@@ -131,8 +131,8 @@ def fetch_binance_klines_history(
 ) -> pd.DataFrame:
 
     end_time=int(time.time()*1000)
-    start_time=end_time-days*24*60*60*1000
-    start_time=align_to_interval(start_time,interval)
+    start_timex=end_time-days*24*60*60*1000
+    # start_time=align_to_interval(start_time,interval)
     all_df=[]
 
     while True:
@@ -140,14 +140,14 @@ def fetch_binance_klines_history(
             symbol=symbol,
             interval=interval,
             limit=limit,
-            start_ms=start_time,
+            start_ms=None,
             end_ms=end_time,
         )
         if   df is None or df.empty:
             break
         all_df.append(df)
         oldest=int(df["openTimeStamp"].iloc[0])
-        if oldest <= start_time:
+        if oldest <= start_timex:
             break
         end_time=oldest
         time.sleep(0.5)
@@ -186,7 +186,7 @@ def align_to_interval(time_stamps:int,interval:int)->int:
 
 if __name__ == "__main__":
     # base_url = choose_base_url()
-    df = fetch_binance_klines_history("BTCUSDT", "1h", days=3)
+    df = fetch_binance_klines_history("BTCUSDT", "1m", days=1)
     print(df.head())
     print(df.tail())
     df.to_csv("BTCUSDT_1m.csv")

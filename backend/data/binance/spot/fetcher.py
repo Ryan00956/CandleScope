@@ -1,11 +1,13 @@
 import requests
 import pandas as pd
 import time
+import os
 from datetime import datetime, timedelta
 
-# 币安的k线数据下载器
-
+# 币安的k线数据下载器 download klines from binance
 # BASE_URL = "https://api.binance.me"
+
+save_dir = os.path.join(os.path.dirname(__file__), "../../data/binance")
 
 def choose_base_url() -> str:
     """检测当前公网 IP 所在国家（返回国家代码，如 CN、US、SG）"""
@@ -150,7 +152,7 @@ def fetch_binance_klines_history(
         if oldest <= start_timex:
             break
         end_time=oldest
-        time.sleep(0.5)
+        time.sleep(0.2)
     if not all_df :
         return pd.DataFrame()
 
@@ -183,13 +185,21 @@ def align_to_interval(time_stamps:int,interval:int)->int:
         raise ValueError(f"Unsupported interval: {interval}")
 
 
+def save_data(df:pd.DataFrame, foldername:str,filename:str) -> None:
+    current_dir=os.path.dirname(__file__)
+    save_dir = os.path.join(current_dir,foldername )
+    os.makedirs(save_dir, exist_ok=True)
+    csv_path = os.path.join(save_dir, filename)
+    df.to_csv(csv_path, index=True)
+
+symbol="BTCUSDT"
+interval="1m"
+
 
 if __name__ == "__main__":
     # base_url = choose_base_url()
-    df = fetch_binance_klines_history("BTCUSDT", "1m", days=1)
+    df = fetch_binance_klines_history(symbol, interval, days=1)
     print(df.head())
     print(df.tail())
-    df.to_csv("BTCUSDT_1m.csv")
-
-
-
+    if df is not None and not df.empty:
+        save_data(df,symbol, f"{interval}.csv")

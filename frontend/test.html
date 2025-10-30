@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>我的第一个K线图</title>
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div id="chart" style="width: 600px; height: 400px;"></div>
+
+  <script>
+    // 1. 创建图表
+    const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+      width: 600,
+      height: 400,
+    });
+
+    // 2. 添加K线序列（Candlestick）
+    const candleSeries = chart.addCandlestickSeries();
+
+    // 3. 设置数据
+    candleSeries.setData([
+      { time: '2024-01-01', open: 100, high: 110, low: 90, close: 105 },
+      { time: '2024-01-02', open: 105, high: 115, low: 95, close: 100 },
+      { time: '2024-01-03', open: 100, high: 108, low: 96, close: 102 },
+    ]);
+  </script>
+</body>
+</html>

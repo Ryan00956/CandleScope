@@ -1,8 +1,9 @@
 /**
  * CandleScope 主应用
  */
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import ChartWidget from "./components/ChartWidget";
+import SettingsModal from "./components/SettingsModal";
 import { fetchKlines, fetchKlinesHistory } from "./services/api";
 import "./index.css";
 
@@ -61,6 +62,37 @@ export default function App() {
   const [lastPrice, setLastPrice] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("loading");
   const [dataSource, setDataSource] = useState(null);
+
+  // ── 界面设置状态 ───────────────────────────────────
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState(() => {
+    const saved = localStorage.getItem('candlescope-settings');
+    return saved ? JSON.parse(saved) : {
+      theme: 'dark',
+      customBg: '#0f172a',
+      upColor: '#22c55e',
+      downColor: '#ef4444'
+    };
+  });
+
+  // ── 应用设置到 DOM ──────────────────────────────────
+  useEffect(() => {
+    const root = document.documentElement;
+    root.setAttribute('data-theme', settings.theme);
+
+    if (settings.theme === 'custom') {
+      root.style.setProperty('--bg-primary', settings.customBg);
+      root.style.setProperty('--bg-secondary', settings.customBg); // 简单处理
+    } else {
+      root.style.removeProperty('--bg-primary');
+      root.style.removeProperty('--bg-secondary');
+    }
+
+    root.style.setProperty('--candle-up', settings.upColor);
+    root.style.setProperty('--candle-down', settings.downColor);
+
+    localStorage.setItem('candlescope-settings', JSON.stringify(settings));
+  }, [settings]);
 
   // ── 加载K线数据 ───────────────────────────────────
   const loadData = useCallback(async (sym, intv) => {
@@ -143,6 +175,17 @@ export default function App() {
           <span className="symbol-name">{symbol}</span>
           <span className="symbol-exchange">Binance</span>
         </div>
+
+        <button
+          className="settings-btn"
+          onClick={() => setShowSettings(true)}
+          style={{
+            background: 'none', border: 'none', cursor: 'pointer',
+            fontSize: '18px', padding: '4px', display: 'flex'
+          }}
+        >
+          ⚙️
+        </button>
 
         {displayData && (
           <div className="price-info">
@@ -234,8 +277,20 @@ export default function App() {
           interval={interval}
           loading={loading}
           onCrosshairMove={setCrosshairData}
+          upColor={settings.upColor}
+          downColor={settings.downColor}
+          theme={settings.theme}
+          customBg={settings.customBg}
         />
       )}
+
+      {/* ── 设置弹窗 ── */}
+      <SettingsModal
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
+        settings={settings}
+        onUpdate={setSettings}
+      />
 
       {/* ── 底部状态栏 ── */}
       <footer className="status-bar" id="status-bar">

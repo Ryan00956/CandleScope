@@ -5,7 +5,7 @@
 import { useEffect, useRef } from "react";
 import { createChart, CandlestickSeries, HistogramSeries } from "lightweight-charts";
 
-export default function ChartWidget({ data, symbol, interval, loading, onCrosshairMove }) {
+export default function ChartWidget({ data, symbol, interval, loading, onCrosshairMove, upColor, downColor, theme, customBg }) {
     const chartContainerRef = useRef(null);
     const chartRef = useRef(null);
     const candlestickSeriesRef = useRef(null);
@@ -21,14 +21,14 @@ export default function ChartWidget({ data, symbol, interval, loading, onCrossha
             width: container.clientWidth,
             height: container.clientHeight,
             layout: {
-                background: { color: "#0a0e17" },
-                textColor: "#94a3b8",
+                background: { color: theme === 'light' ? '#ffffff' : (theme === 'custom' ? customBg : '#0a0e17') },
+                textColor: theme === 'light' ? '#1e293b' : '#94a3b8',
                 fontFamily: "'Inter', sans-serif",
                 fontSize: 12,
             },
             grid: {
-                vertLines: { color: "rgba(30, 41, 59, 0.5)" },
-                horzLines: { color: "rgba(30, 41, 59, 0.5)" },
+                vertLines: { color: theme === 'light' ? 'rgba(0,0,0,0.05)' : 'rgba(30, 41, 59, 0.5)' },
+                horzLines: { color: theme === 'light' ? 'rgba(0,0,0,0.05)' : 'rgba(30, 41, 59, 0.5)' },
             },
             crosshair: {
                 vertLine: {
@@ -60,12 +60,12 @@ export default function ChartWidget({ data, symbol, interval, loading, onCrossha
 
         // K线系列 (v5 API)
         const candlestickSeries = chart.addSeries(CandlestickSeries, {
-            upColor: "#22c55e",
-            downColor: "#ef4444",
-            borderDownColor: "#ef4444",
-            borderUpColor: "#22c55e",
-            wickDownColor: "#ef4444",
-            wickUpColor: "#22c55e",
+            upColor: upColor || "#22c55e",
+            downColor: downColor || "#ef4444",
+            borderDownColor: downColor || "#ef4444",
+            borderUpColor: upColor || "#22c55e",
+            wickDownColor: downColor || "#ef4444",
+            wickUpColor: upColor || "#22c55e",
         });
 
         // 成交量系列 (v5 API)
@@ -119,13 +119,40 @@ export default function ChartWidget({ data, symbol, interval, loading, onCrossha
         };
     }, []); // 只初始化一次
 
-    // ── 数据更新 ──────────────────────────────────
+    // ── 响应颜色和主题变化 ───────────────────────────────
     useEffect(() => {
-        if (!data || data.length === 0) return;
+        if (!chartRef.current || !candlestickSeriesRef.current) return;
+
+        const bgColor = theme === 'light' ? '#ffffff' : (theme === 'custom' ? customBg : '#0a0e17');
+        const textColor = theme === 'light' ? '#1e293b' : '#94a3b8';
+
+        chartRef.current.applyOptions({
+            layout: { background: { color: bgColor }, textColor },
+            grid: {
+                vertLines: { color: theme === 'light' ? 'rgba(0,0,0,0.05)' : 'rgba(30, 41, 59, 0.5)' },
+                horzLines: { color: theme === 'light' ? 'rgba(0,0,0,0.05)' : 'rgba(30, 41, 59, 0.5)' },
+            }
+        });
+
+        candlestickSeriesRef.current.applyOptions({
+            upColor: upColor,
+            downColor: downColor,
+            borderDownColor: downColor,
+            borderUpColor: upColor,
+            wickDownColor: downColor,
+            wickUpColor: upColor,
+        });
+
+        // 强制触发一次数据更新以刷新成交量颜色
+        if (data && data.length > 0) {
+            updateSeriesData(data);
+        }
+    }, [upColor, downColor, theme, customBg, data]); // Added data to dependencies for updateSeriesData call
+
+    const updateSeriesData = (klines) => {
         if (!candlestickSeriesRef.current || !volumeSeriesRef.current) return;
 
-        // K线数据
-        const candleData = data.map((d) => ({
+        const candleData = klines.map((d) => ({
             time: d.time,
             open: d.open,
             high: d.high,
@@ -133,24 +160,26 @@ export default function ChartWidget({ data, symbol, interval, loading, onCrossha
             close: d.close,
         }));
 
-        // 成交量数据（颜色跟随涨跌）
-        const volumeData = data.map((d) => ({
+        const volumeData = klines.map((d) => ({
             time: d.time,
             value: d.volume,
-            color:
-                d.close >= d.open
-                    ? "rgba(34, 197, 94, 0.35)"
-                    : "rgba(239, 68, 68, 0.35)",
+            color: d.close >= d.open ? `${upColor}55` : `${downColor}55`, // 使用半透明颜色
         }));
 
         candlestickSeriesRef.current.setData(candleData);
         volumeSeriesRef.current.setData(volumeData);
+    };
+
+    // ── 数据更新 ──────────────────────────────────
+    useEffect(() => {
+        if (!data || data.length === 0) return;
+        updateSeriesData(data);
 
         // 自动滚动到最新
         if (chartRef.current) {
             chartRef.current.timeScale().fitContent();
         }
-    }, [data]);
+    }, [data, upColor, downColor]); // Added upColor, downColor to dependencies for updateSeriesData call
 
     return (
         <div className="chart-area">

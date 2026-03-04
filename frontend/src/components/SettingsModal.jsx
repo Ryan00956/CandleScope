@@ -93,6 +93,31 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
                             </div>
                         </div>
                     </section>
+                    {/* 4. 时区设置 */}
+                    <section className="settings-section">
+                        <label>显示时区</label>
+                        <select
+                            className="timezone-select"
+                            value={settings.timezone || 'Local'}
+                            onChange={(e) => handleUpdate('timezone', e.target.value)}
+                        >
+                            <option value="Local">本地时间 (Browser Default)</option>
+                            <optgroup label="常用地区 (Common)">
+                                <option value="UTC">UTC (世界协调时间)</option>
+                                <option value="America/New_York">纽约 (New York - EST/EDT)</option>
+                                <option value="Europe/London">伦敦 (London - GMT/BST)</option>
+                                <option value="Asia/Shanghai">北京/上海 (Shanghai - CST)</option>
+                                <option value="Asia/Tokyo">东京 (Tokyo - JST)</option>
+                                <option value="Asia/Singapore">新加坡 (Singapore)</option>
+                                <option value="Asia/Hong_Kong">香港 (Hong Kong)</option>
+                            </optgroup>
+                            <optgroup label="所有时区 (All Timezones)">
+                                {Intl.supportedValuesOf('timeZone').map(tz => (
+                                    <option key={tz} value={tz}>{tz.replace('_', ' ')}</option>
+                                ))}
+                            </optgroup>
+                        </select>
+                    </section>
                 </div>
 
                 <div className="modal-footer">
@@ -149,6 +174,12 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
         input[type="color"] { 
           border: none; width: 32px; height: 32px; cursor: pointer; background: none;
         }
+        .timezone-select {
+          width: 100%; padding: 10px; border: 1px solid var(--border-color); 
+          background: var(--bg-tertiary); color: var(--text-primary); border-radius: 6px; 
+          cursor: pointer; outline: none;
+        }
+        .timezone-select:focus { border-color: var(--accent-blue); }
         .modal-footer { padding: 16px; border-top: 1px solid var(--border-color); text-align: right; }
         .primary-btn {
           background: var(--accent-blue); color: white; border: none;

@@ -6,6 +6,73 @@ import { createChart, CandlestickSeries, HistogramSeries } from "lightweight-cha
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 
+function buildLocalizationOptions(timezone = "Local") {
+    const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
+    try {
+        const axisFormatOptions = {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+            month: "short",
+            day: "numeric",
+        };
+        const tooltipFormatOptions = {
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+        };
+
+        if (timeZoneOpt) {
+            axisFormatOptions.timeZone = timeZoneOpt;
+            tooltipFormatOptions.timeZone = timeZoneOpt;
+        }
+
+        const axisFormatter = new Intl.DateTimeFormat("en-GB", axisFormatOptions);
+        const tooltipFormatter = new Intl.DateTimeFormat("en-GB", tooltipFormatOptions);
+
+        return {
+            localization: {
+                timeFormatter: (timestamp) => tooltipFormatter.format(new Date(timestamp * 1000)),
+            },
+            timeScale: {
+                tickMarkFormatter: (timestamp) => {
+                    const parts = axisFormatter.formatToParts(new Date(timestamp * 1000));
+                    const hour = parts.find((p) => p.type === "hour")?.value;
+                    const min = parts.find((p) => p.type === "minute")?.value;
+                    const day = parts.find((p) => p.type === "day")?.value;
+                    const month = parts.find((p) => p.type === "month")?.value;
+                    if (hour === "00" && min === "00") return `${day} ${month}`;
+                    return `${hour}:${min}`;
+                },
+            },
+        };
+    } catch {
+        return {};
+    }
+}
+
+function toCandlePoint(d) {
+    return {
+        time: d.time,
+        open: d.open,
+        high: d.high,
+        low: d.low,
+        close: d.close,
+    };
+}
+
+function toVolumePoint(d, upColor, downColor) {
+    return {
+        time: d.time,
+        value: d.volume,
+        color: d.close >= d.open ? `${upColor}55` : `${downColor}55`,
+    };
+}
+
 export default function ChartWidget({
     data,
     symbol,
@@ -19,6 +86,7 @@ export default function ChartWidget({
     downColor,
     theme,
     customBg,
+    timezone = "Local",
 }) {
     const chartContainerRef = useRef(null);
     const chartRef = useRef(null);
@@ -30,6 +98,7 @@ export default function ChartWidget({
     const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
     const requestedOldestRef = useRef(null);
     const userInteractedRef = useRef(false);
+    const lastCrosshairSignatureRef = useRef(null);
     const prevDataMetaRef = useRef({
         datasetKey: null,
         first: null,
@@ -52,6 +121,7 @@ export default function ChartWidget({
     useEffect(() => {
         requestedOldestRef.current = null;
         userInteractedRef.current = false;
+        lastCrosshairSignatureRef.current = null;
         prevDataMetaRef.current = { datasetKey, first: null, last: null, length: 0 };
     }, [datasetKey]);
 
@@ -59,6 +129,7 @@ export default function ChartWidget({
         if (!chartContainerRef.current) return;
 
         const container = chartContainerRef.current;
+        const localizationOptions = buildLocalizationOptions(timezone);
         const chart = createChart(container, {
             width: container.clientWidth,
             height: container.clientHeight,
@@ -90,12 +161,14 @@ export default function ChartWidget({
                 borderColor: "#1e293b",
                 scaleMargins: { top: 0.1, bottom: 0.25 },
             },
+            ...(localizationOptions.localization ? { localization: localizationOptions.localization } : {}),
             timeScale: {
                 borderColor: "#1e293b",
                 timeVisible: true,
                 secondsVisible: false,
                 rightOffset: 5,
                 barSpacing: 8,
+                ...(localizationOptions.timeScale ? { tickMarkFormatter: localizationOptions.timeScale.tickMarkFormatter } : {}),
             },
             handleScroll: { vertTouchDrag: false },
         });
@@ -120,7 +193,10 @@ export default function ChartWidget({
         chart.subscribeCrosshairMove((param) => {
             if (!onCrosshairMove) return;
             if (!param.time || !param.seriesData) {
-                onCrosshairMove(null);
+                if (lastCrosshairSignatureRef.current !== null) {
+                    lastCrosshairSignatureRef.current = null;
+                    onCrosshairMove(null);
+                }
                 return;
             }
 
@@ -128,14 +204,19 @@ export default function ChartWidget({
             const volumeData = param.seriesData.get(volumeSeries);
             if (!candleData) return;
 
-            onCrosshairMove({
+            const snapshot = {
                 time: param.time,
                 open: candleData.open,
                 high: candleData.high,
                 low: candleData.low,
                 close: candleData.close,
                 volume: volumeData ? volumeData.value : 0,
-            });
+            };
+            const signature = `${snapshot.time}|${snapshot.open}|${snapshot.high}|${snapshot.low}|${snapshot.close}|${snapshot.volume}`;
+            if (lastCrosshairSignatureRef.current === signature) return;
+
+            lastCrosshairSignatureRef.current = signature;
+            onCrosshairMove(snapshot);
         });
 
         chart.timeScale().subscribeVisibleLogicalRangeChange((logicalRange) => {
@@ -185,30 +266,46 @@ export default function ChartWidget({
 
     const updateSeriesData = (klines) => {
         if (!candlestickSeriesRef.current || !volumeSeriesRef.current) return;
+        try {
+            // Deduplicate by time to prevent lightweight-charts errors
+            const deduped = [];
+            const seen = new Set();
+            for (const d of klines) {
+                if (!seen.has(d.time)) {
+                    seen.add(d.time);
+                    deduped.push(d);
+                }
+            }
+            deduped.sort((a, b) => a.time - b.time);
+            candlestickSeriesRef.current.setData(deduped.map((d) => toCandlePoint(d)));
+            volumeSeriesRef.current.setData(deduped.map((d) => toVolumePoint(d, upColor, downColor)));
+        } catch (err) {
+            console.error("ChartWidget setData error:", err);
+        }
+    };
 
-        const candleData = klines.map((d) => ({
-            time: d.time,
-            open: d.open,
-            high: d.high,
-            low: d.low,
-            close: d.close,
-        }));
-
-        const volumeData = klines.map((d) => ({
-            time: d.time,
-            value: d.volume,
-            color: d.close >= d.open ? `${upColor}55` : `${downColor}55`,
-        }));
-
-        candlestickSeriesRef.current.setData(candleData);
-        volumeSeriesRef.current.setData(volumeData);
+    const updateLatestBars = (klines, barCount = 2) => {
+        if (!candlestickSeriesRef.current || !volumeSeriesRef.current || !klines?.length) return;
+        try {
+            const start = Math.max(0, klines.length - barCount);
+            for (let i = start; i < klines.length; i += 1) {
+                const point = klines[i];
+                candlestickSeriesRef.current.update(toCandlePoint(point));
+                volumeSeriesRef.current.update(toVolumePoint(point, upColor, downColor));
+            }
+        } catch (err) {
+            console.error("ChartWidget update error, falling back to setData:", err);
+            // Fallback: if update fails, do a full setData to fix state
+            updateSeriesData(klines);
+        }
     };
 
     useEffect(() => {
-        if (!chartRef.current || !candlestickSeriesRef.current) return;
+        if (!chartRef.current) return;
 
         const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
         const textColor = theme === "light" ? "#1e293b" : "#94a3b8";
+        const localizationOptions = buildLocalizationOptions(timezone);
 
         chartRef.current.applyOptions({
             layout: { background: { color: bgColor }, textColor },
@@ -216,7 +313,15 @@ export default function ChartWidget({
                 vertLines: { color: theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)" },
                 horzLines: { color: theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)" },
             },
+            ...(localizationOptions.localization ? { localization: localizationOptions.localization } : {}),
+            ...(localizationOptions.timeScale
+                ? { timeScale: { tickMarkFormatter: localizationOptions.timeScale.tickMarkFormatter } }
+                : {}),
         });
+    }, [theme, customBg, timezone]);
+
+    useEffect(() => {
+        if (!candlestickSeriesRef.current) return;
 
         candlestickSeriesRef.current.applyOptions({
             upColor,
@@ -227,22 +332,33 @@ export default function ChartWidget({
             wickUpColor: upColor,
         });
 
+        // Volume colors are per-bar, so repaint once when color settings change.
         if (data && data.length > 0) {
             updateSeriesData(data);
         }
-    }, [upColor, downColor, theme, customBg, data]);
+    }, [upColor, downColor]);
 
     useEffect(() => {
         if (!data || data.length === 0) return;
-        updateSeriesData(data);
 
         const prev = prevDataMetaRef.current;
         const first = data[0].time;
         const last = data[data.length - 1].time;
         const datasetChanged = prev.datasetKey !== datasetKey;
+        const shouldFullReplace =
+            datasetChanged ||
+            prev.length === 0 ||
+            prev.first === null ||
+            first !== prev.first ||
+            data.length < prev.length ||
+            data.length - prev.length > 2;
 
-        // Only auto-fit when a brand new dataset is loaded (e.g. interval switch).
-        // Realtime updates and left-side backfill should keep current view.
+        if (shouldFullReplace) {
+            updateSeriesData(data);
+        } else {
+            updateLatestBars(data, 2);
+        }
+
         if (datasetChanged && chartRef.current) {
             chartRef.current.timeScale().fitContent();
         }

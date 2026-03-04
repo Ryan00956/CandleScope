@@ -19,6 +19,11 @@ from app.data_engine.storage.klines_repo import (
 BINANCE_PAGE_LIMIT = 1000
 MAX_BACKFILL_BATCHES = 24
 MAX_REFRESH_BATCHES = 8
+LIVE_ROW_CACHE_TTL_MS = 2000
+LIVE_ROW_STALE_MS = 10000
+_LIVE_ROW_CACHE: dict[tuple[str, str], dict] = {}
+LATEST_REFRESH_MIN_GAP_MS = 15000
+_LATEST_REFRESH_ATTEMPT_MS: dict[tuple[str, str], int] = {}
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -62,16 +67,27 @@ def _live_row_to_lightweight(row: pd.Series) -> dict:
 
 def _fetch_live_open_row(symbol: str, interval: str) -> dict | None:
     now_ms = int(time.time() * 1000)
+    cache_key = (symbol, interval)
+    cached = _LIVE_ROW_CACHE.get(cache_key)
+    if cached and (now_ms - int(cached["fetched_at"]) <= LIVE_ROW_CACHE_TTL_MS):
+        return cached["row"]
+
     df = fetch_klines(symbol=symbol, interval=interval, limit=3)
     if df is None or df.empty:
+        if cached and (now_ms - int(cached["fetched_at"]) <= LIVE_ROW_STALE_MS):
+            return cached["row"]
         return None
 
     live_df = df[df["closeTimeStamp"] > now_ms]
     if live_df.empty:
+        if cached and (now_ms - int(cached["fetched_at"]) <= LIVE_ROW_STALE_MS):
+            return cached["row"]
         return None
 
     latest_live = live_df.sort_values("openTimeStamp").iloc[-1]
-    return _live_row_to_lightweight(latest_live)
+    row = _live_row_to_lightweight(latest_live)
+    _LIVE_ROW_CACHE[cache_key] = {"fetched_at": now_ms, "row": row}
+    return row
 
 
 def _merge_live_row(data: list[dict], live_row: dict | None) -> list[dict]:
@@ -226,6 +242,26 @@ def _refresh_latest_window(symbol: str, interval: str, window: int = 5) -> int:
     return _store_df(symbol, interval, df)
 
 
+def _refresh_right_if_needed(symbol: str, interval: str, now_ms: int) -> int:
+    interval_ms = interval_to_milliseconds(interval)
+    latest_closed_open_ms = _latest_closed_open_time_ms(now_ms, interval_ms)
+    if latest_closed_open_ms is None:
+        return 0
+
+    bounds = get_bounds(symbol, interval)
+    latest = bounds["latest_open_time"]
+    if latest is not None and int(latest) >= latest_closed_open_ms:
+        return 0
+
+    key = (symbol, interval)
+    last_attempt = _LATEST_REFRESH_ATTEMPT_MS.get(key, 0)
+    if now_ms - last_attempt < LATEST_REFRESH_MIN_GAP_MS:
+        return 0
+
+    _LATEST_REFRESH_ATTEMPT_MS[key] = now_ms
+    return _refresh_right(symbol, interval, target_end_ms=now_ms)
+
+
 def _ensure_cached_range(symbol: str, interval: str, start_ms: int, end_ms: int) -> int:
     written = 0
     written += _backfill_left(symbol, interval, target_start_ms=start_ms, end_ms=end_ms)
@@ -257,7 +293,7 @@ def get_cached_latest(symbol: str, interval: str, limit: int) -> dict:
     interval_ms = interval_to_milliseconds(interval)
 
     _prune_unclosed_rows(symbol, interval, now_ms)
-    fetched = _refresh_right(symbol, interval, target_end_ms=now_ms)
+    fetched = _refresh_right_if_needed(symbol, interval, now_ms)
     rows = query_klines(symbol, interval, end_ms=now_ms, limit=limit, order="DESC")
 
     if not rows:

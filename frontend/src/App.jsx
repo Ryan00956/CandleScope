@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import ChartWidget from "./components/ChartWidget";
 import SettingsModal from "./components/SettingsModal";
 import {
@@ -8,6 +8,49 @@ import {
   getKlineStreamUrl,
 } from "./services/api";
 import "./index.css";
+
+// ---------- ErrorBoundary: 防止任何子组件崩溃导致白屏 ----------
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, errorInfo) {
+    console.error("ErrorBoundary caught:", error, errorInfo);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          display: "flex", flexDirection: "column", alignItems: "center",
+          justifyContent: "center", height: "100%", gap: 16,
+          color: "#94a3b8", padding: 32,
+        }}>
+          <div style={{ fontSize: 48 }}>⚠️</div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: "#e2e8f0" }}>
+            Chart rendering error
+          </div>
+          <div style={{ fontSize: 13, maxWidth: 400, textAlign: "center" }}>
+            {this.state.error?.message || "Unknown error"}
+          </div>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null })}
+            style={{
+              padding: "8px 24px", background: "#3b82f6", color: "#fff",
+              border: "none", borderRadius: 6, cursor: "pointer", fontWeight: 600,
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const INTERVAL_GROUPS = [
   {
@@ -52,6 +95,7 @@ const INTERVAL_DAYS = {
   "1M": 365,
 };
 
+/** 合并并去重（按 time 去重，后来者覆盖前者） */
 function mergeByTime(older, current) {
   const merged = [...older, ...current];
   const uniq = new Map();
@@ -61,8 +105,19 @@ function mergeByTime(older, current) {
   return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
 }
 
+/** 确保 data 按 time 严格递增且无重复（lightweight-charts 要求） */
+function deduplicateByTime(data) {
+  if (!data || data.length <= 1) return data;
+  const seen = new Map();
+  for (const item of data) {
+    seen.set(item.time, item); // 同 time 后覆盖前
+  }
+  return Array.from(seen.values()).sort((a, b) => a.time - b.time);
+}
+
 function upsertRealtimeKline(current, incoming) {
   if (!current || current.length === 0) return current;
+  if (!incoming || incoming.time == null) return current;
   const next = { ...incoming };
 
   const firstTime = current[0].time;
@@ -111,11 +166,11 @@ export default function App() {
     return saved
       ? JSON.parse(saved)
       : {
-          theme: "dark",
-          customBg: "#0f172a",
-          upColor: "#22c55e",
-          downColor: "#ef4444",
-        };
+        theme: "dark",
+        customBg: "#0f172a",
+        upColor: "#22c55e",
+        downColor: "#ef4444",
+      };
   });
 
   useEffect(() => {
@@ -185,11 +240,14 @@ export default function App() {
     let reconnectTimer = null;
     let socket = null;
     let pollInterval = null;
+    let pollingInFlight = false;
 
     const startPolling = () => {
       if (pollInterval) clearInterval(pollInterval);
       pollInterval = setInterval(async () => {
         if (!active) return;
+        if (pollingInFlight) return;
+        pollingInFlight = true;
         try {
           const result = await fetchLatestKlines(symbol, interval, 2);
           if (!result?.data?.length) return;
@@ -199,12 +257,14 @@ export default function App() {
             result.data.forEach((tick) => {
               updated = upsertRealtimeKline(updated, tick);
             });
-            return updated;
+            return deduplicateByTime(updated);
           });
           setLastPrice(result.data[result.data.length - 1]);
           setWsStatus((prev) => (prev === "live" ? prev : "fallback"));
         } catch (pollErr) {
           console.warn("Polling fallback failed:", pollErr);
+        } finally {
+          pollingInFlight = false;
         }
       }, 1000);
     };
@@ -238,7 +298,10 @@ export default function App() {
             }
 
             if (msg.type !== "kline" || !msg.data) return;
-            setChartData((prev) => upsertRealtimeKline(prev, msg.data));
+            setChartData((prev) => {
+              const next = upsertRealtimeKline(prev, msg.data);
+              return deduplicateByTime(next);
+            });
             setLastPrice(msg.data);
           } catch (parseErr) {
             console.error("WS parse failed:", parseErr);
@@ -472,20 +535,23 @@ export default function App() {
           </div>
         </div>
       ) : (
-        <ChartWidget
-          data={chartData}
-          symbol={symbol}
-          interval={interval}
-          loading={loading}
-          onCrosshairMove={setCrosshairData}
-          onNeedMoreLeft={handleNeedMoreLeft}
-          canLoadMoreLeft={hasMoreLeft && !loadingMoreLeft && !loading}
-          datasetKey={`${symbol}-${interval}-${datasetKey}`}
-          upColor={settings.upColor}
-          downColor={settings.downColor}
-          theme={settings.theme}
-          customBg={settings.customBg}
-        />
+        <ErrorBoundary>
+          <ChartWidget
+            data={chartData}
+            symbol={symbol}
+            interval={interval}
+            loading={loading}
+            onCrosshairMove={setCrosshairData}
+            onNeedMoreLeft={handleNeedMoreLeft}
+            canLoadMoreLeft={hasMoreLeft && !loadingMoreLeft && !loading}
+            datasetKey={`${symbol}-${interval}-${datasetKey}`}
+            upColor={settings.upColor}
+            downColor={settings.downColor}
+            theme={settings.theme}
+            customBg={settings.customBg}
+            timezone={settings.timezone}
+          />
+        </ErrorBoundary>
       )}
 
       <SettingsModal

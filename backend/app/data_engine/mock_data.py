@@ -8,13 +8,31 @@ import time
 import math
 import hashlib
 
+def _get_price_at_minute(symbol_seed: int, base_price: float, minute_step: int) -> float:
+    """
+    给定一个分钟级别的 step，返回该分钟的确定性价格。
+    所有 interval 共享同一条价格曲线，确保同一时刻价格一致。
+    """
+    # 用 symbol_seed + 分钟step 生成确定性噪声
+    rng = random.Random(symbol_seed + minute_step)
+    # 长周期趋势 + 中周期波动 + 短周期噪声
+    trend = math.sin(minute_step * 0.00002) * 0.08      # ±8% 超长周期
+    cycle = math.sin(minute_step * 0.0003) * 0.03        # ±3% 中周期
+    noise = (rng.random() - 0.5) * 0.001                 # ±0.05% 每分钟随机
+    factor = 1.0 + trend + cycle + noise
+    return base_price * factor
+
+
 def generate_mock_klines(
     symbol: str = "BTCUSDT",
     interval: str = "1h",
     count: int = 500,
 ) -> list[dict]:
     """
-    生成确定性的模拟 K 线数据。通过 symbol 作为种子，确保同一币种在不同周期下的价格大致统一。
+    生成确定性的模拟 K 线数据。
+    核心原理：基于一条按分钟步进的共享价格曲线，不同 interval 只是在不同
+    时间粒度上采样，从而保证同一时刻（尤其是最新K线的 close）在所有周期
+    下都完全一致。
     """
     # 不同交易对的基础价格
     base_prices = {
@@ -35,59 +53,75 @@ def generate_mock_klines(
     base_price = base_prices.get(symbol.upper(), 50000.0)
     interval_sec = interval_seconds.get(interval, 3600)
 
-    # 现在的秒级时间戳
     now = int(time.time())
-    # 为了让数据看起来是连续的，我们基于固定的时间锚点来生成
-    # 比如基于 2024-01-01 00:00:00 (1704067200)
+    # 锚点: 2024-01-01 00:00:00 UTC
     anchor_time = 1704067200
-    
-    # 使用 symbol 的 hash 作为种子，保证不同 symbol 不同趋势
+
+    # 使用 symbol 的 hash 作为种子
     seed = int(hashlib.md5(symbol.upper().encode()).hexdigest(), 16) % 10**8
-    rng = random.Random(seed)
-    
-    # 波动率参数
-    volatility = 0.001 if interval_sec <= 3600 else 0.005
-    
+
+    # 精度
+    decimals = 2 if base_price >= 1000 else (4 if base_price >= 1 else 8)
+
+    # ---- 计算每根K线的时间对齐 ----
+    # 最后一根K线的开盘时间 = 当前时间往下对齐到 interval 边界
+    latest_open = anchor_time + ((now - anchor_time) // interval_sec) * interval_sec
+    # 第一根K线的开盘时间
+    first_open = latest_open - (count - 1) * interval_sec
+
     records = []
-    
-    # 模拟从锚点到现在的步数（用于对齐）
-    start_step = (now - anchor_time) // interval_sec - count
-    
-    # 累加步长来计算价格，这样即使请求不同 limit，数据也是对齐的
-    # 为了性能，直接从 start_step 推导出一个起始价
-    # 这里用一个简单的伪随机方程来模拟
-    current_price = base_price * (1 + math.sin(start_step * 0.001) * 0.05 + rng.uniform(-0.02, 0.02))
+
+    # 每个 interval 内采样的分钟数（用于计算 OHLC）
+    # 为了性能，大 interval 不逐分钟采样，而是按固定采样点模拟
+    interval_minutes = max(interval_sec // 60, 1)
+    # 采样点数量：最多 60 个采样点，最少 1 个
+    sample_count = min(interval_minutes, 60)
 
     for i in range(count):
-        step = start_step + i
-        t = anchor_time + step * interval_sec
-        # 如果生成的时间超过现在，则修正为现在
-        if t > now: break
+        bar_open_time = first_open + i * interval_sec
+        if bar_open_time > now:
+            break
 
-        # 基于 step 生成确定性的波动
-        # 使用 rng 控制主要的噪声风格，但结合 step 保证连续性
-        walk = math.sin(step * 0.005) * 0.01 + math.cos(step * 0.02) * 0.002
-        noise = (random.Random(seed + step).random() - 0.5) * volatility
-        
-        open_price = current_price
-        close_price = open_price * (1 + walk * 0.1 + noise)
-        
-        high_price = max(open_price, close_price) * (1 + abs(noise) * 0.5)
-        low_price = min(open_price, close_price) * (1 - abs(noise) * 0.5)
-        
-        volume = base_price * (10 + random.Random(seed + step).random() * 90)
+        # 该 K 线的结束时间（不超过当前时间）
+        bar_close_time = min(bar_open_time + interval_sec, now)
 
-        # 精度
-        decimals = 2 if base_price >= 1000 else (4 if base_price >= 1 else 8)
+        # 将该区间内的时间转换为分钟 step
+        open_minute = (bar_open_time - anchor_time) // 60
+        close_minute = (bar_close_time - anchor_time) // 60
+
+        # 计算 open 和 close 价格（共享曲线）
+        open_price = _get_price_at_minute(seed, base_price, open_minute)
+        close_price = _get_price_at_minute(seed, base_price, close_minute)
+
+        # 在区间内采样若干点来估算 high / low
+        high_price = max(open_price, close_price)
+        low_price = min(open_price, close_price)
+
+        if sample_count > 1 and close_minute > open_minute:
+            step = max((close_minute - open_minute) // sample_count, 1)
+            for m in range(open_minute, close_minute + 1, step):
+                p = _get_price_at_minute(seed, base_price, m)
+                if p > high_price:
+                    high_price = p
+                if p < low_price:
+                    low_price = p
+
+        # 给 high/low 加一点影线
+        bar_rng = random.Random(seed + open_minute)
+        wick = bar_rng.random() * 0.001  # 0~0.1% 影线
+        high_price *= (1 + wick)
+        low_price *= (1 - wick)
+
+        # 成交量
+        volume = base_price * (10 + bar_rng.random() * 90)
 
         records.append({
-            "time": t,
+            "time": bar_open_time,
             "open": round(open_price, decimals),
             "high": round(high_price, decimals),
             "low": round(low_price, decimals),
             "close": round(close_price, decimals),
             "volume": round(volume, 2),
         })
-        current_price = close_price
 
     return records

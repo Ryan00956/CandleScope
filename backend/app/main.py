@@ -1,21 +1,19 @@
 """
-CandleScope 后端入口
-FastAPI 应用 + CORS + 路由注册
+CandleScope backend entrypoint.
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.config import CORS_ORIGINS
 from app.api.v1.klines import router as klines_router
+from app.core.config import CORS_ORIGINS
+from app.data_engine.storage import init_klines_storage
 
-# ── 创建 FastAPI 应用 ─────────────────────────────────────
 app = FastAPI(
     title="CandleScope API",
-    description="开源看盘软件 CandleScope 的后端 API",
-    version="0.1.0",
+    description="Backend API for CandleScope",
+    version="0.2.0",
 )
 
-# ── CORS 中间件（允许前端跨域访问） ──────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -24,20 +22,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── 注册路由 ──────────────────────────────────────────────
 app.include_router(klines_router, prefix="/api/v1")
 
 
-# ── 健康检查 ──────────────────────────────────────────────
-@app.get("/", tags=["系统"])
-async def root():
+@app.on_event("startup")
+async def startup_event() -> None:
+    init_klines_storage()
+
+
+@app.get("/", tags=["system"])
+async def root() -> dict:
     return {
         "name": "CandleScope API",
-        "version": "0.1.0",
-        "status": "running ✅",
+        "version": "0.2.0",
+        "status": "running",
     }
 
 
-@app.get("/health", tags=["系统"])
-async def health_check():
+@app.get("/health", tags=["system"])
+async def health_check() -> dict:
     return {"status": "ok"}

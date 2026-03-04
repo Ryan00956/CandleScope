@@ -1,16 +1,12 @@
-/**
- * CandleScope 主应用
- */
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ChartWidget from "./components/ChartWidget";
 import SettingsModal from "./components/SettingsModal";
-import { fetchKlines, fetchKlinesHistory } from "./services/api";
+import { fetchKlinesBefore, fetchKlinesHistory } from "./services/api";
 import "./index.css";
 
-// 时间周期配置
 const INTERVAL_GROUPS = [
   {
-    label: "分钟",
+    label: "Minutes",
     items: [
       { value: "1m", label: "1m" },
       { value: "3m", label: "3m" },
@@ -20,7 +16,7 @@ const INTERVAL_GROUPS = [
     ],
   },
   {
-    label: "小时",
+    label: "Hours",
     items: [
       { value: "1h", label: "1H" },
       { value: "2h", label: "2H" },
@@ -28,7 +24,7 @@ const INTERVAL_GROUPS = [
     ],
   },
   {
-    label: "日+",
+    label: "Days",
     items: [
       { value: "1d", label: "1D" },
       { value: "1w", label: "1W" },
@@ -37,7 +33,6 @@ const INTERVAL_GROUPS = [
   },
 ];
 
-// 不同周期对应的默认拉取天数
 const INTERVAL_DAYS = {
   "1m": 1,
   "3m": 2,
@@ -52,122 +47,164 @@ const INTERVAL_DAYS = {
   "1M": 365,
 };
 
+function mergeByTime(older, current) {
+  const merged = [...older, ...current];
+  const uniq = new Map();
+  for (const item of merged) {
+    uniq.set(item.time, item);
+  }
+  return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
+}
+
 export default function App() {
   const [symbol] = useState("BTCUSDT");
   const [interval, setInterval_] = useState("1h");
+  const [datasetKey, setDatasetKey] = useState(0);
+
   const [chartData, setChartData] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMoreLeft, setLoadingMoreLeft] = useState(false);
+  const [hasMoreLeft, setHasMoreLeft] = useState(true);
   const [error, setError] = useState(null);
+
   const [crosshairData, setCrosshairData] = useState(null);
   const [lastPrice, setLastPrice] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("loading");
   const [dataSource, setDataSource] = useState(null);
 
-  // ── 界面设置状态 ───────────────────────────────────
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(() => {
-    const saved = localStorage.getItem('candlescope-settings');
-    return saved ? JSON.parse(saved) : {
-      theme: 'dark',
-      customBg: '#0f172a',
-      upColor: '#22c55e',
-      downColor: '#ef4444'
-    };
+    const saved = localStorage.getItem("candlescope-settings");
+    return saved
+      ? JSON.parse(saved)
+      : {
+          theme: "dark",
+          customBg: "#0f172a",
+          upColor: "#22c55e",
+          downColor: "#ef4444",
+        };
   });
 
-  // ── 应用设置到 DOM ──────────────────────────────────
   useEffect(() => {
     const root = document.documentElement;
-    root.setAttribute('data-theme', settings.theme);
+    root.setAttribute("data-theme", settings.theme);
 
-    if (settings.theme === 'custom') {
-      root.style.setProperty('--bg-primary', settings.customBg);
-      root.style.setProperty('--bg-secondary', settings.customBg); // 简单处理
+    if (settings.theme === "custom") {
+      root.style.setProperty("--bg-primary", settings.customBg);
+      root.style.setProperty("--bg-secondary", settings.customBg);
     } else {
-      root.style.removeProperty('--bg-primary');
-      root.style.removeProperty('--bg-secondary');
+      root.style.removeProperty("--bg-primary");
+      root.style.removeProperty("--bg-secondary");
     }
 
-    root.style.setProperty('--candle-up', settings.upColor);
-    root.style.setProperty('--candle-down', settings.downColor);
-
-    localStorage.setItem('candlescope-settings', JSON.stringify(settings));
+    root.style.setProperty("--candle-up", settings.upColor);
+    root.style.setProperty("--candle-down", settings.downColor);
+    localStorage.setItem("candlescope-settings", JSON.stringify(settings));
   }, [settings]);
 
-  // ── 加载K线数据 ───────────────────────────────────
   const loadData = useCallback(async (sym, intv) => {
     setLoading(true);
     setError(null);
     setConnectionStatus("loading");
+    setLoadingMoreLeft(false);
+    setHasMoreLeft(true);
 
     try {
       const days = INTERVAL_DAYS[intv] || 7;
       const result = await fetchKlinesHistory(sym, intv, days);
 
       if (result.data && result.data.length > 0) {
-        setChartData(result.data);
-        setDataSource(result.source || "unknown");
-        // 设置最新价格
-        const latest = result.data[result.data.length - 1];
+        const nextData = result.data;
+        const latest = nextData[nextData.length - 1];
+
+        setChartData(nextData);
         setLastPrice(latest);
+        setDataSource(result.source || "unknown");
         setConnectionStatus(result.source === "mock" ? "loading" : "connected");
+        setDatasetKey((v) => v + 1);
       } else {
-        setError("没有获取到数据");
+        setError("No data returned");
         setConnectionStatus("disconnected");
       }
     } catch (err) {
-      console.error("数据加载失败:", err);
-      setError(err.message || "网络错误");
+      console.error("Data load failed:", err);
+      setError(err.message || "Network error");
       setConnectionStatus("disconnected");
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // 初始加载
   useEffect(() => {
     loadData(symbol, interval);
   }, [symbol, interval, loadData]);
 
-  // ── 切换时间周期 ──────────────────────────────────
+  const handleNeedMoreLeft = useCallback(
+    async (oldestLoadedTime) => {
+      if (loading || loadingMoreLeft || !hasMoreLeft || dataSource === "mock") {
+        return;
+      }
+      if (!chartData.length) return;
+
+      const before = oldestLoadedTime || chartData[0].time;
+      setLoadingMoreLeft(true);
+      try {
+        const result = await fetchKlinesBefore(symbol, interval, before, 500);
+        const older = result.data || [];
+
+        if (older.length > 0) {
+          setChartData((prev) => mergeByTime(older, prev));
+        }
+
+        if (typeof result.has_more === "boolean") {
+          setHasMoreLeft(result.has_more);
+        } else if (older.length === 0) {
+          setHasMoreLeft(false);
+        }
+      } catch (err) {
+        console.error("Load older data failed:", err);
+      } finally {
+        setLoadingMoreLeft(false);
+      }
+    },
+    [chartData.length, dataSource, hasMoreLeft, interval, loading, loadingMoreLeft, symbol],
+  );
+
   const handleIntervalChange = (newInterval) => {
     if (newInterval !== interval) {
       setInterval_(newInterval);
     }
   };
 
-  // ── 十字光标数据 ──────────────────────────────────
   const displayData = crosshairData || lastPrice;
-
-  // 计算涨跌幅
-  const priceChange = displayData
-    ? ((displayData.close - displayData.open) / displayData.open) * 100
-    : 0;
+  const priceChange = displayData ? ((displayData.close - displayData.open) / displayData.open) * 100 : 0;
   const isUp = priceChange >= 0;
 
-  // 格式化价格
   const formatPrice = (price) => {
-    if (price == null) return "—";
-    if (price >= 1000) return price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (price == null) return "--";
+    if (price >= 1000) {
+      return price.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+    }
     if (price >= 1) return price.toFixed(4);
     return price.toFixed(8);
   };
 
-  // 格式化成交量
   const formatVolume = (vol) => {
-    if (vol == null) return "—";
-    if (vol >= 1_000_000_000) return (vol / 1_000_000_000).toFixed(2) + "B";
-    if (vol >= 1_000_000) return (vol / 1_000_000).toFixed(2) + "M";
-    if (vol >= 1_000) return (vol / 1_000).toFixed(2) + "K";
+    if (vol == null) return "--";
+    if (vol >= 1_000_000_000) return `${(vol / 1_000_000_000).toFixed(2)}B`;
+    if (vol >= 1_000_000) return `${(vol / 1_000_000).toFixed(2)}M`;
+    if (vol >= 1_000) return `${(vol / 1_000).toFixed(2)}K`;
     return vol.toFixed(2);
   };
 
   return (
     <div className="app-layout">
-      {/* ── 顶部导航栏 ── */}
       <header className="top-bar" id="top-bar">
         <div className="logo">
-          <div className="logo-icon">📊</div>
+          <div className="logo-icon">📳</div>
           <span className="logo-text">CandleScope</span>
         </div>
 
@@ -180,8 +217,12 @@ export default function App() {
           className="settings-btn"
           onClick={() => setShowSettings(true)}
           style={{
-            background: 'none', border: 'none', cursor: 'pointer',
-            fontSize: '18px', padding: '4px', display: 'flex'
+            background: "none",
+            border: "none",
+            cursor: "pointer",
+            fontSize: "18px",
+            padding: "4px",
+            display: "flex",
           }}
         >
           ⚙️
@@ -230,7 +271,6 @@ export default function App() {
         )}
       </header>
 
-      {/* ── 时间周期工具栏 ── */}
       <nav className="toolbar" id="toolbar">
         {INTERVAL_GROUPS.map((group, gi) => (
           <div key={gi} style={{ display: "flex", alignItems: "center" }}>
@@ -251,22 +291,21 @@ export default function App() {
         ))}
       </nav>
 
-      {/* ── 图表区域 ── */}
       {error ? (
         <div className="chart-area">
           <div className="error-overlay">
             <div className="error-icon">⚠️</div>
             <div className="error-message">
-              <strong>数据加载失败</strong>
+              <strong>Data load failed</strong>
               <br />
               {error}
               <br />
               <small style={{ color: "var(--text-muted)", marginTop: 8, display: "block" }}>
-                请确保后端服务已启动 (uvicorn app.main:app --reload)
+                Ensure backend is running: `uvicorn app.main:app --reload`
               </small>
             </div>
             <button className="retry-btn" onClick={() => loadData(symbol, interval)} id="retry-btn">
-              重新加载
+              Retry
             </button>
           </div>
         </div>
@@ -277,6 +316,9 @@ export default function App() {
           interval={interval}
           loading={loading}
           onCrosshairMove={setCrosshairData}
+          onNeedMoreLeft={handleNeedMoreLeft}
+          canLoadMoreLeft={hasMoreLeft && !loadingMoreLeft && !loading}
+          datasetKey={`${symbol}-${interval}-${datasetKey}`}
           upColor={settings.upColor}
           downColor={settings.downColor}
           theme={settings.theme}
@@ -284,7 +326,6 @@ export default function App() {
         />
       )}
 
-      {/* ── 设置弹窗 ── */}
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
@@ -292,23 +333,26 @@ export default function App() {
         onUpdate={setSettings}
       />
 
-      {/* ── 底部状态栏 ── */}
       <footer className="status-bar" id="status-bar">
         <div className="status-left">
           <span>
             <span className={`status-dot ${connectionStatus}`} />
-            {connectionStatus === "connected" && "已连接 Binance"}
-            {connectionStatus === "loading" && (dataSource === "mock" ? "⚡ 模拟数据模式" : "加载中...")}
-            {connectionStatus === "disconnected" && "未连接"}
+            {connectionStatus === "connected" && "Connected to Binance"}
+            {connectionStatus === "loading" && (dataSource === "mock" ? "Mock data mode" : "Loading...")}
+            {connectionStatus === "disconnected" && "Disconnected"}
           </span>
-          <span>{chartData.length} 根K线</span>
+          <span>{chartData.length} bars</span>
+          {loadingMoreLeft && <span style={{ color: "#3b82f6" }}>Loading older data...</span>}
+          {!hasMoreLeft && !loadingMoreLeft && <span style={{ color: "#94a3b8" }}>No more history</span>}
           {dataSource === "mock" && (
-            <span style={{ color: "#f59e0b" }}>⚠ 无法连接币安，显示模拟数据（开启代理后可获取真实数据）</span>
+            <span style={{ color: "#f59e0b" }}>
+              Binance unavailable, using mock data
+            </span>
           )}
         </div>
         <div className="status-right">
-          <span>{dataSource === "binance" ? "Binance Spot" : "Demo Mode"}</span>
-          <span>CandleScope v0.1.0</span>
+          <span>{dataSource === "mock" ? "Demo Mode" : "Binance Spot"}</span>
+          <span>CandleScope v0.2.0</span>
         </div>
       </footer>
     </div>

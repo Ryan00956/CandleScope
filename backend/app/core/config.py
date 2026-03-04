@@ -1,35 +1,42 @@
 """
-CandleScope 全局配置
-所有可调参数集中在这里，通过环境变量或 .env 文件覆盖
+CandleScope global configuration.
 """
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── 服务器 ──────────────────────────────────────────────
+# Server
 HOST = os.getenv("CANDLE_HOST", "0.0.0.0")
 PORT = int(os.getenv("CANDLE_PORT", "8000"))
 
-# ── 币安 API ────────────────────────────────────────────
+# Paths
+BASE_DIR = Path(__file__).resolve().parents[2]
+DATA_DIR = Path(os.getenv("CANDLE_DATA_DIR", BASE_DIR / "data"))
+KLINES_DB_PATH = Path(os.getenv("KLINES_DB_PATH", DATA_DIR / "candlescope.db"))
+
+# Binance HTTP APIs
 BINANCE_BASE_URLS = [
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
     "https://api3.binance.com",
-    "https://api.binance.me",        # 中国大陆可用镜像
+    "https://api.binance.me",
 ]
-
-# 默认 base url（可通过环境变量覆盖）
 BINANCE_BASE_URL = os.getenv("BINANCE_BASE_URL", "https://api.binance.me")
 
-# 币安 WebSocket 地址
+# Binance WebSocket
 BINANCE_WS_URL = os.getenv("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws")
 
-# ── 数据抓取 ────────────────────────────────────────────
+# Request tuning
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "10"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 RATE_LIMIT_SLEEP = int(os.getenv("RATE_LIMIT_SLEEP", "60"))
 
-# ── CORS（跨域，允许前端访问后端） ───────────────────────
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
+# CORS
+CORS_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://localhost:3000",
+).split(",")

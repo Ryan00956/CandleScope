@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ChartWidget from "./components/ChartWidget";
 import SettingsModal from "./components/SettingsModal";
-import { fetchKlinesBefore, fetchKlinesHistory } from "./services/api";
+import {
+  fetchKlinesBefore,
+  fetchKlinesHistory,
+  fetchLatestKlines,
+  getKlineStreamUrl,
+} from "./services/api";
 import "./index.css";
 
 const INTERVAL_GROUPS = [
@@ -56,6 +61,31 @@ function mergeByTime(older, current) {
   return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
 }
 
+function upsertRealtimeKline(current, incoming) {
+  if (!current || current.length === 0) return current;
+  const next = { ...incoming };
+
+  const firstTime = current[0].time;
+  const lastIndex = current.length - 1;
+  const lastTime = current[lastIndex].time;
+
+  if (next.time < firstTime) return current;
+  if (next.time === lastTime) {
+    const updated = [...current];
+    updated[lastIndex] = next;
+    return updated;
+  }
+  if (next.time > lastTime) {
+    return [...current, next];
+  }
+
+  const idx = current.findIndex((item) => item.time === next.time);
+  if (idx === -1) return current;
+  const updated = [...current];
+  updated[idx] = next;
+  return updated;
+}
+
 export default function App() {
   const [symbol] = useState("BTCUSDT");
   const [interval, setInterval_] = useState("1h");
@@ -71,6 +101,9 @@ export default function App() {
   const [lastPrice, setLastPrice] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("loading");
   const [dataSource, setDataSource] = useState(null);
+
+  const [wsStatus, setWsStatus] = useState("idle");
+  const wsRef = useRef(null);
 
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(() => {
@@ -108,6 +141,7 @@ export default function App() {
     setConnectionStatus("loading");
     setLoadingMoreLeft(false);
     setHasMoreLeft(true);
+    setCrosshairData(null);
 
     try {
       const days = INTERVAL_DAYS[intv] || 7;
@@ -139,11 +173,127 @@ export default function App() {
     loadData(symbol, interval);
   }, [symbol, interval, loadData]);
 
+  useEffect(() => {
+    if (loading || error || dataSource === "mock" || datasetKey === 0) {
+      if (dataSource === "mock") setWsStatus("mock");
+      else if (loading) setWsStatus("loading");
+      else setWsStatus("idle");
+      return;
+    }
+
+    let active = true;
+    let reconnectTimer = null;
+    let socket = null;
+    let pollInterval = null;
+
+    const startPolling = () => {
+      if (pollInterval) clearInterval(pollInterval);
+      pollInterval = setInterval(async () => {
+        if (!active) return;
+        try {
+          const result = await fetchLatestKlines(symbol, interval, 2);
+          if (!result?.data?.length) return;
+
+          setChartData((prev) => {
+            let updated = prev;
+            result.data.forEach((tick) => {
+              updated = upsertRealtimeKline(updated, tick);
+            });
+            return updated;
+          });
+          setLastPrice(result.data[result.data.length - 1]);
+          setWsStatus((prev) => (prev === "live" ? prev : "fallback"));
+        } catch (pollErr) {
+          console.warn("Polling fallback failed:", pollErr);
+        }
+      }, 1000);
+    };
+
+    const connect = () => {
+      if (!active) return;
+      setWsStatus("connecting");
+
+      try {
+        const url = getKlineStreamUrl(symbol, interval);
+        socket = new WebSocket(url);
+        wsRef.current = socket;
+
+        socket.onopen = () => {
+          if (!active) return;
+          setWsStatus("live");
+          if (pollInterval) {
+            clearInterval(pollInterval);
+            pollInterval = null;
+          }
+        };
+
+        socket.onmessage = (event) => {
+          if (!active) return;
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "stream_status") {
+              if (msg.status === "live") setWsStatus("live");
+              if (msg.status === "reconnecting") setWsStatus("reconnecting");
+              return;
+            }
+
+            if (msg.type !== "kline" || !msg.data) return;
+            setChartData((prev) => upsertRealtimeKline(prev, msg.data));
+            setLastPrice(msg.data);
+          } catch (parseErr) {
+            console.error("WS parse failed:", parseErr);
+          }
+        };
+
+        socket.onerror = () => {
+          if (!active) return;
+          setWsStatus("reconnecting");
+          startPolling();
+        };
+
+        socket.onclose = () => {
+          if (!active) return;
+          setWsStatus("disconnected");
+          startPolling();
+          reconnectTimer = setTimeout(connect, 5000);
+        };
+      } catch (connectErr) {
+        console.warn("WS initialization failed:", connectErr);
+        startPolling();
+      }
+    };
+
+    connect();
+
+    const initialFallbackTimer = setTimeout(() => {
+      if (
+        active &&
+        !pollInterval &&
+        (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
+      ) {
+        startPolling();
+      }
+    }, 4000);
+
+    return () => {
+      active = false;
+      clearTimeout(initialFallbackTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pollInterval) clearInterval(pollInterval);
+      if (socket) {
+        try {
+          socket.close();
+        } catch (closeErr) {
+          console.error("WS close failed:", closeErr);
+        }
+      }
+      wsRef.current = null;
+    };
+  }, [dataSource, datasetKey, error, interval, loading, symbol]);
+
   const handleNeedMoreLeft = useCallback(
     async (oldestLoadedTime) => {
-      if (loading || loadingMoreLeft || !hasMoreLeft || dataSource === "mock") {
-        return;
-      }
+      if (loading || loadingMoreLeft || !hasMoreLeft || dataSource === "mock") return;
       if (!chartData.length) return;
 
       const before = oldestLoadedTime || chartData[0].time;
@@ -172,6 +322,7 @@ export default function App() {
 
   const handleIntervalChange = (newInterval) => {
     if (newInterval !== interval) {
+      setCrosshairData(null);
       setInterval_(newInterval);
     }
   };
@@ -200,11 +351,22 @@ export default function App() {
     return vol.toFixed(2);
   };
 
+  const wsStatusLabel = {
+    idle: "Realtime idle",
+    loading: "Realtime waiting",
+    connecting: "Connecting WS...",
+    live: "Live (WebSocket)",
+    reconnecting: "Reconnecting...",
+    disconnected: "Disconnected",
+    fallback: "Live (Polling fallback)",
+    mock: "Mock mode",
+  }[wsStatus] || "Unknown";
+
   return (
     <div className="app-layout">
       <header className="top-bar" id="top-bar">
         <div className="logo">
-          <div className="logo-icon">📳</div>
+          <div className="logo-icon">📈</div>
           <span className="logo-text">CandleScope</span>
         </div>
 
@@ -352,6 +514,7 @@ export default function App() {
         </div>
         <div className="status-right">
           <span>{dataSource === "mock" ? "Demo Mode" : "Binance Spot"}</span>
+          <span>{wsStatusLabel}</span>
           <span>CandleScope v0.2.0</span>
         </div>
       </footer>

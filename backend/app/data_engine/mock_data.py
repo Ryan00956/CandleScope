@@ -6,7 +6,7 @@
 import random
 import time
 import math
-
+import hashlib
 
 def generate_mock_klines(
     symbol: str = "BTCUSDT",
@@ -14,78 +14,71 @@ def generate_mock_klines(
     count: int = 500,
 ) -> list[dict]:
     """
-    生成模拟的 K 线数据（Lightweight Charts 格式）
-    数据包含趋势、波动、成交量等真实特征
+    生成确定性的模拟 K 线数据。通过 symbol 作为种子，确保同一币种在不同周期下的价格大致统一。
     """
     # 不同交易对的基础价格
     base_prices = {
-        "BTCUSDT": 87500.0,
-        "ETHUSDT": 3200.0,
-        "BNBUSDT": 420.0,
-        "SOLUSDT": 145.0,
-        "DOGEUSDT": 0.12,
+        "BTCUSDT": 92500.0,
+        "ETHUSDT": 3350.0,
+        "BNBUSDT": 580.0,
+        "SOLUSDT": 185.0,
+        "DOGEUSDT": 0.18,
     }
 
     # 时间间隔（秒）
     interval_seconds = {
-        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+        "1s": 1, "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
         "1h": 3600, "2h": 7200, "4h": 14400,
         "1d": 86400, "1w": 604800, "1M": 2592000,
     }
 
-    base_price = base_prices.get(symbol, 50000.0)
+    base_price = base_prices.get(symbol.upper(), 50000.0)
     interval_sec = interval_seconds.get(interval, 3600)
 
-    # 从 count 根 K 线前开始
+    # 现在的秒级时间戳
     now = int(time.time())
-    start_time = now - (count * interval_sec)
-
-    # 波动率参数（根据周期调整）
-    if interval_sec <= 300:       # 1m ~ 5m
-        volatility = 0.0008
-    elif interval_sec <= 3600:    # 15m ~ 1h
-        volatility = 0.003
-    elif interval_sec <= 14400:   # 2h ~ 4h
-        volatility = 0.008
-    else:                          # 1d+
-        volatility = 0.02
-
+    # 为了让数据看起来是连续的，我们基于固定的时间锚点来生成
+    # 比如基于 2024-01-01 00:00:00 (1704067200)
+    anchor_time = 1704067200
+    
+    # 使用 symbol 的 hash 作为种子，保证不同 symbol 不同趋势
+    seed = int(hashlib.md5(symbol.upper().encode()).hexdigest(), 16) % 10**8
+    rng = random.Random(seed)
+    
+    # 波动率参数
+    volatility = 0.001 if interval_sec <= 3600 else 0.005
+    
     records = []
-    price = base_price * (1 + random.uniform(-0.1, 0.05))  # 随机起始偏移
-
-    # 生成一个大趋势（模拟牛/熊市）
-    trend = random.choice([-1, 1]) * random.uniform(0.00002, 0.00008)
+    
+    # 模拟从锚点到现在的步数（用于对齐）
+    start_step = (now - anchor_time) // interval_sec - count
+    
+    # 累加步长来计算价格，这样即使请求不同 limit，数据也是对齐的
+    # 为了性能，直接从 start_step 推导出一个起始价
+    # 这里用一个简单的伪随机方程来模拟
+    current_price = base_price * (1 + math.sin(start_step * 0.001) * 0.05 + rng.uniform(-0.02, 0.02))
 
     for i in range(count):
-        t = start_time + i * interval_sec
+        step = start_step + i
+        t = anchor_time + step * interval_sec
+        # 如果生成的时间超过现在，则修正为现在
+        if t > now: break
 
-        # 趋势 + 随机噪声 + 周期性波动（模拟日内交易节奏）
-        cycle = math.sin(2 * math.pi * i / 48) * volatility * 0.3
-        noise = random.gauss(0, volatility)
-        change = trend + noise + cycle
-
-        open_price = price
-        close_price = open_price * (1 + change)
-
-        # 影线（wick）
-        wick_up = abs(random.gauss(0, volatility * 0.6))
-        wick_down = abs(random.gauss(0, volatility * 0.6))
-
-        high_price = max(open_price, close_price) * (1 + wick_up)
-        low_price = min(open_price, close_price) * (1 - wick_down)
-
-        # 成交量（价格变动大时成交量也大）
-        base_volume = base_price * 0.1
-        vol_multiplier = 1 + abs(change) * 50 + random.uniform(0, 1)
-        volume = base_volume * vol_multiplier
+        # 基于 step 生成确定性的波动
+        # 使用 rng 控制主要的噪声风格，但结合 step 保证连续性
+        walk = math.sin(step * 0.005) * 0.01 + math.cos(step * 0.02) * 0.002
+        noise = (random.Random(seed + step).random() - 0.5) * volatility
+        
+        open_price = current_price
+        close_price = open_price * (1 + walk * 0.1 + noise)
+        
+        high_price = max(open_price, close_price) * (1 + abs(noise) * 0.5)
+        low_price = min(open_price, close_price) * (1 - abs(noise) * 0.5)
+        
+        volume = base_price * (10 + random.Random(seed + step).random() * 90)
 
         # 精度
-        if base_price >= 1000:
-            decimals = 2
-        elif base_price >= 1:
-            decimals = 4
-        else:
-            decimals = 8
+        decimals = 2 if base_price >= 1000 else (4 if base_price >= 1 else 8)
 
         records.append({
             "time": t,
@@ -95,11 +88,6 @@ def generate_mock_klines(
             "close": round(close_price, decimals),
             "volume": round(volume, 2),
         })
-
-        price = close_price
-
-        # 偶尔改变趋势方向（模拟反转）
-        if random.random() < 0.02:
-            trend = -trend * random.uniform(0.5, 1.5)
+        current_price = close_price
 
     return records

@@ -33,13 +33,13 @@ def _try_fetch_klines(base_url: str, params: dict, timeout: int) -> list | None:
             _last_working_url = base_url
             return r.json()
         else:
-            print(f"   ⚠️ {base_url} → HTTP {r.status_code}")
+            print(f"   WARN {base_url} -> HTTP {r.status_code}")
             return None
     except requests.exceptions.Timeout:
-        print(f"   ⏰ {base_url} → 超时")
+        print(f"   TIMEOUT {base_url}")
         return None
     except requests.exceptions.RequestException as e:
-        print(f"   🔌 {base_url} → {e}")
+        print(f"   ERROR {base_url} -> {e}")
         return None
 
 
@@ -75,7 +75,7 @@ def fetch_klines(
             urls_to_try.append(u)
 
     for attempt in range(MAX_RETRIES):
-        print(f"📡 K线请求 [{attempt+1}/{MAX_RETRIES}] {symbol} {interval} limit={limit}")
+        print(f"KLINE_REQUEST [{attempt+1}/{MAX_RETRIES}] {symbol} {interval} limit={limit}")
 
         for base_url in urls_to_try:
             result = _try_fetch_klines(base_url, params, REQUEST_TIMEOUT)
@@ -88,7 +88,7 @@ def fetch_klines(
 
         # 所有节点都失败了，等一下再重试
         if attempt < MAX_RETRIES - 1:
-            print(f"   所有节点均失败，等待 3s 后第 {attempt+2} 次重试...")
+            print(f"   ALL_ENDPOINTS_FAILED, retry in 3s (attempt {attempt+2})")
             time.sleep(3)
 
     if data is None:

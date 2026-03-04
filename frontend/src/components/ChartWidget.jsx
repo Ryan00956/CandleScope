@@ -236,17 +236,14 @@ export default function ChartWidget({
         if (!data || data.length === 0) return;
         updateSeriesData(data);
 
+        const prev = prevDataMetaRef.current;
         const first = data[0].time;
         const last = data[data.length - 1].time;
-        const prev = prevDataMetaRef.current;
+        const datasetChanged = prev.datasetKey !== datasetKey;
 
-        const isPrepend =
-            prev.datasetKey === datasetKey &&
-            prev.length > 0 &&
-            first < prev.first &&
-            last === prev.last;
-
-        if (!isPrepend && chartRef.current) {
+        // Only auto-fit when a brand new dataset is loaded (e.g. interval switch).
+        // Realtime updates and left-side backfill should keep current view.
+        if (datasetChanged && chartRef.current) {
             chartRef.current.timeScale().fitContent();
         }
 

@@ -3,6 +3,7 @@ Kline API routes.
 """
 from fastapi import APIRouter, HTTPException, Query
 
+from app.core.market import INTERVAL_SECONDS, VALID_INTERVALS
 from app.data_engine.mock_data import generate_mock_klines
 from app.data_engine.services import (
     calculate_sma,
@@ -14,44 +15,6 @@ from app.data_engine.services import (
 )
 
 router = APIRouter(prefix="/klines", tags=["klines"])
-
-VALID_INTERVALS = [
-    "1s",
-    "1m",
-    "3m",
-    "5m",
-    "15m",
-    "30m",
-    "1h",
-    "2h",
-    "4h",
-    "6h",
-    "8h",
-    "12h",
-    "1d",
-    "3d",
-    "1w",
-    "1M",
-]
-
-INTERVAL_SECONDS = {
-    "1s": 1,
-    "1m": 60,
-    "3m": 180,
-    "5m": 300,
-    "15m": 900,
-    "30m": 1800,
-    "1h": 3600,
-    "2h": 7200,
-    "4h": 14400,
-    "6h": 21600,
-    "8h": 28800,
-    "12h": 43200,
-    "1d": 86400,
-    "3d": 259200,
-    "1w": 604800,
-    "1M": 2592000,
-}
 
 
 def _validate_interval(interval: str) -> None:
@@ -83,6 +46,40 @@ async def get_klines(
             }
     except Exception as exc:  # noqa: BLE001
         print(f"real kline fetch failed: {exc}")
+
+    mock_data = generate_mock_klines(symbol=symbol, interval=interval, count=limit)
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "count": len(mock_data),
+        "source": "mock",
+        "fetched": 0,
+        "cache": {"earliest_open_time": None, "latest_open_time": None, "total_count": 0},
+        "data": mock_data,
+    }
+
+
+@router.get("/latest")
+async def get_latest_klines(
+    symbol: str = Query("BTCUSDT", description="Trading symbol, e.g. BTCUSDT"),
+    interval: str = Query("1m", description="Kline interval"),
+    limit: int = Query(2, ge=1, le=1000, description="Number of latest rows"),
+):
+    _validate_interval(interval)
+    try:
+        payload = get_cached_latest(symbol=symbol, interval=interval, limit=limit)
+        if payload["data"]:
+            return {
+                "symbol": symbol.upper(),
+                "interval": interval,
+                "count": len(payload["data"]),
+                "source": payload["source"],
+                "fetched": payload["fetched"],
+                "cache": payload["bounds"],
+                "data": payload["data"],
+            }
+    except Exception as exc:  # noqa: BLE001
+        print(f"latest kline fetch failed: {exc}")
 
     mock_data = generate_mock_klines(symbol=symbol, interval=interval, count=limit)
     return {

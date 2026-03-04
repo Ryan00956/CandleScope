@@ -25,6 +25,16 @@ def _normalize_symbol(symbol: str) -> str:
     return symbol.upper().strip()
 
 
+def _latest_closed_open_time_ms(now_ms: int, interval_ms: int) -> int | None:
+    if interval_ms <= 0:
+        return None
+    current_open = (now_ms // interval_ms) * interval_ms
+    latest_closed_open = current_open - interval_ms
+    if latest_closed_open < 0:
+        return None
+    return latest_closed_open
+
+
 def _rows_to_lightweight(rows: list[dict]) -> list[dict]:
     return [
         {
@@ -39,9 +49,78 @@ def _rows_to_lightweight(rows: list[dict]) -> list[dict]:
     ]
 
 
+def _live_row_to_lightweight(row: pd.Series) -> dict:
+    return {
+        "time": int(row["openTimeStamp"]) // 1000,
+        "open": round(float(row["Open"]), 8),
+        "high": round(float(row["High"]), 8),
+        "low": round(float(row["Low"]), 8),
+        "close": round(float(row["Close"]), 8),
+        "volume": round(float(row["Volume"]), 8),
+    }
+
+
+def _fetch_live_open_row(symbol: str, interval: str) -> dict | None:
+    now_ms = int(time.time() * 1000)
+    df = fetch_klines(symbol=symbol, interval=interval, limit=3)
+    if df is None or df.empty:
+        return None
+
+    live_df = df[df["closeTimeStamp"] > now_ms]
+    if live_df.empty:
+        return None
+
+    latest_live = live_df.sort_values("openTimeStamp").iloc[-1]
+    return _live_row_to_lightweight(latest_live)
+
+
+def _merge_live_row(data: list[dict], live_row: dict | None) -> list[dict]:
+    if live_row is None:
+        return data
+    if not data:
+        return [live_row]
+
+    merged = list(data)
+    for i, row in enumerate(merged):
+        if row["time"] == live_row["time"]:
+            merged[i] = live_row
+            return merged
+
+    if live_row["time"] > merged[-1]["time"]:
+        merged.append(live_row)
+    return merged
+
+
 def _store_df(symbol: str, interval: str, df: pd.DataFrame, source: str = "binance") -> int:
     rows = dataframe_to_rows(df)
+    if not rows:
+        return 0
+
+    now_ms = int(time.time() * 1000)
+    # Keep storage strictly on closed candles; unfinished candle should stay in-memory only.
+    rows = [r for r in rows if int(r["close_time"]) <= now_ms]
+    if not rows:
+        return 0
+
     return upsert_klines(symbol=symbol, interval=interval, rows=rows, source=source)
+
+
+def _prune_unclosed_rows(symbol: str, interval: str, now_ms: int) -> int:
+    interval_ms = interval_to_milliseconds(interval)
+    latest_closed_open_ms = _latest_closed_open_time_ms(now_ms, interval_ms)
+    if latest_closed_open_ms is None:
+        return 0
+
+    bounds = get_bounds(symbol, interval)
+    latest = bounds["latest_open_time"]
+    if latest is None or int(latest) <= latest_closed_open_ms:
+        return 0
+
+    return delete_klines(
+        symbol=symbol,
+        interval=interval,
+        start_ms=latest_closed_open_ms + interval_ms,
+    )
 
 
 def _backfill_left(
@@ -94,20 +173,24 @@ def _refresh_right(
     max_batches: int = MAX_REFRESH_BATCHES,
 ) -> int:
     interval_ms = interval_to_milliseconds(interval)
+    latest_closed_open_ms = _latest_closed_open_time_ms(target_end_ms, interval_ms)
+    if latest_closed_open_ms is None:
+        return 0
+
     bounds = get_bounds(symbol, interval)
     latest = bounds["latest_open_time"]
 
     if latest is None:
-        cursor_start = target_end_ms - BINANCE_PAGE_LIMIT * interval_ms
+        cursor_start = max(0, latest_closed_open_ms - (BINANCE_PAGE_LIMIT - 1) * interval_ms)
     else:
         latest = int(latest)
-        if latest >= target_end_ms - interval_ms:
+        if latest >= latest_closed_open_ms:
             return 0
         cursor_start = latest + interval_ms
 
     total_written = 0
     for _ in range(max_batches):
-        if cursor_start > target_end_ms:
+        if cursor_start > latest_closed_open_ms:
             break
 
         df = fetch_klines(
@@ -115,7 +198,7 @@ def _refresh_right(
             interval=interval,
             limit=BINANCE_PAGE_LIMIT,
             start_ms=cursor_start,
-            end_ms=target_end_ms,
+            end_ms=latest_closed_open_ms,
         )
         if df is None or df.empty:
             break
@@ -126,11 +209,21 @@ def _refresh_right(
             break
 
         cursor_start = newest + interval_ms
+        if cursor_start > latest_closed_open_ms:
+            break
         if len(df) < BINANCE_PAGE_LIMIT:
             break
         time.sleep(0.08)
 
     return total_written
+
+
+def _refresh_latest_window(symbol: str, interval: str, window: int = 5) -> int:
+    window = max(1, min(window, BINANCE_PAGE_LIMIT))
+    df = fetch_klines(symbol=symbol, interval=interval, limit=window)
+    if df is None or df.empty:
+        return 0
+    return _store_df(symbol, interval, df)
 
 
 def _ensure_cached_range(symbol: str, interval: str, start_ms: int, end_ms: int) -> int:
@@ -145,6 +238,7 @@ def get_cached_history(symbol: str, interval: str, days: int) -> dict:
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - int(days * 24 * 60 * 60 * 1000)
 
+    _prune_unclosed_rows(symbol, interval, end_ms)
     fetched = _ensure_cached_range(symbol, interval, start_ms=start_ms, end_ms=end_ms)
     rows = query_klines(symbol, interval, start_ms=start_ms, end_ms=end_ms, order="ASC")
     bounds = get_bounds(symbol, interval)
@@ -162,20 +256,27 @@ def get_cached_latest(symbol: str, interval: str, limit: int) -> dict:
     now_ms = int(time.time() * 1000)
     interval_ms = interval_to_milliseconds(interval)
 
+    _prune_unclosed_rows(symbol, interval, now_ms)
     fetched = _refresh_right(symbol, interval, target_end_ms=now_ms)
     rows = query_klines(symbol, interval, end_ms=now_ms, limit=limit, order="DESC")
 
     if not rows:
         target_start = now_ms - limit * interval_ms
         fetched += _backfill_left(symbol, interval, target_start_ms=target_start, end_ms=now_ms)
+        fetched += _refresh_right(symbol, interval, target_end_ms=now_ms)
         rows = query_klines(symbol, interval, end_ms=now_ms, limit=limit, order="DESC")
 
     rows.reverse()
+    data = _rows_to_lightweight(rows)
+    live_row = _fetch_live_open_row(symbol=symbol, interval=interval)
+    data = _merge_live_row(data, live_row)
+    if len(data) > limit:
+        data = data[-limit:]
     bounds = get_bounds(symbol, interval)
     return {
-        "data": _rows_to_lightweight(rows),
+        "data": data,
         "fetched": fetched,
-        "source": "cache+binance" if fetched > 0 else "cache",
+        "source": "cache+binance" if (fetched > 0 or live_row is not None) else "cache",
         "bounds": bounds,
     }
 

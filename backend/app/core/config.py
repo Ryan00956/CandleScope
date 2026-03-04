@@ -29,6 +29,11 @@ BINANCE_BASE_URL = os.getenv("BINANCE_BASE_URL", "https://api.binance.me")
 
 # Binance WebSocket
 BINANCE_WS_URL = os.getenv("BINANCE_WS_URL", "wss://stream.binance.com:9443/ws")
+BINANCE_WS_URLS = [
+    BINANCE_WS_URL,
+    "wss://data-stream.binance.vision/ws",
+    "wss://stream.binance.me:9443/ws",
+]
 
 # Request tuning
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "10"))

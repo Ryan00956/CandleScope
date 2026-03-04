@@ -35,9 +35,9 @@ BINANCE_WS_URLS = [
     "wss://stream.binance.me:9443/ws",
 ]
 
-# Request tuning
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "10"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+# Request tuning  (lower values = faster fallback when Binance is unreachable)
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "5"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RATE_LIMIT_SLEEP = int(os.getenv("RATE_LIMIT_SLEEP", "60"))
 
 # CORS

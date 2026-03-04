@@ -8,14 +8,13 @@
 Lightweight trading chart software built with FastAPI + React + Lightweight Charts.
 
 Current features:
-- **Binance spot kline fetching**: Rapid synchronization of real market data.
-- **Local SQLite cache**: Avoid repeated full fetches and significantly boost loading speed.
-- **Auto backfill on left drag**: Older klines are fetched automatically when dragging chart to the far left.
-- **WebSocket real-time kline streaming**: Sub-second updates with a robust HTTP polling fallback.
-- **Real-time persistence**: WebSocket closed candles are automatically saved to local storage.
+- **Zero-Latency Interval Switching**: Instant cache-first rendering. Switching between 1m, 1h, or 1d is near-instant if data exists in local SQLite.
+- **Non-blocking Async Architecture**: All heavy I/O operations (Binance API) are offloaded to background thread pools, keeping the WebSocket and UI perfectly responsive.
+- **Intelligent Prefetching**: Frontend automatically pre-warms adjacent intervals (e.g., if you view 1h, it silently fetches 15m and 4h in the background).
+- **Parallel Data Filling**: Historical backfill and real-time refresh are executed concurrently using a specialized `ThreadPoolExecutor`.
+- **Binance Spot K-line Sync**: Rapid synchronization of real market data with a local SQLite cache to avoid redundant network requests.
 - **Unified Mock Data**: Deterministic price levels are perfectly consistent across all intervals (1m to 1M) using a shared price curve.
-- **Rendering Stability**: Built-in **ErrorBoundary** and data de-duplication to prevent "white screen" crashes even with unstable network streams.
-- **Data management APIs**: Comprehensive endpoints for history, storage meta, and basic indicators (SMA).
+- **Rendering Stability**: Built-in **ErrorBoundary** and time-based de-duplication to prevent "white screen" crashes from unstable network streams.
 
 ## Quick Start
 
@@ -44,32 +43,28 @@ Default URL:
 
 ## Core Capabilities
 
-### 1. Persistent kline cache
+### 1. Hybrid Performance Engine
 
-Klines are stored in SQLite with unique key:
-- `symbol + interval + open_time`
+CandleScope uses a two-phase loading strategy:
+- **Phase 1 (Instant)**: Return cached data from SQLite immediately (~5ms).
+- **Phase 2 (Background)**: Silently trigger background threads to fill any gaps or fetch the latest bars from Binance.
 
-Default DB path: `backend/data/candlescope.db`
+### 2. Parallel & Concurrent I/O
 
-### 2. Auto backfill on left drag
+The backend utilizes `asyncio.to_thread` and `ThreadPoolExecutor` to handle network requests. This ensures that a slow response from Binance never blocks the FastAPI event loop, allowing WebSocket updates to continue flowing smoothly.
 
-When you drag to the left edge, frontend requests older data and prepends it without a full-screen loading overlay, ensuring a smooth visual experience.
+### 3. Smart Prefetching & Abort Logic
 
-### 3. Real-time & Auto-Persistence
-
-The app employs a "Dual-Mode" real-time engine:
-- **WebSocket First**: Connects directly to Binance streams.
-- **Polling Fallback**: Automatically switches to HTTP polling if WebSocket is blocked.
-- **Auto-Sync**: Any "closed" candle received is instantly persisted.
+The frontend keeps track of your navigation. Rapidly switching between intervals automatically cancels stale requests via `AbortController`, while successful loads trigger background "warming" of neighboring timeframes.
 
 ### 4. Stability & Precision
 
-- **No White Screen**: Integrated React ErrorBoundaries and chart data sanitization (time-based deduplication) ensure the UI stays up even if the underlying library hits data irregularities.
-- **Shared Price Logic**: The mock generator uses a deterministic minute-level random walk. This ensures that the "current price" is identical whether you are looking at a 1-minute chart or a daily chart.
+- **No White Screen**: Integrated React ErrorBoundaries and chart data sanitization ensure the UI stays up even if the underlying library hits data irregularities.
+- **Deterministic Simulation**: The mock generator uses a shared minute-level random walk, ensuring the "current price" is identical across all charts.
 
 ## Project Structure
 
-- `backend/`: FastAPI backend and data engine.
+- `backend/`: FastAPI backend and multi-threaded data engine.
 - `frontend/`: React frontend with customized Lightweight Charts v5.
 
 ## Notes
@@ -87,14 +82,13 @@ The app employs a "Dual-Mode" real-time engine:
 基于 FastAPI + React + Lightweight Charts 构建的轻量级交易看盘软件。
 
 ### 当前特性
-- **币安 (Binance) 现货 K 线抓取**: 快速同步真实的行情数据。
-- **本地 SQLite 缓存**: 自动存储已加载的 K 线，避免重复网络请求，极大提升加载速度。
-- **历史数据自动回填**: 向左拖拽图表至边缘时，自动触发向后（更早的时间）拉取数据。
-- **强健的实时行情**: 优先 WebSocket 连接，支持 4s 自动感知并无缝切换至 HTTP 轮询。
-- **统一价格模拟**: 彻底解决 Mock 模式下不同周期（1m/1h/1d）价格不一致的问题，共用同一条确定性价格曲线。
+- **极速周期切换**: 采用 Cache-First 策略。在 1m、1h、1d 等周期切换时，只要本地 SQLite 有缓存，即刻实现秒级渲染。
+- **非阻塞异步架构**: 所有重型 I/O 操作（币安 API 请求）均被推送到后台线程池执行，确保 WebSocket 情报流和界面响应零延迟。
+- **智能预取机制**: 前端自动“感知”用户需求并预热相邻周期（例如：当前查看 1h，后台会自动异步静默预读 15m 和 4h 的数据）。
+- **并行数据补全**: 采用 `ThreadPoolExecutor` 实现历史回填 (Backfill) 与实时刷新 (Refresh) 的并行处理，数据加载效率加倍。
+- **双模实时行情**: 优先 WebSocket 连接，支持 4s 自动感知并无缝切换至 HTTP 轮询。
+- **统一价格模拟**: 采用共享价格曲线算法，彻底解决 Mock 模式下不同周期价格不一致的问题。
 - **抗崩溃能力**: 内置 **ErrorBoundary** 错误拦截与数据去重逻辑，杜绝因数据异常导致的“白屏”现象。
-- **实时数据落库**: WebSocket 接收到的已闭合 K 线会自动同步到本地数据库。
-- **丰富的数据接口**: 包含历史补全、存储状态查询、移动平均线 (SMA) 指标计算等。
 
 ## 🚀 快速开始
 
@@ -121,26 +115,26 @@ npm run dev
 
 ## 🛠️ 核心能力
 
-### 1. 持久化存储
-K 线数据持久化存储于 SQLite，唯一键由 `symbol + interval + open_time` 组成。
-- **默认路径**: `backend/data/candlescope.db`
+### 1. 混合性能引擎 (Two-Phase Loading)
+CandleScope 采用两阶段加载方案：
+- **阶段 1 (即时)**: 立即返回 SQLite 中的本地缓存 (~5ms)，让用户先看到数据。
+- **阶段 2 (后台)**: 静默启动后台任务，对数据空隙或最新 K 线进行补全。
 
-### 2. 交互式回填 (Backfill)
-当感知到用户将图表时间轴拉至最左端（可见范围开始处），系统将发起补全请求。回填过程不触发全屏 Loading，仅通过底部状态栏提示。
+### 2. 并行 I/O 调度
+后端通过 `asyncio.to_thread` 将同步阻塞的 API 请求隔离到独立线程，避免卡死 FastAPI 事件循环，确保看盘过程中价格跳动始终丝滑。
 
-### 3. 实时动态与自动持久化
-- **双模引擎**: 优先采用 WebSocket 建立毫秒级行情链接；由于网络环境（如代理）无法建立 WS 时，自动切换至 HTTP 轮询。
-- **增量存储**: WebSocket 接收到的每根“已闭合” K 线都会在后台静默写入本地数据库。
+### 3. 智能请求管理
+前端引入 `AbortController` 机制，在用户快速连续切换周期时自动丢弃过时请求；同时利用闲置带宽对相邻周期进行后台预热。
 
-### 4. 稳定性与精确度
-- **防白屏设计**: 引入 React 错误边界和图表数据清晰化逻辑（按时间戳强行去重），确保即使在数据流不稳定的情况下界面依然可用。
-- **确定性模拟**: 采用基于分钟步进的共享随机游走算法，保证同一 Symbol 在所有周期下的“当前价格”绝对对齐。
+### 4. 稳定性防护
+- **防白屏设计**: 引入 React 错误边界和图表数据清洗逻辑（按时间戳强行去重），确保即使在网络波动的极端情况下界面依然可用。
+- **高精度模拟**: 基于分钟步进的共享随机游走算法，保证同一 Symbol 在所有周期下的“当前价格”绝对对齐。
 
 ## 📂 项目结构
 
-- `backend/`: 核心数据引擎，负责采集、清洗、存储。
-- `frontend/`: 渲染层，包含 Lightweight Charts v5 的深度定制。
+- `backend/`: FastAPI 后端与多线程数据引擎。
+- `frontend/`: React 前端，包含 Lightweight Charts v5 的深度定制。
 
 ## 📝 说明
-- 建议在中国大陆环境下配置合适的网络代理以获取稳定的币安实时行情。
+- 建议配置合适的网络代理以获取稳定的币安实时行情。
 - 本地数据库文件夹 `data/` 已通过 `.gitignore` 排除。

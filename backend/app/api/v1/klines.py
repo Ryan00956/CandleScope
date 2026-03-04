@@ -1,6 +1,8 @@
 """
 Kline API routes.
 """
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 
 from app.core.market import INTERVAL_SECONDS, VALID_INTERVALS
@@ -33,7 +35,9 @@ async def get_klines(
 ):
     _validate_interval(interval)
     try:
-        payload = get_cached_latest(symbol=symbol, interval=interval, limit=limit)
+        payload = await asyncio.to_thread(
+            get_cached_latest, symbol=symbol, interval=interval, limit=limit
+        )
         if payload["data"]:
             return {
                 "symbol": symbol.upper(),
@@ -67,7 +71,9 @@ async def get_latest_klines(
 ):
     _validate_interval(interval)
     try:
-        payload = get_cached_latest(symbol=symbol, interval=interval, limit=limit)
+        payload = await asyncio.to_thread(
+            get_cached_latest, symbol=symbol, interval=interval, limit=limit
+        )
         if payload["data"]:
             return {
                 "symbol": symbol.upper(),
@@ -102,7 +108,9 @@ async def get_klines_history(
     _validate_interval(interval)
 
     try:
-        payload = get_cached_history(symbol=symbol, interval=interval, days=days)
+        payload = await asyncio.to_thread(
+            get_cached_history, symbol=symbol, interval=interval, days=days
+        )
         if payload["data"]:
             return {
                 "symbol": symbol.upper(),
@@ -132,6 +140,7 @@ async def get_klines_history(
     }
 
 
+
 @router.get("/history/before")
 async def get_klines_before(
     symbol: str = Query("BTCUSDT", description="Trading symbol"),
@@ -141,7 +150,9 @@ async def get_klines_before(
 ):
     _validate_interval(interval)
 
-    payload = get_more_left(symbol=symbol, interval=interval, before_seconds=before, bars=bars)
+    payload = await asyncio.to_thread(
+        get_more_left, symbol=symbol, interval=interval, before_seconds=before, bars=bars
+    )
     return {
         "symbol": symbol.upper(),
         "interval": interval,

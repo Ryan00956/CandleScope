@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 import pandas as pd
 
@@ -24,6 +26,12 @@ LIVE_ROW_STALE_MS = 10000
 _LIVE_ROW_CACHE: dict[tuple[str, str], dict] = {}
 LATEST_REFRESH_MIN_GAP_MS = 15000
 _LATEST_REFRESH_ATTEMPT_MS: dict[tuple[str, str], int] = {}
+
+# Shared thread pool for background network IO
+_io_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="kline-io")
+# Track in-flight background tasks to avoid duplicate work
+_bg_tasks_lock = threading.Lock()
+_bg_tasks_in_flight: set[tuple[str, str]] = set()
 
 
 def _normalize_symbol(symbol: str) -> str:
@@ -263,26 +271,95 @@ def _refresh_right_if_needed(symbol: str, interval: str, now_ms: int) -> int:
 
 
 def _ensure_cached_range(symbol: str, interval: str, start_ms: int, end_ms: int) -> int:
+    """Backfill left + refresh right in PARALLEL using thread pool."""
+    futures = []
+    futures.append(_io_pool.submit(_backfill_left, symbol, interval, start_ms, end_ms))
+    futures.append(_io_pool.submit(_refresh_right, symbol, interval, end_ms))
+
     written = 0
-    written += _backfill_left(symbol, interval, target_start_ms=start_ms, end_ms=end_ms)
-    written += _refresh_right(symbol, interval, target_end_ms=end_ms)
+    for f in as_completed(futures):
+        try:
+            written += f.result(timeout=30)
+        except Exception as exc:
+            print(f"_ensure_cached_range sub-task error: {exc}")
     return written
 
 
+def _bg_ensure_cached(symbol: str, interval: str, start_ms: int, end_ms: int) -> None:
+    """Background thread task: fill gaps, then clear in-flight flag."""
+    key = (symbol, interval)
+    try:
+        _ensure_cached_range(symbol, interval, start_ms, end_ms)
+    except Exception as exc:
+        print(f"bg_ensure_cached error {key}: {exc}")
+    finally:
+        with _bg_tasks_lock:
+            _bg_tasks_in_flight.discard(key)
+
+
 def get_cached_history(symbol: str, interval: str, days: int) -> dict:
+    """
+    Two-phase approach:
+    Phase 1 — Instant: return whatever is already in the local cache.
+    Phase 2 — Background: if gaps exist, submit a background thread to
+              backfill/refresh. The next poll or interval switch will pick
+              up the newly cached data.
+    """
     symbol = _normalize_symbol(symbol)
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - int(days * 24 * 60 * 60 * 1000)
 
     _prune_unclosed_rows(symbol, interval, end_ms)
-    fetched = _ensure_cached_range(symbol, interval, start_ms=start_ms, end_ms=end_ms)
+
+    # Phase 1: return cache immediately
     rows = query_klines(symbol, interval, start_ms=start_ms, end_ms=end_ms, order="ASC")
     bounds = get_bounds(symbol, interval)
+    cached_data = _rows_to_lightweight(rows)
+
+    # Phase 2: kick off background fill if there are likely gaps
+    needs_fill = False
+    if not rows:
+        needs_fill = True
+    else:
+        earliest_cached = bounds.get("earliest_open_time")
+        latest_cached = bounds.get("latest_open_time")
+        if earliest_cached is not None and int(earliest_cached) > start_ms:
+            needs_fill = True
+        if latest_cached is not None:
+            interval_ms = interval_to_milliseconds(interval)
+            latest_closed = _latest_closed_open_time_ms(end_ms, interval_ms)
+            if latest_closed and int(latest_cached) < latest_closed:
+                needs_fill = True
+
+    bg_submitted = False
+    if needs_fill:
+        key = (symbol, interval)
+        with _bg_tasks_lock:
+            if key not in _bg_tasks_in_flight:
+                _bg_tasks_in_flight.add(key)
+                bg_submitted = True
+
+        if bg_submitted:
+            _io_pool.submit(_bg_ensure_cached, symbol, interval, start_ms, end_ms)
+
+    # If we have zero cached rows, we must do a synchronous fill (first-time load)
+    if not cached_data and needs_fill:
+        # Wait briefly for inflight task, or do inline fill
+        _ensure_cached_range(symbol, interval, start_ms, end_ms)
+        rows = query_klines(symbol, interval, start_ms=start_ms, end_ms=end_ms, order="ASC")
+        bounds = get_bounds(symbol, interval)
+        cached_data = _rows_to_lightweight(rows)
+        return {
+            "data": cached_data,
+            "fetched": len(cached_data),
+            "source": "cache+binance",
+            "bounds": bounds,
+        }
 
     return {
-        "data": _rows_to_lightweight(rows),
-        "fetched": fetched,
-        "source": "cache+binance" if fetched > 0 else "cache",
+        "data": cached_data,
+        "fetched": 0,
+        "source": "cache" if cached_data else "empty",
         "bounds": bounds,
     }
 

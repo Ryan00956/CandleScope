@@ -95,6 +95,17 @@ const INTERVAL_DAYS = {
   "1M": 365,
 };
 
+// Adjacent intervals for prefetching (left neighbor, right neighbor)
+const ALL_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"];
+function getAdjacentIntervals(intv) {
+  const idx = ALL_INTERVALS.indexOf(intv);
+  if (idx === -1) return [];
+  const neighbors = [];
+  if (idx > 0) neighbors.push(ALL_INTERVALS[idx - 1]);
+  if (idx < ALL_INTERVALS.length - 1) neighbors.push(ALL_INTERVALS[idx + 1]);
+  return neighbors;
+}
+
 /** 合并并去重（按 time 去重，后来者覆盖前者） */
 function mergeByTime(older, current) {
   const merged = [...older, ...current];
@@ -190,17 +201,28 @@ export default function App() {
     localStorage.setItem("candlescope-settings", JSON.stringify(settings));
   }, [settings]);
 
+  const abortRef = useRef(null);
+
   const loadData = useCallback(async (sym, intv) => {
+    // Cancel any previous in-flight request
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setLoading(true);
     setError(null);
     setConnectionStatus("loading");
     setLoadingMoreLeft(false);
     setHasMoreLeft(true);
     setCrosshairData(null);
+    // Keep lastPrice visible during transition to avoid price flickering
 
     try {
       const days = INTERVAL_DAYS[intv] || 7;
       const result = await fetchKlinesHistory(sym, intv, days);
+
+      // If this request was superseded by a newer one, discard
+      if (controller.signal.aborted) return;
 
       if (result.data && result.data.length > 0) {
         const nextData = result.data;
@@ -216,11 +238,23 @@ export default function App() {
         setConnectionStatus("disconnected");
       }
     } catch (err) {
+      if (controller.signal.aborted) return;
       console.error("Data load failed:", err);
       setError(err.message || "Network error");
       setConnectionStatus("disconnected");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) {
+        setLoading(false);
+      }
+    }
+
+    // Prefetch adjacent intervals in background (fire-and-forget)
+    if (!controller.signal.aborted) {
+      const neighbors = getAdjacentIntervals(intv);
+      neighbors.forEach((adj) => {
+        const adjDays = INTERVAL_DAYS[adj] || 7;
+        fetchKlinesHistory(sym, adj, adjDays).catch(() => { });
+      });
     }
   }, []);
 

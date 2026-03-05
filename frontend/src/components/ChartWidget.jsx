@@ -1,10 +1,11 @@
 /**
  * CandleScope chart widget based on Lightweight Charts.
  */
-import { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useCallback } from "react";
 import { createChart, CandlestickSeries, HistogramSeries } from "lightweight-charts";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
+const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
 
 function buildLocalizationOptions(timezone = "Local") {
     const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
@@ -73,7 +74,7 @@ function toVolumePoint(d, upColor, downColor) {
     };
 }
 
-export default function ChartWidget({
+const ChartWidget = forwardRef(function ChartWidget({
     data,
     symbol,
     interval,
@@ -87,7 +88,9 @@ export default function ChartWidget({
     theme,
     customBg,
     timezone = "Local",
-}) {
+    savedVisibleRange = null,
+    onVisibleRangeChange = null,
+}, ref) {
     const chartContainerRef = useRef(null);
     const chartRef = useRef(null);
     const candlestickSeriesRef = useRef(null);
@@ -106,6 +109,20 @@ export default function ChartWidget({
         length: 0,
     });
 
+    // Refs for visible range tracking
+    const savedVisibleRangeRef = useRef(savedVisibleRange);
+    const onVisibleRangeChangeRef = useRef(onVisibleRangeChange);
+    const visibleRangeSaveTimerRef = useRef(null);
+    const hasRestoredRangeRef = useRef(false);
+
+    useEffect(() => {
+        savedVisibleRangeRef.current = savedVisibleRange;
+    }, [savedVisibleRange]);
+
+    useEffect(() => {
+        onVisibleRangeChangeRef.current = onVisibleRangeChange;
+    }, [onVisibleRangeChange]);
+
     useEffect(() => {
         dataRef.current = data || [];
     }, [data]);
@@ -122,8 +139,48 @@ export default function ChartWidget({
         requestedOldestRef.current = null;
         userInteractedRef.current = false;
         lastCrosshairSignatureRef.current = null;
+        hasRestoredRangeRef.current = false;
         prevDataMetaRef.current = { datasetKey, first: null, last: null, length: 0 };
     }, [datasetKey]);
+
+    // Expose getVisibleRange to parent via ref
+    useImperativeHandle(ref, () => ({
+        getVisibleRange: () => {
+            if (!chartRef.current) return null;
+            try {
+                const logicalRange = chartRef.current.timeScale().getVisibleLogicalRange();
+                const timeRange = chartRef.current.timeScale().getVisibleRange();
+                return {
+                    logical: logicalRange,
+                    time: timeRange,
+                };
+            } catch {
+                return null;
+            }
+        },
+    }), []);
+
+    // Debounced visible range save
+    const scheduleVisibleRangeSave = useCallback(() => {
+        if (visibleRangeSaveTimerRef.current) {
+            clearTimeout(visibleRangeSaveTimerRef.current);
+        }
+        visibleRangeSaveTimerRef.current = setTimeout(() => {
+            if (!chartRef.current || !onVisibleRangeChangeRef.current) return;
+            try {
+                const logicalRange = chartRef.current.timeScale().getVisibleLogicalRange();
+                const timeRange = chartRef.current.timeScale().getVisibleRange();
+                if (logicalRange && timeRange) {
+                    onVisibleRangeChangeRef.current({
+                        logical: logicalRange,
+                        time: timeRange,
+                    });
+                }
+            } catch {
+                // Ignore errors during range save
+            }
+        }, VISIBLE_RANGE_SAVE_DEBOUNCE_MS);
+    }, []);
 
     useEffect(() => {
         if (!chartContainerRef.current) return;
@@ -221,6 +278,12 @@ export default function ChartWidget({
 
         chart.timeScale().subscribeVisibleLogicalRangeChange((logicalRange) => {
             if (!logicalRange) return;
+
+            // Save visible range on any scroll/zoom
+            if (userInteractedRef.current) {
+                scheduleVisibleRangeSave();
+            }
+
             if (!onNeedMoreLeftRef.current || !canLoadMoreLeftRef.current) return;
             if (!userInteractedRef.current) return;
             if (logicalRange.from > LEFT_EDGE_TRIGGER_BARS) return;
@@ -253,6 +316,24 @@ export default function ChartWidget({
         resizeObserver.observe(container);
 
         return () => {
+            // Save visible range before destroying chart
+            if (onVisibleRangeChangeRef.current) {
+                try {
+                    const logicalRange = chart.timeScale().getVisibleLogicalRange();
+                    const timeRange = chart.timeScale().getVisibleRange();
+                    if (logicalRange && timeRange) {
+                        onVisibleRangeChangeRef.current({
+                            logical: logicalRange,
+                            time: timeRange,
+                        });
+                    }
+                } catch {
+                    // Ignore
+                }
+            }
+            if (visibleRangeSaveTimerRef.current) {
+                clearTimeout(visibleRangeSaveTimerRef.current);
+            }
             resizeObserver.disconnect();
             container.removeEventListener("wheel", markUserInteracted);
             container.removeEventListener("mousedown", markUserInteracted);
@@ -359,8 +440,20 @@ export default function ChartWidget({
             updateLatestBars(data, 2);
         }
 
+        // Restore saved visible range on dataset change, or fitContent if none saved
         if (datasetChanged && chartRef.current) {
-            chartRef.current.timeScale().fitContent();
+            const rangeToRestore = savedVisibleRangeRef.current;
+            if (rangeToRestore?.time && !hasRestoredRangeRef.current) {
+                try {
+                    chartRef.current.timeScale().setVisibleRange(rangeToRestore.time);
+                    hasRestoredRangeRef.current = true;
+                } catch {
+                    // If restore fails (e.g., saved range is out of current data bounds), fit content
+                    chartRef.current.timeScale().fitContent();
+                }
+            } else {
+                chartRef.current.timeScale().fitContent();
+            }
         }
 
         if (prev.first !== null && first < prev.first) {
@@ -392,4 +485,6 @@ export default function ChartWidget({
             )}
         </div>
     );
-}
+});
+
+export default ChartWidget;

@@ -128,6 +128,41 @@ function saveSavedCustomIntervals(list) {
   localStorage.setItem(CUSTOM_INTERVALS_KEY, JSON.stringify(list));
 }
 
+// ---------- User preference persistence ----------
+const USER_PREFS_KEY = "candlescope-user-prefs";
+function loadUserPrefs() {
+  try {
+    const raw = localStorage.getItem(USER_PREFS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+function saveUserPrefs(prefs) {
+  localStorage.setItem(USER_PREFS_KEY, JSON.stringify(prefs));
+}
+function updateUserPref(key, value) {
+  const prefs = loadUserPrefs();
+  prefs[key] = value;
+  saveUserPrefs(prefs);
+}
+
+// Visible range persistence per interval
+const VISIBLE_RANGE_KEY = "candlescope-visible-ranges";
+function loadVisibleRanges() {
+  try {
+    const raw = localStorage.getItem(VISIBLE_RANGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+function saveVisibleRangeForInterval(interval, range) {
+  const ranges = loadVisibleRanges();
+  ranges[interval] = range;
+  localStorage.setItem(VISIBLE_RANGE_KEY, JSON.stringify(ranges));
+}
+function getVisibleRangeForInterval(interval) {
+  const ranges = loadVisibleRanges();
+  return ranges[interval] || null;
+}
+
 const INTERVAL_DAYS = {
   "1m": 1, "3m": 2, "5m": 3, "15m": 7, "30m": 14,
   "1h": 30, "2h": 60, "4h": 90, "1d": 365, "1w": 365, "1M": 365,
@@ -192,7 +227,10 @@ function upsertRealtimeKline(current, incoming) {
 
 export default function App() {
   const [symbol] = useState("BTCUSDT");
-  const [interval, setInterval_] = useState("1h");
+  const [interval, setInterval_] = useState(() => {
+    const prefs = loadUserPrefs();
+    return prefs.lastInterval || "1h";
+  });
   const [datasetKey, setDatasetKey] = useState(0);
 
   const [chartData, setChartData] = useState([]);
@@ -207,6 +245,7 @@ export default function App() {
   const [dataSource, setDataSource] = useState(null);
 
   const [wsStatus, setWsStatus] = useState("idle");
+  const chartWidgetRef = useRef(null);
 
   // --- Custom interval state ---
   const [customInput, setCustomInput] = useState("");
@@ -640,13 +679,34 @@ export default function App() {
     [chartData.length, dataSource, hasMoreLeft, interval, loading, loadingMoreLeft, saveToCache, symbol],
   );
 
+  // Save visible range when switching away from current interval
+  const saveCurrentVisibleRange = useCallback(() => {
+    if (chartWidgetRef.current?.getVisibleRange) {
+      const range = chartWidgetRef.current.getVisibleRange();
+      if (range) {
+        saveVisibleRangeForInterval(interval, range);
+      }
+    }
+  }, [interval]);
+
+  // Save visible range on page close/refresh
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      saveCurrentVisibleRange();
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [saveCurrentVisibleRange]);
+
   const handleIntervalChange = (newInterval) => {
     if (newInterval !== interval) {
+      saveCurrentVisibleRange();
       setCrosshairData(null);
       setCustomInput("");
       setCustomError(null);
       customCandleRef.current = null;
       setInterval_(newInterval);
+      updateUserPref("lastInterval", newInterval);
     }
   };
 
@@ -918,6 +978,7 @@ export default function App() {
       ) : (
         <ErrorBoundary>
           <ChartWidget
+            ref={chartWidgetRef}
             data={chartData}
             symbol={symbol}
             interval={interval}
@@ -931,6 +992,8 @@ export default function App() {
             theme={settings.theme}
             customBg={settings.customBg}
             timezone={settings.timezone}
+            savedVisibleRange={getVisibleRangeForInterval(interval)}
+            onVisibleRangeChange={(range) => saveVisibleRangeForInterval(interval, range)}
           />
         </ErrorBoundary>
       )}

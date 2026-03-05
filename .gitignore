@@ -207,6 +207,9 @@ backend/data/*.db-shm
 backend/data/*.db-wal
 backend/data/*.sqlite*
 
+# CandleScope user preferences (stored in browser localStorage, never in files)
+# Keys: candlescope-user-prefs, candlescope-visible-ranges, candlescope-custom-intervals
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

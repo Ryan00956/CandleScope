@@ -1,12 +1,18 @@
 /**
  * CandleScope chart widget based on Lightweight Charts.
+ *
+ * ALL drawing (freehand pen, lines, eraser) is handled via the native
+ * Plugin API (ISeriesPrimitive), rendered directly inside the chart's
+ * Canvas pipeline — zero lag on pan/zoom, no DOM overlays needed.
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useCallback } from "react";
 import { createChart, CandlestickSeries, HistogramSeries } from "lightweight-charts";
-import DrawingCanvas from "./DrawingCanvas";
+import { useDrawing } from "../hooks/useDrawing";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
+
+const DRAWING_TOOL_IDS = new Set(["pen", "eraser", "line-segment", "line-ray", "line-infinite"]);
 
 function buildLocalizationOptions(timezone = "Local") {
     const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
@@ -93,10 +99,8 @@ const ChartWidget = forwardRef(function ChartWidget({
     onVisibleRangeChange = null,
     // Drawing props
     drawingTool = null,
-    drawingCanvasRef = null,
     penColor = "#f59e0b",
     penSize = 2,
-    eraserSize = 20,
 }, ref) {
     const chartContainerRef = useRef(null);
     const chartRef = useRef(null);
@@ -151,11 +155,20 @@ const ChartWidget = forwardRef(function ChartWidget({
             clearTimeout(visibleRangeSaveTimerRef.current);
             visibleRangeSaveTimerRef.current = null;
         }
-        // Force the next non-empty data update to be treated as a dataset switch.
         prevDataMetaRef.current = { datasetKey: null, first: null, last: null, length: 0 };
     }, [datasetKey]);
 
-    // Expose getVisibleRange to parent via ref
+    // ── All drawing via native Plugin API ──
+    const { clearAll } = useDrawing({
+        chartRef,
+        seriesRef: candlestickSeriesRef,
+        chartContainerRef,
+        activeTool: drawingTool,
+        penColor,
+        penSize,
+    });
+
+    // Expose getVisibleRange + clearAll to parent via ref
     useImperativeHandle(ref, () => ({
         getVisibleRange: () => {
             if (!chartRef.current) return null;
@@ -170,7 +183,8 @@ const ChartWidget = forwardRef(function ChartWidget({
                 return null;
             }
         },
-    }), []);
+        clearAllDrawings: clearAll,
+    }), [clearAll]);
 
     // Debounced visible range save
     const scheduleVisibleRangeSave = useCallback(() => {
@@ -291,7 +305,6 @@ const ChartWidget = forwardRef(function ChartWidget({
         chart.timeScale().subscribeVisibleLogicalRangeChange((logicalRange) => {
             if (!logicalRange) return;
 
-            // Save visible range on any scroll/zoom
             if (userInteractedRef.current) {
                 scheduleVisibleRangeSave();
             }
@@ -328,7 +341,6 @@ const ChartWidget = forwardRef(function ChartWidget({
         resizeObserver.observe(container);
 
         return () => {
-            // Save visible range before destroying chart
             if (onVisibleRangeChangeRef.current) {
                 try {
                     const logicalRange = chart.timeScale().getVisibleLogicalRange();
@@ -360,7 +372,6 @@ const ChartWidget = forwardRef(function ChartWidget({
     const updateSeriesData = (klines) => {
         if (!candlestickSeriesRef.current || !volumeSeriesRef.current) return;
         try {
-            // Deduplicate by time to prevent lightweight-charts errors
             const deduped = [];
             const seen = new Set();
             for (const d of klines) {
@@ -388,7 +399,6 @@ const ChartWidget = forwardRef(function ChartWidget({
             }
         } catch (err) {
             console.error("ChartWidget update error, falling back to setData:", err);
-            // Fallback: if update fails, do a full setData to fix state
             updateSeriesData(klines);
         }
     };
@@ -425,7 +435,6 @@ const ChartWidget = forwardRef(function ChartWidget({
             wickUpColor: upColor,
         });
 
-        // Volume colors are per-bar, so repaint once when color settings change.
         if (data && data.length > 0) {
             updateSeriesData(data);
         }
@@ -452,8 +461,6 @@ const ChartWidget = forwardRef(function ChartWidget({
             updateLatestBars(data, 2);
         }
 
-        // Restore saved visible range on dataset change, or fitContent if none saved.
-        // Prefer logical range first to keep pan/zoom consistent for the same interval.
         if (datasetChanged && chartRef.current && !hasRestoredRangeRef.current) {
             const rangeToRestore = savedVisibleRangeRef.current;
             const timeScale = chartRef.current.timeScale();
@@ -496,19 +503,17 @@ const ChartWidget = forwardRef(function ChartWidget({
         };
     }, [data, datasetKey]);
 
+    // Determine cursor style for drawing tools
+    const isDrawingActive = DRAWING_TOOL_IDS.has(drawingTool);
+    const cursorStyle = isDrawingActive ? "crosshair" : undefined;
+
     return (
         <div className="chart-area">
             <div
                 ref={chartContainerRef}
                 className="chart-container"
                 id="chart-container"
-            />
-            <DrawingCanvas
-                ref={drawingCanvasRef}
-                activeTool={drawingTool}
-                penColor={penColor}
-                penSize={penSize}
-                eraserSize={eraserSize}
+                style={cursorStyle ? { cursor: cursorStyle } : undefined}
             />
             {loading && (
                 <div className="loading-overlay">

@@ -247,16 +247,14 @@ export default function App() {
 
   const [wsStatus, setWsStatus] = useState("idle");
   const chartWidgetRef = useRef(null);
-  const drawingCanvasRef = useRef(null);
 
   // --- Drawing tool state ---
   const [drawingTool, setDrawingTool] = useState(null);
   const [penColor, setPenColor] = useState("#f59e0b");
   const [penSize, setPenSize] = useState(2);
-  const [eraserSize, setEraserSize] = useState(20);
 
   const handleClearDrawing = useCallback(() => {
-    drawingCanvasRef.current?.clearAll();
+    chartWidgetRef.current?.clearAllDrawings();
   }, []);
 
   // --- Custom interval state ---
@@ -1084,8 +1082,6 @@ export default function App() {
           onPenColorChange={setPenColor}
           penSize={penSize}
           onPenSizeChange={setPenSize}
-          eraserSize={eraserSize}
-          onEraserSizeChange={setEraserSize}
           onClearAll={handleClearDrawing}
         />
 
@@ -1127,10 +1123,8 @@ export default function App() {
               savedVisibleRange={getVisibleRangeForInterval(interval)}
               onVisibleRangeChange={(range) => saveVisibleRangeForInterval(interval, range)}
               drawingTool={drawingTool}
-              drawingCanvasRef={drawingCanvasRef}
               penColor={penColor}
               penSize={penSize}
-              eraserSize={eraserSize}
             />
           </ErrorBoundary>
         )}

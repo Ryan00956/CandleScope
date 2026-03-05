@@ -21,6 +21,7 @@ import { LineDrawingPrimitive } from "../components/primitives/LineDrawingPrimit
 import { FreehandDrawingPrimitive } from "../components/primitives/FreehandDrawingPrimitive.js";
 import { TextDrawingPrimitive } from "../components/primitives/TextDrawingPrimitive.js";
 import { timeToCoordinateInterpolated } from "../components/primitives/coordinateUtils.js";
+import { saveDrawings, loadDrawings, clearSavedDrawings } from "../services/drawingStorage.js";
 
 const LINE_TOOL_IDS = new Set(["line-segment", "line-ray", "line-infinite"]);
 
@@ -39,6 +40,8 @@ export function useDrawing({
   textFontSize,
   textBold,
   textItalic,
+  symbol,
+  seriesReady,
 }) {
   // ── All primitives (lines + freehand strokes + text) ──
   const primitivesRef = useRef([]); // (LineDrawingPrimitive | FreehandDrawingPrimitive | TextDrawingPrimitive)[]
@@ -75,6 +78,9 @@ export function useDrawing({
   textBoldRef.current = textBold;
   const textItalicRef = useRef(textItalic);
   textItalicRef.current = textItalic;
+
+  const symbolRef = useRef(symbol);
+  symbolRef.current = symbol;
 
   const isLineTool = LINE_TOOL_IDS.has(activeTool);
   const isPenTool = activeTool === "pen";
@@ -244,6 +250,89 @@ export function useDrawing({
     [seriesRef],
   );
 
+  // ── Persist drawings to localStorage ──
+
+  const persistDrawings = useCallback(() => {
+    saveDrawings(symbolRef.current, primitivesRef.current);
+  }, []);
+
+  // ── Restore saved drawings when series becomes available ──
+  //
+  // `seriesReady` is a counter that increments each time the chart
+  // (and its candlestick series) is created. By depending on it we
+  // guarantee this effect fires *after* the series ref is populated,
+  // even on the very first mount and after any chart re-creation
+  // (e.g. theme change, page refresh).
+
+  useEffect(() => {
+    const series = seriesRef?.current;
+    if (!series || !symbol || !seriesReady) return;
+
+    // If there are existing primitives in memory (from before a chart
+    // re-creation), they are now detached because the old chart was
+    // destroyed. We need to re-attach them to the new series, OR
+    // if this is a fresh page load, restore from localStorage.
+
+    const existingPrims = primitivesRef.current;
+
+    if (existingPrims.length > 0) {
+      // Re-attach existing in-memory primitives to the new series.
+      // The old chart's destroy will have called detached() on each,
+      // so _series/_chart are null. Re-attaching fixes that.
+      for (const prim of existingPrims) {
+        try {
+          series.attachPrimitive(prim);
+        } catch (err) {
+          console.warn("Failed to re-attach drawing:", err);
+        }
+      }
+      return;
+    }
+
+    // No in-memory primitives → restore from localStorage
+    const saved = loadDrawings(symbol);
+    if (!saved || saved.length === 0) return;
+
+    for (const item of saved) {
+      let prim = null;
+      try {
+        if (item.type === "line") {
+          prim = new LineDrawingPrimitive({
+            id: item.id || nextId("ln"),
+            lineType: item.lineType,
+            dataPoints: item.dataPoints,
+            color: item.color,
+            lineWidth: item.lineWidth,
+          });
+        } else if (item.type === "text") {
+          prim = new TextDrawingPrimitive({
+            id: item.id || nextId("tx"),
+            dataPoint: item.dataPoint,
+            text: item.text,
+            color: item.color,
+            fontSize: item.fontSize,
+            fontFamily: item.fontFamily,
+            bold: item.bold,
+            italic: item.italic,
+          });
+        } else if (item.type === "freehand") {
+          prim = new FreehandDrawingPrimitive({
+            id: item.id || nextId("fh"),
+            dataPoints: item.dataPoints,
+            color: item.color,
+            lineWidth: item.lineWidth,
+          });
+        }
+      } catch (err) {
+        console.warn("Failed to restore drawing:", err, item);
+      }
+      if (prim) {
+        series.attachPrimitive(prim);
+        primitivesRef.current.push(prim);
+      }
+    }
+  }, [symbol, seriesRef, seriesReady]);
+
   // ── Selection helpers ──
 
   const selectPrimitive = useCallback((id) => {
@@ -329,7 +418,8 @@ export function useDrawing({
       }
     }
     cancelTextEditing();
-  }, [editingTextId, editingTextValue, detachPrim, cancelTextEditing]);
+    persistDrawings();
+  }, [editingTextId, editingTextValue, detachPrim, cancelTextEditing, persistDrawings]);
 
   // ── Get mouse position relative to chart container ──
 
@@ -391,6 +481,7 @@ export function useDrawing({
             if (selectedIdRef.current === hit.prim.id) {
               selectedIdRef.current = null;
             }
+            persistDrawings();
           }
         }
         e.preventDefault();
@@ -504,6 +595,7 @@ export function useDrawing({
 
           anchorDataRef.current = null;
           selectPrimitive(finalLine.id);
+          persistDrawings();
 
           e.preventDefault();
           e.stopPropagation();
@@ -765,16 +857,22 @@ export function useDrawing({
   // ════════════════════════════════════════════════════
 
   const handleMouseUp = useCallback(() => {
+    let changed = false;
     // End freehand drawing
     if (isDrawingFreehandRef.current) {
       isDrawingFreehandRef.current = false;
       currentFreehandRef.current = null;
+      changed = true;
     }
     // End dragging
     if (draggingRef.current) {
       draggingRef.current = null;
+      changed = true;
     }
-  }, []);
+    if (changed) {
+      persistDrawings();
+    }
+  }, [persistDrawings]);
 
   // ── RIGHT-CLICK: cancel line placement ──
 
@@ -814,6 +912,7 @@ export function useDrawing({
         if (idx >= 0) {
           detachPrim(primitivesRef.current[idx]);
           primitivesRef.current.splice(idx, 1);
+          persistDrawings();
         }
         selectedIdRef.current = null;
       }
@@ -893,6 +992,7 @@ export function useDrawing({
     isDrawingFreehandRef.current = false;
     currentFreehandRef.current = null;
     cancelTextEditing();
+    clearSavedDrawings(symbolRef.current);
   }, [detachPrim, removePreview, cancelTextEditing]);
 
   return {

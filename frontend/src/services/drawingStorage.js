@@ -1,0 +1,122 @@
+/**
+ * drawingStorage.js — Persist chart drawings to localStorage.
+ *
+ * Drawings are stored in data coordinates (time + price), which are
+ * interval-independent, so we key by symbol only.
+ *
+ * Storage key: `candlescope-drawings-{SYMBOL}`
+ *
+ * Each drawing is serialized as a plain JSON object:
+ *   - type: "line" | "freehand" | "text"
+ *   - id, color, lineWidth, and type-specific fields
+ *   - data coordinates (time + price) — NOT screen pixels
+ */
+
+const STORAGE_PREFIX = "candlescope-drawings";
+
+function storageKey(symbol) {
+  return `${STORAGE_PREFIX}-${symbol}`;
+}
+
+/**
+ * Serialize a primitive instance to a plain JSON-safe object.
+ */
+function serializePrimitive(prim) {
+  // Detect type by checking unique properties
+  if (prim._lineType != null) {
+    // LineDrawingPrimitive
+    return {
+      type: "line",
+      id: prim._id,
+      lineType: prim._lineType,
+      dataPoints: prim._dataPoints.map((dp) => ({
+        time: dp.time,
+        price: dp.price,
+      })),
+      color: prim._color,
+      lineWidth: prim._lineWidth,
+    };
+  }
+
+  if (prim._text != null) {
+    // TextDrawingPrimitive
+    return {
+      type: "text",
+      id: prim._id,
+      dataPoint: {
+        time: prim._dataPoint.time,
+        price: prim._dataPoint.price,
+      },
+      text: prim._text,
+      color: prim._color,
+      fontSize: prim._fontSize,
+      fontFamily: prim._fontFamily,
+      bold: prim._bold,
+      italic: prim._italic,
+    };
+  }
+
+  // FreehandDrawingPrimitive (default)
+  return {
+    type: "freehand",
+    id: prim._id,
+    dataPoints: prim._dataPoints.map((dp) => ({
+      time: dp.time,
+      price: dp.price,
+    })),
+    color: prim._color,
+    lineWidth: prim._lineWidth,
+  };
+}
+
+/**
+ * Save all current drawing primitives for a symbol.
+ * @param {string} symbol - e.g. "BTCUSDT"
+ * @param {Array} primitives - array of primitive instances
+ */
+export function saveDrawings(symbol, primitives) {
+  if (!symbol) return;
+  try {
+    // Filter out preview primitives
+    const data = primitives
+      .filter((p) => p._id !== "__preview__" && !p._isPreview)
+      .map(serializePrimitive);
+    localStorage.setItem(storageKey(symbol), JSON.stringify(data));
+  } catch (err) {
+    console.warn("Failed to save drawings:", err);
+  }
+}
+
+/**
+ * Load saved drawing data for a symbol.
+ * Returns an array of plain objects (not primitive instances).
+ * The caller (useDrawing) is responsible for re-creating primitive instances.
+ *
+ * @param {string} symbol - e.g. "BTCUSDT"
+ * @returns {Array} serialized drawing objects
+ */
+export function loadDrawings(symbol) {
+  if (!symbol) return [];
+  try {
+    const raw = localStorage.getItem(storageKey(symbol));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.warn("Failed to load drawings:", err);
+    return [];
+  }
+}
+
+/**
+ * Clear all saved drawings for a symbol.
+ * @param {string} symbol
+ */
+export function clearSavedDrawings(symbol) {
+  if (!symbol) return;
+  try {
+    localStorage.removeItem(storageKey(symbol));
+  } catch {
+    // ignore
+  }
+}

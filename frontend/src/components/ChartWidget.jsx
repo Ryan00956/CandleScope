@@ -5,7 +5,7 @@
  * Plugin API (ISeriesPrimitive), rendered directly inside the chart's
  * Canvas pipeline — zero lag on pan/zoom, no DOM overlays needed.
  */
-import { forwardRef, useEffect, useImperativeHandle, useRef, useCallback } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useCallback, useState } from "react";
 import { createChart, CandlestickSeries, HistogramSeries } from "lightweight-charts";
 import { useDrawing } from "../hooks/useDrawing";
 
@@ -123,6 +123,10 @@ const ChartWidget = forwardRef(function ChartWidget({
         length: 0,
     });
 
+    // Counter that increments each time the chart series is (re)created,
+    // used to signal useDrawing that it should restore/re-attach primitives.
+    const [seriesReady, setSeriesReady] = useState(0);
+
     // Refs for visible range tracking
     const savedVisibleRangeRef = useRef(savedVisibleRange);
     const onVisibleRangeChangeRef = useRef(onVisibleRangeChange);
@@ -181,6 +185,8 @@ const ChartWidget = forwardRef(function ChartWidget({
         textFontSize,
         textBold,
         textItalic,
+        symbol,
+        seriesReady,
     });
 
     // Expose getVisibleRange + clearAll to parent via ref
@@ -341,6 +347,9 @@ const ChartWidget = forwardRef(function ChartWidget({
         chartRef.current = chart;
         candlestickSeriesRef.current = candlestickSeries;
         volumeSeriesRef.current = volumeSeries;
+
+        // Signal useDrawing that chart + series are ready for primitive attachment
+        setSeriesReady((prev) => prev + 1);
 
         const markUserInteracted = () => {
             userInteractedRef.current = true;

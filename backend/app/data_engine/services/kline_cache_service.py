@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
@@ -38,7 +39,28 @@ def _normalize_symbol(symbol: str) -> str:
     return symbol.upper().strip()
 
 
-def _latest_closed_open_time_ms(now_ms: int, interval_ms: int) -> int | None:
+def _month_start_ms(ts_ms: int) -> int:
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+    month_start = datetime(dt.year, dt.month, 1, tzinfo=timezone.utc)
+    return int(month_start.timestamp() * 1000)
+
+
+def _shift_month_start_ms(month_start_ms: int, delta_months: int) -> int:
+    dt = datetime.fromtimestamp(month_start_ms / 1000, tz=timezone.utc)
+    month_idx = dt.month - 1 + delta_months
+    year = dt.year + month_idx // 12
+    month = month_idx % 12 + 1
+    shifted = datetime(year, month, 1, tzinfo=timezone.utc)
+    return int(shifted.timestamp() * 1000)
+
+
+def _latest_closed_open_time_ms(now_ms: int, interval: str) -> int | None:
+    if interval == "1M":
+        current_open = _month_start_ms(now_ms)
+        latest_closed_open = _shift_month_start_ms(current_open, -1)
+        return latest_closed_open if latest_closed_open >= 0 else None
+
+    interval_ms = interval_to_milliseconds(interval)
     if interval_ms <= 0:
         return None
     current_open = (now_ms // interval_ms) * interval_ms
@@ -46,6 +68,20 @@ def _latest_closed_open_time_ms(now_ms: int, interval_ms: int) -> int | None:
     if latest_closed_open < 0:
         return None
     return latest_closed_open
+
+
+def _next_open_time_ms(open_time_ms: int, interval: str) -> int:
+    if interval == "1M":
+        return _shift_month_start_ms(open_time_ms, 1)
+    return open_time_ms + interval_to_milliseconds(interval)
+
+
+def _target_start_ms(end_ms: int, interval: str, bars: int) -> int:
+    if bars <= 0:
+        return end_ms
+    if interval == "1M":
+        return _shift_month_start_ms(_month_start_ms(end_ms), -bars)
+    return end_ms - bars * interval_to_milliseconds(interval)
 
 
 def _rows_to_lightweight(rows: list[dict]) -> list[dict]:
@@ -130,8 +166,7 @@ def _store_df(symbol: str, interval: str, df: pd.DataFrame, source: str = "binan
 
 
 def _prune_unclosed_rows(symbol: str, interval: str, now_ms: int) -> int:
-    interval_ms = interval_to_milliseconds(interval)
-    latest_closed_open_ms = _latest_closed_open_time_ms(now_ms, interval_ms)
+    latest_closed_open_ms = _latest_closed_open_time_ms(now_ms, interval)
     if latest_closed_open_ms is None:
         return 0
 
@@ -140,10 +175,11 @@ def _prune_unclosed_rows(symbol: str, interval: str, now_ms: int) -> int:
     if latest is None or int(latest) <= latest_closed_open_ms:
         return 0
 
+    prune_start_ms = _next_open_time_ms(latest_closed_open_ms, interval)
     return delete_klines(
         symbol=symbol,
         interval=interval,
-        start_ms=latest_closed_open_ms + interval_ms,
+        start_ms=prune_start_ms,
     )
 
 
@@ -196,8 +232,7 @@ def _refresh_right(
     target_end_ms: int,
     max_batches: int = MAX_REFRESH_BATCHES,
 ) -> int:
-    interval_ms = interval_to_milliseconds(interval)
-    latest_closed_open_ms = _latest_closed_open_time_ms(target_end_ms, interval_ms)
+    latest_closed_open_ms = _latest_closed_open_time_ms(target_end_ms, interval)
     if latest_closed_open_ms is None:
         return 0
 
@@ -205,12 +240,15 @@ def _refresh_right(
     latest = bounds["latest_open_time"]
 
     if latest is None:
-        cursor_start = max(0, latest_closed_open_ms - (BINANCE_PAGE_LIMIT - 1) * interval_ms)
+        cursor_start = max(
+            0,
+            _target_start_ms(latest_closed_open_ms, interval, BINANCE_PAGE_LIMIT - 1),
+        )
     else:
         latest = int(latest)
         if latest >= latest_closed_open_ms:
             return 0
-        cursor_start = latest + interval_ms
+        cursor_start = _next_open_time_ms(latest, interval)
 
     total_written = 0
     for _ in range(max_batches):
@@ -232,7 +270,7 @@ def _refresh_right(
         if newest < cursor_start:
             break
 
-        cursor_start = newest + interval_ms
+        cursor_start = _next_open_time_ms(newest, interval)
         if cursor_start > latest_closed_open_ms:
             break
         if len(df) < BINANCE_PAGE_LIMIT:
@@ -251,8 +289,7 @@ def _refresh_latest_window(symbol: str, interval: str, window: int = 5) -> int:
 
 
 def _refresh_right_if_needed(symbol: str, interval: str, now_ms: int) -> int:
-    interval_ms = interval_to_milliseconds(interval)
-    latest_closed_open_ms = _latest_closed_open_time_ms(now_ms, interval_ms)
+    latest_closed_open_ms = _latest_closed_open_time_ms(now_ms, interval)
     if latest_closed_open_ms is None:
         return 0
 
@@ -326,8 +363,7 @@ def get_cached_history(symbol: str, interval: str, days: int) -> dict:
         if earliest_cached is not None and int(earliest_cached) > start_ms:
             needs_fill = True
         if latest_cached is not None:
-            interval_ms = interval_to_milliseconds(interval)
-            latest_closed = _latest_closed_open_time_ms(end_ms, interval_ms)
+            latest_closed = _latest_closed_open_time_ms(end_ms, interval)
             if latest_closed and int(latest_cached) < latest_closed:
                 needs_fill = True
 
@@ -367,14 +403,13 @@ def get_cached_history(symbol: str, interval: str, days: int) -> dict:
 def get_cached_latest(symbol: str, interval: str, limit: int) -> dict:
     symbol = _normalize_symbol(symbol)
     now_ms = int(time.time() * 1000)
-    interval_ms = interval_to_milliseconds(interval)
 
     _prune_unclosed_rows(symbol, interval, now_ms)
     fetched = _refresh_right_if_needed(symbol, interval, now_ms)
     rows = query_klines(symbol, interval, end_ms=now_ms, limit=limit, order="DESC")
 
     if not rows:
-        target_start = now_ms - limit * interval_ms
+        target_start = _target_start_ms(now_ms, interval, limit)
         fetched += _backfill_left(symbol, interval, target_start_ms=target_start, end_ms=now_ms)
         fetched += _refresh_right(symbol, interval, target_end_ms=now_ms)
         rows = query_klines(symbol, interval, end_ms=now_ms, limit=limit, order="DESC")
@@ -397,12 +432,11 @@ def get_cached_latest(symbol: str, interval: str, limit: int) -> dict:
 def get_more_left(symbol: str, interval: str, before_seconds: int, bars: int = 500, max_batches: int = 12) -> dict:
     symbol = _normalize_symbol(symbol)
     before_ms = before_seconds * 1000
-    interval_ms = interval_to_milliseconds(interval)
 
     rows = fetch_before(symbol=symbol, interval=interval, before_ms=before_ms, limit=bars)
     fetched = 0
     if len(rows) < bars:
-        target_start = before_ms - bars * interval_ms
+        target_start = _target_start_ms(before_ms, interval, bars)
         fetched += _backfill_left(
             symbol=symbol,
             interval=interval,

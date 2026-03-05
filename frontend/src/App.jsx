@@ -95,7 +95,7 @@ const NATIVE_INTERVALS = [
 ];
 
 // Intervals to subscribe via WebSocket for background updates
-const WS_SUBSCRIBE_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w"];
+const WS_SUBSCRIBE_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"];
 
 function buildSortedIntervals(savedCustom) {
   const all = NATIVE_INTERVALS.map((i) => ({ ...i, isCustom: false }));
@@ -265,6 +265,19 @@ export default function App() {
   // Current interval ref for WS message routing
   const intervalRef = useRef(interval);
   intervalRef.current = interval;
+  const lastPriceIntervalRef = useRef(interval);
+
+  const updateLastPrice = useCallback((candidate, intv) => {
+    setLastPrice((prev) => {
+      if (!candidate || candidate.time == null) return prev;
+      const prevIntv = lastPriceIntervalRef.current;
+      if (prevIntv !== intv || !prev || prev.time == null || candidate.time >= prev.time) {
+        lastPriceIntervalRef.current = intv;
+        return candidate;
+      }
+      return prev;
+    });
+  }, []);
 
   // --- Saved custom intervals ---
   const [savedCustomIntervals, setSavedCustomIntervals] = useState(loadSavedCustomIntervals);
@@ -333,7 +346,7 @@ export default function App() {
 
     if (hasCacheHit) {
       setChartData(cached);
-      setLastPrice(cached[cached.length - 1]);
+      updateLastPrice(cached[cached.length - 1], intv);
       setConnectionStatus("connected");
       setDatasetKey((v) => v + 1);
       setLoading(false);
@@ -395,7 +408,7 @@ export default function App() {
         return deduped;
       });
       const latestTick = quickResult.data[quickResult.data.length - 1];
-      setLastPrice(latestTick);
+      updateLastPrice(latestTick, intv);
       setDataSource(quickResult.source || "unknown");
       if (custom) customCandleRef.current = { ...latestTick };
 
@@ -415,7 +428,7 @@ export default function App() {
         return merged;
       });
       const latest = historyResult.data[historyResult.data.length - 1];
-      setLastPrice(latest);
+      updateLastPrice(latest, intv);
       setDataSource(historyResult.source || "unknown");
       setConnectionStatus(historyResult.source === "mock" ? "loading" : "connected");
 
@@ -432,7 +445,7 @@ export default function App() {
     }
 
     setLoading(false);
-  }, [saveToCache]);
+  }, [saveToCache, updateLastPrice]);
 
   useEffect(() => {
     loadData(symbol, interval);
@@ -469,7 +482,8 @@ export default function App() {
             saveToCache(symbol, currentIntv, deduped);
             return deduped;
           });
-          setLastPrice(result.data[result.data.length - 1]);
+          const latestTick = result.data[result.data.length - 1];
+          updateLastPrice(latestTick, currentIntv);
           setWsStatus((prev) => (prev === "live" ? prev : "fallback"));
         } catch (pollErr) {
           console.warn("Polling fallback failed:", pollErr);
@@ -546,7 +560,7 @@ export default function App() {
                 saveToCache(symbol, currentIntv, next);
                 return next;
               });
-              setLastPrice(tick);
+              updateLastPrice(tick, currentIntv);
             }
 
             // ── Handle custom interval aggregation ──
@@ -569,7 +583,7 @@ export default function App() {
                   return next;
                 });
               }
-              setLastPrice(candle);
+              updateLastPrice(candle, currentIntv);
             }
           } catch (parseErr) {
             console.error("WS parse failed:", parseErr);
@@ -612,7 +626,7 @@ export default function App() {
         try { socket.close(); } catch { /* */ }
       }
     };
-  }, [symbol, saveToCache]); // NOTE: no `interval` dep — WS is persistent across switches
+  }, [symbol, saveToCache, updateLastPrice]); // NOTE: no `interval` dep — WS is persistent across switches
 
   // ---------- Background prefetch: load history for ALL intervals ----------
   useEffect(() => {
@@ -705,6 +719,8 @@ export default function App() {
       setCustomInput("");
       setCustomError(null);
       customCandleRef.current = null;
+      lastPriceIntervalRef.current = newInterval;
+      setLastPrice(null);
       setInterval_(newInterval);
       updateUserPref("lastInterval", newInterval);
     }

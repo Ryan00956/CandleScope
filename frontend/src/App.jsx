@@ -6,8 +6,35 @@ import {
   fetchKlinesHistory,
   fetchLatestKlines,
   getKlineStreamUrl,
+  resolveInterval,
 } from "./services/api";
 import "./index.css";
+
+// ---------- Custom interval helpers ----------
+const CUSTOM_INTERVAL_RE = /^(\d+)([smhdwM])$/;
+function parseIntervalSeconds(intv) {
+  const units = { s: 1, m: 60, h: 3600, d: 86400, w: 604800, M: 2592000 };
+  const m = CUSTOM_INTERVAL_RE.exec(intv);
+  if (!m) return null;
+  return parseInt(m[1], 10) * (units[m[2]] || 60);
+}
+function isCustomInterval(intv) {
+  const NATIVE = new Set(["1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"]);
+  return !NATIVE.has(intv);
+}
+/** Aggregate an incoming base candle into a custom-period candle being formed */
+function aggregateRealtimeCandle(currentCandle, incoming, bucketWidth) {
+  const bucketStart = Math.floor(incoming.time / bucketWidth) * bucketWidth;
+  if (!currentCandle || bucketStart !== currentCandle.time) {
+    return { candle: { time: bucketStart, open: incoming.open, high: incoming.high, low: incoming.low, close: incoming.close, volume: incoming.volume }, isNew: true };
+  }
+  const c = { ...currentCandle };
+  c.high = Math.max(c.high, incoming.high);
+  c.low = Math.min(c.low, incoming.low);
+  c.close = incoming.close;
+  c.volume = c.volume + incoming.volume;
+  return { candle: c, isNew: false };
+}
 
 // ---------- ErrorBoundary: 防止任何子组件崩溃导致白屏 ----------
 class ErrorBoundary extends React.Component {
@@ -52,34 +79,53 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-const INTERVAL_GROUPS = [
-  {
-    label: "Minutes",
-    items: [
-      { value: "1m", label: "1m" },
-      { value: "3m", label: "3m" },
-      { value: "5m", label: "5m" },
-      { value: "15m", label: "15m" },
-      { value: "30m", label: "30m" },
-    ],
-  },
-  {
-    label: "Hours",
-    items: [
-      { value: "1h", label: "1H" },
-      { value: "2h", label: "2H" },
-      { value: "4h", label: "4H" },
-    ],
-  },
-  {
-    label: "Days",
-    items: [
-      { value: "1d", label: "1D" },
-      { value: "1w", label: "1W" },
-      { value: "1M", label: "1M" },
-    ],
-  },
+// Native intervals with their seconds for sorting
+const NATIVE_INTERVALS = [
+  { value: "1m", label: "1m", seconds: 60 },
+  { value: "3m", label: "3m", seconds: 180 },
+  { value: "5m", label: "5m", seconds: 300 },
+  { value: "15m", label: "15m", seconds: 900 },
+  { value: "30m", label: "30m", seconds: 1800 },
+  { value: "1h", label: "1H", seconds: 3600 },
+  { value: "2h", label: "2H", seconds: 7200 },
+  { value: "4h", label: "4H", seconds: 14400 },
+  { value: "1d", label: "1D", seconds: 86400 },
+  { value: "1w", label: "1W", seconds: 604800 },
+  { value: "1M", label: "1M", seconds: 2592000 },
 ];
+
+/** Build merged & sorted interval list with custom intervals inserted */
+function buildSortedIntervals(savedCustom) {
+  const all = NATIVE_INTERVALS.map((i) => ({ ...i, isCustom: false }));
+  for (const intv of savedCustom) {
+    const secs = parseIntervalSeconds(intv);
+    if (secs && !all.some((a) => a.value === intv)) {
+      all.push({ value: intv, label: intv, seconds: secs, isCustom: true });
+    }
+  }
+  all.sort((a, b) => a.seconds - b.seconds);
+
+  // Group into Minutes / Hours / Days+
+  const minutes = all.filter((i) => i.seconds < 3600);
+  const hours = all.filter((i) => i.seconds >= 3600 && i.seconds < 86400);
+  const days = all.filter((i) => i.seconds >= 86400);
+  return [
+    { label: "Minutes", items: minutes },
+    { label: "Hours", items: hours },
+    { label: "Days", items: days },
+  ].filter((g) => g.items.length > 0);
+}
+
+const CUSTOM_INTERVALS_KEY = "candlescope-custom-intervals";
+function loadSavedCustomIntervals() {
+  try {
+    const raw = localStorage.getItem(CUSTOM_INTERVALS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+function saveSavedCustomIntervals(list) {
+  localStorage.setItem(CUSTOM_INTERVALS_KEY, JSON.stringify(list));
+}
 
 const INTERVAL_DAYS = {
   "1m": 1,
@@ -94,6 +140,20 @@ const INTERVAL_DAYS = {
   "1w": 365,
   "1M": 365,
 };
+
+/** Calculate default days for a custom interval */
+function getIntervalDays(intv) {
+  if (INTERVAL_DAYS[intv]) return INTERVAL_DAYS[intv];
+  const secs = parseIntervalSeconds(intv);
+  if (!secs) return 7;
+  if (secs <= 60) return 1;
+  if (secs <= 300) return 3;
+  if (secs <= 900) return 7;
+  if (secs <= 1800) return 14;
+  if (secs <= 3600) return 30;
+  if (secs <= 14400) return 90;
+  return 365;
+}
 
 // Adjacent intervals for prefetching (left neighbor, right neighbor)
 const ALL_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"];
@@ -171,6 +231,36 @@ export default function App() {
   const [wsStatus, setWsStatus] = useState("idle");
   const wsRef = useRef(null);
 
+  // --- Custom interval state ---
+  const [customInput, setCustomInput] = useState("");
+  const [customError, setCustomError] = useState(null);
+  const customCandleRef = useRef(null);
+  const baseIntervalRef = useRef(null);
+  const customSecondsRef = useRef(null);
+
+  // --- Saved custom intervals (persisted in localStorage) ---
+  const [savedCustomIntervals, setSavedCustomIntervals] = useState(loadSavedCustomIntervals);
+  const [showIntervalManager, setShowIntervalManager] = useState(false);
+  const intervalGroups = buildSortedIntervals(savedCustomIntervals);
+
+  const addCustomInterval = (intv) => {
+    setSavedCustomIntervals((prev) => {
+      if (prev.includes(intv)) return prev;
+      const next = [...prev, intv];
+      saveSavedCustomIntervals(next);
+      return next;
+    });
+  };
+  const removeCustomInterval = (intv) => {
+    setSavedCustomIntervals((prev) => {
+      const next = prev.filter((i) => i !== intv);
+      saveSavedCustomIntervals(next);
+      return next;
+    });
+    // If currently viewing this interval, switch to 1h
+    if (interval === intv) handleIntervalChange("1h");
+  };
+
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(() => {
     const saved = localStorage.getItem("candlescope-settings");
@@ -215,10 +305,26 @@ export default function App() {
     setLoadingMoreLeft(false);
     setHasMoreLeft(true);
     setCrosshairData(null);
-    // Keep lastPrice visible during transition to avoid price flickering
+    customCandleRef.current = null;
+
+    // Resolve custom interval info from backend
+    const custom = isCustomInterval(intv);
+    if (custom) {
+      try {
+        const info = await resolveInterval(intv);
+        baseIntervalRef.current = info.base_interval;
+        customSecondsRef.current = info.custom_seconds;
+      } catch {
+        baseIntervalRef.current = null;
+        customSecondsRef.current = parseIntervalSeconds(intv);
+      }
+    } else {
+      baseIntervalRef.current = null;
+      customSecondsRef.current = null;
+    }
 
     try {
-      const days = INTERVAL_DAYS[intv] || 7;
+      const days = getIntervalDays(intv);
       const result = await fetchKlinesHistory(sym, intv, days);
 
       // If this request was superseded by a newer one, discard
@@ -233,6 +339,11 @@ export default function App() {
         setDataSource(result.source || "unknown");
         setConnectionStatus(result.source === "mock" ? "loading" : "connected");
         setDatasetKey((v) => v + 1);
+
+        // For custom intervals, seed the forming candle ref with the last bar
+        if (custom) {
+          customCandleRef.current = { ...latest };
+        }
       } else {
         setError("No data returned");
         setConnectionStatus("disconnected");
@@ -249,7 +360,7 @@ export default function App() {
     }
 
     // Prefetch adjacent intervals in background (fire-and-forget)
-    if (!controller.signal.aborted) {
+    if (!controller.signal.aborted && !custom) {
       const neighbors = getAdjacentIntervals(intv);
       neighbors.forEach((adj) => {
         const adjDays = INTERVAL_DAYS[adj] || 7;
@@ -283,6 +394,8 @@ export default function App() {
         if (pollingInFlight) return;
         pollingInFlight = true;
         try {
+          // For custom intervals, poll with the custom interval string;
+          // the backend handles aggregation.
           const result = await fetchLatestKlines(symbol, interval, 2);
           if (!result?.data?.length) return;
 
@@ -303,12 +416,17 @@ export default function App() {
       }, 1000);
     };
 
+    // Determine WS stream interval: for custom intervals, subscribe to the base interval
+    const isCustom = isCustomInterval(interval);
+    const wsInterval = isCustom && baseIntervalRef.current ? baseIntervalRef.current : interval;
+    const customSecs = customSecondsRef.current;
+
     const connect = () => {
       if (!active) return;
       setWsStatus("connecting");
 
       try {
-        const url = getKlineStreamUrl(symbol, interval);
+        const url = getKlineStreamUrl(symbol, wsInterval);
         socket = new WebSocket(url);
         wsRef.current = socket;
 
@@ -332,11 +450,36 @@ export default function App() {
             }
 
             if (msg.type !== "kline" || !msg.data) return;
-            setChartData((prev) => {
-              const next = upsertRealtimeKline(prev, msg.data);
-              return deduplicateByTime(next);
-            });
-            setLastPrice(msg.data);
+
+            if (isCustom && customSecs) {
+              // --- Custom interval: aggregate base candle into custom bucket ---
+              const { candle, isNew } = aggregateRealtimeCandle(
+                customCandleRef.current, msg.data, customSecs
+              );
+              customCandleRef.current = candle;
+
+              if (isNew) {
+                // A new custom candle started — append it
+                setChartData((prev) => {
+                  const next = [...prev, candle];
+                  return deduplicateByTime(next);
+                });
+              } else {
+                // Update the last candle in-place
+                setChartData((prev) => {
+                  const next = upsertRealtimeKline(prev, candle);
+                  return deduplicateByTime(next);
+                });
+              }
+              setLastPrice(candle);
+            } else {
+              // --- Native interval: direct upsert ---
+              setChartData((prev) => {
+                const next = upsertRealtimeKline(prev, msg.data);
+                return deduplicateByTime(next);
+              });
+              setLastPrice(msg.data);
+            }
           } catch (parseErr) {
             console.error("WS parse failed:", parseErr);
           }
@@ -420,8 +563,25 @@ export default function App() {
   const handleIntervalChange = (newInterval) => {
     if (newInterval !== interval) {
       setCrosshairData(null);
+      setCustomInput("");
+      setCustomError(null);
+      customCandleRef.current = null;
       setInterval_(newInterval);
     }
+  };
+
+  const handleCustomSubmit = (e) => {
+    e.preventDefault();
+    const trimmed = customInput.trim();
+    if (!trimmed) return;
+    if (!CUSTOM_INTERVAL_RE.test(trimmed)) {
+      setCustomError("格式: 数字+单位 (s/m/h/d/w/M), 如 7m, 45m, 3h");
+      return;
+    }
+    setCustomError(null);
+    addCustomInterval(trimmed);
+    setCustomInput("");
+    handleIntervalChange(trimmed);
   };
 
   const displayData = crosshairData || lastPrice;
@@ -531,7 +691,7 @@ export default function App() {
       </header>
 
       <nav className="toolbar" id="toolbar">
-        {INTERVAL_GROUPS.map((group, gi) => (
+        {intervalGroups.map((group, gi) => (
           <div key={gi} style={{ display: "flex", alignItems: "center" }}>
             {gi > 0 && <div className="toolbar-divider" />}
             <div className="toolbar-group">
@@ -539,16 +699,123 @@ export default function App() {
                 <button
                   key={item.value}
                   id={`interval-${item.value}`}
-                  className={`interval-btn ${interval === item.value ? "active" : ""}`}
+                  className={`interval-btn ${interval === item.value ? "active" : ""}${item.isCustom ? " custom-interval-btn" : ""}`}
                   onClick={() => handleIntervalChange(item.value)}
+                  title={item.isCustom ? `自定义: ${item.value}` : item.value}
+                  style={item.isCustom ? { fontStyle: "italic", position: "relative" } : {}}
                 >
-                  {item.label}
+                  {item.isCustom ? `★${item.label}` : item.label}
                 </button>
               ))}
             </div>
           </div>
         ))}
+
+        <div className="toolbar-divider" />
+
+        <form
+          className="custom-interval-form"
+          onSubmit={handleCustomSubmit}
+          style={{ display: "flex", alignItems: "center", gap: 6 }}
+        >
+          <input
+            id="custom-interval-input"
+            type="text"
+            className="custom-interval-input"
+            placeholder="添加 如7m"
+            value={customInput}
+            onChange={(e) => { setCustomInput(e.target.value); setCustomError(null); }}
+            style={{
+              width: 80,
+              padding: "4px 8px",
+              fontSize: 12,
+              background: "var(--bg-tertiary)",
+              border: customError ? "1px solid #ef4444" : "1px solid var(--border-color)",
+              borderRadius: 4,
+              color: "var(--text-primary)",
+              outline: "none",
+            }}
+          />
+          <button
+            type="submit"
+            className="interval-btn"
+            style={{ fontSize: 12, padding: "4px 10px" }}
+          >
+            +
+          </button>
+          {savedCustomIntervals.length > 0 && (
+            <button
+              type="button"
+              className={`interval-btn ${showIntervalManager ? "active" : ""}`}
+              onClick={() => setShowIntervalManager((p) => !p)}
+              style={{ fontSize: 12, padding: "4px 8px" }}
+              title="管理自定义周期"
+            >
+              ✎
+            </button>
+          )}
+        </form>
+        {customError && (
+          <span style={{ color: "#ef4444", fontSize: 11, marginLeft: 4 }}>{customError}</span>
+        )}
       </nav>
+
+      {showIntervalManager && (
+        <div className="interval-manager" style={{
+          background: "var(--bg-secondary)",
+          border: "1px solid var(--border-color)",
+          borderRadius: 8,
+          padding: "12px 16px",
+          margin: "0 8px",
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 8,
+          alignItems: "center",
+        }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)", marginRight: 4 }}>自定义周期:</span>
+          {savedCustomIntervals.length === 0 && (
+            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>暂无，在上方输入框添加</span>
+          )}
+          {savedCustomIntervals
+            .map((intv) => ({ intv, secs: parseIntervalSeconds(intv) || 0 }))
+            .sort((a, b) => a.secs - b.secs)
+            .map(({ intv }) => (
+              <div key={intv} style={{
+                display: "flex", alignItems: "center", gap: 4,
+                background: "var(--bg-tertiary)",
+                border: interval === intv ? "1px solid var(--accent-blue)" : "1px solid var(--border-color)",
+                borderRadius: 6, padding: "3px 8px",
+              }}>
+                <span
+                  style={{ fontSize: 12, color: "var(--text-primary)", cursor: "pointer" }}
+                  onClick={() => { handleIntervalChange(intv); setShowIntervalManager(false); }}
+                >
+                  ★ {intv}
+                </span>
+                <button
+                  onClick={() => removeCustomInterval(intv)}
+                  style={{
+                    background: "none", border: "none", color: "#ef4444",
+                    cursor: "pointer", fontSize: 14, padding: "0 2px",
+                    lineHeight: 1,
+                  }}
+                  title={`删除 ${intv}`}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          <button
+            onClick={() => setShowIntervalManager(false)}
+            style={{
+              background: "none", border: "none", color: "var(--text-muted)",
+              cursor: "pointer", fontSize: 11, marginLeft: "auto",
+            }}
+          >
+            收起
+          </button>
+        </div>
+      )}
 
       {error ? (
         <div className="chart-area">

@@ -43,6 +43,11 @@ export async function fetchLatestKlines(symbol = "BTCUSDT", interval = "1h", lim
     return request(url);
 }
 
+export async function resolveInterval(interval = "1h") {
+    const url = `${API_BASE}/klines/resolve?interval=${interval}`;
+    return request(url);
+}
+
 export function getKlineStreamUrl(symbol = "BTCUSDT", interval = "1h") {
     const wsBase = httpBaseToWsBase(API_BASE);
     return `${wsBase}/stream/klines?symbol=${symbol}&interval=${interval}`;

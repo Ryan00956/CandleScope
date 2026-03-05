@@ -394,7 +394,7 @@ def get_cached_latest(symbol: str, interval: str, limit: int) -> dict:
     }
 
 
-def get_more_left(symbol: str, interval: str, before_seconds: int, bars: int = 500) -> dict:
+def get_more_left(symbol: str, interval: str, before_seconds: int, bars: int = 500, max_batches: int = 12) -> dict:
     symbol = _normalize_symbol(symbol)
     before_ms = before_seconds * 1000
     interval_ms = interval_to_milliseconds(interval)
@@ -408,7 +408,7 @@ def get_more_left(symbol: str, interval: str, before_seconds: int, bars: int = 5
             interval=interval,
             target_start_ms=target_start,
             end_ms=before_ms - 1,
-            max_batches=12,
+            max_batches=max_batches,
         )
         rows = fetch_before(symbol=symbol, interval=interval, before_ms=before_ms, limit=bars)
 

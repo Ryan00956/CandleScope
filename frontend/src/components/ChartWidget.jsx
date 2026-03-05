@@ -140,7 +140,12 @@ const ChartWidget = forwardRef(function ChartWidget({
         userInteractedRef.current = false;
         lastCrosshairSignatureRef.current = null;
         hasRestoredRangeRef.current = false;
-        prevDataMetaRef.current = { datasetKey, first: null, last: null, length: 0 };
+        if (visibleRangeSaveTimerRef.current) {
+            clearTimeout(visibleRangeSaveTimerRef.current);
+            visibleRangeSaveTimerRef.current = null;
+        }
+        // Force the next non-empty data update to be treated as a dataset switch.
+        prevDataMetaRef.current = { datasetKey: null, first: null, last: null, length: 0 };
     }, [datasetKey]);
 
     // Expose getVisibleRange to parent via ref
@@ -440,20 +445,36 @@ const ChartWidget = forwardRef(function ChartWidget({
             updateLatestBars(data, 2);
         }
 
-        // Restore saved visible range on dataset change, or fitContent if none saved
-        if (datasetChanged && chartRef.current) {
+        // Restore saved visible range on dataset change, or fitContent if none saved.
+        // Prefer logical range first to keep pan/zoom consistent for the same interval.
+        if (datasetChanged && chartRef.current && !hasRestoredRangeRef.current) {
             const rangeToRestore = savedVisibleRangeRef.current;
-            if (rangeToRestore?.time && !hasRestoredRangeRef.current) {
+            const timeScale = chartRef.current.timeScale();
+            let restored = false;
+
+            if (rangeToRestore?.logical) {
                 try {
-                    chartRef.current.timeScale().setVisibleRange(rangeToRestore.time);
-                    hasRestoredRangeRef.current = true;
+                    timeScale.setVisibleLogicalRange(rangeToRestore.logical);
+                    restored = true;
                 } catch {
-                    // If restore fails (e.g., saved range is out of current data bounds), fit content
-                    chartRef.current.timeScale().fitContent();
+                    // Fallback to time range below.
                 }
-            } else {
-                chartRef.current.timeScale().fitContent();
             }
+
+            if (!restored && rangeToRestore?.time) {
+                try {
+                    timeScale.setVisibleRange(rangeToRestore.time);
+                    restored = true;
+                } catch {
+                    // Fallback to fitContent below.
+                }
+            }
+
+            if (!restored) {
+                timeScale.fitContent();
+            }
+
+            hasRestoredRangeRef.current = true;
         }
 
         if (prev.first !== null && first < prev.first) {

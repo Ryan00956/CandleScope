@@ -408,6 +408,72 @@ body {
   border-color: var(--candle-down);
 }
 
+/* ── 文字工具字号选择器 ──────────────────────────────────── */
+.drawing-font-size-select {
+  width: 32px;
+  padding: 2px 0;
+  font-size: 11px;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: center;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.drawing-font-size-select:hover {
+  border-color: var(--accent-blue);
+}
+
+.drawing-font-size-select:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.drawing-font-size-select option {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.drawing-format-btn {
+  width: 28px;
+  height: 28px;
+  font-family: var(--font-sans);
+}
+
+/* ── 文字编辑浮层 ────────────────────────────────────────── */
+.text-edit-overlay {
+  pointer-events: auto;
+}
+
+.text-edit-input {
+  min-width: 80px;
+  max-width: 300px;
+  padding: 4px 8px;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1.5px solid var(--accent-blue);
+  border-radius: var(--radius-sm);
+  outline: none;
+  font-family: var(--font-sans);
+  caret-color: var(--accent-blue);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.text-edit-input:focus {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(6, 182, 212, 0.2);
+}
+
+[data-theme='light'] .text-edit-input {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: var(--accent-blue);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
 /* ── 工具按钮容器（含弹出菜单） ──────────────────────────── */
 .drawing-tool-wrapper {
   position: relative;

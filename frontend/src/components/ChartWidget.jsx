@@ -12,7 +12,7 @@ import { useDrawing } from "../hooks/useDrawing";
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
 
-const DRAWING_TOOL_IDS = new Set(["pen", "eraser", "line-segment", "line-ray", "line-infinite"]);
+const DRAWING_TOOL_IDS = new Set(["pen", "eraser", "line-segment", "line-ray", "line-infinite", "text"]);
 
 function buildLocalizationOptions(timezone = "Local") {
     const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
@@ -101,6 +101,9 @@ const ChartWidget = forwardRef(function ChartWidget({
     drawingTool = null,
     penColor = "#f59e0b",
     penSize = 2,
+    textFontSize = 14,
+    textBold = false,
+    textItalic = false,
 }, ref) {
     const chartContainerRef = useRef(null);
     const chartRef = useRef(null);
@@ -159,13 +162,25 @@ const ChartWidget = forwardRef(function ChartWidget({
     }, [datasetKey]);
 
     // ── All drawing via native Plugin API ──
-    const { clearAll } = useDrawing({
+    const {
+        clearAll,
+        editingTextId,
+        editingTextValue,
+        editingTextPos,
+        setEditingTextValue,
+        commitTextEditing,
+        cancelTextEditing,
+        editInputRef,
+    } = useDrawing({
         chartRef,
         seriesRef: candlestickSeriesRef,
         chartContainerRef,
         activeTool: drawingTool,
         penColor,
         penSize,
+        textFontSize,
+        textBold,
+        textItalic,
     });
 
     // Expose getVisibleRange + clearAll to parent via ref
@@ -515,6 +530,43 @@ const ChartWidget = forwardRef(function ChartWidget({
                 id="chart-container"
                 style={cursorStyle ? { cursor: cursorStyle } : undefined}
             />
+            {/* Inline text editor overlay */}
+            {editingTextId && editingTextPos && (
+                <div
+                    className="text-edit-overlay"
+                    style={{
+                        position: "absolute",
+                        left: editingTextPos.x,
+                        top: editingTextPos.y,
+                        zIndex: 100,
+                    }}
+                >
+                    <input
+                        ref={editInputRef}
+                        className="text-edit-input"
+                        type="text"
+                        value={editingTextValue}
+                        onChange={(e) => setEditingTextValue(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                                e.preventDefault();
+                                commitTextEditing();
+                            }
+                            if (e.key === "Escape") {
+                                e.preventDefault();
+                                cancelTextEditing();
+                            }
+                        }}
+                        onBlur={() => commitTextEditing()}
+                        style={{
+                            fontSize: textFontSize,
+                            fontWeight: textBold ? "bold" : "normal",
+                            fontStyle: textItalic ? "italic" : "normal",
+                            color: penColor,
+                        }}
+                    />
+                </div>
+            )}
             {loading && (
                 <div className="loading-overlay">
                     <div className="loading-spinner" />

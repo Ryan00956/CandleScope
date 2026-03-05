@@ -252,6 +252,9 @@ export default function App() {
   const [drawingTool, setDrawingTool] = useState(null);
   const [penColor, setPenColor] = useState("#f59e0b");
   const [penSize, setPenSize] = useState(2);
+  const [textFontSize, setTextFontSize] = useState(14);
+  const [textBold, setTextBold] = useState(false);
+  const [textItalic, setTextItalic] = useState(false);
 
   const handleClearDrawing = useCallback(() => {
     chartWidgetRef.current?.clearAllDrawings();
@@ -1083,6 +1086,12 @@ export default function App() {
           penSize={penSize}
           onPenSizeChange={setPenSize}
           onClearAll={handleClearDrawing}
+          textFontSize={textFontSize}
+          onTextFontSizeChange={setTextFontSize}
+          textBold={textBold}
+          onTextBoldChange={setTextBold}
+          textItalic={textItalic}
+          onTextItalicChange={setTextItalic}
         />
 
         {error ? (
@@ -1125,6 +1134,9 @@ export default function App() {
               drawingTool={drawingTool}
               penColor={penColor}
               penSize={penSize}
+              textFontSize={textFontSize}
+              textBold={textBold}
+              textItalic={textItalic}
             />
           </ErrorBoundary>
         )}

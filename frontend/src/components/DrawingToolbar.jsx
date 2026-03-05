@@ -1,7 +1,7 @@
 /**
  * Drawing toolbar — sits on the left side of the chart area.
  *
- * Three main buttons: Pen, Eraser, and Line.
+ * Buttons: Pen, Eraser, Line, Text.
  * Left-click toggles the tool on/off.
  * Right-click or double-click on Line opens a flyout to switch between
  * line-segment / line-ray / line-infinite.
@@ -26,6 +26,14 @@ const EraserIcon = (
     <path d="M20 20H7L3 16c-.8-.8-.8-2 0-2.8L14.6 1.6c.8-.8 2-.8 2.8 0L21.8 6c.8.8.8 2 0 2.8L12 18.6" />
     <path d="M6 14l4 4" />
     <line x1="2" y1="20" x2="7" y2="20" strokeDasharray="2 2" />
+  </svg>
+);
+
+const TextIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 7V4h16v3" />
+    <line x1="12" y1="4" x2="12" y2="20" />
+    <line x1="8" y1="20" x2="16" y2="20" />
   </svg>
 );
 
@@ -119,6 +127,10 @@ function ToolFlyout({ variants, currentId, onSelect, onClose, anchorRef }) {
   );
 }
 
+/* ─── Font size options ─────────────────────────────────── */
+
+const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32];
+
 /* ─── Main toolbar ──────────────────────────────────────── */
 
 const DrawingToolbar = memo(function DrawingToolbar({
@@ -129,6 +141,13 @@ const DrawingToolbar = memo(function DrawingToolbar({
   penSize,
   onPenSizeChange,
   onClearAll,
+  // Text settings
+  textFontSize = 14,
+  onTextFontSizeChange,
+  textBold = false,
+  onTextBoldChange,
+  textItalic = false,
+  onTextItalicChange,
 }) {
   // Which line variant is selected (persisted across toggles)
   const [lineVariant, setLineVariant] = useState("line-segment");
@@ -144,6 +163,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
   const isPenActive = activeTool === "pen";
   const isEraserActive = activeTool === "eraser";
   const isLineActive = LINE_TOOL_IDS.has(activeTool);
+  const isTextActive = activeTool === "text";
 
   /* ── Pen button handlers ── */
   const handlePenClick = useCallback(() => {
@@ -164,6 +184,16 @@ const DrawingToolbar = memo(function DrawingToolbar({
     }
     setFlyoutOpen(null);
   }, [isEraserActive, onToolChange]);
+
+  /* ── Text button handlers ── */
+  const handleTextClick = useCallback(() => {
+    if (isTextActive) {
+      onToolChange(null);
+    } else {
+      onToolChange("text");
+    }
+    setFlyoutOpen(null);
+  }, [isTextActive, onToolChange]);
 
   /* ── Line button handlers ── */
   const handleLineClick = useCallback(() => {
@@ -212,6 +242,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
 
   const showPenOptions = isPenActive;
   const showLineOptions = isLineActive;
+  const showTextOptions = isTextActive;
 
   return (
     <div className="drawing-toolbar">
@@ -258,6 +289,17 @@ const DrawingToolbar = memo(function DrawingToolbar({
             anchorRef={lineBtnRef}
           />
         )}
+      </div>
+
+      {/* ── Text button ── */}
+      <div className="drawing-tool-wrapper">
+        <button
+          className={`drawing-tool-btn ${isTextActive ? "active" : ""}`}
+          onClick={handleTextClick}
+          title="文字标注（点击放置，双击编辑）"
+        >
+          {TextIcon}
+        </button>
       </div>
 
       {/* Divider */}
@@ -307,6 +349,51 @@ const DrawingToolbar = memo(function DrawingToolbar({
               value={penSize}
               onChange={(e) => onPenSizeChange(Number(e.target.value))}
             />
+          </div>
+        </>
+      )}
+
+      {/* ── Options for text tool ── */}
+      {showTextOptions && (
+        <>
+          <div className="drawing-tool-option" title="文字颜色">
+            <input
+              type="color"
+              className="drawing-color-picker"
+              value={penColor}
+              onChange={(e) => onPenColorChange(e.target.value)}
+            />
+          </div>
+          <div className="drawing-tool-option" title="字号">
+            <select
+              className="drawing-font-size-select"
+              value={textFontSize}
+              onChange={(e) => onTextFontSizeChange?.(Number(e.target.value))}
+            >
+              {FONT_SIZES.map((s) => (
+                <option key={s} value={s}>{s}px</option>
+              ))}
+            </select>
+          </div>
+          <div className="drawing-tool-option">
+            <button
+              className={`drawing-tool-btn drawing-format-btn ${textBold ? "active" : ""}`}
+              onClick={() => onTextBoldChange?.(!textBold)}
+              title="加粗"
+              style={{ fontWeight: "bold", fontSize: 14, minWidth: 28 }}
+            >
+              B
+            </button>
+          </div>
+          <div className="drawing-tool-option">
+            <button
+              className={`drawing-tool-btn drawing-format-btn ${textItalic ? "active" : ""}`}
+              onClick={() => onTextItalicChange?.(!textItalic)}
+              title="斜体"
+              style={{ fontStyle: "italic", fontSize: 14, minWidth: 28 }}
+            >
+              I
+            </button>
           </div>
         </>
       )}

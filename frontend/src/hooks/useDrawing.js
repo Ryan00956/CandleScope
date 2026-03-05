@@ -20,6 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { LineDrawingPrimitive } from "../components/primitives/LineDrawingPrimitive.js";
 import { FreehandDrawingPrimitive } from "../components/primitives/FreehandDrawingPrimitive.js";
 import { TextDrawingPrimitive } from "../components/primitives/TextDrawingPrimitive.js";
+import { timeToCoordinateInterpolated } from "../components/primitives/coordinateUtils.js";
 
 const LINE_TOOL_IDS = new Set(["line-segment", "line-ray", "line-infinite"]);
 
@@ -81,6 +82,80 @@ export function useDrawing({
   const isEraserTool = activeTool === "eraser";
 
   // ── Coordinate helpers ──
+  // Data points are stored as { time, price } so drawings survive timeframe switches.
+  // time = Unix timestamp (seconds) — computed via interpolation so it is a
+  // *continuous* value (not snapped to candle boundaries). This ensures
+  // drawings render at the correct position even after the user switches
+  // to a different K-line interval whose candle boundaries differ.
+  //
+  // During rendering, primitives use the helper `timeToCoordinateInterpolated`
+  // to map the continuous timestamp back to a screen x-coordinate by
+  // interpolating between the two bracketing candles in the current dataset.
+
+  /**
+   * Interpolate a continuous timestamp from a fractional logical index.
+   * The logical index 0 corresponds to the first visible data point,
+   * 1 to the second, etc. Fractional values (e.g. 3.4) sit between
+   * candles. We look up the actual candle times from the series data
+   * and linearly interpolate to produce a timestamp that is independent
+   * of any particular timeframe.
+   */
+  const logicalToInterpolatedTime = useCallback(
+    (logicalIndex) => {
+      const chart = chartRef?.current;
+      const series = seriesRef?.current;
+      if (!chart || !series) return null;
+
+      // Get the full data array from the series
+      // Lightweight Charts v5: series.data() returns the current dataset
+      let seriesData;
+      try {
+        seriesData = series.data();
+      } catch {
+        return null;
+      }
+      if (!seriesData || seriesData.length === 0) return null;
+
+      // Compute the offset between logical index and data array index.
+      // The first data point has a logical index that depends on how much
+      // the chart has been scrolled. We find it via coordinateToLogical
+      // round-tripping the first data point.
+      const firstTime = seriesData[0].time;
+      const firstCoord = chart.timeScale().timeToCoordinate(firstTime);
+      if (firstCoord == null) return null;
+      const firstLogical = chart.timeScale().coordinateToLogical(firstCoord);
+      if (firstLogical == null) return null;
+
+      // dataIndex is the (fractional) index into the seriesData array
+      const dataIndex = logicalIndex - firstLogical;
+
+      const floorIdx = Math.floor(dataIndex);
+      const frac = dataIndex - floorIdx;
+
+      // Clamp / edge cases
+      if (floorIdx < 0) {
+        // Extrapolate before the first candle
+        if (seriesData.length >= 2) {
+          const dt = seriesData[1].time - seriesData[0].time;
+          return seriesData[0].time + dataIndex * dt;
+        }
+        return seriesData[0].time;
+      }
+      if (floorIdx >= seriesData.length - 1) {
+        // Extrapolate after the last candle
+        if (seriesData.length >= 2) {
+          const dt = seriesData[seriesData.length - 1].time - seriesData[seriesData.length - 2].time;
+          return seriesData[seriesData.length - 1].time + (dataIndex - (seriesData.length - 1)) * dt;
+        }
+        return seriesData[seriesData.length - 1].time;
+      }
+
+      const tA = seriesData[floorIdx].time;
+      const tB = seriesData[floorIdx + 1].time;
+      return tA + frac * (tB - tA);
+    },
+    [chartRef, seriesRef],
+  );
 
   const screenToData = useCallback(
     (x, y) => {
@@ -91,12 +166,28 @@ export function useDrawing({
         const logical = chart.timeScale().coordinateToLogical(x);
         const price = series.coordinateToPrice(y);
         if (logical == null || price == null || !isFinite(logical) || !isFinite(price)) return null;
-        return { logical, price };
+
+        // Compute a *continuous* timestamp by interpolating between candle
+        // boundaries. This ensures the timestamp is not snapped to any
+        // particular candle and will map correctly on any timeframe.
+        const time = logicalToInterpolatedTime(logical);
+
+        if (time != null && isFinite(time)) {
+          return { time, price };
+        }
+
+        // Fallback: try coordinateToTime (snapped)
+        const snappedTime = chart.timeScale().coordinateToTime(x);
+        if (snappedTime != null && isFinite(snappedTime)) {
+          return { time: snappedTime, price };
+        }
+
+        return { time: null, price, logical };
       } catch {
         return null;
       }
     },
-    [chartRef, seriesRef],
+    [chartRef, seriesRef, logicalToInterpolatedTime],
   );
 
   const dataToScreen = useCallback(
@@ -105,7 +196,20 @@ export function useDrawing({
       const series = seriesRef?.current;
       if (!chart || !series || !dp) return null;
       try {
-        const x = chart.timeScale().logicalToCoordinate(dp.logical);
+        let x = null;
+        if (dp.time != null) {
+          // Try exact match first (fast path)
+          x = chart.timeScale().timeToCoordinate(dp.time);
+
+          // If exact match failed, interpolate between bracketing candles
+          if (x == null || !isFinite(x)) {
+            x = timeToCoordinateInterpolated(chart, series, dp.time);
+          }
+        }
+        // Fallback to logical if time-based conversion failed
+        if ((x == null || !isFinite(x)) && dp.logical != null) {
+          x = chart.timeScale().logicalToCoordinate(dp.logical);
+        }
         const y = series.priceToCoordinate(dp.price);
         if (x == null || y == null || !isFinite(x) || !isFinite(y)) return null;
         return { x, y };

@@ -3,8 +3,8 @@
  *
  * Renders a text annotation directly inside the chart's native Canvas
  * rendering pipeline via series.attachPrimitive(). The text position is
- * stored in data coordinates (logical index + price), so it automatically
- * follows pan/zoom with zero lag.
+ * stored in data coordinates (time + price), so it survives timeframe
+ * switches and automatically follows pan/zoom with zero lag.
  *
  * Supports:
  *   - Multi-line plain text rendering with configurable font, size, color, bold/italic
@@ -12,6 +12,8 @@
  *   - Hit-testing for selection and dragging
  *   - Hover highlight for eraser tool
  */
+
+import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 // ── Pane Renderer ──
 
@@ -132,7 +134,16 @@ class TextPaneView {
     if (!series || !chart) return;
 
     const timeScale = chart.timeScale();
-    const x = timeScale.logicalToCoordinate(source._dataPoint.logical);
+    let x = null;
+    if (source._dataPoint.time != null) {
+      x = timeScale.timeToCoordinate(source._dataPoint.time);
+      if (x == null || !isFinite(x)) {
+        x = timeToCoordinateInterpolated(chart, series, source._dataPoint.time);
+      }
+    }
+    if ((x == null || !isFinite(x)) && source._dataPoint.logical != null) {
+      x = timeScale.logicalToCoordinate(source._dataPoint.logical);
+    }
     const y = series.priceToCoordinate(source._dataPoint.price);
 
     this._renderer.update({
@@ -296,7 +307,16 @@ export class TextDrawingPrimitive {
     if (!this._series || !this._chart) return null;
 
     const timeScale = this._chart.timeScale();
-    const sx = timeScale.logicalToCoordinate(this._dataPoint.logical);
+    let sx = null;
+    if (this._dataPoint.time != null) {
+      sx = timeScale.timeToCoordinate(this._dataPoint.time);
+      if (sx == null || !isFinite(sx)) {
+        sx = timeToCoordinateInterpolated(this._chart, this._series, this._dataPoint.time);
+      }
+    }
+    if ((sx == null || !isFinite(sx)) && this._dataPoint.logical != null) {
+      sx = timeScale.logicalToCoordinate(this._dataPoint.logical);
+    }
     const sy = this._series.priceToCoordinate(this._dataPoint.price);
     if (sx == null || sy == null) return null;
 

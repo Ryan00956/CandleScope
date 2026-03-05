@@ -3,14 +3,16 @@
  *
  * Renders a freehand polyline directly inside the chart's native Canvas
  * rendering pipeline via series.attachPrimitive(). Points are stored in
- * data coordinates (logical index + price), so they automatically follow
- * pan/zoom with zero lag.
+ * data coordinates (time + price), so they survive timeframe switches
+ * and automatically follow pan/zoom with zero lag.
  *
  * Supports:
  *   - Smooth polyline rendering with configurable color/width
  *   - Hover highlight for eraser tool
  *   - Hit-testing for eraser deletion
  */
+
+import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 // ── Geometry helper ──
 
@@ -101,7 +103,16 @@ class FreehandPaneView {
     const points = [];
 
     for (const dp of source._dataPoints) {
-      const x = timeScale.logicalToCoordinate(dp.logical);
+      let x = null;
+      if (dp.time != null) {
+        x = timeScale.timeToCoordinate(dp.time);
+        if (x == null || !isFinite(x)) {
+          x = timeToCoordinateInterpolated(chart, series, dp.time);
+        }
+      }
+      if ((x == null || !isFinite(x)) && dp.logical != null) {
+        x = timeScale.logicalToCoordinate(dp.logical);
+      }
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -216,7 +227,16 @@ export class FreehandDrawingPrimitive {
     const screenPoints = [];
 
     for (const dp of this._dataPoints) {
-      const sx = timeScale.logicalToCoordinate(dp.logical);
+      let sx = null;
+      if (dp.time != null) {
+        sx = timeScale.timeToCoordinate(dp.time);
+        if (sx == null || !isFinite(sx)) {
+          sx = timeToCoordinateInterpolated(this._chart, this._series, dp.time);
+        }
+      }
+      if ((sx == null || !isFinite(sx)) && dp.logical != null) {
+        sx = timeScale.logicalToCoordinate(dp.logical);
+      }
       const sy = this._series.priceToCoordinate(dp.price);
       if (sx != null && sy != null) {
         screenPoints.push({ x: sx, y: sy });

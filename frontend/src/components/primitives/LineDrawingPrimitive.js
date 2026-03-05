@@ -3,8 +3,8 @@
  *
  * Renders a line (segment / ray / infinite) directly inside the chart's native
  * Canvas rendering pipeline via series.attachPrimitive(). The line data is
- * stored in logical-index + price coordinates, so it automatically follows
- * pan/zoom with zero lag — no async coordinate conversion needed.
+ * stored in time (Unix timestamp) + price coordinates, so it survives
+ * timeframe switches and automatically follows pan/zoom with zero lag.
  *
  * Supports:
  *   - line-segment: a finite segment between two anchor points
@@ -13,6 +13,8 @@
  *   - selection handles (circles at endpoints) when selected
  *   - hit-testing for selection, endpoint dragging, and whole-line dragging
  */
+
+import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 // ── Geometry helpers ──
 
@@ -211,7 +213,19 @@ class LinePaneView {
     const points = [];
 
     for (const dp of source._dataPoints) {
-      const x = timeScale.logicalToCoordinate(dp.logical);
+      let x = null;
+      // Prefer time-based coordinate (survives timeframe switches)
+      if (dp.time != null) {
+        x = timeScale.timeToCoordinate(dp.time);
+        // If exact match failed, interpolate between bracketing candles
+        if (x == null || !isFinite(x)) {
+          x = timeToCoordinateInterpolated(chart, series, dp.time);
+        }
+      }
+      // Fallback to logical index (for preview lines or legacy data)
+      if ((x == null || !isFinite(x)) && dp.logical != null) {
+        x = timeScale.logicalToCoordinate(dp.logical);
+      }
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -349,10 +363,19 @@ export class LineDrawingPrimitive {
 
     const timeScale = this._chart.timeScale();
 
-    const screenPoints = this._dataPoints.map((dp) => ({
-      x: timeScale.logicalToCoordinate(dp.logical),
-      y: this._series.priceToCoordinate(dp.price),
-    }));
+    const screenPoints = this._dataPoints.map((dp) => {
+      let x = null;
+      if (dp.time != null) {
+        x = timeScale.timeToCoordinate(dp.time);
+        if (x == null || !isFinite(x)) {
+          x = timeToCoordinateInterpolated(this._chart, this._series, dp.time);
+        }
+      }
+      if ((x == null || !isFinite(x)) && dp.logical != null) {
+        x = timeScale.logicalToCoordinate(dp.logical);
+      }
+      return { x, y: this._series.priceToCoordinate(dp.price) };
+    });
 
     const [sa, sb] = screenPoints;
     if (sa.x == null || sa.y == null || sb.x == null || sb.y == null) return null;

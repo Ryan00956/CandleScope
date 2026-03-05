@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import ChartWidget from "./components/ChartWidget";
+import DrawingToolbar from "./components/DrawingToolbar";
 import SettingsModal from "./components/SettingsModal";
 import {
   fetchKlinesBefore,
@@ -246,6 +247,17 @@ export default function App() {
 
   const [wsStatus, setWsStatus] = useState("idle");
   const chartWidgetRef = useRef(null);
+  const drawingCanvasRef = useRef(null);
+
+  // --- Drawing tool state ---
+  const [drawingTool, setDrawingTool] = useState(null);
+  const [penColor, setPenColor] = useState("#f59e0b");
+  const [penSize, setPenSize] = useState(2);
+  const [eraserSize, setEraserSize] = useState(20);
+
+  const handleClearDrawing = useCallback(() => {
+    drawingCanvasRef.current?.clearAll();
+  }, []);
 
   // --- Custom interval state ---
   const [customInput, setCustomInput] = useState("");
@@ -471,13 +483,36 @@ export default function App() {
   // ============================================================
   //  SINGLE PERSISTENT MULTI-INTERVAL WEBSOCKET
   //  Connects once, subscribes to ALL intervals, updates all caches
+  //  Features: exponential backoff, heartbeat ping, max retry limit
   // ============================================================
   useEffect(() => {
     let active = true;
     let socket = null;
     let reconnectTimer = null;
+    let pingTimer = null;
     let pollInterval = null;
     let pollingInFlight = false;
+
+    // --- Reconnect state ---
+    const WS_RECONNECT_BASE_DELAY = 2000;   // start at 2s
+    const WS_RECONNECT_MAX_DELAY = 60000;   // cap at 60s
+    const WS_MAX_RECONNECT_ATTEMPTS = 20;   // after 20 failures, stay on polling
+    const WS_PING_INTERVAL = 30000;         // heartbeat every 30s
+    let reconnectDelay = WS_RECONNECT_BASE_DELAY;
+    let reconnectAttempts = 0;
+
+    const stopPing = () => {
+      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    };
+
+    const startPing = () => {
+      stopPing();
+      pingTimer = setInterval(() => {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          try { socket.send("ping"); } catch { /* ignore */ }
+        }
+      }, WS_PING_INTERVAL);
+    };
 
     const startPolling = () => {
       if (pollInterval) clearInterval(pollInterval);
@@ -510,9 +545,37 @@ export default function App() {
       }, 1000);
     };
 
+    const scheduleReconnect = () => {
+      // Clear any existing reconnect timer to prevent duplicates
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+      reconnectAttempts += 1;
+      if (reconnectAttempts > WS_MAX_RECONNECT_ATTEMPTS) {
+        console.warn(`WS: exceeded ${WS_MAX_RECONNECT_ATTEMPTS} reconnect attempts, staying on polling fallback`);
+        setWsStatus("fallback");
+        return;
+      }
+
+      console.log(`WS: scheduling reconnect #${reconnectAttempts} in ${reconnectDelay}ms`);
+      setWsStatus("reconnecting");
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, reconnectDelay);
+
+      // Exponential backoff: 2s → 4s → 8s → ... → 60s cap
+      reconnectDelay = Math.min(reconnectDelay * 2, WS_RECONNECT_MAX_DELAY);
+    };
+
     const connect = () => {
       if (!active) return;
       setWsStatus("connecting");
+
+      // Close any lingering old socket
+      if (socket) {
+        try { socket.close(); } catch { /* */ }
+        socket = null;
+      }
 
       try {
         const url = getMultiStreamUrl(symbol);
@@ -520,21 +583,33 @@ export default function App() {
 
         socket.onopen = () => {
           if (!active) return;
+          // Reset reconnect state on successful connection
+          reconnectDelay = WS_RECONNECT_BASE_DELAY;
+          reconnectAttempts = 0;
+
           // Subscribe to ALL native intervals at once
           socket.send(JSON.stringify({
             action: "subscribe",
             intervals: WS_SUBSCRIBE_INTERVALS,
           }));
           setWsStatus("live");
+
+          // Stop polling fallback — WS is live
           if (pollInterval) {
             clearInterval(pollInterval);
             pollInterval = null;
           }
+
+          // Start heartbeat ping
+          startPing();
         };
 
         socket.onmessage = (event) => {
           if (!active) return;
           try {
+            // Ignore pong text responses from heartbeat
+            if (event.data === "pong") return;
+
             const msg = JSON.parse(event.data);
 
             if (msg.type === "stream_status") {
@@ -617,19 +692,21 @@ export default function App() {
 
         socket.onerror = () => {
           if (!active) return;
-          setWsStatus("reconnecting");
+          // onerror is always followed by onclose, so just start polling here
+          // and let onclose handle the reconnect scheduling
           startPolling();
         };
 
         socket.onclose = () => {
           if (!active) return;
-          setWsStatus("disconnected");
+          stopPing();
           startPolling();
-          reconnectTimer = setTimeout(connect, 5000);
+          scheduleReconnect();
         };
       } catch (connectErr) {
         console.warn("WS initialization failed:", connectErr);
         startPolling();
+        scheduleReconnect();
       }
     };
 
@@ -645,7 +722,8 @@ export default function App() {
     return () => {
       active = false;
       clearTimeout(initialFallbackTimer);
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      stopPing();
       if (pollInterval) clearInterval(pollInterval);
       if (socket) {
         try { socket.close(); } catch { /* */ }
@@ -998,46 +1076,65 @@ export default function App() {
         </div>
       )}
 
-      {error ? (
-        <div className="chart-area">
-          <div className="error-overlay">
-            <div className="error-icon">⚠️</div>
-            <div className="error-message">
-              <strong>Data load failed</strong>
-              <br />
-              {error}
-              <br />
-              <small style={{ color: "var(--text-muted)", marginTop: 8, display: "block" }}>
-                Ensure backend is running: `uvicorn app.main:app --reload`
-              </small>
+      <div className="chart-with-toolbar">
+        <DrawingToolbar
+          activeTool={drawingTool}
+          onToolChange={setDrawingTool}
+          penColor={penColor}
+          onPenColorChange={setPenColor}
+          penSize={penSize}
+          onPenSizeChange={setPenSize}
+          eraserSize={eraserSize}
+          onEraserSizeChange={setEraserSize}
+          onClearAll={handleClearDrawing}
+        />
+
+        {error ? (
+          <div className="chart-area">
+            <div className="error-overlay">
+              <div className="error-icon">⚠️</div>
+              <div className="error-message">
+                <strong>Data load failed</strong>
+                <br />
+                {error}
+                <br />
+                <small style={{ color: "var(--text-muted)", marginTop: 8, display: "block" }}>
+                  Ensure backend is running: `uvicorn app.main:app --reload`
+                </small>
+              </div>
+              <button className="retry-btn" onClick={() => loadData(symbol, interval)} id="retry-btn">
+                Retry
+              </button>
             </div>
-            <button className="retry-btn" onClick={() => loadData(symbol, interval)} id="retry-btn">
-              Retry
-            </button>
           </div>
-        </div>
-      ) : (
-        <ErrorBoundary>
-          <ChartWidget
-            ref={chartWidgetRef}
-            data={chartData}
-            symbol={symbol}
-            interval={interval}
-            loading={loading}
-            onCrosshairMove={setCrosshairData}
-            onNeedMoreLeft={handleNeedMoreLeft}
-            canLoadMoreLeft={hasMoreLeft && !loadingMoreLeft && !loading}
-            datasetKey={`${symbol}-${interval}-${datasetKey}`}
-            upColor={settings.upColor}
-            downColor={settings.downColor}
-            theme={settings.theme}
-            customBg={settings.customBg}
-            timezone={settings.timezone}
-            savedVisibleRange={getVisibleRangeForInterval(interval)}
-            onVisibleRangeChange={(range) => saveVisibleRangeForInterval(interval, range)}
-          />
-        </ErrorBoundary>
-      )}
+        ) : (
+          <ErrorBoundary>
+            <ChartWidget
+              ref={chartWidgetRef}
+              data={chartData}
+              symbol={symbol}
+              interval={interval}
+              loading={loading}
+              onCrosshairMove={setCrosshairData}
+              onNeedMoreLeft={handleNeedMoreLeft}
+              canLoadMoreLeft={hasMoreLeft && !loadingMoreLeft && !loading}
+              datasetKey={`${symbol}-${interval}-${datasetKey}`}
+              upColor={settings.upColor}
+              downColor={settings.downColor}
+              theme={settings.theme}
+              customBg={settings.customBg}
+              timezone={settings.timezone}
+              savedVisibleRange={getVisibleRangeForInterval(interval)}
+              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(interval, range)}
+              drawingTool={drawingTool}
+              drawingCanvasRef={drawingCanvasRef}
+              penColor={penColor}
+              penSize={penSize}
+              eraserSize={eraserSize}
+            />
+          </ErrorBoundary>
+        )}
+      </div>
 
       <SettingsModal
         isOpen={showSettings}

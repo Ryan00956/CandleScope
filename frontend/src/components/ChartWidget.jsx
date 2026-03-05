@@ -3,6 +3,7 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useCallback } from "react";
 import { createChart, CandlestickSeries, HistogramSeries } from "lightweight-charts";
+import DrawingCanvas from "./DrawingCanvas";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
@@ -90,6 +91,12 @@ const ChartWidget = forwardRef(function ChartWidget({
     timezone = "Local",
     savedVisibleRange = null,
     onVisibleRangeChange = null,
+    // Drawing props
+    drawingTool = null,
+    drawingCanvasRef = null,
+    penColor = "#f59e0b",
+    penSize = 2,
+    eraserSize = 20,
 }, ref) {
     const chartContainerRef = useRef(null);
     const chartRef = useRef(null);
@@ -495,6 +502,13 @@ const ChartWidget = forwardRef(function ChartWidget({
                 ref={chartContainerRef}
                 className="chart-container"
                 id="chart-container"
+            />
+            <DrawingCanvas
+                ref={drawingCanvasRef}
+                activeTool={drawingTool}
+                penColor={penColor}
+                penSize={penSize}
+                eraserSize={eraserSize}
             />
             {loading && (
                 <div className="loading-overlay">

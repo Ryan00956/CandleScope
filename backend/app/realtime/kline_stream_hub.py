@@ -144,6 +144,7 @@ class KlineStreamHub:
 
     async def _run_stream(self, key: tuple[str, str]) -> None:
         reconnect_delay = 2
+        max_reconnect_delay = 60
         while True:
             async with self._lock:
                 subscription = self._subscriptions.get(key)
@@ -180,6 +181,8 @@ class KlineStreamHub:
                         ) as upstream:
                             self._last_working_ws_base = ws_base
                             connected = True
+                            # Reset backoff on successful connection
+                            reconnect_delay = 2
 
                             await self._broadcast(
                                 key,
@@ -224,7 +227,7 @@ class KlineStreamHub:
                         "status": "reconnecting",
                         "symbol": symbol,
                         "interval": interval,
-                        "detail": str(exc),
+                        "detail": f"{exc} (retry in {reconnect_delay}s)",
                     },
                 )
 
@@ -234,6 +237,8 @@ class KlineStreamHub:
                 return
 
             await asyncio.sleep(reconnect_delay)
+            # Exponential backoff: 2s → 4s → 8s → ... → 60s cap
+            reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
     @staticmethod
     def _normalize_kline_message(message: str, symbol: str, interval: str) -> dict | None:

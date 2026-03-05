@@ -284,6 +284,120 @@ body {
   background: rgba(59, 130, 246, 0.1);
 }
 
+/* ── 图表 + 画图工具栏容器 ───────────────────────────────── */
+.chart-with-toolbar {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── 画图工具栏（图表左侧） ──────────────────────────────── */
+.drawing-toolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 40px;
+  min-width: 40px;
+  padding: 8px 0;
+  gap: 4px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.drawing-tool-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.drawing-tool-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+}
+
+.drawing-tool-btn.active {
+  color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.1);
+  border-color: var(--accent-blue);
+}
+
+.drawing-toolbar-divider {
+  width: 24px;
+  height: 1px;
+  background: var(--border-color);
+  margin: 4px 0;
+}
+
+.drawing-tool-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+}
+
+.drawing-color-picker {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 2px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  background: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.drawing-color-picker::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.drawing-color-picker::-webkit-color-swatch {
+  border: none;
+  border-radius: 2px;
+}
+
+.drawing-color-picker::-moz-color-swatch {
+  border: none;
+  border-radius: 2px;
+}
+
+.drawing-size-slider {
+  width: 24px;
+  height: 80px;
+  -webkit-appearance: slider-vertical;
+  appearance: slider-vertical;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  cursor: pointer;
+  accent-color: var(--accent-blue);
+  background: transparent;
+}
+
+.drawing-clear-btn {
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.drawing-clear-btn:hover {
+  color: var(--candle-down);
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--candle-down);
+}
+
 /* ── 图表主体区域 ────────────────────────────────────────── */
 .chart-area {
   flex: 1;
@@ -298,6 +412,16 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
+}
+
+/* ── 绘图画布覆盖层 ─────────────────────────────────────── */
+.drawing-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
 }
 
 /* ── 加载状态 ────────────────────────────────────────────── */

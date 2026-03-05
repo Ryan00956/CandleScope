@@ -48,7 +48,14 @@ export async function resolveInterval(interval = "1h") {
     return request(url);
 }
 
+/** Single-interval WebSocket URL (legacy) */
 export function getKlineStreamUrl(symbol = "BTCUSDT", interval = "1h") {
     const wsBase = httpBaseToWsBase(API_BASE);
     return `${wsBase}/stream/klines?symbol=${symbol}&interval=${interval}`;
+}
+
+/** Multi-interval WebSocket URL — one connection for all intervals */
+export function getMultiStreamUrl(symbol = "BTCUSDT") {
+    const wsBase = httpBaseToWsBase(API_BASE);
+    return `${wsBase}/stream/klines_multi?symbol=${symbol}`;
 }

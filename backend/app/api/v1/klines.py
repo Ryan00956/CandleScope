@@ -72,52 +72,6 @@ def _resolve_interval(interval: str) -> dict:
     }
 
 
-async def _aggregate_custom_history(
-    symbol: str,
-    custom_seconds: int,
-    fetcher,
-    *fetcher_args,
-    **fetcher_kwargs,
-) -> list[dict]:
-    """Fetch base data and aggregate into custom candles.
-
-    Automatically chooses single-base or multi-resolution strategy based on
-    the fetch plan.
-    """
-    plan = find_optimal_fetch_plan(custom_seconds)
-
-    if plan["use_multi_res"]:
-        # Parallel fetch of coarse + fine data
-        coarse_coro = asyncio.to_thread(
-            fetcher, symbol=symbol, interval=plan["coarse_interval"],
-            *fetcher_args, **fetcher_kwargs,
-        )
-        fine_coro = asyncio.to_thread(
-            fetcher, symbol=symbol, interval=plan["base_interval"],
-            *fetcher_args, **fetcher_kwargs,
-        )
-        coarse_payload, fine_payload = await asyncio.gather(coarse_coro, fine_coro)
-
-        coarse_data = coarse_payload.get("data", [])
-        fine_data = fine_payload.get("data", [])
-
-        data = aggregate_multi_resolution(
-            custom_interval_seconds=custom_seconds,
-            coarse_rows=coarse_data,
-            coarse_seconds=plan["coarse_seconds"],
-            fine_rows=fine_data,
-            fine_seconds=plan["base_seconds"],
-        )
-        # Return metadata from the fine payload (it's more detailed)
-        return data, fine_payload
-    else:
-        payload = await asyncio.to_thread(
-            fetcher, symbol=symbol, interval=plan["base_interval"],
-            *fetcher_args, **fetcher_kwargs,
-        )
-        data = aggregate_klines(payload.get("data", []), custom_seconds)
-        return data, payload
-
 
 @router.get("/")
 async def get_klines(

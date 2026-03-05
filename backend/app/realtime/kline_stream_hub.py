@@ -20,11 +20,21 @@ class StreamSubscription:
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+@dataclass
+class MultiClient:
+    """Tracks a client that subscribes to multiple intervals at once."""
+    websocket: WebSocket
+    symbol: str
+    intervals: set[str] = field(default_factory=set)
+
+
 class KlineStreamHub:
     def __init__(self) -> None:
         self._subscriptions: dict[tuple[str, str], StreamSubscription] = {}
         self._lock = asyncio.Lock()
         self._last_working_ws_base: str | None = None
+        # Multi-stream clients: ws -> MultiClient
+        self._multi_clients: dict[WebSocket, MultiClient] = {}
 
     @staticmethod
     def _key(symbol: str, interval: str) -> tuple[str, str]:
@@ -51,6 +61,8 @@ class KlineStreamHub:
                 bases.append(item)
         return bases
 
+    # ------------- Single-interval subscribe (legacy) ------------------
+
     async def subscribe(self, websocket: WebSocket, symbol: str, interval: str) -> None:
         key = self._key(symbol, interval)
         async with self._lock:
@@ -73,6 +85,50 @@ class KlineStreamHub:
 
         for key in keys:
             await self._remove_client_from_key(websocket, key)
+
+        # Also remove from multi-clients
+        async with self._lock:
+            self._multi_clients.pop(websocket, None)
+
+    # ------------- Multi-interval subscribe ------------------
+
+    async def subscribe_multi(self, websocket: WebSocket, symbol: str, intervals: list[str]) -> None:
+        """Subscribe a single client WebSocket to multiple intervals at once."""
+        symbol = symbol.upper().strip()
+
+        async with self._lock:
+            mc = self._multi_clients.get(websocket)
+            if mc is None:
+                mc = MultiClient(websocket=websocket, symbol=symbol)
+                self._multi_clients[websocket] = mc
+
+        for interval in intervals:
+            interval = interval.strip()
+            mc.intervals.add(interval)
+            key = self._key(symbol, interval)
+            async with self._lock:
+                subscription = self._subscriptions.get(key)
+                if subscription is None:
+                    subscription = StreamSubscription(symbol=key[0], interval=key[1])
+                    self._subscriptions[key] = subscription
+
+                subscription.clients.add(websocket)
+                if subscription.task is None or subscription.task.done():
+                    subscription.stop_event = asyncio.Event()
+                    subscription.task = asyncio.create_task(self._run_stream(key))
+
+    async def unsubscribe_multi(self, websocket: WebSocket, symbol: str, intervals: list[str]) -> None:
+        """Unsubscribe a client from specific intervals."""
+        for interval in intervals:
+            await self._remove_client_from_key(websocket, self._key(symbol, interval))
+
+        async with self._lock:
+            mc = self._multi_clients.get(websocket)
+            if mc:
+                for interval in intervals:
+                    mc.intervals.discard(interval.strip())
+
+    # ---------------------------------------------------------------
 
     async def _remove_client_from_key(self, websocket: WebSocket, key: tuple[str, str]) -> None:
         async with self._lock:

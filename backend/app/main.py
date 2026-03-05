@@ -1,6 +1,8 @@
 """
 CandleScope backend entrypoint.
 """
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -26,10 +28,41 @@ app.add_middleware(
 app.include_router(klines_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 
+# Intervals and days to prewarm on startup (most commonly used)
+_PREWARM_INTERVALS = {
+    "1m": 1,
+    "5m": 3,
+    "15m": 7,
+    "1h": 30,
+    "4h": 90,
+    "1d": 365,
+}
+_PREWARM_SYMBOL = "BTCUSDT"
+
+
+def _prewarm_cache() -> None:
+    """Prewarm the kline cache for common intervals.
+
+    Runs in a background thread so it doesn't block startup.
+    """
+    from app.data_engine.services.kline_cache_service import get_cached_history
+
+    for interval, days in _PREWARM_INTERVALS.items():
+        try:
+            result = get_cached_history(
+                symbol=_PREWARM_SYMBOL, interval=interval, days=days,
+            )
+            count = len(result.get("data", []))
+            print(f"[prewarm] {_PREWARM_SYMBOL} {interval} ({days}d): {count} bars cached")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[prewarm] {_PREWARM_SYMBOL} {interval} failed: {exc}")
+
 
 @app.on_event("startup")
 async def startup_event() -> None:
     init_klines_storage()
+    # Fire-and-forget background prewarming so the server starts immediately
+    asyncio.get_event_loop().run_in_executor(None, _prewarm_cache)
 
 
 @app.get("/", tags=["system"])

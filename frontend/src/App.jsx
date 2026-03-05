@@ -5,7 +5,7 @@ import {
   fetchKlinesBefore,
   fetchKlinesHistory,
   fetchLatestKlines,
-  getKlineStreamUrl,
+  getMultiStreamUrl,
   resolveInterval,
 } from "./services/api";
 import "./index.css";
@@ -36,7 +36,7 @@ function aggregateRealtimeCandle(currentCandle, incoming, bucketWidth) {
   return { candle: c, isNew: false };
 }
 
-// ---------- ErrorBoundary: 防止任何子组件崩溃导致白屏 ----------
+// ---------- ErrorBoundary ----------
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -79,7 +79,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-// Native intervals with their seconds for sorting
+// Native intervals
 const NATIVE_INTERVALS = [
   { value: "1m", label: "1m", seconds: 60 },
   { value: "3m", label: "3m", seconds: 180 },
@@ -94,7 +94,9 @@ const NATIVE_INTERVALS = [
   { value: "1M", label: "1M", seconds: 2592000 },
 ];
 
-/** Build merged & sorted interval list with custom intervals inserted */
+// Intervals to subscribe via WebSocket for background updates
+const WS_SUBSCRIBE_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w"];
+
 function buildSortedIntervals(savedCustom) {
   const all = NATIVE_INTERVALS.map((i) => ({ ...i, isCustom: false }));
   for (const intv of savedCustom) {
@@ -105,7 +107,6 @@ function buildSortedIntervals(savedCustom) {
   }
   all.sort((a, b) => a.seconds - b.seconds);
 
-  // Group into Minutes / Hours / Days+
   const minutes = all.filter((i) => i.seconds < 3600);
   const hours = all.filter((i) => i.seconds >= 3600 && i.seconds < 86400);
   const days = all.filter((i) => i.seconds >= 86400);
@@ -128,20 +129,10 @@ function saveSavedCustomIntervals(list) {
 }
 
 const INTERVAL_DAYS = {
-  "1m": 1,
-  "3m": 2,
-  "5m": 3,
-  "15m": 7,
-  "30m": 14,
-  "1h": 30,
-  "2h": 60,
-  "4h": 90,
-  "1d": 365,
-  "1w": 365,
-  "1M": 365,
+  "1m": 1, "3m": 2, "5m": 3, "15m": 7, "30m": 14,
+  "1h": 30, "2h": 60, "4h": 90, "1d": 365, "1w": 365, "1M": 365,
 };
 
-/** Calculate default days for a custom interval */
 function getIntervalDays(intv) {
   if (INTERVAL_DAYS[intv]) return INTERVAL_DAYS[intv];
   const secs = parseIntervalSeconds(intv);
@@ -155,18 +146,6 @@ function getIntervalDays(intv) {
   return 365;
 }
 
-// Adjacent intervals for prefetching (left neighbor, right neighbor)
-const ALL_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"];
-function getAdjacentIntervals(intv) {
-  const idx = ALL_INTERVALS.indexOf(intv);
-  if (idx === -1) return [];
-  const neighbors = [];
-  if (idx > 0) neighbors.push(ALL_INTERVALS[idx - 1]);
-  if (idx < ALL_INTERVALS.length - 1) neighbors.push(ALL_INTERVALS[idx + 1]);
-  return neighbors;
-}
-
-/** 合并并去重（按 time 去重，后来者覆盖前者） */
 function mergeByTime(older, current) {
   const merged = [...older, ...current];
   const uniq = new Map();
@@ -176,12 +155,11 @@ function mergeByTime(older, current) {
   return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
 }
 
-/** 确保 data 按 time 严格递增且无重复（lightweight-charts 要求） */
 function deduplicateByTime(data) {
   if (!data || data.length <= 1) return data;
   const seen = new Map();
   for (const item of data) {
-    seen.set(item.time, item); // 同 time 后覆盖前
+    seen.set(item.time, item);
   }
   return Array.from(seen.values()).sort((a, b) => a.time - b.time);
 }
@@ -229,7 +207,6 @@ export default function App() {
   const [dataSource, setDataSource] = useState(null);
 
   const [wsStatus, setWsStatus] = useState("idle");
-  const wsRef = useRef(null);
 
   // --- Custom interval state ---
   const [customInput, setCustomInput] = useState("");
@@ -238,7 +215,19 @@ export default function App() {
   const baseIntervalRef = useRef(null);
   const customSecondsRef = useRef(null);
 
-  // --- Saved custom intervals (persisted in localStorage) ---
+  // --- Cross-interval data cache for instant switching ---
+  const chartDataCacheRef = useRef(new Map());
+  const cacheKey = (sym, intv) => `${sym}-${intv}`;
+  const saveToCache = useCallback((sym, intv, data) => {
+    chartDataCacheRef.current.set(cacheKey(sym, intv), data);
+  }, []);
+  const getFromCache = (sym, intv) => chartDataCacheRef.current.get(cacheKey(sym, intv));
+
+  // Current interval ref for WS message routing
+  const intervalRef = useRef(interval);
+  intervalRef.current = interval;
+
+  // --- Saved custom intervals ---
   const [savedCustomIntervals, setSavedCustomIntervals] = useState(loadSavedCustomIntervals);
   const [showIntervalManager, setShowIntervalManager] = useState(false);
   const intervalGroups = buildSortedIntervals(savedCustomIntervals);
@@ -257,7 +246,6 @@ export default function App() {
       saveSavedCustomIntervals(next);
       return next;
     });
-    // If currently viewing this interval, switch to 1h
     if (interval === intv) handleIntervalChange("1h");
   };
 
@@ -277,7 +265,6 @@ export default function App() {
   useEffect(() => {
     const root = document.documentElement;
     root.setAttribute("data-theme", settings.theme);
-
     if (settings.theme === "custom") {
       root.style.setProperty("--bg-primary", settings.customBg);
       root.style.setProperty("--bg-secondary", settings.customBg);
@@ -285,7 +272,6 @@ export default function App() {
       root.style.removeProperty("--bg-primary");
       root.style.removeProperty("--bg-secondary");
     }
-
     root.style.setProperty("--candle-up", settings.upColor);
     root.style.setProperty("--candle-down", settings.downColor);
     localStorage.setItem("candlescope-settings", JSON.stringify(settings));
@@ -293,21 +279,39 @@ export default function App() {
 
   const abortRef = useRef(null);
 
+  // ============================================================
+  //  LOAD DATA — optimized for speed
+  // ============================================================
   const loadData = useCallback(async (sym, intv) => {
-    // Cancel any previous in-flight request
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setLoading(true);
-    setError(null);
-    setConnectionStatus("loading");
+    // --- INSTANT SWITCH: show cached data immediately ---
+    const cached = getFromCache(sym, intv);
+    const hasCacheHit = cached && cached.length > 0;
+    let shownInitialData = false;
+
+    if (hasCacheHit) {
+      setChartData(cached);
+      setLastPrice(cached[cached.length - 1]);
+      setConnectionStatus("connected");
+      setDatasetKey((v) => v + 1);
+      setLoading(false);
+      setError(null);
+      shownInitialData = true;
+    } else {
+      setChartData([]);  // Clear old interval data to prevent cross-interval merging
+      setLoading(true);
+      setError(null);
+      setConnectionStatus("loading");
+    }
     setLoadingMoreLeft(false);
     setHasMoreLeft(true);
     setCrosshairData(null);
     customCandleRef.current = null;
 
-    // Resolve custom interval info from backend
+    // Resolve custom interval info
     const custom = isCustomInterval(intv);
     if (custom) {
       try {
@@ -323,67 +327,86 @@ export default function App() {
       customSecondsRef.current = null;
     }
 
-    try {
-      const days = getIntervalDays(intv);
-      const result = await fetchKlinesHistory(sym, intv, days);
+    if (hasCacheHit && custom) {
+      customCandleRef.current = { ...cached[cached.length - 1] };
+    }
 
-      // If this request was superseded by a newer one, discard
-      if (controller.signal.aborted) return;
+    // ── PARALLEL FETCH: quick tail + full history simultaneously ──
+    const days = getIntervalDays(intv);
+    const [quickResult, historyResult] = await Promise.all([
+      fetchLatestKlines(sym, intv, 5).catch(() => null),
+      fetchKlinesHistory(sym, intv, days).catch(() => null),
+    ]);
 
-      if (result.data && result.data.length > 0) {
-        const nextData = result.data;
-        const latest = nextData[nextData.length - 1];
+    if (controller.signal.aborted) return;
 
-        setChartData(nextData);
-        setLastPrice(latest);
-        setDataSource(result.source || "unknown");
-        setConnectionStatus(result.source === "mock" ? "loading" : "connected");
-        setDatasetKey((v) => v + 1);
-
-        // For custom intervals, seed the forming candle ref with the last bar
-        if (custom) {
-          customCandleRef.current = { ...latest };
+    // Process QUICK result
+    if (quickResult?.data?.length) {
+      setChartData((prev) => {
+        if (prev.length === 0) {
+          saveToCache(sym, intv, quickResult.data);
+          return quickResult.data;
         }
-      } else {
-        setError("No data returned");
-        setConnectionStatus("disconnected");
-      }
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      console.error("Data load failed:", err);
-      setError(err.message || "Network error");
-      setConnectionStatus("disconnected");
-    } finally {
-      if (!controller.signal.aborted) {
+        let updated = prev;
+        quickResult.data.forEach((tick) => {
+          updated = upsertRealtimeKline(updated, tick);
+        });
+        const deduped = deduplicateByTime(updated);
+        saveToCache(sym, intv, deduped);
+        return deduped;
+      });
+      const latestTick = quickResult.data[quickResult.data.length - 1];
+      setLastPrice(latestTick);
+      setDataSource(quickResult.source || "unknown");
+      if (custom) customCandleRef.current = { ...latestTick };
+
+      if (!shownInitialData) {
+        setConnectionStatus("connected");
+        setDatasetKey((v) => v + 1);
         setLoading(false);
+        shownInitialData = true;
       }
     }
 
-    // Prefetch adjacent intervals in background (fire-and-forget)
-    if (!controller.signal.aborted && !custom) {
-      const neighbors = getAdjacentIntervals(intv);
-      neighbors.forEach((adj) => {
-        const adjDays = INTERVAL_DAYS[adj] || 7;
-        fetchKlinesHistory(sym, adj, adjDays).catch(() => { });
+    // Process FULL HISTORY result
+    if (historyResult?.data?.length) {
+      setChartData((prev) => {
+        const merged = mergeByTime(historyResult.data, prev);
+        saveToCache(sym, intv, merged);
+        return merged;
       });
+      const latest = historyResult.data[historyResult.data.length - 1];
+      setLastPrice(latest);
+      setDataSource(historyResult.source || "unknown");
+      setConnectionStatus(historyResult.source === "mock" ? "loading" : "connected");
+
+      if (!shownInitialData) {
+        setDatasetKey((v) => v + 1);
+        shownInitialData = true;
+      }
+      if (custom) {
+        customCandleRef.current = { ...latest };
+      }
+    } else if (!shownInitialData) {
+      setError("No data returned");
+      setConnectionStatus("disconnected");
     }
-  }, []);
+
+    setLoading(false);
+  }, [saveToCache]);
 
   useEffect(() => {
     loadData(symbol, interval);
   }, [symbol, interval, loadData]);
 
+  // ============================================================
+  //  SINGLE PERSISTENT MULTI-INTERVAL WEBSOCKET
+  //  Connects once, subscribes to ALL intervals, updates all caches
+  // ============================================================
   useEffect(() => {
-    if (loading || error || dataSource === "mock" || datasetKey === 0) {
-      if (dataSource === "mock") setWsStatus("mock");
-      else if (loading) setWsStatus("loading");
-      else setWsStatus("idle");
-      return;
-    }
-
     let active = true;
-    let reconnectTimer = null;
     let socket = null;
+    let reconnectTimer = null;
     let pollInterval = null;
     let pollingInFlight = false;
 
@@ -394,9 +417,8 @@ export default function App() {
         if (pollingInFlight) return;
         pollingInFlight = true;
         try {
-          // For custom intervals, poll with the custom interval string;
-          // the backend handles aggregation.
-          const result = await fetchLatestKlines(symbol, interval, 2);
+          const currentIntv = intervalRef.current;
+          const result = await fetchLatestKlines(symbol, currentIntv, 2);
           if (!result?.data?.length) return;
 
           setChartData((prev) => {
@@ -404,7 +426,9 @@ export default function App() {
             result.data.forEach((tick) => {
               updated = upsertRealtimeKline(updated, tick);
             });
-            return deduplicateByTime(updated);
+            const deduped = deduplicateByTime(updated);
+            saveToCache(symbol, currentIntv, deduped);
+            return deduped;
           });
           setLastPrice(result.data[result.data.length - 1]);
           setWsStatus((prev) => (prev === "live" ? prev : "fallback"));
@@ -416,22 +440,21 @@ export default function App() {
       }, 1000);
     };
 
-    // Determine WS stream interval: for custom intervals, subscribe to the base interval
-    const isCustom = isCustomInterval(interval);
-    const wsInterval = isCustom && baseIntervalRef.current ? baseIntervalRef.current : interval;
-    const customSecs = customSecondsRef.current;
-
     const connect = () => {
       if (!active) return;
       setWsStatus("connecting");
 
       try {
-        const url = getKlineStreamUrl(symbol, wsInterval);
+        const url = getMultiStreamUrl(symbol);
         socket = new WebSocket(url);
-        wsRef.current = socket;
 
         socket.onopen = () => {
           if (!active) return;
+          // Subscribe to ALL native intervals at once
+          socket.send(JSON.stringify({
+            action: "subscribe",
+            intervals: WS_SUBSCRIBE_INTERVALS,
+          }));
           setWsStatus("live");
           if (pollInterval) {
             clearInterval(pollInterval);
@@ -443,42 +466,71 @@ export default function App() {
           if (!active) return;
           try {
             const msg = JSON.parse(event.data);
+
             if (msg.type === "stream_status") {
-              if (msg.status === "live") setWsStatus("live");
-              if (msg.status === "reconnecting") setWsStatus("reconnecting");
+              // Only update status display for the currently active interval
+              if (msg.interval === intervalRef.current) {
+                if (msg.status === "live") setWsStatus("live");
+                if (msg.status === "reconnecting") setWsStatus("reconnecting");
+              }
+              return;
+            }
+
+            if (msg.type === "subscribed" || msg.type === "connected" ||
+              msg.type === "warning" || msg.type === "error") {
               return;
             }
 
             if (msg.type !== "kline" || !msg.data) return;
 
-            if (isCustom && customSecs) {
-              // --- Custom interval: aggregate base candle into custom bucket ---
+            const msgInterval = msg.interval;
+            const tick = msg.data;
+            const currentIntv = intervalRef.current;
+            const isCurrentInterval = msgInterval === currentIntv;
+            const isCurrentCustomBase = isCustomInterval(currentIntv) &&
+              baseIntervalRef.current === msgInterval;
+
+            // ── Always update the background cache for this interval ──
+            const key = cacheKey(symbol, msgInterval);
+            const existingCache = chartDataCacheRef.current.get(key);
+            if (existingCache && existingCache.length > 0) {
+              const updatedCache = deduplicateByTime(
+                upsertRealtimeKline(existingCache, tick)
+              );
+              chartDataCacheRef.current.set(key, updatedCache);
+            }
+
+            // ── Update active chart if this is the current interval ──
+            if (isCurrentInterval) {
+              setChartData((prev) => {
+                const next = deduplicateByTime(upsertRealtimeKline(prev, tick));
+                saveToCache(symbol, currentIntv, next);
+                return next;
+              });
+              setLastPrice(tick);
+            }
+
+            // ── Handle custom interval aggregation ──
+            if (isCurrentCustomBase && customSecondsRef.current) {
               const { candle, isNew } = aggregateRealtimeCandle(
-                customCandleRef.current, msg.data, customSecs
+                customCandleRef.current, tick, customSecondsRef.current
               );
               customCandleRef.current = candle;
 
               if (isNew) {
-                // A new custom candle started — append it
                 setChartData((prev) => {
-                  const next = [...prev, candle];
-                  return deduplicateByTime(next);
+                  const next = deduplicateByTime([...prev, candle]);
+                  saveToCache(symbol, currentIntv, next);
+                  return next;
                 });
               } else {
-                // Update the last candle in-place
                 setChartData((prev) => {
-                  const next = upsertRealtimeKline(prev, candle);
-                  return deduplicateByTime(next);
+                  const next = deduplicateByTime(upsertRealtimeKline(prev, candle));
+                  saveToCache(symbol, currentIntv, next);
+                  return next;
                 });
               }
               setLastPrice(candle);
-            } else {
-              // --- Native interval: direct upsert ---
-              setChartData((prev) => {
-                const next = upsertRealtimeKline(prev, msg.data);
-                return deduplicateByTime(next);
-              });
-              setLastPrice(msg.data);
             }
           } catch (parseErr) {
             console.error("WS parse failed:", parseErr);
@@ -503,14 +555,11 @@ export default function App() {
       }
     };
 
+    // Start immediately — don't wait for data load
     connect();
 
     const initialFallbackTimer = setTimeout(() => {
-      if (
-        active &&
-        !pollInterval &&
-        (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)
-      ) {
+      if (active && !pollInterval && (!socket || socket.readyState !== WebSocket.OPEN)) {
         startPolling();
       }
     }, 4000);
@@ -521,16 +570,43 @@ export default function App() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (pollInterval) clearInterval(pollInterval);
       if (socket) {
-        try {
-          socket.close();
-        } catch (closeErr) {
-          console.error("WS close failed:", closeErr);
-        }
+        try { socket.close(); } catch { /* */ }
       }
-      wsRef.current = null;
     };
-  }, [dataSource, datasetKey, error, interval, loading, symbol]);
+  }, [symbol, saveToCache]); // NOTE: no `interval` dep — WS is persistent across switches
 
+  // ---------- Background prefetch: load history for ALL intervals ----------
+  useEffect(() => {
+    let cancelled = false;
+    const prefetch = async () => {
+      // Fire-and-forget: load history for all native intervals into cache
+      // so switching is instant
+      for (const intv of WS_SUBSCRIBE_INTERVALS) {
+        if (cancelled) break;
+        const key = cacheKey(symbol, intv);
+        if (chartDataCacheRef.current.has(key)) continue; // already cached
+
+        const days = INTERVAL_DAYS[intv] || 7;
+        try {
+          const result = await fetchKlinesHistory(symbol, intv, days);
+          if (cancelled) break;
+          if (result?.data?.length) {
+            chartDataCacheRef.current.set(key, result.data);
+          }
+        } catch {
+          // Non-critical, continue
+        }
+        // Small delay to avoid hammering the backend
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    };
+
+    // Start prefetching after a short delay so the active interval loads first
+    const timer = setTimeout(prefetch, 2000);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [symbol]);
+
+  // ---- handle load more left ----
   const handleNeedMoreLeft = useCallback(
     async (oldestLoadedTime) => {
       if (loading || loadingMoreLeft || !hasMoreLeft || dataSource === "mock") return;
@@ -543,7 +619,11 @@ export default function App() {
         const older = result.data || [];
 
         if (older.length > 0) {
-          setChartData((prev) => mergeByTime(older, prev));
+          setChartData((prev) => {
+            const merged = mergeByTime(older, prev);
+            saveToCache(symbol, interval, merged);
+            return merged;
+          });
         }
 
         if (typeof result.has_more === "boolean") {
@@ -557,7 +637,7 @@ export default function App() {
         setLoadingMoreLeft(false);
       }
     },
-    [chartData.length, dataSource, hasMoreLeft, interval, loading, loadingMoreLeft, symbol],
+    [chartData.length, dataSource, hasMoreLeft, interval, loading, loadingMoreLeft, saveToCache, symbol],
   );
 
   const handleIntervalChange = (newInterval) => {

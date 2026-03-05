@@ -265,17 +265,34 @@ export default function App() {
   // Current interval ref for WS message routing
   const intervalRef = useRef(interval);
   intervalRef.current = interval;
-  const lastPriceIntervalRef = useRef(interval);
+
+  // Canonical real-time price — always derived from the fastest (1m) stream
+  // so all intervals display the same "current price" in the header.
+  const realtimePriceRef = useRef(null);
 
   const updateLastPrice = useCallback((candidate, intv) => {
     setLastPrice((prev) => {
       if (!candidate || candidate.time == null) return prev;
-      const prevIntv = lastPriceIntervalRef.current;
-      if (prevIntv !== intv || !prev || prev.time == null || candidate.time >= prev.time) {
-        lastPriceIntervalRef.current = intv;
-        return candidate;
+      // Build a display object that keeps OHLCV from the active interval's
+      // last candle but overrides "close" with the most recent real-time price
+      // when available, so the header always shows one consistent price.
+      const rtPrice = realtimePriceRef.current;
+      if (rtPrice != null && intv === intervalRef.current) {
+        return { ...candidate, close: rtPrice };
       }
-      return prev;
+      return candidate;
+    });
+  }, []);
+
+  /** Update the canonical real-time price (called from WS tick handler). */
+  const updateRealtimePrice = useCallback((closePrice) => {
+    realtimePriceRef.current = closePrice;
+    // Also push it into the displayed lastPrice immediately so the header
+    // updates in real-time even when the active interval's candle hasn't changed.
+    setLastPrice((prev) => {
+      if (!prev) return prev;
+      if (prev.close === closePrice) return prev;
+      return { ...prev, close: closePrice };
     });
   }, []);
 
@@ -543,6 +560,14 @@ export default function App() {
             const isCurrentCustomBase = isCustomInterval(currentIntv) &&
               baseIntervalRef.current === msgInterval;
 
+            // ── Use 1m stream as the canonical real-time price source ──
+            // The 1m stream updates most frequently and always reflects
+            // the latest trade price, ensuring all intervals show the
+            // same "current price" in the header.
+            if (msgInterval === "1m") {
+              updateRealtimePrice(tick.close);
+            }
+
             // ── Always update the background cache for this interval ──
             const key = cacheKey(symbol, msgInterval);
             const existingCache = chartDataCacheRef.current.get(key);
@@ -626,7 +651,7 @@ export default function App() {
         try { socket.close(); } catch { /* */ }
       }
     };
-  }, [symbol, saveToCache, updateLastPrice]); // NOTE: no `interval` dep — WS is persistent across switches
+  }, [symbol, saveToCache, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
 
   // ---------- Background prefetch: load history for ALL intervals ----------
   useEffect(() => {
@@ -719,7 +744,7 @@ export default function App() {
       setCustomInput("");
       setCustomError(null);
       customCandleRef.current = null;
-      lastPriceIntervalRef.current = newInterval;
+      realtimePriceRef.current = null;
       setLastPrice(null);
       setInterval_(newInterval);
       updateUserPref("lastInterval", newInterval);

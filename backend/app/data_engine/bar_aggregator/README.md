@@ -1,5 +1,8 @@
 # Bar Aggregator
 
+[![English](https://img.shields.io/badge/Language-English-blue)](#) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](README_zh.md)
+
+
 > Builds OHLCV candles from heterogeneous market data streams with a layered, extensible architecture.
 
 ## Architecture
@@ -142,5 +145,5 @@ bar_aggregator/
 ├── finalizer.py         # L4: Finalizer + built-in strategies
 ├── publisher.py         # L5: BarAggregatorPublisher
 ├── README.md            # This file
-└── README_CN.md         # Chinese documentation
+└── README_zh.md         # Chinese documentation
 ```

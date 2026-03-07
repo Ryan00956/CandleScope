@@ -1,5 +1,8 @@
 # Real-time Ingestion — Market Data Ingress Pipeline
 
+[![English](https://img.shields.io/badge/Language-English-blue)](#) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](README_zh.md)
+
+
 > **Exchange real-time data → Unified format → Stable event stream**
 
 This module is the **lowest-level data intake layer** of CandleScope. It connects to exchange WebSocket/REST APIs, normalizes raw payloads into a unified `MarketEvent` format, and outputs a stable event stream that downstream services can subscribe to.

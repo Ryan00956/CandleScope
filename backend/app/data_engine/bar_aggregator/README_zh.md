@@ -1,5 +1,8 @@
 # Bar Aggregator（K线聚合器）
 
+[![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](#)
+
+
 > 从异构市场数据流构建 OHLCV 蜡烛图，采用分层、可扩展架构。
 
 ## 架构总览
@@ -238,5 +241,5 @@ bar_aggregator/
 ├── finalizer.py         # L4: 封口器 + 内置策略
 ├── publisher.py         # L5: 发布器
 ├── README.md            # 英文文档
-└── README_CN.md         # 本文件
+└── README_zh.md         # 本文件
 ```

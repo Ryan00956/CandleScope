@@ -1,5 +1,8 @@
 # Data Manager（数据管理器）
 
+[![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](#)
+
+
 > **CandleScope 的统一缓存、查询和事件分发层。**
 
 Data Manager 是所有 K 线数据操作的**唯一入口**。图表、指标、策略、API 端点和 WebSocket 推送全部通过 `DataManager` 交互，不需要直接操作缓存、存储或数据采集模块。

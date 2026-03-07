@@ -1,5 +1,8 @@
 # Data Manager
 
+[![English](https://img.shields.io/badge/Language-English-blue)](#) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](README_zh.md)
+
+
 > **Unified cache, query, and event distribution layer for CandleScope.**
 
 The Data Manager is the **single entry point** for all K-line data operations. Charts, indicators, strategies, API endpoints, and WebSocket hubs all interact with `DataManager` instead of touching cache, storage, or ingestion modules directly.

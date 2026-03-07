@@ -1,5 +1,8 @@
 # 实时数据摄取 — 市场数据接入管道
 
+[![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](#)
+
+
 > **交易所实时数据 → 统一格式 → 稳定事件流**
 
 本模块是 CandleScope 的**最底层数据接入层**。它连接交易所的 WebSocket/REST API，将原始数据转换为统一的 `MarketEvent` 格式，并输出稳定的事件流供下游服务订阅。

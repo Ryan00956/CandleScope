@@ -1,5 +1,8 @@
 # Backfill Engine
 
+[![English](https://img.shields.io/badge/Language-English-blue)](#) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](README_zh.md)
+
+
 > Automatic and on-demand historical data repair for CandleScope.
 
 The Backfill Engine detects missing K-line data in the database, fetches it from the exchange REST API, deduplicates, aggregates custom intervals, writes to storage, and publishes a repair report — all in one `await engine.run("BTCUSDT")` call.
@@ -244,7 +247,7 @@ backfill/
 ├── reconciler.py        # Reconciler (dedup + aggregation + write)
 ├── publisher.py         # Repair Publisher (log + callbacks)
 ├── README.md            # This file
-└── README_CN.md         # 中文文档
+└── README_zh.md         # 中文文档
 ```
 
 ---

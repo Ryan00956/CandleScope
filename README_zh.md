@@ -61,10 +61,10 @@ CandleScope 采用两阶段加载方案：
 
 本系统极其庞大且复杂的 **Data Engine (数据引擎)** 已经被彻底解耦并拆分为多个具有单一职责的精锐模块，更多架构细节与运行机理详情，请查阅各个子系统独立文档：
 
-- 📖 [**Data Manager (数据资源管理器)**](backend/app/data_engine/data_manager/README.md) - 数据出入口的总闸门，负责三级查询流控、多级缓存统筹，与前端直接握手。
-- 📖 [**Ingestion Layer (接入数据流管道)**](backend/app/data_engine/ingestion/README.md) - 连接币安服务器的实时 6 层网关清洗与消息重打包引擎。
-- 📖 [**Bar Aggregator (K线状态聚合机)**](backend/app/data_engine/bar_aggregator/README.md) - 极其聪明的内存“反应堆”，可合成全平台任意定制周期的时间线状态机。
-- 📖 [**Backfill Engine (后台回填挖掘引擎)**](backend/app/data_engine/backfill/README.md) - 拥有缺口感知雷达（Gap Detector）与任务拆分能力的智能多线程后台调度矿工。
+- 📖 [**Data Manager (数据资源管理器)**](backend/app/data_engine/data_manager/README_zh.md) - 数据出入口的总闸门，负责三级查询流控、多级缓存统筹，与前端直接握手。
+- 📖 [**Ingestion Layer (接入数据流管道)**](backend/app/data_engine/ingestion/README_zh.md) - 连接币安服务器的实时 6 层网关清洗与消息重打包引擎。
+- 📖 [**Bar Aggregator (K线状态聚合机)**](backend/app/data_engine/bar_aggregator/README_zh.md) - 极其聪明的内存“反应堆”，可合成全平台任意定制周期的时间线状态机。
+- 📖 [**Backfill Engine (后台回填挖掘引擎)**](backend/app/data_engine/backfill/README_zh.md) - 拥有缺口感知雷达（Gap Detector）与任务拆分能力的智能多线程后台调度矿工。
 
 ## 📝 说明
 - 建议配置合适的网络代理以获取稳定的币安实时行情 WebSocket 连接。

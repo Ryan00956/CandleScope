@@ -1,5 +1,8 @@
 # 回补引擎 (Backfill Engine)
 
+[![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](#)
+
+
 > CandleScope 的历史数据自动检测与修复系统。
 
 回补引擎能够自动检测数据库中缺失的 K 线数据，从交易所 REST API 拉取补全，去重、聚合自定义周期、批量写入存储并推送到缓存 —— 一行代码搞定：`await engine.run("BTCUSDT")`。
@@ -246,7 +249,7 @@ backfill/
 ├── reconciler.py        # 数据调和器（去重 + 聚合 + 写入）
 ├── publisher.py         # 修复报告发布器（日志 + 回调）
 ├── README.md            # 英文文档
-└── README_CN.md         # 本文件
+└── README_zh.md         # 本文件
 ```
 
 ---

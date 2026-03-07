@@ -151,11 +151,17 @@ class TransportLayer:
                 last_exc = exc
                 self._metrics.inc("http_requests_failed")
                 self._metrics.mark("http_last_error_at")
-                logger.warning("HTTP fetch failed (%s): %s", base, exc)
+                logger.warning(
+                    "HTTP fetch failed (%s): [%s] %s",
+                    base, type(exc).__name__, exc,
+                    exc_info=True,
+                )
                 self._rotate_http()
                 tried += 1
 
-        raise TransportError(f"All {total} HTTP endpoints failed") from last_exc
+        raise TransportError(
+            f"All {total} HTTP endpoints failed; last error: [{type(last_exc).__name__}] {last_exc}"
+        ) from last_exc
 
     # ── Public: WebSocket ────────────────────────────────────
 

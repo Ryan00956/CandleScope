@@ -6,7 +6,7 @@
  * Canvas pipeline — zero lag on pan/zoom, no DOM overlays needed.
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useCallback, useState } from "react";
-import { createChart, CandlestickSeries, HistogramSeries } from "lightweight-charts";
+import { createChart, CandlestickSeries } from "lightweight-charts";
 import { useDrawing } from "../hooks/useDrawing";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
@@ -73,14 +73,6 @@ function toCandlePoint(d) {
     };
 }
 
-function toVolumePoint(d, upColor, downColor) {
-    return {
-        time: d.time,
-        value: d.volume,
-        color: d.close >= d.open ? `${upColor}55` : `${downColor}55`,
-    };
-}
-
 const ChartWidget = forwardRef(function ChartWidget({
     data,
     symbol,
@@ -104,13 +96,16 @@ const ChartWidget = forwardRef(function ChartWidget({
     textFontSize = 14,
     textBold = false,
     textItalic = false,
+    // Indicator callback — fires when chart + series are (re)created
+    onChartReady = null,
 }, ref) {
     const chartContainerRef = useRef(null);
     const chartRef = useRef(null);
     const candlestickSeriesRef = useRef(null);
-    const volumeSeriesRef = useRef(null);
 
     const dataRef = useRef([]);
+    // Map for efficient time → data lookup (used by crosshair for volume)
+    const dataMapRef = useRef(new Map());
     const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
     const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
     const requestedOldestRef = useRef(null);
@@ -143,6 +138,12 @@ const ChartWidget = forwardRef(function ChartWidget({
 
     useEffect(() => {
         dataRef.current = data || [];
+        // Build time→data map for crosshair volume lookup
+        const map = new Map();
+        for (const d of (data || [])) {
+            map.set(d.time, d);
+        }
+        dataMapRef.current = map;
     }, [data]);
 
     useEffect(() => {
@@ -189,7 +190,7 @@ const ChartWidget = forwardRef(function ChartWidget({
         seriesReady,
     });
 
-    // Expose getVisibleRange + clearAll to parent via ref
+    // Expose getVisibleRange + clearAll + chart internals to parent via ref
     useImperativeHandle(ref, () => ({
         getVisibleRange: () => {
             if (!chartRef.current) return null;
@@ -205,7 +206,11 @@ const ChartWidget = forwardRef(function ChartWidget({
             }
         },
         clearAllDrawings: clearAll,
-    }), [clearAll]);
+        // Expose refs for indicator system
+        chartRef,
+        seriesRef: candlestickSeriesRef,
+        seriesReady,
+    }), [clearAll, seriesReady]);
 
     // Debounced visible range save
     const scheduleVisibleRangeSave = useCallback(() => {
@@ -262,8 +267,10 @@ const ChartWidget = forwardRef(function ChartWidget({
                 },
             },
             rightPriceScale: {
+                alignLabels: false,
+                entireTextOnly: true,
                 borderColor: "#1e293b",
-                scaleMargins: { top: 0.1, bottom: 0.25 },
+                scaleMargins: { top: 0.05, bottom: 0.35 },
             },
             ...(localizationOptions.localization ? { localization: localizationOptions.localization } : {}),
             timeScale: {
@@ -286,14 +293,6 @@ const ChartWidget = forwardRef(function ChartWidget({
             wickUpColor: upColor || "#22c55e",
         });
 
-        const volumeSeries = chart.addSeries(HistogramSeries, {
-            priceFormat: { type: "volume" },
-            priceScaleId: "volume",
-        });
-        chart.priceScale("volume").applyOptions({
-            scaleMargins: { top: 0.8, bottom: 0 },
-        });
-
         chart.subscribeCrosshairMove((param) => {
             if (!onCrosshairMove) return;
             if (!param.time || !param.seriesData) {
@@ -305,8 +304,11 @@ const ChartWidget = forwardRef(function ChartWidget({
             }
 
             const candleData = param.seriesData.get(candlestickSeries);
-            const volumeData = param.seriesData.get(volumeSeries);
             if (!candleData) return;
+
+            // Look up volume from raw data (volume is now rendered by indicator system)
+            const rawItem = dataMapRef.current.get(param.time);
+            const volume = rawItem ? rawItem.volume : 0;
 
             const snapshot = {
                 time: param.time,
@@ -314,7 +316,7 @@ const ChartWidget = forwardRef(function ChartWidget({
                 high: candleData.high,
                 low: candleData.low,
                 close: candleData.close,
-                volume: volumeData ? volumeData.value : 0,
+                volume,
             };
             const signature = `${snapshot.time}|${snapshot.open}|${snapshot.high}|${snapshot.low}|${snapshot.close}|${snapshot.volume}`;
             if (lastCrosshairSignatureRef.current === signature) return;
@@ -346,10 +348,14 @@ const ChartWidget = forwardRef(function ChartWidget({
 
         chartRef.current = chart;
         candlestickSeriesRef.current = candlestickSeries;
-        volumeSeriesRef.current = volumeSeries;
 
         // Signal useDrawing that chart + series are ready for primitive attachment
         setSeriesReady((prev) => prev + 1);
+
+        // Notify parent about chart/series refs for indicator rendering
+        if (onChartReady) {
+            onChartReady({ chartRef, seriesRef: candlestickSeriesRef });
+        }
 
         const markUserInteracted = () => {
             userInteractedRef.current = true;
@@ -389,12 +395,11 @@ const ChartWidget = forwardRef(function ChartWidget({
             chart.remove();
             chartRef.current = null;
             candlestickSeriesRef.current = null;
-            volumeSeriesRef.current = null;
         };
     }, []);
 
     const updateSeriesData = (klines) => {
-        if (!candlestickSeriesRef.current || !volumeSeriesRef.current) return;
+        if (!candlestickSeriesRef.current) return;
         try {
             const deduped = [];
             const seen = new Set();
@@ -406,20 +411,18 @@ const ChartWidget = forwardRef(function ChartWidget({
             }
             deduped.sort((a, b) => a.time - b.time);
             candlestickSeriesRef.current.setData(deduped.map((d) => toCandlePoint(d)));
-            volumeSeriesRef.current.setData(deduped.map((d) => toVolumePoint(d, upColor, downColor)));
         } catch (err) {
             console.error("ChartWidget setData error:", err);
         }
     };
 
     const updateLatestBars = (klines, barCount = 2) => {
-        if (!candlestickSeriesRef.current || !volumeSeriesRef.current || !klines?.length) return;
+        if (!candlestickSeriesRef.current || !klines?.length) return;
         try {
             const start = Math.max(0, klines.length - barCount);
             for (let i = start; i < klines.length; i += 1) {
                 const point = klines[i];
                 candlestickSeriesRef.current.update(toCandlePoint(point));
-                volumeSeriesRef.current.update(toVolumePoint(point, upColor, downColor));
             }
         } catch (err) {
             console.error("ChartWidget update error, falling back to setData:", err);

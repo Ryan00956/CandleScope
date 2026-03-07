@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import ChartWidget from "./components/ChartWidget";
 import DrawingToolbar from "./components/DrawingToolbar";
 import SettingsModal from "./components/SettingsModal";
+import IndicatorPanel from "./components/IndicatorPanel";
+import { useIndicators } from "./hooks/useIndicators";
 import {
   fetchKlinesBefore,
   fetchKlinesHistory,
@@ -260,6 +262,37 @@ export default function App() {
     chartWidgetRef.current?.clearAllDrawings();
   }, []);
 
+  // --- Indicator state ---
+  const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);
+  // Store the actual ref objects from ChartWidget (not copies of .current)
+  // so useIndicators always reads the live chart/series instances.
+  const indicatorChartRefRef = useRef(null);   // ref-to-ref: points to ChartWidget's chartRef
+  const indicatorSeriesRefRef = useRef(null);  // ref-to-ref: points to ChartWidget's seriesRef
+  const [indicatorSeriesReady, setIndicatorSeriesReady] = useState(0);
+
+  const handleChartReady = useCallback(({ chartRef: cRef, seriesRef: sRef }) => {
+    indicatorChartRefRef.current = cRef;    // store the REF object, not .current
+    indicatorSeriesRefRef.current = sRef;   // store the REF object, not .current
+    setIndicatorSeriesReady((prev) => prev + 1);
+  }, []);
+
+  const {
+    activeIndicators,
+    computing: indicatorComputing,
+    addIndicator,
+    removeIndicator,
+    toggleVisibility,
+    updateIndicatorParams,
+    updateIndicatorScript,
+    computeAll: recomputeIndicators,
+  } = useIndicators({
+    chartRef: indicatorChartRefRef,
+    seriesRef: indicatorSeriesRefRef,
+    chartData,
+    datasetKey: `${symbol}-${interval}-${datasetKey}`,
+    seriesReady: indicatorSeriesReady,
+  });
+
   // --- Custom interval state ---
   const [customInput, setCustomInput] = useState("");
   const [customError, setCustomError] = useState(null);
@@ -470,8 +503,11 @@ export default function App() {
         customCandleRef.current = { ...latest };
       }
     } else if (!shownInitialData) {
-      setError("No data returned");
-      setConnectionStatus("disconnected");
+      // Don't show error immediately — backfill may be in progress.
+      // The QueryEngine auto-triggers backfill when storage is empty,
+      // and we'll receive a backfill_completed event via WS once data arrives.
+      setConnectionStatus("loading");
+      setLoading(false);
     }
 
     setLoading(false);
@@ -626,6 +662,72 @@ export default function App() {
               msg.type === "warning" || msg.type === "error") {
               return;
             }
+
+            // ── Handle backfill completion: reload history for that interval ──
+            if (msg.type === "backfill_completed") {
+              const bfInterval = msg.interval;
+              const bfSymbol = msg.symbol || symbol;
+              console.log(`Backfill completed for ${bfSymbol}@${bfInterval}, reloading data...`);
+              const days = getIntervalDays(bfInterval);
+              fetchKlinesHistory(bfSymbol, bfInterval, days)
+                .then((result) => {
+                  if (!result?.data?.length) return;
+                  const currentIntv = intervalRef.current;
+                  const key = cacheKey(bfSymbol, bfInterval);
+                  const existingCache = chartDataCacheRef.current.get(key);
+                  if (existingCache && existingCache.length > 0) {
+                    const merged = mergeByTime(result.data, existingCache);
+                    chartDataCacheRef.current.set(key, merged);
+                  } else {
+                    chartDataCacheRef.current.set(key, result.data);
+                  }
+                  if (bfInterval === currentIntv) {
+                    setChartData((prev) => {
+                      const merged = mergeByTime(result.data, prev);
+                      saveToCache(bfSymbol, bfInterval, merged);
+                      return merged;
+                    });
+                    const latest = result.data[result.data.length - 1];
+                    updateLastPrice(latest, bfInterval);
+                    setError(null);
+                    setConnectionStatus("connected");
+                    setLoading(false);
+                    setDatasetKey((v) => v + 1);
+                  }
+                })
+                .catch((err) => {
+                  console.warn(`Failed to reload after backfill for ${bfInterval}:`, err);
+                });
+
+              // ALSO seamlessly pull in the missing historical (left-side) data if present
+              const key = cacheKey(bfSymbol, bfInterval);
+              const historicCache = chartDataCacheRef.current.get(key) || [];
+              if (historicCache.length > 0) {
+                const oldest = historicCache[0].time;
+                fetchKlinesBefore(bfSymbol, bfInterval, oldest, 500)
+                  .then((res) => {
+                    if (!res?.data?.length) return;
+                    const cCache = chartDataCacheRef.current.get(key) || [];
+                    const cMerged = mergeByTime(res.data, cCache);
+                    chartDataCacheRef.current.set(key, cMerged);
+
+                    if (bfInterval === intervalRef.current) {
+                      setChartData((prev) => {
+                        const nextUi = mergeByTime(res.data, prev);
+                        saveToCache(bfSymbol, bfInterval, nextUi);
+                        return nextUi;
+                      });
+                      if (typeof res.has_more === "boolean") {
+                        setHasMoreLeft(res.has_more);
+                      }
+                    }
+                  })
+                  .catch((err) => console.warn("Failed backfill fetchBefore:", err));
+              }
+
+              return;
+            }
+
 
             if (msg.type !== "kline" || !msg.data) return;
 
@@ -907,6 +1009,17 @@ export default function App() {
           ⚙️
         </button>
 
+        <button
+          className={`indicator-toggle-btn ${showIndicatorPanel ? "active" : ""}`}
+          onClick={() => setShowIndicatorPanel((p) => !p)}
+          title="指标 (Indicators)"
+        >
+          📊
+          {activeIndicators.length > 0 && (
+            <span className="indicator-badge">{activeIndicators.length}</span>
+          )}
+        </button>
+
         {displayData && (
           <div className="price-info">
             <span className={`current-price ${isUp ? "price-up" : "price-down"}`}>
@@ -1137,10 +1250,25 @@ export default function App() {
               textFontSize={textFontSize}
               textBold={textBold}
               textItalic={textItalic}
+              onChartReady={handleChartReady}
             />
           </ErrorBoundary>
         )}
       </div>
+
+      {/* Indicator Panel — slides in from the right */}
+      <IndicatorPanel
+        isOpen={showIndicatorPanel}
+        onClose={() => setShowIndicatorPanel(false)}
+        activeIndicators={activeIndicators}
+        computing={indicatorComputing}
+        onAddIndicator={addIndicator}
+        onRemoveIndicator={removeIndicator}
+        onToggleVisibility={toggleVisibility}
+        onUpdateParams={updateIndicatorParams}
+        onUpdateScript={updateIndicatorScript}
+        onRecompute={recomputeIndicators}
+      />
 
       <SettingsModal
         isOpen={showSettings}

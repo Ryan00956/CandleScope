@@ -1,0 +1,470 @@
+"""
+Query Engine — three-level data retrieval: Cache → Storage → Backfill.
+
+The query engine is the **single entry point** for all bar data reads.
+Charts, indicators, strategies, and APIs all call ``QueryEngine.query()``
+instead of reaching into cache or storage directly.
+
+Resolution strategy:
+  1. **Cache hit** — fast path, returns immediately.
+  2. **Storage fallback** — if the cache doesn't cover the requested
+     range, the engine reads from the storage backend.
+  3. **Backfill trigger** — if storage is also missing data and
+     ``auto_backfill`` is enabled, a backfill task is spawned.
+
+The engine also pre-warms the cache with storage results so that
+subsequent queries for the same range are served from memory.
+
+Usage::
+
+    engine = QueryEngine(cache, storage, config, backfill_fn)
+
+    result = engine.query("BTCUSDT", "1m", limit=500)
+    result = engine.query("BTCUSDT", "1h", start_ms=..., end_ms=...)
+    result = engine.query_latest("BTCUSDT", "1m", 100)
+"""
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any, Callable
+
+from app.core.market import parse_custom_interval
+
+from .cache import BarCache
+from .config import QueryConfig
+from .models import BarData, QueryResult, QuerySource, SeriesKey, StorageBackend
+
+logger = logging.getLogger("data_manager.query")
+
+# Signature for the optional backfill trigger callback
+BackfillTrigger = Callable[[str, str, int, int], None]
+
+
+class QueryEngine:
+    """Three-level query engine: Cache → Storage → Backfill.
+
+    This class owns **no** data — it orchestrates reads across the
+    cache and storage backend, and optionally triggers backfill when
+    gaps are detected.
+
+    All public methods are synchronous (designed to be called via
+    ``asyncio.to_thread`` from async contexts).
+
+    Attributes:
+        cache:      The in-memory ``BarCache`` instance.
+        storage:    A ``StorageBackend`` implementation (or None).
+        config:     ``QueryConfig`` with limits and feature flags.
+        backfill_trigger:
+                    Optional callback ``(symbol, interval, start_ms, end_ms)``
+                    called when the engine detects missing data.
+    """
+
+    def __init__(
+        self,
+        cache: BarCache,
+        storage: StorageBackend | None = None,
+        config: QueryConfig | None = None,
+        backfill_trigger: BackfillTrigger | None = None,
+    ) -> None:
+        self._cache = cache
+        self._storage = storage
+        self._cfg = config or QueryConfig()
+        self._backfill_trigger = backfill_trigger
+
+        # Metrics
+        self._queries = 0
+        self._cache_hits = 0
+        self._storage_reads = 0
+        self._backfills_triggered = 0
+
+    # ── Public: Main Query ───────────────────────────────────
+
+    def query(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int | None = None,
+    ) -> QueryResult:
+        """Query bars for a (symbol, interval) with flexible parameters.
+
+        This is the **primary query interface**.  All consumers
+        (chart, indicator, strategy, API) should use this method.
+
+        Args:
+            symbol:    Trading pair, e.g. "BTCUSDT".
+            interval:  K-line interval, e.g. "1m", "5m", "1h".
+            start_ms:  Start of range in milliseconds (inclusive).
+            end_ms:    End of range in milliseconds (inclusive).
+            limit:     Maximum bars to return.  Capped by config.
+
+        Returns:
+            ``QueryResult`` with bars sorted ascending by time.
+
+        Resolution order:
+            1. Cache (fast path)
+            2. Storage (if cache miss or partial)
+            3. Backfill trigger (if storage also missing)
+        """
+        t0 = time.monotonic()
+        self._queries += 1
+
+        key = SeriesKey(symbol, interval)
+        effective_limit = min(
+            limit or self._cfg.default_limit,
+            self._cfg.max_limit,
+        )
+
+        # Convert ms → seconds for cache queries
+        start_s = start_ms // 1000 if start_ms else None
+        end_s = end_ms // 1000 if end_ms else None
+
+        # ── Step 1: Try cache ────────────────────────────────
+        if start_s is not None or end_s is not None:
+            cached = self._cache.query(key, start_s, end_s, effective_limit)
+        else:
+            cached = self._cache.get_latest(key, effective_limit)
+
+        if cached and self._is_complete(cached, start_s, end_s, effective_limit):
+            self._cache_hits += 1
+            elapsed = time.monotonic() - t0
+            return QueryResult(
+                bars=cached,
+                symbol=key.symbol,
+                interval=key.interval,
+                source=QuerySource.CACHE,
+                total=len(cached),
+                has_more=self._cache.series_count(key) > len(cached),
+                cache_hit=True,
+                metadata={"elapsed_ms": round(elapsed * 1000, 2)},
+            )
+
+        # ── Step 2: Try storage ──────────────────────────────
+        storage_bars: list[BarData] = []
+        backfill_triggered = False
+
+        if self._storage is not None:
+            self._storage_reads += 1
+            try:
+                rows = self._storage.query_bars(
+                    symbol=key.symbol,
+                    interval=key.interval,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    limit=effective_limit,
+                    order="ASC",
+                )
+                storage_bars = [BarData.from_storage_row(r) for r in rows]
+            except Exception as exc:
+                logger.error("Storage query failed: %s", exc, exc_info=True)
+
+            # Warm cache with storage results
+            if storage_bars:
+                self._cache.bulk_load(key, storage_bars)
+
+        # ── Step 3: Merge cache + storage ────────────────────
+        merged = self._merge(cached, storage_bars)
+
+        if not merged:
+            # Nothing anywhere — trigger backfill if enabled
+            if self._cfg.auto_backfill and self._backfill_trigger:
+                interval_secs = parse_custom_interval(key.interval) or 60
+
+                trigger_start_ms = start_ms
+                if trigger_start_ms is None:
+                    trigger_start_ms = (end_ms or int(time.time() * 1000)) - (effective_limit * interval_secs * 1000)
+
+                self._trigger_backfill(key, trigger_start_ms, end_ms)
+                backfill_triggered = True
+
+            elapsed = time.monotonic() - t0
+            return QueryResult(
+                bars=[],
+                symbol=key.symbol,
+                interval=key.interval,
+                source=QuerySource.EMPTY,
+                total=0,
+                has_more=False,
+                cache_hit=False,
+                backfill_triggered=backfill_triggered,
+                metadata={"elapsed_ms": round(elapsed * 1000, 2)},
+            )
+
+        # ── Step 4: Check completeness & backfill ────────────
+        if (
+            self._cfg.auto_backfill
+            and self._backfill_trigger
+            and not self._is_complete(merged, start_s, end_s, effective_limit)
+        ):
+            interval_secs = parse_custom_interval(key.interval) or 60
+            now_ms = int(time.time() * 1000)
+            earliest_bar_ms = merged[0].time * 1000
+            latest_bar_ms = merged[-1].time * 1000
+
+            # Determine which direction has a gap
+            has_gap_before = (start_ms is not None and earliest_bar_ms > start_ms)
+            has_gap_after = latest_bar_ms < (end_ms or now_ms) - (interval_secs * 1000)
+
+            if has_gap_before and has_gap_after:
+                # Both sides have gaps — backfill the larger gap first
+                # (forward catch-up is usually more urgent)
+                self._trigger_backfill(key, latest_bar_ms, end_ms)
+                backfill_triggered = True
+            elif has_gap_after:
+                # Scenario 1: Forward catch-up (e.g. app was closed overnight)
+                self._trigger_backfill(key, latest_bar_ms, end_ms)
+                backfill_triggered = True
+            elif has_gap_before:
+                # Scenario 2: Backward gap (start of requested range missing)
+                self._trigger_backfill(key, start_ms, earliest_bar_ms)
+                backfill_triggered = True
+            else:
+                # Count-based shortfall — backfill backwards from earliest data
+                needed_ms = (effective_limit - len(merged)) * interval_secs * 1000
+                trigger_start = earliest_bar_ms - needed_ms
+                self._trigger_backfill(key, trigger_start, earliest_bar_ms)
+                backfill_triggered = True
+
+        # Apply limit
+        if len(merged) > effective_limit:
+            merged = merged[-effective_limit:]
+
+        source = QuerySource.CACHE if not storage_bars else (
+            QuerySource.MIXED if cached else QuerySource.STORAGE
+        )
+
+        elapsed = time.monotonic() - t0
+        return QueryResult(
+            bars=merged,
+            symbol=key.symbol,
+            interval=key.interval,
+            source=source,
+            total=len(merged),
+            has_more=True,  # conservative — caller can paginate
+            cache_hit=bool(cached),
+            backfill_triggered=backfill_triggered,
+            metadata={"elapsed_ms": round(elapsed * 1000, 2)},
+        )
+
+    # ── Public: Convenience Methods ──────────────────────────
+
+    def query_latest(
+        self, symbol: str, interval: str, limit: int = 500,
+    ) -> QueryResult:
+        """Shorthand for getting the latest N bars."""
+        return self.query(symbol, interval, limit=limit)
+
+    def query_before(
+        self,
+        symbol: str,
+        interval: str,
+        before_ms: int,
+        limit: int = 500,
+    ) -> QueryResult:
+        """Query bars strictly before a timestamp (for pagination).
+
+        Useful for "load more" / infinite scroll in the chart.
+        """
+        key = SeriesKey(symbol, interval)
+        before_s = before_ms // 1000
+        effective_limit = min(limit, self._cfg.max_limit)
+
+        # Try cache first
+        cached = self._cache.get_before(key, before_s, effective_limit)
+
+        if len(cached) >= effective_limit:
+            return QueryResult(
+                bars=cached,
+                symbol=key.symbol,
+                interval=key.interval,
+                source=QuerySource.CACHE,
+                total=len(cached),
+                has_more=True,
+                cache_hit=True,
+            )
+
+        # Fall back to storage
+        storage_bars: list[BarData] = []
+        if self._storage is not None:
+            try:
+                rows = self._storage.fetch_before(
+                    symbol=key.symbol,
+                    interval=key.interval,
+                    before_ms=before_ms,
+                    limit=effective_limit,
+                )
+                storage_bars = [BarData.from_storage_row(r) for r in rows]
+                if storage_bars:
+                    self._cache.bulk_load(key, storage_bars)
+            except Exception as exc:
+                logger.error("Storage fetch_before failed: %s", exc)
+
+        merged = self._merge(cached, storage_bars)
+        if len(merged) > effective_limit:
+            merged = merged[-effective_limit:]
+
+        backfill_triggered = False
+        if len(merged) < effective_limit and self._cfg.auto_backfill and self._backfill_trigger:
+            interval_secs = parse_custom_interval(key.interval) or 60
+
+            # Only backfill the missing portion before existing data
+            if merged:
+                # We have some bars — backfill from (before_ms - needed_span) up to earliest existing bar
+                needed = effective_limit - len(merged)
+                trigger_start_ms = merged[0].time * 1000 - (needed * interval_secs * 1000)
+                trigger_end_ms = merged[0].time * 1000
+            else:
+                # No data at all — backfill limit bars before before_ms
+                trigger_start_ms = before_ms - (effective_limit * interval_secs * 1000)
+                trigger_end_ms = before_ms
+
+            self._trigger_backfill(key, trigger_start_ms, trigger_end_ms)
+            backfill_triggered = True
+
+        return QueryResult(
+            bars=merged,
+            symbol=key.symbol,
+            interval=key.interval,
+            source=QuerySource.MIXED if storage_bars else QuerySource.CACHE,
+            total=len(merged),
+            has_more=bool(merged) or backfill_triggered,
+            cache_hit=bool(cached),
+            backfill_triggered=backfill_triggered,
+        )
+
+    def get_bounds(self, symbol: str, interval: str) -> dict:
+        """Get cache + storage bounds for a series.
+
+        Returns::
+            {
+                "cache_earliest": int | None,  # seconds
+                "cache_latest": int | None,
+                "cache_count": int,
+                "storage_earliest_ms": int | None,
+                "storage_latest_ms": int | None,
+                "storage_count": int | None,
+            }
+        """
+        key = SeriesKey(symbol, interval)
+        ce, cl = self._cache.get_bounds(key)
+        result: dict[str, Any] = {
+            "cache_earliest": ce,
+            "cache_latest": cl,
+            "cache_count": self._cache.series_count(key),
+        }
+
+        if self._storage is not None:
+            try:
+                sb = self._storage.get_bounds(key.symbol, key.interval)
+                result.update({
+                    "storage_earliest_ms": sb.get("earliest_open_time"),
+                    "storage_latest_ms": sb.get("latest_open_time"),
+                    "storage_count": sb.get("total_count"),
+                })
+            except Exception:
+                result.update({
+                    "storage_earliest_ms": None,
+                    "storage_latest_ms": None,
+                    "storage_count": None,
+                })
+        return result
+
+    # ── Public: Snapshot ─────────────────────────────────────
+
+    def snapshot(self) -> dict:
+        return {
+            "total_queries": self._queries,
+            "cache_hits": self._cache_hits,
+            "storage_reads": self._storage_reads,
+            "backfills_triggered": self._backfills_triggered,
+            "config": {
+                "default_limit": self._cfg.default_limit,
+                "max_limit": self._cfg.max_limit,
+                "auto_backfill": self._cfg.auto_backfill,
+            },
+        }
+
+    # ── Internal ─────────────────────────────────────────────
+
+    def _merge(
+        self, a: list[BarData], b: list[BarData],
+    ) -> list[BarData]:
+        """Merge two sorted bar lists, deduplicating by time.
+
+        On conflict (same timestamp), cache data (``a``) wins because
+        it is typically more recent (from the live stream), while
+        storage data (``b``) may be stale backfill data.
+        """
+        if not a:
+            return list(b)
+        if not b:
+            return list(a)
+
+        combined: dict[int, BarData] = {}
+        for bar in b:
+            combined[bar.time] = bar  # storage first
+        for bar in a:
+            combined[bar.time] = bar  # cache overwrites — cache wins
+        return sorted(combined.values(), key=lambda x: x.time)
+
+    def _is_complete(
+        self,
+        bars: list[BarData],
+        start_s: int | None,
+        end_s: int | None,
+        limit: int,
+    ) -> bool:
+        """Heuristic: does the cache result satisfy the query?"""
+        if not bars:
+            return False
+        if len(bars) >= limit:
+            return True
+            
+        # If no explicit bounds were requested, we CANNOT be complete if we missed the limit
+        if start_s is None and end_s is None:
+            return False
+            
+        # If the query had explicit bounds, check coverage
+        if start_s is not None and bars[0].time > start_s:
+            return False
+        if end_s is not None and bars[-1].time < end_s:
+            return False
+        return True
+
+    def _trigger_backfill(
+        self, key: SeriesKey, start_ms: int | None, end_ms: int | None,
+    ) -> None:
+        """Fire the backfill trigger callback.
+
+        All callers should compute meaningful start/end values before
+        calling this method.  The fallback here is a safety net only.
+        """
+        if self._backfill_trigger is None:
+            return
+        self._backfills_triggered += 1
+
+        now_ms = int(time.time() * 1000)
+        effective_end = end_ms if end_ms is not None else now_ms
+
+        if start_ms is not None:
+            effective_start = start_ms
+        else:
+            # Safety fallback: backfill at most 24 hours instead of from epoch 0
+            effective_start = max(0, effective_end - 86_400_000)
+            logger.warning(
+                "Backfill start_ms is None for %s — "
+                "defaulting to 24h lookback (%d → %d)",
+                key, effective_start, effective_end,
+            )
+
+        try:
+            self._backfill_trigger(
+                key.symbol,
+                key.interval,
+                effective_start,
+                effective_end,
+            )
+        except Exception as exc:
+            logger.error("Backfill trigger failed: %s", exc, exc_info=True)

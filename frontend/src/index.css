@@ -718,3 +718,1070 @@ body {
     opacity: 0.3;
   }
 }
+
+/* ── 指标按钮 ────────────────────────────────────────────── */
+.indicator-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 16px;
+  color: var(--text-secondary);
+  transition: all 0.15s ease;
+  position: relative;
+}
+
+.indicator-toggle-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+}
+
+.indicator-toggle-btn.active {
+  color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.1);
+  border-color: var(--accent-blue);
+}
+
+.indicator-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: #fff;
+  background: var(--accent-blue);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+/* ── 指标面板 ────────────────────────────────────────────── */
+.indicator-panel {
+  position: fixed;
+  top: 48px;
+  right: 0;
+  bottom: 24px;
+  width: 380px;
+  max-width: 90vw;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-color);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.3);
+  z-index: 150;
+  display: flex;
+  flex-direction: column;
+  animation: slide-in-right 0.2s ease-out;
+  overflow: hidden;
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.indicator-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.indicator-panel-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.indicator-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.indicator-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* ── 指标搜索/添加区域 ───────────────────────────────────── */
+.indicator-search-section {
+  margin-bottom: 16px;
+}
+
+.indicator-search-input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.indicator-search-input:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.indicator-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+/* ── 内置指标列表 ────────────────────────────────────────── */
+.indicator-preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.indicator-preset-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.indicator-preset-item:hover {
+  border-color: var(--accent-blue);
+  background: var(--bg-hover);
+}
+
+.indicator-preset-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.indicator-preset-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.indicator-add-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid var(--accent-blue);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-sans);
+  white-space: nowrap;
+}
+
+.indicator-add-btn:hover {
+  background: rgba(59, 130, 246, 0.2);
+}
+
+/* ── 活跃指标列表 ────────────────────────────────────────── */
+.indicator-active-section {
+  margin-top: 16px;
+}
+
+.indicator-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.indicator-active-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.indicator-active-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  transition: all 0.15s ease;
+}
+
+.indicator-active-item:hover {
+  border-color: var(--text-muted);
+}
+
+.indicator-active-item.has-error {
+  border-color: var(--candle-down);
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.indicator-active-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.indicator-active-name:hover {
+  color: var(--accent-blue);
+}
+
+.indicator-active-error {
+  font-size: 11px;
+  color: var(--candle-down);
+  margin-top: 4px;
+  font-family: var(--font-mono);
+}
+
+.indicator-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.15s ease;
+}
+
+.indicator-icon-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+}
+
+.indicator-icon-btn.danger:hover {
+  color: var(--candle-down);
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--candle-down);
+}
+
+/* ── 指标代码编辑器 ──────────────────────────────────────── */
+.indicator-editor-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fade-in 0.15s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.indicator-editor {
+  width: 720px;
+  max-width: 95vw;
+  max-height: 85vh;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  animation: modal-in 0.2s ease-out;
+}
+
+@keyframes modal-in {
+  from {
+    transform: scale(0.95) translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1) translateY(0);
+    opacity: 1;
+  }
+}
+
+.indicator-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.indicator-editor-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.indicator-editor-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.indicator-editor-code-area {
+  flex: 1;
+  min-height: 300px;
+  overflow: auto;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.indicator-editor-code-area .cm-editor {
+  height: 100%;
+}
+
+.indicator-editor-code-area .cm-editor .cm-scroller {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.indicator-editor-code-area .cm-editor.cm-focused {
+  outline: none;
+}
+
+/* CodeMirror theme overrides for dark mode */
+.indicator-editor-code-area .cm-editor {
+  background: var(--bg-primary);
+}
+
+.indicator-editor-code-area .cm-gutters {
+  background: var(--bg-tertiary);
+  border-right: 1px solid var(--border-color);
+  color: var(--text-muted);
+}
+
+.indicator-editor-code-area .cm-activeLineGutter {
+  background: var(--bg-hover);
+}
+
+.indicator-editor-code-area .cm-activeLine {
+  background: rgba(59, 130, 246, 0.05);
+}
+
+.indicator-editor-code-area .cm-selectionBackground {
+  background: rgba(59, 130, 246, 0.2) !important;
+}
+
+.indicator-editor-code-area .cm-cursor {
+  border-left-color: var(--accent-blue);
+}
+
+.indicator-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.indicator-editor-error {
+  flex: 1;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--candle-down);
+  margin-right: 12px;
+  max-height: 60px;
+  overflow-y: auto;
+}
+
+.indicator-editor-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.indicator-btn-primary {
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent-blue);
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-sans);
+}
+
+.indicator-btn-primary:hover {
+  background: #2563eb;
+}
+
+.indicator-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.indicator-btn-secondary {
+  padding: 8px 20px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-sans);
+}
+
+.indicator-btn-secondary:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--text-muted);
+}
+
+/* ── 自定义指标按钮 ──────────────────────────────────────── */
+.indicator-custom-btn {
+  width: 100%;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent-purple);
+  background: rgba(139, 92, 246, 0.08);
+  border: 1px dashed var(--accent-purple);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-sans);
+  margin-top: 8px;
+}
+
+.indicator-custom-btn:hover {
+  background: rgba(139, 92, 246, 0.15);
+  border-style: solid;
+}
+
+/* ── 计算状态指示器 ──────────────────────────────────────── */
+.indicator-computing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--accent-blue);
+  padding: 4px 0;
+}
+
+.indicator-computing-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--accent-blue);
+  border-radius: 50%;
+  animation: pulse 1s infinite;
+}
+
+/* ── 空状态 ──────────────────────────────────────────────── */
+.indicator-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+  gap: 8px;
+}
+
+.indicator-empty-icon {
+  font-size: 32px;
+  opacity: 0.5;
+}
+
+/* ── 指标面板覆盖层 ──────────────────────────────────────── */
+.indicator-panel-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 140;
+  animation: fade-in 0.15s ease-out;
+}
+
+.indicator-panel-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  transition: all 0.15s ease;
+}
+
+.indicator-panel-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+}
+
+/* ── 指标面板 Tab 栏 ─────────────────────────────────────── */
+.indicator-tab-bar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+  padding: 0 8px;
+}
+
+.indicator-tab {
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-sans);
+  white-space: nowrap;
+}
+
+.indicator-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.indicator-tab.active {
+  color: var(--accent-blue);
+  border-bottom-color: var(--accent-blue);
+}
+
+.indicator-tab-create {
+  color: var(--accent-purple);
+  margin-left: auto;
+}
+
+.indicator-tab-create:hover {
+  color: var(--accent-purple);
+  background: rgba(139, 92, 246, 0.1);
+}
+
+/* ── 指标面板内容区 ──────────────────────────────────────── */
+.indicator-panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.indicator-computing-badge {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent-blue);
+  margin-left: 8px;
+  animation: pulse 1.5s infinite;
+}
+
+/* ── 指标搜索 ────────────────────────────────────────────── */
+.indicator-search-wrapper {
+  margin-bottom: 12px;
+}
+
+.indicator-search {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.indicator-search:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.indicator-search::placeholder {
+  color: var(--text-muted);
+}
+
+.indicator-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ── 分类组 ──────────────────────────────────────────────── */
+.indicator-category-group {
+  margin-bottom: 12px;
+}
+
+.indicator-category-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+  padding: 0 4px;
+}
+
+/* ── 内置指标项 ──────────────────────────────────────────── */
+.indicator-preset-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.indicator-preset-item.is-active {
+  border-color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.05);
+}
+
+.indicator-add-btn.added {
+  color: var(--candle-up);
+  background: rgba(34, 197, 94, 0.1);
+  border-color: var(--candle-up);
+}
+
+/* ── 活跃指标项头部 ──────────────────────────────────────── */
+.indicator-active-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.indicator-visibility-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  transition: all 0.15s ease;
+}
+
+.indicator-visibility-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+}
+
+.indicator-visibility-btn.hidden {
+  opacity: 0.4;
+}
+
+.indicator-error-badge {
+  font-size: 12px;
+  cursor: help;
+}
+
+.indicator-active-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.indicator-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-muted);
+  transition: all 0.15s ease;
+}
+
+.indicator-action-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+}
+
+.indicator-remove-btn:hover {
+  color: var(--candle-down);
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--candle-down);
+}
+
+/* ── 参数编辑 ────────────────────────────────────────────── */
+.indicator-params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+}
+
+.indicator-param-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.indicator-param-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 40px;
+}
+
+.indicator-param-input {
+  width: 70px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.indicator-param-input:focus {
+  border-color: var(--accent-blue);
+}
+
+.indicator-param-input[type="color"] {
+  width: 28px;
+  height: 24px;
+  padding: 1px;
+  cursor: pointer;
+}
+
+/* ── 错误消息 ────────────────────────────────────────────── */
+.indicator-error-msg {
+  font-size: 11px;
+  color: var(--candle-down);
+  margin-top: 6px;
+  padding: 4px 8px;
+  background: rgba(239, 68, 68, 0.05);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+/* ── 线条图例 ────────────────────────────────────────────── */
+.indicator-lines-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-color);
+}
+
+.indicator-line-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.indicator-line-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ── 重新计算按钮 ────────────────────────────────────────── */
+.indicator-recompute-btn {
+  width: 100%;
+  padding: 8px 16px;
+  margin-top: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid var(--accent-blue);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: var(--font-sans);
+}
+
+.indicator-recompute-btn:hover {
+  background: rgba(59, 130, 246, 0.18);
+}
+
+.indicator-recompute-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── 指标编辑器 (IndicatorEditor) ────────────────────────── */
+.indicator-editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.indicator-editor-back {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: all 0.15s ease;
+}
+
+.indicator-editor-back:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.indicator-editor .indicator-editor-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.indicator-editor-save {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent-blue);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: all 0.15s ease;
+}
+
+.indicator-editor-save:hover {
+  background: #2563eb;
+}
+
+.indicator-editor-field {
+  padding: 8px 12px;
+}
+
+.indicator-editor-field label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.indicator-editor-name-input {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+
+.indicator-editor-name-input:focus {
+  border-color: var(--accent-blue);
+}
+
+.indicator-editor-code-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.indicator-editor-hint {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--font-mono);
+}
+
+.indicator-editor-codemirror {
+  height: 260px;
+  min-height: 180px;
+  margin: 0 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.indicator-editor-codemirror .cm-editor {
+  height: 100%;
+  background: var(--bg-primary);
+}
+
+.indicator-editor-codemirror .cm-editor .cm-scroller {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.indicator-editor-codemirror .cm-editor.cm-focused {
+  outline: none;
+}
+
+.indicator-editor-codemirror .cm-gutters {
+  background: var(--bg-tertiary);
+  border-right: 1px solid var(--border-color);
+  color: var(--text-muted);
+}
+
+.indicator-editor-params {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  outline: none;
+  resize: vertical;
+}
+
+.indicator-editor-params:focus {
+  border-color: var(--accent-blue);
+}
+
+.indicator-editor-params-error {
+  font-size: 11px;
+  color: var(--candle-down);
+  margin-left: 8px;
+  font-weight: 400;
+  text-transform: none;
+}
+
+.indicator-editor-help {
+  margin: 8px 12px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.indicator-editor-help summary {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.indicator-editor-help summary:hover {
+  color: var(--text-primary);
+}
+
+.indicator-editor-help-content {
+  padding: 8px 12px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.indicator-editor-help-content p {
+  margin: 6px 0;
+}
+
+.indicator-editor-help-content ul {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.indicator-editor-help-content code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent-cyan);
+  background: var(--bg-tertiary);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.indicator-editor-help-content pre {
+  margin: 8px 0;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  white-space: pre;
+}

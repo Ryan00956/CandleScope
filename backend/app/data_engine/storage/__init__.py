@@ -1,4 +1,6 @@
 from .klines_repo import (
+    AsyncKlinesRepoAdapter,
+    KlinesRepoAdapter,
     dataframe_to_rows,
     delete_klines,
     fetch_before,
@@ -11,6 +13,8 @@ from .klines_repo import (
 )
 
 __all__ = [
+    "AsyncKlinesRepoAdapter",
+    "KlinesRepoAdapter",
     "dataframe_to_rows",
     "delete_klines",
     "fetch_before",

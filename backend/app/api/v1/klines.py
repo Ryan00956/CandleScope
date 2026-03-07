@@ -1,9 +1,22 @@
 """
-Kline API routes.
-"""
-import asyncio
+Kline API routes — powered by DataManager facade.
 
-from fastapi import APIRouter, HTTPException, Query
+All endpoints delegate to the unified ``DataManager`` for data retrieval,
+which provides:
+  * Three-level query resolution: Cache → Storage → Backfill
+  * Automatic stream management (auto-start ingestion on demand)
+  * Consistent BarAggregator-based custom interval handling
+  * Event-driven cache warming
+
+The DataManager instance is stored on ``app.state.data_manager`` and
+initialized during application startup (see ``app/main.py``).
+"""
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.core.market import (
     INTERVAL_SECONDS,
@@ -14,18 +27,24 @@ from app.core.market import (
     parse_custom_interval,
 )
 from app.data_engine.mock_data import generate_mock_klines
-from app.data_engine.services import (
-    aggregate_klines,
-    aggregate_multi_resolution,
-    calculate_sma,
-    delete_cached_klines,
-    get_cached_history,
-    get_cached_latest,
-    get_cached_meta,
-    get_more_left,
-)
+
+# Legacy imports — kept as fallback only
+from app.data_engine.services import aggregate_klines, aggregate_multi_resolution
 
 router = APIRouter(prefix="/klines", tags=["klines"])
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Helpers
+# ═══════════════════════════════════════════════════════════════
+
+
+def _get_data_manager(request: Request) -> Any:
+    """Retrieve the DataManager from app state.
+
+    Returns None if not yet initialized (graceful fallback to legacy).
+    """
+    return getattr(request.app.state, "data_manager", None)
 
 
 def _validate_interval(interval: str) -> None:
@@ -45,14 +64,7 @@ def _validate_interval(interval: str) -> None:
 
 
 def _resolve_interval(interval: str) -> dict:
-    """Return resolution info for the requested interval.
-
-    Returns dict with keys:
-      - is_custom: bool
-      - custom_seconds: int (total seconds of target interval)
-      - base_interval: str (exchange-native interval to fetch)
-      - factor: int (how many base candles per custom candle)
-    """
+    """Return resolution info for the requested interval."""
     if not is_custom_interval(interval):
         secs = INTERVAL_SECONDS.get(interval, 60)
         return {
@@ -72,84 +84,304 @@ def _resolve_interval(interval: str) -> dict:
     }
 
 
+def _bars_to_dicts(bars: list) -> list[dict]:
+    """Convert BarData list to lightweight-charts dicts."""
+    return [b.to_dict() if hasattr(b, "to_dict") else b for b in bars]
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Endpoints — DataManager-powered
+# ═══════════════════════════════════════════════════════════════
+
 
 @router.get("/")
 async def get_klines(
+    request: Request,
     symbol: str = Query("BTCUSDT", description="Trading symbol, e.g. BTCUSDT"),
     interval: str = Query("1m", description="Kline interval"),
     limit: int = Query(500, ge=1, le=1000, description="Number of rows"),
 ):
+    """Get the latest K-line bars for a symbol/interval pair.
+
+    Uses DataManager.query_latest() which resolves through
+    Cache → Storage → Backfill automatically.
+    """
     _validate_interval(interval)
-    res = _resolve_interval(interval)
 
-    # For custom intervals, we need more base rows to produce `limit` aggregated candles
-    fetch_limit = min(limit * res["factor"], 5000) if res["is_custom"] else limit
+    dm = _get_data_manager(request)
+    if dm is not None:
+        try:
+            # Ensure stream is active (auto-starts ingestion if needed)
+            await dm.ensure_stream(symbol, interval)
 
-    try:
-        payload = await asyncio.to_thread(
-            get_cached_latest,
-            symbol=symbol,
-            interval=res["base_interval"],
-            limit=fetch_limit,
-        )
-        if payload["data"]:
-            data = payload["data"]
-            if res["is_custom"]:
-                data = aggregate_klines(data, res["custom_seconds"])
-                data = data[-limit:]  # trim to requested limit
+            # Query through DataManager's unified interface
+            result = await asyncio.to_thread(
+                dm.query_latest, symbol, interval, limit,
+            )
 
+            data = _bars_to_dicts(result.bars)
             return {
                 "symbol": symbol.upper(),
                 "interval": interval,
                 "count": len(data),
-                "source": payload["source"],
-                "fetched": payload["fetched"],
-                "cache": payload["bounds"],
+                "source": result.source.value,
+                "fetched": result.total,
+                "cache": result.metadata,
                 "data": data,
-                "base_interval": res["base_interval"] if res["is_custom"] else None,
+                "base_interval": None,
             }
-    except Exception as exc:  # noqa: BLE001
-        print(f"real kline fetch failed: {exc}")
+        except Exception as exc:
+            print(f"DataManager query failed, falling back to legacy: {exc}")
 
-    mock_data = generate_mock_klines(symbol=symbol, interval=res["base_interval"], count=fetch_limit)
-    if res["is_custom"]:
-        mock_data = aggregate_klines(mock_data, res["custom_seconds"])
-        mock_data = mock_data[-limit:]
-    return {
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "count": len(mock_data),
-        "source": "mock",
-        "fetched": 0,
-        "cache": {"earliest_open_time": None, "latest_open_time": None, "total_count": 0},
-        "data": mock_data,
-        "base_interval": res["base_interval"] if res["is_custom"] else None,
-    }
+    # ── Legacy fallback (when DataManager is not available) ──
+    return await _legacy_get_klines(symbol, interval, limit)
 
 
 @router.get("/latest")
 async def get_latest_klines(
+    request: Request,
     symbol: str = Query("BTCUSDT", description="Trading symbol, e.g. BTCUSDT"),
     interval: str = Query("1m", description="Kline interval"),
     limit: int = Query(2, ge=1, le=1000, description="Number of latest rows"),
 ):
+    """Get the very latest K-line bars (typically 1-2 for live updates)."""
+    _validate_interval(interval)
+
+    dm = _get_data_manager(request)
+    if dm is not None:
+        try:
+            await dm.ensure_stream(symbol, interval)
+            result = await asyncio.to_thread(
+                dm.query_latest, symbol, interval, limit,
+            )
+            data = _bars_to_dicts(result.bars)
+            return {
+                "symbol": symbol.upper(),
+                "interval": interval,
+                "count": len(data),
+                "source": result.source.value,
+                "fetched": result.total,
+                "cache": result.metadata,
+                "data": data,
+                "base_interval": None,
+            }
+        except Exception as exc:
+            print(f"DataManager latest query failed: {exc}")
+
+    return await _legacy_get_latest(symbol, interval, limit)
+
+
+@router.get("/history")
+async def get_klines_history(
+    request: Request,
+    symbol: str = Query("BTCUSDT", description="Trading symbol"),
+    interval: str = Query("1h", description="Kline interval"),
+    days: int = Query(7, ge=1, le=3650, description="Historical days"),
+):
+    """Get historical K-line bars for a time range."""
+    _validate_interval(interval)
+
+    dm = _get_data_manager(request)
+    if dm is not None:
+        try:
+            import time
+            end_ms = int(time.time() * 1000)
+            start_ms = end_ms - int(days * 24 * 60 * 60 * 1000)
+            
+            # Calculate the required limit to fit the requested days
+            from app.core.market import INTERVAL_SECONDS, parse_custom_interval
+            interval_secs = parse_custom_interval(interval) or 60
+            needed_limit = int((end_ms - start_ms) / 1000 / interval_secs) + 100
+
+            result = await asyncio.to_thread(
+                dm.query,
+                symbol, interval,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=needed_limit,
+            )
+            data = _bars_to_dicts(result.bars)
+            return {
+                "symbol": symbol.upper(),
+                "interval": interval,
+                "days": days,
+                "count": len(data),
+                "source": result.source.value,
+                "fetched": result.total,
+                "cache": result.metadata,
+                "data": data,
+                "base_interval": None,
+            }
+        except Exception as exc:
+            print(f"DataManager history query failed: {exc}")
+
+    return await _legacy_get_history(symbol, interval, days)
+
+
+@router.get("/history/before")
+async def get_klines_before(
+    request: Request,
+    symbol: str = Query("BTCUSDT", description="Trading symbol"),
+    interval: str = Query("1h", description="Kline interval"),
+    before: int = Query(..., description="Load data before this unix timestamp (seconds)"),
+    bars: int = Query(500, ge=50, le=1000, description="How many bars to load"),
+):
+    """Paginated historical data — load bars before a timestamp."""
+    _validate_interval(interval)
+
+    dm = _get_data_manager(request)
+    if dm is not None:
+        try:
+            before_ms = before * 1000
+            result = await asyncio.to_thread(
+                dm.query_before,
+                symbol, interval, before_ms, bars,
+            )
+            data = _bars_to_dicts(result.bars)
+            return {
+                "symbol": symbol.upper(),
+                "interval": interval,
+                "before": before,
+                "bars": bars,
+                "count": len(data),
+                "has_more": result.has_more,
+                "source": result.source.value,
+                "fetched": result.total,
+                "cache": result.metadata,
+                "data": data,
+                "base_interval": None,
+            }
+        except Exception as exc:
+            print(f"DataManager before query failed: {exc}")
+
+    return await _legacy_get_before(symbol, interval, before, bars)
+
+
+@router.get("/resolve")
+async def resolve_interval_info(
+    interval: str = Query(..., description="Interval to resolve, e.g. '7m' or '45m'"),
+):
+    """Return resolution metadata for a given interval string."""
     _validate_interval(interval)
     res = _resolve_interval(interval)
-    fetch_limit = min(limit * res["factor"] + res["factor"], 5000) if res["is_custom"] else limit
+    plan = find_optimal_fetch_plan(res["custom_seconds"]) if res["is_custom"] else None
+    return {
+        "interval": interval,
+        "is_custom": res["is_custom"],
+        "custom_seconds": res["custom_seconds"],
+        "base_interval": res["base_interval"],
+        "factor": res["factor"],
+        "fetch_plan": plan,
+    }
+
+
+@router.get("/storage/meta")
+async def get_storage_meta(
+    request: Request,
+    symbol: str = Query("BTCUSDT", description="Trading symbol"),
+    interval: str = Query("1h", description="Kline interval"),
+):
+    """Get storage metadata (bounds, count) for a series."""
+    _validate_interval(interval)
+
+    dm = _get_data_manager(request)
+    if dm is not None:
+        try:
+            bounds = await asyncio.to_thread(
+                dm.get_bounds, symbol, interval,
+            )
+            return {
+                "symbol": symbol.upper(),
+                "interval": interval,
+                "meta": bounds,
+            }
+        except Exception as exc:
+            print(f"DataManager bounds query failed: {exc}")
+
+    # Legacy fallback
+    from app.data_engine.services import get_cached_meta
+    meta = get_cached_meta(symbol=symbol, interval=interval)
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "meta": meta,
+    }
+
+
+@router.delete("/storage")
+async def delete_storage_data(
+    symbol: str = Query(..., description="Trading symbol"),
+    interval: str = Query(..., description="Kline interval"),
+    start: int | None = Query(None, description="start unix timestamp (seconds)"),
+    end: int | None = Query(None, description="end unix timestamp (seconds)"),
+):
+    """Delete stored K-line data for a symbol/interval range."""
+    _validate_interval(interval)
+    from app.data_engine.services import delete_cached_klines
+    res = _resolve_interval(interval)
+    deleted = delete_cached_klines(
+        symbol=symbol,
+        interval=res["base_interval"],
+        start_seconds=start,
+        end_seconds=end,
+    )
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "deleted": deleted,
+    }
+
+
+@router.get("/indicators/sma")
+async def get_sma(
+    symbol: str = Query("BTCUSDT", description="Trading symbol"),
+    interval: str = Query("1h", description="Kline interval"),
+    period: int = Query(20, ge=2, le=500),
+    start: int | None = Query(None, description="start unix timestamp (seconds)"),
+    end: int | None = Query(None, description="end unix timestamp (seconds)"),
+):
+    """Calculate SMA indicator values."""
+    _validate_interval(interval)
+    from app.data_engine.services import calculate_sma
+    res = _resolve_interval(interval)
+    values = calculate_sma(
+        symbol=symbol,
+        interval=res["base_interval"],
+        period=period,
+        start_seconds=start,
+        end_seconds=end,
+    )
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "period": period,
+        "count": len(values),
+        "data": values,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Legacy Fallback Functions (when DataManager is not initialized)
+# ═══════════════════════════════════════════════════════════════
+
+
+async def _legacy_get_klines(symbol: str, interval: str, limit: int) -> dict:
+    """Legacy path using old kline_cache_service."""
+    from app.data_engine.services import get_cached_latest
+
+    res = _resolve_interval(interval)
+    fetch_limit = min(limit * res["factor"], 5000) if res["is_custom"] else limit
 
     try:
         payload = await asyncio.to_thread(
-            get_cached_latest,
-            symbol=symbol,
-            interval=res["base_interval"],
-            limit=fetch_limit,
+            get_cached_latest, symbol=symbol,
+            interval=res["base_interval"], limit=fetch_limit,
         )
         if payload["data"]:
             data = payload["data"]
             if res["is_custom"]:
                 data = aggregate_klines(data, res["custom_seconds"])
                 data = data[-limit:]
-
             return {
                 "symbol": symbol.upper(),
                 "interval": interval,
@@ -160,8 +392,8 @@ async def get_latest_klines(
                 "data": data,
                 "base_interval": res["base_interval"] if res["is_custom"] else None,
             }
-    except Exception as exc:  # noqa: BLE001
-        print(f"latest kline fetch failed: {exc}")
+    except Exception as exc:
+        print(f"legacy kline fetch failed: {exc}")
 
     mock_data = generate_mock_klines(symbol=symbol, interval=res["base_interval"], count=fetch_limit)
     if res["is_custom"]:
@@ -179,45 +411,65 @@ async def get_latest_klines(
     }
 
 
-@router.get("/history")
-async def get_klines_history(
-    symbol: str = Query("BTCUSDT", description="Trading symbol"),
-    interval: str = Query("1h", description="Kline interval"),
-    days: int = Query(7, ge=1, le=3650, description="Historical days"),
-):
-    _validate_interval(interval)
+async def _legacy_get_latest(symbol: str, interval: str, limit: int) -> dict:
+    """Legacy path for /latest endpoint."""
+    from app.data_engine.services import get_cached_latest
+
     res = _resolve_interval(interval)
-    plan = find_optimal_fetch_plan(res["custom_seconds"]) if res["is_custom"] else None
+    fetch_limit = min(limit * res["factor"] + res["factor"], 5000) if res["is_custom"] else limit
 
     try:
-        if res["is_custom"] and plan and plan["use_multi_res"]:
-            # Multi-resolution: fetch coarse + fine in parallel
-            coarse_coro = asyncio.to_thread(
-                get_cached_history, symbol=symbol,
-                interval=plan["coarse_interval"], days=days,
-            )
-            fine_coro = asyncio.to_thread(
-                get_cached_history, symbol=symbol,
-                interval=plan["base_interval"], days=days,
-            )
-            coarse_payload, fine_payload = await asyncio.gather(coarse_coro, fine_coro)
-            data = aggregate_multi_resolution(
-                custom_interval_seconds=res["custom_seconds"],
-                coarse_rows=coarse_payload.get("data", []),
-                coarse_seconds=plan["coarse_seconds"],
-                fine_rows=fine_payload.get("data", []),
-                fine_seconds=plan["base_seconds"],
-            )
-            payload = fine_payload  # use fine payload for metadata
-        else:
-            payload = await asyncio.to_thread(
-                get_cached_history, symbol=symbol,
-                interval=res["base_interval"], days=days,
-            )
-            data = payload.get("data", [])
-            if res["is_custom"] and data:
+        payload = await asyncio.to_thread(
+            get_cached_latest, symbol=symbol,
+            interval=res["base_interval"], limit=fetch_limit,
+        )
+        if payload["data"]:
+            data = payload["data"]
+            if res["is_custom"]:
                 data = aggregate_klines(data, res["custom_seconds"])
+                data = data[-limit:]
+            return {
+                "symbol": symbol.upper(),
+                "interval": interval,
+                "count": len(data),
+                "source": payload["source"],
+                "fetched": payload["fetched"],
+                "cache": payload["bounds"],
+                "data": data,
+                "base_interval": res["base_interval"] if res["is_custom"] else None,
+            }
+    except Exception as exc:
+        print(f"legacy latest fetch failed: {exc}")
 
+    mock_data = generate_mock_klines(symbol=symbol, interval=res["base_interval"], count=fetch_limit)
+    if res["is_custom"]:
+        mock_data = aggregate_klines(mock_data, res["custom_seconds"])
+        mock_data = mock_data[-limit:]
+    return {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "count": len(mock_data),
+        "source": "mock",
+        "fetched": 0,
+        "cache": {"earliest_open_time": None, "latest_open_time": None, "total_count": 0},
+        "data": mock_data,
+        "base_interval": res["base_interval"] if res["is_custom"] else None,
+    }
+
+
+async def _legacy_get_history(symbol: str, interval: str, days: int) -> dict:
+    """Legacy path for /history endpoint."""
+    from app.data_engine.services import get_cached_history
+
+    res = _resolve_interval(interval)
+    try:
+        payload = await asyncio.to_thread(
+            get_cached_history, symbol=symbol,
+            interval=res["base_interval"], days=days,
+        )
+        data = payload.get("data", [])
+        if res["is_custom"] and data:
+            data = aggregate_klines(data, res["custom_seconds"])
         if data:
             return {
                 "symbol": symbol.upper(),
@@ -230,12 +482,16 @@ async def get_klines_history(
                 "data": data,
                 "base_interval": res["base_interval"] if res["is_custom"] else None,
             }
-    except Exception as exc:  # noqa: BLE001
-        print(f"history fetch failed: {exc}")
+    except Exception as exc:
+        print(f"legacy history fetch failed: {exc}")
 
     sec = INTERVAL_SECONDS.get(res["base_interval"] if res["is_custom"] else interval, 3600)
     count = min(int(days * 86400 / sec), 3000)
-    mock_data = generate_mock_klines(symbol=symbol, interval=res["base_interval"] if res["is_custom"] else interval, count=count)
+    mock_data = generate_mock_klines(
+        symbol=symbol,
+        interval=res["base_interval"] if res["is_custom"] else interval,
+        count=count,
+    )
     if res["is_custom"]:
         mock_data = aggregate_klines(mock_data, res["custom_seconds"])
     return {
@@ -251,45 +507,14 @@ async def get_klines_history(
     }
 
 
-@router.get("/history/before")
-async def get_klines_before(
-    symbol: str = Query("BTCUSDT", description="Trading symbol"),
-    interval: str = Query("1h", description="Kline interval"),
-    before: int = Query(..., description="Load data before this unix timestamp (seconds)"),
-    bars: int = Query(500, ge=50, le=1000, description="How many bars to load"),
-):
-    _validate_interval(interval)
+async def _legacy_get_before(
+    symbol: str, interval: str, before: int, bars: int,
+) -> dict:
+    """Legacy path for /history/before endpoint."""
+    from app.data_engine.services import get_more_left
+
     res = _resolve_interval(interval)
-    plan = find_optimal_fetch_plan(res["custom_seconds"]) if res["is_custom"] else None
-
-    if res["is_custom"] and plan and plan["use_multi_res"]:
-        # Multi-resolution: fetch coarse + fine data in parallel
-        needed_fine = min(bars * plan["factor"], 5000)
-        # Coarse bars: each custom bar has at most custom/coarse coarse candles
-        needed_coarse = min(bars * (res["custom_seconds"] // plan["coarse_seconds"] + 1), 3000)
-        max_batches_fine = max(12, (needed_fine // 1000) + 2)
-
-        coarse_coro = asyncio.to_thread(
-            get_more_left, symbol=symbol,
-            interval=plan["coarse_interval"],
-            before_seconds=before, bars=needed_coarse,
-        )
-        fine_coro = asyncio.to_thread(
-            get_more_left, symbol=symbol,
-            interval=plan["base_interval"],
-            before_seconds=before, bars=needed_fine,
-            max_batches=max_batches_fine,
-        )
-        coarse_payload, fine_payload = await asyncio.gather(coarse_coro, fine_coro)
-        data = aggregate_multi_resolution(
-            custom_interval_seconds=res["custom_seconds"],
-            coarse_rows=coarse_payload["data"],
-            coarse_seconds=plan["coarse_seconds"],
-            fine_rows=fine_payload["data"],
-            fine_seconds=plan["base_seconds"],
-        )
-        payload = fine_payload
-    elif res["is_custom"]:
+    if res["is_custom"]:
         needed_base = min(bars * res["factor"], 5000)
         max_batches = max(12, (needed_base // 1000) + 2)
         payload = await asyncio.to_thread(
@@ -319,89 +544,4 @@ async def get_klines_before(
         "cache": payload["bounds"],
         "data": data,
         "base_interval": res["base_interval"] if res["is_custom"] else None,
-    }
-
-
-@router.get("/resolve")
-async def resolve_interval_info(
-    interval: str = Query(..., description="Interval to resolve, e.g. '7m' or '45m'"),
-):
-    """Return resolution metadata for a given interval string.
-
-    Useful for the frontend to know the base interval for WebSocket
-    streaming when using custom intervals.
-    """
-    _validate_interval(interval)
-    res = _resolve_interval(interval)
-    plan = find_optimal_fetch_plan(res["custom_seconds"]) if res["is_custom"] else None
-    return {
-        "interval": interval,
-        "is_custom": res["is_custom"],
-        "custom_seconds": res["custom_seconds"],
-        "base_interval": res["base_interval"],
-        "factor": res["factor"],
-        "fetch_plan": plan,
-    }
-
-
-@router.get("/storage/meta")
-async def get_storage_meta(
-    symbol: str = Query("BTCUSDT", description="Trading symbol"),
-    interval: str = Query("1h", description="Kline interval"),
-):
-    _validate_interval(interval)
-    res = _resolve_interval(interval)
-    meta = get_cached_meta(symbol=symbol, interval=res["base_interval"])
-    return {
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "meta": meta,
-    }
-
-
-@router.delete("/storage")
-async def delete_storage_data(
-    symbol: str = Query(..., description="Trading symbol"),
-    interval: str = Query(..., description="Kline interval"),
-    start: int | None = Query(None, description="start unix timestamp (seconds)"),
-    end: int | None = Query(None, description="end unix timestamp (seconds)"),
-):
-    _validate_interval(interval)
-    res = _resolve_interval(interval)
-    deleted = delete_cached_klines(
-        symbol=symbol,
-        interval=res["base_interval"],
-        start_seconds=start,
-        end_seconds=end,
-    )
-    return {
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "deleted": deleted,
-    }
-
-
-@router.get("/indicators/sma")
-async def get_sma(
-    symbol: str = Query("BTCUSDT", description="Trading symbol"),
-    interval: str = Query("1h", description="Kline interval"),
-    period: int = Query(20, ge=2, le=500),
-    start: int | None = Query(None, description="start unix timestamp (seconds)"),
-    end: int | None = Query(None, description="end unix timestamp (seconds)"),
-):
-    _validate_interval(interval)
-    res = _resolve_interval(interval)
-    values = calculate_sma(
-        symbol=symbol,
-        interval=res["base_interval"],
-        period=period,
-        start_seconds=start,
-        end_seconds=end,
-    )
-    return {
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "period": period,
-        "count": len(values),
-        "data": values,
     }

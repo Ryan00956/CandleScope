@@ -1,0 +1,194 @@
+"""
+Binance Ingestion Factory — bridges the six-layer Ingestion pipeline
+into the DataManager's ``IngestionFactory`` protocol.
+
+This is the "last mile" wiring that was missing:
+
+    DataManager.set_ingestion_factory(BinanceIngestionFactory())
+
+When ``StreamCoordinator.ensure_stream()`` starts a new pipeline,
+it calls ``factory.start(symbol, interval, on_bar)`` which:
+
+  1. Creates a ``StreamDescriptor`` for the requested (symbol, interval).
+  2. Uses ``MarketDataIngress`` to spin up a full L1–L6 pipeline
+     (Transport → Session → FeedControl → Normalize → Continuity → Delivery).
+  3. Registers a callback on L6 ``DeliveryLayer`` that converts each
+     ``MarketEvent`` into a bar dict and feeds it to ``on_bar()``.
+  4. Returns a handle with a ``stop()`` coroutine.
+
+The ``on_bar()`` callback is wired by the coordinator into the
+BarAggregator L1–L5 pipeline, which then feeds Cache + EventBus.
+
+Data flow::
+
+    Binance WS/HTTP
+      → L1 Transport → L2 Session → L3 FeedControl
+      → L4 Normalize → L5 Continuity → L6 Delivery
+      → BinanceIngestionFactory (bridge)
+      → on_bar(bar_dict)
+      → StreamCoordinator._BarDictMarketEvent
+      → BarAggregator.on_market_event()
+      → L1 Router → L2 TimeBucket → L3 BarState → L4 Finalizer → L5 Publisher
+      → DataManager._on_aggregator_event()
+      → Cache + EventBus
+      → WebSocket subscribers (frontend)
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any, Callable, Awaitable
+
+from .config import IngestionConfig
+from .models import StreamType, StreamDescriptor, MarketEvent
+
+logger = logging.getLogger("ingestion.factory")
+
+
+class _IngestionHandle:
+    """Handle returned by ``BinanceIngestionFactory.start()``.
+
+    Provides a ``stop()`` coroutine that the coordinator calls
+    when tearing down a stream.
+    """
+    __slots__ = ("_ingress", "_stream_key")
+
+    def __init__(self, ingress: Any, stream_key: str) -> None:
+        self._ingress = ingress
+        self._stream_key = stream_key
+
+    async def stop(self) -> None:
+        """Stop and remove the underlying ingestion pipeline."""
+        try:
+            await self._ingress.remove_stream(self._stream_key)
+            logger.info("Ingestion pipeline stopped: %s", self._stream_key)
+        except Exception as exc:
+            logger.error(
+                "Error stopping ingestion pipeline %s: %s",
+                self._stream_key, exc,
+            )
+
+
+class BinanceIngestionFactory:
+    """Bridges the six-layer Ingestion architecture into the DataManager.
+
+    Implements the ``IngestionFactory`` protocol expected by
+    ``StreamCoordinator``:
+
+        async def start(self, symbol, interval, on_bar) -> handle
+        handle.stop()  — to tear down
+
+    Usage in ``main.py``::
+
+        from app.data_engine.ingestion.factory import BinanceIngestionFactory
+
+        dm = DataManager()
+        dm.set_ingestion_factory(BinanceIngestionFactory())
+        await dm.start()
+    """
+
+    def __init__(self, config: IngestionConfig | None = None) -> None:
+        self._cfg = config or IngestionConfig()
+        self._ingress: Any = None  # lazily created MarketDataIngress
+
+    async def _ensure_ingress(self) -> Any:
+        """Lazily create and start the shared MarketDataIngress instance."""
+        if self._ingress is None:
+            # Import here to avoid circular imports at module level
+            from . import MarketDataIngress
+
+            self._ingress = MarketDataIngress(self._cfg)
+            await self._ingress.start()
+            logger.info("MarketDataIngress initialized and started")
+        return self._ingress
+
+    async def start(
+        self,
+        symbol: str,
+        interval: str,
+        on_bar: Callable[[dict], Awaitable[None]],
+    ) -> _IngestionHandle:
+        """Start an ingestion stream for (symbol, interval).
+
+        Creates a full L1–L6 pipeline via ``MarketDataIngress.add_stream()``,
+        then registers a callback on L6 Delivery that forwards each
+        ``MarketEvent`` as a bar dict to ``on_bar()``.
+
+        Args:
+            symbol:   Trading pair, e.g. "BTCUSDT".
+            interval: K-line interval, e.g. "1m".
+            on_bar:   Async callback ``(bar_dict) -> None``.
+
+        Returns:
+            An ``_IngestionHandle`` with a ``stop()`` coroutine.
+        """
+        ingress = await self._ensure_ingress()
+
+        descriptor = StreamDescriptor(
+            symbol=symbol.upper(),
+            stream_type=StreamType.KLINE,
+            interval=interval,
+        )
+
+        # Check if pipeline already exists (idempotent)
+        existing = ingress.get_pipeline(descriptor.key)
+        if existing is not None:
+            logger.info(
+                "Pipeline already exists for %s, reusing",
+                descriptor.key,
+            )
+            # Add another callback to the existing pipeline
+            self._register_callback(existing, on_bar)
+            return _IngestionHandle(ingress, descriptor.key)
+
+        # Create a new L1–L6 pipeline
+        pipeline = await ingress.add_stream(descriptor)
+
+        # Bridge: L6 DeliveryLayer → on_bar(bar_dict)
+        self._register_callback(pipeline, on_bar)
+
+        logger.info("Ingestion pipeline started: %s", descriptor.key)
+        return _IngestionHandle(ingress, descriptor.key)
+
+    def _register_callback(self, pipeline: Any, on_bar: Callable) -> None:
+        """Register a callback on the pipeline's L6 Delivery layer.
+
+        Converts ``MarketEvent`` → bar dict that the coordinator
+        expects (matching the fields in ``_BarDictMarketEvent``).
+        """
+
+        async def _bridge(market_event: MarketEvent) -> None:
+            """Convert MarketEvent to bar_dict and forward to on_bar."""
+            # Only forward KLINE events
+            if market_event.event_type != StreamType.KLINE:
+                return
+
+            data = market_event.data
+            bar_dict = {
+                "time": data.get("open_time", 0) // 1000 if data.get("open_time", 0) > 1_000_000_000_000 else data.get("open_time", 0),
+                "open_time": data.get("open_time", 0),
+                "close_time": data.get("close_time", 0),
+                "open": data.get("open", 0),
+                "high": data.get("high", 0),
+                "low": data.get("low", 0),
+                "close": data.get("close", 0),
+                "volume": data.get("volume", 0),
+                "quote_volume": data.get("quote_volume", 0),
+                "trades": data.get("trades", 0),
+                "taker_buy_base": data.get("taker_buy_base", 0),
+                "taker_buy_quote": data.get("taker_buy_quote", 0),
+                "is_closed": data.get("is_closed", False),
+            }
+
+            try:
+                await on_bar(bar_dict)
+            except Exception as exc:
+                logger.error("on_bar callback error: %s", exc, exc_info=True)
+
+        pipeline.delivery.on_market_event(_bridge)
+
+    async def shutdown(self) -> None:
+        """Stop the shared MarketDataIngress (called during app shutdown)."""
+        if self._ingress is not None:
+            await self._ingress.stop()
+            self._ingress = None
+            logger.info("BinanceIngestionFactory shut down")

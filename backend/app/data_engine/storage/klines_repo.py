@@ -235,6 +235,178 @@ def get_bounds(symbol: str, interval: str) -> dict:
     return dict(row)
 
 
+# ═══════════════════════════════════════════════════════════════
+#  KlinesRepoAdapter — implements data_manager.StorageBackend protocol
+# ═══════════════════════════════════════════════════════════════
+
+
+class KlinesRepoAdapter:
+    """Wraps the module-level klines_repo functions into an object
+    that satisfies the ``data_manager.models.StorageBackend`` protocol.
+
+    Usage::
+
+        from app.data_engine.storage.klines_repo import KlinesRepoAdapter
+        dm = DataManager()
+        dm.set_storage(KlinesRepoAdapter())
+    """
+
+    def query_bars(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        limit: int | None = None,
+        order: str = "ASC",
+    ) -> list[dict]:
+        """Query bars from SQLite storage."""
+        return query_klines(
+            symbol=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit,
+            order=order,
+        )
+
+    def upsert_bars(
+        self,
+        symbol: str,
+        interval: str,
+        rows: list[dict],
+        source: str = "data_manager",
+    ) -> int:
+        """Insert or update bars in SQLite storage."""
+        return upsert_klines(
+            symbol=symbol,
+            interval=interval,
+            rows=rows,
+            source=source,
+        )
+
+    def get_bounds(self, symbol: str, interval: str) -> dict:
+        """Return {earliest_open_time, latest_open_time, total_count}."""
+        return get_bounds(symbol=symbol, interval=interval)
+
+    def delete_bars(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> int:
+        """Delete bars in range."""
+        return delete_klines(
+            symbol=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+
+    def fetch_before(
+        self,
+        symbol: str,
+        interval: str,
+        before_ms: int,
+        limit: int = 500,
+    ) -> list[dict]:
+        """Fetch bars before a timestamp, ordered ASC."""
+        return fetch_before(
+            symbol=symbol,
+            interval=interval,
+            before_ms=before_ms,
+            limit=limit,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+#  AsyncKlinesRepoAdapter — implements backfill.models.StorageBackend protocol
+# ═══════════════════════════════════════════════════════════════
+
+
+class AsyncKlinesRepoAdapter:
+    """Async wrapper that satisfies the ``backfill.models.StorageBackend``
+    protocol (all methods are async).
+
+    The BackfillEngine's GapDetector, Reconciler, etc. require async storage
+    methods like ``get_latest_time``, ``get_earliest_time``, ``count_bars``,
+    ``get_existing_open_times`` — which the sync ``KlinesRepoAdapter`` does
+    not provide.
+
+    This adapter wraps the module-level sync functions using
+    ``asyncio.to_thread`` so the backfill pipeline can call them with
+    ``await``.
+
+    Usage::
+
+        from app.data_engine.storage.klines_repo import AsyncKlinesRepoAdapter
+        backfill_engine = BackfillEngine(storage=AsyncKlinesRepoAdapter(), ...)
+    """
+
+    async def get_latest_time(self, symbol: str, interval: str) -> int | None:
+        """Return the latest open_time (ms) stored, or None if empty."""
+        import asyncio
+        def _sync():
+            bounds = get_bounds(symbol, interval)
+            return bounds.get("latest_open_time")
+        return await asyncio.to_thread(_sync)
+
+    async def get_earliest_time(self, symbol: str, interval: str) -> int | None:
+        """Return the earliest open_time (ms) stored, or None if empty."""
+        import asyncio
+        def _sync():
+            bounds = get_bounds(symbol, interval)
+            return bounds.get("earliest_open_time")
+        return await asyncio.to_thread(_sync)
+
+    async def query_time_range(
+        self, symbol: str, interval: str, start_ms: int, end_ms: int,
+    ) -> list[dict]:
+        """Return all bars within [start_ms, end_ms], ordered by open_time ASC."""
+        import asyncio
+        return await asyncio.to_thread(
+            query_klines, symbol, interval, start_ms, end_ms, None, "ASC",
+        )
+
+    async def upsert_bars(
+        self, symbol: str, interval: str, bars: list[dict], source: str = "backfill",
+    ) -> int:
+        """Insert or update bars. Return number of rows affected."""
+        import asyncio
+        return await asyncio.to_thread(upsert_klines, symbol, interval, bars, source)
+
+    async def count_bars(
+        self, symbol: str, interval: str, start_ms: int, end_ms: int,
+    ) -> int:
+        """Count bars within [start_ms, end_ms]."""
+        import asyncio
+        def _sync():
+            with _connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM klines "
+                    "WHERE symbol = ? AND interval = ? AND open_time >= ? AND open_time <= ?",
+                    (symbol, interval, start_ms, end_ms),
+                ).fetchone()
+                return row["cnt"] if row else 0
+        return await asyncio.to_thread(_sync)
+
+    async def get_existing_open_times(
+        self, symbol: str, interval: str, start_ms: int, end_ms: int,
+    ) -> set[int]:
+        """Return the set of open_time values that exist in [start_ms, end_ms]."""
+        import asyncio
+        def _sync():
+            with _connect() as conn:
+                rows = conn.execute(
+                    "SELECT open_time FROM klines "
+                    "WHERE symbol = ? AND interval = ? AND open_time >= ? AND open_time <= ?",
+                    (symbol, interval, start_ms, end_ms),
+                ).fetchall()
+                return {r["open_time"] for r in rows}
+        return await asyncio.to_thread(_sync)
+
+
 def has_older_than(symbol: str, interval: str, open_time_ms: int) -> bool:
     with _connect() as conn:
         row = conn.execute(

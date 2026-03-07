@@ -97,6 +97,23 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     // Counter to signal drawing system
     const [seriesReady, setSeriesReady] = useState(0);
 
+    const markUserInteracted = useCallback(() => {
+        userInteractedRef.current = true;
+    }, []);
+
+    const syncLogicalRangeAcrossPanes = useCallback((range, sourcePaneId = null) => {
+        if (!range) return;
+
+        if (mainPaneRef.current && sourcePaneId !== "main") {
+            mainPaneRef.current.setVisibleLogicalRange(range);
+        }
+        for (const [id, paneRef] of subPaneRefs.current.entries()) {
+            if (id !== sourcePaneId && paneRef) {
+                paneRef.setVisibleLogicalRange(range);
+            }
+        }
+    }, []);
+
     // Refs
     useEffect(() => { dataRef.current = data || []; }, [data]);
     useEffect(() => {
@@ -119,6 +136,21 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
             visibleRangeSaveTimerRef.current = null;
         }
     }, [datasetKey]);
+
+    useEffect(() => {
+        const wrapper = wrapperRef.current;
+        if (!wrapper) return;
+
+        wrapper.addEventListener("wheel", markUserInteracted, { passive: true });
+        wrapper.addEventListener("mousedown", markUserInteracted);
+        wrapper.addEventListener("touchstart", markUserInteracted, { passive: true });
+
+        return () => {
+            wrapper.removeEventListener("wheel", markUserInteracted);
+            wrapper.removeEventListener("mousedown", markUserInteracted);
+            wrapper.removeEventListener("touchstart", markUserInteracted);
+        };
+    }, [markUserInteracted]);
 
     // ── Compute pane height percentages when subPanes change ──
     useEffect(() => {
@@ -216,9 +248,9 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     const handleVisibleLogicalRangeChange = useCallback(({ paneId: sourcePaneId, range }) => {
         if (!range) return;
 
-        // Mark user interaction
-        userInteractedRef.current = true;
-        scheduleVisibleRangeSave();
+        if (userInteractedRef.current) {
+            scheduleVisibleRangeSave();
+        }
 
         // Check for need-more-left
         if (onNeedMoreLeftRef.current && canLoadMoreLeftRef.current && range.from <= LEFT_EDGE_TRIGGER_BARS) {
@@ -233,15 +265,8 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         }
 
         // Sync all other panes
-        if (mainPaneRef.current && sourcePaneId !== "main") {
-            mainPaneRef.current.setVisibleLogicalRange(range);
-        }
-        for (const [id, paneRef] of subPaneRefs.current.entries()) {
-            if (id !== sourcePaneId && paneRef) {
-                paneRef.setVisibleLogicalRange(range);
-            }
-        }
-    }, [scheduleVisibleRangeSave]);
+        syncLogicalRangeAcrossPanes(range, sourcePaneId);
+    }, [scheduleVisibleRangeSave, syncLogicalRangeAcrossPanes]);
 
     // ── Crosshair sync: imperatively sync all other panes (no React state) ──
     const handleCrosshairSync = useCallback(({ paneId: sourcePaneId, time }) => {
@@ -304,19 +329,39 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         const rangeToRestore = savedVisibleRangeRef.current;
         let restored = false;
 
-        if (rangeToRestore?.logical) {
+        if (Number.isFinite(rangeToRestore?.barSpacing)) {
+            mainPaneRef.current.applyTimeScaleOptions({ barSpacing: rangeToRestore.barSpacing });
+        }
+
+        if (rangeToRestore?.time) {
             try {
-                mainPaneRef.current.setVisibleLogicalRange(rangeToRestore.logical);
+                mainPaneRef.current.setVisibleTimeRange(rangeToRestore.time);
                 restored = true;
             } catch { /* */ }
+        }
+
+        if (!restored && rangeToRestore?.logical) {
+            try {
+                syncLogicalRangeAcrossPanes(rangeToRestore.logical);
+                restored = true;
+            } catch { /* */ }
+        }
+
+        if (Number.isFinite(rangeToRestore?.scrollPosition)) {
+            mainPaneRef.current.setScrollPosition(rangeToRestore.scrollPosition, false);
         }
 
         if (!restored) {
             mainPaneRef.current.fitContent();
         }
 
+        const syncedRange = mainPaneRef.current.getVisibleLogicalRange?.();
+        if (syncedRange) {
+            syncLogicalRangeAcrossPanes(syncedRange);
+        }
+
         hasRestoredRangeRef.current = true;
-    }, [data, datasetKey]);
+    }, [data, datasetKey, syncLogicalRangeAcrossPanes]);
 
     // ── Resizer logic: redistribute height between pane[i] and pane[i+1] ──
     const handleResize = useCallback((abovePaneId, belowPaneId, deltaY) => {
@@ -348,13 +393,6 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     const mainPaneContainerCallback = useCallback((node) => {
         mainContainerRef.current = node;
     }, []);
-
-    // ── Build the ordered list of panes + resizers ──
-    const allPaneIds = useMemo(() => {
-        const ids = ["main"];
-        for (const p of subPanes) ids.push(p.id);
-        return ids;
-    }, [subPanes]);
 
     // ── Compute time alignment array for sub-pane crosshair sync ──
     // This is the full sorted/deduplicated list of time values from main chart data.

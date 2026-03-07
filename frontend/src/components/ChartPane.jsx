@@ -8,7 +8,7 @@
  * Each pane is an independent createChart() instance. Time-axis and crosshair
  * synchronization is managed by the parent MultiPaneChart.
  */
-import { forwardRef, useEffect, useImperativeHandle, useRef, useCallback, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from "lightweight-charts";
 
 /* ── Localization helpers (shared with old ChartWidget) ─────── */
@@ -436,11 +436,32 @@ const ChartPane = forwardRef(function ChartPane({
             const chart = chartRef.current;
             if (!chart) return null;
             try {
+                const timeScale = chart.timeScale();
                 return {
-                    logical: chart.timeScale().getVisibleLogicalRange(),
-                    time: chart.timeScale().getVisibleRange(),
+                    logical: timeScale.getVisibleLogicalRange(),
+                    time: timeScale.getVisibleRange(),
+                    barSpacing: timeScale.options().barSpacing,
+                    scrollPosition: timeScale.scrollPosition(),
                 };
             } catch { return null; }
+        },
+        setVisibleTimeRange: (range) => {
+            const chart = chartRef.current;
+            if (!chart || !range) return;
+            isSyncingRef.current = true;
+            try {
+                chart.timeScale().setVisibleRange(range);
+            } catch { /* */ }
+            isSyncingRef.current = false;
+        },
+        setScrollPosition: (position, animated = false) => {
+            const chart = chartRef.current;
+            if (!chart || !Number.isFinite(position)) return;
+            isSyncingRef.current = true;
+            try {
+                chart.timeScale().scrollToPosition(position, animated);
+            } catch { /* */ }
+            isSyncingRef.current = false;
         },
         applyTimeScaleOptions: (opts) => {
             const chart = chartRef.current;

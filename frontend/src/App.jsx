@@ -148,7 +148,7 @@ function updateUserPref(key, value) {
   saveUserPrefs(prefs);
 }
 
-// Visible range persistence per interval
+// Visible range persistence per symbol + interval
 const VISIBLE_RANGE_KEY = "candlescope-visible-ranges";
 function loadVisibleRanges() {
   try {
@@ -156,14 +156,47 @@ function loadVisibleRanges() {
     return raw ? JSON.parse(raw) : {};
   } catch { return {}; }
 }
-function saveVisibleRangeForInterval(interval, range) {
+function buildVisibleRangeStorageKey(symbol, interval) {
+  return `${symbol}::${interval}`;
+}
+function normalizeVisibleRange(range) {
+  if (!range || typeof range !== "object") return null;
+  const normalized = {};
+  if (range.logical && Number.isFinite(range.logical.from) && Number.isFinite(range.logical.to)) {
+    normalized.logical = {
+      from: range.logical.from,
+      to: range.logical.to,
+    };
+  }
+  if (range.time && Number.isFinite(range.time.from) && Number.isFinite(range.time.to)) {
+    normalized.time = {
+      from: range.time.from,
+      to: range.time.to,
+    };
+  }
+  if (Number.isFinite(range.barSpacing)) {
+    normalized.barSpacing = range.barSpacing;
+  }
+  if (Number.isFinite(range.scrollPosition)) {
+    normalized.scrollPosition = range.scrollPosition;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+function saveVisibleRangeForInterval(symbol, interval, range) {
+  const normalized = normalizeVisibleRange(range);
+  if (!symbol || !interval || !normalized) return;
   const ranges = loadVisibleRanges();
-  ranges[interval] = range;
+  ranges[buildVisibleRangeStorageKey(symbol, interval)] = normalized;
   localStorage.setItem(VISIBLE_RANGE_KEY, JSON.stringify(ranges));
 }
-function getVisibleRangeForInterval(interval) {
+function getVisibleRangeForInterval(symbol, interval) {
+  if (!symbol || !interval) return null;
   const ranges = loadVisibleRanges();
-  return ranges[interval] || null;
+  return (
+    normalizeVisibleRange(ranges[buildVisibleRangeStorageKey(symbol, interval)]) ||
+    normalizeVisibleRange(ranges[interval]) ||
+    null
+  );
 }
 
 const INTERVAL_DAYS = {
@@ -931,10 +964,10 @@ export default function App() {
     if (chartWidgetRef.current?.getVisibleRange) {
       const range = chartWidgetRef.current.getVisibleRange();
       if (range) {
-        saveVisibleRangeForInterval(interval, range);
+        saveVisibleRangeForInterval(symbol, interval, range);
       }
     }
-  }, [interval]);
+  }, [interval, symbol]);
 
   // Save visible range on page close/refresh
   useEffect(() => {
@@ -1269,8 +1302,8 @@ export default function App() {
               theme={settings.theme}
               customBg={settings.customBg}
               timezone={settings.timezone}
-              savedVisibleRange={getVisibleRangeForInterval(interval)}
-              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(interval, range)}
+              savedVisibleRange={getVisibleRangeForInterval(symbol, interval)}
+              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(symbol, interval, range)}
               drawingTool={drawingTool}
               penColor={penColor}
               penSize={penSize}

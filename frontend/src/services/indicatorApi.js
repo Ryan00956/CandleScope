@@ -1,5 +1,15 @@
 /**
  * Indicator API service layer.
+ *
+ * Supports both the new Indicator Engine (built-in indicators computed
+ * server-side via optimized incremental algorithms) and legacy custom
+ * script execution.
+ *
+ * API endpoints:
+ *   GET  /indicators/presets          → list built-in indicator presets
+ *   GET  /indicators/presets/{id}     → get single preset with script
+ *   GET  /indicators/registry         → list raw indicator specs (advanced)
+ *   POST /indicators/compute          → compute indicator (engine or script)
  */
 const API_BASE = "http://localhost:8000/api/v1";
 
@@ -12,6 +22,10 @@ async function request(url, options = {}) {
   return response.json();
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  Preset / Registry endpoints
+// ═══════════════════════════════════════════════════════════════
+
 /** Fetch built-in preset indicators list */
 export async function fetchPresets() {
   return request(`${API_BASE}/indicators/presets`);
@@ -22,9 +36,75 @@ export async function fetchPreset(presetId) {
   return request(`${API_BASE}/indicators/presets/${presetId}`);
 }
 
-/** Fetch user-saved custom indicators */
+/** Fetch raw indicator specs from registry (advanced) */
+export async function fetchRegistry() {
+  return request(`${API_BASE}/indicators/registry`);
+}
+
+/** Fetch a single indicator spec from registry */
+export async function fetchRegistrySpec(name) {
+  return request(`${API_BASE}/indicators/registry/${name}`);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Compute endpoint
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Compute an indicator against OHLCV data.
+ *
+ * Supports two modes:
+ *   1. Engine mode: provide `name` (e.g. "MA") + `params` → server-side engine
+ *   2. Script mode: provide `script` + `params` → server-side Python exec
+ *
+ * The `script` field from presets starts with "# __ENGINE__:MA" which tells
+ * the backend to route to the engine instead of exec.
+ *
+ * @param {Object} options
+ * @param {string} [options.name]    - Indicator engine name (e.g. "MA", "MACD")
+ * @param {string} [options.script]  - Python script (for custom indicators)
+ * @param {Array}  options.ohlcv     - OHLCV bar data array
+ * @param {Object} [options.params]  - Indicator parameters
+ * @param {string} [options.symbol]  - Symbol context (default "UNKNOWN")
+ * @param {string} [options.interval] - Interval context (default "1m")
+ * @returns {Promise<{ok: boolean, error: string|null, lines: Array, result: Object|null}>}
+ */
+export async function computeIndicator({ name, script, ohlcv, params, symbol, interval }) {
+  const body = { ohlcv, params: params || {} };
+
+  // Prefer engine name if available
+  if (name) {
+    body.name = name;
+  }
+  if (script) {
+    body.script = script;
+  }
+  if (symbol) {
+    body.symbol = symbol;
+  }
+  if (interval) {
+    body.interval = interval;
+  }
+
+  return request(`${API_BASE}/indicators/compute`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Custom indicator endpoints (placeholder for future)
+// ═══════════════════════════════════════════════════════════════
+
+/** Fetch user-saved custom indicators (not yet implemented on backend) */
 export async function fetchCustomIndicators() {
-  return request(`${API_BASE}/indicators/custom`);
+  try {
+    return await request(`${API_BASE}/indicators/custom`);
+  } catch {
+    // Endpoint may not exist yet — return empty list
+    return [];
+  }
 }
 
 /** Save (create/update) a custom indicator */
@@ -40,14 +120,5 @@ export async function saveCustomIndicator({ id, name, script, description, param
 export async function deleteCustomIndicator(indicatorId) {
   return request(`${API_BASE}/indicators/custom/${indicatorId}`, {
     method: "DELETE",
-  });
-}
-
-/** Compute an indicator against OHLCV data */
-export async function computeIndicator({ script, ohlcv, params }) {
-  return request(`${API_BASE}/indicators/compute`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ script, ohlcv, params }),
   });
 }

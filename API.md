@@ -213,3 +213,102 @@ Indicates the health of the connection to the exchange (e.g., Binance). Used to 
 }
 ```
 *(Possible statuses: `starting`, `live`, `reconnecting`, `failed`, `stopped`)*
+
+---
+
+## 3. Utility API
+
+### 3.1 Resolve Custom Interval
+Used by the frontend to understand whether an interval is native or synthetic, and what the optimal underlying base interval should be.
+
+- **URL:** `/klines/resolve`
+- **Method:** `GET`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `interval`| string| **Yes**  | Interval string (e.g., `45m`) |
+
+**Success Response:**
+```json
+{
+  "requested": "45m",
+  "is_custom": true,
+  "base_interval": "1m",
+  "multiplier": 45,
+  "seconds": 2700
+}
+```
+
+### 3.2 Delete Storage Data
+Utility to selectively wipe cached SQLite records. This does not block or clear the in-memory cache, but will force a fresh fetch from the exchange on the next reload.
+
+- **URL:** `/klines/storage/delete`
+- **Method:** `DELETE`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `symbol`  | string| **Yes**  | Trading pair |
+| `interval`| string| **Yes**  | Time interval |
+| `start`   | int  | No       | Start window MS |
+| `end`     | int  | No       | End window MS |
+
+### 3.3 Quick Simple Moving Average (SMA)
+Convenience endpoint for quickly plotting a backend-calculated SMA line without needing a full indicator payload.
+
+- **URL:** `/klines/indicators/sma`
+- **Method:** `GET`
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `symbol`  | string| **Yes**  | `BTCUSDT` | Trading pair |
+| `interval`| string| **Yes**  | `1h`      | Time interval |
+| `period`  | int  | No       | `20`      | SMA rolling window |
+
+---
+
+## 4. Indicator Engine API
+
+Provides endpoints for managing user-defined custom indicators (Python sandbox) and standard built-in indicator presets.
+
+### 4.1 Indicator Presets & Custom Scripts
+
+- **`GET /indicators/presets`**: List built-in system presets (Metadata only, script is hidden).
+- **`GET /indicators/presets/{preset_id}`**: Fetch the full detail of a built-in preset including its raw Python script.
+- **`GET /indicators/custom`**: List all user-saved custom indicators.
+- **`POST /indicators/custom`**: Create or update a custom indicator.
+  *(Body: `{ "id": "uuid" (optional), "name": "...", "script": "def main(data)..." }`)*
+- **`DELETE /indicators/custom/{indicator_id}`**: Delete a user's custom indicator.
+
+### 4.2 Compute Indicator
+The powerhouse endpoint. The frontend passes a raw block of OHLCV data alongside a Python script, and the backend securely executes the script in an isolated thread, returning the computed vector plotting data ready for Lightweight Charts.
+
+- **URL:** `/indicators/compute`
+- **Method:** `POST`
+
+**Request Body:**
+```json
+{
+  "script": "def main(klines, params):\n    return [{'time': k['time'], 'value': k['close']}]",
+  "ohlcv": [
+    { "time": 1700000000, "open": ..., "close": ... }
+  ],
+  "params": {
+    "my_multiplier": 1.5
+  }
+}
+```
+
+**Success Response:**
+```json
+{
+  "ok": true,
+  "error": null,
+  "lines": [
+    {
+       "id": "line_0",
+       "color": "#ff0000",
+       "data": [ {"time": 1700000000, "value": 42050.0} ]
+    }
+  ]
+}
+```

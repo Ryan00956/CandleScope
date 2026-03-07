@@ -215,3 +215,102 @@ http://localhost:8000/api/v1
 }
 ```
 *(其核心可用状态字面量可能包含: `starting`, `live`, `reconnecting`, `failed`, `stopped`)*
+
+---
+
+## 3. 运维与辅助计算接口 (Utility API)
+
+### 3.1 周期合成自省解析
+供前端验证某周期（如 `45m`）是否合法，并获取该周期合成所需的基准组件和乘数计算公式。
+
+- **请求路径:** `/klines/resolve`
+- **请求方式:** `GET`
+
+| 参数名 | 类型 | 必填 | 描述 |
+|-----------|------|----------|-------------|
+| `interval`| string| **是**  | 请求探测的周期字母串 (如 `45m`) |
+
+**成功响应:**
+```json
+{
+  "requested": "45m",
+  "is_custom": true,
+  "base_interval": "1m",
+  "multiplier": 45,
+  "seconds": 2700
+}
+```
+
+### 3.2 强行擦除存储区 (Delete Storage Data)
+维护工具接口：选择性销毁某区间保存在 SQLite 里的缓存数据（注意，不会清空内存中的 Cache）。下次图表滚动到该区域时会强制触发从币安重新拉取的回填逻辑。
+
+- **请求路径:** `/klines/storage/delete`
+- **请求方式:** `DELETE`
+
+| 参数名 | 类型 | 必填 | 描述 |
+|-----------|------|----------|-------------|
+| `symbol`  | string| **是**  | 交易对标识 |
+| `interval`| string| **是**  | K线周期 |
+| `start`   | int  | 否       | 开始擦除的边界秒级时间戳 |
+| `end`     | int  | 否       | 最晚擦除的边界秒级时间戳 |
+
+### 3.3 快速移动平均线 (SMA 快算)
+轻量级辅点接口，通过服务端直接算好单根 MA 线并投递给前端图表划线，节省客户端资源。完整的公式计算请移步下方的 Indicator Engine API。
+
+- **请求路径:** `/klines/indicators/sma`
+- **请求方式:** `GET`
+
+| 参数名 | 类型 | 必填 | 默认值 | 描述 |
+|-----------|------|----------|---------|-------------|
+| `symbol`  | string| **是**  | `BTCUSDT` | 交易对标识 |
+| `interval`| string| **是**  | `1h`      | 计算参照周期 |
+| `period`  | int  | 否       | `20`      | 多长周期的均线 |
+
+---
+
+## 4. 指标运算沙盒 API (Indicator Engine)
+
+系统内建的沙盒执行引擎 API（完全用 Python 环境隔绝对前端代码注入进行重型数值计算和划线推演）。
+
+### 4.1 指标脚本 CRUD
+
+- **`GET /indicators/presets`**: 获取全部系统预装出厂指标信息 (不含脚本源码，仅下发元信息)。
+- **`GET /indicators/presets/{preset_id}`**: 单纯抓取某一个系统预设的全部计算源码及描绘参数。
+- **`GET /indicators/custom`**: 游览用户自己在图表平台手写的全套自定义指标库。
+- **`POST /indicators/custom`**: 保存或新建脚本。
+  *(Body: `{ "id": "uuid" (新建可不传), "name": "...", "script": "def main(data)..." }`)*
+- **`DELETE /indicators/custom/{indicator_id}`**: 强力删除。
+
+### 4.2 核心云计算算力网关 (Compute Indicator)
+重型接口。前端把本地拖拽出来的 **成百万条 OHLCV 数据阵** 打包发往服务端，服务端在隔离沙盒内载入用户书写的 Python 函数，瞬间进行向量计算并传回划线数组以供图表画出线形图。
+
+- **请求路径:** `/indicators/compute`
+- **请求方式:** `POST`
+
+**Request Body:**
+```json
+{
+  "script": "def main(klines, params):\n    return [{'time': k['time'], 'value': k['close']}]",
+  "ohlcv": [
+    { "time": 1700000000, "open": ..., "close": ... }
+  ],
+  "params": {
+    "my_multiplier": 1.5
+  }
+}
+```
+
+**极其精细的数组绘图矢量数据应答:**
+```json
+{
+  "ok": true,
+  "error": null,
+  "lines": [
+    {
+       "id": "line_0",
+       "color": "#ff0000",
+       "data": [ {"time": 1700000000, "value": 42050.0} ]
+    }
+  ]
+}
+```

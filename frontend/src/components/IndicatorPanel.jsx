@@ -73,6 +73,7 @@ export default function IndicatorPanel({
       onAddIndicator({
         id: full.id,
         name: full.name,
+        engineName: full.engineName || null,  // registry key for compute API
         script: full.script,
         params: full.params || {},
         description: full.description || "",

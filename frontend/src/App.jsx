@@ -396,6 +396,10 @@ export default function App() {
 
   // ============================================================
   //  LOAD DATA — optimized for speed
+  //  NOTE: When no cache exists, we keep loading=true until full
+  //  history arrives (or backfill completes via WS).  This avoids
+  //  showing an incorrect chart with only a few real-time bars
+  //  before gap-fill is done.
   // ============================================================
   const loadData = useCallback(async (sym, intv) => {
     if (abortRef.current) abortRef.current.abort();
@@ -455,7 +459,9 @@ export default function App() {
 
     if (controller.signal.aborted) return;
 
-    // Process QUICK result
+    // Process QUICK result — silently stage data behind loading overlay.
+    // Do NOT clear loading here when no cache hit; we wait for full
+    // history or backfill completion to ensure the chart is correct.
     if (quickResult?.data?.length) {
       setChartData((prev) => {
         if (prev.length === 0) {
@@ -475,15 +481,14 @@ export default function App() {
       setDataSource(quickResult.source || "unknown");
       if (custom) customCandleRef.current = { ...latestTick };
 
-      if (!shownInitialData) {
-        setConnectionStatus("connected");
-        setDatasetKey((v) => v + 1);
-        setLoading(false);
-        shownInitialData = true;
+      // Only clear loading immediately if we already had a cache hit
+      // (data is already reliable).  Otherwise keep loading overlay.
+      if (shownInitialData) {
+        // Cache was already shown; quickResult just refreshes it — no-op.
       }
     }
 
-    // Process FULL HISTORY result
+    // Process FULL HISTORY result — this is the "correct" dataset.
     if (historyResult?.data?.length) {
       setChartData((prev) => {
         const merged = mergeByTime(historyResult.data, prev);
@@ -502,15 +507,35 @@ export default function App() {
       if (custom) {
         customCandleRef.current = { ...latest };
       }
-    } else if (!shownInitialData) {
-      // Don't show error immediately — backfill may be in progress.
-      // The QueryEngine auto-triggers backfill when storage is empty,
-      // and we'll receive a backfill_completed event via WS once data arrives.
-      setConnectionStatus("loading");
+      // History arrived — data is reliable, clear loading.
       setLoading(false);
+    } else if (!shownInitialData) {
+      // No history available yet — backfill is likely in progress.
+      // Keep loading=true; the backfill_completed WS handler will
+      // call setLoading(false) + setDatasetKey() once data arrives.
+      // Set a safety timeout so we don't get stuck forever if
+      // backfill fails or takes too long.
+      setConnectionStatus("loading");
+
+      const BACKFILL_TIMEOUT_MS = 30_000;
+      const safetyTimer = setTimeout(() => {
+        if (controller.signal.aborted) return;
+        // Force-show whatever we have after timeout
+        setLoading(false);
+        if (!shownInitialData) {
+          setDatasetKey((v) => v + 1);
+        }
+      }, BACKFILL_TIMEOUT_MS);
+      // If the component is unmounted / interval changes, cancel the timer
+      controller.signal.addEventListener("abort", () => clearTimeout(safetyTimer));
     }
 
-    setLoading(false);
+    // Only clear loading if history provided data (handled above)
+    // or cache was hit (handled at the top).  Do NOT unconditionally
+    // setLoading(false) here — that was the old bug.
+    if (shownInitialData) {
+      setLoading(false);
+    }
   }, [saveToCache, updateLastPrice]);
 
   useEffect(() => {

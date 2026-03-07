@@ -175,6 +175,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
             {
               id: full.id,
               name: full.name,
+              engineName: full.engineName || null,  // registry key for compute API
               script: full.script,
               params: full.params || {},
               description: full.description || "",
@@ -508,7 +509,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     }
     lastComputeSignatureRef.current = dataSignature;
 
-    const indicators = currentIndicators.filter((i) => i.script);
+    const indicators = currentIndicators.filter((i) => i.script || i.name || i.id);
     if (indicators.length === 0) {
       computingRef.current = false;
       return;
@@ -531,6 +532,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
         indicators.map(async (ind) => {
           try {
             const result = await computeIndicator({
+              name: ind.engineName || undefined,  // use registry key, not display name
               script: ind.script,
               ohlcv,
               params: ind.params || {},

@@ -19,7 +19,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.indicators import router as indicators_router
+from app.api.v1.indicators import router as indicators_router  # indicator engine v2
 from app.api.v1.klines import router as klines_router
 from app.api.v1.stream import router as stream_router
 from app.core.config import CORS_ORIGINS
@@ -188,6 +188,59 @@ async def _init_data_manager() -> None:
         app.state.data_manager = dm
         logger.info("DataManager initialized and started successfully")
         print("[startup] DataManager initialized ✓")
+
+        # ── 5. Bridge IndicatorEngine to DataManager EventBus ──
+        #   The IndicatorEngine listens to BAR_CLOSED / BAR_UPDATED /
+        #   BACKFILL_COMPLETED events and incrementally updates all
+        #   subscribed indicator instances in real time.
+        try:
+            from app.indicator import create_engine
+            from app.data_engine.data_manager.models import DataEventType
+
+            indicator_engine = create_engine()
+            app.state.indicator_engine = indicator_engine
+
+            async def _on_bar_event_for_indicators(event):
+                """Bridge DataManager bar events → IndicatorEngine."""
+                bar = event.bar
+                if bar is None:
+                    return
+                symbol = event.key.symbol
+                interval = event.key.interval
+
+                if event.event_type == DataEventType.BAR_CLOSED:
+                    indicator_engine.on_bar_closed(symbol, interval, bar)
+                elif event.event_type == DataEventType.BAR_UPDATED:
+                    indicator_engine.on_bar_updated(symbol, interval, bar)
+
+            async def _on_backfill_for_indicators(event):
+                """Bridge DataManager backfill events → IndicatorEngine recompute."""
+                symbol = event.key.symbol
+                interval = event.key.interval
+                # Query all cached bars and trigger recompute
+                try:
+                    result = dm.query_latest(symbol, interval, limit=5000)
+                    if result.bars:
+                        indicator_engine.on_bars_backfilled(symbol, interval, result.bars)
+                except Exception as exc:
+                    logger.warning("Indicator recompute after backfill failed: %s", exc)
+
+            # Subscribe to bar events (for real-time indicator updates)
+            dm.subscribe(
+                callback=_on_bar_event_for_indicators,
+                event_types={DataEventType.BAR_CLOSED, DataEventType.BAR_UPDATED},
+            )
+
+            # Subscribe to backfill events (for historical correction)
+            dm.subscribe(
+                callback=_on_backfill_for_indicators,
+                event_types={DataEventType.BACKFILL_COMPLETED},
+            )
+
+            print("[startup] IndicatorEngine bridged to DataManager ✓")
+        except Exception as exc:
+            logger.warning("IndicatorEngine bridge failed: %s", exc)
+            print(f"[startup] IndicatorEngine bridge failed: {exc}")
 
     except Exception as exc:
         logger.error("DataManager initialization failed: %s", exc, exc_info=True)

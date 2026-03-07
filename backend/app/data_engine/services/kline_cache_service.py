@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import threading
 
 import pandas as pd
@@ -189,9 +189,18 @@ def _backfill_left(
     target_start_ms: int,
     end_ms: int | None = None,
     max_batches: int = MAX_BACKFILL_BATCHES,
+    _snapshot_earliest: int | None = "NOT_SET",
 ) -> int:
-    bounds = get_bounds(symbol, interval)
-    earliest = bounds["earliest_open_time"]
+    # Take a snapshot of the earliest bound at call time to avoid race
+    # conditions when _refresh_right is writing concurrently.
+    # The caller (e.g. _ensure_cached_range_serial) can pass in a
+    # pre-fetched snapshot via _snapshot_earliest to guarantee consistency.
+    if _snapshot_earliest == "NOT_SET":
+        bounds = get_bounds(symbol, interval)
+        earliest = bounds["earliest_open_time"]
+    else:
+        earliest = _snapshot_earliest
+
     if earliest is not None and earliest <= target_start_ms:
         return 0
 
@@ -218,6 +227,14 @@ def _backfill_left(
         if oldest <= target_start_ms:
             break
         if oldest >= cursor_end:
+            break
+
+        # After writing this batch, check if we've connected to existing
+        # data in the DB (another thread may have inserted newer data).
+        # This closes gaps when backfill runs concurrently with refresh.
+        fresh_bounds = get_bounds(symbol, interval)
+        fresh_earliest = fresh_bounds["earliest_open_time"]
+        if fresh_earliest is not None and fresh_earliest <= target_start_ms:
             break
 
         cursor_end = oldest - 1
@@ -308,17 +325,39 @@ def _refresh_right_if_needed(symbol: str, interval: str, now_ms: int) -> int:
 
 
 def _ensure_cached_range(symbol: str, interval: str, start_ms: int, end_ms: int) -> int:
-    """Backfill left + refresh right in PARALLEL using thread pool."""
-    futures = []
-    futures.append(_io_pool.submit(_backfill_left, symbol, interval, start_ms, end_ms))
-    futures.append(_io_pool.submit(_refresh_right, symbol, interval, end_ms))
+    """Refresh right FIRST, then backfill left — SERIAL execution.
 
+    Running these two phases in parallel caused a race condition:
+    _refresh_right could write a few recent bars, then _backfill_left
+    would see a non-None earliest (from refresh's data), set
+    cursor_end = earliest - 1, and skip the gap between the refresh
+    data and the true historical range — producing visible gaps in the
+    chart.
+
+    By running refresh first, we ensure _backfill_left sees the
+    correct earliest bound and fills all the way back without gaps.
+    """
     written = 0
-    for f in as_completed(futures):
-        try:
-            written += f.result(timeout=30)
-        except Exception as exc:
-            print(f"_ensure_cached_range sub-task error: {exc}")
+
+    # Step 1: Refresh the right side (latest closed candles)
+    try:
+        written += _refresh_right(symbol, interval, end_ms)
+    except Exception as exc:
+        print(f"_ensure_cached_range refresh_right error: {exc}")
+
+    # Step 2: Snapshot bounds AFTER refresh, then backfill left
+    # Pass the snapshot to _backfill_left so it doesn't re-read
+    # bounds at a different moment.
+    try:
+        bounds = get_bounds(symbol, interval)
+        snapshot_earliest = bounds["earliest_open_time"]
+        written += _backfill_left(
+            symbol, interval, start_ms, end_ms,
+            _snapshot_earliest=snapshot_earliest,
+        )
+    except Exception as exc:
+        print(f"_ensure_cached_range backfill_left error: {exc}")
+
     return written
 
 

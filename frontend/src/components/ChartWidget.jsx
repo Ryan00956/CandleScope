@@ -259,6 +259,7 @@ const ChartWidget = forwardRef(function ChartWidget({
                 textColor: theme === "light" ? "#1e293b" : "#94a3b8",
                 fontFamily: "'Inter', sans-serif",
                 fontSize: 12,
+                attributionLogo: false,
             },
             grid: {
                 vertLines: { color: theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)" },

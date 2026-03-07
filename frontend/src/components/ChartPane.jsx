@@ -100,6 +100,7 @@ const ChartPane = forwardRef(function ChartPane({
                 textColor,
                 fontFamily: "'Inter', sans-serif",
                 fontSize: 12,
+                attributionLogo: false,
             },
             grid: {
                 vertLines: { color: gridColor },

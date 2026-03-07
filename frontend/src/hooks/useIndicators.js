@@ -1,18 +1,18 @@
 /**
- * useIndicators — manages active indicators, computation, and line series on the chart.
+ * useIndicators — manages active indicators, computation, and multi-pane line data.
  *
- * Each active indicator gets its own LineSeries / HistogramSeries (or multiple) on the chart.
- * Volume is now a built-in indicator (id="vol") that is auto-added on first load.
- * Each separate-pane indicator gets its own price scale with visible axis labels.
- * Recomputes automatically when chartData changes or indicators are added/removed.
+ * **Multi-pane architecture (v2):**
+ * Instead of adding series directly to a single chart, this hook now computes
+ * indicator data and outputs structured pane information:
+ *   - `mainOverlayLines` — line data for the main chart (overlay indicators)
+ *   - `subPanes`         — array of {id, label, lines} for separate/volume panes
  *
- * NOTE: chartRef / seriesRef are "ref-to-ref" — i.e. chartRef.current is itself
- * a React ref whose .current holds the live lightweight-charts instance.  This
- * guarantees the indicator system always reads the exact same chart object that
- * ChartWidget is using, even after chart recreation.
+ * The MultiPaneChart component uses this data to create independent chart instances
+ * per pane, each with its own price scale and auto-scaling.
+ *
+ * Volume is auto-added as a built-in indicator on first load.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LineSeries, HistogramSeries } from "lightweight-charts";
 import { computeIndicator, fetchPreset } from "../services/indicatorApi";
 
 const ACTIVE_INDICATORS_KEY = "candlescope-active-indicators";
@@ -29,60 +29,6 @@ function loadActiveIndicators() {
 
 function saveActiveIndicators(list) {
   localStorage.setItem(ACTIVE_INDICATORS_KEY, JSON.stringify(list));
-}
-
-/**
- * Safely dereference a "ref-to-ref" to get the live chart / series instance.
- * Handles both patterns:
- *   - ref-to-ref:  outerRef.current is a React ref → outerRef.current.current
- *   - plain ref:   outerRef.current is the object itself (legacy)
- *
- * We detect a React ref by checking if the object is a plain wrapper with
- * only a `current` property (Object.keys length ≤ 1) and not a complex
- * chart/DOM object.
- */
-function deref(outerRef) {
-  const inner = outerRef?.current;
-  if (!inner) return null;
-  // A React ref is a plain object like { current: <value> }.
-  // Chart instances, DOM nodes, and series objects have many own properties
-  // or are instances of specific classes — they won't match this check.
-  if (
-    inner &&
-    typeof inner === "object" &&
-    "current" in inner &&
-    Object.getPrototypeOf(inner) === Object.prototype
-  ) {
-    return inner.current;
-  }
-  return inner;
-}
-
-/**
- * Calculate scaleMargins for each separate pane so they don't overlap.
- * The main chart area occupies the top portion, and separate panes
- * (volume + each separate indicator) are stacked below.
- *
- * @param {number} totalSeparatePanes - total number of separate panes (volume counts as 1)
- * @param {number} paneIndex - 0-based index of this pane among separate panes
- * @returns {{ top: number, bottom: number }}
- */
-function calculatePaneMargins(totalSeparatePanes, paneIndex) {
-  // Reserve the top portion for the main chart (candlesticks + overlay indicators)
-  const mainChartRatio = 0.65; // main chart gets 65% of height
-  const separateAreaRatio = 1 - mainChartRatio; // 35% for all separate panes
-  const gap = 0.008; // small gap between panes
-  const totalGaps = Math.max(0, totalSeparatePanes - 1) * gap;
-  const usableArea = separateAreaRatio - totalGaps;
-  const paneHeight = usableArea / totalSeparatePanes;
-
-  const top = mainChartRatio + paneIndex * (paneHeight + gap);
-  const bottom = 1 - top - paneHeight;
-
-  return {
-    top: Math.min(Math.max(top, 0), 0.95),
-    bottom: Math.min(Math.max(bottom, 0.01), 0.95),
-  };
 }
 
 function buildDataSignature(data) {
@@ -109,8 +55,8 @@ function buildDataSignature(data) {
 
 /**
  * @param {object} opts
- * @param {React.MutableRefObject} opts.chartRef        — ref-to-ref to lightweight-charts chart instance
- * @param {React.MutableRefObject} opts.seriesRef       — ref-to-ref to the candlestick series
+ * @param {React.MutableRefObject} opts.chartRef        — ref-to-ref to main chart instance (for legacy compat)
+ * @param {React.MutableRefObject} opts.seriesRef       — ref-to-ref to the candlestick series (for legacy compat)
  * @param {Array}                  opts.chartData       — current OHLCV data array
  * @param {string}                 opts.datasetKey      — changes when chart is recreated
  * @param {number}                 opts.seriesReady     — increments when chart series is ready
@@ -120,32 +66,27 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
   const [activeIndicators, setActiveIndicators] = useState(loadActiveIndicators);
   const [computing, setComputing] = useState(false);
 
-  // Map: indicatorId -> [series instances on the chart]
-  const lineSeriesMapRef = useRef(new Map());
+  // Structured output for multi-pane rendering
+  const [mainOverlayLines, setMainOverlayLines] = useState([]);
+  const [subPanes, setSubPanes] = useState([]);
+
   const lastComputeSignatureRef = useRef("");
   const queuedRecomputeRef = useRef(false);
   const queuedForceRecomputeRef = useRef(false);
 
-  // Keep a ref to activeIndicators so computeAll always sees the latest
+  // Keep refs to always-latest values
   const activeIndicatorsRef = useRef(activeIndicators);
   activeIndicatorsRef.current = activeIndicators;
-
-  // Keep a ref to chartData so computeAll always sees the latest
   const chartDataRef = useRef(chartData);
   chartDataRef.current = chartData;
 
-  // Flag to indicate a forced compute is pending (survives effect re-runs)
+  // Flag for forced compute
   const pendingForceComputeRef = useRef(false);
-
-  // Flag to prevent double-init of vol indicator
   const volInitRef = useRef(false);
-
-  // Track if computeAll is currently running to prevent overlapping calls
   const computingRef = useRef(false);
 
   // Persist active indicators to localStorage
   useEffect(() => {
-    // Strip computed line data before saving (only save config)
     const toSave = activeIndicators.map(({ lines, error, ...rest }) => rest);
     saveActiveIndicators(toSave);
   }, [activeIndicators]);
@@ -155,15 +96,12 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     if (volInitRef.current) return;
     volInitRef.current = true;
 
-    // Check if vol is already in active indicators
     const current = loadActiveIndicators();
     if (current.some((i) => i.id === "vol")) return;
 
-    // Check if we've ever initialized (don't re-add if user explicitly removed it)
     const wasInit = localStorage.getItem(VOL_INIT_KEY);
     if (wasInit) return;
 
-    // First time: fetch vol preset and add it
     localStorage.setItem(VOL_INIT_KEY, "1");
     fetchPreset("vol")
       .then((full) => {
@@ -175,7 +113,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
             {
               id: full.id,
               name: full.name,
-              engineName: full.engineName || null,  // registry key for compute API
+              engineName: full.engineName || null,
               script: full.script,
               params: full.params || {},
               description: full.description || "",
@@ -191,169 +129,33 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
       .catch((err) => console.warn("Failed to auto-add vol indicator:", err));
   }, []);
 
-  // ── Recalculate layout for all separate panes ─────────────
-  // Accepts optional explicit indicator list to avoid stale ref issues
-  const relayoutPanes = useCallback((explicitIndicators) => {
-    const chart = deref(chartRef);
-    if (!chart) return;
-
-    const indicators = explicitIndicators || activeIndicatorsRef.current;
-
-    // Collect volume-pane and separate-pane indicator IDs
-    let hasVolume = false;
-    const separatePaneIds = [];
-
-    for (const ind of indicators) {
-      if (!ind.visible) continue;
-      if (ind.lines && ind.lines.length > 0) {
-        for (const l of ind.lines) {
-          if (l.pane === "volume") {
-            hasVolume = true;
-          } else if (l.pane === "separate") {
-            if (!separatePaneIds.includes(ind.id)) {
-              separatePaneIds.push(ind.id);
-            }
-          }
-        }
-      }
-    }
-
-    // Total separate panes: volume (if present) + N separate indicators
-    const totalPanes = (hasVolume ? 1 : 0) + separatePaneIds.length;
-
-    if (totalPanes === 0) {
-      // No separate panes — main chart gets full height
-      try {
-        chart.priceScale("right").applyOptions({
-          scaleMargins: { top: 0.05, bottom: 0.05 },
-          alignLabels: true,
-        });
-      } catch { /* */ }
-      return;
-    }
-
-    // Adjust main chart right price scale margins to leave room for separate panes.
-    const mainBottom = 1 - 0.65; // leave 35% for separate panes
-    try {
-      chart.priceScale("right").applyOptions({
-        scaleMargins: {
-          top: 0.05,
-          bottom: mainBottom,
-        },
-        alignLabels: false,
-        entireTextOnly: true,
-      });
-    } catch { /* */ }
-
-    let paneIdx = 0;
-
-    // Layout volume pane (always pane index 0 if present)
-    if (hasVolume) {
-      const volMargins = calculatePaneMargins(totalPanes, paneIdx);
-      try {
-        chart.priceScale("volume").applyOptions({
-          scaleMargins: volMargins,
-          visible: false, // volume scale doesn't need axis labels
-          autoScale: true,
-        });
-      } catch { /* */ }
-      paneIdx++;
-    }
-
-    // Layout each separate indicator pane
-    separatePaneIds.forEach((indId) => {
-      const margins = calculatePaneMargins(totalPanes, paneIdx);
-      try {
-        chart.priceScale(indId).applyOptions({
-          scaleMargins: margins,
-          visible: true,
-          autoScale: true,
-          borderVisible: false,
-          alignLabels: false,
-          entireTextOnly: true,
-          ticksVisible: true,
-        });
-      } catch { /* */ }
-      paneIdx++;
-    });
-  }, [chartRef]);
-
-  // ── Remove all chart series for a given indicator ─────────
-  const removeSeriesFromChart = useCallback((indicatorId) => {
-    const chart = deref(chartRef);
-    const existing = lineSeriesMapRef.current.get(indicatorId);
-    if (chart && existing) {
-      existing.forEach((s) => {
-        try { chart.removeSeries(s); } catch { /* */ }
-      });
-    }
-    lineSeriesMapRef.current.delete(indicatorId);
-
-    // Hide any price scales created for this indicator
-    if (chart) {
-      try {
-        const scale = chart.priceScale(indicatorId);
-        if (scale) scale.applyOptions({ visible: false });
-      } catch { /* scale may not exist */ }
-      try {
-        const overlayScale = chart.priceScale(`indicator-${indicatorId}`);
-        if (overlayScale) overlayScale.applyOptions({ visible: false });
-      } catch { /* scale may not exist */ }
-    }
-  }, [chartRef]);
-
   // ── Add an indicator ──────────────────────────────────────
   const addIndicator = useCallback((indicator) => {
     setActiveIndicators((prev) => {
-      // Don't add duplicates
       if (prev.some((i) => i.id === indicator.id)) return prev;
       return [...prev, { ...indicator, visible: true, lines: [] }];
     });
-    // Flag for forced compute
     pendingForceComputeRef.current = true;
   }, []);
 
   // ── Remove an indicator ───────────────────────────────────
   const removeIndicator = useCallback((indicatorId) => {
-    // Remove line series and associated price scales from chart
-    removeSeriesFromChart(indicatorId);
-
-    setActiveIndicators((prev) => {
-      const updated = prev.filter((i) => i.id !== indicatorId);
-      // Re-layout after removal — use a microtask to let React process the state update
-      // Pass the updated list directly so we don't rely on stale refs
-      queueMicrotask(() => relayoutPanes(updated));
-      return updated;
-    });
-  }, [removeSeriesFromChart, relayoutPanes]);
+    setActiveIndicators((prev) => prev.filter((i) => i.id !== indicatorId));
+    // The pane data will be rebuilt on next render cycle
+  }, []);
 
   // ── Toggle visibility ─────────────────────────────────────
   const toggleVisibility = useCallback((indicatorId) => {
-    setActiveIndicators((prev) => {
-      const updated = prev.map((i) => {
-        if (i.id !== indicatorId) return i;
-        const newVisible = !i.visible;
-        // Show/hide all line series for this indicator
-        const existing = lineSeriesMapRef.current.get(indicatorId);
-        if (existing) {
-          existing.forEach((s) => {
-            try { s.applyOptions({ visible: newVisible }); } catch { /* */ }
-          });
-        }
-        return { ...i, visible: newVisible };
-      });
-      // Re-layout after visibility change with updated list
-      queueMicrotask(() => relayoutPanes(updated));
-      return updated;
-    });
-  }, [relayoutPanes]);
+    setActiveIndicators((prev) =>
+      prev.map((i) => (i.id === indicatorId ? { ...i, visible: !i.visible } : i))
+    );
+  }, []);
 
   // ── Update indicator params ───────────────────────────────
   const updateIndicatorParams = useCallback((indicatorId, newParams) => {
     setActiveIndicators((prev) =>
       prev.map((i) => (i.id === indicatorId ? { ...i, params: newParams } : i))
     );
-    // Flag for forced compute when params change
     pendingForceComputeRef.current = true;
   }, []);
 
@@ -362,130 +164,51 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     setActiveIndicators((prev) =>
       prev.map((i) => (i.id === indicatorId ? { ...i, script: newScript } : i))
     );
-    // Flag for forced compute when script changes
     pendingForceComputeRef.current = true;
   }, []);
 
-  // ── Render computed lines onto the chart (synchronous) ────
-  const renderLines = useCallback((indicatorId, lines, visible) => {
-    const chart = deref(chartRef);
-    if (!chart) return;
+  // ── Build pane data from active indicators ────────────────
+  // This is the core of the multi-pane system: we partition computed lines
+  // into overlay (main chart) vs separate panes.
+  const buildPaneData = useCallback((indicators) => {
+    const overlayLines = [];
+    const paneMap = new Map(); // paneId → {id, label, lines}
 
-    // Remove old series for this indicator first
-    removeSeriesFromChart(indicatorId);
+    for (const ind of indicators) {
+      if (!ind.visible || !ind.lines || ind.lines.length === 0) continue;
 
-    if (!lines || lines.length === 0) return;
+      for (const line of ind.lines) {
+        const pane = line.pane || "main";
 
-    const newSeries = [];
-    for (const line of lines) {
-      if (!line.data || line.data.length === 0) continue;
-
-      // Determine pane placement: overlay (main chart), volume, or separate
-      const isVolume = line.pane === "volume";
-      const isSeparate = line.pane === "separate";
-      const isOverlay = !isVolume && !isSeparate;
-
-      // Volume-pane indicators share the "volume" priceScaleId.
-      // Separate-pane indicators use their indicator ID as the priceScaleId.
-      // Overlay indicators use a unique hidden scale.
-      const priceScaleId = isVolume
-        ? "volume"
-        : isSeparate
-          ? indicatorId
-          : `indicator-${indicatorId}`;
-
-      // Choose series type: histogram or line
-      const isHistogram = line.type === "histogram";
-      const SeriesType = isHistogram ? HistogramSeries : LineSeries;
-
-      const seriesOptions = {
-        color: line.color || "#f59e0b",
-        lineWidth: isHistogram ? undefined : (line.lineWidth || 2),
-        lineStyle: isHistogram ? undefined : (line.lineStyle || 0),
-        title: "",              // no title label on chart
-        visible: visible,
-        priceScaleId,
-        lastValueVisible: false,  // no last-value label on price axis
-        priceLineVisible: false,  // no horizontal price line
-      };
-
-      // For histogram, set priceFormat to volume if it's volume pane
-      if (isHistogram && isVolume) {
-        seriesOptions.priceFormat = { type: "volume" };
-      }
-
-      let series;
-      try {
-        series = chart.addSeries(SeriesType, seriesOptions);
-      } catch (err) {
-        console.warn(`Failed to add series for indicator ${indicatorId}:`, err);
-        continue;
-      }
-
-      if (isVolume) {
-        // Volume pane: will be configured by relayoutPanes
-      } else if (isOverlay) {
-        // Overlay: share the chart area but use an invisible price scale
-        try {
-          chart.priceScale(priceScaleId).applyOptions({
-            visible: false,
-            scaleMargins: { top: 0.05, bottom: 0.35 },
-          });
-        } catch { /* */ }
-      } else {
-        // Separate pane: set initial margins (refined by relayoutPanes)
-        try {
-          chart.priceScale(priceScaleId).applyOptions({
-            visible: true,
-            autoScale: true,
-            borderVisible: false,
-            alignLabels: false,
-            entireTextOnly: true,
-            ticksVisible: true,
-            scaleMargins: { top: 0.7, bottom: 0.05 },
-          });
-        } catch { /* */ }
-      }
-
-      // Build data — handle per-bar colors for histograms (colorData)
-      let validData;
-      if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
-        // Build a time→color map from colorData
-        const colorMap = new Map();
-        for (const cd of line.colorData) {
-          colorMap.set(cd.time, cd.color);
-        }
-
-        validData = line.data
-          .filter((d) => d && d.time != null && d.value != null && isFinite(d.value))
-          .map((d) => {
-            const entry = { time: d.time, value: d.value };
-            const barColor = colorMap.get(d.time);
-            if (barColor) entry.color = barColor;
-            return entry;
-          });
-      } else {
-        validData = line.data.filter(
-          (d) => d && d.time != null && d.value != null && isFinite(d.value)
-        );
-      }
-
-      if (validData.length > 0) {
-        try {
-          series.setData(validData);
-        } catch (err) {
-          console.warn(`Failed to set data for indicator ${indicatorId}:`, err);
+        if (pane === "main") {
+          // Overlay on main chart
+          overlayLines.push(line);
+        } else {
+          // Separate pane or volume pane — group by indicator id
+          const paneId = `${pane}-${ind.id}`;
+          if (!paneMap.has(paneId)) {
+            paneMap.set(paneId, {
+              id: paneId,
+              label: ind.name || ind.id,
+              lines: [],
+            });
+          }
+          paneMap.get(paneId).lines.push(line);
         }
       }
-
-      newSeries.push(series);
     }
-    lineSeriesMapRef.current.set(indicatorId, newSeries);
-  }, [chartRef, removeSeriesFromChart]);
+
+    setMainOverlayLines(overlayLines);
+    setSubPanes(Array.from(paneMap.values()));
+  }, []);
+
+  // ── Rebuild pane data whenever activeIndicators changes ───
+  useEffect(() => {
+    buildPaneData(activeIndicators);
+  }, [activeIndicators, buildPaneData]);
 
   // ── Compute all active indicators ─────────────────────────
   const computeAll = useCallback(async (force = false) => {
-    // Prevent overlapping computations — set flag BEFORE any async work
     if (computingRef.current) {
       queuedRecomputeRef.current = true;
       queuedForceRecomputeRef.current = queuedForceRecomputeRef.current || force;
@@ -493,7 +216,6 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     }
     computingRef.current = true;
 
-    // Use refs to always get the latest values, avoiding stale closures
     const currentChartData = chartDataRef.current;
     const currentIndicators = activeIndicatorsRef.current;
 
@@ -517,7 +239,6 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
 
     setComputing(true);
 
-    // Prepare OHLCV in minimal format
     const ohlcv = currentChartData.map((d) => ({
       time: d.time,
       open: d.open,
@@ -532,7 +253,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
         indicators.map(async (ind) => {
           try {
             const result = await computeIndicator({
-              name: ind.engineName || undefined,  // use registry key, not display name
+              name: ind.engineName || undefined,
               script: ind.script,
               ohlcv,
               params: ind.params || {},
@@ -544,25 +265,22 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
         })
       );
 
-      // Pre-process results outside of setState
       const processedResults = [];
       for (const r of results) {
         if (r.status !== "fulfilled") continue;
         const { id, result, visible } = r.value;
-        // Check result.ok — may be true, false, or undefined (network error)
         const isOk = result.ok === true || (result.ok == null && result.lines && result.lines.length > 0);
         if (isOk) {
-          // Map backend fields to frontend format
           const mappedLines = (result.lines || []).map((line) => {
             const displayName = line.name || line.title || "";
             return {
               ...line,
-              name: displayName,   // keep name field consistent
-              title: displayName,  // keep title field consistent
+              name: displayName,
+              title: displayName,
               color: line.color || "#f59e0b",
               lineWidth: line.lineWidth || 2,
               lineStyle: line.lineStyle || 0,
-              type: line.type || "line",  // "line" or "histogram"
+              type: line.type || "line",
               overlay: line.pane !== "separate" && line.pane !== "volume",
               pane: line.pane || "main",
               colorData: line.colorData || null,
@@ -572,11 +290,6 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
         } else {
           processedResults.push({ id, mappedLines: [], visible, error: result.error || "Unknown error" });
         }
-      }
-
-      // Render lines on chart FIRST (before state update to avoid flash)
-      for (const { id, mappedLines, visible } of processedResults) {
-        renderLines(id, mappedLines, visible);
       }
 
       // Update state with computed line data
@@ -589,20 +302,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
         }
         return updated;
       });
-
-      // Build the updated indicator list for layout calculation
-      // We need to use the current ref value merged with processed results
-      const currentInds = activeIndicatorsRef.current;
-      const updatedForLayout = currentInds.map((ind) => {
-        const processed = processedResults.find((r) => r.id === ind.id);
-        if (processed) {
-          return { ...ind, lines: processed.mappedLines, visible: ind.visible };
-        }
-        return ind;
-      });
-
-      // Re-layout all panes with the correct data immediately
-      relayoutPanes(updatedForLayout);
+      // buildPaneData will be called by the useEffect watching activeIndicators
     } finally {
       computingRef.current = false;
       setComputing(false);
@@ -614,14 +314,13 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
         queueMicrotask(() => computeAll(forceNext));
       }
     }
-  }, [renderLines, relayoutPanes]);
+  }, []);
 
-  // ── Reset compute tracking when dataset changes (interval switch) ──
+  // ── Reset compute tracking when dataset changes ──
   const prevDatasetKeyRef = useRef(datasetKey);
   useEffect(() => {
     if (datasetKey !== prevDatasetKeyRef.current) {
       prevDatasetKeyRef.current = datasetKey;
-      // Reset so next compute isn't skipped due to stale input signature.
       lastComputeSignatureRef.current = "";
       prevIndicatorSignatureRef.current = "";
       pendingForceComputeRef.current = true;
@@ -629,14 +328,12 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
   }, [datasetKey]);
 
   // ── Trigger compute when indicators are added/changed ─────
-  // Track the list of indicator IDs + their scripts/params to detect additions
   const prevIndicatorSignatureRef = useRef("");
 
   useEffect(() => {
     if (!chartData || chartData.length === 0) return;
     if (activeIndicators.length === 0) return;
 
-    // Build a signature of active indicators to detect when one is added/changed.
     const signature = activeIndicators
       .map((i) => `${i.id}:${i.script ? i.script.length : 0}:${JSON.stringify(i.params || {})}`)
       .join("|");
@@ -668,13 +365,11 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     };
   }, [chartData, activeIndicators, computeAll]);
 
-  // ── Re-render when chart is recreated ─────────────────────
+  // ── Re-compute when chart is recreated ─────────────────────
   useEffect(() => {
     if (seriesReady === 0) return;
-    // Chart was recreated, clear old series refs and re-render
-    lineSeriesMapRef.current.clear();
     lastComputeSignatureRef.current = "";
-    prevIndicatorSignatureRef.current = ""; // force recompute
+    prevIndicatorSignatureRef.current = "";
     pendingForceComputeRef.current = true;
 
     const currentIndicators = activeIndicatorsRef.current;
@@ -686,13 +381,6 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     }
   }, [seriesReady, computeAll]);
 
-  // ── Cleanup on unmount ────────────────────────────────────
-  useEffect(() => {
-    return () => {
-      lineSeriesMapRef.current.clear();
-    };
-  }, []);
-
   return {
     activeIndicators,
     computing,
@@ -702,6 +390,8 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     updateIndicatorParams,
     updateIndicatorScript,
     computeAll,
-    relayoutPanes,
+    // Multi-pane output
+    mainOverlayLines,
+    subPanes,
   };
 }

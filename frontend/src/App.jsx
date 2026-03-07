@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import ChartWidget from "./components/ChartWidget";
+import MultiPaneChart from "./components/MultiPaneChart";
 import DrawingToolbar from "./components/DrawingToolbar";
 import SettingsModal from "./components/SettingsModal";
 import IndicatorPanel from "./components/IndicatorPanel";
@@ -285,6 +285,8 @@ export default function App() {
     updateIndicatorParams,
     updateIndicatorScript,
     computeAll: recomputeIndicators,
+    mainOverlayLines,
+    subPanes,
   } = useIndicators({
     chartRef: indicatorChartRefRef,
     seriesRef: indicatorSeriesRefRef,
@@ -1252,7 +1254,7 @@ export default function App() {
           </div>
         ) : (
           <ErrorBoundary>
-            <ChartWidget
+            <MultiPaneChart
               ref={chartWidgetRef}
               data={chartData}
               symbol={symbol}
@@ -1276,6 +1278,8 @@ export default function App() {
               textBold={textBold}
               textItalic={textItalic}
               onChartReady={handleChartReady}
+              mainOverlayLines={mainOverlayLines}
+              subPanes={subPanes}
             />
           </ErrorBoundary>
         )}

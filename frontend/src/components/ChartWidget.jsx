@@ -14,15 +14,16 @@ const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
 
 const DRAWING_TOOL_IDS = new Set(["pen", "eraser", "line-segment", "line-ray", "line-infinite", "text"]);
 
-function buildLocalizationOptions(timezone = "Local") {
+function buildLocalizationOptions(timezone = "Local", interval = "1h") {
     const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
     try {
         const axisFormatOptions = {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
             hour: "2-digit",
             minute: "2-digit",
             hour12: false,
-            month: "short",
-            day: "numeric",
         };
         const tooltipFormatOptions = {
             year: "numeric",
@@ -42,6 +43,9 @@ function buildLocalizationOptions(timezone = "Local") {
         const axisFormatter = new Intl.DateTimeFormat("en-GB", axisFormatOptions);
         const tooltipFormatter = new Intl.DateTimeFormat("en-GB", tooltipFormatOptions);
 
+        const isDailyOrLarger = interval.endsWith('d') || interval.endsWith('w') || interval.endsWith('M');
+        const isMonthly = interval.endsWith('M');
+
         return {
             localization: {
                 timeFormatter: (timestamp) => tooltipFormatter.format(new Date(timestamp * 1000)),
@@ -49,10 +53,18 @@ function buildLocalizationOptions(timezone = "Local") {
             timeScale: {
                 tickMarkFormatter: (timestamp) => {
                     const parts = axisFormatter.formatToParts(new Date(timestamp * 1000));
+                    const year = parts.find((p) => p.type === "year")?.value;
+                    const month = parts.find((p) => p.type === "month")?.value;
+                    const day = parts.find((p) => p.type === "day")?.value;
                     const hour = parts.find((p) => p.type === "hour")?.value;
                     const min = parts.find((p) => p.type === "minute")?.value;
-                    const day = parts.find((p) => p.type === "day")?.value;
-                    const month = parts.find((p) => p.type === "month")?.value;
+
+                    if (isMonthly) {
+                        return `${month} ${year}`;
+                    }
+                    if (isDailyOrLarger) {
+                        return `${day} ${month} ${year}`;
+                    }
                     if (hour === "00" && min === "00") return `${day} ${month}`;
                     return `${hour}:${min}`;
                 },
@@ -238,7 +250,7 @@ const ChartWidget = forwardRef(function ChartWidget({
         if (!chartContainerRef.current) return;
 
         const container = chartContainerRef.current;
-        const localizationOptions = buildLocalizationOptions(timezone);
+        const localizationOptions = buildLocalizationOptions(timezone, interval);
         const chart = createChart(container, {
             width: container.clientWidth,
             height: container.clientHeight,
@@ -435,7 +447,7 @@ const ChartWidget = forwardRef(function ChartWidget({
 
         const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
         const textColor = theme === "light" ? "#1e293b" : "#94a3b8";
-        const localizationOptions = buildLocalizationOptions(timezone);
+        const localizationOptions = buildLocalizationOptions(timezone, interval);
 
         chartRef.current.applyOptions({
             layout: { background: { color: bgColor }, textColor },
@@ -448,7 +460,7 @@ const ChartWidget = forwardRef(function ChartWidget({
                 ? { timeScale: { tickMarkFormatter: localizationOptions.timeScale.tickMarkFormatter } }
                 : {}),
         });
-    }, [theme, customBg, timezone]);
+    }, [theme, customBg, timezone, interval]);
 
     useEffect(() => {
         if (!candlestickSeriesRef.current) return;

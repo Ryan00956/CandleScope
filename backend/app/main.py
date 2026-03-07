@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.indicators import router as indicators_router  # indicator engine v2
 from app.api.v1.klines import router as klines_router
+from app.api.v1.settings import router as settings_router
 from app.api.v1.stream import router as stream_router
 from app.core.config import CORS_ORIGINS
 from app.data_engine.storage import init_klines_storage
@@ -44,6 +45,7 @@ app.add_middleware(
 app.include_router(klines_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
+app.include_router(settings_router, prefix="/api/v1")
 
 
 # ═══════════════════════════════════════════════════════════════

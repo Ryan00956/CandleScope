@@ -1,6 +1,58 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { fetchProxySettings, updateProxySettings, testProxyConnection } from '../services/api';
 
 export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
+    // ── Proxy state ─────────────────────────────────────────
+    const [proxyMode, setProxyMode] = useState('system');
+    const [customProxy, setCustomProxy] = useState('');
+    const [systemProxy, setSystemProxy] = useState('');
+    const [effectiveProxy, setEffectiveProxy] = useState('');
+    const [proxyLoading, setProxyLoading] = useState(false);
+    const [proxyTestResult, setProxyTestResult] = useState(null);
+    const [proxySaveMsg, setProxySaveMsg] = useState(null);
+
+    // Load proxy settings when modal opens
+    useEffect(() => {
+        if (!isOpen) return;
+        setProxyTestResult(null);
+        setProxySaveMsg(null);
+        fetchProxySettings()
+            .then((data) => {
+                setProxyMode(data.mode || 'system');
+                setCustomProxy(data.custom_proxy || '');
+                setSystemProxy(data.system_proxy || '');
+                setEffectiveProxy(data.effective_proxy || '');
+            })
+            .catch(() => { /* ignore — backend may not be up */ });
+    }, [isOpen]);
+
+    const handleProxySave = useCallback(async () => {
+        setProxyLoading(true);
+        setProxySaveMsg(null);
+        try {
+            const res = await updateProxySettings({ mode: proxyMode, custom_proxy: customProxy });
+            setEffectiveProxy(res.effective_proxy || '');
+            setProxySaveMsg({ ok: true, text: '代理设置已保存 ✓' });
+        } catch (err) {
+            setProxySaveMsg({ ok: false, text: `保存失败: ${err.message}` });
+        } finally {
+            setProxyLoading(false);
+        }
+    }, [proxyMode, customProxy]);
+
+    const handleProxyTest = useCallback(async () => {
+        setProxyLoading(true);
+        setProxyTestResult(null);
+        try {
+            const res = await testProxyConnection({ mode: proxyMode, custom_proxy: customProxy });
+            setProxyTestResult(res);
+        } catch (err) {
+            setProxyTestResult({ success: false, message: `请求失败: ${err.message}` });
+        } finally {
+            setProxyLoading(false);
+        }
+    }, [proxyMode, customProxy]);
+
     if (!isOpen) return null;
 
     const handleUpdate = (key, value) => {
@@ -93,7 +145,95 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
                             </div>
                         </div>
                     </section>
-                    {/* 4. 时区设置 */}
+                    {/* 4. 网络代理设置 */}
+                    <section className="settings-section">
+                        <label>🌐 网络代理</label>
+                        <div className="proxy-mode-grid">
+                            <button
+                                className={`theme-opt ${proxyMode === 'system' ? 'active' : ''}`}
+                                onClick={() => { setProxyMode('system'); setProxyTestResult(null); setProxySaveMsg(null); }}
+                            >
+                                🖥️ 系统代理
+                            </button>
+                            <button
+                                className={`theme-opt ${proxyMode === 'custom' ? 'active' : ''}`}
+                                onClick={() => { setProxyMode('custom'); setProxyTestResult(null); setProxySaveMsg(null); }}
+                            >
+                                ⚙️ 自定义
+                            </button>
+                            <button
+                                className={`theme-opt ${proxyMode === 'none' ? 'active' : ''}`}
+                                onClick={() => { setProxyMode('none'); setProxyTestResult(null); setProxySaveMsg(null); }}
+                            >
+                                🚫 不使用
+                            </button>
+                        </div>
+
+                        {proxyMode === 'system' && systemProxy && (
+                            <div className="proxy-info">
+                                <span className="proxy-info-label">检测到系统代理:</span>
+                                <code className="proxy-info-value">{systemProxy}</code>
+                            </div>
+                        )}
+                        {proxyMode === 'system' && !systemProxy && (
+                            <div className="proxy-info proxy-info-warn">
+                                <span>未检测到系统代理环境变量，将直连</span>
+                            </div>
+                        )}
+
+                        {proxyMode === 'custom' && (
+                            <div className="proxy-custom-input">
+                                <input
+                                    type="text"
+                                    className="proxy-input"
+                                    placeholder="http://127.0.0.1:7890 或 socks5://..."
+                                    value={customProxy}
+                                    onChange={(e) => { setCustomProxy(e.target.value); setProxySaveMsg(null); }}
+                                />
+                            </div>
+                        )}
+
+                        {effectiveProxy && proxyMode !== 'none' && (
+                            <div className="proxy-info">
+                                <span className="proxy-info-label">当前生效:</span>
+                                <code className="proxy-info-value">{effectiveProxy}</code>
+                            </div>
+                        )}
+
+                        <div className="proxy-actions">
+                            <button
+                                className="proxy-test-btn"
+                                onClick={handleProxyTest}
+                                disabled={proxyLoading}
+                            >
+                                {proxyLoading ? '⏳ 测试中...' : '🔍 测试连接'}
+                            </button>
+                            <button
+                                className="proxy-save-btn"
+                                onClick={handleProxySave}
+                                disabled={proxyLoading}
+                            >
+                                {proxyLoading ? '⏳ ...' : '💾 保存代理'}
+                            </button>
+                        </div>
+
+                        {proxyTestResult && (
+                            <div className={`proxy-result ${proxyTestResult.success ? 'proxy-result-ok' : 'proxy-result-fail'}`}>
+                                <span>{proxyTestResult.success ? '✅' : '❌'} {proxyTestResult.message}</span>
+                                {proxyTestResult.proxy_used && (
+                                    <div className="proxy-result-detail">代理: {proxyTestResult.proxy_used}</div>
+                                )}
+                            </div>
+                        )}
+
+                        {proxySaveMsg && (
+                            <div className={`proxy-result ${proxySaveMsg.ok ? 'proxy-result-ok' : 'proxy-result-fail'}`}>
+                                <span>{proxySaveMsg.text}</span>
+                            </div>
+                        )}
+                    </section>
+
+                    {/* 5. 时区设置 */}
                     <section className="settings-section">
                         <label>显示时区</label>
                         <select
@@ -139,6 +279,8 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
           border: 1px solid var(--border-color);
           border-radius: var(--radius-md);
           width: 90%; max-width: 400px;
+          max-height: 85vh;
+          overflow-y: auto;
           box-shadow: 0 20px 40px rgba(0,0,0,0.4);
         }
         .modal-header {
@@ -186,6 +328,64 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
           padding: 8px 24px; border-radius: 6px; font-weight: 600; cursor: pointer;
         }
         .primary-btn:hover { opacity: 0.9; }
+
+        /* ── Proxy settings ─────────────────────── */
+        .proxy-mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+        .proxy-info {
+          margin: 8px 0; padding: 8px 12px; border-radius: 6px;
+          background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.2);
+          font-size: 12px; color: var(--text-secondary);
+          display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+        }
+        .proxy-info-warn {
+          background: rgba(234, 179, 8, 0.08); border-color: rgba(234, 179, 8, 0.3);
+          color: #eab308;
+        }
+        .proxy-info-label { font-weight: 500; }
+        .proxy-info-value {
+          font-family: var(--font-mono); font-size: 11px;
+          background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px;
+        }
+        .proxy-custom-input { margin: 10px 0; }
+        .proxy-input {
+          width: 100%; padding: 10px 12px; border: 1px solid var(--border-color);
+          background: var(--bg-tertiary); color: var(--text-primary); border-radius: 6px;
+          font-family: var(--font-mono); font-size: 13px; outline: none;
+          box-sizing: border-box;
+        }
+        .proxy-input:focus { border-color: var(--accent-blue); }
+        .proxy-input::placeholder { color: var(--text-muted); font-family: inherit; }
+        .proxy-actions { display: flex; gap: 8px; margin-top: 12px; }
+        .proxy-test-btn, .proxy-save-btn {
+          flex: 1; padding: 8px 12px; border-radius: 6px; font-size: 13px;
+          font-weight: 500; cursor: pointer; border: 1px solid var(--border-color);
+          transition: all 0.15s;
+        }
+        .proxy-test-btn {
+          background: var(--bg-tertiary); color: var(--text-primary);
+        }
+        .proxy-test-btn:hover:not(:disabled) { border-color: var(--accent-blue); color: var(--accent-blue); }
+        .proxy-save-btn {
+          background: var(--accent-blue); color: white; border-color: var(--accent-blue);
+        }
+        .proxy-save-btn:hover:not(:disabled) { opacity: 0.9; }
+        .proxy-test-btn:disabled, .proxy-save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .proxy-result {
+          margin-top: 10px; padding: 10px 12px; border-radius: 6px;
+          font-size: 12px; line-height: 1.5;
+        }
+        .proxy-result-ok {
+          background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.3);
+          color: #22c55e;
+        }
+        .proxy-result-fail {
+          background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3);
+          color: #ef4444;
+        }
+        .proxy-result-detail {
+          margin-top: 4px; font-size: 11px; opacity: 0.8;
+          font-family: var(--font-mono);
+        }
       `}</style>
         </div>
     );

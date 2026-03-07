@@ -63,6 +63,47 @@ class TransportLayer:
         # Shared HTTP session (created lazily)
         self._http_session: aiohttp.ClientSession | None = None
 
+    # ── Public: Proxy resolution ─────────────────────────────
+
+    def _resolve_proxy(self) -> str | None:
+        """Resolve the effective proxy URL based on proxy_mode.
+
+        Returns None when no proxy should be used.
+
+        On Windows, proxy tools like v2rayN / Clash set the system proxy
+        in the registry rather than environment variables.
+        ``urllib.request.getproxies()`` handles this transparently.
+        """
+        import os as _os
+
+        mode = getattr(self._cfg, "proxy_mode", "system")
+
+        if mode == "none":
+            return None
+
+        if mode == "custom":
+            proxy = self._cfg.http_proxy
+            return proxy if proxy else None
+
+        # mode == "system" (default) — env vars first, then OS-level settings
+        env_proxy = (
+            _os.getenv("HTTPS_PROXY")
+            or _os.getenv("HTTP_PROXY")
+            or _os.getenv("https_proxy")
+            or _os.getenv("http_proxy")
+        )
+        if env_proxy:
+            return env_proxy
+
+        # Fallback: read from Windows registry / macOS scutil / etc.
+        from urllib.request import getproxies
+        proxies = getproxies()
+        os_proxy = proxies.get("https") or proxies.get("http")
+        if os_proxy:
+            return os_proxy
+
+        return self._cfg.http_proxy or None
+
     # ── Public: Metrics ──────────────────────────────────────
 
     @property
@@ -92,6 +133,13 @@ class TransportLayer:
             await self._http_session.close()
             self._http_session = None
             logger.info("HTTP session closed")
+
+    async def restart_http_session(self) -> None:
+        """Restart the HTTP session (e.g. after proxy config change)."""
+        await self.stop()
+        await self.start()
+        proxy = self._resolve_proxy()
+        logger.info("HTTP session restarted (proxy=%s)", proxy or "none")
 
     # ── Public: HTTP ─────────────────────────────────────────
 
@@ -123,7 +171,8 @@ class TransportLayer:
                 self._metrics.set("http_active_endpoint", base)
                 self._metrics.mark("http_last_request_at")
 
-                async with self._http_session.get(url, params=params) as resp:  # type: ignore[union-attr]
+                proxy = self._resolve_proxy()
+                async with self._http_session.get(url, params=params, proxy=proxy) as resp:  # type: ignore[union-attr]
                     if resp.status != 200:
                         body = await resp.text()
                         raise TransportError(f"HTTP {resp.status}: {body[:200]}")

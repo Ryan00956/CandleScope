@@ -59,3 +59,38 @@ export function getMultiStreamUrl(symbol = "BTCUSDT") {
     const wsBase = httpBaseToWsBase(API_BASE);
     return `${wsBase}/stream/klines_multi?symbol=${symbol}`;
 }
+
+// ── Proxy Settings API ──────────────────────────────────────
+
+export async function fetchProxySettings() {
+    const url = `${API_BASE}/settings/proxy`;
+    return request(url);
+}
+
+export async function updateProxySettings({ mode, custom_proxy }) {
+    const url = `${API_BASE}/settings/proxy`;
+    const response = await fetch(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, custom_proxy: custom_proxy || null }),
+    });
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+}
+
+export async function testProxyConnection({ mode, custom_proxy }) {
+    const url = `${API_BASE}/settings/proxy/test`;
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, custom_proxy: custom_proxy || null }),
+    });
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+}

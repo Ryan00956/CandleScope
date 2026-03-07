@@ -46,6 +46,18 @@ def _env_str_list(key: str, default: list[str]) -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+def _get_os_proxy() -> str | None:
+    """Read proxy from OS-level settings (Windows registry, macOS scutil, etc.).
+
+    On Windows, tools like v2rayN / Clash set the system proxy in the
+    registry (Internet Settings → ProxyServer) rather than environment
+    variables.  ``urllib.request.getproxies()`` reads these transparently.
+    """
+    from urllib.request import getproxies
+    proxies = getproxies()
+    return proxies.get("https") or proxies.get("http") or None
+
+
 @dataclass
 class IngestionConfig:
     """Central configuration for the entire ingestion pipeline.
@@ -78,7 +90,13 @@ class IngestionConfig:
     http_timeout: int = field(default_factory=lambda: _env_int("INGESTION_HTTP_TIMEOUT", 8))
     # HTTP proxy (None = no proxy)
     http_proxy: str | None = field(default_factory=lambda: _env_str("INGESTION_HTTP_PROXY", "")
-                                   or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or None)
+                                   or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+                                   or _get_os_proxy() or None)
+    # Proxy mode: "none" | "system" | "custom"
+    #   none   — direct connection, no proxy
+    #   system — read from environment variables (HTTP_PROXY / HTTPS_PROXY)
+    #   custom — use the value in http_proxy
+    proxy_mode: str = field(default_factory=lambda: _env_str("INGESTION_PROXY_MODE", "system"))
 
     # ── L2: Session ────────────────────────────────────────────
     # WebSocket open timeout (seconds)

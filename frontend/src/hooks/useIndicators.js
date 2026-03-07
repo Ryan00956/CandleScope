@@ -354,11 +354,12 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
 
     let fired = false;
     // Use minimal delay: force recompute fires nearly immediately,
-    // data-only changes use a short debounce to batch rapid ticks.
+    // data-only changes use a longer debounce to batch rapid real-time ticks
+    // and avoid triggering indicator series rebuilds on every WS message.
     const timer = setTimeout(() => {
       fired = true;
       computeAll(forceNow);
-    }, forceNow ? 0 : 30);
+    }, forceNow ? 0 : 500);
     return () => {
       clearTimeout(timer);
       if (forceNow && !fired) {

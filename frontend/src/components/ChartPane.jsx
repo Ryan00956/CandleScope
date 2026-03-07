@@ -285,7 +285,7 @@ const ChartPane = forwardRef(function ChartPane({
                 deduped.sort((a, b) => a.time - b.time);
                 mainSeriesRef.current.setData(deduped.map(toCandlePoint));
             } else {
-                const start = Math.max(0, data.length - 2);
+                const start = Math.max(0, prev.length - 1);
                 for (let i = start; i < data.length; i++) {
                     mainSeriesRef.current.update(toCandlePoint(data[i]));
                 }
@@ -322,10 +322,64 @@ const ChartPane = forwardRef(function ChartPane({
 
     /* ── Render indicator lines ────────────────────────────── */
 
+    // Track previous indicator line identity to detect structural changes
+    const prevIndicatorKeyRef = useRef("");
+
     useEffect(() => {
         const chart = chartRef.current;
         if (!chart) return;
 
+        // Build a structural key: how many lines, their names/types/colors
+        // If this hasn't changed, we only need to update data, not recreate series.
+        const structuralKey = (indicatorLines || [])
+            .map((l) => `${l.name || ""}:${l.type || "line"}:${l.color || ""}`)
+            .join("|");
+
+        const structureChanged = structuralKey !== prevIndicatorKeyRef.current;
+        prevIndicatorKeyRef.current = structuralKey;
+
+        if (!structureChanged && indicatorSeriesRef.current.length > 0) {
+            // Structure is the same — just update data in-place (fast path)
+            const lines = indicatorLines || [];
+            for (let idx = 0; idx < indicatorSeriesRef.current.length; idx++) {
+                const { series, lineConfig: prevLine } = indicatorSeriesRef.current[idx];
+                const line = lines[idx];
+                if (!line || !line.data || line.data.length === 0) continue;
+
+                try {
+                    const isHistogram = line.type === "histogram";
+                    let validData;
+                    if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
+                        const colorMap = new Map();
+                        for (const cd of line.colorData) colorMap.set(cd.time, cd.color);
+                        validData = line.data
+                            .filter((d) => d?.time != null && d?.value != null && isFinite(d.value))
+                            .map((d) => {
+                                const entry = { time: d.time, value: d.value };
+                                const c = colorMap.get(d.time);
+                                if (c) entry.color = c;
+                                return entry;
+                            });
+                    } else {
+                        validData = line.data.filter(
+                            (d) => d?.time != null && d?.value != null && isFinite(d.value)
+                        );
+                    }
+
+                    if (validData.length > 0) {
+                        series.setData(validData);
+                    }
+
+                    // Update lineConfig ref
+                    indicatorSeriesRef.current[idx].lineConfig = line;
+                } catch (err) {
+                    console.warn("ChartPane: failed to update indicator series data:", err);
+                }
+            }
+            return;
+        }
+
+        // Structure changed — full rebuild
         // Remove old indicator series
         for (const { series } of indicatorSeriesRef.current) {
             try { chart.removeSeries(series); } catch { /* */ }

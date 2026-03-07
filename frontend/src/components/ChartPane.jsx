@@ -63,6 +63,7 @@ const ChartPane = forwardRef(function ChartPane({
     paneType = "main",       // "main" | "sub"
     paneLabel = "",           // e.g. "RSI(14)" — shown as watermark or label
     data,                     // OHLCV data (main pane) or null (sub panes get data via indicator lines)
+    timeAlignment,            // full time array from main chart data for crosshair alignment
     indicatorLines = [],      // [{data, color, lineWidth, lineStyle, type, colorData, name}]
     showTimeScale = true,     // only the bottom-most pane shows time axis
     // Chart appearance
@@ -71,12 +72,11 @@ const ChartPane = forwardRef(function ChartPane({
     onVisibleLogicalRangeChange,
     onCrosshairMove: onCrosshairMoveExternal,
     onCrosshairSync,          // called with {time, point} for cross-pane sync
-    // Crosshair sync from other panes
-    syncCrosshairTime,        // time value from another pane's crosshair
 }, ref) {
     const containerRef = useRef(null);
     const chartRef = useRef(null);
     const mainSeriesRef = useRef(null);      // CandlestickSeries (main pane only)
+    const alignmentSeriesRef = useRef(null); // invisible series for crosshair alignment (sub panes)
     const indicatorSeriesRef = useRef([]);   // [{series, lineConfig}]
     const prevDataRef = useRef({ length: 0, first: null, last: null });
     const isSyncingRef = useRef(false);      // prevent sync loops
@@ -146,6 +146,22 @@ const ChartPane = forwardRef(function ChartPane({
                 wickUpColor: upColor || "#22c55e",
             });
             mainSeriesRef.current = mainSeries;
+        }
+
+        // Sub panes: create an invisible alignment series with full time range
+        // This ensures setCrosshairPosition maps time→logical consistently
+        // across all panes regardless of indicator data length differences.
+        if (paneType === "sub") {
+            const alignSeries = chart.addSeries(LineSeries, {
+                color: "transparent",
+                lineWidth: 0,
+                priceScaleId: "",           // don't participate in price scale
+                lastValueVisible: false,
+                priceLineVisible: false,
+                crosshairMarkerVisible: false,
+                visible: false,
+            });
+            alignmentSeriesRef.current = alignSeries;
         }
 
         // Subscribe to crosshair for sync
@@ -274,6 +290,21 @@ const ChartPane = forwardRef(function ChartPane({
         prevDataRef.current = { length: data.length, first, last };
     }, [data, paneType]);
 
+    /* ── Update alignment series data (sub panes) ─────────── */
+
+    useEffect(() => {
+        if (paneType !== "sub" || !alignmentSeriesRef.current || !timeAlignment?.length) return;
+        try {
+            // Set whitespace data covering the full time range of the main chart.
+            // Using value:0 with an invisible series ensures time→logical mapping
+            // is identical across all panes.
+            const alignData = timeAlignment.map((t) => ({ time: t, value: 0 }));
+            alignmentSeriesRef.current.setData(alignData);
+        } catch (err) {
+            console.warn("ChartPane: failed to set alignment series data:", err);
+        }
+    }, [timeAlignment, paneType]);
+
     /* ── Update time scale visibility ──────────────────────── */
 
     useEffect(() => {
@@ -350,31 +381,6 @@ const ChartPane = forwardRef(function ChartPane({
         }
     }, [indicatorLines]);
 
-    /* ── Sync crosshair from other panes ───────────────────── */
-
-    useEffect(() => {
-        const chart = chartRef.current;
-        if (!chart || syncCrosshairTime === undefined) return;
-
-        isSyncingRef.current = true;
-        try {
-            if (syncCrosshairTime == null) {
-                chart.clearCrosshairPosition();
-            } else {
-                // Set crosshair at the synced time
-                // We use setCrosshairPosition with the time value
-                // The series doesn't matter much, but we need one for the API
-                const series = mainSeriesRef.current || indicatorSeriesRef.current[0]?.series;
-                if (series) {
-                    chart.setCrosshairPosition(undefined, syncCrosshairTime, series);
-                }
-            }
-        } catch {
-            // Ignore — time might not be in the series data
-        }
-        isSyncingRef.current = false;
-    }, [syncCrosshairTime]);
-
     /* ── Imperative handle ─────────────────────────────────── */
 
     useImperativeHandle(ref, () => ({
@@ -382,6 +388,30 @@ const ChartPane = forwardRef(function ChartPane({
         getMainSeries: () => mainSeriesRef.current,
         getChartRef: () => chartRef,
         getSeriesRef: () => mainSeriesRef,
+        /** Imperatively sync crosshair from another pane — no React re-render needed */
+        syncCrosshair: (time) => {
+            const chart = chartRef.current;
+            if (!chart) return;
+            isSyncingRef.current = true;
+            try {
+                if (time == null) {
+                    chart.clearCrosshairPosition();
+                } else {
+                    // Prefer the alignment series (sub panes) for consistent
+                    // time→logical mapping, fall back to main/indicator series.
+                    const series =
+                        alignmentSeriesRef.current ||
+                        mainSeriesRef.current ||
+                        indicatorSeriesRef.current[0]?.series;
+                    if (series) {
+                        chart.setCrosshairPosition(undefined, time, series);
+                    }
+                }
+            } catch {
+                // Ignore — time might not be in the series data
+            }
+            isSyncingRef.current = false;
+        },
         setVisibleLogicalRange: (range) => {
             const chart = chartRef.current;
             if (!chart || !range) return;

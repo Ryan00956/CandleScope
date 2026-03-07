@@ -82,9 +82,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     const visibleRangeSaveTimerRef = useRef(null);
     const hasRestoredRangeRef = useRef(false);
 
-    // Crosshair sync state
-    const [syncCrosshairTime, setSyncCrosshairTime] = useState(null);
-    const syncSourceRef = useRef(null); // paneId that originated the crosshair move
+    // Crosshair sync — fully imperative (no React state), direct ref calls
 
     // Pane height ratios (percentage of total)
     // Main pane always exists; sub panes are dynamic
@@ -245,10 +243,18 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         }
     }, [scheduleVisibleRangeSave]);
 
-    // ── Crosshair sync: when one pane moves crosshair, sync all others ──
-    const handleCrosshairSync = useCallback(({ paneId: sourcePaneId, time, point }) => {
-        syncSourceRef.current = sourcePaneId;
-        setSyncCrosshairTime(time);
+    // ── Crosshair sync: imperatively sync all other panes (no React state) ──
+    const handleCrosshairSync = useCallback(({ paneId: sourcePaneId, time }) => {
+        // Sync main pane
+        if (sourcePaneId !== "main" && mainPaneRef.current) {
+            mainPaneRef.current.syncCrosshair(time);
+        }
+        // Sync all sub panes
+        for (const [id, paneRef] of subPaneRefs.current.entries()) {
+            if (id !== sourcePaneId && paneRef) {
+                paneRef.syncCrosshair(time);
+            }
+        }
     }, []);
 
     // ── Main pane crosshair → OHLCV header display ──
@@ -350,6 +356,24 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         return ids;
     }, [subPanes]);
 
+    // ── Compute time alignment array for sub-pane crosshair sync ──
+    // This is the full sorted/deduplicated list of time values from main chart data.
+    // Sub-panes use this to create an invisible alignment series so that
+    // setCrosshairPosition maps time→logical identically to the main chart.
+    const timeAlignment = useMemo(() => {
+        if (!data || data.length === 0) return null;
+        const seen = new Set();
+        const times = [];
+        for (const d of data) {
+            if (!seen.has(d.time)) {
+                seen.add(d.time);
+                times.push(d.time);
+            }
+        }
+        times.sort((a, b) => a - b);
+        return times;
+    }, [data]);
+
     // Determine cursor for drawing tools
     const isDrawingActive = DRAWING_TOOL_IDS.has(drawingTool);
     const cursorStyle = isDrawingActive ? "crosshair" : undefined;
@@ -386,7 +410,6 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     onVisibleLogicalRangeChange={handleVisibleLogicalRangeChange}
                     onCrosshairMove={handleMainCrosshairMove}
                     onCrosshairSync={handleCrosshairSync}
-                    syncCrosshairTime={syncSourceRef.current !== "main" ? syncCrosshairTime : undefined}
                 />
                 {cursorStyle && (
                     <div className="chart-pane-cursor-overlay" style={{ cursor: cursorStyle }} />
@@ -418,6 +441,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                 paneId={subPane.id}
                                 paneType="sub"
                                 paneLabel={subPane.label}
+                                timeAlignment={timeAlignment}
                                 indicatorLines={subPane.lines}
                                 showTimeScale={isLast}
                                 theme={theme}
@@ -426,7 +450,6 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                 interval={interval}
                                 onVisibleLogicalRangeChange={handleVisibleLogicalRangeChange}
                                 onCrosshairSync={handleCrosshairSync}
-                                syncCrosshairTime={syncSourceRef.current !== subPane.id ? syncCrosshairTime : undefined}
                             />
                         </div>
                     </div>

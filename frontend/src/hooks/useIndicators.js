@@ -353,10 +353,12 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     }
 
     let fired = false;
+    // Use minimal delay: force recompute fires nearly immediately,
+    // data-only changes use a short debounce to batch rapid ticks.
     const timer = setTimeout(() => {
       fired = true;
       computeAll(forceNow);
-    }, forceNow ? 100 : 150);
+    }, forceNow ? 0 : 30);
     return () => {
       clearTimeout(timer);
       if (forceNow && !fired) {
@@ -376,7 +378,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     const currentChartData = chartDataRef.current;
 
     if (currentIndicators.length > 0 && currentChartData?.length > 0) {
-      const timer = setTimeout(() => computeAll(true), 200);
+      const timer = setTimeout(() => computeAll(true), 50);
       return () => clearTimeout(timer);
     }
   }, [seriesReady, computeAll]);

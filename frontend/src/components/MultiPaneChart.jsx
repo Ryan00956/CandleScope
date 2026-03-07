@@ -296,28 +296,35 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     }, [onCrosshairMove]);
 
     // ── When main pane chart is created, wire up refs for drawing ──
+    // This is called via the ref callback (React commit phase), BEFORE
+    // the ChartPane useEffect creates the chart. So we only store the
+    // imperative handle here; the actual chart/series refs are populated
+    // by the onMainChartCreated callback below.
     const handleMainPaneReady = useCallback((paneRef) => {
         if (!paneRef) return;
         mainPaneRef.current = paneRef;
-        // Get the internal chart/series refs for drawing tools
-        const cRef = paneRef.getChartRef();
-        const sRef = paneRef.getSeriesRef();
-        if (cRef) mainChartRef.current = cRef.current;
-        if (sRef) mainSeriesRef.current = sRef.current;
+    }, []);
 
-        // Set up a mutation-like pattern: we need mainChartRef to be a ref whose .current
-        // points to the chart. Since useDrawing expects ref-to-ref pattern:
-        mainChartRef.current = cRef?.current || null;
-        mainSeriesRef.current = sRef?.current || null;
+    // ── Called by ChartPane's useEffect AFTER chart + series are created ──
+    // At this point chartRef.current and seriesRef.current are guaranteed
+    // to be the live Lightweight Charts objects, not null.
+    const onMainChartCreated = useCallback(({ chartRef: cRef, seriesRef: sRef }) => {
+        // Store the live chart/series objects so that useDrawing can access
+        // them via mainChartRef.current / mainSeriesRef.current.
+        // This callback fires AFTER ChartPane's useEffect creates the chart,
+        // so cRef.current and sRef.current are guaranteed non-null.
+        mainChartRef.current = cRef.current;
+        mainSeriesRef.current = sRef.current;
+
+        // Note: mainContainerRef is already set by mainPaneContainerCallback
+        // to the chart-pane-wrapper div, which is the correct element for
+        // mouse event capture and coordinate calculations.
 
         setSeriesReady((prev) => prev + 1);
 
         // Notify parent for indicator system
         if (onChartReady) {
-            // Create wrapper refs that always resolve to the pane's chart/series
-            const chartRefWrapper = { current: cRef?.current || null };
-            const seriesRefWrapper = { current: sRef?.current || null };
-            onChartReady({ chartRef: chartRefWrapper, seriesRef: seriesRefWrapper });
+            onChartReady({ chartRef: cRef, seriesRef: sRef });
         }
     }, [onChartReady]);
 
@@ -448,6 +455,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     onVisibleLogicalRangeChange={handleVisibleLogicalRangeChange}
                     onCrosshairMove={handleMainCrosshairMove}
                     onCrosshairSync={handleCrosshairSync}
+                    onChartCreated={onMainChartCreated}
                 />
                 {cursorStyle && (
                     <div className="chart-pane-cursor-overlay" style={{ cursor: cursorStyle }} />

@@ -72,6 +72,7 @@ const ChartPane = forwardRef(function ChartPane({
     onVisibleLogicalRangeChange,
     onCrosshairMove: onCrosshairMoveExternal,
     onCrosshairSync,          // called with {time, point} for cross-pane sync
+    onChartCreated,           // called after chart+series are created, passes { chartRef, seriesRef }
 }, ref) {
     const containerRef = useRef(null);
     const chartRef = useRef(null);
@@ -206,6 +207,11 @@ const ChartPane = forwardRef(function ChartPane({
         });
 
         chartRef.current = chart;
+
+        // Notify parent that chart + series are ready (for drawing tools)
+        if (onChartCreated) {
+            onChartCreated({ chartRef, seriesRef: mainSeriesRef, containerRef });
+        }
 
         // Resize observer
         const ro = new ResizeObserver((entries) => {

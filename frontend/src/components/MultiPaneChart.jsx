@@ -391,7 +391,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
             {/* Main Pane */}
             <div
                 className="chart-pane-wrapper"
-                style={{ height: `${paneHeightPercents.main || 100}%` }}
+                style={{ flex: paneHeightPercents.main || 100 }}
                 ref={mainPaneContainerCallback}
             >
                 <ChartPane
@@ -431,7 +431,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                         />
                         <div
                             className="chart-pane-wrapper"
-                            style={{ height: `${heightPct}%` }}
+                            style={{ flex: heightPct }}
                         >
                             <ChartPane
                                 ref={(node) => {

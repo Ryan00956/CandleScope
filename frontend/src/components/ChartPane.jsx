@@ -277,6 +277,7 @@ const ChartPane = forwardRef(function ChartPane({
             data.length < prev.length || data.length - prev.length > 2;
 
         try {
+            isSyncingRef.current = true;
             if (shouldFullReplace) {
                 const deduped = [];
                 const seen = new Set();
@@ -293,6 +294,8 @@ const ChartPane = forwardRef(function ChartPane({
             }
         } catch (err) {
             console.error("ChartPane candle setData error:", err);
+        } finally {
+            isSyncingRef.current = false;
         }
 
         prevDataRef.current = { length: data.length, first, last };
@@ -303,6 +306,7 @@ const ChartPane = forwardRef(function ChartPane({
     useEffect(() => {
         if (paneType !== "sub" || !alignmentSeriesRef.current || !timeAlignment?.length) return;
         try {
+            isSyncingRef.current = true;
             // Set whitespace data covering the full time range of the main chart.
             // Using value:0 with an invisible series ensures time→logical mapping
             // is identical across all panes.
@@ -310,6 +314,8 @@ const ChartPane = forwardRef(function ChartPane({
             alignmentSeriesRef.current.setData(alignData);
         } catch (err) {
             console.warn("ChartPane: failed to set alignment series data:", err);
+        } finally {
+            isSyncingRef.current = false;
         }
     }, [timeAlignment, paneType]);
 
@@ -368,7 +374,12 @@ const ChartPane = forwardRef(function ChartPane({
                     }
 
                     if (validData.length > 0) {
-                        series.setData(validData);
+                        isSyncingRef.current = true;
+                        try {
+                            series.setData(validData);
+                        } finally {
+                            isSyncingRef.current = false;
+                        }
                     }
 
                     // Update lineConfig ref
@@ -433,7 +444,12 @@ const ChartPane = forwardRef(function ChartPane({
                 }
 
                 if (validData.length > 0) {
-                    series.setData(validData);
+                    isSyncingRef.current = true;
+                    try {
+                        series.setData(validData);
+                    } finally {
+                        isSyncingRef.current = false;
+                    }
                 }
 
                 indicatorSeriesRef.current.push({ series, lineConfig: line });

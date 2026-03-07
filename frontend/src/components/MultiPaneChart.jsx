@@ -177,6 +177,37 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         setPaneHeightPercents(heights);
     }, [subPanes.length, subPanes.map((p) => p.id).join(",")]);
 
+    // ── Compute time alignment array for sub-pane crosshair sync ──
+    // This is the full sorted/deduplicated list of time values from main chart data.
+    // Sub-panes use this to create an invisible alignment series so that
+    // setCrosshairPosition maps time→logical identically to the main chart.
+    const timeAlignment = useMemo(() => {
+        if (!data || data.length === 0) return null;
+        const seen = new Set();
+        const times = [];
+        for (const d of data) {
+            if (!seen.has(d.time)) {
+                seen.add(d.time);
+                times.push(d.time);
+            }
+        }
+        times.sort((a, b) => a - b);
+        return times;
+    }, [data]);
+
+    // ── Ensure sub-panes inherit the current visible range after data changes ──
+    useEffect(() => {
+        if (!mainPaneRef.current || subPanes.length === 0) return;
+        // Schedule sync to allow new chart panes to finish initializing and auto-fitting
+        const handle = setTimeout(() => {
+            const range = mainPaneRef.current.getVisibleLogicalRange?.();
+            if (range) {
+                syncLogicalRangeAcrossPanes(range, "main");
+            }
+        }, 50);
+        return () => clearTimeout(handle);
+    }, [subPanes, timeAlignment, datasetKey, syncLogicalRangeAcrossPanes]);
+
     // ── Measure container height ──
     useEffect(() => {
         const wrapper = wrapperRef.current;
@@ -401,23 +432,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         mainContainerRef.current = node;
     }, []);
 
-    // ── Compute time alignment array for sub-pane crosshair sync ──
-    // This is the full sorted/deduplicated list of time values from main chart data.
-    // Sub-panes use this to create an invisible alignment series so that
-    // setCrosshairPosition maps time→logical identically to the main chart.
-    const timeAlignment = useMemo(() => {
-        if (!data || data.length === 0) return null;
-        const seen = new Set();
-        const times = [];
-        for (const d of data) {
-            if (!seen.has(d.time)) {
-                seen.add(d.time);
-                times.push(d.time);
-            }
-        }
-        times.sort((a, b) => a - b);
-        return times;
-    }, [data]);
+
 
     // Determine cursor for drawing tools
     const isDrawingActive = DRAWING_TOOL_IDS.has(drawingTool);

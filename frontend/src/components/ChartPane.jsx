@@ -120,6 +120,7 @@ const ChartPane = forwardRef(function ChartPane({
                 borderColor: theme === "light" ? "#e2e8f0" : "#1e293b",
                 scaleMargins: { top: 0.05, bottom: 0.05 },
                 autoScale: true,
+                minimumWidth: 80,
             },
             ...(loc.localization ? { localization: loc.localization } : {}),
             timeScale: {

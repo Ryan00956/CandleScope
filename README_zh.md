@@ -69,3 +69,11 @@ CandleScope 采用两阶段加载方案：
 ## 📝 说明
 - 建议配置合适的网络代理以获取稳定的币安实时行情 WebSocket 连接。
 - 本地数据库文件夹与缓存文件 (`.db`, `.pyc` 等) 已被 `.gitignore` 清爽排除，初次运行会自动在本地建库。
+
+## 鸣谢
+
+本项目基于多个优秀的开源库构建，在此向这些项目的原作者和维护者表示感谢：
+
+*   **[Lightweight Charts™](https://github.com/tradingview/lightweight-charts)** by [TradingView](https://www.tradingview.com/)
+    *   Licensed under the [Apache License, Version 2.0](https://github.com/tradingview/lightweight-charts/blob/master/LICENSE)
+    *   *用于渲染高性能的金融图表和 K 线数据。*

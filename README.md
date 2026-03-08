@@ -72,3 +72,11 @@ The **Data Engine** provides multiple sub-modules with well-defined responsibili
 
 - If Binance cannot be reached (network/proxy), the app falls back to mock data.
 - Local DB files are ignored in git via `.gitignore`.
+
+## Acknowledgments
+
+This project is built upon several excellent open-source libraries. We would like to express our gratitude to the creators and maintainers of these projects:
+
+*   **[Lightweight Charts™](https://github.com/tradingview/lightweight-charts)** by [TradingView](https://www.tradingview.com/)
+    *   Licensed under the [Apache License, Version 2.0](https://github.com/tradingview/lightweight-charts/blob/master/LICENSE)
+    *   *Used for rendering high-performance financial charts and candlestick data.*

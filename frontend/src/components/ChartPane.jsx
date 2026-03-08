@@ -8,7 +8,7 @@
  * Each pane is an independent createChart() instance. Time-axis and crosshair
  * synchronization is managed by the parent MultiPaneChart.
  */
-import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from "lightweight-charts";
 
 /* ── Localization helpers (shared with old ChartWidget) ─────── */
@@ -81,6 +81,20 @@ const ChartPane = forwardRef(function ChartPane({
     const indicatorSeriesRef = useRef([]);   // [{series, lineConfig}]
     const prevDataRef = useRef({ length: 0, first: null, last: null });
     const isSyncingRef = useRef(false);      // prevent sync loops
+
+    /* ── Auto-scale state ──────────────────────────────────── */
+    const [isAutoScale, setIsAutoScale] = useState(true);
+    const autoScaleRef = useRef(true);       // mirror for event handlers
+
+    const resetAutoScale = useCallback(() => {
+        const chart = chartRef.current;
+        if (!chart) return;
+        try {
+            chart.priceScale("right").applyOptions({ autoScale: true });
+        } catch { /* */ }
+        autoScaleRef.current = true;
+        setIsAutoScale(true);
+    }, []);
 
     /* ── Create chart ──────────────────────────────────────── */
 
@@ -223,7 +237,67 @@ const ChartPane = forwardRef(function ChartPane({
         });
         ro.observe(container);
 
+        // ── Auto-scale detection ──────────────────────────────
+        // Detect manual price-axis dragging: when the user drags on the
+        // price scale area (right side of the chart), lightweight-charts
+        // automatically sets autoScale to false. We detect this by
+        // monitoring mousedown+mousemove on the price scale area.
+        //
+        // The price scale occupies the rightmost ~80px of the container.
+        // We detect a vertical drag there as a manual scale gesture.
+        let priceScaleDragStartY = null;
+        let isPriceScaleDragging = false;
+
+        const handleMouseDown = (e) => {
+            // Check if the mouse is in the price scale area (right edge)
+            const rect = container.getBoundingClientRect();
+            const priceScaleWidth = 80; // matches minimumWidth
+            if (e.clientX >= rect.right - priceScaleWidth) {
+                priceScaleDragStartY = e.clientY;
+                isPriceScaleDragging = false;
+            }
+        };
+
+        const handleMouseMove = (e) => {
+            if (priceScaleDragStartY !== null) {
+                const delta = Math.abs(e.clientY - priceScaleDragStartY);
+                if (delta > 3) {
+                    isPriceScaleDragging = true;
+                }
+            }
+        };
+
+        const handleMouseUp = () => {
+            if (isPriceScaleDragging && autoScaleRef.current) {
+                // User dragged on price scale → manual scaling activated
+                autoScaleRef.current = false;
+                setIsAutoScale(false);
+            }
+            priceScaleDragStartY = null;
+            isPriceScaleDragging = false;
+        };
+
+        // Double-click on price scale → restore auto-scale
+        const handleDblClick = (e) => {
+            const rect = container.getBoundingClientRect();
+            const priceScaleWidth = 80;
+            if (e.clientX >= rect.right - priceScaleWidth) {
+                chart.priceScale("right").applyOptions({ autoScale: true });
+                autoScaleRef.current = true;
+                setIsAutoScale(true);
+            }
+        };
+
+        container.addEventListener("mousedown", handleMouseDown);
+        document.addEventListener("mousemove", handleMouseMove);
+        document.addEventListener("mouseup", handleMouseUp);
+        container.addEventListener("dblclick", handleDblClick);
+
         return () => {
+            container.removeEventListener("mousedown", handleMouseDown);
+            document.removeEventListener("mousemove", handleMouseMove);
+            document.removeEventListener("mouseup", handleMouseUp);
+            container.removeEventListener("dblclick", handleDblClick);
             ro.disconnect();
             chart.remove();
             chartRef.current = null;
@@ -545,7 +619,8 @@ const ChartPane = forwardRef(function ChartPane({
             if (!chart) return;
             try { chart.timeScale().applyOptions(opts); } catch { /* */ }
         },
-    }), []);
+        resetAutoScale,
+    }), [resetAutoScale]);
 
     return (
         <div className="chart-pane" data-pane-id={paneId} data-pane-type={paneType}>
@@ -554,6 +629,24 @@ const ChartPane = forwardRef(function ChartPane({
                 <div className="chart-pane-label">{paneLabel}</div>
             )}
             <div ref={containerRef} className="chart-pane-container" />
+            {/* Auto-scale reset button — shown when user has manually scaled */}
+            {!isAutoScale && (
+                <button
+                    className="auto-scale-btn"
+                    onClick={resetAutoScale}
+                    title="恢复自动缩放 (Auto Scale)"
+                >
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path
+                            d="M2 5V2h3M12 9v3h-3M2 2l3.5 3.5M12 12L8.5 8.5M2 9v3h3M12 5V2H9M2 12l3.5-3.5M12 2L8.5 5.5"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                    </svg>
+                </button>
+            )}
         </div>
     );
 });

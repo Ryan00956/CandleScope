@@ -1902,3 +1902,47 @@ body {
   opacity: 1;
   width: 60px;
 }
+
+/* ── Auto-scale reset button ─────────────────────────────── */
+.auto-scale-btn {
+  position: absolute;
+  bottom: 28px;
+  right: 4px;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: rgba(30, 41, 59, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.auto-scale-btn:hover {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+  transform: scale(1.1);
+}
+
+.auto-scale-btn:active {
+  transform: scale(0.95);
+}
+
+[data-theme='light'] .auto-scale-btn {
+  background: rgba(241, 245, 249, 0.85);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+[data-theme='light'] .auto-scale-btn:hover {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}

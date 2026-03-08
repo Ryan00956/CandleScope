@@ -443,6 +443,16 @@ export default function App() {
   const [textBold, setTextBold] = useState(false);
   const [textItalic, setTextItalic] = useState(false);
 
+  // --- Invert price scale state ---
+  const [invertScale, setInvertScale] = useState(() => {
+    const prefs = loadUserPrefs();
+    return !!prefs.invertScale;
+  });
+  const handleInvertScaleChange = useCallback((val) => {
+    setInvertScale(val);
+    updateUserPref("invertScale", val);
+  }, []);
+
   const handleClearDrawing = useCallback(() => {
     chartWidgetRef.current?.clearAllDrawings();
   }, []);
@@ -1529,6 +1539,8 @@ export default function App() {
               onChartReady={handleChartReady}
               mainOverlayLines={mainOverlayLines}
               subPanes={subPanes}
+              invertScale={invertScale}
+              onInvertScaleChange={handleInvertScaleChange}
             />
           </ErrorBoundary>
         )}

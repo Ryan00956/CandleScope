@@ -61,6 +61,9 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     // subPanes: [{id, label, lines: [...]}]    — each sub pane with its lines
     mainOverlayLines = [],
     subPanes = [],
+    // Price scale inversion (main pane only)
+    invertScale = false,
+    onInvertScaleChange,
     // Callback: fires when main chart is ready, passes refs to parent
     onChartReady = null,
 }, ref) {
@@ -467,6 +470,8 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     customBg={customBg}
                     timezone={timezone}
                     interval={interval}
+                    invertScale={invertScale}
+                    onInvertScaleChange={onInvertScaleChange}
                     onVisibleLogicalRangeChange={handleVisibleLogicalRangeChange}
                     onCrosshairMove={handleMainCrosshairMove}
                     onCrosshairSync={handleCrosshairSync}

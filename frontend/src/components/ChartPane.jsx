@@ -68,6 +68,9 @@ const ChartPane = forwardRef(function ChartPane({
     showTimeScale = true,     // only the bottom-most pane shows time axis
     // Chart appearance
     upColor, downColor, theme, customBg, timezone, interval,
+    // Price scale inversion (main pane only)
+    invertScale = false,
+    onInvertScaleChange,
     // Sync callbacks (called by this pane, handled by parent)
     onVisibleLogicalRangeChange,
     onCrosshairMove: onCrosshairMoveExternal,
@@ -393,6 +396,16 @@ const ChartPane = forwardRef(function ChartPane({
         }
     }, [timeAlignment, paneType]);
 
+    /* ── Update price scale inversion (main pane only) ─────── */
+
+    useEffect(() => {
+        const chart = chartRef.current;
+        if (!chart || paneType !== "main") return;
+        try {
+            chart.priceScale("right").applyOptions({ invertScale: !!invertScale });
+        } catch { /* */ }
+    }, [invertScale, paneType]);
+
     /* ── Update time scale visibility ──────────────────────── */
 
     useEffect(() => {
@@ -639,6 +652,24 @@ const ChartPane = forwardRef(function ChartPane({
                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
                         <path
                             d="M2 5V2h3M12 9v3h-3M2 2l3.5 3.5M12 12L8.5 8.5M2 9v3h3M12 5V2H9M2 12l3.5-3.5M12 2L8.5 5.5"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                        />
+                    </svg>
+                </button>
+            )}
+            {/* Invert price scale button (main pane only) */}
+            {paneType === "main" && onInvertScaleChange && (
+                <button
+                    className={`invert-scale-btn${invertScale ? " active" : ""}`}
+                    onClick={() => onInvertScaleChange(!invertScale)}
+                    title={invertScale ? "恢复正常价格坐标 (Normal Scale)" : "反转价格坐标 (Invert Scale)"}
+                >
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path
+                            d="M7 1v12M4 3.5L7 1l3 2.5M4 10.5L7 13l3-2.5"
                             stroke="currentColor"
                             strokeWidth="1.5"
                             strokeLinecap="round"

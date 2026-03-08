@@ -74,7 +74,7 @@ class BackfillConfig:
     # Tolerate this many missing bars before reporting a gap
     # (avoids noise at boundaries, e.g. exchange maintenance windows)
     gap_tolerance_bars: int = field(
-        default_factory=lambda: _env_int("BACKFILL_GAP_TOLERANCE_BARS", 1),
+        default_factory=lambda: _env_int("BACKFILL_GAP_TOLERANCE_BARS", 0),
     )
     # Whether to scan for interior holes (not just tail gaps)
     gap_scan_interior: bool = field(

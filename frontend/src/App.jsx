@@ -364,6 +364,29 @@ function deduplicateByTime(data) {
   return Array.from(seen.values()).sort((a, b) => a.time - b.time);
 }
 
+/**
+ * Detect gaps in a sorted K-line array.
+ * Returns an array of { from, to } objects representing gap boundaries (unix seconds).
+ * A gap is detected when the time difference between consecutive bars exceeds
+ * 1.5× the expected interval (to allow for minor timing jitter).
+ */
+function detectGaps(data, intervalSeconds) {
+  if (!data || data.length < 2 || !intervalSeconds || intervalSeconds <= 0) return [];
+  const gaps = [];
+  const threshold = intervalSeconds * 1.5;
+  for (let i = 1; i < data.length; i++) {
+    const diff = data[i].time - data[i - 1].time;
+    if (diff > threshold) {
+      gaps.push({
+        from: data[i - 1].time,
+        to: data[i].time,
+        missingBars: Math.round(diff / intervalSeconds) - 1,
+      });
+    }
+  }
+  return gaps;
+}
+
 function upsertRealtimeKline(current, incoming) {
   if (!current || current.length === 0) return current;
   if (!incoming || incoming.time == null) return current;
@@ -1054,6 +1077,69 @@ export default function App() {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [symbol]);
 
+  // ============================================================
+  //  GAP DETECTION & AUTO-FILL
+  //  Periodically checks chartData for interior gaps (missing bars)
+  //  and automatically fetches the missing data from the backend.
+  //  This is the last line of defense against K-line gaps.
+  // ============================================================
+  const gapFillInFlightRef = useRef(new Set()); // track in-flight gap fills to avoid duplicates
+
+  useEffect(() => {
+    if (!chartData || chartData.length < 3 || loading || dataSource === "mock") return;
+
+    // Determine interval seconds
+    const intvSecs = customSecondsRef.current || parseIntervalSeconds(interval);
+    if (!intvSecs || intvSecs <= 0) return;
+
+    // Debounce: wait a bit after data changes before scanning
+    const timer = setTimeout(async () => {
+      const gaps = detectGaps(chartData, intvSecs);
+      if (gaps.length === 0) return;
+
+      // Only fill the first few gaps per cycle to avoid request storms
+      const MAX_GAPS_PER_CYCLE = 3;
+      const gapsToFill = gaps.slice(0, MAX_GAPS_PER_CYCLE);
+
+      for (const gap of gapsToFill) {
+        // Create a unique key for this gap to prevent duplicate requests
+        const gapKey = `${symbol}-${interval}-${gap.from}-${gap.to}`;
+        if (gapFillInFlightRef.current.has(gapKey)) continue;
+        gapFillInFlightRef.current.add(gapKey);
+
+        console.log(
+          `[GapFill] Detected gap: ${gap.missingBars} bars missing between ` +
+          `${new Date(gap.from * 1000).toISOString()} and ${new Date(gap.to * 1000).toISOString()}`
+        );
+
+        try {
+          // Fetch data covering the gap range
+          // Use gap.to as "before" timestamp and request enough bars
+          const barsNeeded = Math.min(gap.missingBars + 2, 1000);
+          const result = await fetchKlinesBefore(symbol, interval, gap.to, barsNeeded);
+
+          if (result?.data?.length > 0) {
+            setChartData((prev) => {
+              const merged = mergeByTime(result.data, prev);
+              saveToCache(symbol, interval, merged);
+              return merged;
+            });
+            console.log(`[GapFill] Filled ${result.data.length} bars for gap at ${new Date(gap.from * 1000).toISOString()}`);
+          }
+        } catch (err) {
+          console.warn(`[GapFill] Failed to fill gap:`, err);
+        } finally {
+          // Remove from in-flight after a delay to prevent immediate re-trigger
+          setTimeout(() => {
+            gapFillInFlightRef.current.delete(gapKey);
+          }, 10000);
+        }
+      }
+    }, 2000); // 2s debounce after data changes
+
+    return () => clearTimeout(timer);
+  }, [chartData, interval, symbol, loading, dataSource, saveToCache]);
+
   // ---- handle load more left ----
   const handleNeedMoreLeft = useCallback(
     async (oldestLoadedTime) => {
@@ -1116,6 +1202,7 @@ export default function App() {
       customCandleRef.current = null;
       realtimePriceRef.current = null;
       setLastPrice(null);
+      gapFillInFlightRef.current.clear(); // Reset gap fill tracking on interval change
       setInterval_(newInterval);
       updateUserPref("lastInterval", newInterval);
     }

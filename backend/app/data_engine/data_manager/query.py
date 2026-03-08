@@ -154,8 +154,9 @@ class QueryEngine:
                     start_ms=start_ms,
                     end_ms=end_ms,
                     limit=effective_limit,
-                    order="ASC",
+                    order="DESC",
                 )
+                rows.reverse()
                 storage_bars = [BarData.from_storage_row(r) for r in rows]
             except Exception as exc:
                 logger.error("Storage query failed: %s", exc, exc_info=True)

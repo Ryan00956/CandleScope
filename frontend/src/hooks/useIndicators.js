@@ -84,6 +84,8 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
   const pendingForceComputeRef = useRef(false);
   const volInitRef = useRef(false);
   const computingRef = useRef(false);
+  // Flag: only show "computing" UI when user manually triggers recompute
+  const userTriggeredRef = useRef(false);
 
   // Persist active indicators to localStorage
   useEffect(() => {
@@ -237,7 +239,9 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
       return;
     }
 
-    setComputing(true);
+    // Only show "computing" UI when user manually triggered the recompute
+    const showUI = userTriggeredRef.current;
+    if (showUI) setComputing(true);
 
     const ohlcv = currentChartData.map((d) => ({
       time: d.time,
@@ -305,7 +309,10 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
       // buildPaneData will be called by the useEffect watching activeIndicators
     } finally {
       computingRef.current = false;
-      setComputing(false);
+      if (showUI) {
+        setComputing(false);
+        userTriggeredRef.current = false;
+      }
 
       if (queuedRecomputeRef.current) {
         const forceNext = queuedForceRecomputeRef.current;
@@ -315,6 +322,13 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
       }
     }
   }, []);
+
+  // ── User-triggered recompute (shows "computing" UI) ───────
+  const recompute = useCallback((force = true) => {
+    userTriggeredRef.current = true;
+    lastComputeSignatureRef.current = "";  // force fresh compute
+    computeAll(force);
+  }, [computeAll]);
 
   // ── Reset compute tracking when dataset changes ──
   const prevDatasetKeyRef = useRef(datasetKey);
@@ -393,6 +407,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     updateIndicatorParams,
     updateIndicatorScript,
     computeAll,
+    recompute,
     // Multi-pane output
     mainOverlayLines,
     subPanes,

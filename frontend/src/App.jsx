@@ -490,6 +490,7 @@ export default function App() {
     updateIndicatorParams,
     updateIndicatorScript,
     computeAll: recomputeIndicators,
+    recompute: recomputeIndicatorsWithUI,
     mainOverlayLines,
     subPanes,
   } = useIndicators({
@@ -1569,7 +1570,7 @@ export default function App() {
         onToggleVisibility={toggleVisibility}
         onUpdateParams={updateIndicatorParams}
         onUpdateScript={updateIndicatorScript}
-        onRecompute={recomputeIndicators}
+        onRecompute={recomputeIndicatorsWithUI}
       />
 
       <SettingsModal

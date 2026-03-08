@@ -314,7 +314,7 @@ const ChartPane = forwardRef(function ChartPane({
                 let x = e.clientX - rect.left;
                 let y = e.clientY - rect.top;
                 const menuWidth = 180; // matches .price-scale-context-menu min-width
-                const menuHeight = 160; // approximate height of the 4 menu items
+                const menuHeight = 220; // approximate height of the 6 menu items + divider
 
                 if (x + menuWidth > rect.width) {
                     x = rect.width - menuWidth - 4;
@@ -711,42 +711,6 @@ const ChartPane = forwardRef(function ChartPane({
                 <div className="chart-pane-label">{paneLabel}</div>
             )}
             <div ref={containerRef} className="chart-pane-container" />
-            {/* Auto-scale reset button — shown when user has manually scaled */}
-            {!isAutoScale && (
-                <button
-                    className="auto-scale-btn"
-                    onClick={resetAutoScale}
-                    title="恢复自动缩放 (Auto Scale)"
-                >
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path
-                            d="M2 5V2h3M12 9v3h-3M2 2l3.5 3.5M12 12L8.5 8.5M2 9v3h3M12 5V2H9M2 12l3.5-3.5M12 2L8.5 5.5"
-                            stroke="currentColor"
-                            strokeWidth="1.5"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        />
-                    </svg>
-                </button>
-            )}
-            {/* Invert price scale button (main pane only) */}
-            {paneType === "main" && onInvertScaleChange && (
-                <button
-                    className={`invert-scale-btn${invertScale ? " active" : ""}`}
-                    onClick={() => onInvertScaleChange(!invertScale)}
-                    title={invertScale ? "恢复正常价格坐标 (Normal Scale)" : "反转价格坐标 (Invert Scale)"}
-                >
-                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path
-                            d="M7 1v12M4 3.5L7 1l3 2.5M4 10.5L7 13l3-2.5"
-                            stroke="currentColor"
-                            strokeWidth="1.5"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                        />
-                    </svg>
-                </button>
-            )}
             {/* Price scale mode context menu (main pane only) */}
             {paneType === "main" && contextMenu && (
                 <div
@@ -754,6 +718,36 @@ const ChartPane = forwardRef(function ChartPane({
                     style={{ left: contextMenu.x, top: contextMenu.y }}
                     onMouseDown={(e) => e.stopPropagation()}
                 >
+                    <button
+                        className={`price-scale-menu-item${isAutoScale ? " active" : ""}`}
+                        onClick={() => {
+                            const newAuto = !isAutoScale;
+                            try {
+                                chartRef.current?.priceScale("right").applyOptions({ autoScale: newAuto });
+                            } catch { /* */ }
+                            autoScaleRef.current = newAuto;
+                            setIsAutoScale(newAuto);
+                            setContextMenu(null);
+                        }}
+                    >
+                        <span className="price-scale-menu-check">{isAutoScale ? "✓" : ""}</span>
+                        <span>自动缩放</span>
+                        <span className="price-scale-menu-label-en">Auto Scale</span>
+                    </button>
+                    {onInvertScaleChange && (
+                        <button
+                            className={`price-scale-menu-item${invertScale ? " active" : ""}`}
+                            onClick={() => {
+                                onInvertScaleChange(!invertScale);
+                                setContextMenu(null);
+                            }}
+                        >
+                            <span className="price-scale-menu-check">{invertScale ? "✓" : ""}</span>
+                            <span>反转坐标轴</span>
+                            <span className="price-scale-menu-label-en">Invert Scale</span>
+                        </button>
+                    )}
+                    <div className="price-scale-menu-divider" />
                     {PRICE_SCALE_MODES.map((mode) => (
                         <button
                             key={mode.value}

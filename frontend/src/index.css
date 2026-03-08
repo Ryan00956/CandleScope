@@ -1903,102 +1903,15 @@ body {
   width: 60px;
 }
 
-/* ── Auto-scale reset button ─────────────────────────────── */
-.auto-scale-btn {
-  position: absolute;
-  bottom: 28px;
-  right: 4px;
-  z-index: 15;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  background: rgba(30, 41, 59, 0.75);
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+/* ── Context Menu Divider ────────────────────────────────── */
+.price-scale-menu-divider {
+  height: 1px;
+  background: rgba(148, 163, 184, 0.2);
+  margin: 4px 6px;
 }
 
-.auto-scale-btn:hover {
-  background: rgba(59, 130, 246, 0.2);
-  border-color: var(--accent-blue);
-  color: var(--accent-blue);
-  transform: scale(1.1);
-}
-
-.auto-scale-btn:active {
-  transform: scale(0.95);
-}
-
-/* Invert scale button */
-.invert-scale-btn {
-  position: absolute;
-  top: 40px;
-  right: 6px;
-  z-index: 10;
-  background: rgba(30, 41, 59, 0.75);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  color: var(--text-muted);
-  font-size: 14px;
-  width: 28px;
-  height: 28px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.15s ease;
-  backdrop-filter: blur(4px);
-  padding: 0;
-  line-height: 1;
-}
-
-.invert-scale-btn:hover {
-  background: rgba(59, 130, 246, 0.2);
-  color: var(--accent-blue);
-  border-color: var(--accent-blue);
-}
-
-.invert-scale-btn.active {
-  background: rgba(59, 130, 246, 0.25);
-  color: var(--accent-blue);
-  border-color: var(--accent-blue);
-}
-
-.invert-scale-btn:active {
-  transform: scale(0.95);
-}
-
-[data-theme='light'] .auto-scale-btn {
-  background: rgba(241, 245, 249, 0.85);
-  border-color: rgba(148, 163, 184, 0.3);
-}
-
-[data-theme='light'] .auto-scale-btn:hover {
-  background: rgba(59, 130, 246, 0.12);
-  border-color: var(--accent-blue);
-  color: var(--accent-blue);
-}
-
-[data-theme='light'] .invert-scale-btn {
-  background: rgba(241, 245, 249, 0.85);
-  border-color: rgba(148, 163, 184, 0.3);
-}
-
-[data-theme='light'] .invert-scale-btn:hover {
-  background: rgba(59, 130, 246, 0.12);
-  border-color: var(--accent-blue);
-  color: var(--accent-blue);
-}
-
-[data-theme='light'] .invert-scale-btn.active {
-  background: rgba(59, 130, 246, 0.15);
+[data-theme='light'] .price-scale-menu-divider {
+  background: rgba(0, 0, 0, 0.08);
 }
 
 /* ── Price scale context menu ──────────────────────────────── */

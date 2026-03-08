@@ -64,6 +64,9 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     // Price scale inversion (main pane only)
     invertScale = false,
     onInvertScaleChange,
+    // Price scale mode (main pane only): 0=Normal, 1=Logarithmic, 2=Percentage, 3=IndexedTo100
+    priceScaleMode = 0,
+    onPriceScaleModeChange,
     // Callback: fires when main chart is ready, passes refs to parent
     onChartReady = null,
 }, ref) {
@@ -472,6 +475,8 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     interval={interval}
                     invertScale={invertScale}
                     onInvertScaleChange={onInvertScaleChange}
+                    priceScaleMode={priceScaleMode}
+                    onPriceScaleModeChange={onPriceScaleModeChange}
                     onVisibleLogicalRangeChange={handleVisibleLogicalRangeChange}
                     onCrosshairMove={handleMainCrosshairMove}
                     onCrosshairSync={handleCrosshairSync}

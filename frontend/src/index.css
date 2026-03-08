@@ -1999,6 +1999,75 @@ body {
 
 [data-theme='light'] .invert-scale-btn.active {
   background: rgba(59, 130, 246, 0.15);
-  border-color: var(--accent-blue);
-  color: var(--accent-blue);
+}
+
+/* ── Price scale context menu ──────────────────────────────── */
+.price-scale-context-menu {
+  position: absolute;
+  z-index: 200;
+  min-width: 180px;
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 8px;
+  padding: 4px 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(12px);
+  display: flex;
+  flex-direction: column;
+}
+
+.price-scale-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 14px;
+  border: none;
+  background: none;
+  color: #e2e8f0;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.price-scale-menu-item:hover {
+  background: rgba(59, 130, 246, 0.15);
+}
+
+.price-scale-menu-item.active {
+  color: #3b82f6;
+  font-weight: 600;
+}
+
+.price-scale-menu-check {
+  width: 16px;
+  text-align: center;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.price-scale-menu-label-en {
+  margin-left: auto;
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 400;
+}
+
+[data-theme='light'] .price-scale-context-menu {
+  background: rgba(255, 255, 255, 0.97);
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+[data-theme='light'] .price-scale-menu-item {
+  color: #1e293b;
+}
+
+[data-theme='light'] .price-scale-menu-item:hover {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+[data-theme='light'] .price-scale-menu-label-en {
+  color: #94a3b8;
 }

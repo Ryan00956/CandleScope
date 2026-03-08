@@ -58,6 +58,14 @@ function toCandlePoint(d) {
 
 /* ── Component ─────────────────────────────────────────────── */
 
+/* ── Price scale mode constants ────────────────────────────── */
+const PRICE_SCALE_MODES = [
+    { value: 0, label: "常规", labelEn: "Regular" },
+    { value: 1, label: "对数", labelEn: "Logarithmic" },
+    { value: 2, label: "百分比", labelEn: "Percentage" },
+    { value: 3, label: "基准100", labelEn: "Indexed to 100" },
+];
+
 const ChartPane = forwardRef(function ChartPane({
     paneId,
     paneType = "main",       // "main" | "sub"
@@ -71,6 +79,9 @@ const ChartPane = forwardRef(function ChartPane({
     // Price scale inversion (main pane only)
     invertScale = false,
     onInvertScaleChange,
+    // Price scale mode (main pane only): 0=Normal, 1=Logarithmic, 2=Percentage, 3=IndexedTo100
+    priceScaleMode = 0,
+    onPriceScaleModeChange,
     // Sync callbacks (called by this pane, handled by parent)
     onVisibleLogicalRangeChange,
     onCrosshairMove: onCrosshairMoveExternal,
@@ -291,16 +302,44 @@ const ChartPane = forwardRef(function ChartPane({
             }
         };
 
+        // ── Right-click on price scale area → show context menu (main pane only) ──
+        const handleContextMenu = (e) => {
+            if (paneType !== "main") return;
+            const rect = container.getBoundingClientRect();
+            const priceScaleWidth = 80;
+            if (e.clientX >= rect.right - priceScaleWidth) {
+                e.preventDefault();
+                e.stopPropagation();
+
+                let x = e.clientX - rect.left;
+                let y = e.clientY - rect.top;
+                const menuWidth = 180; // matches .price-scale-context-menu min-width
+                const menuHeight = 160; // approximate height of the 4 menu items
+
+                if (x + menuWidth > rect.width) {
+                    x = rect.width - menuWidth - 4;
+                }
+
+                if (y + menuHeight > rect.height) {
+                    y = Math.max(0, rect.height - menuHeight - 4);
+                }
+
+                setContextMenu({ x, y });
+            }
+        };
+
         container.addEventListener("mousedown", handleMouseDown);
         document.addEventListener("mousemove", handleMouseMove);
         document.addEventListener("mouseup", handleMouseUp);
         container.addEventListener("dblclick", handleDblClick);
+        container.addEventListener("contextmenu", handleContextMenu);
 
         return () => {
             container.removeEventListener("mousedown", handleMouseDown);
             document.removeEventListener("mousemove", handleMouseMove);
             document.removeEventListener("mouseup", handleMouseUp);
             container.removeEventListener("dblclick", handleDblClick);
+            container.removeEventListener("contextmenu", handleContextMenu);
             ro.disconnect();
             chart.remove();
             chartRef.current = null;
@@ -405,6 +444,36 @@ const ChartPane = forwardRef(function ChartPane({
             chart.priceScale("right").applyOptions({ invertScale: !!invertScale });
         } catch { /* */ }
     }, [invertScale, paneType]);
+
+    /* ── Update price scale mode (main pane only) ──────────── */
+
+    useEffect(() => {
+        const chart = chartRef.current;
+        if (!chart || paneType !== "main") return;
+        try {
+            chart.priceScale("right").applyOptions({ mode: priceScaleMode });
+        } catch { /* */ }
+    }, [priceScaleMode, paneType]);
+
+    /* ── Right-click context menu state (main pane only) ───── */
+    const [contextMenu, setContextMenu] = useState(null); // { x, y } or null
+
+    // Close context menu on outside click or Escape
+    useEffect(() => {
+        if (!contextMenu) return;
+        const handleClick = () => setContextMenu(null);
+        const handleKey = (e) => { if (e.key === "Escape") setContextMenu(null); };
+        // Use setTimeout to avoid the same click that opened the menu from closing it
+        const timer = setTimeout(() => {
+            document.addEventListener("mousedown", handleClick);
+            document.addEventListener("keydown", handleKey);
+        }, 0);
+        return () => {
+            clearTimeout(timer);
+            document.removeEventListener("mousedown", handleClick);
+            document.removeEventListener("keydown", handleKey);
+        };
+    }, [contextMenu]);
 
     /* ── Update time scale visibility ──────────────────────── */
 
@@ -677,6 +746,31 @@ const ChartPane = forwardRef(function ChartPane({
                         />
                     </svg>
                 </button>
+            )}
+            {/* Price scale mode context menu (main pane only) */}
+            {paneType === "main" && contextMenu && (
+                <div
+                    className="price-scale-context-menu"
+                    style={{ left: contextMenu.x, top: contextMenu.y }}
+                    onMouseDown={(e) => e.stopPropagation()}
+                >
+                    {PRICE_SCALE_MODES.map((mode) => (
+                        <button
+                            key={mode.value}
+                            className={`price-scale-menu-item${priceScaleMode === mode.value ? " active" : ""}`}
+                            onClick={() => {
+                                if (onPriceScaleModeChange) onPriceScaleModeChange(mode.value);
+                                setContextMenu(null);
+                            }}
+                        >
+                            <span className="price-scale-menu-check">
+                                {priceScaleMode === mode.value ? "✓" : ""}
+                            </span>
+                            <span>{mode.label}</span>
+                            <span className="price-scale-menu-label-en">{mode.labelEn}</span>
+                        </button>
+                    ))}
+                </div>
             )}
         </div>
     );

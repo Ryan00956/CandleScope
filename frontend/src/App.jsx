@@ -453,6 +453,16 @@ export default function App() {
     updateUserPref("invertScale", val);
   }, []);
 
+  // --- Price scale mode state (0=Normal, 1=Logarithmic, 2=Percentage, 3=IndexedTo100) ---
+  const [priceScaleMode, setPriceScaleMode] = useState(() => {
+    const prefs = loadUserPrefs();
+    return typeof prefs.priceScaleMode === "number" ? prefs.priceScaleMode : 0;
+  });
+  const handlePriceScaleModeChange = useCallback((mode) => {
+    setPriceScaleMode(mode);
+    updateUserPref("priceScaleMode", mode);
+  }, []);
+
   const handleClearDrawing = useCallback(() => {
     chartWidgetRef.current?.clearAllDrawings();
   }, []);
@@ -1541,6 +1551,8 @@ export default function App() {
               subPanes={subPanes}
               invertScale={invertScale}
               onInvertScaleChange={handleInvertScaleChange}
+              priceScaleMode={priceScaleMode}
+              onPriceScaleModeChange={handlePriceScaleModeChange}
             />
           </ErrorBoundary>
         )}

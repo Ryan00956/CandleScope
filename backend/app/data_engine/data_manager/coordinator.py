@@ -200,9 +200,16 @@ class StreamCoordinator:
         If not, and ``auto_start_ingestion`` is True, starts a new
         pipeline.
 
+        For **non-standard intervals** (e.g. 7m, 11m, 45m) that are not
+        natively supported by the exchange WebSocket, the coordinator
+        does NOT create a separate WS connection.  Instead it ensures
+        the base interval (typically 1m) stream is running and creates
+        a passive StreamEntry.  The BarAggregator's L1 Router already
+        knows how to fan out 1m data to custom-interval targets.
+
         Args:
             symbol:   Trading pair, e.g. "BTCUSDT".
-            interval: K-line interval, e.g. "1m", "5m", "1h".
+            interval: K-line interval, e.g. "1m", "5m", "1h", "7m".
 
         Returns:
             ``StreamInfo`` with the current stream status.
@@ -218,6 +225,39 @@ class StreamCoordinator:
         # Auto-start if configured
         if not self._cfg.auto_start_ingestion:
             return StreamInfo(key=key, status=StreamStatus.STOPPED)
+
+        # ── Non-standard interval: reuse base-interval stream ────
+        from ..bar_aggregator.models import is_standard_interval
+
+        if not is_standard_interval(interval):
+            base_interval = self._cfg.base_interval  # typically "1m"
+            base_key = SeriesKey(symbol, base_interval)
+
+            # Ensure the base-interval ingestion stream is running
+            if base_key not in self._streams:
+                await self._start_stream(base_key)
+            else:
+                self._streams[base_key].touch()
+
+            # Create a passive StreamEntry (no WS connection of its own)
+            entry = _StreamEntry(key)
+            entry.info.status = StreamStatus.ACTIVE
+            entry.info.started_at_ms = int(time.time() * 1000)
+            self._streams[key] = entry
+
+            logger.info(
+                "Custom interval %s: aggregating from base stream %s",
+                key, base_key,
+            )
+
+            # Emit stream-started event
+            if self._bus:
+                await self._bus.emit(DataEvent(
+                    event_type=DataEventType.STREAM_STARTED,
+                    key=key,
+                ))
+
+            return entry.info
 
         return await self._start_stream(key)
 

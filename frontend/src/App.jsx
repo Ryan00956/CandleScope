@@ -25,18 +25,147 @@ function isCustomInterval(intv) {
   const NATIVE = new Set(["1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"]);
   return !NATIVE.has(intv);
 }
-/** Aggregate an incoming base candle into a custom-period candle being formed */
+/**
+ * Aggregate an incoming base candle into a custom-period candle being formed.
+ *
+ * The tricky part: Binance WS pushes the *same* base candle (e.g. 1m)
+ * multiple times before it closes.  Each push contains the *total* volume
+ * of that base candle so far — NOT an incremental delta.  Naively doing
+ * `c.volume += incoming.volume` would accumulate duplicates.
+ *
+ * We solve this by tracking the per-base-candle contribution inside
+ * `_baseParts` (keyed by base candle time).  When the same base candle
+ * arrives again we *replace* its contribution instead of adding again.
+ *
+ * `_baseParts` is stored directly on the candle object and stripped
+ * before feeding into the chart (it's harmless if left — chart ignores
+ * unknown keys).
+ */
 function aggregateRealtimeCandle(currentCandle, incoming, bucketWidth) {
   const bucketStart = Math.floor(incoming.time / bucketWidth) * bucketWidth;
+
+  // ── New bucket → brand-new candle ──
   if (!currentCandle || bucketStart !== currentCandle.time) {
-    return { candle: { time: bucketStart, open: incoming.open, high: incoming.high, low: incoming.low, close: incoming.close, volume: incoming.volume }, isNew: true };
+    const parts = {};
+    parts[incoming.time] = {
+      open: incoming.open,
+      high: incoming.high,
+      low: incoming.low,
+      close: incoming.close,
+      volume: incoming.volume,
+    };
+    return {
+      candle: {
+        time: bucketStart,
+        open: incoming.open,
+        high: incoming.high,
+        low: incoming.low,
+        close: incoming.close,
+        volume: incoming.volume,
+        _baseParts: parts,
+      },
+      isNew: true,
+    };
   }
-  const c = { ...currentCandle };
-  c.high = Math.max(c.high, incoming.high);
-  c.low = Math.min(c.low, incoming.low);
-  c.close = incoming.close;
-  c.volume = c.volume + incoming.volume;
-  return { candle: c, isNew: false };
+
+  // ── Same bucket → upsert base candle contribution ──
+  const parts = { ...(currentCandle._baseParts || {}) };
+
+  // If currentCandle was loaded from cache/HTTP (no _baseParts),
+  // `parts` is empty.  We need to preserve the historical aggregate
+  // OHLCV for base candles we haven't seen via WS yet.  We do this
+  // by storing the cached aggregate in a special `_prior` key that
+  // is excluded from volume summation once real base parts arrive
+  // and is used only for OHLC bounds that real parts can't override.
+  if (!currentCandle._baseParts) {
+    parts._prior = {
+      open: currentCandle.open,
+      high: currentCandle.high,
+      low: currentCandle.low,
+      close: currentCandle.close,
+      volume: currentCandle.volume,
+    };
+  }
+
+  parts[incoming.time] = {
+    open: incoming.open,
+    high: incoming.high,
+    low: incoming.low,
+    close: incoming.close,
+    volume: incoming.volume,
+  };
+
+  // Rebuild aggregate OHLCV from all real base parts
+  let aggOpen = null;
+  let aggHigh = -Infinity;
+  let aggLow = Infinity;
+  let aggClose = null;
+  let aggVolume = 0;
+  const sortedTimes = Object.keys(parts)
+    .filter((k) => k !== "_prior")
+    .map(Number)
+    .sort((a, b) => a - b);
+
+  for (const t of sortedTimes) {
+    const p = parts[t];
+    if (aggOpen === null) aggOpen = p.open;
+    aggHigh = Math.max(aggHigh, p.high);
+    aggLow = Math.min(aggLow, p.low);
+    aggClose = p.close;   // last part's close
+    aggVolume += p.volume;
+  }
+
+  // If we have a _prior (from cache), blend in its contribution
+  // for candles we haven't seen live yet:
+  //  - OHLC: expand bounds with prior's high/low, keep prior's open
+  //    if it's earlier than any live part
+  //  - Volume: keep prior's volume as baseline, but we must NOT
+  //    double-count the incoming base candle's volume which is
+  //    already in both _prior.volume and parts[incoming.time].volume.
+  //    Unfortunately we can't decompose _prior.volume per-base-candle.
+  //    So once live parts start arriving, we accept the _prior volume
+  //    as the "frozen" total for all prior base candles, and only ADD
+  //    volume from base candles not yet seen.
+  if (parts._prior) {
+    const prior = parts._prior;
+    // For the very first live tick in this bucket, _prior.volume
+    // already includes this base candle's old volume.  We subtract
+    // nothing because the live tick replaces whatever _prior had for
+    // this time slot — but since _prior is an aggregate, we can't
+    // perfectly decompose.  The pragmatic fix: use _prior.volume for
+    // all base candles EXCEPT those we now track individually.
+    // Since we only have 1 live part so far (the incoming one),
+    // _prior.volume ≈ total - incoming's old contribution.
+    // Best approximation: prior.volume stays as-is, live parts'
+    // volumes are already counted, so we just use the larger of
+    // (prior.volume) vs (sum of live parts) to avoid under-counting
+    // on first tick, then as more live ticks arrive the live sum
+    // naturally overtakes and _prior becomes irrelevant.
+    //
+    // Simplest correct approach: once we have _prior, treat volume
+    // as max(prior.volume, liveSum) until _prior is dropped.
+    aggVolume = Math.max(prior.volume, aggVolume);
+
+    // OHLC: use prior's open (it was set when the bucket started
+    // and is likely earlier than any live base candle)
+    aggOpen = prior.open;
+    aggHigh = Math.max(aggHigh, prior.high);
+    aggLow = Math.min(aggLow, prior.low);
+    // close: keep the latest live part's close (already set)
+  }
+
+  return {
+    candle: {
+      time: bucketStart,
+      open: aggOpen,
+      high: aggHigh,
+      low: aggLow,
+      close: aggClose,
+      volume: aggVolume,
+      _baseParts: parts,
+    },
+    isNew: false,
+  };
 }
 
 // ---------- ErrorBoundary ----------

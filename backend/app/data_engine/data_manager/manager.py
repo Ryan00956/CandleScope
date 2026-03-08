@@ -400,6 +400,12 @@ class DataManager:
         Also registers the (symbol, interval) target with the
         BarAggregator so that incoming data is aggregated.
 
+        For **non-standard intervals** (e.g. 7m, 11m, 45m), the base
+        interval (typically 1m) is also registered as an aggregation
+        target, ensuring the Router can fan out 1m data to the custom
+        interval.  The coordinator handles reusing the base interval's
+        WS connection instead of opening a new one.
+
         This is typically called when:
           * A user opens a chart for a new symbol/interval
           * A strategy subscribes to a new data feed
@@ -407,6 +413,13 @@ class DataManager:
         """
         # Register aggregation target
         self.bar_aggregator.add_target(symbol, interval)
+
+        # For non-standard intervals, also register the base interval
+        # so the Router has a source target to receive and fan out data.
+        from ..bar_aggregator.models import is_standard_interval
+        if not is_standard_interval(interval):
+            base = self._cfg.coordinator.base_interval  # typically "1m"
+            self.bar_aggregator.add_target(symbol, base)
 
         return await self.coordinator.ensure_stream(symbol, interval)
 

@@ -224,7 +224,7 @@ async def get_klines_before(
     symbol: str = Query("BTCUSDT", description="Trading symbol"),
     interval: str = Query("1h", description="Kline interval"),
     before: int = Query(..., description="Load data before this unix timestamp (seconds)"),
-    bars: int = Query(500, ge=50, le=1000, description="How many bars to load"),
+    bars: int = Query(500, ge=1, le=1000, description="How many bars to load"),
 ):
     """Paginated historical data — load bars before a timestamp."""
     _validate_interval(interval)

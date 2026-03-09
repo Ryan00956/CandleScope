@@ -1,57 +1,17 @@
 /**
  * IndicatorEditor — Python code editor for writing custom indicators.
- * Uses CodeMirror 6 with Python syntax highlighting.
+ * Uses Monaco Editor with Python syntax highlighting.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
-import { EditorView, basicSetup } from "codemirror";
-import { python } from "@codemirror/lang-python";
-import { oneDark } from "@codemirror/theme-one-dark";
-import { EditorState } from "@codemirror/state";
+import { useCallback, useState } from "react";
+import Editor from "@monaco-editor/react";
 
 export default function IndicatorEditor({ indicator, onSave, onBack }) {
-  const editorContainerRef = useRef(null);
-  const editorViewRef = useRef(null);
   const [name, setName] = useState(indicator?.name || "My Indicator");
+  const [script, setScript] = useState(indicator?.script || "");
   const [paramsJson, setParamsJson] = useState(
     JSON.stringify(indicator?.params || {}, null, 2)
   );
   const [paramsError, setParamsError] = useState(null);
-
-  // Initialize CodeMirror
-  useEffect(() => {
-    if (!editorContainerRef.current) return;
-
-    const state = EditorState.create({
-      doc: indicator?.script || "",
-      extensions: [
-        basicSetup,
-        python(),
-        oneDark,
-        EditorView.theme({
-          "&": { height: "100%", fontSize: "13px" },
-          ".cm-scroller": { overflow: "auto" },
-          ".cm-content": { fontFamily: "'Fira Code', 'Consolas', monospace" },
-          ".cm-gutters": {
-            backgroundColor: "#1e1e2e",
-            borderRight: "1px solid #313244",
-          },
-        }),
-        EditorView.lineWrapping,
-      ],
-    });
-
-    const view = new EditorView({
-      state,
-      parent: editorContainerRef.current,
-    });
-
-    editorViewRef.current = view;
-
-    return () => {
-      view.destroy();
-      editorViewRef.current = null;
-    };
-  }, []);
 
   const handleSave = useCallback(() => {
     // Validate params JSON
@@ -64,10 +24,6 @@ export default function IndicatorEditor({ indicator, onSave, onBack }) {
       return;
     }
 
-    const script = editorViewRef.current
-      ? editorViewRef.current.state.doc.toString()
-      : indicator?.script || "";
-
     onSave({
       id: indicator?.id || null,
       name,
@@ -76,7 +32,7 @@ export default function IndicatorEditor({ indicator, onSave, onBack }) {
       description: indicator?.description || "",
       isPreset: indicator?.isPreset || false,
     });
-  }, [name, paramsJson, indicator, onSave]);
+  }, [name, script, paramsJson, indicator, onSave]);
 
   return (
     <div className="indicator-editor">
@@ -109,10 +65,26 @@ export default function IndicatorEditor({ indicator, onSave, onBack }) {
           可用变量: open, high, low, close, volume, time | 函数: add_line(data, color, title, overlay)
         </span>
       </div>
-      <div className="indicator-editor-codemirror" ref={editorContainerRef} />
+      <div className="indicator-editor-monaco" style={{ height: "350px", border: "1px solid #313244", borderRadius: "4px", overflow: "hidden" }}>
+        <Editor
+          height="100%"
+          defaultLanguage="python"
+          theme="vs-dark"
+          value={script}
+          onChange={(value) => setScript(value || "")}
+          options={{
+            minimap: { enabled: false },
+            fontSize: 13,
+            fontFamily: "'Fira Code', 'Consolas', monospace",
+            wordWrap: "on",
+            scrollBeyondLastLine: false,
+            padding: { top: 12, bottom: 12 },
+          }}
+        />
+      </div>
 
       {/* Params editor */}
-      <div className="indicator-editor-field">
+      <div className="indicator-editor-field" style={{ marginTop: "16px" }}>
         <label>
           参数 (JSON)
           {paramsError && <span className="indicator-editor-params-error">{paramsError}</span>}
@@ -130,7 +102,7 @@ export default function IndicatorEditor({ indicator, onSave, onBack }) {
       </div>
 
       {/* Help section */}
-      <details className="indicator-editor-help">
+      <details className="indicator-editor-help" style={{ marginTop: "16px" }}>
         <summary>📖 编写指南</summary>
         <div className="indicator-editor-help-content">
           <p><strong>可用变量（numpy 数组）:</strong></p>

@@ -189,10 +189,12 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
 
       for (const line of ind.lines) {
         const pane = line.pane || "main";
+        // Attach indicatorId so fill() can match plot references
+        const lineWithId = { ...line, indicatorId: ind.id };
 
         if (pane === "main") {
           // Overlay on main chart
-          overlayLines.push(line);
+          overlayLines.push(lineWithId);
         } else {
           // Separate pane or volume pane — group by indicator id
           const paneId = `${pane}-${ind.id}`;
@@ -203,7 +205,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
               lines: [],
             });
           }
-          paneMap.get(paneId).lines.push(line);
+          paneMap.get(paneId).lines.push(lineWithId);
         }
       }
     }

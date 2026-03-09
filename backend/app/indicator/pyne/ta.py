@@ -490,16 +490,49 @@ class TaModule:
         return upper, middle, lower
 
     def stdev(self, src: np.ndarray, period: int) -> np.ndarray:
-        """Rolling Standard Deviation.
+        """Rolling Standard Deviation (O(n) optimized).
 
         Pine equivalent: ``ta.stdev(close, 20)``
+
+        Uses the identity ``Var(X) = E[X²] − (E[X])²`` with cumulative
+        sums for O(n) computation instead of the naive O(n·period) loop.
+        Falls back to a per-window approach only when NaN values are present.
         """
         n = len(src)
         result = np.full(n, np.nan)
-        for i in range(period - 1, n):
-            window = src[i - period + 1: i + 1]
-            if not np.any(np.isnan(window)):
-                result[i] = np.std(window, ddof=0)  # Pine uses population stdev
+        if period <= 0 or period > n:
+            return result
+
+        # If NaN values exist, fall back to window-based approach
+        if np.any(np.isnan(src)):
+            for i in range(period - 1, n):
+                window = src[i - period + 1: i + 1]
+                if not np.any(np.isnan(window)):
+                    result[i] = np.std(window, ddof=0)
+            return result
+
+        # ── O(n) vectorized path ──
+        # Var(X) = E[X²] − (E[X])²
+        cs = np.cumsum(src)
+        cs2 = np.cumsum(src * src)
+
+        # First complete window [0 .. period-1]
+        s = cs[period - 1]
+        s2 = cs2[period - 1]
+        mean = s / period
+        result[period - 1] = np.sqrt(max(0.0, s2 / period - mean * mean))
+
+        # Subsequent windows via sliding cumsum difference
+        if period < n:
+            s_arr = cs[period:] - cs[:n - period]
+            s2_arr = cs2[period:] - cs2[:n - period]
+            means = s_arr / period
+            variance = s2_arr / period - means * means
+            # Clamp tiny negatives from floating-point rounding
+            np.maximum(variance, 0.0, out=variance)
+            np.sqrt(variance, out=variance)
+            result[period:] = variance
+
         return result
 
     def keltner(

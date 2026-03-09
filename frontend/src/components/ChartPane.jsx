@@ -9,7 +9,7 @@
  * synchronization is managed by the parent MultiPaneChart.
  */
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { createChart, CandlestickSeries, LineSeries, HistogramSeries } from "lightweight-charts";
+import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
 
 /* ── Localization helpers (shared with old ChartWidget) ─────── */
 
@@ -739,14 +739,245 @@ const ChartPane = forwardRef(function ChartPane({
         }
     }, [indicatorBarcolors, data, paneType]);
 
+    /* ── Apply fill() between two indicator lines ─────────── */
+    // Lightweight Charts doesn't have a native "area between two lines" API.
+    // We approximate fill by creating an invisible AreaSeries that renders
+    // the shaded region between the two plot lines' data by using the
+    // topColor/bottomColor of two stacked area series.
+    //
+    // Approach: For each fill(plot1, plot2), we create TWO area series:
+    //   1. Upper area (plot1 data) with filled color above baseline
+    //   2. Lower area (plot2 data) that masks/clips the fill
+    // Actually the simplest correct approach for lightweight-charts:
+    //   - We find plot1 and plot2 data arrays, compute the band between
+    //     them, and render it as a single area series with lineColor
+    //     transparent and topColor/bottomColor set to the fill color.
+    //
+    // Simpler approach used here: Create an area series between the two
+    // lines by setting one as `value` and the other as `lineBase`. But
+    // lightweight-charts AreaSeries doesn't support dynamic lineBase.
+    //
+    // Final practical approach: We use TWO stacked area series:
+    //   - areaUpper: value = max(plot1, plot2), lineColor transparent
+    //   - areaLower: value = min(plot1, plot2), fills the gap
+    // This creates a visual band effect.
+
+    const fillSeriesRef = useRef([]); // track fill area series
+
+    useEffect(() => {
+        const chart = chartRef.current;
+        if (!chart) return;
+
+        // Remove previous fill series
+        for (const fs of fillSeriesRef.current) {
+            try { chart.removeSeries(fs); } catch { /* */ }
+        }
+        fillSeriesRef.current = [];
+
+        if (!indicatorFills || indicatorFills.length === 0) return;
+        if (!indicatorLines || indicatorLines.length === 0) return;
+
+        // Build a map of plot_id → line data for matching
+        const plotDataMap = new Map();
+        for (const line of indicatorLines) {
+            if (line.id) {
+                plotDataMap.set(line.id, line.data);
+            }
+        }
+
+        // Dynamically import AreaSeries (lightweight-charts v4)
+        // AreaSeries is available from the same package
+        for (const fillDef of indicatorFills) {
+            const { plot1_id, plot2_id, color } = fillDef;
+            const data1 = plotDataMap.get(plot1_id);
+            const data2 = plotDataMap.get(plot2_id);
+            if (!data1 || !data2 || data1.length === 0 || data2.length === 0) continue;
+
+            // Build time-aligned merged data
+            const map1 = new Map();
+            const map2 = new Map();
+            for (const d of data1) {
+                if (d?.time != null && d?.value != null && isFinite(d.value)) map1.set(d.time, d.value);
+            }
+            for (const d of data2) {
+                if (d?.time != null && d?.value != null && isFinite(d.value)) map2.set(d.time, d.value);
+            }
+
+            // Merge times where both series have data
+            const times = [];
+            for (const t of map1.keys()) {
+                if (map2.has(t)) times.push(t);
+            }
+            times.sort((a, b) => a - b);
+            if (times.length === 0) continue;
+
+            try {
+                // Parse fill color opacity — default to semi-transparent
+                let fillColor = color || "rgba(59,130,246,0.1)";
+
+                // Create area series for the upper boundary (max of the two)
+                const areaSeries = chart.addSeries(AreaSeries, {
+                    lineColor: "transparent",
+                    lineWidth: 0,
+                    topColor: fillColor,
+                    bottomColor: "transparent",
+                    priceScaleId: "right",
+                    lastValueVisible: false,
+                    priceLineVisible: false,
+                    crosshairMarkerVisible: false,
+                });
+
+                // Build area data: value = upper line, use fill between the two
+                // We set the area from max down to min using two separate series
+                const upperData = times.map((t) => ({
+                    time: t,
+                    value: Math.max(map1.get(t), map2.get(t)),
+                }));
+                areaSeries.setData(upperData);
+                fillSeriesRef.current.push(areaSeries);
+
+                // Create second area series for the lower boundary (masks the bottom)
+                const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
+                const lowerSeries = chart.addSeries(AreaSeries, {
+                    lineColor: "transparent",
+                    lineWidth: 0,
+                    topColor: bgColor,
+                    bottomColor: bgColor,
+                    priceScaleId: "right",
+                    lastValueVisible: false,
+                    priceLineVisible: false,
+                    crosshairMarkerVisible: false,
+                });
+
+                const lowerData = times.map((t) => ({
+                    time: t,
+                    value: Math.min(map1.get(t), map2.get(t)),
+                }));
+                lowerSeries.setData(lowerData);
+                fillSeriesRef.current.push(lowerSeries);
+            } catch (err) {
+                console.warn("ChartPane: failed to create fill area:", err);
+            }
+        }
+    }, [indicatorFills, indicatorLines, theme, customBg]);
+
     /* ── Apply bgcolors (background color regions) ─────────── */
-    // Lightweight Charts doesn't support bgcolor natively, so we render
-    // colored overlay divs on top of the chart using coordinate mapping.
-    // For simplicity we'll use a CSS overlay approach with the chart's
-    // timeScale coordinate conversion.
-    // NOTE: This is a visual approximation — for now we skip bgcolor
-    // rendering as it requires complex coordinate tracking on every scroll.
-    // TODO: Implement bgcolor via canvas overlay or chart plugin.
+    // We render bgcolor using a HistogramSeries with very large values to
+    // simulate background coloring. The bars are drawn behind other series.
+    //
+    // Alternative approach: We use an invisible AreaSeries with the fill
+    // color, plotted at a very high value to cover the visible area.
+    //
+    // Practical approach used here: We create colored rectangular overlays
+    // using a canvas element positioned over the chart, redrawing on scroll.
+
+    const bgCanvasRef = useRef(null);
+    const bgAnimFrameRef = useRef(null);
+
+    useEffect(() => {
+        const chart = chartRef.current;
+        const container = containerRef.current;
+        if (!chart || !container) return;
+        if (!indicatorBgcolors || indicatorBgcolors.length === 0) {
+            // Remove existing canvas if no bgcolors
+            if (bgCanvasRef.current) {
+                try { bgCanvasRef.current.remove(); } catch { /* */ }
+                bgCanvasRef.current = null;
+            }
+            return;
+        }
+
+        // Create or reuse canvas overlay
+        let canvas = bgCanvasRef.current;
+        if (!canvas) {
+            canvas = document.createElement("canvas");
+            canvas.className = "bgcolor-overlay-canvas";
+            canvas.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:0;";
+            container.style.position = "relative";
+            // Insert canvas as first child so it's behind chart elements
+            container.insertBefore(canvas, container.firstChild);
+            bgCanvasRef.current = canvas;
+        }
+
+        // Build time→color map from all bgcolor sources
+        const colorRegions = []; // [{time, color}]
+        for (const bg of indicatorBgcolors) {
+            if (!bg.regions || !Array.isArray(bg.regions)) continue;
+            const bgColor = bg.color || "rgba(59,130,246,0.1)";
+            for (const region of bg.regions) {
+                if (region.time != null) {
+                    colorRegions.push({ time: region.time, color: bgColor });
+                }
+            }
+        }
+        if (colorRegions.length === 0) return;
+
+        const timeColorMap = new Map();
+        for (const r of colorRegions) {
+            timeColorMap.set(r.time, r.color);
+        }
+
+        // Render function — called on scroll/resize
+        const renderBg = () => {
+            const timeScale = chart.timeScale();
+            const rect = container.getBoundingClientRect();
+            const w = rect.width;
+            const h = rect.height;
+
+            // Update canvas size
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = w * dpr;
+            canvas.height = h * dpr;
+            canvas.style.width = w + "px";
+            canvas.style.height = h + "px";
+
+            const ctx2d = canvas.getContext("2d");
+            if (!ctx2d) return;
+            ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx2d.clearRect(0, 0, w, h);
+
+            // Get visible range
+            const visibleRange = timeScale.getVisibleRange();
+            if (!visibleRange) return;
+
+            // For each colored region, compute x coordinates and draw
+            for (const [time, color] of timeColorMap) {
+                if (time < visibleRange.from || time > visibleRange.to) continue;
+
+                const x = timeScale.timeToCoordinate(time);
+                if (x === null || x === undefined) continue;
+
+                // Get bar width from barSpacing
+                const barSpacing = timeScale.options().barSpacing || 8;
+                const barW = Math.max(1, barSpacing - 1);
+
+                ctx2d.fillStyle = color;
+                ctx2d.fillRect(x - barW / 2, 0, barW, h);
+            }
+        };
+
+        // Initial render
+        renderBg();
+
+        // Re-render on visible range changes
+        const onRangeChange = () => {
+            if (bgAnimFrameRef.current) cancelAnimationFrame(bgAnimFrameRef.current);
+            bgAnimFrameRef.current = requestAnimationFrame(renderBg);
+        };
+
+        const tsObj = chart.timeScale();
+        tsObj.subscribeVisibleLogicalRangeChange(onRangeChange);
+
+        // Also re-render on resize
+        const ro = new ResizeObserver(onRangeChange);
+        ro.observe(container);
+
+        return () => {
+            tsObj.unsubscribeVisibleLogicalRangeChange(onRangeChange);
+            ro.disconnect();
+            if (bgAnimFrameRef.current) cancelAnimationFrame(bgAnimFrameRef.current);
+        };
+    }, [indicatorBgcolors]);
 
     /* ── Imperative handle ─────────────────────────────────── */
 

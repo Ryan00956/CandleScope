@@ -485,9 +485,32 @@ async def _compute_script(req: ComputeRequest) -> dict:
         params=req.params or {},
     )
 
-    return {
+    response: dict = {
         "ok": result.ok,
         "error": result.error,
         "lines": result.lines,
         "result": result.output if result.output else None,
     }
+
+    # Pass through extended output types for frontend rendering
+    output = result.output or {}
+    if output.get("markers"):
+        response["markers"] = output["markers"]
+    if output.get("fills"):
+        response["fills"] = output["fills"]
+    if output.get("hlines"):
+        response["hlines"] = output["hlines"]
+    if output.get("bgcolors"):
+        response["bgcolors"] = output["bgcolors"]
+    if output.get("barcolors"):
+        response["barcolors"] = output["barcolors"]
+
+    # Pass param_schema for dynamic UI generation (from input.* calls)
+    if result.param_schema:
+        response["param_schema"] = result.param_schema
+
+    # Pass indicator metadata
+    if result.meta:
+        response["meta"] = result.meta
+
+    return response

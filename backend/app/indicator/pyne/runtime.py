@@ -218,7 +218,7 @@ class PyneRuntime:
         flat_lines: list[dict[str, Any]] = []
 
         for line in collector.lines:
-            flat_lines.append({
+            entry: dict[str, Any] = {
                 "name": line.get("title", ""),
                 "color": line.get("color", "#f59e0b"),
                 "type": "line",
@@ -226,7 +226,14 @@ class PyneRuntime:
                 "lineWidth": line.get("linewidth", 2),
                 "lineStyle": _style_to_int(line.get("style", "solid")),
                 "data": line.get("data", []),
-            })
+            }
+            # Include plot id for fill() cross-referencing
+            if "id" in line:
+                entry["id"] = line["id"]
+            # Per-bar color flag
+            if line.get("per_bar_color"):
+                entry["per_bar_color"] = True
+            flat_lines.append(entry)
 
         for hist in collector.histograms:
             flat_lines.append({

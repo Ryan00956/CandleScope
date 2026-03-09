@@ -70,6 +70,14 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
   const [mainOverlayLines, setMainOverlayLines] = useState([]);
   const [subPanes, setSubPanes] = useState([]);
 
+  // Extended output types from Pyne runtime
+  const [markers, setMarkers] = useState([]);      // [{data: [{time, shape, color, text, position}]}]
+  const [fills, setFills] = useState([]);           // [{plot1_id, plot2_id, color}]
+  const [hlines, setHlines] = useState([]);         // [{price, title, color, linestyle, pane}]
+  const [bgcolors, setBgcolors] = useState([]);     // [{color, pane, regions: [{time}]}]
+  const [barcolors, setBarcolors] = useState([]);   // [{data: [{time, color}]}]
+  const [paramSchemas, setParamSchemas] = useState({}); // indicatorId → param_schema[]
+
   const lastComputeSignatureRef = useRef("");
   const queuedRecomputeRef = useRef(false);
   const queuedForceRecomputeRef = useRef(false);
@@ -270,6 +278,14 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
       );
 
       const processedResults = [];
+      // Collect extended outputs across all indicators
+      const allMarkers = [];
+      const allFills = [];
+      const allHlines = [];
+      const allBgcolors = [];
+      const allBarcolors = [];
+      const newParamSchemas = {};
+
       for (const r of results) {
         if (r.status !== "fulfilled") continue;
         const { id, result, visible } = r.value;
@@ -291,9 +307,43 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
             };
           });
           processedResults.push({ id, mappedLines, visible, error: null });
+
+          // Collect extended output types (only from visible indicators)
+          if (visible) {
+            if (result.markers) {
+              for (const m of result.markers) allMarkers.push({ ...m, indicatorId: id });
+            }
+            if (result.fills) {
+              for (const f of result.fills) allFills.push({ ...f, indicatorId: id });
+            }
+            if (result.hlines) {
+              for (const h of result.hlines) allHlines.push({ ...h, indicatorId: id });
+            }
+            if (result.bgcolors) {
+              for (const bg of result.bgcolors) allBgcolors.push({ ...bg, indicatorId: id });
+            }
+            if (result.barcolors) {
+              for (const bc of result.barcolors) allBarcolors.push({ ...bc, indicatorId: id });
+            }
+          }
+
+          // Collect param schemas
+          if (result.param_schema && result.param_schema.length > 0) {
+            newParamSchemas[id] = result.param_schema;
+          }
         } else {
           processedResults.push({ id, mappedLines: [], visible, error: result.error || "Unknown error" });
         }
+      }
+
+      // Update extended output states
+      setMarkers(allMarkers);
+      setFills(allFills);
+      setHlines(allHlines);
+      setBgcolors(allBgcolors);
+      setBarcolors(allBarcolors);
+      if (Object.keys(newParamSchemas).length > 0) {
+        setParamSchemas((prev) => ({ ...prev, ...newParamSchemas }));
       }
 
       // Update state with computed line data
@@ -411,5 +461,12 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     // Multi-pane output
     mainOverlayLines,
     subPanes,
+    // Extended output types (Pyne drawing API)
+    markers,
+    fills,
+    hlines,
+    bgcolors,
+    barcolors,
+    paramSchemas,
   };
 }

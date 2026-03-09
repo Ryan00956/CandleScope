@@ -61,6 +61,12 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     // subPanes: [{id, label, lines: [...]}]    — each sub pane with its lines
     mainOverlayLines = [],
     subPanes = [],
+    // Extended Pyne drawing outputs
+    indicatorMarkers = [],
+    indicatorFills = [],
+    indicatorHlines = [],
+    indicatorBgcolors = [],
+    indicatorBarcolors = [],
     // Price scale inversion (main pane only)
     invertScale = false,
     onInvertScaleChange,
@@ -481,6 +487,11 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     onCrosshairMove={handleMainCrosshairMove}
                     onCrosshairSync={handleCrosshairSync}
                     onChartCreated={onMainChartCreated}
+                    indicatorMarkers={indicatorMarkers}
+                    indicatorFills={indicatorFills}
+                    indicatorHlines={indicatorHlines}
+                    indicatorBgcolors={indicatorBgcolors}
+                    indicatorBarcolors={indicatorBarcolors}
                 />
                 {cursorStyle && (
                     <div className="chart-pane-cursor-overlay" style={{ cursor: cursorStyle }} />

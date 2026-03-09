@@ -493,6 +493,13 @@ export default function App() {
     recompute: recomputeIndicatorsWithUI,
     mainOverlayLines,
     subPanes,
+    // Extended output types (Pyne drawing API)
+    markers: indicatorMarkers,
+    fills: indicatorFills,
+    hlines: indicatorHlines,
+    bgcolors: indicatorBgcolors,
+    barcolors: indicatorBarcolors,
+    paramSchemas: indicatorParamSchemas,
   } = useIndicators({
     chartRef: indicatorChartRefRef,
     seriesRef: indicatorSeriesRefRef,
@@ -1550,6 +1557,11 @@ export default function App() {
               onChartReady={handleChartReady}
               mainOverlayLines={mainOverlayLines}
               subPanes={subPanes}
+              indicatorMarkers={indicatorMarkers}
+              indicatorFills={indicatorFills}
+              indicatorHlines={indicatorHlines}
+              indicatorBgcolors={indicatorBgcolors}
+              indicatorBarcolors={indicatorBarcolors}
               invertScale={invertScale}
               onInvertScaleChange={handleInvertScaleChange}
               priceScaleMode={priceScaleMode}

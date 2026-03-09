@@ -87,6 +87,12 @@ const ChartPane = forwardRef(function ChartPane({
     onCrosshairMove: onCrosshairMoveExternal,
     onCrosshairSync,          // called with {time, point} for cross-pane sync
     onChartCreated,           // called after chart+series are created, passes { chartRef, seriesRef }
+    // Extended Pyne drawing outputs (main pane only)
+    indicatorMarkers = [],    // [{data: [{time, position, color, shape, text}], indicatorId}]
+    indicatorFills = [],      // [{plot1_id, plot2_id, color, indicatorId}]
+    indicatorHlines = [],     // [{price, title, color, linestyle, indicatorId}]
+    indicatorBgcolors = [],   // [{data: [{time, color}], indicatorId}]
+    indicatorBarcolors = [],  // [{data: [{time, color}], indicatorId}]
 }, ref) {
     const containerRef = useRef(null);
     const chartRef = useRef(null);
@@ -614,6 +620,133 @@ const ChartPane = forwardRef(function ChartPane({
             }
         }
     }, [indicatorLines]);
+
+    /* ── Apply indicator markers (main pane only) ──────────── */
+    // Lightweight Charts supports setMarkers() on any series.
+    // We apply all markers to the main candlestick series.
+
+    useEffect(() => {
+        if (paneType !== "main" || !mainSeriesRef.current) return;
+        if (!indicatorMarkers || indicatorMarkers.length === 0) {
+            try { mainSeriesRef.current.setMarkers([]); } catch { /* */ }
+            return;
+        }
+
+        // Flatten all marker sources into a single sorted array
+        const SHAPE_MAP = { triangleup: "arrowUp", triangledown: "arrowDown", circle: "circle", cross: "circle", diamond: "circle", xcross: "circle" };
+        const POS_MAP = { abovebar: "aboveBar", belowbar: "belowBar", top: "aboveBar", bottom: "belowBar" };
+
+        const allMarkers = [];
+        for (const group of indicatorMarkers) {
+            if (!group.data || !Array.isArray(group.data)) continue;
+            for (const m of group.data) {
+                if (m.time == null) continue;
+                allMarkers.push({
+                    time: m.time,
+                    position: POS_MAP[m.position] || m.position || "aboveBar",
+                    color: m.color || "#f59e0b",
+                    shape: SHAPE_MAP[m.shape] || m.shape || "circle",
+                    text: m.text || "",
+                });
+            }
+        }
+
+        // Sort markers by time (required by lightweight-charts)
+        allMarkers.sort((a, b) => a.time - b.time);
+
+        try {
+            mainSeriesRef.current.setMarkers(allMarkers);
+        } catch (err) {
+            console.warn("ChartPane: failed to set markers:", err);
+        }
+    }, [indicatorMarkers, paneType]);
+
+    /* ── Apply hlines (horizontal price lines) ─────────────── */
+    // We use createPriceLine() on the main series for each hline.
+    const hlinesRef = useRef([]); // track created price line objects
+
+    useEffect(() => {
+        if (paneType !== "main" || !mainSeriesRef.current) return;
+        const series = mainSeriesRef.current;
+
+        // Remove previous hlines
+        for (const pl of hlinesRef.current) {
+            try { series.removePriceLine(pl); } catch { /* */ }
+        }
+        hlinesRef.current = [];
+
+        if (!indicatorHlines || indicatorHlines.length === 0) return;
+
+        const LINESTYLE_MAP = { solid: 0, dotted: 1, dashed: 2, large_dashed: 3, sparse_dotted: 4 };
+
+        for (const hl of indicatorHlines) {
+            if (hl.price == null || !isFinite(hl.price)) continue;
+            try {
+                const pl = series.createPriceLine({
+                    price: hl.price,
+                    color: hl.color || "#787b86",
+                    lineWidth: 1,
+                    lineStyle: typeof hl.linestyle === "number" ? hl.linestyle : (LINESTYLE_MAP[hl.linestyle] ?? 2),
+                    axisLabelVisible: true,
+                    title: hl.title || "",
+                });
+                hlinesRef.current.push(pl);
+            } catch (err) {
+                console.warn("ChartPane: failed to create hline:", err);
+            }
+        }
+    }, [indicatorHlines, paneType]);
+
+    /* ── Apply barcolors (per-bar candle coloring) ─────────── */
+    // Lightweight Charts CandlestickSeries doesn't support per-bar color
+    // via setData natively, but we can do it by re-setting data with color
+    // fields. We rebuild candle data with color overrides when barcolors change.
+
+    useEffect(() => {
+        if (paneType !== "main" || !mainSeriesRef.current || !data?.length) return;
+        if (!indicatorBarcolors || indicatorBarcolors.length === 0) return;
+
+        // Build a time→color map from all barcolor sources
+        const colorMap = new Map();
+        for (const group of indicatorBarcolors) {
+            if (!group.data || !Array.isArray(group.data)) continue;
+            for (const bc of group.data) {
+                if (bc.time != null && bc.color) {
+                    colorMap.set(bc.time, bc.color);
+                }
+            }
+        }
+        if (colorMap.size === 0) return;
+
+        // Re-set candle data with per-bar color overrides
+        try {
+            isSyncingRef.current = true;
+            const coloredData = data.map((d) => {
+                const c = colorMap.get(d.time);
+                if (c) {
+                    return {
+                        time: d.time, open: d.open, high: d.high, low: d.low, close: d.close,
+                        color: c, borderColor: c, wickColor: c,
+                    };
+                }
+                return toCandlePoint(d);
+            });
+            mainSeriesRef.current.setData(coloredData);
+        } catch (err) {
+            console.warn("ChartPane: failed to apply barcolors:", err);
+        } finally {
+            isSyncingRef.current = false;
+        }
+    }, [indicatorBarcolors, data, paneType]);
+
+    /* ── Apply bgcolors (background color regions) ─────────── */
+    // Lightweight Charts doesn't support bgcolor natively, so we render
+    // colored overlay divs on top of the chart using coordinate mapping.
+    // For simplicity we'll use a CSS overlay approach with the chart's
+    // timeScale coordinate conversion.
+    // NOTE: This is a visual approximation — for now we skip bgcolor
+    // rendering as it requires complex coordinate tracking on every scroll.
+    // TODO: Implement bgcolor via canvas overlay or chart plugin.
 
     /* ── Imperative handle ─────────────────────────────────── */
 

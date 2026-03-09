@@ -20,11 +20,13 @@ from pydantic import BaseModel, Field
 
 from app.data_engine.data_manager.models import BarData
 from app.indicator import registry, IndicatorEngine, create_engine
+from app.indicator.pyne import PyneRuntime
 
 router = APIRouter(prefix="/indicators", tags=["indicators"])
 
-# Module-level engine singleton — reuses cached indicator instances across requests
+# Module-level singletons
 _engine = create_engine()
+_pyne = PyneRuntime()
 
 
 # ── Pydantic models ──────────────────────────────────────────
@@ -471,79 +473,21 @@ async def _compute_engine(name: str, req: ComputeRequest) -> dict:
 
 
 async def _compute_script(req: ComputeRequest) -> dict:
-    """Compute using legacy Python script execution.
+    """Compute using Pyne runtime (with full legacy backward compatibility).
 
-    Provides numpy arrays and an add_line() function to the script.
+    The Pyne runtime provides a rich Pine-style namespace including
+    ta.*, input.*, plot(), color.*, math.*, crossover(), etc.
+    Legacy scripts using add_line() continue to work unchanged.
     """
-    import numpy as np
-    import math as _math
+    result = _pyne.execute(
+        script=req.script,
+        ohlcv=req.ohlcv,
+        params=req.params or {},
+    )
 
-    ohlcv = req.ohlcv
-    if not ohlcv:
-        return {"ok": False, "error": "No OHLCV data provided", "lines": [], "result": None}
-    if len(ohlcv) > 50_000:
-        return {"ok": False, "error": "Too many data points (max 50000)", "lines": [], "result": None}
-
-    # Build numpy arrays
-    times = [d.get("time", 0) for d in ohlcv]
-    opens = np.array([d.get("open", 0) for d in ohlcv], dtype=float)
-    highs = np.array([d.get("high", 0) for d in ohlcv], dtype=float)
-    lows = np.array([d.get("low", 0) for d in ohlcv], dtype=float)
-    closes = np.array([d.get("close", 0) for d in ohlcv], dtype=float)
-    volumes = np.array([d.get("volume", 0) for d in ohlcv], dtype=float)
-
-    lines: list[dict] = []
-
-    def add_line(
-        data,
-        color="#f59e0b",
-        title="",
-        line_width=2,
-        line_style=0,
-        overlay=True,
-        type="line",
-        pane=None,
-        color_data=None,
-    ):
-        if pane is None:
-            pane = "main" if overlay else "separate"
-
-        points = []
-        for i, val in enumerate(data):
-            if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
-                continue
-            points.append({"time": times[i], "value": float(val)})
-
-        line_entry = {
-            "name": title or f"Line {len(lines) + 1}",
-            "color": color,
-            "type": type,
-            "pane": pane,
-            "lineWidth": line_width,
-            "lineStyle": line_style,
-            "data": points,
-        }
-        if color_data:
-            line_entry["colorData"] = color_data
-        lines.append(line_entry)
-
-    # Execute script
-    script_globals = {
-        "np": np,
-        "math": _math,
-        "open": opens,
-        "high": highs,
-        "low": lows,
-        "close": closes,
-        "volume": volumes,
-        "time": times,
-        "params": req.params or {},
-        "add_line": add_line,
+    return {
+        "ok": result.ok,
+        "error": result.error,
+        "lines": result.lines,
+        "result": result.output if result.output else None,
     }
-
-    try:
-        exec(req.script, script_globals)  # noqa: S102
-    except Exception as exc:
-        return {"ok": False, "error": f"Script error: {exc}", "lines": [], "result": None}
-
-    return {"ok": True, "error": None, "lines": lines, "result": None}

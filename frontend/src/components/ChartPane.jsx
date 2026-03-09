@@ -394,9 +394,20 @@ const ChartPane = forwardRef(function ChartPane({
         const prev = prevDataRef.current;
         const first = data[0].time;
         const last = data[data.length - 1].time;
-        const shouldFullReplace =
-            prev.length === 0 || prev.first !== first ||
-            data.length < prev.length || data.length - prev.length > 2;
+
+        // A normal trailing update/append occurs if:
+        // 1. Array length is same (update to current bar) OR length increased by 1 (new bar added)
+        // 2. The first item's time hasn't changed
+        // 3. The time of the element at the OLD last index matches the old last time.
+        // If these don't hold, it means data was inserted in the middle or left, so we must full replace.
+        const isNormalTrailingUpdate =
+            prev.length > 0 &&
+            data.length >= prev.length &&
+            data.length <= prev.length + 1 &&
+            data[0].time === prev.first &&
+            data[prev.length - 1].time === prev.last;
+
+        const shouldFullReplace = !isNormalTrailingUpdate;
 
         try {
             isSyncingRef.current = true;

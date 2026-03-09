@@ -514,6 +514,12 @@ export default function App() {
   const customCandleRef = useRef(null);
   const baseIntervalRef = useRef(null);
   const customSecondsRef = useRef(null);
+  // Track whether the backend is sending pre-aggregated custom-interval
+  // K-lines directly (via DataManager + BarAggregator).  When true, we
+  // skip client-side aggregation from base (1m) candles to avoid
+  // double-update conflicts that cause the last two bars to differ
+  // from TradingView.
+  const backendAggregatingCustomRef = useRef(false);
 
   // --- Cross-interval data cache for instant switching ---
   const chartDataCacheRef = useRef(new Map());
@@ -860,6 +866,10 @@ export default function App() {
 
         socket.onopen = () => {
           if (!active) return;
+
+          // Track whether this is a RE-connection (not the first connect)
+          const isReconnection = reconnectAttempts > 0;
+
           // Reset reconnect state on successful connection
           reconnectDelay = WS_RECONNECT_BASE_DELAY;
           reconnectAttempts = 0;
@@ -879,6 +889,30 @@ export default function App() {
 
           // Start heartbeat ping
           startPing();
+
+          // ── Recovery after WS reconnection ──
+          // During WS downtime, some kline updates may have been missed.
+          // Fetch recent bars for the active interval to fill the gap.
+          if (isReconnection) {
+            const currentIntv = intervalRef.current;
+            const days = getIntervalDays(currentIntv);
+            console.log(`[WS-Recovery] Reconnected, reloading full history for ${symbol}@${currentIntv}`);
+            fetchKlinesHistory(symbol, currentIntv, days)
+              .then((result) => {
+                if (!active || !result?.data?.length) return;
+                setChartData((prev) => {
+                  const merged = mergeByTime(result.data, prev);
+                  saveToCache(symbol, currentIntv, merged);
+                  return merged;
+                });
+                const latest = result.data[result.data.length - 1];
+                updateLastPrice(latest, currentIntv);
+                console.log(`[WS-Recovery] Reloaded ${result.data.length} bars after reconnect`);
+              })
+              .catch((err) => {
+                console.warn("[WS-Recovery] Failed to recover after reconnect:", err);
+              });
+          }
         };
 
         socket.onmessage = (event) => {
@@ -997,6 +1031,11 @@ export default function App() {
             }
 
             // ── Update active chart if this is the current interval ──
+            // When the backend DataManager is active and sending aggregated
+            // custom-interval K-lines directly (isCurrentInterval=true for
+            // custom intervals like "7m"), we use those directly and skip
+            // the client-side aggregation below to avoid double-update
+            // conflicts on the last two bars.
             if (isCurrentInterval) {
               setChartData((prev) => {
                 const next = deduplicateByTime(upsertRealtimeKline(prev, tick));
@@ -1004,29 +1043,53 @@ export default function App() {
                 return next;
               });
               updateLastPrice(tick, currentIntv);
+
+              // If this IS a custom interval and the backend is sending us
+              // aggregated bars directly, mark that backend aggregation is
+              // active so we skip client-side aggregation from base candles.
+              if (isCustomInterval(currentIntv)) {
+                backendAggregatingCustomRef.current = true;
+                customCandleRef.current = { ...tick };
+              }
             }
 
-            // ── Handle custom interval aggregation ──
-            if (isCurrentCustomBase && customSecondsRef.current) {
-              const { candle, isNew } = aggregateRealtimeCandle(
-                customCandleRef.current, tick, customSecondsRef.current
-              );
-              customCandleRef.current = candle;
+            // ── Handle custom interval aggregation (client-side fallback) ──
+            // Only run client-side aggregation from base (1m) candles when
+            // the backend is NOT sending us pre-aggregated custom-interval
+            // K-lines.  When the backend DataManager + BarAggregator are
+            // active, the custom interval data arrives via isCurrentInterval
+            // above, so we must skip this path to avoid double-update
+            // conflicts that cause the last two bars to differ from
+            // TradingView.
+            //
+            // Detection: if we received a direct custom-interval message
+            // (isCurrentInterval was true for the custom interval), the
+            // backend is authoritative.  We only fall through here when
+            // no direct custom-interval messages have arrived (legacy mode).
+            if (isCurrentCustomBase && customSecondsRef.current && !isCurrentInterval) {
+              // Skip client-side aggregation if the backend is already
+              // sending us pre-aggregated custom-interval K-lines.
+              if (!backendAggregatingCustomRef.current) {
+                const { candle, isNew } = aggregateRealtimeCandle(
+                  customCandleRef.current, tick, customSecondsRef.current
+                );
+                customCandleRef.current = candle;
 
-              if (isNew) {
-                setChartData((prev) => {
-                  const next = deduplicateByTime([...prev, candle]);
-                  saveToCache(symbol, currentIntv, next);
-                  return next;
-                });
-              } else {
-                setChartData((prev) => {
-                  const next = deduplicateByTime(upsertRealtimeKline(prev, candle));
-                  saveToCache(symbol, currentIntv, next);
-                  return next;
-                });
+                if (isNew) {
+                  setChartData((prev) => {
+                    const next = deduplicateByTime([...prev, candle]);
+                    saveToCache(symbol, currentIntv, next);
+                    return next;
+                  });
+                } else {
+                  setChartData((prev) => {
+                    const next = deduplicateByTime(upsertRealtimeKline(prev, candle));
+                    saveToCache(symbol, currentIntv, next);
+                    return next;
+                  });
+                }
+                updateLastPrice(candle, currentIntv);
               }
-              updateLastPrice(candle, currentIntv);
             }
           } catch (parseErr) {
             console.error("WS parse failed:", parseErr);
@@ -1112,61 +1175,180 @@ export default function App() {
   //  This is the last line of defense against K-line gaps.
   // ============================================================
   const gapFillInFlightRef = useRef(new Set()); // track in-flight gap fills to avoid duplicates
+  const recoverGapsRef = useRef(null); // stable ref for use in WS effect
 
-  useEffect(() => {
-    if (!chartData || chartData.length < 3 || loading || dataSource === "mock") return;
+  // ============================================================
+  //  SHARED GAP RECOVERY FUNCTION
+  //  Scans chartData for interior gaps (missing bars) and fetches
+  //  the missing data from the backend. Called from:
+  //    1. chartData change effect (passive detection)
+  //    2. visibilitychange handler (active recovery on tab focus)
+  //    3. WS reconnect handler (recovery after reconnection)
+  // ============================================================
+  const recoverGaps = useCallback(async (currentData, sym, intv) => {
+    if (!currentData || currentData.length < 3) return;
 
-    // Determine interval seconds
-    const intvSecs = customSecondsRef.current || parseIntervalSeconds(interval);
+    const intvSecs = customSecondsRef.current || parseIntervalSeconds(intv);
     if (!intvSecs || intvSecs <= 0) return;
 
-    // Debounce: wait a bit after data changes before scanning
-    const timer = setTimeout(async () => {
-      const gaps = detectGaps(chartData, intvSecs);
-      if (gaps.length === 0) return;
+    const gaps = detectGaps(currentData, intvSecs);
+    if (gaps.length === 0) return;
 
-      // Only fill the first few gaps per cycle to avoid request storms
-      const MAX_GAPS_PER_CYCLE = 3;
-      const gapsToFill = gaps.slice(0, MAX_GAPS_PER_CYCLE);
+    // Use a single dedupe key per interval to avoid concurrent full-reloads
+    const reloadKey = `${sym}-${intv}-fullreload`;
+    if (gapFillInFlightRef.current.has(reloadKey)) return;
+    gapFillInFlightRef.current.add(reloadKey);
 
-      for (const gap of gapsToFill) {
-        // Create a unique key for this gap to prevent duplicate requests
-        const gapKey = `${symbol}-${interval}-${gap.from}-${gap.to}`;
-        if (gapFillInFlightRef.current.has(gapKey)) continue;
-        gapFillInFlightRef.current.add(gapKey);
+    const totalMissing = gaps.reduce((sum, g) => sum + g.missingBars, 0);
+    console.log(
+      `[GapFill] Detected ${gaps.length} gap(s), ~${totalMissing} bars missing. ` +
+      `Reloading full history for ${sym}@${intv}...`
+    );
 
-        console.log(
-          `[GapFill] Detected gap: ${gap.missingBars} bars missing between ` +
-          `${new Date(gap.from * 1000).toISOString()} and ${new Date(gap.to * 1000).toISOString()}`
-        );
+    try {
+      // Strategy: reload full history — this is the most reliable way to
+      // fill ANY gap (middle, tail, or multiple scattered gaps at once).
+      const days = getIntervalDays(intv);
+      const result = await fetchKlinesHistory(sym, intv, days);
 
-        try {
-          // Fetch data covering the gap range
-          // Use gap.to as "before" timestamp and request enough bars
-          const barsNeeded = Math.min(gap.missingBars + 2, 1000);
-          const result = await fetchKlinesBefore(symbol, interval, gap.to, barsNeeded);
-
-          if (result?.data?.length > 0) {
-            setChartData((prev) => {
-              const merged = mergeByTime(result.data, prev);
-              saveToCache(symbol, interval, merged);
-              return merged;
-            });
-            console.log(`[GapFill] Filled ${result.data.length} bars for gap at ${new Date(gap.from * 1000).toISOString()}`);
+      if (result?.data?.length > 0) {
+        setChartData((prev) => {
+          const merged = mergeByTime(result.data, prev);
+          saveToCache(sym, intv, merged);
+          // Verify gaps are actually fixed
+          const remaining = detectGaps(merged, intvSecs);
+          if (remaining.length > 0) {
+            console.warn(`[GapFill] ${remaining.length} gap(s) remain after history reload`);
+          } else {
+            console.log(`[GapFill] All gaps filled successfully (${merged.length} total bars)`);
           }
-        } catch (err) {
-          console.warn(`[GapFill] Failed to fill gap:`, err);
-        } finally {
-          // Remove from in-flight after a delay to prevent immediate re-trigger
-          setTimeout(() => {
-            gapFillInFlightRef.current.delete(gapKey);
-          }, 10000);
-        }
+          return merged;
+        });
       }
-    }, 2000); // 2s debounce after data changes
+    } catch (err) {
+      console.warn(`[GapFill] Failed to reload history:`, err);
+    } finally {
+      // Cooldown: don't retry for 10s to avoid hammering
+      setTimeout(() => {
+        gapFillInFlightRef.current.delete(reloadKey);
+      }, 10000);
+    }
+  }, [saveToCache]);
 
-    return () => clearTimeout(timer);
-  }, [chartData, interval, symbol, loading, dataSource, saveToCache]);
+  // Keep recoverGapsRef in sync so closures (WS onopen) always call latest version
+  recoverGapsRef.current = recoverGaps;
+
+  // ── Passive gap detection: Periodic cache scan ──
+  // Every 5s, scan the current cached data for gaps. By reading from
+  // chartDataCacheRef, we avoid React state updater async issues and 
+  // debounce cancellations from high-frequency real-time updates.
+  useEffect(() => {
+    if (loading || dataSource === "mock") return;
+
+    const periodicTimer = setInterval(() => {
+      if (!recoverGapsRef.current) return;
+
+      const currentIntv = intervalRef.current;
+      // Build cache key manually to avoid effect dependency on cacheKey function
+      const currentCacheKey = `${symbol}-${currentIntv}`;
+      const currentCache = chartDataCacheRef.current.get(currentCacheKey);
+
+      if (currentCache && currentCache.length >= 3) {
+        recoverGapsRef.current(currentCache, symbol, currentIntv);
+      }
+    }, 5000);
+
+    return () => clearInterval(periodicTimer);
+  }, [symbol, loading, dataSource]);
+
+  // ============================================================
+  //  VISIBILITY CHANGE — ACTIVE RECOVERY ON TAB FOCUS
+  //  When the user switches back to this tab, immediately fetch
+  //  recent klines to fill any gaps that accumulated while the
+  //  browser throttled WS message processing in the background.
+  // ============================================================
+  const lastVisibleTimeRef = useRef(Date.now());
+  const visibilityRecoveryInFlightRef = useRef(false);
+
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === "hidden") {
+        // Record when the tab went to background
+        lastVisibleTimeRef.current = Date.now();
+        return;
+      }
+
+      // Tab is now visible again
+      const hiddenDurationMs = Date.now() - lastVisibleTimeRef.current;
+      const currentIntv = intervalRef.current;
+      const intvSecs = customSecondsRef.current || parseIntervalSeconds(currentIntv);
+
+      // If we were hidden for more than 5 seconds, trigger recovery unconditionally.
+      // Browsers aggressively throttle WS messages when tabs are inactive.
+      if (hiddenDurationMs < 5000) return;
+
+      // Prevent concurrent recovery
+      if (visibilityRecoveryInFlightRef.current) return;
+      visibilityRecoveryInFlightRef.current = true;
+
+      console.log(
+        `[TabRecovery] Tab was hidden for ${(hiddenDurationMs / 1000).toFixed(1)}s, ` +
+        `recovering data for ${symbol}@${currentIntv}...`
+      );
+
+      try {
+        // Strategy: reload FULL history for the active interval.
+        // This is the most reliable approach — it covers any gap
+        // (middle, tail, or multiple scattered gaps) in one shot.
+        const days = getIntervalDays(currentIntv);
+        const historyResult = await fetchKlinesHistory(symbol, currentIntv, days);
+
+        if (historyResult?.data?.length > 0) {
+          setChartData((prev) => {
+            const merged = mergeByTime(historyResult.data, prev);
+            saveToCache(symbol, currentIntv, merged);
+
+            // Verify gaps are gone
+            const remaining = detectGaps(merged, intvSecs);
+            if (remaining.length > 0) {
+              console.warn(`[TabRecovery] ${remaining.length} gap(s) remain after history reload`);
+            } else {
+              console.log(`[TabRecovery] All gaps filled (${merged.length} total bars)`);
+            }
+            return merged;
+          });
+          const latest = historyResult.data[historyResult.data.length - 1];
+          updateLastPrice(latest, currentIntv);
+          console.log(`[TabRecovery] Reloaded ${historyResult.data.length} bars of full history`);
+        }
+
+        // Also refresh background caches for other intervals
+        for (const bgIntv of WS_SUBSCRIBE_INTERVALS) {
+          if (bgIntv === currentIntv) continue;
+          const bgKey = cacheKey(symbol, bgIntv);
+          const bgCache = chartDataCacheRef.current.get(bgKey);
+          if (!bgCache || bgCache.length === 0) continue;
+
+          try {
+            const bgResult = await fetchLatestKlines(symbol, bgIntv, 10);
+            if (bgResult?.data?.length > 0) {
+              const bgMerged = mergeByTime(bgResult.data, bgCache);
+              chartDataCacheRef.current.set(bgKey, bgMerged);
+            }
+          } catch {
+            // Non-critical — background cache refresh
+          }
+        }
+      } catch (err) {
+        console.warn("[TabRecovery] Recovery failed:", err);
+      } finally {
+        visibilityRecoveryInFlightRef.current = false;
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [symbol, saveToCache, updateLastPrice, recoverGaps]);
 
   // ---- handle load more left ----
   const handleNeedMoreLeft = useCallback(
@@ -1228,6 +1410,7 @@ export default function App() {
       setCustomInput("");
       setCustomError(null);
       customCandleRef.current = null;
+      backendAggregatingCustomRef.current = false; // Reset on interval change
       realtimePriceRef.current = null;
       setLastPrice(null);
       gapFillInFlightRef.current.clear(); // Reset gap fill tracking on interval change

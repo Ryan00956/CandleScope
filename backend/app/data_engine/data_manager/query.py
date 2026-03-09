@@ -127,7 +127,7 @@ class QueryEngine:
         else:
             cached = self._cache.get_latest(key, effective_limit)
 
-        if cached and self._is_complete(cached, start_s, end_s, effective_limit):
+        if cached and self._is_complete(cached, start_s, end_s, effective_limit, interval=interval):
             self._cache_hits += 1
             elapsed = time.monotonic() - t0
             return QueryResult(
@@ -168,6 +168,15 @@ class QueryEngine:
         # ── Step 3: Merge cache + storage ────────────────────
         merged = self._merge(cached, storage_bars)
 
+        # ── Step 3.5: Fill interior gaps from storage ────────
+        # After merging cache + storage, there may still be interior
+        # gaps (missing bars in the middle).  This happens when both
+        # cache AND the initial storage query have holes — e.g. the
+        # browser tab was backgrounded and WS messages were lost.
+        # We detect each gap and do targeted storage reads to fill them.
+        if merged and self._storage is not None and len(merged) >= 2:
+            merged = self._fill_interior_gaps(key, merged, interval)
+
         if not merged:
             # Nothing anywhere — trigger backfill if enabled
             if self._cfg.auto_backfill and self._backfill_trigger:
@@ -197,7 +206,7 @@ class QueryEngine:
         if (
             self._cfg.auto_backfill
             and self._backfill_trigger
-            and not self._is_complete(merged, start_s, end_s, effective_limit)
+            and not self._is_complete(merged, start_s, end_s, effective_limit, interval=interval)
         ):
             interval_secs = parse_custom_interval(key.interval) or 60
             now_ms = int(time.time() * 1000)
@@ -410,16 +419,138 @@ class QueryEngine:
             combined[bar.time] = bar  # cache overwrites — cache wins
         return sorted(combined.values(), key=lambda x: x.time)
 
+    def _has_interior_gaps(
+        self, bars: list[BarData], interval: str,
+    ) -> bool:
+        """Check if bars have interior gaps (missing bars in the middle).
+
+        A gap is detected when the time difference between consecutive
+        bars exceeds 1.5× the expected interval.  This catches cases
+        where the cache has enough bars by count, but is missing data
+        in the middle (e.g. due to ingestion interruptions).
+        """
+        if len(bars) < 2:
+            return False
+        interval_secs = parse_custom_interval(interval) or 60
+        threshold = interval_secs * 1.5
+        for i in range(1, len(bars)):
+            if bars[i].time - bars[i - 1].time > threshold:
+                return True
+        return False
+
+    def _detect_gaps(
+        self, bars: list[BarData], interval: str,
+    ) -> list[tuple[int, int]]:
+        """Return a list of (gap_start_s, gap_end_s) for each interior gap.
+
+        ``gap_start_s`` is the time of the bar *before* the gap.
+        ``gap_end_s``   is the time of the bar *after*  the gap.
+        """
+        if len(bars) < 2:
+            return []
+        interval_secs = parse_custom_interval(interval) or 60
+        threshold = interval_secs * 1.5
+        gaps: list[tuple[int, int]] = []
+        for i in range(1, len(bars)):
+            if bars[i].time - bars[i - 1].time > threshold:
+                gaps.append((bars[i - 1].time, bars[i].time))
+        return gaps
+
+    def _fill_interior_gaps(
+        self,
+        key: SeriesKey,
+        bars: list[BarData],
+        interval: str,
+    ) -> list[BarData]:
+        """Detect interior gaps and fill them from storage.
+
+        For each gap found, queries storage for bars in [gap_start, gap_end]
+        and merges them into the bar list.  Also warms the cache with any
+        newly fetched bars.
+
+        If storage doesn't have the data either, triggers backfill for
+        each gap so the data will be available on the next query.
+
+        Returns the (potentially augmented) bar list, still sorted.
+        """
+        gaps = self._detect_gaps(bars, interval)
+        if not gaps:
+            return bars
+
+        logger.info(
+            "Detected %d interior gap(s) in %s %s, attempting storage fill",
+            len(gaps), key.symbol, key.interval,
+        )
+
+        all_fill_bars: list[BarData] = []
+
+        for gap_start_s, gap_end_s in gaps:
+            gap_start_ms = gap_start_s * 1000
+            gap_end_ms = gap_end_s * 1000
+
+            try:
+                rows = self._storage.query_bars(
+                    symbol=key.symbol,
+                    interval=key.interval,
+                    start_ms=gap_start_ms,
+                    end_ms=gap_end_ms,
+                    limit=5000,  # generous limit for gap fills
+                    order="ASC",
+                )
+                fill_bars = [BarData.from_storage_row(r) for r in rows]
+                if fill_bars:
+                    all_fill_bars.extend(fill_bars)
+                    logger.info(
+                        "Filled gap [%d → %d] with %d bars from storage",
+                        gap_start_s, gap_end_s, len(fill_bars),
+                    )
+                else:
+                    # Storage also doesn't have data — trigger backfill
+                    if self._cfg.auto_backfill and self._backfill_trigger:
+                        logger.info(
+                            "Storage has no data for gap [%d → %d], triggering backfill",
+                            gap_start_s, gap_end_s,
+                        )
+                        self._trigger_backfill(key, gap_start_ms, gap_end_ms)
+            except Exception as exc:
+                logger.error(
+                    "Failed to fill gap [%d → %d] from storage: %s",
+                    gap_start_s, gap_end_s, exc,
+                )
+
+        if all_fill_bars:
+            # Warm cache with the gap-fill data
+            self._cache.bulk_load(key, all_fill_bars)
+            # Merge into the result
+            bars = self._merge(bars, all_fill_bars)
+
+        return bars
+
     def _is_complete(
         self,
         bars: list[BarData],
         start_s: int | None,
         end_s: int | None,
         limit: int,
+        interval: str | None = None,
     ) -> bool:
-        """Heuristic: does the cache result satisfy the query?"""
+        """Heuristic: does the cache result satisfy the query?
+
+        Now also checks for **interior gaps** — even if the bar count
+        is sufficient, hidden gaps in the middle mean the data is
+        incomplete and we must fall through to storage.
+        """
         if not bars:
             return False
+
+        # Even if count is enough, check for interior gaps first
+        if interval and self._has_interior_gaps(bars, interval):
+            logger.debug(
+                "Cache has %d bars but interior gaps detected for %s",
+                len(bars), interval,
+            )
+            return False
+
         if len(bars) >= limit:
             return True
             

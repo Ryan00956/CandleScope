@@ -4,6 +4,68 @@
 
 Lightweight trading chart software built with FastAPI + React + Lightweight Charts.
 
+## Requirements
+
+- Python 3.10+
+- Node.js 20+
+- npm 10+
+
+## Quick Start
+
+### Windows
+
+The current README startup flow is valid on Windows as long as Python and Node.js are installed and available in `PATH`.
+
+Backend:
+
+```powershell
+cd backend
+py -m pip install -r requirements.txt
+py -m uvicorn app.main:app --reload
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Default URLs:
+- API: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
+- Frontend: `http://localhost:5173`
+
+### Linux / WSL
+
+Backend:
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --reload
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Default URLs:
+- API: `http://localhost:8000`
+- Swagger: `http://localhost:8000/docs`
+- Frontend: `http://localhost:5173`
+
+Notes for Linux / WSL:
+- On Debian or Ubuntu, install venv support first if needed: `sudo apt-get install -y python3-pip python3-venv`
+- If Binance is blocked in your region or by your proxy configuration, the app falls back to mock data.
+
 ## Current features
 - **Zero-Latency Interval Switching**: Instant cache-first rendering. Switching between 1m, 1h, or 1d is near-instant if data exists in local SQLite.
 - **Non-blocking Async Architecture**: All heavy I/O operations (Binance API) are offloaded to background thread pools, keeping the WebSocket and UI perfectly responsive.
@@ -13,31 +75,6 @@ Lightweight trading chart software built with FastAPI + React + Lightweight Char
 - **Dynamic Custom Intervals**: In addition to native intervals, the system synthesizes custom intervals (e.g., 45m, 3h) in real-time in-memory based on finer aggregated resolutions.
 - **Unified Mock Data**: Deterministic price levels are perfectly consistent across all intervals (1m to 1M) using a shared minute-step price curve.
 - **Rendering Stability**: Built-in **ErrorBoundary** and time-based de-duplication to prevent "white screen" crashes from unstable network streams.
-
-## Quick Start
-
-### 1. Start backend
-
-```bash
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
-
-Default URLs:
-- API: `http://localhost:8000`
-- Swagger: `http://localhost:8000/docs`
-
-### 2. Start frontend
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Default URL:
-- Frontend: `http://localhost:5173`
 
 ## Core Capabilities
 

@@ -378,6 +378,25 @@ class BackfillPlanner:
             components = self._decompose_greedy(duration_ms)
 
         self._metrics.inc("decompositions_computed")
+
+        # Mixed-interval decompositions such as 7m -> 5m + 1m + 1m do not
+        # encode offsets, so the current fetch plan would request the full
+        # aligned range for every component interval and create overlapping
+        # source data. Fall back to a single interval that tiles the custom
+        # duration exactly; this preserves correctness and matches the
+        # BarAggregator model much better.
+        distinct_intervals = {c.interval for c in components}
+        if len(distinct_intervals) > 1:
+            single_interval_components = self._decompose_min_requests(duration_ms)
+            logger.warning(
+                "Mixed decomposition for %s is lossy (%s); falling back to "
+                "single-source decomposition %s",
+                interval,
+                [(c.interval, c.count) for c in components],
+                [(c.interval, c.count) for c in single_interval_components],
+            )
+            components = single_interval_components
+
         logger.info(
             "Decomposed %s (%dms) → %s",
             interval, duration_ms,

@@ -31,6 +31,7 @@ from .models import (
     BarStatus,
     BarStateChange,
     BarMergeStrategy,
+    is_standard_interval,
 )
 from .time_bucket import TimeBucketEngine
 
@@ -86,6 +87,77 @@ class StandardOHLCVMerge:
         return state
 
 
+class ComponentSnapshotOHLCVMerge:
+    """Component-aware merge for custom intervals.
+
+    Custom targets may receive source bars out of chronological order:
+      * a current forming bar is seeded from partial cache/storage first
+      * missing earlier components may arrive later via backfill
+      * the same source bar may be re-sent with fresher OHLCV
+
+    To keep custom bars correct, we store the latest snapshot for each
+    source component and rebuild the custom bar from those snapshots.
+    """
+
+    @staticmethod
+    def _snapshot_from_input(bar_input: BarInput) -> dict:
+        return {
+            "open_time_ms": bar_input.open_time_ms,
+            "close_time_ms": bar_input.close_time_ms,
+            "open": bar_input.open,
+            "high": bar_input.high,
+            "low": bar_input.low,
+            "close": bar_input.close,
+            "volume": bar_input.volume,
+            "quote_volume": bar_input.quote_volume,
+            "trades": bar_input.trades,
+            "taker_buy_base": bar_input.taker_buy_base,
+            "taker_buy_quote": bar_input.taker_buy_quote,
+            "is_closed": bar_input.is_closed,
+            "sequence": bar_input.sequence if bar_input.sequence is not None else bar_input.open_time_ms,
+        }
+
+    def apply(self, state: BarState, bar_input: BarInput, is_new: bool) -> BarState:
+        now_ms = int(time.time() * 1000)
+        snapshots = state.source_snapshots
+
+        if is_new and snapshots:
+            # Closed custom bars may be amended by late backfill components.
+            # Keep the existing component history and merge the new snapshot.
+            pass
+
+        snapshots[bar_input.input_key] = self._snapshot_from_input(bar_input)
+        ordered = sorted(
+            snapshots.values(),
+            key=lambda snap: (
+                int(snap["open_time_ms"]),
+                int(snap["close_time_ms"]),
+                int(snap["sequence"]),
+            ),
+        )
+
+        first = ordered[0]
+        last = ordered[-1]
+
+        state.open = float(first["open"])
+        state.high = max(float(snap["high"]) for snap in ordered)
+        state.low = min(float(snap["low"]) for snap in ordered)
+        state.close = float(last["close"])
+        state.volume = round(sum(float(snap["volume"]) for snap in ordered), 8)
+        state.quote_volume = round(sum(float(snap["quote_volume"]) for snap in ordered), 8)
+        state.trades = sum(int(snap["trades"]) for snap in ordered)
+        state.taker_buy_base = round(sum(float(snap["taker_buy_base"]) for snap in ordered), 8)
+        state.taker_buy_quote = round(sum(float(snap["taker_buy_quote"]) for snap in ordered), 8)
+        state.tick_count = len(ordered)
+        state.first_input_at_ms = int(first["open_time_ms"])
+        state.last_input_at_ms = int(last["open_time_ms"])
+        state.last_close_received = bool(last["is_closed"])
+        if is_new and state.created_at_ms == 0:
+            state.created_at_ms = now_ms
+        state.updated_at_ms = now_ms
+        return state
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Bar State Engine
 # ═══════════════════════════════════════════════════════════════
@@ -110,7 +182,10 @@ class BarStateEngine:
         self._interval = interval
 
         # Merge strategy (user-replaceable)
-        self._merge_strategy: BarMergeStrategy = StandardOHLCVMerge()
+        if is_standard_interval(interval):
+            self._merge_strategy = StandardOHLCVMerge()
+        else:
+            self._merge_strategy = ComponentSnapshotOHLCVMerge()
 
         # Active (FORMING) bars: {(symbol, bucket_start_ms) → BarState}
         # Using OrderedDict to maintain insertion order for eviction

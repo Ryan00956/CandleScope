@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MultiPaneChart from "./components/MultiPaneChart";
 import DrawingToolbar from "./components/DrawingToolbar";
 import SettingsModal from "./components/SettingsModal";
@@ -9,7 +9,6 @@ import {
   fetchKlinesHistory,
   fetchLatestKlines,
   getMultiStreamUrl,
-  resolveInterval,
 } from "./services/api";
 import "./index.css";
 
@@ -21,153 +20,6 @@ function parseIntervalSeconds(intv) {
   if (!m) return null;
   return parseInt(m[1], 10) * (units[m[2]] || 60);
 }
-function isCustomInterval(intv) {
-  const NATIVE = new Set(["1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"]);
-  return !NATIVE.has(intv);
-}
-/**
- * Aggregate an incoming base candle into a custom-period candle being formed.
- *
- * The tricky part: Binance WS pushes the *same* base candle (e.g. 1m)
- * multiple times before it closes.  Each push contains the *total* volume
- * of that base candle so far — NOT an incremental delta.  Naively doing
- * `c.volume += incoming.volume` would accumulate duplicates.
- *
- * We solve this by tracking the per-base-candle contribution inside
- * `_baseParts` (keyed by base candle time).  When the same base candle
- * arrives again we *replace* its contribution instead of adding again.
- *
- * `_baseParts` is stored directly on the candle object and stripped
- * before feeding into the chart (it's harmless if left — chart ignores
- * unknown keys).
- */
-function aggregateRealtimeCandle(currentCandle, incoming, bucketWidth) {
-  const bucketStart = Math.floor(incoming.time / bucketWidth) * bucketWidth;
-
-  // ── New bucket → brand-new candle ──
-  if (!currentCandle || bucketStart !== currentCandle.time) {
-    const parts = {};
-    parts[incoming.time] = {
-      open: incoming.open,
-      high: incoming.high,
-      low: incoming.low,
-      close: incoming.close,
-      volume: incoming.volume,
-    };
-    return {
-      candle: {
-        time: bucketStart,
-        open: incoming.open,
-        high: incoming.high,
-        low: incoming.low,
-        close: incoming.close,
-        volume: incoming.volume,
-        _baseParts: parts,
-      },
-      isNew: true,
-    };
-  }
-
-  // ── Same bucket → upsert base candle contribution ──
-  const parts = { ...(currentCandle._baseParts || {}) };
-
-  // If currentCandle was loaded from cache/HTTP (no _baseParts),
-  // `parts` is empty.  We need to preserve the historical aggregate
-  // OHLCV for base candles we haven't seen via WS yet.  We do this
-  // by storing the cached aggregate in a special `_prior` key that
-  // is excluded from volume summation once real base parts arrive
-  // and is used only for OHLC bounds that real parts can't override.
-  if (!currentCandle._baseParts) {
-    parts._prior = {
-      open: currentCandle.open,
-      high: currentCandle.high,
-      low: currentCandle.low,
-      close: currentCandle.close,
-      volume: currentCandle.volume,
-    };
-  }
-
-  parts[incoming.time] = {
-    open: incoming.open,
-    high: incoming.high,
-    low: incoming.low,
-    close: incoming.close,
-    volume: incoming.volume,
-  };
-
-  // Rebuild aggregate OHLCV from all real base parts
-  let aggOpen = null;
-  let aggHigh = -Infinity;
-  let aggLow = Infinity;
-  let aggClose = null;
-  let aggVolume = 0;
-  const sortedTimes = Object.keys(parts)
-    .filter((k) => k !== "_prior")
-    .map(Number)
-    .sort((a, b) => a - b);
-
-  for (const t of sortedTimes) {
-    const p = parts[t];
-    if (aggOpen === null) aggOpen = p.open;
-    aggHigh = Math.max(aggHigh, p.high);
-    aggLow = Math.min(aggLow, p.low);
-    aggClose = p.close;   // last part's close
-    aggVolume += p.volume;
-  }
-
-  // If we have a _prior (from cache), blend in its contribution
-  // for candles we haven't seen live yet:
-  //  - OHLC: expand bounds with prior's high/low, keep prior's open
-  //    if it's earlier than any live part
-  //  - Volume: keep prior's volume as baseline, but we must NOT
-  //    double-count the incoming base candle's volume which is
-  //    already in both _prior.volume and parts[incoming.time].volume.
-  //    Unfortunately we can't decompose _prior.volume per-base-candle.
-  //    So once live parts start arriving, we accept the _prior volume
-  //    as the "frozen" total for all prior base candles, and only ADD
-  //    volume from base candles not yet seen.
-  if (parts._prior) {
-    const prior = parts._prior;
-    // For the very first live tick in this bucket, _prior.volume
-    // already includes this base candle's old volume.  We subtract
-    // nothing because the live tick replaces whatever _prior had for
-    // this time slot — but since _prior is an aggregate, we can't
-    // perfectly decompose.  The pragmatic fix: use _prior.volume for
-    // all base candles EXCEPT those we now track individually.
-    // Since we only have 1 live part so far (the incoming one),
-    // _prior.volume ≈ total - incoming's old contribution.
-    // Best approximation: prior.volume stays as-is, live parts'
-    // volumes are already counted, so we just use the larger of
-    // (prior.volume) vs (sum of live parts) to avoid under-counting
-    // on first tick, then as more live ticks arrive the live sum
-    // naturally overtakes and _prior becomes irrelevant.
-    //
-    // Simplest correct approach: once we have _prior, treat volume
-    // as max(prior.volume, liveSum) until _prior is dropped.
-    aggVolume = Math.max(prior.volume, aggVolume);
-
-    // OHLC: use prior's open (it was set when the bucket started
-    // and is likely earlier than any live base candle)
-    aggOpen = prior.open;
-    aggHigh = Math.max(aggHigh, prior.high);
-    aggLow = Math.min(aggLow, prior.low);
-    // close: keep the latest live part's close (already set)
-  }
-
-  return {
-    candle: {
-      time: bucketStart,
-      open: aggOpen,
-      high: aggHigh,
-      low: aggLow,
-      close: aggClose,
-      volume: aggVolume,
-      _baseParts: parts,
-    },
-    isNew: false,
-  };
-}
-
 // ---------- ErrorBoundary ----------
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -227,7 +79,7 @@ const NATIVE_INTERVALS = [
 ];
 
 // Intervals to subscribe via WebSocket for background updates
-const WS_SUBSCRIBE_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"];
+const BASE_WS_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"];
 
 function buildSortedIntervals(savedCustom) {
   const all = NATIVE_INTERVALS.map((i) => ({ ...i, isCustom: false }));
@@ -511,15 +363,6 @@ export default function App() {
   // --- Custom interval state ---
   const [customInput, setCustomInput] = useState("");
   const [customError, setCustomError] = useState(null);
-  const customCandleRef = useRef(null);
-  const baseIntervalRef = useRef(null);
-  const customSecondsRef = useRef(null);
-  // Track whether the backend is sending pre-aggregated custom-interval
-  // K-lines directly (via DataManager + BarAggregator).  When true, we
-  // skip client-side aggregation from base (1m) candles to avoid
-  // double-update conflicts that cause the last two bars to differ
-  // from TradingView.
-  const backendAggregatingCustomRef = useRef(false);
 
   // --- Cross-interval data cache for instant switching ---
   const chartDataCacheRef = useRef(new Map());
@@ -567,6 +410,14 @@ export default function App() {
   const [savedCustomIntervals, setSavedCustomIntervals] = useState(loadSavedCustomIntervals);
   const [showIntervalManager, setShowIntervalManager] = useState(false);
   const intervalGroups = buildSortedIntervals(savedCustomIntervals);
+  const trackedIntervals = useMemo(
+    () => Array.from(new Set([...BASE_WS_INTERVALS, ...savedCustomIntervals, interval])),
+    [interval, savedCustomIntervals],
+  );
+  const trackedIntervalsRef = useRef(trackedIntervals);
+  trackedIntervalsRef.current = trackedIntervals;
+  const socketRef = useRef(null);
+  const liveSubscribedIntervalsRef = useRef(new Set());
 
   const addCustomInterval = (intv) => {
     setSavedCustomIntervals((prev) => {
@@ -649,27 +500,6 @@ export default function App() {
     setLoadingMoreLeft(false);
     setHasMoreLeft(true);
     setCrosshairData(null);
-    customCandleRef.current = null;
-
-    // Resolve custom interval info
-    const custom = isCustomInterval(intv);
-    if (custom) {
-      try {
-        const info = await resolveInterval(intv);
-        baseIntervalRef.current = info.base_interval;
-        customSecondsRef.current = info.custom_seconds;
-      } catch {
-        baseIntervalRef.current = null;
-        customSecondsRef.current = parseIntervalSeconds(intv);
-      }
-    } else {
-      baseIntervalRef.current = null;
-      customSecondsRef.current = null;
-    }
-
-    if (hasCacheHit && custom) {
-      customCandleRef.current = { ...cached[cached.length - 1] };
-    }
 
     // ── PARALLEL FETCH: quick tail + full history simultaneously ──
     const days = getIntervalDays(intv);
@@ -700,7 +530,6 @@ export default function App() {
       const latestTick = quickResult.data[quickResult.data.length - 1];
       updateLastPrice(latestTick, intv);
       setDataSource(quickResult.source || "unknown");
-      if (custom) customCandleRef.current = { ...latestTick };
 
       // Only clear loading immediately if we already had a cache hit
       // (data is already reliable).  Otherwise keep loading overlay.
@@ -724,9 +553,6 @@ export default function App() {
       if (!shownInitialData) {
         setDatasetKey((v) => v + 1);
         shownInitialData = true;
-      }
-      if (custom) {
-        customCandleRef.current = { ...latest };
       }
       // History arrived — data is reliable, clear loading.
       setLoading(false);
@@ -762,6 +588,31 @@ export default function App() {
   useEffect(() => {
     loadData(symbol, interval);
   }, [symbol, interval, loadData]);
+
+  const syncSocketSubscriptions = useCallback((socket, desiredIntervals) => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+    const desired = new Set(desiredIntervals);
+    const active = liveSubscribedIntervalsRef.current;
+    const toSubscribe = desiredIntervals.filter((intv) => !active.has(intv));
+    const toUnsubscribe = Array.from(active).filter((intv) => !desired.has(intv));
+
+    if (toSubscribe.length > 0) {
+      socket.send(JSON.stringify({
+        action: "subscribe",
+        intervals: toSubscribe,
+      }));
+      toSubscribe.forEach((intv) => active.add(intv));
+    }
+
+    if (toUnsubscribe.length > 0) {
+      socket.send(JSON.stringify({
+        action: "unsubscribe",
+        intervals: toUnsubscribe,
+      }));
+      toUnsubscribe.forEach((intv) => active.delete(intv));
+    }
+  }, []);
 
   // ============================================================
   //  SINGLE PERSISTENT MULTI-INTERVAL WEBSOCKET
@@ -863,6 +714,7 @@ export default function App() {
       try {
         const url = getMultiStreamUrl(symbol);
         socket = new WebSocket(url);
+        socketRef.current = socket;
 
         socket.onopen = () => {
           if (!active) return;
@@ -874,11 +726,8 @@ export default function App() {
           reconnectDelay = WS_RECONNECT_BASE_DELAY;
           reconnectAttempts = 0;
 
-          // Subscribe to ALL native intervals at once
-          socket.send(JSON.stringify({
-            action: "subscribe",
-            intervals: WS_SUBSCRIBE_INTERVALS,
-          }));
+          liveSubscribedIntervalsRef.current = new Set();
+          syncSocketSubscriptions(socket, trackedIntervalsRef.current);
           setWsStatus("live");
 
           // Stop polling fallback — WS is live
@@ -1009,8 +858,6 @@ export default function App() {
             const tick = msg.data;
             const currentIntv = intervalRef.current;
             const isCurrentInterval = msgInterval === currentIntv;
-            const isCurrentCustomBase = isCustomInterval(currentIntv) &&
-              baseIntervalRef.current === msgInterval;
 
             // ── Use 1m stream as the canonical real-time price source ──
             // The 1m stream updates most frequently and always reflects
@@ -1043,53 +890,6 @@ export default function App() {
                 return next;
               });
               updateLastPrice(tick, currentIntv);
-
-              // If this IS a custom interval and the backend is sending us
-              // aggregated bars directly, mark that backend aggregation is
-              // active so we skip client-side aggregation from base candles.
-              if (isCustomInterval(currentIntv)) {
-                backendAggregatingCustomRef.current = true;
-                customCandleRef.current = { ...tick };
-              }
-            }
-
-            // ── Handle custom interval aggregation (client-side fallback) ──
-            // Only run client-side aggregation from base (1m) candles when
-            // the backend is NOT sending us pre-aggregated custom-interval
-            // K-lines.  When the backend DataManager + BarAggregator are
-            // active, the custom interval data arrives via isCurrentInterval
-            // above, so we must skip this path to avoid double-update
-            // conflicts that cause the last two bars to differ from
-            // TradingView.
-            //
-            // Detection: if we received a direct custom-interval message
-            // (isCurrentInterval was true for the custom interval), the
-            // backend is authoritative.  We only fall through here when
-            // no direct custom-interval messages have arrived (legacy mode).
-            if (isCurrentCustomBase && customSecondsRef.current && !isCurrentInterval) {
-              // Skip client-side aggregation if the backend is already
-              // sending us pre-aggregated custom-interval K-lines.
-              if (!backendAggregatingCustomRef.current) {
-                const { candle, isNew } = aggregateRealtimeCandle(
-                  customCandleRef.current, tick, customSecondsRef.current
-                );
-                customCandleRef.current = candle;
-
-                if (isNew) {
-                  setChartData((prev) => {
-                    const next = deduplicateByTime([...prev, candle]);
-                    saveToCache(symbol, currentIntv, next);
-                    return next;
-                  });
-                } else {
-                  setChartData((prev) => {
-                    const next = deduplicateByTime(upsertRealtimeKline(prev, candle));
-                    saveToCache(symbol, currentIntv, next);
-                    return next;
-                  });
-                }
-                updateLastPrice(candle, currentIntv);
-              }
             }
           } catch (parseErr) {
             console.error("WS parse failed:", parseErr);
@@ -1134,21 +934,29 @@ export default function App() {
       if (socket) {
         try { socket.close(); } catch { /* */ }
       }
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+      liveSubscribedIntervalsRef.current = new Set();
     };
-  }, [symbol, saveToCache, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
+  }, [symbol, saveToCache, syncSocketSubscriptions, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
+
+  useEffect(() => {
+    syncSocketSubscriptions(socketRef.current, trackedIntervals);
+  }, [syncSocketSubscriptions, trackedIntervals]);
 
   // ---------- Background prefetch: load history for ALL intervals ----------
   useEffect(() => {
     let cancelled = false;
     const prefetch = async () => {
-      // Fire-and-forget: load history for all native intervals into cache
+      // Fire-and-forget: load history for all tracked intervals into cache
       // so switching is instant
-      for (const intv of WS_SUBSCRIBE_INTERVALS) {
+      for (const intv of trackedIntervals) {
         if (cancelled) break;
         const key = cacheKey(symbol, intv);
         if (chartDataCacheRef.current.has(key)) continue; // already cached
 
-        const days = INTERVAL_DAYS[intv] || 7;
+        const days = getIntervalDays(intv);
         try {
           const result = await fetchKlinesHistory(symbol, intv, days);
           if (cancelled) break;
@@ -1166,7 +974,7 @@ export default function App() {
     // Start prefetching after a short delay so the active interval loads first
     const timer = setTimeout(prefetch, 2000);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [symbol]);
+  }, [symbol, trackedIntervals]);
 
   // ============================================================
   //  GAP DETECTION & AUTO-FILL
@@ -1188,7 +996,7 @@ export default function App() {
   const recoverGaps = useCallback(async (currentData, sym, intv) => {
     if (!currentData || currentData.length < 3) return;
 
-    const intvSecs = customSecondsRef.current || parseIntervalSeconds(intv);
+    const intvSecs = parseIntervalSeconds(intv);
     if (!intvSecs || intvSecs <= 0) return;
 
     const gaps = detectGaps(currentData, intvSecs);
@@ -1281,7 +1089,7 @@ export default function App() {
       // Tab is now visible again
       const hiddenDurationMs = Date.now() - lastVisibleTimeRef.current;
       const currentIntv = intervalRef.current;
-      const intvSecs = customSecondsRef.current || parseIntervalSeconds(currentIntv);
+      const intvSecs = parseIntervalSeconds(currentIntv);
 
       // If we were hidden for more than 5 seconds, trigger recovery unconditionally.
       // Browsers aggressively throttle WS messages when tabs are inactive.
@@ -1323,7 +1131,7 @@ export default function App() {
         }
 
         // Also refresh background caches for other intervals
-        for (const bgIntv of WS_SUBSCRIBE_INTERVALS) {
+        for (const bgIntv of trackedIntervalsRef.current) {
           if (bgIntv === currentIntv) continue;
           const bgKey = cacheKey(symbol, bgIntv);
           const bgCache = chartDataCacheRef.current.get(bgKey);
@@ -1409,8 +1217,6 @@ export default function App() {
       setCrosshairData(null);
       setCustomInput("");
       setCustomError(null);
-      customCandleRef.current = null;
-      backendAggregatingCustomRef.current = false; // Reset on interval change
       realtimePriceRef.current = null;
       setLastPrice(null);
       gapFillInFlightRef.current.clear(); // Reset gap fill tracking on interval change

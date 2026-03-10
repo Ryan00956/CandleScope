@@ -380,18 +380,14 @@ class Reconciler:
                     # Ensure the custom interval target is registered
                     self._bar_aggregator.add_target(symbol, custom_iv)
 
-                    # Feed component bars through the aggregator's
-                    # backfill path — the Router will convert FetchedBar
-                    # objects to BarInput and route to the correct pipeline.
-                    bar_dicts = [b.to_dict() for b in bars]
-                    for comp in decomp.components:
-                        comp_bars = [
-                            b for b in bar_dicts if b.get("interval") == comp.interval
-                        ]
-                        if comp_bars:
-                            await self._bar_aggregator.on_backfill_bars(
-                                symbol, comp.interval, comp_bars,
-                            )
+                    # Feed component bars strictly in global chronological order.
+                    # Grouping by source interval first breaks ordering for mixed
+                    # decompositions such as 7m -> 5m + 1m + 1m, which can close a
+                    # custom bucket before all of its components have arrived.
+                    for bar in bars:
+                        await self._bar_aggregator.on_backfill_bars(
+                            symbol, bar.interval, [bar.to_dict()],
+                        )
 
                     # Collect generated bars from BarAggregator's state
                     recent = self._bar_aggregator.get_recent_bars(

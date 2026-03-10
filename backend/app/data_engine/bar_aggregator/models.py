@@ -158,6 +158,7 @@ class BarState:
     first_input_at_ms: int = 0     # open_time of the first input
     last_input_at_ms: int = 0      # open_time of the last input
     last_close_received: bool = False  # did we receive is_closed=True for the last component?
+    source_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
     status: BarStatus = BarStatus.FORMING
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     updated_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))

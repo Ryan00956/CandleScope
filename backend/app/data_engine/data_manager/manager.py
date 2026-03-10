@@ -77,7 +77,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, AsyncIterator
+
+from app.core.market import parse_custom_interval
 
 from .cache import BarCache
 from .config import DataManagerConfig
@@ -99,6 +102,8 @@ from .query import QueryEngine
 from ..bar_aggregator import (
     BarAggregator,
     BarAggregatorConfig,
+    BarInput,
+    BarInputSource,
     BarEvent,
     BarEventType,
     BarState,
@@ -411,6 +416,9 @@ class DataManager:
           * A strategy subscribes to a new data feed
           * The system prewarms on startup
         """
+        stream_key = SeriesKey(symbol, interval)
+        had_stream = stream_key in self.coordinator._streams
+
         # Register aggregation target
         self.bar_aggregator.add_target(symbol, interval)
 
@@ -421,7 +429,20 @@ class DataManager:
             base = self._cfg.coordinator.base_interval  # typically "1m"
             self.bar_aggregator.add_target(symbol, base)
 
-        return await self.coordinator.ensure_stream(symbol, interval)
+        info = await self.coordinator.ensure_stream(symbol, interval)
+
+        if not is_standard_interval(interval) and not had_stream:
+            try:
+                await self._seed_custom_interval(symbol, interval)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to seed active custom bucket for %s@%s: %s",
+                    symbol, interval, exc,
+                    exc_info=True,
+                )
+            self._trigger_custom_tail_repair(symbol, interval)
+
+        return info
 
     async def stop_stream(self, symbol: str, interval: str) -> None:
         """Stop a running data stream."""
@@ -602,6 +623,120 @@ class DataManager:
             dm_event.previous_bar = BarData.from_bar_state(event.previous_bar)
 
         await self.event_bus.emit(dm_event)
+
+    async def _seed_custom_interval(self, symbol: str, interval: str) -> None:
+        """Seed the currently-forming custom bucket from recent base bars.
+
+        Without this, if a user subscribes midway through an active custom
+        bucket (for example a 7m candle in minute 5), the aggregator would
+        only see subsequent realtime base bars and incorrectly treat the
+        first seen component as the bucket's open.
+        """
+        pipeline = self.bar_aggregator.get_pipeline(interval)
+        storage = self.query_engine._storage
+        if pipeline is None or storage is None:
+            return
+
+        base_interval = self._cfg.coordinator.base_interval
+        base_seconds = parse_custom_interval(base_interval) or 60
+        now_ms = int(time.time() * 1000)
+        bucket_start_ms = pipeline.time_bucket.compute_bucket(now_ms)
+
+        rows = storage.query_bars(
+            symbol=symbol.upper(),
+            interval=base_interval,
+            start_ms=bucket_start_ms,
+            end_ms=now_ms,
+            order="ASC",
+        )
+        base_key = SeriesKey(symbol, base_interval)
+        rows_by_open_time = {
+            int(row["open_time"]): dict(row) for row in rows
+        }
+        cached_rows = self.cache.query(
+            base_key,
+            start_time=bucket_start_ms // 1000,
+            end_time=now_ms // 1000,
+        )
+        for cached in cached_rows:
+            open_time_ms = cached.time * 1000
+            if open_time_ms < bucket_start_ms:
+                continue
+
+            close_time_ms = open_time_ms + (base_seconds * 1000) - 1
+            rows_by_open_time[open_time_ms] = {
+                "open_time": open_time_ms,
+                "close_time": close_time_ms,
+                "open": cached.open,
+                "high": cached.high,
+                "low": cached.low,
+                "close": cached.close,
+                "volume": cached.volume,
+                "quote_volume": 0.0,
+                "trades": 0,
+                "taker_buy_base": 0.0,
+                "taker_buy_quote": 0.0,
+            }
+
+        if not rows_by_open_time:
+            return
+
+        rows = sorted(rows_by_open_time.values(), key=lambda row: int(row["open_time"]))
+
+        for row in rows:
+            open_time_ms = int(row["open_time"])
+            close_time_ms = int(row.get("close_time", open_time_ms + (base_seconds * 1000) - 1))
+            is_closed = close_time_ms < now_ms
+            bar_input = BarInput(
+                symbol=symbol.upper(),
+                source_interval=base_interval,
+                open_time_ms=open_time_ms,
+                close_time_ms=close_time_ms,
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=float(row.get("volume", 0)),
+                source=BarInputSource.BACKFILL if is_closed else BarInputSource.REALTIME,
+                is_closed=is_closed,
+                quote_volume=float(row.get("quote_volume", 0) or 0),
+                trades=int(row.get("trades", 0) or 0),
+                taker_buy_base=float(row.get("taker_buy_base", 0) or 0),
+                taker_buy_quote=float(row.get("taker_buy_quote", 0) or 0),
+                sequence=open_time_ms,
+            )
+            await self.bar_aggregator._handle_bar_input(
+                symbol.upper(), interval, bar_input,
+            )
+
+    def _trigger_custom_tail_repair(self, symbol: str, interval: str) -> None:
+        """Force a recent custom-interval rebuild to overwrite stale rows.
+
+        Historical custom bars may already be persisted with older, incorrect
+        aggregation semantics. Trigger a focused tail backfill so the latest
+        visible bars are recomputed and the frontend can reload them on the
+        subsequent BACKFILL_COMPLETED event.
+        """
+        trigger = self.query_engine._backfill_trigger
+        if trigger is None:
+            return
+
+        interval_seconds = parse_custom_interval(interval) or 60
+        now_ms = int(time.time() * 1000)
+        repair_window_ms = min(
+            max(interval_seconds * 16 * 1000, 6 * 60 * 60 * 1000),
+            7 * 24 * 60 * 60 * 1000,
+        )
+        start_ms = max(0, now_ms - repair_window_ms)
+
+        try:
+            trigger(symbol.upper(), interval, start_ms, now_ms)
+        except Exception as exc:
+            logger.warning(
+                "Failed to trigger custom tail repair for %s@%s: %s",
+                symbol, interval, exc,
+                exc_info=True,
+            )
 
     # ═══════════════════════════════════════════════════════════
     #  Internal

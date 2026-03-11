@@ -105,3 +105,15 @@ export async function testProxyConnection({ mode, custom_proxy }) {
     }
     return response.json();
 }
+
+export async function repairStoredCustomIntervals() {
+    const url = `${API_BASE}/settings/storage/repair`;
+    const response = await fetch(url, {
+        method: "POST",
+    });
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+}

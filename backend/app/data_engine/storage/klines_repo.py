@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.core.config import KLINES_DB_PATH
+from app.core.market import VALID_INTERVALS
 
 INTERVAL_SECONDS = {
     "1s": 1,
@@ -235,6 +236,33 @@ def get_bounds(symbol: str, interval: str) -> dict:
     return dict(row)
 
 
+def list_series_summaries(custom_only: bool = False) -> list[dict]:
+    """List stored series with bounds/count metadata."""
+    sql = """
+        SELECT
+            symbol,
+            interval,
+            MIN(open_time) AS earliest_open_time,
+            MAX(open_time) AS latest_open_time,
+            COUNT(*) AS total_count
+        FROM klines
+    """
+    params: list[object] = []
+    if custom_only:
+        placeholders = ", ".join("?" for _ in VALID_INTERVALS)
+        sql += f" WHERE interval NOT IN ({placeholders})"
+        params.extend(VALID_INTERVALS)
+    sql += """
+        GROUP BY symbol, interval
+        ORDER BY symbol ASC, interval ASC
+    """
+
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    return [dict(r) for r in rows]
+
+
 # ═══════════════════════════════════════════════════════════════
 #  KlinesRepoAdapter — implements data_manager.StorageBackend protocol
 # ═══════════════════════════════════════════════════════════════
@@ -288,6 +316,10 @@ class KlinesRepoAdapter:
     def get_bounds(self, symbol: str, interval: str) -> dict:
         """Return {earliest_open_time, latest_open_time, total_count}."""
         return get_bounds(symbol=symbol, interval=interval)
+
+    def list_series(self, custom_only: bool = False) -> list[dict]:
+        """Return stored series summaries."""
+        return list_series_summaries(custom_only=custom_only)
 
     def delete_bars(
         self,

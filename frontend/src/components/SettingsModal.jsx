@@ -1,5 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { fetchProxySettings, updateProxySettings, testProxyConnection } from '../services/api';
+import {
+    fetchProxySettings,
+    updateProxySettings,
+    testProxyConnection,
+    repairStoredCustomIntervals,
+} from '../services/api';
 
 export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
     // ── Proxy state ─────────────────────────────────────────
@@ -10,12 +15,15 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
     const [proxyLoading, setProxyLoading] = useState(false);
     const [proxyTestResult, setProxyTestResult] = useState(null);
     const [proxySaveMsg, setProxySaveMsg] = useState(null);
+    const [storageRepairLoading, setStorageRepairLoading] = useState(false);
+    const [storageRepairResult, setStorageRepairResult] = useState(null);
 
     // Load proxy settings when modal opens
     useEffect(() => {
         if (!isOpen) return;
         setProxyTestResult(null);
         setProxySaveMsg(null);
+        setStorageRepairResult(null);
         fetchProxySettings()
             .then((data) => {
                 setProxyMode(data.mode || 'system');
@@ -53,10 +61,46 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
         }
     }, [proxyMode, customProxy]);
 
+    const handleStorageRepair = useCallback(async () => {
+        setStorageRepairLoading(true);
+        setStorageRepairResult(null);
+        try {
+            const res = await repairStoredCustomIntervals();
+            setStorageRepairResult(res);
+        } catch (err) {
+            setStorageRepairResult({
+                status: 'error',
+                message: `修复失败: ${err.message}`,
+                checked_series: 0,
+                repaired_series: 0,
+                unchanged_series: 0,
+                failed_series: 1,
+                total_deleted_rows: 0,
+                total_written_rows: 0,
+                total_stale_rows_removed: 0,
+                results: [],
+            });
+        } finally {
+            setStorageRepairLoading(false);
+        }
+    }, []);
+
     if (!isOpen) return null;
 
     const handleUpdate = (key, value) => {
         onUpdate({ ...settings, [key]: value });
+    };
+
+    const getRepairResultClassName = (status) => {
+        if (status === 'ok') return 'repair-result-ok';
+        if (status === 'partial' || status === 'warning') return 'repair-result-warn';
+        return 'repair-result-fail';
+    };
+
+    const getRepairStatusLabel = (status) => {
+        if (status === 'repaired') return '已修复';
+        if (status === 'failed') return '失败';
+        return '通过';
     };
 
     return (
@@ -258,6 +302,66 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
                             </optgroup>
                         </select>
                     </section>
+
+                    {/* 6. 数据库存储修复 */}
+                    <section className="settings-section">
+                        <label>🛠️ 库检查与修正</label>
+                        <div className="repair-card">
+                            <div className="repair-title">自定义周期落库修复</div>
+                            <div className="repair-desc">
+                                检查数据库里已存在的自定义周期 K 线，并按基础周期的 authoritative 聚合逻辑重建错误数据。
+                                原生周期不会被改动。
+                            </div>
+                            <div className="repair-note">
+                                如果基础周期本身有缺口，后端会先尝试自动回补，再决定是否回写 custom rows。
+                            </div>
+                            <button
+                                className="repair-btn"
+                                onClick={handleStorageRepair}
+                                disabled={storageRepairLoading}
+                            >
+                                {storageRepairLoading ? '⏳ 检查中...' : '检查并修正库内容'}
+                            </button>
+                        </div>
+
+                        {storageRepairResult && (
+                            <div className={`repair-result ${getRepairResultClassName(storageRepairResult.status)}`}>
+                                <div className="repair-result-head">{storageRepairResult.message}</div>
+                                <div className="repair-stats">
+                                    <span>检查 {storageRepairResult.checked_series || 0}</span>
+                                    <span>修复 {storageRepairResult.repaired_series || 0}</span>
+                                    <span>通过 {storageRepairResult.unchanged_series || 0}</span>
+                                    <span>失败 {storageRepairResult.failed_series || 0}</span>
+                                    <span>删库 {storageRepairResult.total_deleted_rows || 0}</span>
+                                    <span>回写 {storageRepairResult.total_written_rows || 0}</span>
+                                </div>
+
+                                {Array.isArray(storageRepairResult.results) && storageRepairResult.results.length > 0 && (
+                                    <div className="repair-series-list">
+                                        {storageRepairResult.results.slice(0, 6).map((item) => (
+                                            <div
+                                                key={`${item.symbol}-${item.interval}`}
+                                                className="repair-series-item"
+                                            >
+                                                <div className="repair-series-line">
+                                                    <span className="repair-series-name">{item.symbol} · {item.interval}</span>
+                                                    <span className={`repair-series-status repair-series-status-${item.status}`}>
+                                                        {getRepairStatusLabel(item.status)}
+                                                    </span>
+                                                </div>
+                                                <div className="repair-series-msg">{item.message}</div>
+                                            </div>
+                                        ))}
+                                        {storageRepairResult.results.length > 6 && (
+                                            <div className="repair-series-more">
+                                                其余 {storageRepairResult.results.length - 6} 项结果已省略
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </section>
                 </div>
 
                 <div className="modal-footer">
@@ -278,7 +382,7 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
           background: var(--bg-secondary);
           border: 1px solid var(--border-color);
           border-radius: var(--radius-md);
-          width: 90%; max-width: 400px;
+          width: 90%; max-width: 480px;
           max-height: 85vh;
           overflow-y: auto;
           box-shadow: 0 20px 40px rgba(0,0,0,0.4);
@@ -385,6 +489,131 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
         .proxy-result-detail {
           margin-top: 4px; font-size: 11px; opacity: 0.8;
           font-family: var(--font-mono);
+        }
+        .repair-card {
+          padding: 12px;
+          border-radius: 8px;
+          border: 1px solid var(--border-color);
+          background: var(--bg-tertiary);
+        }
+        .repair-title {
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text-primary);
+        }
+        .repair-desc {
+          margin-top: 6px;
+          font-size: 12px;
+          line-height: 1.55;
+          color: var(--text-secondary);
+        }
+        .repair-note {
+          margin-top: 8px;
+          font-size: 11px;
+          line-height: 1.5;
+          color: var(--text-muted);
+        }
+        .repair-btn {
+          width: 100%;
+          margin-top: 12px;
+          padding: 9px 12px;
+          border-radius: 6px;
+          border: 1px solid rgba(245, 158, 11, 0.35);
+          background: rgba(245, 158, 11, 0.12);
+          color: #f59e0b;
+          cursor: pointer;
+          font-weight: 600;
+          transition: all 0.15s;
+        }
+        .repair-btn:hover:not(:disabled) {
+          background: rgba(245, 158, 11, 0.18);
+          border-color: rgba(245, 158, 11, 0.55);
+        }
+        .repair-btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+        .repair-result {
+          margin-top: 12px;
+          padding: 12px;
+          border-radius: 8px;
+          font-size: 12px;
+          line-height: 1.5;
+        }
+        .repair-result-ok {
+          background: rgba(34, 197, 94, 0.08);
+          border: 1px solid rgba(34, 197, 94, 0.3);
+          color: #22c55e;
+        }
+        .repair-result-warn {
+          background: rgba(245, 158, 11, 0.08);
+          border: 1px solid rgba(245, 158, 11, 0.28);
+          color: #f59e0b;
+        }
+        .repair-result-fail {
+          background: rgba(239, 68, 68, 0.08);
+          border: 1px solid rgba(239, 68, 68, 0.3);
+          color: #ef4444;
+        }
+        .repair-result-head {
+          font-weight: 600;
+        }
+        .repair-stats {
+          margin-top: 8px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px 12px;
+          font-size: 11px;
+        }
+        .repair-series-list {
+          margin-top: 10px;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .repair-series-item {
+          padding-top: 8px;
+          border-top: 1px solid rgba(255,255,255,0.08);
+        }
+        .repair-series-line {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 8px;
+        }
+        .repair-series-name {
+          font-family: var(--font-mono);
+          font-size: 11px;
+          color: var(--text-primary);
+        }
+        .repair-series-status {
+          padding: 2px 8px;
+          border-radius: 999px;
+          font-size: 10px;
+          font-weight: 600;
+          white-space: nowrap;
+        }
+        .repair-series-status-repaired {
+          background: rgba(34, 197, 94, 0.12);
+          color: #22c55e;
+        }
+        .repair-series-status-failed {
+          background: rgba(239, 68, 68, 0.12);
+          color: #ef4444;
+        }
+        .repair-series-status-checked {
+          background: rgba(59, 130, 246, 0.12);
+          color: var(--accent-blue);
+        }
+        .repair-series-msg {
+          margin-top: 4px;
+          color: var(--text-secondary);
+          font-size: 11px;
+        }
+        .repair-series-more {
+          margin-top: 4px;
+          font-size: 11px;
+          color: var(--text-muted);
         }
       `}</style>
         </div>

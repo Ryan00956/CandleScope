@@ -373,6 +373,9 @@ class Reconciler:
                 continue
 
             bars.sort(key=lambda b: b.open_time)
+            bucket_min_ms, bucket_max_ms = self._custom_bucket_bounds(
+                bars, custom_ms, decomp.alignment_epoch_ms,
+            )
 
             # ── Route through BarAggregator if available ─────
             if self._bar_aggregator is not None:
@@ -395,6 +398,8 @@ class Reconciler:
                     )
                     custom_bars_from_agg = []
                     for bar_state in recent:
+                        if not (bucket_min_ms <= bar_state.bucket_start_ms <= bucket_max_ms):
+                            continue
                         custom_bars_from_agg.append(FetchedBar(
                             symbol=symbol,
                             interval=custom_iv,
@@ -411,6 +416,7 @@ class Reconciler:
                             taker_buy_quote=bar_state.taker_buy_quote,
                             source="backfill_aggregated_via_bar_agg",
                         ))
+                    custom_bars_from_agg.sort(key=lambda b: b.open_time)
                     generated += len(custom_bars_from_agg)
 
                     # Write to storage
@@ -468,6 +474,19 @@ class Reconciler:
                     )
 
         return generated, written
+
+    @staticmethod
+    def _custom_bucket_bounds(
+        bars: list[FetchedBar],
+        custom_ms: int,
+        epoch_ms: int,
+    ) -> tuple[int, int]:
+        """Return inclusive min/max custom bucket starts touched by *bars*."""
+        first_open = min(bar.open_time for bar in bars)
+        last_open = max(bar.open_time for bar in bars)
+        bucket_min = ((first_open - epoch_ms) // custom_ms) * custom_ms + epoch_ms
+        bucket_max = ((last_open - epoch_ms) // custom_ms) * custom_ms + epoch_ms
+        return bucket_min, bucket_max
 
     def _aggregate_to_custom(
         self,

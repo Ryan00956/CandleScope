@@ -597,6 +597,8 @@ class DataManager:
             event.event_type, DataEventType.BAR_UPDATED,
         )
 
+        await self._persist_bar_event(bar_state, dm_event_type)
+
         # Update cache
         if dm_event_type == DataEventType.BAR_CLOSED:
             self.cache.append(key, bar_data)
@@ -624,6 +626,40 @@ class DataManager:
             dm_event.previous_bar = BarData.from_bar_state(event.previous_bar)
 
         await self.event_bus.emit(dm_event)
+
+    async def _persist_bar_event(
+        self,
+        bar_state: BarState,
+        event_type: DataEventType,
+    ) -> None:
+        """Persist finalized/corrected bars so storage matches live state."""
+        storage = self.query_engine._storage
+        if storage is None:
+            return
+
+        if event_type not in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED):
+            return
+
+        row = bar_state.to_storage_dict()
+        source = "data_manager_amended" if event_type == DataEventType.BAR_AMENDED else "data_manager_closed"
+        try:
+            await asyncio.to_thread(
+                storage.upsert_bars,
+                bar_state.symbol,
+                bar_state.interval,
+                [row],
+                source,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist %s for %s@%s %s: %s",
+                event_type.value,
+                bar_state.symbol,
+                bar_state.interval,
+                bar_state.bucket_start_ms,
+                exc,
+                exc_info=True,
+            )
 
     async def _seed_custom_interval(self, symbol: str, interval: str) -> None:
         """Seed the currently-forming custom bucket from recent base bars.

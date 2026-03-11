@@ -24,6 +24,7 @@ from app.api.v1.klines import router as klines_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.stream import router as stream_router
 from app.core.config import CORS_ORIGINS
+from app.core.market import is_custom_interval
 from app.data_engine.storage import init_klines_storage
 
 logger = logging.getLogger("candlescope")
@@ -135,6 +136,7 @@ async def _init_data_manager() -> None:
             transport=transport,
             ingestion_config=ingestion_cfg,
         )
+        backfill_engine.reconciler.set_bar_aggregator(dm.bar_aggregator)
         app.state.backfill_engine = backfill_engine  # for shutdown
 
         main_loop = asyncio.get_running_loop()
@@ -158,20 +160,35 @@ async def _init_data_manager() -> None:
                         symbol, interval, report.status.value,
                         bars_written,
                     )
-                    # Feed backfilled bars into DataManager cache
+                    # Feed backfilled bars into DataManager cache.
+                    # For custom intervals, rebuild from the authoritative
+                    # base-series query path instead of trusting stored custom
+                    # rows directly.
                     if hasattr(report, 'reconcile_result') and report.reconcile_result:
                         rr = report.reconcile_result
                         if hasattr(rr, 'bars_written') and rr.bars_written > 0:
-                            # Re-query storage and load into cache
-                            from app.data_engine.data_manager.models import BarData
-                            rows = storage.query_bars(
-                                symbol=symbol, interval=interval,
-                                start_ms=start_ms, end_ms=end_ms,
-                                order="ASC",
-                            )
-                            bars = [BarData.from_storage_row(r) for r in rows]
-                            if bars:
-                                await dm.on_bars_backfilled(symbol, interval, bars)
+                            if is_custom_interval(interval):
+                                result = await asyncio.to_thread(
+                                    dm.query,
+                                    symbol,
+                                    interval,
+                                    start_ms,
+                                    end_ms,
+                                    None,
+                                )
+                                if result.bars:
+                                    await dm.on_bars_backfilled(symbol, interval, result.bars)
+                            else:
+                                # Re-query storage and load into cache
+                                from app.data_engine.data_manager.models import BarData
+                                rows = storage.query_bars(
+                                    symbol=symbol, interval=interval,
+                                    start_ms=start_ms, end_ms=end_ms,
+                                    order="ASC",
+                                )
+                                bars = [BarData.from_storage_row(r) for r in rows]
+                                if bars:
+                                    await dm.on_bars_backfilled(symbol, interval, bars)
                 except Exception as exc:
                     logger.error("Backfill task failed: %s", exc, exc_info=True)
 

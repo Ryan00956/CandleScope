@@ -8,16 +8,35 @@ Provides endpoints for:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 
 import aiohttp
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+
+from app.core.market import find_best_base_interval, parse_custom_interval
+from app.data_engine.bar_aggregator import BarAggregator, BarAggregatorConfig
+from app.data_engine.data_manager.models import BarData
+from app.data_engine.storage.klines_repo import list_series_summaries
 
 logger = logging.getLogger("candlescope.settings")
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+
+_STORAGE_ROW_FLOAT_FIELDS = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+    "taker_buy_base",
+    "taker_buy_quote",
+)
+_STORAGE_ROW_INT_FIELDS = ("open_time", "close_time", "trades")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -98,6 +117,177 @@ def _get_transports(request: Request) -> list:
         if ingress is not None and hasattr(ingress, "_transport"):
             transports.append(ingress._transport)
     return transports
+
+
+def _get_data_manager(request: Request):
+    """Return the app-wide DataManager."""
+    return getattr(request.app.state, "data_manager", None)
+
+
+def _get_backfill_engine(request: Request):
+    """Return the app-wide BackfillEngine."""
+    return getattr(request.app.state, "backfill_engine", None)
+
+
+def _get_storage_repair_lock(request: Request) -> asyncio.Lock:
+    """Return a shared lock guarding manual storage repair."""
+    lock = getattr(request.app.state, "storage_repair_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        request.app.state.storage_repair_lock = lock
+    return lock
+
+
+def _normalize_storage_row(row: dict) -> dict:
+    """Normalize a storage row for deterministic comparison/writes."""
+    normalized: dict[str, int | float] = {}
+    for field in _STORAGE_ROW_INT_FIELDS:
+        normalized[field] = int(row.get(field, 0) or 0)
+    for field in _STORAGE_ROW_FLOAT_FIELDS:
+        normalized[field] = float(row.get(field, 0) or 0.0)
+    return normalized
+
+
+def _rows_match(left: dict, right: dict, tol: float = 1e-8) -> bool:
+    """Compare two normalized storage rows."""
+    for field in _STORAGE_ROW_INT_FIELDS:
+        if int(left.get(field, 0)) != int(right.get(field, 0)):
+            return False
+    for field in _STORAGE_ROW_FLOAT_FIELDS:
+        if abs(float(left.get(field, 0.0)) - float(right.get(field, 0.0))) > tol:
+            return False
+    return True
+
+
+def _count_row_differences(existing_rows: list[dict], rebuilt_rows: list[dict]) -> int:
+    """Count per-open-time differences between stored and rebuilt rows."""
+    existing_map = {int(row["open_time"]): _normalize_storage_row(row) for row in existing_rows}
+    rebuilt_map = {int(row["open_time"]): _normalize_storage_row(row) for row in rebuilt_rows}
+    differences = 0
+
+    for open_time in sorted(set(existing_map) | set(rebuilt_map)):
+        left = existing_map.get(open_time)
+        right = rebuilt_map.get(open_time)
+        if left is None or right is None:
+            differences += 1
+            continue
+        if not _rows_match(left, right):
+            differences += 1
+    return differences
+
+
+def _is_closed_bucket(open_time_ms: int, interval_ms: int, now_ms: int) -> bool:
+    """Return True when the bucket is fully closed by now."""
+    return open_time_ms + interval_ms <= now_ms
+
+
+def _list_custom_series(storage) -> list[dict]:
+    """Return stored custom-interval series summaries."""
+    if storage is not None and hasattr(storage, "list_series"):
+        return storage.list_series(custom_only=True)
+    return list_series_summaries(custom_only=True)
+
+
+async def _ensure_base_series_complete(
+    backfill_engine,
+    symbol: str,
+    base_interval: str,
+    start_ms: int,
+    end_ms: int,
+    metadata: dict,
+) -> tuple[bool, int, list[str]]:
+    """Ensure the authoritative base interval is gap-free for repair."""
+    gap_runs = 0
+    errors: list[str] = []
+
+    gaps = await backfill_engine.detect_only(
+        symbol=symbol,
+        intervals=[base_interval],
+        range_start_ms=start_ms,
+        range_end_ms=end_ms,
+    )
+    if not gaps:
+        return True, gap_runs, errors
+
+    gap_runs += 1
+    report = await backfill_engine.run(
+        symbol=symbol,
+        intervals=[base_interval],
+        range_start_ms=start_ms,
+        range_end_ms=end_ms,
+        metadata=metadata,
+    )
+    if report.errors:
+        errors.extend(report.errors)
+
+    remaining = await backfill_engine.detect_only(
+        symbol=symbol,
+        intervals=[base_interval],
+        range_start_ms=start_ms,
+        range_end_ms=end_ms,
+    )
+    if remaining:
+        errors.append(f"{len(remaining)} base gap(s) remain after repair")
+        return False, gap_runs, errors
+
+    return True, gap_runs, errors
+
+
+async def _aggregate_custom_rows(
+    symbol: str,
+    custom_interval: str,
+    base_interval: str,
+    base_rows: list[dict],
+    aggregator_config: dict,
+) -> list[dict]:
+    """Rebuild custom rows through a fresh BarAggregator instance."""
+    symbol = symbol.upper()
+    agg = BarAggregator(BarAggregatorConfig(**aggregator_config))
+    agg.add_target(symbol, custom_interval)
+
+    rows_by_open_time: dict[int, dict] = {}
+
+    async def _capture(event) -> None:
+        row = _normalize_storage_row(event.bar.to_storage_dict())
+        rows_by_open_time[int(row["open_time"])] = row
+
+    agg.publisher.on_bar_closed(_capture)
+    agg.publisher.on_bar_amended(_capture)
+
+    batch_size = 1000
+    for idx in range(0, len(base_rows), batch_size):
+        await agg.on_backfill_bars(
+            symbol,
+            base_interval,
+            base_rows[idx : idx + batch_size],
+        )
+
+    return [rows_by_open_time[key] for key in sorted(rows_by_open_time)]
+
+
+async def _warm_repaired_series(dm, storage, symbol: str, interval: str) -> None:
+    """Invalidate cache, warm latest repaired bars, and reseed active custom tails."""
+    symbol = symbol.upper()
+    dm.cache_invalidate(symbol, interval)
+
+    rows = await asyncio.to_thread(
+        storage.query_bars,
+        symbol,
+        interval,
+        None,
+        None,
+        500,
+        "DESC",
+    )
+    if rows:
+        bars = [BarData.from_storage_row(row) for row in reversed(rows)]
+        await dm.on_bars_backfilled(symbol, interval, bars)
+
+    if (symbol, interval) in set(dm.bar_aggregator.get_targets()):
+        try:
+            await dm._seed_custom_interval(symbol, interval)
+        except Exception as exc:
+            logger.warning("Failed to reseed repaired custom tail for %s@%s: %s", symbol, interval, exc)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -224,4 +414,251 @@ async def test_proxy_connection(body: ProxyTestRequest) -> dict:
             "status_code": None,
             "proxy_used": proxy_url or "(direct)",
             "message": f"测试失败: {type(exc).__name__}: {exc}",
+        }
+
+
+@router.post("/storage/repair")
+async def repair_custom_storage(request: Request) -> dict:
+    """Check and rebuild stored custom-interval rows from authoritative base data."""
+    dm = _get_data_manager(request)
+    backfill_engine = _get_backfill_engine(request)
+    if dm is None or backfill_engine is None:
+        raise HTTPException(status_code=503, detail="DataManager/BackfillEngine 尚未初始化")
+
+    storage = getattr(dm.query_engine, "_storage", None)
+    if storage is None:
+        raise HTTPException(status_code=503, detail="Storage backend 尚未初始化")
+
+    lock = _get_storage_repair_lock(request)
+    if lock.locked():
+        raise HTTPException(status_code=409, detail="库修复任务正在运行，请稍后再试")
+
+    async with lock:
+        started_at_ms = int(time.time() * 1000)
+        now_ms = started_at_ms
+        aggregator_config = dm.bar_aggregator.config.snapshot()
+        series = await asyncio.to_thread(_list_custom_series, storage)
+
+        if not series:
+            return {
+                "status": "warning",
+                "message": "未发现已落库的自定义周期数据，无需修复",
+                "checked_series": 0,
+                "repaired_series": 0,
+                "unchanged_series": 0,
+                "failed_series": 0,
+                "total_deleted_rows": 0,
+                "total_written_rows": 0,
+                "total_stale_rows_removed": 0,
+                "base_backfill_runs": 0,
+                "elapsed_ms": int(time.time() * 1000) - started_at_ms,
+                "results": [],
+            }
+
+        results: list[dict] = []
+        repaired_series = 0
+        unchanged_series = 0
+        failed_series = 0
+        total_deleted_rows = 0
+        total_written_rows = 0
+        total_stale_rows_removed = 0
+        base_backfill_runs = 0
+
+        for item in series:
+            symbol = str(item["symbol"]).upper()
+            interval = str(item["interval"])
+            custom_seconds = parse_custom_interval(interval)
+            result = {
+                "symbol": symbol,
+                "interval": interval,
+                "existing_rows": int(item.get("total_count", 0) or 0),
+                "repaired_rows": 0,
+                "deleted_rows": 0,
+                "stale_rows_removed": 0,
+                "difference_rows": 0,
+                "base_interval": None,
+                "base_backfill_runs": 0,
+                "status": "checked",
+                "message": "",
+            }
+
+            if custom_seconds is None:
+                result["status"] = "failed"
+                result["message"] = "无法解析该自定义周期"
+                failed_series += 1
+                results.append(result)
+                continue
+
+            custom_ms = custom_seconds * 1000
+            earliest_open = int(item["earliest_open_time"])
+            latest_open = int(item["latest_open_time"])
+            existing_rows = await asyncio.to_thread(
+                storage.query_bars,
+                symbol,
+                interval,
+                earliest_open,
+                latest_open,
+                None,
+                "ASC",
+            )
+            existing_rows = [_normalize_storage_row(row) for row in existing_rows]
+            closed_existing = [
+                row for row in existing_rows
+                if _is_closed_bucket(int(row["open_time"]), custom_ms, now_ms)
+            ]
+            stale_existing = [
+                row for row in existing_rows
+                if not _is_closed_bucket(int(row["open_time"]), custom_ms, now_ms)
+            ]
+            result["stale_rows_removed"] = len(stale_existing)
+
+            if not closed_existing:
+                if stale_existing:
+                    deleted = await asyncio.to_thread(
+                        storage.delete_bars,
+                        symbol,
+                        interval,
+                        int(stale_existing[0]["open_time"]),
+                        int(stale_existing[-1]["open_time"]),
+                    )
+                    total_deleted_rows += deleted
+                    total_stale_rows_removed += len(stale_existing)
+                    repaired_series += 1
+                    result["deleted_rows"] = deleted
+                    result["status"] = "repaired"
+                    result["message"] = "仅发现未封口尾部数据，已删除脏尾巴"
+                    await _warm_repaired_series(dm, storage, symbol, interval)
+                else:
+                    unchanged_series += 1
+                    result["message"] = "没有可修复的数据"
+                results.append(result)
+                continue
+
+            repair_start_open = int(closed_existing[0]["open_time"])
+            repair_end_open = int(closed_existing[-1]["open_time"])
+            base_interval, _ = find_best_base_interval(custom_seconds)
+            result["base_interval"] = base_interval
+
+            base_ok, gap_runs, base_errors = await _ensure_base_series_complete(
+                backfill_engine,
+                symbol,
+                base_interval,
+                repair_start_open,
+                repair_end_open + custom_ms - 1,
+                metadata={
+                    "origin": "settings_storage_repair",
+                    "target_interval": interval,
+                    "phase": "base_repair",
+                },
+            )
+            base_backfill_runs += gap_runs
+            result["base_backfill_runs"] = gap_runs
+
+            if not base_ok:
+                result["status"] = "failed"
+                result["message"] = "基础周期存在缺口，自动回补后仍未完全修复"
+                if base_errors:
+                    result["errors"] = base_errors
+                failed_series += 1
+                results.append(result)
+                continue
+
+            base_rows = await asyncio.to_thread(
+                storage.query_bars,
+                symbol,
+                base_interval,
+                repair_start_open,
+                repair_end_open + custom_ms - 1,
+                None,
+                "ASC",
+            )
+            if not base_rows:
+                result["status"] = "failed"
+                result["message"] = "基础周期数据为空，无法重建"
+                failed_series += 1
+                results.append(result)
+                continue
+
+            rebuilt_rows = await _aggregate_custom_rows(
+                symbol=symbol,
+                custom_interval=interval,
+                base_interval=base_interval,
+                base_rows=base_rows,
+                aggregator_config=aggregator_config,
+            )
+            rebuilt_rows = [
+                row for row in rebuilt_rows
+                if repair_start_open <= int(row["open_time"]) <= repair_end_open
+                and _is_closed_bucket(int(row["open_time"]), custom_ms, now_ms)
+            ]
+
+            if not rebuilt_rows and closed_existing:
+                result["status"] = "failed"
+                result["message"] = "重建结果为空，已中止回写以避免误删原有数据"
+                failed_series += 1
+                results.append(result)
+                continue
+
+            difference_rows = _count_row_differences(closed_existing, rebuilt_rows)
+            result["difference_rows"] = difference_rows
+
+            if difference_rows == 0 and not stale_existing:
+                unchanged_series += 1
+                result["message"] = "检查通过，库内容已正确"
+                results.append(result)
+                continue
+
+            deleted = await asyncio.to_thread(
+                storage.delete_bars,
+                symbol,
+                interval,
+                earliest_open,
+                latest_open,
+            )
+            written = 0
+            if rebuilt_rows:
+                written = await asyncio.to_thread(
+                    storage.upsert_bars,
+                    symbol,
+                    interval,
+                    rebuilt_rows,
+                    "settings_manual_repair",
+                )
+
+            total_deleted_rows += deleted
+            total_written_rows += written
+            total_stale_rows_removed += len(stale_existing)
+            repaired_series += 1
+
+            result["deleted_rows"] = deleted
+            result["repaired_rows"] = written
+            result["status"] = "repaired"
+            result["message"] = "已按基础周期重建并回写自定义周期数据"
+
+            await _warm_repaired_series(dm, storage, symbol, interval)
+            results.append(result)
+
+        if failed_series == 0:
+            overall_status = "ok"
+            message = "库检查完成"
+        elif repaired_series > 0 or unchanged_series > 0:
+            overall_status = "partial"
+            message = "库检查完成，但仍有部分周期未修复"
+        else:
+            overall_status = "error"
+            message = "库检查失败，未完成修复"
+
+        return {
+            "status": overall_status,
+            "message": message,
+            "checked_series": len(results),
+            "repaired_series": repaired_series,
+            "unchanged_series": unchanged_series,
+            "failed_series": failed_series,
+            "total_deleted_rows": total_deleted_rows,
+            "total_written_rows": total_written_rows,
+            "total_stale_rows_removed": total_stale_rows_removed,
+            "base_backfill_runs": base_backfill_runs,
+            "elapsed_ms": int(time.time() * 1000) - started_at_ms,
+            "results": results,
         }

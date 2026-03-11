@@ -2,19 +2,42 @@
 
 [![English](https://img.shields.io/badge/Language-English-blue)](#) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](README_zh.md)
 
-Lightweight trading chart software built with FastAPI + React + Lightweight Charts.
+Lightweight trading chart software built with FastAPI + React + Lightweight Charts. Features real-time Binance data sync, a multi-layered data engine, a Pine Script–inspired indicator scripting language, and a fully interactive charting frontend.
 
-## Requirements
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python" />
+  <img src="https://img.shields.io/badge/Node.js-20+-green?logo=node.js" />
+  <img src="https://img.shields.io/badge/React-18+-61DAFB?logo=react" />
+  <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi" />
+  <img src="https://img.shields.io/badge/License-Apache_2.0-orange" />
+</p>
+
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Current Features](#current-features)
+- [Core Capabilities](#core-capabilities)
+- [Indicator Engine](#indicator-engine)
+- [Pyne — Pine-style Scripting](#pyne--pine-style-scripting)
+- [Frontend Features](#frontend-features)
+- [Project Structure](#project-structure)
+- [API Documentation](#api-documentation)
+- [Notes](#notes)
+- [Acknowledgments](#acknowledgments)
+
+---
+
+## Quick Start
+
+### Requirements
 
 - Python 3.10+
 - Node.js 20+
 - npm 10+
 
-## Quick Start
-
 ### Windows
-
-The current README startup flow is valid on Windows as long as Python and Node.js are installed and available in `PATH`.
 
 Backend:
 
@@ -31,11 +54,6 @@ cd frontend
 npm install
 npm run dev
 ```
-
-Default URLs:
-- API: `http://localhost:8000`
-- Swagger: `http://localhost:8000/docs`
-- Frontend: `http://localhost:5173`
 
 ### Linux / WSL
 
@@ -62,19 +80,26 @@ Default URLs:
 - Swagger: `http://localhost:8000/docs`
 - Frontend: `http://localhost:5173`
 
-Notes for Linux / WSL:
-- On Debian or Ubuntu, install venv support first if needed: `sudo apt-get install -y python3-pip python3-venv`
-- If Binance is blocked in your region or by your proxy configuration, the app falls back to mock data.
+> **Note:** On Debian/Ubuntu, install venv support first if needed: `sudo apt-get install -y python3-pip python3-venv`. If Binance is blocked in your region, the app falls back to mock data automatically.
 
-## Current features
-- **Zero-Latency Interval Switching**: Instant cache-first rendering. Switching between 1m, 1h, or 1d is near-instant if data exists in local SQLite.
-- **Non-blocking Async Architecture**: All heavy I/O operations (Binance API) are offloaded to background thread pools, keeping the WebSocket and UI perfectly responsive.
-- **Intelligent Prefetching**: Frontend automatically pre-warms adjacent intervals (e.g., if you view 1h, it silently fetches 15m and 4h in the background).
-- **Parallel Data Filling**: Historical backfill and real-time refresh are executed concurrently using a specialized `ThreadPoolExecutor`.
-- **Binance Spot K-line Sync**: Rapid synchronization of real market data with a local SQLite cache to avoid redundant network requests.
-- **Dynamic Custom Intervals**: In addition to native intervals, the system synthesizes custom intervals (e.g., 45m, 3h) in real-time in-memory based on finer aggregated resolutions.
-- **Unified Mock Data**: Deterministic price levels are perfectly consistent across all intervals (1m to 1M) using a shared minute-step price curve.
-- **Rendering Stability**: Built-in **ErrorBoundary** and time-based de-duplication to prevent "white screen" crashes from unstable network streams.
+---
+
+## Current Features
+
+- **Zero-Latency Interval Switching** — Instant cache-first rendering. Switching between 1m, 1h, or 1d is near-instant if data exists in local SQLite.
+- **Non-blocking Async Architecture** — All heavy I/O operations (Binance API) are offloaded to background thread pools, keeping the WebSocket and UI perfectly responsive.
+- **Intelligent Prefetching** — Frontend automatically pre-warms adjacent intervals (e.g., if you view 1h, it silently fetches 15m and 4h in the background).
+- **Parallel Data Filling** — Historical backfill and real-time refresh are executed concurrently using a specialized `ThreadPoolExecutor`.
+- **Binance Spot K-line Sync** — Rapid synchronization of real market data with a local SQLite cache to avoid redundant network requests.
+- **Dynamic Custom Intervals** — In addition to native intervals, the system synthesizes custom intervals (e.g., 45m, 3h) in real-time in-memory based on finer aggregated resolutions.
+- **Full Indicator Engine** — 6 built-in indicators (MA, EMA, MACD, RSI, BOLL, ATR) with O(1) incremental computation, plus a script sandbox for custom indicators.
+- **Pyne Scripting Language** — A Pine Script–inspired Python library with `ta.*`, `input.*`, `plot()` APIs for rapid indicator development.
+- **Interactive Drawing Tools** — Freehand drawing, line tools, and text annotations directly on the chart canvas.
+- **Multi-Pane Chart Layout** — Separate panes for price, volume, and oscillator indicators with resizable dividers.
+- **Unified Mock Data** — Deterministic price levels are perfectly consistent across all intervals (1m to 1M) using a shared minute-step price curve.
+- **Rendering Stability** — Built-in **ErrorBoundary** and time-based de-duplication to prevent "white screen" crashes from unstable network streams.
+
+---
 
 ## Core Capabilities
 
@@ -93,22 +118,187 @@ The frontend keeps track of your navigation. Rapidly switching between intervals
 - **No White Screen**: Integrated React ErrorBoundaries and chart data sanitization ensure the UI stays up even if the underlying library hits data irregularities.
 - **Deterministic Simulation**: The mock generator uses a shared minute-level random walk, ensuring the "current price" is identical across all charts.
 
-## Project Structure & Data Engine Modules
+---
 
-- `backend/`: FastAPI backend and multi-threaded data engine.
-- `frontend/`: React frontend with customized Lightweight Charts v5.
+## Indicator Engine
 
-The **Data Engine** provides multiple sub-modules with well-defined responsibilities. For detailed architecture and design, please refer to their respective documentation:
+CandleScope includes a comprehensive **incremental indicator computation engine** with support for both built-in indicators and user-defined custom scripts.
 
-- 📖 [**Data Manager**](backend/app/data_engine/data_manager/README.md) - The central facade for querying, caching, and stream coordination.
-- 📖 [**Ingestion Layer**](backend/app/data_engine/ingestion/README.md) - 6-layer pipeline for real-time WebSocket market data via Binance.
-- 📖 [**Bar Aggregator**](backend/app/data_engine/bar_aggregator/README.md) - Real-time custom interval synthesizer (e.g., 45m, 3h).
-- 📖 [**Backfill Engine**](backend/app/data_engine/backfill/README.md) - Intelligent historical data gap detection and multi-threaded backfilling.
+### Built-in Indicators
+
+| Indicator | Category | Output | Pane |
+|-----------|----------|--------|------|
+| **MA** — Simple Moving Average | Trend | `ma` | Main |
+| **EMA** — Exponential Moving Average | Trend | `ema` | Main |
+| **MACD** — Moving Average Convergence Divergence | Trend | `dif`, `dea`, `hist` | Separate |
+| **RSI** — Relative Strength Index | Oscillator | `rsi` | Separate |
+| **BOLL** — Bollinger Bands | Volatility | `upper`, `middle`, `lower` | Main |
+| **ATR** — Average True Range | Volatility | `atr` | Separate |
+
+### Key Design
+
+- **O(1) Incremental Updates** — All indicators maintain rolling state, so each new bar requires only constant time to process.
+- **Two-Phase Update** — `update_partial(bar)` computes preview values without modifying state; `update_closed(bar)` advances state on bar close.
+- **Instance Caching** — Same indicator with same parameters shares a single instance across all consumers.
+- **Script Mode** — Write a quick Python snippet using NumPy arrays; no registration needed. Perfect for prototyping.
+- **Extensible** — Add new indicators by extending the `Indicator` base class with a comprehensive KDJ tutorial in the docs.
+
+📖 **Full documentation:** [Indicator Development Guide](backend/app/indicator/README.md)
+
+---
+
+## Pyne — Pine-style Scripting
+
+**Pyne** brings the simplicity of TradingView's Pine Script to Python. Write indicators using familiar `ta.*`, `input.*`, `plot()` APIs while retaining full Python power.
+
+```python
+# No imports needed — everything is pre-injected
+length = input.int(20, "Period", minval=1)
+src    = input.source(close, "Source")
+
+upper, mid, lower = ta.bb(src, length, 2.0)
+rsi = ta.rsi(close, 14)
+
+p1 = plot(upper, "Upper", color=color.red)
+plot(mid, "Mid", color=color.orange)
+p2 = plot(lower, "Lower", color=color.green)
+fill(p1, p2, color="rgba(59,130,246,0.05)")
+
+marker(rsi > 70, shape="triangle_down", color=color.red, text="OB")
+marker(rsi < 30, shape="triangle_up", color=color.green, text="OS")
+```
+
+### Available Modules
+
+| Module | Description |
+|--------|-------------|
+| `ta.*` | 30+ technical analysis functions — SMA, EMA, RSI, MACD, Bollinger Bands, ATR, Stochastic, ADX, Supertrend, Keltner, Donchian, and more |
+| `input.*` | Parameter declarations — `int`, `float`, `bool`, `source`, `color`, `string` with validation |
+| `plot()`, `bar()`, `hline()`, `fill()`, `marker()`, `bgcolor()`, `barcolor()` | Rich drawing functions for lines, histograms, fills, markers, and coloring |
+| `color.*` | Color constants and `color.new()` transparency helper |
+| `math.*` | Array-aware math functions |
+| Utilities | `crossover`, `crossunder`, `highest`, `lowest`, `change`, `pivothigh`, `pivotlow`, `barssince`, `valuewhen`, etc. |
+
+📖 **Full documentation:** [Pyne Library Reference](backend/app/indicator/pyne/README.md)
+
+---
+
+## Frontend Features
+
+The React frontend is built on **Lightweight Charts v5** with extensive customizations:
+
+- **Multi-Pane Chart** — Price chart, volume pane, and oscillator sub-panes with draggable resizers.
+- **Drawing Tools** — Freehand pen, straight-line, and text annotation tools with persistent storage.
+- **Indicator Editor** — Full-featured code editor with Pyne syntax highlighting, powered by Monaco-style editing.
+- **Indicator Panel** — Browse and add built-in indicators or write custom scripts with live preview.
+- **Settings Modal** — Configure chart appearance, data source, and connection parameters.
+- **Infinite Scroll History** — Seamless left-scroll to load historical data on demand, backed by the backfill engine.
+- **Real-time WebSocket Updates** — Live candlestick updates with multiplexed multi-interval streaming.
+
+---
+
+## Project Structure
+
+```
+CandleScope/
+├── README.md / README_zh.md              # Project documentation (EN/CN)
+├── API.md / API_zh.md                    # REST & WebSocket API reference (EN/CN)
+├── LICENSE                               # Apache 2.0
+│
+├── backend/                              # FastAPI backend & data engine
+│   ├── requirements.txt
+│   └── app/
+│       ├── main.py                       # Application entry point
+│       ├── api/v1/                       # REST & WebSocket endpoints
+│       │   ├── klines.py                 #   K-line data endpoints
+│       │   ├── indicators.py             #   Indicator compute/CRUD endpoints
+│       │   ├── stream.py                 #   WebSocket streaming
+│       │   └── settings.py               #   User settings
+│       ├── core/                         # Configuration & market definitions
+│       ├── realtime/                     # WebSocket stream hub
+│       ├── data_engine/                  # 📦 Multi-layered data engine
+│       │   ├── data_manager/             #   Central facade (cache + query + events)
+│       │   ├── ingestion/                #   6-layer real-time market data pipeline
+│       │   ├── bar_aggregator/           #   Custom interval synthesizer
+│       │   ├── backfill/                 #   Historical gap detection & repair
+│       │   ├── collectors/               #   Exchange-specific data fetchers
+│       │   ├── services/                 #   K-line aggregation & caching services
+│       │   └── storage/                  #   SQLite persistence layer
+│       └── indicator/                    # 📦 Indicator computation engine
+│           ├── base.py                   #   Indicator abstract base class
+│           ├── engine.py                 #   Dispatch, caching & lifecycle
+│           ├── registry.py               #   Global indicator registry
+│           ├── dependency.py             #   Indicator chaining support
+│           ├── indicators/               #   Built-in implementations (MA, EMA, MACD, RSI, BOLL, ATR)
+│           └── pyne/                     #   Pine Script–style Python library
+│               ├── ta.py                 #     Technical analysis functions
+│               ├── input.py              #     Parameter declarations
+│               ├── plot.py               #     Drawing functions
+│               ├── color.py              #     Color constants
+│               └── runtime.py            #     Script execution engine
+│
+└── frontend/                             # React + Vite frontend
+    └── src/
+        ├── App.jsx                       # Main application shell
+        ├── components/
+        │   ├── ChartPane.jsx             #   Single chart pane
+        │   ├── ChartWidget.jsx           #   Lightweight Charts wrapper
+        │   ├── MultiPaneChart.jsx         #   Multi-pane layout manager
+        │   ├── PaneResizer.jsx           #   Draggable pane dividers
+        │   ├── DrawingToolbar.jsx        #   Drawing tool controls
+        │   ├── IndicatorEditor.jsx       #   Code editor for custom indicators
+        │   ├── IndicatorPanel.jsx        #   Indicator browser & configurator
+        │   ├── SettingsModal.jsx         #   Settings dialog
+        │   └── primitives/              #   Custom chart drawing primitives
+        ├── hooks/                        # React hooks (useDrawing, useIndicators)
+        ├── services/                     # API clients & storage helpers
+        └── editor/                       # Pyne language support for editor
+```
+
+### Data Engine Sub-Module Documentation
+
+| Module | Description | Docs |
+|--------|-------------|------|
+| **Data Manager** | Central facade for querying, caching, and stream coordination | [EN](backend/app/data_engine/data_manager/README.md) · [中文](backend/app/data_engine/data_manager/README_zh.md) |
+| **Ingestion Layer** | 6-layer pipeline for real-time WebSocket market data via Binance | [EN](backend/app/data_engine/ingestion/README.md) · [中文](backend/app/data_engine/ingestion/README_zh.md) |
+| **Bar Aggregator** | Real-time custom interval synthesizer (e.g., 45m, 3h) | [EN](backend/app/data_engine/bar_aggregator/README.md) · [中文](backend/app/data_engine/bar_aggregator/README_zh.md) |
+| **Backfill Engine** | Intelligent historical data gap detection and multi-threaded backfilling | [EN](backend/app/data_engine/backfill/README.md) · [中文](backend/app/data_engine/backfill/README_zh.md) |
+
+### Indicator Sub-Module Documentation
+
+| Module | Description | Docs |
+|--------|-------------|------|
+| **Indicator Engine** | Incremental computation engine with built-in indicators and extensible architecture | [EN](backend/app/indicator/README.md) · [中文](backend/app/indicator/README_zh.md) |
+| **Pyne Library** | Pine Script–inspired Python library for rapid indicator development | [EN](backend/app/indicator/pyne/README.md) · [中文](backend/app/indicator/pyne/README_zh.md) |
+
+---
+
+## API Documentation
+
+Full REST and WebSocket API reference is available in a separate document:
+
+- 📖 [**API Reference (English)**](API.md)
+- 📖 [**API 文档 (中文)**](API_zh.md)
+
+**Key endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/klines` | GET | Fetch K-line data (cache-first) |
+| `/api/v1/klines/history/before` | GET | Paginated historical scroll |
+| `/api/v1/stream/multi` | WebSocket | Multiplexed real-time K-line stream |
+| `/api/v1/indicators/compute` | POST | Execute indicator computation |
+| `/api/v1/indicators/registry` | GET | List all available indicators |
+
+---
 
 ## Notes
 
 - If Binance cannot be reached (network/proxy), the app falls back to mock data.
 - Local DB files are ignored in git via `.gitignore`.
+- The indicator script sandbox executes user code in an isolated thread for safety.
+
+---
 
 ## Acknowledgments
 

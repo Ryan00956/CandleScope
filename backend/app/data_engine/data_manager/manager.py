@@ -431,7 +431,7 @@ class DataManager:
 
         info = await self.coordinator.ensure_stream(symbol, interval)
 
-        if not is_standard_interval(interval) and not had_stream:
+        if not is_standard_interval(interval):
             try:
                 await self._seed_custom_interval(symbol, interval)
             except Exception as exc:
@@ -440,7 +440,8 @@ class DataManager:
                     symbol, interval, exc,
                     exc_info=True,
                 )
-            self._trigger_custom_tail_repair(symbol, interval)
+            if not had_stream:
+                self._trigger_custom_tail_repair(symbol, interval)
 
         return info
 
@@ -632,6 +633,7 @@ class DataManager:
         only see subsequent realtime base bars and incorrectly treat the
         first seen component as the bucket's open.
         """
+        symbol = symbol.upper()
         pipeline = self.bar_aggregator.get_pipeline(interval)
         storage = self.query_engine._storage
         if pipeline is None or storage is None:
@@ -643,7 +645,7 @@ class DataManager:
         bucket_start_ms = pipeline.time_bucket.compute_bucket(now_ms)
 
         rows = storage.query_bars(
-            symbol=symbol.upper(),
+            symbol=symbol,
             interval=base_interval,
             start_ms=bucket_start_ms,
             end_ms=now_ms,
@@ -682,13 +684,29 @@ class DataManager:
             return
 
         rows = sorted(rows_by_open_time.values(), key=lambda row: int(row["open_time"]))
+        current_state = pipeline.bar_state.get_active(symbol, bucket_start_ms)
+        if self._custom_bucket_is_synced(current_state, rows):
+            # Keep the cache aligned with the verified in-memory state so HTTP
+            # latest queries and WS updates continue from the same last bar.
+            self.cache.upsert(
+                SeriesKey(symbol, interval),
+                BarData.from_bar_state(current_state),
+            )
+            return
+
+        # The current custom bucket may already exist in memory from a previous
+        # subscriber. If that state drifted from the authoritative 1m base bars,
+        # the next realtime tick would immediately overwrite the correct HTTP
+        # snapshot with a bad last candle. Drop only the current bucket and
+        # rebuild it from the base components.
+        pipeline.bar_state.expire_bar(symbol, bucket_start_ms)
 
         for row in rows:
             open_time_ms = int(row["open_time"])
             close_time_ms = int(row.get("close_time", open_time_ms + (base_seconds * 1000) - 1))
             is_closed = close_time_ms < now_ms
             bar_input = BarInput(
-                symbol=symbol.upper(),
+                symbol=symbol,
                 source_interval=base_interval,
                 open_time_ms=open_time_ms,
                 close_time_ms=close_time_ms,
@@ -706,8 +724,56 @@ class DataManager:
                 sequence=open_time_ms,
             )
             await self.bar_aggregator._handle_bar_input(
-                symbol.upper(), interval, bar_input,
+                symbol, interval, bar_input,
             )
+
+        rebuilt_state = pipeline.bar_state.get_active(symbol, bucket_start_ms)
+        if rebuilt_state is not None:
+            # Seed replay emits many UPDATED events in the same event loop turn.
+            # Those are subject to publisher throttling, so the cache may only
+            # observe an early partial snapshot unless we explicitly persist the
+            # final rebuilt state here.
+            self.cache.upsert(
+                SeriesKey(symbol, interval),
+                BarData.from_bar_state(rebuilt_state),
+            )
+
+    @staticmethod
+    def _custom_bucket_is_synced(state: BarState | None, rows: list[dict]) -> bool:
+        """Check whether the in-memory custom bar still matches its 1m parts."""
+        if state is None or not rows:
+            return False
+
+        first = rows[0]
+        last = rows[-1]
+        expected = {
+            "open": float(first["open"]),
+            "high": max(float(row["high"]) for row in rows),
+            "low": min(float(row["low"]) for row in rows),
+            "close": float(last["close"]),
+            "volume": round(sum(float(row.get("volume", 0) or 0) for row in rows), 8),
+            "quote_volume": round(sum(float(row.get("quote_volume", 0) or 0) for row in rows), 8),
+            "trades": sum(int(row.get("trades", 0) or 0) for row in rows),
+            "taker_buy_base": round(sum(float(row.get("taker_buy_base", 0) or 0) for row in rows), 8),
+            "taker_buy_quote": round(sum(float(row.get("taker_buy_quote", 0) or 0) for row in rows), 8),
+            "components": len(rows),
+        }
+
+        def _same(a: float, b: float, tol: float = 1e-8) -> bool:
+            return abs(float(a) - float(b)) <= tol
+
+        return (
+            _same(state.open, expected["open"]) and
+            _same(state.high, expected["high"]) and
+            _same(state.low, expected["low"]) and
+            _same(state.close, expected["close"]) and
+            _same(state.volume, expected["volume"]) and
+            _same(state.quote_volume, expected["quote_volume"]) and
+            state.trades == expected["trades"] and
+            _same(state.taker_buy_base, expected["taker_buy_base"]) and
+            _same(state.taker_buy_quote, expected["taker_buy_quote"]) and
+            state.tick_count == expected["components"]
+        )
 
     def _trigger_custom_tail_repair(self, symbol: str, interval: str) -> None:
         """Force a recent custom-interval rebuild to overwrite stale rows.

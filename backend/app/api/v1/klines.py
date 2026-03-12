@@ -75,7 +75,7 @@ def _resolve_interval(interval: str) -> dict:
         }
 
     custom_seconds = parse_custom_interval(interval)
-    base_interval, factor = find_best_base_interval(custom_seconds)
+    base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
     return {
         "is_custom": True,
         "custom_seconds": custom_seconds,
@@ -380,7 +380,7 @@ async def _legacy_get_klines(symbol: str, interval: str, limit: int) -> dict:
         if payload["data"]:
             data = payload["data"]
             if res["is_custom"]:
-                data = aggregate_klines(data, res["custom_seconds"])
+                data = aggregate_klines(data, res["custom_seconds"], interval=interval)
                 data = data[-limit:]
             return {
                 "symbol": symbol.upper(),
@@ -397,7 +397,7 @@ async def _legacy_get_klines(symbol: str, interval: str, limit: int) -> dict:
 
     mock_data = generate_mock_klines(symbol=symbol, interval=res["base_interval"], count=fetch_limit)
     if res["is_custom"]:
-        mock_data = aggregate_klines(mock_data, res["custom_seconds"])
+        mock_data = aggregate_klines(mock_data, res["custom_seconds"], interval=interval)
         mock_data = mock_data[-limit:]
     return {
         "symbol": symbol.upper(),
@@ -426,7 +426,7 @@ async def _legacy_get_latest(symbol: str, interval: str, limit: int) -> dict:
         if payload["data"]:
             data = payload["data"]
             if res["is_custom"]:
-                data = aggregate_klines(data, res["custom_seconds"])
+                data = aggregate_klines(data, res["custom_seconds"], interval=interval)
                 data = data[-limit:]
             return {
                 "symbol": symbol.upper(),
@@ -443,7 +443,7 @@ async def _legacy_get_latest(symbol: str, interval: str, limit: int) -> dict:
 
     mock_data = generate_mock_klines(symbol=symbol, interval=res["base_interval"], count=fetch_limit)
     if res["is_custom"]:
-        mock_data = aggregate_klines(mock_data, res["custom_seconds"])
+        mock_data = aggregate_klines(mock_data, res["custom_seconds"], interval=interval)
         mock_data = mock_data[-limit:]
     return {
         "symbol": symbol.upper(),
@@ -469,7 +469,7 @@ async def _legacy_get_history(symbol: str, interval: str, days: int) -> dict:
         )
         data = payload.get("data", [])
         if res["is_custom"] and data:
-            data = aggregate_klines(data, res["custom_seconds"])
+            data = aggregate_klines(data, res["custom_seconds"], interval=interval)
         if data:
             return {
                 "symbol": symbol.upper(),
@@ -493,7 +493,7 @@ async def _legacy_get_history(symbol: str, interval: str, days: int) -> dict:
         count=count,
     )
     if res["is_custom"]:
-        mock_data = aggregate_klines(mock_data, res["custom_seconds"])
+        mock_data = aggregate_klines(mock_data, res["custom_seconds"], interval=interval)
     return {
         "symbol": symbol.upper(),
         "interval": interval,
@@ -523,7 +523,7 @@ async def _legacy_get_before(
             before_seconds=before, bars=needed_base,
             max_batches=max_batches,
         )
-        data = aggregate_klines(payload["data"], res["custom_seconds"])
+        data = aggregate_klines(payload["data"], res["custom_seconds"], interval=interval)
     else:
         payload = await asyncio.to_thread(
             get_more_left, symbol=symbol,

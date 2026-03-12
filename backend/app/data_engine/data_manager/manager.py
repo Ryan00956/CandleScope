@@ -805,30 +805,46 @@ class DataManager:
         # Calculate how many base bars we SHOULD have by now in the
         # current bucket (past minutes only — the current minute may
         # not have closed yet).
-        elapsed_in_bucket_ms = now_ms - bucket_start_ms
-        expected_closed_components = max(0, int(elapsed_in_bucket_ms / (base_seconds * 1000)))
-        actual_in_bucket = sum(
-            1 for ot in rows_by_open_time
-            if ot >= bucket_start_ms and ot < now_ms
-        )
-        if expected_closed_components > 0 and actual_in_bucket < expected_closed_components:
-            missing = expected_closed_components - actual_in_bucket
-            logger.warning(
-                "Custom seed %s@%s: expected %d base bars in current bucket "
-                "but found %d (%d missing). Triggering base backfill.",
-                symbol, interval, expected_closed_components,
-                actual_in_bucket, missing,
+        #
+        # For monthly intervals (2M, 3M, etc.) the bucket can span
+        # 60+ days (86,400+ base bars).  A completeness check at seed
+        # time would almost always find "missing" bars and trigger a
+        # massive backfill that in turn re-triggers seeding — creating
+        # an infinite loop.  Skip the check for monthly intervals;
+        # the normal query → backfill pipeline will fill gaps lazily.
+        from app.core.market import is_monthly_interval as _is_monthly
+        _skip_completeness = _is_monthly(interval)
+
+        if not _skip_completeness:
+            elapsed_in_bucket_ms = now_ms - bucket_start_ms
+            expected_closed_components = max(0, int(elapsed_in_bucket_ms / (base_seconds * 1000)))
+            actual_in_bucket = sum(
+                1 for ot in rows_by_open_time
+                if ot >= bucket_start_ms and ot < now_ms
             )
-            # Trigger backfill for the base interval to fill the gap
-            if self.query_engine._backfill_trigger:
-                try:
-                    self.query_engine._backfill_trigger(
-                        symbol, base_interval, bucket_start_ms, now_ms,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to trigger base backfill during custom seed: %s", exc,
-                    )
+            if expected_closed_components > 0 and actual_in_bucket < expected_closed_components:
+                missing = expected_closed_components - actual_in_bucket
+                logger.warning(
+                    "Custom seed %s@%s: expected %d base bars in current bucket "
+                    "but found %d (%d missing). Triggering base backfill.",
+                    symbol, interval, expected_closed_components,
+                    actual_in_bucket, missing,
+                )
+                # Trigger backfill for the base interval to fill the gap
+                if self.query_engine._backfill_trigger:
+                    try:
+                        self.query_engine._backfill_trigger(
+                            symbol, base_interval, bucket_start_ms, now_ms,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to trigger base backfill during custom seed: %s", exc,
+                        )
+        else:
+            logger.debug(
+                "Custom seed %s@%s: skipping completeness check for monthly interval",
+                symbol, interval,
+            )
 
         if not rows_by_open_time:
             return

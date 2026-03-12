@@ -166,9 +166,36 @@ async def _dm_multi_stream(
     # Queue for forwarding events
     event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
     subscriptions = []  # list of SubscriptionHandle
+    _ws_closed = False  # flag to avoid sending after close
+
+    async def _safe_send_json(data: dict) -> bool:
+        """Send JSON to the WebSocket, returning False if the connection is closed."""
+        nonlocal _ws_closed
+        if _ws_closed:
+            return False
+        try:
+            await websocket.send_json(data)
+            return True
+        except (RuntimeError, Exception):
+            _ws_closed = True
+            return False
+
+    async def _safe_send_text(data: str) -> bool:
+        """Send text to the WebSocket, returning False if the connection is closed."""
+        nonlocal _ws_closed
+        if _ws_closed:
+            return False
+        try:
+            await websocket.send_text(data)
+            return True
+        except (RuntimeError, Exception):
+            _ws_closed = True
+            return False
 
     async def _event_callback(event):
         """Push events into the queue for the forwarder."""
+        if _ws_closed:
+            return
         try:
             # Handle backfill completion events specially
             if event.event_type == DataEventType.BACKFILL_COMPLETED:
@@ -203,39 +230,41 @@ async def _dm_multi_stream(
     try:
         # Task: forward queued events to WebSocket
         async def _forwarder():
-            while True:
+            nonlocal _ws_closed
+            while not _ws_closed:
                 msg = await event_queue.get()
-                try:
-                    await websocket.send_json(msg)
-                except Exception:
+                if not await _safe_send_json(msg):
                     return
 
         forwarder_task = asyncio.create_task(_forwarder(), name="ws_forwarder")
 
         # Main loop: read client commands
         try:
-            while True:
+            while not _ws_closed:
                 raw = await websocket.receive_text()
                 stripped = raw.strip().lower()
 
                 if stripped == "ping":
-                    await websocket.send_text("pong")
+                    if not await _safe_send_text("pong"):
+                        break
                     continue
 
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
-                    await websocket.send_json({"type": "error", "detail": "Invalid JSON"})
+                    if not await _safe_send_json({"type": "error", "detail": "Invalid JSON"}):
+                        break
                     continue
 
                 action = msg.get("action", "").lower()
                 intervals = msg.get("intervals", [])
 
                 if not isinstance(intervals, list) or not intervals:
-                    await websocket.send_json({
+                    if not await _safe_send_json({
                         "type": "error",
                         "detail": "intervals must be a non-empty list",
-                    })
+                    }):
+                        break
                     continue
 
                 # Validate intervals (support both native and custom)
@@ -243,16 +272,17 @@ async def _dm_multi_stream(
                 invalid = [i for i in intervals if not _validate_ws_interval(i)]
 
                 if invalid:
-                    await websocket.send_json({
+                    await _safe_send_json({
                         "type": "warning",
                         "detail": f"Skipped invalid intervals: {invalid}",
                     })
 
                 if not valid:
-                    await websocket.send_json({
+                    if not await _safe_send_json({
                         "type": "error",
                         "detail": "No valid intervals provided",
-                    })
+                    }):
+                        break
                     continue
 
                 if action == "subscribe":
@@ -273,7 +303,7 @@ async def _dm_multi_stream(
                             subscriptions.append(handle)
                             active_intervals.add(iv)
 
-                    await websocket.send_json({
+                    await _safe_send_json({
                         "type": "subscribed",
                         "symbol": symbol,
                         "intervals": valid,
@@ -282,20 +312,20 @@ async def _dm_multi_stream(
                 elif action == "unsubscribe":
                     for iv in valid:
                         active_intervals.discard(iv)
-                    await websocket.send_json({
+                    await _safe_send_json({
                         "type": "unsubscribed",
                         "symbol": symbol,
                         "intervals": valid,
                     })
 
                 else:
-                    await websocket.send_json({
+                    await _safe_send_json({
                         "type": "error",
                         "detail": f"Unknown action: {action}",
                     })
 
         except WebSocketDisconnect:
-            pass
+            _ws_closed = True
 
         forwarder_task.cancel()
         try:
@@ -304,6 +334,7 @@ async def _dm_multi_stream(
             pass
 
     finally:
+        _ws_closed = True
         # Clean up all subscriptions
         for handle in subscriptions:
             try:

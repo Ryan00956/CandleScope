@@ -33,9 +33,13 @@ from typing import Any, Callable
 from datetime import datetime, timezone
 
 from app.core.market import (
+    aggregate_rows_by_month,
+    compute_month_bucket,
     find_best_base_interval,
     is_custom_interval,
+    is_monthly_interval,
     parse_custom_interval,
+    parse_monthly_count,
 )
 
 from .cache import BarCache
@@ -442,11 +446,18 @@ class QueryEngine:
             )
 
         effective_limit = min(limit or self._cfg.default_limit, self._cfg.max_limit)
-        base_interval, factor = find_best_base_interval(custom_seconds)
+        base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
         custom_ms = custom_seconds * 1000
+
+        # For monthly intervals, align start to calendar-month boundaries
+        month_count = parse_monthly_count(interval)
         aligned_start_ms = None
         if start_ms is not None:
-            aligned_start_ms = (start_ms // custom_ms) * custom_ms
+            if month_count is not None:
+                from app.core.market import compute_month_bucket_ms
+                aligned_start_ms = compute_month_bucket_ms(start_ms, month_count)
+            else:
+                aligned_start_ms = (start_ms // custom_ms) * custom_ms
 
         if start_ms is not None and end_ms is not None:
             estimated_custom = max(1, ((end_ms - aligned_start_ms) // custom_ms) + 2)
@@ -517,10 +528,18 @@ class QueryEngine:
             )
 
         effective_limit = min(limit, self._cfg.max_limit)
-        base_interval, factor = find_best_base_interval(custom_seconds)
+        base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
         custom_ms = custom_seconds * 1000
-        last_bucket_start_ms = ((before_ms - 1) // custom_ms) * custom_ms
-        base_end_ms = last_bucket_start_ms + custom_ms - 1
+
+        # For monthly intervals, align to calendar-month boundaries
+        month_count = parse_monthly_count(interval)
+        if month_count is not None:
+            from app.core.market import compute_month_bucket_ms, next_month_bucket
+            last_bucket_start_ms = compute_month_bucket_ms(before_ms - 1, month_count)
+            base_end_ms = next_month_bucket(last_bucket_start_ms // 1000, month_count) * 1000 - 1
+        else:
+            last_bucket_start_ms = ((before_ms - 1) // custom_ms) * custom_ms
+            base_end_ms = last_bucket_start_ms + custom_ms - 1
         base_limit = (effective_limit + 2) * factor
 
         base_result = self.query(
@@ -641,15 +660,27 @@ class QueryEngine:
         start_ms: int | None = None,
         end_ms: int | None = None,
     ) -> list[BarData]:
-        """Aggregate standard-interval bars into a custom interval."""
+        """Aggregate standard-interval bars into a custom interval.
+
+        For monthly intervals (e.g. '2M', '3M'), uses calendar-month
+        aligned bucketing instead of fixed-duration bucketing.
+        """
         custom_seconds = parse_custom_interval(interval)
         if custom_seconds is None or not base_bars:
             return []
 
-        aggregated = _aggregate_rows_to_interval(
-            [bar.to_dict() for bar in base_bars],
-            custom_seconds,
-        )
+        month_count = parse_monthly_count(interval)
+        if month_count is not None:
+            # Use calendar-month aligned aggregation
+            aggregated = aggregate_rows_by_month(
+                [bar.to_dict() for bar in base_bars],
+                months=month_count,
+            )
+        else:
+            aggregated = _aggregate_rows_to_interval(
+                [bar.to_dict() for bar in base_bars],
+                custom_seconds,
+            )
         result = [BarData.from_dict(row) for row in aggregated]
         if start_ms is not None:
             result = [bar for bar in result if bar.time_ms >= start_ms]

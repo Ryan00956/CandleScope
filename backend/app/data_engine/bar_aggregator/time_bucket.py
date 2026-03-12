@@ -246,27 +246,51 @@ class MonthlyBucketCalculator:
     Unlike fixed-duration bucketing (30 days = 2,592,000,000 ms), this
     calculator aligns to the 1st of each month at 00:00:00 UTC.
 
+    Supports multi-month buckets (e.g. 2M, 3M) by grouping months
+    from the start of the year.  For example, with ``months=3``:
+      Q1 = Jan–Mar, Q2 = Apr–Jun, Q3 = Jul–Sep, Q4 = Oct–Dec.
+
     This matches Binance's native 1M kline semantics where each monthly
     candle starts at the beginning of the calendar month.
 
     Implements the ``BucketCalculator`` protocol.
+
+    Args:
+        months: Number of calendar months per bucket (default 1).
     """
 
+    def __init__(self, months: int = 1) -> None:
+        if months <= 0:
+            raise ValueError(f"months must be positive, got {months}")
+        self._months = months
+
     def compute_bucket(self, open_time_ms: int) -> int:
-        """Return the start of the calendar month (UTC) containing open_time_ms."""
+        """Return the start of the calendar-month bucket (UTC) containing open_time_ms.
+
+        For multi-month buckets, aligns to year-start: N-month groups
+        always begin from January.
+        """
         dt = datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc)
-        month_start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # Zero-based month index from January
+        month_index = dt.month - 1  # 0..11
+        # Which N-month group does this fall in?
+        group_index = month_index // self._months
+        bucket_month = group_index * self._months + 1  # 1-based month
+        month_start = dt.replace(
+            month=bucket_month, day=1,
+            hour=0, minute=0, second=0, microsecond=0,
+        )
         return int(month_start.timestamp() * 1000)
 
     def compute_bucket_range(self, bucket_start_ms: int) -> tuple[int, int]:
-        """Return (month_start_ms, next_month_start_ms) for the given bucket."""
+        """Return (bucket_start_ms, next_bucket_start_ms) for the given bucket."""
         dt = datetime.fromtimestamp(bucket_start_ms / 1000, tz=timezone.utc)
         month_start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        # Advance to next month
-        if month_start.month == 12:
-            next_month = month_start.replace(year=month_start.year + 1, month=1)
-        else:
-            next_month = month_start.replace(month=month_start.month + 1)
+        # Advance by N months
+        new_month = month_start.month + self._months
+        new_year = month_start.year + (new_month - 1) // 12
+        new_month = (new_month - 1) % 12 + 1
+        next_bucket = month_start.replace(year=new_year, month=new_month)
         start_ms = int(month_start.timestamp() * 1000)
-        end_ms = int(next_month.timestamp() * 1000)
+        end_ms = int(next_bucket.timestamp() * 1000)
         return (start_ms, end_ms)

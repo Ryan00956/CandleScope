@@ -536,7 +536,7 @@ async def repair_custom_storage(request: Request) -> dict:
 
             repair_start_open = int(closed_existing[0]["open_time"])
             repair_end_open = int(closed_existing[-1]["open_time"])
-            base_interval, _ = find_best_base_interval(custom_seconds)
+            base_interval, _ = find_best_base_interval(custom_seconds, interval=interval)
             result["base_interval"] = base_interval
 
             base_ok, gap_runs, base_errors = await _ensure_base_series_complete(

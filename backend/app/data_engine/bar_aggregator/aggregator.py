@@ -105,10 +105,14 @@ class IntervalPipeline:
 
         alignment = AlignmentMode(config.default_alignment_mode)
 
-        # Monthly intervals need calendar-based bucketing, not fixed 30-day
+        # Monthly intervals need calendar-based bucketing, not fixed 30-day.
+        # This applies to ALL month-unit intervals (1M, 2M, 3M, etc.),
+        # not just the standard "1M".
         custom_calc = None
-        if interval == "1M":
-            custom_calc = MonthlyBucketCalculator()
+        if interval.endswith("M") and interval[:-1].isdigit():
+            month_count = int(interval[:-1])
+            if month_count > 0:
+                custom_calc = MonthlyBucketCalculator(months=month_count)
 
         self.time_bucket = TimeBucketEngine(
             interval_ms=interval_ms,

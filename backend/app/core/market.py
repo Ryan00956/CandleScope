@@ -1,4 +1,6 @@
 import re
+import calendar
+from datetime import datetime, timezone
 
 VALID_INTERVALS = [
     "1s",
@@ -93,12 +95,28 @@ _BASE_INTERVALS_ORDERED = [
 ]
 
 
-def find_best_base_interval(custom_seconds: int) -> tuple[str, int]:
+def find_best_base_interval(
+    custom_seconds: int,
+    *,
+    interval: str | None = None,
+) -> tuple[str, int]:
     """Find the largest native exchange interval that divides custom_seconds evenly.
 
     Returns (base_interval_str, aggregation_factor).
     Example: custom_seconds=2700 (45m) -> ("15m", 3)  because 45 / 15 = 3.
+
+    For monthly intervals (2M, 3M, …), always use ``1d`` as the base because
+    calendar months have variable day counts and larger intervals like ``3d``
+    or ``1w`` would produce misaligned or incomplete buckets.
     """
+    # Monthly intervals always use 1d as base — calendar months are variable
+    # length, so larger fixed intervals (3d, 1w) don't align to month boundaries.
+    if interval is not None and is_monthly_interval(interval):
+        # Approximate: use 30 days per month for factor calculation
+        month_count = parse_monthly_count(interval) or 1
+        factor = month_count * 30  # approximate days per bucket
+        return ("1d", factor)
+
     best_interval = "1m"
     best_factor = custom_seconds // 60
 
@@ -178,3 +196,112 @@ def find_optimal_fetch_plan(custom_seconds: int) -> dict:
         "coarse_interval": coarse_interval,
         "coarse_seconds": coarse_seconds,
     }
+
+
+# --------------- Monthly (calendar) interval helpers ---------------
+
+_MONTHLY_RE = re.compile(r"^(\d+)M$")
+
+
+def is_monthly_interval(interval: str) -> bool:
+    """Return True if *interval* uses calendar-month units (e.g. '1M', '2M', '3M')."""
+    return bool(_MONTHLY_RE.match(interval))
+
+
+def parse_monthly_count(interval: str) -> int | None:
+    """Extract the month count from a monthly interval string.
+
+    Returns the number of months, or None if *interval* is not monthly.
+
+    Examples::
+
+        parse_monthly_count("1M")  → 1
+        parse_monthly_count("3M")  → 3
+        parse_monthly_count("5m")  → None  (lowercase 'm' = minutes)
+    """
+    m = _MONTHLY_RE.match(interval)
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n if n > 0 else None
+
+
+def compute_month_bucket(ts_seconds: int, months: int = 1) -> int:
+    """Compute the calendar-month bucket start (UTC) for a unix timestamp.
+
+    Aligns to year-start: N-month groups always begin from January.
+
+    Args:
+        ts_seconds: Unix timestamp in **seconds**.
+        months:     Bucket width in calendar months (e.g. 1, 2, 3).
+
+    Returns:
+        Unix timestamp (seconds) of the bucket start (1st of the month, 00:00 UTC).
+
+    Examples::
+
+        # 2024-03-15 → bucket start for 3M = 2024-01-01
+        compute_month_bucket(1710504000, 3)
+
+        # 2024-05-10 → bucket start for 2M = 2024-05-01
+        compute_month_bucket(1715299200, 2)
+    """
+    dt = datetime.fromtimestamp(ts_seconds, tz=timezone.utc)
+    # Zero-based month index from January
+    month_index = dt.month - 1  # 0..11
+    # Which N-month group does this fall in?
+    group_index = month_index // months
+    bucket_month = group_index * months + 1  # 1-based month
+    bucket_start = dt.replace(month=bucket_month, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return int(bucket_start.timestamp())
+
+
+def compute_month_bucket_ms(ts_ms: int, months: int = 1) -> int:
+    """Same as ``compute_month_bucket`` but with millisecond timestamps."""
+    return compute_month_bucket(ts_ms // 1000, months) * 1000
+
+
+def next_month_bucket(bucket_start_seconds: int, months: int = 1) -> int:
+    """Return the start of the next N-month bucket (seconds)."""
+    dt = datetime.fromtimestamp(bucket_start_seconds, tz=timezone.utc)
+    dt = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # Advance by N months
+    new_month = dt.month + months
+    new_year = dt.year + (new_month - 1) // 12
+    new_month = (new_month - 1) % 12 + 1
+    next_dt = dt.replace(year=new_year, month=new_month)
+    return int(next_dt.timestamp())
+
+
+def aggregate_rows_by_month(
+    base_rows: list[dict],
+    months: int = 1,
+) -> list[dict]:
+    """Aggregate lightweight-chart rows into calendar-month buckets.
+
+    Each element in *base_rows* must have keys:
+        time (unix seconds), open, high, low, close, volume
+
+    Returns a list of aggregated candle dicts sorted by ``time`` ascending.
+    """
+    if not base_rows:
+        return []
+
+    buckets: dict[int, list[dict]] = {}
+    for row in base_rows:
+        ts = row["time"]
+        bucket_start = compute_month_bucket(ts, months)
+        buckets.setdefault(bucket_start, []).append(row)
+
+    result: list[dict] = []
+    for bucket_start in sorted(buckets):
+        rows = sorted(buckets[bucket_start], key=lambda r: r["time"])
+        result.append({
+            "time": bucket_start,
+            "open": rows[0]["open"],
+            "high": max(r["high"] for r in rows),
+            "low": min(r["low"] for r in rows),
+            "close": rows[-1]["close"],
+            "volume": round(sum(r["volume"] for r in rows), 8),
+        })
+    return result

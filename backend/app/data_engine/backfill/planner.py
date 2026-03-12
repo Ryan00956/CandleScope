@@ -327,11 +327,41 @@ class BackfillPlanner:
         """Decompose a custom interval into standard interval components.
 
         Priority:
+          0. Monthly intervals (calendar-month) → use 1d as base
           1. Pre-registered mappings (add_interval_mapping)
           2. User-supplied decomposition function
           3. Algorithmic decomposition per config strategy
         """
         alignment_mode = AlignmentMode(self._cfg.custom_alignment_mode)
+
+        # 0. Monthly intervals (2M, 3M, etc.) use calendar-month alignment
+        #    and cannot be decomposed via fixed-duration arithmetic.
+        #    Use 1d as the base interval — the actual number of days varies
+        #    per bucket, so we estimate conservatively (31 days × months).
+        import re
+        _monthly_match = re.match(r"^(\d+)M$", interval)
+        if _monthly_match:
+            month_count = int(_monthly_match.group(1))
+            # Conservative estimate: 31 days per month
+            estimated_days = month_count * 31
+            day_ms = 86_400_000
+            components = [IntervalComponent(
+                interval="1d",
+                count=estimated_days,
+                duration_ms=day_ms,
+            )]
+            logger.info(
+                "Monthly interval %s: using 1d base with ~%d days per bucket",
+                interval, estimated_days,
+            )
+            return IntervalDecomposition(
+                custom_interval=interval,
+                custom_duration_ms=duration_ms,
+                components=components,
+                is_standard=False,
+                alignment_mode=alignment_mode,
+                alignment_epoch_ms=self._cfg.alignment_epoch_ms,
+            )
 
         # 1. Check pre-registered mappings
         if interval in self._interval_mappings:

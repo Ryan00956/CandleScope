@@ -5,23 +5,46 @@ Given a set of base-interval OHLCV rows (e.g. 1-min candles), this module
 groups them by a custom time window (e.g. 7 min) and produces aggregated
 OHLCV candles using the standard rules:
   O = first Open,  H = max(High),  L = min(Low),  C = last Close,  V = sum(Volume)
+
+For monthly intervals (e.g. '1M', '2M', '3M'), calendar-month aligned
+bucketing is used instead of fixed-duration (30-day) bucketing.
 """
 from __future__ import annotations
+
+from app.core.market import (
+    aggregate_rows_by_month,
+    compute_month_bucket,
+    is_monthly_interval,
+    parse_monthly_count,
+)
 
 
 def aggregate_klines(
     base_rows: list[dict],
     custom_interval_seconds: int,
+    *,
+    interval: str | None = None,
 ) -> list[dict]:
     """Aggregate *base_rows* into candles of width *custom_interval_seconds*.
 
     Each element in *base_rows* must have keys:
         time (unix seconds), open, high, low, close, volume
 
+    For monthly intervals (detected via the optional *interval* parameter,
+    e.g. '1M', '2M', '3M'), calendar-month aligned bucketing is used
+    instead of fixed-duration (30-day) bucketing.  If *interval* is not
+    provided, the function also checks whether *custom_interval_seconds*
+    corresponds to a 30-day multiple and falls back to fixed bucketing.
+
     Returns a list of aggregated candle dicts sorted by ``time`` ascending.
     """
     if not base_rows:
         return []
+
+    # Check if this is a monthly interval — use calendar-month alignment
+    month_count = parse_monthly_count(interval) if interval else None
+    if month_count is not None:
+        return aggregate_rows_by_month(base_rows, months=month_count)
 
     bucket_width = custom_interval_seconds
 
@@ -54,15 +77,23 @@ def aggregate_realtime_into_last(
     current_custom_candle: dict | None,
     incoming: dict,
     custom_interval_seconds: int,
+    *,
+    interval: str | None = None,
 ) -> tuple[dict, bool]:
     """Merge a single incoming tick/candle into the custom candle being formed.
 
     Returns (updated_candle, is_new_candle).
     If the incoming data falls into a new time bucket, a brand new candle is
     started and ``is_new_candle`` is True.
+
+    For monthly intervals (via *interval* param), uses calendar-month alignment.
     """
-    bucket_width = custom_interval_seconds
-    bucket_start = (incoming["time"] // bucket_width) * bucket_width
+    month_count = parse_monthly_count(interval) if interval else None
+    if month_count is not None:
+        bucket_start = compute_month_bucket(incoming["time"], month_count)
+    else:
+        bucket_width = custom_interval_seconds
+        bucket_start = (incoming["time"] // bucket_width) * bucket_width
 
     if current_custom_candle is None or bucket_start != current_custom_candle["time"]:
         # New candle

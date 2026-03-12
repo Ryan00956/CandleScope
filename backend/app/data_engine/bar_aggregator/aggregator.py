@@ -79,7 +79,7 @@ from .models import (
     is_standard_interval,
 )
 from .router import EventRouter
-from .time_bucket import TimeBucketEngine
+from .time_bucket import TimeBucketEngine, MonthlyBucketCalculator
 from .bar_state import BarStateEngine
 from .finalizer import Finalizer
 from .publisher import BarAggregatorPublisher
@@ -104,10 +104,17 @@ class IntervalPipeline:
         self.interval_ms = interval_ms
 
         alignment = AlignmentMode(config.default_alignment_mode)
+
+        # Monthly intervals need calendar-based bucketing, not fixed 30-day
+        custom_calc = None
+        if interval == "1M":
+            custom_calc = MonthlyBucketCalculator()
+
         self.time_bucket = TimeBucketEngine(
             interval_ms=interval_ms,
             alignment=alignment,
             epoch_ms=config.alignment_epoch_ms,
+            custom_calculator=custom_calc,
         )
         self.bar_state = BarStateEngine(config, self.time_bucket, interval)
         self.finalizer = Finalizer(config, self.time_bucket, interval)

@@ -41,7 +41,7 @@ from .models import (
     parse_interval_ms,
 )
 from .router import EventRouter
-from .time_bucket import TimeBucketEngine
+from .time_bucket import TimeBucketEngine, MonthlyBucketCalculator
 from .bar_state import BarStateEngine, StandardOHLCVMerge
 from .finalizer import (
     Finalizer,
@@ -62,6 +62,7 @@ __all__ = [
     "EventRouter",
     # L2
     "TimeBucketEngine",
+    "MonthlyBucketCalculator",
     # L3
     "BarStateEngine",
     "StandardOHLCVMerge",

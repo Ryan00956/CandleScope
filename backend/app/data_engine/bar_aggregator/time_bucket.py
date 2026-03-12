@@ -25,7 +25,9 @@ volume-based, etc.).
 """
 from __future__ import annotations
 
+import calendar
 import logging
+from datetime import datetime, timezone
 
 from .models import AlignmentMode, BucketCalculator
 
@@ -231,3 +233,40 @@ class TimeBucketEngine:
         if self._alignment == AlignmentMode.NONE:
             return 0
         return 0
+
+
+# ═══════════════════════════════════════════════════════════════
+#  MonthlyBucketCalculator — calendar-month alignment for 1M
+# ═══════════════════════════════════════════════════════════════
+
+
+class MonthlyBucketCalculator:
+    """BucketCalculator that aligns buckets to calendar month boundaries.
+
+    Unlike fixed-duration bucketing (30 days = 2,592,000,000 ms), this
+    calculator aligns to the 1st of each month at 00:00:00 UTC.
+
+    This matches Binance's native 1M kline semantics where each monthly
+    candle starts at the beginning of the calendar month.
+
+    Implements the ``BucketCalculator`` protocol.
+    """
+
+    def compute_bucket(self, open_time_ms: int) -> int:
+        """Return the start of the calendar month (UTC) containing open_time_ms."""
+        dt = datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc)
+        month_start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return int(month_start.timestamp() * 1000)
+
+    def compute_bucket_range(self, bucket_start_ms: int) -> tuple[int, int]:
+        """Return (month_start_ms, next_month_start_ms) for the given bucket."""
+        dt = datetime.fromtimestamp(bucket_start_ms / 1000, tz=timezone.utc)
+        month_start = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # Advance to next month
+        if month_start.month == 12:
+            next_month = month_start.replace(year=month_start.year + 1, month=1)
+        else:
+            next_month = month_start.replace(month=month_start.month + 1)
+        start_ms = int(month_start.timestamp() * 1000)
+        end_ms = int(next_month.timestamp() * 1000)
+        return (start_ms, end_ms)

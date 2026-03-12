@@ -442,6 +442,26 @@ class DataManager:
                 )
             if not had_stream:
                 self._trigger_custom_tail_repair(symbol, interval)
+        elif not had_stream:
+            # ── Seed standard interval from storage/cache ────
+            # On second+ startup, prewarm has loaded historical bars
+            # into cache.  The BarAggregator's _active state is empty.
+            # When the first realtime kline arrives, the aggregator
+            # creates a brand-new BarState with only that single tick's
+            # data, which then overwrites the complete bar in cache via
+            # cache.upsert().  This produces incorrect OHLC (false gaps).
+            #
+            # To prevent this, we seed the BarAggregator with the
+            # currently-forming bar's data from storage so that the
+            # first realtime tick merges into the existing state.
+            try:
+                await self._seed_standard_interval(symbol, interval)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to seed standard interval %s@%s: %s",
+                    symbol, interval, exc,
+                    exc_info=True,
+                )
 
         return info
 
@@ -502,12 +522,49 @@ class DataManager:
         Called by the backfill module after historical data is fetched
         and reconciled.  Bars are loaded into cache and a completion
         event is emitted.
+
+        After loading, the cache is checked for remaining interior gaps.
+        If gaps persist (e.g. partial backfill), a follow-up backfill is
+        triggered for each gap range.
         """
         if not bars:
             return
 
         key = SeriesKey(symbol, interval)
         self.cache.bulk_load(key, bars)
+
+        # ── Post-backfill gap check ──────────────────────────
+        # After merging backfilled bars into cache, verify the series
+        # is gap-free.  If gaps remain, trigger targeted backfill for
+        # each gap so the next query returns complete data.
+        try:
+            interval_secs = parse_custom_interval(interval) or 60
+            threshold = interval_secs * 1.5
+            # Check the region covered by the backfilled bars
+            all_cached = self.cache.query(
+                key,
+                start_time=bars[0].time,
+                end_time=bars[-1].time,
+            )
+            if len(all_cached) >= 2:
+                for i in range(1, len(all_cached)):
+                    diff = all_cached[i].time - all_cached[i - 1].time
+                    if diff > threshold:
+                        gap_start_ms = all_cached[i - 1].time * 1000
+                        gap_end_ms = all_cached[i].time * 1000
+                        logger.info(
+                            "Post-backfill gap detected in %s %s: [%d → %d], "
+                            "triggering follow-up backfill",
+                            symbol, interval,
+                            all_cached[i - 1].time, all_cached[i].time,
+                        )
+                        if self.query_engine._backfill_trigger:
+                            self.query_engine._backfill_trigger(
+                                symbol, interval, gap_start_ms, gap_end_ms,
+                            )
+                        break  # One follow-up at a time to avoid storms
+        except Exception as exc:
+            logger.debug("Post-backfill gap check failed: %s", exc)
 
         # Emit completion event
         await self.event_bus.emit(DataEvent(
@@ -578,7 +635,23 @@ class DataManager:
         This is the key integration point that was previously missing —
         it ensures all data flows through the full L1–L5 pipeline before
         reaching the cache and subscribers.
+
+        During shutdown, ``_flush_all()`` force-closes forming bars that
+        have **incomplete** OHLCV data (the bar hadn't finished forming
+        on the exchange).  Persisting these to storage would corrupt
+        historical data and cause wrong K-lines on the next startup.
+        We skip all processing in this case.
         """
+        # ── Guard: skip shutdown flush events ────────────────
+        # When the DataManager is shutting down, bar_aggregator.stop()
+        # calls _flush_all() which emits CLOSED events for all forming
+        # bars.  These bars have partial data and must NOT be persisted
+        # to storage or written to cache — doing so would overwrite
+        # correct historical bars with incomplete ones, producing
+        # incorrect OHLC and false gaps on the next startup.
+        if not self._started:
+            return
+
         bar_state: BarState = event.bar
         bar_data = BarData.from_bar_state(bar_state)
         symbol = bar_state.symbol
@@ -668,6 +741,11 @@ class DataManager:
         bucket (for example a 7m candle in minute 5), the aggregator would
         only see subsequent realtime base bars and incorrectly treat the
         first seen component as the bucket's open.
+
+        This method also verifies that the base bars are complete — if
+        any expected base components are missing from both storage and cache,
+        it triggers a targeted backfill so the custom bar will be corrected
+        once the data arrives.
         """
         symbol = symbol.upper()
         pipeline = self.bar_aggregator.get_pipeline(interval)
@@ -677,13 +755,20 @@ class DataManager:
 
         base_interval = self._cfg.coordinator.base_interval
         base_seconds = parse_custom_interval(base_interval) or 60
+        custom_seconds = parse_custom_interval(interval) or 60
         now_ms = int(time.time() * 1000)
         bucket_start_ms = pipeline.time_bucket.compute_bucket(now_ms)
+
+        # Also fetch the PREVIOUS bucket so the last *closed* custom bar
+        # in cache is correct. Without this, after a restart the most
+        # recent closed custom bar may be built from stale/partial data.
+        prev_bucket_start_ms = pipeline.time_bucket.prev_bucket(bucket_start_ms)
+        fetch_start_ms = prev_bucket_start_ms
 
         rows = storage.query_bars(
             symbol=symbol,
             interval=base_interval,
-            start_ms=bucket_start_ms,
+            start_ms=fetch_start_ms,
             end_ms=now_ms,
             order="ASC",
         )
@@ -693,12 +778,12 @@ class DataManager:
         }
         cached_rows = self.cache.query(
             base_key,
-            start_time=bucket_start_ms // 1000,
+            start_time=fetch_start_ms // 1000,
             end_time=now_ms // 1000,
         )
         for cached in cached_rows:
             open_time_ms = cached.time * 1000
-            if open_time_ms < bucket_start_ms:
+            if open_time_ms < fetch_start_ms:
                 continue
 
             close_time_ms = open_time_ms + (base_seconds * 1000) - 1
@@ -715,6 +800,35 @@ class DataManager:
                 "taker_buy_base": 0.0,
                 "taker_buy_quote": 0.0,
             }
+
+        # ── Check base bars completeness for the current bucket ──
+        # Calculate how many base bars we SHOULD have by now in the
+        # current bucket (past minutes only — the current minute may
+        # not have closed yet).
+        elapsed_in_bucket_ms = now_ms - bucket_start_ms
+        expected_closed_components = max(0, int(elapsed_in_bucket_ms / (base_seconds * 1000)))
+        actual_in_bucket = sum(
+            1 for ot in rows_by_open_time
+            if ot >= bucket_start_ms and ot < now_ms
+        )
+        if expected_closed_components > 0 and actual_in_bucket < expected_closed_components:
+            missing = expected_closed_components - actual_in_bucket
+            logger.warning(
+                "Custom seed %s@%s: expected %d base bars in current bucket "
+                "but found %d (%d missing). Triggering base backfill.",
+                symbol, interval, expected_closed_components,
+                actual_in_bucket, missing,
+            )
+            # Trigger backfill for the base interval to fill the gap
+            if self.query_engine._backfill_trigger:
+                try:
+                    self.query_engine._backfill_trigger(
+                        symbol, base_interval, bucket_start_ms, now_ms,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to trigger base backfill during custom seed: %s", exc,
+                    )
 
         if not rows_by_open_time:
             return
@@ -809,6 +923,126 @@ class DataManager:
             _same(state.taker_buy_base, expected["taker_buy_base"]) and
             _same(state.taker_buy_quote, expected["taker_buy_quote"]) and
             state.tick_count == expected["components"]
+        )
+
+    async def _seed_standard_interval(self, symbol: str, interval: str) -> None:
+        """Seed the BarAggregator with the currently-forming standard bar.
+
+        This is the counterpart of ``_seed_custom_interval()`` for standard
+        intervals (1m, 5m, 15m, 1h, 4h, 1d, etc.).
+
+        **Problem solved:**
+        On second+ startup, ``prewarm()`` loads historical bars from storage
+        directly into cache.  The BarAggregator's ``_active`` dict is empty.
+        When the first realtime kline event arrives (e.g. a 1m tick), the
+        aggregator creates a brand-new BarState containing only that single
+        tick for ALL target intervals (5m, 15m, 1h, …).  This new BarState
+        is then written to cache via ``cache.upsert()``, **overwriting** the
+        complete bar that prewarm loaded from storage.  The result: the last
+        visible bar in each higher-timeframe chart shows only partial OHLCV
+        data, producing false gaps and incorrect candles.
+
+        **Solution:**
+        Before realtime data starts flowing, we read the last bar for each
+        standard interval from storage and inject it into the BarAggregator
+        as a BACKFILL BarInput.  This pre-populates the ``_active`` state so
+        that subsequent realtime ticks **merge** into the existing bar instead
+        of creating a new incomplete one.
+
+        For the base interval (1m), we seed the current forming bar.
+        For higher intervals (5m, 15m, 1h, …), we seed from the last
+        bar in storage that maps to the currently-forming bucket — i.e.
+        the bar whose bucket contains "now".
+        """
+        symbol = symbol.upper()
+        storage = self.query_engine._storage
+        if storage is None:
+            return
+
+        pipeline = self.bar_aggregator.get_pipeline(interval)
+        if pipeline is None:
+            return
+
+        interval_seconds = parse_custom_interval(interval) or 60
+        interval_ms = interval_seconds * 1000
+        now_ms = int(time.time() * 1000)
+
+        # Compute the bucket that is currently forming (contains "now")
+        bucket_start_ms = pipeline.time_bucket.compute_bucket(now_ms)
+
+        # If the aggregator already has an active bar for this bucket,
+        # it was seeded by a previous call — nothing to do.
+        if pipeline.bar_state.get_active(symbol, bucket_start_ms) is not None:
+            return
+
+        # ── Fetch the last bar from storage for the current bucket ──
+        # Query storage for bars within the current bucket window.
+        # For a 1h bar that started at 14:00, we look for the stored
+        # bar with open_time == bucket_start_ms.
+        rows = storage.query_bars(
+            symbol=symbol,
+            interval=interval,
+            start_ms=bucket_start_ms,
+            end_ms=bucket_start_ms,
+            limit=1,
+            order="ASC",
+        )
+
+        if not rows:
+            # No stored bar for the current bucket — nothing to seed.
+            # This is normal: the bar hasn't been persisted yet because
+            # it's still forming or the previous session didn't run long
+            # enough to see this bucket.
+            return
+
+        row = rows[0]
+        open_time_ms = int(row["open_time"])
+
+        # Sanity check: only seed if the stored bar belongs to the
+        # currently-forming bucket (not an older one)
+        if open_time_ms != bucket_start_ms:
+            return
+
+        close_time_ms = int(row.get("close_time", open_time_ms + interval_ms - 1))
+
+        # The bar is still forming (close_time hasn't passed), so inject
+        # it as a MANUAL input to pre-populate the aggregator state.
+        # The BarStateEngine will create a new BarState from this input,
+        # and subsequent realtime ticks will merge into it.
+        #
+        # We use MANUAL (not BACKFILL) because the BatchFinalizer for
+        # standard intervals immediately closes any BACKFILL input.
+        # MANUAL source is treated like REALTIME by the finalizer chain:
+        # the bar stays FORMING until the exchange sends is_closed=True
+        # or the next bucket's data arrives.
+        bar_input = BarInput(
+            symbol=symbol,
+            source_interval=interval,
+            open_time_ms=open_time_ms,
+            close_time_ms=close_time_ms,
+            open=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            volume=float(row.get("volume", 0)),
+            source=BarInputSource.MANUAL,
+            is_closed=False,  # explicitly NOT closed — still forming
+            quote_volume=float(row.get("quote_volume", 0) or 0),
+            trades=int(row.get("trades", 0) or 0),
+            taker_buy_base=float(row.get("taker_buy_base", 0) or 0),
+            taker_buy_quote=float(row.get("taker_buy_quote", 0) or 0),
+            sequence=open_time_ms,
+        )
+
+        await self.bar_aggregator._handle_bar_input(
+            symbol, interval, bar_input,
+        )
+
+        logger.debug(
+            "Seeded standard interval %s@%s: bucket=%d OHLCV=(%s,%s,%s,%s) V=%s",
+            symbol, interval, bucket_start_ms,
+            row["open"], row["high"], row["low"], row["close"],
+            row.get("volume", 0),
         )
 
     def _trigger_custom_tail_repair(self, symbol: str, interval: str) -> None:

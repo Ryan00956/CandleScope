@@ -25,9 +25,12 @@ Usage::
 """
 from __future__ import annotations
 
+import calendar
 import logging
 import time
 from typing import Any, Callable
+
+from datetime import datetime, timezone
 
 from app.core.market import (
     find_best_base_interval,
@@ -378,13 +381,32 @@ class QueryEngine:
             self._trigger_backfill(key, trigger_start_ms, trigger_end_ms)
             backfill_triggered = True
 
+        # Determine has_more accurately:
+        # - If we got a full page of results, there's likely more data
+        # - If storage returned fewer bars than requested AND no backfill
+        #   was triggered, there's no more data available
+        # - If backfill was triggered, report has_more=True so the frontend
+        #   can retry after backfill completes
+        if len(merged) >= effective_limit:
+            has_more = True
+        elif backfill_triggered:
+            has_more = True
+        elif not merged and not storage_bars:
+            # Nothing found anywhere — no more data
+            has_more = False
+        elif storage_bars and len(storage_bars) < effective_limit:
+            # Storage returned less than requested — we've hit the beginning
+            has_more = False
+        else:
+            has_more = bool(merged)
+
         return QueryResult(
             bars=merged,
             symbol=key.symbol,
             interval=key.interval,
             source=QuerySource.MIXED if storage_bars else QuerySource.CACHE,
             total=len(merged),
-            has_more=bool(merged) or backfill_triggered,
+            has_more=has_more,
             cache_hit=bool(cached),
             backfill_triggered=backfill_triggered,
         )
@@ -430,7 +452,10 @@ class QueryEngine:
             estimated_custom = max(1, ((end_ms - aligned_start_ms) // custom_ms) + 2)
             base_limit = estimated_custom * factor + factor
         else:
-            base_limit = (effective_limit + 2) * factor
+            # Add extra `factor` to ensure the last custom bucket has all
+            # its base-interval components — without this the final candle
+            # may be built from an incomplete set of base bars.
+            base_limit = (effective_limit + 2) * factor + factor
 
         base_result = self.query(
             symbol,

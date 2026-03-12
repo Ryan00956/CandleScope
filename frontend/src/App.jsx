@@ -790,6 +790,15 @@ export default function App() {
             if (msg.type === "backfill_completed") {
               const bfInterval = msg.interval;
               const bfSymbol = msg.symbol || symbol;
+
+              // ── Dedup: skip if a reload for this interval is already in-flight or on cooldown ──
+              const bfDedupeKey = `${bfSymbol}-${bfInterval}`;
+              if (backfillReloadInFlightRef.current.has(bfDedupeKey)) {
+                console.log(`[Backfill] Skipping duplicate reload for ${bfDedupeKey} (already in-flight/cooldown)`);
+                return;
+              }
+              backfillReloadInFlightRef.current.add(bfDedupeKey);
+
               console.log(`Backfill completed for ${bfSymbol}@${bfInterval}, reloading data...`);
               const days = getIntervalDays(bfInterval);
               fetchKlinesHistory(bfSymbol, bfInterval, days)
@@ -820,33 +829,19 @@ export default function App() {
                 })
                 .catch((err) => {
                   console.warn(`Failed to reload after backfill for ${bfInterval}:`, err);
+                })
+                .finally(() => {
+                  // Release the dedup lock after cooldown
+                  setTimeout(() => {
+                    backfillReloadInFlightRef.current.delete(bfDedupeKey);
+                  }, BACKFILL_RELOAD_COOLDOWN_MS);
                 });
 
-              // ALSO seamlessly pull in the missing historical (left-side) data if present
-              const key = cacheKey(bfSymbol, bfInterval);
-              const historicCache = chartDataCacheRef.current.get(key) || [];
-              if (historicCache.length > 0) {
-                const oldest = historicCache[0].time;
-                fetchKlinesBefore(bfSymbol, bfInterval, oldest, 500)
-                  .then((res) => {
-                    if (!res?.data?.length) return;
-                    const cCache = chartDataCacheRef.current.get(key) || [];
-                    const cMerged = mergeByTime(res.data, cCache);
-                    chartDataCacheRef.current.set(key, cMerged);
-
-                    if (bfInterval === intervalRef.current) {
-                      setChartData((prev) => {
-                        const nextUi = mergeByTime(res.data, prev);
-                        saveToCache(bfSymbol, bfInterval, nextUi);
-                        return nextUi;
-                      });
-                      if (typeof res.has_more === "boolean") {
-                        setHasMoreLeft(res.has_more);
-                      }
-                    }
-                  })
-                  .catch((err) => console.warn("Failed backfill fetchBefore:", err));
-              }
+              // NOTE: Removed the redundant fetchKlinesBefore() call that was here.
+              // The fetchKlinesHistory above already covers the full data range.
+              // The extra fetchKlinesBefore was causing a request storm loop:
+              //   backfill_completed → fetchHistory → triggers backfill → backfill_completed → ...
+              // Left-side data loading is handled by handleNeedMoreLeft when the user scrolls.
 
               return;
             }
@@ -983,7 +978,18 @@ export default function App() {
   //  This is the last line of defense against K-line gaps.
   // ============================================================
   const gapFillInFlightRef = useRef(new Set()); // track in-flight gap fills to avoid duplicates
+  const gapFillRetryCountRef = useRef(new Map()); // track retry count per interval
+  const GAP_FILL_MAX_RETRIES = 3; // max consecutive gap-fill attempts per interval
+  const GAP_FILL_COOLDOWN_MS = 30_000; // cooldown between gap-fill attempts
   const recoverGapsRef = useRef(null); // stable ref for use in WS effect
+
+  // Backfill-completed dedup: prevent multiple rapid reloads for same interval
+  const backfillReloadInFlightRef = useRef(new Set());
+  const BACKFILL_RELOAD_COOLDOWN_MS = 10_000;
+
+  // handleNeedMoreLeft cooldown
+  const needMoreLeftCooldownRef = useRef(new Map()); // interval → timestamp
+  const NEED_MORE_LEFT_COOLDOWN_MS = 3_000;
 
   // ============================================================
   //  SHARED GAP RECOVERY FUNCTION
@@ -1163,6 +1169,12 @@ export default function App() {
     async (oldestLoadedTime) => {
       if (loading || loadingMoreLeft || !hasMoreLeft || dataSource === "mock") return;
       if (!chartData.length) return;
+
+      // ── Cooldown: prevent rapid repeated calls ──
+      const cooldownKey = interval;
+      const lastCall = needMoreLeftCooldownRef.current.get(cooldownKey) || 0;
+      if (Date.now() - lastCall < NEED_MORE_LEFT_COOLDOWN_MS) return;
+      needMoreLeftCooldownRef.current.set(cooldownKey, Date.now());
 
       const before = oldestLoadedTime || chartData[0].time;
       setLoadingMoreLeft(true);

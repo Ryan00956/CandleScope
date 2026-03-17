@@ -141,56 +141,83 @@ async def _init_data_manager() -> None:
 
         main_loop = asyncio.get_running_loop()
 
+        _BACKFILL_MAX_RETRIES = 3
+        _BACKFILL_BASE_DELAY = 5  # seconds
+
+        async def _load_backfilled_to_cache(
+            symbol: str, interval: str, start_ms: int, end_ms: int,
+        ) -> None:
+            """Re-query storage for backfilled range and load into cache."""
+            from app.data_engine.data_manager.models import BarData
+            if is_custom_interval(interval):
+                result = await asyncio.to_thread(
+                    dm.query, symbol, interval, start_ms, end_ms, None,
+                )
+                if result.bars:
+                    await dm.on_bars_backfilled(symbol, interval, result.bars)
+            else:
+                rows = storage.query_bars(
+                    symbol=symbol, interval=interval,
+                    start_ms=start_ms, end_ms=end_ms,
+                    order="ASC",
+                )
+                bars = [BarData.from_storage_row(r) for r in rows]
+                if bars:
+                    await dm.on_bars_backfilled(symbol, interval, bars)
+
         def _backfill_trigger(symbol: str, interval: str, start_ms: int, end_ms: int) -> None:
-            """Synchronous trigger that schedules an async backfill run."""
+            """Synchronous trigger that schedules an async backfill run with retry."""
             async def _run_backfill() -> None:
-                try:
-                    report = await backfill_engine.run(
-                        symbol=symbol,
-                        intervals=[interval],
-                        range_start_ms=start_ms,
-                        range_end_ms=end_ms,
-                    )
-                    bars_written = (
-                        report.reconcile_result.bars_written
-                        if report.reconcile_result else 0
-                    )
-                    logger.info(
-                        "Backfill completed: %s/%s status=%s bars_written=%s",
-                        symbol, interval, report.status.value,
-                        bars_written,
-                    )
-                    # Feed backfilled bars into DataManager cache.
-                    # For custom intervals, rebuild from the authoritative
-                    # base-series query path instead of trusting stored custom
-                    # rows directly.
-                    if hasattr(report, 'reconcile_result') and report.reconcile_result:
-                        rr = report.reconcile_result
-                        if hasattr(rr, 'bars_written') and rr.bars_written > 0:
-                            if is_custom_interval(interval):
-                                result = await asyncio.to_thread(
-                                    dm.query,
-                                    symbol,
-                                    interval,
-                                    start_ms,
-                                    end_ms,
-                                    None,
+                for attempt in range(_BACKFILL_MAX_RETRIES):
+                    try:
+                        report = await backfill_engine.run(
+                            symbol=symbol,
+                            intervals=[interval],
+                            range_start_ms=start_ms,
+                            range_end_ms=end_ms,
+                        )
+                        bars_written = (
+                            report.reconcile_result.bars_written
+                            if report.reconcile_result else 0
+                        )
+                        logger.info(
+                            "Backfill completed: %s/%s status=%s bars_written=%s",
+                            symbol, interval, report.status.value,
+                            bars_written,
+                        )
+
+                        from app.data_engine.backfill.models import BackfillStatus
+                        if report.status == BackfillStatus.FAILED:
+                            logger.warning(
+                                "Backfill FAILED for %s/%s (attempt %d/%d)",
+                                symbol, interval, attempt + 1, _BACKFILL_MAX_RETRIES,
+                            )
+                            delay = _BACKFILL_BASE_DELAY * (3 ** attempt)
+                            await asyncio.sleep(delay)
+                            continue  # retry
+
+                        # Success (COMPLETED or PARTIAL): load into cache
+                        if hasattr(report, 'reconcile_result') and report.reconcile_result:
+                            rr = report.reconcile_result
+                            if hasattr(rr, 'bars_written') and rr.bars_written > 0:
+                                await _load_backfilled_to_cache(
+                                    symbol, interval, start_ms, end_ms,
                                 )
-                                if result.bars:
-                                    await dm.on_bars_backfilled(symbol, interval, result.bars)
-                            else:
-                                # Re-query storage and load into cache
-                                from app.data_engine.data_manager.models import BarData
-                                rows = storage.query_bars(
-                                    symbol=symbol, interval=interval,
-                                    start_ms=start_ms, end_ms=end_ms,
-                                    order="ASC",
-                                )
-                                bars = [BarData.from_storage_row(r) for r in rows]
-                                if bars:
-                                    await dm.on_bars_backfilled(symbol, interval, bars)
-                except Exception as exc:
-                    logger.error("Backfill task failed: %s", exc, exc_info=True)
+                        return  # done
+
+                    except Exception as exc:
+                        logger.error(
+                            "Backfill task error for %s/%s (attempt %d/%d): %s",
+                            symbol, interval, attempt + 1,
+                            _BACKFILL_MAX_RETRIES, exc, exc_info=True,
+                        )
+                        delay = _BACKFILL_BASE_DELAY * (3 ** attempt)
+                        await asyncio.sleep(delay)
+
+                logger.error(
+                    "Backfill exhausted all %d retries for %s/%s [%d→%d]",
+                    _BACKFILL_MAX_RETRIES, symbol, interval, start_ms, end_ms,
+                )
 
             try:
                 asyncio.run_coroutine_threadsafe(_run_backfill(), main_loop)
@@ -207,6 +234,69 @@ async def _init_data_manager() -> None:
         app.state.data_manager = dm
         logger.info("DataManager initialized and started successfully")
         print("[startup] DataManager initialized ✓")
+
+        # ── Startup Gap Scan ─────────────────────────────────
+        # Proactively detect and fill gaps for all prewarmed intervals.
+        # This covers the "app was offline for days" scenario.
+        async def _startup_gap_scan() -> None:
+            await asyncio.sleep(5)  # let prewarm + WS settle
+            logger.info("Starting gap scan for all prewarmed intervals...")
+            print("[startup] Running startup gap scan...")
+
+            scanned = 0
+            filled = 0
+            for sym in dm.coordinator._cfg.prewarm_symbols:
+                for iv in dm.coordinator._cfg.prewarm_intervals:
+                    try:
+                        bounds = storage.get_bounds(sym, iv)
+                        latest = bounds.get("latest_open_time")
+                        if not latest:
+                            continue
+
+                        now_ms = int(time.time() * 1000)
+                        from app.data_engine.bar_aggregator.models import parse_interval_ms
+                        interval_ms = parse_interval_ms(iv) or 60_000
+                        gap_ms = now_ms - latest
+
+                        # If latest data is more than 3 intervals behind, backfill
+                        if gap_ms > interval_ms * 3:
+                            scanned += 1
+                            logger.info(
+                                "Startup gap: %s@%s latest=%s gap=%.1fh, backfilling",
+                                sym, iv,
+                                time.strftime('%Y-%m-%d %H:%M', time.gmtime(latest / 1000)),
+                                gap_ms / 3_600_000,
+                            )
+                            report = await backfill_engine.run(
+                                symbol=sym,
+                                intervals=[iv],
+                                range_start_ms=latest,
+                                range_end_ms=now_ms,
+                            )
+                            bars_written = (
+                                report.reconcile_result.bars_written
+                                if report.reconcile_result else 0
+                            )
+                            if bars_written > 0:
+                                filled += 1
+                                await _load_backfilled_to_cache(sym, iv, latest, now_ms)
+                                logger.info(
+                                    "Startup gap filled: %s@%s wrote %d bars",
+                                    sym, iv, bars_written,
+                                )
+                    except Exception as exc:
+                        logger.warning(
+                            "Startup gap scan failed for %s@%s: %s",
+                            sym, iv, exc,
+                        )
+
+            logger.info(
+                "Startup gap scan complete: %d intervals scanned, %d filled",
+                scanned, filled,
+            )
+            print(f"[startup] Gap scan done: {scanned} scanned, {filled} filled")
+
+        asyncio.create_task(_startup_gap_scan())
 
         # ── 5. Bridge IndicatorEngine to DataManager EventBus ──
         #   The IndicatorEngine listens to BAR_CLOSED / BAR_UPDATED /

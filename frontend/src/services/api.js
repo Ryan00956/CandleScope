@@ -117,3 +117,15 @@ export async function repairStoredCustomIntervals() {
     }
     return response.json();
 }
+
+export async function scanAndFillGaps() {
+    const url = `${API_BASE}/settings/storage/gap-scan`;
+    const response = await fetch(url, {
+        method: "POST",
+    });
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+}

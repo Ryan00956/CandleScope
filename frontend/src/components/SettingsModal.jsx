@@ -4,6 +4,7 @@ import {
     updateProxySettings,
     testProxyConnection,
     repairStoredCustomIntervals,
+    scanAndFillGaps,
 } from '../services/api';
 
 export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
@@ -17,6 +18,8 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
     const [proxySaveMsg, setProxySaveMsg] = useState(null);
     const [storageRepairLoading, setStorageRepairLoading] = useState(false);
     const [storageRepairResult, setStorageRepairResult] = useState(null);
+    const [gapScanLoading, setGapScanLoading] = useState(false);
+    const [gapScanResult, setGapScanResult] = useState(null);
 
     // Load proxy settings when modal opens
     useEffect(() => {
@@ -24,6 +27,7 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
         setProxyTestResult(null);
         setProxySaveMsg(null);
         setStorageRepairResult(null);
+        setGapScanResult(null);
         fetchProxySettings()
             .then((data) => {
                 setProxyMode(data.mode || 'system');
@@ -82,6 +86,26 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
             });
         } finally {
             setStorageRepairLoading(false);
+        }
+    }, []);
+
+    const handleGapScan = useCallback(async () => {
+        setGapScanLoading(true);
+        setGapScanResult(null);
+        try {
+            const res = await scanAndFillGaps();
+            setGapScanResult(res);
+        } catch (err) {
+            setGapScanResult({
+                status: 'error',
+                message: `扫描失败: ${err.message}`,
+                gaps_found: 0,
+                gaps_filled: 0,
+                total_bars_filled: 0,
+                results: [],
+            });
+        } finally {
+            setGapScanLoading(false);
         }
     }, []);
 
@@ -361,6 +385,59 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
                                 )}
                             </div>
                         )}
+
+                        {/* Gap Scan card */}
+                        <div className="repair-card" style={{ marginTop: 16 }}>
+                            <div className="repair-title">数据缺口扫描与修复</div>
+                            <div className="repair-desc">
+                                扫描所有标准时间周期（1m ~ 1w）的数据库，检测尾部缺口和内部缺口，
+                                并从币安 REST API 自动补齐。适用于长时间未开、网络中断等情况。
+                            </div>
+                            <button
+                                className="repair-btn gap-scan-btn"
+                                onClick={handleGapScan}
+                                disabled={gapScanLoading || storageRepairLoading}
+                            >
+                                {gapScanLoading ? '⏳ 扫描修复中...' : '🔍 扫描并补齐缺口'}
+                            </button>
+                        </div>
+
+                        {gapScanResult && (
+                            <div className={`repair-result ${getRepairResultClassName(gapScanResult.status)}`}>
+                                <div className="repair-result-head">{gapScanResult.message}</div>
+                                <div className="repair-stats">
+                                    <span>发现缺口 {gapScanResult.gaps_found || 0}</span>
+                                    <span>已修复 {gapScanResult.gaps_filled || 0}</span>
+                                    <span>补回 {gapScanResult.total_bars_filled || 0} 条</span>
+                                    <span>耗时 {((gapScanResult.elapsed_ms || 0) / 1000).toFixed(1)}s</span>
+                                </div>
+
+                                {Array.isArray(gapScanResult.results) && gapScanResult.results.length > 0 && (
+                                    <div className="repair-series-list">
+                                        {gapScanResult.results.map((item) => (
+                                            <div
+                                                key={item.interval}
+                                                className="repair-series-item"
+                                            >
+                                                <div className="repair-series-line">
+                                                    <span className="repair-series-name">
+                                                        {item.interval}
+                                                        <span className="gap-scan-meta">
+                                                            {item.total_bars ? ` · ${item.total_bars}` : ''}
+                                                            {item.latest_data ? ` · ${item.latest_data}` : ''}
+                                                        </span>
+                                                    </span>
+                                                    <span className={`repair-series-status repair-series-status-${item.status === 'filled' ? 'repaired' : item.status === 'ok' ? 'checked' : 'failed'}`}>
+                                                        {item.status === 'ok' ? '✓' : item.status === 'filled' ? `+${item.bars_filled}` : '!'}
+                                                    </span>
+                                                </div>
+                                                <div className="repair-series-msg">{item.message}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </section>
                 </div>
 
@@ -614,6 +691,20 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
           margin-top: 4px;
           font-size: 11px;
           color: var(--text-muted);
+        }
+        .gap-scan-btn {
+          border-color: rgba(59, 130, 246, 0.35);
+          background: rgba(59, 130, 246, 0.12);
+          color: var(--accent-blue);
+        }
+        .gap-scan-btn:hover:not(:disabled) {
+          background: rgba(59, 130, 246, 0.18);
+          border-color: rgba(59, 130, 246, 0.55);
+        }
+        .gap-scan-meta {
+          color: var(--text-muted);
+          font-size: 10px;
+          font-weight: 400;
         }
       `}</style>
         </div>

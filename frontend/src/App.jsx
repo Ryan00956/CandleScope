@@ -226,6 +226,8 @@ function detectGaps(data, intervalSeconds) {
   if (!data || data.length < 2 || !intervalSeconds || intervalSeconds <= 0) return [];
   const gaps = [];
   const threshold = intervalSeconds * 1.5;
+
+  // Interior gaps: missing bars between consecutive entries
   for (let i = 1; i < data.length; i++) {
     const diff = data[i].time - data[i - 1].time;
     if (diff > threshold) {
@@ -236,6 +238,22 @@ function detectGaps(data, intervalSeconds) {
       });
     }
   }
+
+  // Tail gap: latest bar is far behind current time
+  // This catches the "app was offline / WS died" scenario where chart
+  // shows continuous old data but no recent bars.
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const latestBarTime = data[data.length - 1].time;
+  const tailGap = nowSecs - latestBarTime;
+  if (tailGap > intervalSeconds * 3) {
+    gaps.push({
+      from: latestBarTime,
+      to: nowSecs,
+      missingBars: Math.floor(tailGap / intervalSeconds),
+      isTailGap: true,
+    });
+  }
+
   return gaps;
 }
 

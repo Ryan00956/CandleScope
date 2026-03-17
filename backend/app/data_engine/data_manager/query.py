@@ -820,6 +820,22 @@ class QueryEngine:
             )
             return False
 
+        # Check data freshness: if no explicit end bound was requested
+        # (i.e. "give me the latest N bars"), verify the newest bar
+        # isn't stale.  Without this, prewarm data from days ago can
+        # satisfy count >= limit and skip backfill entirely.
+        if interval and end_s is None:
+            interval_secs = parse_custom_interval(interval) or 60
+            now_s = int(time.time())
+            staleness = now_s - bars[-1].time
+            if staleness > interval_secs * 2:
+                logger.debug(
+                    "Cache data stale for %s: latest=%d now=%d gap=%ds (%.1f intervals behind)",
+                    interval, bars[-1].time, now_s, staleness,
+                    staleness / interval_secs,
+                )
+                return False
+
         if len(bars) >= limit:
             return True
             

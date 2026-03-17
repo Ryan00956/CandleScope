@@ -662,3 +662,203 @@ async def repair_custom_storage(request: Request) -> dict:
             "elapsed_ms": int(time.time() * 1000) - started_at_ms,
             "results": results,
         }
+
+
+@router.post("/storage/gap-scan")
+async def scan_and_fill_gaps(request: Request) -> dict:
+    """Scan all standard intervals for data gaps and fill them from Binance REST.
+
+    This is a manual "repair all gaps" button.  Unlike the startup scan
+    (which only checks prewarm intervals), this endpoint checks every
+    standard interval that has data in storage and fills any gap larger than
+    3 intervals.
+
+    Returns a detailed report with per-interval results.
+    """
+    dm = _get_data_manager(request)
+    backfill_engine = _get_backfill_engine(request)
+    if dm is None or backfill_engine is None:
+        raise HTTPException(status_code=503, detail="DataManager/BackfillEngine 尚未初始化")
+
+    storage = getattr(dm.query_engine, "_storage", None)
+    if storage is None:
+        raise HTTPException(status_code=503, detail="Storage backend 尚未初始化")
+
+    lock = _get_storage_repair_lock(request)
+    if lock.locked():
+        raise HTTPException(status_code=409, detail="修复任务正在运行，请稍后再试")
+
+    async with lock:
+        started_at_ms = int(time.time() * 1000)
+        now_ms = started_at_ms
+
+        # Scan all standard intervals that have data
+        all_intervals = [
+            "1m", "3m", "5m", "15m", "30m",
+            "1h", "2h", "4h", "6h", "8h", "12h",
+            "1d", "3d", "1w",
+        ]
+        symbol = "BTCUSDT"
+
+        results = []
+        total_bars_filled = 0
+        gaps_found = 0
+        gaps_filled = 0
+
+        for iv in all_intervals:
+            try:
+                bounds = await asyncio.to_thread(storage.get_bounds, symbol, iv)
+                latest = bounds.get("latest_open_time")
+                earliest = bounds.get("earliest_open_time")
+                total_count = bounds.get("total_count", 0)
+                if not latest or not total_count:
+                    continue
+
+                from app.data_engine.bar_aggregator.models import parse_interval_ms
+                interval_ms = parse_interval_ms(iv) or 60_000
+                gap_ms = now_ms - latest
+
+                entry = {
+                    "interval": iv,
+                    "total_bars": total_count,
+                    "latest_data": time.strftime(
+                        "%Y-%m-%d %H:%M",
+                        time.localtime(latest / 1000),
+                    ),
+                    "gap_hours": round(gap_ms / 3_600_000, 1),
+                    "bars_filled": 0,
+                    "status": "ok",
+                    "message": "",
+                }
+
+                # Check for tail gap
+                if gap_ms > interval_ms * 3:
+                    gaps_found += 1
+                    entry["status"] = "gap_found"
+                    entry["message"] = f"尾部缺口 {entry['gap_hours']}h"
+
+                    report = await backfill_engine.run(
+                        symbol=symbol,
+                        intervals=[iv],
+                        range_start_ms=latest,
+                        range_end_ms=now_ms,
+                    )
+                    bars_written = (
+                        report.reconcile_result.bars_written
+                        if report.reconcile_result else 0
+                    )
+
+                    if bars_written > 0:
+                        entry["bars_filled"] = bars_written
+                        entry["status"] = "filled"
+                        entry["message"] = f"已补 {bars_written} 条"
+                        total_bars_filled += bars_written
+                        gaps_filled += 1
+
+                        # Load into cache
+                        from app.data_engine.data_manager.models import BarData
+                        rows = storage.query_bars(
+                            symbol=symbol, interval=iv,
+                            start_ms=latest, end_ms=now_ms,
+                            order="ASC",
+                        )
+                        bars = [BarData.from_storage_row(r) for r in rows]
+                        if bars:
+                            await dm.on_bars_backfilled(symbol, iv, bars)
+                    else:
+                        entry["message"] = "尝试回补但无新数据（可能是网络问题）"
+
+                # Also check for interior gaps (sample the most recent data)
+                rows = await asyncio.to_thread(
+                    storage.query_bars,
+                    symbol, iv, None, None, 2000, "DESC",
+                )
+                if len(rows) >= 2:
+                    times = sorted([int(r["open_time"]) for r in rows])
+                    threshold = interval_ms * 1.5
+                    interior_gaps = []
+                    for i in range(1, len(times)):
+                        diff = times[i] - times[i - 1]
+                        if diff > threshold:
+                            interior_gaps.append((times[i - 1], times[i], diff))
+
+                    if interior_gaps:
+                        gaps_found += len(interior_gaps)
+                        for gap_start, gap_end, gap_diff in interior_gaps:
+                            gap_report = await backfill_engine.run(
+                                symbol=symbol,
+                                intervals=[iv],
+                                range_start_ms=gap_start,
+                                range_end_ms=gap_end,
+                            )
+                            gap_bars = (
+                                gap_report.reconcile_result.bars_written
+                                if gap_report.reconcile_result else 0
+                            )
+                            if gap_bars > 0:
+                                total_bars_filled += gap_bars
+                                gaps_filled += 1
+                                entry["bars_filled"] += gap_bars
+
+                                from app.data_engine.data_manager.models import BarData
+                                fill_rows = storage.query_bars(
+                                    symbol=symbol, interval=iv,
+                                    start_ms=gap_start, end_ms=gap_end,
+                                    order="ASC",
+                                )
+                                fill_bars = [BarData.from_storage_row(r) for r in fill_rows]
+                                if fill_bars:
+                                    await dm.on_bars_backfilled(symbol, iv, fill_bars)
+
+                        if entry["bars_filled"] > 0:
+                            entry["status"] = "filled"
+                            gap_desc = f"{len(interior_gaps)} 个内部缺口"
+                            if entry["message"]:
+                                entry["message"] += f" + {gap_desc}"
+                            else:
+                                entry["message"] = f"发现并修复 {gap_desc}，已补 {entry['bars_filled']} 条"
+                        elif entry["status"] == "ok":
+                            entry["status"] = "gap_found"
+                            entry["message"] = f"发现 {len(interior_gaps)} 个内部缺口但无法补回"
+
+                if entry["status"] == "ok":
+                    entry["message"] = "数据完整 ✓"
+
+                results.append(entry)
+
+            except Exception as exc:
+                results.append({
+                    "interval": iv,
+                    "total_bars": 0,
+                    "latest_data": "",
+                    "gap_hours": 0,
+                    "bars_filled": 0,
+                    "status": "error",
+                    "message": f"检查失败: {exc}",
+                })
+
+        elapsed_ms = int(time.time() * 1000) - started_at_ms
+
+        if gaps_found == 0:
+            status = "ok"
+            message = "所有周期数据完整，无缺口 ✓"
+        elif gaps_filled == gaps_found:
+            status = "ok"
+            message = f"发现 {gaps_found} 个缺口，全部已修复 ✓"
+        elif gaps_filled > 0:
+            status = "partial"
+            message = f"发现 {gaps_found} 个缺口，修复 {gaps_filled} 个，{gaps_found - gaps_filled} 个未修复"
+        else:
+            status = "error"
+            message = f"发现 {gaps_found} 个缺口，均未能修复"
+
+        return {
+            "status": status,
+            "message": message,
+            "gaps_found": gaps_found,
+            "gaps_filled": gaps_filled,
+            "total_bars_filled": total_bars_filled,
+            "elapsed_ms": elapsed_ms,
+            "results": results,
+        }
+

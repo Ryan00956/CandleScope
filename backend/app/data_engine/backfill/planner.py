@@ -280,10 +280,22 @@ class BackfillPlanner:
         tasks: list[BackfillTask] = []
         priority = self._gap_priority(gap)
 
-        # Align the gap start to custom bucket boundaries
-        aligned_start = self._align_timestamp(gap.start_ms, custom_ms)
-        # Align the gap end to the next bucket boundary
-        aligned_end_exclusive = self._align_timestamp(gap.end_ms, custom_ms) + custom_ms
+        # Align the gap start to custom bucket boundaries.
+        # For monthly intervals, use calendar-month alignment instead of
+        # fixed-duration arithmetic (months have variable day counts).
+        from app.core.market import parse_monthly_count as _parse_mc
+        _month_count = _parse_mc(gap.interval)
+        if _month_count is not None:
+            from app.core.market import compute_month_bucket_ms, next_month_bucket
+            aligned_start = compute_month_bucket_ms(gap.start_ms, _month_count)
+            end_bucket_start = compute_month_bucket_ms(gap.end_ms, _month_count)
+            aligned_end_exclusive = next_month_bucket(
+                end_bucket_start // 1000, _month_count,
+            ) * 1000
+        else:
+            aligned_start = self._align_timestamp(gap.start_ms, custom_ms)
+            # Align the gap end to the next bucket boundary
+            aligned_end_exclusive = self._align_timestamp(gap.end_ms, custom_ms) + custom_ms
 
         # For each component, create fetch tasks
         for component in decomp.components:

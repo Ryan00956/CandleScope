@@ -1075,10 +1075,17 @@ class DataManager:
 
         interval_seconds = parse_custom_interval(interval) or 60
         now_ms = int(time.time() * 1000)
-        repair_window_ms = min(
-            max(interval_seconds * 16 * 1000, 6 * 60 * 60 * 1000),
-            7 * 24 * 60 * 60 * 1000,
-        )
+        # For monthly intervals the 7-day cap is far too small (a 2M
+        # bucket spans ~60 days).  Use 2 full N-month buckets instead.
+        from app.core.market import parse_monthly_count as _parse_mc
+        _mc = _parse_mc(interval)
+        if _mc is not None:
+            repair_window_ms = _mc * 2 * 31 * 86_400 * 1000
+        else:
+            repair_window_ms = min(
+                max(interval_seconds * 16 * 1000, 6 * 60 * 60 * 1000),
+                7 * 24 * 60 * 60 * 1000,
+            )
         start_ms = max(0, now_ms - repair_window_ms)
 
         try:

@@ -219,8 +219,17 @@ class StreamCoordinator:
         # Already running?
         if key in self._streams:
             entry = self._streams[key]
-            entry.touch()
-            return entry.info
+            # If the stream previously failed (e.g. network/proxy error),
+            # remove the stale entry so we can retry starting it.
+            if entry.info.status in (StreamStatus.ERROR, StreamStatus.STOPPED):
+                logger.info(
+                    "Removing stale %s stream %s for retry",
+                    entry.info.status.value, key,
+                )
+                self._streams.pop(key, None)
+            else:
+                entry.touch()
+                return entry.info
 
         # Auto-start if configured
         if not self._cfg.auto_start_ingestion:
@@ -237,7 +246,16 @@ class StreamCoordinator:
             if base_key not in self._streams:
                 await self._start_stream(base_key)
             else:
-                self._streams[base_key].touch()
+                base_entry = self._streams[base_key]
+                if base_entry.info.status in (StreamStatus.ERROR, StreamStatus.STOPPED):
+                    logger.info(
+                        "Removing stale %s base stream %s for retry",
+                        base_entry.info.status.value, base_key,
+                    )
+                    self._streams.pop(base_key, None)
+                    await self._start_stream(base_key)
+                else:
+                    base_entry.touch()
 
             # Create a passive StreamEntry (no WS connection of its own)
             entry = _StreamEntry(key)

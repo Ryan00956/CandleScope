@@ -141,6 +141,7 @@ const ChartPane = forwardRef(function ChartPane({
                 horzLines: { color: gridColor },
             },
             crosshair: {
+                mode: 0, // Normal — follow mouse freely, don't snap to candle price
                 vertLine: {
                     color: "rgba(59, 130, 246, 0.4)", width: 1, style: 2,
                     labelBackgroundColor: "#3b82f6",

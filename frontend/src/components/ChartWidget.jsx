@@ -266,6 +266,7 @@ const ChartWidget = forwardRef(function ChartWidget({
                 horzLines: { color: theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)" },
             },
             crosshair: {
+                mode: 0, // Normal — follow mouse freely, don't snap to candle price
                 vertLine: {
                     color: "rgba(59, 130, 246, 0.4)",
                     width: 1,

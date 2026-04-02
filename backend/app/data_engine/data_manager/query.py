@@ -34,6 +34,8 @@ from datetime import datetime, timezone
 
 from app.core.market import (
     aggregate_rows_by_month,
+    compute_bucket_start,
+    compute_bucket_start_ms,
     compute_month_bucket,
     find_best_base_interval,
     is_custom_interval,
@@ -55,6 +57,8 @@ BackfillTrigger = Callable[[str, str, int, int], None]
 def _aggregate_rows_to_interval(
     base_rows: list[dict],
     custom_interval_seconds: int,
+    *,
+    interval: str | None = None,
 ) -> list[dict]:
     """Aggregate lightweight-chart rows into a custom interval."""
     if not base_rows:
@@ -63,7 +67,7 @@ def _aggregate_rows_to_interval(
     buckets: dict[int, list[dict]] = {}
     for row in base_rows:
         ts = row["time"]
-        bucket_start = (ts // custom_interval_seconds) * custom_interval_seconds
+        bucket_start = compute_bucket_start(ts, custom_interval_seconds, interval=interval)
         buckets.setdefault(bucket_start, []).append(row)
 
     result: list[dict] = []
@@ -457,7 +461,7 @@ class QueryEngine:
                 from app.core.market import compute_month_bucket_ms
                 aligned_start_ms = compute_month_bucket_ms(start_ms, month_count)
             else:
-                aligned_start_ms = (start_ms // custom_ms) * custom_ms
+                aligned_start_ms = compute_bucket_start_ms(start_ms, custom_ms, interval=interval)
 
         if start_ms is not None and end_ms is not None:
             estimated_custom = max(1, ((end_ms - aligned_start_ms) // custom_ms) + 2)
@@ -538,7 +542,7 @@ class QueryEngine:
             last_bucket_start_ms = compute_month_bucket_ms(before_ms - 1, month_count)
             base_end_ms = next_month_bucket(last_bucket_start_ms // 1000, month_count) * 1000 - 1
         else:
-            last_bucket_start_ms = ((before_ms - 1) // custom_ms) * custom_ms
+            last_bucket_start_ms = compute_bucket_start_ms(before_ms - 1, custom_ms, interval=interval)
             base_end_ms = last_bucket_start_ms + custom_ms - 1
         base_limit = (effective_limit + 2) * factor
 
@@ -680,6 +684,7 @@ class QueryEngine:
             aggregated = _aggregate_rows_to_interval(
                 [bar.to_dict() for bar in base_bars],
                 custom_seconds,
+                interval=interval,
             )
         result = [BarData.from_dict(row) for row in aggregated]
         if start_ms is not None:

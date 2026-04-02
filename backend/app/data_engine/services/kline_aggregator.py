@@ -13,8 +13,10 @@ from __future__ import annotations
 
 from app.core.market import (
     aggregate_rows_by_month,
+    compute_bucket_start,
     compute_month_bucket,
     is_monthly_interval,
+    is_weekly_interval,
     parse_monthly_count,
 )
 
@@ -52,7 +54,7 @@ def aggregate_klines(
     buckets: dict[int, list[dict]] = {}
     for row in base_rows:
         ts = row["time"]  # unix seconds
-        bucket_start = (ts // bucket_width) * bucket_width
+        bucket_start = compute_bucket_start(ts, bucket_width, interval=interval)
         buckets.setdefault(bucket_start, []).append(row)
 
     # 2. Merge each bucket into one OHLCV candle
@@ -93,7 +95,7 @@ def aggregate_realtime_into_last(
         bucket_start = compute_month_bucket(incoming["time"], month_count)
     else:
         bucket_width = custom_interval_seconds
-        bucket_start = (incoming["time"] // bucket_width) * bucket_width
+        bucket_start = compute_bucket_start(incoming["time"], bucket_width, interval=interval)
 
     if current_custom_candle is None or bucket_start != current_custom_candle["time"]:
         # New candle
@@ -122,6 +124,8 @@ def aggregate_multi_resolution(
     coarse_seconds: int,
     fine_rows: list[dict],
     fine_seconds: int,
+    *,
+    interval: str | None = None,
 ) -> list[dict]:
     """Aggregate candles from two resolution levels into custom-period candles.
 
@@ -149,7 +153,7 @@ def aggregate_multi_resolution(
 
     for row in coarse_rows:
         ts = row["time"]
-        bucket_start = (ts // bucket_width) * bucket_width
+        bucket_start = compute_bucket_start(ts, bucket_width, interval=interval)
         candle_end = ts + coarse_seconds
 
         # Only include if the coarse candle ends within the bucket
@@ -160,7 +164,7 @@ def aggregate_multi_resolution(
     # --- Phase 2: add fine candles for uncovered gaps ---
     for row in fine_rows:
         ts = row["time"]
-        bucket_start = (ts // bucket_width) * bucket_width
+        bucket_start = compute_bucket_start(ts, bucket_width, interval=interval)
         candle_end = ts + fine_seconds
 
         # Check if this fine candle is already covered by a coarse candle

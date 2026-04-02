@@ -47,6 +47,7 @@ from .models import (
     StorageBackend,
     parse_interval_ms,
 )
+from app.core.market import compute_bucket_start_ms
 
 logger = logging.getLogger("backfill.Reconciler")
 
@@ -375,6 +376,7 @@ class Reconciler:
             bars.sort(key=lambda b: b.open_time)
             bucket_min_ms, bucket_max_ms = self._custom_bucket_bounds(
                 bars, custom_ms, decomp.alignment_epoch_ms,
+                custom_interval=custom_iv,
             )
 
             # ── Route through BarAggregator if available ─────
@@ -480,12 +482,14 @@ class Reconciler:
         bars: list[FetchedBar],
         custom_ms: int,
         epoch_ms: int,
+        *,
+        custom_interval: str | None = None,
     ) -> tuple[int, int]:
         """Return inclusive min/max custom bucket starts touched by *bars*."""
         first_open = min(bar.open_time for bar in bars)
         last_open = max(bar.open_time for bar in bars)
-        bucket_min = ((first_open - epoch_ms) // custom_ms) * custom_ms + epoch_ms
-        bucket_max = ((last_open - epoch_ms) // custom_ms) * custom_ms + epoch_ms
+        bucket_min = compute_bucket_start_ms(first_open, custom_ms, interval=custom_interval)
+        bucket_max = compute_bucket_start_ms(last_open, custom_ms, interval=custom_interval)
         return bucket_min, bucket_max
 
     def _aggregate_to_custom(
@@ -505,7 +509,7 @@ class Reconciler:
         # Assign each bar to a custom bucket
         buckets: dict[int, list[FetchedBar]] = {}
         for bar in bars:
-            bucket_start = ((bar.open_time - epoch_ms) // custom_ms) * custom_ms + epoch_ms
+            bucket_start = compute_bucket_start_ms(bar.open_time, custom_ms, interval=custom_interval)
             buckets.setdefault(bucket_start, []).append(bar)
 
         for bucket_start in sorted(buckets.keys()):

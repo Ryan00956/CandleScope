@@ -293,9 +293,9 @@ class BackfillPlanner:
                 end_bucket_start // 1000, _month_count,
             ) * 1000
         else:
-            aligned_start = self._align_timestamp(gap.start_ms, custom_ms)
+            aligned_start = self._align_timestamp(gap.start_ms, custom_ms, interval=gap.interval)
             # Align the gap end to the next bucket boundary
-            aligned_end_exclusive = self._align_timestamp(gap.end_ms, custom_ms) + custom_ms
+            aligned_end_exclusive = self._align_timestamp(gap.end_ms, custom_ms, interval=gap.interval) + custom_ms
 
         # For each component, create fetch tasks
         for component in decomp.components:
@@ -564,11 +564,20 @@ class BackfillPlanner:
 
     # ── Internal: Alignment ──────────────────────────────────
 
-    def _align_timestamp(self, ts_ms: int, bucket_ms: int) -> int:
+    def _align_timestamp(
+        self, ts_ms: int, bucket_ms: int, *, interval: str | None = None,
+    ) -> int:
         """Align a timestamp to the nearest bucket boundary.
 
         Uses the configured alignment mode or user-supplied function.
+        For weekly intervals, aligns to Monday 00:00 UTC regardless of mode.
         """
+        # Weekly intervals always align to Monday 00:00 UTC
+        if interval is not None:
+            from app.core.market import is_weekly_interval, compute_bucket_start_ms
+            if is_weekly_interval(interval):
+                return compute_bucket_start_ms(ts_ms, bucket_ms, interval=interval)
+
         # User override
         if self._custom_alignment_fn is not None:
             return self._custom_alignment_fn(

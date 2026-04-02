@@ -79,7 +79,7 @@ from .models import (
     is_standard_interval,
 )
 from .router import EventRouter
-from .time_bucket import TimeBucketEngine, MonthlyBucketCalculator
+from .time_bucket import TimeBucketEngine, MonthlyBucketCalculator, WeeklyBucketCalculator
 from .bar_state import BarStateEngine
 from .finalizer import Finalizer
 from .publisher import BarAggregatorPublisher
@@ -113,6 +113,13 @@ class IntervalPipeline:
             month_count = int(interval[:-1])
             if month_count > 0:
                 custom_calc = MonthlyBucketCalculator(months=month_count)
+        # Weekly intervals need Monday-aligned bucketing.
+        # Without this, floor-dividing from Unix epoch (a Thursday)
+        # would produce buckets starting on Thursday instead of Monday.
+        elif interval.endswith("w") and interval[:-1].isdigit():
+            week_count = int(interval[:-1])
+            if week_count > 0:
+                custom_calc = WeeklyBucketCalculator(weeks=week_count)
 
         self.time_bucket = TimeBucketEngine(
             interval_ms=interval_ms,

@@ -1,6 +1,7 @@
 import re
 import calendar
 from datetime import datetime, timezone
+from typing import Optional
 
 VALID_INTERVALS = [
     "1s",
@@ -40,6 +41,14 @@ INTERVAL_SECONDS = {
     "1M": 2592000,
 }
 
+# --------------- Weekly alignment constants ---------------
+# Unix epoch (1970-01-01) is a Thursday.
+# To align weekly buckets to Monday 00:00 UTC, we offset by 4 days
+# to the first Monday after epoch: 1970-01-05.
+_WEEK_EPOCH_OFFSET_S = 4 * 86400       # 345600 seconds
+_WEEK_EPOCH_OFFSET_MS = 4 * 86400_000  # 345600000 milliseconds
+_WEEKLY_RE = re.compile(r"^(\d+)w$")
+
 # --------------- Custom interval parsing ---------------
 
 _UNIT_SECONDS = {
@@ -73,6 +82,54 @@ def parse_custom_interval(interval: str) -> int | None:
 def is_custom_interval(interval: str) -> bool:
     """Return True if *interval* is NOT a native exchange interval."""
     return interval not in VALID_INTERVALS
+
+
+def is_weekly_interval(interval: str) -> bool:
+    """Return True if *interval* uses week units (e.g. '1w', '2w', '3w')."""
+    return bool(_WEEKLY_RE.match(interval))
+
+
+def compute_bucket_start(
+    ts_seconds: int,
+    bucket_width_seconds: int,
+    *,
+    interval: Optional[str] = None,
+) -> int:
+    """Compute the time-bucket start for a Unix timestamp (seconds).
+
+    For weekly intervals (e.g. '1w', '2w'), aligns to Monday 00:00 UTC.
+    For all other intervals, uses simple integer division from Unix epoch.
+
+    Args:
+        ts_seconds:           Unix timestamp in seconds.
+        bucket_width_seconds: Width of each bucket in seconds.
+        interval:             Original interval string (e.g. '2w') used to
+                              detect weekly alignment.  If None, falls back
+                              to epoch-aligned division.
+    """
+    if interval is not None and is_weekly_interval(interval):
+        return (
+            ((ts_seconds - _WEEK_EPOCH_OFFSET_S) // bucket_width_seconds)
+            * bucket_width_seconds
+            + _WEEK_EPOCH_OFFSET_S
+        )
+    return (ts_seconds // bucket_width_seconds) * bucket_width_seconds
+
+
+def compute_bucket_start_ms(
+    ts_ms: int,
+    bucket_width_ms: int,
+    *,
+    interval: Optional[str] = None,
+) -> int:
+    """Same as ``compute_bucket_start`` but with millisecond timestamps."""
+    if interval is not None and is_weekly_interval(interval):
+        return (
+            ((ts_ms - _WEEK_EPOCH_OFFSET_MS) // bucket_width_ms)
+            * bucket_width_ms
+            + _WEEK_EPOCH_OFFSET_MS
+        )
+    return (ts_ms // bucket_width_ms) * bucket_width_ms
 
 
 # Base intervals we can actually query from the exchange, ordered

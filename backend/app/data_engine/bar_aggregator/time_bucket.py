@@ -294,3 +294,44 @@ class MonthlyBucketCalculator:
         start_ms = int(month_start.timestamp() * 1000)
         end_ms = int(next_bucket.timestamp() * 1000)
         return (start_ms, end_ms)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  WeeklyBucketCalculator — Monday-aligned bucketing for Nw
+# ═══════════════════════════════════════════════════════════════
+
+# Unix epoch (1970-01-01) is a Thursday.
+# The first Monday after epoch is 1970-01-05 = 4 * 86400 * 1000 ms.
+_MONDAY_EPOCH_MS = 4 * 86_400_000  # 345_600_000
+
+
+class WeeklyBucketCalculator:
+    """BucketCalculator that aligns weekly buckets to Monday 00:00 UTC.
+
+    Ensures weekly candle boundaries match the standard financial and
+    crypto convention (Binance 1w candles start on Monday 00:00 UTC).
+
+    Supports multi-week buckets (e.g. '2w', '3w') by aligning to every
+    Nth Monday starting from 1970-01-05 (the first Monday after epoch).
+
+    Implements the ``BucketCalculator`` protocol.
+
+    Args:
+        weeks: Number of weeks per bucket (default 1).
+    """
+
+    def __init__(self, weeks: int = 1) -> None:
+        if weeks <= 0:
+            raise ValueError(f"weeks must be positive, got {weeks}")
+        self._weeks = weeks
+        self._bucket_ms = weeks * 7 * 86_400_000  # bucket width in ms
+
+    def compute_bucket(self, open_time_ms: int) -> int:
+        """Return the Monday-aligned bucket start (UTC ms) for the timestamp."""
+        offset = open_time_ms - _MONDAY_EPOCH_MS
+        bucket_index = offset // self._bucket_ms
+        return _MONDAY_EPOCH_MS + bucket_index * self._bucket_ms
+
+    def compute_bucket_range(self, bucket_start_ms: int) -> tuple[int, int]:
+        """Return (bucket_start_ms, next_bucket_start_ms)."""
+        return (bucket_start_ms, bucket_start_ms + self._bucket_ms)

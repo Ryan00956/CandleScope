@@ -401,11 +401,15 @@ export default function App() {
   const updateLastPrice = useCallback((candidate, intv) => {
     setLastPrice((prev) => {
       if (!candidate || candidate.time == null) return prev;
+      // Guard: only accept OHLCV from the currently active interval.
+      // Without this, backfill events or stale fetches for non-current
+      // intervals would overwrite the header with wrong data.
+      if (intv !== intervalRef.current) return prev;
       // Build a display object that keeps OHLCV from the active interval's
       // last candle but overrides "close" with the most recent real-time price
       // when available, so the header always shows one consistent price.
       const rtPrice = realtimePriceRef.current;
-      if (rtPrice != null && intv === intervalRef.current) {
+      if (rtPrice != null) {
         return { ...candidate, close: rtPrice };
       }
       return candidate;
@@ -837,8 +841,15 @@ export default function App() {
                       saveToCache(bfSymbol, bfInterval, merged);
                       return merged;
                     });
-                    const latest = result.data[result.data.length - 1];
-                    updateLastPrice(latest, bfInterval);
+                    // Only set lastPrice from backfill if no live price exists yet.
+                    // Otherwise we'd overwrite the real-time WS price with stale
+                    // history data, causing the header OHLCV to "jump" between
+                    // live ticks and snapshot values from each backfill fetch.
+                    setLastPrice((prev) => {
+                      if (prev) return prev; // live price already flowing — keep it
+                      const latest = result.data[result.data.length - 1];
+                      return latest || prev;
+                    });
                     setError(null);
                     setConnectionStatus("connected");
                     setLoading(false);

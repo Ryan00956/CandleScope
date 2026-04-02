@@ -27,6 +27,7 @@ from app.core.market import (
     parse_custom_interval,
 )
 from app.data_engine.mock_data import generate_mock_klines
+from app.data_engine.storage import DEFAULT_EXCHANGE, DEFAULT_MARKET_TYPE
 
 # Legacy imports — kept as fallback only
 from app.data_engine.services import aggregate_klines, aggregate_multi_resolution
@@ -100,6 +101,8 @@ async def get_klines(
     symbol: str = Query("BTCUSDT", description="Trading symbol, e.g. BTCUSDT"),
     interval: str = Query("1m", description="Kline interval"),
     limit: int = Query(500, ge=1, le=1000, description="Number of rows"),
+    exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
+    market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
 ):
     """Get the latest K-line bars for a symbol/interval pair.
 
@@ -121,6 +124,8 @@ async def get_klines(
 
             data = _bars_to_dicts(result.bars)
             return {
+                "exchange": exchange,
+                "market_type": market_type,
                 "symbol": symbol.upper(),
                 "interval": interval,
                 "count": len(data),
@@ -143,6 +148,8 @@ async def get_latest_klines(
     symbol: str = Query("BTCUSDT", description="Trading symbol, e.g. BTCUSDT"),
     interval: str = Query("1m", description="Kline interval"),
     limit: int = Query(2, ge=1, le=1000, description="Number of latest rows"),
+    exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
+    market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
 ):
     """Get the very latest K-line bars (typically 1-2 for live updates)."""
     _validate_interval(interval)
@@ -156,6 +163,8 @@ async def get_latest_klines(
             )
             data = _bars_to_dicts(result.bars)
             return {
+                "exchange": exchange,
+                "market_type": market_type,
                 "symbol": symbol.upper(),
                 "interval": interval,
                 "count": len(data),
@@ -177,6 +186,8 @@ async def get_klines_history(
     symbol: str = Query("BTCUSDT", description="Trading symbol"),
     interval: str = Query("1h", description="Kline interval"),
     days: int = Query(7, ge=1, le=3650, description="Historical days"),
+    exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
+    market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
 ):
     """Get historical K-line bars for a time range."""
     _validate_interval(interval)
@@ -202,6 +213,8 @@ async def get_klines_history(
             )
             data = _bars_to_dicts(result.bars)
             return {
+                "exchange": exchange,
+                "market_type": market_type,
                 "symbol": symbol.upper(),
                 "interval": interval,
                 "days": days,
@@ -225,6 +238,8 @@ async def get_klines_before(
     interval: str = Query("1h", description="Kline interval"),
     before: int = Query(..., description="Load data before this unix timestamp (seconds)"),
     bars: int = Query(500, ge=1, le=1000, description="How many bars to load"),
+    exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
+    market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
 ):
     """Paginated historical data — load bars before a timestamp."""
     _validate_interval(interval)
@@ -239,6 +254,8 @@ async def get_klines_before(
             )
             data = _bars_to_dicts(result.bars)
             return {
+                "exchange": exchange,
+                "market_type": market_type,
                 "symbol": symbol.upper(),
                 "interval": interval,
                 "before": before,
@@ -280,6 +297,8 @@ async def get_storage_meta(
     request: Request,
     symbol: str = Query("BTCUSDT", description="Trading symbol"),
     interval: str = Query("1h", description="Kline interval"),
+    exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
+    market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
 ):
     """Get storage metadata (bounds, count) for a series."""
     _validate_interval(interval)
@@ -291,6 +310,8 @@ async def get_storage_meta(
                 dm.get_bounds, symbol, interval,
             )
             return {
+                "exchange": exchange,
+                "market_type": market_type,
                 "symbol": symbol.upper(),
                 "interval": interval,
                 "meta": bounds,

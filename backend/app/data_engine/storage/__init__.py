@@ -1,4 +1,7 @@
 from .klines_repo import (
+    DEFAULT_EXCHANGE,
+    DEFAULT_MARKET_TYPE,
+    VALID_MARKET_TYPES,
     AsyncKlinesRepoAdapter,
     KlinesRepoAdapter,
     dataframe_to_rows,
@@ -13,6 +16,9 @@ from .klines_repo import (
 )
 
 __all__ = [
+    "DEFAULT_EXCHANGE",
+    "DEFAULT_MARKET_TYPE",
+    "VALID_MARKET_TYPES",
     "AsyncKlinesRepoAdapter",
     "KlinesRepoAdapter",
     "dataframe_to_rows",

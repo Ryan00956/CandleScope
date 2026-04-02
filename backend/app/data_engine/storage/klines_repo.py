@@ -28,6 +28,11 @@ INTERVAL_SECONDS = {
     "1M": 2592000,
 }
 
+# Valid market types
+VALID_MARKET_TYPES = ("spot", "futures", "swap")
+DEFAULT_EXCHANGE = "binance"
+DEFAULT_MARKET_TYPE = "spot"
+
 
 def interval_to_milliseconds(interval: str) -> int:
     if interval not in INTERVAL_SECONDS:
@@ -43,12 +48,83 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_add_exchange_market_type(conn: sqlite3.Connection) -> None:
+    """Auto-migrate legacy tables that lack exchange/market_type columns.
+
+    Strategy:
+      1. Check if the 'exchange' column exists in the klines table.
+      2. If not, create a new table with the full schema, copy data over
+         (filling defaults), and swap tables.
+    """
+    cursor = conn.execute("PRAGMA table_info(klines);")
+    columns = {row[1] for row in cursor.fetchall()}
+
+    if "exchange" in columns and "market_type" in columns:
+        return  # Already migrated
+
+    print("[migration] Adding exchange/market_type columns to klines table...")
+
+    conn.executescript(
+        f"""
+        -- Create the new table with updated schema
+        CREATE TABLE IF NOT EXISTS klines_new (
+            exchange TEXT NOT NULL DEFAULT '{DEFAULT_EXCHANGE}',
+            market_type TEXT NOT NULL DEFAULT '{DEFAULT_MARKET_TYPE}',
+            symbol TEXT NOT NULL,
+            interval TEXT NOT NULL,
+            open_time INTEGER NOT NULL,
+            close_time INTEGER,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            volume REAL NOT NULL,
+            quote_volume REAL,
+            trades INTEGER,
+            taker_buy_base REAL,
+            taker_buy_quote REAL,
+            source TEXT NOT NULL DEFAULT '{DEFAULT_EXCHANGE}',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (exchange, market_type, symbol, interval, open_time)
+        );
+
+        -- Copy existing data with default values for new columns
+        INSERT OR IGNORE INTO klines_new (
+            exchange, market_type, symbol, interval, open_time,
+            close_time, open, high, low, close, volume,
+            quote_volume, trades, taker_buy_base, taker_buy_quote,
+            source, created_at, updated_at
+        )
+        SELECT
+            '{DEFAULT_EXCHANGE}', '{DEFAULT_MARKET_TYPE}',
+            symbol, interval, open_time,
+            close_time, open, high, low, close, volume,
+            quote_volume, trades, taker_buy_base, taker_buy_quote,
+            source, created_at, updated_at
+        FROM klines;
+
+        -- Swap tables
+        DROP TABLE IF EXISTS klines;
+        ALTER TABLE klines_new RENAME TO klines;
+
+        -- Recreate index
+        CREATE INDEX IF NOT EXISTS idx_klines_lookup
+        ON klines(exchange, market_type, symbol, interval, open_time);
+        """
+    )
+    print("[migration] Migration complete ✓")
+
+
 def init_klines_storage() -> None:
     Path(KLINES_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     with _connect() as conn:
+        # Step 1: Create the table if it doesn't exist (fresh install)
         conn.executescript(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS klines (
+                exchange TEXT NOT NULL DEFAULT '{DEFAULT_EXCHANGE}',
+                market_type TEXT NOT NULL DEFAULT '{DEFAULT_MARKET_TYPE}',
                 symbol TEXT NOT NULL,
                 interval TEXT NOT NULL,
                 open_time INTEGER NOT NULL,
@@ -62,14 +138,22 @@ def init_klines_storage() -> None:
                 trades INTEGER,
                 taker_buy_base REAL,
                 taker_buy_quote REAL,
-                source TEXT NOT NULL DEFAULT 'binance',
+                source TEXT NOT NULL DEFAULT '{DEFAULT_EXCHANGE}',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
-                PRIMARY KEY (symbol, interval, open_time)
+                PRIMARY KEY (exchange, market_type, symbol, interval, open_time)
             );
+            """
+        )
 
-            CREATE INDEX IF NOT EXISTS idx_klines_symbol_interval_time
-            ON klines(symbol, interval, open_time);
+        # Step 2: Migrate old schema if needed (adds exchange/market_type columns)
+        _migrate_add_exchange_market_type(conn)
+
+        # Step 3: Create index (safe after migration)
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_klines_lookup
+            ON klines(exchange, market_type, symbol, interval, open_time);
             """
         )
 
@@ -103,6 +187,9 @@ def upsert_klines(
     interval: str,
     rows: list[dict],
     source: str = "binance",
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
 ) -> int:
     if not rows:
         return 0
@@ -110,6 +197,8 @@ def upsert_klines(
     now_ms = int(time.time() * 1000)
     payload = [
         (
+            exchange,
+            market_type,
             symbol,
             interval,
             r["open_time"],
@@ -134,12 +223,12 @@ def upsert_klines(
         conn.executemany(
             """
             INSERT INTO klines (
-                symbol, interval, open_time, close_time,
-                open, high, low, close, volume, quote_volume,
+                exchange, market_type, symbol, interval, open_time,
+                close_time, open, high, low, close, volume, quote_volume,
                 trades, taker_buy_base, taker_buy_quote,
                 source, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(symbol, interval, open_time) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(exchange, market_type, symbol, interval, open_time) DO UPDATE SET
                 close_time = excluded.close_time,
                 open = excluded.open,
                 high = excluded.high,
@@ -167,9 +256,12 @@ def query_klines(
     end_ms: int | None = None,
     limit: int | None = None,
     order: str = "ASC",
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
 ) -> list[dict]:
-    where = ["symbol = ?", "interval = ?"]
-    params: list[object] = [symbol, interval]
+    where = ["exchange = ?", "market_type = ?", "symbol = ?", "interval = ?"]
+    params: list[object] = [exchange, market_type, symbol, interval]
 
     if start_ms is not None:
         where.append("open_time >= ?")
@@ -180,7 +272,7 @@ def query_klines(
 
     order_sql = "DESC" if order.upper() == "DESC" else "ASC"
     sql = f"""
-        SELECT symbol, interval, open_time, close_time,
+        SELECT exchange, market_type, symbol, interval, open_time, close_time,
                open, high, low, close, volume, quote_volume,
                trades, taker_buy_base, taker_buy_quote, source
         FROM klines
@@ -197,19 +289,27 @@ def query_klines(
     return [dict(r) for r in rows]
 
 
-def fetch_before(symbol: str, interval: str, before_ms: int, limit: int = 500) -> list[dict]:
+def fetch_before(
+    symbol: str,
+    interval: str,
+    before_ms: int,
+    limit: int = 500,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             """
-            SELECT symbol, interval, open_time, close_time,
+            SELECT exchange, market_type, symbol, interval, open_time, close_time,
                    open, high, low, close, volume, quote_volume,
                    trades, taker_buy_base, taker_buy_quote, source
             FROM klines
-            WHERE symbol = ? AND interval = ? AND open_time < ?
+            WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ? AND open_time < ?
             ORDER BY open_time DESC
             LIMIT ?
             """,
-            (symbol, interval, before_ms, limit),
+            (exchange, market_type, symbol, interval, before_ms, limit),
         ).fetchall()
 
     records = [dict(r) for r in rows]
@@ -217,7 +317,13 @@ def fetch_before(symbol: str, interval: str, before_ms: int, limit: int = 500) -
     return records
 
 
-def get_bounds(symbol: str, interval: str) -> dict:
+def get_bounds(
+    symbol: str,
+    interval: str,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+) -> dict:
     with _connect() as conn:
         row = conn.execute(
             """
@@ -226,9 +332,9 @@ def get_bounds(symbol: str, interval: str) -> dict:
                 MAX(open_time) AS latest_open_time,
                 COUNT(*) AS total_count
             FROM klines
-            WHERE symbol = ? AND interval = ?
+            WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ?
             """,
-            (symbol, interval),
+            (exchange, market_type, symbol, interval),
         ).fetchone()
 
     if row is None:
@@ -240,6 +346,8 @@ def list_series_summaries(custom_only: bool = False) -> list[dict]:
     """List stored series with bounds/count metadata."""
     sql = """
         SELECT
+            exchange,
+            market_type,
             symbol,
             interval,
             MIN(open_time) AS earliest_open_time,
@@ -253,8 +361,8 @@ def list_series_summaries(custom_only: bool = False) -> list[dict]:
         sql += f" WHERE interval NOT IN ({placeholders})"
         params.extend(VALID_INTERVALS)
     sql += """
-        GROUP BY symbol, interval
-        ORDER BY symbol ASC, interval ASC
+        GROUP BY exchange, market_type, symbol, interval
+        ORDER BY exchange ASC, market_type ASC, symbol ASC, interval ASC
     """
 
     with _connect() as conn:
@@ -279,6 +387,14 @@ class KlinesRepoAdapter:
         dm.set_storage(KlinesRepoAdapter())
     """
 
+    def __init__(
+        self,
+        exchange: str = DEFAULT_EXCHANGE,
+        market_type: str = DEFAULT_MARKET_TYPE,
+    ) -> None:
+        self._exchange = exchange
+        self._market_type = market_type
+
     def query_bars(
         self,
         symbol: str,
@@ -296,6 +412,8 @@ class KlinesRepoAdapter:
             end_ms=end_ms,
             limit=limit,
             order=order,
+            exchange=self._exchange,
+            market_type=self._market_type,
         )
 
     def upsert_bars(
@@ -311,11 +429,18 @@ class KlinesRepoAdapter:
             interval=interval,
             rows=rows,
             source=source,
+            exchange=self._exchange,
+            market_type=self._market_type,
         )
 
     def get_bounds(self, symbol: str, interval: str) -> dict:
         """Return {earliest_open_time, latest_open_time, total_count}."""
-        return get_bounds(symbol=symbol, interval=interval)
+        return get_bounds(
+            symbol=symbol,
+            interval=interval,
+            exchange=self._exchange,
+            market_type=self._market_type,
+        )
 
     def list_series(self, custom_only: bool = False) -> list[dict]:
         """Return stored series summaries."""
@@ -334,6 +459,8 @@ class KlinesRepoAdapter:
             interval=interval,
             start_ms=start_ms,
             end_ms=end_ms,
+            exchange=self._exchange,
+            market_type=self._market_type,
         )
 
     def fetch_before(
@@ -349,6 +476,8 @@ class KlinesRepoAdapter:
             interval=interval,
             before_ms=before_ms,
             limit=limit,
+            exchange=self._exchange,
+            market_type=self._market_type,
         )
 
 
@@ -376,11 +505,22 @@ class AsyncKlinesRepoAdapter:
         backfill_engine = BackfillEngine(storage=AsyncKlinesRepoAdapter(), ...)
     """
 
+    def __init__(
+        self,
+        exchange: str = DEFAULT_EXCHANGE,
+        market_type: str = DEFAULT_MARKET_TYPE,
+    ) -> None:
+        self._exchange = exchange
+        self._market_type = market_type
+
     async def get_latest_time(self, symbol: str, interval: str) -> int | None:
         """Return the latest open_time (ms) stored, or None if empty."""
         import asyncio
         def _sync():
-            bounds = get_bounds(symbol, interval)
+            bounds = get_bounds(
+                symbol, interval,
+                exchange=self._exchange, market_type=self._market_type,
+            )
             return bounds.get("latest_open_time")
         return await asyncio.to_thread(_sync)
 
@@ -388,7 +528,10 @@ class AsyncKlinesRepoAdapter:
         """Return the earliest open_time (ms) stored, or None if empty."""
         import asyncio
         def _sync():
-            bounds = get_bounds(symbol, interval)
+            bounds = get_bounds(
+                symbol, interval,
+                exchange=self._exchange, market_type=self._market_type,
+            )
             return bounds.get("earliest_open_time")
         return await asyncio.to_thread(_sync)
 
@@ -397,28 +540,43 @@ class AsyncKlinesRepoAdapter:
     ) -> list[dict]:
         """Return all bars within [start_ms, end_ms], ordered by open_time ASC."""
         import asyncio
-        return await asyncio.to_thread(
-            query_klines, symbol, interval, start_ms, end_ms, None, "ASC",
-        )
+        exchange = self._exchange
+        market_type = self._market_type
+        def _sync():
+            return query_klines(
+                symbol, interval, start_ms, end_ms, None, "ASC",
+                exchange=exchange, market_type=market_type,
+            )
+        return await asyncio.to_thread(_sync)
 
     async def upsert_bars(
         self, symbol: str, interval: str, bars: list[dict], source: str = "backfill",
     ) -> int:
         """Insert or update bars. Return number of rows affected."""
         import asyncio
-        return await asyncio.to_thread(upsert_klines, symbol, interval, bars, source)
+        exchange = self._exchange
+        market_type = self._market_type
+        def _sync():
+            return upsert_klines(
+                symbol, interval, bars, source,
+                exchange=exchange, market_type=market_type,
+            )
+        return await asyncio.to_thread(_sync)
 
     async def count_bars(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
     ) -> int:
         """Count bars within [start_ms, end_ms]."""
         import asyncio
+        exchange = self._exchange
+        market_type = self._market_type
         def _sync():
             with _connect() as conn:
                 row = conn.execute(
                     "SELECT COUNT(*) AS cnt FROM klines "
-                    "WHERE symbol = ? AND interval = ? AND open_time >= ? AND open_time <= ?",
-                    (symbol, interval, start_ms, end_ms),
+                    "WHERE exchange = ? AND market_type = ? "
+                    "AND symbol = ? AND interval = ? AND open_time >= ? AND open_time <= ?",
+                    (exchange, market_type, symbol, interval, start_ms, end_ms),
                 ).fetchone()
                 return row["cnt"] if row else 0
         return await asyncio.to_thread(_sync)
@@ -428,27 +586,37 @@ class AsyncKlinesRepoAdapter:
     ) -> set[int]:
         """Return the set of open_time values that exist in [start_ms, end_ms]."""
         import asyncio
+        exchange = self._exchange
+        market_type = self._market_type
         def _sync():
             with _connect() as conn:
                 rows = conn.execute(
                     "SELECT open_time FROM klines "
-                    "WHERE symbol = ? AND interval = ? AND open_time >= ? AND open_time <= ?",
-                    (symbol, interval, start_ms, end_ms),
+                    "WHERE exchange = ? AND market_type = ? "
+                    "AND symbol = ? AND interval = ? AND open_time >= ? AND open_time <= ?",
+                    (exchange, market_type, symbol, interval, start_ms, end_ms),
                 ).fetchall()
                 return {r["open_time"] for r in rows}
         return await asyncio.to_thread(_sync)
 
 
-def has_older_than(symbol: str, interval: str, open_time_ms: int) -> bool:
+def has_older_than(
+    symbol: str,
+    interval: str,
+    open_time_ms: int,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+) -> bool:
     with _connect() as conn:
         row = conn.execute(
             """
             SELECT 1
             FROM klines
-            WHERE symbol = ? AND interval = ? AND open_time < ?
+            WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ? AND open_time < ?
             LIMIT 1
             """,
-            (symbol, interval, open_time_ms),
+            (exchange, market_type, symbol, interval, open_time_ms),
         ).fetchone()
     return row is not None
 
@@ -458,9 +626,12 @@ def delete_klines(
     interval: str,
     start_ms: int | None = None,
     end_ms: int | None = None,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
 ) -> int:
-    where = ["symbol = ?", "interval = ?"]
-    params: list[object] = [symbol, interval]
+    where = ["exchange = ?", "market_type = ?", "symbol = ?", "interval = ?"]
+    params: list[object] = [exchange, market_type, symbol, interval]
 
     if start_ms is not None:
         where.append("open_time >= ?")

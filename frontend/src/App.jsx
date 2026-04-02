@@ -63,26 +63,75 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-// Native intervals
-const NATIVE_INTERVALS = [
-  { value: "1m", label: "1m", seconds: 60 },
-  { value: "3m", label: "3m", seconds: 180 },
-  { value: "5m", label: "5m", seconds: 300 },
-  { value: "15m", label: "15m", seconds: 900 },
-  { value: "30m", label: "30m", seconds: 1800 },
-  { value: "1h", label: "1H", seconds: 3600 },
-  { value: "2h", label: "2H", seconds: 7200 },
-  { value: "4h", label: "4H", seconds: 14400 },
-  { value: "1d", label: "1D", seconds: 86400 },
-  { value: "1w", label: "1W", seconds: 604800 },
-  { value: "1M", label: "1M", seconds: 2592000 },
-];
+// ═══════════════════════════════════════════════════════════════
+//  Exchange-specific interval configuration
+//  Each exchange defines its own native intervals and default
+//  history days. Adding a new exchange is as simple as adding
+//  an entry here.
+// ═══════════════════════════════════════════════════════════════
+const EXCHANGE_INTERVALS = {
+  binance: {
+    label: "Binance",
+    intervals: [
+      { value: "1s",  label: "1s",  seconds: 1 },
+      { value: "1m",  label: "1m",  seconds: 60 },
+      { value: "3m",  label: "3m",  seconds: 180 },
+      { value: "5m",  label: "5m",  seconds: 300 },
+      { value: "15m", label: "15m", seconds: 900 },
+      { value: "30m", label: "30m", seconds: 1800 },
+      { value: "1h",  label: "1H",  seconds: 3600 },
+      { value: "2h",  label: "2H",  seconds: 7200 },
+      { value: "4h",  label: "4H",  seconds: 14400 },
+      { value: "6h",  label: "6H",  seconds: 21600 },
+      { value: "8h",  label: "8H",  seconds: 28800 },
+      { value: "12h", label: "12H", seconds: 43200 },
+      { value: "1d",  label: "1D",  seconds: 86400 },
+      { value: "3d",  label: "3D",  seconds: 259200 },
+      { value: "1w",  label: "1W",  seconds: 604800 },
+      { value: "1M",  label: "1M",  seconds: 2592000 },
+    ],
+    // Default history depth per interval
+    intervalDays: {
+      "1s": 1, "1m": 1, "3m": 2, "5m": 3, "15m": 7, "30m": 14,
+      "1h": 30, "2h": 60, "4h": 90, "6h": 120, "8h": 180, "12h": 180,
+      "1d": 365, "3d": 730, "1w": 1095, "1M": 1095,
+    },
+  },
+  // Future exchanges can be added here, e.g.:
+  // okx: {
+  //   label: "OKX",
+  //   intervals: [
+  //     { value: "1m", label: "1m", seconds: 60 },
+  //     { value: "3m", label: "3m", seconds: 180 },
+  //     { value: "5m", label: "5m", seconds: 300 },
+  //     { value: "15m", label: "15m", seconds: 900 },
+  //     { value: "30m", label: "30m", seconds: 1800 },
+  //     { value: "1H", label: "1H", seconds: 3600 },
+  //     { value: "2H", label: "2H", seconds: 7200 },
+  //     { value: "4H", label: "4H", seconds: 14400 },
+  //     { value: "6H", label: "6H", seconds: 21600 },
+  //     { value: "12H", label: "12H", seconds: 43200 },
+  //     { value: "1D", label: "1D", seconds: 86400 },
+  //     { value: "1W", label: "1W", seconds: 604800 },
+  //     { value: "1M", label: "1M", seconds: 2592000 },
+  //   ],
+  //   intervalDays: { ... },
+  // },
+};
 
-// Intervals to subscribe via WebSocket for background updates
-const BASE_WS_INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d", "1w", "1M"];
+/** Get native intervals for the current exchange */
+function getNativeIntervals(exchange) {
+  return EXCHANGE_INTERVALS[exchange]?.intervals || EXCHANGE_INTERVALS.binance.intervals;
+}
 
-function buildSortedIntervals(savedCustom) {
-  const all = NATIVE_INTERVALS.map((i) => ({ ...i, isCustom: false }));
+/** Get WebSocket intervals to subscribe for the current exchange */
+function getBaseWsIntervals(exchange) {
+  return getNativeIntervals(exchange).map((i) => i.value);
+}
+
+function buildSortedIntervals(savedCustom, exchange = "binance") {
+  const native = getNativeIntervals(exchange);
+  const all = native.map((i) => ({ ...i, isCustom: false }));
   for (const intv of savedCustom) {
     const secs = parseIntervalSeconds(intv);
     if (secs && !all.some((a) => a.value === intv)) {
@@ -91,10 +140,12 @@ function buildSortedIntervals(savedCustom) {
   }
   all.sort((a, b) => a.seconds - b.seconds);
 
-  const minutes = all.filter((i) => i.seconds < 3600);
+  const seconds = all.filter((i) => i.seconds < 60);
+  const minutes = all.filter((i) => i.seconds >= 60 && i.seconds < 3600);
   const hours = all.filter((i) => i.seconds >= 3600 && i.seconds < 86400);
   const days = all.filter((i) => i.seconds >= 86400);
   return [
+    { label: "Seconds", items: seconds },
     { label: "Minutes", items: minutes },
     { label: "Hours", items: hours },
     { label: "Days", items: days },
@@ -180,21 +231,19 @@ function getVisibleRangeForInterval(symbol, interval) {
   );
 }
 
-const INTERVAL_DAYS = {
-  "1m": 1, "3m": 2, "5m": 3, "15m": 7, "30m": 14,
-  "1h": 30, "2h": 60, "4h": 90, "1d": 365, "1w": 365, "1M": 365,
-};
-
-function getIntervalDays(intv) {
-  if (INTERVAL_DAYS[intv]) return INTERVAL_DAYS[intv];
+function getIntervalDays(intv, exchange = "binance") {
+  const config = EXCHANGE_INTERVALS[exchange] || EXCHANGE_INTERVALS.binance;
+  if (config.intervalDays[intv]) return config.intervalDays[intv];
   const secs = parseIntervalSeconds(intv);
   if (!secs) return 7;
+  if (secs <= 1) return 1;
   if (secs <= 60) return 1;
   if (secs <= 300) return 3;
   if (secs <= 900) return 7;
   if (secs <= 1800) return 14;
   if (secs <= 3600) return 30;
   if (secs <= 14400) return 90;
+  if (secs <= 43200) return 180;
   return 365;
 }
 
@@ -285,6 +334,10 @@ function upsertRealtimeKline(current, incoming) {
 
 export default function App() {
   const [symbol] = useState("BTCUSDT");
+  const [exchange] = useState(() => {
+    const prefs = loadUserPrefs();
+    return prefs.lastExchange || "binance";
+  });
   const [interval, setInterval_] = useState(() => {
     const prefs = loadUserPrefs();
     return prefs.lastInterval || "1h";
@@ -431,10 +484,11 @@ export default function App() {
   // --- Saved custom intervals ---
   const [savedCustomIntervals, setSavedCustomIntervals] = useState(loadSavedCustomIntervals);
   const [showIntervalManager, setShowIntervalManager] = useState(false);
-  const intervalGroups = buildSortedIntervals(savedCustomIntervals);
+  const intervalGroups = buildSortedIntervals(savedCustomIntervals, exchange);
+  const baseWsIntervals = useMemo(() => getBaseWsIntervals(exchange), [exchange]);
   const trackedIntervals = useMemo(
-    () => Array.from(new Set([...BASE_WS_INTERVALS, ...savedCustomIntervals, interval])),
-    [interval, savedCustomIntervals],
+    () => Array.from(new Set([...baseWsIntervals, ...savedCustomIntervals, interval])),
+    [interval, savedCustomIntervals, baseWsIntervals],
   );
   const trackedIntervalsRef = useRef(trackedIntervals);
   trackedIntervalsRef.current = trackedIntervals;

@@ -155,6 +155,14 @@ class DataManager:
         # ── State ────────────────────────────────────────────
         self._started = False
         self._ttl_task: asyncio.Task | None = None
+        self._cleanup_task: asyncio.Task | None = None
+
+        # ── Data retention limits (updated via API) ──────────
+        self._db_limits: dict[str, int] = {
+            "minutes": 200_000,
+            "hours": 50_000,
+            "daily": 0,  # 0 = unlimited
+        }
 
     # ═══════════════════════════════════════════════════════════
     #  Setup — call before start()
@@ -232,6 +240,12 @@ class DataManager:
         if self._cfg.cache.ttl_seconds > 0:
             self._ttl_task = asyncio.create_task(self._ttl_loop())
 
+        # Startup DB cleanup (safe — no subscribers yet)
+        await asyncio.to_thread(self._run_startup_db_cleanup)
+
+        # Ephemeral trim loop (every 30 min)
+        self._cleanup_task = asyncio.create_task(self._ephemeral_trim_loop())
+
         logger.info("DataManager started")
 
     async def shutdown(self) -> None:
@@ -246,6 +260,14 @@ class DataManager:
             self._ttl_task.cancel()
             try:
                 await self._ttl_task
+            except asyncio.CancelledError:
+                pass
+
+        # Stop cleanup task
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
             except asyncio.CancelledError:
                 pass
 
@@ -705,7 +727,16 @@ class DataManager:
         bar_state: BarState,
         event_type: DataEventType,
     ) -> None:
-        """Persist finalized/corrected bars so storage matches live state."""
+        """Persist finalized/corrected bars so storage matches live state.
+
+        Ephemeral intervals (e.g. 1s) are skipped — they live only in
+        the in-memory cache and are never written to the database.
+        """
+        # Ephemeral intervals are cache-only — never persist to DB
+        from app.core.market import is_ephemeral_interval
+        if is_ephemeral_interval(bar_state.interval):
+            return
+
         storage = self.query_engine._storage
         if storage is None:
             return
@@ -1112,3 +1143,134 @@ class DataManager:
                     logger.debug("TTL eviction: removed %d series", evicted)
         except asyncio.CancelledError:
             pass
+
+    # ═══════════════════════════════════════════════════════════
+    #  Data Retention Cleanup
+    # ═══════════════════════════════════════════════════════════
+
+    def update_retention_limits(
+        self,
+        db_limits: dict[str, int] | None = None,
+        ephemeral_bars: int | None = None,
+    ) -> None:
+        """Update data retention limits from frontend settings.
+
+        Args:
+            db_limits:      {"minutes": N, "hours": N, "daily": N} where 0 = unlimited.
+            ephemeral_bars: Max bars per ephemeral series (e.g. 86400 for 24h of 1s).
+        """
+        if db_limits is not None:
+            self._db_limits = {**self._db_limits, **db_limits}
+            logger.info("DB retention limits updated: %s", self._db_limits)
+        if ephemeral_bars is not None:
+            self.cache.set_ephemeral_limit(ephemeral_bars)
+            logger.info("Ephemeral cache limit updated: %d bars", ephemeral_bars)
+
+    def _run_startup_db_cleanup(self) -> None:
+        """One-time DB cleanup at startup.  Runs in a thread.
+
+        Scans all stored series and trims any that exceed their tier's
+        retention limit.  Safe because there are no active subscribers
+        at startup.
+        """
+        storage = self.query_engine._storage
+        if storage is None:
+            return
+
+        from app.core.market import get_tier_for_interval, is_ephemeral_interval
+
+        try:
+            series_list = storage.list_series()
+        except Exception as exc:
+            logger.warning("Startup cleanup: failed to list series: %s", exc)
+            return
+
+        total_deleted = 0
+        cleaned_count = 0
+
+        for s in series_list:
+            symbol = s.get("symbol", "")
+            interval = s.get("interval", "")
+            if not symbol or not interval:
+                continue
+
+            # Skip ephemeral intervals (they don't have DB data anyway)
+            if is_ephemeral_interval(interval):
+                continue
+
+            tier = get_tier_for_interval(interval)
+            max_bars = self._db_limits.get(tier, 0)
+
+            if max_bars == 0:  # unlimited
+                continue
+
+            try:
+                deleted = storage.delete_oldest(
+                    symbol=symbol,
+                    interval=interval,
+                    keep=max_bars,
+                )
+                if deleted > 0:
+                    total_deleted += deleted
+                    cleaned_count += 1
+                    logger.info(
+                        "Startup cleanup: %s@%s — deleted %d oldest bars (kept %d)",
+                        symbol, interval, deleted, max_bars,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Startup cleanup failed for %s@%s: %s",
+                    symbol, interval, exc,
+                )
+
+        if total_deleted > 0:
+            logger.info(
+                "Startup DB cleanup complete: %d bars deleted across %d series",
+                total_deleted, cleaned_count,
+            )
+            print(
+                f"[startup] DB cleanup: {total_deleted} bars deleted "
+                f"across {cleaned_count} series"
+            )
+        else:
+            logger.info("Startup DB cleanup: all series within limits")
+
+    async def _ephemeral_trim_loop(self) -> None:
+        """Background loop: trim ephemeral cache series every 30 minutes.
+
+        Skips series with active subscribers to avoid deleting data
+        while the user is viewing it.
+        """
+        try:
+            while True:
+                await asyncio.sleep(30 * 60)  # 30 minutes
+                await self._run_ephemeral_trim()
+        except asyncio.CancelledError:
+            pass
+
+    async def _run_ephemeral_trim(self) -> None:
+        """One pass of ephemeral cache trimming."""
+        from app.core.market import is_ephemeral_interval
+
+        limit = self.cache._ephemeral_max_bars
+        trimmed_total = 0
+        skipped = 0
+
+        for key in self.cache.get_all_keys():
+            if not is_ephemeral_interval(key.interval):
+                continue
+
+            # Skip if there are active subscribers
+            sub_count = self.event_bus.get_subscriber_count(key)
+            if sub_count > 0:
+                skipped += 1
+                continue
+
+            trimmed = self.cache.trim_series(key, limit)
+            trimmed_total += trimmed
+
+        if trimmed_total > 0 or skipped > 0:
+            logger.info(
+                "Ephemeral trim: %d bars trimmed, %d series skipped (active)",
+                trimmed_total, skipped,
+            )

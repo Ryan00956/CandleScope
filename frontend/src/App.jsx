@@ -92,7 +92,7 @@ const EXCHANGE_INTERVALS = {
     ],
     // Default history depth per interval
     intervalDays: {
-      "1s": 1, "1m": 1, "3m": 2, "5m": 3, "15m": 7, "30m": 14,
+      "1s": 0.04, "1m": 1, "3m": 2, "5m": 3, "15m": 7, "30m": 14,
       "1h": 30, "2h": 60, "4h": 90, "6h": 120, "8h": 180, "12h": 180,
       "1d": 365, "3d": 730, "1w": 1095, "1M": 1095,
     },
@@ -515,14 +515,19 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(() => {
     const saved = localStorage.getItem("candlescope-settings");
-    return saved
-      ? JSON.parse(saved)
-      : {
-        theme: "dark",
-        customBg: "#0f172a",
-        upColor: "#22c55e",
-        downColor: "#ef4444",
-      };
+    const defaults = {
+      theme: "dark",
+      customBg: "#0f172a",
+      upColor: "#22c55e",
+      downColor: "#ef4444",
+      cachePreset: "standard",
+      cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
+      ephemeralCacheBars: 86400,
+    };
+    if (saved) {
+      return { ...defaults, ...JSON.parse(saved) };
+    }
+    return defaults;
   });
 
   useEffect(() => {
@@ -539,6 +544,20 @@ export default function App() {
     root.style.setProperty("--candle-down", settings.downColor);
     localStorage.setItem("candlescope-settings", JSON.stringify(settings));
   }, [settings]);
+
+  // Sync cache limits to backend when they change
+  useEffect(() => {
+    const { cacheLimits, ephemeralCacheBars } = settings;
+    if (!cacheLimits) return;
+    fetch("/api/v1/settings/cache-limits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        db_limits: cacheLimits,
+        ephemeral_bars: ephemeralCacheBars ?? 86400,
+      }),
+    }).catch(() => {}); // fire-and-forget
+  }, [settings.cacheLimits, settings.ephemeralCacheBars]);
 
   const abortRef = useRef(null);
 

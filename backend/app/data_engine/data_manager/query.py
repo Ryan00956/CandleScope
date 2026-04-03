@@ -150,6 +150,9 @@ class QueryEngine:
             1. Cache (fast path)
             2. Storage (if cache miss or partial)
             3. Backfill trigger (if storage also missing)
+
+        Ephemeral intervals (e.g. 1s) use a cache-only fast path:
+        no storage reads, no backfill triggers.
         """
         t0 = time.monotonic()
         self._queries += 1
@@ -165,6 +168,17 @@ class QueryEngine:
             )
 
         key = SeriesKey(symbol, interval)
+
+        # Ephemeral intervals are cache-only — skip storage and backfill
+        from app.core.market import is_ephemeral_interval
+        if is_ephemeral_interval(interval):
+            effective_limit = min(
+                limit or self._cfg.default_limit,
+                self._cfg.max_limit,
+            )
+            start_s = start_ms // 1000 if start_ms else None
+            end_s = end_ms // 1000 if end_ms else None
+            return self._query_cache_only(key, start_s, end_s, effective_limit, t0)
         effective_limit = min(
             limit or self._cfg.default_limit,
             self._cfg.max_limit,
@@ -336,6 +350,22 @@ class QueryEngine:
         key = SeriesKey(symbol, interval)
         before_s = before_ms // 1000
         effective_limit = min(limit, self._cfg.max_limit)
+
+        # Ephemeral intervals are cache-only — skip storage and backfill
+        from app.core.market import is_ephemeral_interval
+        if is_ephemeral_interval(interval):
+            cached = self._cache.get_before(key, before_s, effective_limit)
+            return QueryResult(
+                bars=cached,
+                symbol=key.symbol,
+                interval=key.interval,
+                source=QuerySource.CACHE,
+                total=len(cached),
+                has_more=self._cache.series_count(key) > len(cached),
+                cache_hit=bool(cached),
+                backfill_triggered=False,
+                metadata={"ephemeral": True},
+            )
 
         # Try cache first
         cached = self._cache.get_before(key, before_s, effective_limit)
@@ -799,6 +829,38 @@ class QueryEngine:
             bars = self._merge(bars, all_fill_bars)
 
         return bars
+
+    def _query_cache_only(
+        self,
+        key: SeriesKey,
+        start_s: int | None,
+        end_s: int | None,
+        limit: int,
+        started_at: float,
+    ) -> QueryResult:
+        """Ephemeral interval query — cache only, no storage, no backfill.
+
+        Used for intervals like 1s where data is never persisted to DB.
+        Returns whatever is currently in the in-memory cache.
+        """
+        if start_s is not None or end_s is not None:
+            bars = self._cache.query(key, start_s, end_s, limit)
+        else:
+            bars = self._cache.get_latest(key, limit)
+
+        self._cache_hits += 1 if bars else 0
+        elapsed = time.monotonic() - started_at
+        return QueryResult(
+            bars=bars,
+            symbol=key.symbol,
+            interval=key.interval,
+            source=QuerySource.CACHE,
+            total=len(bars),
+            has_more=self._cache.series_count(key) > len(bars),
+            cache_hit=bool(bars),
+            backfill_triggered=False,
+            metadata={"elapsed_ms": round(elapsed * 1000, 2), "ephemeral": True},
+        )
 
     def _is_complete(
         self,

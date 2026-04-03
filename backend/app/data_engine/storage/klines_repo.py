@@ -480,6 +480,21 @@ class KlinesRepoAdapter:
             market_type=self._market_type,
         )
 
+    def delete_oldest(
+        self,
+        symbol: str,
+        interval: str,
+        keep: int,
+    ) -> int:
+        """Delete oldest bars, keeping only the most recent *keep* rows."""
+        return delete_oldest_klines(
+            symbol=symbol,
+            interval=interval,
+            keep=keep,
+            exchange=self._exchange,
+            market_type=self._market_type,
+        )
+
 
 # ═══════════════════════════════════════════════════════════════
 #  AsyncKlinesRepoAdapter — implements backfill.models.StorageBackend protocol
@@ -643,5 +658,59 @@ def delete_klines(
     sql = f"DELETE FROM klines WHERE {' AND '.join(where)}"
     with _connect() as conn:
         cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.rowcount
+
+
+def delete_oldest_klines(
+    symbol: str,
+    interval: str,
+    keep: int,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+) -> int:
+    """Delete oldest bars, keeping only the most recent *keep* rows.
+
+    Uses a subquery to find the cutoff open_time, then deletes everything
+    older.  Returns the number of rows actually deleted.
+
+    If total rows <= keep, nothing is deleted (returns 0).
+    """
+    if keep < 0:
+        keep = 0
+
+    with _connect() as conn:
+        # First check total count
+        count_row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM klines "
+            "WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ?",
+            (exchange, market_type, symbol, interval),
+        ).fetchone()
+        total = count_row["cnt"] if count_row else 0
+
+        if total <= keep:
+            return 0
+
+        # Find the cutoff: the open_time of the (keep)-th newest bar
+        cutoff_row = conn.execute(
+            "SELECT open_time FROM klines "
+            "WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ? "
+            "ORDER BY open_time DESC LIMIT 1 OFFSET ?",
+            (exchange, market_type, symbol, interval, keep),
+        ).fetchone()
+
+        if cutoff_row is None:
+            return 0
+
+        cutoff_ms = cutoff_row["open_time"]
+
+        # Delete everything at or before the cutoff
+        cur = conn.execute(
+            "DELETE FROM klines "
+            "WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ? "
+            "AND open_time <= ?",
+            (exchange, market_type, symbol, interval, cutoff_ms),
+        )
         conn.commit()
         return cur.rowcount

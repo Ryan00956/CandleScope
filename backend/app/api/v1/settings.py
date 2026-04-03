@@ -862,3 +862,35 @@ async def scan_and_fill_gaps(request: Request) -> dict:
             "results": results,
         }
 
+
+class CacheLimitsRequest(BaseModel):
+    """Request body for updating data retention limits."""
+    db_limits: dict[str, int] | None = None     # {"minutes": N, "hours": N, "daily": N}
+    ephemeral_bars: int | None = None            # max bars for ephemeral series (1s)
+
+
+@router.post("/cache-limits")
+async def update_cache_limits(request: Request, body: CacheLimitsRequest) -> dict:
+    """Update data retention limits from frontend settings.
+
+    Accepts:
+      - db_limits: per-tier max bar counts for DB-persisted intervals
+      - ephemeral_bars: max bar count for in-memory-only intervals (e.g. 1s)
+
+    The DB limits are applied at next startup.  The ephemeral limit
+    takes effect immediately (next trim cycle or on new series creation).
+    """
+    dm = _get_data_manager(request)
+    if dm is None:
+        raise HTTPException(status_code=503, detail="DataManager 尚未初始化")
+
+    dm.update_retention_limits(
+        db_limits=body.db_limits,
+        ephemeral_bars=body.ephemeral_bars,
+    )
+
+    return {
+        "status": "ok",
+        "db_limits": dm._db_limits,
+        "ephemeral_bars": dm.cache._ephemeral_max_bars,
+    }

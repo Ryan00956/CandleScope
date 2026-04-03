@@ -293,6 +293,8 @@ class BarCache:
         self._series: OrderedDict[SeriesKey, BarSeries] = OrderedDict()
         # Eviction callbacks
         self._eviction_callbacks: list[Any] = []
+        # Configurable ephemeral cache limit (default 86400 = 24h of 1s)
+        self._ephemeral_max_bars: int = 86_400
         # Metrics
         self._hits = 0
         self._misses = 0
@@ -463,6 +465,34 @@ class BarCache:
         with self._lock:
             return list(self._series.keys())
 
+    def trim_series(self, key: SeriesKey, max_bars: int) -> int:
+        """Trim a series to at most *max_bars*, dropping the oldest.
+
+        Returns the number of bars trimmed.  Safe to call even if
+        the series doesn't exist (returns 0).
+        """
+        with self._lock:
+            series = self._series.get(key)
+            if series is None or series.count <= max_bars:
+                return 0
+            overflow = series.count - max_bars
+            series._bars = series._bars[overflow:]
+            series._time_index = series._time_index[overflow:]
+            logger.debug(
+                "Trimmed %s: removed %d oldest bars (kept %d)",
+                key, overflow, series.count,
+            )
+            return overflow
+
+    def set_ephemeral_limit(self, max_bars: int) -> None:
+        """Update the ephemeral cache limit (e.g. from user settings).
+
+        Does NOT immediately trim existing series — the periodic
+        cleanup task handles that.
+        """
+        self._ephemeral_max_bars = max_bars
+        logger.info("Ephemeral cache limit updated to %d bars", max_bars)
+
     # ── Public: Snapshot ─────────────────────────────────────
 
     def snapshot(self) -> dict:
@@ -498,7 +528,15 @@ class BarCache:
                 "LRU eviction: %s (%d bars)", evicted_key, evicted_series.count,
             )
 
-        series = BarSeries(max_bars=self._cfg.max_bars_per_series)
+        # Ephemeral intervals (e.g. 1s) get a separate cache capacity
+        # since they are cache-only (no DB backing).
+        from app.core.market import is_ephemeral_interval
+        if is_ephemeral_interval(key.interval):
+            max_bars = self._ephemeral_max_bars
+        else:
+            max_bars = self._cfg.max_bars_per_series
+
+        series = BarSeries(max_bars=max_bars)
         self._series[key] = series
         return series
 

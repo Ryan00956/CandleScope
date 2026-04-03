@@ -41,6 +41,47 @@ INTERVAL_SECONDS = {
     "1M": 2592000,
 }
 
+# --------------- Ephemeral (cache-only) intervals ---------------
+# Ephemeral intervals are never persisted to the database and never
+# trigger backfill.  Data lives only in the in-memory cache and is
+# discarded when the process exits.  This is appropriate for very
+# high-frequency intervals like 1s where:
+#   - Historical data has limited value (users care about real-time)
+#   - Data volume is enormous (86,400 bars/day for 1s)
+#   - Backfill would be prohibitively slow
+EPHEMERAL_INTERVALS: set[str] = {"1s"}
+
+
+def is_ephemeral_interval(interval: str) -> bool:
+    """Return True if the interval is ephemeral (cache-only, no DB persistence)."""
+    return interval in EPHEMERAL_INTERVALS
+
+
+def get_tier_for_interval(interval: str) -> str:
+    """Classify an interval into a storage tier based on bar duration.
+
+    Returns one of: 'seconds', 'minutes', 'hours', 'daily'.
+
+    Examples::
+
+        get_tier_for_interval('1s')  -> 'seconds'
+        get_tier_for_interval('45m') -> 'minutes'
+        get_tier_for_interval('4h')  -> 'hours'
+        get_tier_for_interval('1d')  -> 'daily'
+        get_tier_for_interval('1w')  -> 'daily'
+    """
+    secs = parse_custom_interval(interval)
+    if secs is None:
+        return "minutes"  # safe fallback
+    if secs < 60:
+        return "seconds"
+    if secs < 3600:
+        return "minutes"
+    if secs < 86400:
+        return "hours"
+    return "daily"
+
+
 # --------------- Weekly alignment constants ---------------
 # Unix epoch (1970-01-01) is a Thursday.
 # To align weekly buckets to Monday 00:00 UTC, we offset by 4 days

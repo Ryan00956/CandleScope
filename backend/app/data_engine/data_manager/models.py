@@ -407,3 +407,15 @@ class StorageBackend(Protocol):
     ) -> list[dict]:
         """Fetch bars before a timestamp, ordered ASC."""
         ...
+
+    def delete_oldest(
+        self,
+        symbol: str,
+        interval: str,
+        keep: int,
+    ) -> int:
+        """Delete oldest bars, keeping only the most recent *keep* rows.
+
+        Returns the number of rows actually deleted.
+        """
+        ...

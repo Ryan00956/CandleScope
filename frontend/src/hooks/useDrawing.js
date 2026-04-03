@@ -20,10 +20,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { LineDrawingPrimitive } from "../components/primitives/LineDrawingPrimitive.js";
 import { FreehandDrawingPrimitive } from "../components/primitives/FreehandDrawingPrimitive.js";
 import { TextDrawingPrimitive } from "../components/primitives/TextDrawingPrimitive.js";
+import { FibonacciDrawingPrimitive, DEFAULT_FIB_LEVELS } from "../components/primitives/FibonacciDrawingPrimitive.js";
 import { timeToCoordinateInterpolated } from "../components/primitives/coordinateUtils.js";
 import { saveDrawings, loadDrawings, clearSavedDrawings } from "../services/drawingStorage.js";
 
 const LINE_TOOL_IDS = new Set(["line-segment", "line-ray", "line-infinite"]);
+const FIB_TOOL_IDS = new Set(["fibonacci"]);
 
 let _idCounter = 0;
 function nextId(prefix = "d") {
@@ -40,6 +42,8 @@ export function useDrawing({
   textFontSize,
   textBold,
   textItalic,
+  fibLevels,
+  fibInverted,
   symbol,
   seriesReady,
 }) {
@@ -78,11 +82,16 @@ export function useDrawing({
   textBoldRef.current = textBold;
   const textItalicRef = useRef(textItalic);
   textItalicRef.current = textItalic;
+  const fibLevelsRef = useRef(fibLevels);
+  fibLevelsRef.current = fibLevels;
+  const fibInvertedRef = useRef(fibInverted);
+  fibInvertedRef.current = fibInverted;
 
   const symbolRef = useRef(symbol);
   symbolRef.current = symbol;
 
   const isLineTool = LINE_TOOL_IDS.has(activeTool);
+  const isFibTool = FIB_TOOL_IDS.has(activeTool);
   const isPenTool = activeTool === "pen";
   const isTextTool = activeTool === "text";
   const isEraserTool = activeTool === "eraser";
@@ -320,6 +329,15 @@ export function useDrawing({
             bold: item.bold,
             italic: item.italic,
           });
+        } else if (item.type === "fibonacci") {
+          prim = new FibonacciDrawingPrimitive({
+            id: item.id || nextId("fib"),
+            dataPoints: item.dataPoints,
+            color: item.color,
+            lineWidth: item.lineWidth,
+            levels: item.levels,
+            inverted: item.inverted || false,
+          });
         } else if (item.type === "freehand") {
           prim = new FreehandDrawingPrimitive({
             id: item.id || nextId("fh"),
@@ -344,7 +362,7 @@ export function useDrawing({
     selectedIdRef.current = id;
     setSelectedPrimId(id);
     for (const prim of primitivesRef.current) {
-      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive) {
+      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive) {
         prim.setSelected(prim.id === id);
       }
     }
@@ -354,7 +372,7 @@ export function useDrawing({
     selectedIdRef.current = null;
     setSelectedPrimId(null);
     for (const prim of primitivesRef.current) {
-      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive) {
+      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive) {
         prim.setSelected(false);
       }
     }
@@ -371,6 +389,9 @@ export function useDrawing({
         if (prim instanceof LineDrawingPrimitive) {
           const hit = prim.hitTest(x, y);
           if (hit) return { prim, type: "line", ...hit };
+        } else if (prim instanceof FibonacciDrawingPrimitive) {
+          const hit = prim.hitTest(x, y);
+          if (hit) return { prim, type: "fibonacci", ...hit };
         } else if (prim instanceof FreehandDrawingPrimitive) {
           if (prim.hitTest(x, y, hitRadius)) return { prim, type: "freehand" };
         } else if (prim instanceof TextDrawingPrimitive) {
@@ -576,9 +597,9 @@ export function useDrawing({
         return;
       }
 
-      // ── LINE TOOLS ──
-      if (LINE_TOOL_IDS.has(tool)) {
-        // Second click — commit new line
+      // ── LINE/FIB TOOLS ──
+      if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool)) {
+        // Second click — commit new line/fib
         if (anchorDataRef.current && previewRef.current) {
           const dataB = screenToData(pos.x, pos.y);
           if (!dataB) return;
@@ -588,18 +609,30 @@ export function useDrawing({
           previewRef.current = null;
 
           // Create final line primitive
-          const finalLine = new LineDrawingPrimitive({
-            id: nextId("ln"),
-            lineType: tool,
-            dataPoints: [anchorDataRef.current, dataB],
-            color: penColorRef.current,
-            lineWidth: penSizeRef.current,
-          });
-          attachPrim(finalLine);
-          primitivesRef.current.push(finalLine);
+          let finalPrim;
+          if (FIB_TOOL_IDS.has(tool)) {
+             finalPrim = new FibonacciDrawingPrimitive({
+                id: nextId("fib"),
+                dataPoints: [anchorDataRef.current, dataB],
+                color: penColorRef.current,
+                lineWidth: penSizeRef.current,
+                levels: fibLevelsRef.current ? fibLevelsRef.current.map((l) => ({ ...l })) : undefined,
+                inverted: fibInvertedRef.current || false,
+             });
+          } else {
+             finalPrim = new LineDrawingPrimitive({
+               id: nextId("ln"),
+               lineType: tool,
+               dataPoints: [anchorDataRef.current, dataB],
+               color: penColorRef.current,
+               lineWidth: penSizeRef.current,
+             });
+          }
+          attachPrim(finalPrim);
+          primitivesRef.current.push(finalPrim);
 
           anchorDataRef.current = null;
-          selectPrimitive(finalLine.id);
+          selectPrimitive(finalPrim.id);
           persistDrawings();
 
           e.preventDefault();
@@ -609,23 +642,23 @@ export function useDrawing({
 
         // Hit existing element?
         const hit = hitTestAll(pos.x, pos.y);
-        if (hit && hit.type === "line") {
+        if (hit && (hit.type === "line" || hit.type === "fibonacci")) {
           selectPrimitive(hit.prim.id);
 
           if (hit.pointIndex >= 0) {
             // Start dragging endpoint
             draggingRef.current = {
               id: hit.prim.id,
-              type: "line",
+              type: hit.type,
               pointIndex: hit.pointIndex,
               startMouse: pos,
               origPoints: hit.prim.dataPoints.map((p) => ({ ...p })),
             };
           } else {
-            // Start dragging entire line
+            // Start dragging entire line/fib
             draggingRef.current = {
               id: hit.prim.id,
-              type: "line",
+              type: hit.type,
               pointIndex: -1,
               startMouse: pos,
               origPoints: hit.prim.dataPoints.map((p) => ({ ...p })),
@@ -664,14 +697,27 @@ export function useDrawing({
         anchorDataRef.current = dataA;
 
         // Create preview primitive
-        const preview = new LineDrawingPrimitive({
-          id: "__preview__",
-          lineType: tool,
-          dataPoints: [dataA, dataA],
-          color: penColorRef.current,
-          lineWidth: penSizeRef.current,
-          isPreview: true,
-        });
+        let preview;
+        if (FIB_TOOL_IDS.has(tool)) {
+           preview = new FibonacciDrawingPrimitive({
+             id: "__preview__",
+             dataPoints: [dataA, dataA],
+             color: penColorRef.current,
+             lineWidth: penSizeRef.current,
+             isPreview: true,
+             levels: fibLevelsRef.current ? fibLevelsRef.current.map((l) => ({ ...l })) : undefined,
+             inverted: fibInvertedRef.current || false,
+           });
+        } else {
+           preview = new LineDrawingPrimitive({
+             id: "__preview__",
+             lineType: tool,
+             dataPoints: [dataA, dataA],
+             color: penColorRef.current,
+             lineWidth: penSizeRef.current,
+             isPreview: true,
+           });
+        }
         previewRef.current = preview;
         attachPrim(preview);
 
@@ -719,6 +765,8 @@ export function useDrawing({
           const prim = primitivesRef.current[i];
           let isHit = false;
           if (prim instanceof LineDrawingPrimitive) {
+            isHit = prim.hitTest(pos.x, pos.y) != null;
+          } else if (prim instanceof FibonacciDrawingPrimitive) {
             isHit = prim.hitTest(pos.x, pos.y) != null;
           } else if (prim instanceof FreehandDrawingPrimitive) {
             isHit = prim.hitTest(pos.x, pos.y);
@@ -779,8 +827,8 @@ export function useDrawing({
         return;
       }
 
-      // ── LINE TOOLS ──
-      if (LINE_TOOL_IDS.has(tool)) {
+      // ── LINE / FIB TOOLS ──
+      if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool)) {
         // Dragging
         if (draggingRef.current) {
           const { id, type, pointIndex, startMouse, origPoints, origDataPoint } = draggingRef.current;
@@ -800,7 +848,7 @@ export function useDrawing({
             return;
           }
 
-          if (!(prim instanceof LineDrawingPrimitive)) return;
+          if (!(prim instanceof LineDrawingPrimitive) && !(prim instanceof FibonacciDrawingPrimitive)) return;
 
           if (pointIndex >= 0) {
             // Drag single endpoint
@@ -836,10 +884,10 @@ export function useDrawing({
           return;
         }
 
-        // Hover feedback on lines and text
+        // Hover feedback on lines, fibs and text
         const hit = hitTestAll(pos.x, pos.y);
         for (const prim of primitivesRef.current) {
-          if (prim instanceof LineDrawingPrimitive) {
+          if (prim instanceof LineDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive) {
             prim.setHovered(hit?.prim?.id === prim.id);
           }
         }
@@ -884,7 +932,7 @@ export function useDrawing({
   const handleContextMenu = useCallback(
     (e) => {
       const tool = activeToolRef.current;
-      if (LINE_TOOL_IDS.has(tool) && anchorDataRef.current) {
+      if ((LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool)) && anchorDataRef.current) {
         e.preventDefault();
         removePreview();
       }
@@ -895,7 +943,7 @@ export function useDrawing({
   // ── KEYBOARD: Escape / Delete ──
 
   useEffect(() => {
-    if (!isLineTool && !isPenTool && !isEraserTool && !isTextTool) return;
+    if (!isLineTool && !isFibTool && !isPenTool && !isEraserTool && !isTextTool) return;
 
     const handleKeyDown = (e) => {
       // Don't intercept if editing text
@@ -925,16 +973,16 @@ export function useDrawing({
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isLineTool, isPenTool, isEraserTool, isTextTool, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
+  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
 
   // ── Clean up when tool changes ──
 
   useEffect(() => {
-    if (!isLineTool) {
+    if (!isLineTool && !isFibTool) {
       removePreview();
       draggingRef.current = null;
     }
-    if (!isLineTool && !isTextTool) {
+    if (!isLineTool && !isFibTool && !isTextTool) {
       deselectAll();
     }
     if (!isPenTool) {
@@ -950,7 +998,7 @@ export function useDrawing({
         prim.setHovered(false);
       }
     }
-  }, [isLineTool, isPenTool, isEraserTool, isTextTool, removePreview, deselectAll, cancelTextEditing]);
+  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, removePreview, deselectAll, cancelTextEditing]);
 
   // ── Attach event listeners to chart container ──
 

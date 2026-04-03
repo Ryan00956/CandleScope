@@ -91,6 +91,8 @@ const ChartPane = forwardRef(function ChartPane({
     textFontSize,
     textBold,
     textItalic,
+    fibLevels,
+    fibInverted,
     // Sync callbacks (called by this pane, handled by parent)
     onVisibleLogicalRangeChange,
     onCrosshairMove: onCrosshairMoveExternal,
@@ -1051,6 +1053,8 @@ const ChartPane = forwardRef(function ChartPane({
         textFontSize,
         textBold,
         textItalic,
+        fibLevels,
+        fibInverted,
         symbol: paneType === "main" ? symbol : `${symbol}__${paneId}`,
         seriesReady,
     });

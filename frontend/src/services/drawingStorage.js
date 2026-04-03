@@ -56,6 +56,21 @@ function serializePrimitive(prim) {
     };
   }
 
+  if (prim._type === "fibonacci") {
+    return {
+      type: "fibonacci",
+      id: prim._id,
+      dataPoints: prim._dataPoints.map((dp) => ({
+        time: dp.time,
+        price: dp.price,
+      })),
+      color: prim._color,
+      lineWidth: prim._lineWidth,
+      levels: prim._levels,
+      inverted: prim._inverted || false,
+    };
+  }
+
   // FreehandDrawingPrimitive (default)
   return {
     type: "freehand",

@@ -367,6 +367,28 @@ export default function App() {
   const [textBold, setTextBold] = useState(false);
   const [textItalic, setTextItalic] = useState(false);
 
+  // --- Fibonacci tool settings ---
+  const [fibLevels, setFibLevels] = useState(() => {
+    try {
+      const saved = localStorage.getItem("candlescope-fib-levels");
+      if (saved) return JSON.parse(saved);
+    } catch { /* ignore */ }
+    return null; // null = use DEFAULT_FIB_LEVELS
+  });
+  const [fibInverted, setFibInverted] = useState(() => {
+    try {
+      return localStorage.getItem("candlescope-fib-inverted") === "true";
+    } catch { return false; }
+  });
+  const handleFibLevelsChange = useCallback((levels) => {
+    setFibLevels(levels);
+    try { localStorage.setItem("candlescope-fib-levels", JSON.stringify(levels)); } catch { /* ignore */ }
+  }, []);
+  const handleFibInvertedChange = useCallback((v) => {
+    setFibInverted(v);
+    try { localStorage.setItem("candlescope-fib-inverted", String(v)); } catch { /* ignore */ }
+  }, []);
+
   // --- Invert price scale state ---
   const [invertScale, setInvertScale] = useState(() => {
     const prefs = loadUserPrefs();
@@ -1632,6 +1654,10 @@ export default function App() {
           onTextBoldChange={setTextBold}
           textItalic={textItalic}
           onTextItalicChange={setTextItalic}
+          fibLevels={fibLevels}
+          onFibLevelsChange={handleFibLevelsChange}
+          fibInverted={fibInverted}
+          onFibInvertedChange={handleFibInvertedChange}
         />
 
         {error ? (
@@ -1677,6 +1703,8 @@ export default function App() {
               textFontSize={textFontSize}
               textBold={textBold}
               textItalic={textItalic}
+              fibLevels={fibLevels}
+              fibInverted={fibInverted}
               onChartReady={handleChartReady}
               mainOverlayLines={mainOverlayLines}
               subPanes={subPanes}

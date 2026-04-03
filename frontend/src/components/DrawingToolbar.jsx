@@ -1,7 +1,7 @@
 /**
  * Drawing toolbar — sits on the left side of the chart area.
  *
- * Buttons: Pen, Eraser, Line, Text.
+ * Buttons: Pen, Eraser, Line, Text, Fibonacci.
  * Left-click toggles the tool on/off.
  * Right-click or double-click on Line opens a flyout to switch between
  * line-segment / line-ray / line-infinite.
@@ -9,6 +9,7 @@
  * All drawing is native (Plugin API), no pixel overlays.
  */
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { DEFAULT_FIB_LEVELS } from "./primitives/FibonacciDrawingPrimitive.js";
 
 /* ─── Icons ─────────────────────────────────────────────── */
 
@@ -60,6 +61,17 @@ const InfiniteLineIcon = (
     <line x1="1" y1="23" x2="23" y2="1" />
     <path d="M1 20l0 3l3 0" />
     <path d="M21 1l3 0l0 3" />
+  </svg>
+);
+
+const FibonacciIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="4" y1="4" x2="20" y2="20" />
+    <line x1="3" y1="9" x2="21" y2="9" opacity="0.5" />
+    <line x1="3" y1="13" x2="21" y2="13" opacity="0.5" />
+    <line x1="3" y1="17" x2="21" y2="17" opacity="0.5" />
+    <circle cx="4" cy="4" r="2" fill="currentColor" />
+    <circle cx="20" cy="20" r="2" fill="currentColor" />
   </svg>
 );
 
@@ -127,6 +139,137 @@ function ToolFlyout({ variants, currentId, onSelect, onClose, anchorRef }) {
   );
 }
 
+/* ─── Fibonacci levels settings panel ───────────────────── */
+
+const FIB_RANDOM_COLORS = [
+  "#e91e63", "#9c27b0", "#673ab7", "#3f51b5", "#2196f3",
+  "#00bcd4", "#4caf50", "#8bc34a", "#cddc39", "#ffc107",
+  "#ff9800", "#ff5722", "#795548", "#607d8b",
+];
+
+function FibLevelsPanel({ levels, onLevelsChange, inverted, onInvertedChange, onClose, anchorRef }) {
+  const panelRef = useRef(null);
+  const [newLevelInput, setNewLevelInput] = useState("");
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (
+        panelRef.current &&
+        !panelRef.current.contains(e.target) &&
+        anchorRef.current &&
+        !anchorRef.current.contains(e.target)
+      ) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose, anchorRef]);
+
+  const toggleLevel = (idx) => {
+    const next = levels.map((l, i) => i === idx ? { ...l, enabled: !l.enabled } : l);
+    onLevelsChange(next);
+  };
+
+  const changeLevelColor = (idx, color) => {
+    const next = levels.map((l, i) => i === idx ? { ...l, color } : l);
+    onLevelsChange(next);
+  };
+
+  const removeLevel = (idx) => {
+    const next = levels.filter((_, i) => i !== idx);
+    onLevelsChange(next);
+  };
+
+  const addCustomLevel = () => {
+    const val = parseFloat(newLevelInput);
+    if (isNaN(val)) return;
+    if (levels.some((l) => Math.abs(l.level - val) < 0.0001)) return;
+    const color = FIB_RANDOM_COLORS[levels.length % FIB_RANDOM_COLORS.length];
+    const next = [...levels, { level: val, color, enabled: true }].sort((a, b) => a.level - b.level);
+    onLevelsChange(next);
+    setNewLevelInput("");
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") addCustomLevel();
+    e.stopPropagation();
+  };
+
+  const isDefault = (lvl) => DEFAULT_FIB_LEVELS.some((d) => Math.abs(d.level - lvl.level) < 0.0001);
+
+  return (
+    <div className="fib-levels-panel" ref={panelRef}>
+      <div className="fib-levels-header">
+        <span>斐波那契设置</span>
+        <button className="fib-levels-close" onClick={onClose}>✕</button>
+      </div>
+
+      {/* Inverted toggle */}
+      <div className="fib-invert-row">
+        <label className="fib-invert-label">
+          <span>第一次点击定义</span>
+          <button
+            className={`fib-invert-btn ${!inverted ? "active" : ""}`}
+            onClick={() => onInvertedChange(false)}
+          >
+            0
+          </button>
+          <button
+            className={`fib-invert-btn ${inverted ? "active" : ""}`}
+            onClick={() => onInvertedChange(true)}
+          >
+            1
+          </button>
+        </label>
+      </div>
+
+      <div className="fib-levels-divider" />
+
+      {/* Level list */}
+      <div className="fib-levels-list">
+        {levels.map((lvl, idx) => (
+          <div key={idx} className="fib-level-row">
+            <input
+              type="checkbox"
+              checked={lvl.enabled}
+              onChange={() => toggleLevel(idx)}
+              className="fib-level-check"
+            />
+            <input
+              type="color"
+              value={lvl.color}
+              onChange={(e) => changeLevelColor(idx, e.target.value)}
+              className="fib-level-color"
+            />
+            <span className={`fib-level-value ${!lvl.enabled ? "disabled" : ""}`}>
+              {lvl.level}
+            </span>
+            {!isDefault(lvl) && (
+              <button className="fib-level-remove" onClick={() => removeLevel(idx)} title="删除">
+                ✕
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Add custom level */}
+      <div className="fib-add-level-row">
+        <input
+          type="text"
+          className="fib-add-level-input"
+          placeholder="添加比例 (如 1.414)"
+          value={newLevelInput}
+          onChange={(e) => setNewLevelInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+        <button className="fib-add-level-btn" onClick={addCustomLevel}>+</button>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Font size options ─────────────────────────────────── */
 
 const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32];
@@ -148,14 +291,20 @@ const DrawingToolbar = memo(function DrawingToolbar({
   onTextBoldChange,
   textItalic = false,
   onTextItalicChange,
+  // Fibonacci settings
+  fibLevels,
+  onFibLevelsChange,
+  fibInverted = false,
+  onFibInvertedChange,
 }) {
   // Which line variant is selected (persisted across toggles)
   const [lineVariant, setLineVariant] = useState("line-segment");
 
-  // Flyout open state: null | "line"
+  // Flyout open state: null | "line" | "fib-levels"
   const [flyoutOpen, setFlyoutOpen] = useState(null);
 
   const lineBtnRef = useRef(null);
+  const fibBtnRef = useRef(null);
 
   // Double-click timer
   const clickTimerRef = useRef(null);
@@ -164,6 +313,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
   const isEraserActive = activeTool === "eraser";
   const isLineActive = LINE_TOOL_IDS.has(activeTool);
   const isTextActive = activeTool === "text";
+  const isFibonacciActive = activeTool === "fibonacci";
 
   /* ── Pen button handlers ── */
   const handlePenClick = useCallback(() => {
@@ -194,6 +344,16 @@ const DrawingToolbar = memo(function DrawingToolbar({
     }
     setFlyoutOpen(null);
   }, [isTextActive, onToolChange]);
+
+  /* ── Fibonacci button handlers ── */
+  const handleFibonacciClick = useCallback(() => {
+    if (isFibonacciActive) {
+      onToolChange(null);
+    } else {
+      onToolChange("fibonacci");
+    }
+    setFlyoutOpen(null);
+  }, [isFibonacciActive, onToolChange]);
 
   /* ── Line button handlers ── */
   const handleLineClick = useCallback(() => {
@@ -243,6 +403,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
   const showPenOptions = isPenActive;
   const showLineOptions = isLineActive;
   const showTextOptions = isTextActive;
+  const showFibonacciOptions = isFibonacciActive;
 
   return (
     <div className="drawing-toolbar">
@@ -302,6 +463,35 @@ const DrawingToolbar = memo(function DrawingToolbar({
         </button>
       </div>
 
+      {/* ── Fibonacci button ── */}
+      <div className="drawing-tool-wrapper" ref={fibBtnRef}>
+        <button
+          className={`drawing-tool-btn ${isFibonacciActive ? "active" : ""}`}
+          onClick={handleFibonacciClick}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setFlyoutOpen((prev) => (prev === "fib-levels" ? null : "fib-levels"));
+          }}
+          onDoubleClick={() => {
+            setFlyoutOpen((prev) => (prev === "fib-levels" ? null : "fib-levels"));
+          }}
+          title="斐波那契回撤（右键/双击打开设置）"
+        >
+          {FibonacciIcon}
+          {CornerTriangle}
+        </button>
+        {flyoutOpen === "fib-levels" && (
+          <FibLevelsPanel
+            levels={fibLevels || DEFAULT_FIB_LEVELS}
+            onLevelsChange={(levels) => onFibLevelsChange?.(levels)}
+            inverted={fibInverted}
+            onInvertedChange={(v) => onFibInvertedChange?.(v)}
+            onClose={() => setFlyoutOpen(null)}
+            anchorRef={fibBtnRef}
+          />
+        )}
+      </div>
+
       {/* Divider */}
       <div className="drawing-toolbar-divider" />
 
@@ -330,7 +520,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       )}
 
       {/* ── Options for line tools ── */}
-      {showLineOptions && (
+      {(showLineOptions || showFibonacciOptions) && (
         <>
           <div className="drawing-tool-option" title="线条颜色">
             <input

@@ -56,6 +56,8 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     textFontSize = 14,
     textBold = false,
     textItalic = false,
+    fibLevels,
+    fibInverted = false,
     // Indicator data — computed by useIndicators (multi-pane version)
     // mainOverlayLines: [{data, color, ...}]  — overlay lines for main chart
     // subPanes: [{id, label, lines: [...]}]    — each sub pane with its lines
@@ -475,6 +477,8 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     textFontSize={textFontSize}
                     textBold={textBold}
                     textItalic={textItalic}
+                    fibLevels={fibLevels}
+                    fibInverted={fibInverted}
                 />
             </div>
 
@@ -519,6 +523,8 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                 textFontSize={textFontSize}
                                 textBold={textBold}
                                 textItalic={textItalic}
+                                fibLevels={fibLevels}
+                                fibInverted={fibInverted}
                             />
                         </div>
                     </div>

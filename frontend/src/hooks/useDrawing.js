@@ -259,28 +259,33 @@ export function useDrawing({
   // ── Restore saved drawings when series becomes available ──
   //
   // `seriesReady` is a counter that increments each time the chart
-  // (and its candlestick series) is created. By depending on it we
-  // guarantee this effect fires *after* the series ref is populated,
-  // even on the very first mount and after any chart re-creation
-  // (e.g. theme change, page refresh).
+  // (and its candlestick series) is created, or when the drawing anchor
+  // series changes (e.g. indicator series rebuilt on sub-panes).
+  // By depending on it we guarantee this effect fires *after* the
+  // series ref is populated, even on the very first mount and after
+  // any chart re-creation (e.g. theme change, page refresh).
 
   useEffect(() => {
     const series = seriesRef?.current;
     if (!series || !symbol || !seriesReady) return;
 
     // If there are existing primitives in memory (from before a chart
-    // re-creation), they are now detached because the old chart was
-    // destroyed. We need to re-attach them to the new series, OR
-    // if this is a fresh page load, restore from localStorage.
+    // re-creation or series switch), we need to re-attach them to the
+    // new series. Otherwise, if this is a fresh page load, restore
+    // from localStorage.
 
     const existingPrims = primitivesRef.current;
 
     if (existingPrims.length > 0) {
       // Re-attach existing in-memory primitives to the new series.
-      // The old chart's destroy will have called detached() on each,
-      // so _series/_chart are null. Re-attaching fixes that.
+      // First detach from any old series they may still reference,
+      // then attach to the current (possibly new) series.
       for (const prim of existingPrims) {
         try {
+          // Detach from old series if still attached to a different one
+          if (prim._series && prim._series !== series) {
+            try { prim._series.detachPrimitive(prim); } catch { /* already detached */ }
+          }
           series.attachPrimitive(prim);
         } catch (err) {
           console.warn("Failed to re-attach drawing:", err);
@@ -920,7 +925,7 @@ export function useDrawing({
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isLineTool, isPenTool, isEraserTool, isTextTool, editingTextId, removePreview, deselectAll, detachPrim]);
+  }, [isLineTool, isPenTool, isEraserTool, isTextTool, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
 
   // ── Clean up when tool changes ──
 

@@ -10,6 +10,7 @@
  */
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
+import { useDrawing } from "../hooks/useDrawing";
 
 /* ── Localization helpers (shared with old ChartWidget) ─────── */
 
@@ -67,6 +68,7 @@ const PRICE_SCALE_MODES = [
 ];
 
 const ChartPane = forwardRef(function ChartPane({
+    symbol,
     paneId,
     paneType = "main",       // "main" | "sub"
     paneLabel = "",           // e.g. "RSI(14)" — shown as watermark or label
@@ -82,6 +84,13 @@ const ChartPane = forwardRef(function ChartPane({
     // Price scale mode (main pane only): 0=Normal, 1=Logarithmic, 2=Percentage, 3=IndexedTo100
     priceScaleMode = 0,
     onPriceScaleModeChange,
+    // Drawing props
+    drawingTool,
+    penColor,
+    penSize,
+    textFontSize,
+    textBold,
+    textItalic,
     // Sync callbacks (called by this pane, handled by parent)
     onVisibleLogicalRangeChange,
     onCrosshairMove: onCrosshairMoveExternal,
@@ -98,9 +107,11 @@ const ChartPane = forwardRef(function ChartPane({
     const chartRef = useRef(null);
     const mainSeriesRef = useRef(null);      // CandlestickSeries (main pane only)
     const alignmentSeriesRef = useRef(null); // invisible series for crosshair alignment (sub panes)
+    const drawingAnchorSeriesRef = useRef(null); // dynamic ref: first indicator series for drawing (sub panes)
     const indicatorSeriesRef = useRef([]);   // [{series, lineConfig}]
     const prevDataRef = useRef({ length: 0, first: null, last: null });
     const isSyncingRef = useRef(false);      // prevent sync loops
+    const [seriesReady, setSeriesReady] = useState(0);
 
     /* ── Auto-scale state ──────────────────────────────────── */
     const [isAutoScale, setIsAutoScale] = useState(true);
@@ -200,6 +211,9 @@ const ChartPane = forwardRef(function ChartPane({
                 visible: false,
             });
             alignmentSeriesRef.current = alignSeries;
+            // Drawing anchor will be set to the first indicator series once available.
+            // This ensures coordinate mapping uses the indicator's actual price range.
+            drawingAnchorSeriesRef.current = null;
         }
 
         // Subscribe to crosshair for sync
@@ -244,10 +258,11 @@ const ChartPane = forwardRef(function ChartPane({
 
         chartRef.current = chart;
 
-        // Notify parent that chart + series are ready (for drawing tools)
+        // Notify parent that chart + series are ready
         if (onChartCreated) {
             onChartCreated({ chartRef, seriesRef: mainSeriesRef, containerRef });
         }
+        setSeriesReady((prev) => prev + 1);
 
         // Resize observer
         const ro = new ResizeObserver((entries) => {
@@ -351,6 +366,7 @@ const ChartPane = forwardRef(function ChartPane({
             chart.remove();
             chartRef.current = null;
             mainSeriesRef.current = null;
+            drawingAnchorSeriesRef.current = null;
             indicatorSeriesRef.current = [];
         };
     }, []); // created once
@@ -562,6 +578,12 @@ const ChartPane = forwardRef(function ChartPane({
                     console.warn("ChartPane: failed to update indicator series data:", err);
                 }
             }
+
+            // Ensure drawing anchor is set (covers first-time indicator arrival)
+            if (paneType === "sub" && !drawingAnchorSeriesRef.current && indicatorSeriesRef.current.length > 0) {
+                drawingAnchorSeriesRef.current = indicatorSeriesRef.current[0].series;
+                setSeriesReady((prev) => prev + 1);
+            }
             return;
         }
 
@@ -572,7 +594,13 @@ const ChartPane = forwardRef(function ChartPane({
         }
         indicatorSeriesRef.current = [];
 
-        if (!indicatorLines || indicatorLines.length === 0) return;
+        if (!indicatorLines || indicatorLines.length === 0) {
+            // No indicator lines left — clear drawing anchor
+            if (paneType === "sub") {
+                drawingAnchorSeriesRef.current = null;
+            }
+            return;
+        }
 
         for (const line of indicatorLines) {
             if (!line.data || line.data.length === 0) continue;
@@ -631,7 +659,18 @@ const ChartPane = forwardRef(function ChartPane({
                 console.warn("ChartPane: failed to add indicator series:", err);
             }
         }
-    }, [indicatorLines]);
+
+        // Update drawing anchor to the first indicator series for sub-pane drawings.
+        // This ensures coordinate mapping uses the indicator's actual price range,
+        // so drawings maintain stable positions across timeframe switches.
+        if (paneType === "sub" && indicatorSeriesRef.current.length > 0) {
+            const newAnchor = indicatorSeriesRef.current[0].series;
+            if (drawingAnchorSeriesRef.current !== newAnchor) {
+                drawingAnchorSeriesRef.current = newAnchor;
+                setSeriesReady((prev) => prev + 1); // trigger re-attachment in useDrawing
+            }
+        }
+    }, [indicatorLines, paneType]);
 
     /* ── Apply indicator markers (main pane only) ──────────── */
     // Lightweight Charts supports setMarkers() on any series.
@@ -991,9 +1030,35 @@ const ChartPane = forwardRef(function ChartPane({
         };
     }, [indicatorBgcolors]);
 
+    /* ── Drawing state and hooks ───────────────────────────── */
+
+    const {
+        clearAll: clearAllDrawings,
+        editingTextId,
+        editingTextValue,
+        editingTextPos,
+        setEditingTextValue,
+        commitTextEditing,
+        cancelTextEditing,
+        editInputRef,
+    } = useDrawing({
+        chartRef,
+        seriesRef: paneType === "main" ? mainSeriesRef : drawingAnchorSeriesRef,
+        chartContainerRef: containerRef,
+        activeTool: drawingTool,
+        penColor,
+        penSize,
+        textFontSize,
+        textBold,
+        textItalic,
+        symbol: paneType === "main" ? symbol : `${symbol}__${paneId}`,
+        seriesReady,
+    });
+
     /* ── Imperative handle ─────────────────────────────────── */
 
     useImperativeHandle(ref, () => ({
+        clearAllDrawings,
         getChart: () => chartRef.current,
         getMainSeries: () => mainSeriesRef.current,
         getChartRef: () => chartRef,
@@ -1140,6 +1205,33 @@ const ChartPane = forwardRef(function ChartPane({
                             <span className="price-scale-menu-label-en">{mode.labelEn}</span>
                         </button>
                     ))}
+                </div>
+            )}
+
+            {/* Inline text editor overlay (drawing) */}
+            {editingTextId && editingTextPos && (
+                <div
+                    className="text-edit-overlay"
+                    style={{ position: "absolute", left: editingTextPos.x, top: editingTextPos.y, zIndex: 100 }}
+                >
+                    <input
+                        ref={editInputRef}
+                        className="text-edit-input"
+                        type="text"
+                        value={editingTextValue}
+                        onChange={(e) => setEditingTextValue(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") { e.preventDefault(); commitTextEditing(); }
+                            if (e.key === "Escape") { e.preventDefault(); cancelTextEditing(); }
+                        }}
+                        onBlur={() => commitTextEditing()}
+                        style={{
+                            fontSize: textFontSize,
+                            fontWeight: textBold ? "bold" : "normal",
+                            fontStyle: textItalic ? "italic" : "normal",
+                            color: penColor,
+                        }}
+                    />
                 </div>
             )}
         </div>

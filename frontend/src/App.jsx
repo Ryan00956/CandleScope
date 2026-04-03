@@ -10,6 +10,7 @@ import {
   fetchLatestKlines,
   getMultiStreamUrl,
 } from "./services/api";
+import { clearSavedDrawings } from "./services/drawingStorage";
 import "./index.css";
 
 // ---------- Custom interval helpers ----------
@@ -408,7 +409,7 @@ export default function App() {
     activeIndicators,
     computing: indicatorComputing,
     addIndicator,
-    removeIndicator,
+    removeIndicator: rawRemoveIndicator,
     toggleVisibility,
     updateIndicatorParams,
     updateIndicatorScript,
@@ -430,6 +431,12 @@ export default function App() {
     datasetKey: `${symbol}-${interval}-${datasetKey}`,
     seriesReady: indicatorSeriesReady,
   });
+
+  const removeIndicator = useCallback((indicatorId) => {
+    rawRemoveIndicator(indicatorId);
+    clearSavedDrawings(`${symbol}-separate-${indicatorId}`);
+    clearSavedDrawings(`${symbol}-volume-${indicatorId}`);
+  }, [rawRemoveIndicator, symbol]);
 
   // --- Custom interval state ---
   const [customInput, setCustomInput] = useState("");
@@ -1273,10 +1280,10 @@ export default function App() {
       if (!chartData.length) return;
 
       // ── Cooldown: prevent rapid repeated calls ──
+      // Uses adaptive cooldown: longer when backend is backfilling (0 bars returned)
       const cooldownKey = interval;
       const lastCall = needMoreLeftCooldownRef.current.get(cooldownKey) || 0;
       if (Date.now() - lastCall < NEED_MORE_LEFT_COOLDOWN_MS) return;
-      needMoreLeftCooldownRef.current.set(cooldownKey, Date.now());
 
       const before = oldestLoadedTime || chartData[0].time;
       setLoadingMoreLeft(true);
@@ -1290,6 +1297,17 @@ export default function App() {
             saveToCache(symbol, interval, merged);
             return merged;
           });
+          // Normal cooldown on successful fetch
+          needMoreLeftCooldownRef.current.set(cooldownKey, Date.now());
+        } else if (result.has_more) {
+          // Backend returned 0 bars but says there's more (backfill in progress).
+          // Use a longer cooldown to avoid hammering the server while backfill runs.
+          // The backfill_completed WS handler will also reload data independently.
+          console.log(`[LoadMoreLeft] 0 bars returned for ${interval}, backfill likely in progress — will retry in 5s`);
+          needMoreLeftCooldownRef.current.set(cooldownKey, Date.now() + 2_000); // effective 5s cooldown (3s base + 2s extra)
+        } else {
+          // Normal cooldown
+          needMoreLeftCooldownRef.current.set(cooldownKey, Date.now());
         }
 
         if (typeof result.has_more === "boolean") {
@@ -1299,6 +1317,8 @@ export default function App() {
         }
       } catch (err) {
         console.error("Load older data failed:", err);
+        // On error, use a longer cooldown before retrying
+        needMoreLeftCooldownRef.current.set(cooldownKey, Date.now() + 2_000);
       } finally {
         setLoadingMoreLeft(false);
       }

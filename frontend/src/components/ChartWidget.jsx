@@ -120,7 +120,7 @@ const ChartWidget = forwardRef(function ChartWidget({
     const dataMapRef = useRef(new Map());
     const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
     const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
-    const requestedOldestRef = useRef(null);
+
     const userInteractedRef = useRef(false);
     const lastCrosshairSignatureRef = useRef(null);
     const prevDataMetaRef = useRef({
@@ -167,7 +167,7 @@ const ChartWidget = forwardRef(function ChartWidget({
     }, [canLoadMoreLeft]);
 
     useEffect(() => {
-        requestedOldestRef.current = null;
+
         userInteractedRef.current = false;
         lastCrosshairSignatureRef.current = null;
         hasRestoredRangeRef.current = false;
@@ -354,9 +354,6 @@ const ChartWidget = forwardRef(function ChartWidget({
             if (!currentData || currentData.length === 0) return;
 
             const oldestLoadedTime = currentData[0].time;
-            if (requestedOldestRef.current === oldestLoadedTime) return;
-
-            requestedOldestRef.current = oldestLoadedTime;
             onNeedMoreLeftRef.current(oldestLoadedTime);
         });
 
@@ -532,9 +529,7 @@ const ChartWidget = forwardRef(function ChartWidget({
             hasRestoredRangeRef.current = true;
         }
 
-        if (prev.first !== null && first < prev.first) {
-            requestedOldestRef.current = null;
-        }
+
 
         prevDataMetaRef.current = {
             datasetKey,

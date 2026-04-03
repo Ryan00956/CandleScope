@@ -10,7 +10,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import ChartPane from "./ChartPane";
 import PaneResizer from "./PaneResizer";
-import { useDrawing } from "../hooks/useDrawing";
+import { clearSavedDrawings } from "../services/drawingStorage";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
@@ -85,7 +85,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     const dataMapRef = useRef(new Map());
     const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
     const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
-    const requestedOldestRef = useRef(null);
+
     const userInteractedRef = useRef(false);
 
     // Visible range persistence
@@ -140,7 +140,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
 
     // Reset on dataset change
     useEffect(() => {
-        requestedOldestRef.current = null;
+
         userInteractedRef.current = false;
         hasRestoredRangeRef.current = false;
         if (visibleRangeSaveTimerRef.current) {
@@ -148,6 +148,23 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
             visibleRangeSaveTimerRef.current = null;
         }
     }, [datasetKey]);
+
+    // ── Clean up localStorage drawings when sub-panes are removed ──
+    const prevSubPaneIdsRef = useRef(new Set());
+
+    useEffect(() => {
+        const currentIds = new Set(subPanes.map((p) => p.id));
+
+        // Find pane IDs that existed before but are now gone
+        for (const prevId of prevSubPaneIdsRef.current) {
+            if (!currentIds.has(prevId)) {
+                // Sub-pane was removed — clear its orphaned drawing storage
+                clearSavedDrawings(`${symbol}__${prevId}`);
+            }
+        }
+
+        prevSubPaneIdsRef.current = currentIds;
+    }, [subPanes, symbol]);
 
     useEffect(() => {
         const wrapper = wrapperRef.current;
@@ -231,33 +248,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         return () => ro.disconnect();
     }, []);
 
-    // ── Drawing tools (main pane only) ──
-    const mainChartRef = useRef(null);  // will be set to main pane's chartRef
-    const mainSeriesRef = useRef(null); // will be set to main pane's seriesRef
-    const mainContainerRef = useRef(null);
-
-    const {
-        clearAll,
-        editingTextId,
-        editingTextValue,
-        editingTextPos,
-        setEditingTextValue,
-        commitTextEditing,
-        cancelTextEditing,
-        editInputRef,
-    } = useDrawing({
-        chartRef: mainChartRef,
-        seriesRef: mainSeriesRef,
-        chartContainerRef: mainContainerRef,
-        activeTool: drawingTool,
-        penColor,
-        penSize,
-        textFontSize,
-        textBold,
-        textItalic,
-        symbol,
-        seriesReady,
-    });
+    // Counter to signal series creation (already declared)
 
     // ── Expose API via ref ──
     useImperativeHandle(ref, () => ({
@@ -266,11 +257,18 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
             if (!mp) return null;
             return mp.getVisibleRange();
         },
-        clearAllDrawings: clearAll,
-        chartRef: mainChartRef,
-        seriesRef: mainSeriesRef,
+        clearAllDrawings: () => {
+            if (mainPaneRef.current?.clearAllDrawings) {
+                mainPaneRef.current.clearAllDrawings();
+            }
+            for (const subPane of subPaneRefs.current.values()) {
+                if (subPane?.clearAllDrawings) {
+                    subPane.clearAllDrawings();
+                }
+            }
+        },
         seriesReady,
-    }), [clearAll, seriesReady]);
+    }), [seriesReady]);
 
     // ── Debounced visible range save ──
     const scheduleVisibleRangeSave = useCallback(() => {
@@ -296,14 +294,17 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         }
 
         // Check for need-more-left
+        // NOTE: canLoadMoreLeftRef already prevents concurrent calls
+        // (it becomes false when loadingMoreLeft=true), so we don't
+        // need an extra dedupe guard based on the oldest time value.
+        // Previously a requestedOldestRef guard blocked retrigger when
+        // fetchKlinesBefore returned 0 bars (e.g. backfill pending),
+        // causing the "drag left doesn't load" bug.
         if (onNeedMoreLeftRef.current && canLoadMoreLeftRef.current && range.from <= LEFT_EDGE_TRIGGER_BARS) {
             const currentData = dataRef.current;
             if (currentData?.length > 0) {
                 const oldest = currentData[0].time;
-                if (requestedOldestRef.current !== oldest) {
-                    requestedOldestRef.current = oldest;
-                    onNeedMoreLeftRef.current(oldest);
-                }
+                onNeedMoreLeftRef.current(oldest);
             }
         }
 
@@ -349,20 +350,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     }, []);
 
     // ── Called by ChartPane's useEffect AFTER chart + series are created ──
-    // At this point chartRef.current and seriesRef.current are guaranteed
-    // to be the live Lightweight Charts objects, not null.
     const onMainChartCreated = useCallback(({ chartRef: cRef, seriesRef: sRef }) => {
-        // Store the live chart/series objects so that useDrawing can access
-        // them via mainChartRef.current / mainSeriesRef.current.
-        // This callback fires AFTER ChartPane's useEffect creates the chart,
-        // so cRef.current and sRef.current are guaranteed non-null.
-        mainChartRef.current = cRef.current;
-        mainSeriesRef.current = sRef.current;
-
-        // Note: mainContainerRef is already set by mainPaneContainerCallback
-        // to the chart-pane-wrapper div, which is the correct element for
-        // mouse event capture and coordinate calculations.
-
         setSeriesReady((prev) => prev + 1);
 
         // Notify parent for indicator system
@@ -439,17 +427,6 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         }
     }, [subPanes, paneHeightPercents]);
 
-    // ── Set main pane container ref for drawing ──
-    const mainPaneContainerCallback = useCallback((node) => {
-        mainContainerRef.current = node;
-    }, []);
-
-
-
-    // Determine cursor for drawing tools
-    const isDrawingActive = DRAWING_TOOL_IDS.has(drawingTool);
-    const cursorStyle = isDrawingActive ? "crosshair" : undefined;
-
     // ── Ref callback for main chart pane element ──
     const mainPaneRefCallback = useCallback((node) => {
         if (node) {
@@ -464,10 +441,10 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
             <div
                 className="chart-pane-wrapper"
                 style={{ flex: paneHeightPercents.main || 100 }}
-                ref={mainPaneContainerCallback}
             >
                 <ChartPane
                     ref={mainPaneRefCallback}
+                    symbol={symbol}
                     paneId="main"
                     paneType="main"
                     data={data}
@@ -492,10 +469,13 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     indicatorHlines={indicatorHlines}
                     indicatorBgcolors={indicatorBgcolors}
                     indicatorBarcolors={indicatorBarcolors}
+                    drawingTool={drawingTool}
+                    penColor={penColor}
+                    penSize={penSize}
+                    textFontSize={textFontSize}
+                    textBold={textBold}
+                    textItalic={textItalic}
                 />
-                {cursorStyle && (
-                    <div className="chart-pane-cursor-overlay" style={{ cursor: cursorStyle }} />
-                )}
             </div>
 
             {/* Sub Panes with Resizers */}
@@ -521,6 +501,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                     else subPaneRefs.current.delete(subPane.id);
                                 }}
                                 paneId={subPane.id}
+                                symbol={symbol}
                                 paneType="sub"
                                 paneLabel={subPane.label}
                                 timeAlignment={timeAlignment}
@@ -532,38 +513,17 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                 interval={interval}
                                 onVisibleLogicalRangeChange={handleVisibleLogicalRangeChange}
                                 onCrosshairSync={handleCrosshairSync}
+                                drawingTool={drawingTool}
+                                penColor={penColor}
+                                penSize={penSize}
+                                textFontSize={textFontSize}
+                                textBold={textBold}
+                                textItalic={textItalic}
                             />
                         </div>
                     </div>
                 );
             })}
-
-            {/* Inline text editor overlay (drawing) */}
-            {editingTextId && editingTextPos && (
-                <div
-                    className="text-edit-overlay"
-                    style={{ position: "absolute", left: editingTextPos.x, top: editingTextPos.y, zIndex: 100 }}
-                >
-                    <input
-                        ref={editInputRef}
-                        className="text-edit-input"
-                        type="text"
-                        value={editingTextValue}
-                        onChange={(e) => setEditingTextValue(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === "Enter") { e.preventDefault(); commitTextEditing(); }
-                            if (e.key === "Escape") { e.preventDefault(); cancelTextEditing(); }
-                        }}
-                        onBlur={() => commitTextEditing()}
-                        style={{
-                            fontSize: textFontSize,
-                            fontWeight: textBold ? "bold" : "normal",
-                            fontStyle: textItalic ? "italic" : "normal",
-                            color: penColor,
-                        }}
-                    />
-                </div>
-            )}
 
             {/* Loading overlay */}
             {loading && (

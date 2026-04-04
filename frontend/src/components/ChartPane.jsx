@@ -73,6 +73,7 @@ const ChartPane = forwardRef(function ChartPane({
     paneType = "main",       // "main" | "sub"
     paneLabel = "",           // e.g. "RSI(14)" — shown as watermark or label
     data,                     // OHLCV data (main pane) or null (sub panes get data via indicator lines)
+    datasetKey,               // incremented on symbol/interval change — triggers full reset
     timeAlignment,            // full time array from main chart data for crosshair alignment
     indicatorLines = [],      // [{data, color, lineWidth, lineStyle, type, colorData, name}]
     showTimeScale = true,     // only the bottom-most pane shows time axis
@@ -112,6 +113,7 @@ const ChartPane = forwardRef(function ChartPane({
     const drawingAnchorSeriesRef = useRef(null); // dynamic ref: first indicator series for drawing (sub panes)
     const indicatorSeriesRef = useRef([]);   // [{series, lineConfig}]
     const prevDataRef = useRef({ length: 0, first: null, last: null });
+    const prevDatasetKeyRef = useRef(null);  // track datasetKey for reset detection
     const isSyncingRef = useRef(false);      // prevent sync loops
     const [seriesReady, setSeriesReady] = useState(0);
 
@@ -406,6 +408,39 @@ const ChartPane = forwardRef(function ChartPane({
     }, [upColor, downColor, paneType]);
 
     /* ── Update candle data (main pane) ────────────────────── */
+
+    // Reset tracking state when datasetKey changes (symbol or interval switch).
+    // This ensures the first data load after a switch ALWAYS triggers a full
+    // setData() + auto-scale reset, preventing stale Y-axis ranges.
+    useEffect(() => {
+        if (paneType !== "main") return;
+        if (prevDatasetKeyRef.current !== null && prevDatasetKeyRef.current !== datasetKey) {
+            // Dataset changed — reset tracking and clear old series data
+            prevDataRef.current = { length: 0, first: null, last: null };
+
+            // Clear stale candle data from the series immediately so the old
+            // price range doesn't persist on the Y-axis during the transition.
+            if (mainSeriesRef.current) {
+                try {
+                    isSyncingRef.current = true;
+                    mainSeriesRef.current.setData([]);
+                } catch { /* */ } finally {
+                    isSyncingRef.current = false;
+                }
+            }
+
+            // Force auto-scale back on so the Y-axis adapts to the new data
+            const chart = chartRef.current;
+            if (chart) {
+                try {
+                    chart.priceScale("right").applyOptions({ autoScale: true });
+                } catch { /* */ }
+            }
+            autoScaleRef.current = true;
+            setIsAutoScale(true);
+        }
+        prevDatasetKeyRef.current = datasetKey;
+    }, [datasetKey, paneType]);
 
     useEffect(() => {
         if (paneType !== "main" || !mainSeriesRef.current || !data?.length) return;

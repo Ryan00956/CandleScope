@@ -450,6 +450,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     paneId="main"
                     paneType="main"
                     data={data}
+                    datasetKey={datasetKey}
                     indicatorLines={mainOverlayLines}
                     showTimeScale={subPanes.length === 0}
                     upColor={upColor}

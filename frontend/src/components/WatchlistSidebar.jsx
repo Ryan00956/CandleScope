@@ -54,22 +54,36 @@ const WATCHLIST_COLORS = [
   "#ef4444", "#ec4899", "#14b8a6", "#f97316", "#6366f1",
 ];
 
-/** Format price with appropriate decimal places */
-function formatPrice(p) {
-  if (p >= 10000) return p.toFixed(2);
-  if (p >= 1000) return p.toFixed(2);
-  if (p >= 1) return p.toFixed(4);
-  if (p >= 0.01) return p.toFixed(6);
-  return p.toFixed(8);
+/** Remove trailing zeros after decimal point: "1.2000" → "1.2", "3.00" → "3" */
+function stripZeros(s) {
+  if (!s.includes(".")) return s;
+  return s.replace(/\.?0+$/, "");
 }
 
-/** Format change absolute value */
+/** Format price with appropriate decimal places, trailing zeros removed */
+function formatPrice(p) {
+  let s;
+  if (p >= 1000) s = p.toFixed(2);
+  else if (p >= 1) s = p.toFixed(4);
+  else if (p >= 0.01) s = p.toFixed(6);
+  else s = p.toFixed(8);
+  return stripZeros(s);
+}
+
+/** Format change absolute value, trailing zeros removed */
 function formatChange(change) {
   const abs = Math.abs(change);
-  if (abs >= 1000) return change.toFixed(2);
-  if (abs >= 1) return change.toFixed(4);
-  if (abs >= 0.01) return change.toFixed(6);
-  return change.toFixed(8);
+  let s;
+  if (abs >= 1000) s = change.toFixed(2);
+  else if (abs >= 1) s = change.toFixed(4);
+  else if (abs >= 0.01) s = change.toFixed(6);
+  else s = change.toFixed(8);
+  return stripZeros(s);
+}
+
+/** Format percentage, trailing zeros removed */
+function formatPct(pct) {
+  return stripZeros(pct.toFixed(2));
 }
 
 const TIER_OPTIONS = [
@@ -542,7 +556,7 @@ export default function WatchlistSidebar({
 
               {/* Change % */}
               <span className={`wl-col-changepct ${isUp ? "wl-val-up" : "wl-val-down"}`}>
-                {isUp ? "+" : ""}{changePct.toFixed(2)}%
+                {isUp ? "+" : ""}{formatPct(changePct)}%
               </span>
             </>
           ) : (

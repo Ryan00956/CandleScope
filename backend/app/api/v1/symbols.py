@@ -64,6 +64,8 @@ async def load_exchange_info() -> None:
                 "baseAsset": item["baseAsset"],
                 "quoteAsset": item["quoteAsset"],
                 "status": item["status"],
+                "exchange": "binance",
+                "marketType": "spot",
             })
 
         _spot_symbols = symbols

@@ -44,9 +44,14 @@ logger = logging.getLogger("bar_aggregator.L3_BarState")
 
 
 class StandardOHLCVMerge:
-    """Standard OHLCV merge: O=first, H=max, L=min, C=last, V=sum.
+    """Standard OHLCV merge: O=first, H=max, L=min, C=last, V=snapshot/sum.
 
-    This is the default and most common merge strategy.
+    For kline sources each WS update is a **cumulative snapshot** (volume
+    is the running total for the whole bar), so we *replace* additive
+    fields instead of accumulating.
+
+    For tick/trade sources each event is an incremental single trade, so
+    we *sum* them as before.
     """
 
     def apply(self, state: BarState, bar_input: BarInput, is_new: bool) -> BarState:
@@ -72,11 +77,22 @@ class StandardOHLCVMerge:
             state.high = max(state.high, bar_input.high)
             state.low = min(state.low, bar_input.low)
             state.close = bar_input.close
-            state.volume = round(state.volume + bar_input.volume, 8)
-            state.quote_volume = round(state.quote_volume + bar_input.quote_volume, 8)
-            state.trades += bar_input.trades
-            state.taker_buy_base = round(state.taker_buy_base + bar_input.taker_buy_base, 8)
-            state.taker_buy_quote = round(state.taker_buy_quote + bar_input.taker_buy_quote, 8)
+
+            if bar_input.source_interval == "tick":
+                # Trade ticks are incremental — accumulate
+                state.volume = round(state.volume + bar_input.volume, 8)
+                state.quote_volume = round(state.quote_volume + bar_input.quote_volume, 8)
+                state.trades += bar_input.trades
+                state.taker_buy_base = round(state.taker_buy_base + bar_input.taker_buy_base, 8)
+                state.taker_buy_quote = round(state.taker_buy_quote + bar_input.taker_buy_quote, 8)
+            else:
+                # Kline snapshots are cumulative — replace
+                state.volume = round(bar_input.volume, 8)
+                state.quote_volume = round(bar_input.quote_volume, 8)
+                state.trades = bar_input.trades
+                state.taker_buy_base = round(bar_input.taker_buy_base, 8)
+                state.taker_buy_quote = round(bar_input.taker_buy_quote, 8)
+
             state.tick_count += 1
             state.last_input_at_ms = bar_input.open_time_ms
 

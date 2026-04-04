@@ -109,13 +109,12 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
     const current = loadActiveIndicators();
     if (current.some((i) => i.id === "vol")) return;
 
-    const wasInit = localStorage.getItem(VOL_INIT_KEY);
-    if (wasInit) return;
-
-    localStorage.setItem(VOL_INIT_KEY, "1");
+    // Always try to fetch and add vol — even if wasInit was set previously,
+    // because older versions may have set the flag despite the fetch failing.
     fetchPreset("vol")
       .then((full) => {
         if (!full) return;
+        localStorage.setItem(VOL_INIT_KEY, "1");
         setActiveIndicators((prev) => {
           if (prev.some((i) => i.id === "vol")) return prev;
           return [
@@ -128,6 +127,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
               params: full.params || {},
               description: full.description || "",
               category: full.category || "",
+              paneTarget: full.paneTarget || "sub",
               isPreset: true,
               visible: true,
               lines: [],

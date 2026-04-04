@@ -17,11 +17,17 @@ const CATEGORY_LABELS = {
   "波动": "波动率",
   "成交量": "成交量",
   "custom": "自定义",
-  // English fallbacks
+  // English fallbacks (lowercase)
   "trend": "趋势",
   "momentum": "动量",
   "volatility": "波动率",
   "volume": "成交量",
+  "oscillator": "震荡",
+  // English fallbacks (capitalized — as reported by backend engine)
+  "Trend": "趋势",
+  "Oscillator": "震荡",
+  "Volatility": "波动率",
+  "Volume": "成交量",
 };
 
 const CATEGORY_ICONS = {
@@ -30,11 +36,17 @@ const CATEGORY_ICONS = {
   "波动": "📊",
   "成交量": "📦",
   "custom": "✏️",
-  // English fallbacks
+  // English fallbacks (lowercase)
   "trend": "📈",
   "momentum": "⚡",
   "volatility": "📊",
   "volume": "📦",
+  "oscillator": "⚡",
+  // English fallbacks (capitalized)
+  "Trend": "📈",
+  "Oscillator": "⚡",
+  "Volatility": "📊",
+  "Volume": "📦",
 };
 
 export default function IndicatorPanel({
@@ -110,6 +122,7 @@ export default function IndicatorPanel({
         params: full.params || {},
         description: full.description || "",
         category: full.category || "",
+        paneTarget: full.paneTarget || "sub",  // "main" or "sub"
         isPreset: true,
       });
       setTab("active");
@@ -335,6 +348,18 @@ add_line(sma, color="#f59e0b", title=f"SMA({period})")
                                     verticalAlign: "middle",
                                   }}>默认</span>
                                 )}
+                                <span style={{
+                                  fontSize: 9,
+                                  marginLeft: 6,
+                                  padding: "1px 5px",
+                                  borderRadius: 3,
+                                  background: preset.paneTarget === "main"
+                                    ? "rgba(34, 197, 94, 0.15)"
+                                    : "rgba(168, 85, 247, 0.15)",
+                                  color: preset.paneTarget === "main" ? "#22c55e" : "#a855f7",
+                                  fontWeight: 600,
+                                  verticalAlign: "middle",
+                                }}>{preset.paneTarget === "main" ? "主图" : "副图"}</span>
                               </span>
                               <span className="indicator-preset-desc">{preset.description}</span>
                             </div>
@@ -378,7 +403,21 @@ add_line(sma, color="#f59e0b", title=f"SMA({period})")
                           >
                             {ind.visible ? "👁" : "👁‍🗨"}
                           </button>
-                          <span className="indicator-active-name">{ind.name}</span>
+                          <span className="indicator-active-name">
+                            {ind.name}
+                            <span style={{
+                              fontSize: 9,
+                              marginLeft: 6,
+                              padding: "1px 5px",
+                              borderRadius: 3,
+                              background: ind.paneTarget === "main"
+                                ? "rgba(34, 197, 94, 0.15)"
+                                : "rgba(168, 85, 247, 0.15)",
+                              color: ind.paneTarget === "main" ? "#22c55e" : "#a855f7",
+                              fontWeight: 600,
+                              verticalAlign: "middle",
+                            }}>{ind.paneTarget === "main" ? "主图" : "副图"}</span>
+                          </span>
                           {ind.error && (
                             <span className="indicator-error-badge" title={ind.error}>⚠️</span>
                           )}

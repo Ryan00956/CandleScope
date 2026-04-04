@@ -346,6 +346,27 @@ _PRESET_SCRIPTS: dict[str, str] = {
 
         add_line(atr, color=color, title=f"ATR({period})", overlay=False, pane="separate")
     """),
+
+    "VOL": textwrap.dedent("""\
+        # __ENGINE__:VOL
+        # ── Volume (成交量) ──────────────────────────────────────
+        # 以柱状图显示成交量，阳线（close>=open）为上涨色，阴线为下跌色
+        #
+        # 可用变量: open, high, low, close, volume, time (numpy 数组)
+        # 输出函数: add_line(data, color, title, overlay, pane, type)
+
+        up_color   = params.get("up_color", "#26a69a")
+        down_color = params.get("down_color", "#ef5350")
+
+        n = len(close)
+        vol = volume.copy()
+
+        # 按K线阴阳着色
+        colors = [up_color if close[i] >= open[i] else down_color for i in range(n)]
+
+        add_line(vol, color=up_color, title="VOL", overlay=False, pane="volume",
+                 type="histogram", colorData=[{"time": int(time[i]), "color": colors[i]} for i in range(n)])
+    """),
 }
 
 
@@ -363,6 +384,21 @@ def _build_preset_script(name: str, spec_dict: dict) -> str:
 def _spec_to_preset(spec_dict: dict) -> dict:
     """Convert an IndicatorSpec dict to the preset format the frontend expects."""
     name = spec_dict["name"]
+
+    # Determine pane target from the actual indicator class metadata
+    cls = registry.get(name)
+    pane_target = "sub"  # default to sub-pane
+    if cls is not None:
+        try:
+            instance = cls(params=spec_dict.get("params", {}))
+            meta = instance.get_meta()
+            if meta.pane.value == "main":
+                pane_target = "main"
+            else:
+                pane_target = "sub"
+        except Exception:
+            pass
+
     return {
         "id": name.lower(),
         "name": spec_dict.get("display_name") or name,
@@ -375,6 +411,7 @@ def _spec_to_preset(spec_dict: dict) -> dict:
         "outputs": spec_dict.get("outputs", []),
         "is_builtin": spec_dict.get("is_builtin", True),
         "defaultEnabled": name == "VOL",  # auto-enable volume
+        "paneTarget": pane_target,  # "main" = overlay on price chart, "sub" = separate pane
     }
 
 

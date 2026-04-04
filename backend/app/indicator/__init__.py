@@ -57,6 +57,7 @@ from .indicators.macd import MACDIndicator
 from .indicators.rsi import RSIIndicator
 from .indicators.boll import BOLLIndicator
 from .indicators.atr import ATRIndicator
+from .indicators.vol import VOLIndicator
 
 _BUILTINS = [
     MAIndicator,
@@ -65,6 +66,7 @@ _BUILTINS = [
     RSIIndicator,
     BOLLIndicator,
     ATRIndicator,
+    VOLIndicator,
 ]
 
 for _cls in _BUILTINS:
@@ -105,4 +107,5 @@ __all__ = [
     "RSIIndicator",
     "BOLLIndicator",
     "ATRIndicator",
+    "VOLIndicator",
 ]

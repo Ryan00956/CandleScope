@@ -10,6 +10,7 @@ from .macd import MACDIndicator
 from .rsi import RSIIndicator
 from .boll import BOLLIndicator
 from .atr import ATRIndicator
+from .vol import VOLIndicator
 
 __all__ = [
     "MAIndicator",
@@ -18,4 +19,5 @@ __all__ = [
     "RSIIndicator",
     "BOLLIndicator",
     "ATRIndicator",
+    "VOLIndicator",
 ]

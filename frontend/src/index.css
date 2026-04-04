@@ -168,6 +168,187 @@ body {
   border-radius: var(--radius-sm);
 }
 
+.symbol-caret {
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-left: 2px;
+}
+
+/* ── 交易对搜索面板 ────────────────────────────────────────── */
+.symbol-search-wrapper {
+  position: relative;
+}
+
+.symbol-search-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 1000;
+  width: 340px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  animation: symbolPanelIn 0.15s ease-out;
+}
+
+@keyframes symbolPanelIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.symbol-search-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.symbol-search-icon {
+  font-size: 14px;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+
+.symbol-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-sans);
+}
+
+.symbol-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.symbol-search-clear {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s;
+}
+
+.symbol-search-clear:hover {
+  color: var(--text-primary);
+}
+
+/* Quote asset tabs */
+.symbol-quote-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.symbol-quote-tab {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font-sans);
+}
+
+.symbol-quote-tab:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.symbol-quote-tab.active {
+  color: var(--accent-blue);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+/* Virtual scroll list */
+.symbol-list-container {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-color) transparent;
+}
+
+.symbol-list-container::-webkit-scrollbar {
+  width: 5px;
+}
+
+.symbol-list-container::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+.symbol-list-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.symbol-list-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 0 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.symbol-list-item:hover {
+  background: var(--bg-hover);
+}
+
+.symbol-list-item.active {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.symbol-list-pair {
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  min-width: 100px;
+}
+
+.symbol-list-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  flex: 1;
+}
+
+.symbol-list-check {
+  color: var(--accent-blue);
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.symbol-list-footer {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-color);
+  text-align: right;
+}
+
 /* ── 价格信息 ────────────────────────────────────────────── */
 .price-info {
   display: flex;

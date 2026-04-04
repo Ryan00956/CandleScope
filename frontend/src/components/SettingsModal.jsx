@@ -5,6 +5,7 @@ import {
     testProxyConnection,
     repairStoredCustomIntervals,
     scanAndFillGaps,
+    refreshExchangeInfo,
 } from '../services/api';
 
 // ── Category definitions ────────────────────────────────────────
@@ -212,6 +213,30 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
             });
         } finally {
             setGapScanLoading(false);
+        }
+    }, []);
+
+    // ── Exchange info refresh ──
+    const [exchangeRefreshLoading, setExchangeRefreshLoading] = useState(false);
+    const [exchangeRefreshResult, setExchangeRefreshResult] = useState(null);
+
+    const handleExchangeRefresh = useCallback(async () => {
+        setExchangeRefreshLoading(true);
+        setExchangeRefreshResult(null);
+        try {
+            const res = await refreshExchangeInfo();
+            setExchangeRefreshResult({
+                status: 'ok',
+                message: `已更新 ${res.count} 个交易对`,
+                count: res.count,
+            });
+        } catch (err) {
+            setExchangeRefreshResult({
+                status: 'error',
+                message: `更新失败: ${err.message}`,
+            });
+        } finally {
+            setExchangeRefreshLoading(false);
         }
     }, []);
 
@@ -680,6 +705,32 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
                             <span>耗时 {((gapScanResult.elapsed_ms || 0) / 1000).toFixed(1)}s</span>
                         </div>
                         {renderGapScanDetails(gapScanResult)}
+                    </div>
+                )}
+
+                <div className="st-tool-card" style={{ marginTop: 12 }}>
+                    <div className="st-tool-header">
+                        <span className="st-tool-icon">🔄</span>
+                        <div>
+                            <div className="st-tool-name">更新交易对列表</div>
+                            <div className="st-tool-desc">
+                                从币安重新拉取现货交易对列表。交易对列表会在软件启动时自动加载，通常无需手动更新。
+                            </div>
+                        </div>
+                    </div>
+                    <button
+                        className="st-btn st-btn-accent"
+                        onClick={handleExchangeRefresh}
+                        disabled={exchangeRefreshLoading}
+                        style={{ width: '100%' }}
+                    >
+                        {exchangeRefreshLoading ? '⏳ 拉取中...' : '🔄 更新交易对'}
+                    </button>
+                </div>
+
+                {exchangeRefreshResult && (
+                    <div className={`st-result ${getRepairResultClassName(exchangeRefreshResult.status)}`}>
+                        <div className="st-result-head">{exchangeRefreshResult.message}</div>
                     </div>
                 )}
             </div>

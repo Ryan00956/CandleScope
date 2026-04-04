@@ -3,6 +3,7 @@ import MultiPaneChart from "./components/MultiPaneChart";
 import DrawingToolbar from "./components/DrawingToolbar";
 import SettingsModal from "./components/SettingsModal";
 import IndicatorPanel from "./components/IndicatorPanel";
+import SymbolSearch from "./components/SymbolSearch";
 import { useIndicators } from "./hooks/useIndicators";
 import {
   fetchKlinesBefore,
@@ -334,7 +335,10 @@ function upsertRealtimeKline(current, incoming) {
 }
 
 export default function App() {
-  const [symbol] = useState("BTCUSDT");
+  const [symbol, setSymbol] = useState(() => {
+    const prefs = loadUserPrefs();
+    return prefs.lastSymbol || "BTCUSDT";
+  });
   const [exchange] = useState(() => {
     const prefs = loadUserPrefs();
     return prefs.lastExchange || "binance";
@@ -708,6 +712,31 @@ export default function App() {
       setLoading(false);
     }
   }, [saveToCache, updateLastPrice]);
+
+  // ── Symbol switching handler ──
+  const handleSymbolChange = useCallback((newSymbol) => {
+    if (newSymbol === symbol) return;
+
+    // Persist choice
+    updateUserPref("lastSymbol", newSymbol);
+
+    // Clear in-memory caches for old symbol
+    chartDataCacheRef.current.clear();
+    realtimePriceRef.current = null;
+
+    // Reset chart state
+    setChartData([]);
+    setLastPrice(null);
+    setCrosshairData(null);
+    setLoading(true);
+    setError(null);
+    setHasMoreLeft(true);
+    setDatasetKey((v) => v + 1);
+
+    // Trigger symbol change — this causes the WS useEffect to
+    // reconnect and loadData to re-fetch for the new symbol.
+    setSymbol(newSymbol);
+  }, [symbol]);
 
   useEffect(() => {
     loadData(symbol, interval);
@@ -1438,10 +1467,7 @@ export default function App() {
           <span className="logo-text">CandleScope</span>
         </div>
 
-        <div className="symbol-selector" id="symbol-selector">
-          <span className="symbol-name">{symbol}</span>
-          <span className="symbol-exchange">Binance</span>
-        </div>
+        <SymbolSearch currentSymbol={symbol} onSelect={handleSymbolChange} />
 
         <button
           className="settings-btn"

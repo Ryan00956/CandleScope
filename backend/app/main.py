@@ -23,6 +23,7 @@ from app.api.v1.indicators import router as indicators_router  # indicator engin
 from app.api.v1.klines import router as klines_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.stream import router as stream_router
+from app.api.v1.symbols import router as symbols_router
 from app.core.config import CORS_ORIGINS
 from app.core.market import is_custom_interval
 from app.data_engine.storage import init_klines_storage
@@ -47,6 +48,7 @@ app.include_router(klines_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
+app.include_router(symbols_router, prefix="/api/v1")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -369,10 +371,18 @@ async def startup_event() -> None:
     # 1. Initialize SQLite storage
     init_klines_storage()
 
-    # 2. Try to initialize DataManager (new architecture)
+    # 2. Load exchange symbol info (non-blocking, best-effort)
+    try:
+        from app.api.v1.symbols import load_exchange_info
+        await load_exchange_info()
+        print("[startup] Exchange info loaded ✓")
+    except Exception as exc:
+        print(f"[startup] Exchange info load failed (non-critical): {exc}")
+
+    # 3. Try to initialize DataManager (new architecture)
     await _init_data_manager()
 
-    # 3. If DataManager is not available, fall back to legacy prewarm
+    # 4. If DataManager is not available, fall back to legacy prewarm
     if getattr(app.state, "data_manager", None) is None:
         asyncio.get_event_loop().run_in_executor(None, _legacy_prewarm_cache)
 

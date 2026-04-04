@@ -71,6 +71,23 @@ export function getMultiStreamUrl(symbol = "BTCUSDT") {
     return `${wsBase}/stream/klines_multi?symbol=${symbol}`;
 }
 
+// ── Exchange Info API ────────────────────────────────────────
+
+export async function fetchExchangeInfo() {
+    const url = `${API_BASE}/symbols/exchange-info`;
+    return request(url);
+}
+
+export async function refreshExchangeInfo() {
+    const url = `${API_BASE}/symbols/exchange-info/refresh`;
+    const response = await fetch(url, { method: "POST" });
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+}
+
 // ── Proxy Settings API ──────────────────────────────────────
 
 export async function fetchProxySettings() {

@@ -4,6 +4,7 @@ import DrawingToolbar from "./components/DrawingToolbar";
 import SettingsModal from "./components/SettingsModal";
 import IndicatorPanel from "./components/IndicatorPanel";
 import SymbolSearch from "./components/SymbolSearch";
+import WatchlistSidebar, { loadWatchlists, saveWatchlists } from "./components/WatchlistSidebar";
 import { useIndicators } from "./hooks/useIndicators";
 import {
   fetchKlinesBefore,
@@ -544,6 +545,21 @@ export default function App() {
     });
     if (interval === intv) handleIntervalChange("1h");
   };
+
+  // --- Watchlist state (shared between sidebar and search modal) ---
+  const [watchlists, setWatchlists] = useState(loadWatchlists);
+  const handleAddToWatchlist = useCallback((watchlistId, symbol) => {
+    setWatchlists((prev) => {
+      const next = prev.map((wl) => {
+        if (wl.id === watchlistId && !wl.symbols.includes(symbol)) {
+          return { ...wl, symbols: [...wl.symbols, symbol] };
+        }
+        return wl;
+      });
+      saveWatchlists(next);
+      return next;
+    });
+  }, []);
 
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(() => {
@@ -1467,7 +1483,12 @@ export default function App() {
           <span className="logo-text">CandleScope</span>
         </div>
 
-        <SymbolSearch currentSymbol={symbol} onSelect={handleSymbolChange} />
+        <SymbolSearch
+          currentSymbol={symbol}
+          onSelect={handleSymbolChange}
+          watchlists={watchlists}
+          onAddToWatchlist={handleAddToWatchlist}
+        />
 
         <button
           className="settings-btn"
@@ -1665,6 +1686,7 @@ export default function App() {
         </div>
       )}
 
+      <div className="main-content-area">
       <div className="chart-with-toolbar">
         <DrawingToolbar
           activeTool={drawingTool}
@@ -1747,6 +1769,15 @@ export default function App() {
           </ErrorBoundary>
         )}
       </div>
+
+      <WatchlistSidebar
+        currentSymbol={symbol}
+        onSelectSymbol={handleSymbolChange}
+        watchlists={watchlists}
+        onWatchlistsChange={(next) => { setWatchlists(next); saveWatchlists(next); }}
+      />
+
+      </div> {/* end main-content-area */}
 
       {/* Indicator Panel — slides in from the right */}
       <IndicatorPanel

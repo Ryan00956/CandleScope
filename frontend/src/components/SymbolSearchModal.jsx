@@ -30,7 +30,10 @@ function saveFavorites(list) {
 }
 
 // ── Component ────────────────────────────────────────────────
-export default function SymbolSearchModal({ open, onClose, currentSymbol, onSelect }) {
+export default function SymbolSearchModal({
+  open, onClose, currentSymbol, onSelect,
+  watchlists, onAddToWatchlist,
+}) {
   const [search, setSearch] = useState("");
   const [marketType, setMarketType] = useState("spot");
   const [exchangeFilter, setExchangeFilter] = useState(new Set(["binance"]));
@@ -41,6 +44,8 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
   const [allSymbols, setAllSymbols] = useState([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  // ── Right-click context menu state ──
+  const [ctxMenu, setCtxMenu] = useState(null); // { x, y, symbol }
 
   const inputRef = useRef(null);
   const listRef = useRef(null);
@@ -76,6 +81,7 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
       setSearch("");
       setHighlightIndex(0);
       setScrollTop(0);
+      setCtxMenu(null);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
   }, [open]);
@@ -176,11 +182,35 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
     }
   }, []);
 
+  // ── Right-click handler for rows ──
+  const handleRowContextMenu = useCallback((e, sym) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only show if watchlists are provided
+    if (!watchlists || watchlists.length === 0) return;
+    setCtxMenu({ x: e.clientX, y: e.clientY, symbol: sym });
+  }, [watchlists]);
+
+  // Dismiss context menu
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const dismiss = () => setCtxMenu(null);
+    window.addEventListener("click", dismiss);
+    window.addEventListener("contextmenu", dismiss);
+    window.addEventListener("scroll", dismiss, true);
+    return () => {
+      window.removeEventListener("click", dismiss);
+      window.removeEventListener("contextmenu", dismiss);
+      window.removeEventListener("scroll", dismiss, true);
+    };
+  }, [ctxMenu]);
+
   // ── Keyboard navigation ──
   const handleKeyDown = useCallback(
     (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
+        if (ctxMenu) { setCtxMenu(null); return; }
         onClose();
         return;
       }
@@ -218,7 +248,7 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
         return;
       }
     },
-    [filtered, highlightIndex, scrollTop, onClose, handleSelect],
+    [filtered, highlightIndex, scrollTop, onClose, handleSelect, ctxMenu],
   );
 
   // ── Virtual scroll calculations ──
@@ -235,9 +265,16 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
   // ── Favorites set for quick lookup ──
   const favSet = useMemo(() => new Set(favorites), [favorites]);
 
+  // ── Watchlist membership lookup ──
+  const getSymbolWatchlists = useCallback((sym) => {
+    if (!watchlists) return [];
+    return watchlists.filter((wl) => wl.symbols.includes(sym));
+  }, [watchlists]);
+
   if (!open) return null;
 
   const listHeight = VISIBLE_ROWS * ROW_HEIGHT;
+  const hasWatchlists = watchlists && watchlists.length > 0;
 
   return (
     <div className="sym-modal-overlay" onClick={onClose}>
@@ -380,6 +417,7 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
                   const isHighlighted = realIndex === highlightIndex;
                   const isCurrent = s.symbol === currentSymbol;
                   const isFav = favSet.has(s.symbol);
+                  const inWatchlists = getSymbolWatchlists(s.symbol);
 
                   return (
                     <div
@@ -388,6 +426,7 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
                       style={{ height: ROW_HEIGHT }}
                       onClick={() => handleSelect(s.symbol)}
                       onMouseEnter={() => setHighlightIndex(realIndex)}
+                      onContextMenu={(e) => handleRowContextMenu(e, s.symbol)}
                     >
                       <button
                         className={`sym-modal-fav-btn ${isFav ? "active" : ""}`}
@@ -399,6 +438,18 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
                       <span className="sym-modal-col-pair sym-modal-row-pair">
                         {s.symbol}
                         {isCurrent && <span className="sym-modal-current-tag">当前</span>}
+                        {hasWatchlists && inWatchlists.length > 0 && (
+                          <span className="sym-modal-wl-indicators">
+                            {inWatchlists.map((wl) => (
+                              <span
+                                key={wl.id}
+                                className="sym-modal-wl-dot"
+                                style={{ background: wl.color || "#3b82f6" }}
+                                title={`在列表: ${wl.name}`}
+                              />
+                            ))}
+                          </span>
+                        )}
                       </span>
                       <span className="sym-modal-col-base sym-modal-row-base">{s.baseAsset}</span>
                       <span className="sym-modal-col-quote sym-modal-row-quote">{s.quoteAsset}</span>
@@ -426,6 +477,7 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
             </span>
             <span className="sym-modal-shortcut-hint">
               <kbd>↑</kbd><kbd>↓</kbd> 导航 · <kbd>Enter</kbd> 选择 · <kbd>Esc</kbd> 关闭
+              {hasWatchlists && " · 右键添加到自选列表"}
             </span>
           </div>
           <button
@@ -439,6 +491,46 @@ export default function SymbolSearchModal({ open, onClose, currentSymbol, onSele
           </button>
         </div>
       </div>
+
+      {/* ── Right-click context menu: add to watchlist ── */}
+      {ctxMenu && hasWatchlists && (
+        <div
+          className="sym-ctx-menu"
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="sym-ctx-header">
+            <span className="sym-ctx-header-symbol">{ctxMenu.symbol}</span>
+            <span className="sym-ctx-header-label">添加到自选列表</span>
+          </div>
+          <div className="sym-ctx-items">
+            {watchlists.map((wl) => {
+              const alreadyIn = wl.symbols.includes(ctxMenu.symbol);
+              return (
+                <button
+                  key={wl.id}
+                  className={`sym-ctx-item ${alreadyIn ? "already-in" : ""}`}
+                  onClick={() => {
+                    if (!alreadyIn && onAddToWatchlist) {
+                      onAddToWatchlist(wl.id, ctxMenu.symbol);
+                    }
+                    setCtxMenu(null);
+                  }}
+                  disabled={alreadyIn}
+                >
+                  <span className="sym-ctx-dot" style={{ background: wl.color || "#3b82f6" }} />
+                  <span className="sym-ctx-name">{wl.name}</span>
+                  {alreadyIn ? (
+                    <span className="sym-ctx-check">✓</span>
+                  ) : (
+                    <span className="sym-ctx-plus">+</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

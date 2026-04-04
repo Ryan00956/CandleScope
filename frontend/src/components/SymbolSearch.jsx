@@ -7,8 +7,14 @@ import SymbolSearchModal from "./SymbolSearchModal";
  * Renders a compact symbol selector button in the top bar.
  * Clicking it (or pressing Ctrl+K / /) opens a large centered
  * modal with advanced search & filtering capabilities.
+ *
+ * Now also passes watchlists to the modal so users can right-click
+ * to add symbols to their watchlist folders.
  */
-export default function SymbolSearch({ currentSymbol, onSelect }) {
+export default function SymbolSearch({
+  currentSymbol, onSelect,
+  watchlists, onAddToWatchlist,
+}) {
   const [open, setOpen] = useState(false);
 
   const handleOpen = useCallback(() => {
@@ -71,6 +77,8 @@ export default function SymbolSearch({ currentSymbol, onSelect }) {
         onClose={handleClose}
         currentSymbol={currentSymbol}
         onSelect={handleSelect}
+        watchlists={watchlists}
+        onAddToWatchlist={onAddToWatchlist}
       />
     </>
   );

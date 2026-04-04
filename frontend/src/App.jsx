@@ -1473,6 +1473,16 @@ export default function App() {
     return price.toFixed(8);
   };
 
+  const formatPriceDiff = (diff) => {
+    if (diff == null) return "--";
+    const abs = Math.abs(diff);
+    let raw;
+    if (abs >= 1000) raw = abs.toFixed(2);
+    else if (abs >= 1) raw = abs.toFixed(4);
+    else raw = abs.toFixed(8);
+    return parseFloat(raw).toString();
+  };
+
   const formatVolume = (vol) => {
     if (vol == null) return "--";
     if (vol >= 1_000_000_000) return `${(vol / 1_000_000_000).toFixed(2)}B`;
@@ -1571,6 +1581,18 @@ export default function App() {
             <div className="ohlcv-item">
               <span className="ohlcv-label">Vol</span>
               <span className="ohlcv-value">{formatVolume(displayData.volume)}</span>
+            </div>
+            <div className="ohlcv-item">
+              <span className="ohlcv-label">涨跌</span>
+              <span className="ohlcv-value" style={{ color: isUp ? "var(--candle-up)" : "var(--candle-down)" }}>
+                {isUp ? "+" : "-"}{formatPriceDiff(displayData.close - displayData.open)} / {isUp ? "+" : ""}{priceChange.toFixed(2)}%
+              </span>
+            </div>
+            <div className="ohlcv-item">
+              <span className="ohlcv-label">振幅</span>
+              <span className="ohlcv-value">
+                {displayData.open ? ((displayData.high - displayData.low) / displayData.open * 100).toFixed(2) : "0.00"}%
+              </span>
             </div>
           </div>
         )}

@@ -431,6 +431,40 @@ export default function App() {
     chartWidgetRef.current?.clearAllDrawings();
   }, []);
 
+  // --- Settings state (must be before useIndicators which needs settings.upColor/downColor) ---
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState(() => {
+    const saved = localStorage.getItem("candlescope-settings");
+    const defaults = {
+      theme: "dark",
+      customBg: "#0f172a",
+      upColor: "#22c55e",
+      downColor: "#ef4444",
+      cachePreset: "standard",
+      cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
+      ephemeralCacheBars: 86400,
+    };
+    if (saved) {
+      return { ...defaults, ...JSON.parse(saved) };
+    }
+    return defaults;
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.setAttribute("data-theme", settings.theme);
+    if (settings.theme === "custom") {
+      root.style.setProperty("--bg-primary", settings.customBg);
+      root.style.setProperty("--bg-secondary", settings.customBg);
+    } else {
+      root.style.removeProperty("--bg-primary");
+      root.style.removeProperty("--bg-secondary");
+    }
+    root.style.setProperty("--candle-up", settings.upColor);
+    root.style.setProperty("--candle-down", settings.downColor);
+    localStorage.setItem("candlescope-settings", JSON.stringify(settings));
+  }, [settings]);
+
   // --- Indicator state ---
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);
   // Store the actual ref objects from ChartWidget (not copies of .current)
@@ -470,6 +504,8 @@ export default function App() {
     chartData,
     datasetKey: `${symbol}-${interval}-${datasetKey}`,
     seriesReady: indicatorSeriesReady,
+    candleUpColor: settings.upColor,
+    candleDownColor: settings.downColor,
   });
 
   const removeIndicator = useCallback((indicatorId) => {
@@ -574,38 +610,6 @@ export default function App() {
     });
   }, []);
 
-  const [showSettings, setShowSettings] = useState(false);
-  const [settings, setSettings] = useState(() => {
-    const saved = localStorage.getItem("candlescope-settings");
-    const defaults = {
-      theme: "dark",
-      customBg: "#0f172a",
-      upColor: "#22c55e",
-      downColor: "#ef4444",
-      cachePreset: "standard",
-      cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
-      ephemeralCacheBars: 86400,
-    };
-    if (saved) {
-      return { ...defaults, ...JSON.parse(saved) };
-    }
-    return defaults;
-  });
-
-  useEffect(() => {
-    const root = document.documentElement;
-    root.setAttribute("data-theme", settings.theme);
-    if (settings.theme === "custom") {
-      root.style.setProperty("--bg-primary", settings.customBg);
-      root.style.setProperty("--bg-secondary", settings.customBg);
-    } else {
-      root.style.removeProperty("--bg-primary");
-      root.style.removeProperty("--bg-secondary");
-    }
-    root.style.setProperty("--candle-up", settings.upColor);
-    root.style.setProperty("--candle-down", settings.downColor);
-    localStorage.setItem("candlescope-settings", JSON.stringify(settings));
-  }, [settings]);
 
   // Sync cache limits to backend when they change
   useEffect(() => {

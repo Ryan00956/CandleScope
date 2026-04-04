@@ -60,8 +60,10 @@ function buildDataSignature(data) {
  * @param {Array}                  opts.chartData       — current OHLCV data array
  * @param {string}                 opts.datasetKey      — changes when chart is recreated
  * @param {number}                 opts.seriesReady     — increments when chart series is ready
+ * @param {string}                 [opts.candleUpColor]   — K-line up color (synced to VOL indicator)
+ * @param {string}                 [opts.candleDownColor] — K-line down color (synced to VOL indicator)
  */
-export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seriesReady }) {
+export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seriesReady, candleUpColor, candleDownColor }) {
   // Active indicators: [{id, name, script, params, visible, lines: [...computedLines]}]
   const [activeIndicators, setActiveIndicators] = useState(loadActiveIndicators);
   const [computing, setComputing] = useState(false);
@@ -87,6 +89,10 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
   activeIndicatorsRef.current = activeIndicators;
   const chartDataRef = useRef(chartData);
   chartDataRef.current = chartData;
+  const candleUpColorRef = useRef(candleUpColor);
+  candleUpColorRef.current = candleUpColor;
+  const candleDownColorRef = useRef(candleDownColor);
+  candleDownColorRef.current = candleDownColor;
 
   // Flag for forced compute
   const pendingForceComputeRef = useRef(false);
@@ -266,11 +272,22 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
       const results = await Promise.allSettled(
         indicators.map(async (ind) => {
           try {
+            // For VOL indicator, inject K-line colors so volume bars follow candlestick colors
+            let computeParams = ind.params || {};
+            const curUpColor = candleUpColorRef.current;
+            const curDownColor = candleDownColorRef.current;
+            if ((ind.id === "vol" || ind.engineName === "VOL") && (curUpColor || curDownColor)) {
+              computeParams = {
+                ...computeParams,
+                up_color: curUpColor || computeParams.up_color || "#22c55e",
+                down_color: curDownColor || computeParams.down_color || "#ef4444",
+              };
+            }
             const result = await computeIndicator({
               name: ind.engineName || undefined,
               script: ind.script,
               ohlcv,
-              params: ind.params || {},
+              params: computeParams,
             });
             return { id: ind.id, result, visible: ind.visible };
           } catch (err) {
@@ -392,6 +409,24 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
       pendingForceComputeRef.current = true;
     }
   }, [datasetKey]);
+
+  // ── Re-compute VOL when candle colors change ──────────────
+  const prevCandleColorsRef = useRef(`${candleUpColor}|${candleDownColor}`);
+  useEffect(() => {
+    const colorKey = `${candleUpColor}|${candleDownColor}`;
+    if (colorKey !== prevCandleColorsRef.current) {
+      prevCandleColorsRef.current = colorKey;
+      // Check if VOL indicator is active before forcing recompute
+      const hasVol = activeIndicatorsRef.current.some(
+        (i) => i.id === "vol" || i.engineName === "VOL"
+      );
+      if (hasVol) {
+        lastComputeSignatureRef.current = "";
+        pendingForceComputeRef.current = true;
+        computeAll(true);
+      }
+    }
+  }, [candleUpColor, candleDownColor, computeAll]);
 
   // ── Trigger compute when indicators are added/changed ─────
   const prevIndicatorSignatureRef = useRef("");

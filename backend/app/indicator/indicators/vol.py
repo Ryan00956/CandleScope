@@ -30,8 +30,8 @@ class VOLIndicator(Indicator):
 
     def __init__(self, params: dict[str, Any] | None = None) -> None:
         super().__init__(params)
-        self._up_color: str = self.params.get("up_color", "#26a69a")
-        self._down_color: str = self.params.get("down_color", "#ef5350")
+        self._up_color: str = self.params.get("up_color", "#22c55e")
+        self._down_color: str = self.params.get("down_color", "#ef4444")
 
         # Track per-bar colors for histogram coloring
         self._color_data: list[dict] = []
@@ -91,13 +91,13 @@ class VOLIndicator(Indicator):
         return IndicatorSpec(
             name="VOL",
             display_name="成交量",
-            description="成交量柱状图，阳线绿阴线红",
+            description="成交量柱状图，颜色跟随K线设置",
             category="成交量",
             input_specs=["volume", "close"],
             output_specs=["vol"],
             param_schema=[
-                IndicatorParam(key="up_color", label="上涨颜色", type="color", default="#26a69a"),
-                IndicatorParam(key="down_color", label="下跌颜色", type="color", default="#ef5350"),
+                IndicatorParam(key="up_color", label="上涨颜色", type="color", default="#22c55e"),
+                IndicatorParam(key="down_color", label="下跌颜色", type="color", default="#ef4444"),
             ],
-            default_params={"up_color": "#26a69a", "down_color": "#ef5350"},
+            default_params={"up_color": "#22c55e", "down_color": "#ef4444"},
         )

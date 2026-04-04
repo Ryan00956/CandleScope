@@ -822,30 +822,24 @@ export default function App() {
         shownInitialData = true;
       }
 
-      // If the backend signals a tail gap (data doesn't reach "now"),
-      // keep loading=true so the user sees a loading overlay until
-      // backfill_completed arrives with the missing bars.
+      // Even if there's a tail gap (data doesn't reach "now"),
+      // show the data immediately.  The gap will be filled in the
+      // background by backfill + WS.  Blocking the UI for up to 30s
+      // with a loading overlay is a worse UX than showing slightly
+      // stale data that auto-corrects within seconds.
       if (historyResult.has_tail_gap) {
         setConnectionStatus("loading");
-        const BACKFILL_TIMEOUT_MS = 30_000;
-        const safetyTimer = setTimeout(() => {
-          if (controller.signal.aborted) return;
-          setLoading(false);
-        }, BACKFILL_TIMEOUT_MS);
-        controller.signal.addEventListener("abort", () => clearTimeout(safetyTimer));
-      } else {
-        // History arrived with no tail gap — data is complete, clear loading.
-        setLoading(false);
       }
+      // Always clear loading when we have history data
+      setLoading(false);
     } else if (!shownInitialData) {
       // No history available yet — backfill is likely in progress.
       // Keep loading=true; the backfill_completed WS handler will
       // call setLoading(false) + setDatasetKey() once data arrives.
-      // Set a safety timeout so we don't get stuck forever if
-      // backfill fails or takes too long.
+      // Safety timeout prevents getting stuck if backfill fails.
       setConnectionStatus("loading");
 
-      const BACKFILL_TIMEOUT_MS = 30_000;
+      const BACKFILL_TIMEOUT_MS = 10_000;
       const safetyTimer = setTimeout(() => {
         if (controller.signal.aborted) return;
         // Force-show whatever we have after timeout
@@ -858,11 +852,8 @@ export default function App() {
       controller.signal.addEventListener("abort", () => clearTimeout(safetyTimer));
     }
 
-    // Only clear loading if history provided data (handled above)
-    // or cache was hit (handled at the top).  Do NOT unconditionally
-    // setLoading(false) here — that was the old bug.
-    // Also skip if backend signalled a tail gap (backfill still pending).
-    if (shownInitialData && !historyResult?.has_tail_gap) {
+    // Clear loading when we have shown initial data
+    if (shownInitialData) {
       setLoading(false);
     }
   }, [saveToCache, updateLastPrice]);

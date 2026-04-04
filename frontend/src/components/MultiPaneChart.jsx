@@ -14,7 +14,7 @@ import { clearSavedDrawings } from "../services/drawingStorage";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
-const DRAWING_TOOL_IDS = new Set(["pen", "eraser", "line-segment", "line-ray", "line-infinite", "text"]);
+const DRAWING_TOOL_IDS = new Set(["pen", "eraser", "line-segment", "line-ray", "line-infinite", "text", "position-long", "position-short"]);
 
 const PANE_HEIGHTS_KEY = "candlescope-pane-heights";
 const MIN_PANE_HEIGHT = 60; // px
@@ -58,6 +58,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     textItalic = false,
     fibLevels,
     fibInverted = false,
+    positionSize = 1000,
     // Indicator data — computed by useIndicators (multi-pane version)
     // mainOverlayLines: [{data, color, ...}]  — overlay lines for main chart
     // subPanes: [{id, label, lines: [...]}]    — each sub pane with its lines
@@ -480,6 +481,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     textItalic={textItalic}
                     fibLevels={fibLevels}
                     fibInverted={fibInverted}
+                    positionSize={positionSize}
                 />
             </div>
 
@@ -526,6 +528,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                 textItalic={textItalic}
                                 fibLevels={fibLevels}
                                 fibInverted={fibInverted}
+                                positionSize={positionSize}
                             />
                         </div>
                     </div>

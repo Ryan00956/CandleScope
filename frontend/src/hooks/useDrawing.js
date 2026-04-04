@@ -21,11 +21,13 @@ import { LineDrawingPrimitive } from "../components/primitives/LineDrawingPrimit
 import { FreehandDrawingPrimitive } from "../components/primitives/FreehandDrawingPrimitive.js";
 import { TextDrawingPrimitive } from "../components/primitives/TextDrawingPrimitive.js";
 import { FibonacciDrawingPrimitive, DEFAULT_FIB_LEVELS } from "../components/primitives/FibonacciDrawingPrimitive.js";
+import { PositionDrawingPrimitive } from "../components/primitives/PositionDrawingPrimitive.js";
 import { timeToCoordinateInterpolated } from "../components/primitives/coordinateUtils.js";
 import { saveDrawings, loadDrawings, clearSavedDrawings } from "../services/drawingStorage.js";
 
 const LINE_TOOL_IDS = new Set(["line-segment", "line-ray", "line-infinite"]);
 const FIB_TOOL_IDS = new Set(["fibonacci"]);
+const POSITION_TOOL_IDS = new Set(["position-long", "position-short"]);
 
 let _idCounter = 0;
 function nextId(prefix = "d") {
@@ -44,6 +46,7 @@ export function useDrawing({
   textItalic,
   fibLevels,
   fibInverted,
+  positionSize,
   symbol,
   seriesReady,
 }) {
@@ -86,12 +89,18 @@ export function useDrawing({
   fibLevelsRef.current = fibLevels;
   const fibInvertedRef = useRef(fibInverted);
   fibInvertedRef.current = fibInverted;
+  const positionSizeRef = useRef(positionSize);
+  positionSizeRef.current = positionSize;
 
   const symbolRef = useRef(symbol);
   symbolRef.current = symbol;
 
+  // Track previous symbol so we can detect symbol switches and swap drawing sets
+  const prevSymbolRef = useRef(symbol);
+
   const isLineTool = LINE_TOOL_IDS.has(activeTool);
   const isFibTool = FIB_TOOL_IDS.has(activeTool);
+  const isPositionTool = POSITION_TOOL_IDS.has(activeTool);
   const isPenTool = activeTool === "pen";
   const isTextTool = activeTool === "text";
   const isEraserTool = activeTool === "eraser";
@@ -278,20 +287,47 @@ export function useDrawing({
     const series = seriesRef?.current;
     if (!series || !symbol || !seriesReady) return;
 
-    // If there are existing primitives in memory (from before a chart
-    // re-creation or series switch), we need to re-attach them to the
-    // new series. Otherwise, if this is a fresh page load, restore
-    // from localStorage.
+    const prevSymbol = prevSymbolRef.current;
+    const symbolChanged = prevSymbol && prevSymbol !== symbol;
 
-    const existingPrims = primitivesRef.current;
+    // ── Symbol changed: swap drawing sets ──
+    // Save current drawings for the *old* symbol, detach everything,
+    // then load the *new* symbol's drawings from localStorage.
+    if (symbolChanged) {
+      // Save old symbol's drawings before clearing
+      if (primitivesRef.current.length > 0) {
+        saveDrawings(prevSymbol, primitivesRef.current);
+      }
 
-    if (existingPrims.length > 0) {
-      // Re-attach existing in-memory primitives to the new series.
-      // First detach from any old series they may still reference,
-      // then attach to the current (possibly new) series.
-      for (const prim of existingPrims) {
+      // Detach all primitives from whatever series they are attached to
+      for (const prim of primitivesRef.current) {
         try {
-          // Detach from old series if still attached to a different one
+          if (prim._series) {
+            try { prim._series.detachPrimitive(prim); } catch { /* already detached */ }
+          }
+          // Also try detaching from the current series in case _series tracking is off
+          try { series.detachPrimitive(prim); } catch { /* */ }
+        } catch { /* */ }
+      }
+
+      // Clear in-memory state
+      primitivesRef.current = [];
+      selectedIdRef.current = null;
+      setSelectedPrimId(null);
+      draggingRef.current = null;
+      isDrawingFreehandRef.current = false;
+      currentFreehandRef.current = null;
+
+      // Update prev symbol tracker
+      prevSymbolRef.current = symbol;
+
+      // Now fall through to load the new symbol's drawings below
+    }
+
+    // ── Same symbol, but series was recreated (e.g. theme change): re-attach ──
+    if (!symbolChanged && primitivesRef.current.length > 0) {
+      for (const prim of primitivesRef.current) {
+        try {
           if (prim._series && prim._series !== series) {
             try { prim._series.detachPrimitive(prim); } catch { /* already detached */ }
           }
@@ -300,12 +336,16 @@ export function useDrawing({
           console.warn("Failed to re-attach drawing:", err);
         }
       }
+      prevSymbolRef.current = symbol;
       return;
     }
 
-    // No in-memory primitives → restore from localStorage
+    // ── Load drawings from localStorage for current symbol ──
     const saved = loadDrawings(symbol);
-    if (!saved || saved.length === 0) return;
+    if (!saved || saved.length === 0) {
+      prevSymbolRef.current = symbol;
+      return;
+    }
 
     for (const item of saved) {
       let prim = null;
@@ -338,6 +378,16 @@ export function useDrawing({
             levels: item.levels,
             inverted: item.inverted || false,
           });
+        } else if (item.type === "position") {
+          prim = new PositionDrawingPrimitive({
+            id: item.id || nextId("pos"),
+            direction: item.direction,
+            entryPrice: item.entryPrice,
+            tpPrice: item.tpPrice,
+            slPrice: item.slPrice,
+            timeRange: item.timeRange,
+            positionSize: item.positionSize,
+          });
         } else if (item.type === "freehand") {
           prim = new FreehandDrawingPrimitive({
             id: item.id || nextId("fh"),
@@ -354,6 +404,8 @@ export function useDrawing({
         primitivesRef.current.push(prim);
       }
     }
+
+    prevSymbolRef.current = symbol;
   }, [symbol, seriesRef, seriesReady]);
 
   // ── Selection helpers ──
@@ -362,7 +414,7 @@ export function useDrawing({
     selectedIdRef.current = id;
     setSelectedPrimId(id);
     for (const prim of primitivesRef.current) {
-      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive) {
+      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive) {
         prim.setSelected(prim.id === id);
       }
     }
@@ -372,7 +424,7 @@ export function useDrawing({
     selectedIdRef.current = null;
     setSelectedPrimId(null);
     for (const prim of primitivesRef.current) {
-      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive) {
+      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive) {
         prim.setSelected(false);
       }
     }
@@ -386,7 +438,10 @@ export function useDrawing({
       for (let i = primitivesRef.current.length - 1; i >= 0; i--) {
         const prim = primitivesRef.current[i];
 
-        if (prim instanceof LineDrawingPrimitive) {
+        if (prim instanceof PositionDrawingPrimitive) {
+          const hit = prim.hitTest(x, y);
+          if (hit) return { prim, type: "position", ...hit };
+        } else if (prim instanceof LineDrawingPrimitive) {
           const hit = prim.hitTest(x, y);
           if (hit) return { prim, type: "line", ...hit };
         } else if (prim instanceof FibonacciDrawingPrimitive) {
@@ -597,6 +652,131 @@ export function useDrawing({
         return;
       }
 
+      // ── POSITION TOOLS ──
+      if (POSITION_TOOL_IDS.has(tool)) {
+        // Clicking on existing position → select
+        const hit = hitTestAll(pos.x, pos.y);
+        if (hit && hit.type === "position") {
+          selectPrimitive(hit.prim.id);
+
+          // Start dragging TP or SL handle
+          if (hit.zone === "tp") {
+            draggingRef.current = {
+              id: hit.prim.id,
+              type: "position-tp",
+              startMouse: pos,
+              origTpPrice: hit.prim.tpPrice,
+            };
+          } else if (hit.zone === "sl") {
+            draggingRef.current = {
+              id: hit.prim.id,
+              type: "position-sl",
+              startMouse: pos,
+              origSlPrice: hit.prim.slPrice,
+            };
+          } else if (hit.zone === "entry" || hit.zone === "body") {
+            // Drag the whole position
+            draggingRef.current = {
+              id: hit.prim.id,
+              type: "position-move",
+              startMouse: pos,
+              origEntry: hit.prim.entryPrice,
+              origTp: hit.prim.tpPrice,
+              origSl: hit.prim.slPrice,
+              origTimeRange: { ...hit.prim.timeRange },
+            };
+          } else if (hit.zone === "left") {
+            draggingRef.current = {
+              id: hit.prim.id,
+              type: "position-left",
+              startMouse: pos,
+              origTimeRange: { ...hit.prim.timeRange },
+            };
+          } else if (hit.zone === "right") {
+            draggingRef.current = {
+              id: hit.prim.id,
+              type: "position-right",
+              startMouse: pos,
+              origTimeRange: { ...hit.prim.timeRange },
+            };
+          }
+
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+
+        // Deselect if something was selected
+        if (selectedIdRef.current) {
+          deselectAll();
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+
+        // Place new position: click sets entry price
+        const dataA = screenToData(pos.x, pos.y);
+        if (!dataA) return;
+
+        const isLong = tool === "position-long";
+        const entryPrice = dataA.price;
+
+        // Calculate visible time range to auto-span ~30% of visible chart
+        const chart = chartRef?.current;
+        let startTime = dataA.time;
+        let endTime = dataA.time;
+        if (chart) {
+          const vr = chart.timeScale().getVisibleRange();
+          if (vr) {
+            const visibleSpan = vr.to - vr.from;
+            endTime = dataA.time + visibleSpan * 0.15;
+          }
+        }
+
+        // Default TP/SL based on visible price range — ensures proper proportions on any timeframe
+        let tpOffset, slOffset;
+        const series = seriesRef?.current;
+        if (chart && series) {
+          try {
+            // Get the visible price range from the chart container's pixel height
+            const container = chartContainerRef?.current;
+            const chartHeight = container?.clientHeight || 400;
+            const topPrice = series.coordinateToPrice(0);
+            const bottomPrice = series.coordinateToPrice(chartHeight);
+            if (topPrice != null && bottomPrice != null && isFinite(topPrice) && isFinite(bottomPrice)) {
+              const visiblePriceRange = Math.abs(topPrice - bottomPrice);
+              tpOffset = visiblePriceRange * 0.12;  // TP at ~12% of visible range
+              slOffset = visiblePriceRange * 0.06;   // SL at ~6% of visible range
+            }
+          } catch { /* fallback below */ }
+        }
+        // Fallback if we couldn't determine visible range
+        if (!tpOffset) tpOffset = entryPrice * 0.03;
+        if (!slOffset) slOffset = entryPrice * 0.015;
+
+        const tpPrice = isLong ? entryPrice + tpOffset : entryPrice - tpOffset;
+        const slPrice = isLong ? entryPrice - slOffset : entryPrice + slOffset;
+
+        const posPrim = new PositionDrawingPrimitive({
+          id: nextId("pos"),
+          direction: isLong ? "long" : "short",
+          entryPrice,
+          tpPrice,
+          slPrice,
+          timeRange: { start: startTime, end: endTime },
+          positionSize: positionSizeRef.current || 1000,
+        });
+
+        attachPrim(posPrim);
+        primitivesRef.current.push(posPrim);
+        selectPrimitive(posPrim.id);
+        persistDrawings();
+
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
       // ── LINE/FIB TOOLS ──
       if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool)) {
         // Second click — commit new line/fib
@@ -768,6 +948,8 @@ export function useDrawing({
             isHit = prim.hitTest(pos.x, pos.y) != null;
           } else if (prim instanceof FibonacciDrawingPrimitive) {
             isHit = prim.hitTest(pos.x, pos.y) != null;
+          } else if (prim instanceof PositionDrawingPrimitive) {
+            isHit = prim.hitTest(pos.x, pos.y) != null;
           } else if (prim instanceof FreehandDrawingPrimitive) {
             isHit = prim.hitTest(pos.x, pos.y);
           } else if (prim instanceof TextDrawingPrimitive) {
@@ -821,6 +1003,63 @@ export function useDrawing({
         const newData = screenToData(origScreen.x + dx, origScreen.y + dy);
         if (!newData) return;
         prim.setDataPoint(newData);
+
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // ── POSITION TOOL: dragging TP/SL/entry/edges ──
+      if (draggingRef.current && (draggingRef.current.type === "position-tp" || draggingRef.current.type === "position-sl" || draggingRef.current.type === "position-move" || draggingRef.current.type === "position-left" || draggingRef.current.type === "position-right")) {
+        const { id, type } = draggingRef.current;
+        const prim = primitivesRef.current.find((p) => p.id === id);
+        if (!prim || !(prim instanceof PositionDrawingPrimitive)) return;
+
+        const dataPoint = screenToData(pos.x, pos.y);
+        if (!dataPoint) return;
+
+        if (type === "position-tp") {
+          const isLong = prim.direction === "long";
+          let newTp = dataPoint.price;
+          // Clamp: TP cannot cross entry
+          if (isLong) newTp = Math.max(newTp, prim.entryPrice);
+          else newTp = Math.min(newTp, prim.entryPrice);
+          prim.setTpPrice(newTp);
+        } else if (type === "position-sl") {
+          const isLong = prim.direction === "long";
+          let newSl = dataPoint.price;
+          // Clamp: SL cannot cross entry
+          if (isLong) newSl = Math.min(newSl, prim.entryPrice);
+          else newSl = Math.max(newSl, prim.entryPrice);
+          prim.setSlPrice(newSl);
+        } else if (type === "position-left") {
+          // Drag left edge: update timeRange.start
+          prim.setTimeRange({ ...prim.timeRange, start: dataPoint.time });
+        } else if (type === "position-right") {
+          // Drag right edge: update timeRange.end
+          prim.setTimeRange({ ...prim.timeRange, end: dataPoint.time });
+        } else if (type === "position-move") {
+          const { origEntry, origTp, origSl, startMouse: sm, origTimeRange } = draggingRef.current;
+          const dy = pos.y - sm.y;
+          const dx = pos.x - sm.x;
+          // Convert dy to price difference
+          const origScreen = dataToScreen({ time: origTimeRange.start, price: origEntry });
+          if (origScreen) {
+            const newEntryData = screenToData(origScreen.x + dx, origScreen.y + dy);
+            if (newEntryData) {
+              const priceDelta = newEntryData.price - origEntry;
+              prim.setEntryPrice(origEntry + priceDelta);
+              if (origTp != null) prim.setTpPrice(origTp + priceDelta);
+              if (origSl != null) prim.setSlPrice(origSl + priceDelta);
+              // Also shift time range horizontally
+              const timeDelta = newEntryData.time - origTimeRange.start;
+              prim.setTimeRange({
+                start: origTimeRange.start + timeDelta,
+                end: origTimeRange.end + timeDelta,
+              });
+            }
+          }
+        }
 
         e.preventDefault();
         e.stopPropagation();
@@ -887,8 +1126,33 @@ export function useDrawing({
         // Hover feedback on lines, fibs and text
         const hit = hitTestAll(pos.x, pos.y);
         for (const prim of primitivesRef.current) {
-          if (prim instanceof LineDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive) {
+          if (prim instanceof LineDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive) {
             prim.setHovered(hit?.prim?.id === prim.id);
+          }
+        }
+      }
+
+      // ── POSITION TOOL: hover feedback ──
+      if (POSITION_TOOL_IDS.has(tool) && !draggingRef.current) {
+        const container = chartContainerRef?.current;
+        if (container) {
+          const hit = hitTestAll(pos.x, pos.y);
+          if (hit?.type === "position") {
+            if (hit.zone === "tp" || hit.zone === "sl") {
+              container.style.cursor = "ns-resize";
+            } else if (hit.zone === "left" || hit.zone === "right") {
+              container.style.cursor = "ew-resize";
+            } else if (hit.zone === "entry" || hit.zone === "body") {
+              container.style.cursor = "move";
+            }
+          } else {
+            container.style.cursor = "crosshair";
+          }
+          // Hover feedback
+          for (const prim of primitivesRef.current) {
+            if (prim instanceof PositionDrawingPrimitive) {
+              prim.setHovered(hit?.prim?.id === prim.id);
+            }
           }
         }
       }
@@ -943,7 +1207,7 @@ export function useDrawing({
   // ── KEYBOARD: Escape / Delete ──
 
   useEffect(() => {
-    if (!isLineTool && !isFibTool && !isPenTool && !isEraserTool && !isTextTool) return;
+    if (!isLineTool && !isFibTool && !isPenTool && !isEraserTool && !isTextTool && !isPositionTool) return;
 
     const handleKeyDown = (e) => {
       // Don't intercept if editing text
@@ -973,7 +1237,7 @@ export function useDrawing({
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
+  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, isPositionTool, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
 
   // ── Clean up when tool changes ──
 
@@ -982,7 +1246,7 @@ export function useDrawing({
       removePreview();
       draggingRef.current = null;
     }
-    if (!isLineTool && !isFibTool && !isTextTool) {
+    if (!isLineTool && !isFibTool && !isTextTool && !isPositionTool) {
       deselectAll();
     }
     if (!isPenTool) {
@@ -998,7 +1262,7 @@ export function useDrawing({
         prim.setHovered(false);
       }
     }
-  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, removePreview, deselectAll, cancelTextEditing]);
+  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing]);
 
   // ── Attach event listeners to chart container ──
 

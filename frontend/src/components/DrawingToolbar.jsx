@@ -1,7 +1,7 @@
 /**
  * Drawing toolbar — sits on the left side of the chart area.
  *
- * Buttons: Pen, Eraser, Line, Text, Fibonacci.
+ * Buttons: Pen, Eraser, Line, Text, Fibonacci, Position (Long/Short).
  * Left-click toggles the tool on/off.
  * Right-click or double-click on Line opens a flyout to switch between
  * line-segment / line-ray / line-infinite.
@@ -75,6 +75,28 @@ const FibonacciIcon = (
   </svg>
 );
 
+/* ── Position tool icons ── */
+
+const LongPositionIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="6" width="18" height="3" rx="1" fill="#26a69a" stroke="none" opacity="0.5" />
+    <line x1="3" y1="12" x2="21" y2="12" stroke="#2196f3" strokeWidth="2" />
+    <rect x="3" y="15" width="18" height="3" rx="1" fill="#ef5350" stroke="none" opacity="0.5" />
+    <path d="M12 3l3 4h-6l3-4z" fill="#26a69a" stroke="none" />
+    <path d="M12 21l3-4h-6l3 4z" fill="#ef5350" stroke="none" />
+  </svg>
+);
+
+const ShortPositionIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="6" width="18" height="3" rx="1" fill="#ef5350" stroke="none" opacity="0.5" />
+    <line x1="3" y1="12" x2="21" y2="12" stroke="#2196f3" strokeWidth="2" />
+    <rect x="3" y="15" width="18" height="3" rx="1" fill="#26a69a" stroke="none" opacity="0.5" />
+    <path d="M12 3l3 4h-6l3-4z" fill="#ef5350" stroke="none" />
+    <path d="M12 21l3-4h-6l3 4z" fill="#26a69a" stroke="none" />
+  </svg>
+);
+
 /* small indicator triangle rendered in the corner of a tool button */
 const CornerTriangle = (
   <svg
@@ -97,6 +119,13 @@ const LINE_VARIANTS = [
 ];
 
 const LINE_TOOL_IDS = new Set(LINE_VARIANTS.map((v) => v.id));
+
+const POSITION_VARIANTS = [
+  { id: "position-long", label: "做多", icon: LongPositionIcon },
+  { id: "position-short", label: "做空", icon: ShortPositionIcon },
+];
+
+const POSITION_TOOL_IDS = new Set(POSITION_VARIANTS.map((v) => v.id));
 
 /* ─── Flyout menu component ─────────────────────────────── */
 
@@ -270,6 +299,71 @@ function FibLevelsPanel({ levels, onLevelsChange, inverted, onInvertedChange, on
   );
 }
 
+/* ─── Position settings panel ────────────────────────────── */
+
+function PositionSettingsPanel({ positionSize, onPositionSizeChange, onClose, anchorRef }) {
+  const panelRef = useRef(null);
+  const [localSize, setLocalSize] = useState(String(positionSize || 1000));
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (
+        panelRef.current &&
+        !panelRef.current.contains(e.target) &&
+        anchorRef.current &&
+        !anchorRef.current.contains(e.target)
+      ) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose, anchorRef]);
+
+  const handleSizeChange = (val) => {
+    setLocalSize(val);
+    const num = parseFloat(val);
+    if (!isNaN(num) && num > 0) {
+      onPositionSizeChange(num);
+    }
+  };
+
+  const presets = [100, 500, 1000, 5000, 10000, 50000];
+
+  return (
+    <div className="position-settings-panel" ref={panelRef}>
+      <div className="fib-levels-header">
+        <span>仓位设置</span>
+        <button className="fib-levels-close" onClick={onClose}>✕</button>
+      </div>
+      <div className="fib-levels-divider" />
+      <div className="position-size-section">
+        <label className="position-size-label">仓位金额 ($)</label>
+        <input
+          type="number"
+          className="position-size-input"
+          value={localSize}
+          onChange={(e) => handleSizeChange(e.target.value)}
+          onKeyDown={(e) => e.stopPropagation()}
+          min="0"
+          step="100"
+        />
+        <div className="position-size-presets">
+          {presets.map((p) => (
+            <button
+              key={p}
+              className={`position-size-preset ${Number(localSize) === p ? "active" : ""}`}
+              onClick={() => handleSizeChange(String(p))}
+            >
+              {p >= 1000 ? `${p / 1000}K` : p}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── Font size options ─────────────────────────────────── */
 
 const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32];
@@ -296,24 +390,31 @@ const DrawingToolbar = memo(function DrawingToolbar({
   onFibLevelsChange,
   fibInverted = false,
   onFibInvertedChange,
+  // Position settings
+  positionSize = 1000,
+  onPositionSizeChange,
 }) {
   // Which line variant is selected (persisted across toggles)
   const [lineVariant, setLineVariant] = useState("line-segment");
+  const [posVariant, setPosVariant] = useState("position-long");
 
-  // Flyout open state: null | "line" | "fib-levels"
+  // Flyout open state: null | "line" | "fib-levels" | "position" | "position-settings"
   const [flyoutOpen, setFlyoutOpen] = useState(null);
 
   const lineBtnRef = useRef(null);
   const fibBtnRef = useRef(null);
+  const posBtnRef = useRef(null);
 
   // Double-click timer
   const clickTimerRef = useRef(null);
+  const posClickTimerRef = useRef(null);
 
   const isPenActive = activeTool === "pen";
   const isEraserActive = activeTool === "eraser";
   const isLineActive = LINE_TOOL_IDS.has(activeTool);
   const isTextActive = activeTool === "text";
   const isFibonacciActive = activeTool === "fibonacci";
+  const isPositionActive = POSITION_TOOL_IDS.has(activeTool);
 
   /* ── Pen button handlers ── */
   const handlePenClick = useCallback(() => {
@@ -400,10 +501,56 @@ const DrawingToolbar = memo(function DrawingToolbar({
   const currentLineLabel =
     LINE_VARIANTS.find((v) => v.id === lineVariant)?.label || "线段";
 
+  /* ── Position button handlers ── */
+  const handlePositionClick = useCallback(() => {
+    if (posClickTimerRef.current) return;
+    posClickTimerRef.current = setTimeout(() => {
+      posClickTimerRef.current = null;
+      if (isPositionActive) {
+        onToolChange(null);
+      } else {
+        onToolChange(posVariant);
+      }
+      setFlyoutOpen(null);
+    }, 200);
+  }, [isPositionActive, posVariant, onToolChange]);
+
+  const handlePositionDblClick = useCallback(() => {
+    if (posClickTimerRef.current) {
+      clearTimeout(posClickTimerRef.current);
+      posClickTimerRef.current = null;
+    }
+    setFlyoutOpen((prev) => (prev === "position" ? null : "position"));
+  }, []);
+
+  const handlePositionContextMenu = useCallback((e) => {
+    e.preventDefault();
+    if (posClickTimerRef.current) {
+      clearTimeout(posClickTimerRef.current);
+      posClickTimerRef.current = null;
+    }
+    setFlyoutOpen((prev) => (prev === "position" ? null : "position"));
+  }, []);
+
+  const handleSelectPositionVariant = useCallback(
+    (id) => {
+      setPosVariant(id);
+      onToolChange(id);
+    },
+    [onToolChange],
+  );
+
+  /* ── Determine which position icon to show ── */
+  const currentPosIcon =
+    POSITION_VARIANTS.find((v) => v.id === posVariant)?.icon || LongPositionIcon;
+  const currentPosLabel =
+    POSITION_VARIANTS.find((v) => v.id === posVariant)?.label || "做多";
+
   const showPenOptions = isPenActive;
   const showLineOptions = isLineActive;
   const showTextOptions = isTextActive;
   const showFibonacciOptions = isFibonacciActive;
+  const showPositionOptions = isPositionActive;
 
   return (
     <div className="drawing-toolbar">
@@ -488,6 +635,37 @@ const DrawingToolbar = memo(function DrawingToolbar({
             onInvertedChange={(v) => onFibInvertedChange?.(v)}
             onClose={() => setFlyoutOpen(null)}
             anchorRef={fibBtnRef}
+          />
+        )}
+      </div>
+
+      {/* ── Position button ── */}
+      <div className="drawing-tool-wrapper" ref={posBtnRef}>
+        <button
+          className={`drawing-tool-btn ${isPositionActive ? "active" : ""}`}
+          onClick={handlePositionClick}
+          onDoubleClick={handlePositionDblClick}
+          onContextMenu={handlePositionContextMenu}
+          title={`${currentPosLabel}（右键/双击切换多空）`}
+        >
+          {currentPosIcon}
+          {CornerTriangle}
+        </button>
+        {flyoutOpen === "position" && (
+          <ToolFlyout
+            variants={POSITION_VARIANTS}
+            currentId={posVariant}
+            onSelect={handleSelectPositionVariant}
+            onClose={() => setFlyoutOpen(null)}
+            anchorRef={posBtnRef}
+          />
+        )}
+        {flyoutOpen === "position-settings" && (
+          <PositionSettingsPanel
+            positionSize={positionSize}
+            onPositionSizeChange={onPositionSizeChange}
+            onClose={() => setFlyoutOpen(null)}
+            anchorRef={posBtnRef}
           />
         )}
       </div>
@@ -583,6 +761,22 @@ const DrawingToolbar = memo(function DrawingToolbar({
               style={{ fontStyle: "italic", fontSize: 14, minWidth: 28 }}
             >
               I
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ── Options for position tool ── */}
+      {showPositionOptions && (
+        <>
+          <div className="drawing-tool-option" title="仓位金额">
+            <button
+              className="drawing-tool-btn drawing-format-btn position-settings-trigger"
+              onClick={() => setFlyoutOpen((prev) => (prev === "position-settings" ? null : "position-settings"))}
+              title="仓位设置"
+              style={{ fontSize: 11, minWidth: 50 }}
+            >
+              ${positionSize >= 1000 ? `${(positionSize / 1000).toFixed(positionSize % 1000 === 0 ? 0 : 1)}K` : positionSize}
             </button>
           </div>
         </>

@@ -71,6 +71,19 @@ function serializePrimitive(prim) {
     };
   }
 
+  if (prim._type === "position") {
+    return {
+      type: "position",
+      id: prim._id,
+      direction: prim._direction,
+      entryPrice: prim._entryPrice,
+      tpPrice: prim._tpPrice,
+      slPrice: prim._slPrice,
+      timeRange: { ...prim._timeRange },
+      positionSize: prim._positionSize,
+    };
+  }
+
   // FreehandDrawingPrimitive (default)
   return {
     type: "freehand",

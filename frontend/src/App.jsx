@@ -394,6 +394,19 @@ export default function App() {
     try { localStorage.setItem("candlescope-fib-inverted", String(v)); } catch { /* ignore */ }
   }, []);
 
+  // --- Position tool settings ---
+  const [positionSize, setPositionSize] = useState(() => {
+    try {
+      const saved = localStorage.getItem("candlescope-position-size");
+      if (saved) return Number(saved);
+    } catch { /* ignore */ }
+    return 1000;
+  });
+  const handlePositionSizeChange = useCallback((size) => {
+    setPositionSize(size);
+    try { localStorage.setItem("candlescope-position-size", String(size)); } catch { /* ignore */ }
+  }, []);
+
   // --- Invert price scale state ---
   const [invertScale, setInvertScale] = useState(() => {
     const prefs = loadUserPrefs();
@@ -1706,6 +1719,8 @@ export default function App() {
           onFibLevelsChange={handleFibLevelsChange}
           fibInverted={fibInverted}
           onFibInvertedChange={handleFibInvertedChange}
+          positionSize={positionSize}
+          onPositionSizeChange={handlePositionSizeChange}
         />
 
         {error ? (
@@ -1753,6 +1768,7 @@ export default function App() {
               textItalic={textItalic}
               fibLevels={fibLevels}
               fibInverted={fibInverted}
+              positionSize={positionSize}
               onChartReady={handleChartReady}
               mainOverlayLines={mainOverlayLines}
               subPanes={subPanes}

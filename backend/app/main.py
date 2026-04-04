@@ -15,6 +15,7 @@ endpoints fall back to the legacy services/kline_cache_service path.
 """
 import asyncio
 import logging
+import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +24,8 @@ from app.api.v1.indicators import router as indicators_router  # indicator engin
 from app.api.v1.klines import router as klines_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.stream import router as stream_router
+from app.api.v1.subscriptions import router as subscriptions_router
+from app.api.v1.subscriptions import price_ws_router
 from app.api.v1.symbols import router as symbols_router
 from app.core.config import CORS_ORIGINS
 from app.core.market import is_custom_interval
@@ -49,6 +52,8 @@ app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(symbols_router, prefix="/api/v1")
+app.include_router(subscriptions_router, prefix="/api/v1")
+app.include_router(price_ws_router, prefix="/api/v1")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -237,6 +242,27 @@ async def _init_data_manager() -> None:
         logger.info("DataManager initialized and started successfully")
         print("[startup] DataManager initialized ✓")
 
+        # ── 4b. SubscriptionManager + PriceTickerService ─────
+        try:
+            from app.data_engine.services.subscription_manager import SubscriptionManager
+            from app.data_engine.services.price_ticker import PriceTickerService
+            from app.core.config import KLINES_DB_PATH, BINANCE_WS_URLS
+
+            price_ticker = PriceTickerService(ws_urls=BINANCE_WS_URLS)
+            sub_manager = SubscriptionManager(db_path=str(KLINES_DB_PATH))
+            sub_manager.set_data_manager(dm)
+            sub_manager.set_price_ticker(price_ticker)
+
+            await price_ticker.start()
+            await sub_manager.start()
+
+            app.state.price_ticker = price_ticker
+            app.state.subscription_manager = sub_manager
+            print("[startup] SubscriptionManager + PriceTickerService initialized ✓")
+        except Exception as exc:
+            logger.warning("SubscriptionManager init failed: %s", exc)
+            print(f"[startup] SubscriptionManager init failed: {exc}")
+
         # ── Startup Gap Scan ─────────────────────────────────
         # Proactively detect and fill gaps for all prewarmed intervals.
         # This covers the "app was offline for days" scenario.
@@ -415,6 +441,15 @@ async def shutdown_event() -> None:
             print("[shutdown] Backfill transport shut down ✓")
         except Exception as exc:
             print(f"[shutdown] Backfill transport shutdown error: {exc}")
+
+    # Shutdown PriceTickerService
+    price_ticker = getattr(app.state, "price_ticker", None)
+    if price_ticker is not None:
+        try:
+            await price_ticker.stop()
+            print("[shutdown] PriceTickerService shut down ✓")
+        except Exception as exc:
+            print(f"[shutdown] PriceTickerService shutdown error: {exc}")
 
 
 # ═══════════════════════════════════════════════════════════════

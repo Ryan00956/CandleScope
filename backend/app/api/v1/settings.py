@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.core.market import find_best_base_interval, parse_custom_interval
+from app.core.config import load_proxy_settings, normalize_proxy_settings, save_proxy_settings
 from app.data_engine.bar_aggregator import BarAggregator, BarAggregatorConfig
 from app.data_engine.data_manager.models import BarData
 from app.data_engine.storage.klines_repo import list_series_summaries
@@ -301,11 +302,16 @@ async def get_proxy_settings(request: Request) -> dict:
     cfg = _get_ingestion_config(request)
 
     if cfg is not None:
-        mode = getattr(cfg, "proxy_mode", "system")
-        custom_proxy = cfg.http_proxy
+        mode, custom_proxy = normalize_proxy_settings(
+            getattr(cfg, "proxy_mode", "system"),
+            getattr(cfg, "http_proxy", None),
+        )
     else:
-        mode = "system"
-        custom_proxy = None
+        persisted = load_proxy_settings()
+        mode, custom_proxy = normalize_proxy_settings(
+            persisted.get("mode"),
+            persisted.get("custom_proxy"),
+        )
 
     system_proxy = _get_system_proxy()
     effective = _resolve_proxy_url(mode, custom_proxy)
@@ -325,21 +331,27 @@ async def update_proxy_settings(request: Request, body: ProxyConfig) -> dict:
     This updates the IngestionConfig and restarts HTTP sessions
     so the new proxy takes effect immediately.
     """
+    mode, custom_proxy = normalize_proxy_settings(body.mode, body.custom_proxy)
     cfg = _get_ingestion_config(request)
 
     if cfg is None:
+        # Even without IngestionConfig, persist the settings to disk
+        save_proxy_settings(mode, custom_proxy)
         return {
             "status": "warning",
             "message": "IngestionConfig not available (DataManager not initialized). "
-                       "Settings saved in-memory only.",
-            "mode": body.mode,
-            "custom_proxy": body.custom_proxy or "",
+                       "Settings saved to disk for next startup.",
+            "mode": mode,
+            "custom_proxy": custom_proxy or "",
         }
+
+    # Persist to disk so settings survive restarts
+    save_proxy_settings(mode, custom_proxy)
 
     # Update config
     cfg.update(
-        proxy_mode=body.mode,
-        http_proxy=body.custom_proxy if body.mode == "custom" else cfg.http_proxy,
+        proxy_mode=mode,
+        http_proxy=custom_proxy,
     )
 
     # Restart all transport HTTP sessions to apply new proxy
@@ -350,16 +362,16 @@ async def update_proxy_settings(request: Request, body: ProxyConfig) -> dict:
         except Exception as exc:
             logger.warning("Failed to restart transport session: %s", exc)
 
-    effective = _resolve_proxy_url(body.mode, body.custom_proxy)
+    effective = _resolve_proxy_url(mode, custom_proxy)
     logger.info(
         "Proxy settings updated: mode=%s, effective=%s",
-        body.mode, effective or "none",
+        mode, effective or "none",
     )
 
     return {
         "status": "ok",
-        "mode": body.mode,
-        "custom_proxy": body.custom_proxy or "",
+        "mode": mode,
+        "custom_proxy": custom_proxy or "",
         "effective_proxy": effective or "",
     }
 

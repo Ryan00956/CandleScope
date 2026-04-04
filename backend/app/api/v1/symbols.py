@@ -13,7 +13,7 @@ from typing import Any
 import aiohttp
 from fastapi import APIRouter, Query
 
-from app.core.config import BINANCE_BASE_URL, BINANCE_BASE_URLS, REQUEST_TIMEOUT
+from app.core.config import BINANCE_BASE_URL, BINANCE_BASE_URLS, REQUEST_TIMEOUT, get_effective_proxy
 
 logger = logging.getLogger("candlescope.symbols")
 router = APIRouter(prefix="/symbols", tags=["symbols"])
@@ -37,6 +37,10 @@ async def load_exchange_info() -> None:
         u for u in BINANCE_BASE_URLS if u != BINANCE_BASE_URL
     ]
 
+    proxy = get_effective_proxy()
+    if proxy:
+        logger.info("load_exchange_info using proxy: %s", proxy)
+
     last_err: Exception | None = None
     for base in urls_to_try:
         url = f"{base}/api/v3/exchangeInfo"
@@ -45,6 +49,7 @@ async def load_exchange_info() -> None:
                 async with session.get(
                     url,
                     timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
+                    proxy=proxy,
                 ) as resp:
                     if resp.status != 200:
                         logger.warning("exchangeInfo %s returned HTTP %s", base, resp.status)

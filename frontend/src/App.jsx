@@ -11,6 +11,10 @@ import {
   fetchKlinesHistory,
   fetchLatestKlines,
   getMultiStreamUrl,
+  fetchSubscriptions,
+  updateSubscriptionTier,
+  syncWatchlistSymbols,
+  getPriceStreamUrl,
 } from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
 import "./index.css";
@@ -610,6 +614,108 @@ export default function App() {
     });
   }, []);
 
+  // --- Subscription tiers & real-time prices ---
+  const [subscriptionTiers, setSubscriptionTiers] = useState({});
+  const [symbolPrices, setSymbolPrices] = useState({});
+  const priceWsRef = useRef(null);
+
+  // Load subscription tiers from backend on mount
+  useEffect(() => {
+    fetchSubscriptions()
+      .then((res) => {
+        const tiers = {};
+        for (const sub of res.subscriptions || []) {
+          tiers[sub.symbol] = sub.tier;
+        }
+        setSubscriptionTiers(tiers);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Sync watchlist symbols to backend whenever watchlists change.
+  // New symbols auto-register as PRICE_ONLY so prices show immediately.
+  const syncTimerRef = useRef(null);
+  useEffect(() => {
+    // Collect all unique symbols from all watchlists
+    const allSymbols = [...new Set(watchlists.flatMap((wl) => wl.symbols))];
+    if (allSymbols.length === 0) return;
+
+    // Debounce to avoid spamming on rapid edits (DnD, etc.)
+    clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(() => {
+      syncWatchlistSymbols(allSymbols)
+        .then((res) => {
+          if (res.auto_registered > 0) {
+            // Refresh tiers so the UI updates
+            fetchSubscriptions().then((r) => {
+              const tiers = {};
+              for (const sub of r.subscriptions || []) {
+                tiers[sub.symbol] = sub.tier;
+              }
+              setSubscriptionTiers(tiers);
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }, 500);
+
+    return () => clearTimeout(syncTimerRef.current);
+  }, [watchlists]);
+
+  // Price WebSocket — connects once and stays open
+  useEffect(() => {
+    const url = getPriceStreamUrl();
+    let ws = null;
+    let reconnectTimer = null;
+    let stopped = false;
+
+    function connect() {
+      if (stopped) return;
+      ws = new WebSocket(url);
+
+      ws.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          if (msg.type === "prices" && Array.isArray(msg.data)) {
+            setSymbolPrices((prev) => {
+              const next = { ...prev };
+              for (const tick of msg.data) {
+                next[tick.symbol] = tick;
+              }
+              return next;
+            });
+          }
+        } catch { /* ignore */ }
+      };
+
+      ws.onclose = () => {
+        if (!stopped) {
+          reconnectTimer = setTimeout(connect, 3000);
+        }
+      };
+
+      ws.onerror = () => ws.close();
+      priceWsRef.current = ws;
+    }
+
+    connect();
+
+    return () => {
+      stopped = true;
+      clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+      priceWsRef.current = null;
+    };
+  }, []);
+
+  // Handle tier change from WatchlistSidebar context menu
+  const handleTierChange = useCallback((sym, tier) => {
+    setSubscriptionTiers((prev) => ({ ...prev, [sym]: tier }));
+    updateSubscriptionTier(sym, tier).catch((err) => {
+      console.warn("Failed to update tier:", err);
+    });
+  }, []);
+
 
   // Sync cache limits to backend when they change
   useEffect(() => {
@@ -715,8 +821,22 @@ export default function App() {
         setDatasetKey((v) => v + 1);
         shownInitialData = true;
       }
-      // History arrived — data is reliable, clear loading.
-      setLoading(false);
+
+      // If the backend signals a tail gap (data doesn't reach "now"),
+      // keep loading=true so the user sees a loading overlay until
+      // backfill_completed arrives with the missing bars.
+      if (historyResult.has_tail_gap) {
+        setConnectionStatus("loading");
+        const BACKFILL_TIMEOUT_MS = 30_000;
+        const safetyTimer = setTimeout(() => {
+          if (controller.signal.aborted) return;
+          setLoading(false);
+        }, BACKFILL_TIMEOUT_MS);
+        controller.signal.addEventListener("abort", () => clearTimeout(safetyTimer));
+      } else {
+        // History arrived with no tail gap — data is complete, clear loading.
+        setLoading(false);
+      }
     } else if (!shownInitialData) {
       // No history available yet — backfill is likely in progress.
       // Keep loading=true; the backfill_completed WS handler will
@@ -741,7 +861,8 @@ export default function App() {
     // Only clear loading if history provided data (handled above)
     // or cache was hit (handled at the top).  Do NOT unconditionally
     // setLoading(false) here — that was the old bug.
-    if (shownInitialData) {
+    // Also skip if backend signalled a tail gap (backfill still pending).
+    if (shownInitialData && !historyResult?.has_tail_gap) {
       setLoading(false);
     }
   }, [saveToCache, updateLastPrice]);
@@ -1817,6 +1938,11 @@ export default function App() {
         onSelectSymbol={handleSymbolChange}
         watchlists={watchlists}
         onWatchlistsChange={(next) => { setWatchlists(next); saveWatchlists(next); }}
+        prices={symbolPrices}
+        subscriptionTiers={subscriptionTiers}
+        onTierChange={handleTierChange}
+        upColor={settings.upColor}
+        downColor={settings.downColor}
       />
 
       </div> {/* end main-content-area */}

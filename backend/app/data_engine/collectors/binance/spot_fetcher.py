@@ -13,14 +13,27 @@ from datetime import datetime, timedelta
 from app.core.config import (
     BINANCE_BASE_URL, BINANCE_BASE_URLS,
     REQUEST_TIMEOUT, MAX_RETRIES, RATE_LIMIT_SLEEP,
+    get_effective_proxy, load_proxy_settings,
 )
-
-# 代理支持（通过环境变量 HTTP_PROXY / HTTPS_PROXY 设置）
-_proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-_proxies = {"http": _proxy, "https": _proxy} if _proxy else None
 
 # 缓存上一次成功的 base_url，避免每次都从头遍历
 _last_working_url: str | None = None
+
+
+def _fetch_with_current_proxy(url: str, params: dict, timeout: int) -> requests.Response:
+    """Resolve proxy per request so runtime setting changes take effect immediately."""
+    mode = load_proxy_settings().get("mode", "system")
+    if mode == "none":
+        # ``requests`` otherwise falls back to env proxies automatically.
+        with requests.Session() as session:
+            session.trust_env = False
+            return session.get(url, params=params, timeout=timeout)
+
+    proxy = get_effective_proxy()
+    if proxy:
+        proxies = {"http": proxy, "https": proxy}
+        return requests.get(url, params=params, timeout=timeout, proxies=proxies)
+    return requests.get(url, params=params, timeout=timeout)
 
 
 def _try_fetch_klines(base_url: str, params: dict, timeout: int) -> list | None:
@@ -28,7 +41,7 @@ def _try_fetch_klines(base_url: str, params: dict, timeout: int) -> list | None:
     global _last_working_url
     url = f"{base_url}/api/v3/klines"
     try:
-        r = requests.get(url, params=params, timeout=timeout, proxies=_proxies)
+        r = _fetch_with_current_proxy(url, params, timeout)
         if r.status_code == 200:
             _last_working_url = base_url
             return r.json()

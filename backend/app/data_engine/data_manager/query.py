@@ -312,6 +312,18 @@ class QueryEngine:
             QuerySource.MIXED if cached else QuerySource.STORAGE
         )
 
+        # ── Step 5: Detect tail gap ──────────────────────────
+        # If the latest bar in the result set trails "now" by more than
+        # 1.5 × interval, the front-end should keep showing a loading
+        # overlay until the backfill completes and fills the gap.
+        tail_gap = False
+        if merged and backfill_triggered:
+            interval_secs = parse_custom_interval(key.interval) or 60
+            now_s = int(time.time())
+            gap_s = now_s - merged[-1].time
+            if gap_s > interval_secs * 1.5:
+                tail_gap = True
+
         elapsed = time.monotonic() - t0
         return QueryResult(
             bars=merged,
@@ -322,6 +334,7 @@ class QueryEngine:
             has_more=True,  # conservative — caller can paginate
             cache_hit=bool(cached),
             backfill_triggered=backfill_triggered,
+            has_tail_gap=tail_gap,
             metadata={"elapsed_ms": round(elapsed * 1000, 2)},
         )
 
@@ -532,6 +545,7 @@ class QueryEngine:
             has_more=base_result.has_more or len(derived_bars) >= effective_limit,
             cache_hit=base_result.cache_hit,
             backfill_triggered=base_result.backfill_triggered,
+            has_tail_gap=base_result.has_tail_gap,
             metadata={
                 "elapsed_ms": round(elapsed * 1000, 2),
                 "derived_from": base_interval,

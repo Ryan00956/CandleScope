@@ -146,3 +146,68 @@ export async function scanAndFillGaps() {
     }
     return response.json();
 }
+
+// ── Subscription API ────────────────────────────────────────
+
+export async function fetchSubscriptions() {
+    const url = `${API_BASE}/subscriptions/`;
+    return request(url);
+}
+
+export async function fetchSubscription(symbol) {
+    const url = `${API_BASE}/subscriptions/${encodeURIComponent(symbol)}`;
+    return request(url);
+}
+
+export async function updateSubscriptionTier(symbol, tier) {
+    const url = `${API_BASE}/subscriptions/${encodeURIComponent(symbol)}`;
+    const response = await fetch(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tier }),
+    });
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+}
+
+export async function removeSubscription(symbol) {
+    const url = `${API_BASE}/subscriptions/${encodeURIComponent(symbol)}`;
+    const response = await fetch(url, { method: "DELETE" });
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+}
+
+/**
+ * Sync all watchlist symbols to the backend.
+ * New symbols auto-register as PRICE_ONLY; removed symbols downgrade to NONE.
+ */
+export async function syncWatchlistSymbols(symbols) {
+    const url = `${API_BASE}/subscriptions/sync`;
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbols }),
+    });
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+}
+
+export async function fetchPricesSnapshot() {
+    const url = `${API_BASE}/subscriptions/prices`;
+    return request(url);
+}
+
+/** WebSocket URL for real-time price updates */
+export function getPriceStreamUrl() {
+    const wsBase = httpBaseToWsBase(API_BASE);
+    return `${wsBase}/stream/prices`;
+}

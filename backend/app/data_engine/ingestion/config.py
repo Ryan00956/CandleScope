@@ -58,6 +58,38 @@ def _get_os_proxy() -> str | None:
     return proxies.get("https") or proxies.get("http") or None
 
 
+def _load_persisted_proxy_mode() -> str:
+    """Load proxy_mode from persisted settings (disk), fall back to env."""
+    try:
+        from app.core.config import load_proxy_settings
+        settings = load_proxy_settings()
+        return settings.get("mode", _env_str("INGESTION_PROXY_MODE", "system"))
+    except Exception:
+        return _env_str("INGESTION_PROXY_MODE", "system")
+
+
+def _load_persisted_http_proxy() -> str | None:
+    """Load http_proxy from persisted settings (disk), fall back to env/OS."""
+    try:
+        from app.core.config import load_proxy_settings
+        settings = load_proxy_settings()
+        mode = settings.get("mode", "system")
+        custom_proxy = settings.get("custom_proxy")
+        if mode == "none":
+            return None
+        if mode == "custom" and custom_proxy:
+            return custom_proxy
+        if mode == "system":
+            return (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+                    or _get_os_proxy() or None)
+    except Exception:
+        pass
+    # Fall back to environment / OS proxy
+    return (_env_str("INGESTION_HTTP_PROXY", "")
+            or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+            or _get_os_proxy() or None)
+
+
 @dataclass
 class IngestionConfig:
     """Central configuration for the entire ingestion pipeline.
@@ -89,14 +121,12 @@ class IngestionConfig:
     # HTTP request timeout (seconds)
     http_timeout: int = field(default_factory=lambda: _env_int("INGESTION_HTTP_TIMEOUT", 8))
     # HTTP proxy (None = no proxy)
-    http_proxy: str | None = field(default_factory=lambda: _env_str("INGESTION_HTTP_PROXY", "")
-                                   or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
-                                   or _get_os_proxy() or None)
+    http_proxy: str | None = field(default_factory=_load_persisted_http_proxy)
     # Proxy mode: "none" | "system" | "custom"
     #   none   — direct connection, no proxy
     #   system — read from environment variables (HTTP_PROXY / HTTPS_PROXY)
     #   custom — use the value in http_proxy
-    proxy_mode: str = field(default_factory=lambda: _env_str("INGESTION_PROXY_MODE", "system"))
+    proxy_mode: str = field(default_factory=_load_persisted_proxy_mode)
 
     # ── L2: Session ────────────────────────────────────────────
     # WebSocket open timeout (seconds)

@@ -105,7 +105,7 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   自选列表侧栏 — Watchlist Sidebar (Accordion + DnD)
+   自选列表侧栏 — Watchlist Sidebar (Accordion + DnD + Table)
    ═══════════════════════════════════════════════════════════════ */
 
 .watchlist-sidebar {
@@ -118,6 +118,9 @@ body {
   transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   z-index: 50;
   position: relative;
+  /* Dynamic color vars set via inline style */
+  --wl-up-color: var(--candle-up);
+  --wl-down-color: var(--candle-down);
 }
 .watchlist-sidebar.collapsed { width: 40px !important; }
 .watchlist-sidebar.resizing { transition: none; }
@@ -158,6 +161,49 @@ body {
   text-transform: uppercase;
   user-select: none;
   flex: 1;
+}
+
+/* ── Table header row ── */
+.wl-table-header {
+  display: flex;
+  align-items: center;
+  padding: 5px 8px 5px 6px;
+  border-bottom: 1px solid var(--border-color);
+  background: rgba(0, 0, 0, 0.03);
+  flex-shrink: 0;
+  gap: 2px;
+  user-select: none;
+}
+.wl-table-header > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.wl-th-name {
+  flex: 1;
+  min-width: 0;
+  padding-left: 26px; /* align with sym name (grip + tier dot space) */
+}
+.wl-th-price {
+  width: 76px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.wl-th-change {
+  width: 72px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.wl-th-changepct {
+  width: 62px;
+  text-align: right;
+  flex-shrink: 0;
+}
+.wl-th-actions {
+  width: 20px;
+  flex-shrink: 0;
 }
 
 /* ── Collapsed view ── */
@@ -339,8 +385,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 10px 8px;
-  min-height: 32px;
+  padding: 12px 8px;
+  min-height: 36px;
 }
 .wl-list-empty-text {
   font-size: 10px;
@@ -349,18 +395,20 @@ body {
   font-style: italic;
 }
 
-/* ── Symbol row (draggable) ── */
+/* ── Symbol row (draggable, table-style) ── */
 .wl-sym-wrapper { position: relative; }
 
 .wl-sym-row {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 8px 4px 6px;
+  gap: 2px;
+  padding: 7px 8px 7px 6px;
+  min-height: 36px;
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background 0.12s;
   border-right: 2px solid transparent;
   user-select: none;
+  position: relative;
 }
 .wl-sym-row:hover { background: var(--bg-hover); }
 .wl-sym-row.active {
@@ -368,6 +416,7 @@ body {
   border-right-color: var(--accent-blue);
 }
 .wl-sym-row.dragging { opacity: 0.3; }
+
 
 .wl-sym-grip {
   display: flex;
@@ -385,7 +434,7 @@ body {
 .wl-sym-row:hover .wl-sym-grip:hover { opacity: 1; }
 
 .wl-sym-name {
-  font-size: 11.5px;
+  font-size: 12px;
   font-weight: 600;
   font-family: var(--font-mono);
   color: var(--text-primary);
@@ -395,17 +444,57 @@ body {
   white-space: nowrap;
   min-width: 0;
 }
-.wl-sym-active-dot {
-  font-size: 6px;
-  color: var(--accent-blue);
+
+/* ── Price columns ── */
+.wl-col-price,
+.wl-col-change,
+.wl-col-changepct {
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   flex-shrink: 0;
+  transition: color 0.3s ease;
 }
+
+.wl-col-price {
+  width: 76px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.wl-col-change {
+  width: 72px;
+}
+.wl-col-changepct {
+  width: 62px;
+}
+.wl-col-empty {
+  color: var(--text-muted);
+  opacity: 0.4;
+}
+
+/* Value colors (up/down for change and change%) */
+.wl-val-up { color: var(--wl-up-color, var(--candle-up)); }
+.wl-val-down { color: var(--wl-down-color, var(--candle-down)); }
+
+/* Price flash: just color change on update, no scale/jump */
+.wl-flash-up {
+  color: var(--wl-up-color, var(--candle-up)) !important;
+}
+.wl-flash-down {
+  color: var(--wl-down-color, var(--candle-down)) !important;
+}
+
 .wl-sym-del {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   background: none;
   border: none;
   border-radius: 50%;
@@ -515,6 +604,42 @@ body {
   background: var(--border-color);
   margin: 4px 6px;
 }
+.wl-ctx-sub-header {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 4px 10px 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.wl-ctx-item-selected {
+  background: rgba(59, 130, 246, 0.08);
+}
+.wl-ctx-item-desc {
+  font-size: 9px;
+  color: var(--text-muted);
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+/* ── Tier dots ── */
+.wl-tier-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+  opacity: 0.3;
+}
+.wl-tier-dot.wl-tier-full {
+  background: var(--candle-up);
+  opacity: 1;
+  box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
+}
+.wl-tier-dot.wl-tier-price {
+  background: var(--accent-blue);
+  opacity: 1;
+}
+
 
 /* ═══════════════════════════════════════════════════════════════
    搜索 Modal 右键菜单 — Symbol Search Context Menu

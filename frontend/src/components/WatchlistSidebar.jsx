@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 
 // ── LocalStorage keys ──
 const WATCHLISTS_KEY = "candlescope-watchlists";
@@ -7,9 +7,9 @@ const SIDEBAR_COLLAPSED_KEY = "candlescope-sidebar-collapsed";
 const COLLAPSED_LISTS_KEY = "candlescope-collapsed-lists";
 
 // ── Defaults ──
-const DEFAULT_WIDTH = 220;
-const MIN_WIDTH = 160;
-const MAX_WIDTH = 420;
+const DEFAULT_WIDTH = 320;
+const MIN_WIDTH = 260;
+const MAX_WIDTH = 520;
 
 // ── Load/save helpers ──
 function loadWatchlists() {
@@ -26,7 +26,10 @@ function saveWatchlists(lists) {
   localStorage.setItem(WATCHLISTS_KEY, JSON.stringify(lists));
 }
 function loadSidebarWidth() {
-  try { return parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10) || DEFAULT_WIDTH; }
+  try {
+    const w = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10) || DEFAULT_WIDTH;
+    return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, w));
+  }
   catch { return DEFAULT_WIDTH; }
 }
 function loadSidebarCollapsed() {
@@ -51,12 +54,38 @@ const WATCHLIST_COLORS = [
   "#ef4444", "#ec4899", "#14b8a6", "#f97316", "#6366f1",
 ];
 
+/** Format price with appropriate decimal places */
+function formatPrice(p) {
+  if (p >= 10000) return p.toFixed(2);
+  if (p >= 1000) return p.toFixed(2);
+  if (p >= 1) return p.toFixed(4);
+  if (p >= 0.01) return p.toFixed(6);
+  return p.toFixed(8);
+}
+
+/** Format change absolute value */
+function formatChange(change) {
+  const abs = Math.abs(change);
+  if (abs >= 1000) return change.toFixed(2);
+  if (abs >= 1) return change.toFixed(4);
+  if (abs >= 0.01) return change.toFixed(6);
+  return change.toFixed(8);
+}
+
+const TIER_OPTIONS = [
+  { value: "full", label: "完全订阅", desc: "自动同步所有K线" },
+  { value: "price", label: "仅价格", desc: "只推送最新价格" },
+  { value: "none", label: "仅收藏", desc: "不消耗后端资源" },
+];
+
 // ═══════════════════════════════════════════════════════════════
-//  WatchlistSidebar — accordion layout with DnD
+//  WatchlistSidebar — accordion layout with DnD + table-style price display
 // ═══════════════════════════════════════════════════════════════
 export default function WatchlistSidebar({
   currentSymbol, onSelectSymbol,
   watchlists: externalWatchlists, onWatchlistsChange,
+  prices, subscriptionTiers, onTierChange,
+  upColor, downColor,
 }) {
   const [internalWatchlists, setInternalWatchlists] = useState(loadWatchlists);
   const watchlists = externalWatchlists || internalWatchlists;
@@ -91,10 +120,68 @@ export default function WatchlistSidebar({
   const [dragSourceListId, setDragSourceListId] = useState(null);
   const [dropTarget, setDropTarget] = useState(null);    // { type, listId, index, position }
 
+  // ── Price flash tracking ──
+  const prevPricesRef = useRef({});
+
+  // Track which symbols are currently flashing and their direction
+  const [flashStates, setFlashStates] = useState({});
+  const flashTimersRef = useRef({});
+
+  // Detect price changes and trigger flash animation
+  useEffect(() => {
+    if (!prices) return;
+    const prev = prevPricesRef.current;
+    const newFlashes = {};
+
+    for (const [sym, tick] of Object.entries(prices)) {
+      const prevTick = prev[sym];
+      if (prevTick && tick.price !== prevTick.price) {
+        const direction = tick.price > prevTick.price ? "up" : "down";
+        newFlashes[sym] = direction;
+
+        // Clear existing timer
+        if (flashTimersRef.current[sym]) {
+          clearTimeout(flashTimersRef.current[sym]);
+        }
+
+        // Set timer to clear flash (color only, no animation)
+        flashTimersRef.current[sym] = setTimeout(() => {
+          setFlashStates((prev) => {
+            const next = { ...prev };
+            delete next[sym];
+            return next;
+          });
+          delete flashTimersRef.current[sym];
+        }, 1200);
+      }
+    }
+
+    if (Object.keys(newFlashes).length > 0) {
+      setFlashStates((prev) => ({ ...prev, ...newFlashes }));
+    }
+
+    prevPricesRef.current = { ...prices };
+  }, [prices]);
+
+  // Cleanup flash timers on unmount
+  useEffect(() => {
+    return () => {
+      for (const t of Object.values(flashTimersRef.current)) {
+        clearTimeout(t);
+      }
+    };
+  }, []);
+
   const sidebarRef = useRef(null);
   const resizeStartRef = useRef(null);
   const editInputRef = useRef(null);
   const newInputRef = useRef(null);
+
+  // ── Color CSS vars ──
+  const colorVars = useMemo(() => ({
+    "--wl-up-color": upColor || "#22c55e",
+    "--wl-down-color": downColor || "#ef4444",
+  }), [upColor, downColor]);
 
   // ── Persist ──
   useEffect(() => { localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width)); }, [width]);
@@ -197,7 +284,6 @@ export default function WatchlistSidebar({
     setDragListId(listId);
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", listId);
-    // Delay to allow the drag image to render
     requestAnimationFrame(() => {
       const el = e.target;
       if (el) el.style.opacity = "0.4";
@@ -219,7 +305,6 @@ export default function WatchlistSidebar({
       setDropTarget(null);
       return;
     }
-    // Determine if dropping above or below
     const rect = e.currentTarget.getBoundingClientRect();
     const y = e.clientY - rect.top;
     const position = y < rect.height / 2 ? "above" : "below";
@@ -247,7 +332,7 @@ export default function WatchlistSidebar({
 
   // -- Symbol DnD --
   const handleSymbolDragStart = useCallback((e, sym, listId) => {
-    e.stopPropagation(); // Don't trigger list drag
+    e.stopPropagation();
     setDragType("symbol");
     setDragSymbol(sym);
     setDragSourceListId(listId);
@@ -277,7 +362,6 @@ export default function WatchlistSidebar({
     setDropTarget({ type: "symbol", listId, index, position });
   }, [dragType]);
 
-  // Allow dropping symbol on the list header (to add to list)
   const handleListHeaderDragOver = useCallback((e, listId) => {
     e.preventDefault();
     if (dragType === "symbol") {
@@ -293,7 +377,6 @@ export default function WatchlistSidebar({
 
     setWatchlists((prev) => {
       return prev.map((wl) => {
-        // Same list: reorder
         if (wl.id === dragSourceListId && wl.id === targetListId) {
           const syms = [...wl.symbols];
           const fromIdx = syms.indexOf(dragSymbol);
@@ -301,19 +384,16 @@ export default function WatchlistSidebar({
           syms.splice(fromIdx, 1);
           let insertAt = targetIndex;
           if (dropTarget?.position === "below") insertAt += 1;
-          // Adjust if removing shifted indices
           if (fromIdx < insertAt) insertAt -= 1;
           insertAt = Math.max(0, Math.min(syms.length, insertAt));
           syms.splice(insertAt, 0, dragSymbol);
           return { ...wl, symbols: syms };
         }
-        // Source list: remove symbol
         if (wl.id === dragSourceListId) {
           return { ...wl, symbols: wl.symbols.filter((s) => s !== dragSymbol) };
         }
-        // Target list: insert symbol
         if (wl.id === targetListId) {
-          if (wl.symbols.includes(dragSymbol)) return wl; // already exists
+          if (wl.symbols.includes(dragSymbol)) return wl;
           const syms = [...wl.symbols];
           let insertAt = targetIndex;
           if (dropTarget?.position === "below") insertAt += 1;
@@ -331,7 +411,6 @@ export default function WatchlistSidebar({
     setDropTarget(null);
   }, [dragType, dragSymbol, dragSourceListId, dropTarget, setWatchlists]);
 
-  // Drop on list header = append to end
   const handleListHeaderDrop = useCallback((e, targetListId) => {
     e.preventDefault();
     if (dragType !== "symbol" || !dragSymbol) return;
@@ -349,7 +428,6 @@ export default function WatchlistSidebar({
       });
     });
 
-    // Auto-expand target list
     setCollapsedLists((prev) => prev.filter((x) => x !== targetListId));
 
     setDragType(null);
@@ -361,21 +439,33 @@ export default function WatchlistSidebar({
   // ── Context menu ──
   const handleContextMenu = useCallback((e, sym, listId) => {
     e.preventDefault();
+    e.stopPropagation();
+    e.nativeEvent.stopImmediatePropagation();
     setContextMenu({ x: e.clientX, y: e.clientY, symbol: sym, listId });
   }, []);
 
   const handleListContextMenu = useCallback((e, listId) => {
     e.preventDefault();
     e.stopPropagation();
+    e.nativeEvent.stopImmediatePropagation();
     setContextMenu({ x: e.clientX, y: e.clientY, type: "list", listId });
   }, []);
 
   useEffect(() => {
     if (!contextMenu) return;
-    const dismiss = () => setContextMenu(null);
-    window.addEventListener("click", dismiss);
-    window.addEventListener("contextmenu", dismiss);
-    return () => { window.removeEventListener("click", dismiss); window.removeEventListener("contextmenu", dismiss); };
+    const dismiss = (e) => {
+      if (e.target?.closest?.(".wl-context-menu")) return;
+      setContextMenu(null);
+    };
+    const timer = setTimeout(() => {
+      window.addEventListener("click", dismiss);
+      window.addEventListener("contextmenu", dismiss);
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("click", dismiss);
+      window.removeEventListener("contextmenu", dismiss);
+    };
   }, [contextMenu]);
 
   // ── Toggle sidebar collapse ──
@@ -389,6 +479,92 @@ export default function WatchlistSidebar({
   const isListHeaderDropTarget = (listId) =>
     dropTarget?.type === "list-header" && dropTarget.listId === listId;
 
+  // ── Render helper for price columns ──
+  const renderSymbolRow = (sym, wl, idx) => {
+    const isActive = sym === currentSymbol;
+    const isDragged = dragType === "symbol" && dragSymbol === sym && dragSourceListId === wl.id;
+    const tick = prices?.[sym];
+    const tierVal = subscriptionTiers?.[sym] || "none";
+    const tierDot = tierVal === "full" ? "wl-tier-full" : tierVal === "price" ? "wl-tier-price" : "";
+    const flashDir = flashStates[sym]; // "up" | "down" | undefined
+
+    // Use daily (1D) change data from backend (matches 1D chart)
+    const hasPrice = tick && tierVal !== "none";
+    const change = hasPrice ? (tick.daily_change ?? (tick.price - tick.open)) : null;
+    const changePct = hasPrice ? (tick.daily_change_pct ?? tick.change_pct) : null;
+    const isUp = change !== null ? change >= 0 : null;
+    
+    // Determine price color: flash color on update, otherwise default
+    const priceColorClass = flashDir ? `wl-flash-${flashDir}` : "";
+
+    return (
+      <div key={sym} className="wl-sym-wrapper">
+        {isSymbolDropTarget(wl.id, idx, "above") && <div className="wl-drop-bar"/>}
+        <div
+          className={`wl-sym-row ${isActive ? "active" : ""} ${isDragged ? "dragging" : ""}`}
+          draggable
+          onDragStart={(e) => handleSymbolDragStart(e, sym, wl.id)}
+          onDragEnd={handleSymbolDragEnd}
+          onDragOver={(e) => handleSymbolDragOver(e, wl.id, idx)}
+          onDrop={(e) => handleSymbolDrop(e, wl.id, idx)}
+          onDragLeave={() => {
+            if (dropTarget?.listId === wl.id && dropTarget?.index === idx) setDropTarget(null);
+          }}
+          onClick={() => onSelectSymbol(sym)}
+          onContextMenu={(e) => handleContextMenu(e, sym, wl.id)}
+        >
+          {/* Drag grip */}
+          <span className="wl-sym-grip">
+            <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor">
+              <circle cx="3" cy="3" r="1"/><circle cx="7" cy="3" r="1"/>
+              <circle cx="3" cy="7" r="1"/><circle cx="7" cy="7" r="1"/>
+            </svg>
+          </span>
+
+          {/* Tier dot */}
+          {tierDot && <span className={`wl-tier-dot ${tierDot}`} title={tierVal === "full" ? "完全订阅" : "仅价格"}/>}
+
+          {/* Symbol name */}
+          <span className="wl-sym-name">{sym}</span>
+
+          {/* Price columns — only if not "仅收藏" */}
+          {hasPrice ? (
+            <>
+              {/* Latest price */}
+              <span className={`wl-col-price ${priceColorClass}`}>
+                {formatPrice(tick.price)}
+              </span>
+
+              {/* Change (absolute) */}
+              <span className={`wl-col-change ${isUp ? "wl-val-up" : "wl-val-down"}`}>
+                {isUp ? "+" : ""}{formatChange(change)}
+              </span>
+
+              {/* Change % */}
+              <span className={`wl-col-changepct ${isUp ? "wl-val-up" : "wl-val-down"}`}>
+                {isUp ? "+" : ""}{changePct.toFixed(2)}%
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="wl-col-price wl-col-empty">—</span>
+              <span className="wl-col-change wl-col-empty">—</span>
+              <span className="wl-col-changepct wl-col-empty">—</span>
+            </>
+          )}
+
+          {/* Delete button */}
+          <button className="wl-sym-del" onClick={(e) => { e.stopPropagation(); removeSymbol(wl.id, sym); }} title="移除">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        {isSymbolDropTarget(wl.id, idx, "below") && <div className="wl-drop-bar"/>}
+      </div>
+    );
+  };
+
   return (
     <>
       {/* ── Resize handle (left edge of right sidebar) ── */}
@@ -399,7 +575,7 @@ export default function WatchlistSidebar({
 
       <div
         className={`watchlist-sidebar ${sidebarCollapsed ? "collapsed" : ""} ${isResizing ? "resizing" : ""}`}
-        style={{ width: sidebarCollapsed ? 40 : width }}
+        style={{ width: sidebarCollapsed ? 40 : width, ...colorVars }}
         ref={sidebarRef}
       >
         {/* ── Header ── */}
@@ -423,6 +599,17 @@ export default function WatchlistSidebar({
             </>
           )}
         </div>
+
+        {/* ── Column header row (table header) ── */}
+        {!sidebarCollapsed && (
+          <div className="wl-table-header">
+            <span className="wl-th-name">商品</span>
+            <span className="wl-th-price">最新价</span>
+            <span className="wl-th-change">涨跌</span>
+            <span className="wl-th-changepct">涨跌%</span>
+            <span className="wl-th-actions"></span>
+          </div>
+        )}
 
         {/* ── Collapsed view ── */}
         {sidebarCollapsed && (
@@ -532,44 +719,7 @@ export default function WatchlistSidebar({
                         <span className="wl-list-empty-text">拖入或右键添加</span>
                       </div>
                     )}
-                    {!isCollapsed && wl.symbols.map((sym, idx) => {
-                      const isActive = sym === currentSymbol;
-                      const isDragged = dragType === "symbol" && dragSymbol === sym && dragSourceListId === wl.id;
-
-                      return (
-                        <div key={sym} className="wl-sym-wrapper">
-                          {isSymbolDropTarget(wl.id, idx, "above") && <div className="wl-drop-bar"/>}
-                          <div
-                            className={`wl-sym-row ${isActive ? "active" : ""} ${isDragged ? "dragging" : ""}`}
-                            draggable
-                            onDragStart={(e) => handleSymbolDragStart(e, sym, wl.id)}
-                            onDragEnd={handleSymbolDragEnd}
-                            onDragOver={(e) => handleSymbolDragOver(e, wl.id, idx)}
-                            onDrop={(e) => handleSymbolDrop(e, wl.id, idx)}
-                            onDragLeave={() => {
-                              if (dropTarget?.listId === wl.id && dropTarget?.index === idx) setDropTarget(null);
-                            }}
-                            onClick={() => onSelectSymbol(sym)}
-                            onContextMenu={(e) => handleContextMenu(e, sym, wl.id)}
-                          >
-                            <span className="wl-sym-grip">
-                              <svg width="8" height="8" viewBox="0 0 10 10" fill="currentColor">
-                                <circle cx="3" cy="3" r="1"/><circle cx="7" cy="3" r="1"/>
-                                <circle cx="3" cy="7" r="1"/><circle cx="7" cy="7" r="1"/>
-                              </svg>
-                            </span>
-                            <span className="wl-sym-name">{sym}</span>
-                            {isActive && <span className="wl-sym-active-dot">●</span>}
-                            <button className="wl-sym-del" onClick={(e) => { e.stopPropagation(); removeSymbol(wl.id, sym); }} title="移除">
-                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                              </svg>
-                            </button>
-                          </div>
-                          {isSymbolDropTarget(wl.id, idx, "below") && <div className="wl-drop-bar"/>}
-                        </div>
-                      );
-                    })}
+                    {!isCollapsed && wl.symbols.map((sym, idx) => renderSymbolRow(sym, wl, idx))}
                   </div>
 
                   {/* Drop indicator below */}
@@ -620,6 +770,24 @@ export default function WatchlistSidebar({
           ) : (
             <>
               <div className="wl-ctx-header">{contextMenu.symbol}</div>
+              {/* Tier selection */}
+              {onTierChange && (
+                <>
+                  <div className="wl-ctx-sub-header">订阅级别</div>
+                  {TIER_OPTIONS.map((opt) => {
+                    const currentTier = subscriptionTiers?.[contextMenu.symbol] || "none";
+                    return (
+                      <button key={opt.value} className={`wl-ctx-item ${currentTier === opt.value ? "wl-ctx-item-selected" : ""}`}
+                        onClick={() => { onTierChange(contextMenu.symbol, opt.value); setContextMenu(null); }}>
+                        <span className={`wl-tier-dot ${opt.value === "full" ? "wl-tier-full" : opt.value === "price" ? "wl-tier-price" : ""}`}/>
+                        <span>{opt.label}</span>
+                        <span className="wl-ctx-item-desc">{opt.desc}</span>
+                      </button>
+                    );
+                  })}
+                  <div className="wl-ctx-divider"/>
+                </>
+              )}
               {/* Move to other lists */}
               {watchlists.filter((w) => w.id !== contextMenu.listId).map((wl) => (
                 <button key={wl.id} className="wl-ctx-item" onClick={() => {

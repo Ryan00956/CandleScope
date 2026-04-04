@@ -221,6 +221,8 @@ async def get_klines_history(
                 "count": len(data),
                 "source": result.source.value,
                 "fetched": result.total,
+                "has_tail_gap": result.has_tail_gap,
+                "backfill_triggered": result.backfill_triggered,
                 "cache": result.metadata,
                 "data": data,
                 "base_interval": None,

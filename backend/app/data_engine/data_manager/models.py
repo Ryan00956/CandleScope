@@ -176,6 +176,7 @@ class QueryResult:
     has_more: bool = False
     cache_hit: bool = False
     backfill_triggered: bool = False
+    has_tail_gap: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -187,6 +188,7 @@ class QueryResult:
             "has_more": self.has_more,
             "cache_hit": self.cache_hit,
             "backfill_triggered": self.backfill_triggered,
+            "has_tail_gap": self.has_tail_gap,
             "data": [b.to_dict() for b in self.bars],
             "metadata": self.metadata,
         }

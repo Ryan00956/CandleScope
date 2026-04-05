@@ -145,6 +145,20 @@ class OkxExchangeAdapter:
     def get_multi_symbol_ticker_stream_name(self, market_type: str = "spot") -> str | None:
         return None
 
+    def get_ticker_ws_urls(self, market_type: str = "spot") -> list[str]:
+        """Return WS URLs for the public ticker channel (per-symbol)."""
+        return ["wss://ws.okx.com:8443/ws/v5/public"]
+
+    def build_ticker_subscribe(self, symbols: list[str]) -> dict:
+        """Build a subscribe message for the OKX tickers channel."""
+        args = [{"channel": "tickers", "instId": s.upper()} for s in symbols]
+        return {"op": "subscribe", "args": args}
+
+    def build_ticker_unsubscribe(self, symbols: list[str]) -> dict:
+        """Build an unsubscribe message for the OKX tickers channel."""
+        args = [{"channel": "tickers", "instId": s.upper()} for s in symbols]
+        return {"op": "unsubscribe", "args": args}
+
     def supports_ws_streaming(self, market_type: str = "spot") -> bool:
         return True
 

@@ -23,7 +23,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Callable, Awaitable
+from typing import Any, Callable, Awaitable
 
 import aiohttp
 import websockets
@@ -227,14 +227,21 @@ class PriceTickerService:
         self._stop_event.clear()
         for exchange, adapter in self._registry.items():
             capabilities = adapter.capabilities()
-            if not capabilities.supports_multi_symbol_ticker:
-                continue
-            for market in capabilities.markets:
-                task_key = (exchange, market.market_type)
-                self._tasks[task_key] = asyncio.create_task(
-                    self._run_stream(exchange, market.market_type),
-                    name=f"price_ticker_{exchange}_{market.market_type}",
-                )
+            if capabilities.supports_multi_symbol_ticker:
+                for market in capabilities.markets:
+                    task_key = (exchange, market.market_type)
+                    self._tasks[task_key] = asyncio.create_task(
+                        self._run_stream(exchange, market.market_type),
+                        name=f"price_ticker_{exchange}_{market.market_type}",
+                    )
+            elif hasattr(adapter, "get_ticker_ws_urls"):
+                # Per-symbol ticker for exchanges like OKX
+                for market in capabilities.markets:
+                    task_key = (exchange, market.market_type)
+                    self._tasks[task_key] = asyncio.create_task(
+                        self._run_per_symbol_stream(exchange, market.market_type),
+                        name=f"price_ticker_{exchange}_{market.market_type}",
+                    )
         self._daily_task = asyncio.create_task(self._daily_open_loop(), name="daily_open_fetcher")
         logger.info("PriceTickerService started (%d streams)", len(self._tasks))
 
@@ -379,14 +386,24 @@ class PriceTickerService:
         """Fetch the 1D kline open price for a single symbol."""
         for base_url in base_urls:
             url = f"{base_url}{kline_path}"
-            params = {"symbol": symbol, "interval": "1d", "limit": 1}
+            if exchange == "okx":
+                params: dict[str, Any] = {"instId": symbol, "bar": "1D", "limit": "1"}
+            else:
+                params = {"symbol": symbol, "interval": "1d", "limit": 1}
             try:
                 async with session.get(url, params=params, proxy=proxy) as resp:
                     if resp.status == 200:
                         self._last_working_rest_url[(exchange, market_type)] = base_url
-                        data = await resp.json()
-                        if data and len(data) > 0:
-                            return float(data[0][1])
+                        payload = await resp.json()
+                        if exchange == "okx":
+                            # OKX wraps data: {"code":"0","data":[["ts","o","h","l","c",...]]}
+                            if isinstance(payload, dict) and str(payload.get("code", "0")) in ("0", ""):
+                                data = payload.get("data")
+                                if data and len(data) > 0:
+                                    return float(data[0][1])
+                        else:
+                            if payload and len(payload) > 0:
+                                return float(payload[0][1])
             except Exception:
                 continue
         return 0.0
@@ -505,6 +522,182 @@ class PriceTickerService:
                 change_pct=change_pct,
                 volume=float(item.get("v", 0)),
                 quote_volume=float(item.get("q", 0)),
+                daily_open=daily_open,
+                updated_at_ms=now_ms,
+            )
+            self._prices[ck] = tick
+            updated.append(tick)
+
+        if updated and self._callbacks:
+            for cb in self._callbacks:
+                try:
+                    await cb(updated)
+                except Exception as exc:
+                    logger.warning("Price callback error: %s", exc)
+
+    # ── Internal: per-symbol ticker stream (OKX etc.) ────────
+
+    async def _run_per_symbol_stream(self, exchange: str, market_type: str) -> None:
+        """Ticker stream for exchanges that need per-symbol subscriptions (e.g., OKX)."""
+        reconnect_delay = 2
+        max_delay = 60
+
+        try:
+            adapter = self._registry.get(exchange)
+        except KeyError:
+            return
+        if not hasattr(adapter, "get_ticker_ws_urls"):
+            return
+
+        while not self._stop_event.is_set():
+            ws_urls = adapter.get_ticker_ws_urls(market_type)
+            for ws_url in ws_urls:
+                if self._stop_event.is_set():
+                    return
+                try:
+                    async with websockets.connect(
+                        ws_url,
+                        open_timeout=10,
+                        close_timeout=2,
+                        ping_interval=20,
+                        ping_timeout=20,
+                    ) as ws:
+                        reconnect_delay = 2
+                        logger.info(
+                            "PriceTickerService [%s:%s] per-symbol connected: %s",
+                            exchange, market_type, ws_url,
+                        )
+
+                        subscribed: set[str] = set()
+                        await self._sync_ticker_subs(ws, adapter, exchange, market_type, subscribed)
+                        last_sync = time.time()
+
+                        while not self._stop_event.is_set():
+                            try:
+                                msg = await asyncio.wait_for(ws.recv(), timeout=5)
+                                await self._handle_per_symbol_message(msg, exchange, market_type)
+                            except asyncio.TimeoutError:
+                                pass
+
+                            # Re-sync subscriptions periodically
+                            now = time.time()
+                            if now - last_sync > 10:
+                                await self._sync_ticker_subs(
+                                    ws, adapter, exchange, market_type, subscribed,
+                                )
+                                last_sync = now
+
+                except (websockets.exceptions.ConnectionClosed, OSError, Exception) as exc:
+                    logger.warning(
+                        "PriceTickerService [%s:%s] per-symbol WS error: %s",
+                        exchange, market_type, exc,
+                    )
+                    continue
+
+            if not self._stop_event.is_set():
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, max_delay)
+
+    async def _sync_ticker_subs(
+        self,
+        ws,
+        adapter,
+        exchange: str,
+        market_type: str,
+        subscribed: set[str],
+    ) -> None:
+        """Sync subscribed symbols with the current watched set."""
+        wanted: set[str] = set()
+        for ck in self._watched:
+            ex, mt, sym = _parse_composite_key(ck)
+            if ex == exchange and mt == market_type:
+                wanted.add(sym)
+
+        to_unsub = subscribed - wanted
+        to_sub = wanted - subscribed
+
+        if to_unsub:
+            try:
+                msg = adapter.build_ticker_unsubscribe(list(to_unsub))
+                await ws.send(json.dumps(msg))
+                subscribed -= to_unsub
+                logger.debug("Ticker unsubscribed %d symbols [%s:%s]", len(to_unsub), exchange, market_type)
+            except Exception as exc:
+                logger.warning("Ticker unsubscribe error [%s:%s]: %s", exchange, market_type, exc)
+
+        if to_sub:
+            # Batch subscriptions in groups of 20
+            sub_list = list(to_sub)
+            for i in range(0, len(sub_list), 20):
+                batch = sub_list[i:i + 20]
+                try:
+                    msg = adapter.build_ticker_subscribe(batch)
+                    await ws.send(json.dumps(msg))
+                    subscribed.update(batch)
+                except Exception as exc:
+                    logger.warning("Ticker subscribe error [%s:%s]: %s", exchange, market_type, exc)
+            if sub_list:
+                logger.debug("Ticker subscribed %d symbols [%s:%s]", len(sub_list), exchange, market_type)
+
+    async def _handle_per_symbol_message(self, raw: str, exchange: str, market_type: str) -> None:
+        """Parse per-symbol ticker messages (OKX format)."""
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+
+        if not isinstance(data, dict):
+            return
+
+        # Skip subscribe/unsubscribe acks
+        if "event" in data:
+            return
+
+        arg = data.get("arg", {})
+        if arg.get("channel") != "tickers":
+            return
+
+        items = data.get("data")
+        if not isinstance(items, list):
+            return
+
+        now_ms = int(time.time() * 1000)
+        updated: list[PriceTick] = []
+
+        for item in items:
+            inst_id = item.get("instId", "")
+            if not inst_id:
+                continue
+
+            ck = _composite_key(exchange, market_type, inst_id)
+            if ck not in self._watched:
+                continue
+
+            close_price = float(item.get("last", 0))
+            open_24h = float(item.get("open24h", 0))
+            high_24h = float(item.get("high24h", 0))
+            low_24h = float(item.get("low24h", 0))
+            vol_24h = float(item.get("vol24h", 0))
+            vol_ccy_24h = float(item.get("volCcy24h", 0))
+
+            if open_24h > 0:
+                change_pct = ((close_price - open_24h) / open_24h) * 100
+            else:
+                change_pct = 0.0
+
+            daily_open = self._daily_opens.get(ck, 0.0)
+
+            tick = PriceTick(
+                symbol=ck,
+                exchange=exchange,
+                market_type=market_type,
+                price=close_price,
+                open=open_24h,
+                high=high_24h,
+                low=low_24h,
+                change_pct=change_pct,
+                volume=vol_24h,
+                quote_volume=vol_ccy_24h,
                 daily_open=daily_open,
                 updated_at_ms=now_ms,
             )

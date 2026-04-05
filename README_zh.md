@@ -2,14 +2,14 @@
 
 [![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](#)
 
-基于 FastAPI + React + Lightweight Charts 构建的轻量级交易看盘软件。内置实时币安数据同步、多层级数据引擎、Pine Script 风格的指标脚本语言，以及支持绘图工具和多窗格的全交互式图表前端。
+基于 FastAPI + React + Lightweight Charts 构建的轻量级交易看盘软件。当前已支持 Binance 与 OKX、现货与永续市场、多层级数据引擎、Pine Script 风格指标脚本语言，以及支持绘图工具和多窗格的全交互式图表前端。
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python" />
   <img src="https://img.shields.io/badge/Node.js-20+-green?logo=node.js" />
   <img src="https://img.shields.io/badge/React-18+-61DAFB?logo=react" />
   <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi" />
-  <img src="https://img.shields.io/badge/License-Apache_2.0-orange" />
+  <img src="https://img.shields.io/badge/License-GPL--3.0-orange" />
 </p>
 
 ---
@@ -17,6 +17,7 @@
 ## 目录
 
 - [快速开始](#-快速开始)
+- [最近更新](#-最近更新)
 - [当前特性](#当前特性)
 - [核心能力](#-核心能力)
 - [指标引擎](#-指标引擎)
@@ -84,18 +85,36 @@ npm run dev
 
 ---
 
+## ✨ 最近更新
+
+从上次 README 更新到现在，项目已经补进了这些核心能力：
+
+- **多交易所架构完成**：后端围绕交易所注册表与适配器重构，当前已接入 Binance 和 OKX，并暴露交易所能力与交易对元数据接口。
+- **现货 / 合约统一支持**：请求、流推送、存储、符号规范化都带上了 `exchange` 与 `market_type` 维度，同一套前端流程即可覆盖现货和永续。
+- **缺口修复链路明显增强**：新增回填规划、缺口探测、结果回灌、存储修复与 gap scan/fill，K 线断档防御比之前完整很多。
+- **自选列表与订阅分级**：侧边栏支持持久化自选、拖拽整理、价格闪烁提示，后端支持 `full` / `price` / `none` 三档订阅策略。
+- **画图工具扩充**：现在除了自由画笔、直线和文字，还支持斐波那契回撤、多空仓位工具，以及线段 / 射线 / 直线变体。
+- **交易对搜索与元数据刷新**：搜索 UI 与符号接口都已升级为交易所感知模式，并可手动刷新交易所交易对缓存。
+- **内置指标增加**：新增 `VOL` 成交量柱状图，内置指标由原先 6 个扩展到 7 个。
+- **设置页具备运维能力**：支持代理测试、交易对元数据刷新、自定义周期存储修复、历史缺口扫描与补齐。
+
+---
+
 ## 当前特性
 
 - **极速周期切换** — 采用 Cache-First 策略。在 1m、1h、1d 等周期切换时，只要本地 SQLite 有缓存，即刻实现秒级渲染。
 - **非阻塞异步架构** — 所有重型 I/O 操作（币安 API 请求）均被推送到后台线程池执行，确保 WebSocket 情报流和界面响应零延迟。
 - **智能预取机制** — 前端自动"感知"用户需求并预热相邻周期（例如：当前查看 1h，后台会自动异步静默预读 15m 和 4h 的数据）。
 - **并行数据补全** — 采用 `ThreadPoolExecutor` 实现历史回填 (Backfill) 与实时刷新 (Refresh) 的并行处理，数据加载效率加倍。
-- **币安现货 K 线同步** — 与本地 SQLite 缓存高速同步实时行情数据，杜绝冗余网络请求。
+- **多交易所 K 线同步** — 通过统一适配器层对接 Binance 与 OKX，按交易所差异处理符号规范、能力描述、REST 与 WebSocket 接入。
+- **现货 / 合约双市场支持** — 后端与前端都以 `exchange + market_type + symbol` 为主键组织数据，现货与永续可共存。
 - **动态合成周期** — 除原生时间周期外，还支持自由定义合成任意非标周期（如 45m、91m 等），在内存中实时基于底层的细粒度数据聚合拼装。
-- **完整指标引擎** — 内置 6 大核心指标（MA、EMA、MACD、RSI、BOLL、ATR），全部 O(1) 增量计算，另配脚本沙盒支持自定义指标。
+- **完整指标引擎** — 内置 7 大核心指标（MA、EMA、MACD、RSI、BOLL、ATR、VOL），全部 O(1) 增量计算，另配脚本沙盒支持自定义指标。
 - **Pyne 脚本语言** — 受 Pine Script 启发的 Python 库，提供 `ta.*`、`input.*`、`plot()` 等 API，让指标开发如写脚本般简单。
-- **交互式绘图工具** — 自由画笔、直线工具、文字标注，直接在图表画布上操作，支持持久化存储。
+- **交互式绘图工具** — 自由画笔、线段 / 射线 / 直线、文字标注、斐波那契回撤、多空仓位工具都可直接在图表画布上操作，并支持持久化存储。
 - **多窗格图表布局** — 价格主图、成交量面板、振荡器副图，窗格间支持拖拽调整大小。
+- **自选与价格跟踪** — 持久化自选列表、价格快照 / 实时推送、订阅分级与价格跳动高亮都已接入。
+- **数据维护工具** — 设置页内置代理测试、交易对元数据刷新、自定义周期修复与历史缺口扫描 / 补齐。
 - **统一价格策略** — 采用共享价格曲线算法，彻底解决 Mock 模式下不同周期价格不一致的问题，保证同一时刻各个图表的现价完全一致。
 - **抗崩溃能力** — 内置 **ErrorBoundary** 错误拦截与数据按时间强行去重逻辑，杜绝因交易所脏数据或网络错乱导致的"白屏"现象。
 
@@ -135,6 +154,7 @@ CandleScope 内置了完整的**增量指标计算引擎**，同时支持内置�
 | **RSI** — 相对强弱指数 | 振荡器 | `rsi` | 副图 |
 | **BOLL** — 布林带 | 波动率 | `upper`, `middle`, `lower` | 主图 |
 | **ATR** — 平均真实波幅 | 波动率 | `atr` | 副图 |
+| **VOL** — 成交量柱状图 | 成交量 | `vol` | 成交量窗格 |
 
 ### 核心设计
 
@@ -189,10 +209,11 @@ marker(rsi < 30, shape="triangle_up", color=color.green, text="超卖")
 React 前端基于 **Lightweight Charts v5** 深度定制：
 
 - **多窗格图表** — 价格主图、成交量面板、振荡器副图，窗格间支持拖拽调整大小。
-- **绘图工具栏** — 自由画笔、直线工具、文字标注，绘图数据持久化存储不丢失。
+- **绘图工具栏** — 自由画笔、线段 / 射线 / 直线、斐波那契回撤、多空仓位与文字标注，绘图数据持久化存储不丢失。
 - **指标编辑器** — 功能完备的代码编辑器，支持 Pyne 语法高亮，所写即所见。
 - **指标面板** — 浏览并添加内置指标，或编写自定义脚本实时预览效果。
-- **设置面板** — 配置图表外观、数据源和连接参数。
+- **自选侧边栏** — 支持多列表管理、拖拽排序、价格闪烁和每个标的的订阅等级控制。
+- **设置面板** — 配置图表外观、代理与数据源参数，并直接执行存储维护动作。
 - **无限滚动历史** — 向左拖拽时按需无缝加载历史数据，由回填引擎自动驱动数据生长。
 - **实时 WebSocket 推送** — 多路复用的多周期实时 K 线流，一条连接承载所有周期。
 
@@ -204,7 +225,7 @@ React 前端基于 **Lightweight Charts v5** 深度定制：
 CandleScope/
 ├── README.md / README_zh.md              # 项目文档（英/中）
 ├── API.md / API_zh.md                    # REST & WebSocket API 参考（英/中）
-├── LICENSE                               # Apache 2.0
+├── LICENSE                               # GNU GPL-3.0
 │
 ├── backend/                              # FastAPI 后端与数据引擎
 │   ├── requirements.txt
@@ -261,7 +282,7 @@ CandleScope/
 | 模块 | 说明 | 文档 |
 |------|------|------|
 | **Data Manager（数据管理器）** | 数据出入口的总闸门，负责三级查询流控、多级缓存统筹，与前端直接握手 | [EN](backend/app/data_engine/data_manager/README.md) · [中文](backend/app/data_engine/data_manager/README_zh.md) |
-| **Ingestion Layer（接入管道）** | 连接币安服务器的实时 6 层网关清洗与消息重打包引擎 | [EN](backend/app/data_engine/ingestion/README.md) · [中文](backend/app/data_engine/ingestion/README_zh.md) |
+| **Ingestion Layer（接入管道）** | 面向交易所适配器的实时 6 层行情接入、清洗与消息重打包引擎 | [EN](backend/app/data_engine/ingestion/README.md) · [中文](backend/app/data_engine/ingestion/README_zh.md) |
 | **Bar Aggregator（K线聚合器）** | 极其聪明的内存"反应堆"，可合成全平台任意定制周期的时间线状态机 | [EN](backend/app/data_engine/bar_aggregator/README.md) · [中文](backend/app/data_engine/bar_aggregator/README_zh.md) |
 | **Backfill Engine（回填引擎）** | 拥有缺口感知雷达（Gap Detector）与任务拆分能力的智能多线程后台调度矿工 | [EN](backend/app/data_engine/backfill/README.md) · [中文](backend/app/data_engine/backfill/README_zh.md) |
 
@@ -287,17 +308,21 @@ CandleScope/
 |------|------|------|
 | `/api/v1/klines` | GET | 获取 K 线数据（缓存优先） |
 | `/api/v1/klines/history/before` | GET | 分页回溯历史数据 |
-| `/api/v1/stream/multi` | WebSocket | 多路复用实时 K 线流 |
+| `/api/v1/stream/klines_multi` | WebSocket | 多路复用实时 K 线流 |
 | `/api/v1/indicators/compute` | POST | 执行指标计算 |
 | `/api/v1/indicators/registry` | GET | 列出所有可用指标 |
+| `/api/v1/exchanges` | GET | 列出交易所能力信息 |
+| `/api/v1/symbols/exchange-info` | GET | 查询交易所感知的交易对元数据 |
+| `/api/v1/subscriptions` | GET/PUT/POST | 管理自选驱动的订阅等级 |
 
 ---
 
 ## 📝 说明
 
-- 建议配置合适的网络代理以获取稳定的币安实时行情 WebSocket 连接。如果无法连接，程序会自动回退到 Mock 数据。
+- 建议配置合适的网络代理以获取稳定的交易所实时行情连接。如果无法连接，程序会自动回退到 Mock 数据。
 - 本地数据库文件夹与缓存文件 (`.db`, `.pyc` 等) 已被 `.gitignore` 清爽排除，初次运行会自动在本地建库。
 - 指标脚本沙盒在隔离线程中执行用户代码，确保安全性。
+- 本仓库许可证为 **GNU GPL-3.0**，完整文本见 `LICENSE`。
 
 ---
 

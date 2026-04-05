@@ -2,14 +2,14 @@
 
 [![English](https://img.shields.io/badge/Language-English-blue)](#) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](README_zh.md)
 
-Lightweight trading chart software built with FastAPI + React + Lightweight Charts. Features real-time Binance data sync, a multi-layered data engine, a Pine Script–inspired indicator scripting language, and a fully interactive charting frontend.
+Lightweight trading chart software built with FastAPI + React + Lightweight Charts. It now supports Binance and OKX market access, spot and perpetual market types, a multi-layered data engine, a Pine Script–inspired indicator scripting language, and a fully interactive charting frontend.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.10+-blue?logo=python" />
   <img src="https://img.shields.io/badge/Node.js-20+-green?logo=node.js" />
   <img src="https://img.shields.io/badge/React-18+-61DAFB?logo=react" />
   <img src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi" />
-  <img src="https://img.shields.io/badge/License-Apache_2.0-orange" />
+  <img src="https://img.shields.io/badge/License-GPL--3.0-orange" />
 </p>
 
 ---
@@ -17,6 +17,7 @@ Lightweight trading chart software built with FastAPI + React + Lightweight Char
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Recent Updates](#recent-updates)
 - [Current Features](#current-features)
 - [Core Capabilities](#core-capabilities)
 - [Indicator Engine](#indicator-engine)
@@ -84,18 +85,36 @@ Default URLs:
 
 ---
 
+## Recent Updates
+
+Since the last README refresh, the project has gained several major user-facing capabilities:
+
+- **Multi-exchange architecture** — The backend was refactored around an exchange registry and adapter layer. Binance and OKX are both supported, and the API now exposes exchange capabilities and symbol metadata.
+- **Spot + futures market support** — Symbol metadata, history queries, streaming, and storage all carry `exchange` and `market_type`, so the same frontend flow works across spot and perpetual contracts.
+- **Much stronger gap repair pipeline** — The data engine now includes a dedicated backfill planner/reconciler, storage repair tools, gap scanning, and more defensive continuity logic against missing K-lines.
+- **Watchlist + price subscription system** — The frontend sidebar now supports persistent watchlists, drag-and-drop organization, real-time price flashes, and backend subscription tiers (`full` / `price` / `none`).
+- **Expanded chart interaction tools** — Drawing support now includes Fibonacci retracements, long/short position tools, line variants, and persistent drawing storage.
+- **Symbol search and exchange metadata refresh** — Search UI and backend symbol APIs were expanded for exchange-aware discovery and manual metadata refresh.
+- **Indicator set expanded** — Built-in indicators now include `VOL` in addition to MA, EMA, MACD, RSI, BOLL, and ATR.
+- **Operational controls in settings** — The settings panel can test proxies, refresh symbol metadata, repair stored custom intervals, and scan/fill historical gaps.
+
+---
+
 ## Current Features
 
 - **Zero-Latency Interval Switching** — Instant cache-first rendering. Switching between 1m, 1h, or 1d is near-instant if data exists in local SQLite.
 - **Non-blocking Async Architecture** — All heavy I/O operations (Binance API) are offloaded to background thread pools, keeping the WebSocket and UI perfectly responsive.
 - **Intelligent Prefetching** — Frontend automatically pre-warms adjacent intervals (e.g., if you view 1h, it silently fetches 15m and 4h in the background).
 - **Parallel Data Filling** — Historical backfill and real-time refresh are executed concurrently using a specialized `ThreadPoolExecutor`.
-- **Binance Spot K-line Sync** — Rapid synchronization of real market data with a local SQLite cache to avoid redundant network requests.
+- **Multi-Exchange K-line Sync** — Unified adapter-based synchronization for Binance and OKX, with exchange-specific symbol normalization, capabilities, and REST/WS transport handling.
+- **Spot + Futures Support** — The backend and frontend both understand exchange + market-type scoped symbols, enabling spot and perpetual market flows in one codebase.
 - **Dynamic Custom Intervals** — In addition to native intervals, the system synthesizes custom intervals (e.g., 45m, 3h) in real-time in-memory based on finer aggregated resolutions.
-- **Full Indicator Engine** — 6 built-in indicators (MA, EMA, MACD, RSI, BOLL, ATR) with O(1) incremental computation, plus a script sandbox for custom indicators.
+- **Full Indicator Engine** — 7 built-in indicators (MA, EMA, MACD, RSI, BOLL, ATR, VOL) with O(1) incremental computation, plus a script sandbox for custom indicators.
 - **Pyne Scripting Language** — A Pine Script–inspired Python library with `ta.*`, `input.*`, `plot()` APIs for rapid indicator development.
-- **Interactive Drawing Tools** — Freehand drawing, line tools, and text annotations directly on the chart canvas.
+- **Interactive Drawing Tools** — Freehand drawing, segment/ray/infinite lines, text annotations, Fibonacci retracements, and long/short position tools directly on the chart canvas.
 - **Multi-Pane Chart Layout** — Separate panes for price, volume, and oscillator indicators with resizable dividers.
+- **Watchlist & Price Tracking** — Persistent watchlists, symbol grouping, price-only subscription tiers, and real-time price snapshots/streams for sidebar monitoring.
+- **Data Maintenance Toolkit** — Built-in proxy testing, exchange metadata refresh, custom-interval storage repair, and gap scan/fill operations.
 - **Unified Mock Data** — Deterministic price levels are perfectly consistent across all intervals (1m to 1M) using a shared minute-step price curve.
 - **Rendering Stability** — Built-in **ErrorBoundary** and time-based de-duplication to prevent "white screen" crashes from unstable network streams.
 
@@ -134,6 +153,7 @@ CandleScope includes a comprehensive **incremental indicator computation engine*
 | **RSI** — Relative Strength Index | Oscillator | `rsi` | Separate |
 | **BOLL** — Bollinger Bands | Volatility | `upper`, `middle`, `lower` | Main |
 | **ATR** — Average True Range | Volatility | `atr` | Separate |
+| **VOL** — Volume Histogram | Volume | `vol` | Volume |
 
 ### Key Design
 
@@ -188,10 +208,11 @@ marker(rsi < 30, shape="triangle_up", color=color.green, text="OS")
 The React frontend is built on **Lightweight Charts v5** with extensive customizations:
 
 - **Multi-Pane Chart** — Price chart, volume pane, and oscillator sub-panes with draggable resizers.
-- **Drawing Tools** — Freehand pen, straight-line, and text annotation tools with persistent storage.
+- **Drawing Tools** — Freehand pen, line variants, Fibonacci retracement, long/short position tools, and text annotations with persistent storage.
 - **Indicator Editor** — Full-featured code editor with Pyne syntax highlighting, powered by Monaco-style editing.
 - **Indicator Panel** — Browse and add built-in indicators or write custom scripts with live preview.
-- **Settings Modal** — Configure chart appearance, data source, and connection parameters.
+- **Watchlist Sidebar** — Persistent watchlists with drag-and-drop ordering, real-time price flashes, and per-symbol subscription tiers.
+- **Settings Modal** — Configure chart appearance, proxy/data source parameters, and run storage maintenance actions.
 - **Infinite Scroll History** — Seamless left-scroll to load historical data on demand, backed by the backfill engine.
 - **Real-time WebSocket Updates** — Live candlestick updates with multiplexed multi-interval streaming.
 
@@ -203,7 +224,7 @@ The React frontend is built on **Lightweight Charts v5** with extensive customiz
 CandleScope/
 ├── README.md / README_zh.md              # Project documentation (EN/CN)
 ├── API.md / API_zh.md                    # REST & WebSocket API reference (EN/CN)
-├── LICENSE                               # Apache 2.0
+├── LICENSE                               # GNU GPL-3.0
 │
 ├── backend/                              # FastAPI backend & data engine
 │   ├── requirements.txt
@@ -260,7 +281,7 @@ CandleScope/
 | Module | Description | Docs |
 |--------|-------------|------|
 | **Data Manager** | Central facade for querying, caching, and stream coordination | [EN](backend/app/data_engine/data_manager/README.md) · [中文](backend/app/data_engine/data_manager/README_zh.md) |
-| **Ingestion Layer** | 6-layer pipeline for real-time WebSocket market data via Binance | [EN](backend/app/data_engine/ingestion/README.md) · [中文](backend/app/data_engine/ingestion/README_zh.md) |
+| **Ingestion Layer** | 6-layer pipeline for real-time market data ingestion through exchange adapters | [EN](backend/app/data_engine/ingestion/README.md) · [中文](backend/app/data_engine/ingestion/README_zh.md) |
 | **Bar Aggregator** | Real-time custom interval synthesizer (e.g., 45m, 3h) | [EN](backend/app/data_engine/bar_aggregator/README.md) · [中文](backend/app/data_engine/bar_aggregator/README_zh.md) |
 | **Backfill Engine** | Intelligent historical data gap detection and multi-threaded backfilling | [EN](backend/app/data_engine/backfill/README.md) · [中文](backend/app/data_engine/backfill/README_zh.md) |
 
@@ -286,17 +307,21 @@ Full REST and WebSocket API reference is available in a separate document:
 |----------|--------|-------------|
 | `/api/v1/klines` | GET | Fetch K-line data (cache-first) |
 | `/api/v1/klines/history/before` | GET | Paginated historical scroll |
-| `/api/v1/stream/multi` | WebSocket | Multiplexed real-time K-line stream |
+| `/api/v1/stream/klines_multi` | WebSocket | Multiplexed real-time K-line stream |
 | `/api/v1/indicators/compute` | POST | Execute indicator computation |
 | `/api/v1/indicators/registry` | GET | List all available indicators |
+| `/api/v1/exchanges` | GET | List exchange capabilities |
+| `/api/v1/symbols/exchange-info` | GET | Query exchange-aware symbol metadata |
+| `/api/v1/subscriptions` | GET/PUT/POST | Manage watchlist-driven subscription tiers |
 
 ---
 
 ## Notes
 
-- If Binance cannot be reached (network/proxy), the app falls back to mock data.
+- If exchange access fails because of network or proxy issues, the app can fall back to mock data for chart development.
 - Local DB files are ignored in git via `.gitignore`.
 - The indicator script sandbox executes user code in an isolated thread for safety.
+- This repository is licensed under **GNU GPL-3.0**. See `LICENSE` for the full text.
 
 ---
 

@@ -39,6 +39,20 @@ BINANCE_WS_URLS = [
     "wss://stream.binance.me:9443/ws",
 ]
 
+# Binance Futures (USDT-M Perpetual) HTTP APIs
+BINANCE_FUTURES_BASE_URL = os.getenv("BINANCE_FUTURES_BASE_URL", "https://fapi.binance.com")
+BINANCE_FUTURES_BASE_URLS = [
+    "https://fapi.binance.com",
+    "https://fapi.binance.me",
+]
+
+# Binance Futures WebSocket
+BINANCE_FUTURES_WS_URL = os.getenv("BINANCE_FUTURES_WS_URL", "wss://fstream.binance.com/ws")
+BINANCE_FUTURES_WS_URLS = [
+    BINANCE_FUTURES_WS_URL,
+    "wss://fstream.binance.me/ws",
+]
+
 # Request tuning  (lower values = faster fallback when Binance is unreachable)
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "5"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))

@@ -42,8 +42,8 @@ from .models import (
 logger = logging.getLogger("bar_aggregator.L1_Router")
 
 # Type alias for the callback that receives routed BarInputs
-BarInputCallback = Callable[[str, str, BarInput], Awaitable[None]]
-# Signature: (symbol, target_interval, bar_input) → None
+BarInputCallback = Callable[[str, str, str, BarInput], Awaitable[None]]
+# Signature: (market_type, symbol, target_interval, bar_input) → None
 
 
 class EventRouter:
@@ -60,12 +60,12 @@ class EventRouter:
     def __init__(self, config: BarAggregatorConfig) -> None:
         self._cfg = config
 
-        # Registered targets: {(symbol, interval)} — the set of active pipelines
-        self._targets: set[tuple[str, str]] = set()
+        # Registered targets: {(market_type, symbol, interval)} — the set of active pipelines
+        self._targets: set[tuple[str, str, str]] = set()
 
         # For each symbol, which source intervals feed it
-        # {symbol → set(source_interval)}
-        self._symbol_source_intervals: dict[str, set[str]] = {}
+        # {(market_type, symbol) → set(source_interval)}
+        self._symbol_source_intervals: dict[tuple[str, str], set[str]] = {}
 
         # User-registered adapters: {name → adapter}
         self._adapters: dict[str, BarInputAdapter] = {}
@@ -75,7 +75,7 @@ class EventRouter:
 
     # ── Public: Target Management ────────────────────────────
 
-    def register_target(self, symbol: str, interval: str) -> None:
+    def register_target(self, symbol: str, interval: str, market_type: str = "spot") -> None:
         """Register a (symbol, interval) aggregation target.
 
         Once registered, incoming data for this symbol will be routed
@@ -85,28 +85,33 @@ class EventRouter:
             symbol:   Trading pair (e.g. "BTCUSDT")
             interval: Target interval (e.g. "1m", "91m")
         """
-        key = (symbol.upper(), interval)
+        key = (market_type.lower().strip(), symbol.upper(), interval)
         if key in self._targets:
-            logger.debug("Target already registered: %s@%s", symbol, interval)
+            logger.debug("Target already registered: %s:%s@%s", key[0], symbol, interval)
             return
 
         self._targets.add(key)
-        logger.info("Registered target: %s@%s", symbol, interval)
+        logger.info("Registered target: %s:%s@%s", key[0], symbol, interval)
 
-    def unregister_target(self, symbol: str, interval: str) -> None:
+    def unregister_target(self, symbol: str, interval: str, market_type: str = "spot") -> None:
         """Remove a (symbol, interval) aggregation target."""
-        key = (symbol.upper(), interval)
+        key = (market_type.lower().strip(), symbol.upper(), interval)
         self._targets.discard(key)
-        logger.info("Unregistered target: %s@%s", symbol, interval)
+        logger.info("Unregistered target: %s:%s@%s", key[0], symbol, interval)
 
-    def get_targets(self) -> list[tuple[str, str]]:
+    def get_targets(self) -> list[tuple[str, str, str]]:
         """Return all registered (symbol, interval) targets."""
         return sorted(self._targets)
 
-    def get_symbol_targets(self, symbol: str) -> list[str]:
+    def get_symbol_targets(self, symbol: str, market_type: str = "spot") -> list[str]:
         """Return all target intervals for a given symbol."""
         symbol = symbol.upper()
-        return sorted(interval for sym, interval in self._targets if sym == symbol)
+        market_type = market_type.lower().strip()
+        return sorted(
+            interval
+            for mt, sym, interval in self._targets
+            if mt == market_type and sym == symbol
+        )
 
     # ── Public: Adapter Registration ─────────────────────────
 
@@ -161,11 +166,12 @@ class EventRouter:
             return
 
         symbol = getattr(event, "symbol", "").upper()
+        market_type = self._extract_market_type(event)
         if not symbol:
             return
 
         # Check if we have any targets for this symbol
-        symbol_targets = self.get_symbol_targets(symbol)
+        symbol_targets = self.get_symbol_targets(symbol, market_type=market_type)
         if not symbol_targets:
             return
 
@@ -175,7 +181,7 @@ class EventRouter:
             return
 
         # Route to all matching targets
-        await self._dispatch(symbol, bar_input, symbol_targets)
+        await self._dispatch(market_type, symbol, bar_input, symbol_targets)
 
     # ── Public: Ingest from Backfill ─────────────────────────
 
@@ -184,6 +190,7 @@ class EventRouter:
         symbol: str,
         interval: str,
         bars: list[Any],
+        market_type: str = "spot",
     ) -> None:
         """Accept FetchedBar list from the backfill engine.
 
@@ -195,15 +202,16 @@ class EventRouter:
             bars:     List of FetchedBar objects (or dicts)
         """
         symbol = symbol.upper()
-        symbol_targets = self.get_symbol_targets(symbol)
+        market_type = market_type.lower().strip()
+        symbol_targets = self.get_symbol_targets(symbol, market_type=market_type)
         if not symbol_targets:
-            logger.debug("No targets for backfill symbol: %s", symbol)
+            logger.debug("No targets for backfill symbol: %s:%s", market_type, symbol)
             return
 
         for bar in bars:
-            bar_input = self._convert_fetched_bar(bar, symbol, interval)
+            bar_input = self._convert_fetched_bar(bar, symbol, interval, market_type=market_type)
             if bar_input is not None:
-                await self._dispatch(symbol, bar_input, symbol_targets)
+                await self._dispatch(market_type, symbol, bar_input, symbol_targets)
 
     # ── Public: Ingest from Custom Adapter ───────────────────
 
@@ -230,9 +238,10 @@ class EventRouter:
 
         bar_input.source = BarInputSource.ADAPTER
         symbol = bar_input.symbol.upper()
-        symbol_targets = self.get_symbol_targets(symbol)
+        market_type = bar_input.market_type
+        symbol_targets = self.get_symbol_targets(symbol, market_type=market_type)
         if symbol_targets:
-            await self._dispatch(symbol, bar_input, symbol_targets)
+            await self._dispatch(market_type, symbol, bar_input, symbol_targets)
 
     # ── Public: Snapshot ─────────────────────────────────────
 
@@ -240,7 +249,7 @@ class EventRouter:
         return {
             "layer": "L1_EventRouter",
             "bar_source_mode": self._cfg.bar_source_mode,
-            "targets": [f"{s}@{i}" for s, i in sorted(self._targets)],
+            "targets": [f"{mt}:{s}@{i}" for mt, s, i in sorted(self._targets)],
             "adapters": list(self._adapters.keys()),
         }
 
@@ -248,6 +257,7 @@ class EventRouter:
 
     async def _dispatch(
         self,
+        market_type: str,
         symbol: str,
         bar_input: BarInput,
         target_intervals: list[str],
@@ -287,10 +297,10 @@ class EventRouter:
                 continue
                 
             try:
-                await self._on_bar_input(symbol, interval, bar_input)
+                await self._on_bar_input(market_type, symbol, interval, bar_input)
             except Exception as exc:
                 logger.error(
-                    "Dispatch error (%s@%s): %s", symbol, interval,
+                    "Dispatch error (%s:%s@%s): %s", market_type, symbol, interval,
                     exc, exc_info=True,
                 )
 
@@ -351,6 +361,7 @@ class EventRouter:
                 volume=float(data.get("volume", 0)),
                 source=source,
                 is_closed=bool(data.get("is_closed", False)),
+                market_type=self._extract_market_type(event),
                 quote_volume=float(data.get("quote_volume", 0)),
                 trades=int(data.get("trades", 0)),
                 taker_buy_base=float(data.get("taker_buy_base", 0)),
@@ -391,6 +402,7 @@ class EventRouter:
                 volume=quantity,
                 source=source,
                 is_closed=True,  # individual trades are always "closed"
+                market_type=self._extract_market_type(event),
                 sequence=seq,
             )
         except (KeyError, ValueError, TypeError) as exc:
@@ -398,7 +410,7 @@ class EventRouter:
             return None
 
     def _convert_fetched_bar(
-        self, bar: Any, symbol: str, interval: str,
+        self, bar: Any, symbol: str, interval: str, market_type: str = "spot",
     ) -> BarInput | None:
         """Convert a FetchedBar (or dict) to BarInput."""
         try:
@@ -415,6 +427,7 @@ class EventRouter:
                     volume=float(bar.get("volume", 0)),
                     source=BarInputSource.BACKFILL,
                     is_closed=True,  # backfill bars are always closed
+                    market_type=str(bar.get("market_type", market_type)),
                     quote_volume=float(bar.get("quote_volume", 0)),
                     trades=int(bar.get("trades", 0)),
                     taker_buy_base=float(bar.get("taker_buy_base", 0)),
@@ -435,6 +448,7 @@ class EventRouter:
                     volume=float(getattr(bar, "volume", 0)),
                     source=BarInputSource.BACKFILL,
                     is_closed=True,
+                    market_type=str(getattr(bar, "market_type", market_type)),
                     quote_volume=float(getattr(bar, "quote_volume", 0)),
                     trades=int(getattr(bar, "trades", 0)),
                     taker_buy_base=float(getattr(bar, "taker_buy_base", 0)),
@@ -444,3 +458,13 @@ class EventRouter:
         except (KeyError, ValueError, TypeError, AttributeError) as exc:
             logger.warning("Failed to convert fetched bar: %s", exc)
             return None
+
+    @staticmethod
+    def _extract_market_type(event: Any) -> str:
+        market_type = getattr(event, "market_type", None)
+        if isinstance(market_type, str) and market_type.strip():
+            return market_type.strip().lower()
+        stream_key = getattr(event, "stream_key", "")
+        if isinstance(stream_key, str) and ":" in stream_key:
+            return stream_key.split(":", 1)[0].strip().lower() or "spot"
+        return "spot"

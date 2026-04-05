@@ -69,7 +69,7 @@ export async function fetchRegistrySpec(name) {
  * @param {string} [options.interval] - Interval context (default "1m")
  * @returns {Promise<{ok: boolean, error: string|null, lines: Array, result: Object|null}>}
  */
-export async function computeIndicator({ name, script, ohlcv, params, symbol, interval }) {
+export async function computeIndicator({ name, script, ohlcv, params, symbol, interval, marketType }) {
   const body = { ohlcv, params: params || {} };
 
   // Prefer engine name if available
@@ -84,6 +84,9 @@ export async function computeIndicator({ name, script, ohlcv, params, symbol, in
   }
   if (interval) {
     body.interval = interval;
+  }
+  if (marketType) {
+    body.market_type = marketType;
   }
 
   return request(`${API_BASE}/indicators/compute`, {

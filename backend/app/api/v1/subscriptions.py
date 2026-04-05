@@ -78,7 +78,11 @@ async def sync_watchlist(request: Request, body: SyncWatchlistRequest):
     from app.data_engine.services.subscription_manager import SubscriptionTier
 
     mgr = _get_sub_manager(request)
-    watchlist_set = {s.upper().strip() for s in body.symbols}
+    watchlist_set = {
+        mgr.normalize_symbol(s)
+        for s in body.symbols
+        if s.strip()
+    }
 
     # Auto-register new symbols as PRICE_ONLY
     results = []
@@ -96,19 +100,19 @@ async def sync_watchlist(request: Request, body: SyncWatchlistRequest):
     return {"synced": len(watchlist_set), "auto_registered": len(results)}
 
 
-@router.get("/{symbol}")
+@router.get("/{symbol:path}")
 async def get_subscription(request: Request, symbol: str):
-    """Get subscription info for a symbol."""
+    """Get subscription info for a symbol (supports composite keys like 'spot:BTCUSDT')."""
     mgr = _get_sub_manager(request)
     sub = mgr.get(symbol)
     if sub is None:
-        return {"symbol": symbol.upper().strip(), "tier": "none"}
+        return {"symbol": mgr.normalize_symbol(symbol), "tier": "none"}
     return sub.to_dict()
 
 
-@router.put("/{symbol}")
+@router.put("/{symbol:path}")
 async def set_subscription_tier(request: Request, symbol: str, body: SetTierRequest):
-    """Set the subscription tier for a symbol."""
+    """Set the subscription tier for a symbol (supports composite keys)."""
     from app.data_engine.services.subscription_manager import SubscriptionTier
 
     tier_str = body.tier.strip().lower()
@@ -118,16 +122,19 @@ async def set_subscription_tier(request: Request, symbol: str, body: SetTierRequ
         raise HTTPException(400, f"Invalid tier: '{tier_str}'. Must be 'full', 'price', or 'none'.")
 
     mgr = _get_sub_manager(request)
-    result = await mgr.set_tier(symbol, tier)
+    try:
+        result = await mgr.set_tier(symbol, tier)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return result
 
 
-@router.delete("/{symbol}")
+@router.delete("/{symbol:path}")
 async def remove_subscription(request: Request, symbol: str):
     """Remove a symbol subscription entirely."""
     mgr = _get_sub_manager(request)
-    mgr.remove(symbol)
-    return {"symbol": symbol.upper().strip(), "removed": True}
+    await mgr.remove(symbol)
+    return {"symbol": mgr.normalize_symbol(symbol), "removed": True}
 
 
 # ── WebSocket: real-time price stream ────────────────────────

@@ -47,7 +47,7 @@ from .models import (
 logger = logging.getLogger("backfill.GapDetector")
 
 # Type aliases
-ReferenceTimeProvider = Callable[[str, str], Awaitable[int | None]]
+ReferenceTimeProvider = Callable[[str, str, str], Awaitable[int | None]]
 GapFilter = Callable[[GapInfo], bool]
 GapCallback = Callable[[GapInfo], Awaitable[None]]
 
@@ -138,7 +138,7 @@ class GapDetector:
     # ── Public: Update ingestion reference ───────────────────
 
     def update_ingestion_reference(
-        self, symbol: str, interval: str, open_time_ms: int,
+        self, symbol: str, interval: str, open_time_ms: int, market_type: str = "spot",
     ) -> None:
         """Update the cached live-edge time from ingestion.
 
@@ -151,7 +151,7 @@ class GapDetector:
             interval:     K-line interval, e.g. "1m".
             open_time_ms: The open_time of the latest closed bar (ms).
         """
-        key = f"{symbol}@{interval}"
+        key = f"{market_type.strip().lower()}:{symbol}@{interval}"
         current = self._ingestion_reference.get(key)
         if current is None or open_time_ms > current:
             self._ingestion_reference[key] = open_time_ms
@@ -165,6 +165,7 @@ class GapDetector:
         intervals: list[str] | None = None,
         range_start_ms: int | None = None,
         range_end_ms: int | None = None,
+        market_type: str = "spot",
     ) -> list[GapInfo]:
         """Scan for gaps across the specified intervals.
 
@@ -197,7 +198,7 @@ class GapDetector:
         for interval in intervals:
             try:
                 gaps = await self._detect_interval(
-                    symbol, interval, range_start_ms, range_end_ms,
+                    symbol, interval, range_start_ms, range_end_ms, market_type=market_type,
                 )
                 all_gaps.extend(gaps)
             except Exception as exc:
@@ -222,6 +223,7 @@ class GapDetector:
         interval: str,
         range_start_ms: int,
         range_end_ms: int,
+        market_type: str = "spot",
     ) -> list[GapInfo]:
         """Detect gaps for a single symbol + interval."""
         interval_ms = parse_interval_ms(interval)
@@ -230,11 +232,11 @@ class GapDetector:
             return []
 
         # Determine reference (live edge)
-        reference_ms = await self._get_reference_time(symbol, interval, range_end_ms)
+        reference_ms = await self._get_reference_time(symbol, interval, range_end_ms, market_type=market_type)
 
         # Query storage boundaries
-        db_earliest = await self._storage.get_earliest_time(symbol, interval)
-        db_latest = await self._storage.get_latest_time(symbol, interval)
+        db_earliest = await self._storage.get_earliest_time(symbol, interval, market_type=market_type)
+        db_latest = await self._storage.get_latest_time(symbol, interval, market_type=market_type)
 
         gaps: list[GapInfo] = []
 
@@ -251,6 +253,7 @@ class GapDetector:
                     missing_bars=missing,
                     db_latest_ms=None,
                     reference_ms=reference_ms,
+                    market_type=market_type,
                 )
                 gaps.append(gap)
             return await self._apply_filter_and_notify(gaps)
@@ -268,6 +271,7 @@ class GapDetector:
                     missing_bars=missing,
                     db_latest_ms=db_latest,
                     reference_ms=reference_ms,
+                    market_type=market_type,
                 )
                 gaps.append(gap)
 
@@ -285,6 +289,7 @@ class GapDetector:
                     missing_bars=missing,
                     db_latest_ms=db_latest,
                     reference_ms=reference_ms,
+                    market_type=market_type,
                 )
                 gaps.append(gap)
 
@@ -295,6 +300,7 @@ class GapDetector:
                 max(range_start_ms, db_earliest),
                 min(range_end_ms, db_latest),
                 reference_ms,
+                market_type=market_type,
             )
             gaps.extend(interior_gaps)
 
@@ -310,6 +316,7 @@ class GapDetector:
         scan_start: int,
         scan_end: int,
         reference_ms: int,
+        market_type: str = "spot",
     ) -> list[GapInfo]:
         """Scan for holes inside the stored data range.
 
@@ -321,7 +328,7 @@ class GapDetector:
 
         try:
             existing_times = await self._storage.get_existing_open_times(
-                symbol, interval, scan_start, scan_end,
+                symbol, interval, scan_start, scan_end, market_type=market_type,
             )
         except Exception as exc:
             logger.warning(
@@ -330,7 +337,7 @@ class GapDetector:
             )
             # Fallback: fetch full rows and extract open_times
             rows = await self._storage.query_time_range(
-                symbol, interval, scan_start, scan_end,
+                symbol, interval, scan_start, scan_end, market_type=market_type,
             )
             existing_times = {int(r["open_time"]) for r in rows}
 
@@ -366,6 +373,7 @@ class GapDetector:
                         missing_bars=missing,
                         db_latest_ms=sorted_times[-1],
                         reference_ms=reference_ms,
+                        market_type=market_type,
                     )
                     gaps.append(gap)
                     hole_count += 1
@@ -376,7 +384,7 @@ class GapDetector:
     # ── Internal: Reference time resolution ──────────────────
 
     async def _get_reference_time(
-        self, symbol: str, interval: str, fallback_ms: int,
+        self, symbol: str, interval: str, fallback_ms: int, market_type: str = "spot",
     ) -> int:
         """Resolve the "live edge" time for gap comparison.
 
@@ -388,14 +396,14 @@ class GapDetector:
         # 1. Custom provider
         if self._reference_time_provider is not None:
             try:
-                ref = await self._reference_time_provider(symbol, interval)
+                ref = await self._reference_time_provider(symbol, interval, market_type)
                 if ref is not None:
                     return ref
             except Exception as exc:
                 logger.warning("Reference time provider failed: %s", exc)
 
         # 2. Ingestion reference cache
-        key = f"{symbol}@{interval}"
+        key = f"{market_type.strip().lower()}:{symbol}@{interval}"
         cached_ref = self._ingestion_reference.get(key)
         if cached_ref is not None:
             return cached_ref

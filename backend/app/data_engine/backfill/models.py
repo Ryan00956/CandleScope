@@ -96,12 +96,14 @@ class GapInfo:
     missing_bars: int
     db_latest_ms: int | None = None
     reference_ms: int | None = None
+    market_type: str = "spot"
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
             "interval": self.interval,
+            "market_type": self.market_type,
             "gap_type": self.gap_type.value,
             "start_ms": self.start_ms,
             "end_ms": self.end_ms,
@@ -192,16 +194,21 @@ class BackfillTask:
     priority: int = 0
     parent_gap: GapInfo | None = None
     estimated_bars: int = 0
+    market_type: str = "spot"
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def task_key(self) -> str:
-        return f"{self.symbol}@{self.interval}:{self.start_ms}-{self.end_ms}"
+        return (
+            f"{self.market_type}:{self.symbol}"
+            f"@{self.interval}:{self.start_ms}-{self.end_ms}"
+        )
 
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
             "interval": self.interval,
+            "market_type": self.market_type,
             "start_ms": self.start_ms,
             "end_ms": self.end_ms,
             "priority": self.priority,
@@ -264,6 +271,7 @@ class FetchedBar:
     low: float
     close: float
     volume: float
+    market_type: str = "spot"
     quote_volume: float = 0.0
     trades: int = 0
     taker_buy_base: float = 0.0
@@ -274,6 +282,7 @@ class FetchedBar:
         return {
             "symbol": self.symbol,
             "interval": self.interval,
+            "market_type": self.market_type,
             "open_time": self.open_time,
             "close_time": self.close_time,
             "open": self.open,
@@ -477,34 +486,42 @@ class StorageBackend(Protocol):
     are optional but recommended.
     """
 
-    async def get_latest_time(self, symbol: str, interval: str) -> int | None:
+    async def get_latest_time(self, symbol: str, interval: str, market_type: str = "spot") -> int | None:
         """Return the latest open_time (ms) stored, or None if empty."""
         ...
 
-    async def get_earliest_time(self, symbol: str, interval: str) -> int | None:
+    async def get_earliest_time(self, symbol: str, interval: str, market_type: str = "spot") -> int | None:
         """Return the earliest open_time (ms) stored, or None if empty."""
         ...
 
     async def query_time_range(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
+        market_type: str = "spot",
     ) -> list[dict]:
         """Return all bars within [start_ms, end_ms], ordered by open_time ASC."""
         ...
 
     async def upsert_bars(
-        self, symbol: str, interval: str, bars: list[dict], source: str = "backfill",
+        self,
+        symbol: str,
+        interval: str,
+        bars: list[dict],
+        source: str = "backfill",
+        market_type: str = "spot",
     ) -> int:
         """Insert or update bars.  Return number of rows affected."""
         ...
 
     async def count_bars(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
+        market_type: str = "spot",
     ) -> int:
         """Count bars within [start_ms, end_ms]."""
         ...
 
     async def get_existing_open_times(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
+        market_type: str = "spot",
     ) -> set[int]:
         """Return the set of open_time values that exist in [start_ms, end_ms].
 

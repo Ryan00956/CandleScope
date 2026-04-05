@@ -157,27 +157,28 @@ async def _init_data_manager() -> None:
         _BACKFILL_BASE_DELAY = 5  # seconds
 
         async def _load_backfilled_to_cache(
-            symbol: str, interval: str, start_ms: int, end_ms: int,
+            symbol: str, interval: str, start_ms: int, end_ms: int, market_type: str = "spot",
         ) -> None:
             """Re-query storage for backfilled range and load into cache."""
             from app.data_engine.data_manager.models import BarData
             if is_custom_interval(interval):
                 result = await asyncio.to_thread(
-                    dm.query, symbol, interval, start_ms, end_ms, None,
+                    dm.query, symbol, interval, start_ms, end_ms, None, market_type,
                 )
                 if result.bars:
-                    await dm.on_bars_backfilled(symbol, interval, result.bars)
+                    await dm.on_bars_backfilled(symbol, interval, result.bars, market_type=market_type)
             else:
                 rows = storage.query_bars(
                     symbol=symbol, interval=interval,
                     start_ms=start_ms, end_ms=end_ms,
                     order="ASC",
+                    market_type=market_type,
                 )
                 bars = [BarData.from_storage_row(r) for r in rows]
                 if bars:
-                    await dm.on_bars_backfilled(symbol, interval, bars)
+                    await dm.on_bars_backfilled(symbol, interval, bars, market_type=market_type)
 
-        def _backfill_trigger(symbol: str, interval: str, start_ms: int, end_ms: int) -> None:
+        def _backfill_trigger(symbol: str, interval: str, start_ms: int, end_ms: int, market_type: str = "spot") -> None:
             """Synchronous trigger that schedules an async backfill run with retry."""
             async def _run_backfill() -> None:
                 for attempt in range(_BACKFILL_MAX_RETRIES):
@@ -187,6 +188,7 @@ async def _init_data_manager() -> None:
                             intervals=[interval],
                             range_start_ms=start_ms,
                             range_end_ms=end_ms,
+                            market_type=market_type,
                         )
                         bars_written = (
                             report.reconcile_result.bars_written
@@ -213,7 +215,7 @@ async def _init_data_manager() -> None:
                             rr = report.reconcile_result
                             if hasattr(rr, 'bars_written') and rr.bars_written > 0:
                                 await _load_backfilled_to_cache(
-                                    symbol, interval, start_ms, end_ms,
+                                    symbol, interval, start_ms, end_ms, market_type,
                                 )
                         return  # done
 
@@ -254,9 +256,12 @@ async def _init_data_manager() -> None:
         try:
             from app.data_engine.services.subscription_manager import SubscriptionManager
             from app.data_engine.services.price_ticker import PriceTickerService
-            from app.core.config import KLINES_DB_PATH, BINANCE_WS_URLS
+            from app.core.config import KLINES_DB_PATH, BINANCE_WS_URLS, BINANCE_FUTURES_WS_URLS
 
-            price_ticker = PriceTickerService(ws_urls=BINANCE_WS_URLS)
+            price_ticker = PriceTickerService(
+                ws_urls=BINANCE_WS_URLS,
+                futures_ws_urls=BINANCE_FUTURES_WS_URLS,
+            )
             sub_manager = SubscriptionManager(db_path=str(KLINES_DB_PATH))
             sub_manager.set_data_manager(dm)
             sub_manager.set_price_ticker(price_ticker)
@@ -352,21 +357,28 @@ async def _init_data_manager() -> None:
                     return
                 symbol = event.key.symbol
                 interval = event.key.interval
+                market_type = event.key.market_type
 
                 if event.event_type == DataEventType.BAR_CLOSED:
-                    indicator_engine.on_bar_closed(symbol, interval, bar)
+                    indicator_engine.on_bar_closed(symbol, interval, bar, market_type=market_type)
                 elif event.event_type == DataEventType.BAR_UPDATED:
-                    indicator_engine.on_bar_updated(symbol, interval, bar)
+                    indicator_engine.on_bar_updated(symbol, interval, bar, market_type=market_type)
 
             async def _on_backfill_for_indicators(event):
                 """Bridge DataManager backfill events → IndicatorEngine recompute."""
                 symbol = event.key.symbol
                 interval = event.key.interval
+                market_type = event.key.market_type
                 # Query all cached bars and trigger recompute
                 try:
-                    result = dm.query_latest(symbol, interval, limit=5000)
+                    result = dm.query_latest(symbol, interval, limit=5000, market_type=market_type)
                     if result.bars:
-                        indicator_engine.on_bars_backfilled(symbol, interval, result.bars)
+                        indicator_engine.on_bars_backfilled(
+                            symbol,
+                            interval,
+                            result.bars,
+                            market_type=market_type,
+                        )
                 except Exception as exc:
                     logger.warning("Indicator recompute after backfill failed: %s", exc)
 
@@ -407,9 +419,11 @@ async def startup_event() -> None:
 
     # 2. Load exchange symbol info (non-blocking, best-effort)
     try:
-        from app.api.v1.symbols import load_exchange_info
+        from app.api.v1.symbols import load_exchange_info, load_futures_exchange_info
         await load_exchange_info()
-        print("[startup] Exchange info loaded ✓")
+        print("[startup] Spot exchange info loaded ✓")
+        await load_futures_exchange_info()
+        print("[startup] Futures exchange info loaded ✓")
     except Exception as exc:
         print(f"[startup] Exchange info load failed (non-critical): {exc}")
 

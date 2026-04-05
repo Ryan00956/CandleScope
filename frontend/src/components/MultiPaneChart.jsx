@@ -36,6 +36,7 @@ function paneConfigKey(subPaneIds) {
 const MultiPaneChart = forwardRef(function MultiPaneChart({
     data,
     symbol,
+    drawingKeyBase = "",
     interval,
     loading = false,
     onCrosshairMove,
@@ -162,12 +163,12 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         for (const prevId of prevSubPaneIdsRef.current) {
             if (!currentIds.has(prevId)) {
                 // Sub-pane was removed — clear its orphaned drawing storage
-                clearSavedDrawings(`${symbol}__${prevId}`);
+                clearSavedDrawings(`${drawingKeyBase || symbol}__${prevId}`);
             }
         }
 
         prevSubPaneIdsRef.current = currentIds;
-    }, [subPanes, symbol]);
+    }, [drawingKeyBase, subPanes, symbol]);
 
     useEffect(() => {
         const wrapper = wrapperRef.current;
@@ -448,6 +449,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                 <ChartPane
                     ref={mainPaneRefCallback}
                     symbol={symbol}
+                    drawingKeyBase={drawingKeyBase || symbol}
                     paneId="main"
                     paneType="main"
                     data={data}
@@ -509,6 +511,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                 }}
                                 paneId={subPane.id}
                                 symbol={symbol}
+                                drawingKeyBase={drawingKeyBase || symbol}
                                 paneType="sub"
                                 paneLabel={subPane.label}
                                 timeAlignment={timeAlignment}

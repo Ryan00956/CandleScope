@@ -118,6 +118,22 @@ class IngestionConfig:
             "wss://stream.binance.me:9443/ws",
         ],
     ))
+    # HTTP endpoints — Futures (USDT-M Perpetual)
+    http_base_urls_futures: list[str] = field(default_factory=lambda: _env_str_list(
+        "INGESTION_HTTP_BASE_URLS_FUTURES",
+        [
+            "https://fapi.binance.com",
+            "https://fapi.binance.me",
+        ],
+    ))
+    # WebSocket endpoints — Futures
+    ws_base_urls_futures: list[str] = field(default_factory=lambda: _env_str_list(
+        "INGESTION_WS_BASE_URLS_FUTURES",
+        [
+            "wss://fstream.binance.com/ws",
+            "wss://fstream.binance.me/ws",
+        ],
+    ))
     # HTTP request timeout (seconds)
     http_timeout: int = field(default_factory=lambda: _env_int("INGESTION_HTTP_TIMEOUT", 8))
     # HTTP proxy (None = no proxy)
@@ -204,3 +220,15 @@ class IngestionConfig:
         """Return a JSON-serializable snapshot of current configuration."""
         from dataclasses import asdict
         return asdict(self)
+
+    def get_http_urls(self, market_type: str = "spot") -> list[str]:
+        """Return HTTP base URLs for the given market type."""
+        if market_type == "futures":
+            return self.http_base_urls_futures
+        return self.http_base_urls
+
+    def get_ws_urls(self, market_type: str = "spot") -> list[str]:
+        """Return WebSocket base URLs for the given market type."""
+        if market_type == "futures":
+            return self.ws_base_urls_futures
+        return self.ws_base_urls

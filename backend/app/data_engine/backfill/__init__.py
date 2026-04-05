@@ -220,6 +220,7 @@ class BackfillEngine:
         range_start_ms: int | None = None,
         range_end_ms: int | None = None,
         metadata: dict[str, Any] | None = None,
+        market_type: str = "spot",
     ) -> RepairReport:
         """Execute a complete backfill run.
 
@@ -258,6 +259,7 @@ class BackfillEngine:
                 intervals=intervals,
                 range_start_ms=range_start_ms,
                 range_end_ms=range_end_ms,
+                market_type=market_type,
             )
 
             if not gaps:
@@ -295,6 +297,9 @@ class BackfillEngine:
                 return report
 
             # ── Phase 3: Fetch ──
+            # Set market_type on all tasks so the fetcher routes correctly
+            for task in plan.tasks:
+                task.market_type = market_type
             status = BackfillStatus.FETCHING
             fetch_results = await self.fetcher.fetch(plan.tasks)
 
@@ -365,6 +370,7 @@ class BackfillEngine:
         intervals: list[str] | None = None,
         range_start_ms: int | None = None,
         range_end_ms: int | None = None,
+        market_type: str = "spot",
     ) -> list[GapInfo]:
         """Run gap detection only, without planning or fetching.
 
@@ -375,6 +381,7 @@ class BackfillEngine:
             intervals=intervals,
             range_start_ms=range_start_ms,
             range_end_ms=range_end_ms,
+            market_type=market_type,
         )
 
     # ── Public: Plan-only (dry run) ──────────────────────────
@@ -385,6 +392,7 @@ class BackfillEngine:
         intervals: list[str] | None = None,
         range_start_ms: int | None = None,
         range_end_ms: int | None = None,
+        market_type: str = "spot",
     ) -> BackfillPlan:
         """Run gap detection + planning only, without fetching.
 
@@ -395,5 +403,6 @@ class BackfillEngine:
             intervals=intervals,
             range_start_ms=range_start_ms,
             range_end_ms=range_end_ms,
+            market_type=market_type,
         )
         return self.planner.plan(gaps)

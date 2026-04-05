@@ -64,6 +64,10 @@ def _validate_interval(interval: str) -> None:
         )
 
 
+def _validate_market_type(market_type: str) -> str:
+    return (market_type or DEFAULT_MARKET_TYPE).strip().lower()
+
+
 def _resolve_interval(interval: str) -> dict:
     """Return resolution info for the requested interval."""
     if not is_custom_interval(interval):
@@ -110,16 +114,18 @@ async def get_klines(
     Cache → Storage → Backfill automatically.
     """
     _validate_interval(interval)
+    market_type = _validate_market_type(market_type)
 
     dm = _get_data_manager(request)
     if dm is not None:
         try:
             # Ensure stream is active (auto-starts ingestion if needed)
-            await dm.ensure_stream(symbol, interval)
+            await dm.ensure_stream(symbol, interval, market_type=market_type)
 
             # Query through DataManager's unified interface
             result = await asyncio.to_thread(
                 dm.query_latest, symbol, interval, limit,
+                market_type=market_type,
             )
 
             data = _bars_to_dicts(result.bars)
@@ -153,13 +159,15 @@ async def get_latest_klines(
 ):
     """Get the very latest K-line bars (typically 1-2 for live updates)."""
     _validate_interval(interval)
+    market_type = _validate_market_type(market_type)
 
     dm = _get_data_manager(request)
     if dm is not None:
         try:
-            await dm.ensure_stream(symbol, interval)
+            await dm.ensure_stream(symbol, interval, market_type=market_type)
             result = await asyncio.to_thread(
                 dm.query_latest, symbol, interval, limit,
+                market_type=market_type,
             )
             data = _bars_to_dicts(result.bars)
             return {
@@ -191,6 +199,7 @@ async def get_klines_history(
 ):
     """Get historical K-line bars for a time range."""
     _validate_interval(interval)
+    market_type = _validate_market_type(market_type)
 
     dm = _get_data_manager(request)
     if dm is not None:
@@ -210,6 +219,7 @@ async def get_klines_history(
                 start_ms=start_ms,
                 end_ms=end_ms,
                 limit=needed_limit,
+                market_type=market_type,
             )
             data = _bars_to_dicts(result.bars)
             return {
@@ -245,6 +255,7 @@ async def get_klines_before(
 ):
     """Paginated historical data — load bars before a timestamp."""
     _validate_interval(interval)
+    market_type = _validate_market_type(market_type)
 
     dm = _get_data_manager(request)
     if dm is not None:
@@ -253,6 +264,7 @@ async def get_klines_before(
             result = await asyncio.to_thread(
                 dm.query_before,
                 symbol, interval, before_ms, bars,
+                market_type=market_type,
             )
             data = _bars_to_dicts(result.bars)
             return {
@@ -304,12 +316,14 @@ async def get_storage_meta(
 ):
     """Get storage metadata (bounds, count) for a series."""
     _validate_interval(interval)
+    market_type = _validate_market_type(market_type)
 
     dm = _get_data_manager(request)
     if dm is not None:
         try:
             bounds = await asyncio.to_thread(
                 dm.get_bounds, symbol, interval,
+                market_type=market_type,
             )
             return {
                 "exchange": exchange,

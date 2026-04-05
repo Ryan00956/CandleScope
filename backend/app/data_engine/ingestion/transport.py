@@ -36,14 +36,29 @@ logger = logging.getLogger("ingestion.L1_Transport")
 
 # ─── REST endpoint mapping per StreamType ─────────────────────
 
-_REST_PATH: dict[StreamType, str] = {
-    StreamType.KLINE: "/api/v3/klines",
-    StreamType.AGG_TRADE: "/api/v3/aggTrades",
-    StreamType.TRADE: "/api/v3/trades",
-    StreamType.TICKER: "/api/v3/ticker/24hr",
-    StreamType.MINI_TICKER: "/api/v3/ticker/24hr",
-    StreamType.DEPTH: "/api/v3/depth",
+_REST_PATH: dict[str, dict[StreamType, str]] = {
+    "spot": {
+        StreamType.KLINE: "/api/v3/klines",
+        StreamType.AGG_TRADE: "/api/v3/aggTrades",
+        StreamType.TRADE: "/api/v3/trades",
+        StreamType.TICKER: "/api/v3/ticker/24hr",
+        StreamType.MINI_TICKER: "/api/v3/ticker/24hr",
+        StreamType.DEPTH: "/api/v3/depth",
+    },
+    "futures": {
+        StreamType.KLINE: "/fapi/v1/klines",
+        StreamType.AGG_TRADE: "/fapi/v1/aggTrades",
+        StreamType.TRADE: "/fapi/v1/trades",
+        StreamType.TICKER: "/fapi/v1/ticker/24hr",
+        StreamType.MINI_TICKER: "/fapi/v1/ticker/24hr",
+        StreamType.DEPTH: "/fapi/v1/depth",
+    },
 }
+
+def _get_rest_path(stream_type: StreamType, market_type: str = "spot") -> str | None:
+    """Resolve REST path by market type and stream type."""
+    paths = _REST_PATH.get(market_type, _REST_PATH["spot"])
+    return paths.get(stream_type)
 
 
 class TransportLayer:
@@ -153,18 +168,20 @@ class TransportLayer:
         await self._ensure_http_session()
 
         desc = req.descriptor
-        rest_path = _REST_PATH.get(desc.stream_type)
+        market_type = getattr(desc, "market_type", "spot")
+        rest_path = _get_rest_path(desc.stream_type, market_type)
         if rest_path is None:
             raise TransportError(f"No REST endpoint for stream type: {desc.stream_type}")
 
         params = self._build_http_params(req)
 
+        http_urls = self._cfg.get_http_urls(market_type)
         last_exc: Exception | None = None
         tried = 0
-        total = len(self._cfg.http_base_urls)
+        total = len(http_urls)
 
         while tried < total:
-            base = self._current_http_base()
+            base = self._current_http_base(market_type)
             url = f"{base}{rest_path}"
             try:
                 self._metrics.inc("http_requests_sent")
@@ -222,12 +239,14 @@ class TransportLayer:
         Raises ``TransportError`` if ALL endpoints fail.
         """
         stream_name = descriptor.ws_stream_name
+        market_type = getattr(descriptor, "market_type", "spot")
+        ws_urls = self._cfg.get_ws_urls(market_type)
         last_exc: Exception | None = None
         tried = 0
-        total = len(self._cfg.ws_base_urls)
+        total = len(ws_urls)
 
         while tried < total:
-            base = self._current_ws_base()
+            base = self._current_ws_base(market_type)
             url = f"{base}/{stream_name}"
             try:
                 self._metrics.inc("ws_connect_attempts")
@@ -317,12 +336,12 @@ class TransportLayer:
 
     # ── Internal: endpoint rotation ──────────────────────────
 
-    def _current_http_base(self) -> str:
-        urls = self._cfg.http_base_urls
+    def _current_http_base(self, market_type: str = "spot") -> str:
+        urls = self._cfg.get_http_urls(market_type)
         return urls[self._http_idx % len(urls)] if urls else ""
 
-    def _current_ws_base(self) -> str:
-        urls = self._cfg.ws_base_urls
+    def _current_ws_base(self, market_type: str = "spot") -> str:
+        urls = self._cfg.get_ws_urls(market_type)
         return urls[self._ws_idx % len(urls)] if urls else ""
 
     def _rotate_http(self) -> None:

@@ -257,6 +257,7 @@ class BackfillPlanner:
                 priority=priority,
                 parent_gap=gap,
                 estimated_bars=estimated,
+                market_type=gap.market_type,
             )
             tasks.append(task)
             cursor = batch_end + interval_ms
@@ -324,6 +325,7 @@ class BackfillPlanner:
                     priority=priority,
                     parent_gap=gap,
                     estimated_bars=estimated,
+                    market_type=gap.market_type,
                     metadata={"custom_interval": gap.interval},
                 )
                 tasks.append(task)
@@ -650,6 +652,7 @@ class BackfillPlanner:
                         priority=min(last.priority, task.priority),
                         parent_gap=last.parent_gap,
                         estimated_bars=new_estimated,
+                        market_type=last.market_type,
                         metadata={**last.metadata, **task.metadata},
                     )
                 else:

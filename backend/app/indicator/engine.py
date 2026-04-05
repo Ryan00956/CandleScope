@@ -88,6 +88,7 @@ class IndicatorEngine:
         self,
         symbol: str,
         interval: str,
+        market_type: str,
         indicator_name: str,
         params: dict[str, Any],
         bars: list[BarData],
@@ -108,7 +109,13 @@ class IndicatorEngine:
         Returns:
             IndicatorResult on success, None if indicator not found.
         """
-        key = IndicatorKey(symbol, interval, indicator_name, params)
+        key = IndicatorKey(
+            symbol,
+            interval,
+            indicator_name,
+            params,
+            market_type=market_type,
+        )
 
         # Get or create instance
         instance = self._get_or_create(key)
@@ -138,6 +145,7 @@ class IndicatorEngine:
         self,
         symbol: str,
         interval: str,
+        market_type: str,
         indicator_name: str,
         params: dict[str, Any],
         bars: list[BarData] | None = None,
@@ -147,7 +155,13 @@ class IndicatorEngine:
         Returns:
             (key, result) -- result is None if bars not provided.
         """
-        key = IndicatorKey(symbol, interval, indicator_name, params)
+        key = IndicatorKey(
+            symbol,
+            interval,
+            indicator_name,
+            params,
+            market_type=market_type,
+        )
         instance = self._get_or_create(key)
         if instance is None:
             return key, None
@@ -221,12 +235,25 @@ class IndicatorEngine:
     #  Bar Event Handlers (called by DataManager bridge)
     # =============================================================
 
-    def on_bar_closed(self, symbol: str, interval: str, bar: BarData) -> None:
+    def on_bar_closed(
+        self,
+        symbol: str,
+        interval: str,
+        bar: BarData,
+        market_type: str = "spot",
+    ) -> None:
         """Handle a confirmed bar close event.
 
         Updates all indicator instances subscribed to this (symbol, interval).
         """
-        topic = f"{symbol.upper()}@{interval}"
+        key_topic = IndicatorKey(
+            symbol,
+            interval,
+            "__topic__",
+            {},
+            market_type=market_type,
+        ).series_topic
+        topic = key_topic
         keys = self._stream_keys.get(topic, set())
 
         for key in keys:
@@ -248,12 +275,25 @@ class IndicatorEngine:
                     detail={"error": str(exc)}, bar_timestamp=bar.time,
                 )
 
-    def on_bar_updated(self, symbol: str, interval: str, bar: BarData) -> None:
+    def on_bar_updated(
+        self,
+        symbol: str,
+        interval: str,
+        bar: BarData,
+        market_type: str = "spot",
+    ) -> None:
         """Handle a partial bar update (tick, forming bar).
 
         Computes preview values without advancing indicator state.
         """
-        topic = f"{symbol.upper()}@{interval}"
+        key_topic = IndicatorKey(
+            symbol,
+            interval,
+            "__topic__",
+            {},
+            market_type=market_type,
+        ).series_topic
+        topic = key_topic
         keys = self._stream_keys.get(topic, set())
 
         for key in keys:
@@ -271,12 +311,25 @@ class IndicatorEngine:
             except Exception as exc:
                 logger.error("update_partial failed for %s: %s", key.uid, exc, exc_info=True)
 
-    def on_bars_backfilled(self, symbol: str, interval: str, bars: list[BarData]) -> None:
+    def on_bars_backfilled(
+        self,
+        symbol: str,
+        interval: str,
+        bars: list[BarData],
+        market_type: str = "spot",
+    ) -> None:
         """Handle historical bars being inserted (backfill/correction).
 
         Triggers a full recomputation for affected instances.
         """
-        topic = f"{symbol.upper()}@{interval}"
+        key_topic = IndicatorKey(
+            symbol,
+            interval,
+            "__topic__",
+            {},
+            market_type=market_type,
+        ).series_topic
+        topic = key_topic
         keys = self._stream_keys.get(topic, set())
 
         for key in keys:

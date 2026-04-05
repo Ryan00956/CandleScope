@@ -225,6 +225,7 @@ class HistoricalFetcher:
             symbol=task.symbol,
             stream_type=StreamType.KLINE,
             interval=task.interval,
+            market_type=task.market_type,
         )
 
         # Create a temporary NormalizeLayer for parsing
@@ -364,6 +365,7 @@ class HistoricalFetcher:
                 low=float(data["low"]),
                 close=float(data["close"]),
                 volume=float(data["volume"]),
+                market_type=task.market_type,
                 quote_volume=float(data.get("quote_volume", 0)),
                 trades=int(data.get("trades", 0)),
                 taker_buy_base=float(data.get("taker_buy_base", 0)),

@@ -100,6 +100,7 @@ class BarInput:
     volume: float
     source: BarInputSource         # where this came from
     is_closed: bool                # whether the source bar is closed
+    market_type: str = "spot"
     quote_volume: float = 0.0
     trades: int = 0
     taker_buy_base: float = 0.0
@@ -107,14 +108,19 @@ class BarInput:
     sequence: int | None = None    # for ordering / dedup
     extra: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.symbol = self.symbol.upper().strip()
+        self.market_type = self.market_type.strip().lower()
+
     @property
     def input_key(self) -> str:
         """Unique key for dedup: symbol@interval:open_time."""
-        return f"{self.symbol}@{self.source_interval}:{self.open_time_ms}"
+        return f"{self.market_type}:{self.symbol}@{self.source_interval}:{self.open_time_ms}"
 
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
+            "market_type": self.market_type,
             "source_interval": self.source_interval,
             "open_time_ms": self.open_time_ms,
             "close_time_ms": self.close_time_ms,
@@ -150,6 +156,7 @@ class BarState:
     low: float
     close: float
     volume: float
+    market_type: str = "spot"
     quote_volume: float = 0.0
     trades: int = 0
     taker_buy_base: float = 0.0
@@ -163,9 +170,14 @@ class BarState:
     created_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     updated_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
 
+    def __post_init__(self) -> None:
+        self.symbol = self.symbol.upper().strip()
+        self.market_type = self.market_type.strip().lower()
+
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
+            "market_type": self.market_type,
             "interval": self.interval,
             "bucket_start_ms": self.bucket_start_ms,
             "bucket_end_ms": self.bucket_end_ms,
@@ -247,7 +259,10 @@ class BarEvent:
     @property
     def bar_key(self) -> str:
         """Unique key for this bar: symbol@interval:bucket_start."""
-        return f"{self.bar.symbol}@{self.bar.interval}:{self.bar.bucket_start_ms}"
+        return (
+            f"{self.bar.market_type}:{self.bar.symbol}"
+            f"@{self.bar.interval}:{self.bar.bucket_start_ms}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════

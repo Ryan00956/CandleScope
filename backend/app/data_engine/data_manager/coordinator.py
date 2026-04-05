@@ -79,13 +79,15 @@ class IngestionFactory(Protocol):
         symbol: str,
         interval: str,
         on_bar: Callable[[dict], Awaitable[None]],
+        market_type: str = "spot",
     ) -> Any:
         """Start an ingestion stream.
 
         Args:
-            symbol:   Trading pair.
-            interval: Base interval (e.g. "1m").
-            on_bar:   Callback for each incoming bar dict.
+            symbol:      Trading pair.
+            interval:    Base interval (e.g. "1m").
+            on_bar:      Callback for each incoming bar dict.
+            market_type: "spot" or "futures".
 
         Returns:
             A handle with a ``stop()`` coroutine.
@@ -193,8 +195,8 @@ class StreamCoordinator:
 
     # ── Public: Stream Lifecycle ─────────────────────────────
 
-    async def ensure_stream(self, symbol: str, interval: str) -> StreamInfo:
-        """Ensure a data stream is active for (symbol, interval).
+    async def ensure_stream(self, symbol: str, interval: str, market_type: str = "spot") -> StreamInfo:
+        """Ensure a data stream is active for (market_type, symbol, interval).
 
         If the stream is already running, returns its info immediately.
         If not, and ``auto_start_ingestion`` is True, starts a new
@@ -208,13 +210,15 @@ class StreamCoordinator:
         knows how to fan out 1m data to custom-interval targets.
 
         Args:
-            symbol:   Trading pair, e.g. "BTCUSDT".
-            interval: K-line interval, e.g. "1m", "5m", "1h", "7m".
+            symbol:      Trading pair, e.g. "BTCUSDT".
+            interval:    K-line interval, e.g. "1m", "5m", "1h", "7m".
+            market_type: "spot" or "futures".
 
         Returns:
             ``StreamInfo`` with the current stream status.
         """
-        key = SeriesKey(symbol, interval)
+        market_type = self._normalize_market_type(market_type)
+        key = SeriesKey(symbol, interval, market_type=market_type)
 
         # Already running?
         if key in self._streams:
@@ -240,7 +244,7 @@ class StreamCoordinator:
 
         if not is_standard_interval(interval):
             base_interval = self._cfg.base_interval  # typically "1m"
-            base_key = SeriesKey(symbol, base_interval)
+            base_key = SeriesKey(symbol, base_interval, market_type=market_type)
 
             # Ensure the base-interval ingestion stream is running
             if base_key not in self._streams:
@@ -279,9 +283,10 @@ class StreamCoordinator:
 
         return await self._start_stream(key)
 
-    async def stop_stream(self, symbol: str, interval: str) -> None:
+    async def stop_stream(self, symbol: str, interval: str, market_type: str = "spot") -> None:
         """Stop a running data stream."""
-        key = SeriesKey(symbol, interval)
+        market_type = self._normalize_market_type(market_type)
+        key = SeriesKey(symbol, interval, market_type=market_type)
         entry = self._streams.pop(key, None)
         if entry is None:
             return
@@ -317,7 +322,11 @@ class StreamCoordinator:
         """Stop all running streams."""
         keys = list(self._streams.keys())
         for key in keys:
-            await self.stop_stream(key.symbol, key.interval)
+            await self.stop_stream(
+                key.symbol,
+                key.interval,
+                market_type=key.market_type,
+            )
 
     # ── Public: Prewarm ──────────────────────────────────────
 
@@ -337,7 +346,7 @@ class StreamCoordinator:
 
         for symbol in self._cfg.prewarm_symbols:
             for interval, days in self._cfg.prewarm_intervals.items():
-                key = SeriesKey(symbol, interval)
+                key = SeriesKey(symbol, interval, market_type="spot")
                 try:
                     bars_loaded = await asyncio.to_thread(
                         self._prewarm_series, key, days,
@@ -397,16 +406,21 @@ class StreamCoordinator:
 
             if entry.idle_ms > timeout_ms:
                 logger.info("Reaping idle stream: %s (idle %ds)", key, entry.idle_ms // 1000)
-                await self.stop_stream(key.symbol, key.interval)
+                await self.stop_stream(
+                    key.symbol,
+                    key.interval,
+                    market_type=key.market_type,
+                )
                 reaped.append(str(key))
 
         return reaped
 
     # ── Public: Introspection ────────────────────────────────
 
-    def get_stream_info(self, symbol: str, interval: str) -> StreamInfo | None:
+    def get_stream_info(self, symbol: str, interval: str, market_type: str = "spot") -> StreamInfo | None:
         """Get info about a specific stream."""
-        key = SeriesKey(symbol, interval)
+        market_type = self._normalize_market_type(market_type)
+        key = SeriesKey(symbol, interval, market_type=market_type)
         entry = self._streams.get(key)
         return entry.info if entry else None
 
@@ -414,11 +428,16 @@ class StreamCoordinator:
         """Get info about all active streams."""
         return [e.info for e in self._streams.values()]
 
-    def is_active(self, symbol: str, interval: str) -> bool:
+    def is_active(self, symbol: str, interval: str, market_type: str = "spot") -> bool:
         """Check if a stream is currently active."""
-        key = SeriesKey(symbol, interval)
+        market_type = self._normalize_market_type(market_type)
+        key = SeriesKey(symbol, interval, market_type=market_type)
         entry = self._streams.get(key)
         return entry is not None and entry.info.status == StreamStatus.ACTIVE
+
+    @staticmethod
+    def _normalize_market_type(market_type: str) -> str:
+        return (market_type or "spot").strip().lower()
 
     # ── Public: Bar Ingestion (manual push — bypasses aggregator) ─
 
@@ -428,6 +447,7 @@ class StreamCoordinator:
         interval: str,
         bar: BarData,
         event_type: DataEventType = DataEventType.BAR_UPDATED,
+        market_type: str = "spot",
     ) -> None:
         """Manually push a bar event into the coordinator.
 
@@ -444,7 +464,7 @@ class StreamCoordinator:
             bar:        The bar data.
             event_type: BAR_CREATED, BAR_UPDATED, or BAR_CLOSED.
         """
-        key = SeriesKey(symbol, interval)
+        key = SeriesKey(symbol, interval, market_type=market_type)
 
         # Update cache
         if self._cache is not None:
@@ -521,7 +541,7 @@ class StreamCoordinator:
                         # Build a MarketEvent-like object and feed it to
                         # the BarAggregator's L1 Router.
                         market_event = _BarDictMarketEvent(
-                            bar_dict, key.symbol, key.interval,
+                            bar_dict, key.symbol, key.interval, key.market_type,
                         )
                         await self._bar_aggregator.on_market_event(market_event)
                     else:
@@ -539,13 +559,14 @@ class StreamCoordinator:
                         else:
                             event_type = DataEventType.BAR_UPDATED
                         await self.on_bar_event(
-                            key.symbol, key.interval, bar, event_type,
+                            key.symbol, key.interval, bar, event_type, market_type=key.market_type,
                         )
 
                 handle = await self._ingestion_factory.start(
                     symbol=key.symbol,
                     interval=key.interval,
                     on_bar=on_raw_bar,
+                    market_type=key.market_type,
                 )
                 entry.handle = handle
                 entry.info.status = StreamStatus.ACTIVE
@@ -591,6 +612,7 @@ class StreamCoordinator:
             start_ms=start_ms,
             end_ms=now_ms,
             order="ASC",
+            market_type=key.market_type,
         )
         if not rows:
             return 0
@@ -631,12 +653,15 @@ class _BarDictMarketEvent:
       - source      (with .value)
       - data        (dict with kline fields)
     """
-    __slots__ = ("event_type", "symbol", "source", "data")
+    __slots__ = ("event_type", "symbol", "source", "data", "market_type", "stream_key")
 
-    def __init__(self, bar_dict: dict, symbol: str, interval: str) -> None:
+    def __init__(self, bar_dict: dict, symbol: str, interval: str, market_type: str = "spot") -> None:
         self.event_type = _EnumLike("kline")
         self.symbol = symbol.upper()
         self.source = _EnumLike("websocket")
+        self.market_type = market_type
+        base_stream = f"{self.symbol}@kline_{interval}"
+        self.stream_key = base_stream if market_type == "spot" else f"{market_type}:{base_stream}"
         self.data = {
             "interval": interval,
             "open_time": bar_dict.get("open_time", int(bar_dict.get("time", 0)) * 1000),

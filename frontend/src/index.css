@@ -443,6 +443,23 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.wl-market-badge {
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  padding: 1px 4px;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+.wl-market-badge.futures {
+  color: var(--accent-purple);
+  background: rgba(139, 92, 246, 0.15);
 }
 
 /* ── Price columns ── */
@@ -820,6 +837,20 @@ body {
   border-radius: 3px;
   padding: 1px 4px;
   line-height: 1.2;
+}
+
+.symbol-market-badge {
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.03em;
+}
+.symbol-market-badge.futures {
+  color: var(--accent-purple);
+  background: rgba(139, 92, 246, 0.15);
+  border: 1px solid rgba(139, 92, 246, 0.3);
 }
 
 /* ═══════════════════════════════════════════════════════════════

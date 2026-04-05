@@ -63,7 +63,18 @@ function buildDataSignature(data) {
  * @param {string}                 [opts.candleUpColor]   — K-line up color (synced to VOL indicator)
  * @param {string}                 [opts.candleDownColor] — K-line down color (synced to VOL indicator)
  */
-export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seriesReady, candleUpColor, candleDownColor }) {
+export function useIndicators({
+  chartRef,
+  seriesRef,
+  chartData,
+  datasetKey,
+  seriesReady,
+  candleUpColor,
+  candleDownColor,
+  symbol,
+  interval,
+  marketType,
+}) {
   // Active indicators: [{id, name, script, params, visible, lines: [...computedLines]}]
   const [activeIndicators, setActiveIndicators] = useState(loadActiveIndicators);
   const [computing, setComputing] = useState(false);
@@ -288,6 +299,9 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
               script: ind.script,
               ohlcv,
               params: computeParams,
+              symbol,
+              interval,
+              marketType,
             });
             return { id: ind.id, result, visible: ind.visible };
           } catch (err) {
@@ -390,7 +404,7 @@ export function useIndicators({ chartRef, seriesRef, chartData, datasetKey, seri
         queueMicrotask(() => computeAll(forceNext));
       }
     }
-  }, []);
+  }, [interval, marketType, symbol]);
 
   // ── User-triggered recompute (shows "computing" UI) ───────
   const recompute = useCallback((force = true) => {

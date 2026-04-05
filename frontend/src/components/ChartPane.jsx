@@ -86,6 +86,7 @@ const PRICE_SCALE_MODES = [
 
 const ChartPane = forwardRef(function ChartPane({
     symbol,
+    drawingKeyBase,
     paneId,
     paneType = "main",       // "main" | "sub"
     paneLabel = "",           // e.g. "RSI(14)" — shown as watermark or label
@@ -1109,7 +1110,9 @@ const ChartPane = forwardRef(function ChartPane({
         fibLevels,
         fibInverted,
         positionSize,
-        symbol: paneType === "main" ? symbol : `${symbol}__${paneId}`,
+        symbol: paneType === "main"
+            ? (drawingKeyBase || symbol)
+            : `${drawingKeyBase || symbol}__${paneId}`,
         seriesReady,
     });
 

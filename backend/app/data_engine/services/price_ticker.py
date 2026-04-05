@@ -30,6 +30,7 @@ import websockets
 
 from app.core.config import (
     BINANCE_BASE_URL, BINANCE_BASE_URLS,
+    BINANCE_FUTURES_BASE_URLS,
     get_effective_proxy,
 )
 
@@ -74,21 +75,34 @@ class PriceTick:
         }
 
 
+def _composite_key(market_type: str, symbol: str) -> str:
+    """Build a composite key: 'spot:BTCUSDT' or 'futures:ETHUSDT'."""
+    return f"{market_type}:{symbol}"
+
+
+def _parse_composite_key(key: str) -> tuple[str, str]:
+    """Parse 'spot:BTCUSDT' → ('spot', 'BTCUSDT')."""
+    idx = key.find(":")
+    if idx == -1:
+        return "spot", key
+    return key[:idx].lower(), key[idx + 1:]
+
+
 class PriceTickerService:
-    """Single-connection price ticker using Binance !miniTicker@arr.
+    """Dual-stream price ticker using Binance !miniTicker@arr.
+
+    Connects to both spot and futures WebSocket streams so that
+    spot and futures prices are tracked independently.  Prices are
+    stored with composite keys ('spot:BTCUSDT', 'futures:BTCUSDT').
 
     Usage::
 
-        pts = PriceTickerService(ws_urls=[...])
-        pts.set_watched_symbols(["BTCUSDT", "ETHUSDT"])
+        pts = PriceTickerService(ws_urls=[...], futures_ws_urls=[...])
+        pts.set_watched_symbols(["spot:BTCUSDT", "futures:ETHUSDT"])
         await pts.start()
 
-        # Get current price
-        tick = pts.get_price("BTCUSDT")
-
-        # Subscribe for push updates
+        tick = pts.get_price("spot:BTCUSDT")
         pts.on_price_update(my_callback)
-
         await pts.stop()
     """
 
@@ -96,32 +110,57 @@ class PriceTickerService:
         self,
         ws_urls: list[str] | None = None,
         rest_base_urls: list[str] | None = None,
+        futures_ws_urls: list[str] | None = None,
+        futures_rest_base_urls: list[str] | None = None,
     ) -> None:
         self._ws_urls = ws_urls or ["wss://stream.binance.com:9443/ws"]
         self._rest_base_urls = rest_base_urls or list(BINANCE_BASE_URLS)
-        self._watched: set[str] = set()
-        self._prices: dict[str, PriceTick] = {}
-        self._daily_opens: dict[str, float] = {}  # symbol -> daily open price
-        self._daily_opens_fetched_at: float = 0.0  # last fetch timestamp
+        self._futures_ws_urls = futures_ws_urls or ["wss://fstream.binance.com/ws"]
+        self._futures_rest_base_urls = futures_rest_base_urls or list(BINANCE_FUTURES_BASE_URLS)
+        self._watched: set[str] = set()  # composite keys: "spot:BTCUSDT"
+        self._prices: dict[str, PriceTick] = {}  # composite key → PriceTick
+        self._daily_opens: dict[str, float] = {}  # composite key → daily open
+        self._daily_opens_fetched_at: float = 0.0
         self._callbacks: list[Callable[[list[PriceTick]], Awaitable[None]]] = []
 
         self._task: asyncio.Task | None = None
+        self._futures_task: asyncio.Task | None = None
         self._daily_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._last_working_url: str | None = None
         self._last_working_rest_url: str | None = None
+        self._last_working_futures_url: str | None = None
+        self._last_working_futures_rest_url: str | None = None
 
     # ── Configuration ────────────────────────────────────────
 
     def set_watched_symbols(self, symbols: list[str]) -> None:
-        """Update the set of symbols to track prices for."""
-        self._watched = {s.upper().strip() for s in symbols}
+        """Update the set of symbols to track prices for.
+
+        Accepts composite keys like 'spot:BTCUSDT' or 'futures:ETHUSDT'.
+        Plain symbols without prefix are treated as spot.
+        """
+        normalised: set[str] = set()
+        for s in symbols:
+            s = s.strip()
+            if ":" not in s:
+                s = f"spot:{s.upper()}"
+            else:
+                mt, sym = _parse_composite_key(s)
+                s = _composite_key(mt, sym.upper())
+            normalised.add(s)
+        self._watched = normalised
 
     def add_symbol(self, symbol: str) -> None:
-        self._watched.add(symbol.upper().strip())
+        s = symbol.strip()
+        if ":" not in s:
+            s = f"spot:{s.upper()}"
+        self._watched.add(s)
 
     def remove_symbol(self, symbol: str) -> None:
-        s = symbol.upper().strip()
+        s = symbol.strip()
+        if ":" not in s:
+            s = f"spot:{s.upper()}"
         self._watched.discard(s)
         self._prices.pop(s, None)
         self._daily_opens.pop(s, None)
@@ -135,7 +174,10 @@ class PriceTickerService:
     # ── Queries ──────────────────────────────────────────────
 
     def get_price(self, symbol: str) -> PriceTick | None:
-        return self._prices.get(symbol.upper().strip())
+        key = symbol.strip()
+        if ":" not in key:
+            key = f"spot:{key.upper()}"
+        return self._prices.get(key)
 
     def get_all_prices(self) -> dict[str, PriceTick]:
         """Return prices for all watched symbols."""
@@ -151,18 +193,19 @@ class PriceTickerService:
     # ── Lifecycle ────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start the background WS connection and daily open fetcher."""
+        """Start background WS connections (spot + futures) and daily open fetcher."""
         if self._task and not self._task.done():
             return
         self._stop_event.clear()
-        self._task = asyncio.create_task(self._run(), name="price_ticker")
+        self._task = asyncio.create_task(self._run_stream("spot"), name="price_ticker_spot")
+        self._futures_task = asyncio.create_task(self._run_stream("futures"), name="price_ticker_futures")
         self._daily_task = asyncio.create_task(self._daily_open_loop(), name="daily_open_fetcher")
-        logger.info("PriceTickerService started")
+        logger.info("PriceTickerService started (spot + futures)")
 
     async def stop(self) -> None:
-        """Stop the background WS connection."""
+        """Stop all background WS connections."""
         self._stop_event.set()
-        for task in [self._task, self._daily_task]:
+        for task in [self._task, self._futures_task, self._daily_task]:
             if task:
                 task.cancel()
                 try:
@@ -170,6 +213,7 @@ class PriceTickerService:
                 except (asyncio.CancelledError, Exception):
                     pass
         self._task = None
+        self._futures_task = None
         self._daily_task = None
         logger.info("PriceTickerService stopped")
 
@@ -192,68 +236,110 @@ class PriceTickerService:
 
     async def _fetch_daily_opens(self) -> None:
         """Fetch the current 1D kline open price for all watched symbols."""
-        symbols = list(self._watched)
-        if not symbols:
+        composite_keys = list(self._watched)
+        if not composite_keys:
             return
 
-        # Build candidate REST URLs (last working first)
-        urls = []
-        if self._last_working_rest_url:
-            urls.append(self._last_working_rest_url)
-        for u in self._rest_base_urls:
-            if u not in urls:
-                urls.append(u)
+        # Split by market type
+        spot_syms = []
+        futures_syms = []
+        for ck in composite_keys:
+            mt, sym = _parse_composite_key(ck)
+            if mt == "futures":
+                futures_syms.append((ck, sym))
+            else:
+                spot_syms.append((ck, sym))
 
         proxy = get_effective_proxy()
 
-        # Fetch in batches to avoid rate limits
         batch_size = 10
         connector = aiohttp.TCPConnector(limit=batch_size, ssl=False)
         timeout = aiohttp.ClientTimeout(total=15)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            for i in range(0, len(symbols), batch_size):
-                batch = symbols[i:i + batch_size]
-                tasks = [
-                    self._fetch_single_daily_open(session, sym, urls, proxy)
-                    for sym in batch
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                for sym, result in zip(batch, results):
-                    if isinstance(result, (float, int)) and result > 0:
-                        self._daily_opens[sym] = result
-                        # Update existing tick if available
-                        if sym in self._prices:
-                            self._prices[sym].daily_open = result
-                    elif isinstance(result, Exception):
-                        logger.debug("Failed to fetch daily open for %s: %s", sym, result)
-
-                # Small delay between batches
-                if i + batch_size < len(symbols):
-                    await asyncio.sleep(0.5)
+            # Fetch spot daily opens
+            if spot_syms:
+                spot_urls = self._build_rest_urls("spot")
+                await self._fetch_daily_opens_batch(
+                    session, spot_syms, spot_urls, "/api/v3/klines", proxy, "spot",
+                )
+            # Fetch futures daily opens
+            if futures_syms:
+                futures_urls = self._build_rest_urls("futures")
+                await self._fetch_daily_opens_batch(
+                    session, futures_syms, futures_urls, "/fapi/v1/klines", proxy, "futures",
+                )
 
         self._daily_opens_fetched_at = time.time()
         logger.debug("Daily opens fetched for %d symbols", len(self._daily_opens))
+
+    def _build_rest_urls(self, market_type: str) -> list[str]:
+        if market_type == "futures":
+            urls = []
+            if self._last_working_futures_rest_url:
+                urls.append(self._last_working_futures_rest_url)
+            for u in self._futures_rest_base_urls:
+                if u not in urls:
+                    urls.append(u)
+            return urls
+        else:
+            urls = []
+            if self._last_working_rest_url:
+                urls.append(self._last_working_rest_url)
+            for u in self._rest_base_urls:
+                if u not in urls:
+                    urls.append(u)
+            return urls
+
+    async def _fetch_daily_opens_batch(
+        self,
+        session: aiohttp.ClientSession,
+        items: list[tuple[str, str]],  # (composite_key, raw_symbol)
+        base_urls: list[str],
+        kline_path: str,
+        proxy: str | None,
+        market_type: str,
+    ) -> None:
+        batch_size = 10
+        for i in range(0, len(items), batch_size):
+            batch = items[i:i + batch_size]
+            tasks = [
+                self._fetch_single_daily_open(session, sym, base_urls, kline_path, proxy)
+                for _, sym in batch
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for (ck, sym), result in zip(batch, results):
+                if isinstance(result, (float, int)) and result > 0:
+                    self._daily_opens[ck] = result
+                    if ck in self._prices:
+                        self._prices[ck].daily_open = result
+                    # Update last working URL cache
+                    if market_type == "futures":
+                        pass  # updated inside _fetch_single_daily_open
+                elif isinstance(result, Exception):
+                    logger.debug("Failed to fetch daily open for %s: %s", ck, result)
+
+            if i + batch_size < len(items):
+                await asyncio.sleep(0.5)
 
     async def _fetch_single_daily_open(
         self,
         session: aiohttp.ClientSession,
         symbol: str,
         base_urls: list[str],
+        kline_path: str,
         proxy: str | None,
     ) -> float:
         """Fetch the 1D kline open price for a single symbol."""
         for base_url in base_urls:
-            url = f"{base_url}/api/v3/klines"
+            url = f"{base_url}{kline_path}"
             params = {"symbol": symbol, "interval": "1d", "limit": 1}
             try:
                 async with session.get(url, params=params, proxy=proxy) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data and len(data) > 0:
-                            self._last_working_rest_url = base_url
-                            # data[0][1] = open price of the current 1D candle
                             return float(data[0][1])
             except Exception:
                 continue
@@ -261,13 +347,13 @@ class PriceTickerService:
 
     # ── Internal: WS loop ────────────────────────────────────
 
-    async def _run(self) -> None:
-        """Main reconnect loop for the !miniTicker@arr stream."""
+    async def _run_stream(self, market_type: str) -> None:
+        """Reconnect loop for spot or futures !miniTicker@arr stream."""
         reconnect_delay = 2
         max_delay = 60
 
         while not self._stop_event.is_set():
-            for ws_base in self._candidate_urls():
+            for ws_base in self._candidate_ws_urls(market_type):
                 if self._stop_event.is_set():
                     return
                 url = f"{ws_base.rstrip('/')}/!miniTicker@arr"
@@ -279,34 +365,45 @@ class PriceTickerService:
                         ping_interval=20,
                         ping_timeout=20,
                     ) as ws:
-                        self._last_working_url = ws_base
+                        if market_type == "futures":
+                            self._last_working_futures_url = ws_base
+                        else:
+                            self._last_working_url = ws_base
                         reconnect_delay = 2
-                        logger.info("PriceTickerService connected: %s", url)
+                        logger.info("PriceTickerService [%s] connected: %s", market_type, url)
 
                         async for message in ws:
                             if self._stop_event.is_set():
                                 return
-                            await self._handle_message(message)
+                            await self._handle_message(message, market_type)
 
                 except (websockets.exceptions.ConnectionClosed, OSError, Exception) as exc:
-                    logger.warning("PriceTickerService WS error (%s): %s", ws_base, exc)
-                    continue  # try next URL
+                    logger.warning("PriceTickerService [%s] WS error (%s): %s", market_type, ws_base, exc)
+                    continue
 
-            # All URLs failed, wait before retrying
             if not self._stop_event.is_set():
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, max_delay)
 
-    def _candidate_urls(self) -> list[str]:
-        urls = []
-        if self._last_working_url:
-            urls.append(self._last_working_url)
-        for u in self._ws_urls:
-            if u not in urls:
-                urls.append(u)
-        return urls
+    def _candidate_ws_urls(self, market_type: str) -> list[str]:
+        if market_type == "futures":
+            urls = []
+            if self._last_working_futures_url:
+                urls.append(self._last_working_futures_url)
+            for u in self._futures_ws_urls:
+                if u not in urls:
+                    urls.append(u)
+            return urls
+        else:
+            urls = []
+            if self._last_working_url:
+                urls.append(self._last_working_url)
+            for u in self._ws_urls:
+                if u not in urls:
+                    urls.append(u)
+            return urls
 
-    async def _handle_message(self, raw: str) -> None:
+    async def _handle_message(self, raw: str, market_type: str) -> None:
         """Parse a !miniTicker@arr batch and update prices."""
         try:
             data = json.loads(raw)
@@ -320,24 +417,26 @@ class PriceTickerService:
         updated: list[PriceTick] = []
 
         for item in data:
-            sym = item.get("s", "")
-            if not sym or sym not in self._watched:
+            raw_sym = item.get("s", "")
+            if not raw_sym:
+                continue
+
+            ck = _composite_key(market_type, raw_sym)
+            if ck not in self._watched:
                 continue
 
             close_price = float(item.get("c", 0))
             open_price = float(item.get("o", 0))
 
-            # Calculate 24h change percentage
             if open_price > 0:
                 change_pct = ((close_price - open_price) / open_price) * 100
             else:
                 change_pct = 0.0
 
-            # Use cached daily open if available
-            daily_open = self._daily_opens.get(sym, 0.0)
+            daily_open = self._daily_opens.get(ck, 0.0)
 
             tick = PriceTick(
-                symbol=sym,
+                symbol=ck,
                 price=close_price,
                 open=open_price,
                 high=float(item.get("h", 0)),
@@ -348,10 +447,9 @@ class PriceTickerService:
                 daily_open=daily_open,
                 updated_at_ms=now_ms,
             )
-            self._prices[sym] = tick
+            self._prices[ck] = tick
             updated.append(tick)
 
-        # Notify callbacks
         if updated and self._callbacks:
             for cb in self._callbacks:
                 try:

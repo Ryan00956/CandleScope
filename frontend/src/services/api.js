@@ -18,13 +18,13 @@ async function request(url) {
     return response.json();
 }
 
-export async function fetchKlines(symbol = "BTCUSDT", interval = "1m", limit = 500) {
-    const url = `${API_BASE}/klines/?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+export async function fetchKlines(symbol = "BTCUSDT", interval = "1m", limit = 500, marketType = "spot") {
+    const url = `${API_BASE}/klines/?symbol=${symbol}&interval=${interval}&limit=${limit}&market_type=${marketType}`;
     return request(url);
 }
 
-export async function fetchKlinesHistory(symbol = "BTCUSDT", interval = "1h", days = 7) {
-    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${days}`;
+export async function fetchKlinesHistory(symbol = "BTCUSDT", interval = "1h", days = 7, marketType = "spot") {
+    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${days}&market_type=${marketType}`;
     return request(url);
 }
 
@@ -33,13 +33,14 @@ export async function fetchKlinesBefore(
     interval = "1h",
     before = 0,
     bars = 500,
+    marketType = "spot",
 ) {
-    const url = `${API_BASE}/klines/history/before?symbol=${symbol}&interval=${interval}&before=${before}&bars=${bars}`;
+    const url = `${API_BASE}/klines/history/before?symbol=${symbol}&interval=${interval}&before=${before}&bars=${bars}&market_type=${marketType}`;
     return request(url);
 }
 
-export async function fetchLatestKlines(symbol = "BTCUSDT", interval = "1h", limit = 2) {
-    const url = `${API_BASE}/klines/latest?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+export async function fetchLatestKlines(symbol = "BTCUSDT", interval = "1h", limit = 2, marketType = "spot") {
+    const url = `${API_BASE}/klines/latest?symbol=${symbol}&interval=${interval}&limit=${limit}&market_type=${marketType}`;
     return request(url);
 }
 
@@ -47,10 +48,10 @@ export async function fetchLatestKlines(symbol = "BTCUSDT", interval = "1h", lim
  * Fetch klines for a specific time range by computing the necessary "days"
  * parameter from the range boundaries. Uses the /history endpoint internally.
  */
-export async function fetchKlinesRange(symbol = "BTCUSDT", interval = "1h", startSec, endSec) {
+export async function fetchKlinesRange(symbol = "BTCUSDT", interval = "1h", startSec, endSec, marketType = "spot") {
     const nowSec = Math.floor(Date.now() / 1000);
     const daysFromNow = Math.ceil((nowSec - startSec) / 86400) + 1;
-    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${Math.min(daysFromNow, 3650)}`;
+    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${Math.min(daysFromNow, 3650)}&market_type=${marketType}`;
     return request(url);
 }
 
@@ -60,21 +61,22 @@ export async function resolveInterval(interval = "1h") {
 }
 
 /** Single-interval WebSocket URL (legacy) */
-export function getKlineStreamUrl(symbol = "BTCUSDT", interval = "1h") {
+export function getKlineStreamUrl(symbol = "BTCUSDT", interval = "1h", marketType = "spot") {
     const wsBase = httpBaseToWsBase(API_BASE);
-    return `${wsBase}/stream/klines?symbol=${symbol}&interval=${interval}`;
+    return `${wsBase}/stream/klines?symbol=${symbol}&interval=${interval}&market_type=${marketType}`;
 }
 
 /** Multi-interval WebSocket URL — one connection for all intervals */
-export function getMultiStreamUrl(symbol = "BTCUSDT") {
+export function getMultiStreamUrl(symbol = "BTCUSDT", marketType = "spot") {
     const wsBase = httpBaseToWsBase(API_BASE);
-    return `${wsBase}/stream/klines_multi?symbol=${symbol}`;
+    return `${wsBase}/stream/klines_multi?symbol=${symbol}&market_type=${marketType}`;
 }
 
 // ── Exchange Info API ────────────────────────────────────────
 
-export async function fetchExchangeInfo() {
-    const url = `${API_BASE}/symbols/exchange-info`;
+export async function fetchExchangeInfo(marketType = "") {
+    const params = marketType ? `?market_type=${marketType}` : "";
+    const url = `${API_BASE}/symbols/exchange-info${params}`;
     return request(url);
 }
 
@@ -123,8 +125,8 @@ export async function testProxyConnection({ mode, custom_proxy }) {
     return response.json();
 }
 
-export async function repairStoredCustomIntervals() {
-    const url = `${API_BASE}/settings/storage/repair`;
+export async function repairStoredCustomIntervals(marketType = "spot") {
+    const url = `${API_BASE}/settings/storage/repair?market_type=${marketType}`;
     const response = await fetch(url, {
         method: "POST",
     });
@@ -135,8 +137,8 @@ export async function repairStoredCustomIntervals() {
     return response.json();
 }
 
-export async function scanAndFillGaps() {
-    const url = `${API_BASE}/settings/storage/gap-scan`;
+export async function scanAndFillGaps(marketType = "spot") {
+    const url = `${API_BASE}/settings/storage/gap-scan?market_type=${marketType}`;
     const response = await fetch(url, {
         method: "POST",
     });

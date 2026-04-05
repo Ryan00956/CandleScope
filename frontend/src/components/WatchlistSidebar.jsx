@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+import { parseSymbolKey } from "../utils/symbolKey";
 
 // ── LocalStorage keys ──
 const WATCHLISTS_KEY = "candlescope-watchlists";
@@ -96,7 +97,7 @@ const TIER_OPTIONS = [
 //  WatchlistSidebar — accordion layout with DnD + table-style price display
 // ═══════════════════════════════════════════════════════════════
 export default function WatchlistSidebar({
-  currentSymbol, onSelectSymbol,
+  currentSymbol, currentMarketType, onSelectSymbol,
   watchlists: externalWatchlists, onWatchlistsChange,
   prices, subscriptionTiers, onTierChange,
   upColor, downColor,
@@ -147,25 +148,25 @@ export default function WatchlistSidebar({
     const prev = prevPricesRef.current;
     const newFlashes = {};
 
-    for (const [sym, tick] of Object.entries(prices)) {
-      const prevTick = prev[sym];
+    for (const [key, tick] of Object.entries(prices)) {
+      const prevTick = prev[key];
       if (prevTick && tick.price !== prevTick.price) {
         const direction = tick.price > prevTick.price ? "up" : "down";
-        newFlashes[sym] = direction;
+        newFlashes[key] = direction;
 
         // Clear existing timer
-        if (flashTimersRef.current[sym]) {
-          clearTimeout(flashTimersRef.current[sym]);
+        if (flashTimersRef.current[key]) {
+          clearTimeout(flashTimersRef.current[key]);
         }
 
         // Set timer to clear flash (color only, no animation)
-        flashTimersRef.current[sym] = setTimeout(() => {
+        flashTimersRef.current[key] = setTimeout(() => {
           setFlashStates((prev) => {
             const next = { ...prev };
-            delete next[sym];
+            delete next[key];
             return next;
           });
-          delete flashTimersRef.current[sym];
+          delete flashTimersRef.current[key];
         }, 1200);
       }
     }
@@ -494,13 +495,14 @@ export default function WatchlistSidebar({
     dropTarget?.type === "list-header" && dropTarget.listId === listId;
 
   // ── Render helper for price columns ──
-  const renderSymbolRow = (sym, wl, idx) => {
-    const isActive = sym === currentSymbol;
-    const isDragged = dragType === "symbol" && dragSymbol === sym && dragSourceListId === wl.id;
-    const tick = prices?.[sym];
-    const tierVal = subscriptionTiers?.[sym] || "none";
+  const renderSymbolRow = (compositeKey, wl, idx) => {
+    const { symbol: sym, marketType: mt } = parseSymbolKey(compositeKey);
+    const isActive = sym === currentSymbol && mt === (currentMarketType || "spot");
+    const isDragged = dragType === "symbol" && dragSymbol === compositeKey && dragSourceListId === wl.id;
+    const tick = prices?.[compositeKey];
+    const tierVal = subscriptionTiers?.[compositeKey] || "none";
     const tierDot = tierVal === "full" ? "wl-tier-full" : tierVal === "price" ? "wl-tier-price" : "";
-    const flashDir = flashStates[sym]; // "up" | "down" | undefined
+    const flashDir = flashStates[compositeKey]; // "up" | "down" | undefined
 
     // Use daily (1D) change data from backend (matches 1D chart)
     const hasPrice = tick && tierVal !== "none";
@@ -512,20 +514,20 @@ export default function WatchlistSidebar({
     const priceColorClass = flashDir ? `wl-flash-${flashDir}` : "";
 
     return (
-      <div key={sym} className="wl-sym-wrapper">
+      <div key={compositeKey} className="wl-sym-wrapper">
         {isSymbolDropTarget(wl.id, idx, "above") && <div className="wl-drop-bar"/>}
         <div
           className={`wl-sym-row ${isActive ? "active" : ""} ${isDragged ? "dragging" : ""}`}
           draggable
-          onDragStart={(e) => handleSymbolDragStart(e, sym, wl.id)}
+          onDragStart={(e) => handleSymbolDragStart(e, compositeKey, wl.id)}
           onDragEnd={handleSymbolDragEnd}
           onDragOver={(e) => handleSymbolDragOver(e, wl.id, idx)}
           onDrop={(e) => handleSymbolDrop(e, wl.id, idx)}
           onDragLeave={() => {
             if (dropTarget?.listId === wl.id && dropTarget?.index === idx) setDropTarget(null);
           }}
-          onClick={() => onSelectSymbol(sym)}
-          onContextMenu={(e) => handleContextMenu(e, sym, wl.id)}
+          onClick={() => onSelectSymbol({ symbol: sym, marketType: mt })}
+          onContextMenu={(e) => handleContextMenu(e, compositeKey, wl.id)}
         >
           {/* Drag grip */}
           <span className="wl-sym-grip">
@@ -538,8 +540,11 @@ export default function WatchlistSidebar({
           {/* Tier dot */}
           {tierDot && <span className={`wl-tier-dot ${tierDot}`} title={tierVal === "full" ? "完全订阅" : "仅价格"}/>}
 
-          {/* Symbol name */}
-          <span className="wl-sym-name">{sym}</span>
+          {/* Symbol name + market badge */}
+          <span className="wl-sym-name">
+            {sym}
+            {mt === "futures" && <span className="wl-market-badge futures">合约</span>}
+          </span>
 
           {/* Price columns — only if not "仅收藏" */}
           {hasPrice ? (
@@ -568,7 +573,7 @@ export default function WatchlistSidebar({
           )}
 
           {/* Delete button */}
-          <button className="wl-sym-del" onClick={(e) => { e.stopPropagation(); removeSymbol(wl.id, sym); }} title="移除">
+          <button className="wl-sym-del" onClick={(e) => { e.stopPropagation(); removeSymbol(wl.id, compositeKey); }} title="移除">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
               <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
@@ -781,18 +786,21 @@ export default function WatchlistSidebar({
                 </button>
               )}
             </>
-          ) : (
+          ) : (() => {
+              const { symbol: ctxSym } = parseSymbolKey(contextMenu.symbol);
+              const ctxCompositeKey = contextMenu.symbol;
+              return (
             <>
-              <div className="wl-ctx-header">{contextMenu.symbol}</div>
+              <div className="wl-ctx-header">{ctxSym}</div>
               {/* Tier selection */}
               {onTierChange && (
                 <>
                   <div className="wl-ctx-sub-header">订阅级别</div>
                   {TIER_OPTIONS.map((opt) => {
-                    const currentTier = subscriptionTiers?.[contextMenu.symbol] || "none";
+                    const currentTier = subscriptionTiers?.[ctxCompositeKey] || "none";
                     return (
                       <button key={opt.value} className={`wl-ctx-item ${currentTier === opt.value ? "wl-ctx-item-selected" : ""}`}
-                        onClick={() => { onTierChange(contextMenu.symbol, opt.value); setContextMenu(null); }}>
+                        onClick={() => { onTierChange(ctxCompositeKey, opt.value); setContextMenu(null); }}>
                         <span className={`wl-tier-dot ${opt.value === "full" ? "wl-tier-full" : opt.value === "price" ? "wl-tier-price" : ""}`}/>
                         <span>{opt.label}</span>
                         <span className="wl-ctx-item-desc">{opt.desc}</span>
@@ -824,7 +832,8 @@ export default function WatchlistSidebar({
                 移除
               </button>
             </>
-          )}
+              );
+          })()}
         </div>
       )}
     </>

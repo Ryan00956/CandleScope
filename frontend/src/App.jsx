@@ -172,6 +172,7 @@ function saveSavedCustomIntervals(list) {
 
 // ---------- User preference persistence ----------
 const USER_PREFS_KEY = "candlescope-user-prefs";
+
 function loadUserPrefs() {
   try {
     const raw = localStorage.getItem(USER_PREFS_KEY);
@@ -187,7 +188,7 @@ function updateUserPref(key, value) {
   saveUserPrefs(prefs);
 }
 
-// Visible range persistence per symbol + interval
+// Visible range persistence per market + symbol + interval
 const VISIBLE_RANGE_KEY = "candlescope-visible-ranges";
 function loadVisibleRanges() {
   try {
@@ -195,8 +196,8 @@ function loadVisibleRanges() {
     return raw ? JSON.parse(raw) : {};
   } catch { return {}; }
 }
-function buildVisibleRangeStorageKey(symbol, interval) {
-  return `${symbol}::${interval}`;
+function buildVisibleRangeStorageKey(symbol, interval, marketType = "spot") {
+  return `${marketType}::${symbol}::${interval}`;
 }
 function normalizeVisibleRange(range) {
   if (!range || typeof range !== "object") return null;
@@ -221,18 +222,18 @@ function normalizeVisibleRange(range) {
   }
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
-function saveVisibleRangeForInterval(symbol, interval, range) {
+function saveVisibleRangeForInterval(symbol, interval, range, marketType = "spot") {
   const normalized = normalizeVisibleRange(range);
   if (!symbol || !interval || !normalized) return;
   const ranges = loadVisibleRanges();
-  ranges[buildVisibleRangeStorageKey(symbol, interval)] = normalized;
+  ranges[buildVisibleRangeStorageKey(symbol, interval, marketType)] = normalized;
   localStorage.setItem(VISIBLE_RANGE_KEY, JSON.stringify(ranges));
 }
-function getVisibleRangeForInterval(symbol, interval) {
+function getVisibleRangeForInterval(symbol, interval, marketType = "spot") {
   if (!symbol || !interval) return null;
   const ranges = loadVisibleRanges();
   return (
-    normalizeVisibleRange(ranges[buildVisibleRangeStorageKey(symbol, interval)]) ||
+    normalizeVisibleRange(ranges[buildVisibleRangeStorageKey(symbol, interval, marketType)]) ||
     normalizeVisibleRange(ranges[interval]) ||
     null
   );
@@ -347,6 +348,10 @@ export default function App() {
   const [exchange] = useState(() => {
     const prefs = loadUserPrefs();
     return prefs.lastExchange || "binance";
+  });
+  const [marketType, setMarketType] = useState(() => {
+    const prefs = loadUserPrefs();
+    return prefs.lastMarketType || "spot";
   });
   const [interval, setInterval_] = useState(() => {
     const prefs = loadUserPrefs();
@@ -506,17 +511,21 @@ export default function App() {
     chartRef: indicatorChartRefRef,
     seriesRef: indicatorSeriesRefRef,
     chartData,
-    datasetKey: `${symbol}-${interval}-${datasetKey}`,
+    datasetKey: `${marketType}-${symbol}-${interval}-${datasetKey}`,
     seriesReady: indicatorSeriesReady,
     candleUpColor: settings.upColor,
     candleDownColor: settings.downColor,
+    symbol,
+    interval,
+    marketType,
   });
+  const chartStorageKeyBase = `${marketType}:${symbol}`;
 
   const removeIndicator = useCallback((indicatorId) => {
     rawRemoveIndicator(indicatorId);
-    clearSavedDrawings(`${symbol}-separate-${indicatorId}`);
-    clearSavedDrawings(`${symbol}-volume-${indicatorId}`);
-  }, [rawRemoveIndicator, symbol]);
+    clearSavedDrawings(`${chartStorageKeyBase}-separate-${indicatorId}`);
+    clearSavedDrawings(`${chartStorageKeyBase}-volume-${indicatorId}`);
+  }, [chartStorageKeyBase, rawRemoveIndicator]);
 
   // --- Custom interval state ---
   const [customInput, setCustomInput] = useState("");
@@ -524,11 +533,11 @@ export default function App() {
 
   // --- Cross-interval data cache for instant switching ---
   const chartDataCacheRef = useRef(new Map());
-  const cacheKey = (sym, intv) => `${sym}-${intv}`;
+  const cacheKey = useCallback((sym, intv, mt = marketType) => `${mt}-${sym}-${intv}`, [marketType]);
   const saveToCache = useCallback((sym, intv, data) => {
     chartDataCacheRef.current.set(cacheKey(sym, intv), data);
-  }, []);
-  const getFromCache = (sym, intv) => chartDataCacheRef.current.get(cacheKey(sym, intv));
+  }, [cacheKey]);
+  const getFromCache = useCallback((sym, intv) => chartDataCacheRef.current.get(cacheKey(sym, intv)), [cacheKey]);
 
   // Current interval ref for WS message routing
   const intervalRef = useRef(interval);
@@ -709,12 +718,15 @@ export default function App() {
   }, []);
 
   // Handle tier change from WatchlistSidebar context menu
+  // sym is a composite key like "spot:BTCUSDT" or "futures:ETHUSDT"
   const handleTierChange = useCallback((sym, tier) => {
+    const prevTier = subscriptionTiers[sym] || "none";
     setSubscriptionTiers((prev) => ({ ...prev, [sym]: tier }));
     updateSubscriptionTier(sym, tier).catch((err) => {
       console.warn("Failed to update tier:", err);
+      setSubscriptionTiers((prev) => ({ ...prev, [sym]: prevTier }));
     });
-  }, []);
+  }, [subscriptionTiers]);
 
 
   // Sync cache limits to backend when they change
@@ -770,9 +782,10 @@ export default function App() {
 
     // ── PARALLEL FETCH: quick tail + full history simultaneously ──
     const days = getIntervalDays(intv);
+    const mt = marketType;
     const [quickResult, historyResult] = await Promise.all([
-      fetchLatestKlines(sym, intv, 5).catch(() => null),
-      fetchKlinesHistory(sym, intv, days).catch(() => null),
+      fetchLatestKlines(sym, intv, 5, mt).catch(() => null),
+      fetchKlinesHistory(sym, intv, days, mt).catch(() => null),
     ]);
 
     if (controller.signal.aborted) return;
@@ -856,14 +869,24 @@ export default function App() {
     if (shownInitialData) {
       setLoading(false);
     }
-  }, [saveToCache, updateLastPrice]);
+  }, [saveToCache, updateLastPrice, marketType]);
 
   // ── Symbol switching handler ──
-  const handleSymbolChange = useCallback((newSymbol) => {
-    if (newSymbol === symbol) return;
+  const handleSymbolChange = useCallback((newSymbolOrObj) => {
+    // Accept either a string symbol or { symbol, marketType } object
+    let newSymbol, newMarketType;
+    if (typeof newSymbolOrObj === "object" && newSymbolOrObj !== null) {
+      newSymbol = newSymbolOrObj.symbol;
+      newMarketType = newSymbolOrObj.marketType || "spot";
+    } else {
+      newSymbol = newSymbolOrObj;
+      newMarketType = marketType;
+    }
+    if (newSymbol === symbol && newMarketType === marketType) return;
 
     // Persist choice
     updateUserPref("lastSymbol", newSymbol);
+    updateUserPref("lastMarketType", newMarketType);
 
     // Clear in-memory caches for old symbol
     chartDataCacheRef.current.clear();
@@ -878,14 +901,13 @@ export default function App() {
     setHasMoreLeft(true);
     setDatasetKey((v) => v + 1);
 
-    // Trigger symbol change — this causes the WS useEffect to
-    // reconnect and loadData to re-fetch for the new symbol.
+    setMarketType(newMarketType);
     setSymbol(newSymbol);
-  }, [symbol]);
+  }, [symbol, marketType]);
 
   useEffect(() => {
     loadData(symbol, interval);
-  }, [symbol, interval, loadData]);
+  }, [symbol, interval, marketType, loadData]);
 
   const syncSocketSubscriptions = useCallback((socket, desiredIntervals) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -954,7 +976,7 @@ export default function App() {
         pollingInFlight = true;
         try {
           const currentIntv = intervalRef.current;
-          const result = await fetchLatestKlines(symbol, currentIntv, 2);
+          const result = await fetchLatestKlines(symbol, currentIntv, 2, marketType);
           if (!result?.data?.length) return;
 
           setChartData((prev) => {
@@ -1010,7 +1032,7 @@ export default function App() {
       }
 
       try {
-        const url = getMultiStreamUrl(symbol);
+        const url = getMultiStreamUrl(symbol, marketType);
         socket = new WebSocket(url);
         socketRef.current = socket;
 
@@ -1044,7 +1066,7 @@ export default function App() {
             const currentIntv = intervalRef.current;
             const days = getIntervalDays(currentIntv);
             console.log(`[WS-Recovery] Reconnected, reloading full history for ${symbol}@${currentIntv}`);
-            fetchKlinesHistory(symbol, currentIntv, days)
+            fetchKlinesHistory(symbol, currentIntv, days, marketType)
               .then((result) => {
                 if (!active || !result?.data?.length) return;
                 setChartData((prev) => {
@@ -1099,7 +1121,7 @@ export default function App() {
 
               console.log(`Backfill completed for ${bfSymbol}@${bfInterval}, reloading data...`);
               const days = getIntervalDays(bfInterval);
-              fetchKlinesHistory(bfSymbol, bfInterval, days)
+              fetchKlinesHistory(bfSymbol, bfInterval, days, marketType)
                 .then((result) => {
                   if (!result?.data?.length) return;
                   const currentIntv = intervalRef.current;
@@ -1239,7 +1261,7 @@ export default function App() {
       }
       liveSubscribedIntervalsRef.current = new Set();
     };
-  }, [symbol, saveToCache, syncSocketSubscriptions, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
+  }, [symbol, marketType, saveToCache, syncSocketSubscriptions, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
 
   useEffect(() => {
     syncSocketSubscriptions(socketRef.current, trackedIntervals);
@@ -1258,7 +1280,7 @@ export default function App() {
 
         const days = getIntervalDays(intv);
         try {
-          const result = await fetchKlinesHistory(symbol, intv, days);
+          const result = await fetchKlinesHistory(symbol, intv, days, marketType);
           if (cancelled) break;
           if (result?.data?.length) {
             chartDataCacheRef.current.set(key, result.data);
@@ -1274,7 +1296,7 @@ export default function App() {
     // Start prefetching after a short delay so the active interval loads first
     const timer = setTimeout(prefetch, 2000);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [symbol, trackedIntervals]);
+  }, [symbol, marketType, trackedIntervals]);
 
   // ============================================================
   //  GAP DETECTION & AUTO-FILL
@@ -1328,7 +1350,7 @@ export default function App() {
       // Strategy: reload full history — this is the most reliable way to
       // fill ANY gap (middle, tail, or multiple scattered gaps at once).
       const days = getIntervalDays(intv);
-      const result = await fetchKlinesHistory(sym, intv, days);
+      const result = await fetchKlinesHistory(sym, intv, days, marketType);
 
       if (result?.data?.length > 0) {
         setChartData((prev) => {
@@ -1420,7 +1442,7 @@ export default function App() {
         // This is the most reliable approach — it covers any gap
         // (middle, tail, or multiple scattered gaps) in one shot.
         const days = getIntervalDays(currentIntv);
-        const historyResult = await fetchKlinesHistory(symbol, currentIntv, days);
+        const historyResult = await fetchKlinesHistory(symbol, currentIntv, days, marketType);
 
         if (historyResult?.data?.length > 0) {
           setChartData((prev) => {
@@ -1449,7 +1471,7 @@ export default function App() {
           if (!bgCache || bgCache.length === 0) continue;
 
           try {
-            const bgResult = await fetchLatestKlines(symbol, bgIntv, 10);
+            const bgResult = await fetchLatestKlines(symbol, bgIntv, 10, marketType);
             if (bgResult?.data?.length > 0) {
               const bgMerged = mergeByTime(bgResult.data, bgCache);
               chartDataCacheRef.current.set(bgKey, bgMerged);
@@ -1484,7 +1506,7 @@ export default function App() {
       const before = oldestLoadedTime || chartData[0].time;
       setLoadingMoreLeft(true);
       try {
-        const result = await fetchKlinesBefore(symbol, interval, before, 500);
+        const result = await fetchKlinesBefore(symbol, interval, before, 500, marketType);
         const older = result.data || [];
 
         if (older.length > 0) {
@@ -1527,10 +1549,10 @@ export default function App() {
     if (chartWidgetRef.current?.getVisibleRange) {
       const range = chartWidgetRef.current.getVisibleRange();
       if (range) {
-        saveVisibleRangeForInterval(symbol, interval, range);
+        saveVisibleRangeForInterval(symbol, interval, range, marketType);
       }
     }
-  }, [interval, symbol]);
+  }, [interval, marketType, symbol]);
 
   // Save visible range on page close/refresh
   useEffect(() => {
@@ -1624,6 +1646,7 @@ export default function App() {
 
         <SymbolSearch
           currentSymbol={symbol}
+          currentMarketType={marketType}
           onSelect={handleSymbolChange}
           watchlists={watchlists}
           onAddToWatchlist={handleAddToWatchlist}
@@ -1885,19 +1908,20 @@ export default function App() {
               ref={chartWidgetRef}
               data={chartData}
               symbol={symbol}
+              drawingKeyBase={chartStorageKeyBase}
               interval={interval}
               loading={loading}
               onCrosshairMove={setCrosshairData}
               onNeedMoreLeft={handleNeedMoreLeft}
               canLoadMoreLeft={hasMoreLeft && !loadingMoreLeft && !loading}
-              datasetKey={`${symbol}-${interval}-${datasetKey}`}
+              datasetKey={`${marketType}-${symbol}-${interval}-${datasetKey}`}
               upColor={settings.upColor}
               downColor={settings.downColor}
               theme={settings.theme}
               customBg={settings.customBg}
               timezone={settings.timezone}
-              savedVisibleRange={getVisibleRangeForInterval(symbol, interval)}
-              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(symbol, interval, range)}
+              savedVisibleRange={getVisibleRangeForInterval(symbol, interval, marketType)}
+              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(symbol, interval, range, marketType)}
               drawingTool={drawingTool}
               penColor={penColor}
               penSize={penSize}
@@ -1926,6 +1950,7 @@ export default function App() {
 
       <WatchlistSidebar
         currentSymbol={symbol}
+        currentMarketType={marketType}
         onSelectSymbol={handleSymbolChange}
         watchlists={watchlists}
         onWatchlistsChange={(next) => { setWatchlists(next); saveWatchlists(next); }}
@@ -1977,7 +2002,7 @@ export default function App() {
           )}
         </div>
         <div className="status-right">
-          <span>{dataSource === "mock" ? "Demo Mode" : "Binance Spot"}</span>
+          <span>{dataSource === "mock" ? "Demo Mode" : marketType === "futures" ? "Binance Futures" : "Binance Spot"}</span>
           <span>{wsStatusLabel}</span>
           <span>CandleScope v0.2.0</span>
         </div>

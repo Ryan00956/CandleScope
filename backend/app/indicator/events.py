@@ -65,6 +65,7 @@ class IndicatorEvent:
             "indicator_name": self.key.indicator_name,
             "symbol": self.key.symbol,
             "interval": self.key.interval,
+            "market_type": self.key.market_type,
             "timestamp_ms": self.timestamp_ms,
             "bar_timestamp": self.bar_timestamp,
         }

@@ -203,12 +203,12 @@ class BarStateEngine:
         else:
             self._merge_strategy = ComponentSnapshotOHLCVMerge()
 
-        # Active (FORMING) bars: {(symbol, bucket_start_ms) → BarState}
+        # Active (FORMING) bars: {(market_type, symbol, bucket_start_ms) → BarState}
         # Using OrderedDict to maintain insertion order for eviction
-        self._active: OrderedDict[tuple[str, int], BarState] = OrderedDict()
+        self._active: OrderedDict[tuple[str, str, int], BarState] = OrderedDict()
 
-        # Recently closed bars: {(symbol, bucket_start_ms) → BarState}
-        self._closed: OrderedDict[tuple[str, int], BarState] = OrderedDict()
+        # Recently closed bars: {(market_type, symbol, bucket_start_ms) → BarState}
+        self._closed: OrderedDict[tuple[str, str, int], BarState] = OrderedDict()
 
         # Eviction buffers — populated by _enforce_*_limit(), consumed by caller.
         # The aggregator checks these after each apply()/close_bar() call
@@ -241,6 +241,7 @@ class BarStateEngine:
 
     def apply(
         self,
+        market_type: str,
         symbol: str,
         bucket_start_ms: int,
         bar_input: BarInput,
@@ -258,7 +259,8 @@ class BarStateEngine:
         Returns:
             Tuple of (updated BarState, what changed)
         """
-        key = (symbol, bucket_start_ms)
+        market_type = market_type.strip().lower()
+        key = (market_type, symbol, bucket_start_ms)
 
         if key in self._active:
             # Existing active bar — merge
@@ -288,6 +290,7 @@ class BarStateEngine:
         bucket_start, bucket_end = self._time_bucket.compute_bucket_range(bucket_start_ms)
         state = BarState(
             symbol=symbol,
+            market_type=market_type,
             interval=self._interval,
             bucket_start_ms=bucket_start,
             bucket_end_ms=bucket_end,
@@ -301,56 +304,58 @@ class BarStateEngine:
         self._active[key] = state
 
         # Evict oldest active bars if limit exceeded
-        self._enforce_active_limit(symbol)
+        self._enforce_active_limit(market_type, symbol)
 
         return state, BarStateChange.CREATED
 
     # ── Public: State Queries ────────────────────────────────
 
-    def get_active(self, symbol: str, bucket_start_ms: int) -> BarState | None:
+    def get_active(self, market_type: str, symbol: str, bucket_start_ms: int) -> BarState | None:
         """Get a specific active (FORMING) bar state."""
-        return self._active.get((symbol, bucket_start_ms))
+        return self._active.get((market_type.strip().lower(), symbol, bucket_start_ms))
 
-    def get_closed(self, symbol: str, bucket_start_ms: int) -> BarState | None:
+    def get_closed(self, market_type: str, symbol: str, bucket_start_ms: int) -> BarState | None:
         """Get a specific closed bar state from recent memory."""
-        return self._closed.get((symbol, bucket_start_ms))
+        return self._closed.get((market_type.strip().lower(), symbol, bucket_start_ms))
 
-    def get_state(self, symbol: str, bucket_start_ms: int) -> BarState | None:
+    def get_state(self, market_type: str, symbol: str, bucket_start_ms: int) -> BarState | None:
         """Get bar state (active or closed)."""
-        return self._active.get((symbol, bucket_start_ms)) or \
-               self._closed.get((symbol, bucket_start_ms))
+        key = (market_type.strip().lower(), symbol, bucket_start_ms)
+        return self._active.get(key) or self._closed.get(key)
 
-    def get_all_active(self, symbol: str) -> list[BarState]:
+    def get_all_active(self, market_type: str, symbol: str) -> list[BarState]:
         """Get all active (FORMING) bars for a symbol, ordered by bucket_start."""
+        market_type = market_type.strip().lower()
         return sorted(
-            [s for (sym, _), s in self._active.items() if sym == symbol],
+            [s for (mt, sym, _), s in self._active.items() if mt == market_type and sym == symbol],
             key=lambda s: s.bucket_start_ms,
         )
 
-    def get_recent_closed(self, symbol: str, limit: int = 100) -> list[BarState]:
+    def get_recent_closed(self, market_type: str, symbol: str, limit: int = 100) -> list[BarState]:
         """Get recently closed bars for a symbol, newest first."""
-        bars = [s for (sym, _), s in self._closed.items() if sym == symbol]
+        market_type = market_type.strip().lower()
+        bars = [s for (mt, sym, _), s in self._closed.items() if mt == market_type and sym == symbol]
         bars.sort(key=lambda s: s.bucket_start_ms, reverse=True)
         return bars[:limit]
 
-    def get_latest_bar(self, symbol: str) -> BarState | None:
+    def get_latest_bar(self, market_type: str, symbol: str) -> BarState | None:
         """Get the most recent bar (active preferred, then closed)."""
-        active = self.get_all_active(symbol)
+        active = self.get_all_active(market_type, symbol)
         if active:
             return active[-1]
-        closed = self.get_recent_closed(symbol, limit=1)
+        closed = self.get_recent_closed(market_type, symbol, limit=1)
         return closed[0] if closed else None
 
     # ── Public: Lifecycle Management ─────────────────────────
 
-    def close_bar(self, symbol: str, bucket_start_ms: int) -> BarState | None:
+    def close_bar(self, market_type: str, symbol: str, bucket_start_ms: int) -> BarState | None:
         """Move a bar from active to closed.
 
         Called by the Finalizer when a bar should be sealed.
 
         Returns the closed BarState, or None if not found.
         """
-        key = (symbol, bucket_start_ms)
+        key = (market_type.strip().lower(), symbol, bucket_start_ms)
         state = self._active.pop(key, None)
         if state is None:
             return None
@@ -360,22 +365,22 @@ class BarStateEngine:
         self._closed[key] = state
 
         # Enforce closed bars limit
-        self._enforce_closed_limit(symbol)
+        self._enforce_closed_limit(market_type, symbol)
 
         return state
 
-    def expire_bar(self, symbol: str, bucket_start_ms: int) -> BarState | None:
+    def expire_bar(self, market_type: str, symbol: str, bucket_start_ms: int) -> BarState | None:
         """Remove a bar from memory entirely.
 
         Returns the expired BarState, or None if not found.
         """
-        key = (symbol, bucket_start_ms)
+        key = (market_type.strip().lower(), symbol, bucket_start_ms)
         state = self._active.pop(key, None) or self._closed.pop(key, None)
         if state is not None:
             state.status = BarStatus.EXPIRED
         return state
 
-    def force_close_all_active(self, symbol: str) -> list[BarState]:
+    def force_close_all_active(self, market_type: str, symbol: str) -> list[BarState]:
         """Force-close all active bars for a symbol.
 
         Used during shutdown or when switching intervals.
@@ -384,25 +389,31 @@ class BarStateEngine:
         """
         closed: list[BarState] = []
         keys_to_close = [
-            (sym, bs) for (sym, bs) in self._active if sym == symbol
+            (mt, sym, bs) for (mt, sym, bs) in self._active
+            if mt == market_type.strip().lower() and sym == symbol
         ]
         for key in keys_to_close:
-            state = self.close_bar(key[0], key[1])
+            state = self.close_bar(key[0], key[1], key[2])
             if state:
                 closed.append(state)
         return closed
 
-    def clear(self, symbol: str | None = None) -> None:
+    def clear(self, symbol: str | None = None, market_type: str | None = None) -> None:
         """Clear all state.  If symbol is given, clear only that symbol."""
         if symbol is None:
             self._active.clear()
             self._closed.clear()
         else:
+            normalized_market = market_type.strip().lower() if market_type else None
             self._active = OrderedDict(
-                (k, v) for k, v in self._active.items() if k[0] != symbol
+                (k, v)
+                for k, v in self._active.items()
+                if k[1] != symbol or (normalized_market is not None and k[0] != normalized_market)
             )
             self._closed = OrderedDict(
-                (k, v) for k, v in self._closed.items() if k[0] != symbol
+                (k, v)
+                for k, v in self._closed.items()
+                if k[1] != symbol or (normalized_market is not None and k[0] != normalized_market)
             )
 
     # ── Public: Snapshot ─────────────────────────────────────
@@ -421,33 +432,35 @@ class BarStateEngine:
 
     # ── Internal: Eviction ───────────────────────────────────
 
-    def _enforce_active_limit(self, symbol: str) -> None:
+    def _enforce_active_limit(self, market_type: str, symbol: str) -> None:
         """Evict oldest active bars if over the limit.
 
         Force-closed bars are appended to ``self.evicted_closed`` so the
         aggregator can emit CLOSED events for them after processing.
         """
-        symbol_keys = [k for k in self._active if k[0] == symbol]
+        normalized_market = market_type.strip().lower()
+        symbol_keys = [k for k in self._active if k[0] == normalized_market and k[1] == symbol]
         while len(symbol_keys) > self._cfg.max_active_bars:
             oldest_key = symbol_keys.pop(0)
             state = self._active.pop(oldest_key, None)
             if state:
                 logger.warning(
-                    "Force-closing oldest active bar: %s@%s bucket=%d",
-                    symbol, self._interval, oldest_key[1],
+                    "Force-closing oldest active bar: %s:%s@%s bucket=%d",
+                    normalized_market, symbol, self._interval, oldest_key[2],
                 )
                 state.status = BarStatus.CLOSED
                 state.updated_at_ms = int(time.time() * 1000)
                 self._closed[oldest_key] = state
                 self.evicted_closed.append(state)
 
-    def _enforce_closed_limit(self, symbol: str) -> None:
+    def _enforce_closed_limit(self, market_type: str, symbol: str) -> None:
         """Evict oldest closed bars if over the limit.
 
         Expired bars are appended to ``self.evicted_expired`` so the
         aggregator can emit EXPIRED events for them after processing.
         """
-        symbol_keys = [k for k in self._closed if k[0] == symbol]
+        normalized_market = market_type.strip().lower()
+        symbol_keys = [k for k in self._closed if k[0] == normalized_market and k[1] == symbol]
         while len(symbol_keys) > self._cfg.max_closed_bars_in_memory:
             oldest_key = symbol_keys.pop(0)
             evicted = self._closed.pop(oldest_key, None)

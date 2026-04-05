@@ -30,6 +30,25 @@ from typing import Any
 logger = logging.getLogger("candlescope.subscriptions")
 
 
+def _to_composite_key(symbol: str) -> str:
+    """Ensure a symbol is in composite key format.
+
+    'BTCUSDT' -> 'spot:BTCUSDT'
+    'spot:BTCUSDT' -> 'spot:BTCUSDT' (unchanged)
+    'futures:ETHUSDT' -> 'futures:ETHUSDT' (unchanged)
+    """
+    market_type, raw_symbol = _parse_composite_key(symbol)
+    return f"{market_type}:{raw_symbol}"
+
+
+def _parse_composite_key(key: str) -> tuple[str, str]:
+    """Parse 'spot:BTCUSDT' -> ('spot', 'BTCUSDT')."""
+    idx = key.find(":")
+    if idx == -1:
+        return "spot", key.upper().strip()
+    return key[:idx].lower(), key[idx + 1:].upper().strip()
+
+
 class SubscriptionTier(str, enum.Enum):
     FULL = "full"
     PRICE_ONLY = "price"
@@ -88,6 +107,10 @@ class SubscriptionManager:
     def set_price_ticker(self, pt: Any) -> None:
         self._price_ticker = pt
 
+    def normalize_symbol(self, symbol: str) -> str:
+        """Normalize a user/API symbol into the persisted subscription key."""
+        return _to_composite_key(symbol)
+
     # ── Lifecycle ────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -115,34 +138,37 @@ class SubscriptionManager:
     async def set_tier(self, symbol: str, tier: SubscriptionTier) -> dict:
         """Set or update subscription tier for a symbol.
 
+        Accepts composite keys ('spot:BTCUSDT', 'futures:ETHUSDT') or
+        plain symbols ('BTCUSDT' treated as spot).
+
         Returns a status dict including a ``warning`` key if the FULL
         soft limit is exceeded.
         """
-        symbol = symbol.upper().strip()
+        key = self.normalize_symbol(symbol)
         now_ms = int(time.time() * 1000)
 
-        old_sub = self._subs.get(symbol)
+        old_sub = self._subs.get(key)
         old_tier = old_sub.tier if old_sub else None
 
         if old_tier == tier:
-            return {"symbol": symbol, "tier": tier.value, "changed": False}
+            return {"symbol": key, "tier": tier.value, "changed": False}
 
         # Deactivate old tier
         if old_tier == SubscriptionTier.FULL:
-            await self._deactivate_full(symbol)
+            await self._deactivate_full(key)
         elif old_tier == SubscriptionTier.PRICE_ONLY:
-            self._deactivate_price_only(symbol)
+            self._deactivate_price_only(key)
 
         # Activate new tier
         sub = SymbolSubscription(
-            symbol=symbol,
+            symbol=key,
             tier=tier,
             added_at=old_sub.added_at if old_sub else now_ms,
         )
 
         warning = None
         if tier == SubscriptionTier.FULL:
-            await self._activate_full(symbol)
+            await self._activate_full(key)
             full_count = sum(1 for s in self._subs.values() if s.tier == SubscriptionTier.FULL) + (
                 0 if old_tier == SubscriptionTier.FULL else 1
             )
@@ -152,29 +178,37 @@ class SubscriptionManager:
                     f"建议不超过 {FULL_TIER_SOFT_LIMIT} 个以节省内存和带宽。"
                 )
         elif tier == SubscriptionTier.PRICE_ONLY:
-            self._activate_price_only(symbol)
+            self._activate_price_only(key)
 
-        self._subs[symbol] = sub
-        self._save_to_db(symbol, sub)
+        self._subs[key] = sub
+        self._save_to_db(key, sub)
         self._sync_price_ticker_symbols()
 
-        result = {"symbol": symbol, "tier": tier.value, "changed": True}
+        result = {"symbol": key, "tier": tier.value, "changed": True}
         if warning:
             result["warning"] = warning
         return result
 
-    def remove(self, symbol: str) -> None:
-        """Remove a symbol from subscriptions entirely."""
-        symbol = symbol.upper().strip()
-        self._subs.pop(symbol, None)
-        self._delete_from_db(symbol)
+    async def remove(self, symbol: str) -> None:
+        """Remove a symbol from subscriptions entirely and release resources."""
+        key = self.normalize_symbol(symbol)
+        old_sub = self._subs.get(key)
+        if old_sub is not None:
+            if old_sub.tier == SubscriptionTier.FULL:
+                await self._deactivate_full(key)
+            elif old_sub.tier == SubscriptionTier.PRICE_ONLY:
+                self._deactivate_price_only(key)
+        self._subs.pop(key, None)
+        self._delete_from_db(key)
         self._sync_price_ticker_symbols()
 
     def get(self, symbol: str) -> SymbolSubscription | None:
-        return self._subs.get(symbol.upper().strip())
+        key = self.normalize_symbol(symbol)
+        return self._subs.get(key)
 
     def get_tier(self, symbol: str) -> SubscriptionTier:
-        sub = self._subs.get(symbol.upper().strip())
+        key = self.normalize_symbol(symbol)
+        sub = self._subs.get(key)
         return sub.tier if sub else SubscriptionTier.NONE
 
     def get_all(self) -> list[dict]:
@@ -185,29 +219,43 @@ class SubscriptionManager:
 
     # ── Internal: tier activation ────────────────────────────
 
-    async def _activate_full(self, symbol: str) -> None:
+    async def _activate_full(self, key: str) -> None:
         """Start the full ingestion pipeline for a symbol."""
         if self._data_manager is None:
             return
-        # Ensure streams for common intervals
+        market_type, raw_sym = _parse_composite_key(key)
         for interval in ("1m",):
             try:
-                await self._data_manager.ensure_stream(symbol, interval)
+                await self._data_manager.ensure_stream(
+                    raw_sym,
+                    interval,
+                    market_type=market_type,
+                )
             except Exception as exc:
-                logger.warning("ensure_stream(%s, %s) failed: %s", symbol, interval, exc)
+                logger.warning(
+                    "ensure_stream(%s, %s, market_type=%s) failed: %s",
+                    raw_sym,
+                    interval,
+                    market_type,
+                    exc,
+                )
 
-    async def _deactivate_full(self, symbol: str) -> None:
+    async def _deactivate_full(self, key: str) -> None:
         """Stop the full ingestion pipeline for a symbol."""
         if self._data_manager is None:
             return
-        # Stop all streams for this symbol
+        market_type, raw_sym = _parse_composite_key(key)
         try:
             streams = self._data_manager.get_all_streams()
             for info in streams:
-                if info.key.symbol == symbol:
-                    await self._data_manager.stop_stream(symbol, info.key.interval)
+                if info.key.symbol == raw_sym and info.key.market_type == market_type:
+                    await self._data_manager.stop_stream(
+                        raw_sym,
+                        info.key.interval,
+                        market_type=market_type,
+                    )
         except Exception as exc:
-            logger.warning("deactivate_full(%s) failed: %s", symbol, exc)
+            logger.warning("deactivate_full(%s) failed: %s", key, exc)
 
     def _activate_price_only(self, symbol: str) -> None:
         """Register symbol with the PriceTickerService."""
@@ -248,7 +296,12 @@ class SubscriptionManager:
                 tier = SubscriptionTier(tier_str)
             except ValueError:
                 tier = SubscriptionTier.NONE
-            self._subs[sym] = SymbolSubscription(symbol=sym, tier=tier, added_at=added_at)
+            normalized = self.normalize_symbol(sym)
+            self._subs[normalized] = SymbolSubscription(
+                symbol=normalized,
+                tier=tier,
+                added_at=added_at,
+            )
 
     def _save_to_db(self, symbol: str, sub: SymbolSubscription) -> None:
         with sqlite3.connect(self._db_path) as conn:

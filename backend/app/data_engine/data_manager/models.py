@@ -30,27 +30,33 @@ from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
 
 @dataclass(frozen=True, slots=True)
 class SeriesKey:
-    """Immutable identifier for a (symbol, interval) data series.
+    """Immutable identifier for a (market_type, symbol, interval) data series.
 
     Usable as a dict key and set member.
 
     Examples::
 
         key = SeriesKey("BTCUSDT", "1m")
+        key = SeriesKey("BTCUSDT", "1m", market_type="futures")
         cache[key] = bars
     """
     symbol: str
     interval: str
+    market_type: str = "spot"  # "spot" or "futures"
 
     def __post_init__(self) -> None:
         # Normalize symbol to uppercase
         object.__setattr__(self, "symbol", self.symbol.upper().strip())
         object.__setattr__(self, "interval", self.interval.strip())
+        object.__setattr__(self, "market_type", self.market_type.strip().lower())
 
     @property
     def topic(self) -> str:
-        """Event bus topic string, e.g. ``'BTCUSDT@1m'``."""
-        return f"{self.symbol}@{self.interval}"
+        """Event bus topic string, e.g. ``'BTCUSDT@1m'`` or ``'futures:BTCUSDT@1m'``."""
+        base = f"{self.symbol}@{self.interval}"
+        if self.market_type != "spot":
+            return f"{self.market_type}:{base}"
+        return base
 
     def __str__(self) -> str:
         return self.topic
@@ -171,6 +177,7 @@ class QueryResult:
     bars: list[BarData] = field(default_factory=list)
     symbol: str = ""
     interval: str = ""
+    market_type: str = "spot"
     source: QuerySource = QuerySource.EMPTY
     total: int = 0
     has_more: bool = False
@@ -183,6 +190,7 @@ class QueryResult:
         return {
             "symbol": self.symbol,
             "interval": self.interval,
+            "market_type": self.market_type,
             "source": self.source.value,
             "total": self.total,
             "has_more": self.has_more,
@@ -247,6 +255,7 @@ class DataEvent:
             "event_type": self.event_type.value,
             "symbol": self.key.symbol,
             "interval": self.key.interval,
+            "market_type": self.key.market_type,
             "timestamp_ms": self.timestamp_ms,
         }
         if self.bar is not None:
@@ -336,6 +345,7 @@ class StreamInfo:
         return {
             "symbol": self.key.symbol,
             "interval": self.key.interval,
+            "market_type": self.key.market_type,
             "topic": self.key.topic,
             "status": self.status.value,
             "subscriber_count": self.subscriber_count,
@@ -370,6 +380,7 @@ class StorageBackend(Protocol):
         end_ms: int | None = None,
         limit: int | None = None,
         order: str = "ASC",
+        market_type: str = "spot",
     ) -> list[dict]:
         """Query bars from storage.  Returns list of row dicts."""
         ...
@@ -380,12 +391,13 @@ class StorageBackend(Protocol):
         interval: str,
         rows: list[dict],
         source: str = "data_manager",
+        market_type: str = "spot",
     ) -> int:
         """Insert or update bars.  Returns number of rows written."""
         ...
 
     def get_bounds(
-        self, symbol: str, interval: str,
+        self, symbol: str, interval: str, market_type: str = "spot",
     ) -> dict:
         """Return {earliest_open_time, latest_open_time, total_count}."""
         ...
@@ -396,6 +408,7 @@ class StorageBackend(Protocol):
         interval: str,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        market_type: str = "spot",
     ) -> int:
         """Delete bars in range.  Returns number of rows deleted."""
         ...
@@ -406,6 +419,7 @@ class StorageBackend(Protocol):
         interval: str,
         before_ms: int,
         limit: int = 500,
+        market_type: str = "spot",
     ) -> list[dict]:
         """Fetch bars before a timestamp, ordered ASC."""
         ...

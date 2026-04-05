@@ -106,6 +106,7 @@ class BinanceIngestionFactory:
         symbol: str,
         interval: str,
         on_bar: Callable[[dict], Awaitable[None]],
+        market_type: str = "spot",
     ) -> _IngestionHandle:
         """Start an ingestion stream for (symbol, interval).
 
@@ -114,9 +115,10 @@ class BinanceIngestionFactory:
         ``MarketEvent`` as a bar dict to ``on_bar()``.
 
         Args:
-            symbol:   Trading pair, e.g. "BTCUSDT".
-            interval: K-line interval, e.g. "1m".
-            on_bar:   Async callback ``(bar_dict) -> None``.
+            symbol:      Trading pair, e.g. "BTCUSDT".
+            interval:    K-line interval, e.g. "1m".
+            on_bar:      Async callback ``(bar_dict) -> None``.
+            market_type: "spot" or "futures".
 
         Returns:
             An ``_IngestionHandle`` with a ``stop()`` coroutine.
@@ -127,6 +129,7 @@ class BinanceIngestionFactory:
             symbol=symbol.upper(),
             stream_type=StreamType.KLINE,
             interval=interval,
+            market_type=market_type,
         )
 
         # Check if pipeline already exists (idempotent)

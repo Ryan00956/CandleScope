@@ -1,7 +1,24 @@
+import enum
 import re
 import calendar
 from datetime import datetime, timezone
 from typing import Optional
+
+
+class MarketType(str, enum.Enum):
+    """Supported market types."""
+    SPOT = "spot"
+    FUTURES = "futures"  # Binance USDT-M Perpetual
+
+    @classmethod
+    def from_str(cls, value: str | None) -> "MarketType":
+        """Parse a string into a MarketType, defaulting to SPOT."""
+        if value is None:
+            return cls.SPOT
+        v = value.strip().lower()
+        if v in ("futures", "perpetual", "perp", "usdt-m"):
+            return cls.FUTURES
+        return cls.SPOT
 
 VALID_INTERVALS = [
     "1s",

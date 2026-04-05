@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchExchangeInfo, refreshExchangeInfo } from "../services/api";
+import { symbolKey, parseSymbolKey } from "../utils/symbolKey";
 
 // ── Constants ────────────────────────────────────────────────
-const FAVORITES_KEY = "candlescope-favorite-symbols";
+const FAVORITES_KEY = "candlescope-favorite-symbols-v2";
 const QUOTE_CHIPS = ["USDT", "BTC", "ETH", "BNB", "FDUSD", "ALL"];
 const MARKET_TABS = [
   { key: "favorites", label: "★ 收藏", icon: "⭐" },
@@ -31,7 +32,7 @@ function saveFavorites(list) {
 
 // ── Component ────────────────────────────────────────────────
 export default function SymbolSearchModal({
-  open, onClose, currentSymbol, onSelect,
+  open, onClose, currentSymbol, currentMarketType, onSelect,
   watchlists, onAddToWatchlist,
 }) {
   const [search, setSearch] = useState("");
@@ -65,6 +66,7 @@ export default function SymbolSearchModal({
               ...s,
               exchange: s.exchange || "binance",
               marketType: s.marketType || "spot",
+              _key: symbolKey(s.symbol, s.marketType || "spot"),
             }));
             setAllSymbols(enriched);
           }
@@ -93,7 +95,7 @@ export default function SymbolSearchModal({
     // Market type
     if (marketType === "favorites") {
       const favSet = new Set(favorites);
-      list = list.filter((s) => favSet.has(s.symbol));
+      list = list.filter((s) => favSet.has(s._key));
     } else {
       list = list.filter((s) => s.marketType === marketType);
     }
@@ -131,19 +133,21 @@ export default function SymbolSearchModal({
 
   // ── Handlers ──
   const handleSelect = useCallback(
-    (sym) => {
-      if (sym !== currentSymbol) onSelect(sym);
+    (entry) => {
+      // entry is the full symbol object from the filtered list
+      const isSame = entry.symbol === currentSymbol && entry.marketType === (currentMarketType || "spot");
+      if (!isSame) onSelect({ symbol: entry.symbol, marketType: entry.marketType });
       onClose();
     },
-    [currentSymbol, onSelect, onClose],
+    [currentSymbol, currentMarketType, onSelect, onClose],
   );
 
-  const toggleFavorite = useCallback((sym, e) => {
+  const toggleFavorite = useCallback((sKey, e) => {
     e?.stopPropagation();
     setFavorites((prev) => {
-      const next = prev.includes(sym)
-        ? prev.filter((s) => s !== sym)
-        : [...prev, sym];
+      const next = prev.includes(sKey)
+        ? prev.filter((k) => k !== sKey)
+        : [...prev, sKey];
       saveFavorites(next);
       return next;
     });
@@ -172,6 +176,7 @@ export default function SymbolSearchModal({
           ...s,
           exchange: s.exchange || "binance",
           marketType: s.marketType || "spot",
+          _key: symbolKey(s.symbol, s.marketType || "spot"),
         }));
         setAllSymbols(enriched);
       }
@@ -183,12 +188,12 @@ export default function SymbolSearchModal({
   }, []);
 
   // ── Right-click handler for rows ──
-  const handleRowContextMenu = useCallback((e, sym) => {
+  const handleRowContextMenu = useCallback((e, sym, sKey) => {
     e.preventDefault();
     e.stopPropagation();
     // Only show if watchlists are provided
     if (!watchlists || watchlists.length === 0) return;
-    setCtxMenu({ x: e.clientX, y: e.clientY, symbol: sym });
+    setCtxMenu({ x: e.clientX, y: e.clientY, symbol: sym, _key: sKey });
   }, [watchlists]);
 
   // Dismiss context menu
@@ -243,7 +248,7 @@ export default function SymbolSearchModal({
       if (e.key === "Enter") {
         e.preventDefault();
         if (filtered[highlightIndex]) {
-          handleSelect(filtered[highlightIndex].symbol);
+          handleSelect(filtered[highlightIndex]);
         }
         return;
       }
@@ -266,9 +271,9 @@ export default function SymbolSearchModal({
   const favSet = useMemo(() => new Set(favorites), [favorites]);
 
   // ── Watchlist membership lookup ──
-  const getSymbolWatchlists = useCallback((sym) => {
+  const getSymbolWatchlists = useCallback((sKey) => {
     if (!watchlists) return [];
-    return watchlists.filter((wl) => wl.symbols.includes(sym));
+    return watchlists.filter((wl) => wl.symbols.includes(sKey));
   }, [watchlists]);
 
   if (!open) return null;
@@ -415,22 +420,22 @@ export default function SymbolSearchModal({
                 {visibleItems.map((s, i) => {
                   const realIndex = startIndex + i;
                   const isHighlighted = realIndex === highlightIndex;
-                  const isCurrent = s.symbol === currentSymbol;
-                  const isFav = favSet.has(s.symbol);
-                  const inWatchlists = getSymbolWatchlists(s.symbol);
+                  const isCurrent = s.symbol === currentSymbol && s.marketType === (currentMarketType || "spot");
+                  const isFav = favSet.has(s._key);
+                  const inWatchlists = getSymbolWatchlists(s._key);
 
                   return (
                     <div
-                      key={s.symbol}
+                      key={s._key}
                       className={`sym-modal-row ${isHighlighted ? "highlighted" : ""} ${isCurrent ? "current" : ""}`}
                       style={{ height: ROW_HEIGHT }}
-                      onClick={() => handleSelect(s.symbol)}
+                      onClick={() => handleSelect(s)}
                       onMouseEnter={() => setHighlightIndex(realIndex)}
-                      onContextMenu={(e) => handleRowContextMenu(e, s.symbol)}
+                      onContextMenu={(e) => handleRowContextMenu(e, s.symbol, s._key)}
                     >
                       <button
                         className={`sym-modal-fav-btn ${isFav ? "active" : ""}`}
-                        onClick={(e) => toggleFavorite(s.symbol, e)}
+                        onClick={(e) => toggleFavorite(s._key, e)}
                         title={isFav ? "取消收藏" : "添加收藏"}
                       >
                         {isFav ? "★" : "☆"}
@@ -505,14 +510,14 @@ export default function SymbolSearchModal({
           </div>
           <div className="sym-ctx-items">
             {watchlists.map((wl) => {
-              const alreadyIn = wl.symbols.includes(ctxMenu.symbol);
+              const alreadyIn = wl.symbols.includes(ctxMenu._key);
               return (
                 <button
                   key={wl.id}
                   className={`sym-ctx-item ${alreadyIn ? "already-in" : ""}`}
                   onClick={() => {
                     if (!alreadyIn && onAddToWatchlist) {
-                      onAddToWatchlist(wl.id, ctxMenu.symbol);
+                      onAddToWatchlist(wl.id, ctxMenu._key);
                     }
                     setCtxMenu(null);
                   }}

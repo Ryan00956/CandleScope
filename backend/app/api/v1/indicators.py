@@ -42,6 +42,7 @@ class ComputeRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
     symbol: str = Field("UNKNOWN", description="Symbol for context")
     interval: str = Field("1m", description="Interval for context")
+    market_type: str = Field("spot", description="Market type context")
     ohlcv: list[dict[str, Any]] = Field(default_factory=list, description="OHLCV bar data array")
     script: str | None = Field(None, description="Legacy Python script (optional)")
 
@@ -488,6 +489,7 @@ async def _compute_engine(name: str, req: ComputeRequest) -> dict:
         result = _engine.compute(
             symbol=req.symbol,
             interval=req.interval,
+            market_type=req.market_type,
             indicator_name=name,
             params=req.params,
             bars=bars,

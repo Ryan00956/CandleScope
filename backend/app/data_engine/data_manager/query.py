@@ -51,7 +51,7 @@ from .models import BarData, QueryResult, QuerySource, SeriesKey, StorageBackend
 logger = logging.getLogger("data_manager.query")
 
 # Signature for the optional backfill trigger callback
-BackfillTrigger = Callable[[str, str, int, int], None]
+BackfillTrigger = Callable[[str, str, int, int, str], None]
 
 
 def _aggregate_rows_to_interval(
@@ -130,6 +130,7 @@ class QueryEngine:
         start_ms: int | None = None,
         end_ms: int | None = None,
         limit: int | None = None,
+        market_type: str = "spot",
     ) -> QueryResult:
         """Query bars for a (symbol, interval) with flexible parameters.
 
@@ -165,9 +166,10 @@ class QueryEngine:
                 end_ms=end_ms,
                 limit=limit,
                 started_at=t0,
+                market_type=market_type,
             )
 
-        key = SeriesKey(symbol, interval)
+        key = SeriesKey(symbol, interval, market_type=market_type)
 
         # Ephemeral intervals are cache-only — skip storage and backfill
         from app.core.market import is_ephemeral_interval
@@ -201,6 +203,7 @@ class QueryEngine:
                 bars=cached,
                 symbol=key.symbol,
                 interval=key.interval,
+                market_type=key.market_type,
                 source=QuerySource.CACHE,
                 total=len(cached),
                 has_more=self._cache.series_count(key) > len(cached),
@@ -222,6 +225,7 @@ class QueryEngine:
                     end_ms=end_ms,
                     limit=effective_limit,
                     order="DESC",
+                    market_type=key.market_type,
                 )
                 rows.reverse()
                 storage_bars = [BarData.from_storage_row(r) for r in rows]
@@ -261,6 +265,7 @@ class QueryEngine:
                 bars=[],
                 symbol=key.symbol,
                 interval=key.interval,
+                market_type=key.market_type,
                 source=QuerySource.EMPTY,
                 total=0,
                 has_more=False,
@@ -329,6 +334,7 @@ class QueryEngine:
             bars=merged,
             symbol=key.symbol,
             interval=key.interval,
+            market_type=key.market_type,
             source=source,
             total=len(merged),
             has_more=True,  # conservative — caller can paginate
@@ -342,9 +348,10 @@ class QueryEngine:
 
     def query_latest(
         self, symbol: str, interval: str, limit: int = 500,
+        market_type: str = "spot",
     ) -> QueryResult:
         """Shorthand for getting the latest N bars."""
-        return self.query(symbol, interval, limit=limit)
+        return self.query(symbol, interval, limit=limit, market_type=market_type)
 
     def query_before(
         self,
@@ -352,15 +359,13 @@ class QueryEngine:
         interval: str,
         before_ms: int,
         limit: int = 500,
+        market_type: str = "spot",
     ) -> QueryResult:
-        """Query bars strictly before a timestamp (for pagination).
-
-        Useful for "load more" / infinite scroll in the chart.
-        """
+        """Query bars strictly before a timestamp (for pagination)."""
         if is_custom_interval(interval):
-            return self._query_custom_before(symbol, interval, before_ms, limit)
+            return self._query_custom_before(symbol, interval, before_ms, limit, market_type=market_type)
 
-        key = SeriesKey(symbol, interval)
+        key = SeriesKey(symbol, interval, market_type=market_type)
         before_s = before_ms // 1000
         effective_limit = min(limit, self._cfg.max_limit)
 
@@ -372,6 +377,7 @@ class QueryEngine:
                 bars=cached,
                 symbol=key.symbol,
                 interval=key.interval,
+                market_type=key.market_type,
                 source=QuerySource.CACHE,
                 total=len(cached),
                 has_more=self._cache.series_count(key) > len(cached),
@@ -388,6 +394,7 @@ class QueryEngine:
                 bars=cached,
                 symbol=key.symbol,
                 interval=key.interval,
+                market_type=key.market_type,
                 source=QuerySource.CACHE,
                 total=len(cached),
                 has_more=True,
@@ -403,6 +410,7 @@ class QueryEngine:
                     interval=key.interval,
                     before_ms=before_ms,
                     limit=effective_limit,
+                    market_type=key.market_type,
                 )
                 storage_bars = [BarData.from_storage_row(r) for r in rows]
                 if storage_bars:
@@ -455,6 +463,7 @@ class QueryEngine:
             bars=merged,
             symbol=key.symbol,
             interval=key.interval,
+            market_type=key.market_type,
             source=QuerySource.MIXED if storage_bars else QuerySource.CACHE,
             total=len(merged),
             has_more=has_more,
@@ -470,6 +479,7 @@ class QueryEngine:
         end_ms: int | None,
         limit: int | None,
         started_at: float,
+        market_type: str = "spot",
     ) -> QueryResult:
         """Serve custom intervals by aggregating a single base interval on read.
 
@@ -485,6 +495,7 @@ class QueryEngine:
                 bars=[],
                 symbol=symbol.upper(),
                 interval=interval,
+                market_type=market_type,
                 source=QuerySource.EMPTY,
                 total=0,
                 has_more=False,
@@ -521,6 +532,7 @@ class QueryEngine:
             start_ms=aligned_start_ms,
             end_ms=end_ms,
             limit=base_limit,
+            market_type=market_type,
         )
         derived_bars = self._aggregate_custom_bars(
             base_result.bars,
@@ -531,7 +543,7 @@ class QueryEngine:
         if len(derived_bars) > effective_limit:
             derived_bars = derived_bars[-effective_limit:]
 
-        key = SeriesKey(symbol, interval)
+        key = SeriesKey(symbol, interval, market_type=market_type)
         if derived_bars:
             self._cache.bulk_load(key, derived_bars)
 
@@ -540,6 +552,7 @@ class QueryEngine:
             bars=derived_bars,
             symbol=key.symbol,
             interval=key.interval,
+            market_type=key.market_type,
             source=base_result.source,
             total=len(derived_bars),
             has_more=base_result.has_more or len(derived_bars) >= effective_limit,
@@ -560,6 +573,7 @@ class QueryEngine:
         interval: str,
         before_ms: int,
         limit: int,
+        market_type: str = "spot",
     ) -> QueryResult:
         """Paginate custom intervals by rebuilding them from base bars."""
         started_at = time.monotonic()
@@ -569,6 +583,7 @@ class QueryEngine:
                 bars=[],
                 symbol=symbol.upper(),
                 interval=interval,
+                market_type=market_type,
                 source=QuerySource.EMPTY,
                 total=0,
                 has_more=False,
@@ -595,6 +610,7 @@ class QueryEngine:
             base_interval,
             end_ms=base_end_ms,
             limit=base_limit,
+            market_type=market_type,
         )
         derived_bars = self._aggregate_custom_bars(
             base_result.bars,
@@ -605,7 +621,7 @@ class QueryEngine:
         if len(derived_bars) > effective_limit:
             derived_bars = derived_bars[-effective_limit:]
 
-        key = SeriesKey(symbol, interval)
+        key = SeriesKey(symbol, interval, market_type=market_type)
         if derived_bars:
             self._cache.bulk_load(key, derived_bars)
 
@@ -613,6 +629,7 @@ class QueryEngine:
             bars=derived_bars,
             symbol=key.symbol,
             interval=key.interval,
+            market_type=key.market_type,
             source=base_result.source,
             total=len(derived_bars),
             has_more=bool(derived_bars) or base_result.backfill_triggered,
@@ -626,20 +643,9 @@ class QueryEngine:
             },
         )
 
-    def get_bounds(self, symbol: str, interval: str) -> dict:
-        """Get cache + storage bounds for a series.
-
-        Returns::
-            {
-                "cache_earliest": int | None,  # seconds
-                "cache_latest": int | None,
-                "cache_count": int,
-                "storage_earliest_ms": int | None,
-                "storage_latest_ms": int | None,
-                "storage_count": int | None,
-            }
-        """
-        key = SeriesKey(symbol, interval)
+    def get_bounds(self, symbol: str, interval: str, market_type: str = "spot") -> dict:
+        """Get cache + storage bounds for a series."""
+        key = SeriesKey(symbol, interval, market_type=market_type)
         ce, cl = self._cache.get_bounds(key)
         result: dict[str, Any] = {
             "cache_earliest": ce,
@@ -649,7 +655,7 @@ class QueryEngine:
 
         if self._storage is not None:
             try:
-                sb = self._storage.get_bounds(key.symbol, key.interval)
+                sb = self._storage.get_bounds(key.symbol, key.interval, market_type=key.market_type)
                 result.update({
                     "storage_earliest_ms": sb.get("earliest_open_time"),
                     "storage_latest_ms": sb.get("latest_open_time"),
@@ -814,6 +820,7 @@ class QueryEngine:
                     end_ms=gap_end_ms,
                     limit=5000,  # generous limit for gap fills
                     order="ASC",
+                    market_type=key.market_type,
                 )
                 fill_bars = [BarData.from_storage_row(r) for r in rows]
                 if fill_bars:
@@ -868,6 +875,7 @@ class QueryEngine:
             bars=bars,
             symbol=key.symbol,
             interval=key.interval,
+            market_type=key.market_type,
             source=QuerySource.CACHE,
             total=len(bars),
             has_more=self._cache.series_count(key) > len(bars),
@@ -963,6 +971,7 @@ class QueryEngine:
                 key.interval,
                 effective_start,
                 effective_end,
+                key.market_type,
             )
         except Exception as exc:
             logger.error("Backfill trigger failed: %s", exc, exc_info=True)

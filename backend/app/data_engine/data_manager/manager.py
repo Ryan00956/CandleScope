@@ -293,6 +293,7 @@ class DataManager:
         start_ms: int | None = None,
         end_ms: int | None = None,
         limit: int | None = None,
+        market_type: str = "spot",
     ) -> QueryResult:
         """Query K-line bars.
 
@@ -300,42 +301,43 @@ class DataManager:
         strategies, and API endpoints should all use this.
 
         Args:
-            symbol:    Trading pair, e.g. "BTCUSDT".
-            interval:  K-line interval, e.g. "1m", "5m", "1h", "1d".
-            start_ms:  Start time (ms, inclusive).  None = no lower bound.
-            end_ms:    End time (ms, inclusive).  None = no upper bound.
-            limit:     Max bars to return.  Default from config.
+            symbol:      Trading pair, e.g. "BTCUSDT".
+            interval:    K-line interval, e.g. "1m", "5m", "1h", "1d".
+            start_ms:    Start time (ms, inclusive).  None = no lower bound.
+            end_ms:      End time (ms, inclusive).  None = no upper bound.
+            limit:       Max bars to return.  Default from config.
+            market_type: "spot" or "futures".
 
         Returns:
             ``QueryResult`` with bars sorted ascending and metadata.
-
-        Example::
-
-            result = dm.query("BTCUSDT", "1m", limit=500)
-            for bar in result.bars:
-                print(bar.time, bar.close)
         """
+        market_type = self._normalize_market_type(market_type)
         return self.query_engine.query(
             symbol=symbol,
             interval=interval,
             start_ms=start_ms,
             end_ms=end_ms,
             limit=limit,
+            market_type=market_type,
         )
 
-    def query_latest(self, symbol: str, interval: str, limit: int = 500) -> QueryResult:
+    def query_latest(self, symbol: str, interval: str, limit: int = 500, market_type: str = "spot") -> QueryResult:
         """Get the latest N bars.  Shorthand for ``query(limit=N)``."""
-        return self.query_engine.query_latest(symbol, interval, limit)
+        market_type = self._normalize_market_type(market_type)
+        return self.query_engine.query_latest(symbol, interval, limit, market_type=market_type)
 
     def query_before(
         self, symbol: str, interval: str, before_ms: int, limit: int = 500,
+        market_type: str = "spot",
     ) -> QueryResult:
         """Get bars before a timestamp (for pagination / load-more)."""
-        return self.query_engine.query_before(symbol, interval, before_ms, limit)
+        market_type = self._normalize_market_type(market_type)
+        return self.query_engine.query_before(symbol, interval, before_ms, limit, market_type=market_type)
 
-    def get_bounds(self, symbol: str, interval: str) -> dict:
+    def get_bounds(self, symbol: str, interval: str, market_type: str = "spot") -> dict:
         """Get cache + storage bounds for a series."""
-        return self.query_engine.get_bounds(symbol, interval)
+        market_type = self._normalize_market_type(market_type)
+        return self.query_engine.get_bounds(symbol, interval, market_type=market_type)
 
     # ═══════════════════════════════════════════════════════════
     #  Event Subscription — for real-time consumers
@@ -346,6 +348,7 @@ class DataManager:
         callback: EventCallback,
         symbol: str | None = None,
         interval: str | None = None,
+        market_type: str = "spot",
         event_types: set[DataEventType] | None = None,
     ) -> SubscriptionHandle:
         """Subscribe to bar/stream events via callback.
@@ -374,7 +377,8 @@ class DataManager:
         """
         key = None
         if symbol and interval:
-            key = SeriesKey(symbol, interval)
+            market_type = self._normalize_market_type(market_type)
+            key = SeriesKey(symbol, interval, market_type=market_type)
         elif symbol or interval:
             raise ValueError(
                 "Both 'symbol' and 'interval' must be provided together, "
@@ -392,6 +396,7 @@ class DataManager:
         self,
         symbol: str | None = None,
         interval: str | None = None,
+        market_type: str = "spot",
         event_types: set[DataEventType] | None = None,
     ) -> AsyncIterator[DataEvent]:
         """Subscribe as an async iterator.
@@ -403,7 +408,8 @@ class DataManager:
         """
         key = None
         if symbol and interval:
-            key = SeriesKey(symbol, interval)
+            market_type = self._normalize_market_type(market_type)
+            key = SeriesKey(symbol, interval, market_type=market_type)
         elif symbol or interval:
             raise ValueError(
                 "Both 'symbol' and 'interval' must be provided together, "
@@ -418,44 +424,30 @@ class DataManager:
     #  Stream Management
     # ═══════════════════════════════════════════════════════════
 
-    async def ensure_stream(self, symbol: str, interval: str) -> StreamInfo:
+    async def ensure_stream(self, symbol: str, interval: str, market_type: str = "spot") -> StreamInfo:
         """Ensure a live data stream is running.
-
-        If the stream is already active, returns immediately.
-        If ``auto_start_ingestion`` is True, starts the pipeline.
 
         Also registers the (symbol, interval) target with the
         BarAggregator so that incoming data is aggregated.
-
-        For **non-standard intervals** (e.g. 7m, 11m, 45m), the base
-        interval (typically 1m) is also registered as an aggregation
-        target, ensuring the Router can fan out 1m data to the custom
-        interval.  The coordinator handles reusing the base interval's
-        WS connection instead of opening a new one.
-
-        This is typically called when:
-          * A user opens a chart for a new symbol/interval
-          * A strategy subscribes to a new data feed
-          * The system prewarms on startup
         """
-        stream_key = SeriesKey(symbol, interval)
+        market_type = self._normalize_market_type(market_type)
+        stream_key = SeriesKey(symbol, interval, market_type=market_type)
         had_stream = stream_key in self.coordinator._streams
 
         # Register aggregation target
-        self.bar_aggregator.add_target(symbol, interval)
+        self.bar_aggregator.add_target(symbol, interval, market_type=market_type)
 
         # For non-standard intervals, also register the base interval
-        # so the Router has a source target to receive and fan out data.
         from ..bar_aggregator.models import is_standard_interval
         if not is_standard_interval(interval):
-            base = self._cfg.coordinator.base_interval  # typically "1m"
-            self.bar_aggregator.add_target(symbol, base)
+            base = self._cfg.coordinator.base_interval
+            self.bar_aggregator.add_target(symbol, base, market_type=market_type)
 
-        info = await self.coordinator.ensure_stream(symbol, interval)
+        info = await self.coordinator.ensure_stream(symbol, interval, market_type=market_type)
 
         if not is_standard_interval(interval):
             try:
-                await self._seed_custom_interval(symbol, interval)
+                await self._seed_custom_interval(symbol, interval, market_type=market_type)
             except Exception as exc:
                 logger.warning(
                     "Failed to seed active custom bucket for %s@%s: %s",
@@ -463,7 +455,7 @@ class DataManager:
                     exc_info=True,
                 )
             if not had_stream:
-                self._trigger_custom_tail_repair(symbol, interval)
+                self._trigger_custom_tail_repair(symbol, interval, market_type=market_type)
         elif not had_stream:
             # ── Seed standard interval from storage/cache ────
             # On second+ startup, prewarm has loaded historical bars
@@ -477,7 +469,7 @@ class DataManager:
             # currently-forming bar's data from storage so that the
             # first realtime tick merges into the existing state.
             try:
-                await self._seed_standard_interval(symbol, interval)
+                await self._seed_standard_interval(symbol, interval, market_type=market_type)
             except Exception as exc:
                 logger.warning(
                     "Failed to seed standard interval %s@%s: %s",
@@ -487,14 +479,16 @@ class DataManager:
 
         return info
 
-    async def stop_stream(self, symbol: str, interval: str) -> None:
+    async def stop_stream(self, symbol: str, interval: str, market_type: str = "spot") -> None:
         """Stop a running data stream."""
-        await self.coordinator.stop_stream(symbol, interval)
-        self.bar_aggregator.remove_target(symbol, interval)
+        market_type = self._normalize_market_type(market_type)
+        await self.coordinator.stop_stream(symbol, interval, market_type=market_type)
+        self.bar_aggregator.remove_target(symbol, interval, market_type=market_type)
 
-    def get_stream_info(self, symbol: str, interval: str) -> StreamInfo | None:
+    def get_stream_info(self, symbol: str, interval: str, market_type: str = "spot") -> StreamInfo | None:
         """Get info about a specific stream."""
-        return self.coordinator.get_stream_info(symbol, interval)
+        market_type = self._normalize_market_type(market_type)
+        return self.coordinator.get_stream_info(symbol, interval, market_type=market_type)
 
     def get_all_streams(self) -> list[StreamInfo]:
         """Get info about all active streams."""
@@ -504,9 +498,10 @@ class DataManager:
     #  Cache Operations
     # ═══════════════════════════════════════════════════════════
 
-    def cache_invalidate(self, symbol: str, interval: str) -> None:
+    def cache_invalidate(self, symbol: str, interval: str, market_type: str = "spot") -> None:
         """Invalidate (clear) cached bars for a series."""
-        self.cache.invalidate(SeriesKey(symbol, interval))
+        market_type = self._normalize_market_type(market_type)
+        self.cache.invalidate(SeriesKey(symbol, interval, market_type=market_type))
 
     def cache_clear(self) -> None:
         """Clear all cached data."""
@@ -522,6 +517,7 @@ class DataManager:
         interval: str,
         bar: BarData,
         event_type: DataEventType = DataEventType.BAR_UPDATED,
+        market_type: str = "spot",
     ) -> None:
         """Push a bar event into the system.
 
@@ -534,10 +530,20 @@ class DataManager:
             bar:        The bar data.
             event_type: BAR_CREATED, BAR_UPDATED, or BAR_CLOSED.
         """
-        await self.coordinator.on_bar_event(symbol, interval, bar, event_type)
+        await self.coordinator.on_bar_event(
+            symbol,
+            interval,
+            bar,
+            event_type,
+            market_type=self._normalize_market_type(market_type),
+        )
 
     async def on_bars_backfilled(
-        self, symbol: str, interval: str, bars: list[BarData],
+        self,
+        symbol: str,
+        interval: str,
+        bars: list[BarData],
+        market_type: str = "spot",
     ) -> None:
         """Receive backfilled bars and merge into cache.
 
@@ -552,7 +558,8 @@ class DataManager:
         if not bars:
             return
 
-        key = SeriesKey(symbol, interval)
+        market_type = self._normalize_market_type(market_type)
+        key = SeriesKey(symbol, interval, market_type=market_type)
         self.cache.bulk_load(key, bars)
 
         # ── Post-backfill gap check ──────────────────────────
@@ -582,7 +589,7 @@ class DataManager:
                         )
                         if self.query_engine._backfill_trigger:
                             self.query_engine._backfill_trigger(
-                                symbol, interval, gap_start_ms, gap_end_ms,
+                                symbol, interval, gap_start_ms, gap_end_ms, market_type,
                             )
                         break  # One follow-up at a time to avoid storms
         except Exception as exc:
@@ -632,6 +639,10 @@ class DataManager:
         """Access the configuration (read-only reference)."""
         return self._cfg
 
+    @staticmethod
+    def _normalize_market_type(market_type: str) -> str:
+        return (market_type or "spot").strip().lower()
+
     # ═══════════════════════════════════════════════════════════
     #  Async Context Manager
     # ═══════════════════════════════════════════════════════════
@@ -678,7 +689,7 @@ class DataManager:
         bar_data = BarData.from_bar_state(bar_state)
         symbol = bar_state.symbol
         interval = bar_state.interval
-        key = SeriesKey(symbol, interval)
+        key = SeriesKey(symbol, interval, market_type=bar_state.market_type)
 
         # Map BarAggregator event types → DataManager event types
         event_type_map = {
@@ -753,6 +764,7 @@ class DataManager:
                 bar_state.interval,
                 [row],
                 source,
+                bar_state.market_type,
             )
         except Exception as exc:
             logger.warning(
@@ -765,7 +777,7 @@ class DataManager:
                 exc_info=True,
             )
 
-    async def _seed_custom_interval(self, symbol: str, interval: str) -> None:
+    async def _seed_custom_interval(self, symbol: str, interval: str, market_type: str = "spot") -> None:
         """Seed the currently-forming custom bucket from recent base bars.
 
         Without this, if a user subscribes midway through an active custom
@@ -779,6 +791,7 @@ class DataManager:
         once the data arrives.
         """
         symbol = symbol.upper()
+        market_type = self._normalize_market_type(market_type)
         pipeline = self.bar_aggregator.get_pipeline(interval)
         storage = self.query_engine._storage
         if pipeline is None or storage is None:
@@ -802,8 +815,9 @@ class DataManager:
             start_ms=fetch_start_ms,
             end_ms=now_ms,
             order="ASC",
+            market_type=market_type,
         )
-        base_key = SeriesKey(symbol, base_interval)
+        base_key = SeriesKey(symbol, base_interval, market_type=market_type)
         rows_by_open_time = {
             int(row["open_time"]): dict(row) for row in rows
         }
@@ -865,7 +879,7 @@ class DataManager:
                 if self.query_engine._backfill_trigger:
                     try:
                         self.query_engine._backfill_trigger(
-                            symbol, base_interval, bucket_start_ms, now_ms,
+                            symbol, base_interval, bucket_start_ms, now_ms, market_type,
                         )
                     except Exception as exc:
                         logger.warning(
@@ -881,12 +895,12 @@ class DataManager:
             return
 
         rows = sorted(rows_by_open_time.values(), key=lambda row: int(row["open_time"]))
-        current_state = pipeline.bar_state.get_active(symbol, bucket_start_ms)
+        current_state = pipeline.bar_state.get_active(market_type, symbol, bucket_start_ms)
         if self._custom_bucket_is_synced(current_state, rows):
             # Keep the cache aligned with the verified in-memory state so HTTP
             # latest queries and WS updates continue from the same last bar.
             self.cache.upsert(
-                SeriesKey(symbol, interval),
+                SeriesKey(symbol, interval, market_type=market_type),
                 BarData.from_bar_state(current_state),
             )
             return
@@ -896,7 +910,7 @@ class DataManager:
         # the next realtime tick would immediately overwrite the correct HTTP
         # snapshot with a bad last candle. Drop only the current bucket and
         # rebuild it from the base components.
-        pipeline.bar_state.expire_bar(symbol, bucket_start_ms)
+        pipeline.bar_state.expire_bar(market_type, symbol, bucket_start_ms)
 
         for row in rows:
             open_time_ms = int(row["open_time"])
@@ -914,6 +928,7 @@ class DataManager:
                 volume=float(row.get("volume", 0)),
                 source=BarInputSource.BACKFILL if is_closed else BarInputSource.REALTIME,
                 is_closed=is_closed,
+                market_type=market_type,
                 quote_volume=float(row.get("quote_volume", 0) or 0),
                 trades=int(row.get("trades", 0) or 0),
                 taker_buy_base=float(row.get("taker_buy_base", 0) or 0),
@@ -921,17 +936,17 @@ class DataManager:
                 sequence=open_time_ms,
             )
             await self.bar_aggregator._handle_bar_input(
-                symbol, interval, bar_input,
+                market_type, symbol, interval, bar_input,
             )
 
-        rebuilt_state = pipeline.bar_state.get_active(symbol, bucket_start_ms)
+        rebuilt_state = pipeline.bar_state.get_active(market_type, symbol, bucket_start_ms)
         if rebuilt_state is not None:
             # Seed replay emits many UPDATED events in the same event loop turn.
             # Those are subject to publisher throttling, so the cache may only
             # observe an early partial snapshot unless we explicitly persist the
             # final rebuilt state here.
             self.cache.upsert(
-                SeriesKey(symbol, interval),
+                SeriesKey(symbol, interval, market_type=market_type),
                 BarData.from_bar_state(rebuilt_state),
             )
 
@@ -972,7 +987,7 @@ class DataManager:
             state.tick_count == expected["components"]
         )
 
-    async def _seed_standard_interval(self, symbol: str, interval: str) -> None:
+    async def _seed_standard_interval(self, symbol: str, interval: str, market_type: str = "spot") -> None:
         """Seed the BarAggregator with the currently-forming standard bar.
 
         This is the counterpart of ``_seed_custom_interval()`` for standard
@@ -1002,6 +1017,7 @@ class DataManager:
         the bar whose bucket contains "now".
         """
         symbol = symbol.upper()
+        market_type = self._normalize_market_type(market_type)
         storage = self.query_engine._storage
         if storage is None:
             return
@@ -1019,7 +1035,7 @@ class DataManager:
 
         # If the aggregator already has an active bar for this bucket,
         # it was seeded by a previous call — nothing to do.
-        if pipeline.bar_state.get_active(symbol, bucket_start_ms) is not None:
+        if pipeline.bar_state.get_active(market_type, symbol, bucket_start_ms) is not None:
             return
 
         # ── Fetch the last bar from storage for the current bucket ──
@@ -1033,6 +1049,7 @@ class DataManager:
             end_ms=bucket_start_ms,
             limit=1,
             order="ASC",
+            market_type=market_type,
         )
 
         if not rows:
@@ -1074,6 +1091,7 @@ class DataManager:
             volume=float(row.get("volume", 0)),
             source=BarInputSource.MANUAL,
             is_closed=False,  # explicitly NOT closed — still forming
+            market_type=market_type,
             quote_volume=float(row.get("quote_volume", 0) or 0),
             trades=int(row.get("trades", 0) or 0),
             taker_buy_base=float(row.get("taker_buy_base", 0) or 0),
@@ -1082,7 +1100,7 @@ class DataManager:
         )
 
         await self.bar_aggregator._handle_bar_input(
-            symbol, interval, bar_input,
+            market_type, symbol, interval, bar_input,
         )
 
         logger.debug(
@@ -1092,7 +1110,7 @@ class DataManager:
             row.get("volume", 0),
         )
 
-    def _trigger_custom_tail_repair(self, symbol: str, interval: str) -> None:
+    def _trigger_custom_tail_repair(self, symbol: str, interval: str, market_type: str = "spot") -> None:
         """Force a recent custom-interval rebuild to overwrite stale rows.
 
         Historical custom bars may already be persisted with older, incorrect
@@ -1120,7 +1138,7 @@ class DataManager:
         start_ms = max(0, now_ms - repair_window_ms)
 
         try:
-            trigger(symbol.upper(), interval, start_ms, now_ms)
+            trigger(symbol.upper(), interval, start_ms, now_ms, self._normalize_market_type(market_type))
         except Exception as exc:
             logger.warning(
                 "Failed to trigger custom tail repair for %s@%s: %s",

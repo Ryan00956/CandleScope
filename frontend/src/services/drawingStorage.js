@@ -2,7 +2,8 @@
  * drawingStorage.js — Persist chart drawings to localStorage.
  *
  * Drawings are stored in data coordinates (time + price), which are
- * interval-independent, so we key by symbol only.
+ * interval-independent, so callers should pass a stable chart-scope key
+ * such as `spot:BTCUSDT` or `futures:BTCUSDT`.
  *
  * Storage key: `candlescope-drawings-{SYMBOL}`
  *

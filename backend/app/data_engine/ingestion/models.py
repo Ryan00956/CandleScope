@@ -71,16 +71,22 @@ class StreamDescriptor:
     stream_type: StreamType
     interval: str | None = None     # only for KLINE streams
     depth_levels: int | None = None  # only for DEPTH streams (5, 10, 20)
+    market_type: str = "spot"       # "spot" or "futures"
 
     @property
     def key(self) -> str:
-        """Unique pipeline key, e.g. 'BTCUSDT@kline_1m', 'BTCUSDT@aggTrade'."""
+        """Unique pipeline key, e.g. 'BTCUSDT@kline_1m', 'futures:BTCUSDT@kline_1m'."""
         symbol = self.symbol.upper()
         if self.stream_type == StreamType.KLINE:
-            return f"{symbol}@kline_{self.interval}"
-        if self.stream_type == StreamType.DEPTH and self.depth_levels:
-            return f"{symbol}@depth{self.depth_levels}"
-        return f"{symbol}@{self.stream_type.value}"
+            base = f"{symbol}@kline_{self.interval}"
+        elif self.stream_type == StreamType.DEPTH and self.depth_levels:
+            base = f"{symbol}@depth{self.depth_levels}"
+        else:
+            base = f"{symbol}@{self.stream_type.value}"
+        # Prefix with market_type for non-spot to keep backward compatibility
+        if self.market_type != "spot":
+            return f"{self.market_type}:{base}"
+        return base
 
     @property
     def ws_stream_name(self) -> str:

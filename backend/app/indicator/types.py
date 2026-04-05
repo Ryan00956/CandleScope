@@ -39,10 +39,12 @@ class IndicatorKey:
     interval: str
     indicator_name: str
     params: dict[str, Any] = field(default_factory=dict)
+    market_type: str = "spot"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", self.symbol.upper().strip())
         object.__setattr__(self, "interval", self.interval.strip())
+        object.__setattr__(self, "market_type", self.market_type.strip().lower())
         object.__setattr__(self, "indicator_name", self.indicator_name.upper().strip())
         # Freeze params into a hashable form
         if isinstance(self.params, dict):
@@ -56,13 +58,16 @@ class IndicatorKey:
 
     @property
     def uid(self) -> str:
-        """Human-readable unique ID: ``BTCUSDT:1m:MA:a3f1c8...``"""
-        return f"{self.symbol}:{self.interval}:{self.indicator_name}:{self.params_hash}"
+        """Human-readable unique ID including market type."""
+        return f"{self.market_type}:{self.symbol}:{self.interval}:{self.indicator_name}:{self.params_hash}"
 
     @property
     def series_topic(self) -> str:
-        """DataManager topic string: ``BTCUSDT@1m``"""
-        return f"{self.symbol}@{self.interval}"
+        """DataManager topic string matching ``SeriesKey.topic`` semantics."""
+        base = f"{self.symbol}@{self.interval}"
+        if self.market_type != "spot":
+            return f"{self.market_type}:{base}"
+        return base
 
     def __str__(self) -> str:
         return self.uid
@@ -253,6 +258,7 @@ class IndicatorResult:
             "name": self.meta.name,
             "symbol": self.key.symbol,
             "interval": self.key.interval,
+            "market_type": self.key.market_type,
             "params": dict(self.key.params),
             "outputs": {
                 name: output.to_dict()

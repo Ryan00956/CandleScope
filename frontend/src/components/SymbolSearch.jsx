@@ -12,7 +12,7 @@ import SymbolSearchModal from "./SymbolSearchModal";
  * to add symbols to their watchlist folders.
  */
 export default function SymbolSearch({
-  currentSymbol, onSelect,
+  currentSymbol, currentMarketType, onSelect,
   watchlists, onAddToWatchlist,
 }) {
   const [open, setOpen] = useState(false);
@@ -65,6 +65,9 @@ export default function SymbolSearch({
         title="搜索交易对 (Ctrl+K)"
       >
         <span className="symbol-name">{currentSymbol}</span>
+        {currentMarketType === "futures" && (
+          <span className="symbol-market-badge futures">合约</span>
+        )}
         <span className="symbol-exchange">Binance</span>
         <span className="symbol-shortcut-badge">
           <kbd>Ctrl</kbd><kbd>K</kbd>
@@ -76,6 +79,7 @@ export default function SymbolSearch({
         open={open}
         onClose={handleClose}
         currentSymbol={currentSymbol}
+        currentMarketType={currentMarketType}
         onSelect={handleSelect}
         watchlists={watchlists}
         onAddToWatchlist={onAddToWatchlist}

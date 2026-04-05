@@ -37,11 +37,16 @@ def _get_data_manager(websocket: WebSocket):
     return getattr(websocket.app.state, "data_manager", None)
 
 
+def _normalize_market_type(market_type: str) -> str:
+    return (market_type or "spot").strip().lower()
+
+
 @router.websocket("/klines")
 async def kline_stream(
     websocket: WebSocket,
     symbol: str = Query("BTCUSDT"),
     interval: str = Query("1m"),
+    market_type: str = Query("spot"),
 ) -> None:
     """Single-interval WebSocket stream.
 
@@ -50,6 +55,7 @@ async def kline_stream(
     """
     symbol = symbol.upper().strip()
     interval = interval.strip()
+    market_type = _normalize_market_type(market_type)
 
     await websocket.accept()
 
@@ -65,7 +71,7 @@ async def kline_stream(
 
     if dm is not None:
         # ── New architecture: DataManager-powered stream ─────
-        await _dm_single_stream(websocket, dm, symbol, interval)
+        await _dm_single_stream(websocket, dm, symbol, interval, market_type=market_type)
     else:
         # ── Legacy fallback: direct Binance WS ──────────────
         await _legacy_single_stream(websocket, symbol, interval)
@@ -75,6 +81,7 @@ async def kline_stream(
 async def kline_stream_multi(
     websocket: WebSocket,
     symbol: str = Query("BTCUSDT"),
+    market_type: str = Query("spot"),
 ) -> None:
     """Multi-interval WebSocket endpoint.
 
@@ -88,13 +95,19 @@ async def kline_stream_multi(
         "ping"  -> responds "pong"
     """
     symbol = symbol.upper().strip()
+    market_type = _normalize_market_type(market_type)
     await websocket.accept()
-    await websocket.send_json({"type": "connected", "symbol": symbol})
+
+    try:
+        await websocket.send_json({"type": "connected", "symbol": symbol, "market_type": market_type})
+    except (WebSocketDisconnect, RuntimeError, Exception):
+        # Client disconnected between accept() and first send — nothing to do
+        return
 
     dm = _get_data_manager(websocket)
 
     if dm is not None:
-        await _dm_multi_stream(websocket, dm, symbol)
+        await _dm_multi_stream(websocket, dm, symbol, market_type=market_type)
     else:
         await _legacy_multi_stream(websocket, symbol)
 
@@ -106,18 +119,20 @@ async def kline_stream_multi(
 
 async def _dm_single_stream(
     websocket: WebSocket, dm, symbol: str, interval: str,
+    market_type: str = "spot",
 ) -> None:
     """Stream bars for a single interval using DataManager's EventBus."""
     from app.data_engine.data_manager.models import DataEventType
 
     try:
         # Ensure the ingestion pipeline is running
-        await dm.ensure_stream(symbol, interval)
+        await dm.ensure_stream(symbol, interval, market_type=market_type)
 
         await websocket.send_json({
             "type": "subscribed",
             "symbol": symbol,
             "interval": interval,
+            "market_type": market_type,
         })
 
         # Create a task for reading client messages (ping/pong)
@@ -129,7 +144,7 @@ async def _dm_single_stream(
         # Subscribe to DataManager events via async iterator
         stream_task = asyncio.create_task(
             _forward_events_to_ws(
-                websocket, dm, symbol, [interval],
+                websocket, dm, symbol, [interval], market_type=market_type,
             ),
             name="ws_event_forwarder",
         )
@@ -158,6 +173,7 @@ async def _dm_single_stream(
 
 async def _dm_multi_stream(
     websocket: WebSocket, dm, symbol: str,
+    market_type: str = "spot",
 ) -> None:
     """Multi-interval stream using DataManager's EventBus."""
     from app.data_engine.data_manager.models import DataEventType
@@ -203,6 +219,7 @@ async def _dm_multi_stream(
                     "type": "backfill_completed",
                     "symbol": event.key.symbol,
                     "interval": event.key.interval,
+                    "market_type": event.key.market_type,
                     "detail": event.detail or {},
                 }
                 await asyncio.wait_for(
@@ -214,6 +231,7 @@ async def _dm_multi_stream(
                 "type": "kline",
                 "symbol": event.key.symbol,
                 "interval": event.key.interval,
+                "market_type": event.key.market_type,
                 "data": event.bar.to_dict() if event.bar else {},
             }
             # Add is_closed flag
@@ -288,11 +306,12 @@ async def _dm_multi_stream(
                 if action == "subscribe":
                     for iv in valid:
                         if iv not in active_intervals:
-                            await dm.ensure_stream(symbol, iv)
+                            await dm.ensure_stream(symbol, iv, market_type=market_type)
                             handle = dm.subscribe(
                                 callback=_event_callback,
                                 symbol=symbol,
                                 interval=iv,
+                                market_type=market_type,
                                 event_types={
                                     DataEventType.BAR_CREATED,
                                     DataEventType.BAR_UPDATED,
@@ -307,6 +326,7 @@ async def _dm_multi_stream(
                         "type": "subscribed",
                         "symbol": symbol,
                         "intervals": valid,
+                        "market_type": market_type,
                     })
 
                 elif action == "unsubscribe":
@@ -316,6 +336,7 @@ async def _dm_multi_stream(
                         "type": "unsubscribed",
                         "symbol": symbol,
                         "intervals": valid,
+                        "market_type": market_type,
                     })
 
                 else:
@@ -344,7 +365,11 @@ async def _dm_multi_stream(
 
 
 async def _forward_events_to_ws(
-    websocket: WebSocket, dm, symbol: str, intervals: list[str],
+    websocket: WebSocket,
+    dm,
+    symbol: str,
+    intervals: list[str],
+    market_type: str = "spot",
 ) -> None:
     """Forward DataManager events to a WebSocket client."""
     from app.data_engine.data_manager.models import DataEventType
@@ -354,6 +379,7 @@ async def _forward_events_to_ws(
         async for event in dm.subscribe_iter(
             symbol=symbol,
             interval=interval,
+            market_type=market_type,
             event_types={
                 DataEventType.BAR_CREATED,
                 DataEventType.BAR_UPDATED,
@@ -364,6 +390,7 @@ async def _forward_events_to_ws(
                 "type": "kline",
                 "symbol": event.key.symbol,
                 "interval": event.key.interval,
+                "market_type": event.key.market_type,
                 "data": event.bar.to_dict() if event.bar else {},
             }
             if event.event_type == DataEventType.BAR_CLOSED:

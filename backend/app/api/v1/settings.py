@@ -57,6 +57,11 @@ class ProxyTestRequest(BaseModel):
     custom_proxy: str | None = None
 
 
+class StorageMaintenanceRequest(BaseModel):
+    """Optional scope for storage repair/gap scan operations."""
+    symbols: list[str] = []
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Helpers
 # ═══════════════════════════════════════════════════════════════
@@ -65,6 +70,19 @@ class ProxyTestRequest(BaseModel):
 def _normalize_market_type(value: str | None) -> str:
     """Normalize API market type values to the internal canonical form."""
     return MarketType.from_str(value).value
+
+
+def _normalize_symbol_list(symbols: list[str] | None) -> list[str]:
+    """Normalize a user-supplied symbol filter."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols or []:
+        sym = str(symbol).upper().strip()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        normalized.append(sym)
+    return normalized
 
 
 def _get_system_proxy() -> str | None:
@@ -454,9 +472,14 @@ async def test_proxy_connection(body: ProxyTestRequest) -> dict:
 
 
 @router.post("/storage/repair")
-async def repair_custom_storage(request: Request, market_type: str = "spot") -> dict:
+async def repair_custom_storage(
+    request: Request,
+    body: StorageMaintenanceRequest | None = None,
+    market_type: str = "spot",
+) -> dict:
     """Check and rebuild stored custom-interval rows from authoritative base data."""
     market_type = _normalize_market_type(market_type)
+    symbols_filter = _normalize_symbol_list(body.symbols if body else [])
     dm = _get_data_manager(request)
     backfill_engine = _get_backfill_engine(request)
     if dm is None or backfill_engine is None:
@@ -475,11 +498,18 @@ async def repair_custom_storage(request: Request, market_type: str = "spot") -> 
         now_ms = started_at_ms
         aggregator_config = dm.bar_aggregator.config.snapshot()
         series = await asyncio.to_thread(_list_custom_series, storage, market_type)
+        if symbols_filter:
+            allowed = set(symbols_filter)
+            series = [item for item in series if str(item.get("symbol", "")).upper() in allowed]
 
         if not series:
             return {
                 "status": "warning",
-                "message": "未发现已落库的自定义周期数据，无需修复",
+                "message": (
+                    "指定范围内未发现已落库的自定义周期数据，无需修复"
+                    if symbols_filter else
+                    "未发现已落库的自定义周期数据，无需修复"
+                ),
                 "checked_series": 0,
                 "repaired_series": 0,
                 "unchanged_series": 0,
@@ -490,6 +520,7 @@ async def repair_custom_storage(request: Request, market_type: str = "spot") -> 
                 "base_backfill_runs": 0,
                 "elapsed_ms": int(time.time() * 1000) - started_at_ms,
                 "market_type": market_type,
+                "symbols_filter": symbols_filter,
                 "results": [],
             }
 
@@ -706,13 +737,18 @@ async def repair_custom_storage(request: Request, market_type: str = "spot") -> 
             "total_stale_rows_removed": total_stale_rows_removed,
             "base_backfill_runs": base_backfill_runs,
             "market_type": market_type,
+            "symbols_filter": symbols_filter,
             "elapsed_ms": int(time.time() * 1000) - started_at_ms,
             "results": results,
         }
 
 
 @router.post("/storage/gap-scan")
-async def scan_and_fill_gaps(request: Request, market_type: str = "spot") -> dict:
+async def scan_and_fill_gaps(
+    request: Request,
+    body: StorageMaintenanceRequest | None = None,
+    market_type: str = "spot",
+) -> dict:
     """Scan all standard intervals for data gaps and fill them from Binance REST.
 
     This is a manual "repair all gaps" button.  Unlike the startup scan
@@ -723,6 +759,7 @@ async def scan_and_fill_gaps(request: Request, market_type: str = "spot") -> dic
     Returns a detailed report with per-interval results.
     """
     market_type = _normalize_market_type(market_type)
+    symbols_filter = _normalize_symbol_list(body.symbols if body else [])
     dm = _get_data_manager(request)
     backfill_engine = _get_backfill_engine(request)
     if dm is None or backfill_engine is None:
@@ -750,6 +787,12 @@ async def scan_and_fill_gaps(request: Request, market_type: str = "spot") -> dic
             item for item in series
             if str(item.get("interval", "")) in all_intervals
         ]
+        if symbols_filter:
+            allowed = set(symbols_filter)
+            standard_series = [
+                item for item in standard_series
+                if str(item.get("symbol", "")).upper() in allowed
+            ]
 
         results = []
         total_bars_filled = 0
@@ -921,6 +964,7 @@ async def scan_and_fill_gaps(request: Request, market_type: str = "spot") -> dic
             "status": status,
             "message": message,
             "market_type": market_type,
+            "symbols_filter": symbols_filter,
             "scanned_series": len(results),
             "gaps_found": gaps_found,
             "gaps_filled": gaps_filled,

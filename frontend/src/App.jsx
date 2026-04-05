@@ -1982,6 +1982,9 @@ export default function App() {
         onClose={() => setShowSettings(false)}
         settings={settings}
         onUpdate={setSettings}
+        currentSymbol={symbol}
+        currentMarketType={marketType}
+        watchlists={watchlists}
       />
 
       <footer className="status-bar" id="status-bar">

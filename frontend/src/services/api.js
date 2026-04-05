@@ -125,10 +125,12 @@ export async function testProxyConnection({ mode, custom_proxy }) {
     return response.json();
 }
 
-export async function repairStoredCustomIntervals(marketType = "spot") {
+export async function repairStoredCustomIntervals({ marketType = "spot", symbols = [] } = {}) {
     const url = `${API_BASE}/settings/storage/repair?market_type=${marketType}`;
     const response = await fetch(url, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbols }),
     });
     if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -137,10 +139,12 @@ export async function repairStoredCustomIntervals(marketType = "spot") {
     return response.json();
 }
 
-export async function scanAndFillGaps(marketType = "spot") {
+export async function scanAndFillGaps({ marketType = "spot", symbols = [] } = {}) {
     const url = `${API_BASE}/settings/storage/gap-scan?market_type=${marketType}`;
     const response = await fetch(url, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbols }),
     });
     if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));

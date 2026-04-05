@@ -7,6 +7,7 @@ import {
     scanAndFillGaps,
     refreshExchangeInfo,
 } from '../services/api';
+import { parseSymbolKey } from '../utils/symbolKey';
 
 // ── Category definitions ────────────────────────────────────────
 const CATEGORIES = [
@@ -116,7 +117,15 @@ function barsToMemorySize(bars) {
     return `≈ ${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
+export default function SettingsModal({
+    isOpen,
+    onClose,
+    settings,
+    onUpdate,
+    currentSymbol = '',
+    currentMarketType = 'spot',
+    watchlists = [],
+}) {
     const [activeCategory, setActiveCategory] = useState('appearance');
 
     // ── Proxy state ─────────────────────────────────────────
@@ -133,6 +142,7 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
     const [storageRepairResult, setStorageRepairResult] = useState(null);
     const [gapScanLoading, setGapScanLoading] = useState(false);
     const [gapScanResult, setGapScanResult] = useState(null);
+    const [maintenanceScope, setMaintenanceScope] = useState(null);
 
     // Load proxy settings when modal opens
     useEffect(() => {
@@ -141,6 +151,7 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
         setProxySaveMsg(null);
         setStorageRepairResult(null);
         setGapScanResult(null);
+        setMaintenanceScope(null);
         fetchProxySettings()
             .then((data) => {
                 setProxyMode(data.mode || 'system');
@@ -178,16 +189,41 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
         }
     }, [proxyMode, customProxy]);
 
-    const handleStorageRepair = useCallback(async () => {
+    const getCurrentScopeSymbols = useCallback(() => {
+        const symbol = String(currentSymbol || '').toUpperCase().trim();
+        return symbol ? [symbol] : [];
+    }, [currentSymbol]);
+
+    const getWatchlistScopeSymbols = useCallback(() => {
+        const collected = new Set(getCurrentScopeSymbols());
+        for (const wl of watchlists || []) {
+            for (const item of wl.symbols || []) {
+                const { symbol, marketType } = parseSymbolKey(item);
+                if ((marketType || 'spot') !== currentMarketType) continue;
+                const normalized = String(symbol || '').toUpperCase().trim();
+                if (normalized) collected.add(normalized);
+            }
+        }
+        return [...collected];
+    }, [currentMarketType, getCurrentScopeSymbols, watchlists]);
+
+    const handleStorageRepair = useCallback(async (scope) => {
+        const symbols = scope === 'watchlist' ? getWatchlistScopeSymbols() : getCurrentScopeSymbols();
         setStorageRepairLoading(true);
         setStorageRepairResult(null);
+        setMaintenanceScope(scope);
         try {
-            const res = await repairStoredCustomIntervals();
+            const res = await repairStoredCustomIntervals({
+                marketType: currentMarketType,
+                symbols,
+            });
             setStorageRepairResult(res);
         } catch (err) {
             setStorageRepairResult({
                 status: 'error',
                 message: `修复失败: ${err.message}`,
+                market_type: currentMarketType,
+                symbols_filter: symbols,
                 checked_series: 0, repaired_series: 0,
                 unchanged_series: 0, failed_series: 1,
                 total_deleted_rows: 0, total_written_rows: 0,
@@ -196,25 +232,32 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
         } finally {
             setStorageRepairLoading(false);
         }
-    }, []);
+    }, [currentMarketType, getCurrentScopeSymbols, getWatchlistScopeSymbols]);
 
-    const handleGapScan = useCallback(async () => {
+    const handleGapScan = useCallback(async (scope) => {
+        const symbols = scope === 'watchlist' ? getWatchlistScopeSymbols() : getCurrentScopeSymbols();
         setGapScanLoading(true);
         setGapScanResult(null);
+        setMaintenanceScope(scope);
         try {
-            const res = await scanAndFillGaps();
+            const res = await scanAndFillGaps({
+                marketType: currentMarketType,
+                symbols,
+            });
             setGapScanResult(res);
         } catch (err) {
             setGapScanResult({
                 status: 'error',
                 message: `扫描失败: ${err.message}`,
+                market_type: currentMarketType,
+                symbols_filter: symbols,
                 gaps_found: 0, gaps_filled: 0,
                 total_bars_filled: 0, results: [],
             });
         } finally {
             setGapScanLoading(false);
         }
-    }, []);
+    }, [currentMarketType, getCurrentScopeSymbols, getWatchlistScopeSymbols]);
 
     // ── Exchange info refresh ──
     const [exchangeRefreshLoading, setExchangeRefreshLoading] = useState(false);
@@ -260,6 +303,10 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
         if (status === 'failed') return '失败';
         return '通过';
     };
+
+    const currentScopeSymbols = getCurrentScopeSymbols();
+    const watchlistScopeSymbols = getWatchlistScopeSymbols();
+    const scopeLabel = maintenanceScope === 'watchlist' ? '自选 + 当前' : '当前图表';
 
     // ── Render category panels ──────────────────────────────
 
@@ -650,19 +697,39 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
                             </div>
                         </div>
                     </div>
-                    <button
-                        className="st-btn st-btn-warn"
-                        onClick={handleStorageRepair}
-                        disabled={storageRepairLoading}
-                        style={{ width: '100%' }}
-                    >
-                        {storageRepairLoading ? '⏳ 检查中...' : '检查并修正库内容'}
-                    </button>
+                    <div className="st-actions-row">
+                        <button
+                            className="st-btn st-btn-warn"
+                            onClick={() => handleStorageRepair('current')}
+                            disabled={storageRepairLoading || currentScopeSymbols.length === 0}
+                            style={{ flex: 1 }}
+                        >
+                            {storageRepairLoading && maintenanceScope === 'current'
+                                ? '⏳ 检查中...'
+                                : `当前图表 (${currentSymbol || '-'})`}
+                        </button>
+                        <button
+                            className="st-btn st-btn-secondary"
+                            onClick={() => handleStorageRepair('watchlist')}
+                            disabled={storageRepairLoading || watchlistScopeSymbols.length === 0}
+                            style={{ flex: 1 }}
+                        >
+                            {storageRepairLoading && maintenanceScope === 'watchlist'
+                                ? '⏳ 检查中...'
+                                : `自选 + 当前 (${watchlistScopeSymbols.length})`}
+                        </button>
+                    </div>
                 </div>
 
                 {storageRepairResult && (
                     <div className={`st-result ${getRepairResultClassName(storageRepairResult.status)}`}>
                         <div className="st-result-head">{storageRepairResult.message}</div>
+                        <div className="st-result-detail">
+                            范围: {scopeLabel} · 市场: {storageRepairResult.market_type || currentMarketType}
+                            {Array.isArray(storageRepairResult.symbols_filter) && storageRepairResult.symbols_filter.length > 0
+                                ? ` · 品种 ${storageRepairResult.symbols_filter.length}`
+                                : ''}
+                        </div>
                         <div className="st-result-stats">
                             <span>检查 {storageRepairResult.checked_series || 0}</span>
                             <span>修复 {storageRepairResult.repaired_series || 0}</span>
@@ -685,19 +752,39 @@ export default function SettingsModal({ isOpen, onClose, settings, onUpdate }) {
                             </div>
                         </div>
                     </div>
-                    <button
-                        className="st-btn st-btn-accent"
-                        onClick={handleGapScan}
-                        disabled={gapScanLoading || storageRepairLoading}
-                        style={{ width: '100%' }}
-                    >
-                        {gapScanLoading ? '⏳ 扫描修复中...' : '🔍 扫描并补齐缺口'}
-                    </button>
+                    <div className="st-actions-row">
+                        <button
+                            className="st-btn st-btn-accent"
+                            onClick={() => handleGapScan('current')}
+                            disabled={gapScanLoading || storageRepairLoading || currentScopeSymbols.length === 0}
+                            style={{ flex: 1 }}
+                        >
+                            {gapScanLoading && maintenanceScope === 'current'
+                                ? '⏳ 扫描中...'
+                                : `当前图表 (${currentSymbol || '-'})`}
+                        </button>
+                        <button
+                            className="st-btn st-btn-secondary"
+                            onClick={() => handleGapScan('watchlist')}
+                            disabled={gapScanLoading || storageRepairLoading || watchlistScopeSymbols.length === 0}
+                            style={{ flex: 1 }}
+                        >
+                            {gapScanLoading && maintenanceScope === 'watchlist'
+                                ? '⏳ 扫描中...'
+                                : `自选 + 当前 (${watchlistScopeSymbols.length})`}
+                        </button>
+                    </div>
                 </div>
 
                 {gapScanResult && (
                     <div className={`st-result ${getRepairResultClassName(gapScanResult.status)}`}>
                         <div className="st-result-head">{gapScanResult.message}</div>
+                        <div className="st-result-detail">
+                            范围: {scopeLabel} · 市场: {gapScanResult.market_type || currentMarketType}
+                            {Array.isArray(gapScanResult.symbols_filter) && gapScanResult.symbols_filter.length > 0
+                                ? ` · 品种 ${gapScanResult.symbols_filter.length}`
+                                : ''}
+                        </div>
                         <div className="st-result-stats">
                             <span>发现缺口 {gapScanResult.gaps_found || 0}</span>
                             <span>已修复 {gapScanResult.gaps_filled || 0}</span>

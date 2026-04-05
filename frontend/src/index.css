@@ -461,6 +461,25 @@ body {
   color: var(--accent-purple);
   background: rgba(139, 92, 246, 0.15);
 }
+.wl-exchange-badge {
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  padding: 1px 4px;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+  color: #888;
+  background: rgba(128, 128, 128, 0.12);
+}
+.wl-exchange-badge.binance {
+  color: #f0b90b;
+  background: rgba(240, 185, 11, 0.12);
+}
+.wl-exchange-badge.okx {
+  color: var(--text-secondary, #aaa);
+  background: rgba(128, 128, 128, 0.15);
+}
 
 /* ── Price columns ── */
 .wl-col-price,

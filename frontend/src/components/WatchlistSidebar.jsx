@@ -554,10 +554,11 @@ export default function WatchlistSidebar({
           {/* Tier dot */}
           {tierDot && <span className={`wl-tier-dot ${tierDot}`} title={tierVal === "full" ? "完全订阅" : "仅价格"}/>}
 
-          {/* Symbol name + market badge */}
+          {/* Symbol name + market badge + exchange badge */}
           <span className="wl-sym-name">
             {sym}
             {mt === "futures" && <span className="wl-market-badge futures">合约</span>}
+            <span className={`wl-exchange-badge ${ex}`}>{ex === "okx" ? "OKX" : ex === "binance" ? "币安" : ex.toUpperCase()}</span>
           </span>
 
           {/* Price columns — only if not "仅收藏" */}

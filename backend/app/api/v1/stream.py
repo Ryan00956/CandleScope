@@ -19,6 +19,7 @@ import json
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 from app.core.market import VALID_INTERVALS, parse_custom_interval
 
 router = APIRouter(prefix="/stream", tags=["stream"])
@@ -41,11 +42,20 @@ def _normalize_market_type(market_type: str) -> str:
     return (market_type or "spot").strip().lower()
 
 
+def _normalize_exchange(exchange: str) -> str:
+    normalized = (exchange or "binance").strip().lower()
+    bootstrap_default_adapters()
+    if not get_exchange_registry().has(normalized):
+        return "binance"
+    return normalized
+
+
 @router.websocket("/klines")
 async def kline_stream(
     websocket: WebSocket,
     symbol: str = Query("BTCUSDT"),
     interval: str = Query("1m"),
+    exchange: str = Query("binance"),
     market_type: str = Query("spot"),
 ) -> None:
     """Single-interval WebSocket stream.
@@ -55,6 +65,7 @@ async def kline_stream(
     """
     symbol = symbol.upper().strip()
     interval = interval.strip()
+    exchange = _normalize_exchange(exchange)
     market_type = _normalize_market_type(market_type)
 
     await websocket.accept()
@@ -71,7 +82,7 @@ async def kline_stream(
 
     if dm is not None:
         # ── New architecture: DataManager-powered stream ─────
-        await _dm_single_stream(websocket, dm, symbol, interval, market_type=market_type)
+        await _dm_single_stream(websocket, dm, symbol, interval, exchange=exchange, market_type=market_type)
     else:
         # ── Legacy fallback: direct Binance WS ──────────────
         await _legacy_single_stream(websocket, symbol, interval)
@@ -81,6 +92,7 @@ async def kline_stream(
 async def kline_stream_multi(
     websocket: WebSocket,
     symbol: str = Query("BTCUSDT"),
+    exchange: str = Query("binance"),
     market_type: str = Query("spot"),
 ) -> None:
     """Multi-interval WebSocket endpoint.
@@ -95,11 +107,17 @@ async def kline_stream_multi(
         "ping"  -> responds "pong"
     """
     symbol = symbol.upper().strip()
+    exchange = _normalize_exchange(exchange)
     market_type = _normalize_market_type(market_type)
     await websocket.accept()
 
     try:
-        await websocket.send_json({"type": "connected", "symbol": symbol, "market_type": market_type})
+        await websocket.send_json({
+            "type": "connected",
+            "exchange": exchange,
+            "symbol": symbol,
+            "market_type": market_type,
+        })
     except (WebSocketDisconnect, RuntimeError, Exception):
         # Client disconnected between accept() and first send — nothing to do
         return
@@ -107,7 +125,7 @@ async def kline_stream_multi(
     dm = _get_data_manager(websocket)
 
     if dm is not None:
-        await _dm_multi_stream(websocket, dm, symbol, market_type=market_type)
+        await _dm_multi_stream(websocket, dm, symbol, exchange=exchange, market_type=market_type)
     else:
         await _legacy_multi_stream(websocket, symbol)
 
@@ -119,6 +137,7 @@ async def kline_stream_multi(
 
 async def _dm_single_stream(
     websocket: WebSocket, dm, symbol: str, interval: str,
+    exchange: str = "binance",
     market_type: str = "spot",
 ) -> None:
     """Stream bars for a single interval using DataManager's EventBus."""
@@ -126,10 +145,11 @@ async def _dm_single_stream(
 
     try:
         # Ensure the ingestion pipeline is running
-        await dm.ensure_stream(symbol, interval, market_type=market_type)
+        await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
 
         await websocket.send_json({
             "type": "subscribed",
+            "exchange": exchange,
             "symbol": symbol,
             "interval": interval,
             "market_type": market_type,
@@ -144,7 +164,7 @@ async def _dm_single_stream(
         # Subscribe to DataManager events via async iterator
         stream_task = asyncio.create_task(
             _forward_events_to_ws(
-                websocket, dm, symbol, [interval], market_type=market_type,
+                websocket, dm, symbol, [interval], exchange=exchange, market_type=market_type,
             ),
             name="ws_event_forwarder",
         )
@@ -173,6 +193,7 @@ async def _dm_single_stream(
 
 async def _dm_multi_stream(
     websocket: WebSocket, dm, symbol: str,
+    exchange: str = "binance",
     market_type: str = "spot",
 ) -> None:
     """Multi-interval stream using DataManager's EventBus."""
@@ -217,6 +238,7 @@ async def _dm_multi_stream(
             if event.event_type == DataEventType.BACKFILL_COMPLETED:
                 backfill_msg = {
                     "type": "backfill_completed",
+                    "exchange": event.key.exchange,
                     "symbol": event.key.symbol,
                     "interval": event.key.interval,
                     "market_type": event.key.market_type,
@@ -229,6 +251,7 @@ async def _dm_multi_stream(
 
             bar_dict = {
                 "type": "kline",
+                "exchange": event.key.exchange,
                 "symbol": event.key.symbol,
                 "interval": event.key.interval,
                 "market_type": event.key.market_type,
@@ -306,11 +329,12 @@ async def _dm_multi_stream(
                 if action == "subscribe":
                     for iv in valid:
                         if iv not in active_intervals:
-                            await dm.ensure_stream(symbol, iv, market_type=market_type)
+                            await dm.ensure_stream(symbol, iv, exchange=exchange, market_type=market_type)
                             handle = dm.subscribe(
                                 callback=_event_callback,
                                 symbol=symbol,
                                 interval=iv,
+                                exchange=exchange,
                                 market_type=market_type,
                                 event_types={
                                     DataEventType.BAR_CREATED,
@@ -324,6 +348,7 @@ async def _dm_multi_stream(
 
                     await _safe_send_json({
                         "type": "subscribed",
+                        "exchange": exchange,
                         "symbol": symbol,
                         "intervals": valid,
                         "market_type": market_type,
@@ -334,6 +359,7 @@ async def _dm_multi_stream(
                         active_intervals.discard(iv)
                     await _safe_send_json({
                         "type": "unsubscribed",
+                        "exchange": exchange,
                         "symbol": symbol,
                         "intervals": valid,
                         "market_type": market_type,
@@ -369,6 +395,7 @@ async def _forward_events_to_ws(
     dm,
     symbol: str,
     intervals: list[str],
+    exchange: str = "binance",
     market_type: str = "spot",
 ) -> None:
     """Forward DataManager events to a WebSocket client."""
@@ -379,6 +406,7 @@ async def _forward_events_to_ws(
         async for event in dm.subscribe_iter(
             symbol=symbol,
             interval=interval,
+            exchange=exchange,
             market_type=market_type,
             event_types={
                 DataEventType.BAR_CREATED,
@@ -388,6 +416,7 @@ async def _forward_events_to_ws(
         ):
             bar_dict = {
                 "type": "kline",
+                "exchange": event.key.exchange,
                 "symbol": event.key.symbol,
                 "interval": event.key.interval,
                 "market_type": event.key.market_type,

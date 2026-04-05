@@ -121,6 +121,12 @@ class BackfillConfig:
     fetch_concurrency: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_CONCURRENCY", 3),
     )
+    # Exchange-specific concurrency override for OKX.
+    # OKX public market endpoints are easy to hit with 429s during
+    # multi-interval backfills, so we serialize requests by default.
+    fetch_okx_concurrency: int = field(
+        default_factory=lambda: _env_int("BACKFILL_FETCH_OKX_CONCURRENCY", 1),
+    )
     # Bars per REST page (exchange limit is usually 1000)
     fetch_batch_size: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_BATCH_SIZE", 1000),
@@ -129,9 +135,17 @@ class BackfillConfig:
     fetch_rate_limit_delay: float = field(
         default_factory=lambda: _env_float("BACKFILL_FETCH_RATE_LIMIT_DELAY", 0.1),
     )
+    # OKX-specific minimum spacing between backfill requests.
+    fetch_okx_rate_limit_delay: float = field(
+        default_factory=lambda: _env_float("BACKFILL_FETCH_OKX_RATE_LIMIT_DELAY", 0.35),
+    )
     # Maximum retries for a single fetch task before giving up
     fetch_max_retries: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_MAX_RETRIES", 3),
+    )
+    # Additional backoff when the exchange returns HTTP 429.
+    fetch_429_backoff_seconds: float = field(
+        default_factory=lambda: _env_float("BACKFILL_FETCH_429_BACKOFF_SECONDS", 2.0),
     )
     # Per-request timeout (seconds), inherits from ingestion if 0
     fetch_timeout: int = field(

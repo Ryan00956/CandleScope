@@ -18,10 +18,35 @@ import logging
 import time
 from contextlib import suppress
 
+# ── Monkey-patch: websockets recv_messages bug ──────────────────
+# websockets ≥15 initializes ``recv_messages`` in ``connection_made``,
+# but if the TCP connection is reset (e.g. GFW) *before* that callback
+# fires, ``connection_lost`` crashes with:
+#   AttributeError: 'ClientConnection' object has no attribute 'recv_messages'
+# This patch makes ``connection_lost`` safe when the connection was
+# never fully established.
+try:
+    from websockets.asyncio.connection import Connection as _WsConnection
+
+    _orig_connection_lost = _WsConnection.connection_lost
+
+    def _safe_connection_lost(self, exc):
+        if not hasattr(self, "recv_messages"):
+            # Connection was reset before handshake; nothing to clean up.
+            return
+        _orig_connection_lost(self, exc)
+
+    _WsConnection.connection_lost = _safe_connection_lost
+except Exception:
+    pass
+# ── End monkey-patch ────────────────────────────────────────────
+
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.indicators import router as indicators_router  # indicator engine v2
+from app.api.v1.exchanges import router as exchanges_router
 from app.api.v1.klines import router as klines_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.stream import router as stream_router
@@ -52,6 +77,7 @@ app.include_router(klines_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
+app.include_router(exchanges_router, prefix="/api/v1")
 app.include_router(symbols_router, prefix="/api/v1")
 app.include_router(subscriptions_router, prefix="/api/v1")
 app.include_router(price_ws_router, prefix="/api/v1")
@@ -157,28 +183,53 @@ async def _init_data_manager() -> None:
         _BACKFILL_BASE_DELAY = 5  # seconds
 
         async def _load_backfilled_to_cache(
-            symbol: str, interval: str, start_ms: int, end_ms: int, market_type: str = "spot",
+            symbol: str,
+            interval: str,
+            start_ms: int,
+            end_ms: int,
+            exchange: str = "binance",
+            market_type: str = "spot",
         ) -> None:
             """Re-query storage for backfilled range and load into cache."""
             from app.data_engine.data_manager.models import BarData
             if is_custom_interval(interval):
                 result = await asyncio.to_thread(
-                    dm.query, symbol, interval, start_ms, end_ms, None, market_type,
+                    dm.query,
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    exchange=exchange,
+                    market_type=market_type,
                 )
                 if result.bars:
-                    await dm.on_bars_backfilled(symbol, interval, result.bars, market_type=market_type)
+                    await dm.on_bars_backfilled(
+                        symbol, interval, result.bars, exchange=exchange, market_type=market_type,
+                    )
             else:
                 rows = storage.query_bars(
-                    symbol=symbol, interval=interval,
-                    start_ms=start_ms, end_ms=end_ms,
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
                     order="ASC",
+                    exchange=exchange,
                     market_type=market_type,
                 )
                 bars = [BarData.from_storage_row(r) for r in rows]
                 if bars:
-                    await dm.on_bars_backfilled(symbol, interval, bars, market_type=market_type)
+                    await dm.on_bars_backfilled(
+                        symbol, interval, bars, exchange=exchange, market_type=market_type,
+                    )
 
-        def _backfill_trigger(symbol: str, interval: str, start_ms: int, end_ms: int, market_type: str = "spot") -> None:
+        def _backfill_trigger(
+            symbol: str,
+            interval: str,
+            start_ms: int,
+            end_ms: int,
+            exchange: str = "binance",
+            market_type: str = "spot",
+        ) -> None:
             """Synchronous trigger that schedules an async backfill run with retry."""
             async def _run_backfill() -> None:
                 for attempt in range(_BACKFILL_MAX_RETRIES):
@@ -188,6 +239,7 @@ async def _init_data_manager() -> None:
                             intervals=[interval],
                             range_start_ms=start_ms,
                             range_end_ms=end_ms,
+                            exchange=exchange,
                             market_type=market_type,
                         )
                         bars_written = (
@@ -215,7 +267,7 @@ async def _init_data_manager() -> None:
                             rr = report.reconcile_result
                             if hasattr(rr, 'bars_written') and rr.bars_written > 0:
                                 await _load_backfilled_to_cache(
-                                    symbol, interval, start_ms, end_ms, market_type,
+                                    symbol, interval, start_ms, end_ms, exchange, market_type,
                                 )
                         return  # done
 
@@ -286,10 +338,10 @@ async def _init_data_manager() -> None:
 
             scanned = 0
             filled = 0
-            for sym in dm.coordinator._cfg.prewarm_symbols:
+            for exchange, market_type, sym in dm.coordinator._iter_prewarm_targets():
                 for iv in dm.coordinator._cfg.prewarm_intervals:
                     try:
-                        bounds = storage.get_bounds(sym, iv)
+                        bounds = storage.get_bounds(sym, iv, exchange=exchange, market_type=market_type)
                         latest = bounds.get("latest_open_time")
                         if not latest:
                             continue
@@ -313,6 +365,8 @@ async def _init_data_manager() -> None:
                                 intervals=[iv],
                                 range_start_ms=latest,
                                 range_end_ms=now_ms,
+                                exchange=exchange,
+                                market_type=market_type,
                             )
                             bars_written = (
                                 report.reconcile_result.bars_written
@@ -320,15 +374,17 @@ async def _init_data_manager() -> None:
                             )
                             if bars_written > 0:
                                 filled += 1
-                                await _load_backfilled_to_cache(sym, iv, latest, now_ms)
+                                await _load_backfilled_to_cache(
+                                    sym, iv, latest, now_ms, exchange, market_type,
+                                )
                                 logger.info(
-                                    "Startup gap filled: %s@%s wrote %d bars",
-                                    sym, iv, bars_written,
+                                    "Startup gap filled: %s:%s:%s@%s wrote %d bars",
+                                    exchange, market_type, sym, iv, bars_written,
                                 )
                     except Exception as exc:
                         logger.warning(
-                            "Startup gap scan failed for %s@%s: %s",
-                            sym, iv, exc,
+                            "Startup gap scan failed for %s:%s:%s@%s: %s",
+                            exchange, market_type, sym, iv, exc,
                         )
 
             logger.info(
@@ -419,11 +475,10 @@ async def startup_event() -> None:
 
     # 2. Load exchange symbol info (non-blocking, best-effort)
     try:
-        from app.api.v1.symbols import load_exchange_info, load_futures_exchange_info
-        await load_exchange_info()
-        print("[startup] Spot exchange info loaded ✓")
-        await load_futures_exchange_info()
-        print("[startup] Futures exchange info loaded ✓")
+        from app.api.v1.symbols import refresh_exchange_metadata
+
+        counts = await refresh_exchange_metadata()
+        print(f"[startup] Exchange info loaded ✓ {counts}")
     except Exception as exc:
         print(f"[startup] Exchange info load failed (non-critical): {exc}")
 

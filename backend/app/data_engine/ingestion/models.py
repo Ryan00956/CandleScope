@@ -14,7 +14,7 @@ depth updates, etc.).
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -71,11 +71,12 @@ class StreamDescriptor:
     stream_type: StreamType
     interval: str | None = None     # only for KLINE streams
     depth_levels: int | None = None  # only for DEPTH streams (5, 10, 20)
+    exchange: str = "binance"
     market_type: str = "spot"       # "spot" or "futures"
 
     @property
     def key(self) -> str:
-        """Unique pipeline key, e.g. 'BTCUSDT@kline_1m', 'futures:BTCUSDT@kline_1m'."""
+        """Unique pipeline key, e.g. 'BTCUSDT@kline_1m', 'okx:futures:BTCUSDT@kline_1m'."""
         symbol = self.symbol.upper()
         if self.stream_type == StreamType.KLINE:
             base = f"{symbol}@kline_{self.interval}"
@@ -83,9 +84,13 @@ class StreamDescriptor:
             base = f"{symbol}@depth{self.depth_levels}"
         else:
             base = f"{symbol}@{self.stream_type.value}"
-        # Prefix with market_type for non-spot to keep backward compatibility
+        prefixes: list[str] = []
+        if self.exchange.strip().lower() != "binance":
+            prefixes.append(self.exchange.strip().lower())
         if self.market_type != "spot":
-            return f"{self.market_type}:{base}"
+            prefixes.append(self.market_type)
+        if prefixes:
+            return f"{':'.join(prefixes)}:{base}"
         return base
 
     @property
@@ -231,6 +236,8 @@ class RawMessage:
     stream_type: StreamType
     received_at_ms: int           # local timestamp when we received it
     endpoint: str = ""            # which URL / endpoint delivered this
+
+
 
 
 @dataclass(slots=True)

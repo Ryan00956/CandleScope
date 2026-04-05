@@ -165,9 +165,9 @@ class BarAggregator:
         # Per-interval pipelines: {interval → IntervalPipeline}
         self._pipelines: dict[str, IntervalPipeline] = {}
 
-        # Track which (market_type, symbol) are active per interval
+        # Track which (exchange, market_type, symbol) are active per interval
         # (redundant with router targets, but useful for fast lookup)
-        self._symbol_intervals: dict[tuple[str, str], set[str]] = {}
+        self._symbol_intervals: dict[tuple[str, str, str], set[str]] = {}
 
         # Timeout checker task
         self._timeout_task: asyncio.Task | None = None
@@ -199,7 +199,13 @@ class BarAggregator:
 
     # ── Public: Target Management ────────────────────────────
 
-    def add_target(self, symbol: str, interval: str, market_type: str = "spot") -> None:
+    def add_target(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> None:
         """Register a (symbol, interval) aggregation target.
 
         Creates the per-interval pipeline if it doesn't exist yet.
@@ -212,6 +218,7 @@ class BarAggregator:
             ValueError: If the interval string cannot be parsed
         """
         symbol = symbol.upper()
+        exchange = exchange.lower().strip()
         market_type = market_type.lower().strip()
         interval_ms = parse_interval_ms(interval)
         if interval_ms is None:
@@ -227,24 +234,31 @@ class BarAggregator:
             )
 
         # Register with router
-        self._router.register_target(symbol, interval, market_type=market_type)
+        self._router.register_target(symbol, interval, exchange=exchange, market_type=market_type)
 
         # Track
-        self._symbol_intervals.setdefault((market_type, symbol), set()).add(interval)
+        self._symbol_intervals.setdefault((exchange, market_type, symbol), set()).add(interval)
 
-    def remove_target(self, symbol: str, interval: str, market_type: str = "spot") -> None:
+    def remove_target(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> None:
         """Unregister a (symbol, interval) target.
 
         Does NOT destroy the pipeline — other symbols may use it.
         """
         symbol = symbol.upper()
+        exchange = exchange.lower().strip()
         market_type = market_type.lower().strip()
-        self._router.unregister_target(symbol, interval, market_type=market_type)
-        key = (market_type, symbol)
+        self._router.unregister_target(symbol, interval, exchange=exchange, market_type=market_type)
+        key = (exchange, market_type, symbol)
         if key in self._symbol_intervals:
             self._symbol_intervals[key].discard(interval)
 
-    def get_targets(self) -> list[tuple[str, str, str]]:
+    def get_targets(self) -> list[tuple[str, str, str, str]]:
         """Return all registered (symbol, interval) targets."""
         return self._router.get_targets()
 
@@ -259,14 +273,21 @@ class BarAggregator:
         await self._router.on_market_event(event)
 
     async def on_backfill_bars(
-        self, symbol: str, interval: str, bars: list[Any], market_type: str = "spot",
+        self,
+        symbol: str,
+        interval: str,
+        bars: list[Any],
+        exchange: str = "binance",
+        market_type: str = "spot",
     ) -> None:
         """Feed historical bars from the backfill engine.
 
         Each bar is converted to BarInput and processed through the
         full pipeline.
         """
-        await self._router.on_backfill_bars(symbol, interval, bars, market_type=market_type)
+        await self._router.on_backfill_bars(
+            symbol, interval, bars, exchange=exchange, market_type=market_type,
+        )
 
     async def on_custom_data(self, adapter_name: str, raw_data: Any) -> None:
         """Feed data through a registered custom adapter."""
@@ -319,28 +340,45 @@ class BarAggregator:
 
     # ── Public: State Queries ────────────────────────────────
 
-    def get_latest_bar(self, symbol: str, interval: str, market_type: str = "spot") -> BarState | None:
+    def get_latest_bar(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> BarState | None:
         """Get the most recent bar for a (symbol, interval) pair."""
         p = self._pipelines.get(interval)
         if p is None:
             return None
-        return p.bar_state.get_latest_bar(market_type, symbol)
+        return p.bar_state.get_latest_bar(exchange, market_type, symbol)
 
-    def get_active_bars(self, symbol: str, interval: str, market_type: str = "spot") -> list[BarState]:
+    def get_active_bars(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> list[BarState]:
         """Get all active (FORMING) bars for a (symbol, interval) pair."""
         p = self._pipelines.get(interval)
         if p is None:
             return []
-        return p.bar_state.get_all_active(market_type, symbol)
+        return p.bar_state.get_all_active(exchange, market_type, symbol)
 
     def get_recent_bars(
-        self, symbol: str, interval: str, limit: int = 100, market_type: str = "spot",
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 100,
+        exchange: str = "binance",
+        market_type: str = "spot",
     ) -> list[BarState]:
         """Get recently closed bars for a (symbol, interval) pair."""
         p = self._pipelines.get(interval)
         if p is None:
             return []
-        return p.bar_state.get_recent_closed(market_type, symbol, limit)
+        return p.bar_state.get_recent_closed(exchange, market_type, symbol, limit)
 
     # ── Public: Snapshot ─────────────────────────────────────
 
@@ -359,7 +397,12 @@ class BarAggregator:
     # ── Internal: Core Processing ────────────────────────────
 
     async def _handle_bar_input(
-        self, market_type: str, symbol: str, interval: str, bar_input: BarInput,
+        self,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+        bar_input: BarInput,
     ) -> None:
         """Core processing callback: L1 → L2 → L3 → L4 → L5.
 
@@ -377,11 +420,13 @@ class BarAggregator:
         # Check for event-driven close: if this input starts a new bucket,
         # close previous active bars for this symbol
         await self._check_event_driven_close(
-            market_type, symbol, interval, pipeline, bucket_start_ms, bar_input,
+            exchange, market_type, symbol, interval, pipeline, bucket_start_ms, bar_input,
         )
 
         # L3: Apply input to bar state
-        state, change = pipeline.bar_state.apply(market_type, symbol, bucket_start_ms, bar_input)
+        state, change = pipeline.bar_state.apply(
+            exchange, market_type, symbol, bucket_start_ms, bar_input,
+        )
 
         # Drain eviction buffers — emit events for bars that were
         # force-closed or expired during apply() due to limit enforcement.
@@ -407,7 +452,9 @@ class BarAggregator:
 
         if close_event is not None:
             # Seal the bar
-            closed = pipeline.bar_state.close_bar(market_type, symbol, bucket_start_ms)
+            closed = pipeline.bar_state.close_bar(
+                exchange, market_type, symbol, bucket_start_ms,
+            )
             if closed is not None:
                 await self._publisher.emit_closed(closed)
                 # Drain eviction buffers after close_bar() — closing a bar
@@ -416,6 +463,7 @@ class BarAggregator:
 
     async def _check_event_driven_close(
         self,
+        exchange: str,
         market_type: str,
         symbol: str,
         interval: str,
@@ -427,7 +475,7 @@ class BarAggregator:
         if not self._cfg.use_event_driven_close:
             return
 
-        active = pipeline.bar_state.get_all_active(market_type, symbol)
+        active = pipeline.bar_state.get_all_active(exchange, market_type, symbol)
         for state in active:
             if state.bucket_start_ms < new_bucket_start_ms:
                 trigger = FinalizeTrigger(
@@ -438,7 +486,7 @@ class BarAggregator:
                 close_event = pipeline.finalizer.check(state, trigger)
                 if close_event is not None:
                     closed = pipeline.bar_state.close_bar(
-                        market_type, symbol, state.bucket_start_ms,
+                        exchange, market_type, symbol, state.bucket_start_ms,
                     )
                     if closed is not None:
                         await self._publisher.emit_closed(closed)
@@ -486,7 +534,7 @@ class BarAggregator:
                 close_event = pipeline.finalizer.check_timeout(state)
                 if close_event is not None:
                     closed = pipeline.bar_state.close_bar(
-                        state.market_type, state.symbol, state.bucket_start_ms,
+                        state.exchange, state.market_type, state.symbol, state.bucket_start_ms,
                     )
                     if closed is not None:
                         await self._publisher.emit_closed(closed)
@@ -497,8 +545,8 @@ class BarAggregator:
         """Force-close all active bars (used during shutdown)."""
         for interval, pipeline in self._pipelines.items():
             for key in list(pipeline.bar_state._active.keys()):
-                market_type, symbol, bucket_start = key
-                closed = pipeline.bar_state.close_bar(market_type, symbol, bucket_start)
+                exchange, market_type, symbol, bucket_start = key
+                closed = pipeline.bar_state.close_bar(exchange, market_type, symbol, bucket_start)
                 if closed is not None:
                     await self._publisher.emit_closed(closed)
         logger.info("Flushed all active bars")

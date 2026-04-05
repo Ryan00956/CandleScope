@@ -14,6 +14,8 @@ to connect to and which REST endpoint + params to hit.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import time
 from typing import Any
@@ -21,6 +23,12 @@ from typing import Any
 import aiohttp
 import websockets
 from websockets.asyncio.client import ClientConnection
+
+from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.exchanges.ws_protocol import (
+    WsConnectionContext,
+    WsSubscriptionMode,
+)
 
 from .config import IngestionConfig
 from .metrics import LayerMetrics
@@ -34,33 +42,6 @@ from .models import (
 
 logger = logging.getLogger("ingestion.L1_Transport")
 
-# ─── REST endpoint mapping per StreamType ─────────────────────
-
-_REST_PATH: dict[str, dict[StreamType, str]] = {
-    "spot": {
-        StreamType.KLINE: "/api/v3/klines",
-        StreamType.AGG_TRADE: "/api/v3/aggTrades",
-        StreamType.TRADE: "/api/v3/trades",
-        StreamType.TICKER: "/api/v3/ticker/24hr",
-        StreamType.MINI_TICKER: "/api/v3/ticker/24hr",
-        StreamType.DEPTH: "/api/v3/depth",
-    },
-    "futures": {
-        StreamType.KLINE: "/fapi/v1/klines",
-        StreamType.AGG_TRADE: "/fapi/v1/aggTrades",
-        StreamType.TRADE: "/fapi/v1/trades",
-        StreamType.TICKER: "/fapi/v1/ticker/24hr",
-        StreamType.MINI_TICKER: "/fapi/v1/ticker/24hr",
-        StreamType.DEPTH: "/fapi/v1/depth",
-    },
-}
-
-def _get_rest_path(stream_type: StreamType, market_type: str = "spot") -> str | None:
-    """Resolve REST path by market type and stream type."""
-    paths = _REST_PATH.get(market_type, _REST_PATH["spot"])
-    return paths.get(stream_type)
-
-
 class TransportLayer:
     """Async HTTP + WS transport with endpoint rotation.
 
@@ -70,10 +51,12 @@ class TransportLayer:
     def __init__(self, config: IngestionConfig) -> None:
         self._cfg = config
         self._metrics = LayerMetrics("L1_Transport")
+        bootstrap_default_adapters()
+        self._registry = get_exchange_registry()
 
         # Endpoint rotation state
-        self._http_idx = 0
-        self._ws_idx = 0
+        self._http_idx: dict[tuple[str, str], int] = {}
+        self._ws_idx: dict[tuple[str, str], int] = {}
 
         # Shared HTTP session (created lazily)
         self._http_session: aiohttp.ClientSession | None = None
@@ -128,8 +111,8 @@ class TransportLayer:
     def snapshot(self) -> dict:
         return {
             "layer": "L1_Transport",
-            "active_http_endpoint": self._current_http_base(),
-            "active_ws_endpoint": self._current_ws_base(),
+            "active_http_endpoint": self.current_http_base,
+            "active_ws_endpoint": self.current_ws_base,
             "metrics": self._metrics.snapshot(),
         }
 
@@ -168,20 +151,27 @@ class TransportLayer:
         await self._ensure_http_session()
 
         desc = req.descriptor
+        exchange = getattr(desc, "exchange", "binance")
         market_type = getattr(desc, "market_type", "spot")
-        rest_path = _get_rest_path(desc.stream_type, market_type)
+        adapter = self._registry.get(exchange)
+        rest_path = adapter.get_rest_path(desc.stream_type, market_type)
         if rest_path is None:
             raise TransportError(f"No REST endpoint for stream type: {desc.stream_type}")
 
-        params = self._build_http_params(req)
-
-        http_urls = self._cfg.get_http_urls(market_type)
+        params = adapter.build_http_params(req)
+        http_urls = self._sanitize_http_urls(
+            exchange,
+            adapter.get_http_base_urls(market_type, config=self._cfg),
+        )
         last_exc: Exception | None = None
         tried = 0
         total = len(http_urls)
 
+        if total == 0:
+            raise TransportError(f"No HTTP endpoints configured for exchange: {exchange}")
+
         while tried < total:
-            base = self._current_http_base(market_type)
+            base = self._current_http_base(exchange, market_type, http_urls)
             url = f"{base}{rest_path}"
             try:
                 self._metrics.inc("http_requests_sent")
@@ -199,8 +189,7 @@ class TransportLayer:
                 self._metrics.mark("http_last_success_at")
                 now_ms = int(time.time() * 1000)
 
-                # Normalize response to list
-                rows = data if isinstance(data, list) else [data]
+                rows = adapter.extract_http_rows(data, desc.stream_type)
 
                 return [
                     RawMessage(
@@ -220,9 +209,8 @@ class TransportLayer:
                 logger.warning(
                     "HTTP fetch failed (%s): [%s] %s",
                     base, type(exc).__name__, exc,
-                    exc_info=True,
                 )
-                self._rotate_http()
+                self._rotate_http(exchange, market_type, len(http_urls))
                 tried += 1
 
         raise TransportError(
@@ -231,50 +219,146 @@ class TransportLayer:
 
     # ── Public: WebSocket ────────────────────────────────────
 
-    async def ws_connect(self, descriptor: StreamDescriptor) -> ClientConnection:
+    async def ws_connect(
+        self,
+        descriptor: StreamDescriptor,
+        *,
+        quiet: bool = False,
+    ) -> WsConnectionContext:
         """Open a raw WebSocket connection for the given stream.
 
         Returns the ``websockets`` connection object.
         The caller (L2 Session) is responsible for reading messages.
         Raises ``TransportError`` if ALL endpoints fail.
         """
-        stream_name = descriptor.ws_stream_name
+        exchange = getattr(descriptor, "exchange", "binance")
         market_type = getattr(descriptor, "market_type", "spot")
-        ws_urls = self._cfg.get_ws_urls(market_type)
+        adapter = self._registry.get(exchange)
+        subscription = adapter.build_ws_subscription(descriptor)
+        ws_urls = self._sanitize_ws_urls(
+            exchange,
+            adapter.get_ws_base_urls(market_type, config=self._cfg),
+        )
         last_exc: Exception | None = None
         tried = 0
         total = len(ws_urls)
 
+        if total == 0:
+            raise TransportError(f"No WS endpoints configured for exchange: {exchange}")
+
         while tried < total:
-            base = self._current_ws_base(market_type)
-            url = f"{base}/{stream_name}"
+            base = self._current_ws_base(exchange, market_type, ws_urls)
+            if subscription.mode == WsSubscriptionMode.PATH:
+                if not subscription.stream_name:
+                    raise TransportError(f"Missing WS stream name for {descriptor.key}")
+                url = f"{base}/{subscription.stream_name}"
+            else:
+                url = base
             try:
                 self._metrics.inc("ws_connect_attempts")
                 self._metrics.set("ws_active_endpoint", base)
                 self._metrics.mark("ws_last_connect_at")
 
-                conn = await websockets.connect(
-                    url,
-                    open_timeout=self._cfg.ws_open_timeout,
-                    close_timeout=2,
-                    ping_interval=self._cfg.ws_ping_interval,
-                    ping_timeout=self._cfg.ws_ping_timeout,
-                )
+                connect_kwargs: dict[str, Any] = {
+                    "open_timeout": self._cfg.ws_open_timeout,
+                    "close_timeout": 2,
+                    "ping_interval": self._cfg.ws_ping_interval,
+                    "ping_timeout": self._cfg.ws_ping_timeout,
+                }
+                # websockets ≥15 supports proxy natively.
+                # When proxy_mode == "none", pass proxy=None to
+                # disable the library's automatic system-proxy detection.
+                proxy = self._resolve_proxy()
+                proxy_mode = getattr(self._cfg, "proxy_mode", "system")
+                if proxy:
+                    connect_kwargs["proxy"] = proxy
+                elif proxy_mode == "none":
+                    connect_kwargs["proxy"] = None
+                # else: proxy_mode == "system" with no proxy detected →
+                #        let websockets auto-detect (do NOT pass proxy kwarg)
+
+                conn = await websockets.connect(url, **connect_kwargs)
 
                 self._metrics.inc("ws_connect_ok")
                 self._metrics.mark("ws_last_success_at")
                 logger.info("WS connected: %s", url)
-                return conn
+                return WsConnectionContext(
+                    connection=conn,
+                    endpoint=base,
+                    subscription=subscription,
+                )
 
             except Exception as exc:
                 last_exc = exc
                 self._metrics.inc("ws_connect_failed")
                 self._metrics.mark("ws_last_error_at")
-                logger.warning("WS connect failed (%s): %s", url, exc)
-                self._rotate_ws()
+                if quiet:
+                    logger.debug("WS connect failed (%s): %s", url, exc)
+                else:
+                    logger.warning("WS connect failed (%s): %s", url, exc)
+                self._rotate_ws(exchange, market_type, len(ws_urls))
                 tried += 1
 
         raise TransportError(f"All {total} WS endpoints failed") from last_exc
+
+    async def ws_subscribe(
+        self,
+        ctx: WsConnectionContext,
+        *,
+        quiet: bool = False,
+    ) -> None:
+        """Perform post-connect subscription handshake when required."""
+        spec = ctx.subscription
+        if spec.mode != WsSubscriptionMode.MESSAGE or spec.subscribe_payload is None:
+            return
+
+        try:
+            await ctx.connection.send(json.dumps(spec.subscribe_payload))
+        except Exception as exc:
+            raise TransportError(f"WS subscribe send failed: {exc}") from exc
+
+        if not spec.requires_subscribe_ack:
+            return
+
+        while True:
+            try:
+                raw_msg = await asyncio.wait_for(
+                    ctx.connection.recv(),
+                    timeout=self._cfg.ws_open_timeout,
+                )
+            except Exception as exc:
+                raise TransportError(f"WS subscribe ack failed: {exc}") from exc
+
+            try:
+                payload = json.loads(raw_msg) if isinstance(raw_msg, (str, bytes)) else raw_msg
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            if isinstance(payload, dict):
+                event = str(payload.get("event", "")).lower()
+                if event == "subscribe":
+                    return
+                if event == "error":
+                    raise TransportError(f"WS subscription rejected: {payload}")
+
+            ctx.prefetched_payloads.append(payload)
+
+    async def ws_unsubscribe(self, ctx: WsConnectionContext) -> None:
+        """Attempt a graceful unsubscribe for message-based protocols."""
+        spec = ctx.subscription
+        if spec.mode != WsSubscriptionMode.MESSAGE or spec.unsubscribe_payload is None:
+            return
+        try:
+            await ctx.connection.send(json.dumps(spec.unsubscribe_payload))
+        except Exception:
+            return
+
+    def supports_ws(self, descriptor: StreamDescriptor) -> bool:
+        """Return whether the current stack can stream this descriptor over WebSocket."""
+        exchange = getattr(descriptor, "exchange", "binance")
+        market_type = getattr(descriptor, "market_type", "spot")
+        adapter = self._registry.get(exchange)
+        return adapter.supports_ws_streaming(market_type)
 
     # ── Public: probe (used by L3 to test WS connectivity) ───
 
@@ -284,8 +368,9 @@ class TransportLayer:
         Returns True if connection succeeds, False otherwise.
         """
         try:
-            conn = await self.ws_connect(descriptor)
-            await conn.close()
+            ctx = await self.ws_connect(descriptor, quiet=True)
+            await self.ws_subscribe(ctx, quiet=True)
+            await ctx.connection.close()
             return True
         except TransportError:
             return False
@@ -295,62 +380,64 @@ class TransportLayer:
     @property
     def current_http_base(self) -> str:
         """The HTTP base URL currently in use."""
-        return self._current_http_base()
+        return self._current_http_base("binance", "spot", self._registry.get("binance").get_http_base_urls("spot", config=self._cfg))
 
     @property
     def current_ws_base(self) -> str:
         """The WS base URL currently in use."""
-        return self._current_ws_base()
-
-    # ── Internal: build HTTP params ──────────────────────────
-
-    @staticmethod
-    def _build_http_params(req: TransportRequest) -> dict[str, Any]:
-        """Build query params based on stream type."""
-        desc = req.descriptor
-        params: dict[str, Any] = {"symbol": desc.symbol.upper()}
-
-        if desc.stream_type == StreamType.KLINE:
-            params["interval"] = desc.interval
-            params["limit"] = req.limit
-            if req.start_ms is not None:
-                params["startTime"] = req.start_ms
-            if req.end_ms is not None:
-                params["endTime"] = req.end_ms
-
-        elif desc.stream_type in (StreamType.AGG_TRADE, StreamType.TRADE):
-            params["limit"] = req.limit
-            if req.start_ms is not None:
-                params["startTime"] = req.start_ms
-            if req.end_ms is not None:
-                params["endTime"] = req.end_ms
-
-        elif desc.stream_type in (StreamType.TICKER, StreamType.MINI_TICKER):
-            # /api/v3/ticker/24hr?symbol=BTCUSDT — no extra params needed
-            pass
-
-        elif desc.stream_type == StreamType.DEPTH:
-            params["limit"] = min(req.limit, 5000)
-
-        return params
+        return self._current_ws_base("binance", "spot", self._registry.get("binance").get_ws_base_urls("spot", config=self._cfg))
 
     # ── Internal: endpoint rotation ──────────────────────────
 
-    def _current_http_base(self, market_type: str = "spot") -> str:
-        urls = self._cfg.get_http_urls(market_type)
-        return urls[self._http_idx % len(urls)] if urls else ""
+    def _current_http_base(
+        self,
+        exchange: str,
+        market_type: str,
+        urls: list[str],
+    ) -> str:
+        key = (exchange, market_type)
+        idx = self._http_idx.get(key, 0)
+        return urls[idx % len(urls)] if urls else ""
 
-    def _current_ws_base(self, market_type: str = "spot") -> str:
-        urls = self._cfg.get_ws_urls(market_type)
-        return urls[self._ws_idx % len(urls)] if urls else ""
+    def _current_ws_base(
+        self,
+        exchange: str,
+        market_type: str,
+        urls: list[str],
+    ) -> str:
+        key = (exchange, market_type)
+        idx = self._ws_idx.get(key, 0)
+        return urls[idx % len(urls)] if urls else ""
 
-    def _rotate_http(self) -> None:
-        self._http_idx = (self._http_idx + 1) % max(len(self._cfg.http_base_urls), 1)
-        logger.debug("HTTP endpoint rotated → %s", self._current_http_base())
+    def _rotate_http(self, exchange: str, market_type: str, total: int) -> None:
+        key = (exchange, market_type)
+        self._http_idx[key] = (self._http_idx.get(key, 0) + 1) % max(total, 1)
+        urls = self._sanitize_http_urls(
+            exchange,
+            self._registry.get(exchange).get_http_base_urls(market_type, config=self._cfg),
+        )
+        logger.debug("HTTP endpoint rotated → %s", self._current_http_base(exchange, market_type, urls))
 
-    def _rotate_ws(self) -> None:
-        self._ws_idx = (self._ws_idx + 1) % max(len(self._cfg.ws_base_urls), 1)
-        logger.debug("WS endpoint rotated → %s", self._current_ws_base())
+    def _rotate_ws(self, exchange: str, market_type: str, total: int) -> None:
+        key = (exchange, market_type)
+        self._ws_idx[key] = (self._ws_idx.get(key, 0) + 1) % max(total, 1)
+        urls = self._sanitize_ws_urls(
+            exchange,
+            self._registry.get(exchange).get_ws_base_urls(market_type, config=self._cfg),
+        )
+        logger.debug("WS endpoint rotated → %s", self._current_ws_base(exchange, market_type, urls))
+
+    def _sanitize_http_urls(self, exchange: str, urls: list[str]) -> list[str]:
+        cleaned = [u for u in urls if u]
+        if exchange == "okx":
+            cleaned = [u for u in cleaned if "aws.okx.com" not in u]
+        return list(dict.fromkeys(cleaned))
+
+    def _sanitize_ws_urls(self, exchange: str, urls: list[str]) -> list[str]:
+        cleaned = [u for u in urls if u]
+        if exchange == "okx":
+            cleaned = [u for u in cleaned if "wsaws.okx.com" not in u]
+        return list(dict.fromkeys(cleaned))
 
     # ── Internal: HTTP session ───────────────────────────────
 

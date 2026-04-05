@@ -110,6 +110,24 @@ from .models import (
 
 logger = logging.getLogger("ingestion.L4_Normalize")
 
+_OKX_INTERVALS_TO_INTERNAL = {
+    "1s": "1s",
+    "1m": "1m",
+    "3m": "3m",
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1H": "1h",
+    "2H": "2h",
+    "4H": "4h",
+    "6H": "6h",
+    "12H": "12h",
+    "1D": "1d",
+    "3D": "3d",
+    "1W": "1w",
+    "1M": "1M",
+}
+
 
 class NormalizeLayer:
     """Converts ``RawMessage`` → ``MarketEvent``."""
@@ -202,6 +220,9 @@ class NormalizeLayer:
         if not isinstance(payload, dict):
             return None
 
+        if self._descriptor.exchange == "okx":
+            return self._parse_okx_ws(msg)
+
         if st == StreamType.KLINE:
             return self._parse_ws_kline(payload, msg)
         if st == StreamType.AGG_TRADE:
@@ -251,7 +272,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=StreamType.KLINE,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=int(payload.get("E", msg.received_at_ms)),
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -285,7 +306,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=StreamType.AGG_TRADE,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=int(payload.get("E", msg.received_at_ms)),
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -319,7 +340,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=StreamType.TRADE,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=int(payload.get("E", msg.received_at_ms)),
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -378,7 +399,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=st,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=int(payload.get("E", msg.received_at_ms)),
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -410,7 +431,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=StreamType.DEPTH,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=int(payload.get("E", msg.received_at_ms)),
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -425,6 +446,9 @@ class NormalizeLayer:
 
     def _parse_http(self, msg: RawMessage) -> MarketEvent | None:
         st = msg.stream_type
+
+        if self._descriptor.exchange == "okx":
+            return self._parse_okx_http(msg)
 
         if st == StreamType.KLINE:
             return self._parse_http_kline(msg)
@@ -478,7 +502,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=StreamType.KLINE,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=data["open_time"],
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -513,7 +537,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=StreamType.AGG_TRADE,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=data["trade_time_ms"],
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -548,7 +572,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=StreamType.TRADE,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=data["trade_time_ms"],
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -608,7 +632,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=st,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=int(p.get("closeTime", msg.received_at_ms)),
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -638,7 +662,7 @@ class NormalizeLayer:
         return MarketEvent(
             event_type=StreamType.DEPTH,
             symbol=self._descriptor.symbol,
-            exchange=self._cfg.exchange,
+            exchange=self._descriptor.exchange,
             event_time_ms=msg.received_at_ms,
             received_at_ms=msg.received_at_ms,
             source=msg.source,
@@ -647,9 +671,101 @@ class NormalizeLayer:
             sequence=data["last_update_id"],
         )
 
+    def _parse_okx_ws(self, msg: RawMessage) -> MarketEvent | None:
+        if msg.stream_type != StreamType.KLINE:
+            return None
+
+        payload = msg.payload
+        if not isinstance(payload, dict):
+            return None
+
+        rows = payload.get("data")
+        if not isinstance(rows, list) or not rows:
+            return None
+
+        arg = payload.get("arg") if isinstance(payload.get("arg"), dict) else {}
+        channel = str(arg.get("channel", ""))
+        return self._parse_okx_kline_row(rows[0], msg, channel=channel)
+
+    def _parse_okx_http(self, msg: RawMessage) -> MarketEvent | None:
+        if msg.stream_type != StreamType.KLINE:
+            return None
+        return self._parse_okx_kline_row(msg.payload, msg)
+
+    def _parse_okx_kline_row(
+        self,
+        row: object,
+        msg: RawMessage,
+        channel: str = "",
+    ) -> MarketEvent | None:
+        if not isinstance(row, (list, tuple)) or len(row) < 9:
+            logger.warning("OKX kline row too short (%s)", type(row).__name__)
+            return None
+
+        if channel.startswith("candle"):
+            raw_interval = channel[len("candle"):]
+            interval = _OKX_INTERVALS_TO_INTERNAL.get(raw_interval, self._descriptor.interval or "")
+        else:
+            interval = self._descriptor.interval or ""
+
+        open_time_ms = int(row[0])
+        data = {
+            "interval": interval,
+            "open_time": open_time_ms,
+            "close_time": _interval_close_time_ms(open_time_ms, interval),
+            "open": float(row[1]),
+            "high": float(row[2]),
+            "low": float(row[3]),
+            "close": float(row[4]),
+            "volume": float(row[5]),
+            "quote_volume": float(row[7]),
+            "trades": 0,
+            "taker_buy_base": 0.0,
+            "taker_buy_quote": 0.0,
+            "is_closed": str(row[8]) == "1",
+        }
+
+        return MarketEvent(
+            event_type=StreamType.KLINE,
+            symbol=self._descriptor.symbol,
+            exchange=self._descriptor.exchange,
+            event_time_ms=open_time_ms,
+            received_at_ms=msg.received_at_ms,
+            source=msg.source,
+            data=data,
+            stream_key=self._descriptor.key,
+            sequence=open_time_ms,
+        )
+
 
 # ─── Helpers ─────────────────────────────────────────────────
 
 def _truncate(obj, max_len: int = 200) -> str:
     s = str(obj)
     return s if len(s) <= max_len else s[:max_len] + "…"
+
+
+def _interval_close_time_ms(open_time_ms: int, interval: str) -> int:
+    interval_ms = _interval_to_ms(interval)
+    if interval_ms <= 0:
+        return open_time_ms
+    return open_time_ms + interval_ms - 1
+
+
+def _interval_to_ms(interval: str) -> int:
+    normalized = str(interval or "").strip()
+    if len(normalized) < 2:
+        return 0
+    unit = normalized[-1]
+    try:
+        amount = int(normalized[:-1])
+    except ValueError:
+        return 0
+    return amount * {
+        "s": 1000,
+        "m": 60_000,
+        "h": 3_600_000,
+        "d": 86_400_000,
+        "w": 604_800_000,
+        "M": 2_592_000_000,
+    }.get(unit, 0)

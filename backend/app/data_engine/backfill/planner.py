@@ -257,6 +257,7 @@ class BackfillPlanner:
                 priority=priority,
                 parent_gap=gap,
                 estimated_bars=estimated,
+                exchange=gap.exchange,
                 market_type=gap.market_type,
             )
             tasks.append(task)
@@ -325,6 +326,7 @@ class BackfillPlanner:
                     priority=priority,
                     parent_gap=gap,
                     estimated_bars=estimated,
+                    exchange=gap.exchange,
                     market_type=gap.market_type,
                     metadata={"custom_interval": gap.interval},
                 )
@@ -621,14 +623,14 @@ class BackfillPlanner:
             return []
 
         # Group by (symbol, interval)
-        groups: dict[tuple[str, str], list[BackfillTask]] = {}
+        groups: dict[tuple[str, str, str], list[BackfillTask]] = {}
         for task in tasks:
-            key = (task.symbol, task.interval)
+            key = (task.exchange, task.symbol, task.interval)
             groups.setdefault(key, []).append(task)
 
         deduplicated: list[BackfillTask] = []
 
-        for (symbol, interval), group in groups.items():
+        for (exchange, symbol, interval), group in groups.items():
             # Sort by start_ms
             group.sort(key=lambda t: t.start_ms)
 
@@ -652,6 +654,7 @@ class BackfillPlanner:
                         priority=min(last.priority, task.priority),
                         parent_gap=last.parent_gap,
                         estimated_bars=new_estimated,
+                        exchange=exchange,
                         market_type=last.market_type,
                         metadata={**last.metadata, **task.metadata},
                     )

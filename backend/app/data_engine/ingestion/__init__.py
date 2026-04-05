@@ -53,6 +53,7 @@ from .feed_control import FeedControlLayer
 from .normalize import NormalizeLayer
 from .continuity import ContinuityLayer
 from .delivery import DeliveryLayer
+from .shared_ws import SharedWsHubRegistry
 
 logger = logging.getLogger("ingestion")
 
@@ -93,11 +94,17 @@ class StreamPipeline:
         config: IngestionConfig,
         transport: TransportLayer,
         descriptor: StreamDescriptor,
+        shared_ws_hub=None,
     ) -> None:
         self.descriptor = descriptor
 
         # Build layers
-        self.feed_control = FeedControlLayer(config, transport, descriptor)
+        self.feed_control = FeedControlLayer(
+            config,
+            transport,
+            descriptor,
+            shared_ws_hub=shared_ws_hub,
+        )
         self.normalize = NormalizeLayer(config, descriptor)
         self.continuity = ContinuityLayer(config, transport, descriptor)
         self.delivery = DeliveryLayer(config, descriptor)
@@ -134,6 +141,7 @@ class MarketDataIngress:
     def __init__(self, config: IngestionConfig | None = None) -> None:
         self._cfg = config or IngestionConfig()
         self._transport = TransportLayer(self._cfg)
+        self._shared_ws = SharedWsHubRegistry(self._cfg, self._transport)
         self._pipelines: dict[str, StreamPipeline] = {}
         self._started = False
 
@@ -183,7 +191,12 @@ class MarketDataIngress:
         if not self._started:
             await self.start()
 
-        pipeline = StreamPipeline(self._cfg, self._transport, descriptor)
+        pipeline = StreamPipeline(
+            self._cfg,
+            self._transport,
+            descriptor,
+            shared_ws_hub=self._shared_ws.get_hub(descriptor),
+        )
         self._pipelines[key] = pipeline
         await pipeline.start()
         logger.info("Stream added: %s", key)

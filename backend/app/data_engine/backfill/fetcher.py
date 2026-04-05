@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import defaultdict
 from typing import Callable, Awaitable
 
 from ..ingestion.config import IngestionConfig
@@ -78,6 +79,9 @@ class HistoricalFetcher:
 
         # Concurrency control
         self._semaphore = asyncio.Semaphore(self._cfg.fetch_concurrency)
+        self._exchange_semaphores: dict[tuple[str, str], asyncio.Semaphore] = {}
+        self._exchange_rate_locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._exchange_next_request_at: dict[tuple[str, str], float] = {}
 
         # Extension points
         self._progress_callbacks: list[ProgressCallback] = []
@@ -94,8 +98,10 @@ class HistoricalFetcher:
         return {
             "component": "HistoricalFetcher",
             "concurrency": self._cfg.fetch_concurrency,
+            "okx_concurrency": self._cfg.fetch_okx_concurrency,
             "batch_size": self._cfg.fetch_batch_size,
             "rate_limit_delay": self._cfg.fetch_rate_limit_delay,
+            "okx_rate_limit_delay": self._cfg.fetch_okx_rate_limit_delay,
             "metrics": self._metrics.snapshot(),
         }
 
@@ -225,100 +231,131 @@ class HistoricalFetcher:
             symbol=task.symbol,
             stream_type=StreamType.KLINE,
             interval=task.interval,
+            exchange=task.exchange,
             market_type=task.market_type,
         )
 
-        # Create a temporary NormalizeLayer for parsing
-        normalize = NormalizeLayer(self._ingestion_cfg, descriptor)
+        # Create a normalizer for parsing raw REST responses
+        normalizer = NormalizeLayer(self._ingestion_cfg, descriptor)
 
+        # Estimate total bars for progress reporting
+        now_ms = int(time.time() * 1000)
+        total_span_ms = (task.end_ms or now_ms) - (task.start_ms or 0)
+        estimated_total = max(1, total_span_ms // interval_ms) if interval_ms > 0 else 0
+
+        # Pagination: walk backward from end_ms
+        cursor_end_ms = task.end_ms or now_ms
         batch_size = self._cfg.fetch_batch_size
-        cursor_start = task.start_ms
         max_retries = self._cfg.fetch_max_retries
         max_total = self._cfg.fetch_max_total_bars
 
-        while cursor_start <= task.end_ms:
+        while True:
+            # Safety: cap total bars
             if len(all_bars) >= max_total:
                 logger.warning(
-                    "Hit max total bars limit (%d) for task %s",
-                    max_total, task.task_key,
+                    "Task %s hit max total bars (%d), stopping",
+                    task.task_key, max_total,
                 )
                 break
 
-            # Build request
             req = TransportRequest(
                 descriptor=descriptor,
-                start_ms=cursor_start,
-                end_ms=task.end_ms,
-                limit=min(batch_size, 1000),
+                limit=batch_size,
+                start_ms=task.start_ms,
+                end_ms=cursor_end_ms,
             )
 
-            # Fetch with retries
-            raw_messages = None
-            last_error = ""
-
-            for attempt in range(max_retries):
-                try:
-                    await self._rate_limit()
-                    raw_messages = await self._transport.http_fetch(req)
-                    break
-                except TransportError as exc:
-                    last_error = str(exc)
-                    self._metrics.inc("fetch_retries")
-                    logger.warning(
-                        "Fetch attempt %d/%d failed for %s: %s",
-                        attempt + 1, max_retries, task.task_key, exc,
-                    )
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(self._cfg.fetch_rate_limit_delay * (attempt + 1))
-                except Exception as exc:
-                    last_error = str(exc)
-                    self._metrics.inc("fetch_errors")
-                    logger.error(
-                        "Unexpected fetch error for %s: %s",
-                        task.task_key, exc, exc_info=True,
-                    )
-                    break
-
-            if raw_messages is None:
-                errors.append(f"Page at {cursor_start}: {last_error}")
-                await self._fire_error(task, last_error)
-                self._metrics.inc("pages_failed")
-                break
-
-            # Parse raw messages → FetchedBar
+            # Fetch with retry
             page_bars: list[FetchedBar] = []
-            for raw_msg in raw_messages:
-                raw_msg.source = DataSource.HTTP_BACKFILL
-                event = normalize.parse_raw(raw_msg)
-                if event is None:
-                    continue
-                bar = self._event_to_bar(event, task)
-                if bar is not None:
-                    page_bars.append(bar)
+            retry_count = 0
+            success = False
+            max_attempts = max_retries + 1
+
+            while retry_count < max_attempts:
+                try:
+                    exchange_semaphore = self._get_exchange_semaphore(task)
+                    async with exchange_semaphore:
+                        await self._rate_limit(task)
+                        raw_messages = await self._transport.http_fetch(req)
+                    self._metrics.inc("http_pages_fetched")
+
+                    for msg in raw_messages:
+                        msg.source = DataSource.HTTP_BACKFILL
+                        event = normalizer.parse_raw(msg)
+                        if event is None:
+                            continue
+                        bar = self._event_to_bar(event, task)
+                        if bar is not None:
+                            page_bars.append(bar)
+
+                    success = True
+                    break
+
+                except TransportError as exc:
+                    retry_count += 1
+                    error_msg = (
+                        f"Page fetch error (attempt {retry_count}/{max_attempts}): {exc}"
+                    )
+                    logger.warning(error_msg)
+                    if retry_count >= max_attempts:
+                        errors.append(error_msg)
+                        await self._fire_error(task, error_msg)
+                    else:
+                        await self._rate_limit(
+                            task,
+                            penalty_seconds=self._retry_backoff_seconds(task, exc),
+                        )
+
+                except Exception as exc:
+                    error_msg = f"Unexpected fetch error: {exc}"
+                    errors.append(error_msg)
+                    logger.error(error_msg, exc_info=True)
+                    await self._fire_error(task, error_msg)
+                    break
+
+            if not success:
+                break
 
             pages_fetched += 1
+
+            if not page_bars:
+                break  # No more data available
+
             all_bars.extend(page_bars)
-            self._metrics.inc("pages_fetched")
-            self._metrics.inc("bars_fetched", len(page_bars))
+            await self._fire_progress(task, len(all_bars), estimated_total)
 
-            # Progress callback
-            await self._fire_progress(task, len(all_bars), task.estimated_bars)
-
-            # Check if we got fewer bars than requested → last page
-            if len(raw_messages) < batch_size:
+            # Advance cursor: move to before the oldest bar in this page
+            oldest_bar_time = min(b.open_time for b in page_bars)
+            if oldest_bar_time >= cursor_end_ms:
+                logger.warning(
+                    "Task %s pagination stalled: oldest=%d cursor_end=%d; stopping",
+                    task.task_key,
+                    oldest_bar_time,
+                    cursor_end_ms,
+                )
                 break
+            if task.start_ms is not None and oldest_bar_time <= task.start_ms:
+                break  # Covered entire requested range
 
-            # Advance cursor past the last fetched bar
-            if page_bars:
-                last_open_time = max(b.open_time for b in page_bars)
-                cursor_start = last_open_time + interval_ms
-            else:
-                # No parseable bars — advance by batch to avoid infinite loop
-                cursor_start += batch_size * interval_ms
+            cursor_end_ms = oldest_bar_time - 1
 
-        elapsed = self._elapsed_ms(start_time)
+        # Deduplicate by open_time and sort ascending
+        seen: set[int] = set()
+        unique_bars: list[FetchedBar] = []
+        for bar in sorted(all_bars, key=lambda b: b.open_time):
+            if bar.open_time not in seen:
+                seen.add(bar.open_time)
+                unique_bars.append(bar)
+        all_bars = unique_bars
+
+        # Filter to task range
+        if task.start_ms is not None:
+            all_bars = [b for b in all_bars if b.open_time >= task.start_ms]
+        if task.end_ms is not None:
+            all_bars = [b for b in all_bars if b.open_time <= task.end_ms]
 
         # Determine status
+        elapsed = self._elapsed_ms(start_time)
         if errors and not all_bars:
             status = BackfillStatus.FAILED
         elif errors:
@@ -365,6 +402,7 @@ class HistoricalFetcher:
                 low=float(data["low"]),
                 close=float(data["close"]),
                 volume=float(data["volume"]),
+                exchange=task.exchange,
                 market_type=task.market_type,
                 quote_volume=float(data.get("quote_volume", 0)),
                 trades=int(data.get("trades", 0)),
@@ -378,12 +416,67 @@ class HistoricalFetcher:
 
     # ── Internal: Rate limiting ──────────────────────────────
 
-    async def _rate_limit(self) -> None:
+    async def _rate_limit(
+        self,
+        task: BackfillTask | None = None,
+        penalty_seconds: float = 0.0,
+    ) -> None:
         """Apply rate limiting between requests."""
         if self._custom_rate_limiter is not None:
             await self._custom_rate_limiter()
-        elif self._cfg.fetch_rate_limit_delay > 0:
-            await asyncio.sleep(self._cfg.fetch_rate_limit_delay)
+            if penalty_seconds > 0:
+                await asyncio.sleep(penalty_seconds)
+            return
+
+        if task is None:
+            base_delay = self._cfg.fetch_rate_limit_delay
+            if base_delay > 0 or penalty_seconds > 0:
+                await asyncio.sleep(base_delay + penalty_seconds)
+            return
+
+        key = self._exchange_key(task)
+        lock = self._exchange_rate_locks[key]
+        base_delay = self._base_delay_for_task(task)
+
+        async with lock:
+            now = time.monotonic()
+            next_allowed_at = self._exchange_next_request_at.get(key, now)
+            wait_seconds = max(0.0, next_allowed_at - now)
+            if wait_seconds > 0:
+                await asyncio.sleep(wait_seconds)
+            if penalty_seconds > 0:
+                await asyncio.sleep(penalty_seconds)
+            self._exchange_next_request_at[key] = time.monotonic() + base_delay
+
+    def _get_exchange_semaphore(self, task: BackfillTask) -> asyncio.Semaphore:
+        key = self._exchange_key(task)
+        sem = self._exchange_semaphores.get(key)
+        if sem is not None:
+            return sem
+        limit = self._cfg.fetch_okx_concurrency if key[0] == "okx" else self._cfg.fetch_concurrency
+        sem = asyncio.Semaphore(max(1, int(limit)))
+        self._exchange_semaphores[key] = sem
+        return sem
+
+    @staticmethod
+    def _exchange_key(task: BackfillTask) -> tuple[str, str]:
+        return (
+            str(task.exchange or "binance").strip().lower(),
+            str(task.market_type or "spot").strip().lower(),
+        )
+
+    def _base_delay_for_task(self, task: BackfillTask) -> float:
+        if self._exchange_key(task)[0] == "okx":
+            return max(0.0, self._cfg.fetch_okx_rate_limit_delay)
+        return max(0.0, self._cfg.fetch_rate_limit_delay)
+
+    def _retry_backoff_seconds(self, task: BackfillTask, exc: TransportError) -> float:
+        message = str(exc)
+        if "HTTP 429" in message:
+            if self._exchange_key(task)[0] == "okx":
+                return max(self._cfg.fetch_429_backoff_seconds, self._cfg.fetch_okx_rate_limit_delay)
+            return max(self._cfg.fetch_429_backoff_seconds, self._cfg.fetch_rate_limit_delay)
+        return 0.0
 
     # ── Internal: Callbacks ──────────────────────────────────
 

@@ -100,6 +100,7 @@ class BarInput:
     volume: float
     source: BarInputSource         # where this came from
     is_closed: bool                # whether the source bar is closed
+    exchange: str = "binance"
     market_type: str = "spot"
     quote_volume: float = 0.0
     trades: int = 0
@@ -110,16 +111,21 @@ class BarInput:
 
     def __post_init__(self) -> None:
         self.symbol = self.symbol.upper().strip()
+        self.exchange = self.exchange.strip().lower()
         self.market_type = self.market_type.strip().lower()
 
     @property
     def input_key(self) -> str:
         """Unique key for dedup: symbol@interval:open_time."""
-        return f"{self.market_type}:{self.symbol}@{self.source_interval}:{self.open_time_ms}"
+        return (
+            f"{self.exchange}:{self.market_type}:{self.symbol}"
+            f"@{self.source_interval}:{self.open_time_ms}"
+        )
 
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
+            "exchange": self.exchange,
             "market_type": self.market_type,
             "source_interval": self.source_interval,
             "open_time_ms": self.open_time_ms,
@@ -156,6 +162,7 @@ class BarState:
     low: float
     close: float
     volume: float
+    exchange: str = "binance"
     market_type: str = "spot"
     quote_volume: float = 0.0
     trades: int = 0
@@ -172,11 +179,13 @@ class BarState:
 
     def __post_init__(self) -> None:
         self.symbol = self.symbol.upper().strip()
+        self.exchange = self.exchange.strip().lower()
         self.market_type = self.market_type.strip().lower()
 
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
+            "exchange": self.exchange,
             "market_type": self.market_type,
             "interval": self.interval,
             "bucket_start_ms": self.bucket_start_ms,
@@ -260,7 +269,7 @@ class BarEvent:
     def bar_key(self) -> str:
         """Unique key for this bar: symbol@interval:bucket_start."""
         return (
-            f"{self.bar.market_type}:{self.bar.symbol}"
+            f"{self.bar.exchange}:{self.bar.market_type}:{self.bar.symbol}"
             f"@{self.bar.interval}:{self.bar.bucket_start_ms}"
         )
 
@@ -300,11 +309,17 @@ class BarEventFilter:
     All fields are optional.  An event passes the filter if it matches
     ALL specified criteria (AND logic).  Unset fields match everything.
     """
+    exchanges: set[str] | None = None         # only these exchanges
+    market_types: set[str] | None = None      # only these market types
     symbols: set[str] | None = None           # only these symbols
     intervals: set[str] | None = None         # only these intervals
     event_types: set[BarEventType] | None = None  # only these event types
 
     def matches(self, event: BarEvent) -> bool:
+        if self.exchanges and event.bar.exchange not in self.exchanges:
+            return False
+        if self.market_types and event.bar.market_type not in self.market_types:
+            return False
         if self.symbols and event.bar.symbol not in self.symbols:
             return False
         if self.intervals and event.bar.interval not in self.intervals:

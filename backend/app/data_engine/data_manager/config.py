@@ -18,6 +18,22 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class PrewarmTarget:
+    """One series family to prewarm on startup."""
+
+    symbol: str
+    exchange: str = "binance"
+    market_type: str = "spot"
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "symbol": self.symbol,
+            "exchange": self.exchange,
+            "market_type": self.market_type,
+        }
+
+
+@dataclass
 class CacheConfig:
     """In-memory K-line cache tuning.
 
@@ -119,6 +135,10 @@ class CoordinatorConfig:
 
         prewarm_symbols:
             Symbols to prewarm on startup.
+
+        prewarm_targets:
+            Optional structured targets that include exchange/market_type.
+            When set, this takes precedence over ``prewarm_symbols``.
     """
     auto_start_ingestion: bool = True
     idle_stream_timeout_seconds: int = 300  # 5 min
@@ -132,6 +152,7 @@ class CoordinatorConfig:
         "1d": 365,
     })
     prewarm_symbols: list[str] = field(default_factory=lambda: ["BTCUSDT"])
+    prewarm_targets: list[PrewarmTarget] = field(default_factory=list)
 
 
 @dataclass
@@ -178,5 +199,6 @@ class DataManagerConfig:
                 "base_interval": self.coordinator.base_interval,
                 "prewarm_intervals": self.coordinator.prewarm_intervals,
                 "prewarm_symbols": self.coordinator.prewarm_symbols,
+                "prewarm_targets": [target.to_dict() for target in self.coordinator.prewarm_targets],
             },
         }

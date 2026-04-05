@@ -21,6 +21,7 @@ from .config import (
     CoordinatorConfig,
     DataManagerConfig,
     EventBusConfig,
+    PrewarmTarget,
     QueryConfig,
 )
 from .models import (
@@ -51,6 +52,7 @@ __all__ = [
     "QueryConfig",
     "EventBusConfig",
     "CoordinatorConfig",
+    "PrewarmTarget",
     # Models
     "BarData",
     "SeriesKey",

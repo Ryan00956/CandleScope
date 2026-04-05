@@ -18,13 +18,25 @@ async function request(url) {
     return response.json();
 }
 
-export async function fetchKlines(symbol = "BTCUSDT", interval = "1m", limit = 500, marketType = "spot") {
-    const url = `${API_BASE}/klines/?symbol=${symbol}&interval=${interval}&limit=${limit}&market_type=${marketType}`;
+export async function fetchKlines(
+    symbol = "BTCUSDT",
+    interval = "1m",
+    limit = 500,
+    marketType = "spot",
+    exchange = "binance",
+) {
+    const url = `${API_BASE}/klines/?symbol=${symbol}&interval=${interval}&limit=${limit}&exchange=${exchange}&market_type=${marketType}`;
     return request(url);
 }
 
-export async function fetchKlinesHistory(symbol = "BTCUSDT", interval = "1h", days = 7, marketType = "spot") {
-    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${days}&market_type=${marketType}`;
+export async function fetchKlinesHistory(
+    symbol = "BTCUSDT",
+    interval = "1h",
+    days = 7,
+    marketType = "spot",
+    exchange = "binance",
+) {
+    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${days}&exchange=${exchange}&market_type=${marketType}`;
     return request(url);
 }
 
@@ -34,13 +46,20 @@ export async function fetchKlinesBefore(
     before = 0,
     bars = 500,
     marketType = "spot",
+    exchange = "binance",
 ) {
-    const url = `${API_BASE}/klines/history/before?symbol=${symbol}&interval=${interval}&before=${before}&bars=${bars}&market_type=${marketType}`;
+    const url = `${API_BASE}/klines/history/before?symbol=${symbol}&interval=${interval}&before=${before}&bars=${bars}&exchange=${exchange}&market_type=${marketType}`;
     return request(url);
 }
 
-export async function fetchLatestKlines(symbol = "BTCUSDT", interval = "1h", limit = 2, marketType = "spot") {
-    const url = `${API_BASE}/klines/latest?symbol=${symbol}&interval=${interval}&limit=${limit}&market_type=${marketType}`;
+export async function fetchLatestKlines(
+    symbol = "BTCUSDT",
+    interval = "1h",
+    limit = 2,
+    marketType = "spot",
+    exchange = "binance",
+) {
+    const url = `${API_BASE}/klines/latest?symbol=${symbol}&interval=${interval}&limit=${limit}&exchange=${exchange}&market_type=${marketType}`;
     return request(url);
 }
 
@@ -48,10 +67,17 @@ export async function fetchLatestKlines(symbol = "BTCUSDT", interval = "1h", lim
  * Fetch klines for a specific time range by computing the necessary "days"
  * parameter from the range boundaries. Uses the /history endpoint internally.
  */
-export async function fetchKlinesRange(symbol = "BTCUSDT", interval = "1h", startSec, endSec, marketType = "spot") {
+export async function fetchKlinesRange(
+    symbol = "BTCUSDT",
+    interval = "1h",
+    startSec,
+    endSec,
+    marketType = "spot",
+    exchange = "binance",
+) {
     const nowSec = Math.floor(Date.now() / 1000);
     const daysFromNow = Math.ceil((nowSec - startSec) / 86400) + 1;
-    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${Math.min(daysFromNow, 3650)}&market_type=${marketType}`;
+    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${Math.min(daysFromNow, 3650)}&exchange=${exchange}&market_type=${marketType}`;
     return request(url);
 }
 
@@ -61,27 +87,31 @@ export async function resolveInterval(interval = "1h") {
 }
 
 /** Single-interval WebSocket URL (legacy) */
-export function getKlineStreamUrl(symbol = "BTCUSDT", interval = "1h", marketType = "spot") {
+export function getKlineStreamUrl(symbol = "BTCUSDT", interval = "1h", marketType = "spot", exchange = "binance") {
     const wsBase = httpBaseToWsBase(API_BASE);
-    return `${wsBase}/stream/klines?symbol=${symbol}&interval=${interval}&market_type=${marketType}`;
+    return `${wsBase}/stream/klines?symbol=${symbol}&interval=${interval}&exchange=${exchange}&market_type=${marketType}`;
 }
 
 /** Multi-interval WebSocket URL — one connection for all intervals */
-export function getMultiStreamUrl(symbol = "BTCUSDT", marketType = "spot") {
+export function getMultiStreamUrl(symbol = "BTCUSDT", marketType = "spot", exchange = "binance") {
     const wsBase = httpBaseToWsBase(API_BASE);
-    return `${wsBase}/stream/klines_multi?symbol=${symbol}&market_type=${marketType}`;
+    return `${wsBase}/stream/klines_multi?symbol=${symbol}&exchange=${exchange}&market_type=${marketType}`;
 }
 
 // ── Exchange Info API ────────────────────────────────────────
 
-export async function fetchExchangeInfo(marketType = "") {
-    const params = marketType ? `?market_type=${marketType}` : "";
+export async function fetchExchangeInfo(marketType = "", exchange = "") {
+    const searchParams = new URLSearchParams();
+    if (marketType) searchParams.set("market_type", marketType);
+    if (exchange) searchParams.set("exchange", exchange);
+    const params = searchParams.toString() ? `?${searchParams.toString()}` : "";
     const url = `${API_BASE}/symbols/exchange-info${params}`;
     return request(url);
 }
 
-export async function refreshExchangeInfo() {
-    const url = `${API_BASE}/symbols/exchange-info/refresh`;
+export async function refreshExchangeInfo(exchange = "") {
+    const params = exchange ? `?exchange=${encodeURIComponent(exchange)}` : "";
+    const url = `${API_BASE}/symbols/exchange-info/refresh${params}`;
     const response = await fetch(url, { method: "POST" });
     if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -125,8 +155,8 @@ export async function testProxyConnection({ mode, custom_proxy }) {
     return response.json();
 }
 
-export async function repairStoredCustomIntervals({ marketType = "spot", symbols = [] } = {}) {
-    const url = `${API_BASE}/settings/storage/repair?market_type=${marketType}`;
+export async function repairStoredCustomIntervals({ marketType = "spot", exchange = "binance", symbols = [] } = {}) {
+    const url = `${API_BASE}/settings/storage/repair?market_type=${marketType}&exchange=${exchange}`;
     const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -139,8 +169,8 @@ export async function repairStoredCustomIntervals({ marketType = "spot", symbols
     return response.json();
 }
 
-export async function scanAndFillGaps({ marketType = "spot", symbols = [] } = {}) {
-    const url = `${API_BASE}/settings/storage/gap-scan?market_type=${marketType}`;
+export async function scanAndFillGaps({ marketType = "spot", exchange = "binance", symbols = [] } = {}) {
+    const url = `${API_BASE}/settings/storage/gap-scan?market_type=${marketType}&exchange=${exchange}`;
     const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -216,4 +246,12 @@ export async function fetchPricesSnapshot() {
 export function getPriceStreamUrl() {
     const wsBase = httpBaseToWsBase(API_BASE);
     return `${wsBase}/stream/prices`;
+}
+
+export async function fetchExchanges() {
+    return request(`${API_BASE}/exchanges/`);
+}
+
+export async function fetchExchangeCapabilities(exchange = "binance") {
+    return request(`${API_BASE}/exchanges/${encodeURIComponent(exchange)}/capabilities`);
 }

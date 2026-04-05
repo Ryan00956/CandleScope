@@ -33,6 +33,7 @@ from .models import (
 )
 from .transport import TransportLayer, TransportError
 from .session import SessionLayer
+from .shared_ws import SharedWsSubscriptionHandle
 
 logger = logging.getLogger("ingestion.L3_FeedControl")
 
@@ -55,16 +56,19 @@ class FeedControlLayer:
         config: IngestionConfig,
         transport: TransportLayer,
         descriptor: StreamDescriptor,
+        shared_ws_hub=None,
     ) -> None:
         self._cfg = config
         self._transport = transport
         self._descriptor = descriptor
+        self._shared_ws_hub = shared_ws_hub
 
         self._metrics = LayerMetrics("L3_FeedControl")
         self._mode = FeedMode.IDLE
 
         # L2 Session (created on start)
         self._session: SessionLayer | None = None
+        self._shared_ws_handle: SharedWsSubscriptionHandle | None = None
 
         # HTTP poll task + WS probe task
         self._http_poll_task: asyncio.Task | None = None
@@ -119,7 +123,17 @@ class FeedControlLayer:
             return
         self._running = True
         self._metrics.mark("started_at")
-        await self._switch_to_ws()
+        if self._shared_ws_hub is not None:
+            await self._start_shared_ws()
+            logger.info("FeedControl started: %s", self._descriptor.key)
+            return
+        if self._transport.supports_ws(self._descriptor):
+            await self._switch_to_ws()
+        else:
+            await self._switch_to_http(
+                "exchange does not support direct WS streaming in current ingestion stack",
+                allow_probe=False,
+            )
         logger.info("FeedControl started: %s", self._descriptor.key)
 
     async def stop(self) -> None:
@@ -134,8 +148,24 @@ class FeedControlLayer:
 
     # ── Mode switching ───────────────────────────────────────
 
+    async def _start_shared_ws(self) -> None:
+        if self._shared_ws_handle is None:
+            self._shared_ws_handle = await self._shared_ws_hub.subscribe(
+                self._descriptor,
+                self._handle_shared_ws_message,
+                self._handle_shared_health_change,
+            )
+        self._set_mode(FeedMode.WEBSOCKET)
+        self._metrics.inc("ws_activations")
+        logger.info("Switched to shared WS mode: %s", self._descriptor.key)
+
     async def _switch_to_ws(self) -> None:
         """Activate WS mode via L2 Session."""
+        if self._shared_ws_hub is not None:
+            await self._stop_http_poll()
+            await self._stop_ws_probe()
+            await self._start_shared_ws()
+            return
         await self._stop_http_poll()
         await self._stop_ws_probe()
 
@@ -153,9 +183,13 @@ class FeedControlLayer:
         self._metrics.inc("ws_activations")
         logger.info("Switched to WS mode: %s", self._descriptor.key)
 
-    async def _switch_to_http(self, reason: str) -> None:
-        """Activate HTTP polling mode.  Session keeps running (L2 will keep
-        trying to reconnect), but we don't rely on it for data."""
+    async def _switch_to_http(self, reason: str, allow_probe: bool = True) -> None:
+        """Activate HTTP polling mode and stop the active WS session.
+
+        Keeping the failed session alive creates reconnect storms and very
+        noisy logs. We switch to HTTP as the data source, then rely on the
+        lighter probe loop to decide when WS is worth retrying.
+        """
         if self._mode == FeedMode.HTTP_POLL:
             return  # already in HTTP mode
 
@@ -173,6 +207,8 @@ class FeedControlLayer:
             "Switched to HTTP poll mode (%s): %s",
             self._descriptor.key, reason,
         )
+        if self._shared_ws_hub is None:
+            await self._stop_session()
 
         # Start HTTP polling
         self._http_poll_task = asyncio.create_task(
@@ -180,12 +216,14 @@ class FeedControlLayer:
             name=f"http_poll_{self._descriptor.key}",
         )
 
-        # Start WS probing (to detect when WS recovers)
-        self._ws_probe_successes = 0
-        self._ws_probe_task = asyncio.create_task(
-            self._ws_probe_loop(),
-            name=f"ws_probe_{self._descriptor.key}",
-        )
+        # Start WS probing (to detect when WS recovers) only when the
+        # exchange supports the current WS model.
+        if allow_probe and self._transport.supports_ws(self._descriptor):
+            self._ws_probe_successes = 0
+            self._ws_probe_task = asyncio.create_task(
+                self._ws_probe_loop(),
+                name=f"ws_probe_{self._descriptor.key}",
+            )
 
     async def _switch_back_to_ws(self) -> None:
         """WS has recovered — switch back from HTTP to WS."""
@@ -194,6 +232,9 @@ class FeedControlLayer:
         # Stop HTTP polling & probe
         await self._stop_http_poll()
         await self._stop_ws_probe()
+        if self._shared_ws_hub is not None:
+            self._set_mode(FeedMode.WEBSOCKET)
+            return
         # Restart session (fresh connection)
         await self._stop_session()
         await self._switch_to_ws()
@@ -214,6 +255,27 @@ class FeedControlLayer:
             self._set_mode(FeedMode.WEBSOCKET)
             self._metrics.inc("ws_recoveries")
             logger.info("WS self-recovered via L2: %s", self._descriptor.key)
+
+    async def _handle_shared_health_change(self, health: SessionHealth, reason: str) -> None:
+        self._metrics.set("ws_health", health.value)
+        self._metrics.mark("ws_health_changed_at")
+
+        if health == SessionHealth.CONNECTED:
+            if self._mode == FeedMode.HTTP_POLL:
+                await self._stop_http_poll()
+                await self._stop_ws_probe()
+            self._set_mode(FeedMode.WEBSOCKET)
+            self._metrics.inc("ws_recoveries")
+            return
+
+        if (
+            health in (SessionHealth.RECONNECTING, SessionHealth.UNHEALTHY, SessionHealth.DISCONNECTED)
+            and self._mode == FeedMode.WEBSOCKET
+        ):
+            await self._switch_to_http(reason, allow_probe=False)
+
+    async def _handle_shared_ws_message(self, msg: RawMessage) -> None:
+        await self._handle_ws_message(msg)
 
     # ── WS message handler ───────────────────────────────────
 
@@ -312,6 +374,9 @@ class FeedControlLayer:
         if self._session:
             await self._session.stop()
             self._session = None
+        if self._shared_ws_handle is not None:
+            await self._shared_ws_handle.unsubscribe()
+            self._shared_ws_handle = None
 
     async def _stop_http_poll(self) -> None:
         if self._http_poll_task and not self._http_poll_task.done():

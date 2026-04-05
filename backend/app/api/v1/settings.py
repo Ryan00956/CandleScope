@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from app.core.market import MarketType, find_best_base_interval, parse_custom_interval
 from app.core.config import load_proxy_settings, normalize_proxy_settings, save_proxy_settings
+from app.exchanges.symbols import normalize_symbol
 from app.data_engine.bar_aggregator import BarAggregator, BarAggregatorConfig
 from app.data_engine.data_manager.models import BarData
 from app.data_engine.storage.klines_repo import list_series_summaries
@@ -72,12 +73,21 @@ def _normalize_market_type(value: str | None) -> str:
     return MarketType.from_str(value).value
 
 
-def _normalize_symbol_list(symbols: list[str] | None) -> list[str]:
+def _normalize_exchange(value: str | None) -> str:
+    """Normalize API exchange values to a canonical lowercase key."""
+    return str(value or "binance").strip().lower() or "binance"
+
+
+def _normalize_symbol_list(
+    symbols: list[str] | None,
+    exchange: str = "binance",
+    market_type: str = "spot",
+) -> list[str]:
     """Normalize a user-supplied symbol filter."""
     normalized: list[str] = []
     seen: set[str] = set()
     for symbol in symbols or []:
-        sym = str(symbol).upper().strip()
+        sym = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
         if not sym or sym in seen:
             continue
         seen.add(sym)
@@ -205,11 +215,11 @@ def _is_closed_bucket(open_time_ms: int, interval_ms: int, now_ms: int) -> bool:
     return open_time_ms + interval_ms <= now_ms
 
 
-def _list_custom_series(storage, market_type: str = "spot") -> list[dict]:
+def _list_custom_series(storage, market_type: str = "spot", exchange: str = "binance") -> list[dict]:
     """Return stored custom-interval series summaries."""
     if storage is not None and hasattr(storage, "list_series"):
-        return storage.list_series(custom_only=True, market_type=market_type)
-    return list_series_summaries(custom_only=True, market_type=market_type)
+        return storage.list_series(custom_only=True, exchange=exchange, market_type=market_type)
+    return list_series_summaries(custom_only=True, exchange=exchange, market_type=market_type)
 
 
 async def _ensure_base_series_complete(
@@ -219,6 +229,7 @@ async def _ensure_base_series_complete(
     start_ms: int,
     end_ms: int,
     metadata: dict,
+    exchange: str = "binance",
     market_type: str = "spot",
 ) -> tuple[bool, int, list[str]]:
     """Ensure the authoritative base interval is gap-free for repair."""
@@ -230,6 +241,7 @@ async def _ensure_base_series_complete(
         intervals=[base_interval],
         range_start_ms=start_ms,
         range_end_ms=end_ms,
+        exchange=exchange,
         market_type=market_type,
     )
     if not gaps:
@@ -241,6 +253,7 @@ async def _ensure_base_series_complete(
         intervals=[base_interval],
         range_start_ms=start_ms,
         range_end_ms=end_ms,
+        exchange=exchange,
         market_type=market_type,
         metadata=metadata,
     )
@@ -252,6 +265,7 @@ async def _ensure_base_series_complete(
         intervals=[base_interval],
         range_start_ms=start_ms,
         range_end_ms=end_ms,
+        exchange=exchange,
         market_type=market_type,
     )
     if remaining:
@@ -267,12 +281,13 @@ async def _aggregate_custom_rows(
     base_interval: str,
     base_rows: list[dict],
     aggregator_config: dict,
+    exchange: str = "binance",
     market_type: str = "spot",
 ) -> list[dict]:
     """Rebuild custom rows through a fresh BarAggregator instance."""
     symbol = symbol.upper()
     agg = BarAggregator(BarAggregatorConfig(**aggregator_config))
-    agg.add_target(symbol, custom_interval, market_type=market_type)
+    agg.add_target(symbol, custom_interval, exchange=exchange, market_type=market_type)
 
     rows_by_open_time: dict[int, dict] = {}
 
@@ -289,6 +304,7 @@ async def _aggregate_custom_rows(
             symbol,
             base_interval,
             base_rows[idx : idx + batch_size],
+            exchange=exchange,
             market_type=market_type,
         )
 
@@ -300,32 +316,33 @@ async def _warm_repaired_series(
     storage,
     symbol: str,
     interval: str,
+    exchange: str = "binance",
     market_type: str = "spot",
 ) -> None:
     """Invalidate cache, warm latest repaired bars, and reseed active custom tails."""
     symbol = symbol.upper()
-    dm.cache_invalidate(symbol, interval, market_type=market_type)
+    dm.cache_invalidate(symbol, interval, exchange=exchange, market_type=market_type)
 
     rows = await asyncio.to_thread(
         storage.query_bars,
-        symbol,
-        interval,
-        None,
-        None,
-        500,
-        "DESC",
-        market_type,
+        symbol=symbol,
+        interval=interval,
+        limit=500,
+        order="DESC",
+        exchange=exchange,
+        market_type=market_type,
     )
     if rows:
         bars = [BarData.from_storage_row(row) for row in reversed(rows)]
-        await dm.on_bars_backfilled(symbol, interval, bars, market_type=market_type)
+        await dm.on_bars_backfilled(symbol, interval, bars, exchange=exchange, market_type=market_type)
 
-    if (market_type, symbol, interval) in set(dm.bar_aggregator.get_targets()):
+    if (exchange, market_type, symbol, interval) in set(dm.bar_aggregator.get_targets()):
         try:
-            await dm._seed_custom_interval(symbol, interval, market_type=market_type)
+            await dm._seed_custom_interval(symbol, interval, exchange=exchange, market_type=market_type)
         except Exception as exc:
             logger.warning(
-                "Failed to reseed repaired custom tail for %s:%s@%s: %s",
+                "Failed to reseed repaired custom tail for %s:%s:%s@%s: %s",
+                exchange,
                 market_type,
                 symbol,
                 interval,
@@ -476,10 +493,16 @@ async def repair_custom_storage(
     request: Request,
     body: StorageMaintenanceRequest | None = None,
     market_type: str = "spot",
+    exchange: str = "binance",
 ) -> dict:
     """Check and rebuild stored custom-interval rows from authoritative base data."""
+    exchange = _normalize_exchange(exchange)
     market_type = _normalize_market_type(market_type)
-    symbols_filter = _normalize_symbol_list(body.symbols if body else [])
+    symbols_filter = _normalize_symbol_list(
+        body.symbols if body else [],
+        exchange=exchange,
+        market_type=market_type,
+    )
     dm = _get_data_manager(request)
     backfill_engine = _get_backfill_engine(request)
     if dm is None or backfill_engine is None:
@@ -497,7 +520,7 @@ async def repair_custom_storage(
         started_at_ms = int(time.time() * 1000)
         now_ms = started_at_ms
         aggregator_config = dm.bar_aggregator.config.snapshot()
-        series = await asyncio.to_thread(_list_custom_series, storage, market_type)
+        series = await asyncio.to_thread(_list_custom_series, storage, market_type, exchange)
         if symbols_filter:
             allowed = set(symbols_filter)
             series = [item for item in series if str(item.get("symbol", "")).upper() in allowed]
@@ -519,6 +542,7 @@ async def repair_custom_storage(
                 "total_stale_rows_removed": 0,
                 "base_backfill_runs": 0,
                 "elapsed_ms": int(time.time() * 1000) - started_at_ms,
+                "exchange": exchange,
                 "market_type": market_type,
                 "symbols_filter": symbols_filter,
                 "results": [],
@@ -538,6 +562,7 @@ async def repair_custom_storage(
             interval = str(item["interval"])
             custom_seconds = parse_custom_interval(interval)
             result = {
+                "exchange": exchange,
                 "symbol": symbol,
                 "interval": interval,
                 "market_type": market_type,
@@ -564,13 +589,13 @@ async def repair_custom_storage(
             latest_open = int(item["latest_open_time"])
             existing_rows = await asyncio.to_thread(
                 storage.query_bars,
-                symbol,
-                interval,
-                earliest_open,
-                latest_open,
-                None,
-                "ASC",
-                market_type,
+                symbol=symbol,
+                interval=interval,
+                start_ms=earliest_open,
+                end_ms=latest_open,
+                order="ASC",
+                exchange=exchange,
+                market_type=market_type,
             )
             existing_rows = [_normalize_storage_row(row) for row in existing_rows]
             closed_existing = [
@@ -587,11 +612,12 @@ async def repair_custom_storage(
                 if stale_existing:
                     deleted = await asyncio.to_thread(
                         storage.delete_bars,
-                        symbol,
-                        interval,
-                        int(stale_existing[0]["open_time"]),
-                        int(stale_existing[-1]["open_time"]),
-                        market_type,
+                        symbol=symbol,
+                        interval=interval,
+                        start_ms=int(stale_existing[0]["open_time"]),
+                        end_ms=int(stale_existing[-1]["open_time"]),
+                        exchange=exchange,
+                        market_type=market_type,
                     )
                     total_deleted_rows += deleted
                     total_stale_rows_removed += len(stale_existing)
@@ -599,7 +625,7 @@ async def repair_custom_storage(
                     result["deleted_rows"] = deleted
                     result["status"] = "repaired"
                     result["message"] = "仅发现未封口尾部数据，已删除脏尾巴"
-                    await _warm_repaired_series(dm, storage, symbol, interval, market_type=market_type)
+                    await _warm_repaired_series(dm, storage, symbol, interval, exchange=exchange, market_type=market_type)
                 else:
                     unchanged_series += 1
                     result["message"] = "没有可修复的数据"
@@ -622,6 +648,7 @@ async def repair_custom_storage(
                     "target_interval": interval,
                     "phase": "base_repair",
                 },
+                exchange=exchange,
                 market_type=market_type,
             )
             base_backfill_runs += gap_runs
@@ -638,13 +665,13 @@ async def repair_custom_storage(
 
             base_rows = await asyncio.to_thread(
                 storage.query_bars,
-                symbol,
-                base_interval,
-                repair_start_open,
-                repair_end_open + custom_ms - 1,
-                None,
-                "ASC",
-                market_type,
+                symbol=symbol,
+                interval=base_interval,
+                start_ms=repair_start_open,
+                end_ms=repair_end_open + custom_ms - 1,
+                order="ASC",
+                exchange=exchange,
+                market_type=market_type,
             )
             if not base_rows:
                 result["status"] = "failed"
@@ -659,6 +686,7 @@ async def repair_custom_storage(
                 base_interval=base_interval,
                 base_rows=base_rows,
                 aggregator_config=aggregator_config,
+                exchange=exchange,
                 market_type=market_type,
             )
             rebuilt_rows = [
@@ -685,21 +713,23 @@ async def repair_custom_storage(
 
             deleted = await asyncio.to_thread(
                 storage.delete_bars,
-                symbol,
-                interval,
-                earliest_open,
-                latest_open,
-                market_type,
+                symbol=symbol,
+                interval=interval,
+                start_ms=earliest_open,
+                end_ms=latest_open,
+                exchange=exchange,
+                market_type=market_type,
             )
             written = 0
             if rebuilt_rows:
                 written = await asyncio.to_thread(
                     storage.upsert_bars,
-                    symbol,
-                    interval,
-                    rebuilt_rows,
-                    "settings_manual_repair",
-                    market_type,
+                    symbol=symbol,
+                    interval=interval,
+                    rows=rebuilt_rows,
+                    source="settings_manual_repair",
+                    exchange=exchange,
+                    market_type=market_type,
                 )
 
             total_deleted_rows += deleted
@@ -712,7 +742,7 @@ async def repair_custom_storage(
             result["status"] = "repaired"
             result["message"] = "已按基础周期重建并回写自定义周期数据"
 
-            await _warm_repaired_series(dm, storage, symbol, interval, market_type=market_type)
+            await _warm_repaired_series(dm, storage, symbol, interval, exchange=exchange, market_type=market_type)
             results.append(result)
 
         if failed_series == 0:
@@ -736,6 +766,7 @@ async def repair_custom_storage(
             "total_written_rows": total_written_rows,
             "total_stale_rows_removed": total_stale_rows_removed,
             "base_backfill_runs": base_backfill_runs,
+            "exchange": exchange,
             "market_type": market_type,
             "symbols_filter": symbols_filter,
             "elapsed_ms": int(time.time() * 1000) - started_at_ms,
@@ -748,6 +779,7 @@ async def scan_and_fill_gaps(
     request: Request,
     body: StorageMaintenanceRequest | None = None,
     market_type: str = "spot",
+    exchange: str = "binance",
 ) -> dict:
     """Scan all standard intervals for data gaps and fill them from Binance REST.
 
@@ -758,8 +790,13 @@ async def scan_and_fill_gaps(
 
     Returns a detailed report with per-interval results.
     """
+    exchange = _normalize_exchange(exchange)
     market_type = _normalize_market_type(market_type)
-    symbols_filter = _normalize_symbol_list(body.symbols if body else [])
+    symbols_filter = _normalize_symbol_list(
+        body.symbols if body else [],
+        exchange=exchange,
+        market_type=market_type,
+    )
     dm = _get_data_manager(request)
     backfill_engine = _get_backfill_engine(request)
     if dm is None or backfill_engine is None:
@@ -782,7 +819,7 @@ async def scan_and_fill_gaps(
             "1h", "2h", "4h", "6h", "8h", "12h",
             "1d", "3d", "1w",
         }
-        series = await asyncio.to_thread(storage.list_series, False, market_type)
+        series = await asyncio.to_thread(storage.list_series, False, exchange, market_type)
         standard_series = [
             item for item in series
             if str(item.get("interval", "")) in all_intervals
@@ -814,6 +851,7 @@ async def scan_and_fill_gaps(
                 gap_ms = now_ms - latest
 
                 entry = {
+                    "exchange": exchange,
                     "symbol": symbol,
                     "interval": iv,
                     "market_type": market_type,
@@ -839,6 +877,7 @@ async def scan_and_fill_gaps(
                         intervals=[iv],
                         range_start_ms=latest,
                         range_end_ms=now_ms,
+                        exchange=exchange,
                         market_type=market_type,
                     )
                     bars_written = (
@@ -859,18 +898,24 @@ async def scan_and_fill_gaps(
                             symbol=symbol, interval=iv,
                             start_ms=latest, end_ms=now_ms,
                             order="ASC",
+                            exchange=exchange,
                             market_type=market_type,
                         )
                         bars = [BarData.from_storage_row(r) for r in rows]
                         if bars:
-                            await dm.on_bars_backfilled(symbol, iv, bars, market_type=market_type)
+                            await dm.on_bars_backfilled(symbol, iv, bars, exchange=exchange, market_type=market_type)
                     else:
                         entry["message"] = "尝试回补但无新数据（可能是网络问题）"
 
                 # Also check for interior gaps (sample the most recent data)
                 rows = await asyncio.to_thread(
                     storage.query_bars,
-                    symbol, iv, None, None, 2000, "DESC", market_type,
+                    symbol=symbol,
+                    interval=iv,
+                    limit=2000,
+                    order="DESC",
+                    exchange=exchange,
+                    market_type=market_type,
                 )
                 if len(rows) >= 2:
                     times = sorted([int(r["open_time"]) for r in rows])
@@ -889,6 +934,7 @@ async def scan_and_fill_gaps(
                                 intervals=[iv],
                                 range_start_ms=gap_start,
                                 range_end_ms=gap_end,
+                                exchange=exchange,
                                 market_type=market_type,
                             )
                             gap_bars = (
@@ -905,6 +951,7 @@ async def scan_and_fill_gaps(
                                     symbol=symbol, interval=iv,
                                     start_ms=gap_start, end_ms=gap_end,
                                     order="ASC",
+                                    exchange=exchange,
                                     market_type=market_type,
                                 )
                                 fill_bars = [BarData.from_storage_row(r) for r in fill_rows]
@@ -913,6 +960,7 @@ async def scan_and_fill_gaps(
                                         symbol,
                                         iv,
                                         fill_bars,
+                                        exchange=exchange,
                                         market_type=market_type,
                                     )
 
@@ -934,6 +982,7 @@ async def scan_and_fill_gaps(
 
             except Exception as exc:
                 results.append({
+                    "exchange": exchange,
                     "symbol": symbol,
                     "interval": iv,
                     "market_type": market_type,
@@ -963,6 +1012,7 @@ async def scan_and_fill_gaps(
         return {
             "status": status,
             "message": message,
+            "exchange": exchange,
             "market_type": market_type,
             "symbols_filter": symbols_filter,
             "scanned_series": len(results),

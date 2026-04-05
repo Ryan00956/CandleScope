@@ -106,6 +106,7 @@ class BinanceIngestionFactory:
         symbol: str,
         interval: str,
         on_bar: Callable[[dict], Awaitable[None]],
+        exchange: str = "binance",
         market_type: str = "spot",
     ) -> _IngestionHandle:
         """Start an ingestion stream for (symbol, interval).
@@ -129,6 +130,7 @@ class BinanceIngestionFactory:
             symbol=symbol.upper(),
             stream_type=StreamType.KLINE,
             interval=interval,
+            exchange=exchange,
             market_type=market_type,
         )
 

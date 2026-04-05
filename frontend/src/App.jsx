@@ -6,6 +6,7 @@ import IndicatorPanel from "./components/IndicatorPanel";
 import SymbolSearch from "./components/SymbolSearch";
 import WatchlistSidebar, { loadWatchlists, saveWatchlists } from "./components/WatchlistSidebar";
 import { useIndicators } from "./hooks/useIndicators";
+import { inferExchangeFromSymbol } from "./utils/symbolKey";
 import {
   fetchKlinesBefore,
   fetchKlinesHistory,
@@ -104,26 +105,31 @@ const EXCHANGE_INTERVALS = {
       "1d": 365, "3d": 730, "1w": 1095, "1M": 1095,
     },
   },
-  // Future exchanges can be added here, e.g.:
-  // okx: {
-  //   label: "OKX",
-  //   intervals: [
-  //     { value: "1m", label: "1m", seconds: 60 },
-  //     { value: "3m", label: "3m", seconds: 180 },
-  //     { value: "5m", label: "5m", seconds: 300 },
-  //     { value: "15m", label: "15m", seconds: 900 },
-  //     { value: "30m", label: "30m", seconds: 1800 },
-  //     { value: "1H", label: "1H", seconds: 3600 },
-  //     { value: "2H", label: "2H", seconds: 7200 },
-  //     { value: "4H", label: "4H", seconds: 14400 },
-  //     { value: "6H", label: "6H", seconds: 21600 },
-  //     { value: "12H", label: "12H", seconds: 43200 },
-  //     { value: "1D", label: "1D", seconds: 86400 },
-  //     { value: "1W", label: "1W", seconds: 604800 },
-  //     { value: "1M", label: "1M", seconds: 2592000 },
-  //   ],
-  //   intervalDays: { ... },
-  // },
+  okx: {
+    label: "OKX",
+    intervals: [
+      { value: "1s",  label: "1s",  seconds: 1 },
+      { value: "1m",  label: "1m",  seconds: 60 },
+      { value: "3m",  label: "3m",  seconds: 180 },
+      { value: "5m",  label: "5m",  seconds: 300 },
+      { value: "15m", label: "15m", seconds: 900 },
+      { value: "30m", label: "30m", seconds: 1800 },
+      { value: "1h",  label: "1H",  seconds: 3600 },
+      { value: "2h",  label: "2H",  seconds: 7200 },
+      { value: "4h",  label: "4H",  seconds: 14400 },
+      { value: "6h",  label: "6H",  seconds: 21600 },
+      { value: "12h", label: "12H", seconds: 43200 },
+      { value: "1d",  label: "1D",  seconds: 86400 },
+      { value: "3d",  label: "3D",  seconds: 259200 },
+      { value: "1w",  label: "1W",  seconds: 604800 },
+      { value: "1M",  label: "1M",  seconds: 2592000 },
+    ],
+    intervalDays: {
+      "1s": 0.04, "1m": 1, "3m": 2, "5m": 3, "15m": 7, "30m": 14,
+      "1h": 30, "2h": 60, "4h": 90, "6h": 120, "12h": 180,
+      "1d": 365, "3d": 730, "1w": 1095, "1M": 1095,
+    },
+  },
 };
 
 /** Get native intervals for the current exchange */
@@ -196,8 +202,8 @@ function loadVisibleRanges() {
     return raw ? JSON.parse(raw) : {};
   } catch { return {}; }
 }
-function buildVisibleRangeStorageKey(symbol, interval, marketType = "spot") {
-  return `${marketType}::${symbol}::${interval}`;
+function buildVisibleRangeStorageKey(symbol, interval, marketType = "spot", exchange = "binance") {
+  return `${exchange}::${marketType}::${symbol}::${interval}`;
 }
 function normalizeVisibleRange(range) {
   if (!range || typeof range !== "object") return null;
@@ -222,18 +228,18 @@ function normalizeVisibleRange(range) {
   }
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
-function saveVisibleRangeForInterval(symbol, interval, range, marketType = "spot") {
+function saveVisibleRangeForInterval(symbol, interval, range, marketType = "spot", exchange = "binance") {
   const normalized = normalizeVisibleRange(range);
   if (!symbol || !interval || !normalized) return;
   const ranges = loadVisibleRanges();
-  ranges[buildVisibleRangeStorageKey(symbol, interval, marketType)] = normalized;
+  ranges[buildVisibleRangeStorageKey(symbol, interval, marketType, exchange)] = normalized;
   localStorage.setItem(VISIBLE_RANGE_KEY, JSON.stringify(ranges));
 }
-function getVisibleRangeForInterval(symbol, interval, marketType = "spot") {
+function getVisibleRangeForInterval(symbol, interval, marketType = "spot", exchange = "binance") {
   if (!symbol || !interval) return null;
   const ranges = loadVisibleRanges();
   return (
-    normalizeVisibleRange(ranges[buildVisibleRangeStorageKey(symbol, interval, marketType)]) ||
+    normalizeVisibleRange(ranges[buildVisibleRangeStorageKey(symbol, interval, marketType, exchange)]) ||
     normalizeVisibleRange(ranges[interval]) ||
     null
   );
@@ -253,6 +259,10 @@ function getIntervalDays(intv, exchange = "binance") {
   if (secs <= 14400) return 90;
   if (secs <= 43200) return 180;
   return 365;
+}
+
+function isNativeIntervalSupported(exchange, interval) {
+  return getNativeIntervals(exchange).some((item) => item.value === interval);
 }
 
 function mergeByTime(older, current) {
@@ -345,9 +355,9 @@ export default function App() {
     const prefs = loadUserPrefs();
     return prefs.lastSymbol || "BTCUSDT";
   });
-  const [exchange] = useState(() => {
+  const [exchange, setExchange] = useState(() => {
     const prefs = loadUserPrefs();
-    return prefs.lastExchange || "binance";
+    return prefs.lastExchange || inferExchangeFromSymbol(prefs.lastSymbol || "BTCUSDT", "binance");
   });
   const [marketType, setMarketType] = useState(() => {
     const prefs = loadUserPrefs();
@@ -511,7 +521,7 @@ export default function App() {
     chartRef: indicatorChartRefRef,
     seriesRef: indicatorSeriesRefRef,
     chartData,
-    datasetKey: `${marketType}-${symbol}-${interval}-${datasetKey}`,
+    datasetKey: `${exchange}-${marketType}-${symbol}-${interval}-${datasetKey}`,
     seriesReady: indicatorSeriesReady,
     candleUpColor: settings.upColor,
     candleDownColor: settings.downColor,
@@ -519,7 +529,7 @@ export default function App() {
     interval,
     marketType,
   });
-  const chartStorageKeyBase = `${marketType}:${symbol}`;
+  const chartStorageKeyBase = `${exchange}:${marketType}:${symbol}`;
 
   const removeIndicator = useCallback((indicatorId) => {
     rawRemoveIndicator(indicatorId);
@@ -533,7 +543,10 @@ export default function App() {
 
   // --- Cross-interval data cache for instant switching ---
   const chartDataCacheRef = useRef(new Map());
-  const cacheKey = useCallback((sym, intv, mt = marketType) => `${mt}-${sym}-${intv}`, [marketType]);
+  const cacheKey = useCallback(
+    (sym, intv, mt = marketType, ex = exchange) => `${ex}-${mt}-${sym}-${intv}`,
+    [exchange, marketType],
+  );
   const saveToCache = useCallback((sym, intv, data) => {
     chartDataCacheRef.current.set(cacheKey(sym, intv), data);
   }, [cacheKey]);
@@ -752,7 +765,7 @@ export default function App() {
   //  showing an incorrect chart with only a few real-time bars
   //  before gap-fill is done.
   // ============================================================
-  const loadData = useCallback(async (sym, intv) => {
+  const loadData = useCallback(async (sym, intv, mt = marketType, ex = exchange) => {
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -781,11 +794,10 @@ export default function App() {
     setCrosshairData(null);
 
     // ── PARALLEL FETCH: quick tail + full history simultaneously ──
-    const days = getIntervalDays(intv);
-    const mt = marketType;
+    const days = getIntervalDays(intv, ex);
     const [quickResult, historyResult] = await Promise.all([
-      fetchLatestKlines(sym, intv, 5, mt).catch(() => null),
-      fetchKlinesHistory(sym, intv, days, mt).catch(() => null),
+      fetchLatestKlines(sym, intv, 5, mt, ex).catch(() => null),
+      fetchKlinesHistory(sym, intv, days, mt, ex).catch(() => null),
     ]);
 
     if (controller.signal.aborted) return;
@@ -869,24 +881,32 @@ export default function App() {
     if (shownInitialData) {
       setLoading(false);
     }
-  }, [saveToCache, updateLastPrice, marketType]);
+  }, [exchange, marketType, saveToCache, updateLastPrice]);
 
   // ── Symbol switching handler ──
   const handleSymbolChange = useCallback((newSymbolOrObj) => {
     // Accept either a string symbol or { symbol, marketType } object
-    let newSymbol, newMarketType;
+    let newSymbol, newMarketType, newExchange;
     if (typeof newSymbolOrObj === "object" && newSymbolOrObj !== null) {
       newSymbol = newSymbolOrObj.symbol;
       newMarketType = newSymbolOrObj.marketType || "spot";
+      newExchange = newSymbolOrObj.exchange || "binance";
     } else {
       newSymbol = newSymbolOrObj;
       newMarketType = marketType;
+      newExchange = exchange;
     }
-    if (newSymbol === symbol && newMarketType === marketType) return;
+    if (newSymbol === symbol && newMarketType === marketType && newExchange === exchange) return;
 
     // Persist choice
+    const nextInterval = (
+      savedCustomIntervals.includes(interval) || isNativeIntervalSupported(newExchange, interval)
+    ) ? interval : "1h";
+
     updateUserPref("lastSymbol", newSymbol);
     updateUserPref("lastMarketType", newMarketType);
+    updateUserPref("lastExchange", newExchange);
+    updateUserPref("lastInterval", nextInterval);
 
     // Clear in-memory caches for old symbol
     chartDataCacheRef.current.clear();
@@ -901,13 +921,15 @@ export default function App() {
     setHasMoreLeft(true);
     setDatasetKey((v) => v + 1);
 
+    setExchange(newExchange);
     setMarketType(newMarketType);
     setSymbol(newSymbol);
-  }, [symbol, marketType]);
+    setInterval_(nextInterval);
+  }, [exchange, interval, marketType, savedCustomIntervals, symbol]);
 
   useEffect(() => {
-    loadData(symbol, interval);
-  }, [symbol, interval, marketType, loadData]);
+    loadData(symbol, interval, marketType, exchange);
+  }, [symbol, interval, marketType, exchange, loadData]);
 
   const syncSocketSubscriptions = useCallback((socket, desiredIntervals) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -976,7 +998,7 @@ export default function App() {
         pollingInFlight = true;
         try {
           const currentIntv = intervalRef.current;
-          const result = await fetchLatestKlines(symbol, currentIntv, 2, marketType);
+          const result = await fetchLatestKlines(symbol, currentIntv, 2, marketType, exchange);
           if (!result?.data?.length) return;
 
           setChartData((prev) => {
@@ -1032,7 +1054,7 @@ export default function App() {
       }
 
       try {
-        const url = getMultiStreamUrl(symbol, marketType);
+        const url = getMultiStreamUrl(symbol, marketType, exchange);
         socket = new WebSocket(url);
         socketRef.current = socket;
 
@@ -1064,9 +1086,9 @@ export default function App() {
           // Fetch recent bars for the active interval to fill the gap.
           if (isReconnection) {
             const currentIntv = intervalRef.current;
-            const days = getIntervalDays(currentIntv);
+            const days = getIntervalDays(currentIntv, exchange);
             console.log(`[WS-Recovery] Reconnected, reloading full history for ${symbol}@${currentIntv}`);
-            fetchKlinesHistory(symbol, currentIntv, days, marketType)
+            fetchKlinesHistory(symbol, currentIntv, days, marketType, exchange)
               .then((result) => {
                 if (!active || !result?.data?.length) return;
                 setChartData((prev) => {
@@ -1110,9 +1132,11 @@ export default function App() {
             if (msg.type === "backfill_completed") {
               const bfInterval = msg.interval;
               const bfSymbol = msg.symbol || symbol;
+              const bfExchange = msg.exchange || exchange;
+              const bfMarketType = msg.market_type || marketType;
 
               // ── Dedup: skip if a reload for this interval is already in-flight or on cooldown ──
-              const bfDedupeKey = `${bfSymbol}-${bfInterval}`;
+              const bfDedupeKey = `${bfExchange}-${bfMarketType}-${bfSymbol}-${bfInterval}`;
               if (backfillReloadInFlightRef.current.has(bfDedupeKey)) {
                 console.log(`[Backfill] Skipping duplicate reload for ${bfDedupeKey} (already in-flight/cooldown)`);
                 return;
@@ -1120,12 +1144,12 @@ export default function App() {
               backfillReloadInFlightRef.current.add(bfDedupeKey);
 
               console.log(`Backfill completed for ${bfSymbol}@${bfInterval}, reloading data...`);
-              const days = getIntervalDays(bfInterval);
-              fetchKlinesHistory(bfSymbol, bfInterval, days, marketType)
+              const days = getIntervalDays(bfInterval, bfExchange);
+              fetchKlinesHistory(bfSymbol, bfInterval, days, bfMarketType, bfExchange)
                 .then((result) => {
                   if (!result?.data?.length) return;
                   const currentIntv = intervalRef.current;
-                  const key = cacheKey(bfSymbol, bfInterval);
+                  const key = cacheKey(bfSymbol, bfInterval, bfMarketType, bfExchange);
                   const existingCache = chartDataCacheRef.current.get(key);
                   if (existingCache && existingCache.length > 0) {
                     const merged = mergeByTime(result.data, existingCache);
@@ -1133,7 +1157,7 @@ export default function App() {
                   } else {
                     chartDataCacheRef.current.set(key, result.data);
                   }
-                  if (bfInterval === currentIntv) {
+                  if (bfInterval === currentIntv && bfSymbol === symbol && bfExchange === exchange && bfMarketType === marketType) {
                     setChartData((prev) => {
                       const merged = mergeByTime(result.data, prev);
                       saveToCache(bfSymbol, bfInterval, merged);
@@ -1190,7 +1214,7 @@ export default function App() {
             }
 
             // ── Always update the background cache for this interval ──
-            const key = cacheKey(symbol, msgInterval);
+            const key = cacheKey(symbol, msgInterval, marketType, exchange);
             const existingCache = chartDataCacheRef.current.get(key);
             if (existingCache && existingCache.length > 0) {
               const updatedCache = deduplicateByTime(
@@ -1261,7 +1285,7 @@ export default function App() {
       }
       liveSubscribedIntervalsRef.current = new Set();
     };
-  }, [symbol, marketType, saveToCache, syncSocketSubscriptions, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
+  }, [cacheKey, exchange, marketType, saveToCache, syncSocketSubscriptions, symbol, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
 
   useEffect(() => {
     syncSocketSubscriptions(socketRef.current, trackedIntervals);
@@ -1275,12 +1299,12 @@ export default function App() {
       // so switching is instant
       for (const intv of trackedIntervals) {
         if (cancelled) break;
-        const key = cacheKey(symbol, intv);
+        const key = cacheKey(symbol, intv, marketType, exchange);
         if (chartDataCacheRef.current.has(key)) continue; // already cached
 
-        const days = getIntervalDays(intv);
+        const days = getIntervalDays(intv, exchange);
         try {
-          const result = await fetchKlinesHistory(symbol, intv, days, marketType);
+          const result = await fetchKlinesHistory(symbol, intv, days, marketType, exchange);
           if (cancelled) break;
           if (result?.data?.length) {
             chartDataCacheRef.current.set(key, result.data);
@@ -1296,7 +1320,7 @@ export default function App() {
     // Start prefetching after a short delay so the active interval loads first
     const timer = setTimeout(prefetch, 2000);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [symbol, marketType, trackedIntervals]);
+  }, [cacheKey, exchange, marketType, symbol, trackedIntervals]);
 
   // ============================================================
   //  GAP DETECTION & AUTO-FILL
@@ -1349,8 +1373,8 @@ export default function App() {
     try {
       // Strategy: reload full history — this is the most reliable way to
       // fill ANY gap (middle, tail, or multiple scattered gaps at once).
-      const days = getIntervalDays(intv);
-      const result = await fetchKlinesHistory(sym, intv, days, marketType);
+      const days = getIntervalDays(intv, exchange);
+      const result = await fetchKlinesHistory(sym, intv, days, marketType, exchange);
 
       if (result?.data?.length > 0) {
         setChartData((prev) => {
@@ -1374,7 +1398,7 @@ export default function App() {
         gapFillInFlightRef.current.delete(reloadKey);
       }, 10000);
     }
-  }, [saveToCache]);
+  }, [exchange, marketType, saveToCache]);
 
   // Keep recoverGapsRef in sync so closures (WS onopen) always call latest version
   recoverGapsRef.current = recoverGaps;
@@ -1391,7 +1415,7 @@ export default function App() {
 
       const currentIntv = intervalRef.current;
       // Build cache key manually to avoid effect dependency on cacheKey function
-      const currentCacheKey = `${symbol}-${currentIntv}`;
+      const currentCacheKey = cacheKey(symbol, currentIntv, marketType, exchange);
       const currentCache = chartDataCacheRef.current.get(currentCacheKey);
 
       if (currentCache && currentCache.length >= 3) {
@@ -1400,7 +1424,7 @@ export default function App() {
     }, 5000);
 
     return () => clearInterval(periodicTimer);
-  }, [symbol, loading, dataSource]);
+  }, [cacheKey, dataSource, exchange, loading, marketType, symbol]);
 
   // ============================================================
   //  VISIBILITY CHANGE — ACTIVE RECOVERY ON TAB FOCUS
@@ -1441,8 +1465,8 @@ export default function App() {
         // Strategy: reload FULL history for the active interval.
         // This is the most reliable approach — it covers any gap
         // (middle, tail, or multiple scattered gaps) in one shot.
-        const days = getIntervalDays(currentIntv);
-        const historyResult = await fetchKlinesHistory(symbol, currentIntv, days, marketType);
+        const days = getIntervalDays(currentIntv, exchange);
+        const historyResult = await fetchKlinesHistory(symbol, currentIntv, days, marketType, exchange);
 
         if (historyResult?.data?.length > 0) {
           setChartData((prev) => {
@@ -1466,12 +1490,12 @@ export default function App() {
         // Also refresh background caches for other intervals
         for (const bgIntv of trackedIntervalsRef.current) {
           if (bgIntv === currentIntv) continue;
-          const bgKey = cacheKey(symbol, bgIntv);
+          const bgKey = cacheKey(symbol, bgIntv, marketType, exchange);
           const bgCache = chartDataCacheRef.current.get(bgKey);
           if (!bgCache || bgCache.length === 0) continue;
 
           try {
-            const bgResult = await fetchLatestKlines(symbol, bgIntv, 10, marketType);
+            const bgResult = await fetchLatestKlines(symbol, bgIntv, 10, marketType, exchange);
             if (bgResult?.data?.length > 0) {
               const bgMerged = mergeByTime(bgResult.data, bgCache);
               chartDataCacheRef.current.set(bgKey, bgMerged);
@@ -1489,7 +1513,7 @@ export default function App() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [symbol, saveToCache, updateLastPrice, recoverGaps]);
+  }, [cacheKey, exchange, marketType, recoverGaps, saveToCache, symbol, updateLastPrice]);
 
   // ---- handle load more left ----
   const handleNeedMoreLeft = useCallback(
@@ -1506,7 +1530,7 @@ export default function App() {
       const before = oldestLoadedTime || chartData[0].time;
       setLoadingMoreLeft(true);
       try {
-        const result = await fetchKlinesBefore(symbol, interval, before, 500, marketType);
+        const result = await fetchKlinesBefore(symbol, interval, before, 500, marketType, exchange);
         const older = result.data || [];
 
         if (older.length > 0) {
@@ -1541,7 +1565,7 @@ export default function App() {
         setLoadingMoreLeft(false);
       }
     },
-    [chartData.length, dataSource, hasMoreLeft, interval, loading, loadingMoreLeft, saveToCache, symbol],
+    [chartData.length, dataSource, exchange, hasMoreLeft, interval, loading, loadingMoreLeft, marketType, saveToCache, symbol],
   );
 
   // Save visible range when switching away from current interval
@@ -1549,10 +1573,10 @@ export default function App() {
     if (chartWidgetRef.current?.getVisibleRange) {
       const range = chartWidgetRef.current.getVisibleRange();
       if (range) {
-        saveVisibleRangeForInterval(symbol, interval, range, marketType);
+        saveVisibleRangeForInterval(symbol, interval, range, marketType, exchange);
       }
     }
-  }, [interval, marketType, symbol]);
+  }, [exchange, interval, marketType, symbol]);
 
   // Save visible range on page close/refresh
   useEffect(() => {
@@ -1635,6 +1659,10 @@ export default function App() {
     fallback: "Live (Polling fallback)",
     mock: "Mock mode",
   }[wsStatus] || "Unknown";
+  const exchangeLabel = EXCHANGE_INTERVALS[exchange]?.label || (
+    exchange ? `${exchange.charAt(0).toUpperCase()}${exchange.slice(1)}` : "Unknown"
+  );
+  const marketLabel = marketType === "futures" ? "Futures" : "Spot";
 
   return (
     <div className="app-layout">
@@ -1647,6 +1675,7 @@ export default function App() {
         <SymbolSearch
           currentSymbol={symbol}
           currentMarketType={marketType}
+          currentExchange={exchange}
           onSelect={handleSymbolChange}
           watchlists={watchlists}
           onAddToWatchlist={handleAddToWatchlist}
@@ -1914,14 +1943,14 @@ export default function App() {
               onCrosshairMove={setCrosshairData}
               onNeedMoreLeft={handleNeedMoreLeft}
               canLoadMoreLeft={hasMoreLeft && !loadingMoreLeft && !loading}
-              datasetKey={`${marketType}-${symbol}-${interval}-${datasetKey}`}
+              datasetKey={`${exchange}-${marketType}-${symbol}-${interval}-${datasetKey}`}
               upColor={settings.upColor}
               downColor={settings.downColor}
               theme={settings.theme}
               customBg={settings.customBg}
               timezone={settings.timezone}
-              savedVisibleRange={getVisibleRangeForInterval(symbol, interval, marketType)}
-              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(symbol, interval, range, marketType)}
+              savedVisibleRange={getVisibleRangeForInterval(symbol, interval, marketType, exchange)}
+              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(symbol, interval, range, marketType, exchange)}
               drawingTool={drawingTool}
               penColor={penColor}
               penSize={penSize}
@@ -1951,6 +1980,7 @@ export default function App() {
       <WatchlistSidebar
         currentSymbol={symbol}
         currentMarketType={marketType}
+        currentExchange={exchange}
         onSelectSymbol={handleSymbolChange}
         watchlists={watchlists}
         onWatchlistsChange={(next) => { setWatchlists(next); saveWatchlists(next); }}
@@ -1984,6 +2014,7 @@ export default function App() {
         onUpdate={setSettings}
         currentSymbol={symbol}
         currentMarketType={marketType}
+        currentExchange={exchange}
         watchlists={watchlists}
       />
 
@@ -1991,7 +2022,7 @@ export default function App() {
         <div className="status-left">
           <span>
             <span className={`status-dot ${connectionStatus}`} />
-            {connectionStatus === "connected" && "Connected to Binance"}
+            {connectionStatus === "connected" && `Connected to ${exchangeLabel}`}
             {connectionStatus === "loading" && (dataSource === "mock" ? "Mock data mode" : "Loading...")}
             {connectionStatus === "disconnected" && "Disconnected"}
           </span>
@@ -2000,12 +2031,12 @@ export default function App() {
           {!hasMoreLeft && !loadingMoreLeft && <span style={{ color: "#94a3b8" }}>No more history</span>}
           {dataSource === "mock" && (
             <span style={{ color: "#f59e0b" }}>
-              Binance unavailable, using mock data
+              {exchangeLabel} unavailable, using mock data
             </span>
           )}
         </div>
         <div className="status-right">
-          <span>{dataSource === "mock" ? "Demo Mode" : marketType === "futures" ? "Binance Futures" : "Binance Spot"}</span>
+          <span>{dataSource === "mock" ? "Demo Mode" : `${exchangeLabel} ${marketLabel}`}</span>
           <span>{wsStatusLabel}</span>
           <span>CandleScope v0.2.0</span>
         </div>

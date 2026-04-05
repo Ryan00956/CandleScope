@@ -185,15 +185,15 @@ class Reconciler:
         result = ReconcileResult()
 
         try:
-            # 1. Collect all bars grouped by (market_type, symbol, interval)
+            # 1. Collect all bars grouped by (exchange, market_type, symbol, interval)
             grouped = self._group_bars(fetch_results)
             total_received = sum(len(bars) for bars in grouped.values())
             result.bars_received = total_received
 
             # 2 & 3. Dedup + write standard bars
-            for (market_type, symbol, interval), bars in grouped.items():
+            for (exchange, market_type, symbol, interval), bars in grouped.items():
                 written, skipped, deduped = await self._dedup_and_write(
-                    symbol, interval, bars, market_type=market_type,
+                    symbol, interval, bars, exchange=exchange, market_type=market_type,
                 )
                 result.bars_written += written
                 result.bars_skipped += skipped
@@ -242,14 +242,14 @@ class Reconciler:
     @staticmethod
     def _group_bars(
         fetch_results: list[FetchResult],
-    ) -> dict[tuple[str, str, str], list[FetchedBar]]:
-        """Group all fetched bars by (market_type, symbol, interval)."""
-        grouped: dict[tuple[str, str, str], list[FetchedBar]] = {}
+    ) -> dict[tuple[str, str, str, str], list[FetchedBar]]:
+        """Group all fetched bars by (exchange, market_type, symbol, interval)."""
+        grouped: dict[tuple[str, str, str, str], list[FetchedBar]] = {}
         for fr in fetch_results:
             if fr.status == BackfillStatus.FAILED:
                 continue
             for bar in fr.bars:
-                key = (bar.market_type, bar.symbol, bar.interval)
+                key = (bar.exchange, bar.market_type, bar.symbol, bar.interval)
                 grouped.setdefault(key, []).append(bar)
 
         # Sort each group by open_time
@@ -265,6 +265,7 @@ class Reconciler:
         symbol: str,
         interval: str,
         bars: list[FetchedBar],
+        exchange: str = "binance",
         market_type: str = "spot",
     ) -> tuple[int, int, int]:
         """Deduplicate bars against DB and write in batches.
@@ -282,7 +283,7 @@ class Reconciler:
         max_ot = bars[-1].open_time
         try:
             existing = await self._storage.get_existing_open_times(
-                symbol, interval, min_ot, max_ot, market_type=market_type,
+                symbol, interval, min_ot, max_ot, exchange=exchange, market_type=market_type,
             )
         except Exception:
             existing = set()
@@ -307,7 +308,7 @@ class Reconciler:
             dicts = [b.to_storage_dict() for b in batch]
             try:
                 n = await self._storage.upsert_bars(
-                    symbol, interval, dicts, source="backfill", market_type=market_type,
+                    symbol, interval, dicts, source="backfill", exchange=exchange, market_type=market_type,
                 )
                 written += n
                 await self._fire_write_batch(symbol, interval, n)
@@ -340,7 +341,7 @@ class Reconciler:
     async def _generate_custom_bars(
         self,
         decomp: IntervalDecomposition,
-        grouped: dict[tuple[str, str, str], list[FetchedBar]],
+        grouped: dict[tuple[str, str, str, str], list[FetchedBar]],
     ) -> tuple[int, int]:
         """Aggregate standard bars into custom-interval candles.
 
@@ -360,17 +361,17 @@ class Reconciler:
         written = 0
 
         # Collect all component bars for each symbol
-        symbols: set[str] = set()
-        component_bars: dict[tuple[str, str], list[FetchedBar]] = {}  # (market_type, symbol) → sorted bars
+        symbols: set[tuple[str, str, str]] = set()
+        component_bars: dict[tuple[str, str, str], list[FetchedBar]] = {}
 
         for comp in decomp.components:
-            for (market_type, sym, iv), bars in grouped.items():
+            for (exchange, market_type, sym, iv), bars in grouped.items():
                 if iv == comp.interval:
-                    symbols.add((market_type, sym))
-                    component_bars.setdefault((market_type, sym), []).extend(bars)
+                    symbols.add((exchange, market_type, sym))
+                    component_bars.setdefault((exchange, market_type, sym), []).extend(bars)
 
-        for market_type, symbol in symbols:
-            bars = component_bars.get((market_type, symbol), [])
+        for exchange, market_type, symbol in symbols:
+            bars = component_bars.get((exchange, market_type, symbol), [])
             if not bars:
                 continue
 
@@ -384,7 +385,9 @@ class Reconciler:
             if self._bar_aggregator is not None:
                 try:
                     # Ensure the custom interval target is registered
-                    self._bar_aggregator.add_target(symbol, custom_iv, market_type=market_type)
+                    self._bar_aggregator.add_target(
+                        symbol, custom_iv, exchange=exchange, market_type=market_type,
+                    )
 
                     # Feed component bars strictly in global chronological order.
                     # Grouping by source interval first breaks ordering for mixed
@@ -392,12 +395,20 @@ class Reconciler:
                     # custom bucket before all of its components have arrived.
                     for bar in bars:
                         await self._bar_aggregator.on_backfill_bars(
-                            symbol, bar.interval, [bar.to_dict()], market_type=market_type,
+                            symbol,
+                            bar.interval,
+                            [bar.to_dict()],
+                            exchange=exchange,
+                            market_type=market_type,
                         )
 
                     # Collect generated bars from BarAggregator's state
                     recent = self._bar_aggregator.get_recent_bars(
-                        symbol, custom_iv, limit=10000, market_type=market_type,
+                        symbol,
+                        custom_iv,
+                        limit=10000,
+                        exchange=exchange,
+                        market_type=market_type,
                     )
                     custom_bars_from_agg = []
                     for bar_state in recent:
@@ -413,6 +424,7 @@ class Reconciler:
                             low=bar_state.low,
                             close=bar_state.close,
                             volume=bar_state.volume,
+                            exchange=exchange,
                             market_type=market_type,
                             quote_volume=bar_state.quote_volume,
                             trades=bar_state.trades,
@@ -432,6 +444,7 @@ class Reconciler:
                             n = await self._storage.upsert_bars(
                                 symbol, custom_iv, dicts,
                                 source="backfill_aggregated",
+                                exchange=exchange,
                                 market_type=market_type,
                             )
                             written += n
@@ -469,7 +482,12 @@ class Reconciler:
                 dicts = [b.to_storage_dict() for b in batch]
                 try:
                     n = await self._storage.upsert_bars(
-                        symbol, custom_iv, dicts, source="backfill_aggregated", market_type=market_type,
+                        symbol,
+                        custom_iv,
+                        dicts,
+                        source="backfill_aggregated",
+                        exchange=exchange,
+                        market_type=market_type,
                     )
                     written += n
                 except Exception as exc:
@@ -558,7 +576,9 @@ class Reconciler:
             low=min(b.low for b in bars),
             close=bars[-1].close,
             volume=sum(b.volume for b in bars),
+            exchange=bars[0].exchange,
             quote_volume=sum(b.quote_volume for b in bars),
+            market_type=bars[0].market_type,
             trades=sum(b.trades for b in bars),
             taker_buy_base=sum(b.taker_buy_base for b in bars),
             taker_buy_quote=sum(b.taker_buy_quote for b in bars),
@@ -569,7 +589,7 @@ class Reconciler:
 
     async def _push_to_cache(
         self,
-        grouped: dict[tuple[str, str, str], list[FetchedBar]],
+        grouped: dict[tuple[str, str, str, str], list[FetchedBar]],
     ) -> int:
         """Push recent bars to the cache backend."""
         if self._cache is None:
@@ -580,14 +600,16 @@ class Reconciler:
         cutoff = now_ms - window
         total_cached = 0
 
-        for (market_type, symbol, interval), bars in grouped.items():
+        for (exchange, market_type, symbol, interval), bars in grouped.items():
             recent = [b for b in bars if b.open_time >= cutoff]
             if not recent:
                 continue
             try:
                 dicts = [b.to_lightweight() for b in recent]
                 try:
-                    n = await self._cache.push_bars(symbol, interval, dicts, market_type=market_type)
+                    n = await self._cache.push_bars(
+                        symbol, interval, dicts, exchange=exchange, market_type=market_type,
+                    )
                 except TypeError:
                     n = await self._cache.push_bars(symbol, interval, dicts)
                 total_cached += n

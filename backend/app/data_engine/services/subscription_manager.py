@@ -27,7 +27,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.exchanges.symbols import normalize_symbol as normalize_exchange_symbol
+
 logger = logging.getLogger("candlescope.subscriptions")
+
+
+def _infer_exchange_from_symbol(symbol: str, fallback: str = "binance") -> str:
+    normalized = str(symbol or "").upper().strip()
+    if not normalized:
+        return fallback
+    if "-" in normalized:
+        return "okx"
+    return fallback
 
 
 def _to_composite_key(symbol: str) -> str:
@@ -35,18 +46,38 @@ def _to_composite_key(symbol: str) -> str:
 
     'BTCUSDT' -> 'spot:BTCUSDT'
     'spot:BTCUSDT' -> 'spot:BTCUSDT' (unchanged)
+    'okx:spot:BTC-USDT' -> 'okx:spot:BTC-USDT' (unchanged)
     'futures:ETHUSDT' -> 'futures:ETHUSDT' (unchanged)
     """
-    market_type, raw_symbol = _parse_composite_key(symbol)
-    return f"{market_type}:{raw_symbol}"
+    exchange, market_type, raw_symbol = _parse_composite_key(symbol)
+    raw_symbol = normalize_exchange_symbol(
+        raw_symbol,
+        exchange=exchange,
+        market_type=market_type,
+    )
+    if exchange == "binance":
+        return f"{market_type}:{raw_symbol}"
+    return f"{exchange}:{market_type}:{raw_symbol}"
 
 
-def _parse_composite_key(key: str) -> tuple[str, str]:
-    """Parse 'spot:BTCUSDT' -> ('spot', 'BTCUSDT')."""
-    idx = key.find(":")
-    if idx == -1:
-        return "spot", key.upper().strip()
-    return key[:idx].lower(), key[idx + 1:].upper().strip()
+def _parse_composite_key(key: str) -> tuple[str, str, str]:
+    """Parse to (exchange, market_type, raw_symbol)."""
+    parts = [part.strip() for part in key.split(":") if part.strip()]
+    if len(parts) >= 3:
+        exchange = parts[0].lower()
+        market_type = parts[1].lower()
+        raw_symbol = normalize_exchange_symbol(parts[2], exchange=exchange, market_type=market_type)
+        return exchange, market_type, raw_symbol
+    if len(parts) == 2:
+        market_type = parts[0].lower()
+        raw_symbol = parts[1].upper()
+        exchange = _infer_exchange_from_symbol(raw_symbol)
+        raw_symbol = normalize_exchange_symbol(raw_symbol, exchange=exchange, market_type=market_type)
+        return exchange, market_type, raw_symbol
+    raw_symbol = key.upper().strip()
+    exchange = _infer_exchange_from_symbol(raw_symbol)
+    raw_symbol = normalize_exchange_symbol(raw_symbol, exchange=exchange, market_type="spot")
+    return exchange, "spot", raw_symbol
 
 
 class SubscriptionTier(str, enum.Enum):
@@ -223,19 +254,21 @@ class SubscriptionManager:
         """Start the full ingestion pipeline for a symbol."""
         if self._data_manager is None:
             return
-        market_type, raw_sym = _parse_composite_key(key)
+        exchange, market_type, raw_sym = _parse_composite_key(key)
         for interval in ("1m",):
             try:
                 await self._data_manager.ensure_stream(
                     raw_sym,
                     interval,
+                    exchange=exchange,
                     market_type=market_type,
                 )
             except Exception as exc:
                 logger.warning(
-                    "ensure_stream(%s, %s, market_type=%s) failed: %s",
+                    "ensure_stream(%s, %s, exchange=%s, market_type=%s) failed: %s",
                     raw_sym,
                     interval,
+                    exchange,
                     market_type,
                     exc,
                 )
@@ -244,14 +277,19 @@ class SubscriptionManager:
         """Stop the full ingestion pipeline for a symbol."""
         if self._data_manager is None:
             return
-        market_type, raw_sym = _parse_composite_key(key)
+        exchange, market_type, raw_sym = _parse_composite_key(key)
         try:
             streams = self._data_manager.get_all_streams()
             for info in streams:
-                if info.key.symbol == raw_sym and info.key.market_type == market_type:
+                if (
+                    info.key.symbol == raw_sym
+                    and info.key.exchange == exchange
+                    and info.key.market_type == market_type
+                ):
                     await self._data_manager.stop_stream(
                         raw_sym,
                         info.key.interval,
+                        exchange=exchange,
                         market_type=market_type,
                     )
         except Exception as exc:
@@ -291,6 +329,7 @@ class SubscriptionManager:
     def _load_from_db(self) -> None:
         with sqlite3.connect(self._db_path) as conn:
             rows = conn.execute("SELECT symbol, tier, added_at FROM subscriptions").fetchall()
+            rewrites: list[tuple[str, str, int, str]] = []
         for sym, tier_str, added_at in rows:
             try:
                 tier = SubscriptionTier(tier_str)
@@ -302,6 +341,17 @@ class SubscriptionManager:
                 tier=tier,
                 added_at=added_at,
             )
+            if normalized != sym:
+                rewrites.append((normalized, tier.value, added_at, sym))
+        if rewrites:
+            with sqlite3.connect(self._db_path) as conn:
+                for normalized, tier_value, added_at, original in rewrites:
+                    conn.execute("DELETE FROM subscriptions WHERE symbol = ?", (original,))
+                    conn.execute(
+                        "INSERT OR REPLACE INTO subscriptions (symbol, tier, added_at) VALUES (?, ?, ?)",
+                        (normalized, tier_value, added_at),
+                    )
+                conn.commit()
 
     def _save_to_db(self, symbol: str, sub: SymbolSubscription) -> None:
         with sqlite3.connect(self._db_path) as conn:

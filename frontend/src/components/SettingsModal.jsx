@@ -124,6 +124,7 @@ export default function SettingsModal({
     onUpdate,
     currentSymbol = '',
     currentMarketType = 'spot',
+    currentExchange = 'binance',
     watchlists = [],
 }) {
     const [activeCategory, setActiveCategory] = useState('appearance');
@@ -198,14 +199,15 @@ export default function SettingsModal({
         const collected = new Set(getCurrentScopeSymbols());
         for (const wl of watchlists || []) {
             for (const item of wl.symbols || []) {
-                const { symbol, marketType } = parseSymbolKey(item);
+                const { symbol, marketType, exchange } = parseSymbolKey(item);
                 if ((marketType || 'spot') !== currentMarketType) continue;
+                if ((exchange || 'binance') !== currentExchange) continue;
                 const normalized = String(symbol || '').toUpperCase().trim();
                 if (normalized) collected.add(normalized);
             }
         }
         return [...collected];
-    }, [currentMarketType, getCurrentScopeSymbols, watchlists]);
+    }, [currentExchange, currentMarketType, getCurrentScopeSymbols, watchlists]);
 
     const handleStorageRepair = useCallback(async (scope) => {
         const symbols = scope === 'watchlist' ? getWatchlistScopeSymbols() : getCurrentScopeSymbols();
@@ -215,6 +217,7 @@ export default function SettingsModal({
         try {
             const res = await repairStoredCustomIntervals({
                 marketType: currentMarketType,
+                exchange: currentExchange,
                 symbols,
             });
             setStorageRepairResult(res);
@@ -222,6 +225,7 @@ export default function SettingsModal({
             setStorageRepairResult({
                 status: 'error',
                 message: `修复失败: ${err.message}`,
+                exchange: currentExchange,
                 market_type: currentMarketType,
                 symbols_filter: symbols,
                 checked_series: 0, repaired_series: 0,
@@ -232,7 +236,7 @@ export default function SettingsModal({
         } finally {
             setStorageRepairLoading(false);
         }
-    }, [currentMarketType, getCurrentScopeSymbols, getWatchlistScopeSymbols]);
+    }, [currentExchange, currentMarketType, getCurrentScopeSymbols, getWatchlistScopeSymbols]);
 
     const handleGapScan = useCallback(async (scope) => {
         const symbols = scope === 'watchlist' ? getWatchlistScopeSymbols() : getCurrentScopeSymbols();
@@ -242,6 +246,7 @@ export default function SettingsModal({
         try {
             const res = await scanAndFillGaps({
                 marketType: currentMarketType,
+                exchange: currentExchange,
                 symbols,
             });
             setGapScanResult(res);
@@ -249,6 +254,7 @@ export default function SettingsModal({
             setGapScanResult({
                 status: 'error',
                 message: `扫描失败: ${err.message}`,
+                exchange: currentExchange,
                 market_type: currentMarketType,
                 symbols_filter: symbols,
                 gaps_found: 0, gaps_filled: 0,
@@ -257,7 +263,7 @@ export default function SettingsModal({
         } finally {
             setGapScanLoading(false);
         }
-    }, [currentMarketType, getCurrentScopeSymbols, getWatchlistScopeSymbols]);
+    }, [currentExchange, currentMarketType, getCurrentScopeSymbols, getWatchlistScopeSymbols]);
 
     // ── Exchange info refresh ──
     const [exchangeRefreshLoading, setExchangeRefreshLoading] = useState(false);
@@ -267,11 +273,14 @@ export default function SettingsModal({
         setExchangeRefreshLoading(true);
         setExchangeRefreshResult(null);
         try {
-            const res = await refreshExchangeInfo();
+            const res = await refreshExchangeInfo(currentExchange);
+            const refreshedCount = typeof res.count === 'number'
+                ? res.count
+                : Object.values(res.counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
             setExchangeRefreshResult({
                 status: 'ok',
-                message: `已更新 ${res.count} 个交易对`,
-                count: res.count,
+                message: `已更新 ${currentExchange} 的 ${refreshedCount} 个交易对`,
+                count: refreshedCount,
             });
         } catch (err) {
             setExchangeRefreshResult({
@@ -281,7 +290,7 @@ export default function SettingsModal({
         } finally {
             setExchangeRefreshLoading(false);
         }
-    }, []);
+    }, [currentExchange]);
 
     // ── Data management state (must be above early return for hook ordering) ──
     const [showAdvanced, setShowAdvanced] = useState(false);

@@ -345,6 +345,7 @@ def get_bounds(
 def list_series_summaries(
     custom_only: bool = False,
     *,
+    exchange: str | None = None,
     market_type: str | None = None,
 ) -> list[dict]:
     """List stored series with bounds/count metadata."""
@@ -361,6 +362,9 @@ def list_series_summaries(
     """
     params: list[object] = []
     where: list[str] = []
+    if exchange:
+        where.append("exchange = ?")
+        params.append(exchange)
     if market_type:
         where.append("market_type = ?")
         params.append(market_type)
@@ -413,6 +417,7 @@ class KlinesRepoAdapter:
         end_ms: int | None = None,
         limit: int | None = None,
         order: str = "ASC",
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> list[dict]:
         """Query bars from SQLite storage."""
@@ -423,7 +428,7 @@ class KlinesRepoAdapter:
             end_ms=end_ms,
             limit=limit,
             order=order,
-            exchange=self._exchange,
+            exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
         )
 
@@ -433,6 +438,7 @@ class KlinesRepoAdapter:
         interval: str,
         rows: list[dict],
         source: str = "data_manager",
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> int:
         """Insert or update bars in SQLite storage."""
@@ -441,27 +447,35 @@ class KlinesRepoAdapter:
             interval=interval,
             rows=rows,
             source=source,
-            exchange=self._exchange,
+            exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
         )
 
-    def get_bounds(self, symbol: str, interval: str, market_type: str | None = None) -> dict:
+    def get_bounds(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> dict:
         """Return {earliest_open_time, latest_open_time, total_count}."""
         return get_bounds(
             symbol=symbol,
             interval=interval,
-            exchange=self._exchange,
+            exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
         )
 
     def list_series(
         self,
         custom_only: bool = False,
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> list[dict]:
         """Return stored series summaries."""
         return list_series_summaries(
             custom_only=custom_only,
+            exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
         )
 
@@ -471,6 +485,7 @@ class KlinesRepoAdapter:
         interval: str,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> int:
         """Delete bars in range."""
@@ -479,7 +494,7 @@ class KlinesRepoAdapter:
             interval=interval,
             start_ms=start_ms,
             end_ms=end_ms,
-            exchange=self._exchange,
+            exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
         )
 
@@ -489,6 +504,7 @@ class KlinesRepoAdapter:
         interval: str,
         before_ms: int,
         limit: int = 500,
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> list[dict]:
         """Fetch bars before a timestamp, ordered ASC."""
@@ -497,7 +513,7 @@ class KlinesRepoAdapter:
             interval=interval,
             before_ms=before_ms,
             limit=limit,
-            exchange=self._exchange,
+            exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
         )
 
@@ -550,40 +566,55 @@ class AsyncKlinesRepoAdapter:
         self._exchange = exchange
         self._market_type = market_type
 
-    async def get_latest_time(self, symbol: str, interval: str, market_type: str | None = None) -> int | None:
+    async def get_latest_time(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> int | None:
         """Return the latest open_time (ms) stored, or None if empty."""
         import asyncio
         def _sync():
             bounds = get_bounds(
                 symbol, interval,
-                exchange=self._exchange, market_type=market_type or self._market_type,
+                exchange=exchange or self._exchange,
+                market_type=market_type or self._market_type,
             )
             return bounds.get("latest_open_time")
         return await asyncio.to_thread(_sync)
 
-    async def get_earliest_time(self, symbol: str, interval: str, market_type: str | None = None) -> int | None:
+    async def get_earliest_time(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> int | None:
         """Return the earliest open_time (ms) stored, or None if empty."""
         import asyncio
         def _sync():
             bounds = get_bounds(
                 symbol, interval,
-                exchange=self._exchange, market_type=market_type or self._market_type,
+                exchange=exchange or self._exchange,
+                market_type=market_type or self._market_type,
             )
             return bounds.get("earliest_open_time")
         return await asyncio.to_thread(_sync)
 
     async def query_time_range(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> list[dict]:
         """Return all bars within [start_ms, end_ms], ordered by open_time ASC."""
         import asyncio
-        exchange = self._exchange
+        resolved_exchange = exchange or self._exchange
         resolved_market_type = market_type or self._market_type
         def _sync():
             return query_klines(
                 symbol, interval, start_ms, end_ms, None, "ASC",
-                exchange=exchange, market_type=resolved_market_type,
+                exchange=resolved_exchange, market_type=resolved_market_type,
             )
         return await asyncio.to_thread(_sync)
 
@@ -593,26 +624,28 @@ class AsyncKlinesRepoAdapter:
         interval: str,
         bars: list[dict],
         source: str = "backfill",
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> int:
         """Insert or update bars. Return number of rows affected."""
         import asyncio
-        exchange = self._exchange
+        resolved_exchange = exchange or self._exchange
         resolved_market_type = market_type or self._market_type
         def _sync():
             return upsert_klines(
                 symbol, interval, bars, source,
-                exchange=exchange, market_type=resolved_market_type,
+                exchange=resolved_exchange, market_type=resolved_market_type,
             )
         return await asyncio.to_thread(_sync)
 
     async def count_bars(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> int:
         """Count bars within [start_ms, end_ms]."""
         import asyncio
-        exchange = self._exchange
+        resolved_exchange = exchange or self._exchange
         resolved_market_type = market_type or self._market_type
         def _sync():
             with _connect() as conn:
@@ -620,18 +653,19 @@ class AsyncKlinesRepoAdapter:
                     "SELECT COUNT(*) AS cnt FROM klines "
                     "WHERE exchange = ? AND market_type = ? "
                     "AND symbol = ? AND interval = ? AND open_time >= ? AND open_time <= ?",
-                    (exchange, resolved_market_type, symbol, interval, start_ms, end_ms),
+                    (resolved_exchange, resolved_market_type, symbol, interval, start_ms, end_ms),
                 ).fetchone()
                 return row["cnt"] if row else 0
         return await asyncio.to_thread(_sync)
 
     async def get_existing_open_times(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> set[int]:
         """Return the set of open_time values that exist in [start_ms, end_ms]."""
         import asyncio
-        exchange = self._exchange
+        resolved_exchange = exchange or self._exchange
         resolved_market_type = market_type or self._market_type
         def _sync():
             with _connect() as conn:
@@ -639,7 +673,7 @@ class AsyncKlinesRepoAdapter:
                     "SELECT open_time FROM klines "
                     "WHERE exchange = ? AND market_type = ? "
                     "AND symbol = ? AND interval = ? AND open_time >= ? AND open_time <= ?",
-                    (exchange, resolved_market_type, symbol, interval, start_ms, end_ms),
+                    (resolved_exchange, resolved_market_type, symbol, interval, start_ms, end_ms),
                 ).fetchall()
                 return {r["open_time"] for r in rows}
         return await asyncio.to_thread(_sync)

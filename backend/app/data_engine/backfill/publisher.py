@@ -132,6 +132,7 @@ class RepairPublisher:
     def build_report(
         self,
         symbol: str,
+        exchange: str,
         status: BackfillStatus,
         plan: BackfillPlan | None,
         fetch_results: list[FetchResult],
@@ -155,6 +156,7 @@ class RepairPublisher:
         report = RepairReport(
             run_id=uuid.uuid4().hex[:12],
             symbol=symbol,
+            exchange=exchange,
             status=status,
             plan=plan,
             fetch_results=fetch_results,
@@ -223,6 +225,7 @@ class RepairPublisher:
         return {
             "run_id": report.run_id,
             "symbol": report.symbol,
+            "exchange": report.exchange,
             "status": report.status.value,
             "elapsed_ms": report.elapsed_ms,
             "gaps": len(report.plan.gaps) if report.plan else 0,

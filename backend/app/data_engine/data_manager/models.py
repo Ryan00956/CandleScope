@@ -30,7 +30,7 @@ from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
 
 @dataclass(frozen=True, slots=True)
 class SeriesKey:
-    """Immutable identifier for a (market_type, symbol, interval) data series.
+    """Immutable identifier for an (exchange, market_type, symbol, interval) series.
 
     Usable as a dict key and set member.
 
@@ -42,20 +42,27 @@ class SeriesKey:
     """
     symbol: str
     interval: str
+    exchange: str = "binance"
     market_type: str = "spot"  # "spot" or "futures"
 
     def __post_init__(self) -> None:
         # Normalize symbol to uppercase
         object.__setattr__(self, "symbol", self.symbol.upper().strip())
         object.__setattr__(self, "interval", self.interval.strip())
+        object.__setattr__(self, "exchange", self.exchange.strip().lower())
         object.__setattr__(self, "market_type", self.market_type.strip().lower())
 
     @property
     def topic(self) -> str:
-        """Event bus topic string, e.g. ``'BTCUSDT@1m'`` or ``'futures:BTCUSDT@1m'``."""
+        """Event bus topic string, e.g. ``'BTCUSDT@1m'`` or ``'okx:futures:BTCUSDT@1m'``."""
         base = f"{self.symbol}@{self.interval}"
+        prefixes: list[str] = []
+        if self.exchange != "binance":
+            prefixes.append(self.exchange)
         if self.market_type != "spot":
-            return f"{self.market_type}:{base}"
+            prefixes.append(self.market_type)
+        if prefixes:
+            return f"{':'.join(prefixes)}:{base}"
         return base
 
     def __str__(self) -> str:
@@ -177,6 +184,7 @@ class QueryResult:
     bars: list[BarData] = field(default_factory=list)
     symbol: str = ""
     interval: str = ""
+    exchange: str = "binance"
     market_type: str = "spot"
     source: QuerySource = QuerySource.EMPTY
     total: int = 0
@@ -190,6 +198,7 @@ class QueryResult:
         return {
             "symbol": self.symbol,
             "interval": self.interval,
+            "exchange": self.exchange,
             "market_type": self.market_type,
             "source": self.source.value,
             "total": self.total,
@@ -253,6 +262,7 @@ class DataEvent:
     def to_dict(self) -> dict:
         d: dict[str, Any] = {
             "event_type": self.event_type.value,
+            "exchange": self.key.exchange,
             "symbol": self.key.symbol,
             "interval": self.key.interval,
             "market_type": self.key.market_type,
@@ -343,6 +353,7 @@ class StreamInfo:
 
     def to_dict(self) -> dict:
         return {
+            "exchange": self.key.exchange,
             "symbol": self.key.symbol,
             "interval": self.key.interval,
             "market_type": self.key.market_type,
@@ -380,6 +391,7 @@ class StorageBackend(Protocol):
         end_ms: int | None = None,
         limit: int | None = None,
         order: str = "ASC",
+        exchange: str = "binance",
         market_type: str = "spot",
     ) -> list[dict]:
         """Query bars from storage.  Returns list of row dicts."""
@@ -391,13 +403,14 @@ class StorageBackend(Protocol):
         interval: str,
         rows: list[dict],
         source: str = "data_manager",
+        exchange: str = "binance",
         market_type: str = "spot",
     ) -> int:
         """Insert or update bars.  Returns number of rows written."""
         ...
 
     def get_bounds(
-        self, symbol: str, interval: str, market_type: str = "spot",
+        self, symbol: str, interval: str, exchange: str = "binance", market_type: str = "spot",
     ) -> dict:
         """Return {earliest_open_time, latest_open_time, total_count}."""
         ...
@@ -408,6 +421,7 @@ class StorageBackend(Protocol):
         interval: str,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        exchange: str = "binance",
         market_type: str = "spot",
     ) -> int:
         """Delete bars in range.  Returns number of rows deleted."""
@@ -419,6 +433,7 @@ class StorageBackend(Protocol):
         interval: str,
         before_ms: int,
         limit: int = 500,
+        exchange: str = "binance",
         market_type: str = "spot",
     ) -> list[dict]:
         """Fetch bars before a timestamp, ordered ASC."""

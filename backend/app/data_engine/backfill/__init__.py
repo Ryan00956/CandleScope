@@ -50,6 +50,8 @@ import logging
 import time
 from typing import Any
 
+from app.exchanges.symbols import normalize_symbol
+
 from ..ingestion.config import IngestionConfig
 from ..ingestion.metrics import LayerMetrics
 from ..ingestion.transport import TransportLayer
@@ -220,6 +222,7 @@ class BackfillEngine:
         range_start_ms: int | None = None,
         range_end_ms: int | None = None,
         metadata: dict[str, Any] | None = None,
+        exchange: str = "binance",
         market_type: str = "spot",
     ) -> RepairReport:
         """Execute a complete backfill run.
@@ -237,6 +240,7 @@ class BackfillEngine:
             A ``RepairReport`` describing what happened.
         """
         started_at_ms = int(time.time() * 1000)
+        symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
         self._metrics.inc("runs")
         self._metrics.mark("last_run_at")
 
@@ -259,6 +263,7 @@ class BackfillEngine:
                 intervals=intervals,
                 range_start_ms=range_start_ms,
                 range_end_ms=range_end_ms,
+                exchange=exchange,
                 market_type=market_type,
             )
 
@@ -267,6 +272,7 @@ class BackfillEngine:
                 status = BackfillStatus.COMPLETED
                 report = self.publisher.build_report(
                     symbol=symbol,
+                    exchange=exchange,
                     status=status,
                     plan=None,
                     fetch_results=[],
@@ -286,6 +292,7 @@ class BackfillEngine:
                 status = BackfillStatus.COMPLETED
                 report = self.publisher.build_report(
                     symbol=symbol,
+                    exchange=exchange,
                     status=status,
                     plan=plan,
                     fetch_results=[],
@@ -299,6 +306,7 @@ class BackfillEngine:
             # ── Phase 3: Fetch ──
             # Set market_type on all tasks so the fetcher routes correctly
             for task in plan.tasks:
+                task.exchange = exchange
                 task.market_type = market_type
             status = BackfillStatus.FETCHING
             fetch_results = await self.fetcher.fetch(plan.tasks)
@@ -341,6 +349,7 @@ class BackfillEngine:
         # ── Phase 5: Publish ──
         report = self.publisher.build_report(
             symbol=symbol,
+            exchange=exchange,
             status=status,
             plan=plan,
             fetch_results=fetch_results,
@@ -370,17 +379,20 @@ class BackfillEngine:
         intervals: list[str] | None = None,
         range_start_ms: int | None = None,
         range_end_ms: int | None = None,
+        exchange: str = "binance",
         market_type: str = "spot",
     ) -> list[GapInfo]:
         """Run gap detection only, without planning or fetching.
 
         Useful for diagnostics and dry runs.
         """
+        symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
         return await self.detector.detect(
             symbol=symbol,
             intervals=intervals,
             range_start_ms=range_start_ms,
             range_end_ms=range_end_ms,
+            exchange=exchange,
             market_type=market_type,
         )
 
@@ -392,17 +404,20 @@ class BackfillEngine:
         intervals: list[str] | None = None,
         range_start_ms: int | None = None,
         range_end_ms: int | None = None,
+        exchange: str = "binance",
         market_type: str = "spot",
     ) -> BackfillPlan:
         """Run gap detection + planning only, without fetching.
 
         Useful for cost estimation and previewing what would happen.
         """
+        symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
         gaps = await self.detector.detect(
             symbol=symbol,
             intervals=intervals,
             range_start_ms=range_start_ms,
             range_end_ms=range_end_ms,
+            exchange=exchange,
             market_type=market_type,
         )
         return self.planner.plan(gaps)

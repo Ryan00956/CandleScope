@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
-import { parseSymbolKey } from "../utils/symbolKey";
+import { parseSymbolKey, symbolKey } from "../utils/symbolKey";
 
 // ── LocalStorage keys ──
 const WATCHLISTS_KEY = "candlescope-watchlists";
@@ -18,7 +18,17 @@ function loadWatchlists() {
     const raw = localStorage.getItem(WATCHLISTS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map((wl) => ({
+          ...wl,
+          symbols: Array.isArray(wl.symbols)
+            ? wl.symbols.map((item) => {
+                const { symbol, marketType, exchange } = parseSymbolKey(item);
+                return symbolKey(symbol, marketType, exchange);
+              })
+            : [],
+        }));
+      }
     }
   } catch { /* ignore */ }
   return [{ id: "default", name: "自选列表", symbols: [], color: "#3b82f6" }];
@@ -97,7 +107,7 @@ const TIER_OPTIONS = [
 //  WatchlistSidebar — accordion layout with DnD + table-style price display
 // ═══════════════════════════════════════════════════════════════
 export default function WatchlistSidebar({
-  currentSymbol, currentMarketType, onSelectSymbol,
+  currentSymbol, currentMarketType, currentExchange = "binance", onSelectSymbol,
   watchlists: externalWatchlists, onWatchlistsChange,
   prices, subscriptionTiers, onTierChange,
   upColor, downColor,
@@ -496,8 +506,12 @@ export default function WatchlistSidebar({
 
   // ── Render helper for price columns ──
   const renderSymbolRow = (compositeKey, wl, idx) => {
-    const { symbol: sym, marketType: mt } = parseSymbolKey(compositeKey);
-    const isActive = sym === currentSymbol && mt === (currentMarketType || "spot");
+    const { symbol: sym, marketType: mt, exchange: ex } = parseSymbolKey(compositeKey);
+    const isActive = (
+      sym === currentSymbol
+      && mt === (currentMarketType || "spot")
+      && ex === (currentExchange || "binance")
+    );
     const isDragged = dragType === "symbol" && dragSymbol === compositeKey && dragSourceListId === wl.id;
     const tick = prices?.[compositeKey];
     const tierVal = subscriptionTiers?.[compositeKey] || "none";
@@ -526,7 +540,7 @@ export default function WatchlistSidebar({
           onDragLeave={() => {
             if (dropTarget?.listId === wl.id && dropTarget?.index === idx) setDropTarget(null);
           }}
-          onClick={() => onSelectSymbol({ symbol: sym, marketType: mt })}
+          onClick={() => onSelectSymbol({ symbol: sym, marketType: mt, exchange: ex })}
           onContextMenu={(e) => handleContextMenu(e, compositeKey, wl.id)}
         >
           {/* Drag grip */}

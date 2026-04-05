@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchExchangeInfo, refreshExchangeInfo } from "../services/api";
-import { symbolKey, parseSymbolKey } from "../utils/symbolKey";
+import { symbolKey } from "../utils/symbolKey";
 
 // ── Constants ────────────────────────────────────────────────
 const FAVORITES_KEY = "candlescope-favorite-symbols-v2";
@@ -10,11 +10,6 @@ const MARKET_TABS = [
   { key: "spot",      label: "现货",   icon: "💱" },
   { key: "futures",   label: "合约",   icon: "📄" },
 ];
-const EXCHANGE_CHIPS = [
-  { key: "binance", label: "Binance" },
-  // Future: { key: "okx", label: "OKX" }, { key: "bybit", label: "Bybit" }
-];
-
 // Virtual scroll
 const ROW_HEIGHT = 42;
 const VISIBLE_ROWS = 14;
@@ -32,12 +27,12 @@ function saveFavorites(list) {
 
 // ── Component ────────────────────────────────────────────────
 export default function SymbolSearchModal({
-  open, onClose, currentSymbol, currentMarketType, onSelect,
+  open, onClose, currentSymbol, currentMarketType, currentExchange = "binance", onSelect,
   watchlists, onAddToWatchlist,
 }) {
   const [search, setSearch] = useState("");
-  const [marketType, setMarketType] = useState("spot");
-  const [exchangeFilter, setExchangeFilter] = useState(new Set(["binance"]));
+  const [marketType, setMarketType] = useState(currentMarketType || "spot");
+  const [exchangeFilter, setExchangeFilter] = useState(() => new Set([currentExchange || "binance"]));
   const [quoteFilter, setQuoteFilter] = useState("USDT");
   const [favorites, setFavorites] = useState(loadFavorites);
   const [highlightIndex, setHighlightIndex] = useState(0);
@@ -66,7 +61,7 @@ export default function SymbolSearchModal({
               ...s,
               exchange: s.exchange || "binance",
               marketType: s.marketType || "spot",
-              _key: symbolKey(s.symbol, s.marketType || "spot"),
+              _key: symbolKey(s.symbol, s.marketType || "spot", s.exchange || "binance"),
             }));
             setAllSymbols(enriched);
           }
@@ -81,12 +76,28 @@ export default function SymbolSearchModal({
   useEffect(() => {
     if (open) {
       setSearch("");
+      setMarketType(currentMarketType || "spot");
+      setExchangeFilter(new Set([currentExchange || "binance"]));
       setHighlightIndex(0);
       setScrollTop(0);
       setCtxMenu(null);
       setTimeout(() => inputRef.current?.focus(), 50);
     }
-  }, [open]);
+  }, [currentExchange, currentMarketType, open]);
+
+  const exchangeChips = useMemo(() => {
+    const exchanges = new Set([currentExchange || "binance"]);
+    for (const item of allSymbols) {
+      if (item.exchange) exchanges.add(item.exchange);
+    }
+    return Array.from(exchanges)
+      .filter(Boolean)
+      .sort()
+      .map((key) => ({
+        key,
+        label: key.charAt(0).toUpperCase() + key.slice(1),
+      }));
+  }, [allSymbols, currentExchange]);
 
   // ── Filter logic ──
   const filtered = useMemo(() => {
@@ -135,11 +146,21 @@ export default function SymbolSearchModal({
   const handleSelect = useCallback(
     (entry) => {
       // entry is the full symbol object from the filtered list
-      const isSame = entry.symbol === currentSymbol && entry.marketType === (currentMarketType || "spot");
-      if (!isSame) onSelect({ symbol: entry.symbol, marketType: entry.marketType });
+      const isSame = (
+        entry.symbol === currentSymbol
+        && entry.marketType === (currentMarketType || "spot")
+        && (entry.exchange || "binance") === (currentExchange || "binance")
+      );
+      if (!isSame) {
+        onSelect({
+          symbol: entry.symbol,
+          marketType: entry.marketType,
+          exchange: entry.exchange || "binance",
+        });
+      }
       onClose();
     },
-    [currentSymbol, currentMarketType, onSelect, onClose],
+    [currentExchange, currentSymbol, currentMarketType, onSelect, onClose],
   );
 
   const toggleFavorite = useCallback((sKey, e) => {
@@ -169,14 +190,14 @@ export default function SymbolSearchModal({
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await refreshExchangeInfo();
+      await refreshExchangeInfo(currentExchange);
       const data = await fetchExchangeInfo();
       if (data?.symbols) {
         const enriched = data.symbols.map((s) => ({
           ...s,
           exchange: s.exchange || "binance",
           marketType: s.marketType || "spot",
-          _key: symbolKey(s.symbol, s.marketType || "spot"),
+          _key: symbolKey(s.symbol, s.marketType || "spot", s.exchange || "binance"),
         }));
         setAllSymbols(enriched);
       }
@@ -185,7 +206,7 @@ export default function SymbolSearchModal({
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [currentExchange]);
 
   // ── Right-click handler for rows ──
   const handleRowContextMenu = useCallback((e, sym, sKey) => {
@@ -345,7 +366,7 @@ export default function SymbolSearchModal({
           <div className="sym-modal-filter-row sym-modal-filter-row-chips">
             <div className="sym-modal-chip-group">
               <span className="sym-modal-chip-label">交易所</span>
-              {EXCHANGE_CHIPS.map((ex) => (
+              {exchangeChips.map((ex) => (
                 <button
                   key={ex.key}
                   className={`sym-modal-chip ${exchangeFilter.has(ex.key) ? "active" : ""}`}
@@ -420,7 +441,11 @@ export default function SymbolSearchModal({
                 {visibleItems.map((s, i) => {
                   const realIndex = startIndex + i;
                   const isHighlighted = realIndex === highlightIndex;
-                  const isCurrent = s.symbol === currentSymbol && s.marketType === (currentMarketType || "spot");
+                  const isCurrent = (
+                    s.symbol === currentSymbol
+                    && s.marketType === (currentMarketType || "spot")
+                    && (s.exchange || "binance") === (currentExchange || "binance")
+                  );
                   const isFav = favSet.has(s._key);
                   const inWatchlists = getSymbolWatchlists(s._key);
 

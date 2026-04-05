@@ -185,7 +185,7 @@ async def get_klines_history(
     request: Request,
     symbol: str = Query("BTCUSDT", description="Trading symbol"),
     interval: str = Query("1h", description="Kline interval"),
-    days: int = Query(7, ge=1, le=3650, description="Historical days"),
+    days: float = Query(7, ge=0.001, le=3650, description="Historical days (supports fractional, e.g. 0.04)"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
 ):

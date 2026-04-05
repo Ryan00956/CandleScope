@@ -271,8 +271,12 @@ class SessionLayer:
     async def _close_conn(self) -> None:
         if self._conn is not None:
             try:
-                await self._conn.close()
-            except Exception:
+                # Timeout prevents hanging on WS close handshake during
+                # shutdown — the server may not respond to close frames
+                # promptly, and this runs in a finally block where even
+                # task cancellation cannot interrupt it.
+                await asyncio.wait_for(self._conn.close(), timeout=2)
+            except (asyncio.TimeoutError, Exception):
                 pass
             self._conn = None
 

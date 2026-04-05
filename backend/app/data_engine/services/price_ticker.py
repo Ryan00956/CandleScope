@@ -275,6 +275,7 @@ class PriceTickerService:
                     async with websockets.connect(
                         url,
                         open_timeout=10,
+                        close_timeout=2,
                         ping_interval=20,
                         ping_timeout=20,
                     ) as ws:

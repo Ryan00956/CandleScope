@@ -237,6 +237,7 @@ class TransportLayer:
                 conn = await websockets.connect(
                     url,
                     open_timeout=self._cfg.ws_open_timeout,
+                    close_timeout=2,
                     ping_interval=self._cfg.ws_ping_interval,
                     ping_timeout=self._cfg.ws_ping_timeout,
                 )

@@ -17,14 +17,6 @@ const DRAWING_TOOL_IDS = new Set(["pen", "eraser", "line-segment", "line-ray", "
 function buildLocalizationOptions(timezone = "Local", interval = "1h") {
     const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
     try {
-        const axisFormatOptions = {
-            year: "numeric",
-            month: "short",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: false,
-        };
         const tooltipFormatOptions = {
             year: "numeric",
             month: "2-digit",
@@ -35,38 +27,54 @@ function buildLocalizationOptions(timezone = "Local", interval = "1h") {
             hour12: false,
         };
 
+        const datePartsOptions = {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+        };
+
         if (timeZoneOpt) {
-            axisFormatOptions.timeZone = timeZoneOpt;
             tooltipFormatOptions.timeZone = timeZoneOpt;
+            datePartsOptions.timeZone = timeZoneOpt;
         }
 
-        const axisFormatter = new Intl.DateTimeFormat("en-GB", axisFormatOptions);
         const tooltipFormatter = new Intl.DateTimeFormat("en-GB", tooltipFormatOptions);
+        const partsFormatter = new Intl.DateTimeFormat("en-GB", datePartsOptions);
 
-        const isDailyOrLarger = interval.endsWith('d') || interval.endsWith('w') || interval.endsWith('M');
-        const isMonthly = interval.endsWith('M');
-
+        // TickMarkType enum: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds
         return {
             localization: {
                 timeFormatter: (timestamp) => tooltipFormatter.format(new Date(timestamp * 1000)),
             },
             timeScale: {
-                tickMarkFormatter: (timestamp) => {
-                    const parts = axisFormatter.formatToParts(new Date(timestamp * 1000));
-                    const year = parts.find((p) => p.type === "year")?.value;
-                    const month = parts.find((p) => p.type === "month")?.value;
-                    const day = parts.find((p) => p.type === "day")?.value;
-                    const hour = parts.find((p) => p.type === "hour")?.value;
-                    const min = parts.find((p) => p.type === "minute")?.value;
+                tickMarkFormatter: (timestamp, tickMarkType, _locale) => {
+                    const parts = partsFormatter.formatToParts(new Date(timestamp * 1000));
+                    const get = (t) => parts.find((p) => p.type === t)?.value;
+                    const year = get("year");
+                    const month = get("month");
+                    const day = get("day");
+                    const hour = get("hour");
+                    const min = get("minute");
+                    const sec = get("second");
 
-                    if (isMonthly) {
-                        return `${month} ${year}`;
+                    switch (tickMarkType) {
+                        case 0: // Year
+                            return year;
+                        case 1: // Month
+                            return `${month} '${year.slice(-2)}`;
+                        case 2: // DayOfMonth
+                            return `${day} ${month}`;
+                        case 3: // Time
+                            return `${hour}:${min}`;
+                        case 4: // TimeWithSeconds
+                            return `${hour}:${min}:${sec}`;
+                        default:
+                            return `${day} ${month}`;
                     }
-                    if (isDailyOrLarger) {
-                        return `${day} ${month} ${year}`;
-                    }
-                    if (hour === "00" && min === "00") return `${day} ${month}`;
-                    return `${hour}:${min}`;
                 },
             },
         };

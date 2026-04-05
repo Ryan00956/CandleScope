@@ -16,6 +16,7 @@ endpoints fall back to the legacy services/kline_cache_service path.
 import asyncio
 import logging
 import time
+from contextlib import suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -148,6 +149,10 @@ async def _init_data_manager() -> None:
 
         main_loop = asyncio.get_running_loop()
 
+        # Track backfill futures so they can be cancelled on shutdown
+        _pending_backfill_futures: list[asyncio.Future] = []
+        app.state.backfill_futures = _pending_backfill_futures
+
         _BACKFILL_MAX_RETRIES = 3
         _BACKFILL_BASE_DELAY = 5  # seconds
 
@@ -227,7 +232,10 @@ async def _init_data_manager() -> None:
                 )
 
             try:
-                asyncio.run_coroutine_threadsafe(_run_backfill(), main_loop)
+                fut = asyncio.run_coroutine_threadsafe(_run_backfill(), main_loop)
+                _pending_backfill_futures.append(fut)
+                # Clean up completed futures periodically
+                _pending_backfill_futures[:] = [f for f in _pending_backfill_futures if not f.done()]
             except Exception as exc:
                 logger.warning("Failed to schedule backfill trigger: %s", exc)
 
@@ -324,7 +332,7 @@ async def _init_data_manager() -> None:
             )
             print(f"[startup] Gap scan done: {scanned} scanned, {filled} filled")
 
-        asyncio.create_task(_startup_gap_scan())
+        app.state.gap_scan_task = asyncio.create_task(_startup_gap_scan())
 
         # ── 5. Bridge IndicatorEngine to DataManager EventBus ──
         #   The IndicatorEngine listens to BAR_CLOSED / BAR_UPDATED /
@@ -416,40 +424,73 @@ async def startup_event() -> None:
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     """Application shutdown handler."""
+    _STEP_TIMEOUT = 5  # seconds per shutdown step
+
+    # ── 1. Cancel fire-and-forget background tasks first ─────
+    # These tasks may be sleeping or making HTTP requests;
+    # if not cancelled they keep the event loop alive.
+
+    # Cancel startup gap scan
+    gap_scan_task = getattr(app.state, "gap_scan_task", None)
+    if gap_scan_task is not None and not gap_scan_task.done():
+        gap_scan_task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(gap_scan_task, timeout=2)
+        print("[shutdown] Gap scan task cancelled ✓")
+
+    # Cancel all pending backfill futures
+    backfill_futures = getattr(app.state, "backfill_futures", [])
+    for fut in backfill_futures:
+        if not fut.done():
+            fut.cancel()
+    if backfill_futures:
+        print(f"[shutdown] Cancelled {len(backfill_futures)} backfill futures ✓")
+
+    # ── 2. Shut down DataManager (streams, aggregator, eventbus) ──
     dm = getattr(app.state, "data_manager", None)
     if dm is not None:
         try:
-            await dm.shutdown()
+            await asyncio.wait_for(dm.shutdown(), timeout=_STEP_TIMEOUT)
             print("[shutdown] DataManager shut down gracefully ✓")
+        except asyncio.TimeoutError:
+            print("[shutdown] DataManager shutdown timed out, forcing")
         except Exception as exc:
             print(f"[shutdown] DataManager shutdown error: {exc}")
 
-    # Shutdown ingestion factory (closes shared MarketDataIngress)
+    # ── 3. Shutdown ingestion factory (closes shared MarketDataIngress) ──
     ingestion_factory = getattr(app.state, "ingestion_factory", None)
     if ingestion_factory is not None:
         try:
-            await ingestion_factory.shutdown()
+            await asyncio.wait_for(ingestion_factory.shutdown(), timeout=_STEP_TIMEOUT)
             print("[shutdown] IngestionFactory shut down ✓")
+        except asyncio.TimeoutError:
+            print("[shutdown] IngestionFactory shutdown timed out")
         except Exception as exc:
             print(f"[shutdown] IngestionFactory shutdown error: {exc}")
 
-    # Shutdown backfill transport (HTTP session)
+    # ── 4. Shutdown backfill transport (HTTP session) ──
     transport = getattr(app.state, "backfill_transport", None)
     if transport is not None:
         try:
-            await transport.stop()
+            await asyncio.wait_for(transport.stop(), timeout=_STEP_TIMEOUT)
             print("[shutdown] Backfill transport shut down ✓")
+        except asyncio.TimeoutError:
+            print("[shutdown] Backfill transport shutdown timed out")
         except Exception as exc:
             print(f"[shutdown] Backfill transport shutdown error: {exc}")
 
-    # Shutdown PriceTickerService
+    # ── 5. Shutdown PriceTickerService ──
     price_ticker = getattr(app.state, "price_ticker", None)
     if price_ticker is not None:
         try:
-            await price_ticker.stop()
+            await asyncio.wait_for(price_ticker.stop(), timeout=_STEP_TIMEOUT)
             print("[shutdown] PriceTickerService shut down ✓")
+        except asyncio.TimeoutError:
+            print("[shutdown] PriceTickerService shutdown timed out")
         except Exception as exc:
             print(f"[shutdown] PriceTickerService shutdown error: {exc}")
+
+    print("[shutdown] All components shut down")
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -17,34 +17,51 @@ import { useDrawing } from "../hooks/useDrawing";
 function buildLocalizationOptions(timezone = "Local", interval = "1h") {
     const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
     try {
-        const axisFormatOptions = {
-            year: "numeric", month: "short", day: "numeric",
-            hour: "2-digit", minute: "2-digit", hour12: false,
-        };
         const tooltipFormatOptions = {
             year: "numeric", month: "2-digit", day: "2-digit",
             hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
         };
+        const datePartsOptions = {
+            year: "numeric", month: "short", day: "numeric",
+            hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+        };
         if (timeZoneOpt) {
-            axisFormatOptions.timeZone = timeZoneOpt;
             tooltipFormatOptions.timeZone = timeZoneOpt;
+            datePartsOptions.timeZone = timeZoneOpt;
         }
-        const axisFormatter = new Intl.DateTimeFormat("en-GB", axisFormatOptions);
         const tooltipFormatter = new Intl.DateTimeFormat("en-GB", tooltipFormatOptions);
-        const isDailyOrLarger = interval.endsWith("d") || interval.endsWith("w") || interval.endsWith("M");
-        const isMonthly = interval.endsWith("M");
+        const partsFormatter = new Intl.DateTimeFormat("en-GB", datePartsOptions);
+
+        // TickMarkType enum: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds
         return {
             localization: {
                 timeFormatter: (ts) => tooltipFormatter.format(new Date(ts * 1000)),
             },
             timeScale: {
-                tickMarkFormatter: (ts) => {
-                    const parts = axisFormatter.formatToParts(new Date(ts * 1000));
+                tickMarkFormatter: (ts, tickMarkType, _locale) => {
+                    const parts = partsFormatter.formatToParts(new Date(ts * 1000));
                     const get = (t) => parts.find((p) => p.type === t)?.value;
-                    if (isMonthly) return `${get("month")} ${get("year")}`;
-                    if (isDailyOrLarger) return `${get("day")} ${get("month")} ${get("year")}`;
-                    if (get("hour") === "00" && get("minute") === "00") return `${get("day")} ${get("month")}`;
-                    return `${get("hour")}:${get("minute")}`;
+                    const year = get("year");
+                    const month = get("month");
+                    const day = get("day");
+                    const hour = get("hour");
+                    const min = get("minute");
+                    const sec = get("second");
+
+                    switch (tickMarkType) {
+                        case 0: // Year
+                            return year;
+                        case 1: // Month
+                            return `${month} '${year.slice(-2)}`;
+                        case 2: // DayOfMonth
+                            return `${day} ${month}`;
+                        case 3: // Time
+                            return `${hour}:${min}`;
+                        case 4: // TimeWithSeconds
+                            return `${hour}:${min}:${sec}`;
+                        default:
+                            return `${day} ${month}`;
+                    }
                 },
             },
         };

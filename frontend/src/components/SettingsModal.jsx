@@ -734,7 +734,7 @@ export default function SettingsModal({
                     <div className={`st-result ${getRepairResultClassName(storageRepairResult.status)}`}>
                         <div className="st-result-head">{storageRepairResult.message}</div>
                         <div className="st-result-detail">
-                            范围: {scopeLabel} · 市场: {storageRepairResult.market_type || currentMarketType}
+                            范围: {scopeLabel} · 交易所: {(storageRepairResult.exchange || currentExchange).charAt(0).toUpperCase() + (storageRepairResult.exchange || currentExchange).slice(1)} · 市场: {storageRepairResult.market_type || currentMarketType}
                             {Array.isArray(storageRepairResult.symbols_filter) && storageRepairResult.symbols_filter.length > 0
                                 ? ` · 品种 ${storageRepairResult.symbols_filter.length}`
                                 : ''}
@@ -757,7 +757,7 @@ export default function SettingsModal({
                         <div>
                             <div className="st-tool-name">数据缺口扫描与修复</div>
                             <div className="st-tool-desc">
-                                扫描所有标准时间周期（1m ~ 1w）的数据库，检测尾部缺口和内部缺口，并从币安 REST API 自动补齐。
+                                扫描所有标准时间周期（1m ~ 1w）的数据库，检测尾部缺口和内部缺口，并从 {currentExchange.charAt(0).toUpperCase() + currentExchange.slice(1)} REST API 自动补齐。
                             </div>
                         </div>
                     </div>
@@ -789,7 +789,7 @@ export default function SettingsModal({
                     <div className={`st-result ${getRepairResultClassName(gapScanResult.status)}`}>
                         <div className="st-result-head">{gapScanResult.message}</div>
                         <div className="st-result-detail">
-                            范围: {scopeLabel} · 市场: {gapScanResult.market_type || currentMarketType}
+                            范围: {scopeLabel} · 交易所: {(gapScanResult.exchange || currentExchange).charAt(0).toUpperCase() + (gapScanResult.exchange || currentExchange).slice(1)} · 市场: {gapScanResult.market_type || currentMarketType}
                             {Array.isArray(gapScanResult.symbols_filter) && gapScanResult.symbols_filter.length > 0
                                 ? ` · 品种 ${gapScanResult.symbols_filter.length}`
                                 : ''}

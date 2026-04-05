@@ -111,12 +111,15 @@ class OkxExchangeAdapter:
         params["bar"] = mapped
         params["limit"] = min(max(int(req.limit or 1), 1), 300)
         # OKX naming is counter-intuitive:
-        #   "after"  → return records with ts EARLIER (older) than this value (upper bound)
-        #   "before" → return records with ts NEWER  (more recent) than this value (lower bound)
+        #   "after"  → return records with ts STRICTLY EARLIER (older) than this value
+        #   "before" → return records with ts STRICTLY NEWER  (more recent) than this value
+        # Both are EXCLUSIVE boundaries, but req.end_ms / req.start_ms are
+        # meant to be INCLUSIVE.  Add ±1 ms to include bars at the exact
+        # boundary timestamps.
         if req.end_ms is not None:
-            params["after"] = int(req.end_ms)
+            params["after"] = int(req.end_ms) + 1
         if req.start_ms is not None:
-            params["before"] = int(req.start_ms)
+            params["before"] = int(req.start_ms) - 1
         return params
 
     def build_ws_stream_name(self, descriptor) -> str:

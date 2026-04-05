@@ -4,7 +4,7 @@ Settings API routes — proxy configuration and connectivity test.
 Provides endpoints for:
   * GET  /settings/proxy       — read current proxy configuration
   * PUT  /settings/proxy       — update proxy configuration at runtime
-  * POST /settings/proxy/test  — test proxy connectivity to Binance
+  * POST /settings/proxy/test  — test proxy connectivity to all exchanges
 """
 from __future__ import annotations
 
@@ -447,55 +447,105 @@ async def update_proxy_settings(request: Request, body: ProxyConfig) -> dict:
 
 @router.post("/proxy/test")
 async def test_proxy_connection(body: ProxyTestRequest) -> dict:
-    """Test proxy connectivity by making a request to Binance API.
+    """Test proxy connectivity by making requests to all registered exchange APIs.
 
     Uses the provided proxy settings (not the current config) to
     test if the proxy works before the user commits the change.
+    Returns per-exchange results so the user can see which exchanges
+    are reachable.
     """
     proxy_url = _resolve_proxy_url(body.mode, body.custom_proxy)
-    test_url = "https://api.binance.com/api/v3/ping"
 
-    try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(test_url, proxy=proxy_url) as resp:
-                status_code = resp.status
-                if status_code == 200:
-                    return {
-                        "success": True,
-                        "status_code": status_code,
-                        "proxy_used": proxy_url or "(direct)",
-                        "message": "连接成功 — Binance API 可达",
-                    }
-                else:
-                    body_text = await resp.text()
-                    return {
-                        "success": False,
-                        "status_code": status_code,
-                        "proxy_used": proxy_url or "(direct)",
-                        "message": f"HTTP {status_code}: {body_text[:200]}",
-                    }
-    except aiohttp.ClientProxyConnectionError as exc:
-        return {
-            "success": False,
-            "status_code": None,
-            "proxy_used": proxy_url or "(direct)",
-            "message": f"代理连接失败: {exc}",
-        }
-    except aiohttp.ClientConnectorError as exc:
-        return {
-            "success": False,
-            "status_code": None,
-            "proxy_used": proxy_url or "(direct)",
-            "message": f"连接失败: {exc}",
-        }
-    except Exception as exc:
-        return {
-            "success": False,
-            "status_code": None,
-            "proxy_used": proxy_url or "(direct)",
-            "message": f"测试失败: {type(exc).__name__}: {exc}",
-        }
+    # Define test targets for each exchange
+    test_targets = [
+        {
+            "exchange": "binance",
+            "label": "Binance Spot",
+            "url": "https://api.binance.com/api/v3/ping",
+        },
+        {
+            "exchange": "binance_futures",
+            "label": "Binance Futures",
+            "url": "https://fapi.binance.com/fapi/v1/ping",
+        },
+        {
+            "exchange": "okx",
+            "label": "OKX",
+            "url": "https://www.okx.com/api/v5/public/time",
+        },
+    ]
+
+    async def _test_one(target: dict) -> dict:
+        """Test a single exchange endpoint."""
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(target["url"], proxy=proxy_url) as resp:
+                    status_code = resp.status
+                    if status_code == 200:
+                        return {
+                            "exchange": target["exchange"],
+                            "label": target["label"],
+                            "success": True,
+                            "status_code": status_code,
+                            "message": "可达",
+                        }
+                    else:
+                        resp_text = await resp.text()
+                        return {
+                            "exchange": target["exchange"],
+                            "label": target["label"],
+                            "success": False,
+                            "status_code": status_code,
+                            "message": f"HTTP {status_code}: {resp_text[:200]}",
+                        }
+        except aiohttp.ClientProxyConnectionError as exc:
+            return {
+                "exchange": target["exchange"],
+                "label": target["label"],
+                "success": False,
+                "status_code": None,
+                "message": f"代理连接失败: {exc}",
+            }
+        except aiohttp.ClientConnectorError as exc:
+            return {
+                "exchange": target["exchange"],
+                "label": target["label"],
+                "success": False,
+                "status_code": None,
+                "message": f"连接失败: {exc}",
+            }
+        except Exception as exc:
+            return {
+                "exchange": target["exchange"],
+                "label": target["label"],
+                "success": False,
+                "status_code": None,
+                "message": f"测试失败: {type(exc).__name__}: {exc}",
+            }
+
+    # Test all exchanges concurrently
+    results = await asyncio.gather(*[_test_one(t) for t in test_targets])
+
+    all_success = all(r["success"] for r in results)
+    any_success = any(r["success"] for r in results)
+    success_count = sum(1 for r in results if r["success"])
+    total_count = len(results)
+
+    if all_success:
+        message = f"全部连接成功 — {total_count}/{total_count} 个交易所 API 可达"
+    elif any_success:
+        message = f"部分连接成功 — {success_count}/{total_count} 个交易所 API 可达"
+    else:
+        message = f"全部连接失败 — 0/{total_count} 个交易所 API 均不可达"
+
+    return {
+        "success": all_success,
+        "partial": any_success and not all_success,
+        "proxy_used": proxy_url or "(direct)",
+        "message": message,
+        "results": results,
+    }
 
 
 @router.post("/storage/repair")

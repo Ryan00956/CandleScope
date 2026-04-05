@@ -504,10 +504,21 @@ export default function SettingsModal({
                 </div>
 
                 {proxyTestResult && (
-                    <div className={`st-result ${proxyTestResult.success ? 'st-result-ok' : 'st-result-fail'}`}>
-                        <span>{proxyTestResult.success ? '✅' : '❌'} {proxyTestResult.message}</span>
+                    <div className={`st-result ${proxyTestResult.success ? 'st-result-ok' : proxyTestResult.partial ? 'st-result-warn' : 'st-result-fail'}`}>
+                        <span>{proxyTestResult.success ? '✅' : proxyTestResult.partial ? '⚠️' : '❌'} {proxyTestResult.message}</span>
                         {proxyTestResult.proxy_used && (
                             <div className="st-result-detail">代理: {proxyTestResult.proxy_used}</div>
+                        )}
+                        {Array.isArray(proxyTestResult.results) && proxyTestResult.results.length > 0 && (
+                            <div className="st-exchange-results">
+                                {proxyTestResult.results.map((r) => (
+                                    <div key={r.exchange} className={`st-exchange-result-item ${r.success ? 'ok' : 'fail'}`}>
+                                        <span className="st-exchange-result-icon">{r.success ? '✅' : '❌'}</span>
+                                        <span className="st-exchange-result-label">{r.label}</span>
+                                        <span className="st-exchange-result-msg">{r.message}</span>
+                                    </div>
+                                ))}
+                            </div>
                         )}
                     </div>
                 )}
@@ -2016,6 +2027,51 @@ input[type="color"] {
 .st-stack-value {
   color: var(--text-primary, #f1f5f9);
   font-weight: 500;
+}
+
+
+/* ── Exchange connectivity test results ─────────────────── */
+.st-exchange-results {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.st-exchange-result-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  transition: background 0.15s;
+}
+
+.st-exchange-result-item.ok {
+  background: rgba(34, 197, 94, 0.06);
+}
+
+.st-exchange-result-item.fail {
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.st-exchange-result-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.st-exchange-result-label {
+  font-weight: 600;
+  color: var(--text-primary, #f1f5f9);
+  min-width: 110px;
+}
+
+.st-exchange-result-msg {
+  color: var(--text-secondary, #94a3b8);
+  font-size: 11.5px;
+  flex: 1;
+  text-align: right;
 }
 
 

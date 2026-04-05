@@ -84,36 +84,6 @@ app.include_router(price_ws_router, prefix="/api/v1")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Legacy prewarm (fallback when DataManager is not available)
-# ═══════════════════════════════════════════════════════════════
-
-_PREWARM_INTERVALS = {
-    "1m": 1,
-    "5m": 3,
-    "15m": 7,
-    "1h": 30,
-    "4h": 90,
-    "1d": 365,
-}
-_PREWARM_SYMBOL = "BTCUSDT"
-
-
-def _legacy_prewarm_cache() -> None:
-    """Prewarm the kline cache using the legacy service (fallback)."""
-    from app.data_engine.services.kline_cache_service import get_cached_history
-
-    for interval, days in _PREWARM_INTERVALS.items():
-        try:
-            result = get_cached_history(
-                symbol=_PREWARM_SYMBOL, interval=interval, days=days,
-            )
-            count = len(result.get("data", []))
-            print(f"[prewarm/legacy] {_PREWARM_SYMBOL} {interval} ({days}d): {count} bars cached")
-        except Exception as exc:  # noqa: BLE001
-            print(f"[prewarm/legacy] {_PREWARM_SYMBOL} {interval} failed: {exc}")
-
-
-# ═══════════════════════════════════════════════════════════════
 #  DataManager bootstrap
 # ═══════════════════════════════════════════════════════════════
 
@@ -458,7 +428,6 @@ async def _init_data_manager() -> None:
     except Exception as exc:
         logger.error("DataManager initialization failed: %s", exc, exc_info=True)
         print(f"[startup] DataManager init failed: {exc}")
-        print("[startup] Falling back to legacy services")
         app.state.data_manager = None
 
 
@@ -482,12 +451,8 @@ async def startup_event() -> None:
     except Exception as exc:
         print(f"[startup] Exchange info load failed (non-critical): {exc}")
 
-    # 3. Try to initialize DataManager (new architecture)
+    # 3. Initialize DataManager
     await _init_data_manager()
-
-    # 4. If DataManager is not available, fall back to legacy prewarm
-    if getattr(app.state, "data_manager", None) is None:
-        asyncio.get_event_loop().run_in_executor(None, _legacy_prewarm_cache)
 
 
 @app.on_event("shutdown")

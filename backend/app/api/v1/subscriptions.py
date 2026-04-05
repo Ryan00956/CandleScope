@@ -196,6 +196,11 @@ async def price_stream(websocket: WebSocket):
         )
         for t in pending:
             t.cancel()
+        for t in done:
+            try:
+                t.result()
+            except (WebSocketDisconnect, Exception):
+                pass
 
     except WebSocketDisconnect:
         pass

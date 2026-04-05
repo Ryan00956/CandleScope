@@ -89,13 +89,23 @@ class TransportLayer:
             or _os.getenv("HTTP_PROXY")
             or _os.getenv("https_proxy")
             or _os.getenv("http_proxy")
+            or _os.getenv("ALL_PROXY")
+            or _os.getenv("all_proxy")
         )
         if env_proxy:
             return env_proxy
 
         # Fallback: read from Windows registry / macOS scutil / etc.
-        from urllib.request import getproxies
-        proxies = getproxies()
+        # Note: getproxies() short-circuits when getproxies_environment()
+        # returns any entry (e.g. no_proxy), skipping the registry reader.
+        # Call getproxies_registry() directly on Windows to avoid this.
+        import sys
+        if sys.platform == "win32":
+            from urllib.request import getproxies_registry
+            proxies = getproxies_registry()
+        else:
+            from urllib.request import getproxies
+            proxies = getproxies()
         os_proxy = proxies.get("https") or proxies.get("http")
         if os_proxy:
             return os_proxy

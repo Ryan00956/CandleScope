@@ -1,13 +1,9 @@
 """
 WebSocket stream endpoints — powered by DataManager's event bus.
 
-Data flow (new architecture):
+Data flow:
     Ingestion → BarAggregator (L1–L5) → DataManager EventBus
     → subscribe_iter() → WebSocket client
-
-Legacy fallback:
-    When DataManager is not initialized, falls back to the old
-    KlineStreamHub which connects directly to Binance WS.
 
 The DataManager instance is stored on ``app.state.data_manager``
 and initialized during application startup (see ``app/main.py``).
@@ -80,12 +76,15 @@ async def kline_stream(
 
     dm = _get_data_manager(websocket)
 
-    if dm is not None:
-        # ── New architecture: DataManager-powered stream ─────
-        await _dm_single_stream(websocket, dm, symbol, interval, exchange=exchange, market_type=market_type)
-    else:
-        # ── Legacy fallback: direct Binance WS ──────────────
-        await _legacy_single_stream(websocket, symbol, interval)
+    if dm is None:
+        await websocket.send_json({
+            "type": "error",
+            "detail": "DataManager not initialized. Server is not ready.",
+        })
+        await websocket.close(code=1013)
+        return
+
+    await _dm_single_stream(websocket, dm, symbol, interval, exchange=exchange, market_type=market_type)
 
 
 @router.websocket("/klines_multi")
@@ -124,10 +123,15 @@ async def kline_stream_multi(
 
     dm = _get_data_manager(websocket)
 
-    if dm is not None:
-        await _dm_multi_stream(websocket, dm, symbol, exchange=exchange, market_type=market_type)
-    else:
-        await _legacy_multi_stream(websocket, symbol)
+    if dm is None:
+        await websocket.send_json({
+            "type": "error",
+            "detail": "DataManager not initialized. Server is not ready.",
+        })
+        await websocket.close(code=1013)
+        return
+
+    await _dm_multi_stream(websocket, dm, symbol, exchange=exchange, market_type=market_type)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -444,125 +448,3 @@ async def _read_client_messages(websocket: WebSocket) -> None:
         pass
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Legacy Fallback (direct Binance WS — when DataManager not set)
-# ═══════════════════════════════════════════════════════════════
-
-
-async def _legacy_single_stream(
-    websocket: WebSocket, symbol: str, interval: str,
-) -> None:
-    """Legacy single-interval stream using KlineStreamHub."""
-    from app.realtime import kline_stream_hub
-
-    if interval not in VALID_INTERVALS:
-        await websocket.send_json({
-            "type": "error",
-            "detail": f"Legacy mode only supports native intervals: {VALID_INTERVALS}",
-        })
-        await websocket.close(code=1008)
-        return
-
-    await kline_stream_hub.subscribe(
-        websocket=websocket, symbol=symbol, interval=interval,
-    )
-    await websocket.send_json({
-        "type": "subscribed",
-        "symbol": symbol,
-        "interval": interval,
-    })
-
-    try:
-        while True:
-            message = await websocket.receive_text()
-            if message.lower().strip() == "ping":
-                await websocket.send_text("pong")
-    except WebSocketDisconnect:
-        await kline_stream_hub.remove_websocket(websocket)
-    except Exception:
-        await kline_stream_hub.remove_websocket(websocket)
-        try:
-            await websocket.close()
-        except Exception:
-            pass
-
-
-async def _legacy_multi_stream(
-    websocket: WebSocket, symbol: str,
-) -> None:
-    """Legacy multi-interval stream using KlineStreamHub."""
-    from app.realtime import kline_stream_hub
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            stripped = raw.strip().lower()
-
-            if stripped == "ping":
-                await websocket.send_text("pong")
-                continue
-
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                await websocket.send_json({"type": "error", "detail": "Invalid JSON"})
-                continue
-
-            action = msg.get("action", "").lower()
-            intervals = msg.get("intervals", [])
-
-            if not isinstance(intervals, list) or not intervals:
-                await websocket.send_json({
-                    "type": "error",
-                    "detail": "intervals must be a non-empty list",
-                })
-                continue
-
-            valid = [i for i in intervals if i in VALID_INTERVALS]
-            invalid = [i for i in intervals if i not in VALID_INTERVALS]
-
-            if invalid:
-                await websocket.send_json({
-                    "type": "warning",
-                    "detail": f"Skipped non-native intervals: {invalid}",
-                })
-
-            if not valid:
-                await websocket.send_json({
-                    "type": "error",
-                    "detail": "No valid intervals provided",
-                })
-                continue
-
-            if action == "subscribe":
-                await kline_stream_hub.subscribe_multi(
-                    websocket=websocket, symbol=symbol, intervals=valid,
-                )
-                await websocket.send_json({
-                    "type": "subscribed",
-                    "symbol": symbol,
-                    "intervals": valid,
-                })
-            elif action == "unsubscribe":
-                await kline_stream_hub.unsubscribe_multi(
-                    websocket=websocket, symbol=symbol, intervals=valid,
-                )
-                await websocket.send_json({
-                    "type": "unsubscribed",
-                    "symbol": symbol,
-                    "intervals": valid,
-                })
-            else:
-                await websocket.send_json({
-                    "type": "error",
-                    "detail": f"Unknown action: {action}",
-                })
-
-    except WebSocketDisconnect:
-        await kline_stream_hub.remove_websocket(websocket)
-    except Exception:
-        await kline_stream_hub.remove_websocket(websocket)
-        try:
-            await websocket.close()
-        except Exception:
-            pass

@@ -51,10 +51,20 @@ def _get_os_proxy() -> str | None:
 
     On Windows, tools like v2rayN / Clash set the system proxy in the
     registry (Internet Settings → ProxyServer) rather than environment
-    variables.  ``urllib.request.getproxies()`` reads these transparently.
+    variables.
+
+    Note: ``urllib.request.getproxies()`` short-circuits when
+    ``getproxies_environment()`` returns *any* entry (e.g. ``no_proxy``),
+    skipping ``getproxies_registry()`` entirely.  We call the registry
+    reader directly on Windows to avoid this.
     """
-    from urllib.request import getproxies
-    proxies = getproxies()
+    import sys
+    if sys.platform == "win32":
+        from urllib.request import getproxies_registry
+        proxies = getproxies_registry()
+    else:
+        from urllib.request import getproxies
+        proxies = getproxies()
     return proxies.get("https") or proxies.get("http") or None
 
 
@@ -81,12 +91,14 @@ def _load_persisted_http_proxy() -> str | None:
             return custom_proxy
         if mode == "system":
             return (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+                    or os.getenv("ALL_PROXY") or os.getenv("all_proxy")
                     or _get_os_proxy() or None)
     except Exception:
         pass
     # Fall back to environment / OS proxy
     return (_env_str("INGESTION_HTTP_PROXY", "")
             or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+            or os.getenv("ALL_PROXY") or os.getenv("all_proxy")
             or _get_os_proxy() or None)
 
 

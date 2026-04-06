@@ -716,6 +716,21 @@ class NormalizeLayer:
             interval = self._descriptor.interval or ""
 
         open_time_ms = int(row[0])
+
+        # OKX volume field semantics differ by instrument type:
+        #   row[5] = vol        — Spot: base currency qty;  Futures/Swap: NUMBER OF CONTRACTS
+        #   row[6] = volCcy     — always base currency volume (e.g. BTC)
+        #   row[7] = volCcyQuote — always quote currency volume (e.g. USDT)
+        #
+        # For futures/swap, row[5] is the contract count (e.g. 8,640,486 contracts),
+        # which is meaninglessly large when displayed as "volume".  We must use
+        # row[6] (volCcy) for the base-currency volume instead.
+        market_type = (self._descriptor.market_type or "spot").strip().lower()
+        if market_type in ("futures", "swap", "perpetual"):
+            volume = float(row[6])      # volCcy  — base currency volume
+        else:
+            volume = float(row[5])      # vol     — base currency volume (spot)
+
         data = {
             "interval": interval,
             "open_time": open_time_ms,
@@ -724,7 +739,7 @@ class NormalizeLayer:
             "high": float(row[2]),
             "low": float(row[3]),
             "close": float(row[4]),
-            "volume": float(row[5]),
+            "volume": volume,
             "quote_volume": float(row[7]),
             "trades": 0,
             "taker_buy_base": 0.0,

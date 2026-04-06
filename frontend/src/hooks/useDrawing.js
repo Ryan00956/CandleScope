@@ -575,6 +575,11 @@ export function useDrawing({
         const dataPoint = screenToData(pos.x, pos.y);
         if (!dataPoint) return;
 
+        // Cache screen coordinates on the initial point so the renderer
+        // can draw exactly where the mouse is, avoiding lossy round-trips.
+        dataPoint._screenX = pos.x;
+        dataPoint._screenY = pos.y;
+
         const freehand = new FreehandDrawingPrimitive({
           id: nextId("fh"),
           dataPoints: [dataPoint],
@@ -969,7 +974,9 @@ export function useDrawing({
       if (tool === "pen" && isDrawingFreehandRef.current && currentFreehandRef.current) {
         const dataPoint = screenToData(pos.x, pos.y);
         if (dataPoint) {
-          currentFreehandRef.current.addPoint(dataPoint);
+          // Pass raw screen coordinates so the renderer draws exactly
+          // where the mouse is during the active stroke.
+          currentFreehandRef.current.addPoint(dataPoint, pos.x, pos.y);
         }
         e.preventDefault();
         e.stopPropagation();
@@ -1177,6 +1184,12 @@ export function useDrawing({
     let changed = false;
     // End freehand drawing
     if (isDrawingFreehandRef.current) {
+      // Clear the cached screen coordinates now that the stroke is done.
+      // Subsequent renders (pan/zoom/timeframe switch) will convert from
+      // data coordinates normally.
+      if (currentFreehandRef.current) {
+        currentFreehandRef.current.clearScreenCache();
+      }
       isDrawingFreehandRef.current = false;
       currentFreehandRef.current = null;
       changed = true;

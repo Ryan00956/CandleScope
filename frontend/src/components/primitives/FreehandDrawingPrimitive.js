@@ -10,6 +10,14 @@
  *   - Smooth polyline rendering with configurable color/width
  *   - Hover highlight for eraser tool
  *   - Hit-testing for eraser deletion
+ *
+ * Screen-coordinate caching:
+ *   During active drawing, each point also carries cached screen
+ *   coordinates (_screenX, _screenY) so that the renderer can bypass
+ *   the lossy time↔coordinate round-trip and draw exactly where the
+ *   mouse was. Once the stroke finishes, the cache is cleared and all
+ *   subsequent renders (pan/zoom/timeframe switch) convert from
+ *   data coordinates as usual.
  */
 
 import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
@@ -64,18 +72,38 @@ class FreehandRenderer {
         ctx.globalAlpha = 1;
       }
 
-      ctx.beginPath();
-      let started = false;
+      // Filter out invalid points first
+      const valid = [];
       for (const pt of points) {
-        if (pt.x == null || pt.y == null) continue;
-        const bx = pt.x * hRatio;
-        const by = pt.y * vRatio;
-        if (!started) {
-          ctx.moveTo(bx, by);
-          started = true;
-        } else {
-          ctx.lineTo(bx, by);
+        if (pt.x != null && pt.y != null) {
+          valid.push({ bx: pt.x * hRatio, by: pt.y * vRatio });
         }
+      }
+
+      if (valid.length < 2) { ctx.restore(); return; }
+
+      ctx.beginPath();
+      ctx.moveTo(valid[0].bx, valid[0].by);
+
+      if (valid.length === 2) {
+        // Only two points — just draw a straight line
+        ctx.lineTo(valid[1].bx, valid[1].by);
+      } else {
+        // Smooth curve using quadratic Bezier through midpoints:
+        // Each original sample point becomes a control point, and
+        // the midpoint between consecutive samples becomes the
+        // curve endpoint — this produces C1-continuous curves.
+        for (let i = 1; i < valid.length - 1; i++) {
+          const midX = (valid[i].bx + valid[i + 1].bx) / 2;
+          const midY = (valid[i].by + valid[i + 1].by) / 2;
+          ctx.quadraticCurveTo(valid[i].bx, valid[i].by, midX, midY);
+        }
+        // Final segment: curve to the last point
+        const last = valid[valid.length - 1];
+        ctx.quadraticCurveTo(
+          valid[valid.length - 2].bx, valid[valid.length - 2].by,
+          last.bx, last.by
+        );
       }
       ctx.stroke();
 
@@ -103,6 +131,15 @@ class FreehandPaneView {
     const points = [];
 
     for (const dp of source._dataPoints) {
+      // ── Fast path: use cached screen coordinates if available ──
+      // During active drawing, the cached screen coords avoid the lossy
+      // data-coordinate round-trip, so the line follows the cursor exactly.
+      if (dp._screenX != null && dp._screenY != null) {
+        points.push({ x: dp._screenX, y: dp._screenY });
+        continue;
+      }
+
+      // ── Normal path: convert data coordinates to screen ──
       let x = null;
       if (dp.time != null) {
         x = timeScale.timeToCoordinate(dp.time);
@@ -186,8 +223,34 @@ export class FreehandDrawingPrimitive {
   get color() { return this._color; }
   get lineWidth() { return this._lineWidth; }
 
-  addPoint(dp) {
+  /**
+   * Add a point during active drawing.
+   * @param {object} dp - { time, price } data coordinates
+   * @param {number} [screenX] - cached screen x coordinate
+   * @param {number} [screenY] - cached screen y coordinate
+   */
+  addPoint(dp, screenX, screenY) {
+    // Attach cached screen coordinates directly to the data point
+    // so the renderer can use them without round-tripping through
+    // lossy coordinate conversion.
+    if (screenX != null && screenY != null) {
+      dp._screenX = screenX;
+      dp._screenY = screenY;
+    }
     this._dataPoints.push(dp);
+    this._requestUpdate?.();
+  }
+
+  /**
+   * Clear cached screen coordinates from all data points.
+   * Call this when the stroke finishes so that subsequent renders
+   * (after pan/zoom/timeframe change) use proper data-coordinate conversion.
+   */
+  clearScreenCache() {
+    for (const dp of this._dataPoints) {
+      delete dp._screenX;
+      delete dp._screenY;
+    }
     this._requestUpdate?.();
   }
 

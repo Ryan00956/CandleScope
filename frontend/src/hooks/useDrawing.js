@@ -34,6 +34,35 @@ function nextId(prefix = "d") {
   return `${prefix}_${++_idCounter}`;
 }
 
+// ── Ramer-Douglas-Peucker point decimation ──
+// Reduces freehand stroke point count by removing near-collinear
+// points that don't contribute meaningfully to the curve shape.
+
+function _perpendicularDist(p, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+function _rdp(pts, eps) {
+  if (pts.length <= 2) return pts;
+  let maxD = 0, maxI = 0;
+  const a = pts[0], b = pts[pts.length - 1];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = _perpendicularDist(pts[i], a, b);
+    if (d > maxD) { maxD = d; maxI = i; }
+  }
+  if (maxD > eps) {
+    const left = _rdp(pts.slice(0, maxI + 1), eps);
+    const right = _rdp(pts.slice(maxI), eps);
+    return left.slice(0, -1).concat(right);
+  }
+  return [a, b];
+}
+
 export function useDrawing({
   chartRef,
   seriesRef,
@@ -187,26 +216,45 @@ export function useDrawing({
       const series = seriesRef?.current;
       if (!chart || !series) return null;
       try {
-        const logical = chart.timeScale().coordinateToLogical(x);
+        const ts = chart.timeScale();
+        const intLogical = ts.coordinateToLogical(x);
         const price = series.coordinateToPrice(y);
-        if (logical == null || price == null || !isFinite(logical) || !isFinite(price)) return null;
+        if (intLogical == null || price == null || !isFinite(intLogical) || !isFinite(price)) return null;
+
+        // coordinateToLogical returns an integer (snapped to nearest candle).
+        // To get sub-candle precision we compute a fractional offset by
+        // checking where `x` falls between the pixel positions of the
+        // two bracketing integer logical indices.
+        let fracLogical = intLogical;
+        const x0 = ts.logicalToCoordinate(intLogical);
+        if (x0 != null && isFinite(x0)) {
+          // Determine which direction the fraction goes
+          const delta = x - x0;
+          const neighbor = delta >= 0 ? intLogical + 1 : intLogical - 1;
+          const x1 = ts.logicalToCoordinate(neighbor);
+          if (x1 != null && isFinite(x1)) {
+            const span = Math.abs(x1 - x0);
+            if (span > 0) {
+              fracLogical = intLogical + delta / (x1 - x0);
+            }
+          }
+        }
 
         // Compute a *continuous* timestamp by interpolating between candle
-        // boundaries. This ensures the timestamp is not snapped to any
-        // particular candle and will map correctly on any timeframe.
-        const time = logicalToInterpolatedTime(logical);
+        // boundaries using the fractional logical index.
+        const time = logicalToInterpolatedTime(fracLogical);
 
         if (time != null && isFinite(time)) {
           return { time, price };
         }
 
         // Fallback: try coordinateToTime (snapped)
-        const snappedTime = chart.timeScale().coordinateToTime(x);
+        const snappedTime = ts.coordinateToTime(x);
         if (snappedTime != null && isFinite(snappedTime)) {
           return { time: snappedTime, price };
         }
 
-        return { time: null, price, logical };
+        return { time: null, price, logical: fracLogical };
       } catch {
         return null;
       }
@@ -574,11 +622,6 @@ export function useDrawing({
       if (tool === "pen") {
         const dataPoint = screenToData(pos.x, pos.y);
         if (!dataPoint) return;
-
-        // Cache screen coordinates on the initial point so the renderer
-        // can draw exactly where the mouse is, avoiding lossy round-trips.
-        dataPoint._screenX = pos.x;
-        dataPoint._screenY = pos.y;
 
         const freehand = new FreehandDrawingPrimitive({
           id: nextId("fh"),
@@ -974,9 +1017,7 @@ export function useDrawing({
       if (tool === "pen" && isDrawingFreehandRef.current && currentFreehandRef.current) {
         const dataPoint = screenToData(pos.x, pos.y);
         if (dataPoint) {
-          // Pass raw screen coordinates so the renderer draws exactly
-          // where the mouse is during the active stroke.
-          currentFreehandRef.current.addPoint(dataPoint, pos.x, pos.y);
+          currentFreehandRef.current.addPoint(dataPoint);
         }
         e.preventDefault();
         e.stopPropagation();
@@ -1184,11 +1225,20 @@ export function useDrawing({
     let changed = false;
     // End freehand drawing
     if (isDrawingFreehandRef.current) {
-      // Clear the cached screen coordinates now that the stroke is done.
-      // Subsequent renders (pan/zoom/timeframe switch) will convert from
-      // data coordinates normally.
-      if (currentFreehandRef.current) {
-        currentFreehandRef.current.clearScreenCache();
+      // ── Decimate stroke via RDP to reduce render cost ──
+      const prim = currentFreehandRef.current;
+      if (prim && prim.dataPoints.length > 3) {
+        // Convert data points to screen coordinates for pixel-space RDP
+        const indexed = [];
+        for (let i = 0; i < prim.dataPoints.length; i++) {
+          const s = dataToScreen(prim.dataPoints[i]);
+          if (s) indexed.push({ x: s.x, y: s.y, _i: i });
+        }
+        if (indexed.length > 3) {
+          const kept = _rdp(indexed, 1.5); // ~1.5px tolerance
+          const decimated = kept.map((sp) => prim.dataPoints[sp._i]);
+          prim.setDataPoints(decimated);
+        }
       }
       isDrawingFreehandRef.current = false;
       currentFreehandRef.current = null;
@@ -1202,7 +1252,7 @@ export function useDrawing({
     if (changed) {
       persistDrawings();
     }
-  }, [persistDrawings]);
+  }, [persistDrawings, dataToScreen]);
 
   // ── RIGHT-CLICK: cancel line placement ──
 

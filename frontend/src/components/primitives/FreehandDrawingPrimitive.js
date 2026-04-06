@@ -7,17 +7,9 @@
  * and automatically follow pan/zoom with zero lag.
  *
  * Supports:
- *   - Smooth polyline rendering with configurable color/width
+ *   - Smooth polyline rendering via quadratic Bezier curves
  *   - Hover highlight for eraser tool
  *   - Hit-testing for eraser deletion
- *
- * Screen-coordinate caching:
- *   During active drawing, each point also carries cached screen
- *   coordinates (_screenX, _screenY) so that the renderer can bypass
- *   the lossy time↔coordinate round-trip and draw exactly where the
- *   mouse was. Once the stroke finishes, the cache is cleared and all
- *   subsequent renders (pan/zoom/timeframe switch) convert from
- *   data coordinates as usual.
  */
 
 import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
@@ -131,15 +123,6 @@ class FreehandPaneView {
     const points = [];
 
     for (const dp of source._dataPoints) {
-      // ── Fast path: use cached screen coordinates if available ──
-      // During active drawing, the cached screen coords avoid the lossy
-      // data-coordinate round-trip, so the line follows the cursor exactly.
-      if (dp._screenX != null && dp._screenY != null) {
-        points.push({ x: dp._screenX, y: dp._screenY });
-        continue;
-      }
-
-      // ── Normal path: convert data coordinates to screen ──
       let x = null;
       if (dp.time != null) {
         x = timeScale.timeToCoordinate(dp.time);
@@ -177,7 +160,7 @@ export class FreehandDrawingPrimitive {
   /**
    * @param {object} opts
    * @param {string} opts.id - unique identifier
-   * @param {{logical: number, price: number}[]} opts.dataPoints - polyline points in data coords
+   * @param {{time: number, price: number}[]} opts.dataPoints - polyline points in data coords
    * @param {string} opts.color - line color (hex)
    * @param {number} opts.lineWidth - line width in CSS pixels
    */
@@ -223,34 +206,8 @@ export class FreehandDrawingPrimitive {
   get color() { return this._color; }
   get lineWidth() { return this._lineWidth; }
 
-  /**
-   * Add a point during active drawing.
-   * @param {object} dp - { time, price } data coordinates
-   * @param {number} [screenX] - cached screen x coordinate
-   * @param {number} [screenY] - cached screen y coordinate
-   */
-  addPoint(dp, screenX, screenY) {
-    // Attach cached screen coordinates directly to the data point
-    // so the renderer can use them without round-tripping through
-    // lossy coordinate conversion.
-    if (screenX != null && screenY != null) {
-      dp._screenX = screenX;
-      dp._screenY = screenY;
-    }
+  addPoint(dp) {
     this._dataPoints.push(dp);
-    this._requestUpdate?.();
-  }
-
-  /**
-   * Clear cached screen coordinates from all data points.
-   * Call this when the stroke finishes so that subsequent renders
-   * (after pan/zoom/timeframe change) use proper data-coordinate conversion.
-   */
-  clearScreenCache() {
-    for (const dp of this._dataPoints) {
-      delete dp._screenX;
-      delete dp._screenY;
-    }
     this._requestUpdate?.();
   }
 

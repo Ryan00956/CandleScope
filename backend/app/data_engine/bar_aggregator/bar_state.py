@@ -85,6 +85,13 @@ class StandardOHLCVMerge:
                 state.trades += bar_input.trades
                 state.taker_buy_base = round(state.taker_buy_base + bar_input.taker_buy_base, 8)
                 state.taker_buy_quote = round(state.taker_buy_quote + bar_input.taker_buy_quote, 8)
+            elif bar_input.source_interval != state.interval:
+                # Cross-interval routing (e.g. OKX 1m -> 5m).
+                # The source volume covers only one component period, NOT the
+                # full target bar.  Only update OHLC (price), skip volume
+                # fields — those will be set correctly by the native push
+                # (exact-match source_interval == state.interval).
+                pass
             else:
                 # Kline snapshots are cumulative — replace
                 state.volume = round(bar_input.volume, 8)
@@ -96,8 +103,15 @@ class StandardOHLCVMerge:
             state.tick_count += 1
             state.last_input_at_ms = bar_input.open_time_ms
 
-        # Track whether the last component bar is closed
-        state.last_close_received = bar_input.is_closed
+        # Track whether the last component bar is closed.
+        # Only update from the native channel (source_interval matches
+        # the target interval) or from tick data.  Cross-interval
+        # routing (e.g. OKX 1m → 5m) must NOT set this flag, because
+        # a 1m bar closing does not mean the 5m bar should close —
+        # doing so would cause SourceCloseFinalizer to seal the bar
+        # after only one component, freezing the chart.
+        if bar_input.source_interval == state.interval or bar_input.source_interval == "tick":
+            state.last_close_received = bar_input.is_closed
         state.updated_at_ms = now_ms
 
         return state

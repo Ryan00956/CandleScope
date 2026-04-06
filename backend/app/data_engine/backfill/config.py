@@ -65,7 +65,7 @@ class BackfillConfig:
     # Default intervals to scan for gaps when none specified
     gap_scan_intervals: list[str] = field(default_factory=lambda: _env_str_list(
         "BACKFILL_GAP_SCAN_INTERVALS",
-        ["1m", "5m", "15m", "1h", "4h", "1d"],
+        ["1m", "5m", "15m", "1h", "4h", "1d", "1w", "1M"],
     ))
     # Maximum time range (ms) to scan in a single gap-detection pass
     gap_max_scan_range_ms: int = field(
@@ -90,7 +90,7 @@ class BackfillConfig:
     # The planner uses these as building blocks for custom interval decomposition.
     standard_intervals: list[str] = field(default_factory=lambda: _env_str_list(
         "BACKFILL_STANDARD_INTERVALS",
-        ["1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w"],
+        ["1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"],
     ))
     # Decomposition strategy for custom intervals:
     #   "greedy_descending" — use largest fitting standard intervals first (fast)

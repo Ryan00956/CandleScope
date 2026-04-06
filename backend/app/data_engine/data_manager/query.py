@@ -1007,8 +1007,8 @@ class QueryEngine:
             self._backfill_trigger(
                 key.symbol,
                 key.interval,
-                effective_start,
-                effective_end,
+                int(effective_start),
+                int(effective_end),
                 key.exchange,
                 key.market_type,
             )

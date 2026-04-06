@@ -261,8 +261,8 @@ class HistoricalFetcher:
             req = TransportRequest(
                 descriptor=descriptor,
                 limit=batch_size,
-                start_ms=task.start_ms,
-                end_ms=cursor_end_ms,
+                start_ms=int(task.start_ms) if task.start_ms is not None else None,
+                end_ms=int(cursor_end_ms),
             )
 
             # Fetch with retry

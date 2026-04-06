@@ -71,9 +71,9 @@ def fetch_klines(
 
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     if start_ms is not None:
-        params["startTime"] = start_ms
+        params["startTime"] = int(start_ms)
     if end_ms is not None:
-        params["endTime"] = end_ms
+        params["endTime"] = int(end_ms)
 
     data = None
 

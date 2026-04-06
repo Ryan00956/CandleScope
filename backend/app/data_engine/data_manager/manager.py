@@ -477,10 +477,32 @@ class DataManager:
         )
 
         # For non-standard intervals, also register the base interval
-        from ..bar_aggregator.models import is_standard_interval
+        from ..bar_aggregator.models import is_standard_interval, parse_interval_ms
         if not is_standard_interval(interval):
             base = self._cfg.coordinator.base_interval
             self.bar_aggregator.add_target(
+                symbol, base, exchange=exchange, market_type=market_type,
+            )
+
+        # For OKX standard intervals > 1m, also ensure the 1m base stream
+        # is running so that real-time 1m ticks can be aggregated into
+        # higher timeframes.  OKX native WS channels for large intervals
+        # (e.g. candle4H, candle1D) push data infrequently, causing the
+        # chart to appear frozen.  By running 1m alongside, the Router
+        # can fan out 1m updates to all larger standard intervals.
+        _needs_okx_base = (
+            exchange.lower().strip() == "okx"
+            and is_standard_interval(interval)
+            and interval != self._cfg.coordinator.base_interval
+            and (parse_interval_ms(interval) or 0)
+                > (parse_interval_ms(self._cfg.coordinator.base_interval) or 0)
+        )
+        if _needs_okx_base:
+            base = self._cfg.coordinator.base_interval
+            self.bar_aggregator.add_target(
+                symbol, base, exchange=exchange, market_type=market_type,
+            )
+            await self.coordinator.ensure_stream(
                 symbol, base, exchange=exchange, market_type=market_type,
             )
 

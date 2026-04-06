@@ -123,15 +123,15 @@ class BinanceExchangeAdapter:
             params["interval"] = desc.interval
             params["limit"] = req.limit
             if req.start_ms is not None:
-                params["startTime"] = req.start_ms
+                params["startTime"] = int(req.start_ms)
             if req.end_ms is not None:
-                params["endTime"] = req.end_ms
+                params["endTime"] = int(req.end_ms)
         elif desc.stream_type.value in ("aggTrade", "trade"):
             params["limit"] = req.limit
             if req.start_ms is not None:
-                params["startTime"] = req.start_ms
+                params["startTime"] = int(req.start_ms)
             if req.end_ms is not None:
-                params["endTime"] = req.end_ms
+                params["endTime"] = int(req.end_ms)
         elif desc.stream_type.value == "depth":
             params["limit"] = min(req.limit, 5000)
 

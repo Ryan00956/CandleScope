@@ -317,6 +317,22 @@ class EventRouter:
                     if is_standard_interval(src) and 0 < src_ms <= tgt_ms:
                         should_route = True
 
+            # Rule 4: OKX realtime 1m -> larger standard intervals
+            # OKX native WS channels for large intervals (candle4H, candle1D,
+            # etc.) push data infrequently, causing chart prices to appear
+            # frozen.  Allow 1m realtime data to fan out to all larger
+            # standard intervals so the current forming bar updates in
+            # real-time -- matching the behavior of Binance.
+            elif (
+                is_standard_interval(interval)
+                and src == "1m"
+                and bar_input.source == BarInputSource.REALTIME
+                and exchange == "okx"
+            ):
+                tgt_ms = parse_interval_ms(interval) or 0
+                if tgt_ms > 60_000:
+                    should_route = True
+
             # Discard contaminated source intervals
             if not should_route:
                 continue

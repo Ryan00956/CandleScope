@@ -44,9 +44,9 @@ def fetch_binance_klines(
     assert 1 <= limit <= 1000 , "request too many klines,please ensure 1 <= limit <= 1000"
     params = {"symbol": symbol, "interval": interval, "limit": limit}
     if start_ms is not None:
-        params["startTime"] = start_ms
+        params["startTime"] = int(start_ms)
     if end_ms is not None:
-        params["endTime"] = end_ms
+        params["endTime"] = int(end_ms)
 
     url = f"{base_url}/api/v3/klines"
     retries = 5

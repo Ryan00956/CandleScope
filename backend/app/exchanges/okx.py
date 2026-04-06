@@ -25,12 +25,12 @@ _OKX_INTERVALS = {
     "1h": "1H",
     "2h": "2H",
     "4h": "4H",
-    "6h": "6H",
-    "12h": "12H",
-    "1d": "1D",
-    "3d": "3D",
-    "1w": "1W",
-    "1M": "1M",
+    "6h": "6Hutc",
+    "12h": "12Hutc",
+    "1d": "1Dutc",
+    "3d": "3Dutc",
+    "1w": "1Wutc",
+    "1M": "1Mutc",
 }
 
 _REST_PATH: dict[str, dict[str, str]] = {
@@ -117,9 +117,9 @@ class OkxExchangeAdapter:
         # meant to be INCLUSIVE.  Add ±1 ms to include bars at the exact
         # boundary timestamps.
         if req.end_ms is not None:
-            params["after"] = int(req.end_ms) + 1
+            params["after"] = str(max(0, int(req.end_ms) + 1))
         if req.start_ms is not None:
-            params["before"] = int(req.start_ms) - 1
+            params["before"] = str(max(0, int(req.start_ms) - 1))
         return params
 
     def build_ws_stream_name(self, descriptor) -> str:

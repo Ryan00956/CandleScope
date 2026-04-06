@@ -192,6 +192,11 @@ class TransportLayer:
                 async with self._http_session.get(url, params=params, proxy=proxy) as resp:  # type: ignore[union-attr]
                     if resp.status != 200:
                         body = await resp.text()
+                        if resp.status == 400:
+                            logger.error(
+                                "HTTP 400 from %s — params=%r url=%s body=%s",
+                                base, params, resp.url, body[:300],
+                            )
                         raise TransportError(f"HTTP {resp.status}: {body[:200]}")
                     data = await resp.json()
 

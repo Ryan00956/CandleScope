@@ -121,11 +121,18 @@ _OKX_INTERVALS_TO_INTERNAL = {
     "2H": "2h",
     "4H": "4h",
     "6H": "6h",
+    "6Hutc": "6h",
     "12H": "12h",
+    "12Hutc": "12h",
     "1D": "1d",
+    "1Dutc": "1d",
+    "2Dutc": "1d",  # not standard, but map defensively
     "3D": "3d",
+    "3Dutc": "3d",
     "1W": "1w",
+    "1Wutc": "1w",
     "1M": "1M",
+    "1Mutc": "1M",
 }
 
 
@@ -746,6 +753,28 @@ def _truncate(obj, max_len: int = 200) -> str:
 
 
 def _interval_close_time_ms(open_time_ms: int, interval: str) -> int:
+    """Compute the close_time for a candle.
+
+    For monthly intervals, use actual calendar month boundaries instead
+    of a fixed 30-day approximation.
+    """
+    # Monthly intervals need calendar-aware computation
+    normalized = str(interval or "").strip()
+    if normalized.endswith("M") and not normalized.endswith("m"):
+        # Parse month count (e.g. "1M" -> 1, "3M" -> 3)
+        try:
+            month_count = int(normalized[:-1]) if len(normalized) > 1 else 1
+        except ValueError:
+            month_count = 1
+        from datetime import datetime, timezone
+        dt = datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc)
+        # Advance by month_count months
+        month_idx = dt.month - 1 + month_count
+        year = dt.year + month_idx // 12
+        month = month_idx % 12 + 1
+        next_month_start = datetime(year, month, 1, tzinfo=timezone.utc)
+        return int(next_month_start.timestamp() * 1000) - 1
+
     interval_ms = _interval_to_ms(interval)
     if interval_ms <= 0:
         return open_time_ms

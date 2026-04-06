@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Callable, Awaitable, Any
 
 from ..ingestion.metrics import LayerMetrics
@@ -45,6 +46,27 @@ from .models import (
 )
 
 logger = logging.getLogger("backfill.GapDetector")
+
+
+def _is_monthly(interval: str) -> bool:
+    """Return True if interval uses calendar-month units (e.g. '1M')."""
+    return interval.endswith("M") and not interval.endswith("m")
+
+
+def _next_month_open_ms(ts_ms: int, months: int = 1) -> int:
+    """Compute the open_time of the next monthly candle after *ts_ms*."""
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+    month_idx = dt.month - 1 + months
+    year = dt.year + month_idx // 12
+    month = month_idx % 12 + 1
+    return int(datetime(year, month, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _count_months_between(start_ms: int, end_ms: int) -> int:
+    """Approximate number of monthly candles between two timestamps."""
+    s = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    e = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
+    return max(0, (e.year - s.year) * 12 + (e.month - s.month))
 
 # Type aliases
 ReferenceTimeProvider = Callable[[str, str, str, str], Awaitable[int | None]]
@@ -300,7 +322,25 @@ class GapDetector:
                 gaps.append(gap)
 
         # ── Case 3: Tail gap — DB is behind the live edge ──
-        if db_latest < reference_ms - interval_ms * self._cfg.gap_tolerance_bars:
+        if _is_monthly(interval):
+            next_expected = _next_month_open_ms(db_latest)
+            if next_expected <= reference_ms:
+                missing = _count_months_between(next_expected, reference_ms)
+                if missing > self._cfg.gap_tolerance_bars:
+                    gap = GapInfo(
+                        symbol=symbol,
+                        interval=interval,
+                        gap_type=GapType.TAIL,
+                        start_ms=next_expected,
+                        end_ms=reference_ms,
+                        missing_bars=missing,
+                        exchange=exchange,
+                        db_latest_ms=db_latest,
+                        reference_ms=reference_ms,
+                        market_type=market_type,
+                    )
+                    gaps.append(gap)
+        elif db_latest < reference_ms - interval_ms * self._cfg.gap_tolerance_bars:
             next_expected = db_latest + interval_ms
             missing = (reference_ms - next_expected) // interval_ms + 1
             if missing > self._cfg.gap_tolerance_bars:
@@ -397,18 +437,25 @@ class GapDetector:
 
             current = sorted_times[i]
             next_time = sorted_times[i + 1]
-            expected_next = current + interval_ms
+
+            if _is_monthly(interval):
+                expected_next = _next_month_open_ms(current)
+            else:
+                expected_next = current + interval_ms
 
             if next_time > expected_next:
                 # There's a hole
-                missing = (next_time - expected_next) // interval_ms
+                if _is_monthly(interval):
+                    missing = _count_months_between(expected_next, next_time)
+                else:
+                    missing = (next_time - expected_next) // interval_ms
                 if missing > self._cfg.gap_tolerance_bars:
                     gap = GapInfo(
                         symbol=symbol,
                         interval=interval,
                         gap_type=GapType.INTERIOR,
                         start_ms=expected_next,
-                        end_ms=next_time - interval_ms,
+                        end_ms=next_time - interval_ms if not _is_monthly(interval) else next_time,
                         missing_bars=missing,
                         exchange=exchange,
                         db_latest_ms=sorted_times[-1],

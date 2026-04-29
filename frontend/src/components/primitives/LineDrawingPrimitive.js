@@ -55,6 +55,30 @@ function distToSegment(px, py, ax, ay, bx, by) {
   return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
 }
 
+// Distance from point (px,py) to the infinite line through A and B.
+function distToInfiniteLine(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.sqrt((px - ax) ** 2 + (py - ay) ** 2);
+  return Math.abs(dx * (py - ay) - dy * (px - ax)) / Math.sqrt(lenSq);
+}
+
+// Distance from point (px,py) to the ray starting at A and passing through B (extending past B to infinity).
+function distToRay(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.sqrt((px - ax) ** 2 + (py - ay) ** 2);
+  const t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+  if (t <= 0) {
+    // Projection falls behind A → distance to endpoint A.
+    return Math.sqrt((px - ax) ** 2 + (py - ay) ** 2);
+  }
+  // Projection is on the ray (t > 0) → perpendicular distance to the line.
+  return Math.abs(dx * (py - ay) - dy * (px - ax)) / Math.sqrt(lenSq);
+}
+
 // ── Pane Renderer ──
 
 class LineRenderer {
@@ -393,8 +417,17 @@ export class LineDrawingPrimitive {
       }
     }
 
-    // Check body
-    if (distToSegment(x, y, sa.x, sa.y, sb.x, sb.y) <= LINE_HIT_RADIUS) {
+    // Check body — use the appropriate distance function so the entire visible
+    // line (including ray/infinite extensions) is hit-testable, not just A→B.
+    let bodyDist;
+    if (this._lineType === "line-infinite") {
+      bodyDist = distToInfiniteLine(x, y, sa.x, sa.y, sb.x, sb.y);
+    } else if (this._lineType === "line-ray") {
+      bodyDist = distToRay(x, y, sa.x, sa.y, sb.x, sb.y);
+    } else {
+      bodyDist = distToSegment(x, y, sa.x, sa.y, sb.x, sb.y);
+    }
+    if (bodyDist <= LINE_HIT_RADIUS) {
       return { pointIndex: -1 };
     }
 

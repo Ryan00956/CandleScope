@@ -61,6 +61,9 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     fibLevels,
     fibInverted = false,
     positionSize = 1000,
+    // Selection style sync — fired when the currently selected drawing on the
+    // main pane changes (or is cleared). Lets the parent mirror its style.
+    onSelectedDrawingChange,
     // Indicator data — computed by useIndicators (multi-pane version)
     // mainOverlayLines: [{data, color, ...}]  — overlay lines for main chart
     // subPanes: [{id, label, lines: [...]}]    — each sub pane with its lines
@@ -269,6 +272,18 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
             for (const subPane of subPaneRefs.current.values()) {
                 if (subPane?.clearAllDrawings) {
                     subPane.clearAllDrawings();
+                }
+            }
+        },
+        // Style update for the currently selected drawing on the main pane.
+        // Sub panes also get a chance in case the selection lives there.
+        updateSelectedDrawingStyle: (patch) => {
+            if (mainPaneRef.current?.updateSelectedDrawingStyle) {
+                mainPaneRef.current.updateSelectedDrawingStyle(patch);
+            }
+            for (const subPane of subPaneRefs.current.values()) {
+                if (subPane?.updateSelectedDrawingStyle) {
+                    subPane.updateSelectedDrawingStyle(patch);
                 }
             }
         },
@@ -486,6 +501,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     fibLevels={fibLevels}
                     fibInverted={fibInverted}
                     positionSize={positionSize}
+                    onSelectedDrawingChange={onSelectedDrawingChange}
                 />
             </div>
 

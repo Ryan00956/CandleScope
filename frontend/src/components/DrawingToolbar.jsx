@@ -393,6 +393,10 @@ const DrawingToolbar = memo(function DrawingToolbar({
   // Position settings
   positionSize = 1000,
   onPositionSizeChange,
+  // Current stylable selection. The regular stroke controls update both this
+  // existing drawing and the default style for subsequently created drawings.
+  selectedDrawing = null,
+  onSelectedDrawingStyleChange,
 }) {
   // Which line variant is selected (persisted across toggles)
   const [lineVariant, setLineVariant] = useState("line-segment");
@@ -552,6 +556,20 @@ const DrawingToolbar = memo(function DrawingToolbar({
   const showFibonacciOptions = isFibonacciActive;
   const showPositionOptions = isPositionActive;
 
+  const handleStrokeColorChange = useCallback((color) => {
+    onPenColorChange?.(color);
+    if (selectedDrawing) {
+      onSelectedDrawingStyleChange?.({ color });
+    }
+  }, [onPenColorChange, onSelectedDrawingStyleChange, selectedDrawing]);
+
+  const handleStrokeSizeChange = useCallback((lineWidth) => {
+    onPenSizeChange?.(lineWidth);
+    if (selectedDrawing) {
+      onSelectedDrawingStyleChange?.({ lineWidth });
+    }
+  }, [onPenSizeChange, onSelectedDrawingStyleChange, selectedDrawing]);
+
   return (
     <div className="drawing-toolbar">
       {/* ── Pen button ── */}
@@ -681,7 +699,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
               type="color"
               className="drawing-color-picker"
               value={penColor}
-              onChange={(e) => onPenColorChange(e.target.value)}
+              onChange={(e) => handleStrokeColorChange(e.target.value)}
             />
           </div>
           <div className="drawing-tool-option" title={`画笔大小: ${penSize}px`}>
@@ -691,7 +709,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
               min="1"
               max="10"
               value={penSize}
-              onChange={(e) => onPenSizeChange(Number(e.target.value))}
+              onChange={(e) => handleStrokeSizeChange(Number(e.target.value))}
             />
           </div>
         </>
@@ -705,7 +723,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
               type="color"
               className="drawing-color-picker"
               value={penColor}
-              onChange={(e) => onPenColorChange(e.target.value)}
+              onChange={(e) => handleStrokeColorChange(e.target.value)}
             />
           </div>
           <div className="drawing-tool-option" title={`线条粗细: ${penSize}px`}>
@@ -715,7 +733,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
               min="1"
               max="10"
               value={penSize}
-              onChange={(e) => onPenSizeChange(Number(e.target.value))}
+              onChange={(e) => handleStrokeSizeChange(Number(e.target.value))}
             />
           </div>
         </>

@@ -355,6 +355,228 @@ class SessionLike(Protocol):
 
 - 长期：让 `SessionLayer` 和 `SharedWsHubSession` 都实现这个接口，L3 只依赖 `SessionLike`，不知道 OKX 特例。
 
+#### 不同交易所 WS 连接方式应该如何统一
+
+OKX 和 Binance 的 WS 连接方式确实不同，所以不能简单要求它们走完全一样的连接代码。
+
+问题不在于“有不同实现”，而在于现在不同实现没有被统一抽象管理。
+
+更准确地说：
+
+```text
+合理：不同交易所有不同 WS 策略
+不合理：不同 WS 策略绕过六层架构，各自长出一套生命周期
+```
+
+Binance 更像“一条 stream 一个 URL path”：
+
+```text
+wss://stream.binance.com:9443/ws/btcusdt@kline_1m
+```
+
+连接模型：
+
+```text
+descriptor -> build path stream name -> connect URL -> read messages
+```
+
+它适合 `DirectPathSession`：
+
+- 一个 descriptor 通常对应一个 WS 连接。
+- 订阅信息体现在 URL path 里。
+- 连接建立后通常不需要再发送 subscribe message。
+- 收到的消息天然属于当前 descriptor，不需要复杂路由。
+
+OKX 更像“先连接公共 endpoint，再发送 subscribe message”：
+
+```text
+wss://ws.okx.com:8443/ws/v5/business
+
+send:
+{
+  "op": "subscribe",
+  "args": [
+    {"channel": "candle1m", "instId": "BTC-USDT"}
+  ]
+}
+```
+
+连接模型：
+
+```text
+connect endpoint -> send subscribe payload -> read messages -> route by arg.channel + arg.instId
+```
+
+它适合 `MultiplexedMessageSession`：
+
+- 一个 WS 连接可以承载多个订阅。
+- 订阅信息通过 message 发送。
+- 收到的 payload 需要按 `arg.channel` 和 `arg.instId` 分发给对应 descriptor。
+- ack/error/control message 需要额外识别。
+
+以后新增交易所时，可能还会遇到这些差异：
+
+- 一个连接只能订阅一个 stream。
+- 一个连接可以订阅多个 stream。
+- 订阅放在 URL path。
+- 订阅放在 JSON message。
+- 订阅需要 auth。
+- public/private channel 分 endpoint。
+- ack 格式不同。
+- 心跳需要客户端主动 ping message。
+- payload 需要按 topic/channel/symbol/request id 路由。
+
+所以架构上不应该把 Binance 或 OKX 任何一种方式写死到 `FeedControlLayer`。
+
+推荐抽象是 `SessionLike + WsTopology`。
+
+`SessionLike` 统一描述“一个可被 FeedControl 管理的 WS 会话”：
+
+```python
+class SessionLike(Protocol):
+    def on_message(self, callback): ...
+    def on_health_change(self, callback): ...
+    async def start(self) -> None: ...
+    async def stop(self) -> None: ...
+    def snapshot(self) -> dict: ...
+```
+
+然后不同连接方式实现不同 session strategy：
+
+```text
+DirectPathSession
+  适合 Binance：一个 descriptor 一个 path URL
+
+MessageSession
+  适合普通 message subscribe：一个 descriptor 一个连接，连接后发 subscribe
+
+MultiplexedMessageSession
+  适合 OKX：一个连接多个订阅，收到 payload 后按 channel/symbol 路由
+
+HttpOnlySession
+  适合没有 WS 或当前环境不支持 WS 的交易所
+```
+
+同时，在 exchange adapter 里描述连接拓扑：
+
+```python
+class WsTopology(str, Enum):
+    PER_STREAM_PATH = "per_stream_path"
+    PER_STREAM_MESSAGE = "per_stream_message"
+    MULTIPLEXED_MESSAGE = "multiplexed_message"
+    HTTP_ONLY = "http_only"
+```
+
+exchange adapter 提供：
+
+```python
+def ws_topology(descriptor) -> WsTopology:
+    ...
+
+def build_ws_subscription(descriptor) -> WsSubscriptionSpec:
+    ...
+
+def route_ws_payload(payload) -> StreamRouteKey | None:
+    ...
+```
+
+Binance adapter：
+
+```text
+ws_topology = PER_STREAM_PATH
+build_ws_subscription = path stream name
+route_ws_payload = 不需要复杂路由
+```
+
+OKX adapter：
+
+```text
+ws_topology = MULTIPLEXED_MESSAGE
+build_ws_subscription = {"op": "subscribe", "args": [...]}
+route_ws_payload = payload["arg"]["channel"] + payload["arg"]["instId"]
+```
+
+未来新增 Bybit、Coinbase、Kraken 等交易所时，只需要：
+
+1. 实现 exchange adapter。
+2. 声明 `ws_topology`。
+3. 复用已有 session strategy，或新增一个通用 strategy。
+
+`FeedControlLayer` 不需要知道具体交易所。
+
+目标形态：
+
+```text
+FeedControlLayer
+      |
+      v
+SessionFactory
+      |
+      v
+SessionLike
+  |-- DirectPathSession
+  |-- MessageSession
+  |-- MultiplexedMessageSession
+  |-- HttpOnlySession
+      |
+      v
+TransportLayer
+```
+
+对当前 OKX shared WS，不建议直接删除。它解决的问题是真实存在的，更合适的方向是把它泛化：
+
+```text
+OkxSharedKlineHub
+      |
+      v
+MultiplexedMessageSession
+```
+
+OKX adapter 只保留交易所特有部分：
+
+- endpoint 是哪个。
+- subscribe payload 怎么构造。
+- unsubscribe payload 怎么构造。
+- ack/error message 怎么识别。
+- market data payload 怎么路由到 descriptor。
+
+通用 `MultiplexedMessageSession` 负责：
+
+- 连接。
+- 多订阅者管理。
+- 合并 subscribe。
+- 取消订阅。
+- read loop。
+- stale 检测。
+- reconnect backoff。
+- health change。
+- payload dispatch。
+
+这样以后其他 message multiplexed 交易所也能复用，不会再复制一套 `xxx_shared_ws.py`。
+
+修改后的职责边界应该是：
+
+```text
+ExchangeAdapter
+  描述交易所协议：URL、订阅格式、payload 路由、ack/error 规则
+
+TransportLayer
+  只负责 connect/send/recv/http request
+
+SessionLike
+  负责 WS 生命周期：连接、订阅、读消息、重连、健康状态
+
+FeedControlLayer
+  只负责在 WS session 和 HTTP polling 之间切换
+```
+
+这能解决当前最核心的问题：
+
+```text
+连接方式可以不同；
+生命周期模型必须统一。
+```
+
 ---
 
 ### 4.3 L4 Normalize 过大，交易所解析全部堆在一个类里

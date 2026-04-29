@@ -450,6 +450,20 @@ export default function App() {
     chartWidgetRef.current?.clearAllDrawings();
   }, []);
 
+  // Currently selected drawing on the chart (line/freehand/fibonacci).
+  // When selection changes, mirror its stroke style into the toolbar's single
+  // color/width controls so editing existing drawings and creating new ones
+  // use the same visible state.
+  const [selectedDrawing, setSelectedDrawing] = useState(null);
+  useEffect(() => {
+    if (!selectedDrawing) return;
+    if (selectedDrawing.color) setPenColor(selectedDrawing.color);
+    if (typeof selectedDrawing.lineWidth === "number") setPenSize(selectedDrawing.lineWidth);
+  }, [selectedDrawing]);
+  const handleSelectedDrawingStyleChange = useCallback((patch) => {
+    chartWidgetRef.current?.updateSelectedDrawingStyle?.(patch);
+  }, []);
+
   // --- Settings state (must be before useIndicators which needs settings.upColor/downColor) ---
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(() => {
@@ -1911,6 +1925,8 @@ export default function App() {
           onFibInvertedChange={handleFibInvertedChange}
           positionSize={positionSize}
           onPositionSizeChange={handlePositionSizeChange}
+          selectedDrawing={selectedDrawing}
+          onSelectedDrawingStyleChange={handleSelectedDrawingStyleChange}
         />
 
         {error ? (
@@ -1961,6 +1977,7 @@ export default function App() {
               fibLevels={fibLevels}
               fibInverted={fibInverted}
               positionSize={positionSize}
+              onSelectedDrawingChange={setSelectedDrawing}
               onChartReady={handleChartReady}
               mainOverlayLines={mainOverlayLines}
               subPanes={subPanes}

@@ -44,6 +44,31 @@ function isTextOverlayTarget(target) {
 
 const EMPTY_SELECTED_TEXT_UI = { snapshot: null, box: null };
 
+/**
+ * Build a lightweight description of the currently selected non-text drawing
+ * (line / freehand / fibonacci) for the toolbar's style editor. Returns null
+ * for primitives that don't expose color/lineWidth or for text (which has its
+ * own dedicated UI).
+ */
+function selectedDrawingMetaFromPrimitive(prim) {
+  if (!prim) return null;
+  if (prim instanceof TextDrawingPrimitive) return null;
+  if (prim instanceof PositionDrawingPrimitive) return null;
+  if (typeof prim.setColor !== "function" && typeof prim.setLineWidth !== "function") {
+    return null;
+  }
+  let type = "drawing";
+  if (prim instanceof LineDrawingPrimitive) type = "line";
+  else if (prim instanceof FreehandDrawingPrimitive) type = "freehand";
+  else if (prim instanceof FibonacciDrawingPrimitive) type = "fibonacci";
+  return {
+    id: prim.id,
+    type,
+    color: prim.color,
+    lineWidth: prim.lineWidth,
+  };
+}
+
 function selectedTextUiFromPrimitive(prim) {
   if (!(prim instanceof TextDrawingPrimitive)) return EMPTY_SELECTED_TEXT_UI;
   let box = null;
@@ -133,6 +158,17 @@ export function useDrawing({
   // ── Selected primitive ID as React state (for toolbar sync) ──
   const [selectedPrimId, setSelectedPrimId] = useState(null);
   const [selectedTextUi, setSelectedTextUi] = useState(EMPTY_SELECTED_TEXT_UI);
+  const [selectedDrawingMeta, setSelectedDrawingMeta] = useState(null);
+
+  // Whenever the selection is cleared from any of the many code paths that
+  // touch `selectedPrimId`, also drop the toolbar-facing meta so the style
+  // editor goes away. selectPrimitive() sets meta directly, so this only
+  // needs to handle the deselect case.
+  useEffect(() => {
+    if (selectedPrimId == null) {
+      setSelectedDrawingMeta(null);
+    }
+  }, [selectedPrimId]);
 
   // ── Freehand-specific state ──
   const currentFreehandRef = useRef(null); // FreehandDrawingPrimitive being drawn
@@ -527,13 +563,19 @@ export function useDrawing({
         if (prim.id === id) selectedPrim = prim;
       }
     }
+    if (!selectedPrim) {
+      // Freehand strokes don't have setSelected; locate by id directly
+      selectedPrim = primitivesRef.current.find((p) => p.id === id) || null;
+    }
     setSelectedTextUi(selectedTextUiFromPrimitive(selectedPrim));
+    setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(selectedPrim));
   }, []);
 
   const deselectAll = useCallback(() => {
     selectedIdRef.current = null;
     setSelectedPrimId(null);
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
+    setSelectedDrawingMeta(null);
     for (const prim of primitivesRef.current) {
       if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive) {
         prim.setSelected(false);
@@ -1728,6 +1770,31 @@ export function useDrawing({
     persistDrawings();
   }, [detachPrim, persistDrawings]);
 
+  /**
+   * Update the color and/or lineWidth of the currently selected
+   * line / freehand / fibonacci drawing. Persists the change and refreshes
+   * the toolbar's meta snapshot.
+   */
+  const updateSelectedDrawingStyle = useCallback((patch) => {
+    const id = selectedIdRef.current;
+    if (!id || !patch) return;
+    const prim = primitivesRef.current.find((p) => p.id === id);
+    if (!prim) return;
+    let changed = false;
+    if (typeof patch.color === "string" && typeof prim.setColor === "function" && patch.color !== prim.color) {
+      prim.setColor(patch.color);
+      changed = true;
+    }
+    if (typeof patch.lineWidth === "number" && typeof prim.setLineWidth === "function" && patch.lineWidth !== prim.lineWidth) {
+      prim.setLineWidth(patch.lineWidth);
+      changed = true;
+    }
+    if (changed) {
+      setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(prim));
+      persistDrawings();
+    }
+  }, [persistDrawings]);
+
   const selectedTextSnapshot = selectedTextUi.snapshot;
   const selectedTextBox = selectedTextUi.box;
 
@@ -1735,6 +1802,7 @@ export function useDrawing({
     clearAll,
     primitivesRef,
     selectedPrimId,
+    selectedDrawingMeta,
     // Text editing state (for rendering the inline editor in the component)
     editingTextId,
     editingTextValue,
@@ -1747,6 +1815,7 @@ export function useDrawing({
     selectedTextSnapshot,
     selectedTextBox,
     updateSelectedText,
+    updateSelectedDrawingStyle,
     deleteSelected,
   };
 }

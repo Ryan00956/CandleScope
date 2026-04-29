@@ -116,6 +116,9 @@ const ChartPane = forwardRef(function ChartPane({
     fibLevels,
     fibInverted,
     positionSize,
+    // Selection style sync (main pane only): called when the currently
+    // selected drawing changes so the global toolbar can mirror its style.
+    onSelectedDrawingChange,
     // Sync callbacks (called by this pane, handled by parent)
     onVisibleLogicalRangeChange,
     onCrosshairMove: onCrosshairMoveExternal,
@@ -1103,7 +1106,9 @@ const ChartPane = forwardRef(function ChartPane({
         selectedTextSnapshot,
         selectedTextBox,
         updateSelectedText,
+        updateSelectedDrawingStyle,
         deleteSelected,
+        selectedDrawingMeta,
     } = useDrawing({
         chartRef,
         seriesRef: paneType === "main" ? mainSeriesRef : drawingAnchorSeriesRef,
@@ -1144,8 +1149,16 @@ const ChartPane = forwardRef(function ChartPane({
 
     /* ── Imperative handle ─────────────────────────────────── */
 
+    // Bubble selection meta up to App/Toolbar so the shared stroke controls
+    // reflect the currently selected drawing. Only the main pane wires this up.
+    useEffect(() => {
+        if (!onSelectedDrawingChange) return;
+        onSelectedDrawingChange(selectedDrawingMeta);
+    }, [selectedDrawingMeta, onSelectedDrawingChange]);
+
     useImperativeHandle(ref, () => ({
         clearAllDrawings,
+        updateSelectedDrawingStyle,
         getChart: () => chartRef.current,
         getMainSeries: () => mainSeriesRef.current,
         getChartRef: () => chartRef,
@@ -1230,7 +1243,7 @@ const ChartPane = forwardRef(function ChartPane({
             try { chart.timeScale().applyOptions(opts); } catch { /* */ }
         },
         resetAutoScale,
-    }), [resetAutoScale]);
+    }), [resetAutoScale, clearAllDrawings, updateSelectedDrawingStyle]);
 
     return (
         <div className="chart-pane" data-pane-id={paneId} data-pane-type={paneType}>

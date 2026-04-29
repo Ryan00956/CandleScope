@@ -459,6 +459,20 @@ export default function App() {
     chartWidgetRef.current?.setDrawingsHidden?.(drawingsHidden);
   }, [drawingsHidden]);
 
+  // Toggle magnet snapping for drawing tools (pen always stays freehand).
+  const [drawingSnapEnabled, setDrawingSnapEnabled] = useState(() => {
+    try {
+      const saved = localStorage.getItem("candlescope-drawing-snap-enabled");
+      return saved == null ? true : saved === "true";
+    } catch {
+      return true;
+    }
+  });
+  const handleDrawingSnapEnabledChange = useCallback((enabled) => {
+    setDrawingSnapEnabled(enabled);
+    try { localStorage.setItem("candlescope-drawing-snap-enabled", String(enabled)); } catch { /* ignore */ }
+  }, []);
+
   // Currently selected drawing on the chart (line/freehand/fibonacci).
   // When selection changes, mirror its stroke style into the toolbar's single
   // color/width controls so editing existing drawings and creating new ones
@@ -1924,6 +1938,8 @@ export default function App() {
           onClearAll={handleClearDrawing}
           drawingsHidden={drawingsHidden}
           onToggleDrawingsHidden={handleToggleDrawingsHidden}
+          drawingSnapEnabled={drawingSnapEnabled}
+          onDrawingSnapEnabledChange={handleDrawingSnapEnabledChange}
           textFontSize={textFontSize}
           onTextFontSizeChange={setTextFontSize}
           textBold={textBold}
@@ -1988,6 +2004,7 @@ export default function App() {
               fibLevels={fibLevels}
               fibInverted={fibInverted}
               positionSize={positionSize}
+              drawingSnapEnabled={drawingSnapEnabled}
               onSelectedDrawingChange={setSelectedDrawing}
               onChartReady={handleChartReady}
               mainOverlayLines={mainOverlayLines}

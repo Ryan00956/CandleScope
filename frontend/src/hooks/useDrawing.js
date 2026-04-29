@@ -9,6 +9,7 @@
  *   - Two-click lines ("line-segment" / "line-ray" / "line-infinite")
  *   - Text annotations ("text"): click to place, inline editing
  *   - Live preview while placing second point of a line
+ *   - Magnet snapping to nearby candle OHLC / series values (except pen)
  *   - Selecting / dragging existing lines & text (endpoints or whole body)
  *   - Eraser ("eraser"): click to delete any drawing
  *   - Hover highlight for eraser
@@ -28,6 +29,11 @@ import { saveDrawings, loadDrawings, clearSavedDrawings } from "../services/draw
 const LINE_TOOL_IDS = new Set(["line-segment", "line-ray", "line-infinite"]);
 const FIB_TOOL_IDS = new Set(["fibonacci"]);
 const POSITION_TOOL_IDS = new Set(["position-long", "position-short"]);
+const SNAP_TIME_DISTANCE_PX = 12;
+const SNAP_PRICE_DISTANCE_PX = 10;
+const SNAP_PRICE_CANDLE_DISTANCE_PX = 18;
+const SNAP_CANDIDATE_SCAN_RADIUS = 3;
+const SNAP_PRICE_FIELDS = ["open", "high", "low", "close"];
 
 let _idCounter = 0;
 function nextId(prefix = "d") {
@@ -40,6 +46,29 @@ function setCursor(el, cursor) {
 
 function isTextOverlayTarget(target) {
   return target instanceof Element && !!target.closest(".text-format-bar, .text-edit-overlay");
+}
+
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function getSnapPriceCandidates(item) {
+  if (!item) return [];
+  const candidates = [];
+  const seen = new Set();
+
+  for (const field of SNAP_PRICE_FIELDS) {
+    const value = item[field];
+    if (!isFiniteNumber(value) || seen.has(value)) continue;
+    seen.add(value);
+    candidates.push({ value, source: field });
+  }
+
+  if (candidates.length === 0 && isFiniteNumber(item.value)) {
+    candidates.push({ value: item.value, source: "value" });
+  }
+
+  return candidates;
 }
 
 const EMPTY_SELECTED_TEXT_UI = { snapshot: null, box: null };
@@ -139,6 +168,7 @@ export function useDrawing({
   fibLevels,
   fibInverted,
   positionSize,
+  drawingSnapEnabled = true,
   symbol,
   seriesReady,
   // Optional callback so the hook can flip the active tool back to null after
@@ -196,6 +226,7 @@ export function useDrawing({
   const fibLevelsRef = useRef(fibLevels);
   const fibInvertedRef = useRef(fibInverted);
   const positionSizeRef = useRef(positionSize);
+  const drawingSnapEnabledRef = useRef(drawingSnapEnabled);
 
   const symbolRef = useRef(symbol);
 
@@ -210,8 +241,9 @@ export function useDrawing({
     fibLevelsRef.current = fibLevels;
     fibInvertedRef.current = fibInverted;
     positionSizeRef.current = positionSize;
+    drawingSnapEnabledRef.current = drawingSnapEnabled;
     symbolRef.current = symbol;
-  }, [onToolChange, activeTool, penColor, penSize, textFontSize, textBold, textItalic, fibLevels, fibInverted, positionSize, symbol]);
+  }, [onToolChange, activeTool, penColor, penSize, textFontSize, textBold, textItalic, fibLevels, fibInverted, positionSize, drawingSnapEnabled, symbol]);
 
   // Track previous symbol so we can detect symbol switches and swap drawing sets
   const prevSymbolRef = useRef(symbol);
@@ -379,6 +411,154 @@ export function useDrawing({
       }
     },
     [chartRef, seriesRef],
+  );
+
+  const findSnapTarget = useCallback(
+    (x, y) => {
+      const chart = chartRef?.current;
+      const series = seriesRef?.current;
+      if (!chart || !series) return null;
+
+      let seriesData;
+      try {
+        seriesData = series.data?.();
+      } catch {
+        return null;
+      }
+      if (!Array.isArray(seriesData) || seriesData.length === 0) return null;
+
+      const ts = chart.timeScale();
+      let logical = null;
+      let firstLogical = null;
+      try {
+        logical = ts.coordinateToLogical(x);
+      } catch {
+        logical = null;
+      }
+      try {
+        const firstCoord = ts.timeToCoordinate(seriesData[0].time);
+        if (isFiniteNumber(firstCoord)) {
+          const value = ts.coordinateToLogical(firstCoord);
+          if (isFiniteNumber(value)) firstLogical = value;
+        }
+      } catch {
+        firstLogical = null;
+      }
+
+      let centerIdx = null;
+      if (isFiniteNumber(logical) && isFiniteNumber(firstLogical)) {
+        centerIdx = Math.round(logical - firstLogical);
+      } else {
+        let bestDx = Infinity;
+        for (let i = 0; i < seriesData.length; i++) {
+          const item = seriesData[i];
+          if (!item || item.time == null) continue;
+          let cx = null;
+          try { cx = ts.timeToCoordinate(item.time); } catch { cx = null; }
+          if (!isFiniteNumber(cx)) continue;
+          const dx = Math.abs(cx - x);
+          if (dx < bestDx) {
+            bestDx = dx;
+            centerIdx = i;
+          }
+        }
+      }
+
+      if (!isFiniteNumber(centerIdx)) return null;
+      centerIdx = Math.max(0, Math.min(seriesData.length - 1, centerIdx));
+
+      let priceCandidateMaxDx = SNAP_PRICE_CANDLE_DISTANCE_PX;
+      try {
+        const barSpacing = ts.options?.().barSpacing;
+        if (isFiniteNumber(barSpacing)) {
+          priceCandidateMaxDx = Math.max(priceCandidateMaxDx, barSpacing * 0.5);
+        }
+      } catch {
+        // Keep the default max horizontal distance.
+      }
+
+      const start = Math.max(0, centerIdx - SNAP_CANDIDATE_SCAN_RADIUS);
+      const end = Math.min(seriesData.length - 1, centerIdx + SNAP_CANDIDATE_SCAN_RADIUS);
+      let bestTimeSnap = null;
+      let bestTimeDistance = Infinity;
+      let bestPriceSnap = null;
+      let bestPriceScore = Infinity;
+
+      for (let i = start; i <= end; i++) {
+        const item = seriesData[i];
+        if (!item || item.time == null) continue;
+
+        let cx = null;
+        try { cx = ts.timeToCoordinate(item.time); } catch { cx = null; }
+        if (!isFiniteNumber(cx)) continue;
+
+        const dx = Math.abs(cx - x);
+        if (dx <= SNAP_TIME_DISTANCE_PX && dx < bestTimeDistance) {
+          bestTimeDistance = dx;
+          bestTimeSnap = { time: item.time, x: cx, dx, index: i };
+        }
+
+        if (dx > priceCandidateMaxDx) continue;
+
+        for (const candidate of getSnapPriceCandidates(item)) {
+          let py = null;
+          try { py = series.priceToCoordinate(candidate.value); } catch { py = null; }
+          if (!isFiniteNumber(py)) continue;
+          const dy = Math.abs(py - y);
+          if (dy > SNAP_PRICE_DISTANCE_PX) continue;
+
+          const score = dy + dx * 0.15;
+          if (score < bestPriceScore) {
+            bestPriceScore = score;
+            bestPriceSnap = {
+              price: candidate.value,
+              time: item.time,
+              x: cx,
+              y: py,
+              dx,
+              dy,
+              source: candidate.source,
+              index: i,
+            };
+          }
+        }
+      }
+
+      if (!bestTimeSnap && !bestPriceSnap) return null;
+      return { time: bestTimeSnap, price: bestPriceSnap };
+    },
+    [chartRef, seriesRef],
+  );
+
+  const snapDataPoint = useCallback(
+    (dataPoint, x, y, options = {}) => {
+      if (!dataPoint || options.snap === false) return dataPoint;
+      const allowTime = options.time !== false;
+      const allowPrice = options.price !== false;
+      if (!allowTime && !allowPrice) return dataPoint;
+
+      const target = findSnapTarget(x, y);
+      if (!target) return dataPoint;
+
+      const next = { ...dataPoint };
+      if (allowPrice && target.price) {
+        next.price = target.price.price;
+        if (allowTime) next.time = target.price.time;
+      } else if (allowTime && target.time) {
+        next.time = target.time.time;
+      }
+      return next;
+    },
+    [findSnapTarget],
+  );
+
+  const screenToDrawingData = useCallback(
+    (x, y, options = {}) => {
+      const dataPoint = screenToData(x, y);
+      if (!dataPoint) return null;
+      return snapDataPoint(dataPoint, x, y, options);
+    },
+    [screenToData, snapDataPoint],
   );
 
   // ── Attach / detach primitive helpers ──
@@ -931,7 +1111,7 @@ export function useDrawing({
         }
 
         // Place new text
-        const dataPoint = screenToData(pos.x, pos.y);
+        const dataPoint = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
         if (!dataPoint) return;
 
         const textPrim = new TextDrawingPrimitive({
@@ -1017,7 +1197,7 @@ export function useDrawing({
         }
 
         // Place new position: click sets entry price
-        const dataA = screenToData(pos.x, pos.y);
+        const dataA = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
         if (!dataA) return;
 
         const isLong = tool === "position-long";
@@ -1083,7 +1263,7 @@ export function useDrawing({
       if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool)) {
         // Second click — commit new line/fib
         if (anchorDataRef.current && previewRef.current) {
-          const dataB = screenToData(pos.x, pos.y);
+          const dataB = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
           if (!dataB) return;
 
           // Remove preview
@@ -1174,7 +1354,7 @@ export function useDrawing({
         }
 
         // First click — set anchor
-        const dataA = screenToData(pos.x, pos.y);
+        const dataA = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
         if (!dataA) return;
         anchorDataRef.current = dataA;
 
@@ -1208,7 +1388,7 @@ export function useDrawing({
         return;
       }
     },
-    [getChartPos, screenToData, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, chartRef, seriesRef, chartContainerRef],
+    [getChartPos, screenToData, screenToDrawingData, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, chartRef, seriesRef, chartContainerRef],
   );
 
   // ════════════════════════════════════════════════════
@@ -1379,7 +1559,7 @@ export function useDrawing({
         const dy = pos.y - startMouse.y;
         const origScreen = dataToScreen(origDataPoint);
         if (!origScreen) return;
-        const newData = screenToData(origScreen.x + dx, origScreen.y + dy);
+        const newData = screenToDrawingData(origScreen.x + dx, origScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
         if (!newData) return;
         prim.setDataPoint(newData);
         refreshSelectedTextUi(id);
@@ -1395,7 +1575,13 @@ export function useDrawing({
         const prim = primitivesRef.current.find((p) => p.id === id);
         if (!prim || !(prim instanceof PositionDrawingPrimitive)) return;
 
-        const dataPoint = screenToData(pos.x, pos.y);
+        const dataPoint = type === "position-move"
+          ? screenToData(pos.x, pos.y)
+          : screenToDrawingData(pos.x, pos.y, {
+              snap: drawingSnapEnabledRef.current && !e.altKey,
+              time: type === "position-left" || type === "position-right",
+              price: type !== "position-left" && type !== "position-right",
+            });
         if (!dataPoint) return;
 
         if (type === "position-tp") {
@@ -1425,7 +1611,7 @@ export function useDrawing({
           // Convert dy to price difference
           const origScreen = dataToScreen({ time: origTimeRange.start, price: origEntry });
           if (origScreen) {
-            const newEntryData = screenToData(origScreen.x + dx, origScreen.y + dy);
+            const newEntryData = screenToDrawingData(origScreen.x + dx, origScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
             if (newEntryData) {
               const priceDelta = newEntryData.price - origEntry;
               prim.setEntryPrice(origEntry + priceDelta);
@@ -1459,7 +1645,7 @@ export function useDrawing({
             const dy = pos.y - startMouse.y;
             const origScreen = dataToScreen(origDataPoint);
             if (!origScreen) return;
-            const newData = screenToData(origScreen.x + dx, origScreen.y + dy);
+            const newData = screenToDrawingData(origScreen.x + dx, origScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
             if (!newData) return;
             prim.setDataPoint(newData);
             e.preventDefault();
@@ -1471,7 +1657,7 @@ export function useDrawing({
 
           if (pointIndex >= 0) {
             // Drag single endpoint
-            const newData = screenToData(pos.x, pos.y);
+            const newData = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
             if (!newData) return;
             const newPoints = [...prim.dataPoints];
             newPoints[pointIndex] = newData;
@@ -1496,7 +1682,7 @@ export function useDrawing({
 
         // Preview line: update second point
         if (anchorDataRef.current && previewRef.current) {
-          const dataB = screenToData(pos.x, pos.y);
+          const dataB = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
           if (dataB) {
             previewRef.current.setDataPoints([anchorDataRef.current, dataB]);
           }
@@ -1554,7 +1740,7 @@ export function useDrawing({
         }
       }
     },
-    [getChartPos, screenToData, dataToScreen, hitTestAll, refreshSelectedTextUi, chartContainerRef],
+    [getChartPos, screenToData, screenToDrawingData, dataToScreen, hitTestAll, refreshSelectedTextUi, chartContainerRef],
   );
 
   // ════════════════════════════════════════════════════

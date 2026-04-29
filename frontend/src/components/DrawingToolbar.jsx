@@ -97,6 +97,14 @@ const ShortPositionIcon = (
   </svg>
 );
 
+const MagnetIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 3h4v7a2 2 0 0 0 4 0V3h4v7a6 6 0 0 1-12 0V3z" />
+    <line x1="6" y1="7" x2="10" y2="7" />
+    <line x1="14" y1="7" x2="18" y2="7" />
+  </svg>
+);
+
 /* small indicator triangle rendered in the corner of a tool button */
 const CornerTriangle = (
   <svg
@@ -380,6 +388,8 @@ const DrawingToolbar = memo(function DrawingToolbar({
   onClearAll,
   drawingsHidden = false,
   onToggleDrawingsHidden,
+  drawingSnapEnabled = true,
+  onDrawingSnapEnabledChange,
   // Text settings
   textFontSize = 14,
   onTextFontSizeChange,
@@ -688,6 +698,17 @@ const DrawingToolbar = memo(function DrawingToolbar({
             anchorRef={posBtnRef}
           />
         )}
+      </div>
+
+      {/* ── Snap toggle ── */}
+      <div className="drawing-tool-wrapper">
+        <button
+          className={`drawing-tool-btn ${drawingSnapEnabled ? "active" : ""}`}
+          onClick={() => onDrawingSnapEnabledChange?.(!drawingSnapEnabled)}
+          title={drawingSnapEnabled ? "吸附已开启（Alt 临时关闭）" : "吸附已关闭"}
+        >
+          {MagnetIcon}
+        </button>
       </div>
 
       {/* Divider */}

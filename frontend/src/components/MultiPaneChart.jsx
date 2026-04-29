@@ -61,6 +61,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     fibLevels,
     fibInverted = false,
     positionSize = 1000,
+    drawingSnapEnabled = true,
     // Selection style sync — fired when the currently selected drawing on the
     // main pane changes (or is cleared). Lets the parent mirror its style.
     onSelectedDrawingChange,
@@ -511,6 +512,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     fibLevels={fibLevels}
                     fibInverted={fibInverted}
                     positionSize={positionSize}
+                    drawingSnapEnabled={drawingSnapEnabled}
                     onSelectedDrawingChange={onSelectedDrawingChange}
                 />
             </div>
@@ -561,6 +563,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                 fibLevels={fibLevels}
                                 fibInverted={fibInverted}
                                 positionSize={positionSize}
+                                drawingSnapEnabled={drawingSnapEnabled}
                             />
                         </div>
                     </div>

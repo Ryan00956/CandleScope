@@ -116,6 +116,7 @@ const ChartPane = forwardRef(function ChartPane({
     fibLevels,
     fibInverted,
     positionSize,
+    drawingSnapEnabled = true,
     // Selection style sync (main pane only): called when the currently
     // selected drawing changes so the global toolbar can mirror its style.
     onSelectedDrawingChange,
@@ -1124,6 +1125,7 @@ const ChartPane = forwardRef(function ChartPane({
         fibLevels,
         fibInverted,
         positionSize,
+        drawingSnapEnabled,
         symbol: paneType === "main"
             ? (drawingKeyBase || symbol)
             : `${drawingKeyBase || symbol}__${paneId}`,

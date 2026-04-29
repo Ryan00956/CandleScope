@@ -1952,6 +1952,7 @@ export default function App() {
               savedVisibleRange={getVisibleRangeForInterval(symbol, interval, marketType, exchange)}
               onVisibleRangeChange={(range) => saveVisibleRangeForInterval(symbol, interval, range, marketType, exchange)}
               drawingTool={drawingTool}
+              onDrawingToolChange={setDrawingTool}
               penColor={penColor}
               penSize={penSize}
               textFontSize={textFontSize}

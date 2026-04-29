@@ -34,6 +34,44 @@ function nextId(prefix = "d") {
   return `${prefix}_${++_idCounter}`;
 }
 
+function setCursor(el, cursor) {
+  if (el) el.style.setProperty("cursor", cursor);
+}
+
+function isTextOverlayTarget(target) {
+  return target instanceof Element && !!target.closest(".text-format-bar, .text-edit-overlay");
+}
+
+const EMPTY_SELECTED_TEXT_UI = { snapshot: null, box: null };
+
+function selectedTextUiFromPrimitive(prim) {
+  if (!(prim instanceof TextDrawingPrimitive)) return EMPTY_SELECTED_TEXT_UI;
+  let box = null;
+  try {
+    box = prim.getBoundingBoxScreen();
+  } catch {
+    box = null;
+  }
+  return {
+    snapshot: {
+      text: prim.text,
+      color: prim.color,
+      fontSize: prim.fontSize,
+      fontFamily: prim.fontFamily,
+      bold: prim.bold,
+      italic: prim.italic,
+      underline: prim.underline,
+      align: prim.align,
+      bgColor: prim.bgColor,
+      borderColor: prim.borderColor,
+      borderWidth: prim.borderWidth,
+      widthPx: prim.widthPx,
+      padding: prim.padding,
+    },
+    box,
+  };
+}
+
 // ── Ramer-Douglas-Peucker point decimation ──
 // Reduces freehand stroke point count by removing near-collinear
 // points that don't contribute meaningfully to the curve shape.
@@ -78,7 +116,11 @@ export function useDrawing({
   positionSize,
   symbol,
   seriesReady,
+  // Optional callback so the hook can flip the active tool back to null after
+  // committing a text edit (PPT-style: clicking elsewhere exits text mode).
+  onToolChange,
 }) {
+  const onToolChangeRef = useRef(onToolChange);
   // ── All primitives (lines + freehand strokes + text) ──
   const primitivesRef = useRef([]); // (LineDrawingPrimitive | FreehandDrawingPrimitive | TextDrawingPrimitive)[]
 
@@ -90,6 +132,7 @@ export function useDrawing({
 
   // ── Selected primitive ID as React state (for toolbar sync) ──
   const [selectedPrimId, setSelectedPrimId] = useState(null);
+  const [selectedTextUi, setSelectedTextUi] = useState(EMPTY_SELECTED_TEXT_UI);
 
   // ── Freehand-specific state ──
   const currentFreehandRef = useRef(null); // FreehandDrawingPrimitive being drawn
@@ -97,32 +140,39 @@ export function useDrawing({
 
   // ── Text editing state ──
   const [editingTextId, setEditingTextId] = useState(null);
+  // Mirror of editingTextId for use inside event handlers (avoids stale
+  // React state during the same mousedown frame that just blurred the editor).
+  const editingTextIdRef = useRef(null);
   const [editingTextValue, setEditingTextValue] = useState("");
   const [editingTextPos, setEditingTextPos] = useState(null); // { x, y } screen coords
   const editInputRef = useRef(null);
 
   // ── Tool refs (avoid stale closures) ──
   const activeToolRef = useRef(activeTool);
-  activeToolRef.current = activeTool;
   const penColorRef = useRef(penColor);
-  penColorRef.current = penColor;
   const penSizeRef = useRef(penSize);
-  penSizeRef.current = penSize;
   const textFontSizeRef = useRef(textFontSize);
-  textFontSizeRef.current = textFontSize;
   const textBoldRef = useRef(textBold);
-  textBoldRef.current = textBold;
   const textItalicRef = useRef(textItalic);
-  textItalicRef.current = textItalic;
   const fibLevelsRef = useRef(fibLevels);
-  fibLevelsRef.current = fibLevels;
   const fibInvertedRef = useRef(fibInverted);
-  fibInvertedRef.current = fibInverted;
   const positionSizeRef = useRef(positionSize);
-  positionSizeRef.current = positionSize;
 
   const symbolRef = useRef(symbol);
-  symbolRef.current = symbol;
+
+  useEffect(() => {
+    onToolChangeRef.current = onToolChange;
+    activeToolRef.current = activeTool;
+    penColorRef.current = penColor;
+    penSizeRef.current = penSize;
+    textFontSizeRef.current = textFontSize;
+    textBoldRef.current = textBold;
+    textItalicRef.current = textItalic;
+    fibLevelsRef.current = fibLevels;
+    fibInvertedRef.current = fibInverted;
+    positionSizeRef.current = positionSize;
+    symbolRef.current = symbol;
+  }, [onToolChange, activeTool, penColor, penSize, textFontSize, textBold, textItalic, fibLevels, fibInverted, positionSize, symbol]);
 
   // Track previous symbol so we can detect symbol switches and swap drawing sets
   const prevSymbolRef = useRef(symbol);
@@ -362,6 +412,7 @@ export function useDrawing({
       primitivesRef.current = [];
       selectedIdRef.current = null;
       setSelectedPrimId(null);
+      setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
       draggingRef.current = null;
       isDrawingFreehandRef.current = false;
       currentFreehandRef.current = null;
@@ -416,6 +467,14 @@ export function useDrawing({
             fontFamily: item.fontFamily,
             bold: item.bold,
             italic: item.italic,
+            // Extended (PPT-style) fields — backward compatible with old saves.
+            underline: item.underline,
+            align: item.align,
+            bgColor: item.bgColor,
+            borderColor: item.borderColor,
+            borderWidth: item.borderWidth,
+            widthPx: item.widthPx,
+            padding: item.padding,
           });
         } else if (item.type === "fibonacci") {
           prim = new FibonacciDrawingPrimitive({
@@ -461,21 +520,34 @@ export function useDrawing({
   const selectPrimitive = useCallback((id) => {
     selectedIdRef.current = id;
     setSelectedPrimId(id);
+    let selectedPrim = null;
     for (const prim of primitivesRef.current) {
       if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive) {
         prim.setSelected(prim.id === id);
+        if (prim.id === id) selectedPrim = prim;
       }
     }
+    setSelectedTextUi(selectedTextUiFromPrimitive(selectedPrim));
   }, []);
 
   const deselectAll = useCallback(() => {
     selectedIdRef.current = null;
     setSelectedPrimId(null);
+    setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     for (const prim of primitivesRef.current) {
       if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive) {
         prim.setSelected(false);
       }
     }
+  }, []);
+
+  const getPrimitiveById = useCallback((id) => {
+    return primitivesRef.current.find((p) => p.id === id) || null;
+  }, []);
+
+  const refreshSelectedTextUi = useCallback((id = selectedIdRef.current) => {
+    const prim = id ? primitivesRef.current.find((p) => p.id === id) : null;
+    setSelectedTextUi(selectedTextUiFromPrimitive(prim));
   }, []);
 
   // ── Hit-test all primitives ──
@@ -519,19 +591,56 @@ export function useDrawing({
 
   // ── Cancel text editing ──
 
-  const cancelTextEditing = useCallback(() => {
+  const cancelTextEditing = useCallback((opts = {}) => {
+    const { clearSelection = false, exitTool = true } = opts || {};
+    const wasEditing = editingTextIdRef.current;
+    if (wasEditing) {
+      // If text was newly created and never confirmed, drop it.
+      const prim = getPrimitiveById(wasEditing);
+      if (prim && prim instanceof TextDrawingPrimitive) {
+        // Make the underlying canvas text visible again.
+        prim.setHidden(false);
+        if (!prim.text || !prim.text.trim()) {
+          const idx = primitivesRef.current.indexOf(prim);
+          if (idx >= 0) {
+            detachPrim(prim);
+            primitivesRef.current.splice(idx, 1);
+          }
+          if (selectedIdRef.current === wasEditing) {
+            selectedIdRef.current = null;
+            setSelectedPrimId(null);
+            setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
+          }
+        }
+      }
+    }
+    editingTextIdRef.current = null;
     setEditingTextId(null);
     setEditingTextValue("");
     setEditingTextPos(null);
-  }, []);
+    if (clearSelection) {
+      deselectAll();
+    }
+    // PPT behavior: leaving text edit mode also leaves the text *tool*.
+    if (exitTool && activeToolRef.current === "text") {
+      onToolChangeRef.current?.(null);
+    }
+    refreshSelectedTextUi();
+  }, [getPrimitiveById, detachPrim, deselectAll, refreshSelectedTextUi]);
 
   // ── Commit text editing ──
 
-  const commitTextEditing = useCallback(() => {
-    if (!editingTextId) return;
-    const prim = primitivesRef.current.find((p) => p.id === editingTextId);
+  const commitTextEditing = useCallback((opts = {}) => {
+    const { clearSelection = false, exitTool = true } = opts || {};
+    const editingId = editingTextIdRef.current;
+    if (!editingId) return false;
+    const prim = getPrimitiveById(editingId);
+    let removed = false;
     if (prim && prim instanceof TextDrawingPrimitive) {
-      const trimmed = editingTextValue.trim();
+      // Restore canvas rendering of the underlying text.
+      prim.setHidden(false);
+      const value = editingTextValue;
+      const trimmed = value.replace(/\s+$/g, "");
       if (trimmed) {
         prim.setText(trimmed);
       } else {
@@ -540,15 +649,26 @@ export function useDrawing({
         if (idx >= 0) {
           detachPrim(prim);
           primitivesRef.current.splice(idx, 1);
-        }
-        if (selectedIdRef.current === prim.id) {
-          selectedIdRef.current = null;
+          removed = true;
         }
       }
     }
-    cancelTextEditing();
+    editingTextIdRef.current = null;
+    setEditingTextId(null);
+    setEditingTextValue("");
+    setEditingTextPos(null);
+    if (clearSelection || removed) {
+      deselectAll();
+    } else if (prim && !removed) {
+      selectPrimitive(prim.id);
+    }
+    if (exitTool && activeToolRef.current === "text") {
+      onToolChangeRef.current?.(null);
+    }
     persistDrawings();
-  }, [editingTextId, editingTextValue, detachPrim, cancelTextEditing, persistDrawings]);
+    refreshSelectedTextUi();
+    return true;
+  }, [editingTextValue, getPrimitiveById, detachPrim, deselectAll, selectPrimitive, persistDrawings, refreshSelectedTextUi]);
 
   // ── Get mouse position relative to chart container ──
 
@@ -572,19 +692,84 @@ export function useDrawing({
       const screenPos = dataToScreen(prim.dataPoint);
       if (!screenPos) return;
 
+      editingTextIdRef.current = prim.id;
       setEditingTextId(prim.id);
-      setEditingTextValue(prim.text);
+      setEditingTextValue(prim.text === "Text" ? "" : prim.text);
       setEditingTextPos({ x: screenPos.x, y: screenPos.y });
+      // Hide the canvas-rendered text so the editable textarea doesn't
+      // appear duplicated on top of it.
+      prim.setHidden(true);
       selectPrimitive(prim.id);
 
       // Focus the input after render
       setTimeout(() => {
         editInputRef.current?.focus();
         editInputRef.current?.select();
-      }, 50);
+      }, 30);
     },
     [dataToScreen, selectPrimitive],
   );
+
+  const beginTextDrag = useCallback((prim, hit, pos) => {
+    if (!(prim instanceof TextDrawingPrimitive) || !hit || !pos) return false;
+
+    const box = prim.getBoundingBoxScreen();
+    if (hit.handle && box) {
+      draggingRef.current = {
+        id: prim.id,
+        type: "text-handle",
+        handle: hit.handle,
+        startMouse: pos,
+        origBox: box,
+        origFontSize: prim.fontSize,
+        origWidthPx: prim.widthPx,
+        origDataPoint: { ...prim.dataPoint },
+      };
+    } else {
+      draggingRef.current = {
+        id: prim.id,
+        type: "text",
+        startMouse: pos,
+        origDataPoint: { ...prim.dataPoint },
+      };
+    }
+    return true;
+  }, []);
+
+  // ── While editing OR a text is selected, keep both the textarea AND the
+  // floating format toolbar pinned to the underlying primitive, even on
+  // wheel zoom / pan / auto-scale. We piggy-back on requestAnimationFrame
+  // because Lightweight Charts does not expose a single subscription that
+  // covers both time-scale changes and price-scale auto-scale updates.
+  useEffect(() => {
+    const activeId = editingTextId || selectedPrimId;
+    if (!activeId) return;
+
+    let raf = 0;
+    let lastX = NaN;
+    let lastY = NaN;
+
+    const tick = () => {
+      const prim = primitivesRef.current.find((p) => p.id === activeId);
+      if (prim && prim instanceof TextDrawingPrimitive) {
+        const sp = dataToScreen(prim.dataPoint);
+        if (sp && (Math.abs(sp.x - lastX) > 0.5 || Math.abs(sp.y - lastY) > 0.5)) {
+          lastX = sp.x;
+          lastY = sp.y;
+          if (editingTextId === activeId) {
+            setEditingTextPos({ x: sp.x, y: sp.y });
+          } else {
+            refreshSelectedTextUi(activeId);
+          }
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [editingTextId, selectedPrimId, dataToScreen, refreshSelectedTextUi]);
 
   // ════════════════════════════════════════════════════
   //  MOUSE DOWN
@@ -596,8 +781,47 @@ export function useDrawing({
       const pos = getChartPos(e);
       if (!pos) return;
 
-      // If we're editing text, don't interfere
-      if (editingTextId) return;
+      // Editing text owns the next chart click. Commit through the same path
+      // for blank clicks, text clicks, and text-tool clicks so blur does not
+      // become a separate hidden state transition.
+      if (editingTextIdRef.current) {
+        const hit = hitTestAll(pos.x, pos.y);
+        const clickedTextId = hit?.type === "text" ? hit.prim.id : null;
+        commitTextEditing({ clearSelection: !clickedTextId, exitTool: true });
+        if (clickedTextId && primitivesRef.current.some((p) => p.id === clickedTextId)) {
+          selectPrimitive(clickedTextId);
+        }
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // No drawing tool active: PPT-style click-away deselect for text boxes,
+      // OR re-grab the selected text for move/resize so the floating format
+      // toolbar mode stays useful (drag body to move, drag a handle to scale).
+      if (!tool && selectedIdRef.current) {
+        const sel = getPrimitiveById(selectedIdRef.current);
+        if (sel instanceof TextDrawingPrimitive) {
+          let hit = false;
+          try { hit = sel.hitTest(pos.x, pos.y); } catch { /* ignore */ }
+          if (hit) {
+            beginTextDrag(sel, hit, pos);
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+          // Clicked outside the selected text → drop selection.
+          deselectAll();
+        } else if (sel) {
+          let stillOnIt = false;
+          try {
+            if (typeof sel.hitTest === "function") {
+              stillOnIt = !!sel.hitTest(pos.x, pos.y);
+            }
+          } catch { /* ignore */ }
+          if (!stillOnIt) deselectAll();
+        }
+      }
 
       // ── ERASER: click to delete ──
       if (tool === "eraser") {
@@ -609,6 +833,8 @@ export function useDrawing({
             primitivesRef.current.splice(idx, 1);
             if (selectedIdRef.current === hit.prim.id) {
               selectedIdRef.current = null;
+              setSelectedPrimId(null);
+              setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
             }
             persistDrawings();
           }
@@ -641,31 +867,11 @@ export function useDrawing({
 
       // ── TEXT TOOL ──
       if (tool === "text") {
-        // Check if clicking on existing text → select it
+        // Check if clicking on existing text → select it (or grab a handle)
         const hit = hitTestAll(pos.x, pos.y);
         if (hit && hit.type === "text") {
           selectPrimitive(hit.prim.id);
-
-          // Corner hit → start resize drag
-          if (hit.corner != null) {
-            draggingRef.current = {
-              id: hit.prim.id,
-              type: "text-resize",
-              corner: hit.corner,
-              startMouse: pos,
-              origFontSize: hit.prim.fontSize,
-              origDataPoint: { ...hit.prim.dataPoint },
-            };
-          } else {
-            // Body hit → start position drag
-            draggingRef.current = {
-              id: hit.prim.id,
-              type: "text",
-              startMouse: pos,
-              origDataPoint: { ...hit.prim.dataPoint },
-            };
-          }
-
+          beginTextDrag(hit.prim, hit, pos);
           e.preventDefault();
           e.stopPropagation();
           return;
@@ -683,7 +889,7 @@ export function useDrawing({
         const textPrim = new TextDrawingPrimitive({
           id: nextId("tx"),
           dataPoint,
-          text: "Text",
+          text: "",
           color: penColorRef.current,
           fontSize: textFontSizeRef.current || 14,
           bold: textBoldRef.current || false,
@@ -954,7 +1160,7 @@ export function useDrawing({
         return;
       }
     },
-    [getChartPos, screenToData, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, startTextEditing, editingTextId],
+    [getChartPos, screenToData, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, chartRef, seriesRef, chartContainerRef],
   );
 
   // ════════════════════════════════════════════════════
@@ -1024,21 +1230,98 @@ export function useDrawing({
         return;
       }
 
-      // ── TEXT TOOL: resize drag ──
-      if (draggingRef.current && draggingRef.current.type === "text-resize") {
-        const { id, startMouse, origFontSize } = draggingRef.current;
+      // ── TEXT TOOL: 8-handle resize drag (corners = scale, sides = wrap width) ──
+      if (draggingRef.current && draggingRef.current.type === "text-handle") {
+        const { id, handle, startMouse, origBox, origFontSize, origWidthPx, origDataPoint } = draggingRef.current;
         const prim = primitivesRef.current.find((p) => p.id === id);
         if (!prim || !(prim instanceof TextDrawingPrimitive)) return;
-        // Use vertical delta to scale font size
-        const dy = startMouse.y - pos.y; // drag up = bigger
-        const newSize = Math.max(8, Math.min(200, origFontSize + dy * 0.3));
-        prim.setFontSize(Math.round(newSize));
+
+        const dx = pos.x - startMouse.x;
+        const dy = pos.y - startMouse.y;
+
+        // Side handles ( l / r ): change widthPx, anchor the opposite vertical edge.
+        if (handle === "l" || handle === "r") {
+          let newWidth;
+          let anchorScreenX;
+          if (handle === "r") {
+            newWidth = Math.max(20, origBox.width + dx);
+            anchorScreenX = origBox.x; // left edge stays
+          } else {
+            newWidth = Math.max(20, origBox.width - dx);
+            anchorScreenX = origBox.x + origBox.width - newWidth; // shift left edge to follow mouse
+          }
+          prim.setWidthPx(newWidth);
+          if (handle === "l") {
+            const newDp = screenToData(anchorScreenX, origBox.y);
+            if (newDp) prim.setDataPoint(newDp);
+          }
+          refreshSelectedTextUi(id);
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+
+        // Top / bottom handles ( t / b ): adjust font height proportionally.
+        if (handle === "t" || handle === "b") {
+          let scale;
+          if (handle === "b") scale = (origBox.height + dy) / origBox.height;
+          else scale = (origBox.height - dy) / origBox.height;
+          if (!isFinite(scale)) return;
+          scale = Math.max(0.2, Math.min(8, scale));
+          const newSize = Math.max(8, Math.min(200, Math.round(origFontSize * scale)));
+          prim.setFontSize(newSize);
+          if (origWidthPx) prim.setWidthPx(Math.max(20, origWidthPx * scale));
+          if (handle === "t") {
+            // Top edge moves with cursor; bottom stays.
+            const newBoxH = origBox.height * scale;
+            const newAnchorY = origBox.y + origBox.height - newBoxH;
+            const newDp = screenToData(origBox.x, newAnchorY);
+            if (newDp) prim.setDataPoint({ ...newDp, time: origDataPoint.time });
+          }
+          refreshSelectedTextUi(id);
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+
+        // Corner handles: equi-scale font + width using the larger of the two
+        // axis ratios so the box visually follows the mouse on the chosen corner.
+        // The opposite corner stays anchored.
+        let signX = 0, signY = 0;
+        if (handle === "tl") { signX = -1; signY = -1; }
+        if (handle === "tr") { signX =  1; signY = -1; }
+        if (handle === "bl") { signX = -1; signY =  1; }
+        if (handle === "br") { signX =  1; signY =  1; }
+        const scaleX = (origBox.width + signX * dx) / origBox.width;
+        const scaleY = (origBox.height + signY * dy) / origBox.height;
+        let scale = Math.max(scaleX, scaleY);
+        if (!isFinite(scale)) return;
+        scale = Math.max(0.2, Math.min(8, scale));
+
+        const newSize = Math.max(8, Math.min(200, Math.round(origFontSize * scale)));
+        prim.setFontSize(newSize);
+        if (origWidthPx) prim.setWidthPx(Math.max(20, origWidthPx * scale));
+
+        // Recompute new box top-left so the opposite corner stays put.
+        const newW = origBox.width * scale;
+        const newH = origBox.height * scale;
+        let newAnchorX = origBox.x;
+        let newAnchorY = origBox.y;
+        if (handle === "tl") { newAnchorX = origBox.x + origBox.width - newW; newAnchorY = origBox.y + origBox.height - newH; }
+        if (handle === "tr") { newAnchorY = origBox.y + origBox.height - newH; }
+        if (handle === "bl") { newAnchorX = origBox.x + origBox.width - newW; }
+        // 'br' keeps anchor unchanged
+        if (newAnchorX !== origBox.x || newAnchorY !== origBox.y) {
+          const newDp = screenToData(newAnchorX, newAnchorY);
+          if (newDp) prim.setDataPoint(newDp);
+        }
+        refreshSelectedTextUi(id);
         e.preventDefault();
         e.stopPropagation();
         return;
       }
 
-      // ── TEXT TOOL: dragging ──
+      // ── TEXT TOOL: dragging body ──
       if (draggingRef.current && draggingRef.current.type === "text") {
         const { id, startMouse, origDataPoint } = draggingRef.current;
         const prim = primitivesRef.current.find((p) => p.id === id);
@@ -1051,6 +1334,7 @@ export function useDrawing({
         const newData = screenToData(origScreen.x + dx, origScreen.y + dy);
         if (!newData) return;
         prim.setDataPoint(newData);
+        refreshSelectedTextUi(id);
 
         e.preventDefault();
         e.stopPropagation();
@@ -1187,14 +1471,14 @@ export function useDrawing({
           const hit = hitTestAll(pos.x, pos.y);
           if (hit?.type === "position") {
             if (hit.zone === "tp" || hit.zone === "sl") {
-              container.style.cursor = "ns-resize";
+              setCursor(container, "ns-resize");
             } else if (hit.zone === "left" || hit.zone === "right") {
-              container.style.cursor = "ew-resize";
+              setCursor(container, "ew-resize");
             } else if (hit.zone === "entry" || hit.zone === "body") {
-              container.style.cursor = "move";
+              setCursor(container, "move");
             }
           } else {
-            container.style.cursor = "crosshair";
+            setCursor(container, "crosshair");
           }
           // Hover feedback
           for (const prim of primitivesRef.current) {
@@ -1205,16 +1489,24 @@ export function useDrawing({
         }
       }
 
-      // ── TEXT TOOL: hover feedback for existing text ──
+      // ── TEXT TOOL: hover feedback for existing text + handle cursors ──
       if (tool === "text" && !draggingRef.current) {
         const container = chartContainerRef?.current;
         if (container) {
           const hit = hitTestAll(pos.x, pos.y);
-          container.style.cursor = hit?.type === "text" ? "move" : "crosshair";
+          if (hit?.type === "text") {
+            if (hit.handle === "l" || hit.handle === "r") setCursor(container, "ew-resize");
+            else if (hit.handle === "t" || hit.handle === "b") setCursor(container, "ns-resize");
+            else if (hit.handle === "tl" || hit.handle === "br") setCursor(container, "nwse-resize");
+            else if (hit.handle === "tr" || hit.handle === "bl") setCursor(container, "nesw-resize");
+            else setCursor(container, "move");
+          } else {
+            setCursor(container, "crosshair");
+          }
         }
       }
     },
-    [getChartPos, screenToData, dataToScreen, hitTestAll, chartContainerRef],
+    [getChartPos, screenToData, dataToScreen, hitTestAll, refreshSelectedTextUi, chartContainerRef],
   );
 
   // ════════════════════════════════════════════════════
@@ -1254,6 +1546,16 @@ export function useDrawing({
     }
   }, [persistDrawings, dataToScreen]);
 
+  const handleMouseLeave = useCallback((e) => {
+    // Text overlays are siblings of the chart canvas container. Moving the
+    // pointer over the floating format/edit bar fires mouseleave on the chart
+    // container, but it should not terminate an in-progress text drag/resize.
+    if (draggingRef.current && isTextOverlayTarget(e.relatedTarget)) {
+      return;
+    }
+    handleMouseUp();
+  }, [handleMouseUp]);
+
   // ── RIGHT-CLICK: cancel line placement ──
 
   const handleContextMenu = useCallback(
@@ -1270,11 +1572,11 @@ export function useDrawing({
   // ── KEYBOARD: Escape / Delete ──
 
   useEffect(() => {
-    if (!isLineTool && !isFibTool && !isPenTool && !isEraserTool && !isTextTool && !isPositionTool) return;
+    if (!isLineTool && !isFibTool && !isPenTool && !isEraserTool && !isTextTool && !isPositionTool && !selectedPrimId && !editingTextId) return;
 
     const handleKeyDown = (e) => {
       // Don't intercept if editing text
-      if (editingTextId) return;
+      if (editingTextIdRef.current) return;
 
       if (e.key === "Escape") {
         if (anchorDataRef.current) {
@@ -1295,12 +1597,14 @@ export function useDrawing({
           persistDrawings();
         }
         selectedIdRef.current = null;
+        setSelectedPrimId(null);
+        setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
       }
     };
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, isPositionTool, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
+  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, isPositionTool, selectedPrimId, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
 
   // ── Clean up when tool changes ──
 
@@ -1310,7 +1614,16 @@ export function useDrawing({
       draggingRef.current = null;
     }
     if (!isLineTool && !isFibTool && !isTextTool && !isPositionTool) {
-      deselectAll();
+      // Keep a currently-selected text primitive selected even after we
+      // leave the text tool — so the floating format toolbar remains
+      // visible right after committing a freshly-created text annotation
+      // (PPT-style "click out of edit mode → still selected").
+      const sel = selectedIdRef.current
+        ? primitivesRef.current.find((p) => p.id === selectedIdRef.current)
+        : null;
+      if (!(sel instanceof TextDrawingPrimitive)) {
+        deselectAll();
+      }
     }
     if (!isPenTool) {
       isDrawingFreehandRef.current = false;
@@ -1333,30 +1646,36 @@ export function useDrawing({
     const container = chartContainerRef?.current;
     if (!container) return;
 
-    container.addEventListener("mousedown", handleMouseDown);
-    container.addEventListener("mousemove", handleMouseMove);
-    container.addEventListener("mouseup", handleMouseUp);
-    container.addEventListener("mouseleave", handleMouseUp);
+    container.addEventListener("mousedown", handleMouseDown, true);
+    // Listen for mousemove/mouseup on `document` in the CAPTURE phase so we
+    // run *before* any sibling React component (e.g. the floating
+    // TextFormatBar / TextEditOverlay) calls stopPropagation on its own
+    // mouseup handler. Without capture, releasing the mouse while the
+    // cursor is over those overlays would silently drop the mouseup and
+    // leave the drag stuck mid-motion.
+    document.addEventListener("mousemove", handleMouseMove, true);
+    document.addEventListener("mouseup", handleMouseUp, true);
+    container.addEventListener("mouseleave", handleMouseLeave);
     container.addEventListener("dblclick", handleDblClick);
     container.addEventListener("contextmenu", handleContextMenu);
-    container.addEventListener("touchstart", handleMouseDown, { passive: false });
+    container.addEventListener("touchstart", handleMouseDown, { passive: false, capture: true });
     container.addEventListener("touchmove", handleMouseMove, { passive: false });
     container.addEventListener("touchend", handleMouseUp);
     container.addEventListener("touchcancel", handleMouseUp);
 
     return () => {
-      container.removeEventListener("mousedown", handleMouseDown);
-      container.removeEventListener("mousemove", handleMouseMove);
-      container.removeEventListener("mouseup", handleMouseUp);
-      container.removeEventListener("mouseleave", handleMouseUp);
+      container.removeEventListener("mousedown", handleMouseDown, true);
+      document.removeEventListener("mousemove", handleMouseMove, true);
+      document.removeEventListener("mouseup", handleMouseUp, true);
+      container.removeEventListener("mouseleave", handleMouseLeave);
       container.removeEventListener("dblclick", handleDblClick);
       container.removeEventListener("contextmenu", handleContextMenu);
-      container.removeEventListener("touchstart", handleMouseDown);
+      container.removeEventListener("touchstart", handleMouseDown, true);
       container.removeEventListener("touchmove", handleMouseMove);
       container.removeEventListener("touchend", handleMouseUp);
       container.removeEventListener("touchcancel", handleMouseUp);
     };
-  }, [chartContainerRef, handleMouseDown, handleMouseMove, handleMouseUp, handleDblClick, handleContextMenu]);
+  }, [chartContainerRef, handleMouseDown, handleMouseMove, handleMouseUp, handleMouseLeave, handleDblClick, handleContextMenu]);
 
   // ── Public API ──
 
@@ -1368,12 +1687,49 @@ export function useDrawing({
     primitivesRef.current = [];
     removePreview();
     selectedIdRef.current = null;
+    setSelectedPrimId(null);
+    setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     draggingRef.current = null;
     isDrawingFreehandRef.current = false;
     currentFreehandRef.current = null;
     cancelTextEditing();
     clearSavedDrawings(symbolRef.current);
   }, [detachPrim, removePreview, cancelTextEditing]);
+
+  // ── Selected-text helpers (consumed by floating format toolbar) ──
+
+  /**
+   * Apply a partial style/text patch to the currently selected text primitive.
+   * Triggers persistence + a React re-render of the format bar snapshot.
+   */
+  const updateSelectedText = useCallback((patch) => {
+    const id = selectedIdRef.current;
+    if (!id) return;
+    const prim = getPrimitiveById(id);
+    if (!prim || !(prim instanceof TextDrawingPrimitive)) return;
+    const changed = prim.applyPatch(patch);
+    if (changed) {
+      refreshSelectedTextUi(id);
+      persistDrawings();
+    }
+  }, [getPrimitiveById, refreshSelectedTextUi, persistDrawings]);
+
+  /** Delete the currently selected primitive (any type). */
+  const deleteSelected = useCallback(() => {
+    const id = selectedIdRef.current;
+    if (!id) return;
+    const idx = primitivesRef.current.findIndex((p) => p.id === id);
+    if (idx < 0) return;
+    detachPrim(primitivesRef.current[idx]);
+    primitivesRef.current.splice(idx, 1);
+    selectedIdRef.current = null;
+    setSelectedPrimId(null);
+    setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
+    persistDrawings();
+  }, [detachPrim, persistDrawings]);
+
+  const selectedTextSnapshot = selectedTextUi.snapshot;
+  const selectedTextBox = selectedTextUi.box;
 
   return {
     clearAll,
@@ -1387,6 +1743,11 @@ export function useDrawing({
     commitTextEditing,
     cancelTextEditing,
     editInputRef,
+    // Selected-text bag (for the floating format toolbar)
+    selectedTextSnapshot,
+    selectedTextBox,
+    updateSelectedText,
+    deleteSelected,
   };
 }
 

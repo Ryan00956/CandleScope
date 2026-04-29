@@ -11,6 +11,8 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
 import { useDrawing } from "../hooks/useDrawing";
+import TextEditOverlay from "./TextEditOverlay";
+import TextFormatBar from "./TextFormatBar";
 
 /* ── Localization helpers (shared with old ChartWidget) ─────── */
 
@@ -105,6 +107,7 @@ const ChartPane = forwardRef(function ChartPane({
     onPriceScaleModeChange,
     // Drawing props
     drawingTool,
+    onDrawingToolChange,
     penColor,
     penSize,
     textFontSize,
@@ -1097,11 +1100,16 @@ const ChartPane = forwardRef(function ChartPane({
         commitTextEditing,
         cancelTextEditing,
         editInputRef,
+        selectedTextSnapshot,
+        selectedTextBox,
+        updateSelectedText,
+        deleteSelected,
     } = useDrawing({
         chartRef,
         seriesRef: paneType === "main" ? mainSeriesRef : drawingAnchorSeriesRef,
         chartContainerRef: containerRef,
         activeTool: drawingTool,
+        onToolChange: onDrawingToolChange,
         penColor,
         penSize,
         textFontSize,
@@ -1115,6 +1123,24 @@ const ChartPane = forwardRef(function ChartPane({
             : `${drawingKeyBase || symbol}__${paneId}`,
         seriesReady,
     });
+    const [chartContainerWidth, setChartContainerWidth] = useState(0);
+
+    useEffect(() => {
+        const el = containerRef.current;
+        if (!el) return;
+
+        const updateWidth = () => setChartContainerWidth(el.clientWidth || 0);
+        updateWidth();
+
+        if (typeof ResizeObserver === "undefined") {
+            window.addEventListener("resize", updateWidth);
+            return () => window.removeEventListener("resize", updateWidth);
+        }
+
+        const ro = new ResizeObserver(updateWidth);
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
 
     /* ── Imperative handle ─────────────────────────────────── */
 
@@ -1271,29 +1297,39 @@ const ChartPane = forwardRef(function ChartPane({
 
             {/* Inline text editor overlay (drawing) */}
             {editingTextId && editingTextPos && (
-                <div
-                    className="text-edit-overlay"
-                    style={{ position: "absolute", left: editingTextPos.x, top: editingTextPos.y, zIndex: 100 }}
-                >
-                    <input
-                        ref={editInputRef}
-                        className="text-edit-input"
-                        type="text"
-                        value={editingTextValue}
-                        onChange={(e) => setEditingTextValue(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === "Enter") { e.preventDefault(); commitTextEditing(); }
-                            if (e.key === "Escape") { e.preventDefault(); cancelTextEditing(); }
-                        }}
-                        onBlur={() => commitTextEditing()}
-                        style={{
-                            fontSize: textFontSize,
-                            fontWeight: textBold ? "bold" : "normal",
-                            fontStyle: textItalic ? "italic" : "normal",
-                            color: penColor,
-                        }}
-                    />
-                </div>
+                <TextEditOverlay
+                    box={editingTextPos}
+                    value={editingTextValue}
+                    onChange={setEditingTextValue}
+                    onCommit={commitTextEditing}
+                    onCancel={cancelTextEditing}
+                    fontSize={selectedTextSnapshot?.fontSize ?? textFontSize}
+                    fontFamily={selectedTextSnapshot?.fontFamily}
+                    bold={selectedTextSnapshot?.bold ?? textBold}
+                    italic={selectedTextSnapshot?.italic ?? textItalic}
+                    underline={selectedTextSnapshot?.underline ?? false}
+                    align={selectedTextSnapshot?.align ?? "left"}
+                    color={selectedTextSnapshot?.color ?? penColor}
+                    bgColor={selectedTextSnapshot?.bgColor ?? null}
+                    borderColor={selectedTextSnapshot?.borderColor ?? null}
+                    padding={selectedTextSnapshot?.padding ?? 6}
+                    widthPx={selectedTextSnapshot?.widthPx ?? null}
+                    inputRef={editInputRef}
+                />
+            )}
+
+            {/* Floating PPT-style format toolbar for the selected text */}
+            {!editingTextId && selectedTextSnapshot && selectedTextBox && (
+                <TextFormatBar
+                    position={{
+                        x: selectedTextBox.x,
+                        y: Math.max(2, selectedTextBox.y - 44),
+                    }}
+                    snapshot={selectedTextSnapshot}
+                    onPatch={updateSelectedText}
+                    onDelete={deleteSelected}
+                    containerWidth={chartContainerWidth}
+                />
             )}
         </div>
     );

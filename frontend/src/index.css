@@ -1691,31 +1691,197 @@ body {
 
 /* ── 文字编辑浮层 ────────────────────────────────────────── */
 .text-edit-overlay {
-  pointer-events: auto;
+  pointer-events: none;
 }
 
 .text-edit-input {
-  min-width: 80px;
-  max-width: 300px;
-  padding: 4px 8px;
-  background: rgba(15, 23, 42, 0.92);
-  border: 1.5px solid var(--accent-blue);
-  border-radius: var(--radius-sm);
-  outline: none;
+  /* Most styles are now inlined from React (font/color/box) so the editor
+     visually matches the underlying primitive. We only set defaults here. */
+  display: block;
   font-family: var(--font-sans);
   caret-color: var(--accent-blue);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 2px rgba(59, 130, 246, 0.15);
 }
 
-.text-edit-input:focus {
-  border-color: var(--accent-cyan);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 3px rgba(6, 182, 212, 0.2);
+[data-theme='light'] .text-edit-input {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 2px rgba(59, 130, 246, 0.15);
 }
 
-[data-theme='light'] .text-edit-input {
-  background: rgba(255, 255, 255, 0.95);
-  border-color: var(--accent-blue);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1), 0 0 0 2px rgba(59, 130, 246, 0.15);
+/* ── PPT 风格文字格式浮动工具条 ────────────────────────── */
+.text-format-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(59, 130, 246, 0.15);
+  font-family: var(--font-sans);
+  color: #e2e8f0;
+  user-select: none;
+}
+
+[data-theme='light'] .text-format-bar {
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(15, 23, 42, 0.12);
+  color: #1e293b;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+
+.text-format-bar .tfb-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.text-format-bar .tfb-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 4px 4px;
+  background: rgba(148, 163, 184, 0.25);
+}
+
+.text-format-bar .tfb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+.text-format-bar .tfb-btn:hover {
+  background: rgba(59, 130, 246, 0.18);
+}
+.text-format-bar .tfb-btn.active,
+.text-format-bar .tfb-btn-toggle.active {
+  background: rgba(59, 130, 246, 0.28);
+  border-color: rgba(59, 130, 246, 0.55);
+  color: #bfdbfe;
+}
+[data-theme='light'] .text-format-bar .tfb-btn.active {
+  color: #1d4ed8;
+}
+
+.text-format-bar .tfb-btn-icon {
+  font-weight: 600;
+}
+
+.text-format-bar .tfb-btn-danger:hover {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+}
+
+.text-format-bar .tfb-select {
+  height: 26px;
+  padding: 0 4px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 4px;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+[data-theme='light'] .text-format-bar .tfb-select {
+  background: rgba(241, 245, 249, 0.9);
+  border-color: rgba(15, 23, 42, 0.15);
+}
+
+.text-format-bar .tfb-fontsize-input {
+  width: 42px;
+  height: 26px;
+  padding: 0 4px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 4px;
+  color: inherit;
+  font-size: 12px;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+.text-format-bar .tfb-fontsize-input::-webkit-outer-spin-button,
+.text-format-bar .tfb-fontsize-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+[data-theme='light'] .text-format-bar .tfb-fontsize-input {
+  background: rgba(241, 245, 249, 0.9);
+  border-color: rgba(15, 23, 42, 0.15);
+}
+
+.text-format-bar .tfb-label {
+  display: inline-flex;
+  width: 18px;
+  justify-content: center;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.text-format-bar .tfb-color-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.text-format-bar .tfb-color-btn {
+  padding: 2px;
+  width: 26px;
+  height: 26px;
+}
+.text-format-bar .tfb-color-chip {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+}
+.text-format-bar .tfb-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  padding: 8px;
+  background: rgba(15, 23, 42, 0.98);
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+[data-theme='light'] .text-format-bar .tfb-popover {
+  background: #ffffff;
+  border-color: rgba(15, 23, 42, 0.15);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.text-format-bar .tfb-color-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 18px);
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.text-format-bar .tfb-color-cell {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  padding: 0;
+}
+.text-format-bar .tfb-color-cell:hover {
+  outline: 2px solid rgba(59, 130, 246, 0.6);
+}
+.text-format-bar .tfb-color-cell-none {
+  background: repeating-linear-gradient(45deg, #e11d48 0 2px, transparent 2px 5px);
+}
+.text-format-bar .tfb-color-input {
+  width: 100%;
+  height: 24px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
 }
 
 /* ── 工具按钮容器（含弹出菜单） ──────────────────────────── */

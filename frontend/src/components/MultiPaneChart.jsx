@@ -52,6 +52,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     onVisibleRangeChange = null,
     // Drawing props
     drawingTool = null,
+    onDrawingToolChange,
     penColor = "#f59e0b",
     penSize = 2,
     textFontSize = 14,
@@ -476,6 +477,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     indicatorBgcolors={indicatorBgcolors}
                     indicatorBarcolors={indicatorBarcolors}
                     drawingTool={drawingTool}
+                    onDrawingToolChange={onDrawingToolChange}
                     penColor={penColor}
                     penSize={penSize}
                     textFontSize={textFontSize}
@@ -524,6 +526,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                 onVisibleLogicalRangeChange={handleVisibleLogicalRangeChange}
                                 onCrosshairSync={handleCrosshairSync}
                                 drawingTool={drawingTool}
+                                onDrawingToolChange={onDrawingToolChange}
                                 penColor={penColor}
                                 penSize={penSize}
                                 textFontSize={textFontSize}

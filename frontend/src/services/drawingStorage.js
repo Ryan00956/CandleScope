@@ -54,6 +54,14 @@ function serializePrimitive(prim) {
       fontFamily: prim._fontFamily,
       bold: prim._bold,
       italic: prim._italic,
+      // ── Extended fields (PPT-style text box) ──
+      underline: prim._underline,
+      align: prim._align,
+      bgColor: prim._bgColor,
+      borderColor: prim._borderColor,
+      borderWidth: prim._borderWidth,
+      widthPx: prim._widthPx,
+      padding: prim._padding,
     };
   }
 

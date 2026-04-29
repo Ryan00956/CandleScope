@@ -8,6 +8,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useCallback, useState } from "react";
 import { createChart, CandlestickSeries } from "lightweight-charts";
 import { useDrawing } from "../hooks/useDrawing";
+import TextEditOverlay from "./TextEditOverlay";
+import TextFormatBar from "./TextFormatBar";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
@@ -111,6 +113,7 @@ const ChartWidget = forwardRef(function ChartWidget({
     onVisibleRangeChange = null,
     // Drawing props
     drawingTool = null,
+    onDrawingToolChange,
     penColor = "#f59e0b",
     penSize = 2,
     textFontSize = 14,
@@ -196,11 +199,16 @@ const ChartWidget = forwardRef(function ChartWidget({
         commitTextEditing,
         cancelTextEditing,
         editInputRef,
+        selectedTextSnapshot,
+        selectedTextBox,
+        updateSelectedText,
+        deleteSelected,
     } = useDrawing({
         chartRef,
         seriesRef: candlestickSeriesRef,
         chartContainerRef,
         activeTool: drawingTool,
+        onToolChange: onDrawingToolChange,
         penColor,
         penSize,
         textFontSize,
@@ -209,6 +217,24 @@ const ChartWidget = forwardRef(function ChartWidget({
         symbol,
         seriesReady,
     });
+    const [chartContainerWidth, setChartContainerWidth] = useState(0);
+
+    useEffect(() => {
+        const el = chartContainerRef.current;
+        if (!el) return;
+
+        const updateWidth = () => setChartContainerWidth(el.clientWidth || 0);
+        updateWidth();
+
+        if (typeof ResizeObserver === "undefined") {
+            window.addEventListener("resize", updateWidth);
+            return () => window.removeEventListener("resize", updateWidth);
+        }
+
+        const ro = new ResizeObserver(updateWidth);
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
 
     // Expose getVisibleRange + clearAll + chart internals to parent via ref
     useImperativeHandle(ref, () => ({
@@ -561,40 +587,37 @@ const ChartWidget = forwardRef(function ChartWidget({
             />
             {/* Inline text editor overlay */}
             {editingTextId && editingTextPos && (
-                <div
-                    className="text-edit-overlay"
-                    style={{
-                        position: "absolute",
-                        left: editingTextPos.x,
-                        top: editingTextPos.y,
-                        zIndex: 100,
+                <TextEditOverlay
+                    box={editingTextPos}
+                    value={editingTextValue}
+                    onChange={setEditingTextValue}
+                    onCommit={commitTextEditing}
+                    onCancel={cancelTextEditing}
+                    fontSize={selectedTextSnapshot?.fontSize ?? textFontSize}
+                    fontFamily={selectedTextSnapshot?.fontFamily}
+                    bold={selectedTextSnapshot?.bold ?? textBold}
+                    italic={selectedTextSnapshot?.italic ?? textItalic}
+                    underline={selectedTextSnapshot?.underline ?? false}
+                    align={selectedTextSnapshot?.align ?? "left"}
+                    color={selectedTextSnapshot?.color ?? penColor}
+                    bgColor={selectedTextSnapshot?.bgColor ?? null}
+                    borderColor={selectedTextSnapshot?.borderColor ?? null}
+                    padding={selectedTextSnapshot?.padding ?? 6}
+                    widthPx={selectedTextSnapshot?.widthPx ?? null}
+                    inputRef={editInputRef}
+                />
+            )}
+            {!editingTextId && selectedTextSnapshot && selectedTextBox && (
+                <TextFormatBar
+                    position={{
+                        x: selectedTextBox.x,
+                        y: Math.max(2, selectedTextBox.y - 44),
                     }}
-                >
-                    <input
-                        ref={editInputRef}
-                        className="text-edit-input"
-                        type="text"
-                        value={editingTextValue}
-                        onChange={(e) => setEditingTextValue(e.target.value)}
-                        onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                                e.preventDefault();
-                                commitTextEditing();
-                            }
-                            if (e.key === "Escape") {
-                                e.preventDefault();
-                                cancelTextEditing();
-                            }
-                        }}
-                        onBlur={() => commitTextEditing()}
-                        style={{
-                            fontSize: textFontSize,
-                            fontWeight: textBold ? "bold" : "normal",
-                            fontStyle: textItalic ? "italic" : "normal",
-                            color: penColor,
-                        }}
-                    />
-                </div>
+                    snapshot={selectedTextSnapshot}
+                    onPatch={updateSelectedText}
+                    onDelete={deleteSelected}
+                    containerWidth={chartContainerWidth}
+                />
             )}
             {loading && (
                 <div className="loading-overlay">

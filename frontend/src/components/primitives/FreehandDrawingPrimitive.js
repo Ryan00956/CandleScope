@@ -42,6 +42,7 @@ class FreehandRenderer {
   draw(target) {
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
+    if (data.hidden) return;
 
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
@@ -142,6 +143,7 @@ class FreehandPaneView {
       color: source._color,
       lineWidth: source._lineWidth,
       hovered: source._hovered,
+      hidden: source._hidden,
     });
   }
 
@@ -170,6 +172,7 @@ export class FreehandDrawingPrimitive {
     this._color = opts.color || "#f59e0b";
     this._lineWidth = opts.lineWidth || 2;
     this._hovered = false;
+    this._hidden = !!opts.hidden;
 
     this._series = null;
     this._chart = null;
@@ -233,6 +236,14 @@ export class FreehandDrawingPrimitive {
     this._requestUpdate?.();
   }
 
+  setHidden(v, request = true) {
+    const next = !!v;
+    if (this._hidden !== next) {
+      this._hidden = next;
+      if (request) this._requestUpdate?.();
+    }
+  }
+
   requestUpdate() {
     this._requestUpdate?.();
   }
@@ -240,6 +251,7 @@ export class FreehandDrawingPrimitive {
   // ── Hit testing (screen/CSS-pixel coordinates) ──
 
   hitTest(x, y, hitRadius = 8) {
+    if (this._hidden) return false;
     if (!this._series || !this._chart) return false;
     if (this._dataPoints.length < 2) return false;
 

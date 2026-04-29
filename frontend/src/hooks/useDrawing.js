@@ -149,6 +149,9 @@ export function useDrawing({
   // ── All primitives (lines + freehand strokes + text) ──
   const primitivesRef = useRef([]); // (LineDrawingPrimitive | FreehandDrawingPrimitive | TextDrawingPrimitive)[]
 
+  // ── Visibility toggle (hide all without deleting) ──
+  const hiddenRef = useRef(false);
+
   // ── Line-specific state ──
   const previewRef = useRef(null); // LineDrawingPrimitive (dashed preview)
   const anchorDataRef = useRef(null); // { logical, price } first click
@@ -384,6 +387,7 @@ export function useDrawing({
     (prim) => {
       const series = seriesRef?.current;
       if (!series) return;
+      prim.setHidden?.(hiddenRef.current, false);
       series.attachPrimitive(prim);
     },
     [seriesRef],
@@ -466,6 +470,7 @@ export function useDrawing({
           if (prim._series && prim._series !== series) {
             try { prim._series.detachPrimitive(prim); } catch { /* already detached */ }
           }
+          prim.setHidden?.(hiddenRef.current, false);
           series.attachPrimitive(prim);
         } catch (err) {
           console.warn("Failed to re-attach drawing:", err);
@@ -543,6 +548,7 @@ export function useDrawing({
         console.warn("Failed to restore drawing:", err, item);
       }
       if (prim) {
+        prim.setHidden?.(hiddenRef.current, false);
         series.attachPrimitive(prim);
         primitivesRef.current.push(prim);
       }
@@ -1738,6 +1744,51 @@ export function useDrawing({
     clearSavedDrawings(symbolRef.current);
   }, [detachPrim, removePreview, cancelTextEditing]);
 
+  /**
+   * Toggle visibility of all drawings without deleting them.
+   * Primitives stay attached; their renderers and hit-tests skip hidden items.
+   * This avoids doing one attach/detach cycle per drawing on every toggle.
+   */
+  const setHidden = useCallback((next) => {
+    const value = !!next;
+    if (hiddenRef.current === value) return;
+    hiddenRef.current = value;
+
+    if (value) {
+      // Also drop preview / transient edit state so nothing stays on screen.
+      removePreview();
+      cancelTextEditing();
+      draggingRef.current = null;
+      isDrawingFreehandRef.current = false;
+      currentFreehandRef.current = null;
+    }
+
+    let updateRequested = false;
+    for (const prim of primitivesRef.current) {
+      if (typeof prim.setHidden === "function") {
+        prim.setHidden(value, false);
+      } else {
+        prim._hidden = value;
+      }
+      if (!updateRequested && typeof prim.requestUpdate === "function" && prim._series) {
+        prim.requestUpdate();
+        updateRequested = true;
+      }
+    }
+
+    if (!updateRequested) {
+      const series = seriesRef?.current;
+      if (!series) return;
+      try {
+        // Force a lightweight redraw when there are no attached primitives that
+        // can request one themselves.
+        series.applyOptions({});
+      } catch {
+        // ignore
+      }
+    }
+  }, [seriesRef, removePreview, cancelTextEditing]);
+
   // ── Selected-text helpers (consumed by floating format toolbar) ──
 
   /**
@@ -1800,6 +1851,7 @@ export function useDrawing({
 
   return {
     clearAll,
+    setHidden,
     primitivesRef,
     selectedPrimId,
     selectedDrawingMeta,

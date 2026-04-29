@@ -450,6 +450,15 @@ export default function App() {
     chartWidgetRef.current?.clearAllDrawings();
   }, []);
 
+  // Toggle hide/show all drawings across panes (does not delete them).
+  const [drawingsHidden, setDrawingsHidden] = useState(false);
+  const handleToggleDrawingsHidden = useCallback(() => {
+    setDrawingsHidden((prev) => !prev);
+  }, []);
+  useEffect(() => {
+    chartWidgetRef.current?.setDrawingsHidden?.(drawingsHidden);
+  }, [drawingsHidden]);
+
   // Currently selected drawing on the chart (line/freehand/fibonacci).
   // When selection changes, mirror its stroke style into the toolbar's single
   // color/width controls so editing existing drawings and creating new ones
@@ -1913,6 +1922,8 @@ export default function App() {
           penSize={penSize}
           onPenSizeChange={setPenSize}
           onClearAll={handleClearDrawing}
+          drawingsHidden={drawingsHidden}
+          onToggleDrawingsHidden={handleToggleDrawingsHidden}
           textFontSize={textFontSize}
           onTextFontSizeChange={setTextFontSize}
           textBold={textBold}

@@ -1096,6 +1096,7 @@ const ChartPane = forwardRef(function ChartPane({
 
     const {
         clearAll: clearAllDrawings,
+        setHidden: setDrawingsHidden,
         editingTextId,
         editingTextValue,
         editingTextPos,
@@ -1158,6 +1159,7 @@ const ChartPane = forwardRef(function ChartPane({
 
     useImperativeHandle(ref, () => ({
         clearAllDrawings,
+        setDrawingsHidden,
         updateSelectedDrawingStyle,
         getChart: () => chartRef.current,
         getMainSeries: () => mainSeriesRef.current,
@@ -1243,7 +1245,7 @@ const ChartPane = forwardRef(function ChartPane({
             try { chart.timeScale().applyOptions(opts); } catch { /* */ }
         },
         resetAutoScale,
-    }), [resetAutoScale, clearAllDrawings, updateSelectedDrawingStyle]);
+    }), [resetAutoScale, clearAllDrawings, setDrawingsHidden, updateSelectedDrawingStyle]);
 
     return (
         <div className="chart-pane" data-pane-id={paneId} data-pane-type={paneType}>

@@ -38,6 +38,7 @@ class FibRenderer {
   draw(target) {
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
+    if (data.hidden) return;
 
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
@@ -258,6 +259,7 @@ class FibPaneView {
       hovered: source._hovered,
       levels: source._levels,
       inverted: source._inverted,
+      hidden: source._hidden,
     });
   }
 
@@ -282,6 +284,7 @@ export class FibonacciDrawingPrimitive {
     this._type = "fibonacci";
     this._levels = opts.levels || DEFAULT_FIB_LEVELS.map((l) => ({ ...l }));
     this._inverted = opts.inverted || false;
+    this._hidden = !!opts.hidden;
 
     this._series = null;
     this._chart = null;
@@ -357,11 +360,20 @@ export class FibonacciDrawingPrimitive {
     this._requestUpdate?.();
   }
 
+  setHidden(v, request = true) {
+    const next = !!v;
+    if (this._hidden !== next) {
+      this._hidden = next;
+      if (request) this._requestUpdate?.();
+    }
+  }
+
   requestUpdate() {
     this._requestUpdate?.();
   }
 
   hitTest(x, y) {
+    if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
     if (this._dataPoints.length < 2) return null;
 

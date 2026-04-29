@@ -275,6 +275,16 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                 }
             }
         },
+        setDrawingsHidden: (hidden) => {
+            if (mainPaneRef.current?.setDrawingsHidden) {
+                mainPaneRef.current.setDrawingsHidden(hidden);
+            }
+            for (const subPane of subPaneRefs.current.values()) {
+                if (subPane?.setDrawingsHidden) {
+                    subPane.setDrawingsHidden(hidden);
+                }
+            }
+        },
         // Style update for the currently selected drawing on the main pane.
         // Sub panes also get a chance in case the selection lives there.
         updateSelectedDrawingStyle: (patch) => {

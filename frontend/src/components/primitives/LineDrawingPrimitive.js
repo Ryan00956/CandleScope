@@ -93,6 +93,7 @@ class LineRenderer {
   draw(target) {
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
+    if (data.hidden) return;
 
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
@@ -262,6 +263,7 @@ class LinePaneView {
       selected: source._selected,
       isPreview: source._isPreview,
       hovered: source._hovered,
+      hidden: source._hidden,
     });
   }
 
@@ -298,6 +300,7 @@ export class LineDrawingPrimitive {
     this._selected = opts.selected || false;
     this._isPreview = opts.isPreview || false;
     this._hovered = opts.hovered || false;
+    this._hidden = !!opts.hidden;
 
     this._series = null;
     this._chart = null;
@@ -368,6 +371,14 @@ export class LineDrawingPrimitive {
     this._requestUpdate?.();
   }
 
+  setHidden(v, request = true) {
+    const next = !!v;
+    if (this._hidden !== next) {
+      this._hidden = next;
+      if (request) this._requestUpdate?.();
+    }
+  }
+
   requestUpdate() {
     this._requestUpdate?.();
   }
@@ -382,6 +393,7 @@ export class LineDrawingPrimitive {
    *   pointIndex: 0 or 1 for endpoint hit, -1 for body hit
    */
   hitTest(x, y) {
+    if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
     if (this._dataPoints.length < 2) return null;
 

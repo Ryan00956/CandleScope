@@ -398,8 +398,12 @@ export class TextDrawingPrimitive {
   setHovered(v) {
     if (this._hovered !== v) { this._hovered = v; this._requestUpdate?.(); }
   }
-  setHidden(v) {
-    if (this._hidden !== !!v) { this._hidden = !!v; this._requestUpdate?.(); }
+  setHidden(v, request = true) {
+    const next = !!v;
+    if (this._hidden !== next) {
+      this._hidden = next;
+      if (request) this._requestUpdate?.();
+    }
   }
   requestUpdate() { this._requestUpdate?.(); }
 
@@ -498,6 +502,7 @@ export class TextDrawingPrimitive {
    *   { body: true }                                       — body hit
    */
   hitTest(x, y) {
+    if (this._hidden) return false;
     const box = this.getBoundingBoxScreen();
     if (!box) return false;
 

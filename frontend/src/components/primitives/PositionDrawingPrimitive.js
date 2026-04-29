@@ -77,6 +77,7 @@ class PositionRenderer {
   draw(target) {
     const data = this._data;
     if (!data) return;
+    if (data.hidden) return;
 
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
@@ -568,6 +569,7 @@ class PositionPaneView {
       upColor,
       downColor,
       currentPrice,
+      hidden: source._hidden,
     });
   }
 
@@ -605,6 +607,7 @@ export class PositionDrawingPrimitive {
     this._selected = opts.selected || false;
     this._isPreview = opts.isPreview || false;
     this._hovered = opts.hovered || false;
+    this._hidden = !!opts.hidden;
 
     this._series = null;
     this._chart = null;
@@ -708,6 +711,14 @@ export class PositionDrawingPrimitive {
     this._requestUpdate?.();
   }
 
+  setHidden(v, request = true) {
+    const next = !!v;
+    if (this._hidden !== next) {
+      this._hidden = next;
+      if (request) this._requestUpdate?.();
+    }
+  }
+
   requestUpdate() {
     this._requestUpdate?.();
   }
@@ -715,6 +726,7 @@ export class PositionDrawingPrimitive {
   // ── Hit testing ──
 
   hitTest(x, y) {
+    if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
 
     const timeScale = this._chart.timeScale();

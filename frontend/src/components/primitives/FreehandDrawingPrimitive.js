@@ -8,11 +8,29 @@
  *
  * Supports:
  *   - Smooth polyline rendering via quadratic Bezier curves
+ *   - Square brush rendering for highlighter strokes
  *   - Hover highlight for eraser tool
  *   - Hit-testing for eraser deletion
  */
 
 import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
+
+const DEFAULT_HIGHLIGHTER_OPACITY = 0.35;
+const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION = "multiply";
+
+function normalizeFreehandType(value) {
+  return value === "highlighter" ? "highlighter" : "freehand";
+}
+
+function normalizeOpacity(value, fallback = 1) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+function normalizeBrushShape(value, fallback = "round") {
+  return value === "square" ? "square" : fallback;
+}
 
 // ── Geometry helper ──
 
@@ -48,11 +66,13 @@ class FreehandRenderer {
       const ctx = scope.context;
       const hRatio = scope.horizontalPixelRatio;
       const vRatio = scope.verticalPixelRatio;
-      const { points, color, lineWidth, hovered } = data;
+      const { points, color, lineWidth, hovered, opacity, compositeOperation, brushShape } = data;
+      const isSquareBrush = brushShape === "square";
 
       ctx.save();
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
+      ctx.lineCap = isSquareBrush ? "square" : "round";
+      ctx.lineJoin = isSquareBrush ? "bevel" : "round";
+      ctx.globalCompositeOperation = hovered ? "source-over" : (compositeOperation || "source-over");
 
       const scaledWidth = lineWidth * Math.min(hRatio, vRatio);
       ctx.lineWidth = scaledWidth;
@@ -62,7 +82,7 @@ class FreehandRenderer {
         ctx.globalAlpha = 0.6;
       } else {
         ctx.strokeStyle = color;
-        ctx.globalAlpha = 1;
+        ctx.globalAlpha = normalizeOpacity(opacity, 1);
       }
 
       // Filter out invalid points first
@@ -78,9 +98,12 @@ class FreehandRenderer {
       ctx.beginPath();
       ctx.moveTo(valid[0].bx, valid[0].by);
 
-      if (valid.length === 2) {
-        // Only two points — just draw a straight line
-        ctx.lineTo(valid[1].bx, valid[1].by);
+      if (valid.length === 2 || isSquareBrush) {
+        // Square brushes should keep hard edges, so draw straight segments
+        // instead of smoothing through quadratic curves.
+        for (let i = 1; i < valid.length; i++) {
+          ctx.lineTo(valid[i].bx, valid[i].by);
+        }
       } else {
         // Smooth curve using quadratic Bezier through midpoints:
         // Each original sample point becomes a control point, and
@@ -142,6 +165,9 @@ class FreehandPaneView {
       points,
       color: source._color,
       lineWidth: source._lineWidth,
+      opacity: source._opacity,
+      compositeOperation: source._compositeOperation,
+      brushShape: source._brushShape,
       hovered: source._hovered,
       hidden: source._hidden,
     });
@@ -165,12 +191,28 @@ export class FreehandDrawingPrimitive {
    * @param {{time: number, price: number}[]} opts.dataPoints - polyline points in data coords
    * @param {string} opts.color - line color (hex)
    * @param {number} opts.lineWidth - line width in CSS pixels
+   * @param {"freehand"|"highlighter"} [opts.type] - drawing subtype
+   * @param {number} [opts.opacity] - stroke opacity, 0..1
+   * @param {string} [opts.compositeOperation] - Canvas composite mode
+  * @param {"round"|"square"} [opts.brushShape] - brush cap/join shape
    */
   constructor(opts) {
     this._id = opts.id;
+    this._type = normalizeFreehandType(opts.type);
     this._dataPoints = opts.dataPoints || [];
     this._color = opts.color || "#f59e0b";
     this._lineWidth = opts.lineWidth || 2;
+    this._opacity = normalizeOpacity(
+      opts.opacity,
+      this._type === "highlighter" ? DEFAULT_HIGHLIGHTER_OPACITY : 1,
+    );
+    this._compositeOperation = opts.compositeOperation || (
+      this._type === "highlighter" ? DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION : "source-over"
+    );
+    this._brushShape = normalizeBrushShape(
+      opts.brushShape,
+      this._type === "highlighter" ? "square" : "round",
+    );
     this._hovered = false;
     this._hidden = !!opts.hidden;
 
@@ -208,6 +250,10 @@ export class FreehandDrawingPrimitive {
   get dataPoints() { return this._dataPoints; }
   get color() { return this._color; }
   get lineWidth() { return this._lineWidth; }
+  get type() { return this._type; }
+  get opacity() { return this._opacity; }
+  get compositeOperation() { return this._compositeOperation; }
+  get brushShape() { return this._brushShape; }
 
   addPoint(dp) {
     this._dataPoints.push(dp);
@@ -233,6 +279,21 @@ export class FreehandDrawingPrimitive {
 
   setLineWidth(w) {
     this._lineWidth = w;
+    this._requestUpdate?.();
+  }
+
+  setOpacity(opacity) {
+    this._opacity = normalizeOpacity(opacity, this._opacity);
+    this._requestUpdate?.();
+  }
+
+  setCompositeOperation(compositeOperation) {
+    this._compositeOperation = compositeOperation || "source-over";
+    this._requestUpdate?.();
+  }
+
+  setBrushShape(brushShape) {
+    this._brushShape = normalizeBrushShape(brushShape, this._brushShape);
     this._requestUpdate?.();
   }
 

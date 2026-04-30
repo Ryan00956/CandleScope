@@ -5,8 +5,10 @@
  * everything directly inside the chart's Canvas pipeline — zero lag.
  *
  * Handles:
- *   - Freehand pen ("pen"): click-drag to draw polylines in data coords
+ *   - Freehand pen ("pen") and highlighter ("highlighter"): click-drag polylines in data coords
  *   - Two-click lines ("line-segment" / "line-ray" / "line-infinite")
+ *   - One-point axis lines ("line-horizontal" / "line-vertical" / "line-cross")
+ *   - Angle measurement ("angle-measure") with a visual degree label
  *   - Text annotations ("text"): click to place, inline editing
  *   - Live preview while placing second point of a line
  *   - Magnet snapping to nearby candle OHLC / series values (except pen)
@@ -23,12 +25,23 @@ import { FreehandDrawingPrimitive } from "../components/primitives/FreehandDrawi
 import { TextDrawingPrimitive } from "../components/primitives/TextDrawingPrimitive.js";
 import { FibonacciDrawingPrimitive, DEFAULT_FIB_LEVELS } from "../components/primitives/FibonacciDrawingPrimitive.js";
 import { PositionDrawingPrimitive } from "../components/primitives/PositionDrawingPrimitive.js";
+import { ShapeDrawingPrimitive } from "../components/primitives/ShapeDrawingPrimitive.js";
+import { AxisLineDrawingPrimitive } from "../components/primitives/AxisLineDrawingPrimitive.js";
+import { AngleMeasurementPrimitive } from "../components/primitives/AngleMeasurementPrimitive.js";
 import { timeToCoordinateInterpolated } from "../components/primitives/coordinateUtils.js";
 import { saveDrawings, loadDrawings, clearSavedDrawings } from "../services/drawingStorage.js";
 
-const LINE_TOOL_IDS = new Set(["line-segment", "line-ray", "line-infinite"]);
+const BASIC_LINE_TOOL_IDS = new Set(["line-segment", "line-ray", "line-infinite"]);
+const AXIS_LINE_TOOL_IDS = new Set(["line-horizontal", "line-vertical", "line-cross"]);
+const ANGLE_TOOL_IDS = new Set(["angle-measure"]);
+const LINE_TOOL_IDS = new Set([...BASIC_LINE_TOOL_IDS, ...AXIS_LINE_TOOL_IDS, ...ANGLE_TOOL_IDS]);
 const FIB_TOOL_IDS = new Set(["fibonacci"]);
 const POSITION_TOOL_IDS = new Set(["position-long", "position-short"]);
+const SHAPE_TOOL_IDS = new Set(["shape-rectangle", "shape-ellipse"]);
+const CURSOR_TOOL_IDS = new Set(["cursor-default", "cursor-crosshair", "cursor-dot", "cursor-highlighter", "cursor-plain"]);
+const DEFAULT_HIGHLIGHTER_OPACITY = 0.35;
+const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION = "multiply";
+const DEFAULT_HIGHLIGHTER_BRUSH_SHAPE = "square";
 const SNAP_TIME_DISTANCE_PX = 12;
 const SNAP_PRICE_DISTANCE_PX = 10;
 const SNAP_PRICE_CANDLE_DISTANCE_PX = 18;
@@ -44,12 +57,79 @@ function setCursor(el, cursor) {
   if (el) el.style.setProperty("cursor", cursor);
 }
 
+function isPassiveCursorTool(tool) {
+  return !tool || CURSOR_TOOL_IDS.has(tool);
+}
+
+function cursorStyleForPassiveTool(tool) {
+  if (tool === "cursor-crosshair") return "crosshair";
+  if (tool === "cursor-dot" || tool === "cursor-highlighter") return "none";
+  return "default";
+}
+
 function isTextOverlayTarget(target) {
   return target instanceof Element && !!target.closest(".text-format-bar, .text-edit-overlay");
 }
 
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function shapeTypeFromTool(tool) {
+  if (tool === "shape-ellipse") return "ellipse";
+  if (tool === "shape-rectangle") return "rectangle";
+  return null;
+}
+
+function axisLineTypeFromTool(tool) {
+  if (tool === "line-vertical") return "vertical";
+  if (tool === "line-cross") return "cross";
+  return "horizontal";
+}
+
+function constrainShapeScreenPoint(anchorScreen, pointerScreen) {
+  if (!anchorScreen || !pointerScreen) return pointerScreen;
+  const dx = pointerScreen.x - anchorScreen.x;
+  const dy = pointerScreen.y - anchorScreen.y;
+  const size = Math.max(Math.abs(dx), Math.abs(dy));
+  const sx = dx < 0 ? -1 : 1;
+  const sy = dy < 0 ? -1 : 1;
+  return {
+    x: anchorScreen.x + sx * size,
+    y: anchorScreen.y + sy * size,
+  };
+}
+
+function resizedShapeBoxFromHandle(box, handle, pos) {
+  if (!box || !handle || !pos) return null;
+  let left = box.x;
+  let top = box.y;
+  let right = box.right ?? (box.x + box.width);
+  let bottom = box.bottom ?? (box.y + box.height);
+
+  if (handle.includes("l")) left = pos.x;
+  if (handle.includes("r")) right = pos.x;
+  if (handle.includes("t")) top = pos.y;
+  if (handle.includes("b")) bottom = pos.y;
+
+  const MIN_SIZE = 4;
+  if (Math.abs(right - left) < MIN_SIZE) {
+    if (handle.includes("l")) left = right - MIN_SIZE;
+    else right = left + MIN_SIZE;
+  }
+  if (Math.abs(bottom - top) < MIN_SIZE) {
+    if (handle.includes("t")) top = bottom - MIN_SIZE;
+    else bottom = top + MIN_SIZE;
+  }
+
+  const x = Math.min(left, right);
+  const y = Math.min(top, bottom);
+  return {
+    x,
+    y,
+    width: Math.abs(right - left),
+    height: Math.abs(bottom - top),
+  };
 }
 
 function getSnapPriceCandidates(item) {
@@ -88,13 +168,17 @@ function selectedDrawingMetaFromPrimitive(prim) {
   }
   let type = "drawing";
   if (prim instanceof LineDrawingPrimitive) type = "line";
-  else if (prim instanceof FreehandDrawingPrimitive) type = "freehand";
+  else if (prim instanceof AxisLineDrawingPrimitive) type = prim.axisLineType === "cross" ? "cross-line" : `${prim.axisLineType}-line`;
+  else if (prim instanceof AngleMeasurementPrimitive) type = "angle-measure";
+  else if (prim instanceof FreehandDrawingPrimitive) type = prim.type === "highlighter" ? "highlighter" : "freehand";
   else if (prim instanceof FibonacciDrawingPrimitive) type = "fibonacci";
+  else if (prim instanceof ShapeDrawingPrimitive) type = prim.shapeType || "shape";
   return {
     id: prim.id,
     type,
     color: prim.color,
     lineWidth: prim.lineWidth,
+    opacity: prim.opacity,
   };
 }
 
@@ -251,9 +335,17 @@ export function useDrawing({
   const isLineTool = LINE_TOOL_IDS.has(activeTool);
   const isFibTool = FIB_TOOL_IDS.has(activeTool);
   const isPositionTool = POSITION_TOOL_IDS.has(activeTool);
+  const isShapeTool = SHAPE_TOOL_IDS.has(activeTool);
   const isPenTool = activeTool === "pen";
+  const isHighlighterTool = activeTool === "highlighter";
   const isTextTool = activeTool === "text";
   const isEraserTool = activeTool === "eraser";
+
+  useEffect(() => {
+    const container = chartContainerRef?.current;
+    if (!container || !isPassiveCursorTool(activeTool)) return;
+    setCursor(container, cursorStyleForPassiveTool(activeTool));
+  }, [activeTool, chartContainerRef]);
 
   // ── Coordinate helpers ──
   // Data points are stored as { time, price } so drawings survive timeframe switches.
@@ -678,6 +770,21 @@ export function useDrawing({
             color: item.color,
             lineWidth: item.lineWidth,
           });
+        } else if (item.type === "axis-line") {
+          prim = new AxisLineDrawingPrimitive({
+            id: item.id || nextId("ax"),
+            axisLineType: item.axisLineType,
+            dataPoint: item.dataPoint,
+            color: item.color,
+            lineWidth: item.lineWidth,
+          });
+        } else if (item.type === "angle-measure") {
+          prim = new AngleMeasurementPrimitive({
+            id: item.id || nextId("ang"),
+            dataPoints: item.dataPoints,
+            color: item.color,
+            lineWidth: item.lineWidth,
+          });
         } else if (item.type === "text") {
           prim = new TextDrawingPrimitive({
             id: item.id || nextId("tx"),
@@ -715,6 +822,29 @@ export function useDrawing({
             slPrice: item.slPrice,
             timeRange: item.timeRange,
             positionSize: item.positionSize,
+            infoPanelOffset: item.infoPanelOffset,
+          });
+        } else if (item.type === "shape") {
+          prim = new ShapeDrawingPrimitive({
+            id: item.id || nextId("sh"),
+            shapeType: item.shapeType,
+            dataPoints: item.dataPoints,
+            color: item.color,
+            lineWidth: item.lineWidth,
+            fillColor: item.fillColor,
+            fillOpacity: item.fillOpacity,
+            lineStyle: item.lineStyle,
+          });
+        } else if (item.type === "highlighter") {
+          prim = new FreehandDrawingPrimitive({
+            id: item.id || nextId("hl"),
+            type: "highlighter",
+            dataPoints: item.dataPoints,
+            color: item.color,
+            lineWidth: item.lineWidth,
+            opacity: item.opacity ?? DEFAULT_HIGHLIGHTER_OPACITY,
+            compositeOperation: item.compositeOperation || DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION,
+            brushShape: item.brushShape || DEFAULT_HIGHLIGHTER_BRUSH_SHAPE,
           });
         } else if (item.type === "freehand") {
           prim = new FreehandDrawingPrimitive({
@@ -744,7 +874,7 @@ export function useDrawing({
     setSelectedPrimId(id);
     let selectedPrim = null;
     for (const prim of primitivesRef.current) {
-      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive) {
+      if (prim instanceof LineDrawingPrimitive || prim instanceof AxisLineDrawingPrimitive || prim instanceof AngleMeasurementPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive || prim instanceof ShapeDrawingPrimitive) {
         prim.setSelected(prim.id === id);
         if (prim.id === id) selectedPrim = prim;
       }
@@ -763,7 +893,7 @@ export function useDrawing({
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     setSelectedDrawingMeta(null);
     for (const prim of primitivesRef.current) {
-      if (prim instanceof LineDrawingPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive) {
+      if (prim instanceof LineDrawingPrimitive || prim instanceof AxisLineDrawingPrimitive || prim instanceof AngleMeasurementPrimitive || prim instanceof TextDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive || prim instanceof ShapeDrawingPrimitive) {
         prim.setSelected(false);
       }
     }
@@ -792,11 +922,20 @@ export function useDrawing({
         } else if (prim instanceof LineDrawingPrimitive) {
           const hit = prim.hitTest(x, y);
           if (hit) return { prim, type: "line", ...hit };
+        } else if (prim instanceof AxisLineDrawingPrimitive) {
+          const hit = prim.hitTest(x, y);
+          if (hit) return { prim, type: "axis-line", ...hit };
+        } else if (prim instanceof AngleMeasurementPrimitive) {
+          const hit = prim.hitTest(x, y);
+          if (hit) return { prim, type: "angle", ...hit };
         } else if (prim instanceof FibonacciDrawingPrimitive) {
           const hit = prim.hitTest(x, y);
           if (hit) return { prim, type: "fibonacci", ...hit };
+        } else if (prim instanceof ShapeDrawingPrimitive) {
+          const hit = prim.hitTest(x, y);
+          if (hit) return { prim, type: "shape", ...hit };
         } else if (prim instanceof FreehandDrawingPrimitive) {
-          if (prim.hitTest(x, y, hitRadius)) return { prim, type: "freehand" };
+          if (prim.hitTest(x, y, hitRadius)) return { prim, type: prim.type === "highlighter" ? "highlighter" : "freehand" };
         } else if (prim instanceof TextDrawingPrimitive) {
           const hit = prim.hitTest(x, y);
           if (hit) return { prim, type: "text", ...hit };
@@ -1024,10 +1163,10 @@ export function useDrawing({
         return;
       }
 
-      // No drawing tool active: PPT-style click-away deselect for text boxes,
+      // Passive cursor mode: PPT-style click-away deselect for text boxes,
       // OR re-grab the selected text for move/resize so the floating format
       // toolbar mode stays useful (drag body to move, drag a handle to scale).
-      if (!tool && selectedIdRef.current) {
+      if (isPassiveCursorTool(tool) && selectedIdRef.current) {
         const sel = getPrimitiveById(selectedIdRef.current);
         if (sel instanceof TextDrawingPrimitive) {
           let hit = false;
@@ -1072,16 +1211,21 @@ export function useDrawing({
         return;
       }
 
-      // ── PEN (freehand): start stroke ──
-      if (tool === "pen") {
+      // ── PEN / HIGHLIGHTER (freehand): start stroke ──
+      if (tool === "pen" || tool === "highlighter") {
         const dataPoint = screenToData(pos.x, pos.y);
         if (!dataPoint) return;
+        const isHighlighter = tool === "highlighter";
 
         const freehand = new FreehandDrawingPrimitive({
-          id: nextId("fh"),
+          id: nextId(isHighlighter ? "hl" : "fh"),
+          type: isHighlighter ? "highlighter" : "freehand",
           dataPoints: [dataPoint],
           color: penColorRef.current,
           lineWidth: penSizeRef.current,
+          opacity: isHighlighter ? DEFAULT_HIGHLIGHTER_OPACITY : 1,
+          compositeOperation: isHighlighter ? DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION : "source-over",
+          brushShape: isHighlighter ? DEFAULT_HIGHLIGHTER_BRUSH_SHAPE : "round",
         });
         attachPrim(freehand);
         primitivesRef.current.push(freehand);
@@ -1166,6 +1310,13 @@ export function useDrawing({
               origTp: hit.prim.tpPrice,
               origSl: hit.prim.slPrice,
               origTimeRange: { ...hit.prim.timeRange },
+            };
+          } else if (hit.zone === "panel") {
+            draggingRef.current = {
+              id: hit.prim.id,
+              type: "position-panel",
+              startMouse: pos,
+              origInfoPanelOffset: { ...hit.prim.infoPanelOffset },
             };
           } else if (hit.zone === "left") {
             draggingRef.current = {
@@ -1259,20 +1410,47 @@ export function useDrawing({
         return;
       }
 
-      // ── LINE/FIB TOOLS ──
-      if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool)) {
-        // Second click — commit new line/fib
-        if (anchorDataRef.current && previewRef.current) {
-          const dataB = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
+      // ── LINE/FIB/SHAPE TOOLS ──
+      if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool) || SHAPE_TOOL_IDS.has(tool)) {
+        const isAxisLineTool = AXIS_LINE_TOOL_IDS.has(tool);
+        const isAngleTool = ANGLE_TOOL_IDS.has(tool);
+        const isShapeDrawingTool = SHAPE_TOOL_IDS.has(tool);
+        const shapeType = shapeTypeFromTool(tool);
+
+        // Second click — commit new line/fib/shape
+        if (!isAxisLineTool && anchorDataRef.current && previewRef.current) {
+          let targetPos = pos;
+          if (isShapeDrawingTool && e.shiftKey) {
+            const anchorScreen = dataToScreen(anchorDataRef.current);
+            targetPos = constrainShapeScreenPoint(anchorScreen, pos);
+          }
+          const dataB = screenToDrawingData(targetPos.x, targetPos.y, { snap: drawingSnapEnabledRef.current && !e.altKey && !(isShapeDrawingTool && e.shiftKey) });
           if (!dataB) return;
 
           // Remove preview
           detachPrim(previewRef.current);
           previewRef.current = null;
 
-          // Create final line primitive
+          // Create final primitive
           let finalPrim;
-          if (FIB_TOOL_IDS.has(tool)) {
+          if (isShapeDrawingTool) {
+             finalPrim = new ShapeDrawingPrimitive({
+               id: nextId("sh"),
+               shapeType,
+               dataPoints: [anchorDataRef.current, dataB],
+               color: penColorRef.current,
+               lineWidth: penSizeRef.current,
+               fillColor: penColorRef.current,
+               fillOpacity: 0.12,
+             });
+           } else if (isAngleTool) {
+             finalPrim = new AngleMeasurementPrimitive({
+              id: nextId("ang"),
+              dataPoints: [anchorDataRef.current, dataB],
+              color: penColorRef.current,
+              lineWidth: penSizeRef.current,
+             });
+          } else if (FIB_TOOL_IDS.has(tool)) {
              finalPrim = new FibonacciDrawingPrimitive({
                 id: nextId("fib"),
                 dataPoints: [anchorDataRef.current, dataB],
@@ -1304,10 +1482,27 @@ export function useDrawing({
 
         // Hit existing element?
         const hit = hitTestAll(pos.x, pos.y);
-        if (hit && (hit.type === "line" || hit.type === "fibonacci")) {
+        if (hit && (hit.type === "line" || hit.type === "axis-line" || hit.type === "angle" || hit.type === "fibonacci" || hit.type === "shape")) {
           selectPrimitive(hit.prim.id);
 
-          if (hit.pointIndex >= 0) {
+          if (hit.type === "axis-line") {
+            draggingRef.current = {
+              id: hit.prim.id,
+              type: "axis-line",
+              zone: hit.zone || "body",
+              startMouse: pos,
+              origDataPoint: { ...hit.prim.dataPoint },
+            };
+          } else if (hit.type === "shape") {
+            draggingRef.current = {
+              id: hit.prim.id,
+              type: "shape",
+              zone: hit.zone || "body",
+              startMouse: pos,
+              origPoints: hit.prim.dataPoints.map((p) => ({ ...p })),
+              origBox: hit.prim.getBoundingBoxScreen?.() || null,
+            };
+          } else if (hit.pointIndex >= 0) {
             // Start dragging endpoint
             draggingRef.current = {
               id: hit.prim.id,
@@ -1353,6 +1548,42 @@ export function useDrawing({
           return;
         }
 
+        // One-point axis lines: click creates immediately; drag before mouseup adjusts it.
+        if (isAxisLineTool) {
+          if (anchorDataRef.current || previewRef.current) {
+            removePreview();
+          }
+          const axisLineType = axisLineTypeFromTool(tool);
+          const dataA = screenToDrawingData(pos.x, pos.y, {
+            snap: drawingSnapEnabledRef.current && !e.altKey,
+            time: axisLineType !== "horizontal",
+            price: axisLineType !== "vertical",
+          });
+          if (!dataA) return;
+
+          const axisPrim = new AxisLineDrawingPrimitive({
+            id: nextId("ax"),
+            axisLineType,
+            dataPoint: dataA,
+            color: penColorRef.current,
+            lineWidth: penSizeRef.current,
+          });
+          attachPrim(axisPrim);
+          primitivesRef.current.push(axisPrim);
+          selectPrimitive(axisPrim.id);
+          draggingRef.current = {
+            id: axisPrim.id,
+            type: "axis-line",
+            zone: "center",
+            startMouse: pos,
+            origDataPoint: { ...dataA },
+          };
+
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+
         // First click — set anchor
         const dataA = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
         if (!dataA) return;
@@ -1360,7 +1591,26 @@ export function useDrawing({
 
         // Create preview primitive
         let preview;
-        if (FIB_TOOL_IDS.has(tool)) {
+        if (isShapeDrawingTool) {
+           preview = new ShapeDrawingPrimitive({
+             id: "__preview__",
+             shapeType,
+             dataPoints: [dataA, dataA],
+             color: penColorRef.current,
+             lineWidth: penSizeRef.current,
+             fillColor: penColorRef.current,
+             fillOpacity: 0.12,
+             isPreview: true,
+           });
+        } else if (isAngleTool) {
+           preview = new AngleMeasurementPrimitive({
+             id: "__preview__",
+             dataPoints: [dataA, dataA],
+             color: penColorRef.current,
+             lineWidth: penSizeRef.current,
+             isPreview: true,
+           });
+        } else if (FIB_TOOL_IDS.has(tool)) {
            preview = new FibonacciDrawingPrimitive({
              id: "__preview__",
              dataPoints: [dataA, dataA],
@@ -1388,7 +1638,7 @@ export function useDrawing({
         return;
       }
     },
-    [getChartPos, screenToData, screenToDrawingData, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, chartRef, seriesRef, chartContainerRef],
+    [getChartPos, screenToData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, chartRef, seriesRef, chartContainerRef],
   );
 
   // ════════════════════════════════════════════════════
@@ -1428,7 +1678,13 @@ export function useDrawing({
           let isHit = false;
           if (prim instanceof LineDrawingPrimitive) {
             isHit = prim.hitTest(pos.x, pos.y) != null;
+          } else if (prim instanceof AxisLineDrawingPrimitive) {
+            isHit = prim.hitTest(pos.x, pos.y) != null;
+          } else if (prim instanceof AngleMeasurementPrimitive) {
+            isHit = prim.hitTest(pos.x, pos.y) != null;
           } else if (prim instanceof FibonacciDrawingPrimitive) {
+            isHit = prim.hitTest(pos.x, pos.y) != null;
+          } else if (prim instanceof ShapeDrawingPrimitive) {
             isHit = prim.hitTest(pos.x, pos.y) != null;
           } else if (prim instanceof PositionDrawingPrimitive) {
             isHit = prim.hitTest(pos.x, pos.y) != null;
@@ -1447,8 +1703,8 @@ export function useDrawing({
         return;
       }
 
-      // ── PEN (freehand): extend stroke ──
-      if (tool === "pen" && isDrawingFreehandRef.current && currentFreehandRef.current) {
+      // ── PEN / HIGHLIGHTER (freehand): extend stroke ──
+      if ((tool === "pen" || tool === "highlighter") && isDrawingFreehandRef.current && currentFreehandRef.current) {
         const dataPoint = screenToData(pos.x, pos.y);
         if (dataPoint) {
           currentFreehandRef.current.addPoint(dataPoint);
@@ -1569,11 +1825,23 @@ export function useDrawing({
         return;
       }
 
-      // ── POSITION TOOL: dragging TP/SL/entry/edges ──
-      if (draggingRef.current && (draggingRef.current.type === "position-tp" || draggingRef.current.type === "position-sl" || draggingRef.current.type === "position-move" || draggingRef.current.type === "position-left" || draggingRef.current.type === "position-right")) {
+      // ── POSITION TOOL: dragging TP/SL/entry/edges/info panel ──
+      if (draggingRef.current && (draggingRef.current.type === "position-tp" || draggingRef.current.type === "position-sl" || draggingRef.current.type === "position-move" || draggingRef.current.type === "position-left" || draggingRef.current.type === "position-right" || draggingRef.current.type === "position-panel")) {
         const { id, type } = draggingRef.current;
         const prim = primitivesRef.current.find((p) => p.id === id);
         if (!prim || !(prim instanceof PositionDrawingPrimitive)) return;
+
+        if (type === "position-panel") {
+          const { startMouse, origInfoPanelOffset } = draggingRef.current;
+          prim.setInfoPanelOffset({
+            x: origInfoPanelOffset.x + (pos.x - startMouse.x),
+            y: origInfoPanelOffset.y + (pos.y - startMouse.y),
+          });
+          setCursor(chartContainerRef?.current, "grabbing");
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
 
         const dataPoint = type === "position-move"
           ? screenToData(pos.x, pos.y)
@@ -1632,11 +1900,11 @@ export function useDrawing({
         return;
       }
 
-      // ── LINE / FIB TOOLS ──
-      if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool)) {
+      // ── LINE / FIB / SHAPE TOOLS ──
+      if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool) || SHAPE_TOOL_IDS.has(tool)) {
         // Dragging
         if (draggingRef.current) {
-          const { id, type, pointIndex, startMouse, origPoints, origDataPoint } = draggingRef.current;
+          const { id, type, pointIndex, startMouse, origPoints, origDataPoint, zone, origBox } = draggingRef.current;
           const prim = primitivesRef.current.find((p) => p.id === id);
           if (!prim) return;
 
@@ -1653,7 +1921,53 @@ export function useDrawing({
             return;
           }
 
-          if (!(prim instanceof LineDrawingPrimitive) && !(prim instanceof FibonacciDrawingPrimitive)) return;
+          if (type === "axis-line" && prim instanceof AxisLineDrawingPrimitive) {
+            const axisLineType = prim.axisLineType;
+            const dataPoint = screenToDrawingData(pos.x, pos.y, {
+              snap: drawingSnapEnabledRef.current && !e.altKey,
+              time: axisLineType !== "horizontal",
+              price: axisLineType !== "vertical",
+            });
+            if (!dataPoint) return;
+            const basePoint = origDataPoint || prim.dataPoint || dataPoint;
+            let nextPoint = dataPoint;
+            if (axisLineType === "horizontal") {
+              nextPoint = { ...basePoint, price: dataPoint.price };
+            } else if (axisLineType === "vertical") {
+              nextPoint = { ...basePoint, time: dataPoint.time, logical: dataPoint.logical };
+            }
+            prim.setDataPoint(nextPoint);
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+
+          if (type === "shape" && prim instanceof ShapeDrawingPrimitive) {
+            if (zone && zone !== "body" && origBox) {
+              const nextBox = resizedShapeBoxFromHandle(origBox, zone, pos);
+              if (!nextBox) return;
+              const newA = screenToData(nextBox.x, nextBox.y);
+              const newB = screenToData(nextBox.x + nextBox.width, nextBox.y + nextBox.height);
+              if (!newA || !newB) return;
+              prim.setDataPoints([newA, newB]);
+            } else {
+              const dx = pos.x - startMouse.x;
+              const dy = pos.y - startMouse.y;
+              const sa0 = dataToScreen(origPoints[0]);
+              const sb0 = dataToScreen(origPoints[1]);
+              if (!sa0 || !sb0) return;
+              const newA = screenToData(sa0.x + dx, sa0.y + dy);
+              const newB = screenToData(sb0.x + dx, sb0.y + dy);
+              if (!newA || !newB) return;
+              prim.setDataPoints([newA, newB]);
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+          }
+
+          if (!(prim instanceof LineDrawingPrimitive) && !(prim instanceof FibonacciDrawingPrimitive) && !(prim instanceof AngleMeasurementPrimitive)) return;
 
           if (pointIndex >= 0) {
             // Drag single endpoint
@@ -1682,7 +1996,12 @@ export function useDrawing({
 
         // Preview line: update second point
         if (anchorDataRef.current && previewRef.current) {
-          const dataB = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
+          let targetPos = pos;
+          if (SHAPE_TOOL_IDS.has(tool) && e.shiftKey) {
+            const anchorScreen = dataToScreen(anchorDataRef.current);
+            targetPos = constrainShapeScreenPoint(anchorScreen, pos);
+          }
+          const dataB = screenToDrawingData(targetPos.x, targetPos.y, { snap: drawingSnapEnabledRef.current && !e.altKey && !(SHAPE_TOOL_IDS.has(tool) && e.shiftKey) });
           if (dataB) {
             previewRef.current.setDataPoints([anchorDataRef.current, dataB]);
           }
@@ -1692,8 +2011,41 @@ export function useDrawing({
         // Hover feedback on lines, fibs and text
         const hit = hitTestAll(pos.x, pos.y);
         for (const prim of primitivesRef.current) {
-          if (prim instanceof LineDrawingPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive) {
+          if (prim instanceof LineDrawingPrimitive || prim instanceof AxisLineDrawingPrimitive || prim instanceof AngleMeasurementPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive || prim instanceof ShapeDrawingPrimitive) {
             prim.setHovered(hit?.prim?.id === prim.id);
+          }
+        }
+
+        if (LINE_TOOL_IDS.has(tool) && !draggingRef.current) {
+          const container = chartContainerRef?.current;
+          if (container) {
+            if (hit?.type === "axis-line") {
+              const axisLineType = hit.prim.axisLineType;
+              if (axisLineType === "horizontal") setCursor(container, "ns-resize");
+              else if (axisLineType === "vertical") setCursor(container, "ew-resize");
+              else setCursor(container, "move");
+            } else if (hit?.type === "angle") {
+              setCursor(container, hit.pointIndex >= 0 ? "crosshair" : "move");
+            } else if (hit?.type === "line") {
+              setCursor(container, hit.pointIndex >= 0 ? "crosshair" : "move");
+            } else {
+              setCursor(container, "crosshair");
+            }
+          }
+        }
+
+        if (SHAPE_TOOL_IDS.has(tool) && !draggingRef.current) {
+          const container = chartContainerRef?.current;
+          if (container) {
+            if (hit?.type === "shape") {
+              if (hit.zone === "l" || hit.zone === "r") setCursor(container, "ew-resize");
+              else if (hit.zone === "t" || hit.zone === "b") setCursor(container, "ns-resize");
+              else if (hit.zone === "tl" || hit.zone === "br") setCursor(container, "nwse-resize");
+              else if (hit.zone === "tr" || hit.zone === "bl") setCursor(container, "nesw-resize");
+              else setCursor(container, "move");
+            } else {
+              setCursor(container, "crosshair");
+            }
           }
         }
       }
@@ -1706,6 +2058,8 @@ export function useDrawing({
           if (hit?.type === "position") {
             if (hit.zone === "tp" || hit.zone === "sl") {
               setCursor(container, "ns-resize");
+            } else if (hit.zone === "panel") {
+              setCursor(container, "grab");
             } else if (hit.zone === "left" || hit.zone === "right") {
               setCursor(container, "ew-resize");
             } else if (hit.zone === "entry" || hit.zone === "body") {
@@ -1790,12 +2144,12 @@ export function useDrawing({
     handleMouseUp();
   }, [handleMouseUp]);
 
-  // ── RIGHT-CLICK: cancel line placement ──
+  // ── RIGHT-CLICK: cancel pending two-point placement ──
 
   const handleContextMenu = useCallback(
     (e) => {
       const tool = activeToolRef.current;
-      if ((LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool)) && anchorDataRef.current) {
+      if ((LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool) || SHAPE_TOOL_IDS.has(tool)) && anchorDataRef.current) {
         e.preventDefault();
         removePreview();
       }
@@ -1806,7 +2160,7 @@ export function useDrawing({
   // ── KEYBOARD: Escape / Delete ──
 
   useEffect(() => {
-    if (!isLineTool && !isFibTool && !isPenTool && !isEraserTool && !isTextTool && !isPositionTool && !selectedPrimId && !editingTextId) return;
+    if (!isLineTool && !isFibTool && !isShapeTool && !isPenTool && !isHighlighterTool && !isEraserTool && !isTextTool && !isPositionTool && !selectedPrimId && !editingTextId) return;
 
     const handleKeyDown = (e) => {
       // Don't intercept if editing text
@@ -1838,16 +2192,16 @@ export function useDrawing({
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, isPositionTool, selectedPrimId, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
+  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, selectedPrimId, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
 
   // ── Clean up when tool changes ──
 
   useEffect(() => {
-    if (!isLineTool && !isFibTool) {
+    if (!isLineTool && !isFibTool && !isShapeTool) {
       removePreview();
       draggingRef.current = null;
     }
-    if (!isLineTool && !isFibTool && !isTextTool && !isPositionTool) {
+    if (!isLineTool && !isFibTool && !isShapeTool && !isTextTool && !isPositionTool) {
       // Keep a currently-selected text primitive selected even after we
       // leave the text tool — so the floating format toolbar remains
       // visible right after committing a freshly-created text annotation
@@ -1859,7 +2213,7 @@ export function useDrawing({
         deselectAll();
       }
     }
-    if (!isPenTool) {
+    if (!isPenTool && !isHighlighterTool) {
       isDrawingFreehandRef.current = false;
       currentFreehandRef.current = null;
     }
@@ -1872,7 +2226,7 @@ export function useDrawing({
         prim.setHovered(false);
       }
     }
-  }, [isLineTool, isFibTool, isPenTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing]);
+  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing]);
 
   // ── Attach event listeners to chart container ──
 
@@ -2024,6 +2378,10 @@ export function useDrawing({
     }
     if (typeof patch.lineWidth === "number" && typeof prim.setLineWidth === "function" && patch.lineWidth !== prim.lineWidth) {
       prim.setLineWidth(patch.lineWidth);
+      changed = true;
+    }
+    if (typeof patch.opacity === "number" && typeof prim.setOpacity === "function" && patch.opacity !== prim.opacity) {
+      prim.setOpacity(patch.opacity);
       changed = true;
     }
     if (changed) {

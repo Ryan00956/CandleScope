@@ -1,11 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MultiPaneChart from "./components/MultiPaneChart";
 import DrawingToolbar from "./components/DrawingToolbar";
+import ExportPanel from "./components/ExportPanel";
 import SettingsModal from "./components/SettingsModal";
 import IndicatorPanel from "./components/IndicatorPanel";
+import AlertsPanel from "./components/alerts/AlertsPanel";
+import IntervalSelector from "./components/IntervalSelector";
 import SymbolSearch from "./components/SymbolSearch";
 import WatchlistSidebar, { loadWatchlists, saveWatchlists } from "./components/WatchlistSidebar";
+import { useCustomIntervals } from "./hooks/useCustomIntervals";
+import { useExportPreview } from "./hooks/useExportPreview";
 import { useIndicators } from "./hooks/useIndicators";
+import { groupIntervalsByDuration, parseIntervalSeconds } from "./utils/intervals";
 import { inferExchangeFromSymbol } from "./utils/symbolKey";
 import {
   fetchKlinesBefore,
@@ -18,16 +24,8 @@ import {
   getPriceStreamUrl,
 } from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
+import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, downloadBlob } from "./services/exportService";
 import "./index.css";
-
-// ---------- Custom interval helpers ----------
-const CUSTOM_INTERVAL_RE = /^(\d+)([smhdwM])$/;
-function parseIntervalSeconds(intv) {
-  const units = { s: 1, m: 60, h: 3600, d: 86400, w: 604800, M: 2592000 };
-  const m = CUSTOM_INTERVAL_RE.exec(intv);
-  if (!m) return null;
-  return parseInt(m[1], 10) * (units[m[2]] || 60);
-}
 // ---------- ErrorBoundary ----------
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -151,33 +149,19 @@ function buildSortedIntervals(savedCustom, exchange = "binance") {
       all.push({ value: intv, label: intv, seconds: secs, isCustom: true });
     }
   }
-  all.sort((a, b) => a.seconds - b.seconds);
-
-  const seconds = all.filter((i) => i.seconds < 60);
-  const minutes = all.filter((i) => i.seconds >= 60 && i.seconds < 3600);
-  const hours = all.filter((i) => i.seconds >= 3600 && i.seconds < 86400);
-  const days = all.filter((i) => i.seconds >= 86400);
-  return [
-    { label: "Seconds", items: seconds },
-    { label: "Minutes", items: minutes },
-    { label: "Hours", items: hours },
-    { label: "Days", items: days },
-  ].filter((g) => g.items.length > 0);
-}
-
-const CUSTOM_INTERVALS_KEY = "candlescope-custom-intervals";
-function loadSavedCustomIntervals() {
-  try {
-    const raw = localStorage.getItem(CUSTOM_INTERVALS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-function saveSavedCustomIntervals(list) {
-  localStorage.setItem(CUSTOM_INTERVALS_KEY, JSON.stringify(list));
+  return groupIntervalsByDuration(all);
 }
 
 // ---------- User preference persistence ----------
 const USER_PREFS_KEY = "candlescope-user-prefs";
+const DEFAULT_CURSOR_TOOL = "cursor-default";
+const CURSOR_TOOL_IDS = new Set([
+  DEFAULT_CURSOR_TOOL,
+  "cursor-crosshair",
+  "cursor-dot",
+  "cursor-highlighter",
+  "cursor-plain",
+]);
 
 function loadUserPrefs() {
   try {
@@ -192,6 +176,11 @@ function updateUserPref(key, value) {
   const prefs = loadUserPrefs();
   prefs[key] = value;
   saveUserPrefs(prefs);
+}
+
+function getSystemTheme() {
+  if (typeof window === "undefined" || !window.matchMedia) return "dark";
+  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
 // Visible range persistence per market + symbol + interval
@@ -382,9 +371,18 @@ export default function App() {
 
   const [wsStatus, setWsStatus] = useState("idle");
   const chartWidgetRef = useRef(null);
+  const pageExportRef = useRef(null);
 
   // --- Drawing tool state ---
-  const [drawingTool, setDrawingTool] = useState(null);
+  const [drawingTool, setDrawingToolState] = useState(DEFAULT_CURSOR_TOOL);
+  const lastCursorToolRef = useRef(DEFAULT_CURSOR_TOOL);
+  const setDrawingTool = useCallback((nextTool) => {
+    const normalizedTool = nextTool || lastCursorToolRef.current || DEFAULT_CURSOR_TOOL;
+    if (CURSOR_TOOL_IDS.has(normalizedTool)) {
+      lastCursorToolRef.current = normalizedTool;
+    }
+    setDrawingToolState(normalizedTool);
+  }, []);
   const [penColor, setPenColor] = useState("#f59e0b");
   const [penSize, setPenSize] = useState(2);
   const [textFontSize, setTextFontSize] = useState(14);
@@ -505,10 +503,39 @@ export default function App() {
     }
     return defaults;
   });
+  const [systemTheme, setSystemTheme] = useState(getSystemTheme);
+  const resolvedTheme = settings.theme === "system" ? systemTheme : settings.theme;
+
+  // --- Chart export state ---
+  const [showExportPanel, setShowExportPanel] = useState(false);
+  const [exportOptions, setExportOptions] = useState(() => {
+    const prefs = loadUserPrefs();
+    return { ...DEFAULT_EXPORT_OPTIONS, ...(prefs.chartExportOptions || {}) };
+  });
+  const [exportInProgress, setExportInProgress] = useState(false);
+  const [exportError, setExportError] = useState(null);
+  const [exportNotice, setExportNotice] = useState(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return undefined;
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
+    const handleSystemThemeChange = (event) => {
+      setSystemTheme(event.matches ? "light" : "dark");
+    };
+
+    setSystemTheme(mediaQuery.matches ? "light" : "dark");
+    if (mediaQuery.addEventListener) {
+      mediaQuery.addEventListener("change", handleSystemThemeChange);
+      return () => mediaQuery.removeEventListener("change", handleSystemThemeChange);
+    }
+
+    mediaQuery.addListener(handleSystemThemeChange);
+    return () => mediaQuery.removeListener(handleSystemThemeChange);
+  }, []);
 
   useEffect(() => {
     const root = document.documentElement;
-    root.setAttribute("data-theme", settings.theme);
+    root.setAttribute("data-theme", resolvedTheme);
     if (settings.theme === "custom") {
       root.style.setProperty("--bg-primary", settings.customBg);
       root.style.setProperty("--bg-secondary", settings.customBg);
@@ -519,10 +546,11 @@ export default function App() {
     root.style.setProperty("--candle-up", settings.upColor);
     root.style.setProperty("--candle-down", settings.downColor);
     localStorage.setItem("candlescope-settings", JSON.stringify(settings));
-  }, [settings]);
+  }, [resolvedTheme, settings]);
 
   // --- Indicator state ---
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);
+  const [showAlertsPanel, setShowAlertsPanel] = useState(false);
   // Store the actual ref objects from ChartWidget (not copies of .current)
   // so useIndicators always reads the live chart/series instances.
   const indicatorChartRefRef = useRef(null);   // ref-to-ref: points to ChartWidget's chartRef
@@ -543,7 +571,6 @@ export default function App() {
     toggleVisibility,
     updateIndicatorParams,
     updateIndicatorScript,
-    computeAll: recomputeIndicators,
     recompute: recomputeIndicatorsWithUI,
     mainOverlayLines,
     subPanes,
@@ -553,7 +580,6 @@ export default function App() {
     hlines: indicatorHlines,
     bgcolors: indicatorBgcolors,
     barcolors: indicatorBarcolors,
-    paramSchemas: indicatorParamSchemas,
   } = useIndicators({
     chartRef: indicatorChartRefRef,
     seriesRef: indicatorSeriesRefRef,
@@ -568,15 +594,75 @@ export default function App() {
   });
   const chartStorageKeyBase = `${exchange}:${marketType}:${symbol}`;
 
+  const exportMetadata = useMemo(() => ({
+    exchange,
+    marketType,
+    symbol,
+    interval,
+    theme: resolvedTheme,
+  }), [exchange, interval, marketType, resolvedTheme, symbol]);
+
+  const exportPreview = useExportPreview({
+    isOpen: showExportPanel,
+    options: exportOptions,
+    metadata: exportMetadata,
+    chartWidgetRef,
+    pageExportRef,
+    drawingsHidden,
+    setDrawingsHidden,
+  });
+
+  const handleExportOptionsChange = useCallback((nextOptions) => {
+    setExportOptions(nextOptions);
+    updateUserPref("chartExportOptions", nextOptions);
+  }, []);
+
+  const handleToggleExportPanel = useCallback(() => {
+    setExportError(null);
+    setExportNotice(null);
+    setShowExportPanel((prev) => !prev);
+  }, []);
+
+  const handleCloseExportPanel = useCallback(() => {
+    if (exportInProgress) return;
+    setShowExportPanel(false);
+  }, [exportInProgress]);
+
+  const handleExportChart = useCallback(async (requestedOptions = exportOptions) => {
+    if (exportInProgress) return;
+
+    const finalOptions = {
+      ...DEFAULT_EXPORT_OPTIONS,
+      ...exportOptions,
+      ...requestedOptions,
+      metadata: exportMetadata,
+    };
+    const finalOptionsKey = buildExportOptionsKey(finalOptions);
+    const previewReady = exportPreview.blob && exportPreview.optionsKey === finalOptionsKey;
+
+    setExportInProgress(true);
+    setExportError(null);
+    setExportNotice(null);
+
+    try {
+      if (!previewReady) {
+        throw new Error("当前配置的预览还未生成完成，请等待右侧预览更新后再保存。 ");
+      }
+
+      downloadBlob(exportPreview.blob, exportPreview.filename);
+      setExportNotice(`已保存 ${exportPreview.filename}`);
+    } catch (err) {
+      setExportError(err?.message || "保存失败，请稍后重试。 ");
+    } finally {
+      setExportInProgress(false);
+    }
+  }, [exportInProgress, exportMetadata, exportOptions, exportPreview.blob, exportPreview.filename, exportPreview.optionsKey]);
+
   const removeIndicator = useCallback((indicatorId) => {
     rawRemoveIndicator(indicatorId);
     clearSavedDrawings(`${chartStorageKeyBase}-separate-${indicatorId}`);
     clearSavedDrawings(`${chartStorageKeyBase}-volume-${indicatorId}`);
   }, [chartStorageKeyBase, rawRemoveIndicator]);
-
-  // --- Custom interval state ---
-  const [customInput, setCustomInput] = useState("");
-  const [customError, setCustomError] = useState(null);
 
   // --- Cross-interval data cache for instant switching ---
   const chartDataCacheRef = useRef(new Map());
@@ -628,9 +714,24 @@ export default function App() {
   }, []);
 
   // --- Saved custom intervals ---
-  const [savedCustomIntervals, setSavedCustomIntervals] = useState(loadSavedCustomIntervals);
-  const [showIntervalManager, setShowIntervalManager] = useState(false);
-  const intervalGroups = buildSortedIntervals(savedCustomIntervals, exchange);
+  const {
+    customIntervalRecords,
+    savedCustomIntervals,
+    addCustomInterval,
+    markIntervalUsed,
+    removeCustomInterval,
+    restoreCustomInterval,
+    togglePinCustomInterval,
+    clearCustomIntervals,
+  } = useCustomIntervals();
+  const [intervalNotice, setIntervalNotice] = useState(null);
+  const lastRemovedIntervalRef = useRef(null);
+  const intervalNoticeTimerRef = useRef(null);
+  const nativeIntervals = useMemo(() => getNativeIntervals(exchange), [exchange]);
+  const intervalGroups = useMemo(
+    () => buildSortedIntervals(savedCustomIntervals, exchange),
+    [exchange, savedCustomIntervals],
+  );
   const baseWsIntervals = useMemo(() => getBaseWsIntervals(exchange), [exchange]);
   const trackedIntervals = useMemo(
     () => Array.from(new Set([...baseWsIntervals, ...savedCustomIntervals, interval])),
@@ -640,23 +741,6 @@ export default function App() {
   trackedIntervalsRef.current = trackedIntervals;
   const socketRef = useRef(null);
   const liveSubscribedIntervalsRef = useRef(new Set());
-
-  const addCustomInterval = (intv) => {
-    setSavedCustomIntervals((prev) => {
-      if (prev.includes(intv)) return prev;
-      const next = [...prev, intv];
-      saveSavedCustomIntervals(next);
-      return next;
-    });
-  };
-  const removeCustomInterval = (intv) => {
-    setSavedCustomIntervals((prev) => {
-      const next = prev.filter((i) => i !== intv);
-      saveSavedCustomIntervals(next);
-      return next;
-    });
-    if (interval === intv) handleIntervalChange("1h");
-  };
 
   // --- Watchlist state (shared between sidebar and search modal) ---
   const [watchlists, setWatchlists] = useState(loadWatchlists);
@@ -1366,7 +1450,6 @@ export default function App() {
   //  This is the last line of defense against K-line gaps.
   // ============================================================
   const gapFillInFlightRef = useRef(new Set()); // track in-flight gap fills to avoid duplicates
-  const gapFillRetryCountRef = useRef(new Map()); // track retry count per interval
   const GAP_FILL_MAX_RETRIES = 3; // max consecutive gap-fill attempts per interval
   const GAP_FILL_COOLDOWN_MS = 30_000; // cooldown between gap-fill attempts
   const recoverGapsRef = useRef(null); // stable ref for use in WS effect
@@ -1624,32 +1707,98 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [saveCurrentVisibleRange]);
 
+  useEffect(() => () => {
+    if (intervalNoticeTimerRef.current) clearTimeout(intervalNoticeTimerRef.current);
+  }, []);
+
+  const showIntervalNotice = useCallback((notice) => {
+    setIntervalNotice(notice);
+    if (intervalNoticeTimerRef.current) clearTimeout(intervalNoticeTimerRef.current);
+    intervalNoticeTimerRef.current = setTimeout(() => {
+      setIntervalNotice(null);
+      intervalNoticeTimerRef.current = null;
+    }, notice?.duration || 4200);
+  }, []);
+
+  const getFallbackIntervalAfterRemove = useCallback((removedInterval) => {
+    const recentCustom = customIntervalRecords
+      .filter((record) => record.value !== removedInterval)
+      .sort((a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0))[0];
+    if (recentCustom) return recentCustom.value;
+
+    const removedSeconds = parseIntervalSeconds(removedInterval);
+    if (!removedSeconds) return isNativeIntervalSupported(exchange, "1h") ? "1h" : nativeIntervals[0]?.value || "1m";
+
+    return [...nativeIntervals]
+      .filter((item) => item.value !== removedInterval)
+      .sort((a, b) => Math.abs(a.seconds - removedSeconds) - Math.abs(b.seconds - removedSeconds))[0]?.value || "1h";
+  }, [customIntervalRecords, exchange, nativeIntervals]);
+
   const handleIntervalChange = (newInterval) => {
     if (newInterval !== interval) {
       saveCurrentVisibleRange();
       setCrosshairData(null);
-      setCustomInput("");
-      setCustomError(null);
       realtimePriceRef.current = null;
       setLastPrice(null);
       gapFillInFlightRef.current.clear(); // Reset gap fill tracking on interval change
       setInterval_(newInterval);
+      markIntervalUsed(newInterval);
       updateUserPref("lastInterval", newInterval);
     }
   };
 
-  const handleCustomSubmit = (e) => {
-    e.preventDefault();
-    const trimmed = customInput.trim();
-    if (!trimmed) return;
-    if (!CUSTOM_INTERVAL_RE.test(trimmed)) {
-      setCustomError("格式: 数字+单位 (s/m/h/d/w/M), 如 7m, 45m, 3h");
-      return;
+  const handleCreateCustomInterval = (newInterval) => {
+    if (isNativeIntervalSupported(exchange, newInterval)) {
+      handleIntervalChange(newInterval);
+      return { ok: true, added: false };
     }
-    setCustomError(null);
-    addCustomInterval(trimmed);
-    setCustomInput("");
-    handleIntervalChange(trimmed);
+    const result = addCustomInterval(newInterval, { markUsed: true });
+    if (!result.ok) return { ok: false, message: "周期格式无效" };
+    handleIntervalChange(result.value);
+    showIntervalNotice({ type: "success", text: `${result.value} 已添加并切换` });
+    return { ok: true, added: result.added };
+  };
+
+  const handleRemoveCustomInterval = (removedInterval) => {
+    const removed = removeCustomInterval(removedInterval);
+    if (!removed) return;
+    lastRemovedIntervalRef.current = removed;
+    if (interval === removedInterval) {
+      handleIntervalChange(getFallbackIntervalAfterRemove(removedInterval));
+    }
+    showIntervalNotice({
+      type: "warning",
+      text: `${removedInterval} 已删除`,
+      actionLabel: "撤销",
+      duration: 6500,
+    });
+  };
+
+  const handleRestoreCustomInterval = () => {
+    const restored = restoreCustomInterval(lastRemovedIntervalRef.current);
+    if (!restored) return;
+    lastRemovedIntervalRef.current = null;
+    showIntervalNotice({ type: "success", text: `${restored.value} 已恢复` });
+  };
+
+  const handleClearCustomIntervals = () => {
+    const removed = clearCustomIntervals();
+    if (removed.length === 0) return;
+    const currentWasRemoved = removed.some((record) => record.value === interval);
+    lastRemovedIntervalRef.current = removed[removed.length - 1] || null;
+    if (currentWasRemoved) {
+      const currentSeconds = parseIntervalSeconds(interval);
+      const fallback = currentSeconds
+        ? [...nativeIntervals].sort((a, b) => Math.abs(a.seconds - currentSeconds) - Math.abs(b.seconds - currentSeconds))[0]?.value
+        : null;
+      handleIntervalChange(fallback || "1h");
+    }
+    showIntervalNotice({
+      type: "warning",
+      text: `已清空 ${removed.length} 个自定义周期，最近一项可撤销`,
+      actionLabel: "撤销最近一项",
+      duration: 6500,
+    });
   };
 
   const displayData = crosshairData || lastPrice;
@@ -1702,7 +1851,7 @@ export default function App() {
   const marketLabel = marketType === "futures" ? "Futures" : "Spot";
 
   return (
-    <div className="app-layout">
+    <div className="app-layout" ref={pageExportRef}>
       <header className="top-bar" id="top-bar">
         <div className="logo">
           <div className="logo-icon">📈</div>
@@ -1742,6 +1891,14 @@ export default function App() {
           {activeIndicators.length > 0 && (
             <span className="indicator-badge">{activeIndicators.length}</span>
           )}
+        </button>
+
+        <button
+          className={`indicator-toggle-btn alert-toggle-btn ${showAlertsPanel ? "active" : ""}`}
+          onClick={() => setShowAlertsPanel((p) => !p)}
+          title="警报 (Alerts)"
+        >
+          🔔
         </button>
 
         {displayData && (
@@ -1799,132 +1956,20 @@ export default function App() {
         )}
       </header>
 
-      <nav className="toolbar" id="toolbar">
-        {intervalGroups.map((group, gi) => (
-          <div key={gi} style={{ display: "flex", alignItems: "center" }}>
-            {gi > 0 && <div className="toolbar-divider" />}
-            <div className="toolbar-group">
-              {group.items.map((item) => (
-                <button
-                  key={item.value}
-                  id={`interval-${item.value}`}
-                  className={`interval-btn ${interval === item.value ? "active" : ""}${item.isCustom ? " custom-interval-btn" : ""}`}
-                  onClick={() => handleIntervalChange(item.value)}
-                  title={item.isCustom ? `自定义: ${item.value}` : item.value}
-                  style={item.isCustom ? { fontStyle: "italic", position: "relative" } : {}}
-                >
-                  {item.isCustom ? `★${item.label}` : item.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        ))}
-
-        <div className="toolbar-divider" />
-
-        <form
-          className="custom-interval-form"
-          onSubmit={handleCustomSubmit}
-          style={{ display: "flex", alignItems: "center", gap: 6 }}
-        >
-          <input
-            id="custom-interval-input"
-            type="text"
-            className="custom-interval-input"
-            placeholder="添加 如7m"
-            value={customInput}
-            onChange={(e) => { setCustomInput(e.target.value); setCustomError(null); }}
-            style={{
-              width: 80,
-              padding: "4px 8px",
-              fontSize: 12,
-              background: "var(--bg-tertiary)",
-              border: customError ? "1px solid #ef4444" : "1px solid var(--border-color)",
-              borderRadius: 4,
-              color: "var(--text-primary)",
-              outline: "none",
-            }}
-          />
-          <button
-            type="submit"
-            className="interval-btn"
-            style={{ fontSize: 12, padding: "4px 10px" }}
-          >
-            +
-          </button>
-          {savedCustomIntervals.length > 0 && (
-            <button
-              type="button"
-              className={`interval-btn ${showIntervalManager ? "active" : ""}`}
-              onClick={() => setShowIntervalManager((p) => !p)}
-              style={{ fontSize: 12, padding: "4px 8px" }}
-              title="管理自定义周期"
-            >
-              ✎
-            </button>
-          )}
-        </form>
-        {customError && (
-          <span style={{ color: "#ef4444", fontSize: 11, marginLeft: 4 }}>{customError}</span>
-        )}
-      </nav>
-
-      {showIntervalManager && (
-        <div className="interval-manager" style={{
-          background: "var(--bg-secondary)",
-          border: "1px solid var(--border-color)",
-          borderRadius: 8,
-          padding: "12px 16px",
-          margin: "0 8px",
-          display: "flex",
-          flexWrap: "wrap",
-          gap: 8,
-          alignItems: "center",
-        }}>
-          <span style={{ fontSize: 12, color: "var(--text-muted)", marginRight: 4 }}>自定义周期:</span>
-          {savedCustomIntervals.length === 0 && (
-            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>暂无，在上方输入框添加</span>
-          )}
-          {savedCustomIntervals
-            .map((intv) => ({ intv, secs: parseIntervalSeconds(intv) || 0 }))
-            .sort((a, b) => a.secs - b.secs)
-            .map(({ intv }) => (
-              <div key={intv} style={{
-                display: "flex", alignItems: "center", gap: 4,
-                background: "var(--bg-tertiary)",
-                border: interval === intv ? "1px solid var(--accent-blue)" : "1px solid var(--border-color)",
-                borderRadius: 6, padding: "3px 8px",
-              }}>
-                <span
-                  style={{ fontSize: 12, color: "var(--text-primary)", cursor: "pointer" }}
-                  onClick={() => { handleIntervalChange(intv); setShowIntervalManager(false); }}
-                >
-                  ★ {intv}
-                </span>
-                <button
-                  onClick={() => removeCustomInterval(intv)}
-                  style={{
-                    background: "none", border: "none", color: "#ef4444",
-                    cursor: "pointer", fontSize: 14, padding: "0 2px",
-                    lineHeight: 1,
-                  }}
-                  title={`删除 ${intv}`}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          <button
-            onClick={() => setShowIntervalManager(false)}
-            style={{
-              background: "none", border: "none", color: "var(--text-muted)",
-              cursor: "pointer", fontSize: 11, marginLeft: "auto",
-            }}
-          >
-            收起
-          </button>
-        </div>
-      )}
+      <IntervalSelector
+        interval={interval}
+        nativeIntervals={nativeIntervals}
+        intervalGroups={intervalGroups}
+        customIntervalRecords={customIntervalRecords}
+        savedCustomIntervals={savedCustomIntervals}
+        onSelectInterval={handleIntervalChange}
+        onCreateCustomInterval={handleCreateCustomInterval}
+        onRemoveCustomInterval={handleRemoveCustomInterval}
+        onRestoreCustomInterval={handleRestoreCustomInterval}
+        onTogglePinCustomInterval={togglePinCustomInterval}
+        onClearCustomIntervals={handleClearCustomIntervals}
+        intervalNotice={intervalNotice}
+      />
 
       <div className="main-content-area">
       <div className="chart-with-toolbar">
@@ -1954,6 +1999,24 @@ export default function App() {
           onPositionSizeChange={handlePositionSizeChange}
           selectedDrawing={selectedDrawing}
           onSelectedDrawingStyleChange={handleSelectedDrawingStyleChange}
+          exportPanelOpen={showExportPanel}
+          exportInProgress={exportInProgress}
+          onToggleExportPanel={handleToggleExportPanel}
+        />
+
+        <ExportPanel
+          isOpen={showExportPanel}
+          options={exportOptions}
+          onOptionsChange={handleExportOptionsChange}
+          onExport={handleExportChart}
+          onClose={handleCloseExportPanel}
+          inProgress={exportInProgress}
+          error={exportError}
+          notice={exportNotice}
+          metadata={exportMetadata}
+          loading={loading || loadingMoreLeft}
+          indicatorComputing={indicatorComputing}
+          preview={exportPreview}
         />
 
         {error ? (
@@ -1989,7 +2052,7 @@ export default function App() {
               datasetKey={`${exchange}-${marketType}-${symbol}-${interval}-${datasetKey}`}
               upColor={settings.upColor}
               downColor={settings.downColor}
-              theme={settings.theme}
+              theme={resolvedTheme}
               customBg={settings.customBg}
               timezone={settings.timezone}
               savedVisibleRange={getVisibleRangeForInterval(symbol, interval, marketType, exchange)}
@@ -2051,6 +2114,18 @@ export default function App() {
         onUpdateParams={updateIndicatorParams}
         onUpdateScript={updateIndicatorScript}
         onRecompute={recomputeIndicatorsWithUI}
+      />
+
+      <AlertsPanel
+        isOpen={showAlertsPanel}
+        onClose={() => setShowAlertsPanel(false)}
+        currentSymbol={symbol}
+        currentMarketType={marketType}
+        currentExchange={exchange}
+        currentInterval={interval}
+        displayPrice={displayData?.close ?? lastPrice?.close}
+        wsStatus={wsStatus}
+        watchlists={watchlists}
       />
 
       <SettingsModal

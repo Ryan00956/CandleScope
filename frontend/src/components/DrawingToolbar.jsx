@@ -1,10 +1,9 @@
 /**
  * Drawing toolbar — sits on the left side of the chart area.
  *
- * Buttons: Pen, Eraser, Line, Text, Fibonacci, Position (Long/Short).
+ * Buttons: Mouse cursor, Pen/Highlighter, Eraser, Line, Shape, Text, Fibonacci, Position (Long/Short).
  * Left-click toggles the tool on/off.
- * Right-click or double-click on Line opens a flyout to switch between
- * line-segment / line-ray / line-infinite.
+ * Right-click or double-click on Cursor / Pen / Line / Shape opens a flyout to switch variants.
  *
  * All drawing is native (Plugin API), no pixel overlays.
  */
@@ -22,6 +21,15 @@ const PenIcon = (
   </svg>
 );
 
+const HighlighterIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 20h7" />
+    <path d="M13.5 3.5l7 7-8.5 8.5H6.5l7-15.5z" />
+    <path d="M12 6l6 6" />
+    <path d="M6.5 19L4 21.5" opacity="0.6" />
+  </svg>
+);
+
 const EraserIcon = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M20 20H7L3 16c-.8-.8-.8-2 0-2.8L14.6 1.6c.8-.8 2-.8 2.8 0L21.8 6c.8.8.8 2 0 2.8L12 18.6" />
@@ -35,6 +43,43 @@ const TextIcon = (
     <path d="M4 7V4h16v3" />
     <line x1="12" y1="4" x2="12" y2="20" />
     <line x1="8" y1="20" x2="16" y2="20" />
+  </svg>
+);
+
+const MouseDefaultIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M5 3l7.5 17 2.1-7.1L21 10.2 5 3z" />
+    <line x1="17" y1="4" x2="17" y2="8" opacity="0.65" />
+    <line x1="15" y1="6" x2="19" y2="6" opacity="0.65" />
+  </svg>
+);
+
+const MouseCrosshairIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 4l6.6 15 1.7-6 5.7-2.3L4 4z" />
+    <line x1="17" y1="3" x2="17" y2="9" />
+    <line x1="14" y1="6" x2="20" y2="6" />
+  </svg>
+);
+
+const CursorDotIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M5 3l7.5 17 2.1-7.1L21 10.2 5 3z" opacity="0.55" />
+    <circle cx="17" cy="7" r="2.4" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const CursorHighlighterIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M5 3l7.5 17 2.1-7.1L21 10.2 5 3z" opacity="0.5" />
+    <circle cx="17" cy="7" r="4.4" fill="currentColor" stroke="none" opacity="0.28" />
+    <circle cx="17" cy="7" r="1.4" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const MousePlainIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M5 3l7.5 17 2.1-7.1L21 10.2 5 3z" />
   </svg>
 );
 
@@ -61,6 +106,55 @@ const InfiniteLineIcon = (
     <line x1="1" y1="23" x2="23" y2="1" />
     <path d="M1 20l0 3l3 0" />
     <path d="M21 1l3 0l0 3" />
+  </svg>
+);
+
+const HorizontalLineIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="3" y1="12" x2="21" y2="12" />
+    <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const VerticalLineIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="12" y1="3" x2="12" y2="21" />
+    <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const CrossLineIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="3" y1="12" x2="21" y2="12" />
+    <line x1="12" y1="3" x2="12" y2="21" />
+    <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const AngleMeasureIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 20h16" opacity="0.55" strokeDasharray="3 3" />
+    <path d="M4 20L18 6" />
+    <path d="M9 20a5 5 0 0 0-1.5-3.5" />
+    <text x="12.5" y="18" fontSize="6" fill="currentColor" stroke="none">°</text>
+  </svg>
+);
+
+/* ── Shape tool icons ── */
+
+const RectangleIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="4" y="6" width="16" height="12" rx="1.5" />
+    <circle cx="4" cy="6" r="1.6" fill="currentColor" stroke="none" />
+    <circle cx="20" cy="18" r="1.6" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const EllipseIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <ellipse cx="12" cy="12" rx="8" ry="5.5" />
+    <circle cx="4" cy="12" r="1.6" fill="currentColor" stroke="none" />
+    <circle cx="20" cy="12" r="1.6" fill="currentColor" stroke="none" />
   </svg>
 );
 
@@ -105,6 +199,15 @@ const MagnetIcon = (
   </svg>
 );
 
+const ExportIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+    <path d="M12 3v12" />
+    <path d="M7 10l5 5 5-5" />
+    <rect x="5" y="5" width="14" height="9" rx="2" opacity="0.25" />
+  </svg>
+);
+
 /* small indicator triangle rendered in the corner of a tool button */
 const CornerTriangle = (
   <svg
@@ -120,13 +223,41 @@ const CornerTriangle = (
 
 /* ─── Tool variant definitions ──────────────────────────── */
 
+const CURSOR_VARIANTS = [
+  { id: "cursor-default", label: "默认鼠标", icon: MouseDefaultIcon },
+  { id: "cursor-crosshair", label: "十字星", icon: MouseCrosshairIcon },
+  { id: "cursor-dot", label: "圆点", icon: CursorDotIcon },
+  { id: "cursor-highlighter", label: "荧光笔光标", icon: CursorHighlighterIcon },
+  { id: "cursor-plain", label: "纯鼠标", icon: MousePlainIcon },
+];
+
+const CURSOR_TOOL_IDS = new Set(CURSOR_VARIANTS.map((v) => v.id));
+
+const FREEHAND_VARIANTS = [
+  { id: "pen", label: "画笔", icon: PenIcon },
+  { id: "highlighter", label: "荧光笔", icon: HighlighterIcon },
+];
+
+const FREEHAND_TOOL_IDS = new Set(FREEHAND_VARIANTS.map((v) => v.id));
+
 const LINE_VARIANTS = [
   { id: "line-segment", label: "线段", icon: SegmentIcon },
   { id: "line-ray", label: "射线", icon: RayIcon },
   { id: "line-infinite", label: "直线", icon: InfiniteLineIcon },
+  { id: "line-horizontal", label: "水平线", icon: HorizontalLineIcon },
+  { id: "line-vertical", label: "垂直线", icon: VerticalLineIcon },
+  { id: "line-cross", label: "十字线", icon: CrossLineIcon },
+  { id: "angle-measure", label: "角度", icon: AngleMeasureIcon },
 ];
 
 const LINE_TOOL_IDS = new Set(LINE_VARIANTS.map((v) => v.id));
+
+const SHAPE_VARIANTS = [
+  { id: "shape-rectangle", label: "矩形", icon: RectangleIcon },
+  { id: "shape-ellipse", label: "圆形/椭圆", icon: EllipseIcon },
+];
+
+const SHAPE_TOOL_IDS = new Set(SHAPE_VARIANTS.map((v) => v.id));
 
 const POSITION_VARIANTS = [
   { id: "position-long", label: "做多", icon: LongPositionIcon },
@@ -409,38 +540,116 @@ const DrawingToolbar = memo(function DrawingToolbar({
   // existing drawing and the default style for subsequently created drawings.
   selectedDrawing = null,
   onSelectedDrawingStyleChange,
+  exportPanelOpen = false,
+  exportInProgress = false,
+  onToggleExportPanel,
 }) {
-  // Which line variant is selected (persisted across toggles)
+  // Which tool variants are selected (persisted across toggles)
+  const [cursorVariant, setCursorVariant] = useState("cursor-default");
+  const [freehandVariant, setFreehandVariant] = useState("pen");
   const [lineVariant, setLineVariant] = useState("line-segment");
+  const [shapeVariant, setShapeVariant] = useState("shape-rectangle");
   const [posVariant, setPosVariant] = useState("position-long");
 
-  // Flyout open state: null | "line" | "fib-levels" | "position" | "position-settings"
+  // Flyout open state: null | "cursor" | "freehand" | "line" | "shape" | "fib-levels" | "position" | "position-settings"
   const [flyoutOpen, setFlyoutOpen] = useState(null);
 
+  const cursorBtnRef = useRef(null);
+  const freehandBtnRef = useRef(null);
   const lineBtnRef = useRef(null);
+  const shapeBtnRef = useRef(null);
   const fibBtnRef = useRef(null);
   const posBtnRef = useRef(null);
 
   // Double-click timer
+  const cursorClickTimerRef = useRef(null);
+  const freehandClickTimerRef = useRef(null);
   const clickTimerRef = useRef(null);
+  const shapeClickTimerRef = useRef(null);
   const posClickTimerRef = useRef(null);
 
-  const isPenActive = activeTool === "pen";
+  const isCursorActive = CURSOR_TOOL_IDS.has(activeTool);
+  const isFreehandActive = FREEHAND_TOOL_IDS.has(activeTool);
   const isEraserActive = activeTool === "eraser";
   const isLineActive = LINE_TOOL_IDS.has(activeTool);
+  const isShapeActive = SHAPE_TOOL_IDS.has(activeTool);
   const isTextActive = activeTool === "text";
   const isFibonacciActive = activeTool === "fibonacci";
   const isPositionActive = POSITION_TOOL_IDS.has(activeTool);
 
-  /* ── Pen button handlers ── */
-  const handlePenClick = useCallback(() => {
-    if (isPenActive) {
-      onToolChange(null);
-    } else {
-      onToolChange("pen");
+  /* ── Passive cursor button handlers ── */
+  const handleCursorClick = useCallback(() => {
+    if (cursorClickTimerRef.current) return;
+    cursorClickTimerRef.current = setTimeout(() => {
+      cursorClickTimerRef.current = null;
+      onToolChange(isCursorActive ? activeTool : cursorVariant);
+      setFlyoutOpen(null);
+    }, 200);
+  }, [activeTool, cursorVariant, isCursorActive, onToolChange]);
+
+  const handleCursorDblClick = useCallback(() => {
+    if (cursorClickTimerRef.current) {
+      clearTimeout(cursorClickTimerRef.current);
+      cursorClickTimerRef.current = null;
     }
-    setFlyoutOpen(null);
-  }, [isPenActive, onToolChange]);
+    setFlyoutOpen((prev) => (prev === "cursor" ? null : "cursor"));
+  }, []);
+
+  const handleCursorContextMenu = useCallback((e) => {
+    e.preventDefault();
+    if (cursorClickTimerRef.current) {
+      clearTimeout(cursorClickTimerRef.current);
+      cursorClickTimerRef.current = null;
+    }
+    setFlyoutOpen((prev) => (prev === "cursor" ? null : "cursor"));
+  }, []);
+
+  const handleSelectCursorVariant = useCallback(
+    (id) => {
+      setCursorVariant(id);
+      onToolChange(id);
+    },
+    [onToolChange],
+  );
+
+  /* ── Pen / highlighter button handlers ── */
+  const handleFreehandClick = useCallback(() => {
+    if (freehandClickTimerRef.current) return;
+    freehandClickTimerRef.current = setTimeout(() => {
+      freehandClickTimerRef.current = null;
+      if (isFreehandActive) {
+        onToolChange(null);
+      } else {
+        onToolChange(freehandVariant);
+      }
+      setFlyoutOpen(null);
+    }, 200);
+  }, [freehandVariant, isFreehandActive, onToolChange]);
+
+  const handleFreehandDblClick = useCallback(() => {
+    if (freehandClickTimerRef.current) {
+      clearTimeout(freehandClickTimerRef.current);
+      freehandClickTimerRef.current = null;
+    }
+    setFlyoutOpen((prev) => (prev === "freehand" ? null : "freehand"));
+  }, []);
+
+  const handleFreehandContextMenu = useCallback((e) => {
+    e.preventDefault();
+    if (freehandClickTimerRef.current) {
+      clearTimeout(freehandClickTimerRef.current);
+      freehandClickTimerRef.current = null;
+    }
+    setFlyoutOpen((prev) => (prev === "freehand" ? null : "freehand"));
+  }, []);
+
+  const handleSelectFreehandVariant = useCallback(
+    (id) => {
+      setFreehandVariant(id);
+      onToolChange(id);
+    },
+    [onToolChange],
+  );
 
   /* ── Eraser button handlers ── */
   const handleEraserClick = useCallback(() => {
@@ -511,11 +720,69 @@ const DrawingToolbar = memo(function DrawingToolbar({
     [onToolChange],
   );
 
+  /* ── Determine which passive cursor icon to show ── */
+  const currentCursorId = isCursorActive ? activeTool : cursorVariant;
+  const currentCursorIcon =
+    CURSOR_VARIANTS.find((v) => v.id === currentCursorId)?.icon || MouseDefaultIcon;
+  const currentCursorLabel =
+    CURSOR_VARIANTS.find((v) => v.id === currentCursorId)?.label || "默认鼠标";
+
+  /* ── Determine which freehand icon to show ── */
+  const currentFreehandId = isFreehandActive ? activeTool : freehandVariant;
+  const currentFreehandIcon =
+    FREEHAND_VARIANTS.find((v) => v.id === currentFreehandId)?.icon || PenIcon;
+  const currentFreehandLabel =
+    FREEHAND_VARIANTS.find((v) => v.id === currentFreehandId)?.label || "画笔";
+
   /* ── Determine which line icon to show ── */
   const currentLineIcon =
     LINE_VARIANTS.find((v) => v.id === lineVariant)?.icon || SegmentIcon;
   const currentLineLabel =
     LINE_VARIANTS.find((v) => v.id === lineVariant)?.label || "线段";
+
+  /* ── Shape button handlers ── */
+  const handleShapeClick = useCallback(() => {
+    if (shapeClickTimerRef.current) return;
+    shapeClickTimerRef.current = setTimeout(() => {
+      shapeClickTimerRef.current = null;
+      if (isShapeActive) {
+        onToolChange(null);
+      } else {
+        onToolChange(shapeVariant);
+      }
+      setFlyoutOpen(null);
+    }, 200);
+  }, [isShapeActive, shapeVariant, onToolChange]);
+
+  const handleShapeDblClick = useCallback(() => {
+    if (shapeClickTimerRef.current) {
+      clearTimeout(shapeClickTimerRef.current);
+      shapeClickTimerRef.current = null;
+    }
+    setFlyoutOpen((prev) => (prev === "shape" ? null : "shape"));
+  }, []);
+
+  const handleShapeContextMenu = useCallback((e) => {
+    e.preventDefault();
+    if (shapeClickTimerRef.current) {
+      clearTimeout(shapeClickTimerRef.current);
+      shapeClickTimerRef.current = null;
+    }
+    setFlyoutOpen((prev) => (prev === "shape" ? null : "shape"));
+  }, []);
+
+  const handleSelectShapeVariant = useCallback(
+    (id) => {
+      setShapeVariant(id);
+      onToolChange(id);
+    },
+    [onToolChange],
+  );
+
+  const currentShapeIcon =
+    SHAPE_VARIANTS.find((v) => v.id === shapeVariant)?.icon || RectangleIcon;
+  const currentShapeLabel =
+    SHAPE_VARIANTS.find((v) => v.id === shapeVariant)?.label || "矩形";
 
   /* ── Position button handlers ── */
   const handlePositionClick = useCallback(() => {
@@ -562,8 +829,10 @@ const DrawingToolbar = memo(function DrawingToolbar({
   const currentPosLabel =
     POSITION_VARIANTS.find((v) => v.id === posVariant)?.label || "做多";
 
-  const showPenOptions = isPenActive;
+  const showPenOptions = isFreehandActive;
+  const freehandOptionLabel = currentFreehandLabel;
   const showLineOptions = isLineActive;
+  const showShapeOptions = isShapeActive;
   const showTextOptions = isTextActive;
   const showFibonacciOptions = isFibonacciActive;
   const showPositionOptions = isPositionActive;
@@ -582,17 +851,57 @@ const DrawingToolbar = memo(function DrawingToolbar({
     }
   }, [onPenSizeChange, onSelectedDrawingStyleChange, selectedDrawing]);
 
+  const handleExportClick = useCallback(() => {
+    setFlyoutOpen(null);
+    onToggleExportPanel?.();
+  }, [onToggleExportPanel]);
+
   return (
     <div className="drawing-toolbar">
-      {/* ── Pen button ── */}
-      <div className="drawing-tool-wrapper">
+      {/* ── Passive cursor / mouse mode button ── */}
+      <div className="drawing-tool-wrapper" ref={cursorBtnRef}>
         <button
-          className={`drawing-tool-btn ${isPenActive ? "active" : ""}`}
-          onClick={handlePenClick}
-          title="画笔"
+          className={`drawing-tool-btn ${isCursorActive ? "active" : ""}`}
+          onClick={handleCursorClick}
+          onDoubleClick={handleCursorDblClick}
+          onContextMenu={handleCursorContextMenu}
+          title={`${currentCursorLabel}（右键/双击切换鼠标样式）`}
         >
-          {PenIcon}
+          {currentCursorIcon}
+          {CornerTriangle}
         </button>
+        {flyoutOpen === "cursor" && (
+          <ToolFlyout
+            variants={CURSOR_VARIANTS}
+            currentId={currentCursorId}
+            onSelect={handleSelectCursorVariant}
+            onClose={() => setFlyoutOpen(null)}
+            anchorRef={cursorBtnRef}
+          />
+        )}
+      </div>
+
+      {/* ── Pen / highlighter button ── */}
+      <div className="drawing-tool-wrapper" ref={freehandBtnRef}>
+        <button
+          className={`drawing-tool-btn ${isFreehandActive ? "active" : ""}`}
+          onClick={handleFreehandClick}
+          onDoubleClick={handleFreehandDblClick}
+          onContextMenu={handleFreehandContextMenu}
+          title={`${currentFreehandLabel}（右键/双击切换画笔类型）`}
+        >
+          {currentFreehandIcon}
+          {CornerTriangle}
+        </button>
+        {flyoutOpen === "freehand" && (
+          <ToolFlyout
+            variants={FREEHAND_VARIANTS}
+            currentId={currentFreehandId}
+            onSelect={handleSelectFreehandVariant}
+            onClose={() => setFlyoutOpen(null)}
+            anchorRef={freehandBtnRef}
+          />
+        )}
       </div>
 
       {/* ── Eraser button ── */}
@@ -625,6 +934,29 @@ const DrawingToolbar = memo(function DrawingToolbar({
             onSelect={handleSelectLineVariant}
             onClose={() => setFlyoutOpen(null)}
             anchorRef={lineBtnRef}
+          />
+        )}
+      </div>
+
+      {/* ── Shape button ── */}
+      <div className="drawing-tool-wrapper" ref={shapeBtnRef}>
+        <button
+          className={`drawing-tool-btn ${isShapeActive ? "active" : ""}`}
+          onClick={handleShapeClick}
+          onDoubleClick={handleShapeDblClick}
+          onContextMenu={handleShapeContextMenu}
+          title={`${currentShapeLabel}（右键/双击切换形状，Shift 锁定正方形/正圆）`}
+        >
+          {currentShapeIcon}
+          {CornerTriangle}
+        </button>
+        {flyoutOpen === "shape" && (
+          <ToolFlyout
+            variants={SHAPE_VARIANTS}
+            currentId={shapeVariant}
+            onSelect={handleSelectShapeVariant}
+            onClose={() => setFlyoutOpen(null)}
+            anchorRef={shapeBtnRef}
           />
         )}
       </div>
@@ -714,10 +1046,10 @@ const DrawingToolbar = memo(function DrawingToolbar({
       {/* Divider */}
       <div className="drawing-toolbar-divider" />
 
-      {/* ── Options for pen ── */}
+      {/* ── Options for pen / highlighter ── */}
       {showPenOptions && (
         <>
-          <div className="drawing-tool-option" title="画笔颜色">
+          <div className="drawing-tool-option" title={`${freehandOptionLabel}颜色`}>
             <input
               type="color"
               className="drawing-color-picker"
@@ -725,7 +1057,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
               onChange={(e) => handleStrokeColorChange(e.target.value)}
             />
           </div>
-          <div className="drawing-tool-option" title={`画笔大小: ${penSize}px`}>
+          <div className="drawing-tool-option" title={`${freehandOptionLabel}大小: ${penSize}px`}>
             <input
               type="range"
               className="drawing-size-slider"
@@ -738,8 +1070,8 @@ const DrawingToolbar = memo(function DrawingToolbar({
         </>
       )}
 
-      {/* ── Options for line tools ── */}
-      {(showLineOptions || showFibonacciOptions) && (
+      {/* ── Options for line / shape tools ── */}
+      {(showLineOptions || showShapeOptions || showFibonacciOptions) && (
         <>
           <div className="drawing-tool-option" title="线条颜色">
             <input
@@ -825,6 +1157,14 @@ const DrawingToolbar = memo(function DrawingToolbar({
 
       {/* Clear all button at the bottom */}
       <div style={{ flex: 1 }} />
+      <button
+        className={`drawing-tool-btn drawing-export-btn ${exportPanelOpen ? "active" : ""}`}
+        onClick={handleExportClick}
+        disabled={exportInProgress}
+        title={exportInProgress ? "正在导出图片..." : "截图 / 导出图片"}
+      >
+        {ExportIcon}
+      </button>
       <button
         className={`drawing-tool-btn drawing-hide-btn ${drawingsHidden ? "active" : ""}`}
         onClick={onToggleDrawingsHidden}

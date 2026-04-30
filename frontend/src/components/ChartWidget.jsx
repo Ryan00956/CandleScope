@@ -14,11 +14,53 @@ import TextFormatBar from "./TextFormatBar";
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
 
-const DRAWING_TOOL_IDS = new Set(["pen", "eraser", "line-segment", "line-ray", "line-infinite", "text"]);
+const DRAWING_TOOL_IDS = new Set(["pen", "highlighter", "eraser", "line-segment", "line-ray", "line-infinite", "line-horizontal", "line-vertical", "line-cross", "angle-measure", "shape-rectangle", "shape-ellipse", "text", "fibonacci", "position-long", "position-short"]);
+const PASSIVE_CURSOR_TOOL_IDS = new Set(["cursor-default", "cursor-crosshair", "cursor-dot", "cursor-highlighter", "cursor-plain"]);
+const CUSTOM_POINTER_TOOL_IDS = new Set(["cursor-dot", "cursor-highlighter"]);
+const HIDDEN_CROSSHAIR_TOOL_IDS = new Set(["cursor-dot", "cursor-highlighter", "cursor-plain"]);
+
+function buildCrosshairOptions(visible = true) {
+    return {
+        mode: 0, // Normal — follow mouse freely, don't snap to candle price
+        vertLine: {
+            color: "rgba(59, 130, 246, 0.4)",
+            width: 1,
+            style: 2,
+            labelBackgroundColor: "#3b82f6",
+            visible,
+            labelVisible: visible,
+        },
+        horzLine: {
+            color: "rgba(59, 130, 246, 0.4)",
+            width: 1,
+            style: 2,
+            labelBackgroundColor: "#3b82f6",
+            visible,
+            labelVisible: visible,
+        },
+    };
+}
+
+function getCursorStyleForTool(tool) {
+    if (!tool) return "default";
+    if (PASSIVE_CURSOR_TOOL_IDS.has(tool)) {
+        if (tool === "cursor-crosshair") return "crosshair";
+        if (CUSTOM_POINTER_TOOL_IDS.has(tool)) return "none";
+        return "default";
+    }
+    return DRAWING_TOOL_IDS.has(tool) ? "crosshair" : "default";
+}
+
+function getCustomPointerClass(tool) {
+    if (tool === "cursor-dot") return "chart-pane-cursor-dot";
+    if (tool === "cursor-highlighter") return "chart-pane-cursor-highlighter";
+    return "";
+}
 
 function buildLocalizationOptions(timezone = "Local", interval = "1h") {
     const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
     try {
+        const showSeconds = /^\d+s$/.test(String(interval));
         const tooltipFormatOptions = {
             year: "numeric",
             month: "2-digit",
@@ -53,7 +95,7 @@ function buildLocalizationOptions(timezone = "Local", interval = "1h") {
                 timeFormatter: (timestamp) => tooltipFormatter.format(new Date(timestamp * 1000)),
             },
             timeScale: {
-                tickMarkFormatter: (timestamp, tickMarkType, _locale) => {
+                tickMarkFormatter: (timestamp, tickMarkType) => {
                     const parts = partsFormatter.formatToParts(new Date(timestamp * 1000));
                     const get = (t) => parts.find((p) => p.type === t)?.value;
                     const year = get("year");
@@ -71,7 +113,7 @@ function buildLocalizationOptions(timezone = "Local", interval = "1h") {
                         case 2: // DayOfMonth
                             return `${day} ${month}`;
                         case 3: // Time
-                            return `${hour}:${min}`;
+                            return showSeconds ? `${hour}:${min}:${sec}` : `${hour}:${min}`;
                         case 4: // TimeWithSeconds
                             return `${hour}:${min}:${sec}`;
                         default:
@@ -123,6 +165,7 @@ const ChartWidget = forwardRef(function ChartWidget({
     onChartReady = null,
 }, ref) {
     const chartContainerRef = useRef(null);
+    const cursorOverlayRef = useRef(null);
     const chartRef = useRef(null);
     const candlestickSeriesRef = useRef(null);
 
@@ -299,21 +342,7 @@ const ChartWidget = forwardRef(function ChartWidget({
                 vertLines: { color: theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)" },
                 horzLines: { color: theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)" },
             },
-            crosshair: {
-                mode: 0, // Normal — follow mouse freely, don't snap to candle price
-                vertLine: {
-                    color: "rgba(59, 130, 246, 0.4)",
-                    width: 1,
-                    style: 2,
-                    labelBackgroundColor: "#3b82f6",
-                },
-                horzLine: {
-                    color: "rgba(59, 130, 246, 0.4)",
-                    width: 1,
-                    style: 2,
-                    labelBackgroundColor: "#3b82f6",
-                },
-            },
+            crosshair: buildCrosshairOptions(true),
             rightPriceScale: {
                 alignLabels: false,
                 entireTextOnly: true,
@@ -394,8 +423,18 @@ const ChartWidget = forwardRef(function ChartWidget({
         chartRef.current = chart;
         candlestickSeriesRef.current = candlestickSeries;
 
+        let readyNotifyCancelled = false;
+        const notifySeriesReady = () => {
+            if (!readyNotifyCancelled) {
+                setSeriesReady((prev) => prev + 1);
+            }
+        };
         // Signal useDrawing that chart + series are ready for primitive attachment
-        setSeriesReady((prev) => prev + 1);
+        if (typeof queueMicrotask === "function") {
+            queueMicrotask(notifySeriesReady);
+        } else {
+            setTimeout(notifySeriesReady, 0);
+        }
 
         // Notify parent about chart/series refs for indicator rendering
         if (onChartReady) {
@@ -416,6 +455,7 @@ const ChartWidget = forwardRef(function ChartWidget({
         resizeObserver.observe(container);
 
         return () => {
+            readyNotifyCancelled = true;
             if (onVisibleRangeChangeRef.current) {
                 try {
                     const logicalRange = chart.timeScale().getVisibleLogicalRange();
@@ -512,6 +552,50 @@ const ChartWidget = forwardRef(function ChartWidget({
         }
     }, [upColor, downColor]);
 
+
+    useEffect(() => {
+        if (!chartRef.current) return;
+        chartRef.current.applyOptions({
+            crosshair: buildCrosshairOptions(!HIDDEN_CROSSHAIR_TOOL_IDS.has(drawingTool)),
+        });
+    }, [drawingTool]);
+
+    useEffect(() => {
+        const container = chartContainerRef.current;
+        const overlay = cursorOverlayRef.current;
+        if (!container || !overlay || !CUSTOM_POINTER_TOOL_IDS.has(drawingTool)) {
+            if (overlay) overlay.style.display = "none";
+            return undefined;
+        }
+
+        const updateCursor = (event) => {
+            if (event.touches) return;
+            const rect = container.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+                overlay.style.display = "none";
+                return;
+            }
+            overlay.style.display = "block";
+            overlay.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+        };
+
+        const hideCursor = () => {
+            overlay.style.display = "none";
+        };
+
+        container.addEventListener("mousemove", updateCursor);
+        container.addEventListener("mouseenter", updateCursor);
+        container.addEventListener("mouseleave", hideCursor);
+
+        return () => {
+            hideCursor();
+            container.removeEventListener("mousemove", updateCursor);
+            container.removeEventListener("mouseenter", updateCursor);
+            container.removeEventListener("mouseleave", hideCursor);
+        };
+    }, [drawingTool]);
     useEffect(() => {
         if (!data || data.length === 0) return;
 
@@ -573,9 +657,8 @@ const ChartWidget = forwardRef(function ChartWidget({
         };
     }, [data, datasetKey]);
 
-    // Determine cursor style for drawing tools
-    const isDrawingActive = DRAWING_TOOL_IDS.has(drawingTool);
-    const cursorStyle = isDrawingActive ? "crosshair" : undefined;
+    // Determine cursor style for drawing and passive mouse tools.
+    const cursorStyle = getCursorStyleForTool(drawingTool);
 
     return (
         <div className="chart-area">
@@ -583,8 +666,16 @@ const ChartWidget = forwardRef(function ChartWidget({
                 ref={chartContainerRef}
                 className="chart-container"
                 id="chart-container"
-                style={cursorStyle ? { cursor: cursorStyle } : undefined}
+                style={{ cursor: cursorStyle }}
             />
+            {CUSTOM_POINTER_TOOL_IDS.has(drawingTool) && (
+                <div className="chart-pane-cursor-overlay" aria-hidden="true">
+                    <div
+                        ref={cursorOverlayRef}
+                        className={`chart-pane-cursor ${getCustomPointerClass(drawingTool)}`}
+                    />
+                </div>
+            )}
             {/* Inline text editor overlay */}
             {editingTextId && editingTextPos && (
                 <TextEditOverlay

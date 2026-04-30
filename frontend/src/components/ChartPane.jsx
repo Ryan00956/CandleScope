@@ -19,6 +19,7 @@ import TextFormatBar from "./TextFormatBar";
 function buildLocalizationOptions(timezone = "Local", interval = "1h") {
     const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
     try {
+        const showSeconds = /^\d+s$/.test(String(interval));
         const tooltipFormatOptions = {
             year: "numeric", month: "2-digit", day: "2-digit",
             hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
@@ -40,7 +41,7 @@ function buildLocalizationOptions(timezone = "Local", interval = "1h") {
                 timeFormatter: (ts) => tooltipFormatter.format(new Date(ts * 1000)),
             },
             timeScale: {
-                tickMarkFormatter: (ts, tickMarkType, _locale) => {
+                tickMarkFormatter: (ts, tickMarkType) => {
                     const parts = partsFormatter.formatToParts(new Date(ts * 1000));
                     const get = (t) => parts.find((p) => p.type === t)?.value;
                     const year = get("year");
@@ -58,7 +59,7 @@ function buildLocalizationOptions(timezone = "Local", interval = "1h") {
                         case 2: // DayOfMonth
                             return `${day} ${month}`;
                         case 3: // Time
-                            return `${hour}:${min}`;
+                            return showSeconds ? `${hour}:${min}:${sec}` : `${hour}:${min}`;
                         case 4: // TimeWithSeconds
                             return `${hour}:${min}:${sec}`;
                         default:
@@ -85,6 +86,44 @@ const PRICE_SCALE_MODES = [
     { value: 2, label: "百分比", labelEn: "Percentage" },
     { value: 3, label: "基准100", labelEn: "Indexed to 100" },
 ];
+
+const PASSIVE_CURSOR_TOOL_IDS = new Set(["cursor-default", "cursor-crosshair", "cursor-dot", "cursor-highlighter", "cursor-plain"]);
+const CUSTOM_POINTER_TOOL_IDS = new Set(["cursor-dot", "cursor-highlighter"]);
+const HIDDEN_CROSSHAIR_TOOL_IDS = new Set(["cursor-dot", "cursor-highlighter", "cursor-plain"]);
+
+function buildCrosshairOptions(visible = true) {
+    return {
+        mode: 0, // Normal — follow mouse freely, don't snap to candle price
+        vertLine: {
+            color: "rgba(59, 130, 246, 0.4)", width: 1, style: 2,
+            labelBackgroundColor: "#3b82f6",
+            visible,
+            labelVisible: visible,
+        },
+        horzLine: {
+            color: "rgba(59, 130, 246, 0.4)", width: 1, style: 2,
+            labelBackgroundColor: "#3b82f6",
+            visible,
+            labelVisible: visible,
+        },
+    };
+}
+
+function getCursorStyleForTool(tool) {
+    if (!tool) return "default";
+    if (PASSIVE_CURSOR_TOOL_IDS.has(tool)) {
+        if (tool === "cursor-crosshair") return "crosshair";
+        if (CUSTOM_POINTER_TOOL_IDS.has(tool)) return "none";
+        return "default";
+    }
+    return "crosshair";
+}
+
+function getCustomPointerClass(tool) {
+    if (tool === "cursor-dot") return "chart-pane-cursor-dot";
+    if (tool === "cursor-highlighter") return "chart-pane-cursor-highlighter";
+    return "";
+}
 
 const ChartPane = forwardRef(function ChartPane({
     symbol,
@@ -132,7 +171,9 @@ const ChartPane = forwardRef(function ChartPane({
     indicatorBgcolors = [],   // [{data: [{time, color}], indicatorId}]
     indicatorBarcolors = [],  // [{data: [{time, color}], indicatorId}]
 }, ref) {
+    const paneRootRef = useRef(null);
     const containerRef = useRef(null);
+    const cursorOverlayRef = useRef(null);
     const chartRef = useRef(null);
     const mainSeriesRef = useRef(null);      // CandlestickSeries (main pane only)
     const alignmentSeriesRef = useRef(null); // invisible series for crosshair alignment (sub panes)
@@ -181,17 +222,7 @@ const ChartPane = forwardRef(function ChartPane({
                 vertLines: { color: gridColor },
                 horzLines: { color: gridColor },
             },
-            crosshair: {
-                mode: 0, // Normal — follow mouse freely, don't snap to candle price
-                vertLine: {
-                    color: "rgba(59, 130, 246, 0.4)", width: 1, style: 2,
-                    labelBackgroundColor: "#3b82f6",
-                },
-                horzLine: {
-                    color: "rgba(59, 130, 246, 0.4)", width: 1, style: 2,
-                    labelBackgroundColor: "#3b82f6",
-                },
-            },
+            crosshair: buildCrosshairOptions(true),
             rightPriceScale: {
                 alignLabels: false,
                 entireTextOnly: true,
@@ -422,6 +453,51 @@ const ChartPane = forwardRef(function ChartPane({
         });
     }, [theme, customBg, timezone, interval]);
 
+    useEffect(() => {
+        const chart = chartRef.current;
+        if (!chart) return;
+        chart.applyOptions({
+            crosshair: buildCrosshairOptions(!HIDDEN_CROSSHAIR_TOOL_IDS.has(drawingTool)),
+        });
+    }, [drawingTool]);
+
+    useEffect(() => {
+        const container = containerRef.current;
+        const overlay = cursorOverlayRef.current;
+        if (!container || !overlay || !CUSTOM_POINTER_TOOL_IDS.has(drawingTool)) {
+            if (overlay) overlay.style.display = "none";
+            return undefined;
+        }
+
+        const updateCursor = (event) => {
+            if (event.touches) return;
+            const rect = container.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+                overlay.style.display = "none";
+                return;
+            }
+            overlay.style.display = "block";
+            overlay.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+        };
+
+        const hideCursor = () => {
+            overlay.style.display = "none";
+        };
+
+        container.addEventListener("mousemove", updateCursor);
+        container.addEventListener("mouseenter", updateCursor);
+        container.addEventListener("mouseleave", hideCursor);
+
+        return () => {
+            hideCursor();
+            container.removeEventListener("mousemove", updateCursor);
+            container.removeEventListener("mouseenter", updateCursor);
+            container.removeEventListener("mouseleave", hideCursor);
+        };
+    }, [drawingTool]);
+
     /* ── Update candle colors (main pane only) ─────────────── */
 
     useEffect(() => {
@@ -602,7 +678,7 @@ const ChartPane = forwardRef(function ChartPane({
             // Structure is the same — just update data in-place (fast path)
             const lines = indicatorLines || [];
             for (let idx = 0; idx < indicatorSeriesRef.current.length; idx++) {
-                const { series, lineConfig: prevLine } = indicatorSeriesRef.current[idx];
+                const { series } = indicatorSeriesRef.current[idx];
                 const line = lines[idx];
                 if (!line || !line.data || line.data.length === 0) continue;
 
@@ -1167,6 +1243,23 @@ const ChartPane = forwardRef(function ChartPane({
         getMainSeries: () => mainSeriesRef.current,
         getChartRef: () => chartRef,
         getSeriesRef: () => mainSeriesRef,
+        prepareExport: () => {
+            if (editingTextId) {
+                commitTextEditing({ clearSelection: true, exitTool: false });
+            }
+        },
+        getExportSnapshot: () => {
+            const rootElement = paneRootRef.current;
+            const chartElement = containerRef.current;
+            return {
+                paneId,
+                paneType,
+                rootElement,
+                chartElement,
+                chart: chartRef.current,
+                rect: rootElement?.getBoundingClientRect?.() || null,
+            };
+        },
         /** Imperatively sync crosshair from another pane — no React re-render needed */
         syncCrosshair: (time) => {
             const chart = chartRef.current;
@@ -1247,15 +1340,27 @@ const ChartPane = forwardRef(function ChartPane({
             try { chart.timeScale().applyOptions(opts); } catch { /* */ }
         },
         resetAutoScale,
-    }), [resetAutoScale, clearAllDrawings, setDrawingsHidden, updateSelectedDrawingStyle]);
+    }), [resetAutoScale, clearAllDrawings, setDrawingsHidden, updateSelectedDrawingStyle, editingTextId, commitTextEditing, paneId, paneType]);
 
     return (
-        <div className="chart-pane" data-pane-id={paneId} data-pane-type={paneType}>
+        <div ref={paneRootRef} className="chart-pane" data-pane-id={paneId} data-pane-type={paneType}>
             {/* Pane label (for sub panes) */}
             {paneType === "sub" && paneLabel && (
                 <div className="chart-pane-label">{paneLabel}</div>
             )}
-            <div ref={containerRef} className="chart-pane-container" />
+            <div
+                ref={containerRef}
+                className="chart-pane-container"
+                style={{ cursor: getCursorStyleForTool(drawingTool) }}
+            />
+            {CUSTOM_POINTER_TOOL_IDS.has(drawingTool) && (
+                <div className="chart-pane-cursor-overlay" aria-hidden="true">
+                    <div
+                        ref={cursorOverlayRef}
+                        className={`chart-pane-cursor ${getCustomPointerClass(drawingTool)}`}
+                    />
+                </div>
+            )}
             {/* Price scale mode context menu (main pane only) */}
             {paneType === "main" && contextMenu && (
                 <div

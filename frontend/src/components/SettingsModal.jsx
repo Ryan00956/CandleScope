@@ -324,11 +324,12 @@ export default function SettingsModal({
             {/* Theme */}
             <div className="st-group">
                 <div className="st-group-title">视觉主题</div>
-                <div className="st-group-desc">选择界面的整体视觉风格</div>
-                <div className="st-theme-grid">
+              <div className="st-group-desc">选择界面的整体视觉风格，可跟随系统亮/暗色自动切换</div>
+              <div className="st-theme-grid st-appearance-theme-grid">
                     {[
                         { value: 'dark',   icon: '🌙', label: '深色' },
                         { value: 'light',  icon: '☀️', label: '亮色' },
+                  { value: 'system', icon: '🌓', label: '跟随系统' },
                         { value: 'custom', icon: '🎨', label: '自定义' },
                     ].map(t => (
                         <button
@@ -1204,6 +1205,10 @@ export default function SettingsModal({
   gap: 10px;
 }
 
+.st-appearance-theme-grid {
+  grid-template-columns: repeat(4, 1fr);
+}
+
 .st-theme-card {
   display: flex;
   flex-direction: column;
@@ -1797,6 +1802,10 @@ input[type="color"] {
 
   .st-theme-grid {
     grid-template-columns: repeat(3, 1fr);
+  }
+
+  .st-appearance-theme-grid {
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .st-preset-cards {

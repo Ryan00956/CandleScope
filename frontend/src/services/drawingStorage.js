@@ -8,7 +8,7 @@
  * Storage key: `candlescope-drawings-{SYMBOL}`
  *
  * Each drawing is serialized as a plain JSON object:
- *   - type: "line" | "freehand" | "text"
+ *   - type: "line" | "axis-line" | "angle-measure" | "freehand" | "highlighter" | "text" | "shape"
  *   - id, color, lineWidth, and type-specific fields
  *   - data coordinates (time + price) — NOT screen pixels
  */
@@ -30,6 +30,33 @@ function serializePrimitive(prim) {
       type: "line",
       id: prim._id,
       lineType: prim._lineType,
+      dataPoints: prim._dataPoints.map((dp) => ({
+        time: dp.time,
+        price: dp.price,
+      })),
+      color: prim._color,
+      lineWidth: prim._lineWidth,
+    };
+  }
+
+  if (prim._type === "axis-line") {
+    return {
+      type: "axis-line",
+      id: prim._id,
+      axisLineType: prim._axisLineType,
+      dataPoint: {
+        time: prim._dataPoint?.time,
+        price: prim._dataPoint?.price,
+      },
+      color: prim._color,
+      lineWidth: prim._lineWidth,
+    };
+  }
+
+  if (prim._type === "angle-measure") {
+    return {
+      type: "angle-measure",
+      id: prim._id,
       dataPoints: prim._dataPoints.map((dp) => ({
         time: dp.time,
         price: dp.price,
@@ -90,6 +117,40 @@ function serializePrimitive(prim) {
       slPrice: prim._slPrice,
       timeRange: { ...prim._timeRange },
       positionSize: prim._positionSize,
+      infoPanelOffset: prim._infoPanelOffset ? { ...prim._infoPanelOffset } : undefined,
+    };
+  }
+
+  if (prim._type === "shape") {
+    return {
+      type: "shape",
+      id: prim._id,
+      shapeType: prim._shapeType,
+      dataPoints: prim._dataPoints.map((dp) => ({
+        time: dp.time,
+        price: dp.price,
+      })),
+      color: prim._color,
+      lineWidth: prim._lineWidth,
+      fillColor: prim._fillColor,
+      fillOpacity: prim._fillOpacity,
+      lineStyle: prim._lineStyle,
+    };
+  }
+
+  if (prim._type === "highlighter") {
+    return {
+      type: "highlighter",
+      id: prim._id,
+      dataPoints: prim._dataPoints.map((dp) => ({
+        time: dp.time,
+        price: dp.price,
+      })),
+      color: prim._color,
+      lineWidth: prim._lineWidth,
+      opacity: prim._opacity,
+      compositeOperation: prim._compositeOperation,
+      brushShape: prim._brushShape,
     };
   }
 

@@ -14,7 +14,7 @@ import { clearSavedDrawings } from "../services/drawingStorage";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
-const DRAWING_TOOL_IDS = new Set(["pen", "eraser", "line-segment", "line-ray", "line-infinite", "text", "position-long", "position-short"]);
+const DRAWING_TOOL_IDS = new Set(["pen", "highlighter", "eraser", "line-segment", "line-ray", "line-infinite", "line-horizontal", "line-vertical", "line-cross", "angle-measure", "shape-rectangle", "shape-ellipse", "text", "fibonacci", "position-long", "position-short"]);
 
 const PANE_HEIGHTS_KEY = "candlescope-pane-heights";
 const MIN_PANE_HEIGHT = 60; // px
@@ -194,6 +194,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     useEffect(() => {
         const subCount = subPanes.length;
         if (subCount === 0) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect -- pane layout is derived from dynamic indicator panes.
             setPaneHeightPercents({ main: 100 });
             return;
         }
@@ -298,8 +299,24 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                 }
             }
         },
+        prepareExport: () => {
+            mainPaneRef.current?.prepareExport?.();
+            for (const subPane of subPaneRefs.current.values()) {
+                subPane?.prepareExport?.();
+            }
+        },
+        getExportSnapshot: () => ({
+            rootElement: wrapperRef.current,
+            mainPane: mainPaneRef.current?.getExportSnapshot?.() || null,
+            subPanes: Array.from(subPaneRefs.current.entries()).map(([id, paneRef]) => ({
+                id,
+                ...(paneRef?.getExportSnapshot?.() || {}),
+            })),
+            visibleRange: mainPaneRef.current?.getVisibleRange?.() || null,
+            loading,
+        }),
         seriesReady,
-    }), [seriesReady]);
+    }), [seriesReady, loading]);
 
     // ── Debounced visible range save ──
     const scheduleVisibleRangeSave = useCallback(() => {

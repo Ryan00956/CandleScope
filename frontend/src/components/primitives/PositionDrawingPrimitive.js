@@ -53,6 +53,15 @@ function calcPnlPct(entryPrice, price, isLong) {
     : ((entryPrice - price) / entryPrice) * 100;
 }
 
+function normalizeInfoPanelOffset(offset) {
+  const x = Number(offset?.x);
+  const y = Number(offset?.y);
+  return {
+    x: Number.isFinite(x) ? x : 0,
+    y: Number.isFinite(y) ? y : 0,
+  };
+}
+
 // ── Smart price formatter ──
 
 function formatPrice(price) {
@@ -92,10 +101,13 @@ class PositionRenderer {
         entryPrice, tpPrice, slPrice,
         positionSize,
         upColor, downColor, // K-line colors from CSS variables
-        currentPrice,
+        setInfoPanelBox,
       } = data;
 
-      if (entryY == null || leftX == null || rightX == null) return;
+      if (entryY == null || leftX == null || rightX == null) {
+        setInfoPanelBox?.(null);
+        return;
+      }
 
       const eY = entryY * vRatio;
       const tY = tpY != null ? tpY * vRatio : null;
@@ -182,7 +194,10 @@ class PositionRenderer {
 
       // ── Draw info panel on the right side ──
       if (!isPreview && entryPrice != null) {
-        this._drawInfoPanel(ctx, ratio, vRatio, rX, eY, tY, sY, data);
+        const panelBox = this._drawInfoPanel(ctx, ratio, vRatio, rX, eY, tY, sY, data);
+        setInfoPanelBox?.(panelBox || null);
+      } else {
+        setInfoPanelBox?.(null);
       }
 
       // ── Direction badge ──
@@ -347,7 +362,7 @@ class PositionRenderer {
   }
 
   _drawInfoPanel(ctx, ratio, vRatio, rX, eY, tY, sY, data) {
-    const { entryPrice, tpPrice, slPrice, positionSize, direction, currentPrice, upColor, downColor } = data;
+    const { entryPrice, tpPrice, slPrice, positionSize, direction, currentPrice, upColor, downColor, infoPanelOffset, selected } = data;
     const isLong = direction === "long";
     const kUpColor = upColor || "#22c55e";
     const kDownColor = downColor || "#ef4444";
@@ -433,10 +448,11 @@ class PositionRenderer {
     const boxW = maxW + padX * 2;
     const boxH = lineH * lines.length + padY * 2;
 
-    // Position panel above entry line on right side
-    const boxX = rX - boxW - 8 * ratio;
+    // Position panel above entry line on right side, plus user-controlled offset.
+    const offset = normalizeInfoPanelOffset(infoPanelOffset);
+    const boxX = rX - boxW - 8 * ratio + offset.x * ratio;
     const targetY = eY - boxH - 8 * vRatio;
-    const boxY = Math.max(4 * vRatio, targetY);
+    const boxY = Math.max(4 * vRatio, targetY + offset.y * vRatio);
 
     // Background
     ctx.fillStyle = "rgba(30, 33, 40, 0.92)";
@@ -475,6 +491,35 @@ class PositionRenderer {
         ctx.fillText(line.extra, boxX + padX + labelW + valueW, textY);
       }
     });
+
+    if (selected) {
+      ctx.strokeStyle = "rgba(59, 130, 246, 0.55)";
+      ctx.lineWidth = 1 * Math.min(ratio, vRatio);
+      ctx.setLineDash([4 * ratio, 3 * ratio]);
+      this._roundRect(ctx, boxX - 1 * ratio, boxY - 1 * vRatio, boxW + 2 * ratio, boxH + 2 * vRatio, 6 * Math.min(ratio, vRatio));
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Small grip dots make it discoverable that the panel itself can be dragged.
+      const dotR = 1.2 * Math.min(ratio, vRatio);
+      const gripX = boxX + boxW - 13 * ratio;
+      const gripY = boxY + 9 * vRatio;
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      for (let row = 0; row < 2; row++) {
+        for (let col = 0; col < 3; col++) {
+          ctx.beginPath();
+          ctx.arc(gripX + col * 5 * ratio, gripY + row * 5 * vRatio, dotR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    return {
+      x: boxX / ratio,
+      y: boxY / vRatio,
+      width: boxW / ratio,
+      height: boxH / vRatio,
+    };
   }
 
   _roundRect(ctx, x, y, w, h, r) {
@@ -566,10 +611,12 @@ class PositionPaneView {
       tpPrice: source._tpPrice,
       slPrice: source._slPrice,
       positionSize: source._positionSize,
+      infoPanelOffset: source._infoPanelOffset,
       upColor,
       downColor,
       currentPrice,
       hidden: source._hidden,
+      setInfoPanelBox: (box) => { source._infoPanelBox = box; },
     });
   }
 
@@ -604,6 +651,8 @@ export class PositionDrawingPrimitive {
     this._slPrice = opts.slPrice ?? null;
     this._timeRange = opts.timeRange || { start: null, end: null };
     this._positionSize = opts.positionSize || 1000;
+    this._infoPanelOffset = normalizeInfoPanelOffset(opts.infoPanelOffset);
+    this._infoPanelBox = null;
     this._selected = opts.selected || false;
     this._isPreview = opts.isPreview || false;
     this._hovered = opts.hovered || false;
@@ -646,6 +695,7 @@ export class PositionDrawingPrimitive {
   get slPrice() { return this._slPrice; }
   get timeRange() { return this._timeRange; }
   get positionSize() { return this._positionSize; }
+  get infoPanelOffset() { return this._infoPanelOffset; }
   get selected() { return this._selected; }
   get dataPoints() {
     const points = [];
@@ -681,6 +731,17 @@ export class PositionDrawingPrimitive {
   setPositionSize(size) {
     this._positionSize = size;
     this._requestUpdate?.();
+  }
+
+  setInfoPanelOffset(offset) {
+    const next = normalizeInfoPanelOffset(offset);
+    if (next.x === this._infoPanelOffset.x && next.y === this._infoPanelOffset.y) return;
+    this._infoPanelOffset = next;
+    this._requestUpdate?.();
+  }
+
+  resetInfoPanelOffset() {
+    this.setInfoPanelOffset({ x: 0, y: 0 });
   }
 
   setDirection(dir) {
@@ -745,6 +806,18 @@ export class PositionDrawingPrimitive {
     const rightX = toScreenX(this._timeRange.end);
 
     if (leftX == null || rightX == null) return null;
+
+    // Info panel is a separate draggable surface and may sit outside the
+    // position box, so test it before rejecting by the main box extent.
+    if (this._infoPanelBox) {
+      const b = this._infoPanelBox;
+      if (
+        x >= b.x && x <= b.x + b.width &&
+        y >= b.y && y <= b.y + b.height
+      ) {
+        return { zone: "panel", pointIndex: -1 };
+      }
+    }
 
     const minX = Math.min(leftX, rightX);
     const maxX = Math.max(leftX, rightX);

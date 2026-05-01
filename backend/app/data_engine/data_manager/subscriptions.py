@@ -7,11 +7,52 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from app.exchanges.symbols import normalize_symbol as normalize_exchange_symbol
 
 logger = logging.getLogger("data_manager.subscriptions")
+
+
+class SubscriptionDataManagerLike(Protocol):
+    """Minimal DataManager contract used by SubscriptionService."""
+
+    async def ensure_stream(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> Any:
+        ...
+
+    async def stop_stream(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> None:
+        ...
+
+    def get_all_streams(self) -> list[Any]:
+        ...
+
+    async def ensure_price_stream(
+        self,
+        symbol: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> Any:
+        ...
+
+    async def stop_price_stream(
+        self,
+        symbol: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> None:
+        ...
 
 
 class SubscriptionTier(str, enum.Enum):
@@ -93,11 +134,11 @@ class SubscriptionService:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._subs: dict[str, SymbolSubscription] = {}
-        self._data_manager: Any = None
+        self._data_manager: SubscriptionDataManagerLike | None = None
         self._init_db()
         self._load_from_db()
 
-    def set_data_manager(self, dm: Any) -> None:
+    def set_data_manager(self, dm: SubscriptionDataManagerLike) -> None:
         self._data_manager = dm
 
     def normalize_symbol(self, symbol: str) -> str:

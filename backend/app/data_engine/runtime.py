@@ -35,15 +35,59 @@ class DataEngineRuntime:
     gap_scan_task: asyncio.Task | None = None
 
     def attach_to_app_state(self, state: Any) -> None:
-        """Expose stable app.state handles used by existing API routes."""
+        """Expose stable app.state handles used by API routes."""
         state.data_engine_runtime = self
         state.data_manager = self.data_manager
-        state.ingestion_factory = self.ingestion_factory
-        state.backfill_transport = self.backfill_transport
-        state.backfill_engine = self.backfill_engine
-        state.backfill_coordinator = self.backfill_coordinator
-        state.price_stream_source = self.price_stream_source
-        state.gap_scan_task = self.gap_scan_task
+
+    def get_ingestion_config(self) -> IngestionConfig | None:
+        """Return the primary ingestion config for settings display."""
+        configs = self._ingestion_configs()
+        return configs[0] if configs else None
+
+    def update_ingestion_config(self, **updates: Any) -> None:
+        """Apply config updates to all runtime-owned ingestion configs."""
+        for config in self._ingestion_configs():
+            config.update(**updates)
+
+    def transports(self) -> list[TransportLayer]:
+        """Return all runtime-owned transports that can be restarted."""
+        transports: list[TransportLayer] = []
+
+        def _append(transport: Any) -> None:
+            if transport is not None and all(existing is not transport for existing in transports):
+                transports.append(transport)
+
+        _append(self.backfill_transport)
+
+        get_transports = getattr(self.ingestion_factory, "get_transports", None)
+        if callable(get_transports):
+            for transport in get_transports():
+                _append(transport)
+
+        return transports
+
+    async def restart_transports(self) -> None:
+        """Restart active transport HTTP sessions after config changes."""
+        for transport in self.transports():
+            try:
+                await transport.restart_http_session()
+            except Exception as exc:
+                logger.warning("Failed to restart transport session: %s", exc)
+
+    def get_backfill_coordinator(self) -> BackfillCoordinator:
+        """Return the runtime-owned backfill coordinator."""
+        return self.backfill_coordinator
+
+    def _ingestion_configs(self) -> list[IngestionConfig]:
+        configs: list[IngestionConfig] = []
+
+        def _append(config: Any) -> None:
+            if config is not None and all(existing is not config for existing in configs):
+                configs.append(config)
+
+        _append(getattr(self.backfill_transport, "config", None))
+        _append(getattr(self.ingestion_factory, "config", None))
+        return configs
 
     async def shutdown(self, step_timeout: float = 5.0) -> None:
         """Stop runtime-owned components in dependency order."""
@@ -126,11 +170,12 @@ async def start_data_engine() -> DataEngineRuntime:
             transport=transport,
             ingestion_config=ingestion_cfg,
         )
-        backfill_engine.reconciler.set_bar_aggregator(dm.bar_aggregator)
+        dm.wire_backfill_reconciler(backfill_engine.reconciler)
 
         backfill_coordinator = BackfillCoordinator(
-            data_manager=dm,
             storage=storage,
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.emit_event,
             engine=backfill_engine,
             loop=asyncio.get_running_loop(),
         )
@@ -185,7 +230,7 @@ async def _start_subscription_workflows(
 
         subscription_service = SubscriptionService(db_path=str(KLINES_DB_PATH))
         subscription_service.set_data_manager(dm)
-        dm.subscriptions = subscription_service
+        dm.set_subscription_service(subscription_service)
 
         await subscription_service.start()
 
@@ -205,8 +250,8 @@ def _start_startup_gap_scan(
     print("[startup] Running startup gap scan...")
     task = asyncio.create_task(
         backfill_coordinator.startup_scan(
-            dm.coordinator.prewarm_targets(),
-            dm.coordinator.prewarm_intervals(),
+            dm.prewarm_targets(),
+            dm.prewarm_intervals(),
             delay_seconds=5,
         )
     )

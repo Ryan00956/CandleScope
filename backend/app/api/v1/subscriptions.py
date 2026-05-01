@@ -40,7 +40,8 @@ class SyncWatchlistRequest(BaseModel):
 
 def _get_sub_manager(request: Request):
     dm = getattr(request.app.state, "data_manager", None)
-    mgr = getattr(dm, "subscriptions", None) if dm is not None else None
+    get_service = getattr(dm, "get_subscription_service", None) if dm is not None else None
+    mgr = get_service() if callable(get_service) else None
     if mgr is None:
         raise HTTPException(503, "SubscriptionService not initialized")
     return mgr

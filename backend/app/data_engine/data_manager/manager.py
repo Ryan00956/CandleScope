@@ -77,7 +77,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Protocol
 
 from app.data_engine.interval_policy import parse_interval_ms
 
@@ -99,9 +99,9 @@ from .models import (
     StreamStatus,
     SubscriptionHandle,
 )
-from .maintenance import MaintenanceService
+from .maintenance import MaintenanceService, RepairRequester
 from .price_cache import PriceSnapshot, PriceSnapshotCache, normalize_price_key
-from .query import QueryEngine
+from .query import BackfillTrigger, QueryEngine
 from .retention import RetentionService
 from .stream_policy import StreamEnsurePlanner
 from .warm_start import AggregatorWarmStartService
@@ -112,6 +112,26 @@ from ..bar_aggregator import (
 )
 
 logger = logging.getLogger("data_manager")
+
+
+class BackfillReconcilerLike(Protocol):
+    """Minimal backfill reconciler contract used during runtime wiring."""
+
+    def set_bar_aggregator(self, aggregator: BarAggregator) -> None:
+        ...
+
+
+class PriceStreamControllerLike(Protocol):
+    """Optional controller contract for DataManager-owned price streams."""
+
+    async def ensure_symbol(self, key: str) -> Any:
+        ...
+
+    async def remove_symbol(self, key: str) -> Any:
+        ...
+
+    def set_watched_symbols(self, symbols: set[str]) -> Any:
+        ...
 
 
 class DataManager:
@@ -149,7 +169,7 @@ class DataManager:
         self._started = False
         self._ttl_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
-        self._backfill_trigger: Any | None = None
+        self._backfill_trigger: BackfillTrigger | None = None
 
         # ── BarAggregator (L1–L5) ───────────────────────────
         self.bar_aggregator = BarAggregator(BarAggregatorConfig())
@@ -178,9 +198,8 @@ class DataManager:
             backfill_trigger_provider=lambda: self._backfill_trigger,
         )
         self.price_cache = PriceSnapshotCache()
-        self.maintenance = MaintenanceService(self)
-        self.subscriptions: Any = None
-        self._price_stream_controller: Any = None
+        self._subscriptions: Any = None
+        self._price_stream_controller: PriceStreamControllerLike | None = None
 
         # Wire BarAggregator output → DataManager → Cache + EventBus
         self.bar_aggregator.publisher.on_bar_event(self.aggregator_bridge.on_bar_event)
@@ -188,6 +207,14 @@ class DataManager:
 
         # Tell Coordinator to route ingestion data through BarAggregator
         self.coordinator.set_bar_aggregator(self.bar_aggregator)
+        self.maintenance = MaintenanceService(
+            storage_provider=lambda: self.query_engine.storage,
+            aggregator_config_snapshot=lambda: self.bar_aggregator.config.snapshot(),
+            cache_invalidator=self.cache_invalidate,
+            bars_backfilled=self.on_bars_backfilled,
+            active_targets=self.bar_aggregator.get_targets,
+            seed_active_bar=self.warm_start.seed_if_needed,
+        )
 
         # Compatibility reference for older settings code.
         self._db_limits = self.retention.db_limits
@@ -224,7 +251,34 @@ class DataManager:
         """
         self.coordinator.set_ingestion_factory(factory)
 
-    def set_backfill_trigger(self, trigger: Any) -> None:
+    def wire_backfill_reconciler(self, reconciler: BackfillReconcilerLike) -> None:
+        """Attach this manager's BarAggregator to a backfill reconciler."""
+        set_bar_aggregator = getattr(reconciler, "set_bar_aggregator", None)
+        if not callable(set_bar_aggregator):
+            raise TypeError("reconciler must expose set_bar_aggregator()")
+        set_bar_aggregator(self.bar_aggregator)
+
+    async def emit_event(self, event: DataEvent) -> None:
+        """Emit a DataEvent through the manager-owned event bus."""
+        await self.event_bus.emit(event)
+
+    def prewarm_targets(self) -> list[tuple[str, str, str]]:
+        """Return configured prewarm targets for runtime startup scans."""
+        return self.coordinator.prewarm_targets()
+
+    def prewarm_intervals(self) -> tuple[str, ...]:
+        """Return configured prewarm intervals for runtime startup scans."""
+        return self.coordinator.prewarm_intervals()
+
+    def set_subscription_service(self, service: Any | None) -> None:
+        """Attach the runtime-owned subscription service."""
+        self._subscriptions = service
+
+    def get_subscription_service(self) -> Any | None:
+        """Return the attached subscription service, if initialized."""
+        return self._subscriptions
+
+    def set_backfill_trigger(self, trigger: BackfillTrigger | None) -> None:
         """Inject a backfill trigger callback.
 
         Signature:
@@ -628,7 +682,7 @@ class DataManager:
     #  Price Streams
     # ═══════════════════════════════════════════════════════════
 
-    def set_price_stream_controller(self, controller: Any) -> None:
+    def set_price_stream_controller(self, controller: PriceStreamControllerLike | None) -> None:
         """Attach the price stream source to DataManager."""
         self._price_stream_controller = controller
         self._sync_price_stream_controller()
@@ -827,7 +881,7 @@ class DataManager:
         self,
         *,
         symbols_filter: list[str] | None,
-        backfill_coordinator: Any,
+        backfill_coordinator: RepairRequester | None,
         exchange: str = "binance",
         market_type: str = "spot",
     ) -> dict:
@@ -843,7 +897,7 @@ class DataManager:
         self,
         *,
         symbols_filter: list[str] | None,
-        backfill_coordinator: Any,
+        backfill_coordinator: RepairRequester | None,
         exchange: str = "binance",
         market_type: str = "spot",
     ) -> dict:

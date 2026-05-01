@@ -189,6 +189,56 @@ def test_main_delegates_data_engine_runtime_wiring() -> None:
     assert "bridge_indicator_engine" in text
 
 
+def test_runtime_attaches_only_stable_app_state_handles() -> None:
+    """Runtime should not publish internal wiring objects onto app.state."""
+    text = (BACKEND_ROOT / "app/data_engine/runtime.py").read_text(
+        encoding="utf-8",
+        errors="ignore",
+    )
+    forbidden = (
+        "state.ingestion_factory",
+        "state.backfill_transport",
+        "state.backfill_engine",
+        "state.backfill_coordinator",
+        "state.price_stream_source",
+        "state.gap_scan_task",
+    )
+
+    offenders = [token for token in forbidden if token in text]
+
+    assert offenders == []
+    assert "state.data_engine_runtime" in text
+    assert "state.data_manager" in text
+
+
+def test_settings_uses_runtime_facade_for_data_engine_internals() -> None:
+    """Settings API should not read DataEngine internals from app.state."""
+    text = (BACKEND_ROOT / "app/api/v1/settings.py").read_text(
+        encoding="utf-8",
+        errors="ignore",
+    )
+    forbidden_state_fields = (
+        "ingestion_factory",
+        "backfill_transport",
+        "backfill_engine",
+        "backfill_coordinator",
+        "price_stream_source",
+        "gap_scan_task",
+    )
+
+    offenders: list[str] = []
+    for field in forbidden_state_fields:
+        patterns = (
+            rf"request\.app\.state\.{field}\b",
+            rf"getattr\(\s*request\.app\.state\s*,\s*[\"']{field}[\"']",
+        )
+        if any(re.search(pattern, text) for pattern in patterns):
+            offenders.append(field)
+
+    assert offenders == []
+    assert '"data_engine_runtime"' in text
+
+
 def test_data_engine_layer_import_boundaries_are_directional() -> None:
     """Cross-module imports should follow the planned DataEngine layering."""
     checks = [
@@ -275,6 +325,129 @@ def test_settings_storage_maintenance_stays_behind_data_manager() -> None:
     )
 
     offenders = [token for token in forbidden if token in text]
+
+    assert offenders == []
+
+
+def test_maintenance_service_uses_explicit_dependencies() -> None:
+    """MaintenanceService should not hold the whole DataManager facade."""
+    text = (BACKEND_ROOT / "app/data_engine/data_manager/maintenance.py").read_text(
+        encoding="utf-8",
+        errors="ignore",
+    )
+    forbidden = (
+        "def __init__(self, data_manager",
+        "self._dm",
+        "_dm.",
+    )
+
+    offenders = [token for token in forbidden if token in text]
+
+    assert offenders == []
+    assert "storage_provider" in text
+    assert "cache_invalidator" in text
+    assert "bars_backfilled" in text
+
+
+def test_backfill_coordinator_uses_explicit_sinks() -> None:
+    """BackfillCoordinator should not hold the whole DataManager facade."""
+    text = (BACKEND_ROOT / "app/data_engine/data_manager/backfill_coordinator.py").read_text(
+        encoding="utf-8",
+        errors="ignore",
+    )
+    forbidden = (
+        "data_manager:",
+        "self._dm",
+        "_dm.",
+    )
+
+    offenders = [token for token in forbidden if token in text]
+
+    assert offenders == []
+    assert "bars_backfilled" in text
+    assert "emit_event" in text
+
+
+def test_business_code_uses_data_manager_public_facade_for_internals() -> None:
+    """Business modules should not reach into DataManager internals."""
+    files = [
+        *_python_files("app/api", "app/indicator"),
+        BACKEND_ROOT / "app/main.py",
+        BACKEND_ROOT / "app/data_engine/runtime.py",
+    ]
+    direct_pattern = re.compile(
+        r"\bdm\.(?:cache|event_bus|coordinator|query_engine|bar_aggregator|subscriptions)\b|"
+        r"\bruntime\.data_manager\.(?:cache|event_bus|coordinator|query_engine|bar_aggregator|subscriptions)\b|"
+        r"getattr\(\s*dm\s*,\s*[\"'](?:cache|event_bus|coordinator|query_engine|bar_aggregator|subscriptions)[\"']",
+    )
+
+    offenders: list[str] = []
+    for path in files:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if direct_pattern.search(text):
+            offenders.append(str(path.relative_to(BACKEND_ROOT)))
+
+    assert offenders == []
+
+
+def test_data_manager_package_root_does_not_export_internal_services() -> None:
+    """Package root should expose facade contracts, not internal services."""
+    from app.data_engine import data_manager
+
+    forbidden = {
+        "BarCache",
+        "BarSeries",
+        "DataEventBus",
+        "MiddlewareHook",
+        "DailyOpenService",
+        "QueryEngine",
+        "StreamCoordinator",
+        "IngestionFactory",
+        "IngestionPriceSource",
+        "MaintenanceService",
+        "PriceSnapshot",
+        "PriceSnapshotCache",
+        "SubscriptionService",
+    }
+
+    exported = set(data_manager.__all__)
+
+    assert forbidden.isdisjoint(exported)
+    assert {
+        "DataManager",
+        "DataManagerConfig",
+        "BarData",
+        "SeriesKey",
+        "DataEventType",
+        "MaintenanceBusyError",
+        "MaintenanceUnavailableError",
+        "SubscriptionTier",
+    }.issubset(exported)
+
+
+def test_cross_module_dependency_slots_use_named_contracts() -> None:
+    """High-risk cross-module hooks should use named contracts, not bare Any."""
+    checked = [
+        BACKEND_ROOT / "app/data_engine/data_manager/manager.py",
+        BACKEND_ROOT / "app/data_engine/data_manager/maintenance.py",
+        BACKEND_ROOT / "app/data_engine/data_manager/backfill_coordinator.py",
+        BACKEND_ROOT / "app/data_engine/data_manager/subscriptions.py",
+    ]
+    forbidden = (
+        "def wire_backfill_reconciler(self, reconciler: Any)",
+        "def set_price_stream_controller(self, controller: Any)",
+        "def set_backfill_trigger(self, trigger: Any)",
+        "backfill_coordinator: Any",
+        "data_manager: Any",
+        "_data_manager: Any",
+    )
+
+    offenders: list[str] = []
+    for path in checked:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for token in forbidden:
+            if token in text:
+                offenders.append(f"{path.relative_to(BACKEND_ROOT)}:{token}")
 
     assert offenders == []
 
@@ -967,8 +1140,9 @@ def test_backfill_coordinator_dedupes_inflight_request_and_loads_cache() -> None
         engine = _Engine()
         dm = _DataManager()
         coord = BackfillCoordinator(
-            data_manager=dm,
             storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
             engine=engine,
             loop=asyncio.get_running_loop(),
             base_delay_seconds=0,

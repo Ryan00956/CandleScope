@@ -33,6 +33,10 @@ class _EventBus:
 class _DataManager:
     def __init__(self) -> None:
         self.event_bus = _EventBus()
+        self.loaded: list[tuple] = []
+
+    async def on_bars_backfilled(self, symbol, interval, bars, **kwargs):
+        self.loaded.append((symbol, interval, bars, kwargs))
 
 
 class _Storage:
@@ -77,9 +81,11 @@ def test_backfill_coordinator_merges_pending_requests_for_same_series() -> None:
                 return _RepairReport(status="completed")
 
         engine = _Engine()
+        dm = _DataManager()
         coord = BackfillCoordinator(
-            data_manager=_DataManager(),
             storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
             engine=engine,
             loop=asyncio.get_running_loop(),
             base_delay_seconds=0,
@@ -126,8 +132,9 @@ def test_backfill_coordinator_retries_failed_report_until_success() -> None:
         dm = _DataManager()
         engine = _Engine()
         coord = BackfillCoordinator(
-            data_manager=dm,
             storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
             engine=engine,
             loop=asyncio.get_running_loop(),
             max_retries=2,
@@ -183,19 +190,12 @@ def test_backfill_coordinator_loads_cache_from_written_ranges() -> None:
                     "volume": 3,
                 }]
 
-        class _DataManager:
-            def __init__(self) -> None:
-                self.event_bus = _EventBus()
-                self.loaded: list[tuple] = []
-
-            async def on_bars_backfilled(self, symbol, interval, bars, **kwargs):
-                self.loaded.append((symbol, interval, bars, kwargs))
-
         storage = _Storage()
         dm = _DataManager()
         coord = BackfillCoordinator(
-            data_manager=dm,
             storage=storage,
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
             engine=_Engine(),
             loop=asyncio.get_running_loop(),
             base_delay_seconds=0,
@@ -227,8 +227,9 @@ def test_backfill_coordinator_maps_partial_report_to_completed_event() -> None:
 
         dm = _DataManager()
         coord = BackfillCoordinator(
-            data_manager=dm,
             storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
             engine=_Engine(),
             loop=asyncio.get_running_loop(),
             base_delay_seconds=0,
@@ -253,8 +254,9 @@ def test_backfill_coordinator_maps_failed_report_to_failed_event() -> None:
 
         dm = _DataManager()
         coord = BackfillCoordinator(
-            data_manager=dm,
             storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
             engine=_Engine(),
             loop=asyncio.get_running_loop(),
             max_retries=1,
@@ -283,9 +285,11 @@ def test_backfill_coordinator_shutdown_cancels_active_request() -> None:
                 await asyncio.Event().wait()
 
         engine = _Engine()
+        dm = _DataManager()
         coord = BackfillCoordinator(
-            data_manager=_DataManager(),
             storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
             engine=engine,
             loop=asyncio.get_running_loop(),
             base_delay_seconds=0,

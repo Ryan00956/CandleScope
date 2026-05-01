@@ -5,13 +5,35 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from app.data_engine.interval_policy import parse_interval_ms
 from .models import BarData, DataEvent, DataEventType, SeriesKey
 
 logger = logging.getLogger("data_manager.backfill_coordinator")
+
+
+class BackfillEngineLike(Protocol):
+    """Minimal engine contract used by BackfillCoordinator."""
+
+    async def run(self, **kwargs: Any) -> Any:
+        ...
+
+
+class BackfillStorageLike(Protocol):
+    """Minimal storage contract used by BackfillCoordinator."""
+
+    def get_bounds(self, *args: Any, **kwargs: Any) -> dict:
+        ...
+
+    def query_bars(self, **kwargs: Any) -> list[dict]:
+        ...
+
+
+BarsBackfilledCallback = Callable[..., Awaitable[None]]
+EventEmitter = Callable[[DataEvent], Awaitable[None]]
 
 
 @dataclass(slots=True)
@@ -98,15 +120,17 @@ class BackfillCoordinator:
     def __init__(
         self,
         *,
-        data_manager: Any,
-        storage: Any,
-        engine: Any | None = None,
+        storage: BackfillStorageLike,
+        bars_backfilled: BarsBackfilledCallback,
+        emit_event: EventEmitter,
+        engine: BackfillEngineLike | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
         max_retries: int = 3,
         base_delay_seconds: float = 5.0,
     ) -> None:
-        self._dm = data_manager
         self._storage = storage
+        self._bars_backfilled = bars_backfilled
+        self._emit_event = emit_event
         self._engine = engine
         self._loop = loop
         self._max_retries = max(1, max_retries)
@@ -121,7 +145,7 @@ class BackfillCoordinator:
         self._deduped = 0
         self._merged = 0
 
-    def set_engine(self, engine: Any) -> None:
+    def set_engine(self, engine: BackfillEngineLike) -> None:
         self._engine = engine
 
     def trigger(
@@ -435,7 +459,7 @@ class BackfillCoordinator:
             if not bars:
                 continue
 
-            await self._dm.on_bars_backfilled(
+            await self._bars_backfilled(
                 written_range["symbol"],
                 written_range["interval"],
                 bars,
@@ -460,7 +484,7 @@ class BackfillCoordinator:
     ) -> None:
         if bars_loaded > 0:
             return
-        await self._dm.event_bus.emit(DataEvent(
+        await self._emit_event(DataEvent(
             event_type=DataEventType.BACKFILL_COMPLETED,
             key=SeriesKey(
                 request.symbol,
@@ -481,7 +505,7 @@ class BackfillCoordinator:
         report: Any | None = None,
         error: str | None = None,
     ) -> None:
-        await self._dm.event_bus.emit(DataEvent(
+        await self._emit_event(DataEvent(
             event_type=DataEventType.BACKFILL_FAILED,
             key=SeriesKey(
                 request.symbol,

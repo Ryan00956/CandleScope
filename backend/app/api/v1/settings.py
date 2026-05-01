@@ -125,42 +125,30 @@ def _resolve_proxy_url(mode: str, custom_proxy: str | None) -> str | None:
     return _get_system_proxy()
 
 
+def _get_data_engine_runtime(request: Request):
+    """Return the app-wide DataEngineRuntime, if initialized."""
+    return getattr(request.app.state, "data_engine_runtime", None)
+
+
 def _get_ingestion_config(request: Request):
-    """Get the IngestionConfig from app state (if available)."""
-    transport = getattr(request.app.state, "backfill_transport", None)
-    if transport is not None:
-        cfg = getattr(transport, "config", None)
-        if cfg is not None:
-            return cfg
-
-    factory = getattr(request.app.state, "ingestion_factory", None)
-    if factory is not None:
-        cfg = getattr(factory, "config", None)
-        if cfg is not None:
-            return cfg
-
-    return None
+    """Get the IngestionConfig through the runtime facade."""
+    runtime = _get_data_engine_runtime(request)
+    if runtime is None:
+        return None
+    get_config = getattr(runtime, "get_ingestion_config", None)
+    if not callable(get_config):
+        return None
+    return get_config()
 
 
-def _get_transports(request: Request) -> list:
-    """Collect all TransportLayer instances from app state."""
-    transports = []
-
-    def _append(transport) -> None:
-        if transport is not None and all(existing is not transport for existing in transports):
-            transports.append(transport)
-
-    bt = getattr(request.app.state, "backfill_transport", None)
-    _append(bt)
-
-    factory = getattr(request.app.state, "ingestion_factory", None)
-    if factory is not None:
-        get_transports = getattr(factory, "get_transports", None)
-        if callable(get_transports):
-            for transport in get_transports():
-                _append(transport)
-
-    return transports
+async def _restart_runtime_transports(request: Request) -> None:
+    """Restart runtime-owned transports after proxy config changes."""
+    runtime = _get_data_engine_runtime(request)
+    if runtime is None:
+        return
+    restart = getattr(runtime, "restart_transports", None)
+    if callable(restart):
+        await restart()
 
 
 def _get_data_manager(request: Request):
@@ -169,8 +157,14 @@ def _get_data_manager(request: Request):
 
 
 def _get_backfill_coordinator(request: Request):
-    """Return the app-wide BackfillCoordinator."""
-    return getattr(request.app.state, "backfill_coordinator", None)
+    """Return the app-wide BackfillCoordinator through the runtime facade."""
+    runtime = _get_data_engine_runtime(request)
+    if runtime is None:
+        return None
+    get_coordinator = getattr(runtime, "get_backfill_coordinator", None)
+    if not callable(get_coordinator):
+        return None
+    return get_coordinator()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -230,19 +224,15 @@ async def update_proxy_settings(request: Request, body: ProxyConfig) -> dict:
     # Persist to disk so settings survive restarts
     save_proxy_settings(mode, custom_proxy)
 
-    # Update config
-    cfg.update(
-        proxy_mode=mode,
-        http_proxy=custom_proxy,
-    )
+    runtime = _get_data_engine_runtime(request)
+    update_config = getattr(runtime, "update_ingestion_config", None)
+    if callable(update_config):
+        update_config(proxy_mode=mode, http_proxy=custom_proxy)
+    else:
+        cfg.update(proxy_mode=mode, http_proxy=custom_proxy)
 
-    # Restart all transport HTTP sessions to apply new proxy
-    transports = _get_transports(request)
-    for transport in transports:
-        try:
-            await transport.restart_http_session()
-        except Exception as exc:
-            logger.warning("Failed to restart transport session: %s", exc)
+    # Restart all active runtime transports to apply the new proxy.
+    await _restart_runtime_transports(request)
 
     effective = _resolve_proxy_url(mode, custom_proxy)
     logger.info(

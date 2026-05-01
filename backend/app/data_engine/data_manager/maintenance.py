@@ -4,7 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any, Protocol
 
 from app.data_engine.bar_aggregator import BarAggregator, BarAggregatorConfig
 from app.data_engine.interval_policy import (
@@ -42,18 +43,39 @@ class MaintenanceUnavailableError(RuntimeError):
     """Raised when required maintenance dependencies are not available."""
 
 
+class RepairRequester(Protocol):
+    """Minimal repair coordinator contract used by maintenance workflows."""
+
+    async def request_and_wait(self, request: RepairRequest) -> Any:
+        ...
+
+
 class MaintenanceService:
     """Owns manual storage repair and gap scan workflows."""
 
-    def __init__(self, data_manager: Any) -> None:
-        self._dm = data_manager
+    def __init__(
+        self,
+        *,
+        storage_provider: Callable[[], Any | None],
+        aggregator_config_snapshot: Callable[[], dict],
+        cache_invalidator: Callable[..., None],
+        bars_backfilled: Callable[..., Awaitable[None]],
+        active_targets: Callable[[], Iterable[tuple[str, str, str, str]]],
+        seed_active_bar: Callable[..., Awaitable[None]],
+    ) -> None:
+        self._storage_provider = storage_provider
+        self._aggregator_config_snapshot = aggregator_config_snapshot
+        self._cache_invalidator = cache_invalidator
+        self._bars_backfilled = bars_backfilled
+        self._active_targets = active_targets
+        self._seed_active_bar = seed_active_bar
         self._lock = asyncio.Lock()
 
     async def repair_custom_storage(
         self,
         *,
         symbols_filter: list[str] | None,
-        backfill_coordinator: Any,
+        backfill_coordinator: RepairRequester | None,
         exchange: str = "binance",
         market_type: str = "spot",
     ) -> dict:
@@ -68,7 +90,7 @@ class MaintenanceService:
         async with self._lock:
             started_at_ms = int(time.time() * 1000)
             now_ms = started_at_ms
-            aggregator_config = self._dm.bar_aggregator.config.snapshot()
+            aggregator_config = self._aggregator_config_snapshot()
             series = await asyncio.to_thread(
                 self._list_custom_series,
                 storage,
@@ -352,7 +374,7 @@ class MaintenanceService:
         self,
         *,
         symbols_filter: list[str] | None,
-        backfill_coordinator: Any,
+        backfill_coordinator: RepairRequester | None,
         exchange: str = "binance",
         market_type: str = "spot",
     ) -> dict:
@@ -582,7 +604,7 @@ class MaintenanceService:
             exchange=exchange,
             market_type=market_type,
         )
-        self._dm.cache_invalidate(
+        self._cache_invalidator(
             symbol,
             interval,
             exchange=exchange,
@@ -591,13 +613,13 @@ class MaintenanceService:
         return int(deleted or 0)
 
     def _storage(self) -> Any:
-        storage = self._dm.query_engine.storage
+        storage = self._storage_provider()
         if storage is None:
             raise MaintenanceUnavailableError("Storage backend 尚未初始化")
         return storage
 
     @staticmethod
-    def _require_backfill(backfill_coordinator: Any) -> None:
+    def _require_backfill(backfill_coordinator: RepairRequester | None) -> None:
         if backfill_coordinator is None:
             raise MaintenanceUnavailableError("BackfillCoordinator 尚未初始化")
 
@@ -614,7 +636,7 @@ class MaintenanceService:
 
     async def _ensure_base_series_complete(
         self,
-        backfill_coordinator: Any,
+        backfill_coordinator: RepairRequester,
         storage: Any,
         symbol: str,
         base_interval: str,
@@ -677,7 +699,7 @@ class MaintenanceService:
         market_type: str = "spot",
     ) -> None:
         symbol = symbol.upper()
-        self._dm.cache_invalidate(
+        self._cache_invalidator(
             symbol,
             interval,
             exchange=exchange,
@@ -695,7 +717,7 @@ class MaintenanceService:
         )
         if rows:
             bars = [BarData.from_storage_row(row) for row in reversed(rows)]
-            await self._dm.on_bars_backfilled(
+            await self._bars_backfilled(
                 symbol,
                 interval,
                 bars,
@@ -703,9 +725,9 @@ class MaintenanceService:
                 market_type=market_type,
             )
 
-        if (exchange, market_type, symbol, interval) in set(self._dm.bar_aggregator.get_targets()):
+        if (exchange, market_type, symbol, interval) in set(self._active_targets()):
             try:
-                await self._dm.warm_start.seed_if_needed(
+                await self._seed_active_bar(
                     symbol,
                     interval,
                     exchange=exchange,

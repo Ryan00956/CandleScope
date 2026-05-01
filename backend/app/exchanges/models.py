@@ -32,6 +32,7 @@ class ExchangeCapabilities:
     native_intervals: list[str] = field(default_factory=list)
     supports_multi_symbol_ticker: bool = False
     supports_symbol_search: bool = True
+    ws_connection_model: str = "path_per_stream"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +42,7 @@ class ExchangeCapabilities:
             "native_intervals": list(self.native_intervals),
             "supports_multi_symbol_ticker": self.supports_multi_symbol_ticker,
             "supports_symbol_search": self.supports_symbol_search,
+            "ws_connection_model": self.ws_connection_model,
         }
 
 

@@ -100,7 +100,7 @@ from .models import (
     SubscriptionHandle,
 )
 from .maintenance import MaintenanceService, RepairRequester
-from .price_cache import PriceSnapshot, PriceSnapshotCache, normalize_price_key
+from .price_cache import PriceSnapshot, PriceSnapshotCache, normalize_price_key, price_key
 from .query import BackfillTrigger, QueryEngine
 from .retention import RetentionService
 from .stream_policy import StreamEnsurePlanner
@@ -905,10 +905,7 @@ class DataManager:
         controller = self._price_stream_controller
         if controller is None:
             return
-        if exchange == "binance":
-            key = f"{market_type}:{symbol}"
-        else:
-            key = f"{exchange}:{market_type}:{symbol}"
+        key = price_key(symbol, exchange=exchange, market_type=market_type)
         remove_symbol = getattr(controller, "remove_symbol", None)
         if callable(remove_symbol):
             await remove_symbol(key)

@@ -5,7 +5,7 @@ import logging
 import inspect
 from typing import Any, Awaitable, Callable
 
-from .subscriptions import parse_subscription_key
+from .subscriptions import format_subscription_key, parse_subscription_key
 
 logger = logging.getLogger("data_manager.ingestion_price_source")
 
@@ -144,6 +144,4 @@ class IngestionPriceSource:
     @staticmethod
     def _normalize_key(key: str) -> str:
         exchange, market_type, symbol = parse_subscription_key(key)
-        if exchange == "binance":
-            return f"{market_type}:{symbol}"
-        return f"{exchange}:{market_type}:{symbol}"
+        return format_subscription_key(exchange, market_type, symbol)

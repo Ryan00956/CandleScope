@@ -30,6 +30,8 @@ import logging
 from dataclasses import replace
 from typing import Callable, Awaitable, Any
 
+from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+
 from .config import BarAggregatorConfig
 from .models import (
     BarInput,
@@ -324,22 +326,16 @@ class EventRouter:
                         should_route = True
                         merge_mode = MergeMode.COMPONENT
 
-            # Rule 4: OKX realtime 1m -> larger standard intervals
-            # OKX native WS channels for large intervals (candle4H, candle1D,
-            # etc.) push data infrequently, causing chart prices to appear
-            # frozen.  Allow 1m realtime data to fan out to all larger
-            # standard intervals so the current forming bar updates in
-            # real-time -- matching the behavior of Binance.
+            # Rule 4: exchange policy can fan out realtime base interval
+            # updates to larger standard intervals when native large-interval
+            # WS channels update too slowly for active charts.
             elif (
                 is_standard_interval(interval)
-                and src == "1m"
                 and bar_input.source == BarInputSource.REALTIME
-                and exchange == "okx"
+                and self._realtime_policy(exchange).should_fanout_realtime_base(src, interval)
             ):
-                tgt_ms = parse_interval_ms(interval) or 0
-                if tgt_ms > 60_000:
-                    should_route = True
-                    merge_mode = MergeMode.PRICE_ONLY
+                should_route = True
+                merge_mode = MergeMode.PRICE_ONLY
 
             # Discard contaminated source intervals
             if not should_route:
@@ -357,6 +353,11 @@ class EventRouter:
                     "Dispatch error (%s:%s:%s@%s): %s", exchange, market_type, symbol, interval,
                     exc, exc_info=True,
                 )
+
+    @staticmethod
+    def _realtime_policy(exchange: str):
+        bootstrap_default_adapters()
+        return get_exchange_registry().get_plugin(exchange).realtime_policy()
 
     # ── Internal: Stream Type Filter ─────────────────────────
 

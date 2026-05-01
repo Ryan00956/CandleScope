@@ -1,0 +1,111 @@
+from app.data_engine.backfill.config import BackfillConfig
+from app.data_engine.ingestion.config import IngestionConfig
+from app.data_engine.ingestion.models import StreamDescriptor, StreamType
+from app.data_engine.ingestion.normalizers.binance import BinanceNormalizer
+from app.data_engine.ingestion.normalizers.okx import OkxNormalizer
+from app.exchanges.protocol import AdapterBackedProtocol
+from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+
+
+def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
+    bootstrap_default_adapters()
+    registry = get_exchange_registry()
+
+    adapter = registry.get("binance")
+    plugin = registry.get_plugin("binance")
+
+    assert adapter.id == "binance"
+    assert plugin.adapter() is adapter
+    assert [item.id for item in registry.list()] == ["binance", "okx"]
+    assert [item.id for item in registry.list_plugins()] == ["binance", "okx"]
+
+
+def test_builtin_plugins_create_exchange_normalizers() -> None:
+    bootstrap_default_adapters()
+    registry = get_exchange_registry()
+    config = IngestionConfig()
+
+    binance_descriptor = StreamDescriptor("BTCUSDT", StreamType.KLINE, interval="1m")
+    okx_descriptor = StreamDescriptor(
+        "BTC-USDT",
+        StreamType.KLINE,
+        interval="1m",
+        exchange="okx",
+    )
+
+    assert isinstance(
+        registry.get_plugin("binance").normalizer(config, binance_descriptor),
+        BinanceNormalizer,
+    )
+    assert isinstance(
+        registry.get_plugin("okx").normalizer(config, okx_descriptor),
+        OkxNormalizer,
+    )
+
+
+def test_builtin_plugins_own_symbol_and_rate_limit_policies() -> None:
+    bootstrap_default_adapters()
+    registry = get_exchange_registry()
+    config = BackfillConfig(
+        fetch_concurrency=3,
+        fetch_rate_limit_delay=0.25,
+        fetch_binance_futures_concurrency=1,
+        fetch_binance_futures_rate_limit_delay=1.5,
+        fetch_okx_concurrency=1,
+        fetch_okx_rate_limit_delay=0.8,
+    )
+
+    assert (
+        registry.get_plugin("binance")
+        .symbol_normalizer()
+        .normalize("BTC-USDT-SWAP", "futures")
+        == "BTCUSDT"
+    )
+    assert (
+        registry.get_plugin("okx")
+        .symbol_normalizer()
+        .normalize("BTC-USDT", "spot")
+        == "BTC-USDT"
+    )
+
+    binance_policy = registry.get_plugin("binance").rate_limit_policy(config)
+    okx_policy = registry.get_plugin("okx").rate_limit_policy(config)
+
+    assert binance_policy.concurrency_for("spot") == 3
+    assert binance_policy.delay_for("spot") == 0.25
+    assert binance_policy.concurrency_for("futures") == 1
+    assert binance_policy.delay_for("futures") == 1.5
+    assert okx_policy.concurrency_for("spot") == 1
+    assert okx_policy.delay_for("spot") == 0.8
+    assert registry.get_plugin("binance").price_stream_type("spot") == StreamType.MINI_TICKER
+    assert registry.get_plugin("okx").price_stream_type("spot") == StreamType.TICKER
+
+
+def test_adapter_backed_protocol_sanitizes_configured_endpoints() -> None:
+    class _Adapter:
+        def get_http_base_urls(self, market_type="spot", config=None):
+            return [
+                "https://www.okx.com",
+                "https://aws.okx.com",
+                "https://www.okx.com",
+                "",
+            ]
+
+        def get_ws_base_urls(self, market_type="spot", config=None):
+            return [
+                "wss://ws.okx.com:8443/ws/v5/business",
+                "wss://wsaws.okx.com:8443/ws/v5/business",
+                "wss://ws.okx.com:8443/ws/v5/business",
+                "",
+            ]
+
+    protocol = AdapterBackedProtocol(
+        _Adapter(),
+        blocked_http_substrings=("aws.okx.com",),
+        blocked_ws_substrings=("wsaws.okx.com",),
+    )
+
+    assert protocol.rest_base_urls() == ["https://www.okx.com"]
+    assert protocol.ws_base_urls(StreamDescriptor("BTC-USDT", StreamType.KLINE)) == [
+        "wss://ws.okx.com:8443/ws/v5/business",
+    ]

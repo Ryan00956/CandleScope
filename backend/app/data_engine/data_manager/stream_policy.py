@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.data_engine.interval_policy import is_standard_interval, parse_interval_ms
+from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.data_engine.interval_policy import is_standard_interval
 
 from .models import SeriesKey
 
@@ -39,16 +40,23 @@ class StreamEnsurePlanner:
         )
         targets = [requested]
         prerequisites: list[SeriesKey] = []
-        base = SeriesKey(
-            symbol,
-            self._base_interval,
-            exchange=exchange,
-            market_type=market_type,
-        )
 
         if not is_standard_interval(interval):
+            base = SeriesKey(
+                symbol,
+                self._base_interval,
+                exchange=exchange,
+                market_type=market_type,
+            )
             targets.append(base)
-        elif self._needs_okx_base_stream(requested):
+        elif self._needs_policy_base_stream(requested):
+            policy = self._realtime_policy(requested.exchange)
+            base = SeriesKey(
+                symbol,
+                policy.base_interval,
+                exchange=exchange,
+                market_type=market_type,
+            )
             targets.append(base)
             prerequisites.append(base)
 
@@ -58,13 +66,10 @@ class StreamEnsurePlanner:
             prerequisite_streams=tuple(dict.fromkeys(prerequisites)),
         )
 
-    def _needs_okx_base_stream(self, requested: SeriesKey) -> bool:
-        if requested.exchange != "okx":
-            return False
-        if requested.interval == self._base_interval:
-            return False
-        if not is_standard_interval(requested.interval):
-            return False
-        requested_ms = parse_interval_ms(requested.interval) or 0
-        base_ms = parse_interval_ms(self._base_interval) or 0
-        return requested_ms > base_ms
+    def _needs_policy_base_stream(self, requested: SeriesKey) -> bool:
+        return self._realtime_policy(requested.exchange).needs_base_stream(requested.interval)
+
+    @staticmethod
+    def _realtime_policy(exchange: str):
+        bootstrap_default_adapters()
+        return get_exchange_registry().get_plugin(exchange).realtime_policy()

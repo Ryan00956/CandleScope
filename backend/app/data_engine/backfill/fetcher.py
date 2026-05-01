@@ -31,6 +31,7 @@ import time
 from collections import defaultdict
 from typing import Callable, Awaitable
 
+from app.exchanges import RateLimitPolicy, bootstrap_default_adapters, get_exchange_registry
 from app.data_engine.interval_policy import parse_interval_ms
 
 from ..ingestion.config import IngestionConfig
@@ -467,12 +468,7 @@ class HistoricalFetcher:
         sem = self._exchange_semaphores.get(key)
         if sem is not None:
             return sem
-        if key == ("binance", "futures"):
-            limit = self._cfg.fetch_binance_futures_concurrency
-        elif key[0] == "okx":
-            limit = self._cfg.fetch_okx_concurrency
-        else:
-            limit = self._cfg.fetch_concurrency
+        limit = self._rate_limit_policy(task).concurrency_for(task.market_type)
         sem = asyncio.Semaphore(max(1, int(limit)))
         self._exchange_semaphores[key] = sem
         return sem
@@ -485,18 +481,29 @@ class HistoricalFetcher:
         )
 
     def _base_delay_for_task(self, task: BackfillTask) -> float:
-        key = self._exchange_key(task)
-        if key == ("binance", "futures"):
-            return max(0.0, self._cfg.fetch_binance_futures_rate_limit_delay)
-        if key[0] == "okx":
-            return max(0.0, self._cfg.fetch_okx_rate_limit_delay)
-        return max(0.0, self._cfg.fetch_rate_limit_delay)
+        return self._rate_limit_policy(task).delay_for(task.market_type)
 
     def _retry_backoff_seconds(self, task: BackfillTask, exc: TransportError) -> float:
         if self._is_rate_limited(exc):
             retry_after = getattr(exc, "retry_after", None) or 0.0
-            return max(self._cfg.fetch_429_backoff_seconds, self._base_delay_for_task(task), retry_after)
+            return max(
+                self._rate_limit_policy(task).retry_429_backoff_for(task.market_type),
+                self._base_delay_for_task(task),
+                retry_after,
+            )
         return 0.0
+
+    def _rate_limit_policy(self, task: BackfillTask):
+        bootstrap_default_adapters()
+        try:
+            plugin = get_exchange_registry().get_plugin(task.exchange)
+        except KeyError:
+            return RateLimitPolicy(
+                default_concurrency=self._cfg.fetch_concurrency,
+                default_delay_seconds=self._cfg.fetch_rate_limit_delay,
+                default_retry_429_backoff_seconds=self._cfg.fetch_429_backoff_seconds,
+            )
+        return plugin.rate_limit_policy(self._cfg)
 
     async def _record_rate_limit_cooldown(
         self,

@@ -12,7 +12,8 @@ from app.data_engine.ingestion.models import (
     StreamDescriptor,
     StreamType,
 )
-from app.data_engine.ingestion.shared_ws import SharedWsSessionAdapter
+from app.data_engine.ingestion.shared_ws import SharedWsHubRegistry, SharedWsSessionAdapter
+from app.data_engine.ingestion.transport import TransportLayer
 
 
 class _FakeTransport:
@@ -214,3 +215,29 @@ def test_shared_ws_session_adapter_matches_session_contract() -> None:
         assert hub.handle.unsubscribed is True
 
     asyncio.run(_run())
+
+
+def test_shared_ws_hub_registry_uses_exchange_capabilities() -> None:
+    registry = SharedWsHubRegistry(IngestionConfig(), TransportLayer(IngestionConfig()))
+
+    okx_kline = StreamDescriptor(
+        "BTC-USDT",
+        StreamType.KLINE,
+        interval="1m",
+        exchange="okx",
+    )
+    okx_ticker = StreamDescriptor(
+        "BTC-USDT",
+        StreamType.TICKER,
+        exchange="okx",
+    )
+    binance_kline = StreamDescriptor(
+        "BTCUSDT",
+        StreamType.KLINE,
+        interval="1m",
+        exchange="binance",
+    )
+
+    assert registry.get_hub(okx_kline) is not None
+    assert registry.get_hub(okx_ticker) is None
+    assert registry.get_hub(binance_kline) is None

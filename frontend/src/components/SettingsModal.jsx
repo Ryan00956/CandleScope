@@ -5,6 +5,7 @@ import {
     testProxyConnection,
     repairStoredCustomIntervals,
     scanAndFillGaps,
+    fetchSupportedExchanges,
     refreshExchangeInfo,
 } from '../services/api';
 import { parseSymbolKey } from '../utils/symbolKey';
@@ -13,31 +14,10 @@ import { parseSymbolKey } from '../utils/symbolKey';
 const CATEGORIES = [
     { key: 'appearance', label: '外观显示', icon: '🎨' },
     { key: 'network',    label: '网络连接', icon: '🌐' },
+    { key: 'exchanges',  label: '交易所',   icon: '🏦' },
     { key: 'data',       label: '数据管理', icon: '💾' },
     { key: 'about',      label: '关于',     icon: 'ℹ️' },
 ];
-
-// ── Interval parsing utility ────────────────────────────────────
-const _UNIT_SECONDS = { s: 1, m: 60, h: 3600, d: 86400, w: 604800, M: 2592000 };
-const _INTERVAL_RE = /^(\d+)([smhdwM])$/;
-
-function parseIntervalToSeconds(interval) {
-    const m = _INTERVAL_RE.exec(interval);
-    if (!m) return null;
-    const num = parseInt(m[1], 10);
-    const unit = m[2];
-    if (num <= 0 || !_UNIT_SECONDS[unit]) return null;
-    return num * _UNIT_SECONDS[unit];
-}
-
-function getTierForInterval(interval) {
-    const secs = parseIntervalToSeconds(interval);
-    if (secs === null) return 'minutes';
-    if (secs < 60)    return 'seconds';
-    if (secs < 3600)  return 'minutes';
-    if (secs < 86400) return 'hours';
-    return 'daily';
-}
 
 // ── Ephemeral cache (memory-only, e.g. 1s) ──────────────────────
 const EPHEMERAL_CACHE_OPTIONS = [
@@ -138,6 +118,11 @@ export default function SettingsModal({
     const [proxyTestResult, setProxyTestResult] = useState(null);
     const [proxySaveMsg, setProxySaveMsg] = useState(null);
 
+    // ── Exchange support state ─────────────────────────────
+    const [supportedExchanges, setSupportedExchanges] = useState([]);
+    const [exchangeListLoading, setExchangeListLoading] = useState(false);
+    const [exchangeListError, setExchangeListError] = useState(null);
+
     // ── Storage repair state ────────────────────────────────
     const [storageRepairLoading, setStorageRepairLoading] = useState(false);
     const [storageRepairResult, setStorageRepairResult] = useState(null);
@@ -162,6 +147,24 @@ export default function SettingsModal({
             })
             .catch(() => { /* ignore — backend may not be up */ });
     }, [isOpen]);
+
+    const loadSupportedExchanges = useCallback(async () => {
+        setExchangeListLoading(true);
+        setExchangeListError(null);
+        try {
+            const data = await fetchSupportedExchanges();
+            setSupportedExchanges(Array.isArray(data.exchanges) ? data.exchanges : []);
+        } catch (err) {
+            setExchangeListError(err.message || '交易所列表加载失败');
+        } finally {
+            setExchangeListLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        loadSupportedExchanges();
+    }, [isOpen, loadSupportedExchanges]);
 
     const handleProxySave = useCallback(async () => {
         setProxyLoading(true);
@@ -527,6 +530,113 @@ export default function SettingsModal({
                 {proxySaveMsg && (
                     <div className={`st-result ${proxySaveMsg.ok ? 'st-result-ok' : 'st-result-fail'}`}>
                         <span>{proxySaveMsg.text}</span>
+                    </div>
+                )}
+            </div>
+        </>
+    );
+
+    const formatBoolSupport = (value) => (value ? '支持' : '不支持');
+
+    const getWsConnectionLabel = (model) => {
+        if (model === 'shared_multiplex') return '共享复用连接';
+        if (model === 'path_per_stream') return '单流独立连接';
+        return model || '默认连接';
+    };
+
+    const formatMarketLabels = (markets = []) => {
+        if (!Array.isArray(markets) || markets.length === 0) return '暂无市场配置';
+        return markets
+            .map((market) => market.label || market.market_type || market.product_type)
+            .filter(Boolean)
+            .join(' / ');
+    };
+
+    const renderIntervalPreview = (intervals = []) => {
+        if (!Array.isArray(intervals) || intervals.length === 0) {
+            return <span className="st-exchange-empty">未声明原生周期</span>;
+        }
+        const visible = intervals.slice(0, 10);
+        const hidden = intervals.length - visible.length;
+        return (
+            <div className="st-exchange-intervals">
+                {visible.map((interval) => (
+                    <span key={interval} className="st-exchange-chip">{interval}</span>
+                ))}
+                {hidden > 0 && <span className="st-exchange-chip muted">+{hidden}</span>}
+            </div>
+        );
+    };
+
+    const renderExchanges = () => (
+        <>
+            <div className="st-group">
+                <div className="st-group-title-row">
+                    <div>
+                        <div className="st-group-title" style={{ marginBottom: 0 }}>后端已注册交易所</div>
+                        <div className="st-group-desc" style={{ marginBottom: 0 }}>
+                            这里直接读取交易所插件注册表；新增交易所插件注册后会自动出现在列表中。
+                        </div>
+                    </div>
+                    <button
+                        className="st-advanced-toggle"
+                        onClick={loadSupportedExchanges}
+                        disabled={exchangeListLoading}
+                    >
+                        {exchangeListLoading ? '刷新中...' : '刷新'}
+                    </button>
+                </div>
+
+                {exchangeListError && (
+                    <div className="st-result st-result-fail">
+                        <div className="st-result-head">交易所列表加载失败</div>
+                        <div className="st-result-detail">{exchangeListError}</div>
+                    </div>
+                )}
+
+                {!exchangeListError && exchangeListLoading && supportedExchanges.length === 0 && (
+                    <div className="st-info-box">正在读取交易所插件注册表...</div>
+                )}
+
+                {!exchangeListError && !exchangeListLoading && supportedExchanges.length === 0 && (
+                    <div className="st-info-box st-info-warn">当前后端没有返回已注册交易所。</div>
+                )}
+
+                {supportedExchanges.length > 0 && (
+                    <div className="st-exchange-grid">
+                        {supportedExchanges.map((exchange) => (
+                            <div key={exchange.exchange} className="st-exchange-card">
+                                <div className="st-exchange-card-head">
+                                    <div>
+                                        <div className="st-exchange-name">{exchange.name || exchange.exchange}</div>
+                                        <div className="st-exchange-id">{exchange.exchange}</div>
+                                    </div>
+                                    <span className={`st-series-badge ${exchange.exchange === currentExchange ? 'st-badge-ok' : 'st-badge-info'}`}>
+                                        {exchange.exchange === currentExchange ? '当前' : '可用'}
+                                    </span>
+                                </div>
+
+                                <div className="st-exchange-market-line">
+                                    {formatMarketLabels(exchange.markets)}
+                                </div>
+
+                                <div className="st-exchange-cap-row">
+                                    <span>实时模型</span>
+                                    <strong>{getWsConnectionLabel(exchange.ws_connection_model)}</strong>
+                                </div>
+                                <div className="st-exchange-cap-row">
+                                    <span>多品种报价</span>
+                                    <strong>{formatBoolSupport(exchange.supports_multi_symbol_ticker)}</strong>
+                                </div>
+                                <div className="st-exchange-cap-row">
+                                    <span>搜索交易对</span>
+                                    <strong>{formatBoolSupport(exchange.supports_symbol_search)}</strong>
+                                </div>
+
+                                <div className="st-exchange-section-label">原生周期</div>
+                                {renderIntervalPreview(exchange.native_intervals)}
+                            </div>
+                        ))}
                     </div>
                 )}
             </div>
@@ -951,6 +1061,7 @@ export default function SettingsModal({
         switch (activeCategory) {
             case 'appearance': return renderAppearance();
             case 'network':    return renderNetwork();
+            case 'exchanges':  return renderExchanges();
             case 'data':       return renderData();
             case 'about':      return renderAbout();
             default:           return renderAppearance();
@@ -1752,6 +1863,106 @@ input[type="color"] {
   white-space: nowrap;
 }
 
+/* ── Supported exchanges ───────────────────────────────── */
+.st-exchange-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.st-exchange-card {
+  padding: 16px;
+  border: 1px solid var(--border-color, #334155);
+  background: var(--bg-tertiary, #1a2332);
+  border-radius: 10px;
+}
+
+.st-exchange-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.st-exchange-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary, #f1f5f9);
+}
+
+.st-exchange-id {
+  margin-top: 2px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+}
+
+.st-exchange-market-line {
+  min-height: 18px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-secondary, #94a3b8);
+}
+
+.st-exchange-cap-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 12px;
+}
+
+.st-exchange-cap-row span {
+  color: var(--text-muted, #64748b);
+}
+
+.st-exchange-cap-row strong {
+  color: var(--text-primary, #f1f5f9);
+  font-weight: 600;
+  text-align: right;
+}
+
+.st-exchange-section-label {
+  margin-top: 12px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted, #64748b);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.st-exchange-intervals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.st-exchange-chip {
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(59, 130, 246, 0.1);
+  color: #93c5fd;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.st-exchange-chip.muted {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted, #64748b);
+}
+
+.st-exchange-empty {
+  color: var(--text-muted, #64748b);
+  font-size: 12px;
+}
+
 /* ── Responsive ─────────────────────────────────────────── */
 @media (max-width: 640px) {
   .st-panel {
@@ -1814,6 +2025,10 @@ input[type="color"] {
 
   .st-ephemeral-cards {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .st-exchange-grid {
+    grid-template-columns: 1fr;
   }
 
   .st-tier-header,

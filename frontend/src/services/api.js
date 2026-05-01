@@ -126,6 +126,11 @@ export async function fetchExchangeInfo(marketType = "", exchange = "") {
     return request(url);
 }
 
+export async function fetchSupportedExchanges() {
+    const url = `${API_BASE}/exchanges/`;
+    return request(url);
+}
+
 export async function refreshExchangeInfo(exchange = "") {
     const params = exchange ? `?exchange=${encodeURIComponent(exchange)}` : "";
     const url = `${API_BASE}/symbols/exchange-info/refresh${params}`;

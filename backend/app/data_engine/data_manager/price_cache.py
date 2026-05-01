@@ -8,7 +8,7 @@ from typing import Any, Iterable
 from app.exchanges.symbols import normalize_symbol as normalize_exchange_symbol
 
 from .models import SeriesKey
-from .subscriptions import parse_subscription_key
+from .subscriptions import format_subscription_key, parse_subscription_key
 
 
 def normalize_price_key(
@@ -37,9 +37,7 @@ def price_key(symbol: str, exchange: str = "binance", market_type: str = "spot")
         exchange=exchange,
         market_type=market_type,
     )
-    if normalized_exchange == "binance":
-        return f"{normalized_market}:{normalized_symbol}"
-    return f"{normalized_exchange}:{normalized_market}:{normalized_symbol}"
+    return format_subscription_key(normalized_exchange, normalized_market, normalized_symbol)
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:

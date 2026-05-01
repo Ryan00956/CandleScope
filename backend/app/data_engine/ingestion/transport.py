@@ -167,16 +167,13 @@ class TransportLayer:
         desc = req.descriptor
         exchange = getattr(desc, "exchange", "binance")
         market_type = getattr(desc, "market_type", "spot")
-        adapter = self._registry.get(exchange)
-        rest_path = adapter.get_rest_path(desc.stream_type, market_type)
+        protocol = self._registry.get_plugin(exchange).protocol()
+        rest_path = protocol.rest_path(desc.stream_type, market_type)
         if rest_path is None:
             raise TransportError(f"No REST endpoint for stream type: {desc.stream_type}")
 
-        params = adapter.build_http_params(req)
-        http_urls = self._sanitize_http_urls(
-            exchange,
-            adapter.get_http_base_urls(market_type, config=self._cfg),
-        )
+        params = protocol.build_http_params(req)
+        http_urls = protocol.rest_base_urls(market_type, config=self._cfg)
         last_exc: Exception | None = None
         tried = 0
         total = len(http_urls)
@@ -212,7 +209,7 @@ class TransportLayer:
                 self._metrics.mark("http_last_success_at")
                 now_ms = int(time.time() * 1000)
 
-                rows = adapter.extract_http_rows(data, desc.stream_type)
+                rows = protocol.extract_http_rows(data, desc.stream_type)
 
                 return [
                     RawMessage(
@@ -263,12 +260,9 @@ class TransportLayer:
         """
         exchange = getattr(descriptor, "exchange", "binance")
         market_type = getattr(descriptor, "market_type", "spot")
-        adapter = self._registry.get(exchange)
-        subscription = adapter.build_ws_subscription(descriptor)
-        ws_urls = self._sanitize_ws_urls(
-            exchange,
-            self._get_ws_base_urls_for_descriptor(adapter, descriptor, market_type),
-        )
+        protocol = self._registry.get_plugin(exchange).protocol()
+        subscription = protocol.build_ws_subscription(descriptor)
+        ws_urls = protocol.ws_base_urls(descriptor, config=self._cfg)
         last_exc: Exception | None = None
         tried = 0
         total = len(ws_urls)
@@ -387,8 +381,8 @@ class TransportLayer:
         """Return whether the current stack can stream this descriptor over WebSocket."""
         exchange = getattr(descriptor, "exchange", "binance")
         market_type = getattr(descriptor, "market_type", "spot")
-        adapter = self._registry.get(exchange)
-        return adapter.supports_ws_streaming(market_type)
+        plugin = self._registry.get_plugin(exchange)
+        return plugin.adapter().supports_ws_streaming(market_type)
 
     # ── Public: probe (used by L3 to test WS connectivity) ───
 
@@ -410,12 +404,29 @@ class TransportLayer:
     @property
     def current_http_base(self) -> str:
         """The HTTP base URL currently in use."""
-        return self._current_http_base("binance", "spot", self._registry.get("binance").get_http_base_urls("spot", config=self._cfg))
+        protocol = self._registry.get_plugin("binance").protocol()
+        return self._current_http_base(
+            "binance",
+            "spot",
+            protocol.rest_base_urls("spot", config=self._cfg),
+        )
 
     @property
     def current_ws_base(self) -> str:
         """The WS base URL currently in use."""
-        return self._current_ws_base("binance", "spot", self._registry.get("binance").get_ws_base_urls("spot", config=self._cfg))
+        protocol = self._registry.get_plugin("binance").protocol()
+        descriptor = StreamDescriptor(
+            "BTCUSDT",
+            StreamType.KLINE,
+            interval="1m",
+            exchange="binance",
+            market_type="spot",
+        )
+        return self._current_ws_base(
+            "binance",
+            "spot",
+            protocol.ws_base_urls(descriptor, config=self._cfg),
+        )
 
     # ── Internal: endpoint rotation ──────────────────────────
 
@@ -442,32 +453,23 @@ class TransportLayer:
     def _rotate_http(self, exchange: str, market_type: str, total: int) -> None:
         key = (exchange, market_type)
         self._http_idx[key] = (self._http_idx.get(key, 0) + 1) % max(total, 1)
-        urls = self._sanitize_http_urls(
-            exchange,
-            self._registry.get(exchange).get_http_base_urls(market_type, config=self._cfg),
-        )
+        protocol = self._registry.get_plugin(exchange).protocol()
+        urls = protocol.rest_base_urls(market_type, config=self._cfg)
         logger.debug("HTTP endpoint rotated → %s", self._current_http_base(exchange, market_type, urls))
 
     def _rotate_ws(self, exchange: str, market_type: str, total: int) -> None:
         key = (exchange, market_type)
         self._ws_idx[key] = (self._ws_idx.get(key, 0) + 1) % max(total, 1)
-        urls = self._sanitize_ws_urls(
-            exchange,
-            self._registry.get(exchange).get_ws_base_urls(market_type, config=self._cfg),
+        protocol = self._registry.get_plugin(exchange).protocol()
+        descriptor = StreamDescriptor(
+            "",
+            StreamType.KLINE,
+            interval="1m",
+            exchange=exchange,
+            market_type=market_type,
         )
+        urls = protocol.ws_base_urls(descriptor, config=self._cfg)
         logger.debug("WS endpoint rotated → %s", self._current_ws_base(exchange, market_type, urls))
-
-    def _sanitize_http_urls(self, exchange: str, urls: list[str]) -> list[str]:
-        cleaned = [u for u in urls if u]
-        if exchange == "okx":
-            cleaned = [u for u in cleaned if "aws.okx.com" not in u]
-        return list(dict.fromkeys(cleaned))
-
-    def _sanitize_ws_urls(self, exchange: str, urls: list[str]) -> list[str]:
-        cleaned = [u for u in urls if u]
-        if exchange == "okx":
-            cleaned = [u for u in cleaned if "wsaws.okx.com" not in u]
-        return list(dict.fromkeys(cleaned))
 
     def _get_ws_base_urls_for_descriptor(
         self,

@@ -1,6 +1,7 @@
 """Exchange-specific normalizer factory."""
 from __future__ import annotations
 
+from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import StreamDescriptor
 
@@ -14,9 +15,8 @@ def create_normalizer(
     descriptor: StreamDescriptor,
 ) -> ExchangeNormalizer:
     exchange = (descriptor.exchange or "binance").strip().lower()
-    if exchange == "okx":
-        return OkxNormalizer(config, descriptor)
-    return BinanceNormalizer(config, descriptor)
+    bootstrap_default_adapters()
+    return get_exchange_registry().get_plugin(exchange).normalizer(config, descriptor)
 
 
 __all__ = [

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .registry import bootstrap_default_adapters, get_exchange_registry
 
 _BINANCE_PERP_SUFFIXES = {"SWAP", "PERP", "PERPETUAL"}
 
@@ -18,10 +19,15 @@ def normalize_symbol(symbol: str, exchange: str = "binance", market_type: str = 
     if not normalized:
         return ""
 
-    if normalized_exchange == "binance":
-        return _normalize_binance_symbol(normalized, normalized_market_type)
+    bootstrap_default_adapters()
+    try:
+        normalizer = get_exchange_registry().get_plugin(normalized_exchange).symbol_normalizer()
+    except KeyError:
+        if normalized_exchange == "binance":
+            return _normalize_binance_symbol(normalized, normalized_market_type)
+        return normalized
 
-    return normalized
+    return normalizer.normalize(normalized, normalized_market_type)
 
 
 def _normalize_binance_symbol(symbol: str, market_type: str) -> str:

@@ -32,7 +32,7 @@ class _Subscriber:
 class SharedWsSubscriptionHandle:
     __slots__ = ("_hub", "_token", "_closed")
 
-    def __init__(self, hub: "OkxSharedKlineHub", token: int) -> None:
+    def __init__(self, hub: "SharedMultiplexHub", token: int) -> None:
         self._hub = hub
         self._token = token
         self._closed = False
@@ -49,7 +49,7 @@ class SharedWsSessionAdapter:
 
     def __init__(
         self,
-        hub: "OkxSharedKlineHub",
+        hub: "SharedMultiplexHub",
         descriptor: StreamDescriptor,
     ) -> None:
         self._hub = hub
@@ -124,8 +124,8 @@ class SharedWsSessionAdapter:
             await self._on_health_change(health, reason)
 
 
-class OkxSharedKlineHub:
-    """One upstream OKX WS connection shared by many interval subscribers."""
+class SharedMultiplexHub:
+    """One upstream WS connection shared by many stream subscribers."""
 
     def __init__(
         self,
@@ -142,7 +142,8 @@ class OkxSharedKlineHub:
         self._symbol = symbol.upper()
 
         bootstrap_default_adapters()
-        self._adapter = get_exchange_registry().get(exchange)
+        self._plugin = get_exchange_registry().get_plugin(exchange)
+        self._protocol = self._plugin.protocol()
 
         self._subscribers: dict[int, _Subscriber] = {}
         self._next_token = 1
@@ -201,7 +202,7 @@ class OkxSharedKlineHub:
         if self._runner_task is None or self._runner_task.done():
             self._runner_task = asyncio.create_task(
                 self._run_loop(),
-                name=f"okx_shared_ws_{self._market_type}_{self._symbol}",
+                name=f"{self._exchange}_shared_ws_{self._market_type}_{self._symbol}",
             )
 
     async def _run_loop(self) -> None:
@@ -267,25 +268,10 @@ class OkxSharedKlineHub:
     async def _send_combined_subscribe(self, descriptors: list[StreamDescriptor]) -> None:
         if self._conn is None:
             raise TransportError("shared WS connection not ready")
-        args: list[dict] = []
-        seen: set[tuple[str, str]] = set()
-        for descriptor in descriptors:
-            spec = self._adapter.build_ws_subscription(descriptor)
-            payload = spec.subscribe_payload or {}
-            payload_args = payload.get("args") if isinstance(payload.get("args"), list) else []
-            for arg in payload_args:
-                if not isinstance(arg, dict):
-                    continue
-                channel = str(arg.get("channel", ""))
-                inst_id = str(arg.get("instId", "")).upper()
-                key = (channel, inst_id)
-                if not channel or not inst_id or key in seen:
-                    continue
-                seen.add(key)
-                args.append({"channel": channel, "instId": inst_id})
-        if not args:
-            raise TransportError("no OKX subscription args available")
-        await self._conn.send(json.dumps({"op": "subscribe", "args": args}))
+        payload = self._protocol.build_combined_subscribe(descriptors)
+        if not payload:
+            raise TransportError(f"no {self._exchange} subscription payload available")
+        await self._conn.send(json.dumps(payload))
 
     async def _read_loop(self) -> None:
         assert self._conn is not None
@@ -309,7 +295,7 @@ class OkxSharedKlineHub:
                 if event == "subscribe":
                     continue
                 if event == "error":
-                    raise TransportError(f"OKX WS subscription rejected: {payload}")
+                    raise TransportError(f"{self._exchange} WS subscription rejected: {payload}")
 
             await self._dispatch_payload(payload)
 
@@ -322,18 +308,11 @@ class OkxSharedKlineHub:
     async def _dispatch_payload(self, payload: dict | list) -> None:
         if not isinstance(payload, dict):
             return
-        arg = payload.get("arg") if isinstance(payload.get("arg"), dict) else {}
-        channel = str(arg.get("channel", ""))
-        inst_id = str(arg.get("instId", "")).upper()
-        if not channel or inst_id != self._symbol:
-            return
 
         now_ms = int(time.time() * 1000)
         matching = [
             sub for sub in self._subscribers.values()
-            if sub.descriptor.stream_type == StreamType.KLINE
-            and sub.descriptor.symbol.upper() == inst_id
-            and self._channel_for_descriptor(sub.descriptor) == channel
+            if self._protocol.payload_matches_descriptor(payload, sub.descriptor)
         ]
         for sub in matching:
             msg = RawMessage(
@@ -347,14 +326,6 @@ class OkxSharedKlineHub:
                 await sub.on_data(msg)
             except Exception as exc:
                 logger.error("Shared WS callback error: %s", exc, exc_info=True)
-
-    def _channel_for_descriptor(self, descriptor: StreamDescriptor) -> str:
-        spec = self._adapter.build_ws_subscription(descriptor)
-        payload = spec.subscribe_payload or {}
-        payload_args = payload.get("args") if isinstance(payload.get("args"), list) else []
-        if payload_args and isinstance(payload_args[0], dict):
-            return str(payload_args[0].get("channel", ""))
-        return ""
 
     async def _set_health(self, new_health: SessionHealth, reason: str) -> None:
         if new_health == self._health:
@@ -388,22 +359,27 @@ class SharedWsHubRegistry:
     def __init__(self, config: IngestionConfig, transport: TransportLayer) -> None:
         self._cfg = config
         self._transport = transport
-        self._okx_hubs: dict[tuple[str, str, str], OkxSharedKlineHub] = {}
+        self._hubs: dict[tuple[str, str, str], SharedMultiplexHub] = {}
 
-    def get_hub(self, descriptor: StreamDescriptor) -> OkxSharedKlineHub | None:
-        if descriptor.exchange != "okx" or descriptor.stream_type != StreamType.KLINE:
+    def get_hub(self, descriptor: StreamDescriptor) -> SharedMultiplexHub | None:
+        bootstrap_default_adapters()
+        plugin = get_exchange_registry().get_plugin(descriptor.exchange)
+        if (
+            plugin.capabilities().ws_connection_model != "shared_multiplex"
+            or descriptor.stream_type != StreamType.KLINE
+        ):
             return None
         key = (descriptor.exchange, descriptor.market_type, descriptor.symbol.upper())
-        hub = self._okx_hubs.get(key)
+        hub = self._hubs.get(key)
         if hub is None:
-            hub = OkxSharedKlineHub(
+            hub = SharedMultiplexHub(
                 config=self._cfg,
                 transport=self._transport,
                 exchange=descriptor.exchange,
                 market_type=descriptor.market_type,
                 symbol=descriptor.symbol,
             )
-            self._okx_hubs[key] = hub
+            self._hubs[key] = hub
         return hub
 
     def create_session(self, descriptor: StreamDescriptor) -> SessionLike | None:
@@ -411,3 +387,7 @@ class SharedWsHubRegistry:
         if hub is None:
             return None
         return SharedWsSessionAdapter(hub, descriptor)
+
+
+# Backward-compatible alias for tests and older imports.
+OkxSharedKlineHub = SharedMultiplexHub

@@ -39,6 +39,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Awaitable
 
+from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+
 from .config import IngestionConfig
 from .models import StreamType, StreamDescriptor, MarketEvent
 
@@ -179,7 +181,7 @@ class BinanceIngestionFactory:
     ) -> _IngestionHandle:
         """Start an ingestion ticker stream for a watched price symbol."""
         ingress = await self._ensure_ingress()
-        stream_type = StreamType.MINI_TICKER if exchange == "binance" else StreamType.TICKER
+        stream_type = self._price_stream_type(exchange, market_type)
         descriptor = StreamDescriptor(
             symbol=symbol.upper(),
             stream_type=stream_type,
@@ -196,6 +198,15 @@ class BinanceIngestionFactory:
         self._register_price_callback(pipeline, on_price, exchange, market_type)
         logger.info("Price ingestion pipeline started: %s", descriptor.key)
         return _IngestionHandle(ingress, descriptor.key)
+
+    @staticmethod
+    def _price_stream_type(exchange: str, market_type: str) -> StreamType:
+        bootstrap_default_adapters()
+        try:
+            stream_type = get_exchange_registry().get_plugin(exchange).price_stream_type(market_type)
+        except KeyError:
+            return StreamType.TICKER
+        return stream_type if isinstance(stream_type, StreamType) else StreamType(str(stream_type))
 
     def _register_callback(self, pipeline: Any, on_bar: Callable) -> None:
         """Register a callback on the pipeline's L6 Delivery layer.

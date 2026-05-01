@@ -184,6 +184,11 @@ def test_ingestion_factory_price_callback_receives_delivery_events() -> None:
     asyncio.run(_run())
 
 
+def test_ingestion_factory_uses_exchange_plugin_price_stream_type() -> None:
+    assert BinanceIngestionFactory._price_stream_type("binance", "spot") == StreamType.MINI_TICKER
+    assert BinanceIngestionFactory._price_stream_type("okx", "spot") == StreamType.TICKER
+
+
 def test_data_manager_daily_open_prefers_storage_1d_bar() -> None:
     async def _run() -> None:
         updated_at_ms = DAY_MS * 10 + 123_000

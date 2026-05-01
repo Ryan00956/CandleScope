@@ -100,12 +100,35 @@ def parse_subscription_key(key: str) -> tuple[str, str, str]:
     return exchange, "spot", raw_symbol
 
 
+def format_subscription_key(
+    exchange: str,
+    market_type: str,
+    symbol: str,
+    *,
+    legacy_binance: bool = True,
+) -> str:
+    """Format a normalized subscription key.
+
+    ``legacy_binance`` keeps existing persisted/watchlist Binance keys in the
+    historical two-part shape (``spot:BTCUSDT``) while all other exchanges use
+    the explicit three-part shape.
+    """
+    normalized_exchange = str(exchange or "binance").strip().lower()
+    normalized_market = str(market_type or "spot").strip().lower()
+    normalized_symbol = normalize_exchange_symbol(
+        symbol,
+        exchange=normalized_exchange,
+        market_type=normalized_market,
+    )
+    if legacy_binance and normalized_exchange == "binance":
+        return f"{normalized_market}:{normalized_symbol}"
+    return f"{normalized_exchange}:{normalized_market}:{normalized_symbol}"
+
+
 def normalize_subscription_key(symbol: str) -> str:
     """Normalize a user symbol into the persisted subscription key."""
     exchange, market_type, raw_symbol = parse_subscription_key(symbol)
-    if exchange == "binance":
-        return f"{market_type}:{raw_symbol}"
-    return f"{exchange}:{market_type}:{raw_symbol}"
+    return format_subscription_key(exchange, market_type, raw_symbol)
 
 
 @dataclass(slots=True)

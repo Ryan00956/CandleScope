@@ -133,11 +133,6 @@ function shouldShowIndicatorCrosshairMarker(lineConfig, tool) {
     return lineConfig?.type !== "histogram" && shouldShowCrosshairDetails(tool);
 }
 
-function getPaneCursorStyle(tool, paneType) {
-    if (paneType !== "main" && CUSTOM_POINTER_TOOL_IDS.has(tool)) return "default";
-    return getCursorStyleForTool(tool);
-}
-
 const ChartPane = forwardRef(function ChartPane({
     symbol,
     drawingKeyBase,
@@ -1231,14 +1226,6 @@ const ChartPane = forwardRef(function ChartPane({
         seriesReady,
     });
 
-    useEffect(() => {
-        const container = containerRef.current;
-        if (!container) return;
-        if (paneType !== "main" && CUSTOM_POINTER_TOOL_IDS.has(drawingTool)) {
-            container.style.setProperty("cursor", "default");
-        }
-    }, [drawingTool, paneType]);
-
     const [chartContainerWidth, setChartContainerWidth] = useState(0);
 
     useEffect(() => {
@@ -1383,9 +1370,9 @@ const ChartPane = forwardRef(function ChartPane({
             <div
                 ref={containerRef}
                 className="chart-pane-container"
-                style={{ cursor: getPaneCursorStyle(drawingTool, paneType) }}
+                style={{ cursor: getCursorStyleForTool(drawingTool) }}
             />
-            {paneType === "main" && CUSTOM_POINTER_TOOL_IDS.has(drawingTool) && (
+            {CUSTOM_POINTER_TOOL_IDS.has(drawingTool) && (
                 <div className="chart-pane-cursor-overlay" aria-hidden="true">
                     <div
                         ref={cursorOverlayRef}

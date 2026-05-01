@@ -5851,7 +5851,7 @@ body {
   background: rgba(248, 250, 252, 0.7);
 }
 
-/* Cursor overlay for drawing tools on the main pane */
+/* Cursor overlay for drawing tools on chart panes */
 .chart-pane-cursor-overlay {
   position: absolute;
   top: 0;

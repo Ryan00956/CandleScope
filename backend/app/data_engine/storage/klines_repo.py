@@ -7,7 +7,13 @@ from pathlib import Path
 import pandas as pd
 
 from app.core.config import KLINES_DB_PATH
-from app.data_engine.interval_policy import INTERVAL_SECONDS, VALID_INTERVALS
+from app.data_engine.interval_policy import (
+    INTERVAL_SECONDS,
+    VALID_INTERVALS,
+    compute_bucket_end_ms,
+    compute_bucket_start_ms,
+    parse_interval_ms,
+)
 
 # Valid market types
 VALID_MARKET_TYPES = ("spot", "futures", "swap")
@@ -366,6 +372,179 @@ def list_series_summaries(
     return [dict(r) for r in rows]
 
 
+def _first_expected_open_ms(start_ms: int, interval: str) -> int:
+    interval_ms = parse_interval_ms(interval) or 60_000
+    bucket = compute_bucket_start_ms(start_ms, interval_ms, interval=interval)
+    if bucket < start_ms:
+        bucket = compute_bucket_end_ms(bucket, interval_ms, interval=interval)
+    return bucket
+
+
+def _last_expected_open_ms(end_ms: int, interval: str) -> int:
+    interval_ms = parse_interval_ms(interval) or 60_000
+    return compute_bucket_start_ms(end_ms, interval_ms, interval=interval)
+
+
+def _gap_payload(
+    *,
+    exchange: str,
+    market_type: str,
+    symbol: str,
+    interval: str,
+    start_ms: int,
+    end_ms: int,
+    reason: str,
+) -> dict:
+    interval_ms = parse_interval_ms(interval) or 60_000
+    missing_bars = int((end_ms - start_ms) // interval_ms) + 1 if end_ms >= start_ms else 0
+    return {
+        "exchange": exchange,
+        "market_type": market_type,
+        "symbol": symbol,
+        "interval": interval,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "missing_bars": missing_bars,
+        "reason": reason,
+        "status": "detected",
+    }
+
+
+def scan_klines_gaps(
+    symbol: str,
+    interval: str,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+    limit: int = 50_000,
+) -> dict:
+    """Scan one stored series for continuity gaps in a bounded range."""
+    interval_ms = parse_interval_ms(interval)
+    if interval_ms is None or interval_ms <= 0:
+        return {
+            "exchange": exchange,
+            "market_type": market_type,
+            "symbol": symbol,
+            "interval": interval,
+            "gaps": [],
+            "gap_count": 0,
+            "missing_bars": 0,
+            "scanned_bars": 0,
+            "truncated": False,
+            "error": f"Unsupported interval: {interval}",
+        }
+
+    where = ["exchange = ?", "market_type = ?", "symbol = ?", "interval = ?"]
+    params: list[object] = [exchange, market_type, symbol, interval]
+    if start_ms is not None:
+        where.append("open_time >= ?")
+        params.append(start_ms)
+    if end_ms is not None:
+        where.append("open_time <= ?")
+        params.append(end_ms)
+
+    sql = f"""
+        SELECT open_time
+        FROM klines
+        WHERE {" AND ".join(where)}
+        ORDER BY open_time ASC
+        LIMIT ?
+    """
+    params.append(max(1, limit + 1))
+
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    opens = [int(row["open_time"]) for row in rows[:limit]]
+    truncated = len(rows) > limit
+    gaps: list[dict] = []
+
+    if not opens:
+        if start_ms is not None and end_ms is not None and start_ms <= end_ms:
+            gap_start = _first_expected_open_ms(start_ms, interval)
+            gap_end = _last_expected_open_ms(end_ms, interval)
+            if gap_start <= gap_end:
+                gaps.append(_gap_payload(
+                    exchange=exchange,
+                    market_type=market_type,
+                    symbol=symbol,
+                    interval=interval,
+                    start_ms=gap_start,
+                    end_ms=gap_end,
+                    reason="empty_range",
+                ))
+        return {
+            "exchange": exchange,
+            "market_type": market_type,
+            "symbol": symbol,
+            "interval": interval,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "gaps": gaps,
+            "gap_count": len(gaps),
+            "missing_bars": sum(gap["missing_bars"] for gap in gaps),
+            "scanned_bars": 0,
+            "truncated": truncated,
+        }
+
+    if start_ms is not None:
+        first_expected = _first_expected_open_ms(start_ms, interval)
+        if opens[0] > first_expected:
+            gaps.append(_gap_payload(
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                interval=interval,
+                start_ms=first_expected,
+                end_ms=opens[0] - interval_ms,
+                reason="head_gap",
+            ))
+
+    previous = opens[0]
+    for current in opens[1:]:
+        expected_next = previous + interval_ms
+        if current > expected_next:
+            gaps.append(_gap_payload(
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                interval=interval,
+                start_ms=expected_next,
+                end_ms=current - interval_ms,
+                reason="interior_gap",
+            ))
+        previous = current
+
+    if end_ms is not None and not truncated:
+        last_expected = _last_expected_open_ms(end_ms, interval)
+        if opens[-1] < last_expected:
+            gaps.append(_gap_payload(
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                interval=interval,
+                start_ms=opens[-1] + interval_ms,
+                end_ms=last_expected,
+                reason="tail_gap",
+            ))
+
+    return {
+        "exchange": exchange,
+        "market_type": market_type,
+        "symbol": symbol,
+        "interval": interval,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "gaps": gaps,
+        "gap_count": len(gaps),
+        "missing_bars": sum(gap["missing_bars"] for gap in gaps),
+        "scanned_bars": len(opens),
+        "truncated": truncated,
+    }
+
+
 # ═══════════════════════════════════════════════════════════════
 #  KlinesRepoAdapter — implements data_manager.StorageBackend protocol
 # ═══════════════════════════════════════════════════════════════
@@ -458,6 +637,27 @@ class KlinesRepoAdapter:
             custom_only=custom_only,
             exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
+        )
+
+    def scan_gaps(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
+        limit: int = 50_000,
+    ) -> dict:
+        """Scan a stored series for continuity gaps."""
+        return scan_klines_gaps(
+            symbol=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            exchange=exchange or self._exchange,
+            market_type=market_type or self._market_type,
+            limit=limit,
         )
 
     def delete_bars(

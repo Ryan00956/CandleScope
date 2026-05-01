@@ -169,3 +169,140 @@ def test_history_query_triggers_data_manager_backfill_request_when_empty() -> No
     symbol, interval, start_ms, end_ms, exchange, market_type = calls[0]
     assert (symbol, interval, exchange, market_type) == ("BTCUSDT", "1h", "binance", "spot")
     assert start_ms < end_ms
+
+
+def test_range_query_reports_exact_visible_gap() -> None:
+    class _RangeDataManager:
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+        ) -> QueryResult:
+            assert (start_ms, end_ms, limit) == (60_000, 180_000, 102)
+            assert auto_backfill is False
+            return QueryResult(
+                bars=[
+                    BarData(time=60, open=1, high=2, low=1, close=2, volume=10),
+                    BarData(time=180, open=3, high=4, low=3, close=4, volume=30),
+                ],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=2,
+            )
+
+    client = _client(_RangeDataManager())
+
+    response = client.get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 180_000,
+            "exchange": "binance",
+            "market_type": "spot",
+            "repair": "none",
+            "strict": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["verified_contiguous"] is False
+    assert payload["renderable"] is False
+    assert payload["missing_ranges"] == [
+        {
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "exchange": "binance",
+            "market_type": "spot",
+            "start_ms": 120_000,
+            "end_ms": 120_000,
+            "missing_bars": 1,
+            "reason": "range_verification",
+            "status": "detected",
+        }
+    ]
+
+
+def test_continuity_endpoint_returns_storage_gap_report() -> None:
+    class _ContinuityDataManager:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def scan_storage_gaps(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int | None,
+            end_ms: int | None,
+            exchange: str,
+            market_type: str,
+            limit: int,
+        ) -> dict:
+            self.calls.append({
+                "symbol": symbol,
+                "interval": interval,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "exchange": exchange,
+                "market_type": market_type,
+                "limit": limit,
+            })
+            return {
+                "exchange": exchange,
+                "market_type": market_type,
+                "symbol": symbol,
+                "interval": interval,
+                "gaps": [{
+                    "start_ms": 120_000,
+                    "end_ms": 120_000,
+                    "missing_bars": 1,
+                    "reason": "interior_gap",
+                    "status": "detected",
+                }],
+                "gap_count": 1,
+                "missing_bars": 1,
+                "scanned_bars": 2,
+                "truncated": False,
+            }
+
+    dm = _ContinuityDataManager()
+    client = _client(dm)
+
+    response = client.get(
+        "/api/v1/klines/continuity",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 180_000,
+            "exchange": "binance",
+            "market_type": "spot",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["verified_contiguous"] is False
+    assert payload["gap_count"] == 1
+    assert dm.calls == [{
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "start_ms": 60_000,
+        "end_ms": 180_000,
+        "exchange": "binance",
+        "market_type": "spot",
+        "limit": 50_000,
+    }]

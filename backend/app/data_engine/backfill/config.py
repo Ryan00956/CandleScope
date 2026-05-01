@@ -117,9 +117,16 @@ class BackfillConfig:
     )
 
     # ── Historical Fetcher ───────────────────────────────────
-    # Maximum concurrent REST requests
+    # Maximum concurrent REST requests. Keep the default modest because a
+    # single page can carry non-trivial exchange request weight.
     fetch_concurrency: int = field(
-        default_factory=lambda: _env_int("BACKFILL_FETCH_CONCURRENCY", 3),
+        default_factory=lambda: _env_int("BACKFILL_FETCH_CONCURRENCY", 2),
+    )
+    # Binance Futures applies strict IP-level request limits. Serialize
+    # futures backfills by default so a multi-interval repair cannot fan out
+    # into a burst of REST calls.
+    fetch_binance_futures_concurrency: int = field(
+        default_factory=lambda: _env_int("BACKFILL_FETCH_BINANCE_FUTURES_CONCURRENCY", 1),
     )
     # Exchange-specific concurrency override for OKX.
     # OKX public market endpoints are easy to hit with 429s during
@@ -131,21 +138,26 @@ class BackfillConfig:
     fetch_batch_size: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_BATCH_SIZE", 1000),
     )
-    # Delay between consecutive requests (seconds) to respect rate limits
+    # Delay between consecutive requests (seconds) to respect rate limits.
     fetch_rate_limit_delay: float = field(
-        default_factory=lambda: _env_float("BACKFILL_FETCH_RATE_LIMIT_DELAY", 0.1),
+        default_factory=lambda: _env_float("BACKFILL_FETCH_RATE_LIMIT_DELAY", 0.5),
+    )
+    # Binance Futures-specific minimum spacing between backfill requests.
+    fetch_binance_futures_rate_limit_delay: float = field(
+        default_factory=lambda: _env_float("BACKFILL_FETCH_BINANCE_FUTURES_RATE_LIMIT_DELAY", 1.0),
     )
     # OKX-specific minimum spacing between backfill requests.
     fetch_okx_rate_limit_delay: float = field(
-        default_factory=lambda: _env_float("BACKFILL_FETCH_OKX_RATE_LIMIT_DELAY", 0.35),
+        default_factory=lambda: _env_float("BACKFILL_FETCH_OKX_RATE_LIMIT_DELAY", 0.75),
     )
     # Maximum retries for a single fetch task before giving up
     fetch_max_retries: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_MAX_RETRIES", 3),
     )
-    # Additional backoff when the exchange returns HTTP 429.
+    # Additional backoff when the exchange returns HTTP 429. This is an
+    # exchange/market-wide cooldown, not just a per-task retry sleep.
     fetch_429_backoff_seconds: float = field(
-        default_factory=lambda: _env_float("BACKFILL_FETCH_429_BACKOFF_SECONDS", 2.0),
+        default_factory=lambda: _env_float("BACKFILL_FETCH_429_BACKOFF_SECONDS", 60.0),
     )
     # Per-request timeout (seconds), inherits from ingestion if 0
     fetch_timeout: int = field(

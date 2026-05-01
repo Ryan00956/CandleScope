@@ -33,6 +33,7 @@ from app.data_engine.interval_policy import (
     is_custom_interval,
     is_ephemeral_interval,
     parse_custom_interval,
+    parse_interval_ms,
 )
 
 from .cache import BarCache
@@ -130,6 +131,7 @@ class QueryEngine:
         limit: int | None = None,
         exchange: str = "binance",
         market_type: str = "spot",
+        auto_backfill: bool | None = None,
     ) -> QueryResult:
         """Query bars for a (symbol, interval) with flexible parameters.
 
@@ -156,6 +158,7 @@ class QueryEngine:
         """
         t0 = time.monotonic()
         self._queries += 1
+        allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
 
         if is_custom_interval(interval):
             return self.custom_intervals.query_from_base(
@@ -167,6 +170,7 @@ class QueryEngine:
                 started_at=t0,
                 exchange=exchange,
                 market_type=market_type,
+                auto_backfill=auto_backfill,
             )
 
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
@@ -249,13 +253,13 @@ class QueryEngine:
         # We detect each gap and do targeted storage reads to fill them.
         if merged and self._storage is not None and len(merged) >= 2:
             merged = self._fill_interior_gaps(
-                key, merged, interval, missing_ranges,
+                key, merged, interval, missing_ranges, auto_backfill=allow_backfill,
             )
             backfill_triggered = bool(missing_ranges)
 
         if not merged:
             # Nothing anywhere — report a missing range if enabled.
-            if self._cfg.auto_backfill:
+            if allow_backfill:
                 interval_secs = parse_custom_interval(key.interval) or 60
 
                 trigger_start_ms = start_ms
@@ -263,7 +267,15 @@ class QueryEngine:
                     trigger_start_ms = (end_ms or int(time.time() * 1000)) - (effective_limit * interval_secs * 1000)
 
                 missing_range = self._trigger_backfill(
-                    key, trigger_start_ms, end_ms, reason="query_empty",
+                    key,
+                    trigger_start_ms,
+                    end_ms,
+                    reason="query_empty",
+                    missing_bars=self._estimate_missing_bars(
+                        trigger_start_ms,
+                        end_ms,
+                        key.interval,
+                    ),
                 )
                 if missing_range is not None:
                     missing_ranges.append(missing_range)
@@ -287,7 +299,7 @@ class QueryEngine:
 
         # ── Step 4: Check completeness & backfill ────────────
         if (
-            self._cfg.auto_backfill
+            allow_backfill
             and not missing_ranges
             and not self._is_complete(merged, start_s, end_s, effective_limit, interval=interval)
         ):
@@ -304,17 +316,26 @@ class QueryEngine:
                 # Both sides have gaps — backfill the larger gap first
                 # (forward catch-up is usually more urgent)
                 missing_range = self._trigger_backfill(
-                    key, latest_bar_ms, end_ms, reason="query_tail_gap",
+                    key,
+                    latest_bar_ms + interval_secs * 1000,
+                    end_ms,
+                    reason="query_tail_gap",
                 )
             elif has_gap_after:
                 # Scenario 1: Forward catch-up (e.g. app was closed overnight)
                 missing_range = self._trigger_backfill(
-                    key, latest_bar_ms, end_ms, reason="query_tail_gap",
+                    key,
+                    latest_bar_ms + interval_secs * 1000,
+                    end_ms,
+                    reason="query_tail_gap",
                 )
             elif has_gap_before:
                 # Scenario 2: Backward gap (start of requested range missing)
                 missing_range = self._trigger_backfill(
-                    key, start_ms, earliest_bar_ms, reason="query_left_gap",
+                    key,
+                    start_ms,
+                    earliest_bar_ms - interval_secs * 1000,
+                    reason="query_left_gap",
                 )
             else:
                 # Count-based shortfall — backfill backwards from earliest data
@@ -323,7 +344,7 @@ class QueryEngine:
                 missing_range = self._trigger_backfill(
                     key,
                     trigger_start,
-                    earliest_bar_ms,
+                    earliest_bar_ms - interval_secs * 1000,
                     reason="query_shortfall",
                 )
             if missing_range is not None:
@@ -466,11 +487,11 @@ class QueryEngine:
                 # We have some bars — backfill from (before_ms - needed_span) up to earliest existing bar
                 needed = effective_limit - len(merged)
                 trigger_start_ms = merged[0].time * 1000 - (needed * interval_secs * 1000)
-                trigger_end_ms = merged[0].time * 1000
+                trigger_end_ms = merged[0].time * 1000 - interval_secs * 1000
             else:
                 # No data at all — backfill limit bars before before_ms
                 trigger_start_ms = before_ms - (effective_limit * interval_secs * 1000)
-                trigger_end_ms = before_ms
+                trigger_end_ms = before_ms - interval_secs * 1000
 
             missing_range = self._trigger_backfill(
                 key,
@@ -633,12 +654,13 @@ class QueryEngine:
         bars: list[BarData],
         interval: str,
         missing_ranges: list[MissingRange] | None = None,
+        auto_backfill: bool = True,
     ) -> list[BarData]:
         """Detect interior gaps and fill them from storage.
 
-        For each gap found, queries storage for bars in [gap_start, gap_end]
-        and merges them into the bar list.  Also warms the cache with any
-        newly fetched bars.
+        For each gap found, queries storage only for the truly missing
+        open_time range, excluding the two boundary bars. Also warms the
+        cache with any newly fetched bars.
 
         If storage doesn't have the data either, triggers backfill for
         each gap so the data will be available on the next query.
@@ -657,15 +679,20 @@ class QueryEngine:
         all_fill_bars: list[BarData] = []
 
         for gap_start_s, gap_end_s in gaps:
-            gap_start_ms = gap_start_s * 1000
-            gap_end_ms = gap_end_s * 1000
+            missing_start_ms, missing_end_ms, missing_bars = self._missing_bounds_between(
+                gap_start_s,
+                gap_end_s,
+                interval,
+            )
+            if missing_start_ms is None or missing_end_ms is None:
+                continue
 
             try:
                 rows = self._storage.query_bars(
                     symbol=key.symbol,
                     interval=key.interval,
-                    start_ms=gap_start_ms,
-                    end_ms=gap_end_ms,
+                    start_ms=missing_start_ms,
+                    end_ms=missing_end_ms,
                     limit=5000,  # generous limit for gap fills
                     order="ASC",
                     exchange=key.exchange,
@@ -675,28 +702,29 @@ class QueryEngine:
                 if fill_bars:
                     all_fill_bars.extend(fill_bars)
                     logger.info(
-                        "Filled gap [%d → %d] with %d bars from storage",
-                        gap_start_s, gap_end_s, len(fill_bars),
+                        "Filled missing gap [%d → %d] with %d bars from storage",
+                        missing_start_ms, missing_end_ms, len(fill_bars),
                     )
                 else:
                     # Storage also doesn't have data — report a missing range.
-                    if self._cfg.auto_backfill:
+                    if auto_backfill:
                         logger.info(
-                            "Storage has no data for gap [%d → %d], triggering backfill",
-                            gap_start_s, gap_end_s,
+                            "Storage has no data for missing gap [%d → %d], triggering backfill",
+                            missing_start_ms, missing_end_ms,
                         )
                         missing_range = self._trigger_backfill(
                             key,
-                            gap_start_ms,
-                            gap_end_ms,
+                            missing_start_ms,
+                            missing_end_ms,
                             reason="query_interior_gap",
+                            missing_bars=missing_bars,
                         )
                         if missing_range is not None and missing_ranges is not None:
                             missing_ranges.append(missing_range)
             except Exception as exc:
                 logger.error(
                     "Failed to fill gap [%d → %d] from storage: %s",
-                    gap_start_s, gap_end_s, exc,
+                    missing_start_ms, missing_end_ms, exc,
                 )
 
         if all_fill_bars:
@@ -803,6 +831,7 @@ class QueryEngine:
         end_ms: int | None,
         *,
         reason: str = "query_gap",
+        missing_bars: int | None = None,
     ) -> MissingRange | None:
         """Fire the backfill trigger callback.
 
@@ -823,6 +852,22 @@ class QueryEngine:
                 key, effective_start, effective_end,
             )
 
+        if effective_start > effective_end:
+            logger.debug(
+                "Skipping invalid backfill range for %s: %d > %d",
+                key,
+                effective_start,
+                effective_end,
+            )
+            return None
+
+        if missing_bars is None:
+            missing_bars = self._estimate_missing_bars(
+                effective_start,
+                effective_end,
+                key.interval,
+            )
+
         missing_range = MissingRange(
             symbol=key.symbol,
             interval=key.interval,
@@ -831,6 +876,7 @@ class QueryEngine:
             start_ms=int(effective_start),
             end_ms=int(effective_end),
             reason=reason,
+            missing_bars=missing_bars,
         )
         if self._backfill_trigger is None:
             return missing_range
@@ -853,3 +899,32 @@ class QueryEngine:
     def note_backfill_triggered(self, count: int = 1) -> None:
         """Record externally submitted backfill requests in query metrics."""
         self._backfills_triggered += max(0, count)
+
+    def _missing_bounds_between(
+        self,
+        previous_s: int,
+        next_s: int,
+        interval: str,
+    ) -> tuple[int | None, int | None, int | None]:
+        """Return the actual missing open_time range between two boundary bars."""
+        interval_ms = parse_interval_ms(interval)
+        if interval_ms is None or interval_ms <= 0:
+            return None, None, None
+        start_ms = previous_s * 1000 + interval_ms
+        end_ms = next_s * 1000 - interval_ms
+        if start_ms > end_ms:
+            return None, None, None
+        return start_ms, end_ms, self._estimate_missing_bars(start_ms, end_ms, interval)
+
+    def _estimate_missing_bars(
+        self,
+        start_ms: int | None,
+        end_ms: int | None,
+        interval: str,
+    ) -> int | None:
+        if start_ms is None or end_ms is None or start_ms > end_ms:
+            return None
+        interval_ms = parse_interval_ms(interval)
+        if interval_ms is None or interval_ms <= 0:
+            return None
+        return int((end_ms - start_ms) // interval_ms) + 1

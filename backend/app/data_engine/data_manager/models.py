@@ -174,9 +174,11 @@ class MissingRange:
     exchange: str = "binance"
     market_type: str = "spot"
     reason: str = "query_gap"
+    missing_bars: int | None = None
+    status: str = "detected"
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "symbol": self.symbol,
             "interval": self.interval,
             "exchange": self.exchange,
@@ -184,7 +186,11 @@ class MissingRange:
             "start_ms": self.start_ms,
             "end_ms": self.end_ms,
             "reason": self.reason,
+            "status": self.status,
         }
+        if self.missing_bars is not None:
+            payload["missing_bars"] = self.missing_bars
+        return payload
 
 
 @dataclass(slots=True)

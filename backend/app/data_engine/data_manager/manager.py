@@ -270,6 +270,43 @@ class DataManager:
         """Return configured prewarm intervals for runtime startup scans."""
         return self.coordinator.prewarm_intervals()
 
+    def gap_audit_series(self) -> list[tuple[str, str, str, str]]:
+        """Return exact series that should be included in background gap audits."""
+        series: set[tuple[str, str, str, str]] = set()
+
+        for exchange, market_type, symbol in self.prewarm_targets():
+            for interval in self.prewarm_intervals():
+                series.add((
+                    exchange.strip().lower(),
+                    self._normalize_market_type(market_type),
+                    symbol.upper().strip(),
+                    interval,
+                ))
+
+        for exchange, market_type, symbol, interval in self.bar_aggregator.get_targets():
+            series.add((
+                exchange.strip().lower(),
+                self._normalize_market_type(market_type),
+                symbol.upper().strip(),
+                interval,
+            ))
+
+        storage = self.query_engine.storage
+        list_series = getattr(storage, "list_series", None)
+        if callable(list_series):
+            try:
+                for row in list_series(custom_only=False):
+                    series.add((
+                        str(row.get("exchange") or "binance").strip().lower(),
+                        self._normalize_market_type(row.get("market_type") or "spot"),
+                        str(row.get("symbol") or "").upper().strip(),
+                        str(row.get("interval") or "").strip(),
+                    ))
+            except Exception:
+                logger.exception("Failed to list storage series for gap audit")
+
+        return sorted(item for item in series if item[2] and item[3])
+
     def set_subscription_service(self, service: Any | None) -> None:
         """Attach the runtime-owned subscription service."""
         self._subscriptions = service
@@ -307,7 +344,7 @@ class DataManager:
 
             interval_ms = parse_interval_ms(key.interval) or 0
             start_ms = int(getattr(gap, "gap_start", 0) or 0) + interval_ms
-            end_ms = int(getattr(gap, "gap_end", 0) or 0)
+            end_ms = int(getattr(gap, "gap_end", 0) or 0) - interval_ms
             if start_ms <= 0 or end_ms <= 0 or start_ms > end_ms:
                 return
             trigger(
@@ -407,6 +444,7 @@ class DataManager:
         limit: int | None = None,
         exchange: str = "binance",
         market_type: str = "spot",
+        auto_backfill: bool | None = None,
     ) -> QueryResult:
         """Query K-line bars.
 
@@ -433,6 +471,7 @@ class DataManager:
             limit=limit,
             exchange=exchange,
             market_type=market_type,
+            auto_backfill=auto_backfill,
         )
         return self._submit_missing_ranges(result)
 
@@ -517,6 +556,43 @@ class DataManager:
         """Get cache + storage bounds for a series."""
         market_type = self._normalize_market_type(market_type)
         return self.query_engine.get_bounds(symbol, interval, exchange=exchange, market_type=market_type)
+
+    def scan_storage_gaps(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        limit: int = 50_000,
+    ) -> dict:
+        """Detect storage continuity gaps without triggering repair."""
+        market_type = self._normalize_market_type(market_type)
+        storage = self.query_engine.storage
+        scanner = getattr(storage, "scan_gaps", None)
+        if not callable(scanner):
+            return {
+                "exchange": exchange,
+                "market_type": market_type,
+                "symbol": symbol.upper(),
+                "interval": interval,
+                "gaps": [],
+                "gap_count": 0,
+                "missing_bars": 0,
+                "scanned_bars": 0,
+                "truncated": False,
+                "error": "storage does not support gap scanning",
+            }
+        return scanner(
+            symbol=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            exchange=exchange,
+            market_type=market_type,
+            limit=limit,
+        )
 
     # ═══════════════════════════════════════════════════════════
     #  Event Subscription — for real-time consumers

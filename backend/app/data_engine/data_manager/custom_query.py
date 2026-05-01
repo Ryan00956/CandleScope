@@ -137,6 +137,7 @@ class CustomIntervalQueryService:
         started_at: float,
         exchange: str = "binance",
         market_type: str = "spot",
+        auto_backfill: bool | None = None,
     ) -> QueryResult:
         """Serve custom intervals by aggregating a standard interval on read."""
         custom_seconds = parse_custom_interval(interval)
@@ -184,6 +185,7 @@ class CustomIntervalQueryService:
             limit=base_limit,
             exchange=exchange,
             market_type=market_type,
+            auto_backfill=auto_backfill,
         )
         derived_bars = self.aggregate_custom_bars(
             base_result.bars,

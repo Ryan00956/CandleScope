@@ -201,7 +201,11 @@ class TransportLayer:
                                 "HTTP 400 from %s — params=%r url=%s body=%s",
                                 base, params, resp.url, body[:300],
                             )
-                        raise TransportError(f"HTTP {resp.status}: {body[:200]}")
+                        raise TransportError(
+                            f"HTTP {resp.status}: {body[:200]}",
+                            status_code=resp.status,
+                            retry_after=_parse_retry_after(resp.headers.get("Retry-After")),
+                        )
                     data = await resp.json()
 
                 self._metrics.inc("http_requests_ok")
@@ -232,6 +236,13 @@ class TransportLayer:
                 self._rotate_http(exchange, market_type, len(http_urls))
                 tried += 1
 
+        if isinstance(last_exc, TransportError):
+            raise TransportError(
+                f"All {total} HTTP endpoints failed; last error: "
+                f"[{type(last_exc).__name__}] {last_exc}",
+                status_code=last_exc.status_code,
+                retry_after=last_exc.retry_after,
+            ) from last_exc
         raise TransportError(
             f"All {total} HTTP endpoints failed; last error: [{type(last_exc).__name__}] {last_exc}"
         ) from last_exc
@@ -495,3 +506,24 @@ class TransportLayer:
 
 class TransportError(Exception):
     """Raised when all transport endpoints fail."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None

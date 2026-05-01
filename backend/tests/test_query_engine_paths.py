@@ -139,6 +139,8 @@ def test_query_engine_triggers_backfill_when_cache_and_storage_are_empty() -> No
         "start_ms": 60_000,
         "end_ms": 120_000,
         "reason": "query_empty",
+        "status": "detected",
+        "missing_bars": 2,
     }]
     assert result.bars == []
     assert storage.calls[0]["exchange"] == "okx"
@@ -183,8 +185,10 @@ def test_query_engine_reports_interior_missing_ranges() -> None:
         "interval": "1m",
         "exchange": "okx",
         "market_type": "spot",
-        "start_ms": 60_000,
-        "end_ms": 180_000,
+        "start_ms": 120_000,
+        "end_ms": 120_000,
         "reason": "query_interior_gap",
+        "status": "detected",
+        "missing_bars": 1,
     }]
-    assert triggered == [("BTC-USDT", "1m", 60_000, 180_000, "okx", "spot")]
+    assert triggered == [("BTC-USDT", "1m", 120_000, 120_000, "okx", "spot")]

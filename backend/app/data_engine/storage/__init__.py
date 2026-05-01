@@ -13,8 +13,10 @@ from .klines_repo import (
     init_klines_storage,
     interval_to_milliseconds,
     query_klines,
+    scan_klines_gaps,
     upsert_klines,
 )
+from .gap_ledger import GapLedger
 
 __all__ = [
     "DEFAULT_EXCHANGE",
@@ -31,5 +33,7 @@ __all__ = [
     "init_klines_storage",
     "interval_to_milliseconds",
     "query_klines",
+    "scan_klines_gaps",
     "upsert_klines",
+    "GapLedger",
 ]

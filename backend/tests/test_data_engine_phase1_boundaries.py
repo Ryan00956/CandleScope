@@ -591,7 +591,7 @@ def test_ingestion_gap_marker_routes_to_backfill_trigger() -> None:
 
         await factory.on_gap(_Gap())
 
-        assert triggered == [("BTC-USDT", "1m", 120_000, 180_000, "okx", "spot")]
+        assert triggered == [("BTC-USDT", "1m", 120_000, 120_000, "okx", "spot")]
 
     asyncio.run(_run())
 

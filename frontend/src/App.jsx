@@ -16,6 +16,7 @@ import { inferExchangeFromSymbol } from "./utils/symbolKey";
 import {
   fetchKlinesBefore,
   fetchKlinesHistory,
+  fetchKlinesRange,
   fetchLatestKlines,
   getMultiStreamUrl,
   fetchSubscriptions,
@@ -275,11 +276,29 @@ function isNativeIntervalSupported(exchange, interval) {
   return getNativeIntervals(exchange).some((item) => item.value === interval);
 }
 
-function mergeByTime(older, current) {
-  const merged = [...older, ...current];
+function mergeRealtimeWins(current, incoming) {
   const uniq = new Map();
-  for (const item of merged) {
+  for (const item of current || []) {
     uniq.set(item.time, item);
+  }
+  for (const item of incoming || []) {
+    uniq.set(item.time, item);
+  }
+  return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
+}
+
+function mergeServerClosedWins(current, serverBars, interval) {
+  const intervalSeconds = parseIntervalSeconds(interval) || 60;
+  const currentOpen = Math.floor(Date.now() / 1000 / intervalSeconds) * intervalSeconds;
+  const uniq = new Map();
+
+  for (const item of current || []) {
+    uniq.set(item.time, item);
+  }
+  for (const item of serverBars || []) {
+    if (item.time < currentOpen || !uniq.has(item.time)) {
+      uniq.set(item.time, item);
+    }
   }
   return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
 }
@@ -907,7 +926,8 @@ export default function App() {
 
   // Sync cache limits to backend when they change
   useEffect(() => {
-    const { cacheLimits, ephemeralCacheBars } = settings;
+    const cacheLimits = settings.cacheLimits;
+    const ephemeralCacheBars = settings.ephemeralCacheBars;
     if (!cacheLimits) return;
     updateCacheLimits({
       dbLimits: cacheLimits,
@@ -992,7 +1012,7 @@ export default function App() {
     // Process FULL HISTORY result — this is the "correct" dataset.
     if (historyResult?.data?.length) {
       setChartData((prev) => {
-        const merged = mergeByTime(historyResult.data, prev);
+        const merged = mergeServerClosedWins(prev, historyResult.data, intv);
         saveToCache(sym, intv, merged);
         return merged;
       });
@@ -1040,7 +1060,7 @@ export default function App() {
     if (shownInitialData) {
       setLoading(false);
     }
-  }, [exchange, marketType, saveToCache, updateLastPrice]);
+  }, [exchange, getFromCache, marketType, saveToCache, updateLastPrice]);
 
   // ── Symbol switching handler ──
   const handleSymbolChange = useCallback((newSymbolOrObj) => {
@@ -1273,7 +1293,7 @@ export default function App() {
               .then((result) => {
                 if (!active || !result?.data?.length) return;
                 setChartData((prev) => {
-                  const merged = mergeByTime(result.data, prev);
+                  const merged = mergeRealtimeWins(prev, result.data);
                   saveToCache(symbol, currentIntv, merged);
                   return merged;
                 });
@@ -1335,13 +1355,32 @@ export default function App() {
               }
               backfillReloadInFlightRef.current.add(bfDedupeKey);
 
-              console.log(`Backfill completed for ${bfSymbol}@${bfInterval}, reloading data...`);
-              const days = getIntervalDays(bfInterval, bfExchange);
-              fetchKlinesHistory(bfSymbol, bfInterval, days, bfMarketType, bfExchange)
+              const detail = msg.detail || {};
+              const rangeStartSec = detail.range_start_ms ? Math.floor(detail.range_start_ms / 1000) : null;
+              const rangeEndSec = detail.range_end_ms ? Math.floor(detail.range_end_ms / 1000) : null;
+              console.log(`Backfill completed for ${bfSymbol}@${bfInterval}, reloading repaired range...`);
+              const reloadPromise = (rangeStartSec != null && rangeEndSec != null)
+                ? fetchKlinesRange(
+                    bfSymbol,
+                    bfInterval,
+                    rangeStartSec,
+                    rangeEndSec,
+                    bfMarketType,
+                    bfExchange,
+                    { repair: "none", strict: false },
+                  )
+                : fetchKlinesHistory(
+                    bfSymbol,
+                    bfInterval,
+                    getIntervalDays(bfInterval, bfExchange),
+                    bfMarketType,
+                    bfExchange,
+                  );
+              reloadPromise
                 .then((result) => {
                   if (!result?.data?.length) return;
                   setChartData((prev) => {
-                    const merged = mergeByTime(result.data, prev);
+                    const merged = mergeServerClosedWins(prev, result.data, bfInterval);
                     saveToCache(bfSymbol, bfInterval, merged);
                     return merged;
                   });
@@ -1508,39 +1547,58 @@ export default function App() {
     const gaps = detectGaps(currentData, intvSecs);
     if (gaps.length === 0) return;
 
-    // Use a single dedupe key per interval to avoid concurrent full-reloads
-    const reloadKey = `${sym}-${intv}-fullreload`;
+    // Use a single dedupe key per interval to avoid concurrent exact-range repairs.
+    const reloadKey = `${exchange}-${marketType}-${sym}-${intv}-range-repair`;
     if (gapFillInFlightRef.current.has(reloadKey)) return;
     gapFillInFlightRef.current.add(reloadKey);
 
     const totalMissing = gaps.reduce((sum, g) => sum + g.missingBars, 0);
     console.log(
       `[GapFill] Detected ${gaps.length} gap(s), ~${totalMissing} bars missing. ` +
-      `Reloading full history for ${sym}@${intv}...`
+      `Repairing exact ranges for ${sym}@${intv}...`
     );
 
     try {
-      // Strategy: reload full history — this is the most reliable way to
-      // fill ANY gap (middle, tail, or multiple scattered gaps at once).
-      const days = getIntervalDays(intv, exchange);
-      const result = await fetchKlinesHistory(sym, intv, days, marketType, exchange);
+      const repairedResults = await Promise.all(
+        gaps.map((gap) => {
+          const startSec = gap.from + intvSecs;
+          const endSec = gap.isTailGap ? gap.to : gap.to - intvSecs;
+          if (startSec > endSec) return Promise.resolve(null);
+          return fetchKlinesRange(
+            sym,
+            intv,
+            startSec,
+            endSec,
+            marketType,
+            exchange,
+            { repair: "wait", waitMs: 3000, strict: false },
+          ).catch((err) => {
+            console.warn(`[GapFill] Exact repair failed for ${startSec}-${endSec}:`, err);
+            return null;
+          });
+        })
+      );
 
-      if (result?.data?.length > 0) {
+      const repairedBars = repairedResults.flatMap((result) => result?.data || []);
+
+      if (repairedBars.length > 0) {
         setChartData((prev) => {
-          const merged = mergeByTime(result.data, prev);
+          const merged = mergeServerClosedWins(prev, repairedBars, intv);
           saveToCache(sym, intv, merged);
           // Verify gaps are actually fixed
           const remaining = detectGaps(merged, intvSecs);
           if (remaining.length > 0) {
-            console.warn(`[GapFill] ${remaining.length} gap(s) remain after history reload`);
+            console.warn(`[GapFill] ${remaining.length} gap(s) remain after exact repair`);
           } else {
             console.log(`[GapFill] All gaps filled successfully (${merged.length} total bars)`);
           }
           return merged;
         });
+      } else {
+        console.warn(`[GapFill] Exact repair returned no bars for ${sym}@${intv}`);
       }
     } catch (err) {
-      console.warn(`[GapFill] Failed to reload history:`, err);
+      console.warn(`[GapFill] Failed to repair exact ranges:`, err);
     } finally {
       // Cooldown: don't retry for 10s to avoid hammering
       setTimeout(() => {
@@ -1614,7 +1672,7 @@ export default function App() {
 
         if (latestResult?.data?.length > 0) {
           setChartData((prev) => {
-            const merged = mergeByTime(latestResult.data, prev);
+            const merged = mergeRealtimeWins(prev, latestResult.data);
             saveToCache(symbol, currentIntv, merged);
             return merged;
           });
@@ -1653,7 +1711,7 @@ export default function App() {
 
         if (older.length > 0) {
           setChartData((prev) => {
-            const merged = mergeByTime(older, prev);
+            const merged = mergeServerClosedWins(prev, older, interval);
             saveToCache(symbol, interval, merged);
             return merged;
           });
@@ -1683,7 +1741,7 @@ export default function App() {
         setLoadingMoreLeft(false);
       }
     },
-    [chartData.length, dataSource, exchange, hasMoreLeft, interval, loading, loadingMoreLeft, marketType, saveToCache, symbol],
+    [chartData, dataSource, exchange, hasMoreLeft, interval, loading, loadingMoreLeft, marketType, saveToCache, symbol],
   );
 
   // Save visible range when switching away from current interval

@@ -16,7 +16,7 @@ from app.data_engine.data_manager.subscriptions import SubscriptionService
 from app.data_engine.ingestion import TransportLayer
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.factory import BinanceIngestionFactory
-from app.data_engine.storage import AsyncKlinesRepoAdapter, KlinesRepoAdapter
+from app.data_engine.storage import AsyncKlinesRepoAdapter, GapLedger, KlinesRepoAdapter
 
 logger = logging.getLogger("data_engine.runtime")
 
@@ -33,6 +33,7 @@ class DataEngineRuntime:
     price_stream_source: IngestionPriceSource | None = None
     subscription_service: SubscriptionService | None = None
     gap_scan_task: asyncio.Task | None = None
+    gap_audit_task: asyncio.Task | None = None
 
     def attach_to_app_state(self, state: Any) -> None:
         """Expose stable app.state handles used by API routes."""
@@ -91,7 +92,8 @@ class DataEngineRuntime:
 
     async def shutdown(self, step_timeout: float = 5.0) -> None:
         """Stop runtime-owned components in dependency order."""
-        await self._cancel_gap_scan()
+        await self._cancel_background_task(self.gap_audit_task, "Gap audit")
+        await self._cancel_background_task(self.gap_scan_task, "Gap scan")
 
         await self._shutdown_step(
             "BackfillCoordinator",
@@ -122,14 +124,13 @@ class DataEngineRuntime:
             step_timeout,
         )
 
-    async def _cancel_gap_scan(self) -> None:
-        task = self.gap_scan_task
+    async def _cancel_background_task(self, task: asyncio.Task | None, name: str) -> None:
         if task is None or task.done():
             return
         task.cancel()
         with suppress(asyncio.CancelledError, Exception):
             await asyncio.wait_for(task, timeout=2)
-        print("[shutdown] Gap scan task cancelled ✓")
+        print(f"[shutdown] {name} task cancelled ✓")
 
     @staticmethod
     async def _shutdown_step(name: str, awaitable: Any, timeout: float) -> None:
@@ -155,6 +156,7 @@ async def start_data_engine() -> DataEngineRuntime:
 
         storage = KlinesRepoAdapter()
         async_storage = AsyncKlinesRepoAdapter()
+        gap_ledger = GapLedger()
         dm.set_storage(storage)
 
         ingestion_factory = BinanceIngestionFactory()
@@ -178,6 +180,7 @@ async def start_data_engine() -> DataEngineRuntime:
             emit_event=dm.emit_event,
             engine=backfill_engine,
             loop=asyncio.get_running_loop(),
+            gap_ledger=gap_ledger,
         )
         dm.set_backfill_trigger(backfill_coordinator.trigger)
         print("[startup] BackfillCoordinator injected ✓")
@@ -192,6 +195,7 @@ async def start_data_engine() -> DataEngineRuntime:
         )
 
         gap_scan_task = _start_startup_gap_scan(dm, backfill_coordinator)
+        gap_audit_task = _start_background_gap_audit(dm, backfill_coordinator)
 
         runtime = DataEngineRuntime(
             data_manager=dm,
@@ -202,6 +206,7 @@ async def start_data_engine() -> DataEngineRuntime:
             price_stream_source=price_source,
             subscription_service=subscription_service,
             gap_scan_task=gap_scan_task,
+            gap_audit_task=gap_audit_task,
         )
         return runtime
     except Exception:
@@ -278,6 +283,85 @@ def _log_gap_scan_done(task: asyncio.Task) -> None:
         "[startup] Gap scan done: "
         f"{report.scanned} scanned, {report.repaired} repaired, {report.failed} failed"
     )
+
+
+def _start_background_gap_audit(
+    dm: DataManager,
+    backfill_coordinator: BackfillCoordinator,
+    *,
+    initial_delay_seconds: float = 30.0,
+    interval_seconds: float = 300.0,
+) -> asyncio.Task:
+    logger.info("Starting background storage gap audit...")
+    task = asyncio.create_task(
+        _background_gap_audit_loop(
+            dm,
+            backfill_coordinator,
+            initial_delay_seconds=initial_delay_seconds,
+            interval_seconds=interval_seconds,
+        ),
+        name="data-engine-gap-audit",
+    )
+    task.add_done_callback(_log_gap_audit_done)
+    return task
+
+
+async def _background_gap_audit_loop(
+    dm: DataManager,
+    backfill_coordinator: BackfillCoordinator,
+    *,
+    initial_delay_seconds: float,
+    interval_seconds: float,
+) -> None:
+    if initial_delay_seconds > 0:
+        await asyncio.sleep(initial_delay_seconds)
+
+    while True:
+        try:
+            get_series = getattr(dm, "gap_audit_series", None)
+            if callable(get_series):
+                report = await backfill_coordinator.audit_storage_series(
+                    get_series(),
+                    scan_limit=50_000,
+                    max_gaps=100,
+                    repair=True,
+                )
+            else:
+                report = await backfill_coordinator.audit_storage_gaps(
+                    dm.prewarm_targets(),
+                    dm.prewarm_intervals(),
+                    scan_limit=50_000,
+                    max_gaps=100,
+                    repair=True,
+                )
+            if report.queued or report.failed:
+                logger.info(
+                    "Background gap audit: %d scanned, %d queued, %d failed",
+                    report.scanned,
+                    report.queued,
+                    report.failed,
+                )
+                print(
+                    "[gap-audit] "
+                    f"{report.scanned} scanned, {report.queued} queued, "
+                    f"{report.failed} failed"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Background gap audit iteration failed: %s", exc)
+            print(f"[gap-audit] iteration failed: {exc}")
+
+        await asyncio.sleep(interval_seconds)
+
+
+def _log_gap_audit_done(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Background gap audit stopped: %s", exc)
+        print(f"[gap-audit] stopped: {exc}")
 
 
 async def _cleanup_partial_start(

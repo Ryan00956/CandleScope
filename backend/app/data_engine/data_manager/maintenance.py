@@ -491,11 +491,15 @@ class MaintenanceService:
                             gaps_found += len(interior_gaps)
                             gap_errors: list[str] = []
                             for gap_start, gap_end, _gap_diff in interior_gaps:
+                                missing_start = int(gap_start) + interval_ms
+                                missing_end = int(gap_end) - interval_ms
+                                if missing_start > missing_end:
+                                    continue
                                 outcome = await backfill_coordinator.request_and_wait(RepairRequest(
                                     symbol=symbol,
                                     interval=interval,
-                                    start_ms=int(gap_start),
-                                    end_ms=int(gap_end),
+                                    start_ms=missing_start,
+                                    end_ms=missing_end,
                                     exchange=exchange,
                                     market_type=market_type,
                                     reason="settings_interior_gap_scan",

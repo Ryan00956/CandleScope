@@ -167,6 +167,17 @@ def _get_backfill_coordinator(request: Request):
     return get_coordinator()
 
 
+def _call_runtime_list(obj, method_name: str) -> list:
+    method = getattr(obj, method_name, None)
+    if not callable(method):
+        return []
+    try:
+        return list(method())
+    except Exception:
+        logger.exception("Failed to read runtime list via %s", method_name)
+        return []
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Endpoints
 # ═══════════════════════════════════════════════════════════════
@@ -423,6 +434,26 @@ async def scan_and_fill_gaps(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except MaintenanceUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/storage/health")
+async def storage_health(request: Request) -> dict:
+    """Return gap repair health without triggering new repair work."""
+    dm = _get_data_manager(request)
+    backfill_coordinator = _get_backfill_coordinator(request)
+    if dm is None or backfill_coordinator is None:
+        raise HTTPException(status_code=503, detail="DataEngine 尚未初始化")
+
+    snapshot = backfill_coordinator.snapshot()
+    open_gaps = snapshot.get("gap_ledger_open") or []
+    return {
+        "status": "ok",
+        "targets": _call_runtime_list(dm, "prewarm_targets"),
+        "intervals": _call_runtime_list(dm, "prewarm_intervals"),
+        "audit_series": _call_runtime_list(dm, "gap_audit_series"),
+        "open_gap_count": len(open_gaps),
+        "backfill": snapshot,
+    }
 
 
 class CacheLimitsRequest(BaseModel):

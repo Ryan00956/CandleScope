@@ -37,6 +37,8 @@ from datetime import datetime, timezone
 from typing import Callable, Awaitable, Any
 
 from app.data_engine.interval_policy import (
+    compute_bucket_end_ms,
+    compute_bucket_start_ms,
     is_monthly_interval,
     next_month_bucket,
     parse_interval_ms,
@@ -70,6 +72,36 @@ def _count_months_between(start_ms: int, end_ms: int, months: int = 1) -> int:
     e = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
     month_delta = max(0, (e.year - s.year) * 12 + (e.month - s.month))
     return max(0, (month_delta + months - 1) // months)
+
+
+def _first_expected_open_ms(start_ms: int, interval: str, interval_ms: int) -> int:
+    bucket = compute_bucket_start_ms(start_ms, interval_ms, interval=interval)
+    if bucket < start_ms:
+        bucket = compute_bucket_end_ms(bucket, interval_ms, interval=interval)
+    return bucket
+
+
+def _last_expected_open_ms(end_ms: int, interval: str, interval_ms: int) -> int:
+    return compute_bucket_start_ms(end_ms, interval_ms, interval=interval)
+
+
+def _count_expected_opens(
+    start_ms: int,
+    end_ms: int,
+    interval: str,
+    interval_ms: int,
+) -> int:
+    if start_ms > end_ms:
+        return 0
+    if _is_monthly(interval):
+        month_count = parse_monthly_count(interval) or 1
+        count = 0
+        current = start_ms
+        while current <= end_ms:
+            count += 1
+            current = _next_month_open_ms(current, month_count)
+        return count
+    return (end_ms - start_ms) // interval_ms + 1
 
 # Type aliases
 ReferenceTimeProvider = Callable[[str, str, str, str], Awaitable[int | None]]
@@ -424,12 +456,82 @@ class GapDetector:
             )
             existing_times = {int(r["open_time"]) for r in rows}
 
-        if not existing_times:
+        first_expected = _first_expected_open_ms(scan_start, interval, interval_ms)
+        last_expected = _last_expected_open_ms(scan_end, interval, interval_ms)
+        if first_expected > last_expected:
             return []
 
-        sorted_times = sorted(existing_times)
+        if not existing_times:
+            missing = _count_expected_opens(
+                first_expected,
+                last_expected,
+                interval,
+                interval_ms,
+            )
+            if missing <= self._cfg.gap_tolerance_bars:
+                return []
+            gap = GapInfo(
+                symbol=symbol,
+                interval=interval,
+                gap_type=GapType.INTERIOR,
+                start_ms=first_expected,
+                end_ms=last_expected,
+                missing_bars=missing,
+                exchange=exchange,
+                db_latest_ms=None,
+                reference_ms=reference_ms,
+                market_type=market_type,
+            )
+            self._metrics.inc("interior_holes_found", 1)
+            return [gap]
+
+        sorted_times = sorted(
+            ts for ts in existing_times
+            if first_expected <= ts <= last_expected
+        )
+        if not sorted_times:
+            missing = _count_expected_opens(
+                first_expected,
+                last_expected,
+                interval,
+                interval_ms,
+            )
+            if missing <= self._cfg.gap_tolerance_bars:
+                return []
+            gap = GapInfo(
+                symbol=symbol,
+                interval=interval,
+                gap_type=GapType.INTERIOR,
+                start_ms=first_expected,
+                end_ms=last_expected,
+                missing_bars=missing,
+                exchange=exchange,
+                db_latest_ms=None,
+                reference_ms=reference_ms,
+                market_type=market_type,
+            )
+            self._metrics.inc("interior_holes_found", 1)
+            return [gap]
+
         gaps: list[GapInfo] = []
         hole_count = 0
+
+        if not _is_monthly(interval) and sorted_times[0] > first_expected:
+            missing = (sorted_times[0] - first_expected) // interval_ms
+            if missing > self._cfg.gap_tolerance_bars:
+                gaps.append(GapInfo(
+                    symbol=symbol,
+                    interval=interval,
+                    gap_type=GapType.INTERIOR,
+                    start_ms=first_expected,
+                    end_ms=sorted_times[0] - interval_ms,
+                    missing_bars=missing,
+                    exchange=exchange,
+                    db_latest_ms=sorted_times[-1],
+                    reference_ms=reference_ms,
+                    market_type=market_type,
+                ))
+                hole_count += 1
 
         for i in range(len(sorted_times) - 1):
             if hole_count >= self._cfg.gap_max_interior_holes:
@@ -469,6 +571,27 @@ class GapDetector:
                     )
                     gaps.append(gap)
                     hole_count += 1
+
+        if (
+            not _is_monthly(interval)
+            and hole_count < self._cfg.gap_max_interior_holes
+            and sorted_times[-1] + interval_ms <= last_expected
+        ):
+            start_ms = sorted_times[-1] + interval_ms
+            missing = (last_expected - start_ms) // interval_ms + 1
+            if missing > self._cfg.gap_tolerance_bars:
+                gaps.append(GapInfo(
+                    symbol=symbol,
+                    interval=interval,
+                    gap_type=GapType.INTERIOR,
+                    start_ms=start_ms,
+                    end_ms=last_expected,
+                    missing_bars=missing,
+                    exchange=exchange,
+                    db_latest_ms=sorted_times[-1],
+                    reference_ms=reference_ms,
+                    market_type=market_type,
+                ))
 
         self._metrics.inc("interior_holes_found", len(gaps))
         return gaps

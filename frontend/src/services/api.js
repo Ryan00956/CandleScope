@@ -74,10 +74,6 @@ export async function fetchLatestKlines(
     return request(url);
 }
 
-/**
- * Fetch klines for a specific time range by computing the necessary "days"
- * parameter from the range boundaries. Uses the /history endpoint internally.
- */
 export async function fetchKlinesRange(
     symbol = "BTCUSDT",
     interval = "1h",
@@ -85,10 +81,20 @@ export async function fetchKlinesRange(
     endSec,
     marketType = "spot",
     exchange = "binance",
+    options = {},
 ) {
-    const nowSec = Math.floor(Date.now() / 1000);
-    const daysFromNow = Math.ceil((nowSec - startSec) / 86400) + 1;
-    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${Math.min(daysFromNow, 3650)}&exchange=${exchange}&market_type=${marketType}`;
+    const params = new URLSearchParams({
+        symbol,
+        interval,
+        start_ms: String(Math.max(0, Math.floor(startSec * 1000))),
+        end_ms: String(Math.max(0, Math.floor(endSec * 1000))),
+        exchange,
+        market_type: marketType,
+        repair: options.repair || "async",
+        wait_ms: String(options.waitMs ?? 0),
+        strict: String(options.strict ?? false),
+    });
+    const url = `${API_BASE}/klines/range?${params.toString()}`;
     return request(url);
 }
 

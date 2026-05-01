@@ -5,7 +5,7 @@ Every layer speaks these types.  No raw dicts leaking between layers.
 
 The ingestion pipeline is a **generic market data intake** layer.  It does
 NOT produce domain-specific structures like K-line bars — that is the
-responsibility of downstream services (e.g. kline_aggregator).
+responsibility of downstream modules such as bar aggregation.
 
 Core output type: ``MarketEvent`` — a unified, exchange-agnostic envelope
 for any kind of real-time market data (kline snapshots, trades, tickers,

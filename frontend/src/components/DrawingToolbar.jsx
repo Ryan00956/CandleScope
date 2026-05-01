@@ -208,6 +208,66 @@ const ExportIcon = (
   </svg>
 );
 
+const CandlestickChartIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="6" y1="4" x2="6" y2="20" />
+    <rect x="4" y="8" width="4" height="7" rx="1" fill="currentColor" stroke="none" opacity="0.75" />
+    <line x1="12" y1="3" x2="12" y2="21" />
+    <rect x="10" y="6" width="4" height="10" rx="1" fill="currentColor" stroke="none" opacity="0.45" />
+    <line x1="18" y1="5" x2="18" y2="19" />
+    <rect x="16" y="10" width="4" height="5" rx="1" fill="currentColor" stroke="none" opacity="0.75" />
+  </svg>
+);
+
+const OhlcBarChartIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="7" y1="5" x2="7" y2="19" />
+    <line x1="4" y1="9" x2="7" y2="9" />
+    <line x1="7" y1="15" x2="10" y2="15" />
+    <line x1="13" y1="3" x2="13" y2="21" />
+    <line x1="10" y1="7" x2="13" y2="7" />
+    <line x1="13" y1="17" x2="16" y2="17" />
+    <line x1="19" y1="6" x2="19" y2="18" />
+    <line x1="16" y1="12" x2="19" y2="12" />
+    <line x1="19" y1="10" x2="22" y2="10" />
+  </svg>
+);
+
+const ChartLineIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="3,17 8,12 12,14 17,7 21,10" />
+    <circle cx="8" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="17" cy="7" r="1.4" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const ChartAreaIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 18l5-6 4 3 5-8 4 4v7H3z" fill="currentColor" stroke="none" opacity="0.22" />
+    <polyline points="3,18 8,12 12,15 17,7 21,11" />
+    <line x1="3" y1="18" x2="21" y2="18" opacity="0.45" />
+  </svg>
+);
+
+const ChartBaselineIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="3" y1="12" x2="21" y2="12" strokeDasharray="3 3" opacity="0.55" />
+    <path d="M3 12l5-5 4 3 4 7 5-5" />
+    <path d="M3 12l5-5 4 3v2H3z" fill="#26a69a" stroke="none" opacity="0.25" />
+    <path d="M12 12l4 5 5-5v6h-9z" fill="#ef5350" stroke="none" opacity="0.22" />
+  </svg>
+);
+
+const ChartHistogramIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="4" y="13" width="3" height="6" rx="0.8" fill="currentColor" stroke="none" opacity="0.5" />
+    <rect x="9" y="8" width="3" height="11" rx="0.8" fill="currentColor" stroke="none" opacity="0.75" />
+    <rect x="14" y="5" width="3" height="14" rx="0.8" fill="currentColor" stroke="none" opacity="0.55" />
+    <rect x="19" y="10" width="3" height="9" rx="0.8" fill="currentColor" stroke="none" opacity="0.8" />
+    <line x1="3" y1="20" x2="22" y2="20" opacity="0.5" />
+  </svg>
+);
+
 /* small indicator triangle rendered in the corner of a tool button */
 const CornerTriangle = (
   <svg
@@ -266,9 +326,18 @@ const POSITION_VARIANTS = [
 
 const POSITION_TOOL_IDS = new Set(POSITION_VARIANTS.map((v) => v.id));
 
+const CHART_TYPE_VARIANTS = [
+  { id: "candlestick", label: "K线", description: "当前主图默认样式", icon: CandlestickChartIcon },
+  { id: "bar", label: "OHLC柱", description: "库支持；暂未接入切换", icon: OhlcBarChartIcon },
+  { id: "line", label: "折线", description: "库支持；暂未接入切换", icon: ChartLineIcon },
+  { id: "area", label: "面积", description: "库支持；暂未接入切换", icon: ChartAreaIcon },
+  { id: "baseline", label: "基准线", description: "库支持；暂未接入切换", icon: ChartBaselineIcon },
+  { id: "histogram", label: "柱状", description: "库支持；更适合成交量", icon: ChartHistogramIcon },
+];
+
 /* ─── Flyout menu component ─────────────────────────────── */
 
-function ToolFlyout({ variants, currentId, onSelect, onClose, anchorRef }) {
+function ToolFlyout({ variants, currentId, onSelect, onClose, anchorRef, className = "" }) {
   const menuRef = useRef(null);
 
   // Close when clicking outside
@@ -288,7 +357,7 @@ function ToolFlyout({ variants, currentId, onSelect, onClose, anchorRef }) {
   }, [onClose, anchorRef]);
 
   return (
-    <div className="tool-flyout" ref={menuRef}>
+    <div className={`tool-flyout ${className}`.trim()} ref={menuRef}>
       {variants.map((v) => (
         <button
           key={v.id}
@@ -299,7 +368,10 @@ function ToolFlyout({ variants, currentId, onSelect, onClose, anchorRef }) {
           }}
         >
           <span className="tool-flyout-icon">{v.icon}</span>
-          <span className="tool-flyout-label">{v.label}</span>
+          <span className="tool-flyout-label">
+            <span className="tool-flyout-label-main">{v.label}</span>
+            {v.description && <span className="tool-flyout-description">{v.description}</span>}
+          </span>
           {currentId === v.id && <span className="tool-flyout-check">✓</span>}
         </button>
       ))}
@@ -550,10 +622,12 @@ const DrawingToolbar = memo(function DrawingToolbar({
   const [lineVariant, setLineVariant] = useState("line-segment");
   const [shapeVariant, setShapeVariant] = useState("shape-rectangle");
   const [posVariant, setPosVariant] = useState("position-long");
+  const [chartType, setChartType] = useState("candlestick");
 
-  // Flyout open state: null | "cursor" | "freehand" | "line" | "shape" | "fib-levels" | "position" | "position-settings"
+  // Flyout open state: null | "chart-type" | "cursor" | "freehand" | "line" | "shape" | "fib-levels" | "position" | "position-settings"
   const [flyoutOpen, setFlyoutOpen] = useState(null);
 
+  const chartTypeBtnRef = useRef(null);
   const cursorBtnRef = useRef(null);
   const freehandBtnRef = useRef(null);
   const lineBtnRef = useRef(null);
@@ -576,6 +650,16 @@ const DrawingToolbar = memo(function DrawingToolbar({
   const isTextActive = activeTool === "text";
   const isFibonacciActive = activeTool === "fibonacci";
   const isPositionActive = POSITION_TOOL_IDS.has(activeTool);
+
+  const currentChartType = CHART_TYPE_VARIANTS.find((v) => v.id === chartType) || CHART_TYPE_VARIANTS[0];
+
+  const handleChartTypeClick = useCallback(() => {
+    setFlyoutOpen((prev) => (prev === "chart-type" ? null : "chart-type"));
+  }, []);
+
+  const handleSelectChartType = useCallback((id) => {
+    setChartType(id);
+  }, []);
 
   /* ── Passive cursor button handlers ── */
   const handleCursorClick = useCallback(() => {
@@ -858,6 +942,32 @@ const DrawingToolbar = memo(function DrawingToolbar({
 
   return (
     <div className="drawing-toolbar">
+      {/* ── Chart type selector (UI only; no series switching yet) ── */}
+      <div className="drawing-tool-wrapper chart-type-tool-wrapper" ref={chartTypeBtnRef}>
+        <button
+          type="button"
+          className={`drawing-tool-btn chart-type-tool-btn ${flyoutOpen === "chart-type" ? "active" : ""}`}
+          onClick={handleChartTypeClick}
+          title={`图表类型：${currentChartType.label}（仅 UI，暂不切换图表）`}
+          aria-label={`图表类型：${currentChartType.label}`}
+        >
+          {currentChartType.icon}
+          {CornerTriangle}
+        </button>
+        {flyoutOpen === "chart-type" && (
+          <ToolFlyout
+            variants={CHART_TYPE_VARIANTS}
+            currentId={chartType}
+            onSelect={handleSelectChartType}
+            onClose={() => setFlyoutOpen(null)}
+            anchorRef={chartTypeBtnRef}
+            className="chart-type-flyout"
+          />
+        )}
+      </div>
+
+      <div className="drawing-toolbar-divider" />
+
       {/* ── Passive cursor / mouse mode button ── */}
       <div className="drawing-tool-wrapper" ref={cursorBtnRef}>
         <button

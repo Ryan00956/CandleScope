@@ -27,6 +27,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Callable, Awaitable, Any
 
 from .config import BarAggregatorConfig
@@ -34,6 +35,7 @@ from .models import (
     BarInput,
     BarInputSource,
     BarSourceMode,
+    MergeMode,
     BarInputAdapter,
     parse_interval_ms,
     is_standard_interval,
@@ -295,14 +297,17 @@ class EventRouter:
 
         for interval in target_intervals:
             should_route = False
+            merge_mode: MergeMode | None = None
 
             # Rule 1: Exact match (e.g. 1m to 1m, 5m to 5m, custom 91m to custom 91m)
             if src == interval:
                 should_route = True
+                merge_mode = MergeMode.SNAPSHOT
             
             # Rule 2: Trade ticks apply to everywhere natively
             elif src == "tick":
                 should_route = True
+                merge_mode = MergeMode.INCREMENTAL
                 
             # Rule 3: Cross-interval mapping for Custom Intervals
             elif not is_standard_interval(interval):
@@ -310,12 +315,14 @@ class EventRouter:
                     # Realtime custom bars are built purely from 1m base by convention
                     if src == "1m":
                         should_route = True
+                        merge_mode = MergeMode.COMPONENT
                 elif bar_input.source == BarInputSource.BACKFILL:
                     # Backfill custom bars accept cleanly decomposed components (standard intervals)
                     tgt_ms = parse_interval_ms(interval) or 0
                     src_ms = parse_interval_ms(src) or 0
                     if is_standard_interval(src) and 0 < src_ms <= tgt_ms:
                         should_route = True
+                        merge_mode = MergeMode.COMPONENT
 
             # Rule 4: OKX realtime 1m -> larger standard intervals
             # OKX native WS channels for large intervals (candle4H, candle1D,
@@ -332,13 +339,19 @@ class EventRouter:
                 tgt_ms = parse_interval_ms(interval) or 0
                 if tgt_ms > 60_000:
                     should_route = True
+                    merge_mode = MergeMode.PRICE_ONLY
 
             # Discard contaminated source intervals
             if not should_route:
                 continue
                 
             try:
-                await self._on_bar_input(exchange, market_type, symbol, interval, bar_input)
+                routed_input = (
+                    replace(bar_input, merge_mode=merge_mode)
+                    if merge_mode is not None and bar_input.merge_mode != merge_mode
+                    else bar_input
+                )
+                await self._on_bar_input(exchange, market_type, symbol, interval, routed_input)
             except Exception as exc:
                 logger.error(
                     "Dispatch error (%s:%s:%s@%s): %s", exchange, market_type, symbol, interval,

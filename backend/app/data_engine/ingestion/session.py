@@ -27,13 +27,10 @@ from app.exchanges.ws_protocol import WsConnectionContext
 from .config import IngestionConfig
 from .metrics import LayerMetrics
 from .models import StreamDescriptor, SessionHealth, DataSource, RawMessage
+from .session_types import HealthCallback
 from .transport import TransportLayer, TransportError
 
 logger = logging.getLogger("ingestion.L2_Session")
-
-# Type alias for the health-change callback consumed by L3
-HealthCallback = Callable[[SessionHealth, str], Awaitable[None]]
-
 
 class SessionLayer:
     """Manages a single WS session with reconnect and health tracking."""
@@ -78,6 +75,14 @@ class SessionLayer:
     @property
     def health(self) -> SessionHealth:
         return self._health
+
+    @property
+    def manages_recovery_while_http(self) -> bool:
+        return False
+
+    @property
+    def http_fallback_health_states(self) -> frozenset[SessionHealth]:
+        return frozenset({SessionHealth.UNHEALTHY})
 
     @property
     def consecutive_failures(self) -> int:

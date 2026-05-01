@@ -14,6 +14,7 @@ it calls ``factory.start(symbol, interval, on_bar)`` which:
      (Transport → Session → FeedControl → Normalize → Continuity → Delivery).
   3. Registers a callback on L6 ``DeliveryLayer`` that converts each
      ``MarketEvent`` into a bar dict and feeds it to ``on_bar()``.
+     Gap markers can be forwarded through optional ``on_gap``.
   4. Returns a handle with a ``stop()`` coroutine.
 
 The ``on_bar()`` callback is wired by the coordinator into the
@@ -29,7 +30,7 @@ Data flow::
       → StreamCoordinator._BarDictMarketEvent
       → BarAggregator.on_market_event()
       → L1 Router → L2 TimeBucket → L3 BarState → L4 Finalizer → L5 Publisher
-      → DataManager._on_aggregator_event()
+      → AggregatorBridge.on_bar_event()
       → Cache + EventBus
       → WebSocket subscribers (frontend)
 """
@@ -90,6 +91,16 @@ class BinanceIngestionFactory:
         self._cfg = config or IngestionConfig()
         self._ingress: Any = None  # lazily created MarketDataIngress
 
+    @property
+    def config(self) -> IngestionConfig:
+        return self._cfg
+
+    def get_transports(self) -> list[Any]:
+        """Return active transport layers managed by this factory."""
+        if self._ingress is None:
+            return []
+        return [self._ingress.transport]
+
     async def _ensure_ingress(self) -> Any:
         """Lazily create and start the shared MarketDataIngress instance."""
         if self._ingress is None:
@@ -108,6 +119,7 @@ class BinanceIngestionFactory:
         on_bar: Callable[[dict], Awaitable[None]],
         exchange: str = "binance",
         market_type: str = "spot",
+        on_gap: Callable[[Any], Awaitable[None]] | None = None,
     ) -> _IngestionHandle:
         """Start an ingestion stream for (symbol, interval).
 
@@ -143,6 +155,8 @@ class BinanceIngestionFactory:
             )
             # Add another callback to the existing pipeline
             self._register_callback(existing, on_bar)
+            if on_gap is not None:
+                existing.delivery.on_gap(on_gap)
             return _IngestionHandle(ingress, descriptor.key)
 
         # Create a new L1–L6 pipeline
@@ -150,8 +164,37 @@ class BinanceIngestionFactory:
 
         # Bridge: L6 DeliveryLayer → on_bar(bar_dict)
         self._register_callback(pipeline, on_bar)
+        if on_gap is not None:
+            pipeline.delivery.on_gap(on_gap)
 
         logger.info("Ingestion pipeline started: %s", descriptor.key)
+        return _IngestionHandle(ingress, descriptor.key)
+
+    async def start_price(
+        self,
+        symbol: str,
+        on_price: Callable[[dict], Awaitable[None]],
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> _IngestionHandle:
+        """Start an ingestion ticker stream for a watched price symbol."""
+        ingress = await self._ensure_ingress()
+        stream_type = StreamType.MINI_TICKER if exchange == "binance" else StreamType.TICKER
+        descriptor = StreamDescriptor(
+            symbol=symbol.upper(),
+            stream_type=stream_type,
+            exchange=exchange,
+            market_type=market_type,
+        )
+
+        existing = ingress.get_pipeline(descriptor.key)
+        if existing is not None:
+            self._register_price_callback(existing, on_price, exchange, market_type)
+            return _IngestionHandle(ingress, descriptor.key)
+
+        pipeline = await ingress.add_stream(descriptor)
+        self._register_price_callback(pipeline, on_price, exchange, market_type)
+        logger.info("Price ingestion pipeline started: %s", descriptor.key)
         return _IngestionHandle(ingress, descriptor.key)
 
     def _register_callback(self, pipeline: Any, on_bar: Callable) -> None:
@@ -190,6 +233,45 @@ class BinanceIngestionFactory:
                 logger.error("on_bar callback error: %s", exc, exc_info=True)
 
         pipeline.delivery.on_market_event(_bridge)
+
+    def _register_price_callback(
+        self,
+        pipeline: Any,
+        on_price: Callable[[dict], Awaitable[None]],
+        exchange: str,
+        market_type: str,
+    ) -> None:
+        async def _bridge(market_event: MarketEvent) -> None:
+            if market_event.event_type not in (StreamType.TICKER, StreamType.MINI_TICKER):
+                return
+
+            data = market_event.data
+            price = float(data.get("last_price", data.get("close_price", 0)) or 0)
+            open_price = float(data.get("open_price", 0) or 0)
+            if "price_change_pct" in data:
+                change_pct = float(data.get("price_change_pct", 0) or 0)
+            elif open_price > 0:
+                change_pct = ((price - open_price) / open_price) * 100
+            else:
+                change_pct = 0.0
+
+            try:
+                await on_price({
+                    "symbol": market_event.symbol,
+                    "exchange": exchange,
+                    "market_type": market_type,
+                    "price": price,
+                    "open": open_price,
+                    "high": float(data.get("high_price", 0) or 0),
+                    "low": float(data.get("low_price", 0) or 0),
+                    "change_pct": change_pct,
+                    "volume": float(data.get("volume", 0) or 0),
+                    "quote_volume": float(data.get("quote_volume", 0) or 0),
+                    "daily_open": open_price,
+                    "updated_at_ms": market_event.event_time_ms or market_event.received_at_ms,
+                })
+            except Exception as exc:
+                logger.error("on_price callback error: %s", exc, exc_info=True)
 
     async def shutdown(self) -> None:
         """Stop the shared MarketDataIngress (called during app shutdown)."""

@@ -29,6 +29,7 @@ from .models import (
     DataEvent,
     DataEventType,
     EventCallback,
+    MissingRange,
     QueryResult,
     QuerySource,
     SeriesKey,
@@ -39,8 +40,13 @@ from .models import (
 )
 from .cache import BarCache, BarSeries
 from .event_bus import DataEventBus, MiddlewareHook
+from .daily_open import DailyOpenService
 from .query import QueryEngine
 from .coordinator import StreamCoordinator, IngestionFactory
+from .ingestion_price_source import IngestionPriceSource
+from .maintenance import MaintenanceBusyError, MaintenanceService, MaintenanceUnavailableError
+from .price_cache import PriceSnapshot, PriceSnapshotCache
+from .subscriptions import SubscriptionService, SubscriptionTier
 from .manager import DataManager
 
 __all__ = [
@@ -57,6 +63,7 @@ __all__ = [
     "BarData",
     "SeriesKey",
     "QueryResult",
+    "MissingRange",
     "QuerySource",
     "DataEvent",
     "DataEventType",
@@ -70,7 +77,16 @@ __all__ = [
     "BarSeries",
     "DataEventBus",
     "MiddlewareHook",
+    "DailyOpenService",
     "QueryEngine",
     "StreamCoordinator",
     "IngestionFactory",
+    "IngestionPriceSource",
+    "MaintenanceService",
+    "MaintenanceBusyError",
+    "MaintenanceUnavailableError",
+    "PriceSnapshot",
+    "PriceSnapshotCache",
+    "SubscriptionService",
+    "SubscriptionTier",
 ]

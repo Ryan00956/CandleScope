@@ -31,6 +31,8 @@ import time
 from collections import defaultdict
 from typing import Callable, Awaitable
 
+from app.data_engine.interval_policy import parse_interval_ms
+
 from ..ingestion.config import IngestionConfig
 from ..ingestion.metrics import LayerMetrics
 from ..ingestion.models import (
@@ -48,7 +50,6 @@ from .models import (
     BackfillStatus,
     FetchedBar,
     FetchResult,
-    parse_interval_ms,
 )
 
 logger = logging.getLogger("backfill.Fetcher")

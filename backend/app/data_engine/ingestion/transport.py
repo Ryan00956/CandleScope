@@ -115,6 +115,10 @@ class TransportLayer:
     # ── Public: Metrics ──────────────────────────────────────
 
     @property
+    def config(self) -> IngestionConfig:
+        return self._cfg
+
+    @property
     def metrics(self) -> LayerMetrics:
         return self._metrics
 

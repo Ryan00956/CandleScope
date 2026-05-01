@@ -66,6 +66,7 @@ from .models import (
     ReconcileResult,
     RepairReport,
     StorageBackend,
+    WrittenRange,
 )
 from .gap_detector import GapDetector
 from .planner import BackfillPlanner
@@ -95,6 +96,7 @@ __all__ = [
     "ReconcileResult",
     "RepairReport",
     "StorageBackend",
+    "WrittenRange",
 ]
 
 

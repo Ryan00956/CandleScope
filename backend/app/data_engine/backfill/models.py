@@ -44,7 +44,8 @@ class DeduplicationStrategy(str, enum.Enum):
     """How to handle duplicate bars when reconciling."""
     SKIP = "skip"              # keep existing, discard new
     OVERWRITE = "overwrite"    # always replace with new
-    NEWER_WINS = "newer_wins"  # keep whichever has a later updated_at
+    BACKFILL_WINS = "backfill_wins"  # replace existing with fetched repair data
+    NEWER_WINS = "newer_wins"        # legacy alias for BACKFILL_WINS behavior
 
 
 class BackfillStatus(str, enum.Enum):
@@ -371,6 +372,34 @@ class FetchResult:
 
 
 @dataclass(slots=True)
+class WrittenRange:
+    """Storage range successfully written by reconciliation."""
+
+    symbol: str
+    interval: str
+    start_ms: int
+    end_ms: int
+    bars_written: int
+    exchange: str = "binance"
+    market_type: str = "spot"
+    source: str = "backfill"
+    phase: str = "standard"
+
+    def to_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "exchange": self.exchange,
+            "market_type": self.market_type,
+            "start_ms": self.start_ms,
+            "end_ms": self.end_ms,
+            "bars_written": self.bars_written,
+            "source": self.source,
+            "phase": self.phase,
+        }
+
+
+@dataclass(slots=True)
 class ReconcileResult:
     """Result of the reconciliation phase.
 
@@ -382,6 +411,9 @@ class ReconcileResult:
         custom_bars_generated: Custom-interval aggregated bars generated.
         custom_bars_written:  Custom-interval bars written to storage.
         bars_cached:          Bars pushed to cache.
+        written_ranges:       Exact storage ranges written by reconciliation.
+        write_errors:         Number of failed storage write batches.
+        failed_batches:       Per-batch storage write failure details.
         elapsed_ms:           Time spent reconciling.
         errors:               List of error messages.
     """
@@ -392,6 +424,9 @@ class ReconcileResult:
     custom_bars_generated: int = 0
     custom_bars_written: int = 0
     bars_cached: int = 0
+    written_ranges: list[WrittenRange] = field(default_factory=list)
+    write_errors: int = 0
+    failed_batches: list[dict[str, Any]] = field(default_factory=list)
     elapsed_ms: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -404,6 +439,9 @@ class ReconcileResult:
             "custom_bars_generated": self.custom_bars_generated,
             "custom_bars_written": self.custom_bars_written,
             "bars_cached": self.bars_cached,
+            "written_ranges": [r.to_dict() for r in self.written_ranges],
+            "write_errors": self.write_errors,
+            "failed_batches": self.failed_batches,
             "elapsed_ms": self.elapsed_ms,
             "errors": self.errors,
         }
@@ -428,6 +466,7 @@ class RepairReport:
         started_at_ms:    When the run started (epoch ms).
         completed_at_ms:  When the run finished (epoch ms).
         elapsed_ms:       Total wall-clock time.
+        written_ranges:   Exact storage ranges written by reconciliation.
         data_preview:     Optional preview of written data.
         errors:           Top-level errors.
         metadata:         Arbitrary user-attached metadata.
@@ -442,6 +481,7 @@ class RepairReport:
     started_at_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     completed_at_ms: int = 0
     elapsed_ms: int = 0
+    written_ranges: list[WrittenRange] = field(default_factory=list)
     data_preview: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -460,6 +500,7 @@ class RepairReport:
             "started_at_ms": self.started_at_ms,
             "completed_at_ms": self.completed_at_ms,
             "elapsed_ms": self.elapsed_ms,
+            "written_ranges": [r.to_dict() for r in self.written_ranges],
             "data_preview": self.data_preview,
             "errors": self.errors,
             "metadata": self.metadata,
@@ -581,80 +622,11 @@ class CacheBackend(Protocol):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Interval Helpers
+#  Interval Helpers (compatibility exports)
 # ═══════════════════════════════════════════════════════════════
 
-# Mapping of standard interval strings → milliseconds.
-# Custom intervals (e.g. "91m") are parsed dynamically by parse_interval_ms().
-STANDARD_INTERVAL_MS: dict[str, int] = {
-    "1s": 1_000,
-    "1m": 60_000,
-    "3m": 180_000,
-    "5m": 300_000,
-    "15m": 900_000,
-    "30m": 1_800_000,
-    "1h": 3_600_000,
-    "2h": 7_200_000,
-    "4h": 14_400_000,
-    "6h": 21_600_000,
-    "8h": 28_800_000,
-    "12h": 43_200_000,
-    "1d": 86_400_000,
-    "3d": 259_200_000,
-    "1w": 604_800_000,
-    "1M": 2_592_000_000,  # ~30 days, approximate
-}
-
-# Suffix → milliseconds multiplier
-_SUFFIX_MS: dict[str, int] = {
-    "s": 1_000,
-    "m": 60_000,
-    "h": 3_600_000,
-    "d": 86_400_000,
-    "w": 604_800_000,
-    "M": 2_592_000_000,
-}
-
-
-def parse_interval_ms(interval: str) -> int | None:
-    """Parse an interval string (standard or custom) into milliseconds.
-
-    Supports:
-      - Standard: "1m", "5m", "1h", "4h", "1d", etc.
-      - Custom:   "91m", "7h", "2d", etc.
-
-    Returns None if the interval string cannot be parsed.
-
-    Examples::
-
-        parse_interval_ms("1m")  → 60_000
-        parse_interval_ms("91m") → 5_460_000
-        parse_interval_ms("4h")  → 14_400_000
-    """
-    # Check standard mapping first
-    if interval in STANDARD_INTERVAL_MS:
-        return STANDARD_INTERVAL_MS[interval]
-
-    # Try dynamic parsing: <number><suffix>
-    if len(interval) < 2:
-        return None
-
-    suffix = interval[-1]
-    multiplier = _SUFFIX_MS.get(suffix)
-    if multiplier is None:
-        return None
-
-    try:
-        value = int(interval[:-1])
-    except ValueError:
-        return None
-
-    if value <= 0:
-        return None
-
-    return value * multiplier
-
-
-def is_standard_interval(interval: str) -> bool:
-    """Return True if the interval is natively supported by the exchange."""
-    return interval in STANDARD_INTERVAL_MS
+from app.data_engine.interval_policy import (  # noqa: E402
+    STANDARD_INTERVAL_MS,
+    is_standard_interval,
+    parse_interval_ms,
+)

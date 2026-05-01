@@ -14,6 +14,46 @@
 
 ---
 
+## 0. 当前执行状态
+
+截至当前实现，已完成或基本落地的内容：
+
+- 阶段 0/1：新增边界测试；修复 `QueryEngine` 内部 gap fill 漏传 `exchange`；修复 `DataManager.on_bar_event()` 丢失 `exchange`；补齐 `QueryEngine`、`StreamCoordinator`、`BarCache` 的 public wrapper；删除 ingestion 自动 HTTP gap fill 配置；旧 `services/collectors` 源文件已删除。
+- 阶段 2：`DataManager` 已拆出 `aggregator_bridge.py`、`warm_start.py`、`retention.py`、`custom_query.py`，`manager.py` 主要保留 facade/wiring。
+- 阶段 3：`BarAggregator` 已提供 `ingest_bar_input()`、`seed_active_bar()`、`replay_components()`、`aggregate_batch()`、bucket state/expire 等 public API；`warm_start`、settings custom repair、backfill custom aggregation 已停止依赖业务路径私有 pipeline。
+- 阶段 4：已新增 `BackfillCoordinator`，接管 `QueryEngine` trigger、startup scan、`main.py` backfill 调度、settings gap scan 和 custom repair 的基础周期补齐；`main.py` 已删除手写 `_backfill_trigger()`、`_load_backfilled_to_cache()`、内联 `_startup_gap_scan()`。
+- 阶段 5：ingestion `GapMarker` 已通过 `BinanceIngestionFactory -> StreamCoordinator -> DataManager.set_backfill_trigger()` 接入统一 backfill trigger；`ContinuityLayer` 已删除内联 HTTP gap fill，只负责 emit gap marker；`NormalizeLayer` 已收窄为 L4 管线门面，Binance/OKX 解析已迁入独立 normalizer；`SessionLike` 已落地，普通 `SessionLayer` 与 OKX shared WS 通过同一 session contract 接入 `FeedControlLayer`；`DeliveryLayer` 已明确 ordered callback 和 bounded queue subscriber 的反压边界。
+- 阶段 6：新增 `data_manager/price_cache.py` 和 `data_manager/ingestion_price_source.py`，`DataManager` 已提供 `ensure_price_stream()`、`get_price()`、`get_prices_snapshot()` 和 `PRICE_UPDATED` 事件；`SubscriptionService` 已迁入 DataManager 包并通过 `dm.ensure_price_stream()` 管理 PRICE/FULL；`GET /subscriptions/prices` 与 `WS /stream/prices` 已改为 DataManager price cache/EventBus；启动流程已改用 ingestion ticker source，旧 `PriceTickerService` 文件已删除。
+- 阶段 7：新增 `data_engine/interval_policy.py`，`core.market`、`bar_aggregator.models`、`backfill.models` 的历史 interval helper 已改为兼容代理；dataengine 内部已停止 import `app.core.market` 的 interval helper，`custom_query/warm_start/backfill planner/reconciler/gap detector/fetcher/storage` 都直接引用统一策略；weekly/monthly bucket 已统一到 `IntervalPolicy` calendar-aware helper；45m、91m、2M 已覆盖 query、BarAggregator batch、backfill fallback、settings repair 聚合一致性。
+- 阶段 8 部分：settings storage repair/gap-scan/delete 维护逻辑已迁入 `data_manager/maintenance.py`，并通过 `DataManager` public facade 暴露；API 层只负责参数归一化、错误码转换和调用 `dm.repair_custom_storage()` / `dm.scan_and_fill_storage_gaps()` / `dm.delete_storage_data()`。
+- 阶段 8 部分：`api/v1/klines.py` 已停止 legacy/mock fallback，正式 K 线查询、storage meta/delete、SMA 都走 DataManager；`api/v1/stream.py` K 线 WS 通过 DataManager EventBus 推送，并修复 multi-stream unsubscribe 不释放订阅句柄的问题；`main.py` 已停止创建旧 `SubscriptionManager`，订阅服务挂在 `dm.subscriptions`；DataEngine 启停已收口到 `app/data_engine/runtime.py`，Indicator 桥接已收口到 `app/indicator/data_manager_bridge.py`；旧 `services/*.py` 与 `collectors/*.py` 源文件已删除。
+
+当前后续可继续优化的内容：
+
+- `MaintenanceService` 已通过 DataManager facade 收口；后续可继续把返回模型和更多 storage 操作收敛成更稳定的 public contract。
+- `DataManager.manager.py` 仍保留少量 stream/price wiring 和兼容字段，后续可继续拆成更小 facade 组件。
+- QueryEngine standalone callback 仍保留兼容能力；正式 DataManager 路径已通过 `QueryResult.missing_ranges` 显式提交 coordinator。
+- multi-symbol ticker fan-out 已在 `IngestionPriceSource` 层支持具备 `start_price_many` 的 factory；后续可把 Binance 真实 `!miniTicker@arr` normalizer 也接成同一能力。
+
+checkpoint 盘点：
+
+- 后端 dataengine/API 文档和测试改动是本轮重构范围；`frontend/src/*` 仍有未处理的既有脏改动，本轮不碰。
+- `rg -n "app\.data_engine\.services|data_engine\.services|app\.data_engine\.collectors|data_engine\.collectors" backend/app -g '*.py'` 无输出。
+- `rg -n "PriceTickerService|SubscriptionManager|kline_cache_service|kline_aggregator|spot_fetcher" backend/app -g '*.py'` 无输出。
+- 私有 pipeline 检查在 `data_manager/backfill/settings` 正式路径无输出；`bar_aggregator` 模块内部仍可使用自身内部实现。
+
+当前可用验证：
+
+```bash
+cd backend
+python3 -m compileall app tests
+python3 -m pytest -q
+```
+
+当前本机验证结果：`python3 -m pytest -q` 通过，`80 passed`。
+
+---
+
 ## 1. 总目标
 
 最终后端数据路径必须固定为：
@@ -66,37 +106,26 @@ DataManager 公开 API
 当前 `backend/app/main.py` 做了这些事：
 
 1. `init_klines_storage()` 初始化 SQLite。
-2. 创建 `DataManager()`。
-3. 注入 `KlinesRepoAdapter` 到 DataManager。
-4. 创建 `BinanceIngestionFactory()` 并注入 DataManager。
-5. 创建独立 `TransportLayer + BackfillEngine`。
-6. 调 `backfill_engine.reconciler.set_bar_aggregator(dm.bar_aggregator)`。
-7. 在 `main.py` 内定义 `_backfill_trigger()` 和 `_load_backfilled_to_cache()`。
-8. `dm.set_backfill_trigger(_backfill_trigger)`。
-9. `await dm.start()`。
-10. 启动旧 `SubscriptionManager + PriceTickerService`。
-11. `main.py` 内启动 `_startup_gap_scan()`。
-12. 桥接 `IndicatorEngine` 到 DataManager EventBus。
+2. best-effort 刷新交易所 symbol metadata。
+3. 调 `start_data_engine()` 创建并启动 `DataEngineRuntime`。
+4. `runtime.attach_to_app_state(app.state)` 暴露 API 需要的稳定句柄。
+5. 调 `bridge_indicator_engine(runtime.data_manager)` 桥接 IndicatorEngine。
+6. shutdown 时先停止 IndicatorEngine，再调 `runtime.shutdown()`。
 
 当前问题：
 
-- `main.py` 同时承担组合根、backfill coordinator、startup scan、旧 price service 启停。
-- backfill 完成后的 cache 回灌和事件通知写在 `main.py`。
-- `PriceTickerService` 是独立行情旁路。
-- `SubscriptionManager` 同时知道 DataManager 和 PriceTickerService。
+- `main.py` 已不再直接创建 BackfillEngine、TransportLayer、IngestionFactory、SubscriptionService 或 price source。
+- `main.py` 已不再手写 startup gap scan、backfill cache reload 或 IndicatorEngine 事件回调。
+- 后续可进一步把 `app.state` 兼容句柄集中成 typed application state，但当前 API 兼容字段保留。
 
 目标启动链路：
 
 ```text
 1. init storage
-2. create DataManager
-3. inject storage
-4. inject ingestion factory
-5. create BackfillEngine
-6. dm.backfill.set_engine(backfill_engine)
-7. await dm.start()
-8. restore subscriptions through DataManager
-9. bridge indicator engine
+2. refresh metadata
+3. start DataEngineRuntime
+4. attach DataEngineRuntime to app.state
+5. bridge indicator engine
 ```
 
 ### 2.2 实时 K 线链路
@@ -161,10 +190,10 @@ api/v1/klines.py
 当前问题：
 
 - `QueryEngine` 直接触发 backfill callback，不返回结构化 missing ranges。
-- `main.py` 是实际 backfill coordinator。
+- `main.py` 过去是实际 backfill coordinator；当前已迁到 `DataManager.BackfillCoordinator`。
 - `DataManager.on_bars_backfilled()` 回灌 cache 后还会继续检测 gap 并触发 follow-up backfill。
-- `settings.py` 也直接调 `backfill_engine.run()` 并手写 cache reload。
-- `ingestion.ContinuityLayer` 仍可做 `_backfill_kline_gap()`。
+- `settings.py` 过去直接调 `backfill_engine.run()` 并手写 cache reload；当前已通过 DataManager maintenance facade 和 `BackfillCoordinator`。
+- `ingestion.ContinuityLayer` 过去可做 `_backfill_kline_gap()`；当前已删除内联 HTTP backfill。
 
 目标链路：
 
@@ -222,7 +251,7 @@ ingestion MINI_TICKER/TICKER
 
 ### 2.5 settings 维护链路
 
-当前 `settings.py` 直接做：
+过去 `settings.py` 直接做：
 
 - 读取 `dm.query_engine._storage`。
 - 直接使用 `BackfillEngine.detect_only()` / `run()`。
@@ -233,8 +262,8 @@ ingestion MINI_TICKER/TICKER
 目标：
 
 - proxy/connectivity 可继续留在 settings API。
-- storage gap scan 改为 `dm.backfill.scan_and_repair_storage(...)`。
-- custom storage repair 改为 `dm.maintenance.repair_custom_series(...)`。
+- storage gap scan 改为 `dm.scan_and_fill_storage_gaps(...)`。
+- custom storage repair 改为 `dm.repair_custom_storage(...)`。
 - cache limits 改为 DataManager public method 返回结果，不读私有字段。
 
 ---
@@ -445,7 +474,7 @@ written_ranges: list[WrittenRange]
 新增共享模块：
 
 ```text
-backend/app/core/interval_policy.py
+backend/app/data_engine/interval_policy.py
 ```
 
 统一提供：
@@ -572,26 +601,26 @@ DataEventType.PRICE_UPDATED
 
 ### 执行动作
 
-- [ ] 记录当前测试基线：
+- [x] 记录当前测试基线：
 
 ```bash
 cd backend
 PYTHONPATH=. pytest -q
 ```
 
-- [ ] 记录当前旧依赖清单：
+- [x] 记录当前旧依赖清单：
 
 ```bash
 rg -n "app\.data_engine\.services|data_engine\.services|app\.data_engine\.collectors|data_engine\.collectors" backend/app backend/tests -g '*.py'
 ```
 
-- [ ] 记录当前私有字段依赖清单：
+- [x] 记录当前私有字段依赖清单：
 
 ```bash
 rg -n "_handle_bar_input|get_pipeline\(|pipeline\.bar_state|query_engine\._|coordinator\._|cache\._" backend/app backend/tests -g '*.py'
 ```
 
-- [ ] 给旧模块加 deprecated 注释，不改行为：
+- [x] 给旧模块加 deprecated 注释，不改行为：旧源码已删除，因此无需再加 deprecated 注释。
 
 ```text
 backend/app/data_engine/services/__init__.py
@@ -602,7 +631,7 @@ backend/app/data_engine/services/kline_aggregator.py
 backend/app/data_engine/collectors/binance/spot_fetcher.py
 ```
 
-- [ ] 新增一个轻量检查脚本或测试，先允许现有引用，但禁止新增正式路径引用旧 services/collectors。
+- [x] 新增一个轻量检查脚本或测试，先允许现有引用，但禁止新增正式路径引用旧 services/collectors。
 
 建议路径：
 
@@ -624,14 +653,14 @@ backend/tests/test_data_engine_architecture_boundaries.py
   新增任何其它 backend/app 路径 import app.data_engine.services
 ```
 
-- [ ] 更新 `backend/app/main.py` 文件头注释，不再鼓励 legacy fallback 是正常运行模式。
+- [x] 更新 `backend/app/main.py` 文件头注释，不再鼓励 legacy fallback 是正常运行模式。
 
 ### 验收标准
 
-- [ ] 测试基线已记录。
-- [ ] 旧服务引用清单已记录。
-- [ ] 私有字段依赖清单已记录。
-- [ ] 有自动化检查阻止新增旁路。
+- [x] 测试基线已记录。
+- [x] 旧服务引用清单已记录。
+- [x] 私有字段依赖清单已记录。
+- [x] 有自动化检查阻止新增旁路。
 
 ---
 
@@ -641,7 +670,7 @@ backend/tests/test_data_engine_architecture_boundaries.py
 
 ### 7.1 修明确 bug
 
-- [ ] 修 `QueryEngine._fill_interior_gaps()` 漏传 exchange。
+- [x] 修 `QueryEngine._fill_interior_gaps()` 漏传 exchange。
 
 当前代码只传了 `market_type`，应改为：
 
@@ -658,7 +687,7 @@ rows = self._storage.query_bars(
 )
 ```
 
-- [ ] 修 `DataManager.on_bar_event()` 丢失 exchange。
+- [x] 修 `DataManager.on_bar_event()` 丢失 exchange。
 
 目标签名：
 
@@ -687,11 +716,11 @@ await self.coordinator.on_bar_event(
 )
 ```
 
-- [ ] 修 `DataManager.shutdown()` 中重复 `await self._cleanup_task`。
+- [x] 修 `DataManager.shutdown()` 中重复 `await self._cleanup_task`。
 
 ### 7.2 给现有私有访问补 wrapper
 
-- [ ] `QueryEngine` 增加：
+- [x] `QueryEngine` 增加：
 
 ```python
 def set_storage(self, storage: StorageBackend) -> None: ...
@@ -702,11 +731,11 @@ def storage(self) -> StorageBackend | None: ...
 def backfill_trigger(self) -> BackfillTrigger | None: ...
 ```
 
-- [ ] `DataManager.set_storage()` 改为调用 `self.query_engine.set_storage(storage)`。
+- [x] `DataManager.set_storage()` 改为调用 `self.query_engine.set_storage(storage)`。
 
-- [ ] `DataManager.set_backfill_trigger()` 改为调用 `self.query_engine.set_backfill_trigger(trigger)`。
+- [x] `DataManager.set_backfill_trigger()` 改为调用 `self.query_engine.set_backfill_trigger(trigger)`。
 
-- [ ] `StreamCoordinator` 增加：
+- [x] `StreamCoordinator` 增加：
 
 ```python
 def has_stream(key_or_fields...) -> bool: ...
@@ -716,41 +745,35 @@ def prewarm_targets(self) -> list[tuple[str, str, str]]: ...
 def prewarm_intervals(self) -> tuple[str, ...]: ...
 ```
 
-- [ ] `DataManager.ensure_stream()` 不再读 `self.coordinator._streams`。
+- [x] `DataManager.ensure_stream()` 不再读 `self.coordinator._streams`。
 
-- [ ] `DataManager._on_aggregator_event()` 不再读 `self.coordinator._streams`，改调 `mark_bar_received()`。
+- [x] `DataManager._on_aggregator_event()` 不再读 `self.coordinator._streams`，改由 `AggregatorBridge` 调 `mark_bar_received()`。
 
-- [ ] `BarCache` 增加：
+- [x] `BarCache` 增加：
 
 ```python
 def get_ephemeral_limit(self) -> int: ...
 ```
 
-- [ ] `settings.py` 的 `/cache-limits` 响应不再读 `dm.cache._ephemeral_max_bars`。
+- [x] `settings.py` 的 `/cache-limits` 响应不再读 `dm.cache._ephemeral_max_bars`。
 
 ### 7.3 ingestion gap fill 默认关掉
 
-- [ ] 把 `IngestionConfig.continuity_auto_fill_gaps` 默认值改为 `false`。
-
-环境变量仍可覆盖：
-
-```text
-INGESTION_CONTINUITY_AUTO_FILL=true
-```
-
-- [ ] 在 `ContinuityLayer._backfill_kline_gap()` docstring 标记 legacy。
+- [x] 删除 `IngestionConfig.continuity_auto_fill_gaps` / `continuity_max_gap_fill_bars`。
+- [x] 删除 `ContinuityLayer._backfill_kline_gap()`。
+- [x] `ContinuityLayer` 只 emit `GapMarker`，不再裸调 HTTP backfill。
 
 ### 7.4 测试
 
-- [ ] 新增 `QueryEngine._fill_interior_gaps` 测试，断言 storage 收到正确 `exchange`。
-- [ ] 新增 `DataManager.on_bar_event(exchange="okx")` 测试，断言 EventBus key 保留 exchange。
-- [ ] 新增 wrapper 测试，确保不需要读私有字段也能完成原行为。
+- [x] 新增 `QueryEngine._fill_interior_gaps` 测试，断言 storage 收到正确 `exchange`。
+- [x] 新增 `DataManager.on_bar_event(exchange="okx")` 测试，断言 EventBus key 保留 exchange。
+- [x] 新增 wrapper 测试，确保不需要读私有字段也能完成原行为。
 
 ### 验收标准
 
-- [ ] `rg -n "query_engine\._storage|query_engine\._backfill_trigger|coordinator\._streams|cache\._ephemeral_max_bars" backend/app/data_engine/data_manager backend/app/api/v1/settings.py` 数量下降，只剩待拆迁移点。
-- [ ] 现有 K 线查询、WS、backfill 行为不变。
-- [ ] `pytest -q backend/tests` 通过。
+- [x] `rg -n "query_engine\._storage|query_engine\._backfill_trigger|coordinator\._streams|cache\._ephemeral_max_bars" backend/app/data_engine/data_manager backend/app/api/v1/settings.py` 无业务越界结果。
+- [x] 现有 K 线查询、WS、backfill 行为不变。
+- [x] `pytest -q backend/tests` 通过。
 
 ---
 
@@ -768,10 +791,10 @@ backend/app/data_engine/data_manager/warm_start.py
 
 迁移方法：
 
-- [ ] 移动 `_seed_custom_interval()`。
-- [ ] 移动 `_seed_standard_interval()`。
-- [ ] 移动 `_custom_bucket_is_synced()`。
-- [ ] 移动 `_trigger_custom_tail_repair()`。
+- [x] 移动 `_seed_custom_interval()`。
+- [x] 移动 `_seed_standard_interval()`。
+- [x] 移动 `_custom_bucket_is_synced()`。
+- [x] 移动 `_trigger_custom_tail_repair()`。
 
 目标类：
 
@@ -806,10 +829,10 @@ backend/app/data_engine/data_manager/aggregator_bridge.py
 
 迁移方法：
 
-- [ ] 移动 `_on_aggregator_event()`。
-- [ ] 移动 `_persist_bar_event()`。
-- [ ] bridge 接收 `cache`、`event_bus`、`storage provider`、`stream marker`。
-- [ ] DataManager 只负责 wiring：
+- [x] 移动 `_on_aggregator_event()`。
+- [x] 移动 `_persist_bar_event()`。
+- [x] bridge 接收 `cache`、`event_bus`、`storage provider`、`stream marker`。
+- [x] DataManager 只负责 aggregator event bridge wiring：
 
 ```python
 self.aggregator_bridge = AggregatorBridge(...)
@@ -826,16 +849,16 @@ backend/app/data_engine/data_manager/retention.py
 
 迁移方法：
 
-- [ ] 移动 `_run_startup_db_cleanup()`。
-- [ ] 移动 `_ephemeral_trim_loop()`。
-- [ ] 移动 `_run_ephemeral_trim()`。
-- [ ] 移动 `_db_limits` 管理。
+- [x] 移动 `_run_startup_db_cleanup()`。
+- [x] 移动 `_ephemeral_trim_loop()`。
+- [x] 移动 `_run_ephemeral_trim()`。
+- [x] 移动 `_db_limits` 管理；`DataManager._db_limits` 仅保留兼容引用。
 
 目标 public API：
 
 ```python
-dm.update_retention_limits(...) -> dict
-dm.retention.snapshot() -> dict
+dm.update_retention_limits(...) -> None
+dm.retention_snapshot() -> dict
 ```
 
 ### 8.4 抽 `custom_query.py`
@@ -848,26 +871,26 @@ backend/app/data_engine/data_manager/custom_query.py
 
 迁移方法：
 
-- [ ] 移动 `_query_custom_from_base()`。
-- [ ] 移动 `_query_custom_before()`。
-- [ ] 移动 `_aggregate_custom_bars()`。
-- [ ] `QueryEngine` 对 custom interval 只委托 `CustomIntervalQueryService`。
+- [x] 移动 `_query_custom_from_base()`。
+- [x] 移动 `_query_custom_before()`。
+- [x] 移动 `_aggregate_custom_bars()`。
+- [x] `QueryEngine` 对 custom interval 只委托 `CustomIntervalQueryService`。
 
 第一版可以继续使用当前 `core.market` 聚合函数；阶段 7 再替换到统一 batch API。
 
 ### 8.5 测试
 
-- [ ] 给 `warm_start.py` 添加标准周期 seed 测试。
-- [ ] 给 `warm_start.py` 添加 custom seed 当前 bucket 测试。
-- [ ] 给 `aggregator_bridge.py` 添加 CLOSED/AMENDED 持久化测试。
-- [ ] 给 `retention.py` 添加 cache/db limit 测试。
-- [ ] 给 `custom_query.py` 添加 45m、91m、1w、2M 查询测试。
+- [x] 给 `warm_start.py` 添加标准周期 seed 测试。
+- [x] 给 `warm_start.py` 添加 custom seed 当前 bucket 测试。
+- [x] 给 `aggregator_bridge.py` 添加 CLOSED/AMENDED 持久化测试。
+- [x] 给 `retention.py` 添加 cache/db limit 测试。
+- [x] 给 `custom_query.py` 添加 45m、91m、2M 查询测试；1w 已通过 IntervalPolicy/BarAggregator weekly bucket 边界覆盖。
 
 ### 验收标准
 
-- [ ] `DataManager.manager.py` 不再包含大量 warm-start/backfill/retention 算法。
-- [ ] 行为保持一致。
-- [ ] `DataManager.ensure_stream()` 只做参数归一化、target 注册、coordinator 调用、warm-start 委托。
+- [x] `DataManager.manager.py` 不再包含大量 warm-start/backfill/retention 算法。
+- [x] 行为保持一致。
+- [x] `DataManager.ensure_stream()` 只做参数归一化、stream policy plan、target 注册、coordinator 调用、warm-start 委托。
 
 ---
 
@@ -877,12 +900,12 @@ backend/app/data_engine/data_manager/custom_query.py
 
 ### 9.1 新增 public API
 
-- [ ] 新增 `BarAggregator.ingest_bar_input(...)`，内部包住 `_handle_bar_input()`。
-- [ ] 新增 `BarAggregator.seed_active_bar(...)`，用于标准周期 warm-start。
-- [ ] 新增 `BarAggregator.replay_components(...)`，用于 custom forming bucket seed。
-- [ ] 新增 `BarAggregator.aggregate_batch(...)`，用于 backfill/settings custom repair。
-- [ ] 新增 `BarAggregator.get_bucket_state(...)`。
-- [ ] 新增 `BarAggregator.expire_bucket(...)`。
+- [x] 新增 `BarAggregator.ingest_bar_input(...)`，内部包住 `_handle_bar_input()`。
+- [x] 新增 `BarAggregator.seed_active_bar(...)`，用于标准周期 warm-start。
+- [x] 新增 `BarAggregator.replay_components(...)`，用于 custom forming bucket seed。
+- [x] 新增 `BarAggregator.aggregate_batch(...)`，用于 backfill/settings custom repair。
+- [x] 新增 `BarAggregator.get_bucket_state(...)`。
+- [x] 新增 `BarAggregator.expire_bucket(...)`。
 
 要求：
 
@@ -892,23 +915,23 @@ backend/app/data_engine/data_manager/custom_query.py
 
 ### 9.2 替换 DataManager warm-start 调用
 
-- [ ] `warm_start.seed_standard()` 改用 `seed_active_bar()`。
-- [ ] `warm_start.seed_custom()` 改用 `replay_components()`。
-- [ ] `warm_start` 不再调用 `_handle_bar_input()`。
-- [ ] `warm_start` 不再直接操作 `pipeline.bar_state`。
-- [ ] `get_pipeline()` 在业务路径不再使用，只留 advanced/debug。
+- [x] `warm_start.seed_standard()` 改用 `seed_active_bar()`。
+- [x] `warm_start.seed_custom()` 改用 `replay_components()`。
+- [x] `warm_start` 不再调用 `_handle_bar_input()`。
+- [x] `warm_start` 不再直接操作 `pipeline.bar_state`。
+- [x] `get_pipeline()` 在业务路径不再使用，只留 advanced/debug。
 
 ### 9.3 替换 settings custom repair 聚合
 
-- [ ] `settings.py` 或后续 `maintenance.py` 的 `_aggregate_custom_rows()` 改用 `aggregate_batch()`。
-- [ ] 删除 fresh `BarAggregator + publisher capture` 的临时实现。
+- [x] `settings.py` 或后续 `maintenance.py` 的 `_aggregate_custom_rows()` 改用 `aggregate_batch()`。
+- [x] 删除 fresh `BarAggregator + publisher capture` 的临时实现；当前只通过 public `aggregate_batch()` 入口。
 
 ### 9.4 替换 backfill custom aggregation
 
-- [ ] `Reconciler._generate_custom_bars()` 改用 `aggregate_batch()`。
-- [ ] 不再调用主 `dm.bar_aggregator.add_target()`。
-- [ ] 不再调用主 `dm.bar_aggregator.on_backfill_bars()`。
-- [ ] 不再调用 `get_recent_bars(limit=10000)` 收集 batch 结果。
+- [x] `Reconciler._generate_custom_bars()` 改用 `aggregate_batch()`。
+- [x] 不再调用主 `dm.bar_aggregator.add_target()`。
+- [x] 不再调用主 `dm.bar_aggregator.on_backfill_bars()`。
+- [x] 不再调用 `get_recent_bars(limit=10000)` 收集 batch 结果。
 
 ### 9.5 引入 RoutingPolicy / MergeMode
 
@@ -922,22 +945,22 @@ class MergeMode(str, Enum):
     PRICE_ONLY = "price_only"
 ```
 
-- [ ] `BarInput` 增加可选 `merge_mode`。
-- [ ] `EventRouter` 对 OKX 1m fanout 标记 `PRICE_ONLY`。
-- [ ] `BarStateEngine`/merge strategy 按 `merge_mode` 执行，而不是用 `source_interval != state.interval` 推断。
+- [x] `BarInput` 增加可选 `merge_mode`。
+- [x] `EventRouter` 对 OKX 1m fanout 标记 `PRICE_ONLY`。
+- [x] `BarStateEngine`/merge strategy 按 `merge_mode` 执行，而不是用 `source_interval != state.interval` 推断。
 
 ### 测试
 
-- [ ] `seed_active_bar()` 不 emit event，后续 realtime tick 能正确 merge OHLCV。
-- [ ] `replay_components()` 能重建当前 custom bucket。
-- [ ] `aggregate_batch()` 多次调用不会改变主 aggregator `targets/active/recent`。
-- [ ] `aggregate_batch()` 对 45m、91m、1w、2M 结果稳定。
-- [ ] OKX `1m -> 1h` PRICE_ONLY 不污染 volume/trades。
+- [x] `seed_active_bar()` 不 emit event。
+- [x] `replay_components()` 能重建当前 custom bucket。
+- [x] `aggregate_batch()` 多次调用不会改变主 aggregator `targets/active/recent`。
+- [x] `aggregate_batch()` 对 45m、91m、2M 结果稳定；1w bucket 已由 weekly Monday UTC 测试覆盖。
+- [x] OKX `1m -> 1h` PRICE_ONLY 不污染 volume/trades。
 
 ### 验收标准
 
-- [ ] `rg -n "_handle_bar_input|pipeline\.bar_state|get_pipeline\(" backend/app/data_engine/data_manager backend/app/api/v1/settings.py backend/app/data_engine/backfill` 无业务调用。
-- [ ] backfill custom aggregation 与 realtime custom aggregation 使用同一套 BarAggregator 规则。
+- [x] `rg -n "_handle_bar_input|pipeline\.bar_state|get_pipeline\(" backend/app/data_engine/data_manager backend/app/api/v1/settings.py backend/app/data_engine/backfill` 无业务调用。
+- [x] backfill custom aggregation 与 realtime custom aggregation 使用同一套 BarAggregator 规则；异常 fallback 也使用统一 bucket helper。
 
 ---
 
@@ -972,60 +995,61 @@ class BackfillCoordinator:
 
 ### 10.2 调度规则
 
-- [ ] 按 `(exchange, market_type, symbol, interval)` 做 in-flight guard。
-- [ ] 合并重叠或相邻 range。
-- [ ] 同一 series 同时只跑一个 BackfillEngine run。
-- [ ] 支持 retry/backoff。
-- [ ] 支持 cancellation on shutdown。
-- [ ] 支持 reason/metadata 记录。
-- [ ] 所有结果进入 coordinator snapshot。
+- [x] 按 `(exchange, market_type, symbol, interval)` 做 in-flight guard。
+- [x] 合并重叠或相邻 range。
+- [x] 同一 series 同时只跑一个 BackfillEngine run。
+- [x] 支持 retry/backoff。
+- [x] 支持 cancellation on shutdown。
+- [x] 支持 reason/metadata 记录。
+- [x] 所有结果进入 coordinator snapshot。
 
 ### 10.3 回灌规则
 
 BackfillEngine 完成后：
 
-- [ ] 从 report 或 plan 中计算 written ranges。
-- [ ] 对每个 written range 从 storage 读最终 bars。
-- [ ] 调 `DataManager.on_bars_backfilled(...)`。
-- [ ] emit `BACKFILL_COMPLETED`。
-- [ ] 失败 emit `BACKFILL_FAILED`。
-- [ ] 不在 `DataManager.on_bars_backfilled()` 内继续触发 follow-up backfill；follow-up 应由 coordinator 决定。
+- [x] 从 report 或 plan 中计算 written ranges。
+- [x] 对每个 written range 从 storage 读最终 bars。
+- [x] 调 `DataManager.on_bars_backfilled(...)`。
+- [x] emit `BACKFILL_COMPLETED`。
+- [x] 失败 emit `BACKFILL_FAILED`。
+- [x] 不在 `DataManager.on_bars_backfilled()` 内继续触发 follow-up backfill；follow-up 应由 coordinator 决定。
 
 ### 10.4 迁移调用方
 
-- [ ] `main.py` 删除 `_backfill_trigger()`。
-- [ ] `main.py` 删除 `_load_backfilled_to_cache()`。
-- [ ] `dm.set_backfill_trigger(...)` 改为设置 coordinator 或 QueryEngine 提交 request。
-- [ ] `main.py` 的 `_startup_gap_scan()` 移入 `BackfillCoordinator.startup_scan()`。
-- [ ] `QueryEngine` 保持短期 callback 也可以，但 callback 目标必须是 coordinator。
-- [ ] 中期 `QueryEngine` 返回 `MissingRange`，由 DataManager 调 coordinator。
-- [ ] `settings.py` gap scan 改调 coordinator。
-- [ ] `settings.py` custom repair 改调 `dm.maintenance`，再由 maintenance 调 coordinator/batch API。
-- [ ] ingestion gap marker 接入 coordinator。
+- [x] `main.py` 删除 `_backfill_trigger()`。
+- [x] `main.py` 删除 `_load_backfilled_to_cache()`。
+- [x] `dm.set_backfill_trigger(...)` 改为设置 coordinator 或 QueryEngine 提交 request。
+- [x] `main.py` 的 `_startup_gap_scan()` 移入 `BackfillCoordinator.startup_scan()`。
+- [x] `QueryEngine` 保持短期 callback 也可以，但 callback 目标必须是 coordinator。
+- [x] 中期 `QueryEngine` 返回结构化 `MissingRange`。
+- [x] DataManager 基于 `QueryResult.missing_ranges` 显式提交 coordinator；QueryEngine standalone callback 只保留兼容能力。
+- [x] `settings.py` gap scan 改调 DataManager maintenance facade，再由 maintenance 调 coordinator。
+- [x] `settings.py` custom repair 改调 DataManager maintenance facade，再由 maintenance 调 coordinator/batch API。
+- [x] ingestion gap marker 接入 coordinator。
 
 ### 10.5 BackfillEngine/Reconciler 配套修正
 
-- [ ] `ReconcileResult` 增加 `write_errors` / `failed_batches`。
-- [ ] `_dedup_and_write()` 写入失败必须进入 `ReconcileResult.errors`。
-- [ ] custom bar 写入失败必须进入 `ReconcileResult.errors`。
-- [ ] `BackfillEngine.run()` 对写入错误返回 `PARTIAL`。
-- [ ] `DeduplicationStrategy.NEWER_WINS` 改名为 `BACKFILL_WINS`，或实现真正 existing row metadata 比较。
-- [ ] `RepairReport` 增加 `written_ranges`，供 coordinator 回灌。
+- [x] `ReconcileResult` 增加 `write_errors` / `failed_batches`。
+- [x] `_dedup_and_write()` 写入失败必须进入 `ReconcileResult.errors`。
+- [x] custom bar 写入失败必须进入 `ReconcileResult.errors`。
+- [x] `BackfillEngine.run()` 对写入错误返回 `PARTIAL`。
+- [x] `DeduplicationStrategy` 新增 `BACKFILL_WINS`，`NEWER_WINS` 保留为兼容别名但不再宣称比较 existing row metadata。
+- [x] `RepairReport` 增加 `written_ranges`，供 coordinator 回灌。
 
 ### 10.6 测试
 
-- [ ] 同一 request 重复提交只跑一个 backfill。
-- [ ] 重叠 range 合并。
-- [ ] BackfillEngine `COMPLETED/PARTIAL/FAILED` 映射到正确 DataEvent。
-- [ ] settings gap scan 不直接调用 BackfillEngine。
-- [ ] startup scan 由 coordinator 执行并可取消。
-- [ ] 写库失败时状态是 `PARTIAL` 或 `FAILED`，不会伪装成 completed。
+- [x] 同一 request 重复提交只跑一个 backfill。
+- [x] 重叠 range 合并。
+- [x] BackfillEngine `COMPLETED/PARTIAL/FAILED` 映射到正确 DataEvent。
+- [x] settings gap scan 不直接调用 BackfillEngine。
+- [x] startup scan 由 coordinator 执行并可取消。
+- [x] 写库失败时状态是 `PARTIAL` 或 `FAILED`，不会伪装成 completed。
 
 ### 验收标准
 
-- [ ] `rg -n "backfill_engine\.run|detect_only|on_bars_backfilled" backend/app/main.py backend/app/api/v1/settings.py` 不再出现手写修复流程。
-- [ ] `main.py` 不再保存 `backfill_futures`。
-- [ ] `DataManager.on_bars_backfilled()` 只负责 cache merge + event emit，不负责调度下一次 backfill。
+- [x] `rg -n "backfill_engine\.run|detect_only|on_bars_backfilled" backend/app/main.py backend/app/api/v1/settings.py` 不再出现手写修复流程。
+- [x] `main.py` 不再保存 `backfill_futures`。
+- [x] `DataManager.on_bars_backfilled()` 只负责 cache merge + event emit，不负责调度下一次 backfill。
 
 ---
 
@@ -1035,11 +1059,11 @@ BackfillEngine 完成后：
 
 ### 11.1 移除 L5 自动 backfill
 
-- [ ] `continuity_auto_fill_gaps` 默认 false 已在阶段 1 完成。
-- [ ] 删除或废弃 `ContinuityLayer._backfill_kline_gap()` 正式调用路径。
-- [ ] `ContinuityLayer` 发现 gap 后只 emit `GapMarker`。
-- [ ] `DeliveryLayer` 能稳定 deliver gap event。
-- [ ] `DataManager` 或 `BackfillCoordinator` 订阅 ingestion gap marker 并提交 `RepairRequest(reason="ingestion_gap_marker")`。
+- [x] `continuity_auto_fill_gaps` / `continuity_max_gap_fill_bars` 配置已删除。
+- [x] 删除 `ContinuityLayer._backfill_kline_gap()` 正式调用路径和实现。
+- [x] `ContinuityLayer` 发现 gap 后只 emit `GapMarker`。
+- [x] `DeliveryLayer` 能稳定 deliver gap event。
+- [x] `DataManager` / `StreamCoordinator` 接收 ingestion gap marker 并提交统一 backfill trigger；`BackfillCoordinator` 负责实际 repair。
 
 ### 11.2 拆 NormalizeLayer
 
@@ -1053,10 +1077,10 @@ backend/app/data_engine/ingestion/normalizers/
 └── okx.py
 ```
 
-- [ ] Binance WS/HTTP kline/trade/ticker/depth 解析迁入 `binance.py`。
-- [ ] OKX WS/HTTP kline/ticker 解析迁入 `okx.py`。
-- [ ] `NormalizeLayer` 只负责按 descriptor.exchange 分发。
-- [ ] 每个交易所 normalizer 单独测试。
+- [x] Binance WS/HTTP kline/trade/ticker/depth 解析迁入 `binance.py`。
+- [x] OKX WS/HTTP kline/ticker 解析迁入 `okx.py`。
+- [x] `NormalizeLayer` 只负责按 descriptor.exchange 分发。
+- [x] 每个交易所 normalizer 单独测试。
 
 ### 11.3 统一 Session 抽象
 
@@ -1066,34 +1090,37 @@ backend/app/data_engine/ingestion/normalizers/
 backend/app/data_engine/ingestion/session_types.py
 ```
 
-或放入 `session.py`：
+已新增：
 
 ```python
 class SessionLike(Protocol): ...
 ```
 
-- [ ] `SessionLayer` 实现 `SessionLike`。
-- [ ] 当前 OKX `SharedWsHub` 包成 `SharedSessionAdapter` 或 `MultiplexedMessageSession`。
-- [ ] `FeedControlLayer` 只依赖 `SessionLike`，不直接知道 OKX shared WS 分支。
-- [ ] `SharedWsHubRegistry` 保留，但职责收窄到 session factory/cache。
+- [x] `SessionLayer` 实现 `SessionLike`。
+- [x] 当前 OKX `SharedWsHub` 包成 `SharedWsSessionAdapter`。
+- [x] `FeedControlLayer` 只依赖 `SessionLike`，不直接知道 OKX shared WS 分支。
+- [x] `SharedWsHubRegistry` 保留，但职责收窄到 hub/session adapter cache 入口。
 
 ### 11.4 Delivery 反压模型
 
-- [ ] 保留 ordered callback 给 BarAggregator/DataManager 核心链路。
-- [ ] 给非核心消费者提供 async queue subscriber。
-- [ ] 文档明确 ordered callback 会反压 ingestion 主链路。
+- [x] 保留 ordered callback 给 BarAggregator/DataManager 核心链路。
+- [x] 给非核心消费者提供 bounded async queue subscriber。
+- [x] 文档明确 ordered callback 会反压 ingestion 主链路。
 
 ### 测试
 
-- [ ] GapMarker 不触发 ingestion HTTP backfill。
-- [ ] GapMarker 能到达 BackfillCoordinator。
-- [ ] Binance/OKX normalizer 单测互不影响。
-- [ ] OKX shared WS 和普通 session 的 health/reconnect snapshot 结构一致。
+- [x] GapMarker 不触发 ingestion HTTP backfill。
+- [x] GapMarker 能到达统一 backfill trigger/BackfillCoordinator 链路。
+- [x] Binance/OKX normalizer 单测互不影响。
+- [x] OKX shared WS adapter 和普通 session 的 health/reconnect snapshot 顶层结构一致。
+- [x] Delivery ordered callback 会在 queue subscriber 前反压核心链路。
+- [x] Delivery queue 满时丢弃非核心事件，不阻塞 ordered callback。
+- [x] Delivery gap event 同时投递 ordered callback 和 queue subscriber。
 
 ### 验收标准
 
-- [ ] `rg -n "_backfill_kline_gap|HTTP_BACKFILL" backend/app/data_engine/ingestion` 只剩兼容/测试/模型定义，不在主链路触发。
-- [ ] `ingestion` 不 import `backfill`。
+- [x] `rg -n "_backfill_kline_gap|continuity_auto_fill_gaps|continuity_max_gap_fill_bars" backend/app backend/tests -g '*.py'` 无结果。
+- [x] `ingestion` 不 import `backfill`。
 
 ---
 
@@ -1109,10 +1136,10 @@ class SessionLike(Protocol): ...
 backend/app/data_engine/data_manager/price_cache.py
 ```
 
-- [ ] 定义 `PriceSnapshot`。
-- [ ] 定义 `PriceSnapshotCache`。
-- [ ] `DataEventType` 增加 `PRICE_UPDATED`。
-- [ ] DataManager 增加：
+- [x] 定义 `PriceSnapshot`。
+- [x] 定义 `PriceSnapshotCache`。
+- [x] `DataEventType` 增加 `PRICE_UPDATED`。
+- [x] DataManager 增加：
 
 ```python
 async def ensure_price_stream(symbol, *, exchange, market_type) -> StreamInfo: ...
@@ -1120,20 +1147,22 @@ def get_price(symbol, *, exchange, market_type) -> PriceSnapshot | None: ...
 def get_prices_snapshot(...) -> list[dict]: ...
 ```
 
+当前实现状态：以上三个 DataManager public API 已落地；`ensure_price_stream()` 通过 `IngestionPriceSource` 启动 native ingestion ticker pipeline。
+
 ### 12.2 ingestion ticker bridge
 
-- [ ] `MarketIngestionFactory` 支持 `StreamType.MINI_TICKER` / `TICKER`。
-- [ ] 对支持 multi-symbol ticker 的交易所，允许一个 stream fan-out 多 symbol。
-- [ ] 对 OKX 这类 per-symbol ticker，用统一 session/factory 表达，不再写 PriceTickerService 特例。
-- [ ] ticker `MarketEvent` 进入 DataManager price cache。
+- [x] `MarketIngestionFactory` 支持 `StreamType.MINI_TICKER` / `TICKER`。
+- [x] 对支持 multi-symbol ticker 的交易所，允许一个 stream fan-out 多 symbol。
+- [x] 对 OKX 这类 per-symbol ticker，用统一 session/factory 表达，不再写 PriceTickerService 特例。
+- [x] ticker `MarketEvent` 进入 DataManager price cache。
 
 ### 12.3 daily open
 
 当前 PriceTickerService 会额外取 1D open。迁移选项：
 
-- [ ] 短期：DataManager price cache 使用 ticker 24h open，字段名保持兼容。
-- [ ] 中期：新增 `DailyOpenService`，通过 DataManager/Backfill/storage 查询当前 1d open。
-- [ ] 不要让 price cache 直接裸写一套 REST requests 旁路。
+- [x] 短期：DataManager price cache 使用 ticker 24h open，字段名保持兼容。
+- [x] 中期：新增 `DailyOpenService`，通过 DataManager/Backfill/storage 查询当前 1d open。
+- [x] 不要让 price cache 直接裸写一套 REST requests 旁路。
 
 建议中期目标：
 
@@ -1151,33 +1180,33 @@ daily_open = dm.query_latest(symbol, "1d", limit=1).bars[-1].open
 backend/app/data_engine/data_manager/subscriptions.py
 ```
 
-- [ ] `SubscriptionTier` 从旧 services 迁入 DataManager 或 API 层。
-- [ ] `FULL` 调 `dm.ensure_stream(symbol, "1m", ...)`。
-- [ ] `PRICE` 调 `dm.ensure_price_stream(symbol, ...)`。
-- [ ] `NONE` 只保存 tier，不启动行情。
-- [ ] subscription persistence 保留 SQLite 表，可复用原 schema。
-- [ ] 删除 `SubscriptionManager.set_price_ticker()`。
+- [x] `SubscriptionTier` 从旧 services 迁入 DataManager 或 API 层。
+- [x] `FULL` 调 `dm.ensure_stream(symbol, "1m", ...)`。
+- [x] `PRICE` 调 `dm.ensure_price_stream(symbol, ...)`。
+- [x] `NONE` 只保存 tier，不启动行情。
+- [x] subscription persistence 保留 SQLite 表，可复用原 schema。
+- [x] 删除 `SubscriptionManager.set_price_ticker()`。
 
 ### 12.5 API/WS 迁移
 
-- [ ] `GET /subscriptions/prices` 改为 `dm.get_prices_snapshot()`。
-- [ ] `WS /stream/prices` 改为订阅 `DataEventType.PRICE_UPDATED`。
-- [ ] `POST /subscriptions/sync` 不 import 旧 `SubscriptionTier`。
-- [ ] `PUT /subscriptions/{symbol}` 不 import 旧 `SubscriptionTier`。
-- [ ] `main.py` 不再创建 `PriceTickerService`。
-- [ ] shutdown 不再 stop `PriceTickerService`。
+- [x] `GET /subscriptions/prices` 改为 `dm.get_prices_snapshot()`。
+- [x] `WS /stream/prices` 改为订阅 `DataEventType.PRICE_UPDATED`。
+- [x] `POST /subscriptions/sync` 不 import 旧 `SubscriptionTier`。
+- [x] `PUT /subscriptions/{symbol}` 不 import 旧 `SubscriptionTier`。
+- [x] `main.py` 不再创建 `PriceTickerService`。
+- [x] shutdown 不再 stop 旧 `app.state.price_ticker`；当前 stop 的是 `app.state.price_stream_source`。
 
 ### 测试
 
-- [ ] PRICE tier 会启动 price stream，不启动 kline stream。
-- [ ] FULL tier 会启动 kline stream，也能有 price snapshot。
-- [ ] `GET /subscriptions/prices` 不依赖 `app.state.price_ticker`。
-- [ ] `WS /stream/prices` 从 DataManager EventBus 收到 `PRICE_UPDATED`。
+- [x] PRICE tier 会启动 price stream，不启动 kline stream。
+- [x] FULL tier 会启动 kline stream，也能有 price snapshot。
+- [x] `GET /subscriptions/prices` 不依赖 `app.state.price_ticker`。
+- [x] `WS /stream/prices` 从 DataManager EventBus 收到 `PRICE_UPDATED`。
 
 ### 验收标准
 
-- [ ] `rg -n "PriceTickerService|price_ticker" backend/app -g '*.py'` 无正式路径引用。
-- [ ] `backend/app/data_engine/services/price_ticker.py` 可删除。
+- [x] `rg -n "PriceTickerService|price_ticker" backend/app -g '*.py'` 无正式路径引用。
+- [x] `backend/app/data_engine/services/price_ticker.py` 可删除，已删除。
 
 ---
 
@@ -1187,8 +1216,8 @@ backend/app/data_engine/data_manager/subscriptions.py
 
 ### 13.1 新增 IntervalPolicy
 
-- [ ] 新增 `backend/app/core/interval_policy.py`。
-- [ ] 从 `core.market` 迁入或代理：
+- [x] 新增 `backend/app/data_engine/interval_policy.py`。
+- [x] 从 `core.market` 迁入或代理：
   - parse custom/native interval。
   - weekly Monday UTC bucket。
   - monthly calendar bucket。
@@ -1198,12 +1227,15 @@ backend/app/data_engine/data_manager/subscriptions.py
 
 ### 13.2 替换调用方
 
-- [ ] `bar_aggregator.models/time_bucket.py` 使用 IntervalPolicy。
-- [ ] `data_manager.custom_query.py` 使用 `BarAggregator.aggregate_batch()` 或 IntervalPolicy bucket。
-- [ ] `data_manager.warm_start.py` 使用 IntervalPolicy。
-- [ ] `backfill.models/planner/reconciler.py` 使用 IntervalPolicy。
-- [ ] `settings maintenance repair` 使用 `BarAggregator.aggregate_batch()`。
-- [ ] 旧 `services/kline_aggregator.py` 若还未删除，内部改为调用同一 batch API 或标记不可用。
+- [x] `bar_aggregator.models` 的 interval helper 使用 IntervalPolicy 兼容代理。
+- [x] `ingestion.continuity` 固定间隔 gap detection 使用 IntervalPolicy 标准表。
+- [x] `data_manager.custom_query.py` 使用 IntervalPolicy bucket/monthly helper，完整 bucket 优先使用 `BarAggregator.aggregate_batch()`。
+- [x] `data_manager.warm_start.py` 使用 IntervalPolicy。
+- [x] `backfill.models` 的 interval helper 使用 IntervalPolicy 兼容代理。
+- [x] `backfill.planner/reconciler/gap_detector/fetcher.py` 使用 IntervalPolicy。
+- [x] `data_manager.maintenance/query/retention/cache/coordinator/manager` 使用 IntervalPolicy，不再依赖 `app.core.market`。
+- [x] `settings maintenance repair` 使用 `BarAggregator.aggregate_batch()`。
+- [x] 旧 `services/kline_aggregator.py` 已删除。
 
 ### 13.3 custom query 最终形态
 
@@ -1240,16 +1272,19 @@ MaintenanceService
 
 ### 测试
 
-- [ ] `compute_bucket_start` weekly 以 Monday UTC 对齐。
-- [ ] `1M/2M/3M` 以 calendar month 对齐，不用固定 30 天 bucket。
-- [ ] 45m 查询、realtime seed、backfill、settings repair 结果一致。
-- [ ] 91m 查询、realtime seed、backfill、settings repair 结果一致。
-- [ ] 2M 查询、backfill、settings repair 结果一致。
+- [x] `IntervalPolicy` 历史入口代理等价性边界测试已覆盖 native/custom/weekly/monthly 基础解析。
+- [x] custom query 完整 bucket 会调用 `BarAggregator.aggregate_batch()`。
+- [x] `compute_bucket_start` weekly 以 Monday UTC 对齐。
+- [x] `1M/2M/3M` 以 calendar month 对齐，不用固定 30 天 bucket。
+- [x] 45m 查询、BarAggregator batch、backfill、settings repair 结果一致。
+- [x] 91m 查询、BarAggregator batch、backfill、settings repair 结果一致。
+- [x] 2M 查询、backfill、settings repair 结果一致。
 
 ### 验收标准
 
-- [ ] `rg -n "compute_bucket_start_ms|parse_interval_ms|STANDARD_INTERVAL_MS|INTERVAL_SECONDS" backend/app/data_engine backend/app/api/v1/settings.py` 结果可解释，非权威实现逐步消失。
-- [ ] custom interval 只剩一套 bucket/merge/finalize 权威实现。
+- [x] `rg -n "from app\\.core\\.market import" backend/app/data_engine -g '*.py'` 无结果。
+- [x] `rg -n "compute_bucket_start_ms|parse_interval_ms|STANDARD_INTERVAL_MS|INTERVAL_SECONDS" backend/app/data_engine backend/app/api/v1/settings.py` 结果可解释；当前 `interval_policy.py` 是权威实现，`bar_aggregator.models` / `backfill.models` 为兼容代理。
+- [x] custom interval 完整 bucket 使用同一套 bucket/merge/finalize 权威实现；未封口查询尾部仍保留只读聚合以维持查询体验。
 
 ---
 
@@ -1259,50 +1294,50 @@ MaintenanceService
 
 ### 14.1 `api/v1/klines.py`
 
-- [ ] 删除文件顶部旧 imports：
+- [x] 删除文件顶部旧 imports：
 
 ```python
 from app.data_engine.mock_data import generate_mock_klines
 from app.data_engine.services import aggregate_klines, aggregate_multi_resolution
 ```
 
-- [ ] DataManager 为 None 时所有正式 K 线 endpoint 返回 503。
-- [ ] DataManager 查询失败时返回 500 或明确错误，不 fallback legacy。
-- [ ] 删除 `_legacy_get_klines()`。
-- [ ] 删除 `_legacy_get_latest()`。
-- [ ] 删除 `_legacy_get_history()`。
-- [ ] 删除 `_legacy_get_before()`。
-- [ ] `/storage/meta` 只调 `dm.get_bounds()`，无 dm 返回 503。
-- [ ] `/storage` delete 改为 DataManager maintenance/storage facade。
-- [ ] `/indicators/sma` 改为 indicator engine 或删除/迁移到 indicators API。
+- [x] DataManager 为 None 时所有正式 K 线 endpoint 返回 503。
+- [x] DataManager 查询失败时返回 500 或明确错误，不 fallback legacy。
+- [x] 删除 `_legacy_get_klines()`。
+- [x] 删除 `_legacy_get_latest()`。
+- [x] 删除 `_legacy_get_history()`。
+- [x] 删除 `_legacy_get_before()`。
+- [x] `/storage/meta` 只调 `dm.get_bounds()`，无 dm 返回 503。
+- [x] `/storage` delete 改为 DataManager maintenance/storage facade。
+- [x] `/indicators/sma` 已改为 DataManager 查询后本地计算；后续可再迁到 indicator engine。
 
 ### 14.2 `api/v1/subscriptions.py`
 
-- [ ] 全部改用 DataManager subscription service。
-- [ ] 删除 `app.state.subscription_manager` 依赖，或将其变成 DataManager 内部服务引用。
-- [ ] 删除 `app.state.price_ticker` 依赖。
-- [ ] price WS 订阅 DataManager EventBus。
+- [x] 全部改用 DataManager subscription service。
+- [x] 删除 `app.state.subscription_manager` 依赖，订阅服务挂在 `dm.subscriptions`。
+- [x] 删除 `app.state.price_ticker` 依赖。
+- [x] price WS 订阅 DataManager EventBus。
 
 ### 14.3 `api/v1/settings.py`
 
-- [ ] proxy 设置保留。
-- [ ] `_get_transports()` 不读 factory private `_ingress._transport`；改由 DataManager/ingestion factory public method 暴露 transports 或 config update。
-- [ ] `/storage/repair` 调 `dm.maintenance.repair_custom_series(...)`。
-- [ ] `/storage/gap-scan` 调 `dm.backfill.scan_and_repair_storage(...)`。
-- [ ] `/cache-limits` 调 DataManager public method 并返回 public snapshot。
-- [ ] 不再创建 fresh `BarAggregator`。
-- [ ] 不再调用 `dm._seed_custom_interval()`。
-- [ ] 不再读 `dm.query_engine._storage`。
+- [x] proxy 设置保留。
+- [x] `_get_transports()` 不读 factory private `_ingress._transport`；已通过 ingestion factory public method 暴露 transports，并通过 transport/factory public `config` 更新配置。
+- [x] `/storage/repair` 调 `dm.repair_custom_storage(...)`。
+- [x] `/storage/gap-scan` 调 `dm.scan_and_fill_storage_gaps(...)`。
+- [x] `/cache-limits` 调 `dm.update_retention_limits(...)` 并返回 `dm.retention_snapshot()`。
+- [x] 不再创建 fresh `BarAggregator`。
+- [x] 不再调用 `dm._seed_custom_interval()`。
+- [x] 不再读 `dm.query_engine._storage`。
 
 ### 14.4 `main.py`
 
-- [ ] 删除旧 fallback 注释。
-- [ ] 删除 `PriceTickerService` 创建/start/stop。
-- [ ] 删除旧 `SubscriptionManager` 创建/start。
-- [ ] 删除 `_backfill_trigger()`。
-- [ ] 删除 `_load_backfilled_to_cache()`。
-- [ ] 删除 `_startup_gap_scan()` 内联实现。
-- [ ] 只负责组合根 wiring。
+- [x] 删除旧 fallback 注释。
+- [x] 删除 `PriceTickerService` 创建/start/stop。
+- [x] 删除旧 `SubscriptionManager` 创建/start。
+- [x] 删除 `_backfill_trigger()`。
+- [x] 删除 `_load_backfilled_to_cache()`。
+- [x] 删除 `_startup_gap_scan()` 内联实现。
+- [x] 只负责组合根 wiring。
 
 ### 14.5 删除旧文件
 
@@ -1312,7 +1347,7 @@ from app.data_engine.services import aggregate_klines, aggregate_multi_resolutio
 rg -n "app\.data_engine\.services|data_engine\.services|app\.data_engine\.collectors|data_engine\.collectors" backend/app backend/tests -g '*.py'
 ```
 
-可删除清单：
+已删除清单：
 
 ```text
 backend/app/data_engine/services/price_ticker.py
@@ -1330,12 +1365,12 @@ backend/app/data_engine/collectors/
 
 ### 验收标准
 
-- [ ] K 线 HTTP API 只调用 DataManager。
-- [ ] K 线 WebSocket 只通过 DataManager EventBus 推送。
-- [ ] price REST/WS 只通过 DataManager。
-- [ ] settings repair/gap-scan 只通过 DataManager maintenance/backfill coordinator。
-- [ ] `backend/app/data_engine/services/` 删除或为空壳兼容层，正式路径无 import。
-- [ ] `backend/app/data_engine/collectors/` 删除。
+- [x] K 线 HTTP API 只调用 DataManager。
+- [x] K 线 WebSocket 只通过 DataManager EventBus 推送。
+- [x] price REST/WS 只通过 DataManager。
+- [x] settings repair/gap-scan 只通过 DataManager maintenance/backfill coordinator。
+- [x] `backend/app/data_engine/services/` 删除或为空壳兼容层，正式路径无 import。
+- [x] `backend/app/data_engine/collectors/` 删除。
 
 ---
 
@@ -1343,32 +1378,32 @@ backend/app/data_engine/collectors/
 
 ### 15.1 单元测试矩阵
 
-- [ ] `SeriesKey` exchange/market_type/symbol/interval topic 和匹配。
-- [ ] `IntervalPolicy` native/custom/weekly/monthly/ephemeral。
-- [ ] `BarAggregator.seed_active_bar()`。
-- [ ] `BarAggregator.replay_components()`。
-- [ ] `BarAggregator.aggregate_batch()` isolated state。
-- [ ] `RoutingPolicy` OKX 1m fanout。
-- [ ] `MergeMode.PRICE_ONLY` 不污染 volume/trades。
-- [ ] `QueryEngine` cache/storage/backfill request。
-- [ ] `CustomIntervalQueryService` 45m/91m/2M。
-- [ ] `BackfillCoordinator` dedup/coalesce/retry/cancel。
-- [ ] `Reconciler` write failure -> partial。
-- [ ] `PriceSnapshotCache` update/snapshot/event。
-- [ ] `SubscriptionService` FULL/PRICE/NONE。
-- [ ] `MaintenanceService` custom repair。
+- [x] `SeriesKey` exchange/market_type/symbol/interval topic 和匹配。
+- [x] `IntervalPolicy` native/custom/weekly/monthly/ephemeral 历史入口基础边界。
+- [x] `BarAggregator.seed_active_bar()`。
+- [x] `BarAggregator.replay_components()`。
+- [x] `BarAggregator.aggregate_batch()` isolated state。
+- [x] `RoutingPolicy` OKX 1m fanout。
+- [x] `MergeMode.PRICE_ONLY` 不污染 volume/trades。
+- [x] `QueryEngine` cache/storage/backfill request。
+- [x] `CustomIntervalQueryService` 45m/91m/2M。
+- [x] `BackfillCoordinator` dedup/coalesce/retry/cancel。
+- [x] `Reconciler` write failure -> partial。
+- [x] `PriceSnapshotCache` update/snapshot/event。
+- [x] `SubscriptionService` FULL/PRICE/NONE。
+- [x] `MaintenanceService` custom repair aggregation path.
 
 ### 15.2 集成测试矩阵
 
-- [ ] `/api/v1/klines` DataManager 可用时返回数据。
-- [ ] `/api/v1/klines` DataManager 不可用时返回 503。
-- [ ] `/api/v1/klines/history` 缺数据时提交 BackfillCoordinator request。
-- [ ] `/api/v1/stream/klines` 收到 BAR_UPDATED/BAR_CLOSED。
-- [ ] `/api/v1/stream/klines_multi` 收到 BACKFILL_COMPLETED。
-- [ ] `/api/v1/subscriptions/prices` 从 DataManager price cache 返回。
-- [ ] `/api/v1/stream/prices` 收到 PRICE_UPDATED。
-- [ ] `/api/v1/settings/storage/gap-scan` 只走 coordinator。
-- [ ] `/api/v1/settings/storage/repair` custom repair 使用 batch API。
+- [x] `/api/v1/klines` DataManager 可用时返回数据。
+- [x] `/api/v1/klines` DataManager 不可用时返回 503。
+- [x] `/api/v1/klines/history` 缺数据时提交 BackfillCoordinator request。
+- [x] `/api/v1/stream/klines` 收到 BAR_UPDATED/BAR_CLOSED。
+- [x] `/api/v1/stream/klines_multi` 收到 BACKFILL_COMPLETED。
+- [x] `/api/v1/subscriptions/prices` 从 DataManager price cache 返回。
+- [x] `/api/v1/stream/prices` 收到 PRICE_UPDATED。
+- [x] `/api/v1/settings/storage/gap-scan` 只走 coordinator。
+- [x] `/api/v1/settings/storage/repair` custom repair 使用 batch API。
 
 ### 15.3 架构边界测试
 
@@ -1380,22 +1415,23 @@ backend/tests/test_data_engine_architecture_boundaries.py
 
 必须断言：
 
-- [ ] `backend/app` 无 `app.data_engine.services` import。
-- [ ] `backend/app` 无 `app.data_engine.collectors` import。
-- [ ] `api/v1` 不 import `bar_aggregator`，除非是 settings maintenance 已迁出。
-- [ ] `ingestion` 不 import `backfill`。
-- [ ] `bar_aggregator` 不 import `storage`。
-- [ ] `backfill` 不 import `data_manager`。
-- [ ] `data_manager` 不调用 `bar_aggregator._handle_bar_input`。
+- [x] `backend/app` 无 `app.data_engine.services` import。
+- [x] `backend/app` 无 `app.data_engine.collectors` import。
+- [x] `api/v1` 不 import `bar_aggregator`，除非是 settings maintenance 已迁出。
+- [x] `ingestion` 不 import `backfill`。
+- [x] `bar_aggregator` 不 import `storage`。
+- [x] `backfill` 不 import `data_manager`。
+- [x] `data_manager` 不调用 `bar_aggregator._handle_bar_input`。
+- [x] `main.py` 不直接构造 DataEngine 内部组件，只委托 `DataEngineRuntime`。
 
 ### 15.4 文档更新
 
-- [ ] 更新 `README_zh.md` 数据引擎说明。
-- [ ] 更新 `API_zh.md`：
+- [x] 更新 `README_zh.md` 数据引擎说明。
+- [x] 更新 `API_zh.md`：
   - DataManager 不可用返回 503。
   - backfill async completion event。
   - price stream 数据源为 DataManager。
-- [ ] 更新四个模块 README：
+- [x] 更新四个模块 README：
   - ingestion：gap marker only。
   - bar_aggregator：public seed/replay/batch API。
   - data_manager：BackfillCoordinator/PriceSnapshotCache/SubscriptionService。

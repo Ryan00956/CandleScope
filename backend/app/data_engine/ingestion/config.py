@@ -201,15 +201,7 @@ class IngestionConfig:
     continuity_buffer_size: int = field(
         default_factory=lambda: _env_int("INGESTION_CONTINUITY_BUFFER_SIZE", 100),
     )
-    # Whether to attempt automatic gap fill via HTTP when a gap is detected
-    continuity_auto_fill_gaps: bool = field(
-        default_factory=lambda: _env_str("INGESTION_CONTINUITY_AUTO_FILL", "true").lower()
-        in ("true", "1", "yes"),
-    )
-    # Max gap size (in number of bars) that auto-fill will attempt
-    continuity_max_gap_fill_bars: int = field(
-        default_factory=lambda: _env_int("INGESTION_CONTINUITY_MAX_GAP_FILL", 50),
-    )
+    # Gap markers are emitted to DeliveryLayer and repaired by BackfillCoordinator.
 
     # ── L6: Delivery ──────────────────────────────────────────
     # Max queued items in the delivery async queue per subscriber

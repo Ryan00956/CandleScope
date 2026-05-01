@@ -164,6 +164,9 @@ class RepairPublisher:
             started_at_ms=started_at_ms,
             completed_at_ms=now_ms,
             elapsed_ms=elapsed,
+            written_ranges=list(reconcile_result.written_ranges)
+            if reconcile_result is not None
+            else [],
             data_preview=preview,
             errors=errors or [],
             metadata=metadata or {},
@@ -235,6 +238,7 @@ class RepairPublisher:
             "bars_skipped": rec.bars_skipped if rec else 0,
             "custom_generated": rec.custom_bars_generated if rec else 0,
             "bars_cached": rec.bars_cached if rec else 0,
+            "written_ranges": len(rec.written_ranges) if rec else 0,
             "errors": report.errors[:5],  # first 5 errors
         }
 

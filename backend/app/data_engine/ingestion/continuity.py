@@ -4,7 +4,7 @@ L5: Continuity Layer — ensures data stream integrity.
 Responsibilities:
   * Deduplicate events using ``MarketEvent.dedup_key``
   * Detect gaps using ``MarketEvent.continuity_key``
-  * Optionally trigger HTTP backfill for kline / trade gaps
+  * Emit gap markers for downstream repair orchestration
   * Forward events to L6 Delivery
 
 Dedup & gap strategies vary by stream type:
@@ -14,7 +14,6 @@ Dedup & gap strategies vary by stream type:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections import OrderedDict
 from typing import Callable, Awaitable
@@ -24,26 +23,22 @@ from .metrics import LayerMetrics
 from .models import (
     StreamDescriptor,
     StreamType,
-    DataSource,
     MarketEvent,
     GapMarker,
-    RawMessage,
-    TransportRequest,
 )
-from .transport import TransportLayer, TransportError
+from .transport import TransportLayer
+from app.data_engine.interval_policy import STANDARD_INTERVAL_MS, is_monthly_interval
 
 logger = logging.getLogger("ingestion.L5_Continuity")
 
-# ─── Interval → milliseconds mapping (for kline gap detection) ──
-
-_INTERVAL_MS: dict[str, int] = {
-    "1s": 1_000, "1m": 60_000, "3m": 180_000, "5m": 300_000,
-    "15m": 900_000, "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000,
-    "4h": 14_400_000, "6h": 21_600_000, "8h": 28_800_000,
-    "12h": 43_200_000, "1d": 86_400_000, "3d": 259_200_000,
-    "1w": 604_800_000,
-    # NOTE: "1M" intentionally omitted — months have variable duration
-    # (28–31 days), so fixed-interval gap detection is not applicable.
+# ─── Fixed interval mapping for kline gap detection ───────────
+#
+# Monthly intervals have variable duration, so ContinuityLayer intentionally
+# excludes them from fixed-step stream gap detection.
+_FIXED_INTERVAL_MS: dict[str, int] = {
+    interval: value
+    for interval, value in STANDARD_INTERVAL_MS.items()
+    if not is_monthly_interval(interval)
 }
 
 
@@ -71,15 +66,11 @@ class ContinuityLayer:
         # Kline interval in ms (only for kline streams)
         self._interval_ms: int | None = None
         if descriptor.stream_type == StreamType.KLINE and descriptor.interval:
-            self._interval_ms = _INTERVAL_MS.get(descriptor.interval)
+            self._interval_ms = _FIXED_INTERVAL_MS.get(descriptor.interval)
 
         # Upstream callbacks
         self._on_event: Callable[[MarketEvent], Awaitable[None]] | None = None
         self._on_gap: Callable[[GapMarker], Awaitable[None]] | None = None
-
-        # Backfill lock
-        self._backfill_lock = asyncio.Lock()
-        self._backfilling = False
 
     # ── Public: Metrics / Snapshot ───────────────────────────
 
@@ -93,7 +84,6 @@ class ContinuityLayer:
             "stream_key": self._descriptor.key,
             "last_continuity_key": self._last_continuity_key,
             "seen_cache_size": len(self._seen),
-            "backfilling": self._backfilling,
             "metrics": self._metrics.snapshot(),
         }
 
@@ -147,15 +137,6 @@ class ContinuityLayer:
                 if self._on_gap:
                     await self._on_gap(gap)
 
-                # Auto-backfill for kline streams — await to preserve order
-                if (
-                    self._cfg.continuity_auto_fill_gaps
-                    and st == StreamType.KLINE
-                    and self._interval_ms
-                    and gap_count <= self._cfg.continuity_max_gap_fill_bars
-                ):
-                    await self._backfill_kline_gap(expected_next, continuity_key)
-
             elif continuity_key < (expected_next or continuity_key):
                 self._metrics.inc("events_out_of_order")
 
@@ -193,75 +174,3 @@ class ContinuityLayer:
         if st in (StreamType.AGG_TRADE, StreamType.TRADE):
             return actual - expected
         return 0
-
-    # ── Internal: Kline backfill ─────────────────────────────
-
-    async def _backfill_kline_gap(self, start_ms: int, end_ms: int) -> None:
-        async with self._backfill_lock:
-            if self._backfilling:
-                return
-            self._backfilling = True
-
-        try:
-            assert self._interval_ms is not None
-            expected = (end_ms - start_ms) // self._interval_ms
-            logger.info(
-                "Backfilling kline gap (%s): %d → %d (~%d bars)",
-                self._descriptor.key, start_ms, end_ms, expected,
-            )
-            self._metrics.inc("backfill_attempts")
-
-            req = TransportRequest(
-                descriptor=self._descriptor,
-                start_ms=start_ms,
-                end_ms=end_ms - 1,
-                limit=min(int(expected) + 1, 1000),
-            )
-
-            try:
-                raw_messages = await self._transport.http_fetch(req)
-            except TransportError as exc:
-                self._metrics.inc("backfill_failures")
-                logger.warning("Backfill HTTP fetch failed: %s", exc)
-                return
-
-            from .normalize import NormalizeLayer
-            temp_norm = NormalizeLayer(self._cfg, self._descriptor)
-
-            filled = 0
-            for raw_msg in raw_messages:
-                raw_msg.source = DataSource.HTTP_BACKFILL
-                event = temp_norm.parse_raw(raw_msg)
-                if event is None:
-                    continue
-                dk = event.dedup_key
-                if dk is not None and dk in self._seen:
-                    continue
-                if dk is not None:
-                    self._seen[dk] = True
-                    if len(self._seen) > self._cfg.continuity_buffer_size:
-                        self._seen.popitem(last=False)
-                await self._emit(event)
-                filled += 1
-
-            self._metrics.inc("backfill_events_filled", filled)
-            self._metrics.inc("backfills_completed")
-            logger.info("Backfill completed: filled %d / ~%d", filled, expected)
-
-            if self._on_gap and filled > 0:
-                filled_gap = GapMarker(
-                    stream_key=self._descriptor.key,
-                    symbol=self._descriptor.symbol,
-                    stream_type=StreamType.KLINE,
-                    gap_start=start_ms - (self._interval_ms or 0),
-                    gap_end=end_ms,
-                    expected_count=int(expected),
-                    filled=True,
-                )
-                await self._on_gap(filled_gap)
-
-        except Exception as exc:
-            self._metrics.inc("backfill_errors")
-            logger.error("Backfill error: %s", exc, exc_info=True)
-        finally:
-            self._backfilling = False

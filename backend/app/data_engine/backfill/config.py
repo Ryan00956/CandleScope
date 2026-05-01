@@ -158,9 +158,10 @@ class BackfillConfig:
 
     # ── Reconciler ───────────────────────────────────────────
     # Deduplication strategy when writing to storage:
-    #   "skip"        — skip rows that already exist in DB
-    #   "overwrite"   — always overwrite existing rows
-    #   "newer_wins"  — keep whichever row has a later timestamp
+    #   "skip"          — skip rows that already exist in DB
+    #   "overwrite"     — always overwrite existing rows
+    #   "backfill_wins" — replace existing rows with fetched repair data
+    #   "newer_wins"    — legacy alias for "backfill_wins"
     reconcile_dedup_strategy: str = field(
         default_factory=lambda: _env_str("BACKFILL_RECONCILE_DEDUP_STRATEGY", "overwrite"),
     )

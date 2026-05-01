@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.data_engine.services.subscription_manager import SubscriptionManager
+from app.data_engine.data_manager.subscriptions import SubscriptionService
 from app.exchanges.symbols import normalize_symbol
 
 
@@ -16,6 +16,6 @@ def test_keep_okx_symbols_unchanged() -> None:
 
 
 def test_subscription_manager_normalizes_explicit_binance_keys(tmp_path) -> None:
-    mgr = SubscriptionManager(tmp_path / "subs.db")
+    mgr = SubscriptionService(tmp_path / "subs.db")
     assert mgr.normalize_symbol("binance:futures:BTC-USDT-SWAP") == "futures:BTCUSDT"
     assert mgr.normalize_symbol("binance:spot:BTC-USDT") == "spot:BTCUSDT"

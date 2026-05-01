@@ -31,6 +31,7 @@ from .models import (
     BarStatus,
     BarStateChange,
     BarMergeStrategy,
+    MergeMode,
     is_standard_interval,
 )
 from .time_bucket import TimeBucketEngine
@@ -56,6 +57,7 @@ class StandardOHLCVMerge:
 
     def apply(self, state: BarState, bar_input: BarInput, is_new: bool) -> BarState:
         now_ms = int(time.time() * 1000)
+        merge_mode = self._resolve_merge_mode(state, bar_input)
 
         if is_new:
             # First input for this bucket — initialize from input
@@ -63,11 +65,20 @@ class StandardOHLCVMerge:
             state.high = bar_input.high
             state.low = bar_input.low
             state.close = bar_input.close
-            state.volume = round(bar_input.volume, 8)
-            state.quote_volume = round(bar_input.quote_volume, 8)
-            state.trades = bar_input.trades
-            state.taker_buy_base = round(bar_input.taker_buy_base, 8)
-            state.taker_buy_quote = round(bar_input.taker_buy_quote, 8)
+            if merge_mode == MergeMode.PRICE_ONLY:
+                # Price-only inputs refresh the forming target candle but
+                # their additive fields are not target-interval totals.
+                state.volume = 0.0
+                state.quote_volume = 0.0
+                state.trades = 0
+                state.taker_buy_base = 0.0
+                state.taker_buy_quote = 0.0
+            else:
+                state.volume = round(bar_input.volume, 8)
+                state.quote_volume = round(bar_input.quote_volume, 8)
+                state.trades = bar_input.trades
+                state.taker_buy_base = round(bar_input.taker_buy_base, 8)
+                state.taker_buy_quote = round(bar_input.taker_buy_quote, 8)
             state.tick_count = 1
             state.first_input_at_ms = bar_input.open_time_ms
             state.last_input_at_ms = bar_input.open_time_ms
@@ -78,19 +89,14 @@ class StandardOHLCVMerge:
             state.low = min(state.low, bar_input.low)
             state.close = bar_input.close
 
-            if bar_input.source_interval == "tick":
+            if merge_mode == MergeMode.INCREMENTAL:
                 # Trade ticks are incremental — accumulate
                 state.volume = round(state.volume + bar_input.volume, 8)
                 state.quote_volume = round(state.quote_volume + bar_input.quote_volume, 8)
                 state.trades += bar_input.trades
                 state.taker_buy_base = round(state.taker_buy_base + bar_input.taker_buy_base, 8)
                 state.taker_buy_quote = round(state.taker_buy_quote + bar_input.taker_buy_quote, 8)
-            elif bar_input.source_interval != state.interval:
-                # Cross-interval routing (e.g. OKX 1m -> 5m).
-                # The source volume covers only one component period, NOT the
-                # full target bar.  Only update OHLC (price), skip volume
-                # fields — those will be set correctly by the native push
-                # (exact-match source_interval == state.interval).
+            elif merge_mode == MergeMode.PRICE_ONLY:
                 pass
             else:
                 # Kline snapshots are cumulative — replace
@@ -110,11 +116,24 @@ class StandardOHLCVMerge:
         # a 1m bar closing does not mean the 5m bar should close —
         # doing so would cause SourceCloseFinalizer to seal the bar
         # after only one component, freezing the chart.
-        if bar_input.source_interval == state.interval or bar_input.source_interval == "tick":
+        if merge_mode in (MergeMode.SNAPSHOT, MergeMode.INCREMENTAL):
             state.last_close_received = bar_input.is_closed
         state.updated_at_ms = now_ms
 
         return state
+
+    @staticmethod
+    def _resolve_merge_mode(state: BarState, bar_input: BarInput) -> MergeMode:
+        """Return the effective merge mode for standard-interval bars.
+
+        New router paths set ``merge_mode`` explicitly.  The fallback keeps
+        direct public API calls compatible while older callers are migrated.
+        """
+        if bar_input.merge_mode is not None:
+            return bar_input.merge_mode
+        if bar_input.source_interval == "tick":
+            return MergeMode.INCREMENTAL
+        return MergeMode.SNAPSHOT
 
 
 class ComponentSnapshotOHLCVMerge:

@@ -3,9 +3,9 @@
 [![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](#)
 
 
-> CandleScope 的历史数据自动检测与修复系统。
+> CandleScope 的历史数据检测、拉取、调和与写库 pipeline。
 
-回补引擎能够自动检测数据库中缺失的 K 线数据，从交易所 REST API 拉取补全，去重、聚合自定义周期、批量写入存储并推送到缓存 —— 一行代码搞定：`await engine.run("BTCUSDT")`。
+`BackfillEngine` 能够检测数据库中缺失的 K 线数据，从交易所 REST API 拉取补全，去重、聚合自定义周期、批量写入存储并输出 `RepairReport`。它不直接管理 FastAPI、WebSocket、DataManager cache 或应用级重试队列；这些由 `DataManager.BackfillCoordinator` 负责。
 
 ---
 
@@ -39,8 +39,38 @@
 | 1 | **检测** | `GapDetector` | 对比实时边界（来自 ingestion 第六层）与数据库，发现尾部/头部/内部缺口 |
 | 2 | **规划** | `BackfillPlanner` | 分解自定义周期、对齐桶边界、生成拉取任务 |
 | 3 | **拉取** | `HistoricalFetcher` | 分页 REST 调用，并发控制 + 重试 |
-| 4 | **调和** | `Reconciler` | 去重、自定义周期聚合、批量写库、缓存推送 |
+| 4 | **调和** | `Reconciler` | 去重、自定义周期聚合、批量写库、记录写入失败 |
 | 5 | **发布** | `RepairPublisher` | 日志 + 回调，输出 `RepairReport` |
+
+## 与 DataManager 的边界
+
+生产链路如下：
+
+```text
+QueryEngine / Settings / Ingestion GapMarker
+        │
+        ▼
+BackfillCoordinator
+        │  去重、合并、retry、cancel
+        ▼
+BackfillEngine.run()
+        │  detect → plan → fetch → reconcile → report
+        ▼
+BackfillCoordinator
+        │  从 storage 回读最终 bars
+        ▼
+DataManager.on_bars_backfilled()
+        │
+        ▼
+cache merge + DataEventBus BACKFILL_COMPLETED / BACKFILL_FAILED
+```
+
+因此：
+
+- `BackfillEngine` 只做 pipeline，不直接回灌 DataManager cache。
+- `BackfillCoordinator` 负责 request lifecycle、in-flight guard、失败重试、shutdown cancel 和事件映射。
+- `Reconciler` 写库失败会进入 `ReconcileResult.write_errors` / `failed_batches`，整体报告会返回 `PARTIAL` 或 `FAILED`，不会伪装成 completed。
+- 自定义周期聚合复用 `BarAggregator.aggregate_batch()`，避免污染主 aggregator 的 targets/active/recent 状态。
 
 ---
 
@@ -212,8 +242,8 @@ engine.fetcher.set_rate_limiter(my_token_bucket)
 
 ### Reconciler（数据调和器）
 ```python
-# 自定义 OHLCV 聚合逻辑
-engine.reconciler.set_custom_aggregator(my_agg_fn)
+# 自定义 OHLCV 聚合逻辑。默认路径优先使用 BarAggregator.aggregate_batch()
+engine.reconciler.set_bar_aggregator(my_bar_aggregator)
 
 # 自定义去重逻辑
 engine.reconciler.set_dedup_fn(my_dedup_fn)

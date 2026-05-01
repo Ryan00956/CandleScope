@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.data_engine.backfill.config import BackfillConfig
 from app.data_engine.backfill.fetcher import HistoricalFetcher
-from app.data_engine.backfill.models import BackfillTask, GapType
+from app.data_engine.backfill.models import BackfillTask
 
 
 class _DummyTransport:
@@ -15,7 +15,6 @@ def _task(exchange: str, market_type: str = "spot") -> BackfillTask:
         interval="1m",
         start_ms=0,
         end_ms=60_000,
-        gap_type=GapType.TAIL,
         exchange=exchange,
         market_type=market_type,
     )

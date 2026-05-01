@@ -164,6 +164,30 @@ class QuerySource(str, enum.Enum):
 
 
 @dataclass(slots=True)
+class MissingRange:
+    """A storage gap detected during a query."""
+
+    symbol: str
+    interval: str
+    start_ms: int
+    end_ms: int
+    exchange: str = "binance"
+    market_type: str = "spot"
+    reason: str = "query_gap"
+
+    def to_dict(self) -> dict:
+        return {
+            "symbol": self.symbol,
+            "interval": self.interval,
+            "exchange": self.exchange,
+            "market_type": self.market_type,
+            "start_ms": self.start_ms,
+            "end_ms": self.end_ms,
+            "reason": self.reason,
+        }
+
+
+@dataclass(slots=True)
 class QueryResult:
     """Standard response envelope for all bar queries.
 
@@ -179,6 +203,8 @@ class QueryResult:
         cache_hit:   Whether the query was (partially) served from cache.
         backfill_triggered:
                      Whether a backfill was triggered to fill gaps.
+        missing_ranges:
+                     Structured missing ranges detected by QueryEngine.
         metadata:    Arbitrary extra info (bounds, timing, etc.).
     """
     bars: list[BarData] = field(default_factory=list)
@@ -192,6 +218,7 @@ class QueryResult:
     cache_hit: bool = False
     backfill_triggered: bool = False
     has_tail_gap: bool = False
+    missing_ranges: list[MissingRange] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -206,6 +233,7 @@ class QueryResult:
             "cache_hit": self.cache_hit,
             "backfill_triggered": self.backfill_triggered,
             "has_tail_gap": self.has_tail_gap,
+            "missing_ranges": [r.to_dict() for r in self.missing_ranges],
             "data": [b.to_dict() for b in self.bars],
             "metadata": self.metadata,
         }
@@ -236,6 +264,7 @@ class DataEventType(str, enum.Enum):
     BACKFILL_FAILED = "backfill.failed"
     CACHE_PREWARM = "cache.prewarm"
     CACHE_EVICTION = "cache.eviction"
+    PRICE_UPDATED = "price.updated"
 
 
 @dataclass(slots=True)

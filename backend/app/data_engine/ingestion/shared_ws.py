@@ -10,7 +10,9 @@ from typing import Awaitable, Callable
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 
 from .config import IngestionConfig
+from .metrics import LayerMetrics
 from .models import DataSource, RawMessage, SessionHealth, StreamDescriptor, StreamType
+from .session_types import HealthCallback, MessageCallback, SessionLike
 from .transport import TransportError, TransportLayer
 
 logger = logging.getLogger("ingestion.shared_ws")
@@ -40,6 +42,86 @@ class SharedWsSubscriptionHandle:
             return
         self._closed = True
         await self._hub.unsubscribe(self._token)
+
+
+class SharedWsSessionAdapter:
+    """SessionLike adapter for a shared upstream WS hub."""
+
+    def __init__(
+        self,
+        hub: "OkxSharedKlineHub",
+        descriptor: StreamDescriptor,
+    ) -> None:
+        self._hub = hub
+        self._descriptor = descriptor
+        self._metrics = LayerMetrics("L2_SharedSession")
+        self._handle: SharedWsSubscriptionHandle | None = None
+        self._health = hub.health
+        self._last_msg_time = 0.0
+        self._on_message: MessageCallback | None = None
+        self._on_health_change: HealthCallback | None = None
+
+    @property
+    def health(self) -> SessionHealth:
+        return self._health
+
+    @property
+    def manages_recovery_while_http(self) -> bool:
+        return True
+
+    @property
+    def http_fallback_health_states(self) -> frozenset[SessionHealth]:
+        return frozenset({
+            SessionHealth.RECONNECTING,
+            SessionHealth.UNHEALTHY,
+            SessionHealth.DISCONNECTED,
+        })
+
+    def on_message(self, callback: MessageCallback) -> None:
+        self._on_message = callback
+
+    def on_health_change(self, callback: HealthCallback) -> None:
+        self._on_health_change = callback
+
+    async def start(self) -> None:
+        if self._handle is not None:
+            return
+        self._handle = await self._hub.subscribe(
+            self._descriptor,
+            self._handle_data,
+            self._handle_health,
+        )
+        self._metrics.mark("started_at")
+
+    async def stop(self) -> None:
+        if self._handle is not None:
+            await self._handle.unsubscribe()
+            self._handle = None
+        self._metrics.mark("stopped_at")
+
+    def snapshot(self) -> dict:
+        return {
+            "layer": "L2_SharedSession",
+            "stream_key": self._descriptor.key,
+            "health": self._health.value,
+            "consecutive_failures": self._hub.consecutive_failures,
+            "last_msg_time": self._last_msg_time,
+            "metrics": self._metrics.snapshot(),
+        }
+
+    async def _handle_data(self, msg: RawMessage) -> None:
+        self._last_msg_time = time.monotonic()
+        self._metrics.inc("messages_received")
+        self._metrics.mark("last_message_at")
+        if self._on_message:
+            await self._on_message(msg)
+
+    async def _handle_health(self, health: SessionHealth, reason: str) -> None:
+        self._health = health
+        self._metrics.set("health", health.value)
+        self._metrics.mark("health_changed_at")
+        if self._on_health_change:
+            await self._on_health_change(health, reason)
 
 
 class OkxSharedKlineHub:
@@ -75,6 +157,10 @@ class OkxSharedKlineHub:
     @property
     def health(self) -> SessionHealth:
         return self._health
+
+    @property
+    def consecutive_failures(self) -> int:
+        return self._consecutive_failures
 
     async def subscribe(
         self,
@@ -319,3 +405,9 @@ class SharedWsHubRegistry:
             )
             self._okx_hubs[key] = hub
         return hub
+
+    def create_session(self, descriptor: StreamDescriptor) -> SessionLike | None:
+        hub = self.get_hub(descriptor)
+        if hub is None:
+            return None
+        return SharedWsSessionAdapter(hub, descriptor)

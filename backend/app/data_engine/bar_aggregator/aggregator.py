@@ -293,6 +293,202 @@ class BarAggregator:
         """Feed data through a registered custom adapter."""
         await self._router.on_custom_data(adapter_name, raw_data)
 
+    async def ingest_bar_input(
+        self,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+        bar_input: BarInput,
+        *,
+        emit_events: bool = True,
+    ) -> None:
+        """Public wrapper for feeding an already-normalized BarInput."""
+        await self._handle_bar_input(
+            exchange.lower().strip(),
+            market_type.lower().strip(),
+            symbol.upper().strip(),
+            interval,
+            bar_input,
+            emit_events=emit_events,
+        )
+
+    def compute_bucket(self, interval: str, open_time_ms: int) -> int | None:
+        """Return the bucket start for an interval using its pipeline policy."""
+        pipeline = self._pipelines.get(interval)
+        if pipeline is None:
+            return None
+        return pipeline.time_bucket.compute_bucket(open_time_ms)
+
+    def previous_bucket(self, interval: str, bucket_start_ms: int) -> int | None:
+        """Return the previous bucket start for an interval."""
+        pipeline = self._pipelines.get(interval)
+        if pipeline is None:
+            return None
+        return pipeline.time_bucket.prev_bucket(bucket_start_ms)
+
+    def get_bucket_state(
+        self,
+        symbol: str,
+        interval: str,
+        bucket_start_ms: int,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> BarState | None:
+        """Return active state for a specific bucket."""
+        pipeline = self._pipelines.get(interval)
+        if pipeline is None:
+            return None
+        return pipeline.bar_state.get_active(
+            exchange.lower().strip(),
+            market_type.lower().strip(),
+            symbol.upper().strip(),
+            bucket_start_ms,
+        )
+
+    def expire_bucket(
+        self,
+        symbol: str,
+        interval: str,
+        bucket_start_ms: int,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> BarState | None:
+        """Expire an active bucket without exposing BarStateEngine internals."""
+        pipeline = self._pipelines.get(interval)
+        if pipeline is None:
+            return None
+        return pipeline.bar_state.expire_bar(
+            exchange.lower().strip(),
+            market_type.lower().strip(),
+            symbol.upper().strip(),
+            bucket_start_ms,
+        )
+
+    async def seed_active_bar(
+        self,
+        symbol: str,
+        interval: str,
+        bar_input: BarInput,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        *,
+        emit_events: bool = False,
+    ) -> BarState | None:
+        """Seed a forming standard bucket from a trusted snapshot."""
+        await self.ingest_bar_input(
+            exchange,
+            market_type,
+            symbol,
+            interval,
+            bar_input,
+            emit_events=emit_events,
+        )
+        bucket_start_ms = self.compute_bucket(interval, bar_input.open_time_ms)
+        if bucket_start_ms is None:
+            return None
+        return self.get_bucket_state(
+            symbol,
+            interval,
+            bucket_start_ms,
+            exchange=exchange,
+            market_type=market_type,
+        )
+
+    async def replay_components(
+        self,
+        symbol: str,
+        interval: str,
+        components: list[BarInput],
+        exchange: str = "binance",
+        market_type: str = "spot",
+        *,
+        bucket_start_ms: int | None = None,
+        expire_existing: bool = True,
+        emit_events: bool = False,
+    ) -> BarState | None:
+        """Replay base components into a target bucket and return its state."""
+        if bucket_start_ms is not None and expire_existing:
+            self.expire_bucket(
+                symbol,
+                interval,
+                bucket_start_ms,
+                exchange=exchange,
+                market_type=market_type,
+            )
+
+        for component in components:
+            await self.ingest_bar_input(
+                exchange,
+                market_type,
+                symbol,
+                interval,
+                component,
+                emit_events=emit_events,
+            )
+
+        if bucket_start_ms is None and components:
+            bucket_start_ms = self.compute_bucket(interval, components[-1].open_time_ms)
+        if bucket_start_ms is None:
+            return None
+        return self.get_bucket_state(
+            symbol,
+            interval,
+            bucket_start_ms,
+            exchange=exchange,
+            market_type=market_type,
+        )
+
+    async def aggregate_batch(
+        self,
+        symbol: str,
+        target_interval: str,
+        source_interval: str | None,
+        bars: list[Any],
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> list[BarState]:
+        """Aggregate a batch in an isolated aggregator instance."""
+        temp = BarAggregator(self._cfg)
+        temp.add_target(
+            symbol,
+            target_interval,
+            exchange=exchange,
+            market_type=market_type,
+        )
+        rows_by_open_time: dict[int, BarState] = {}
+
+        async def _capture(event: BarEvent) -> None:
+            rows_by_open_time[event.bar.bucket_start_ms] = event.bar
+
+        temp.publisher.on_bar_closed(_capture)
+        temp.publisher.on_bar_amended(_capture)
+        if source_interval is not None:
+            await temp.on_backfill_bars(
+                symbol,
+                source_interval,
+                bars,
+                exchange=exchange,
+                market_type=market_type,
+            )
+        else:
+            for bar in bars:
+                interval = (
+                    bar.get("interval")
+                    if isinstance(bar, dict)
+                    else getattr(bar, "interval", None)
+                )
+                if interval is None:
+                    raise ValueError("source_interval is required when bars do not carry interval")
+                await temp.on_backfill_bars(
+                    symbol,
+                    interval,
+                    [bar],
+                    exchange=exchange,
+                    market_type=market_type,
+                )
+        return [rows_by_open_time[key] for key in sorted(rows_by_open_time)]
+
     # ── Public: Layer Access (advanced customization) ────────
 
     @property
@@ -403,6 +599,7 @@ class BarAggregator:
         symbol: str,
         interval: str,
         bar_input: BarInput,
+        emit_events: bool = True,
     ) -> None:
         """Core processing callback: L1 → L2 → L3 → L4 → L5.
 
@@ -420,7 +617,14 @@ class BarAggregator:
         # Check for event-driven close: if this input starts a new bucket,
         # close previous active bars for this symbol
         await self._check_event_driven_close(
-            exchange, market_type, symbol, interval, pipeline, bucket_start_ms, bar_input,
+            exchange,
+            market_type,
+            symbol,
+            interval,
+            pipeline,
+            bucket_start_ms,
+            bar_input,
+            emit_events=emit_events,
         )
 
         # L3: Apply input to bar state
@@ -430,15 +634,16 @@ class BarAggregator:
 
         # Drain eviction buffers — emit events for bars that were
         # force-closed or expired during apply() due to limit enforcement.
-        await self._drain_eviction_buffers(pipeline)
+        await self._drain_eviction_buffers(pipeline, emit_events=emit_events)
 
         # L5: Emit lifecycle events
-        if change == BarStateChange.CREATED:
-            await self._publisher.emit_created(state)
-        elif change == BarStateChange.UPDATED:
-            await self._publisher.emit_updated(state)
-        elif change == BarStateChange.AMENDED:
-            await self._publisher.emit_amended(state)
+        if emit_events:
+            if change == BarStateChange.CREATED:
+                await self._publisher.emit_created(state)
+            elif change == BarStateChange.UPDATED:
+                await self._publisher.emit_updated(state)
+            elif change == BarStateChange.AMENDED:
+                await self._publisher.emit_amended(state)
 
         # L4: Check if this bar should be finalized
         is_backfill = bar_input.source == BarInputSource.BACKFILL
@@ -456,10 +661,11 @@ class BarAggregator:
                 exchange, market_type, symbol, bucket_start_ms,
             )
             if closed is not None:
-                await self._publisher.emit_closed(closed)
+                if emit_events:
+                    await self._publisher.emit_closed(closed)
                 # Drain eviction buffers after close_bar() — closing a bar
                 # may trigger expired evictions from the closed bars cache.
-                await self._drain_eviction_buffers(pipeline)
+                await self._drain_eviction_buffers(pipeline, emit_events=emit_events)
 
     async def _check_event_driven_close(
         self,
@@ -470,6 +676,8 @@ class BarAggregator:
         pipeline: IntervalPipeline,
         new_bucket_start_ms: int,
         bar_input: BarInput,
+        *,
+        emit_events: bool = True,
     ) -> None:
         """Close any older active bars when a new bucket's data arrives."""
         if not self._cfg.use_event_driven_close:
@@ -489,11 +697,18 @@ class BarAggregator:
                         exchange, market_type, symbol, state.bucket_start_ms,
                     )
                     if closed is not None:
-                        await self._publisher.emit_closed(closed)
+                        if emit_events:
+                            await self._publisher.emit_closed(closed)
+                        await self._drain_eviction_buffers(pipeline, emit_events=emit_events)
 
     # ── Internal: Eviction Buffer Drain ──────────────────────
 
-    async def _drain_eviction_buffers(self, pipeline: IntervalPipeline) -> None:
+    async def _drain_eviction_buffers(
+        self,
+        pipeline: IntervalPipeline,
+        *,
+        emit_events: bool = True,
+    ) -> None:
         """Emit lifecycle events for bars evicted by limit enforcement.
 
         The BarStateEngine populates ``evicted_closed`` and ``evicted_expired``
@@ -502,14 +717,16 @@ class BarAggregator:
         """
         # Emit CLOSED events for force-closed bars (active limit exceeded)
         if pipeline.bar_state.evicted_closed:
-            for bar in pipeline.bar_state.evicted_closed:
-                await self._publisher.emit_closed(bar)
+            if emit_events:
+                for bar in pipeline.bar_state.evicted_closed:
+                    await self._publisher.emit_closed(bar)
             pipeline.bar_state.evicted_closed.clear()
 
         # Emit EXPIRED events for expired bars (closed limit exceeded)
         if pipeline.bar_state.evicted_expired:
-            for bar in pipeline.bar_state.evicted_expired:
-                await self._publisher.emit_expired(bar)
+            if emit_events:
+                for bar in pipeline.bar_state.evicted_expired:
+                    await self._publisher.emit_expired(bar)
             pipeline.bar_state.evicted_expired.clear()
 
     # ── Internal: Timeout Loop ───────────────────────────────

@@ -91,6 +91,7 @@ npm run dev
 
 - **多交易所架构完成**：后端围绕交易所注册表与适配器重构，当前已接入 Binance 和 OKX，并暴露交易所能力与交易对元数据接口。
 - **现货 / 合约统一支持**：请求、流推送、存储、符号规范化都带上了 `exchange` 与 `market_type` 维度，同一套前端流程即可覆盖现货和永续。
+- **数据引擎统一收口**：正式 K 线、实时 K 线、价格快照、订阅状态和 settings 维护操作都通过 `DataManager`，旧 `services/collectors` 不再作为正式路径。
 - **缺口修复链路明显增强**：新增回填规划、缺口探测、结果回灌、存储修复与 gap scan/fill，K 线断档防御比之前完整很多。
 - **自选列表与订阅分级**：侧边栏支持持久化自选、拖拽整理、价格闪烁提示，后端支持 `full` / `price` / `none` 三档订阅策略。
 - **画图工具扩充**：现在除了自由画笔、直线和文字，还支持斐波那契回撤、多空仓位工具，以及线段 / 射线 / 直线变体。
@@ -239,12 +240,12 @@ CandleScope/
 │       ├── core/                         # 配置与市场定义
 │       ├── realtime/                     # WebSocket 流推送中枢
 │       ├── data_engine/                  # 📦 多层级数据引擎
-│       │   ├── data_manager/             #   数据总闸门（缓存 + 查询 + 事件）
+│       │   ├── runtime.py                #   DataEngineRuntime 组合根
+│       │   ├── interval_policy.py        #   周期解析与桶边界权威入口
+│       │   ├── data_manager/             #   数据总闸门（缓存 + 查询 + 事件 + 维护）
 │       │   ├── ingestion/                #   6层实时市场数据接入管道
-│       │   ├── bar_aggregator/           #   自定义周期合成器
-│       │   ├── backfill/                 #   历史缺口检测与修复
-│       │   ├── collectors/               #   交易所专用数据采集器
-│       │   ├── services/                 #   K 线聚合与缓存服务
+│       │   ├── bar_aggregator/           #   标准/自定义周期聚合器
+│       │   ├── backfill/                 #   历史缺口检测与修复 pipeline
 │       │   └── storage/                  #   SQLite 持久化层
 │       └── indicator/                    # 📦 指标计算引擎
 │           ├── base.py                   #   指标抽象基类
@@ -281,10 +282,10 @@ CandleScope/
 
 | 模块 | 说明 | 文档 |
 |------|------|------|
-| **Data Manager（数据管理器）** | 数据出入口的总闸门，负责三级查询流控、多级缓存统筹，与前端直接握手 | [EN](backend/app/data_engine/data_manager/README.md) · [中文](backend/app/data_engine/data_manager/README_zh.md) |
-| **Ingestion Layer（接入管道）** | 面向交易所适配器的实时 6 层行情接入、清洗与消息重打包引擎 | [EN](backend/app/data_engine/ingestion/README.md) · [中文](backend/app/data_engine/ingestion/README_zh.md) |
-| **Bar Aggregator（K线聚合器）** | 极其聪明的内存"反应堆"，可合成全平台任意定制周期的时间线状态机 | [EN](backend/app/data_engine/bar_aggregator/README.md) · [中文](backend/app/data_engine/bar_aggregator/README_zh.md) |
-| **Backfill Engine（回填引擎）** | 拥有缺口感知雷达（Gap Detector）与任务拆分能力的智能多线程后台调度矿工 | [EN](backend/app/data_engine/backfill/README.md) · [中文](backend/app/data_engine/backfill/README_zh.md) |
+| **Data Manager（数据管理器）** | 后端数据唯一入口，统筹 cache/storage/query/event/backfill/price/subscription/maintenance | [EN](backend/app/data_engine/data_manager/README.md) · [中文](backend/app/data_engine/data_manager/README_zh.md) |
+| **Ingestion Layer（接入管道）** | 面向交易所适配器的实时 6 层行情接入、清洗、gap marker 与受控分发管道 | [EN](backend/app/data_engine/ingestion/README.md) · [中文](backend/app/data_engine/ingestion/README_zh.md) |
+| **Bar Aggregator（K线聚合器）** | 标准/自定义周期状态机，提供 seed/replay/batch public API 给 DataManager 与 Backfill 使用 | [EN](backend/app/data_engine/bar_aggregator/README.md) · [中文](backend/app/data_engine/bar_aggregator/README_zh.md) |
+| **Backfill Engine（回填引擎）** | 纯历史修复 pipeline，负责 detect/plan/fetch/reconcile/report，调度与回灌由 BackfillCoordinator 负责 | [EN](backend/app/data_engine/backfill/README.md) · [中文](backend/app/data_engine/backfill/README_zh.md) |
 
 ### 指标子模块文档
 
@@ -309,6 +310,8 @@ CandleScope/
 | `/api/v1/klines` | GET | 获取 K 线数据（缓存优先） |
 | `/api/v1/klines/history/before` | GET | 分页回溯历史数据 |
 | `/api/v1/stream/klines_multi` | WebSocket | 多路复用实时 K 线流 |
+| `/api/v1/subscriptions/prices` | GET | 从 DataManager price cache 获取价格快照 |
+| `/api/v1/stream/prices` | WebSocket | 订阅 DataManager `PRICE_UPDATED` 价格事件 |
 | `/api/v1/indicators/compute` | POST | 执行指标计算 |
 | `/api/v1/indicators/registry` | GET | 列出所有可用指标 |
 | `/api/v1/exchanges` | GET | 列出交易所能力信息 |

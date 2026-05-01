@@ -383,16 +383,11 @@ export default function AlertsPanel({
     exchange: currentExchange,
   });
   const currentWatchProduct = watchlistProducts.find((item) => item.key === currentProductKey) || null;
-  const selectedProduct = watchlistProducts.find((item) => item.key === selectedProductKey) || currentWatchProduct || watchlistProducts[0] || null;
+  const selectedProductExists = watchlistProducts.some((item) => item.key === selectedProductKey);
+  const defaultProductKey = currentWatchProduct?.key || watchlistProducts[0]?.key || "";
+  const effectiveSelectedProductKey = selectedProductExists ? selectedProductKey : defaultProductKey;
+  const selectedProduct = watchlistProducts.find((item) => item.key === effectiveSelectedProductKey) || null;
   const currentProductMissing = Boolean(currentSymbol) && !currentWatchProduct;
-
-  useEffect(() => {
-    if (!isOpen) return;
-    setSelectedProductKey((prev) => {
-      if (watchlistProducts.some((item) => item.key === prev)) return prev;
-      return currentWatchProduct?.key || watchlistProducts[0]?.key || "";
-    });
-  }, [currentWatchProduct, isOpen, watchlistProducts]);
 
   const startResizing = useCallback((event) => {
     setIsResizing(true);
@@ -495,7 +490,7 @@ export default function AlertsPanel({
                   <div className="alert-product-picker-row">
                     <label className="alert-field">
                       <span>自选商品</span>
-                      <select value={selectedProduct?.key || ""} onChange={(event) => setSelectedProductKey(event.target.value)}>
+                      <select value={effectiveSelectedProductKey} onChange={(event) => setSelectedProductKey(event.target.value)}>
                         {watchlistProducts.map((item) => (
                           <option key={item.key} value={item.key}>
                             {item.symbol} · {formatMarket(item.exchange, item.marketType)} · {item.listNames.join(" / ")}

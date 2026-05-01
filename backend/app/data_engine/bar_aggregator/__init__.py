@@ -36,6 +36,7 @@ from .models import (
     BucketCalculator,
     FinalizeTrigger,
     FinalizerStrategy,
+    MergeMode,
     STANDARD_INTERVALS,
     is_standard_interval,
     parse_interval_ms,
@@ -91,6 +92,7 @@ __all__ = [
     "BucketCalculator",
     "FinalizeTrigger",
     "FinalizerStrategy",
+    "MergeMode",
     # Helpers
     "STANDARD_INTERVALS",
     "is_standard_interval",

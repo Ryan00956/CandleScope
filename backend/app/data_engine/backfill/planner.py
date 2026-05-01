@@ -41,6 +41,16 @@ import math
 from typing import Callable, Any
 
 from ..ingestion.metrics import LayerMetrics
+from app.data_engine.interval_policy import (
+    STANDARD_INTERVAL_MS,
+    compute_bucket_start_ms,
+    compute_month_bucket_ms,
+    is_standard_interval,
+    is_weekly_interval,
+    next_month_bucket,
+    parse_interval_ms,
+    parse_monthly_count,
+)
 from .config import BackfillConfig
 from .models import (
     GapInfo,
@@ -51,9 +61,6 @@ from .models import (
     IntervalDecomposition,
     AlignmentMode,
     DecompStrategy,
-    STANDARD_INTERVAL_MS,
-    parse_interval_ms,
-    is_standard_interval,
 )
 
 logger = logging.getLogger("backfill.Planner")
@@ -285,10 +292,8 @@ class BackfillPlanner:
         # Align the gap start to custom bucket boundaries.
         # For monthly intervals, use calendar-month alignment instead of
         # fixed-duration arithmetic (months have variable day counts).
-        from app.core.market import parse_monthly_count as _parse_mc
-        _month_count = _parse_mc(gap.interval)
+        _month_count = parse_monthly_count(gap.interval)
         if _month_count is not None:
-            from app.core.market import compute_month_bucket_ms, next_month_bucket
             aligned_start = compute_month_bucket_ms(gap.start_ms, _month_count)
             end_bucket_start = compute_month_bucket_ms(gap.end_ms, _month_count)
             aligned_end_exclusive = next_month_bucket(
@@ -577,10 +582,8 @@ class BackfillPlanner:
         For weekly intervals, aligns to Monday 00:00 UTC regardless of mode.
         """
         # Weekly intervals always align to Monday 00:00 UTC
-        if interval is not None:
-            from app.core.market import is_weekly_interval, compute_bucket_start_ms
-            if is_weekly_interval(interval):
-                return compute_bucket_start_ms(ts_ms, bucket_ms, interval=interval)
+        if interval is not None and is_weekly_interval(interval):
+            return compute_bucket_start_ms(ts_ms, bucket_ms, interval=interval)
 
         # User override
         if self._custom_alignment_fn is not None:

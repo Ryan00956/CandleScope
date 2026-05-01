@@ -3,20 +3,16 @@ CandleScope backend entrypoint.
 
 Startup sequence:
   1. Initialize SQLite storage (klines_repo).
-  2. Create and start the unified ``DataManager`` facade.
-  3. Inject ``KlinesRepoAdapter`` as the storage backend.
-  4. Store ``DataManager`` on ``app.state`` so that API/WS endpoints
-     can access it via ``request.app.state.data_manager``.
-  5. On shutdown, gracefully stop all streams and flush state.
+  2. Refresh exchange metadata on a best-effort basis.
+  3. Start the DataEngine runtime and attach its public handles to
+     ``app.state`` for API/WS endpoints.
+  4. Bridge the IndicatorEngine to DataManager events.
+  5. On shutdown, stop IndicatorEngine and the DataEngine runtime.
 
-When DataManager fails to initialize (e.g. import error during
-early development), the application still starts — API and WS
-endpoints fall back to the legacy services/kline_cache_service path.
+When DataManager fails to initialize, the application can still expose
+health endpoints, but data APIs report explicit service-unavailable errors.
 """
-import asyncio
 import logging
-import time
-from contextlib import suppress
 
 # ── Monkey-patch: websockets recv_messages bug ──────────────────
 # websockets ≥15 initializes ``recv_messages`` in ``connection_made``,
@@ -54,7 +50,6 @@ from app.api.v1.subscriptions import router as subscriptions_router
 from app.api.v1.subscriptions import price_ws_router
 from app.api.v1.symbols import router as symbols_router
 from app.core.config import CORS_ORIGINS
-from app.core.market import is_custom_interval
 from app.data_engine.storage import init_klines_storage
 
 logger = logging.getLogger("candlescope")
@@ -89,337 +84,17 @@ app.include_router(price_ws_router, prefix="/api/v1")
 
 
 async def _init_data_manager() -> None:
-    """Create, configure, and start the DataManager.
-
-    Wiring:
-      DataManager
-        ├── BarAggregator (L1–L5)  — auto-created internally
-        ├── StreamCoordinator      — auto-created internally
-        ├── BarCache               — auto-created internally
-        ├── QueryEngine            — auto-created internally
-        ├── EventBus               — auto-created internally
-        ├── StorageBackend         — injected: KlinesRepoAdapter
-        ├── IngestionFactory       — injected: BinanceIngestionFactory  ← NEW
-        └── BackfillTrigger        — injected: BackfillEngine.run()    ← NEW
-    """
+    """Create and start the DataEngine runtime."""
     try:
-        from app.data_engine.data_manager import DataManager
-        from app.data_engine.storage import KlinesRepoAdapter, AsyncKlinesRepoAdapter
-        from app.data_engine.ingestion.factory import BinanceIngestionFactory
-        from app.data_engine.backfill import BackfillEngine
-        from app.data_engine.ingestion import TransportLayer
-        from app.data_engine.ingestion.config import IngestionConfig
+        from app.data_engine.runtime import start_data_engine
+        from app.indicator.data_manager_bridge import bridge_indicator_engine
 
-        dm = DataManager()
+        runtime = await start_data_engine()
+        runtime.attach_to_app_state(app.state)
 
-        # ── 1. Inject storage backend ────────────────────────
-        storage = KlinesRepoAdapter()          # sync — for DataManager/QueryEngine
-        async_storage = AsyncKlinesRepoAdapter()  # async — for BackfillEngine
-        dm.set_storage(storage)
-
-        # ── 2. Inject ingestion factory (real-time data) ─────
-        #   Bridges the 6-layer Ingestion pipeline into DataManager.
-        #   When a chart subscribes to (symbol, interval), the coordinator
-        #   calls factory.start() → spins up WS connection → data flows
-        #   through L1–L6 Ingestion → BarAggregator → Cache → EventBus → WS.
-        ingestion_factory = BinanceIngestionFactory()
-        dm.set_ingestion_factory(ingestion_factory)
-        app.state.ingestion_factory = ingestion_factory  # for shutdown
-        print("[startup] IngestionFactory injected ✓")
-
-        # ── 3. Inject backfill trigger (historical gap repair) ──
-        #   When QueryEngine detects gaps, it calls this trigger to
-        #   spawn a BackfillEngine.run() task that fetches missing data.
-        ingestion_cfg = IngestionConfig()
-        transport = TransportLayer(ingestion_cfg)
-        await transport.start()
-        app.state.backfill_transport = transport  # for shutdown
-
-        backfill_engine = BackfillEngine(
-            storage=async_storage,
-            transport=transport,
-            ingestion_config=ingestion_cfg,
-        )
-        backfill_engine.reconciler.set_bar_aggregator(dm.bar_aggregator)
-        app.state.backfill_engine = backfill_engine  # for shutdown
-
-        main_loop = asyncio.get_running_loop()
-
-        # Track backfill futures so they can be cancelled on shutdown
-        _pending_backfill_futures: list[asyncio.Future] = []
-        app.state.backfill_futures = _pending_backfill_futures
-
-        _BACKFILL_MAX_RETRIES = 3
-        _BACKFILL_BASE_DELAY = 5  # seconds
-
-        async def _load_backfilled_to_cache(
-            symbol: str,
-            interval: str,
-            start_ms: int,
-            end_ms: int,
-            exchange: str = "binance",
-            market_type: str = "spot",
-        ) -> None:
-            """Re-query storage for backfilled range and load into cache."""
-            from app.data_engine.data_manager.models import BarData
-            if is_custom_interval(interval):
-                result = await asyncio.to_thread(
-                    dm.query,
-                    symbol=symbol,
-                    interval=interval,
-                    start_ms=start_ms,
-                    end_ms=end_ms,
-                    exchange=exchange,
-                    market_type=market_type,
-                )
-                if result.bars:
-                    await dm.on_bars_backfilled(
-                        symbol, interval, result.bars, exchange=exchange, market_type=market_type,
-                    )
-            else:
-                rows = storage.query_bars(
-                    symbol=symbol,
-                    interval=interval,
-                    start_ms=start_ms,
-                    end_ms=end_ms,
-                    order="ASC",
-                    exchange=exchange,
-                    market_type=market_type,
-                )
-                bars = [BarData.from_storage_row(r) for r in rows]
-                if bars:
-                    await dm.on_bars_backfilled(
-                        symbol, interval, bars, exchange=exchange, market_type=market_type,
-                    )
-
-        def _backfill_trigger(
-            symbol: str,
-            interval: str,
-            start_ms: int,
-            end_ms: int,
-            exchange: str = "binance",
-            market_type: str = "spot",
-        ) -> None:
-            """Synchronous trigger that schedules an async backfill run with retry."""
-            async def _run_backfill() -> None:
-                for attempt in range(_BACKFILL_MAX_RETRIES):
-                    try:
-                        report = await backfill_engine.run(
-                            symbol=symbol,
-                            intervals=[interval],
-                            range_start_ms=start_ms,
-                            range_end_ms=end_ms,
-                            exchange=exchange,
-                            market_type=market_type,
-                        )
-                        bars_written = (
-                            report.reconcile_result.bars_written
-                            if report.reconcile_result else 0
-                        )
-                        logger.info(
-                            "Backfill completed: %s/%s status=%s bars_written=%s",
-                            symbol, interval, report.status.value,
-                            bars_written,
-                        )
-
-                        from app.data_engine.backfill.models import BackfillStatus
-                        if report.status == BackfillStatus.FAILED:
-                            logger.warning(
-                                "Backfill FAILED for %s/%s (attempt %d/%d)",
-                                symbol, interval, attempt + 1, _BACKFILL_MAX_RETRIES,
-                            )
-                            delay = _BACKFILL_BASE_DELAY * (3 ** attempt)
-                            await asyncio.sleep(delay)
-                            continue  # retry
-
-                        # Success (COMPLETED or PARTIAL): load into cache
-                        if hasattr(report, 'reconcile_result') and report.reconcile_result:
-                            rr = report.reconcile_result
-                            if hasattr(rr, 'bars_written') and rr.bars_written > 0:
-                                await _load_backfilled_to_cache(
-                                    symbol, interval, start_ms, end_ms, exchange, market_type,
-                                )
-                        return  # done
-
-                    except Exception as exc:
-                        logger.error(
-                            "Backfill task error for %s/%s (attempt %d/%d): %s",
-                            symbol, interval, attempt + 1,
-                            _BACKFILL_MAX_RETRIES, exc, exc_info=True,
-                        )
-                        delay = _BACKFILL_BASE_DELAY * (3 ** attempt)
-                        await asyncio.sleep(delay)
-
-                logger.error(
-                    "Backfill exhausted all %d retries for %s/%s [%d→%d]",
-                    _BACKFILL_MAX_RETRIES, symbol, interval, start_ms, end_ms,
-                )
-
-            try:
-                fut = asyncio.run_coroutine_threadsafe(_run_backfill(), main_loop)
-                _pending_backfill_futures.append(fut)
-                # Clean up completed futures periodically
-                _pending_backfill_futures[:] = [f for f in _pending_backfill_futures if not f.done()]
-            except Exception as exc:
-                logger.warning("Failed to schedule backfill trigger: %s", exc)
-
-        dm.set_backfill_trigger(_backfill_trigger)
-        print("[startup] BackfillTrigger injected ✓")
-
-        # ── 4. Start the DataManager ─────────────────────────
-        await dm.start()
-
-        # Store on app.state for access by API/WS endpoints
-        app.state.data_manager = dm
-        logger.info("DataManager initialized and started successfully")
-        print("[startup] DataManager initialized ✓")
-
-        # ── 4b. SubscriptionManager + PriceTickerService ─────
         try:
-            from app.data_engine.services.subscription_manager import SubscriptionManager
-            from app.data_engine.services.price_ticker import PriceTickerService
-            from app.core.config import KLINES_DB_PATH, BINANCE_WS_URLS, BINANCE_FUTURES_WS_URLS
-
-            price_ticker = PriceTickerService(
-                ws_urls=BINANCE_WS_URLS,
-                futures_ws_urls=BINANCE_FUTURES_WS_URLS,
-            )
-            sub_manager = SubscriptionManager(db_path=str(KLINES_DB_PATH))
-            sub_manager.set_data_manager(dm)
-            sub_manager.set_price_ticker(price_ticker)
-
-            await price_ticker.start()
-            await sub_manager.start()
-
-            app.state.price_ticker = price_ticker
-            app.state.subscription_manager = sub_manager
-            print("[startup] SubscriptionManager + PriceTickerService initialized ✓")
-        except Exception as exc:
-            logger.warning("SubscriptionManager init failed: %s", exc)
-            print(f"[startup] SubscriptionManager init failed: {exc}")
-
-        # ── Startup Gap Scan ─────────────────────────────────
-        # Proactively detect and fill gaps for all prewarmed intervals.
-        # This covers the "app was offline for days" scenario.
-        async def _startup_gap_scan() -> None:
-            await asyncio.sleep(5)  # let prewarm + WS settle
-            logger.info("Starting gap scan for all prewarmed intervals...")
-            print("[startup] Running startup gap scan...")
-
-            scanned = 0
-            filled = 0
-            for exchange, market_type, sym in dm.coordinator._iter_prewarm_targets():
-                for iv in dm.coordinator._cfg.prewarm_intervals:
-                    try:
-                        bounds = storage.get_bounds(sym, iv, exchange=exchange, market_type=market_type)
-                        latest = bounds.get("latest_open_time")
-                        if not latest:
-                            continue
-
-                        now_ms = int(time.time() * 1000)
-                        from app.data_engine.bar_aggregator.models import parse_interval_ms
-                        interval_ms = parse_interval_ms(iv) or 60_000
-                        gap_ms = now_ms - latest
-
-                        # If latest data is more than 3 intervals behind, backfill
-                        if gap_ms > interval_ms * 3:
-                            scanned += 1
-                            logger.info(
-                                "Startup gap: %s@%s latest=%s gap=%.1fh, backfilling",
-                                sym, iv,
-                                time.strftime('%Y-%m-%d %H:%M', time.gmtime(latest / 1000)),
-                                gap_ms / 3_600_000,
-                            )
-                            report = await backfill_engine.run(
-                                symbol=sym,
-                                intervals=[iv],
-                                range_start_ms=latest,
-                                range_end_ms=now_ms,
-                                exchange=exchange,
-                                market_type=market_type,
-                            )
-                            bars_written = (
-                                report.reconcile_result.bars_written
-                                if report.reconcile_result else 0
-                            )
-                            if bars_written > 0:
-                                filled += 1
-                                await _load_backfilled_to_cache(
-                                    sym, iv, latest, now_ms, exchange, market_type,
-                                )
-                                logger.info(
-                                    "Startup gap filled: %s:%s:%s@%s wrote %d bars",
-                                    exchange, market_type, sym, iv, bars_written,
-                                )
-                    except Exception as exc:
-                        logger.warning(
-                            "Startup gap scan failed for %s:%s:%s@%s: %s",
-                            exchange, market_type, sym, iv, exc,
-                        )
-
-            logger.info(
-                "Startup gap scan complete: %d intervals scanned, %d filled",
-                scanned, filled,
-            )
-            print(f"[startup] Gap scan done: {scanned} scanned, {filled} filled")
-
-        app.state.gap_scan_task = asyncio.create_task(_startup_gap_scan())
-
-        # ── 5. Bridge IndicatorEngine to DataManager EventBus ──
-        #   The IndicatorEngine listens to BAR_CLOSED / BAR_UPDATED /
-        #   BACKFILL_COMPLETED events and incrementally updates all
-        #   subscribed indicator instances in real time.
-        try:
-            from app.indicator import create_engine
-            from app.data_engine.data_manager.models import DataEventType
-
-            indicator_engine = create_engine()
+            indicator_engine = bridge_indicator_engine(runtime.data_manager)
             app.state.indicator_engine = indicator_engine
-
-            async def _on_bar_event_for_indicators(event):
-                """Bridge DataManager bar events → IndicatorEngine."""
-                bar = event.bar
-                if bar is None:
-                    return
-                symbol = event.key.symbol
-                interval = event.key.interval
-                market_type = event.key.market_type
-
-                if event.event_type == DataEventType.BAR_CLOSED:
-                    indicator_engine.on_bar_closed(symbol, interval, bar, market_type=market_type)
-                elif event.event_type == DataEventType.BAR_UPDATED:
-                    indicator_engine.on_bar_updated(symbol, interval, bar, market_type=market_type)
-
-            async def _on_backfill_for_indicators(event):
-                """Bridge DataManager backfill events → IndicatorEngine recompute."""
-                symbol = event.key.symbol
-                interval = event.key.interval
-                market_type = event.key.market_type
-                # Query all cached bars and trigger recompute
-                try:
-                    result = dm.query_latest(symbol, interval, limit=5000, market_type=market_type)
-                    if result.bars:
-                        indicator_engine.on_bars_backfilled(
-                            symbol,
-                            interval,
-                            result.bars,
-                            market_type=market_type,
-                        )
-                except Exception as exc:
-                    logger.warning("Indicator recompute after backfill failed: %s", exc)
-
-            # Subscribe to bar events (for real-time indicator updates)
-            dm.subscribe(
-                callback=_on_bar_event_for_indicators,
-                event_types={DataEventType.BAR_CLOSED, DataEventType.BAR_UPDATED},
-            )
-
-            # Subscribe to backfill events (for historical correction)
-            dm.subscribe(
-                callback=_on_backfill_for_indicators,
-                event_types={DataEventType.BACKFILL_COMPLETED},
-            )
-
             print("[startup] IndicatorEngine bridged to DataManager ✓")
         except Exception as exc:
             logger.warning("IndicatorEngine bridge failed: %s", exc)
@@ -458,71 +133,17 @@ async def startup_event() -> None:
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     """Application shutdown handler."""
-    _STEP_TIMEOUT = 5  # seconds per shutdown step
-
-    # ── 1. Cancel fire-and-forget background tasks first ─────
-    # These tasks may be sleeping or making HTTP requests;
-    # if not cancelled they keep the event loop alive.
-
-    # Cancel startup gap scan
-    gap_scan_task = getattr(app.state, "gap_scan_task", None)
-    if gap_scan_task is not None and not gap_scan_task.done():
-        gap_scan_task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await asyncio.wait_for(gap_scan_task, timeout=2)
-        print("[shutdown] Gap scan task cancelled ✓")
-
-    # Cancel all pending backfill futures
-    backfill_futures = getattr(app.state, "backfill_futures", [])
-    for fut in backfill_futures:
-        if not fut.done():
-            fut.cancel()
-    if backfill_futures:
-        print(f"[shutdown] Cancelled {len(backfill_futures)} backfill futures ✓")
-
-    # ── 2. Shut down DataManager (streams, aggregator, eventbus) ──
-    dm = getattr(app.state, "data_manager", None)
-    if dm is not None:
+    indicator_engine = getattr(app.state, "indicator_engine", None)
+    if indicator_engine is not None:
         try:
-            await asyncio.wait_for(dm.shutdown(), timeout=_STEP_TIMEOUT)
-            print("[shutdown] DataManager shut down gracefully ✓")
-        except asyncio.TimeoutError:
-            print("[shutdown] DataManager shutdown timed out, forcing")
+            indicator_engine.stop()
+            print("[shutdown] IndicatorEngine shut down ✓")
         except Exception as exc:
-            print(f"[shutdown] DataManager shutdown error: {exc}")
+            print(f"[shutdown] IndicatorEngine shutdown error: {exc}")
 
-    # ── 3. Shutdown ingestion factory (closes shared MarketDataIngress) ──
-    ingestion_factory = getattr(app.state, "ingestion_factory", None)
-    if ingestion_factory is not None:
-        try:
-            await asyncio.wait_for(ingestion_factory.shutdown(), timeout=_STEP_TIMEOUT)
-            print("[shutdown] IngestionFactory shut down ✓")
-        except asyncio.TimeoutError:
-            print("[shutdown] IngestionFactory shutdown timed out")
-        except Exception as exc:
-            print(f"[shutdown] IngestionFactory shutdown error: {exc}")
-
-    # ── 4. Shutdown backfill transport (HTTP session) ──
-    transport = getattr(app.state, "backfill_transport", None)
-    if transport is not None:
-        try:
-            await asyncio.wait_for(transport.stop(), timeout=_STEP_TIMEOUT)
-            print("[shutdown] Backfill transport shut down ✓")
-        except asyncio.TimeoutError:
-            print("[shutdown] Backfill transport shutdown timed out")
-        except Exception as exc:
-            print(f"[shutdown] Backfill transport shutdown error: {exc}")
-
-    # ── 5. Shutdown PriceTickerService ──
-    price_ticker = getattr(app.state, "price_ticker", None)
-    if price_ticker is not None:
-        try:
-            await asyncio.wait_for(price_ticker.stop(), timeout=_STEP_TIMEOUT)
-            print("[shutdown] PriceTickerService shut down ✓")
-        except asyncio.TimeoutError:
-            print("[shutdown] PriceTickerService shutdown timed out")
-        except Exception as exc:
-            print(f"[shutdown] PriceTickerService shutdown error: {exc}")
+    runtime = getattr(app.state, "data_engine_runtime", None)
+    if runtime is not None:
+        await runtime.shutdown(step_timeout=5)
 
     print("[shutdown] All components shut down")
 
@@ -539,7 +160,7 @@ async def root() -> dict:
         "name": "CandleScope API",
         "version": "0.3.0",
         "status": "running",
-        "data_manager": "active" if dm is not None else "legacy_fallback",
+        "data_manager": "active" if dm is not None else "not_initialized",
     }
 
 

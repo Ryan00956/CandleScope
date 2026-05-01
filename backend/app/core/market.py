@@ -420,3 +420,26 @@ def aggregate_rows_by_month(
             "volume": round(sum(r["volume"] for r in rows), 8),
         })
     return result
+
+
+# Canonical interval policy lives in data_engine. Keep these historical
+# app.core.market names as compatibility aliases for API and storage callers.
+from app.data_engine import interval_policy as _interval_policy  # noqa: E402
+
+VALID_INTERVALS = _interval_policy.VALID_INTERVALS
+INTERVAL_SECONDS = _interval_policy.INTERVAL_SECONDS
+EPHEMERAL_INTERVALS = _interval_policy.EPHEMERAL_INTERVALS
+parse_custom_interval = _interval_policy.parse_custom_interval
+is_custom_interval = _interval_policy.is_custom_interval
+is_ephemeral_interval = _interval_policy.is_ephemeral_interval
+get_tier_for_interval = _interval_policy.get_tier_for_interval
+compute_bucket_start = _interval_policy.compute_bucket_start
+compute_bucket_start_ms = _interval_policy.compute_bucket_start_ms
+find_best_base_interval = _interval_policy.find_best_base_interval
+find_optimal_fetch_plan = _interval_policy.find_optimal_fetch_plan
+is_monthly_interval = _interval_policy.is_monthly_interval
+parse_monthly_count = _interval_policy.parse_monthly_count
+compute_month_bucket = _interval_policy.compute_month_bucket
+compute_month_bucket_ms = _interval_policy.compute_month_bucket_ms
+next_month_bucket = _interval_policy.next_month_bucket
+aggregate_rows_by_month = _interval_policy.aggregate_rows_by_month

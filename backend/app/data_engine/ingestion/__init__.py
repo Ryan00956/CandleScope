@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from .config import IngestionConfig
 from .models import (
@@ -49,11 +49,12 @@ from .models import (
 from .metrics import LayerMetrics
 from .transport import TransportLayer, TransportError
 from .session import SessionLayer
+from .session_types import SessionLike
 from .feed_control import FeedControlLayer
 from .normalize import NormalizeLayer
 from .continuity import ContinuityLayer
-from .delivery import DeliveryLayer
-from .shared_ws import SharedWsHubRegistry
+from .delivery import DeliveryLayer, DeliveryQueueSubscriber
+from .shared_ws import SharedWsHubRegistry, SharedWsSessionAdapter
 
 logger = logging.getLogger("ingestion")
 
@@ -73,10 +74,12 @@ __all__ = [
     "TransportLayer",
     "TransportError",
     "SessionLayer",
+    "SessionLike",
     "FeedControlLayer",
     "NormalizeLayer",
     "ContinuityLayer",
     "DeliveryLayer",
+    "DeliveryQueueSubscriber",
     # Orchestrator
     "StreamPipeline",
     "MarketDataIngress",
@@ -94,7 +97,7 @@ class StreamPipeline:
         config: IngestionConfig,
         transport: TransportLayer,
         descriptor: StreamDescriptor,
-        shared_ws_hub=None,
+        session_factory: Callable[[], SessionLike] | None = None,
     ) -> None:
         self.descriptor = descriptor
 
@@ -103,7 +106,7 @@ class StreamPipeline:
             config,
             transport,
             descriptor,
-            shared_ws_hub=shared_ws_hub,
+            session_factory=session_factory,
         )
         self.normalize = NormalizeLayer(config, descriptor)
         self.continuity = ContinuityLayer(config, transport, descriptor)
@@ -195,7 +198,7 @@ class MarketDataIngress:
             self._cfg,
             self._transport,
             descriptor,
-            shared_ws_hub=self._shared_ws.get_hub(descriptor),
+            session_factory=self._create_session_factory(descriptor),
         )
         self._pipelines[key] = pipeline
         await pipeline.start()
@@ -212,6 +215,23 @@ class MarketDataIngress:
     def get_pipeline(self, key: str) -> StreamPipeline | None:
         """Get a pipeline by its key."""
         return self._pipelines.get(key)
+
+    def _create_session_factory(
+        self,
+        descriptor: StreamDescriptor,
+    ) -> Callable[[], SessionLike] | None:
+        shared_hub = self._shared_ws.get_hub(descriptor)
+        if shared_hub is not None:
+            return lambda: SharedWsSessionAdapter(shared_hub, descriptor)
+
+        if not self._transport.supports_ws(descriptor):
+            return None
+
+        return lambda: SessionLayer(
+            config=self._cfg,
+            transport=self._transport,
+            descriptor=descriptor,
+        )
 
     # ── Observability ────────────────────────────────────────
 

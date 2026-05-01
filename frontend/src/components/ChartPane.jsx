@@ -125,6 +125,19 @@ function getCustomPointerClass(tool) {
     return "";
 }
 
+function shouldShowCrosshairDetails(tool) {
+    return !HIDDEN_CROSSHAIR_TOOL_IDS.has(tool);
+}
+
+function shouldShowIndicatorCrosshairMarker(lineConfig, tool) {
+    return lineConfig?.type !== "histogram" && shouldShowCrosshairDetails(tool);
+}
+
+function getPaneCursorStyle(tool, paneType) {
+    if (paneType !== "main" && CUSTOM_POINTER_TOOL_IDS.has(tool)) return "default";
+    return getCursorStyleForTool(tool);
+}
+
 const ChartPane = forwardRef(function ChartPane({
     symbol,
     drawingKeyBase,
@@ -457,7 +470,7 @@ const ChartPane = forwardRef(function ChartPane({
         const chart = chartRef.current;
         if (!chart) return;
         chart.applyOptions({
-            crosshair: buildCrosshairOptions(!HIDDEN_CROSSHAIR_TOOL_IDS.has(drawingTool)),
+            crosshair: buildCrosshairOptions(shouldShowCrosshairDetails(drawingTool)),
         });
     }, [drawingTool]);
 
@@ -684,6 +697,12 @@ const ChartPane = forwardRef(function ChartPane({
 
                 try {
                     const isHistogram = line.type === "histogram";
+                    if (!isHistogram) {
+                        series.applyOptions({
+                            crosshairMarkerVisible: shouldShowIndicatorCrosshairMarker(line, drawingTool),
+                        });
+                    }
+
                     let validData;
                     if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
                         const colorMap = new Map();
@@ -758,6 +777,10 @@ const ChartPane = forwardRef(function ChartPane({
                 priceLineVisible: false,
             };
 
+            if (!isHistogram) {
+                opts.crosshairMarkerVisible = shouldShowIndicatorCrosshairMarker(line, drawingTool);
+            }
+
             if (isHistogram) {
                 opts.priceFormat = { type: "volume" };
             }
@@ -809,7 +832,7 @@ const ChartPane = forwardRef(function ChartPane({
                 setSeriesReady((prev) => prev + 1); // trigger re-attachment in useDrawing
             }
         }
-    }, [indicatorLines, paneType]);
+    }, [indicatorLines, paneType, drawingTool]);
 
     /* ── Apply indicator markers (main pane only) ──────────── */
     // Lightweight Charts supports setMarkers() on any series.
@@ -1207,6 +1230,15 @@ const ChartPane = forwardRef(function ChartPane({
             : `${drawingKeyBase || symbol}__${paneId}`,
         seriesReady,
     });
+
+    useEffect(() => {
+        const container = containerRef.current;
+        if (!container) return;
+        if (paneType !== "main" && CUSTOM_POINTER_TOOL_IDS.has(drawingTool)) {
+            container.style.setProperty("cursor", "default");
+        }
+    }, [drawingTool, paneType]);
+
     const [chartContainerWidth, setChartContainerWidth] = useState(0);
 
     useEffect(() => {
@@ -1351,9 +1383,9 @@ const ChartPane = forwardRef(function ChartPane({
             <div
                 ref={containerRef}
                 className="chart-pane-container"
-                style={{ cursor: getCursorStyleForTool(drawingTool) }}
+                style={{ cursor: getPaneCursorStyle(drawingTool, paneType) }}
             />
-            {CUSTOM_POINTER_TOOL_IDS.has(drawingTool) && (
+            {paneType === "main" && CUSTOM_POINTER_TOOL_IDS.has(drawingTool) && (
                 <div className="chart-pane-cursor-overlay" aria-hidden="true">
                     <div
                         ref={cursorOverlayRef}

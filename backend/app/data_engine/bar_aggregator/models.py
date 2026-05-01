@@ -39,6 +39,14 @@ class BarSourceMode(str, enum.Enum):
     AUTO = "auto"                  # prefer kline, fallback to trade
 
 
+class MergeMode(str, enum.Enum):
+    """How a BarInput should be merged into the target bucket."""
+    SNAPSHOT = "snapshot"          # cumulative kline snapshot for target interval
+    INCREMENTAL = "incremental"    # tick/trade delta, additive fields accumulate
+    COMPONENT = "component"        # component bar for custom interval rebuild
+    PRICE_ONLY = "price_only"      # update OHLC only; leave additive fields intact
+
+
 class BarStatus(str, enum.Enum):
     """Lifecycle status of a bar being formed."""
     FORMING = "forming"            # actively receiving data
@@ -100,6 +108,7 @@ class BarInput:
     volume: float
     source: BarInputSource         # where this came from
     is_closed: bool                # whether the source bar is closed
+    merge_mode: MergeMode | str | None = None
     exchange: str = "binance"
     market_type: str = "spot"
     quote_volume: float = 0.0
@@ -113,6 +122,8 @@ class BarInput:
         self.symbol = self.symbol.upper().strip()
         self.exchange = self.exchange.strip().lower()
         self.market_type = self.market_type.strip().lower()
+        if self.merge_mode is not None and not isinstance(self.merge_mode, MergeMode):
+            self.merge_mode = MergeMode(str(self.merge_mode))
 
     @property
     def input_key(self) -> str:
@@ -137,6 +148,7 @@ class BarInput:
             "volume": self.volume,
             "source": self.source.value,
             "is_closed": self.is_closed,
+            "merge_mode": self.merge_mode.value if self.merge_mode else None,
             "quote_volume": self.quote_volume,
             "trades": self.trades,
         }
@@ -438,69 +450,11 @@ class FinalizerStrategy(Protocol):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Interval Helpers (shared with backfill)
+#  Interval Helpers (compatibility exports)
 # ═══════════════════════════════════════════════════════════════
 
-# Standard intervals supported by Binance
-STANDARD_INTERVALS: dict[str, int] = {
-    "1s": 1_000,
-    "1m": 60_000,
-    "3m": 180_000,
-    "5m": 300_000,
-    "15m": 900_000,
-    "30m": 1_800_000,
-    "1h": 3_600_000,
-    "2h": 7_200_000,
-    "4h": 14_400_000,
-    "6h": 21_600_000,
-    "8h": 28_800_000,
-    "12h": 43_200_000,
-    "1d": 86_400_000,
-    "3d": 259_200_000,
-    "1w": 604_800_000,
-    "1M": 2_592_000_000,
-}
-
-_SUFFIX_MS: dict[str, int] = {
-    "s": 1_000,
-    "m": 60_000,
-    "h": 3_600_000,
-    "d": 86_400_000,
-    "w": 604_800_000,
-    "M": 2_592_000_000,
-}
-
-
-def parse_interval_ms(interval: str) -> int | None:
-    """Parse an interval string (standard or custom) into milliseconds.
-
-    Supports standard ("1m", "4h") and custom ("91m", "7h") intervals.
-
-    Returns None if the string cannot be parsed.
-
-    Examples::
-
-        parse_interval_ms("1m")  → 60_000
-        parse_interval_ms("91m") → 5_460_000
-        parse_interval_ms("4h")  → 14_400_000
-    """
-    if interval in STANDARD_INTERVALS:
-        return STANDARD_INTERVALS[interval]
-    if len(interval) < 2:
-        return None
-    suffix = interval[-1]
-    multiplier = _SUFFIX_MS.get(suffix)
-    if multiplier is None:
-        return None
-    try:
-        value = int(interval[:-1])
-    except ValueError:
-        return None
-    if value <= 0:
-        return None
-    return value * multiplier
-
-
-def is_standard_interval(interval: str) -> bool:
-    """Return True if the interval is natively supported by the exchange."""
-    return interval in STANDARD_INTERVALS
+from app.data_engine.interval_policy import (  # noqa: E402
+    STANDARD_INTERVALS,
+    is_standard_interval,
+    parse_interval_ms,
+)

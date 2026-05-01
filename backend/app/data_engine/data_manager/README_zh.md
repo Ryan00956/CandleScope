@@ -19,8 +19,8 @@ Data Manager 是所有 K 线数据操作的**唯一入口**。图表、指标、
 │  └────┬─────┘  └──────┬──────┘  └───────┬────────┘  │
 │       │               │                │             │
 │  ┌────┴───────────────┴────────────────┴──────────┐  │
-│  │           StreamCoordinator（流协调器）          │  │
-│  │     数据采集 + 聚合 生命周期管理                   │  │
+│  │ StreamCoordinator / BackfillCoordinator /       │  │
+│  │ Maintenance / Subscription / PriceSnapshotCache │  │
 │  └────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────┘
          ▲              ▲              ▲
@@ -39,6 +39,14 @@ Data Manager 是所有 K 线数据操作的**唯一入口**。图表、指标、
 | `event_bus.py` | `DataEventBus` — 基于主题的发布/订阅，支持回调和异步迭代器两种订阅方式，支持中间件 |
 | `query.py` | `QueryEngine` — 三级查询引擎：缓存 → 存储 → 回填 |
 | `coordinator.py` | `StreamCoordinator` — 数据采集管道的生命周期管理、预热、空闲回收 |
+| `backfill_coordinator.py` | `BackfillCoordinator` — backfill 请求去重、合并、重试、取消、回灌和事件发布 |
+| `warm_start.py` | `WarmStartService` — 标准/自定义周期启动预热 |
+| `aggregator_bridge.py` | `AggregatorBridge` — BarAggregator 事件持久化、cache merge、EventBus 转发 |
+| `custom_query.py` | `CustomIntervalQueryService` — 自定义周期查询聚合 |
+| `maintenance.py` | `MaintenanceService` — settings storage repair/gap scan/delete 的实现 |
+| `price_cache.py` | `PriceSnapshotCache` — 实时价格快照与 `PRICE_UPDATED` 事件数据 |
+| `subscriptions.py` | `SubscriptionService` — `full` / `price` / `none` 订阅等级持久化与恢复 |
+| `retention.py` | `RetentionService` — cache/db limits 快照与维护 |
 | `manager.py` | `DataManager` — 组合所有组件的公共门面 |
 
 ## 快速开始
@@ -49,10 +57,10 @@ from app.data_engine.data_manager import DataManager, DataManagerConfig
 # 使用默认或自定义配置创建
 dm = DataManager()
 
-# 注入可选后端
+# 注入可选后端。生产启动通常由 DataEngineRuntime 统一完成 wiring。
 dm.set_storage(my_storage_backend)          # SQLite、PostgreSQL 等
 dm.set_ingestion_factory(my_ws_factory)     # Binance、OKX 等
-dm.set_backfill_trigger(backfill_fn)        # 缺口填补回调
+dm.set_backfill_trigger(backfill_fn)        # 通常指向 BackfillCoordinator
 
 # 启动（预热缓存、启动空闲回收器）
 await dm.start()
@@ -86,6 +94,8 @@ print(result.backfill_triggered)  # 是否触发了回填
 1. **缓存** — 亚毫秒级，内存中
 2. **存储** — SQLite / 数据库回退，结果会自动缓存供下次使用
 3. **回填** — 如果检测到缺口，触发异步历史数据获取
+
+当前 `QueryEngine` 仍以 callback 方式提交缺失区间；生产 wiring 中该 callback 指向 `BackfillCoordinator`，由 coordinator 负责 request 去重、range 合并、执行 `BackfillEngine`、从 storage 回读最终 bars、回灌 DataManager cache 并发布事件。
 
 ## 订阅事件
 
@@ -128,6 +138,7 @@ async for event in dm.subscribe_iter("BTCUSDT", "1m"):
 | `STREAM_STOPPED` | 数据采集管道停止 |
 | `STREAM_ERROR` | 数据流遇到错误 |
 | `BACKFILL_*` | 回填生命周期（开始/完成/失败） |
+| `PRICE_UPDATED` | 价格快照更新 |
 | `CACHE_PREWARM` | 缓存预热完成 |
 | `CACHE_EVICTION` | 系列被从缓存淘汰 |
 
@@ -144,6 +155,36 @@ await dm.stop_stream("BTCUSDT", "1m")
 streams = dm.get_all_streams()
 for s in streams:
     print(s.to_dict())
+```
+
+## 价格快照与订阅等级
+
+价格流已经并入 DataManager，不再依赖旧 `PriceTickerService`：
+
+```python
+await dm.ensure_price_stream("BTCUSDT", exchange="binance", market_type="spot")
+snapshot = dm.get_price("BTCUSDT")
+all_prices = dm.get_prices_snapshot()
+
+await dm.subscriptions.set_tier("BTCUSDT", SubscriptionTier.FULL)
+await dm.subscriptions.set_tier("okx:spot:BTC-USDT", SubscriptionTier.PRICE_ONLY)
+```
+
+- `FULL` 会启动 K 线 stream，并可同时拥有 price snapshot。
+- `PRICE_ONLY` 只启动 ticker/miniTicker price stream。
+- `NONE` 只保存订阅等级，不启动行情。
+
+REST `/subscriptions/prices` 与 WS `/stream/prices` 都从 `PriceSnapshotCache` / `DataEventBus` 取数。
+
+## 维护 Facade
+
+settings API 不直接读 DataManager 私有字段或直接运行 BackfillEngine，统一调用 DataManager public facade：
+
+```python
+await dm.repair_custom_storage("BTCUSDT", "45m", ...)
+await dm.scan_and_fill_storage_gaps("BTCUSDT", ...)
+await dm.delete_storage_data("BTCUSDT", "1m", ...)
+snapshot = dm.retention_snapshot()
 ```
 
 ## 中间件
@@ -169,6 +210,8 @@ await data_manager.on_bar_event(
     interval="5m",
     bar=bar,
     event_type=DataEventType.BAR_CLOSED,
+    exchange="binance",
+    market_type="spot",
 )
 ```
 

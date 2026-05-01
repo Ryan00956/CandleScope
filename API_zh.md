@@ -4,6 +4,7 @@
 
 本文档提供了 CandleScope 的 HTTP REST 接口与 WebSocket 实时流 API 的完整集成指南。
 所有 K 线相关的查询端点（Endpoints）现已全面接入统一的 `DataManager`，由其自动调度 **三级缓存系统**（内存缓存 → SQLite 持久化 → 异步智能历史回填）。
+正式数据接口不再回退到 legacy/mock 数据路径：如果 `DataManager` 未初始化，K 线 REST 接口会返回 `503 Service Unavailable`，WebSocket 会发送错误消息并关闭连接。
 
 ---
 
@@ -53,7 +54,7 @@ http://localhost:8000/api/v1
   "base_interval": null
 }
 ```
-*注：`source` 字段会真实返回本次数据的来源，可能为 `cache` (内存最高极速)、`storage` (SQLite 数据库)、`mixed` (混合)、或 `empty` (无数据，已触发后台回填)。*
+*注：`source` 字段会真实返回本次数据的来源，可能为 `cache` (内存最高极速)、`storage` (SQLite 数据库)、`mixed` (混合)、或 `empty` (无数据，已提交后台回填请求)。`backfill_triggered` 为 true 时，前端应等待后续 WebSocket 回填完成事件后重拉。*
 
 ---
 
@@ -72,7 +73,7 @@ http://localhost:8000/api/v1
 ---
 
 ### 1.3 获取历史 K线 (Historical K-lines)
-获取从当前时间点往前推算指定天数的历史 K 线数据。后端会自动折算成适当的 `limit`，并在发现数据缺失（Gap）时，将缺失任务直接甩给后台的缺口雷达异步并行执行。
+获取从当前时间点往前推算指定天数的历史 K 线数据。后端会自动折算成适当的 `limit`，并在发现数据缺失（Gap）时，通过 `BackfillCoordinator` 异步提交修复请求。
 
 - **请求路径:** `/klines/history`
 - **请求方式:** `GET`
@@ -126,13 +127,13 @@ http://localhost:8000/api/v1
 
 ## 2. WebSocket 实时全量事件流 API
 
-提供了两种订阅流的方案。这些推送流与数据不只是“网络中继”，它们是高度集成的：经历了 Ingestion 摄取管道六层清洗 → BarAggregator 高级合成组装后 → 经由 EventBus 零损耗推送到前端图表。
+提供了三种订阅流方案。这些推送流不是“网络中继”：K 线事件经历 Ingestion 摄取管道六层清洗 → BarAggregator 合成组装 → DataManager EventBus 推送到前端；价格事件由 ingestion ticker 源进入 DataManager `PriceSnapshotCache` 后推送。
 
 ### 2.1 单周期固定流 (Single-Interval Stream)
 
 直接在 URL 参数里锁死想要监听的时间级别。
 
-- **WebSocket URL:** `ws://localhost:8000/api/v1/stream`
+- **WebSocket URL:** `ws://localhost:8000/api/v1/stream/klines`
 - **查询参数:** `?symbol=BTCUSDT&interval=1m`
 
 ---
@@ -141,7 +142,7 @@ http://localhost:8000/api/v1
 
 允许前端建立**唯一一条**物理 WS 长连接，并能在客户端通过发送指令、随意热插拔地监听和退订任意多个（甚至是系统现场动态生成的自定义级别） K 线周期。
 
-- **WebSocket URL:** `ws://localhost:8000/api/v1/stream/multi`
+- **WebSocket URL:** `ws://localhost:8000/api/v1/stream/klines_multi`
 - **查询参数:** `?symbol=BTCUSDT`
 
 **连接建立后，向服务端发送指令 (JSON格式):**
@@ -193,8 +194,8 @@ http://localhost:8000/api/v1
 ```
 
 **2. 缺失历史回填完毕通知 (类型: `"backfill_completed"`)**
-该信号是系统中极为关键的**异步解耦信标**！当你的 `before` 滚轮拖拽接口刚刚没有读取到旧日志时，经过数秒后（后台向币安批量化请求完成），此消息会将喜讯广电推送至全服。
-前端收到该事件后，需立即在本地执行重放拉取 `history/before` 动作。无需刷新网页，远古缺口便会自适应无缝显现。
+该信号是系统的异步解耦信标。当 `history/before` 或 `history` 查询提交了后台修复请求，`BackfillCoordinator` 完成 storage 写入和 DataManager cache 回灌后，会通过 EventBus 推送该消息。
+前端收到该事件后，应重拉对应区间或重新执行 `history/before`。
 ```json
 {
   "type": "backfill_completed",
@@ -215,6 +216,35 @@ http://localhost:8000/api/v1
 }
 ```
 *(其核心可用状态字面量可能包含: `starting`, `live`, `reconnecting`, `failed`, `stopped`)*
+
+---
+
+### 2.4 价格实时流 (Price Stream)
+
+- **REST 快照:** `GET /subscriptions/prices`
+- **WebSocket URL:** `ws://localhost:8000/api/v1/stream/prices`
+
+价格数据源为 DataManager price cache，不依赖旧 `PriceTickerService`。订阅等级为 `price` 或 `full` 的交易对会由 `dm.ensure_price_stream()` 启动 ticker ingestion。
+
+WebSocket 建连后先返回当前快照：
+
+```json
+{
+  "type": "prices",
+  "data": [
+    {
+      "symbol": "BTCUSDT",
+      "exchange": "binance",
+      "market_type": "spot",
+      "price": 42050.0,
+      "daily_open": 41800.0,
+      "timestamp_ms": 1700000000000
+    }
+  ]
+}
+```
+
+随后每次 `PRICE_UPDATED` 事件都会发送同样的 `prices` 包，`data` 中只包含本次更新的价格项。
 
 ---
 
@@ -244,7 +274,7 @@ http://localhost:8000/api/v1
 ### 3.2 强行擦除存储区 (Delete Storage Data)
 维护工具接口：选择性销毁某区间保存在 SQLite 里的缓存数据（注意，不会清空内存中的 Cache）。下次图表滚动到该区域时会强制触发从币安重新拉取的回填逻辑。
 
-- **请求路径:** `/klines/storage/delete`
+- **请求路径:** `/klines/storage`
 - **请求方式:** `DELETE`
 
 | 参数名 | 类型 | 必填 | 描述 |

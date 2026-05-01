@@ -493,6 +493,10 @@ class BarCache:
         self._ephemeral_max_bars = max_bars
         logger.info("Ephemeral cache limit updated to %d bars", max_bars)
 
+    def get_ephemeral_limit(self) -> int:
+        """Return the configured max bars for ephemeral cache series."""
+        return self._ephemeral_max_bars
+
     # ── Public: Snapshot ─────────────────────────────────────
 
     def snapshot(self) -> dict:
@@ -530,7 +534,7 @@ class BarCache:
 
         # Ephemeral intervals (e.g. 1s) get a separate cache capacity
         # since they are cache-only (no DB backing).
-        from app.core.market import is_ephemeral_interval
+        from app.data_engine.interval_policy import is_ephemeral_interval
         if is_ephemeral_interval(key.interval):
             max_bars = self._ephemeral_max_bars
         else:

@@ -36,9 +36,13 @@ _OKX_INTERVALS = {
 _REST_PATH: dict[str, dict[str, str]] = {
     "spot": {
         "kline": "/api/v5/market/history-candles",
+        "ticker": "/api/v5/market/ticker",
+        "miniTicker": "/api/v5/market/ticker",
     },
     "futures": {
         "kline": "/api/v5/market/history-candles",
+        "ticker": "/api/v5/market/ticker",
+        "miniTicker": "/api/v5/market/ticker",
     },
 }
 
@@ -123,6 +127,8 @@ class OkxExchangeAdapter:
         return params
 
     def build_ws_stream_name(self, descriptor) -> str:
+        if descriptor.stream_type.value in ("ticker", "miniTicker"):
+            return "tickers"
         interval = descriptor.interval or "1m"
         mapped = _OKX_INTERVALS.get(interval)
         if mapped is None:

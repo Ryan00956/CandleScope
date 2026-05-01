@@ -12,11 +12,13 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+
+from app.data_engine.data_manager.models import DataEventType
+from app.data_engine.data_manager.subscriptions import SubscriptionTier
 
 logger = logging.getLogger("candlescope.subscription_api")
 
@@ -37,14 +39,18 @@ class SyncWatchlistRequest(BaseModel):
 # ── Helpers ──────────────────────────────────────────────────
 
 def _get_sub_manager(request: Request):
-    mgr = getattr(request.app.state, "subscription_manager", None)
+    dm = getattr(request.app.state, "data_manager", None)
+    mgr = getattr(dm, "subscriptions", None) if dm is not None else None
     if mgr is None:
-        raise HTTPException(503, "SubscriptionManager not initialized")
+        raise HTTPException(503, "SubscriptionService not initialized")
     return mgr
 
 
-def _get_price_ticker(request: Request):
-    return getattr(request.app.state, "price_ticker", None)
+def _get_data_manager(request: Request):
+    dm = getattr(request.app.state, "data_manager", None)
+    if dm is None:
+        raise HTTPException(503, "DataManager not initialized")
+    return dm
 
 
 # ── REST endpoints ───────────────────────────────────────────
@@ -60,10 +66,8 @@ async def list_subscriptions(request: Request):
 @router.get("/prices")
 async def get_prices(request: Request):
     """Snapshot of current prices for all watched symbols."""
-    pt = _get_price_ticker(request)
-    if pt is None:
-        return {"prices": []}
-    return {"prices": pt.get_prices_snapshot()}
+    dm = _get_data_manager(request)
+    return {"prices": dm.get_prices_snapshot()}
 
 
 @router.post("/sync")
@@ -75,8 +79,6 @@ async def sync_watchlist(request: Request, body: SyncWatchlistRequest):
     Symbols that were previously subscribed but are no longer in any
     watchlist are downgraded to NONE.
     """
-    from app.data_engine.services.subscription_manager import SubscriptionTier
-
     mgr = _get_sub_manager(request)
     watchlist_set = {
         mgr.normalize_symbol(s)
@@ -113,8 +115,6 @@ async def get_subscription(request: Request, symbol: str):
 @router.put("/{symbol:path}")
 async def set_subscription_tier(request: Request, symbol: str, body: SetTierRequest):
     """Set the subscription tier for a symbol (supports composite keys)."""
-    from app.data_engine.services.subscription_manager import SubscriptionTier
-
     tier_str = body.tier.strip().lower()
     try:
         tier = SubscriptionTier(tier_str)
@@ -150,35 +150,29 @@ async def price_stream(websocket: WebSocket):
     """Push real-time price ticks to the frontend.
 
     The client connects, and we send batches of price updates as they
-    arrive from PriceTickerService.
+    arrive on the DataManager event bus.
     """
-    pt = getattr(websocket.app.state, "price_ticker", None)
-    if pt is None:
+    dm = getattr(websocket.app.state, "data_manager", None)
+    if dm is None:
         await websocket.accept()
-        await websocket.send_json({"type": "error", "detail": "PriceTickerService not available"})
+        await websocket.send_json({"type": "error", "detail": "DataManager not available"})
         await websocket.close(code=1011)
         return
 
     await websocket.accept()
     await websocket.send_json({"type": "connected"})
-
-    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
-
-    async def _on_prices(ticks):
-        try:
-            data = [t.to_dict() for t in ticks]
-            await queue.put(data)
-        except asyncio.QueueFull:
-            pass  # drop if consumer is too slow
-
-    pt.on_price_update(_on_prices)
+    await websocket.send_json({"type": "prices", "data": dm.get_prices_snapshot()})
 
     try:
         # Task to forward price updates
         async def _forwarder():
-            while True:
-                batch = await queue.get()
-                await websocket.send_json({"type": "prices", "data": batch})
+            async for event in dm.subscribe_iter(
+                event_types={DataEventType.PRICE_UPDATED},
+            ):
+                price = event.detail.get("price")
+                if price is None:
+                    continue
+                await websocket.send_json({"type": "prices", "data": [price]})
 
         # Task to read client messages (keepalive pings)
         async def _reader():
@@ -207,9 +201,6 @@ async def price_stream(websocket: WebSocket):
     except Exception as exc:
         logger.warning("Price WS error: %s", exc)
     finally:
-        # Remove callback
-        if _on_prices in pt._callbacks:
-            pt._callbacks.remove(_on_prices)
         try:
             await websocket.close()
         except Exception:

@@ -3,7 +3,7 @@ Reconciler — deduplicates, aggregates custom intervals, writes to DB, and push
 
 Responsibilities:
   * Receive ``FetchResult`` objects from the Historical Fetcher
-  * Deduplicate against existing DB data (skip / overwrite / newer_wins)
+  * Deduplicate against existing DB data (skip / overwrite / backfill_wins)
   * Aggregate standard-interval bars into custom-interval candles
     — **preferring** BarAggregator when available (DRY compliance)
     — falling back to built-in ``_default_aggregate`` when aggregator is not set
@@ -33,6 +33,12 @@ import logging
 import time
 from typing import Callable, Awaitable, Any
 
+from app.data_engine.interval_policy import (
+    compute_bucket_close_ms,
+    compute_bucket_start_ms,
+    parse_interval_ms,
+)
+
 from ..ingestion.metrics import LayerMetrics
 from .config import BackfillConfig
 from .models import (
@@ -45,9 +51,8 @@ from .models import (
     IntervalDecomposition,
     ReconcileResult,
     StorageBackend,
-    parse_interval_ms,
+    WrittenRange,
 )
-from app.core.market import compute_bucket_start_ms
 
 logger = logging.getLogger("backfill.Reconciler")
 
@@ -192,21 +197,25 @@ class Reconciler:
 
             # 2 & 3. Dedup + write standard bars
             for (exchange, market_type, symbol, interval), bars in grouped.items():
-                written, skipped, deduped = await self._dedup_and_write(
+                written, skipped, deduped, failures, written_ranges = await self._dedup_and_write(
                     symbol, interval, bars, exchange=exchange, market_type=market_type,
                 )
                 result.bars_written += written
                 result.bars_skipped += skipped
                 result.bars_deduplicated += deduped
+                result.written_ranges.extend(written_ranges)
+                self._record_write_failures(result, failures)
 
             # 4. Generate custom-interval bars
             if self._cfg.reconcile_generate_custom and plan.custom_intervals:
                 for decomp in plan.decompositions:
-                    gen, wrt = await self._generate_custom_bars(
+                    gen, wrt, failures, written_ranges = await self._generate_custom_bars(
                         decomp, grouped,
                     )
                     result.custom_bars_generated += gen
                     result.custom_bars_written += wrt
+                    result.written_ranges.extend(written_ranges)
+                    self._record_write_failures(result, failures)
 
             # 5. Push to cache
             if self._cfg.reconcile_enable_cache_push and self._cache is not None:
@@ -267,13 +276,13 @@ class Reconciler:
         bars: list[FetchedBar],
         exchange: str = "binance",
         market_type: str = "spot",
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, list[dict[str, Any]], list[WrittenRange]]:
         """Deduplicate bars against DB and write in batches.
 
-        Returns (written, skipped, deduplicated).
+        Returns (written, skipped, deduplicated, failures, written_ranges).
         """
         if not bars:
-            return 0, 0, 0
+            return 0, 0, 0, [], []
 
         strategy = DeduplicationStrategy(self._cfg.reconcile_dedup_strategy)
         batch_size = self._cfg.reconcile_write_batch_size
@@ -303,6 +312,8 @@ class Reconciler:
 
         # Write in batches
         written = 0
+        failures: list[dict[str, Any]] = []
+        written_ranges: list[WrittenRange] = []
         for i in range(0, len(to_write), batch_size):
             batch = to_write[i : i + batch_size]
             dicts = [b.to_storage_dict() for b in batch]
@@ -311,6 +322,18 @@ class Reconciler:
                     symbol, interval, dicts, source="backfill", exchange=exchange, market_type=market_type,
                 )
                 written += n
+                written_range = self._written_range_from_batch(
+                    exchange=exchange,
+                    market_type=market_type,
+                    symbol=symbol,
+                    interval=interval,
+                    batch=batch,
+                    bars_written=n,
+                    source="backfill",
+                    phase="standard",
+                )
+                if written_range is not None:
+                    written_ranges.append(written_range)
                 await self._fire_write_batch(symbol, interval, n)
             except Exception as exc:
                 logger.error(
@@ -318,8 +341,17 @@ class Reconciler:
                     symbol, interval, exc, exc_info=True,
                 )
                 self._metrics.inc("write_errors")
+                failures.append(self._write_failure_detail(
+                    exchange=exchange,
+                    market_type=market_type,
+                    symbol=symbol,
+                    interval=interval,
+                    batch=batch,
+                    error=exc,
+                    phase="standard",
+                ))
 
-        return written, skipped, deduped
+        return written, skipped, deduped, failures, written_ranges
 
     def _should_replace(
         self, bar: FetchedBar, strategy: DeduplicationStrategy,
@@ -332,8 +364,8 @@ class Reconciler:
             return False
         if strategy == DeduplicationStrategy.OVERWRITE:
             return True
-        # NEWER_WINS — without querying the existing row's timestamp,
-        # we default to keeping new (backfill data is presumably correct)
+        # BACKFILL_WINS (and the legacy newer_wins name) keeps the fetched
+        # repair data without pretending we compared storage updated_at.
         return True
 
     # ── Internal: Custom interval aggregation ────────────────
@@ -342,7 +374,7 @@ class Reconciler:
         self,
         decomp: IntervalDecomposition,
         grouped: dict[tuple[str, str, str, str], list[FetchedBar]],
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, list[dict[str, Any]], list[WrittenRange]]:
         """Aggregate standard bars into custom-interval candles.
 
         When a BarAggregator is available, component bars are fed through
@@ -353,12 +385,14 @@ class Reconciler:
         When no BarAggregator is available, falls back to the built-in
         ``_aggregate_to_custom`` implementation.
 
-        Returns (generated, written).
+        Returns (generated, written, failures, written_ranges).
         """
         custom_iv = decomp.custom_interval
         custom_ms = decomp.custom_duration_ms
         generated = 0
         written = 0
+        failures: list[dict[str, Any]] = []
+        written_ranges: list[WrittenRange] = []
 
         # Collect all component bars for each symbol
         symbols: set[tuple[str, str, str]] = set()
@@ -384,34 +418,18 @@ class Reconciler:
             # ── Route through BarAggregator if available ─────
             if self._bar_aggregator is not None:
                 try:
-                    # Ensure the custom interval target is registered
-                    self._bar_aggregator.add_target(
-                        symbol, custom_iv, exchange=exchange, market_type=market_type,
-                    )
-
-                    # Feed component bars strictly in global chronological order.
-                    # Grouping by source interval first breaks ordering for mixed
-                    # decompositions such as 7m -> 5m + 1m + 1m, which can close a
-                    # custom bucket before all of its components have arrived.
-                    for bar in bars:
-                        await self._bar_aggregator.on_backfill_bars(
-                            symbol,
-                            bar.interval,
-                            [bar.to_dict()],
-                            exchange=exchange,
-                            market_type=market_type,
-                        )
-
-                    # Collect generated bars from BarAggregator's state
-                    recent = self._bar_aggregator.get_recent_bars(
+                    # Aggregate in an isolated BarAggregator instance so the
+                    # reconciler cannot pollute live targets or active state.
+                    batch_states = await self._bar_aggregator.aggregate_batch(
                         symbol,
                         custom_iv,
-                        limit=10000,
+                        None,
+                        bars,
                         exchange=exchange,
                         market_type=market_type,
                     )
                     custom_bars_from_agg = []
-                    for bar_state in recent:
+                    for bar_state in batch_states:
                         if not (bucket_min_ms <= bar_state.bucket_start_ms <= bucket_max_ms):
                             continue
                         custom_bars_from_agg.append(FetchedBar(
@@ -448,12 +466,34 @@ class Reconciler:
                                 market_type=market_type,
                             )
                             written += n
+                            written_range = self._written_range_from_batch(
+                                exchange=exchange,
+                                market_type=market_type,
+                                symbol=symbol,
+                                interval=custom_iv,
+                                batch=batch,
+                                bars_written=n,
+                                source="backfill_aggregated",
+                                phase="custom_via_aggregator",
+                            )
+                            if written_range is not None:
+                                written_ranges.append(written_range)
                         except Exception as exc:
                             logger.error(
                                 "Custom bar write (via aggregator) failed "
                                 "for %s@%s: %s",
                                 symbol, custom_iv, exc, exc_info=True,
                             )
+                            self._metrics.inc("write_errors")
+                            failures.append(self._write_failure_detail(
+                                exchange=exchange,
+                                market_type=market_type,
+                                symbol=symbol,
+                                interval=custom_iv,
+                                batch=batch,
+                                error=exc,
+                                phase="custom_via_aggregator",
+                            ))
                     logger.debug(
                         "Custom bars via BarAggregator: %s@%s → %d bars",
                         symbol, custom_iv, len(custom_bars_from_agg),
@@ -490,13 +530,103 @@ class Reconciler:
                         market_type=market_type,
                     )
                     written += n
+                    written_range = self._written_range_from_batch(
+                        exchange=exchange,
+                        market_type=market_type,
+                        symbol=symbol,
+                        interval=custom_iv,
+                        batch=batch,
+                        bars_written=n,
+                        source="backfill_aggregated",
+                        phase="custom",
+                    )
+                    if written_range is not None:
+                        written_ranges.append(written_range)
                 except Exception as exc:
                     logger.error(
                         "Custom bar write failed for %s@%s: %s",
                         symbol, custom_iv, exc, exc_info=True,
                     )
+                    self._metrics.inc("write_errors")
+                    failures.append(self._write_failure_detail(
+                        exchange=exchange,
+                        market_type=market_type,
+                        symbol=symbol,
+                        interval=custom_iv,
+                        batch=batch,
+                        error=exc,
+                        phase="custom",
+                    ))
 
-        return generated, written
+        return generated, written, failures, written_ranges
+
+    @staticmethod
+    def _written_range_from_batch(
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+        batch: list[FetchedBar],
+        bars_written: int,
+        source: str,
+        phase: str,
+    ) -> WrittenRange | None:
+        if bars_written <= 0 or not batch:
+            return None
+        open_times = [bar.open_time for bar in batch]
+        return WrittenRange(
+            symbol=symbol,
+            interval=interval,
+            exchange=exchange,
+            market_type=market_type,
+            start_ms=min(open_times),
+            end_ms=max(open_times),
+            bars_written=bars_written,
+            source=source,
+            phase=phase,
+        )
+
+    @staticmethod
+    def _write_failure_detail(
+        *,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+        interval: str,
+        batch: list[FetchedBar],
+        error: Exception,
+        phase: str,
+    ) -> dict[str, Any]:
+        open_times = [bar.open_time for bar in batch]
+        return {
+            "exchange": exchange,
+            "market_type": market_type,
+            "symbol": symbol,
+            "interval": interval,
+            "phase": phase,
+            "batch_size": len(batch),
+            "start_ms": min(open_times) if open_times else None,
+            "end_ms": max(open_times) if open_times else None,
+            "error": str(error),
+        }
+
+    @staticmethod
+    def _record_write_failures(
+        result: ReconcileResult,
+        failures: list[dict[str, Any]],
+    ) -> None:
+        if not failures:
+            return
+        result.write_errors += len(failures)
+        result.failed_batches.extend(failures)
+        for failure in failures:
+            result.errors.append(
+                "Write batch failed for "
+                f"{failure['exchange']}:{failure['market_type']}:"
+                f"{failure['symbol']}@{failure['interval']} "
+                f"({failure['phase']}): {failure['error']}"
+            )
 
     @staticmethod
     def _custom_bucket_bounds(
@@ -536,7 +666,11 @@ class Reconciler:
         for bucket_start in sorted(buckets.keys()):
             bucket_bars = buckets[bucket_start]
             bucket_bars.sort(key=lambda b: b.open_time)
-            bucket_end = bucket_start + custom_ms - 1
+            bucket_end = compute_bucket_close_ms(
+                bucket_start,
+                custom_ms,
+                interval=custom_interval,
+            )
 
             if self._custom_aggregator is not None:
                 agg = self._custom_aggregator(

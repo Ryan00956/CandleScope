@@ -7,7 +7,7 @@
 
 本模块是 CandleScope 的**最底层数据接入层**。它连接交易所的 WebSocket/REST API，将原始数据转换为统一的 `MarketEvent` 格式，并输出稳定的事件流供下游服务订阅。
 
-**本模块不负责生成K线、计算指标或存储数据。** 这些职责属于下游层（kline_aggregator、storage 等）。
+**本模块不负责生成K线、计算指标、写存储或执行历史回补。** 这些职责属于下游层（`BarAggregator`、`DataManager`、`BackfillCoordinator` 等）。
 
 ---
 
@@ -28,14 +28,22 @@
 ├─────────────────┤
 │  L4: Normalize   │  原始JSON → MarketEvent — 统一格式转换
 ├─────────────────┤
-│  L5: Continuity  │  去重、间隙检测、自动回填
+│  L5: Continuity  │  去重、间隙检测、GapMarker 输出
 ├─────────────────┤
 │  L6: Delivery    │  分发 — 回调 + 异步迭代器，面向消费者
 └─────────────────┘
       │
       ▼
-  MarketEvent 事件流  (供 kline_aggregator、storage、UI 等消费)
+  MarketEvent / GapMarker 事件流  (供 BarAggregator、DataManager 等消费)
 ```
+
+当前正式边界：
+
+- `ContinuityLayer` 只检测缺口并 emit `GapMarker`，不在 ingestion 内裸调 HTTP 回补。
+- `GapMarker` 由 `DataManager` / `StreamCoordinator` 接入统一 backfill trigger，实际修复由 `BackfillCoordinator` 调度。
+- `NormalizeLayer` 只做分发门面，Binance/OKX 解析放在 `normalizers/` 下。
+- 普通 WS session 与 OKX shared WS 都实现同一 `SessionLike` contract，`FeedControlLayer` 不关心具体 session 类型。
+- `DeliveryLayer` 的 ordered callback 用于核心链路，会反压 ingestion；非核心消费者使用 bounded async queue，队列满时丢弃非核心事件。
 
 ## 支持的数据流类型
 
@@ -177,7 +185,8 @@ async for event in pipeline.delivery.subscribe():
 - **WS → HTTP 降级** — WS连续失败时自动切换（L3）
 - **WS 探测** — HTTP模式下定期探测WS，恢复后自动切回（L3）
 - **去重** — 按事件类型使用不同的去重键（L5）
-- **间隙检测** — 自动回填K线间隙（L5）
+- **间隙检测** — 输出 `GapMarker`，交给上层 `BackfillCoordinator` 修复（L5）
+- **受控分发** — ordered callback 保护核心顺序，bounded queue 保护辅助消费者（L6）
 - **端点轮换** — 多个交易所端点间自动切换（L1）
 
 ## 配置
@@ -188,7 +197,6 @@ async for event in pipeline.delivery.subscribe():
 config = IngestionConfig(
     ws_reconnect_delay_max=60.0,      # WS最大重连延迟
     http_poll_interval=2.0,            # HTTP轮询间隔
-    continuity_auto_fill_gaps=True,    # 自动填补间隙
     delivery_queue_size=500,           # 每订阅者队列大小
 )
 ingress = MarketDataIngress(config=config)
@@ -203,8 +211,11 @@ ingress = MarketDataIngress(config=config)
 | `metrics.py`     | 全局  | 各层指标（计数器、度量）               |
 | `transport.py`   | L1    | 原始 WS/HTTP I/O，端点轮换            |
 | `session.py`     | L2    | WS 会话生命周期，重连                  |
+| `session_types.py` | L2  | `SessionLike` 协议                    |
+| `shared_ws.py`   | L2    | OKX shared WS hub 与 session adapter  |
 | `feed_control.py`| L3    | WS↔HTTP 故障转移编排器                |
-| `normalize.py`   | L4    | 原始数据 → MarketEvent 转换           |
-| `continuity.py`  | L5    | 去重、间隙检测、回填                   |
+| `normalize.py`   | L4    | normalizer 分发门面                   |
+| `normalizers/`   | L4    | Binance/OKX 原始数据解析              |
+| `continuity.py`  | L5    | 去重、间隙检测、GapMarker             |
 | `delivery.py`    | L6    | 分发给订阅者                          |
 | `__init__.py`    | —     | 组装、StreamPipeline、MarketDataIngress |

@@ -36,13 +36,19 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Awaitable, Any
 
+from app.data_engine.interval_policy import (
+    is_monthly_interval,
+    next_month_bucket,
+    parse_interval_ms,
+    parse_monthly_count,
+)
+
 from ..ingestion.metrics import LayerMetrics
 from .config import BackfillConfig
 from .models import (
     GapInfo,
     GapType,
     StorageBackend,
-    parse_interval_ms,
 )
 
 logger = logging.getLogger("backfill.GapDetector")
@@ -50,23 +56,20 @@ logger = logging.getLogger("backfill.GapDetector")
 
 def _is_monthly(interval: str) -> bool:
     """Return True if interval uses calendar-month units (e.g. '1M')."""
-    return interval.endswith("M") and not interval.endswith("m")
+    return is_monthly_interval(interval)
 
 
 def _next_month_open_ms(ts_ms: int, months: int = 1) -> int:
     """Compute the open_time of the next monthly candle after *ts_ms*."""
-    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-    month_idx = dt.month - 1 + months
-    year = dt.year + month_idx // 12
-    month = month_idx % 12 + 1
-    return int(datetime(year, month, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    return next_month_bucket(ts_ms // 1000, months) * 1000
 
 
-def _count_months_between(start_ms: int, end_ms: int) -> int:
+def _count_months_between(start_ms: int, end_ms: int, months: int = 1) -> int:
     """Approximate number of monthly candles between two timestamps."""
     s = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
     e = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
-    return max(0, (e.year - s.year) * 12 + (e.month - s.month))
+    month_delta = max(0, (e.year - s.year) * 12 + (e.month - s.month))
+    return max(0, (month_delta + months - 1) // months)
 
 # Type aliases
 ReferenceTimeProvider = Callable[[str, str, str, str], Awaitable[int | None]]
@@ -323,9 +326,10 @@ class GapDetector:
 
         # ── Case 3: Tail gap — DB is behind the live edge ──
         if _is_monthly(interval):
-            next_expected = _next_month_open_ms(db_latest)
+            month_count = parse_monthly_count(interval) or 1
+            next_expected = _next_month_open_ms(db_latest, month_count)
             if next_expected <= reference_ms:
-                missing = _count_months_between(next_expected, reference_ms)
+                missing = _count_months_between(next_expected, reference_ms, month_count)
                 if missing > self._cfg.gap_tolerance_bars:
                     gap = GapInfo(
                         symbol=symbol,
@@ -439,14 +443,15 @@ class GapDetector:
             next_time = sorted_times[i + 1]
 
             if _is_monthly(interval):
-                expected_next = _next_month_open_ms(current)
+                month_count = parse_monthly_count(interval) or 1
+                expected_next = _next_month_open_ms(current, month_count)
             else:
                 expected_next = current + interval_ms
 
             if next_time > expected_next:
                 # There's a hole
                 if _is_monthly(interval):
-                    missing = _count_months_between(expected_next, next_time)
+                    missing = _count_months_between(expected_next, next_time, month_count)
                 else:
                     missing = (next_time - expected_next) // interval_ms
                 if missing > self._cfg.gap_tolerance_bars:

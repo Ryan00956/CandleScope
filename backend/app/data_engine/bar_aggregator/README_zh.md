@@ -64,6 +64,30 @@ await agg.on_market_event(market_event)
 await agg.on_backfill_bars("BTCUSDT", "1m", historical_bars)
 ```
 
+## 当前公共 API 边界
+
+`BarAggregator` 是 DataManager、Backfill、settings repair 访问聚合能力的唯一入口，不要求调用方理解内部 pipeline：
+
+```python
+# 直接喂入已经规范化的 BarInput
+await agg.ingest_bar_input("okx", "spot", "BTC-USDT", "1m", bar_input)
+
+# 标准周期 warm-start：种入当前 forming bar，不触发事件
+state = await agg.seed_active_bar("BTC-USDT", "1m", bar_input, exchange="okx")
+
+# 自定义周期 warm-start：重放基础组件，重建当前 bucket
+state = await agg.replay_components("BTC-USDT", "45m", components, exchange="okx")
+
+# 批处理聚合：隔离临时 aggregator，不污染主 targets/active/recent
+states = await agg.aggregate_batch("BTC-USDT", "45m", "15m", rows)
+
+# 查询/移除 bucket 状态
+state = agg.get_bucket_state("BTC-USDT", "1m", bucket_start_ms)
+expired = agg.expire_bucket("BTC-USDT", "1m", bucket_start_ms)
+```
+
+业务路径不应直接调用 `_handle_bar_input()`，也不应直接操作 `pipeline.bar_state`。`get_pipeline()` 保留给高级调试和自定义策略安装。
+
 ## 各层详解
 
 ### L1: EventRouter — 事件路由器 (`router.py`)
@@ -74,6 +98,7 @@ await agg.on_backfill_bars("BTCUSDT", "1m", historical_bars)
 - 接收 `FetchedBar`（来自 backfill 历史回填）
 - 接收自定义数据（通过注册的 `BarInputAdapter`）
 - 一条数据可同时分发到多个目标周期（如 1m → 1m, 5m, 91m）
+- OKX realtime `1m` 可扇出到更大的标准周期，用于刷新当前大周期价格；该路径是 price-only，不会污染目标周期 volume/trades
 
 **扩展点**：注册自定义适配器
 
@@ -113,7 +138,8 @@ engine = TimeBucketEngine(interval_ms=..., custom_calculator=SessionBucket())
 
 **职责**：维护每个时间桶的 OHLCV 累积状态。
 
-- 默认合并规则：`O=第一个Open, H=最大High, L=最小Low, C=最后Close, V=累加Volume`
+- 默认合并规则：标准周期原生 kline 使用快照替换 volume/trades；tick 使用增量累加；跨周期 realtime fanout 只更新 OHLC，不写入 volume/trades
+- 自定义周期使用组件快照重建 OHLCV，支持 out-of-order backfill 或 forming bucket replay
 - 管理活跃（FORMING）K线和已封口（CLOSED）K线
 - 自动驱逐过旧的K线，防止内存无限增长
 - `max_active_bars` / `max_closed_bars_in_memory` 可配置
@@ -221,7 +247,7 @@ async for event in agg.publisher.subscribe(
 └─────────────┘                      │   (K线聚合器)     │
                                      │                  │
 ┌─────────────┐     FetchedBar       │   BarEvent       │
-│  Backfill   │ ──────────────────── │   ──────────── → │ → Storage
+│  Backfill   │ ──────────────────── │   ──────────── → │ → DataManager cache/storage/event bus
 │  (历史回填)  │                      │                  │ → WebSocket
 └─────────────┘                      │                  │ → Indicators
                                      └──────────────────┘

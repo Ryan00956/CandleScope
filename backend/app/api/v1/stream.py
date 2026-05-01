@@ -206,7 +206,7 @@ async def _dm_multi_stream(
     active_intervals: set[str] = set()
     # Queue for forwarding events
     event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
-    subscriptions = []  # list of SubscriptionHandle
+    subscriptions = {}  # interval -> SubscriptionHandle
     _ws_closed = False  # flag to avoid sending after close
 
     async def _safe_send_json(data: dict) -> bool:
@@ -347,7 +347,7 @@ async def _dm_multi_stream(
                                     DataEventType.BACKFILL_COMPLETED,
                                 },
                             )
-                            subscriptions.append(handle)
+                            subscriptions[iv] = handle
                             active_intervals.add(iv)
 
                     await _safe_send_json({
@@ -361,6 +361,12 @@ async def _dm_multi_stream(
                 elif action == "unsubscribe":
                     for iv in valid:
                         active_intervals.discard(iv)
+                        handle = subscriptions.pop(iv, None)
+                        if handle is not None:
+                            try:
+                                dm.unsubscribe(handle)
+                            except Exception:
+                                pass
                     await _safe_send_json({
                         "type": "unsubscribed",
                         "exchange": exchange,
@@ -387,11 +393,12 @@ async def _dm_multi_stream(
     finally:
         _ws_closed = True
         # Clean up all subscriptions
-        for handle in subscriptions:
+        for handle in list(subscriptions.values()):
             try:
                 dm.unsubscribe(handle)
             except Exception:
                 pass
+        subscriptions.clear()
 
 
 async def _forward_events_to_ws(
@@ -446,5 +453,4 @@ async def _read_client_messages(websocket: WebSocket) -> None:
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
         pass
-
 

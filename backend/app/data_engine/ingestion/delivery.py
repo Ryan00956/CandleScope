@@ -5,9 +5,9 @@ Responsibilities:
   * Accept ``MarketEvent`` / ``GapMarker`` from L5 Continuity
   * Wrap them in ``IngestionEvent`` envelopes
   * Distribute to multiple subscribers via:
-      - Async queue (``subscribe()`` → ``AsyncIterator``)
-      - Callback registration (``on_market_event()`` / ``on_gap()`` / ``on_event()``)
-  * Bounded queue per subscriber to prevent backpressure from stalling the pipeline
+      - Ordered callback registration for the core path
+      - Bounded async queues for non-core consumers
+  * Bounded queue per subscriber to prevent slow consumers from stalling the pipeline
   * Emit status events (feed-mode changes, etc.)
 
 This layer outputs a **stable event stream** similar to a WebSocket feed.
@@ -25,18 +25,59 @@ Usage::
     async for event in delivery.subscribe():
         if event.event_type == "market_event":
             process(event.market_event)
+
+Ordered callbacks are awaited and can backpressure the ingestion path. Queue
+subscribers are non-blocking; when a queue is full, the new event is dropped
+for that subscriber.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable, Awaitable, AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
 from .config import IngestionConfig
 from .metrics import LayerMetrics
 from .models import StreamDescriptor, MarketEvent, GapMarker, IngestionEvent
 
 logger = logging.getLogger("ingestion.L6_Delivery")
+
+
+class DeliveryQueueSubscriber:
+    """Bounded queue subscriber for non-core consumers."""
+
+    def __init__(
+        self,
+        layer: "DeliveryLayer",
+        queue: asyncio.Queue[IngestionEvent | None],
+    ) -> None:
+        self._layer = layer
+        self._queue = queue
+        self._closed = False
+
+    @property
+    def queue_size(self) -> int:
+        return self._queue.qsize()
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._layer._remove_queue(self._queue)
+        self._layer._send_sentinel(self._queue)
+
+    def __aiter__(self) -> AsyncIterator[IngestionEvent]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[IngestionEvent]:
+        try:
+            while True:
+                event = await self._queue.get()
+                if event is None:
+                    break
+                yield event
+        finally:
+            await self.close()
 
 
 class DeliveryLayer:
@@ -52,7 +93,8 @@ class DeliveryLayer:
         self._gap_callbacks: list[Callable[[GapMarker], Awaitable[None]]] = []
         self._event_callbacks: list[Callable[[IngestionEvent], Awaitable[None]]] = []
 
-        # Subscriber queues (for async-iterator consumers)
+        # Subscriber queues for non-core async consumers. These are bounded and
+        # never block the ordered callback path.
         self._subscriber_queues: list[asyncio.Queue[IngestionEvent | None]] = []
 
     # ── Public: Metrics / Snapshot ───────────────────────────
@@ -75,15 +117,19 @@ class DeliveryLayer:
     # ── Public: Callback registration ────────────────────────
 
     def on_market_event(self, callback: Callable[[MarketEvent], Awaitable[None]]) -> None:
-        """Register a callback for market events."""
+        """Register an ordered callback for market events.
+
+        Ordered callbacks are part of the core ingestion path and are awaited
+        before non-core queue subscribers receive the event.
+        """
         self._market_event_callbacks.append(callback)
 
     def on_gap(self, callback: Callable[[GapMarker], Awaitable[None]]) -> None:
-        """Register a callback for gap markers."""
+        """Register an ordered callback for gap markers."""
         self._gap_callbacks.append(callback)
 
     def on_event(self, callback: Callable[[IngestionEvent], Awaitable[None]]) -> None:
-        """Register a callback for all events (market_event, gap, status)."""
+        """Register an ordered callback for all events."""
         self._event_callbacks.append(callback)
 
     def remove_market_event_callback(self, callback: Callable) -> None:
@@ -99,6 +145,20 @@ class DeliveryLayer:
 
     # ── Public: Async-iterator subscription ──────────────────
 
+    def create_queue_subscriber(
+        self,
+        maxsize: int | None = None,
+    ) -> DeliveryQueueSubscriber:
+        """Create a bounded queue subscriber for non-core consumers."""
+        queue: asyncio.Queue[IngestionEvent | None] = asyncio.Queue(
+            maxsize=maxsize if maxsize is not None else self._cfg.delivery_queue_size,
+        )
+        self._subscriber_queues.append(queue)
+        self._metrics.inc("subscribers_total")
+        self._metrics.set("active_subscribers", len(self._subscriber_queues))
+        logger.debug("New subscriber (total=%d)", len(self._subscriber_queues))
+        return DeliveryQueueSubscriber(self, queue)
+
     async def subscribe(self) -> AsyncIterator[IngestionEvent]:
         """Subscribe as an async iterator.  Yields ``IngestionEvent``.
 
@@ -109,35 +169,15 @@ class DeliveryLayer:
 
         Break out of the loop to stop.
         """
-        queue: asyncio.Queue[IngestionEvent | None] = asyncio.Queue(
-            maxsize=self._cfg.delivery_queue_size,
-        )
-        self._subscriber_queues.append(queue)
-        self._metrics.inc("subscribers_total")
-        self._metrics.set("active_subscribers", len(self._subscriber_queues))
-        logger.debug("New subscriber (total=%d)", len(self._subscriber_queues))
-
-        try:
-            while True:
-                event = await queue.get()
-                if event is None:
-                    # Sentinel — unsubscribe
-                    break
-                yield event
-        finally:
-            self._subscriber_queues = [q for q in self._subscriber_queues if q is not queue]
-            self._metrics.set("active_subscribers", len(self._subscriber_queues))
-            logger.debug("Subscriber removed (remaining=%d)", len(self._subscriber_queues))
+        subscriber = self.create_queue_subscriber()
+        async for event in subscriber:
+            yield event
 
     async def close_all_subscribers(self) -> None:
         """Send sentinel to all subscriber queues to unblock them."""
         for queue in list(self._subscriber_queues):
-            try:
-                queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
-        self._subscriber_queues.clear()
-        self._metrics.set("active_subscribers", 0)
+            self._remove_queue(queue)
+            self._send_sentinel(queue)
 
     # ── Public: Ingest (called by L5) ────────────────────────
 
@@ -216,3 +256,25 @@ class DeliveryLayer:
                     "Subscriber queue full (size=%d), dropping event",
                     queue.maxsize,
                 )
+
+    def _remove_queue(self, queue: asyncio.Queue[IngestionEvent | None]) -> None:
+        self._subscriber_queues = [q for q in self._subscriber_queues if q is not queue]
+        self._metrics.set("active_subscribers", len(self._subscriber_queues))
+        logger.debug("Subscriber removed (remaining=%d)", len(self._subscriber_queues))
+
+    def _send_sentinel(self, queue: asyncio.Queue[IngestionEvent | None]) -> None:
+        try:
+            queue.put_nowait(None)
+            return
+        except asyncio.QueueFull:
+            self._metrics.inc("queue_close_drops")
+
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+
+        try:
+            queue.put_nowait(None)
+        except asyncio.QueueFull:
+            logger.warning("Subscriber queue still full while closing")

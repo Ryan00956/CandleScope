@@ -25,63 +25,32 @@ Usage::
 """
 from __future__ import annotations
 
-import calendar
 import logging
 import time
 from typing import Any, Callable
 
-from datetime import datetime, timezone
-
-from app.core.market import (
-    aggregate_rows_by_month,
-    compute_bucket_start,
-    compute_bucket_start_ms,
-    compute_month_bucket,
-    find_best_base_interval,
+from app.data_engine.interval_policy import (
     is_custom_interval,
-    is_monthly_interval,
+    is_ephemeral_interval,
     parse_custom_interval,
-    parse_monthly_count,
 )
 
 from .cache import BarCache
 from .config import QueryConfig
-from .models import BarData, QueryResult, QuerySource, SeriesKey, StorageBackend
+from .custom_query import CustomIntervalQueryService
+from .models import (
+    BarData,
+    MissingRange,
+    QueryResult,
+    QuerySource,
+    SeriesKey,
+    StorageBackend,
+)
 
 logger = logging.getLogger("data_manager.query")
 
 # Signature for the optional backfill trigger callback
 BackfillTrigger = Callable[[str, str, int, int, str, str], None]
-
-
-def _aggregate_rows_to_interval(
-    base_rows: list[dict],
-    custom_interval_seconds: int,
-    *,
-    interval: str | None = None,
-) -> list[dict]:
-    """Aggregate lightweight-chart rows into a custom interval."""
-    if not base_rows:
-        return []
-
-    buckets: dict[int, list[dict]] = {}
-    for row in base_rows:
-        ts = row["time"]
-        bucket_start = compute_bucket_start(ts, custom_interval_seconds, interval=interval)
-        buckets.setdefault(bucket_start, []).append(row)
-
-    result: list[dict] = []
-    for bucket_start in sorted(buckets):
-        rows = sorted(buckets[bucket_start], key=lambda r: r["time"])
-        result.append({
-            "time": bucket_start,
-            "open": rows[0]["open"],
-            "high": max(r["high"] for r in rows),
-            "low": min(r["low"] for r in rows),
-            "close": rows[-1]["close"],
-            "volume": round(sum(r["volume"] for r in rows), 8),
-        })
-    return result
 
 
 class QueryEngine:
@@ -120,6 +89,35 @@ class QueryEngine:
         self._cache_hits = 0
         self._storage_reads = 0
         self._backfills_triggered = 0
+        self.custom_intervals = CustomIntervalQueryService(
+            cache=self._cache,
+            config=self._cfg,
+            base_query=self.query,
+        )
+
+    # ── Public: Dependency Access ────────────────────────────
+
+    @property
+    def storage(self) -> StorageBackend | None:
+        """Return the configured storage backend, if any."""
+        return self._storage
+
+    def set_storage(self, storage: StorageBackend | None) -> None:
+        """Set or clear the storage backend used by query operations."""
+        self._storage = storage
+
+    @property
+    def backfill_trigger(self) -> BackfillTrigger | None:
+        """Return the configured backfill trigger callback, if any."""
+        return self._backfill_trigger
+
+    def set_backfill_trigger(self, trigger: BackfillTrigger | None) -> None:
+        """Set or clear the backfill trigger callback."""
+        self._backfill_trigger = trigger
+
+    def set_bar_aggregator(self, bar_aggregator: Any | None) -> None:
+        """Set the BarAggregator used for custom interval read aggregation."""
+        self.custom_intervals.set_bar_aggregator(bar_aggregator)
 
     # ── Public: Main Query ───────────────────────────────────
 
@@ -160,7 +158,7 @@ class QueryEngine:
         self._queries += 1
 
         if is_custom_interval(interval):
-            return self._query_custom_from_base(
+            return self.custom_intervals.query_from_base(
                 symbol=symbol,
                 interval=interval,
                 start_ms=start_ms,
@@ -174,7 +172,6 @@ class QueryEngine:
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
 
         # Ephemeral intervals are cache-only — skip storage and backfill
-        from app.core.market import is_ephemeral_interval
         if is_ephemeral_interval(interval):
             effective_limit = min(
                 limit or self._cfg.default_limit,
@@ -217,6 +214,7 @@ class QueryEngine:
         # ── Step 2: Try storage ──────────────────────────────
         storage_bars: list[BarData] = []
         backfill_triggered = False
+        missing_ranges: list[MissingRange] = []
 
         if self._storage is not None:
             self._storage_reads += 1
@@ -250,19 +248,26 @@ class QueryEngine:
         # browser tab was backgrounded and WS messages were lost.
         # We detect each gap and do targeted storage reads to fill them.
         if merged and self._storage is not None and len(merged) >= 2:
-            merged = self._fill_interior_gaps(key, merged, interval)
+            merged = self._fill_interior_gaps(
+                key, merged, interval, missing_ranges,
+            )
+            backfill_triggered = bool(missing_ranges)
 
         if not merged:
-            # Nothing anywhere — trigger backfill if enabled
-            if self._cfg.auto_backfill and self._backfill_trigger:
+            # Nothing anywhere — report a missing range if enabled.
+            if self._cfg.auto_backfill:
                 interval_secs = parse_custom_interval(key.interval) or 60
 
                 trigger_start_ms = start_ms
                 if trigger_start_ms is None:
                     trigger_start_ms = (end_ms or int(time.time() * 1000)) - (effective_limit * interval_secs * 1000)
 
-                self._trigger_backfill(key, trigger_start_ms, end_ms)
-                backfill_triggered = True
+                missing_range = self._trigger_backfill(
+                    key, trigger_start_ms, end_ms, reason="query_empty",
+                )
+                if missing_range is not None:
+                    missing_ranges.append(missing_range)
+                    backfill_triggered = self._backfill_trigger is not None
 
             elapsed = time.monotonic() - t0
             return QueryResult(
@@ -276,13 +281,14 @@ class QueryEngine:
                 has_more=False,
                 cache_hit=False,
                 backfill_triggered=backfill_triggered,
+                missing_ranges=missing_ranges,
                 metadata={"elapsed_ms": round(elapsed * 1000, 2)},
             )
 
         # ── Step 4: Check completeness & backfill ────────────
         if (
             self._cfg.auto_backfill
-            and self._backfill_trigger
+            and not missing_ranges
             and not self._is_complete(merged, start_s, end_s, effective_limit, interval=interval)
         ):
             interval_secs = parse_custom_interval(key.interval) or 60
@@ -297,22 +303,32 @@ class QueryEngine:
             if has_gap_before and has_gap_after:
                 # Both sides have gaps — backfill the larger gap first
                 # (forward catch-up is usually more urgent)
-                self._trigger_backfill(key, latest_bar_ms, end_ms)
-                backfill_triggered = True
+                missing_range = self._trigger_backfill(
+                    key, latest_bar_ms, end_ms, reason="query_tail_gap",
+                )
             elif has_gap_after:
                 # Scenario 1: Forward catch-up (e.g. app was closed overnight)
-                self._trigger_backfill(key, latest_bar_ms, end_ms)
-                backfill_triggered = True
+                missing_range = self._trigger_backfill(
+                    key, latest_bar_ms, end_ms, reason="query_tail_gap",
+                )
             elif has_gap_before:
                 # Scenario 2: Backward gap (start of requested range missing)
-                self._trigger_backfill(key, start_ms, earliest_bar_ms)
-                backfill_triggered = True
+                missing_range = self._trigger_backfill(
+                    key, start_ms, earliest_bar_ms, reason="query_left_gap",
+                )
             else:
                 # Count-based shortfall — backfill backwards from earliest data
                 needed_ms = (effective_limit - len(merged)) * interval_secs * 1000
                 trigger_start = earliest_bar_ms - needed_ms
-                self._trigger_backfill(key, trigger_start, earliest_bar_ms)
-                backfill_triggered = True
+                missing_range = self._trigger_backfill(
+                    key,
+                    trigger_start,
+                    earliest_bar_ms,
+                    reason="query_shortfall",
+                )
+            if missing_range is not None:
+                missing_ranges.append(missing_range)
+                backfill_triggered = self._backfill_trigger is not None
 
         # Apply limit
         if len(merged) > effective_limit:
@@ -347,6 +363,7 @@ class QueryEngine:
             cache_hit=bool(cached),
             backfill_triggered=backfill_triggered,
             has_tail_gap=tail_gap,
+            missing_ranges=missing_ranges,
             metadata={"elapsed_ms": round(elapsed * 1000, 2)},
         )
 
@@ -371,7 +388,7 @@ class QueryEngine:
     ) -> QueryResult:
         """Query bars strictly before a timestamp (for pagination)."""
         if is_custom_interval(interval):
-            return self._query_custom_before(
+            return self.custom_intervals.query_before(
                 symbol,
                 interval,
                 before_ms,
@@ -385,7 +402,6 @@ class QueryEngine:
         effective_limit = min(limit, self._cfg.max_limit)
 
         # Ephemeral intervals are cache-only — skip storage and backfill
-        from app.core.market import is_ephemeral_interval
         if is_ephemeral_interval(interval):
             cached = self._cache.get_before(key, before_s, effective_limit)
             return QueryResult(
@@ -441,7 +457,8 @@ class QueryEngine:
             merged = merged[-effective_limit:]
 
         backfill_triggered = False
-        if len(merged) < effective_limit and self._cfg.auto_backfill and self._backfill_trigger:
+        missing_ranges: list[MissingRange] = []
+        if len(merged) < effective_limit and self._cfg.auto_backfill:
             interval_secs = parse_custom_interval(key.interval) or 60
 
             # Only backfill the missing portion before existing data
@@ -455,8 +472,15 @@ class QueryEngine:
                 trigger_start_ms = before_ms - (effective_limit * interval_secs * 1000)
                 trigger_end_ms = before_ms
 
-            self._trigger_backfill(key, trigger_start_ms, trigger_end_ms)
-            backfill_triggered = True
+            missing_range = self._trigger_backfill(
+                key,
+                trigger_start_ms,
+                trigger_end_ms,
+                reason="load_more_shortfall",
+            )
+            if missing_range is not None:
+                missing_ranges.append(missing_range)
+                backfill_triggered = self._backfill_trigger is not None
 
         # Determine has_more accurately:
         # - If we got a full page of results, there's likely more data
@@ -488,186 +512,7 @@ class QueryEngine:
             has_more=has_more,
             cache_hit=bool(cached),
             backfill_triggered=backfill_triggered,
-        )
-
-    def _query_custom_from_base(
-        self,
-        symbol: str,
-        interval: str,
-        start_ms: int | None,
-        end_ms: int | None,
-        limit: int | None,
-        started_at: float,
-        exchange: str = "binance",
-        market_type: str = "spot",
-    ) -> QueryResult:
-        """Serve custom intervals by aggregating a single base interval on read.
-
-        This deliberately avoids trusting persisted custom-interval rows,
-        which may have been generated by older aggregation logic.  The
-        returned bars are rebuilt from the authoritative standard-interval
-        series (cache + storage + backfill), then cached under the custom key
-        for downstream consumers.
-        """
-        custom_seconds = parse_custom_interval(interval)
-        if custom_seconds is None:
-            return QueryResult(
-                bars=[],
-                symbol=symbol.upper(),
-                interval=interval,
-                exchange=exchange,
-                market_type=market_type,
-                source=QuerySource.EMPTY,
-                total=0,
-                has_more=False,
-                cache_hit=False,
-                metadata={"elapsed_ms": round((time.monotonic() - started_at) * 1000, 2)},
-            )
-
-        effective_limit = min(limit or self._cfg.default_limit, self._cfg.max_limit)
-        base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
-        custom_ms = custom_seconds * 1000
-
-        # For monthly intervals, align start to calendar-month boundaries
-        month_count = parse_monthly_count(interval)
-        aligned_start_ms = None
-        if start_ms is not None:
-            if month_count is not None:
-                from app.core.market import compute_month_bucket_ms
-                aligned_start_ms = compute_month_bucket_ms(start_ms, month_count)
-            else:
-                aligned_start_ms = compute_bucket_start_ms(start_ms, custom_ms, interval=interval)
-
-        if start_ms is not None and end_ms is not None:
-            estimated_custom = max(1, ((end_ms - aligned_start_ms) // custom_ms) + 2)
-            base_limit = estimated_custom * factor + factor
-        else:
-            # Add extra `factor` to ensure the last custom bucket has all
-            # its base-interval components — without this the final candle
-            # may be built from an incomplete set of base bars.
-            base_limit = (effective_limit + 2) * factor + factor
-
-        base_result = self.query(
-            symbol,
-            base_interval,
-            start_ms=aligned_start_ms,
-            end_ms=end_ms,
-            limit=base_limit,
-            exchange=exchange,
-            market_type=market_type,
-        )
-        derived_bars = self._aggregate_custom_bars(
-            base_result.bars,
-            interval=interval,
-            start_ms=start_ms,
-            end_ms=end_ms,
-        )
-        if len(derived_bars) > effective_limit:
-            derived_bars = derived_bars[-effective_limit:]
-
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
-        if derived_bars:
-            self._cache.bulk_load(key, derived_bars)
-
-        elapsed = time.monotonic() - started_at
-        return QueryResult(
-            bars=derived_bars,
-            symbol=key.symbol,
-            interval=key.interval,
-            exchange=key.exchange,
-            market_type=key.market_type,
-            source=base_result.source,
-            total=len(derived_bars),
-            has_more=base_result.has_more or len(derived_bars) >= effective_limit,
-            cache_hit=base_result.cache_hit,
-            backfill_triggered=base_result.backfill_triggered,
-            has_tail_gap=base_result.has_tail_gap,
-            metadata={
-                "elapsed_ms": round(elapsed * 1000, 2),
-                "derived_from": base_interval,
-                "aggregation_factor": factor,
-                "base_source": base_result.source.value,
-            },
-        )
-
-    def _query_custom_before(
-        self,
-        symbol: str,
-        interval: str,
-        before_ms: int,
-        limit: int,
-        exchange: str = "binance",
-        market_type: str = "spot",
-    ) -> QueryResult:
-        """Paginate custom intervals by rebuilding them from base bars."""
-        started_at = time.monotonic()
-        custom_seconds = parse_custom_interval(interval)
-        if custom_seconds is None:
-            return QueryResult(
-                bars=[],
-                symbol=symbol.upper(),
-                interval=interval,
-                exchange=exchange,
-                market_type=market_type,
-                source=QuerySource.EMPTY,
-                total=0,
-                has_more=False,
-                cache_hit=False,
-            )
-
-        effective_limit = min(limit, self._cfg.max_limit)
-        base_interval, factor = find_best_base_interval(custom_seconds, interval=interval)
-        custom_ms = custom_seconds * 1000
-
-        # For monthly intervals, align to calendar-month boundaries
-        month_count = parse_monthly_count(interval)
-        if month_count is not None:
-            from app.core.market import compute_month_bucket_ms, next_month_bucket
-            last_bucket_start_ms = compute_month_bucket_ms(before_ms - 1, month_count)
-            base_end_ms = next_month_bucket(last_bucket_start_ms // 1000, month_count) * 1000 - 1
-        else:
-            last_bucket_start_ms = compute_bucket_start_ms(before_ms - 1, custom_ms, interval=interval)
-            base_end_ms = last_bucket_start_ms + custom_ms - 1
-        base_limit = (effective_limit + 2) * factor
-
-        base_result = self.query(
-            symbol,
-            base_interval,
-            end_ms=base_end_ms,
-            limit=base_limit,
-            exchange=exchange,
-            market_type=market_type,
-        )
-        derived_bars = self._aggregate_custom_bars(
-            base_result.bars,
-            interval=interval,
-            end_ms=base_end_ms,
-        )
-        derived_bars = [bar for bar in derived_bars if bar.time_ms < before_ms]
-        if len(derived_bars) > effective_limit:
-            derived_bars = derived_bars[-effective_limit:]
-
-        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
-        if derived_bars:
-            self._cache.bulk_load(key, derived_bars)
-
-        return QueryResult(
-            bars=derived_bars,
-            symbol=key.symbol,
-            interval=key.interval,
-            exchange=key.exchange,
-            market_type=key.market_type,
-            source=base_result.source,
-            total=len(derived_bars),
-            has_more=bool(derived_bars) or base_result.backfill_triggered,
-            cache_hit=base_result.cache_hit,
-            backfill_triggered=base_result.backfill_triggered,
-            metadata={
-                "elapsed_ms": round((time.monotonic() - started_at) * 1000, 2),
-                "derived_from": base_interval,
-                "aggregation_factor": factor,
-                "base_source": base_result.source.value,
-            },
+            missing_ranges=missing_ranges,
         )
 
     def get_bounds(
@@ -745,42 +590,6 @@ class QueryEngine:
             combined[bar.time] = bar  # cache overwrites — cache wins
         return sorted(combined.values(), key=lambda x: x.time)
 
-    def _aggregate_custom_bars(
-        self,
-        base_bars: list[BarData],
-        interval: str,
-        start_ms: int | None = None,
-        end_ms: int | None = None,
-    ) -> list[BarData]:
-        """Aggregate standard-interval bars into a custom interval.
-
-        For monthly intervals (e.g. '2M', '3M'), uses calendar-month
-        aligned bucketing instead of fixed-duration bucketing.
-        """
-        custom_seconds = parse_custom_interval(interval)
-        if custom_seconds is None or not base_bars:
-            return []
-
-        month_count = parse_monthly_count(interval)
-        if month_count is not None:
-            # Use calendar-month aligned aggregation
-            aggregated = aggregate_rows_by_month(
-                [bar.to_dict() for bar in base_bars],
-                months=month_count,
-            )
-        else:
-            aggregated = _aggregate_rows_to_interval(
-                [bar.to_dict() for bar in base_bars],
-                custom_seconds,
-                interval=interval,
-            )
-        result = [BarData.from_dict(row) for row in aggregated]
-        if start_ms is not None:
-            result = [bar for bar in result if bar.time_ms >= start_ms]
-        if end_ms is not None:
-            result = [bar for bar in result if bar.time_ms <= end_ms]
-        return result
-
     def _has_interior_gaps(
         self, bars: list[BarData], interval: str,
     ) -> bool:
@@ -823,6 +632,7 @@ class QueryEngine:
         key: SeriesKey,
         bars: list[BarData],
         interval: str,
+        missing_ranges: list[MissingRange] | None = None,
     ) -> list[BarData]:
         """Detect interior gaps and fill them from storage.
 
@@ -858,6 +668,7 @@ class QueryEngine:
                     end_ms=gap_end_ms,
                     limit=5000,  # generous limit for gap fills
                     order="ASC",
+                    exchange=key.exchange,
                     market_type=key.market_type,
                 )
                 fill_bars = [BarData.from_storage_row(r) for r in rows]
@@ -868,13 +679,20 @@ class QueryEngine:
                         gap_start_s, gap_end_s, len(fill_bars),
                     )
                 else:
-                    # Storage also doesn't have data — trigger backfill
-                    if self._cfg.auto_backfill and self._backfill_trigger:
+                    # Storage also doesn't have data — report a missing range.
+                    if self._cfg.auto_backfill:
                         logger.info(
                             "Storage has no data for gap [%d → %d], triggering backfill",
                             gap_start_s, gap_end_s,
                         )
-                        self._trigger_backfill(key, gap_start_ms, gap_end_ms)
+                        missing_range = self._trigger_backfill(
+                            key,
+                            gap_start_ms,
+                            gap_end_ms,
+                            reason="query_interior_gap",
+                        )
+                        if missing_range is not None and missing_ranges is not None:
+                            missing_ranges.append(missing_range)
             except Exception as exc:
                 logger.error(
                     "Failed to fill gap [%d → %d] from storage: %s",
@@ -913,6 +731,7 @@ class QueryEngine:
             bars=bars,
             symbol=key.symbol,
             interval=key.interval,
+            exchange=key.exchange,
             market_type=key.market_type,
             source=QuerySource.CACHE,
             total=len(bars),
@@ -978,17 +797,18 @@ class QueryEngine:
         return True
 
     def _trigger_backfill(
-        self, key: SeriesKey, start_ms: int | None, end_ms: int | None,
-    ) -> None:
+        self,
+        key: SeriesKey,
+        start_ms: int | None,
+        end_ms: int | None,
+        *,
+        reason: str = "query_gap",
+    ) -> MissingRange | None:
         """Fire the backfill trigger callback.
 
         All callers should compute meaningful start/end values before
         calling this method.  The fallback here is a safety net only.
         """
-        if self._backfill_trigger is None:
-            return
-        self._backfills_triggered += 1
-
         now_ms = int(time.time() * 1000)
         effective_end = end_ms if end_ms is not None else now_ms
 
@@ -1003,6 +823,19 @@ class QueryEngine:
                 key, effective_start, effective_end,
             )
 
+        missing_range = MissingRange(
+            symbol=key.symbol,
+            interval=key.interval,
+            exchange=key.exchange,
+            market_type=key.market_type,
+            start_ms=int(effective_start),
+            end_ms=int(effective_end),
+            reason=reason,
+        )
+        if self._backfill_trigger is None:
+            return missing_range
+
+        self._backfills_triggered += 1
         try:
             self._backfill_trigger(
                 key.symbol,
@@ -1012,5 +845,11 @@ class QueryEngine:
                 key.exchange,
                 key.market_type,
             )
+            return missing_range
         except Exception as exc:
             logger.error("Backfill trigger failed: %s", exc, exc_info=True)
+            return missing_range
+
+    def note_backfill_triggered(self, count: int = 1) -> None:
+        """Record externally submitted backfill requests in query metrics."""
+        self._backfills_triggered += max(0, count)

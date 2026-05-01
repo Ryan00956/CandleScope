@@ -614,6 +614,8 @@ export default function App() {
 
   const handleExportOptionsChange = useCallback((nextOptions) => {
     setExportOptions(nextOptions);
+    setExportError(null);
+    setExportNotice(null);
     updateUserPref("chartExportOptions", nextOptions);
   }, []);
 

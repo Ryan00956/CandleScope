@@ -21,7 +21,7 @@ Data flow::
     Ingestion → on_raw_bar() → BarAggregator.on_market_event()
                               → L1–L5 pipeline
                               → Publisher callbacks
-                              → DataManager._on_aggregator_event()
+                              → AggregatorBridge.on_bar_event()
                               → Cache + EventBus
 
 Usage::
@@ -39,9 +39,12 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
+
+from app.data_engine.interval_policy import is_standard_interval
 
 from .cache import BarCache
 from .config import CoordinatorConfig
@@ -81,6 +84,7 @@ class IngestionFactory(Protocol):
         on_bar: Callable[[dict], Awaitable[None]],
         exchange: str = "binance",
         market_type: str = "spot",
+        on_gap: Callable[[Any], Awaitable[None]] | None = None,
     ) -> Any:
         """Start an ingestion stream.
 
@@ -89,6 +93,7 @@ class IngestionFactory(Protocol):
             interval:    Base interval (e.g. "1m").
             on_bar:      Callback for each incoming bar dict.
             market_type: "spot" or "futures".
+            on_gap:      Optional callback for ingestion gap markers.
 
         Returns:
             A handle with a ``stop()`` coroutine.
@@ -157,6 +162,7 @@ class StreamCoordinator:
         self._ingestion_factory: IngestionFactory | None = None
         self._bar_aggregator: Any = None  # BarAggregator instance
         self._storage: StorageBackend | None = None
+        self._gap_handler: Callable[[SeriesKey, Any], Awaitable[None]] | None = None
 
         # Background tasks
         self._reaper_task: asyncio.Task | None = None
@@ -193,6 +199,13 @@ class StreamCoordinator:
     def set_event_bus(self, bus: DataEventBus) -> None:
         """Set the event bus instance."""
         self._bus = bus
+
+    def set_gap_handler(
+        self,
+        handler: Callable[[SeriesKey, Any], Awaitable[None]] | None,
+    ) -> None:
+        """Set the callback used for ingestion gap markers."""
+        self._gap_handler = handler
 
     # ── Public: Stream Lifecycle ─────────────────────────────
 
@@ -247,8 +260,6 @@ class StreamCoordinator:
             return StreamInfo(key=key, status=StreamStatus.STOPPED)
 
         # ── Non-standard interval: reuse base-interval stream ────
-        from ..bar_aggregator.models import is_standard_interval
-
         if not is_standard_interval(interval):
             base_interval = self._cfg.base_interval  # typically "1m"
             base_key = SeriesKey(symbol, base_interval, exchange=exchange, market_type=market_type)
@@ -397,6 +408,14 @@ class StreamCoordinator:
             for symbol in self._cfg.prewarm_symbols
         ]
 
+    def prewarm_targets(self) -> list[tuple[str, str, str]]:
+        """Return configured prewarm targets as (exchange, market_type, symbol)."""
+        return self._iter_prewarm_targets()
+
+    def prewarm_intervals(self) -> tuple[str, ...]:
+        """Return configured prewarm interval names."""
+        return tuple(self._cfg.prewarm_intervals)
+
     # ── Public: Idle Reaping ─────────────────────────────────
 
     async def start_reaper(self) -> None:
@@ -464,6 +483,26 @@ class StreamCoordinator:
         """Get info about all active streams."""
         return [e.info for e in self._streams.values()]
 
+    def has_stream(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> bool:
+        """Return True if a stream entry exists, regardless of status."""
+        market_type = self._normalize_market_type(market_type)
+        key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        return key in self._streams
+
+    def mark_bar_received(self, key: SeriesKey) -> None:
+        """Record that a bar was received for an active stream."""
+        entry = self._streams.get(key)
+        if entry is None:
+            return
+        entry.info.bars_received += 1
+        entry.info.last_bar_at_ms = int(time.time() * 1000)
+
     def is_active(
         self,
         symbol: str,
@@ -495,8 +534,8 @@ class StreamCoordinator:
         """Manually push a bar event into the coordinator.
 
         This pushes directly to cache + event_bus, **bypassing**
-        the BarAggregator.  Used by DataManager._on_aggregator_event()
-        which is the output side of the aggregator pipeline.
+        the BarAggregator. The aggregator output path now enters
+        DataManager through AggregatorBridge.on_bar_event().
 
         For normal data flow, ingestion data goes through the
         BarAggregator first (see ``_start_stream``).
@@ -562,7 +601,7 @@ class StreamCoordinator:
             Ingestion → on_raw_bar() → _build_market_event()
                       → BarAggregator.on_market_event()
                       → L1–L5 pipeline → Publisher
-                      → DataManager._on_aggregator_event()
+                      → AggregatorBridge.on_bar_event()
                       → Cache + EventBus
 
         Data flow without BarAggregator (fallback):
@@ -610,13 +649,25 @@ class StreamCoordinator:
                             market_type=key.market_type,
                         )
 
-                handle = await self._ingestion_factory.start(
-                    symbol=key.symbol,
-                    interval=key.interval,
-                    on_bar=on_raw_bar,
-                    exchange=key.exchange,
-                    market_type=key.market_type,
-                )
+                async def on_gap(gap: Any) -> None:
+                    if self._gap_handler is not None:
+                        await self._gap_handler(key, gap)
+
+                start_kwargs = {
+                    "symbol": key.symbol,
+                    "interval": key.interval,
+                    "on_bar": on_raw_bar,
+                    "exchange": key.exchange,
+                    "market_type": key.market_type,
+                }
+                try:
+                    start_signature = inspect.signature(self._ingestion_factory.start)
+                    if "on_gap" in start_signature.parameters:
+                        start_kwargs["on_gap"] = on_gap
+                except (TypeError, ValueError):
+                    logger.debug("Could not inspect ingestion factory start signature")
+
+                handle = await self._ingestion_factory.start(**start_kwargs)
                 entry.handle = handle
                 entry.info.status = StreamStatus.ACTIVE
 

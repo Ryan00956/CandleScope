@@ -19,9 +19,11 @@ import {
   fetchLatestKlines,
   getMultiStreamUrl,
   fetchSubscriptions,
+  fetchPricesSnapshot,
   updateSubscriptionTier,
   syncWatchlistSymbols,
   getPriceStreamUrl,
+  updateCacheLimits,
 } from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
 import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, downloadBlob } from "./services/exportService";
@@ -135,9 +137,12 @@ function getNativeIntervals(exchange) {
   return EXCHANGE_INTERVALS[exchange]?.intervals || EXCHANGE_INTERVALS.binance.intervals;
 }
 
-/** Get WebSocket intervals to subscribe for the current exchange */
-function getBaseWsIntervals(exchange) {
-  return getNativeIntervals(exchange).map((i) => i.value);
+function getLiveWsIntervals(interval, exchange = "binance") {
+  const intervals = [interval];
+  if (interval !== "1m" && isNativeIntervalSupported(exchange, "1m")) {
+    intervals.push("1m");
+  }
+  return Array.from(new Set(intervals));
 }
 
 function buildSortedIntervals(savedCustom, exchange = "binance") {
@@ -248,6 +253,22 @@ function getIntervalDays(intv, exchange = "binance") {
   if (secs <= 14400) return 90;
   if (secs <= 43200) return 180;
   return 365;
+}
+
+function mapSubscriptionsBySymbol(subscriptions = []) {
+  const tiers = {};
+  for (const sub of subscriptions || []) {
+    tiers[sub.symbol] = sub.tier;
+  }
+  return tiers;
+}
+
+function mapPricesBySymbol(prices = []) {
+  const next = {};
+  for (const tick of prices || []) {
+    if (tick?.symbol) next[tick.symbol] = tick;
+  }
+  return next;
 }
 
 function isNativeIntervalSupported(exchange, interval) {
@@ -734,10 +755,9 @@ export default function App() {
     () => buildSortedIntervals(savedCustomIntervals, exchange),
     [exchange, savedCustomIntervals],
   );
-  const baseWsIntervals = useMemo(() => getBaseWsIntervals(exchange), [exchange]);
   const trackedIntervals = useMemo(
-    () => Array.from(new Set([...baseWsIntervals, ...savedCustomIntervals, interval])),
-    [interval, savedCustomIntervals, baseWsIntervals],
+    () => getLiveWsIntervals(interval, exchange),
+    [exchange, interval],
   );
   const trackedIntervalsRef = useRef(trackedIntervals);
   trackedIntervalsRef.current = trackedIntervals;
@@ -764,18 +784,28 @@ export default function App() {
   const [symbolPrices, setSymbolPrices] = useState({});
   const priceWsRef = useRef(null);
 
-  // Load subscription tiers from backend on mount
-  useEffect(() => {
+  const refreshPriceState = useCallback(() => {
     fetchSubscriptions()
       .then((res) => {
-        const tiers = {};
-        for (const sub of res.subscriptions || []) {
-          tiers[sub.symbol] = sub.tier;
-        }
-        setSubscriptionTiers(tiers);
+        setSubscriptionTiers(mapSubscriptionsBySymbol(res.subscriptions));
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.warn("Failed to load subscriptions:", err);
+      });
+
+    fetchPricesSnapshot()
+      .then((res) => {
+        setSymbolPrices(mapPricesBySymbol(res.prices));
+      })
+      .catch((err) => {
+        console.warn("Failed to load price snapshot:", err);
+      });
   }, []);
+
+  // Load subscription tiers and any cached watched prices from backend on mount.
+  useEffect(() => {
+    refreshPriceState();
+  }, [refreshPriceState]);
 
   // Sync watchlist symbols to backend whenever watchlists change.
   // New symbols auto-register as PRICE_ONLY so prices show immediately.
@@ -783,29 +813,21 @@ export default function App() {
   useEffect(() => {
     // Collect all unique symbols from all watchlists
     const allSymbols = [...new Set(watchlists.flatMap((wl) => wl.symbols))];
-    if (allSymbols.length === 0) return;
 
     // Debounce to avoid spamming on rapid edits (DnD, etc.)
     clearTimeout(syncTimerRef.current);
     syncTimerRef.current = setTimeout(() => {
       syncWatchlistSymbols(allSymbols)
-        .then((res) => {
-          if (res.auto_registered > 0) {
-            // Refresh tiers so the UI updates
-            fetchSubscriptions().then((r) => {
-              const tiers = {};
-              for (const sub of r.subscriptions || []) {
-                tiers[sub.symbol] = sub.tier;
-              }
-              setSubscriptionTiers(tiers);
-            }).catch(() => {});
-          }
+        .then(() => {
+          refreshPriceState();
         })
-        .catch(() => {});
+        .catch((err) => {
+          console.warn("Failed to sync watchlist subscriptions:", err);
+        });
     }, 500);
 
     return () => clearTimeout(syncTimerRef.current);
-  }, [watchlists]);
+  }, [refreshPriceState, watchlists]);
 
   // Price WebSocket — connects once and stays open
   useEffect(() => {
@@ -817,8 +839,15 @@ export default function App() {
     function connect() {
       if (stopped) return;
       ws = new WebSocket(url);
+      const currentWs = ws;
+
+      ws.onopen = () => {
+        if (stopped || ws !== currentWs) return;
+        refreshPriceState();
+      };
 
       ws.onmessage = (evt) => {
+        if (stopped || ws !== currentWs) return;
         try {
           const msg = JSON.parse(evt.data);
           if (msg.type === "prices" && Array.isArray(msg.data)) {
@@ -834,12 +863,17 @@ export default function App() {
       };
 
       ws.onclose = () => {
+        if (ws !== currentWs) return;
         if (!stopped) {
           reconnectTimer = setTimeout(connect, 3000);
         }
       };
 
-      ws.onerror = () => ws.close();
+      ws.onerror = (err) => {
+        if (stopped || ws !== currentWs) return;
+        console.warn("Price WebSocket error:", err);
+        ws.close();
+      };
       priceWsRef.current = ws;
     }
 
@@ -848,10 +882,16 @@ export default function App() {
     return () => {
       stopped = true;
       clearTimeout(reconnectTimer);
-      if (ws) ws.close();
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        try { ws.close(); } catch { /* ignore */ }
+      }
       priceWsRef.current = null;
     };
-  }, []);
+  }, [refreshPriceState]);
 
   // Handle tier change from WatchlistSidebar context menu
   // sym is a composite key like "spot:BTCUSDT" or "futures:ETHUSDT"
@@ -869,13 +909,9 @@ export default function App() {
   useEffect(() => {
     const { cacheLimits, ephemeralCacheBars } = settings;
     if (!cacheLimits) return;
-    fetch("/api/v1/settings/cache-limits", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        db_limits: cacheLimits,
-        ephemeral_bars: ephemeralCacheBars ?? 86400,
-      }),
+    updateCacheLimits({
+      dbLimits: cacheLimits,
+      ephemeralBars: ephemeralCacheBars ?? 86400,
     }).catch(() => {}); // fire-and-forget
   }, [settings.cacheLimits, settings.ephemeralCacheBars]);
 
@@ -919,7 +955,7 @@ export default function App() {
     // ── PARALLEL FETCH: quick tail + full history simultaneously ──
     const days = getIntervalDays(intv, ex);
     const [quickResult, historyResult] = await Promise.all([
-      fetchLatestKlines(sym, intv, 5, mt, ex).catch(() => null),
+      fetchLatestKlines(sym, intv, 5, mt, ex, "load_data").catch(() => null),
       fetchKlinesHistory(sym, intv, days, mt, ex).catch(() => null),
     ]);
 
@@ -1081,7 +1117,7 @@ export default function App() {
 
   // ============================================================
   //  SINGLE PERSISTENT MULTI-INTERVAL WEBSOCKET
-  //  Connects once, subscribes to ALL intervals, updates all caches
+  //  Connects once, subscribes to active chart interval + 1m price feed
   //  Features: exponential backoff, heartbeat ping, max retry limit
   // ============================================================
   useEffect(() => {
@@ -1113,15 +1149,32 @@ export default function App() {
       }, WS_PING_INTERVAL);
     };
 
-    const startPolling = () => {
+    const startPolling = (reason = "unknown") => {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        console.debug(`[WS] skip polling fallback (${reason}); socket is open`);
+        return;
+      }
       if (pollInterval) clearInterval(pollInterval);
+      console.warn(`[WS] starting polling fallback: ${reason}`, {
+        symbol,
+        interval: intervalRef.current,
+        marketType,
+        exchange,
+      });
       pollInterval = setInterval(async () => {
         if (!active) return;
         if (pollingInFlight) return;
         pollingInFlight = true;
         try {
           const currentIntv = intervalRef.current;
-          const result = await fetchLatestKlines(symbol, currentIntv, 2, marketType, exchange);
+          const result = await fetchLatestKlines(
+            symbol,
+            currentIntv,
+            2,
+            marketType,
+            exchange,
+            `polling:${reason}`,
+          );
           if (!result?.data?.length) return;
 
           setChartData((prev) => {
@@ -1141,7 +1194,7 @@ export default function App() {
         } finally {
           pollingInFlight = false;
         }
-      }, 1000);
+      }, 5000);
     };
 
     const scheduleReconnect = () => {
@@ -1172,6 +1225,10 @@ export default function App() {
 
       // Close any lingering old socket
       if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.onerror = null;
         try { socket.close(); } catch { /* */ }
         socket = null;
       }
@@ -1179,10 +1236,12 @@ export default function App() {
       try {
         const url = getMultiStreamUrl(symbol, marketType, exchange);
         socket = new WebSocket(url);
+        const currentSocket = socket;
         socketRef.current = socket;
 
         socket.onopen = () => {
           if (!active) return;
+          if (socket !== currentSocket) return;
 
           // Track whether this is a RE-connection (not the first connect)
           const isReconnection = reconnectAttempts > 0;
@@ -1205,13 +1264,12 @@ export default function App() {
           startPing();
 
           // ── Recovery after WS reconnection ──
-          // During WS downtime, some kline updates may have been missed.
-          // Fetch recent bars for the active interval to fill the gap.
+          // During WS downtime, a few tail updates may have been missed.
+          // Refresh only the tail; full-history repair is handled by gap detection.
           if (isReconnection) {
             const currentIntv = intervalRef.current;
-            const days = getIntervalDays(currentIntv, exchange);
-            console.log(`[WS-Recovery] Reconnected, reloading full history for ${symbol}@${currentIntv}`);
-            fetchKlinesHistory(symbol, currentIntv, days, marketType, exchange)
+            console.log(`[WS-Recovery] Reconnected, refreshing tail for ${symbol}@${currentIntv}`);
+            fetchLatestKlines(symbol, currentIntv, 10, marketType, exchange, "ws_recovery")
               .then((result) => {
                 if (!active || !result?.data?.length) return;
                 setChartData((prev) => {
@@ -1221,7 +1279,7 @@ export default function App() {
                 });
                 const latest = result.data[result.data.length - 1];
                 updateLastPrice(latest, currentIntv);
-                console.log(`[WS-Recovery] Reloaded ${result.data.length} bars after reconnect`);
+                console.log(`[WS-Recovery] Refreshed ${result.data.length} tail bars after reconnect`);
               })
               .catch((err) => {
                 console.warn("[WS-Recovery] Failed to recover after reconnect:", err);
@@ -1231,6 +1289,7 @@ export default function App() {
 
         socket.onmessage = (event) => {
           if (!active) return;
+          if (socket !== currentSocket) return;
           try {
             // Ignore pong text responses from heartbeat
             if (event.data === "pong") return;
@@ -1251,12 +1310,22 @@ export default function App() {
               return;
             }
 
-            // ── Handle backfill completion: reload history for that interval ──
+            // ── Handle backfill completion for the active chart only ──
             if (msg.type === "backfill_completed") {
               const bfInterval = msg.interval;
               const bfSymbol = msg.symbol || symbol;
               const bfExchange = msg.exchange || exchange;
               const bfMarketType = msg.market_type || marketType;
+              const currentIntv = intervalRef.current;
+
+              if (
+                bfInterval !== currentIntv ||
+                bfSymbol !== symbol ||
+                bfExchange !== exchange ||
+                bfMarketType !== marketType
+              ) {
+                return;
+              }
 
               // ── Dedup: skip if a reload for this interval is already in-flight or on cooldown ──
               const bfDedupeKey = `${bfExchange}-${bfMarketType}-${bfSymbol}-${bfInterval}`;
@@ -1271,35 +1340,24 @@ export default function App() {
               fetchKlinesHistory(bfSymbol, bfInterval, days, bfMarketType, bfExchange)
                 .then((result) => {
                   if (!result?.data?.length) return;
-                  const currentIntv = intervalRef.current;
-                  const key = cacheKey(bfSymbol, bfInterval, bfMarketType, bfExchange);
-                  const existingCache = chartDataCacheRef.current.get(key);
-                  if (existingCache && existingCache.length > 0) {
-                    const merged = mergeByTime(result.data, existingCache);
-                    chartDataCacheRef.current.set(key, merged);
-                  } else {
-                    chartDataCacheRef.current.set(key, result.data);
-                  }
-                  if (bfInterval === currentIntv && bfSymbol === symbol && bfExchange === exchange && bfMarketType === marketType) {
-                    setChartData((prev) => {
-                      const merged = mergeByTime(result.data, prev);
-                      saveToCache(bfSymbol, bfInterval, merged);
-                      return merged;
-                    });
-                    // Only set lastPrice from backfill if no live price exists yet.
-                    // Otherwise we'd overwrite the real-time WS price with stale
-                    // history data, causing the header OHLCV to "jump" between
-                    // live ticks and snapshot values from each backfill fetch.
-                    setLastPrice((prev) => {
-                      if (prev) return prev; // live price already flowing — keep it
-                      const latest = result.data[result.data.length - 1];
-                      return latest || prev;
-                    });
-                    setError(null);
-                    setConnectionStatus("connected");
-                    setLoading(false);
-                    setDatasetKey((v) => v + 1);
-                  }
+                  setChartData((prev) => {
+                    const merged = mergeByTime(result.data, prev);
+                    saveToCache(bfSymbol, bfInterval, merged);
+                    return merged;
+                  });
+                  // Only set lastPrice from backfill if no live price exists yet.
+                  // Otherwise we'd overwrite the real-time WS price with stale
+                  // history data, causing the header OHLCV to "jump" between
+                  // live ticks and snapshot values from each backfill fetch.
+                  setLastPrice((prev) => {
+                    if (prev) return prev; // live price already flowing — keep it
+                    const latest = result.data[result.data.length - 1];
+                    return latest || prev;
+                  });
+                  setError(null);
+                  setConnectionStatus("connected");
+                  setLoading(false);
+                  setDatasetKey((v) => v + 1);
                 })
                 .catch((err) => {
                   console.warn(`Failed to reload after backfill for ${bfInterval}:`, err);
@@ -1310,12 +1368,6 @@ export default function App() {
                     backfillReloadInFlightRef.current.delete(bfDedupeKey);
                   }, BACKFILL_RELOAD_COOLDOWN_MS);
                 });
-
-              // NOTE: Removed the redundant fetchKlinesBefore() call that was here.
-              // The fetchKlinesHistory above already covers the full data range.
-              // The extra fetchKlinesBefore was causing a request storm loop:
-              //   backfill_completed → fetchHistory → triggers backfill → backfill_completed → ...
-              // Left-side data loading is handled by handleNeedMoreLeft when the user scrolls.
 
               return;
             }
@@ -1367,20 +1419,22 @@ export default function App() {
 
         socket.onerror = () => {
           if (!active) return;
+          if (socket !== currentSocket) return;
           // onerror is always followed by onclose, so just start polling here
           // and let onclose handle the reconnect scheduling
-          startPolling();
+          startPolling("socket error");
         };
 
         socket.onclose = () => {
           if (!active) return;
+          if (socket !== currentSocket) return;
           stopPing();
-          startPolling();
+          startPolling("socket closed");
           scheduleReconnect();
         };
       } catch (connectErr) {
         console.warn("WS initialization failed:", connectErr);
-        startPolling();
+        startPolling("connect initialization failed");
         scheduleReconnect();
       }
     };
@@ -1390,7 +1444,7 @@ export default function App() {
 
     const initialFallbackTimer = setTimeout(() => {
       if (active && !pollInterval && (!socket || socket.readyState !== WebSocket.OPEN)) {
-        startPolling();
+        startPolling("initial open timeout");
       }
     }, 4000);
 
@@ -1401,6 +1455,10 @@ export default function App() {
       stopPing();
       if (pollInterval) clearInterval(pollInterval);
       if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onclose = null;
+        socket.onerror = null;
         try { socket.close(); } catch { /* */ }
       }
       if (socketRef.current === socket) {
@@ -1413,37 +1471,6 @@ export default function App() {
   useEffect(() => {
     syncSocketSubscriptions(socketRef.current, trackedIntervals);
   }, [syncSocketSubscriptions, trackedIntervals]);
-
-  // ---------- Background prefetch: load history for ALL intervals ----------
-  useEffect(() => {
-    let cancelled = false;
-    const prefetch = async () => {
-      // Fire-and-forget: load history for all tracked intervals into cache
-      // so switching is instant
-      for (const intv of trackedIntervals) {
-        if (cancelled) break;
-        const key = cacheKey(symbol, intv, marketType, exchange);
-        if (chartDataCacheRef.current.has(key)) continue; // already cached
-
-        const days = getIntervalDays(intv, exchange);
-        try {
-          const result = await fetchKlinesHistory(symbol, intv, days, marketType, exchange);
-          if (cancelled) break;
-          if (result?.data?.length) {
-            chartDataCacheRef.current.set(key, result.data);
-          }
-        } catch {
-          // Non-critical, continue
-        }
-        // Small delay to avoid hammering the backend
-        await new Promise((r) => setTimeout(r, 200));
-      }
-    };
-
-    // Start prefetching after a short delay so the active interval loads first
-    const timer = setTimeout(prefetch, 2000);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [cacheKey, exchange, marketType, symbol, trackedIntervals]);
 
   // ============================================================
   //  GAP DETECTION & AUTO-FILL
@@ -1549,10 +1576,9 @@ export default function App() {
   }, [cacheKey, dataSource, exchange, loading, marketType, symbol]);
 
   // ============================================================
-  //  VISIBILITY CHANGE — ACTIVE RECOVERY ON TAB FOCUS
-  //  When the user switches back to this tab, immediately fetch
-  //  recent klines to fill any gaps that accumulated while the
-  //  browser throttled WS message processing in the background.
+  //  VISIBILITY CHANGE — TAIL REFRESH ON TAB FOCUS
+  //  When the user switches back to this tab, refresh only recent bars.
+  //  Full-history repairs are left to explicit gap detection.
   // ============================================================
   const lastVisibleTimeRef = useRef(Date.now());
   const visibilityRecoveryInFlightRef = useRef(false);
@@ -1568,8 +1594,6 @@ export default function App() {
       // Tab is now visible again
       const hiddenDurationMs = Date.now() - lastVisibleTimeRef.current;
       const currentIntv = intervalRef.current;
-      const intvSecs = parseIntervalSeconds(currentIntv);
-
       // If we were hidden for more than 5 seconds, trigger recovery unconditionally.
       // Browsers aggressively throttle WS messages when tabs are inactive.
       if (hiddenDurationMs < 5000) return;
@@ -1580,51 +1604,23 @@ export default function App() {
 
       console.log(
         `[TabRecovery] Tab was hidden for ${(hiddenDurationMs / 1000).toFixed(1)}s, ` +
-        `recovering data for ${symbol}@${currentIntv}...`
+        `refreshing tail for ${symbol}@${currentIntv}...`
       );
 
       try {
-        // Strategy: reload FULL history for the active interval.
-        // This is the most reliable approach — it covers any gap
-        // (middle, tail, or multiple scattered gaps) in one shot.
-        const days = getIntervalDays(currentIntv, exchange);
-        const historyResult = await fetchKlinesHistory(symbol, currentIntv, days, marketType, exchange);
+        // Refresh only the tail on focus. If there is a real interior gap,
+        // the periodic gap scanner will issue a history repair separately.
+        const latestResult = await fetchLatestKlines(symbol, currentIntv, 10, marketType, exchange, "tab_recovery");
 
-        if (historyResult?.data?.length > 0) {
+        if (latestResult?.data?.length > 0) {
           setChartData((prev) => {
-            const merged = mergeByTime(historyResult.data, prev);
+            const merged = mergeByTime(latestResult.data, prev);
             saveToCache(symbol, currentIntv, merged);
-
-            // Verify gaps are gone
-            const remaining = detectGaps(merged, intvSecs);
-            if (remaining.length > 0) {
-              console.warn(`[TabRecovery] ${remaining.length} gap(s) remain after history reload`);
-            } else {
-              console.log(`[TabRecovery] All gaps filled (${merged.length} total bars)`);
-            }
             return merged;
           });
-          const latest = historyResult.data[historyResult.data.length - 1];
+          const latest = latestResult.data[latestResult.data.length - 1];
           updateLastPrice(latest, currentIntv);
-          console.log(`[TabRecovery] Reloaded ${historyResult.data.length} bars of full history`);
-        }
-
-        // Also refresh background caches for other intervals
-        for (const bgIntv of trackedIntervalsRef.current) {
-          if (bgIntv === currentIntv) continue;
-          const bgKey = cacheKey(symbol, bgIntv, marketType, exchange);
-          const bgCache = chartDataCacheRef.current.get(bgKey);
-          if (!bgCache || bgCache.length === 0) continue;
-
-          try {
-            const bgResult = await fetchLatestKlines(symbol, bgIntv, 10, marketType, exchange);
-            if (bgResult?.data?.length > 0) {
-              const bgMerged = mergeByTime(bgResult.data, bgCache);
-              chartDataCacheRef.current.set(bgKey, bgMerged);
-            }
-          } catch {
-            // Non-critical — background cache refresh
-          }
+          console.log(`[TabRecovery] Refreshed ${latestResult.data.length} tail bars`);
         }
       } catch (err) {
         console.warn("[TabRecovery] Recovery failed:", err);
@@ -1635,7 +1631,7 @@ export default function App() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [cacheKey, exchange, marketType, recoverGaps, saveToCache, symbol, updateLastPrice]);
+  }, [exchange, marketType, saveToCache, symbol, updateLastPrice]);
 
   // ---- handle load more left ----
   const handleNeedMoreLeft = useCallback(

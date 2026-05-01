@@ -40,6 +40,18 @@ _REST_PATH: dict[str, dict[str, str]] = {
     },
 }
 
+_FUTURES_MARKET_STREAMS = {
+    "aggTrade",
+    "kline",
+    "miniTicker",
+    "ticker",
+}
+
+_FUTURES_PUBLIC_STREAMS = {
+    "depth",
+    "trade",
+}
+
 
 class BinanceExchangeAdapter:
     """Exchange adapter for Binance spot + USDT-M perpetual."""
@@ -106,6 +118,23 @@ class BinanceExchangeAdapter:
             "wss://stream.binance.me:9443/ws",
         ]
 
+    def get_ws_base_urls_for_descriptor(
+        self,
+        descriptor,
+        market_type: str = "spot",
+        config: Any | None = None,
+    ) -> list[str]:
+        urls = self.get_ws_base_urls(market_type, config=config)
+        if market_type != "futures":
+            return urls
+
+        stream_type = getattr(descriptor.stream_type, "value", str(descriptor.stream_type))
+        if stream_type in _FUTURES_MARKET_STREAMS:
+            return self._route_futures_ws_urls(urls, "market")
+        if stream_type in _FUTURES_PUBLIC_STREAMS:
+            return self._route_futures_ws_urls(urls, "public")
+        return urls
+
     def get_rest_path(self, stream_type, market_type: str = "spot") -> str | None:
         return _REST_PATH.get(market_type, _REST_PATH["spot"]).get(stream_type.value)
 
@@ -160,6 +189,25 @@ class BinanceExchangeAdapter:
 
     def supports_ws_streaming(self, market_type: str = "spot") -> bool:
         return True
+
+    @staticmethod
+    def _route_futures_ws_urls(urls: list[str], route: str) -> list[str]:
+        routed: list[str] = []
+        for url in urls:
+            base = url.rstrip("/")
+            if f"/{route}/ws" in base:
+                routed.append(base)
+                continue
+            if base.endswith("/ws"):
+                base = base[:-3]
+            elif base.endswith("/stream"):
+                base = base[:-7]
+            for legacy_route in ("/public", "/market", "/private"):
+                if base.endswith(legacy_route):
+                    base = base[: -len(legacy_route)]
+                    break
+            routed.append(f"{base}/{route}/ws")
+        return list(dict.fromkeys(routed))
 
     def extract_http_rows(self, payload: Any, stream_type) -> list[Any]:
         if isinstance(payload, list):

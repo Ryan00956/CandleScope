@@ -514,7 +514,8 @@ export default function WatchlistSidebar({
     );
     const isDragged = dragType === "symbol" && dragSymbol === compositeKey && dragSourceListId === wl.id;
     const tick = prices?.[compositeKey];
-    const tierVal = subscriptionTiers?.[compositeKey] || "none";
+    const tierKnown = Object.prototype.hasOwnProperty.call(subscriptionTiers || {}, compositeKey);
+    const tierVal = tierKnown ? subscriptionTiers[compositeKey] : (tick ? "price" : "none");
     const tierDot = tierVal === "full" ? "wl-tier-full" : tierVal === "price" ? "wl-tier-price" : "";
     const flashDir = flashStates[compositeKey]; // "up" | "down" | undefined
 

@@ -15,6 +15,8 @@ from app.data_engine.data_manager.subscriptions import (
     SubscriptionService,
     SubscriptionTier,
 )
+from app.data_engine.ingestion.factory import BinanceIngestionFactory
+from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
 
 DAY_MS = 86_400_000
 
@@ -112,6 +114,74 @@ def test_price_key_helpers_normalize_exchange_market_and_symbol() -> None:
         volume=0,
         quote_volume=0,
     ).series_key == SeriesKey("BTCUSDT", "price")
+
+
+def test_ingestion_factory_price_callback_receives_delivery_events() -> None:
+    async def _run() -> None:
+        class _Delivery:
+            def __init__(self) -> None:
+                self.callbacks = []
+
+            def on_market_event(self, callback):
+                self.callbacks.append(callback)
+
+        class _Pipeline:
+            def __init__(self) -> None:
+                self.delivery = _Delivery()
+
+        received = []
+
+        async def _on_price(tick):
+            received.append(tick)
+
+        pipeline = _Pipeline()
+        factory = BinanceIngestionFactory()
+        factory._register_price_callback(  # noqa: SLF001 - regression coverage for bridge wiring
+            pipeline,
+            _on_price,
+            "binance",
+            "spot",
+        )
+
+        assert len(pipeline.delivery.callbacks) == 1
+
+        await pipeline.delivery.callbacks[0](
+            MarketEvent(
+                event_type=StreamType.MINI_TICKER,
+                symbol="BTCUSDT",
+                exchange="binance",
+                event_time_ms=1700000000123,
+                received_at_ms=1700000000456,
+                source=DataSource.WEBSOCKET,
+                stream_key="BTCUSDT@miniTicker",
+                data={
+                    "last_price": 101.5,
+                    "open_price": 100,
+                    "high_price": 105,
+                    "low_price": 95,
+                    "price_change_pct": 1.5,
+                    "volume": 12,
+                    "quote_volume": 1200,
+                },
+            )
+        )
+
+        assert received == [{
+            "symbol": "BTCUSDT",
+            "exchange": "binance",
+            "market_type": "spot",
+            "price": 101.5,
+            "open": 100.0,
+            "high": 105.0,
+            "low": 95.0,
+            "change_pct": 1.5,
+            "volume": 12.0,
+            "quote_volume": 1200.0,
+            "daily_open": 100.0,
+            "updated_at_ms": 1700000000123,
+        }]
+
+    asyncio.run(_run())
 
 
 def test_data_manager_daily_open_prefers_storage_1d_bar() -> None:

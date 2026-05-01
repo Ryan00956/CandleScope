@@ -273,6 +273,8 @@ class BinanceIngestionFactory:
             except Exception as exc:
                 logger.error("on_price callback error: %s", exc, exc_info=True)
 
+        pipeline.delivery.on_market_event(_bridge)
+
     async def shutdown(self) -> None:
         """Stop the shared MarketDataIngress (called during app shutdown)."""
         if self._ingress is not None:

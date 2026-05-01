@@ -1,7 +1,6 @@
 """Daily open resolver for price snapshots."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -59,8 +58,7 @@ class DailyOpenService:
         if storage is None:
             return 0.0
         try:
-            rows = await asyncio.to_thread(
-                storage.query_bars,
+            rows = storage.query_bars(
                 symbol=snapshot.symbol,
                 interval="1d",
                 start_ms=bucket_start_ms,

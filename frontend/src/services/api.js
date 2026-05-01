@@ -2,6 +2,7 @@
  * CandleScope API service layer.
  */
 const API_BASE = "http://localhost:8000/api/v1";
+const CLIENT_INSTANCE_ID = Math.random().toString(36).slice(2, 10);
 
 function httpBaseToWsBase(httpBase) {
     if (httpBase.startsWith("https://")) return `wss://${httpBase.slice("https://".length)}`;
@@ -58,8 +59,18 @@ export async function fetchLatestKlines(
     limit = 2,
     marketType = "spot",
     exchange = "binance",
+    source = "",
 ) {
-    const url = `${API_BASE}/klines/latest?symbol=${symbol}&interval=${interval}&limit=${limit}&exchange=${exchange}&market_type=${marketType}`;
+    const params = new URLSearchParams({
+        symbol,
+        interval,
+        limit: String(limit),
+        exchange,
+        market_type: marketType,
+        client_id: CLIENT_INSTANCE_ID,
+    });
+    if (source) params.set("source", source);
+    const url = `${API_BASE}/klines/latest?${params.toString()}`;
     return request(url);
 }
 
@@ -147,6 +158,23 @@ export async function testProxyConnection({ mode, custom_proxy }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode, custom_proxy: custom_proxy || null }),
+    });
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+}
+
+export async function updateCacheLimits({ dbLimits, ephemeralBars }) {
+    const url = `${API_BASE}/settings/cache-limits`;
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            db_limits: dbLimits,
+            ephemeral_bars: ephemeralBars,
+        }),
     });
     if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));

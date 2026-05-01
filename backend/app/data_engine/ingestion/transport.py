@@ -256,7 +256,7 @@ class TransportLayer:
         subscription = adapter.build_ws_subscription(descriptor)
         ws_urls = self._sanitize_ws_urls(
             exchange,
-            adapter.get_ws_base_urls(market_type, config=self._cfg),
+            self._get_ws_base_urls_for_descriptor(adapter, descriptor, market_type),
         )
         last_exc: Exception | None = None
         tried = 0
@@ -457,6 +457,32 @@ class TransportLayer:
         if exchange == "okx":
             cleaned = [u for u in cleaned if "wsaws.okx.com" not in u]
         return list(dict.fromkeys(cleaned))
+
+    def _get_ws_base_urls_for_descriptor(
+        self,
+        adapter: Any,
+        descriptor: StreamDescriptor,
+        market_type: str,
+    ) -> list[str]:
+        get_descriptor_ws_urls = getattr(adapter, "get_ws_base_urls_for_descriptor", None)
+        if callable(get_descriptor_ws_urls):
+            urls = list(
+                get_descriptor_ws_urls(
+                    descriptor,
+                    market_type=market_type,
+                    config=self._cfg,
+                ) or []
+            )
+            if urls:
+                return urls
+
+        if descriptor.stream_type in (StreamType.TICKER, StreamType.MINI_TICKER):
+            get_ticker_ws_urls = getattr(adapter, "get_ticker_ws_urls", None)
+            if callable(get_ticker_ws_urls):
+                urls = list(get_ticker_ws_urls(market_type) or [])
+                if urls:
+                    return urls
+        return list(adapter.get_ws_base_urls(market_type, config=self._cfg))
 
     # ── Internal: HTTP session ───────────────────────────────
 

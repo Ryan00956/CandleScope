@@ -39,7 +39,7 @@
 | 1 | **检测** | `GapDetector` | 对比实时边界（来自 ingestion 第六层）与数据库，发现尾部/头部/内部缺口 |
 | 2 | **规划** | `BackfillPlanner` | 分解自定义周期、对齐桶边界、生成拉取任务 |
 | 3 | **拉取** | `HistoricalFetcher` | 分页 REST 调用，并发控制 + 重试 |
-| 4 | **调和** | `Reconciler` | 去重、自定义周期聚合、批量写库、记录写入失败 |
+| 4 | **调和** | `Reconciler` | 去重、自定义周期聚合、批量写库、记录写入失败和 `written_ranges` |
 | 5 | **发布** | `RepairPublisher` | 日志 + 回调，输出 `RepairReport` |
 
 ## 与 DataManager 的边界
@@ -69,8 +69,38 @@ cache merge + DataEventBus BACKFILL_COMPLETED / BACKFILL_FAILED
 
 - `BackfillEngine` 只做 pipeline，不直接回灌 DataManager cache。
 - `BackfillCoordinator` 负责 request lifecycle、in-flight guard、失败重试、shutdown cancel 和事件映射。
+- `RepairReport.written_ranges` 是 coordinator 回灌 cache 的权威范围；不会再按原始 request 大范围盲读 storage。
 - `Reconciler` 写库失败会进入 `ReconcileResult.write_errors` / `failed_batches`，整体报告会返回 `PARTIAL` 或 `FAILED`，不会伪装成 completed。
 - 自定义周期聚合复用 `BarAggregator.aggregate_batch()`，避免污染主 aggregator 的 targets/active/recent 状态。
+
+## RepairReport 与写入范围
+
+BackfillEngine 不直接通知前端，也不直接写 DataManager cache。它通过报告告诉 coordinator 实际发生了什么：
+
+```python
+report.status                 # COMPLETED / PARTIAL / FAILED
+report.errors                 # 顶层错误
+report.reconcile_result       # bars_written / write_errors / failed_batches
+report.written_ranges         # 已成功写入 storage 的精确范围
+```
+
+`WrittenRange` 结构：
+
+```python
+WrittenRange(
+    exchange="binance",
+    market_type="spot",
+    symbol="BTCUSDT",
+    interval="1m",
+    start_ms=...,
+    end_ms=...,
+    bars_written=500,
+    source="backfill",
+    phase="standard",
+)
+```
+
+Coordinator 对每个 `WrittenRange` 重新从 storage 查询最终数据，再调用 `DataManager.on_bars_backfilled()`。这样可以处理 partial 写入、custom bar 写入和 request range 与实际写入范围不一致的情况。
 
 ---
 
@@ -186,7 +216,7 @@ class MyCache:
 | `fetch_batch_size` | `1000` | 每页K线数 |
 | `fetch_rate_limit_delay` | `0.1` | 请求间隔（秒） |
 | `fetch_max_retries` | `3` | 单次请求最大重试次数 |
-| `reconcile_dedup_strategy` | `"overwrite"` | 重复数据处理策略 |
+| `reconcile_dedup_strategy` | `"overwrite"` | 重复数据处理策略：`skip` / `overwrite` / `backfill_wins`；`newer_wins` 保留为兼容别名 |
 | `reconcile_enable_cache_push` | `True` | 是否推送近期数据到缓存 |
 | `publish_mode` | `"both"` | `"log"` / `"callback"` / `"both"` |
 

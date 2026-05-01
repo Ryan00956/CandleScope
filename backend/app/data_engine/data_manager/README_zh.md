@@ -34,7 +34,7 @@ Data Manager 是所有 K 线数据操作的**唯一入口**。图表、指标、
 | 文件 | 说明 |
 |------|------|
 | `config.py` | 所有配置数据类（`DataManagerConfig`、`CacheConfig`、`QueryConfig`、`EventBusConfig`、`CoordinatorConfig`） |
-| `models.py` | 核心类型：`BarData`（K线数据）、`SeriesKey`（系列标识）、`QueryResult`（查询结果）、`DataEvent`（事件）、`StorageBackend`（存储协议）等 |
+| `models.py` | 核心类型：`BarData`、`SeriesKey`、`MissingRange`、`QueryResult`、`DataEvent`、`StorageBackend` 等 |
 | `cache.py` | `BarCache` — 线程安全、LRU 淘汰、有界的内存 K 线缓存，每个系列独立环形缓冲区 |
 | `event_bus.py` | `DataEventBus` — 基于主题的发布/订阅，支持回调和异步迭代器两种订阅方式，支持中间件 |
 | `query.py` | `QueryEngine` — 三级查询引擎：缓存 → 存储 → 回填 |
@@ -45,6 +45,9 @@ Data Manager 是所有 K 线数据操作的**唯一入口**。图表、指标、
 | `custom_query.py` | `CustomIntervalQueryService` — 自定义周期查询聚合 |
 | `maintenance.py` | `MaintenanceService` — settings storage repair/gap scan/delete 的实现 |
 | `price_cache.py` | `PriceSnapshotCache` — 实时价格快照与 `PRICE_UPDATED` 事件数据 |
+| `daily_open.py` | `DailyOpenService` — 从 storage 当前 `1d` bar 获取 daily open，缺失时触发 `1d` backfill |
+| `ingestion_price_source.py` | `IngestionPriceSource` — 将 ingestion ticker/miniTicker 接入 DataManager price cache |
+| `stream_policy.py` | `StreamEnsurePlanner` — 计算 `ensure_stream()` 的 aggregation targets 和前置 stream |
 | `subscriptions.py` | `SubscriptionService` — `full` / `price` / `none` 订阅等级持久化与恢复 |
 | `retention.py` | `RetentionService` — cache/db limits 快照与维护 |
 | `manager.py` | `DataManager` — 组合所有组件的公共门面 |
@@ -87,15 +90,18 @@ for bar in result.bars:
 # 元数据
 print(result.source)              # "cache"、"storage"、"mixed"、"empty"
 print(result.cache_hit)           # True/False
-print(result.backfill_triggered)  # 是否触发了回填
+print(result.backfill_triggered)  # DataManager 是否已提交回填
+print(result.missing_ranges)      # QueryEngine 检出的结构化缺失区间
 ```
 
 查询引擎分三级解析数据：
 1. **缓存** — 亚毫秒级，内存中
 2. **存储** — SQLite / 数据库回退，结果会自动缓存供下次使用
-3. **回填** — 如果检测到缺口，触发异步历史数据获取
+3. **缺口报告** — 如果检测到缺口，返回 `MissingRange`
 
-当前 `QueryEngine` 仍以 callback 方式提交缺失区间；生产 wiring 中该 callback 指向 `BackfillCoordinator`，由 coordinator 负责 request 去重、range 合并、执行 `BackfillEngine`、从 storage 回读最终 bars、回灌 DataManager cache 并发布事件。
+当前生产路径中，`QueryEngine` 只负责检测并把缺口放进 `QueryResult.missing_ranges`；`DataManager` 读取这些结构化区间后显式提交 `BackfillCoordinator`。`QueryEngine` 保留 standalone callback 能力只是为了兼容独立使用场景。
+
+`BackfillCoordinator` 负责 request 去重、range 合并、执行 `BackfillEngine`、按 `RepairReport.written_ranges` 从 storage 精确回读最终 bars、回灌 DataManager cache 并发布 `BACKFILL_COMPLETED` / `BACKFILL_FAILED`。
 
 ## 订阅事件
 
@@ -176,6 +182,10 @@ await dm.subscriptions.set_tier("okx:spot:BTC-USDT", SubscriptionTier.PRICE_ONLY
 
 REST `/subscriptions/prices` 与 WS `/stream/prices` 都从 `PriceSnapshotCache` / `DataEventBus` 取数。
 
+price snapshot 的 `daily_open` 不再通过单独 REST 旁路获取。`DailyOpenService` 优先读取当前 `1d` storage bar 的 open；如果没有 `1d` 数据，会触发 `1d` backfill，同时暂时使用 ticker 自带的 24h open 作为兜底。
+
+如果 price source 对应的 factory 提供 `start_price_many`，`IngestionPriceSource` 会按 `(exchange, market_type)` 复用一个 multi-symbol ticker handle，并通过 `set_symbols()` / `set_watched_symbols()` 更新 watch set；不支持的交易所继续使用 per-symbol ticker。
+
 ## 维护 Facade
 
 settings API 不直接读 DataManager 私有字段或直接运行 BackfillEngine，统一调用 DataManager public facade：
@@ -218,8 +228,10 @@ await data_manager.on_bar_event(
 ## 与 backfill 集成
 
 ```python
-# 回填获取和校验完成后
-bars = [BarData.from_storage_row(r) for r in rows]
+# 通常由 BackfillCoordinator 调用：
+# 1. BackfillEngine 返回 RepairReport.written_ranges
+# 2. Coordinator 对每个 written range 从 storage 读取最终 bars
+# 3. 回灌 cache 并发布 BACKFILL_COMPLETED / BACKFILL_FAILED
 await data_manager.on_bars_backfilled("BTCUSDT", "1m", bars)
 ```
 

@@ -9,6 +9,18 @@
 
 **本模块不负责生成K线、计算指标、写存储或执行历史回补。** 这些职责属于下游层（`BarAggregator`、`DataManager`、`BackfillCoordinator` 等）。
 
+在当前完整 data-engine 中，`ingestion` 是唯一正式市场数据入口：
+
+```text
+交易所 WS/REST
+      ▼
+ingestion: MarketEvent / GapMarker
+      ▼
+BarAggregator / DataManager
+```
+
+价格流也走同一套入口。`TICKER` / `MINI_TICKER` 会被 `DataManager.IngestionPriceSource` 消费并写入 `PriceSnapshotCache`；支持 multi-symbol ticker 的 factory 可以通过 `start_price_many` 用一个流 fan-out 多个 watched symbols。
+
 ---
 
 ## 架构
@@ -44,6 +56,7 @@
 - `NormalizeLayer` 只做分发门面，Binance/OKX 解析放在 `normalizers/` 下。
 - 普通 WS session 与 OKX shared WS 都实现同一 `SessionLike` contract，`FeedControlLayer` 不关心具体 session 类型。
 - `DeliveryLayer` 的 ordered callback 用于核心链路，会反压 ingestion；非核心消费者使用 bounded async queue，队列满时丢弃非核心事件。
+- `TICKER` / `MINI_TICKER` 只输出标准化价格事件，不维护业务 watchlist；watchlist、daily open 和订阅等级属于 DataManager。
 
 ## 支持的数据流类型
 
@@ -218,4 +231,5 @@ ingress = MarketDataIngress(config=config)
 | `normalizers/`   | L4    | Binance/OKX 原始数据解析              |
 | `continuity.py`  | L5    | 去重、间隙检测、GapMarker             |
 | `delivery.py`    | L6    | 分发给订阅者                          |
+| `factory.py`     | —     | 应用侧工厂，启动 KLINE/TICKER pipeline |
 | `__init__.py`    | —     | 组装、StreamPipeline、MarketDataIngress |

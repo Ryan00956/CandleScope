@@ -79,7 +79,7 @@ state = await agg.seed_active_bar("BTC-USDT", "1m", bar_input, exchange="okx")
 state = await agg.replay_components("BTC-USDT", "45m", components, exchange="okx")
 
 # 批处理聚合：隔离临时 aggregator，不污染主 targets/active/recent
-states = await agg.aggregate_batch("BTC-USDT", "45m", "15m", rows)
+states = await agg.aggregate_batch("BTC-USDT", "45m", "15m", rows, exchange="okx")
 
 # 查询/移除 bucket 状态
 state = agg.get_bucket_state("BTC-USDT", "1m", bucket_start_ms)
@@ -87,6 +87,19 @@ expired = agg.expire_bucket("BTC-USDT", "1m", bucket_start_ms)
 ```
 
 业务路径不应直接调用 `_handle_bar_input()`，也不应直接操作 `pipeline.bar_state`。`get_pipeline()` 保留给高级调试和自定义策略安装。
+
+## 当前数据语义
+
+`BarInput` 带有显式 `MergeMode`，避免用 `source_interval != target_interval` 这类隐式规则推断行为：
+
+| MergeMode | 使用场景 | 合并语义 |
+|---|---|---|
+| `SNAPSHOT` | 交易所原生 kline、backfill 标准周期 | OHLCV 快照覆盖当前 bucket |
+| `INCREMENTAL` | tick/trade 增量源 | price 更新，volume/trades 累加 |
+| `COMPONENT` | 自定义周期由基础组件重放 | 组件快照聚合成目标周期 |
+| `PRICE_ONLY` | OKX 1m realtime 扇出到更大标准周期 | 只刷新 OHLC，不写入 volume/trades |
+
+这点对 OKX 高周期很关键：1m 数据可以让 1h/4h/1d 当前价格持续刷新，但不会把 1m 的成交量错误累加到原生高周期 candle。
 
 ## 各层详解
 

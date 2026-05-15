@@ -273,6 +273,53 @@ function deduplicateByTime(data) {
   return Array.from(seen.values()).sort((a, b) => a.time - b.time);
 }
 
+const MAX_RENDER_GAP_POINTS_PER_GAP = 5_000;
+const MAX_RENDER_GAP_POINTS_TOTAL = 20_000;
+
+function buildRenderableChartData(data, intervalSeconds) {
+  if (!data || data.length <= 1 || !intervalSeconds || intervalSeconds <= 0) {
+    return data || [];
+  }
+
+  const sorted = deduplicateByTime(data);
+  const rendered = [];
+  let insertedTotal = 0;
+
+  for (let i = 0; i < sorted.length; i += 1) {
+    const current = sorted[i];
+    if (i > 0) {
+      const previous = sorted[i - 1];
+      const diff = current.time - previous.time;
+      const missingBars = Math.round(diff / intervalSeconds) - 1;
+
+      if (missingBars > 0) {
+        const canInsertFullGap =
+          missingBars <= MAX_RENDER_GAP_POINTS_PER_GAP &&
+          insertedTotal + missingBars <= MAX_RENDER_GAP_POINTS_TOTAL;
+
+        if (canInsertFullGap) {
+          for (let t = previous.time + intervalSeconds; t < current.time; t += intervalSeconds) {
+            rendered.push({ time: t, __whitespace: true });
+            insertedTotal += 1;
+          }
+        } else {
+          const firstMissing = previous.time + intervalSeconds;
+          const lastMissing = current.time - intervalSeconds;
+          rendered.push({ time: firstMissing, __whitespace: true });
+          insertedTotal += 1;
+          if (lastMissing > firstMissing) {
+            rendered.push({ time: lastMissing, __whitespace: true });
+            insertedTotal += 1;
+          }
+        }
+      }
+    }
+    rendered.push(current);
+  }
+
+  return rendered;
+}
+
 const INITIAL_BACKFILL_RETRY_MS = 3_000;
 const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
 
@@ -363,6 +410,10 @@ export default function App() {
   const [datasetKey, setDatasetKey] = useState(0);
 
   const [chartData, setChartData] = useState([]);
+  const renderChartData = useMemo(
+    () => buildRenderableChartData(chartData, parseIntervalSeconds(interval)),
+    [chartData, interval],
+  );
   const [loading, setLoading] = useState(true);
   const [loadingMoreLeft, setLoadingMoreLeft] = useState(false);
   const [hasMoreLeft, setHasMoreLeft] = useState(true);
@@ -2216,7 +2267,7 @@ export default function App() {
           <ErrorBoundary>
             <MultiPaneChart
               ref={chartWidgetRef}
-              data={chartData}
+              data={renderChartData}
               symbol={symbol}
               drawingKeyBase={chartStorageKeyBase}
               interval={interval}

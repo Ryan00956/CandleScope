@@ -74,6 +74,15 @@ function buildLocalizationOptions(timezone = "Local", interval = "1h") {
 }
 
 function toCandlePoint(d) {
+    if (
+        d?.__whitespace ||
+        d?.open == null ||
+        d?.high == null ||
+        d?.low == null ||
+        d?.close == null
+    ) {
+        return { time: d.time };
+    }
     return { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close };
 }
 
@@ -307,6 +316,10 @@ const ChartPane = forwardRef(function ChartPane({
                 }
                 const cd = param.seriesData.get(mainSeries);
                 if (!cd) return;
+                if (cd.open == null || cd.high == null || cd.low == null || cd.close == null) {
+                    onCrosshairMoveExternal(null);
+                    return;
+                }
                 onCrosshairMoveExternal({
                     time: param.time,
                     open: cd.open,
@@ -958,14 +971,18 @@ const ChartPane = forwardRef(function ChartPane({
         try {
             isSyncingRef.current = true;
             const coloredData = data.map((d) => {
+                const point = toCandlePoint(d);
+                if (point.open == null || point.high == null || point.low == null || point.close == null) {
+                    return point;
+                }
                 const c = colorMap.get(d.time);
                 if (c) {
                     return {
-                        time: d.time, open: d.open, high: d.high, low: d.low, close: d.close,
+                        ...point,
                         color: c, borderColor: c, wickColor: c,
                     };
                 }
-                return toCandlePoint(d);
+                return point;
             });
             mainSeriesRef.current.setData(coloredData);
         } catch (err) {

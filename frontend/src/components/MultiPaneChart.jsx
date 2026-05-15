@@ -278,6 +278,27 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         return () => clearTimeout(handle);
     }, [subPanes, timeAlignment, datasetKey, syncLogicalRangeAcrossPanes]);
 
+    useEffect(() => {
+        if (!data?.length || !mainPaneRef.current) return;
+
+        const handle = requestAnimationFrame(() => {
+            const range = mainPaneRef.current?.getVisibleLogicalRange?.();
+            if (!range || range.from > LEFT_EDGE_TRIGGER_BARS) return;
+
+            const width = range.to - range.from;
+            if (!Number.isFinite(width) || width <= 0) return;
+
+            const nextRange = range.from < 0
+                ? { from: 0, to: width }
+                : { from: range.from, to: range.to };
+
+            mainPaneRef.current?.setVisibleLogicalRange?.(nextRange);
+            syncLogicalRangeAcrossPanes(nextRange, "main");
+        });
+
+        return () => cancelAnimationFrame(handle);
+    }, [data, syncLogicalRangeAcrossPanes]);
+
     // ── Measure container height ──
     useEffect(() => {
         const wrapper = wrapperRef.current;

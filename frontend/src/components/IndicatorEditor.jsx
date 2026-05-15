@@ -12,10 +12,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { registerPyneLanguageSupport } from "../editor/pyneLanguage";
 import { registerPyneTheme, getPyneEditorOptions } from "../editor/pyneTheme";
+import { fetchPyneSecurityPolicy } from "../services/indicatorApi";
 
 /** Track whether Pyne providers have been registered globally */
 let pyneRegistered = false;
-let pyneDispose = null;
 
 export default function IndicatorEditor({
   indicator,
@@ -27,6 +27,8 @@ export default function IndicatorEditor({
 }) {
   const [name, setName] = useState(indicator?.name || "My Indicator");
   const [script, setScript] = useState(indicator?.script || "");
+  const [securityMode, setSecurityMode] = useState(indicator?.securityMode || "safe");
+  const [securityPolicy, setSecurityPolicy] = useState(null);
   const editorRef = useRef(null);
 
   const handlePreview = useCallback(() => {
@@ -36,9 +38,10 @@ export default function IndicatorEditor({
       script,
       params: indicator?.params || {},
       description: indicator?.description || "",
+      securityMode,
       isPreset: indicator?.isPreset || false,
     });
-  }, [name, script, indicator, onPreview, previewState]);
+  }, [name, script, securityMode, indicator, onPreview, previewState]);
 
   const handleSave = useCallback(() => {
     onSave({
@@ -47,9 +50,21 @@ export default function IndicatorEditor({
       script,
       params: indicator?.params || {},
       description: indicator?.description || "",
+      securityMode,
       isPreset: indicator?.isPreset || false,
     });
-  }, [name, script, indicator, onSave, previewState]);
+  }, [name, script, securityMode, indicator, onSave, previewState]);
+
+  const handleSecurityModeChange = useCallback((event) => {
+    const nextMode = event.target.value;
+    if (
+      nextMode === "unsafe" &&
+      !window.confirm("不安全模式允许脚本执行任意 Python 代码，包括访问文件、网络和交易 API。仅在本机运行完全信任的脚本时启用。")
+    ) {
+      return;
+    }
+    setSecurityMode(nextMode);
+  }, []);
 
   /**
    * Called before Monaco mounts — register theme so it's available
@@ -68,7 +83,7 @@ export default function IndicatorEditor({
 
     // Register Pyne providers once (they're global to the Monaco instance)
     if (!pyneRegistered) {
-      pyneDispose = registerPyneLanguageSupport(monaco);
+      registerPyneLanguageSupport(monaco);
       pyneRegistered = true;
     }
 
@@ -87,6 +102,20 @@ export default function IndicatorEditor({
     return () => {
       // Don't dispose global providers — they persist across editor instances
       editorRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPyneSecurityPolicy()
+      .then((policy) => {
+        if (!cancelled) setSecurityPolicy(policy);
+      })
+      .catch(() => {
+        if (!cancelled) setSecurityPolicy(null);
+      });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -150,9 +179,33 @@ export default function IndicatorEditor({
 
         {/* Code editor */}
         <div className="indicator-editor-code-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '8px', marginTop: '-8px' }}>
-          <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 500 }}>Pyne 脚本</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 500 }}>Pyne 脚本</span>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
+              模式
+              <select
+                value={securityMode}
+                onChange={handleSecurityModeChange}
+                style={{ background: 'var(--bg-tertiary)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '4px 8px', fontSize: '12px' }}
+              >
+                <option value="safe">safe</option>
+                <option value="research">research</option>
+                <option value="unsafe">unsafe</option>
+              </select>
+            </label>
+            {securityPolicy && (
+              <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                默认 {securityPolicy.mode} · 超时 {securityPolicy.timeoutSeconds}s
+              </span>
+            )}
+          </div>
           <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>输入 <code style={{ background: 'var(--bg-tertiary)', padding: '1px 4px', borderRadius: '3px', fontSize: '11px' }}>ta.</code> <code style={{ background: 'var(--bg-tertiary)', padding: '1px 4px', borderRadius: '3px', fontSize: '11px' }}>input.</code> <code style={{ background: 'var(--bg-tertiary)', padding: '1px 4px', borderRadius: '3px', fontSize: '11px' }}>color.</code> 触发自动补全 · <kbd style={{ background: 'var(--bg-tertiary)', padding: '1px 5px', borderRadius: '3px', fontSize: '10px', border: '1px solid var(--border-color)' }}>Ctrl+Enter</kbd> 运行</span>
         </div>
+        {securityMode === "unsafe" && (
+          <div style={{ marginBottom: '8px', padding: '8px 10px', border: '1px solid rgba(239, 68, 68, 0.35)', borderRadius: '6px', color: 'var(--candle-down)', background: 'rgba(239, 68, 68, 0.08)', fontSize: '12px' }}>
+            unsafe mode 会允许脚本访问完整 Python 能力，包括文件、网络和交易 API。只运行完全信任的本机脚本。
+          </div>
+        )}
         <div className="indicator-editor-monaco" style={{ flex: 1, minHeight: 0, border: "1px solid rgba(255, 255, 255, 0.1)", borderRadius: "10px", overflow: "hidden", boxShadow: "0 8px 32px rgba(0, 0, 0, 0.2), inset 0 2px 4px rgba(0, 0, 0, 0.2)" }}>
           <Editor
             height="100%"

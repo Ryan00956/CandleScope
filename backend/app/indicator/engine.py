@@ -92,6 +92,7 @@ class IndicatorEngine:
         indicator_name: str,
         params: dict[str, Any],
         bars: list[BarData],
+        exchange: str = "binance",
     ) -> IndicatorResult | None:
         """Compute an indicator over a set of bars.
 
@@ -115,6 +116,7 @@ class IndicatorEngine:
             indicator_name,
             params,
             market_type=market_type,
+            exchange=exchange,
         )
 
         # Get or create instance
@@ -149,6 +151,7 @@ class IndicatorEngine:
         indicator_name: str,
         params: dict[str, Any],
         bars: list[BarData] | None = None,
+        exchange: str = "binance",
     ) -> tuple[IndicatorKey, IndicatorResult | None]:
         """Subscribe to an indicator -- create/reuse instance + optional init.
 
@@ -161,6 +164,7 @@ class IndicatorEngine:
             indicator_name,
             params,
             market_type=market_type,
+            exchange=exchange,
         )
         instance = self._get_or_create(key)
         if instance is None:
@@ -241,6 +245,7 @@ class IndicatorEngine:
         interval: str,
         bar: BarData,
         market_type: str = "spot",
+        exchange: str = "binance",
     ) -> None:
         """Handle a confirmed bar close event.
 
@@ -252,6 +257,7 @@ class IndicatorEngine:
             "__topic__",
             {},
             market_type=market_type,
+            exchange=exchange,
         ).series_topic
         topic = key_topic
         keys = self._stream_keys.get(topic, set())
@@ -281,6 +287,7 @@ class IndicatorEngine:
         interval: str,
         bar: BarData,
         market_type: str = "spot",
+        exchange: str = "binance",
     ) -> None:
         """Handle a partial bar update (tick, forming bar).
 
@@ -292,6 +299,7 @@ class IndicatorEngine:
             "__topic__",
             {},
             market_type=market_type,
+            exchange=exchange,
         ).series_topic
         topic = key_topic
         keys = self._stream_keys.get(topic, set())
@@ -317,6 +325,7 @@ class IndicatorEngine:
         interval: str,
         bars: list[BarData],
         market_type: str = "spot",
+        exchange: str = "binance",
     ) -> None:
         """Handle historical bars being inserted (backfill/correction).
 
@@ -328,6 +337,7 @@ class IndicatorEngine:
             "__topic__",
             {},
             market_type=market_type,
+            exchange=exchange,
         ).series_topic
         topic = key_topic
         keys = self._stream_keys.get(topic, set())
@@ -433,6 +443,7 @@ class IndicatorEngine:
                 {
                     "key": key.uid,
                     "indicator": key.indicator_name,
+                    "exchange": key.exchange,
                     "symbol": key.symbol,
                     "interval": key.interval,
                     "params": dict(key.params),

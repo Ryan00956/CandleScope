@@ -13,10 +13,12 @@
  * Volume is auto-added as a built-in indicator on first load.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { computeIndicator, fetchPreset } from "../services/indicatorApi";
+import { computeIndicator, fetchPreset, getIndicatorStreamUrl } from "../services/indicatorApi";
 
 const ACTIVE_INDICATORS_KEY = "candlescope-active-indicators";
 const VOL_INIT_KEY = "candlescope-vol-initialized";
+const ENGINE_SCRIPT_MARKER = "# __ENGINE__:";
+const INDICATOR_WS_RECONNECT_MS = 3000;
 
 function loadActiveIndicators() {
   try {
@@ -53,10 +55,237 @@ function buildDataSignature(data) {
   ].join("|");
 }
 
+function stringSignature(value = "") {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
+  }
+  return `${value.length}:${hash}`;
+}
+
+function formatIndicatorError(payload, fallback = "Indicator error") {
+  const detail = payload?.errorDetail;
+  if (detail?.message) {
+    const location = detail.line
+      ? ` (line ${detail.line}${detail.column ? `:${detail.column}` : ""})`
+      : "";
+    return `${detail.message}${location}${detail.hint ? `\n${detail.hint}` : ""}`;
+  }
+  if (typeof payload?.error === "string") return payload.error;
+  if (typeof payload?.detail === "string") return payload.detail;
+  if (typeof payload?.detail?.error === "string") return payload.detail.error;
+  return payload?.code || fallback;
+}
+
+function isEngineBackedScript(indicator) {
+  return typeof indicator?.script === "string" && indicator.script.startsWith(ENGINE_SCRIPT_MARKER);
+}
+
+function isBuiltinIndicator(indicator) {
+  return Boolean(indicator?.engineName || isEngineBackedScript(indicator));
+}
+
+function isWsHostedIndicator(indicator) {
+  return isBuiltinIndicator(indicator) || Boolean(indicator?.script);
+}
+
+function getBuiltinIndicatorName(indicator) {
+  if (indicator?.engineName) return indicator.engineName;
+  if (isEngineBackedScript(indicator)) {
+    return indicator.script.split("\n")[0].slice(ENGINE_SCRIPT_MARKER.length).trim();
+  }
+  return "";
+}
+
+function normalizeIndicatorLines(lines = []) {
+  return lines.map((line) => {
+    const displayName = line.name || line.title || "";
+    return {
+      ...line,
+      name: displayName,
+      title: displayName,
+      outputName: line.outputName || line.output_name || null,
+      color: line.color || "#f59e0b",
+      lineWidth: line.lineWidth || 2,
+      lineStyle: line.lineStyle || 0,
+      type: line.type || "line",
+      overlay: line.pane !== "separate" && line.pane !== "volume",
+      pane: line.pane || "main",
+      colorData: line.colorData || null,
+    };
+  });
+}
+
+function normalizeSeriesToLines(series = []) {
+  return (series || []).map((item) => {
+    const style = item.style || {};
+    const displayName = style.title || item.localId || item.id || "";
+    return {
+      id: item.localId || item.id,
+      name: displayName,
+      title: displayName,
+      outputName: item.localId || item.id || null,
+      color: style.color || "#f59e0b",
+      lineWidth: style.lineWidth || 2,
+      lineStyle: style.lineStyle || 0,
+      type: item.type || "line",
+      pane: item.pane || "main",
+      overlay: item.pane !== "separate" && item.pane !== "volume",
+      colorData: style.colorData || null,
+      data: item.data || [],
+    };
+  });
+}
+
+function resolveWsValue(line, values, isSingleLine) {
+  const exactKeys = [line.outputName, line.name, line.title].filter(Boolean);
+  for (const key of exactKeys) {
+    if (Object.prototype.hasOwnProperty.call(values, key)) return values[key];
+  }
+
+  const lowerMap = new Map(
+    Object.entries(values).map(([key, value]) => [String(key).toLowerCase(), value])
+  );
+  for (const key of exactKeys) {
+    const normalized = String(key).toLowerCase();
+    if (lowerMap.has(normalized)) return lowerMap.get(normalized);
+  }
+
+  const entries = Object.entries(values);
+  if (isSingleLine && entries.length === 1) return entries[0][1];
+  return undefined;
+}
+
+function upsertLinePoint(data, point) {
+  const next = Array.isArray(data) ? [...data] : [];
+  const idx = next.findIndex((item) => item.time === point.time);
+  if (point.value == null || Number.isNaN(Number(point.value))) {
+    if (idx !== -1) next.splice(idx, 1);
+    return next;
+  }
+  const normalized = { ...point, value: Number(point.value) };
+  if (idx === -1) {
+    next.push(normalized);
+    next.sort((a, b) => a.time - b.time);
+  } else {
+    next[idx] = { ...next[idx], ...normalized };
+  }
+  return next;
+}
+
+function withIndicatorId(items, indicatorId) {
+  return (items || []).map((item) => ({ ...item, indicatorId }));
+}
+
+function normalizeIndicatorFills(fills = [], indicatorId) {
+  return (fills || []).map((fill) => {
+    if (Array.isArray(fill.localSeriesIds) && fill.localSeriesIds.length >= 2) {
+      return {
+        plot1_id: fill.localSeriesIds[0],
+        plot2_id: fill.localSeriesIds[1],
+        color: fill.style?.color || fill.color,
+        title: fill.style?.title || fill.title || "",
+        pane: fill.pane,
+        indicatorId,
+      };
+    }
+    return { ...fill, indicatorId };
+  });
+}
+
+function splitUnifiedAnnotations(annotations = [], indicatorId) {
+  const markers = [];
+  const hlines = [];
+  const bgcolors = [];
+  const barcolors = [];
+  const signals = [];
+
+  for (const item of annotations || []) {
+    const style = item.style || {};
+    const base = {
+      id: item.id,
+      indicatorId,
+      pane: item.pane,
+    };
+    if (item.type === "marker") {
+      markers.push({
+        ...base,
+        shape: style.shape || "circle",
+        color: style.color || "#f59e0b",
+        text: style.text || "",
+        position: style.position || "above",
+        size: style.size || "normal",
+        data: item.data || [],
+      });
+    } else if (item.type === "hline") {
+      hlines.push({
+        ...base,
+        price: item.data?.[0]?.value,
+        title: style.title || "",
+        color: style.color || "#787b86",
+        linestyle: style.lineStyle ?? "dashed",
+        linewidth: style.lineWidth || 1,
+      });
+    } else if (item.type === "bgcolor") {
+      bgcolors.push({
+        ...base,
+        title: style.title || "",
+        color: style.color || "rgba(59,130,246,0.1)",
+        regions: item.data || [],
+      });
+    } else if (item.type === "barcolor") {
+      barcolors.push({
+        ...base,
+        data: item.data || [],
+      });
+    } else if (item.type === "signal") {
+      signals.push({
+        ...base,
+        name: style.name || "signal",
+        side: style.side || "alert",
+        message: style.message || "",
+        data: item.data || [],
+      });
+    }
+  }
+
+  return { markers, hlines, bgcolors, barcolors, signals };
+}
+
+function normalizeIndicatorPayload(payload, indicatorId) {
+  const hasUnifiedSeries = Array.isArray(payload?.series) && payload.series.length > 0;
+  const annotations = Array.isArray(payload?.annotations) ? payload.annotations : [];
+  const splitAnnotations = splitUnifiedAnnotations(annotations, indicatorId);
+
+  return {
+    lines: normalizeIndicatorLines(
+      hasUnifiedSeries ? normalizeSeriesToLines(payload.series) : (payload?.lines || [])
+    ),
+    markers: annotations.length > 0
+      ? splitAnnotations.markers
+      : withIndicatorId(payload?.markers, indicatorId),
+    hlines: annotations.length > 0
+      ? splitAnnotations.hlines
+      : withIndicatorId(payload?.hlines, indicatorId),
+    bgcolors: annotations.length > 0
+      ? splitAnnotations.bgcolors
+      : withIndicatorId(payload?.bgcolors, indicatorId),
+    barcolors: annotations.length > 0
+      ? splitAnnotations.barcolors
+      : withIndicatorId(payload?.barcolors, indicatorId),
+    signals: annotations.length > 0
+      ? splitAnnotations.signals
+      : withIndicatorId(payload?.signals, indicatorId),
+    fills: normalizeIndicatorFills(payload?.legacyFills || payload?.fills, indicatorId),
+  };
+}
+
+function normalizeParamSchema(schema) {
+  return Array.isArray(schema) ? schema : [];
+}
+
 /**
  * @param {object} opts
- * @param {React.MutableRefObject} opts.chartRef        — ref-to-ref to main chart instance (for legacy compat)
- * @param {React.MutableRefObject} opts.seriesRef       — ref-to-ref to the candlestick series (for legacy compat)
  * @param {Array}                  opts.chartData       — current OHLCV data array
  * @param {string}                 opts.datasetKey      — changes when chart is recreated
  * @param {number}                 opts.seriesReady     — increments when chart series is ready
@@ -64,8 +293,6 @@ function buildDataSignature(data) {
  * @param {string}                 [opts.candleDownColor] — K-line down color (synced to VOL indicator)
  */
 export function useIndicators({
-  chartRef,
-  seriesRef,
   chartData,
   datasetKey,
   seriesReady,
@@ -74,6 +301,7 @@ export function useIndicators({
   symbol,
   interval,
   marketType,
+  exchange = "binance",
 }) {
   // Active indicators: [{id, name, script, params, visible, lines: [...computedLines]}]
   const [activeIndicators, setActiveIndicators] = useState(loadActiveIndicators);
@@ -89,7 +317,9 @@ export function useIndicators({
   const [hlines, setHlines] = useState([]);         // [{price, title, color, linestyle, pane}]
   const [bgcolors, setBgcolors] = useState([]);     // [{color, pane, regions: [{time}]}]
   const [barcolors, setBarcolors] = useState([]);   // [{data: [{time, color}]}]
+  const [signals, setSignals] = useState([]);       // [{data: [{time, side, name, message}], indicatorId}]
   const [paramSchemas, setParamSchemas] = useState({}); // indicatorId → param_schema[]
+  const [indicatorWsRefreshKey, setIndicatorWsRefreshKey] = useState(0);
 
   const lastComputeSignatureRef = useRef("");
   const queuedRecomputeRef = useRef(false);
@@ -111,10 +341,16 @@ export function useIndicators({
   const computingRef = useRef(false);
   // Flag: only show "computing" UI when user manually triggers recompute
   const userTriggeredRef = useRef(false);
+  const indicatorWsRef = useRef(null);
 
   // Persist active indicators to localStorage
   useEffect(() => {
-    const toSave = activeIndicators.map(({ lines, error, ...rest }) => rest);
+    const toSave = activeIndicators.map((indicator) => {
+      const rest = { ...indicator };
+      delete rest.lines;
+      delete rest.error;
+      return rest;
+    });
     saveActiveIndicators(toSave);
   }, [activeIndicators]);
 
@@ -194,6 +430,83 @@ export function useIndicators({
     pendingForceComputeRef.current = true;
   }, []);
 
+  const applyWsSnapshot = useCallback((indicatorId, payload) => {
+    const error = payload?.ok === false ? formatIndicatorError(payload) : null;
+    const schema = normalizeParamSchema(payload?.param_schema);
+    const normalized = normalizeIndicatorPayload(payload, indicatorId);
+    setActiveIndicators((prev) =>
+      prev.map((ind) =>
+        ind.id === indicatorId
+          ? {
+              ...ind,
+              lines: normalized.lines,
+              error,
+              ...(schema.length > 0 ? { paramSchema: schema } : {}),
+            }
+          : ind
+      )
+    );
+    setMarkers((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...normalized.markers,
+    ]);
+    setFills((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...normalized.fills,
+    ]);
+    setHlines((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...normalized.hlines,
+    ]);
+    setBgcolors((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...normalized.bgcolors,
+    ]);
+    setBarcolors((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...normalized.barcolors,
+    ]);
+    setSignals((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...normalized.signals,
+    ]);
+    if (schema.length > 0) {
+      setParamSchemas((prev) => ({ ...prev, [indicatorId]: schema }));
+    }
+  }, []);
+
+  const applyWsValues = useCallback((indicatorId, values, barTime) => {
+    if (!values || !barTime) return;
+    const currentChartData = chartDataRef.current || [];
+    const bar = currentChartData.find((item) => item.time === barTime);
+    const histogramColor = bar
+      ? (bar.close >= bar.open ? candleUpColorRef.current : candleDownColorRef.current)
+      : null;
+
+    setActiveIndicators((prev) =>
+      prev.map((ind) => {
+        if (ind.id !== indicatorId || !Array.isArray(ind.lines)) return ind;
+        const isSingleLine = ind.lines.length === 1 && Object.keys(values).length === 1;
+        const lines = ind.lines.map((line) => {
+          const value = resolveWsValue(line, values, isSingleLine);
+          if (value === undefined) return line;
+          const point = { time: barTime, value };
+          if (line.type === "histogram" && histogramColor) {
+            point.color = histogramColor;
+          }
+          return { ...line, data: upsertLinePoint(line.data, point) };
+        });
+        return { ...ind, lines, error: null };
+      })
+    );
+  }, []);
+
+  const setIndicatorError = useCallback((indicatorId, error) => {
+    setActiveIndicators((prev) =>
+      prev.map((ind) => (ind.id === indicatorId ? { ...ind, error } : ind))
+    );
+  }, []);
+
   // ── Build pane data from active indicators ────────────────
   // This is the core of the multi-pane system: we partition computed lines
   // into overlay (main chart) vs separate panes.
@@ -236,6 +549,155 @@ export function useIndicators({
     buildPaneData(activeIndicators);
   }, [activeIndicators, buildPaneData]);
 
+  const indicatorWsSignature = activeIndicators
+    .filter((ind) => isWsHostedIndicator(ind) && ind.visible !== false)
+    .map((ind) => [
+      ind.id,
+      getBuiltinIndicatorName(ind),
+      ind.script?.startsWith(ENGINE_SCRIPT_MARKER) ? ind.script.split("\n")[0] : "",
+      isBuiltinIndicator(ind) ? "builtin" : "script",
+      stringSignature(ind.script || ""),
+      ind.securityMode || "",
+      JSON.stringify(ind.params || {}),
+    ].join(":"))
+    .join("|");
+  const chartHistoryFirstTime = chartData?.[0]?.time ?? null;
+
+  // ── Backend-hosted indicators: builtin incremental + Pyne snapshot WS ──
+  useEffect(() => {
+    const hostedIndicators = activeIndicatorsRef.current.filter(
+      (ind) => isWsHostedIndicator(ind) && ind.visible !== false
+    );
+    const currentChartData = chartDataRef.current || [];
+    if (!symbol || !interval || hostedIndicators.length === 0 || currentChartData.length === 0) {
+      if (indicatorWsRef.current) {
+        try { indicatorWsRef.current.close(); } catch { /* ignore */ }
+        indicatorWsRef.current = null;
+      }
+      return;
+    }
+
+    let stopped = false;
+    let socket = null;
+    let reconnectTimer = null;
+    let lastSeq = 0;
+    let gapResubscribeTimer = null;
+
+    const buildParams = (ind) => {
+      let params = ind.params || {};
+      if ((ind.id === "vol" || ind.engineName === "VOL") && (candleUpColor || candleDownColor)) {
+        params = {
+          ...params,
+          up_color: candleUpColor || params.up_color || "#22c55e",
+          down_color: candleDownColor || params.down_color || "#ef4444",
+        };
+      }
+      return params;
+    };
+
+    const subscribeAll = () => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      for (const ind of hostedIndicators) {
+        const builtin = isBuiltinIndicator(ind);
+        const historyLimit = Math.min(Math.max(chartDataRef.current?.length || 0, 1), 5000);
+        socket.send(JSON.stringify({
+          action: "subscribe",
+          clientId: ind.id,
+          kind: builtin ? "builtin" : "script",
+          exchange,
+          marketType,
+          symbol,
+          interval,
+          name: builtin ? getBuiltinIndicatorName(ind) : undefined,
+          displayName: ind.name || ind.id,
+          customId: !builtin ? ind.id : undefined,
+          script: builtin ? undefined : ind.script,
+          securityMode: builtin ? undefined : ind.securityMode,
+          params: buildParams(ind),
+          historyLimit,
+        }));
+      }
+    };
+
+    const connect = () => {
+      if (stopped) return;
+      socket = new WebSocket(getIndicatorStreamUrl());
+      indicatorWsRef.current = socket;
+
+      socket.onopen = () => {
+        lastSeq = 0;
+        if (!stopped) subscribeAll();
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (Number.isFinite(msg.seq)) {
+            if (lastSeq > 0 && msg.seq !== lastSeq + 1 && !gapResubscribeTimer) {
+              console.warn(`Indicator WS sequence gap: expected ${lastSeq + 1}, got ${msg.seq}`);
+              gapResubscribeTimer = setTimeout(() => {
+                gapResubscribeTimer = null;
+                subscribeAll();
+              }, 100);
+            }
+            lastSeq = msg.seq;
+          }
+          if (msg.type === "heartbeat" || msg.type === "connected") return;
+          if (!msg.clientId) return;
+          if (msg.type === "indicator.snapshot") {
+            applyWsSnapshot(msg.clientId, msg);
+          } else if (msg.type === "indicator.preview" || msg.type === "indicator.update") {
+            applyWsValues(msg.clientId, msg.values || {}, msg.barTime);
+          } else if (msg.type === "indicator.error" || msg.type === "error") {
+            setIndicatorError(msg.clientId, formatIndicatorError(msg, "Indicator WS error"));
+          }
+        } catch (err) {
+          console.warn("Indicator WS message parse failed:", err);
+        }
+      };
+
+      socket.onclose = () => {
+        if (indicatorWsRef.current === socket) {
+          indicatorWsRef.current = null;
+        }
+        if (!stopped) {
+          reconnectTimer = setTimeout(connect, INDICATOR_WS_RECONNECT_MS);
+        }
+      };
+
+      socket.onerror = () => {
+        try { socket.close(); } catch { /* ignore */ }
+      };
+    };
+
+    connect();
+
+    return () => {
+      stopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (gapResubscribeTimer) clearTimeout(gapResubscribeTimer);
+      if (socket) {
+        try { socket.close(); } catch { /* ignore */ }
+      }
+      if (indicatorWsRef.current === socket) {
+        indicatorWsRef.current = null;
+      }
+    };
+  }, [
+    applyWsSnapshot,
+    applyWsValues,
+    candleDownColor,
+    candleUpColor,
+    chartHistoryFirstTime,
+    exchange,
+    indicatorWsSignature,
+    indicatorWsRefreshKey,
+    interval,
+    marketType,
+    setIndicatorError,
+    symbol,
+  ]);
+
   // ── Compute all active indicators ─────────────────────────
   const computeAll = useCallback(async (force = false) => {
     if (computingRef.current) {
@@ -260,7 +722,9 @@ export function useIndicators({
     }
     lastComputeSignatureRef.current = dataSignature;
 
-    const indicators = currentIndicators.filter((i) => i.script || i.name || i.id);
+    const indicators = currentIndicators.filter(
+      (i) => !isWsHostedIndicator(i) && (i.script || i.name || i.id)
+    );
     if (indicators.length === 0) {
       computingRef.current = false;
       return;
@@ -294,11 +758,16 @@ export function useIndicators({
                 down_color: curDownColor || computeParams.down_color || "#ef4444",
               };
             }
+            const isEngineBackedScript =
+              typeof ind.script === "string" && ind.script.startsWith(ENGINE_SCRIPT_MARKER);
             const result = await computeIndicator({
+              mode: ind.engineName || isEngineBackedScript ? "builtin" : "script",
+              securityMode: ind.securityMode,
               name: ind.engineName || undefined,
               script: ind.script,
               ohlcv,
               params: computeParams,
+              exchange,
               symbol,
               interval,
               marketType,
@@ -317,64 +786,72 @@ export function useIndicators({
       const allHlines = [];
       const allBgcolors = [];
       const allBarcolors = [];
+      const allSignals = [];
       const newParamSchemas = {};
 
       for (const r of results) {
         if (r.status !== "fulfilled") continue;
         const { id, result, visible } = r.value;
-        const isOk = result.ok === true || (result.ok == null && result.lines && result.lines.length > 0);
+        const isOk = result.ok === true
+          || (result.ok == null && (
+            (result.lines && result.lines.length > 0)
+            || (result.series && result.series.length > 0)
+          ));
         if (isOk) {
-          const mappedLines = (result.lines || []).map((line) => {
-            const displayName = line.name || line.title || "";
-            return {
-              ...line,
-              name: displayName,
-              title: displayName,
-              color: line.color || "#f59e0b",
-              lineWidth: line.lineWidth || 2,
-              lineStyle: line.lineStyle || 0,
-              type: line.type || "line",
-              overlay: line.pane !== "separate" && line.pane !== "volume",
-              pane: line.pane || "main",
-              colorData: line.colorData || null,
-            };
-          });
+          const normalized = normalizeIndicatorPayload(result, id);
+          const mappedLines = normalized.lines;
           processedResults.push({ id, mappedLines, visible, error: null });
 
           // Collect extended output types (only from visible indicators)
           if (visible) {
-            if (result.markers) {
-              for (const m of result.markers) allMarkers.push({ ...m, indicatorId: id });
-            }
-            if (result.fills) {
-              for (const f of result.fills) allFills.push({ ...f, indicatorId: id });
-            }
-            if (result.hlines) {
-              for (const h of result.hlines) allHlines.push({ ...h, indicatorId: id });
-            }
-            if (result.bgcolors) {
-              for (const bg of result.bgcolors) allBgcolors.push({ ...bg, indicatorId: id });
-            }
-            if (result.barcolors) {
-              for (const bc of result.barcolors) allBarcolors.push({ ...bc, indicatorId: id });
-            }
+            allMarkers.push(...normalized.markers);
+            allFills.push(...normalized.fills);
+            allHlines.push(...normalized.hlines);
+            allBgcolors.push(...normalized.bgcolors);
+            allBarcolors.push(...normalized.barcolors);
+            allSignals.push(...normalized.signals);
           }
 
           // Collect param schemas
           if (result.param_schema && result.param_schema.length > 0) {
-            newParamSchemas[id] = result.param_schema;
+            newParamSchemas[id] = normalizeParamSchema(result.param_schema);
           }
         } else {
-          processedResults.push({ id, mappedLines: [], visible, error: result.error || "Unknown error" });
+          processedResults.push({
+            id,
+            mappedLines: [],
+            visible,
+            error: formatIndicatorError(result, "Unknown error"),
+          });
         }
       }
 
       // Update extended output states
-      setMarkers(allMarkers);
-      setFills(allFills);
-      setHlines(allHlines);
-      setBgcolors(allBgcolors);
-      setBarcolors(allBarcolors);
+      const processedIds = new Set(processedResults.map((item) => item.id));
+      setMarkers((prev) => [
+        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+        ...allMarkers,
+      ]);
+      setFills((prev) => [
+        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+        ...allFills,
+      ]);
+      setHlines((prev) => [
+        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+        ...allHlines,
+      ]);
+      setBgcolors((prev) => [
+        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+        ...allBgcolors,
+      ]);
+      setBarcolors((prev) => [
+        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+        ...allBarcolors,
+      ]);
+      setSignals((prev) => [
+        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+        ...allSignals,
+      ]);
       if (Object.keys(newParamSchemas).length > 0) {
         setParamSchemas((prev) => ({ ...prev, ...newParamSchemas }));
       }
@@ -385,7 +862,12 @@ export function useIndicators({
         for (const { id, mappedLines, error } of processedResults) {
           const idx = updated.findIndex((i) => i.id === id);
           if (idx === -1) continue;
-          updated[idx] = { ...updated[idx], lines: mappedLines, error };
+          updated[idx] = {
+            ...updated[idx],
+            lines: mappedLines,
+            error,
+            ...(newParamSchemas[id] ? { paramSchema: newParamSchemas[id] } : {}),
+          };
         }
         return updated;
       });
@@ -404,12 +886,13 @@ export function useIndicators({
         queueMicrotask(() => computeAll(forceNext));
       }
     }
-  }, [interval, marketType, symbol]);
+  }, [exchange, interval, marketType, symbol]);
 
   // ── User-triggered recompute (shows "computing" UI) ───────
   const recompute = useCallback((force = true) => {
     userTriggeredRef.current = true;
     lastComputeSignatureRef.current = "";  // force fresh compute
+    setIndicatorWsRefreshKey((value) => value + 1);
     computeAll(force);
   }, [computeAll]);
 
@@ -450,7 +933,7 @@ export function useIndicators({
     if (activeIndicators.length === 0) return;
 
     const signature = activeIndicators
-      .map((i) => `${i.id}:${i.script ? i.script.length : 0}:${JSON.stringify(i.params || {})}`)
+      .map((i) => `${i.id}:${stringSignature(i.script || "")}:${JSON.stringify(i.params || {})}`)
       .join("|");
 
     const signatureChanged = signature !== prevIndicatorSignatureRef.current;
@@ -518,6 +1001,7 @@ export function useIndicators({
     hlines,
     bgcolors,
     barcolors,
+    signals,
     paramSchemas,
   };
 }

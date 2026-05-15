@@ -58,6 +58,31 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "5"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 RATE_LIMIT_SLEEP = int(os.getenv("RATE_LIMIT_SLEEP", "60"))
 
+# Pyne runtime safety. This is a local-first application, so advanced users can
+# opt into broader Python capability, but the default stays conservative.
+PYNE_SECURITY_MODE = os.getenv("PYNE_SECURITY_MODE", "safe").strip().lower()
+if PYNE_SECURITY_MODE not in {"safe", "research", "unsafe"}:
+    PYNE_SECURITY_MODE = "safe"
+PYNE_EXEC_TIMEOUT_SECONDS = float(os.getenv("PYNE_EXEC_TIMEOUT_SECONDS", "5"))
+PYNE_EXECUTOR_MODE = os.getenv("PYNE_EXECUTOR_MODE", "process").strip().lower()
+if PYNE_EXECUTOR_MODE not in {"inline", "process"}:
+    PYNE_EXECUTOR_MODE = "process"
+PYNE_PROCESS_GRACE_SECONDS = float(os.getenv("PYNE_PROCESS_GRACE_SECONDS", "0.5"))
+PYNE_MAX_BARS = int(os.getenv("PYNE_MAX_BARS", "50000"))
+PYNE_MAX_OUTPUT_SERIES = int(os.getenv("PYNE_MAX_OUTPUT_SERIES", "20"))
+PYNE_MAX_OUTPUT_POINTS = int(os.getenv("PYNE_MAX_OUTPUT_POINTS", "1000000"))
+PYNE_CACHE_MAX_ITEMS = int(os.getenv("PYNE_CACHE_MAX_ITEMS", "32"))
+PYNE_ALLOWED_IMPORTS = [
+    item.strip()
+    for item in os.getenv("PYNE_ALLOWED_IMPORTS", "numpy,pandas,scipy,sklearn,torch").split(",")
+    if item.strip()
+]
+
+# Indicator WebSocket stability tuning.
+INDICATOR_WS_MAX_SUBSCRIPTIONS = int(os.getenv("INDICATOR_WS_MAX_SUBSCRIPTIONS", "50"))
+INDICATOR_WS_QUEUE_SIZE = int(os.getenv("INDICATOR_WS_QUEUE_SIZE", "1000"))
+INDICATOR_WS_HEARTBEAT_SECONDS = float(os.getenv("INDICATOR_WS_HEARTBEAT_SECONDS", "15"))
+
 # CORS
 CORS_ORIGINS = os.getenv(
     "CORS_ORIGINS",

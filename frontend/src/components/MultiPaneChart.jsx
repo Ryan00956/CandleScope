@@ -33,6 +33,29 @@ function paneConfigKey(subPaneIds) {
     return subPaneIds.sort().join(",");
 }
 
+function paneKeyForItem(item) {
+    const pane = item?.pane || "main";
+    if (pane === "main") return "main";
+    if (!item?.indicatorId) return pane;
+    return `${pane}-${item.indicatorId}`;
+}
+
+function filterItemsForPane(items, paneId) {
+    return (items || []).filter((item) => paneKeyForItem(item) === paneId);
+}
+
+function filterFillsForLines(fills, lines) {
+    const lineKeys = new Set();
+    for (const line of lines || []) {
+        if (!line?.id) continue;
+        lineKeys.add(`${line.indicatorId || ""}:${line.id}`);
+    }
+    return (fills || []).filter((fill) => (
+        lineKeys.has(`${fill.indicatorId || ""}:${fill.plot1_id}`)
+        && lineKeys.has(`${fill.indicatorId || ""}:${fill.plot2_id}`)
+    ));
+}
+
 const MultiPaneChart = forwardRef(function MultiPaneChart({
     data,
     symbol,
@@ -96,6 +119,14 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
 
     const userInteractedRef = useRef(false);
+
+    const mainMarkers = useMemo(() => filterItemsForPane(indicatorMarkers, "main"), [indicatorMarkers]);
+    const mainHlines = useMemo(() => filterItemsForPane(indicatorHlines, "main"), [indicatorHlines]);
+    const mainBgcolors = useMemo(() => filterItemsForPane(indicatorBgcolors, "main"), [indicatorBgcolors]);
+    const mainFills = useMemo(
+        () => filterFillsForLines(indicatorFills, mainOverlayLines),
+        [indicatorFills, mainOverlayLines]
+    );
 
     // Visible range persistence
     const savedVisibleRangeRef = useRef(savedVisibleRange);
@@ -413,22 +444,42 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         if (!mainPaneRef.current) return;
 
         const rangeToRestore = savedVisibleRangeRef.current;
+        const firstDataTime = data[0]?.time;
+        const lastDataTime = data[data.length - 1]?.time;
+        const savedTimeRange = rangeToRestore?.time;
+        const savedLogicalRange = rangeToRestore?.logical;
+        const savedTimeIntersectsData = Boolean(
+            savedTimeRange
+            && Number.isFinite(savedTimeRange.from)
+            && Number.isFinite(savedTimeRange.to)
+            && Number.isFinite(firstDataTime)
+            && Number.isFinite(lastDataTime)
+            && savedTimeRange.to >= firstDataTime
+            && savedTimeRange.from <= lastDataTime
+        );
+        const savedLogicalIntersectsData = Boolean(
+            savedLogicalRange
+            && Number.isFinite(savedLogicalRange.from)
+            && Number.isFinite(savedLogicalRange.to)
+            && savedLogicalRange.to >= 0
+            && savedLogicalRange.from <= data.length - 1
+        );
         let restored = false;
 
         if (Number.isFinite(rangeToRestore?.barSpacing)) {
             mainPaneRef.current.applyTimeScaleOptions({ barSpacing: rangeToRestore.barSpacing });
         }
 
-        if (rangeToRestore?.time) {
+        if (savedTimeIntersectsData) {
             try {
-                mainPaneRef.current.setVisibleTimeRange(rangeToRestore.time);
+                mainPaneRef.current.setVisibleTimeRange(savedTimeRange);
                 restored = true;
             } catch { /* */ }
         }
 
-        if (!restored && rangeToRestore?.logical) {
+        if (!restored && savedLogicalIntersectsData) {
             try {
-                syncLogicalRangeAcrossPanes(rangeToRestore.logical);
+                syncLogicalRangeAcrossPanes(savedLogicalRange);
                 restored = true;
             } catch { /* */ }
         }
@@ -514,10 +565,10 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                     onCrosshairMove={handleMainCrosshairMove}
                     onCrosshairSync={handleCrosshairSync}
                     onChartCreated={onMainChartCreated}
-                    indicatorMarkers={indicatorMarkers}
-                    indicatorFills={indicatorFills}
-                    indicatorHlines={indicatorHlines}
-                    indicatorBgcolors={indicatorBgcolors}
+                    indicatorMarkers={mainMarkers}
+                    indicatorFills={mainFills}
+                    indicatorHlines={mainHlines}
+                    indicatorBgcolors={mainBgcolors}
                     indicatorBarcolors={indicatorBarcolors}
                     drawingTool={drawingTool}
                     onDrawingToolChange={onDrawingToolChange}
@@ -539,6 +590,10 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                 const abovePaneId = idx === 0 ? "main" : subPanes[idx - 1].id;
                 const isLast = idx === subPanes.length - 1;
                 const heightPct = paneHeightPercents[subPane.id] || (35 / subPanes.length);
+                const paneMarkers = filterItemsForPane(indicatorMarkers, subPane.id);
+                const paneHlines = filterItemsForPane(indicatorHlines, subPane.id);
+                const paneBgcolors = filterItemsForPane(indicatorBgcolors, subPane.id);
+                const paneFills = filterFillsForLines(indicatorFills, subPane.lines);
 
                 return (
                     <div key={subPane.id} style={{ display: "contents" }}>
@@ -563,6 +618,10 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
                                 paneLabel={subPane.label}
                                 timeAlignment={timeAlignment}
                                 indicatorLines={subPane.lines}
+                                indicatorMarkers={paneMarkers}
+                                indicatorFills={paneFills}
+                                indicatorHlines={paneHlines}
+                                indicatorBgcolors={paneBgcolors}
                                 showTimeScale={isLast}
                                 theme={theme}
                                 customBg={customBg}

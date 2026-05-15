@@ -172,7 +172,7 @@ const ChartPane = forwardRef(function ChartPane({
     onCrosshairMove: onCrosshairMoveExternal,
     onCrosshairSync,          // called with {time, point} for cross-pane sync
     onChartCreated,           // called after chart+series are created, passes { chartRef, seriesRef }
-    // Extended Pyne drawing outputs (main pane only)
+    // Extended Pyne drawing outputs (already filtered to this pane by parent)
     indicatorMarkers = [],    // [{data: [{time, position, color, shape, text}], indicatorId}]
     indicatorFills = [],      // [{plot1_id, plot2_id, color, indicatorId}]
     indicatorHlines = [],     // [{price, title, color, linestyle, indicatorId}]
@@ -829,20 +829,46 @@ const ChartPane = forwardRef(function ChartPane({
         }
     }, [indicatorLines, paneType, drawingTool]);
 
-    /* ── Apply indicator markers (main pane only) ──────────── */
+    /* ── Apply indicator markers ───────────────────────────── */
     // Lightweight Charts supports setMarkers() on any series.
-    // We apply all markers to the main candlestick series.
+    // Main pane uses the candle series; sub panes use the first indicator series.
+    const markerTargetRef = useRef(null);
 
     useEffect(() => {
-        if (paneType !== "main" || !mainSeriesRef.current) return;
+        const targetSeries = paneType === "main"
+            ? mainSeriesRef.current
+            : drawingAnchorSeriesRef.current;
+        if (markerTargetRef.current && markerTargetRef.current !== targetSeries) {
+            try { markerTargetRef.current.setMarkers([]); } catch { /* */ }
+        }
+        markerTargetRef.current = targetSeries;
+        if (!targetSeries) return;
         if (!indicatorMarkers || indicatorMarkers.length === 0) {
-            try { mainSeriesRef.current.setMarkers([]); } catch { /* */ }
+            try { targetSeries.setMarkers([]); } catch { /* */ }
             return;
         }
 
         // Flatten all marker sources into a single sorted array
-        const SHAPE_MAP = { triangleup: "arrowUp", triangledown: "arrowDown", circle: "circle", cross: "circle", diamond: "circle", xcross: "circle" };
-        const POS_MAP = { abovebar: "aboveBar", belowbar: "belowBar", top: "aboveBar", bottom: "belowBar" };
+        const SHAPE_MAP = {
+            triangleup: "arrowUp",
+            triangle_up: "arrowUp",
+            arrow_up: "arrowUp",
+            triangledown: "arrowDown",
+            triangle_down: "arrowDown",
+            arrow_down: "arrowDown",
+            circle: "circle",
+            cross: "circle",
+            diamond: "circle",
+            xcross: "circle",
+        };
+        const POS_MAP = {
+            above: "aboveBar",
+            below: "belowBar",
+            abovebar: "aboveBar",
+            belowbar: "belowBar",
+            top: "aboveBar",
+            bottom: "belowBar",
+        };
 
         const allMarkers = [];
         for (const group of indicatorMarkers) {
@@ -863,26 +889,28 @@ const ChartPane = forwardRef(function ChartPane({
         allMarkers.sort((a, b) => a.time - b.time);
 
         try {
-            mainSeriesRef.current.setMarkers(allMarkers);
+            targetSeries.setMarkers(allMarkers);
         } catch (err) {
             console.warn("ChartPane: failed to set markers:", err);
         }
-    }, [indicatorMarkers, paneType]);
+    }, [indicatorMarkers, indicatorLines, paneType]);
 
     /* ── Apply hlines (horizontal price lines) ─────────────── */
-    // We use createPriceLine() on the main series for each hline.
+    // We use createPriceLine() on the pane's anchor series for each hline.
     const hlinesRef = useRef([]); // track created price line objects
 
     useEffect(() => {
-        if (paneType !== "main" || !mainSeriesRef.current) return;
-        const series = mainSeriesRef.current;
+        const series = paneType === "main"
+            ? mainSeriesRef.current
+            : drawingAnchorSeriesRef.current;
 
         // Remove previous hlines
-        for (const pl of hlinesRef.current) {
-            try { series.removePriceLine(pl); } catch { /* */ }
+        for (const item of hlinesRef.current) {
+            try { item.series.removePriceLine(item.priceLine); } catch { /* */ }
         }
         hlinesRef.current = [];
 
+        if (!series) return;
         if (!indicatorHlines || indicatorHlines.length === 0) return;
 
         const LINESTYLE_MAP = { solid: 0, dotted: 1, dashed: 2, large_dashed: 3, sparse_dotted: 4 };
@@ -898,12 +926,12 @@ const ChartPane = forwardRef(function ChartPane({
                     axisLabelVisible: true,
                     title: hl.title || "",
                 });
-                hlinesRef.current.push(pl);
+                hlinesRef.current.push({ series, priceLine: pl });
             } catch (err) {
                 console.warn("ChartPane: failed to create hline:", err);
             }
         }
-    }, [indicatorHlines, paneType]);
+    }, [indicatorHlines, indicatorLines, paneType]);
 
     /* ── Apply barcolors (per-bar candle coloring) ─────────── */
     // Lightweight Charts CandlestickSeries doesn't support per-bar color
@@ -985,11 +1013,17 @@ const ChartPane = forwardRef(function ChartPane({
         if (!indicatorFills || indicatorFills.length === 0) return;
         if (!indicatorLines || indicatorLines.length === 0) return;
 
-        // Build a map of plot_id → line data for matching
+        // Build a map of indicatorId + plot_id → line data for matching.
+        // Pyne plot ids restart from plot_1 for every script, so matching only
+        // by plot id can accidentally fill between different indicators.
         const plotDataMap = new Map();
         for (const line of indicatorLines) {
             if (line.id) {
-                plotDataMap.set(line.id, line.data);
+                const scopedKey = `${line.indicatorId || ""}:${line.id}`;
+                plotDataMap.set(scopedKey, line.data);
+                if (!line.indicatorId && !plotDataMap.has(line.id)) {
+                    plotDataMap.set(line.id, line.data);
+                }
             }
         }
 
@@ -997,8 +1031,9 @@ const ChartPane = forwardRef(function ChartPane({
         // AreaSeries is available from the same package
         for (const fillDef of indicatorFills) {
             const { plot1_id, plot2_id, color } = fillDef;
-            const data1 = plotDataMap.get(plot1_id);
-            const data2 = plotDataMap.get(plot2_id);
+            const scope = fillDef.indicatorId || "";
+            const data1 = plotDataMap.get(`${scope}:${plot1_id}`) || (!scope ? plotDataMap.get(plot1_id) : null);
+            const data2 = plotDataMap.get(`${scope}:${plot2_id}`) || (!scope ? plotDataMap.get(plot2_id) : null);
             if (!data1 || !data2 || data1.length === 0 || data2.length === 0) continue;
 
             // Build time-aligned merged data

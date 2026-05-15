@@ -33,18 +33,20 @@ class IndicatorKey:
     Examples::
 
         key = IndicatorKey("BTCUSDT", "1m", "MA", {"period": 20, "source": "close"})
-        # key.uid → "BTCUSDT:1m:MA:a3f1c8..."
+        # key.uid → "binance:spot:BTCUSDT:1m:MA:a3f1c8..."
     """
     symbol: str
     interval: str
     indicator_name: str
     params: dict[str, Any] = field(default_factory=dict)
     market_type: str = "spot"
+    exchange: str = "binance"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", self.symbol.upper().strip())
         object.__setattr__(self, "interval", self.interval.strip())
         object.__setattr__(self, "market_type", self.market_type.strip().lower())
+        object.__setattr__(self, "exchange", self.exchange.strip().lower())
         object.__setattr__(self, "indicator_name", self.indicator_name.upper().strip())
         # Freeze params into a hashable form
         if isinstance(self.params, dict):
@@ -58,15 +60,20 @@ class IndicatorKey:
 
     @property
     def uid(self) -> str:
-        """Human-readable unique ID including market type."""
-        return f"{self.market_type}:{self.symbol}:{self.interval}:{self.indicator_name}:{self.params_hash}"
+        """Human-readable unique ID including exchange and market type."""
+        return f"{self.exchange}:{self.market_type}:{self.symbol}:{self.interval}:{self.indicator_name}:{self.params_hash}"
 
     @property
     def series_topic(self) -> str:
         """DataManager topic string matching ``SeriesKey.topic`` semantics."""
         base = f"{self.symbol}@{self.interval}"
+        prefixes: list[str] = []
+        if self.exchange != "binance":
+            prefixes.append(self.exchange)
         if self.market_type != "spot":
-            return f"{self.market_type}:{base}"
+            prefixes.append(self.market_type)
+        if prefixes:
+            return f"{':'.join(prefixes)}:{base}"
         return base
 
     def __str__(self) -> str:
@@ -211,6 +218,7 @@ class IndicatorOutput:
     def to_dict(self) -> dict:
         d: dict[str, Any] = {
             "name": self.display_name or self.name,
+            "outputName": self.name,
             "color": self.color,
             "type": self.series_type.value,
             "pane": self.pane.value,
@@ -258,6 +266,7 @@ class IndicatorResult:
             "name": self.meta.name,
             "symbol": self.key.symbol,
             "interval": self.key.interval,
+            "exchange": self.key.exchange,
             "market_type": self.key.market_type,
             "params": dict(self.key.params),
             "outputs": {

@@ -18,19 +18,30 @@ Usage::
 from __future__ import annotations
 
 import math as _builtin_math
-import traceback
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
+from app.indicator.errors import error_detail
+
 from .context import PyneContext
 from .ta import TaModule
 from .input import InputModule
 from .color import Color, color as color_singleton
+from .cache import pyne as pyne_cache_namespace
 from .math_ext import PyneMath, pyne_math
 from .plot import OutputCollector, create_plot_functions
 from . import utils
+from .security import (
+    PyneSecurityError,
+    PyneSecurityPolicy,
+    PyneTimeoutError,
+    build_builtins,
+    enforce_output_limits,
+    execution_timeout,
+    validate_script_security,
+)
 
 
 @dataclass
@@ -47,6 +58,10 @@ class PyneResult:
     """
     ok: bool = True
     error: str | None = None
+    code: str | None = None
+    line: int | None = None
+    column: int | None = None
+    hint: str | None = None
     lines: list[dict[str, Any]] = field(default_factory=list)
     output: dict[str, Any] = field(default_factory=dict)
     param_schema: list[dict[str, Any]] = field(default_factory=list)
@@ -56,11 +71,43 @@ class PyneResult:
         return {
             "ok": self.ok,
             "error": self.error,
+            "code": self.code,
+            "line": self.line,
+            "column": self.column,
+            "hint": self.hint,
+            "errorDetail": self.error_detail,
             "lines": self.lines,
             "output": self.output,
             "param_schema": self.param_schema,
             "meta": self.meta,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PyneResult":
+        return cls(
+            ok=bool(data.get("ok")),
+            error=data.get("error"),
+            code=data.get("code"),
+            line=data.get("line"),
+            column=data.get("column"),
+            hint=data.get("hint"),
+            lines=data.get("lines") if isinstance(data.get("lines"), list) else [],
+            output=data.get("output") if isinstance(data.get("output"), dict) else {},
+            param_schema=data.get("param_schema") if isinstance(data.get("param_schema"), list) else [],
+            meta=data.get("meta") if isinstance(data.get("meta"), dict) else {},
+        )
+
+    @property
+    def error_detail(self) -> dict[str, Any] | None:
+        if self.ok or not self.code or not self.error:
+            return None
+        return error_detail(
+            self.code,
+            self.error,
+            line=self.line,
+            column=self.column,
+            hint=self.hint,
+        )
 
 
 class PyneRuntime:
@@ -78,6 +125,7 @@ class PyneRuntime:
         script: str,
         ohlcv: list[dict[str, Any]],
         params: dict[str, Any] | None = None,
+        security_mode: str | None = None,
     ) -> PyneResult:
         """Execute a Pyne/Python indicator script.
 
@@ -90,14 +138,28 @@ class PyneRuntime:
             PyneResult with all computed outputs.
         """
         if not ohlcv:
-            return PyneResult(ok=False, error="No OHLCV data provided")
-
-        if len(ohlcv) > 50_000:
-            return PyneResult(ok=False, error="Too many data points (max 50,000)")
+            return PyneResult(
+                ok=False,
+                code="INVALID_OHLCV",
+                error="No OHLCV data provided",
+                hint="请确认当前图表已经加载 K 线数据。",
+            )
 
         params = params or {}
 
         try:
+            policy = PyneSecurityPolicy.from_config(security_mode)
+
+            if len(ohlcv) > policy.max_bars:
+                return PyneResult(
+                    ok=False,
+                    code="INVALID_OHLCV",
+                    error=f"Too many data points (max {policy.max_bars})",
+                    hint="缩小历史窗口，或调大 PYNE_MAX_BARS 配置。",
+                )
+
+            validate_script_security(script, policy)
+
             # 1. Build data context
             ctx = PyneContext.from_ohlcv(ohlcv)
 
@@ -114,19 +176,55 @@ class PyneRuntime:
                 input_mod=input_mod,
                 plot_funcs=plot_funcs,
                 params=params,
+                policy=policy,
             )
 
             # 4. Execute
-            exec(script, script_globals)  # noqa: S102
+            with execution_timeout(policy.timeout_seconds):
+                exec(script, script_globals)  # noqa: S102
 
             # 5. Collect outputs
-            return self._collect_result(collector, input_mod)
+            result = self._collect_result(collector, input_mod)
+            enforce_output_limits(result.output, policy)
+            result.meta = {**result.meta, "securityMode": policy.mode}
+            return result
 
+        except SyntaxError as exc:
+            return PyneResult(
+                ok=False,
+                code="PYNE_SYNTAX_ERROR",
+                error=str(exc.msg or exc),
+                line=exc.lineno,
+                column=exc.offset,
+                hint="这是 Python/Pyne 语法错误，请检查报错行附近的括号、缩进、逗号或赋值写法。",
+            )
+        except PyneTimeoutError as exc:
+            return PyneResult(
+                ok=False,
+                code="PYNE_TIMEOUT",
+                error=str(exc),
+                hint="脚本执行超时。请减少循环、缩小窗口，或在确认风险后调高超时时间。",
+            )
+        except PyneSecurityError as exc:
+            message = str(exc)
+            if "output series" in message or "output points" in message:
+                code = "PYNE_OUTPUT_LIMIT_EXCEEDED"
+                hint = "脚本输出过多。请减少 plot/marker 数量，或降低单次输出点数。"
+            elif "Import" in message or "import" in message:
+                code = "PYNE_IMPORT_BLOCKED"
+                hint = "当前安全模式不允许该 import。可切换 research/unsafe，或配置 PYNE_ALLOWED_IMPORTS。"
+            else:
+                code = "PYNE_SECURITY_ERROR"
+                hint = "当前 Pyne 安全策略拒绝执行该脚本。"
+            return PyneResult(ok=False, code=code, error=message, hint=hint)
         except Exception as exc:
-            tb = traceback.format_exc()
-            # Extract the most useful part of the traceback
             error_msg = f"Script error: {exc}"
-            return PyneResult(ok=False, error=error_msg)
+            return PyneResult(
+                ok=False,
+                code="PYNE_RUNTIME_ERROR",
+                error=error_msg,
+                hint="脚本运行时失败。请检查变量名、函数参数，以及数组长度是否一致。",
+            )
 
     def _build_namespace(
         self,
@@ -135,6 +233,7 @@ class PyneRuntime:
         input_mod: InputModule,
         plot_funcs: dict[str, Any],
         params: dict[str, Any],
+        policy: PyneSecurityPolicy,
     ) -> dict[str, Any]:
         """Build the global namespace injected into user scripts.
 
@@ -174,11 +273,20 @@ class PyneRuntime:
         # math.* — array-aware math (overrides Python's math)
         ns["math"] = pyne_math
 
+        # pyne.* — local helper namespace for cache and future runtime helpers.
+        ns["pyne"] = pyne_cache_namespace
+        ns["cache"] = pyne_cache_namespace.cache
+        ns["cache_clear"] = pyne_cache_namespace.cache_clear
+        ns["cache_stats"] = pyne_cache_namespace.cache_stats
+
         # ── Layer 2.5: Utility functions (global access) ─────
         # These are also available via ta.* but exposed at top level
         # for convenience, matching Pine's global functions
         ns["crossover"] = utils.crossover
         ns["crossunder"] = utils.crossunder
+        ns["iff"] = lambda cond, a, b: np.where(cond, a, b)
+        ns["where"] = ns["iff"]
+        ns["ref"] = utils.shift
         ns["highest"] = utils.highest
         ns["lowest"] = utils.lowest
         ns["change"] = utils.change
@@ -193,6 +301,20 @@ class PyneRuntime:
         ns["rising"] = utils.rising
         ns["falling"] = utils.falling
 
+        # Pine-style lowercase constants and common TA aliases. These are
+        # ordinary Python names, so they do not require a custom parser.
+        ns["true"] = True
+        ns["false"] = False
+        ns["sma"] = ta.sma
+        ns["ema"] = ta.ema
+        ns["wma"] = ta.wma
+        ns["rma"] = ta.rma
+        ns["vwma"] = ta.vwma
+        ns["rsi"] = ta.rsi
+        ns["macd"] = ta.macd
+        ns["atr"] = ta.atr
+        ns["bb"] = ta.bb
+
         # ── Layer 3: Python standard library ─────────────────
         ns["np"] = np
         ns["numpy"] = np
@@ -200,8 +322,8 @@ class PyneRuntime:
         # ── Legacy compatibility ─────────────────────────────
         ns["params"] = params
 
-        # ── Allow imports (Layer 4: advanced users) ──────────
-        ns["__builtins__"] = __builtins__
+        # ── Builtins / imports (policy-controlled) ──────────
+        ns["__builtins__"] = build_builtins(policy)
 
         return ns
 
@@ -258,8 +380,11 @@ class PyneRuntime:
 
 def _style_to_int(style: str) -> int:
     """Convert line style string to lightweight-charts integer."""
+    if isinstance(style, int):
+        return style
     mapping = {
         "solid": 0,
+        "line": 0,
         "dashed": 2,
         "dotted": 1,
     }

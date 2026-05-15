@@ -7,8 +7,7 @@
  * - Open code editor for custom indicators
  */
 import { useCallback, useEffect, useState } from "react";
-import { createPortal } from "react-dom";
-import { fetchPresets, fetchPreset } from "../services/indicatorApi";
+import { fetchPresets, fetchPreset, fetchCustomIndicators, saveCustomIndicator } from "../services/indicatorApi";
 import IndicatorEditor from "./IndicatorEditor";
 
 const CATEGORY_LABELS = {
@@ -49,10 +48,31 @@ const CATEGORY_ICONS = {
   "Volume": "📦",
 };
 
+const SOURCE_OPTIONS = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4"];
+
+function normalizeParamSchema(schema) {
+  return Array.isArray(schema) ? schema.filter((item) => item && item.key) : [];
+}
+
+function getParamValue(params, schema) {
+  if (params && Object.prototype.hasOwnProperty.call(params, schema.key)) {
+    return params[schema.key];
+  }
+  return schema.default ?? "";
+}
+
+function parseParamValue(rawValue, type) {
+  if (type === "int") return Number.parseInt(rawValue, 10) || 0;
+  if (type === "float") return Number.parseFloat(rawValue) || 0;
+  if (type === "bool") return Boolean(rawValue);
+  return rawValue;
+}
+
 export default function IndicatorPanel({
   isOpen,
   onClose,
   activeIndicators,
+  paramSchemas = {},
   onAddIndicator,
   onRemoveIndicator,
   onToggleVisibility,
@@ -63,12 +83,81 @@ export default function IndicatorPanel({
 }) {
   const [tab, setTab] = useState("presets"); // "presets" | "active" | "editor"
   const [presets, setPresets] = useState([]);
+  const [customIndicators, setCustomIndicators] = useState([]);
   const [presetsLoading, setPresetsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [editingIndicator, setEditingIndicator] = useState(null);
 
   const [panelWidth, setPanelWidth] = useState(400);
   const [isResizing, setIsResizing] = useState(false);
+
+  const getSchemaForIndicator = useCallback((indicator) => {
+    const liveSchema = normalizeParamSchema(paramSchemas[indicator.id]);
+    if (liveSchema.length > 0) return liveSchema;
+    return normalizeParamSchema(indicator.paramSchema);
+  }, [paramSchemas]);
+
+  const handleParamChange = useCallback((indicator, key, value, shouldRecompute = false) => {
+    onUpdateParams(indicator.id, {
+      ...(indicator.params || {}),
+      [key]: value,
+    });
+    if (shouldRecompute) onRecompute?.(true);
+  }, [onRecompute, onUpdateParams]);
+
+  const renderParamControl = useCallback((indicator, schema) => {
+    const type = schema.type || "string";
+    const value = getParamValue(indicator.params || {}, schema);
+    const common = {
+      className: "indicator-param-input",
+      title: schema.tooltip || "",
+      onBlur: () => onRecompute?.(true),
+    };
+
+    if (type === "bool") {
+      return (
+        <input
+          {...common}
+          type="checkbox"
+          checked={Boolean(value)}
+          onChange={(e) => handleParamChange(indicator, schema.key, e.target.checked, true)}
+        />
+      );
+    }
+
+    const options = type === "source"
+      ? (schema.options || SOURCE_OPTIONS)
+      : schema.options;
+    if (Array.isArray(options) && options.length > 0) {
+      return (
+        <select
+          {...common}
+          value={String(value)}
+          onChange={(e) => {
+            handleParamChange(indicator, schema.key, parseParamValue(e.target.value, type), true);
+          }}
+        >
+          {options.map((option) => (
+            <option key={option} value={option}>{option}</option>
+          ))}
+        </select>
+      );
+    }
+
+    return (
+      <input
+        {...common}
+        type={type === "color" ? "color" : type === "int" || type === "float" ? "number" : "text"}
+        value={value}
+        min={schema.min}
+        max={schema.max}
+        step={schema.step ?? (type === "float" ? 0.1 : type === "int" ? 1 : undefined)}
+        onChange={(e) => {
+          handleParamChange(indicator, schema.key, parseParamValue(e.target.value, type));
+        }}
+      />
+    );
+  }, [handleParamChange, onRecompute]);
 
   const startResizing = useCallback((e) => {
     setIsResizing(true);
@@ -101,17 +190,55 @@ export default function IndicatorPanel({
 
   // Load presets on first open
   useEffect(() => {
-    if (isOpen && presets.length === 0) {
+    if (!isOpen || presets.length !== 0) return;
+
+    let cancelled = false;
+    const loadIndicators = async () => {
       setPresetsLoading(true);
-      fetchPresets()
-        .then((data) => setPresets(data))
-        .catch((err) => console.error("Failed to load presets:", err))
-        .finally(() => setPresetsLoading(false));
-    }
-  }, [isOpen]);
+      try {
+        const [presetData, customData] = await Promise.all([fetchPresets(), fetchCustomIndicators()]);
+        if (cancelled) return;
+        setPresets(presetData);
+        setCustomIndicators((customData || []).map((item) => ({
+            ...item,
+            category: item.category || "custom",
+            is_builtin: false,
+            isPreset: false,
+            paneTarget: item.renderHints?.paneTarget || "sub",
+            securityMode: item.securityMode || "safe",
+        })));
+      } catch (err) {
+        console.error("Failed to load presets:", err);
+      } finally {
+        if (!cancelled) setPresetsLoading(false);
+      }
+    };
+
+    loadIndicators();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, presets.length]);
 
   const handleAddPreset = useCallback(async (preset) => {
     try {
+      if (preset.is_builtin === false || preset.isPreset === false || preset.kind === "script") {
+        onAddIndicator({
+          id: preset.id,
+          name: preset.name,
+          engineName: null,
+          script: preset.script,
+          params: preset.params || {},
+          description: preset.description || "",
+          category: preset.category || "custom",
+          paneTarget: preset.paneTarget || preset.renderHints?.paneTarget || "sub",
+          securityMode: preset.securityMode || "safe",
+          kind: "script",
+          isPreset: false,
+        });
+        setTab("active");
+        return;
+      }
       // Fetch full preset with script
       const full = await fetchPreset(preset.id);
       onAddIndicator({
@@ -123,6 +250,7 @@ export default function IndicatorPanel({
         description: full.description || "",
         category: full.category || "",
         paneTarget: full.paneTarget || "sub",  // "main" or "sub"
+        kind: "builtin",
         isPreset: true,
       });
       setTab("active");
@@ -135,23 +263,19 @@ export default function IndicatorPanel({
     setEditingIndicator({
       id: null,
       name: "My Indicator",
-      script: `# Custom Indicator
-# Available variables: open, high, low, close, volume, time (numpy arrays)
-# Use add_line(data, color, title) to output lines
+      script: `indicator("My Indicator", overlay=True)
 
-# Example: Simple Moving Average
-period = params.get("period", 20)
-sma = []
-for i in range(len(close)):
-    if i < period - 1:
-        sma.append(None)
-    else:
-        sma.append(sum(close[i-period+1:i+1]) / period)
+length = input.int(20, "Length", minval=1)
+src = input.source(close, "Source")
+line_color = input.color(color.orange, "Color")
 
-add_line(sma, color="#f59e0b", title=f"SMA({period})")
+ma = ta.sma(src, length)
+plot(ma, "MA", color=line_color)
 `,
-      params: { period: 20 },
+      params: {},
       description: "",
+      securityMode: "safe",
+      kind: "script",
       isPreset: false,
     });
     setTab("editor");
@@ -162,33 +286,80 @@ add_line(sma, color="#f59e0b", title=f"SMA({period})")
     setTab("editor");
   }, []);
 
+  const toCustomDraft = useCallback((updated) => ({
+    ...updated,
+    id: updated.id || `custom-${Date.now()}`,
+    kind: "script",
+    engineName: null,
+    isPreset: false,
+    is_builtin: false,
+    category: updated.category || "custom",
+    securityMode: updated.securityMode || "safe",
+  }), []);
+
   const handleEditorPreview = useCallback((updated) => {
-    if (updated.id && activeIndicators.some((i) => i.id === updated.id)) {
+    const active = updated.id ? activeIndicators.find((i) => i.id === updated.id) : null;
+    if (updated.id && active && !active.isPreset && !active.engineName) {
       onUpdateScript(updated.id, updated.script);
       if (updated.params) onUpdateParams(updated.id, updated.params);
       setEditingIndicator(prev => ({ ...prev, ...updated }));
     } else {
-      const id = updated.id || `custom-${Date.now()}`;
-      onAddIndicator({
-        ...updated,
-        id,
-        isPreset: false,
-      });
-      setEditingIndicator(prev => ({ ...prev, ...updated, id }));
+      const draft = toCustomDraft({ ...updated, id: null });
+      onAddIndicator(draft);
+      setEditingIndicator(prev => ({ ...prev, ...draft }));
     }
-  }, [activeIndicators, onAddIndicator, onUpdateScript, onUpdateParams]);
+  }, [activeIndicators, onAddIndicator, onUpdateScript, onUpdateParams, toCustomDraft]);
 
-  const handleEditorSave = useCallback((updated) => {
-    if (updated.id && activeIndicators.some((i) => i.id === updated.id)) {
+  const handleEditorSave = useCallback(async (updated) => {
+    const active = updated.id ? activeIndicators.find((i) => i.id === updated.id) : null;
+    const shouldFork = !active || active.isPreset || active.engineName;
+    const indicatorToSave = shouldFork ? toCustomDraft({ ...updated, id: null }) : toCustomDraft(updated);
+
+    let saved = indicatorToSave;
+    try {
+      saved = await saveCustomIndicator({
+        id: indicatorToSave.id,
+        kind: "script",
+        name: indicatorToSave.name,
+        script: indicatorToSave.script,
+        description: indicatorToSave.description || "",
+        params: indicatorToSave.params || {},
+        paramSchema: indicatorToSave.paramSchema || [],
+        renderHints: { paneTarget: indicatorToSave.paneTarget || "sub" },
+        securityMode: indicatorToSave.securityMode || "safe",
+      });
+      setCustomIndicators((prev) => {
+        const item = {
+          ...saved,
+          category: "custom",
+          is_builtin: false,
+          isPreset: false,
+          paneTarget: saved.renderHints?.paneTarget || indicatorToSave.paneTarget || "sub",
+          securityMode: saved.securityMode || indicatorToSave.securityMode || "safe",
+        };
+        const idx = prev.findIndex((i) => i.id === item.id);
+        if (idx === -1) return [...prev, item];
+        const next = [...prev];
+        next[idx] = item;
+        return next;
+      });
+    } catch (err) {
+      console.error("Failed to save custom indicator:", err);
+    }
+
+    if (!shouldFork && activeIndicators.some((i) => i.id === saved.id)) {
       // Update existing — these already trigger pendingForceCompute in useIndicators
-      onUpdateScript(updated.id, updated.script);
-      if (updated.params) onUpdateParams(updated.id, updated.params);
+      onUpdateScript(saved.id, saved.script);
+      if (saved.params) onUpdateParams(saved.id, saved.params);
     } else {
       // Add new — addIndicator already triggers pendingForceCompute
-      const id = updated.id || `custom-${Date.now()}`;
       onAddIndicator({
-        ...updated,
-        id,
+        ...saved,
+        kind: "script",
+        engineName: null,
+        category: "custom",
+        paneTarget: saved.renderHints?.paneTarget || indicatorToSave.paneTarget || "sub",
+        securityMode: saved.securityMode || indicatorToSave.securityMode || "safe",
         isPreset: false,
       });
     }
@@ -196,7 +367,7 @@ add_line(sma, color="#f59e0b", title=f"SMA({period})")
     setTab("active");
     // No need to manually call onRecompute — the state changes above
     // already set pendingForceComputeRef which triggers automatic recompute
-  }, [activeIndicators, onAddIndicator, onUpdateScript, onUpdateParams]);
+  }, [activeIndicators, onAddIndicator, onUpdateScript, onUpdateParams, toCustomDraft]);
 
   const handleEditorBack = useCallback(() => {
     setEditingIndicator(null);
@@ -213,7 +384,8 @@ add_line(sma, color="#f59e0b", title=f"SMA({period})")
   } : null;
 
   // Filter presets by search
-  const filteredPresets = presets.filter((p) => {
+  const allPresets = [...presets, ...customIndicators];
+  const filteredPresets = allPresets.filter((p) => {
     if (!searchQuery) return true;
     const q = searchQuery.toLowerCase();
     return (
@@ -440,33 +612,46 @@ add_line(sma, color="#f59e0b", title=f"SMA({period})")
                         </div>
 
                         {/* Param editors */}
-                        {ind.params && Object.keys(ind.params).length > 0 && (
+                        {(getSchemaForIndicator(ind).length > 0 || (ind.params && Object.keys(ind.params).length > 0)) && (
                           <div className="indicator-params">
-                            {Object.entries(ind.params).map(([key, value]) => {
-                              // Detect param type: color (#hex), number, or text
-                              const isColor = typeof value === "string" && /^#[0-9a-fA-F]{3,8}$/.test(value);
-                              const isNumber = typeof value === "number";
-                              const inputType = isColor ? "color" : isNumber ? "number" : "text";
+                            {(() => {
+                              const schema = getSchemaForIndicator(ind);
+                              if (schema.length > 0) {
+                                return schema.map((item) => (
+                                  <div key={item.key} className="indicator-param-row">
+                                    <label className="indicator-param-label">
+                                      {item.label || item.title || item.key}
+                                    </label>
+                                    {renderParamControl(ind, item)}
+                                  </div>
+                                ));
+                              }
 
-                              return (
-                                <div key={key} className="indicator-param-row">
-                                  <label className="indicator-param-label">{key}</label>
-                                  <input
-                                    className="indicator-param-input"
-                                    type={inputType}
-                                    value={value}
-                                    step={isNumber && !Number.isInteger(value) ? "0.1" : undefined}
-                                    onChange={(e) => {
-                                      const newVal = isNumber
-                                        ? Number(e.target.value)
-                                        : e.target.value;
-                                      onUpdateParams(ind.id, { ...ind.params, [key]: newVal });
-                                    }}
-                                    onBlur={() => onRecompute?.(true)}
-                                  />
-                                </div>
-                              );
-                            })}
+                              return Object.entries(ind.params || {}).map(([key, value]) => {
+                                const isColor = typeof value === "string" && /^#[0-9a-fA-F]{3,8}$/.test(value);
+                                const isNumber = typeof value === "number";
+                                const inputType = isColor ? "color" : isNumber ? "number" : "text";
+
+                                return (
+                                  <div key={key} className="indicator-param-row">
+                                    <label className="indicator-param-label">{key}</label>
+                                    <input
+                                      className="indicator-param-input"
+                                      type={inputType}
+                                      value={value}
+                                      step={isNumber && !Number.isInteger(value) ? "0.1" : undefined}
+                                      onChange={(e) => {
+                                        const newVal = isNumber
+                                          ? Number(e.target.value)
+                                          : e.target.value;
+                                        onUpdateParams(ind.id, { ...ind.params, [key]: newVal });
+                                      }}
+                                      onBlur={() => onRecompute?.(true)}
+                                    />
+                                  </div>
+                                );
+                              });
+                            })()}
                           </div>
                         )}
 

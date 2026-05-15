@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +20,7 @@ from app.data_engine.interval_policy import (
 VALID_MARKET_TYPES = ("spot", "futures", "swap")
 DEFAULT_EXCHANGE = "binance"
 DEFAULT_MARKET_TYPE = "spot"
+logger = logging.getLogger("candlescope.storage.klines")
 
 
 def interval_to_milliseconds(interval: str) -> int:
@@ -30,7 +32,11 @@ def interval_to_milliseconds(interval: str) -> int:
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(str(KLINES_DB_PATH), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+    except sqlite3.OperationalError as exc:
+        logger.warning("SQLite WAL mode unavailable for %s, falling back to DELETE journal: %s", KLINES_DB_PATH, exc)
+        conn.execute("PRAGMA journal_mode=DELETE;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 

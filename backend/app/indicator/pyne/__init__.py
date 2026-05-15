@@ -28,6 +28,14 @@ Architecture::
     └── utils.py         ← na, nz, shift, crossover, etc.
 """
 
-from .runtime import PyneRuntime
+from .cache import pyne_cache
+from .executor import execute_pyne_script, execute_pyne_script_in_process
+from .runtime import PyneRuntime, PyneResult
 
-__all__ = ["PyneRuntime"]
+__all__ = [
+    "PyneRuntime",
+    "PyneResult",
+    "execute_pyne_script",
+    "execute_pyne_script_in_process",
+    "pyne_cache",
+]

@@ -21,21 +21,24 @@ def bridge_indicator_engine(data_manager: Any) -> Any:
         symbol = event.key.symbol
         interval = event.key.interval
         market_type = event.key.market_type
+        exchange = event.key.exchange
 
         if event.event_type == DataEventType.BAR_CLOSED:
-            indicator_engine.on_bar_closed(symbol, interval, bar, market_type=market_type)
+            indicator_engine.on_bar_closed(symbol, interval, bar, market_type=market_type, exchange=exchange)
         elif event.event_type == DataEventType.BAR_UPDATED:
-            indicator_engine.on_bar_updated(symbol, interval, bar, market_type=market_type)
+            indicator_engine.on_bar_updated(symbol, interval, bar, market_type=market_type, exchange=exchange)
 
     async def _on_backfill(event: Any) -> None:
         symbol = event.key.symbol
         interval = event.key.interval
         market_type = event.key.market_type
+        exchange = event.key.exchange
         try:
             result = data_manager.query_latest(
                 symbol,
                 interval,
                 limit=5000,
+                exchange=exchange,
                 market_type=market_type,
             )
             if result.bars:
@@ -44,6 +47,7 @@ def bridge_indicator_engine(data_manager: Any) -> Any:
                     interval,
                     result.bars,
                     market_type=market_type,
+                    exchange=exchange,
                 )
         except Exception as exc:
             logger.warning("Indicator recompute after backfill failed: %s", exc)

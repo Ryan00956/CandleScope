@@ -12,21 +12,31 @@ Endpoints:
 """
 from __future__ import annotations
 
+import time
 import textwrap
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.core import config
 from app.data_engine.data_manager.models import BarData
 from app.indicator import registry, IndicatorEngine, create_engine
-from app.indicator.pyne import PyneRuntime
+from app.indicator.custom_store import CustomIndicatorStore
+from app.indicator.pyne.cache import pyne_cache
+from app.indicator.pyne.executor import execute_pyne_script
+from app.indicator.pyne.security import PyneSecurityPolicy
+from app.indicator.serialization import (
+    build_error_payload,
+    serialize_indicator_result,
+    serialize_pyne_result,
+)
 
 router = APIRouter(prefix="/indicators", tags=["indicators"])
 
 # Module-level singletons
 _engine = create_engine()
-_pyne = PyneRuntime()
+_custom_store = CustomIndicatorStore()
 
 
 # ── Pydantic models ──────────────────────────────────────────
@@ -39,12 +49,30 @@ class ComputeRequest(BaseModel):
       2. Script mode: provide ``script`` + ``params`` → legacy Python exec
     """
     name: str | None = Field(None, description="Indicator name (e.g. 'MA', 'MACD')")
+    mode: str | None = Field(None, description="'builtin' for engine mode or 'script' for Pyne mode")
     params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
+    exchange: str = Field("binance", description="Exchange context")
     symbol: str = Field("UNKNOWN", description="Symbol for context")
     interval: str = Field("1m", description="Interval for context")
     market_type: str = Field("spot", description="Market type context")
     ohlcv: list[dict[str, Any]] = Field(default_factory=list, description="OHLCV bar data array")
     script: str | None = Field(None, description="Legacy Python script (optional)")
+    securityMode: str | None = Field(None, description="'safe', 'research', or 'unsafe' for Pyne scripts")
+
+
+class CustomIndicatorPayload(BaseModel):
+    """Create/update payload for a user-defined indicator."""
+
+    schemaVersion: int = Field(1, description="Custom indicator schema version")
+    id: str | None = Field(None, description="Stable custom indicator id")
+    kind: str = Field("script", description="'script' or 'custom'")
+    name: str = Field(..., description="Display name")
+    description: str = Field("", description="Description")
+    script: str = Field(..., description="Pyne/Python script")
+    params: dict[str, Any] = Field(default_factory=dict, description="Default params")
+    paramSchema: list[dict[str, Any]] = Field(default_factory=list, description="Parameter schema")
+    renderHints: dict[str, Any] = Field(default_factory=dict, description="Optional rendering hints")
+    securityMode: str | None = Field(None, description="Preferred Pyne security mode")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -434,6 +462,119 @@ async def get_preset(preset_id: str):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Custom indicator CRUD
+# ═══════════════════════════════════════════════════════════════
+
+@router.get("/custom")
+async def list_custom_indicators():
+    """List all user-saved custom indicators."""
+    try:
+        return _custom_store.list()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/custom")
+async def save_custom_indicator(payload: CustomIndicatorPayload):
+    """Create or update a user-saved custom indicator."""
+    try:
+        data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        return _custom_store.upsert(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/custom/{indicator_id}")
+async def delete_custom_indicator(indicator_id: str):
+    """Delete a user-saved custom indicator."""
+    try:
+        deleted = _custom_store.delete(indicator_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Custom indicator '{indicator_id}' not found")
+    return {"ok": True, "id": indicator_id}
+
+
+@router.get("/pyne/security")
+async def get_pyne_security_policy():
+    """Return the default Pyne security policy advertised to the UI."""
+    return PyneSecurityPolicy.from_config().to_public_dict()
+
+
+def _resolve_runtime_engine(request: Request | None) -> IndicatorEngine:
+    """Prefer the app-wide runtime engine when the endpoint is called via ASGI."""
+    if request is not None:
+        try:
+            engine = getattr(request.app.state, "indicator_engine", None)
+            if isinstance(engine, IndicatorEngine):
+                return engine
+        except Exception:
+            pass
+    return _engine
+
+
+def _build_diagnostics_snapshot(
+    *,
+    engine: IndicatorEngine,
+    store: CustomIndicatorStore,
+) -> dict[str, Any]:
+    """Build a compact, stable diagnostics payload for support/debugging."""
+    custom_error = None
+    custom_count = 0
+    try:
+        custom_count = len(store.list())
+    except ValueError as exc:
+        custom_error = str(exc)
+
+    policy = PyneSecurityPolicy.from_config().to_public_dict()
+
+    return {
+        "ok": True,
+        "schemaVersion": 1,
+        "generatedAt": int(time.time()),
+        "registry": {
+            "count": len(registry.list_names()),
+            "indicators": registry.list_names(),
+        },
+        "engine": engine.snapshot(),
+        "customIndicators": {
+            "count": custom_count,
+            "path": str(store.path),
+            "error": custom_error,
+        },
+        "pyne": {
+            "security": policy,
+            "executor": {
+                "mode": config.PYNE_EXECUTOR_MODE,
+                "timeoutSeconds": config.PYNE_EXEC_TIMEOUT_SECONDS,
+                "processGraceSeconds": config.PYNE_PROCESS_GRACE_SECONDS,
+            },
+            "limits": {
+                "maxBars": config.PYNE_MAX_BARS,
+                "maxOutputSeries": config.PYNE_MAX_OUTPUT_SERIES,
+                "maxOutputPoints": config.PYNE_MAX_OUTPUT_POINTS,
+            },
+            "cache": pyne_cache.stats(),
+        },
+        "websocket": {
+            "maxSubscriptions": config.INDICATOR_WS_MAX_SUBSCRIPTIONS,
+            "queueSize": config.INDICATOR_WS_QUEUE_SIZE,
+            "heartbeatSeconds": config.INDICATOR_WS_HEARTBEAT_SECONDS,
+        },
+    }
+
+
+@router.get("/diagnostics")
+async def get_indicator_diagnostics(request: Request):
+    """Return a read-only diagnostics snapshot for the indicator subsystem."""
+    return _build_diagnostics_snapshot(
+        engine=_resolve_runtime_engine(request),
+        store=_custom_store,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Compute endpoint — unified
 # ═══════════════════════════════════════════════════════════════
 
@@ -449,11 +590,39 @@ async def compute(req: ComputeRequest):
     Returns ``{ok, error, lines, result}`` — ``lines`` is the flat list
     for direct frontend rendering, ``result`` is the full structured output.
     """
-    # Determine which indicator to use
-    indicator_name = req.name
-    use_engine = indicator_name is not None
+    mode = req.mode.strip().lower() if req.mode else None
+    if mode and mode not in {"builtin", "script"}:
+        return build_error_payload(
+            "INVALID_MODE",
+            "mode must be 'builtin' or 'script'",
+            hint="内置指标使用 mode='builtin'，自定义 Pyne 脚本使用 mode='script'。",
+        )
 
-    # Check if script is an engine-backed pseudo-script
+    indicator_name = req.name
+
+    if mode == "script":
+        if not req.script:
+            return build_error_payload(
+                "PYNE_SCRIPT_REQUIRED",
+                "Script mode requires 'script'",
+                hint="请提交 Pyne 脚本文本，或切换到 builtin 模式。",
+            )
+        return await _compute_script(req)
+
+    if mode == "builtin":
+        if not indicator_name and req.script and req.script.startswith(_ENGINE_SCRIPT_MARKER):
+            first_line = req.script.split("\n")[0]
+            indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
+        if not indicator_name:
+            return build_error_payload(
+                "INDICATOR_NAME_REQUIRED",
+                "Builtin mode requires 'name'",
+                hint="请传入内置指标名称，例如 MA、MACD、RSI。",
+            )
+        return await _compute_engine(indicator_name, req)
+
+    # Legacy mode: preserve old behavior for existing frontend/localStorage data.
+    use_engine = indicator_name is not None
     if not use_engine and req.script and req.script.startswith(_ENGINE_SCRIPT_MARKER):
         first_line = req.script.split("\n")[0]
         indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
@@ -461,10 +630,13 @@ async def compute(req: ComputeRequest):
 
     if use_engine and indicator_name:
         return await _compute_engine(indicator_name, req)
-    elif req.script:
+    if req.script:
         return await _compute_script(req)
-    else:
-        return {"ok": False, "error": "Provide either 'name' or 'script'", "lines": [], "result": None}
+    return build_error_payload(
+        "INDICATOR_REQUEST_EMPTY",
+        "Provide either 'name' or 'script'",
+        hint="内置指标传 name，自定义指标传 script。",
+    )
 
 
 async def _compute_engine(name: str, req: ComputeRequest) -> dict:
@@ -472,18 +644,34 @@ async def _compute_engine(name: str, req: ComputeRequest) -> dict:
     name = name.upper()
 
     if not registry.has(name):
-        return {"ok": False, "error": f"Indicator '{name}' not registered", "lines": [], "result": None}
+        return build_error_payload(
+            "INDICATOR_NOT_FOUND",
+            f"Indicator '{name}' not registered",
+            hint="请检查指标名称是否存在于 /api/v1/indicators/registry。",
+        )
 
     ohlcv = req.ohlcv
     if not ohlcv:
-        return {"ok": False, "error": "No OHLCV data provided", "lines": [], "result": None}
+        return build_error_payload(
+            "INVALID_OHLCV",
+            "No OHLCV data provided",
+            hint="请确认前端已经加载 K 线数据后再计算指标。",
+        )
     if len(ohlcv) > 50_000:
-        return {"ok": False, "error": "Too many data points (max 50000)", "lines": [], "result": None}
+        return build_error_payload(
+            "INVALID_OHLCV",
+            "Too many data points (max 50000)",
+            hint="请缩小历史窗口，或为后端指标计算增加分页/窗口策略。",
+        )
 
     try:
         bars = [BarData.from_dict(d) for d in ohlcv]
     except (KeyError, ValueError, TypeError) as exc:
-        return {"ok": False, "error": f"Invalid OHLCV data: {exc}", "lines": [], "result": None}
+        return build_error_payload(
+            "INVALID_OHLCV",
+            f"Invalid OHLCV data: {exc}",
+            hint="OHLCV 每根 K 线需要包含 time/open/high/low/close/volume。",
+        )
 
     try:
         result = _engine.compute(
@@ -493,22 +681,22 @@ async def _compute_engine(name: str, req: ComputeRequest) -> dict:
             indicator_name=name,
             params=req.params,
             bars=bars,
+            exchange=req.exchange,
         )
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "lines": [], "result": None}
+        return build_error_payload(
+            "INDICATOR_COMPUTE_FAILED",
+            str(exc),
+            hint="内置指标计算失败，请检查参数类型和历史数据长度。",
+        )
 
     if result is None:
-        return {"ok": False, "error": f"Indicator '{name}' computation returned None", "lines": [], "result": None}
+        return build_error_payload(
+            "INDICATOR_RESULT_EMPTY",
+            f"Indicator '{name}' computation returned None",
+        )
 
-    if result.error:
-        return {"ok": False, "error": result.error, "lines": [], "result": result.to_dict()}
-
-    return {
-        "ok": True,
-        "error": None,
-        "lines": result.lines,  # flat list of output dicts for frontend
-        "result": result.to_dict(),
-    }
+    return serialize_indicator_result(result)
 
 
 async def _compute_script(req: ComputeRequest) -> dict:
@@ -518,38 +706,11 @@ async def _compute_script(req: ComputeRequest) -> dict:
     ta.*, input.*, plot(), color.*, math.*, crossover(), etc.
     Legacy scripts using add_line() continue to work unchanged.
     """
-    result = _pyne.execute(
+    result = execute_pyne_script(
         script=req.script,
         ohlcv=req.ohlcv,
         params=req.params or {},
+        security_mode=req.securityMode,
     )
 
-    response: dict = {
-        "ok": result.ok,
-        "error": result.error,
-        "lines": result.lines,
-        "result": result.output if result.output else None,
-    }
-
-    # Pass through extended output types for frontend rendering
-    output = result.output or {}
-    if output.get("markers"):
-        response["markers"] = output["markers"]
-    if output.get("fills"):
-        response["fills"] = output["fills"]
-    if output.get("hlines"):
-        response["hlines"] = output["hlines"]
-    if output.get("bgcolors"):
-        response["bgcolors"] = output["bgcolors"]
-    if output.get("barcolors"):
-        response["barcolors"] = output["barcolors"]
-
-    # Pass param_schema for dynamic UI generation (from input.* calls)
-    if result.param_schema:
-        response["param_schema"] = result.param_schema
-
-    # Pass indicator metadata
-    if result.meta:
-        response["meta"] = result.meta
-
-    return response
+    return serialize_pyne_result(result)

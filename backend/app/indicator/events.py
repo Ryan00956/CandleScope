@@ -63,6 +63,7 @@ class IndicatorEvent:
             "event_type": self.event_type.value,
             "indicator_id": self.key.uid,
             "indicator_name": self.key.indicator_name,
+            "exchange": self.key.exchange,
             "symbol": self.key.symbol,
             "interval": self.key.interval,
             "market_type": self.key.market_type,

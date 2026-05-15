@@ -13,6 +13,12 @@
  */
 const API_BASE = "http://localhost:8000/api/v1";
 
+function httpBaseToWsBase(httpBase) {
+  if (httpBase.startsWith("https://")) return `wss://${httpBase.slice("https://".length)}`;
+  if (httpBase.startsWith("http://")) return `ws://${httpBase.slice("http://".length)}`;
+  return httpBase;
+}
+
 async function request(url, options = {}) {
   const response = await fetch(url, options);
   if (!response.ok) {
@@ -61,17 +67,26 @@ export async function fetchRegistrySpec(name) {
  * the backend to route to the engine instead of exec.
  *
  * @param {Object} options
+ * @param {string} [options.mode]    - "builtin" or "script"
+ * @param {string} [options.securityMode] - "safe", "research", or "unsafe" for script mode
  * @param {string} [options.name]    - Indicator engine name (e.g. "MA", "MACD")
  * @param {string} [options.script]  - Python script (for custom indicators)
  * @param {Array}  options.ohlcv     - OHLCV bar data array
  * @param {Object} [options.params]  - Indicator parameters
  * @param {string} [options.symbol]  - Symbol context (default "UNKNOWN")
  * @param {string} [options.interval] - Interval context (default "1m")
+ * @param {string} [options.exchange] - Exchange context (default "binance")
  * @returns {Promise<{ok: boolean, error: string|null, lines: Array, result: Object|null}>}
  */
-export async function computeIndicator({ name, script, ohlcv, params, symbol, interval, marketType }) {
+export async function computeIndicator({ mode, securityMode, name, script, ohlcv, params, symbol, interval, marketType, exchange }) {
   const body = { ohlcv, params: params || {} };
 
+  if (mode) {
+    body.mode = mode;
+  }
+  if (securityMode) {
+    body.securityMode = securityMode;
+  }
   // Prefer engine name if available
   if (name) {
     body.name = name;
@@ -81,6 +96,9 @@ export async function computeIndicator({ name, script, ohlcv, params, symbol, in
   }
   if (symbol) {
     body.symbol = symbol;
+  }
+  if (exchange) {
+    body.exchange = exchange;
   }
   if (interval) {
     body.interval = interval;
@@ -100,7 +118,7 @@ export async function computeIndicator({ name, script, ohlcv, params, symbol, in
 //  Custom indicator endpoints (placeholder for future)
 // ═══════════════════════════════════════════════════════════════
 
-/** Fetch user-saved custom indicators (not yet implemented on backend) */
+/** Fetch user-saved custom indicators */
 export async function fetchCustomIndicators() {
   try {
     return await request(`${API_BASE}/indicators/custom`);
@@ -111,12 +129,33 @@ export async function fetchCustomIndicators() {
 }
 
 /** Save (create/update) a custom indicator */
-export async function saveCustomIndicator({ id, name, script, description, params, paramSchema }) {
+export async function saveCustomIndicator({ id, kind, name, script, description, params, paramSchema, renderHints, schemaVersion, securityMode }) {
   return request(`${API_BASE}/indicators/custom`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id, name, script, description, params, paramSchema }),
+    body: JSON.stringify({
+      schemaVersion: schemaVersion || 1,
+      id,
+      kind: kind || "script",
+      name,
+      script,
+      description,
+      params,
+      paramSchema,
+      renderHints: renderHints || {},
+      securityMode,
+    }),
   });
+}
+
+/** Fetch current Pyne security defaults */
+export async function fetchPyneSecurityPolicy() {
+  return request(`${API_BASE}/indicators/pyne/security`);
+}
+
+/** WebSocket URL for backend-managed builtin indicator updates */
+export function getIndicatorStreamUrl() {
+  return `${httpBaseToWsBase(API_BASE)}/stream/indicators`;
 }
 
 /** Delete a custom indicator */

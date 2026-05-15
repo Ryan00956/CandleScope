@@ -24,6 +24,11 @@ from typing import Any
 import numpy as np
 
 
+class _Namespace:
+    def __init__(self, **entries: str) -> None:
+        self.__dict__.update(entries)
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Plot Reference (returned by plot() for use with fill())
 # ═══════════════════════════════════════════════════════════════
@@ -33,6 +38,7 @@ class PlotRef:
     """Opaque reference to a plotted line, used by ``fill()``."""
     id: str
     title: str
+    pane: str = "main"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -57,6 +63,7 @@ class OutputCollector:
         self.bgcolors: list[dict[str, Any]] = []
         self.labels: list[dict[str, Any]] = []
         self.barcolors: list[dict[str, Any]] = []
+        self.signals: list[dict[str, Any]] = []
         self._indicator_meta: dict[str, Any] = {}
         self._plot_counter: int = 0
 
@@ -99,6 +106,8 @@ class OutputCollector:
             result["labels"] = self.labels
         if self.barcolors:
             result["barcolors"] = self.barcolors
+        if self.signals:
+            result["signals"] = self.signals
 
         return result
 
@@ -119,6 +128,34 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
         Pine equivalent: ``indicator("My Indicator", overlay=true)``
         """
         collector.set_indicator_meta(title=title, overlay=overlay, **kwargs)
+
+    def _values_from_data(data: np.ndarray | list | Any) -> list:
+        if isinstance(data, np.ndarray):
+            return data.tolist()
+        if isinstance(data, list):
+            return data
+        return [data] * len(collector.times)
+
+    def _color_for_index(color_data: Any, idx: int, timestamp: int) -> str | None:
+        if color_data is None:
+            return None
+        if isinstance(color_data, np.ndarray):
+            if idx < len(color_data):
+                return str(color_data[idx])
+            return None
+        if isinstance(color_data, list):
+            if idx >= len(color_data):
+                return None
+            item = color_data[idx]
+            if isinstance(item, dict):
+                if item.get("time") == timestamp or "time" not in item:
+                    return str(item.get("color")) if item.get("color") else None
+                return None
+            return str(item) if item else None
+        return str(color_data) if color_data else None
+
+    def _is_valid_value(value: Any) -> bool:
+        return value is not None and not (isinstance(value, float) and np.isnan(value))
 
     def plot(
         data: np.ndarray | list,
@@ -149,22 +186,18 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
         """
         plot_id = collector._next_id()
 
-        # Convert data to serializable format
-        if isinstance(data, np.ndarray):
-            values = data.tolist()
-        elif isinstance(data, list):
-            values = data
-        else:
-            values = [data] * len(collector.times)
+        values = _values_from_data(data)
 
         # Build data points: [{time, value}, ...]
         points = []
         for i, (t, v) in enumerate(zip(collector.times, values)):
-            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+            if _is_valid_value(v):
                 point: dict[str, Any] = {"time": t, "value": round(float(v), 8)}
                 # Per-bar coloring
                 if color_array is not None:
-                    point["color"] = str(color_array[i]) if isinstance(color_array, np.ndarray) else str(color_array)
+                    point_color = _color_for_index(color_array, i, t)
+                    if point_color:
+                        point["color"] = point_color
                 points.append(point)
 
         # Determine pane
@@ -175,6 +208,25 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
                 pane = "main"
             else:
                 pane = "separate"
+
+        if str(style).lower() in {"histogram", "columns", "column", "bar"}:
+            hist_points = []
+            for i, (t, v) in enumerate(zip(collector.times, values)):
+                if not _is_valid_value(v):
+                    continue
+                point = {"time": t, "value": round(float(v), 8)}
+                point_color = _color_for_index(color_array if color_array is not None else color, i, t)
+                if point_color:
+                    point["color"] = point_color
+                hist_points.append(point)
+            collector.histograms.append({
+                "title": title or plot_id,
+                "color_up": str(color) if not isinstance(color, np.ndarray) else "#26a69a",
+                "color_down": str(color) if not isinstance(color, np.ndarray) else "#ef5350",
+                "pane": pane,
+                "data": hist_points,
+            })
+            return PlotRef(id=plot_id, title=title, pane=pane)
 
         line_entry: dict[str, Any] = {
             "id": plot_id,
@@ -190,7 +242,7 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
             line_entry["per_bar_color"] = True
 
         collector.lines.append(line_entry)
-        return PlotRef(id=plot_id, title=title)
+        return PlotRef(id=plot_id, title=title, pane=pane)
 
     def bar(
         data: np.ndarray | list,
@@ -212,19 +264,14 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
             color_down: Color for negative values.
             pane: "main" or "separate".
         """
-        if isinstance(data, np.ndarray):
-            values = data.tolist()
-        elif isinstance(data, list):
-            values = data
-        else:
-            values = [data] * len(collector.times)
+        values = _values_from_data(data)
 
         if pane is None:
             pane = "separate"
 
         points = []
         for t, v in zip(collector.times, values):
-            if v is not None and not (isinstance(v, float) and np.isnan(v)):
+            if _is_valid_value(v):
                 fv = float(v)
                 points.append({
                     "time": t,
@@ -284,6 +331,7 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
             "plot2_id": plot2.id,
             "color": color,
             "title": title,
+            "pane": plot1.pane if plot1.pane == plot2.pane else "separate",
         })
 
     def bgcolor(
@@ -328,7 +376,9 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
         color: str = "#f59e0b",
         text: str = "",
         position: str = "above",
+        location: str | None = None,
         size: str = "normal",
+        pane: str | None = None,
     ) -> None:
         """Plot markers/shapes at specific bars.
 
@@ -342,7 +392,13 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
             text: Text to display with the marker.
             position: "above" or "below" the bar.
             size: "tiny", "small", "normal", "large".
+            pane: "main" or "separate".
         """
+        if location is not None:
+            position = location
+        if pane is None:
+            pane = "separate" if not collector._indicator_meta.get("overlay", True) else "main"
+
         marks = []
         for i, (t, c) in enumerate(zip(collector.times, condition)):
             if c:
@@ -353,6 +409,7 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
                     "text": text,
                     "position": position,
                     "size": size,
+                    "pane": pane,
                 })
 
         if marks:
@@ -362,6 +419,7 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
                 "text": text,
                 "position": position,
                 "size": size,
+                "pane": pane,
                 "data": marks,
             })
 
@@ -389,6 +447,73 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
 
         if bar_colors:
             collector.barcolors.append({"data": bar_colors})
+
+    def emit_signal(
+        condition: np.ndarray | bool,
+        name: str = "",
+        side: str = "buy",
+        message: str = "",
+        strength: float | None = None,
+        price: np.ndarray | float | None = None,
+        payload: dict[str, Any] | None = None,
+        pane: str = "main",
+    ) -> None:
+        """Emit structured buy/sell/alert signals without placing orders.
+
+        The indicator system only reports these events. Future Strategy or
+        Trading modules may consume them, but Pyne indicators do not manage API
+        keys or submit orders.
+        """
+        if isinstance(condition, np.ndarray):
+            flags = condition.tolist()
+        elif isinstance(condition, list):
+            flags = condition
+        else:
+            flags = [bool(condition)] * len(collector.times)
+
+        prices = _values_from_data(price) if price is not None else [None] * len(collector.times)
+        normalized_side = str(side or "alert").lower()
+        data = []
+        for t, flag, signal_price in zip(collector.times, flags, prices):
+            if not flag:
+                continue
+            point: dict[str, Any] = {
+                "time": t,
+                "side": normalized_side,
+                "name": name or normalized_side,
+                "message": message,
+            }
+            if strength is not None:
+                point["strength"] = float(strength)
+            if signal_price is not None and _is_valid_value(signal_price):
+                point["price"] = round(float(signal_price), 8)
+            if payload:
+                point["payload"] = payload
+            data.append(point)
+
+        if data:
+            collector.signals.append({
+                "name": name or normalized_side,
+                "side": normalized_side,
+                "message": message,
+                "pane": pane,
+                "data": data,
+            })
+
+    def alertcondition(
+        condition: np.ndarray | bool,
+        title: str = "",
+        message: str = "",
+        side: str = "alert",
+    ) -> None:
+        """Pine-style alert condition helper."""
+        emit_signal(
+            condition,
+            name=title or side,
+            side=side,
+            message=message,
+            pane="main",
+        )
 
     def label_func(
         text: str,
@@ -426,10 +551,74 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
         data: np.ndarray | list,
         title: str = "",
         color: str = "#f59e0b",
-        pane: str = "main",
+        pane: str | None = None,
+        line_width: int | None = None,
+        line_style: str | int | None = None,
+        overlay: bool | None = None,
+        type: str = "line",
+        color_data: list | np.ndarray | None = None,
+        colorData: list | np.ndarray | None = None,
+        linewidth: int | None = None,
+        style: str | int | None = None,
+        **_: Any,
     ) -> None:
         """Legacy ``add_line()`` — maps to ``plot()`` for backward compatibility."""
-        plot(data, title=title, color=color, pane=pane)
+        resolved_pane = pane
+        if resolved_pane is None:
+            if overlay is None:
+                resolved_pane = "main"
+            else:
+                resolved_pane = "main" if overlay else "separate"
+
+        resolved_width = linewidth if linewidth is not None else line_width
+        if resolved_width is None:
+            resolved_width = 2
+
+        resolved_style = style if style is not None else line_style
+        if resolved_style is None:
+            resolved_style = "solid"
+
+        resolved_color_data = colorData if colorData is not None else color_data
+        series_type = (type or "line").lower()
+
+        if series_type in {"histogram", "bar", "columns", "column"}:
+            values = _values_from_data(data)
+            points = []
+            for idx, (t, v) in enumerate(zip(collector.times, values)):
+                if not _is_valid_value(v):
+                    continue
+                point = {"time": t, "value": round(float(v), 8)}
+                point_color = _color_for_index(resolved_color_data, idx, t)
+                if point_color:
+                    point["color"] = point_color
+                points.append(point)
+
+            collector.histograms.append({
+                "title": title,
+                "color_up": color,
+                "color_down": color,
+                "pane": resolved_pane,
+                "data": points,
+            })
+            return
+
+        plot(
+            data,
+            title=title,
+            color=color,
+            linewidth=resolved_width,
+            style=resolved_style,
+            overlay=overlay,
+            pane=resolved_pane,
+            color_array=resolved_color_data,
+        )
+
+    plot.style_line = "line"
+    plot.style_histogram = "histogram"
+    plot.style_columns = "histogram"
+    hline.style_solid = "solid"
+    hline.style_dashed = "dashed"
+    hline.style_dotted = "dotted"
 
     return {
         "indicator": indicator,
@@ -440,6 +629,23 @@ def create_plot_functions(collector: OutputCollector) -> dict[str, Any]:
         "bgcolor": bgcolor,
         "marker": marker,
         "barcolor": barcolor,
+        "emit_signal": emit_signal,
+        "alertcondition": alertcondition,
         "label": label_func,
         "add_line": add_line,
+        "shape": _Namespace(
+            triangleup="triangle_up",
+            triangledown="triangle_down",
+            circle="circle",
+            cross="cross",
+            diamond="diamond",
+            arrowup="arrow_up",
+            arrowdown="arrow_down",
+        ),
+        "location": _Namespace(
+            abovebar="above",
+            belowbar="below",
+            top="above",
+            bottom="below",
+        ),
     }

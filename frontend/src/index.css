@@ -4943,6 +4943,35 @@ body {
   background: rgba(59, 130, 246, 0.2);
 }
 
+.indicator-preset-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.indicator-preset-delete-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.15s ease;
+}
+
+.indicator-preset-delete-btn:hover {
+  color: var(--candle-down);
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--candle-down);
+}
+
 /* ── 活跃指标列表 ────────────────────────────────────────── */
 .indicator-active-section {
   margin-top: 16px;

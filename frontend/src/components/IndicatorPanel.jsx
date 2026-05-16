@@ -7,7 +7,13 @@
  * - Open code editor for custom indicators
  */
 import { useCallback, useEffect, useState } from "react";
-import { fetchPresets, fetchPreset, fetchCustomIndicators, saveCustomIndicator } from "../services/indicatorApi";
+import {
+  deleteCustomIndicator,
+  fetchPresets,
+  fetchPreset,
+  fetchCustomIndicators,
+  saveCustomIndicator,
+} from "../services/indicatorApi";
 import IndicatorEditor from "./IndicatorEditor";
 
 const CATEGORY_LABELS = {
@@ -49,6 +55,61 @@ const CATEGORY_ICONS = {
 };
 
 const SOURCE_OPTIONS = ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4", "hlcc4"];
+const ENGINE_SCRIPT_MARKER = "# __ENGINE__:";
+
+function isBuiltinIndicator(indicator) {
+  return Boolean(
+    indicator?.engineName ||
+    indicator?.kind === "builtin" ||
+    indicator?.is_builtin === true ||
+    (typeof indicator?.script === "string" && indicator.script.startsWith(ENGINE_SCRIPT_MARKER))
+  );
+}
+
+function stripEngineMarker(script = "") {
+  if (!script.startsWith(ENGINE_SCRIPT_MARKER)) return script;
+  return script.split("\n").slice(1).join("\n").replace(/^\s*\n/, "");
+}
+
+function IndicatorBadge({ children, tone = "neutral" }) {
+  const palette = {
+    builtin: {
+      background: "rgba(59, 130, 246, 0.15)",
+      color: "#3b82f6",
+    },
+    custom: {
+      background: "rgba(20, 184, 166, 0.14)",
+      color: "#14b8a6",
+    },
+    main: {
+      background: "rgba(34, 197, 94, 0.15)",
+      color: "#22c55e",
+    },
+    sub: {
+      background: "rgba(168, 85, 247, 0.15)",
+      color: "#a855f7",
+    },
+    neutral: {
+      background: "rgba(148, 163, 184, 0.15)",
+      color: "#94a3b8",
+    },
+  };
+  return (
+    <span style={{
+      fontSize: 9,
+      marginLeft: 6,
+      padding: "1px 5px",
+      borderRadius: 3,
+      background: palette[tone]?.background || palette.neutral.background,
+      color: palette[tone]?.color || palette.neutral.color,
+      fontWeight: 600,
+      verticalAlign: "middle",
+      whiteSpace: "nowrap",
+    }}>
+      {children}
+    </span>
+  );
+}
 
 function normalizeParamSchema(schema) {
   return Array.isArray(schema) ? schema.filter((item) => item && item.key) : [];
@@ -259,6 +320,23 @@ export default function IndicatorPanel({
     }
   }, [onAddIndicator]);
 
+  const handleDeleteCustomPreset = useCallback(async (preset) => {
+    if (isBuiltinIndicator(preset)) return;
+    const confirmed = window.confirm(`删除自定义指标 "${preset.name}"？如果它已添加到图表，也会一并移除。`);
+    if (!confirmed) return;
+
+    try {
+      await deleteCustomIndicator(preset.id);
+      setCustomIndicators((prev) => prev.filter((item) => item.id !== preset.id));
+      if (activeIndicators.some((item) => item.id === preset.id)) {
+        onRemoveIndicator(preset.id);
+      }
+    } catch (err) {
+      console.error("Failed to delete custom indicator:", err);
+      window.alert(`删除自定义指标失败：${err.message || err}`);
+    }
+  }, [activeIndicators, onRemoveIndicator]);
+
   const handleCreateCustom = useCallback(() => {
     setEditingIndicator({
       id: null,
@@ -296,6 +374,20 @@ plot(ma, "MA", color=line_color)
     category: updated.category || "custom",
     securityMode: updated.securityMode || "safe",
   }), []);
+
+  const handleForkBuiltin = useCallback((indicator) => {
+    const draft = toCustomDraft({
+      ...indicator,
+      id: null,
+      name: `${indicator.name || "Builtin Indicator"} Custom`,
+      script: stripEngineMarker(indicator.script || ""),
+      params: indicator.params || {},
+      description: indicator.description || "",
+      paneTarget: indicator.paneTarget || indicator.renderHints?.paneTarget || "sub",
+      securityMode: "safe",
+    });
+    setEditingIndicator(draft);
+  }, [toCustomDraft]);
 
   const handleEditorPreview = useCallback((updated) => {
     const active = updated.id ? activeIndicators.find((i) => i.id === updated.id) : null;
@@ -435,10 +527,13 @@ plot(ma, "MA", color=line_color)
 
         {tab === "editor" && editingIndicator ? (
           <IndicatorEditor
+            key={`${editingIndicator.id || "new"}:${isBuiltinIndicator(editingIndicator) ? "builtin" : "script"}`}
             indicator={editingIndicator}
             onSave={handleEditorSave}
             onBack={handleEditorBack}
             onPreview={handleEditorPreview}
+            onForkBuiltin={handleForkBuiltin}
+            readOnly={isBuiltinIndicator(editingIndicator)}
             previewState={previewState}
             onToggleVisibility={onToggleVisibility}
           />
@@ -459,7 +554,7 @@ plot(ma, "MA", color=line_color)
                 className={`indicator-tab ${tab === "presets" ? "active" : ""}`}
                 onClick={() => setTab("presets")}
               >
-                内置指标
+                指标库
               </button>
               <button
                 className={`indicator-tab ${tab === "active" ? "active" : ""}`}
@@ -508,39 +603,36 @@ plot(ma, "MA", color=line_color)
                             <div className="indicator-preset-info">
                               <span className="indicator-preset-name">
                                 {preset.name}
+                                <IndicatorBadge tone={isBuiltinIndicator(preset) ? "builtin" : "custom"}>
+                                  {isBuiltinIndicator(preset) ? "内置" : "自定义"}
+                                </IndicatorBadge>
                                 {preset.defaultEnabled && (
-                                  <span style={{
-                                    fontSize: 9,
-                                    marginLeft: 6,
-                                    padding: "1px 5px",
-                                    borderRadius: 3,
-                                    background: "rgba(59, 130, 246, 0.15)",
-                                    color: "#3b82f6",
-                                    fontWeight: 600,
-                                    verticalAlign: "middle",
-                                  }}>默认</span>
+                                  <IndicatorBadge tone="neutral">默认</IndicatorBadge>
                                 )}
-                                <span style={{
-                                  fontSize: 9,
-                                  marginLeft: 6,
-                                  padding: "1px 5px",
-                                  borderRadius: 3,
-                                  background: preset.paneTarget === "main"
-                                    ? "rgba(34, 197, 94, 0.15)"
-                                    : "rgba(168, 85, 247, 0.15)",
-                                  color: preset.paneTarget === "main" ? "#22c55e" : "#a855f7",
-                                  fontWeight: 600,
-                                  verticalAlign: "middle",
-                                }}>{preset.paneTarget === "main" ? "主图" : "副图"}</span>
+                                <IndicatorBadge tone={preset.paneTarget === "main" ? "main" : "sub"}>
+                                  {preset.paneTarget === "main" ? "主图" : "副图"}
+                                </IndicatorBadge>
                               </span>
                               <span className="indicator-preset-desc">{preset.description}</span>
                             </div>
-                            <button
-                              className={`indicator-add-btn ${isActive(preset.id) ? "added" : ""}`}
-                              onClick={() => isActive(preset.id) ? onRemoveIndicator(preset.id) : handleAddPreset(preset)}
-                            >
-                              {isActive(preset.id) ? "✓" : "+"}
-                            </button>
+                            <div className="indicator-preset-actions">
+                              <button
+                                className={`indicator-add-btn ${isActive(preset.id) ? "added" : ""}`}
+                                onClick={() => isActive(preset.id) ? onRemoveIndicator(preset.id) : handleAddPreset(preset)}
+                                title={isActive(preset.id) ? "从图表移除" : "添加到图表"}
+                              >
+                                {isActive(preset.id) ? "✓" : "+"}
+                              </button>
+                              {!isBuiltinIndicator(preset) && (
+                                <button
+                                  className="indicator-preset-delete-btn"
+                                  onClick={() => handleDeleteCustomPreset(preset)}
+                                  title="永久删除自定义指标"
+                                >
+                                  🗑
+                                </button>
+                              )}
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -577,18 +669,12 @@ plot(ma, "MA", color=line_color)
                           </button>
                           <span className="indicator-active-name">
                             {ind.name}
-                            <span style={{
-                              fontSize: 9,
-                              marginLeft: 6,
-                              padding: "1px 5px",
-                              borderRadius: 3,
-                              background: ind.paneTarget === "main"
-                                ? "rgba(34, 197, 94, 0.15)"
-                                : "rgba(168, 85, 247, 0.15)",
-                              color: ind.paneTarget === "main" ? "#22c55e" : "#a855f7",
-                              fontWeight: 600,
-                              verticalAlign: "middle",
-                            }}>{ind.paneTarget === "main" ? "主图" : "副图"}</span>
+                            <IndicatorBadge tone={isBuiltinIndicator(ind) ? "builtin" : "custom"}>
+                              {isBuiltinIndicator(ind) ? "内置" : "自定义"}
+                            </IndicatorBadge>
+                            <IndicatorBadge tone={ind.paneTarget === "main" ? "main" : "sub"}>
+                              {ind.paneTarget === "main" ? "主图" : "副图"}
+                            </IndicatorBadge>
                           </span>
                           {ind.error && (
                             <span className="indicator-error-badge" title={ind.error}>⚠️</span>
@@ -597,9 +683,9 @@ plot(ma, "MA", color=line_color)
                             <button
                               className="indicator-action-btn"
                               onClick={() => handleEditIndicator(ind)}
-                              title="编辑代码"
+                              title={isBuiltinIndicator(ind) ? "查看参考实现" : "编辑代码"}
                             >
-                              ✏️
+                              {isBuiltinIndicator(ind) ? "📖" : "✏️"}
                             </button>
                             <button
                               className="indicator-action-btn indicator-remove-btn"

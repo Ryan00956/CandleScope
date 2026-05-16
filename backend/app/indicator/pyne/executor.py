@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import queue
+import time
 from typing import Any
 
 from app.core import config
@@ -63,9 +64,10 @@ def execute_pyne_script_in_process(
         daemon=True,
     )
     process.start()
-    process.join(timeout + grace if timeout > 0 else None)
 
-    if process.is_alive():
+    payload = _read_process_result(result_queue, process, timeout + grace if timeout > 0 else None)
+
+    if payload is None and process.is_alive():
         process.terminate()
         process.join(1)
         if process.is_alive():
@@ -78,9 +80,12 @@ def execute_pyne_script_in_process(
             hint="脚本执行超时，已终止独立执行进程。请减少循环、缩小窗口，或调整 PYNE_EXEC_TIMEOUT_SECONDS。",
         )
 
-    try:
-        payload = result_queue.get_nowait()
-    except queue.Empty:
+    process.join(1)
+    if process.is_alive():
+        process.terminate()
+        process.join(1)
+
+    if payload is None:
         return PyneResult(
             ok=False,
             code="PYNE_PROCESS_FAILED",
@@ -102,6 +107,34 @@ def execute_pyne_script_in_process(
         error=payload.get("error") or "Pyne executor process failed",
         hint=payload.get("hint"),
     )
+
+
+def _read_process_result(result_queue, process, timeout_seconds: float | None) -> Any:
+    """Read the worker result while the process is still running.
+
+    Large indicator payloads can block a child process in ``Queue.put()`` until
+    the parent drains the pipe. Polling the queue before ``join()`` avoids a
+    false timeout for scripts that finished computing but are returning many
+    points.
+    """
+    deadline = None
+    if timeout_seconds is not None:
+        deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
+
+    while True:
+        try:
+            return result_queue.get(timeout=0.05)
+        except queue.Empty:
+            pass
+
+        if not process.is_alive():
+            try:
+                return result_queue.get_nowait()
+            except queue.Empty:
+                return None
+
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
 
 
 def _multiprocessing_context():
@@ -132,4 +165,3 @@ def _pyne_worker(
             "code": "PYNE_PROCESS_FAILED",
             "error": f"Pyne executor process failed: {exc}",
         })
-

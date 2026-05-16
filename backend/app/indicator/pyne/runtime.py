@@ -32,6 +32,7 @@ from .color import Color, color as color_singleton
 from .cache import pyne as pyne_cache_namespace
 from .math_ext import PyneMath, pyne_math
 from .plot import OutputCollector, create_plot_functions
+from .incremental import IncrementalPyneResult, PyneIncrementalSession, is_incremental_pyne_script
 from . import utils
 from .security import (
     PyneSecurityError,
@@ -160,6 +161,17 @@ class PyneRuntime:
 
             validate_script_security(script, policy)
 
+            if is_incremental_pyne_script(script):
+                incremental = PyneIncrementalSession(
+                    script=script,
+                    params=params,
+                    policy=policy,
+                )
+                result = self._collect_incremental_result(incremental.seed(ohlcv))
+                result.meta = {**result.meta, "securityMode": policy.mode}
+                enforce_output_limits(result.output, policy)
+                return result
+
             # 1. Build data context
             ctx = PyneContext.from_ohlcv(ohlcv)
 
@@ -198,6 +210,7 @@ class PyneRuntime:
                 column=exc.offset,
                 hint="这是 Python/Pyne 语法错误，请检查报错行附近的括号、缩进、逗号或赋值写法。",
             )
+
         except PyneTimeoutError as exc:
             return PyneResult(
                 ok=False,
@@ -225,6 +238,20 @@ class PyneRuntime:
                 error=error_msg,
                 hint="脚本运行时失败。请检查变量名、函数参数，以及数组长度是否一致。",
             )
+
+    def _collect_incremental_result(self, result: IncrementalPyneResult) -> PyneResult:
+        return PyneResult(
+            ok=result.ok,
+            error=result.error,
+            code=result.code,
+            line=result.line,
+            column=result.column,
+            hint=result.hint,
+            lines=result.lines,
+            output=result.output,
+            param_schema=result.param_schema,
+            meta=result.meta,
+        )
 
     def _build_namespace(
         self,

@@ -229,6 +229,47 @@ change(src, period=1)
 roc(src, period=1)
 ```
 
+## Incremental Mode
+
+Batch scripts remain the default. Scripts that need realtime O(1) updates can declare incremental mode and define `on_bar(ctx, bar)`:
+
+```python
+indicator("Incremental MA", mode="incremental", overlay=true)
+
+def init(ctx):
+    ctx.ta.sma("ma20", period=20)
+
+def on_bar(ctx, bar):
+    ma = ctx.ta.sma("ma20").update(bar.close)
+    ctx.plot("MA20", ma, color=color.orange)
+```
+
+Execution model:
+
+- Historical load replays bars in timestamp order, O(n).
+- Realtime closed-bar updates process only the new closed bar, O(1).
+- Realtime previews clone committed state and do not mutate it.
+
+Available starter API:
+
+- `ctx.state(name, default)`: persistent mutable state with a `.value` field.
+- `ctx.window(name, size)`: fixed-size rolling window.
+- `ctx.plot(name, value, **style)`: emit one line point for the current bar.
+- `ctx.marker(condition, **style)`: emit one marker for the current bar.
+- `ctx.ta.sma(name, period)` / `ctx.ta.ema(name, period)`: stateful moving-average helpers.
+- `ctx.ta.boll(name, period, multiplier)`: returns `(upper, mid, lower)`.
+- `ctx.ta.macd(name, fast, slow, signal)`: returns `(dif, dea, hist)`.
+- `ctx.ta.rsi(name, period)` / `ctx.ta.atr(name, period)`: stateful oscillator/range helpers.
+- `ctx.ta.highest(name, period)` / `ctx.ta.lowest(name, period)`: monotonic-window helpers.
+
+Resource protection:
+
+- In `safe` mode, incremental `ctx.state()` keys and `ctx.window()`/window-backed helper sizes are capped.
+- In `research` and `unsafe` modes, incremental state/window caps are not applied. This keeps local research workflows unrestricted; users are responsible for memory use in those modes.
+- Existing execution timeout, `PYNE_MAX_BARS`, and output-size limits still apply.
+
+Incremental WebSocket subscriptions share one in-process session when symbol, interval, script, params, security mode, and history limit match. Duplicate subscribers reuse the same computed bar result instead of advancing state multiple times.
+
 ## Security Modes
 
 Modes are defined in [security.py](security.py):

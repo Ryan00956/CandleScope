@@ -30,11 +30,21 @@ Architecture::
 
 from .cache import pyne_cache
 from .executor import execute_pyne_script, execute_pyne_script_in_process
+from .incremental import (
+    PyneIncrementalSession,
+    PyneIncrementalSessionManager,
+    SharedPyneIncrementalSession,
+    is_incremental_pyne_script,
+)
 from .runtime import PyneRuntime, PyneResult
 
 __all__ = [
     "PyneRuntime",
     "PyneResult",
+    "PyneIncrementalSession",
+    "PyneIncrementalSessionManager",
+    "SharedPyneIncrementalSession",
+    "is_incremental_pyne_script",
     "execute_pyne_script",
     "execute_pyne_script_in_process",
     "pyne_cache",

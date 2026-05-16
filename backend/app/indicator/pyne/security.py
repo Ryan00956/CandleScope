@@ -157,19 +157,46 @@ def execution_timeout(seconds: float) -> Iterator[None]:
     if seconds <= 0 or threading.current_thread() is not threading.main_thread():
         yield
         return
+    if not (
+        hasattr(signal, "SIGALRM")
+        and hasattr(signal, "ITIMER_REAL")
+        and hasattr(signal, "setitimer")
+    ):
+        yield
+        return
 
-    previous_handler = signal.getsignal(signal.SIGALRM)
+    try:
+        previous_handler = signal.getsignal(signal.SIGALRM)
+    except (AttributeError, ValueError, OSError):
+        yield
+        return
 
     def _handler(signum: int, frame: Any) -> None:
         raise PyneTimeoutError(f"Pyne script exceeded {seconds:g}s timeout")
 
+    handler_installed = False
+    armed = False
     try:
         signal.signal(signal.SIGALRM, _handler)
+        handler_installed = True
         signal.setitimer(signal.ITIMER_REAL, seconds)
+        armed = True
+    except (AttributeError, ValueError, OSError):
+        try:
+            yield
+            return
+        finally:
+            if armed:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+            if handler_installed:
+                signal.signal(signal.SIGALRM, previous_handler)
+    try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
+        if armed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        if handler_installed:
+            signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _validate_imports(modules: list[str], policy: PyneSecurityPolicy) -> None:

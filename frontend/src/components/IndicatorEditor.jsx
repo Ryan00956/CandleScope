@@ -22,6 +22,8 @@ export default function IndicatorEditor({
   onSave,
   onBack,
   onPreview,
+  onForkBuiltin,
+  readOnly = false,
   previewState, // { id: string | null, error: string | null, visible: boolean, isComputing: boolean }
   onToggleVisibility
 }) {
@@ -32,6 +34,7 @@ export default function IndicatorEditor({
   const editorRef = useRef(null);
 
   const handlePreview = useCallback(() => {
+    if (readOnly) return;
     onPreview({
       id: indicator?.id || previewState?.id || null,
       name,
@@ -41,9 +44,10 @@ export default function IndicatorEditor({
       securityMode,
       isPreset: indicator?.isPreset || false,
     });
-  }, [name, script, securityMode, indicator, onPreview, previewState]);
+  }, [name, script, securityMode, indicator, onPreview, previewState, readOnly]);
 
   const handleSave = useCallback(() => {
+    if (readOnly) return;
     onSave({
       id: indicator?.id || previewState?.id || null,
       name,
@@ -53,7 +57,7 @@ export default function IndicatorEditor({
       securityMode,
       isPreset: indicator?.isPreset || false,
     });
-  }, [name, script, securityMode, indicator, onSave, previewState]);
+  }, [name, script, securityMode, indicator, onSave, previewState, readOnly]);
 
   const handleSecurityModeChange = useCallback((event) => {
     const nextMode = event.target.value;
@@ -87,15 +91,17 @@ export default function IndicatorEditor({
       pyneRegistered = true;
     }
 
-    // Add Ctrl+Enter shortcut to run
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
-      // Trigger preview via DOM click (simplest way to use latest state)
-      document.querySelector(".indicator-editor-run")?.click();
-    });
+    if (!readOnly) {
+      // Add Ctrl+Enter shortcut to run
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+        // Trigger preview via DOM click (simplest way to use latest state)
+        document.querySelector(".indicator-editor-run")?.click();
+      });
+    }
 
     // Focus the editor
     editor.focus();
-  }, []);
+  }, [readOnly]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -124,12 +130,14 @@ export default function IndicatorEditor({
       {/* Toolbar */}
       <div className="indicator-editor-toolbar" style={{ padding: '12px 24px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <span className="indicator-editor-title" style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', letterSpacing: '0.5px' }}>✨ Pyne 指标编辑器</span>
+          <span className="indicator-editor-title" style={{ fontWeight: 600, fontSize: '15px', color: 'var(--text-primary)', letterSpacing: '0.5px' }}>
+            {readOnly ? "内置指标参考实现" : "Pyne 指标编辑器"}
+          </span>
           <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{name}</span>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {previewState?.id && (
+          {previewState?.id && !readOnly && (
             <button
               onClick={() => onToggleVisibility(previewState.id)}
               style={{ background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border-color)', padding: '6px 10px', borderRadius: '6px', cursor: 'pointer', display: 'flex', alignItems: 'center', transition: 'all 0.15s' }}
@@ -138,20 +146,32 @@ export default function IndicatorEditor({
               {previewState.visible ? "👁" : "👁‍🗨"}
             </button>
           )}
-          <button
-            className="indicator-editor-run"
-            onClick={handlePreview}
-            style={{ background: 'var(--bg-tertiary)', color: 'var(--accent-blue)', border: '1px solid var(--accent-blue)', padding: '6px 16px', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '6px' }}
-          >
-            {previewState?.isComputing ? "⏳ 计算中..." : "▶ 运行到图表"}
-          </button>
-          <button
-            className="indicator-editor-save"
-            onClick={handleSave}
-            style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px', boxShadow: '0 2px 8px rgba(59, 130, 246, 0.3)', transition: 'all 0.2s ease', marginLeft: '8px' }}
-          >
-            💾 保存并关闭
-          </button>
+          {readOnly ? (
+            <button
+              className="indicator-editor-save"
+              onClick={() => onForkBuiltin?.({ ...indicator, name, script, securityMode })}
+              style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px', boxShadow: '0 2px 8px rgba(59, 130, 246, 0.3)', transition: 'all 0.2s ease', marginLeft: '8px' }}
+            >
+              复制为自定义
+            </button>
+          ) : (
+            <>
+              <button
+                className="indicator-editor-run"
+                onClick={handlePreview}
+                style={{ background: 'var(--bg-tertiary)', color: 'var(--accent-blue)', border: '1px solid var(--accent-blue)', padding: '6px 16px', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px', transition: 'all 0.2s ease', display: 'flex', alignItems: 'center', gap: '6px' }}
+              >
+                {previewState?.isComputing ? "⏳ 计算中..." : "▶ 运行到图表"}
+              </button>
+              <button
+                className="indicator-editor-save"
+                onClick={handleSave}
+                style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', padding: '6px 16px', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px', boxShadow: '0 2px 8px rgba(59, 130, 246, 0.3)', transition: 'all 0.2s ease', marginLeft: '8px' }}
+              >
+                💾 保存并关闭
+              </button>
+            </>
+          )}
           <div style={{ width: '1px', height: '20px', background: 'var(--border-color)', margin: '0 8px' }}></div>
           <button
             className="indicator-editor-back"
@@ -171,7 +191,10 @@ export default function IndicatorEditor({
           <input
             type="text"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              if (!readOnly) setName(e.target.value);
+            }}
+            readOnly={readOnly}
             className="indicator-editor-name-input"
             style={{ width: '100%', padding: '12px 16px', background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '15px', outline: 'none', transition: 'all 0.2s', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.1)' }}
           />
@@ -181,7 +204,7 @@ export default function IndicatorEditor({
         <div className="indicator-editor-code-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '8px', marginTop: '-8px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '13px', color: 'var(--text-secondary)', fontWeight: 500 }}>Pyne 脚本</span>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
+            {!readOnly && <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-muted)' }}>
               模式
               <select
                 value={securityMode}
@@ -192,7 +215,7 @@ export default function IndicatorEditor({
                 <option value="research">research</option>
                 <option value="unsafe">unsafe</option>
               </select>
-            </label>
+            </label>}
             {securityPolicy && (
               <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
                 默认 {securityPolicy.mode} · 超时 {securityPolicy.timeoutSeconds}s
@@ -212,10 +235,18 @@ export default function IndicatorEditor({
             defaultLanguage="python"
             theme="pyne-dark"
             value={script}
-            onChange={(value) => setScript(value || "")}
+            onChange={(value) => {
+              if (!readOnly) setScript(value || "");
+            }}
             beforeMount={handleBeforeMount}
             onMount={handleEditorMount}
-            options={getPyneEditorOptions()}
+            options={getPyneEditorOptions(readOnly ? {
+              readOnly: true,
+              domReadOnly: true,
+              quickSuggestions: false,
+              suggestOnTriggerCharacters: false,
+              cursorStyle: "line-thin",
+            } : {})}
           />
         </div>
 
@@ -223,7 +254,9 @@ export default function IndicatorEditor({
 
       {/* Error Console */}
       <div className="indicator-editor-console" style={{ padding: '8px 24px', background: 'var(--bg-primary)', borderTop: '1px solid var(--border-color)', minHeight: '40px', flexShrink: 0, display: 'flex', alignItems: 'center', fontFamily: "'JetBrains Mono', monospace", fontSize: '12px', overflowY: 'auto' }}>
-        {previewState?.error ? (
+        {readOnly ? (
+          <span style={{ color: 'var(--text-muted)' }}>内置指标由 IndicatorEngine 计算；这里仅展示参考实现，修改代码不会影响图表。需要改代码时请先复制为自定义指标。</span>
+        ) : previewState?.error ? (
           <span style={{ color: 'var(--candle-down)', whiteSpace: 'pre-wrap' }}>❌ {previewState.error}</span>
         ) : previewState?.isComputing ? (
           <span style={{ color: 'var(--accent-blue)' }}>⏳ 正在计算指标数据...</span>

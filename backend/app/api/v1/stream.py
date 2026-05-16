@@ -11,6 +11,7 @@ and initialized during application startup (see ``app/main.py``).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import Any
 
@@ -24,7 +25,15 @@ from app.indicator import create_engine, registry as indicator_registry
 from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.errors import error_detail
 from app.indicator.events import IndicatorEvent, IndicatorEventType
+from app.indicator.pyne import (
+    PyneIncrementalSession,
+    PyneIncrementalSessionManager,
+    PyneResult,
+    SharedPyneIncrementalSession,
+    is_incremental_pyne_script,
+)
 from app.indicator.pyne.executor import execute_pyne_script
+from app.indicator.pyne.security import PyneSecurityError, PyneTimeoutError
 from app.indicator.serialization import (
     build_indicator_snapshot_payload,
     build_pyne_snapshot_payload,
@@ -33,6 +42,7 @@ from app.indicator.serialization import (
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 _stream_custom_store = CustomIndicatorStore()
+_pyne_incremental_sessions = PyneIncrementalSessionManager()
 INDICATOR_DEFAULT_PAGE_BARS = 500
 INDICATOR_MAX_RANGE_BARS = 5000
 
@@ -1173,6 +1183,31 @@ async def _handle_pyne_indicator_subscribe(
         "securityMode": security_mode,
         "historyLimit": history_limit,
     }
+    try:
+        incremental_script = is_incremental_pyne_script(script)
+    except SyntaxError:
+        incremental_script = False
+    if incremental_script:
+        session_key = _pyne_incremental_session_key(
+            exchange=exchange,
+            market_type=market_type,
+            symbol=symbol,
+            interval=interval,
+            script=script,
+            params=params,
+            security_mode=security_mode,
+            history_limit=history_limit,
+        )
+        meta["scriptMode"] = "incremental"
+        meta["pyneSessionKey"] = session_key
+        meta["pyneSharedSession"] = _pyne_incremental_sessions.acquire(
+            session_key,
+            lambda: PyneIncrementalSession(
+                script=script,
+                params=params,
+                security_mode=security_mode,
+            ),
+        )
     client_meta[client_id] = meta
 
     initial = await _compute_pyne_snapshot_message_async(client_id, dm, meta)
@@ -1189,12 +1224,20 @@ async def _handle_pyne_indicator_subscribe(
             existing.cancel()
 
         async def _run() -> None:
-            msg = await _compute_pyne_snapshot_message_async(
-                client_id,
-                dm,
-                meta,
-                bar_time=event.bar.time if event.bar else 0,
-            )
+            if meta.get("scriptMode") == "incremental" and event.bar is not None:
+                msg = await _compute_incremental_pyne_bar_message_async(
+                    client_id,
+                    meta,
+                    event.bar.to_dict(),
+                    preview=event.event_type == DataEventType.BAR_UPDATED,
+                )
+            else:
+                msg = await _compute_pyne_snapshot_message_async(
+                    client_id,
+                    dm,
+                    meta,
+                    bar_time=event.bar.time if event.bar else 0,
+                )
             _queue_indicator_message(queue, msg)
 
         custom_tasks[client_id] = asyncio.create_task(_run(), name=f"pyne_indicator_{client_id}")
@@ -1238,7 +1281,9 @@ def _unsubscribe_indicator_client(
     if task is not None:
         task.cancel()
 
-    client_meta.pop(client_id, None)
+    meta = client_meta.pop(client_id, None)
+    if meta is not None:
+        _release_pyne_incremental_meta(meta)
 
 
 def _compute_pyne_snapshot_message(
@@ -1247,6 +1292,9 @@ def _compute_pyne_snapshot_message(
     meta: dict,
     bar_time: int = 0,
 ) -> dict:
+    if meta.get("scriptMode") == "incremental" and not bar_time:
+        return _compute_incremental_pyne_snapshot_message(client_id, dm, meta)
+
     query_result = dm.query_latest(
         meta["symbol"],
         meta["interval"],
@@ -1283,6 +1331,170 @@ def _compute_pyne_snapshot_message(
     return payload
 
 
+def _pyne_incremental_session_key(
+    *,
+    exchange: str,
+    market_type: str,
+    symbol: str,
+    interval: str,
+    script: str,
+    params: dict[str, Any],
+    security_mode: str | None,
+    history_limit: int,
+) -> str:
+    raw = json.dumps(
+        {
+            "exchange": exchange,
+            "marketType": market_type,
+            "symbol": symbol,
+            "interval": interval,
+            "script": script,
+            "params": params,
+            "securityMode": security_mode or "",
+            "historyLimit": int(history_limit),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _release_pyne_incremental_meta(meta: dict[str, Any]) -> None:
+    key = meta.get("pyneSessionKey")
+    if isinstance(key, str) and key:
+        _pyne_incremental_sessions.release(key)
+
+
+def _pyne_result_from_incremental(result) -> PyneResult:
+    return PyneResult(
+        ok=result.ok,
+        error=result.error,
+        code=result.code,
+        line=result.line,
+        column=result.column,
+        hint=result.hint,
+        lines=result.lines,
+        output=result.output,
+        param_schema=result.param_schema,
+        meta=result.meta,
+    )
+
+
+def _pyne_error_result_from_exception(exc: Exception) -> PyneResult:
+    if isinstance(exc, PyneTimeoutError):
+        return PyneResult(
+            ok=False,
+            code="PYNE_TIMEOUT",
+            error=str(exc),
+            hint="脚本执行超时。请减少循环、缩小窗口，或调整 PYNE_EXEC_TIMEOUT_SECONDS。",
+        )
+    if isinstance(exc, PyneSecurityError):
+        return PyneResult(
+            ok=False,
+            code="PYNE_SECURITY_ERROR",
+            error=str(exc),
+            hint="当前 Pyne 安全策略拒绝执行该脚本。",
+        )
+    return PyneResult(
+        ok=False,
+        code="PYNE_RUNTIME_ERROR",
+        error=f"Script error: {exc}",
+        hint="脚本运行时失败。请检查 incremental state、window、helper 和 on_bar/on_preview 逻辑。",
+    )
+
+
+def _build_pyne_ws_payload_from_result(
+    *,
+    client_id: str,
+    meta: dict,
+    result: PyneResult,
+    bar_time: int = 0,
+) -> dict:
+    return build_pyne_snapshot_payload(
+        client_id=client_id,
+        indicator_id=meta.get("indicatorId") or f"pyne:{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{client_id}",
+        exchange=meta["exchange"],
+        symbol=meta["symbol"],
+        interval=meta["interval"],
+        market_type=meta["market_type"],
+        name=meta["name"],
+        params=meta.get("params") if isinstance(meta.get("params"), dict) else {},
+        result=result,
+        bar_time=bar_time,
+    )
+
+
+def _compute_incremental_pyne_snapshot_message(
+    client_id: str,
+    dm,
+    meta: dict,
+) -> dict:
+    shared = meta.get("pyneSharedSession")
+    if not isinstance(shared, SharedPyneIncrementalSession):
+        session = meta.get("pyneSession")
+    else:
+        session = None
+    if shared is None and not isinstance(session, PyneIncrementalSession):
+        session = PyneIncrementalSession(
+            script=meta["script"],
+            params=meta.get("params") if isinstance(meta.get("params"), dict) else {},
+            security_mode=meta.get("securityMode"),
+        )
+        meta["pyneSession"] = session
+
+    query_result = dm.query_latest(
+        meta["symbol"],
+        meta["interval"],
+        limit=meta["historyLimit"],
+        exchange=meta["exchange"],
+        market_type=meta["market_type"],
+    )
+    ohlcv = [bar.to_dict() for bar in query_result.bars]
+    try:
+        if isinstance(shared, SharedPyneIncrementalSession):
+            incremental_result = _pyne_incremental_sessions.seed_or_snapshot(shared, ohlcv)
+        else:
+            incremental_result = session.seed(ohlcv)
+        result = _pyne_result_from_incremental(incremental_result)
+    except Exception as exc:
+        result = _pyne_error_result_from_exception(exc)
+    return _build_pyne_ws_payload_from_result(client_id=client_id, meta=meta, result=result)
+
+
+def _compute_incremental_pyne_bar_message(
+    client_id: str,
+    meta: dict,
+    bar: dict[str, Any],
+    *,
+    preview: bool,
+) -> dict:
+    shared = meta.get("pyneSharedSession")
+    try:
+        if isinstance(shared, SharedPyneIncrementalSession):
+            incremental_result = _pyne_incremental_sessions.process_bar(shared, bar, preview=preview)
+        else:
+            session = meta.get("pyneSession")
+            if not isinstance(session, PyneIncrementalSession):
+                raise RuntimeError("incremental Pyne session is not initialized")
+            incremental_result = session.on_bar_updated(bar) if preview else session.on_bar_closed(bar)
+        result = _pyne_result_from_incremental(incremental_result)
+    except Exception as exc:
+        result = _pyne_error_result_from_exception(exc)
+    bar_time = int(bar.get("time") or 0)
+    payload = _build_pyne_ws_payload_from_result(
+        client_id=client_id,
+        meta=meta,
+        result=result,
+        bar_time=bar_time,
+    )
+    return _patch_from_snapshot(
+        payload,
+        reason="bar_update" if preview else "bar_closed",
+        start_s=bar_time,
+        end_s=bar_time,
+    )
+
+
 def _compute_pyne_range_patch(
     client_id: str,
     dm,
@@ -1297,12 +1509,20 @@ def _compute_pyne_range_patch(
     if len(bars) > max(int(config.PYNE_MAX_BARS), 1):
         raise ValueError(f"Too many Pyne bars: {len(bars)} > {config.PYNE_MAX_BARS}")
     ohlcv = [bar.to_dict() for bar in bars]
-    result = execute_pyne_script(
-        script=meta["script"],
-        ohlcv=ohlcv,
-        params=params,
-        security_mode=meta.get("securityMode"),
-    )
+    if meta.get("scriptMode") == "incremental":
+        session = PyneIncrementalSession(
+            script=meta["script"],
+            params=params,
+            security_mode=meta.get("securityMode"),
+        )
+        result = _pyne_result_from_incremental(session.seed(ohlcv, start_s=start_s, end_s=end_s))
+    else:
+        result = execute_pyne_script(
+            script=meta["script"],
+            ohlcv=ohlcv,
+            params=params,
+            security_mode=meta.get("securityMode"),
+        )
     payload = build_pyne_snapshot_payload(
         client_id=client_id,
         indicator_id=meta.get("indicatorId") or f"pyne:{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{client_id}",
@@ -1332,6 +1552,22 @@ async def _compute_pyne_snapshot_message_async(
         dm,
         meta,
         bar_time,
+    )
+
+
+async def _compute_incremental_pyne_bar_message_async(
+    client_id: str,
+    meta: dict,
+    bar: dict[str, Any],
+    *,
+    preview: bool,
+) -> dict:
+    return await asyncio.to_thread(
+        _compute_incremental_pyne_bar_message,
+        client_id,
+        meta,
+        bar,
+        preview=preview,
     )
 
 

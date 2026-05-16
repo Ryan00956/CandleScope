@@ -19,6 +19,7 @@ const ACTIVE_INDICATORS_KEY = "candlescope-active-indicators";
 const VOL_INIT_KEY = "candlescope-vol-initialized";
 const ENGINE_SCRIPT_MARKER = "# __ENGINE__:";
 const INDICATOR_WS_RECONNECT_MS = 3000;
+const INDICATOR_WS_INITIAL_HISTORY_LIMIT = 500;
 
 function loadActiveIndicators() {
   try {
@@ -393,8 +394,6 @@ export function useIndicators({
   const [barcolors, setBarcolors] = useState([]);   // [{data: [{time, color}]}]
   const [signals, setSignals] = useState([]);       // [{data: [{time, side, name, message}], indicatorId}]
   const [paramSchemas, setParamSchemas] = useState({}); // indicatorId → param_schema[]
-  const [indicatorWsRefreshKey, setIndicatorWsRefreshKey] = useState(0);
-
   const lastComputeSignatureRef = useRef("");
   const queuedRecomputeRef = useRef(false);
   const queuedForceRecomputeRef = useRef(false);
@@ -416,6 +415,8 @@ export function useIndicators({
   // Flag: only show "computing" UI when user manually triggers recompute
   const userTriggeredRef = useRef(false);
   const indicatorWsRef = useRef(null);
+  const indicatorWsSubscriptionsRef = useRef(new Map());
+  const syncHostedSubscriptionsRef = useRef(() => false);
 
   // Persist active indicators to localStorage
   useEffect(() => {
@@ -693,17 +694,103 @@ export function useIndicators({
     ].join(":"))
     .join("|");
   const chartHistoryFirstTime = chartData?.[0]?.time ?? null;
+  const hasWsHostedIndicators = activeIndicators.some(
+    (ind) => isWsHostedIndicator(ind) && ind.visible !== false
+  );
+  const chartDataReady = Boolean(chartData?.length);
 
-  // ── Backend-hosted indicators: builtin incremental + Pyne snapshot WS ──
-  useEffect(() => {
+  const buildHostedIndicatorParams = useCallback((ind) => {
+    let params = ind.params || {};
+    const curUpColor = candleUpColorRef.current;
+    const curDownColor = candleDownColorRef.current;
+    if ((ind.id === "vol" || ind.engineName === "VOL") && (curUpColor || curDownColor)) {
+      params = {
+        ...params,
+        up_color: curUpColor || params.up_color || "#22c55e",
+        down_color: curDownColor || params.down_color || "#ef4444",
+      };
+    }
+    return params;
+  }, []);
+
+  const buildHostedSubscriptionMessage = useCallback((ind) => {
+    const builtin = isBuiltinIndicator(ind);
+    const historyLimit = Math.min(
+      Math.max(chartDataRef.current?.length || 0, 1),
+      INDICATOR_WS_INITIAL_HISTORY_LIMIT,
+    );
+    return {
+      action: "subscribe",
+      clientId: ind.id,
+      kind: builtin ? "builtin" : "script",
+      exchange,
+      marketType,
+      symbol,
+      interval,
+      name: builtin ? getBuiltinIndicatorName(ind) : undefined,
+      displayName: ind.name || ind.id,
+      customId: !builtin ? ind.id : undefined,
+      script: builtin ? undefined : ind.script,
+      securityMode: builtin ? undefined : ind.securityMode,
+      params: buildHostedIndicatorParams(ind),
+      historyLimit,
+    };
+  }, [buildHostedIndicatorParams, exchange, interval, marketType, symbol]);
+
+  const hostedSubscriptionSignature = useCallback((ind) => {
+    const message = buildHostedSubscriptionMessage(ind);
+    return JSON.stringify({
+      kind: message.kind,
+      exchange: message.exchange,
+      marketType: message.marketType,
+      symbol: message.symbol,
+      interval: message.interval,
+      name: message.name || "",
+      scriptHash: stringSignature(message.script || ""),
+      securityMode: message.securityMode || "",
+      params: message.params || {},
+      historyLimit: message.historyLimit,
+    });
+  }, [buildHostedSubscriptionMessage]);
+
+  const syncHostedSubscriptions = useCallback((force = false) => {
+    const socket = indicatorWsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+
     const hostedIndicators = activeIndicatorsRef.current.filter(
       (ind) => isWsHostedIndicator(ind) && ind.visible !== false
     );
-    const currentChartData = chartDataRef.current || [];
-    if (!symbol || !interval || hostedIndicators.length === 0 || currentChartData.length === 0) {
+    const nextIds = new Set();
+
+    for (const ind of hostedIndicators) {
+      nextIds.add(ind.id);
+      const signature = hostedSubscriptionSignature(ind);
+      if (!force && indicatorWsSubscriptionsRef.current.get(ind.id) === signature) {
+        continue;
+      }
+      socket.send(JSON.stringify(buildHostedSubscriptionMessage(ind)));
+      indicatorWsSubscriptionsRef.current.set(ind.id, signature);
+    }
+
+    for (const clientId of Array.from(indicatorWsSubscriptionsRef.current.keys())) {
+      if (nextIds.has(clientId)) continue;
+      socket.send(JSON.stringify({ action: "unsubscribe", clientId }));
+      indicatorWsSubscriptionsRef.current.delete(clientId);
+    }
+
+    return true;
+  }, [buildHostedSubscriptionMessage, hostedSubscriptionSignature]);
+
+  syncHostedSubscriptionsRef.current = syncHostedSubscriptions;
+
+  // ── Backend-hosted indicators: builtin incremental + Pyne snapshot WS ──
+  useEffect(() => {
+    const wsSubscriptions = indicatorWsSubscriptionsRef.current;
+    if (!symbol || !interval || !hasWsHostedIndicators || !chartDataReady) {
       if (indicatorWsRef.current) {
         try { indicatorWsRef.current.close(); } catch { /* ignore */ }
         indicatorWsRef.current = null;
+        wsSubscriptions.clear();
       }
       return;
     }
@@ -714,40 +801,8 @@ export function useIndicators({
     let lastSeq = 0;
     let gapResubscribeTimer = null;
 
-    const buildParams = (ind) => {
-      let params = ind.params || {};
-      if ((ind.id === "vol" || ind.engineName === "VOL") && (candleUpColor || candleDownColor)) {
-        params = {
-          ...params,
-          up_color: candleUpColor || params.up_color || "#22c55e",
-          down_color: candleDownColor || params.down_color || "#ef4444",
-        };
-      }
-      return params;
-    };
-
     const subscribeAll = () => {
-      if (!socket || socket.readyState !== WebSocket.OPEN) return;
-      for (const ind of hostedIndicators) {
-        const builtin = isBuiltinIndicator(ind);
-        const historyLimit = Math.min(Math.max(chartDataRef.current?.length || 0, 1), 5000);
-        socket.send(JSON.stringify({
-          action: "subscribe",
-          clientId: ind.id,
-          kind: builtin ? "builtin" : "script",
-          exchange,
-          marketType,
-          symbol,
-          interval,
-          name: builtin ? getBuiltinIndicatorName(ind) : undefined,
-          displayName: ind.name || ind.id,
-          customId: !builtin ? ind.id : undefined,
-          script: builtin ? undefined : ind.script,
-          securityMode: builtin ? undefined : ind.securityMode,
-          params: buildParams(ind),
-          historyLimit,
-        }));
-      }
+      syncHostedSubscriptionsRef.current(true);
     };
 
     const connect = () => {
@@ -757,6 +812,7 @@ export function useIndicators({
 
       socket.onopen = () => {
         lastSeq = 0;
+        wsSubscriptions.clear();
         if (!stopped) subscribeAll();
       };
 
@@ -792,6 +848,7 @@ export function useIndicators({
       socket.onclose = () => {
         if (indicatorWsRef.current === socket) {
           indicatorWsRef.current = null;
+          wsSubscriptions.clear();
         }
         if (!stopped) {
           reconnectTimer = setTimeout(connect, INDICATOR_WS_RECONNECT_MS);
@@ -814,22 +871,33 @@ export function useIndicators({
       }
       if (indicatorWsRef.current === socket) {
         indicatorWsRef.current = null;
+        wsSubscriptions.clear();
       }
     };
   }, [
     applyWsSnapshot,
     applyWsPatch,
     applyWsValues,
-    candleDownColor,
-    candleUpColor,
-    chartHistoryFirstTime,
+    chartDataReady,
     exchange,
-    indicatorWsSignature,
-    indicatorWsRefreshKey,
+    hasWsHostedIndicators,
     interval,
     marketType,
     setIndicatorError,
     symbol,
+  ]);
+
+  useEffect(() => {
+    if (!hasWsHostedIndicators || !chartDataReady) return;
+    syncHostedSubscriptions(false);
+  }, [
+    candleDownColor,
+    candleUpColor,
+    chartDataReady,
+    chartHistoryFirstTime,
+    hasWsHostedIndicators,
+    indicatorWsSignature,
+    syncHostedSubscriptions,
   ]);
 
   // ── Compute all active indicators ─────────────────────────
@@ -1026,7 +1094,7 @@ export function useIndicators({
   const recompute = useCallback((force = true) => {
     userTriggeredRef.current = true;
     lastComputeSignatureRef.current = "";  // force fresh compute
-    setIndicatorWsRefreshKey((value) => value + 1);
+    syncHostedSubscriptionsRef.current(true);
     computeAll(force);
   }, [computeAll]);
 

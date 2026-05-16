@@ -12,9 +12,10 @@ from app.indicator import create_engine
 from app.data_engine.data_manager.models import BarData
 from app.indicator.events import IndicatorEvent, IndicatorEventType
 from app.indicator.custom_store import CustomIndicatorStore
-from app.indicator.pyne import PyneRuntime
+from app.indicator.pyne import PyneIncrementalSession, PyneIncrementalSessionManager, PyneRuntime
 from app.indicator.pyne.cache import pyne_cache
 from app.indicator.pyne.executor import execute_pyne_script_in_process
+from app.indicator.pyne import security as pyne_security
 from app.indicator.types import IndicatorKey
 
 
@@ -83,6 +84,35 @@ async def test_compute_mode_script_runs_script_even_when_name_is_present() -> No
 
     assert payload["ok"] is True
     assert payload["lines"][0]["name"] == "Script Close"
+
+
+@pytest.mark.anyio
+async def test_builtin_reference_templates_run_as_custom_pyne_scripts() -> None:
+    for name, script in indicators_api._PRESET_SCRIPTS.items():
+        custom_script = script
+        if custom_script.startswith(indicators_api._ENGINE_SCRIPT_MARKER):
+            custom_script = custom_script.split("\n", 1)[1]
+
+        payload = await indicators_api.compute(
+            ComputeRequest(mode="script", script=custom_script, ohlcv=_bars(120))
+        )
+
+        assert payload["ok"] is True, (name, payload.get("error"))
+        assert payload["lines"], name
+        assert payload.get("param_schema"), name
+
+
+def test_pyne_inline_timeout_skips_sigalrm_when_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delattr(pyne_security.signal, "SIGALRM", raising=False)
+
+    result = PyneRuntime().execute(
+        script='plot(close, title="Close")',
+        ohlcv=_bars(),
+        params={},
+    )
+
+    assert result.ok is True
+    assert result.lines[0]["name"] == "Close"
 
 
 @pytest.mark.anyio
@@ -193,6 +223,47 @@ def test_pyne_process_executor_kills_infinite_loop() -> None:
     assert result.ok is False
     assert result.code == "PYNE_TIMEOUT"
     assert "timeout" in result.error
+
+
+def test_pyne_process_executor_runs_incremental_script() -> None:
+    script = """
+indicator("Inc EMA", mode="incremental", overlay=True)
+
+def init(ctx):
+    ctx.ta.ema("ema", period=3)
+
+def on_bar(ctx, bar):
+    ctx.plot("EMA3", ctx.ta.ema("ema").update(bar.close))
+"""
+    result = execute_pyne_script_in_process(
+        script=script,
+        ohlcv=_bars(5),
+        params={},
+        security_mode="safe",
+        timeout_seconds=2,
+    )
+
+    assert result.ok is True
+    assert result.meta["mode"] == "incremental"
+    assert result.lines[0]["name"] == "EMA3"
+    assert result.lines[0]["data"][-1] == {"time": 1_700_000_240, "value": 103.0}
+
+
+def test_pyne_process_executor_reads_large_result_before_join_timeout() -> None:
+    script = indicators_api._PRESET_SCRIPTS["MACD"].split("\n", 1)[1]
+    bars = _bars(5000)
+
+    result = execute_pyne_script_in_process(
+        script=script,
+        ohlcv=bars,
+        params={},
+        security_mode="safe",
+        timeout_seconds=5,
+    )
+
+    assert result.ok is True
+    assert len(result.lines) == 3
+    assert sum(len(line["data"]) for line in result.lines) > 4000
 
 
 def test_pyne_cache_reuses_loader_value_in_inline_runtime() -> None:
@@ -527,6 +598,53 @@ def test_indicator_engine_routes_exchange_scoped_updates() -> None:
     assert binance_key != okx_key
 
 
+def test_builtin_indicator_engine_preview_does_not_commit_state() -> None:
+    engine = create_engine()
+    events: list[IndicatorEvent] = []
+    engine.add_listener(events.append)
+
+    bars = [BarData.from_dict(item) for item in _bars(3)]
+    key, result = engine.subscribe(
+        "BTCUSDT",
+        "1m",
+        "spot",
+        "MA",
+        {"period": 3},
+        bars,
+        exchange="binance",
+    )
+    assert result.outputs["ma"].latest_value == 101.0
+    events.clear()
+
+    preview_bar = BarData(
+        time=bars[-1].time + 60,
+        open=bars[-1].open,
+        high=1000,
+        low=bars[-1].low,
+        close=1000,
+        volume=bars[-1].volume,
+    )
+    closed_bar = BarData(
+        time=bars[-1].time + 60,
+        open=bars[-1].open,
+        high=bars[-1].high,
+        low=bars[-1].low,
+        close=103,
+        volume=bars[-1].volume,
+    )
+
+    engine.on_bar_updated("BTCUSDT", "1m", preview_bar)
+    preview_events = [event for event in events if event.event_type == IndicatorEventType.INDICATOR_PREVIEW]
+    assert preview_events[-1].key == key
+    assert preview_events[-1].values == {"ma": 401.0}
+    assert engine._instances[key].get_latest() == {"ma": 101.0}
+
+    engine.on_bar_closed("BTCUSDT", "1m", closed_bar)
+    update_events = [event for event in events if event.event_type == IndicatorEventType.INDICATOR_UPDATED]
+    assert update_events[-1].values == {"ma": 102.0}
+    assert engine._instances[key].get_latest() == {"ma": 102.0}
+
+
 def test_pyne_ws_snapshot_message_runs_script() -> None:
     class FakeDataManager:
         def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
@@ -646,6 +764,233 @@ def test_pyne_ws_bar_update_sends_single_bar_patch() -> None:
     assert msg["reason"] == "bar_update"
     assert msg["range"] == {"start": bar_time, "end": bar_time}
     assert msg["lines"][0]["data"] == [{"time": bar_time, "value": bars[-1].close * 2}]
+
+
+def test_pyne_incremental_runtime_seeds_history_with_stateful_sma() -> None:
+    script = """
+indicator("Inc MA", mode="incremental", overlay=True)
+
+def init(ctx):
+    ctx.ta.sma("ma", period=3)
+
+def on_bar(ctx, bar):
+    ctx.plot("MA3", ctx.ta.sma("ma").update(bar.close))
+"""
+
+    result = PyneRuntime().execute(
+        script=script,
+        ohlcv=_bars(5),
+        params={},
+        security_mode="safe",
+    )
+
+    assert result.ok is True
+    assert result.meta["mode"] == "incremental"
+    assert result.lines[0]["name"] == "MA3"
+    assert result.lines[0]["data"] == [
+        {"time": 1_700_000_120, "value": 101.0},
+        {"time": 1_700_000_180, "value": 102.0},
+        {"time": 1_700_000_240, "value": 103.0},
+    ]
+
+
+def test_pyne_incremental_preview_does_not_commit_state() -> None:
+    script = """
+indicator("Inc MA", mode="incremental", overlay=True)
+
+def init(ctx):
+    ctx.ta.sma("ma", period=3)
+
+def on_bar(ctx, bar):
+    ctx.plot("MA3", ctx.ta.sma("ma").update(bar.close))
+"""
+    session = PyneIncrementalSession(script=script, params={}, security_mode="safe")
+    session.seed(_bars(3))
+
+    preview_bar = {**_bars(4)[-1], "close": 1000}
+    preview = session.on_bar_updated(preview_bar)
+    closed = session.on_bar_closed(_bars(4)[-1])
+
+    assert preview.lines[0]["data"] == [{"time": 1_700_000_180, "value": 401.0}]
+    assert closed.lines[0]["data"] == [{"time": 1_700_000_180, "value": 102.0}]
+
+
+def test_pyne_ws_incremental_bar_update_uses_session_patch() -> None:
+    script = """
+indicator("Inc MA", mode="incremental", overlay=True)
+
+def init(ctx):
+    ctx.ta.sma("ma", period=3)
+
+def on_bar(ctx, bar):
+    ctx.plot("MA3", ctx.ta.sma("ma").update(bar.close))
+"""
+    session = PyneIncrementalSession(script=script, params={}, security_mode="safe")
+    session.seed(_bars(3))
+    bar = _bars(4)[-1]
+    meta = {
+        "kind": "script",
+        "scriptMode": "incremental",
+        "exchange": "binance",
+        "market_type": "spot",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "Inc MA",
+        "indicatorId": "pyne:binance:spot:BTCUSDT:1m:inc-1",
+        "script": script,
+        "params": {},
+        "securityMode": "safe",
+        "historyLimit": 100,
+        "pyneSession": session,
+    }
+
+    msg = stream_api._compute_incremental_pyne_bar_message(
+        "inc-1",
+        meta,
+        bar,
+        preview=False,
+    )
+
+    assert msg["type"] == "indicator.patch"
+    assert msg["reason"] == "bar_closed"
+    assert msg["range"] == {"start": bar["time"], "end": bar["time"]}
+    assert msg["lines"][0]["data"] == [{"time": bar["time"], "value": 102.0}]
+
+
+def test_pyne_incremental_ta_helpers_cover_common_indicators() -> None:
+    script = """
+indicator("Inc Helpers", mode="incremental", overlay=True)
+
+def init(ctx):
+    ctx.ta.boll("bb", period=3, multiplier=2)
+    ctx.ta.macd("macd", fast=2, slow=3, signal=2)
+    ctx.ta.rsi("rsi", period=3)
+    ctx.ta.atr("atr", period=3)
+    ctx.ta.highest("highest", period=3)
+    ctx.ta.lowest("lowest", period=3)
+
+def on_bar(ctx, bar):
+    upper, mid, lower = ctx.ta.boll("bb").update(bar.close)
+    ctx.plot("BB Upper", upper)
+    ctx.plot("BB Mid", mid)
+    ctx.plot("BB Lower", lower)
+
+    dif, dea, hist = ctx.ta.macd("macd").update(bar.close)
+    ctx.plot("MACD DIF", dif)
+    ctx.plot("MACD DEA", dea)
+    ctx.plot("MACD HIST", hist, type="histogram", pane="separate")
+
+    ctx.plot("RSI", ctx.ta.rsi("rsi").update(bar.close), pane="separate")
+    ctx.plot("ATR", ctx.ta.atr("atr").update(bar), pane="separate")
+    ctx.plot("Highest", ctx.ta.highest("highest").update(bar.high))
+    ctx.plot("Lowest", ctx.ta.lowest("lowest").update(bar.low))
+"""
+
+    result = PyneRuntime().execute(
+        script=script,
+        ohlcv=_bars(5),
+        params={},
+        security_mode="safe",
+    )
+    by_name = {line["name"]: line["data"] for line in result.lines}
+
+    assert result.ok is True
+    assert by_name["BB Mid"][0] == {"time": 1_700_000_120, "value": 101.0}
+    assert by_name["BB Upper"][0] == {"time": 1_700_000_120, "value": 102.63299316}
+    assert by_name["BB Lower"][0] == {"time": 1_700_000_120, "value": 99.36700684}
+    assert by_name["MACD DIF"][-1] == {"time": 1_700_000_240, "value": 0.5}
+    assert by_name["MACD DEA"][-1] == {"time": 1_700_000_240, "value": 0.5}
+    assert by_name["MACD HIST"][-1] == {"time": 1_700_000_240, "value": 0.0}
+    assert by_name["RSI"][-1] == {"time": 1_700_000_240, "value": 100.0}
+    assert by_name["ATR"][0] == {"time": 1_700_000_120, "value": 2.0}
+    assert by_name["Highest"][0] == {"time": 1_700_000_120, "value": 103.0}
+    assert by_name["Lowest"][0] == {"time": 1_700_000_120, "value": 99.0}
+
+
+def test_pyne_incremental_safe_mode_limits_windows_and_state_keys() -> None:
+    huge_window_script = """
+indicator("Huge Window", mode="incremental")
+
+def init(ctx):
+    ctx.window("huge", size=10001)
+
+def on_bar(ctx, bar):
+    pass
+"""
+    unsafe_result = PyneRuntime().execute(
+        script=huge_window_script,
+        ohlcv=_bars(1),
+        params={},
+        security_mode="unsafe",
+    )
+    safe_result = PyneRuntime().execute(
+        script=huge_window_script,
+        ohlcv=_bars(1),
+        params={},
+        security_mode="safe",
+    )
+
+    assert unsafe_result.ok is True
+    assert safe_result.ok is False
+    assert safe_result.code == "PYNE_SECURITY_ERROR"
+    assert "safe-mode limit" in safe_result.error
+
+    many_states_script = """
+indicator("Many States", mode="incremental")
+
+def init(ctx):
+    for i in range(101):
+        ctx.state(f"s{i}", 0)
+
+def on_bar(ctx, bar):
+    pass
+"""
+    state_result = PyneRuntime().execute(
+        script=many_states_script,
+        ohlcv=_bars(1),
+        params={},
+        security_mode="safe",
+    )
+    assert state_result.ok is False
+    assert state_result.code == "PYNE_SECURITY_ERROR"
+    assert "state keys" in state_result.error
+
+
+def test_pyne_incremental_session_manager_shares_duplicate_bar_results() -> None:
+    script = """
+indicator("Shared Counter", mode="incremental")
+
+def init(ctx):
+    ctx.state("count", 0)
+
+def on_bar(ctx, bar):
+    counter = ctx.state("count")
+    counter.value += 1
+    ctx.plot("Count", counter.value)
+"""
+    manager = PyneIncrementalSessionManager()
+    shared = manager.acquire(
+        "shared-key",
+        lambda: PyneIncrementalSession(script=script, params={}, security_mode="safe"),
+    )
+    manager.acquire(
+        "shared-key",
+        lambda: PyneIncrementalSession(script=script, params={}, security_mode="safe"),
+    )
+
+    manager.seed_or_snapshot(shared, _bars(1))
+    bar = _bars(2)[-1]
+    first = manager.process_bar(shared, bar, preview=False)
+    second = manager.process_bar(shared, bar, preview=False)
+
+    assert first.lines[0]["data"] == [{"time": bar["time"], "value": 2.0}]
+    assert second.lines[0]["data"] == [{"time": bar["time"], "value": 2.0}]
+    assert manager.snapshot()["keys"]["shared-key"]["refCount"] == 2
+
+    manager.release("shared-key")
+    assert manager.snapshot()["keys"]["shared-key"]["refCount"] == 1
+    manager.release("shared-key")
+    assert manager.snapshot()["sessions"] == 0
 
 
 @pytest.mark.anyio

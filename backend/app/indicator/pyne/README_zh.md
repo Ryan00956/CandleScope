@@ -229,6 +229,47 @@ change(src, period=1)
 roc(src, period=1)
 ```
 
+## Incremental 模式
+
+Batch 脚本仍是默认模式。需要实时 O(1) 的脚本可以声明 incremental，并定义 `on_bar(ctx, bar)`：
+
+```python
+indicator("Incremental MA", mode="incremental", overlay=true)
+
+def init(ctx):
+    ctx.ta.sma("ma20", period=20)
+
+def on_bar(ctx, bar):
+    ma = ctx.ta.sma("ma20").update(bar.close)
+    ctx.plot("MA20", ma, color=color.orange)
+```
+
+运行模型：
+
+- 历史加载：按时间顺序回放 bars，复杂度 O(n)。
+- 实时收盘：只处理新收盘 bar，复杂度 O(1)。
+- 实时预览：从已收盘状态 clone 一份临时状态，不污染 committed state。
+
+可用基础 API：
+
+- `ctx.state(name, default)`：持久状态值，返回带 `.value` 的对象。
+- `ctx.window(name, size)`：固定长度 rolling window。
+- `ctx.plot(name, value, **style)`：输出当前 bar 的单点 line。
+- `ctx.marker(condition, **style)`：输出当前 bar marker。
+- `ctx.ta.sma(name, period)` / `ctx.ta.ema(name, period)`：状态化均线 helper。
+- `ctx.ta.boll(name, period, multiplier)`：返回 `(upper, mid, lower)`。
+- `ctx.ta.macd(name, fast, slow, signal)`：返回 `(dif, dea, hist)`。
+- `ctx.ta.rsi(name, period)` / `ctx.ta.atr(name, period)`：状态化震荡/波动 helper。
+- `ctx.ta.highest(name, period)` / `ctx.ta.lowest(name, period)`：单调窗口 helper。
+
+资源保护：
+
+- `safe` 模式会限制 incremental 的 `ctx.state()` key 数量，以及 `ctx.window()` / 依赖窗口的 helper 大小。
+- `research` 和 `unsafe` 模式不启用 incremental state/window 限制，保留本地研究自由度；这些模式下用户自行承担内存风险。
+- 现有执行超时、`PYNE_MAX_BARS`、输出大小限制仍然生效。
+
+Incremental WebSocket 订阅会在品种、周期、脚本、参数、安全模式、history limit 一致时共享同一个进程内 session。重复订阅复用同一根 bar 的计算结果，不会多次推进 state。
+
 ## Security Modes
 
 模式定义在 [security.py](security.py)：

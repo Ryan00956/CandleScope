@@ -114,287 +114,111 @@ _ENGINE_SCRIPT_MARKER = "# __ENGINE__:"
 _PRESET_SCRIPTS: dict[str, str] = {
     "MA": textwrap.dedent("""\
         # __ENGINE__:MA
-        # ── Simple Moving Average (SMA) ──────────────────────────
-        # 使用滚动窗口计算简单移动平均线
-        #
-        # 可用变量: open, high, low, close, volume, time (numpy 数组)
-        # 输出函数: add_line(data, color, title, overlay=True)
+        indicator("MA", overlay=True)
 
-        period = params.get("period", 20)
-        source = params.get("source", "close")
-        color  = params.get("color", "#f59e0b")
+        period = input.int(20, "Period", minval=1, maxval=500)
+        src = input.source(close, "Source")
+        line_color = input.color(color.orange, "Color")
 
-        # 选择数据源
-        source_map = {
-            "open": open, "high": high, "low": low, "close": close,
-            "hl2":  (high + low) / 2,
-            "hlc3": (high + low + close) / 3,
-            "ohlc4": (open + high + low + close) / 4,
-        }
-        src = source_map.get(source, close)
-
-        # 计算 SMA — O(n) 滚动求和
-        ma = np.full(len(src), np.nan)
-        rolling_sum = 0.0
-        for i in range(len(src)):
-            rolling_sum += src[i]
-            if i >= period:
-                rolling_sum -= src[i - period]
-            if i >= period - 1:
-                ma[i] = rolling_sum / period
-
-        add_line(ma, color=color, title=f"MA({period})")
+        ma = ta.sma(src, period)
+        plot(ma, title=f"MA({period})", color=line_color, overlay=True)
     """),
 
     "EMA": textwrap.dedent("""\
         # __ENGINE__:EMA
-        # ── Exponential Moving Average (EMA) ─────────────────────
-        # 使用递归加权计算指数移动平均线
-        # EMA_t = α × price + (1 − α) × EMA_{t-1},  α = 2 / (period + 1)
-        #
-        # 可用变量: open, high, low, close, volume, time (numpy 数组)
-        # 输出函数: add_line(data, color, title, overlay=True)
+        indicator("EMA", overlay=True)
 
-        period = params.get("period", 20)
-        source = params.get("source", "close")
-        color  = params.get("color", "#3b82f6")
+        period = input.int(20, "Period", minval=1, maxval=500)
+        src = input.source(close, "Source")
+        line_color = input.color(color.blue, "Color")
 
-        source_map = {
-            "open": open, "high": high, "low": low, "close": close,
-            "hl2":  (high + low) / 2,
-            "hlc3": (high + low + close) / 3,
-            "ohlc4": (open + high + low + close) / 4,
-        }
-        src = source_map.get(source, close)
-
-        alpha = 2.0 / (period + 1)
-        ema = np.full(len(src), np.nan)
-
-        # 前 period 根 K 线用 SMA 初始化
-        if len(src) >= period:
-            ema[period - 1] = np.mean(src[:period])
-            for i in range(period, len(src)):
-                ema[i] = alpha * src[i] + (1 - alpha) * ema[i - 1]
-
-        add_line(ema, color=color, title=f"EMA({period})")
+        ema_line = ta.ema(src, period)
+        plot(ema_line, title=f"EMA({period})", color=line_color, overlay=True)
     """),
 
     "BOLL": textwrap.dedent("""\
         # __ENGINE__:BOLL
-        # ── Bollinger Bands (BOLL) ───────────────────────────────
-        # 中轨 = SMA(period), 上轨 = 中轨 + mult × σ, 下轨 = 中轨 − mult × σ
-        #
-        # 可用变量: open, high, low, close, volume, time (numpy 数组)
-        # 输出函数: add_line(data, color, title, overlay=True)
+        indicator("BOLL", overlay=True)
 
-        period      = params.get("period", 20)
-        mult        = params.get("mult", 2.0)
-        source      = params.get("source", "close")
-        color_mid   = params.get("color_middle", "#f59e0b")
-        color_upper = params.get("color_upper", "#ef4444")
-        color_lower = params.get("color_lower", "#22c55e")
+        period = input.int(20, "Period", minval=1, maxval=500)
+        mult = input.float(2.0, "Multiplier", minval=0.1, step=0.1)
+        src = input.source(close, "Source")
+        mid_color = input.color(color.orange, "Middle Color")
+        upper_color = input.color(color.red, "Upper Color")
+        lower_color = input.color(color.green, "Lower Color")
+        fill_color = input.color(color.new(color.blue, 88), "Fill Color")
 
-        source_map = {
-            "open": open, "high": high, "low": low, "close": close,
-            "hl2":  (high + low) / 2,
-            "hlc3": (high + low + close) / 3,
-            "ohlc4": (open + high + low + close) / 4,
-        }
-        src = source_map.get(source, close)
-
-        mid   = np.full(len(src), np.nan)
-        upper = np.full(len(src), np.nan)
-        lower = np.full(len(src), np.nan)
-
-        for i in range(period - 1, len(src)):
-            window = src[i - period + 1 : i + 1]
-            mean = np.mean(window)
-            std  = np.std(window, ddof=0)      # 总体标准差
-            mid[i]   = mean
-            upper[i] = mean + mult * std
-            lower[i] = mean - mult * std
-
-        add_line(mid,   color=color_mid,   title=f"BOLL Mid({period})")
-        add_line(upper, color=color_upper, title="BOLL Upper")
-        add_line(lower, color=color_lower, title="BOLL Lower")
+        upper, middle, lower = ta.bb(src, period, mult)
+        upper_plot = plot(upper, title="BOLL Upper", color=upper_color, overlay=True)
+        middle_plot = plot(middle, title=f"BOLL Mid({period})", color=mid_color, overlay=True)
+        lower_plot = plot(lower, title="BOLL Lower", color=lower_color, overlay=True)
+        fill(upper_plot, lower_plot, color=fill_color, title="BOLL Band")
     """),
 
     "RSI": textwrap.dedent("""\
         # __ENGINE__:RSI
-        # ── Relative Strength Index (RSI) ────────────────────────
-        # 使用 Wilder 平滑法计算 RSI
-        # RSI = 100 − 100 / (1 + RS),  RS = avg_gain / avg_loss
-        #
-        # 可用变量: open, high, low, close, volume, time (numpy 数组)
-        # 输出函数: add_line(data, color, title, overlay, pane)
+        indicator("RSI", overlay=False)
 
-        period = params.get("period", 14)
-        source = params.get("source", "close")
-        color  = params.get("color", "#a855f7")
+        period = input.int(14, "Period", minval=1, maxval=200)
+        src = input.source(close, "Source")
+        line_color = input.color(color.purple, "Color")
+        overbought = input.float(70.0, "Overbought", minval=0, maxval=100, step=1)
+        oversold = input.float(30.0, "Oversold", minval=0, maxval=100, step=1)
 
-        source_map = {
-            "open": open, "high": high, "low": low, "close": close,
-            "hl2":  (high + low) / 2,
-            "hlc3": (high + low + close) / 3,
-            "ohlc4": (open + high + low + close) / 4,
-        }
-        src = source_map.get(source, close)
-
-        rsi = np.full(len(src), np.nan)
-
-        if len(src) > period:
-            # 计算价格变化
-            deltas = np.diff(src)
-            gains = np.where(deltas > 0, deltas, 0.0)
-            losses = np.where(deltas < 0, -deltas, 0.0)
-
-            # 初始平均涨跌幅 (前 period 个变化)
-            avg_gain = np.mean(gains[:period])
-            avg_loss = np.mean(losses[:period])
-
-            if avg_loss == 0:
-                rsi[period] = 100.0
-            else:
-                rsi[period] = 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
-
-            # Wilder 递推平滑
-            for i in range(period, len(deltas)):
-                avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-                avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-                if avg_loss == 0:
-                    rsi[i + 1] = 100.0
-                else:
-                    rsi[i + 1] = 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
-
-        add_line(rsi, color=color, title=f"RSI({period})", overlay=False, pane="separate")
+        rsi_line = ta.rsi(src, period)
+        plot(rsi_line, title=f"RSI({period})", color=line_color, overlay=False, pane="separate")
+        hline(overbought, title="Overbought", color=color.red, pane="separate")
+        hline(50, title="Middle", color=color.gray, pane="separate")
+        hline(oversold, title="Oversold", color=color.green, pane="separate")
     """),
 
     "MACD": textwrap.dedent("""\
         # __ENGINE__:MACD
-        # ── MACD (Moving Average Convergence Divergence) ─────────
-        # DIF  = EMA(fast) − EMA(slow)
-        # DEA  = EMA(signal) of DIF
-        # HIST = 2 × (DIF − DEA)
-        #
-        # 可用变量: open, high, low, close, volume, time (numpy 数组)
-        # 输出函数: add_line(data, color, title, overlay, pane, type)
+        indicator("MACD", overlay=False)
 
-        fast_period   = params.get("fast", 12)
-        slow_period   = params.get("slow", 26)
-        signal_period = params.get("signal", 9)
-        source        = params.get("source", "close")
+        fast_period = input.int(12, "Fast Period", minval=1, maxval=200)
+        slow_period = input.int(26, "Slow Period", minval=1, maxval=300)
+        signal_period = input.int(9, "Signal Period", minval=1, maxval=100)
+        src = input.source(close, "Source")
+        dif_color = input.color(color.blue, "DIF Color")
+        dea_color = input.color(color.orange, "DEA Color")
+        hist_up_color = input.color(color.green, "Histogram Up Color")
+        hist_down_color = input.color(color.red, "Histogram Down Color")
 
-        source_map = {
-            "open": open, "high": high, "low": low, "close": close,
-            "hl2":  (high + low) / 2,
-            "hlc3": (high + low + close) / 3,
-            "ohlc4": (open + high + low + close) / 4,
-        }
-        src = source_map.get(source, close)
-        n = len(src)
-
-        # ── 辅助: 计算 EMA ──
-        def calc_ema(data, period):
-            ema = np.full(len(data), np.nan)
-            if len(data) < period:
-                return ema
-            ema[period - 1] = np.mean(data[:period])
-            alpha = 2.0 / (period + 1)
-            for i in range(period, len(data)):
-                ema[i] = alpha * data[i] + (1 - alpha) * ema[i - 1]
-            return ema
-
-        fast_ema = calc_ema(src, fast_period)
-        slow_ema = calc_ema(src, slow_period)
-
-        # DIF = fast_ema − slow_ema
-        dif = np.full(n, np.nan)
-        for i in range(n):
-            if not (np.isnan(fast_ema[i]) or np.isnan(slow_ema[i])):
-                dif[i] = fast_ema[i] - slow_ema[i]
-
-        # DEA = EMA(signal) of DIF (从第一个有效 DIF 值开始)
-        dea = np.full(n, np.nan)
-        hist = np.full(n, np.nan)
-
-        # 找到 DIF 有效值的起始位置
-        valid_start = -1
-        for i in range(n):
-            if not np.isnan(dif[i]):
-                valid_start = i
-                break
-
-        if valid_start >= 0:
-            # 收集有效 DIF 值
-            valid_dif = dif[valid_start:]
-            dea_part = calc_ema(valid_dif, signal_period)
-            for i in range(len(dea_part)):
-                idx = valid_start + i
-                if not np.isnan(dea_part[i]):
-                    dea[idx] = dea_part[i]
-                    hist[idx] = 2.0 * (dif[idx] - dea[idx])
-
-        add_line(dif,  color="#3b82f6", title="DIF",       overlay=False, pane="separate")
-        add_line(dea,  color="#f59e0b", title="DEA",       overlay=False, pane="separate")
-        add_line(hist, color="#22c55e", title="MACD Hist", overlay=False, pane="separate",
-                 type="histogram")
+        dif, dea, hist = ta.macd(src, fast_period, slow_period, signal_period)
+        plot(dif, title="DIF", color=dif_color, overlay=False, pane="separate")
+        plot(dea, title="DEA", color=dea_color, overlay=False, pane="separate")
+        bar(hist, title="MACD Hist", color_up=hist_up_color, color_down=hist_down_color, pane="separate")
+        hline(0, title="Zero", color=color.gray, pane="separate")
     """),
 
     "ATR": textwrap.dedent("""\
         # __ENGINE__:ATR
-        # ── Average True Range (ATR) ─────────────────────────────
-        # True Range = max(H−L, |H−prev_close|, |L−prev_close|)
-        # ATR = Wilder 平滑 of True Range
-        #
-        # 可用变量: open, high, low, close, volume, time (numpy 数组)
-        # 输出函数: add_line(data, color, title, overlay, pane)
+        indicator("ATR", overlay=False)
 
-        period = params.get("period", 14)
-        color  = params.get("color", "#06b6d4")
+        period = input.int(14, "Period", minval=1, maxval=200)
+        line_color = input.color(color.aqua, "Color")
 
-        n = len(close)
-        atr = np.full(n, np.nan)
-
-        if n > 1:
-            # 计算 True Range 序列
-            tr = np.empty(n)
-            tr[0] = high[0] - low[0]
-            for i in range(1, n):
-                hl = high[i] - low[i]
-                hc = abs(high[i] - close[i - 1])
-                lc = abs(low[i] - close[i - 1])
-                tr[i] = max(hl, hc, lc)
-
-            # 初始 ATR = 前 period 个 TR 的简单平均
-            if n >= period:
-                atr[period - 1] = np.mean(tr[:period])
-
-                # Wilder 递推平滑
-                for i in range(period, n):
-                    atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-
-        add_line(atr, color=color, title=f"ATR({period})", overlay=False, pane="separate")
+        atr_line = ta.atr(period)
+        plot(atr_line, title=f"ATR({period})", color=line_color, overlay=False, pane="separate")
     """),
 
     "VOL": textwrap.dedent("""\
         # __ENGINE__:VOL
-        # ── Volume (成交量) ──────────────────────────────────────
-        # 以柱状图显示成交量，阳线（close>=open）为上涨色，阴线为下跌色
-        #
-        # 可用变量: open, high, low, close, volume, time (numpy 数组)
-        # 输出函数: add_line(data, color, title, overlay, pane, type)
+        indicator("VOL", overlay=False)
 
-        up_color   = params.get("up_color", "#26a69a")
-        down_color = params.get("down_color", "#ef5350")
+        up_color = input.color(color.green, "Up Color")
+        down_color = input.color(color.red, "Down Color")
 
-        n = len(close)
-        vol = volume.copy()
-
-        # 按K线阴阳着色
-        colors = [up_color if close[i] >= open[i] else down_color for i in range(n)]
-
-        add_line(vol, color=up_color, title="VOL", overlay=False, pane="volume",
-                 type="histogram", colorData=[{"time": int(time[i]), "color": colors[i]} for i in range(n)])
+        volume_colors = color.when(close >= open, up_color, down_color)
+        plot(
+            volume,
+            title="VOL",
+            color=volume_colors,
+            style=plot.style_histogram,
+            overlay=False,
+            pane="volume",
+        )
     """),
 }
 

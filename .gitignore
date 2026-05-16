@@ -207,6 +207,11 @@ backend/data/*.db-shm
 backend/data/*.db-wal
 backend/data/*.sqlite*
 
+# CandleScope local-only agent state and construction notes
+.codex
+.codex/
+local_docs/
+
 # CandleScope user preferences (stored in browser localStorage, never in files)
 # Keys: candlescope-user-prefs, candlescope-visible-ranges, candlescope-custom-intervals, candlescope-drawings-*
 

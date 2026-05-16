@@ -1,149 +1,125 @@
 # Bar Aggregator
 
-[![English](https://img.shields.io/badge/Language-English-blue)](#) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](README_zh.md)
+[中文](README_zh.md)
 
+> Converts normalized market events and historical bars into lifecycle-aware OHLCV candles. It is the only Data Engine module that owns bucket calculation, merge semantics, forming/closed state, and `BarEvent` publication.
 
-> Builds OHLCV candles from heterogeneous market data streams with a layered, extensible architecture.
+## Position In Data Engine
 
-## Architecture
-
-```
-MarketEvent / FetchedBar / CustomData
-        │
+```text
+ingestion.MarketEvent / backfill bars / manual BarInput
         ▼
-┌─ L1: EventRouter ─────────────────────────┐
-│   normalize → BarInput                     │
-│   dispatch by (symbol, target_interval)    │
-└───────────────┬────────────────────────────┘
-                │  BarInput
-                ▼
-┌─ L2: TimeBucketEngine ─────────────────────┐
-│   compute_bucket(open_time_ms) → bucket_ms │
-│   alignment: epoch / midnight / custom     │
-└───────────────┬────────────────────────────┘
-                │  bucket_start_ms
-                ▼
-┌─ L3: BarStateEngine ───────────────────────┐
-│   apply(symbol, bucket, input) → BarState  │
-│   merge strategy: OHLCV / Heikin-Ashi / …  │
-└───────────────┬────────────────────────────┘
-                │  BarState + BarStateChange
-                ▼
-┌─ L4: Finalizer ───────────────────────────┐
-│   strategy chain evaluation                │
-│   source_close → composite → event → time  │
-└───────────────┬────────────────────────────┘
-                │  BarEvent (if closed)
-                ▼
-┌─ L5: Publisher ───────────────────────────┐
-│   emit(CREATED / UPDATED / CLOSED / ...)  │
-│   → callbacks + async iterators           │
-└───────────────────────────────────────────┘
+bar_aggregator
+        │ BarEvent
+        ▼
+data_manager
 ```
 
-## Quick Start
+`bar_aggregator` does not connect to exchanges, read/write storage, or manage API subscriptions. It receives inputs and emits bar lifecycle events.
+
+## Five-Layer Architecture
+
+| Layer | Component | Responsibility |
+|---|---|---|
+| L1 | `EventRouter` | Convert `MarketEvent` to `BarInput`, dispatch to registered `(exchange, market_type, symbol, interval)` targets |
+| L2 | `TimeBucketEngine` | Compute bucket start/end for standard, custom, weekly, and monthly intervals |
+| L3 | `BarStateEngine` | Maintain forming/closed `BarState`, apply merge strategies |
+| L4 | `Finalizer` | Decide when a bar closes using source-close, event-driven, composite, batch, or timeout rules |
+| L5 | `BarAggregatorPublisher` | Emit `CREATED`, `UPDATED`, `CLOSED`, `AMENDED`, `EXPIRED` events to callbacks/queues |
+
+## Public Facade
 
 ```python
 from app.data_engine.bar_aggregator import BarAggregator
 
 agg = BarAggregator()
-agg.add_target("BTCUSDT", "1m")
-agg.add_target("BTCUSDT", "5m")
-agg.add_target("BTCUSDT", "91m")  # custom interval
+agg.add_target("BTCUSDT", "1m", exchange="binance", market_type="spot")
+agg.add_target("BTCUSDT", "91m")
+agg.publisher.on_bar_closed(save_bar)
 
-# Subscribe to closed bars
-agg.publisher.on_bar_closed(save_to_database)
-
-# Start background timeout checker
 await agg.start()
-
-# Feed data from ingestion
 await agg.on_market_event(market_event)
-
-# Feed data from backfill
-await agg.on_backfill_bars("BTCUSDT", "1m", historical_bars)
+await agg.stop()
 ```
 
-## Layers
+Important methods on `BarAggregator`:
 
-### L1: EventRouter (`router.py`)
+| Method | Use |
+|---|---|
+| `add_target()` / `remove_target()` | Register or remove a target series |
+| `on_market_event()` | Feed realtime normalized events from ingestion |
+| `on_backfill_bars()` | Feed historical repair bars |
+| `ingest_bar_input()` | Directly inject a normalized `BarInput` |
+| `seed_active_bar()` | Seed forming state from warm-start data |
+| `replay_components()` | Rebuild buckets from component bars |
+| `aggregate_batch()` | Stateless batch aggregation for backfill/custom storage repair |
+| `get_bucket_state()` / `get_latest_bar()` | Inspect current in-memory state |
+| `get_active_bars()` / `get_recent_bars()` | Debug/diagnostic access |
+| `snapshot()` | JSON-serializable diagnostics |
 
-- Accepts `MarketEvent` (from ingestion), `FetchedBar` (from backfill), or custom data
-- Converts all inputs to unified `BarInput` format
-- Dispatches to all matching `(symbol, interval)` targets
-- Supports user-registered `BarInputAdapter` for custom data sources
+## Key Models
 
-### L2: TimeBucketEngine (`time_bucket.py`)
+| Type | Notes |
+|---|---|
+| `BarInput` | Unified input from realtime, backfill, manual, or adapters; timestamps are milliseconds |
+| `BarState` | Current OHLCV state for one bucket |
+| `BarEvent` | Published lifecycle event with identity, status, and bar payload |
+| `BarEventFilter` | Subscriber-side filtering |
+| `FinalizeTrigger` | Reason a finalizer check is running |
+| `BarInputSource` | `realtime`, `backfill`, `manual`, `adapter` |
+| `BarSourceMode` | `kline`, `trade`, `auto` |
+| `MergeMode` | `snapshot`, `incremental`, `component`, `price_only` |
+| `BarStatus` | `forming`, `closed`, `expired` |
+| `BarEventType` | `bar.created`, `bar.updated`, `bar.closed`, `bar.amended`, `bar.expired` |
+| `AlignmentMode` | `epoch`, `midnight`, `market`, `custom`, `none` |
 
-- Pure-functional, stateless computation
-- Given a timestamp + interval → which bucket it belongs to
-- Supports alignment modes: `epoch`, `midnight`, `market`, `custom`
-- Replaceable via `BucketCalculator` protocol (session-based, volume-based, etc.)
+## Merge Modes
 
-### L3: BarStateEngine (`bar_state.py`)
+- `SNAPSHOT`: exchange kline snapshot for the target interval. Cumulative values replace the current source snapshot.
+- `INCREMENTAL`: trade/tick style update. Additive fields accumulate.
+- `COMPONENT`: component bar used to rebuild larger custom buckets.
+- `PRICE_ONLY`: update open/high/low/close while leaving volume, quote volume, and trades unchanged. Used for OKX realtime fan-out where higher intervals should follow price without corrupting additive fields.
 
-- Maintains OHLCV accumulation state per `(symbol, bucket)`
-- Default merge: `O=first, H=max, L=min, C=last, V=sum`
-- Replaceable via `BarMergeStrategy` protocol (Heikin-Ashi, Renko, etc.)
-- Auto-evicts old bars to bound memory usage
+## Custom, Weekly, And Monthly Intervals
 
-### L4: Finalizer (`finalizer.py`)
+Intervals are parsed through the shared interval policy. Fixed custom intervals such as `7m`, `45m`, `3h`, or `91m` use millisecond bucket math. Weekly intervals are Monday-aligned. Month-unit intervals such as `1M`, `2M`, and `3M` use calendar-aware monthly bucket calculators instead of assuming a fixed 30-day month.
 
-- Strategy chain pattern — first match wins
-- Built-in strategies:
-  - `SourceCloseFinalizer` — exchange `is_closed=True` (Binance `x=true`)
-  - `CompositeCloseFinalizer` — last component bar closed (custom intervals)
-  - `EventDrivenFinalizer` — next bucket's data arrived
-  - `TimeBasedFinalizer` — safety timeout after `bucket_end + N ms`
-  - `BatchFinalizer` — immediate close for backfill data
-- Add custom strategies via `FinalizerStrategy` protocol
+For backfill and storage repair, prefer `aggregate_batch()` when you need isolated batch results. Tests assert that `aggregate_batch()` does not register targets or leave active bars behind.
 
-### L5: Publisher (`publisher.py`)
+## Finalization
 
-- Emits `BarEvent` lifecycle events: `CREATED`, `UPDATED`, `CLOSED`, `AMENDED`, `EXPIRED`
-- Two consumption patterns:
-  - **Callbacks**: `on_bar_closed(callback)`, `on_bar_updated(callback)`, etc.
-  - **Async iterator**: `async for event in publisher.subscribe(filter=...)`
-- Throttles `UPDATED` events (configurable)
-- Bounded subscriber queues with backpressure
+Finalizers combine multiple close signals:
 
-## Extension Points
-
-| Extension | Protocol | Where |
-|---|---|---|
-| Custom data source | `BarInputAdapter` | `router.register_adapter()` |
-| Custom bucketing | `BucketCalculator` | `TimeBucketEngine(custom_calculator=...)` |
-| Custom merge logic | `BarMergeStrategy` | `bar_state.set_merge_strategy()` |
-| Custom close logic | `FinalizerStrategy` | `finalizer.add_strategy()` |
+- Source close signal from exchange kline payloads.
+- Event-driven close when a new bucket starts.
+- Composite close for custom intervals when the last component closes.
+- Time-based timeout to close bars if the exchange close signal is lost.
+- Batch finalization for historical aggregation.
 
 ## Configuration
 
-All parameters are in `BarAggregatorConfig` with sensible defaults.
-Override via constructor kwargs or environment variables (prefix `BAR_AGG_`):
+`BarAggregatorConfig` supports constructor values, `BAR_AGG_*` environment variables, and runtime `update()`.
 
-| Parameter | Env Var | Default | Description |
-|---|---|---|---|
-| `bar_source_mode` | `BAR_AGG_SOURCE_MODE` | `"kline"` | `kline` / `trade` / `auto` |
-| `default_alignment_mode` | `BAR_AGG_ALIGNMENT_MODE` | `"epoch"` | Bucket alignment |
-| `max_active_bars` | `BAR_AGG_MAX_ACTIVE_BARS` | `3` | Max forming bars per key |
-| `max_closed_bars_in_memory` | `BAR_AGG_MAX_CLOSED_BARS` | `500` | Closed bars cache |
-| `use_source_close_signal` | `BAR_AGG_USE_SOURCE_CLOSE` | `true` | Use exchange x=true |
-| `finalize_timeout_ms` | `BAR_AGG_FINALIZE_TIMEOUT_MS` | `5000` | Safety timeout |
-| `update_throttle_ms` | `BAR_AGG_UPDATE_THROTTLE_MS` | `250` | UPDATED event throttle |
+| Env | Purpose |
+|---|---|
+| `BAR_AGG_SOURCE_MODE` | `kline`, `trade`, or `auto` |
+| `BAR_AGG_ACCEPTED_STREAMS` | accepted stream types |
+| `BAR_AGG_ALIGNMENT_MODE` | default custom interval alignment |
+| `BAR_AGG_ALIGNMENT_EPOCH_MS` | custom alignment epoch |
+| `BAR_AGG_MAX_ACTIVE_BARS` | max forming buckets per series |
+| `BAR_AGG_MAX_CLOSED_BARS` | recent closed bars retained in memory |
+| `BAR_AGG_USE_SOURCE_CLOSE` | use exchange close signal |
+| `BAR_AGG_FINALIZE_TIMEOUT_MS` | force-close timeout |
+| `BAR_AGG_USE_EVENT_DRIVEN_CLOSE` | close previous bucket when next bucket arrives |
+| `BAR_AGG_USE_COMPOSITE_CLOSE` | close custom bars from component close state |
+| `BAR_AGG_UPDATE_THROTTLE_MS` | throttle `UPDATED` events |
+| `BAR_AGG_PUBLISHER_QUEUE_SIZE` | subscriber queue size |
 
-## File Structure
+## Tests
 
+```bash
+cd backend
+python -m pytest -q tests/test_bar_aggregator_contracts.py
 ```
-bar_aggregator/
-├── __init__.py          # Public API exports
-├── aggregator.py        # Top-level orchestrator (BarAggregator)
-├── config.py            # BarAggregatorConfig
-├── models.py            # Data models, enums, protocols
-├── router.py            # L1: EventRouter
-├── time_bucket.py       # L2: TimeBucketEngine
-├── bar_state.py         # L3: BarStateEngine + StandardOHLCVMerge
-├── finalizer.py         # L4: Finalizer + built-in strategies
-├── publisher.py         # L5: BarAggregatorPublisher
-├── README.md            # This file
-└── README_zh.md         # Chinese documentation
-```
+
+The contract tests cover exchange/market identity in keys, OKX `PRICE_ONLY` fan-out behavior, event matching, isolated replay, and stateless batch aggregation.

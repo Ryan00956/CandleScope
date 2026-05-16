@@ -1,284 +1,125 @@
-# Bar Aggregator（K线聚合器）
+# Bar Aggregator
 
-[![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](#)
+[English](README.md)
 
+> 将标准化行情事件和历史 bars 转成带生命周期的 OHLCV K 线。它是 Data Engine 中唯一负责 bucket 计算、merge 语义、forming/closed 状态和 `BarEvent` 发布的模块。
 
-> 从异构市场数据流构建 OHLCV 蜡烛图，采用分层、可扩展架构。
+## 在 Data Engine 中的位置
 
-## 架构总览
-
-```
-MarketEvent / FetchedBar / 自定义数据
-        │
+```text
+ingestion.MarketEvent / backfill bars / manual BarInput
         ▼
-┌─ L1: EventRouter（事件路由）──────────────┐
-│   规范化 → BarInput                        │
-│   按 (symbol, target_interval) 分发        │
-└───────────────┬────────────────────────────┘
-                │  BarInput
-                ▼
-┌─ L2: TimeBucketEngine（时间桶引擎）────────┐
-│   compute_bucket(时间戳) → 桶起始时间       │
-│   对齐模式: epoch / midnight / custom       │
-└───────────────┬────────────────────────────┘
-                │  bucket_start_ms
-                ▼
-┌─ L3: BarStateEngine（K线状态引擎）─────────┐
-│   apply(symbol, bucket, input) → BarState  │
-│   合并策略: 标准OHLCV / Heikin-Ashi / …    │
-└───────────────┬────────────────────────────┘
-                │  BarState + BarStateChange
-                ▼
-┌─ L4: Finalizer（封口器）──────────────────┐
-│   策略链评估                               │
-│   source_close → composite → event → time  │
-└───────────────┬────────────────────────────┘
-                │  BarEvent（如果需要封口）
-                ▼
-┌─ L5: Publisher（发布器）──────────────────┐
-│   发布(CREATED / UPDATED / CLOSED / ...)  │
-│   → 回调函数 + 异步迭代器                  │
-└───────────────────────────────────────────┘
+bar_aggregator
+        │ BarEvent
+        ▼
+data_manager
 ```
 
-## 快速开始
+`bar_aggregator` 不连接交易所、不读写 storage、不管理 API 订阅。它只接收输入并输出 K 线生命周期事件。
+
+## 五层架构
+
+| 层 | 组件 | 职责 |
+|---|---|---|
+| L1 | `EventRouter` | 将 `MarketEvent` 转为 `BarInput`，并分发给已注册的 `(exchange, market_type, symbol, interval)` target |
+| L2 | `TimeBucketEngine` | 计算标准、自定义、周、月周期的 bucket start/end |
+| L3 | `BarStateEngine` | 维护 forming/closed `BarState`，应用 merge strategy |
+| L4 | `Finalizer` | 按 source-close、event-driven、composite、batch、timeout 等规则判断收盘 |
+| L5 | `BarAggregatorPublisher` | 向 callback/queue 发布 `CREATED`、`UPDATED`、`CLOSED`、`AMENDED`、`EXPIRED` 事件 |
+
+## 公共门面
 
 ```python
 from app.data_engine.bar_aggregator import BarAggregator
 
 agg = BarAggregator()
-agg.add_target("BTCUSDT", "1m")
-agg.add_target("BTCUSDT", "5m")
-agg.add_target("BTCUSDT", "91m")  # 自定义周期
-
-# 订阅已封口的K线
-agg.publisher.on_bar_closed(save_to_database)
-
-# 启动后台超时检查器
-await agg.start()
-
-# 从 ingestion 接收实时数据
-await agg.on_market_event(market_event)
-
-# 从 backfill 接收历史数据
-await agg.on_backfill_bars("BTCUSDT", "1m", historical_bars)
-```
-
-## 当前公共 API 边界
-
-`BarAggregator` 是 DataManager、Backfill、settings repair 访问聚合能力的唯一入口，不要求调用方理解内部 pipeline：
-
-```python
-# 直接喂入已经规范化的 BarInput
-await agg.ingest_bar_input("okx", "spot", "BTC-USDT", "1m", bar_input)
-
-# 标准周期 warm-start：种入当前 forming bar，不触发事件
-state = await agg.seed_active_bar("BTC-USDT", "1m", bar_input, exchange="okx")
-
-# 自定义周期 warm-start：重放基础组件，重建当前 bucket
-state = await agg.replay_components("BTC-USDT", "45m", components, exchange="okx")
-
-# 批处理聚合：隔离临时 aggregator，不污染主 targets/active/recent
-states = await agg.aggregate_batch("BTC-USDT", "45m", "15m", rows, exchange="okx")
-
-# 查询/移除 bucket 状态
-state = agg.get_bucket_state("BTC-USDT", "1m", bucket_start_ms)
-expired = agg.expire_bucket("BTC-USDT", "1m", bucket_start_ms)
-```
-
-业务路径不应直接调用 `_handle_bar_input()`，也不应直接操作 `pipeline.bar_state`。`get_pipeline()` 保留给高级调试和自定义策略安装。
-
-## 当前数据语义
-
-`BarInput` 带有显式 `MergeMode`，避免用 `source_interval != target_interval` 这类隐式规则推断行为：
-
-| MergeMode | 使用场景 | 合并语义 |
-|---|---|---|
-| `SNAPSHOT` | 交易所原生 kline、backfill 标准周期 | OHLCV 快照覆盖当前 bucket |
-| `INCREMENTAL` | tick/trade 增量源 | price 更新，volume/trades 累加 |
-| `COMPONENT` | 自定义周期由基础组件重放 | 组件快照聚合成目标周期 |
-| `PRICE_ONLY` | OKX 1m realtime 扇出到更大标准周期 | 只刷新 OHLC，不写入 volume/trades |
-
-这点对 OKX 高周期很关键：1m 数据可以让 1h/4h/1d 当前价格持续刷新，但不会把 1m 的成交量错误累加到原生高周期 candle。
-
-## 各层详解
-
-### L1: EventRouter — 事件路由器 (`router.py`)
-
-**职责**：接收来自不同数据源的原始事件，统一转换为 `BarInput`，然后分发到所有匹配的聚合管道。
-
-- 接收 `MarketEvent`（来自 ingestion 实时推送）
-- 接收 `FetchedBar`（来自 backfill 历史回填）
-- 接收自定义数据（通过注册的 `BarInputAdapter`）
-- 一条数据可同时分发到多个目标周期（如 1m → 1m, 5m, 91m）
-- OKX realtime `1m` 可扇出到更大的标准周期，用于刷新当前大周期价格；该路径是 price-only，不会污染目标周期 volume/trades
-
-**扩展点**：注册自定义适配器
-
-```python
-class MyExchangeAdapter:
-    def adapt(self, raw_data):
-        return BarInput(symbol=..., open=..., ...)
-
-router.register_adapter("my_exchange", MyExchangeAdapter())
-```
-
-### L2: TimeBucketEngine — 时间桶引擎 (`time_bucket.py`)
-
-**职责**：纯计算层，给定时间戳和目标周期，计算它属于哪个时间桶。
-
-- **无状态、纯函数** — 无副作用，易于测试
-- 支持对齐模式：
-  - `epoch` — 对齐到 Unix 纪元 0（默认）
-  - `midnight` — 对齐到 UTC 午夜
-  - `custom` — 用户自定义锚点
-- 支持自定义周期：91m、7h 等任意时间周期
-
-**扩展点**：替换整个桶计算逻辑
-
-```python
-class SessionBucket:
-    def compute_bucket(self, open_time_ms):
-        # 按交易时段对齐
-        ...
-    def compute_bucket_range(self, bucket_start_ms):
-        ...
-
-engine = TimeBucketEngine(interval_ms=..., custom_calculator=SessionBucket())
-```
-
-### L3: BarStateEngine — K线状态引擎 (`bar_state.py`)
-
-**职责**：维护每个时间桶的 OHLCV 累积状态。
-
-- 默认合并规则：标准周期原生 kline 使用快照替换 volume/trades；tick 使用增量累加；跨周期 realtime fanout 只更新 OHLC，不写入 volume/trades
-- 自定义周期使用组件快照重建 OHLCV，支持 out-of-order backfill 或 forming bucket replay
-- 管理活跃（FORMING）K线和已封口（CLOSED）K线
-- 自动驱逐过旧的K线，防止内存无限增长
-- `max_active_bars` / `max_closed_bars_in_memory` 可配置
-
-**扩展点**：自定义合并策略
-
-```python
-class HeikinAshiMerge:
-    def apply(self, state, bar_input, is_new):
-        # Heikin-Ashi 计算逻辑
-        return state
-
-pipeline = agg.get_pipeline("91m")
-pipeline.bar_state.set_merge_strategy(HeikinAshiMerge())
-```
-
-### L4: Finalizer — 封口器 (`finalizer.py`)
-
-**职责**：判断一个正在形成的K线是否应该被封口（FORMING → CLOSED）。
-
-采用 **策略链模式**，按优先级依次评估，第一个返回 True 的策略触发封口：
-
-| 策略 | 说明 | 适用场景 |
-|---|---|---|
-| `BatchFinalizer` | 立即封口 | backfill 数据 |
-| `SourceCloseFinalizer` | 交易所 `is_closed=True`（x=true） | 标准周期实时 |
-| `CompositeCloseFinalizer` | 最后一个组件K线封口 | 自定义周期 |
-| `EventDrivenFinalizer` | 下一个桶的数据到达 | 通用回退 |
-| `TimeBasedFinalizer` | 超时安全兜底 | 所有场景 |
-
-**扩展点**：自定义封口策略
-
-```python
-class TickCountFinalizer:
-    def __init__(self, max_ticks=100):
-        self.max_ticks = max_ticks
-    def should_close(self, state, trigger):
-        return state.tick_count >= self.max_ticks
-
-finalizer = agg.get_finalizer("1m")
-finalizer.add_strategy("tick_count", TickCountFinalizer(50), priority=0)
-```
-
-### L5: Publisher — 发布器 (`publisher.py`)
-
-**职责**：将K线生命周期事件广播给下游消费者。
-
-**事件类型**：
-
-| 事件 | 说明 |
-|---|---|
-| `CREATED` | 新K线开始形成 |
-| `UPDATED` | K线 OHLCV 更新（可节流） |
-| `CLOSED` | K线封口完成（**最重要！**） |
-| `AMENDED` | 历史K线被修正（backfill 覆盖） |
-| `EXPIRED` | K线从内存中驱逐 |
-
-**消费模式**：
-
-```python
-# 回调模式
+agg.add_target("BTCUSDT", "1m", exchange="binance", market_type="spot")
+agg.add_target("BTCUSDT", "91m")
 agg.publisher.on_bar_closed(save_bar)
-agg.publisher.on_bar_updated(push_to_ws)
 
-# 异步迭代器模式（支持过滤）
-async for event in agg.publisher.subscribe(
-    filter=BarEventFilter(
-        symbols={"BTCUSDT"},
-        event_types={BarEventType.CLOSED},
-    )
-):
-    process(event)
+await agg.start()
+await agg.on_market_event(market_event)
+await agg.stop()
 ```
 
-## 扩展点总结
+`BarAggregator` 常用方法：
 
-| 扩展能力 | 协议/接口 | 注册位置 |
-|---|---|---|
-| 自定义数据源 | `BarInputAdapter` | `router.register_adapter()` |
-| 自定义桶计算 | `BucketCalculator` | `TimeBucketEngine(custom_calculator=...)` |
-| 自定义合并逻辑 | `BarMergeStrategy` | `bar_state.set_merge_strategy()` |
-| 自定义封口逻辑 | `FinalizerStrategy` | `finalizer.add_strategy()` |
+| 方法 | 用途 |
+|---|---|
+| `add_target()` / `remove_target()` | 注册或移除目标序列 |
+| `on_market_event()` | 接收 ingestion 的实时标准事件 |
+| `on_backfill_bars()` | 接收历史修复 bars |
+| `ingest_bar_input()` | 直接注入标准化 `BarInput` |
+| `seed_active_bar()` | 用 warm-start 数据预置 forming 状态 |
+| `replay_components()` | 用 component bars 重建 buckets |
+| `aggregate_batch()` | 给 backfill/custom storage repair 使用的无状态批量聚合 |
+| `get_bucket_state()` / `get_latest_bar()` | 查看当前内存状态 |
+| `get_active_bars()` / `get_recent_bars()` | 调试和诊断 |
+| `snapshot()` | JSON 诊断快照 |
 
-## 配置参数
+## 核心模型
 
-所有参数在 `BarAggregatorConfig` 中定义，有合理默认值。
-可通过构造函数参数或环境变量（前缀 `BAR_AGG_`）覆盖：
+| 类型 | 说明 |
+|---|---|
+| `BarInput` | 来自 realtime、backfill、manual、adapter 的统一输入；时间戳为毫秒 |
+| `BarState` | 单个 bucket 的当前 OHLCV 状态 |
+| `BarEvent` | 带 identity、status 和 bar payload 的生命周期事件 |
+| `BarEventFilter` | subscriber 侧过滤 |
+| `FinalizeTrigger` | 触发 finalizer 检查的原因 |
+| `BarInputSource` | `realtime`、`backfill`、`manual`、`adapter` |
+| `BarSourceMode` | `kline`、`trade`、`auto` |
+| `MergeMode` | `snapshot`、`incremental`、`component`、`price_only` |
+| `BarStatus` | `forming`、`closed`、`expired` |
+| `BarEventType` | `bar.created`、`bar.updated`、`bar.closed`、`bar.amended`、`bar.expired` |
+| `AlignmentMode` | `epoch`、`midnight`、`market`、`custom`、`none` |
 
-| 参数 | 环境变量 | 默认值 | 说明 |
-|---|---|---|---|
-| `bar_source_mode` | `BAR_AGG_SOURCE_MODE` | `"kline"` | 数据源模式 |
-| `default_alignment_mode` | `BAR_AGG_ALIGNMENT_MODE` | `"epoch"` | 桶对齐方式 |
-| `max_active_bars` | `BAR_AGG_MAX_ACTIVE_BARS` | `3` | 每 key 最大活跃K线数 |
-| `max_closed_bars_in_memory` | `BAR_AGG_MAX_CLOSED_BARS` | `500` | 已封口K线缓存 |
-| `use_source_close_signal` | `BAR_AGG_USE_SOURCE_CLOSE` | `true` | 使用交易所封口信号 |
-| `finalize_timeout_ms` | `BAR_AGG_FINALIZE_TIMEOUT_MS` | `5000` | 安全超时(ms) |
-| `update_throttle_ms` | `BAR_AGG_UPDATE_THROTTLE_MS` | `250` | UPDATED 节流(ms) |
+## Merge Modes
 
-## 与其他模块的关系
+- `SNAPSHOT`：交易所目标周期 kline snapshot。累计字段按当前 source snapshot 替换。
+- `INCREMENTAL`：trade/tick 类增量更新。累加型字段会累积。
+- `COMPONENT`：用于重建更大自定义 bucket 的组件 bar。
+- `PRICE_ONLY`：只更新 open/high/low/close，不改 volume、quote volume、trades。用于 OKX realtime fan-out，避免高周期价格刷新污染累加字段。
 
+## 自定义、周、月周期
+
+周期解析走共享 interval policy。`7m`、`45m`、`3h`、`91m` 等固定自定义周期使用毫秒 bucket 计算。周周期按周一对齐。`1M`、`2M`、`3M` 等月周期使用日历感知的 monthly bucket calculator，不假设一个月固定 30 天。
+
+backfill 和 storage repair 需要隔离批量结果时，优先使用 `aggregate_batch()`。测试断言它不会注册 target，也不会留下 active bars。
+
+## 收盘判断
+
+Finalizer 会组合多个收盘信号：
+
+- 交易所 kline payload 的 source close signal。
+- 新 bucket 到达时触发上一 bucket event-driven close。
+- 自定义周期最后一个 component close 后 composite close。
+- 交易所 close signal 丢失时的 time-based timeout。
+- 历史批量聚合使用的 batch finalization。
+
+## 配置
+
+`BarAggregatorConfig` 支持构造参数、`BAR_AGG_*` 环境变量和运行时 `update()`。
+
+| 环境变量 | 用途 |
+|---|---|
+| `BAR_AGG_SOURCE_MODE` | `kline`、`trade` 或 `auto` |
+| `BAR_AGG_ACCEPTED_STREAMS` | 接受的 stream types |
+| `BAR_AGG_ALIGNMENT_MODE` | 默认自定义周期对齐方式 |
+| `BAR_AGG_ALIGNMENT_EPOCH_MS` | 自定义对齐 epoch |
+| `BAR_AGG_MAX_ACTIVE_BARS` | 每个序列最多 forming buckets |
+| `BAR_AGG_MAX_CLOSED_BARS` | 内存保留的 recent closed bars |
+| `BAR_AGG_USE_SOURCE_CLOSE` | 使用交易所 close signal |
+| `BAR_AGG_FINALIZE_TIMEOUT_MS` | 强制收盘 timeout |
+| `BAR_AGG_USE_EVENT_DRIVEN_CLOSE` | 新 bucket 到达时关闭上一 bucket |
+| `BAR_AGG_USE_COMPOSITE_CLOSE` | 根据 component close 状态关闭自定义周期 |
+| `BAR_AGG_UPDATE_THROTTLE_MS` | `UPDATED` 事件节流 |
+| `BAR_AGG_PUBLISHER_QUEUE_SIZE` | subscriber queue 大小 |
+
+## 测试
+
+```bash
+cd backend
+python -m pytest -q tests/test_bar_aggregator_contracts.py
 ```
-┌─────────────┐     MarketEvent      ┌──────────────────┐
-│  Ingestion  │ ──────────────────── │                  │
-│  (实时推送)  │                      │   Bar Aggregator │
-└─────────────┘                      │   (K线聚合器)     │
-                                     │                  │
-┌─────────────┐     FetchedBar       │   BarEvent       │
-│  Backfill   │ ──────────────────── │   ──────────── → │ → DataManager cache/storage/event bus
-│  (历史回填)  │                      │                  │ → WebSocket
-└─────────────┘                      │                  │ → Indicators
-                                     └──────────────────┘
-```
 
-## 文件结构
-
-```
-bar_aggregator/
-├── __init__.py          # 公共 API 导出
-├── aggregator.py        # 顶层编排器 (BarAggregator)
-├── config.py            # 配置 (BarAggregatorConfig)
-├── models.py            # 数据模型、枚举、协议接口
-├── router.py            # L1: 事件路由器
-├── time_bucket.py       # L2: 时间桶引擎
-├── bar_state.py         # L3: K线状态引擎 + 标准OHLCV合并
-├── finalizer.py         # L4: 封口器 + 内置策略
-├── publisher.py         # L5: 发布器
-├── README.md            # 英文文档
-└── README_zh.md         # 本文件
-```
+contract tests 覆盖 exchange/market identity、OKX `PRICE_ONLY` fan-out、事件匹配、隔离 replay 和无状态批量聚合。

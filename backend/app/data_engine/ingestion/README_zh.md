@@ -1,235 +1,130 @@
-# 实时数据摄取 — 市场数据接入管道
+# Ingestion
 
-[![English](https://img.shields.io/badge/Language-English-blue)](README.md) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](#)
+[English](README.md)
 
+> 实时行情接入层。该模块把交易所 HTTP/WS payload 转成统一的 `MarketEvent` 和 `GapMarker`，交给下游 K 线聚合和历史修复链路。
 
-> **交易所实时数据 → 统一格式 → 稳定事件流**
-
-本模块是 CandleScope 的**最底层数据接入层**。它连接交易所的 WebSocket/REST API，将原始数据转换为统一的 `MarketEvent` 格式，并输出稳定的事件流供下游服务订阅。
-
-**本模块不负责生成K线、计算指标、写存储或执行历史回补。** 这些职责属于下游层（`BarAggregator`、`DataManager`、`BackfillCoordinator` 等）。
-
-在当前完整 data-engine 中，`ingestion` 是唯一正式市场数据入口：
+## 在 Data Engine 中的位置
 
 ```text
-交易所 WS/REST
-      ▼
-ingestion: MarketEvent / GapMarker
-      ▼
-BarAggregator / DataManager
+交易所 WS / REST
+        ▼
+ingestion
+        │ MarketEvent / GapMarker
+        ▼
+bar_aggregator / data_manager backfill trigger
 ```
 
-价格流也走同一套入口。`TICKER` / `MINI_TICKER` 会被 `DataManager.IngestionPriceSource` 消费并写入 `PriceSnapshotCache`；支持 multi-symbol ticker 的 factory 可以通过 `start_price_many` 用一个流 fan-out 多个 watched symbols。
+`ingestion` 保持通用接入层定位：不生成最终业务 K 线、不写 storage、不执行历史修复。这些职责分别属于 `bar_aggregator`、`storage` 和 `backfill`。
 
----
+## 六层 Pipeline
 
-## 架构
+| 层 | 组件 | 职责 |
+|---|---|---|
+| L1 | `TransportLayer` | HTTP 和 WebSocket I/O、endpoint 选择、proxy 使用、REST 分页辅助 |
+| L2 | `SessionLayer` / `SharedWsSessionAdapter` | WebSocket 生命周期、重连、stale 检测、健康状态 |
+| L3 | `FeedControlLayer` | stream 不健康时在 WS 和 HTTP polling 间切换 |
+| L4 | `NormalizeLayer` | 原始交易所 payload 转成 `MarketEvent` |
+| L5 | `ContinuityLayer` | 去重、保序、检测缺口、发出 `GapMarker` |
+| L6 | `DeliveryLayer` | 将事件 fan out 给 callback 和 async iterator subscriber |
 
-六层管道，每层职责清晰单一：
+`MarketDataIngress.add_stream()` 会为一个 `StreamDescriptor` 创建 `StreamPipeline`，并把 L3 -> L4 -> L5 -> L6 串起来。L1 transport 和 shared WS hub registry 由 `MarketDataIngress` 持有。
 
-```
-交易所 WS/REST
-      │
-      ▼
-┌─────────────────┐
-│  L1: Transport   │  原始 I/O — WS连接、HTTP请求、端点轮换
-├─────────────────┤
-│  L2: Session     │  WS生命周期 — 重连、退避、超时检测
-├─────────────────┤
-│  L3: FeedControl │  WS↔HTTP 故障转移 — 自动降级与恢复
-├─────────────────┤
-│  L4: Normalize   │  原始JSON → MarketEvent — 统一格式转换
-├─────────────────┤
-│  L5: Continuity  │  去重、间隙检测、GapMarker 输出
-├─────────────────┤
-│  L6: Delivery    │  分发 — 回调 + 异步迭代器，面向消费者
-└─────────────────┘
-      │
-      ▼
-  MarketEvent / GapMarker 事件流  (供 BarAggregator、DataManager 等消费)
-```
-
-当前正式边界：
-
-- `ContinuityLayer` 只检测缺口并 emit `GapMarker`，不在 ingestion 内裸调 HTTP 回补。
-- `GapMarker` 由 `DataManager` / `StreamCoordinator` 接入统一 backfill trigger，实际修复由 `BackfillCoordinator` 调度。
-- `NormalizeLayer` 只做分发门面，Binance/OKX 解析放在 `normalizers/` 下。
-- 普通 WS session 与 OKX shared WS 都实现同一 `SessionLike` contract，`FeedControlLayer` 不关心具体 session 类型。
-- `DeliveryLayer` 的 ordered callback 用于核心链路，会反压 ingestion；非核心消费者使用 bounded async queue，队列满时丢弃非核心事件。
-- `TICKER` / `MINI_TICKER` 只输出标准化价格事件，不维护业务 watchlist；watchlist、daily open 和订阅等级属于 DataManager。
-
-## 支持的数据流类型
-
-| StreamType    | WS 流名称             | REST 端点              | 说明               |
-|---------------|----------------------|------------------------|--------------------|
-| `KLINE`       | `@kline_<interval>`  | `/api/v3/klines`       | 交易所聚合K线       |
-| `AGG_TRADE`   | `@aggTrade`          | `/api/v3/aggTrades`    | 聚合交易            |
-| `TRADE`       | `@trade`             | `/api/v3/trades`       | 原始逐笔交易        |
-| `TICKER`      | `@ticker`            | `/api/v3/ticker/24hr`  | 24小时滚动行情      |
-| `MINI_TICKER` | `@miniTicker`        | `/api/v3/ticker/24hr`  | 轻量行情            |
-| `DEPTH`       | `@depth<levels>`     | `/api/v3/depth`        | 订单簿深度          |
-
-## 快速开始
+## 公共入口
 
 ```python
-from backend.app.data_engine.ingestion import (
-    MarketDataIngress, StreamDescriptor, StreamType
+from app.data_engine.ingestion import (
+    IngestionConfig,
+    MarketDataIngress,
+    StreamDescriptor,
+    StreamType,
 )
 
-async def main():
-    ingress = MarketDataIngress()
-    await ingress.start()
+ingress = MarketDataIngress(IngestionConfig())
+await ingress.start()
 
-    # 订阅 BTC 1分钟K线流
-    desc = StreamDescriptor("BTCUSDT", StreamType.KLINE, interval="1m")
-    pipeline = await ingress.add_stream(desc)
+desc = StreamDescriptor(
+    symbol="BTCUSDT",
+    stream_type=StreamType.KLINE,
+    interval="1m",
+    exchange="binance",
+    market_type="spot",
+)
+pipeline = await ingress.add_stream(desc)
 
-    # 方式一：异步迭代器消费
-    async for event in pipeline.delivery.subscribe():
-        print(event.to_dict())
-
-    # 方式二：回调消费
-    async def on_event(market_event):
-        print(market_event.data)
-
-    pipeline.delivery.on_market_event(on_event)
-
-    # 可以同时订阅多种流
-    trade_desc = StreamDescriptor("BTCUSDT", StreamType.AGG_TRADE)
-    trade_pipeline = await ingress.add_stream(trade_desc)
-
-    await ingress.stop()
-```
-
-## 核心输出：`MarketEvent`
-
-所有流类型都输出统一的 `MarketEvent`，其 `data` 字典按类型有不同的标准化结构：
-
-```python
-@dataclass
-class MarketEvent:
-    event_type: StreamType      # kline / aggTrade / trade / ticker / ...
-    symbol: str                 # "BTCUSDT"
-    exchange: str               # "binance"
-    event_time_ms: int          # 交易所事件时间戳 (ms)
-    received_at_ms: int         # 本地接收时间戳 (ms)
-    source: DataSource          # websocket / http / http_backfill
-    data: dict[str, Any]        # 标准化载荷（schema 因 event_type 而异）
-    stream_key: str             # "BTCUSDT@kline_1m"
-    sequence: int | None        # 用于去重/排序
-```
-
-### 各 StreamType 的 data 结构
-
-**KLINE（K线）:**
-```json
-{
-  "interval": "1m", "open_time": 1672531200000, "close_time": 1672531259999,
-  "open": 16500.0, "high": 16510.0, "low": 16490.0, "close": 16505.0,
-  "volume": 100.5, "quote_volume": 1658250.0, "trades": 350,
-  "taker_buy_base": 60.3, "taker_buy_quote": 995000.0, "is_closed": true
-}
-```
-
-**AGG_TRADE（聚合交易）:**
-```json
-{
-  "agg_trade_id": 123456, "price": 16500.0, "quantity": 0.5,
-  "first_trade_id": 100, "last_trade_id": 105,
-  "trade_time_ms": 1672531200123, "is_buyer_maker": false
-}
-```
-
-**TRADE（逐笔交易）:**
-```json
-{
-  "trade_id": 12345, "price": 16500.0, "quantity": 0.5,
-  "trade_time_ms": 1672531200123, "is_buyer_maker": false,
-  "buyer_order_id": 111, "seller_order_id": 222
-}
-```
-
-**TICKER（行情）:**
-```json
-{
-  "price_change": 100.0, "price_change_pct": 0.61, "last_price": 16500.0,
-  "bid_price": 16499.0, "ask_price": 16501.0, "volume": 50000.0, ...
-}
-```
-
-**DEPTH（深度）:**
-```json
-{
-  "last_update_id": 123456789,
-  "bids": [[16499.0, 5.0], ...],
-  "asks": [[16501.0, 2.0], ...]
-}
-```
-
-## Delivery 层（L6）— 消费者接口
-
-Delivery 层提供**类似 WebSocket 的稳定事件流**：
-
-### 回调方式
-```python
-# 仅市场事件
-pipeline.delivery.on_market_event(my_handler)
-
-# 间隙标记
-pipeline.delivery.on_gap(my_gap_handler)
-
-# 所有事件（market_event + gap + status）
-pipeline.delivery.on_event(my_universal_handler)
-```
-
-### 异步迭代器方式
-```python
 async for event in pipeline.delivery.subscribe():
-    if event.event_type == "market_event":
-        process(event.market_event)
-    elif event.event_type == "gap":
-        handle_gap(event.gap)
+    print(event.to_dict())
 ```
 
-## 可靠性特性
+生产 runtime 通常通过 `BinanceIngestionFactory` 使用 ingestion，而不是直接创建 `MarketDataIngress`。
 
-- **自动重连** — 指数退避策略（L2）
-- **超时检测** — N秒无消息则强制重连（L2）
-- **WS → HTTP 降级** — WS连续失败时自动切换（L3）
-- **WS 探测** — HTTP模式下定期探测WS，恢复后自动切回（L3）
-- **去重** — 按事件类型使用不同的去重键（L5）
-- **间隙检测** — 输出 `GapMarker`，交给上层 `BackfillCoordinator` 修复（L5）
-- **受控分发** — ordered callback 保护核心顺序，bounded queue 保护辅助消费者（L6）
-- **端点轮换** — 多个交易所端点间自动切换（L1）
+## 核心模型
+
+| 类型 | 文件 | 说明 |
+|---|---|---|
+| `StreamDescriptor` | [models.py](models.py) | 用 exchange、market type、symbol、stream type、interval/depth 唯一标识数据流 |
+| `StreamType` | [models.py](models.py) | `KLINE`、`AGG_TRADE`、`TRADE`、`TICKER`、`MINI_TICKER`、`DEPTH` |
+| `MarketEvent` | [models.py](models.py) | 交易所无关的标准事件 envelope；事件时间戳统一为毫秒 |
+| `GapMarker` | [models.py](models.py) | continuity 检测出的缺口，交给修复协调层处理 |
+| `RawMessage` | [models.py](models.py) | L1 -> L4 内部 payload wrapper |
+| `TransportRequest` | [models.py](models.py) | transport/fetching 路径使用的 REST 请求描述 |
+| `FeedMode` | [models.py](models.py) | `websocket`、`http_poll`、`idle` |
+| `SessionHealth` | [models.py](models.py) | `connected`、`connecting`、`reconnecting`、`unhealthy`、`disconnected` |
+
+## 交易所标准化
+
+normalizer 位于 [normalizers](normalizers/)：
+
+- `binance.py` 处理 Binance spot/futures kline、trade、ticker、depth payload。
+- `okx.py` 处理 OKX public/business WS payload 和 OKX volume 字段差异。
+- `base.py` 定义 normalizer contract。
+
+`NormalizeLayer` 按 `StreamDescriptor.exchange` 分发，把交易所差异隔离在 ingestion 内部。
+
+## Shared WebSocket
+
+[shared_ws.py](shared_ws.py) 为适合共享连接的交易所/stream type 提供 multiplex hub。当前测试断言 OKX kline stream 会走 shared hub，而普通 direct session 在不健康时会切到 HTTP fallback。
+
+shared adapter 允许 L3 使用 HTTP fallback，同时不停止其他订阅者共用的底层 shared session。
 
 ## 配置
 
-所有参数可通过 `IngestionConfig` 或环境变量配置：
+`IngestionConfig` 支持构造参数、`INGESTION_*` 环境变量和运行时 `update()`。
 
-```python
-config = IngestionConfig(
-    ws_reconnect_delay_max=60.0,      # WS最大重连延迟
-    http_poll_interval=2.0,            # HTTP轮询间隔
-    delivery_queue_size=500,           # 每订阅者队列大小
-)
-ingress = MarketDataIngress(config=config)
+常用参数：
+
+| 字段 / 环境变量 | 默认用途 |
+|---|---|
+| `INGESTION_HTTP_BASE_URLS` | Binance spot HTTP endpoints |
+| `INGESTION_WS_BASE_URLS` | Binance spot WS endpoints |
+| `INGESTION_HTTP_BASE_URLS_FUTURES` | Binance futures HTTP endpoints |
+| `INGESTION_WS_BASE_URLS_FUTURES` | Binance futures WS endpoints |
+| `INGESTION_HTTP_TIMEOUT` | HTTP 请求超时 |
+| `INGESTION_PROXY_MODE` | `system`、`custom` 或 `none` |
+| `INGESTION_HTTP_PROXY` | custom proxy URL |
+| `INGESTION_WS_OPEN_TIMEOUT` | WebSocket 建连超时 |
+| `INGESTION_WS_PING_INTERVAL` / `INGESTION_WS_PING_TIMEOUT` | WS keepalive |
+| `INGESTION_WS_FAIL_THRESHOLD` | 连续失败多少次后标记 unhealthy |
+| `INGESTION_HTTP_POLL_INTERVAL` | HTTP fallback 轮询间隔 |
+| `INGESTION_DELIVERY_QUEUE_SIZE` | 每个 subscriber 的队列大小 |
+| `INGESTION_EXCHANGE` | 默认 exchange id |
+
+proxy 还会读取 `app.core.config` 中持久化的应用设置，因此前端可以运行时切换 proxy 模式。
+
+## Delivery 语义
+
+- callback subscriber 会在 queue delivery 之前被 await，给有序消费者提供背压。
+- queue 满时丢弃 queue delivery item，不阻塞 callback。
+- gap event 会同时发送给 callback 和 async queue。
+- 关闭 subscriber 会解除满队列阻塞。
+
+## 测试
+
+```bash
+cd backend
+python -m pytest -q \
+  tests/test_ingestion_delivery.py \
+  tests/test_ingestion_normalizers.py \
+  tests/test_ingestion_session_types.py \
+  tests/test_transport_ws_urls.py
 ```
-
-## 文件结构
-
-| 文件              | 层级  | 说明                                  |
-|------------------|-------|---------------------------------------|
-| `models.py`      | 全局  | 数据类型：MarketEvent, StreamDescriptor |
-| `config.py`      | 全局  | IngestionConfig，支持环境变量          |
-| `metrics.py`     | 全局  | 各层指标（计数器、度量）               |
-| `transport.py`   | L1    | 原始 WS/HTTP I/O，端点轮换            |
-| `session.py`     | L2    | WS 会话生命周期，重连                  |
-| `session_types.py` | L2  | `SessionLike` 协议                    |
-| `shared_ws.py`   | L2    | OKX shared WS hub 与 session adapter  |
-| `feed_control.py`| L3    | WS↔HTTP 故障转移编排器                |
-| `normalize.py`   | L4    | normalizer 分发门面                   |
-| `normalizers/`   | L4    | Binance/OKX 原始数据解析              |
-| `continuity.py`  | L5    | 去重、间隙检测、GapMarker             |
-| `delivery.py`    | L6    | 分发给订阅者                          |
-| `factory.py`     | —     | 应用侧工厂，启动 KLINE/TICKER pipeline |
-| `__init__.py`    | —     | 组装、StreamPipeline、MarketDataIngress |

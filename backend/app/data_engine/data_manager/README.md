@@ -1,252 +1,195 @@
 # Data Manager
 
-[![English](https://img.shields.io/badge/Language-English-blue)](#) [![简体中文](https://img.shields.io/badge/语言-简体中文-red)](README_zh.md)
+[中文](README_zh.md)
 
+> Public business facade for CandleScope market data. `DataManager` is the module API/WS/Indicator code should use for K-line queries, cache access, event subscriptions, stream lifecycle, backfill coordination, price snapshots, and maintenance tasks.
 
-> **Unified cache, query, and event distribution layer for CandleScope.**
+## Position In Data Engine
 
-The Data Manager is the **single entry point** for all K-line data operations. Charts, indicators, strategies, API endpoints, and WebSocket hubs all interact with `DataManager` instead of touching cache, storage, or ingestion modules directly.
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│                  DataManager (facade)                │
-│                                                      │
-│  ┌──────────┐  ┌─────────────┐  ┌────────────────┐  │
-│  │ BarCache │  │ QueryEngine │  │  DataEventBus  │  │
-│  └────┬─────┘  └──────┬──────┘  └───────┬────────┘  │
-│       │               │                │             │
-│  ┌────┴───────────────┴────────────────┴──────────┐  │
-│  │            StreamCoordinator                   │  │
-│  │   (ingestion + aggregation lifecycle mgmt)     │  │
-│  └────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────┘
-         ▲              ▲              ▲
-         │              │              │
-    bar_aggregator   storage      ingestion
-      (upstream)     (SQLite)    (WebSocket)
+```text
+ingestion -> bar_aggregator -> DataManager -> API / WS / Indicator
+                         ▲
+                         └── backfill -> storage readback
 ```
 
-## Module Files
+`data_manager` is the boundary between low-level data plumbing and application features. External modules should use the package root exports from [__init__.py](__init__.py), not internal services such as `QueryEngine`, `StreamCoordinator`, or `AggregatorBridge`.
 
-| File | Description |
-|------|-------------|
-| `config.py` | All configuration dataclasses (`DataManagerConfig`, `CacheConfig`, `QueryConfig`, `EventBusConfig`, `CoordinatorConfig`) |
-| `models.py` | Core types: `BarData`, `SeriesKey`, `QueryResult`, `DataEvent`, `DataEventType`, `SubscriptionHandle`, `StreamInfo`, `StorageBackend` protocol |
-| `cache.py` | `BarCache` — thread-safe, LRU-evicting, bounded in-memory bar storage with per-series ring buffers |
-| `event_bus.py` | `DataEventBus` — topic-based pub/sub with callback and async-iterator delivery, middleware support |
-| `query.py` | `QueryEngine` — three-level query resolution: Cache → Storage → Backfill |
-| `coordinator.py` | `StreamCoordinator` — lifecycle management for ingestion pipelines, prewarm, idle reaping |
-| `manager.py` | `DataManager` — the public facade that composes all components |
+## Responsibilities
 
-## Quick Start
+| Area | Component | Responsibility |
+|---|---|---|
+| Facade | `DataManager` | Public methods for query, stream, subscription, maintenance, and diagnostics |
+| Cache | `KlineCache` | In-memory series cache with size/TTL limits |
+| Query | `QueryEngine` | Resolve Cache -> Storage -> Backfill with missing-range metadata |
+| Streams | `StreamCoordinator` / `StreamEnsurePlanner` | Start and stop ingestion + bar aggregator targets |
+| Events | `DataEventBus` | Callback and async-iterator event distribution |
+| Aggregation Bridge | `AggregatorBridge` | Persist bar events, merge cache, emit `DataEvent` |
+| Backfill | `BackfillCoordinator` | Request dedup, merge, retry, cancel, storage readback, event mapping |
+| Custom Query | `CustomQueryEngine` | Query custom intervals consistently |
+| Warm Start | `AggregatorWarmStartService` | Seed aggregator state from storage on startup |
+| Price | `IngestionPriceSource` / `PriceSnapshotCache` | Lightweight realtime price stream and snapshots |
+| Subscription | `SubscriptionService` | Watchlist tiers: `full`, `price`, `none` |
+| Maintenance | `maintenance.py`, `retention.py` | storage repair, gap scan, retention limits |
+
+## Public API
+
+Common methods on `DataManager`:
+
+| Method | Purpose |
+|---|---|
+| `start()` / `shutdown()` | Lifecycle |
+| `query()` | Query a range, optionally triggering backfill |
+| `query_latest()` | Latest N bars |
+| `query_before()` | Pagination before a timestamp |
+| `get_bounds()` | Storage metadata for a series |
+| `scan_storage_gaps()` | Continuity scan without repair |
+| `ensure_stream()` | Ensure realtime ingestion + aggregation is running |
+| `subscribe()` / `unsubscribe()` | Callback event subscription |
+| `subscribe_iter()` | Async iterator event subscription |
+| `on_bar_event()` | Consume `BarAggregator` events |
+| `on_bars_backfilled()` | Merge repaired bars after storage readback |
+| `get_prices_snapshot()` | Current watched-symbol price snapshots |
+| `get_subscription_service()` | Access subscription tier manager |
+| `repair_custom_storage()` | Rebuild custom interval rows |
+| `scan_and_fill_storage_gaps()` | Manual gap scan and repair |
+| `update_retention_limits()` | Update DB/ephemeral retention settings |
+| `snapshot()` | Full diagnostic snapshot |
+
+Example:
 
 ```python
-from app.data_engine.data_manager import DataManager, DataManagerConfig
+from app.data_engine.data_manager import DataManager
 
-# Create with default or custom config
 dm = DataManager()
-# dm = DataManager(DataManagerConfig(cache=CacheConfig(max_bars_per_series=10000)))
-
-# Inject optional backends
-dm.set_storage(my_storage_backend)          # SQLite, PostgreSQL, etc.
-dm.set_ingestion_factory(my_ws_factory)     # Binance, OKX, etc.
-dm.set_backfill_trigger(backfill_fn)        # gap-filling callback
-
-# Start (prewarms cache, starts reaper)
 await dm.start()
-```
 
-## Querying Data
+await dm.ensure_stream("BTCUSDT", "1m", exchange="binance", market_type="spot")
+result = dm.query_latest("BTCUSDT", "1m", 500, "binance", market_type="spot")
 
-All consumers use the same interface:
-
-```python
-# Latest 500 bars
-result = dm.query("BTCUSDT", "1m", limit=500)
-
-# Time range query
-result = dm.query("BTCUSDT", "1h", start_ms=1700000000000, end_ms=1700100000000)
-
-# Pagination (load more)
-result = dm.query_before("BTCUSDT", "1m", before_ms=oldest_bar_ms, limit=500)
-
-# Access results
-for bar in result.bars:
-    print(bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume)
-
-# Metadata
-print(result.source)           # "cache", "storage", "mixed", "empty"
-print(result.cache_hit)        # True/False
-print(result.backfill_triggered)
-```
-
-The query engine resolves data in three levels:
-1. **Cache** — sub-millisecond, in-memory
-2. **Storage** — SQLite / database fallback, results are cached for next time
-3. **Backfill** — triggers async historical data fetch if gaps detected
-
-## Subscribing to Events
-
-### Callback Style
-
-```python
-from app.data_engine.data_manager import DataEventType
-
-async def on_bar_closed(event):
-    bar = event.bar
-    print(f"Closed: {event.key} @ {bar.close}")
-
-handle = dm.subscribe(
-    callback=on_bar_closed,
-    symbol="BTCUSDT",
-    interval="1m",
-    event_types={DataEventType.BAR_CLOSED},
-)
-
-# Later...
+handle = dm.subscribe(callback=on_event, symbol="BTCUSDT", interval="1m")
 dm.unsubscribe(handle)
+
+await dm.shutdown()
 ```
 
-### Async Iterator Style
+## Public Types
 
-```python
-async for event in dm.subscribe_iter("BTCUSDT", "1m"):
-    await websocket.send(event.to_dict())
+The package root exports the stable facade and contracts:
+
+- Config: `DataManagerConfig`, `CacheConfig`, `QueryConfig`, `EventBusConfig`, `CoordinatorConfig`, `PrewarmTarget`
+- Data: `BarData`, `SeriesKey`, `QueryResult`, `MissingRange`, `QuerySource`
+- Events: `DataEvent`, `DataEventType`, `SubscriptionHandle`
+- Streams: `StreamInfo`, `StreamStatus`
+- Storage protocol: `StorageBackend`
+- Maintenance/subscription: `MaintenanceBusyError`, `MaintenanceUnavailableError`, `SubscriptionTier`
+
+## Timestamp And Identity Rules
+
+- Storage and internal engine timestamps are milliseconds.
+- `BarData.time` is Unix seconds for `lightweight-charts`.
+- `SeriesKey` normalizes symbol to uppercase and exchange/market type to lowercase.
+- Binance spot topics remain compact: `BTCUSDT@1m`.
+- Non-default exchange or market type is prefixed: `okx:swap:BTC-USDT@1m`, `futures:BTCUSDT@1m`.
+
+## Query Semantics
+
+`QueryEngine` resolves data in this order:
+
+1. Cache, when the requested range is present.
+2. Storage, via the injected storage backend.
+3. Backfill trigger, when missing ranges are detected and `auto_backfill` is enabled.
+
+`QueryResult` includes:
+
+- `bars`: sorted ascending `BarData`
+- `source`: `cache`, `storage`, `backfill`, `mixed`, or `empty`
+- `cache_hit`
+- `has_more`
+- `backfill_triggered`
+- `has_tail_gap`
+- `missing_ranges`
+- `metadata`
+
+API range endpoints add visible-range verification on top of this metadata.
+
+## Stream Lifecycle
+
+`ensure_stream()` is the public way to start realtime data:
+
+```text
+ensure_stream(symbol, interval)
+        ▼
+StreamEnsurePlanner
+        ▼
+StreamCoordinator
+        ├── BarAggregator.add_target()
+        └── IngestionFactory.start_kline()
 ```
 
-### Event Types
+The planner chooses the required source streams. For custom intervals, this can mean starting a suitable base interval and registering the requested target interval with the aggregator.
 
-| Event | Description |
-|-------|-------------|
-| `BAR_CREATED` | New bar bucket started |
-| `BAR_UPDATED` | Bar OHLCV updated (live tick) |
-| `BAR_CLOSED` | Bar finalized — most important for strategies |
-| `BAR_AMENDED` | Historical bar corrected (backfill) |
-| `STREAM_STARTED` | Ingestion pipeline started |
-| `STREAM_STOPPED` | Ingestion pipeline stopped |
-| `STREAM_ERROR` | Stream encountered an error |
-| `BACKFILL_STARTED/COMPLETED/FAILED` | Backfill lifecycle |
-| `CACHE_PREWARM` | Cache prewarm completed for a series |
-| `CACHE_EVICTION` | Series evicted from cache |
+## Backfill Coordination
 
-## Stream Management
+`BackfillCoordinator` is deliberately separate from `BackfillEngine`:
 
-```python
-# Auto-start a stream when needed
-info = await dm.ensure_stream("BTCUSDT", "1m")
+- Deduplicates in-flight requests.
+- Merges compatible ranges.
+- Persists gap lifecycle in `GapLedger`.
+- Handles retry/cancel/shutdown.
+- Runs `BackfillEngine`.
+- Reads `RepairReport.written_ranges` back from storage.
+- Calls `DataManager.on_bars_backfilled()`.
+- Emits `BACKFILL_COMPLETED` or `BACKFILL_FAILED`.
 
-# Stop a stream
-await dm.stop_stream("BTCUSDT", "1m")
+API and settings code should trigger repair through DataManager/coordinator, not call `BackfillEngine.run()` directly.
 
-# Inspect
-streams = dm.get_all_streams()
-for s in streams:
-    print(s.to_dict())
-```
+## Events
 
-## Middleware
+`DataEventType` values include:
 
-Middleware hooks run before every event reaches subscribers:
+- Bar lifecycle: `BAR_CREATED`, `BAR_UPDATED`, `BAR_CLOSED`, `BAR_AMENDED`, `BAR_EXPIRED`
+- Stream lifecycle: `STREAM_STARTED`, `STREAM_STOPPED`, `STREAM_ERROR`
+- Backfill lifecycle: `BACKFILL_STARTED`, `BACKFILL_COMPLETED`, `BACKFILL_FAILED`
+- Cache/price: `CACHE_PREWARM`, `CACHE_EVICTION`, `PRICE_UPDATED`
+
+Consumers can use callbacks or async iteration:
 
 ```python
-async def logging_middleware(event):
-    logger.info(f"Event: {event.event_type} {event.key}")
-    return event  # return None to suppress
-
-dm.add_middleware(logging_middleware)
-```
-
-## Integration with bar_aggregator
-
-The `bar_aggregator.publisher` pushes events into the Data Manager:
-
-```python
-# In bar_aggregator publisher callback
-bar = BarData.from_bar_state(bar_state)
-await data_manager.on_bar_event(
-    symbol="BTCUSDT",
-    interval="5m",
-    bar=bar,
-    event_type=DataEventType.BAR_CLOSED,
-)
-```
-
-## Integration with backfill
-
-```python
-# After backfill fetches and reconciles bars
-bars = [BarData.from_storage_row(r) for r in rows]
-await data_manager.on_bars_backfilled("BTCUSDT", "1m", bars)
-```
-
-## Custom Storage Backend
-
-Implement the `StorageBackend` protocol:
-
-```python
-class MyPostgresStorage:
-    def query_bars(self, symbol, interval, start_ms=None, end_ms=None, limit=None, order="ASC"):
-        ...
-    def upsert_bars(self, symbol, interval, rows, source="data_manager"):
-        ...
-    def get_bounds(self, symbol, interval):
-        ...
-    def delete_bars(self, symbol, interval, start_ms=None, end_ms=None):
-        ...
-    def fetch_before(self, symbol, interval, before_ms, limit=500):
-        ...
-
-dm.set_storage(MyPostgresStorage())
-```
-
-## Diagnostics
-
-```python
-snapshot = dm.snapshot()
-# Returns a full JSON-serializable dict with:
-# - cache stats (hits, misses, series counts)
-# - query metrics (total queries, cache hit rate)
-# - event bus state (subscriber counts, events emitted/dropped)
-# - stream info (active streams, health)
-# - full config
+async for event in dm.subscribe_iter(symbol="BTCUSDT", interval="1m"):
+    print(event.to_dict())
 ```
 
 ## Configuration
 
-All configuration is via `DataManagerConfig`:
+`DataManagerConfig` groups:
 
-```python
-from app.data_engine.data_manager import (
-    DataManagerConfig, CacheConfig, QueryConfig, EventBusConfig, CoordinatorConfig
-)
+| Section | Important Fields |
+|---|---|
+| `cache` | `max_bars_per_series`, `max_series`, `prewarm_bars`, `ttl_seconds` |
+| `query` | `default_limit`, `max_limit`, `sync_backfill_timeout_seconds`, `auto_backfill` |
+| `event_bus` | `subscriber_queue_size`, `emit_bar_updated`, `emit_bar_created` |
+| `coordinator` | `auto_start_ingestion`, `idle_stream_timeout_seconds`, `base_interval`, `prewarm_intervals`, `prewarm_symbols`, `prewarm_targets` |
 
-config = DataManagerConfig(
-    cache=CacheConfig(
-        max_bars_per_series=5000,   # bars per (symbol, interval)
-        max_series=200,             # max tracked series
-        prewarm_bars=1000,          # bars loaded on first access
-        ttl_seconds=0,              # 0 = never expire
-    ),
-    query=QueryConfig(
-        default_limit=500,
-        max_limit=10000,
-        auto_backfill=True,
-    ),
-    event_bus=EventBusConfig(
-        subscriber_queue_size=1000,
-        emit_bar_updated=True,
-        emit_bar_created=True,
-    ),
-    coordinator=CoordinatorConfig(
-        auto_start_ingestion=True,
-        idle_stream_timeout_seconds=300,
-        base_interval="1m",
-        prewarm_symbols=["BTCUSDT"],
-        prewarm_intervals={"1m": 1, "5m": 3, "1h": 30},
-    ),
-)
+## Maintenance
 
-dm = DataManager(config)
+`DataManager` exposes maintenance through facade methods used by settings API:
+
+- `repair_custom_storage()`
+- `scan_and_fill_storage_gaps()`
+- `scan_storage_gaps()`
+- `update_retention_limits()`
+- `retention_snapshot()`
+
+Maintenance methods raise `MaintenanceBusyError` for concurrent conflicting work and `MaintenanceUnavailableError` when a required runtime dependency is missing.
+
+## Tests
+
+```bash
+cd backend
+python -m pytest -q \
+  tests/test_query_engine_paths.py \
+  tests/test_backfill_coordinator.py \
+  tests/test_data_manager_warm_start_bridge.py \
+  tests/test_maintenance_facade.py \
+  tests/test_price_subscription_services.py
 ```

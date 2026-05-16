@@ -192,3 +192,38 @@ def test_query_engine_reports_interior_missing_ranges() -> None:
         "missing_bars": 1,
     }]
     assert triggered == [("BTC-USDT", "1m", 120_000, 120_000, "okx", "spot")]
+
+
+def test_query_before_keeps_has_more_when_backfill_is_deferred_to_facade() -> None:
+    class _BeforeStorage:
+        def fetch_before(self, **kwargs):
+            return []
+
+    engine = QueryEngine(
+        cache=BarCache(),
+        storage=_BeforeStorage(),  # type: ignore[arg-type]
+    )
+
+    result = engine.query_before(
+        "BTCUSDT",
+        "1h",
+        before_ms=36_000_000,
+        limit=2,
+        exchange="binance",
+        market_type="spot",
+    )
+
+    assert result.bars == []
+    assert result.backfill_triggered is False
+    assert result.has_more is True
+    assert [r.to_dict() for r in result.missing_ranges] == [{
+        "symbol": "BTCUSDT",
+        "interval": "1h",
+        "exchange": "binance",
+        "market_type": "spot",
+        "start_ms": 28_800_000,
+        "end_ms": 32_400_000,
+        "reason": "load_more_shortfall",
+        "status": "detected",
+        "missing_bars": 2,
+    }]

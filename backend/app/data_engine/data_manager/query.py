@@ -511,7 +511,7 @@ class QueryEngine:
         #   can retry after backfill completes
         if len(merged) >= effective_limit:
             has_more = True
-        elif backfill_triggered:
+        elif backfill_triggered or missing_ranges:
             has_more = True
         elif not merged and not storage_bars:
             # Nothing found anywhere — no more data

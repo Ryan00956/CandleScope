@@ -586,6 +586,21 @@ const ChartPane = forwardRef(function ChartPane({
 
         const shouldFullReplace = !isNormalTrailingUpdate;
 
+        // Capture the user's current time-based visible range BEFORE setData,
+        // so that left-prepend backfills (drag into blank area) don't shift
+        // the visible window. lightweight-charts' setData() resets/reinterprets
+        // the logical range; restoring by time keeps the same bars in view
+        // regardless of how many bars were prepended on the left.
+        // Skip on first load (prev.length === 0) to preserve the saved-range
+        // restoration path in MultiPaneChart.
+        const chart = chartRef.current;
+        let prevTimeRange = null;
+        if (shouldFullReplace && prev.length > 0 && chart) {
+            try {
+                prevTimeRange = chart.timeScale().getVisibleRange();
+            } catch { /* */ }
+        }
+
         try {
             isSyncingRef.current = true;
             if (shouldFullReplace) {
@@ -596,6 +611,20 @@ const ChartPane = forwardRef(function ChartPane({
                 }
                 deduped.sort((a, b) => a.time - b.time);
                 mainSeriesRef.current.setData(deduped.map(toCandlePoint));
+
+                // Restore the pre-setData time window so the chart doesn't
+                // visually jump after a left-side backfill prepend. Kept
+                // inside the isSyncingRef guard so the resulting logical
+                // range event does NOT propagate to MultiPaneChart (which
+                // would otherwise re-trigger onNeedMoreLeft / save the
+                // shifted range).
+                if (prevTimeRange
+                    && Number.isFinite(prevTimeRange.from)
+                    && Number.isFinite(prevTimeRange.to)) {
+                    try {
+                        chart.timeScale().setVisibleRange(prevTimeRange);
+                    } catch { /* range may be out of bounds; ignore */ }
+                }
             } else {
                 const start = Math.max(0, prev.length - 1);
                 for (let i = start; i < data.length; i++) {

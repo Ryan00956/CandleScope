@@ -627,6 +627,7 @@ export default function App() {
     updateIndicatorParams,
     updateIndicatorScript,
     recompute: recomputeIndicatorsWithUI,
+    requestIndicatorRange,
     mainOverlayLines,
     subPanes,
     // Extended output types (Pyne drawing API)
@@ -1457,6 +1458,8 @@ export default function App() {
                     .then((beforeResult) => {
                       const older = beforeResult?.data || [];
                       if (older.length > 0) {
+                        const patchStart = older[0]?.time;
+                        const patchEnd = older[older.length - 1]?.time;
                         const key = cacheKey(bfSymbol, bfInterval, bfMarketType, bfExchange);
                         const existingCache = chartDataCacheRef.current.get(key);
                         const merged = existingCache && existingCache.length > 0
@@ -1470,6 +1473,9 @@ export default function App() {
                             saveToCache(bfSymbol, bfInterval, m);
                             return m;
                           });
+                          if (patchStart && patchEnd) {
+                            requestIndicatorRange?.(patchStart, patchEnd);
+                          }
                           setDatasetKey((v) => v + 1);
                         }
                         pendingLoadMoreLeftRef.current.delete(pendingKey);
@@ -1583,7 +1589,7 @@ export default function App() {
       }
       liveSubscribedIntervalsRef.current = new Set();
     };
-  }, [cacheKey, exchange, marketType, saveToCache, syncSocketSubscriptions, symbol, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
+  }, [cacheKey, exchange, marketType, requestIndicatorRange, saveToCache, syncSocketSubscriptions, symbol, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
 
   useEffect(() => {
     syncSocketSubscriptions(socketRef.current, trackedIntervals);
@@ -1827,10 +1833,11 @@ export default function App() {
   }, [cacheKey, exchange, marketType, recoverGaps, saveToCache, symbol, updateLastPrice]);
 
   // ---- handle load more left ----
+  const oldestChartTime = chartData[0]?.time ?? null;
   const handleNeedMoreLeft = useCallback(
     async (oldestLoadedTime) => {
       if (loading || loadingMoreLeft || !hasMoreLeft || dataSource === "mock") return;
-      if (!chartData.length) return;
+      if (oldestChartTime == null) return;
 
       // ── Cooldown: prevent rapid repeated calls ──
       // Uses adaptive cooldown: longer when backend is backfilling (0 bars returned)
@@ -1838,7 +1845,7 @@ export default function App() {
       const lastCall = needMoreLeftCooldownRef.current.get(cooldownKey) || 0;
       if (Date.now() - lastCall < NEED_MORE_LEFT_COOLDOWN_MS) return;
 
-      const before = oldestLoadedTime || chartData[0].time;
+      const before = oldestLoadedTime || oldestChartTime;
       const pendingKey = cacheKey(symbol, interval);
       setLoadingMoreLeft(true);
       try {
@@ -1846,11 +1853,16 @@ export default function App() {
         const older = result.data || [];
 
         if (older.length > 0) {
+          const patchStart = older[0]?.time;
+          const patchEnd = older[older.length - 1]?.time;
           setChartData((prev) => {
             const merged = mergeByTime(older, prev);
             saveToCache(symbol, interval, merged);
             return merged;
           });
+          if (patchStart && patchEnd) {
+            requestIndicatorRange?.(patchStart, patchEnd);
+          }
           // Got data — clear any pending wait for this series.
           pendingLoadMoreLeftRef.current.delete(pendingKey);
           // Normal cooldown on successful fetch
@@ -1905,7 +1917,7 @@ export default function App() {
         setLoadingMoreLeft(false);
       }
     },
-    [cacheKey, chartData.length, dataSource, exchange, hasMoreLeft, interval, loading, loadingMoreLeft, marketType, saveToCache, symbol],
+    [cacheKey, dataSource, exchange, hasMoreLeft, interval, loading, loadingMoreLeft, marketType, oldestChartTime, requestIndicatorRange, saveToCache, symbol],
   );
 
   // Keep latest handleNeedMoreLeft addressable from async callbacks (safety-net

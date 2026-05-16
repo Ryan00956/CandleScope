@@ -563,6 +563,91 @@ def test_pyne_ws_snapshot_message_runs_script() -> None:
     assert msg["markers"][0]["data"][0]["text"] == "X"
 
 
+def test_indicator_range_command_supports_load_before_and_clamps_bars() -> None:
+    start_s, end_s, bars = stream_api._range_from_indicator_command(
+        action="load_before",
+        msg={"before": 1_700_000_000, "bars": stream_api.INDICATOR_MAX_RANGE_BARS + 100},
+        interval="1h",
+    )
+
+    assert bars == stream_api.INDICATOR_MAX_RANGE_BARS
+    assert end_s == 1_700_000_000 - 3600
+    assert start_s == end_s - (bars - 1) * 3600
+
+
+def test_indicator_patch_from_snapshot_filters_time_series_payloads() -> None:
+    payload = {
+        "type": "indicator.snapshot",
+        "lines": [
+            {
+                "name": "MA",
+                "data": [{"time": 10, "value": 1}, {"time": 20, "value": 2}, {"time": 30, "value": 3}],
+                "colorData": [{"time": 20, "color": "#fff"}, {"time": 30, "color": "#000"}],
+            }
+        ],
+        "series": [
+            {
+                "id": "s1",
+                "data": [{"time": 10, "value": 1}, {"time": 20, "value": 2}],
+                "style": {"colorData": [{"time": 20, "color": "#fff"}, {"time": 30, "color": "#000"}]},
+            }
+        ],
+        "markers": [{"id": "m1", "data": [{"time": 10}, {"time": 20}]}],
+        "annotations": [
+            {"id": "marker", "type": "marker", "data": [{"time": 10}, {"time": 20}]},
+            {"id": "hline", "type": "hline", "data": [{"value": 5}]},
+        ],
+    }
+
+    patch = stream_api._patch_from_snapshot(payload, reason="load_range", start_s=20, end_s=20)
+
+    assert patch["type"] == "indicator.patch"
+    assert patch["range"] == {"start": 20, "end": 20}
+    assert patch["lines"][0]["data"] == [{"time": 20, "value": 2}]
+    assert patch["lines"][0]["colorData"] == [{"time": 20, "color": "#fff"}]
+    assert patch["series"][0]["data"] == [{"time": 20, "value": 2}]
+    assert patch["series"][0]["style"]["colorData"] == [{"time": 20, "color": "#fff"}]
+    assert patch["markers"][0]["data"] == [{"time": 20}]
+    assert patch["annotations"][0]["data"] == [{"time": 20}]
+    assert patch["annotations"][1]["data"] == [{"value": 5}]
+
+
+def test_pyne_ws_bar_update_sends_single_bar_patch() -> None:
+    bars = [BarData.from_dict(item) for item in _bars(30)]
+    bar_time = bars[-1].time
+
+    class FakeDataManager:
+        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
+            class Result:
+                pass
+
+            result = Result()
+            result.bars = bars
+            return result
+
+    msg = stream_api._compute_pyne_snapshot_message(
+        "custom-1",
+        FakeDataManager(),
+        {
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "name": "Custom",
+            "script": 'plot(close * 2, title="Double")',
+            "params": {},
+            "securityMode": "safe",
+            "historyLimit": 100,
+        },
+        bar_time=bar_time,
+    )
+
+    assert msg["type"] == "indicator.patch"
+    assert msg["reason"] == "bar_update"
+    assert msg["range"] == {"start": bar_time, "end": bar_time}
+    assert msg["lines"][0]["data"] == [{"time": bar_time, "value": bars[-1].close * 2}]
+
+
 @pytest.mark.anyio
 async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monkeypatch) -> None:
     store = CustomIndicatorStore(tmp_path / "custom_indicators.json")

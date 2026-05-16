@@ -173,6 +173,80 @@ function upsertLinePoint(data, point) {
   return next;
 }
 
+function mergeTimeData(existing = [], incoming = []) {
+  const byTime = new Map();
+  for (const item of existing || []) {
+    if (item?.time == null) continue;
+    byTime.set(item.time, item);
+  }
+  for (const item of incoming || []) {
+    if (item?.time == null) continue;
+    byTime.set(item.time, { ...(byTime.get(item.time) || {}), ...item });
+  }
+  return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
+}
+
+function lineIdentity(line, index = 0) {
+  return String(line?.outputName || line?.id || line?.localId || line?.name || line?.title || `line-${index}`);
+}
+
+function mergeIndicatorLines(existing = [], incoming = []) {
+  const merged = [...(existing || [])];
+  const indexByKey = new Map();
+  merged.forEach((line, index) => {
+    indexByKey.set(lineIdentity(line, index), index);
+  });
+
+  incoming.forEach((line, incomingIndex) => {
+    const key = lineIdentity(line, incomingIndex);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex == null) {
+      merged.push(line);
+      indexByKey.set(key, merged.length - 1);
+      return;
+    }
+    const current = merged[existingIndex];
+    merged[existingIndex] = {
+      ...current,
+      ...line,
+      data: mergeTimeData(current.data, line.data),
+      ...(current.colorData || line.colorData
+        ? { colorData: mergeTimeData(current.colorData, line.colorData) }
+        : {}),
+    };
+  });
+
+  return merged;
+}
+
+function itemIdentity(item, index = 0) {
+  return String(item?.id || item?.name || item?.title || item?.indicatorId || `item-${index}`);
+}
+
+function mergeIndicatorItems(existing = [], incoming = []) {
+  const merged = [...(existing || [])];
+  const indexByKey = new Map();
+  merged.forEach((item, index) => {
+    indexByKey.set(itemIdentity(item, index), index);
+  });
+  incoming.forEach((item, incomingIndex) => {
+    const key = itemIdentity(item, incomingIndex);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex == null) {
+      merged.push(item);
+      indexByKey.set(key, merged.length - 1);
+      return;
+    }
+    const current = merged[existingIndex];
+    merged[existingIndex] = {
+      ...current,
+      ...item,
+      data: mergeTimeData(current.data, item.data),
+    };
+  });
+  return merged;
+}
+
 function withIndicatorId(items, indicatorId) {
   return (items || []).map((item) => ({ ...item, indicatorId }));
 }
@@ -475,6 +549,63 @@ export function useIndicators({
     }
   }, []);
 
+  const applyWsPatch = useCallback((indicatorId, payload) => {
+    const normalized = normalizeIndicatorPayload(payload, indicatorId);
+    setActiveIndicators((prev) =>
+      prev.map((ind) =>
+        ind.id === indicatorId
+          ? {
+              ...ind,
+              lines: mergeIndicatorLines(ind.lines || [], normalized.lines),
+              error: payload?.ok === false ? formatIndicatorError(payload) : null,
+            }
+          : ind
+      )
+    );
+    setMarkers((prev) => mergeIndicatorItems(
+      prev.filter((item) => item.indicatorId !== indicatorId),
+      [
+        ...prev.filter((item) => item.indicatorId === indicatorId),
+        ...normalized.markers,
+      ],
+    ));
+    setFills((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...mergeIndicatorItems(
+        prev.filter((item) => item.indicatorId === indicatorId),
+        normalized.fills,
+      ),
+    ]);
+    setHlines((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...mergeIndicatorItems(
+        prev.filter((item) => item.indicatorId === indicatorId),
+        normalized.hlines,
+      ),
+    ]);
+    setBgcolors((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...mergeIndicatorItems(
+        prev.filter((item) => item.indicatorId === indicatorId),
+        normalized.bgcolors,
+      ),
+    ]);
+    setBarcolors((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...mergeIndicatorItems(
+        prev.filter((item) => item.indicatorId === indicatorId),
+        normalized.barcolors,
+      ),
+    ]);
+    setSignals((prev) => [
+      ...prev.filter((item) => item.indicatorId !== indicatorId),
+      ...mergeIndicatorItems(
+        prev.filter((item) => item.indicatorId === indicatorId),
+        normalized.signals,
+      ),
+    ]);
+  }, []);
+
   const applyWsValues = useCallback((indicatorId, values, barTime) => {
     if (!values || !barTime) return;
     const currentChartData = chartDataRef.current || [];
@@ -646,6 +777,8 @@ export function useIndicators({
           if (!msg.clientId) return;
           if (msg.type === "indicator.snapshot") {
             applyWsSnapshot(msg.clientId, msg);
+          } else if (msg.type === "indicator.patch") {
+            applyWsPatch(msg.clientId, msg);
           } else if (msg.type === "indicator.preview" || msg.type === "indicator.update") {
             applyWsValues(msg.clientId, msg.values || {}, msg.barTime);
           } else if (msg.type === "indicator.error" || msg.type === "error") {
@@ -685,6 +818,7 @@ export function useIndicators({
     };
   }, [
     applyWsSnapshot,
+    applyWsPatch,
     applyWsValues,
     candleDownColor,
     candleUpColor,
@@ -896,6 +1030,33 @@ export function useIndicators({
     computeAll(force);
   }, [computeAll]);
 
+  const requestIndicatorRange = useCallback((start, end) => {
+    const socket = indicatorWsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const startSec = Math.floor(Number(start));
+    const endSec = Math.floor(Number(end));
+    if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || startSec <= 0 || endSec <= 0 || startSec > endSec) {
+      return false;
+    }
+
+    const hostedIndicators = activeIndicatorsRef.current.filter(
+      (ind) => isWsHostedIndicator(ind) && ind.visible !== false
+    );
+    for (const ind of hostedIndicators) {
+      try {
+        socket.send(JSON.stringify({
+          action: "load_range",
+          clientId: ind.id,
+          start: startSec,
+          end: endSec,
+        }));
+      } catch (err) {
+        console.warn("Indicator range request failed:", err);
+      }
+    }
+    return hostedIndicators.length > 0;
+  }, []);
+
   // ── Reset compute tracking when dataset changes ──
   const prevDatasetKeyRef = useRef(datasetKey);
   useEffect(() => {
@@ -992,6 +1153,7 @@ export function useIndicators({
     updateIndicatorScript,
     computeAll,
     recompute,
+    requestIndicatorRange,
     // Multi-pane output
     mainOverlayLines,
     subPanes,

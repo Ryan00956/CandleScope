@@ -206,6 +206,8 @@ backend/data/*.db
 backend/data/*.db-shm
 backend/data/*.db-wal
 backend/data/*.sqlite*
+backend/data/custom_indicators.json
+backend/data/custom_indicators.json.tmp
 
 # CandleScope local-only agent state and construction notes
 .codex

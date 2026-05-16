@@ -19,7 +19,8 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from app.core import config
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 from app.core.market import VALID_INTERVALS, parse_custom_interval
-from app.indicator import registry as indicator_registry
+from app.data_engine.interval_policy import parse_interval_ms
+from app.indicator import create_engine, registry as indicator_registry
 from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.errors import error_detail
 from app.indicator.events import IndicatorEvent, IndicatorEventType
@@ -32,6 +33,8 @@ from app.indicator.serialization import (
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 _stream_custom_store = CustomIndicatorStore()
+INDICATOR_DEFAULT_PAGE_BARS = 500
+INDICATOR_MAX_RANGE_BARS = 5000
 
 
 def _validate_ws_interval(interval: str) -> bool:
@@ -560,6 +563,15 @@ async def _indicator_stream_loop(websocket: WebSocket, dm, indicator_engine) -> 
                     send_json=_safe_send_json,
                     msg=msg,
                 )
+            elif action in {"load_range", "load_before"}:
+                await _handle_indicator_range_request(
+                    dm=dm,
+                    client_meta=client_meta,
+                    client_id=str(msg.get("clientId") or "").strip(),
+                    action=action,
+                    msg=msg,
+                    send_json=_safe_send_json,
+                )
             elif action == "unsubscribe":
                 client_id = str(msg.get("clientId") or "").strip()
                 _unsubscribe_indicator_client(
@@ -579,7 +591,7 @@ async def _indicator_stream_loop(websocket: WebSocket, dm, indicator_engine) -> 
                 await _safe_send_json(build_ws_error_payload(
                     "UNKNOWN_ACTION",
                     f"Unknown action: {action}",
-                    hint="指标 WS 当前支持 subscribe、unsubscribe。",
+                    hint="指标 WS 当前支持 subscribe、unsubscribe、load_range、load_before。",
                 ))
 
     except WebSocketDisconnect:
@@ -613,6 +625,310 @@ async def _indicator_stream_loop(websocket: WebSocket, dm, indicator_engine) -> 
         custom_handles.clear()
         custom_tasks.clear()
         client_meta.clear()
+
+
+def _clamp_indicator_bars(value: Any, default: int = INDICATOR_DEFAULT_PAGE_BARS) -> int:
+    try:
+        bars = int(value)
+    except (TypeError, ValueError):
+        bars = default
+    return min(max(bars, 1), INDICATOR_MAX_RANGE_BARS)
+
+
+def _indicator_warmup_bars(name: str, params: dict[str, Any]) -> int:
+    normalized = str(name or "").upper().strip()
+
+    def _param_int(key: str, fallback: int) -> int:
+        try:
+            return max(1, int(params.get(key, fallback)))
+        except (TypeError, ValueError):
+            return fallback
+
+    if normalized == "VOL":
+        return 0
+    if normalized in {"MA", "SMA", "BOLL"}:
+        return max(0, _param_int("period", 20) - 1)
+    if normalized in {"RSI", "ATR"}:
+        return _param_int("period", 14) * 3
+    if normalized == "EMA":
+        return _param_int("period", 20) * 5
+    if normalized == "MACD":
+        return _param_int("slow", 26) * 5 + _param_int("signal", 9) * 3
+    return _param_int("warmup", 200)
+
+
+def _range_from_indicator_command(
+    *,
+    action: str,
+    msg: dict,
+    interval: str,
+) -> tuple[int, int, int]:
+    interval_ms = parse_interval_ms(interval)
+    if interval_ms is None or interval_ms <= 0:
+        raise ValueError(f"Unsupported interval: {interval}")
+    interval_s = interval_ms // 1000
+
+    if action == "load_before":
+        before = int(msg.get("before") or 0)
+        if before <= 0:
+            raise ValueError("before must be a positive unix timestamp")
+        bars = _clamp_indicator_bars(msg.get("bars"))
+        end_s = before - interval_s
+        start_s = end_s - (bars - 1) * interval_s
+        return start_s, end_s, bars
+
+    start_s = int(msg.get("start") or 0)
+    end_s = int(msg.get("end") or 0)
+    if start_s <= 0 or end_s <= 0 or start_s > end_s:
+        raise ValueError("start/end must be positive unix timestamps with start <= end")
+    bars = ((end_s - start_s) // interval_s) + 1
+    if bars > INDICATOR_MAX_RANGE_BARS:
+        raise ValueError(f"range too large: {bars} bars > {INDICATOR_MAX_RANGE_BARS}")
+    return start_s, end_s, int(bars)
+
+
+def _missing_overlaps_target(missing_ranges: list[Any], start_ms: int, end_ms: int) -> bool:
+    for missing in missing_ranges or []:
+        m_start = getattr(missing, "start_ms", None)
+        m_end = getattr(missing, "end_ms", None)
+        if m_start is None or m_end is None:
+            continue
+        if int(m_start) <= end_ms and int(m_end) >= start_ms:
+            return True
+    return False
+
+
+def _filter_points_to_range(points: list[dict[str, Any]], start_s: int, end_s: int) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for point in points or []:
+        try:
+            ts = int(point.get("time"))
+        except (TypeError, ValueError):
+            continue
+        if start_s <= ts <= end_s:
+            filtered.append(point)
+    return filtered
+
+
+def _filter_payload_to_range(payload: dict[str, Any], start_s: int, end_s: int) -> dict[str, Any]:
+    """Trim a snapshot-like indicator payload down to a range patch."""
+    next_payload = dict(payload)
+
+    if isinstance(next_payload.get("lines"), list):
+        next_payload["lines"] = [
+            {
+                **line,
+                "data": _filter_points_to_range(line.get("data") or [], start_s, end_s),
+                **(
+                    {"colorData": _filter_points_to_range(line.get("colorData") or [], start_s, end_s)}
+                    if line.get("colorData")
+                    else {}
+                ),
+            }
+            for line in next_payload["lines"]
+        ]
+
+    if isinstance(next_payload.get("series"), list):
+        series = []
+        for item in next_payload["series"]:
+            style = dict(item.get("style") or {})
+            if style.get("colorData"):
+                style["colorData"] = _filter_points_to_range(style.get("colorData") or [], start_s, end_s)
+            series.append({
+                **item,
+                "data": _filter_points_to_range(item.get("data") or [], start_s, end_s),
+                "style": style,
+            })
+        next_payload["series"] = series
+
+    if isinstance(next_payload.get("annotations"), list):
+        annotations = []
+        for item in next_payload["annotations"]:
+            data = item.get("data") or []
+            if data and isinstance(data[0], dict) and "time" in data[0]:
+                data = _filter_points_to_range(data, start_s, end_s)
+            annotations.append({**item, "data": data})
+        next_payload["annotations"] = annotations
+
+    for key in ("markers", "bgcolors", "barcolors", "signals"):
+        if isinstance(next_payload.get(key), list):
+            next_payload[key] = [
+                {**group, "data": _filter_points_to_range(group.get("data") or [], start_s, end_s)}
+                for group in next_payload[key]
+            ]
+
+    return next_payload
+
+
+def _patch_from_snapshot(
+    payload: dict[str, Any],
+    *,
+    reason: str,
+    start_s: int,
+    end_s: int,
+) -> dict[str, Any]:
+    patch = _filter_payload_to_range(payload, start_s, end_s)
+    patch.update({
+        "type": "indicator.patch",
+        "reason": reason,
+        "range": {"start": start_s, "end": end_s},
+    })
+    return patch
+
+
+async def _handle_indicator_range_request(
+    *,
+    dm,
+    client_meta: dict[str, dict],
+    client_id: str,
+    action: str,
+    msg: dict,
+    send_json,
+) -> None:
+    if not client_id:
+        await send_json(build_ws_error_payload(
+            "INDICATOR_CLIENT_ID_REQUIRED",
+            "clientId is required.",
+            hint="load_range/load_before 需要指定已有指标订阅的 clientId。",
+        ))
+        return
+
+    meta = client_meta.get(client_id)
+    if meta is None:
+        await send_json(build_ws_error_payload(
+            "INDICATOR_CLIENT_NOT_FOUND",
+            f"Indicator client '{client_id}' is not subscribed.",
+            client_id=client_id,
+            hint="请先 subscribe，再请求指标历史 patch。",
+        ))
+        return
+
+    try:
+        start_s, end_s, target_bars = _range_from_indicator_command(
+            action=action,
+            msg=msg,
+            interval=meta["interval"],
+        )
+    except ValueError as exc:
+        await send_json(build_ws_error_payload(
+            "INVALID_INDICATOR_RANGE",
+            str(exc),
+            client_id=client_id,
+            hint="请检查 start/end 或 before/bars 参数。",
+        ))
+        return
+
+    try:
+        if meta.get("kind") == "script":
+            payload = await _compute_pyne_range_patch_async(client_id, dm, meta, start_s, end_s, reason=action)
+        else:
+            payload = await asyncio.to_thread(
+                _compute_builtin_range_patch,
+                client_id,
+                dm,
+                meta,
+                start_s,
+                end_s,
+                action,
+                target_bars,
+            )
+    except RuntimeError as exc:
+        await send_json(build_ws_error_payload(
+            "INDICATOR_RANGE_NOT_READY",
+            str(exc),
+            client_id=client_id,
+            detail={
+                "range": {"start": start_s, "end": end_s},
+                "retryAfterMs": 3000,
+            },
+            hint="K 线历史仍在补齐，稍后重试该指标区间。",
+        ))
+        return
+    except Exception as exc:
+        await send_json(build_ws_error_payload(
+            "INDICATOR_RANGE_COMPUTE_FAILED",
+            str(exc),
+            client_id=client_id,
+            detail={"range": {"start": start_s, "end": end_s}},
+            hint="指标历史区间计算失败，请检查指标参数或脚本。",
+        ))
+        return
+
+    await send_json(payload)
+
+
+def _query_indicator_compute_bars(
+    dm,
+    meta: dict[str, Any],
+    start_s: int,
+    end_s: int,
+    *,
+    warmup_bars: int,
+) -> list[Any]:
+    interval_ms = parse_interval_ms(meta["interval"])
+    if interval_ms is None or interval_ms <= 0:
+        raise ValueError(f"Unsupported interval: {meta['interval']}")
+    start_ms = start_s * 1000
+    end_ms = end_s * 1000
+    compute_start_ms = max(0, start_ms - warmup_bars * interval_ms)
+    needed = int((end_ms - compute_start_ms) // interval_ms) + 1
+    result = dm.query(
+        meta["symbol"],
+        meta["interval"],
+        start_ms=compute_start_ms,
+        end_ms=end_ms,
+        limit=needed + 5,
+        exchange=meta["exchange"],
+        market_type=meta["market_type"],
+        auto_backfill=True,
+    )
+    if _missing_overlaps_target(result.missing_ranges, start_ms, end_ms):
+        raise RuntimeError("target K-line range is still backfilling")
+    bars = [bar for bar in result.bars if bar.time <= end_s]
+    if not any(start_s <= bar.time <= end_s for bar in bars):
+        raise RuntimeError("target K-line range is not available yet")
+    return bars
+
+
+def _compute_builtin_range_patch(
+    client_id: str,
+    dm,
+    meta: dict[str, Any],
+    start_s: int,
+    end_s: int,
+    reason: str,
+    target_bars: int,
+) -> dict[str, Any]:
+    name = str(meta.get("name") or "").upper()
+    params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+    warmup = _indicator_warmup_bars(name, params)
+    bars = _query_indicator_compute_bars(dm, meta, start_s, end_s, warmup_bars=warmup)
+
+    engine = create_engine()
+    result = engine.compute(
+        symbol=meta["symbol"],
+        interval=meta["interval"],
+        market_type=meta["market_type"],
+        indicator_name=name,
+        params=params,
+        bars=bars,
+        exchange=meta["exchange"],
+    )
+    payload = build_indicator_snapshot_payload(
+        client_id=client_id,
+        indicator_id=meta.get("indicatorId") or f"{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{name}",
+        exchange=meta["exchange"],
+        symbol=meta["symbol"],
+        interval=meta["interval"],
+        market_type=meta["market_type"],
+        name=name,
+        params=params,
+        result=result,
+    )
+    patch = _patch_from_snapshot(payload, reason=reason, start_s=start_s, end_s=end_s)
+    patch["warmupBars"] = warmup
+    patch["targetBars"] = target_bars
+    return patch
 
 
 async def _handle_indicator_subscribe(
@@ -744,10 +1060,14 @@ async def _handle_indicator_subscribe(
     )
     subscribed[client_id] = key
     client_meta[client_id] = {
+        "kind": "builtin",
         "exchange": exchange,
         "symbol": symbol,
         "interval": interval,
         "market_type": market_type,
+        "name": indicator_name,
+        "params": params,
+        "indicatorId": key.uid,
     }
 
     await send_json(build_indicator_snapshot_payload(
@@ -847,6 +1167,7 @@ async def _handle_pyne_indicator_subscribe(
         "market_type": market_type,
         "name": name,
         "customId": custom_id or None,
+        "indicatorId": f"pyne:{exchange}:{market_type}:{symbol}:{interval}:{client_id}",
         "script": script,
         "params": params,
         "securityMode": security_mode,
@@ -860,6 +1181,9 @@ async def _handle_pyne_indicator_subscribe(
     from app.data_engine.data_manager.models import DataEventType
 
     async def _on_data_event(event) -> None:
+        if event.event_type == DataEventType.BACKFILL_COMPLETED:
+            return
+
         existing = custom_tasks.get(client_id)
         if existing is not None and not existing.done():
             existing.cancel()
@@ -937,9 +1261,9 @@ def _compute_pyne_snapshot_message(
         params=meta["params"],
         security_mode=meta.get("securityMode"),
     )
-    return build_pyne_snapshot_payload(
+    payload = build_pyne_snapshot_payload(
         client_id=client_id,
-        indicator_id=f"pyne:{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{client_id}",
+        indicator_id=meta.get("indicatorId") or f"pyne:{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{client_id}",
         exchange=meta["exchange"],
         symbol=meta["symbol"],
         interval=meta["interval"],
@@ -949,6 +1273,50 @@ def _compute_pyne_snapshot_message(
         result=result,
         bar_time=bar_time,
     )
+    if bar_time:
+        return _patch_from_snapshot(
+            payload,
+            reason="bar_update",
+            start_s=int(bar_time),
+            end_s=int(bar_time),
+        )
+    return payload
+
+
+def _compute_pyne_range_patch(
+    client_id: str,
+    dm,
+    meta: dict,
+    start_s: int,
+    end_s: int,
+    reason: str = "load_range",
+) -> dict:
+    params = meta.get("params") if isinstance(meta.get("params"), dict) else {}
+    warmup = _indicator_warmup_bars("PYNE", params)
+    bars = _query_indicator_compute_bars(dm, meta, start_s, end_s, warmup_bars=warmup)
+    if len(bars) > max(int(config.PYNE_MAX_BARS), 1):
+        raise ValueError(f"Too many Pyne bars: {len(bars)} > {config.PYNE_MAX_BARS}")
+    ohlcv = [bar.to_dict() for bar in bars]
+    result = execute_pyne_script(
+        script=meta["script"],
+        ohlcv=ohlcv,
+        params=params,
+        security_mode=meta.get("securityMode"),
+    )
+    payload = build_pyne_snapshot_payload(
+        client_id=client_id,
+        indicator_id=meta.get("indicatorId") or f"pyne:{meta['exchange']}:{meta['market_type']}:{meta['symbol']}:{meta['interval']}:{client_id}",
+        exchange=meta["exchange"],
+        symbol=meta["symbol"],
+        interval=meta["interval"],
+        market_type=meta["market_type"],
+        name=meta["name"],
+        params=params,
+        result=result,
+    )
+    patch = _patch_from_snapshot(payload, reason=reason, start_s=start_s, end_s=end_s)
+    patch["warmupBars"] = warmup
+    return patch
 
 
 async def _compute_pyne_snapshot_message_async(
@@ -964,6 +1332,25 @@ async def _compute_pyne_snapshot_message_async(
         dm,
         meta,
         bar_time,
+    )
+
+
+async def _compute_pyne_range_patch_async(
+    client_id: str,
+    dm,
+    meta: dict,
+    start_s: int,
+    end_s: int,
+    reason: str = "load_range",
+) -> dict:
+    return await asyncio.to_thread(
+        _compute_pyne_range_patch,
+        client_id,
+        dm,
+        meta,
+        start_s,
+        end_s,
+        reason,
     )
 
 

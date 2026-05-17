@@ -18,6 +18,8 @@ from typing import Any
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.core import config
+from app.core.executors import run_indicator, run_pyne_wait
+from app.core.runtime_metrics import ws_runtime_metrics
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 from app.core.market import VALID_INTERVALS, parse_custom_interval
 from app.data_engine.interval_policy import parse_interval_ms
@@ -45,6 +47,32 @@ _stream_custom_store = CustomIndicatorStore()
 _pyne_incremental_sessions = PyneIncrementalSessionManager()
 INDICATOR_DEFAULT_PAGE_BARS = 500
 INDICATOR_MAX_RANGE_BARS = 5000
+
+
+def _ws_send_timeout() -> float:
+    return max(0.1, float(config.WS_SEND_TIMEOUT_SECONDS))
+
+
+async def _send_json_with_timeout(websocket: WebSocket, data: dict) -> None:
+    try:
+        await asyncio.wait_for(websocket.send_json(data), timeout=_ws_send_timeout())
+    except asyncio.TimeoutError:
+        ws_runtime_metrics.record_send_timeout("json")
+        raise
+    except Exception:
+        ws_runtime_metrics.record_send_error("json")
+        raise
+
+
+async def _send_text_with_timeout(websocket: WebSocket, data: str) -> None:
+    try:
+        await asyncio.wait_for(websocket.send_text(data), timeout=_ws_send_timeout())
+    except asyncio.TimeoutError:
+        ws_runtime_metrics.record_send_timeout("text")
+        raise
+    except Exception:
+        ws_runtime_metrics.record_send_error("text")
+        raise
 
 
 def _validate_ws_interval(interval: str) -> bool:
@@ -98,7 +126,7 @@ async def kline_stream(
     await websocket.accept()
 
     if not _validate_ws_interval(interval):
-        await websocket.send_json({
+        await _send_json_with_timeout(websocket, {
             "type": "error",
             "detail": f"Unsupported interval: {interval}.",
         })
@@ -108,7 +136,7 @@ async def kline_stream(
     dm = _get_data_manager(websocket)
 
     if dm is None:
-        await websocket.send_json({
+        await _send_json_with_timeout(websocket, {
             "type": "error",
             "detail": "DataManager not initialized. Server is not ready.",
         })
@@ -142,7 +170,7 @@ async def kline_stream_multi(
     await websocket.accept()
 
     try:
-        await websocket.send_json({
+        await _send_json_with_timeout(websocket, {
             "type": "connected",
             "exchange": exchange,
             "symbol": symbol,
@@ -155,7 +183,7 @@ async def kline_stream_multi(
     dm = _get_data_manager(websocket)
 
     if dm is None:
-        await websocket.send_json({
+        await _send_json_with_timeout(websocket, {
             "type": "error",
             "detail": "DataManager not initialized. Server is not ready.",
         })
@@ -186,7 +214,7 @@ async def indicator_stream(websocket: WebSocket) -> None:
     dm = _get_data_manager(websocket)
     indicator_engine = _get_indicator_engine(websocket)
     if dm is None or indicator_engine is None:
-        await websocket.send_json({
+        await _send_json_with_timeout(websocket, {
             "type": "error",
             "code": "INDICATOR_STREAM_NOT_READY",
             "detail": "DataManager or IndicatorEngine not initialized.",
@@ -214,7 +242,7 @@ async def _dm_single_stream(
         # Ensure the ingestion pipeline is running
         await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
 
-        await websocket.send_json({
+        await _send_json_with_timeout(websocket, {
             "type": "subscribed",
             "exchange": exchange,
             "symbol": symbol,
@@ -278,7 +306,7 @@ async def _dm_multi_stream(
         if _ws_closed:
             return False
         try:
-            await websocket.send_json(data)
+            await _send_json_with_timeout(websocket, data)
             return True
         except (RuntimeError, Exception):
             _ws_closed = True
@@ -290,7 +318,7 @@ async def _dm_multi_stream(
         if _ws_closed:
             return False
         try:
-            await websocket.send_text(data)
+            await _send_text_with_timeout(websocket, data)
             return True
         except (RuntimeError, Exception):
             _ws_closed = True
@@ -499,7 +527,7 @@ async def _indicator_stream_loop(websocket: WebSocket, dm, indicator_engine) -> 
         if ws_closed:
             return False
         try:
-            await websocket.send_json(_with_seq(data))
+            await _send_json_with_timeout(websocket, _with_seq(data))
             return True
         except Exception:
             ws_closed = True
@@ -510,7 +538,7 @@ async def _indicator_stream_loop(websocket: WebSocket, dm, indicator_engine) -> 
         if ws_closed:
             return False
         try:
-            await websocket.send_text(data)
+            await _send_text_with_timeout(websocket, data)
             return True
         except Exception:
             ws_closed = True
@@ -526,8 +554,16 @@ async def _indicator_stream_loop(websocket: WebSocket, dm, indicator_engine) -> 
         interval = float(config.INDICATOR_WS_HEARTBEAT_SECONDS)
         if interval <= 0:
             return
+        loop = asyncio.get_running_loop()
+        next_due = loop.time() + interval
         while not ws_closed:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(max(0.0, next_due - loop.time()))
+            now = loop.time()
+            ws_runtime_metrics.record_heartbeat_delay(
+                "indicators",
+                max(0.0, (now - next_due) * 1000),
+            )
+            next_due = now + interval
             if not await _safe_send_json({
                 "type": "heartbeat",
                 "stream": "indicators",
@@ -832,7 +868,7 @@ async def _handle_indicator_range_request(
         if meta.get("kind") == "script":
             payload = await _compute_pyne_range_patch_async(client_id, dm, meta, start_s, end_s, reason=action)
         else:
-            payload = await asyncio.to_thread(
+            payload = await run_indicator(
                 _compute_builtin_range_patch,
                 client_id,
                 dm,
@@ -1546,7 +1582,7 @@ async def _compute_pyne_snapshot_message_async(
     bar_time: int = 0,
 ) -> dict:
     """Compute a Pyne snapshot off the event loop."""
-    return await asyncio.to_thread(
+    return await run_pyne_wait(
         _compute_pyne_snapshot_message,
         client_id,
         dm,
@@ -1562,7 +1598,7 @@ async def _compute_incremental_pyne_bar_message_async(
     *,
     preview: bool,
 ) -> dict:
-    return await asyncio.to_thread(
+    return await run_pyne_wait(
         _compute_incremental_pyne_bar_message,
         client_id,
         meta,
@@ -1579,7 +1615,7 @@ async def _compute_pyne_range_patch_async(
     end_s: int,
     reason: str = "load_range",
 ) -> dict:
-    return await asyncio.to_thread(
+    return await run_pyne_wait(
         _compute_pyne_range_patch,
         client_id,
         dm,
@@ -1723,7 +1759,7 @@ async def _forward_events_to_ws(
                 bar_dict["data"]["is_closed"] = False
 
             try:
-                await websocket.send_json(bar_dict)
+                await _send_json_with_timeout(websocket, bar_dict)
             except Exception:
                 return
 
@@ -1734,6 +1770,6 @@ async def _read_client_messages(websocket: WebSocket) -> None:
         while True:
             message = await websocket.receive_text()
             if message.lower().strip() == "ping":
-                await websocket.send_text("pong")
+                await _send_text_with_timeout(websocket, "pong")
     except WebSocketDisconnect:
         pass

@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.core.config import KLINES_DB_PATH
+from app.core.executors import run_storage
 from app.data_engine.interval_policy import (
     INTERVAL_SECONDS,
     VALID_INTERVALS,
@@ -736,7 +737,7 @@ class AsyncKlinesRepoAdapter:
     not provide.
 
     This adapter wraps the module-level sync functions using
-    ``asyncio.to_thread`` so the backfill pipeline can call them with
+    the shared storage executor so the backfill pipeline can call them with
     ``await``.
 
     Usage::
@@ -761,7 +762,6 @@ class AsyncKlinesRepoAdapter:
         market_type: str | None = None,
     ) -> int | None:
         """Return the latest open_time (ms) stored, or None if empty."""
-        import asyncio
         def _sync():
             bounds = get_bounds(
                 symbol, interval,
@@ -769,7 +769,7 @@ class AsyncKlinesRepoAdapter:
                 market_type=market_type or self._market_type,
             )
             return bounds.get("latest_open_time")
-        return await asyncio.to_thread(_sync)
+        return await run_storage(_sync)
 
     async def get_earliest_time(
         self,
@@ -779,7 +779,6 @@ class AsyncKlinesRepoAdapter:
         market_type: str | None = None,
     ) -> int | None:
         """Return the earliest open_time (ms) stored, or None if empty."""
-        import asyncio
         def _sync():
             bounds = get_bounds(
                 symbol, interval,
@@ -787,7 +786,7 @@ class AsyncKlinesRepoAdapter:
                 market_type=market_type or self._market_type,
             )
             return bounds.get("earliest_open_time")
-        return await asyncio.to_thread(_sync)
+        return await run_storage(_sync)
 
     async def query_time_range(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
@@ -795,7 +794,6 @@ class AsyncKlinesRepoAdapter:
         market_type: str | None = None,
     ) -> list[dict]:
         """Return all bars within [start_ms, end_ms], ordered by open_time ASC."""
-        import asyncio
         resolved_exchange = exchange or self._exchange
         resolved_market_type = market_type or self._market_type
         def _sync():
@@ -803,7 +801,7 @@ class AsyncKlinesRepoAdapter:
                 symbol, interval, start_ms, end_ms, None, "ASC",
                 exchange=resolved_exchange, market_type=resolved_market_type,
             )
-        return await asyncio.to_thread(_sync)
+        return await run_storage(_sync)
 
     async def upsert_bars(
         self,
@@ -815,7 +813,6 @@ class AsyncKlinesRepoAdapter:
         market_type: str | None = None,
     ) -> int:
         """Insert or update bars. Return number of rows affected."""
-        import asyncio
         resolved_exchange = exchange or self._exchange
         resolved_market_type = market_type or self._market_type
         def _sync():
@@ -823,7 +820,7 @@ class AsyncKlinesRepoAdapter:
                 symbol, interval, bars, source,
                 exchange=resolved_exchange, market_type=resolved_market_type,
             )
-        return await asyncio.to_thread(_sync)
+        return await run_storage(_sync)
 
     async def count_bars(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
@@ -831,7 +828,6 @@ class AsyncKlinesRepoAdapter:
         market_type: str | None = None,
     ) -> int:
         """Count bars within [start_ms, end_ms]."""
-        import asyncio
         resolved_exchange = exchange or self._exchange
         resolved_market_type = market_type or self._market_type
         def _sync():
@@ -843,7 +839,7 @@ class AsyncKlinesRepoAdapter:
                     (resolved_exchange, resolved_market_type, symbol, interval, start_ms, end_ms),
                 ).fetchone()
                 return row["cnt"] if row else 0
-        return await asyncio.to_thread(_sync)
+        return await run_storage(_sync)
 
     async def get_existing_open_times(
         self, symbol: str, interval: str, start_ms: int, end_ms: int,
@@ -851,7 +847,6 @@ class AsyncKlinesRepoAdapter:
         market_type: str | None = None,
     ) -> set[int]:
         """Return the set of open_time values that exist in [start_ms, end_ms]."""
-        import asyncio
         resolved_exchange = exchange or self._exchange
         resolved_market_type = market_type or self._market_type
         def _sync():
@@ -863,7 +858,7 @@ class AsyncKlinesRepoAdapter:
                     (resolved_exchange, resolved_market_type, symbol, interval, start_ms, end_ms),
                 ).fetchall()
                 return {r["open_time"] for r in rows}
-        return await asyncio.to_thread(_sync)
+        return await run_storage(_sync)
 
 
 def has_older_than(

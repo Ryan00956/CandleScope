@@ -8,7 +8,8 @@ producers (ingestion → bar_aggregator, backfill, cache) to consumers
 Features:
   * **Topic routing** — events are keyed by ``SeriesKey`` (symbol@interval).
     Subscribers can listen to a specific topic or to all topics (wildcard).
-  * **Callback delivery** — registered async callbacks are fired sequentially.
+  * **Callback delivery** — registered async callbacks are isolated behind
+    per-subscriber bounded queues.
   * **Async-iterator delivery** — ``subscribe_iter()`` returns an
     ``AsyncIterator[DataEvent]`` backed by a bounded queue.
   * **Type filtering** — subscribers can filter by ``DataEventType``.
@@ -16,8 +17,8 @@ Features:
 
 Design constraints:
   * The bus is **in-process only** — no network transport.
-  * Callbacks should be fast and non-blocking; heavy work should be
-    offloaded to tasks or queues.
+  * Callbacks should still be reasonably fast, but a slow callback no longer
+    blocks producers or other subscribers.
   * Queue-based subscribers that fall behind will have events dropped
     (bounded queue with backpressure).
 
@@ -50,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Awaitable
 
 from .config import EventBusConfig
@@ -65,6 +67,36 @@ logger = logging.getLogger("data_manager.event_bus")
 
 # Type for middleware hooks
 MiddlewareHook = Callable[[DataEvent], Awaitable[DataEvent | None]]
+
+
+@dataclass(slots=True)
+class _QueuedEvent:
+    event: DataEvent
+    enqueued_at: float
+
+
+@dataclass(slots=True)
+class _CallbackSubscription:
+    queue: asyncio.Queue[_QueuedEvent | None]
+    handle: SubscriptionHandle
+    task: asyncio.Task | None = None
+    dropped: int = 0
+    last_error: str | None = None
+    delivered: int = 0
+    total_lag_ms: float = 0.0
+    max_lag_ms: float = 0.0
+    last_lag_ms: float = 0.0
+
+
+@dataclass(slots=True)
+class _QueueSubscription:
+    queue: asyncio.Queue[_QueuedEvent | None]
+    handle: SubscriptionHandle
+    dropped: int = 0
+    delivered: int = 0
+    total_lag_ms: float = 0.0
+    max_lag_ms: float = 0.0
+    last_lag_ms: float = 0.0
 
 
 class DataEventBus:
@@ -83,8 +115,11 @@ class DataEventBus:
         # Callback subscriptions: handle.id → SubscriptionHandle
         self._subscriptions: dict[str, SubscriptionHandle] = {}
 
+        # Callback subscriptions delivered through per-subscriber worker queues.
+        self._callback_subs: dict[str, _CallbackSubscription] = {}
+
         # Queue-based subscriptions: handle.id → (queue, handle)
-        self._queue_subs: dict[str, tuple[asyncio.Queue[DataEvent | None], SubscriptionHandle]] = {}
+        self._queue_subs: dict[str, _QueueSubscription] = {}
 
         # Middleware chain (pre-emit hooks)
         self._middleware: list[MiddlewareHook] = []
@@ -129,6 +164,12 @@ class DataEventBus:
             callback=callback,
         )
         self._subscriptions[handle.id] = handle
+        queue: asyncio.Queue[_QueuedEvent | None] = asyncio.Queue(
+            maxsize=self._cfg.subscriber_queue_size,
+        )
+        sub = _CallbackSubscription(queue=queue, handle=handle)
+        self._callback_subs[handle.id] = sub
+        self._ensure_callback_worker(sub)
         logger.debug(
             "Subscription added: id=%s key=%s types=%s",
             handle.id, key, event_types,
@@ -141,14 +182,17 @@ class DataEventBus:
         if removed:
             logger.debug("Subscription removed: id=%s", handle.id)
 
+        callback_entry = self._callback_subs.pop(handle.id, None)
+        if callback_entry:
+            self._put_sentinel(callback_entry.queue)
+            if callback_entry.task is not None:
+                callback_entry.task.cancel()
+            logger.debug("Callback subscription removed: id=%s", handle.id)
+
         # Also check queue subscriptions
         entry = self._queue_subs.pop(handle.id, None)
         if entry:
-            queue, _ = entry
-            try:
-                queue.put_nowait(None)  # sentinel to unblock iterator
-            except asyncio.QueueFull:
-                pass
+            self._put_sentinel(entry.queue)
             logger.debug("Queue subscription removed: id=%s", handle.id)
 
     # ── Public: Subscription (async iterator) ────────────────
@@ -171,24 +215,26 @@ class DataEventBus:
             ):
                 push_to_websocket(event)
         """
-        queue: asyncio.Queue[DataEvent | None] = asyncio.Queue(
+        queue: asyncio.Queue[_QueuedEvent | None] = asyncio.Queue(
             maxsize=self._cfg.subscriber_queue_size,
         )
         handle = SubscriptionHandle(
             key=key,
             event_types=event_types,
         )
-        self._queue_subs[handle.id] = (queue, handle)
+        sub = _QueueSubscription(queue=queue, handle=handle)
+        self._queue_subs[handle.id] = sub
         logger.debug(
             "Iterator subscription added: id=%s key=%s", handle.id, key,
         )
 
         try:
             while True:
-                event = await queue.get()
-                if event is None:
+                item = await queue.get()
+                if item is None:
                     break
-                yield event
+                self._record_queue_lag(sub, item.enqueued_at)
+                yield item.event
         finally:
             self._queue_subs.pop(handle.id, None)
             logger.debug(
@@ -203,9 +249,9 @@ class DataEventBus:
         The event flows through the middleware chain first.  If any
         middleware returns ``None``, the event is suppressed.
 
-        Then it is delivered to:
-          1. Callback subscribers (sequentially)
-          2. Queue subscribers (non-blocking put)
+        Then it is delivered to callback and iterator subscribers via
+        non-blocking queue puts. Slow callbacks are isolated to their own
+        queues and do not block this emit call.
         """
         # Apply config-level filters
         if not self._should_emit(event):
@@ -226,27 +272,27 @@ class DataEventBus:
         self._events_emitted += 1
 
         # Callback subscribers
-        for handle in list(self._subscriptions.values()):
+        for sub_id, sub in list(self._callback_subs.items()):
+            handle = sub.handle
             if not handle.matches(event):
                 continue
             if handle.callback is None:
                 continue
-            try:
-                await handle.callback(event)
-            except Exception as exc:
-                self._callback_errors += 1
-                logger.error(
-                    "Event callback error (sub=%s): %s",
-                    handle.id, exc, exc_info=True,
+            self._ensure_callback_worker(sub)
+            if not self._put_event_nowait(sub.queue, event):
+                sub.dropped += 1
+                self._events_dropped += 1
+                logger.warning(
+                    "Callback subscriber %s full, dropping event", sub_id,
                 )
 
         # Queue subscribers
-        for sub_id, (queue, handle) in list(self._queue_subs.items()):
+        for sub_id, sub in list(self._queue_subs.items()):
+            handle = sub.handle
             if not handle.matches(event):
                 continue
-            try:
-                queue.put_nowait(event)
-            except asyncio.QueueFull:
+            if not self._put_event_nowait(sub.queue, event):
+                sub.dropped += 1
                 self._events_dropped += 1
                 logger.warning(
                     "Queue subscriber %s full, dropping event", sub_id,
@@ -291,11 +337,19 @@ class DataEventBus:
 
     async def close(self) -> None:
         """Send sentinel to all queue subscribers and clear everything."""
-        for sub_id, (queue, _) in list(self._queue_subs.items()):
-            try:
-                queue.put_nowait(None)
-            except asyncio.QueueFull:
-                pass
+        callback_tasks: list[asyncio.Task] = []
+        for sub_id, sub in list(self._callback_subs.items()):
+            self._put_sentinel(sub.queue)
+            if sub.task is not None:
+                sub.task.cancel()
+                callback_tasks.append(sub.task)
+            logger.debug("Callback subscription closed: id=%s", sub_id)
+        if callback_tasks:
+            await asyncio.gather(*callback_tasks, return_exceptions=True)
+        self._callback_subs.clear()
+
+        for sub_id, sub in list(self._queue_subs.items()):
+            self._put_sentinel(sub.queue)
         self._queue_subs.clear()
         self._subscriptions.clear()
         logger.info("Event bus closed")
@@ -308,7 +362,8 @@ class DataEventBus:
         for handle in self._subscriptions.values():
             if key is None or handle.key is None or handle.key == key:
                 count += 1
-        for _, (_, handle) in self._queue_subs.items():
+        for _, sub in self._queue_subs.items():
+            handle = sub.handle
             if key is None or handle.key is None or handle.key == key:
                 count += 1
         return count
@@ -319,7 +374,8 @@ class DataEventBus:
         for handle in self._subscriptions.values():
             if handle.key is not None:
                 keys.add(handle.key)
-        for _, (_, handle) in self._queue_subs.items():
+        for _, sub in self._queue_subs.items():
+            handle = sub.handle
             if handle.key is not None:
                 keys.add(handle.key)
         return keys
@@ -335,6 +391,26 @@ class DataEventBus:
             "events_emitted": self._events_emitted,
             "events_dropped": self._events_dropped,
             "callback_errors": self._callback_errors,
+            "callback_queue_drops": {
+                sub_id: sub.dropped
+                for sub_id, sub in self._callback_subs.items()
+                if sub.dropped
+            },
+            "callback_last_errors": {
+                sub_id: sub.last_error
+                for sub_id, sub in self._callback_subs.items()
+                if sub.last_error
+            },
+            "callback_lag": {
+                sub_id: self._lag_snapshot(sub)
+                for sub_id, sub in self._callback_subs.items()
+                if sub.delivered or sub.dropped or sub.queue.qsize()
+            },
+            "queue_lag": {
+                sub_id: self._lag_snapshot(sub)
+                for sub_id, sub in self._queue_subs.items()
+                if sub.delivered or sub.dropped or sub.queue.qsize()
+            },
             "subscribed_keys": [
                 str(k) for k in self.get_all_subscribed_keys()
             ],
@@ -350,3 +426,92 @@ class DataEventBus:
         if et == DataEventType.BAR_CREATED and not self._cfg.emit_bar_created:
             return False
         return True
+
+    def _ensure_callback_worker(self, sub: _CallbackSubscription) -> None:
+        if sub.task is not None and not sub.task.done():
+            return
+        try:
+            asyncio.get_running_loop()
+            sub.task = asyncio.create_task(
+                self._callback_worker(sub),
+                name=f"event-bus-callback:{sub.handle.id}",
+            )
+        except RuntimeError:
+            # subscribe() may run during setup before an event loop exists.
+            # The worker will be started on the first emit inside a loop.
+            sub.task = None
+
+    async def _callback_worker(self, sub: _CallbackSubscription) -> None:
+        handle = sub.handle
+        while True:
+            item = await sub.queue.get()
+            if item is None:
+                return
+            if handle.callback is None:
+                continue
+            self._record_queue_lag(sub, item.enqueued_at)
+            try:
+                await handle.callback(item.event)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                sub.last_error = str(exc)
+                self._callback_errors += 1
+                logger.error(
+                    "Event callback error (sub=%s): %s",
+                    handle.id, exc, exc_info=True,
+                )
+
+    @staticmethod
+    def _put_sentinel(queue: asyncio.Queue[_QueuedEvent | None]) -> None:
+        try:
+            queue.put_nowait(None)
+            return
+        except asyncio.QueueFull:
+            pass
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            pass
+        try:
+            queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+    @staticmethod
+    def _put_event_nowait(
+        queue: asyncio.Queue[_QueuedEvent | None],
+        event: DataEvent,
+    ) -> bool:
+        try:
+            queue.put_nowait(_QueuedEvent(
+                event=event,
+                enqueued_at=time.perf_counter(),
+            ))
+            return True
+        except asyncio.QueueFull:
+            return False
+
+    @staticmethod
+    def _record_queue_lag(
+        sub: _CallbackSubscription | _QueueSubscription,
+        enqueued_at: float,
+    ) -> None:
+        lag_ms = max(0.0, (time.perf_counter() - enqueued_at) * 1000)
+        sub.delivered += 1
+        sub.total_lag_ms += lag_ms
+        sub.max_lag_ms = max(sub.max_lag_ms, lag_ms)
+        sub.last_lag_ms = lag_ms
+
+    @staticmethod
+    def _lag_snapshot(sub: _CallbackSubscription | _QueueSubscription) -> dict[str, Any]:
+        avg = sub.total_lag_ms / sub.delivered if sub.delivered else 0.0
+        return {
+            "queue_size": sub.queue.qsize(),
+            "queue_max_size": sub.queue.maxsize,
+            "delivered": sub.delivered,
+            "dropped": sub.dropped,
+            "avg_lag_ms": round(avg, 2),
+            "max_lag_ms": round(sub.max_lag_ms, 2),
+            "last_lag_ms": round(sub.last_lag_ms, 2),
+        }

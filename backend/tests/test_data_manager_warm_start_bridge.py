@@ -63,6 +63,15 @@ class _Storage:
         })
 
 
+async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    assert predicate()
+
+
 def _service(
     *,
     cache: BarCache,
@@ -325,11 +334,13 @@ def test_aggregator_bridge_persists_closed_and_amended_events() -> None:
         assert storage.upsert_calls[1]["market_type"] == "spot"
         assert cache.get_latest(key, 1)[0].close == 3
         assert marked == [key, key]
+        await _wait_until(lambda: len(events) == 2)
         assert [event.event_type for event in events] == [
             DataEventType.BAR_CLOSED,
             DataEventType.BAR_AMENDED,
         ]
         assert events[1].previous_bar is not None
         assert events[1].previous_bar.close == 2
+        await bus.close()
 
     asyncio.run(_run())

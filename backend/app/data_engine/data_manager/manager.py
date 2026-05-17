@@ -80,6 +80,7 @@ import inspect
 import logging
 from typing import Any, AsyncIterator, Protocol
 
+from app.core.executors import run_storage
 from app.data_engine.interval_policy import parse_interval_ms
 
 from .aggregator_bridge import AggregatorBridge
@@ -396,7 +397,7 @@ class DataManager:
             self._ttl_task = asyncio.create_task(self._ttl_loop())
 
         # Startup DB cleanup (safe — no subscribers yet)
-        await asyncio.to_thread(self.retention.run_startup_db_cleanup)
+        await run_storage(self.retention.run_startup_db_cleanup)
 
         # Ephemeral trim loop (every 30 min)
         self._cleanup_task = asyncio.create_task(self.retention.ephemeral_trim_loop())

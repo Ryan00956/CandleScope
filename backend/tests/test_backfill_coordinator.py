@@ -364,6 +364,50 @@ def test_backfill_scheduler_runs_initial_history_from_newest_chunk() -> None:
     asyncio.run(_run())
 
 
+def test_backfill_scheduler_wakes_after_rate_limit_without_new_submit() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+        request = _request(0, 60_000, request_id="rate-limited")
+        bucket = coord._scheduler._bucket_for(request)
+        bucket.capacity = 1
+        bucket.tokens = 0
+        bucket.refill_per_second = 20.0
+
+        task = asyncio.create_task(coord.request_and_wait(request))
+        await asyncio.sleep(0)
+
+        snapshot = coord.snapshot()
+        assert engine.calls == []
+        assert snapshot["ready_chunks"] == 1
+        assert snapshot["next_drain_in_ms"] is not None
+        assert snapshot["rate_limited_skips"] == 1
+
+        await _wait_until(lambda: len(engine.calls) == 1)
+        outcome = await task
+
+        assert outcome.status == "completed"
+        assert coord.snapshot()["next_drain_in_ms"] is None
+
+    asyncio.run(_run())
+
+
 def test_backfill_coordinator_retries_failed_report_until_success() -> None:
     async def _run() -> None:
         class _Engine:

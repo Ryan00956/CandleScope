@@ -49,7 +49,9 @@ from app.api.v1.stream import router as stream_router
 from app.api.v1.subscriptions import router as subscriptions_router
 from app.api.v1.subscriptions import price_ws_router
 from app.api.v1.symbols import router as symbols_router
-from app.core.config import CORS_ORIGINS
+from app.core.config import CORS_ORIGINS, EVENT_LOOP_LAG_INTERVAL_SECONDS
+from app.core.executors import executors_snapshot
+from app.core.runtime_metrics import EventLoopLagMonitor, ws_runtime_metrics
 from app.data_engine.storage import init_klines_storage
 
 logger = logging.getLogger("candlescope")
@@ -114,6 +116,10 @@ async def _init_data_manager() -> None:
 @app.on_event("startup")
 async def startup_event() -> None:
     """Application startup handler."""
+    lag_monitor = EventLoopLagMonitor(interval_seconds=EVENT_LOOP_LAG_INTERVAL_SECONDS)
+    lag_monitor.start()
+    app.state.event_loop_lag_monitor = lag_monitor
+
     # 1. Initialize SQLite storage
     init_klines_storage()
 
@@ -133,6 +139,10 @@ async def startup_event() -> None:
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     """Application shutdown handler."""
+    lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
+    if lag_monitor is not None:
+        await lag_monitor.stop()
+
     indicator_engine = getattr(app.state, "indicator_engine", None)
     if indicator_engine is not None:
         try:
@@ -176,6 +186,9 @@ async def health_check() -> dict:
                 "active_streams": snapshot.get("coordinator", {}).get("active_streams", 0),
                 "cache_series": snapshot.get("cache", {}).get("series_count", 0),
             }
+            lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
+            if lag_monitor is not None:
+                result["event_loop_lag"] = lag_monitor.snapshot()
         except Exception:
             result["data_manager"] = {"status": "error"}
     else:
@@ -190,6 +203,13 @@ async def debug_snapshot() -> dict:
     if dm is None:
         return {"error": "DataManager not initialized"}
     try:
-        return dm.snapshot()
+        snapshot = dm.snapshot()
+        snapshot["executors"] = executors_snapshot()
+        lag_monitor = getattr(app.state, "event_loop_lag_monitor", None)
+        snapshot["runtime"] = {
+            "event_loop_lag": lag_monitor.snapshot() if lag_monitor is not None else None,
+            "websocket": ws_runtime_metrics.snapshot(),
+        }
+        return snapshot
     except Exception as exc:
         return {"error": str(exc)}

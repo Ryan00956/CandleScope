@@ -32,6 +32,7 @@ from app.data_engine.data_manager.event_bus import DataEventBus
 from app.data_engine.data_manager.ingestion_price_source import IngestionPriceSource
 from app.data_engine.data_manager.models import (
     BarData,
+    DataEvent,
     DataEventType,
     QueryResult,
     QuerySource,
@@ -53,6 +54,15 @@ def _load_module_from_path(name: str, path: Path):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    assert predicate()
 
 
 backfill_models = _load_module_from_path(
@@ -542,9 +552,11 @@ def test_data_manager_on_bar_event_preserves_exchange() -> None:
             market_type="spot",
         )
 
+        await _wait_until(lambda: len(events) == 1)
         assert len(events) == 1
         assert events[0].key.exchange == "okx"
         assert events[0].key.market_type == "spot"
+        await dm.event_bus.close()
 
     asyncio.run(_run())
 
@@ -625,9 +637,105 @@ def test_data_manager_price_updates_emit_events_and_snapshot() -> None:
         assert len(snapshot) == 1
         assert snapshot[0]["symbol"] == "okx:spot:BTC-USDT"
         assert snapshot[0]["daily_change"] == 5
+        await _wait_until(lambda: len(events) == 1)
         assert len(events) == 1
         assert events[0].event_type == DataEventType.PRICE_UPDATED
         assert events[0].key == SeriesKey("BTC-USDT", "price", exchange="okx", market_type="spot")
+        await dm.event_bus.close()
+
+    asyncio.run(_run())
+
+
+def test_event_bus_callback_subscribers_do_not_block_each_other() -> None:
+    async def _run() -> None:
+        bus = DataEventBus()
+        gate = asyncio.Event()
+        fast_received = asyncio.Event()
+        delivered: list[str] = []
+
+        async def _slow(_event):
+            await gate.wait()
+            delivered.append("slow")
+
+        async def _fast(_event):
+            delivered.append("fast")
+            fast_received.set()
+
+        bus.subscribe(_slow)
+        bus.subscribe(_fast)
+
+        await bus.emit(DataEvent(
+            event_type=DataEventType.BAR_UPDATED,
+            key=SeriesKey("BTC-USDT", "1m"),
+        ))
+
+        await asyncio.wait_for(fast_received.wait(), timeout=1.0)
+        assert delivered == ["fast"]
+
+        gate.set()
+        await _wait_until(lambda: delivered == ["fast", "slow"])
+        await bus.close()
+
+    asyncio.run(_run())
+
+
+def test_event_bus_reports_callback_subscriber_lag() -> None:
+    async def _run() -> None:
+        bus = DataEventBus()
+        delivered = asyncio.Event()
+
+        async def _callback(_event):
+            delivered.set()
+
+        bus.subscribe(_callback, event_types={DataEventType.BAR_CLOSED})
+        await bus.emit(DataEvent(
+            event_type=DataEventType.BAR_CLOSED,
+            key=SeriesKey("BTC-USDT", "1m"),
+        ))
+        await asyncio.wait_for(delivered.wait(), timeout=1.0)
+
+        snapshot = bus.snapshot()
+        assert snapshot["callback_lag"]
+        stats = next(iter(snapshot["callback_lag"].values()))
+        assert stats["delivered"] == 1
+        assert stats["max_lag_ms"] >= 0
+
+        await bus.close()
+
+    asyncio.run(_run())
+
+
+def test_event_bus_reports_iterator_subscriber_lag() -> None:
+    async def _run() -> None:
+        bus = DataEventBus()
+        delivered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _consume() -> None:
+            async for _event in bus.subscribe_iter(
+                event_types={DataEventType.BAR_CLOSED},
+            ):
+                delivered.set()
+                await release.wait()
+                break
+
+        task = asyncio.create_task(_consume())
+        await asyncio.sleep(0)
+        await bus.emit(DataEvent(
+            event_type=DataEventType.BAR_CLOSED,
+            key=SeriesKey("BTC-USDT", "1m"),
+        ))
+        await asyncio.wait_for(delivered.wait(), timeout=1.0)
+
+        snapshot = bus.snapshot()
+        assert snapshot["queue_lag"]
+        stats = next(iter(snapshot["queue_lag"].values()))
+        assert stats["delivered"] == 1
+        assert stats["max_lag_ms"] >= 0
+
+        release.set()
+        await task
+        await bus.close()
 
     asyncio.run(_run())
 
@@ -846,8 +954,10 @@ def test_aggregator_bridge_persists_closed_bar_and_preserves_exchange() -> None:
         assert storage.calls[0]["market_type"] == "spot"
         assert cache.get_latest(key, 1)[0].close == 2
         assert marked == [key]
+        await _wait_until(lambda: len(events) == 1)
         assert events[0].key == key
         assert events[0].event_type == DataEventType.BAR_CLOSED
+        await bus.close()
 
     asyncio.run(_run())
 

@@ -12,6 +12,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import textwrap
 from typing import Any
@@ -20,6 +21,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.core import config
+from app.core.executors import executors_snapshot, run_indicator, run_pyne_wait
+from app.core.runtime_metrics import ws_runtime_metrics
 from app.data_engine.data_manager.models import BarData
 from app.indicator import registry, IndicatorEngine, create_engine
 from app.indicator.custom_store import CustomIndicatorStore
@@ -385,7 +388,9 @@ def _build_diagnostics_snapshot(
             "maxSubscriptions": config.INDICATOR_WS_MAX_SUBSCRIPTIONS,
             "queueSize": config.INDICATOR_WS_QUEUE_SIZE,
             "heartbeatSeconds": config.INDICATOR_WS_HEARTBEAT_SECONDS,
+            "metrics": ws_runtime_metrics.snapshot(),
         },
+        "executors": executors_snapshot(),
     }
 
 
@@ -498,14 +503,17 @@ async def _compute_engine(name: str, req: ComputeRequest) -> dict:
         )
 
     try:
-        result = _engine.compute(
-            symbol=req.symbol,
-            interval=req.interval,
-            market_type=req.market_type,
-            indicator_name=name,
-            params=req.params,
-            bars=bars,
-            exchange=req.exchange,
+        result = await _run_indicator_http_compute(
+            _compute_builtin_once,
+            name,
+            req,
+            bars,
+        )
+    except asyncio.TimeoutError:
+        return build_error_payload(
+            "INDICATOR_COMPUTE_TIMEOUT",
+            f"Indicator compute exceeded {config.INDICATOR_HTTP_TIMEOUT_SECONDS:g}s timeout",
+            hint="指标计算超时，请缩小历史窗口或优化参数。",
         )
     except Exception as exc:
         return build_error_payload(
@@ -530,11 +538,51 @@ async def _compute_script(req: ComputeRequest) -> dict:
     ta.*, input.*, plot(), color.*, math.*, crossover(), etc.
     Legacy scripts using add_line() continue to work unchanged.
     """
-    result = execute_pyne_script(
-        script=req.script,
-        ohlcv=req.ohlcv,
-        params=req.params or {},
-        security_mode=req.securityMode,
-    )
+    try:
+        result = await _run_indicator_http_compute(
+            execute_pyne_script,
+            executor_kind="pyne",
+            script=req.script,
+            ohlcv=req.ohlcv,
+            params=req.params or {},
+            security_mode=req.securityMode,
+        )
+    except asyncio.TimeoutError:
+        return build_error_payload(
+            "PYNE_TIMEOUT",
+            f"Pyne script exceeded {config.INDICATOR_HTTP_TIMEOUT_SECONDS:g}s HTTP timeout",
+            hint="脚本执行超时，请减少循环、缩小窗口，或调整 INDICATOR_HTTP_TIMEOUT_SECONDS。",
+        )
 
     return serialize_pyne_result(result)
+
+
+async def _run_indicator_http_compute(func, *args, executor_kind: str = "indicator", **kwargs):
+    """Run heavy HTTP indicator work off the event loop with a hard wait cap."""
+    runner = run_pyne_wait if executor_kind == "pyne" else run_indicator
+    return await asyncio.wait_for(
+        runner(func, *args, **kwargs),
+        timeout=max(float(config.INDICATOR_HTTP_TIMEOUT_SECONDS), 0.1),
+    )
+
+
+def _compute_builtin_once(name: str, req: ComputeRequest, bars: list[BarData]):
+    """Compute a builtin indicator without touching the runtime IndicatorEngine.
+
+    HTTP compute is one-shot work. Using a temporary engine keeps it isolated
+    from the app-wide realtime IndicatorEngine, whose cached instances are
+    mutated by WebSocket subscriptions and DataManager events.
+    """
+    engine = create_engine()
+    try:
+        return engine.compute(
+            symbol=req.symbol,
+            interval=req.interval,
+            market_type=req.market_type,
+            indicator_name=name,
+            params=req.params,
+            bars=bars,
+            exchange=req.exchange,
+        )
+    finally:
+        engine.stop()

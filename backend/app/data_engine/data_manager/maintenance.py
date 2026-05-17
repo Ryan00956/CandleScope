@@ -7,6 +7,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, Protocol
 
+from app.core.executors import run_storage
 from app.data_engine.bar_aggregator import BarAggregator, BarAggregatorConfig
 from app.data_engine.interval_policy import (
     STANDARD_INTERVAL_MS,
@@ -91,7 +92,7 @@ class MaintenanceService:
             started_at_ms = int(time.time() * 1000)
             now_ms = started_at_ms
             aggregator_config = self._aggregator_config_snapshot()
-            series = await asyncio.to_thread(
+            series = await run_storage(
                 self._list_custom_series,
                 storage,
                 market_type,
@@ -166,7 +167,7 @@ class MaintenanceService:
                 custom_ms = custom_seconds * 1000
                 earliest_open = int(item["earliest_open_time"])
                 latest_open = int(item["latest_open_time"])
-                existing_rows = await asyncio.to_thread(
+                existing_rows = await run_storage(
                     storage.query_bars,
                     symbol=symbol,
                     interval=interval,
@@ -189,7 +190,7 @@ class MaintenanceService:
 
                 if not closed_existing:
                     if stale_existing:
-                        deleted = await asyncio.to_thread(
+                        deleted = await run_storage(
                             storage.delete_bars,
                             symbol=symbol,
                             interval=interval,
@@ -254,7 +255,7 @@ class MaintenanceService:
                     results.append(result)
                     continue
 
-                base_rows = await asyncio.to_thread(
+                base_rows = await run_storage(
                     storage.query_bars,
                     symbol=symbol,
                     interval=base_interval,
@@ -302,7 +303,7 @@ class MaintenanceService:
                     results.append(result)
                     continue
 
-                deleted = await asyncio.to_thread(
+                deleted = await run_storage(
                     storage.delete_bars,
                     symbol=symbol,
                     interval=interval,
@@ -313,7 +314,7 @@ class MaintenanceService:
                 )
                 written = 0
                 if rebuilt_rows:
-                    written = await asyncio.to_thread(
+                    written = await run_storage(
                         storage.upsert_bars,
                         symbol=symbol,
                         interval=interval,
@@ -390,7 +391,7 @@ class MaintenanceService:
             started_at_ms = int(time.time() * 1000)
             now_ms = started_at_ms
 
-            series = await asyncio.to_thread(storage.list_series, False, exchange, market_type)
+            series = await run_storage(storage.list_series, False, exchange, market_type)
             standard_series = [
                 item for item in series
                 if str(item.get("interval", "")) in _STANDARD_INTERVALS
@@ -469,7 +470,7 @@ class MaintenanceService:
                         else:
                             entry["message"] = "尝试回补但无新数据（可能是网络问题）"
 
-                    rows = await asyncio.to_thread(
+                    rows = await run_storage(
                         storage.query_bars,
                         symbol=symbol,
                         interval=interval,
@@ -599,7 +600,7 @@ class MaintenanceService:
     ) -> int:
         """Delete stored bars for a series through the configured storage backend."""
         storage = self._storage()
-        deleted = await asyncio.to_thread(
+        deleted = await run_storage(
             storage.delete_bars,
             symbol=symbol,
             interval=interval,
@@ -710,7 +711,7 @@ class MaintenanceService:
             market_type=market_type,
         )
 
-        rows = await asyncio.to_thread(
+        rows = await run_storage(
             storage.query_bars,
             symbol=symbol,
             interval=interval,
@@ -828,7 +829,7 @@ async def _find_storage_gap_ranges(
     market_type: str = "spot",
 ) -> list[tuple[int, int]]:
     interval_ms = parse_interval_ms(interval) or 60_000
-    rows = await asyncio.to_thread(
+    rows = await run_storage(
         storage.query_bars,
         symbol=symbol,
         interval=interval,

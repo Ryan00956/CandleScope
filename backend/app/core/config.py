@@ -78,10 +78,19 @@ PYNE_ALLOWED_IMPORTS = [
     if item.strip()
 ]
 
+# Indicator HTTP compute tuning. The API endpoint should only orchestrate work;
+# heavy builtin/Pyne computation is offloaded so it cannot block the event loop.
+INDICATOR_HTTP_TIMEOUT_SECONDS = float(os.getenv("INDICATOR_HTTP_TIMEOUT_SECONDS", "8"))
+INDICATOR_THREAD_WORKERS = int(os.getenv("INDICATOR_THREAD_WORKERS", "2"))
+PYNE_HTTP_THREAD_WORKERS = int(os.getenv("PYNE_HTTP_THREAD_WORKERS", "2"))
+STORAGE_THREAD_WORKERS = int(os.getenv("STORAGE_THREAD_WORKERS", "4"))
+
 # Indicator WebSocket stability tuning.
 INDICATOR_WS_MAX_SUBSCRIPTIONS = int(os.getenv("INDICATOR_WS_MAX_SUBSCRIPTIONS", "50"))
 INDICATOR_WS_QUEUE_SIZE = int(os.getenv("INDICATOR_WS_QUEUE_SIZE", "1000"))
 INDICATOR_WS_HEARTBEAT_SECONDS = float(os.getenv("INDICATOR_WS_HEARTBEAT_SECONDS", "15"))
+WS_SEND_TIMEOUT_SECONDS = float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "2"))
+EVENT_LOOP_LAG_INTERVAL_SECONDS = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "1"))
 
 # CORS
 CORS_ORIGINS = os.getenv(

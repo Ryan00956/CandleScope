@@ -44,6 +44,7 @@ import logging
 import time
 from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
 
+from app.core.executors import run_storage
 from app.data_engine.interval_policy import is_standard_interval
 
 from .cache import BarCache
@@ -373,7 +374,7 @@ class StreamCoordinator:
             for interval, days in self._cfg.prewarm_intervals.items():
                 key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
                 try:
-                    bars_loaded = await asyncio.to_thread(
+                    bars_loaded = await run_storage(
                         self._prewarm_series, key, days,
                     )
                     results[str(key)] = bars_loaded

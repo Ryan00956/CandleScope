@@ -7,6 +7,7 @@
 ## 运行栈
 
 - Python FastAPI app：`app/main.py`
+- 核心异步基础设施：`app/core/executors.py`、`app/core/runtime_metrics.py`
 - 行情数据 runtime：`app/data_engine/runtime.py`
 - 交易所 registry/plugins：`app/exchanges`
 - 指标引擎和 Pyne runtime：`app/indicator`
@@ -43,13 +44,14 @@ curl http://localhost:8000/debug/snapshot
 
 `app/main.py` 会：
 
-1. 初始化 SQLite K 线 storage。
-2. best-effort 刷新交易所 symbol metadata。
-3. 通过 `start_data_engine()` 启动 Data Engine。
-4. 将稳定 runtime 句柄挂到 `app.state`。
-5. 将 IndicatorEngine 桥接到 DataManager events。
+1. 启动 event-loop lag 监控。
+2. 初始化 SQLite K 线 storage。
+3. best-effort 刷新交易所 symbol metadata。
+4. 通过 `start_data_engine()` 启动 Data Engine。
+5. 将稳定 runtime 句柄挂到 `app.state`。
+6. 将 IndicatorEngine 桥接到 DataManager events。
 
-关闭时先停止 IndicatorEngine，再关闭 Data Engine runtime。
+关闭时先停止 lag monitor，再停止 IndicatorEngine，最后关闭 Data Engine runtime。
 
 ## API 总览
 
@@ -109,6 +111,42 @@ DataManager cache + events
 - [app/data_engine/backfill](app/data_engine/backfill/)
 - [app/data_engine/data_manager](app/data_engine/data_manager/)
 
+## 并发模型
+
+后端把 FastAPI event loop 作为编排层。阻塞或重计算任务不会直接跑在 event loop 上，而是进入有边界的基础设施。
+
+```text
+FastAPI event loop
+  -> 请求 / WebSocket 编排
+  -> 不直接跑阻塞 storage query
+  -> 不直接跑重指标计算
+  -> 不直接等待 Pyne 子进程
+
+Core executors
+  -> indicator executor：内置指标 HTTP/range compute
+  -> pyne-wait executor：Pyne process wait 和 Pyne snapshot
+  -> storage executor：SQLite/DataManager 同步 storage 路径
+
+DataEventBus
+  -> emit() 只做过滤和入队
+  -> 每个 callback subscriber 一个 bounded queue + worker
+  -> iterator subscriber 也使用 bounded queue
+
+BackfillScheduler
+  -> priority queue
+  -> 单 series single flight
+  -> 全局并发上限
+  -> token bucket 限流
+  -> rate-limit skip 后 delayed drain 自唤醒
+```
+
+新增核心模块：
+
+- `app/core/executors.py`：负责专用线程池，以及 executor queue/run 统计。
+- `app/core/runtime_metrics.py`：负责 event-loop lag 采样，以及 WebSocket send/heartbeat 聚合指标。
+
+职责边界保持清晰：API 层做编排，DataEventBus 做事件投递，BackfillScheduler 做修复调度，core 模块提供共享运行时基础设施。
+
 ## 交易所插件
 
 内置交易所通过 `app.exchanges.registry` 注册：
@@ -133,6 +171,45 @@ Exchange adapter 暴露 capabilities、symbol normalization、REST/WS endpoint p
 
 Pyne 脚本通过 `execute_pyne_script()` 执行，默认使用 process executor。Security modes 为 `safe`、`research`、`unsafe`。
 
+HTTP 指标计算通过专用 executor 隔离：
+
+- 内置指标 HTTP compute 使用 one-shot engine，不会修改全局实时 `IndicatorEngine`。
+- Pyne HTTP 和 range snapshot 路径通过 Pyne wait executor 包装 process runtime。
+- 两条路径都受 `INDICATOR_HTTP_TIMEOUT_SECONDS` 保护。
+
+## 可观测性和压测
+
+诊断信息挂在现有 endpoints 上：
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/debug/snapshot
+curl http://localhost:8000/api/v1/indicators/diagnostics
+curl http://localhost:8000/api/v1/settings/storage/health
+```
+
+重要字段：
+
+| 字段 | 含义 |
+|---|---|
+| `event_loop_lag` | `/health` 中的 event-loop 调度延迟摘要 |
+| `runtime.event_loop_lag` | `/debug/snapshot` 中完整 event-loop lag 快照 |
+| `runtime.websocket.heartbeat_delay` | WebSocket heartbeat 调度延迟 |
+| `runtime.websocket.send_timeouts` | 按 payload 类型统计的 WS send timeout |
+| `executors.*` | 每类 executor 的 submitted/active/pending 和 queue/run timing |
+| `event_bus.callback_lag` | callback subscriber queue lag 和 drops |
+| `event_bus.queue_lag` | async-iterator subscriber queue lag 和 drops |
+| `ready_chunks` / `running_chunks` / `next_drain_in_ms` | backfill scheduler 状态 |
+
+对运行中的后端执行并发压测：
+
+```bash
+cd backend
+python scripts/bench_concurrency.py --base-url http://127.0.0.1:8000
+```
+
+压测会覆盖 K 线 latest 查询、内置指标 compute、Pyne compute、可见区间 repair 和主要 WebSocket 流，并输出延迟分位数以及压测前后的 diagnostics。
+
 ## 配置
 
 环境变量通过 `python-dotenv` 加载。
@@ -150,6 +227,12 @@ Pyne 脚本通过 `execute_pyne_script()` 执行，默认使用 process executor
 | `BACKFILL_*` | 历史修复 intervals、fetch limits、dedup、publish mode |
 | `BAR_AGG_*` | 聚合 source mode、alignment、finalization、event throttling |
 | `PYNE_*` | Pyne security、executor mode、timeouts、output limits |
+| `INDICATOR_HTTP_TIMEOUT_SECONDS` | HTTP 指标计算等待上限 |
+| `INDICATOR_THREAD_WORKERS` | 内置指标 executor 大小 |
+| `PYNE_HTTP_THREAD_WORKERS` | Pyne wait executor 大小 |
+| `STORAGE_THREAD_WORKERS` | storage executor 大小 |
+| `WS_SEND_TIMEOUT_SECONDS` | WebSocket send timeout |
+| `EVENT_LOOP_LAG_INTERVAL_SECONDS` | event-loop lag 采样周期 |
 
 proxy settings 也可以通过 API 更新，并持久化到：
 
@@ -194,4 +277,11 @@ python -m pytest -q \
   tests/test_indicator_api.py \
   tests/test_exchange_registry_plugins.py \
   tests/test_data_engine_phase1_boundaries.py
+```
+
+并发压测脚本编译检查：
+
+```bash
+cd backend
+python -m py_compile scripts/bench_concurrency.py app/core/executors.py app/core/runtime_metrics.py
 ```

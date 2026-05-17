@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from app.core.executors import run_storage
 from app.data_engine.interval_policy import parse_interval_ms
 from .models import BarData, DataEvent, DataEventType, SeriesKey
 
@@ -208,6 +209,15 @@ class _TokenBucket:
         self.tokens -= cost
         return True
 
+    def next_available_delay(self, now_ms: int, cost: int = 1) -> float:
+        if now_ms < self.cooldown_until_ms:
+            return max(0.01, (self.cooldown_until_ms - now_ms) / 1000)
+        if self.tokens >= cost:
+            return 0.01
+        if self.refill_per_second <= 0:
+            return 1.0
+        return max(0.01, (cost - self.tokens) / self.refill_per_second)
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "tokens": round(self.tokens, 2),
@@ -246,10 +256,13 @@ class _BackfillScheduler:
         self._outcomes: dict[str, RepairOutcome] = {}
         self._seq = 0
         self._shutdown = False
+        self._drain_timer: asyncio.TimerHandle | None = None
+        self._next_drain_at: float | None = None
 
         self.submitted = 0
         self.deduped = 0
         self.merged = 0
+        self.rate_limited_skips = 0
 
     def submit(self, request: RepairRequest) -> tuple[str, asyncio.Future[RepairOutcome]]:
         if self._shutdown:
@@ -293,6 +306,7 @@ class _BackfillScheduler:
 
     async def shutdown(self) -> None:
         self._shutdown = True
+        self._cancel_drain_timer()
         for task in list(self._tasks.values()):
             task.cancel()
         if self._tasks:
@@ -336,6 +350,8 @@ class _BackfillScheduler:
             "pending": pending,
             "ready_chunks": len(self._ready),
             "running_chunks": len(self._tasks),
+            "next_drain_in_ms": self._next_drain_in_ms(),
+            "rate_limited_skips": self.rate_limited_skips,
             "buckets": {
                 key: bucket.snapshot()
                 for key, bucket in sorted(self._buckets.items())
@@ -431,6 +447,7 @@ class _BackfillScheduler:
         if self._shutdown:
             return
         skipped: list[tuple[int, int, int, str]] = []
+        next_delay: float | None = None
         try:
             while len(self._tasks) < self._max_concurrency and self._ready:
                 item = heapq.heappop(self._ready)
@@ -448,6 +465,9 @@ class _BackfillScheduler:
                 bucket = self._bucket_for(chunk.request)
                 now_ms = int(time.time() * 1000)
                 if not bucket.try_acquire(now_ms):
+                    self.rate_limited_skips += 1
+                    delay = bucket.next_available_delay(now_ms)
+                    next_delay = delay if next_delay is None else min(next_delay, delay)
                     skipped.append(item)
                     continue
 
@@ -467,6 +487,47 @@ class _BackfillScheduler:
         finally:
             for item in skipped:
                 heapq.heappush(self._ready, item)
+            if next_delay is not None and self._ready:
+                self._schedule_drain(next_delay)
+            elif not self._ready:
+                self._cancel_drain_timer()
+
+    def _schedule_drain(self, delay: float) -> None:
+        if self._shutdown:
+            return
+        delay = max(float(delay), 0.01)
+        loop = asyncio.get_running_loop()
+        when = loop.time() + delay
+        if (
+            self._drain_timer is not None
+            and not self._drain_timer.cancelled()
+            and self._next_drain_at is not None
+            and self._next_drain_at <= when
+        ):
+            return
+        self._cancel_drain_timer()
+        self._next_drain_at = when
+        self._drain_timer = loop.call_later(delay, self._run_scheduled_drain)
+
+    def _run_scheduled_drain(self) -> None:
+        self._drain_timer = None
+        self._next_drain_at = None
+        self._drain()
+
+    def _cancel_drain_timer(self) -> None:
+        if self._drain_timer is not None and not self._drain_timer.cancelled():
+            self._drain_timer.cancel()
+        self._drain_timer = None
+        self._next_drain_at = None
+
+    def _next_drain_in_ms(self) -> int | None:
+        if self._next_drain_at is None:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        return max(0, int((self._next_drain_at - loop.time()) * 1000))
 
     async def _run_chunk(self, chunk: _FetchChunk) -> None:
         try:
@@ -893,7 +954,7 @@ class BackfillCoordinator:
             if queued >= max_gaps:
                 return report
             try:
-                scan = await asyncio.to_thread(
+                scan = await run_storage(
                     scanner,
                     symbol=symbol,
                     interval=interval,
@@ -1094,7 +1155,7 @@ class BackfillCoordinator:
 
         total_loaded = 0
         for written_range in self._written_ranges_for_request(request, report):
-            rows = await asyncio.to_thread(
+            rows = await run_storage(
                 self._storage.query_bars,
                 symbol=written_range["symbol"],
                 interval=written_range["interval"],
@@ -1214,7 +1275,7 @@ class BackfillCoordinator:
             }
 
         try:
-            rows = await asyncio.to_thread(
+            rows = await run_storage(
                 query_bars,
                 symbol=request.symbol,
                 interval=request.interval,

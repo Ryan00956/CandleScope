@@ -21,6 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.core.executors import run_storage
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 from app.exchanges.symbols import normalize_symbol
 from app.core.market import (
@@ -337,7 +338,7 @@ async def get_klines(
     dm = _require_data_manager(request)
     try:
         await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
-        result = await asyncio.to_thread(
+        result = await run_storage(
             dm.query_latest, symbol, interval, limit,
             exchange,
             market_type=market_type,
@@ -378,7 +379,7 @@ async def get_latest_klines(
     dm = _require_data_manager(request)
     try:
         await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
-        result = await asyncio.to_thread(
+        result = await run_storage(
             _call_data_manager_method,
             dm.query_latest, symbol, interval, limit,
             exchange,
@@ -428,7 +429,7 @@ async def get_klines_history(
         interval_secs = parse_custom_interval(interval) or 60
         needed_limit = int((end_ms - start_ms) / 1000 / interval_secs) + 100
 
-        result = await asyncio.to_thread(
+        result = await run_storage(
             _call_data_manager_method,
             dm.query,
             symbol, interval,
@@ -542,7 +543,7 @@ async def get_klines_range(
 
     dm = _require_data_manager(request)
     try:
-        result = await asyncio.to_thread(
+        result = await run_storage(
             _call_data_manager_method,
             dm.query,
             symbol,
@@ -574,7 +575,7 @@ async def get_klines_range(
             and result.backfill_triggered
         ):
             await asyncio.sleep(wait_ms / 1000)
-            result = await asyncio.to_thread(
+            result = await run_storage(
                 _call_data_manager_method,
                 dm.query,
                 symbol,
@@ -649,7 +650,7 @@ async def get_klines_before(
     dm = _require_data_manager(request)
     try:
         before_ms = before * 1000
-        result = await asyncio.to_thread(
+        result = await run_storage(
             _call_data_manager_method,
             dm.query_before,
             symbol, interval, before_ms, bars,
@@ -715,7 +716,7 @@ async def get_storage_meta(
 
     dm = _require_data_manager(request)
     try:
-        meta = await asyncio.to_thread(
+        meta = await run_storage(
             dm.get_bounds, symbol, interval,
             exchange,
             market_type=market_type,
@@ -753,7 +754,7 @@ async def get_klines_continuity(
 
     dm = _require_data_manager(request)
     try:
-        report = await asyncio.to_thread(
+        report = await run_storage(
             dm.scan_storage_gaps,
             symbol,
             interval,
@@ -844,7 +845,7 @@ async def get_sma(
 
     try:
         if start is not None or end is not None:
-            result = await asyncio.to_thread(
+            result = await run_storage(
                 dm.query,
                 symbol,
                 interval,
@@ -855,7 +856,7 @@ async def get_sma(
                 market_type=market_type,
             )
         else:
-            result = await asyncio.to_thread(
+            result = await run_storage(
                 dm.query_latest,
                 symbol,
                 interval,

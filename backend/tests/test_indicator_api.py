@@ -473,6 +473,10 @@ def test_indicator_diagnostics_snapshot_reports_runtime_state(tmp_path) -> None:
     assert payload["pyne"]["executor"]["mode"] in {"inline", "process"}
     assert payload["pyne"]["cache"]["maxItems"] >= 1
     assert payload["websocket"]["maxSubscriptions"] >= 1
+    assert "heartbeat_delay" in payload["websocket"]["metrics"]
+    assert payload["executors"]["indicator"]["max_workers"] >= 1
+    assert payload["executors"]["pyne_wait"]["max_workers"] >= 1
+    assert payload["executors"]["storage"]["max_workers"] >= 1
 
 
 def test_indicator_ws_event_message_shape() -> None:

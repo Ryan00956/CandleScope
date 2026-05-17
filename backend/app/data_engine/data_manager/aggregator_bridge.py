@@ -1,10 +1,10 @@
 """Bridge BarAggregator events into DataManager cache, storage, and bus."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 
+from app.core.executors import run_storage
 from app.data_engine.interval_policy import is_ephemeral_interval
 
 from ..bar_aggregator import BarEvent, BarEventType, BarState
@@ -105,7 +105,7 @@ class AggregatorBridge:
             else "data_manager_closed"
         )
         try:
-            await asyncio.to_thread(
+            await run_storage(
                 storage.upsert_bars,
                 bar_state.symbol,
                 bar_state.interval,

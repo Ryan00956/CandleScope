@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import time
 import uuid
@@ -13,6 +14,32 @@ from app.data_engine.interval_policy import parse_interval_ms
 from .models import BarData, DataEvent, DataEventType, SeriesKey
 
 logger = logging.getLogger("data_manager.backfill_coordinator")
+
+
+BACKFILL_REASON_PRIORITIES: dict[str, int] = {
+    "initial_history": 10,
+    "visible_load_more": 20,
+    "visible_range_gap": 20,
+    "visible_seed_gap": 30,
+    "related_interval_warmup": 40,
+    "tail_gap": 50,
+    "full_subscription_warmup": 60,
+    "price_daily_open": 70,
+    "latest_refresh": 80,
+    "query_gap": 100,
+    "query_empty": 100,
+    "query_tail_gap": 100,
+    "query_left_gap": 100,
+    "query_shortfall": 100,
+    "query_interior_gap": 100,
+    "startup_gap_scan": 120,
+    "background_gap_audit": 150,
+}
+
+
+def priority_for_reason(reason: str | None, default: int = 100) -> int:
+    """Return the scheduler priority for a demand reason."""
+    return BACKFILL_REASON_PRIORITIES.get(str(reason or "").strip(), default)
 
 
 class BackfillEngineLike(Protocol):
@@ -47,8 +74,19 @@ class RepairRequest:
     exchange: str = "binance"
     market_type: str = "spot"
     reason: str = "query_gap"
+    priority: int | None = None
+    requester: str = "query"
+    wait_policy: str = "async"
     metadata: dict[str, Any] = field(default_factory=dict)
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def __post_init__(self) -> None:
+        if self.priority is None:
+            self.priority = priority_for_reason(self.reason)
+        self.metadata.setdefault("requested_range", {
+            "start_ms": int(self.start_ms),
+            "end_ms": int(self.end_ms),
+        })
 
     @property
     def series_key(self) -> tuple[str, str, str, str]:
@@ -76,6 +114,9 @@ class RepairRequest:
             exchange=self.exchange,
             market_type=self.market_type,
             reason=f"{self.reason}+{other.reason}",
+            priority=min(int(self.priority or 100), int(other.priority or 100)),
+            requester=self.requester if self.requester == other.requester else "mixed",
+            wait_policy=self.wait_policy,
             metadata=metadata,
             request_id=self.request_id,
         )
@@ -113,9 +154,491 @@ class ScanReport:
 
 @dataclass(slots=True)
 class _SeriesState:
-    current: RepairRequest | None = None
-    pending: RepairRequest | None = None
-    task: asyncio.Task | None = None
+    active: str | None = None
+    pending: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _FetchChunk:
+    chunk_id: str
+    parent_id: str
+    request: RepairRequest
+    sequence: int
+
+
+@dataclass(slots=True)
+class _RequestState:
+    request: RepairRequest
+    future: asyncio.Future[RepairOutcome]
+    chunk_ids: list[str]
+    completed: int = 0
+    attempts: int = 0
+    bars_loaded: int = 0
+    outcomes: list[RepairOutcome] = field(default_factory=list)
+    failed: RepairOutcome | None = None
+    stale: bool = False
+
+    @property
+    def total(self) -> int:
+        return len(self.chunk_ids)
+
+    @property
+    def pending_count(self) -> int:
+        return max(0, self.total - self.completed - (1 if self.failed else 0))
+
+
+@dataclass(slots=True)
+class _TokenBucket:
+    key: str
+    capacity: int = 60
+    refill_per_second: float = 60.0
+    tokens: float = 60.0
+    updated_at: float = field(default_factory=time.monotonic)
+    cooldown_until_ms: int = 0
+
+    def try_acquire(self, now_ms: int, cost: int = 1) -> bool:
+        if now_ms < self.cooldown_until_ms:
+            return False
+        now = time.monotonic()
+        elapsed = max(0.0, now - self.updated_at)
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_per_second)
+        self.updated_at = now
+        if self.tokens < cost:
+            return False
+        self.tokens -= cost
+        return True
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "tokens": round(self.tokens, 2),
+            "capacity": self.capacity,
+            "cooldown_until_ms": self.cooldown_until_ms,
+        }
+
+
+class _BackfillScheduler:
+    """Priority scheduler used behind BackfillCoordinator's public API."""
+
+    def __init__(
+        self,
+        *,
+        execute: Callable[[RepairRequest], Awaitable[RepairOutcome]],
+        future_for: Callable[[RepairRequest], asyncio.Future[RepairOutcome]],
+        complete: Callable[[RepairRequest, RepairOutcome], None],
+        on_queued: Callable[[RepairRequest], None],
+        max_concurrency: int = 4,
+        chunk_bars: int = 1000,
+    ) -> None:
+        self._execute = execute
+        self._future_for = future_for
+        self._complete = complete
+        self._on_queued = on_queued
+        self._max_concurrency = max(1, max_concurrency)
+        self._chunk_bars = max(1, chunk_bars)
+
+        self._series: dict[tuple[str, str, str, str], _SeriesState] = {}
+        self._requests: dict[str, _RequestState] = {}
+        self._chunks: dict[str, _FetchChunk] = {}
+        self._ready: list[tuple[int, int, int, str]] = []
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._buckets: dict[str, _TokenBucket] = {}
+        self._coverage: dict[tuple[str, str, str, str], list[dict[str, int]]] = {}
+        self._outcomes: dict[str, RepairOutcome] = {}
+        self._seq = 0
+        self._shutdown = False
+
+        self.submitted = 0
+        self.deduped = 0
+        self.merged = 0
+
+    def submit(self, request: RepairRequest) -> tuple[str, asyncio.Future[RepairOutcome]]:
+        if self._shutdown:
+            raise RuntimeError("BackfillCoordinator is shut down")
+
+        self.submitted += 1
+        series_key = request.series_key
+        series = self._series.setdefault(series_key, _SeriesState())
+
+        active_state = self._requests.get(series.active or "")
+        if active_state is not None and self._covers(active_state.request, request):
+            self.deduped += 1
+            return active_state.request.request_id, active_state.future
+
+        for request_id in list(series.pending):
+            state = self._requests.get(request_id)
+            if state is None or state.stale:
+                continue
+            if self._covers(state.request, request):
+                self.deduped += 1
+                return state.request.request_id, state.future
+            if state.completed == 0 and self._should_merge(state.request, request):
+                state.request = state.request.merged_with(request)
+                self._replace_pending_chunks(state)
+                self._on_queued(state.request)
+                self.merged += 1
+                return state.request.request_id, state.future
+
+        future = self._future_for(request)
+        state = _RequestState(
+            request=request,
+            future=future,
+            chunk_ids=[],
+        )
+        self._requests[request.request_id] = state
+        series.pending.append(request.request_id)
+        self._on_queued(request)
+        self._replace_pending_chunks(state)
+        self._drain()
+        return request.request_id, future
+
+    async def shutdown(self) -> None:
+        self._shutdown = True
+        for task in list(self._tasks.values()):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+
+        for state in list(self._requests.values()):
+            if state.future.done():
+                continue
+            outcome = RepairOutcome(
+                request=state.request,
+                status="failed",
+                error="cancelled",
+            )
+            state.future.set_result(outcome)
+
+        self._ready.clear()
+        self._chunks.clear()
+        self._requests.clear()
+        self._series.clear()
+        self._tasks.clear()
+
+    def snapshot(self) -> dict[str, Any]:
+        active: list[dict[str, Any]] = []
+        pending: list[dict[str, Any]] = []
+        for series_key, series in self._series.items():
+            series_label = ":".join(series_key)
+            if series.active:
+                state = self._requests.get(series.active)
+                if state is not None:
+                    active.append(self._state_snapshot(series_label, state, active=True))
+            for request_id in series.pending:
+                state = self._requests.get(request_id)
+                if state is not None and not state.stale:
+                    pending.append(self._state_snapshot(series_label, state, active=False))
+
+        return {
+            "submitted": self.submitted,
+            "deduped": self.deduped,
+            "merged": self.merged,
+            "active": active,
+            "pending": pending,
+            "ready_chunks": len(self._ready),
+            "running_chunks": len(self._tasks),
+            "buckets": {
+                key: bucket.snapshot()
+                for key, bucket in sorted(self._buckets.items())
+            },
+            "coverage": {
+                ":".join(series): {"covered_ranges": ranges, "missing_ranges": []}
+                for series, ranges in sorted(self._coverage.items())
+            },
+            "recent_outcomes": {
+                request_id: self._outcome_snapshot(outcome)
+                for request_id, outcome in list(self._outcomes.items())[-20:]
+            },
+        }
+
+    def _replace_pending_chunks(self, state: _RequestState) -> None:
+        for chunk_id in state.chunk_ids:
+            self._chunks.pop(chunk_id, None)
+        state.chunk_ids = []
+        state.completed = 0
+        state.failed = None
+        state.outcomes = []
+        state.attempts = 0
+        state.bars_loaded = 0
+
+        for chunk in self._split_request(state.request):
+            self._chunks[chunk.chunk_id] = chunk
+            state.chunk_ids.append(chunk.chunk_id)
+            self._push_ready(chunk)
+
+    def _split_request(self, request: RepairRequest) -> list[_FetchChunk]:
+        interval_ms = parse_interval_ms(request.interval) or 60_000
+        chunk_span = interval_ms * self._chunk_bars
+        chunks: list[_FetchChunk] = []
+        start = int(request.start_ms)
+        end = int(request.end_ms)
+        sequence = 0
+        while start <= end:
+            chunk_end = min(end, start + chunk_span - interval_ms)
+            chunk_request = RepairRequest(
+                symbol=request.symbol,
+                interval=request.interval,
+                start_ms=start,
+                end_ms=chunk_end,
+                exchange=request.exchange,
+                market_type=request.market_type,
+                reason=request.reason,
+                priority=request.priority,
+                requester=request.requester,
+                wait_policy=request.wait_policy,
+                metadata={
+                    **request.metadata,
+                    "parent_request_id": request.request_id,
+                    "chunk_sequence": sequence,
+                },
+                request_id=request.request_id,
+            )
+            chunks.append(_FetchChunk(
+                chunk_id=f"{request.request_id}:{sequence}",
+                parent_id=request.request_id,
+                request=chunk_request,
+                sequence=sequence,
+            ))
+            sequence += 1
+            start = chunk_end + interval_ms
+        if self._newest_first(request):
+            return list(reversed(chunks))
+        return chunks
+
+    @staticmethod
+    def _newest_first(request: RepairRequest) -> bool:
+        return request.reason in {
+            "initial_history",
+            "visible_load_more",
+            "visible_range_gap",
+            "visible_seed_gap",
+            "tail_gap",
+            "latest_refresh",
+        }
+
+    def _push_ready(self, chunk: _FetchChunk) -> None:
+        self._seq += 1
+        heapq.heappush(
+            self._ready,
+            (
+                int(chunk.request.priority or 100),
+                int(chunk.request.metadata.get("created_at_ms", 0) or 0),
+                self._seq,
+                chunk.chunk_id,
+            ),
+        )
+
+    def _drain(self) -> None:
+        if self._shutdown:
+            return
+        skipped: list[tuple[int, int, int, str]] = []
+        try:
+            while len(self._tasks) < self._max_concurrency and self._ready:
+                item = heapq.heappop(self._ready)
+                chunk = self._chunks.get(item[3])
+                if chunk is None:
+                    continue
+                state = self._requests.get(chunk.parent_id)
+                if state is None or state.stale or state.failed is not None:
+                    self._chunks.pop(chunk.chunk_id, None)
+                    continue
+                series = self._series.setdefault(chunk.request.series_key, _SeriesState())
+                if series.active is not None:
+                    skipped.append(item)
+                    continue
+                bucket = self._bucket_for(chunk.request)
+                now_ms = int(time.time() * 1000)
+                if not bucket.try_acquire(now_ms):
+                    skipped.append(item)
+                    continue
+
+                series.active = chunk.parent_id
+                if chunk.parent_id in series.pending:
+                    series.pending.remove(chunk.parent_id)
+                task = asyncio.create_task(
+                    self._run_chunk(chunk),
+                    name=(
+                        "backfill-chunk:"
+                        f"{chunk.request.exchange}:{chunk.request.market_type}:"
+                        f"{chunk.request.symbol}@{chunk.request.interval}:"
+                        f"{chunk.sequence}"
+                    ),
+                )
+                self._tasks[chunk.chunk_id] = task
+        finally:
+            for item in skipped:
+                heapq.heappush(self._ready, item)
+
+    async def _run_chunk(self, chunk: _FetchChunk) -> None:
+        try:
+            try:
+                outcome = await self._execute(chunk.request)
+            except asyncio.CancelledError:
+                outcome = RepairOutcome(
+                    request=chunk.request,
+                    status="failed",
+                    error="cancelled",
+                )
+            except Exception as exc:
+                logger.exception("Backfill chunk failed for %s", chunk.chunk_id)
+                outcome = RepairOutcome(
+                    request=chunk.request,
+                    status="failed",
+                    error=str(exc),
+                )
+            self._finish_chunk(chunk, outcome)
+        finally:
+            self._tasks.pop(chunk.chunk_id, None)
+            self._drain()
+
+    def _finish_chunk(self, chunk: _FetchChunk, outcome: RepairOutcome) -> None:
+        self._chunks.pop(chunk.chunk_id, None)
+        state = self._requests.get(chunk.parent_id)
+        series = self._series.get(chunk.request.series_key)
+        if series is not None and series.active == chunk.parent_id:
+            series.active = None
+
+        if state is None or state.future.done():
+            return
+
+        state.completed += 1
+        state.attempts += int(outcome.attempts or 0)
+        state.bars_loaded += int(outcome.bars_loaded or 0)
+        state.outcomes.append(outcome)
+        if self._is_failed(outcome.status):
+            state.failed = outcome
+            self._discard_remaining_chunks(state)
+
+        if not self._is_failed(outcome.status):
+            self._coverage.setdefault(chunk.request.series_key, []).append({
+                "start_ms": chunk.request.start_ms,
+                "end_ms": chunk.request.end_ms,
+            })
+
+        if state.failed is not None or state.completed >= state.total:
+            final = self._aggregate_outcome(state)
+            self._outcomes[state.request.request_id] = final
+            self._complete(state.request, final)
+            self._requests.pop(state.request.request_id, None)
+            if series is not None and not series.pending and series.active is None:
+                self._series.pop(chunk.request.series_key, None)
+        elif series is not None and state.request.request_id not in series.pending:
+            # Remaining chunks are already in the global queue. Keep the parent
+            # visible in pending diagnostics while it waits for the next turn.
+            series.pending.append(state.request.request_id)
+
+    def _discard_remaining_chunks(self, state: _RequestState) -> None:
+        for chunk_id in state.chunk_ids:
+            self._chunks.pop(chunk_id, None)
+        state.stale = True
+
+    def _aggregate_outcome(self, state: _RequestState) -> RepairOutcome:
+        if state.failed is not None:
+            return RepairOutcome(
+                request=state.request,
+                status=state.failed.status,
+                report=state.failed.report,
+                attempts=state.attempts or state.failed.attempts,
+                bars_loaded=state.bars_loaded,
+                verified_contiguous=False,
+                remaining_missing_bars=state.failed.remaining_missing_bars,
+                error=state.failed.error,
+            )
+
+        last = state.outcomes[-1] if state.outcomes else None
+        verified_values = [
+            outcome.verified_contiguous
+            for outcome in state.outcomes
+            if outcome.verified_contiguous is not None
+        ]
+        missing_values = [
+            outcome.remaining_missing_bars
+            for outcome in state.outcomes
+            if outcome.remaining_missing_bars is not None
+        ]
+        return RepairOutcome(
+            request=state.request,
+            status=last.status if last is not None else "completed",
+            report=last.report if last is not None else None,
+            attempts=state.attempts,
+            bars_loaded=state.bars_loaded,
+            verified_contiguous=(
+                all(verified_values) if verified_values else None
+            ),
+            remaining_missing_bars=(
+                sum(int(value or 0) for value in missing_values)
+                if missing_values
+                else None
+            ),
+            error=None,
+        )
+
+    def _bucket_for(self, request: RepairRequest) -> _TokenBucket:
+        key = f"{request.exchange.lower().strip()}:{request.market_type.lower().strip()}"
+        bucket = self._buckets.get(key)
+        if bucket is None:
+            bucket = _TokenBucket(key=key)
+            self._buckets[key] = bucket
+        return bucket
+
+    def _state_snapshot(
+        self,
+        series: str,
+        state: _RequestState,
+        *,
+        active: bool,
+    ) -> dict[str, Any]:
+        payload = {
+            "series": series,
+            "request_id": state.request.request_id,
+            "reason": state.request.reason,
+            "priority": state.request.priority,
+            "requester": state.request.requester,
+            "range_start_ms": state.request.start_ms,
+            "range_end_ms": state.request.end_ms,
+            "total_chunks": state.total,
+            "completed_chunks": state.completed,
+            "pending_chunks": state.pending_count,
+            "active": active,
+        }
+        metadata = state.request.metadata or {}
+        for key in ("focus_scope", "subscription_tier", "current_interval"):
+            if key in metadata:
+                payload[key] = metadata[key]
+        return payload
+
+    @staticmethod
+    def _outcome_snapshot(outcome: RepairOutcome) -> dict[str, Any]:
+        return {
+            "status": BackfillCoordinator._status_value(outcome.status),
+            "reason": outcome.request.reason,
+            "priority": outcome.request.priority,
+            "requester": outcome.request.requester,
+            "range_start_ms": outcome.request.start_ms,
+            "range_end_ms": outcome.request.end_ms,
+            "attempts": outcome.attempts,
+            "bars_loaded": outcome.bars_loaded,
+            "verified_contiguous": outcome.verified_contiguous,
+            "remaining_missing_bars": outcome.remaining_missing_bars,
+            "error": outcome.error,
+        }
+
+    @staticmethod
+    def _covers(existing: RepairRequest, new: RepairRequest) -> bool:
+        return existing.start_ms <= new.start_ms and existing.end_ms >= new.end_ms
+
+    @classmethod
+    def _should_merge(cls, existing: RepairRequest, new: RepairRequest) -> bool:
+        interval_ms = parse_interval_ms(existing.interval) or 60_000
+        tolerance = interval_ms * 3
+        return (
+            existing.series_key == new.series_key
+            and existing.start_ms <= new.end_ms + tolerance
+            and new.start_ms <= existing.end_ms + tolerance
+        )
+
+    @staticmethod
+    def _is_failed(status: Any) -> bool:
+        return BackfillCoordinator._status_value(status) == "failed"
 
 
 class GapLedgerLike(Protocol):
@@ -168,6 +691,8 @@ class BackfillCoordinator:
         max_retries: int = 3,
         base_delay_seconds: float = 5.0,
         gap_ledger: GapLedgerLike | None = None,
+        max_concurrency: int = 4,
+        chunk_bars: int = 1000,
     ) -> None:
         self._storage = storage
         self._bars_backfilled = bars_backfilled
@@ -178,14 +703,17 @@ class BackfillCoordinator:
         self._base_delay_seconds = base_delay_seconds
         self._gap_ledger = gap_ledger
 
-        self._series: dict[tuple[str, str, str, str], _SeriesState] = {}
         self._futures: dict[str, asyncio.Future[RepairOutcome]] = {}
         self._outcomes: dict[str, RepairOutcome] = {}
         self._shutdown = False
-
-        self._submitted = 0
-        self._deduped = 0
-        self._merged = 0
+        self._scheduler = _BackfillScheduler(
+            execute=self._run_with_retries,
+            future_for=self._future_for,
+            complete=self._complete,
+            on_queued=self._ledger_upsert_detected,
+            max_concurrency=max_concurrency,
+            chunk_bars=chunk_bars,
+        )
 
     def set_engine(self, engine: BackfillEngineLike) -> None:
         self._engine = engine
@@ -198,6 +726,11 @@ class BackfillCoordinator:
         end_ms: int,
         exchange: str = "binance",
         market_type: str = "spot",
+        *,
+        reason: str = "query_gap",
+        priority: int | None = None,
+        requester: str = "query",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Synchronous QueryEngine-compatible callback."""
         self.request(RepairRequest(
@@ -207,6 +740,10 @@ class BackfillCoordinator:
             end_ms=int(end_ms),
             exchange=exchange,
             market_type=market_type,
+            reason=reason,
+            priority=priority,
+            requester=requester,
+            metadata=metadata or {},
         ))
 
     def request(self, request: RepairRequest) -> str:
@@ -274,6 +811,8 @@ class BackfillCoordinator:
                         exchange=exchange,
                         market_type=market_type,
                         reason="startup_gap_scan",
+                        priority=priority_for_reason("startup_gap_scan"),
+                        requester="startup_scan",
                     ))
                     if self._is_failed(outcome.status):
                         report.failed += 1
@@ -374,10 +913,11 @@ class BackfillCoordinator:
                         exchange=exchange,
                         market_type=market_type,
                         reason="background_gap_audit",
+                        priority=priority_for_reason("background_gap_audit"),
+                        requester="background_audit",
                         metadata={
                             "origin": "background_gap_audit",
                             "gap_type": gap.get("reason", "unknown"),
-                            "priority": 80,
                         },
                     )
                     if self._should_skip_audited_gap(request):
@@ -409,46 +949,12 @@ class BackfillCoordinator:
     async def shutdown(self) -> None:
         """Cancel active and pending repairs."""
         self._shutdown = True
-        tasks = [
-            state.task
-            for state in self._series.values()
-            if state.task is not None and not state.task.done()
-        ]
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._scheduler.shutdown()
 
     def snapshot(self) -> dict:
-        active = [
-            ":".join(series)
-            for series, state in self._series.items()
-            if state.task is not None and not state.task.done()
-        ]
-        pending = [
-            ":".join(series)
-            for series, state in self._series.items()
-            if state.pending is not None
-        ]
-        return {
-            "submitted": self._submitted,
-            "deduped": self._deduped,
-            "merged": self._merged,
-            "active": active,
-            "pending": pending,
-            "gap_ledger_open": self._ledger_open_snapshot(),
-            "recent_outcomes": {
-                request_id: {
-                    "status": self._status_value(outcome.status),
-                    "attempts": outcome.attempts,
-                    "bars_loaded": outcome.bars_loaded,
-                    "verified_contiguous": outcome.verified_contiguous,
-                    "remaining_missing_bars": outcome.remaining_missing_bars,
-                    "error": outcome.error,
-                }
-                for request_id, outcome in list(self._outcomes.items())[-20:]
-            },
-        }
+        snapshot = self._scheduler.snapshot()
+        snapshot["gap_ledger_open"] = self._ledger_open_snapshot()
+        return snapshot
 
     def _request_in_loop(
         self,
@@ -457,33 +963,7 @@ class BackfillCoordinator:
         if self._shutdown:
             raise RuntimeError("BackfillCoordinator is shut down")
 
-        self._submitted += 1
-        series_key = request.series_key
-        state = self._series.setdefault(series_key, _SeriesState())
-
-        if state.current is not None:
-            if self._covers(state.current, request):
-                self._deduped += 1
-                return state.current.request_id, self._future_for(state.current)
-
-            if state.pending is None:
-                self._ledger_upsert_detected(request)
-                state.pending = request
-                return request.request_id, self._future_for(request)
-
-            state.pending = state.pending.merged_with(request)
-            self._ledger_upsert_detected(state.pending)
-            self._merged += 1
-            return state.pending.request_id, self._future_for(state.pending)
-
-        self._ledger_upsert_detected(request)
-        state.current = request
-        future = self._future_for(request)
-        state.task = asyncio.create_task(
-            self._run_series(series_key, state),
-            name=f"backfill:{request.exchange}:{request.market_type}:{request.symbol}@{request.interval}",
-        )
-        return request.request_id, future
+        return self._scheduler.submit(request)
 
     def _future_for(self, request: RepairRequest) -> asyncio.Future[RepairOutcome]:
         future = self._futures.get(request.request_id)
@@ -491,32 +971,6 @@ class BackfillCoordinator:
             future = asyncio.get_running_loop().create_future()
             self._futures[request.request_id] = future
         return future
-
-    async def _run_series(
-        self,
-        series_key: tuple[str, str, str, str],
-        state: _SeriesState,
-    ) -> None:
-        try:
-            while state.current is not None and not self._shutdown:
-                request = state.current
-                try:
-                    outcome = await self._run_with_retries(request)
-                except asyncio.CancelledError:
-                    outcome = RepairOutcome(
-                        request=request,
-                        status="failed",
-                        error="cancelled",
-                    )
-                    self._complete(request, outcome)
-                    raise
-                self._complete(request, outcome)
-                state.current = state.pending
-                state.pending = None
-        finally:
-            state.task = None
-            if state.current is None and state.pending is None:
-                self._series.pop(series_key, None)
 
     async def _run_with_retries(self, request: RepairRequest) -> RepairOutcome:
         if self._engine is None:
@@ -542,6 +996,8 @@ class BackfillCoordinator:
                     metadata={
                         **request.metadata,
                         "reason": request.reason,
+                        "priority": request.priority,
+                        "requester": request.requester,
                         "request_id": request.request_id,
                     },
                 )
@@ -662,6 +1118,9 @@ class BackfillCoordinator:
                 event_detail={
                     "request_id": request.request_id,
                     "status": self._status_value(report.status),
+                    "reason": request.reason,
+                    "priority": request.priority,
+                    "requester": request.requester,
                     "range_start_ms": written_range["start_ms"],
                     "range_end_ms": written_range["end_ms"],
                     "request_start_ms": request.start_ms,
@@ -698,6 +1157,9 @@ class BackfillCoordinator:
             detail={
                 "request_id": request.request_id,
                 "status": self._status_value(report.status),
+                "reason": request.reason,
+                "priority": request.priority,
+                "requester": request.requester,
                 "bars_count": 0,
                 "range_start_ms": request.start_ms,
                 "range_end_ms": request.end_ms,
@@ -729,6 +1191,9 @@ class BackfillCoordinator:
             detail={
                 "request_id": request.request_id,
                 "status": self._status_value(report.status) if report is not None else "failed",
+                "reason": request.reason,
+                "priority": request.priority,
+                "requester": request.requester,
                 "errors": report.errors if report is not None else ([error] if error else []),
             },
         ))
@@ -985,10 +1450,6 @@ class BackfillCoordinator:
 
     def _backoff(self, attempt: int) -> float:
         return self._base_delay_seconds * (3 ** (attempt - 1))
-
-    @staticmethod
-    def _covers(existing: RepairRequest, new: RepairRequest) -> bool:
-        return existing.start_ms <= new.start_ms and existing.end_ms >= new.end_ms
 
     @staticmethod
     def _status_value(status: Any) -> str:

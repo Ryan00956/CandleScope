@@ -140,6 +140,230 @@ def test_backfill_coordinator_merges_pending_requests_for_same_series() -> None:
     asyncio.run(_run())
 
 
+def test_backfill_coordinator_preserves_highest_priority_when_merging_pending() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+
+        coord.request(_request(0, 60_000, request_id="current"))
+        await engine.first_started.wait()
+
+        coord.request(RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=120_000,
+            end_ms=180_000,
+            exchange="binance",
+            market_type="spot",
+            reason="latest_refresh",
+            priority=80,
+            request_id="latest",
+        ))
+        coord.request(RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=60_000,
+            end_ms=300_000,
+            exchange="binance",
+            market_type="spot",
+            reason="initial_history",
+            priority=10,
+            request_id="history",
+        ))
+
+        snapshot = coord.snapshot()
+        assert snapshot["pending"][0]["priority"] == 10
+        assert snapshot["pending"][0]["range_start_ms"] == 60_000
+        assert snapshot["pending"][0]["range_end_ms"] == 300_000
+
+        engine.release_first.set()
+        await _wait_until(lambda: len(engine.calls) == 2 and not coord.snapshot()["active"])
+        assert engine.calls[1]["metadata"]["priority"] == 10
+        assert engine.calls[1]["range_start_ms"] == 60_000
+        assert engine.calls[1]["range_end_ms"] == 300_000
+
+    asyncio.run(_run())
+
+
+def test_backfill_scheduler_runs_different_series_concurrently() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.active = 0
+                self.max_active = 0
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                if len(self.calls) == 2:
+                    self.started.set()
+                await self.release.wait()
+                self.active -= 1
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=2,
+            chunk_bars=1,
+        )
+
+        btc = asyncio.create_task(coord.request_and_wait(_request(0, 60_000)))
+        eth = asyncio.create_task(coord.request_and_wait(RepairRequest(
+            symbol="ETHUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=60_000,
+            exchange="binance",
+            market_type="spot",
+        )))
+
+        await engine.started.wait()
+        assert engine.max_active == 2
+        assert {call["symbol"] for call in engine.calls[:2]} == {"BTCUSDT", "ETHUSDT"}
+
+        engine.release.set()
+        await asyncio.gather(btc, eth)
+
+    asyncio.run(_run())
+
+
+def test_backfill_scheduler_prioritizes_foreground_after_active_chunk() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+
+        background = asyncio.create_task(coord.request_and_wait(RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=180_000,
+            exchange="binance",
+            market_type="spot",
+            reason="background_gap_audit",
+            request_id="background",
+        )))
+        await engine.first_started.wait()
+
+        foreground = asyncio.create_task(coord.request_and_wait(RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=240_000,
+            end_ms=240_000,
+            exchange="binance",
+            market_type="spot",
+            reason="initial_history",
+            request_id="foreground",
+        )))
+
+        engine.release_first.set()
+        await _wait_until(lambda: len(engine.calls) >= 2)
+        assert engine.calls[0]["range_start_ms"] == 0
+        assert engine.calls[1]["range_start_ms"] == 240_000
+        assert engine.calls[1]["metadata"]["reason"] == "initial_history"
+
+        await asyncio.gather(background, foreground)
+
+    asyncio.run(_run())
+
+
+def test_backfill_scheduler_runs_initial_history_from_newest_chunk() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+            max_concurrency=1,
+            chunk_bars=1,
+        )
+
+        await coord.request_and_wait(RepairRequest(
+            symbol="BTCUSDT",
+            interval="1m",
+            start_ms=0,
+            end_ms=180_000,
+            exchange="binance",
+            market_type="spot",
+            reason="initial_history",
+        ))
+
+        assert [call["range_start_ms"] for call in engine.calls] == [
+            180_000,
+            120_000,
+            60_000,
+            0,
+        ]
+
+    asyncio.run(_run())
+
+
 def test_backfill_coordinator_retries_failed_report_until_success() -> None:
     async def _run() -> None:
         class _Engine:

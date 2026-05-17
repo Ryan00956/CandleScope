@@ -19,6 +19,52 @@ DataManager precise storage readback + cache merge
 
 `backfill` owns the repair pipeline. It does not own API endpoints, WebSocket delivery, DataManager cache updates, or request lifecycle coordination. Those are handled by `DataManager.BackfillCoordinator`.
 
+## Demand-Aware Scheduling
+
+Runtime backfill requests now flow through a demand-aware scheduler inside
+`BackfillCoordinator`. `BackfillEngine` still owns detect/plan/fetch/reconcile;
+the coordinator owns prioritization, chunking, deduplication, and cache/event
+handoff.
+
+Important behavior:
+
+- Requests carry `reason`, `priority`, `requester`, and metadata.
+- `/klines/history` submits `initial_history` at priority `10`.
+- `/klines/latest` does not trigger backfill by default, so it cannot steal the
+  first-screen history slot on a cold symbol.
+- `/klines/range` uses `visible_range_gap`; `/klines/history/before` uses
+  `visible_load_more`.
+- Related intervals for the current symbol are scheduled as
+  `related_interval_warmup` after the active interval.
+- `full` subscriptions use lower-priority `full_subscription_warmup`; `price`
+  subscriptions only maintain price flow plus `price_daily_open`; `none` does
+  not proactively create K-line repair work.
+- Large visible-range repairs are split into chunks and user-visible chunks run
+  newest-first, so the right side of the chart can become renderable sooner.
+- Different series can run concurrently; the same
+  `(exchange, market_type, symbol, interval)` remains serialized for storage
+  reconciliation.
+
+Current priority map:
+
+| Reason | Priority | Source |
+|---|---:|---|
+| `initial_history` | 10 | current chart first-screen history |
+| `visible_load_more` / `visible_range_gap` | 20 | user-visible range work |
+| `visible_seed_gap` | 30 | foreground custom/base warm start |
+| `related_interval_warmup` | 40 | same-symbol interval warmup |
+| `tail_gap` | 50 | realtime gap marker |
+| `full_subscription_warmup` | 60 | full watchlist K-line maintenance |
+| `price_daily_open` | 70 | price-only daily open repair |
+| `latest_refresh` | 80 | low-value tail refresh |
+| `query_gap` / query-derived fallback reasons | 100 | generic query repair |
+| `startup_gap_scan` | 120 | startup maintenance |
+| `background_gap_audit` | 150 | lowest-priority background audit |
+
+The scheduler snapshot is exposed through DataManager diagnostics and includes
+active requests, pending requests, chunk counts, token buckets, recent outcomes,
+and coverage ranges.
+
 ## Pipeline
 
 | Phase | Component | Responsibility |

@@ -23,6 +23,9 @@ class SubscriptionDataManagerLike(Protocol):
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        *,
+        focus_scope: str = "foreground",
+        subscription_tier: str | None = None,
     ) -> Any:
         ...
 
@@ -254,6 +257,8 @@ class SubscriptionService:
             "1m",
             exchange=exchange,
             market_type=market_type,
+            focus_scope="subscription",
+            subscription_tier=SubscriptionTier.FULL.value,
         )
 
     async def _deactivate_full(self, key: str) -> None:

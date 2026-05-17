@@ -14,6 +14,8 @@ initialized during application startup (see ``app/main.py``).
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import time
 from typing import Any
 
@@ -37,6 +39,9 @@ from app.data_engine.interval_policy import (
 from app.data_engine.storage import DEFAULT_EXCHANGE, DEFAULT_MARKET_TYPE
 
 router = APIRouter(prefix="/klines", tags=["klines"])
+logger = logging.getLogger("api.klines")
+
+RELATED_WARMUP_INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -108,6 +113,25 @@ def _resolve_interval(interval: str) -> dict:
 def _bars_to_dicts(bars: list) -> list[dict]:
     """Convert BarData list to lightweight-charts dicts."""
     return [b.to_dict() if hasattr(b, "to_dict") else b for b in bars]
+
+
+def _call_data_manager_method(method: Any, *args: Any, **kwargs: Any) -> Any:
+    """Call a DataManager method while tolerating older test doubles."""
+    try:
+        signature = inspect.signature(method)
+        supports_kwargs = any(
+            param.kind is inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+        if not supports_kwargs:
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in signature.parameters
+            }
+    except (TypeError, ValueError):
+        pass
+    return method(*args, **kwargs)
 
 
 def _last_closed_open_ms(interval: str, now_ms: int | None = None) -> int:
@@ -226,6 +250,66 @@ def _merge_missing_ranges(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]
     return sorted(merged.values(), key=lambda item: (item["start_ms"], item["end_ms"]))
 
 
+def _related_warmup_intervals(current_interval: str, *, limit: int = 3) -> list[str]:
+    if current_interval not in RELATED_WARMUP_INTERVALS:
+        return []
+
+    current_index = RELATED_WARMUP_INTERVALS.index(current_interval)
+    candidates: list[tuple[int, int, str]] = []
+    for index, interval in enumerate(RELATED_WARMUP_INTERVALS):
+        if interval == current_interval:
+            continue
+        distance = abs(index - current_index)
+        direction_bias = 0 if index < current_index else 1
+        candidates.append((distance, direction_bias, interval))
+    return [interval for _, _, interval in sorted(candidates)[:limit]]
+
+
+def _schedule_related_interval_warmup(
+    dm: Any,
+    *,
+    symbol: str,
+    current_interval: str,
+    start_ms: int,
+    end_ms: int,
+    exchange: str,
+    market_type: str,
+) -> None:
+    request_backfill = getattr(dm, "request_backfill", None)
+    if request_backfill is None:
+        return
+
+    for interval in _related_warmup_intervals(current_interval):
+        try:
+            _call_data_manager_method(
+                request_backfill,
+                symbol,
+                interval,
+                start_ms,
+                end_ms,
+                exchange,
+                market_type,
+                reason="related_interval_warmup",
+                requester="klines_history_related",
+                metadata={
+                    "focus_scope": "related",
+                    "current_interval": current_interval,
+                    "requested_interval": interval,
+                    "visible_range": {
+                        "start_ms": start_ms,
+                        "end_ms": end_ms,
+                    },
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to schedule related warmup for %s@%s: %s",
+                symbol,
+                interval,
+                exc,
+            )
+
+
 # ═══════════════════════════════════════════════════════════════
 #  Endpoints — DataManager-powered
 # ═══════════════════════════════════════════════════════════════
@@ -295,9 +379,13 @@ async def get_latest_klines(
     try:
         await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
         result = await asyncio.to_thread(
+            _call_data_manager_method,
             dm.query_latest, symbol, interval, limit,
             exchange,
             market_type=market_type,
+            auto_backfill=False,
+            backfill_reason="latest_refresh",
+            backfill_requester="klines_latest",
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager latest query failed: {exc}") from exc
@@ -311,6 +399,7 @@ async def get_latest_klines(
         "count": len(data),
         "source": result.source.value,
         "fetched": result.total,
+        "backfill_triggered": result.backfill_triggered,
         "cache": result.metadata,
         "data": data,
         "base_interval": None,
@@ -340,6 +429,7 @@ async def get_klines_history(
         needed_limit = int((end_ms - start_ms) / 1000 / interval_secs) + 100
 
         result = await asyncio.to_thread(
+            _call_data_manager_method,
             dm.query,
             symbol, interval,
             start_ms=start_ms,
@@ -347,9 +437,21 @@ async def get_klines_history(
             limit=needed_limit,
             exchange=exchange,
             market_type=market_type,
+            backfill_reason="initial_history",
+            backfill_requester="klines_history",
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager history query failed: {exc}") from exc
+
+    _schedule_related_interval_warmup(
+        dm,
+        symbol=symbol,
+        current_interval=interval,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        exchange=exchange,
+        market_type=market_type,
+    )
 
     data = _bars_to_dicts(result.bars)
     verification = _verify_range_continuity(
@@ -441,6 +543,7 @@ async def get_klines_range(
     dm = _require_data_manager(request)
     try:
         result = await asyncio.to_thread(
+            _call_data_manager_method,
             dm.query,
             symbol,
             interval,
@@ -450,6 +553,8 @@ async def get_klines_range(
             exchange=exchange,
             market_type=market_type,
             auto_backfill=(repair_mode != "none"),
+            backfill_reason="visible_range_gap",
+            backfill_requester="klines_range",
         )
         data = _bars_to_dicts(result.bars)
         verification = _verify_range_continuity(
@@ -470,6 +575,7 @@ async def get_klines_range(
         ):
             await asyncio.sleep(wait_ms / 1000)
             result = await asyncio.to_thread(
+                _call_data_manager_method,
                 dm.query,
                 symbol,
                 interval,
@@ -479,6 +585,8 @@ async def get_klines_range(
                 exchange=exchange,
                 market_type=market_type,
                 auto_backfill=(repair_mode != "none"),
+                backfill_reason="visible_range_gap",
+                backfill_requester="klines_range",
             )
             data = _bars_to_dicts(result.bars)
             verification = _verify_range_continuity(
@@ -542,10 +650,13 @@ async def get_klines_before(
     try:
         before_ms = before * 1000
         result = await asyncio.to_thread(
+            _call_data_manager_method,
             dm.query_before,
             symbol, interval, before_ms, bars,
             exchange,
             market_type=market_type,
+            backfill_reason="visible_load_more",
+            backfill_requester="klines_history_before",
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager before query failed: {exc}") from exc

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import DatabaseManagementPanel from './settings/DatabaseManagementPanel';
 import {
     fetchProxySettings,
     updateProxySettings,
@@ -16,6 +17,7 @@ const CATEGORIES = [
     { key: 'network',    label: '网络连接', icon: '🌐' },
     { key: 'exchanges',  label: '交易所',   icon: '🏦' },
     { key: 'data',       label: '数据管理', icon: '💾' },
+    { key: 'database',   label: '数据库工具', icon: '🗄️' },
     { key: 'about',      label: '关于',     icon: 'ℹ️' },
 ];
 
@@ -1008,6 +1010,15 @@ export default function SettingsModal({
         </>
     );
 
+      const renderDatabase = () => (
+        <DatabaseManagementPanel
+          currentExchange={currentExchange}
+          currentMarketType={currentMarketType}
+          currentSymbol={currentSymbol}
+          watchlists={watchlists}
+        />
+      );
+
     // ── Detail renderers (repair / gap scan results) ────────
     const renderRepairDetails = (result) => {
         if (!Array.isArray(result.results) || result.results.length === 0) return null;
@@ -1063,6 +1074,7 @@ export default function SettingsModal({
             case 'network':    return renderNetwork();
             case 'exchanges':  return renderExchanges();
             case 'data':       return renderData();
+            case 'database':   return renderDatabase();
             case 'about':      return renderAbout();
             default:           return renderAppearance();
         }
@@ -2181,6 +2193,360 @@ input[type="color"] {
   margin-top: 4px;
   font-size: 11px;
   color: var(--text-muted, #64748b);
+}
+
+/* ── Database tools ─────────────────────────────────────── */
+.st-db-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.st-db-summary-card {
+  min-height: 64px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color, #334155);
+  background: var(--bg-tertiary, #1a2332);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+
+.st-db-summary-card span {
+  color: var(--text-muted, #64748b);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.st-db-summary-card strong {
+  color: var(--text-primary, #f1f5f9);
+  font-size: 15px;
+  font-family: var(--font-mono, monospace);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.st-db-summary-wide {
+  grid-column: span 2;
+}
+
+.st-db-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.st-db-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.st-db-field span {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted, #64748b);
+}
+
+.st-db-scope-actions .st-btn {
+  min-width: 0;
+}
+
+.st-db-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.st-db-empty {
+  padding: 24px 16px;
+  border: 1px dashed var(--border-color, #334155);
+  border-radius: 10px;
+  text-align: center;
+  color: var(--text-muted, #64748b);
+  font-size: 12.5px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.st-db-symbol-card {
+  border: 1px solid var(--border-color, #334155);
+  background: var(--bg-tertiary, #1a2332);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.st-db-symbol-head {
+  width: 100%;
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 18px minmax(100px, 1fr) auto auto auto minmax(130px, auto);
+  gap: 8px;
+  align-items: center;
+  padding: 12px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary, #f1f5f9);
+  cursor: pointer;
+  text-align: left;
+}
+
+.st-db-symbol-head:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.st-db-expand {
+  color: var(--text-muted, #64748b);
+  font-size: 13px;
+}
+
+.st-db-symbol-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, monospace);
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.st-db-chip {
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary, #94a3b8);
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.st-db-symbol-meta {
+  color: var(--text-muted, #64748b);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.st-db-symbol-body {
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.st-db-symbol-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 2px 2px 8px;
+  color: var(--text-muted, #64748b);
+  font-size: 11px;
+}
+
+.st-db-symbol-toolbar .st-btn {
+  margin-left: auto;
+}
+
+.st-db-series-row {
+  display: grid;
+  grid-template-columns: 90px 82px minmax(180px, 1.6fr) 70px 100px 180px;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.st-db-series-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 0;
+}
+
+.st-db-interval {
+  color: var(--text-primary, #f1f5f9);
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.st-db-series-stat {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.st-db-series-stat span {
+  color: var(--text-muted, #64748b);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.st-db-series-stat strong {
+  color: var(--text-secondary, #94a3b8);
+  font-size: 11.5px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.st-db-row-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.st-db-mini-btn {
+  flex: none;
+  min-height: 32px;
+  padding: 6px 8px;
+  font-size: 11.5px;
+}
+
+.st-db-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1002;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.st-db-dialog {
+  width: min(460px, 100%);
+  padding: 18px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color, #334155);
+  background: var(--bg-secondary, #1e293b);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+}
+
+.st-db-dialog-title {
+  color: var(--text-primary, #f1f5f9);
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.st-db-dialog-subtitle {
+  color: var(--text-secondary, #94a3b8);
+  font-family: var(--font-mono, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+}
+
+.st-db-dialog-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.st-db-dialog-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+}
+
+.st-db-dialog-row span {
+  color: var(--text-muted, #64748b);
+}
+
+.st-db-dialog-row strong {
+  color: var(--text-primary, #f1f5f9);
+  font-family: var(--font-mono, monospace);
+  text-align: right;
+}
+
+.st-db-confirm-field {
+  margin-top: 12px;
+}
+
+@media (max-width: 860px) {
+  .st-db-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .st-db-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .st-db-series-row {
+    grid-template-columns: 80px 82px minmax(160px, 1fr) 86px;
+  }
+
+  .st-db-series-row .st-db-series-stat:nth-of-type(4),
+  .st-db-series-row .st-db-series-stat:nth-of-type(5) {
+    display: none;
+  }
+
+  .st-db-row-actions {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 640px) {
+  .st-db-summary-grid,
+  .st-db-filter-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .st-db-summary-wide {
+    grid-column: auto;
+  }
+
+  .st-db-symbol-head {
+    grid-template-columns: 18px minmax(90px, 1fr) auto;
+    align-items: start;
+  }
+
+  .st-db-symbol-head .st-series-badge,
+  .st-db-symbol-meta {
+    grid-column: 2 / -1;
+  }
+
+  .st-db-chip {
+    justify-self: start;
+  }
+
+  .st-db-symbol-meta {
+    text-align: left;
+  }
+
+  .st-db-series-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .st-db-series-row .st-db-series-stat:nth-of-type(4),
+  .st-db-series-row .st-db-series-stat:nth-of-type(5) {
+    display: flex;
+  }
+
+  .st-db-series-main,
+  .st-db-series-stat {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .st-db-row-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .st-db-scope-actions {
+    flex-direction: column;
+  }
 }
 
 /* ── About section ──────────────────────────────────────── */

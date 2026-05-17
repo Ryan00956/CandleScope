@@ -210,6 +210,59 @@ def test_warm_start_custom_interval_replays_components_and_warms_cache() -> None
     asyncio.run(_run())
 
 
+def test_warm_start_marks_full_subscription_base_backfill_priority() -> None:
+    async def _run() -> None:
+        fixed_now_ms = (10 * 60 * 60 * 1000) + (50 * 60 * 1000)
+        fixed_time = fixed_now_ms / 1000
+        agg = BarAggregator(BarAggregatorConfig(update_throttle_ms=0))
+        agg.add_target("BTC-USDT", "45m", exchange="okx", market_type="spot")
+        bucket_start_ms = agg.compute_bucket("45m", fixed_now_ms)
+        assert bucket_start_ms is not None
+
+        storage = _Storage(rows=[])
+        cache = BarCache()
+        calls: list[tuple[tuple, dict]] = []
+        service = AggregatorWarmStartService(
+            cache=cache,
+            bar_aggregator=agg,
+            base_interval="15m",
+            storage_provider=lambda: storage,  # type: ignore[return-value]
+            backfill_trigger_provider=lambda: (
+                lambda *args, **kwargs: calls.append((args, kwargs))
+            ),
+        )
+
+        with patch("app.data_engine.data_manager.warm_start.time.time", return_value=fixed_time):
+            await service.seed_if_needed(
+                "BTC-USDT",
+                "45m",
+                exchange="okx",
+                market_type="spot",
+                had_stream=True,
+                focus_scope="subscription",
+                subscription_tier="full",
+            )
+
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert args == (
+            "BTC-USDT",
+            "15m",
+            bucket_start_ms,
+            fixed_now_ms,
+            "okx",
+            "spot",
+        )
+        assert kwargs["reason"] == "full_subscription_warmup"
+        assert kwargs["priority"] == 60
+        assert kwargs["requester"] == "warm_start_custom_seed"
+        assert kwargs["metadata"]["focus_scope"] == "subscription"
+        assert kwargs["metadata"]["subscription_tier"] == "full"
+        assert kwargs["metadata"]["requested_interval"] == "45m"
+
+    asyncio.run(_run())
+
+
 def test_aggregator_bridge_persists_closed_and_amended_events() -> None:
     async def _run() -> None:
         cache = BarCache()

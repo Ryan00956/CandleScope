@@ -322,6 +322,78 @@ function buildRenderableChartData(data, intervalSeconds) {
 
 const INITIAL_BACKFILL_RETRY_MS = 3_000;
 const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
+const INITIAL_BACKFILL_MAX_WAIT_MS = 60_000;
+const INDICATOR_RANGE_REQUEST_MAX_BARS = 5_000;
+
+function requestIndicatorRangeInChunks(requestRange, start, end, intervalSeconds) {
+  if (typeof requestRange !== "function") return;
+  const startSec = Math.floor(Number(start));
+  const endSec = Math.floor(Number(end));
+  if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || startSec <= 0 || endSec <= 0 || startSec > endSec) {
+    return;
+  }
+  if (!intervalSeconds || intervalSeconds <= 0) {
+    requestRange(startSec, endSec);
+    return;
+  }
+
+  const chunkBars = INDICATOR_RANGE_REQUEST_MAX_BARS;
+  const chunkSpan = (chunkBars - 1) * intervalSeconds;
+  for (let chunkStart = startSec; chunkStart <= endSec; chunkStart += chunkBars * intervalSeconds) {
+    const chunkEnd = Math.min(endSec, chunkStart + chunkSpan);
+    requestRange(chunkStart, chunkEnd);
+  }
+}
+
+function numericRange(start, end) {
+  const startValue = Number(start);
+  const endValue = Number(end);
+  if (!Number.isFinite(startValue) || !Number.isFinite(endValue)) return null;
+  if (endValue < startValue) return null;
+  return { start: startValue, end: endValue };
+}
+
+function eventRangeFromDetail(detail = {}) {
+  return numericRange(
+    detail.request_start_ms ?? detail.range_start_ms,
+    detail.request_end_ms ?? detail.range_end_ms,
+  );
+}
+
+function rowRangeMs(rows) {
+  if (!rows?.length) return null;
+  const times = rows
+    .map((row) => Number(row?.time))
+    .filter((value) => Number.isFinite(value));
+  if (!times.length) return null;
+  return {
+    start: Math.min(...times) * 1000,
+    end: Math.max(...times) * 1000,
+  };
+}
+
+function rangesOverlap(a, b) {
+  if (!a || !b) return false;
+  return a.start <= b.end && b.start <= a.end;
+}
+
+function rangeCovers(container, target, toleranceMs = 0) {
+  if (!container || !target) return false;
+  return (
+    container.start <= target.start + toleranceMs &&
+    container.end >= target.end - toleranceMs
+  );
+}
+
+function isSameSeries(a, b) {
+  if (!a || !b) return false;
+  return (
+    String(a.exchange || "").toLowerCase() === String(b.exchange || "").toLowerCase() &&
+    String(a.marketType || "").toLowerCase() === String(b.marketType || "").toLowerCase() &&
+    String(a.symbol || "").toUpperCase() === String(b.symbol || "").toUpperCase() &&
+    a.interval === b.interval
+  );
+}
 
 /**
  * Detect gaps in a sorted K-line array.
@@ -415,6 +487,8 @@ export default function App() {
     [chartData, interval],
   );
   const [loading, setLoading] = useState(true);
+  const loadingRef = useRef(loading);
+  loadingRef.current = loading;
   const [loadingMoreLeft, setLoadingMoreLeft] = useState(false);
   const [hasMoreLeft, setHasMoreLeft] = useState(true);
   const [error, setError] = useState(null);
@@ -726,6 +800,7 @@ export default function App() {
 
   // --- Cross-interval data cache for instant switching ---
   const chartDataCacheRef = useRef(new Map());
+  const pendingInitialHistoryRef = useRef(null);
   const cacheKey = useCallback(
     (sym, intv, mt = marketType, ex = exchange) => `${ex}-${mt}-${sym}-${intv}`,
     [exchange, marketType],
@@ -973,6 +1048,7 @@ export default function App() {
     setLoadingMoreLeft(false);
     setHasMoreLeft(true);
     setCrosshairData(null);
+    pendingInitialHistoryRef.current = null;
 
     // ── PARALLEL FETCH: quick tail + full history simultaneously ──
     const days = getIntervalDays(intv, ex);
@@ -1012,6 +1088,16 @@ export default function App() {
     }
 
     // Process FULL HISTORY result — this is the "correct" dataset.
+    if (historyResult?.start_ms != null && historyResult?.end_ms != null) {
+      pendingInitialHistoryRef.current = {
+        exchange: ex,
+        marketType: mt,
+        symbol: sym,
+        interval: intv,
+        range: numericRange(historyResult.start_ms, historyResult.end_ms),
+      };
+    }
+
     if (historyResult?.data?.length) {
       setChartData((prev) => {
         const merged = mergeByTime(historyResult.data, prev);
@@ -1027,6 +1113,7 @@ export default function App() {
         setDatasetKey((v) => v + 1);
         shownInitialData = true;
       }
+      pendingInitialHistoryRef.current = null;
 
       // Even if there's a tail gap (data doesn't reach "now"),
       // show the data immediately.  The gap will be filled in the
@@ -1049,12 +1136,14 @@ export default function App() {
 
       let retryTimer = null;
       let safetyTimer = null;
+      let stoppedRetrying = false;
+      const retryStartedAt = Date.now();
 
       const retryInitialHistory = async () => {
-        if (controller.signal.aborted) return false;
+        if (controller.signal.aborted || stoppedRetrying) return false;
         try {
           const retryResult = await fetchKlinesHistory(sym, intv, days, mt, ex);
-          if (controller.signal.aborted) return false;
+          if (controller.signal.aborted || stoppedRetrying) return false;
           if (retryResult?.data?.length) {
             setChartData((prev) => {
               const merged = mergeByTime(retryResult.data, prev);
@@ -1069,6 +1158,7 @@ export default function App() {
               setDatasetKey((v) => v + 1);
               shownInitialData = true;
             }
+            pendingInitialHistoryRef.current = null;
             setLoading(false);
             return true;
           }
@@ -1078,15 +1168,30 @@ export default function App() {
         return false;
       };
 
-      retryTimer = setTimeout(async () => {
-        const loaded = await retryInitialHistory();
-        if (loaded && safetyTimer) clearTimeout(safetyTimer);
-      }, INITIAL_BACKFILL_RETRY_MS);
+      const scheduleRetry = () => {
+        if (controller.signal.aborted || stoppedRetrying) return;
+        retryTimer = setTimeout(async () => {
+          retryTimer = null;
+          const loaded = await retryInitialHistory();
+          if (loaded) {
+            stoppedRetrying = true;
+            if (safetyTimer) clearTimeout(safetyTimer);
+            return;
+          }
+          if (Date.now() - retryStartedAt < INITIAL_BACKFILL_MAX_WAIT_MS) {
+            scheduleRetry();
+          }
+        }, INITIAL_BACKFILL_RETRY_MS);
+      };
+
+      scheduleRetry();
 
       safetyTimer = setTimeout(async () => {
         if (controller.signal.aborted) return;
         if (await retryInitialHistory()) return;
-        // Force-show whatever we have after timeout
+        // Stop blocking the UI after a short timeout, but keep the retry loop
+        // alive in the background. New/unseen symbols can need longer backfills
+        // than the first-screen loading overlay should occupy.
         setLoading(false);
         if (!shownInitialData) {
           setDatasetKey((v) => v + 1);
@@ -1094,6 +1199,7 @@ export default function App() {
       }, INITIAL_BACKFILL_TIMEOUT_MS);
       // If the component is unmounted / interval changes, cancel the timer
       controller.signal.addEventListener("abort", () => {
+        stoppedRetrying = true;
         if (retryTimer) clearTimeout(retryTimer);
         if (safetyTimer) clearTimeout(safetyTimer);
       });
@@ -1103,7 +1209,7 @@ export default function App() {
     if (shownInitialData) {
       setLoading(false);
     }
-  }, [exchange, marketType, saveToCache, updateLastPrice]);
+  }, [exchange, getFromCache, marketType, saveToCache, updateLastPrice]);
 
   // ── Symbol switching handler ──
   const handleSymbolChange = useCallback((newSymbolOrObj) => {
@@ -1357,6 +1463,25 @@ export default function App() {
               const bfExchange = msg.exchange || exchange;
               const bfMarketType = msg.market_type || marketType;
               const detail = msg.detail || {};
+              const eventSeries = {
+                exchange: bfExchange,
+                marketType: bfMarketType,
+                symbol: bfSymbol,
+                interval: bfInterval,
+              };
+              const activeSeries = {
+                exchange,
+                marketType,
+                symbol,
+                interval: intervalRef.current,
+              };
+              const eventRange = eventRangeFromDetail(detail);
+              const userVisibleReason = new Set([
+                "initial_history",
+                "visible_range_gap",
+                "visible_load_more",
+                "visible_seed_gap",
+              ]).has(detail.reason);
 
               // ── Dedup: skip if a reload for this interval is already in-flight or on cooldown ──
               const bfDedupeKey = `${bfExchange}-${bfMarketType}-${bfSymbol}-${bfInterval}`;
@@ -1368,6 +1493,23 @@ export default function App() {
 
               console.log(`Backfill completed for ${bfSymbol}@${bfInterval}, reloading data...`);
               const days = getIntervalDays(bfInterval, bfExchange);
+              const canReleaseInitialLoading = (rows) => {
+                if (!isSameSeries(eventSeries, activeSeries)) return false;
+                if (!loadingRef.current) return true;
+
+                const pendingInitial = pendingInitialHistoryRef.current;
+                const rowsRange = rowRangeMs(rows);
+                if (pendingInitial && isSameSeries(eventSeries, pendingInitial)) {
+                  if (!pendingInitial.range) return true;
+                  if (rowsRange && rangesOverlap(rowsRange, pendingInitial.range)) return true;
+                  if (eventRange && rangesOverlap(eventRange, pendingInitial.range)) return true;
+                  if (detail.verified_contiguous === true && rangeCovers(eventRange, pendingInitial.range)) return true;
+                  return false;
+                }
+
+                return userVisibleReason;
+              };
+
               const mergeBackfillRows = (rows) => {
                 if (!rows?.length) return false;
                 const key = cacheKey(bfSymbol, bfInterval, bfMarketType, bfExchange);
@@ -1392,9 +1534,18 @@ export default function App() {
                     const latest = rows[rows.length - 1];
                     return latest || prev;
                   });
+                  requestIndicatorRangeInChunks(
+                    requestIndicatorRange,
+                    rows[0]?.time,
+                    rows[rows.length - 1]?.time,
+                    parseIntervalSeconds(bfInterval),
+                  );
                   setError(null);
-                  setConnectionStatus("connected");
-                  setLoading(false);
+                  if (canReleaseInitialLoading(rows)) {
+                    pendingInitialHistoryRef.current = null;
+                    setConnectionStatus("connected");
+                    setLoading(false);
+                  }
                   setDatasetKey((v) => v + 1);
                 }
                 return true;
@@ -1474,7 +1625,12 @@ export default function App() {
                             return m;
                           });
                           if (patchStart && patchEnd) {
-                            requestIndicatorRange?.(patchStart, patchEnd);
+                            requestIndicatorRangeInChunks(
+                              requestIndicatorRange,
+                              patchStart,
+                              patchEnd,
+                              parseIntervalSeconds(bfInterval),
+                            );
                           }
                           setDatasetKey((v) => v + 1);
                         }
@@ -1606,9 +1762,8 @@ export default function App() {
         const key = cacheKey(symbol, intv, marketType, exchange);
         if (chartDataCacheRef.current.has(key)) continue; // already cached
 
-        const days = getIntervalDays(intv, exchange);
         try {
-          const result = await fetchKlinesHistory(symbol, intv, days, marketType, exchange);
+          const result = await fetchLatestKlines(symbol, intv, 500, marketType, exchange, "background-prefetch");
           if (cancelled) break;
           if (result?.data?.length) {
             chartDataCacheRef.current.set(key, result.data);
@@ -1706,6 +1861,14 @@ export default function App() {
           }
           return merged;
         });
+        for (const gap of gaps) {
+          requestIndicatorRangeInChunks(
+            requestIndicatorRange,
+            gap.from + intvSecs,
+            gap.to - intvSecs,
+            intvSecs,
+          );
+        }
       }
     } catch (err) {
       console.warn(`[GapFill] Failed to reload history:`, err);
@@ -1715,7 +1878,7 @@ export default function App() {
         gapFillInFlightRef.current.delete(reloadKey);
       }, 10000);
     }
-  }, [exchange, marketType, saveToCache]);
+  }, [exchange, marketType, requestIndicatorRange, saveToCache]);
 
   // Keep recoverGapsRef in sync so closures (WS onopen) always call latest version
   recoverGapsRef.current = recoverGaps;
@@ -1799,6 +1962,12 @@ export default function App() {
             }
             return merged;
           });
+          requestIndicatorRangeInChunks(
+            requestIndicatorRange,
+            historyResult.data[0]?.time,
+            historyResult.data[historyResult.data.length - 1]?.time,
+            intvSecs,
+          );
           const latest = historyResult.data[historyResult.data.length - 1];
           updateLastPrice(latest, currentIntv);
           console.log(`[TabRecovery] Reloaded ${historyResult.data.length} bars of full history`);
@@ -1830,7 +1999,7 @@ export default function App() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [cacheKey, exchange, marketType, recoverGaps, saveToCache, symbol, updateLastPrice]);
+  }, [cacheKey, exchange, marketType, recoverGaps, requestIndicatorRange, saveToCache, symbol, updateLastPrice]);
 
   // ---- handle load more left ----
   const oldestChartTime = chartData[0]?.time ?? null;
@@ -1861,7 +2030,12 @@ export default function App() {
             return merged;
           });
           if (patchStart && patchEnd) {
-            requestIndicatorRange?.(patchStart, patchEnd);
+            requestIndicatorRangeInChunks(
+              requestIndicatorRange,
+              patchStart,
+              patchEnd,
+              parseIntervalSeconds(interval),
+            );
           }
           // Got data — clear any pending wait for this series.
           pendingLoadMoreLeftRef.current.delete(pendingKey);

@@ -17,6 +17,7 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻
 - [快速开始](#快速开始)
 - [项目能力](#项目能力)
 - [架构](#架构)
+- [Backfill 智能调度摘要](#backfill-智能调度摘要)
 - [后端](#后端)
 - [前端](#前端)
 - [指标和 Pyne](#指标和-pyne)
@@ -121,6 +122,25 @@ storage
         v
 DataManager cache + EventBus
 ```
+
+## Backfill 智能调度摘要
+
+当前历史数据修复已经接入 demand-aware backfill scheduler：
+
+- 当前图表的 `/klines/history` 使用 `initial_history(priority=10)`，始终优先。
+- `/klines/latest` 默认不触发 backfill，避免空库切换新商品时抢占首屏历史。
+- 当前周期完成后，同商品其他周期以 `related_interval_warmup(priority=40)` 预热。
+- `FULL` 自选商品的后台 K 线维护使用 `full_subscription_warmup(priority=60)`。
+- `PRICE_ONLY` 只维护价格流和 `price_daily_open(priority=70)`，不主动补完整 K 线历史。
+- `NONE` 不主动创建 K 线 backfill；只有用户打开图表才进入可见需求优先级。
+- 大范围可见 backfill 会拆成 chunk，并从最新端优先执行。
+- 前端只会在 `symbol / interval / range / reason` 匹配当前图表时解除首屏 loading。
+
+更详细的后端说明见：
+
+- [Backfill README](backend/app/data_engine/backfill/README_zh.md)
+- [DataManager README](backend/app/data_engine/data_manager/README.md)
+- [调度执行计划](local_docs/construction/backend/app/data_engine/backfill/SCHEDULER_EXECUTION_PLAN_zh.md)
 
 当前正式后端路径围绕 `DataManager` 和 `DataEngineRuntime` 展开。代码树中可能仍有较早的 `data_engine/collectors`、`data_engine/services` 目录，但新功能和新文档不以它们作为主架构路径。
 

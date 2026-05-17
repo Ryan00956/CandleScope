@@ -76,7 +76,8 @@ CandleScope is a local-first market charting application with:
 - Spot and derivative market support through `exchange` and `market_type` scoped series.
 - Cache-first historical queries backed by SQLite.
 - Realtime K-line WebSocket streams with single-interval and multi-interval modes.
-- Background gap detection and repair through a dedicated backfill pipeline.
+- Demand-aware historical backfill scheduling: current chart history first,
+  related intervals next, subscriptions and background audits later.
 - Watchlists, price-only subscriptions, realtime price snapshots, and price streams.
 - Built-in indicators: `MA`, `EMA`, `MACD`, `RSI`, `BOLL`, `ATR`, and `VOL`.
 - Pyne, a Pine-style Python runtime for custom indicators.
@@ -111,12 +112,12 @@ QueryEngine / Settings / Ingestion GapMarker
         |
         v
 BackfillCoordinator
-        |
+        | priority / chunk scheduler
         v
 BackfillEngine
         |
         v
-storage
+storage readback
         |
         v
 DataManager cache + EventBus
@@ -152,7 +153,7 @@ Core backend modules:
 | `app/data_engine/ingestion` | Realtime exchange intake and normalization |
 | `app/data_engine/bar_aggregator` | K-line bucket/merge/finalization/event lifecycle |
 | `app/data_engine/data_manager` | Public data facade for query/cache/events/streams/backfill/prices/maintenance |
-| `app/data_engine/backfill` | Historical detect/plan/fetch/reconcile/report pipeline |
+| `app/data_engine/backfill` | Historical detect/plan/fetch/reconcile/report pipeline behind the scheduler |
 | `app/data_engine/storage` | SQLite K-line repository and gap ledger |
 | `app/indicator` | Built-in indicators, Pyne runtime, indicator streaming |
 

@@ -4,6 +4,9 @@
 
 > CandleScope 的历史数据修复 pipeline。`BackfillEngine` 负责检测缺口、规划 REST 拉取、获取历史 bars、调和写入 storage，并发布 `RepairReport`。
 
+调度优化设计见 [Backfill 调度架构设计](../../../../local_docs/construction/backend/app/data_engine/backfill/SCHEDULING_DESIGN_zh.md)
+和 [调度执行计划](../../../../local_docs/construction/backend/app/data_engine/backfill/SCHEDULER_EXECUTION_PLAN_zh.md)。
+
 ## 在 Data Engine 中的位置
 
 ```text
@@ -18,6 +21,52 @@ DataManager 精确回读 storage + cache merge
 ```
 
 `backfill` 只负责修复 pipeline。它不负责 API endpoint、WebSocket 推送、DataManager cache 更新或 request 生命周期协调。这些由 `DataManager.BackfillCoordinator` 处理。
+
+## 当前智能调度行为
+
+当前运行时 backfill 已经不再是简单串行队列，而是由
+`DataManager.BackfillCoordinator` 内部的 demand-aware scheduler 统一调度。
+`BackfillEngine` 仍然只负责 detect / plan / fetch / reconcile；调度器负责
+优先级、chunk、去重合并、同序列串行、跨序列并发、cache 回读和事件语义。
+
+关键规则：
+
+- 每个 repair request 都带 `reason`、`priority`、`requester` 和 metadata。
+- `/klines/history` 是当前图表首屏历史，使用 `initial_history(priority=10)`。
+- `/klines/latest` 默认不触发 backfill，避免空库新商品时抢占首屏历史。
+- `/klines/range` 使用 `visible_range_gap`；`/klines/history/before` 使用
+  `visible_load_more`。
+- 用户打开全新商品时，当前正在看的周期先补；同商品其他周期作为
+  `related_interval_warmup(priority=40)` 排在当前周期之后。
+- `FULL` 自选订阅的 K 线维护使用 `full_subscription_warmup(priority=60)`，
+  不伪装成前台图表需求。
+- `PRICE_ONLY` 只维护价格流和 `price_daily_open(priority=70)`，不主动补完整
+  K 线历史。
+- `NONE` 不因 watchlist 或后台维护主动创建 K 线 backfill；只有用户打开图表才会
+  进入可见需求优先级。
+- 大范围用户可见 repair 会被拆成 chunk，并按最新端优先执行，让图表右侧更快可渲染。
+- 不同 series 可以并发；同一个 `(exchange, market_type, symbol, interval)` 的
+  reconcile/write 仍保持串行。
+
+优先级数字越小越高：
+
+| reason | priority | 场景 |
+|---|---:|---|
+| `initial_history` | 10 | 当前图表首屏历史 |
+| `visible_load_more` / `visible_range_gap` | 20 | 当前可见范围或左拖加载 |
+| `visible_seed_gap` | 30 | 前台 custom/base 预热缺口 |
+| `related_interval_warmup` | 40 | 当前商品其他周期预热 |
+| `tail_gap` | 50 | 实时尾部缺口 |
+| `full_subscription_warmup` | 60 | FULL 自选商品后台 K 线维护 |
+| `price_daily_open` | 70 | price-only 日开补齐 |
+| `latest_refresh` | 80 | 低优先级尾部刷新 |
+| `query_gap` | 100 | 普通 query 缺口 |
+| `startup_gap_scan` | 120 | 启动扫描 |
+| `background_gap_audit` | 150 | 后台 audit |
+
+前端现在也按 `symbol / interval / range / reason` 判断 `backfill_completed`：
+只有命中当前图表首屏或可见范围的事件，才会解除首屏 loading；后台预热、其他周期
+或订阅维护事件不会误触发当前图表 reload。
 
 ## Pipeline
 

@@ -26,6 +26,10 @@ QueryEngine / Settings / Ingestion GapMarker
         ▼
 DataManager.BackfillCoordinator
         ▼
+demand-aware scheduler
+        ▼
+chunked BackfillEngine runs
+        ▼
 backfill
         ▼
 storage
@@ -146,9 +150,13 @@ cache merge + BACKFILL_COMPLETED / BACKFILL_FAILED
 Key rules:
 
 - `BackfillEngine` only runs the repair pipeline; it does not mutate DataManager cache directly.
-- `BackfillCoordinator` owns request deduplication, range merging, retry, cancel, gap-ledger state, and event mapping.
+- `BackfillCoordinator` owns semantic priority, request deduplication, range merging, chunk scheduling, retry, cancel, gap-ledger state, and event mapping.
 - `RepairReport.written_ranges` is the authoritative cache readback range.
 - `PARTIAL` means some write/fetch batch failed and is not reported as completed.
+- Current chart history (`initial_history`) outranks latest refreshes, related interval warmups, subscriptions, startup scans, and background audits.
+- Large user-visible ranges are chunked newest-first so the chart's right edge can become renderable earlier.
+- Different series can backfill concurrently; the same series stays serialized for reconcile/write safety.
+- Frontend loading reacts to the completed `symbol / interval / range / reason`, not to any arbitrary `BACKFILL_COMPLETED` event.
 
 ## Price Streams And Subscriptions
 

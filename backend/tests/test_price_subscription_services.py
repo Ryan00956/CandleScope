@@ -289,6 +289,53 @@ def test_data_manager_daily_open_triggers_1d_backfill_when_storage_missing() -> 
     asyncio.run(_run())
 
 
+def test_data_manager_daily_open_marks_price_only_priority_metadata() -> None:
+    async def _run() -> None:
+        updated_at_ms = DAY_MS * 10 + 123_000
+        bucket_start = compute_bucket_start_ms(updated_at_ms, DAY_MS, interval="1d")
+
+        class _Storage:
+            def query_bars(self, **kwargs):
+                return []
+
+        calls: list[tuple[tuple, dict]] = []
+        dm = DataManager()
+        dm.set_storage(_Storage())  # type: ignore[arg-type]
+        dm.set_backfill_trigger(lambda *args, **kwargs: calls.append((args, kwargs)))
+
+        await dm.ensure_price_stream("BTC-USDT", exchange="okx", market_type="spot")
+        await dm.on_price_ticks([{
+            "symbol": "okx:spot:BTC-USDT",
+            "price": 100,
+            "open": 90,
+            "high": 110,
+            "low": 80,
+            "change_pct": 11.1111,
+            "volume": 12,
+            "quote_volume": 1200,
+            "daily_open": 99,
+            "updated_at_ms": updated_at_ms,
+        }])
+
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert args == (
+            "BTC-USDT",
+            "1d",
+            bucket_start,
+            bucket_start + DAY_MS - 1,
+            "okx",
+            "spot",
+        )
+        assert kwargs["reason"] == "price_daily_open"
+        assert kwargs["priority"] == 70
+        assert kwargs["requester"] == "daily_open"
+        assert kwargs["metadata"]["focus_scope"] == "price"
+        assert kwargs["metadata"]["subscription_tier"] == "price"
+
+    asyncio.run(_run())
+
+
 def test_subscription_service_full_price_none_lifecycle(tmp_path) -> None:
     async def _run() -> None:
         class _StreamInfo:
@@ -297,14 +344,30 @@ def test_subscription_service_full_price_none_lifecycle(tmp_path) -> None:
 
         class _DataManager:
             def __init__(self) -> None:
-                self.stream_started: list[tuple[str, str, str, str]] = []
+                self.stream_started: list[tuple[str, str, str, str, str, str | None]] = []
                 self.stream_stopped: list[tuple[str, str, str, str]] = []
                 self.price_started: list[tuple[str, str, str]] = []
                 self.price_stopped: list[tuple[str, str, str]] = []
                 self.streams: list[_StreamInfo] = []
 
-            async def ensure_stream(self, symbol, interval, exchange="binance", market_type="spot"):
-                self.stream_started.append((exchange, market_type, symbol, interval))
+            async def ensure_stream(
+                self,
+                symbol,
+                interval,
+                exchange="binance",
+                market_type="spot",
+                *,
+                focus_scope="foreground",
+                subscription_tier=None,
+            ):
+                self.stream_started.append((
+                    exchange,
+                    market_type,
+                    symbol,
+                    interval,
+                    focus_scope,
+                    subscription_tier,
+                ))
                 self.streams.append(_StreamInfo(
                     SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
                 ))
@@ -333,7 +396,14 @@ def test_subscription_service_full_price_none_lifecycle(tmp_path) -> None:
         assert full["changed"] is True
         assert full["tier"] == "full"
         assert service.get_tier("okx:spot:BTC-USDT") == SubscriptionTier.FULL
-        assert dm.stream_started == [("okx", "spot", "BTC-USDT", "1m")]
+        assert dm.stream_started == [(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1m",
+            "subscription",
+            "full",
+        )]
         assert dm.price_started == [("okx", "spot", "BTC-USDT")]
 
         price_only = await service.set_tier("okx:spot:BTC-USDT", SubscriptionTier.PRICE_ONLY)
@@ -354,11 +424,27 @@ def test_subscription_service_restores_persisted_full_and_price_tiers(tmp_path) 
     async def _run() -> None:
         class _DataManager:
             def __init__(self) -> None:
-                self.stream_started: list[tuple[str, str, str, str]] = []
+                self.stream_started: list[tuple[str, str, str, str, str, str | None]] = []
                 self.price_started: list[tuple[str, str, str]] = []
 
-            async def ensure_stream(self, symbol, interval, exchange="binance", market_type="spot"):
-                self.stream_started.append((exchange, market_type, symbol, interval))
+            async def ensure_stream(
+                self,
+                symbol,
+                interval,
+                exchange="binance",
+                market_type="spot",
+                *,
+                focus_scope="foreground",
+                subscription_tier=None,
+            ):
+                self.stream_started.append((
+                    exchange,
+                    market_type,
+                    symbol,
+                    interval,
+                    focus_scope,
+                    subscription_tier,
+                ))
 
             async def ensure_price_stream(self, symbol, exchange="binance", market_type="spot"):
                 self.price_started.append((exchange, market_type, symbol))
@@ -373,7 +459,14 @@ def test_subscription_service_restores_persisted_full_and_price_tiers(tmp_path) 
         restored.set_data_manager(dm)
         await restored.start()
 
-        assert dm.stream_started == [("binance", "spot", "BTCUSDT", "1m")]
+        assert dm.stream_started == [(
+            "binance",
+            "spot",
+            "BTCUSDT",
+            "1m",
+            "subscription",
+            "full",
+        )]
         assert dm.price_started == [
             ("binance", "spot", "BTCUSDT"),
             ("okx", "spot", "ETH-USDT"),

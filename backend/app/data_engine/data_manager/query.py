@@ -394,9 +394,17 @@ class QueryEngine:
         self, symbol: str, interval: str, limit: int = 500,
         exchange: str = "binance",
         market_type: str = "spot",
+        auto_backfill: bool | None = None,
     ) -> QueryResult:
         """Shorthand for getting the latest N bars."""
-        return self.query(symbol, interval, limit=limit, exchange=exchange, market_type=market_type)
+        return self.query(
+            symbol,
+            interval,
+            limit=limit,
+            exchange=exchange,
+            market_type=market_type,
+            auto_backfill=auto_backfill,
+        )
 
     def query_before(
         self,

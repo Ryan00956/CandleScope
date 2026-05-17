@@ -165,10 +165,70 @@ def test_history_query_triggers_data_manager_backfill_request_when_empty() -> No
     assert payload["count"] == 0
     assert payload["source"] == "empty"
     assert payload["backfill_triggered"] is True
-    assert len(calls) == 1
+    assert len(calls) == 4
     symbol, interval, start_ms, end_ms, exchange, market_type = calls[0]
     assert (symbol, interval, exchange, market_type) == ("BTCUSDT", "1h", "binance", "spot")
     assert start_ms < end_ms
+    assert [call[1] for call in calls[1:]] == ["15m", "4h", "5m"]
+
+
+def test_latest_endpoint_does_not_trigger_backfill_when_storage_is_empty() -> None:
+    calls: list[tuple] = []
+    dm = DataManager()
+    dm.set_backfill_trigger(lambda *args, **kwargs: calls.append((args, kwargs)))
+    client = _client(dm)
+
+    response = client.get(
+        "/api/v1/klines/latest",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "limit": 5,
+            "exchange": "binance",
+            "market_type": "spot",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 0
+    assert payload["backfill_triggered"] is False
+    assert calls == []
+
+
+def test_history_endpoint_submits_initial_history_demand_metadata() -> None:
+    calls: list[tuple[tuple, dict]] = []
+    dm = DataManager()
+    dm.set_backfill_trigger(lambda *args, **kwargs: calls.append((args, kwargs)))
+    client = _client(dm)
+
+    response = client.get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "days": 0.001,
+            "exchange": "binance",
+            "market_type": "spot",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 4
+    args, kwargs = calls[0]
+    assert args[0:2] == ("BTCUSDT", "1h")
+    assert kwargs["reason"] == "initial_history"
+    assert kwargs["priority"] == 10
+    assert kwargs["requester"] == "klines_history"
+    assert kwargs["metadata"]["query_reason"] == "query_empty"
+
+    related = calls[1:]
+    assert [item[0][1] for item in related] == ["15m", "4h", "5m"]
+    assert all(item[1]["reason"] == "related_interval_warmup" for item in related)
+    assert all(item[1]["priority"] == 40 for item in related)
+    assert all(item[1]["requester"] == "klines_history_related" for item in related)
+    assert related[0][1]["metadata"]["focus_scope"] == "related"
+    assert related[0][1]["metadata"]["current_interval"] == "1h"
 
 
 def test_range_query_reports_exact_visible_gap() -> None:

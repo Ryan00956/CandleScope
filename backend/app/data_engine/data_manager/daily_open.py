@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import logging
+import inspect
 from collections.abc import Callable
 from typing import Any
 
 from app.data_engine.interval_policy import compute_bucket_start_ms
 
+from .backfill_coordinator import priority_for_reason
 from .price_cache import PriceSnapshot
 from .query import BackfillTrigger
 
@@ -102,6 +104,20 @@ class DailyOpenService:
             return
         self._requested.add(request_key)
         try:
+            kwargs = self._supported_trigger_kwargs(
+                trigger,
+                {
+                    "reason": "price_daily_open",
+                    "priority": priority_for_reason("price_daily_open"),
+                    "requester": "daily_open",
+                    "metadata": {
+                        "focus_scope": "price",
+                        "subscription_tier": "price",
+                        "requested_interval": "1d",
+                        "daily_bucket_start_ms": bucket_start_ms,
+                    },
+                },
+            )
             trigger(
                 snapshot.symbol,
                 "1d",
@@ -109,6 +125,7 @@ class DailyOpenService:
                 bucket_start_ms + DAY_MS - 1,
                 snapshot.exchange,
                 snapshot.market_type,
+                **kwargs,
             )
         except Exception as exc:
             logger.warning(
@@ -118,3 +135,25 @@ class DailyOpenService:
                 snapshot.symbol,
                 exc,
             )
+
+    @staticmethod
+    def _supported_trigger_kwargs(
+        trigger: BackfillTrigger,
+        kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        filtered = {key: value for key, value in kwargs.items() if value is not None}
+        try:
+            signature = inspect.signature(trigger)
+            supports_kwargs = any(
+                param.kind is inspect.Parameter.VAR_KEYWORD
+                for param in signature.parameters.values()
+            )
+            if not supports_kwargs:
+                filtered = {
+                    key: value
+                    for key, value in filtered.items()
+                    if key in signature.parameters
+                }
+        except (TypeError, ValueError):
+            pass
+        return filtered

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+import inspect
 import time
 from collections.abc import Callable
+from typing import Any
 
 from app.data_engine.interval_policy import (
     is_monthly_interval,
@@ -19,6 +21,7 @@ from ..bar_aggregator import (
     BarState,
 )
 from .cache import BarCache
+from .backfill_coordinator import priority_for_reason
 from .models import BarData, SeriesKey, StorageBackend
 from .query import BackfillTrigger
 
@@ -54,6 +57,8 @@ class AggregatorWarmStartService:
         exchange: str,
         market_type: str,
         had_stream: bool,
+        focus_scope: str = "foreground",
+        subscription_tier: str | None = None,
     ) -> None:
         """Seed the relevant active bucket after DataManager starts a stream."""
         market_type = self._normalize_market_type(market_type)
@@ -64,6 +69,8 @@ class AggregatorWarmStartService:
                     interval,
                     exchange=exchange,
                     market_type=market_type,
+                    focus_scope=focus_scope,
+                    subscription_tier=subscription_tier,
                 )
             except Exception as exc:
                 logger.warning(
@@ -79,6 +86,8 @@ class AggregatorWarmStartService:
                     interval,
                     exchange=exchange,
                     market_type=market_type,
+                    focus_scope=focus_scope,
+                    subscription_tier=subscription_tier,
                 )
             return
 
@@ -107,6 +116,8 @@ class AggregatorWarmStartService:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        focus_scope: str = "foreground",
+        subscription_tier: str | None = None,
     ) -> None:
         """Seed the currently-forming custom bucket from recent base bars."""
         symbol = symbol.upper()
@@ -188,22 +199,29 @@ class AggregatorWarmStartService:
                     actual_in_bucket,
                     missing,
                 )
-                trigger = self._backfill_trigger_provider()
-                if trigger is not None:
-                    try:
-                        trigger(
-                            symbol,
-                            base_interval,
-                            bucket_start_ms,
-                            now_ms,
-                            exchange,
-                            market_type,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to trigger base backfill during custom seed: %s",
-                            exc,
-                        )
+                try:
+                    self._call_backfill_trigger(
+                        symbol=symbol,
+                        interval=base_interval,
+                        start_ms=bucket_start_ms,
+                        end_ms=now_ms,
+                        exchange=exchange,
+                        market_type=market_type,
+                        reason=self._warmup_reason(focus_scope, subscription_tier),
+                        requester="warm_start_custom_seed",
+                        metadata={
+                            "focus_scope": focus_scope,
+                            "subscription_tier": subscription_tier,
+                            "requested_interval": interval,
+                            "base_interval": base_interval,
+                            "had_stream": True,
+                        },
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to trigger base backfill during custom seed: %s",
+                        exc,
+                    )
         else:
             logger.debug(
                 "Custom seed %s@%s: skipping completeness check for monthly interval",
@@ -416,12 +434,10 @@ class AggregatorWarmStartService:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        focus_scope: str = "foreground",
+        subscription_tier: str | None = None,
     ) -> None:
         """Force a recent custom-interval rebuild to overwrite stale rows."""
-        trigger = self._backfill_trigger_provider()
-        if trigger is None:
-            return
-
         interval_seconds = parse_custom_interval(interval) or 60
         now_ms = int(time.time() * 1000)
 
@@ -436,13 +452,22 @@ class AggregatorWarmStartService:
         start_ms = max(0, now_ms - repair_window_ms)
 
         try:
-            trigger(
-                symbol.upper(),
-                interval,
-                start_ms,
-                now_ms,
-                exchange,
-                self._normalize_market_type(market_type),
+            self._call_backfill_trigger(
+                symbol=symbol.upper(),
+                interval=interval,
+                start_ms=start_ms,
+                end_ms=now_ms,
+                exchange=exchange,
+                market_type=self._normalize_market_type(market_type),
+                reason=self._warmup_reason(focus_scope, subscription_tier),
+                requester="warm_start_custom_tail",
+                metadata={
+                    "focus_scope": focus_scope,
+                    "subscription_tier": subscription_tier,
+                    "requested_interval": interval,
+                    "base_interval": self._base_interval,
+                    "had_stream": False,
+                },
             )
         except Exception as exc:
             logger.warning(
@@ -452,6 +477,62 @@ class AggregatorWarmStartService:
                 exc,
                 exc_info=True,
             )
+
+    def _call_backfill_trigger(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        end_ms: int,
+        exchange: str,
+        market_type: str,
+        reason: str,
+        requester: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        trigger = self._backfill_trigger_provider()
+        if trigger is None:
+            return
+        raw_kwargs = {
+            "reason": reason,
+            "priority": priority_for_reason(reason),
+            "requester": requester,
+            "metadata": {
+                key: value
+                for key, value in (metadata or {}).items()
+                if value is not None
+            },
+        }
+        kwargs: dict[str, Any] = {
+            key: value
+            for key, value in raw_kwargs.items()
+            if value is not None
+        }
+        try:
+            signature = inspect.signature(trigger)
+            supports_kwargs = any(
+                param.kind is inspect.Parameter.VAR_KEYWORD
+                for param in signature.parameters.values()
+            )
+            if not supports_kwargs:
+                kwargs = {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key in signature.parameters
+                }
+        except (TypeError, ValueError):
+            pass
+
+        trigger(symbol, interval, start_ms, end_ms, exchange, market_type, **kwargs)
+
+    @staticmethod
+    def _warmup_reason(focus_scope: str, subscription_tier: str | None) -> str:
+        if str(subscription_tier or "").lower() == "full":
+            return "full_subscription_warmup"
+        if str(focus_scope or "").lower() == "subscription":
+            return "full_subscription_warmup"
+        return "visible_seed_gap"
 
     @staticmethod
     def _normalize_market_type(market_type: str) -> str:

@@ -19,7 +19,7 @@ const ACTIVE_INDICATORS_KEY = "candlescope-active-indicators";
 const VOL_INIT_KEY = "candlescope-vol-initialized";
 const ENGINE_SCRIPT_MARKER = "# __ENGINE__:";
 const INDICATOR_WS_RECONNECT_MS = 3000;
-const INDICATOR_WS_INITIAL_HISTORY_LIMIT = 500;
+const INDICATOR_WS_INITIAL_HISTORY_LIMIT = 5000;
 
 function loadActiveIndicators() {
   try {
@@ -782,6 +782,24 @@ export function useIndicators({
   }, [buildHostedSubscriptionMessage, hostedSubscriptionSignature]);
 
   syncHostedSubscriptionsRef.current = syncHostedSubscriptions;
+
+  useEffect(() => {
+    setActiveIndicators((prev) =>
+      prev.map((indicator) => ({
+        ...indicator,
+        lines: [],
+        error: null,
+      }))
+    );
+    setMainOverlayLines([]);
+    setSubPanes([]);
+    setMarkers([]);
+    setFills([]);
+    setHlines([]);
+    setBgcolors([]);
+    setBarcolors([]);
+    setSignals([]);
+  }, [exchange, marketType, symbol, interval]);
 
   // ── Backend-hosted indicators: builtin incremental + Pyne snapshot WS ──
   useEffect(() => {

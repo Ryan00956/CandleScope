@@ -76,6 +76,7 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any, AsyncIterator, Protocol
 
@@ -102,6 +103,7 @@ from .models import (
 from .maintenance import MaintenanceService, RepairRequester
 from .price_cache import PriceSnapshot, PriceSnapshotCache, normalize_price_key, price_key
 from .query import BackfillTrigger, QueryEngine
+from .backfill_coordinator import priority_for_reason
 from .retention import RetentionService
 from .stream_policy import StreamEnsurePlanner
 from .warm_start import AggregatorWarmStartService
@@ -319,7 +321,9 @@ class DataManager:
         """Inject a backfill trigger callback.
 
         Signature:
-        ``(symbol, interval, start_ms, end_ms, exchange, market_type) -> None``
+        ``(symbol, interval, start_ms, end_ms, exchange, market_type, *, reason=None,
+        priority=None, requester=None, metadata=None) -> None``. Legacy callbacks
+        with only the first six positional arguments remain supported.
 
         Called by DataManager when QueryEngine reports missing ranges.
         Also used by ingestion gap markers emitted from ContinuityLayer.
@@ -347,13 +351,15 @@ class DataManager:
             end_ms = int(getattr(gap, "gap_end", 0) or 0) - interval_ms
             if start_ms <= 0 or end_ms <= 0 or start_ms > end_ms:
                 return
-            trigger(
+            self._call_backfill_trigger(
                 key.symbol,
                 key.interval,
                 start_ms,
                 end_ms,
                 key.exchange,
                 key.market_type,
+                reason="tail_gap",
+                requester="ingestion_gap",
             )
 
         self.coordinator.set_gap_handler(_handle_ingestion_gap)
@@ -445,6 +451,8 @@ class DataManager:
         exchange: str = "binance",
         market_type: str = "spot",
         auto_backfill: bool | None = None,
+        backfill_reason: str | None = None,
+        backfill_requester: str = "query",
     ) -> QueryResult:
         """Query K-line bars.
 
@@ -473,7 +481,11 @@ class DataManager:
             market_type=market_type,
             auto_backfill=auto_backfill,
         )
-        return self._submit_missing_ranges(result)
+        return self._submit_missing_ranges(
+            result,
+            reason=backfill_reason,
+            requester=backfill_requester,
+        )
 
     def query_latest(
         self,
@@ -482,6 +494,9 @@ class DataManager:
         limit: int = 500,
         exchange: str = "binance",
         market_type: str = "spot",
+        auto_backfill: bool | None = None,
+        backfill_reason: str | None = "latest_refresh",
+        backfill_requester: str = "query_latest",
     ) -> QueryResult:
         """Get the latest N bars.  Shorthand for ``query(limit=N)``."""
         market_type = self._normalize_market_type(market_type)
@@ -491,13 +506,20 @@ class DataManager:
             limit,
             exchange=exchange,
             market_type=market_type,
+            auto_backfill=auto_backfill,
         )
-        return self._submit_missing_ranges(result)
+        return self._submit_missing_ranges(
+            result,
+            reason=backfill_reason,
+            requester=backfill_requester,
+        )
 
     def query_before(
         self, symbol: str, interval: str, before_ms: int, limit: int = 500,
         exchange: str = "binance",
         market_type: str = "spot",
+        backfill_reason: str | None = "visible_load_more",
+        backfill_requester: str = "query_before",
     ) -> QueryResult:
         """Get bars before a timestamp (for pagination / load-more)."""
         market_type = self._normalize_market_type(market_type)
@@ -509,23 +531,45 @@ class DataManager:
             exchange=exchange,
             market_type=market_type,
         )
-        return self._submit_missing_ranges(result)
+        return self._submit_missing_ranges(
+            result,
+            reason=backfill_reason,
+            requester=backfill_requester,
+        )
 
-    def _submit_missing_ranges(self, result: QueryResult) -> QueryResult:
+    def _submit_missing_ranges(
+        self,
+        result: QueryResult,
+        *,
+        reason: str | None = None,
+        requester: str = "query",
+    ) -> QueryResult:
         """Submit QueryEngine-detected missing ranges via DataManager."""
         if self._backfill_trigger is None or not result.missing_ranges:
             return result
 
         submitted = 0
         for missing in result.missing_ranges:
+            demand_reason = reason or self._semantic_reason_for_missing(missing.reason)
+            metadata = {
+                "query_reason": missing.reason,
+                "requested_range": {
+                    "start_ms": missing.start_ms,
+                    "end_ms": missing.end_ms,
+                },
+            }
             try:
-                self._backfill_trigger(
+                self._call_backfill_trigger(
                     missing.symbol,
                     missing.interval,
                     missing.start_ms,
                     missing.end_ms,
                     missing.exchange,
                     missing.market_type,
+                    reason=demand_reason,
+                    priority=priority_for_reason(demand_reason),
+                    requester=requester,
+                    metadata=metadata,
                 )
                 submitted += 1
             except Exception as exc:
@@ -545,6 +589,90 @@ class DataManager:
             result.backfill_triggered = True
             self.query_engine.note_backfill_triggered(submitted)
         return result
+
+    def _call_backfill_trigger(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        end_ms: int,
+        exchange: str,
+        market_type: str,
+        *,
+        reason: str | None = None,
+        priority: int | None = None,
+        requester: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        trigger = self._backfill_trigger
+        if trigger is None:
+            return
+
+        raw_kwargs = {
+            "reason": reason,
+            "priority": priority,
+            "requester": requester,
+            "metadata": metadata,
+        }
+        kwargs = {key: value for key, value in raw_kwargs.items() if value is not None}
+        try:
+            signature = inspect.signature(trigger)
+            supports_kwargs = any(
+                param.kind is inspect.Parameter.VAR_KEYWORD
+                for param in signature.parameters.values()
+            )
+            if not supports_kwargs:
+                kwargs = {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key in signature.parameters
+                }
+        except (TypeError, ValueError):
+            pass
+
+        trigger(symbol, interval, start_ms, end_ms, exchange, market_type, **kwargs)
+
+    def request_backfill(
+        self,
+        symbol: str,
+        interval: str,
+        start_ms: int,
+        end_ms: int,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        *,
+        reason: str = "query_gap",
+        priority: int | None = None,
+        requester: str = "data_manager",
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Submit an explicit semantic backfill demand through the facade."""
+        if self._backfill_trigger is None:
+            return False
+        market_type = self._normalize_market_type(market_type)
+        self._call_backfill_trigger(
+            symbol,
+            interval,
+            int(start_ms),
+            int(end_ms),
+            exchange,
+            market_type,
+            reason=reason,
+            priority=priority if priority is not None else priority_for_reason(reason),
+            requester=requester,
+            metadata=metadata,
+        )
+        return True
+
+    @staticmethod
+    def _semantic_reason_for_missing(reason: str) -> str:
+        if reason == "load_more_shortfall":
+            return "visible_load_more"
+        if reason in {"query_tail_gap"}:
+            return "tail_gap"
+        if reason in {"query_left_gap", "query_interior_gap", "range_verification"}:
+            return "visible_range_gap"
+        return reason or "query_gap"
 
     def get_bounds(
         self,
@@ -687,6 +815,9 @@ class DataManager:
         interval: str,
         exchange: str = "binance",
         market_type: str = "spot",
+        *,
+        focus_scope: str = "foreground",
+        subscription_tier: str | None = None,
     ) -> StreamInfo:
         """Ensure a live data stream is running.
 
@@ -736,6 +867,8 @@ class DataManager:
             exchange=plan.requested.exchange,
             market_type=plan.requested.market_type,
             had_stream=had_stream,
+            focus_scope=focus_scope,
+            subscription_tier=subscription_tier,
         )
 
         return info

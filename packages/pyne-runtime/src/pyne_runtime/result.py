@@ -44,6 +44,31 @@ class PyneResult:
     def to_json(self, *, indent: int | None = None) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
 
+    @property
+    def series_names(self) -> list[str]:
+        """Return plotted series names in output order."""
+        return [name for line in self.lines if (name := _series_name(line))]
+
+    def get_series(self, name: str) -> list[dict[str, Any]]:
+        """Return points for a plotted series by name."""
+        for line in self.lines:
+            if _series_name(line) == name:
+                data = line.get("data")
+                return list(data) if isinstance(data, list) else []
+        raise KeyError(f"Unknown Pyne series: {name}")
+
+    def values(self, name: str) -> list[Any]:
+        """Return only the values for a plotted series."""
+        return [point.get("value") for point in self.get_series(name)]
+
+    def latest(self, name: str, default: Any = None) -> Any:
+        """Return the latest non-empty value for a plotted series."""
+        for point in reversed(self.get_series(name)):
+            value = point.get("value")
+            if value is not None:
+                return value
+        return default
+
     def to_frame(self) -> Any:
         try:
             import pandas as pd
@@ -121,3 +146,8 @@ class PyneResult:
             column=self.column,
             hint=self.hint,
         )
+
+
+def _series_name(line: dict[str, Any]) -> str:
+    value = line.get("name") or line.get("title") or line.get("id")
+    return str(value) if value is not None else ""

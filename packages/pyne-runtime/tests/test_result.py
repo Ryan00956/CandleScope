@@ -38,3 +38,33 @@ def test_result_error_detail_is_structured() -> None:
             "pyne-runtime/docs/reference/error_codes.md#pyne-runtime-error"
         ),
     }
+
+
+def test_result_series_helpers() -> None:
+    result = PyneResult(lines=[
+        {
+            "name": "Close",
+            "data": [
+                {"time": 1, "value": None},
+                {"time": 2, "value": 2.0},
+                {"time": 3, "value": 3.0},
+            ],
+        },
+        {"name": "Signal", "data": [{"time": 3, "value": 1}]},
+    ])
+
+    assert result.series_names == ["Close", "Signal"]
+    assert result.get_series("Close")[1]["value"] == 2.0
+    assert result.values("Close") == [None, 2.0, 3.0]
+    assert result.latest("Close") == 3.0
+
+
+def test_result_series_helpers_raise_for_unknown_name() -> None:
+    result = PyneResult(lines=[])
+
+    try:
+        result.get_series("Missing")
+    except KeyError as exc:
+        assert "Missing" in str(exc)
+    else:
+        raise AssertionError("Expected KeyError for missing series")

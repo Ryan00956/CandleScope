@@ -32,3 +32,12 @@ pn.PYNE_OUTPUT_SCHEMA_VERSION
 ```
 
 Internal helpers and non-exported functions are not part of the compatibility contract.
+
+`PyneResult` also exposes convenience helpers for common series access:
+
+```python
+result.series_names
+result.get_series("Close")
+result.values("Close")
+result.latest("Close")
+```

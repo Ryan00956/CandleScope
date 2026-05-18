@@ -20,7 +20,8 @@ import pyne_runtime as pn
 
 data = pn.read_ohlcv("bars.csv")
 result = pn.run(open("ma_cross.py", encoding="utf-8").read(), data)
+print(result.series_names)
+print(result.latest("Fast EMA"))
 ```
 
 Use `result.lines` for chart series, `result.output` for structured outputs, and `result.error_detail` when execution fails.
-

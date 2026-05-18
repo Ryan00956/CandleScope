@@ -32,6 +32,12 @@ Run a script from the command line:
 pyne run packages/pyne-runtime/examples/ma_cross.py --ohlcv packages/pyne-runtime/examples/sample_ohlcv.csv --out result.json
 ```
 
+Override script inputs from the command line:
+
+```bash
+pyne run packages/pyne-runtime/examples/ma_cross.py --ohlcv packages/pyne-runtime/examples/sample_ohlcv.csv --param Length=20
+```
+
 Validate a script:
 
 ```bash
@@ -42,5 +48,6 @@ Inspect package metadata and schema:
 
 ```bash
 pyne --version
+python -m pyne_runtime --version
 pyne schema
 ```

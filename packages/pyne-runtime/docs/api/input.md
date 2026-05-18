@@ -13,3 +13,8 @@ kind = input.string("EMA", "Type", options=["SMA", "EMA"])
 
 Declarations are collected into `result.param_schema`.
 
+When using the CLI, override input values with `--param` or `--params-json`:
+
+```bash
+pyne run script.py --ohlcv bars.csv --param Length=20 --param Show=true
+```

@@ -12,3 +12,4 @@
 - Added documentation structure for quickstart, tutorials, concepts, API, and reference pages.
 - Added package version access, `pyne --version`, CLI contract tests, and quality gate docs/scripts.
 - Added packaged example execution coverage.
+- Added `python -m pyne_runtime`, CLI parameter overrides, and CLI reference documentation.

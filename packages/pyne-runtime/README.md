@@ -38,6 +38,7 @@ pyne run packages/pyne-runtime/examples/ma_cross.py --ohlcv packages/pyne-runtim
 
 ```bash
 pyne --version
+python -m pyne_runtime --version
 pyne schema
 pyne validate packages/pyne-runtime/examples/ma_cross.py
 ```
@@ -76,6 +77,7 @@ API:
 Reference:
 
 - [Output Schema](docs/reference/output_schema.md)
+- [CLI](docs/reference/cli.md)
 - [Error Codes](docs/reference/error_codes.md)
 - [Compatibility](docs/reference/compatibility.md)
 

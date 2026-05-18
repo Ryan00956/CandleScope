@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -41,3 +43,14 @@ def test_cli_version_prints_version(capsys: pytest.CaptureFixture[str]) -> None:
     captured = capsys.readouterr()
     assert exc.value.code == 0
     assert captured.out.startswith("pyne ")
+
+
+def test_module_entrypoint_prints_version() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "pyne_runtime", "--version"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.startswith("pyne ")

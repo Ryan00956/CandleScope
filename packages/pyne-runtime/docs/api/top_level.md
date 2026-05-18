@@ -13,6 +13,7 @@ Core functions:
 - `pn.from_pandas(df, **columns)`
 - `pn.validate(script, settings=None)`
 - `pn.schema()`
+- `pn.__version__`
 
 Core classes:
 
@@ -20,4 +21,3 @@ Core classes:
 - `pn.PyneResult`
 - `pn.PyneSettings`
 - `pn.PyneRuntime`
-

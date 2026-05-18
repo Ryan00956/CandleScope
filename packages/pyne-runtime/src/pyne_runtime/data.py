@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -84,11 +84,49 @@ class PyneData:
         pd = _require_pandas()
         return pd.DataFrame(self.to_ohlcv())
 
+    @property
+    def columns(self) -> tuple[str, ...]:
+        return tuple(DEFAULT_COLUMNS)
+
+    @property
+    def first(self) -> dict[str, Any]:
+        return dict(self._ohlcv[0])
+
+    @property
+    def last(self) -> dict[str, Any]:
+        return dict(self._ohlcv[-1])
+
+    @property
+    def time_range(self) -> tuple[int, int]:
+        return int(self._ohlcv[0]["time"]), int(self._ohlcv[-1]["time"])
+
+    def column(self, name: str) -> list[Any]:
+        if name not in DEFAULT_COLUMNS:
+            raise KeyError(f"Unknown OHLCV column: {name}")
+        return [item[name] for item in self._ohlcv]
+
+    def head(self, n: int = 5) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._ohlcv[:max(n, 0)]]
+
+    def tail(self, n: int = 5) -> list[dict[str, Any]]:
+        if n <= 0:
+            return []
+        return [dict(item) for item in self._ohlcv[-n:]]
+
     def __len__(self) -> int:
         return len(self._ohlcv)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[dict[str, Any]]:
         return iter(self.to_ohlcv())
+
+    def __getitem__(self, key: str | int | slice) -> Any:
+        if isinstance(key, str):
+            return self.column(key)
+        if isinstance(key, int):
+            return dict(self._ohlcv[key])
+        if isinstance(key, slice):
+            return [dict(item) for item in self._ohlcv[key]]
+        raise TypeError("PyneData indices must be a column name, integer, or slice")
 
     def __repr__(self) -> str:
         first = self._ohlcv[0]["time"] if self._ohlcv else None
@@ -132,4 +170,3 @@ def _require_pandas() -> Any:
             "pip install pyne-runtime[pandas]"
         ) from exc
     return pd
-

@@ -23,7 +23,8 @@ plot(close, "Close", color=color.orange)
 """, data)
 
 print(result.ok)
-print(result.lines)
+print(result.series_names)
+print(result.latest("Close"))
 ```
 
 Run a script from the command line:

@@ -17,8 +17,6 @@ Usage::
 """
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -33,7 +31,8 @@ from .plot import OutputCollector, create_plot_functions
 from .incremental import IncrementalPyneResult, PyneIncrementalSession, is_incremental_pyne_script
 from . import utils
 from .cache import pyne_cache
-from .errors import error_detail
+from .errors import classify_security_error, error_hint
+from .result import PyneResult
 from .security import (
     PyneSecurityError,
     PyneSecurityPolicy,
@@ -44,125 +43,6 @@ from .security import (
     validate_script_security,
 )
 from .settings import PyneSettings
-
-
-@dataclass
-class PyneResult:
-    """Result of a Pyne script execution.
-
-    Attributes:
-        ok:           Whether execution succeeded.
-        error:        Error message if failed.
-        lines:        Flat list of line dicts (backward compatible with frontend).
-        output:       Full structured output (lines, histograms, markers, etc.).
-        param_schema: Collected parameter schemas for dynamic UI generation.
-        meta:         Indicator metadata from ``indicator()`` call.
-    """
-    ok: bool = True
-    error: str | None = None
-    code: str | None = None
-    line: int | None = None
-    column: int | None = None
-    hint: str | None = None
-    lines: list[dict[str, Any]] = field(default_factory=list)
-    output: dict[str, Any] = field(default_factory=dict)
-    param_schema: list[dict[str, Any]] = field(default_factory=list)
-    meta: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "ok": self.ok,
-            "error": self.error,
-            "code": self.code,
-            "line": self.line,
-            "column": self.column,
-            "hint": self.hint,
-            "errorDetail": self.error_detail,
-            "lines": self.lines,
-            "output": self.output,
-            "param_schema": self.param_schema,
-            "meta": self.meta,
-        }
-
-    def to_json(self, *, indent: int | None = None) -> str:
-        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
-
-    def to_frame(self) -> Any:
-        try:
-            import pandas as pd
-        except ImportError as exc:  # pragma: no cover - depends on optional env
-            raise ImportError(
-                "Pandas support requires the optional dependency: "
-                "pip install pyne-runtime[pandas]"
-            ) from exc
-
-        rows: dict[int, dict[str, Any]] = {}
-        for line in self.lines:
-            name = line.get("name") or line.get("title") or line.get("id") or "value"
-            for point in line.get("data") or []:
-                timestamp = point.get("time")
-                if timestamp is None:
-                    continue
-                row = rows.setdefault(timestamp, {"time": timestamp})
-                row[str(name)] = point.get("value")
-        return pd.DataFrame(rows.values()).sort_values("time").reset_index(drop=True)
-
-    def plot(self) -> Any:
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError as exc:  # pragma: no cover - depends on optional env
-            raise ImportError(
-                "Plot support requires the optional dependency: "
-                "pip install pyne-runtime[plot]"
-            ) from exc
-
-        for line in self.lines:
-            data = line.get("data") or []
-            if not data:
-                continue
-            x = [point.get("time") for point in data]
-            y = [point.get("value") for point in data]
-            plt.plot(x, y, label=line.get("name") or line.get("id"))
-        if self.lines:
-            plt.legend()
-        return plt.gca()
-
-    def __repr__(self) -> str:
-        if self.ok:
-            title = self.meta.get("title") or self.meta.get("name") or ""
-            title_part = f', title="{title}"' if title else ""
-            return (
-                f"PyneResult(ok=True, series={len(self.lines)}, "
-                f"outputs={len(self.output)}{title_part})"
-            )
-        return f'PyneResult(ok=False, code="{self.code}", error="{self.error}")'
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PyneResult":
-        return cls(
-            ok=bool(data.get("ok")),
-            error=data.get("error"),
-            code=data.get("code"),
-            line=data.get("line"),
-            column=data.get("column"),
-            hint=data.get("hint"),
-            lines=data.get("lines") if isinstance(data.get("lines"), list) else [],
-            output=data.get("output") if isinstance(data.get("output"), dict) else {},
-            param_schema=data.get("param_schema") if isinstance(data.get("param_schema"), list) else [],
-            meta=data.get("meta") if isinstance(data.get("meta"), dict) else {},
-        )
-
-    @property
-    def error_detail(self) -> dict[str, Any] | None:
-        if self.ok or not self.code or not self.error:
-            return None
-        return error_detail(
-            self.code,
-            self.error,
-            line=self.line,
-            column=self.column,
-            hint=self.hint,
-        )
 
 
 class PyneRuntime:
@@ -196,9 +76,9 @@ class PyneRuntime:
         if not ohlcv:
             return PyneResult(
                 ok=False,
-                code="INVALID_OHLCV",
+                code="PYNE_INVALID_OHLCV",
                 error="No OHLCV data provided",
-                hint="请确认当前图表已经加载 K 线数据。",
+                hint=error_hint("PYNE_INVALID_OHLCV"),
             )
 
         params = params or {}
@@ -209,9 +89,9 @@ class PyneRuntime:
             if len(ohlcv) > policy.max_bars:
                 return PyneResult(
                     ok=False,
-                    code="INVALID_OHLCV",
+                    code="PYNE_INVALID_OHLCV",
                     error=f"Too many data points (max {policy.max_bars})",
-                    hint="缩小历史窗口，或调大 PYNE_MAX_BARS 配置。",
+                    hint="Reduce the history window or increase max_bars for trusted workloads.",
                 )
 
             validate_script_security(script, policy)
@@ -263,7 +143,7 @@ class PyneRuntime:
                 error=str(exc.msg or exc),
                 line=exc.lineno,
                 column=exc.offset,
-                hint="这是 Python/Pyne 语法错误，请检查报错行附近的括号、缩进、逗号或赋值写法。",
+                hint=error_hint("PYNE_SYNTAX_ERROR"),
             )
 
         except PyneTimeoutError as exc:
@@ -271,27 +151,19 @@ class PyneRuntime:
                 ok=False,
                 code="PYNE_TIMEOUT",
                 error=str(exc),
-                hint="脚本执行超时。请减少循环、缩小窗口，或在确认风险后调高超时时间。",
+                hint=error_hint("PYNE_TIMEOUT"),
             )
         except PyneSecurityError as exc:
             message = str(exc)
-            if "output series" in message or "output points" in message:
-                code = "PYNE_OUTPUT_LIMIT_EXCEEDED"
-                hint = "脚本输出过多。请减少 plot/marker 数量，或降低单次输出点数。"
-            elif "Import" in message or "import" in message:
-                code = "PYNE_IMPORT_BLOCKED"
-                hint = "当前安全模式不允许该 import。可切换 research/unsafe，或配置 PYNE_ALLOWED_IMPORTS。"
-            else:
-                code = "PYNE_SECURITY_ERROR"
-                hint = "当前 Pyne 安全策略拒绝执行该脚本。"
-            return PyneResult(ok=False, code=code, error=message, hint=hint)
+            code = classify_security_error(message)
+            return PyneResult(ok=False, code=code, error=message, hint=error_hint(code))
         except Exception as exc:
             error_msg = f"Script error: {exc}"
             return PyneResult(
                 ok=False,
                 code="PYNE_RUNTIME_ERROR",
                 error=error_msg,
-                hint="脚本运行时失败。请检查变量名、函数参数，以及数组长度是否一致。",
+                hint=error_hint("PYNE_RUNTIME_ERROR"),
             )
 
     def _collect_incremental_result(self, result: IncrementalPyneResult) -> PyneResult:

@@ -11,7 +11,9 @@ import queue
 import time
 from typing import Any
 
-from .runtime import PyneResult, PyneRuntime
+from .errors import error_hint
+from .result import PyneResult
+from .runtime import PyneRuntime
 from .security import PyneSecurityPolicy
 from .settings import PyneSettings
 
@@ -81,7 +83,7 @@ def execute_pyne_script_in_process(
             ok=False,
             code="PYNE_TIMEOUT",
             error=f"Pyne script exceeded {timeout:g}s timeout",
-            hint="脚本执行超时，已终止独立执行进程。请减少循环、缩小窗口，或调整 PYNE_EXEC_TIMEOUT_SECONDS。",
+            hint=error_hint("PYNE_TIMEOUT"),
         )
 
     process.join(1)
@@ -94,7 +96,7 @@ def execute_pyne_script_in_process(
             ok=False,
             code="PYNE_PROCESS_FAILED",
             error=f"Pyne executor process exited with code {process.exitcode}",
-            hint="脚本执行进程异常退出。请检查 unsafe/research 模式下的第三方库或系统资源。",
+            hint=error_hint("PYNE_PROCESS_FAILED"),
         )
 
     if not isinstance(payload, dict):
@@ -109,7 +111,7 @@ def execute_pyne_script_in_process(
         ok=False,
         code=payload.get("code") or "PYNE_PROCESS_FAILED",
         error=payload.get("error") or "Pyne executor process failed",
-        hint=payload.get("hint"),
+        hint=payload.get("hint") or error_hint(payload.get("code") or "PYNE_PROCESS_FAILED"),
     )
 
 

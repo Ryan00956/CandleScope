@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from .data import PyneData, coerce_ohlcv
+from .errors import classify_security_error, error_detail
 from .executor import execute_pyne_script
-from .runtime import PyneResult
+from .result import PyneResult
+from .schema import schema as schema_bundle
 from .security import PyneSecurityPolicy, validate_script_security
 from .settings import PyneSettings
 
@@ -52,45 +54,25 @@ def validate(script: str | Path, *, settings: PyneSettings | None = None) -> lis
     try:
         compile(script_text, "<pyne>", "exec")
     except SyntaxError as exc:
-        diagnostics.append({
-            "code": "PYNE_SYNTAX_ERROR",
-            "message": str(exc.msg or exc),
-            "line": exc.lineno,
-            "column": exc.offset,
-        })
+        diagnostics.append(error_detail(
+            "PYNE_SYNTAX_ERROR",
+            str(exc.msg or exc),
+            line=exc.lineno,
+            column=exc.offset,
+        ))
         return diagnostics
 
     policy = PyneSecurityPolicy.from_settings(settings or PyneSettings.from_env())
     try:
         validate_script_security(script_text, policy)
     except Exception as exc:
-        diagnostics.append({
-            "code": "PYNE_SECURITY_ERROR",
-            "message": str(exc),
-        })
+        code = classify_security_error(str(exc))
+        diagnostics.append(error_detail(code, str(exc)))
     return diagnostics
 
 
 def schema() -> dict[str, Any]:
-    return {
-        "input": {
-            "type": "ohlcv",
-            "required": ["time", "open", "high", "low", "close", "volume"],
-            "timeUnit": "seconds",
-        },
-        "output": {
-            "keys": [
-                "lines",
-                "histograms",
-                "markers",
-                "hlines",
-                "fills",
-                "bgcolors",
-                "barcolors",
-                "signals",
-            ]
-        },
-    }
+    return schema_bundle()
 
 
 def _read_script(script: str | Path) -> str:
@@ -102,4 +84,3 @@ def _read_script(script: str | Path) -> str:
             return path.read_text(encoding="utf-8")
         return script
     raise TypeError("script must be a string or path")
-

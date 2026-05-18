@@ -11,7 +11,9 @@ from .incremental import (
     SharedPyneIncrementalSession,
     is_incremental_pyne_script,
 )
-from .runtime import PyneResult, PyneRuntime
+from .result import PyneResult
+from .runtime import PyneRuntime
+from .schema import PYNE_INPUT_SCHEMA_VERSION, PYNE_OUTPUT_SCHEMA_VERSION
 from .settings import PyneSettings
 
 __all__ = [
@@ -21,6 +23,8 @@ __all__ = [
     "PyneResult",
     "PyneRuntime",
     "PyneSettings",
+    "PYNE_INPUT_SCHEMA_VERSION",
+    "PYNE_OUTPUT_SCHEMA_VERSION",
     "SharedPyneIncrementalSession",
     "execute_pyne_script",
     "execute_pyne_script_in_process",

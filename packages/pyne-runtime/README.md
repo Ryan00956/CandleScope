@@ -40,3 +40,35 @@ pyne run packages/pyne-runtime/examples/ma_cross.py --ohlcv packages/pyne-runtim
 
 This package is the standalone runtime extraction of Pyne. It does not import CandleScope application modules.
 
+## Documentation
+
+Start here:
+
+- [Quickstart](docs/quickstart.md)
+- [First Indicator Tutorial](docs/tutorials/first_indicator.md)
+- [CSV To Signal Tutorial](docs/tutorials/csv_to_signal.md)
+
+Concepts:
+
+- [Data Model](docs/concepts/data_model.md)
+- [Script Runtime](docs/concepts/script_runtime.md)
+- [Security Modes](docs/concepts/security_modes.md)
+- [Incremental Runtime](docs/concepts/incremental_runtime.md)
+
+API:
+
+- [Public API](docs/api/public_api.md)
+- [Top-Level API](docs/api/top_level.md)
+- [PyneData](docs/api/data.md)
+- [PyneResult](docs/api/result.md)
+- [PyneRuntime](docs/api/runtime.md)
+- [PyneSettings](docs/api/settings.md)
+- [`ta` API](docs/api/ta.md)
+- [`input` API](docs/api/input.md)
+- [Plot API](docs/api/plot.md)
+
+Reference:
+
+- [Output Schema](docs/reference/output_schema.md)
+- [Error Codes](docs/reference/error_codes.md)
+- [Compatibility](docs/reference/compatibility.md)

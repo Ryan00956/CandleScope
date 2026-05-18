@@ -28,11 +28,13 @@ def test_validate_reports_syntax_error() -> None:
 
     assert diagnostics
     assert diagnostics[0]["code"] == "PYNE_SYNTAX_ERROR"
+    assert "hint" in diagnostics[0]
+    assert "docsUrl" in diagnostics[0]
 
 
 def test_schema_exposes_ohlcv_contract() -> None:
     schema = pn.schema()
 
     assert schema["input"]["type"] == "ohlcv"
+    assert schema["input"]["schemaVersion"] == pn.PYNE_INPUT_SCHEMA_VERSION
     assert "close" in schema["input"]["required"]
-

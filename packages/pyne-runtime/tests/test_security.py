@@ -17,6 +17,7 @@ def test_safe_mode_blocks_imports() -> None:
     assert not result.ok
     assert result.code == "PYNE_IMPORT_BLOCKED"
     assert result.error_detail["code"] == "PYNE_IMPORT_BLOCKED"
+    assert "docsUrl" in result.error_detail
 
 
 def test_research_mode_allows_whitelisted_imports() -> None:
@@ -39,4 +40,3 @@ def test_research_mode_blocks_unlisted_imports() -> None:
 
     assert not result.ok
     assert result.code == "PYNE_IMPORT_BLOCKED"
-

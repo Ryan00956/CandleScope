@@ -36,6 +36,12 @@ python -m pip install -e packages/pyne-runtime
 pyne run packages/pyne-runtime/examples/ma_cross.py --ohlcv packages/pyne-runtime/examples/sample_ohlcv.csv --out result.json
 ```
 
+```bash
+pyne --version
+pyne schema
+pyne validate packages/pyne-runtime/examples/ma_cross.py
+```
+
 ## Status
 
 This package is the standalone runtime extraction of Pyne. It does not import CandleScope application modules.
@@ -72,3 +78,7 @@ Reference:
 - [Output Schema](docs/reference/output_schema.md)
 - [Error Codes](docs/reference/error_codes.md)
 - [Compatibility](docs/reference/compatibility.md)
+
+Development:
+
+- [Quality Gates](docs/development/quality_gates.md)

@@ -1,6 +1,7 @@
 """Pyne Runtime public API."""
 from __future__ import annotations
 
+from ._version import __version__
 from .api import from_pandas, read_ohlcv, run, schema, validate
 from .cache import pyne_cache
 from .data import PyneData
@@ -17,6 +18,7 @@ from .schema import PYNE_INPUT_SCHEMA_VERSION, PYNE_OUTPUT_SCHEMA_VERSION
 from .settings import PyneSettings
 
 __all__ = [
+    "__version__",
     "PyneData",
     "PyneIncrementalSession",
     "PyneIncrementalSessionManager",

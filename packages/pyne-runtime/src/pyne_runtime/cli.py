@@ -5,11 +5,13 @@ import argparse
 import json
 from pathlib import Path
 
+from ._version import __version__
 from .api import read_ohlcv, run, validate
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pyne")
+    parser.add_argument("--version", action="version", version=f"pyne {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run a Pyne script against OHLCV CSV data")

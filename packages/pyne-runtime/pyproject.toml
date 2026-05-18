@@ -32,8 +32,10 @@ dependencies = [
 pandas = ["pandas>=2"]
 plot = ["matplotlib>=3"]
 dev = [
+  "build>=1",
   "pytest>=7",
   "ruff>=0.5",
+  "twine>=5",
 ]
 all = [
   "pandas>=2",

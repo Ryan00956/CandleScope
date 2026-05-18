@@ -38,3 +38,9 @@ Validate a script:
 pyne validate packages/pyne-runtime/examples/ma_cross.py
 ```
 
+Inspect package metadata and schema:
+
+```bash
+pyne --version
+pyne schema
+```

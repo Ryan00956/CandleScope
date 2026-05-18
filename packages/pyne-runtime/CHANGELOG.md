@@ -10,3 +10,4 @@
 - Added public API documentation, `result.py`, and schema version helpers.
 - Added error code registry with standard hints and documentation URLs.
 - Added documentation structure for quickstart, tutorials, concepts, API, and reference pages.
+- Added package version access, `pyne --version`, CLI contract tests, and quality gate docs/scripts.

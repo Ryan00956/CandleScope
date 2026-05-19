@@ -182,7 +182,9 @@ export default function WatchlistSidebar({
     }
 
     if (Object.keys(newFlashes).length > 0) {
-      setFlashStates((prev) => ({ ...prev, ...newFlashes }));
+      setTimeout(() => {
+        setFlashStates((prev) => ({ ...prev, ...newFlashes }));
+      }, 0);
     }
 
     prevPricesRef.current = { ...prices };
@@ -190,8 +192,9 @@ export default function WatchlistSidebar({
 
   // Cleanup flash timers on unmount
   useEffect(() => {
+    const timers = flashTimersRef.current;
     return () => {
-      for (const t of Object.values(flashTimersRef.current)) {
+      for (const t of Object.values(timers)) {
         clearTimeout(t);
       }
     };
@@ -855,5 +858,3 @@ export default function WatchlistSidebar({
     </>
   );
 }
-
-export { loadWatchlists, saveWatchlists, WATCHLISTS_KEY };

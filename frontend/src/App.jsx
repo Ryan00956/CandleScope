@@ -7,7 +7,7 @@ import IndicatorPanel from "./components/IndicatorPanel";
 import AlertsPanel from "./components/alerts/AlertsPanel";
 import IntervalSelector from "./components/IntervalSelector";
 import SymbolSearch from "./components/SymbolSearch";
-import WatchlistSidebar, { loadWatchlists, saveWatchlists } from "./components/WatchlistSidebar";
+import WatchlistSidebar from "./components/WatchlistSidebar";
 import { useCustomIntervals } from "./hooks/useCustomIntervals";
 import { useExportPreview } from "./hooks/useExportPreview";
 import { useIndicators } from "./hooks/useIndicators";
@@ -27,6 +27,7 @@ import {
 } from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
 import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, downloadBlob } from "./services/exportService";
+import { loadWatchlists, saveWatchlists } from "./services/watchlistStorage";
 import "./index.css";
 // ---------- ErrorBoundary ----------
 class ErrorBoundary extends React.Component {
@@ -1102,8 +1103,8 @@ export default function App() {
 
 
   // Sync cache limits to backend when they change
+  const { cacheLimits, ephemeralCacheBars } = settings;
   useEffect(() => {
-    const { cacheLimits, ephemeralCacheBars } = settings;
     if (!cacheLimits) return;
     fetch("/api/v1/settings/cache-limits", {
       method: "POST",
@@ -1113,7 +1114,7 @@ export default function App() {
         ephemeral_bars: ephemeralCacheBars ?? 86400,
       }),
     }).catch(() => {}); // fire-and-forget
-  }, [settings.cacheLimits, settings.ephemeralCacheBars]);
+  }, [cacheLimits, ephemeralCacheBars]);
 
   const abortRef = useRef(null);
 

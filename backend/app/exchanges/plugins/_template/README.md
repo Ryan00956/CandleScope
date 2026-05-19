@@ -45,6 +45,7 @@ Built-in examples:
 | `HistoricalPaginationPolicy` | `app/exchanges/pagination.py` | Exchange-specific historical pagination semantics |
 | `RealtimePolicy` | `app/exchanges/realtime.py` | Native interval, base fanout, or polling behavior |
 | `RateLimitPolicy` | `app/exchanges/rate_limits.py` | REST/WS rate-limit defaults and overrides |
+| `ExchangeContractCase` | `app/exchanges/contracts.py` | Contract-test fixtures for protocol and policy behavior |
 
 ## Adding A New Plugin
 
@@ -56,8 +57,9 @@ Built-in examples:
 6. Implement symbol canonicalization and symbol metadata conversion in `symbols.py`.
 7. Add a pagination policy in `pagination.py` if default reverse-time pagination is not correct for the exchange.
 8. Return the protocol, normalizer, symbol normalizer, and policies from `plugin.py`.
-9. Register it in `app/exchanges/registry.py` through `bootstrap_default_adapters()`, or connect it to a future dynamic discovery mechanism.
-10. Add tests for capabilities, symbol normalization, REST specs, WS specs/subscriptions, normalizer behavior, pagination, and historical fetch behavior.
+9. Keep `plugin_api_version="1.0"` and `capability_schema_version=1` unless the backend registry explicitly supports a newer major contract.
+10. Register it in `app/exchanges/registry.py` through `bootstrap_default_adapters()`, or load it explicitly with `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory`.
+11. Add contract fixtures with `ExchangeContractCase` and tests for capabilities, symbol normalization, REST specs, WS specs/subscriptions, normalizer behavior, pagination, and historical fetch behavior.
 
 ## Plugin Capabilities To Express
 
@@ -65,6 +67,11 @@ At minimum, define:
 
 - `id`: exchange id, for example `binance` or `okx`.
 - `capabilities()`: supported market types, intervals, REST/WS features.
+- `plugin_api_version`: major contract version consumed by `ExchangeRegistry`.
+- `capability_schema_version`: schema version for capability metadata.
+- `protocol_features`: stable feature flags such as `rest.kline`, `ws.shared_multiplex`, or `pagination.reverse_time`.
+- `limits`: machine-readable limits such as `rest.kline.max_limit`.
+- `known_limitations`: honest limitations that frontend/runtime diagnostics can surface.
 - REST request specs for spot/futures/swap markets.
 - WS connection specs for public/business/private or spot/futures endpoints.
 - Historical kline params and pagination semantics.
@@ -99,6 +106,7 @@ Tests should cover common aliases, swap/futures suffixes, case normalization, an
 ```bash
 cd backend
 python -m pytest -q \
+  tests/test_exchange_plugin_contracts.py \
   tests/test_exchange_registry_plugins.py \
   tests/test_symbol_normalization.py \
   tests/test_transport_ws_urls.py \

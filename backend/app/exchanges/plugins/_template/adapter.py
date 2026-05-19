@@ -31,6 +31,17 @@ class TemplateExchangeAdapter:
             supports_multi_symbol_ticker=False,
             supports_symbol_search=True,
             ws_connection_model="message_per_stream",
+            protocol_features=[
+                "rest.kline",
+                "ws.message_subscribe",
+                "pagination.custom",
+            ],
+            limits={
+                "rest.kline.max_limit": 1000,
+            },
+            known_limitations=[
+                "Replace template limitations with exchange-specific notes",
+            ],
         )
 
     async def list_symbols(self, market_type: str = "") -> list[SymbolInfo]:

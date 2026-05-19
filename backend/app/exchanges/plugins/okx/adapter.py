@@ -65,6 +65,19 @@ class OkxExchangeAdapter:
             supports_multi_symbol_ticker=False,
             supports_symbol_search=True,
             ws_connection_model="shared_multiplex",
+            protocol_features=[
+                "rest.kline",
+                "rest.ticker",
+                "ws.message_subscribe",
+                "ws.shared_multiplex",
+                "pagination.okx_history",
+            ],
+            limits={
+                "rest.kline.max_limit": 300,
+            },
+            known_limitations=[
+                "aggTrade, trade, and depth are not exposed by the current OKX plugin",
+            ],
         )
 
     async def list_symbols(self, market_type: str = "") -> list[SymbolInfo]:

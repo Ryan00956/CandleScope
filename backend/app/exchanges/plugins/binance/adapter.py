@@ -55,6 +55,18 @@ class BinanceExchangeAdapter:
             native_intervals=list(VALID_INTERVALS),
             supports_multi_symbol_ticker=True,
             supports_symbol_search=True,
+            protocol_features=[
+                "rest.kline",
+                "rest.trades",
+                "rest.depth",
+                "ws.path_streams",
+                "ws.futures_route_split",
+                "pagination.reverse_time",
+            ],
+            limits={
+                "rest.kline.max_limit": 1000,
+                "rest.depth.max_limit": 5000,
+            },
         )
 
     async def list_symbols(self, market_type: str = "") -> list[SymbolInfo]:

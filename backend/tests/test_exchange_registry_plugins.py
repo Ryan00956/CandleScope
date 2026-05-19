@@ -21,6 +21,7 @@ def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
     assert plugin.adapter() is adapter
     assert [item.id for item in registry.list()] == ["binance", "okx"]
     assert [item.id for item in registry.list_plugins()] == ["binance", "okx"]
+    assert registry.diagnostics()["count"] >= 2
 
 
 def test_builtin_plugins_create_exchange_normalizers() -> None:
@@ -95,6 +96,13 @@ def test_builtin_plugins_use_concrete_protocols_and_pagination_policies() -> Non
     assert isinstance(okx.protocol(), OkxExchangeProtocol)
     assert isinstance(binance.pagination_policy(BackfillConfig()), ReverseTimePaginationPolicy)
     assert isinstance(okx.pagination_policy(BackfillConfig()), OkxHistoricalPaginationPolicy)
+
+    binance_capabilities = binance.capabilities().to_dict()
+    okx_capabilities = okx.capabilities().to_dict()
+    assert binance_capabilities["plugin_api_version"] == "1.0"
+    assert "ws.futures_route_split" in binance_capabilities["protocol_features"]
+    assert okx_capabilities["ws_connection_model"] == "shared_multiplex"
+    assert okx_capabilities["limits"]["rest.kline.max_limit"] == 300
 
 
 def test_adapter_backed_protocol_sanitizes_configured_endpoints() -> None:

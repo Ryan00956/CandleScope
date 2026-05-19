@@ -19,6 +19,7 @@ import {
   fetchKlinesRange,
   fetchLatestKlines,
   getMultiStreamUrl,
+  fetchExchanges,
   fetchSubscriptions,
   updateSubscriptionTier,
   syncWatchlistSymbols,
@@ -131,18 +132,76 @@ const EXCHANGE_INTERVALS = {
   },
 };
 
+function labelInterval(value) {
+  const match = String(value || "").match(/^(\d+)([a-zA-Z]+)$/);
+  if (!match) return String(value || "");
+  const [, amount, unit] = match;
+  return ["h", "d", "w", "M"].includes(unit) ? `${amount}${unit.toUpperCase()}` : `${amount}${unit}`;
+}
+
+function intervalItemFromValue(value) {
+  const seconds = parseIntervalSeconds(value);
+  if (!seconds) return null;
+  return { value, label: labelInterval(value), seconds };
+}
+
+function buildExchangeCatalog(exchanges) {
+  const catalog = {};
+  for (const item of exchanges || []) {
+    const exchangeId = String(item.exchange || "").toLowerCase();
+    if (!exchangeId) continue;
+    const fallback = EXCHANGE_INTERVALS[exchangeId] || {};
+    const intervals = (item.native_intervals || [])
+      .map(intervalItemFromValue)
+      .filter(Boolean);
+    catalog[exchangeId] = {
+      id: exchangeId,
+      label: item.name || fallback.label || labelInterval(exchangeId),
+      markets: Array.isArray(item.markets) ? item.markets : [],
+      nativeIntervals: intervals.length > 0 ? intervals : (fallback.intervals || []),
+      intervalDays: fallback.intervalDays || {},
+      protocolFeatures: new Set(item.protocol_features || []),
+      limits: item.limits || {},
+      knownLimitations: item.known_limitations || [],
+      wsConnectionModel: item.ws_connection_model || "path_per_stream",
+      raw: item,
+    };
+  }
+  return catalog;
+}
+
+function getExchangeConfig(exchange, catalog = null) {
+  const key = String(exchange || "binance").toLowerCase();
+  return catalog?.[key] || {
+    id: key,
+    label: EXCHANGE_INTERVALS[key]?.label || labelInterval(key),
+    markets: [],
+    nativeIntervals: EXCHANGE_INTERVALS[key]?.intervals || EXCHANGE_INTERVALS.binance.intervals,
+    intervalDays: EXCHANGE_INTERVALS[key]?.intervalDays || {},
+    protocolFeatures: new Set(),
+    limits: {},
+    knownLimitations: [],
+    wsConnectionModel: "path_per_stream",
+    raw: null,
+  };
+}
+
 /** Get native intervals for the current exchange */
-function getNativeIntervals(exchange) {
-  return EXCHANGE_INTERVALS[exchange]?.intervals || EXCHANGE_INTERVALS.binance.intervals;
+function getNativeIntervals(exchange, catalog = null) {
+  return getExchangeConfig(exchange, catalog).nativeIntervals;
 }
 
 /** Get WebSocket intervals to subscribe for the current exchange */
-function getBaseWsIntervals(exchange) {
-  return getNativeIntervals(exchange).map((i) => i.value);
+function getBaseWsIntervals(exchange, catalog = null) {
+  const config = getExchangeConfig(exchange, catalog);
+  if (config.protocolFeatures.has("ws.polling_only") || config.wsConnectionModel === "polling_only") {
+    return [];
+  }
+  return config.nativeIntervals.map((i) => i.value);
 }
 
-function buildSortedIntervals(savedCustom, exchange = "binance") {
-  const native = getNativeIntervals(exchange);
+function buildSortedIntervals(savedCustom, exchange = "binance", catalog = null) {
+  const native = getNativeIntervals(exchange, catalog);
   const all = native.map((i) => ({ ...i, isCustom: false }));
   for (const intv of savedCustom) {
     const secs = parseIntervalSeconds(intv);
@@ -251,8 +310,8 @@ function getIntervalDays(intv, exchange = "binance") {
   return 365;
 }
 
-function isNativeIntervalSupported(exchange, interval) {
-  return getNativeIntervals(exchange).some((item) => item.value === interval);
+function isNativeIntervalSupported(exchange, interval, catalog = null) {
+  return getNativeIntervals(exchange, catalog).some((item) => item.value === interval);
 }
 
 function mergeByTime(older, current) {
@@ -479,6 +538,8 @@ export default function App() {
     const prefs = loadUserPrefs();
     return prefs.lastInterval || "1h";
   });
+  const [exchangeCatalog, setExchangeCatalog] = useState({});
+  const [exchangeCatalogStatus, setExchangeCatalogStatus] = useState("loading");
   const [datasetKey, setDatasetKey] = useState(0);
 
   const [chartData, setChartData] = useState([]);
@@ -492,6 +553,22 @@ export default function App() {
   const [loadingMoreLeft, setLoadingMoreLeft] = useState(false);
   const [hasMoreLeft, setHasMoreLeft] = useState(true);
   const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setExchangeCatalogStatus("loading");
+    fetchExchanges()
+      .then((payload) => {
+        if (cancelled) return;
+        setExchangeCatalog(buildExchangeCatalog(payload?.exchanges || []));
+        setExchangeCatalogStatus("ready");
+      })
+      .catch((err) => {
+        console.warn("Failed to load exchange capabilities:", err);
+        if (!cancelled) setExchangeCatalogStatus("fallback");
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const [crosshairData, setCrosshairData] = useState(null);
   const [lastPrice, setLastPrice] = useState(null);
@@ -862,16 +939,42 @@ export default function App() {
   const [intervalNotice, setIntervalNotice] = useState(null);
   const lastRemovedIntervalRef = useRef(null);
   const intervalNoticeTimerRef = useRef(null);
-  const nativeIntervals = useMemo(() => getNativeIntervals(exchange), [exchange]);
-  const intervalGroups = useMemo(
-    () => buildSortedIntervals(savedCustomIntervals, exchange),
-    [exchange, savedCustomIntervals],
+  const exchangeConfig = useMemo(
+    () => getExchangeConfig(exchange, exchangeCatalog),
+    [exchange, exchangeCatalog],
   );
-  const baseWsIntervals = useMemo(() => getBaseWsIntervals(exchange), [exchange]);
+  const exchangeMarketTypes = useMemo(
+    () => exchangeConfig.markets.map((market) => market.market_type).filter(Boolean),
+    [exchangeConfig],
+  );
+  const exchangeLimitations = exchangeConfig.knownLimitations || [];
+  const nativeIntervals = useMemo(() => getNativeIntervals(exchange, exchangeCatalog), [exchange, exchangeCatalog]);
+  const intervalGroups = useMemo(
+    () => buildSortedIntervals(savedCustomIntervals, exchange, exchangeCatalog),
+    [exchange, exchangeCatalog, savedCustomIntervals],
+  );
+  const baseWsIntervals = useMemo(() => getBaseWsIntervals(exchange, exchangeCatalog), [exchange, exchangeCatalog]);
   const trackedIntervals = useMemo(
     () => Array.from(new Set([...baseWsIntervals, ...savedCustomIntervals, interval])),
     [interval, savedCustomIntervals, baseWsIntervals],
   );
+  useEffect(() => {
+    if (exchangeCatalogStatus === "loading") return;
+    if (exchangeMarketTypes.length === 0 || exchangeMarketTypes.includes(marketType)) return;
+    const nextMarketType = exchangeMarketTypes[0] || "spot";
+    setMarketType(nextMarketType);
+    updateUserPref("lastMarketType", nextMarketType);
+  }, [exchangeCatalogStatus, exchangeMarketTypes, marketType]);
+  useEffect(() => {
+    if (exchangeCatalogStatus === "loading") return;
+    if (savedCustomIntervals.includes(interval)) return;
+    if (isNativeIntervalSupported(exchange, interval, exchangeCatalog)) return;
+    const nextInterval = nativeIntervals.find((item) => item.value === "1h")?.value
+      || nativeIntervals[0]?.value
+      || "1h";
+    setInterval_(nextInterval);
+    updateUserPref("lastInterval", nextInterval);
+  }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, nativeIntervals, savedCustomIntervals]);
   const trackedIntervalsRef = useRef(trackedIntervals);
   trackedIntervalsRef.current = trackedIntervals;
   const socketRef = useRef(null);
@@ -1228,7 +1331,7 @@ export default function App() {
 
     // Persist choice
     const nextInterval = (
-      savedCustomIntervals.includes(interval) || isNativeIntervalSupported(newExchange, interval)
+      savedCustomIntervals.includes(interval) || isNativeIntervalSupported(newExchange, interval, exchangeCatalog)
     ) ? interval : "1h";
 
     updateUserPref("lastSymbol", newSymbol);
@@ -1253,7 +1356,7 @@ export default function App() {
     setMarketType(newMarketType);
     setSymbol(newSymbol);
     setInterval_(nextInterval);
-  }, [exchange, interval, marketType, savedCustomIntervals, symbol]);
+  }, [exchange, exchangeCatalog, interval, marketType, savedCustomIntervals, symbol]);
 
   useEffect(() => {
     loadData(symbol, interval, marketType, exchange);
@@ -2257,10 +2360,11 @@ export default function App() {
     fallback: "Live (Polling fallback)",
     mock: "Mock mode",
   }[wsStatus] || "Unknown";
-  const exchangeLabel = EXCHANGE_INTERVALS[exchange]?.label || (
+  const exchangeLabel = exchangeConfig.label || (
     exchange ? `${exchange.charAt(0).toUpperCase()}${exchange.slice(1)}` : "Unknown"
   );
-  const marketLabel = marketType === "futures" ? "Futures" : "Spot";
+  const marketLabel = exchangeConfig.markets.find((item) => item.market_type === marketType)?.label
+    || (marketType === "futures" ? "Futures" : "Spot");
 
   return (
     <div className="app-layout" ref={pageExportRef}>
@@ -2274,6 +2378,7 @@ export default function App() {
           currentSymbol={symbol}
           currentMarketType={marketType}
           currentExchange={exchange}
+          exchangeCatalog={exchangeCatalog}
           onSelect={handleSymbolChange}
           watchlists={watchlists}
           onAddToWatchlist={handleAddToWatchlist}
@@ -2566,6 +2671,14 @@ export default function App() {
           {dataSource === "mock" && (
             <span style={{ color: "#f59e0b" }}>
               {exchangeLabel} unavailable, using mock data
+            </span>
+          )}
+          {exchangeCatalogStatus === "fallback" && (
+            <span style={{ color: "#f59e0b" }}>Exchange capabilities fallback</span>
+          )}
+          {exchangeLimitations.length > 0 && (
+            <span title={exchangeLimitations.join(" | ")} style={{ color: "#94a3b8" }}>
+              {exchangeLimitations.length} exchange limitation{exchangeLimitations.length > 1 ? "s" : ""}
             </span>
           )}
         </div>

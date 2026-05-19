@@ -168,6 +168,7 @@ Long-lived plugin boundaries:
 - `app.exchanges.contracts` provides a reusable contract harness for REST specs, WS specs, payload extraction, historical pagination, and normalizer output schema.
 - Built-in contract fixtures live under `tests/fixtures/exchanges/`; add new exchange fixtures there before wiring the plugin into runtime code.
 - Optional out-of-tree plugins can be loaded with `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory`. This path is explicit and diagnostics-backed; built-in plugins still load first.
+- The frontend consumes `/api/v1/exchanges/` for interval lists, market availability, WS mode, and user-visible limitations. Keep new exchange UI behavior in capabilities rather than hard-coded frontend branches.
 
 ## Indicators And Pyne
 

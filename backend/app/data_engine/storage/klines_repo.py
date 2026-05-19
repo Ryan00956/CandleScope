@@ -14,6 +14,7 @@ from app.data_engine.interval_policy import (
     VALID_INTERVALS,
     compute_bucket_end_ms,
     compute_bucket_start_ms,
+    is_monthly_interval,
     parse_interval_ms,
 )
 
@@ -392,6 +393,32 @@ def _last_expected_open_ms(end_ms: int, interval: str) -> int:
     return compute_bucket_start_ms(end_ms, interval_ms, interval=interval)
 
 
+def _next_expected_open_ms(open_ms: int, interval: str) -> int:
+    interval_ms = parse_interval_ms(interval) or 60_000
+    return compute_bucket_end_ms(open_ms, interval_ms, interval=interval)
+
+
+def _previous_expected_open_ms(open_ms: int, interval: str) -> int:
+    interval_ms = parse_interval_ms(interval) or 60_000
+    return compute_bucket_start_ms(open_ms - 1, interval_ms, interval=interval)
+
+
+def _count_expected_opens(start_ms: int, end_ms: int, interval: str) -> int:
+    if start_ms > end_ms:
+        return 0
+
+    interval_ms = parse_interval_ms(interval) or 60_000
+    if not is_monthly_interval(interval):
+        return (end_ms - start_ms) // interval_ms + 1
+
+    count = 0
+    current = start_ms
+    while current <= end_ms:
+        count += 1
+        current = compute_bucket_end_ms(current, interval_ms, interval=interval)
+    return count
+
+
 def _gap_payload(
     *,
     exchange: str,
@@ -402,8 +429,7 @@ def _gap_payload(
     end_ms: int,
     reason: str,
 ) -> dict:
-    interval_ms = parse_interval_ms(interval) or 60_000
-    missing_bars = int((end_ms - start_ms) // interval_ms) + 1 if end_ms >= start_ms else 0
+    missing_bars = _count_expected_opens(start_ms, end_ms, interval)
     return {
         "exchange": exchange,
         "market_type": market_type,
@@ -499,40 +525,43 @@ def scan_klines_gaps(
     if start_ms is not None:
         first_expected = _first_expected_open_ms(start_ms, interval)
         if opens[0] > first_expected:
+            gap_end = _previous_expected_open_ms(opens[0], interval)
             gaps.append(_gap_payload(
                 exchange=exchange,
                 market_type=market_type,
                 symbol=symbol,
                 interval=interval,
                 start_ms=first_expected,
-                end_ms=opens[0] - interval_ms,
+                end_ms=gap_end,
                 reason="head_gap",
             ))
 
     previous = opens[0]
     for current in opens[1:]:
-        expected_next = previous + interval_ms
+        expected_next = _next_expected_open_ms(previous, interval)
         if current > expected_next:
+            gap_end = _previous_expected_open_ms(current, interval)
             gaps.append(_gap_payload(
                 exchange=exchange,
                 market_type=market_type,
                 symbol=symbol,
                 interval=interval,
                 start_ms=expected_next,
-                end_ms=current - interval_ms,
+                end_ms=gap_end,
                 reason="interior_gap",
             ))
         previous = current
 
     if end_ms is not None and not truncated:
         last_expected = _last_expected_open_ms(end_ms, interval)
-        if opens[-1] < last_expected:
+        next_expected = _next_expected_open_ms(opens[-1], interval)
+        if next_expected <= last_expected:
             gaps.append(_gap_payload(
                 exchange=exchange,
                 market_type=market_type,
                 symbol=symbol,
                 interval=interval,
-                start_ms=opens[-1] + interval_ms,
+                start_ms=next_expected,
                 end_ms=last_expected,
                 reason="tail_gap",
             ))

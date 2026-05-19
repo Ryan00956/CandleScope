@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
 from typing import Callable, Awaitable, Any
 
 from app.data_engine.interval_policy import (
@@ -66,14 +65,6 @@ def _next_month_open_ms(ts_ms: int, months: int = 1) -> int:
     return next_month_bucket(ts_ms // 1000, months) * 1000
 
 
-def _count_months_between(start_ms: int, end_ms: int, months: int = 1) -> int:
-    """Approximate number of monthly candles between two timestamps."""
-    s = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
-    e = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
-    month_delta = max(0, (e.year - s.year) * 12 + (e.month - s.month))
-    return max(0, (month_delta + months - 1) // months)
-
-
 def _first_expected_open_ms(start_ms: int, interval: str, interval_ms: int) -> int:
     bucket = compute_bucket_start_ms(start_ms, interval_ms, interval=interval)
     if bucket < start_ms:
@@ -83,6 +74,14 @@ def _first_expected_open_ms(start_ms: int, interval: str, interval_ms: int) -> i
 
 def _last_expected_open_ms(end_ms: int, interval: str, interval_ms: int) -> int:
     return compute_bucket_start_ms(end_ms, interval_ms, interval=interval)
+
+
+def _next_expected_open_ms(open_ms: int, interval: str, interval_ms: int) -> int:
+    return compute_bucket_end_ms(open_ms, interval_ms, interval=interval)
+
+
+def _previous_expected_open_ms(open_ms: int, interval: str, interval_ms: int) -> int:
+    return compute_bucket_start_ms(open_ms - 1, interval_ms, interval=interval)
 
 
 def _count_expected_opens(
@@ -321,14 +320,21 @@ class GapDetector:
 
         # ── Case 1: Empty storage — one big gap ──
         if db_earliest is None or db_latest is None:
-            missing = max(0, (reference_ms - range_start_ms) // interval_ms)
+            first_expected = _first_expected_open_ms(range_start_ms, interval, interval_ms)
+            last_expected = _last_expected_open_ms(reference_ms, interval, interval_ms)
+            missing = _count_expected_opens(
+                first_expected,
+                last_expected,
+                interval,
+                interval_ms,
+            )
             if missing > self._cfg.gap_tolerance_bars:
                 gap = GapInfo(
                     symbol=symbol,
                     interval=interval,
                     gap_type=GapType.TAIL,
-                    start_ms=range_start_ms,
-                    end_ms=reference_ms,
+                    start_ms=first_expected,
+                    end_ms=last_expected,
                     missing_bars=missing,
                     exchange=exchange,
                     db_latest_ms=None,
@@ -339,15 +345,22 @@ class GapDetector:
             return await self._apply_filter_and_notify(gaps)
 
         # ── Case 2: Head gap — DB starts later than requested range ──
-        if db_earliest > range_start_ms + interval_ms * self._cfg.gap_tolerance_bars:
-            missing = (db_earliest - range_start_ms) // interval_ms
+        first_expected = _first_expected_open_ms(range_start_ms, interval, interval_ms)
+        head_end = _previous_expected_open_ms(db_earliest, interval, interval_ms)
+        if first_expected <= head_end:
+            missing = _count_expected_opens(
+                first_expected,
+                head_end,
+                interval,
+                interval_ms,
+            )
             if missing > self._cfg.gap_tolerance_bars:
                 gap = GapInfo(
                     symbol=symbol,
                     interval=interval,
                     gap_type=GapType.HEAD,
-                    start_ms=range_start_ms,
-                    end_ms=db_earliest - interval_ms,
+                    start_ms=first_expected,
+                    end_ms=head_end,
                     missing_bars=missing,
                     exchange=exchange,
                     db_latest_ms=db_latest,
@@ -360,15 +373,21 @@ class GapDetector:
         if _is_monthly(interval):
             month_count = parse_monthly_count(interval) or 1
             next_expected = _next_month_open_ms(db_latest, month_count)
-            if next_expected <= reference_ms:
-                missing = _count_months_between(next_expected, reference_ms, month_count)
+            last_expected = _last_expected_open_ms(reference_ms, interval, interval_ms)
+            if next_expected <= last_expected:
+                missing = _count_expected_opens(
+                    next_expected,
+                    last_expected,
+                    interval,
+                    interval_ms,
+                )
                 if missing > self._cfg.gap_tolerance_bars:
                     gap = GapInfo(
                         symbol=symbol,
                         interval=interval,
                         gap_type=GapType.TAIL,
                         start_ms=next_expected,
-                        end_ms=reference_ms,
+                        end_ms=last_expected,
                         missing_bars=missing,
                         exchange=exchange,
                         db_latest_ms=db_latest,
@@ -516,15 +535,21 @@ class GapDetector:
         gaps: list[GapInfo] = []
         hole_count = 0
 
-        if not _is_monthly(interval) and sorted_times[0] > first_expected:
-            missing = (sorted_times[0] - first_expected) // interval_ms
+        if sorted_times[0] > first_expected:
+            gap_end = _previous_expected_open_ms(sorted_times[0], interval, interval_ms)
+            missing = _count_expected_opens(
+                first_expected,
+                gap_end,
+                interval,
+                interval_ms,
+            )
             if missing > self._cfg.gap_tolerance_bars:
                 gaps.append(GapInfo(
                     symbol=symbol,
                     interval=interval,
                     gap_type=GapType.INTERIOR,
                     start_ms=first_expected,
-                    end_ms=sorted_times[0] - interval_ms,
+                    end_ms=gap_end,
                     missing_bars=missing,
                     exchange=exchange,
                     db_latest_ms=sorted_times[-1],
@@ -544,25 +569,23 @@ class GapDetector:
             current = sorted_times[i]
             next_time = sorted_times[i + 1]
 
-            if _is_monthly(interval):
-                month_count = parse_monthly_count(interval) or 1
-                expected_next = _next_month_open_ms(current, month_count)
-            else:
-                expected_next = current + interval_ms
+            expected_next = _next_expected_open_ms(current, interval, interval_ms)
 
             if next_time > expected_next:
-                # There's a hole
-                if _is_monthly(interval):
-                    missing = _count_months_between(expected_next, next_time, month_count)
-                else:
-                    missing = (next_time - expected_next) // interval_ms
+                gap_end = _previous_expected_open_ms(next_time, interval, interval_ms)
+                missing = _count_expected_opens(
+                    expected_next,
+                    gap_end,
+                    interval,
+                    interval_ms,
+                )
                 if missing > self._cfg.gap_tolerance_bars:
                     gap = GapInfo(
                         symbol=symbol,
                         interval=interval,
                         gap_type=GapType.INTERIOR,
                         start_ms=expected_next,
-                        end_ms=next_time - interval_ms if not _is_monthly(interval) else next_time,
+                        end_ms=gap_end,
                         missing_bars=missing,
                         exchange=exchange,
                         db_latest_ms=sorted_times[-1],
@@ -573,12 +596,16 @@ class GapDetector:
                     hole_count += 1
 
         if (
-            not _is_monthly(interval)
-            and hole_count < self._cfg.gap_max_interior_holes
-            and sorted_times[-1] + interval_ms <= last_expected
+            hole_count < self._cfg.gap_max_interior_holes
+            and _next_expected_open_ms(sorted_times[-1], interval, interval_ms) <= last_expected
         ):
-            start_ms = sorted_times[-1] + interval_ms
-            missing = (last_expected - start_ms) // interval_ms + 1
+            start_ms = _next_expected_open_ms(sorted_times[-1], interval, interval_ms)
+            missing = _count_expected_opens(
+                start_ms,
+                last_expected,
+                interval,
+                interval_ms,
+            )
             if missing > self._cfg.gap_tolerance_bars:
                 gaps.append(GapInfo(
                     symbol=symbol,

@@ -3,6 +3,7 @@ from .contracts import (
     ExchangeContractCase,
     ExchangeContractIssue,
     ExchangeContractReport,
+    NormalizerContractSample,
     assert_exchange_plugin_contract,
     validate_exchange_plugin_contract,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "ExchangePluginRegistrationError",
     "ExchangeProtocol",
     "HistoricalPaginationPolicy",
+    "NormalizerContractSample",
     "OkxHistoricalPaginationPolicy",
     "RateLimitOverride",
     "RateLimitPolicy",

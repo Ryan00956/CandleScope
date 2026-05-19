@@ -45,7 +45,8 @@ Built-in examples:
 | `HistoricalPaginationPolicy` | `app/exchanges/pagination.py` | Exchange-specific historical pagination semantics |
 | `RealtimePolicy` | `app/exchanges/realtime.py` | Native interval, base fanout, or polling behavior |
 | `RateLimitPolicy` | `app/exchanges/rate_limits.py` | REST/WS rate-limit defaults and overrides |
-| `ExchangeContractCase` | `app/exchanges/contracts.py` | Contract-test fixtures for protocol and policy behavior |
+| `ExchangeContractCase` | `app/exchanges/contracts.py` | Contract-test fixtures for protocol, policy, and normalizer behavior |
+| `NormalizerContractSample` | `app/exchanges/contracts.py` | Raw payload samples that must parse into schema-valid `MarketEvent` objects |
 
 ## Adding A New Plugin
 
@@ -59,7 +60,8 @@ Built-in examples:
 8. Return the protocol, normalizer, symbol normalizer, and policies from `plugin.py`.
 9. Keep `plugin_api_version="1.0"` and `capability_schema_version=1` unless the backend registry explicitly supports a newer major contract.
 10. Register it in `app/exchanges/registry.py` through `bootstrap_default_adapters()`, or load it explicitly with `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory`.
-11. Add contract fixtures with `ExchangeContractCase` and tests for capabilities, symbol normalization, REST specs, WS specs/subscriptions, normalizer behavior, pagination, and historical fetch behavior.
+11. Add contract fixtures under `tests/fixtures/exchanges/` with `ExchangeContractCase` and `NormalizerContractSample`.
+12. Add tests for capabilities, symbol normalization, REST specs, WS specs/subscriptions, normalizer behavior, pagination, and historical fetch behavior.
 
 ## Plugin Capabilities To Express
 
@@ -114,3 +116,10 @@ python -m pytest -q \
 ```
 
 New exchanges usually also need dedicated fetcher/normalizer tests; see `tests/test_okx_backfill_fetcher.py`.
+
+Contract fixtures should include:
+
+- A descriptor/request pair for every supported market data stream.
+- REST sample payloads for `protocol.extract_http_rows()`.
+- Normalizer raw payload samples that must produce schema-valid `MarketEvent.data`.
+- Exchange-specific required data fields when a stream exposes extra semantics.

@@ -165,7 +165,8 @@ Long-lived plugin boundaries:
 - `ExchangeCapabilities` includes `plugin_api_version`, `capability_schema_version`, protocol features, limits, and known limitations.
 - `ExchangeRegistry.register()` rejects plugins whose major plugin API version or capability schema is not supported by this backend.
 - `GET /api/v1/exchanges/diagnostics` reports load status, protocol class, adapter facade, and policy classes for each plugin.
-- `app.exchanges.contracts` provides a reusable contract harness for REST specs, WS specs, payload extraction, and historical pagination.
+- `app.exchanges.contracts` provides a reusable contract harness for REST specs, WS specs, payload extraction, historical pagination, and normalizer output schema.
+- Built-in contract fixtures live under `tests/fixtures/exchanges/`; add new exchange fixtures there before wiring the plugin into runtime code.
 - Optional out-of-tree plugins can be loaded with `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory`. This path is explicit and diagnostics-backed; built-in plugins still load first.
 
 ## Indicators And Pyne

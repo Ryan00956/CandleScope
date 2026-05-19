@@ -14,6 +14,19 @@ class ExchangeContractCase:
     request: Any
     sample_http_payload: Any | None = None
     expected_http_rows: int | None = None
+    normalizer_samples: list[NormalizerContractSample] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class NormalizerContractSample:
+    """One raw payload sample expected to parse into a MarketEvent."""
+
+    payload: Any
+    source: Any
+    stream_type: Any | None = None
+    received_at_ms: int = 123_456_789
+    required_data_fields: set[str] = field(default_factory=set)
+    expected_event_type: Any | None = None
 
 
 @dataclass(slots=True)
@@ -59,6 +72,8 @@ class ExchangeContractReport:
 def validate_exchange_plugin_contract(
     plugin: ExchangePlugin,
     cases: list[ExchangeContractCase],
+    *,
+    config: Any | None = None,
 ) -> ExchangeContractReport:
     """Validate the stable runtime contract expected from an exchange plugin."""
 
@@ -75,16 +90,19 @@ def validate_exchange_plugin_contract(
         _validate_rest_contract(protocol, case, report)
         _validate_ws_contract(protocol, case, report)
         _validate_pagination_contract(plugin, case, report)
+        _validate_normalizer_contract(plugin, case, report, config=config)
     return report
 
 
 def assert_exchange_plugin_contract(
     plugin: ExchangePlugin,
     cases: list[ExchangeContractCase],
+    *,
+    config: Any | None = None,
 ) -> None:
     """Raise AssertionError with a compact message if the plugin contract fails."""
 
-    report = validate_exchange_plugin_contract(plugin, cases)
+    report = validate_exchange_plugin_contract(plugin, cases, config=config)
     if report.ok:
         return
     lines = [f"{issue.code}: {issue.message}" for issue in report.issues]
@@ -228,6 +246,142 @@ def _validate_pagination_contract(
             "pagination.exchange_mismatch",
             f"pagination request exchange {first.descriptor.exchange!r} does not match plugin id",
         )
+
+
+def _validate_normalizer_contract(
+    plugin: ExchangePlugin,
+    case: ExchangeContractCase,
+    report: ExchangeContractReport,
+    *,
+    config: Any | None,
+) -> None:
+    if not case.normalizer_samples:
+        return
+
+    from app.data_engine.ingestion.config import IngestionConfig
+    from app.data_engine.ingestion.models import MarketEvent, RawMessage
+
+    normalizer = _safe_call(
+        report,
+        "plugin.normalizer",
+        lambda: plugin.normalizer(config or IngestionConfig(), case.descriptor),
+    )
+    if normalizer is None:
+        return
+
+    for sample in case.normalizer_samples:
+        stream_type = sample.stream_type or case.descriptor.stream_type
+        expected_event_type = sample.expected_event_type or stream_type
+        raw = RawMessage(
+            payload=sample.payload,
+            source=sample.source,
+            stream_type=stream_type,
+            received_at_ms=sample.received_at_ms,
+        )
+        event = _safe_call(report, "normalizer.parse", lambda: normalizer.parse(raw))
+        if event is None:
+            report.add(
+                "normalizer.no_event",
+                f"normalizer returned no event for {stream_type!r}",
+            )
+            continue
+        if not isinstance(event, MarketEvent):
+            report.add(
+                "normalizer.event_type_invalid",
+                f"normalizer returned {type(event).__name__}, expected MarketEvent",
+            )
+            continue
+        _validate_market_event_shape(event, expected_event_type, sample, report)
+
+
+def _validate_market_event_shape(
+    event: Any,
+    expected_event_type: Any,
+    sample: NormalizerContractSample,
+    report: ExchangeContractReport,
+) -> None:
+    from app.data_engine.ingestion.models import StreamType
+
+    if event.event_type != expected_event_type:
+        report.add(
+            "normalizer.event_type_mismatch",
+            f"expected event_type {expected_event_type!r}, got {event.event_type!r}",
+        )
+    if not event.symbol:
+        report.add("normalizer.symbol_missing", "MarketEvent.symbol must be non-empty")
+    if not event.exchange:
+        report.add("normalizer.exchange_missing", "MarketEvent.exchange must be non-empty")
+    if not isinstance(event.event_time_ms, int):
+        report.add("normalizer.event_time_invalid", "MarketEvent.event_time_ms must be int")
+    if event.received_at_ms != sample.received_at_ms:
+        report.add(
+            "normalizer.received_at_mismatch",
+            f"expected received_at_ms {sample.received_at_ms}, got {event.received_at_ms}",
+        )
+    if not isinstance(event.data, dict):
+        report.add("normalizer.data_invalid", "MarketEvent.data must be a dict")
+        return
+
+    required = set(sample.required_data_fields)
+    required.update(_schema_required_fields(event.event_type, event.data))
+    missing = sorted(field for field in required if field not in event.data)
+    if missing:
+        report.add(
+            "normalizer.data_fields_missing",
+            f"missing required data fields for {event.event_type!r}: {', '.join(missing)}",
+        )
+
+    if event.event_type == StreamType.KLINE:
+        open_time = event.data.get("open_time")
+        close_time = event.data.get("close_time")
+        if not isinstance(open_time, int) or not isinstance(close_time, int):
+            report.add(
+                "normalizer.kline_time_invalid",
+                "kline open_time and close_time must be integers",
+            )
+        elif close_time < open_time:
+            report.add(
+                "normalizer.kline_time_order",
+                "kline close_time must be greater than or equal to open_time",
+            )
+
+
+def _schema_required_fields(stream_type: Any, data: dict[str, Any]) -> set[str]:
+    from app.data_engine.ingestion.models import StreamType
+
+    if stream_type == StreamType.KLINE:
+        return {
+            "interval",
+            "open_time",
+            "close_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "is_closed",
+        }
+    if stream_type == StreamType.AGG_TRADE:
+        return {
+            "agg_trade_id",
+            "price",
+            "quantity",
+            "first_trade_id",
+            "last_trade_id",
+            "trade_time_ms",
+        }
+    if stream_type == StreamType.TRADE:
+        return {"trade_id", "price", "quantity", "trade_time_ms"}
+    if stream_type in (StreamType.TICKER, StreamType.MINI_TICKER):
+        required = {"open_price", "high_price", "low_price", "volume"}
+        if "last_price" in data:
+            required.add("last_price")
+        else:
+            required.add("close_price")
+        return required
+    if stream_type == StreamType.DEPTH:
+        return {"bids", "asks"}
+    return set()
 
 
 def _safe_call(

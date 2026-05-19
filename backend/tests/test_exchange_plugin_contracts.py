@@ -4,88 +4,20 @@ import sys
 
 import pytest
 
-from app.data_engine.ingestion.models import StreamDescriptor, StreamType, TransportRequest
-from app.exchanges.contracts import ExchangeContractCase, validate_exchange_plugin_contract
+from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
+from app.exchanges.contracts import NormalizerContractSample, validate_exchange_plugin_contract
 from app.exchanges.loader import load_external_plugins_from_env
 from app.exchanges.models import ExchangeCapabilities
 from app.exchanges.registry import ExchangePluginRegistrationError, ExchangeRegistry
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from tests.fixtures.exchanges.contract_cases import builtin_exchange_contract_cases
 
 
 def test_builtin_exchange_plugins_satisfy_runtime_contracts() -> None:
     bootstrap_default_adapters()
     registry = get_exchange_registry()
 
-    cases = {
-        "binance": [
-            ExchangeContractCase(
-                descriptor=StreamDescriptor(
-                    "BTCUSDT",
-                    StreamType.KLINE,
-                    interval="1m",
-                    exchange="binance",
-                    market_type="spot",
-                ),
-                request=TransportRequest(
-                    StreamDescriptor(
-                        "BTCUSDT",
-                        StreamType.KLINE,
-                        interval="1m",
-                        exchange="binance",
-                        market_type="spot",
-                    ),
-                    limit=100,
-                    start_ms=1_700_000_000_000,
-                    end_ms=1_700_000_060_000,
-                ),
-                sample_http_payload=[
-                    [
-                        1_700_000_000_000,
-                        "1",
-                        "2",
-                        "0.5",
-                        "1.5",
-                        "10",
-                        1_700_000_059_999,
-                    ],
-                ],
-                expected_http_rows=1,
-            )
-        ],
-        "okx": [
-            ExchangeContractCase(
-                descriptor=StreamDescriptor(
-                    "BTC-USDT",
-                    StreamType.KLINE,
-                    interval="1m",
-                    exchange="okx",
-                    market_type="spot",
-                ),
-                request=TransportRequest(
-                    StreamDescriptor(
-                        "BTC-USDT",
-                        StreamType.KLINE,
-                        interval="1m",
-                        exchange="okx",
-                        market_type="spot",
-                    ),
-                    limit=100,
-                    start_ms=1_700_000_000_000,
-                    end_ms=1_700_000_060_000,
-                ),
-                sample_http_payload={
-                    "code": "0",
-                    "data": [
-                        ["1700000060000", "1", "2", "0.5", "1.5", "10"],
-                        ["1700000000000", "1", "2", "0.5", "1.5", "10"],
-                    ],
-                },
-                expected_http_rows=2,
-            )
-        ],
-    }
-
-    for plugin_id, plugin_cases in cases.items():
+    for plugin_id, plugin_cases in builtin_exchange_contract_cases().items():
         report = validate_exchange_plugin_contract(
             registry.get_plugin(plugin_id),
             plugin_cases,
@@ -142,3 +74,69 @@ def create_plugin():
     assert by_id["external_binance"]["status"] == "loaded"
     assert by_id["missing_exchange_plugin"]["status"] == "error"
     assert "external_exchange" in sys.modules
+
+
+def test_contract_harness_rejects_incomplete_normalizer_output() -> None:
+    bootstrap_default_adapters()
+    registry = get_exchange_registry()
+    case = builtin_exchange_contract_cases()["binance"][0]
+
+    class BrokenNormalizer:
+        def parse(self, msg):
+            return MarketEvent(
+                event_type=StreamType.KLINE,
+                symbol="BTCUSDT",
+                exchange="binance",
+                event_time_ms=msg.received_at_ms,
+                received_at_ms=msg.received_at_ms,
+                source=DataSource.HTTP_BACKFILL,
+                data={"open_time": 1},
+            )
+
+    class BrokenPlugin:
+        id = "binance"
+        name = "Broken Binance"
+
+        def __init__(self, base_plugin):
+            self._base = base_plugin
+
+        def adapter(self):
+            return self._base.adapter()
+
+        def capabilities(self):
+            return self._base.capabilities()
+
+        def protocol(self):
+            return self._base.protocol()
+
+        def normalizer(self, config, descriptor):
+            return BrokenNormalizer()
+
+        def symbol_normalizer(self):
+            return self._base.symbol_normalizer()
+
+        def rate_limit_policy(self, config=None):
+            return self._base.rate_limit_policy(config)
+
+        def pagination_policy(self, config=None):
+            return self._base.pagination_policy(config)
+
+        def realtime_policy(self):
+            return self._base.realtime_policy()
+
+        def price_stream_type(self, market_type="spot"):
+            return self._base.price_stream_type(market_type)
+
+    case.normalizer_samples.append(
+        NormalizerContractSample(
+            payload=[1, "1", "2", "0.5", "1.5", "10", 60_000, "15", 1, "6", "9", "0"],
+            source=DataSource.HTTP_BACKFILL,
+        )
+    )
+    report = validate_exchange_plugin_contract(
+        BrokenPlugin(registry.get_plugin("binance")),
+        [case],
+    )
+
+    assert not report.ok
+    assert any(issue.code == "normalizer.data_fields_missing" for issue in report.issues)

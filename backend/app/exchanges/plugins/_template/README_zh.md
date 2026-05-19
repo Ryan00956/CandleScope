@@ -45,7 +45,8 @@ backend/app/exchanges/plugins/<exchange>/
 | `HistoricalPaginationPolicy` | `app/exchanges/pagination.py` | 交易所历史分页边界语义 |
 | `RealtimePolicy` | `app/exchanges/realtime.py` | native interval、base fanout 或 polling 策略 |
 | `RateLimitPolicy` | `app/exchanges/rate_limits.py` | REST/WS 限流默认值和 overrides |
-| `ExchangeContractCase` | `app/exchanges/contracts.py` | protocol/policy 契约测试 fixture |
+| `ExchangeContractCase` | `app/exchanges/contracts.py` | protocol、policy、normalizer 契约测试 fixture |
+| `NormalizerContractSample` | `app/exchanges/contracts.py` | 必须解析成 schema-valid `MarketEvent` 的 raw payload 样本 |
 
 ## 添加新插件步骤
 
@@ -59,7 +60,8 @@ backend/app/exchanges/plugins/<exchange>/
 8. 在 `plugin.py` 中返回 protocol、normalizer、symbol normalizer 和各类 policy。
 9. 除非 registry 已支持新的 major contract，否则保持 `plugin_api_version="1.0"` 和 `capability_schema_version=1`。
 10. 通过 `bootstrap_default_adapters()` 注册内置插件，或用 `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory` 显式加载外部插件。
-11. 增加 `ExchangeContractCase` 契约 fixture，并覆盖 capabilities、symbol normalization、REST spec、WS spec/subscription、normalizer、pagination 和 backfill fetch 行为。
+11. 在 `tests/fixtures/exchanges/` 下增加 `ExchangeContractCase` 和 `NormalizerContractSample` 契约 fixture。
+12. 覆盖 capabilities、symbol normalization、REST spec、WS spec/subscription、normalizer、pagination 和 backfill fetch 行为。
 
 ## Plugin 需要表达的能力
 
@@ -114,3 +116,10 @@ python -m pytest -q \
 ```
 
 新增交易所通常还需要自己的 fetcher/normalizer 测试；可参考 `tests/test_okx_backfill_fetcher.py`。
+
+contract fixtures 应包含：
+
+- 每个支持的数据流对应的 descriptor/request。
+- 用于 `protocol.extract_http_rows()` 的 REST sample payload。
+- 必须解析成 schema-valid `MarketEvent.data` 的 normalizer raw payload sample。
+- 某个交易所额外暴露语义时，对应的 exchange-specific required data fields。

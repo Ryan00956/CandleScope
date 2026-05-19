@@ -165,7 +165,8 @@ Exchange plugin 暴露 capabilities、symbol normalization、REST/WS protocol sp
 - `ExchangeCapabilities` 包含 `plugin_api_version`、`capability_schema_version`、protocol features、limits 和 known limitations。
 - `ExchangeRegistry.register()` 会拒绝当前后端不支持的 plugin API major version 或 capability schema version。
 - `GET /api/v1/exchanges/diagnostics` 会返回每个插件的加载状态、protocol class、adapter facade 和 policy classes。
-- `app.exchanges.contracts` 提供可复用契约测试 harness，用于验证 REST specs、WS specs、payload extraction 和历史分页。
+- `app.exchanges.contracts` 提供可复用契约测试 harness，用于验证 REST specs、WS specs、payload extraction、历史分页和 normalizer 输出 schema。
+- 内置 contract fixtures 放在 `tests/fixtures/exchanges/`；新增交易所应先补 fixture，再接入 runtime。
 - 外部插件可通过 `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory` 显式加载。内置插件仍先加载，外部插件加载失败会进入 diagnostics，而不是静默污染 runtime。
 
 ## 指标和 Pyne

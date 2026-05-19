@@ -54,7 +54,7 @@ DataEngineRuntime
 ├── DataManager
 ├── KlinesRepoAdapter / AsyncKlinesRepoAdapter
 ├── GapLedger
-├── BinanceIngestionFactory
+├── ExchangeIngestionFactory
 ├── TransportLayer(IngestionConfig)       # backfill REST transport
 ├── BackfillEngine
 ├── BackfillCoordinator
@@ -77,7 +77,7 @@ DataEngineRuntime
 1. 创建 `DataManager()`。
 2. 创建 `KlinesRepoAdapter()`、`AsyncKlinesRepoAdapter()` 和 `GapLedger()`。
 3. 将 storage 注入 DataManager。
-4. 创建并注入 `BinanceIngestionFactory`。
+4. 创建并注入 `ExchangeIngestionFactory`。
 5. 启动 backfill 专用 `TransportLayer(IngestionConfig())`。
 6. 创建 `BackfillEngine(storage=async_storage, transport=transport, ingestion_config=ingestion_cfg)`。
 7. 创建 `BackfillCoordinator`，显式注入 `bars_backfilled=dm.on_bars_backfilled` 和 `emit_event=dm.emit_event`。

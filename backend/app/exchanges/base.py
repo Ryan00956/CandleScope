@@ -10,7 +10,11 @@ if TYPE_CHECKING:
 
 
 class ExchangeAdapter(Protocol):
-    """Interface implemented by each exchange integration."""
+    """Legacy facade implemented by each exchange integration.
+
+    Runtime code should prefer ``ExchangePlugin`` plus its protocol and
+    policies. This interface remains to keep older callers and imports stable.
+    """
 
     id: str
     name: str

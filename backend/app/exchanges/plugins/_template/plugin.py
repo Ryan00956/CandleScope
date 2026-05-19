@@ -6,6 +6,8 @@ from app.exchanges.plugin import BuiltinExchangePlugin
 from app.exchanges.rate_limits import RateLimitPolicy
 
 from .adapter import TemplateExchangeAdapter
+from .pagination import TemplateHistoricalPaginationPolicy
+from .protocol import TemplateExchangeProtocol
 from .symbols import TemplateSymbolNormalizer
 
 
@@ -16,9 +18,11 @@ class TemplatePlugin(BuiltinExchangePlugin):
         adapter = TemplateExchangeAdapter()
         super().__init__(
             adapter,
+            protocol=TemplateExchangeProtocol(),
             normalizer_factory=self._normalizer,
             symbol_normalizer=TemplateSymbolNormalizer(),
             rate_limit_policy_factory=self._rate_limit_policy,
+            pagination_policy_factory=self._pagination_policy,
         )
 
     @staticmethod
@@ -36,6 +40,10 @@ class TemplatePlugin(BuiltinExchangePlugin):
                 getattr(config, "fetch_429_backoff_seconds", 60.0)
             ),
         )
+
+    @staticmethod
+    def _pagination_policy(config: Any | None = None) -> TemplateHistoricalPaginationPolicy:
+        return TemplateHistoricalPaginationPolicy()
 
 
 def create_plugin() -> TemplatePlugin:

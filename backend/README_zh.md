@@ -62,7 +62,7 @@ curl http://localhost:8000/debug/snapshot
 | K 线 | `GET /klines/`, `/latest`, `/history`, `/range`, `/history/before`, `/resolve`, `/storage/meta`, `/continuity`, `DELETE /klines/storage` |
 | Streams | `WS /stream/klines`, `WS /stream/klines_multi`, `WS /stream/indicators`, `WS /stream/prices` |
 | Indicators | `GET /indicators/registry`, presets, custom CRUD, Pyne security, diagnostics, `POST /indicators/compute` |
-| Exchanges | `GET /exchanges/`, `GET /exchanges/{exchange}/capabilities` |
+| Exchanges | `GET /exchanges/`, `GET /exchanges/diagnostics`, `GET /exchanges/{exchange}/capabilities` |
 | Symbols | `GET /symbols/exchange-info`, `POST /symbols/exchange-info/refresh` |
 | Settings | proxy get/update/test、storage repair、gap scan、storage health、cache limits |
 | Subscriptions | list、sync、prices snapshot、get/set/delete symbol tier |
@@ -158,7 +158,21 @@ BackfillScheduler
 
 - [app/exchanges/plugins/_template](app/exchanges/plugins/_template/)
 
-Exchange adapter 暴露 capabilities、symbol normalization、REST/WS endpoint policy、subscription specs、realtime policy、rate limits 和 payload extraction。
+架构说明：
+
+- [app/exchanges](app/exchanges/)
+
+Exchange plugin 暴露 capabilities、symbol normalization、REST/WS protocol specs、subscription specs、realtime policy、rate limits、pagination policy 和 payload normalization。adapter 仅保留为旧调用兼容门面。
+
+长期稳定边界：
+
+- `ExchangeCapabilities` 包含 `plugin_api_version`、`capability_schema_version`、protocol features、limits 和 known limitations。
+- `ExchangeRegistry.register()` 会拒绝当前后端不支持的 plugin API major version 或 capability schema version。
+- `GET /api/v1/exchanges/diagnostics` 会返回每个插件的加载状态、protocol class、adapter facade 和 policy classes。
+- `app.exchanges.contracts` 提供可复用契约测试 harness，用于验证 REST specs、WS specs、payload extraction、历史分页和 normalizer 输出 schema。
+- 内置 contract fixtures 放在 `tests/fixtures/exchanges/`；新增交易所应先补 fixture，再接入 runtime。
+- 外部插件可通过 `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory` 显式加载。内置插件仍先加载，外部插件加载失败会进入 diagnostics，而不是静默污染 runtime。
+- 前端通过 `/api/v1/exchanges/` 消费 interval list、market availability、WS mode 和用户可见 limitations。新增交易所 UI 行为应放在 capabilities 中，而不是写新的前端硬编码分支。
 
 ## 指标和 Pyne
 
@@ -275,6 +289,8 @@ python -m pytest -q \
   tests/test_klines_api.py \
   tests/test_stream_api.py \
   tests/test_indicator_api.py \
+  tests/test_exchanges_api.py \
+  tests/test_exchange_plugin_contracts.py \
   tests/test_exchange_registry_plugins.py \
   tests/test_data_engine_phase1_boundaries.py
 ```

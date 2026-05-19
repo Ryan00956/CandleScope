@@ -7,55 +7,43 @@ import aiohttp
 
 from app.core.config import REQUEST_TIMEOUT, get_effective_proxy
 from app.exchanges.models import ExchangeCapabilities, ExchangeMarket, SymbolInfo
-from app.exchanges.ws_protocol import WsSubscriptionMode, WsSubscriptionSpec
+
+from .protocol import OKX_REST_BASE_URLS, OkxExchangeProtocol
 
 logger = logging.getLogger("candlescope.exchange.okx")
 
-OKX_REST_BASE_URLS = [
-    "https://www.okx.com",
+_OKX_NATIVE_INTERVALS = [
+    "1s",
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "12h",
+    "1d",
+    "3d",
+    "1w",
+    "1M",
 ]
-
-_OKX_INTERVALS = {
-    "1s": "1s",
-    "1m": "1m",
-    "3m": "3m",
-    "5m": "5m",
-    "15m": "15m",
-    "30m": "30m",
-    "1h": "1H",
-    "2h": "2H",
-    "4h": "4H",
-    "6h": "6Hutc",
-    "12h": "12Hutc",
-    "1d": "1Dutc",
-    "3d": "3Dutc",
-    "1w": "1Wutc",
-    "1M": "1Mutc",
-}
-
-_REST_PATH: dict[str, dict[str, str]] = {
-    "spot": {
-        "kline": "/api/v5/market/history-candles",
-        "ticker": "/api/v5/market/ticker",
-        "miniTicker": "/api/v5/market/ticker",
-    },
-    "futures": {
-        "kline": "/api/v5/market/history-candles",
-        "ticker": "/api/v5/market/ticker",
-        "miniTicker": "/api/v5/market/ticker",
-    },
-}
 
 
 class OkxExchangeAdapter:
-    """Exchange adapter for OKX spot + perpetual markets.
+    """Legacy facade for OKX exchange integration.
 
-    Prefer native WS first, then degrade to HTTP polling when the runtime
-    environment cannot keep the socket stable.
+    New runtime code should use ``OkxPlugin.protocol()`` and other plugin
+    policies. This adapter remains for compatibility with older imports and
+    symbol metadata callers.
     """
 
     id = "okx"
     name = "OKX"
+
+    def __init__(self) -> None:
+        self._protocol = OkxExchangeProtocol()
 
     def capabilities(self) -> ExchangeCapabilities:
         return ExchangeCapabilities(
@@ -73,10 +61,23 @@ class OkxExchangeAdapter:
                     label="Swap Perpetual",
                 ),
             ],
-            native_intervals=list(_OKX_INTERVALS.keys()),
+            native_intervals=list(_OKX_NATIVE_INTERVALS),
             supports_multi_symbol_ticker=False,
             supports_symbol_search=True,
             ws_connection_model="shared_multiplex",
+            protocol_features=[
+                "rest.kline",
+                "rest.ticker",
+                "ws.message_subscribe",
+                "ws.shared_multiplex",
+                "pagination.okx_history",
+            ],
+            limits={
+                "rest.kline.max_limit": 300,
+            },
+            known_limitations=[
+                "aggTrade, trade, and depth are not exposed by the current OKX plugin",
+            ],
         )
 
     async def list_symbols(self, market_type: str = "") -> list[SymbolInfo]:
@@ -92,95 +93,49 @@ class OkxExchangeAdapter:
         return []
 
     def get_http_base_urls(self, market_type: str = "spot", config: Any | None = None) -> list[str]:
-        return list(OKX_REST_BASE_URLS)
+        return self._protocol.rest_base_urls(market_type, config=config)
 
     def get_ws_base_urls(self, market_type: str = "spot", config: Any | None = None) -> list[str]:
-        return [
-            "wss://ws.okx.com:8443/ws/v5/business",
-        ]
+        from app.data_engine.ingestion.models import StreamDescriptor, StreamType
+
+        descriptor = StreamDescriptor(
+            symbol="BTC-USDT",
+            stream_type=StreamType.KLINE,
+            interval="1m",
+            exchange=self.id,
+            market_type=market_type,
+        )
+        return self._protocol.ws_base_urls(descriptor, config=config)
 
     def get_rest_path(self, stream_type, market_type: str = "spot") -> str | None:
-        return _REST_PATH.get(market_type, _REST_PATH["spot"]).get(stream_type.value)
+        return self._protocol.rest_path(stream_type, market_type)
 
     def build_http_params(self, req) -> dict[str, Any]:
-        desc = req.descriptor
-        params: dict[str, Any] = {"instId": desc.symbol.upper()}
-        if desc.stream_type.value != "kline":
-            return params
-
-        interval = desc.interval or "1m"
-        mapped = _OKX_INTERVALS.get(interval)
-        if mapped is None:
-            raise ValueError(f"Unsupported OKX interval: {interval}")
-
-        params["bar"] = mapped
-        params["limit"] = min(max(int(req.limit or 1), 1), 300)
-        # OKX naming is counter-intuitive:
-        #   "after"  → return records with ts STRICTLY EARLIER (older) than this value
-        #   "before" → return records with ts STRICTLY NEWER  (more recent) than this value
-        # Both are EXCLUSIVE boundaries, but req.end_ms / req.start_ms are
-        # meant to be INCLUSIVE.  Add ±1 ms to include bars at the exact
-        # boundary timestamps.
-        if req.end_ms is not None:
-            params["after"] = str(max(0, int(req.end_ms) + 1))
-        if req.start_ms is not None:
-            params["before"] = str(max(0, int(req.start_ms) - 1))
-        return params
+        return self._protocol.build_http_params(req)
 
     def build_ws_stream_name(self, descriptor) -> str:
-        if descriptor.stream_type.value in ("ticker", "miniTicker"):
-            return "tickers"
-        interval = descriptor.interval or "1m"
-        mapped = _OKX_INTERVALS.get(interval)
-        if mapped is None:
-            raise ValueError(f"Unsupported OKX interval: {interval}")
-        return f"candle{mapped}"
+        return self._protocol.build_ws_stream_name(descriptor)
 
-    def build_ws_subscription(self, descriptor) -> WsSubscriptionSpec:
-        channel = self.build_ws_stream_name(descriptor)
-        arg = {
-            "channel": channel,
-            "instId": descriptor.symbol.upper(),
-        }
-        return WsSubscriptionSpec(
-            mode=WsSubscriptionMode.MESSAGE,
-            subscribe_payload={"op": "subscribe", "args": [arg]},
-            unsubscribe_payload={"op": "unsubscribe", "args": [arg]},
-            requires_subscribe_ack=True,
-        )
+    def build_ws_subscription(self, descriptor):
+        return self._protocol.build_ws_subscription(descriptor)
 
     def get_multi_symbol_ticker_stream_name(self, market_type: str = "spot") -> str | None:
-        return None
+        return self._protocol.get_multi_symbol_ticker_stream_name(market_type)
 
     def get_ticker_ws_urls(self, market_type: str = "spot") -> list[str]:
-        """Return WS URLs for the public ticker channel (per-symbol)."""
-        return ["wss://ws.okx.com:8443/ws/v5/public"]
+        return self._protocol.get_ticker_ws_urls(market_type)
 
     def build_ticker_subscribe(self, symbols: list[str]) -> dict:
-        """Build a subscribe message for the OKX tickers channel."""
-        args = [{"channel": "tickers", "instId": s.upper()} for s in symbols]
-        return {"op": "subscribe", "args": args}
+        return self._protocol.build_ticker_subscribe(symbols)
 
     def build_ticker_unsubscribe(self, symbols: list[str]) -> dict:
-        """Build an unsubscribe message for the OKX tickers channel."""
-        args = [{"channel": "tickers", "instId": s.upper()} for s in symbols]
-        return {"op": "unsubscribe", "args": args}
+        return self._protocol.build_ticker_unsubscribe(symbols)
 
     def supports_ws_streaming(self, market_type: str = "spot") -> bool:
         return True
 
     def extract_http_rows(self, payload: Any, stream_type) -> list[Any]:
-        if not isinstance(payload, dict):
-            return []
-        if str(payload.get("code", "0")) not in ("0", ""):
-            msg = payload.get("msg") or "unknown OKX error"
-            raise RuntimeError(f"OKX REST error: {msg}")
-        data = payload.get("data")
-        if not isinstance(data, list):
-            return []
-        if getattr(stream_type, "value", "") == "kline":
-            return list(reversed(data))
-        return data
+        return self._protocol.extract_http_rows(payload, stream_type)
 
     async def _load_symbols(
         self,

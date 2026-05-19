@@ -7,6 +7,7 @@ from app.exchanges.plugin import BuiltinExchangePlugin
 from app.exchanges.rate_limits import RateLimitOverride, RateLimitPolicy
 
 from .adapter import BinanceExchangeAdapter
+from .protocol import BinanceExchangeProtocol
 from .symbols import BinanceSymbolNormalizer
 
 
@@ -17,6 +18,7 @@ class BinancePlugin(BuiltinExchangePlugin):
         adapter = BinanceExchangeAdapter()
         super().__init__(
             adapter,
+            protocol=BinanceExchangeProtocol(),
             normalizer_factory=self._normalizer,
             symbol_normalizer=BinanceSymbolNormalizer(),
             rate_limit_policy_factory=self._rate_limit_policy,

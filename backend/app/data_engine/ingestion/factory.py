@@ -1,10 +1,10 @@
 """
-Binance Ingestion Factory — bridges the six-layer Ingestion pipeline
+    Exchange Ingestion Factory — bridges the six-layer Ingestion pipeline
 into the DataManager's ``IngestionFactory`` protocol.
 
 This is the "last mile" wiring that was missing:
 
-    DataManager.set_ingestion_factory(BinanceIngestionFactory())
+    DataManager.set_ingestion_factory(ExchangeIngestionFactory())
 
 When ``StreamCoordinator.ensure_stream()`` starts a new pipeline,
 it calls ``factory.start(symbol, interval, on_bar)`` which:
@@ -22,10 +22,10 @@ BarAggregator L1–L5 pipeline, which then feeds Cache + EventBus.
 
 Data flow::
 
-    Binance WS/HTTP
+    Exchange WS/HTTP
       → L1 Transport → L2 Session → L3 FeedControl
       → L4 Normalize → L5 Continuity → L6 Delivery
-      → BinanceIngestionFactory (bridge)
+      → ExchangeIngestionFactory (bridge)
       → on_bar(bar_dict)
       → StreamCoordinator._BarDictMarketEvent
       → BarAggregator.on_market_event()
@@ -48,7 +48,7 @@ logger = logging.getLogger("ingestion.factory")
 
 
 class _IngestionHandle:
-    """Handle returned by ``BinanceIngestionFactory.start()``.
+    """Handle returned by ``ExchangeIngestionFactory.start()``.
 
     Provides a ``stop()`` coroutine that the coordinator calls
     when tearing down a stream.
@@ -71,7 +71,7 @@ class _IngestionHandle:
             )
 
 
-class BinanceIngestionFactory:
+class ExchangeIngestionFactory:
     """Bridges the six-layer Ingestion architecture into the DataManager.
 
     Implements the ``IngestionFactory`` protocol expected by
@@ -82,10 +82,10 @@ class BinanceIngestionFactory:
 
     Usage in ``main.py``::
 
-        from app.data_engine.ingestion.factory import BinanceIngestionFactory
+        from app.data_engine.ingestion.factory import ExchangeIngestionFactory
 
         dm = DataManager()
-        dm.set_ingestion_factory(BinanceIngestionFactory())
+        dm.set_ingestion_factory(ExchangeIngestionFactory())
         await dm.start()
     """
 
@@ -291,4 +291,8 @@ class BinanceIngestionFactory:
         if self._ingress is not None:
             await self._ingress.stop()
             self._ingress = None
-            logger.info("BinanceIngestionFactory shut down")
+            logger.info("ExchangeIngestionFactory shut down")
+
+
+# Backward-compatible alias for older imports and tests.
+BinanceIngestionFactory = ExchangeIngestionFactory

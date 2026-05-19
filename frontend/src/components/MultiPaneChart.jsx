@@ -168,6 +168,8 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
 
     // Refs
     useEffect(() => { dataRef.current = data || []; }, [data]);
+    const subPaneIdsKey = useMemo(() => subPanes.map((p) => p.id).join(","), [subPanes]);
+
     useEffect(() => {
         const map = new Map();
         for (const d of (data || [])) map.set(d.time, d);
@@ -245,7 +247,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
             heights[p.id] = subHeight;
         }
         setPaneHeightPercents(heights);
-    }, [subPanes.length, subPanes.map((p) => p.id).join(",")]);
+    }, [subPanes, subPaneIdsKey]);
 
     // ── Compute time alignment array for sub-pane crosshair sync ──
     // This is the full sorted/deduplicated list of time values from main chart data.

@@ -1,12 +1,39 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .ws_protocol import WsSubscriptionSpec
 
 
+@dataclass(slots=True)
+class RestRequestSpec:
+    """Complete exchange-specific REST request for the transport layer."""
+
+    base_urls: list[str]
+    path: str
+    params: dict[str, Any]
+    method: str = "GET"
+    weight: int = 1
+
+
+@dataclass(slots=True)
+class WsConnectionSpec:
+    """Complete exchange-specific WS connection plan for the transport layer."""
+
+    base_urls: list[str]
+    subscription: WsSubscriptionSpec
+    connection_model: str = "path_per_stream"
+
+
 class ExchangeProtocol(Protocol):
     """Exchange-specific REST/WS protocol behavior."""
+
+    def rest_request(self, req: Any, config: Any | None = None) -> RestRequestSpec | None:
+        ...
+
+    def ws_connection(self, descriptor: Any, config: Any | None = None) -> WsConnectionSpec:
+        ...
 
     def rest_base_urls(self, market_type: str = "spot", config: Any | None = None) -> list[str]:
         ...
@@ -40,7 +67,7 @@ class ExchangeProtocol(Protocol):
 
 
 class AdapterBackedProtocol:
-    """Compatibility protocol backed by the existing ExchangeAdapter API."""
+    """Compatibility protocol backed by the legacy ExchangeAdapter API."""
 
     def __init__(
         self,
@@ -56,6 +83,18 @@ class AdapterBackedProtocol:
     def rest_base_urls(self, market_type: str = "spot", config: Any | None = None) -> list[str]:
         return self.sanitize_http_urls(
             list(self._adapter.get_http_base_urls(market_type, config=config))
+        )
+
+    def rest_request(self, req: Any, config: Any | None = None) -> RestRequestSpec | None:
+        descriptor = req.descriptor
+        market_type = getattr(descriptor, "market_type", "spot")
+        path = self.rest_path(descriptor.stream_type, market_type)
+        if path is None:
+            return None
+        return RestRequestSpec(
+            base_urls=self.rest_base_urls(market_type, config=config),
+            path=path,
+            params=self.build_http_params(req),
         )
 
     def ws_base_urls(self, descriptor: Any, config: Any | None = None) -> list[str]:
@@ -89,6 +128,15 @@ class AdapterBackedProtocol:
             )
         )
 
+    def ws_connection(self, descriptor: Any, config: Any | None = None) -> WsConnectionSpec:
+        return WsConnectionSpec(
+            base_urls=self.ws_base_urls(descriptor, config=config),
+            subscription=self.build_ws_subscription(descriptor),
+            connection_model="shared_multiplex"
+            if self._capability_ws_model() == "shared_multiplex"
+            else "path_per_stream",
+        )
+
     def rest_path(self, stream_type: Any, market_type: str = "spot") -> str | None:
         return self._adapter.get_rest_path(stream_type, market_type)
 
@@ -99,7 +147,8 @@ class AdapterBackedProtocol:
         return self._adapter.build_ws_subscription(descriptor)
 
     def extract_http_rows(self, payload: Any, stream_type: Any) -> list[Any]:
-        return self._adapter.extract_http_rows(payload, stream_type)
+        actual_stream_type = getattr(stream_type, "stream_type", stream_type)
+        return self._adapter.extract_http_rows(payload, actual_stream_type)
 
     def build_combined_subscribe(self, descriptors: list[Any]) -> dict[str, Any]:
         args: list[dict[str, Any]] = []
@@ -161,3 +210,9 @@ class AdapterBackedProtocol:
             if url and not any(blocked in url for blocked in blocked_substrings)
         ]
         return list(dict.fromkeys(cleaned))
+
+    def _capability_ws_model(self) -> str:
+        capabilities = getattr(self._adapter, "capabilities", None)
+        if not callable(capabilities):
+            return "path_per_stream"
+        return str(getattr(capabilities(), "ws_connection_model", "path_per_stream"))

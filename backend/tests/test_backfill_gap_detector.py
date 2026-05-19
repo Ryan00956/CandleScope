@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 
 from app.data_engine.backfill.config import BackfillConfig
 from app.data_engine.backfill.gap_detector import GapDetector
 from app.data_engine.backfill.models import GapType
+
+
+def _ms(year: int, month: int, day: int) -> int:
+    return int(datetime(year, month, day, tzinfo=timezone.utc).timestamp() * 1000)
 
 
 class _Storage:
@@ -53,6 +58,57 @@ def test_gap_detector_reports_fully_empty_requested_interior_range() -> None:
         assert gap.start_ms == 60_000
         assert gap.end_ms == 540_000
         assert gap.missing_bars == 9
+
+    asyncio.run(_run())
+
+
+def test_gap_detector_monthly_uses_calendar_open_sequence() -> None:
+    async def _run() -> None:
+        detector = GapDetector(
+            BackfillConfig(gap_tolerance_bars=0),
+            _Storage({_ms(2024, 3, 1), _ms(2024, 6, 1)}),
+        )
+
+        gaps = await detector.detect(
+            symbol="BTC-USDT",
+            intervals=["1M"],
+            range_start_ms=_ms(2024, 1, 1),
+            range_end_ms=_ms(2024, 7, 15),
+            exchange="okx",
+            market_type="spot",
+        )
+
+        assert [
+            (gap.gap_type, gap.start_ms, gap.end_ms, gap.missing_bars)
+            for gap in sorted(gaps, key=lambda gap: gap.start_ms)
+        ] == [
+            (GapType.HEAD, _ms(2024, 1, 1), _ms(2024, 2, 1), 2),
+            (GapType.INTERIOR, _ms(2024, 4, 1), _ms(2024, 5, 1), 2),
+            (GapType.TAIL, _ms(2024, 7, 1), _ms(2024, 7, 1), 1),
+        ]
+
+    asyncio.run(_run())
+
+
+def test_gap_detector_empty_monthly_range_aligns_to_calendar_months() -> None:
+    async def _run() -> None:
+        detector = GapDetector(BackfillConfig(gap_tolerance_bars=0), _Storage(set()))
+
+        gaps = await detector.detect(
+            symbol="BTC-USDT",
+            intervals=["1M"],
+            range_start_ms=_ms(2024, 1, 15),
+            range_end_ms=_ms(2024, 4, 15),
+            exchange="okx",
+            market_type="spot",
+        )
+
+        assert len(gaps) == 1
+        gap = gaps[0]
+        assert gap.gap_type == GapType.TAIL
+        assert gap.start_ms == _ms(2024, 2, 1)
+        assert gap.end_ms == _ms(2024, 4, 1)
+        assert gap.missing_bars == 3
 
     asyncio.run(_run())
 

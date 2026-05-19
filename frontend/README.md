@@ -1,16 +1,25 @@
-# React + Vite
+# CandleScope Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React/Vite charting UI for CandleScope.
 
-Currently, two official plugins are available:
+## Exchange Capabilities
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+The app loads `GET /api/v1/exchanges/` on startup and builds an exchange catalog from backend capabilities.
 
-## React Compiler
+Frontend exchange behavior should prefer backend metadata:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- `native_intervals` drives the interval selector.
+- `markets` drives available spot/futures choices where the UI exposes market filters.
+- `ws_connection_model` and `protocol_features` decide whether live WS intervals are subscribed.
+- `known_limitations` are surfaced in the status bar so exchange-specific gaps are visible to users.
 
-## Expanding the ESLint configuration
+The local `EXCHANGE_INTERVALS` table in `src/App.jsx` is a fallback only. New exchange support should be added in the backend plugin first, then exposed through `ExchangeCapabilities`.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Checks
+
+```bash
+node ./node_modules/vite/bin/vite.js build
+node ./node_modules/eslint/bin/eslint.js .
+```
+
+On this Windows Codex desktop environment, use the bundled Node executable if `npm` or `node` is not available on `PATH`.

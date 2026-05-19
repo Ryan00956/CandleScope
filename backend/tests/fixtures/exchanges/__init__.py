@@ -1,0 +1,1 @@
+"""Exchange plugin contract fixtures."""

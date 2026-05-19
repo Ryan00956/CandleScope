@@ -451,6 +451,7 @@ const ChartPane = forwardRef(function ChartPane({
             drawingAnchorSeriesRef.current = null;
             indicatorSeriesRef.current = [];
         };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- chart instance is created once; runtime option changes are applied by follow-up effects.
     }, []); // created once
 
     /* ── Update theme / appearance ─────────────────────────── */

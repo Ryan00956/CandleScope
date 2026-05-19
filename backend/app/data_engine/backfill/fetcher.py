@@ -252,13 +252,18 @@ class HistoricalFetcher:
         total_span_ms = (task.end_ms or now_ms) - (task.start_ms or 0)
         estimated_total = max(1, total_span_ms // interval_ms) if interval_ms > 0 else 0
 
-        # Pagination: walk backward from end_ms
-        cursor_end_ms = task.end_ms or now_ms
+        # Pagination is exchange-owned because cursor semantics vary by API.
+        pagination_policy = self._pagination_policy(task)
+        current_request = pagination_policy.first_request(
+            task,
+            batch_size=self._cfg.fetch_batch_size,
+            now_ms=now_ms,
+        )
         batch_size = self._cfg.fetch_batch_size
         max_retries = self._cfg.fetch_max_retries
         max_total = self._cfg.fetch_max_total_bars
 
-        while True:
+        while current_request is not None:
             # Safety: cap total bars
             if len(all_bars) >= max_total:
                 logger.warning(
@@ -267,12 +272,7 @@ class HistoricalFetcher:
                 )
                 break
 
-            req = TransportRequest(
-                descriptor=descriptor,
-                limit=batch_size,
-                start_ms=int(task.start_ms) if task.start_ms is not None else None,
-                end_ms=int(cursor_end_ms),
-            )
+            req = current_request
 
             # Fetch with retry
             page_bars: list[FetchedBar] = []
@@ -334,20 +334,12 @@ class HistoricalFetcher:
             all_bars.extend(page_bars)
             await self._fire_progress(task, len(all_bars), estimated_total)
 
-            # Advance cursor: move to before the oldest bar in this page
-            oldest_bar_time = min(b.open_time for b in page_bars)
-            if oldest_bar_time >= cursor_end_ms:
-                logger.warning(
-                    "Task %s pagination stalled: oldest=%d cursor_end=%d; stopping",
-                    task.task_key,
-                    oldest_bar_time,
-                    cursor_end_ms,
-                )
-                break
-            if task.start_ms is not None and oldest_bar_time <= task.start_ms:
-                break  # Covered entire requested range
-
-            cursor_end_ms = oldest_bar_time - 1
+            current_request = pagination_policy.next_request(
+                task,
+                req,
+                page_bars,
+                batch_size=batch_size,
+            )
 
         # Deduplicate by open_time and sort ascending
         seen: set[int] = set()
@@ -504,6 +496,16 @@ class HistoricalFetcher:
                 default_retry_429_backoff_seconds=self._cfg.fetch_429_backoff_seconds,
             )
         return plugin.rate_limit_policy(self._cfg)
+
+    def _pagination_policy(self, task: BackfillTask):
+        bootstrap_default_adapters()
+        try:
+            plugin = get_exchange_registry().get_plugin(task.exchange)
+        except KeyError:
+            from app.exchanges.pagination import ReverseTimePaginationPolicy
+
+            return ReverseTimePaginationPolicy()
+        return plugin.pagination_policy(self._cfg)
 
     async def _record_rate_limit_cooldown(
         self,

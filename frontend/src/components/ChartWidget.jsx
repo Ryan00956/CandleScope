@@ -481,6 +481,7 @@ const ChartWidget = forwardRef(function ChartWidget({
             chartRef.current = null;
             candlestickSeriesRef.current = null;
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- chart instance is created once; runtime option changes are applied by follow-up effects.
     }, []);
 
     const updateSeriesData = (klines) => {
@@ -550,6 +551,7 @@ const ChartWidget = forwardRef(function ChartWidget({
         if (data && data.length > 0) {
             updateSeriesData(data);
         }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- color updates should not force a data refresh; data updates are handled below.
     }, [upColor, downColor]);
 
 
@@ -655,6 +657,7 @@ const ChartWidget = forwardRef(function ChartWidget({
             last,
             length: data.length,
         };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- update helpers intentionally read current refs and should not re-trigger this data sync.
     }, [data, datasetKey]);
 
     // Determine cursor style for drawing and passive mouse tools.

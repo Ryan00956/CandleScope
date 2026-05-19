@@ -7,9 +7,10 @@ from app.exchanges.ws_protocol import WsSubscriptionMode, WsSubscriptionSpec
 
 
 class TemplateExchangeAdapter:
-    """Adapter skeleton for a new exchange plugin.
+    """Legacy facade skeleton for a new exchange plugin.
 
-    Replace Template/template names and fill in exchange-specific behavior.
+    Prefer putting REST/WS behavior in protocol.py. Keep this class small so
+    old imports and optional symbol metadata callers continue to work.
     """
 
     id = "template"
@@ -30,6 +31,17 @@ class TemplateExchangeAdapter:
             supports_multi_symbol_ticker=False,
             supports_symbol_search=True,
             ws_connection_model="message_per_stream",
+            protocol_features=[
+                "rest.kline",
+                "ws.message_subscribe",
+                "pagination.custom",
+            ],
+            limits={
+                "rest.kline.max_limit": 1000,
+            },
+            known_limitations=[
+                "Replace template limitations with exchange-specific notes",
+            ],
         )
 
     async def list_symbols(self, market_type: str = "") -> list[SymbolInfo]:

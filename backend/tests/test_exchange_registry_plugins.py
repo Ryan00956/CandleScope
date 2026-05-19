@@ -3,8 +3,11 @@ from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import StreamDescriptor, StreamType
 from app.data_engine.ingestion.normalizers.binance import BinanceNormalizer
 from app.data_engine.ingestion.normalizers.okx import OkxNormalizer
+from app.exchanges.pagination import OkxHistoricalPaginationPolicy, ReverseTimePaginationPolicy
 from app.exchanges.protocol import AdapterBackedProtocol
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.exchanges.plugins.binance.protocol import BinanceExchangeProtocol
+from app.exchanges.plugins.okx.protocol import OkxExchangeProtocol
 
 
 def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
@@ -18,6 +21,7 @@ def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
     assert plugin.adapter() is adapter
     assert [item.id for item in registry.list()] == ["binance", "okx"]
     assert [item.id for item in registry.list_plugins()] == ["binance", "okx"]
+    assert registry.diagnostics()["count"] >= 2
 
 
 def test_builtin_plugins_create_exchange_normalizers() -> None:
@@ -79,6 +83,26 @@ def test_builtin_plugins_own_symbol_and_rate_limit_policies() -> None:
     assert okx_policy.delay_for("spot") == 0.8
     assert registry.get_plugin("binance").price_stream_type("spot") == StreamType.MINI_TICKER
     assert registry.get_plugin("okx").price_stream_type("spot") == StreamType.TICKER
+
+
+def test_builtin_plugins_use_concrete_protocols_and_pagination_policies() -> None:
+    bootstrap_default_adapters()
+    registry = get_exchange_registry()
+
+    binance = registry.get_plugin("binance")
+    okx = registry.get_plugin("okx")
+
+    assert isinstance(binance.protocol(), BinanceExchangeProtocol)
+    assert isinstance(okx.protocol(), OkxExchangeProtocol)
+    assert isinstance(binance.pagination_policy(BackfillConfig()), ReverseTimePaginationPolicy)
+    assert isinstance(okx.pagination_policy(BackfillConfig()), OkxHistoricalPaginationPolicy)
+
+    binance_capabilities = binance.capabilities().to_dict()
+    okx_capabilities = okx.capabilities().to_dict()
+    assert binance_capabilities["plugin_api_version"] == "1.0"
+    assert "ws.futures_route_split" in binance_capabilities["protocol_features"]
+    assert okx_capabilities["ws_connection_model"] == "shared_multiplex"
+    assert okx_capabilities["limits"]["rest.kline.max_limit"] == 300
 
 
 def test_adapter_backed_protocol_sanitizes_configured_endpoints() -> None:

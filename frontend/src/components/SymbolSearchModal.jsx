@@ -28,7 +28,7 @@ function saveFavorites(list) {
 // ── Component ────────────────────────────────────────────────
 export default function SymbolSearchModal({
   open, onClose, currentSymbol, currentMarketType, currentExchange = "binance", onSelect,
-  watchlists, onAddToWatchlist,
+  exchangeCatalog, watchlists, onAddToWatchlist,
 }) {
   const [search, setSearch] = useState("");
   const [marketType, setMarketType] = useState(currentMarketType || "spot");
@@ -95,9 +95,33 @@ export default function SymbolSearchModal({
       .sort()
       .map((key) => ({
         key,
-        label: key.charAt(0).toUpperCase() + key.slice(1),
+        label: exchangeCatalog?.[key]?.label || key.charAt(0).toUpperCase() + key.slice(1),
       }));
-  }, [allSymbols, currentExchange]);
+  }, [allSymbols, currentExchange, exchangeCatalog]);
+
+  const marketTabs = useMemo(() => {
+    const available = new Set(["favorites"]);
+    for (const selectedExchange of exchangeFilter) {
+      const markets = exchangeCatalog?.[selectedExchange]?.markets || [];
+      for (const market of markets) {
+        if (market.market_type) available.add(market.market_type);
+      }
+    }
+    if (available.size === 1) {
+      for (const item of allSymbols) {
+        if (!exchangeFilter.size || exchangeFilter.has(item.exchange)) {
+          available.add(item.marketType || "spot");
+        }
+      }
+    }
+    return MARKET_TABS.filter((tab) => available.has(tab.key));
+  }, [allSymbols, exchangeCatalog, exchangeFilter]);
+
+  useEffect(() => {
+    if (marketType === "favorites") return;
+    if (marketTabs.some((tab) => tab.key === marketType)) return;
+    setMarketType(marketTabs.find((tab) => tab.key !== "favorites")?.key || "favorites");
+  }, [marketTabs, marketType]);
 
   // ── Filter logic ──
   const filtered = useMemo(() => {
@@ -346,7 +370,7 @@ export default function SymbolSearchModal({
           {/* Market type tabs */}
           <div className="sym-modal-filter-row">
             <div className="sym-modal-market-tabs">
-              {MARKET_TABS.map((tab) => (
+              {marketTabs.map((tab) => (
                 <button
                   key={tab.key}
                   className={`sym-modal-market-tab ${marketType === tab.key ? "active" : ""}`}

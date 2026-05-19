@@ -13,7 +13,7 @@ import SymbolSearchModal from "./SymbolSearchModal";
  */
 export default function SymbolSearch({
   currentSymbol, currentMarketType, currentExchange = "binance", onSelect,
-  watchlists, onAddToWatchlist,
+  exchangeCatalog, watchlists, onAddToWatchlist,
 }) {
   const [open, setOpen] = useState(false);
 
@@ -83,6 +83,7 @@ export default function SymbolSearch({
         currentSymbol={currentSymbol}
         currentMarketType={currentMarketType}
         currentExchange={currentExchange}
+        exchangeCatalog={exchangeCatalog}
         onSelect={handleSelect}
         watchlists={watchlists}
         onAddToWatchlist={onAddToWatchlist}

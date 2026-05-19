@@ -62,7 +62,7 @@ All application APIs are mounted under `/api/v1`.
 | K-lines | `GET /klines/`, `/latest`, `/history`, `/range`, `/history/before`, `/resolve`, `/storage/meta`, `/continuity`, `DELETE /klines/storage` |
 | Streams | `WS /stream/klines`, `WS /stream/klines_multi`, `WS /stream/indicators`, `WS /stream/prices` |
 | Indicators | `GET /indicators/registry`, presets, custom CRUD, Pyne security, diagnostics, `POST /indicators/compute` |
-| Exchanges | `GET /exchanges/`, `GET /exchanges/{exchange}/capabilities` |
+| Exchanges | `GET /exchanges/`, `GET /exchanges/diagnostics`, `GET /exchanges/{exchange}/capabilities` |
 | Symbols | `GET /symbols/exchange-info`, `POST /symbols/exchange-info/refresh` |
 | Settings | proxy get/update/test, storage repair, gap scan, storage health, cache limits |
 | Subscriptions | list, sync, prices snapshot, get/set/delete symbol tier |
@@ -158,7 +158,21 @@ Plugin template:
 
 - [app/exchanges/plugins/_template](app/exchanges/plugins/_template/)
 
-Exchange adapters expose capabilities, symbol normalization, REST/WS endpoint policy, subscription specs, realtime policy, rate limits, and payload extraction.
+Architecture guide:
+
+- [app/exchanges](app/exchanges/)
+
+Exchange plugins expose capabilities, symbol normalization, REST/WS protocol specs, subscription specs, realtime policy, rate limits, pagination policy, and payload normalization. Adapters remain as legacy facades for older imports.
+
+Long-lived plugin boundaries:
+
+- `ExchangeCapabilities` includes `plugin_api_version`, `capability_schema_version`, protocol features, limits, and known limitations.
+- `ExchangeRegistry.register()` rejects plugins whose major plugin API version or capability schema is not supported by this backend.
+- `GET /api/v1/exchanges/diagnostics` reports load status, protocol class, adapter facade, and policy classes for each plugin.
+- `app.exchanges.contracts` provides a reusable contract harness for REST specs, WS specs, payload extraction, historical pagination, and normalizer output schema.
+- Built-in contract fixtures live under `tests/fixtures/exchanges/`; add new exchange fixtures there before wiring the plugin into runtime code.
+- Optional out-of-tree plugins can be loaded with `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory`. This path is explicit and diagnostics-backed; built-in plugins still load first.
+- The frontend consumes `/api/v1/exchanges/` for interval lists, market availability, WS mode, and user-visible limitations. Keep new exchange UI behavior in capabilities rather than hard-coded frontend branches.
 
 ## Indicators And Pyne
 
@@ -275,6 +289,8 @@ python -m pytest -q \
   tests/test_klines_api.py \
   tests/test_stream_api.py \
   tests/test_indicator_api.py \
+  tests/test_exchanges_api.py \
+  tests/test_exchange_plugin_contracts.py \
   tests/test_exchange_registry_plugins.py \
   tests/test_data_engine_phase1_boundaries.py
 ```

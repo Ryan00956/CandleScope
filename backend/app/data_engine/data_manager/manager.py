@@ -250,7 +250,7 @@ class DataManager:
 
         Example::
 
-            dm.set_ingestion_factory(BinanceIngestionFactory())
+            dm.set_ingestion_factory(ExchangeIngestionFactory())
         """
         self.coordinator.set_ingestion_factory(factory)
 

@@ -158,7 +158,7 @@ BackfillScheduler
 
 - [app/exchanges/plugins/_template](app/exchanges/plugins/_template/)
 
-Exchange adapter 暴露 capabilities、symbol normalization、REST/WS endpoint policy、subscription specs、realtime policy、rate limits 和 payload extraction。
+Exchange plugin 暴露 capabilities、symbol normalization、REST/WS protocol specs、subscription specs、realtime policy、rate limits、pagination policy 和 payload normalization。adapter 仅保留为旧调用兼容门面。
 
 ## 指标和 Pyne
 

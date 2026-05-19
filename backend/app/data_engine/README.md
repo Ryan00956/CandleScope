@@ -58,7 +58,7 @@ DataEngineRuntime
 ├── DataManager
 ├── KlinesRepoAdapter / AsyncKlinesRepoAdapter
 ├── GapLedger
-├── BinanceIngestionFactory
+├── ExchangeIngestionFactory
 ├── TransportLayer(IngestionConfig)       # backfill REST transport
 ├── BackfillEngine
 ├── BackfillCoordinator
@@ -81,7 +81,7 @@ API modules should not hold internal objects such as `BackfillEngine`, `BarAggre
 1. Creates `DataManager()`.
 2. Creates `KlinesRepoAdapter()`, `AsyncKlinesRepoAdapter()`, and `GapLedger()`.
 3. Injects storage into DataManager.
-4. Creates and injects `BinanceIngestionFactory`.
+4. Creates and injects `ExchangeIngestionFactory`.
 5. Starts a backfill-specific `TransportLayer(IngestionConfig())`.
 6. Creates `BackfillEngine(storage=async_storage, transport=transport, ingestion_config=ingestion_cfg)`.
 7. Creates `BackfillCoordinator` with explicit sinks: `bars_backfilled=dm.on_bars_backfilled` and `emit_event=dm.emit_event`.

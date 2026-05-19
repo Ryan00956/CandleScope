@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from app.exchanges.plugin import BuiltinExchangePlugin
-from app.exchanges.protocol import AdapterBackedProtocol
+from app.exchanges.pagination import OkxHistoricalPaginationPolicy
 from app.exchanges.rate_limits import RateLimitPolicy
 from app.exchanges.realtime import RealtimePolicy, RealtimeUpdateMode
 
 from .adapter import OkxExchangeAdapter
+from .protocol import OkxExchangeProtocol
 
 
 class OkxPlugin(BuiltinExchangePlugin):
@@ -18,12 +19,9 @@ class OkxPlugin(BuiltinExchangePlugin):
         super().__init__(
             adapter,
             normalizer_factory=self._normalizer,
-            protocol=AdapterBackedProtocol(
-                adapter,
-                blocked_http_substrings=("aws.okx.com",),
-                blocked_ws_substrings=("wsaws.okx.com",),
-            ),
+            protocol=OkxExchangeProtocol(),
             rate_limit_policy_factory=self._rate_limit_policy,
+            pagination_policy_factory=self._pagination_policy,
             realtime_policy=RealtimePolicy(update_mode=RealtimeUpdateMode.BASE_INTERVAL_FANOUT),
         )
 
@@ -42,6 +40,10 @@ class OkxPlugin(BuiltinExchangePlugin):
                 getattr(config, "fetch_429_backoff_seconds", 60.0)
             ),
         )
+
+    @staticmethod
+    def _pagination_policy(config: Any | None = None) -> OkxHistoricalPaginationPolicy:
+        return OkxHistoricalPaginationPolicy()
 
 
 def create_plugin() -> OkxPlugin:

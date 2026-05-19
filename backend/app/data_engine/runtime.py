@@ -15,7 +15,7 @@ from app.data_engine.data_manager.ingestion_price_source import IngestionPriceSo
 from app.data_engine.data_manager.subscriptions import SubscriptionService
 from app.data_engine.ingestion import TransportLayer
 from app.data_engine.ingestion.config import IngestionConfig
-from app.data_engine.ingestion.factory import BinanceIngestionFactory
+from app.data_engine.ingestion.factory import ExchangeIngestionFactory
 from app.data_engine.storage import AsyncKlinesRepoAdapter, GapLedger, KlinesRepoAdapter
 
 logger = logging.getLogger("data_engine.runtime")
@@ -26,7 +26,7 @@ class DataEngineRuntime:
     """Runtime-owned components needed by the FastAPI application."""
 
     data_manager: DataManager
-    ingestion_factory: BinanceIngestionFactory
+    ingestion_factory: ExchangeIngestionFactory
     backfill_transport: TransportLayer
     backfill_engine: BackfillEngine
     backfill_coordinator: BackfillCoordinator
@@ -147,7 +147,7 @@ async def start_data_engine() -> DataEngineRuntime:
     """Create, configure, and start the application DataEngine runtime."""
     runtime: DataEngineRuntime | None = None
     dm: DataManager | None = None
-    ingestion_factory: BinanceIngestionFactory | None = None
+    ingestion_factory: ExchangeIngestionFactory | None = None
     transport: TransportLayer | None = None
     price_source: IngestionPriceSource | None = None
 
@@ -159,7 +159,7 @@ async def start_data_engine() -> DataEngineRuntime:
         gap_ledger = GapLedger()
         dm.set_storage(storage)
 
-        ingestion_factory = BinanceIngestionFactory()
+        ingestion_factory = ExchangeIngestionFactory()
         dm.set_ingestion_factory(ingestion_factory)
         print("[startup] IngestionFactory injected ✓")
 
@@ -224,7 +224,7 @@ async def start_data_engine() -> DataEngineRuntime:
 
 async def _start_subscription_workflows(
     dm: DataManager,
-    ingestion_factory: BinanceIngestionFactory,
+    ingestion_factory: ExchangeIngestionFactory,
 ) -> tuple[IngestionPriceSource | None, SubscriptionService | None]:
     price_source: IngestionPriceSource | None = None
     subscription_service: SubscriptionService | None = None
@@ -367,7 +367,7 @@ def _log_gap_audit_done(task: asyncio.Task) -> None:
 async def _cleanup_partial_start(
     *,
     dm: DataManager | None,
-    ingestion_factory: BinanceIngestionFactory | None,
+    ingestion_factory: ExchangeIngestionFactory | None,
     transport: TransportLayer | None,
     price_source: IngestionPriceSource | None,
 ) -> None:

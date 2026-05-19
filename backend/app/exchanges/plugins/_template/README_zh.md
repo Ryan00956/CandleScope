@@ -9,9 +9,11 @@
 ```text
 backend/app/exchanges/plugins/<exchange>/
 ├── __init__.py
-├── adapter.py      # ExchangeAdapter 实现
+├── adapter.py      # legacy facade / 可选 symbol metadata helper
 ├── normalizer.py   # ingestion payload normalizer
+├── pagination.py   # 可选历史分页策略
 ├── plugin.py       # ExchangePlugin / factory metadata
+├── protocol.py     # REST/WS request spec 和 payload routing
 └── symbols.py      # symbol normalization and metadata helpers
 ```
 
@@ -19,9 +21,11 @@ backend/app/exchanges/plugins/<exchange>/
 
 | 文件 | 用途 |
 |---|---|
-| [adapter.py](adapter.py) | 实现交易所能力、REST/WS URL、请求参数、订阅 spec、payload extraction |
+| [adapter.py](adapter.py) | 旧 adapter 兼容门面，以及可选 symbol metadata helper |
 | [normalizer.py](normalizer.py) | 把交易所原始 payload 转成 ingestion 标准事件 |
-| [plugin.py](plugin.py) | 插件入口，声明 adapter 和 normalizer 创建方式 |
+| [pagination.py](pagination.py) | 当默认倒序时间分页不适用时，声明交易所历史分页策略 |
+| [plugin.py](plugin.py) | 插件入口，组合 protocol、normalizer、symbol、rate limit、pagination、realtime 策略 |
+| [protocol.py](protocol.py) | REST/WS request spec、订阅 spec、payload routing |
 | [symbols.py](symbols.py) | symbol 格式规范化和交易对列表转换 |
 
 可参考内置实现：
@@ -35,10 +39,12 @@ backend/app/exchanges/plugins/<exchange>/
 
 | 契约 | 文件 | 说明 |
 |---|---|---|
-| `ExchangeAdapter` | `app/exchanges/base.py` | API 和 transport 使用的主要 adapter protocol |
-| `ExchangePlugin` | `app/exchanges/plugin.py` | 插件创建 adapter/normalizer/symbol normalizer 的协议 |
+| `ExchangeAdapter` | `app/exchanges/base.py` | 旧兼容门面，不是新能力入口 |
+| `ExchangePlugin` | `app/exchanges/plugin.py` | 交易所组合根，提供 protocol、normalizer 和各类 policy |
+| `ExchangeProtocol` | `app/exchanges/protocol.py` | REST/WS request spec 和 raw payload routing |
 | `ExchangeCapabilities` | `app/exchanges/models.py` | 描述 markets、intervals、features、limits |
 | `WsSubscriptionSpec` | `app/exchanges/ws_protocol.py` | 描述 WS 是 path subscription 还是 message subscription |
+| `HistoricalPaginationPolicy` | `app/exchanges/pagination.py` | 交易所历史分页边界语义 |
 | `RealtimePolicy` | `app/exchanges/realtime.py` | native interval、base fanout 或 polling 策略 |
 | `RateLimitPolicy` | `app/exchanges/rate_limits.py` | REST/WS 限流默认值和 overrides |
 
@@ -46,24 +52,26 @@ backend/app/exchanges/plugins/<exchange>/
 
 1. 复制 `_template` 为新目录，例如 `coinbase`。
 2. 修改 package/module 名称，确保没有 `_template` 残留。
-3. 在 `adapter.py` 中实现交易所能力和 URL/params 逻辑。
-4. 在 `normalizer.py` 中实现 kline、ticker、trade 等 payload 标准化。
-5. 在 `symbols.py` 中实现 symbol 规范化和 symbol metadata 转换。
-6. 在 `plugin.py` 中返回 adapter、normalizer 和 symbol normalizer。
-7. 在 `app/exchanges/registry.py` 的 `bootstrap_default_adapters()` 中注册，或接入后续动态发现机制。
-8. 增加测试，至少覆盖 capabilities、symbol normalization、REST URL、WS URL/subscription spec、normalizer 和 backfill fetch 行为。
+3. 在 `adapter.py` 中实现兼容门面和可选 symbol metadata 行为。
+4. 在 `protocol.py` 中实现 REST/WS request spec、subscription spec 和 payload routing。
+5. 在 `normalizer.py` 中实现 kline、ticker、trade 等 payload 标准化。
+6. 在 `symbols.py` 中实现 symbol 规范化和 symbol metadata 转换。
+7. 如果默认倒序时间分页不适用，在 `pagination.py` 中实现交易所分页策略。
+8. 在 `plugin.py` 中返回 protocol、normalizer、symbol normalizer 和各类 policy。
+9. 在 `app/exchanges/registry.py` 的 `bootstrap_default_adapters()` 中注册，或接入后续动态发现机制。
+10. 增加测试，至少覆盖 capabilities、symbol normalization、REST spec、WS spec/subscription、normalizer、pagination 和 backfill fetch 行为。
 
-## Adapter 需要表达的能力
+## Plugin 需要表达的能力
 
 至少明确：
 
 - `id`：交易所 id，例如 `binance`、`okx`。
 - `capabilities()`：支持的 market types、intervals、REST/WS 特性。
-- REST base URL selection：spot/futures/swap 等不同 market type 的 URL。
-- WS URL selection：public/business/private 或 spot/futures endpoint。
-- Historical kline params：symbol、interval、start/end、limit 的交易所参数名和格式。
+- REST request spec：spot/futures/swap 等不同 market type 的 URL、path、params。
+- WS connection spec：public/business/private 或 spot/futures endpoint。
+- Historical kline params 和 pagination boundary：symbol、interval、start/end、limit 的交易所参数名和格式。
 - WebSocket subscription spec：通过 path 订阅还是 connect 后发送 subscribe message。
-- Payload extraction：从交易所 response 中取出 kline/ticker arrays。
+- Payload extraction/routing：从交易所 response 中取出 kline/ticker arrays，并把 WS payload 匹配到 descriptor。
 - Rate limit policy：并发、delay、429 backoff。
 - Realtime policy：是否支持 native interval，或需要 base interval fanout/polling。
 - Price stream type：ticker、mini ticker 或其他轻量价格流。

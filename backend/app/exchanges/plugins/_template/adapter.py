@@ -7,9 +7,10 @@ from app.exchanges.ws_protocol import WsSubscriptionMode, WsSubscriptionSpec
 
 
 class TemplateExchangeAdapter:
-    """Adapter skeleton for a new exchange plugin.
+    """Legacy facade skeleton for a new exchange plugin.
 
-    Replace Template/template names and fill in exchange-specific behavior.
+    Prefer putting REST/WS behavior in protocol.py. Keep this class small so
+    old imports and optional symbol metadata callers continue to work.
     """
 
     id = "template"

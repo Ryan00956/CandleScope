@@ -249,6 +249,18 @@ def test_settings_uses_runtime_facade_for_data_engine_internals() -> None:
     assert '"data_engine_runtime"' in text
 
 
+def test_data_engine_does_not_call_exchange_adapters_directly() -> None:
+    """Data Engine core should consume exchange plugins/protocols, not adapters."""
+    offenders: list[str] = []
+    for path in (BACKEND_ROOT / "app/data_engine").rglob("*.py"):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for token in ("plugin.adapter()", "get_exchange_registry().get("):
+            if token in text:
+                offenders.append(f"{path.relative_to(BACKEND_ROOT)}:{token}")
+
+    assert offenders == []
+
+
 def test_data_engine_layer_import_boundaries_are_directional() -> None:
     """Cross-module imports should follow the planned DataEngine layering."""
     checks = [

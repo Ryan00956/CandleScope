@@ -15,49 +15,25 @@ from app.core.config import (
 )
 from app.core.market import VALID_INTERVALS
 from app.exchanges.models import ExchangeCapabilities, ExchangeMarket, SymbolInfo
-from app.exchanges.symbols import normalize_symbol
-from app.exchanges.ws_protocol import WsSubscriptionMode, WsSubscriptionSpec
+
+from .protocol import BinanceExchangeProtocol
 
 logger = logging.getLogger("candlescope.exchange.binance")
 
 
-_REST_PATH: dict[str, dict[str, str]] = {
-    "spot": {
-        "kline": "/api/v3/klines",
-        "aggTrade": "/api/v3/aggTrades",
-        "trade": "/api/v3/trades",
-        "ticker": "/api/v3/ticker/24hr",
-        "miniTicker": "/api/v3/ticker/24hr",
-        "depth": "/api/v3/depth",
-    },
-    "futures": {
-        "kline": "/fapi/v1/klines",
-        "aggTrade": "/fapi/v1/aggTrades",
-        "trade": "/fapi/v1/trades",
-        "ticker": "/fapi/v1/ticker/24hr",
-        "miniTicker": "/fapi/v1/ticker/24hr",
-        "depth": "/fapi/v1/depth",
-    },
-}
-
-_FUTURES_MARKET_STREAMS = {
-    "aggTrade",
-    "kline",
-    "miniTicker",
-    "ticker",
-}
-
-_FUTURES_PUBLIC_STREAMS = {
-    "depth",
-    "trade",
-}
-
-
 class BinanceExchangeAdapter:
-    """Exchange adapter for Binance spot + USDT-M perpetual."""
+    """Legacy facade for Binance exchange integration.
+
+    New runtime code should use ``BinancePlugin.protocol()`` and other plugin
+    policies. This adapter remains for compatibility with older imports and
+    symbol metadata callers.
+    """
 
     id = "binance"
     name = "Binance"
+
+    def __init__(self) -> None:
+        self._protocol = BinanceExchangeProtocol()
 
     def capabilities(self) -> ExchangeCapabilities:
         return ExchangeCapabilities(
@@ -94,29 +70,19 @@ class BinanceExchangeAdapter:
         return []
 
     def get_http_base_urls(self, market_type: str = "spot", config: Any | None = None) -> list[str]:
-        if config is not None and hasattr(config, "get_http_urls"):
-            return list(config.get_http_urls(market_type))
-        if market_type == "futures":
-            return [BINANCE_FUTURES_BASE_URL] + [
-                url for url in BINANCE_FUTURES_BASE_URLS if url != BINANCE_FUTURES_BASE_URL
-            ]
-        return [BINANCE_BASE_URL] + [
-            url for url in BINANCE_BASE_URLS if url != BINANCE_BASE_URL
-        ]
+        return self._protocol.rest_base_urls(market_type, config=config)
 
     def get_ws_base_urls(self, market_type: str = "spot", config: Any | None = None) -> list[str]:
-        if config is not None and hasattr(config, "get_ws_urls"):
-            return list(config.get_ws_urls(market_type))
-        if market_type == "futures":
-            return [
-                "wss://fstream.binance.com/ws",
-                "wss://fstream.binance.me/ws",
-            ]
-        return [
-            "wss://stream.binance.com:9443/ws",
-            "wss://data-stream.binance.vision/ws",
-            "wss://stream.binance.me:9443/ws",
-        ]
+        from app.data_engine.ingestion.models import StreamDescriptor, StreamType
+
+        descriptor = StreamDescriptor(
+            symbol="BTCUSDT",
+            stream_type=StreamType.KLINE,
+            interval="1m",
+            exchange=self.id,
+            market_type=market_type,
+        )
+        return self._protocol.ws_base_urls(descriptor, config=config)
 
     def get_ws_base_urls_for_descriptor(
         self,
@@ -124,95 +90,28 @@ class BinanceExchangeAdapter:
         market_type: str = "spot",
         config: Any | None = None,
     ) -> list[str]:
-        urls = self.get_ws_base_urls(market_type, config=config)
-        if market_type != "futures":
-            return urls
-
-        stream_type = getattr(descriptor.stream_type, "value", str(descriptor.stream_type))
-        if stream_type in _FUTURES_MARKET_STREAMS:
-            return self._route_futures_ws_urls(urls, "market")
-        if stream_type in _FUTURES_PUBLIC_STREAMS:
-            return self._route_futures_ws_urls(urls, "public")
-        return urls
+        return self._protocol.ws_base_urls(descriptor, config=config)
 
     def get_rest_path(self, stream_type, market_type: str = "spot") -> str | None:
-        return _REST_PATH.get(market_type, _REST_PATH["spot"]).get(stream_type.value)
+        return self._protocol.rest_path(stream_type, market_type)
 
     def build_http_params(self, req) -> dict[str, Any]:
-        desc = req.descriptor
-        params: dict[str, Any] = {
-            "symbol": normalize_symbol(
-                desc.symbol,
-                exchange=self.id,
-                market_type=desc.market_type,
-            ),
-        }
-
-        if desc.stream_type.value == "kline":
-            params["interval"] = desc.interval
-            params["limit"] = req.limit
-            if req.start_ms is not None:
-                params["startTime"] = str(max(0, int(req.start_ms)))
-            if req.end_ms is not None:
-                params["endTime"] = str(max(0, int(req.end_ms)))
-        elif desc.stream_type.value in ("aggTrade", "trade"):
-            params["limit"] = req.limit
-            if req.start_ms is not None:
-                params["startTime"] = str(max(0, int(req.start_ms)))
-            if req.end_ms is not None:
-                params["endTime"] = str(max(0, int(req.end_ms)))
-        elif desc.stream_type.value == "depth":
-            params["limit"] = min(req.limit, 5000)
-
-        return params
+        return self._protocol.build_http_params(req)
 
     def build_ws_stream_name(self, descriptor) -> str:
-        symbol = normalize_symbol(
-            descriptor.symbol,
-            exchange=self.id,
-            market_type=descriptor.market_type,
-        ).lower()
-        if descriptor.stream_type.value == "kline":
-            return f"{symbol}@kline_{descriptor.interval}"
-        if descriptor.stream_type.value == "depth" and descriptor.depth_levels:
-            return f"{symbol}@depth{descriptor.depth_levels}"
-        return f"{symbol}@{descriptor.stream_type.value}"
+        return self._protocol.build_ws_stream_name(descriptor)
 
-    def build_ws_subscription(self, descriptor) -> WsSubscriptionSpec:
-        return WsSubscriptionSpec(
-            mode=WsSubscriptionMode.PATH,
-            stream_name=self.build_ws_stream_name(descriptor),
-        )
+    def build_ws_subscription(self, descriptor):
+        return self._protocol.build_ws_subscription(descriptor)
 
     def get_multi_symbol_ticker_stream_name(self, market_type: str = "spot") -> str | None:
-        return "!miniTicker@arr"
+        return self._protocol.get_multi_symbol_ticker_stream_name(market_type)
 
     def supports_ws_streaming(self, market_type: str = "spot") -> bool:
         return True
 
-    @staticmethod
-    def _route_futures_ws_urls(urls: list[str], route: str) -> list[str]:
-        routed: list[str] = []
-        for url in urls:
-            base = url.rstrip("/")
-            if f"/{route}/ws" in base:
-                routed.append(base)
-                continue
-            if base.endswith("/ws"):
-                base = base[:-3]
-            elif base.endswith("/stream"):
-                base = base[:-7]
-            for legacy_route in ("/public", "/market", "/private"):
-                if base.endswith(legacy_route):
-                    base = base[: -len(legacy_route)]
-                    break
-            routed.append(f"{base}/{route}/ws")
-        return list(dict.fromkeys(routed))
-
     def extract_http_rows(self, payload: Any, stream_type) -> list[Any]:
-        if isinstance(payload, list):
-            return payload
-        return [payload]
+        return self._protocol.extract_http_rows(payload, stream_type)
 
     async def _load_spot_symbols(self) -> list[SymbolInfo]:
         urls_to_try = [BINANCE_BASE_URL] + [

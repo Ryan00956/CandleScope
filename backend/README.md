@@ -158,7 +158,7 @@ Plugin template:
 
 - [app/exchanges/plugins/_template](app/exchanges/plugins/_template/)
 
-Exchange adapters expose capabilities, symbol normalization, REST/WS endpoint policy, subscription specs, realtime policy, rate limits, and payload extraction.
+Exchange plugins expose capabilities, symbol normalization, REST/WS protocol specs, subscription specs, realtime policy, rate limits, pagination policy, and payload normalization. Adapters remain as legacy facades for older imports.
 
 ## Indicators And Pyne
 

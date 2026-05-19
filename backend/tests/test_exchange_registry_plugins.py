@@ -3,8 +3,11 @@ from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.models import StreamDescriptor, StreamType
 from app.data_engine.ingestion.normalizers.binance import BinanceNormalizer
 from app.data_engine.ingestion.normalizers.okx import OkxNormalizer
+from app.exchanges.pagination import OkxHistoricalPaginationPolicy, ReverseTimePaginationPolicy
 from app.exchanges.protocol import AdapterBackedProtocol
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.exchanges.plugins.binance.protocol import BinanceExchangeProtocol
+from app.exchanges.plugins.okx.protocol import OkxExchangeProtocol
 
 
 def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
@@ -79,6 +82,19 @@ def test_builtin_plugins_own_symbol_and_rate_limit_policies() -> None:
     assert okx_policy.delay_for("spot") == 0.8
     assert registry.get_plugin("binance").price_stream_type("spot") == StreamType.MINI_TICKER
     assert registry.get_plugin("okx").price_stream_type("spot") == StreamType.TICKER
+
+
+def test_builtin_plugins_use_concrete_protocols_and_pagination_policies() -> None:
+    bootstrap_default_adapters()
+    registry = get_exchange_registry()
+
+    binance = registry.get_plugin("binance")
+    okx = registry.get_plugin("okx")
+
+    assert isinstance(binance.protocol(), BinanceExchangeProtocol)
+    assert isinstance(okx.protocol(), OkxExchangeProtocol)
+    assert isinstance(binance.pagination_policy(BackfillConfig()), ReverseTimePaginationPolicy)
+    assert isinstance(okx.pagination_policy(BackfillConfig()), OkxHistoricalPaginationPolicy)
 
 
 def test_adapter_backed_protocol_sanitizes_configured_endpoints() -> None:

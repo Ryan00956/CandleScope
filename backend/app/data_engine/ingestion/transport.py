@@ -57,6 +57,8 @@ class TransportLayer:
         # Endpoint rotation state
         self._http_idx: dict[tuple[str, str], int] = {}
         self._ws_idx: dict[tuple[str, str], int] = {}
+        self._last_http_base: str = ""
+        self._last_ws_base: str = ""
 
         # Shared HTTP session (created lazily)
         self._http_session: aiohttp.ClientSession | None = None
@@ -127,6 +129,14 @@ class TransportLayer:
             "layer": "L1_Transport",
             "active_http_endpoint": self.current_http_base,
             "active_ws_endpoint": self.current_ws_base,
+            "active_http_endpoints": {
+                f"{exchange}:{market_type}": self._current_http_base(exchange, market_type, urls)
+                for (exchange, market_type), urls in self._diagnostic_http_url_map().items()
+            },
+            "active_ws_endpoints": {
+                f"{exchange}:{market_type}": self._current_ws_base(exchange, market_type, urls)
+                for (exchange, market_type), urls in self._diagnostic_ws_url_map().items()
+            },
             "metrics": self._metrics.snapshot(),
         }
 
@@ -168,12 +178,12 @@ class TransportLayer:
         exchange = getattr(desc, "exchange", "binance")
         market_type = getattr(desc, "market_type", "spot")
         protocol = self._registry.get_plugin(exchange).protocol()
-        rest_path = protocol.rest_path(desc.stream_type, market_type)
-        if rest_path is None:
+        spec = protocol.rest_request(req, config=self._cfg)
+        if spec is None:
             raise TransportError(f"No REST endpoint for stream type: {desc.stream_type}")
 
-        params = protocol.build_http_params(req)
-        http_urls = protocol.rest_base_urls(market_type, config=self._cfg)
+        params = spec.params
+        http_urls = spec.base_urls
         last_exc: Exception | None = None
         tried = 0
         total = len(http_urls)
@@ -183,7 +193,7 @@ class TransportLayer:
 
         while tried < total:
             base = self._current_http_base(exchange, market_type, http_urls)
-            url = f"{base}{rest_path}"
+            url = f"{base}{spec.path}"
             try:
                 self._metrics.inc("http_requests_sent")
                 self._metrics.set("http_active_endpoint", base)
@@ -207,9 +217,10 @@ class TransportLayer:
 
                 self._metrics.inc("http_requests_ok")
                 self._metrics.mark("http_last_success_at")
+                self._last_http_base = base
                 now_ms = int(time.time() * 1000)
 
-                rows = protocol.extract_http_rows(data, desc.stream_type)
+                rows = protocol.extract_http_rows(data, desc)
 
                 return [
                     RawMessage(
@@ -261,8 +272,9 @@ class TransportLayer:
         exchange = getattr(descriptor, "exchange", "binance")
         market_type = getattr(descriptor, "market_type", "spot")
         protocol = self._registry.get_plugin(exchange).protocol()
-        subscription = protocol.build_ws_subscription(descriptor)
-        ws_urls = protocol.ws_base_urls(descriptor, config=self._cfg)
+        spec = protocol.ws_connection(descriptor, config=self._cfg)
+        subscription = spec.subscription
+        ws_urls = spec.base_urls
         last_exc: Exception | None = None
         tried = 0
         total = len(ws_urls)
@@ -305,6 +317,7 @@ class TransportLayer:
 
                 self._metrics.inc("ws_connect_ok")
                 self._metrics.mark("ws_last_success_at")
+                self._last_ws_base = base
                 logger.info("WS connected: %s", url)
                 return WsConnectionContext(
                     connection=conn,
@@ -382,7 +395,8 @@ class TransportLayer:
         exchange = getattr(descriptor, "exchange", "binance")
         market_type = getattr(descriptor, "market_type", "spot")
         plugin = self._registry.get_plugin(exchange)
-        return plugin.adapter().supports_ws_streaming(market_type)
+        capabilities = plugin.capabilities()
+        return capabilities.ws_connection_model != "polling_only"
 
     # ── Public: probe (used by L3 to test WS connectivity) ───
 
@@ -403,30 +417,25 @@ class TransportLayer:
 
     @property
     def current_http_base(self) -> str:
-        """The HTTP base URL currently in use."""
-        protocol = self._registry.get_plugin("binance").protocol()
-        return self._current_http_base(
-            "binance",
-            "spot",
-            protocol.rest_base_urls("spot", config=self._cfg),
-        )
+        """Most recent HTTP base URL used by this transport."""
+        if self._last_http_base:
+            return self._last_http_base
+        url_map = self._diagnostic_http_url_map()
+        for (exchange, market_type), urls in url_map.items():
+            if urls:
+                return self._current_http_base(exchange, market_type, urls)
+        return ""
 
     @property
     def current_ws_base(self) -> str:
-        """The WS base URL currently in use."""
-        protocol = self._registry.get_plugin("binance").protocol()
-        descriptor = StreamDescriptor(
-            "BTCUSDT",
-            StreamType.KLINE,
-            interval="1m",
-            exchange="binance",
-            market_type="spot",
-        )
-        return self._current_ws_base(
-            "binance",
-            "spot",
-            protocol.ws_base_urls(descriptor, config=self._cfg),
-        )
+        """Most recent WS base URL used by this transport."""
+        if self._last_ws_base:
+            return self._last_ws_base
+        url_map = self._diagnostic_ws_url_map()
+        for (exchange, market_type), urls in url_map.items():
+            if urls:
+                return self._current_ws_base(exchange, market_type, urls)
+        return ""
 
     # ── Internal: endpoint rotation ──────────────────────────
 
@@ -470,6 +479,35 @@ class TransportLayer:
         )
         urls = protocol.ws_base_urls(descriptor, config=self._cfg)
         logger.debug("WS endpoint rotated → %s", self._current_ws_base(exchange, market_type, urls))
+
+    def _diagnostic_http_url_map(self) -> dict[tuple[str, str], list[str]]:
+        result: dict[tuple[str, str], list[str]] = {}
+        for plugin in self._registry.list_plugins():
+            protocol = plugin.protocol()
+            for market in plugin.capabilities().markets:
+                result[(plugin.id, market.market_type)] = protocol.rest_base_urls(
+                    market.market_type,
+                    config=self._cfg,
+                )
+        return result
+
+    def _diagnostic_ws_url_map(self) -> dict[tuple[str, str], list[str]]:
+        result: dict[tuple[str, str], list[str]] = {}
+        for plugin in self._registry.list_plugins():
+            protocol = plugin.protocol()
+            for market in plugin.capabilities().markets:
+                descriptor = StreamDescriptor(
+                    "",
+                    StreamType.KLINE,
+                    interval="1m",
+                    exchange=plugin.id,
+                    market_type=market.market_type,
+                )
+                result[(plugin.id, market.market_type)] = protocol.ws_base_urls(
+                    descriptor,
+                    config=self._cfg,
+                )
+        return result
 
     def _get_ws_base_urls_for_descriptor(
         self,

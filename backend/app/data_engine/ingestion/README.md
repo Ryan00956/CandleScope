@@ -56,7 +56,7 @@ async for event in pipeline.delivery.subscribe():
     print(event.to_dict())
 ```
 
-The production runtime normally uses `BinanceIngestionFactory` instead of direct `MarketDataIngress` construction.
+The production runtime normally uses `ExchangeIngestionFactory` instead of direct `MarketDataIngress` construction.
 
 ## Key Models
 

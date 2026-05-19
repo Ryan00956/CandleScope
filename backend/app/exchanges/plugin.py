@@ -4,6 +4,7 @@ from typing import Any, Callable, Protocol
 
 from .base import ExchangeAdapter
 from .models import ExchangeCapabilities
+from .pagination import HistoricalPaginationPolicy, ReverseTimePaginationPolicy
 from .protocol import AdapterBackedProtocol, ExchangeProtocol
 from .rate_limits import RateLimitPolicy
 from .realtime import RealtimePolicy
@@ -20,7 +21,11 @@ class SymbolNormalizer(Protocol):
 
 
 class ExchangePlugin(Protocol):
-    """Top-level exchange integration object."""
+    """Top-level exchange integration object.
+
+    New exchange behavior should be exposed through the plugin's protocol and
+    policies. The adapter entry point remains for legacy compatibility.
+    """
 
     id: str
     name: str
@@ -41,6 +46,9 @@ class ExchangePlugin(Protocol):
         ...
 
     def rate_limit_policy(self, config: Any | None = None) -> RateLimitPolicy:
+        ...
+
+    def pagination_policy(self, config: Any | None = None) -> HistoricalPaginationPolicy:
         ...
 
     def realtime_policy(self) -> RealtimePolicy:
@@ -74,6 +82,7 @@ class BuiltinExchangePlugin:
         protocol: ExchangeProtocol | None = None,
         symbol_normalizer: SymbolNormalizer | None = None,
         rate_limit_policy_factory: Callable[[Any | None], RateLimitPolicy] | None = None,
+        pagination_policy_factory: Callable[[Any | None], HistoricalPaginationPolicy] | None = None,
         realtime_policy: RealtimePolicy | None = None,
         price_stream_type_factory: Callable[[str], Any] | None = None,
     ) -> None:
@@ -84,6 +93,7 @@ class BuiltinExchangePlugin:
         self._normalizer_factory = normalizer_factory
         self._symbol_normalizer = symbol_normalizer or DefaultSymbolNormalizer()
         self._rate_limit_policy_factory = rate_limit_policy_factory
+        self._pagination_policy_factory = pagination_policy_factory
         self._realtime_policy = realtime_policy or RealtimePolicy()
         self._price_stream_type_factory = price_stream_type_factory
 
@@ -108,6 +118,11 @@ class BuiltinExchangePlugin:
         if self._rate_limit_policy_factory is None:
             return RateLimitPolicy()
         return self._rate_limit_policy_factory(config)
+
+    def pagination_policy(self, config: Any | None = None) -> HistoricalPaginationPolicy:
+        if self._pagination_policy_factory is None:
+            return ReverseTimePaginationPolicy()
+        return self._pagination_policy_factory(config)
 
     def realtime_policy(self) -> RealtimePolicy:
         return self._realtime_policy

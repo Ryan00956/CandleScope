@@ -158,6 +158,10 @@ Plugin template:
 
 - [app/exchanges/plugins/_template](app/exchanges/plugins/_template/)
 
+Architecture guide:
+
+- [app/exchanges](app/exchanges/)
+
 Exchange plugins expose capabilities, symbol normalization, REST/WS protocol specs, subscription specs, realtime policy, rate limits, pagination policy, and payload normalization. Adapters remain as legacy facades for older imports.
 
 Long-lived plugin boundaries:

@@ -158,6 +158,10 @@ BackfillScheduler
 
 - [app/exchanges/plugins/_template](app/exchanges/plugins/_template/)
 
+架构说明：
+
+- [app/exchanges](app/exchanges/)
+
 Exchange plugin 暴露 capabilities、symbol normalization、REST/WS protocol specs、subscription specs、realtime policy、rate limits、pagination policy 和 payload normalization。adapter 仅保留为旧调用兼容门面。
 
 长期稳定边界：

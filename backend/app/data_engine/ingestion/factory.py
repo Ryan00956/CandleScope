@@ -7,27 +7,26 @@ This is the "last mile" wiring that was missing:
     DataManager.set_ingestion_factory(ExchangeIngestionFactory())
 
 When ``StreamCoordinator.ensure_stream()`` starts a new pipeline,
-it calls ``factory.start(symbol, interval, on_bar)`` which:
+it calls ``factory.start(symbol, interval, on_market_event)`` which:
 
   1. Creates a ``StreamDescriptor`` for the requested (symbol, interval).
   2. Uses ``MarketDataIngress`` to spin up a full L1–L6 pipeline
      (Transport → Session → FeedControl → Normalize → Continuity → Delivery).
-  3. Registers a callback on L6 ``DeliveryLayer`` that converts each
-     ``MarketEvent`` into a bar dict and feeds it to ``on_bar()``.
+  3. Registers a callback on L6 ``DeliveryLayer`` that forwards each
+     ``MarketEvent`` directly to ``on_market_event()``.
      Gap markers can be forwarded through optional ``on_gap``.
   4. Returns a handle with a ``stop()`` coroutine.
 
-The ``on_bar()`` callback is wired by the coordinator into the
-BarAggregator L1–L5 pipeline, which then feeds Cache + EventBus.
+The ``on_market_event()`` callback is wired by the coordinator into the
+BarAggregator L1-L5 pipeline, which then feeds Cache + EventBus.
 
 Data flow::
 
     Exchange WS/HTTP
       → L1 Transport → L2 Session → L3 FeedControl
       → L4 Normalize → L5 Continuity → L6 Delivery
-      → ExchangeIngestionFactory (bridge)
-      → on_bar(bar_dict)
-      → StreamCoordinator._BarDictMarketEvent
+      → ExchangeIngestionFactory
+      → on_market_event(market_event)
       → BarAggregator.on_market_event()
       → L1 Router → L2 TimeBucket → L3 BarState → L4 Finalizer → L5 Publisher
       → AggregatorBridge.on_bar_event()
@@ -77,7 +76,7 @@ class ExchangeIngestionFactory:
     Implements the ``IngestionFactory`` protocol expected by
     ``StreamCoordinator``:
 
-        async def start(self, symbol, interval, on_bar) -> handle
+        async def start(self, symbol, interval, on_market_event) -> handle
         handle.stop()  — to tear down
 
     Usage in ``main.py``::
@@ -118,7 +117,7 @@ class ExchangeIngestionFactory:
         self,
         symbol: str,
         interval: str,
-        on_bar: Callable[[dict], Awaitable[None]],
+        on_market_event: Callable[[MarketEvent], Awaitable[None]],
         exchange: str = "binance",
         market_type: str = "spot",
         on_gap: Callable[[Any], Awaitable[None]] | None = None,
@@ -127,12 +126,12 @@ class ExchangeIngestionFactory:
 
         Creates a full L1–L6 pipeline via ``MarketDataIngress.add_stream()``,
         then registers a callback on L6 Delivery that forwards each
-        ``MarketEvent`` as a bar dict to ``on_bar()``.
+        ``MarketEvent`` directly to ``on_market_event()``.
 
         Args:
             symbol:      Trading pair, e.g. "BTCUSDT".
             interval:    K-line interval, e.g. "1m".
-            on_bar:      Async callback ``(bar_dict) -> None``.
+            on_market_event: Async callback ``(MarketEvent) -> None``.
             market_type: "spot" or "futures".
 
         Returns:
@@ -155,8 +154,7 @@ class ExchangeIngestionFactory:
                 "Pipeline already exists for %s, reusing",
                 descriptor.key,
             )
-            # Add another callback to the existing pipeline
-            self._register_callback(existing, on_bar)
+            existing.delivery.on_market_event(on_market_event)
             if on_gap is not None:
                 existing.delivery.on_gap(on_gap)
             return _IngestionHandle(ingress, descriptor.key)
@@ -164,8 +162,7 @@ class ExchangeIngestionFactory:
         # Create a new L1–L6 pipeline
         pipeline = await ingress.add_stream(descriptor)
 
-        # Bridge: L6 DeliveryLayer → on_bar(bar_dict)
-        self._register_callback(pipeline, on_bar)
+        pipeline.delivery.on_market_event(on_market_event)
         if on_gap is not None:
             pipeline.delivery.on_gap(on_gap)
 
@@ -207,43 +204,6 @@ class ExchangeIngestionFactory:
         except KeyError:
             return StreamType.TICKER
         return stream_type if isinstance(stream_type, StreamType) else StreamType(str(stream_type))
-
-    def _register_callback(self, pipeline: Any, on_bar: Callable) -> None:
-        """Register a callback on the pipeline's L6 Delivery layer.
-
-        Converts ``MarketEvent`` → bar dict that the coordinator
-        expects (matching the fields in ``_BarDictMarketEvent``).
-        """
-
-        async def _bridge(market_event: MarketEvent) -> None:
-            """Convert MarketEvent to bar_dict and forward to on_bar."""
-            # Only forward KLINE events
-            if market_event.event_type != StreamType.KLINE:
-                return
-
-            data = market_event.data
-            bar_dict = {
-                "time": data.get("open_time", 0) // 1000 if data.get("open_time", 0) > 1_000_000_000_000 else data.get("open_time", 0),
-                "open_time": data.get("open_time", 0),
-                "close_time": data.get("close_time", 0),
-                "open": data.get("open", 0),
-                "high": data.get("high", 0),
-                "low": data.get("low", 0),
-                "close": data.get("close", 0),
-                "volume": data.get("volume", 0),
-                "quote_volume": data.get("quote_volume", 0),
-                "trades": data.get("trades", 0),
-                "taker_buy_base": data.get("taker_buy_base", 0),
-                "taker_buy_quote": data.get("taker_buy_quote", 0),
-                "is_closed": data.get("is_closed", False),
-            }
-
-            try:
-                await on_bar(bar_dict)
-            except Exception as exc:
-                logger.error("on_bar callback error: %s", exc, exc_info=True)
-
-        pipeline.delivery.on_market_event(_bridge)
 
     def _register_price_callback(
         self,

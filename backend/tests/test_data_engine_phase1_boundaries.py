@@ -40,8 +40,10 @@ from app.data_engine.data_manager.models import (
 )
 from app.data_engine.data_manager.query import QueryEngine
 from app.data_engine.data_manager.retention import RetentionService
+from app.data_engine.data_manager.coordinator import StreamCoordinator
 from app.data_engine.data_manager.stream_policy import StreamEnsurePlanner
 from app.data_engine.data_manager.subscriptions import SubscriptionService, SubscriptionTier
+from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -587,7 +589,7 @@ def test_ingestion_gap_marker_routes_to_backfill_trigger() -> None:
                 self,
                 symbol,
                 interval,
-                on_bar,
+                on_market_event,
                 exchange="binance",
                 market_type="spot",
                 on_gap=None,
@@ -618,6 +620,96 @@ def test_ingestion_gap_marker_routes_to_backfill_trigger() -> None:
         assert triggered == [("BTC-USDT", "1m", 120_000, 120_000, "okx", "spot")]
 
     asyncio.run(_run())
+
+
+def test_stream_coordinator_forwards_real_market_event_to_bar_aggregator() -> None:
+    async def _run() -> None:
+        class _Handle:
+            async def stop(self) -> None:
+                pass
+
+        class _Factory:
+            def __init__(self) -> None:
+                self.on_market_event = None
+
+            async def start(
+                self,
+                symbol,
+                interval,
+                on_market_event,
+                exchange="binance",
+                market_type="spot",
+                on_gap=None,
+            ):
+                self.on_market_event = on_market_event
+                return _Handle()
+
+        class _Aggregator:
+            def __init__(self) -> None:
+                self.events = []
+
+            async def on_market_event(self, event):
+                self.events.append(event)
+
+        factory = _Factory()
+        aggregator = _Aggregator()
+        coord = StreamCoordinator()
+        coord.set_ingestion_factory(factory)
+        coord.set_bar_aggregator(aggregator)
+
+        await coord.ensure_stream("BTC-USDT", "1m", exchange="okx", market_type="swap")
+        assert factory.on_market_event is not None
+
+        event = MarketEvent(
+            event_type=StreamType.KLINE,
+            symbol="BTC-USDT",
+            exchange="okx",
+            event_time_ms=60_000,
+            received_at_ms=60_010,
+            source=DataSource.WEBSOCKET,
+            data={
+                "interval": "1m",
+                "open_time": 60_000,
+                "close_time": 119_999,
+                "open": 1,
+                "high": 2,
+                "low": 1,
+                "close": 2,
+                "volume": 10,
+                "is_closed": False,
+            },
+            stream_key="okx:swap:BTC-USDT@kline_1m",
+            market_type="swap",
+        )
+        await factory.on_market_event(event)
+
+        assert aggregator.events == [event]
+
+    asyncio.run(_run())
+
+
+def test_realtime_kline_path_has_no_bar_dict_market_event_adapter() -> None:
+    checked = [
+        BACKEND_ROOT / "app/data_engine/ingestion/factory.py",
+        BACKEND_ROOT / "app/data_engine/data_manager/coordinator.py",
+    ]
+    forbidden = (
+        "_BarDictMarketEvent",
+        "_EnumLike",
+        "on_raw_bar",
+        "on_bar: Callable[[dict]",
+        "bar_dict -> MarketEvent",
+        "MarketEvent -> bar_dict",
+    )
+
+    offenders: list[str] = []
+    for path in checked:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for token in forbidden:
+            if token in text:
+                offenders.append(f"{path.relative_to(BACKEND_ROOT)}:{token}")
+
+    assert offenders == []
 
 
 def test_data_manager_price_updates_emit_events_and_snapshot() -> None:

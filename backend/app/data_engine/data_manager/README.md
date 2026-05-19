@@ -123,7 +123,7 @@ StreamEnsurePlanner
         ▼
 StreamCoordinator
         ├── BarAggregator.add_target()
-        └── IngestionFactory.start_kline()
+        └── IngestionFactory.start(on_market_event)
 ```
 
 The planner chooses the required source streams. For custom intervals, this can mean starting a suitable base interval and registering the requested target interval with the aggregator.

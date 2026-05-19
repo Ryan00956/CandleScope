@@ -18,7 +18,7 @@ ingestion/aggregation implementations.
 
 Data flow::
 
-    Ingestion → on_raw_bar() → BarAggregator.on_market_event()
+    Ingestion → on_market_event() → BarAggregator.on_market_event()
                               → L1–L5 pipeline
                               → Publisher callbacks
                               → AggregatorBridge.on_bar_event()
@@ -47,6 +47,7 @@ from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
 from app.core.executors import run_storage
 from app.data_engine.interval_policy import is_standard_interval
 
+from ..ingestion.models import GapMarker, MarketEvent
 from .cache import BarCache
 from .config import CoordinatorConfig
 from .event_bus import DataEventBus
@@ -82,17 +83,17 @@ class IngestionFactory(Protocol):
         self,
         symbol: str,
         interval: str,
-        on_bar: Callable[[dict], Awaitable[None]],
+        on_market_event: Callable[[MarketEvent], Awaitable[None]],
         exchange: str = "binance",
         market_type: str = "spot",
-        on_gap: Callable[[Any], Awaitable[None]] | None = None,
+        on_gap: Callable[[GapMarker], Awaitable[None]] | None = None,
     ) -> Any:
         """Start an ingestion stream.
 
         Args:
             symbol:      Trading pair.
             interval:    Base interval (e.g. "1m").
-            on_bar:      Callback for each incoming bar dict.
+            on_market_event: Callback for each normalized MarketEvent.
             market_type: "spot" or "futures".
             on_gap:      Optional callback for ingestion gap markers.
 
@@ -598,16 +599,12 @@ class StreamCoordinator:
     async def _start_stream(self, key: SeriesKey) -> StreamInfo:
         """Start a new ingestion pipeline for a series.
 
-        Data flow when BarAggregator is set:
-            Ingestion → on_raw_bar() → _build_market_event()
+        Data flow:
+            Ingestion → on_market_event()
                       → BarAggregator.on_market_event()
-                      → L1–L5 pipeline → Publisher
+                      → L1-L5 pipeline → Publisher
                       → AggregatorBridge.on_bar_event()
                       → Cache + EventBus
-
-        Data flow without BarAggregator (fallback):
-            Ingestion → on_raw_bar() → on_bar_event()
-                      → Cache + EventBus (directly)
         """
         entry = _StreamEntry(key)
         entry.info.status = StreamStatus.STARTING
@@ -618,46 +615,23 @@ class StreamCoordinator:
 
         if self._ingestion_factory is not None:
             try:
-                async def on_raw_bar(bar_dict: dict) -> None:
-                    """Callback from ingestion: route through BarAggregator."""
-                    if self._bar_aggregator is not None:
-                        # Build a MarketEvent-like object and feed it to
-                        # the BarAggregator's L1 Router.
-                        market_event = _BarDictMarketEvent(
-                            bar_dict, key.symbol, key.interval, key.exchange, key.market_type,
-                        )
-                        await self._bar_aggregator.on_market_event(market_event)
-                    else:
-                        # Fallback: direct to cache (legacy behavior)
-                        bar = BarData.from_dict(bar_dict)
-                        raw_type = bar_dict.get("event_type")
-                        if raw_type == "bar.closed" or raw_type == "closed":
-                            event_type = DataEventType.BAR_CLOSED
-                        elif raw_type == "bar.created" or raw_type == "created":
-                            event_type = DataEventType.BAR_CREATED
-                        elif bar_dict.get("is_closed") or bar_dict.get("closed"):
-                            event_type = DataEventType.BAR_CLOSED
-                        elif bar_dict.get("is_new"):
-                            event_type = DataEventType.BAR_CREATED
-                        else:
-                            event_type = DataEventType.BAR_UPDATED
-                        await self.on_bar_event(
-                            key.symbol,
-                            key.interval,
-                            bar,
-                            event_type,
-                            exchange=key.exchange,
-                            market_type=key.market_type,
-                        )
+                if self._bar_aggregator is None:
+                    raise RuntimeError(
+                        "StreamCoordinator requires a BarAggregator for realtime kline streams"
+                    )
 
-                async def on_gap(gap: Any) -> None:
+                async def on_market_event(market_event: MarketEvent) -> None:
+                    """Callback from ingestion: route real L6 events through BarAggregator."""
+                    await self._bar_aggregator.on_market_event(market_event)
+
+                async def on_gap(gap: GapMarker) -> None:
                     if self._gap_handler is not None:
                         await self._gap_handler(key, gap)
 
                 start_kwargs = {
                     "symbol": key.symbol,
                     "interval": key.interval,
-                    "on_bar": on_raw_bar,
+                    "on_market_event": on_market_event,
                     "exchange": key.exchange,
                     "market_type": key.market_type,
                 }
@@ -737,66 +711,3 @@ class StreamCoordinator:
                     logger.info("Reaper cycle: stopped %d streams", len(reaped))
         except asyncio.CancelledError:
             pass
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Helper: Lightweight MarketEvent-like wrapper for bar dicts
-# ═══════════════════════════════════════════════════════════════
-
-
-class _BarDictMarketEvent:
-    """Lightweight wrapper that makes a raw bar dict look like a
-    ``MarketEvent`` for the BarAggregator's L1 Router.
-
-    The Router uses duck-typing (``getattr``) to extract fields,
-    so we only need to provide the attributes it expects:
-      - event_type  (with .value)
-      - symbol
-      - source      (with .value)
-      - data        (dict with kline fields)
-    """
-    __slots__ = ("event_type", "symbol", "source", "data", "market_type", "stream_key", "exchange")
-
-    def __init__(
-        self,
-        bar_dict: dict,
-        symbol: str,
-        interval: str,
-        exchange: str = "binance",
-        market_type: str = "spot",
-    ) -> None:
-        self.event_type = _EnumLike("kline")
-        self.symbol = symbol.upper()
-        self.source = _EnumLike("websocket")
-        self.exchange = exchange
-        self.market_type = market_type
-        base_stream = f"{self.symbol}@kline_{interval}"
-        prefixes: list[str] = []
-        if exchange != "binance":
-            prefixes.append(exchange)
-        if market_type != "spot":
-            prefixes.append(market_type)
-        self.stream_key = base_stream if not prefixes else f"{':'.join(prefixes)}:{base_stream}"
-        self.data = {
-            "interval": interval,
-            "open_time": bar_dict.get("open_time", int(bar_dict.get("time", 0)) * 1000),
-            "close_time": bar_dict.get("close_time", 0),
-            "open": bar_dict.get("open", 0),
-            "high": bar_dict.get("high", 0),
-            "low": bar_dict.get("low", 0),
-            "close": bar_dict.get("close", 0),
-            "volume": bar_dict.get("volume", 0),
-            "quote_volume": bar_dict.get("quote_volume", 0),
-            "trades": bar_dict.get("trades", 0),
-            "taker_buy_base": bar_dict.get("taker_buy_base", 0),
-            "taker_buy_quote": bar_dict.get("taker_buy_quote", 0),
-            "is_closed": bar_dict.get("is_closed", bar_dict.get("closed", False)),
-        }
-
-
-class _EnumLike:
-    """Minimal enum-like object with a .value attribute."""
-    __slots__ = ("value",)
-
-    def __init__(self, value: str) -> None:
-        self.value = value

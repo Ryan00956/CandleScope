@@ -132,6 +132,7 @@ class MarketEvent:
     data: dict[str, Any]            # standardized payload (schema varies by event_type)
     stream_key: str = ""            # pipeline key, e.g. "BTCUSDT@kline_1m"
     sequence: int | None = None     # optional sequence/ID for dedup (trade_id, etc.)
+    market_type: str = "spot"       # "spot", "futures", "swap", ...
 
     # ── Convenience ──
 
@@ -147,6 +148,7 @@ class MarketEvent:
             "data": self.data,
             "stream_key": self.stream_key,
             "sequence": self.sequence,
+            "market_type": self.market_type,
         }
 
     @property

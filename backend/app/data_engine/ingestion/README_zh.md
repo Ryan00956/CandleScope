@@ -56,7 +56,7 @@ async for event in pipeline.delivery.subscribe():
     print(event.to_dict())
 ```
 
-生产 runtime 通常通过 `ExchangeIngestionFactory` 使用 ingestion，而不是直接创建 `MarketDataIngress`。
+生产 runtime 通常通过 `ExchangeIngestionFactory` 使用 ingestion，而不是直接创建 `MarketDataIngress`。对于 K 线流，factory 会通过 `StreamCoordinator` 将 L6 `MarketEvent` 直接转发给 `BarAggregator.on_market_event()`。
 
 ## 核心模型
 

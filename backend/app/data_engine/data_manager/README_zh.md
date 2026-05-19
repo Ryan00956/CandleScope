@@ -123,7 +123,7 @@ StreamEnsurePlanner
         ▼
 StreamCoordinator
         ├── BarAggregator.add_target()
-        └── IngestionFactory.start_kline()
+        └── IngestionFactory.start(on_market_event)
 ```
 
 planner 会选择需要的 source streams。对于自定义周期，可能会启动合适的 base interval，并在 aggregator 中注册用户请求的 target interval。

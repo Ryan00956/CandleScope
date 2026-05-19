@@ -86,6 +86,7 @@ class BinanceNormalizer:
             data=data,
             stream_key=self._descriptor.key,
             sequence=sequence,
+            market_type=self._descriptor.market_type,
         )
 
     def _parse_ws_kline(self, payload: dict, msg: RawMessage) -> MarketEvent | None:

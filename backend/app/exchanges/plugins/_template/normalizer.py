@@ -61,6 +61,7 @@ class TemplateNormalizer:
             data=data,
             stream_key=self._descriptor.key,
             sequence=open_time,
+            market_type=self._descriptor.market_type,
         )
 
     def _parse_ticker(self, msg: RawMessage) -> MarketEvent | None:
@@ -89,4 +90,5 @@ class TemplateNormalizer:
             source=DataSource.WEBSOCKET if msg.source == DataSource.WEBSOCKET else msg.source,
             data=data,
             stream_key=self._descriptor.key,
+            market_type=self._descriptor.market_type,
         )

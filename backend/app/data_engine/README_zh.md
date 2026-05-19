@@ -104,7 +104,7 @@ StreamEnsurePlanner
         ▼
 StreamCoordinator
         ├── BarAggregator.add_target()
-        └── IngestionFactory.start_kline()
+        └── IngestionFactory.start(on_market_event)
                 ▼
 ingestion.MarketEvent
         ▼
@@ -180,6 +180,7 @@ cache merge + BACKFILL_COMPLETED / BACKFILL_FAILED
 | [storage](storage/) | SQLite repo 和 gap ledger，当前没有单独 README |
 | [interval_policy.py](interval_policy.py) | 周期解析与 bucket 策略 |
 | [runtime.py](runtime.py) | Data Engine 组合根 |
+| [MARKET_EVENT_DIRECT_PATH_zh.md](MARKET_EVENT_DIRECT_PATH_zh.md) | L6 `MarketEvent` 直通 `BarAggregator` 的设计与实施说明 |
 
 ## 验证命令
 

@@ -110,6 +110,7 @@ class OkxNormalizer:
             source=msg.source,
             data=data,
             stream_key=self._descriptor.key,
+            market_type=self._descriptor.market_type,
         )
 
     def _parse_kline_row(
@@ -158,6 +159,7 @@ class OkxNormalizer:
             data=data,
             stream_key=self._descriptor.key,
             sequence=open_time_ms,
+            market_type=self._descriptor.market_type,
         )
 
     def _resolve_interval(self, channel: str) -> str:

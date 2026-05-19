@@ -108,7 +108,7 @@ StreamEnsurePlanner
         ▼
 StreamCoordinator
         ├── BarAggregator.add_target()
-        └── IngestionFactory.start_kline()
+        └── IngestionFactory.start(on_market_event)
                 ▼
 ingestion.MarketEvent
         ▼
@@ -188,6 +188,7 @@ Operational entrypoints are exposed through the settings API:
 | [storage](storage/) | SQLite repo and gap ledger; no standalone README yet |
 | [interval_policy.py](interval_policy.py) | Interval parsing and bucket policy |
 | [runtime.py](runtime.py) | Data Engine composition root |
+| [MARKET_EVENT_DIRECT_PATH_zh.md](MARKET_EVENT_DIRECT_PATH_zh.md) | Design and implementation notes for routing L6 `MarketEvent` directly into `BarAggregator` |
 
 ## Verification
 

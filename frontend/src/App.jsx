@@ -15,6 +15,7 @@ import { useBackfillCompletionRuntime } from "./runtime/useBackfillCompletionRun
 import { useChartBackgroundPrefetch } from "./runtime/useChartBackgroundPrefetch";
 import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
+import { useChartLoadMoreLeft } from "./runtime/useChartLoadMoreLeft";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
 import { useKlineStreamRuntime } from "./runtime/useKlineStreamRuntime";
 import { useWatchlistRuntime } from "./runtime/useWatchlistRuntime";
@@ -27,9 +28,7 @@ import {
   getVisibleRangeForInterval,
   saveVisibleRangeForInterval,
 } from "./runtime/viewportController";
-import { requestIndicatorRangeInChunks } from "./runtime/indicatorRangeRuntime";
 import {
-  fetchKlinesBefore,
   fetchExchanges,
   updateSubscriptionTier,
   updateCacheLimits,
@@ -318,8 +317,6 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const loadingRef = useRef(loading);
   loadingRef.current = loading;
-  const [loadingMoreLeft, setLoadingMoreLeft] = useState(false);
-  const [hasMoreLeft, setHasMoreLeft] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
@@ -778,6 +775,26 @@ export default function App() {
     }).catch(() => {}); // fire-and-forget
   }, [cacheLimits, ephemeralCacheBars]);
 
+  const {
+    loadingMoreLeft,
+    setLoadingMoreLeft,
+    hasMoreLeft,
+    setHasMoreLeft,
+    pendingLoadMoreLeftRef,
+    handleNeedMoreLeft,
+  } = useChartLoadMoreLeft({
+    symbol,
+    exchange,
+    marketType,
+    interval,
+    chartData,
+    loading,
+    dataSource,
+    cacheKey,
+    commitMergedChartData,
+    requestIndicatorRange,
+  });
+
   const loadData = useChartInitialLoad({
     exchange,
     marketType,
@@ -841,22 +858,11 @@ export default function App() {
     setMarketType(newMarketType);
     setSymbol(newSymbol);
     setInterval_(nextInterval);
-  }, [clearCache, clearChartData, exchange, exchangeCatalog, interval, marketType, savedCustomIntervals, symbol]);
+  }, [clearCache, clearChartData, exchange, exchangeCatalog, interval, marketType, savedCustomIntervals, setHasMoreLeft, symbol]);
 
   useEffect(() => {
     loadData(symbol, interval, marketType, exchange);
   }, [symbol, interval, marketType, exchange, loadData]);
-
-  // handleNeedMoreLeft cooldown
-  const needMoreLeftCooldownRef = useRef(new Map()); // interval -> timestamp
-  const NEED_MORE_LEFT_COOLDOWN_MS = 3_000;
-
-  // Pending "load more left" requests waiting for backfill to finish.
-  // Key = `${exchange}-${marketType}-${symbol}-${interval}` (matches cacheKey),
-  // value = { before: number, safetyAttempts: number, completionAttempts: number }.
-  const pendingLoadMoreLeftRef = useRef(new Map());
-  const PENDING_LOAD_MORE_LEFT_SAFETY_MAX_ATTEMPTS = 1;
-  const PENDING_LOAD_MORE_LEFT_SAFETY_MS = 6_000;
 
   const handleBackfillCompleted = useBackfillCompletionRuntime({
     symbol,
@@ -877,10 +883,6 @@ export default function App() {
     setLoading,
     setDatasetKey,
   });
-
-  // Stable handle to the latest handleNeedMoreLeft so the safety-net timer
-  // and other async sites can invoke it without being captured to a stale closure.
-  const handleNeedMoreLeftRef = useRef(null);
 
   useKlineStreamRuntime({
     symbol,
@@ -923,101 +925,6 @@ export default function App() {
     requestIndicatorRange,
     updateLastPrice,
   });
-
-  // ---- handle load more left ----
-  const oldestChartTime = chartData[0]?.time ?? null;
-  const handleNeedMoreLeft = useCallback(
-    async (oldestLoadedTime) => {
-      if (loading || loadingMoreLeft || !hasMoreLeft || dataSource === "mock") return;
-      if (oldestChartTime == null) return;
-
-      // ── Cooldown: prevent rapid repeated calls ──
-      // Uses adaptive cooldown: longer when backend is backfilling (0 bars returned)
-      const cooldownKey = interval;
-      const lastCall = needMoreLeftCooldownRef.current.get(cooldownKey) || 0;
-      if (Date.now() - lastCall < NEED_MORE_LEFT_COOLDOWN_MS) return;
-
-      const before = oldestLoadedTime || oldestChartTime;
-      const pendingKey = cacheKey(symbol, interval);
-      setLoadingMoreLeft(true);
-      try {
-        const result = await fetchKlinesBefore(symbol, interval, before, 500, marketType, exchange);
-        const older = result.data || [];
-
-        if (older.length > 0) {
-          const patchStart = older[0]?.time;
-          const patchEnd = older[older.length - 1]?.time;
-          commitMergedChartData(symbol, interval, older, { source: "history-before-page" });
-          if (patchStart && patchEnd) {
-            requestIndicatorRangeInChunks(
-              requestIndicatorRange,
-              patchStart,
-              patchEnd,
-              parseIntervalSeconds(interval),
-            );
-          }
-          // Got data — clear any pending wait for this series.
-          pendingLoadMoreLeftRef.current.delete(pendingKey);
-          // Normal cooldown on successful fetch
-          needMoreLeftCooldownRef.current.set(cooldownKey, Date.now());
-        } else if (result.has_more) {
-          // Backend returned 0 bars but says there's more (backfill in progress).
-          // Use a longer cooldown to avoid hammering the server while backfill runs.
-          // Record a pending intent so the backfill_completed WS handler knows to
-          // retry fetchKlinesBefore for this exact `before` cursor (the default
-          // fetchKlinesHistory window won't cover this older slice).
-          console.log(`[LoadMoreLeft] 0 bars returned for ${interval}, backfill likely in progress — will retry in 5s`);
-          const existing = pendingLoadMoreLeftRef.current.get(pendingKey);
-          if (!existing || existing.before !== before) {
-            pendingLoadMoreLeftRef.current.set(pendingKey, {
-              before,
-              safetyAttempts: 0,
-              completionAttempts: 0,
-            });
-          }
-          needMoreLeftCooldownRef.current.set(cooldownKey, Date.now() + 2_000); // effective 5s cooldown (3s base + 2s extra)
-
-          // Safety-net: if backfill_completed never arrives (event lost,
-          // filtered out, or backfill stalled), retry once after a delay.
-          setTimeout(() => {
-            const stillPending = pendingLoadMoreLeftRef.current.get(pendingKey);
-            if (!stillPending || stillPending.before !== before) return;
-            const safetyAttempts = stillPending.safetyAttempts ?? 0;
-            if (safetyAttempts >= PENDING_LOAD_MORE_LEFT_SAFETY_MAX_ATTEMPTS) {
-              return;
-            }
-            // Bypass cooldown for this single safety-net retry.
-            needMoreLeftCooldownRef.current.set(cooldownKey, 0);
-            stillPending.safetyAttempts = safetyAttempts + 1;
-            handleNeedMoreLeftRef.current?.(before);
-          }, PENDING_LOAD_MORE_LEFT_SAFETY_MS);
-        } else {
-          // No more data available upstream.
-          pendingLoadMoreLeftRef.current.delete(pendingKey);
-          needMoreLeftCooldownRef.current.set(cooldownKey, Date.now());
-        }
-
-        if (typeof result.has_more === "boolean") {
-          setHasMoreLeft(result.has_more);
-        } else if (older.length === 0) {
-          setHasMoreLeft(false);
-        }
-      } catch (err) {
-        console.error("Load older data failed:", err);
-        // On error, use a longer cooldown before retrying
-        needMoreLeftCooldownRef.current.set(cooldownKey, Date.now() + 2_000);
-      } finally {
-        setLoadingMoreLeft(false);
-      }
-    },
-    [cacheKey, commitMergedChartData, dataSource, exchange, hasMoreLeft, interval, loading, loadingMoreLeft, marketType, oldestChartTime, requestIndicatorRange, symbol],
-  );
-
-  // Keep latest handleNeedMoreLeft addressable from async callbacks (safety-net
-  // timer, backfill_completed handler) without capturing stale closures.
-  useEffect(() => {
-    handleNeedMoreLeftRef.current = handleNeedMoreLeft;
-  }, [handleNeedMoreLeft]);
 
   // Save visible range when switching away from current interval
   const saveCurrentVisibleRange = useCallback(() => {

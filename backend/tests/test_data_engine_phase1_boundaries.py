@@ -179,6 +179,7 @@ def test_main_delegates_data_engine_runtime_wiring() -> None:
         "BackfillEngine(",
         "TransportLayer(",
         "BinanceIngestionFactory(",
+        "ExchangeIngestionFactory(",
         "BackfillCoordinator(",
         "IngestionPriceSource",
         "SubscriptionService",
@@ -745,6 +746,39 @@ def test_data_manager_price_updates_emit_events_and_snapshot() -> None:
         assert len(events) == 1
         assert events[0].event_type == DataEventType.PRICE_UPDATED
         assert events[0].key == SeriesKey("BTC-USDT", "price", exchange="okx", market_type="spot")
+        await dm.event_bus.close()
+
+    asyncio.run(_run())
+
+
+def test_price_updates_do_not_touch_bar_aggregator() -> None:
+    async def _run() -> None:
+        class _ForbiddenAggregator:
+            def __getattribute__(self, name):
+                raise AssertionError(f"price path touched BarAggregator.{name}")
+
+        dm = DataManager()
+        await dm.ensure_price_stream("BTC-USDT", exchange="okx", market_type="spot")
+        dm.bar_aggregator = _ForbiddenAggregator()  # type: ignore[assignment]
+
+        await dm.on_price_ticks([{
+            "symbol": "okx:spot:BTC-USDT",
+            "exchange": "okx",
+            "market_type": "spot",
+            "price": 100,
+            "open": 90,
+            "high": 110,
+            "low": 80,
+            "change_pct": 11.1111,
+            "volume": 12,
+            "quote_volume": 1200,
+            "daily_open": 95,
+            "updated_at_ms": 123456,
+        }])
+
+        snapshot = dm.get_price("BTC-USDT", exchange="okx", market_type="spot")
+        assert snapshot is not None
+        assert snapshot.price == 100
         await dm.event_bus.close()
 
     asyncio.run(_run())

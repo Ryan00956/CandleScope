@@ -621,7 +621,12 @@ class StreamCoordinator:
                     )
 
                 async def on_market_event(market_event: MarketEvent) -> None:
-                    """Callback from ingestion: route real L6 events through BarAggregator."""
+                    """Callback from ingestion: route L6 events into K-line semantics.
+
+                    Realtime MarketEvents do not mutate DataManager cache directly.
+                    BarAggregator emits BarEvents, then AggregatorBridge converts
+                    those into cache/storage/EventBus updates.
+                    """
                     await self._bar_aggregator.on_market_event(market_event)
 
                 async def on_gap(gap: GapMarker) -> None:

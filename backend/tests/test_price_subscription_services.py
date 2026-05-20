@@ -15,7 +15,8 @@ from app.data_engine.data_manager.subscriptions import (
     SubscriptionService,
     SubscriptionTier,
 )
-from app.data_engine.ingestion.factory import BinanceIngestionFactory
+from app.data_engine.ingestion import factory as ingestion_factory
+from app.data_engine.ingestion.factory import ExchangeIngestionFactory
 from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
 
 DAY_MS = 86_400_000
@@ -135,7 +136,7 @@ def test_ingestion_factory_price_callback_receives_delivery_events() -> None:
             received.append(tick)
 
         pipeline = _Pipeline()
-        factory = BinanceIngestionFactory()
+        factory = ExchangeIngestionFactory()
         factory._register_price_callback(  # noqa: SLF001 - regression coverage for bridge wiring
             pipeline,
             _on_price,
@@ -185,8 +186,13 @@ def test_ingestion_factory_price_callback_receives_delivery_events() -> None:
 
 
 def test_ingestion_factory_uses_exchange_plugin_price_stream_type() -> None:
-    assert BinanceIngestionFactory._price_stream_type("binance", "spot") == StreamType.MINI_TICKER
-    assert BinanceIngestionFactory._price_stream_type("okx", "spot") == StreamType.TICKER
+    assert ExchangeIngestionFactory._price_stream_type("binance", "spot") == StreamType.MINI_TICKER
+    assert ExchangeIngestionFactory._price_stream_type("okx", "spot") == StreamType.TICKER
+
+
+def test_legacy_binance_ingestion_factory_alias_is_removed() -> None:
+    assert hasattr(ingestion_factory, "ExchangeIngestionFactory")
+    assert not hasattr(ingestion_factory, "BinanceIngestionFactory")
 
 
 def test_data_manager_daily_open_prefers_storage_1d_bar() -> None:

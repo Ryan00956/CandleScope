@@ -4,6 +4,7 @@ import asyncio
 
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.feed_control import FeedControlLayer
+from app.data_engine.ingestion import MarketDataIngress
 from app.data_engine.ingestion.models import (
     DataSource,
     FeedMode,
@@ -12,6 +13,7 @@ from app.data_engine.ingestion.models import (
     StreamDescriptor,
     StreamType,
 )
+from app.data_engine.ingestion.session import SessionLayer
 from app.data_engine.ingestion.shared_ws import SharedWsHubRegistry, SharedWsSessionAdapter
 from app.data_engine.ingestion.transport import TransportLayer
 
@@ -241,3 +243,28 @@ def test_shared_ws_hub_registry_uses_exchange_capabilities() -> None:
     assert registry.get_hub(okx_kline) is not None
     assert registry.get_hub(okx_ticker) is None
     assert registry.get_hub(binance_kline) is None
+
+
+def test_market_data_ingress_session_factory_follows_exchange_capabilities() -> None:
+    ingress = MarketDataIngress(IngestionConfig())
+
+    binance_kline = StreamDescriptor(
+        "BTCUSDT",
+        StreamType.KLINE,
+        interval="1m",
+        exchange="binance",
+    )
+    okx_kline = StreamDescriptor(
+        "BTC-USDT",
+        StreamType.KLINE,
+        interval="1m",
+        exchange="okx",
+    )
+
+    binance_factory = ingress._create_session_factory(binance_kline)
+    okx_factory = ingress._create_session_factory(okx_kline)
+
+    assert binance_factory is not None
+    assert okx_factory is not None
+    assert isinstance(binance_factory(), SessionLayer)
+    assert isinstance(okx_factory(), SharedWsSessionAdapter)

@@ -252,7 +252,3 @@ class ExchangeIngestionFactory:
             await self._ingress.stop()
             self._ingress = None
             logger.info("ExchangeIngestionFactory shut down")
-
-
-# Backward-compatible alias for older imports and tests.
-BinanceIngestionFactory = ExchangeIngestionFactory

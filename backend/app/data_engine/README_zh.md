@@ -181,6 +181,8 @@ cache merge + BACKFILL_COMPLETED / BACKFILL_FAILED
 | [interval_policy.py](interval_policy.py) | 周期解析与 bucket 策略 |
 | [runtime.py](runtime.py) | Data Engine 组合根 |
 | [MARKET_EVENT_DIRECT_PATH_zh.md](MARKET_EVENT_DIRECT_PATH_zh.md) | L6 `MarketEvent` 直通 `BarAggregator` 的设计与实施说明 |
+| [DATA_FLOW_PATHS_zh.md](DATA_FLOW_PATHS_zh.md) | 当前数据流路径地图，覆盖实时 K 线、backfill、价格快照、指标和交易所 WS routing |
+| [ARCHITECTURE_POLISH_ROADMAP_zh.md](ARCHITECTURE_POLISH_ROADMAP_zh.md) | 跨模块架构打磨路线图，覆盖命名、route 拆分、WS capability routing 和路径级测试 |
 
 ## 验证命令
 

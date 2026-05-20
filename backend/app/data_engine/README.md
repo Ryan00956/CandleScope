@@ -189,6 +189,8 @@ Operational entrypoints are exposed through the settings API:
 | [interval_policy.py](interval_policy.py) | Interval parsing and bucket policy |
 | [runtime.py](runtime.py) | Data Engine composition root |
 | [MARKET_EVENT_DIRECT_PATH_zh.md](MARKET_EVENT_DIRECT_PATH_zh.md) | Design and implementation notes for routing L6 `MarketEvent` directly into `BarAggregator` |
+| [DATA_FLOW_PATHS.md](DATA_FLOW_PATHS.md) | Current path map for realtime K-lines, backfill, price snapshots, indicators, and exchange WS routing |
+| [ARCHITECTURE_POLISH_ROADMAP.md](ARCHITECTURE_POLISH_ROADMAP.md) | Cross-module roadmap for simplifying names, routes, WS capability routing, and path-level tests |
 
 ## Verification
 

@@ -110,6 +110,8 @@ DataManager cache + events
 - [app/data_engine/bar_aggregator](app/data_engine/bar_aggregator/)
 - [app/data_engine/backfill](app/data_engine/backfill/)
 - [app/data_engine/data_manager](app/data_engine/data_manager/)
+- [app/data_engine/DATA_FLOW_PATHS_zh.md](app/data_engine/DATA_FLOW_PATHS_zh.md)
+- [app/data_engine/ARCHITECTURE_POLISH_ROADMAP_zh.md](app/data_engine/ARCHITECTURE_POLISH_ROADMAP_zh.md)
 
 ## 并发模型
 

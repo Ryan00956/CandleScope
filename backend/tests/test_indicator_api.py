@@ -6,7 +6,9 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.v1 import indicators as indicators_api
-from app.api.v1 import stream as stream_api
+from app.api.v1 import stream_indicator_payloads as payload_api
+from app.api.v1 import stream_indicators as stream_api
+from app.api.v1 import stream_pyne_subscriptions as pyne_stream_api
 from app.api.v1.indicators import ComputeRequest, CustomIndicatorPayload
 from app.indicator import create_engine
 from app.data_engine.data_manager.models import BarData
@@ -488,7 +490,7 @@ def test_indicator_ws_event_message_shape() -> None:
         bar_timestamp=1_700_000_000,
     )
 
-    msg = stream_api._indicator_event_to_ws_message(
+    msg = payload_api._indicator_event_to_ws_message(
         "client-1",
         event,
         {"exchange": "binance"},
@@ -510,7 +512,7 @@ def test_indicator_ws_error_message_has_structured_detail() -> None:
         bar_timestamp=1_700_000_000,
     )
 
-    msg = stream_api._indicator_event_to_ws_message(
+    msg = payload_api._indicator_event_to_ws_message(
         "client-1",
         event,
         {"exchange": "binance"},
@@ -657,7 +659,7 @@ def test_pyne_ws_snapshot_message_runs_script() -> None:
 
             return Result()
 
-    msg = stream_api._compute_pyne_snapshot_message(
+    msg = payload_api._compute_pyne_snapshot_message(
         "custom-1",
         FakeDataManager(),
         {
@@ -686,13 +688,13 @@ def test_pyne_ws_snapshot_message_runs_script() -> None:
 
 
 def test_indicator_range_command_supports_load_before_and_clamps_bars() -> None:
-    start_s, end_s, bars = stream_api._range_from_indicator_command(
+    start_s, end_s, bars = payload_api._range_from_indicator_command(
         action="load_before",
-        msg={"before": 1_700_000_000, "bars": stream_api.INDICATOR_MAX_RANGE_BARS + 100},
+        msg={"before": 1_700_000_000, "bars": payload_api.INDICATOR_MAX_RANGE_BARS + 100},
         interval="1h",
     )
 
-    assert bars == stream_api.INDICATOR_MAX_RANGE_BARS
+    assert bars == payload_api.INDICATOR_MAX_RANGE_BARS
     assert end_s == 1_700_000_000 - 3600
     assert start_s == end_s - (bars - 1) * 3600
 
@@ -721,7 +723,7 @@ def test_indicator_patch_from_snapshot_filters_time_series_payloads() -> None:
         ],
     }
 
-    patch = stream_api._patch_from_snapshot(payload, reason="load_range", start_s=20, end_s=20)
+    patch = payload_api._patch_from_snapshot(payload, reason="load_range", start_s=20, end_s=20)
 
     assert patch["type"] == "indicator.patch"
     assert patch["range"] == {"start": 20, "end": 20}
@@ -747,7 +749,7 @@ def test_pyne_ws_bar_update_sends_single_bar_patch() -> None:
             result.bars = bars
             return result
 
-    msg = stream_api._compute_pyne_snapshot_message(
+    msg = payload_api._compute_pyne_snapshot_message(
         "custom-1",
         FakeDataManager(),
         {
@@ -848,7 +850,7 @@ def on_bar(ctx, bar):
         "pyneSession": session,
     }
 
-    msg = stream_api._compute_incremental_pyne_bar_message(
+    msg = payload_api._compute_incremental_pyne_bar_message(
         "inc-1",
         meta,
         bar,
@@ -1006,7 +1008,7 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
         "params": {"length": 5},
         "securityMode": "safe",
     })
-    monkeypatch.setattr(stream_api, "_stream_custom_store", store)
+    monkeypatch.setattr(pyne_stream_api, "_stream_custom_store", store)
 
     class FakeDataManager:
         async def ensure_stream(self, *args, **kwargs):
@@ -1027,15 +1029,17 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
         sent.append(payload)
         return True
 
-    await stream_api._handle_pyne_indicator_subscribe(
-        websocket=None,
+    custom_handles = {}
+    custom_tasks = {}
+    client_meta = {}
+    queue = asyncio.Queue()
+
+    await pyne_stream_api.handle_pyne_indicator_subscribe(
         dm=FakeDataManager(),
-        indicator_engine=None,
-        subscribed={},
-        custom_handles={},
-        custom_tasks={},
-        queue=asyncio.Queue(),
-        client_meta={},
+        custom_handles=custom_handles,
+        custom_tasks=custom_tasks,
+        queue=queue,
+        client_meta=client_meta,
         client_id="saved-1",
         symbol="BTCUSDT",
         interval="1m",
@@ -1048,6 +1052,8 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
         security_mode=None,
         history_limit=100,
         send_json=send_json,
+        unsubscribe_client=lambda _client_id: None,
+        queue_message=stream_api._queue_indicator_message,
     )
 
     assert sent[0]["type"] == "indicator.snapshot"

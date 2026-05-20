@@ -110,6 +110,8 @@ Detailed docs:
 - [app/data_engine/bar_aggregator](app/data_engine/bar_aggregator/)
 - [app/data_engine/backfill](app/data_engine/backfill/)
 - [app/data_engine/data_manager](app/data_engine/data_manager/)
+- [app/data_engine/DATA_FLOW_PATHS.md](app/data_engine/DATA_FLOW_PATHS.md)
+- [app/data_engine/ARCHITECTURE_POLISH_ROADMAP.md](app/data_engine/ARCHITECTURE_POLISH_ROADMAP.md)
 
 ## Concurrency Model
 

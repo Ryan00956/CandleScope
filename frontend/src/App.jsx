@@ -17,6 +17,7 @@ import { useChartBackgroundPrefetch } from "./runtime/useChartBackgroundPrefetch
 import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./runtime/useChartLoadMoreLeft";
+import { useChartSettingsRuntime } from "./runtime/useChartSettingsRuntime";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
 import { useKlineStreamRuntime } from "./runtime/useKlineStreamRuntime";
 import { useWatchlistRuntime } from "./runtime/useWatchlistRuntime";
@@ -112,11 +113,6 @@ function updateUserPref(key, value) {
   const prefs = loadUserPrefs();
   prefs[key] = value;
   saveUserPrefs(prefs);
-}
-
-function getSystemTheme() {
-  if (typeof window === "undefined" || !window.matchMedia) return "dark";
-  return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
 
 export default function App() {
@@ -288,24 +284,7 @@ export default function App() {
 
   // --- Settings state (must be before useIndicators which needs settings.upColor/downColor) ---
   const [showSettings, setShowSettings] = useState(false);
-  const [settings, setSettings] = useState(() => {
-    const saved = localStorage.getItem("candlescope-settings");
-    const defaults = {
-      theme: "dark",
-      customBg: "#0f172a",
-      upColor: "#22c55e",
-      downColor: "#ef4444",
-      cachePreset: "standard",
-      cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
-      ephemeralCacheBars: 86400,
-    };
-    if (saved) {
-      return { ...defaults, ...JSON.parse(saved) };
-    }
-    return defaults;
-  });
-  const [systemTheme, setSystemTheme] = useState(getSystemTheme);
-  const resolvedTheme = settings.theme === "system" ? systemTheme : settings.theme;
+  const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
 
   // --- Chart export state ---
   const [showExportPanel, setShowExportPanel] = useState(false);
@@ -316,38 +295,6 @@ export default function App() {
   const [exportInProgress, setExportInProgress] = useState(false);
   const [exportError, setExportError] = useState(null);
   const [exportNotice, setExportNotice] = useState(null);
-
-  useEffect(() => {
-    if (typeof window === "undefined" || !window.matchMedia) return undefined;
-    const mediaQuery = window.matchMedia("(prefers-color-scheme: light)");
-    const handleSystemThemeChange = (event) => {
-      setSystemTheme(event.matches ? "light" : "dark");
-    };
-
-    setSystemTheme(mediaQuery.matches ? "light" : "dark");
-    if (mediaQuery.addEventListener) {
-      mediaQuery.addEventListener("change", handleSystemThemeChange);
-      return () => mediaQuery.removeEventListener("change", handleSystemThemeChange);
-    }
-
-    mediaQuery.addListener(handleSystemThemeChange);
-    return () => mediaQuery.removeListener(handleSystemThemeChange);
-  }, []);
-
-  useEffect(() => {
-    const root = document.documentElement;
-    root.setAttribute("data-theme", resolvedTheme);
-    if (settings.theme === "custom") {
-      root.style.setProperty("--bg-primary", settings.customBg);
-      root.style.setProperty("--bg-secondary", settings.customBg);
-    } else {
-      root.style.removeProperty("--bg-primary");
-      root.style.removeProperty("--bg-secondary");
-    }
-    root.style.setProperty("--candle-up", settings.upColor);
-    root.style.setProperty("--candle-down", settings.downColor);
-    localStorage.setItem("candlescope-settings", JSON.stringify(settings));
-  }, [resolvedTheme, settings]);
 
   // --- Indicator state ---
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);

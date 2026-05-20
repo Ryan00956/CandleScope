@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { fetchLatestKlines } from "../services/api";
+import { fetchLatestKlines } from "../../services/api";
 
 const PREFETCH_DELAY_MS = 2_000;
 const PREFETCH_INTERVAL_GAP_MS = 200;

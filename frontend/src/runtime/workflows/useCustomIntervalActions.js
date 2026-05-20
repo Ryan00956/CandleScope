@@ -1,5 +1,5 @@
 import { useCallback, useRef } from "react";
-import { parseIntervalSeconds } from "../utils/intervals";
+import { parseIntervalSeconds } from "../../utils/intervals";
 
 export function useCustomIntervalActions({
   exchange,

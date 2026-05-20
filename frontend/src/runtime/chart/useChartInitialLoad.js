@@ -1,5 +1,5 @@
 import { useCallback, useRef } from "react";
-import { fetchKlinesHistory, fetchLatestKlines } from "../services/api";
+import { fetchKlinesHistory, fetchLatestKlines } from "../../services/api";
 import { numericRange } from "./rangeRuntime";
 
 const INITIAL_BACKFILL_RETRY_MS = 3_000;

@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { updateCacheLimits } from "../services/api";
+import { updateCacheLimits } from "../../services/api";
 
 export function useCacheLimitsSync({ cacheLimits, ephemeralCacheBars }) {
   useEffect(() => {

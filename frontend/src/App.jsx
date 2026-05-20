@@ -1,43 +1,39 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MultiPaneChart from "./components/MultiPaneChart";
 import DrawingToolbar from "./components/DrawingToolbar";
-import ExportPanel from "./components/ExportPanel";
-import SettingsModal from "./components/SettingsModal";
-import IndicatorPanel from "./components/IndicatorPanel";
-import AlertsPanel from "./components/alerts/AlertsPanel";
 import IntervalSelector from "./components/IntervalSelector";
 import SymbolSearch from "./components/SymbolSearch";
 import WatchlistSidebar from "./components/WatchlistSidebar";
 import { useCustomIntervals } from "./hooks/useCustomIntervals";
 import { useIndicators } from "./hooks/useIndicators";
-import { useBackfillCompletionRuntime } from "./runtime/useBackfillCompletionRuntime";
-import { useCacheLimitsSync } from "./runtime/useCacheLimitsSync";
-import { useChartExportRuntime } from "./runtime/useChartExportRuntime";
-import { useChartBackgroundPrefetch } from "./runtime/useChartBackgroundPrefetch";
-import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
-import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
-import { useChartLoadMoreLeft } from "./runtime/useChartLoadMoreLeft";
-import { useChartNavigationRuntime } from "./runtime/useChartNavigationRuntime";
-import { useChartSettingsRuntime } from "./runtime/useChartSettingsRuntime";
-import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
-import { useCustomIntervalActions } from "./runtime/useCustomIntervalActions";
-import { useDrawingRuntime } from "./runtime/useDrawingRuntime";
-import { useIntervalNoticeRuntime } from "./runtime/useIntervalNoticeRuntime";
-import { useKlineStreamRuntime } from "./runtime/useKlineStreamRuntime";
-import { usePriceScalePrefs } from "./runtime/usePriceScalePrefs";
-import { useWatchlistRuntime } from "./runtime/useWatchlistRuntime";
-import { useWatchlistStorageRuntime } from "./runtime/useWatchlistStorageRuntime";
+import { useBackfillCompletionRuntime } from "./runtime/streams/useBackfillCompletionRuntime";
+import { useCacheLimitsSync } from "./runtime/preferences/useCacheLimitsSync";
+import { useChartExportRuntime } from "./runtime/workflows/useChartExportRuntime";
+import { useChartBackgroundPrefetch } from "./runtime/chart/useChartBackgroundPrefetch";
+import { useChartGapRecovery } from "./runtime/chart/useChartGapRecovery";
+import { useChartInitialLoad } from "./runtime/chart/useChartInitialLoad";
+import { useChartLoadMoreLeft } from "./runtime/chart/useChartLoadMoreLeft";
+import { useChartNavigationRuntime } from "./runtime/chart/useChartNavigationRuntime";
+import { useChartSettingsRuntime } from "./runtime/preferences/useChartSettingsRuntime";
+import { useChartDataRuntime } from "./runtime/chart/useChartDataRuntime";
+import { useCustomIntervalActions } from "./runtime/workflows/useCustomIntervalActions";
+import { useDrawingRuntime } from "./runtime/workflows/useDrawingRuntime";
+import { useIntervalNoticeRuntime } from "./runtime/workflows/useIntervalNoticeRuntime";
+import { useKlineStreamRuntime } from "./runtime/streams/useKlineStreamRuntime";
+import { usePriceScalePrefs } from "./runtime/preferences/usePriceScalePrefs";
+import { useWatchlistRuntime } from "./runtime/workflows/useWatchlistRuntime";
+import { useWatchlistStorageRuntime } from "./runtime/preferences/useWatchlistStorageRuntime";
 import { parseIntervalSeconds } from "./utils/intervals";
 import { inferExchangeFromSymbol } from "./utils/symbolKey";
 import {
   buildRenderableChartData,
-} from "./runtime/chartDataRuntime";
+} from "./runtime/chart/chartDataRuntime";
 import {
   buildChartDisplayState,
   formatPrice,
   formatPriceDiff,
   formatVolume,
-} from "./runtime/chartDisplayRuntime";
+} from "./runtime/chart/chartDisplayRuntime";
 import {
   buildSortedIntervals,
   getBaseWsIntervals,
@@ -46,12 +42,18 @@ import {
   getNativeIntervals,
   isNativeIntervalSupported,
   useExchangeCatalog,
-} from "./runtime/exchangeCatalogRuntime";
+} from "./runtime/exchange/exchangeCatalogRuntime";
 import {
   getVisibleRangeForInterval,
-} from "./runtime/viewportController";
+} from "./runtime/chart/viewportController";
 import { clearSavedDrawings } from "./services/drawingStorage";
 import "./index.css";
+
+const ExportPanel = React.lazy(() => import("./components/ExportPanel"));
+const SettingsModal = React.lazy(() => import("./components/SettingsModal"));
+const IndicatorPanel = React.lazy(() => import("./components/IndicatorPanel"));
+const AlertsPanel = React.lazy(() => import("./components/alerts/AlertsPanel"));
+
 // ---------- ErrorBoundary ----------
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -735,20 +737,24 @@ export default function App() {
           onToggleExportPanel={handleToggleExportPanel}
         />
 
-        <ExportPanel
-          isOpen={showExportPanel}
-          options={exportOptions}
-          onOptionsChange={handleExportOptionsChange}
-          onExport={handleExportChart}
-          onClose={handleCloseExportPanel}
-          inProgress={exportInProgress}
-          error={exportError}
-          notice={exportNotice}
-          metadata={exportMetadata}
-          loading={loading || loadingMoreLeft}
-          indicatorComputing={indicatorComputing}
-          preview={exportPreview}
-        />
+        {showExportPanel && (
+          <React.Suspense fallback={null}>
+            <ExportPanel
+              isOpen={showExportPanel}
+              options={exportOptions}
+              onOptionsChange={handleExportOptionsChange}
+              onExport={handleExportChart}
+              onClose={handleCloseExportPanel}
+              inProgress={exportInProgress}
+              error={exportError}
+              notice={exportNotice}
+              metadata={exportMetadata}
+              loading={loading || loadingMoreLeft}
+              indicatorComputing={indicatorComputing}
+              preview={exportPreview}
+            />
+          </React.Suspense>
+        )}
 
         {error ? (
           <div className="chart-area">
@@ -835,42 +841,54 @@ export default function App() {
       </div> {/* end main-content-area */}
 
       {/* Indicator Panel — slides in from the right */}
-      <IndicatorPanel
-        isOpen={showIndicatorPanel}
-        onClose={() => setShowIndicatorPanel(false)}
-        activeIndicators={activeIndicators}
-        paramSchemas={indicatorParamSchemas}
-        computing={indicatorComputing}
-        onAddIndicator={addIndicator}
-        onRemoveIndicator={removeIndicator}
-        onToggleVisibility={toggleVisibility}
-        onUpdateParams={updateIndicatorParams}
-        onUpdateScript={updateIndicatorScript}
-        onRecompute={recomputeIndicatorsWithUI}
-      />
+      {showIndicatorPanel && (
+        <React.Suspense fallback={null}>
+          <IndicatorPanel
+            isOpen={showIndicatorPanel}
+            onClose={() => setShowIndicatorPanel(false)}
+            activeIndicators={activeIndicators}
+            paramSchemas={indicatorParamSchemas}
+            computing={indicatorComputing}
+            onAddIndicator={addIndicator}
+            onRemoveIndicator={removeIndicator}
+            onToggleVisibility={toggleVisibility}
+            onUpdateParams={updateIndicatorParams}
+            onUpdateScript={updateIndicatorScript}
+            onRecompute={recomputeIndicatorsWithUI}
+          />
+        </React.Suspense>
+      )}
 
-      <AlertsPanel
-        isOpen={showAlertsPanel}
-        onClose={() => setShowAlertsPanel(false)}
-        currentSymbol={symbol}
-        currentMarketType={marketType}
-        currentExchange={exchange}
-        currentInterval={interval}
-        displayPrice={displayData?.close ?? lastPrice?.close}
-        wsStatus={wsStatus}
-        watchlists={watchlists}
-      />
+      {showAlertsPanel && (
+        <React.Suspense fallback={null}>
+          <AlertsPanel
+            isOpen={showAlertsPanel}
+            onClose={() => setShowAlertsPanel(false)}
+            currentSymbol={symbol}
+            currentMarketType={marketType}
+            currentExchange={exchange}
+            currentInterval={interval}
+            displayPrice={displayData?.close ?? lastPrice?.close}
+            wsStatus={wsStatus}
+            watchlists={watchlists}
+          />
+        </React.Suspense>
+      )}
 
-      <SettingsModal
-        isOpen={showSettings}
-        onClose={() => setShowSettings(false)}
-        settings={settings}
-        onUpdate={setSettings}
-        currentSymbol={symbol}
-        currentMarketType={marketType}
-        currentExchange={exchange}
-        watchlists={watchlists}
-      />
+      {showSettings && (
+        <React.Suspense fallback={null}>
+          <SettingsModal
+            isOpen={showSettings}
+            onClose={() => setShowSettings(false)}
+            settings={settings}
+            onUpdate={setSettings}
+            currentSymbol={symbol}
+            currentMarketType={marketType}
+            currentExchange={exchange}
+            watchlists={watchlists}
+          />
+        </React.Suspense>
+      )}
 
       <footer className="status-bar" id="status-bar">
         <div className="status-left">

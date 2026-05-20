@@ -4,7 +4,7 @@ import {
   getPriceStreamUrl,
   syncWatchlistSymbols,
   updateSubscriptionTier,
-} from "../services/api";
+} from "../../services/api";
 
 const WATCHLIST_SYNC_DEBOUNCE_MS = 500;
 const PRICE_WS_RECONNECT_MS = 3_000;

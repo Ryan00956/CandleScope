@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchKlinesBefore } from "../services/api";
-import { parseIntervalSeconds } from "../utils/intervals";
+import { fetchKlinesBefore } from "../../services/api";
+import { parseIntervalSeconds } from "../../utils/intervals";
 import { requestIndicatorRangeInChunks } from "./indicatorRangeRuntime";
 
 const NEED_MORE_LEFT_COOLDOWN_MS = 3_000;

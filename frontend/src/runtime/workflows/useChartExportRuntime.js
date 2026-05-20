@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
-import { useExportPreview } from "../hooks/useExportPreview";
-import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, downloadBlob } from "../services/exportService";
+import { useExportPreview } from "../../hooks/useExportPreview";
+import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, downloadBlob } from "../../services/exportService";
 
 export function useChartExportRuntime({
   exchange,

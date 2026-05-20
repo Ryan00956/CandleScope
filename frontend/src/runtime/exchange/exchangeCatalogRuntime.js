@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { fetchExchanges } from "../services/api";
-import { groupIntervalsByDuration, parseIntervalSeconds } from "../utils/intervals";
+import { fetchExchanges } from "../../services/api";
+import { groupIntervalsByDuration, parseIntervalSeconds } from "../../utils/intervals";
 
 const EXCHANGE_INTERVALS = {
   binance: {

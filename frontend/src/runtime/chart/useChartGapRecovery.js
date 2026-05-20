@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
-import { fetchKlinesHistory, fetchLatestKlines } from "../services/api";
-import { parseIntervalSeconds } from "../utils/intervals";
+import { fetchKlinesHistory, fetchLatestKlines } from "../../services/api";
+import { parseIntervalSeconds } from "../../utils/intervals";
 import { detectGaps } from "./chartDataRuntime";
 import { requestIndicatorRangeInChunks } from "./indicatorRangeRuntime";
 

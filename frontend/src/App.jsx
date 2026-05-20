@@ -12,6 +12,7 @@ import { useCustomIntervals } from "./hooks/useCustomIntervals";
 import { useExportPreview } from "./hooks/useExportPreview";
 import { useIndicators } from "./hooks/useIndicators";
 import { useBackfillCompletionRuntime } from "./runtime/useBackfillCompletionRuntime";
+import { useChartBackgroundPrefetch } from "./runtime/useChartBackgroundPrefetch";
 import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
@@ -28,7 +29,6 @@ import {
 import { requestIndicatorRangeInChunks } from "./runtime/indicatorRangeRuntime";
 import {
   fetchKlinesBefore,
-  fetchLatestKlines,
   fetchExchanges,
   fetchSubscriptions,
   updateSubscriptionTier,
@@ -989,34 +989,14 @@ export default function App() {
     setWsStatus,
   });
 
-  // ---------- Background prefetch: load history for ALL intervals ----------
-  useEffect(() => {
-    let cancelled = false;
-    const prefetch = async () => {
-      // Fire-and-forget: load history for all tracked intervals into cache
-      // so switching is instant
-      for (const intv of trackedIntervals) {
-        if (cancelled) break;
-        if (hasCache(symbol, intv, { marketType, exchange })) continue; // already cached
-
-        try {
-          const result = await fetchLatestKlines(symbol, intv, 500, marketType, exchange, "background-prefetch");
-          if (cancelled) break;
-          if (result?.data?.length) {
-            setCache(symbol, intv, result.data, { marketType, exchange });
-          }
-        } catch {
-          // Non-critical, continue
-        }
-        // Small delay to avoid hammering the backend
-        await new Promise((r) => setTimeout(r, 200));
-      }
-    };
-
-    // Start prefetching after a short delay so the active interval loads first
-    const timer = setTimeout(prefetch, 2000);
-    return () => { cancelled = true; clearTimeout(timer); };
-  }, [exchange, hasCache, marketType, setCache, symbol, trackedIntervals]);
+  useChartBackgroundPrefetch({
+    symbol,
+    exchange,
+    marketType,
+    trackedIntervals,
+    hasCache,
+    setCache,
+  });
 
   const { resetGapRecovery } = useChartGapRecovery({
     loading,

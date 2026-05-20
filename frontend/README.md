@@ -2,6 +2,12 @@
 
 React/Vite charting UI for CandleScope.
 
+## Architecture
+
+- [Frontend Architecture](ARCHITECTURE.md)
+- [前端架构](ARCHITECTURE_zh.md)
+- [Runtime Boundaries](src/runtime/README.md)
+
 ## Backend Connection
 
 The frontend uses same-origin `/api/v1` by default. During local development,

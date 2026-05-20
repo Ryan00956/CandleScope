@@ -51,6 +51,10 @@ npm install
 npm run dev
 ```
 
+本地开发时，前端默认使用同源 `/api/v1`；Vite 会把 HTTP 和 WebSocket 请求代理到
+`http://localhost:8000`。`http://localhost:5173` 和
+`http://127.0.0.1:5173` 都可以作为开发入口。
+
 默认地址：
 
 | 服务 | URL |
@@ -181,19 +185,27 @@ DataManager cache + EventBus
 
 前端是 React + Vite 应用，图表层使用 Lightweight Charts v5。
 
+前端架构文档：
+
+- [Frontend Architecture](frontend/ARCHITECTURE.md)
+- [前端架构](frontend/ARCHITECTURE_zh.md)
+- [Runtime Boundaries](frontend/src/runtime/README.md)
+
 重要前端模块：
 
 | 路径 | 用途 |
 |---|---|
-| `frontend/src/App.jsx` | 应用主框架 |
+| `frontend/src/App.jsx` | runtime hooks 和 UI surface 的组合根 |
 | `frontend/src/components/MultiPaneChart.jsx` | 多窗格图表布局 |
 | `frontend/src/components/ChartWidget.jsx` | Lightweight Charts 封装 |
 | `frontend/src/components/DrawingToolbar.jsx` | 绘图工具控制 |
-| `frontend/src/components/IndicatorPanel.jsx` | 指标浏览和配置 |
-| `frontend/src/components/IndicatorEditor.jsx` | Pyne/自定义指标编辑器 |
+| `frontend/src/components/IndicatorPanel.jsx` | 懒加载的指标浏览和配置 |
+| `frontend/src/components/IndicatorEditor.jsx` | 通过指标工作流加载的 Pyne/自定义指标编辑器 |
 | `frontend/src/components/SymbolSearch*.jsx` | 交易所感知 symbol search |
 | `frontend/src/components/WatchlistSidebar.jsx` | 自选列表和价格跟踪 |
-| `frontend/src/components/SettingsModal.jsx` | proxy、数据、图表和维护设置 |
+| `frontend/src/components/SettingsModal.jsx` | 懒加载的 proxy、数据、图表和维护设置 |
+| `frontend/src/runtime` | 按 chart、streams、exchange、preferences、workflows 分组的 runtime 编排层 |
+| `frontend/src/services/apiConfig.js` | API base 和 HTTP 到 WebSocket URL 配置 |
 | `frontend/src/services/api.js` | 主要后端 API client |
 | `frontend/src/services/indicatorApi.js` | 指标 API client |
 | `frontend/src/hooks/useIndicators.js` | 指标 HTTP/WS 集成 |
@@ -328,10 +340,15 @@ npm run build
 npm run lint
 ```
 
+渲染层 smoke 检查：启动后端和 Vite 后，打开 `http://localhost:5173/`
+或 `http://127.0.0.1:5173/`。确认状态栏达到 `Connected to Binance`，
+显示非零 `bars`，并显示 `Live (WebSocket)`。
+
 ## 说明
 
 - 如果交易所访问需要代理，可在设置面板或 `/api/v1/settings/proxy` 配置。
 - runtime proxy 设置默认持久化到 `backend/data/proxy_settings.json`。
+- Windows 下如果后端启动时打印状态符号导致编码错误，可设置 `PYTHONIOENCODING=utf-8` 和 `PYTHONUTF8=1` 后再启动。
 - SQLite 数据是本地文件，并已被 git 忽略。
 - Pyne 脚本会按配置的 security mode 在后端本地执行。只对完全信任的脚本使用 `unsafe`。
 - 本仓库使用 GNU GPL-3.0 许可证，见 [LICENSE](LICENSE)。

@@ -15,6 +15,7 @@ import { useBackfillCompletionRuntime } from "./runtime/useBackfillCompletionRun
 import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
+import { useKlineStreamRuntime } from "./runtime/useKlineStreamRuntime";
 import { groupIntervalsByDuration, parseIntervalSeconds } from "./utils/intervals";
 import { inferExchangeFromSymbol } from "./utils/symbolKey";
 import {
@@ -27,9 +28,7 @@ import {
 import { requestIndicatorRangeInChunks } from "./runtime/indicatorRangeRuntime";
 import {
   fetchKlinesBefore,
-  fetchKlinesHistory,
   fetchLatestKlines,
-  getMultiStreamUrl,
   fetchExchanges,
   fetchSubscriptions,
   updateSubscriptionTier,
@@ -737,8 +736,6 @@ export default function App() {
   }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, nativeIntervals, savedCustomIntervals]);
   const trackedIntervalsRef = useRef(trackedIntervals);
   trackedIntervalsRef.current = trackedIntervals;
-  const socketRef = useRef(null);
-  const liveSubscribedIntervalsRef = useRef(new Set());
 
   // --- Watchlist state (shared between sidebar and search modal) ---
   const [watchlists, setWatchlists] = useState(loadWatchlists);
@@ -975,274 +972,22 @@ export default function App() {
   // and other async sites can invoke it without being captured to a stale closure.
   const handleNeedMoreLeftRef = useRef(null);
 
-  const syncSocketSubscriptions = useCallback((socket, desiredIntervals) => {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
-    const desired = new Set(desiredIntervals);
-    const active = liveSubscribedIntervalsRef.current;
-    const toSubscribe = desiredIntervals.filter((intv) => !active.has(intv));
-    const toUnsubscribe = Array.from(active).filter((intv) => !desired.has(intv));
-
-    if (toSubscribe.length > 0) {
-      socket.send(JSON.stringify({
-        action: "subscribe",
-        intervals: toSubscribe,
-      }));
-      toSubscribe.forEach((intv) => active.add(intv));
-    }
-
-    if (toUnsubscribe.length > 0) {
-      socket.send(JSON.stringify({
-        action: "unsubscribe",
-        intervals: toUnsubscribe,
-      }));
-      toUnsubscribe.forEach((intv) => active.delete(intv));
-    }
-  }, []);
-
-  // ============================================================
-  //  SINGLE PERSISTENT MULTI-INTERVAL WEBSOCKET
-  //  Connects once, subscribes to ALL intervals, updates all caches
-  //  Features: exponential backoff, heartbeat ping, max retry limit
-  // ============================================================
-  useEffect(() => {
-    let active = true;
-    let socket = null;
-    let reconnectTimer = null;
-    let pingTimer = null;
-    let pollInterval = null;
-    let pollingInFlight = false;
-
-    // --- Reconnect state ---
-    const WS_RECONNECT_BASE_DELAY = 2000;   // start at 2s
-    const WS_RECONNECT_MAX_DELAY = 60000;   // cap at 60s
-    const WS_MAX_RECONNECT_ATTEMPTS = 20;   // after 20 failures, stay on polling
-    const WS_PING_INTERVAL = 30000;         // heartbeat every 30s
-    let reconnectDelay = WS_RECONNECT_BASE_DELAY;
-    let reconnectAttempts = 0;
-
-    const stopPing = () => {
-      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-    };
-
-    const startPing = () => {
-      stopPing();
-      pingTimer = setInterval(() => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          try { socket.send("ping"); } catch { /* ignore */ }
-        }
-      }, WS_PING_INTERVAL);
-    };
-
-    const startPolling = () => {
-      if (pollInterval) clearInterval(pollInterval);
-      pollInterval = setInterval(async () => {
-        if (!active) return;
-        if (pollingInFlight) return;
-        pollingInFlight = true;
-        try {
-          const currentIntv = intervalRef.current;
-          const result = await fetchLatestKlines(symbol, currentIntv, 2, marketType, exchange);
-          if (!result?.data?.length) return;
-
-          commitPatchedChartData(symbol, currentIntv, result.data, { source: "polling-latest" });
-          const latestTick = result.data[result.data.length - 1];
-          updateLastPrice(latestTick, currentIntv);
-          setWsStatus((prev) => (prev === "live" ? prev : "fallback"));
-        } catch (pollErr) {
-          console.warn("Polling fallback failed:", pollErr);
-        } finally {
-          pollingInFlight = false;
-        }
-      }, 1000);
-    };
-
-    const scheduleReconnect = () => {
-      // Clear any existing reconnect timer to prevent duplicates
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-
-      reconnectAttempts += 1;
-      if (reconnectAttempts > WS_MAX_RECONNECT_ATTEMPTS) {
-        console.warn(`WS: exceeded ${WS_MAX_RECONNECT_ATTEMPTS} reconnect attempts, staying on polling fallback`);
-        setWsStatus("fallback");
-        return;
-      }
-
-      console.log(`WS: scheduling reconnect #${reconnectAttempts} in ${reconnectDelay}ms`);
-      setWsStatus("reconnecting");
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connect();
-      }, reconnectDelay);
-
-      // Exponential backoff: 2s → 4s → 8s → ... → 60s cap
-      reconnectDelay = Math.min(reconnectDelay * 2, WS_RECONNECT_MAX_DELAY);
-    };
-
-    const connect = () => {
-      if (!active) return;
-      setWsStatus("connecting");
-
-      // Close any lingering old socket
-      if (socket) {
-        try { socket.close(); } catch { /* */ }
-        socket = null;
-      }
-
-      try {
-        const url = getMultiStreamUrl(symbol, marketType, exchange);
-        socket = new WebSocket(url);
-        socketRef.current = socket;
-
-        socket.onopen = () => {
-          if (!active) return;
-
-          // Track whether this is a RE-connection (not the first connect)
-          const isReconnection = reconnectAttempts > 0;
-
-          // Reset reconnect state on successful connection
-          reconnectDelay = WS_RECONNECT_BASE_DELAY;
-          reconnectAttempts = 0;
-
-          liveSubscribedIntervalsRef.current = new Set();
-          syncSocketSubscriptions(socket, trackedIntervalsRef.current);
-          setWsStatus("live");
-
-          // Stop polling fallback — WS is live
-          if (pollInterval) {
-            clearInterval(pollInterval);
-            pollInterval = null;
-          }
-
-          // Start heartbeat ping
-          startPing();
-
-          // ── Recovery after WS reconnection ──
-          // During WS downtime, some kline updates may have been missed.
-          // Fetch recent bars for the active interval to fill the gap.
-          if (isReconnection) {
-            const currentIntv = intervalRef.current;
-            const days = getIntervalDays(currentIntv, exchange);
-            console.log(`[WS-Recovery] Reconnected, reloading full history for ${symbol}@${currentIntv}`);
-            fetchKlinesHistory(symbol, currentIntv, days, marketType, exchange)
-              .then((result) => {
-                if (!active || !result?.data?.length) return;
-                commitMergedChartData(symbol, currentIntv, result.data, { source: "ws-reconnect-history" });
-                const latest = result.data[result.data.length - 1];
-                updateLastPrice(latest, currentIntv);
-                console.log(`[WS-Recovery] Reloaded ${result.data.length} bars after reconnect`);
-              })
-              .catch((err) => {
-                console.warn("[WS-Recovery] Failed to recover after reconnect:", err);
-              });
-          }
-        };
-
-        socket.onmessage = (event) => {
-          if (!active) return;
-          try {
-            // Ignore pong text responses from heartbeat
-            if (event.data === "pong") return;
-
-            const msg = JSON.parse(event.data);
-
-            if (msg.type === "stream_status") {
-              // Only update status display for the currently active interval
-              if (msg.interval === intervalRef.current) {
-                if (msg.status === "live") setWsStatus("live");
-                if (msg.status === "reconnecting") setWsStatus("reconnecting");
-              }
-              return;
-            }
-
-            if (msg.type === "subscribed" || msg.type === "connected" ||
-              msg.type === "warning" || msg.type === "error") {
-              return;
-            }
-
-            if (handleBackfillCompleted(msg)) return;
-
-            if (msg.type !== "kline" || !msg.data) return;
-
-            const msgInterval = msg.interval;
-            const tick = msg.data;
-            const currentIntv = intervalRef.current;
-            const isCurrentInterval = msgInterval === currentIntv;
-
-            // ── Use 1m stream as the canonical real-time price source ──
-            // The 1m stream updates most frequently and always reflects
-            // the latest trade price, ensuring all intervals show the
-            // same "current price" in the header.
-            if (msgInterval === "1m") {
-              updateRealtimePrice(tick.close);
-            }
-
-            // ── Always update the background cache for this interval ──
-            patchCacheTick(symbol, msgInterval, tick, { marketType, exchange });
-
-            // ── Update active chart if this is the current interval ──
-            // When the backend DataManager is active and sending aggregated
-            // custom-interval K-lines directly (isCurrentInterval=true for
-            // custom intervals like "7m"), we use those directly and skip
-            // the client-side aggregation below to avoid double-update
-            // conflicts on the last two bars.
-            if (isCurrentInterval) {
-              commitPatchedChartData(symbol, currentIntv, [tick], { source: "kline-ws" });
-              updateLastPrice(tick, currentIntv);
-            }
-          } catch (parseErr) {
-            console.error("WS parse failed:", parseErr);
-          }
-        };
-
-        socket.onerror = () => {
-          if (!active) return;
-          // onerror is always followed by onclose, so just start polling here
-          // and let onclose handle the reconnect scheduling
-          startPolling();
-        };
-
-        socket.onclose = () => {
-          if (!active) return;
-          stopPing();
-          startPolling();
-          scheduleReconnect();
-        };
-      } catch (connectErr) {
-        console.warn("WS initialization failed:", connectErr);
-        startPolling();
-        scheduleReconnect();
-      }
-    };
-
-    // Start immediately — don't wait for data load
-    connect();
-
-    const initialFallbackTimer = setTimeout(() => {
-      if (active && !pollInterval && (!socket || socket.readyState !== WebSocket.OPEN)) {
-        startPolling();
-      }
-    }, 4000);
-
-    return () => {
-      active = false;
-      clearTimeout(initialFallbackTimer);
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-      stopPing();
-      if (pollInterval) clearInterval(pollInterval);
-      if (socket) {
-        try { socket.close(); } catch { /* */ }
-      }
-      if (socketRef.current === socket) {
-        socketRef.current = null;
-      }
-      liveSubscribedIntervalsRef.current = new Set();
-    };
-  }, [commitMergedChartData, commitPatchedChartData, exchange, handleBackfillCompleted, marketType, patchCacheTick, syncSocketSubscriptions, symbol, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
-
-  useEffect(() => {
-    syncSocketSubscriptions(socketRef.current, trackedIntervals);
-  }, [syncSocketSubscriptions, trackedIntervals]);
+  useKlineStreamRuntime({
+    symbol,
+    exchange,
+    marketType,
+    trackedIntervals,
+    trackedIntervalsRef,
+    intervalRef,
+    getIntervalDays,
+    commitMergedChartData,
+    commitPatchedChartData,
+    patchCacheTick,
+    updateLastPrice,
+    updateRealtimePrice,
+    handleBackfillCompleted,
+    setWsStatus,
+  });
 
   // ---------- Background prefetch: load history for ALL intervals ----------
   useEffect(() => {

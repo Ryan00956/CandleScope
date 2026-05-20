@@ -34,3 +34,17 @@ def test_exchange_diagnostics_reports_loaded_plugins() -> None:
     assert by_id["okx"]["policy_classes"]["pagination"].endswith(
         "OkxHistoricalPaginationPolicy"
     )
+    binance_rules = {
+        rule["name"]: rule
+        for rule in by_id["binance"]["rate_limit_rules"]
+    }
+    okx_rules = {
+        rule["name"]: rule
+        for rule in by_id["okx"]["rate_limit_rules"]
+    }
+    assert binance_rules["binance_spot_klines"]["bucket_key"] == (
+        "binance:spot:request_weight:ip"
+    )
+    assert binance_rules["binance_spot_klines"]["algorithm"] == "header_weight"
+    assert binance_rules["binance_futures_klines"]["endpoint"] == "/fapi/v1/klines"
+    assert okx_rules["okx_history_candles"]["bucket_key"] == "okx:history-candles:ip"

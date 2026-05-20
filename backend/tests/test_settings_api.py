@@ -33,12 +33,31 @@ class _BackfillCoordinator:
         }
 
 
+class _BackfillEngine:
+    def snapshot(self) -> dict:
+        return {
+            "component": "BackfillEngine",
+            "fetcher": {
+                "exchange_rate_limits": {
+                    "binance:spot:request_weight:ip": {
+                        "rule": "binance_spot_klines",
+                        "algorithm": "token_bucket",
+                    }
+                }
+            },
+        }
+
+
 class _Runtime:
     def __init__(self) -> None:
         self.coordinator = _BackfillCoordinator()
+        self.engine = _BackfillEngine()
 
     def get_backfill_coordinator(self):
         return self.coordinator
+
+    def get_backfill_engine(self):
+        return self.engine
 
 
 def _client(*, with_runtime: bool = True) -> TestClient:
@@ -64,6 +83,11 @@ def test_storage_health_returns_backfill_snapshot() -> None:
     ]
     assert payload["open_gap_count"] == 1
     assert payload["backfill"]["submitted"] == 3
+    assert (
+        payload["backfill_engine"]["fetcher"]["exchange_rate_limits"]
+        ["binance:spot:request_weight:ip"]["rule"]
+        == "binance_spot_klines"
+    )
 
 
 def test_storage_health_requires_data_engine() -> None:

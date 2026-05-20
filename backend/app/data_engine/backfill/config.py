@@ -26,6 +26,16 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _env_optional_int(key: str) -> int | None:
+    raw = os.getenv(key)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _env_float(key: str, default: float) -> float:
     raw = os.getenv(key)
     if raw is None:
@@ -117,10 +127,20 @@ class BackfillConfig:
     )
 
     # ── Historical Fetcher ───────────────────────────────────
-    # Maximum concurrent REST requests. Keep the default modest because a
-    # single page can carry non-trivial exchange request weight.
+    # Legacy generic REST concurrency. Kept for compatibility and as the
+    # default for global/exchange-specific fields when they are not set.
     fetch_concurrency: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_CONCURRENCY", 2),
+    )
+    # Process-wide REST fetch concurrency. This is local resource protection,
+    # not an exchange quota.
+    fetch_global_concurrency: int | None = field(
+        default_factory=lambda: _env_optional_int("BACKFILL_FETCH_GLOBAL_CONCURRENCY"),
+    )
+    # Binance spot per-endpoint concurrency. If unset, the legacy generic
+    # fetch_concurrency value is used.
+    fetch_binance_spot_concurrency: int | None = field(
+        default_factory=lambda: _env_optional_int("BACKFILL_FETCH_BINANCE_SPOT_CONCURRENCY"),
     )
     # Binance Futures applies strict IP-level request limits. Serialize
     # futures backfills by default so a multi-interval repair cannot fan out
@@ -154,10 +174,27 @@ class BackfillConfig:
     fetch_max_retries: int = field(
         default_factory=lambda: _env_int("BACKFILL_FETCH_MAX_RETRIES", 3),
     )
-    # Additional backoff when the exchange returns HTTP 429. This is an
-    # exchange/market-wide cooldown, not just a per-task retry sleep.
+    # Additional fallback backoff when the exchange returns HTTP 429. The
+    # endpoint-aware rate limiter applies it to the matching bucket.
     fetch_429_backoff_seconds: float = field(
         default_factory=lambda: _env_float("BACKFILL_FETCH_429_BACKOFF_SECONDS", 60.0),
+    )
+    # Safety factor applied to official exchange REST quotas. A value below
+    # 1.0 leaves headroom for non-backfill traffic and clock/window jitter.
+    fetch_rate_limit_safety_factor: float = field(
+        default_factory=lambda: _env_float("BACKFILL_RATE_LIMIT_SAFETY_FACTOR", 0.8),
+    )
+    fetch_binance_spot_weight_per_minute: int = field(
+        default_factory=lambda: _env_int("BACKFILL_RATE_LIMIT_BINANCE_SPOT_WEIGHT_PER_MINUTE", 1200),
+    )
+    fetch_binance_futures_weight_per_minute: int = field(
+        default_factory=lambda: _env_int("BACKFILL_RATE_LIMIT_BINANCE_FUTURES_WEIGHT_PER_MINUTE", 2400),
+    )
+    fetch_okx_candles_requests_per_2s: int = field(
+        default_factory=lambda: _env_int("BACKFILL_RATE_LIMIT_OKX_CANDLES_REQUESTS_PER_2S", 40),
+    )
+    fetch_okx_history_candles_requests_per_2s: int = field(
+        default_factory=lambda: _env_int("BACKFILL_RATE_LIMIT_OKX_HISTORY_CANDLES_REQUESTS_PER_2S", 20),
     )
     # Per-request timeout (seconds), inherits from ingestion if 0
     fetch_timeout: int = field(

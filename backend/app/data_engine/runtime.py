@@ -79,6 +79,10 @@ class DataEngineRuntime:
         """Return the runtime-owned backfill coordinator."""
         return self.backfill_coordinator
 
+    def get_backfill_engine(self) -> BackfillEngine:
+        """Return the runtime-owned backfill engine."""
+        return self.backfill_engine
+
     def _ingestion_configs(self) -> list[IngestionConfig]:
         configs: list[IngestionConfig] = []
 

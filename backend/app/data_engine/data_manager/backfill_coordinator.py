@@ -190,6 +190,8 @@ class _RequestState:
 
 @dataclass(slots=True)
 class _TokenBucket:
+    """Local scheduler dispatch bucket, separate from exchange REST quotas."""
+
     key: str
     capacity: int = 60
     refill_per_second: float = 60.0
@@ -220,8 +222,10 @@ class _TokenBucket:
 
     def snapshot(self) -> dict[str, Any]:
         return {
+            "scope": "scheduler_dispatch",
             "tokens": round(self.tokens, 2),
             "capacity": self.capacity,
+            "refill_per_second": self.refill_per_second,
             "cooldown_until_ms": self.cooldown_until_ms,
         }
 
@@ -353,6 +357,10 @@ class _BackfillScheduler:
             "next_drain_in_ms": self._next_drain_in_ms(),
             "rate_limited_skips": self.rate_limited_skips,
             "buckets": {
+                key: bucket.snapshot()
+                for key, bucket in sorted(self._buckets.items())
+            },
+            "scheduler_buckets": {
                 key: bucket.snapshot()
                 for key, bucket in sorted(self._buckets.items())
             },

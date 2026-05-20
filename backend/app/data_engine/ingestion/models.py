@@ -238,6 +238,9 @@ class RawMessage:
     stream_type: StreamType
     received_at_ms: int           # local timestamp when we received it
     endpoint: str = ""            # which URL / endpoint delivered this
+    http_status: int | None = None
+    http_headers: dict[str, str] | None = None
+    http_body_code: str | None = None
 
 
 

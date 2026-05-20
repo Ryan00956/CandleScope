@@ -28,10 +28,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import defaultdict
 from typing import Callable, Awaitable
 
-from app.exchanges import RateLimitPolicy, bootstrap_default_adapters, get_exchange_registry
+from app.exchanges import (
+    HistoricalRequest,
+    RateLimitManager,
+    RateLimitPolicy,
+    RateLimitRule,
+    bootstrap_default_adapters,
+    get_exchange_registry,
+)
 from app.data_engine.interval_policy import parse_interval_ms
 
 from ..ingestion.config import IngestionConfig
@@ -80,11 +86,9 @@ class HistoricalFetcher:
         self._metrics = LayerMetrics("HistoricalFetcher")
 
         # Concurrency control
-        self._semaphore = asyncio.Semaphore(self._cfg.fetch_concurrency)
+        self._semaphore = asyncio.Semaphore(self._global_fetch_concurrency())
         self._exchange_semaphores: dict[tuple[str, str], asyncio.Semaphore] = {}
-        self._exchange_rate_locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._exchange_next_request_at: dict[tuple[str, str], float] = {}
-        self._exchange_cooldown_until: dict[tuple[str, str], float] = {}
+        self._rate_limit_manager = RateLimitManager()
 
         # Extension points
         self._progress_callbacks: list[ProgressCallback] = []
@@ -101,16 +105,17 @@ class HistoricalFetcher:
         return {
             "component": "HistoricalFetcher",
             "concurrency": self._cfg.fetch_concurrency,
+            "global_concurrency": self._global_fetch_concurrency(),
+            "binance_spot_concurrency": getattr(
+                self._cfg, "fetch_binance_spot_concurrency", None,
+            ),
             "binance_futures_concurrency": self._cfg.fetch_binance_futures_concurrency,
             "okx_concurrency": self._cfg.fetch_okx_concurrency,
             "batch_size": self._cfg.fetch_batch_size,
             "rate_limit_delay": self._cfg.fetch_rate_limit_delay,
             "binance_futures_rate_limit_delay": self._cfg.fetch_binance_futures_rate_limit_delay,
             "okx_rate_limit_delay": self._cfg.fetch_okx_rate_limit_delay,
-            "rate_limit_cooldowns": {
-                f"{exchange}:{market_type}": until
-                for (exchange, market_type), until in self._exchange_cooldown_until.items()
-            },
+            "exchange_rate_limits": self._rate_limit_manager.snapshot(),
             "metrics": self._metrics.snapshot(),
         }
 
@@ -282,14 +287,16 @@ class HistoricalFetcher:
 
             while retry_count < max_attempts:
                 try:
-                    exchange_semaphore = self._get_exchange_semaphore(task)
+                    exchange_semaphore = self._get_exchange_semaphore(task, req)
                     async with exchange_semaphore:
-                        await self._rate_limit(task)
+                        await self._rate_limit(task, req)
                         try:
                             raw_messages = await self._transport.http_fetch(req)
                         except TransportError as exc:
-                            await self._record_rate_limit_cooldown(task, exc)
+                            await self._record_rate_limit_cooldown(task, exc, req)
                             raise
+                        if raw_messages:
+                            self._record_rate_limit_response(task, req, raw_messages[0])
                     self._metrics.inc("http_pages_fetched")
 
                     for msg in raw_messages:
@@ -313,8 +320,6 @@ class HistoricalFetcher:
                     if retry_count >= max_attempts:
                         errors.append(error_msg)
                         await self._fire_error(task, error_msg)
-                    else:
-                        await self._rate_limit(task)
 
                 except Exception as exc:
                     error_msg = f"Unexpected fetch error: {exc}"
@@ -421,6 +426,7 @@ class HistoricalFetcher:
     async def _rate_limit(
         self,
         task: BackfillTask | None = None,
+        request: TransportRequest | None = None,
         penalty_seconds: float = 0.0,
     ) -> None:
         """Apply rate limiting between requests."""
@@ -436,50 +442,49 @@ class HistoricalFetcher:
                 await asyncio.sleep(base_delay + penalty_seconds)
             return
 
-        key = self._exchange_key(task)
-        lock = self._exchange_rate_locks[key]
-        base_delay = self._base_delay_for_task(task)
+        historical_request = self._historical_request(task, request)
+        rule = self._rate_limit_rule(task, historical_request)
+        if penalty_seconds > 0:
+            self._rate_limit_manager.record_cooldown(rule, penalty_seconds)
+        await self._rate_limit_manager.acquire(rule, historical_request)
 
-        async with lock:
-            now = time.monotonic()
-            if penalty_seconds > 0:
-                self._extend_cooldown(key, now + penalty_seconds)
-            next_allowed_at = self._exchange_next_request_at.get(key, now)
-            cooldown_until = self._exchange_cooldown_until.get(key, now)
-            next_allowed_at = max(next_allowed_at, cooldown_until)
-            wait_seconds = max(0.0, next_allowed_at - now)
-            if wait_seconds > 0:
-                await asyncio.sleep(wait_seconds)
-            now = time.monotonic()
-            if self._exchange_cooldown_until.get(key, 0.0) <= now:
-                self._exchange_cooldown_until.pop(key, None)
-            self._exchange_next_request_at[key] = now + base_delay
-
-    def _get_exchange_semaphore(self, task: BackfillTask) -> asyncio.Semaphore:
-        key = self._exchange_key(task)
+    def _get_exchange_semaphore(
+        self,
+        task: BackfillTask,
+        request: TransportRequest | None = None,
+    ) -> asyncio.Semaphore:
+        historical_request = self._historical_request(task, request)
+        rule = self._rate_limit_rule(task, historical_request)
+        key = (rule.bucket_key, str(rule.max_concurrency or self._cfg.fetch_concurrency))
         sem = self._exchange_semaphores.get(key)
         if sem is not None:
             return sem
-        limit = self._rate_limit_policy(task).concurrency_for(task.market_type)
+        limit = rule.max_concurrency or self._rate_limit_policy(task).concurrency_for(task.market_type)
         sem = asyncio.Semaphore(max(1, int(limit)))
         self._exchange_semaphores[key] = sem
         return sem
 
-    @staticmethod
-    def _exchange_key(task: BackfillTask) -> tuple[str, str]:
-        return (
-            str(task.exchange or "binance").strip().lower(),
-            str(task.market_type or "spot").strip().lower(),
-        )
+    def _global_fetch_concurrency(self) -> int:
+        configured = getattr(self._cfg, "fetch_global_concurrency", None)
+        if configured is None:
+            configured = self._cfg.fetch_concurrency
+        return max(1, int(configured))
 
     def _base_delay_for_task(self, task: BackfillTask) -> float:
         return self._rate_limit_policy(task).delay_for(task.market_type)
 
-    def _retry_backoff_seconds(self, task: BackfillTask, exc: TransportError) -> float:
+    def _retry_backoff_seconds(
+        self,
+        task: BackfillTask,
+        exc: TransportError,
+        request: TransportRequest | None = None,
+    ) -> float:
         if self._is_rate_limited(exc):
             retry_after = getattr(exc, "retry_after", None) or 0.0
+            historical_request = self._historical_request(task, request)
+            rule = self._rate_limit_rule(task, historical_request)
             return max(
-                self._rate_limit_policy(task).retry_429_backoff_for(task.market_type),
+                rule.cooldown_seconds,
                 self._base_delay_for_task(task),
                 retry_after,
             )
@@ -507,37 +512,100 @@ class HistoricalFetcher:
             return ReverseTimePaginationPolicy()
         return plugin.pagination_policy(self._cfg)
 
+    def _historical_request(
+        self,
+        task: BackfillTask,
+        request: TransportRequest | None = None,
+    ) -> HistoricalRequest:
+        endpoint = self._endpoint_for_task(task, request)
+        return HistoricalRequest(
+            exchange=str(task.exchange or "binance").strip().lower(),
+            market_type=str(task.market_type or "spot").strip().lower(),
+            endpoint=endpoint,
+            symbol=str(task.symbol),
+            interval=str(task.interval) if task.interval is not None else None,
+            start_ms=request.start_ms if request is not None else task.start_ms,
+            end_ms=request.end_ms if request is not None else task.end_ms,
+            limit=request.limit if request is not None else self._cfg.fetch_batch_size,
+        )
+
+    def _endpoint_for_task(
+        self,
+        task: BackfillTask,
+        request: TransportRequest | None = None,
+    ) -> str:
+        bootstrap_default_adapters()
+        try:
+            plugin = get_exchange_registry().get_plugin(task.exchange)
+            protocol = plugin.protocol()
+            descriptor = request.descriptor if request is not None else StreamDescriptor(
+                symbol=task.symbol,
+                stream_type=StreamType.KLINE,
+                interval=task.interval,
+                exchange=task.exchange,
+                market_type=task.market_type,
+            )
+            endpoint = protocol.rest_path(descriptor.stream_type, descriptor.market_type)
+        except Exception:
+            endpoint = None
+        return endpoint or "kline"
+
+    def _rate_limit_rule(
+        self,
+        task: BackfillTask,
+        request: HistoricalRequest,
+    ) -> RateLimitRule:
+        return self._rate_limit_policy(task).rule_for(request)
+
     async def _record_rate_limit_cooldown(
         self,
         task: BackfillTask,
         exc: TransportError,
+        request: TransportRequest | None = None,
     ) -> None:
-        backoff_seconds = self._retry_backoff_seconds(task, exc)
+        backoff_seconds = self._retry_backoff_seconds(task, exc, request)
         if backoff_seconds <= 0:
             return
 
-        key = self._exchange_key(task)
-        async with self._exchange_rate_locks[key]:
-            cooldown_until = time.monotonic() + backoff_seconds
-            extended = self._extend_cooldown(key, cooldown_until)
-            if extended:
-                logger.warning(
-                    "HTTP 429 cooldown active for %s:%s backfill requests: %.1fs",
-                    key[0],
-                    key[1],
-                    backoff_seconds,
-                )
+        historical_request = self._historical_request(task, request)
+        rule = self._rate_limit_rule(task, historical_request)
+        extended = self._rate_limit_manager.record_response(
+            rule,
+            status_code=getattr(exc, "status_code", None),
+            headers=getattr(exc, "headers", None),
+            body_code=getattr(exc, "body_code", None),
+            retry_after=getattr(exc, "retry_after", None),
+            fallback_cooldown_seconds=backoff_seconds,
+        )
+        if extended:
+            logger.warning(
+                "Rate-limit cooldown active for %s backfill requests: %.1fs",
+                rule.bucket_key,
+                backoff_seconds,
+            )
+
+    def _record_rate_limit_response(
+        self,
+        task: BackfillTask,
+        request: TransportRequest,
+        message,
+    ) -> None:
+        historical_request = self._historical_request(task, request)
+        rule = self._rate_limit_rule(task, historical_request)
+        self._rate_limit_manager.record_response(
+            rule,
+            status_code=getattr(message, "http_status", None),
+            headers=getattr(message, "http_headers", None),
+            body_code=getattr(message, "http_body_code", None),
+        )
 
     @staticmethod
     def _is_rate_limited(exc: TransportError) -> bool:
-        return getattr(exc, "status_code", None) == 429 or "HTTP 429" in str(exc)
-
-    def _extend_cooldown(self, key: tuple[str, str], cooldown_until: float) -> bool:
-        current = self._exchange_cooldown_until.get(key, 0.0)
-        if cooldown_until <= current:
-            return False
-        self._exchange_cooldown_until[key] = cooldown_until
-        return True
+        return (
+            getattr(exc, "status_code", None) == 429
+            or getattr(exc, "body_code", None) == "50011"
+            or "HTTP 429" in str(exc)
+        )
 
     # ── Internal: Callbacks ──────────────────────────────────
 

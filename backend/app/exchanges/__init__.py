@@ -12,7 +12,15 @@ from .models import ExchangeCapabilities, ExchangeMarket, SymbolInfo
 from .pagination import HistoricalPaginationPolicy, OkxHistoricalPaginationPolicy, ReverseTimePaginationPolicy
 from .plugin import ExchangePlugin, SymbolNormalizer
 from .protocol import AdapterBackedProtocol, ExchangeProtocol, RestRequestSpec, WsConnectionSpec
-from .rate_limits import RateLimitOverride, RateLimitPolicy
+from .rate_limits import (
+    HistoricalRequest,
+    RateLimitDecision,
+    RateLimitManager,
+    RateLimitOverride,
+    RateLimitPolicy,
+    RateLimitRule,
+    effective_rate_limit_capacity,
+)
 from .realtime import RealtimePolicy, RealtimeUpdateMode
 from .registry import (
     ExchangePluginLoadStatus,
@@ -35,10 +43,14 @@ __all__ = [
     "ExchangePluginRegistrationError",
     "ExchangeProtocol",
     "HistoricalPaginationPolicy",
+    "HistoricalRequest",
     "NormalizerContractSample",
     "OkxHistoricalPaginationPolicy",
+    "RateLimitDecision",
+    "RateLimitManager",
     "RateLimitOverride",
     "RateLimitPolicy",
+    "RateLimitRule",
     "RealtimePolicy",
     "RealtimeUpdateMode",
     "RestRequestSpec",
@@ -48,6 +60,7 @@ __all__ = [
     "WsConnectionSpec",
     "assert_exchange_plugin_contract",
     "bootstrap_default_adapters",
+    "effective_rate_limit_capacity",
     "get_exchange_registry",
     "load_external_plugin",
     "load_external_plugins_from_env",

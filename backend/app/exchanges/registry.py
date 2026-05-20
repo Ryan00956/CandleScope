@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Any, Iterable
 
 from .base import ExchangeAdapter
 from .plugin import BuiltinExchangePlugin, ExchangePlugin
@@ -27,6 +27,7 @@ class ExchangePluginLoadStatus:
     protocol_class: str = ""
     adapter_class: str = ""
     policy_classes: dict[str, str] = field(default_factory=dict)
+    rate_limit_rules: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
 
     def to_dict(self) -> dict:
@@ -39,6 +40,7 @@ class ExchangePluginLoadStatus:
             "protocol_class": self.protocol_class,
             "adapter_class": self.adapter_class,
             "policy_classes": dict(self.policy_classes),
+            "rate_limit_rules": list(self.rate_limit_rules),
             "error": self.error,
         }
 
@@ -154,6 +156,7 @@ class ExchangeRegistry:
     @staticmethod
     def _status_for_plugin(plugin: ExchangePlugin, *, source: str) -> ExchangePluginLoadStatus:
         capabilities = plugin.capabilities()
+        rate_limit_policy = plugin.rate_limit_policy()
         return ExchangePluginLoadStatus(
             plugin_id=plugin.id,
             source=source,
@@ -163,11 +166,12 @@ class ExchangeRegistry:
             protocol_class=_qualified_class_name(plugin.protocol()),
             adapter_class=_qualified_class_name(plugin.adapter()),
             policy_classes={
-                "rate_limit": _qualified_class_name(plugin.rate_limit_policy()),
+                "rate_limit": _qualified_class_name(rate_limit_policy),
                 "pagination": _qualified_class_name(plugin.pagination_policy()),
                 "realtime": _qualified_class_name(plugin.realtime_policy()),
                 "symbol": _qualified_class_name(plugin.symbol_normalizer()),
             },
+            rate_limit_rules=_rate_limit_rule_summaries(rate_limit_policy),
         )
 
 
@@ -183,6 +187,34 @@ def _parse_major_version(version: str) -> int:
 def _qualified_class_name(obj: object) -> str:
     cls = obj.__class__
     return f"{cls.__module__}.{cls.__name__}"
+
+
+def _rate_limit_rule_summaries(policy: object) -> list[dict[str, Any]]:
+    rules = getattr(policy, "endpoint_rules", ()) or ()
+    summaries: list[dict[str, Any]] = []
+    for rule in rules:
+        to_dict = getattr(rule, "to_dict", None)
+        if callable(to_dict):
+            summaries.append(to_dict())
+            continue
+        summaries.append(
+            {
+                "name": getattr(rule, "name", ""),
+                "bucket_key": getattr(rule, "bucket_key", ""),
+                "endpoint": getattr(rule, "endpoint", None),
+                "market_types": list(getattr(rule, "market_types", ()) or ()),
+                "algorithm": getattr(rule, "algorithm", ""),
+                "capacity": getattr(rule, "capacity", None),
+                "refill_interval_seconds": getattr(
+                    rule,
+                    "refill_interval_seconds",
+                    None,
+                ),
+                "max_concurrency": getattr(rule, "max_concurrency", None),
+                "cooldown_seconds": getattr(rule, "cooldown_seconds", None),
+            }
+        )
+    return summaries
 
 
 _registry = ExchangeRegistry()

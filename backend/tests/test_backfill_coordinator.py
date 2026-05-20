@@ -398,6 +398,9 @@ def test_backfill_scheduler_wakes_after_rate_limit_without_new_submit() -> None:
         assert snapshot["ready_chunks"] == 1
         assert snapshot["next_drain_in_ms"] is not None
         assert snapshot["rate_limited_skips"] == 1
+        scheduler_bucket = snapshot["scheduler_buckets"]["binance:spot"]
+        assert scheduler_bucket["scope"] == "scheduler_dispatch"
+        assert scheduler_bucket["refill_per_second"] == 20.0
 
         await _wait_until(lambda: len(engine.calls) == 1)
         outcome = await task

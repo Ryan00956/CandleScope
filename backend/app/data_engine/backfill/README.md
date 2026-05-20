@@ -4,6 +4,8 @@
 
 > Historical data repair pipeline for CandleScope. `BackfillEngine` detects gaps, plans REST fetches, fetches historical bars, reconciles them into storage, and publishes a `RepairReport`.
 
+Design note: [exchange-aware rate limiting](RATE_LIMITING_DESIGN.md).
+
 ## Position In Data Engine
 
 ```text
@@ -62,8 +64,9 @@ Current priority map:
 | `background_gap_audit` | 150 | lowest-priority background audit |
 
 The scheduler snapshot is exposed through DataManager diagnostics and includes
-active requests, pending requests, chunk counts, token buckets, recent outcomes,
-and coverage ranges.
+active requests, pending requests, chunk counts, local scheduler buckets, recent
+outcomes, and coverage ranges. Exchange REST quota buckets are owned separately
+by `HistoricalFetcher` and exposed under the backfill engine fetcher snapshot.
 
 ## Pipeline
 
@@ -168,7 +171,8 @@ Custom interval writes reuse `BarAggregator.aggregate_batch()` so batch repair d
 - Generic fetch concurrency defaults are intentionally modest.
 - Binance futures defaults serialize requests more aggressively.
 - OKX defaults are conservative and tests cover pagination beyond the 300-row page cap.
-- HTTP 429 handling uses `Retry-After` when present and applies exchange/market cooldown.
+- HTTP 429 handling uses `Retry-After` when present and applies cooldown to
+  the matching endpoint bucket.
 
 ## Deduplication
 
@@ -194,11 +198,18 @@ Write failures are surfaced through `ReconcileResult.write_errors` and `failed_b
 | `BACKFILL_STANDARD_INTERVALS` | standard intervals used for decomposition |
 | `BACKFILL_DECOMPOSITION_STRATEGY` | custom interval decomposition strategy |
 | `BACKFILL_CUSTOM_ALIGNMENT_MODE` | custom interval alignment mode |
-| `BACKFILL_FETCH_CONCURRENCY` | generic REST fetch concurrency |
+| `BACKFILL_FETCH_CONCURRENCY` | legacy generic REST concurrency fallback |
+| `BACKFILL_FETCH_GLOBAL_CONCURRENCY` | process-wide REST fetch concurrency |
+| `BACKFILL_FETCH_BINANCE_SPOT_CONCURRENCY` | Binance spot endpoint concurrency |
 | `BACKFILL_FETCH_BINANCE_FUTURES_CONCURRENCY` | Binance futures override |
 | `BACKFILL_FETCH_OKX_CONCURRENCY` | OKX override |
 | `BACKFILL_FETCH_RATE_LIMIT_DELAY` | generic delay between REST calls |
 | `BACKFILL_FETCH_429_BACKOFF_SECONDS` | cooldown after HTTP 429 |
+| `BACKFILL_RATE_LIMIT_SAFETY_FACTOR` | multiplier applied to official exchange quotas |
+| `BACKFILL_RATE_LIMIT_BINANCE_SPOT_WEIGHT_PER_MINUTE` | Binance spot request-weight budget |
+| `BACKFILL_RATE_LIMIT_BINANCE_FUTURES_WEIGHT_PER_MINUTE` | Binance futures request-weight budget |
+| `BACKFILL_RATE_LIMIT_OKX_CANDLES_REQUESTS_PER_2S` | OKX market candles request window |
+| `BACKFILL_RATE_LIMIT_OKX_HISTORY_CANDLES_REQUESTS_PER_2S` | OKX history candles request window |
 | `BACKFILL_RECONCILE_DEDUP_STRATEGY` | write conflict policy |
 | `BACKFILL_RECONCILE_WRITE_BATCH_SIZE` | storage write batch size |
 | `BACKFILL_RECONCILE_GENERATE_CUSTOM` | generate custom interval rows |
@@ -214,5 +225,6 @@ python -m pytest -q \
   tests/test_backfill_gap_detector.py \
   tests/test_backfill_rate_limit.py \
   tests/test_backfill_reconciler.py \
+  tests/test_transport_http_rate_limit_metadata.py \
   tests/test_okx_backfill_fetcher.py
 ```

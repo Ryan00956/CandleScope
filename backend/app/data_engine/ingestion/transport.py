@@ -201,6 +201,7 @@ class TransportLayer:
 
                 proxy = self._resolve_proxy()
                 async with self._http_session.get(url, params=params, proxy=proxy) as resp:  # type: ignore[union-attr]
+                    headers = {str(k): str(v) for k, v in resp.headers.items()}
                     if resp.status != 200:
                         body = await resp.text()
                         if resp.status == 400:
@@ -212,8 +213,19 @@ class TransportLayer:
                             f"HTTP {resp.status}: {body[:200]}",
                             status_code=resp.status,
                             retry_after=_parse_retry_after(resp.headers.get("Retry-After")),
+                            headers=headers,
+                            body_code=_extract_body_code(body),
                         )
                     data = await resp.json()
+                    body_code = _extract_body_code(data)
+                    if body_code not in (None, "0"):
+                        raise TransportError(
+                            f"Exchange error {body_code}: {str(data)[:200]}",
+                            status_code=resp.status,
+                            retry_after=_parse_retry_after(resp.headers.get("Retry-After")),
+                            headers=headers,
+                            body_code=body_code,
+                        )
 
                 self._metrics.inc("http_requests_ok")
                 self._metrics.mark("http_last_success_at")
@@ -229,6 +241,9 @@ class TransportLayer:
                         stream_type=desc.stream_type,
                         received_at_ms=now_ms,
                         endpoint=base,
+                        http_status=200,
+                        http_headers=headers,
+                        http_body_code=body_code,
                     )
                     for row in rows
                 ]
@@ -250,6 +265,8 @@ class TransportLayer:
                 f"[{type(last_exc).__name__}] {last_exc}",
                 status_code=last_exc.status_code,
                 retry_after=last_exc.retry_after,
+                headers=last_exc.headers,
+                body_code=last_exc.body_code,
             ) from last_exc
         raise TransportError(
             f"All {total} HTTP endpoints failed; last error: [{type(last_exc).__name__}] {last_exc}"
@@ -553,10 +570,14 @@ class TransportError(Exception):
         *,
         status_code: int | None = None,
         retry_after: float | None = None,
+        headers: dict[str, str] | None = None,
+        body_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.retry_after = retry_after
+        self.headers = headers or {}
+        self.body_code = body_code
 
 
 def _parse_retry_after(value: str | None) -> float | None:
@@ -567,3 +588,19 @@ def _parse_retry_after(value: str | None) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
+
+
+def _extract_body_code(body: object) -> str | None:
+    if isinstance(body, dict):
+        raw = body.get("code")
+        return str(raw) if raw is not None else None
+    if not isinstance(body, str):
+        return None
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("code")
+    return str(raw) if raw is not None else None

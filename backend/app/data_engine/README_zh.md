@@ -206,6 +206,7 @@ python -m pytest -q \
   tests/test_backfill_gap_detector.py \
   tests/test_backfill_rate_limit.py \
   tests/test_backfill_reconciler.py \
+  tests/test_transport_http_rate_limit_metadata.py \
   tests/test_okx_backfill_fetcher.py \
   tests/test_data_manager_warm_start_bridge.py
 ```

@@ -4,8 +4,9 @@
 
 > CandleScope 的历史数据修复 pipeline。`BackfillEngine` 负责检测缺口、规划 REST 拉取、获取历史 bars、调和写入 storage，并发布 `RepairReport`。
 
-调度优化设计见 [Backfill 调度架构设计](../../../../local_docs/construction/backend/app/data_engine/backfill/SCHEDULING_DESIGN_zh.md)
-和 [调度执行计划](../../../../local_docs/construction/backend/app/data_engine/backfill/SCHEDULER_EXECUTION_PLAN_zh.md)。
+调度优化设计见 [Backfill 调度架构设计](../../../../local_docs/construction/backend/app/data_engine/backfill/SCHEDULING_DESIGN_zh.md)、
+[调度执行计划](../../../../local_docs/construction/backend/app/data_engine/backfill/SCHEDULER_EXECUTION_PLAN_zh.md)
+和 [交易所限流设计](RATE_LIMITING_DESIGN_zh.md)。
 
 ## 在 Data Engine 中的位置
 
@@ -47,6 +48,10 @@ DataManager 精确回读 storage + cache merge
 - 大范围用户可见 repair 会被拆成 chunk，并按最新端优先执行，让图表右侧更快可渲染。
 - 不同 series 可以并发；同一个 `(exchange, market_type, symbol, interval)` 的
   reconcile/write 仍保持串行。
+
+调度器 snapshot 会暴露本地 dispatch bucket，用于解释 coordinator 是否在等待下一次
+chunk 派发。交易所 REST 配额 bucket 由 `HistoricalFetcher` 单独负责，并在 backfill
+engine 的 fetcher snapshot 中暴露。
 
 优先级数字越小越高：
 
@@ -171,7 +176,7 @@ Planner 会把自定义周期拆成标准组件。例如：
 - 通用 fetch concurrency 默认值保守。
 - Binance futures 默认更严格地串行化请求。
 - OKX 默认保守，测试覆盖超过 300 行 page cap 的分页拉取。
-- HTTP 429 会优先使用 `Retry-After`，并应用 exchange/market 级 cooldown。
+- HTTP 429 会优先使用 `Retry-After`，并只对匹配的 endpoint bucket 应用 cooldown。
 
 ## 去重策略
 
@@ -197,11 +202,18 @@ Planner 会把自定义周期拆成标准组件。例如：
 | `BACKFILL_STANDARD_INTERVALS` | 用于分解的标准周期 |
 | `BACKFILL_DECOMPOSITION_STRATEGY` | 自定义周期分解策略 |
 | `BACKFILL_CUSTOM_ALIGNMENT_MODE` | 自定义周期对齐模式 |
-| `BACKFILL_FETCH_CONCURRENCY` | 通用 REST 拉取并发 |
+| `BACKFILL_FETCH_CONCURRENCY` | 兼容保留的通用 REST 并发 fallback |
+| `BACKFILL_FETCH_GLOBAL_CONCURRENCY` | 进程级 REST 拉取总并发 |
+| `BACKFILL_FETCH_BINANCE_SPOT_CONCURRENCY` | Binance spot endpoint 并发 |
 | `BACKFILL_FETCH_BINANCE_FUTURES_CONCURRENCY` | Binance futures override |
 | `BACKFILL_FETCH_OKX_CONCURRENCY` | OKX override |
 | `BACKFILL_FETCH_RATE_LIMIT_DELAY` | 通用 REST 请求间隔 |
 | `BACKFILL_FETCH_429_BACKOFF_SECONDS` | HTTP 429 后 cooldown |
+| `BACKFILL_RATE_LIMIT_SAFETY_FACTOR` | 交易所官方额度的保守系数 |
+| `BACKFILL_RATE_LIMIT_BINANCE_SPOT_WEIGHT_PER_MINUTE` | Binance spot request-weight 额度 |
+| `BACKFILL_RATE_LIMIT_BINANCE_FUTURES_WEIGHT_PER_MINUTE` | Binance futures request-weight 额度 |
+| `BACKFILL_RATE_LIMIT_OKX_CANDLES_REQUESTS_PER_2S` | OKX market candles 请求窗口 |
+| `BACKFILL_RATE_LIMIT_OKX_HISTORY_CANDLES_REQUESTS_PER_2S` | OKX history candles 请求窗口 |
 | `BACKFILL_RECONCILE_DEDUP_STRATEGY` | 写入冲突策略 |
 | `BACKFILL_RECONCILE_WRITE_BATCH_SIZE` | storage 写入批大小 |
 | `BACKFILL_RECONCILE_GENERATE_CUSTOM` | 是否生成自定义周期 rows |
@@ -217,5 +229,6 @@ python -m pytest -q \
   tests/test_backfill_gap_detector.py \
   tests/test_backfill_rate_limit.py \
   tests/test_backfill_reconciler.py \
+  tests/test_transport_http_rate_limit_metadata.py \
   tests/test_okx_backfill_fetcher.py
 ```

@@ -167,6 +167,17 @@ def _get_backfill_coordinator(request: Request):
     return get_coordinator()
 
 
+def _get_backfill_engine(request: Request):
+    """Return the app-wide BackfillEngine through the runtime facade."""
+    runtime = _get_data_engine_runtime(request)
+    if runtime is None:
+        return None
+    get_engine = getattr(runtime, "get_backfill_engine", None)
+    if not callable(get_engine):
+        return None
+    return get_engine()
+
+
 def _call_runtime_list(obj, method_name: str) -> list:
     method = getattr(obj, method_name, None)
     if not callable(method):
@@ -441,10 +452,16 @@ async def storage_health(request: Request) -> dict:
     """Return gap repair health without triggering new repair work."""
     dm = _get_data_manager(request)
     backfill_coordinator = _get_backfill_coordinator(request)
+    backfill_engine = _get_backfill_engine(request)
     if dm is None or backfill_coordinator is None:
         raise HTTPException(status_code=503, detail="DataEngine 尚未初始化")
 
     snapshot = backfill_coordinator.snapshot()
+    engine_snapshot = (
+        backfill_engine.snapshot()
+        if backfill_engine is not None and callable(getattr(backfill_engine, "snapshot", None))
+        else None
+    )
     open_gaps = snapshot.get("gap_ledger_open") or []
     return {
         "status": "ok",
@@ -453,6 +470,7 @@ async def storage_health(request: Request) -> dict:
         "audit_series": _call_runtime_list(dm, "gap_audit_series"),
         "open_gap_count": len(open_gaps),
         "backfill": snapshot,
+        "backfill_engine": engine_snapshot,
     }
 
 

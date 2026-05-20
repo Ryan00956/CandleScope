@@ -17,6 +17,7 @@ import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
 import { useKlineStreamRuntime } from "./runtime/useKlineStreamRuntime";
+import { useWatchlistRuntime } from "./runtime/useWatchlistRuntime";
 import { groupIntervalsByDuration, parseIntervalSeconds } from "./utils/intervals";
 import { inferExchangeFromSymbol } from "./utils/symbolKey";
 import {
@@ -30,10 +31,7 @@ import { requestIndicatorRangeInChunks } from "./runtime/indicatorRangeRuntime";
 import {
   fetchKlinesBefore,
   fetchExchanges,
-  fetchSubscriptions,
   updateSubscriptionTier,
-  syncWatchlistSymbols,
-  getPriceStreamUrl,
   updateCacheLimits,
 } from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
@@ -752,99 +750,11 @@ export default function App() {
     });
   }, []);
 
-  // --- Subscription tiers & real-time prices ---
-  const [subscriptionTiers, setSubscriptionTiers] = useState({});
-  const [symbolPrices, setSymbolPrices] = useState({});
-  const priceWsRef = useRef(null);
-
-  // Load subscription tiers from backend on mount
-  useEffect(() => {
-    fetchSubscriptions()
-      .then((res) => {
-        const tiers = {};
-        for (const sub of res.subscriptions || []) {
-          tiers[sub.symbol] = sub.tier;
-        }
-        setSubscriptionTiers(tiers);
-      })
-      .catch(() => {});
-  }, []);
-
-  // Sync watchlist symbols to backend whenever watchlists change.
-  // New symbols auto-register as PRICE_ONLY so prices show immediately.
-  const syncTimerRef = useRef(null);
-  useEffect(() => {
-    // Collect all unique symbols from all watchlists
-    const allSymbols = [...new Set(watchlists.flatMap((wl) => wl.symbols))];
-    if (allSymbols.length === 0) return;
-
-    // Debounce to avoid spamming on rapid edits (DnD, etc.)
-    clearTimeout(syncTimerRef.current);
-    syncTimerRef.current = setTimeout(() => {
-      syncWatchlistSymbols(allSymbols)
-        .then((res) => {
-          if (res.auto_registered > 0) {
-            // Refresh tiers so the UI updates
-            fetchSubscriptions().then((r) => {
-              const tiers = {};
-              for (const sub of r.subscriptions || []) {
-                tiers[sub.symbol] = sub.tier;
-              }
-              setSubscriptionTiers(tiers);
-            }).catch(() => {});
-          }
-        })
-        .catch(() => {});
-    }, 500);
-
-    return () => clearTimeout(syncTimerRef.current);
-  }, [watchlists]);
-
-  // Price WebSocket — connects once and stays open
-  useEffect(() => {
-    const url = getPriceStreamUrl();
-    let ws = null;
-    let reconnectTimer = null;
-    let stopped = false;
-
-    function connect() {
-      if (stopped) return;
-      ws = new WebSocket(url);
-
-      ws.onmessage = (evt) => {
-        try {
-          const msg = JSON.parse(evt.data);
-          if (msg.type === "prices" && Array.isArray(msg.data)) {
-            setSymbolPrices((prev) => {
-              const next = { ...prev };
-              for (const tick of msg.data) {
-                next[tick.symbol] = tick;
-              }
-              return next;
-            });
-          }
-        } catch { /* ignore */ }
-      };
-
-      ws.onclose = () => {
-        if (!stopped) {
-          reconnectTimer = setTimeout(connect, 3000);
-        }
-      };
-
-      ws.onerror = () => ws.close();
-      priceWsRef.current = ws;
-    }
-
-    connect();
-
-    return () => {
-      stopped = true;
-      clearTimeout(reconnectTimer);
-      if (ws) ws.close();
-      priceWsRef.current = null;
-    };
-  }, []);
+  const {
+    subscriptionTiers,
+    setSubscriptionTiers,
+    symbolPrices,
+  } = useWatchlistRuntime({ watchlists });
 
   // Handle tier change from WatchlistSidebar context menu
   // sym is a composite key like "spot:BTCUSDT" or "futures:ETHUSDT"
@@ -855,7 +765,7 @@ export default function App() {
       console.warn("Failed to update tier:", err);
       setSubscriptionTiers((prev) => ({ ...prev, [sym]: prevTier }));
     });
-  }, [subscriptionTiers]);
+  }, [setSubscriptionTiers, subscriptionTiers]);
 
 
   // Sync cache limits to backend when they change

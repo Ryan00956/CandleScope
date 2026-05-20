@@ -9,10 +9,10 @@ import IntervalSelector from "./components/IntervalSelector";
 import SymbolSearch from "./components/SymbolSearch";
 import WatchlistSidebar from "./components/WatchlistSidebar";
 import { useCustomIntervals } from "./hooks/useCustomIntervals";
-import { useExportPreview } from "./hooks/useExportPreview";
 import { useIndicators } from "./hooks/useIndicators";
 import { useBackfillCompletionRuntime } from "./runtime/useBackfillCompletionRuntime";
 import { useCacheLimitsSync } from "./runtime/useCacheLimitsSync";
+import { useChartExportRuntime } from "./runtime/useChartExportRuntime";
 import { useChartBackgroundPrefetch } from "./runtime/useChartBackgroundPrefetch";
 import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
@@ -43,7 +43,6 @@ import {
   updateSubscriptionTier,
 } from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
-import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, downloadBlob } from "./services/exportService";
 import { loadWatchlists, saveWatchlists } from "./services/watchlistStorage";
 import "./index.css";
 // ---------- ErrorBoundary ----------
@@ -158,7 +157,9 @@ export default function App() {
   );
   const [loading, setLoading] = useState(true);
   const loadingRef = useRef(loading);
-  loadingRef.current = loading;
+  useEffect(() => {
+    loadingRef.current = loading;
+  }, [loading]);
   const [error, setError] = useState(null);
 
   const [crosshairData, setCrosshairData] = useState(null);
@@ -273,11 +274,12 @@ export default function App() {
   // color/width controls so editing existing drawings and creating new ones
   // use the same visible state.
   const [selectedDrawing, setSelectedDrawing] = useState(null);
-  useEffect(() => {
-    if (!selectedDrawing) return;
-    if (selectedDrawing.color) setPenColor(selectedDrawing.color);
-    if (typeof selectedDrawing.lineWidth === "number") setPenSize(selectedDrawing.lineWidth);
-  }, [selectedDrawing]);
+  const handleSelectedDrawingChange = useCallback((drawing) => {
+    setSelectedDrawing(drawing);
+    if (!drawing) return;
+    if (drawing.color) setPenColor(drawing.color);
+    if (typeof drawing.lineWidth === "number") setPenSize(drawing.lineWidth);
+  }, []);
   const handleSelectedDrawingStyleChange = useCallback((patch) => {
     chartWidgetRef.current?.updateSelectedDrawingStyle?.(patch);
   }, []);
@@ -285,16 +287,6 @@ export default function App() {
   // --- Settings state (must be before useIndicators which needs settings.upColor/downColor) ---
   const [showSettings, setShowSettings] = useState(false);
   const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
-
-  // --- Chart export state ---
-  const [showExportPanel, setShowExportPanel] = useState(false);
-  const [exportOptions, setExportOptions] = useState(() => {
-    const prefs = loadUserPrefs();
-    return { ...DEFAULT_EXPORT_OPTIONS, ...(prefs.chartExportOptions || {}) };
-  });
-  const [exportInProgress, setExportInProgress] = useState(false);
-  const [exportError, setExportError] = useState(null);
-  const [exportNotice, setExportNotice] = useState(null);
 
   // --- Indicator state ---
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);
@@ -346,71 +338,31 @@ export default function App() {
   });
   const chartStorageKeyBase = `${exchange}:${marketType}:${symbol}`;
 
-  const exportMetadata = useMemo(() => ({
+  const {
+    showExportPanel,
+    exportOptions,
+    exportInProgress,
+    exportError,
+    exportNotice,
+    exportPreview,
+    exportMetadata,
+    handleExportOptionsChange,
+    handleToggleExportPanel,
+    handleCloseExportPanel,
+    handleExportChart,
+  } = useChartExportRuntime({
     exchange,
     marketType,
     symbol,
     interval,
-    theme: resolvedTheme,
-  }), [exchange, interval, marketType, resolvedTheme, symbol]);
-
-  const exportPreview = useExportPreview({
-    isOpen: showExportPanel,
-    options: exportOptions,
-    metadata: exportMetadata,
+    resolvedTheme,
     chartWidgetRef,
     pageExportRef,
     drawingsHidden,
     setDrawingsHidden,
+    loadUserPrefs,
+    updateUserPref,
   });
-
-  const handleExportOptionsChange = useCallback((nextOptions) => {
-    setExportOptions(nextOptions);
-    setExportError(null);
-    setExportNotice(null);
-    updateUserPref("chartExportOptions", nextOptions);
-  }, []);
-
-  const handleToggleExportPanel = useCallback(() => {
-    setExportError(null);
-    setExportNotice(null);
-    setShowExportPanel((prev) => !prev);
-  }, []);
-
-  const handleCloseExportPanel = useCallback(() => {
-    if (exportInProgress) return;
-    setShowExportPanel(false);
-  }, [exportInProgress]);
-
-  const handleExportChart = useCallback(async (requestedOptions = exportOptions) => {
-    if (exportInProgress) return;
-
-    const finalOptions = {
-      ...DEFAULT_EXPORT_OPTIONS,
-      ...exportOptions,
-      ...requestedOptions,
-      metadata: exportMetadata,
-    };
-    const finalOptionsKey = buildExportOptionsKey(finalOptions);
-    const previewReady = exportPreview.blob && exportPreview.optionsKey === finalOptionsKey;
-
-    setExportInProgress(true);
-    setExportError(null);
-    setExportNotice(null);
-
-    try {
-      if (!previewReady) {
-        throw new Error("当前配置的预览还未生成完成，请等待右侧预览更新后再保存。 ");
-      }
-
-      downloadBlob(exportPreview.blob, exportPreview.filename);
-      setExportNotice(`已保存 ${exportPreview.filename}`);
-    } catch (err) {
-      setExportError(err?.message || "保存失败，请稍后重试。 ");
-    } finally {
-      setExportInProgress(false);
-    }
-  }, [exportInProgress, exportMetadata, exportOptions, exportPreview.blob, exportPreview.filename, exportPreview.optionsKey]);
 
   const removeIndicator = useCallback((indicatorId) => {
     rawRemoveIndicator(indicatorId);
@@ -420,7 +372,9 @@ export default function App() {
 
   // Current interval ref for WS message routing
   const intervalRef = useRef(interval);
-  intervalRef.current = interval;
+  useEffect(() => {
+    intervalRef.current = interval;
+  }, [interval]);
 
   // Canonical real-time price — always derived from the fastest (1m) stream
   // so all intervals display the same "current price" in the header.
@@ -493,8 +447,11 @@ export default function App() {
     if (exchangeCatalogStatus === "loading") return;
     if (exchangeMarketTypes.length === 0 || exchangeMarketTypes.includes(marketType)) return;
     const nextMarketType = exchangeMarketTypes[0] || "spot";
-    setMarketType(nextMarketType);
-    updateUserPref("lastMarketType", nextMarketType);
+    const timer = setTimeout(() => {
+      setMarketType(nextMarketType);
+      updateUserPref("lastMarketType", nextMarketType);
+    }, 0);
+    return () => clearTimeout(timer);
   }, [exchangeCatalogStatus, exchangeMarketTypes, marketType]);
   useEffect(() => {
     if (exchangeCatalogStatus === "loading") return;
@@ -503,11 +460,16 @@ export default function App() {
     const nextInterval = nativeIntervals.find((item) => item.value === "1h")?.value
       || nativeIntervals[0]?.value
       || "1h";
-    setInterval_(nextInterval);
-    updateUserPref("lastInterval", nextInterval);
+    const timer = setTimeout(() => {
+      setInterval_(nextInterval);
+      updateUserPref("lastInterval", nextInterval);
+    }, 0);
+    return () => clearTimeout(timer);
   }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, nativeIntervals, savedCustomIntervals]);
   const trackedIntervalsRef = useRef(trackedIntervals);
-  trackedIntervalsRef.current = trackedIntervals;
+  useEffect(() => {
+    trackedIntervalsRef.current = trackedIntervals;
+  }, [trackedIntervals]);
 
   // --- Watchlist state (shared between sidebar and search modal) ---
   const [watchlists, setWatchlists] = useState(loadWatchlists);
@@ -1080,7 +1042,7 @@ export default function App() {
               fibInverted={fibInverted}
               positionSize={positionSize}
               drawingSnapEnabled={drawingSnapEnabled}
-              onSelectedDrawingChange={setSelectedDrawing}
+              onSelectedDrawingChange={handleSelectedDrawingChange}
               onChartReady={handleChartReady}
               mainOverlayLines={mainOverlayLines}
               subPanes={subPanes}

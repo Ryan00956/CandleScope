@@ -26,6 +26,7 @@ import { useIntervalNoticeRuntime } from "./runtime/useIntervalNoticeRuntime";
 import { useKlineStreamRuntime } from "./runtime/useKlineStreamRuntime";
 import { usePriceScalePrefs } from "./runtime/usePriceScalePrefs";
 import { useWatchlistRuntime } from "./runtime/useWatchlistRuntime";
+import { useWatchlistStorageRuntime } from "./runtime/useWatchlistStorageRuntime";
 import { parseIntervalSeconds } from "./utils/intervals";
 import { inferExchangeFromSymbol } from "./utils/symbolKey";
 import {
@@ -47,7 +48,6 @@ import {
   updateSubscriptionTier,
 } from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
-import { loadWatchlists, saveWatchlists } from "./services/watchlistStorage";
 import "./index.css";
 // ---------- ErrorBoundary ----------
 class ErrorBoundary extends React.Component {
@@ -389,20 +389,7 @@ export default function App() {
     trackedIntervalsRef.current = trackedIntervals;
   }, [trackedIntervals]);
 
-  // --- Watchlist state (shared between sidebar and search modal) ---
-  const [watchlists, setWatchlists] = useState(loadWatchlists);
-  const handleAddToWatchlist = useCallback((watchlistId, symbol) => {
-    setWatchlists((prev) => {
-      const next = prev.map((wl) => {
-        if (wl.id === watchlistId && !wl.symbols.includes(symbol)) {
-          return { ...wl, symbols: [...wl.symbols, symbol] };
-        }
-        return wl;
-      });
-      saveWatchlists(next);
-      return next;
-    });
-  }, []);
+  const { watchlists, setWatchlists, handleAddToWatchlist } = useWatchlistStorageRuntime();
 
   const {
     subscriptionTiers,
@@ -878,7 +865,7 @@ export default function App() {
         currentExchange={exchange}
         onSelectSymbol={handleSymbolChange}
         watchlists={watchlists}
-        onWatchlistsChange={(next) => { setWatchlists(next); saveWatchlists(next); }}
+        onWatchlistsChange={setWatchlists}
         prices={symbolPrices}
         subscriptionTiers={subscriptionTiers}
         onTierChange={handleTierChange}

@@ -11,13 +11,7 @@
  *   GET  /indicators/registry         → list raw indicator specs (advanced)
  *   POST /indicators/compute          → compute indicator (engine or script)
  */
-const API_BASE = "http://localhost:8000/api/v1";
-
-function httpBaseToWsBase(httpBase) {
-  if (httpBase.startsWith("https://")) return `wss://${httpBase.slice("https://".length)}`;
-  if (httpBase.startsWith("http://")) return `ws://${httpBase.slice("http://".length)}`;
-  return httpBase;
-}
+import { API_BASE, httpBaseToWsBase } from "./apiConfig";
 
 async function request(url, options = {}) {
   const response = await fetch(url, options);

@@ -2,6 +2,20 @@
 
 React/Vite charting UI for CandleScope.
 
+## Backend Connection
+
+The frontend uses same-origin `/api/v1` by default. During local development,
+Vite proxies `/api` HTTP and WebSocket traffic to `http://localhost:8000`, so
+both `http://localhost:5173` and `http://127.0.0.1:5173` work without browser
+CORS differences.
+
+Use `VITE_API_BASE` only when the backend is not reachable through the Vite
+proxy, for example:
+
+```bash
+VITE_API_BASE=http://localhost:8000/api/v1 npm run dev
+```
+
 ## Exchange Capabilities
 
 The app loads `GET /api/v1/exchanges/` on startup and builds an exchange catalog from backend capabilities.

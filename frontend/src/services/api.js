@@ -1,14 +1,9 @@
 /**
  * CandleScope API service layer.
  */
-const API_BASE = "http://localhost:8000/api/v1";
-const CLIENT_INSTANCE_ID = Math.random().toString(36).slice(2, 10);
+import { API_BASE, httpBaseToWsBase } from "./apiConfig";
 
-function httpBaseToWsBase(httpBase) {
-    if (httpBase.startsWith("https://")) return `wss://${httpBase.slice("https://".length)}`;
-    if (httpBase.startsWith("http://")) return `ws://${httpBase.slice("http://".length)}`;
-    return httpBase;
-}
+const CLIENT_INSTANCE_ID = Math.random().toString(36).slice(2, 10);
 
 async function request(url) {
     const response = await fetch(url);

@@ -12,6 +12,7 @@ import { useCustomIntervals } from "./hooks/useCustomIntervals";
 import { useExportPreview } from "./hooks/useExportPreview";
 import { useIndicators } from "./hooks/useIndicators";
 import { useBackfillCompletionRuntime } from "./runtime/useBackfillCompletionRuntime";
+import { useCacheLimitsSync } from "./runtime/useCacheLimitsSync";
 import { useChartBackgroundPrefetch } from "./runtime/useChartBackgroundPrefetch";
 import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
@@ -31,7 +32,6 @@ import {
 import {
   fetchExchanges,
   updateSubscriptionTier,
-  updateCacheLimits,
 } from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
 import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, downloadBlob } from "./services/exportService";
@@ -767,13 +767,7 @@ export default function App() {
 
   // Sync cache limits to backend when they change
   const { cacheLimits, ephemeralCacheBars } = settings;
-  useEffect(() => {
-    if (!cacheLimits) return;
-    updateCacheLimits({
-      dbLimits: cacheLimits,
-      ephemeralBars: ephemeralCacheBars ?? 86400,
-    }).catch(() => {}); // fire-and-forget
-  }, [cacheLimits, ephemeralCacheBars]);
+  useCacheLimitsSync({ cacheLimits, ephemeralCacheBars });
 
   const {
     loadingMoreLeft,

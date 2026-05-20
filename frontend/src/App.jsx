@@ -12,6 +12,7 @@ import { useCustomIntervals } from "./hooks/useCustomIntervals";
 import { useExportPreview } from "./hooks/useExportPreview";
 import { useIndicators } from "./hooks/useIndicators";
 import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
+import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
 import { groupIntervalsByDuration, parseIntervalSeconds } from "./utils/intervals";
 import { inferExchangeFromSymbol } from "./utils/symbolKey";
@@ -26,7 +27,6 @@ import { requestIndicatorRangeInChunks } from "./runtime/indicatorRangeRuntime";
 import {
   eventRangeFromDetail,
   isSameSeries,
-  numericRange,
   rangeCovers,
   rangesOverlap,
   rowRangeMs,
@@ -282,10 +282,6 @@ function getIntervalDays(intv, exchange = "binance") {
 function isNativeIntervalSupported(exchange, interval, catalog = null) {
   return getNativeIntervals(exchange, catalog).some((item) => item.value === interval);
 }
-
-const INITIAL_BACKFILL_RETRY_MS = 3_000;
-const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
-const INITIAL_BACKFILL_MAX_WAIT_MS = 60_000;
 
 export default function App() {
   const [symbol, setSymbol] = useState(() => {
@@ -882,180 +878,26 @@ export default function App() {
     }).catch(() => {}); // fire-and-forget
   }, [cacheLimits, ephemeralCacheBars]);
 
-  const abortRef = useRef(null);
-
-  // ============================================================
-  //  LOAD DATA — optimized for speed
-  //  NOTE: When no cache exists, we keep loading=true until full
-  //  history arrives (or backfill completes via WS).  This avoids
-  //  showing an incorrect chart with only a few real-time bars
-  //  before gap-fill is done.
-  // ============================================================
-  const loadData = useCallback(async (sym, intv, mt = marketType, ex = exchange) => {
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    // --- INSTANT SWITCH: show cached data immediately ---
-    const cached = getFromCache(sym, intv);
-    const hasCacheHit = cached && cached.length > 0;
-    let shownInitialData = false;
-
-    if (hasCacheHit) {
-      replaceChartData(sym, intv, cached, { source: "memory-cache-hit" });
-      updateLastPrice(cached[cached.length - 1], intv);
-      setConnectionStatus("connected");
-      setDatasetKey((v) => v + 1);
-      setLoading(false);
-      setError(null);
-      shownInitialData = true;
-    } else {
-      clearChartData("load-start-clear", sym, intv);  // Clear old interval data to prevent cross-interval merging
-      setLoading(true);
-      setError(null);
-      setConnectionStatus("loading");
-    }
-    setLoadingMoreLeft(false);
-    setHasMoreLeft(true);
-    setCrosshairData(null);
-    pendingInitialHistoryRef.current = null;
-
-    // Start quick tail and full history together, but commit each result as
-    // soon as it arrives. Promise.all would make the quick tail wait for the
-    // slower request, which is exactly the blank-first-screen failure mode.
-    const days = getIntervalDays(intv, ex);
-
-    const commitQuickResult = (quickResult) => {
-      if (controller.signal.aborted || !quickResult?.data?.length) return;
-      commitPatchedChartData(sym, intv, quickResult.data, { seedIfEmpty: true, source: "initial-latest" });
-      const latestTick = quickResult.data[quickResult.data.length - 1];
-      updateLastPrice(latestTick, intv);
-      setDataSource(quickResult.source || "unknown");
-
-      if (!shownInitialData) {
-        setDatasetKey((v) => v + 1);
-        setLoading(false);
-        shownInitialData = true;
-      }
-    };
-
-    const startInitialHistoryRetry = () => {
-      setConnectionStatus("loading");
-
-      let retryTimer = null;
-      let safetyTimer = null;
-      let stoppedRetrying = false;
-      const retryStartedAt = Date.now();
-
-      const retryInitialHistory = async () => {
-        if (controller.signal.aborted || stoppedRetrying) return false;
-        try {
-          const retryResult = await fetchKlinesHistory(sym, intv, days, mt, ex);
-          if (controller.signal.aborted || stoppedRetrying) return false;
-          if (retryResult?.data?.length) {
-            commitHistoryResult(retryResult);
-            return true;
-          }
-        } catch (retryErr) {
-          console.warn("Initial history retry failed:", retryErr);
-        }
-        return false;
-      };
-
-      const scheduleRetry = () => {
-        if (controller.signal.aborted || stoppedRetrying) return;
-        retryTimer = setTimeout(async () => {
-          retryTimer = null;
-          const loaded = await retryInitialHistory();
-          if (loaded) {
-            stoppedRetrying = true;
-            if (safetyTimer) clearTimeout(safetyTimer);
-            return;
-          }
-          if (Date.now() - retryStartedAt < INITIAL_BACKFILL_MAX_WAIT_MS) {
-            scheduleRetry();
-          }
-        }, INITIAL_BACKFILL_RETRY_MS);
-      };
-
-      scheduleRetry();
-
-      safetyTimer = setTimeout(async () => {
-        if (controller.signal.aborted) return;
-        if (await retryInitialHistory()) return;
-        // Stop blocking the UI after a short timeout only if nothing has been
-        // shown yet. If quick tail is visible, retry continues in background.
-        if (!shownInitialData) {
-          setLoading(false);
-          setDatasetKey((v) => v + 1);
-        }
-      }, INITIAL_BACKFILL_TIMEOUT_MS);
-
-      controller.signal.addEventListener("abort", () => {
-        stoppedRetrying = true;
-        if (retryTimer) clearTimeout(retryTimer);
-        if (safetyTimer) clearTimeout(safetyTimer);
-      });
-    };
-
-    const commitHistoryResult = (historyResult) => {
-      if (controller.signal.aborted) return;
-
-      if (historyResult?.start_ms != null && historyResult?.end_ms != null) {
-        pendingInitialHistoryRef.current = {
-          exchange: ex,
-          marketType: mt,
-          symbol: sym,
-          interval: intv,
-          range: numericRange(historyResult.start_ms, historyResult.end_ms),
-        };
-      }
-
-      if (!historyResult?.data?.length) {
-        startInitialHistoryRetry();
-        return;
-      }
-
-      commitMergedChartData(sym, intv, historyResult.data, { source: "initial-history" });
-      const latest = historyResult.data[historyResult.data.length - 1];
-      updateLastPrice(latest, intv);
-      setDataSource(historyResult.source || "unknown");
-      setConnectionStatus(historyResult.source === "mock" ? "loading" : "connected");
-
-      if (!shownInitialData) {
-        setDatasetKey((v) => v + 1);
-        shownInitialData = true;
-      }
-      pendingInitialHistoryRef.current = null;
-
-      // Even if there's a tail gap (data doesn't reach "now"),
-      // show the data immediately.  The gap will be filled in the
-      // background by backfill + WS.  Blocking the UI for up to 30s
-      // with a loading overlay is a worse UX than showing slightly
-      // stale data that auto-corrects within seconds.
-      if (historyResult.has_tail_gap) {
-        setConnectionStatus("loading");
-      }
-      // Always clear loading when we have history data
-      setLoading(false);
-    };
-
-    await Promise.all([
-      fetchLatestKlines(sym, intv, 5, mt, ex)
-        .then(commitQuickResult)
-        .catch(() => null),
-      fetchKlinesHistory(sym, intv, days, mt, ex)
-        .then(commitHistoryResult)
-        .catch(() => {
-          if (!controller.signal.aborted) startInitialHistoryRetry();
-        }),
-    ]);
-
-    // Clear loading when we have shown initial data
-    if (shownInitialData) {
-      setLoading(false);
-    }
-  }, [clearChartData, commitMergedChartData, commitPatchedChartData, exchange, getFromCache, marketType, pendingInitialHistoryRef, replaceChartData, updateLastPrice]);
+  const loadData = useChartInitialLoad({
+    exchange,
+    marketType,
+    getIntervalDays,
+    getFromCache,
+    replaceChartData,
+    clearChartData,
+    commitMergedChartData,
+    commitPatchedChartData,
+    pendingInitialHistoryRef,
+    updateLastPrice,
+    setConnectionStatus,
+    setDatasetKey,
+    setLoading,
+    setError,
+    setLoadingMoreLeft,
+    setHasMoreLeft,
+    setCrosshairData,
+    setDataSource,
+  });
 
   // ── Symbol switching handler ──
   const handleSymbolChange = useCallback((newSymbolOrObj) => {

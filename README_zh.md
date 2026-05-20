@@ -343,8 +343,8 @@ npm run lint
 
 渲染层 smoke 检查：启动后端和 Vite 后，运行
 `npm run smoke -- --url http://127.0.0.1:5173/`。该检查会确认状态栏达到
-`Connected to Binance`、显示非零 `bars`、显示 `Live (WebSocket)`，并打开
-懒加载的 Settings 面板。
+`Connected to Binance`、显示非零 `bars`、显示 `Live (WebSocket)`，确认
+drawing toolbar 已加载，并打开懒加载的 symbol search 和 Settings 面板。
 
 ## 说明
 

@@ -57,6 +57,8 @@ through the Vite proxy.
 | Runtime folder grouping and ownership docs | Done |
 | Vite `/api` proxy and configurable API base | Done |
 | Lazy chunks for Settings, Indicators, Alerts, Export panels | Done |
+| Lazy chunks for symbol search modal, watchlist sidebar, and drawing toolbar | Done |
+| Build-time vendor chunks for React, Lightweight Charts, editor, and export libraries | Done |
 
 ## Validation Baseline
 
@@ -79,7 +81,8 @@ For rendered smoke validation:
    ```
 
    The smoke check confirms the page reaches `Connected to Binance`, non-zero
-   `bars`, `Live (WebSocket)`, and that the lazy-loaded Settings panel opens.
+   `bars`, `Live (WebSocket)`, that the drawing toolbar loads, and that the
+   lazy-loaded symbol search and Settings panels open.
 
 On Windows, if backend startup logs fail with a console encoding error, start
 the backend with UTF-8 output enabled:
@@ -92,10 +95,10 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ## Remaining Work
 
-- Analyze the remaining main bundle and split only the next proven heavy path.
-- Consider lazy-loading deeper indicator editor or Monaco paths if bundle
-  analysis shows they still affect the first render.
-- Review drawing primitives separately before lazy-loading them, because chart
-  interactions are more sensitive than side panels.
+- Review drawing primitives separately before lazy-loading the drawing engine,
+  because it is attached to the active chart pane and affects chart
+  interactions more directly than side panels.
+- Consider interaction preloading for lazy chunks if users report first-click
+  delay on symbol search, watchlists, drawing tools, or settings.
 - Keep top-level README and this architecture document in sync when frontend
   runtime boundaries change.

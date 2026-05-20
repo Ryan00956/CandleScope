@@ -1,9 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import MultiPaneChart from "./components/MultiPaneChart";
-import DrawingToolbar from "./components/DrawingToolbar";
 import IntervalSelector from "./components/IntervalSelector";
 import SymbolSearch from "./components/SymbolSearch";
-import WatchlistSidebar from "./components/WatchlistSidebar";
 import { useCustomIntervals } from "./hooks/useCustomIntervals";
 import { useIndicators } from "./hooks/useIndicators";
 import { useBackfillCompletionRuntime } from "./runtime/streams/useBackfillCompletionRuntime";
@@ -50,9 +48,11 @@ import { clearSavedDrawings } from "./services/drawingStorage";
 import "./index.css";
 
 const ExportPanel = React.lazy(() => import("./components/ExportPanel"));
+const DrawingToolbar = React.lazy(() => import("./components/DrawingToolbar"));
 const SettingsModal = React.lazy(() => import("./components/SettingsModal"));
 const IndicatorPanel = React.lazy(() => import("./components/IndicatorPanel"));
 const AlertsPanel = React.lazy(() => import("./components/alerts/AlertsPanel"));
+const WatchlistSidebar = React.lazy(() => import("./components/WatchlistSidebar"));
 
 // ---------- ErrorBoundary ----------
 class ErrorBoundary extends React.Component {
@@ -706,36 +706,38 @@ export default function App() {
 
       <div className="main-content-area">
       <div className="chart-with-toolbar">
-        <DrawingToolbar
-          activeTool={drawingTool}
-          onToolChange={setDrawingTool}
-          penColor={penColor}
-          onPenColorChange={setPenColor}
-          penSize={penSize}
-          onPenSizeChange={setPenSize}
-          onClearAll={handleClearDrawing}
-          drawingsHidden={drawingsHidden}
-          onToggleDrawingsHidden={handleToggleDrawingsHidden}
-          drawingSnapEnabled={drawingSnapEnabled}
-          onDrawingSnapEnabledChange={handleDrawingSnapEnabledChange}
-          textFontSize={textFontSize}
-          onTextFontSizeChange={setTextFontSize}
-          textBold={textBold}
-          onTextBoldChange={setTextBold}
-          textItalic={textItalic}
-          onTextItalicChange={setTextItalic}
-          fibLevels={fibLevels}
-          onFibLevelsChange={handleFibLevelsChange}
-          fibInverted={fibInverted}
-          onFibInvertedChange={handleFibInvertedChange}
-          positionSize={positionSize}
-          onPositionSizeChange={handlePositionSizeChange}
-          selectedDrawing={selectedDrawing}
-          onSelectedDrawingStyleChange={handleSelectedDrawingStyleChange}
-          exportPanelOpen={showExportPanel}
-          exportInProgress={exportInProgress}
-          onToggleExportPanel={handleToggleExportPanel}
-        />
+        <React.Suspense fallback={<div className="drawing-toolbar drawing-toolbar-loading" aria-hidden="true" />}>
+          <DrawingToolbar
+            activeTool={drawingTool}
+            onToolChange={setDrawingTool}
+            penColor={penColor}
+            onPenColorChange={setPenColor}
+            penSize={penSize}
+            onPenSizeChange={setPenSize}
+            onClearAll={handleClearDrawing}
+            drawingsHidden={drawingsHidden}
+            onToggleDrawingsHidden={handleToggleDrawingsHidden}
+            drawingSnapEnabled={drawingSnapEnabled}
+            onDrawingSnapEnabledChange={handleDrawingSnapEnabledChange}
+            textFontSize={textFontSize}
+            onTextFontSizeChange={setTextFontSize}
+            textBold={textBold}
+            onTextBoldChange={setTextBold}
+            textItalic={textItalic}
+            onTextItalicChange={setTextItalic}
+            fibLevels={fibLevels}
+            onFibLevelsChange={handleFibLevelsChange}
+            fibInverted={fibInverted}
+            onFibInvertedChange={handleFibInvertedChange}
+            positionSize={positionSize}
+            onPositionSizeChange={handlePositionSizeChange}
+            selectedDrawing={selectedDrawing}
+            onSelectedDrawingStyleChange={handleSelectedDrawingStyleChange}
+            exportPanelOpen={showExportPanel}
+            exportInProgress={exportInProgress}
+            onToggleExportPanel={handleToggleExportPanel}
+          />
+        </React.Suspense>
 
         {showExportPanel && (
           <React.Suspense fallback={null}>
@@ -824,19 +826,29 @@ export default function App() {
         )}
       </div>
 
-      <WatchlistSidebar
-        currentSymbol={symbol}
-        currentMarketType={marketType}
-        currentExchange={exchange}
-        onSelectSymbol={handleSymbolChange}
-        watchlists={watchlists}
-        onWatchlistsChange={setWatchlists}
-        prices={symbolPrices}
-        subscriptionTiers={subscriptionTiers}
-        onTierChange={handleTierChange}
-        upColor={settings.upColor}
-        downColor={settings.downColor}
-      />
+      <React.Suspense
+        fallback={(
+          <div
+            className="watchlist-sidebar watchlist-sidebar-loading"
+            aria-hidden="true"
+            style={{ width: 320 }}
+          />
+        )}
+      >
+        <WatchlistSidebar
+          currentSymbol={symbol}
+          currentMarketType={marketType}
+          currentExchange={exchange}
+          onSelectSymbol={handleSymbolChange}
+          watchlists={watchlists}
+          onWatchlistsChange={setWatchlists}
+          prices={symbolPrices}
+          subscriptionTiers={subscriptionTiers}
+          onTierChange={handleTierChange}
+          upColor={settings.upColor}
+          downColor={settings.downColor}
+        />
+      </React.Suspense>
 
       </div> {/* end main-content-area */}
 

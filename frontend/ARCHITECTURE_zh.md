@@ -49,6 +49,8 @@ CORS 阻止访问 `http://localhost:8000`，导致 K 线 HTTP 请求失败。
 | Runtime 目录分组和边界文档 | 已完成 |
 | Vite `/api` proxy 和可配置 API base | 已完成 |
 | Settings、Indicators、Alerts、Export 面板懒加载拆包 | 已完成 |
+| Symbol search modal、watchlist sidebar、drawing toolbar 懒加载拆包 | 已完成 |
+| React、Lightweight Charts、editor、export 库的构建期 vendor chunk | 已完成 |
 
 ## 验证基线
 
@@ -71,7 +73,8 @@ node ./node_modules/vite/bin/vite.js build
    ```
 
    该检查会确认页面达到 `Connected to Binance`、非零 `bars`、
-   `Live (WebSocket)`，并确认懒加载的 Settings 面板可以打开。
+   `Live (WebSocket)`，确认 drawing toolbar 已加载，并确认懒加载的
+   symbol search 和 Settings 面板可以打开。
 
 Windows 下如果后端启动日志因为控制台编码失败，可用 UTF-8 输出启动：
 
@@ -83,7 +86,8 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ## 剩余工作
 
-- 分析剩余 main bundle，再按证据拆下一条重路径。
-- 如果 bundle 分析显示指标编辑器或 Monaco 仍影响首屏，再继续拆该路径。
-- 绘图 primitives 要单独评估后再懒加载，因为图表交互比侧边面板更敏感。
+- 绘图 primitives 要单独评估后再懒加载 drawing engine，因为它挂在当前图表 pane 上，
+  对图表交互的影响比侧边面板更直接。
+- 如果用户反馈 symbol search、watchlist、drawing tools 或 settings 首次点击有延迟，
+  再增加交互预加载。
 - 当前端 runtime 边界变化时，同步更新顶层 README 和本文档。

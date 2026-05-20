@@ -330,6 +330,46 @@ async function openSettings(cdp) {
   };
 }
 
+async function verifyLazySurfaces(cdp) {
+  let drawingToolbarLoaded = false;
+  for (let i = 0; i < 20; i += 1) {
+    await wait(500);
+    const toolbarResult = await cdp.send("Runtime.evaluate", {
+      expression: "Boolean(document.querySelector('.drawing-toolbar:not(.drawing-toolbar-loading) .drawing-tool-btn'))",
+      returnByValue: true,
+    });
+    drawingToolbarLoaded = Boolean(toolbarResult.result?.value);
+    if (drawingToolbarLoaded) break;
+  }
+
+  const symbolClickResult = await cdp.send("Runtime.evaluate", {
+    expression: "(() => { const button = document.querySelector('#symbol-selector'); if (!button) return false; button.click(); return true; })()",
+    returnByValue: true,
+  });
+
+  let symbolSearchOpened = false;
+  for (let i = 0; i < 20; i += 1) {
+    await wait(500);
+    const symbolResult = await cdp.send("Runtime.evaluate", {
+      expression: "Boolean(document.querySelector('.sym-modal-overlay .sym-modal'))",
+      returnByValue: true,
+    });
+    symbolSearchOpened = Boolean(symbolResult.result?.value);
+    if (symbolSearchOpened) break;
+  }
+
+  await cdp.send("Runtime.evaluate", {
+    expression: "document.querySelector('.sym-modal-close-btn')?.click()",
+    returnByValue: true,
+  });
+
+  return {
+    drawingToolbarLoaded,
+    symbolSearchButtonClicked: Boolean(symbolClickResult.result?.value),
+    symbolSearchOpened,
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const chromePath = findChrome(args.chromePath);
@@ -402,6 +442,7 @@ async function main() {
     await cdp.send("Page.navigate", { url: args.url });
 
     const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
+    const lazySurfaces = await verifyLazySurfaces(cdp);
     const settings = await openSettings(cdp);
     const screenshotData = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
     fs.writeFileSync(screenshot, Buffer.from(screenshotData.data, "base64"));
@@ -412,6 +453,7 @@ async function main() {
       bars: parseBarCount(bodyText),
       connected: bodyText.includes("Connected to Binance"),
       live: bodyText.includes("Live (WebSocket)"),
+      ...lazySurfaces,
       ...settings,
       apiResponses: responses.slice(0, 20),
       failures,
@@ -421,7 +463,13 @@ async function main() {
 
     console.log(JSON.stringify(report, null, 2));
 
-    const failed = !report.connected || !report.live || report.bars <= 0 || !report.settingsOpened || failures.length > 0;
+    const failed = !report.connected
+      || !report.live
+      || report.bars <= 0
+      || !report.drawingToolbarLoaded
+      || !report.symbolSearchOpened
+      || !report.settingsOpened
+      || failures.length > 0;
     process.exitCode = failed ? 1 : 0;
   } finally {
     if (cdp) cdp.close();

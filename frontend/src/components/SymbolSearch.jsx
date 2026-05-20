@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
-import SymbolSearchModal from "./SymbolSearchModal";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+
+const SymbolSearchModal = lazy(() => import("./SymbolSearchModal"));
 
 /**
  * SymbolSearch — trigger button + full-screen search modal.
@@ -76,18 +77,21 @@ export default function SymbolSearch({
         </span>
       </button>
 
-      {/* Full-screen search modal */}
-      <SymbolSearchModal
-        open={open}
-        onClose={handleClose}
-        currentSymbol={currentSymbol}
-        currentMarketType={currentMarketType}
-        currentExchange={currentExchange}
-        exchangeCatalog={exchangeCatalog}
-        onSelect={handleSelect}
-        watchlists={watchlists}
-        onAddToWatchlist={onAddToWatchlist}
-      />
+      {open && (
+        <Suspense fallback={null}>
+          <SymbolSearchModal
+            open={open}
+            onClose={handleClose}
+            currentSymbol={currentSymbol}
+            currentMarketType={currentMarketType}
+            currentExchange={currentExchange}
+            exchangeCatalog={exchangeCatalog}
+            onSelect={handleSelect}
+            watchlists={watchlists}
+            onAddToWatchlist={onAddToWatchlist}
+          />
+        </Suspense>
+      )}
     </>
   );
 }

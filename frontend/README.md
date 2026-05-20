@@ -43,7 +43,7 @@ node ./node_modules/eslint/bin/eslint.js .
 ```
 
 With the backend and Vite running, use the browser smoke check to verify the
-rendered chart and lazy Settings panel:
+rendered chart, drawing toolbar, lazy symbol search, and lazy Settings panel:
 
 ```bash
 npm run smoke -- --url http://127.0.0.1:5173/

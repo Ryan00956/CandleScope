@@ -33,6 +33,12 @@ import {
   buildRenderableChartData,
 } from "./runtime/chartDataRuntime";
 import {
+  buildChartDisplayState,
+  formatPrice,
+  formatPriceDiff,
+  formatVolume,
+} from "./runtime/chartDisplayRuntime";
+import {
   buildSortedIntervals,
   getBaseWsIntervals,
   getExchangeConfig,
@@ -571,55 +577,22 @@ export default function App() {
     isNativeIntervalSupported,
   });
 
-  const displayData = crosshairData || lastPrice;
-  const priceChange = displayData ? ((displayData.close - displayData.open) / displayData.open) * 100 : 0;
-  const isUp = priceChange >= 0;
-
-  const formatPrice = (price) => {
-    if (price == null) return "--";
-    if (price >= 1000) {
-      return price.toLocaleString("en-US", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      });
-    }
-    if (price >= 1) return price.toFixed(4);
-    return price.toFixed(8);
-  };
-
-  const formatPriceDiff = (diff) => {
-    if (diff == null) return "--";
-    const abs = Math.abs(diff);
-    let raw;
-    if (abs >= 1000) raw = abs.toFixed(2);
-    else if (abs >= 1) raw = abs.toFixed(4);
-    else raw = abs.toFixed(8);
-    return parseFloat(raw).toString();
-  };
-
-  const formatVolume = (vol) => {
-    if (vol == null) return "--";
-    if (vol >= 1_000_000_000) return `${(vol / 1_000_000_000).toFixed(2)}B`;
-    if (vol >= 1_000_000) return `${(vol / 1_000_000).toFixed(2)}M`;
-    if (vol >= 1_000) return `${(vol / 1_000).toFixed(2)}K`;
-    return vol.toFixed(2);
-  };
-
-  const wsStatusLabel = {
-    idle: "Realtime idle",
-    loading: "Realtime waiting",
-    connecting: "Connecting WS...",
-    live: "Live (WebSocket)",
-    reconnecting: "Reconnecting...",
-    disconnected: "Disconnected",
-    fallback: "Live (Polling fallback)",
-    mock: "Mock mode",
-  }[wsStatus] || "Unknown";
-  const exchangeLabel = exchangeConfig.label || (
-    exchange ? `${exchange.charAt(0).toUpperCase()}${exchange.slice(1)}` : "Unknown"
-  );
-  const marketLabel = exchangeConfig.markets.find((item) => item.market_type === marketType)?.label
-    || (marketType === "futures" ? "Futures" : "Spot");
+  const {
+    displayData,
+    priceChange,
+    isUp,
+    amplitude,
+    wsStatusLabel,
+    exchangeLabel,
+    marketLabel,
+  } = buildChartDisplayState({
+    crosshairData,
+    lastPrice,
+    wsStatus,
+    exchange,
+    exchangeConfig,
+    marketType,
+  });
 
   return (
     <div className="app-layout" ref={pageExportRef}>
@@ -721,7 +694,7 @@ export default function App() {
             <div className="ohlcv-item">
               <span className="ohlcv-label">振幅</span>
               <span className="ohlcv-value">
-                {displayData.open ? ((displayData.high - displayData.low) / displayData.open * 100).toFixed(2) : "0.00"}%
+                {amplitude}%
               </span>
             </div>
           </div>

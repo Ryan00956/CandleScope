@@ -21,6 +21,7 @@ import { useChartSettingsRuntime } from "./runtime/useChartSettingsRuntime";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
 import { useDrawingRuntime } from "./runtime/useDrawingRuntime";
 import { useKlineStreamRuntime } from "./runtime/useKlineStreamRuntime";
+import { usePriceScalePrefs } from "./runtime/usePriceScalePrefs";
 import { useWatchlistRuntime } from "./runtime/useWatchlistRuntime";
 import { parseIntervalSeconds } from "./utils/intervals";
 import { inferExchangeFromSymbol } from "./utils/symbolKey";
@@ -194,25 +195,12 @@ export default function App() {
     handleToggleDrawingsHidden,
   } = useDrawingRuntime({ chartWidgetRef });
 
-  // --- Invert price scale state ---
-  const [invertScale, setInvertScale] = useState(() => {
-    const prefs = loadUserPrefs();
-    return !!prefs.invertScale;
-  });
-  const handleInvertScaleChange = useCallback((val) => {
-    setInvertScale(val);
-    updateUserPref("invertScale", val);
-  }, []);
-
-  // --- Price scale mode state (0=Normal, 1=Logarithmic, 2=Percentage, 3=IndexedTo100) ---
-  const [priceScaleMode, setPriceScaleMode] = useState(() => {
-    const prefs = loadUserPrefs();
-    return typeof prefs.priceScaleMode === "number" ? prefs.priceScaleMode : 0;
-  });
-  const handlePriceScaleModeChange = useCallback((mode) => {
-    setPriceScaleMode(mode);
-    updateUserPref("priceScaleMode", mode);
-  }, []);
+  const {
+    invertScale,
+    handleInvertScaleChange,
+    priceScaleMode,
+    handlePriceScaleModeChange,
+  } = usePriceScalePrefs({ loadUserPrefs, updateUserPref });
 
   // --- Settings state (must be before useIndicators which needs settings.upColor/downColor) ---
   const [showSettings, setShowSettings] = useState(false);

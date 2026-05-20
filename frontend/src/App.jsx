@@ -19,6 +19,7 @@ import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./runtime/useChartLoadMoreLeft";
 import { useChartSettingsRuntime } from "./runtime/useChartSettingsRuntime";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
+import { useDrawingRuntime } from "./runtime/useDrawingRuntime";
 import { useKlineStreamRuntime } from "./runtime/useKlineStreamRuntime";
 import { useWatchlistRuntime } from "./runtime/useWatchlistRuntime";
 import { parseIntervalSeconds } from "./utils/intervals";
@@ -90,14 +91,6 @@ class ErrorBoundary extends React.Component {
 
 // ---------- User preference persistence ----------
 const USER_PREFS_KEY = "candlescope-user-prefs";
-const DEFAULT_CURSOR_TOOL = "cursor-default";
-const CURSOR_TOOL_IDS = new Set([
-  DEFAULT_CURSOR_TOOL,
-  "cursor-crosshair",
-  "cursor-dot",
-  "cursor-highlighter",
-  "cursor-plain",
-]);
 
 function loadUserPrefs() {
   try {
@@ -171,56 +164,35 @@ export default function App() {
   const chartWidgetRef = useRef(null);
   const pageExportRef = useRef(null);
 
-  // --- Drawing tool state ---
-  const [drawingTool, setDrawingToolState] = useState(DEFAULT_CURSOR_TOOL);
-  const lastCursorToolRef = useRef(DEFAULT_CURSOR_TOOL);
-  const setDrawingTool = useCallback((nextTool) => {
-    const normalizedTool = nextTool || lastCursorToolRef.current || DEFAULT_CURSOR_TOOL;
-    if (CURSOR_TOOL_IDS.has(normalizedTool)) {
-      lastCursorToolRef.current = normalizedTool;
-    }
-    setDrawingToolState(normalizedTool);
-  }, []);
-  const [penColor, setPenColor] = useState("#f59e0b");
-  const [penSize, setPenSize] = useState(2);
-  const [textFontSize, setTextFontSize] = useState(14);
-  const [textBold, setTextBold] = useState(false);
-  const [textItalic, setTextItalic] = useState(false);
-
-  // --- Fibonacci tool settings ---
-  const [fibLevels, setFibLevels] = useState(() => {
-    try {
-      const saved = localStorage.getItem("candlescope-fib-levels");
-      if (saved) return JSON.parse(saved);
-    } catch { /* ignore */ }
-    return null; // null = use DEFAULT_FIB_LEVELS
-  });
-  const [fibInverted, setFibInverted] = useState(() => {
-    try {
-      return localStorage.getItem("candlescope-fib-inverted") === "true";
-    } catch { return false; }
-  });
-  const handleFibLevelsChange = useCallback((levels) => {
-    setFibLevels(levels);
-    try { localStorage.setItem("candlescope-fib-levels", JSON.stringify(levels)); } catch { /* ignore */ }
-  }, []);
-  const handleFibInvertedChange = useCallback((v) => {
-    setFibInverted(v);
-    try { localStorage.setItem("candlescope-fib-inverted", String(v)); } catch { /* ignore */ }
-  }, []);
-
-  // --- Position tool settings ---
-  const [positionSize, setPositionSize] = useState(() => {
-    try {
-      const saved = localStorage.getItem("candlescope-position-size");
-      if (saved) return Number(saved);
-    } catch { /* ignore */ }
-    return 1000;
-  });
-  const handlePositionSizeChange = useCallback((size) => {
-    setPositionSize(size);
-    try { localStorage.setItem("candlescope-position-size", String(size)); } catch { /* ignore */ }
-  }, []);
+  const {
+    drawingTool,
+    setDrawingTool,
+    penColor,
+    setPenColor,
+    penSize,
+    setPenSize,
+    textFontSize,
+    setTextFontSize,
+    textBold,
+    setTextBold,
+    textItalic,
+    setTextItalic,
+    fibLevels,
+    handleFibLevelsChange,
+    fibInverted,
+    handleFibInvertedChange,
+    positionSize,
+    handlePositionSizeChange,
+    drawingsHidden,
+    setDrawingsHidden,
+    drawingSnapEnabled,
+    handleDrawingSnapEnabledChange,
+    selectedDrawing,
+    handleSelectedDrawingChange,
+    handleSelectedDrawingStyleChange,
+    handleClearDrawing,
+    handleToggleDrawingsHidden,
+  } = useDrawingRuntime({ chartWidgetRef });
 
   // --- Invert price scale state ---
   const [invertScale, setInvertScale] = useState(() => {
@@ -240,48 +212,6 @@ export default function App() {
   const handlePriceScaleModeChange = useCallback((mode) => {
     setPriceScaleMode(mode);
     updateUserPref("priceScaleMode", mode);
-  }, []);
-
-  const handleClearDrawing = useCallback(() => {
-    chartWidgetRef.current?.clearAllDrawings();
-  }, []);
-
-  // Toggle hide/show all drawings across panes (does not delete them).
-  const [drawingsHidden, setDrawingsHidden] = useState(false);
-  const handleToggleDrawingsHidden = useCallback(() => {
-    setDrawingsHidden((prev) => !prev);
-  }, []);
-  useEffect(() => {
-    chartWidgetRef.current?.setDrawingsHidden?.(drawingsHidden);
-  }, [drawingsHidden]);
-
-  // Toggle magnet snapping for drawing tools (pen always stays freehand).
-  const [drawingSnapEnabled, setDrawingSnapEnabled] = useState(() => {
-    try {
-      const saved = localStorage.getItem("candlescope-drawing-snap-enabled");
-      return saved == null ? true : saved === "true";
-    } catch {
-      return true;
-    }
-  });
-  const handleDrawingSnapEnabledChange = useCallback((enabled) => {
-    setDrawingSnapEnabled(enabled);
-    try { localStorage.setItem("candlescope-drawing-snap-enabled", String(enabled)); } catch { /* ignore */ }
-  }, []);
-
-  // Currently selected drawing on the chart (line/freehand/fibonacci).
-  // When selection changes, mirror its stroke style into the toolbar's single
-  // color/width controls so editing existing drawings and creating new ones
-  // use the same visible state.
-  const [selectedDrawing, setSelectedDrawing] = useState(null);
-  const handleSelectedDrawingChange = useCallback((drawing) => {
-    setSelectedDrawing(drawing);
-    if (!drawing) return;
-    if (drawing.color) setPenColor(drawing.color);
-    if (typeof drawing.lineWidth === "number") setPenSize(drawing.lineWidth);
-  }, []);
-  const handleSelectedDrawingStyleChange = useCallback((patch) => {
-    chartWidgetRef.current?.updateSelectedDrawingStyle?.(patch);
   }, []);
 
   // --- Settings state (must be before useIndicators which needs settings.upColor/downColor) ---

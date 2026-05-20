@@ -11,6 +11,7 @@ import WatchlistSidebar from "./components/WatchlistSidebar";
 import { useCustomIntervals } from "./hooks/useCustomIntervals";
 import { useExportPreview } from "./hooks/useExportPreview";
 import { useIndicators } from "./hooks/useIndicators";
+import { useBackfillCompletionRuntime } from "./runtime/useBackfillCompletionRuntime";
 import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
@@ -25,16 +26,8 @@ import {
 } from "./runtime/viewportController";
 import { requestIndicatorRangeInChunks } from "./runtime/indicatorRangeRuntime";
 import {
-  eventRangeFromDetail,
-  isSameSeries,
-  rangeCovers,
-  rangesOverlap,
-  rowRangeMs,
-} from "./runtime/rangeRuntime";
-import {
   fetchKlinesBefore,
   fetchKlinesHistory,
-  fetchKlinesRange,
   fetchLatestKlines,
   getMultiStreamUrl,
   fetchExchanges,
@@ -947,6 +940,41 @@ export default function App() {
     loadData(symbol, interval, marketType, exchange);
   }, [symbol, interval, marketType, exchange, loadData]);
 
+  // handleNeedMoreLeft cooldown
+  const needMoreLeftCooldownRef = useRef(new Map()); // interval -> timestamp
+  const NEED_MORE_LEFT_COOLDOWN_MS = 3_000;
+
+  // Pending "load more left" requests waiting for backfill to finish.
+  // Key = `${exchange}-${marketType}-${symbol}-${interval}` (matches cacheKey),
+  // value = { before: number, safetyAttempts: number, completionAttempts: number }.
+  const pendingLoadMoreLeftRef = useRef(new Map());
+  const PENDING_LOAD_MORE_LEFT_SAFETY_MAX_ATTEMPTS = 1;
+  const PENDING_LOAD_MORE_LEFT_SAFETY_MS = 6_000;
+
+  const handleBackfillCompleted = useBackfillCompletionRuntime({
+    symbol,
+    exchange,
+    marketType,
+    intervalRef,
+    loadingRef,
+    pendingInitialHistoryRef,
+    pendingLoadMoreLeftRef,
+    cacheKey,
+    getIntervalDays,
+    mergeCacheData,
+    commitMergedChartData,
+    requestIndicatorRange,
+    setLastPrice,
+    setError,
+    setConnectionStatus,
+    setLoading,
+    setDatasetKey,
+  });
+
+  // Stable handle to the latest handleNeedMoreLeft so the safety-net timer
+  // and other async sites can invoke it without being captured to a stale closure.
+  const handleNeedMoreLeftRef = useRef(null);
+
   const syncSocketSubscriptions = useCallback((socket, desiredIntervals) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
@@ -1132,195 +1160,7 @@ export default function App() {
               return;
             }
 
-            // ── Handle backfill completion: reload the exact repaired range first ──
-            if (msg.type === "backfill_completed") {
-              const bfInterval = msg.interval;
-              const bfSymbol = msg.symbol || symbol;
-              const bfExchange = msg.exchange || exchange;
-              const bfMarketType = msg.market_type || marketType;
-              const detail = msg.detail || {};
-              const eventSeries = {
-                exchange: bfExchange,
-                marketType: bfMarketType,
-                symbol: bfSymbol,
-                interval: bfInterval,
-              };
-              const activeSeries = {
-                exchange,
-                marketType,
-                symbol,
-                interval: intervalRef.current,
-              };
-              const eventRange = eventRangeFromDetail(detail);
-              const userVisibleReason = new Set([
-                "initial_history",
-                "visible_range_gap",
-                "visible_load_more",
-                "visible_seed_gap",
-              ]).has(detail.reason);
-
-              // ── Dedup: skip if a reload for this interval is already in-flight or on cooldown ──
-              const bfDedupeKey = `${bfExchange}-${bfMarketType}-${bfSymbol}-${bfInterval}`;
-              if (backfillReloadInFlightRef.current.has(bfDedupeKey)) {
-                console.log(`[Backfill] Skipping duplicate reload for ${bfDedupeKey} (already in-flight/cooldown)`);
-                return;
-              }
-              backfillReloadInFlightRef.current.add(bfDedupeKey);
-
-              console.log(`Backfill completed for ${bfSymbol}@${bfInterval}, reloading data...`);
-              const days = getIntervalDays(bfInterval, bfExchange);
-              const canReleaseInitialLoading = (rows) => {
-                if (!isSameSeries(eventSeries, activeSeries)) return false;
-                if (!loadingRef.current) return true;
-
-                const pendingInitial = pendingInitialHistoryRef.current;
-                const rowsRange = rowRangeMs(rows);
-                if (pendingInitial && isSameSeries(eventSeries, pendingInitial)) {
-                  if (!pendingInitial.range) return true;
-                  if (rowsRange && rangesOverlap(rowsRange, pendingInitial.range)) return true;
-                  if (eventRange && rangesOverlap(eventRange, pendingInitial.range)) return true;
-                  if (detail.verified_contiguous === true && rangeCovers(eventRange, pendingInitial.range)) return true;
-                  return false;
-                }
-
-                return userVisibleReason;
-              };
-
-              const mergeBackfillRows = (rows) => {
-                if (!rows?.length) return false;
-                mergeCacheData(bfSymbol, bfInterval, rows, {
-                  marketType: bfMarketType,
-                  exchange: bfExchange,
-                });
-
-                if (bfInterval === intervalRef.current && bfSymbol === symbol && bfExchange === exchange && bfMarketType === marketType) {
-                  commitMergedChartData(bfSymbol, bfInterval, rows, { source: "backfill-completed" });
-                  // Only set lastPrice from backfill if no live price exists yet.
-                  // Otherwise we'd overwrite the real-time WS price with stale
-                  // history data, causing the header OHLCV to jump between
-                  // live ticks and snapshot values from each backfill fetch.
-                  setLastPrice((prev) => {
-                    if (prev) return prev;
-                    const latest = rows[rows.length - 1];
-                    return latest || prev;
-                  });
-                  requestIndicatorRangeInChunks(
-                    requestIndicatorRange,
-                    rows[0]?.time,
-                    rows[rows.length - 1]?.time,
-                    parseIntervalSeconds(bfInterval),
-                  );
-                  setError(null);
-                  if (canReleaseInitialLoading(rows)) {
-                    pendingInitialHistoryRef.current = null;
-                    setConnectionStatus("connected");
-                    setLoading(false);
-                  }
-                  setDatasetKey((v) => v + 1);
-                }
-                return true;
-              };
-
-              const readBackfilledData = async () => {
-                const startMs = Number(detail.range_start_ms ?? detail.request_start_ms);
-                const endMs = Number(detail.range_end_ms ?? detail.request_end_ms);
-                let loadedAny = false;
-                let lastError = null;
-
-                if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
-                  try {
-                    const rangeResult = await fetchKlinesRange(
-                      bfSymbol,
-                      bfInterval,
-                      startMs / 1000,
-                      endMs / 1000,
-                      bfMarketType,
-                      bfExchange,
-                      { repair: "none", strict: false },
-                    );
-                    loadedAny = mergeBackfillRows(rangeResult?.data || []) || loadedAny;
-                  } catch (rangeErr) {
-                    lastError = rangeErr;
-                    console.warn(`[Backfill] Exact range reload failed for ${bfDedupeKey}:`, rangeErr);
-                  }
-                }
-
-                try {
-                  const result = await fetchKlinesHistory(bfSymbol, bfInterval, days, bfMarketType, bfExchange);
-                  loadedAny = mergeBackfillRows(result?.data || []) || loadedAny;
-                } catch (historyErr) {
-                  lastError = historyErr;
-                  console.warn(`[Backfill] History reload failed for ${bfDedupeKey}:`, historyErr);
-                }
-
-                if (!loadedAny && lastError) {
-                  throw lastError;
-                }
-              };
-
-              readBackfilledData()
-                .then(() => {
-                  // ── Consume pending "load more left" intent ──
-                  // If the user previously scrolled past the left edge and got
-                  // back 0 bars (backfill was in flight), the default-window
-                  // fetchKlinesHistory above may not cover that older slice.
-                  // Issue a targeted fetchKlinesBefore for the same `before`
-                  // cursor so the leftmost K-lines actually appear.
-                  const pendingKey = cacheKey(bfSymbol, bfInterval, bfMarketType, bfExchange);
-                  const pending = pendingLoadMoreLeftRef.current.get(pendingKey);
-                  if (!pending) return;
-                  const completionAttempts = pending.completionAttempts ?? 0;
-                  if (completionAttempts >= PENDING_LOAD_MORE_LEFT_COMPLETION_MAX_ATTEMPTS) {
-                    pendingLoadMoreLeftRef.current.delete(pendingKey);
-                    return;
-                  }
-                  pending.completionAttempts = completionAttempts + 1;
-                  return fetchKlinesBefore(bfSymbol, bfInterval, pending.before, 500, bfMarketType, bfExchange)
-                    .then((beforeResult) => {
-                      const older = beforeResult?.data || [];
-                      if (older.length > 0) {
-                        const patchStart = older[0]?.time;
-                        const patchEnd = older[older.length - 1]?.time;
-                        mergeCacheData(bfSymbol, bfInterval, older, {
-                          marketType: bfMarketType,
-                          exchange: bfExchange,
-                        });
-                        const currentIntv = intervalRef.current;
-                        if (bfInterval === currentIntv && bfSymbol === symbol && bfExchange === exchange && bfMarketType === marketType) {
-                          commitMergedChartData(bfSymbol, bfInterval, older, { source: "backfill-before-page" });
-                          if (patchStart && patchEnd) {
-                            requestIndicatorRangeInChunks(
-                              requestIndicatorRange,
-                              patchStart,
-                              patchEnd,
-                              parseIntervalSeconds(bfInterval),
-                            );
-                          }
-                          setDatasetKey((v) => v + 1);
-                        }
-                        pendingLoadMoreLeftRef.current.delete(pendingKey);
-                      } else if (beforeResult && beforeResult.has_more === false) {
-                        pendingLoadMoreLeftRef.current.delete(pendingKey);
-                      }
-                      // Else: still backfilling deeper. Leave pending in place;
-                      // a future backfill_completed can retry this cursor.
-                    })
-                    .catch((err) => {
-                      console.warn(`[Backfill] Pending fetchKlinesBefore failed for ${pendingKey}:`, err);
-                    });
-                })
-                .catch((err) => {
-                  console.warn(`Failed to reload after backfill for ${bfInterval}:`, err);
-                })
-                .finally(() => {
-                  // Release the dedup lock after cooldown
-                  setTimeout(() => {
-                    backfillReloadInFlightRef.current.delete(bfDedupeKey);
-                  }, BACKFILL_RELOAD_COOLDOWN_MS);
-                });
-
-              return;
-            }
+            if (handleBackfillCompleted(msg)) return;
 
             if (msg.type !== "kline" || !msg.data) return;
 
@@ -1398,7 +1238,7 @@ export default function App() {
       }
       liveSubscribedIntervalsRef.current = new Set();
     };
-  }, [cacheKey, commitMergedChartData, commitPatchedChartData, exchange, marketType, mergeCacheData, patchCacheTick, pendingInitialHistoryRef, requestIndicatorRange, syncSocketSubscriptions, symbol, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
+  }, [commitMergedChartData, commitPatchedChartData, exchange, handleBackfillCompleted, marketType, patchCacheTick, syncSocketSubscriptions, symbol, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
 
   useEffect(() => {
     syncSocketSubscriptions(socketRef.current, trackedIntervals);
@@ -1448,28 +1288,6 @@ export default function App() {
     requestIndicatorRange,
     updateLastPrice,
   });
-
-  // Backfill-completed dedup: prevent multiple rapid reloads for same interval
-  const backfillReloadInFlightRef = useRef(new Set());
-  const BACKFILL_RELOAD_COOLDOWN_MS = 10_000;
-
-  // handleNeedMoreLeft cooldown
-  const needMoreLeftCooldownRef = useRef(new Map()); // interval → timestamp
-  const NEED_MORE_LEFT_COOLDOWN_MS = 3_000;
-
-  // Pending "load more left" requests waiting for backfill to finish.
-  // Key = `${exchange}-${marketType}-${symbol}-${interval}` (matches cacheKey),
-  // value = { before: number, safetyAttempts: number, completionAttempts: number }. Populated when
-  // /klines/history/before returns 0 bars + has_more=true (backfill in flight),
-  // consumed when backfill_completed arrives or the safety-net timer fires.
-  const pendingLoadMoreLeftRef = useRef(new Map());
-  const PENDING_LOAD_MORE_LEFT_SAFETY_MAX_ATTEMPTS = 1;
-  const PENDING_LOAD_MORE_LEFT_COMPLETION_MAX_ATTEMPTS = 3;
-  const PENDING_LOAD_MORE_LEFT_SAFETY_MS = 6_000;
-
-  // Stable handle to the latest handleNeedMoreLeft so the safety-net timer
-  // and other async sites can invoke it without being captured to a stale closure.
-  const handleNeedMoreLeftRef = useRef(null);
 
   // ---- handle load more left ----
   const oldestChartTime = chartData[0]?.time ?? null;

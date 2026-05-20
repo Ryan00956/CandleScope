@@ -17,7 +17,6 @@ export function useKlineStreamRuntime({
   exchange,
   marketType,
   trackedIntervals,
-  trackedIntervalsRef,
   intervalRef,
   getIntervalDays,
   commitMergedChartData,
@@ -30,6 +29,11 @@ export function useKlineStreamRuntime({
 }) {
   const socketRef = useRef(null);
   const liveSubscribedIntervalsRef = useRef(new Set());
+  const trackedIntervalsRef = useRef(trackedIntervals);
+
+  useEffect(() => {
+    trackedIntervalsRef.current = trackedIntervals;
+  }, [trackedIntervals]);
 
   const syncSocketSubscriptions = useCallback((socket, desiredIntervals) => {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -280,7 +284,6 @@ export function useKlineStreamRuntime({
     setWsStatus,
     symbol,
     syncSocketSubscriptions,
-    trackedIntervalsRef,
     updateLastPrice,
     updateRealtimePrice,
   ]);

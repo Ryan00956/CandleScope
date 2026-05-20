@@ -3,6 +3,7 @@ import {
   fetchSubscriptions,
   getPriceStreamUrl,
   syncWatchlistSymbols,
+  updateSubscriptionTier,
 } from "../services/api";
 
 const WATCHLIST_SYNC_DEBOUNCE_MS = 500;
@@ -21,11 +22,25 @@ export function useWatchlistRuntime({ watchlists }) {
   const [symbolPrices, setSymbolPrices] = useState({});
   const syncTimerRef = useRef(null);
   const priceWsRef = useRef(null);
+  const subscriptionTiersRef = useRef(subscriptionTiers);
+
+  useEffect(() => {
+    subscriptionTiersRef.current = subscriptionTiers;
+  }, [subscriptionTiers]);
 
   const refreshSubscriptions = useCallback(async () => {
     const res = await fetchSubscriptions();
     setSubscriptionTiers(buildTierMap(res.subscriptions));
     return res;
+  }, []);
+
+  const handleTierChange = useCallback((sym, tier) => {
+    const prevTier = subscriptionTiersRef.current[sym] || "none";
+    setSubscriptionTiers((prev) => ({ ...prev, [sym]: tier }));
+    updateSubscriptionTier(sym, tier).catch((err) => {
+      console.warn("Failed to update tier:", err);
+      setSubscriptionTiers((current) => ({ ...current, [sym]: prevTier }));
+    });
   }, []);
 
   useEffect(() => {
@@ -112,5 +127,6 @@ export function useWatchlistRuntime({ watchlists }) {
     setSubscriptionTiers,
     symbolPrices,
     refreshSubscriptions,
+    handleTierChange,
   };
 }

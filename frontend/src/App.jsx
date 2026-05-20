@@ -50,9 +50,6 @@ import {
 import {
   getVisibleRangeForInterval,
 } from "./runtime/viewportController";
-import {
-  updateSubscriptionTier,
-} from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
 import "./index.css";
 // ---------- ErrorBoundary ----------
@@ -399,20 +396,9 @@ export default function App() {
 
   const {
     subscriptionTiers,
-    setSubscriptionTiers,
     symbolPrices,
+    handleTierChange,
   } = useWatchlistRuntime({ watchlists });
-
-  // Handle tier change from WatchlistSidebar context menu
-  // sym is a composite key like "spot:BTCUSDT" or "futures:ETHUSDT"
-  const handleTierChange = useCallback((sym, tier) => {
-    const prevTier = subscriptionTiers[sym] || "none";
-    setSubscriptionTiers((prev) => ({ ...prev, [sym]: tier }));
-    updateSubscriptionTier(sym, tier).catch((err) => {
-      console.warn("Failed to update tier:", err);
-      setSubscriptionTiers((prev) => ({ ...prev, [sym]: prevTier }));
-    });
-  }, [setSubscriptionTiers, subscriptionTiers]);
 
 
   // Sync cache limits to backend when they change

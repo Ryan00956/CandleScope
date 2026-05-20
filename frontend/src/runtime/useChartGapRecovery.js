@@ -81,7 +81,9 @@ export function useChartGapRecovery({
     }
   }, [commitMergedChartData, exchange, getIntervalDays, marketType, requestIndicatorRange]);
 
-  recoverGapsRef.current = recoverGaps;
+  useEffect(() => {
+    recoverGapsRef.current = recoverGaps;
+  }, [recoverGaps]);
 
   useEffect(() => {
     if (loading || dataSource === "mock") return undefined;

@@ -20,7 +20,9 @@ import { useChartLoadMoreLeft } from "./runtime/useChartLoadMoreLeft";
 import { useChartNavigationRuntime } from "./runtime/useChartNavigationRuntime";
 import { useChartSettingsRuntime } from "./runtime/useChartSettingsRuntime";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
+import { useCustomIntervalActions } from "./runtime/useCustomIntervalActions";
 import { useDrawingRuntime } from "./runtime/useDrawingRuntime";
+import { useIntervalNoticeRuntime } from "./runtime/useIntervalNoticeRuntime";
 import { useKlineStreamRuntime } from "./runtime/useKlineStreamRuntime";
 import { usePriceScalePrefs } from "./runtime/usePriceScalePrefs";
 import { useWatchlistRuntime } from "./runtime/useWatchlistRuntime";
@@ -339,9 +341,7 @@ export default function App() {
     togglePinCustomInterval,
     clearCustomIntervals,
   } = useCustomIntervals();
-  const [intervalNotice, setIntervalNotice] = useState(null);
-  const lastRemovedIntervalRef = useRef(null);
-  const intervalNoticeTimerRef = useRef(null);
+  const { intervalNotice, showIntervalNotice } = useIntervalNoticeRuntime();
   const exchangeConfig = useMemo(
     () => getExchangeConfig(exchange, exchangeCatalog),
     [exchange, exchangeCatalog],
@@ -565,86 +565,24 @@ export default function App() {
     markIntervalUsed,
   });
 
-  useEffect(() => () => {
-    if (intervalNoticeTimerRef.current) clearTimeout(intervalNoticeTimerRef.current);
-  }, []);
-
-  const showIntervalNotice = useCallback((notice) => {
-    setIntervalNotice(notice);
-    if (intervalNoticeTimerRef.current) clearTimeout(intervalNoticeTimerRef.current);
-    intervalNoticeTimerRef.current = setTimeout(() => {
-      setIntervalNotice(null);
-      intervalNoticeTimerRef.current = null;
-    }, notice?.duration || 4200);
-  }, []);
-
-  const getFallbackIntervalAfterRemove = useCallback((removedInterval) => {
-    const recentCustom = customIntervalRecords
-      .filter((record) => record.value !== removedInterval)
-      .sort((a, b) => (b.lastUsedAt || 0) - (a.lastUsedAt || 0))[0];
-    if (recentCustom) return recentCustom.value;
-
-    const removedSeconds = parseIntervalSeconds(removedInterval);
-    if (!removedSeconds) return isNativeIntervalSupported(exchange, "1h") ? "1h" : nativeIntervals[0]?.value || "1m";
-
-    return [...nativeIntervals]
-      .filter((item) => item.value !== removedInterval)
-      .sort((a, b) => Math.abs(a.seconds - removedSeconds) - Math.abs(b.seconds - removedSeconds))[0]?.value || "1h";
-  }, [customIntervalRecords, exchange, nativeIntervals]);
-
-  const handleCreateCustomInterval = (newInterval) => {
-    if (isNativeIntervalSupported(exchange, newInterval)) {
-      handleIntervalChange(newInterval);
-      return { ok: true, added: false };
-    }
-    const result = addCustomInterval(newInterval, { markUsed: true });
-    if (!result.ok) return { ok: false, message: "周期格式无效" };
-    handleIntervalChange(result.value);
-    showIntervalNotice({ type: "success", text: `${result.value} 已添加并切换` });
-    return { ok: true, added: result.added };
-  };
-
-  const handleRemoveCustomInterval = (removedInterval) => {
-    const removed = removeCustomInterval(removedInterval);
-    if (!removed) return;
-    lastRemovedIntervalRef.current = removed;
-    if (interval === removedInterval) {
-      handleIntervalChange(getFallbackIntervalAfterRemove(removedInterval));
-    }
-    showIntervalNotice({
-      type: "warning",
-      text: `${removedInterval} 已删除`,
-      actionLabel: "撤销",
-      duration: 6500,
-    });
-  };
-
-  const handleRestoreCustomInterval = () => {
-    const restored = restoreCustomInterval(lastRemovedIntervalRef.current);
-    if (!restored) return;
-    lastRemovedIntervalRef.current = null;
-    showIntervalNotice({ type: "success", text: `${restored.value} 已恢复` });
-  };
-
-  const handleClearCustomIntervals = () => {
-    const removed = clearCustomIntervals();
-    if (removed.length === 0) return;
-    const currentWasRemoved = removed.some((record) => record.value === interval);
-    lastRemovedIntervalRef.current = removed[removed.length - 1] || null;
-    if (currentWasRemoved) {
-      const currentSeconds = parseIntervalSeconds(interval);
-      const fallback = currentSeconds
-        ? [...nativeIntervals].sort((a, b) => Math.abs(a.seconds - currentSeconds) - Math.abs(b.seconds - currentSeconds))[0]?.value
-        : null;
-      handleIntervalChange(fallback || "1h");
-    }
-    showIntervalNotice({
-      type: "warning",
-      text: `已清空 ${removed.length} 个自定义周期，最近一项可撤销`,
-      actionLabel: "撤销最近一项",
-      duration: 6500,
-    });
-  };
+  const {
+    handleCreateCustomInterval,
+    handleRemoveCustomInterval,
+    handleRestoreCustomInterval,
+    handleClearCustomIntervals,
+  } = useCustomIntervalActions({
+    exchange,
+    interval,
+    nativeIntervals,
+    customIntervalRecords,
+    addCustomInterval,
+    removeCustomInterval,
+    restoreCustomInterval,
+    clearCustomIntervals,
+    handleIntervalChange,
+    showIntervalNotice,
+    isNativeIntervalSupported,
+  });
 
   const displayData = crosshairData || lastPrice;
   const priceChange = displayData ? ((displayData.close - displayData.open) / displayData.open) * 100 : 0;

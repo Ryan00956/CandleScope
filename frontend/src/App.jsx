@@ -17,6 +17,7 @@ import { useChartBackgroundPrefetch } from "./runtime/useChartBackgroundPrefetch
 import { useChartGapRecovery } from "./runtime/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./runtime/useChartLoadMoreLeft";
+import { useChartNavigationRuntime } from "./runtime/useChartNavigationRuntime";
 import { useChartSettingsRuntime } from "./runtime/useChartSettingsRuntime";
 import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
 import { useDrawingRuntime } from "./runtime/useDrawingRuntime";
@@ -39,7 +40,6 @@ import {
 } from "./runtime/exchangeCatalogRuntime";
 import {
   getVisibleRangeForInterval,
-  saveVisibleRangeForInterval,
 } from "./runtime/viewportController";
 import {
   updateSubscriptionTier,
@@ -467,50 +467,6 @@ export default function App() {
     setDataSource,
   });
 
-  // ── Symbol switching handler ──
-  const handleSymbolChange = useCallback((newSymbolOrObj) => {
-    // Accept either a string symbol or { symbol, marketType } object
-    let newSymbol, newMarketType, newExchange;
-    if (typeof newSymbolOrObj === "object" && newSymbolOrObj !== null) {
-      newSymbol = newSymbolOrObj.symbol;
-      newMarketType = newSymbolOrObj.marketType || "spot";
-      newExchange = newSymbolOrObj.exchange || "binance";
-    } else {
-      newSymbol = newSymbolOrObj;
-      newMarketType = marketType;
-      newExchange = exchange;
-    }
-    if (newSymbol === symbol && newMarketType === marketType && newExchange === exchange) return;
-
-    // Persist choice
-    const nextInterval = (
-      savedCustomIntervals.includes(interval) || isNativeIntervalSupported(newExchange, interval, exchangeCatalog)
-    ) ? interval : "1h";
-
-    updateUserPref("lastSymbol", newSymbol);
-    updateUserPref("lastMarketType", newMarketType);
-    updateUserPref("lastExchange", newExchange);
-    updateUserPref("lastInterval", nextInterval);
-
-    // Clear in-memory caches for old symbol
-    clearCache();
-    realtimePriceRef.current = null;
-
-    // Reset chart state
-    clearChartData("symbol-switch-clear", newSymbol, nextInterval);
-    setLastPrice(null);
-    setCrosshairData(null);
-    setLoading(true);
-    setError(null);
-    setHasMoreLeft(true);
-    setDatasetKey((v) => v + 1);
-
-    setExchange(newExchange);
-    setMarketType(newMarketType);
-    setSymbol(newSymbol);
-    setInterval_(nextInterval);
-  }, [clearCache, clearChartData, exchange, exchangeCatalog, interval, marketType, savedCustomIntervals, setHasMoreLeft, symbol]);
-
   useEffect(() => {
     loadData(symbol, interval, marketType, exchange);
   }, [symbol, interval, marketType, exchange, loadData]);
@@ -577,24 +533,37 @@ export default function App() {
     updateLastPrice,
   });
 
-  // Save visible range when switching away from current interval
-  const saveCurrentVisibleRange = useCallback(() => {
-    if (chartWidgetRef.current?.getVisibleRange) {
-      const range = chartWidgetRef.current.getVisibleRange();
-      if (range) {
-        saveVisibleRangeForInterval(symbol, interval, range, marketType, exchange, chartDataMeta);
-      }
-    }
-  }, [chartDataMeta, exchange, interval, marketType, symbol]);
-
-  // Save visible range on page close/refresh
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      saveCurrentVisibleRange();
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [saveCurrentVisibleRange]);
+  const {
+    handleSymbolChange,
+    handleIntervalChange,
+    handleVisibleRangeChange,
+  } = useChartNavigationRuntime({
+    symbol,
+    exchange,
+    marketType,
+    interval,
+    exchangeCatalog,
+    savedCustomIntervals,
+    chartDataMeta,
+    chartWidgetRef,
+    realtimePriceRef,
+    clearCache,
+    clearChartData,
+    resetGapRecovery,
+    isNativeIntervalSupported,
+    updateUserPref,
+    setSymbol,
+    setExchange,
+    setMarketType,
+    setInterval: setInterval_,
+    setLastPrice,
+    setCrosshairData,
+    setLoading,
+    setError,
+    setHasMoreLeft,
+    setDatasetKey,
+    markIntervalUsed,
+  });
 
   useEffect(() => () => {
     if (intervalNoticeTimerRef.current) clearTimeout(intervalNoticeTimerRef.current);
@@ -622,19 +591,6 @@ export default function App() {
       .filter((item) => item.value !== removedInterval)
       .sort((a, b) => Math.abs(a.seconds - removedSeconds) - Math.abs(b.seconds - removedSeconds))[0]?.value || "1h";
   }, [customIntervalRecords, exchange, nativeIntervals]);
-
-  const handleIntervalChange = (newInterval) => {
-    if (newInterval !== interval) {
-      saveCurrentVisibleRange();
-      setCrosshairData(null);
-      realtimePriceRef.current = null;
-      setLastPrice(null);
-      resetGapRecovery();
-      setInterval_(newInterval);
-      markIntervalUsed(newInterval);
-      updateUserPref("lastInterval", newInterval);
-    }
-  };
 
   const handleCreateCustomInterval = (newInterval) => {
     if (isNativeIntervalSupported(exchange, newInterval)) {
@@ -948,7 +904,7 @@ export default function App() {
               timezone={settings.timezone}
               savedVisibleRange={getVisibleRangeForInterval(symbol, interval, marketType, exchange)}
               dataMeta={chartDataMeta}
-              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(symbol, interval, range, marketType, exchange, chartDataMeta)}
+              onVisibleRangeChange={handleVisibleRangeChange}
               drawingTool={drawingTool}
               onDrawingToolChange={setDrawingTool}
               penColor={penColor}

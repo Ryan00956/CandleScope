@@ -11,6 +11,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import ChartPane from "./ChartPane";
 import PaneResizer from "./PaneResizer";
 import { clearSavedDrawings } from "../services/drawingStorage";
+import { planVisibleRangeRestore } from "../runtime/viewportController";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
@@ -72,6 +73,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     customBg,
     timezone = "Local",
     savedVisibleRange = null,
+    dataMeta = null,
     onVisibleRangeChange = null,
     // Drawing props
     drawingTool = null,
@@ -466,49 +468,29 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         if (!data?.length || hasRestoredRangeRef.current) return;
         if (!mainPaneRef.current) return;
 
-        const rangeToRestore = savedVisibleRangeRef.current;
-        const firstDataTime = data[0]?.time;
-        const lastDataTime = data[data.length - 1]?.time;
-        const savedTimeRange = rangeToRestore?.time;
-        const savedLogicalRange = rangeToRestore?.logical;
-        const savedTimeIntersectsData = Boolean(
-            savedTimeRange
-            && Number.isFinite(savedTimeRange.from)
-            && Number.isFinite(savedTimeRange.to)
-            && Number.isFinite(firstDataTime)
-            && Number.isFinite(lastDataTime)
-            && savedTimeRange.to >= firstDataTime
-            && savedTimeRange.from <= lastDataTime
-        );
-        const savedLogicalIntersectsData = Boolean(
-            savedLogicalRange
-            && Number.isFinite(savedLogicalRange.from)
-            && Number.isFinite(savedLogicalRange.to)
-            && savedLogicalRange.to >= 0
-            && savedLogicalRange.from <= data.length - 1
-        );
+        const restorePlan = planVisibleRangeRestore(savedVisibleRangeRef.current, data, dataMeta);
         let restored = false;
 
-        if (Number.isFinite(rangeToRestore?.barSpacing)) {
-            mainPaneRef.current.applyTimeScaleOptions({ barSpacing: rangeToRestore.barSpacing });
+        if (restorePlan.barSpacing != null) {
+            mainPaneRef.current.applyTimeScaleOptions({ barSpacing: restorePlan.barSpacing });
         }
 
-        if (savedTimeIntersectsData) {
+        if (restorePlan.mode === "time") {
             try {
-                mainPaneRef.current.setVisibleTimeRange(savedTimeRange);
+                mainPaneRef.current.setVisibleTimeRange(restorePlan.timeRange);
                 restored = true;
             } catch { /* */ }
         }
 
-        if (!restored && savedLogicalIntersectsData) {
+        if (!restored && restorePlan.mode === "logical") {
             try {
-                syncLogicalRangeAcrossPanes(savedLogicalRange);
+                syncLogicalRangeAcrossPanes(restorePlan.logicalRange);
                 restored = true;
             } catch { /* */ }
         }
 
-        if (Number.isFinite(rangeToRestore?.scrollPosition)) {
-            mainPaneRef.current.setScrollPosition(rangeToRestore.scrollPosition, false);
+        if (restored && restorePlan.scrollPosition != null) {
+            mainPaneRef.current.setScrollPosition(restorePlan.scrollPosition, false);
         }
 
         if (!restored) {
@@ -521,7 +503,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
         }
 
         hasRestoredRangeRef.current = true;
-    }, [data, datasetKey, syncLogicalRangeAcrossPanes]);
+    }, [data, dataMeta, datasetKey, syncLogicalRangeAcrossPanes]);
 
     // ── Resizer logic: redistribute height between pane[i] and pane[i+1] ──
     const handleResize = useCallback((abovePaneId, belowPaneId, deltaY) => {

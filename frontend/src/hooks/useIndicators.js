@@ -56,6 +56,19 @@ function buildDataSignature(data) {
   ].join("|");
 }
 
+function buildRuntimeDataSignature(data, dataMeta = null) {
+  const dataSignature = buildDataSignature(data);
+  if (!dataMeta) return dataSignature;
+  return [
+    dataMeta.version ?? "",
+    dataMeta.status ?? "",
+    dataMeta.firstTime ?? "",
+    dataMeta.lastTime ?? "",
+    dataMeta.bars ?? "",
+    dataSignature,
+  ].join("|");
+}
+
 function stringSignature(value = "") {
   let hash = 0;
   for (let i = 0; i < value.length; i += 1) {
@@ -362,6 +375,7 @@ function normalizeParamSchema(schema) {
 /**
  * @param {object} opts
  * @param {Array}                  opts.chartData       — current OHLCV data array
+ * @param {object}                 [opts.chartDataMeta] — chart data version/status/coverage
  * @param {string}                 opts.datasetKey      — changes when chart is recreated
  * @param {number}                 opts.seriesReady     — increments when chart series is ready
  * @param {string}                 [opts.candleUpColor]   — K-line up color (synced to VOL indicator)
@@ -369,6 +383,7 @@ function normalizeParamSchema(schema) {
  */
 export function useIndicators({
   chartData,
+  chartDataMeta = null,
   datasetKey,
   seriesReady,
   candleUpColor,
@@ -403,6 +418,8 @@ export function useIndicators({
   activeIndicatorsRef.current = activeIndicators;
   const chartDataRef = useRef(chartData);
   chartDataRef.current = chartData;
+  const chartDataMetaRef = useRef(chartDataMeta);
+  chartDataMetaRef.current = chartDataMeta;
   const candleUpColorRef = useRef(candleUpColor);
   candleUpColorRef.current = candleUpColor;
   const candleDownColorRef = useRef(candleDownColor);
@@ -693,11 +710,13 @@ export function useIndicators({
       JSON.stringify(ind.params || {}),
     ].join(":"))
     .join("|");
-  const chartHistoryFirstTime = chartData?.[0]?.time ?? null;
+  const chartHistoryFirstTime = chartDataMeta?.firstTime ?? chartData?.[0]?.time ?? null;
+  const chartDataVersion = chartDataMeta?.version ?? 0;
+  const chartDataStatus = chartDataMeta?.status || "idle";
   const hasWsHostedIndicators = activeIndicators.some(
     (ind) => isWsHostedIndicator(ind) && ind.visible !== false
   );
-  const chartDataReady = Boolean(chartData?.length);
+  const chartDataReady = Boolean(chartData?.length && chartDataStatus !== "loading");
 
   const buildHostedIndicatorParams = useCallback((ind) => {
     let params = ind.params || {};
@@ -739,6 +758,8 @@ export function useIndicators({
 
   const hostedSubscriptionSignature = useCallback((ind) => {
     const message = buildHostedSubscriptionMessage(ind);
+    const currentMeta = chartDataMetaRef.current || {};
+    const currentData = chartDataRef.current || [];
     return JSON.stringify({
       kind: message.kind,
       exchange: message.exchange,
@@ -750,6 +771,9 @@ export function useIndicators({
       securityMode: message.securityMode || "",
       params: message.params || {},
       historyLimit: message.historyLimit,
+      historyFirstTime: currentMeta.firstTime ?? currentData[0]?.time ?? null,
+      historyLastTime: currentMeta.lastTime ?? currentData[currentData.length - 1]?.time ?? null,
+      chartDataStatus: currentMeta.status || "idle",
     });
   }, [buildHostedSubscriptionMessage]);
 
@@ -912,6 +936,8 @@ export function useIndicators({
     candleDownColor,
     candleUpColor,
     chartDataReady,
+    chartDataStatus,
+    chartDataVersion,
     chartHistoryFirstTime,
     hasWsHostedIndicators,
     indicatorWsSignature,
@@ -935,7 +961,7 @@ export function useIndicators({
       return;
     }
 
-    const dataSignature = buildDataSignature(currentChartData);
+    const dataSignature = buildRuntimeDataSignature(currentChartData, chartDataMetaRef.current);
     if (!force && dataSignature === lastComputeSignatureRef.current) {
       computingRef.current = false;
       return;
@@ -1190,7 +1216,7 @@ export function useIndicators({
     }
 
     const forceNow = pendingForceComputeRef.current;
-    const dataChanged = buildDataSignature(chartData) !== lastComputeSignatureRef.current;
+    const dataChanged = buildRuntimeDataSignature(chartData, chartDataMeta) !== lastComputeSignatureRef.current;
     if (!forceNow && !dataChanged) return;
 
     if (forceNow) {
@@ -1211,7 +1237,7 @@ export function useIndicators({
         pendingForceComputeRef.current = true;
       }
     };
-  }, [chartData, activeIndicators, computeAll]);
+  }, [chartData, chartDataMeta, activeIndicators, computeAll]);
 
   // ── Re-compute when chart is recreated ─────────────────────
   useEffect(() => {

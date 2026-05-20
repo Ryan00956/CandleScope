@@ -11,8 +11,13 @@ import WatchlistSidebar from "./components/WatchlistSidebar";
 import { useCustomIntervals } from "./hooks/useCustomIntervals";
 import { useExportPreview } from "./hooks/useExportPreview";
 import { useIndicators } from "./hooks/useIndicators";
+import { useChartDataRuntime } from "./runtime/useChartDataRuntime";
 import { groupIntervalsByDuration, parseIntervalSeconds } from "./utils/intervals";
 import { inferExchangeFromSymbol } from "./utils/symbolKey";
+import {
+  buildRenderableChartData,
+  detectGaps,
+} from "./runtime/chartDataRuntime";
 import {
   fetchKlinesBefore,
   fetchKlinesHistory,
@@ -24,6 +29,7 @@ import {
   updateSubscriptionTier,
   syncWatchlistSymbols,
   getPriceStreamUrl,
+  updateCacheLimits,
 } from "./services/api";
 import { clearSavedDrawings } from "./services/drawingStorage";
 import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, downloadBlob } from "./services/exportService";
@@ -276,13 +282,46 @@ function normalizeVisibleRange(range) {
   if (Number.isFinite(range.scrollPosition)) {
     normalized.scrollPosition = range.scrollPosition;
   }
+  if (Number.isFinite(range.dataVersion)) {
+    normalized.dataVersion = range.dataVersion;
+  }
+  if (typeof range.dataStatus === "string") {
+    normalized.dataStatus = range.dataStatus;
+  }
+  if (typeof range.dataSource === "string") {
+    normalized.dataSource = range.dataSource;
+  }
+  if (Number.isFinite(range.dataFirstTime)) {
+    normalized.dataFirstTime = range.dataFirstTime;
+  }
+  if (Number.isFinite(range.dataLastTime)) {
+    normalized.dataLastTime = range.dataLastTime;
+  }
+  if (Number.isFinite(range.dataBars)) {
+    normalized.dataBars = range.dataBars;
+  }
+  if (Number.isFinite(range.savedAt)) {
+    normalized.savedAt = range.savedAt;
+  }
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
-function saveVisibleRangeForInterval(symbol, interval, range, marketType = "spot", exchange = "binance") {
+function attachVisibleRangeDataMeta(range, dataMeta) {
+  if (!range || !dataMeta) return range;
+  const next = { ...range };
+  if (Number.isFinite(dataMeta.version)) next.dataVersion = dataMeta.version;
+  if (typeof dataMeta.status === "string") next.dataStatus = dataMeta.status;
+  if (typeof dataMeta.source === "string") next.dataSource = dataMeta.source;
+  if (Number.isFinite(dataMeta.firstTime)) next.dataFirstTime = dataMeta.firstTime;
+  if (Number.isFinite(dataMeta.lastTime)) next.dataLastTime = dataMeta.lastTime;
+  if (Number.isFinite(dataMeta.bars)) next.dataBars = dataMeta.bars;
+  next.savedAt = Date.now();
+  return next;
+}
+function saveVisibleRangeForInterval(symbol, interval, range, marketType = "spot", exchange = "binance", dataMeta = null) {
   const normalized = normalizeVisibleRange(range);
   if (!symbol || !interval || !normalized) return;
   const ranges = loadVisibleRanges();
-  ranges[buildVisibleRangeStorageKey(symbol, interval, marketType, exchange)] = normalized;
+  ranges[buildVisibleRangeStorageKey(symbol, interval, marketType, exchange)] = attachVisibleRangeDataMeta(normalized, dataMeta);
   localStorage.setItem(VISIBLE_RANGE_KEY, JSON.stringify(ranges));
 }
 function getVisibleRangeForInterval(symbol, interval, marketType = "spot", exchange = "binance") {
@@ -313,71 +352,6 @@ function getIntervalDays(intv, exchange = "binance") {
 
 function isNativeIntervalSupported(exchange, interval, catalog = null) {
   return getNativeIntervals(exchange, catalog).some((item) => item.value === interval);
-}
-
-function mergeByTime(older, current) {
-  const merged = [...older, ...current];
-  const uniq = new Map();
-  for (const item of merged) {
-    uniq.set(item.time, item);
-  }
-  return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
-}
-
-function deduplicateByTime(data) {
-  if (!data || data.length <= 1) return data;
-  const seen = new Map();
-  for (const item of data) {
-    seen.set(item.time, item);
-  }
-  return Array.from(seen.values()).sort((a, b) => a.time - b.time);
-}
-
-const MAX_RENDER_GAP_POINTS_PER_GAP = 5_000;
-const MAX_RENDER_GAP_POINTS_TOTAL = 20_000;
-
-function buildRenderableChartData(data, intervalSeconds) {
-  if (!data || data.length <= 1 || !intervalSeconds || intervalSeconds <= 0) {
-    return data || [];
-  }
-
-  const sorted = deduplicateByTime(data);
-  const rendered = [];
-  let insertedTotal = 0;
-
-  for (let i = 0; i < sorted.length; i += 1) {
-    const current = sorted[i];
-    if (i > 0) {
-      const previous = sorted[i - 1];
-      const diff = current.time - previous.time;
-      const missingBars = Math.round(diff / intervalSeconds) - 1;
-
-      if (missingBars > 0) {
-        const canInsertFullGap =
-          missingBars <= MAX_RENDER_GAP_POINTS_PER_GAP &&
-          insertedTotal + missingBars <= MAX_RENDER_GAP_POINTS_TOTAL;
-
-        if (canInsertFullGap) {
-          for (let t = previous.time + intervalSeconds; t < current.time; t += intervalSeconds) {
-            rendered.push({ time: t, __whitespace: true });
-            insertedTotal += 1;
-          }
-        } else {
-          const firstMissing = previous.time + intervalSeconds;
-          const lastMissing = current.time - intervalSeconds;
-          rendered.push({ time: firstMissing, __whitespace: true });
-          insertedTotal += 1;
-          if (lastMissing > firstMissing) {
-            rendered.push({ time: lastMissing, __whitespace: true });
-            insertedTotal += 1;
-          }
-        }
-      }
-    }
-    rendered.push(current);
-  }
-
-  return rendered;
 }
 
 const INITIAL_BACKFILL_RETRY_MS = 3_000;
@@ -455,73 +429,6 @@ function isSameSeries(a, b) {
   );
 }
 
-/**
- * Detect gaps in a sorted K-line array.
- * Returns an array of { from, to } objects representing gap boundaries (unix seconds).
- * A gap is detected when the time difference between consecutive bars exceeds
- * 1.5× the expected interval (to allow for minor timing jitter).
- */
-function detectGaps(data, intervalSeconds) {
-  if (!data || data.length < 2 || !intervalSeconds || intervalSeconds <= 0) return [];
-  const gaps = [];
-  const threshold = intervalSeconds * 1.5;
-
-  // Interior gaps: missing bars between consecutive entries
-  for (let i = 1; i < data.length; i++) {
-    const diff = data[i].time - data[i - 1].time;
-    if (diff > threshold) {
-      gaps.push({
-        from: data[i - 1].time,
-        to: data[i].time,
-        missingBars: Math.round(diff / intervalSeconds) - 1,
-      });
-    }
-  }
-
-  // Tail gap: latest bar is far behind current time
-  // This catches the "app was offline / WS died" scenario where chart
-  // shows continuous old data but no recent bars.
-  const nowSecs = Math.floor(Date.now() / 1000);
-  const latestBarTime = data[data.length - 1].time;
-  const tailGap = nowSecs - latestBarTime;
-  if (tailGap > intervalSeconds * 3) {
-    gaps.push({
-      from: latestBarTime,
-      to: nowSecs,
-      missingBars: Math.floor(tailGap / intervalSeconds),
-      isTailGap: true,
-    });
-  }
-
-  return gaps;
-}
-
-function upsertRealtimeKline(current, incoming) {
-  if (!current || current.length === 0) return current;
-  if (!incoming || incoming.time == null) return current;
-  const next = { ...incoming };
-
-  const firstTime = current[0].time;
-  const lastIndex = current.length - 1;
-  const lastTime = current[lastIndex].time;
-
-  if (next.time < firstTime) return current;
-  if (next.time === lastTime) {
-    const updated = [...current];
-    updated[lastIndex] = next;
-    return updated;
-  }
-  if (next.time > lastTime) {
-    return [...current, next];
-  }
-
-  const idx = current.findIndex((item) => item.time === next.time);
-  if (idx === -1) return current;
-  const updated = [...current];
-  updated[idx] = next;
-  return updated;
-}
-
 export default function App() {
   const [symbol, setSymbol] = useState(() => {
     const prefs = loadUserPrefs();
@@ -543,7 +450,23 @@ export default function App() {
   const [exchangeCatalogStatus, setExchangeCatalogStatus] = useState("loading");
   const [datasetKey, setDatasetKey] = useState(0);
 
-  const [chartData, setChartData] = useState([]);
+  const {
+    chartData,
+    chartDataMeta,
+    pendingInitialHistoryRef,
+    cacheKey,
+    getFromCache,
+    getCache,
+    setCache,
+    hasCache,
+    clearCache,
+    mergeCacheData,
+    patchCacheTick,
+    replaceChartData,
+    clearChartData,
+    commitMergedChartData,
+    commitPatchedChartData,
+  } = useChartDataRuntime({ exchange, marketType, symbol, interval });
   const renderChartData = useMemo(
     () => buildRenderableChartData(chartData, parseIntervalSeconds(interval)),
     [chartData, interval],
@@ -793,6 +716,7 @@ export default function App() {
     chartRef: indicatorChartRefRef,
     seriesRef: indicatorSeriesRefRef,
     chartData,
+    chartDataMeta,
     datasetKey: `${exchange}-${marketType}-${symbol}-${interval}-${datasetKey}`,
     seriesReady: indicatorSeriesReady,
     candleUpColor: settings.upColor,
@@ -875,18 +799,6 @@ export default function App() {
     clearSavedDrawings(`${chartStorageKeyBase}-separate-${indicatorId}`);
     clearSavedDrawings(`${chartStorageKeyBase}-volume-${indicatorId}`);
   }, [chartStorageKeyBase, rawRemoveIndicator]);
-
-  // --- Cross-interval data cache for instant switching ---
-  const chartDataCacheRef = useRef(new Map());
-  const pendingInitialHistoryRef = useRef(null);
-  const cacheKey = useCallback(
-    (sym, intv, mt = marketType, ex = exchange) => `${ex}-${mt}-${sym}-${intv}`,
-    [exchange, marketType],
-  );
-  const saveToCache = useCallback((sym, intv, data) => {
-    chartDataCacheRef.current.set(cacheKey(sym, intv), data);
-  }, [cacheKey]);
-  const getFromCache = useCallback((sym, intv) => chartDataCacheRef.current.get(cacheKey(sym, intv)), [cacheKey]);
 
   // Current interval ref for WS message routing
   const intervalRef = useRef(interval);
@@ -1106,13 +1018,9 @@ export default function App() {
   const { cacheLimits, ephemeralCacheBars } = settings;
   useEffect(() => {
     if (!cacheLimits) return;
-    fetch("/api/v1/settings/cache-limits", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        db_limits: cacheLimits,
-        ephemeral_bars: ephemeralCacheBars ?? 86400,
-      }),
+    updateCacheLimits({
+      dbLimits: cacheLimits,
+      ephemeralBars: ephemeralCacheBars ?? 86400,
     }).catch(() => {}); // fire-and-forget
   }, [cacheLimits, ephemeralCacheBars]);
 
@@ -1136,7 +1044,7 @@ export default function App() {
     let shownInitialData = false;
 
     if (hasCacheHit) {
-      setChartData(cached);
+      replaceChartData(sym, intv, cached, { source: "memory-cache-hit" });
       updateLastPrice(cached[cached.length - 1], intv);
       setConnectionStatus("connected");
       setDatasetKey((v) => v + 1);
@@ -1144,7 +1052,7 @@ export default function App() {
       setError(null);
       shownInitialData = true;
     } else {
-      setChartData([]);  // Clear old interval data to prevent cross-interval merging
+      clearChartData("load-start-clear", sym, intv);  // Clear old interval data to prevent cross-interval merging
       setLoading(true);
       setError(null);
       setConnectionStatus("loading");
@@ -1154,88 +1062,26 @@ export default function App() {
     setCrosshairData(null);
     pendingInitialHistoryRef.current = null;
 
-    // ── PARALLEL FETCH: quick tail + full history simultaneously ──
+    // Start quick tail and full history together, but commit each result as
+    // soon as it arrives. Promise.all would make the quick tail wait for the
+    // slower request, which is exactly the blank-first-screen failure mode.
     const days = getIntervalDays(intv, ex);
-    const [quickResult, historyResult] = await Promise.all([
-      fetchLatestKlines(sym, intv, 5, mt, ex).catch(() => null),
-      fetchKlinesHistory(sym, intv, days, mt, ex).catch(() => null),
-    ]);
 
-    if (controller.signal.aborted) return;
-
-    // Process QUICK result — silently stage data behind loading overlay.
-    // Do NOT clear loading here when no cache hit; we wait for full
-    // history or backfill completion to ensure the chart is correct.
-    if (quickResult?.data?.length) {
-      setChartData((prev) => {
-        if (prev.length === 0) {
-          saveToCache(sym, intv, quickResult.data);
-          return quickResult.data;
-        }
-        let updated = prev;
-        quickResult.data.forEach((tick) => {
-          updated = upsertRealtimeKline(updated, tick);
-        });
-        const deduped = deduplicateByTime(updated);
-        saveToCache(sym, intv, deduped);
-        return deduped;
-      });
+    const commitQuickResult = (quickResult) => {
+      if (controller.signal.aborted || !quickResult?.data?.length) return;
+      commitPatchedChartData(sym, intv, quickResult.data, { seedIfEmpty: true, source: "initial-latest" });
       const latestTick = quickResult.data[quickResult.data.length - 1];
       updateLastPrice(latestTick, intv);
       setDataSource(quickResult.source || "unknown");
 
-      // Only clear loading immediately if we already had a cache hit
-      // (data is already reliable).  Otherwise keep loading overlay.
-      if (shownInitialData) {
-        // Cache was already shown; quickResult just refreshes it — no-op.
-      }
-    }
-
-    // Process FULL HISTORY result — this is the "correct" dataset.
-    if (historyResult?.start_ms != null && historyResult?.end_ms != null) {
-      pendingInitialHistoryRef.current = {
-        exchange: ex,
-        marketType: mt,
-        symbol: sym,
-        interval: intv,
-        range: numericRange(historyResult.start_ms, historyResult.end_ms),
-      };
-    }
-
-    if (historyResult?.data?.length) {
-      setChartData((prev) => {
-        const merged = mergeByTime(historyResult.data, prev);
-        saveToCache(sym, intv, merged);
-        return merged;
-      });
-      const latest = historyResult.data[historyResult.data.length - 1];
-      updateLastPrice(latest, intv);
-      setDataSource(historyResult.source || "unknown");
-      setConnectionStatus(historyResult.source === "mock" ? "loading" : "connected");
-
       if (!shownInitialData) {
         setDatasetKey((v) => v + 1);
+        setLoading(false);
         shownInitialData = true;
       }
-      pendingInitialHistoryRef.current = null;
+    };
 
-      // Even if there's a tail gap (data doesn't reach "now"),
-      // show the data immediately.  The gap will be filled in the
-      // background by backfill + WS.  Blocking the UI for up to 30s
-      // with a loading overlay is a worse UX than showing slightly
-      // stale data that auto-corrects within seconds.
-      if (historyResult.has_tail_gap) {
-        setConnectionStatus("loading");
-      }
-      // Always clear loading when we have history data
-      setLoading(false);
-    } else if (!shownInitialData) {
-      // No history available yet — backfill is likely in progress.
-      // Keep loading=true; the backfill_completed WS handler will
-      // call setLoading(false) + setDatasetKey() once data arrives.  Also
-      // retry over HTTP because a fast backfill can finish before the kline
-      // WS subscription is ready, while indicator WS snapshots can already
-      // render from the newly filled DataManager cache.
+    const startInitialHistoryRetry = () => {
       setConnectionStatus("loading");
 
       let retryTimer = null;
@@ -1249,21 +1095,7 @@ export default function App() {
           const retryResult = await fetchKlinesHistory(sym, intv, days, mt, ex);
           if (controller.signal.aborted || stoppedRetrying) return false;
           if (retryResult?.data?.length) {
-            setChartData((prev) => {
-              const merged = mergeByTime(retryResult.data, prev);
-              saveToCache(sym, intv, merged);
-              return merged;
-            });
-            const latest = retryResult.data[retryResult.data.length - 1];
-            updateLastPrice(latest, intv);
-            setDataSource(retryResult.source || "unknown");
-            setConnectionStatus(retryResult.has_tail_gap ? "loading" : "connected");
-            if (!shownInitialData) {
-              setDatasetKey((v) => v + 1);
-              shownInitialData = true;
-            }
-            pendingInitialHistoryRef.current = null;
-            setLoading(false);
+            commitHistoryResult(retryResult);
             return true;
           }
         } catch (retryErr) {
@@ -1293,27 +1125,79 @@ export default function App() {
       safetyTimer = setTimeout(async () => {
         if (controller.signal.aborted) return;
         if (await retryInitialHistory()) return;
-        // Stop blocking the UI after a short timeout, but keep the retry loop
-        // alive in the background. New/unseen symbols can need longer backfills
-        // than the first-screen loading overlay should occupy.
-        setLoading(false);
+        // Stop blocking the UI after a short timeout only if nothing has been
+        // shown yet. If quick tail is visible, retry continues in background.
         if (!shownInitialData) {
+          setLoading(false);
           setDatasetKey((v) => v + 1);
         }
       }, INITIAL_BACKFILL_TIMEOUT_MS);
-      // If the component is unmounted / interval changes, cancel the timer
+
       controller.signal.addEventListener("abort", () => {
         stoppedRetrying = true;
         if (retryTimer) clearTimeout(retryTimer);
         if (safetyTimer) clearTimeout(safetyTimer);
       });
-    }
+    };
+
+    const commitHistoryResult = (historyResult) => {
+      if (controller.signal.aborted) return;
+
+      if (historyResult?.start_ms != null && historyResult?.end_ms != null) {
+        pendingInitialHistoryRef.current = {
+          exchange: ex,
+          marketType: mt,
+          symbol: sym,
+          interval: intv,
+          range: numericRange(historyResult.start_ms, historyResult.end_ms),
+        };
+      }
+
+      if (!historyResult?.data?.length) {
+        startInitialHistoryRetry();
+        return;
+      }
+
+      commitMergedChartData(sym, intv, historyResult.data, { source: "initial-history" });
+      const latest = historyResult.data[historyResult.data.length - 1];
+      updateLastPrice(latest, intv);
+      setDataSource(historyResult.source || "unknown");
+      setConnectionStatus(historyResult.source === "mock" ? "loading" : "connected");
+
+      if (!shownInitialData) {
+        setDatasetKey((v) => v + 1);
+        shownInitialData = true;
+      }
+      pendingInitialHistoryRef.current = null;
+
+      // Even if there's a tail gap (data doesn't reach "now"),
+      // show the data immediately.  The gap will be filled in the
+      // background by backfill + WS.  Blocking the UI for up to 30s
+      // with a loading overlay is a worse UX than showing slightly
+      // stale data that auto-corrects within seconds.
+      if (historyResult.has_tail_gap) {
+        setConnectionStatus("loading");
+      }
+      // Always clear loading when we have history data
+      setLoading(false);
+    };
+
+    await Promise.all([
+      fetchLatestKlines(sym, intv, 5, mt, ex)
+        .then(commitQuickResult)
+        .catch(() => null),
+      fetchKlinesHistory(sym, intv, days, mt, ex)
+        .then(commitHistoryResult)
+        .catch(() => {
+          if (!controller.signal.aborted) startInitialHistoryRetry();
+        }),
+    ]);
 
     // Clear loading when we have shown initial data
     if (shownInitialData) {
       setLoading(false);
     }
-  }, [exchange, getFromCache, marketType, saveToCache, updateLastPrice]);
+  }, [clearChartData, commitMergedChartData, commitPatchedChartData, exchange, getFromCache, marketType, pendingInitialHistoryRef, replaceChartData, updateLastPrice]);
 
   // ── Symbol switching handler ──
   const handleSymbolChange = useCallback((newSymbolOrObj) => {
@@ -1341,11 +1225,11 @@ export default function App() {
     updateUserPref("lastInterval", nextInterval);
 
     // Clear in-memory caches for old symbol
-    chartDataCacheRef.current.clear();
+    clearCache();
     realtimePriceRef.current = null;
 
     // Reset chart state
-    setChartData([]);
+    clearChartData("symbol-switch-clear", newSymbol, nextInterval);
     setLastPrice(null);
     setCrosshairData(null);
     setLoading(true);
@@ -1357,7 +1241,7 @@ export default function App() {
     setMarketType(newMarketType);
     setSymbol(newSymbol);
     setInterval_(nextInterval);
-  }, [exchange, exchangeCatalog, interval, marketType, savedCustomIntervals, symbol]);
+  }, [clearCache, clearChartData, exchange, exchangeCatalog, interval, marketType, savedCustomIntervals, symbol]);
 
   useEffect(() => {
     loadData(symbol, interval, marketType, exchange);
@@ -1433,15 +1317,7 @@ export default function App() {
           const result = await fetchLatestKlines(symbol, currentIntv, 2, marketType, exchange);
           if (!result?.data?.length) return;
 
-          setChartData((prev) => {
-            let updated = prev;
-            result.data.forEach((tick) => {
-              updated = upsertRealtimeKline(updated, tick);
-            });
-            const deduped = deduplicateByTime(updated);
-            saveToCache(symbol, currentIntv, deduped);
-            return deduped;
-          });
+          commitPatchedChartData(symbol, currentIntv, result.data, { source: "polling-latest" });
           const latestTick = result.data[result.data.length - 1];
           updateLastPrice(latestTick, currentIntv);
           setWsStatus((prev) => (prev === "live" ? prev : "fallback"));
@@ -1523,11 +1399,7 @@ export default function App() {
             fetchKlinesHistory(symbol, currentIntv, days, marketType, exchange)
               .then((result) => {
                 if (!active || !result?.data?.length) return;
-                setChartData((prev) => {
-                  const merged = mergeByTime(result.data, prev);
-                  saveToCache(symbol, currentIntv, merged);
-                  return merged;
-                });
+                commitMergedChartData(symbol, currentIntv, result.data, { source: "ws-reconnect-history" });
                 const latest = result.data[result.data.length - 1];
                 updateLastPrice(latest, currentIntv);
                 console.log(`[WS-Recovery] Reloaded ${result.data.length} bars after reconnect`);
@@ -1616,19 +1488,13 @@ export default function App() {
 
               const mergeBackfillRows = (rows) => {
                 if (!rows?.length) return false;
-                const key = cacheKey(bfSymbol, bfInterval, bfMarketType, bfExchange);
-                const existingCache = chartDataCacheRef.current.get(key);
-                const mergedCache = existingCache && existingCache.length > 0
-                  ? mergeByTime(rows, existingCache)
-                  : rows;
-                chartDataCacheRef.current.set(key, mergedCache);
+                mergeCacheData(bfSymbol, bfInterval, rows, {
+                  marketType: bfMarketType,
+                  exchange: bfExchange,
+                });
 
                 if (bfInterval === intervalRef.current && bfSymbol === symbol && bfExchange === exchange && bfMarketType === marketType) {
-                  setChartData((prev) => {
-                    const merged = mergeByTime(rows, prev);
-                    saveToCache(bfSymbol, bfInterval, merged);
-                    return merged;
-                  });
+                  commitMergedChartData(bfSymbol, bfInterval, rows, { source: "backfill-completed" });
                   // Only set lastPrice from backfill if no live price exists yet.
                   // Otherwise we'd overwrite the real-time WS price with stale
                   // history data, causing the header OHLCV to jump between
@@ -1715,19 +1581,13 @@ export default function App() {
                       if (older.length > 0) {
                         const patchStart = older[0]?.time;
                         const patchEnd = older[older.length - 1]?.time;
-                        const key = cacheKey(bfSymbol, bfInterval, bfMarketType, bfExchange);
-                        const existingCache = chartDataCacheRef.current.get(key);
-                        const merged = existingCache && existingCache.length > 0
-                          ? mergeByTime(older, existingCache)
-                          : older;
-                        chartDataCacheRef.current.set(key, merged);
+                        mergeCacheData(bfSymbol, bfInterval, older, {
+                          marketType: bfMarketType,
+                          exchange: bfExchange,
+                        });
                         const currentIntv = intervalRef.current;
                         if (bfInterval === currentIntv && bfSymbol === symbol && bfExchange === exchange && bfMarketType === marketType) {
-                          setChartData((prev) => {
-                            const m = mergeByTime(older, prev);
-                            saveToCache(bfSymbol, bfInterval, m);
-                            return m;
-                          });
+                          commitMergedChartData(bfSymbol, bfInterval, older, { source: "backfill-before-page" });
                           if (patchStart && patchEnd) {
                             requestIndicatorRangeInChunks(
                               requestIndicatorRange,
@@ -1778,14 +1638,7 @@ export default function App() {
             }
 
             // ── Always update the background cache for this interval ──
-            const key = cacheKey(symbol, msgInterval, marketType, exchange);
-            const existingCache = chartDataCacheRef.current.get(key);
-            if (existingCache && existingCache.length > 0) {
-              const updatedCache = deduplicateByTime(
-                upsertRealtimeKline(existingCache, tick)
-              );
-              chartDataCacheRef.current.set(key, updatedCache);
-            }
+            patchCacheTick(symbol, msgInterval, tick, { marketType, exchange });
 
             // ── Update active chart if this is the current interval ──
             // When the backend DataManager is active and sending aggregated
@@ -1794,11 +1647,7 @@ export default function App() {
             // the client-side aggregation below to avoid double-update
             // conflicts on the last two bars.
             if (isCurrentInterval) {
-              setChartData((prev) => {
-                const next = deduplicateByTime(upsertRealtimeKline(prev, tick));
-                saveToCache(symbol, currentIntv, next);
-                return next;
-              });
+              commitPatchedChartData(symbol, currentIntv, [tick], { source: "kline-ws" });
               updateLastPrice(tick, currentIntv);
             }
           } catch (parseErr) {
@@ -1849,7 +1698,7 @@ export default function App() {
       }
       liveSubscribedIntervalsRef.current = new Set();
     };
-  }, [cacheKey, exchange, marketType, requestIndicatorRange, saveToCache, syncSocketSubscriptions, symbol, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
+  }, [cacheKey, commitMergedChartData, commitPatchedChartData, exchange, marketType, mergeCacheData, patchCacheTick, pendingInitialHistoryRef, requestIndicatorRange, syncSocketSubscriptions, symbol, updateLastPrice, updateRealtimePrice]); // NOTE: no `interval` dep — WS is persistent across switches
 
   useEffect(() => {
     syncSocketSubscriptions(socketRef.current, trackedIntervals);
@@ -1863,14 +1712,13 @@ export default function App() {
       // so switching is instant
       for (const intv of trackedIntervals) {
         if (cancelled) break;
-        const key = cacheKey(symbol, intv, marketType, exchange);
-        if (chartDataCacheRef.current.has(key)) continue; // already cached
+        if (hasCache(symbol, intv, { marketType, exchange })) continue; // already cached
 
         try {
           const result = await fetchLatestKlines(symbol, intv, 500, marketType, exchange, "background-prefetch");
           if (cancelled) break;
           if (result?.data?.length) {
-            chartDataCacheRef.current.set(key, result.data);
+            setCache(symbol, intv, result.data, { marketType, exchange });
           }
         } catch {
           // Non-critical, continue
@@ -1883,7 +1731,7 @@ export default function App() {
     // Start prefetching after a short delay so the active interval loads first
     const timer = setTimeout(prefetch, 2000);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [cacheKey, exchange, marketType, symbol, trackedIntervals]);
+  }, [exchange, hasCache, marketType, setCache, symbol, trackedIntervals]);
 
   // ============================================================
   //  GAP DETECTION & AUTO-FILL
@@ -1953,17 +1801,16 @@ export default function App() {
       const result = await fetchKlinesHistory(sym, intv, days, marketType, exchange);
 
       if (result?.data?.length > 0) {
-        setChartData((prev) => {
-          const merged = mergeByTime(result.data, prev);
-          saveToCache(sym, intv, merged);
-          // Verify gaps are actually fixed
-          const remaining = detectGaps(merged, intvSecs);
-          if (remaining.length > 0) {
-            console.warn(`[GapFill] ${remaining.length} gap(s) remain after history reload`);
-          } else {
-            console.log(`[GapFill] All gaps filled successfully (${merged.length} total bars)`);
-          }
-          return merged;
+        commitMergedChartData(sym, intv, result.data, {
+          source: "gap-fill-history",
+          onMerged: (merged) => {
+            const remaining = detectGaps(merged, intvSecs);
+            if (remaining.length > 0) {
+              console.warn(`[GapFill] ${remaining.length} gap(s) remain after history reload`);
+            } else {
+              console.log(`[GapFill] All gaps filled successfully (${merged.length} total bars)`);
+            }
+          },
         });
         for (const gap of gaps) {
           requestIndicatorRangeInChunks(
@@ -1982,14 +1829,14 @@ export default function App() {
         gapFillInFlightRef.current.delete(reloadKey);
       }, 10000);
     }
-  }, [exchange, marketType, requestIndicatorRange, saveToCache]);
+  }, [commitMergedChartData, exchange, marketType, requestIndicatorRange]);
 
   // Keep recoverGapsRef in sync so closures (WS onopen) always call latest version
   recoverGapsRef.current = recoverGaps;
 
   // ── Passive gap detection: Periodic cache scan ──
-  // Every 5s, scan the current cached data for gaps. By reading from
-  // chartDataCacheRef, we avoid React state updater async issues and 
+  // Every 5s, scan the current cached data for gaps. Reading through the
+  // chart data runtime avoids React state updater async issues and
   // debounce cancellations from high-frequency real-time updates.
   useEffect(() => {
     if (loading || dataSource === "mock") return;
@@ -1998,9 +1845,7 @@ export default function App() {
       if (!recoverGapsRef.current) return;
 
       const currentIntv = intervalRef.current;
-      // Build cache key manually to avoid effect dependency on cacheKey function
-      const currentCacheKey = cacheKey(symbol, currentIntv, marketType, exchange);
-      const currentCache = chartDataCacheRef.current.get(currentCacheKey);
+      const currentCache = getCache(symbol, currentIntv, { marketType, exchange });
 
       if (currentCache && currentCache.length >= 3) {
         recoverGapsRef.current(currentCache, symbol, currentIntv);
@@ -2008,7 +1853,7 @@ export default function App() {
     }, 5000);
 
     return () => clearInterval(periodicTimer);
-  }, [cacheKey, dataSource, exchange, loading, marketType, symbol]);
+  }, [dataSource, exchange, getCache, loading, marketType, symbol]);
 
   // ============================================================
   //  VISIBILITY CHANGE — ACTIVE RECOVERY ON TAB FOCUS
@@ -2053,18 +1898,16 @@ export default function App() {
         const historyResult = await fetchKlinesHistory(symbol, currentIntv, days, marketType, exchange);
 
         if (historyResult?.data?.length > 0) {
-          setChartData((prev) => {
-            const merged = mergeByTime(historyResult.data, prev);
-            saveToCache(symbol, currentIntv, merged);
-
-            // Verify gaps are gone
-            const remaining = detectGaps(merged, intvSecs);
-            if (remaining.length > 0) {
-              console.warn(`[TabRecovery] ${remaining.length} gap(s) remain after history reload`);
-            } else {
-              console.log(`[TabRecovery] All gaps filled (${merged.length} total bars)`);
-            }
-            return merged;
+          commitMergedChartData(symbol, currentIntv, historyResult.data, {
+            source: "tab-recovery-history",
+            onMerged: (merged) => {
+              const remaining = detectGaps(merged, intvSecs);
+              if (remaining.length > 0) {
+                console.warn(`[TabRecovery] ${remaining.length} gap(s) remain after history reload`);
+              } else {
+                console.log(`[TabRecovery] All gaps filled (${merged.length} total bars)`);
+              }
+            },
           });
           requestIndicatorRangeInChunks(
             requestIndicatorRange,
@@ -2080,15 +1923,13 @@ export default function App() {
         // Also refresh background caches for other intervals
         for (const bgIntv of trackedIntervalsRef.current) {
           if (bgIntv === currentIntv) continue;
-          const bgKey = cacheKey(symbol, bgIntv, marketType, exchange);
-          const bgCache = chartDataCacheRef.current.get(bgKey);
+          const bgCache = getCache(symbol, bgIntv, { marketType, exchange });
           if (!bgCache || bgCache.length === 0) continue;
 
           try {
             const bgResult = await fetchLatestKlines(symbol, bgIntv, 10, marketType, exchange);
             if (bgResult?.data?.length > 0) {
-              const bgMerged = mergeByTime(bgResult.data, bgCache);
-              chartDataCacheRef.current.set(bgKey, bgMerged);
+              mergeCacheData(symbol, bgIntv, bgResult.data, { marketType, exchange });
             }
           } catch {
             // Non-critical — background cache refresh
@@ -2103,7 +1944,7 @@ export default function App() {
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  }, [cacheKey, exchange, marketType, recoverGaps, requestIndicatorRange, saveToCache, symbol, updateLastPrice]);
+  }, [commitMergedChartData, exchange, getCache, marketType, mergeCacheData, recoverGaps, requestIndicatorRange, symbol, updateLastPrice]);
 
   // ---- handle load more left ----
   const oldestChartTime = chartData[0]?.time ?? null;
@@ -2128,11 +1969,7 @@ export default function App() {
         if (older.length > 0) {
           const patchStart = older[0]?.time;
           const patchEnd = older[older.length - 1]?.time;
-          setChartData((prev) => {
-            const merged = mergeByTime(older, prev);
-            saveToCache(symbol, interval, merged);
-            return merged;
-          });
+          commitMergedChartData(symbol, interval, older, { source: "history-before-page" });
           if (patchStart && patchEnd) {
             requestIndicatorRangeInChunks(
               requestIndicatorRange,
@@ -2195,7 +2032,7 @@ export default function App() {
         setLoadingMoreLeft(false);
       }
     },
-    [cacheKey, dataSource, exchange, hasMoreLeft, interval, loading, loadingMoreLeft, marketType, oldestChartTime, requestIndicatorRange, saveToCache, symbol],
+    [cacheKey, commitMergedChartData, dataSource, exchange, hasMoreLeft, interval, loading, loadingMoreLeft, marketType, oldestChartTime, requestIndicatorRange, symbol],
   );
 
   // Keep latest handleNeedMoreLeft addressable from async callbacks (safety-net
@@ -2209,10 +2046,10 @@ export default function App() {
     if (chartWidgetRef.current?.getVisibleRange) {
       const range = chartWidgetRef.current.getVisibleRange();
       if (range) {
-        saveVisibleRangeForInterval(symbol, interval, range, marketType, exchange);
+        saveVisibleRangeForInterval(symbol, interval, range, marketType, exchange, chartDataMeta);
       }
     }
-  }, [exchange, interval, marketType, symbol]);
+  }, [chartDataMeta, exchange, interval, marketType, symbol]);
 
   // Save visible range on page close/refresh
   useEffect(() => {
@@ -2574,7 +2411,8 @@ export default function App() {
               customBg={settings.customBg}
               timezone={settings.timezone}
               savedVisibleRange={getVisibleRangeForInterval(symbol, interval, marketType, exchange)}
-              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(symbol, interval, range, marketType, exchange)}
+              dataMeta={chartDataMeta}
+              onVisibleRangeChange={(range) => saveVisibleRangeForInterval(symbol, interval, range, marketType, exchange, chartDataMeta)}
               drawingTool={drawingTool}
               onDrawingToolChange={setDrawingTool}
               penColor={penColor}

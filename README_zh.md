@@ -218,6 +218,7 @@ cd frontend
 npm run dev
 npm run build
 npm run lint
+npm run smoke -- --url http://127.0.0.1:5173/
 ```
 
 ## 指标和 Pyne
@@ -340,9 +341,10 @@ npm run build
 npm run lint
 ```
 
-渲染层 smoke 检查：启动后端和 Vite 后，打开 `http://localhost:5173/`
-或 `http://127.0.0.1:5173/`。确认状态栏达到 `Connected to Binance`，
-显示非零 `bars`，并显示 `Live (WebSocket)`。
+渲染层 smoke 检查：启动后端和 Vite 后，运行
+`npm run smoke -- --url http://127.0.0.1:5173/`。该检查会确认状态栏达到
+`Connected to Binance`、显示非零 `bars`、显示 `Live (WebSocket)`，并打开
+懒加载的 Settings 面板。
 
 ## 说明
 

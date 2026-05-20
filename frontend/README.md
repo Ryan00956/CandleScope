@@ -42,4 +42,11 @@ node ./node_modules/vite/bin/vite.js build
 node ./node_modules/eslint/bin/eslint.js .
 ```
 
+With the backend and Vite running, use the browser smoke check to verify the
+rendered chart and lazy Settings panel:
+
+```bash
+npm run smoke -- --url http://127.0.0.1:5173/
+```
+
 On this Windows Codex desktop environment, use the bundled Node executable if `npm` or `node` is not available on `PATH`.

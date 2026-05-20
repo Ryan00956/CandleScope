@@ -197,6 +197,7 @@ cd frontend
 npm run dev
 npm run build
 npm run lint
+npm run smoke -- --url http://127.0.0.1:5173/
 ```
 
 ## Indicators And Pyne
@@ -317,10 +318,10 @@ npm run build
 npm run lint
 ```
 
-For rendered frontend smoke checks, start the backend and Vite, then open
-`http://localhost:5173/` or `http://127.0.0.1:5173/`. Confirm the status bar
-reaches `Connected to Binance`, shows non-zero `bars`, and reports
-`Live (WebSocket)`.
+For rendered frontend smoke checks, start the backend and Vite, then run
+`npm run smoke -- --url http://127.0.0.1:5173/`. The smoke check confirms the
+status bar reaches `Connected to Binance`, shows non-zero `bars`, reports
+`Live (WebSocket)`, and opens the lazy-loaded Settings panel.
 
 ## Notes
 

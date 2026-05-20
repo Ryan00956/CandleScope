@@ -72,11 +72,14 @@ For rendered smoke validation:
 
 1. Start the backend on `http://localhost:8000`.
 2. Start Vite on port `5173`.
-3. Open either `http://localhost:5173/` or `http://127.0.0.1:5173/`.
-4. Confirm the page reaches `Connected to Binance`, non-zero `bars`, and
-   `Live (WebSocket)`.
-5. Open a lazy panel such as Settings or Indicators and check for console
-   errors.
+3. Run the committed smoke check:
+
+   ```bash
+   npm run smoke -- --url http://127.0.0.1:5173/
+   ```
+
+   The smoke check confirms the page reaches `Connected to Binance`, non-zero
+   `bars`, `Live (WebSocket)`, and that the lazy-loaded Settings panel opens.
 
 On Windows, if backend startup logs fail with a console encoding error, start
 the backend with UTF-8 output enabled:
@@ -89,7 +92,6 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ## Remaining Work
 
-- Add a committed smoke script so the browser checks above are repeatable.
 - Analyze the remaining main bundle and split only the next proven heavy path.
 - Consider lazy-loading deeper indicator editor or Monaco paths if bundle
   analysis shows they still affect the first render.

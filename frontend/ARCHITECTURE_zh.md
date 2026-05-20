@@ -64,9 +64,14 @@ node ./node_modules/vite/bin/vite.js build
 
 1. 启动后端到 `http://localhost:8000`。
 2. 启动 Vite 到 `5173`。
-3. 打开 `http://localhost:5173/` 或 `http://127.0.0.1:5173/`。
-4. 确认页面达到 `Connected to Binance`、非零 `bars`、`Live (WebSocket)`。
-5. 打开 Settings 或 Indicators 等懒加载面板，检查 console 是否有错误。
+3. 运行仓库内 smoke 检查：
+
+   ```bash
+   npm run smoke -- --url http://127.0.0.1:5173/
+   ```
+
+   该检查会确认页面达到 `Connected to Binance`、非零 `bars`、
+   `Live (WebSocket)`，并确认懒加载的 Settings 面板可以打开。
 
 Windows 下如果后端启动日志因为控制台编码失败，可用 UTF-8 输出启动：
 
@@ -78,7 +83,6 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ## 剩余工作
 
-- 增加仓库内 smoke 脚本，让浏览器检查可重复运行。
 - 分析剩余 main bundle，再按证据拆下一条重路径。
 - 如果 bundle 分析显示指标编辑器或 Monaco 仍影响首屏，再继续拆该路径。
 - 绘图 primitives 要单独评估后再懒加载，因为图表交互比侧边面板更敏感。

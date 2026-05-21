@@ -212,6 +212,17 @@ ChartPane
 - 导出前仍会 commit text editing。
 - 主图 pan/zoom 仍顺滑。
 
+Phase 4 设计记录：
+
+- 新增 [DRAWING_ENGINE_LAZY_LOAD_DESIGN_zh.md](DRAWING_ENGINE_LAZY_LOAD_DESIGN_zh.md)。
+- 当前 `ChartPane` 直接 import `useDrawing`，会把完整绘图 hook 和 primitive 类
+  带入活动图表模块图。
+- 方向是先建立 `DrawingController` 边界，提供空实现、加载中、完整引擎三种
+  状态。controller 必须保留现有 `useDrawing` 的完整返回形状，避免破坏
+  `ChartPane` 和 `MultiPaneChart` 的合同。
+- 实现应先增加只读 storage 的 `hasSavedDrawings()` helper，并在切分 primitive
+  chunk 前补上工具激活、保存绘图恢复、导出文本提交的 smoke 覆盖。
+
 ## Phase 5：图表渲染更新成本
 
 目标：降低数据到达后的运行时渲染成本。

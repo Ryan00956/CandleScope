@@ -230,6 +230,19 @@ Acceptance for implementation, if approved:
 - Export still commits text editing before snapshot.
 - Main chart panning/zooming remains smooth.
 
+Design note after Phase 4:
+
+- Added [DRAWING_ENGINE_LAZY_LOAD_DESIGN.md](DRAWING_ENGINE_LAZY_LOAD_DESIGN.md).
+- Current `ChartPane` imports `useDrawing` directly, which pulls the full
+  drawing hook and primitive classes into the active chart module graph.
+- The approved direction is a `DrawingController` boundary with no-op, loading,
+  and real-engine states. The controller must preserve the complete current
+  `useDrawing` return shape so `ChartPane` and `MultiPaneChart` contracts stay
+  stable.
+- Implementation should start with a storage-only `hasSavedDrawings()` helper
+  and smoke coverage for tool activation, saved restore, and export text commit
+  before any primitive chunk split.
+
 ## Phase 5: Chart Rendering Update Cost
 
 Goal: reduce runtime rendering cost after data arrives.

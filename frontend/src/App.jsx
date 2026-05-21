@@ -13,8 +13,7 @@ import { useChartExportRuntime } from "./runtime/workflows/useChartExportRuntime
 import { useChartSettingsRuntime } from "./runtime/preferences/useChartSettingsRuntime";
 import { useDrawingRuntime } from "./features/drawings/useDrawingRuntime";
 import { usePriceScalePrefs } from "./runtime/preferences/usePriceScalePrefs";
-import { useWatchlistRuntime } from "./runtime/workflows/useWatchlistRuntime";
-import { useWatchlistStorageRuntime } from "./runtime/preferences/useWatchlistStorageRuntime";
+import { useWatchlistRuntime } from "./features/watchlist/useWatchlistRuntime";
 import "./index.css";
 
 // ---------- ErrorBoundary ----------
@@ -247,13 +246,17 @@ export default function App() {
     clearIndicatorDrawingStorage(indicatorId);
   }, [clearIndicatorDrawingStorage, rawRemoveIndicator]);
 
-  const { watchlists, setWatchlists, handleAddToWatchlist } = useWatchlistStorageRuntime();
-
+  const watchlist = useWatchlistRuntime();
   const {
+    watchlists,
+    layout: watchlistLayout,
+    prices: symbolPrices,
     subscriptionTiers,
-    symbolPrices,
+  } = watchlist.view;
+  const {
+    addToWatchlist: handleAddToWatchlist,
     handleTierChange,
-  } = useWatchlistRuntime({ watchlists });
+  } = watchlist.actions;
 
 
   // Sync cache limits to backend when they change
@@ -406,7 +409,8 @@ export default function App() {
           currentExchange: exchange,
           onSelectSymbol: handleSymbolChange,
           watchlists,
-          onWatchlistsChange: setWatchlists,
+          layout: watchlistLayout,
+          actions: watchlist.actions,
           prices: symbolPrices,
           subscriptionTiers,
           onTierChange: handleTierChange,

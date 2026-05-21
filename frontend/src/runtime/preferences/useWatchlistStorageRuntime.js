@@ -1,29 +1,11 @@
-import { useCallback, useState } from "react";
-import { loadWatchlists, saveWatchlists } from "../../services/watchlistStorage";
+import { useWatchlistStore } from "../../features/watchlist/watchlistStore.js";
 
 export function useWatchlistStorageRuntime() {
-  const [watchlists, setWatchlistsState] = useState(loadWatchlists);
-
-  const setWatchlists = useCallback((nextOrUpdater) => {
-    setWatchlistsState((prev) => {
-      const next = typeof nextOrUpdater === "function" ? nextOrUpdater(prev) : nextOrUpdater;
-      saveWatchlists(next);
-      return next;
-    });
-  }, []);
-
-  const handleAddToWatchlist = useCallback((watchlistId, symbol) => {
-    setWatchlists((prev) => prev.map((watchlist) => {
-      if (watchlist.id === watchlistId && !watchlist.symbols.includes(symbol)) {
-        return { ...watchlist, symbols: [...watchlist.symbols, symbol] };
-      }
-      return watchlist;
-    }));
-  }, [setWatchlists]);
+  const store = useWatchlistStore();
 
   return {
-    watchlists,
-    setWatchlists,
-    handleAddToWatchlist,
+    watchlists: store.watchlists,
+    setWatchlists: store.actions.setWatchlists,
+    handleAddToWatchlist: store.actions.addToWatchlist,
   };
 }

@@ -3,7 +3,7 @@ import MultiPaneChart from "../MultiPaneChart";
 
 const ExportPanel = React.lazy(() => import("../ExportPanel"));
 const DrawingToolbar = React.lazy(() => import("../../features/drawings/DrawingToolbar"));
-const WatchlistSidebar = React.lazy(() => import("../WatchlistSidebar"));
+const WatchlistSidebar = React.lazy(() => import("../../features/watchlist/WatchlistSidebar"));
 
 class ChartErrorBoundary extends React.Component {
   constructor(props) {

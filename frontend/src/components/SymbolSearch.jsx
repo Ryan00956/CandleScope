@@ -1,7 +1,11 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { markPerf } from "../runtime/performance/perfMarks";
 
-const SymbolSearchModal = lazy(() => import("./SymbolSearchModal"));
+function loadSymbolSearchModal() {
+  return import("./SymbolSearchModal");
+}
+
+const SymbolSearchModal = lazy(loadSymbolSearchModal);
 
 /**
  * SymbolSearch — trigger button + full-screen search modal.
@@ -68,6 +72,10 @@ export default function SymbolSearch({
       <button
         className="symbol-selector"
         id="symbol-selector"
+        onPointerEnter={loadSymbolSearchModal}
+        onMouseOver={loadSymbolSearchModal}
+        onMouseEnter={loadSymbolSearchModal}
+        onFocus={loadSymbolSearchModal}
         onClick={handleOpen}
         title="搜索交易对 (Ctrl+K)"
       >

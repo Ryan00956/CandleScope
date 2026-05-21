@@ -1,5 +1,6 @@
 import SymbolSearch from "../SymbolSearch";
 import { markPerf } from "../../runtime/performance/perfMarks";
+import { loadSettingsModal } from "./lazySurfaceLoaders";
 import {
   formatPrice,
   formatPriceDiff,
@@ -44,6 +45,10 @@ export default function TopBar({
 
       <button
         className="settings-btn"
+        onPointerEnter={loadSettingsModal}
+        onMouseOver={loadSettingsModal}
+        onMouseEnter={loadSettingsModal}
+        onFocus={loadSettingsModal}
         onClick={() => {
           markPerf("lazy.settings.open.start", { trigger: "button" });
           onOpenSettings();

@@ -324,6 +324,21 @@ Phase 5 barcolor 轮次实现说明：
 - lazy panel first-open time 下降。
 - first chart ready time 不回退。
 
+Phase 6 实现后说明：
+
+- 新增共享 lazy surface loaders，让 Settings、Indicator Panel 和 Alerts 的
+  `React.lazy()` 与交互预加载复用同一组 dynamic import 函数。
+- `#symbol-selector` 与 settings button 现在会在 pointer hover、mouse hover
+  和 focus 时预加载对应 lazy chunk。预加载仍由用户意图触发，不会把这些面板重新放回
+  首屏启动路径。
+- smoke 现在会先触发同样的意图事件，再测量 symbol search 和 Settings 的 click-to-open
+  路径。这样测试覆盖的是实际交互路径，而不是每次都测冷启动 lazy import。
+- 本轮预加载后的本地验证：app main chunk 约 148 kB minified，
+  `DrawingEngineHost` lazy chunk 约 89 kB，Settings lazy chunk 约 82 kB，
+  SymbolSearch lazy chunk 约 11 kB。smoke 通过：bars 722，connected true，
+  live true，failures 0，chartReadyMs 2,580，firstBarsMs 2,580，
+  symbolSearchOpenMs 506，settingsOpenMs 521。
+
 ## 验证命令
 
 常规命令：

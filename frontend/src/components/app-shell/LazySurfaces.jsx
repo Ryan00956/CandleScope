@@ -1,8 +1,13 @@
 import React from "react";
+import {
+  loadAlertsPanel,
+  loadIndicatorPanel,
+  loadSettingsModal,
+} from "./lazySurfaceLoaders";
 
-const SettingsModal = React.lazy(() => import("../SettingsModal"));
-const IndicatorPanel = React.lazy(() => import("../IndicatorPanel"));
-const AlertsPanel = React.lazy(() => import("../alerts/AlertsPanel"));
+const SettingsModal = React.lazy(loadSettingsModal);
+const IndicatorPanel = React.lazy(loadIndicatorPanel);
+const AlertsPanel = React.lazy(loadAlertsPanel);
 
 export default function LazySurfaces({
   indicatorPanel,

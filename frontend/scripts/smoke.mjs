@@ -346,6 +346,11 @@ async function waitForPerfTiming(cdp, timingKey, timeoutMs = 10_000) {
 }
 
 async function openSettings(cdp) {
+  await cdp.send("Runtime.evaluate", {
+    expression: "(() => { const button = document.querySelector('.settings-btn'); if (!button) return false; button.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true })); button.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); button.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); button.focus(); return true; })()",
+    returnByValue: true,
+  });
+  await wait(350);
   const started = Date.now();
   const clickResult = await cdp.send("Runtime.evaluate", {
     expression: "(() => { const button = document.querySelector('.settings-btn'); if (!button) return false; button.click(); return true; })()",
@@ -391,6 +396,11 @@ async function verifyLazySurfaces(cdp) {
     }
   }
 
+  await cdp.send("Runtime.evaluate", {
+    expression: "(() => { const button = document.querySelector('#symbol-selector'); if (!button) return false; button.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true })); button.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); button.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); button.focus(); return true; })()",
+    returnByValue: true,
+  });
+  await wait(350);
   const symbolStarted = Date.now();
   const symbolClickResult = await cdp.send("Runtime.evaluate", {
     expression: "(() => { const button = document.querySelector('#symbol-selector'); if (!button) return false; button.click(); return true; })()",

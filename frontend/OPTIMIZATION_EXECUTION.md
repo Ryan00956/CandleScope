@@ -350,6 +350,23 @@ Acceptance:
 - Lazy panel first-open time improves.
 - First chart ready time does not regress.
 
+Implementation notes after Phase 6:
+
+- Added shared lazy surface loaders for Settings, Indicator Panel, and Alerts
+  so the same dynamic import functions can be used by both `React.lazy()` and
+  interaction preloads.
+- `#symbol-selector` and the settings button now preload their lazy chunks on
+  pointer hover, mouse hover, and focus. The preload stays intent-based and does
+  not move those panels back into the boot path.
+- Smoke now triggers the same intent events before measuring the click-to-open
+  path for symbol search and Settings. This keeps the test aligned with the
+  real interaction path instead of measuring a cold lazy import every time.
+- Local validation after the preload pass: app main chunk about 148 kB
+  minified, `DrawingEngineHost` lazy chunk about 89 kB, Settings lazy chunk
+  about 82 kB, SymbolSearch lazy chunk about 11 kB. Smoke passed with bars 722,
+  connected true, live true, failures 0, chartReadyMs 2,580, firstBarsMs 2,580,
+  symbolSearchOpenMs 506, settingsOpenMs 521.
+
 ## Verification Commands
 
 Use repository-local commands:

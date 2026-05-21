@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import MultiPaneChart from "./components/MultiPaneChart";
 import IntervalSelector from "./components/IntervalSelector";
-import SymbolSearch from "./components/SymbolSearch";
+import ChartWorkspace from "./components/app-shell/ChartWorkspace";
+import LazySurfaces from "./components/app-shell/LazySurfaces";
+import StatusBar from "./components/app-shell/StatusBar";
+import TopBar from "./components/app-shell/TopBar";
 import { useCustomIntervals } from "./hooks/useCustomIntervals";
 import { useIndicators } from "./hooks/useIndicators";
 import { useBackfillCompletionRuntime } from "./runtime/streams/useBackfillCompletionRuntime";
@@ -28,9 +30,6 @@ import {
 } from "./runtime/chart/chartDataRuntime";
 import {
   buildChartDisplayState,
-  formatPrice,
-  formatPriceDiff,
-  formatVolume,
 } from "./runtime/chart/chartDisplayRuntime";
 import {
   buildSortedIntervals,
@@ -45,15 +44,7 @@ import {
   getVisibleRangeForInterval,
 } from "./runtime/chart/viewportController";
 import { clearSavedDrawings } from "./services/drawingStorage";
-import { markPerf } from "./runtime/performance/perfMarks";
 import "./index.css";
-
-const ExportPanel = React.lazy(() => import("./components/ExportPanel"));
-const DrawingToolbar = React.lazy(() => import("./components/DrawingToolbar"));
-const SettingsModal = React.lazy(() => import("./components/SettingsModal"));
-const IndicatorPanel = React.lazy(() => import("./components/IndicatorPanel"));
-const AlertsPanel = React.lazy(() => import("./components/alerts/AlertsPanel"));
-const WatchlistSidebar = React.lazy(() => import("./components/WatchlistSidebar"));
 
 // ---------- ErrorBoundary ----------
 class ErrorBoundary extends React.Component {
@@ -588,113 +579,25 @@ export default function App() {
 
   return (
     <div className="app-layout" ref={pageExportRef}>
-      <header className="top-bar" id="top-bar">
-        <div className="logo">
-          <div className="logo-icon">📈</div>
-          <span className="logo-text">CandleScope</span>
-        </div>
-
-        <SymbolSearch
-          currentSymbol={symbol}
-          currentMarketType={marketType}
-          currentExchange={exchange}
-          exchangeCatalog={exchangeCatalog}
-          onSelect={handleSymbolChange}
-          watchlists={watchlists}
-          onAddToWatchlist={handleAddToWatchlist}
-        />
-
-        <button
-          className="settings-btn"
-          onClick={() => {
-            markPerf("lazy.settings.open.start", { trigger: "button" });
-            setShowSettings(true);
-          }}
-          style={{
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            fontSize: "18px",
-            padding: "4px",
-            display: "flex",
-          }}
-        >
-          ⚙️
-        </button>
-
-        <button
-          className={`indicator-toggle-btn ${showIndicatorPanel ? "active" : ""}`}
-          onClick={() => setShowIndicatorPanel((p) => !p)}
-          title="指标 (Indicators)"
-        >
-          📊
-          {activeIndicators.length > 0 && (
-            <span className="indicator-badge">{activeIndicators.length}</span>
-          )}
-        </button>
-
-        <button
-          className={`indicator-toggle-btn alert-toggle-btn ${showAlertsPanel ? "active" : ""}`}
-          onClick={() => setShowAlertsPanel((p) => !p)}
-          title="警报 (Alerts)"
-        >
-          🔔
-        </button>
-
-        {displayData && (
-          <div className="price-info">
-            <span className={`current-price ${isUp ? "price-up" : "price-down"}`}>
-              {formatPrice(displayData.close)}
-            </span>
-            <span className={`price-change ${isUp ? "change-positive" : "change-negative"}`}>
-              {isUp ? "▲" : "▼"} {Math.abs(priceChange).toFixed(2)}%
-            </span>
-          </div>
-        )}
-
-        {displayData && (
-          <div className="ohlcv-bar">
-            <div className="ohlcv-item">
-              <span className="ohlcv-label">O</span>
-              <span className="ohlcv-value">{formatPrice(displayData.open)}</span>
-            </div>
-            <div className="ohlcv-item">
-              <span className="ohlcv-label">H</span>
-              <span className="ohlcv-value" style={{ color: "var(--candle-up)" }}>
-                {formatPrice(displayData.high)}
-              </span>
-            </div>
-            <div className="ohlcv-item">
-              <span className="ohlcv-label">L</span>
-              <span className="ohlcv-value" style={{ color: "var(--candle-down)" }}>
-                {formatPrice(displayData.low)}
-              </span>
-            </div>
-            <div className="ohlcv-item">
-              <span className="ohlcv-label">C</span>
-              <span className={`ohlcv-value ${isUp ? "price-up" : "price-down"}`}>
-                {formatPrice(displayData.close)}
-              </span>
-            </div>
-            <div className="ohlcv-item">
-              <span className="ohlcv-label">Vol</span>
-              <span className="ohlcv-value">{formatVolume(displayData.volume)}</span>
-            </div>
-            <div className="ohlcv-item">
-              <span className="ohlcv-label">涨跌</span>
-              <span className="ohlcv-value" style={{ color: isUp ? "var(--candle-up)" : "var(--candle-down)" }}>
-                {isUp ? "+" : "-"}{formatPriceDiff(displayData.close - displayData.open)} / {isUp ? "+" : ""}{priceChange.toFixed(2)}%
-              </span>
-            </div>
-            <div className="ohlcv-item">
-              <span className="ohlcv-label">振幅</span>
-              <span className="ohlcv-value">
-                {amplitude}%
-              </span>
-            </div>
-          </div>
-        )}
-      </header>
+      <TopBar
+        symbol={symbol}
+        marketType={marketType}
+        exchange={exchange}
+        exchangeCatalog={exchangeCatalog}
+        onSelectSymbol={handleSymbolChange}
+        watchlists={watchlists}
+        onAddToWatchlist={handleAddToWatchlist}
+        onOpenSettings={() => setShowSettings(true)}
+        indicatorPanelOpen={showIndicatorPanel}
+        onToggleIndicatorPanel={() => setShowIndicatorPanel((p) => !p)}
+        alertPanelOpen={showAlertsPanel}
+        onToggleAlertPanel={() => setShowAlertsPanel((p) => !p)}
+        activeIndicatorCount={activeIndicators.length}
+        displayData={displayData}
+        isUp={isUp}
+        priceChange={priceChange}
+        amplitude={amplitude}
+      />
 
       <IntervalSelector
         interval={interval}
@@ -711,235 +614,164 @@ export default function App() {
         intervalNotice={intervalNotice}
       />
 
-      <div className="main-content-area">
-      <div className="chart-with-toolbar">
-        <React.Suspense fallback={<div className="drawing-toolbar drawing-toolbar-loading" aria-hidden="true" />}>
-          <DrawingToolbar
-            activeTool={drawingTool}
-            onToolChange={setDrawingTool}
-            penColor={penColor}
-            onPenColorChange={setPenColor}
-            penSize={penSize}
-            onPenSizeChange={setPenSize}
-            onClearAll={handleClearDrawing}
-            drawingsHidden={drawingsHidden}
-            onToggleDrawingsHidden={handleToggleDrawingsHidden}
-            drawingSnapEnabled={drawingSnapEnabled}
-            onDrawingSnapEnabledChange={handleDrawingSnapEnabledChange}
-            textFontSize={textFontSize}
-            onTextFontSizeChange={setTextFontSize}
-            textBold={textBold}
-            onTextBoldChange={setTextBold}
-            textItalic={textItalic}
-            onTextItalicChange={setTextItalic}
-            fibLevels={fibLevels}
-            onFibLevelsChange={handleFibLevelsChange}
-            fibInverted={fibInverted}
-            onFibInvertedChange={handleFibInvertedChange}
-            positionSize={positionSize}
-            onPositionSizeChange={handlePositionSizeChange}
-            selectedDrawing={selectedDrawing}
-            onSelectedDrawingStyleChange={handleSelectedDrawingStyleChange}
-            exportPanelOpen={showExportPanel}
-            exportInProgress={exportInProgress}
-            onToggleExportPanel={handleToggleExportPanel}
-          />
-        </React.Suspense>
+      <ChartWorkspace
+        errorBoundary={ErrorBoundary}
+        drawingToolbar={{
+          activeTool: drawingTool,
+          onToolChange: setDrawingTool,
+          penColor,
+          onPenColorChange: setPenColor,
+          penSize,
+          onPenSizeChange: setPenSize,
+          onClearAll: handleClearDrawing,
+          drawingsHidden,
+          onToggleDrawingsHidden: handleToggleDrawingsHidden,
+          drawingSnapEnabled,
+          onDrawingSnapEnabledChange: handleDrawingSnapEnabledChange,
+          textFontSize,
+          onTextFontSizeChange: setTextFontSize,
+          textBold,
+          onTextBoldChange: setTextBold,
+          textItalic,
+          onTextItalicChange: setTextItalic,
+          fibLevels,
+          onFibLevelsChange: handleFibLevelsChange,
+          fibInverted,
+          onFibInvertedChange: handleFibInvertedChange,
+          positionSize,
+          onPositionSizeChange: handlePositionSizeChange,
+          selectedDrawing,
+          onSelectedDrawingStyleChange: handleSelectedDrawingStyleChange,
+          exportPanelOpen: showExportPanel,
+          exportInProgress,
+          onToggleExportPanel: handleToggleExportPanel,
+        }}
+        exportPanel={{
+          isOpen: showExportPanel,
+          options: exportOptions,
+          onOptionsChange: handleExportOptionsChange,
+          onExport: handleExportChart,
+          onClose: handleCloseExportPanel,
+          inProgress: exportInProgress,
+          error: exportError,
+          notice: exportNotice,
+          metadata: exportMetadata,
+          loading: loading || loadingMoreLeft,
+          indicatorComputing,
+          preview: exportPreview,
+        }}
+        chart={{
+          error,
+          onRetryLoad: () => loadData(symbol, interval),
+          chartProps: {
+            ref: chartWidgetRef,
+            data: renderChartData,
+            symbol,
+            drawingKeyBase: chartStorageKeyBase,
+            interval,
+            loading,
+            onCrosshairMove: setCrosshairData,
+            onNeedMoreLeft: handleNeedMoreLeft,
+            canLoadMoreLeft: hasMoreLeft && !loadingMoreLeft && !loading,
+            datasetKey: `${exchange}-${marketType}-${symbol}-${interval}-${datasetKey}`,
+            upColor: settings.upColor,
+            downColor: settings.downColor,
+            theme: resolvedTheme,
+            customBg: settings.customBg,
+            timezone: settings.timezone,
+            savedVisibleRange: getVisibleRangeForInterval(symbol, interval, marketType, exchange),
+            dataMeta: chartDataMeta,
+            onVisibleRangeChange: handleVisibleRangeChange,
+            drawingTool,
+            onDrawingToolChange: setDrawingTool,
+            penColor,
+            penSize,
+            textFontSize,
+            textBold,
+            textItalic,
+            fibLevels,
+            fibInverted,
+            positionSize,
+            drawingSnapEnabled,
+            onSelectedDrawingChange: handleSelectedDrawingChange,
+            onChartReady: handleChartReady,
+            mainOverlayLines,
+            subPanes,
+            indicatorMarkers,
+            indicatorFills,
+            indicatorHlines,
+            indicatorBgcolors,
+            indicatorBarcolors,
+            invertScale,
+            onInvertScaleChange: handleInvertScaleChange,
+            priceScaleMode,
+            onPriceScaleModeChange: handlePriceScaleModeChange,
+          },
+        }}
+        watchlist={{
+          currentSymbol: symbol,
+          currentMarketType: marketType,
+          currentExchange: exchange,
+          onSelectSymbol: handleSymbolChange,
+          watchlists,
+          onWatchlistsChange: setWatchlists,
+          prices: symbolPrices,
+          subscriptionTiers,
+          onTierChange: handleTierChange,
+          upColor: settings.upColor,
+          downColor: settings.downColor,
+        }}
+      />
 
-        {showExportPanel && (
-          <React.Suspense fallback={null}>
-            <ExportPanel
-              isOpen={showExportPanel}
-              options={exportOptions}
-              onOptionsChange={handleExportOptionsChange}
-              onExport={handleExportChart}
-              onClose={handleCloseExportPanel}
-              inProgress={exportInProgress}
-              error={exportError}
-              notice={exportNotice}
-              metadata={exportMetadata}
-              loading={loading || loadingMoreLeft}
-              indicatorComputing={indicatorComputing}
-              preview={exportPreview}
-            />
-          </React.Suspense>
-        )}
+      <LazySurfaces
+        indicatorPanel={{
+          isOpen: showIndicatorPanel,
+          onClose: () => setShowIndicatorPanel(false),
+          activeIndicators,
+          paramSchemas: indicatorParamSchemas,
+          computing: indicatorComputing,
+          onAddIndicator: addIndicator,
+          onRemoveIndicator: removeIndicator,
+          onToggleVisibility: toggleVisibility,
+          onUpdateParams: updateIndicatorParams,
+          onUpdateScript: updateIndicatorScript,
+          onRecompute: recomputeIndicatorsWithUI,
+        }}
+        alertsPanel={{
+          isOpen: showAlertsPanel,
+          onClose: () => setShowAlertsPanel(false),
+          currentSymbol: symbol,
+          currentMarketType: marketType,
+          currentExchange: exchange,
+          currentInterval: interval,
+          displayPrice: displayData?.close ?? lastPrice?.close,
+          wsStatus,
+          watchlists,
+        }}
+        settingsModal={{
+          isOpen: showSettings,
+          onClose: () => setShowSettings(false),
+          settings,
+          onUpdate: setSettings,
+          currentSymbol: symbol,
+          currentMarketType: marketType,
+          currentExchange: exchange,
+          watchlists,
+        }}
+      />
 
-        {error ? (
-          <div className="chart-area">
-            <div className="error-overlay">
-              <div className="error-icon">⚠️</div>
-              <div className="error-message">
-                <strong>Data load failed</strong>
-                <br />
-                {error}
-                <br />
-                <small style={{ color: "var(--text-muted)", marginTop: 8, display: "block" }}>
-                  Ensure backend is running: `uvicorn app.main:app --reload`
-                </small>
-              </div>
-              <button className="retry-btn" onClick={() => loadData(symbol, interval)} id="retry-btn">
-                Retry
-              </button>
-            </div>
-          </div>
-        ) : (
-          <ErrorBoundary>
-            <MultiPaneChart
-              ref={chartWidgetRef}
-              data={renderChartData}
-              symbol={symbol}
-              drawingKeyBase={chartStorageKeyBase}
-              interval={interval}
-              loading={loading}
-              onCrosshairMove={setCrosshairData}
-              onNeedMoreLeft={handleNeedMoreLeft}
-              canLoadMoreLeft={hasMoreLeft && !loadingMoreLeft && !loading}
-              datasetKey={`${exchange}-${marketType}-${symbol}-${interval}-${datasetKey}`}
-              upColor={settings.upColor}
-              downColor={settings.downColor}
-              theme={resolvedTheme}
-              customBg={settings.customBg}
-              timezone={settings.timezone}
-              savedVisibleRange={getVisibleRangeForInterval(symbol, interval, marketType, exchange)}
-              dataMeta={chartDataMeta}
-              onVisibleRangeChange={handleVisibleRangeChange}
-              drawingTool={drawingTool}
-              onDrawingToolChange={setDrawingTool}
-              penColor={penColor}
-              penSize={penSize}
-              textFontSize={textFontSize}
-              textBold={textBold}
-              textItalic={textItalic}
-              fibLevels={fibLevels}
-              fibInverted={fibInverted}
-              positionSize={positionSize}
-              drawingSnapEnabled={drawingSnapEnabled}
-              onSelectedDrawingChange={handleSelectedDrawingChange}
-              onChartReady={handleChartReady}
-              mainOverlayLines={mainOverlayLines}
-              subPanes={subPanes}
-              indicatorMarkers={indicatorMarkers}
-              indicatorFills={indicatorFills}
-              indicatorHlines={indicatorHlines}
-              indicatorBgcolors={indicatorBgcolors}
-              indicatorBarcolors={indicatorBarcolors}
-              invertScale={invertScale}
-              onInvertScaleChange={handleInvertScaleChange}
-              priceScaleMode={priceScaleMode}
-              onPriceScaleModeChange={handlePriceScaleModeChange}
-            />
-          </ErrorBoundary>
-        )}
-      </div>
-
-      <React.Suspense
-        fallback={(
-          <div
-            className="watchlist-sidebar watchlist-sidebar-loading"
-            aria-hidden="true"
-            style={{ width: 320 }}
-          />
-        )}
-      >
-        <WatchlistSidebar
-          currentSymbol={symbol}
-          currentMarketType={marketType}
-          currentExchange={exchange}
-          onSelectSymbol={handleSymbolChange}
-          watchlists={watchlists}
-          onWatchlistsChange={setWatchlists}
-          prices={symbolPrices}
-          subscriptionTiers={subscriptionTiers}
-          onTierChange={handleTierChange}
-          upColor={settings.upColor}
-          downColor={settings.downColor}
-        />
-      </React.Suspense>
-
-      </div> {/* end main-content-area */}
-
-      {/* Indicator Panel — slides in from the right */}
-      {showIndicatorPanel && (
-        <React.Suspense fallback={null}>
-          <IndicatorPanel
-            isOpen={showIndicatorPanel}
-            onClose={() => setShowIndicatorPanel(false)}
-            activeIndicators={activeIndicators}
-            paramSchemas={indicatorParamSchemas}
-            computing={indicatorComputing}
-            onAddIndicator={addIndicator}
-            onRemoveIndicator={removeIndicator}
-            onToggleVisibility={toggleVisibility}
-            onUpdateParams={updateIndicatorParams}
-            onUpdateScript={updateIndicatorScript}
-            onRecompute={recomputeIndicatorsWithUI}
-          />
-        </React.Suspense>
-      )}
-
-      {showAlertsPanel && (
-        <React.Suspense fallback={null}>
-          <AlertsPanel
-            isOpen={showAlertsPanel}
-            onClose={() => setShowAlertsPanel(false)}
-            currentSymbol={symbol}
-            currentMarketType={marketType}
-            currentExchange={exchange}
-            currentInterval={interval}
-            displayPrice={displayData?.close ?? lastPrice?.close}
-            wsStatus={wsStatus}
-            watchlists={watchlists}
-          />
-        </React.Suspense>
-      )}
-
-      {showSettings && (
-        <React.Suspense fallback={null}>
-          <SettingsModal
-            isOpen={showSettings}
-            onClose={() => setShowSettings(false)}
-            settings={settings}
-            onUpdate={setSettings}
-            currentSymbol={symbol}
-            currentMarketType={marketType}
-            currentExchange={exchange}
-            watchlists={watchlists}
-          />
-        </React.Suspense>
-      )}
-
-      <footer className="status-bar" id="status-bar">
-        <div className="status-left">
-          <span>
-            <span className={`status-dot ${connectionStatus}`} />
-            {connectionStatus === "connected" && `Connected to ${exchangeLabel}`}
-            {connectionStatus === "loading" && (dataSource === "mock" ? "Mock data mode" : "Loading...")}
-            {connectionStatus === "disconnected" && "Disconnected"}
-          </span>
-          <span>{chartData.length} bars</span>
-          {loadingMoreLeft && <span style={{ color: "#3b82f6" }}>Loading older data...</span>}
-          {!hasMoreLeft && !loadingMoreLeft && <span style={{ color: "#94a3b8" }}>No more history</span>}
-          {dataSource === "mock" && (
-            <span style={{ color: "#f59e0b" }}>
-              {exchangeLabel} unavailable, using mock data
-            </span>
-          )}
-          {exchangeCatalogStatus === "fallback" && (
-            <span style={{ color: "#f59e0b" }}>Exchange capabilities fallback</span>
-          )}
-          {exchangeLimitations.length > 0 && (
-            <span title={exchangeLimitations.join(" | ")} style={{ color: "#94a3b8" }}>
-              {exchangeLimitations.length} exchange limitation{exchangeLimitations.length > 1 ? "s" : ""}
-            </span>
-          )}
-        </div>
-        <div className="status-right">
-          <span>{dataSource === "mock" ? "Demo Mode" : `${exchangeLabel} ${marketLabel}`}</span>
-          <span>{wsStatusLabel}</span>
-          <span>CandleScope v0.2.0</span>
-        </div>
-      </footer>
+      <StatusBar
+        connectionStatus={connectionStatus}
+        dataSource={dataSource}
+        exchangeLabel={exchangeLabel}
+        marketLabel={marketLabel}
+        wsStatusLabel={wsStatusLabel}
+        barCount={chartData.length}
+        loadingMoreLeft={loadingMoreLeft}
+        hasMoreLeft={hasMoreLeft}
+        exchangeCatalogStatus={exchangeCatalogStatus}
+        exchangeLimitations={exchangeLimitations}
+      />
     </div>
   );
 }

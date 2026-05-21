@@ -171,6 +171,17 @@ Acceptance:
 - No behavior change in smoke.
 - The file split makes ownership clearer, not merely smaller.
 
+Implementation notes after Phase 3:
+
+- Added `components/app-shell/TopBar.jsx`, `ChartWorkspace.jsx`,
+  `LazySurfaces.jsx`, and `StatusBar.jsx`.
+- `App.jsx` still owns runtime hooks, refs, callbacks, and data derivation; the
+  shell components only receive explicit UI and behavior props.
+- Lazy panels remain lazy-loaded from the shell layer, while chart data
+  ownership and backend endpoint selection stay in `App.jsx` and runtime hooks.
+- Build baseline after extraction: app main chunk about 240 kB minified, still
+  under the 250 kB budget.
+
 ## Phase 4: Drawing Engine Design
 
 Goal: decide whether the drawing engine can be loaded only when needed without

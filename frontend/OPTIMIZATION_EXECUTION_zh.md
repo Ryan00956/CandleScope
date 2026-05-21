@@ -158,6 +158,16 @@ Phase 2 实测基线：
 - smoke 行为不变。
 - 文件拆分让所有权更清楚，而不是只让文件更短。
 
+Phase 3 实现后说明：
+
+- 新增 `components/app-shell/TopBar.jsx`、`ChartWorkspace.jsx`、
+  `LazySurfaces.jsx` 和 `StatusBar.jsx`。
+- `App.jsx` 仍然拥有 runtime hooks、refs、callbacks 和数据派生；shell 组件只接收
+  明确的 UI / 行为 props。
+- lazy 面板仍从 shell 层懒加载；图表数据所有权和后端 endpoint 选择仍留在
+  `App.jsx` 与 runtime hooks。
+- 拆分后 build 基线：app main chunk 约 240 kB minified，仍低于 250 kB 预算。
+
 ## Phase 4：Drawing Engine 设计
 
 目标：判断 drawing engine 能否按需加载，同时不破坏图表交互。

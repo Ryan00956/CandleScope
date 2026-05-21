@@ -434,6 +434,21 @@ async function clickSelector(cdp, selector) {
   return Boolean(result.result?.value);
 }
 
+async function waitForSelector(cdp, selector, timeoutMs = 5_000) {
+  const started = Date.now();
+  let found = false;
+  while (Date.now() - started < timeoutMs) {
+    const result = await cdp.send("Runtime.evaluate", {
+      expression: `Boolean(document.querySelector(${JSON.stringify(selector)}))`,
+      returnByValue: true,
+    });
+    found = Boolean(result.result?.value);
+    if (found) return true;
+    await wait(250);
+  }
+  return false;
+}
+
 async function getRect(cdp, selector) {
   const result = await cdp.send("Runtime.evaluate", {
     expression: `(() => {
@@ -494,13 +509,16 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
     returnByValue: true,
   });
   const lineToolActive = Boolean(activeResult.result?.value);
+  const drawingEngineReady = lineToolActive
+    ? await waitForSelector(cdp, '[data-drawing-engine="ready"]')
+    : false;
 
   const rect = await getRect(cdp, chartSelector);
   let drawingPersistedCount = 0;
   let drawingRestoredCount = 0;
   let reloadLoadedAtMs = null;
 
-  if (rect && lineToolActive) {
+  if (rect && lineToolActive && drawingEngineReady) {
     const y = Math.round(rect.y + rect.height * 0.45);
     await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.35), y);
     await wait(150);
@@ -518,6 +536,7 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
   return {
     drawingLineToolClicked: lineToolClicked,
     drawingLineToolActive: lineToolActive,
+    drawingEngineReady,
     drawingChartRectFound: Boolean(rect),
     drawingPersistedCount,
     drawingReloadLoadedAtMs: reloadLoadedAtMs,
@@ -651,6 +670,7 @@ async function main() {
       || (args.drawingCheck && (
         !drawingWorkflow?.drawingLineToolClicked
         || !drawingWorkflow?.drawingLineToolActive
+        || !drawingWorkflow?.drawingEngineReady
         || !drawingWorkflow?.drawingChartRectFound
         || drawingWorkflow?.drawingPersistedCount <= 0
         || drawingWorkflow?.drawingRestoredCount <= 0

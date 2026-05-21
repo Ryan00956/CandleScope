@@ -257,10 +257,21 @@ Implementation checkpoint after Phase 4 preflight:
 
 - Added storage-only `hasSavedDrawings()` in `drawingStorage.js`.
 - Added `useDrawingController` as the `ChartPane` drawing adapter boundary.
-  It currently delegates to the existing real `useDrawing` engine so behavior
-  stays unchanged before lazy-loading is introduced.
 - `ChartPane` now computes a single pane drawing key and passes it through the
   controller, preserving the main/sub-pane key distinction documented above.
+
+Implementation notes after Phase 4 lazy split:
+
+- Added `DrawingEngineHost`, which owns the real `useDrawing` hook and text
+  overlay rendering. `ChartPane` only mounts it when saved drawings exist or an
+  active drawing tool requires the real engine.
+- `ChartPane` keeps no-op imperative behavior for hidden drawings, clear,
+  selected-style updates, and export preparation while the real engine is not
+  mounted.
+- Build result after the split: app main chunk about 146 kB minified;
+  `DrawingEngineHost` lazy chunk about 89 kB minified. Both stay within budget.
+- Local `--drawing-check` after lazy split: drawing engine ready true, line tool
+  active true, persisted drawings 1, restored drawings 1, failures 0.
 
 ## Phase 5: Chart Rendering Update Cost
 

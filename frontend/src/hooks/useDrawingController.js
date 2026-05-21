@@ -1,4 +1,3 @@
-import { useDrawing } from "./useDrawing";
 import { hasSavedDrawings } from "../services/drawingStorage";
 
 export const PASSIVE_CURSOR_TOOL_IDS = new Set([
@@ -31,9 +30,3 @@ export const DRAWING_ENGINE_TOOL_IDS = new Set([
 export function shouldLoadDrawingEngine({ activeTool, drawingKey }) {
   return DRAWING_ENGINE_TOOL_IDS.has(activeTool) || hasSavedDrawings(drawingKey);
 }
-
-export function useDrawingController(options) {
-  return useDrawing(options);
-}
-
-export default useDrawingController;

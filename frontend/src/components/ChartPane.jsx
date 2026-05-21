@@ -10,9 +10,8 @@
  */
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
-import { useDrawingController } from "../hooks/useDrawingController";
-import TextEditOverlay from "./TextEditOverlay";
-import TextFormatBar from "./TextFormatBar";
+import { shouldLoadDrawingEngine } from "../hooks/useDrawingController";
+import { clearSavedDrawings } from "../services/drawingStorage";
 
 /* ── Localization helpers (shared with old ChartWidget) ─────── */
 
@@ -1275,68 +1274,56 @@ const ChartPane = forwardRef(function ChartPane({
         ? (drawingKeyBase || symbol)
         : `${drawingKeyBase || symbol}__${paneId}`;
 
-    const {
-        clearAll: clearAllDrawings,
-        setHidden: setDrawingsHidden,
-        editingTextId,
-        editingTextValue,
-        editingTextPos,
-        setEditingTextValue,
-        commitTextEditing,
-        cancelTextEditing,
-        editInputRef,
-        selectedTextSnapshot,
-        selectedTextBox,
-        updateSelectedText,
-        updateSelectedDrawingStyle,
-        deleteSelected,
-        selectedDrawingMeta,
-    } = useDrawingController({
-        chartRef,
-        seriesRef: paneType === "main" ? mainSeriesRef : drawingAnchorSeriesRef,
-        chartContainerRef: containerRef,
-        activeTool: drawingTool,
-        onToolChange: onDrawingToolChange,
-        penColor,
-        penSize,
-        textFontSize,
-        textBold,
-        textItalic,
-        fibLevels,
-        fibInverted,
-        positionSize,
-        drawingSnapEnabled,
-        symbol: drawingKey,
-        seriesReady,
-    });
-
-    const [chartContainerWidth, setChartContainerWidth] = useState(0);
+    const drawingApiRef = useRef(null);
+    const drawingsHiddenRef = useRef(false);
+    const [DrawingEngineHost, setDrawingEngineHost] = useState(null);
+    const drawingAnchorReady = paneType === "main"
+        ? !!mainSeriesRef.current
+        : !!drawingAnchorSeriesRef.current;
+    const shouldMountDrawingEngine =
+        seriesReady > 0 &&
+        drawingAnchorReady &&
+        shouldLoadDrawingEngine({ activeTool: drawingTool, drawingKey });
 
     useEffect(() => {
-        const el = containerRef.current;
-        if (!el) return;
+        if (!shouldMountDrawingEngine || DrawingEngineHost) return undefined;
+        let cancelled = false;
+        import("./DrawingEngineHost").then((module) => {
+            if (!cancelled) setDrawingEngineHost(() => module.default);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [DrawingEngineHost, shouldMountDrawingEngine]);
 
-        const updateWidth = () => setChartContainerWidth(el.clientWidth || 0);
-        updateWidth();
+    const handleDrawingApiChange = useCallback((api) => {
+        drawingApiRef.current = api;
+        if (api) api.setHidden?.(drawingsHiddenRef.current);
+    }, []);
 
-        if (typeof ResizeObserver === "undefined") {
-            window.addEventListener("resize", updateWidth);
-            return () => window.removeEventListener("resize", updateWidth);
+    const clearAllDrawings = useCallback(() => {
+        if (drawingApiRef.current?.clearAll) {
+            drawingApiRef.current.clearAll();
+        } else {
+            clearSavedDrawings(drawingKey);
+            onSelectedDrawingChange?.(null);
         }
+    }, [drawingKey, onSelectedDrawingChange]);
 
-        const ro = new ResizeObserver(updateWidth);
-        ro.observe(el);
-        return () => ro.disconnect();
+    const setDrawingsHidden = useCallback((hidden) => {
+        drawingsHiddenRef.current = !!hidden;
+        drawingApiRef.current?.setHidden?.(hidden);
+    }, []);
+
+    const updateSelectedDrawingStyle = useCallback((patch) => {
+        drawingApiRef.current?.updateSelectedDrawingStyle?.(patch);
+    }, []);
+
+    const prepareDrawingExport = useCallback(() => {
+        drawingApiRef.current?.prepareExport?.();
     }, []);
 
     /* ── Imperative handle ─────────────────────────────────── */
-
-    // Bubble selection meta up to App/Toolbar so the shared stroke controls
-    // reflect the currently selected drawing. Only the main pane wires this up.
-    useEffect(() => {
-        if (!onSelectedDrawingChange) return;
-        onSelectedDrawingChange(selectedDrawingMeta);
-    }, [selectedDrawingMeta, onSelectedDrawingChange]);
 
     useImperativeHandle(ref, () => ({
         clearAllDrawings,
@@ -1347,9 +1334,7 @@ const ChartPane = forwardRef(function ChartPane({
         getChartRef: () => chartRef,
         getSeriesRef: () => mainSeriesRef,
         prepareExport: () => {
-            if (editingTextId) {
-                commitTextEditing({ clearSelection: true, exitTool: false });
-            }
+            prepareDrawingExport();
         },
         getExportSnapshot: () => {
             const rootElement = paneRootRef.current;
@@ -1443,7 +1428,7 @@ const ChartPane = forwardRef(function ChartPane({
             try { chart.timeScale().applyOptions(opts); } catch { /* */ }
         },
         resetAutoScale,
-    }), [resetAutoScale, clearAllDrawings, setDrawingsHidden, updateSelectedDrawingStyle, editingTextId, commitTextEditing, paneId, paneType]);
+    }), [resetAutoScale, clearAllDrawings, setDrawingsHidden, updateSelectedDrawingStyle, prepareDrawingExport, paneId, paneType]);
 
     return (
         <div ref={paneRootRef} className="chart-pane" data-pane-id={paneId} data-pane-type={paneType}>
@@ -1464,6 +1449,31 @@ const ChartPane = forwardRef(function ChartPane({
                     />
                 </div>
             )}
+
+            {DrawingEngineHost && shouldMountDrawingEngine && (
+                <DrawingEngineHost
+                    chartRef={chartRef}
+                    seriesRef={paneType === "main" ? mainSeriesRef : drawingAnchorSeriesRef}
+                    chartContainerRef={containerRef}
+                    activeTool={drawingTool}
+                    onToolChange={onDrawingToolChange}
+                    penColor={penColor}
+                    penSize={penSize}
+                    textFontSize={textFontSize}
+                    textBold={textBold}
+                    textItalic={textItalic}
+                    fibLevels={fibLevels}
+                    fibInverted={fibInverted}
+                    positionSize={positionSize}
+                    drawingSnapEnabled={drawingSnapEnabled}
+                    drawingKey={drawingKey}
+                    seriesReady={seriesReady}
+                    initialHidden={drawingsHiddenRef.current}
+                    onApiChange={handleDrawingApiChange}
+                    onSelectedDrawingChange={onSelectedDrawingChange}
+                />
+            )}
+
             {/* Price scale mode context menu (main pane only) */}
             {paneType === "main" && contextMenu && (
                 <div
@@ -1520,42 +1530,6 @@ const ChartPane = forwardRef(function ChartPane({
                 </div>
             )}
 
-            {/* Inline text editor overlay (drawing) */}
-            {editingTextId && editingTextPos && (
-                <TextEditOverlay
-                    box={editingTextPos}
-                    value={editingTextValue}
-                    onChange={setEditingTextValue}
-                    onCommit={commitTextEditing}
-                    onCancel={cancelTextEditing}
-                    fontSize={selectedTextSnapshot?.fontSize ?? textFontSize}
-                    fontFamily={selectedTextSnapshot?.fontFamily}
-                    bold={selectedTextSnapshot?.bold ?? textBold}
-                    italic={selectedTextSnapshot?.italic ?? textItalic}
-                    underline={selectedTextSnapshot?.underline ?? false}
-                    align={selectedTextSnapshot?.align ?? "left"}
-                    color={selectedTextSnapshot?.color ?? penColor}
-                    bgColor={selectedTextSnapshot?.bgColor ?? null}
-                    borderColor={selectedTextSnapshot?.borderColor ?? null}
-                    padding={selectedTextSnapshot?.padding ?? 6}
-                    widthPx={selectedTextSnapshot?.widthPx ?? null}
-                    inputRef={editInputRef}
-                />
-            )}
-
-            {/* Floating PPT-style format toolbar for the selected text */}
-            {!editingTextId && selectedTextSnapshot && selectedTextBox && (
-                <TextFormatBar
-                    position={{
-                        x: selectedTextBox.x,
-                        y: Math.max(2, selectedTextBox.y - 44),
-                    }}
-                    snapshot={selectedTextSnapshot}
-                    onPatch={updateSelectedText}
-                    onDelete={deleteSelected}
-                    containerWidth={chartContainerWidth}
-                />
-            )}
         </div>
     );
 });

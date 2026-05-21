@@ -235,10 +235,21 @@ Phase 4 实现前 smoke 覆盖：
 Phase 4 预检后的实现 checkpoint：
 
 - 在 `drawingStorage.js` 增加只读 storage 的 `hasSavedDrawings()`。
-- 新增 `useDrawingController`，作为 `ChartPane` 的绘图 adapter 边界。当前它
-  仍委托给现有真实 `useDrawing` 引擎，确保引入 lazy-load 前行为不变。
+- 新增 `useDrawingController`，作为 `ChartPane` 的绘图 adapter 边界。
 - `ChartPane` 现在先计算单一 pane drawing key，再传入 controller，保留上面
   文档里的主图 / 子窗格 key 区分。
+
+Phase 4 lazy split 后实现说明：
+
+- 新增 `DrawingEngineHost`，由它拥有真实 `useDrawing` hook 和文本 overlay
+  渲染。`ChartPane` 只在存在已保存绘图，或 active drawing tool 需要真实引擎时
+  挂载它。
+- 真实引擎未挂载时，`ChartPane` 保留 hide drawings、clear、选中样式更新、
+  export preparation 的 no-op imperative 行为。
+- split 后 build 结果：app main chunk 约 146 kB minified；
+  `DrawingEngineHost` lazy chunk 约 89 kB minified，均在预算内。
+- lazy split 后本地 `--drawing-check`：drawing engine ready true，line tool
+  active true，persisted drawings 1，restored drawings 1，failures 0。
 
 ## Phase 5：图表渲染更新成本
 

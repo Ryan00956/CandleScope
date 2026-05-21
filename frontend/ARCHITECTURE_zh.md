@@ -4,6 +4,8 @@
 
 下一阶段逐步执行方案见
 [前端优化执行文档](OPTIMIZATION_EXECUTION_zh.md)。
+当前阶段审查和推荐后续工作见
+[前端优化阶段审查](OPTIMIZATION_PHASE_REVIEW_zh.md)。
 
 ## 目标
 
@@ -53,6 +55,11 @@ CORS 阻止访问 `http://localhost:8000`，导致 K 线 HTTP 请求失败。
 | Vite `/api` proxy 和可配置 API base | 已完成 |
 | Settings、Indicators、Alerts、Export 面板懒加载拆包 | 已完成 |
 | Symbol search modal、watchlist sidebar、drawing toolbar 懒加载拆包 | 已完成 |
+| active/saved drawing workflow 的 lazy drawing engine host | 已完成 |
+| 前端性能 marks 和 smoke timing report | 已完成 |
+| K 线优先于指标和后台任务的首屏加载 | 已完成 |
+| 保守的 chart series 尾部增量更新路径 | 已完成 |
+| symbol search 和 Settings 的意图预加载 | 已完成 |
 | React、Lightweight Charts、editor、export 库的构建期 vendor chunk | 已完成 |
 
 ## 验证基线
@@ -89,8 +96,11 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ## 剩余工作
 
-- 绘图 primitives 要单独评估后再懒加载 drawing engine，因为它挂在当前图表 pane 上，
-  对图表交互的影响比侧边面板更直接。
-- 如果用户反馈 symbol search、watchlist、drawing tools 或 settings 首次点击有延迟，
-  再增加交互预加载。
+- 收紧 lazy surface 的 smoke timing 粒度；当前浏览器 smoke 循环对产品验证是安全的，
+  但有 500 ms 的粗轮询下限。
+- 继续以实测为依据优化 fills、markers、hlines、overlays 和 visible-range restore
+  相关的图表渲染成本，再考虑更大的 chart component 重构。
+- `ChartPane` 内部简化继续以证据驱动。它仍然是最密集的图表模块，但
+  Lightweight Charts 所有权应继续留在 chart components 内。
+- 当本地 smoke 数字稳定到适合跨机器比较后，可以考虑把性能预算报告接入 CI。
 - 当前端 runtime 边界变化时，同步更新顶层 README 和本文档。

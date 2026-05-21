@@ -5,6 +5,8 @@ work already completed, and the remaining optimization path.
 
 For the step-by-step execution plan, see
 [Frontend Optimization Execution Plan](OPTIMIZATION_EXECUTION.md).
+For the current phase review and recommended next work, see
+[Frontend Optimization Phase Review](OPTIMIZATION_PHASE_REVIEW.md).
 
 ## Goals
 
@@ -61,6 +63,11 @@ through the Vite proxy.
 | Vite `/api` proxy and configurable API base | Done |
 | Lazy chunks for Settings, Indicators, Alerts, Export panels | Done |
 | Lazy chunks for symbol search modal, watchlist sidebar, and drawing toolbar | Done |
+| Lazy drawing engine host for active/saved drawing workflows | Done |
+| Frontend performance marks and smoke timing report | Done |
+| K-line-first loading before indicator/background work | Done |
+| Conservative trailing chart-series update paths | Done |
+| Intent-based preload for symbol search and Settings | Done |
 | Build-time vendor chunks for React, Lightweight Charts, editor, and export libraries | Done |
 
 ## Validation Baseline
@@ -98,10 +105,15 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ## Remaining Work
 
-- Review drawing primitives separately before lazy-loading the drawing engine,
-  because it is attached to the active chart pane and affects chart
-  interactions more directly than side panels.
-- Consider interaction preloading for lazy chunks if users report first-click
-  delay on symbol search, watchlists, drawing tools, or settings.
+- Tighten smoke timing granularity for lazy surfaces; the current browser
+  smoke loop is product-safe but has a coarse 500 ms polling floor.
+- Continue measured chart rendering work around fills, markers, hlines,
+  overlays, and visible-range restoration before attempting broader chart
+  component refactors.
+- Keep `ChartPane` internal simplification evidence-led. It is still the
+  densest chart module, but Lightweight Charts ownership should remain inside
+  chart components.
+- Consider CI-visible performance budget reporting once local smoke numbers are
+  stable enough to compare across machines.
 - Keep top-level README and this architecture document in sync when frontend
   runtime boundaries change.

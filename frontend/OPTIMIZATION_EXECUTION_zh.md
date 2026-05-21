@@ -416,6 +416,18 @@ Overlay-heavy smoke 场景：
   `chart.hline.create: 17`、`chart.hline.remove: 16`，所以下一个有实测依据的
   渲染目标是 fill/hline lifecycle churn。
 
+Fill/hline lifecycle cleanup：
+
+- `ChartPane` 现在会在 target series 和 hline 定义签名都没变时跳过 hline rebuild。
+  子窗格 hline 在 anchor series 改变时仍会重建。
+- Fill area rendering 现在会根据匹配到的 plot data 和 theme background 生成 render-data
+  签名；如果指标 patch 没有改变填充带，就不再 remove/recreate fill series。
+- 空 fill pass 不再记录零操作的 `chart.fillSeries.create` 事件，让 event summary 更接近
+  真实图表工作。
+- 这次 cleanup 后的 production preview `--overlay-heavy` 结果：bars 722，failures 0，
+  `overlayHeavyCoverage: true`，`chart.fillSeries.create: 1`，
+  `chart.hline.create: 1`，捕获到的 summary 里没有 fill/hline remove 事件。
+
 ## 验证命令
 
 常规命令：

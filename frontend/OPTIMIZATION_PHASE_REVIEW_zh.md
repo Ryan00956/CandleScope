@@ -104,3 +104,10 @@ Overlay instrumentation checkpoint 现在也已实现：
 - 后续在改 fill、hline、separate-pane 或多指标生命周期之前，先用它比较事件频率。
 - 第一次 production-preview 运行已通过，`overlayHeavyCoverage: true`，同时暴露出
   fill/hline 重复 remove-create churn 是下一个有实测依据的目标。
+
+Fill/hline cleanup 现在也已实现：
+
+- target series 和定义签名没变时，hlines 会保留已有 price lines。
+- 匹配到的 render data 和背景签名没变时，fill bands 会保留已有 area series。
+- Production-preview `--overlay-heavy` 现在报告 `chart.fillSeries.create: 1` 和
+  `chart.hline.create: 1`，捕获到的 summary 里没有 fill/hline remove 事件。

@@ -170,6 +170,96 @@ function applyLineSeriesData(series, nextData, previousData, detail) {
     return "setData";
 }
 
+function buildHlineSignature(indicatorHlines = []) {
+    if (!indicatorHlines?.length) return "empty";
+    return indicatorHlines
+        .map((hl) => [
+            hl.price ?? "",
+            hl.color || "#787b86",
+            hl.linestyle ?? "dashed",
+            hl.title || "",
+        ].join(":"))
+        .join("|");
+}
+
+function lineDataSignature(data = []) {
+    return data.map((point) => `${point.time}:${point.value}`).join(";");
+}
+
+function buildFillRenderEntries(indicatorFills = [], indicatorLines = [], backgroundColor) {
+    if (!indicatorFills?.length || !indicatorLines?.length) {
+        return { entries: [], signature: "empty", matchedFillCount: 0, pointCount: 0 };
+    }
+
+    const plotDataMap = new Map();
+    for (const line of indicatorLines) {
+        if (line.id) {
+            const scopedKey = `${line.indicatorId || ""}:${line.id}`;
+            plotDataMap.set(scopedKey, line.data);
+            if (!line.indicatorId && !plotDataMap.has(line.id)) {
+                plotDataMap.set(line.id, line.data);
+            }
+        }
+    }
+
+    const entries = [];
+    const signatureParts = [];
+    let pointCount = 0;
+
+    for (const fillDef of indicatorFills) {
+        const { plot1_id, plot2_id } = fillDef;
+        const scope = fillDef.indicatorId || "";
+        const data1 = plotDataMap.get(`${scope}:${plot1_id}`) || (!scope ? plotDataMap.get(plot1_id) : null);
+        const data2 = plotDataMap.get(`${scope}:${plot2_id}`) || (!scope ? plotDataMap.get(plot2_id) : null);
+        if (!data1 || !data2 || data1.length === 0 || data2.length === 0) continue;
+
+        const map1 = new Map();
+        const map2 = new Map();
+        for (const d of data1) {
+            if (d?.time != null && d?.value != null && isFinite(d.value)) map1.set(d.time, d.value);
+        }
+        for (const d of data2) {
+            if (d?.time != null && d?.value != null && isFinite(d.value)) map2.set(d.time, d.value);
+        }
+
+        const times = [];
+        for (const t of map1.keys()) {
+            if (map2.has(t)) times.push(t);
+        }
+        times.sort((a, b) => a - b);
+        if (times.length === 0) continue;
+
+        const upperData = times.map((t) => ({
+            time: t,
+            value: Math.max(map1.get(t), map2.get(t)),
+        }));
+        const lowerData = times.map((t) => ({
+            time: t,
+            value: Math.min(map1.get(t), map2.get(t)),
+        }));
+        const fillColor = fillDef.color || "rgba(59,130,246,0.1)";
+
+        entries.push({ fillColor, backgroundColor, upperData, lowerData });
+        pointCount += upperData.length + lowerData.length;
+        signatureParts.push([
+            scope,
+            plot1_id,
+            plot2_id,
+            fillColor,
+            backgroundColor,
+            lineDataSignature(upperData),
+            lineDataSignature(lowerData),
+        ].join("|"));
+    }
+
+    return {
+        entries,
+        signature: signatureParts.length ? signatureParts.join("||") : "empty",
+        matchedFillCount: entries.length,
+        pointCount,
+    };
+}
+
 /* ── Component ─────────────────────────────────────────────── */
 
 /* ── Price scale mode constants ────────────────────────────── */
@@ -1054,11 +1144,17 @@ const ChartPane = forwardRef(function ChartPane({
     /* ── Apply hlines (horizontal price lines) ─────────────── */
     // We use createPriceLine() on the pane's anchor series for each hline.
     const hlinesRef = useRef([]); // track created price line objects
+    const hlinesStateRef = useRef({ target: null, signature: "unknown" });
 
     useEffect(() => {
         const series = paneType === "main"
             ? mainSeriesRef.current
             : drawingAnchorSeriesRef.current;
+        const signature = buildHlineSignature(indicatorHlines);
+
+        if (hlinesStateRef.current.target === series && hlinesStateRef.current.signature === signature) {
+            return;
+        }
 
         // Remove previous hlines
         const removedHlines = hlinesRef.current.length;
@@ -1072,6 +1168,7 @@ const ChartPane = forwardRef(function ChartPane({
             });
         }
         hlinesRef.current = [];
+        hlinesStateRef.current = { target: series, signature };
 
         if (!series) return;
         if (!indicatorHlines || indicatorHlines.length === 0) return;
@@ -1101,7 +1198,7 @@ const ChartPane = forwardRef(function ChartPane({
             hlines: createdHlines,
             definitions: indicatorHlines.length,
         });
-    }, [indicatorHlines, indicatorLines, paneId, paneType]);
+    }, [indicatorHlines, paneId, paneType, seriesReady]);
 
     /* ── Apply barcolors (per-bar candle coloring) ─────────── */
     // Lightweight Charts CandlestickSeries doesn't support per-bar color
@@ -1215,10 +1312,20 @@ const ChartPane = forwardRef(function ChartPane({
     // This creates a visual band effect.
 
     const fillSeriesRef = useRef([]); // track fill area series
+    const fillSeriesStateRef = useRef({ chart: null, signature: "unknown" });
 
     useEffect(() => {
         const chart = chartRef.current;
         if (!chart) return;
+        const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
+        const fillPayload = buildFillRenderEntries(indicatorFills, indicatorLines, bgColor);
+
+        if (
+            fillSeriesStateRef.current.chart === chart
+            && fillSeriesStateRef.current.signature === fillPayload.signature
+        ) {
+            return;
+        }
 
         // Remove previous fill series
         const removedFillSeries = fillSeriesRef.current.length;
@@ -1232,64 +1339,18 @@ const ChartPane = forwardRef(function ChartPane({
             });
         }
         fillSeriesRef.current = [];
+        fillSeriesStateRef.current = { chart, signature: fillPayload.signature };
 
-        if (!indicatorFills || indicatorFills.length === 0) return;
-        if (!indicatorLines || indicatorLines.length === 0) return;
+        if (fillPayload.entries.length === 0) return;
 
-        // Build a map of indicatorId + plot_id → line data for matching.
-        // Pyne plot ids restart from plot_1 for every script, so matching only
-        // by plot id can accidentally fill between different indicators.
-        const plotDataMap = new Map();
-        for (const line of indicatorLines) {
-            if (line.id) {
-                const scopedKey = `${line.indicatorId || ""}:${line.id}`;
-                plotDataMap.set(scopedKey, line.data);
-                if (!line.indicatorId && !plotDataMap.has(line.id)) {
-                    plotDataMap.set(line.id, line.data);
-                }
-            }
-        }
-
-        // Dynamically import AreaSeries (lightweight-charts v4)
-        // AreaSeries is available from the same package
         let createdFillSeries = 0;
-        let fillPointCount = 0;
-        let matchedFillCount = 0;
-        for (const fillDef of indicatorFills) {
-            const { plot1_id, plot2_id, color } = fillDef;
-            const scope = fillDef.indicatorId || "";
-            const data1 = plotDataMap.get(`${scope}:${plot1_id}`) || (!scope ? plotDataMap.get(plot1_id) : null);
-            const data2 = plotDataMap.get(`${scope}:${plot2_id}`) || (!scope ? plotDataMap.get(plot2_id) : null);
-            if (!data1 || !data2 || data1.length === 0 || data2.length === 0) continue;
-
-            // Build time-aligned merged data
-            const map1 = new Map();
-            const map2 = new Map();
-            for (const d of data1) {
-                if (d?.time != null && d?.value != null && isFinite(d.value)) map1.set(d.time, d.value);
-            }
-            for (const d of data2) {
-                if (d?.time != null && d?.value != null && isFinite(d.value)) map2.set(d.time, d.value);
-            }
-
-            // Merge times where both series have data
-            const times = [];
-            for (const t of map1.keys()) {
-                if (map2.has(t)) times.push(t);
-            }
-            times.sort((a, b) => a - b);
-            if (times.length === 0) continue;
-            matchedFillCount += 1;
-
+        for (const entry of fillPayload.entries) {
             try {
-                // Parse fill color opacity — default to semi-transparent
-                let fillColor = color || "rgba(59,130,246,0.1)";
-
                 // Create area series for the upper boundary (max of the two)
                 const areaSeries = chart.addSeries(AreaSeries, {
                     lineColor: "transparent",
                     lineWidth: 0,
-                    topColor: fillColor,
+                    topColor: entry.fillColor,
                     bottomColor: "transparent",
                     priceScaleId: "right",
                     lastValueVisible: false,
@@ -1297,48 +1358,35 @@ const ChartPane = forwardRef(function ChartPane({
                     crosshairMarkerVisible: false,
                 });
 
-                // Build area data: value = upper line, use fill between the two
-                // We set the area from max down to min using two separate series
-                const upperData = times.map((t) => ({
-                    time: t,
-                    value: Math.max(map1.get(t), map2.get(t)),
-                }));
-                areaSeries.setData(upperData);
+                areaSeries.setData(entry.upperData);
                 fillSeriesRef.current.push(areaSeries);
                 createdFillSeries += 1;
-                fillPointCount += upperData.length;
 
                 // Create second area series for the lower boundary (masks the bottom)
-                const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
                 const lowerSeries = chart.addSeries(AreaSeries, {
                     lineColor: "transparent",
                     lineWidth: 0,
-                    topColor: bgColor,
-                    bottomColor: bgColor,
+                    topColor: entry.backgroundColor,
+                    bottomColor: entry.backgroundColor,
                     priceScaleId: "right",
                     lastValueVisible: false,
                     priceLineVisible: false,
                     crosshairMarkerVisible: false,
                 });
 
-                const lowerData = times.map((t) => ({
-                    time: t,
-                    value: Math.min(map1.get(t), map2.get(t)),
-                }));
-                lowerSeries.setData(lowerData);
+                lowerSeries.setData(entry.lowerData);
                 fillSeriesRef.current.push(lowerSeries);
                 createdFillSeries += 1;
-                fillPointCount += lowerData.length;
             } catch (err) {
                 console.warn("ChartPane: failed to create fill area:", err);
             }
         }
         recordPerfEvent("chart.fillSeries.create", {
             paneId,
-            fills: matchedFillCount,
-            definitions: indicatorFills.length,
+            fills: fillPayload.matchedFillCount,
+            definitions: indicatorFills?.length || 0,
             series: createdFillSeries,
-            points: fillPointCount,
+            points: fillPayload.pointCount,
         });
     }, [indicatorFills, indicatorLines, paneId, theme, customBg]);
 

@@ -456,6 +456,21 @@ Overlay-heavy smoke scenario:
   `chart.hline.remove: 16`, making fill/hline lifecycle churn the next measured
   rendering target.
 
+Fill/hline lifecycle cleanup:
+
+- `ChartPane` now skips hline rebuilds when the target series and hline
+  definition signature are unchanged. Sub-pane hlines still rebuild when the
+  anchor series changes.
+- Fill area rendering now derives a render-data signature from the matched
+  plot data and theme background. Repeated indicator patches that do not change
+  the filled band no longer remove and recreate fill series.
+- Empty fill passes no longer record zero-operation `chart.fillSeries.create`
+  events, keeping the event summary focused on real chart work.
+- Production preview `--overlay-heavy` after this cleanup: bars 722, failures
+  0, `overlayHeavyCoverage: true`, `chart.fillSeries.create: 1`,
+  `chart.hline.create: 1`, and no fill/hline remove events in the captured
+  summary.
+
 ## Verification Commands
 
 Use repository-local commands:

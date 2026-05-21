@@ -117,3 +117,13 @@ The next measurement fixture is available:
   lifecycle events before making another rendering change.
 - First production-preview run passed with `overlayHeavyCoverage: true` and
   exposed repeated fill/hline remove-create churn as the next measured target.
+
+The fill/hline cleanup is now implemented:
+
+- Hlines keep their existing price lines when the target series and definition
+  signature are unchanged.
+- Fill bands keep their existing area series when the matched render data and
+  background signature are unchanged.
+- Production-preview `--overlay-heavy` now reports `chart.fillSeries.create: 1`
+  and `chart.hline.create: 1`, with no fill/hline remove events in the captured
+  summary.

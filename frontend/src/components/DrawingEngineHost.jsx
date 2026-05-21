@@ -4,8 +4,7 @@ import TextEditOverlay from "./TextEditOverlay";
 import TextFormatBar from "./TextFormatBar";
 
 export default function DrawingEngineHost({
-    chartRef,
-    seriesRef,
+    chartAdapter,
     chartContainerRef,
     activeTool,
     onToolChange,
@@ -25,8 +24,7 @@ export default function DrawingEngineHost({
     onSelectedDrawingChange,
 }) {
     const drawing = useDrawing({
-        chartRef,
-        seriesRef,
+        chartAdapter,
         chartContainerRef,
         activeTool,
         onToolChange,

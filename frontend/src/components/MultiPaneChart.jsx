@@ -107,8 +107,6 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     // Price scale mode (main pane only): 0=Normal, 1=Logarithmic, 2=Percentage, 3=IndexedTo100
     priceScaleMode = 0,
     onPriceScaleModeChange,
-    // Callback: fires when main chart is ready, passes refs to parent
-    onChartReady = null,
 }, ref) {
     const wrapperRef = useRef(null);
     const mainPaneRef = useRef(null);
@@ -454,14 +452,9 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     }, []);
 
     // ── Called by ChartPane's useEffect AFTER chart + series are created ──
-    const onMainChartCreated = useCallback(({ chartRef: cRef, seriesRef: sRef }) => {
+    const onMainChartCreated = useCallback(() => {
         setSeriesReady((prev) => prev + 1);
-
-        // Notify parent for indicator system
-        if (onChartReady) {
-            onChartReady({ chartRef: cRef, seriesRef: sRef });
-        }
-    }, [onChartReady]);
+    }, []);
 
     // ── Restore visible range on first data load ──
     useEffect(() => {

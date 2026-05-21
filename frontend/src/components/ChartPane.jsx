@@ -8,8 +8,9 @@
  * Each pane is an independent createChart() instance. Time-axis and crosshair
  * synchronization is managed by the parent MultiPaneChart.
  */
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
+import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
 import { shouldLoadDrawingEngine } from "../hooks/useDrawingController";
 import { clearSavedDrawings } from "../services/drawingStorage";
 import { recordPerfEvent } from "../runtime/performance/perfMarks";
@@ -354,7 +355,7 @@ const ChartPane = forwardRef(function ChartPane({
     onVisibleLogicalRangeChange,
     onCrosshairMove: onCrosshairMoveExternal,
     onCrosshairSync,          // called with {time, point} for cross-pane sync
-    onChartCreated,           // called after chart+series are created, passes { chartRef, seriesRef }
+    onChartCreated,           // called after chart+series are created
     // Extended Pyne drawing outputs (already filtered to this pane by parent)
     indicatorMarkers = [],    // [{data: [{time, position, color, shape, text}], indicatorId}]
     indicatorFills = [],      // [{plot1_id, plot2_id, color, indicatorId}]
@@ -374,6 +375,11 @@ const ChartPane = forwardRef(function ChartPane({
     const prevDatasetKeyRef = useRef(null);  // track datasetKey for reset detection
     const isSyncingRef = useRef(false);      // prevent sync loops
     const [seriesReady, setSeriesReady] = useState(0);
+    const drawingSeriesRef = paneType === "main" ? mainSeriesRef : drawingAnchorSeriesRef;
+    const chartAdapter = useMemo(
+        () => createLightweightChartAdapter({ chartRef, seriesRef: drawingSeriesRef }),
+        [drawingSeriesRef],
+    );
 
     /* ── Auto-scale state ──────────────────────────────────── */
     const [isAutoScale, setIsAutoScale] = useState(true);
@@ -516,7 +522,7 @@ const ChartPane = forwardRef(function ChartPane({
 
         // Notify parent that chart + series are ready
         if (onChartCreated) {
-            onChartCreated({ chartRef, seriesRef: mainSeriesRef, containerRef });
+            onChartCreated({ chartAdapter });
         }
         setSeriesReady((prev) => prev + 1);
 
@@ -1580,10 +1586,6 @@ const ChartPane = forwardRef(function ChartPane({
         clearAllDrawings,
         setDrawingsHidden,
         updateSelectedDrawingStyle,
-        getChart: () => chartRef.current,
-        getMainSeries: () => mainSeriesRef.current,
-        getChartRef: () => chartRef,
-        getSeriesRef: () => mainSeriesRef,
         prepareExport: () => {
             prepareDrawingExport();
         },
@@ -1595,7 +1597,6 @@ const ChartPane = forwardRef(function ChartPane({
                 paneType,
                 rootElement,
                 chartElement,
-                chart: chartRef.current,
                 rect: rootElement?.getBoundingClientRect?.() || null,
             };
         },
@@ -1703,8 +1704,7 @@ const ChartPane = forwardRef(function ChartPane({
 
             {DrawingEngineHost && shouldMountDrawingEngine && (
                 <DrawingEngineHost
-                    chartRef={chartRef}
-                    seriesRef={paneType === "main" ? mainSeriesRef : drawingAnchorSeriesRef}
+                    chartAdapter={chartAdapter}
                     chartContainerRef={containerRef}
                     activeTool={drawingTool}
                     onToolChange={onDrawingToolChange}

@@ -28,7 +28,6 @@ import { PositionDrawingPrimitive } from "../components/primitives/PositionDrawi
 import { ShapeDrawingPrimitive } from "../components/primitives/ShapeDrawingPrimitive.js";
 import { AxisLineDrawingPrimitive } from "../components/primitives/AxisLineDrawingPrimitive.js";
 import { AngleMeasurementPrimitive } from "../components/primitives/AngleMeasurementPrimitive.js";
-import { timeToCoordinateInterpolated } from "../components/primitives/coordinateUtils.js";
 import { saveDrawings, loadDrawings, clearSavedDrawings } from "../services/drawingStorage.js";
 
 const BASIC_LINE_TOOL_IDS = new Set(["line-segment", "line-ray", "line-infinite"]);
@@ -240,8 +239,7 @@ function _rdp(pts, eps) {
 }
 
 export function useDrawing({
-  chartRef,
-  seriesRef,
+  chartAdapter,
   chartContainerRef,
   activeTool,
   penColor,
@@ -260,6 +258,7 @@ export function useDrawing({
   onToolChange,
 }) {
   const onToolChangeRef = useRef(onToolChange);
+  const getChartAdapter = useCallback(() => chartAdapter || null, [chartAdapter]);
   // ── All primitives (lines + freehand strokes + text) ──
   const primitivesRef = useRef([]); // (LineDrawingPrimitive | FreehandDrawingPrimitive | TextDrawingPrimitive)[]
 
@@ -368,18 +367,12 @@ export function useDrawing({
    */
   const logicalToInterpolatedTime = useCallback(
     (logicalIndex) => {
-      const chart = chartRef?.current;
-      const series = seriesRef?.current;
-      if (!chart || !series) return null;
+      const adapter = getChartAdapter();
+      if (!adapter?.isReady?.()) return null;
 
       // Get the full data array from the series
       // Lightweight Charts v5: series.data() returns the current dataset
-      let seriesData;
-      try {
-        seriesData = series.data();
-      } catch {
-        return null;
-      }
+      const seriesData = adapter.getSeriesData?.();
       if (!seriesData || seriesData.length === 0) return null;
 
       // Compute the offset between logical index and data array index.
@@ -387,9 +380,9 @@ export function useDrawing({
       // the chart has been scrolled. We find it via coordinateToLogical
       // round-tripping the first data point.
       const firstTime = seriesData[0].time;
-      const firstCoord = chart.timeScale().timeToCoordinate(firstTime);
+      const firstCoord = adapter.timeToCoordinate?.(firstTime);
       if (firstCoord == null) return null;
-      const firstLogical = chart.timeScale().coordinateToLogical(firstCoord);
+      const firstLogical = adapter.coordinateToLogical?.(firstCoord);
       if (firstLogical == null) return null;
 
       // dataIndex is the (fractional) index into the seriesData array
@@ -420,18 +413,16 @@ export function useDrawing({
       const tB = seriesData[floorIdx + 1].time;
       return tA + frac * (tB - tA);
     },
-    [chartRef, seriesRef],
+    [getChartAdapter],
   );
 
   const screenToData = useCallback(
     (x, y) => {
-      const chart = chartRef?.current;
-      const series = seriesRef?.current;
-      if (!chart || !series) return null;
+      const adapter = getChartAdapter();
+      if (!adapter?.isReady?.()) return null;
       try {
-        const ts = chart.timeScale();
-        const intLogical = ts.coordinateToLogical(x);
-        const price = series.coordinateToPrice(y);
+        const intLogical = adapter.coordinateToLogical?.(x);
+        const price = adapter.coordinateToPrice?.(y);
         if (intLogical == null || price == null || !isFinite(intLogical) || !isFinite(price)) return null;
 
         // coordinateToLogical returns an integer (snapped to nearest candle).
@@ -439,12 +430,12 @@ export function useDrawing({
         // checking where `x` falls between the pixel positions of the
         // two bracketing integer logical indices.
         let fracLogical = intLogical;
-        const x0 = ts.logicalToCoordinate(intLogical);
+        const x0 = adapter.logicalToCoordinate?.(intLogical);
         if (x0 != null && isFinite(x0)) {
           // Determine which direction the fraction goes
           const delta = x - x0;
           const neighbor = delta >= 0 ? intLogical + 1 : intLogical - 1;
-          const x1 = ts.logicalToCoordinate(neighbor);
+          const x1 = adapter.logicalToCoordinate?.(neighbor);
           if (x1 != null && isFinite(x1)) {
             const span = Math.abs(x1 - x0);
             if (span > 0) {
@@ -462,7 +453,7 @@ export function useDrawing({
         }
 
         // Fallback: try coordinateToTime (snapped)
-        const snappedTime = ts.coordinateToTime(x);
+  const snappedTime = adapter.coordinateToTime?.(x);
         if (snappedTime != null && isFinite(snappedTime)) {
           return { time: snappedTime, price };
         }
@@ -472,65 +463,57 @@ export function useDrawing({
         return null;
       }
     },
-    [chartRef, seriesRef, logicalToInterpolatedTime],
+    [getChartAdapter, logicalToInterpolatedTime],
   );
 
   const dataToScreen = useCallback(
     (dp) => {
-      const chart = chartRef?.current;
-      const series = seriesRef?.current;
-      if (!chart || !series || !dp) return null;
+      const adapter = getChartAdapter();
+      if (!adapter?.isReady?.() || !dp) return null;
       try {
         let x = null;
         if (dp.time != null) {
           // Try exact match first (fast path)
-          x = chart.timeScale().timeToCoordinate(dp.time);
+          x = adapter.timeToCoordinate?.(dp.time);
 
           // If exact match failed, interpolate between bracketing candles
           if (x == null || !isFinite(x)) {
-            x = timeToCoordinateInterpolated(chart, series, dp.time);
+            x = adapter.timeToCoordinateInterpolated?.(dp.time);
           }
         }
         // Fallback to logical if time-based conversion failed
         if ((x == null || !isFinite(x)) && dp.logical != null) {
-          x = chart.timeScale().logicalToCoordinate(dp.logical);
+          x = adapter.logicalToCoordinate?.(dp.logical);
         }
-        const y = series.priceToCoordinate(dp.price);
+        const y = adapter.priceToCoordinate?.(dp.price);
         if (x == null || y == null || !isFinite(x) || !isFinite(y)) return null;
         return { x, y };
       } catch {
         return null;
       }
     },
-    [chartRef, seriesRef],
+    [getChartAdapter],
   );
 
   const findSnapTarget = useCallback(
     (x, y) => {
-      const chart = chartRef?.current;
-      const series = seriesRef?.current;
-      if (!chart || !series) return null;
+      const adapter = getChartAdapter();
+      if (!adapter?.isReady?.()) return null;
 
-      let seriesData;
-      try {
-        seriesData = series.data?.();
-      } catch {
-        return null;
-      }
+      const seriesData = adapter.getSeriesData?.();
       if (!Array.isArray(seriesData) || seriesData.length === 0) return null;
 
-      const ts = chart.timeScale();
       let logical = null;
       let firstLogical = null;
       try {
-        logical = ts.coordinateToLogical(x);
+        logical = adapter.coordinateToLogical?.(x);
       } catch {
         logical = null;
       }
       try {
-        const firstCoord = ts.timeToCoordinate(seriesData[0].time);
+        const firstCoord = adapter.timeToCoordinate?.(seriesData[0].time);
         if (isFiniteNumber(firstCoord)) {
-          const value = ts.coordinateToLogical(firstCoord);
+          const value = adapter.coordinateToLogical?.(firstCoord);
           if (isFiniteNumber(value)) firstLogical = value;
         }
       } catch {
@@ -546,7 +529,7 @@ export function useDrawing({
           const item = seriesData[i];
           if (!item || item.time == null) continue;
           let cx = null;
-          try { cx = ts.timeToCoordinate(item.time); } catch { cx = null; }
+          try { cx = adapter.timeToCoordinate?.(item.time); } catch { cx = null; }
           if (!isFiniteNumber(cx)) continue;
           const dx = Math.abs(cx - x);
           if (dx < bestDx) {
@@ -561,7 +544,7 @@ export function useDrawing({
 
       let priceCandidateMaxDx = SNAP_PRICE_CANDLE_DISTANCE_PX;
       try {
-        const barSpacing = ts.options?.().barSpacing;
+        const barSpacing = adapter.getBarSpacing?.();
         if (isFiniteNumber(barSpacing)) {
           priceCandidateMaxDx = Math.max(priceCandidateMaxDx, barSpacing * 0.5);
         }
@@ -581,7 +564,7 @@ export function useDrawing({
         if (!item || item.time == null) continue;
 
         let cx = null;
-        try { cx = ts.timeToCoordinate(item.time); } catch { cx = null; }
+  try { cx = adapter.timeToCoordinate?.(item.time); } catch { cx = null; }
         if (!isFiniteNumber(cx)) continue;
 
         const dx = Math.abs(cx - x);
@@ -594,7 +577,7 @@ export function useDrawing({
 
         for (const candidate of getSnapPriceCandidates(item)) {
           let py = null;
-          try { py = series.priceToCoordinate(candidate.value); } catch { py = null; }
+          try { py = adapter.priceToCoordinate?.(candidate.value); } catch { py = null; }
           if (!isFiniteNumber(py)) continue;
           const dy = Math.abs(py - y);
           if (dy > SNAP_PRICE_DISTANCE_PX) continue;
@@ -619,7 +602,7 @@ export function useDrawing({
       if (!bestTimeSnap && !bestPriceSnap) return null;
       return { time: bestTimeSnap, price: bestPriceSnap };
     },
-    [chartRef, seriesRef],
+    [getChartAdapter],
   );
 
   const snapDataPoint = useCallback(
@@ -657,25 +640,20 @@ export function useDrawing({
 
   const attachPrim = useCallback(
     (prim) => {
-      const series = seriesRef?.current;
-      if (!series) return;
+      const adapter = getChartAdapter();
+      if (!adapter?.hasSeries?.()) return;
       prim.setHidden?.(hiddenRef.current, false);
-      series.attachPrimitive(prim);
+      adapter.attachPrimitive?.(prim);
     },
-    [seriesRef],
+    [getChartAdapter],
   );
 
   const detachPrim = useCallback(
     (prim) => {
-      const series = seriesRef?.current;
-      if (!series) return;
-      try {
-        series.detachPrimitive(prim);
-      } catch {
-        // may already be detached
-      }
+      const adapter = getChartAdapter();
+      adapter?.detachPrimitive?.(prim);
     },
-    [seriesRef],
+    [getChartAdapter],
   );
 
   // ── Persist drawings to localStorage ──
@@ -694,8 +672,8 @@ export function useDrawing({
   // any chart re-creation (e.g. theme change, page refresh).
 
   useEffect(() => {
-    const series = seriesRef?.current;
-    if (!series || !symbol || !seriesReady) return;
+    const adapter = getChartAdapter();
+    if (!adapter?.hasSeries?.() || !symbol || !seriesReady) return;
 
     const prevSymbol = prevSymbolRef.current;
     const symbolChanged = prevSymbol && prevSymbol !== symbol;
@@ -711,13 +689,7 @@ export function useDrawing({
 
       // Detach all primitives from whatever series they are attached to
       for (const prim of primitivesRef.current) {
-        try {
-          if (prim._series) {
-            try { prim._series.detachPrimitive(prim); } catch { /* already detached */ }
-          }
-          // Also try detaching from the current series in case _series tracking is off
-          try { series.detachPrimitive(prim); } catch { /* */ }
-        } catch { /* */ }
+        adapter.detachPrimitive?.(prim);
       }
 
       // Clear in-memory state
@@ -739,11 +711,9 @@ export function useDrawing({
     if (!symbolChanged && primitivesRef.current.length > 0) {
       for (const prim of primitivesRef.current) {
         try {
-          if (prim._series && prim._series !== series) {
-            try { prim._series.detachPrimitive(prim); } catch { /* already detached */ }
-          }
+          adapter.detachPrimitive?.(prim);
           prim.setHidden?.(hiddenRef.current, false);
-          series.attachPrimitive(prim);
+          adapter.attachPrimitive?.(prim);
         } catch (err) {
           console.warn("Failed to re-attach drawing:", err);
         }
@@ -859,13 +829,13 @@ export function useDrawing({
       }
       if (prim) {
         prim.setHidden?.(hiddenRef.current, false);
-        series.attachPrimitive(prim);
+        adapter.attachPrimitive?.(prim);
         primitivesRef.current.push(prim);
       }
     }
 
     prevSymbolRef.current = symbol;
-  }, [symbol, seriesRef, seriesReady]);
+  }, [symbol, getChartAdapter, seriesReady]);
 
   // ── Selection helpers ──
 
@@ -1355,11 +1325,11 @@ export function useDrawing({
         const entryPrice = dataA.price;
 
         // Calculate visible time range to auto-span ~30% of visible chart
-        const chart = chartRef?.current;
+        const adapter = getChartAdapter();
         let startTime = dataA.time;
         let endTime = dataA.time;
-        if (chart) {
-          const vr = chart.timeScale().getVisibleRange();
+        if (adapter?.isReady?.()) {
+          const vr = adapter.getVisibleTimeRange?.();
           if (vr) {
             const visibleSpan = vr.to - vr.from;
             endTime = dataA.time + visibleSpan * 0.15;
@@ -1368,16 +1338,13 @@ export function useDrawing({
 
         // Default TP/SL based on visible price range — ensures proper proportions on any timeframe
         let tpOffset, slOffset;
-        const series = seriesRef?.current;
-        if (chart && series) {
+        if (adapter?.isReady?.()) {
           try {
             // Get the visible price range from the chart container's pixel height
             const container = chartContainerRef?.current;
             const chartHeight = container?.clientHeight || 400;
-            const topPrice = series.coordinateToPrice(0);
-            const bottomPrice = series.coordinateToPrice(chartHeight);
-            if (topPrice != null && bottomPrice != null && isFinite(topPrice) && isFinite(bottomPrice)) {
-              const visiblePriceRange = Math.abs(topPrice - bottomPrice);
+            const visiblePriceRange = adapter.getVisiblePriceRange?.(chartHeight);
+            if (visiblePriceRange != null && isFinite(visiblePriceRange)) {
               tpOffset = visiblePriceRange * 0.12;  // TP at ~12% of visible range
               slOffset = visiblePriceRange * 0.06;   // SL at ~6% of visible range
             }
@@ -1638,7 +1605,7 @@ export function useDrawing({
         return;
       }
     },
-    [getChartPos, screenToData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, chartRef, seriesRef, chartContainerRef],
+    [getChartPos, screenToData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef],
   );
 
   // ════════════════════════════════════════════════════
@@ -2317,17 +2284,11 @@ export function useDrawing({
     }
 
     if (!updateRequested) {
-      const series = seriesRef?.current;
-      if (!series) return;
-      try {
-        // Force a lightweight redraw when there are no attached primitives that
-        // can request one themselves.
-        series.applyOptions({});
-      } catch {
-        // ignore
-      }
+      // Force a lightweight redraw when there are no attached primitives that
+      // can request one themselves.
+      getChartAdapter()?.requestSeriesUpdate?.();
     }
-  }, [seriesRef, removePreview, cancelTextEditing]);
+  }, [getChartAdapter, removePreview, cancelTextEditing]);
 
   // ── Selected-text helpers (consumed by floating format toolbar) ──
 

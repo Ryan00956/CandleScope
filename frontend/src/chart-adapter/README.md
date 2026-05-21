@@ -25,6 +25,20 @@ Adapter-facing code should converge on a contract like:
 The exact implementation can evolve, but the public contract should stay about
 chart operations, not feature state.
 
+## Current Bridge
+
+- `chartInstanceBridge.js` wraps live chart and series refs and exposes chart
+  operations for drawing/runtime code.
+- `coordinateBridge.js` owns Lightweight Charts coordinate interpolation helpers.
+- `ChartPane` still creates and owns chart instances, series, pane sync, and
+  rendering lifecycle. Business-facing code should receive the adapter object,
+  not raw chart or series refs.
+
+The active adapter also exposes drawing-oriented chart operations such as
+`getSeriesData`, `coordinateToLogical`, `logicalToCoordinate`,
+`getVisibleTimeRange`, `getVisiblePriceRange`, and `requestSeriesUpdate`.
+These are still chart operations; they must not grow business rules.
+
 ## Allowed Dependencies
 
 - Adapter modules may import `lightweight-charts`.

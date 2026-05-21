@@ -131,6 +131,7 @@ export default function App() {
     loadingMoreLeft,
     hasMoreLeft,
     canLoadMoreLeft,
+    activeChartReady,
     barCount,
   } = marketData.status;
 
@@ -178,18 +179,6 @@ export default function App() {
   // --- Indicator state ---
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);
   const [showAlertsPanel, setShowAlertsPanel] = useState(false);
-  // Store the actual ref objects from ChartWidget (not copies of .current)
-  // so useIndicators always reads the live chart/series instances.
-  const indicatorChartRefRef = useRef(null);   // ref-to-ref: points to ChartWidget's chartRef
-  const indicatorSeriesRefRef = useRef(null);  // ref-to-ref: points to ChartWidget's seriesRef
-  const [indicatorSeriesReady, setIndicatorSeriesReady] = useState(0);
-
-  const handleChartReady = useCallback(({ chartRef: cRef, seriesRef: sRef }) => {
-    indicatorChartRefRef.current = cRef;    // store the REF object, not .current
-    indicatorSeriesRefRef.current = sRef;   // store the REF object, not .current
-    setIndicatorSeriesReady((prev) => prev + 1);
-  }, []);
-
   const {
     activeIndicators,
     computing: indicatorComputing,
@@ -210,12 +199,10 @@ export default function App() {
     barcolors: indicatorBarcolors,
     paramSchemas: indicatorParamSchemas,
   } = useIndicators({
-    chartRef: indicatorChartRefRef,
-    seriesRef: indicatorSeriesRefRef,
     chartData,
     chartDataMeta,
     datasetKey,
-    seriesReady: indicatorSeriesReady,
+    seriesReady: activeChartReady ? 1 : 0,
     candleUpColor: settings.upColor,
     candleDownColor: settings.downColor,
     symbol,
@@ -407,7 +394,6 @@ export default function App() {
             positionSize,
             drawingSnapEnabled,
             onSelectedDrawingChange: handleSelectedDrawingChange,
-            onChartReady: handleChartReady,
             mainOverlayLines,
             subPanes,
             indicatorMarkers,

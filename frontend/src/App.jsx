@@ -4,7 +4,8 @@ import ChartWorkspace from "./components/app-shell/ChartWorkspace";
 import LazySurfaces from "./components/app-shell/LazySurfaces";
 import StatusBar from "./components/app-shell/StatusBar";
 import TopBar from "./components/app-shell/TopBar";
-import { useCustomIntervals } from "./hooks/useCustomIntervals";
+import { loadUserPrefs, updateUserPref } from "./features/chart-session/chartSessionModel";
+import { useChartSession } from "./features/chart-session/useChartSession";
 import { useIndicators } from "./hooks/useIndicators";
 import { useBackfillCompletionRuntime } from "./runtime/streams/useBackfillCompletionRuntime";
 import { useCacheLimitsSync } from "./runtime/preferences/useCacheLimitsSync";
@@ -13,36 +14,20 @@ import { useChartBackgroundPrefetch } from "./runtime/chart/useChartBackgroundPr
 import { useChartGapRecovery } from "./runtime/chart/useChartGapRecovery";
 import { useChartInitialLoad } from "./runtime/chart/useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./runtime/chart/useChartLoadMoreLeft";
-import { useChartNavigationRuntime } from "./runtime/chart/useChartNavigationRuntime";
 import { useChartSettingsRuntime } from "./runtime/preferences/useChartSettingsRuntime";
 import { useChartDataRuntime } from "./runtime/chart/useChartDataRuntime";
-import { useCustomIntervalActions } from "./runtime/workflows/useCustomIntervalActions";
 import { useDrawingRuntime } from "./runtime/workflows/useDrawingRuntime";
-import { useIntervalNoticeRuntime } from "./runtime/workflows/useIntervalNoticeRuntime";
 import { useKlineStreamRuntime } from "./runtime/streams/useKlineStreamRuntime";
 import { usePriceScalePrefs } from "./runtime/preferences/usePriceScalePrefs";
 import { useWatchlistRuntime } from "./runtime/workflows/useWatchlistRuntime";
 import { useWatchlistStorageRuntime } from "./runtime/preferences/useWatchlistStorageRuntime";
 import { parseIntervalSeconds } from "./utils/intervals";
-import { inferExchangeFromSymbol } from "./utils/symbolKey";
 import {
   buildRenderableChartData,
 } from "./runtime/chart/chartDataRuntime";
 import {
   buildChartDisplayState,
 } from "./runtime/chart/chartDisplayRuntime";
-import {
-  buildSortedIntervals,
-  getBaseWsIntervals,
-  getExchangeConfig,
-  getIntervalDays,
-  getNativeIntervals,
-  isNativeIntervalSupported,
-  useExchangeCatalog,
-} from "./runtime/exchange/exchangeCatalogRuntime";
-import {
-  getVisibleRangeForInterval,
-} from "./runtime/chart/viewportController";
 import { clearSavedDrawings } from "./services/drawingStorage";
 import "./index.css";
 
@@ -89,43 +74,52 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-// ---------- User preference persistence ----------
-const USER_PREFS_KEY = "candlescope-user-prefs";
-
-function loadUserPrefs() {
-  try {
-    const raw = localStorage.getItem(USER_PREFS_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
-}
-function saveUserPrefs(prefs) {
-  localStorage.setItem(USER_PREFS_KEY, JSON.stringify(prefs));
-}
-function updateUserPref(key, value) {
-  const prefs = loadUserPrefs();
-  prefs[key] = value;
-  saveUserPrefs(prefs);
-}
-
 export default function App() {
-  const [symbol, setSymbol] = useState(() => {
-    const prefs = loadUserPrefs();
-    return prefs.lastSymbol || "BTCUSDT";
+  const chartWidgetRef = useRef(null);
+  const pageExportRef = useRef(null);
+  const realtimePriceRef = useRef(null);
+  const chartSessionRuntimeBridgeRef = useRef({});
+  const chartSession = useChartSession({
+    chartWidgetRef,
+    realtimePriceRef,
+    runtimeBridgeRef: chartSessionRuntimeBridgeRef,
   });
-  const [exchange, setExchange] = useState(() => {
-    const prefs = loadUserPrefs();
-    return prefs.lastExchange || inferExchangeFromSymbol(prefs.lastSymbol || "BTCUSDT", "binance");
-  });
-  const [marketType, setMarketType] = useState(() => {
-    const prefs = loadUserPrefs();
-    return prefs.lastMarketType || "spot";
-  });
-  const [interval, setInterval_] = useState(() => {
-    const prefs = loadUserPrefs();
-    return prefs.lastInterval || "1h";
-  });
-  const { exchangeCatalog, exchangeCatalogStatus } = useExchangeCatalog();
-  const [datasetKey, setDatasetKey] = useState(0);
+  const {
+    symbol,
+    exchange,
+    marketType,
+    interval,
+    datasetKey,
+    exchangeCatalog,
+    exchangeConfig,
+    nativeIntervals,
+    intervalGroups,
+    trackedIntervals,
+    customIntervalRecords,
+    savedCustomIntervals,
+    intervalNotice,
+    savedVisibleRange,
+  } = chartSession.view;
+  const {
+    selectSymbol: handleSymbolChange,
+    selectInterval: handleIntervalChange,
+    setDatasetVersion: setDatasetKey,
+    getIntervalDays: getExchangeIntervalDays,
+    handleVisibleRangeChange,
+    createCustomInterval: handleCreateCustomInterval,
+    removeCustomInterval: handleRemoveCustomInterval,
+    restoreCustomInterval: handleRestoreCustomInterval,
+    clearCustomIntervals: handleClearCustomIntervals,
+    togglePinCustomInterval,
+  } = chartSession.actions;
+  const {
+    exchangeCatalogStatus,
+    exchangeLimitations,
+  } = chartSession.status;
+  const {
+    intervalRef,
+    trackedIntervalsRef,
+  } = chartSession.refs;
 
   const {
     chartData,
@@ -162,8 +156,6 @@ export default function App() {
   const [dataSource, setDataSource] = useState(null);
 
   const [wsStatus, setWsStatus] = useState("idle");
-  const chartWidgetRef = useRef(null);
-  const pageExportRef = useRef(null);
 
   const {
     drawingTool,
@@ -245,7 +237,7 @@ export default function App() {
     seriesRef: indicatorSeriesRefRef,
     chartData,
     chartDataMeta,
-    datasetKey: `${exchange}-${marketType}-${symbol}-${interval}-${datasetKey}`,
+    datasetKey,
     seriesReady: indicatorSeriesReady,
     candleUpColor: settings.upColor,
     candleDownColor: settings.downColor,
@@ -288,16 +280,8 @@ export default function App() {
     clearSavedDrawings(`${chartStorageKeyBase}-volume-${indicatorId}`);
   }, [chartStorageKeyBase, rawRemoveIndicator]);
 
-  // Current interval ref for WS message routing
-  const intervalRef = useRef(interval);
-  useEffect(() => {
-    intervalRef.current = interval;
-  }, [interval]);
-
   // Canonical real-time price — always derived from the fastest (1m) stream
   // so all intervals display the same "current price" in the header.
-  const realtimePriceRef = useRef(null);
-
   const updateLastPrice = useCallback((candidate, intv) => {
     setLastPrice((prev) => {
       if (!candidate || candidate.time == null) return prev;
@@ -314,7 +298,7 @@ export default function App() {
       }
       return candidate;
     });
-  }, []);
+  }, [intervalRef, realtimePriceRef]);
 
   /** Update the canonical real-time price (called from WS tick handler). */
   const updateRealtimePrice = useCallback((closePrice) => {
@@ -326,70 +310,7 @@ export default function App() {
       if (prev.close === closePrice) return prev;
       return { ...prev, close: closePrice };
     });
-  }, []);
-
-  // --- Saved custom intervals ---
-  const {
-    customIntervalRecords,
-    savedCustomIntervals,
-    addCustomInterval,
-    markIntervalUsed,
-    removeCustomInterval,
-    restoreCustomInterval,
-    togglePinCustomInterval,
-    clearCustomIntervals,
-  } = useCustomIntervals();
-  const { intervalNotice, showIntervalNotice } = useIntervalNoticeRuntime();
-  const exchangeConfig = useMemo(
-    () => getExchangeConfig(exchange, exchangeCatalog),
-    [exchange, exchangeCatalog],
-  );
-  const exchangeMarketTypes = useMemo(
-    () => exchangeConfig.markets.map((market) => market.market_type).filter(Boolean),
-    [exchangeConfig],
-  );
-  const exchangeLimitations = exchangeConfig.knownLimitations || [];
-  const nativeIntervals = useMemo(() => getNativeIntervals(exchange, exchangeCatalog), [exchange, exchangeCatalog]);
-  const intervalGroups = useMemo(
-    () => buildSortedIntervals(savedCustomIntervals, exchange, exchangeCatalog),
-    [exchange, exchangeCatalog, savedCustomIntervals],
-  );
-  const baseWsIntervals = useMemo(() => getBaseWsIntervals(exchange, exchangeCatalog), [exchange, exchangeCatalog]);
-  const getExchangeIntervalDays = useCallback(
-    (intv, ex = exchange) => getIntervalDays(intv, ex, exchangeCatalog),
-    [exchange, exchangeCatalog],
-  );
-  const trackedIntervals = useMemo(
-    () => Array.from(new Set([...baseWsIntervals, ...savedCustomIntervals, interval])),
-    [interval, savedCustomIntervals, baseWsIntervals],
-  );
-  useEffect(() => {
-    if (exchangeCatalogStatus === "loading") return;
-    if (exchangeMarketTypes.length === 0 || exchangeMarketTypes.includes(marketType)) return;
-    const nextMarketType = exchangeMarketTypes[0] || "spot";
-    const timer = setTimeout(() => {
-      setMarketType(nextMarketType);
-      updateUserPref("lastMarketType", nextMarketType);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [exchangeCatalogStatus, exchangeMarketTypes, marketType]);
-  useEffect(() => {
-    if (exchangeCatalogStatus === "loading") return;
-    if (savedCustomIntervals.includes(interval)) return;
-    if (isNativeIntervalSupported(exchange, interval, exchangeCatalog)) return;
-    const nextInterval = nativeIntervals.find((item) => item.value === "1h")?.value
-      || nativeIntervals[0]?.value
-      || "1h";
-    const timer = setTimeout(() => {
-      setInterval_(nextInterval);
-      updateUserPref("lastInterval", nextInterval);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, nativeIntervals, savedCustomIntervals]);
-  const trackedIntervalsRef = useRef(trackedIntervals);
-  useEffect(() => {
-    trackedIntervalsRef.current = trackedIntervals;
-  }, [trackedIntervals]);
+  }, [realtimePriceRef]);
 
   const { watchlists, setWatchlists, handleAddToWatchlist } = useWatchlistStorageRuntime();
 
@@ -513,56 +434,29 @@ export default function App() {
     updateLastPrice,
   });
 
-  const {
-    handleSymbolChange,
-    handleIntervalChange,
-    handleVisibleRangeChange,
-  } = useChartNavigationRuntime({
-    symbol,
-    exchange,
-    marketType,
-    interval,
-    exchangeCatalog,
-    savedCustomIntervals,
+  useEffect(() => {
+    chartSessionRuntimeBridgeRef.current = {
+      chartDataMeta,
+      clearCache,
+      clearChartData,
+      resetGapRecovery,
+      setLastPrice,
+      setCrosshairData,
+      setLoading,
+      setError,
+      setHasMoreLeft,
+    };
+  }, [
     chartDataMeta,
-    chartWidgetRef,
-    realtimePriceRef,
     clearCache,
     clearChartData,
     resetGapRecovery,
-    isNativeIntervalSupported,
-    updateUserPref,
-    setSymbol,
-    setExchange,
-    setMarketType,
-    setInterval: setInterval_,
-    setLastPrice,
     setCrosshairData,
-    setLoading,
     setError,
     setHasMoreLeft,
-    setDatasetKey,
-    markIntervalUsed,
-  });
-
-  const {
-    handleCreateCustomInterval,
-    handleRemoveCustomInterval,
-    handleRestoreCustomInterval,
-    handleClearCustomIntervals,
-  } = useCustomIntervalActions({
-    exchange,
-    interval,
-    nativeIntervals,
-    customIntervalRecords,
-    addCustomInterval,
-    removeCustomInterval,
-    restoreCustomInterval,
-    clearCustomIntervals,
-    handleIntervalChange,
-    showIntervalNotice,
-    isNativeIntervalSupported,
-  });
+    setLastPrice,
+    setLoading,
+  ]);
 
   const {
     displayData,
@@ -677,13 +571,13 @@ export default function App() {
             onCrosshairMove: setCrosshairData,
             onNeedMoreLeft: handleNeedMoreLeft,
             canLoadMoreLeft: hasMoreLeft && !loadingMoreLeft && !loading,
-            datasetKey: `${exchange}-${marketType}-${symbol}-${interval}-${datasetKey}`,
+            datasetKey,
             upColor: settings.upColor,
             downColor: settings.downColor,
             theme: resolvedTheme,
             customBg: settings.customBg,
             timezone: settings.timezone,
-            savedVisibleRange: getVisibleRangeForInterval(symbol, interval, marketType, exchange),
+            savedVisibleRange,
             dataMeta: chartDataMeta,
             onVisibleRangeChange: handleVisibleRangeChange,
             drawingTool,

@@ -32,6 +32,7 @@ function parseArgs(argv) {
     chromePath: process.env.CHROME_PATH || "",
     screenshot: process.env.SMOKE_SCREENSHOT || "",
     seedIndicators: process.env.SMOKE_SEED_INDICATORS !== "0",
+    drawingCheck: process.env.SMOKE_DRAWING_CHECK === "1",
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -41,6 +42,7 @@ function parseArgs(argv) {
     else if (arg === "--chrome") args.chromePath = argv[++i];
     else if (arg === "--screenshot") args.screenshot = argv[++i];
     else if (arg === "--no-seed-indicators") args.seedIndicators = false;
+    else if (arg === "--drawing-check") args.drawingCheck = true;
   }
 
   return args;
@@ -424,6 +426,105 @@ async function verifyLazySurfaces(cdp) {
   };
 }
 
+async function clickSelector(cdp, selector) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; el.click(); return true; })()`,
+    returnByValue: true,
+  });
+  return Boolean(result.result?.value);
+}
+
+async function getRect(cdp, selector) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    })()`,
+    returnByValue: true,
+  });
+  return result.result?.value || null;
+}
+
+async function dispatchClick(cdp, x, y) {
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none" });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+}
+
+async function readSavedDrawingCount(cdp, drawingKey) {
+  const storageKey = `candlescope-drawings-${drawingKey}`;
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      try {
+        const raw = localStorage.getItem(${JSON.stringify(storageKey)});
+        if (!raw) return 0;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.length : 0;
+      } catch {
+        return -1;
+      }
+    })()`,
+    returnByValue: true,
+  });
+  return Number(result.result?.value || 0);
+}
+
+async function waitForSavedDrawing(cdp, drawingKey, timeoutMs = 5_000) {
+  const started = Date.now();
+  let count = await readSavedDrawingCount(cdp, drawingKey);
+  while (Date.now() - started < timeoutMs) {
+    if (count > 0) return count;
+    await wait(250);
+    count = await readSavedDrawingCount(cdp, drawingKey);
+  }
+  return count;
+}
+
+async function verifyDrawingWorkflow(cdp, timeoutMs) {
+  const drawingKey = "binance:spot:BTCUSDT";
+  const lineButtonSelector = '[data-drawing-tool="line-segment"]';
+  const chartSelector = '.chart-pane[data-pane-id="main"] .chart-pane-container';
+
+  const lineToolClicked = await clickSelector(cdp, lineButtonSelector);
+  await wait(250);
+  const activeResult = await cdp.send("Runtime.evaluate", {
+    expression: `Boolean(document.querySelector(${JSON.stringify(`${lineButtonSelector}.active`)}))`,
+    returnByValue: true,
+  });
+  const lineToolActive = Boolean(activeResult.result?.value);
+
+  const rect = await getRect(cdp, chartSelector);
+  let drawingPersistedCount = 0;
+  let drawingRestoredCount = 0;
+  let reloadLoadedAtMs = null;
+
+  if (rect && lineToolActive) {
+    const y = Math.round(rect.y + rect.height * 0.45);
+    await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.35), y);
+    await wait(150);
+    await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.58), Math.round(rect.y + rect.height * 0.42));
+    drawingPersistedCount = await waitForSavedDrawing(cdp, drawingKey);
+
+    if (drawingPersistedCount > 0) {
+      await cdp.send("Page.reload", { ignoreCache: true });
+      const reloadResult = await waitForChartReady(cdp, timeoutMs);
+      reloadLoadedAtMs = reloadResult.loadedAt;
+      drawingRestoredCount = await readSavedDrawingCount(cdp, drawingKey);
+    }
+  }
+
+  return {
+    drawingLineToolClicked: lineToolClicked,
+    drawingLineToolActive: lineToolActive,
+    drawingChartRectFound: Boolean(rect),
+    drawingPersistedCount,
+    drawingReloadLoadedAtMs: reloadLoadedAtMs,
+    drawingRestoredCount,
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const chromePath = findChrome(args.chromePath);
@@ -506,6 +607,7 @@ async function main() {
     await cdp.send("Page.navigate", { url: args.url });
 
     const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
+    const drawingWorkflow = args.drawingCheck ? await verifyDrawingWorkflow(cdp, args.timeoutMs) : null;
     const lazySurfaces = await verifyLazySurfaces(cdp);
     const settings = await openSettings(cdp);
     const performanceTimings = args.seedIndicators
@@ -522,6 +624,7 @@ async function main() {
       live: bodyText.includes("Live (WebSocket)"),
       ...lazySurfaces,
       ...settings,
+      drawingWorkflow,
       smokeTimings: {
         chartLoadedAtMs: loadedAt,
         drawingToolbarReadyMs: lazySurfaces.drawingToolbarReadyMs,
@@ -534,6 +637,7 @@ async function main() {
       warnings: warnings.slice(0, 20),
       screenshot,
       seededIndicators: args.seedIndicators,
+      drawingCheck: args.drawingCheck,
     };
 
     console.log(JSON.stringify(report, null, 2));
@@ -544,6 +648,13 @@ async function main() {
       || !report.drawingToolbarLoaded
       || !report.symbolSearchOpened
       || !report.settingsOpened
+      || (args.drawingCheck && (
+        !drawingWorkflow?.drawingLineToolClicked
+        || !drawingWorkflow?.drawingLineToolActive
+        || !drawingWorkflow?.drawingChartRectFound
+        || drawingWorkflow?.drawingPersistedCount <= 0
+        || drawingWorkflow?.drawingRestoredCount <= 0
+      ))
       || (args.seedIndicators && !performanceTimings?.timings?.indicatorHostedSnapshotMs)
       || failures.length > 0;
     process.exitCode = failed ? 1 : 0;

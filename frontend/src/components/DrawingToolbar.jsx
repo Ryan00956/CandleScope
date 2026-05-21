@@ -977,6 +977,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       <div className="drawing-tool-wrapper" ref={cursorBtnRef}>
         <button
           className={`drawing-tool-btn ${isCursorActive ? "active" : ""}`}
+          data-drawing-tool="cursor"
           onClick={handleCursorClick}
           onDoubleClick={handleCursorDblClick}
           onContextMenu={handleCursorContextMenu}
@@ -1000,6 +1001,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       <div className="drawing-tool-wrapper" ref={freehandBtnRef}>
         <button
           className={`drawing-tool-btn ${isFreehandActive ? "active" : ""}`}
+          data-drawing-tool={currentFreehandId}
           onClick={handleFreehandClick}
           onDoubleClick={handleFreehandDblClick}
           onContextMenu={handleFreehandContextMenu}
@@ -1023,6 +1025,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       <div className="drawing-tool-wrapper">
         <button
           className={`drawing-tool-btn ${isEraserActive ? "active" : ""}`}
+          data-drawing-tool="eraser"
           onClick={handleEraserClick}
           title="橡皮（点击删除绘图元素）"
         >
@@ -1034,6 +1037,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       <div className="drawing-tool-wrapper" ref={lineBtnRef}>
         <button
           className={`drawing-tool-btn ${isLineActive ? "active" : ""}`}
+          data-drawing-tool={lineVariant}
           onClick={handleLineClick}
           onDoubleClick={handleLineDblClick}
           onContextMenu={handleLineContextMenu}
@@ -1057,6 +1061,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       <div className="drawing-tool-wrapper" ref={shapeBtnRef}>
         <button
           className={`drawing-tool-btn ${isShapeActive ? "active" : ""}`}
+          data-drawing-tool={shapeVariant}
           onClick={handleShapeClick}
           onDoubleClick={handleShapeDblClick}
           onContextMenu={handleShapeContextMenu}
@@ -1080,6 +1085,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       <div className="drawing-tool-wrapper">
         <button
           className={`drawing-tool-btn ${isTextActive ? "active" : ""}`}
+          data-drawing-tool="text"
           onClick={handleTextClick}
           title="文字标注（点击放置，双击编辑）"
         >
@@ -1091,6 +1097,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       <div className="drawing-tool-wrapper" ref={fibBtnRef}>
         <button
           className={`drawing-tool-btn ${isFibonacciActive ? "active" : ""}`}
+          data-drawing-tool="fibonacci"
           onClick={handleFibonacciClick}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -1120,6 +1127,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       <div className="drawing-tool-wrapper" ref={posBtnRef}>
         <button
           className={`drawing-tool-btn ${isPositionActive ? "active" : ""}`}
+          data-drawing-tool={posVariant}
           onClick={handlePositionClick}
           onDoubleClick={handlePositionDblClick}
           onContextMenu={handlePositionContextMenu}
@@ -1274,6 +1282,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       <div style={{ flex: 1 }} />
       <button
         className={`drawing-tool-btn drawing-export-btn ${exportPanelOpen ? "active" : ""}`}
+        data-drawing-action="export"
         onClick={handleExportClick}
         disabled={exportInProgress}
         title={exportInProgress ? "正在导出图片..." : "截图 / 导出图片"}
@@ -1282,6 +1291,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       </button>
       <button
         className={`drawing-tool-btn drawing-hide-btn ${drawingsHidden ? "active" : ""}`}
+        data-drawing-action="toggle-hidden"
         onClick={onToggleDrawingsHidden}
         title={drawingsHidden ? "显示所有绘图" : "隐藏所有绘图"}
       >
@@ -1303,6 +1313,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
       </button>
       <button
         className="drawing-tool-btn drawing-clear-btn"
+        data-drawing-action="clear"
         onClick={onClearAll}
         title="清除所有绘图"
       >

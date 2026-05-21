@@ -223,6 +223,15 @@ Phase 4 设计记录：
 - 实现应先增加只读 storage 的 `hasSavedDrawings()` helper，并在切分 primitive
   chunk 前补上工具激活、保存绘图恢复、导出文本提交的 smoke 覆盖。
 
+Phase 4 实现前 smoke 覆盖：
+
+- `DrawingToolbar` 暴露稳定的 `data-drawing-tool` 和 `data-drawing-action`
+  选择器，供 smoke 和后续 lazy-load 检查使用。
+- `scripts/smoke.mjs --drawing-check` 会激活线段工具、在主图绘制、验证绘图
+  持久化、刷新页面，并验证保存的绘图数据仍存在。
+- 本地 `--drawing-check` 结果：chart gate 1,002 ms，线段工具已激活，
+  persisted drawings 1，restored drawings 1，无网络失败。
+
 ## Phase 5：图表渲染更新成本
 
 目标：降低数据到达后的运行时渲染成本。

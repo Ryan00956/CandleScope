@@ -243,6 +243,16 @@ Design note after Phase 4:
   and smoke coverage for tool activation, saved restore, and export text commit
   before any primitive chunk split.
 
+Pre-implementation smoke coverage after Phase 4:
+
+- `DrawingToolbar` exposes stable `data-drawing-tool` and
+  `data-drawing-action` selectors for smoke tests and future lazy-load checks.
+- `scripts/smoke.mjs --drawing-check` activates the line tool, draws on the
+  main pane, verifies drawing persistence, reloads the page, and verifies the
+  saved drawing is still present.
+- Local result with `--drawing-check`: chart gate 1,002 ms, line tool active,
+  persisted drawings 1, restored drawings 1, no network failures.
+
 ## Phase 5: Chart Rendering Update Cost
 
 Goal: reduce runtime rendering cost after data arrives.

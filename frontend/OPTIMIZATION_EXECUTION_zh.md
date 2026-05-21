@@ -232,6 +232,14 @@ Phase 4 实现前 smoke 覆盖：
 - 本地 `--drawing-check` 结果：chart gate 1,002 ms，线段工具已激活，
   persisted drawings 1，restored drawings 1，无网络失败。
 
+Phase 4 预检后的实现 checkpoint：
+
+- 在 `drawingStorage.js` 增加只读 storage 的 `hasSavedDrawings()`。
+- 新增 `useDrawingController`，作为 `ChartPane` 的绘图 adapter 边界。当前它
+  仍委托给现有真实 `useDrawing` 引擎，确保引入 lazy-load 前行为不变。
+- `ChartPane` 现在先计算单一 pane drawing key，再传入 controller，保留上面
+  文档里的主图 / 子窗格 key 区分。
+
 ## Phase 5：图表渲染更新成本
 
 目标：降低数据到达后的运行时渲染成本。

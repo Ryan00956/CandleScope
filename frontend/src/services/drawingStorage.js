@@ -207,6 +207,26 @@ export function loadDrawings(symbol) {
 }
 
 /**
+ * Return true when a symbol/pane key has persisted drawings.
+ * This intentionally avoids importing primitive classes so callers can use it
+ * before the real drawing engine is loaded.
+ *
+ * @param {string} symbol
+ * @returns {boolean}
+ */
+export function hasSavedDrawings(symbol) {
+  if (!symbol) return false;
+  try {
+    const raw = localStorage.getItem(storageKey(symbol));
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Clear all saved drawings for a symbol.
  * @param {string} symbol
  */

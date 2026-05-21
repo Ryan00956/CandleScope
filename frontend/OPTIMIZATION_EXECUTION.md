@@ -253,6 +253,15 @@ Pre-implementation smoke coverage after Phase 4:
 - Local result with `--drawing-check`: chart gate 1,002 ms, line tool active,
   persisted drawings 1, restored drawings 1, no network failures.
 
+Implementation checkpoint after Phase 4 preflight:
+
+- Added storage-only `hasSavedDrawings()` in `drawingStorage.js`.
+- Added `useDrawingController` as the `ChartPane` drawing adapter boundary.
+  It currently delegates to the existing real `useDrawing` engine so behavior
+  stays unchanged before lazy-loading is introduced.
+- `ChartPane` now computes a single pane drawing key and passes it through the
+  controller, preserving the main/sub-pane key distinction documented above.
+
 ## Phase 5: Chart Rendering Update Cost
 
 Goal: reduce runtime rendering cost after data arrives.

@@ -10,7 +10,7 @@
  */
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
-import { useDrawing } from "../hooks/useDrawing";
+import { useDrawingController } from "../hooks/useDrawingController";
 import TextEditOverlay from "./TextEditOverlay";
 import TextFormatBar from "./TextFormatBar";
 
@@ -1271,6 +1271,10 @@ const ChartPane = forwardRef(function ChartPane({
 
     /* ── Drawing state and hooks ───────────────────────────── */
 
+    const drawingKey = paneType === "main"
+        ? (drawingKeyBase || symbol)
+        : `${drawingKeyBase || symbol}__${paneId}`;
+
     const {
         clearAll: clearAllDrawings,
         setHidden: setDrawingsHidden,
@@ -1287,7 +1291,7 @@ const ChartPane = forwardRef(function ChartPane({
         updateSelectedDrawingStyle,
         deleteSelected,
         selectedDrawingMeta,
-    } = useDrawing({
+    } = useDrawingController({
         chartRef,
         seriesRef: paneType === "main" ? mainSeriesRef : drawingAnchorSeriesRef,
         chartContainerRef: containerRef,
@@ -1302,9 +1306,7 @@ const ChartPane = forwardRef(function ChartPane({
         fibInverted,
         positionSize,
         drawingSnapEnabled,
-        symbol: paneType === "main"
-            ? (drawingKeyBase || symbol)
-            : `${drawingKeyBase || symbol}__${paneId}`,
+        symbol: drawingKey,
         seriesReady,
     });
 

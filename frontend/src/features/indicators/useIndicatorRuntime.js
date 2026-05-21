@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef } from "react";
 import { useActiveIndicatorStore } from "./activeIndicatorStore";
 import { useIndicatorComputeController } from "./indicatorComputeController";
 import {
@@ -18,7 +18,9 @@ import {
 
 function useLatestRef(value) {
   const ref = useRef(value);
-  ref.current = value;
+  useLayoutEffect(() => {
+    ref.current = value;
+  });
   return ref;
 }
 

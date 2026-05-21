@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { getIndicatorStreamUrl } from "../../services/indicatorApi";
 import { markPerf, recordPerfEvent } from "../../runtime/performance/perfMarks";
 import {
@@ -93,7 +93,9 @@ export function useIndicatorStreamController({
     return true;
   }, [activeIndicatorsRef, buildHostedMessage, hostedSubscriptionSignature]);
 
-  syncHostedSubscriptionsRef.current = syncHostedSubscriptions;
+  useLayoutEffect(() => {
+    syncHostedSubscriptionsRef.current = syncHostedSubscriptions;
+  }, [syncHostedSubscriptions]);
 
   useEffect(() => {
     const wsSubscriptions = indicatorWsSubscriptionsRef.current;

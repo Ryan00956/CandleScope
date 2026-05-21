@@ -345,6 +345,21 @@ async function waitForPerfTiming(cdp, timingKey, timeoutMs = 10_000, pollMs = 50
   return report;
 }
 
+function summarizePerformanceEvents(performanceReport) {
+  const events = Array.isArray(performanceReport?.events) ? performanceReport.events : [];
+  const eventCounts = {};
+  const chartEventCounts = {};
+  for (const event of events) {
+    const name = event?.name;
+    if (!name) continue;
+    eventCounts[name] = (eventCounts[name] || 0) + 1;
+    if (name.startsWith("chart.")) {
+      chartEventCounts[name] = (chartEventCounts[name] || 0) + 1;
+    }
+  }
+  return { eventCounts, chartEventCounts };
+}
+
 async function waitForExpression(cdp, expression, timeoutMs = 5_000, pollMs = 50) {
   const started = Date.now();
   let matched = false;
@@ -639,6 +654,7 @@ async function main() {
     const performanceTimings = args.seedIndicators
       ? await waitForPerfTiming(cdp, "indicatorHostedSnapshotMs")
       : await readPerfReport(cdp);
+    const performanceEventSummary = summarizePerformanceEvents(performanceTimings);
     const screenshotData = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
     fs.writeFileSync(screenshot, Buffer.from(screenshotData.data, "base64"));
 
@@ -658,6 +674,7 @@ async function main() {
         settingsOpenMs: settings.settingsOpenMs,
       },
       performance: performanceTimings,
+      performanceEventSummary,
       apiResponses: responses.slice(0, 20),
       failures,
       warnings: warnings.slice(0, 20),

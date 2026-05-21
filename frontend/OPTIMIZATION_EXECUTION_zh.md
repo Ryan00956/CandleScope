@@ -381,6 +381,8 @@ Phase 7 overlay instrumentation 实现后说明：
   create/remove/render 生命周期事件。
 - event details 包含 pane id、定义数量、创建/删除的 series 数、marker 数、fill 点数，
   以及可见 bgcolor region 数。
+- `scripts/smoke.mjs` 现在会输出 `performanceEventSummary`，包含全部 event counts
+  和 chart-only event counts，同时保留原始 performance report 方便深入检查。
 - 本地验证：`eslint src/components/ChartPane.jsx` 通过；Vite build 通过，app main chunk
   约 149 kB minified。因为本地 backend/Vite 服务未运行，本轮没有跑端到端 smoke。
 

@@ -83,5 +83,7 @@ Overlay instrumentation checkpoint 现在也已实现：
 
 - `ChartPane` 会记录 indicator series、markers、hlines、fill area series 和
   bgcolor canvas overlays 的生命周期事件。
+- Smoke report 现在包含 `performanceEventSummary`，可以直接比较事件频率，不用手动扫
+  原始 performance event list。
 - 本轮刻意只做观测，不改变渲染策略。下一步可以根据事件频率和点数决定优化方向，
   而不是只凭源码结构判断。

@@ -414,6 +414,9 @@ Implementation notes after Phase 7 overlay instrumentation:
   bgcolor canvas overlay create/remove/render.
 - Event details include pane id, definition counts, created/removed series
   counts, marker counts, fill point counts, and visible bgcolor region counts.
+- `scripts/smoke.mjs` now adds `performanceEventSummary` with all event counts
+  and chart-only event counts, while preserving the raw performance report for
+  deeper inspection.
 - Local validation: `eslint src/components/ChartPane.jsx` passed; Vite build
   passed with app main chunk about 149 kB minified. End-to-end smoke was not
   run because the local backend/Vite services were not running.

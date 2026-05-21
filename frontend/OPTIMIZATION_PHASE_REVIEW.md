@@ -93,6 +93,8 @@ The overlay instrumentation checkpoint is now implemented:
 
 - `ChartPane` records lifecycle events for indicator series, markers, hlines,
   fill area series, and bgcolor canvas overlays.
+- Smoke reports now include `performanceEventSummary`, so event frequency can
+  be compared without manually scanning the raw performance event list.
 - The pass is intentionally observational. It does not change rendering
   strategy, so the next decision can be based on event frequency and point
   counts rather than source-code shape alone.

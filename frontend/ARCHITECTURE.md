@@ -3,6 +3,9 @@
 This document records the current frontend architecture target, the refactor
 work already completed, and the remaining optimization path.
 
+For the step-by-step execution plan, see
+[Frontend Optimization Execution Plan](OPTIMIZATION_EXECUTION.md).
+
 ## Goals
 
 - Keep `App.jsx` as the composition root instead of the owner of every data,

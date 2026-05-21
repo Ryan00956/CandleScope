@@ -37,6 +37,11 @@ The local `EXCHANGE_INTERVALS` table in `src/App.jsx` is a fallback only. New ex
 
 ## Checks
 
+Optimization execution notes:
+
+- [Architecture](ARCHITECTURE.md)
+- [Optimization Execution Plan](OPTIMIZATION_EXECUTION.md)
+
 ```bash
 node ./node_modules/vite/bin/vite.js build
 node ./node_modules/eslint/bin/eslint.js .

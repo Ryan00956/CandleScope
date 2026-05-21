@@ -6,9 +6,13 @@ React/Vite charting UI for CandleScope.
 
 - [Frontend Architecture](ARCHITECTURE.md)
 - [前端架构](ARCHITECTURE_zh.md)
+- [Feature Boundaries](src/features/README.md)
+- [Shared Boundaries](src/shared/README.md)
+- [Chart Adapter Boundaries](src/chart-adapter/README.md)
 - [Runtime Boundaries](src/runtime/README.md)
 - [Frontend Cleanup Execution Plan](FRONTEND_CLEANUP_EXECUTION.md)
 - [前端清理执行计划](FRONTEND_CLEANUP_EXECUTION_zh.md)
+- [前端理想架构执行文档](FRONTEND_ARCHITECTURE_REBUILD_EXECUTION_zh.md)
 
 ## Backend Connection
 

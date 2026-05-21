@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { markPerfOnce, recordPerfEvent } from "../performance/perfMarks";
 import { deduplicateByTime, mergeByTime, upsertRealtimeKline } from "./chartDataRuntime";
 
 function inferCommitStatus(source, data, extra = {}) {
@@ -116,6 +117,21 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
     };
     chartDataCommitMetaRef.current = commitMeta;
     setChartDataMeta(commitMeta);
+    recordPerfEvent("chart.data.commit", {
+      source,
+      status,
+      symbol: sym,
+      interval: intv,
+      bars,
+      firstTime,
+      lastTime,
+    });
+    if (bars > 0) {
+      markPerfOnce("chart.firstBars", { source, status, symbol: sym, interval: intv, bars });
+      if (status === "ready" || status === "provisional") {
+        markPerfOnce("chart.ready", { source, status, symbol: sym, interval: intv, bars });
+      }
+    }
     return version;
   }, [cacheKey]);
 

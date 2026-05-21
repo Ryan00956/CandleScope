@@ -12,7 +12,7 @@ Keep these numbers as the reference point before starting the next phase:
 
 | Metric | Current baseline |
 |---|---:|
-| App main chunk | ~231 kB minified |
+| App main chunk | ~237 kB minified after Phase 1 instrumentation |
 | React vendor chunk | ~195 kB minified |
 | Lightweight Charts vendor chunk | ~158 kB minified |
 | Initial smoke target | K-line bars > 0, live WebSocket, drawing toolbar, symbol search, Settings |
@@ -68,6 +68,25 @@ Acceptance:
 - `npm run smoke -- --url http://127.0.0.1:5173/` prints timing fields.
 - Smoke still fails on product breakage, not on optional timing fields.
 - Docs list the measured baseline after one successful local run.
+
+Measured baseline after implementation:
+
+| Metric | Local smoke result |
+|---|---:|
+| Smoke chart loaded gate | 2,008 ms |
+| Browser `chartReadyMs` mark | 546 ms |
+| Browser `firstBarsMs` mark | 546 ms |
+| Browser `wsLiveReadyMs` mark | 573 ms |
+| Browser latest request duration | 394 ms |
+| Browser history request duration | 521 ms |
+| Browser symbol search open mark | 357 ms |
+| Browser Settings open mark | 389 ms |
+| Smoke bars loaded | 710 |
+
+The smoke gate is intentionally coarser than the browser marks because it polls
+DOM text and waits for the "connected + live" product state. In local dev,
+React StrictMode can also duplicate mount-time events; use the latest mark
+values for comparison and inspect the event list when debugging double loads.
 
 ## Phase 2: K-Line First Scheduling
 

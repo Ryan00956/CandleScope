@@ -10,6 +10,7 @@ import {
     refreshExchangeInfo,
 } from '../services/api';
 import { parseSymbolKey } from '../utils/symbolKey';
+import { markPerf } from '../runtime/performance/perfMarks';
 
 // ── Category definitions ────────────────────────────────────────
 const CATEGORIES = [
@@ -131,6 +132,10 @@ export default function SettingsModal({
     const [gapScanLoading, setGapScanLoading] = useState(false);
     const [gapScanResult, setGapScanResult] = useState(null);
     const [maintenanceScope, setMaintenanceScope] = useState(null);
+
+    useEffect(() => {
+        if (isOpen) markPerf('lazy.settings.ready');
+    }, [isOpen]);
 
     // Load proxy settings when modal opens
     useEffect(() => {

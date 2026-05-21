@@ -8,6 +8,7 @@
  * All drawing is native (Plugin API), no pixel overlays.
  */
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { markPerfOnce } from "../runtime/performance/perfMarks";
 import { DEFAULT_FIB_LEVELS } from "./primitives/FibonacciDrawingPrimitive.js";
 
 /* ─── Icons ─────────────────────────────────────────────── */
@@ -616,6 +617,10 @@ const DrawingToolbar = memo(function DrawingToolbar({
   exportInProgress = false,
   onToggleExportPanel,
 }) {
+  useEffect(() => {
+    markPerfOnce("lazy.drawingToolbar.ready");
+  }, []);
+
   // Which tool variants are selected (persisted across toggles)
   const [cursorVariant, setCursorVariant] = useState("cursor-default");
   const [freehandVariant, setFreehandVariant] = useState("pen");

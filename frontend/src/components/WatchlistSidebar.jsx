@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+import { markPerfOnce } from "../runtime/performance/perfMarks";
 import { parseSymbolKey, symbolKey } from "../utils/symbolKey";
 
 // ── LocalStorage keys ──
@@ -151,6 +152,10 @@ export default function WatchlistSidebar({
   // Track which symbols are currently flashing and their direction
   const [flashStates, setFlashStates] = useState({});
   const flashTimersRef = useRef({});
+
+  useEffect(() => {
+    markPerfOnce("lazy.watchlist.ready");
+  }, []);
 
   // Detect price changes and trigger flash animation
   useEffect(() => {

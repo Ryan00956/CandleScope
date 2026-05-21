@@ -45,6 +45,7 @@ import {
   getVisibleRangeForInterval,
 } from "./runtime/chart/viewportController";
 import { clearSavedDrawings } from "./services/drawingStorage";
+import { markPerf } from "./runtime/performance/perfMarks";
 import "./index.css";
 
 const ExportPanel = React.lazy(() => import("./components/ExportPanel"));
@@ -602,7 +603,10 @@ export default function App() {
 
         <button
           className="settings-btn"
-          onClick={() => setShowSettings(true)}
+          onClick={() => {
+            markPerf("lazy.settings.open.start", { trigger: "button" });
+            setShowSettings(true);
+          }}
           style={{
             background: "none",
             border: "none",

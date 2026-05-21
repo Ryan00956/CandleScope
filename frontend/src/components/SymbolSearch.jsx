@@ -1,4 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { markPerf } from "../runtime/performance/perfMarks";
 
 const SymbolSearchModal = lazy(() => import("./SymbolSearchModal"));
 
@@ -19,6 +20,7 @@ export default function SymbolSearch({
   const [open, setOpen] = useState(false);
 
   const handleOpen = useCallback(() => {
+    markPerf("lazy.symbolSearch.open.start", { trigger: "button" });
     setOpen(true);
   }, []);
 
@@ -40,7 +42,10 @@ export default function SymbolSearch({
       // Ctrl+K (or Cmd+K on Mac)
       if ((e.ctrlKey || e.metaKey) && e.key === "k") {
         e.preventDefault();
-        setOpen((prev) => !prev);
+        setOpen((prev) => {
+          if (!prev) markPerf("lazy.symbolSearch.open.start", { trigger: "keyboard" });
+          return !prev;
+        });
         return;
       }
       // "/" key — only when no input/textarea is focused
@@ -49,6 +54,7 @@ export default function SymbolSearch({
         !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)
       ) {
         e.preventDefault();
+        markPerf("lazy.symbolSearch.open.start", { trigger: "keyboard" });
         setOpen(true);
       }
     };

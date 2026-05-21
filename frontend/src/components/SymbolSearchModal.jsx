@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { markPerf } from "../runtime/performance/perfMarks";
 import { fetchExchangeInfo, refreshExchangeInfo } from "../services/api";
 import { symbolKey } from "../utils/symbolKey";
 
@@ -46,6 +47,10 @@ export default function SymbolSearchModal({
   const inputRef = useRef(null);
   const listRef = useRef(null);
   const modalRef = useRef(null);
+
+  useEffect(() => {
+    if (open) markPerf("lazy.symbolSearch.ready");
+  }, [open]);
 
   // ── Load exchange info ──
   useEffect(() => {

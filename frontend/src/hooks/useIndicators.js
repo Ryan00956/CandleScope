@@ -13,6 +13,7 @@
  * Volume is auto-added as a built-in indicator on first load.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import { markPerf, recordPerfEvent } from "../runtime/performance/perfMarks";
 import { computeIndicator, fetchPreset, getIndicatorStreamUrl } from "../services/indicatorApi";
 
 const ACTIVE_INDICATORS_KEY = "candlescope-active-indicators";
@@ -957,12 +958,14 @@ export function useIndicators({
     const currentIndicators = activeIndicatorsRef.current;
 
     if (!currentChartData || currentChartData.length === 0) {
+      recordPerfEvent("indicator.compute.skip", { reason: "no-chart-data" });
       computingRef.current = false;
       return;
     }
 
     const dataSignature = buildRuntimeDataSignature(currentChartData, chartDataMetaRef.current);
     if (!force && dataSignature === lastComputeSignatureRef.current) {
+      recordPerfEvent("indicator.compute.skip", { reason: "same-data-signature" });
       computingRef.current = false;
       return;
     }
@@ -972,6 +975,7 @@ export function useIndicators({
       (i) => !isWsHostedIndicator(i) && (i.script || i.name || i.id)
     );
     if (indicators.length === 0) {
+      recordPerfEvent("indicator.compute.skip", { reason: "no-local-indicators" });
       computingRef.current = false;
       return;
     }
@@ -979,6 +983,15 @@ export function useIndicators({
     // Only show "computing" UI when user manually triggered the recompute
     const showUI = userTriggeredRef.current;
     if (showUI) setComputing(true);
+    markPerf("indicator.compute.start", {
+      force,
+      indicatorCount: indicators.length,
+      bars: currentChartData.length,
+      symbol,
+      interval,
+      marketType,
+      exchange,
+    });
 
     const ohlcv = currentChartData.map((d) => ({
       time: d.time,
@@ -1119,6 +1132,15 @@ export function useIndicators({
       });
       // buildPaneData will be called by the useEffect watching activeIndicators
     } finally {
+      markPerf("indicator.compute.end", {
+        force,
+        indicatorCount: indicators.length,
+        bars: currentChartData.length,
+        symbol,
+        interval,
+        marketType,
+        exchange,
+      });
       computingRef.current = false;
       if (showUI) {
         setComputing(false);

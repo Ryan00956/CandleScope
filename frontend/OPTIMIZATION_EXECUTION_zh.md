@@ -11,7 +11,7 @@ vendor chunks。
 
 | 指标 | 当前基线 |
 |---|---:|
-| App main chunk | 约 231 kB minified |
+| App main chunk | Phase 1 打点后约 237 kB minified |
 | React vendor chunk | 约 195 kB minified |
 | Lightweight Charts vendor chunk | 约 158 kB minified |
 | smoke 覆盖目标 | K 线 bars > 0、实时 WebSocket、drawing toolbar、symbol search、Settings |
@@ -63,6 +63,24 @@ vendor chunks。
 - `npm run smoke -- --url http://127.0.0.1:5173/` 输出 timing 字段。
 - smoke 仍然因为产品行为坏了而失败，不因为可选 timing 字段缺失而失败。
 - 成功跑一次后，把 measured baseline 写回文档。
+
+实现后的实测基线：
+
+| 指标 | 本地 smoke 结果 |
+|---|---:|
+| smoke 图表 loaded gate | 2,008 ms |
+| 浏览器 `chartReadyMs` mark | 546 ms |
+| 浏览器 `firstBarsMs` mark | 546 ms |
+| 浏览器 `wsLiveReadyMs` mark | 573 ms |
+| 浏览器 latest 请求耗时 | 394 ms |
+| 浏览器 history 请求耗时 | 521 ms |
+| 浏览器 symbol search 打开 mark | 357 ms |
+| 浏览器 Settings 打开 mark | 389 ms |
+| smoke 加载 bars | 710 |
+
+smoke gate 会比浏览器内 mark 粗一些，因为脚本按 DOM 文本轮询，并等待
+“connected + live”的产品状态。本地 dev 下 React StrictMode 也可能让挂载期事件
+出现两次；后续对比以 latest mark 为准，排查重复加载时再看 event list。
 
 ## Phase 2：K 线优先调度
 

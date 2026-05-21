@@ -4,6 +4,7 @@ import {
   fetchLatestKlines,
   getMultiStreamUrl,
 } from "../../services/api";
+import { markPerfOnce, recordPerfEvent } from "../performance/perfMarks";
 
 const WS_RECONNECT_BASE_DELAY = 2_000;
 const WS_RECONNECT_MAX_DELAY = 60_000;
@@ -87,6 +88,7 @@ export function useKlineStreamRuntime({
     };
 
     const startPolling = () => {
+      recordPerfEvent("ws.kline.polling.start", { symbol, marketType, exchange });
       if (pollInterval) clearInterval(pollInterval);
       pollInterval = setInterval(async () => {
         if (!active) return;
@@ -148,6 +150,7 @@ export function useKlineStreamRuntime({
 
         socket.onopen = () => {
           if (!active) return;
+          markPerfOnce("ws.kline.open", { symbol, marketType, exchange });
 
           const isReconnection = reconnectAttempts > 0;
           reconnectDelay = WS_RECONNECT_BASE_DELAY;
@@ -156,6 +159,13 @@ export function useKlineStreamRuntime({
           liveSubscribedIntervalsRef.current = new Set();
           syncSocketSubscriptions(socket, trackedIntervalsRef.current);
           setWsStatus("live");
+          markPerfOnce("ws.kline.live", {
+            symbol,
+            marketType,
+            exchange,
+            intervals: trackedIntervalsRef.current,
+            source: "socket-open",
+          });
 
           if (pollInterval) {
             clearInterval(pollInterval);
@@ -191,7 +201,16 @@ export function useKlineStreamRuntime({
 
             if (msg.type === "stream_status") {
               if (msg.interval === intervalRef.current) {
-                if (msg.status === "live") setWsStatus("live");
+                if (msg.status === "live") {
+                  setWsStatus("live");
+                  markPerfOnce("ws.kline.live", {
+                    symbol,
+                    marketType,
+                    exchange,
+                    interval: msg.interval,
+                    source: "stream-status",
+                  });
+                }
                 if (msg.status === "reconnecting") setWsStatus("reconnecting");
               }
               return;
@@ -221,6 +240,7 @@ export function useKlineStreamRuntime({
             patchCacheTick(symbol, msgInterval, tick, { marketType, exchange });
 
             if (msgInterval === currentIntv) {
+              markPerfOnce("ws.kline.firstTick", { symbol, marketType, exchange, interval: currentIntv });
               commitPatchedChartData(symbol, currentIntv, [tick], { source: "kline-ws" });
               updateLastPrice(tick, currentIntv);
             }

@@ -1,5 +1,6 @@
 import { useCallback, useRef } from "react";
 import { fetchKlinesHistory, fetchLatestKlines } from "../../services/api";
+import { markPerf, recordPerfEvent } from "../performance/perfMarks";
 import { numericRange } from "./rangeRuntime";
 
 const INITIAL_BACKFILL_RETRY_MS = 3_000;
@@ -29,6 +30,7 @@ export function useChartInitialLoad({
   const abortRef = useRef(null);
 
   return useCallback(async (sym, intv, mt = marketType, ex = exchange) => {
+    markPerf("chart.initialLoad.start", { exchange: ex, marketType: mt, symbol: sym, interval: intv });
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -61,6 +63,10 @@ export function useChartInitialLoad({
 
     function commitQuickResult(quickResult) {
       if (controller.signal.aborted || !quickResult?.data?.length) return;
+      markPerf("chart.initialLoad.latest.commit", {
+        source: quickResult.source || "unknown",
+        bars: quickResult.data.length,
+      });
       commitPatchedChartData(sym, intv, quickResult.data, {
         seedIfEmpty: true,
         source: "initial-latest",
@@ -79,6 +85,12 @@ export function useChartInitialLoad({
     function commitHistoryResult(historyResult) {
       if (controller.signal.aborted) return;
 
+      recordPerfEvent("chart.initialLoad.history.result", {
+        source: historyResult?.source || "unknown",
+        bars: historyResult?.data?.length || 0,
+        hasTailGap: Boolean(historyResult?.has_tail_gap),
+      });
+
       if (historyResult?.start_ms != null && historyResult?.end_ms != null) {
         pendingInitialHistoryRef.current = {
           exchange: ex,
@@ -90,10 +102,20 @@ export function useChartInitialLoad({
       }
 
       if (!historyResult?.data?.length) {
+        recordPerfEvent("chart.initialLoad.history.empty", {
+          exchange: ex,
+          marketType: mt,
+          symbol: sym,
+          interval: intv,
+        });
         startInitialHistoryRetry();
         return;
       }
 
+      markPerf("chart.initialLoad.history.commit", {
+        source: historyResult.source || "unknown",
+        bars: historyResult.data.length,
+      });
       commitMergedChartData(sym, intv, historyResult.data, { source: "initial-history" });
       const latest = historyResult.data[historyResult.data.length - 1];
       updateLastPrice(latest, intv);
@@ -113,6 +135,7 @@ export function useChartInitialLoad({
     }
 
     function startInitialHistoryRetry() {
+      markPerf("chart.initialLoad.retry.start", { exchange: ex, marketType: mt, symbol: sym, interval: intv });
       setConnectionStatus("loading");
 
       let retryTimer = null;
@@ -126,6 +149,10 @@ export function useChartInitialLoad({
           const retryResult = await fetchKlinesHistory(sym, intv, days, mt, ex);
           if (controller.signal.aborted || stoppedRetrying) return false;
           if (retryResult?.data?.length) {
+            markPerf("chart.initialLoad.retry.success", {
+              source: retryResult.source || "unknown",
+              bars: retryResult.data.length,
+            });
             commitHistoryResult(retryResult);
             return true;
           }
@@ -157,6 +184,7 @@ export function useChartInitialLoad({
         if (controller.signal.aborted) return;
         if (await retryInitialHistory()) return;
         if (!shownInitialData) {
+          markPerf("chart.initialLoad.retry.timeout", { exchange: ex, marketType: mt, symbol: sym, interval: intv });
           setLoading(false);
           setDatasetKey((version) => version + 1);
         }
@@ -169,12 +197,27 @@ export function useChartInitialLoad({
       });
     }
 
+    markPerf("chart.initialLoad.latest.request", { exchange: ex, marketType: mt, symbol: sym, interval: intv, limit: 5 });
+    markPerf("chart.initialLoad.history.request", { exchange: ex, marketType: mt, symbol: sym, interval: intv, days });
+
     await Promise.all([
       fetchLatestKlines(sym, intv, 5, mt, ex)
-        .then(commitQuickResult)
+        .then((result) => {
+          markPerf("chart.initialLoad.latest.response", {
+            source: result?.source || "unknown",
+            bars: result?.data?.length || 0,
+          });
+          commitQuickResult(result);
+        })
         .catch(() => null),
       fetchKlinesHistory(sym, intv, days, mt, ex)
-        .then(commitHistoryResult)
+        .then((result) => {
+          markPerf("chart.initialLoad.history.response", {
+            source: result?.source || "unknown",
+            bars: result?.data?.length || 0,
+          });
+          commitHistoryResult(result);
+        })
         .catch(() => {
           if (!controller.signal.aborted) startInitialHistoryRetry();
         }),

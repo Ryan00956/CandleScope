@@ -307,13 +307,23 @@ async function waitForChartReady(cdp, timeoutMs) {
   return { bodyText, loadedAt };
 }
 
+async function readPerfReport(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: "window.__CANDLESCOPE_PERF__?.report ? window.__CANDLESCOPE_PERF__.report() : null",
+    returnByValue: true,
+  });
+  return result.result?.value || null;
+}
+
 async function openSettings(cdp) {
+  const started = Date.now();
   const clickResult = await cdp.send("Runtime.evaluate", {
     expression: "(() => { const button = document.querySelector('.settings-btn'); if (!button) return false; button.click(); return true; })()",
     returnByValue: true,
   });
 
   let settingsOpened = false;
+  let settingsOpenMs = null;
   for (let i = 0; i < 20; i += 1) {
     await wait(500);
     const settingsResult = await cdp.send("Runtime.evaluate", {
@@ -321,17 +331,23 @@ async function openSettings(cdp) {
       returnByValue: true,
     });
     settingsOpened = Boolean(settingsResult.result?.value);
-    if (settingsOpened) break;
+    if (settingsOpened) {
+      settingsOpenMs = Date.now() - started;
+      break;
+    }
   }
 
   return {
     settingsButtonClicked: Boolean(clickResult.result?.value),
     settingsOpened,
+    settingsOpenMs,
   };
 }
 
 async function verifyLazySurfaces(cdp) {
+  const toolbarStarted = Date.now();
   let drawingToolbarLoaded = false;
+  let drawingToolbarReadyMs = null;
   for (let i = 0; i < 20; i += 1) {
     await wait(500);
     const toolbarResult = await cdp.send("Runtime.evaluate", {
@@ -339,15 +355,20 @@ async function verifyLazySurfaces(cdp) {
       returnByValue: true,
     });
     drawingToolbarLoaded = Boolean(toolbarResult.result?.value);
-    if (drawingToolbarLoaded) break;
+    if (drawingToolbarLoaded) {
+      drawingToolbarReadyMs = Date.now() - toolbarStarted;
+      break;
+    }
   }
 
+  const symbolStarted = Date.now();
   const symbolClickResult = await cdp.send("Runtime.evaluate", {
     expression: "(() => { const button = document.querySelector('#symbol-selector'); if (!button) return false; button.click(); return true; })()",
     returnByValue: true,
   });
 
   let symbolSearchOpened = false;
+  let symbolSearchOpenMs = null;
   for (let i = 0; i < 20; i += 1) {
     await wait(500);
     const symbolResult = await cdp.send("Runtime.evaluate", {
@@ -355,7 +376,10 @@ async function verifyLazySurfaces(cdp) {
       returnByValue: true,
     });
     symbolSearchOpened = Boolean(symbolResult.result?.value);
-    if (symbolSearchOpened) break;
+    if (symbolSearchOpened) {
+      symbolSearchOpenMs = Date.now() - symbolStarted;
+      break;
+    }
   }
 
   await cdp.send("Runtime.evaluate", {
@@ -365,8 +389,10 @@ async function verifyLazySurfaces(cdp) {
 
   return {
     drawingToolbarLoaded,
+    drawingToolbarReadyMs,
     symbolSearchButtonClicked: Boolean(symbolClickResult.result?.value),
     symbolSearchOpened,
+    symbolSearchOpenMs,
   };
 }
 
@@ -444,6 +470,7 @@ async function main() {
     const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
     const lazySurfaces = await verifyLazySurfaces(cdp);
     const settings = await openSettings(cdp);
+    const performanceTimings = await readPerfReport(cdp);
     const screenshotData = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
     fs.writeFileSync(screenshot, Buffer.from(screenshotData.data, "base64"));
 
@@ -455,6 +482,13 @@ async function main() {
       live: bodyText.includes("Live (WebSocket)"),
       ...lazySurfaces,
       ...settings,
+      smokeTimings: {
+        chartLoadedAtMs: loadedAt,
+        drawingToolbarReadyMs: lazySurfaces.drawingToolbarReadyMs,
+        symbolSearchOpenMs: lazySurfaces.symbolSearchOpenMs,
+        settingsOpenMs: settings.settingsOpenMs,
+      },
+      performance: performanceTimings,
       apiResponses: responses.slice(0, 20),
       failures,
       warnings: warnings.slice(0, 20),

@@ -291,6 +291,17 @@ Phase 5 第一轮实现说明：
 - `ChartPane` 改动后本地 `--drawing-check` 也通过：drawing engine ready true，
   persisted drawings 1，restored drawings 1，failures 0。
 
+Phase 5 barcolor 轮次实现说明：
+
+- barcolor overlay 现在会保存上一份 colored candle data；当已着色历史稳定时，
+  使用保守的尾部 `update()`。首次应用、清空、历史变化、或中间 K 线颜色/数值
+  变化仍继续使用 `setData()`。
+- 本地 smoke 结果：bars 722，connected true，live true，failures 0，
+  chartReadyMs 793，firstBarsMs 793。series event counts：candle `setData` 2，
+  candle `update` 2，indicator `setData` 5，indicator `update` 7。
+- 本地 `--drawing-check` 仍通过：drawing engine ready true，persisted drawings 1，
+  restored drawings 1，failures 0。
+
 ## Phase 6：交互预加载
 
 目标：只有用户真的感到首次点击延迟时，才处理 lazy UI 的 first-click cost。

@@ -315,6 +315,18 @@ Implementation notes after Phase 5 first pass:
 - Local `--drawing-check` also passed after the `ChartPane` changes: drawing
   engine ready true, persisted drawings 1, restored drawings 1, failures 0.
 
+Implementation notes after Phase 5 barcolor pass:
+
+- Barcolor overlays now keep their previous colored candle data and use a
+  conservative trailing `update()` path when the colored history is stable.
+  They still use `setData()` for first apply, clear, history changes, or any
+  middle-candle color/value change.
+- Local smoke after this pass: bars 722, connected true, live true, failures 0,
+  chartReadyMs 793, firstBarsMs 793. Series event counts: candle `setData` 2,
+  candle `update` 2, indicator `setData` 5, indicator `update` 7.
+- Local `--drawing-check` still passed: drawing engine ready true, persisted
+  drawings 1, restored drawings 1, failures 0.
+
 ## Phase 6: Interaction Preloading
 
 Goal: remove first-click delay from lazy UI only if users feel it.

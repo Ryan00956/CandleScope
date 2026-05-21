@@ -111,6 +111,17 @@ function linePointEquals(a, b) {
         && (a?.color || null) === (b?.color || null);
 }
 
+function candlePointEquals(a, b) {
+    return a?.time === b?.time
+        && a?.open === b?.open
+        && a?.high === b?.high
+        && a?.low === b?.low
+        && a?.close === b?.close
+        && (a?.color || null) === (b?.color || null)
+        && (a?.borderColor || null) === (b?.borderColor || null)
+        && (a?.wickColor || null) === (b?.wickColor || null);
+}
+
 function canUseTrailingSeriesUpdate(previousData, nextData) {
     if (!previousData?.length || !nextData?.length) return false;
     if (nextData.length < previousData.length || nextData.length > previousData.length + 1) return false;
@@ -120,6 +131,19 @@ function canUseTrailingSeriesUpdate(previousData, nextData) {
     const stableCount = Math.max(0, previousData.length - 1);
     for (let i = 0; i < stableCount; i += 1) {
         if (!linePointEquals(previousData[i], nextData[i])) return false;
+    }
+    return true;
+}
+
+function canUseTrailingCandleUpdate(previousData, nextData) {
+    if (!previousData?.length || !nextData?.length) return false;
+    if (nextData.length < previousData.length || nextData.length > previousData.length + 1) return false;
+    if (nextData[0]?.time !== previousData[0]?.time) return false;
+    if (nextData[previousData.length - 1]?.time !== previousData[previousData.length - 1]?.time) return false;
+
+    const stableCount = Math.max(0, previousData.length - 1);
+    for (let i = 0; i < stableCount; i += 1) {
+        if (!candlePointEquals(previousData[i], nextData[i])) return false;
     }
     return true;
 }
@@ -1035,10 +1059,30 @@ const ChartPane = forwardRef(function ChartPane({
     // Lightweight Charts CandlestickSeries doesn't support per-bar color
     // via setData natively, but we can do it by re-setting data with color
     // fields. We rebuild candle data with color overrides when barcolors change.
+    const prevBarcoloredDataRef = useRef([]);
 
     useEffect(() => {
         if (paneType !== "main" || !mainSeriesRef.current || !data?.length) return;
-        if (!indicatorBarcolors || indicatorBarcolors.length === 0) return;
+        if (!indicatorBarcolors || indicatorBarcolors.length === 0) {
+            if (prevBarcoloredDataRef.current.length > 0) {
+                const plainData = data.map(toCandlePoint);
+                try {
+                    isSyncingRef.current = true;
+                    mainSeriesRef.current.setData(plainData);
+                    recordPerfEvent("chart.candleSeries.setData", {
+                        paneId,
+                        reason: "barcolor-clear",
+                        points: plainData.length,
+                    });
+                } catch (err) {
+                    console.warn("ChartPane: failed to clear barcolors:", err);
+                } finally {
+                    isSyncingRef.current = false;
+                    prevBarcoloredDataRef.current = [];
+                }
+            }
+            return;
+        }
 
         // Build a time→color map from all barcolor sources
         const colorMap = new Map();
@@ -1050,7 +1094,10 @@ const ChartPane = forwardRef(function ChartPane({
                 }
             }
         }
-        if (colorMap.size === 0) return;
+        if (colorMap.size === 0) {
+            prevBarcoloredDataRef.current = [];
+            return;
+        }
 
         // Re-set candle data with per-bar color overrides
         try {
@@ -1069,13 +1116,32 @@ const ChartPane = forwardRef(function ChartPane({
                 }
                 return point;
             });
-            mainSeriesRef.current.setData(coloredData);
+            if (canUseTrailingCandleUpdate(prevBarcoloredDataRef.current, coloredData)) {
+                const start = Math.max(0, prevBarcoloredDataRef.current.length - 1);
+                for (let i = start; i < coloredData.length; i += 1) {
+                    mainSeriesRef.current.update(coloredData[i]);
+                }
+                recordPerfEvent("chart.candleSeries.update", {
+                    paneId,
+                    reason: "barcolor-trailing",
+                    points: coloredData.length - start,
+                    totalPoints: coloredData.length,
+                });
+            } else {
+                mainSeriesRef.current.setData(coloredData);
+                recordPerfEvent("chart.candleSeries.setData", {
+                    paneId,
+                    reason: "barcolor-full",
+                    points: coloredData.length,
+                });
+            }
+            prevBarcoloredDataRef.current = coloredData;
         } catch (err) {
             console.warn("ChartPane: failed to apply barcolors:", err);
         } finally {
             isSyncingRef.current = false;
         }
-    }, [indicatorBarcolors, data, paneType]);
+    }, [indicatorBarcolors, data, paneId, paneType]);
 
     /* ── Apply fill() between two indicator lines ─────────── */
     // Lightweight Charts doesn't have a native "area between two lines" API.

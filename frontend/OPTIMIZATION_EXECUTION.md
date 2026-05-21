@@ -121,6 +121,30 @@ Acceptance:
 - Drag-left loading still preserves the existing `backfill_completed` retry
   behavior.
 
+Implementation notes after Phase 2:
+
+- Hosted indicator subscriptions now wait for `chartDataMeta.status === "ready"`
+  instead of starting from the provisional quick-latest bars.
+- Local indicator result commits are wrapped in `startTransition`, and
+  provisional first-bar recomputes are delayed so the full history response can
+  win when it arrives shortly after quick latest.
+- Background prefetch and periodic gap recovery wait for the active chart to be
+  ready; left-load and `backfill_completed` retry behavior is unchanged.
+- Smoke seeds a small MA indicator in its temporary browser profile so the
+  report verifies the "indicators enabled" path.
+
+Measured baseline after Phase 2:
+
+| Metric | Local smoke result |
+|---|---:|
+| Smoke chart loaded gate | 1,005 ms |
+| Browser `firstBarsMs` mark | 242 ms |
+| Browser `chartReadyMs` mark | 242 ms |
+| Browser `wsLiveReadyMs` mark | 268 ms |
+| Browser hosted indicator open mark | 352 ms |
+| Browser hosted indicator snapshot mark | 4,751 ms |
+| Smoke bars loaded | 722 |
+
 ## Phase 3: App Shell Extraction
 
 Goal: keep `App.jsx` as a composition root rather than a large JSX owner.

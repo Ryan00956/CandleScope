@@ -112,6 +112,28 @@ smoke gate 会比浏览器内 mark 粗一些，因为脚本按 DOM 文本轮询�
 - 关闭指标不会改变 K 线 loading 控制流。
 - 左拖加载历史仍保留现有 `backfill_completed` retry 行为。
 
+Phase 2 实现后说明：
+
+- hosted indicator 订阅现在等待 `chartDataMeta.status === "ready"`，不再从
+  quick-latest 的 provisional bars 立刻启动。
+- 本地指标结果写入使用 `startTransition`；provisional 首批 bars 的重算会延迟，
+  让短时间内返回的完整 history 优先。
+- background prefetch 和周期性 gap recovery 等 active chart ready 后再启动；
+  左拖加载和 `backfill_completed` retry 行为保持不变。
+- smoke 会在临时浏览器 profile 里种一个 MA 指标，用来验证“开启指标”的路径。
+
+Phase 2 实测基线：
+
+| 指标 | 本地 smoke 结果 |
+|---|---:|
+| smoke 图表 loaded gate | 1,005 ms |
+| 浏览器 `firstBarsMs` mark | 242 ms |
+| 浏览器 `chartReadyMs` mark | 242 ms |
+| 浏览器 `wsLiveReadyMs` mark | 268 ms |
+| 浏览器 hosted indicator open mark | 352 ms |
+| 浏览器 hosted indicator snapshot mark | 4,751 ms |
+| smoke 加载 bars | 722 |
+
 ## Phase 3：App Shell 拆分
 
 目标：让 `App.jsx` 保持组合根，而不是大段 JSX 的所有者。

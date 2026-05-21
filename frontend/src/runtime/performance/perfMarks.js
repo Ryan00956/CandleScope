@@ -13,6 +13,8 @@ const TIMING_PAIRS = {
   wsLiveReadyMs: ["app.boot.start", "ws.kline.live"],
   firstRealtimeTickMs: ["app.boot.start", "ws.kline.firstTick"],
   indicatorComputeMs: ["indicator.compute.start", "indicator.compute.end"],
+  indicatorHostedOpenMs: ["app.boot.start", "indicator.ws.open"],
+  indicatorHostedSnapshotMs: ["app.boot.start", "indicator.ws.snapshot"],
   settingsOpenMs: ["lazy.settings.open.start", "lazy.settings.ready"],
   symbolSearchOpenMs: ["lazy.symbolSearch.open.start", "lazy.symbolSearch.ready"],
   watchlistReadyMs: ["app.boot.start", "lazy.watchlist.ready"],

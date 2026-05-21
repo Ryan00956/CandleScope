@@ -12,7 +12,7 @@
  *
  * Volume is auto-added as a built-in indicator on first load.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import { markPerf, recordPerfEvent } from "../runtime/performance/perfMarks";
 import { computeIndicator, fetchPreset, getIndicatorStreamUrl } from "../services/indicatorApi";
 
@@ -21,6 +21,8 @@ const VOL_INIT_KEY = "candlescope-vol-initialized";
 const ENGINE_SCRIPT_MARKER = "# __ENGINE__:";
 const INDICATOR_WS_RECONNECT_MS = 3000;
 const INDICATOR_WS_INITIAL_HISTORY_LIMIT = 5000;
+const INDICATOR_DATA_DEBOUNCE_MS = 500;
+const PROVISIONAL_INDICATOR_DELAY_MS = 1200;
 
 function loadActiveIndicators() {
   try {
@@ -68,6 +70,10 @@ function buildRuntimeDataSignature(data, dataMeta = null) {
     dataMeta.bars ?? "",
     dataSignature,
   ].join("|");
+}
+
+function isProvisionalChartData(dataMeta = null) {
+  return dataMeta?.status === "provisional";
 }
 
 function stringSignature(value = "") {
@@ -717,7 +723,7 @@ export function useIndicators({
   const hasWsHostedIndicators = activeIndicators.some(
     (ind) => isWsHostedIndicator(ind) && ind.visible !== false
   );
-  const chartDataReady = Boolean(chartData?.length && chartDataStatus !== "loading");
+  const chartDataReady = Boolean(chartData?.length && chartDataStatus === "ready");
 
   const buildHostedIndicatorParams = useCallback((ind) => {
     let params = ind.params || {};
@@ -854,6 +860,7 @@ export function useIndicators({
       indicatorWsRef.current = socket;
 
       socket.onopen = () => {
+        markPerf("indicator.ws.open", { symbol, interval, marketType, exchange });
         lastSeq = 0;
         wsSubscriptions.clear();
         if (!stopped) subscribeAll();
@@ -875,8 +882,10 @@ export function useIndicators({
           if (msg.type === "heartbeat" || msg.type === "connected") return;
           if (!msg.clientId) return;
           if (msg.type === "indicator.snapshot") {
+            markPerf("indicator.ws.snapshot", { indicatorId: msg.clientId });
             applyWsSnapshot(msg.clientId, msg);
           } else if (msg.type === "indicator.patch") {
+            recordPerfEvent("indicator.ws.patch", { indicatorId: msg.clientId });
             applyWsPatch(msg.clientId, msg);
           } else if (msg.type === "indicator.preview" || msg.type === "indicator.update") {
             applyWsValues(msg.clientId, msg.values || {}, msg.barTime);
@@ -1085,50 +1094,53 @@ export function useIndicators({
         }
       }
 
-      // Update extended output states
-      const processedIds = new Set(processedResults.map((item) => item.id));
-      setMarkers((prev) => [
-        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
-        ...allMarkers,
-      ]);
-      setFills((prev) => [
-        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
-        ...allFills,
-      ]);
-      setHlines((prev) => [
-        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
-        ...allHlines,
-      ]);
-      setBgcolors((prev) => [
-        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
-        ...allBgcolors,
-      ]);
-      setBarcolors((prev) => [
-        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
-        ...allBarcolors,
-      ]);
-      setSignals((prev) => [
-        ...prev.filter((item) => !processedIds.has(item.indicatorId)),
-        ...allSignals,
-      ]);
-      if (Object.keys(newParamSchemas).length > 0) {
-        setParamSchemas((prev) => ({ ...prev, ...newParamSchemas }));
-      }
-
-      // Update state with computed line data
-      setActiveIndicators((prev) => {
-        const updated = [...prev];
-        for (const { id, mappedLines, error } of processedResults) {
-          const idx = updated.findIndex((i) => i.id === id);
-          if (idx === -1) continue;
-          updated[idx] = {
-            ...updated[idx],
-            lines: mappedLines,
-            error,
-            ...(newParamSchemas[id] ? { paramSchema: newParamSchemas[id] } : {}),
-          };
+      startTransition(() => {
+        // Update extended output states as non-urgent work so first K-line paint
+        // is not blocked by pane/annotation rebuilds.
+        const processedIds = new Set(processedResults.map((item) => item.id));
+        setMarkers((prev) => [
+          ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+          ...allMarkers,
+        ]);
+        setFills((prev) => [
+          ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+          ...allFills,
+        ]);
+        setHlines((prev) => [
+          ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+          ...allHlines,
+        ]);
+        setBgcolors((prev) => [
+          ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+          ...allBgcolors,
+        ]);
+        setBarcolors((prev) => [
+          ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+          ...allBarcolors,
+        ]);
+        setSignals((prev) => [
+          ...prev.filter((item) => !processedIds.has(item.indicatorId)),
+          ...allSignals,
+        ]);
+        if (Object.keys(newParamSchemas).length > 0) {
+          setParamSchemas((prev) => ({ ...prev, ...newParamSchemas }));
         }
-        return updated;
+
+        // Update state with computed line data
+        setActiveIndicators((prev) => {
+          const updated = [...prev];
+          for (const { id, mappedLines, error } of processedResults) {
+            const idx = updated.findIndex((i) => i.id === id);
+            if (idx === -1) continue;
+            updated[idx] = {
+              ...updated[idx],
+              lines: mappedLines,
+              error,
+              ...(newParamSchemas[id] ? { paramSchema: newParamSchemas[id] } : {}),
+            };
+          }
+          return updated;
+        });
       });
       // buildPaneData will be called by the useEffect watching activeIndicators
     } finally {
@@ -1246,13 +1258,28 @@ export function useIndicators({
     }
 
     let fired = false;
+    const isProvisional = isProvisionalChartData(chartDataMeta);
+    if (isProvisional) {
+      recordPerfEvent("indicator.compute.deferred", {
+        reason: "provisional-chart-data",
+        force: forceNow,
+        bars: chartData.length,
+      });
+    }
     // Use minimal delay: force recompute fires nearly immediately,
     // data-only changes use a longer debounce to batch rapid real-time ticks
     // and avoid triggering indicator series rebuilds on every WS message.
+    // Provisional first bars are deliberately delayed so the full history
+    // response can win and avoid a duplicate first-screen indicator compute.
+    const delayMs = isProvisional
+      ? PROVISIONAL_INDICATOR_DELAY_MS
+      : forceNow
+        ? 0
+        : INDICATOR_DATA_DEBOUNCE_MS;
     const timer = setTimeout(() => {
       fired = true;
       computeAll(forceNow);
-    }, forceNow ? 0 : 500);
+    }, delayMs);
     return () => {
       clearTimeout(timer);
       if (forceNow && !fired) {
@@ -1270,9 +1297,11 @@ export function useIndicators({
 
     const currentIndicators = activeIndicatorsRef.current;
     const currentChartData = chartDataRef.current;
+    const currentMeta = chartDataMetaRef.current;
 
     if (currentIndicators.length > 0 && currentChartData?.length > 0) {
-      const timer = setTimeout(() => computeAll(true), 50);
+      const delayMs = isProvisionalChartData(currentMeta) ? PROVISIONAL_INDICATOR_DELAY_MS : 50;
+      const timer = setTimeout(() => computeAll(true), delayMs);
       return () => clearTimeout(timer);
     }
   }, [seriesReady, computeAll]);

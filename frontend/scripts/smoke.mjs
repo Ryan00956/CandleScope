@@ -9,6 +9,21 @@ import path from "node:path";
 const DEFAULT_URL = "http://127.0.0.1:5173/";
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
+const SMOKE_ACTIVE_INDICATORS = [
+  {
+    id: "ma",
+    name: "Simple Moving Average",
+    engineName: "MA",
+    script: "# __ENGINE__:MA\nindicator(\"MA\", overlay=True)\n\nperiod = input.int(20, \"Period\", minval=1, maxval=500)\nsrc = input.source(close, \"Source\")\nline_color = input.color(color.orange, \"Color\")\n\nma = ta.sma(src, period)\nplot(ma, title=f\"MA({period})\", color=line_color, overlay=True)\n",
+    params: { period: 20, source: "close", color: "#f59e0b" },
+    description: "Simple Moving Average",
+    category: "Trend",
+    paneTarget: "main",
+    kind: "builtin",
+    isPreset: true,
+    visible: true,
+  },
+];
 
 function parseArgs(argv) {
   const args = {
@@ -16,6 +31,7 @@ function parseArgs(argv) {
     timeoutMs: Number(process.env.SMOKE_TIMEOUT_MS || DEFAULT_TIMEOUT_MS),
     chromePath: process.env.CHROME_PATH || "",
     screenshot: process.env.SMOKE_SCREENSHOT || "",
+    seedIndicators: process.env.SMOKE_SEED_INDICATORS !== "0",
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -24,6 +40,7 @@ function parseArgs(argv) {
     else if (arg === "--timeout-ms") args.timeoutMs = Number(argv[++i]);
     else if (arg === "--chrome") args.chromePath = argv[++i];
     else if (arg === "--screenshot") args.screenshot = argv[++i];
+    else if (arg === "--no-seed-indicators") args.seedIndicators = false;
   }
 
   return args;
@@ -315,6 +332,17 @@ async function readPerfReport(cdp) {
   return result.result?.value || null;
 }
 
+async function waitForPerfTiming(cdp, timingKey, timeoutMs = 10_000) {
+  const started = Date.now();
+  let report = await readPerfReport(cdp);
+  while (Date.now() - started < timeoutMs) {
+    if (report?.timings?.[timingKey] != null) return report;
+    await wait(500);
+    report = await readPerfReport(cdp);
+  }
+  return report;
+}
+
 async function openSettings(cdp) {
   const started = Date.now();
   const clickResult = await cdp.send("Runtime.evaluate", {
@@ -459,6 +487,16 @@ async function main() {
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable");
     await cdp.send("Page.enable");
+    if (args.seedIndicators) {
+      await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+        source: `
+          try {
+            localStorage.setItem("candlescope-active-indicators", ${JSON.stringify(JSON.stringify(SMOKE_ACTIVE_INDICATORS))});
+            localStorage.setItem("candlescope-vol-initialized", "1");
+          } catch {}
+        `,
+      });
+    }
     await cdp.send("Emulation.setDeviceMetricsOverride", {
       width: DEFAULT_VIEWPORT.width,
       height: DEFAULT_VIEWPORT.height,
@@ -470,7 +508,9 @@ async function main() {
     const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
     const lazySurfaces = await verifyLazySurfaces(cdp);
     const settings = await openSettings(cdp);
-    const performanceTimings = await readPerfReport(cdp);
+    const performanceTimings = args.seedIndicators
+      ? await waitForPerfTiming(cdp, "indicatorHostedSnapshotMs")
+      : await readPerfReport(cdp);
     const screenshotData = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
     fs.writeFileSync(screenshot, Buffer.from(screenshotData.data, "base64"));
 
@@ -493,6 +533,7 @@ async function main() {
       failures,
       warnings: warnings.slice(0, 20),
       screenshot,
+      seededIndicators: args.seedIndicators,
     };
 
     console.log(JSON.stringify(report, null, 2));
@@ -503,6 +544,7 @@ async function main() {
       || !report.drawingToolbarLoaded
       || !report.symbolSearchOpened
       || !report.settingsOpened
+      || (args.seedIndicators && !performanceTimings?.timings?.indicatorHostedSnapshotMs)
       || failures.length > 0;
     process.exitCode = failed ? 1 : 0;
   } finally {

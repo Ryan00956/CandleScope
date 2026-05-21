@@ -10,6 +10,7 @@ const TAB_RECOVERY_MIN_HIDDEN_MS = 5_000;
 
 export function useChartGapRecovery({
   loading,
+  dataReady = true,
   dataSource,
   symbol,
   exchange,
@@ -86,7 +87,7 @@ export function useChartGapRecovery({
   }, [recoverGaps]);
 
   useEffect(() => {
-    if (loading || dataSource === "mock") return undefined;
+    if (loading || !dataReady || dataSource === "mock") return undefined;
 
     const periodicTimer = setInterval(() => {
       if (!recoverGapsRef.current) return;
@@ -100,7 +101,7 @@ export function useChartGapRecovery({
     }, GAP_RECOVERY_SCAN_MS);
 
     return () => clearInterval(periodicTimer);
-  }, [dataSource, exchange, getCache, intervalRef, loading, marketType, symbol]);
+  }, [dataReady, dataSource, exchange, getCache, intervalRef, loading, marketType, symbol]);
 
   useEffect(() => {
     const handleVisibilityChange = async () => {

@@ -12,8 +12,10 @@ export function useChartBackgroundPrefetch({
   trackedIntervals,
   hasCache,
   setCache,
+  enabled = true,
 }) {
   useEffect(() => {
+    if (!enabled) return undefined;
     let cancelled = false;
 
     const prefetch = async () => {
@@ -47,5 +49,5 @@ export function useChartBackgroundPrefetch({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [exchange, hasCache, marketType, setCache, symbol, trackedIntervals]);
+  }, [enabled, exchange, hasCache, marketType, setCache, symbol, trackedIntervals]);
 }

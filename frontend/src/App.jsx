@@ -162,6 +162,7 @@ export default function App() {
   useEffect(() => {
     loadingRef.current = loading;
   }, [loading]);
+  const activeChartReady = chartData.length > 0 && chartDataMeta.status === "ready";
   const [error, setError] = useState(null);
 
   const [crosshairData, setCrosshairData] = useState(null);
@@ -497,10 +498,12 @@ export default function App() {
     trackedIntervals,
     hasCache,
     setCache,
+    enabled: activeChartReady,
   });
 
   const { resetGapRecovery } = useChartGapRecovery({
     loading,
+    dataReady: activeChartReady,
     dataSource,
     symbol,
     exchange,

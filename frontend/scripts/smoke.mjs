@@ -334,15 +334,30 @@ async function readPerfReport(cdp) {
   return result.result?.value || null;
 }
 
-async function waitForPerfTiming(cdp, timingKey, timeoutMs = 10_000) {
+async function waitForPerfTiming(cdp, timingKey, timeoutMs = 10_000, pollMs = 500) {
   const started = Date.now();
   let report = await readPerfReport(cdp);
   while (Date.now() - started < timeoutMs) {
     if (report?.timings?.[timingKey] != null) return report;
-    await wait(500);
+    await wait(pollMs);
     report = await readPerfReport(cdp);
   }
   return report;
+}
+
+async function waitForExpression(cdp, expression, timeoutMs = 5_000, pollMs = 50) {
+  const started = Date.now();
+  let matched = false;
+  while (Date.now() - started < timeoutMs) {
+    const result = await cdp.send("Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+    });
+    matched = Boolean(result.result?.value);
+    if (matched) return true;
+    await wait(pollMs);
+  }
+  return false;
 }
 
 async function openSettings(cdp) {
@@ -357,20 +372,16 @@ async function openSettings(cdp) {
     returnByValue: true,
   });
 
-  let settingsOpened = false;
-  let settingsOpenMs = null;
-  for (let i = 0; i < 20; i += 1) {
-    await wait(500);
-    const settingsResult = await cdp.send("Runtime.evaluate", {
-      expression: "Boolean(document.querySelector('.st-overlay .st-panel') && document.querySelector('.st-sidebar') && document.querySelector('.st-btn-close'))",
-      returnByValue: true,
-    });
-    settingsOpened = Boolean(settingsResult.result?.value);
-    if (settingsOpened) {
-      settingsOpenMs = Date.now() - started;
-      break;
-    }
-  }
+  const [settingsReport, settingsOpened] = await Promise.all([
+    waitForPerfTiming(cdp, "settingsOpenMs", 5_000, 25),
+    waitForExpression(
+      cdp,
+      "Boolean(document.querySelector('.st-overlay .st-panel') && document.querySelector('.st-sidebar') && document.querySelector('.st-btn-close'))",
+      5_000,
+      25,
+    ),
+  ]);
+  const settingsOpenMs = settingsReport?.timings?.settingsOpenMs ?? (settingsOpened ? Date.now() - started : null);
 
   return {
     settingsButtonClicked: Boolean(clickResult.result?.value),
@@ -380,21 +391,16 @@ async function openSettings(cdp) {
 }
 
 async function verifyLazySurfaces(cdp) {
-  const toolbarStarted = Date.now();
-  let drawingToolbarLoaded = false;
-  let drawingToolbarReadyMs = null;
-  for (let i = 0; i < 20; i += 1) {
-    await wait(500);
-    const toolbarResult = await cdp.send("Runtime.evaluate", {
-      expression: "Boolean(document.querySelector('.drawing-toolbar:not(.drawing-toolbar-loading) .drawing-tool-btn'))",
-      returnByValue: true,
-    });
-    drawingToolbarLoaded = Boolean(toolbarResult.result?.value);
-    if (drawingToolbarLoaded) {
-      drawingToolbarReadyMs = Date.now() - toolbarStarted;
-      break;
-    }
-  }
+  const [toolbarReport, drawingToolbarLoaded] = await Promise.all([
+    waitForPerfTiming(cdp, "drawingToolbarReadyMs", 10_000, 50),
+    waitForExpression(
+      cdp,
+      "Boolean(document.querySelector('.drawing-toolbar:not(.drawing-toolbar-loading) .drawing-tool-btn'))",
+      10_000,
+      50,
+    ),
+  ]);
+  const drawingToolbarReadyMs = toolbarReport?.timings?.drawingToolbarReadyMs ?? null;
 
   await cdp.send("Runtime.evaluate", {
     expression: "(() => { const button = document.querySelector('#symbol-selector'); if (!button) return false; button.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true })); button.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); button.dispatchEvent(new FocusEvent('focusin', { bubbles: true })); button.focus(); return true; })()",
@@ -407,20 +413,11 @@ async function verifyLazySurfaces(cdp) {
     returnByValue: true,
   });
 
-  let symbolSearchOpened = false;
-  let symbolSearchOpenMs = null;
-  for (let i = 0; i < 20; i += 1) {
-    await wait(500);
-    const symbolResult = await cdp.send("Runtime.evaluate", {
-      expression: "Boolean(document.querySelector('.sym-modal-overlay .sym-modal'))",
-      returnByValue: true,
-    });
-    symbolSearchOpened = Boolean(symbolResult.result?.value);
-    if (symbolSearchOpened) {
-      symbolSearchOpenMs = Date.now() - symbolStarted;
-      break;
-    }
-  }
+  const [symbolReport, symbolSearchOpened] = await Promise.all([
+    waitForPerfTiming(cdp, "symbolSearchOpenMs", 5_000, 25),
+    waitForExpression(cdp, "Boolean(document.querySelector('.sym-modal-overlay .sym-modal'))", 5_000, 25),
+  ]);
+  const symbolSearchOpenMs = symbolReport?.timings?.symbolSearchOpenMs ?? (symbolSearchOpened ? Date.now() - symbolStarted : null);
 
   await cdp.send("Runtime.evaluate", {
     expression: "document.querySelector('.sym-modal-close-btn')?.click()",

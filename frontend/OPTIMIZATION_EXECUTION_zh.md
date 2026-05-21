@@ -339,6 +339,35 @@ Phase 6 实现后说明：
   live true，failures 0，chartReadyMs 2,580，firstBarsMs 2,580，
   symbolSearchOpenMs 506，settingsOpenMs 521。
 
+## Phase 7：测量质量和 Overlay 渲染
+
+目标：先让下一轮优化能测到 500 ms 粗轮询以下的差异，再继续用证据推进图表渲染优化。
+
+第一 checkpoint：
+
+- 把 lazy-surface smoke timing 从依赖 500 ms DOM 轮询，改成等待应用自己的
+  performance marks。
+- DOM 可见性检查仍作为产品断言保留，但 timing 使用浏览器 performance report 里的
+  `settingsOpenMs`、`symbolSearchOpenMs` 和 `drawingToolbarReadyMs`。
+- hosted-indicator wait 继续使用原来的慢轮询；那条路径等的是 backend/runtime 工作，
+  不是 500 ms 以下的 UI 交互。
+
+测量 checkpoint 验收：
+
+- smoke script 级别 lint 通过。
+- build 仍在现有 chunk budgets 内。
+- 当 backend 和 Vite 可用时，smoke 输出的 lazy-surface timings 可以低于 500 ms。
+
+Phase 7 测量 checkpoint 实现后说明：
+
+- `scripts/smoke.mjs` 现在支持给 `waitForPerfTiming()` 配置轮询间隔，并新增
+  `waitForExpression()` 处理 DOM 断言。
+- Settings、symbol search 和 drawing toolbar readiness 优先使用 perf-report timing，
+  同时保留 DOM 检查来捕获产品行为损坏。
+- 本地验证：smoke script eslint 通过；Vite build 通过，app main chunk 约
+  148 kB minified。因为 `127.0.0.1:5173` 上的 Vite 和 `127.0.0.1:8000`
+  上的后端都未运行，本轮没有跑端到端 smoke。
+
 ## 验证命令
 
 常规命令：

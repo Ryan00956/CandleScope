@@ -66,3 +66,15 @@ Phase 7 先做测量质量，再继续渲染成本优化：
 4. 只有测量结果指向 `ChartPane` 结构本身时，再拆成 chart-owned helpers，
    例如 series managers 或 overlay controllers。
 5. 当 timing collection 足够精确后，再考虑在 CI 中产出 smoke timing snapshot。
+
+## Phase 7 进展
+
+第一轮测量质量 checkpoint 已实现：
+
+- Lazy-surface smoke waits 现在读取应用自己的 performance timings，不再用
+  500 ms DOM 轮询推导打开延迟。
+- DOM 可见性检查仍保留为产品断言。
+- 本地 script 级 lint 和 production build 已通过。
+
+下一步 Phase 7 是给 fills、markers、hlines 和 overlay series lifecycle 增加
+render events，再用这些 events 判断是否需要继续拆 `ChartPane` 内部结构。

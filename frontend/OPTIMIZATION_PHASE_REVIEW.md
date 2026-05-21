@@ -75,3 +75,16 @@ Start Phase 7 with measurement quality, then continue rendering work:
    controllers.
 5. Consider a CI artifact for smoke timing snapshots once the timing collection
    is precise enough.
+
+## Phase 7 Progress
+
+The first measurement-quality checkpoint is implemented:
+
+- Lazy-surface smoke waits now read app-owned performance timings instead of
+  deriving open latency from the 500 ms DOM polling loop.
+- DOM visibility checks remain in place as product assertions.
+- Script-level lint and production build passed locally.
+
+The next Phase 7 step is to add render events around fills, markers, hlines,
+and overlay series lifecycle, then use those events to decide whether any
+additional `ChartPane` internals should be split.

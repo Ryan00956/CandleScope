@@ -367,6 +367,38 @@ Implementation notes after Phase 6:
   connected true, live true, failures 0, chartReadyMs 2,580, firstBarsMs 2,580,
   symbolSearchOpenMs 506, settingsOpenMs 521.
 
+## Phase 7: Measurement Quality and Overlay Rendering
+
+Goal: make the next optimization pass measurable below the coarse smoke polling
+floor, then continue chart rendering work with evidence.
+
+First checkpoint:
+
+- Replace lazy-surface smoke timing that depended on 500 ms DOM polling with
+  waits against app-owned performance marks.
+- Keep DOM visibility checks as product assertions, but use
+  `settingsOpenMs`, `symbolSearchOpenMs`, and `drawingToolbarReadyMs` from the
+  browser performance report for timing.
+- Keep the hosted-indicator wait on the existing slower polling interval; that
+  path waits for backend/runtime work rather than a sub-500 ms UI interaction.
+
+Acceptance for the measurement checkpoint:
+
+- Script-level lint passes.
+- Build stays within existing chunk budgets.
+- When backend and Vite are available, smoke reports lazy-surface timings that
+  can fall below 500 ms.
+
+Implementation notes after Phase 7 measurement checkpoint:
+
+- `scripts/smoke.mjs` now supports configurable polling for
+  `waitForPerfTiming()` and adds `waitForExpression()` for DOM assertions.
+- Settings, symbol search, and drawing toolbar readiness now use perf-report
+  timings where available, with DOM checks preserved to catch product breakage.
+- Local validation: smoke script eslint passed; Vite build passed with app main
+  chunk about 148 kB minified. End-to-end smoke was not run because neither
+  Vite on `127.0.0.1:5173` nor the backend on `127.0.0.1:8000` was running.
+
 ## Verification Commands
 
 Use repository-local commands:

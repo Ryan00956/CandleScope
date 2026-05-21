@@ -7,6 +7,8 @@ React/Vite charting UI for CandleScope.
 - [Frontend Architecture](ARCHITECTURE.md)
 - [前端架构](ARCHITECTURE_zh.md)
 - [Runtime Boundaries](src/runtime/README.md)
+- [Frontend Cleanup Execution Plan](FRONTEND_CLEANUP_EXECUTION.md)
+- [前端清理执行计划](FRONTEND_CLEANUP_EXECUTION_zh.md)
 
 ## Backend Connection
 
@@ -41,6 +43,7 @@ Optimization execution notes:
 
 - [Architecture](ARCHITECTURE.md)
 - [Optimization Execution Plan](OPTIMIZATION_EXECUTION.md)
+- [Frontend Cleanup Execution Plan](FRONTEND_CLEANUP_EXECUTION.md)
 
 ```bash
 node ./node_modules/vite/bin/vite.js build

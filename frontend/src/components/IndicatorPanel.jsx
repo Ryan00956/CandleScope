@@ -9,11 +9,9 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   deleteCustomIndicator,
-  fetchPresets,
-  fetchPreset,
-  fetchCustomIndicators,
   saveCustomIndicator,
 } from "../services/indicatorApi";
+import { useIndicatorCatalogRuntime } from "../runtime/indicators/useIndicatorCatalogRuntime";
 import IndicatorEditor from "./IndicatorEditor";
 
 const CATEGORY_LABELS = {
@@ -143,9 +141,14 @@ export default function IndicatorPanel({
   onRecompute,
 }) {
   const [tab, setTab] = useState("presets"); // "presets" | "active" | "editor"
-  const [presets, setPresets] = useState([]);
-  const [customIndicators, setCustomIndicators] = useState([]);
-  const [presetsLoading, setPresetsLoading] = useState(false);
+  const {
+    customIndicators,
+    presets,
+    presetsLoading,
+    removeCustomIndicator,
+    resolvePresetForChart,
+    upsertCustomIndicator,
+  } = useIndicatorCatalogRuntime({ isOpen });
   const [searchQuery, setSearchQuery] = useState("");
   const [editingIndicator, setEditingIndicator] = useState(null);
 
@@ -249,76 +252,14 @@ export default function IndicatorPanel({
     };
   }, [isResizing, resize, stopResizing]);
 
-  // Load presets on first open
-  useEffect(() => {
-    if (!isOpen || presets.length !== 0) return;
-
-    let cancelled = false;
-    const loadIndicators = async () => {
-      setPresetsLoading(true);
-      try {
-        const [presetData, customData] = await Promise.all([fetchPresets(), fetchCustomIndicators()]);
-        if (cancelled) return;
-        setPresets(presetData);
-        setCustomIndicators((customData || []).map((item) => ({
-            ...item,
-            category: item.category || "custom",
-            is_builtin: false,
-            isPreset: false,
-            paneTarget: item.renderHints?.paneTarget || "sub",
-            securityMode: item.securityMode || "safe",
-        })));
-      } catch (err) {
-        console.error("Failed to load presets:", err);
-      } finally {
-        if (!cancelled) setPresetsLoading(false);
-      }
-    };
-
-    loadIndicators();
-    return () => {
-      cancelled = true;
-    };
-  }, [isOpen, presets.length]);
-
   const handleAddPreset = useCallback(async (preset) => {
     try {
-      if (preset.is_builtin === false || preset.isPreset === false || preset.kind === "script") {
-        onAddIndicator({
-          id: preset.id,
-          name: preset.name,
-          engineName: null,
-          script: preset.script,
-          params: preset.params || {},
-          description: preset.description || "",
-          category: preset.category || "custom",
-          paneTarget: preset.paneTarget || preset.renderHints?.paneTarget || "sub",
-          securityMode: preset.securityMode || "safe",
-          kind: "script",
-          isPreset: false,
-        });
-        setTab("active");
-        return;
-      }
-      // Fetch full preset with script
-      const full = await fetchPreset(preset.id);
-      onAddIndicator({
-        id: full.id,
-        name: full.name,
-        engineName: full.engineName || null,  // registry key for compute API
-        script: full.script,
-        params: full.params || {},
-        description: full.description || "",
-        category: full.category || "",
-        paneTarget: full.paneTarget || "sub",  // "main" or "sub"
-        kind: "builtin",
-        isPreset: true,
-      });
+      onAddIndicator(await resolvePresetForChart(preset));
       setTab("active");
     } catch (err) {
       console.error("Failed to add preset:", err);
     }
-  }, [onAddIndicator]);
+  }, [onAddIndicator, resolvePresetForChart]);
 
   const handleDeleteCustomPreset = useCallback(async (preset) => {
     if (isBuiltinIndicator(preset)) return;
@@ -327,7 +268,7 @@ export default function IndicatorPanel({
 
     try {
       await deleteCustomIndicator(preset.id);
-      setCustomIndicators((prev) => prev.filter((item) => item.id !== preset.id));
+      removeCustomIndicator(preset.id);
       if (activeIndicators.some((item) => item.id === preset.id)) {
         onRemoveIndicator(preset.id);
       }
@@ -335,7 +276,7 @@ export default function IndicatorPanel({
       console.error("Failed to delete custom indicator:", err);
       window.alert(`删除自定义指标失败：${err.message || err}`);
     }
-  }, [activeIndicators, onRemoveIndicator]);
+  }, [activeIndicators, onRemoveIndicator, removeCustomIndicator]);
 
   const handleCreateCustom = useCallback(() => {
     setEditingIndicator({
@@ -420,21 +361,7 @@ plot(ma, "MA", color=line_color)
         renderHints: { paneTarget: indicatorToSave.paneTarget || "sub" },
         securityMode: indicatorToSave.securityMode || "safe",
       });
-      setCustomIndicators((prev) => {
-        const item = {
-          ...saved,
-          category: "custom",
-          is_builtin: false,
-          isPreset: false,
-          paneTarget: saved.renderHints?.paneTarget || indicatorToSave.paneTarget || "sub",
-          securityMode: saved.securityMode || indicatorToSave.securityMode || "safe",
-        };
-        const idx = prev.findIndex((i) => i.id === item.id);
-        if (idx === -1) return [...prev, item];
-        const next = [...prev];
-        next[idx] = item;
-        return next;
-      });
+      upsertCustomIndicator(saved, indicatorToSave);
     } catch (err) {
       console.error("Failed to save custom indicator:", err);
     }
@@ -459,7 +386,7 @@ plot(ma, "MA", color=line_color)
     setTab("active");
     // No need to manually call onRecompute — the state changes above
     // already set pendingForceComputeRef which triggers automatic recompute
-  }, [activeIndicators, onAddIndicator, onUpdateScript, onUpdateParams, toCustomDraft]);
+  }, [activeIndicators, onAddIndicator, onUpdateScript, onUpdateParams, toCustomDraft, upsertCustomIndicator]);
 
   const handleEditorBack = useCallback(() => {
     setEditingIndicator(null);

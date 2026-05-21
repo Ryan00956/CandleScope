@@ -5,12 +5,55 @@ import { API_BASE, httpBaseToWsBase } from "./apiConfig";
 
 const CLIENT_INSTANCE_ID = Math.random().toString(36).slice(2, 10);
 
-async function request(url) {
-    const response = await fetch(url);
+export class ApiError extends Error {
+    constructor({ status, detail, url }) {
+        super(detail || `HTTP ${status}`);
+        this.name = "ApiError";
+        this.status = status;
+        this.detail = detail || `HTTP ${status}`;
+        this.url = url;
+    }
+}
+
+function buildUrl(path, params = {}) {
+    return buildUrlWithBase(API_BASE, path, params);
+}
+
+function buildWsUrl(path, params = {}) {
+    return buildUrlWithBase(httpBaseToWsBase(API_BASE), path, params);
+}
+
+function buildUrlWithBase(base, path, params = {}) {
+    const searchParams = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+        if (value === undefined || value === null || value === "") continue;
+        searchParams.set(key, String(value));
+    }
+    const query = searchParams.toString();
+    return `${base}${path}${query ? `?${query}` : ""}`;
+}
+
+async function request(url, { method = "GET", headers, body, signal } = {}) {
+    const requestHeaders = body && !(body instanceof FormData)
+        ? { "Content-Type": "application/json", ...headers }
+        : headers;
+    const response = await fetch(url, {
+        method,
+        headers: requestHeaders,
+        body: body && !(typeof body === "string" || body instanceof FormData)
+            ? JSON.stringify(body)
+            : body,
+        signal,
+    });
     if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
+        throw new ApiError({
+            status: response.status,
+            detail: errorData.detail || `HTTP ${response.status}`,
+            url,
+        });
     }
+    if (response.status === 204) return null;
     return response.json();
 }
 
@@ -20,9 +63,15 @@ export async function fetchKlines(
     limit = 500,
     marketType = "spot",
     exchange = "binance",
+    options = {},
 ) {
-    const url = `${API_BASE}/klines/?symbol=${symbol}&interval=${interval}&limit=${limit}&exchange=${exchange}&market_type=${marketType}`;
-    return request(url);
+    return request(buildUrl("/klines/", {
+        symbol,
+        interval,
+        limit,
+        exchange,
+        market_type: marketType,
+    }), { signal: options.signal });
 }
 
 export async function fetchKlinesHistory(
@@ -31,9 +80,15 @@ export async function fetchKlinesHistory(
     days = 7,
     marketType = "spot",
     exchange = "binance",
+    options = {},
 ) {
-    const url = `${API_BASE}/klines/history?symbol=${symbol}&interval=${interval}&days=${days}&exchange=${exchange}&market_type=${marketType}`;
-    return request(url);
+    return request(buildUrl("/klines/history", {
+        symbol,
+        interval,
+        days,
+        exchange,
+        market_type: marketType,
+    }), { signal: options.signal });
 }
 
 export async function fetchKlinesBefore(
@@ -43,9 +98,16 @@ export async function fetchKlinesBefore(
     bars = 500,
     marketType = "spot",
     exchange = "binance",
+    options = {},
 ) {
-    const url = `${API_BASE}/klines/history/before?symbol=${symbol}&interval=${interval}&before=${before}&bars=${bars}&exchange=${exchange}&market_type=${marketType}`;
-    return request(url);
+    return request(buildUrl("/klines/history/before", {
+        symbol,
+        interval,
+        before,
+        bars,
+        exchange,
+        market_type: marketType,
+    }), { signal: options.signal });
 }
 
 export async function fetchLatestKlines(
@@ -55,18 +117,18 @@ export async function fetchLatestKlines(
     marketType = "spot",
     exchange = "binance",
     source = "",
+    options = {},
 ) {
-    const params = new URLSearchParams({
+    const params = {
         symbol,
         interval,
-        limit: String(limit),
+        limit,
         exchange,
         market_type: marketType,
         client_id: CLIENT_INSTANCE_ID,
-    });
-    if (source) params.set("source", source);
-    const url = `${API_BASE}/klines/latest?${params.toString()}`;
-    return request(url);
+        source,
+    };
+    return request(buildUrl("/klines/latest", params), { signal: options.signal });
 }
 
 export async function fetchKlinesRange(
@@ -78,47 +140,50 @@ export async function fetchKlinesRange(
     exchange = "binance",
     options = {},
 ) {
-    const params = new URLSearchParams({
+    const params = {
         symbol,
         interval,
-        start_ms: String(Math.max(0, Math.floor(startSec * 1000))),
-        end_ms: String(Math.max(0, Math.floor(endSec * 1000))),
+        start_ms: Math.max(0, Math.floor(startSec * 1000)),
+        end_ms: Math.max(0, Math.floor(endSec * 1000)),
         exchange,
         market_type: marketType,
         repair: options.repair || "async",
-        wait_ms: String(options.waitMs ?? 0),
-        strict: String(options.strict ?? false),
-    });
-    const url = `${API_BASE}/klines/range?${params.toString()}`;
-    return request(url);
+        wait_ms: options.waitMs ?? 0,
+        strict: options.strict ?? false,
+    };
+    return request(buildUrl("/klines/range", params), { signal: options.signal });
 }
 
-export async function resolveInterval(interval = "1h") {
-    const url = `${API_BASE}/klines/resolve?interval=${interval}`;
-    return request(url);
+export async function resolveInterval(interval = "1h", options = {}) {
+    return request(buildUrl("/klines/resolve", { interval }), { signal: options.signal });
 }
 
 /** Single-interval WebSocket URL (legacy) */
 export function getKlineStreamUrl(symbol = "BTCUSDT", interval = "1h", marketType = "spot", exchange = "binance") {
-    const wsBase = httpBaseToWsBase(API_BASE);
-    return `${wsBase}/stream/klines?symbol=${symbol}&interval=${interval}&exchange=${exchange}&market_type=${marketType}`;
+    return buildWsUrl("/stream/klines", {
+        symbol,
+        interval,
+        exchange,
+        market_type: marketType,
+    });
 }
 
 /** Multi-interval WebSocket URL — one connection for all intervals */
 export function getMultiStreamUrl(symbol = "BTCUSDT", marketType = "spot", exchange = "binance") {
-    const wsBase = httpBaseToWsBase(API_BASE);
-    return `${wsBase}/stream/klines_multi?symbol=${symbol}&exchange=${exchange}&market_type=${marketType}`;
+    return buildWsUrl("/stream/klines_multi", {
+        symbol,
+        exchange,
+        market_type: marketType,
+    });
 }
 
 // ── Exchange Info API ────────────────────────────────────────
 
 export async function fetchExchangeInfo(marketType = "", exchange = "") {
-    const searchParams = new URLSearchParams();
-    if (marketType) searchParams.set("market_type", marketType);
-    if (exchange) searchParams.set("exchange", exchange);
-    const params = searchParams.toString() ? `?${searchParams.toString()}` : "";
-    const url = `${API_BASE}/symbols/exchange-info${params}`;
-    return request(url);
+    return request(buildUrl("/symbols/exchange-info", {
+        market_type: marketType,
+        exchange,
+    }));
 }
 
 export async function fetchSupportedExchanges() {
@@ -127,14 +192,7 @@ export async function fetchSupportedExchanges() {
 }
 
 export async function refreshExchangeInfo(exchange = "") {
-    const params = exchange ? `?exchange=${encodeURIComponent(exchange)}` : "";
-    const url = `${API_BASE}/symbols/exchange-info/refresh${params}`;
-    const response = await fetch(url, { method: "POST" });
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-    }
-    return response.json();
+    return request(buildUrl("/symbols/exchange-info/refresh", { exchange }), { method: "POST" });
 }
 
 // ── Proxy Settings API ──────────────────────────────────────
@@ -146,75 +204,49 @@ export async function fetchProxySettings() {
 
 export async function updateProxySettings({ mode, custom_proxy }) {
     const url = `${API_BASE}/settings/proxy`;
-    const response = await fetch(url, {
+    return request(url, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, custom_proxy: custom_proxy || null }),
+        body: { mode, custom_proxy: custom_proxy || null },
     });
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-    }
-    return response.json();
 }
 
 export async function testProxyConnection({ mode, custom_proxy }) {
     const url = `${API_BASE}/settings/proxy/test`;
-    const response = await fetch(url, {
+    return request(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, custom_proxy: custom_proxy || null }),
+        body: { mode, custom_proxy: custom_proxy || null },
     });
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-    }
-    return response.json();
 }
 
 export async function updateCacheLimits({ dbLimits, ephemeralBars }) {
     const url = `${API_BASE}/settings/cache-limits`;
-    const response = await fetch(url, {
+    return request(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: {
             db_limits: dbLimits,
             ephemeral_bars: ephemeralBars,
-        }),
+        },
     });
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-    }
-    return response.json();
 }
 
 export async function repairStoredCustomIntervals({ marketType = "spot", exchange = "binance", symbols = [] } = {}) {
-    const url = `${API_BASE}/settings/storage/repair?market_type=${marketType}&exchange=${exchange}`;
-    const response = await fetch(url, {
+    return request(buildUrl("/settings/storage/repair", {
+        market_type: marketType,
+        exchange,
+    }), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols }),
+        body: { symbols },
     });
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-    }
-    return response.json();
 }
 
 export async function scanAndFillGaps({ marketType = "spot", exchange = "binance", symbols = [] } = {}) {
-    const url = `${API_BASE}/settings/storage/gap-scan?market_type=${marketType}&exchange=${exchange}`;
-    const response = await fetch(url, {
+    return request(buildUrl("/settings/storage/gap-scan", {
+        market_type: marketType,
+        exchange,
+    }), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols }),
+        body: { symbols },
     });
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-    }
-    return response.json();
 }
 
 // ── Subscription API ────────────────────────────────────────
@@ -231,26 +263,15 @@ export async function fetchSubscription(symbol) {
 
 export async function updateSubscriptionTier(symbol, tier) {
     const url = `${API_BASE}/subscriptions/${encodeURIComponent(symbol)}`;
-    const response = await fetch(url, {
+    return request(url, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tier }),
+        body: { tier },
     });
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-    }
-    return response.json();
 }
 
 export async function removeSubscription(symbol) {
     const url = `${API_BASE}/subscriptions/${encodeURIComponent(symbol)}`;
-    const response = await fetch(url, { method: "DELETE" });
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-    }
-    return response.json();
+    return request(url, { method: "DELETE" });
 }
 
 /**
@@ -259,16 +280,10 @@ export async function removeSubscription(symbol) {
  */
 export async function syncWatchlistSymbols(symbols) {
     const url = `${API_BASE}/subscriptions/sync`;
-    const response = await fetch(url, {
+    return request(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbols }),
+        body: { symbols },
     });
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `HTTP ${response.status}`);
-    }
-    return response.json();
 }
 
 export async function fetchPricesSnapshot() {

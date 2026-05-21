@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { registerPyneLanguageSupport } from "../editor/pyneLanguage";
 import { registerPyneTheme, getPyneEditorOptions } from "../editor/pyneTheme";
-import { fetchPyneSecurityPolicy } from "../services/indicatorApi";
+import { usePyneSecurityPolicy } from "../runtime/indicators/usePyneSecurityPolicy";
 
 /** Track whether Pyne providers have been registered globally */
 let pyneRegistered = false;
@@ -30,7 +30,7 @@ export default function IndicatorEditor({
   const [name, setName] = useState(indicator?.name || "My Indicator");
   const [script, setScript] = useState(indicator?.script || "");
   const [securityMode, setSecurityMode] = useState(indicator?.securityMode || "safe");
-  const [securityPolicy, setSecurityPolicy] = useState(null);
+  const securityPolicy = usePyneSecurityPolicy();
   const editorRef = useRef(null);
 
   const handlePreview = useCallback(() => {
@@ -108,20 +108,6 @@ export default function IndicatorEditor({
     return () => {
       // Don't dispose global providers — they persist across editor instances
       editorRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchPyneSecurityPolicy()
-      .then((policy) => {
-        if (!cancelled) setSecurityPolicy(policy);
-      })
-      .catch(() => {
-        if (!cancelled) setSecurityPolicy(null);
-      });
-    return () => {
-      cancelled = true;
     };
   }, []);
 

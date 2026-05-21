@@ -355,6 +355,10 @@ export default function App() {
     [exchange, exchangeCatalog, savedCustomIntervals],
   );
   const baseWsIntervals = useMemo(() => getBaseWsIntervals(exchange, exchangeCatalog), [exchange, exchangeCatalog]);
+  const getExchangeIntervalDays = useCallback(
+    (intv, ex = exchange) => getIntervalDays(intv, ex, exchangeCatalog),
+    [exchange, exchangeCatalog],
+  );
   const trackedIntervals = useMemo(
     () => Array.from(new Set([...baseWsIntervals, ...savedCustomIntervals, interval])),
     [interval, savedCustomIntervals, baseWsIntervals],
@@ -423,7 +427,7 @@ export default function App() {
   const loadData = useChartInitialLoad({
     exchange,
     marketType,
-    getIntervalDays,
+    getIntervalDays: getExchangeIntervalDays,
     getFromCache,
     replaceChartData,
     clearChartData,
@@ -454,7 +458,7 @@ export default function App() {
     pendingInitialHistoryRef,
     pendingLoadMoreLeftRef,
     cacheKey,
-    getIntervalDays,
+    getIntervalDays: getExchangeIntervalDays,
     mergeCacheData,
     commitMergedChartData,
     requestIndicatorRange,
@@ -472,7 +476,7 @@ export default function App() {
     trackedIntervals,
     trackedIntervalsRef,
     intervalRef,
-    getIntervalDays,
+    getIntervalDays: getExchangeIntervalDays,
     commitMergedChartData,
     commitPatchedChartData,
     patchCacheTick,
@@ -501,7 +505,7 @@ export default function App() {
     marketType,
     intervalRef,
     trackedIntervalsRef,
-    getIntervalDays,
+    getIntervalDays: getExchangeIntervalDays,
     getCache,
     mergeCacheData,
     commitMergedChartData,

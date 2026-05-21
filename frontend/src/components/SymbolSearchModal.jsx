@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { markPerf } from "../runtime/performance/perfMarks";
-import { fetchExchangeInfo, refreshExchangeInfo } from "../services/api";
-import { symbolKey } from "../utils/symbolKey";
+import { useSymbolCatalogRuntime } from "../runtime/exchange/useSymbolCatalogRuntime";
 
 // ── Constants ────────────────────────────────────────────────
 const FAVORITES_KEY = "candlescope-favorite-symbols-v2";
@@ -38,9 +37,12 @@ export default function SymbolSearchModal({
   const [favorites, setFavorites] = useState(loadFavorites);
   const [highlightIndex, setHighlightIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
-  const [allSymbols, setAllSymbols] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const {
+    allSymbols,
+    loading,
+    refreshing,
+    refreshSymbols: handleRefresh,
+  } = useSymbolCatalogRuntime({ currentExchange, open });
   // ── Right-click context menu state ──
   const [ctxMenu, setCtxMenu] = useState(null); // { x, y, symbol }
 
@@ -52,42 +54,22 @@ export default function SymbolSearchModal({
     if (open) markPerf("lazy.symbolSearch.ready");
   }, [open]);
 
-  // ── Load exchange info ──
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    if (allSymbols.length === 0) {
-      setLoading(true);
-      fetchExchangeInfo()
-        .then((data) => {
-          if (!cancelled && data?.symbols) {
-            // Enrich with exchange and marketType defaults
-            const enriched = data.symbols.map((s) => ({
-              ...s,
-              exchange: s.exchange || "binance",
-              marketType: s.marketType || "spot",
-              _key: symbolKey(s.symbol, s.marketType || "spot", s.exchange || "binance"),
-            }));
-            setAllSymbols(enriched);
-          }
-        })
-        .catch((err) => console.warn("Failed to load exchange info:", err))
-        .finally(() => { if (!cancelled) setLoading(false); });
-    }
-    return () => { cancelled = true; };
-  }, [open, allSymbols.length]);
-
   // ── Auto-focus & reset on open ──
   useEffect(() => {
-    if (open) {
+    if (!open) return undefined;
+    const resetTimer = setTimeout(() => {
       setSearch("");
       setMarketType(currentMarketType || "spot");
       setExchangeFilter(new Set([currentExchange || "binance"]));
       setHighlightIndex(0);
       setScrollTop(0);
       setCtxMenu(null);
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
+    }, 0);
+    const focusTimer = setTimeout(() => inputRef.current?.focus(), 50);
+    return () => {
+      clearTimeout(resetTimer);
+      clearTimeout(focusTimer);
+    };
   }, [currentExchange, currentMarketType, open]);
 
   const exchangeChips = useMemo(() => {
@@ -125,7 +107,9 @@ export default function SymbolSearchModal({
   useEffect(() => {
     if (marketType === "favorites") return;
     if (marketTabs.some((tab) => tab.key === marketType)) return;
-    setMarketType(marketTabs.find((tab) => tab.key !== "favorites")?.key || "favorites");
+    const nextMarketType = marketTabs.find((tab) => tab.key !== "favorites")?.key || "favorites";
+    const timer = setTimeout(() => setMarketType(nextMarketType), 0);
+    return () => clearTimeout(timer);
   }, [marketTabs, marketType]);
 
   // ── Filter logic ──
@@ -166,9 +150,12 @@ export default function SymbolSearchModal({
 
   // ── Clamp highlight when filter changes ──
   useEffect(() => {
-    setHighlightIndex(0);
-    setScrollTop(0);
-    if (listRef.current) listRef.current.scrollTop = 0;
+    const timer = setTimeout(() => {
+      setHighlightIndex(0);
+      setScrollTop(0);
+      if (listRef.current) listRef.current.scrollTop = 0;
+    }, 0);
+    return () => clearTimeout(timer);
   }, [marketType, exchangeFilter, quoteFilter, search]);
 
   // ── Handlers ──
@@ -215,27 +202,6 @@ export default function SymbolSearchModal({
       return next;
     });
   }, []);
-
-  const handleRefresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      await refreshExchangeInfo(currentExchange);
-      const data = await fetchExchangeInfo();
-      if (data?.symbols) {
-        const enriched = data.symbols.map((s) => ({
-          ...s,
-          exchange: s.exchange || "binance",
-          marketType: s.marketType || "spot",
-          _key: symbolKey(s.symbol, s.marketType || "spot", s.exchange || "binance"),
-        }));
-        setAllSymbols(enriched);
-      }
-    } catch (err) {
-      console.warn("Refresh failed:", err);
-    } finally {
-      setRefreshing(false);
-    }
-  }, [currentExchange]);
 
   // ── Right-click handler for rows ──
   const handleRowContextMenu = useCallback((e, sym, sKey) => {

@@ -146,7 +146,9 @@ export function useChartInitialLoad({
       const retryInitialHistory = async () => {
         if (controller.signal.aborted || stoppedRetrying) return false;
         try {
-          const retryResult = await fetchKlinesHistory(sym, intv, days, mt, ex);
+          const retryResult = await fetchKlinesHistory(sym, intv, days, mt, ex, {
+            signal: controller.signal,
+          });
           if (controller.signal.aborted || stoppedRetrying) return false;
           if (retryResult?.data?.length) {
             markPerf("chart.initialLoad.retry.success", {
@@ -201,7 +203,7 @@ export function useChartInitialLoad({
     markPerf("chart.initialLoad.history.request", { exchange: ex, marketType: mt, symbol: sym, interval: intv, days });
 
     await Promise.all([
-      fetchLatestKlines(sym, intv, 5, mt, ex)
+      fetchLatestKlines(sym, intv, 5, mt, ex, "", { signal: controller.signal })
         .then((result) => {
           markPerf("chart.initialLoad.latest.response", {
             source: result?.source || "unknown",
@@ -210,7 +212,7 @@ export function useChartInitialLoad({
           commitQuickResult(result);
         })
         .catch(() => null),
-      fetchKlinesHistory(sym, intv, days, mt, ex)
+      fetchKlinesHistory(sym, intv, days, mt, ex, { signal: controller.signal })
         .then((result) => {
           markPerf("chart.initialLoad.history.response", {
             source: result?.source || "unknown",

@@ -56,6 +56,33 @@ const EXCHANGE_INTERVALS = {
   },
 };
 
+function normalizeIntervalDayMap(value) {
+  if (!value) return {};
+  if (Array.isArray(value)) {
+    return Object.fromEntries(
+      value
+        .map((item) => [item?.interval || item?.value, item?.days ?? item?.history_days ?? item?.default_days])
+        .filter(([interval, days]) => interval && Number.isFinite(Number(days)))
+        .map(([interval, days]) => [interval, Number(days)]),
+    );
+  }
+  if (typeof value !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, days]) => Number.isFinite(Number(days)))
+      .map(([interval, days]) => [interval, Number(days)]),
+  );
+}
+
+function getCapabilityIntervalDays(item) {
+  return {
+    ...normalizeIntervalDayMap(item.default_history_days),
+    ...normalizeIntervalDayMap(item.default_history_days_by_interval),
+    ...normalizeIntervalDayMap(item.history_window_days),
+    ...normalizeIntervalDayMap(item.history_windows),
+  };
+}
+
 function labelInterval(value) {
   const match = String(value || "").match(/^(\d+)([a-zA-Z]+)$/);
   if (!match) return String(value || "");
@@ -78,12 +105,17 @@ function buildExchangeCatalog(exchanges) {
     const intervals = (item.native_intervals || [])
       .map(intervalItemFromValue)
       .filter(Boolean);
+    const capabilityIntervalDays = getCapabilityIntervalDays(item);
+    const fallbackIntervalDays = fallback.intervalDays || {};
     catalog[exchangeId] = {
       id: exchangeId,
       label: item.name || fallback.label || labelInterval(exchangeId),
       markets: Array.isArray(item.markets) ? item.markets : [],
       nativeIntervals: intervals.length > 0 ? intervals : (fallback.intervals || []),
-      intervalDays: fallback.intervalDays || {},
+      intervalDays: Object.keys(capabilityIntervalDays).length > 0
+        ? capabilityIntervalDays
+        : fallbackIntervalDays,
+      intervalDaysSource: Object.keys(capabilityIntervalDays).length > 0 ? "capability" : "fallback",
       protocolFeatures: new Set(item.protocol_features || []),
       limits: item.limits || {},
       knownLimitations: item.known_limitations || [],
@@ -102,6 +134,7 @@ export function getExchangeConfig(exchange, catalog = null) {
     markets: [],
     nativeIntervals: EXCHANGE_INTERVALS[key]?.intervals || EXCHANGE_INTERVALS.binance.intervals,
     intervalDays: EXCHANGE_INTERVALS[key]?.intervalDays || {},
+    intervalDaysSource: "fallback",
     protocolFeatures: new Set(),
     limits: {},
     knownLimitations: [],
@@ -134,8 +167,8 @@ export function buildSortedIntervals(savedCustom, exchange = "binance", catalog 
   return groupIntervalsByDuration(all);
 }
 
-export function getIntervalDays(intv, exchange = "binance") {
-  const config = EXCHANGE_INTERVALS[exchange] || EXCHANGE_INTERVALS.binance;
+export function getIntervalDays(intv, exchange = "binance", catalog = null) {
+  const config = getExchangeConfig(exchange, catalog);
   if (config.intervalDays[intv]) return config.intervalDays[intv];
   const secs = parseIntervalSeconds(intv);
   if (!secs) return 7;

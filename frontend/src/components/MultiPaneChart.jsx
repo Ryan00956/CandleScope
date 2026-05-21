@@ -90,7 +90,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     // Selection style sync — fired when the currently selected drawing on the
     // main pane changes (or is cleared). Lets the parent mirror its style.
     onSelectedDrawingChange,
-    // Indicator data — computed by useIndicators (multi-pane version)
+    // Indicator data — computed by the indicators feature runtime
     // mainOverlayLines: [{data, color, ...}]  — overlay lines for main chart
     // subPanes: [{id, label, lines: [...]}]    — each sub pane with its lines
     mainOverlayLines = [],

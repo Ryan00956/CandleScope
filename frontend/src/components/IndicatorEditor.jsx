@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { registerPyneLanguageSupport } from "../editor/pyneLanguage";
 import { registerPyneTheme, getPyneEditorOptions } from "../editor/pyneTheme";
-import { usePyneSecurityPolicy } from "../runtime/indicators/usePyneSecurityPolicy";
+import { usePyneSecurityPolicy } from "../features/indicators/usePyneSecurityPolicy";
 
 /** Track whether Pyne providers have been registered globally */
 let pyneRegistered = false;

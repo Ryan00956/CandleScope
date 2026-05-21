@@ -7,7 +7,7 @@ import TopBar from "./components/app-shell/TopBar";
 import { loadUserPrefs, updateUserPref } from "./features/chart-session/chartSessionModel";
 import { useChartSession } from "./features/chart-session/useChartSession";
 import { useMarketDataRuntime } from "./features/market-data/useMarketDataRuntime";
-import { useIndicators } from "./hooks/useIndicators";
+import { useIndicatorRuntime } from "./features/indicators/useIndicatorRuntime";
 import { useCacheLimitsSync } from "./runtime/preferences/useCacheLimitsSync";
 import { useChartExportRuntime } from "./runtime/workflows/useChartExportRuntime";
 import { useChartSettingsRuntime } from "./runtime/preferences/useChartSettingsRuntime";
@@ -110,7 +110,6 @@ export default function App() {
     requestIndicatorRange: requestIndicatorRangeForMarketData,
   });
   const {
-    bars: chartData,
     renderBars: renderChartData,
     meta: chartDataMeta,
     loading,
@@ -131,7 +130,6 @@ export default function App() {
     loadingMoreLeft,
     hasMoreLeft,
     canLoadMoreLeft,
-    activeChartReady,
     barCount,
   } = marketData.status;
 
@@ -172,16 +170,32 @@ export default function App() {
     handlePriceScaleModeChange,
   } = usePriceScalePrefs({ loadUserPrefs, updateUserPref });
 
-  // --- Settings state (must be before useIndicators which needs settings.upColor/downColor) ---
+  // --- Settings state (must be before indicators which need settings.upColor/downColor) ---
   const [showSettings, setShowSettings] = useState(false);
   const { settings, setSettings, resolvedTheme } = useChartSettingsRuntime();
 
   // --- Indicator state ---
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);
   const [showAlertsPanel, setShowAlertsPanel] = useState(false);
+  const indicators = useIndicatorRuntime({
+    session: chartSession,
+    marketData,
+    candleUpColor: settings.upColor,
+    candleDownColor: settings.downColor,
+  });
   const {
     activeIndicators,
-    computing: indicatorComputing,
+    mainOverlayLines,
+    subPanes,
+    markers: indicatorMarkers,
+    fills: indicatorFills,
+    hlines: indicatorHlines,
+    bgcolors: indicatorBgcolors,
+    barcolors: indicatorBarcolors,
+    paramSchemas: indicatorParamSchemas,
+  } = indicators.view;
+  const { computing: indicatorComputing } = indicators.status;
+  const {
     addIndicator,
     removeIndicator: rawRemoveIndicator,
     toggleVisibility,
@@ -189,27 +203,7 @@ export default function App() {
     updateIndicatorScript,
     recompute: recomputeIndicatorsWithUI,
     requestIndicatorRange,
-    mainOverlayLines,
-    subPanes,
-    // Extended output types (Pyne drawing API)
-    markers: indicatorMarkers,
-    fills: indicatorFills,
-    hlines: indicatorHlines,
-    bgcolors: indicatorBgcolors,
-    barcolors: indicatorBarcolors,
-    paramSchemas: indicatorParamSchemas,
-  } = useIndicators({
-    chartData,
-    chartDataMeta,
-    datasetKey,
-    seriesReady: activeChartReady ? 1 : 0,
-    candleUpColor: settings.upColor,
-    candleDownColor: settings.downColor,
-    symbol,
-    interval,
-    marketType,
-    exchange,
-  });
+  } = indicators.actions;
 
   useEffect(() => {
     indicatorRangeRequestRef.current = requestIndicatorRange;

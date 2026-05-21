@@ -3,7 +3,7 @@ export function loadSettingsModal() {
 }
 
 export function loadIndicatorPanel() {
-  return import("../IndicatorPanel");
+  return import("../../features/indicators/IndicatorPanel");
 }
 
 export function loadAlertsPanel() {

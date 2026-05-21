@@ -11,7 +11,7 @@ import {
   deleteCustomIndicator,
   saveCustomIndicator,
 } from "../services/indicatorApi";
-import { useIndicatorCatalogRuntime } from "../runtime/indicators/useIndicatorCatalogRuntime";
+import { useIndicatorCatalogRuntime } from "../features/indicators/useIndicatorCatalogRuntime";
 import IndicatorEditor from "./IndicatorEditor";
 
 const CATEGORY_LABELS = {
@@ -367,7 +367,7 @@ plot(ma, "MA", color=line_color)
     }
 
     if (!shouldFork && activeIndicators.some((i) => i.id === saved.id)) {
-      // Update existing — these already trigger pendingForceCompute in useIndicators
+      // Update existing — these already trigger pendingForceCompute in the indicators runtime
       onUpdateScript(saved.id, saved.script);
       if (saved.params) onUpdateParams(saved.id, saved.params);
     } else {

@@ -433,6 +433,11 @@ Measured follow-up after event summary:
   `chart.indicatorSeries.create: 3`, `chart.indicatorSeries.setData: 3`, and
   `chart.indicatorSeries.update: 1`. App main chunk stayed within budget at
   about 149 kB minified.
+- Production preview smoke on `127.0.0.1:4173` showed the remaining duplicate
+  `volume-vol` rebuild from dev smoke was not present outside Vite dev
+  StrictMode behavior. Preview result: `chart.markerSeries.clear: 2`,
+  `chart.indicatorSeries.create: 2`, `chart.indicatorSeries.setData: 2`, and
+  `chart.indicatorSeries.update: 1`, matching one MA line plus one VOL line.
 
 ## Verification Commands
 

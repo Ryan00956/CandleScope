@@ -93,3 +93,6 @@ Overlay instrumentation checkpoint 现在也已实现：
 - 基线 smoke 在无 marker 数据时报告 `chart.markerSeries.clear: 37`。
 - `ChartPane` 现在会记住某个 target series 已经处于 marker-empty 状态。
 - 跟进 smoke 报告 `chart.markerSeries.clear: 6`，且无产品失败。
+- Production preview 报告 `chart.indicatorSeries.create: 2` 和
+  `chart.indicatorSeries.setData: 2`，所以 Vite dev 里额外的 `volume-vol`
+  rebuild 先视为 StrictMode/dev 噪声，不作为生产热路径继续硬改。

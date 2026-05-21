@@ -396,6 +396,11 @@ event summary 后的实测跟进：
 - 跟进 smoke 通过：`chart.markerSeries.clear: 6`，
   `chart.indicatorSeries.create: 3`，`chart.indicatorSeries.setData: 3`，
   `chart.indicatorSeries.update: 1`。app main chunk 仍在预算内，约 149 kB minified。
+- 在 `127.0.0.1:4173` 跑 production preview smoke 后确认，dev smoke 里剩余的
+  `volume-vol` 重复 rebuild 没有出现在 Vite dev StrictMode 之外。preview 结果：
+  `chart.markerSeries.clear: 2`，`chart.indicatorSeries.create: 2`，
+  `chart.indicatorSeries.setData: 2`，`chart.indicatorSeries.update: 1`，
+  对应一条 MA line 和一条 VOL line。
 
 ## 验证命令
 

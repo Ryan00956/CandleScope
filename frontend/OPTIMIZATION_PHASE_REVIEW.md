@@ -105,3 +105,6 @@ The first measured cleanup reduced repeated empty marker clears:
 - `ChartPane` now remembers when a target series is already marker-empty.
 - Follow-up smoke reported `chart.markerSeries.clear: 6` with no product
   failures.
+- Production preview reported `chart.indicatorSeries.create: 2` and
+  `chart.indicatorSeries.setData: 2`, so the extra `volume-vol` rebuild seen in
+  Vite dev is treated as StrictMode/dev noise rather than a production hot path.

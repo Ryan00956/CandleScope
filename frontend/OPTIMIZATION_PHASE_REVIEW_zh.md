@@ -87,3 +87,9 @@ Overlay instrumentation checkpoint 现在也已实现：
   原始 performance event list。
 - 本轮刻意只做观测，不改变渲染策略。下一步可以根据事件频率和点数决定优化方向，
   而不是只凭源码结构判断。
+
+第一轮基于实测的 cleanup 已减少重复 empty marker clears：
+
+- 基线 smoke 在无 marker 数据时报告 `chart.markerSeries.clear: 37`。
+- `ChartPane` 现在会记住某个 target series 已经处于 marker-empty 状态。
+- 跟进 smoke 报告 `chart.markerSeries.clear: 6`，且无产品失败。

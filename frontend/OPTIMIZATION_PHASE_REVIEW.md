@@ -98,3 +98,10 @@ The overlay instrumentation checkpoint is now implemented:
 - The pass is intentionally observational. It does not change rendering
   strategy, so the next decision can be based on event frequency and point
   counts rather than source-code shape alone.
+
+The first measured cleanup reduced repeated empty marker clears:
+
+- Baseline smoke reported `chart.markerSeries.clear: 37` with no marker data.
+- `ChartPane` now remembers when a target series is already marker-empty.
+- Follow-up smoke reported `chart.markerSeries.clear: 6` with no product
+  failures.

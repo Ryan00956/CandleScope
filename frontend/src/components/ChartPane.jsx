@@ -969,6 +969,7 @@ const ChartPane = forwardRef(function ChartPane({
     // Lightweight Charts supports setMarkers() on any series.
     // Main pane uses the candle series; sub panes use the first indicator series.
     const markerTargetRef = useRef(null);
+    const markerStateRef = useRef({ target: null, state: "unknown" });
 
     useEffect(() => {
         const targetSeries = paneType === "main"
@@ -976,6 +977,7 @@ const ChartPane = forwardRef(function ChartPane({
             : drawingAnchorSeriesRef.current;
         if (markerTargetRef.current && markerTargetRef.current !== targetSeries) {
             try { markerTargetRef.current.setMarkers([]); } catch { /* */ }
+            markerStateRef.current = { target: null, state: "empty" };
             recordPerfEvent("chart.markerSeries.clear", {
                 paneId,
                 reason: "target-change",
@@ -984,11 +986,15 @@ const ChartPane = forwardRef(function ChartPane({
         markerTargetRef.current = targetSeries;
         if (!targetSeries) return;
         if (!indicatorMarkers || indicatorMarkers.length === 0) {
-            try { targetSeries.setMarkers([]); } catch { /* */ }
-            recordPerfEvent("chart.markerSeries.clear", {
-                paneId,
-                reason: "empty",
-            });
+            const markerState = markerStateRef.current;
+            if (markerState.target !== targetSeries || markerState.state !== "empty") {
+                try { targetSeries.setMarkers([]); } catch { /* */ }
+                markerStateRef.current = { target: targetSeries, state: "empty" };
+                recordPerfEvent("chart.markerSeries.clear", {
+                    paneId,
+                    reason: "empty",
+                });
+            }
             return;
         }
 
@@ -1034,6 +1040,7 @@ const ChartPane = forwardRef(function ChartPane({
 
         try {
             targetSeries.setMarkers(allMarkers);
+            markerStateRef.current = { target: targetSeries, state: "markers" };
             recordPerfEvent("chart.markerSeries.setMarkers", {
                 paneId,
                 groups: indicatorMarkers.length,

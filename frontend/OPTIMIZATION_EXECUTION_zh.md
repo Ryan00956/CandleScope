@@ -386,6 +386,17 @@ Phase 7 overlay instrumentation 实现后说明：
 - 本地验证：`eslint src/components/ChartPane.jsx` 通过；Vite build 通过，app main chunk
   约 149 kB minified。因为本地 backend/Vite 服务未运行，本轮没有跑端到端 smoke。
 
+event summary 后的实测跟进：
+
+- 新 event summary 的基线 smoke 显示，在无 marker 的 MA/VOL 场景里
+  `chart.markerSeries.clear: 37`。重复调用来自 marker effects 在 indicator data
+  和布局状态变化时反复清理已经为空的 target。
+- `ChartPane` 现在会按 target series 缓存 empty marker 状态；如果同一个 target
+  已经是 empty，就跳过重复的 `setMarkers([])`。
+- 跟进 smoke 通过：`chart.markerSeries.clear: 6`，
+  `chart.indicatorSeries.create: 3`，`chart.indicatorSeries.setData: 3`，
+  `chart.indicatorSeries.update: 1`。app main chunk 仍在预算内，约 149 kB minified。
+
 ## 验证命令
 
 常规命令：

@@ -421,6 +421,19 @@ Implementation notes after Phase 7 overlay instrumentation:
   passed with app main chunk about 149 kB minified. End-to-end smoke was not
   run because the local backend/Vite services were not running.
 
+Measured follow-up after event summary:
+
+- Baseline smoke with the new event summary showed
+  `chart.markerSeries.clear: 37` in a no-marker MA/VOL scenario. The repeated
+  calls came from marker effects clearing an already-empty target as indicator
+  data and layout state changed.
+- `ChartPane` now caches empty marker state per target series and skips
+  repeated `setMarkers([])` calls when the same target is already empty.
+- Follow-up smoke passed with `chart.markerSeries.clear: 6`,
+  `chart.indicatorSeries.create: 3`, `chart.indicatorSeries.setData: 3`, and
+  `chart.indicatorSeries.update: 1`. App main chunk stayed within budget at
+  about 149 kB minified.
+
 ## Verification Commands
 
 Use repository-local commands:

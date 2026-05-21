@@ -399,6 +399,25 @@ Implementation notes after Phase 7 measurement checkpoint:
   chunk about 148 kB minified. End-to-end smoke was not run because neither
   Vite on `127.0.0.1:5173` nor the backend on `127.0.0.1:8000` was running.
 
+Second checkpoint:
+
+- Add render events around the chart surfaces that were still opaque after the
+  candle and indicator-line work.
+- Keep this pass instrumentation-only. Do not change fill, marker, hline, or
+  background overlay update strategy until the events show which path is
+  actually hot.
+
+Implementation notes after Phase 7 overlay instrumentation:
+
+- `ChartPane` now records lifecycle events for indicator series create/remove,
+  marker set/clear, hline create/remove, fill-series create/remove, and
+  bgcolor canvas overlay create/remove/render.
+- Event details include pane id, definition counts, created/removed series
+  counts, marker counts, fill point counts, and visible bgcolor region counts.
+- Local validation: `eslint src/components/ChartPane.jsx` passed; Vite build
+  passed with app main chunk about 149 kB minified. End-to-end smoke was not
+  run because the local backend/Vite services were not running.
+
 ## Verification Commands
 
 Use repository-local commands:

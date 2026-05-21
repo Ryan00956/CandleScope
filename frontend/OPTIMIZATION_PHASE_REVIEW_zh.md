@@ -78,3 +78,10 @@ Phase 7 先做测量质量，再继续渲染成本优化：
 
 下一步 Phase 7 是给 fills、markers、hlines 和 overlay series lifecycle 增加
 render events，再用这些 events 判断是否需要继续拆 `ChartPane` 内部结构。
+
+Overlay instrumentation checkpoint 现在也已实现：
+
+- `ChartPane` 会记录 indicator series、markers、hlines、fill area series 和
+  bgcolor canvas overlays 的生命周期事件。
+- 本轮刻意只做观测，不改变渲染策略。下一步可以根据事件频率和点数决定优化方向，
+  而不是只凭源码结构判断。

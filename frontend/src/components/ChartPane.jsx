@@ -874,8 +874,16 @@ const ChartPane = forwardRef(function ChartPane({
 
         // Structure changed — full rebuild
         // Remove old indicator series
+        const removedSeriesCount = indicatorSeriesRef.current.length;
         for (const { series } of indicatorSeriesRef.current) {
             try { chart.removeSeries(series); } catch { /* */ }
+        }
+        if (removedSeriesCount > 0) {
+            recordPerfEvent("chart.indicatorSeries.remove", {
+                paneId,
+                reason: "rebuild",
+                series: removedSeriesCount,
+            });
         }
         indicatorSeriesRef.current = [];
 
@@ -914,6 +922,12 @@ const ChartPane = forwardRef(function ChartPane({
 
             try {
                 const series = chart.addSeries(SeriesType, opts);
+                recordPerfEvent("chart.indicatorSeries.create", {
+                    paneId,
+                    line: line.name || line.id || indicatorSeriesRef.current.length,
+                    type: line.type || "line",
+                    path: "rebuild",
+                });
 
                 const validData = normalizeLineSeriesData(line);
 
@@ -962,11 +976,19 @@ const ChartPane = forwardRef(function ChartPane({
             : drawingAnchorSeriesRef.current;
         if (markerTargetRef.current && markerTargetRef.current !== targetSeries) {
             try { markerTargetRef.current.setMarkers([]); } catch { /* */ }
+            recordPerfEvent("chart.markerSeries.clear", {
+                paneId,
+                reason: "target-change",
+            });
         }
         markerTargetRef.current = targetSeries;
         if (!targetSeries) return;
         if (!indicatorMarkers || indicatorMarkers.length === 0) {
             try { targetSeries.setMarkers([]); } catch { /* */ }
+            recordPerfEvent("chart.markerSeries.clear", {
+                paneId,
+                reason: "empty",
+            });
             return;
         }
 
@@ -1012,10 +1034,15 @@ const ChartPane = forwardRef(function ChartPane({
 
         try {
             targetSeries.setMarkers(allMarkers);
+            recordPerfEvent("chart.markerSeries.setMarkers", {
+                paneId,
+                groups: indicatorMarkers.length,
+                markers: allMarkers.length,
+            });
         } catch (err) {
             console.warn("ChartPane: failed to set markers:", err);
         }
-    }, [indicatorMarkers, indicatorLines, paneType]);
+    }, [indicatorMarkers, indicatorLines, paneId, paneType]);
 
     /* ── Apply hlines (horizontal price lines) ─────────────── */
     // We use createPriceLine() on the pane's anchor series for each hline.
@@ -1027,8 +1054,15 @@ const ChartPane = forwardRef(function ChartPane({
             : drawingAnchorSeriesRef.current;
 
         // Remove previous hlines
+        const removedHlines = hlinesRef.current.length;
         for (const item of hlinesRef.current) {
             try { item.series.removePriceLine(item.priceLine); } catch { /* */ }
+        }
+        if (removedHlines > 0) {
+            recordPerfEvent("chart.hline.remove", {
+                paneId,
+                hlines: removedHlines,
+            });
         }
         hlinesRef.current = [];
 
@@ -1036,6 +1070,7 @@ const ChartPane = forwardRef(function ChartPane({
         if (!indicatorHlines || indicatorHlines.length === 0) return;
 
         const LINESTYLE_MAP = { solid: 0, dotted: 1, dashed: 2, large_dashed: 3, sparse_dotted: 4 };
+        let createdHlines = 0;
 
         for (const hl of indicatorHlines) {
             if (hl.price == null || !isFinite(hl.price)) continue;
@@ -1049,11 +1084,17 @@ const ChartPane = forwardRef(function ChartPane({
                     title: hl.title || "",
                 });
                 hlinesRef.current.push({ series, priceLine: pl });
+                createdHlines += 1;
             } catch (err) {
                 console.warn("ChartPane: failed to create hline:", err);
             }
         }
-    }, [indicatorHlines, indicatorLines, paneType]);
+        recordPerfEvent("chart.hline.create", {
+            paneId,
+            hlines: createdHlines,
+            definitions: indicatorHlines.length,
+        });
+    }, [indicatorHlines, indicatorLines, paneId, paneType]);
 
     /* ── Apply barcolors (per-bar candle coloring) ─────────── */
     // Lightweight Charts CandlestickSeries doesn't support per-bar color
@@ -1173,8 +1214,15 @@ const ChartPane = forwardRef(function ChartPane({
         if (!chart) return;
 
         // Remove previous fill series
+        const removedFillSeries = fillSeriesRef.current.length;
         for (const fs of fillSeriesRef.current) {
             try { chart.removeSeries(fs); } catch { /* */ }
+        }
+        if (removedFillSeries > 0) {
+            recordPerfEvent("chart.fillSeries.remove", {
+                paneId,
+                series: removedFillSeries,
+            });
         }
         fillSeriesRef.current = [];
 
@@ -1197,6 +1245,9 @@ const ChartPane = forwardRef(function ChartPane({
 
         // Dynamically import AreaSeries (lightweight-charts v4)
         // AreaSeries is available from the same package
+        let createdFillSeries = 0;
+        let fillPointCount = 0;
+        let matchedFillCount = 0;
         for (const fillDef of indicatorFills) {
             const { plot1_id, plot2_id, color } = fillDef;
             const scope = fillDef.indicatorId || "";
@@ -1221,6 +1272,7 @@ const ChartPane = forwardRef(function ChartPane({
             }
             times.sort((a, b) => a - b);
             if (times.length === 0) continue;
+            matchedFillCount += 1;
 
             try {
                 // Parse fill color opacity — default to semi-transparent
@@ -1246,6 +1298,8 @@ const ChartPane = forwardRef(function ChartPane({
                 }));
                 areaSeries.setData(upperData);
                 fillSeriesRef.current.push(areaSeries);
+                createdFillSeries += 1;
+                fillPointCount += upperData.length;
 
                 // Create second area series for the lower boundary (masks the bottom)
                 const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
@@ -1266,11 +1320,20 @@ const ChartPane = forwardRef(function ChartPane({
                 }));
                 lowerSeries.setData(lowerData);
                 fillSeriesRef.current.push(lowerSeries);
+                createdFillSeries += 1;
+                fillPointCount += lowerData.length;
             } catch (err) {
                 console.warn("ChartPane: failed to create fill area:", err);
             }
         }
-    }, [indicatorFills, indicatorLines, theme, customBg]);
+        recordPerfEvent("chart.fillSeries.create", {
+            paneId,
+            fills: matchedFillCount,
+            definitions: indicatorFills.length,
+            series: createdFillSeries,
+            points: fillPointCount,
+        });
+    }, [indicatorFills, indicatorLines, paneId, theme, customBg]);
 
     /* ── Apply bgcolors (background color regions) ─────────── */
     // We render bgcolor using a HistogramSeries with very large values to
@@ -1294,6 +1357,7 @@ const ChartPane = forwardRef(function ChartPane({
             if (bgCanvasRef.current) {
                 try { bgCanvasRef.current.remove(); } catch { /* */ }
                 bgCanvasRef.current = null;
+                recordPerfEvent("chart.bgcolorOverlay.remove", { paneId });
             }
             return;
         }
@@ -1308,6 +1372,7 @@ const ChartPane = forwardRef(function ChartPane({
             // Insert canvas as first child so it's behind chart elements
             container.insertBefore(canvas, container.firstChild);
             bgCanvasRef.current = canvas;
+            recordPerfEvent("chart.bgcolorOverlay.create", { paneId });
         }
 
         // Build time→color map from all bgcolor sources
@@ -1352,11 +1417,13 @@ const ChartPane = forwardRef(function ChartPane({
             if (!visibleRange) return;
 
             // For each colored region, compute x coordinates and draw
+            let visibleRegions = 0;
             for (const [time, color] of timeColorMap) {
                 if (time < visibleRange.from || time > visibleRange.to) continue;
 
                 const x = timeScale.timeToCoordinate(time);
                 if (x === null || x === undefined) continue;
+                visibleRegions += 1;
 
                 // Get bar width from barSpacing
                 const barSpacing = timeScale.options().barSpacing || 8;
@@ -1365,6 +1432,13 @@ const ChartPane = forwardRef(function ChartPane({
                 ctx2d.fillStyle = color;
                 ctx2d.fillRect(x - barW / 2, 0, barW, h);
             }
+            recordPerfEvent("chart.bgcolorOverlay.render", {
+                paneId,
+                regions: timeColorMap.size,
+                visibleRegions,
+                width: Math.round(w),
+                height: Math.round(h),
+            });
         };
 
         // Initial render
@@ -1388,7 +1462,7 @@ const ChartPane = forwardRef(function ChartPane({
             ro.disconnect();
             if (bgAnimFrameRef.current) cancelAnimationFrame(bgAnimFrameRef.current);
         };
-    }, [indicatorBgcolors]);
+    }, [indicatorBgcolors, paneId]);
 
     /* ── Drawing state and hooks ───────────────────────────── */
 

@@ -88,3 +88,11 @@ The first measurement-quality checkpoint is implemented:
 The next Phase 7 step is to add render events around fills, markers, hlines,
 and overlay series lifecycle, then use those events to decide whether any
 additional `ChartPane` internals should be split.
+
+The overlay instrumentation checkpoint is now implemented:
+
+- `ChartPane` records lifecycle events for indicator series, markers, hlines,
+  fill area series, and bgcolor canvas overlays.
+- The pass is intentionally observational. It does not change rendering
+  strategy, so the next decision can be based on event frequency and point
+  counts rather than source-code shape alone.

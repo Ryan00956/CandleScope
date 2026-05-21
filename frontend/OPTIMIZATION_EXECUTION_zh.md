@@ -368,6 +368,22 @@ Phase 7 测量 checkpoint 实现后说明：
   148 kB minified。因为 `127.0.0.1:5173` 上的 Vite 和 `127.0.0.1:8000`
   上的后端都未运行，本轮没有跑端到端 smoke。
 
+第二 checkpoint：
+
+- 给 candles 和 indicator lines 之外仍然不透明的 chart surfaces 增加 render events。
+- 本轮只做 instrumentation，不改变 fill、marker、hline 或 background overlay 的更新策略。
+  等 events 显示哪条路径真的热，再做优化。
+
+Phase 7 overlay instrumentation 实现后说明：
+
+- `ChartPane` 现在会记录 indicator series create/remove、marker set/clear、
+  hline create/remove、fill-series create/remove，以及 bgcolor canvas overlay
+  create/remove/render 生命周期事件。
+- event details 包含 pane id、定义数量、创建/删除的 series 数、marker 数、fill 点数，
+  以及可见 bgcolor region 数。
+- 本地验证：`eslint src/components/ChartPane.jsx` 通过；Vite build 通过，app main chunk
+  约 149 kB minified。因为本地 backend/Vite 服务未运行，本轮没有跑端到端 smoke。
+
 ## 验证命令
 
 常规命令：

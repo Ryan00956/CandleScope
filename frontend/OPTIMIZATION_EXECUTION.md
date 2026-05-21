@@ -298,6 +298,23 @@ Acceptance:
 - Manual pan/zoom and interval switch remain stable.
 - Performance report shows lower chart update time or fewer full resets.
 
+Implementation notes after Phase 5 first pass:
+
+- Added chart render perf events for candle and indicator series operations:
+  `chart.candleSeries.setData`, `chart.candleSeries.update`,
+  `chart.indicatorSeries.setData`, and `chart.indicatorSeries.update`.
+- The main K-line path already used `update()` for normal trailing changes; it
+  now records whether each render pass was a full replace or trailing update.
+- Indicator lines now use a conservative trailing-update fast path. They only
+  call `series.update()` when all stable historical points are unchanged and
+  the change is limited to the last point or one appended point. Parameter
+  recomputes, history changes, and middle-data changes still use `setData()`.
+- Local smoke after this pass: bars 721, connected true, live true, failures 0,
+  chartReadyMs 305, firstBarsMs 305. Series event counts: candle `setData` 2,
+  candle `update` 3, indicator `setData` 1.
+- Local `--drawing-check` also passed after the `ChartPane` changes: drawing
+  engine ready true, persisted drawings 1, restored drawings 1, failures 0.
+
 ## Phase 6: Interaction Preloading
 
 Goal: remove first-click delay from lazy UI only if users feel it.

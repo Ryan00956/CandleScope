@@ -275,6 +275,22 @@ Phase 4 lazy split 后实现说明：
 - 手动 pan/zoom 和切换 interval 稳定。
 - 性能报告显示 chart update 时间下降，或全量 reset 次数减少。
 
+Phase 5 第一轮实现说明：
+
+- 新增 chart render perf events：`chart.candleSeries.setData`、
+  `chart.candleSeries.update`、`chart.indicatorSeries.setData` 和
+  `chart.indicatorSeries.update`。
+- 主 K 线链路原本已经在正常尾部变化时使用 `update()`；现在会记录每次渲染是
+  full replace 还是 trailing update。
+- 指标线新增保守的 trailing-update 快路径。只有稳定历史点完全不变，且变化只
+  发生在最后一点或新增一点时，才调用 `series.update()`。参数重算、历史变化、
+  中间数据变化仍继续走 `setData()`。
+- 本地 smoke 结果：bars 721，connected true，live true，failures 0，
+  chartReadyMs 305，firstBarsMs 305。series event counts：candle `setData` 2，
+  candle `update` 3，indicator `setData` 1。
+- `ChartPane` 改动后本地 `--drawing-check` 也通过：drawing engine ready true，
+  persisted drawings 1，restored drawings 1，failures 0。
+
 ## Phase 6：交互预加载
 
 目标：只有用户真的感到首次点击延迟时，才处理 lazy UI 的 first-click cost。

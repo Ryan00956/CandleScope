@@ -12,6 +12,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
 import { shouldLoadDrawingEngine } from "../hooks/useDrawingController";
 import { clearSavedDrawings } from "../services/drawingStorage";
+import { recordPerfEvent } from "../runtime/performance/perfMarks";
 
 /* ── Localization helpers (shared with old ChartWidget) ─────── */
 
@@ -83,6 +84,66 @@ function toCandlePoint(d) {
         return { time: d.time };
     }
     return { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close };
+}
+
+function normalizeLineSeriesData(line) {
+    const isHistogram = line?.type === "histogram";
+    if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
+        const colorMap = new Map();
+        for (const cd of line.colorData) colorMap.set(cd.time, cd.color);
+        return (line.data || [])
+            .filter((d) => d?.time != null && d?.value != null && isFinite(d.value))
+            .map((d) => {
+                const entry = { time: d.time, value: d.value };
+                const c = colorMap.get(d.time);
+                if (c) entry.color = c;
+                return entry;
+            });
+    }
+    return (line?.data || []).filter(
+        (d) => d?.time != null && d?.value != null && isFinite(d.value)
+    );
+}
+
+function linePointEquals(a, b) {
+    return a?.time === b?.time
+        && a?.value === b?.value
+        && (a?.color || null) === (b?.color || null);
+}
+
+function canUseTrailingSeriesUpdate(previousData, nextData) {
+    if (!previousData?.length || !nextData?.length) return false;
+    if (nextData.length < previousData.length || nextData.length > previousData.length + 1) return false;
+    if (nextData[0]?.time !== previousData[0]?.time) return false;
+    if (nextData[previousData.length - 1]?.time !== previousData[previousData.length - 1]?.time) return false;
+
+    const stableCount = Math.max(0, previousData.length - 1);
+    for (let i = 0; i < stableCount; i += 1) {
+        if (!linePointEquals(previousData[i], nextData[i])) return false;
+    }
+    return true;
+}
+
+function applyLineSeriesData(series, nextData, previousData, detail) {
+    if (!nextData?.length) return "empty";
+    if (canUseTrailingSeriesUpdate(previousData, nextData)) {
+        const start = Math.max(0, previousData.length - 1);
+        for (let i = start; i < nextData.length; i += 1) {
+            series.update(nextData[i]);
+        }
+        recordPerfEvent("chart.indicatorSeries.update", {
+            ...detail,
+            points: nextData.length - start,
+            totalPoints: nextData.length,
+        });
+        return "update";
+    }
+    series.setData(nextData);
+    recordPerfEvent("chart.indicatorSeries.setData", {
+        ...detail,
+        points: nextData.length,
+    });
+    return "setData";
 }
 
 /* ── Component ─────────────────────────────────────────────── */
@@ -611,6 +672,11 @@ const ChartPane = forwardRef(function ChartPane({
                 }
                 deduped.sort((a, b) => a.time - b.time);
                 mainSeriesRef.current.setData(deduped.map(toCandlePoint));
+                recordPerfEvent("chart.candleSeries.setData", {
+                    paneId,
+                    reason: prev.length > 0 ? "full-replace" : "initial",
+                    points: deduped.length,
+                });
 
                 // Restore the pre-setData time window so the chart doesn't
                 // visually jump after a left-side backfill prepend. Kept
@@ -630,6 +696,11 @@ const ChartPane = forwardRef(function ChartPane({
                 for (let i = start; i < data.length; i++) {
                     mainSeriesRef.current.update(toCandlePoint(data[i]));
                 }
+                recordPerfEvent("chart.candleSeries.update", {
+                    paneId,
+                    points: data.length - start,
+                    totalPoints: data.length,
+                });
             }
         } catch (err) {
             console.error("ChartPane candle setData error:", err);
@@ -638,7 +709,7 @@ const ChartPane = forwardRef(function ChartPane({
         }
 
         prevDataRef.current = { length: data.length, first, last };
-    }, [data, paneType]);
+    }, [data, paneId, paneType]);
 
     /* ── Update alignment series data (sub panes) ─────────── */
 
@@ -740,28 +811,22 @@ const ChartPane = forwardRef(function ChartPane({
                         });
                     }
 
-                    let validData;
-                    if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
-                        const colorMap = new Map();
-                        for (const cd of line.colorData) colorMap.set(cd.time, cd.color);
-                        validData = line.data
-                            .filter((d) => d?.time != null && d?.value != null && isFinite(d.value))
-                            .map((d) => {
-                                const entry = { time: d.time, value: d.value };
-                                const c = colorMap.get(d.time);
-                                if (c) entry.color = c;
-                                return entry;
-                            });
-                    } else {
-                        validData = line.data.filter(
-                            (d) => d?.time != null && d?.value != null && isFinite(d.value)
-                        );
-                    }
+                    const validData = normalizeLineSeriesData(line);
 
                     if (validData.length > 0) {
                         isSyncingRef.current = true;
                         try {
-                            series.setData(validData);
+                            applyLineSeriesData(
+                                series,
+                                validData,
+                                indicatorSeriesRef.current[idx].data,
+                                {
+                                    paneId,
+                                    line: line.name || line.id || idx,
+                                    type: line.type || "line",
+                                    path: "fast",
+                                },
+                            );
                         } finally {
                             isSyncingRef.current = false;
                         }
@@ -769,6 +834,7 @@ const ChartPane = forwardRef(function ChartPane({
 
                     // Update lineConfig ref
                     indicatorSeriesRef.current[idx].lineConfig = line;
+                    indicatorSeriesRef.current[idx].data = validData;
                 } catch (err) {
                     console.warn("ChartPane: failed to update indicator series data:", err);
                 }
@@ -825,35 +891,25 @@ const ChartPane = forwardRef(function ChartPane({
             try {
                 const series = chart.addSeries(SeriesType, opts);
 
-                // Build data with optional per-bar colors
-                let validData;
-                if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
-                    const colorMap = new Map();
-                    for (const cd of line.colorData) colorMap.set(cd.time, cd.color);
-                    validData = line.data
-                        .filter((d) => d?.time != null && d?.value != null && isFinite(d.value))
-                        .map((d) => {
-                            const entry = { time: d.time, value: d.value };
-                            const c = colorMap.get(d.time);
-                            if (c) entry.color = c;
-                            return entry;
-                        });
-                } else {
-                    validData = line.data.filter(
-                        (d) => d?.time != null && d?.value != null && isFinite(d.value)
-                    );
-                }
+                const validData = normalizeLineSeriesData(line);
 
                 if (validData.length > 0) {
                     isSyncingRef.current = true;
                     try {
                         series.setData(validData);
+                        recordPerfEvent("chart.indicatorSeries.setData", {
+                            paneId,
+                            line: line.name || line.id || indicatorSeriesRef.current.length,
+                            type: line.type || "line",
+                            path: "rebuild",
+                            points: validData.length,
+                        });
                     } finally {
                         isSyncingRef.current = false;
                     }
                 }
 
-                indicatorSeriesRef.current.push({ series, lineConfig: line });
+                indicatorSeriesRef.current.push({ series, lineConfig: line, data: validData });
             } catch (err) {
                 console.warn("ChartPane: failed to add indicator series:", err);
             }
@@ -869,7 +925,7 @@ const ChartPane = forwardRef(function ChartPane({
                 setSeriesReady((prev) => prev + 1); // trigger re-attachment in useDrawing
             }
         }
-    }, [indicatorLines, paneType, drawingTool]);
+    }, [indicatorLines, paneId, paneType, drawingTool]);
 
     /* ── Apply indicator markers ───────────────────────────── */
     // Lightweight Charts supports setMarkers() on any series.

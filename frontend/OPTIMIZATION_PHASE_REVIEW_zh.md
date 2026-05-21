@@ -96,3 +96,11 @@ Overlay instrumentation checkpoint 现在也已实现：
 - Production preview 报告 `chart.indicatorSeries.create: 2` 和
   `chart.indicatorSeries.setData: 2`，所以 Vite dev 里额外的 `volume-vol`
   rebuild 先视为 StrictMode/dev 噪声，不作为生产热路径继续硬改。
+
+下一轮测量 fixture 已经可用：
+
+- `scripts/smoke.mjs --overlay-heavy` 会 seed MA、VOL、BOLL 和 RSI，但不改变默认
+  smoke 路径。
+- 后续在改 fill、hline、separate-pane 或多指标生命周期之前，先用它比较事件频率。
+- 第一次 production-preview 运行已通过，`overlayHeavyCoverage: true`，同时暴露出
+  fill/hline 重复 remove-create churn 是下一个有实测依据的目标。

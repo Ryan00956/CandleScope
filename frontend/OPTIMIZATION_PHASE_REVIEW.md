@@ -108,3 +108,12 @@ The first measured cleanup reduced repeated empty marker clears:
 - Production preview reported `chart.indicatorSeries.create: 2` and
   `chart.indicatorSeries.setData: 2`, so the extra `volume-vol` rebuild seen in
   Vite dev is treated as StrictMode/dev noise rather than a production hot path.
+
+The next measurement fixture is available:
+
+- `scripts/smoke.mjs --overlay-heavy` seeds MA, VOL, BOLL, and RSI without
+  changing the default smoke path.
+- Use it when comparing fill, hline, separate-pane, and multi-indicator
+  lifecycle events before making another rendering change.
+- First production-preview run passed with `overlayHeavyCoverage: true` and
+  exposed repeated fill/hline remove-create churn as the next measured target.

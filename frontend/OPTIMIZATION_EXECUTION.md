@@ -439,6 +439,23 @@ Measured follow-up after event summary:
   `chart.indicatorSeries.create: 2`, `chart.indicatorSeries.setData: 2`, and
   `chart.indicatorSeries.update: 1`, matching one MA line plus one VOL line.
 
+Overlay-heavy smoke scenario:
+
+- `scripts/smoke.mjs --overlay-heavy` keeps the default smoke path unchanged
+  but seeds MA, VOL, BOLL, and RSI when a denser chart-rendering fixture is
+  needed.
+- The scenario exercises main-pane indicator lines, volume subpane histogram,
+  BOLL fill area output, RSI hlines, and separate-pane indicator lifecycle in a
+  repeatable browser profile.
+- A marker-producing fixture is intentionally deferred until the supported
+  script syntax is stable enough to seed without inventing test-only behavior.
+- Production preview result for this scenario: bars 722, failures 0,
+  `overlayHeavyCoverage: true`, snapshot ids `ma`, `vol`, `boll`, and `rsi`.
+  Chart event counts included `chart.fillSeries.create: 13`,
+  `chart.fillSeries.remove: 12`, `chart.hline.create: 17`, and
+  `chart.hline.remove: 16`, making fill/hline lifecycle churn the next measured
+  rendering target.
+
 ## Verification Commands
 
 Use repository-local commands:

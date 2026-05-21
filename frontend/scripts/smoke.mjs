@@ -9,20 +9,70 @@ import path from "node:path";
 const DEFAULT_URL = "http://127.0.0.1:5173/";
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
-const SMOKE_ACTIVE_INDICATORS = [
-  {
-    id: "ma",
-    name: "Simple Moving Average",
-    engineName: "MA",
-    script: "# __ENGINE__:MA\nindicator(\"MA\", overlay=True)\n\nperiod = input.int(20, \"Period\", minval=1, maxval=500)\nsrc = input.source(close, \"Source\")\nline_color = input.color(color.orange, \"Color\")\n\nma = ta.sma(src, period)\nplot(ma, title=f\"MA({period})\", color=line_color, overlay=True)\n",
-    params: { period: 20, source: "close", color: "#f59e0b" },
-    description: "Simple Moving Average",
-    category: "Trend",
-    paneTarget: "main",
-    kind: "builtin",
-    isPreset: true,
-    visible: true,
+const SMOKE_MA_INDICATOR = {
+  id: "ma",
+  name: "Simple Moving Average",
+  engineName: "MA",
+  script: "# __ENGINE__:MA\nindicator(\"MA\", overlay=True)\n\nperiod = input.int(20, \"Period\", minval=1, maxval=500)\nsrc = input.source(close, \"Source\")\nline_color = input.color(color.orange, \"Color\")\n\nma = ta.sma(src, period)\nplot(ma, title=f\"MA({period})\", color=line_color, overlay=True)\n",
+  params: { period: 20, source: "close", color: "#f59e0b" },
+  description: "Simple Moving Average",
+  category: "Trend",
+  paneTarget: "main",
+  kind: "builtin",
+  isPreset: true,
+  visible: true,
+};
+const SMOKE_VOL_INDICATOR = {
+  id: "vol",
+  name: "Volume",
+  engineName: "VOL",
+  script: "# __ENGINE__:VOL\nindicator(\"VOL\", overlay=False)\n\nup_color = input.color(color.green, \"Up Color\")\ndown_color = input.color(color.red, \"Down Color\")\n\nvolume_colors = color.when(close >= open, up_color, down_color)\nplot(\n    volume,\n    title=\"VOL\",\n    color=volume_colors,\n    style=plot.style_histogram,\n    overlay=False,\n    pane=\"volume\",\n)\n",
+  params: { up_color: "#22c55e", down_color: "#ef4444" },
+  description: "Volume histogram",
+  category: "Volume",
+  paneTarget: "sub",
+  kind: "builtin",
+  isPreset: true,
+  visible: true,
+};
+const SMOKE_BOLL_INDICATOR = {
+  id: "boll",
+  name: "Bollinger Bands",
+  script: "indicator(\"BOLL Smoke\", overlay=True)\n\nperiod = input.int(20, \"Period\", minval=1, maxval=500)\nmult = input.float(2.0, \"Multiplier\", minval=0.1, step=0.1)\nsrc = input.source(close, \"Source\")\nmid_color = input.color(color.orange, \"Middle Color\")\nupper_color = input.color(color.red, \"Upper Color\")\nlower_color = input.color(color.green, \"Lower Color\")\nfill_color = input.color(color.new(color.blue, 88), \"Fill Color\")\n\nupper, middle, lower = ta.bb(src, period, mult)\nupper_plot = plot(upper, title=\"BOLL Upper\", color=upper_color, overlay=True)\nmiddle_plot = plot(middle, title=f\"BOLL Mid({period})\", color=mid_color, overlay=True)\nlower_plot = plot(lower, title=\"BOLL Lower\", color=lower_color, overlay=True)\nfill(upper_plot, lower_plot, color=fill_color, title=\"BOLL Band\")\n",
+  params: {
+    period: 20,
+    mult: 2,
+    source: "close",
+    mid_color: "#f59e0b",
+    upper_color: "#ef4444",
+    lower_color: "#22c55e",
+    fill_color: "rgba(59, 130, 246, 0.12)",
   },
+  description: "Bollinger Bands",
+  category: "Volatility",
+  paneTarget: "main",
+  kind: "custom",
+  isPreset: true,
+  visible: true,
+};
+const SMOKE_RSI_INDICATOR = {
+  id: "rsi",
+  name: "Relative Strength Index",
+  script: "indicator(\"RSI Smoke\", overlay=False)\n\nperiod = input.int(14, \"Period\", minval=1, maxval=200)\nsrc = input.source(close, \"Source\")\nline_color = input.color(color.purple, \"Color\")\noverbought = input.float(70.0, \"Overbought\", minval=0, maxval=100, step=1)\noversold = input.float(30.0, \"Oversold\", minval=0, maxval=100, step=1)\n\nrsi_line = ta.rsi(src, period)\nplot(rsi_line, title=f\"RSI({period})\", color=line_color, overlay=False, pane=\"separate\")\nhline(overbought, title=\"Overbought\", color=color.red, pane=\"separate\")\nhline(50, title=\"Middle\", color=color.gray, pane=\"separate\")\nhline(oversold, title=\"Oversold\", color=color.green, pane=\"separate\")\n",
+  params: { period: 14, source: "close", color: "#8b5cf6", overbought: 70, oversold: 30 },
+  description: "Relative Strength Index",
+  category: "Oscillator",
+  paneTarget: "sub",
+  kind: "custom",
+  isPreset: true,
+  visible: true,
+};
+const SMOKE_ACTIVE_INDICATORS = [SMOKE_MA_INDICATOR];
+const SMOKE_OVERLAY_HEAVY_INDICATORS = [
+  SMOKE_MA_INDICATOR,
+  SMOKE_VOL_INDICATOR,
+  SMOKE_BOLL_INDICATOR,
+  SMOKE_RSI_INDICATOR,
 ];
 
 function parseArgs(argv) {
@@ -32,6 +82,7 @@ function parseArgs(argv) {
     chromePath: process.env.CHROME_PATH || "",
     screenshot: process.env.SMOKE_SCREENSHOT || "",
     seedIndicators: process.env.SMOKE_SEED_INDICATORS !== "0",
+    overlayHeavy: process.env.SMOKE_OVERLAY_HEAVY === "1",
     drawingCheck: process.env.SMOKE_DRAWING_CHECK === "1",
   };
 
@@ -42,6 +93,7 @@ function parseArgs(argv) {
     else if (arg === "--chrome") args.chromePath = argv[++i];
     else if (arg === "--screenshot") args.screenshot = argv[++i];
     else if (arg === "--no-seed-indicators") args.seedIndicators = false;
+    else if (arg === "--overlay-heavy") args.overlayHeavy = true;
     else if (arg === "--drawing-check") args.drawingCheck = true;
   }
 
@@ -345,6 +397,39 @@ async function waitForPerfTiming(cdp, timingKey, timeoutMs = 10_000, pollMs = 50
   return report;
 }
 
+function getIndicatorSnapshotIds(performanceReport) {
+  const events = Array.isArray(performanceReport?.events) ? performanceReport.events : [];
+  return new Set(
+    events
+      .filter((event) => event?.name === "indicator.ws.snapshot" && event.detail?.indicatorId)
+      .map((event) => event.detail.indicatorId),
+  );
+}
+
+function hasOverlayHeavyCoverage(performanceReport) {
+  const expectedSnapshotIds = ["ma", "vol", "boll", "rsi"];
+  const snapshotIds = getIndicatorSnapshotIds(performanceReport);
+  const { chartEventCounts } = summarizePerformanceEvents(performanceReport);
+  return expectedSnapshotIds.every((id) => snapshotIds.has(id))
+    && (chartEventCounts["chart.fillSeries.create"] || 0) > 0
+    && (chartEventCounts["chart.hline.create"] || 0) > 0;
+}
+
+async function waitForSeededIndicatorReport(cdp, args) {
+  if (!args.seedIndicators) return readPerfReport(cdp);
+  if (!args.overlayHeavy) return waitForPerfTiming(cdp, "indicatorHostedSnapshotMs");
+
+  const started = Date.now();
+  let report = await readPerfReport(cdp);
+  const timeoutMs = Math.max(15_000, Math.min(args.timeoutMs, 30_000));
+  while (Date.now() - started < timeoutMs) {
+    if (hasOverlayHeavyCoverage(report)) return report;
+    await wait(500);
+    report = await readPerfReport(cdp);
+  }
+  return report;
+}
+
 function summarizePerformanceEvents(performanceReport) {
   const events = Array.isArray(performanceReport?.events) ? performanceReport.events : [];
   const eventCounts = {};
@@ -630,10 +715,11 @@ async function main() {
     await cdp.send("Network.enable");
     await cdp.send("Page.enable");
     if (args.seedIndicators) {
+      const activeIndicators = args.overlayHeavy ? SMOKE_OVERLAY_HEAVY_INDICATORS : SMOKE_ACTIVE_INDICATORS;
       await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
         source: `
           try {
-            localStorage.setItem("candlescope-active-indicators", ${JSON.stringify(JSON.stringify(SMOKE_ACTIVE_INDICATORS))});
+            localStorage.setItem("candlescope-active-indicators", ${JSON.stringify(JSON.stringify(activeIndicators))});
             localStorage.setItem("candlescope-vol-initialized", "1");
           } catch {}
         `,
@@ -651,10 +737,10 @@ async function main() {
     const drawingWorkflow = args.drawingCheck ? await verifyDrawingWorkflow(cdp, args.timeoutMs) : null;
     const lazySurfaces = await verifyLazySurfaces(cdp);
     const settings = await openSettings(cdp);
-    const performanceTimings = args.seedIndicators
-      ? await waitForPerfTiming(cdp, "indicatorHostedSnapshotMs")
-      : await readPerfReport(cdp);
+    const performanceTimings = await waitForSeededIndicatorReport(cdp, args);
     const performanceEventSummary = summarizePerformanceEvents(performanceTimings);
+    const overlayHeavyCoverage = args.overlayHeavy ? hasOverlayHeavyCoverage(performanceTimings) : null;
+    const indicatorSnapshotIds = Array.from(getIndicatorSnapshotIds(performanceTimings));
     const screenshotData = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
     fs.writeFileSync(screenshot, Buffer.from(screenshotData.data, "base64"));
 
@@ -675,11 +761,14 @@ async function main() {
       },
       performance: performanceTimings,
       performanceEventSummary,
+      indicatorSnapshotIds,
+      overlayHeavyCoverage,
       apiResponses: responses.slice(0, 20),
       failures,
       warnings: warnings.slice(0, 20),
       screenshot,
       seededIndicators: args.seedIndicators,
+      overlayHeavy: args.overlayHeavy,
       drawingCheck: args.drawingCheck,
     };
 
@@ -700,6 +789,7 @@ async function main() {
         || drawingWorkflow?.drawingRestoredCount <= 0
       ))
       || (args.seedIndicators && !performanceTimings?.timings?.indicatorHostedSnapshotMs)
+      || (args.seedIndicators && args.overlayHeavy && !overlayHeavyCoverage)
       || failures.length > 0;
     process.exitCode = failed ? 1 : 0;
   } finally {

@@ -402,6 +402,20 @@ event summary 后的实测跟进：
   `chart.indicatorSeries.setData: 2`，`chart.indicatorSeries.update: 1`，
   对应一条 MA line 和一条 VOL line。
 
+Overlay-heavy smoke 场景：
+
+- `scripts/smoke.mjs --overlay-heavy` 不改变默认 smoke 路径，只在需要更密集的
+  chart-rendering fixture 时 seed MA、VOL、BOLL 和 RSI。
+- 这个场景会稳定覆盖 main-pane indicator lines、volume subpane histogram、BOLL
+  fill area output、RSI hlines，以及 separate-pane indicator lifecycle。
+- marker fixture 暂缓，直到支持的脚本语法足够稳定；这里不为了测试而发明产品里没有的
+  marker seed 行为。
+- 这次 production preview 结果：bars 722，failures 0，`overlayHeavyCoverage: true`，
+  snapshot ids 为 `ma`、`vol`、`boll`、`rsi`。Chart event counts 包含
+  `chart.fillSeries.create: 13`、`chart.fillSeries.remove: 12`、
+  `chart.hline.create: 17`、`chart.hline.remove: 16`，所以下一个有实测依据的
+  渲染目标是 fill/hline lifecycle churn。
+
 ## 验证命令
 
 常规命令：

@@ -10,7 +10,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import ChartPane from "./ChartPane";
 import PaneResizer from "./PaneResizer";
-import { clearSavedDrawings } from "../services/drawingStorage";
+import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
 import { planVisibleRangeRestore } from "../runtime/chart/viewportController";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;

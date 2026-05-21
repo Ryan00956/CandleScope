@@ -11,11 +11,10 @@ import { useIndicatorRuntime } from "./features/indicators/useIndicatorRuntime";
 import { useCacheLimitsSync } from "./runtime/preferences/useCacheLimitsSync";
 import { useChartExportRuntime } from "./runtime/workflows/useChartExportRuntime";
 import { useChartSettingsRuntime } from "./runtime/preferences/useChartSettingsRuntime";
-import { useDrawingRuntime } from "./runtime/workflows/useDrawingRuntime";
+import { useDrawingRuntime } from "./features/drawings/useDrawingRuntime";
 import { usePriceScalePrefs } from "./runtime/preferences/usePriceScalePrefs";
 import { useWatchlistRuntime } from "./runtime/workflows/useWatchlistRuntime";
 import { useWatchlistStorageRuntime } from "./runtime/preferences/useWatchlistStorageRuntime";
-import { clearSavedDrawings } from "./services/drawingStorage";
 import "./index.css";
 
 // ---------- ErrorBoundary ----------
@@ -161,7 +160,8 @@ export default function App() {
     handleSelectedDrawingStyleChange,
     handleClearDrawing,
     handleToggleDrawingsHidden,
-  } = useDrawingRuntime({ chartWidgetRef });
+    clearIndicatorDrawingStorage,
+  } = useDrawingRuntime({ chartWidgetRef, session: chartSession });
 
   const {
     invertScale,
@@ -244,9 +244,8 @@ export default function App() {
 
   const removeIndicator = useCallback((indicatorId) => {
     rawRemoveIndicator(indicatorId);
-    clearSavedDrawings(`${chartStorageKeyBase}-separate-${indicatorId}`);
-    clearSavedDrawings(`${chartStorageKeyBase}-volume-${indicatorId}`);
-  }, [chartStorageKeyBase, rawRemoveIndicator]);
+    clearIndicatorDrawingStorage(indicatorId);
+  }, [clearIndicatorDrawingStorage, rawRemoveIndicator]);
 
   const { watchlists, setWatchlists, handleAddToWatchlist } = useWatchlistStorageRuntime();
 

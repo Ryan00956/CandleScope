@@ -1,0 +1,72 @@
+# Drawings Feature
+
+`features/drawings` owns native chart drawing tools, drawing selection, interaction state, persistence, and export-time drawing preparation.
+
+## Public Contract
+
+`useDrawingRuntime({ chartWidgetRef, session })` exposes:
+
+```js
+{
+  view: {
+    drawingTool,
+    penColor,
+    penSize,
+    textFontSize,
+    textBold,
+    textItalic,
+    fibLevels,
+    fibInverted,
+    positionSize,
+    drawingsHidden,
+    drawingSnapEnabled,
+    selectedDrawing,
+  },
+  actions: {
+    setDrawingTool,
+    setPenColor,
+    setPenSize,
+    setTextFontSize,
+    setTextBold,
+    setTextItalic,
+    handleClearDrawing,
+    handleToggleDrawingsHidden,
+    handleDrawingSnapEnabledChange,
+    handleSelectedDrawingChange,
+    handleSelectedDrawingStyleChange,
+    clearIndicatorDrawingStorage,
+  },
+  status: {},
+}
+```
+
+The hook still returns legacy flat fields while `App.jsx` and shell props are migrated.
+
+## Internal Ownership
+
+- `drawingModel.js` owns tool ids, drawing constants, id creation, and pure geometry helpers.
+- `drawingToolState.js` owns toolbar-facing drawing preferences and selected drawing style mirroring.
+- `drawingPersistence.js` owns localStorage serialization, loading, existence checks, and clearing.
+- `drawingPrimitiveFactory.js` owns primitive creation from saved models and tool actions.
+- `drawingSnapController.js` owns magnet snapping to visible candle time/price candidates.
+- `drawingSelectionController.js` owns selected drawing metadata, selected text snapshots, and hit testing.
+- `drawingInteractionController.js` owns pointer, keyboard, drag, resize, erase, text edit, primitive lifecycle, and chart adapter calls.
+- `DrawingEngineHost.jsx` mounts the interaction controller and text editing surfaces.
+
+## Allowed Dependencies
+
+- May consume chart session through the runtime argument to derive drawing storage keys for cross-feature cleanup.
+- May depend on `chart-adapter` operations passed by chart rendering components.
+- May import drawing primitive implementations while they remain under `src/components/primitives` during migration.
+- May expose feature UI entry points such as `DrawingToolbar` and `DrawingEngineHost`.
+
+## Forbidden Dependencies
+
+- Do not load K-line data, indicators, watchlist, settings, or export options here.
+- Do not import App internals or sibling feature internals.
+- Do not expose raw Lightweight Charts refs or series instances from the public runtime contract.
+- Do not let generic UI components own drawing localStorage access.
+
+## Migration Notes
+
+`src/hooks/useDrawing.js`, `src/hooks/useDrawingController.js`, `src/services/drawingStorage.js`, and `src/runtime/workflows/useDrawingRuntime.js` remain compatibility wrappers for older imports.

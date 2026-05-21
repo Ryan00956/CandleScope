@@ -11,8 +11,8 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
-import { shouldLoadDrawingEngine } from "../hooks/useDrawingController";
-import { clearSavedDrawings } from "../services/drawingStorage";
+import { shouldLoadDrawingEngine } from "../features/drawings/drawingEngineLoader";
+import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
 import { recordPerfEvent } from "../runtime/performance/perfMarks";
 
 /* ── Localization helpers (shared with old ChartWidget) ─────── */
@@ -1545,7 +1545,7 @@ const ChartPane = forwardRef(function ChartPane({
     useEffect(() => {
         if (!shouldMountDrawingEngine || DrawingEngineHost) return undefined;
         let cancelled = false;
-        import("./DrawingEngineHost").then((module) => {
+        import("../features/drawings/DrawingEngineHost").then((module) => {
             if (!cancelled) setDrawingEngineHost(() => module.default);
         });
         return () => {

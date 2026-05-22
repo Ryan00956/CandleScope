@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchCustomIndicators, fetchPreset, fetchPresets } from "../../services/indicatorApi";
+import {
+  deleteCustomIndicator as deleteCustomIndicatorRequest,
+  fetchCustomIndicators,
+  fetchPreset,
+  fetchPresets,
+  saveCustomIndicator as saveCustomIndicatorRequest,
+} from "../../services/indicatorApi";
 
 function normalizeCustomIndicator(item) {
   return {
@@ -106,12 +112,25 @@ export function useIndicatorCatalogRuntime({ isOpen }) {
     });
   }, []);
 
+  const deleteCustomIndicator = useCallback(async (id) => {
+    await deleteCustomIndicatorRequest(id);
+    removeCustomIndicator(id);
+  }, [removeCustomIndicator]);
+
+  const saveCustomIndicator = useCallback(async (draft) => {
+    const saved = await saveCustomIndicatorRequest(draft);
+    upsertCustomIndicator(saved, draft);
+    return saved;
+  }, [upsertCustomIndicator]);
+
   return {
     customIndicators,
+    deleteCustomIndicator,
     presets,
     presetsLoading,
     removeCustomIndicator,
     resolvePresetForChart,
+    saveCustomIndicator,
     upsertCustomIndicator,
   };
 }

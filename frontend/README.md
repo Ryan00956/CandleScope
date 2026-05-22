@@ -13,6 +13,7 @@ React/Vite charting UI for CandleScope.
 - [Frontend Cleanup Execution Plan](FRONTEND_CLEANUP_EXECUTION.md)
 - [前端清理执行计划](FRONTEND_CLEANUP_EXECUTION_zh.md)
 - [前端理想架构执行文档](FRONTEND_ARCHITECTURE_REBUILD_EXECUTION_zh.md)
+- [前端架构边界硬化执行文档](FRONTEND_ARCHITECTURE_HARDENING_EXECUTION_zh.md)
 
 ## Backend Connection
 

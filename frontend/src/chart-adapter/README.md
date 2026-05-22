@@ -61,5 +61,7 @@ These are still chart operations; they must not grow business rules.
 ## Migration Notes
 
 Current chart components may still import `lightweight-charts` directly. That
-is a migration allowance, not the target architecture. New business features
-should depend on adapter methods rather than chart-library objects.
+is a migration allowance for the active multi-pane chart renderer, not the
+target architecture. The old single-pane `ChartWidget` was removed after it no
+longer had runtime references. New business features should depend on adapter
+methods rather than chart-library objects.

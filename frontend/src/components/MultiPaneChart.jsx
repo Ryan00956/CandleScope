@@ -11,28 +11,14 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import ChartPane from "./ChartPane";
 import PaneResizer from "./PaneResizer";
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
+import { buildPaneConfigKey, loadPaneHeights, savePaneHeights } from "../features/chart-session/paneLayoutStorage";
 import { planVisibleRangeRestore } from "../features/chart-session/visibleRangeStorage";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
 const DRAWING_TOOL_IDS = new Set(["pen", "highlighter", "eraser", "line-segment", "line-ray", "line-infinite", "line-horizontal", "line-vertical", "line-cross", "angle-measure", "shape-rectangle", "shape-ellipse", "text", "fibonacci", "position-long", "position-short"]);
 
-const PANE_HEIGHTS_KEY = "candlescope-pane-heights";
 const MIN_PANE_HEIGHT = 60; // px
-
-function loadPaneHeights() {
-    try { return JSON.parse(localStorage.getItem(PANE_HEIGHTS_KEY)) || {}; } catch { return {}; }
-}
-function savePaneHeights(h) {
-    localStorage.setItem(PANE_HEIGHTS_KEY, JSON.stringify(h));
-}
-
-/**
- * Build a stable pane config key from indicator IDs so we can persist heights.
- */
-function paneConfigKey(subPaneIds) {
-    return subPaneIds.sort().join(",");
-}
 
 function paneKeyForItem(item) {
     const pane = item?.pane || "main";
@@ -234,7 +220,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
 
         // Try to load saved heights
         const saved = loadPaneHeights();
-        const key = paneConfigKey(subPanes.map((p) => p.id));
+        const key = buildPaneConfigKey(subPanes.map((p) => p.id));
         if (saved[key]) {
             setPaneHeightPercents(saved[key]);
             return;
@@ -517,7 +503,7 @@ const MultiPaneChart = forwardRef(function MultiPaneChart({
     const handleResizeEnd = useCallback(() => {
         // Persist heights
         if (subPanes.length > 0) {
-            const key = paneConfigKey(subPanes.map((p) => p.id));
+            const key = buildPaneConfigKey(subPanes.map((p) => p.id));
             const saved = loadPaneHeights();
             saved[key] = paneHeightPercents;
             savePaneHeights(saved);

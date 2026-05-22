@@ -15,7 +15,7 @@ import { shouldLoadDrawingEngine } from "../features/drawings/drawingEngineLoade
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
 import { recordPerfEvent } from "../runtime/performance/perfMarks";
 
-/* ── Localization helpers (shared with old ChartWidget) ─────── */
+/* ── Localization helpers ───────────────────────────────────── */
 
 function buildLocalizationOptions(timezone = "Local", interval = "1h") {
     const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;

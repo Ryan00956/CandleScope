@@ -27,7 +27,8 @@
 }
 ```
 
-`SettingsModal.jsx` remains the lazy-loaded modal entry. During the shell migration, `src/components/SettingsModal.jsx` renders the modal chrome and mounts feature-owned panel props from `useSettingsRuntime`.
+`SettingsModal.jsx` is the lazy-loaded modal entry. It renders the modal chrome
+and mounts feature-owned panel props from `useSettingsRuntime`.
 
 ## Internal Ownership
 

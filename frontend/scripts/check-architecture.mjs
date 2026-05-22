@@ -17,21 +17,6 @@ const RULES = {
 };
 
 const allowlist = [
-  // Phase 4 removal plan: move custom indicator save/delete actions behind
-  // the indicators feature runtime and remove this legacy component service import.
-  {
-    rule: RULES.componentNoServiceImport,
-    path: "src/components/IndicatorPanel.jsx",
-    target: "src/services/indicatorApi",
-    reason: "legacy indicator panel still calls custom indicator API directly",
-  },
-  // Phase 10/11 follow-up: move pane height persistence out of the chart
-  // rendering component once pane layout ownership is settled.
-  {
-    rule: RULES.componentNoLocalStorage,
-    path: "src/components/MultiPaneChart.jsx",
-    reason: "pane height persistence still lives in the chart container",
-  },
   // Phase 3 removal plan: keep raw Lightweight Charts creation in chart
   // rendering components until the adapter owns the full chart surface.
   {
@@ -39,14 +24,6 @@ const allowlist = [
     path: "src/components/ChartPane.jsx",
     target: "lightweight-charts",
     reason: "current multi-pane chart renderer owns chart lifecycle during adapter migration",
-  },
-  // Phase 3 removal plan: delete this exception when the legacy single-pane
-  // widget is removed or routed through the chart adapter.
-  {
-    rule: RULES.chartAdapterLightweightImport,
-    path: "src/components/ChartWidget.jsx",
-    target: "lightweight-charts",
-    reason: "legacy chart widget still owns chart lifecycle during adapter migration",
   },
 ];
 

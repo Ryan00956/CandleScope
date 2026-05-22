@@ -42,6 +42,8 @@ migrated. New code should prefer `view`, `actions`, and `status`.
 ## Internal Ownership
 
 - `activeIndicatorStore.js` owns active indicator persistence and mutation.
+- `useIndicatorCatalogRuntime.js` owns preset/custom indicator catalog loading
+  and custom indicator save/delete actions.
 - `indicatorComputeController.js` owns local/backend compute scheduling.
 - `indicatorStreamController.js` owns hosted indicator WebSocket subscriptions,
   snapshots, patches, range requests, and sequence recovery.
@@ -60,7 +62,7 @@ migrated. New code should prefer `view`, `actions`, and `status`.
 - May use chart data shape supplied by market-data, without owning K-line
   loading, caching, WebSocket ticks, or gap recovery.
 - May expose feature UI entry points such as `IndicatorPanel` and
-  `IndicatorEditor` during migration.
+  `IndicatorEditor`.
 
 ## Forbidden Dependencies
 
@@ -74,6 +76,5 @@ migrated. New code should prefer `view`, `actions`, and `status`.
 ## Migration Notes
 
 Phase 11 removed the old `src/hooks/useIndicators.js` wrapper and folded the
-indicator compute, payload, catalog, security-policy, and hosted stream helpers
-into this feature. The remaining component wrappers only preserve lazy UI entry
-points while panel code continues to be simplified.
+indicator compute, payload, catalog, security-policy, hosted stream helpers,
+and indicator panel/editor UI into this feature.

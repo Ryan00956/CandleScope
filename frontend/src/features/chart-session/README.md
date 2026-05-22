@@ -26,6 +26,8 @@ longer need imperative range callbacks.
 - May own exchange capability catalog loading and interval metadata fallback.
 - May own custom interval storage and visible-range persistence for the active
   chart identity.
+- May temporarily own chart pane layout persistence while pane layout remains
+  coupled to the active chart session and indicator panes.
 - May use shared interval and symbol utilities.
 - May expose stable actions to app composition and feature UI.
 

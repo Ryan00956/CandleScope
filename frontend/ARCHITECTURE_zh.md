@@ -79,6 +79,7 @@ CORS 阻止访问 `http://localhost:8000`，导致 K 线 HTTP 请求失败。
 
 ```bash
 cd frontend
+node ./scripts/check-architecture.mjs
 node ./node_modules/eslint/bin/eslint.js .
 node ./node_modules/vite/bin/vite.js build
 ```

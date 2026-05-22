@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "check:architecture": "node scripts/check-architecture.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "smoke": "node scripts/smoke.mjs"

@@ -50,6 +50,7 @@ Optimization execution notes:
 - [Frontend Cleanup Execution Plan](FRONTEND_CLEANUP_EXECUTION.md)
 
 ```bash
+node ./scripts/check-architecture.mjs
 node ./node_modules/vite/bin/vite.js build
 node ./node_modules/eslint/bin/eslint.js .
 ```

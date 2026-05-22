@@ -1,5 +1,5 @@
 export function loadSettingsModal() {
-  return import("../SettingsModal");
+  return import("../../features/settings/SettingsModal");
 }
 
 export function loadIndicatorPanel() {

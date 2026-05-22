@@ -8,9 +8,9 @@ import { loadUserPrefs, updateUserPref } from "./features/chart-session/chartSes
 import { useChartSession } from "./features/chart-session/useChartSession";
 import { useMarketDataRuntime } from "./features/market-data/useMarketDataRuntime";
 import { useIndicatorRuntime } from "./features/indicators/useIndicatorRuntime";
-import { useCacheLimitsSync } from "./runtime/preferences/useCacheLimitsSync";
+import { useCacheLimitsSync } from "./features/settings/cacheLimitSettingsRuntime";
 import { useChartExportRuntime } from "./runtime/workflows/useChartExportRuntime";
-import { useChartSettingsRuntime } from "./runtime/preferences/useChartSettingsRuntime";
+import { useChartSettingsRuntime } from "./features/settings/chartAppearanceSettings";
 import { useDrawingRuntime } from "./features/drawings/useDrawingRuntime";
 import { usePriceScalePrefs } from "./runtime/preferences/usePriceScalePrefs";
 import { useWatchlistRuntime } from "./features/watchlist/useWatchlistRuntime";

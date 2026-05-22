@@ -5,7 +5,7 @@ import {
     fetchDatabaseSeries,
     requestDatabaseBackfill,
     scanDatabaseSeriesGaps,
-} from '../../services/databaseToolsApi';
+} from '../../features/settings/databaseSettingsRuntime';
 import { parseSymbolKey } from '../../utils/symbolKey';
 
 const ALL_VALUE = 'all';

@@ -1,25 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import AboutSettingsPanel from './settings/AboutSettingsPanel';
-import CacheLimitsPanel from './settings/CacheLimitsPanel';
-import ChartAppearancePanel from './settings/ChartAppearancePanel';
-import DatabaseManagementPanel from './settings/DatabaseManagementPanel';
-import ExchangeSettingsPanel from './settings/ExchangeSettingsPanel';
-import ProxySettingsPanel from './settings/ProxySettingsPanel';
-import { useExchangeSettingsRuntime } from '../runtime/exchange/useExchangeSettingsRuntime';
-import { useProxySettingsRuntime } from '../runtime/preferences/useProxySettingsRuntime';
-import { useSettingsMaintenanceRuntime } from '../runtime/preferences/useSettingsMaintenanceRuntime';
-import StorageMaintenancePanel from './settings/StorageMaintenancePanel';
-import { markPerf } from '../runtime/performance/perfMarks';
-
-// ── Category definitions ────────────────────────────────────────
-const CATEGORIES = [
-    { key: 'appearance', label: '外观显示', icon: '🎨' },
-    { key: 'network',    label: '网络连接', icon: '🌐' },
-    { key: 'exchanges',  label: '交易所',   icon: '🏦' },
-    { key: 'data',       label: '数据管理', icon: '💾' },
-    { key: 'database',   label: '数据库工具', icon: '🗄️' },
-    { key: 'about',      label: '关于',     icon: 'ℹ️' },
-];
+import React, { useState } from 'react';
+import AboutSettingsPanel from '../features/settings/panels/AboutSettingsPanel';
+import CacheLimitsPanel from '../features/settings/panels/CacheLimitsPanel';
+import ChartAppearancePanel from '../features/settings/panels/ChartAppearancePanel';
+import DatabaseManagementPanel from '../features/settings/panels/DatabaseManagementPanel';
+import ExchangeSettingsPanel from '../features/settings/panels/ExchangeSettingsPanel';
+import ProxySettingsPanel from '../features/settings/panels/ProxySettingsPanel';
+import StorageMaintenancePanel from '../features/settings/panels/StorageMaintenancePanel';
+import { SETTINGS_CATEGORIES, useSettingsRuntime } from '../features/settings/useSettingsRuntime';
 
 export default function SettingsModal({
     isOpen,
@@ -32,22 +19,16 @@ export default function SettingsModal({
     watchlists = [],
 }) {
     const [activeCategory, setActiveCategory] = useState('appearance');
-    const exchangeRuntime = useExchangeSettingsRuntime({ isOpen });
-    const proxyRuntime = useProxySettingsRuntime({ isOpen });
-    const maintenanceRuntime = useSettingsMaintenanceRuntime({
+  const settingsRuntime = useSettingsRuntime({
         isOpen,
+    settings,
+    onUpdate,
         currentSymbol,
         currentMarketType,
         currentExchange,
         watchlists,
     });
-
-    useEffect(() => {
-        if (isOpen) markPerf('lazy.settings.ready');
-    }, [isOpen]);
-
-    // ── Data management state (must be above early return for hook ordering) ──
-    const [showAdvanced, setShowAdvanced] = useState(false);
+  const { view, actions } = settingsRuntime;
 
     if (!isOpen) return null;
 
@@ -55,45 +36,33 @@ export default function SettingsModal({
 
     const renderAppearance = () => (
         <ChartAppearancePanel
-            settings={settings}
-            onUpdate={onUpdate}
+        {...view.appearance}
         />
     );
 
     const renderNetwork = () => (
         <ProxySettingsPanel
-            {...proxyRuntime}
-            onProxyModeChange={proxyRuntime.handleProxyModeChange}
-            onCustomProxyChange={proxyRuntime.handleCustomProxyChange}
-            onProxyTest={proxyRuntime.handleProxyTest}
-            onProxySave={proxyRuntime.handleProxySave}
+        {...view.proxy}
+        {...actions.proxy}
         />
     );
 
     const renderExchanges = () => (
         <ExchangeSettingsPanel
-            currentExchange={currentExchange}
-            {...exchangeRuntime}
-            onRefreshExchanges={exchangeRuntime.loadSupportedExchanges}
+        {...view.exchanges}
+        {...actions.exchanges}
         />
     );
 
     const renderData = () => (
         <>
             <CacheLimitsPanel
-                settings={settings}
-                onUpdate={onUpdate}
-                showAdvanced={showAdvanced}
-                onToggleAdvanced={() => setShowAdvanced((prev) => !prev)}
+              {...view.cacheLimits}
+              {...actions.cacheLimits}
             />
             <StorageMaintenancePanel
-                currentSymbol={currentSymbol}
-                currentMarketType={currentMarketType}
-                currentExchange={currentExchange}
-                {...maintenanceRuntime}
-                onStorageRepair={maintenanceRuntime.handleStorageRepair}
-                onGapScan={maintenanceRuntime.handleGapScan}
-                onExchangeRefresh={maintenanceRuntime.handleExchangeRefresh}
+              {...view.maintenance}
+              {...actions.maintenance}
             />
         </>
     );
@@ -102,10 +71,7 @@ export default function SettingsModal({
 
       const renderDatabase = () => (
         <DatabaseManagementPanel
-          currentExchange={currentExchange}
-          currentMarketType={currentMarketType}
-          currentSymbol={currentSymbol}
-          watchlists={watchlists}
+          {...view.database}
         />
       );
 
@@ -122,7 +88,7 @@ export default function SettingsModal({
         }
     };
 
-    const activeCatObj = CATEGORIES.find(c => c.key === activeCategory) || CATEGORIES[0];
+    const activeCatObj = SETTINGS_CATEGORIES.find(c => c.key === activeCategory) || SETTINGS_CATEGORIES[0];
 
     return (
         <div className="st-overlay" onClick={onClose}>
@@ -131,7 +97,7 @@ export default function SettingsModal({
                 <nav className="st-sidebar">
                     <div className="st-sidebar-title">设置</div>
                     <div className="st-sidebar-nav">
-                        {CATEGORIES.map(cat => (
+                        {SETTINGS_CATEGORIES.map(cat => (
                             <button
                                 key={cat.key}
                                 className={`st-nav-item ${activeCategory === cat.key ? 'active' : ''}`}

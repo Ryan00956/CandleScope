@@ -16,17 +16,18 @@ persistence for the active series.
 }
 ```
 
-During the migration it also exposes compatibility fields for existing market
-data runtimes, such as tracked interval refs and custom interval actions. Those
-fields should disappear when Phase 2 moves the K-line lifecycle into
-`features/market-data`.
+It also exposes compatibility refs used by `features/market-data` while the app
+composition root still bridges a small amount of cross-feature coordination.
+Those refs should disappear when the market-data and indicator contracts no
+longer need imperative range callbacks.
 
 ## Allowed Dependencies
 
-- The feature may consume exchange capability helpers from the migration
-  runtime until exchange catalog ownership is revisited.
-- It may use shared interval and symbol utilities.
-- It may expose stable actions to app composition and feature UI.
+- May own exchange capability catalog loading and interval metadata fallback.
+- May own custom interval storage and visible-range persistence for the active
+  chart identity.
+- May use shared interval and symbol utilities.
+- May expose stable actions to app composition and feature UI.
 
 ## Forbidden Dependencies
 

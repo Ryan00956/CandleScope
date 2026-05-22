@@ -1,4 +1,4 @@
-import { mergeIndicatorItems } from "../../runtime/indicators/indicatorPayloadRuntime";
+import { mergeIndicatorItems } from "./indicatorPayloadRuntime";
 
 const OUTPUT_KEYS = ["markers", "fills", "hlines", "bgcolors", "barcolors", "signals"];
 

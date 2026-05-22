@@ -6,7 +6,7 @@ import {
   getBuiltinIndicatorName,
   isBuiltinIndicator,
   isWsHostedIndicator,
-} from "../../runtime/indicators/indicatorPayloadRuntime";
+} from "./indicatorPayloadRuntime";
 import {
   buildCandleColorKey,
   buildIndicatorComputeParams,
@@ -17,7 +17,7 @@ import {
   resolveIndicatorComputeDelay,
   resolveSeriesReadyComputeDelay,
   shouldDeferIndicatorCompute,
-} from "../../runtime/indicators/indicatorComputeRuntime";
+} from "./indicatorComputeRuntime";
 
 export function useIndicatorComputeController({
   activeIndicators,

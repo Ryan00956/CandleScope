@@ -1,14 +1,14 @@
 import { useCallback, useRef } from "react";
 import { fetchKlinesBefore, fetchKlinesHistory, fetchKlinesRange } from "../../services/api";
 import { parseIntervalSeconds } from "../../utils/intervals";
-import { requestIndicatorRangeInChunks } from "../chart/indicatorRangeRuntime";
+import { requestIndicatorRangeInChunks } from "./indicatorRangeRuntime";
 import {
   eventRangeFromDetail,
   isSameSeries,
   rangeCovers,
   rangesOverlap,
   rowRangeMs,
-} from "../chart/rangeRuntime";
+} from "./rangeRuntime";
 
 const BACKFILL_RELOAD_COOLDOWN_MS = 10_000;
 const PENDING_LOAD_MORE_LEFT_COMPLETION_MAX_ATTEMPTS = 3;

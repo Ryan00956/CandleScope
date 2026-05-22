@@ -7,7 +7,7 @@ import { useCacheLimitsSync } from "../features/settings/cacheLimitSettingsRunti
 import { useExportRuntime } from "../features/export/useExportRuntime";
 import { useChartSettingsRuntime } from "../features/settings/chartAppearanceSettings";
 import { useDrawingRuntime } from "../features/drawings/useDrawingRuntime";
-import { usePriceScalePrefs } from "../runtime/preferences/usePriceScalePrefs";
+import { usePriceScalePrefs } from "../features/settings/priceScalePrefsRuntime";
 import { useWatchlistRuntime } from "../features/watchlist/useWatchlistRuntime";
 import AppProviders from "./AppProviders";
 import AppShell from "./AppShell";

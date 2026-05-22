@@ -5,7 +5,7 @@ import {
   formatPrice,
   formatPriceDiff,
   formatVolume,
-} from "../runtime/chart/chartDisplayRuntime";
+} from "../features/market-data/marketDataView";
 
 export default function TopBar({ symbolSearch, controls, marketSummary }) {
   const {

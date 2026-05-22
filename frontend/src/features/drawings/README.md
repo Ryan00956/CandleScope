@@ -69,4 +69,6 @@ The hook still returns legacy flat fields while `App.jsx` and shell props are mi
 
 ## Migration Notes
 
-`src/hooks/useDrawing.js`, `src/hooks/useDrawingController.js`, `src/services/drawingStorage.js`, and `src/runtime/workflows/useDrawingRuntime.js` remain compatibility wrappers for older imports.
+Phase 11 removed the old `src/hooks` and `src/runtime/workflows` drawing wrappers.
+`src/services/drawingStorage.js` remains as a compatibility storage entry until
+all drawing storage imports are folded into this feature.

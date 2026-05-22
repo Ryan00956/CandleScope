@@ -11,8 +11,8 @@ import {
   getVisibleHostedIndicators,
   parseIndicatorWsMessage,
   resolveIndicatorWsSequenceState,
-} from "../../runtime/indicators/indicatorWsRuntime";
-import { formatIndicatorError } from "../../runtime/indicators/indicatorPayloadRuntime";
+} from "./indicatorWsRuntime";
+import { formatIndicatorError } from "./indicatorPayloadRuntime";
 
 const INDICATOR_WS_RECONNECT_MS = 3000;
 

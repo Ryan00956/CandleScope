@@ -65,7 +65,9 @@ events through the app composition root.
 
 ## Migration Notes
 
-Existing business logic may still live in `src/hooks`, `src/runtime`,
-`src/components`, or `src/services`. New feature work should move ownership one
-capability at a time according to the architecture rebuild phases, keeping each
-phase independently lintable and buildable.
+Phase 11 removed the old `src/hooks` business entrypoints and folded feature-owned
+`src/runtime` modules back into their owning features. Existing UI and service
+code may still live in `src/components` or `src/services` during migration. New
+feature work should move ownership one capability at a time according to the
+architecture rebuild phases, keeping each phase independently lintable and
+buildable.

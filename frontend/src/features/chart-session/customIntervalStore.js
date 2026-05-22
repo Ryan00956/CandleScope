@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { normalizeIntervalValue, parseIntervalSeconds } from "../utils/intervals";
+import { normalizeIntervalValue, parseIntervalSeconds } from "../../utils/intervals";
 
 const LEGACY_CUSTOM_INTERVALS_KEY = "candlescope-custom-intervals";
 const CUSTOM_INTERVAL_RECORDS_KEY = "candlescope-custom-intervals-v2";

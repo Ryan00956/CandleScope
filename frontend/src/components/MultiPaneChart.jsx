@@ -11,7 +11,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import ChartPane from "./ChartPane";
 import PaneResizer from "./PaneResizer";
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
-import { planVisibleRangeRestore } from "../runtime/chart/viewportController";
+import { planVisibleRangeRestore } from "../features/chart-session/visibleRangeStorage";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;

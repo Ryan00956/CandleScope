@@ -60,4 +60,5 @@
 
 ## Migration Notes
 
-`src/runtime/preferences/useChartSettingsRuntime.js`, `src/runtime/preferences/useCacheLimitsSync.js`, `src/runtime/preferences/useProxySettingsRuntime.js`, and `src/runtime/exchange/useExchangeSettingsRuntime.js` remain compatibility wrappers for older imports.
+Phase 11 removed the old settings runtime compatibility wrappers. Settings
+runtime imports should go directly through `features/settings` modules.

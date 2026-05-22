@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { markPerfOnce, recordPerfEvent } from "../performance/perfMarks";
+import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks";
 import { deduplicateByTime, mergeByTime, upsertRealtimeKline } from "./chartDataRuntime";
 
 function inferCommitStatus(source, data, extra = {}) {

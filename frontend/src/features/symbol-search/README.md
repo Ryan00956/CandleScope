@@ -63,4 +63,6 @@
 
 ## Migration Notes
 
-`src/components/SymbolSearch.jsx`, `src/components/SymbolSearchModal.jsx`, and `src/runtime/exchange/useSymbolCatalogRuntime.js` remain compatibility wrappers for older imports.
+Phase 11 removed the old symbol-search component and runtime compatibility
+wrappers. App and shell code should import symbol-search UI and catalog runtime
+from this feature directly.

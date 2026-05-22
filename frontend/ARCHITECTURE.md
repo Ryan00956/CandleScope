@@ -10,30 +10,40 @@ For the current phase review and recommended next work, see
 
 ## Goals
 
-- Keep `App.jsx` as the composition root instead of the owner of every data,
+- Keep `src/app/App.jsx` as the composition root instead of the owner of every data,
   stream, preference, and workflow concern.
-- Keep rendering components in `src/components`, backend clients in
-  `src/services`, and orchestration/runtime hooks in `src/runtime`.
+- Keep business ownership in `src/features/*`, grouped by capability rather
+  than by technical layer.
+- Keep `src/runtime` free of business ownership; it now only hosts app-wide
+  performance instrumentation.
 - Make K-line loading, indicator updates, WebSocket streams, gap recovery, and
-  user workflows independently understandable and testable.
+  user workflows independently understandable and testable by feature.
 - Keep local development stable across `localhost` and `127.0.0.1` entrypoints.
 - Reduce initial JavaScript cost by lazy-loading panels that are not needed for
   the first chart render.
 
-## Current Runtime Boundaries
+## Current Ownership Boundaries
 
-`src/runtime` is split by ownership:
+After Phase 10, `src/app` owns the composition root and shell. After Phase 11,
+business runtimes that previously lived in `src/hooks` and `src/runtime` have
+been folded into their owning features.
+
+`src/features` is split by capability:
 
 | Group | Ownership |
 |---|---|
-| `chart/` | Chart data cache, visible range restore, initial history load, left pagination, gap recovery, chart display derivations |
-| `streams/` | K-line WebSocket runtime and backend backfill completion handling |
-| `exchange/` | Exchange capability catalog and interval metadata |
-| `preferences/` | Local and backend-backed user preference sync |
-| `workflows/` | Export, drawing, custom interval, interval notice, and watchlist workflows |
+| `chart-session/` | Active symbol, exchange, market type, interval, dataset key, custom intervals, exchange capabilities, visible-range storage |
+| `market-data/` | K-line cache, initial history load, left pagination, backfill completion, K-line WebSocket, background prefetch, gap recovery, header market display state |
+| `indicators/` | Active indicators, compute scheduling, hosted indicator WebSocket, output reducer, pane projection, catalog, and Pyne security policy |
+| `drawings/` | Drawing tool state, primitive interaction, selection, snap, persistence, and lazy drawing engine host |
+| `watchlist/` | Watchlist folders, sidebar layout, subscription tiers, and watchlist price streams |
+| `symbol-search/` | Symbol catalog, favorites, filtering, and modal interaction |
+| `settings/` | Chart appearance, proxy settings, exchange refresh, cache limits, maintenance actions, and database tools panel |
+| `export/` | Export options, preview, export service, and drawing commit coordination before export |
 
-See [src/runtime/README.md](src/runtime/README.md) for the package-local
-ownership rules.
+`src/runtime` only keeps app-wide performance marks; see
+[src/runtime/README.md](src/runtime/README.md). Feature boundary rules live in
+[src/features/README.md](src/features/README.md).
 
 ## Backend Connection
 
@@ -69,6 +79,8 @@ through the Vite proxy.
 | Conservative trailing chart-series update paths | Done |
 | Intent-based preload for symbol search and Settings | Done |
 | Build-time vendor chunks for React, Lightweight Charts, editor, and export libraries | Done |
+| Phase 10 app shell and lazy surfaces moved into `src/app` | Done |
+| Phase 11 cleanup for `src/hooks` and business `src/runtime` migration entries | Done |
 
 ## Validation Baseline
 
@@ -115,5 +127,8 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
   chart components.
 - Consider CI-visible performance budget reporting once local smoke numbers are
   stable enough to compare across machines.
+- Continue moving feature UI implementations that still live under
+  `src/components` into their owning features when those files are stable enough
+  to move without behavior churn.
 - Keep top-level README and this architecture document in sync when frontend
-  runtime boundaries change.
+  feature boundaries change.

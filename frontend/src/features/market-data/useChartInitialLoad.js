@@ -1,6 +1,6 @@
 import { useCallback, useRef } from "react";
 import { fetchKlinesHistory, fetchLatestKlines } from "../../services/api";
-import { markPerf, recordPerfEvent } from "../performance/perfMarks";
+import { markPerf, recordPerfEvent } from "../../runtime/performance/perfMarks";
 import { numericRange } from "./rangeRuntime";
 
 const INITIAL_BACKFILL_RETRY_MS = 3_000;

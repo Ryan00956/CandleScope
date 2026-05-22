@@ -4,7 +4,7 @@ import {
   fetchLatestKlines,
   getMultiStreamUrl,
 } from "../../services/api";
-import { markPerfOnce, recordPerfEvent } from "../performance/perfMarks";
+import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks";
 
 const WS_RECONNECT_BASE_DELAY = 2_000;
 const WS_RECONNECT_MAX_DELAY = 60_000;

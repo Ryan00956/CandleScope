@@ -18,17 +18,15 @@ warming, gap recovery, and header price state.
 }
 ```
 
-During migration the feature composes existing `src/runtime/chart` and
-`src/runtime/streams` hooks as implementation details. `App.jsx` should depend
-on this feature contract rather than directly calling the low-level chart data,
-initial load, pagination, stream, backfill, prefetch, or gap recovery hooks.
+The feature owns the low-level chart data, initial load, pagination, stream,
+backfill, prefetch, and gap recovery helpers directly. `App.jsx` should depend
+on this feature contract rather than calling those implementation hooks.
 
 ## Allowed Dependencies
 
 - May consume the chart session view/actions/refs passed by the app composition
   root.
-- May import migration-period chart and stream runtime hooks until those modules
-  are folded into this feature.
+- May use internal chart data and stream helpers from this feature directory.
 - May call backend K-line services through existing runtime hooks.
 - May notify indicator range loading through a callback passed from the app
   composition root while indicator ownership remains in a later phase.

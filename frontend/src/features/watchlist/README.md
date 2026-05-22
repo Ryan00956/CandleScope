@@ -50,4 +50,6 @@ The runtime still returns legacy flat fields while `App.jsx` and shell props con
 
 ## Migration Notes
 
-`src/services/watchlistStorage.js`, `src/runtime/preferences/useWatchlistStorageRuntime.js`, `src/runtime/workflows/useWatchlistRuntime.js`, and `src/components/WatchlistSidebar.jsx` remain compatibility wrappers for older imports.
+Phase 11 removed the old watchlist runtime and component wrappers. `src/services/watchlistStorage.js`
+remains as a compatibility storage entry until all watchlist storage imports are
+folded into this feature.

@@ -14,7 +14,7 @@ import {
   normalizeParamSchema,
   resolveWsValue,
   upsertLinePoint,
-} from "../../runtime/indicators/indicatorPayloadRuntime";
+} from "./indicatorPayloadRuntime";
 
 function useLatestRef(value) {
   const ref = useRef(value);

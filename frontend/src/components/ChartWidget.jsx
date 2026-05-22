@@ -7,7 +7,7 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef, useCallback, useState } from "react";
 import { createChart, CandlestickSeries } from "lightweight-charts";
-import { useDrawing } from "../hooks/useDrawing";
+import { useDrawing } from "../features/drawings/drawingInteractionController";
 import TextEditOverlay from "./TextEditOverlay";
 import TextFormatBar from "./TextFormatBar";
 

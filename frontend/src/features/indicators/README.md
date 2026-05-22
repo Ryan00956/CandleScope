@@ -71,6 +71,7 @@ migrated. New code should prefer `view`, `actions`, and `status`.
 
 ## Migration Notes
 
-`src/hooks/useIndicators.js` remains a compatibility wrapper. Existing helper
-modules under `src/runtime/indicators` are migration-era implementation details
-and should not be imported by new app or shell code.
+Phase 11 removed the old `src/hooks/useIndicators.js` wrapper and folded the
+indicator compute, payload, catalog, security-policy, and hosted stream helpers
+into this feature. The remaining component wrappers only preserve lazy UI entry
+points while panel code continues to be simplified.

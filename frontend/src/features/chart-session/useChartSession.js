@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useCustomIntervals } from "../../hooks/useCustomIntervals";
+import { useCustomIntervals } from "./customIntervalStore";
 import {
   buildSortedIntervals,
   getBaseWsIntervals,
@@ -8,8 +8,8 @@ import {
   getNativeIntervals,
   isNativeIntervalSupported,
   useExchangeCatalog,
-} from "../../runtime/exchange/exchangeCatalogRuntime";
-import { useIntervalNoticeRuntime } from "../../runtime/workflows/useIntervalNoticeRuntime";
+} from "./exchangeCatalogRuntime";
+import { useIntervalNoticeRuntime } from "./intervalNoticeRuntime";
 import { loadInitialChartSession, updateUserPref } from "./chartSessionModel";
 import {
   getExchangeMarketTypes,

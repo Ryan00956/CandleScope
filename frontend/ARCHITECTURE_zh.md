@@ -9,25 +9,34 @@
 
 ## 目标
 
-- 让 `App.jsx` 成为组合根，而不是所有数据、流、偏好和工作流逻辑的所有者。
-- 渲染组件放在 `src/components`，后端客户端放在 `src/services`，编排和运行时 hook 放在 `src/runtime`。
-- 让 K 线加载、指标更新、WebSocket、缺口恢复和用户工作流可以分别理解、验证和维护。
+- 让 `src/app/App.jsx` 成为组合根，而不是所有数据、流、偏好和工作流逻辑的所有者。
+- 让 `src/features/*` 按业务能力拥有状态、runtime、storage、controller 和 feature UI 入口。
+- 让 `src/runtime` 不再承载业务所有权，只保留跨应用性能 instrumentation。
+- 让 K 线加载、指标更新、WebSocket、缺口恢复和用户工作流可以按 feature 分别理解、验证和维护。
 - 让本地开发在 `localhost` 和 `127.0.0.1` 入口下都稳定。
 - 通过懒加载首屏不需要的面板，降低初始 JavaScript 成本。
 
-## 当前 Runtime 边界
+## 当前所有权边界
 
-`src/runtime` 按所有权分组：
+Phase 10 后，`src/app` 拥有应用组合根和 Shell。Phase 11 后，原先在
+`src/hooks` 和 `src/runtime` 中的业务 runtime 已迁入对应 feature。
+
+`src/features` 按业务能力分组：
 
 | 分组 | 所有权 |
 |---|---|
-| `chart/` | 图表数据缓存、可见范围恢复、首屏历史加载、左侧分页、缺口恢复、图表展示派生状态 |
-| `streams/` | K 线 WebSocket runtime、后端 backfill completion 处理 |
-| `exchange/` | 交易所能力目录和周期元数据 |
-| `preferences/` | 本地或后端同步的用户偏好 |
-| `workflows/` | 导出、绘图、自定义周期、周期提示、自选列表等用户工作流 |
+| `chart-session/` | 当前 symbol、exchange、market type、interval、dataset key、自定义周期、交易所 capability、可见范围存储 |
+| `market-data/` | K 线缓存、首屏历史加载、左侧分页、backfill completion、K 线 WebSocket、背景预取、gap recovery、header 行情展示状态 |
+| `indicators/` | active indicators、计算调度、hosted indicator WebSocket、输出 reducer、pane projection、catalog 和 Pyne 安全策略 |
+| `drawings/` | 绘图工具状态、primitive 交互、选择、snap、持久化、lazy drawing engine host |
+| `watchlist/` | 自选列表、侧栏布局、订阅层级、watchlist price stream |
+| `symbol-search/` | symbol catalog、收藏、搜索过滤、modal interaction |
+| `settings/` | 图表外观、代理、交易所刷新、cache limit、维护动作、数据库工具面板 |
+| `export/` | 导出选项、预览、导出服务和导出前绘图提交协作 |
 
-包内边界规则见 [src/runtime/README.md](src/runtime/README.md)。
+`src/runtime` 仅保留 app-wide performance marks，规则见
+[src/runtime/README.md](src/runtime/README.md)。Feature 边界规则见
+[src/features/README.md](src/features/README.md)。
 
 ## 后端连接
 
@@ -61,6 +70,8 @@ CORS 阻止访问 `http://localhost:8000`，导致 K 线 HTTP 请求失败。
 | 保守的 chart series 尾部增量更新路径 | 已完成 |
 | symbol search 和 Settings 的意图预加载 | 已完成 |
 | React、Lightweight Charts、editor、export 库的构建期 vendor chunk | 已完成 |
+| Phase 10 app shell 和 lazy surfaces 迁入 `src/app` | 已完成 |
+| Phase 11 清理 `src/hooks` 和业务 `src/runtime` 迁移期入口 | 已完成 |
 
 ## 验证基线
 
@@ -103,4 +114,5 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 - `ChartPane` 内部简化继续以证据驱动。它仍然是最密集的图表模块，但
   Lightweight Charts 所有权应继续留在 chart components 内。
 - 当本地 smoke 数字稳定到适合跨机器比较后，可以考虑把性能预算报告接入 CI。
-- 当前端 runtime 边界变化时，同步更新顶层 README 和本文档。
+- 继续把仍留在 `src/components` 的 feature UI 实现逐步迁入对应 feature，避免只为了目录整齐而移动仍不稳定的代码。
+- 当前端 feature 边界变化时，同步更新顶层 README 和本文档。

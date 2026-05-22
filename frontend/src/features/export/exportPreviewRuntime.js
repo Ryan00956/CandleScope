@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, renderExportImage } from "../services/exportService";
+import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, renderExportImage } from "./exportService";
 
 function waitForAnimationFrames(count = 2) {
   return new Promise((resolve) => {
@@ -44,14 +44,15 @@ const EMPTY_PREVIEW = {
   generatedAt: null,
 };
 
-export function useExportPreview({
+export function useExportPreviewRuntime({
   isOpen,
   options,
   metadata,
   chartWidgetRef,
   pageExportRef,
   drawingsHidden,
-  setDrawingsHidden,
+  prepareDrawingExport,
+  setDrawingsHiddenForExport,
   debounceMs = 450,
 }) {
   const [preview, setPreview] = useState(EMPTY_PREVIEW);
@@ -159,12 +160,11 @@ export function useExportPreview({
         throw new Error("图表尚未就绪，无法生成预览。 ");
       }
 
-      chartApi.prepareExport?.();
+      prepareDrawingExport?.();
 
       if (exportOptions.hideDrawings && !previousDrawingsHidden) {
         changedDrawingVisibility = true;
-        setDrawingsHidden(true);
-        chartApi.setDrawingsHidden?.(true);
+        setDrawingsHiddenForExport?.(true);
       }
 
       await waitForAnimationFrames(2);
@@ -204,8 +204,7 @@ export function useExportPreview({
       return null;
     } finally {
       if (changedDrawingVisibility) {
-        chartApi?.setDrawingsHidden?.(false);
-        setDrawingsHidden(false);
+        setDrawingsHiddenForExport?.(false);
       }
 
       runningRef.current = false;
@@ -220,7 +219,7 @@ export function useExportPreview({
         setLoading(false);
       }
     }
-  }, [chartWidgetRef, pageExportRef, setDrawingsHidden]);
+  }, [chartWidgetRef, pageExportRef, prepareDrawingExport, setDrawingsHiddenForExport]);
 
   useEffect(() => {
     runGenerationRef.current = runGeneration;
@@ -257,4 +256,4 @@ export function useExportPreview({
   };
 }
 
-export default useExportPreview;
+export default useExportPreviewRuntime;

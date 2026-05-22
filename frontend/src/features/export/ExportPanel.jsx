@@ -1,6 +1,6 @@
 import { memo, useMemo } from "react";
 import ExportPreviewPanel from "./ExportPreviewPanel";
-import { buildExportFilename } from "../utils/exportFilename";
+import { buildExportFilename } from "../../utils/exportFilename";
 
 const SCOPE_OPTIONS = [
   { value: "chart", label: "整张图表", desc: "包含主图和所有指标窗格" },

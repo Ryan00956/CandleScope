@@ -4,7 +4,7 @@ import {
   buildDefaultWatermark,
   buildExportFilename,
   getExportMimeType,
-} from "../utils/exportFilename";
+} from "../../utils/exportFilename";
 
 export const DEFAULT_EXPORT_OPTIONS = {
   scope: "chart",

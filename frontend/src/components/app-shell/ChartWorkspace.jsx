@@ -1,7 +1,7 @@
 ﻿import React from "react";
 import MultiPaneChart from "../MultiPaneChart";
 
-const ExportPanel = React.lazy(() => import("../ExportPanel"));
+const ExportPanel = React.lazy(() => import("../../features/export/ExportPanel"));
 const DrawingToolbar = React.lazy(() => import("../../features/drawings/DrawingToolbar"));
 const WatchlistSidebar = React.lazy(() => import("../../features/watchlist/WatchlistSidebar"));
 

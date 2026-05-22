@@ -18,6 +18,16 @@ export function useDrawingRuntime({ chartWidgetRef, session }) {
     setDrawingsHidden((prev) => !prev);
   }, [setDrawingsHidden]);
 
+  const setDrawingsHiddenForExport = useCallback((hidden) => {
+    const nextHidden = !!hidden;
+    setDrawingsHidden(nextHidden);
+    chartWidgetRef.current?.setDrawingsHidden?.(nextHidden);
+  }, [chartWidgetRef, setDrawingsHidden]);
+
+  const prepareExport = useCallback(() => {
+    chartWidgetRef.current?.prepareExport?.();
+  }, [chartWidgetRef]);
+
   useEffect(() => {
     chartWidgetRef.current?.setDrawingsHidden?.(view.drawingsHidden);
   }, [chartWidgetRef, view.drawingsHidden]);
@@ -39,6 +49,8 @@ export function useDrawingRuntime({ chartWidgetRef, session }) {
     handleClearDrawing,
     handleToggleDrawingsHidden,
     handleSelectedDrawingStyleChange,
+    setDrawingsHiddenForExport,
+    prepareExport,
     clearIndicatorDrawingStorage,
   };
 

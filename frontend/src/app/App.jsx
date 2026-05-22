@@ -53,12 +53,9 @@ export default function App() {
     marketData,
     candleUpColor: settings.upColor,
     candleDownColor: settings.downColor,
+    onIndicatorRemoved: drawings.actions.handleIndicatorRemoved,
   });
-  const {
-    removeIndicator: rawRemoveIndicator,
-    requestIndicatorRange,
-  } = indicators.actions;
-  const { clearIndicatorDrawingStorage } = drawings.actions;
+  const { requestIndicatorRange } = indicators.actions;
 
   useEffect(() => {
     indicatorRangeRequestRef.current = requestIndicatorRange;
@@ -78,11 +75,6 @@ export default function App() {
     loadUserPrefs,
     updateUserPref,
   });
-
-  const removeIndicator = useCallback((indicatorId) => {
-    rawRemoveIndicator(indicatorId);
-    clearIndicatorDrawingStorage(indicatorId);
-  }, [clearIndicatorDrawingStorage, rawRemoveIndicator]);
 
   const watchlist = useWatchlistRuntime();
 
@@ -104,7 +96,6 @@ export default function App() {
           },
           actions: {
             ...indicators.actions,
-            removeIndicator,
             openPanel: () => setShowIndicatorPanel(true),
             closePanel: () => setShowIndicatorPanel(false),
             togglePanel: () => setShowIndicatorPanel((prev) => !prev),

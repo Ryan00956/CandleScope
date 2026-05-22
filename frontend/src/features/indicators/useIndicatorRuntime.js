@@ -56,6 +56,7 @@ export function useIndicatorRuntime(options = {}) {
     seriesReady,
     symbol,
   } = resolveRuntimeInputs(options);
+  const onIndicatorRemoved = options.onIndicatorRemoved;
 
   const pendingForceComputeRef = useRef(false);
   const requireIndicatorCompute = useCallback(() => {
@@ -66,11 +67,16 @@ export function useIndicatorRuntime(options = {}) {
     activeIndicators,
     setActiveIndicators,
     addIndicator,
-    removeIndicator,
+    removeIndicator: removeActiveIndicator,
     toggleVisibility,
     updateIndicatorParams,
     updateIndicatorScript,
   } = useActiveIndicatorStore({ onRequireCompute: requireIndicatorCompute });
+
+  const removeIndicator = useCallback((indicatorId) => {
+    removeActiveIndicator(indicatorId);
+    onIndicatorRemoved?.(indicatorId);
+  }, [onIndicatorRemoved, removeActiveIndicator]);
 
   const [outputState, outputDispatch] = useReducer(
     indicatorOutputReducer,

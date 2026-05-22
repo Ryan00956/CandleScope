@@ -6,7 +6,7 @@ stable view/action/status objects to the app shell.
 
 ## Public Contract
 
-`useIndicatorRuntime({ session, marketData, candleUpColor, candleDownColor })`
+`useIndicatorRuntime({ session, marketData, candleUpColor, candleDownColor, onIndicatorRemoved })`
 exposes:
 
 ```js
@@ -54,6 +54,8 @@ migrated. New code should prefer `view`, `actions`, and `status`.
 
 - May consume `features/chart-session` and `features/market-data` contracts
   through arguments passed by the app composition root.
+- May notify the app composition root when an indicator is removed so owning
+  features can handle related cleanup through their own public actions.
 - May call indicator backend services through `services/indicatorApi`.
 - May use chart data shape supplied by market-data, without owning K-line
   loading, caching, WebSocket ticks, or gap recovery.

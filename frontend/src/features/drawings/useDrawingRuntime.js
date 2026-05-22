@@ -36,7 +36,7 @@ export function useDrawingRuntime({ chartWidgetRef, session }) {
     chartWidgetRef.current?.updateSelectedDrawingStyle?.(patch);
   }, [chartWidgetRef]);
 
-  const clearIndicatorDrawingStorage = useCallback((indicatorId) => {
+  const handleIndicatorRemoved = useCallback((indicatorId) => {
     const sessionView = session?.view;
     if (!sessionView || !indicatorId) return;
     const storageKeyBase = `${sessionView.exchange}:${sessionView.marketType}:${sessionView.symbol}`;
@@ -51,7 +51,7 @@ export function useDrawingRuntime({ chartWidgetRef, session }) {
     handleSelectedDrawingStyleChange,
     setDrawingsHiddenForExport,
     prepareExport,
-    clearIndicatorDrawingStorage,
+    handleIndicatorRemoved,
   };
 
   return {
@@ -85,6 +85,6 @@ export function useDrawingRuntime({ chartWidgetRef, session }) {
     handleSelectedDrawingStyleChange,
     handleClearDrawing,
     handleToggleDrawingsHidden,
-    clearIndicatorDrawingStorage,
+    handleIndicatorRemoved,
   };
 }

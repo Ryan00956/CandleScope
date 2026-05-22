@@ -1,31 +1,32 @@
-import SymbolSearch from "../../features/symbol-search/SymbolSearch";
-import { markPerf } from "../../runtime/performance/perfMarks";
+import SymbolSearch from "../features/symbol-search/SymbolSearch";
+import { markPerf } from "../runtime/performance/perfMarks";
 import { loadSettingsModal } from "./lazySurfaceLoaders";
 import {
   formatPrice,
   formatPriceDiff,
   formatVolume,
-} from "../../runtime/chart/chartDisplayRuntime";
+} from "../runtime/chart/chartDisplayRuntime";
 
-export default function TopBar({
-  symbol,
-  marketType,
-  exchange,
-  exchangeCatalog,
-  onSelectSymbol,
-  watchlists,
-  onAddToWatchlist,
-  onOpenSettings,
-  indicatorPanelOpen,
-  onToggleIndicatorPanel,
-  alertPanelOpen,
-  onToggleAlertPanel,
-  activeIndicatorCount,
-  displayData,
-  isUp,
-  priceChange,
-  amplitude,
-}) {
+export default function TopBar({ symbolSearch, controls, marketSummary }) {
+  const {
+    currentSymbol,
+    currentMarketType,
+    currentExchange,
+    exchangeCatalog,
+    onSelectSymbol,
+    watchlists,
+    onAddToWatchlist,
+  } = symbolSearch;
+  const {
+    onOpenSettings,
+    indicatorPanelOpen,
+    onToggleIndicatorPanel,
+    alertPanelOpen,
+    onToggleAlertPanel,
+    activeIndicatorCount,
+  } = controls;
+  const { displayData, isUp, priceChange, amplitude } = marketSummary;
+
   return (
     <header className="top-bar" id="top-bar">
       <div className="logo">
@@ -34,9 +35,9 @@ export default function TopBar({
       </div>
 
       <SymbolSearch
-        currentSymbol={symbol}
-        currentMarketType={marketType}
-        currentExchange={exchange}
+        currentSymbol={currentSymbol}
+        currentMarketType={currentMarketType}
+        currentExchange={currentExchange}
         exchangeCatalog={exchangeCatalog}
         onSelect={onSelectSymbol}
         watchlists={watchlists}

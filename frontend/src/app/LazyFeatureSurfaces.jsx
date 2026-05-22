@@ -9,11 +9,9 @@ const SettingsModal = React.lazy(loadSettingsModal);
 const IndicatorPanel = React.lazy(loadIndicatorPanel);
 const AlertsPanel = React.lazy(loadAlertsPanel);
 
-export default function LazySurfaces({
-  indicatorPanel,
-  alertsPanel,
-  settingsModal,
-}) {
+export default function LazyFeatureSurfaces({ surfaces }) {
+  const { indicatorPanel, alertsPanel, settingsModal } = surfaces;
+
   return (
     <>
       {indicatorPanel.isOpen && (

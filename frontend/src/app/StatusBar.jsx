@@ -1,15 +1,17 @@
-export default function StatusBar({
-  connectionStatus,
-  dataSource,
-  exchangeLabel,
-  marketLabel,
-  wsStatusLabel,
-  barCount,
-  loadingMoreLeft,
-  hasMoreLeft,
-  exchangeCatalogStatus,
-  exchangeLimitations,
-}) {
+export default function StatusBar({ status }) {
+  const {
+    connectionStatus,
+    dataSource,
+    exchangeLabel,
+    marketLabel,
+    wsStatusLabel,
+    barCount,
+    loadingMoreLeft,
+    hasMoreLeft,
+    exchangeCatalogStatus,
+    exchangeLimitations = [],
+  } = status;
+
   return (
     <footer className="status-bar" id="status-bar">
       <div className="status-left">

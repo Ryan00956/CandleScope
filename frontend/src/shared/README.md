@@ -25,8 +25,7 @@ or the chart adapter.
 
 ## Forbidden Dependencies
 
-- Do not import from `src/app`, `src/features`, `src/runtime`, or
-  `src/components/app-shell`.
+- Do not import from `src/app`, `src/features`, or `src/runtime`.
 - Do not import backend clients from `src/services`.
 - Do not create CandleScope API endpoints, WebSocket URLs, or request payloads.
 - Do not own localStorage keys for symbols, drawings, indicators, watchlists,

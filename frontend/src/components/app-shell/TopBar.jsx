@@ -1,4 +1,4 @@
-import SymbolSearch from "../SymbolSearch";
+import SymbolSearch from "../../features/symbol-search/SymbolSearch";
 import { markPerf } from "../../runtime/performance/perfMarks";
 import { loadSettingsModal } from "./lazySurfaceLoaders";
 import {

@@ -20,14 +20,14 @@
  *   - Clear all drawings
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LineDrawingPrimitive } from "../../components/primitives/LineDrawingPrimitive.js";
-import { FreehandDrawingPrimitive } from "../../components/primitives/FreehandDrawingPrimitive.js";
-import { TextDrawingPrimitive } from "../../components/primitives/TextDrawingPrimitive.js";
-import { FibonacciDrawingPrimitive } from "../../components/primitives/FibonacciDrawingPrimitive.js";
-import { PositionDrawingPrimitive } from "../../components/primitives/PositionDrawingPrimitive.js";
-import { ShapeDrawingPrimitive } from "../../components/primitives/ShapeDrawingPrimitive.js";
-import { AxisLineDrawingPrimitive } from "../../components/primitives/AxisLineDrawingPrimitive.js";
-import { AngleMeasurementPrimitive } from "../../components/primitives/AngleMeasurementPrimitive.js";
+import { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
+import { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
+import { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
+import { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
+import { PositionDrawingPrimitive } from "./primitives/PositionDrawingPrimitive.js";
+import { ShapeDrawingPrimitive } from "./primitives/ShapeDrawingPrimitive.js";
+import { AxisLineDrawingPrimitive } from "./primitives/AxisLineDrawingPrimitive.js";
+import { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitive.js";
 import { clearSavedDrawings } from "./drawingPersistence.js";
 import {
   AXIS_LINE_TOOL_IDS,

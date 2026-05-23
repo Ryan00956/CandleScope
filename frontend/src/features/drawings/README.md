@@ -55,6 +55,8 @@ The hook still returns legacy flat fields while `App.jsx` and shell props are mi
 - `drawingInteractionController.js` owns pointer, keyboard, drag, resize, erase, text edit, primitive lifecycle, and chart adapter calls.
 - `drawingPointerController.js` owns pointer coordinate normalization and DOM pointer listener lifecycle.
 - `drawingEraseController.js` owns eraser hit deletion and hover-state updates.
+- `primitives/` owns drawing primitive implementations used by the drawing
+  controller, primitive factory, and drawing-specific UI defaults.
 - `DrawingEngineHost.jsx` mounts the interaction controller and text editing surfaces.
 
 ## Allowed Dependencies
@@ -64,7 +66,7 @@ The hook still returns legacy flat fields while `App.jsx` and shell props are mi
   composition root can route lifecycle events without knowing drawing storage keys.
 - May depend on explicit `chart-adapter` surface actions passed by the app
   composition root.
-- May import drawing primitive implementations while they remain under `src/components/primitives` during migration.
+- May import drawing primitive implementations from `features/drawings/primitives`.
 - May expose feature UI entry points such as `DrawingToolbar` and `DrawingEngineHost`.
 
 ## Forbidden Dependencies

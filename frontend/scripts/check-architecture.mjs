@@ -17,6 +17,7 @@ const RULES = {
   appNoMarketDataRuntimeBridge: "app-no-market-data-runtime-bridge",
   appNoIndicatorRangeBridge: "app-no-indicator-range-bridge",
   appNoRawChartWidgetRef: "app-no-raw-chart-widget-ref",
+  featureNoComponentPrimitivesImport: "feature-no-component-primitives-import",
 };
 
 const allowlist = [];
@@ -237,6 +238,16 @@ function checkImports(absPath, filePath, content) {
         line,
         target: specifier,
         message: "Lightweight Charts import must stay inside chart-adapter or a migration allowlist entry",
+      });
+    }
+
+    if (filePath.startsWith("src/features/") && normalizedTarget.startsWith("src/components/primitives/")) {
+      addViolation({
+        rule: RULES.featureNoComponentPrimitivesImport,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: "drawing primitives belong under features/drawings/primitives, not components/primitives",
       });
     }
   }

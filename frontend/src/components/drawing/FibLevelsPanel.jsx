@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { DEFAULT_FIB_LEVELS } from "../primitives/FibonacciDrawingPrimitive.js";
+import { DEFAULT_FIB_LEVELS } from "../../features/drawings/primitives/FibonacciDrawingPrimitive.js";
 
 const FIB_RANDOM_COLORS = [
   "#e91e63",

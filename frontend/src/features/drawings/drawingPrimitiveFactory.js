@@ -1,11 +1,11 @@
-import { AxisLineDrawingPrimitive } from "../../components/primitives/AxisLineDrawingPrimitive.js";
-import { AngleMeasurementPrimitive } from "../../components/primitives/AngleMeasurementPrimitive.js";
-import { FibonacciDrawingPrimitive } from "../../components/primitives/FibonacciDrawingPrimitive.js";
-import { FreehandDrawingPrimitive } from "../../components/primitives/FreehandDrawingPrimitive.js";
-import { LineDrawingPrimitive } from "../../components/primitives/LineDrawingPrimitive.js";
-import { PositionDrawingPrimitive } from "../../components/primitives/PositionDrawingPrimitive.js";
-import { ShapeDrawingPrimitive } from "../../components/primitives/ShapeDrawingPrimitive.js";
-import { TextDrawingPrimitive } from "../../components/primitives/TextDrawingPrimitive.js";
+import { AxisLineDrawingPrimitive } from "./primitives/AxisLineDrawingPrimitive.js";
+import { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitive.js";
+import { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
+import { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
+import { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
+import { PositionDrawingPrimitive } from "./primitives/PositionDrawingPrimitive.js";
+import { ShapeDrawingPrimitive } from "./primitives/ShapeDrawingPrimitive.js";
+import { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
 import {
   DEFAULT_HIGHLIGHTER_BRUSH_SHAPE,
   DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION,

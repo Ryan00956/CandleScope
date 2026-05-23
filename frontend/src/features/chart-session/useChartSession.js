@@ -17,15 +17,22 @@ import {
   getFallbackIntervalAfterCustomRemove,
   resolveSupportedInterval,
 } from "./intervalPolicy";
+import {
+  buildChartSessionKey,
+  CHART_SESSION_TRANSITION_TYPES,
+  createChartSessionTransition,
+} from "./chartSessionTransition";
 import { getVisibleRangeForInterval, saveVisibleRangeForInterval } from "./visibleRangeStorage";
 
-export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridgeRef } = {}) {
+export function useChartSession({ chartWidgetRef } = {}) {
   const [initialSession] = useState(loadInitialChartSession);
   const [symbol, setSymbol] = useState(initialSession.symbol);
   const [exchange, setExchange] = useState(initialSession.exchange);
   const [marketType, setMarketType] = useState(initialSession.marketType);
   const [interval, setInterval] = useState(initialSession.interval);
   const [datasetVersion, setDatasetVersion] = useState(0);
+  const [lastTransition, setLastTransition] = useState(null);
+  const transitionIdRef = useRef(0);
 
   const { exchangeCatalog, exchangeCatalogStatus } = useExchangeCatalog();
   const {
@@ -84,6 +91,28 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
     () => getVisibleRangeForInterval(symbol, interval, marketType, exchange),
     [exchange, interval, marketType, symbol],
   );
+  const sessionKey = useMemo(
+    () => buildChartSessionKey({ exchange, marketType, symbol, interval }),
+    [exchange, interval, marketType, symbol],
+  );
+  const visibleRangeDataMetaRef = useRef(null);
+
+  const publishTransition = useCallback((type, nextSession) => {
+    const from = { exchange, marketType, symbol, interval };
+    const to = {
+      exchange: nextSession.exchange ?? exchange,
+      marketType: nextSession.marketType ?? marketType,
+      symbol: nextSession.symbol ?? symbol,
+      interval: nextSession.interval ?? interval,
+    };
+    transitionIdRef.current += 1;
+    setLastTransition(createChartSessionTransition({
+      id: transitionIdRef.current,
+      type,
+      from,
+      to,
+    }));
+  }, [exchange, interval, marketType, symbol]);
 
   const setDatasetVersionCompat = useCallback((nextVersion) => {
     setDatasetVersion((currentVersion) => (
@@ -100,7 +129,7 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
     [exchange, exchangeCatalog],
   );
 
-  const saveCurrentVisibleRange = useCallback(() => {
+  const saveCurrentVisibleRange = useCallback((dataMeta = visibleRangeDataMetaRef.current) => {
     if (!chartWidgetRef?.current?.getVisibleRange) return;
     const range = chartWidgetRef.current.getVisibleRange();
     if (!range) return;
@@ -110,20 +139,27 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
       range,
       marketType,
       exchange,
-      runtimeBridgeRef?.current?.chartDataMeta,
+      dataMeta,
     );
-  }, [chartWidgetRef, exchange, interval, marketType, runtimeBridgeRef, symbol]);
+  }, [chartWidgetRef, exchange, interval, marketType, symbol]);
 
-  const handleVisibleRangeChange = useCallback((range) => {
+  const handleVisibleRangeChange = useCallback((range, dataMeta = null) => {
+    if (dataMeta) {
+      visibleRangeDataMetaRef.current = dataMeta;
+    }
     saveVisibleRangeForInterval(
       symbol,
       interval,
       range,
       marketType,
       exchange,
-      runtimeBridgeRef?.current?.chartDataMeta,
+      dataMeta ?? visibleRangeDataMetaRef.current,
     );
-  }, [exchange, interval, marketType, runtimeBridgeRef, symbol]);
+  }, [exchange, interval, marketType, symbol]);
+
+  const updateVisibleRangeDataMeta = useCallback((dataMeta) => {
+    visibleRangeDataMetaRef.current = dataMeta ?? null;
+  }, []);
 
   useEffect(() => {
     const handleBeforeUnload = () => {
@@ -162,15 +198,12 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
     updateUserPref("lastExchange", nextExchange);
     updateUserPref("lastInterval", nextInterval);
 
-    const bridge = runtimeBridgeRef?.current || {};
-    bridge.clearCache?.();
-    if (realtimePriceRef) realtimePriceRef.current = null;
-    bridge.clearChartData?.("symbol-switch-clear", nextSymbol, nextInterval);
-    bridge.setLastPrice?.(null);
-    bridge.setCrosshairData?.(null);
-    bridge.setLoading?.(true);
-    bridge.setError?.(null);
-    bridge.setHasMoreLeft?.(true);
+    publishTransition(CHART_SESSION_TRANSITION_TYPES.SYMBOL_CHANGE, {
+      exchange: nextExchange,
+      marketType: nextMarketType,
+      symbol: nextSymbol,
+      interval: nextInterval,
+    });
     refreshDataset();
 
     setExchange(nextExchange);
@@ -182,9 +215,8 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
     exchangeCatalog,
     interval,
     marketType,
-    realtimePriceRef,
+    publishTransition,
     refreshDataset,
-    runtimeBridgeRef,
     savedCustomIntervals,
     symbol,
   ]);
@@ -192,32 +224,32 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
   const selectInterval = useCallback((nextInterval) => {
     if (nextInterval === interval) return;
     saveCurrentVisibleRange();
-    const bridge = runtimeBridgeRef?.current || {};
-    bridge.setCrosshairData?.(null);
-    if (realtimePriceRef) realtimePriceRef.current = null;
-    bridge.setLastPrice?.(null);
-    bridge.resetGapRecovery?.();
+    publishTransition(CHART_SESSION_TRANSITION_TYPES.INTERVAL_CHANGE, { interval: nextInterval });
     setInterval(nextInterval);
     markIntervalUsed(nextInterval);
     updateUserPref("lastInterval", nextInterval);
-  }, [interval, markIntervalUsed, realtimePriceRef, runtimeBridgeRef, saveCurrentVisibleRange]);
+  }, [interval, markIntervalUsed, publishTransition, saveCurrentVisibleRange]);
 
   const selectMarketType = useCallback((nextMarketType) => {
     if (!nextMarketType || nextMarketType === marketType) return;
+    publishTransition(CHART_SESSION_TRANSITION_TYPES.MARKET_TYPE_CHANGE, { marketType: nextMarketType });
     setMarketType(nextMarketType);
     updateUserPref("lastMarketType", nextMarketType);
-  }, [marketType]);
+  }, [marketType, publishTransition]);
 
   useEffect(() => {
     if (exchangeCatalogStatus === "loading") return undefined;
     if (exchangeMarketTypes.length === 0 || exchangeMarketTypes.includes(marketType)) return undefined;
     const nextMarketType = exchangeMarketTypes[0] || "spot";
     const timer = setTimeout(() => {
+      publishTransition(CHART_SESSION_TRANSITION_TYPES.CAPABILITY_CORRECTION, {
+        marketType: nextMarketType,
+      });
       setMarketType(nextMarketType);
       updateUserPref("lastMarketType", nextMarketType);
     }, 0);
     return () => clearTimeout(timer);
-  }, [exchangeCatalogStatus, exchangeMarketTypes, marketType]);
+  }, [exchangeCatalogStatus, exchangeMarketTypes, marketType, publishTransition]);
 
   useEffect(() => {
     if (exchangeCatalogStatus === "loading") return undefined;
@@ -232,11 +264,14 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
       isNativeIntervalSupported,
     });
     const timer = setTimeout(() => {
+      publishTransition(CHART_SESSION_TRANSITION_TYPES.CAPABILITY_CORRECTION, {
+        interval: nextInterval,
+      });
       setInterval(nextInterval);
       updateUserPref("lastInterval", nextInterval);
     }, 0);
     return () => clearTimeout(timer);
-  }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, nativeIntervals, savedCustomIntervals]);
+  }, [exchange, exchangeCatalog, exchangeCatalogStatus, interval, nativeIntervals, publishTransition, savedCustomIntervals]);
 
   const createCustomInterval = useCallback((nextInterval) => {
     if (isNativeIntervalSupported(exchange, nextInterval, exchangeCatalog)) {
@@ -302,6 +337,7 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
       exchange,
       marketType,
       interval,
+      sessionKey,
       datasetKey,
       datasetVersion,
       exchangeCatalog,
@@ -325,6 +361,7 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
       getIntervalDays: getExchangeIntervalDays,
       saveCurrentVisibleRange,
       handleVisibleRangeChange,
+      updateVisibleRangeDataMeta,
       createCustomInterval,
       removeCustomInterval: removeCustomIntervalAction,
       restoreCustomInterval: restoreCustomIntervalAction,
@@ -334,6 +371,10 @@ export function useChartSession({ chartWidgetRef, realtimePriceRef, runtimeBridg
     status: {
       exchangeCatalogStatus,
       exchangeLimitations,
+    },
+    events: {
+      transitionToken: lastTransition?.id ?? 0,
+      lastTransition,
     },
     refs: {
       intervalRef,

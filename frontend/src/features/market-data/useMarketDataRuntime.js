@@ -8,12 +8,12 @@ import { buildChartDisplayState } from "./marketDataView";
 import { useChartGapRecovery } from "./useChartGapRecovery";
 import { useChartInitialLoad } from "./useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./useChartLoadMoreLeft";
+import { useSessionTransitionReset } from "./useSessionTransitionReset";
 import { parseIntervalSeconds } from "../../utils/intervals";
 
 export function useMarketDataRuntime({
   session,
   realtimePriceRef,
-  runtimeBridgeRef,
   requestIndicatorRange,
 }) {
   const {
@@ -21,6 +21,7 @@ export function useMarketDataRuntime({
     exchange,
     marketType,
     interval,
+    sessionKey,
     trackedIntervals,
     exchangeConfig,
   } = session.view;
@@ -28,11 +29,13 @@ export function useMarketDataRuntime({
     setDatasetVersion,
     getIntervalDays,
     handleVisibleRangeChange,
+    updateVisibleRangeDataMeta,
   } = session.actions;
   const {
     intervalRef,
     trackedIntervalsRef,
   } = session.refs;
+  const lastSessionTransition = session.events?.lastTransition ?? null;
 
   const {
     chartData,
@@ -71,6 +74,10 @@ export function useMarketDataRuntime({
   const [wsStatus, setWsStatus] = useState("idle");
 
   const activeChartReady = chartData.length > 0 && chartDataMeta.status === "ready";
+
+  useEffect(() => {
+    updateVisibleRangeDataMeta?.(chartDataMeta);
+  }, [chartDataMeta, updateVisibleRangeDataMeta]);
 
   const updateLastPrice = useCallback((candidate, intv) => {
     setLastPrice((prev) => {
@@ -133,10 +140,6 @@ export function useMarketDataRuntime({
     setCrosshairData,
     setDataSource,
   });
-
-  useEffect(() => {
-    loadData(symbol, interval, marketType, exchange);
-  }, [symbol, interval, marketType, exchange, loadData]);
 
   const handleBackfillCompleted = useBackfillCompletionRuntime({
     symbol,
@@ -202,26 +205,32 @@ export function useMarketDataRuntime({
     updateLastPrice,
   });
 
-  useEffect(() => {
-    if (!runtimeBridgeRef) return;
-    runtimeBridgeRef.current = {
-      chartDataMeta,
-      clearCache,
-      clearChartData,
-      resetGapRecovery,
-      setLastPrice,
-      setCrosshairData,
-      setLoading,
-      setError,
-      setHasMoreLeft,
-    };
-  }, [
-    chartDataMeta,
+  const resetForSessionTransition = useSessionTransitionReset({
     clearCache,
     clearChartData,
+    interval,
+    realtimePriceRef,
     resetGapRecovery,
-    runtimeBridgeRef,
+    sessionKey,
+    setCrosshairData,
+    setError,
     setHasMoreLeft,
+    setLastPrice,
+    setLoading,
+    symbol,
+  });
+
+  useEffect(() => {
+    resetForSessionTransition(lastSessionTransition);
+    loadData(symbol, interval, marketType, exchange);
+  }, [
+    exchange,
+    interval,
+    lastSessionTransition,
+    loadData,
+    marketType,
+    resetForSessionTransition,
+    symbol,
   ]);
 
   const retry = useCallback(() => {
@@ -258,7 +267,7 @@ export function useMarketDataRuntime({
       retry,
       loadMoreLeft: handleNeedMoreLeft,
       onCrosshairMove: setCrosshairData,
-      onVisibleRangeChange: handleVisibleRangeChange,
+      onVisibleRangeChange: (range) => handleVisibleRangeChange(range, chartDataMeta),
     },
     events: {
       onBackfillCompleted: handleBackfillCompleted,

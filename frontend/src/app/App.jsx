@@ -17,11 +17,8 @@ export default function App() {
   const chartWidgetRef = useRef(null);
   const pageExportRef = useRef(null);
   const realtimePriceRef = useRef(null);
-  const chartSessionRuntimeBridgeRef = useRef({});
   const chartSession = useChartSession({
     chartWidgetRef,
-    realtimePriceRef,
-    runtimeBridgeRef: chartSessionRuntimeBridgeRef,
   });
   const indicatorRangeRequestRef = useRef(null);
   const requestIndicatorRangeForMarketData = useCallback((start, end) => (
@@ -31,7 +28,6 @@ export default function App() {
   const marketData = useMarketDataRuntime({
     session: chartSession,
     realtimePriceRef,
-    runtimeBridgeRef: chartSessionRuntimeBridgeRef,
     requestIndicatorRange: requestIndicatorRangeForMarketData,
   });
   const drawings = useDrawingRuntime({ chartWidgetRef, session: chartSession });

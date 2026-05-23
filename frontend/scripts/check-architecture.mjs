@@ -14,18 +14,10 @@ const RULES = {
   servicesNoReactImport: "services-no-react-import",
   featureRuntimeNoJsx: "feature-runtime-no-jsx",
   chartAdapterLightweightImport: "chart-adapter-lightweight-import",
+  appNoMarketDataRuntimeBridge: "app-no-market-data-runtime-bridge",
 };
 
-const allowlist = [
-  // Phase 3 removal plan: keep raw Lightweight Charts creation in chart
-  // rendering components until the adapter owns the full chart surface.
-  {
-    rule: RULES.chartAdapterLightweightImport,
-    path: "src/components/ChartPane.jsx",
-    target: "lightweight-charts",
-    reason: "current multi-pane chart renderer owns chart lifecycle during adapter migration",
-  },
-];
+const allowlist = [];
 
 const usedAllowlistEntries = new Set();
 const violations = [];
@@ -274,12 +266,28 @@ function checkFeatureRuntimeJsx(filePath, content) {
   });
 }
 
+function checkAppRuntimeBridge(filePath, content) {
+  if (filePath !== "src/app/App.jsx") return;
+  const stripped = stripCommentsAndStrings(content);
+  const runtimeBridgePattern = /\bruntimeBridgeRef\b/g;
+  let match;
+  while ((match = runtimeBridgePattern.exec(stripped))) {
+    addViolation({
+      rule: RULES.appNoMarketDataRuntimeBridge,
+      filePath,
+      line: lineNumberAt(stripped, match.index),
+      message: "App must not bridge chart-session to market-data with runtimeBridgeRef; use session transition events instead",
+    });
+  }
+}
+
 for (const absPath of walkSourceFiles(srcRoot)) {
   const filePath = toProjectPath(absPath);
   const content = fs.readFileSync(absPath, "utf8");
   checkImports(absPath, filePath, content);
   checkLocalStorage(filePath, content);
   checkFeatureRuntimeJsx(filePath, content);
+  checkAppRuntimeBridge(filePath, content);
 }
 
 for (const entry of allowlist) {

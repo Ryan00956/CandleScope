@@ -10,16 +10,23 @@ persistence for the active series.
 
 ```js
 {
-  view: { symbol, exchange, marketType, interval, datasetKey, nativeIntervals, intervalGroups },
-  actions: { selectSymbol, selectInterval, selectMarketType, refreshDataset },
+  view: { symbol, exchange, marketType, interval, sessionKey, datasetKey, nativeIntervals, intervalGroups },
+  actions: {
+    selectSymbol,
+    selectInterval,
+    selectMarketType,
+    refreshDataset,
+    handleVisibleRangeChange,
+    updateVisibleRangeDataMeta,
+  },
+  events: { transitionToken, lastTransition },
   status: { exchangeCatalogStatus, exchangeLimitations },
 }
 ```
 
-It also exposes compatibility refs used by `features/market-data` while the app
-composition root still bridges a small amount of cross-feature coordination.
-Those refs should disappear when the market-data and indicator contracts no
-longer need imperative range callbacks.
+Session identity changes are exposed as explicit transition events. Consumers
+that own data, drawing, or indicator side effects should react to those events
+inside their feature runtime instead of reaching back through `App.jsx`.
 
 ## Allowed Dependencies
 
@@ -30,10 +37,13 @@ longer need imperative range callbacks.
   coupled to the active chart session and indicator panes.
 - May use shared interval and symbol utilities.
 - May expose stable actions to app composition and feature UI.
+- May publish pure session transition metadata for feature runtimes that need to
+  reset their own state after symbol, interval, or capability changes.
 
 ## Forbidden Dependencies
 
 - Do not fetch or mutate K-line data here.
 - Do not own indicator, drawing, watchlist, or export state.
 - Do not expose Lightweight Charts raw objects through the public contract.
+- Do not call market-data setters through bridge refs.
 - Do not let UI components access chart session storage directly.

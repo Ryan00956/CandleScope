@@ -26,6 +26,8 @@ on this feature contract rather than calling those implementation hooks.
 
 - May consume the chart session view/actions/refs passed by the app composition
   root.
+- May consume chart session transition events and reset its own K-line cache,
+  loading, error, visible-data, and gap-recovery state for the active session.
 - May use internal chart data and stream helpers from this feature directory.
 - May call backend K-line services through existing runtime hooks.
 - May notify indicator range loading through a callback passed from the app
@@ -36,5 +38,6 @@ on this feature contract rather than calling those implementation hooks.
 - Do not own symbol, exchange, market type, interval selection, or user session
   preference persistence; those belong to `features/chart-session`.
 - Do not compute or mutate indicators directly.
+- Do not expose K-line reset setters back to chart-session or `App.jsx`.
 - Do not own drawing, export, watchlist, settings, or alert UI state.
 - Do not expose raw Lightweight Charts objects in the public contract.

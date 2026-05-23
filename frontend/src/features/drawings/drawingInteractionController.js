@@ -61,7 +61,9 @@ import {
   createTwoPointDrawingPrimitive,
 } from "./drawingPrimitiveFactory.js";
 import { snapDataPointAtPointer } from "./drawingSnapController.js";
+import { eraseDrawingAtPointer, updateEraserHoverState } from "./drawingEraseController.js";
 import { useDrawingPersistenceLifecycle } from "./useDrawingPersistenceLifecycle.js";
+import { useChartPointerPosition, useDrawingPointerEvents } from "./drawingPointerController.js";
 
 export function useDrawing({
   chartAdapter,
@@ -520,17 +522,7 @@ export function useDrawing({
 
   // ── Get mouse position relative to chart container ──
 
-  const getChartPos = useCallback(
-    (e) => {
-      const container = chartContainerRef?.current;
-      if (!container) return null;
-      const rect = container.getBoundingClientRect();
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-      return { x: clientX - rect.left, y: clientY - rect.top };
-    },
-    [chartContainerRef],
-  );
+  const getChartPos = useChartPointerPosition(chartContainerRef);
 
   // ── Start text editing for a specific text primitive ──
 
@@ -674,19 +666,15 @@ export function useDrawing({
       // ── ERASER: click to delete ──
       if (tool === "eraser") {
         const hit = hitTestAll(pos.x, pos.y);
-        if (hit) {
-          const idx = primitivesRef.current.indexOf(hit.prim);
-          if (idx >= 0) {
-            detachPrim(hit.prim);
-            primitivesRef.current.splice(idx, 1);
-            if (selectedIdRef.current === hit.prim.id) {
-              selectedIdRef.current = null;
-              setSelectedPrimId(null);
-              setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
-            }
-            persistDrawings();
-          }
-        }
+        eraseDrawingAtPointer({
+          detachPrim,
+          hit,
+          persistDrawings,
+          primitivesRef,
+          selectedIdRef,
+          setSelectedPrimId,
+          setSelectedTextUi,
+        });
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -1075,34 +1063,7 @@ export function useDrawing({
 
       // ── ERASER: hover highlight ──
       if (tool === "eraser") {
-        let hitId = null;
-        for (let i = primitivesRef.current.length - 1; i >= 0; i--) {
-          const prim = primitivesRef.current[i];
-          let isHit = false;
-          if (prim instanceof LineDrawingPrimitive) {
-            isHit = prim.hitTest(pos.x, pos.y) != null;
-          } else if (prim instanceof AxisLineDrawingPrimitive) {
-            isHit = prim.hitTest(pos.x, pos.y) != null;
-          } else if (prim instanceof AngleMeasurementPrimitive) {
-            isHit = prim.hitTest(pos.x, pos.y) != null;
-          } else if (prim instanceof FibonacciDrawingPrimitive) {
-            isHit = prim.hitTest(pos.x, pos.y) != null;
-          } else if (prim instanceof ShapeDrawingPrimitive) {
-            isHit = prim.hitTest(pos.x, pos.y) != null;
-          } else if (prim instanceof PositionDrawingPrimitive) {
-            isHit = prim.hitTest(pos.x, pos.y) != null;
-          } else if (prim instanceof FreehandDrawingPrimitive) {
-            isHit = prim.hitTest(pos.x, pos.y);
-          } else if (prim instanceof TextDrawingPrimitive) {
-            isHit = prim.hitTest(pos.x, pos.y);
-          }
-          if (isHit && !hitId) {
-            hitId = prim.id;
-            prim.setHovered(true);
-          } else {
-            prim.setHovered(false);
-          }
-        }
+        updateEraserHoverState(primitivesRef.current, pos.x, pos.y);
         return;
       }
 
@@ -1631,42 +1592,15 @@ export function useDrawing({
     }
   }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing]);
 
-  // ── Attach event listeners to chart container ──
-
-  useEffect(() => {
-    const container = chartContainerRef?.current;
-    if (!container) return;
-
-    container.addEventListener("mousedown", handleMouseDown, true);
-    // Listen for mousemove/mouseup on `document` in the CAPTURE phase so we
-    // run *before* any sibling React component (e.g. the floating
-    // TextFormatBar / TextEditOverlay) calls stopPropagation on its own
-    // mouseup handler. Without capture, releasing the mouse while the
-    // cursor is over those overlays would silently drop the mouseup and
-    // leave the drag stuck mid-motion.
-    document.addEventListener("mousemove", handleMouseMove, true);
-    document.addEventListener("mouseup", handleMouseUp, true);
-    container.addEventListener("mouseleave", handleMouseLeave);
-    container.addEventListener("dblclick", handleDblClick);
-    container.addEventListener("contextmenu", handleContextMenu);
-    container.addEventListener("touchstart", handleMouseDown, { passive: false, capture: true });
-    container.addEventListener("touchmove", handleMouseMove, { passive: false });
-    container.addEventListener("touchend", handleMouseUp);
-    container.addEventListener("touchcancel", handleMouseUp);
-
-    return () => {
-      container.removeEventListener("mousedown", handleMouseDown, true);
-      document.removeEventListener("mousemove", handleMouseMove, true);
-      document.removeEventListener("mouseup", handleMouseUp, true);
-      container.removeEventListener("mouseleave", handleMouseLeave);
-      container.removeEventListener("dblclick", handleDblClick);
-      container.removeEventListener("contextmenu", handleContextMenu);
-      container.removeEventListener("touchstart", handleMouseDown, true);
-      container.removeEventListener("touchmove", handleMouseMove);
-      container.removeEventListener("touchend", handleMouseUp);
-      container.removeEventListener("touchcancel", handleMouseUp);
-    };
-  }, [chartContainerRef, handleMouseDown, handleMouseMove, handleMouseUp, handleMouseLeave, handleDblClick, handleContextMenu]);
+  useDrawingPointerEvents({
+    chartContainerRef,
+    handleDblClick,
+    handleContextMenu,
+    handleMouseDown,
+    handleMouseLeave,
+    handleMouseMove,
+    handleMouseUp,
+  });
 
   // ── Public API ──
 

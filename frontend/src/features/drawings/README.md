@@ -53,6 +53,8 @@ The hook still returns legacy flat fields while `App.jsx` and shell props are mi
 - `drawingSnapController.js` owns magnet snapping to visible candle time/price candidates.
 - `drawingSelectionController.js` owns selected drawing metadata, selected text snapshots, and hit testing.
 - `drawingInteractionController.js` owns pointer, keyboard, drag, resize, erase, text edit, primitive lifecycle, and chart adapter calls.
+- `drawingPointerController.js` owns pointer coordinate normalization and DOM pointer listener lifecycle.
+- `drawingEraseController.js` owns eraser hit deletion and hover-state updates.
 - `DrawingEngineHost.jsx` mounts the interaction controller and text editing surfaces.
 
 ## Allowed Dependencies

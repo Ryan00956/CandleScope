@@ -9,70 +9,18 @@
  * synchronization is managed by the parent MultiPaneChart.
  */
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
+import { buildChartPaneImperativeHandle } from "../chart-adapter/chartImperativeHandle";
+import {
+    applyChartPaneAppearance,
+    buildCrosshairOptions,
+    createChartPaneLifecycle,
+} from "../chart-adapter/chartPaneLifecycle";
+import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRenderer";
+import { createIndicatorSeries, removeSeriesEntries } from "../chart-adapter/seriesLifecycle";
 import { shouldLoadDrawingEngine } from "../features/drawings/drawingEngineLoader";
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
 import { recordPerfEvent } from "../runtime/performance/perfMarks";
-
-/* ── Localization helpers ───────────────────────────────────── */
-
-function buildLocalizationOptions(timezone = "Local", interval = "1h") {
-    const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
-    try {
-        const showSeconds = /^\d+s$/.test(String(interval));
-        const tooltipFormatOptions = {
-            year: "numeric", month: "2-digit", day: "2-digit",
-            hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-        };
-        const datePartsOptions = {
-            year: "numeric", month: "short", day: "numeric",
-            hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-        };
-        if (timeZoneOpt) {
-            tooltipFormatOptions.timeZone = timeZoneOpt;
-            datePartsOptions.timeZone = timeZoneOpt;
-        }
-        const tooltipFormatter = new Intl.DateTimeFormat("en-GB", tooltipFormatOptions);
-        const partsFormatter = new Intl.DateTimeFormat("en-GB", datePartsOptions);
-
-        // TickMarkType enum: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds
-        return {
-            localization: {
-                timeFormatter: (ts) => tooltipFormatter.format(new Date(ts * 1000)),
-            },
-            timeScale: {
-                tickMarkFormatter: (ts, tickMarkType) => {
-                    const parts = partsFormatter.formatToParts(new Date(ts * 1000));
-                    const get = (t) => parts.find((p) => p.type === t)?.value;
-                    const year = get("year");
-                    const month = get("month");
-                    const day = get("day");
-                    const hour = get("hour");
-                    const min = get("minute");
-                    const sec = get("second");
-
-                    switch (tickMarkType) {
-                        case 0: // Year
-                            return year;
-                        case 1: // Month
-                            return `${month} '${year.slice(-2)}`;
-                        case 2: // DayOfMonth
-                            return `${day} ${month}`;
-                        case 3: // Time
-                            return showSeconds ? `${hour}:${min}:${sec}` : `${hour}:${min}`;
-                        case 4: // TimeWithSeconds
-                            return `${hour}:${min}:${sec}`;
-                        default:
-                            return `${day} ${month}`;
-                    }
-                },
-            },
-        };
-    } catch {
-        return {};
-    }
-}
 
 function toCandlePoint(d) {
     if (
@@ -171,18 +119,6 @@ function applyLineSeriesData(series, nextData, previousData, detail) {
     return "setData";
 }
 
-function buildHlineSignature(indicatorHlines = []) {
-    if (!indicatorHlines?.length) return "empty";
-    return indicatorHlines
-        .map((hl) => [
-            hl.price ?? "",
-            hl.color || "#787b86",
-            hl.linestyle ?? "dashed",
-            hl.title || "",
-        ].join(":"))
-        .join("|");
-}
-
 function lineDataSignature(data = []) {
     return data.map((point) => `${point.time}:${point.value}`).join(";");
 }
@@ -274,24 +210,6 @@ const PRICE_SCALE_MODES = [
 const PASSIVE_CURSOR_TOOL_IDS = new Set(["cursor-default", "cursor-crosshair", "cursor-dot", "cursor-highlighter", "cursor-plain"]);
 const CUSTOM_POINTER_TOOL_IDS = new Set(["cursor-dot", "cursor-highlighter"]);
 const HIDDEN_CROSSHAIR_TOOL_IDS = new Set(["cursor-dot", "cursor-highlighter", "cursor-plain"]);
-
-function buildCrosshairOptions(visible = true) {
-    return {
-        mode: 0, // Normal — follow mouse freely, don't snap to candle price
-        vertLine: {
-            color: "rgba(59, 130, 246, 0.4)", width: 1, style: 2,
-            labelBackgroundColor: "#3b82f6",
-            visible,
-            labelVisible: visible,
-        },
-        horzLine: {
-            color: "rgba(59, 130, 246, 0.4)", width: 1, style: 2,
-            labelBackgroundColor: "#3b82f6",
-            visible,
-            labelVisible: visible,
-        },
-    };
-}
 
 function getCursorStyleForTool(tool) {
     if (!tool) return "default";
@@ -399,238 +317,39 @@ const ChartPane = forwardRef(function ChartPane({
 
     useEffect(() => {
         if (!containerRef.current) return;
-        const container = containerRef.current;
-        const loc = buildLocalizationOptions(timezone, interval);
-        const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
-        const textColor = theme === "light" ? "#1e293b" : "#94a3b8";
-        const gridColor = theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)";
-
-        const chart = createChart(container, {
-            width: container.clientWidth,
-            height: container.clientHeight,
-            layout: {
-                background: { color: bgColor },
-                textColor,
-                fontFamily: "'Inter', sans-serif",
-                fontSize: 12,
-                attributionLogo: false,
+        const lifecycle = createChartPaneLifecycle({
+            container: containerRef.current,
+            paneId,
+            paneType,
+            theme,
+            customBg,
+            timezone,
+            interval,
+            showTimeScale,
+            upColor,
+            downColor,
+            chartAdapter,
+            refs: {
+                chartRef,
+                mainSeriesRef,
+                alignmentSeriesRef,
+                drawingAnchorSeriesRef,
+                indicatorSeriesRef,
+                isSyncingRef,
+                autoScaleRef,
             },
-            grid: {
-                vertLines: { color: gridColor },
-                horzLines: { color: gridColor },
+            handlers: {
+                onChartCreated,
+                onCrosshairMoveExternal,
+                onCrosshairSync,
+                onVisibleLogicalRangeChange,
+                setContextMenu,
+                setIsAutoScale,
+                setSeriesReady,
             },
-            crosshair: buildCrosshairOptions(true),
-            rightPriceScale: {
-                alignLabels: false,
-                entireTextOnly: true,
-                borderColor: theme === "light" ? "#e2e8f0" : "#1e293b",
-                scaleMargins: { top: 0.05, bottom: 0.05 },
-                autoScale: true,
-                minimumWidth: 80,
-            },
-            ...(loc.localization ? { localization: loc.localization } : {}),
-            timeScale: {
-                borderColor: theme === "light" ? "#e2e8f0" : "#1e293b",
-                timeVisible: true,
-                secondsVisible: false,
-                rightOffset: 5,
-                barSpacing: 8,
-                visible: showTimeScale,
-                ...(loc.timeScale ? { tickMarkFormatter: loc.timeScale.tickMarkFormatter } : {}),
-            },
-            handleScroll: { vertTouchDrag: false },
         });
 
-        // Main pane: add candlestick series
-        let mainSeries = null;
-        if (paneType === "main") {
-            mainSeries = chart.addSeries(CandlestickSeries, {
-                upColor: upColor || "#22c55e",
-                downColor: downColor || "#ef4444",
-                borderDownColor: downColor || "#ef4444",
-                borderUpColor: upColor || "#22c55e",
-                wickDownColor: downColor || "#ef4444",
-                wickUpColor: upColor || "#22c55e",
-            });
-            mainSeriesRef.current = mainSeries;
-        }
-
-        // Sub panes: create an invisible alignment series with full time range
-        // This ensures setCrosshairPosition maps time→logical consistently
-        // across all panes regardless of indicator data length differences.
-        if (paneType === "sub") {
-            const alignSeries = chart.addSeries(LineSeries, {
-                color: "transparent",
-                lineWidth: 0,
-                priceScaleId: "",           // don't participate in price scale
-                lastValueVisible: false,
-                priceLineVisible: false,
-                crosshairMarkerVisible: false,
-                visible: false,
-            });
-            alignmentSeriesRef.current = alignSeries;
-            // Drawing anchor will be set to the first indicator series once available.
-            // This ensures coordinate mapping uses the indicator's actual price range.
-            drawingAnchorSeriesRef.current = null;
-        }
-
-        // Subscribe to crosshair for sync
-        chart.subscribeCrosshairMove((param) => {
-            if (isSyncingRef.current) return;
-
-            // Notify parent for cross-pane sync
-            if (onCrosshairSync) {
-                onCrosshairSync({
-                    paneId,
-                    time: param.time || null,
-                    point: param.point || null,
-                    logical: param.logical,
-                });
-            }
-
-            // Main pane crosshair → OHLCV display
-            if (paneType === "main" && onCrosshairMoveExternal && mainSeries) {
-                if (!param.time || !param.seriesData) {
-                    onCrosshairMoveExternal(null);
-                    return;
-                }
-                const cd = param.seriesData.get(mainSeries);
-                if (!cd) return;
-                if (cd.open == null || cd.high == null || cd.low == null || cd.close == null) {
-                    onCrosshairMoveExternal(null);
-                    return;
-                }
-                onCrosshairMoveExternal({
-                    time: param.time,
-                    open: cd.open,
-                    high: cd.high,
-                    low: cd.low,
-                    close: cd.close,
-                });
-            }
-        });
-
-        // Subscribe to visible range changes for sync
-        chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-            if (isSyncingRef.current) return;
-            if (range && onVisibleLogicalRangeChange) {
-                onVisibleLogicalRangeChange({ paneId, range });
-            }
-        });
-
-        chartRef.current = chart;
-
-        // Notify parent that chart + series are ready
-        if (onChartCreated) {
-            onChartCreated({ chartAdapter });
-        }
-        setSeriesReady((prev) => prev + 1);
-
-        // Resize observer
-        const ro = new ResizeObserver((entries) => {
-            const { width, height } = entries[0].contentRect;
-            if (width > 0 && height > 0) {
-                chart.applyOptions({ width, height });
-            }
-        });
-        ro.observe(container);
-
-        // ── Auto-scale detection ──────────────────────────────
-        // Detect manual price-axis dragging: when the user drags on the
-        // price scale area (right side of the chart), lightweight-charts
-        // automatically sets autoScale to false. We detect this by
-        // monitoring mousedown+mousemove on the price scale area.
-        //
-        // The price scale occupies the rightmost ~80px of the container.
-        // We detect a vertical drag there as a manual scale gesture.
-        let priceScaleDragStartY = null;
-        let isPriceScaleDragging = false;
-
-        const handleMouseDown = (e) => {
-            // Check if the mouse is in the price scale area (right edge)
-            const rect = container.getBoundingClientRect();
-            const priceScaleWidth = 80; // matches minimumWidth
-            if (e.clientX >= rect.right - priceScaleWidth) {
-                priceScaleDragStartY = e.clientY;
-                isPriceScaleDragging = false;
-            }
-        };
-
-        const handleMouseMove = (e) => {
-            if (priceScaleDragStartY !== null) {
-                const delta = Math.abs(e.clientY - priceScaleDragStartY);
-                if (delta > 3) {
-                    isPriceScaleDragging = true;
-                }
-            }
-        };
-
-        const handleMouseUp = () => {
-            if (isPriceScaleDragging && autoScaleRef.current) {
-                // User dragged on price scale → manual scaling activated
-                autoScaleRef.current = false;
-                setIsAutoScale(false);
-            }
-            priceScaleDragStartY = null;
-            isPriceScaleDragging = false;
-        };
-
-        // Double-click on price scale → restore auto-scale
-        const handleDblClick = (e) => {
-            const rect = container.getBoundingClientRect();
-            const priceScaleWidth = 80;
-            if (e.clientX >= rect.right - priceScaleWidth) {
-                chart.priceScale("right").applyOptions({ autoScale: true });
-                autoScaleRef.current = true;
-                setIsAutoScale(true);
-            }
-        };
-
-        // ── Right-click on price scale area → show context menu (main pane only) ──
-        const handleContextMenu = (e) => {
-            if (paneType !== "main") return;
-            const rect = container.getBoundingClientRect();
-            const priceScaleWidth = 80;
-            if (e.clientX >= rect.right - priceScaleWidth) {
-                e.preventDefault();
-                e.stopPropagation();
-
-                let x = e.clientX - rect.left;
-                let y = e.clientY - rect.top;
-                const menuWidth = 180; // matches .price-scale-context-menu min-width
-                const menuHeight = 220; // approximate height of the 6 menu items + divider
-
-                if (x + menuWidth > rect.width) {
-                    x = rect.width - menuWidth - 4;
-                }
-
-                if (y + menuHeight > rect.height) {
-                    y = Math.max(0, rect.height - menuHeight - 4);
-                }
-
-                setContextMenu({ x, y });
-            }
-        };
-
-        container.addEventListener("mousedown", handleMouseDown);
-        document.addEventListener("mousemove", handleMouseMove);
-        document.addEventListener("mouseup", handleMouseUp);
-        container.addEventListener("dblclick", handleDblClick);
-        container.addEventListener("contextmenu", handleContextMenu);
-
-        return () => {
-            container.removeEventListener("mousedown", handleMouseDown);
-            document.removeEventListener("mousemove", handleMouseMove);
-            document.removeEventListener("mouseup", handleMouseUp);
-            container.removeEventListener("dblclick", handleDblClick);
-            container.removeEventListener("contextmenu", handleContextMenu);
-            ro.disconnect();
-            chart.remove();
-            chartRef.current = null;
-            mainSeriesRef.current = null;
-            drawingAnchorSeriesRef.current = null;
-            indicatorSeriesRef.current = [];
-        };
+        return lifecycle.dispose;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- chart instance is created once; runtime option changes are applied by follow-up effects.
     }, []); // created once
 
@@ -639,20 +358,7 @@ const ChartPane = forwardRef(function ChartPane({
     useEffect(() => {
         const chart = chartRef.current;
         if (!chart) return;
-        const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
-        const textColor = theme === "light" ? "#1e293b" : "#94a3b8";
-        const gridColor = theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)";
-        const borderColor = theme === "light" ? "#e2e8f0" : "#1e293b";
-        const loc = buildLocalizationOptions(timezone, interval);
-
-        chart.applyOptions({
-            layout: { background: { color: bgColor }, textColor },
-            grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
-            rightPriceScale: { borderColor },
-            timeScale: { borderColor },
-            ...(loc.localization ? { localization: loc.localization } : {}),
-            ...(loc.timeScale ? { timeScale: { tickMarkFormatter: loc.timeScale.tickMarkFormatter } } : {}),
-        });
+        applyChartPaneAppearance(chart, { theme, customBg, timezone, interval });
     }, [theme, customBg, timezone, interval]);
 
     useEffect(() => {
@@ -970,10 +676,7 @@ const ChartPane = forwardRef(function ChartPane({
 
         // Structure changed — full rebuild
         // Remove old indicator series
-        const removedSeriesCount = indicatorSeriesRef.current.length;
-        for (const { series } of indicatorSeriesRef.current) {
-            try { chart.removeSeries(series); } catch { /* */ }
-        }
+        const removedSeriesCount = removeSeriesEntries(chart, indicatorSeriesRef.current);
         if (removedSeriesCount > 0) {
             recordPerfEvent("chart.indicatorSeries.remove", {
                 paneId,
@@ -994,30 +697,10 @@ const ChartPane = forwardRef(function ChartPane({
         for (const line of indicatorLines) {
             if (!line.data || line.data.length === 0) continue;
 
-            const isHistogram = line.type === "histogram";
-            const SeriesType = isHistogram ? HistogramSeries : LineSeries;
-
-            const opts = {
-                color: line.color || "#f59e0b",
-                lineWidth: isHistogram ? undefined : (line.lineWidth || 2),
-                lineStyle: isHistogram ? undefined : (line.lineStyle || 0),
-                title: "",
-                visible: true,
-                priceScaleId: "right",
-                lastValueVisible: false,
-                priceLineVisible: false,
-            };
-
-            if (!isHistogram) {
-                opts.crosshairMarkerVisible = shouldShowIndicatorCrosshairMarker(line, drawingTool);
-            }
-
-            if (isHistogram) {
-                opts.priceFormat = { type: "volume" };
-            }
-
             try {
-                const series = chart.addSeries(SeriesType, opts);
+                const series = createIndicatorSeries(chart, line, {
+                    crosshairMarkerVisible: shouldShowIndicatorCrosshairMarker(line, drawingTool),
+                });
                 recordPerfEvent("chart.indicatorSeries.create", {
                     paneId,
                     line: line.name || line.id || indicatorSeriesRef.current.length,
@@ -1156,53 +839,14 @@ const ChartPane = forwardRef(function ChartPane({
         const series = paneType === "main"
             ? mainSeriesRef.current
             : drawingAnchorSeriesRef.current;
-        const signature = buildHlineSignature(indicatorHlines);
-
-        if (hlinesStateRef.current.target === series && hlinesStateRef.current.signature === signature) {
-            return;
-        }
-
-        // Remove previous hlines
-        const removedHlines = hlinesRef.current.length;
-        for (const item of hlinesRef.current) {
-            try { item.series.removePriceLine(item.priceLine); } catch { /* */ }
-        }
-        if (removedHlines > 0) {
-            recordPerfEvent("chart.hline.remove", {
-                paneId,
-                hlines: removedHlines,
-            });
-        }
-        hlinesRef.current = [];
-        hlinesStateRef.current = { target: series, signature };
-
-        if (!series) return;
-        if (!indicatorHlines || indicatorHlines.length === 0) return;
-
-        const LINESTYLE_MAP = { solid: 0, dotted: 1, dashed: 2, large_dashed: 3, sparse_dotted: 4 };
-        let createdHlines = 0;
-
-        for (const hl of indicatorHlines) {
-            if (hl.price == null || !isFinite(hl.price)) continue;
-            try {
-                const pl = series.createPriceLine({
-                    price: hl.price,
-                    color: hl.color || "#787b86",
-                    lineWidth: 1,
-                    lineStyle: typeof hl.linestyle === "number" ? hl.linestyle : (LINESTYLE_MAP[hl.linestyle] ?? 2),
-                    axisLabelVisible: true,
-                    title: hl.title || "",
-                });
-                hlinesRef.current.push({ series, priceLine: pl });
-                createdHlines += 1;
-            } catch (err) {
-                console.warn("ChartPane: failed to create hline:", err);
-            }
-        }
-        recordPerfEvent("chart.hline.create", {
+        renderHlines({
+            series,
+            indicatorHlines,
+            hlinesRef,
+            hlinesStateRef,
             paneId,
-            hlines: createdHlines,
-            definitions: indicatorHlines.length,
+            recordPerfEvent,
+            onError: (err) => console.warn("ChartPane: failed to create hline:", err),
         });
     }, [indicatorHlines, paneId, paneType, seriesReady]);
 
@@ -1325,74 +969,15 @@ const ChartPane = forwardRef(function ChartPane({
         if (!chart) return;
         const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
         const fillPayload = buildFillRenderEntries(indicatorFills, indicatorLines, bgColor);
-
-        if (
-            fillSeriesStateRef.current.chart === chart
-            && fillSeriesStateRef.current.signature === fillPayload.signature
-        ) {
-            return;
-        }
-
-        // Remove previous fill series
-        const removedFillSeries = fillSeriesRef.current.length;
-        for (const fs of fillSeriesRef.current) {
-            try { chart.removeSeries(fs); } catch { /* */ }
-        }
-        if (removedFillSeries > 0) {
-            recordPerfEvent("chart.fillSeries.remove", {
-                paneId,
-                series: removedFillSeries,
-            });
-        }
-        fillSeriesRef.current = [];
-        fillSeriesStateRef.current = { chart, signature: fillPayload.signature };
-
-        if (fillPayload.entries.length === 0) return;
-
-        let createdFillSeries = 0;
-        for (const entry of fillPayload.entries) {
-            try {
-                // Create area series for the upper boundary (max of the two)
-                const areaSeries = chart.addSeries(AreaSeries, {
-                    lineColor: "transparent",
-                    lineWidth: 0,
-                    topColor: entry.fillColor,
-                    bottomColor: "transparent",
-                    priceScaleId: "right",
-                    lastValueVisible: false,
-                    priceLineVisible: false,
-                    crosshairMarkerVisible: false,
-                });
-
-                areaSeries.setData(entry.upperData);
-                fillSeriesRef.current.push(areaSeries);
-                createdFillSeries += 1;
-
-                // Create second area series for the lower boundary (masks the bottom)
-                const lowerSeries = chart.addSeries(AreaSeries, {
-                    lineColor: "transparent",
-                    lineWidth: 0,
-                    topColor: entry.backgroundColor,
-                    bottomColor: entry.backgroundColor,
-                    priceScaleId: "right",
-                    lastValueVisible: false,
-                    priceLineVisible: false,
-                    crosshairMarkerVisible: false,
-                });
-
-                lowerSeries.setData(entry.lowerData);
-                fillSeriesRef.current.push(lowerSeries);
-                createdFillSeries += 1;
-            } catch (err) {
-                console.warn("ChartPane: failed to create fill area:", err);
-            }
-        }
-        recordPerfEvent("chart.fillSeries.create", {
+        renderFillSeries({
+            chart,
+            fillPayload,
+            fillSeriesRef,
+            fillSeriesStateRef,
             paneId,
-            fills: fillPayload.matchedFillCount,
-            definitions: indicatorFills?.length || 0,
-            series: createdFillSeries,
-            points: fillPayload.pointCount,
+            definitionsCount: indicatorFills?.length || 0,
+            recordPerfEvent,
+            onError: (err) => console.warn("ChartPane: failed to create fill area:", err),
         });
     }, [indicatorFills, indicatorLines, paneId, theme, customBg]);
 
@@ -1582,103 +1167,20 @@ const ChartPane = forwardRef(function ChartPane({
 
     /* ── Imperative handle ─────────────────────────────────── */
 
-    useImperativeHandle(ref, () => ({
+    useImperativeHandle(ref, () => buildChartPaneImperativeHandle({
+        paneId,
+        paneType,
+        paneRootRef,
+        containerRef,
+        chartRef,
+        alignmentSeriesRef,
+        mainSeriesRef,
+        indicatorSeriesRef,
+        isSyncingRef,
         clearAllDrawings,
         setDrawingsHidden,
         updateSelectedDrawingStyle,
-        prepareExport: () => {
-            prepareDrawingExport();
-        },
-        getExportSnapshot: () => {
-            const rootElement = paneRootRef.current;
-            const chartElement = containerRef.current;
-            return {
-                paneId,
-                paneType,
-                rootElement,
-                chartElement,
-                rect: rootElement?.getBoundingClientRect?.() || null,
-            };
-        },
-        /** Imperatively sync crosshair from another pane — no React re-render needed */
-        syncCrosshair: (time) => {
-            const chart = chartRef.current;
-            if (!chart) return;
-            isSyncingRef.current = true;
-            try {
-                if (time == null) {
-                    chart.clearCrosshairPosition();
-                } else {
-                    // Prefer the alignment series (sub panes) for consistent
-                    // time→logical mapping, fall back to main/indicator series.
-                    const series =
-                        alignmentSeriesRef.current ||
-                        mainSeriesRef.current ||
-                        indicatorSeriesRef.current[0]?.series;
-                    if (series) {
-                        chart.setCrosshairPosition(undefined, time, series);
-                    }
-                }
-            } catch {
-                // Ignore — time might not be in the series data
-            }
-            isSyncingRef.current = false;
-        },
-        setVisibleLogicalRange: (range) => {
-            const chart = chartRef.current;
-            if (!chart || !range) return;
-            isSyncingRef.current = true;
-            try {
-                chart.timeScale().setVisibleLogicalRange(range);
-            } catch { /* */ }
-            isSyncingRef.current = false;
-        },
-        fitContent: () => {
-            const chart = chartRef.current;
-            if (!chart) return;
-            try { chart.timeScale().fitContent(); } catch { /* */ }
-        },
-        getVisibleLogicalRange: () => {
-            const chart = chartRef.current;
-            if (!chart) return null;
-            try { return chart.timeScale().getVisibleLogicalRange(); } catch { return null; }
-        },
-        getVisibleRange: () => {
-            const chart = chartRef.current;
-            if (!chart) return null;
-            try {
-                const timeScale = chart.timeScale();
-                return {
-                    logical: timeScale.getVisibleLogicalRange(),
-                    time: timeScale.getVisibleRange(),
-                    barSpacing: timeScale.options().barSpacing,
-                    scrollPosition: timeScale.scrollPosition(),
-                };
-            } catch { return null; }
-        },
-        setVisibleTimeRange: (range) => {
-            const chart = chartRef.current;
-            if (!chart || !range) return;
-            isSyncingRef.current = true;
-            try {
-                chart.timeScale().setVisibleRange(range);
-            } catch { /* */ }
-            isSyncingRef.current = false;
-        },
-        setScrollPosition: (position, animated = false) => {
-            const chart = chartRef.current;
-            if (!chart || !Number.isFinite(position)) return;
-            isSyncingRef.current = true;
-            try {
-                chart.timeScale().scrollToPosition(position, animated);
-            } catch { /* */ }
-            isSyncingRef.current = false;
-        },
-        applyTimeScaleOptions: (opts) => {
-            const chart = chartRef.current;
-            if (!chart) return;
-            try { chart.timeScale().applyOptions(opts); } catch { /* */ }
-        },
+        prepareDrawingExport,
         resetAutoScale,
     }), [resetAutoScale, clearAllDrawings, setDrawingsHidden, updateSelectedDrawingStyle, prepareDrawingExport, paneId, paneType]);
 

@@ -18,12 +18,22 @@ const RULES = {
   appNoIndicatorRangeBridge: "app-no-indicator-range-bridge",
   appNoRawChartWidgetRef: "app-no-raw-chart-widget-ref",
   featureNoComponentPrimitivesImport: "feature-no-component-primitives-import",
+  featureRuntimeNoLegacyCompatFields: "feature-runtime-no-legacy-compat-fields",
 };
 
 const allowlist = [];
 
 const usedAllowlistEntries = new Set();
 const violations = [];
+
+const strictRuntimeContractFiles = new Set([
+  "src/features/indicators/useIndicatorRuntime.js",
+  "src/features/drawings/useDrawingRuntime.js",
+  "src/features/market-data/useMarketDataRuntime.js",
+  "src/features/watchlist/useWatchlistRuntime.js",
+]);
+
+const allowedRuntimeContractFields = new Set(["view", "actions", "status"]);
 
 function toProjectPath(filePath) {
   return path.relative(projectRoot, filePath).split(path.sep).join("/");
@@ -312,6 +322,78 @@ function checkAppRuntimeBridge(filePath, content) {
   }
 }
 
+function findMatchingBrace(content, openIndex) {
+  let depth = 0;
+  for (let index = openIndex; index < content.length; index += 1) {
+    const char = content[index];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function findLastReturnObject(content) {
+  const returnPattern = /\breturn\s*\{/g;
+  let match;
+  let last = null;
+  while ((match = returnPattern.exec(content))) {
+    const openIndex = content.indexOf("{", match.index);
+    const closeIndex = findMatchingBrace(content, openIndex);
+    if (closeIndex !== -1) {
+      last = { openIndex, closeIndex };
+    }
+  }
+  return last;
+}
+
+function topLevelObjectSegments(objectBody) {
+  const segments = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < objectBody.length; index += 1) {
+    const char = objectBody[index];
+    if (char === "{" || char === "[" || char === "(") depth += 1;
+    if (char === "}" || char === "]" || char === ")") depth -= 1;
+    if (char === "," && depth === 0) {
+      segments.push({ text: objectBody.slice(start, index), start });
+      start = index + 1;
+    }
+  }
+  segments.push({ text: objectBody.slice(start), start });
+  return segments;
+}
+
+function objectPropertyName(segment) {
+  const trimmed = segment.trim();
+  if (!trimmed || trimmed.startsWith("...")) return null;
+  const namedProperty = /^([A-Za-z_$][\w$]*)\s*:/.exec(trimmed);
+  if (namedProperty) return namedProperty[1];
+  const shorthandProperty = /^([A-Za-z_$][\w$]*)\b/.exec(trimmed);
+  return shorthandProperty?.[1] || null;
+}
+
+function checkFeatureRuntimeLegacyCompatFields(filePath, content) {
+  if (!strictRuntimeContractFiles.has(filePath)) return;
+  const stripped = stripCommentsAndStrings(content);
+  const returnObject = findLastReturnObject(stripped);
+  if (!returnObject) return;
+  const objectBody = stripped.slice(returnObject.openIndex + 1, returnObject.closeIndex);
+  for (const segment of topLevelObjectSegments(objectBody)) {
+    const field = objectPropertyName(segment.text);
+    if (field && !allowedRuntimeContractFields.has(field)) {
+      addViolation({
+        rule: RULES.featureRuntimeNoLegacyCompatFields,
+        filePath,
+        line: lineNumberAt(stripped, returnObject.openIndex + 1 + segment.start),
+        message: `feature runtime must not re-expose legacy compat field ${field}; use view/actions/status`,
+      });
+    }
+  }
+}
+
 for (const absPath of walkSourceFiles(srcRoot)) {
   const filePath = toProjectPath(absPath);
   const content = fs.readFileSync(absPath, "utf8");
@@ -319,6 +401,7 @@ for (const absPath of walkSourceFiles(srcRoot)) {
   checkLocalStorage(filePath, content);
   checkFeatureRuntimeJsx(filePath, content);
   checkAppRuntimeBridge(filePath, content);
+  checkFeatureRuntimeLegacyCompatFields(filePath, content);
 }
 
 for (const entry of allowlist) {

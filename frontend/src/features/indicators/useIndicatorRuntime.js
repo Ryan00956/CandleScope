@@ -27,7 +27,7 @@ function useLatestRef(value) {
 function resolveRuntimeInputs(options = {}) {
   const sessionView = options.session?.view || {};
   const marketDataView = options.marketData?.view || {};
-  const marketDataEvents = options.marketData?.events || {};
+  const marketDataActions = options.marketData?.actions || {};
   const marketDataStatus = options.marketData?.status || {};
 
   return {
@@ -38,8 +38,8 @@ function resolveRuntimeInputs(options = {}) {
     datasetKey: options.datasetKey ?? sessionView.datasetKey,
     exchange: options.exchange ?? sessionView.exchange ?? "binance",
     interval: options.interval ?? sessionView.interval,
-    indicatorRangeRequests: options.indicatorRangeRequests ?? marketDataEvents.indicatorRangeRequests ?? [],
-    consumeIndicatorRangeRequest: options.consumeIndicatorRangeRequest ?? marketDataEvents.consumeIndicatorRangeRequest,
+    indicatorRangeRequests: options.indicatorRangeRequests ?? marketDataStatus.indicatorRangeRequests ?? [],
+    consumeIndicatorRangeRequest: options.consumeIndicatorRangeRequest ?? marketDataActions.consumeIndicatorRangeRequest,
     marketType: options.marketType ?? sessionView.marketType,
     seriesReady: options.seriesReady ?? (marketDataStatus.activeChartReady ? 1 : 0),
     sessionKey: options.sessionKey ?? sessionView.sessionKey,
@@ -293,24 +293,5 @@ export function useIndicatorRuntime(options = {}) {
     view,
     actions,
     status,
-    activeIndicators,
-    computing,
-    addIndicator,
-    removeIndicator,
-    toggleVisibility,
-    updateIndicatorParams,
-    updateIndicatorScript,
-    computeAll,
-    recompute,
-    requestIndicatorRange,
-    mainOverlayLines: paneData.mainOverlayLines,
-    subPanes: paneData.subPanes,
-    markers: outputState.markers,
-    fills: outputState.fills,
-    hlines: outputState.hlines,
-    bgcolors: outputState.bgcolors,
-    barcolors: outputState.barcolors,
-    signals: outputState.signals,
-    paramSchemas: outputState.paramSchemas,
   };
 }

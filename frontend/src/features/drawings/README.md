@@ -40,7 +40,8 @@
 }
 ```
 
-The hook still returns legacy flat fields while `App.jsx` and shell props are migrated.
+The hook returns only `view`, `actions`, and `status`; callers must not depend
+on legacy flat fields.
 
 ## Internal Ownership
 

@@ -34,11 +34,5 @@ export function useWatchlistRuntime() {
     view,
     actions,
     status: {},
-    watchlists: view.watchlists,
-    setWatchlists: actions.setWatchlists,
-    handleAddToWatchlist: actions.addToWatchlist,
-    subscriptionTiers: view.subscriptionTiers,
-    symbolPrices: view.prices,
-    handleTierChange: actions.handleTierChange,
   };
 }

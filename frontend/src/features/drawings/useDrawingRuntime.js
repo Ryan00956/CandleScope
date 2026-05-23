@@ -7,7 +7,6 @@ export function useDrawingRuntime({ chartSurfaceActions, session }) {
   const { view } = toolState;
   const {
     setDrawingsHidden,
-    handleSelectedDrawingChange,
   } = toolState.actions;
 
   const handleClearDrawing = useCallback(() => {
@@ -58,33 +57,5 @@ export function useDrawingRuntime({ chartSurfaceActions, session }) {
     view,
     actions,
     status: {},
-    drawingTool: view.drawingTool,
-    setDrawingTool: actions.setDrawingTool,
-    penColor: view.penColor,
-    setPenColor: actions.setPenColor,
-    penSize: view.penSize,
-    setPenSize: actions.setPenSize,
-    textFontSize: view.textFontSize,
-    setTextFontSize: actions.setTextFontSize,
-    textBold: view.textBold,
-    setTextBold: actions.setTextBold,
-    textItalic: view.textItalic,
-    setTextItalic: actions.setTextItalic,
-    fibLevels: view.fibLevels,
-    handleFibLevelsChange: actions.handleFibLevelsChange,
-    fibInverted: view.fibInverted,
-    handleFibInvertedChange: actions.handleFibInvertedChange,
-    positionSize: view.positionSize,
-    handlePositionSizeChange: actions.handlePositionSizeChange,
-    drawingsHidden: view.drawingsHidden,
-    setDrawingsHidden: actions.setDrawingsHidden,
-    drawingSnapEnabled: view.drawingSnapEnabled,
-    handleDrawingSnapEnabledChange: actions.handleDrawingSnapEnabledChange,
-    selectedDrawing: view.selectedDrawing,
-    handleSelectedDrawingChange,
-    handleSelectedDrawingStyleChange,
-    handleClearDrawing,
-    handleToggleDrawingsHidden,
-    handleIndicatorRemoved,
   };
 }

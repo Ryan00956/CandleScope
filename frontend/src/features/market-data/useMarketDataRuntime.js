@@ -285,10 +285,6 @@ export function useMarketDataRuntime({
       loadMoreLeft: handleNeedMoreLeft,
       onCrosshairMove: setCrosshairData,
       onVisibleRangeChange: (range) => handleVisibleRangeChange(range, chartDataMeta),
-    },
-    events: {
-      onBackfillCompleted: handleBackfillCompleted,
-      indicatorRangeRequests,
       consumeIndicatorRangeRequest,
     },
     status: {
@@ -297,6 +293,7 @@ export function useMarketDataRuntime({
       activeChartReady,
       canLoadMoreLeft: hasMoreLeft && !loadingMoreLeft && !loading,
       barCount: chartData.length,
+      indicatorRangeRequests,
     },
   };
 }

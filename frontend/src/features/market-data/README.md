@@ -13,7 +13,7 @@ warming, gap recovery, and header price state.
 {
   view: { bars, renderBars, meta, loading, error, lastPrice, dataSource, wsStatus },
   actions: { retry, loadMoreLeft, onVisibleRangeChange },
-  events: { onBackfillCompleted },
+  events: { onBackfillCompleted, indicatorRangeRequests, consumeIndicatorRangeRequest },
   status: { hasMoreLeft, loadingMoreLeft, activeChartReady },
 }
 ```
@@ -30,8 +30,8 @@ on this feature contract rather than calling those implementation hooks.
   loading, error, visible-data, and gap-recovery state for the active session.
 - May use internal chart data and stream helpers from this feature directory.
 - May call backend K-line services through existing runtime hooks.
-- May notify indicator range loading through a callback passed from the app
-  composition root while indicator ownership remains in a later phase.
+- May publish indicator range request events after K-line history expands or is
+  repaired; indicators own the actual range request side effects.
 
 ## Forbidden Dependencies
 

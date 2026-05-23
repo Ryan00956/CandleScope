@@ -9,12 +9,12 @@ import { useChartGapRecovery } from "./useChartGapRecovery";
 import { useChartInitialLoad } from "./useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./useChartLoadMoreLeft";
 import { useSessionTransitionReset } from "./useSessionTransitionReset";
+import { INDICATOR_RANGE_REQUEST_REASONS, useMarketDataEvents } from "./marketDataEvents";
 import { parseIntervalSeconds } from "../../utils/intervals";
 
 export function useMarketDataRuntime({
   session,
   realtimePriceRef,
-  requestIndicatorRange,
 }) {
   const {
     symbol,
@@ -36,6 +36,23 @@ export function useMarketDataRuntime({
     trackedIntervalsRef,
   } = session.refs;
   const lastSessionTransition = session.events?.lastTransition ?? null;
+  const {
+    indicatorRangeRequests,
+    consumeIndicatorRangeRequest,
+    createIndicatorRangeRequester,
+  } = useMarketDataEvents({ interval, sessionKey });
+  const requestLoadMoreIndicatorRange = useMemo(
+    () => createIndicatorRangeRequester(INDICATOR_RANGE_REQUEST_REASONS.LOAD_MORE_LEFT),
+    [createIndicatorRangeRequester],
+  );
+  const requestBackfillIndicatorRange = useMemo(
+    () => createIndicatorRangeRequester(INDICATOR_RANGE_REQUEST_REASONS.BACKFILL_COMPLETED),
+    [createIndicatorRangeRequester],
+  );
+  const requestGapRecoveryIndicatorRange = useMemo(
+    () => createIndicatorRangeRequester(INDICATOR_RANGE_REQUEST_REASONS.GAP_RECOVERY),
+    [createIndicatorRangeRequester],
+  );
 
   const {
     chartData,
@@ -117,7 +134,7 @@ export function useMarketDataRuntime({
     dataSource,
     cacheKey,
     commitMergedChartData,
-    requestIndicatorRange,
+    requestIndicatorRange: requestLoadMoreIndicatorRange,
   });
 
   const loadData = useChartInitialLoad({
@@ -153,7 +170,7 @@ export function useMarketDataRuntime({
     getIntervalDays,
     mergeCacheData,
     commitMergedChartData,
-    requestIndicatorRange,
+    requestIndicatorRange: requestBackfillIndicatorRange,
     setLastPrice,
     setError,
     setConnectionStatus,
@@ -201,7 +218,7 @@ export function useMarketDataRuntime({
     getCache,
     mergeCacheData,
     commitMergedChartData,
-    requestIndicatorRange,
+    requestIndicatorRange: requestGapRecoveryIndicatorRange,
     updateLastPrice,
   });
 
@@ -271,6 +288,8 @@ export function useMarketDataRuntime({
     },
     events: {
       onBackfillCompleted: handleBackfillCompleted,
+      indicatorRangeRequests,
+      consumeIndicatorRangeRequest,
     },
     status: {
       hasMoreLeft,

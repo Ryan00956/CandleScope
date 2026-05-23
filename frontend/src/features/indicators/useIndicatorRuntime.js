@@ -27,6 +27,7 @@ function useLatestRef(value) {
 function resolveRuntimeInputs(options = {}) {
   const sessionView = options.session?.view || {};
   const marketDataView = options.marketData?.view || {};
+  const marketDataEvents = options.marketData?.events || {};
   const marketDataStatus = options.marketData?.status || {};
 
   return {
@@ -37,8 +38,11 @@ function resolveRuntimeInputs(options = {}) {
     datasetKey: options.datasetKey ?? sessionView.datasetKey,
     exchange: options.exchange ?? sessionView.exchange ?? "binance",
     interval: options.interval ?? sessionView.interval,
+    indicatorRangeRequests: options.indicatorRangeRequests ?? marketDataEvents.indicatorRangeRequests ?? [],
+    consumeIndicatorRangeRequest: options.consumeIndicatorRangeRequest ?? marketDataEvents.consumeIndicatorRangeRequest,
     marketType: options.marketType ?? sessionView.marketType,
     seriesReady: options.seriesReady ?? (marketDataStatus.activeChartReady ? 1 : 0),
+    sessionKey: options.sessionKey ?? sessionView.sessionKey,
     symbol: options.symbol ?? sessionView.symbol,
   };
 }
@@ -52,8 +56,11 @@ export function useIndicatorRuntime(options = {}) {
     datasetKey,
     exchange,
     interval,
+    indicatorRangeRequests,
+    consumeIndicatorRangeRequest,
     marketType,
     seriesReady,
+    sessionKey,
     symbol,
   } = resolveRuntimeInputs(options);
   const onIndicatorRemoved = options.onIndicatorRemoved;
@@ -89,6 +96,7 @@ export function useIndicatorRuntime(options = {}) {
   const chartDataMetaRef = useLatestRef(chartDataMeta);
   const candleUpColorRef = useLatestRef(candleUpColor);
   const candleDownColorRef = useLatestRef(candleDownColor);
+  const consumedIndicatorRangeRequestIdsRef = useRef(new Set());
 
   const chartDataStatus = chartDataMeta?.status || "idle";
   const chartDataReady = Boolean(chartData?.length && chartDataStatus === "ready");
@@ -194,6 +202,16 @@ export function useIndicatorRuntime(options = {}) {
     setIndicatorError,
     symbol,
   });
+
+  useEffect(() => {
+    for (const request of indicatorRangeRequests) {
+      if (!request || request.sessionKey !== sessionKey) continue;
+      if (consumedIndicatorRangeRequestIdsRef.current.has(request.id)) continue;
+      consumedIndicatorRangeRequestIdsRef.current.add(request.id);
+      requestIndicatorRange(request.start, request.end);
+      consumeIndicatorRangeRequest?.(request.id);
+    }
+  }, [consumeIndicatorRangeRequest, indicatorRangeRequests, requestIndicatorRange, sessionKey]);
 
   const { computeAll, computing, recompute } = useIndicatorComputeController({
     activeIndicators,

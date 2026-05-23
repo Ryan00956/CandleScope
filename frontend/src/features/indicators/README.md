@@ -56,6 +56,8 @@ migrated. New code should prefer `view`, `actions`, and `status`.
 
 - May consume `features/chart-session` and `features/market-data` contracts
   through arguments passed by the app composition root.
+- May consume market-data indicator range request events idempotently and issue
+  hosted indicator range requests through the indicator stream controller.
 - May notify the app composition root when an indicator is removed so owning
   features can handle related cleanup through their own public actions.
 - May call indicator backend services through `services/indicatorApi`.

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { loadUserPrefs, updateUserPref } from "../features/chart-session/chartSessionModel";
 import { useChartSession } from "../features/chart-session/useChartSession";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime";
@@ -20,15 +20,10 @@ export default function App() {
   const chartSession = useChartSession({
     chartWidgetRef,
   });
-  const indicatorRangeRequestRef = useRef(null);
-  const requestIndicatorRangeForMarketData = useCallback((start, end) => (
-    indicatorRangeRequestRef.current?.(start, end) ?? false
-  ), []);
 
   const marketData = useMarketDataRuntime({
     session: chartSession,
     realtimePriceRef,
-    requestIndicatorRange: requestIndicatorRangeForMarketData,
   });
   const drawings = useDrawingRuntime({ chartWidgetRef, session: chartSession });
 
@@ -51,17 +46,6 @@ export default function App() {
     candleDownColor: settings.downColor,
     onIndicatorRemoved: drawings.actions.handleIndicatorRemoved,
   });
-  const { requestIndicatorRange } = indicators.actions;
-
-  useEffect(() => {
-    indicatorRangeRequestRef.current = requestIndicatorRange;
-    return () => {
-      if (indicatorRangeRequestRef.current === requestIndicatorRange) {
-        indicatorRangeRequestRef.current = null;
-      }
-    };
-  }, [requestIndicatorRange]);
-
   const exportFlow = useExportRuntime({
     session: chartSession,
     resolvedTheme,

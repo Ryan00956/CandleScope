@@ -15,6 +15,7 @@ const RULES = {
   featureRuntimeNoJsx: "feature-runtime-no-jsx",
   chartAdapterLightweightImport: "chart-adapter-lightweight-import",
   appNoMarketDataRuntimeBridge: "app-no-market-data-runtime-bridge",
+  appNoIndicatorRangeBridge: "app-no-indicator-range-bridge",
 };
 
 const allowlist = [];
@@ -269,15 +270,28 @@ function checkFeatureRuntimeJsx(filePath, content) {
 function checkAppRuntimeBridge(filePath, content) {
   if (filePath !== "src/app/App.jsx") return;
   const stripped = stripCommentsAndStrings(content);
-  const runtimeBridgePattern = /\bruntimeBridgeRef\b/g;
-  let match;
-  while ((match = runtimeBridgePattern.exec(stripped))) {
-    addViolation({
+  const appBridgePatterns = [
+    {
+      pattern: /\bruntimeBridgeRef\b/g,
       rule: RULES.appNoMarketDataRuntimeBridge,
-      filePath,
-      line: lineNumberAt(stripped, match.index),
       message: "App must not bridge chart-session to market-data with runtimeBridgeRef; use session transition events instead",
-    });
+    },
+    {
+      pattern: /\bindicatorRangeRequestRef\b/g,
+      rule: RULES.appNoIndicatorRangeBridge,
+      message: "App must not bridge market-data to indicators with indicatorRangeRequestRef; use market-data range request events instead",
+    },
+  ];
+  let match;
+  for (const { pattern, rule, message } of appBridgePatterns) {
+    while ((match = pattern.exec(stripped))) {
+      addViolation({
+        rule,
+        filePath,
+        line: lineNumberAt(stripped, match.index),
+        message,
+      });
+    }
   }
 }
 

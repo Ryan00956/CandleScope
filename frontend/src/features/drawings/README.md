@@ -47,6 +47,8 @@ The hook still returns legacy flat fields while `App.jsx` and shell props are mi
 - `drawingModel.js` owns tool ids, drawing constants, id creation, and pure geometry helpers.
 - `drawingToolState.js` owns toolbar-facing drawing preferences and selected drawing style mirroring.
 - `drawingPersistence.js` owns localStorage serialization, loading, existence checks, and clearing.
+- `useDrawingPersistenceLifecycle.js` owns when saved drawings are persisted,
+  restored, re-attached, or swapped across symbols.
 - `drawingPrimitiveFactory.js` owns primitive creation from saved models and tool actions.
 - `drawingSnapController.js` owns magnet snapping to visible candle time/price candidates.
 - `drawingSelectionController.js` owns selected drawing metadata, selected text snapshots, and hit testing.

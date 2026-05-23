@@ -28,7 +28,7 @@ import { PositionDrawingPrimitive } from "../../components/primitives/PositionDr
 import { ShapeDrawingPrimitive } from "../../components/primitives/ShapeDrawingPrimitive.js";
 import { AxisLineDrawingPrimitive } from "../../components/primitives/AxisLineDrawingPrimitive.js";
 import { AngleMeasurementPrimitive } from "../../components/primitives/AngleMeasurementPrimitive.js";
-import { saveDrawings, loadDrawings, clearSavedDrawings } from "./drawingPersistence.js";
+import { clearSavedDrawings } from "./drawingPersistence.js";
 import {
   AXIS_LINE_TOOL_IDS,
   FIB_TOOL_IDS,
@@ -57,11 +57,11 @@ import {
   createFreehandPrimitive,
   createPositionPrimitive,
   createPreviewPrimitive,
-  createPrimitiveFromSavedDrawing,
   createTextPrimitive,
   createTwoPointDrawingPrimitive,
 } from "./drawingPrimitiveFactory.js";
 import { snapDataPointAtPointer } from "./drawingSnapController.js";
+import { useDrawingPersistenceLifecycle } from "./useDrawingPersistenceLifecycle.js";
 
 export function useDrawing({
   chartAdapter,
@@ -361,95 +361,21 @@ export function useDrawing({
     [getChartAdapter],
   );
 
-  // ── Persist drawings to localStorage ──
-
-  const persistDrawings = useCallback(() => {
-    saveDrawings(symbolRef.current, primitivesRef.current);
-  }, []);
-
-  // ── Restore saved drawings when series becomes available ──
-  //
-  // `seriesReady` is a counter that increments each time the chart
-  // (and its candlestick series) is created, or when the drawing anchor
-  // series changes (e.g. indicator series rebuilt on sub-panes).
-  // By depending on it we guarantee this effect fires *after* the
-  // series ref is populated, even on the very first mount and after
-  // any chart re-creation (e.g. theme change, page refresh).
-
-  useEffect(() => {
-    const adapter = getChartAdapter();
-    if (!adapter?.hasSeries?.() || !symbol || !seriesReady) return;
-
-    const prevSymbol = prevSymbolRef.current;
-    const symbolChanged = prevSymbol && prevSymbol !== symbol;
-
-    // ── Symbol changed: swap drawing sets ──
-    // Save current drawings for the *old* symbol, detach everything,
-    // then load the *new* symbol's drawings from localStorage.
-    if (symbolChanged) {
-      // Save old symbol's drawings before clearing
-      if (primitivesRef.current.length > 0) {
-        saveDrawings(prevSymbol, primitivesRef.current);
-      }
-
-      // Detach all primitives from whatever series they are attached to
-      for (const prim of primitivesRef.current) {
-        adapter.detachPrimitive?.(prim);
-      }
-
-      // Clear in-memory state
-      primitivesRef.current = [];
-      selectedIdRef.current = null;
-      setSelectedPrimId(null);
-      setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
-      draggingRef.current = null;
-      isDrawingFreehandRef.current = false;
-      currentFreehandRef.current = null;
-
-      // Update prev symbol tracker
-      prevSymbolRef.current = symbol;
-
-      // Now fall through to load the new symbol's drawings below
-    }
-
-    // ── Same symbol, but series was recreated (e.g. theme change): re-attach ──
-    if (!symbolChanged && primitivesRef.current.length > 0) {
-      for (const prim of primitivesRef.current) {
-        try {
-          adapter.detachPrimitive?.(prim);
-          prim.setHidden?.(hiddenRef.current, false);
-          adapter.attachPrimitive?.(prim);
-        } catch (err) {
-          console.warn("Failed to re-attach drawing:", err);
-        }
-      }
-      prevSymbolRef.current = symbol;
-      return;
-    }
-
-    // ── Load drawings from localStorage for current symbol ──
-    const saved = loadDrawings(symbol);
-    if (!saved || saved.length === 0) {
-      prevSymbolRef.current = symbol;
-      return;
-    }
-
-    for (const item of saved) {
-      let prim = null;
-      try {
-        prim = createPrimitiveFromSavedDrawing(item);
-      } catch (err) {
-        console.warn("Failed to restore drawing:", err, item);
-      }
-      if (prim) {
-        prim.setHidden?.(hiddenRef.current, false);
-        adapter.attachPrimitive?.(prim);
-        primitivesRef.current.push(prim);
-      }
-    }
-
-    prevSymbolRef.current = symbol;
-  }, [symbol, getChartAdapter, seriesReady]);
+  const { persistDrawings } = useDrawingPersistenceLifecycle({
+    currentFreehandRef,
+    draggingRef,
+    getChartAdapter,
+    hiddenRef,
+    isDrawingFreehandRef,
+    prevSymbolRef,
+    primitivesRef,
+    selectedIdRef,
+    seriesReady,
+    setSelectedPrimId,
+    setSelectedTextUi,
+    symbol,
+    symbolRef,
+  });
 
   // ── Selection helpers ──
 

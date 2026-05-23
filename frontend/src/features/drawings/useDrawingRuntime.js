@@ -2,7 +2,7 @@ import { useCallback, useEffect } from "react";
 import { clearSavedDrawings } from "./drawingPersistence.js";
 import { useDrawingToolState } from "./drawingToolState.js";
 
-export function useDrawingRuntime({ chartWidgetRef, session }) {
+export function useDrawingRuntime({ chartSurfaceActions, session }) {
   const toolState = useDrawingToolState();
   const { view } = toolState;
   const {
@@ -11,8 +11,8 @@ export function useDrawingRuntime({ chartWidgetRef, session }) {
   } = toolState.actions;
 
   const handleClearDrawing = useCallback(() => {
-    chartWidgetRef.current?.clearAllDrawings();
-  }, [chartWidgetRef]);
+    chartSurfaceActions?.clearAllDrawings?.();
+  }, [chartSurfaceActions]);
 
   const handleToggleDrawingsHidden = useCallback(() => {
     setDrawingsHidden((prev) => !prev);
@@ -21,20 +21,20 @@ export function useDrawingRuntime({ chartWidgetRef, session }) {
   const setDrawingsHiddenForExport = useCallback((hidden) => {
     const nextHidden = !!hidden;
     setDrawingsHidden(nextHidden);
-    chartWidgetRef.current?.setDrawingsHidden?.(nextHidden);
-  }, [chartWidgetRef, setDrawingsHidden]);
+    chartSurfaceActions?.setDrawingsHidden?.(nextHidden);
+  }, [chartSurfaceActions, setDrawingsHidden]);
 
   const prepareExport = useCallback(() => {
-    chartWidgetRef.current?.prepareExport?.();
-  }, [chartWidgetRef]);
+    chartSurfaceActions?.prepareExport?.();
+  }, [chartSurfaceActions]);
 
   useEffect(() => {
-    chartWidgetRef.current?.setDrawingsHidden?.(view.drawingsHidden);
-  }, [chartWidgetRef, view.drawingsHidden]);
+    chartSurfaceActions?.setDrawingsHidden?.(view.drawingsHidden);
+  }, [chartSurfaceActions, view.drawingsHidden]);
 
   const handleSelectedDrawingStyleChange = useCallback((patch) => {
-    chartWidgetRef.current?.updateSelectedDrawingStyle?.(patch);
-  }, [chartWidgetRef]);
+    chartSurfaceActions?.updateSelectedDrawingStyle?.(patch);
+  }, [chartSurfaceActions]);
 
   const handleIndicatorRemoved = useCallback((indicatorId) => {
     const sessionView = session?.view;

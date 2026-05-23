@@ -7,7 +7,7 @@ import { buildAppShellViewModel } from "./appShellViewModel";
 
 export default function AppShell({
   pageExportRef,
-  chartWidgetRef,
+  chartSurfaceRef,
   session,
   marketData,
   drawings,
@@ -32,10 +32,10 @@ export default function AppShell({
   const chartWorkspace = {
     ...model.chartWorkspace,
     chart: {
-      ...model.chartWorkspace.chart,
+        ...model.chartWorkspace.chart,
       chartProps: {
         ...model.chartWorkspace.chart.chartProps,
-        ref: chartWidgetRef,
+        ref: chartSurfaceRef,
       },
     },
   };

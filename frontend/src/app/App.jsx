@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { useChartSurfaceRuntime } from "../chart-adapter/useChartSurfaceRuntime";
 import { loadUserPrefs, updateUserPref } from "../features/chart-session/chartSessionModel";
 import { useChartSession } from "../features/chart-session/useChartSession";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime";
@@ -14,18 +15,18 @@ import AppShell from "./AppShell";
 import "../index.css";
 
 export default function App() {
-  const chartWidgetRef = useRef(null);
+  const chartSurface = useChartSurfaceRuntime();
   const pageExportRef = useRef(null);
   const realtimePriceRef = useRef(null);
   const chartSession = useChartSession({
-    chartWidgetRef,
+    chartSurfaceActions: chartSurface.actions,
   });
 
   const marketData = useMarketDataRuntime({
     session: chartSession,
     realtimePriceRef,
   });
-  const drawings = useDrawingRuntime({ chartWidgetRef, session: chartSession });
+  const drawings = useDrawingRuntime({ chartSurfaceActions: chartSurface.actions, session: chartSession });
 
   const {
     invertScale,
@@ -49,7 +50,7 @@ export default function App() {
   const exportFlow = useExportRuntime({
     session: chartSession,
     resolvedTheme,
-    chartWidgetRef,
+    chartSurfaceActions: chartSurface.actions,
     pageExportRef,
     drawings,
     loadUserPrefs,
@@ -65,7 +66,7 @@ export default function App() {
     <AppProviders>
       <AppShell
         pageExportRef={pageExportRef}
-        chartWidgetRef={chartWidgetRef}
+        chartSurfaceRef={chartSurface.ref}
         session={chartSession}
         marketData={marketData}
         drawings={drawings}

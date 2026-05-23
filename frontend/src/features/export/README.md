@@ -37,7 +37,8 @@
 
 ## Allowed Dependencies
 
-- May receive the chart surface ref while export snapshot support is still exposed by `MultiPaneChart`.
+- May receive explicit chart surface actions for export snapshots while
+  `MultiPaneChart` still owns the imperative chart handle.
 - May receive `pageExportRef` for page-scope export capture.
 - May receive `session.view` metadata for filenames and watermarks.
 - May call drawing runtime actions to prepare text edits and temporarily hide or restore drawings.
@@ -52,4 +53,6 @@
 
 ## Migration Notes
 
-The chart surface still exposes `prepareExport`, `setDrawingsHidden`, and `getExportSnapshot` through the existing chart ref. A later chart-adapter pass can replace that ref with an explicit export adapter without changing the feature UI.
+The chart surface now exposes `prepareExport`, `setDrawingsHidden`, and
+`getExportSnapshot` through explicit chart-adapter actions. Export should not
+depend on the raw chart widget ref.

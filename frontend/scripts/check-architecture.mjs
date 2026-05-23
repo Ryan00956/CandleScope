@@ -16,6 +16,7 @@ const RULES = {
   chartAdapterLightweightImport: "chart-adapter-lightweight-import",
   appNoMarketDataRuntimeBridge: "app-no-market-data-runtime-bridge",
   appNoIndicatorRangeBridge: "app-no-indicator-range-bridge",
+  appNoRawChartWidgetRef: "app-no-raw-chart-widget-ref",
 };
 
 const allowlist = [];
@@ -280,6 +281,11 @@ function checkAppRuntimeBridge(filePath, content) {
       pattern: /\bindicatorRangeRequestRef\b/g,
       rule: RULES.appNoIndicatorRangeBridge,
       message: "App must not bridge market-data to indicators with indicatorRangeRequestRef; use market-data range request events instead",
+    },
+    {
+      pattern: /\bchartWidgetRef\b/g,
+      rule: RULES.appNoRawChartWidgetRef,
+      message: "App must not create or pass raw chartWidgetRef; use chart surface runtime instead",
     },
   ];
   let match;

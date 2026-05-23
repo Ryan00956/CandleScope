@@ -24,7 +24,7 @@ import {
 } from "./chartSessionTransition";
 import { getVisibleRangeForInterval, saveVisibleRangeForInterval } from "./visibleRangeStorage";
 
-export function useChartSession({ chartWidgetRef } = {}) {
+export function useChartSession({ chartSurfaceActions } = {}) {
   const [initialSession] = useState(loadInitialChartSession);
   const [symbol, setSymbol] = useState(initialSession.symbol);
   const [exchange, setExchange] = useState(initialSession.exchange);
@@ -130,8 +130,7 @@ export function useChartSession({ chartWidgetRef } = {}) {
   );
 
   const saveCurrentVisibleRange = useCallback((dataMeta = visibleRangeDataMetaRef.current) => {
-    if (!chartWidgetRef?.current?.getVisibleRange) return;
-    const range = chartWidgetRef.current.getVisibleRange();
+    const range = chartSurfaceActions?.getVisibleRange?.();
     if (!range) return;
     saveVisibleRangeForInterval(
       symbol,
@@ -141,7 +140,7 @@ export function useChartSession({ chartWidgetRef } = {}) {
       exchange,
       dataMeta,
     );
-  }, [chartWidgetRef, exchange, interval, marketType, symbol]);
+  }, [chartSurfaceActions, exchange, interval, marketType, symbol]);
 
   const handleVisibleRangeChange = useCallback((range, dataMeta = null) => {
     if (dataMeta) {

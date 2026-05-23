@@ -48,7 +48,7 @@ export function useExportPreviewRuntime({
   isOpen,
   options,
   metadata,
-  chartWidgetRef,
+  chartSurfaceActions,
   pageExportRef,
   drawingsHidden,
   prepareDrawingExport,
@@ -140,7 +140,6 @@ export function useExportPreviewRuntime({
     runningRef.current = true;
     pendingRef.current = false;
 
-    const chartApi = chartWidgetRef.current;
     const exportOptions = {
       ...DEFAULT_EXPORT_OPTIONS,
       ...(latestOptionsRef.current || {}),
@@ -156,7 +155,7 @@ export function useExportPreviewRuntime({
     }
 
     try {
-      if (!chartApi?.getExportSnapshot) {
+      if (typeof chartSurfaceActions?.getExportSnapshot !== "function") {
         throw new Error("图表尚未就绪，无法生成预览。 ");
       }
 
@@ -168,7 +167,7 @@ export function useExportPreviewRuntime({
       }
 
       await waitForAnimationFrames(2);
-      const snapshot = chartApi.getExportSnapshot();
+      const snapshot = chartSurfaceActions.getExportSnapshot();
       const result = await withTimeout(
         renderExportImage(snapshot, exportOptions),
         12000,
@@ -219,7 +218,7 @@ export function useExportPreviewRuntime({
         setLoading(false);
       }
     }
-  }, [chartWidgetRef, pageExportRef, prepareDrawingExport, setDrawingsHiddenForExport]);
+  }, [chartSurfaceActions, pageExportRef, prepareDrawingExport, setDrawingsHiddenForExport]);
 
   useEffect(() => {
     runGenerationRef.current = runGeneration;

@@ -6,7 +6,7 @@ import { useExportPreviewRuntime } from "./exportPreviewRuntime";
 export function useExportRuntime({
   session,
   resolvedTheme,
-  chartWidgetRef,
+  chartSurfaceActions,
   pageExportRef,
   drawings,
   loadUserPrefs,
@@ -37,7 +37,7 @@ export function useExportRuntime({
     isOpen,
     options,
     metadata,
-    chartWidgetRef,
+    chartSurfaceActions,
     pageExportRef,
     drawingsHidden: drawings?.view?.drawingsHidden,
     prepareDrawingExport: drawings?.actions?.prepareExport,

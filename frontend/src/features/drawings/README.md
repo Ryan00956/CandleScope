@@ -4,7 +4,7 @@
 
 ## Public Contract
 
-`useDrawingRuntime({ chartWidgetRef, session })` exposes:
+`useDrawingRuntime({ chartSurfaceActions, session })` exposes:
 
 ```js
 {
@@ -58,7 +58,8 @@ The hook still returns legacy flat fields while `App.jsx` and shell props are mi
 - May consume chart session through the runtime argument to derive drawing storage keys for drawing-owned cleanup.
 - May expose event-style actions, such as `handleIndicatorRemoved`, so the app
   composition root can route lifecycle events without knowing drawing storage keys.
-- May depend on `chart-adapter` operations passed by chart rendering components.
+- May depend on explicit `chart-adapter` surface actions passed by the app
+  composition root.
 - May import drawing primitive implementations while they remain under `src/components/primitives` during migration.
 - May expose feature UI entry points such as `DrawingToolbar` and `DrawingEngineHost`.
 

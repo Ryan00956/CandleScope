@@ -414,8 +414,10 @@ class QueryEngine:
         limit: int = 500,
         exchange: str = "binance",
         market_type: str = "spot",
+        auto_backfill: bool | None = None,
     ) -> QueryResult:
         """Query bars strictly before a timestamp (for pagination)."""
+        allow_backfill = self._cfg.auto_backfill if auto_backfill is None else auto_backfill
         if is_custom_interval(interval):
             return self.custom_intervals.query_before(
                 symbol,
@@ -487,7 +489,7 @@ class QueryEngine:
 
         backfill_triggered = False
         missing_ranges: list[MissingRange] = []
-        if len(merged) < effective_limit and self._cfg.auto_backfill:
+        if len(merged) < effective_limit and allow_backfill:
             interval_secs = parse_custom_interval(key.interval) or 60
 
             # Only backfill the missing portion before existing data

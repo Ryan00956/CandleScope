@@ -19,7 +19,7 @@
  *   - Double-click text to edit
  *   - Clear all drawings
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
 import { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
 import { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
@@ -35,35 +35,34 @@ import {
   LINE_TOOL_IDS,
   POSITION_TOOL_IDS,
   SHAPE_TOOL_IDS,
-  axisLineTypeFromTool,
-  constrainShapeScreenPoint,
   cursorStyleForPassiveTool,
   decimateScreenPoints,
   isPassiveCursorTool,
   isTextOverlayTarget,
-  resizedShapeBoxFromHandle,
   setCursor,
-  shapeTypeFromTool,
 } from "./drawingModel.js";
 import {
   EMPTY_SELECTED_TEXT_UI,
   hitTestDrawingPrimitives,
-  isSelectablePrimitive,
   selectedDrawingMetaFromPrimitive,
-  selectedTextUiFromPrimitive,
+  useDrawingSelection,
 } from "./drawingSelectionController.js";
-import {
-  createAxisLinePrimitive,
-  createFreehandPrimitive,
-  createPositionPrimitive,
-  createPreviewPrimitive,
-  createTextPrimitive,
-  createTwoPointDrawingPrimitive,
-} from "./drawingPrimitiveFactory.js";
 import { snapDataPointAtPointer } from "./drawingSnapController.js";
 import { eraseDrawingAtPointer, updateEraserHoverState } from "./drawingEraseController.js";
 import { useDrawingPersistenceLifecycle } from "./useDrawingPersistenceLifecycle.js";
 import { useChartPointerPosition, useDrawingPointerEvents } from "./drawingPointerController.js";
+import { useDrawingTextEdit } from "./drawingTextEditController.js";
+import { useDrawingKeyboard } from "./drawingKeyboardController.js";
+import { applyTextAndPositionDrag, applyLineFibShapeDrag } from "./drawingDragResizeController.js";
+import {
+  beginAxisLineDrawing,
+  beginTwoPointDrawing,
+  commitTwoPointDrawing,
+  placePositionDrawing,
+  placeTextDrawing,
+  startFreehandStroke,
+  updateTwoPointPreview,
+} from "./drawingCreationController.js";
 
 export function useDrawing({
   chartAdapter,
@@ -95,36 +94,26 @@ export function useDrawing({
   // ── Line-specific state ──
   const previewRef = useRef(null); // LineDrawingPrimitive (dashed preview)
   const anchorDataRef = useRef(null); // { logical, price } first click
-  const selectedIdRef = useRef(null);
   const draggingRef = useRef(null); // { id, pointIndex, startMouse, origPoints | origDataPoint }
 
-  // ── Selected primitive ID as React state (for toolbar sync) ──
-  const [selectedPrimId, setSelectedPrimId] = useState(null);
-  const [selectedTextUi, setSelectedTextUi] = useState(EMPTY_SELECTED_TEXT_UI);
-  const [selectedDrawingMeta, setSelectedDrawingMeta] = useState(null);
-
-  // Whenever the selection is cleared from any of the many code paths that
-  // touch `selectedPrimId`, also drop the toolbar-facing meta so the style
-  // editor goes away. selectPrimitive() sets meta directly, so this only
-  // needs to handle the deselect case.
-  useEffect(() => {
-    if (selectedPrimId == null) {
-      setSelectedDrawingMeta(null);
-    }
-  }, [selectedPrimId]);
+  // ── Selection state + lifecycle (extracted) ──
+  const {
+    selectedIdRef,
+    selectedPrimId,
+    selectedTextUi,
+    selectedDrawingMeta,
+    setSelectedPrimId,
+    setSelectedTextUi,
+    setSelectedDrawingMeta,
+    selectPrimitive,
+    deselectAll,
+    getPrimitiveById,
+    refreshSelectedTextUi,
+  } = useDrawingSelection({ primitivesRef });
 
   // ── Freehand-specific state ──
   const currentFreehandRef = useRef(null); // FreehandDrawingPrimitive being drawn
   const isDrawingFreehandRef = useRef(false);
-
-  // ── Text editing state ──
-  const [editingTextId, setEditingTextId] = useState(null);
-  // Mirror of editingTextId for use inside event handlers (avoids stale
-  // React state during the same mousedown frame that just blurred the editor).
-  const editingTextIdRef = useRef(null);
-  const [editingTextValue, setEditingTextValue] = useState("");
-  const [editingTextPos, setEditingTextPos] = useState(null); // { x, y } screen coords
-  const editInputRef = useRef(null);
 
   // ── Tool refs (avoid stale closures) ──
   const activeToolRef = useRef(activeTool);
@@ -379,46 +368,7 @@ export function useDrawing({
     symbolRef,
   });
 
-  // ── Selection helpers ──
-
-  const selectPrimitive = useCallback((id) => {
-    selectedIdRef.current = id;
-    setSelectedPrimId(id);
-    let selectedPrim = null;
-    for (const prim of primitivesRef.current) {
-      if (isSelectablePrimitive(prim)) {
-        prim.setSelected(prim.id === id);
-        if (prim.id === id) selectedPrim = prim;
-      }
-    }
-    if (!selectedPrim) {
-      // Freehand strokes don't have setSelected; locate by id directly
-      selectedPrim = primitivesRef.current.find((p) => p.id === id) || null;
-    }
-    setSelectedTextUi(selectedTextUiFromPrimitive(selectedPrim));
-    setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(selectedPrim));
-  }, []);
-
-  const deselectAll = useCallback(() => {
-    selectedIdRef.current = null;
-    setSelectedPrimId(null);
-    setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
-    setSelectedDrawingMeta(null);
-    for (const prim of primitivesRef.current) {
-      if (isSelectablePrimitive(prim)) {
-        prim.setSelected(false);
-      }
-    }
-  }, []);
-
-  const getPrimitiveById = useCallback((id) => {
-    return primitivesRef.current.find((p) => p.id === id) || null;
-  }, []);
-
-  const refreshSelectedTextUi = useCallback((id = selectedIdRef.current) => {
-    const prim = id ? primitivesRef.current.find((p) => p.id === id) : null;
-    setSelectedTextUi(selectedTextUiFromPrimitive(prim));
-  }, []);
+  // ── Selection helpers are provided by useDrawingSelection above ──
 
   // ── Hit-test all primitives ──
 
@@ -439,116 +389,38 @@ export function useDrawing({
     anchorDataRef.current = null;
   }, [detachPrim]);
 
-  // ── Cancel text editing ──
+  // ── Text editing lifecycle (extracted) ──
 
-  const cancelTextEditing = useCallback((opts = {}) => {
-    const { clearSelection = false, exitTool = true } = opts || {};
-    const wasEditing = editingTextIdRef.current;
-    if (wasEditing) {
-      // If text was newly created and never confirmed, drop it.
-      const prim = getPrimitiveById(wasEditing);
-      if (prim && prim instanceof TextDrawingPrimitive) {
-        // Make the underlying canvas text visible again.
-        prim.setHidden(false);
-        if (!prim.text || !prim.text.trim()) {
-          const idx = primitivesRef.current.indexOf(prim);
-          if (idx >= 0) {
-            detachPrim(prim);
-            primitivesRef.current.splice(idx, 1);
-          }
-          if (selectedIdRef.current === wasEditing) {
-            selectedIdRef.current = null;
-            setSelectedPrimId(null);
-            setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
-          }
-        }
-      }
-    }
-    editingTextIdRef.current = null;
-    setEditingTextId(null);
-    setEditingTextValue("");
-    setEditingTextPos(null);
-    if (clearSelection) {
-      deselectAll();
-    }
-    // PPT behavior: leaving text edit mode also leaves the text *tool*.
-    if (exitTool && activeToolRef.current === "text") {
-      onToolChangeRef.current?.(null);
-    }
-    refreshSelectedTextUi();
-  }, [getPrimitiveById, detachPrim, deselectAll, refreshSelectedTextUi]);
-
-  // ── Commit text editing ──
-
-  const commitTextEditing = useCallback((opts = {}) => {
-    const { clearSelection = false, exitTool = true } = opts || {};
-    const editingId = editingTextIdRef.current;
-    if (!editingId) return false;
-    const prim = getPrimitiveById(editingId);
-    let removed = false;
-    if (prim && prim instanceof TextDrawingPrimitive) {
-      // Restore canvas rendering of the underlying text.
-      prim.setHidden(false);
-      const value = editingTextValue;
-      const trimmed = value.replace(/\s+$/g, "");
-      if (trimmed) {
-        prim.setText(trimmed);
-      } else {
-        // Empty text → delete the annotation
-        const idx = primitivesRef.current.indexOf(prim);
-        if (idx >= 0) {
-          detachPrim(prim);
-          primitivesRef.current.splice(idx, 1);
-          removed = true;
-        }
-      }
-    }
-    editingTextIdRef.current = null;
-    setEditingTextId(null);
-    setEditingTextValue("");
-    setEditingTextPos(null);
-    if (clearSelection || removed) {
-      deselectAll();
-    } else if (prim && !removed) {
-      selectPrimitive(prim.id);
-    }
-    if (exitTool && activeToolRef.current === "text") {
-      onToolChangeRef.current?.(null);
-    }
-    persistDrawings();
-    refreshSelectedTextUi();
-    return true;
-  }, [editingTextValue, getPrimitiveById, detachPrim, deselectAll, selectPrimitive, persistDrawings, refreshSelectedTextUi]);
+  const {
+    editingTextId,
+    editingTextValue,
+    editingTextPos,
+    editingTextIdRef,
+    editInputRef,
+    setEditingTextValue,
+    setEditingTextPos,
+    startTextEditing,
+    commitTextEditing,
+    cancelTextEditing,
+  } = useDrawingTextEdit({
+    primitivesRef,
+    selectedIdRef,
+    getPrimitiveById,
+    detachPrim,
+    deselectAll,
+    selectPrimitive,
+    refreshSelectedTextUi,
+    persistDrawings,
+    dataToScreen,
+    activeToolRef,
+    onToolChangeRef,
+    setSelectedPrimId,
+    setSelectedTextUi,
+  });
 
   // ── Get mouse position relative to chart container ──
 
   const getChartPos = useChartPointerPosition(chartContainerRef);
-
-  // ── Start text editing for a specific text primitive ──
-
-  const startTextEditing = useCallback(
-    (prim) => {
-      if (!(prim instanceof TextDrawingPrimitive)) return;
-      const screenPos = dataToScreen(prim.dataPoint);
-      if (!screenPos) return;
-
-      editingTextIdRef.current = prim.id;
-      setEditingTextId(prim.id);
-      setEditingTextValue(prim.text === "Text" ? "" : prim.text);
-      setEditingTextPos({ x: screenPos.x, y: screenPos.y });
-      // Hide the canvas-rendered text so the editable textarea doesn't
-      // appear duplicated on top of it.
-      prim.setHidden(true);
-      selectPrimitive(prim.id);
-
-      // Focus the input after render
-      setTimeout(() => {
-        editInputRef.current?.focus();
-        editInputRef.current?.select();
-      }, 30);
-    },
-    [dataToScreen, selectPrimitive],
-  );
 
   const beginTextDrag = useCallback((prim, hit, pos) => {
     if (!(prim instanceof TextDrawingPrimitive) || !hit || !pos) return false;
@@ -609,7 +481,7 @@ export function useDrawing({
     return () => {
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [editingTextId, selectedPrimId, dataToScreen, refreshSelectedTextUi]);
+  }, [editingTextId, selectedPrimId, dataToScreen, refreshSelectedTextUi, setEditingTextPos]);
 
   // ════════════════════════════════════════════════════
   //  MOUSE DOWN
@@ -682,22 +554,10 @@ export function useDrawing({
 
       // ── PEN / HIGHLIGHTER (freehand): start stroke ──
       if (tool === "pen" || tool === "highlighter") {
-        const dataPoint = screenToData(pos.x, pos.y);
-        if (!dataPoint) return;
-        const freehand = createFreehandPrimitive({
-          tool,
-          dataPoint,
-          color: penColorRef.current,
-          lineWidth: penSizeRef.current,
-        });
-        attachPrim(freehand);
-        primitivesRef.current.push(freehand);
-        currentFreehandRef.current = freehand;
-        isDrawingFreehandRef.current = true;
-
-        e.preventDefault();
-        e.stopPropagation();
-        return;
+        if (startFreehandStroke({
+          tool, pos, e, primitivesRef, currentFreehandRef, isDrawingFreehandRef,
+          attachPrim, screenToData, penColorRef, penSizeRef,
+        })) return;
       }
 
       // ── TEXT TOOL ──
@@ -718,25 +578,10 @@ export function useDrawing({
         }
 
         // Place new text
-        const dataPoint = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
-        if (!dataPoint) return;
-
-        const textPrim = createTextPrimitive({
-          dataPoint,
-          color: penColorRef.current,
-          fontSize: textFontSizeRef.current || 14,
-          bold: textBoldRef.current || false,
-          italic: textItalicRef.current || false,
-        });
-        attachPrim(textPrim);
-        primitivesRef.current.push(textPrim);
-
-        // Immediately open text editor
-        startTextEditing(textPrim);
-
-        e.preventDefault();
-        e.stopPropagation();
-        return;
+        if (placeTextDrawing({
+          pos, e, primitivesRef, attachPrim, startTextEditing, screenToDrawingData,
+          drawingSnapEnabledRef, penColorRef, textFontSizeRef, textBoldRef, textItalicRef,
+        })) return;
       }
 
       // ── POSITION TOOLS ──
@@ -809,100 +654,22 @@ export function useDrawing({
         }
 
         // Place new position: click sets entry price
-        const dataA = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
-        if (!dataA) return;
-
-        const entryPrice = dataA.price;
-
-        // Calculate visible time range to auto-span ~30% of visible chart
-        const adapter = getChartAdapter();
-        let startTime = dataA.time;
-        let endTime = dataA.time;
-        if (adapter?.isReady?.()) {
-          const vr = adapter.getVisibleTimeRange?.();
-          if (vr) {
-            const visibleSpan = vr.to - vr.from;
-            endTime = dataA.time + visibleSpan * 0.15;
-          }
-        }
-
-        // Default TP/SL based on visible price range — ensures proper proportions on any timeframe
-        let tpOffset, slOffset;
-        if (adapter?.isReady?.()) {
-          try {
-            // Get the visible price range from the chart container's pixel height
-            const container = chartContainerRef?.current;
-            const chartHeight = container?.clientHeight || 400;
-            const visiblePriceRange = adapter.getVisiblePriceRange?.(chartHeight);
-            if (visiblePriceRange != null && isFinite(visiblePriceRange)) {
-              tpOffset = visiblePriceRange * 0.12;  // TP at ~12% of visible range
-              slOffset = visiblePriceRange * 0.06;   // SL at ~6% of visible range
-            }
-          } catch { /* fallback below */ }
-        }
-        // Fallback if we couldn't determine visible range
-        if (!tpOffset) tpOffset = entryPrice * 0.03;
-        if (!slOffset) slOffset = entryPrice * 0.015;
-
-        const posPrim = createPositionPrimitive({
-          tool,
-          dataPoint: dataA,
-          timeRange: { start: startTime, end: endTime },
-          tpOffset,
-          slOffset,
-          positionSize: positionSizeRef.current || 1000,
-        });
-
-        attachPrim(posPrim);
-        primitivesRef.current.push(posPrim);
-        selectPrimitive(posPrim.id);
-        persistDrawings();
-
-        e.preventDefault();
-        e.stopPropagation();
-        return;
+        if (placePositionDrawing({
+          tool, pos, e, primitivesRef, attachPrim, selectPrimitive, persistDrawings,
+          screenToDrawingData, getChartAdapter, chartContainerRef, drawingSnapEnabledRef, positionSizeRef,
+        })) return;
       }
 
       // ── LINE/FIB/SHAPE TOOLS ──
       if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool) || SHAPE_TOOL_IDS.has(tool)) {
         const isAxisLineTool = AXIS_LINE_TOOL_IDS.has(tool);
-        const isShapeDrawingTool = SHAPE_TOOL_IDS.has(tool);
-        const shapeType = shapeTypeFromTool(tool);
 
         // Second click — commit new line/fib/shape
-        if (!isAxisLineTool && anchorDataRef.current && previewRef.current) {
-          let targetPos = pos;
-          if (isShapeDrawingTool && e.shiftKey) {
-            const anchorScreen = dataToScreen(anchorDataRef.current);
-            targetPos = constrainShapeScreenPoint(anchorScreen, pos);
-          }
-          const dataB = screenToDrawingData(targetPos.x, targetPos.y, { snap: drawingSnapEnabledRef.current && !e.altKey && !(isShapeDrawingTool && e.shiftKey) });
-          if (!dataB) return;
-
-          // Remove preview
-          detachPrim(previewRef.current);
-          previewRef.current = null;
-
-          const finalPrim = createTwoPointDrawingPrimitive({
-            tool,
-            shapeType: isShapeDrawingTool ? shapeType : null,
-            dataPoints: [anchorDataRef.current, dataB],
-            color: penColorRef.current,
-            lineWidth: penSizeRef.current,
-            fibLevels: fibLevelsRef.current,
-            fibInverted: fibInvertedRef.current,
-          });
-          attachPrim(finalPrim);
-          primitivesRef.current.push(finalPrim);
-
-          anchorDataRef.current = null;
-          selectPrimitive(finalPrim.id);
-          persistDrawings();
-
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
+        if (commitTwoPointDrawing({
+          tool, pos, e, primitivesRef, anchorDataRef, previewRef, attachPrim, detachPrim,
+          selectPrimitive, persistDrawings, screenToDrawingData, dataToScreen, drawingSnapEnabledRef,
+          penColorRef, penSizeRef, fibLevelsRef, fibInvertedRef,
+        })) return;
 
         // Hit existing element?
         const hit = hitTestAll(pos.x, pos.y);
@@ -974,62 +741,20 @@ export function useDrawing({
 
         // One-point axis lines: click creates immediately; drag before mouseup adjusts it.
         if (isAxisLineTool) {
-          if (anchorDataRef.current || previewRef.current) {
-            removePreview();
-          }
-          const axisLineType = axisLineTypeFromTool(tool);
-          const dataA = screenToDrawingData(pos.x, pos.y, {
-            snap: drawingSnapEnabledRef.current && !e.altKey,
-            time: axisLineType !== "horizontal",
-            price: axisLineType !== "vertical",
-          });
-          if (!dataA) return;
-
-          const axisPrim = createAxisLinePrimitive({
-            axisLineType,
-            dataPoint: dataA,
-            color: penColorRef.current,
-            lineWidth: penSizeRef.current,
-          });
-          attachPrim(axisPrim);
-          primitivesRef.current.push(axisPrim);
-          selectPrimitive(axisPrim.id);
-          draggingRef.current = {
-            id: axisPrim.id,
-            type: "axis-line",
-            zone: "center",
-            startMouse: pos,
-            origDataPoint: { ...dataA },
-          };
-
-          e.preventDefault();
-          e.stopPropagation();
-          return;
+          if (beginAxisLineDrawing({
+            tool, pos, e, primitivesRef, anchorDataRef, previewRef, draggingRef, attachPrim,
+            selectPrimitive, removePreview, screenToDrawingData, drawingSnapEnabledRef, penColorRef, penSizeRef,
+          })) return;
         }
 
         // First click — set anchor
-        const dataA = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
-        if (!dataA) return;
-        anchorDataRef.current = dataA;
-
-        const preview = createPreviewPrimitive({
-          tool,
-          shapeType: isShapeDrawingTool ? shapeType : null,
-          dataPoint: dataA,
-          color: penColorRef.current,
-          lineWidth: penSizeRef.current,
-          fibLevels: fibLevelsRef.current,
-          fibInverted: fibInvertedRef.current,
-        });
-        previewRef.current = preview;
-        attachPrim(preview);
-
-        e.preventDefault();
-        e.stopPropagation();
-        return;
+        if (beginTwoPointDrawing({
+          tool, pos, e, anchorDataRef, previewRef, attachPrim, screenToDrawingData,
+          drawingSnapEnabledRef, penColorRef, penSizeRef, fibLevelsRef, fibInvertedRef,
+        })) return;
       }
     },
-    [getChartPos, screenToData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef],
+    [getChartPos, screenToData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi],
   );
 
   // ════════════════════════════════════════════════════
@@ -1078,189 +803,19 @@ export function useDrawing({
         return;
       }
 
-      // ── TEXT TOOL: 8-handle resize drag (corners = scale, sides = wrap width) ──
-      if (draggingRef.current && draggingRef.current.type === "text-handle") {
-        const { id, handle, startMouse, origBox, origFontSize, origWidthPx, origDataPoint } = draggingRef.current;
-        const prim = primitivesRef.current.find((p) => p.id === id);
-        if (!prim || !(prim instanceof TextDrawingPrimitive)) return;
-
-        const dx = pos.x - startMouse.x;
-        const dy = pos.y - startMouse.y;
-
-        // Side handles ( l / r ): change widthPx, anchor the opposite vertical edge.
-        if (handle === "l" || handle === "r") {
-          let newWidth;
-          let anchorScreenX;
-          if (handle === "r") {
-            newWidth = Math.max(20, origBox.width + dx);
-            anchorScreenX = origBox.x; // left edge stays
-          } else {
-            newWidth = Math.max(20, origBox.width - dx);
-            anchorScreenX = origBox.x + origBox.width - newWidth; // shift left edge to follow mouse
-          }
-          prim.setWidthPx(newWidth);
-          if (handle === "l") {
-            const newDp = screenToData(anchorScreenX, origBox.y);
-            if (newDp) prim.setDataPoint(newDp);
-          }
-          refreshSelectedTextUi(id);
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
-
-        // Top / bottom handles ( t / b ): adjust font height proportionally.
-        if (handle === "t" || handle === "b") {
-          let scale;
-          if (handle === "b") scale = (origBox.height + dy) / origBox.height;
-          else scale = (origBox.height - dy) / origBox.height;
-          if (!isFinite(scale)) return;
-          scale = Math.max(0.2, Math.min(8, scale));
-          const newSize = Math.max(8, Math.min(200, Math.round(origFontSize * scale)));
-          prim.setFontSize(newSize);
-          if (origWidthPx) prim.setWidthPx(Math.max(20, origWidthPx * scale));
-          if (handle === "t") {
-            // Top edge moves with cursor; bottom stays.
-            const newBoxH = origBox.height * scale;
-            const newAnchorY = origBox.y + origBox.height - newBoxH;
-            const newDp = screenToData(origBox.x, newAnchorY);
-            if (newDp) prim.setDataPoint({ ...newDp, time: origDataPoint.time });
-          }
-          refreshSelectedTextUi(id);
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
-
-        // Corner handles: equi-scale font + width using the larger of the two
-        // axis ratios so the box visually follows the mouse on the chosen corner.
-        // The opposite corner stays anchored.
-        let signX = 0, signY = 0;
-        if (handle === "tl") { signX = -1; signY = -1; }
-        if (handle === "tr") { signX =  1; signY = -1; }
-        if (handle === "bl") { signX = -1; signY =  1; }
-        if (handle === "br") { signX =  1; signY =  1; }
-        const scaleX = (origBox.width + signX * dx) / origBox.width;
-        const scaleY = (origBox.height + signY * dy) / origBox.height;
-        let scale = Math.max(scaleX, scaleY);
-        if (!isFinite(scale)) return;
-        scale = Math.max(0.2, Math.min(8, scale));
-
-        const newSize = Math.max(8, Math.min(200, Math.round(origFontSize * scale)));
-        prim.setFontSize(newSize);
-        if (origWidthPx) prim.setWidthPx(Math.max(20, origWidthPx * scale));
-
-        // Recompute new box top-left so the opposite corner stays put.
-        const newW = origBox.width * scale;
-        const newH = origBox.height * scale;
-        let newAnchorX = origBox.x;
-        let newAnchorY = origBox.y;
-        if (handle === "tl") { newAnchorX = origBox.x + origBox.width - newW; newAnchorY = origBox.y + origBox.height - newH; }
-        if (handle === "tr") { newAnchorY = origBox.y + origBox.height - newH; }
-        if (handle === "bl") { newAnchorX = origBox.x + origBox.width - newW; }
-        // 'br' keeps anchor unchanged
-        if (newAnchorX !== origBox.x || newAnchorY !== origBox.y) {
-          const newDp = screenToData(newAnchorX, newAnchorY);
-          if (newDp) prim.setDataPoint(newDp);
-        }
-        refreshSelectedTextUi(id);
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-
-      // ── TEXT TOOL: dragging body ──
-      if (draggingRef.current && draggingRef.current.type === "text") {
-        const { id, startMouse, origDataPoint } = draggingRef.current;
-        const prim = primitivesRef.current.find((p) => p.id === id);
-        if (!prim || !(prim instanceof TextDrawingPrimitive)) return;
-
-        const dx = pos.x - startMouse.x;
-        const dy = pos.y - startMouse.y;
-        const origScreen = dataToScreen(origDataPoint);
-        if (!origScreen) return;
-        const newData = screenToDrawingData(origScreen.x + dx, origScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
-        if (!newData) return;
-        prim.setDataPoint(newData);
-        refreshSelectedTextUi(id);
-
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-
-      // ── POSITION TOOL: dragging TP/SL/entry/edges/info panel ──
-      if (draggingRef.current && (draggingRef.current.type === "position-tp" || draggingRef.current.type === "position-sl" || draggingRef.current.type === "position-move" || draggingRef.current.type === "position-left" || draggingRef.current.type === "position-right" || draggingRef.current.type === "position-panel")) {
-        const { id, type } = draggingRef.current;
-        const prim = primitivesRef.current.find((p) => p.id === id);
-        if (!prim || !(prim instanceof PositionDrawingPrimitive)) return;
-
-        if (type === "position-panel") {
-          const { startMouse, origInfoPanelOffset } = draggingRef.current;
-          prim.setInfoPanelOffset({
-            x: origInfoPanelOffset.x + (pos.x - startMouse.x),
-            y: origInfoPanelOffset.y + (pos.y - startMouse.y),
-          });
-          setCursor(chartContainerRef?.current, "grabbing");
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
-
-        const dataPoint = type === "position-move"
-          ? screenToData(pos.x, pos.y)
-          : screenToDrawingData(pos.x, pos.y, {
-              snap: drawingSnapEnabledRef.current && !e.altKey,
-              time: type === "position-left" || type === "position-right",
-              price: type !== "position-left" && type !== "position-right",
-            });
-        if (!dataPoint) return;
-
-        if (type === "position-tp") {
-          const isLong = prim.direction === "long";
-          let newTp = dataPoint.price;
-          // Clamp: TP cannot cross entry
-          if (isLong) newTp = Math.max(newTp, prim.entryPrice);
-          else newTp = Math.min(newTp, prim.entryPrice);
-          prim.setTpPrice(newTp);
-        } else if (type === "position-sl") {
-          const isLong = prim.direction === "long";
-          let newSl = dataPoint.price;
-          // Clamp: SL cannot cross entry
-          if (isLong) newSl = Math.min(newSl, prim.entryPrice);
-          else newSl = Math.max(newSl, prim.entryPrice);
-          prim.setSlPrice(newSl);
-        } else if (type === "position-left") {
-          // Drag left edge: update timeRange.start
-          prim.setTimeRange({ ...prim.timeRange, start: dataPoint.time });
-        } else if (type === "position-right") {
-          // Drag right edge: update timeRange.end
-          prim.setTimeRange({ ...prim.timeRange, end: dataPoint.time });
-        } else if (type === "position-move") {
-          const { origEntry, origTp, origSl, startMouse: sm, origTimeRange } = draggingRef.current;
-          const dy = pos.y - sm.y;
-          const dx = pos.x - sm.x;
-          // Convert dy to price difference
-          const origScreen = dataToScreen({ time: origTimeRange.start, price: origEntry });
-          if (origScreen) {
-            const newEntryData = screenToDrawingData(origScreen.x + dx, origScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
-            if (newEntryData) {
-              const priceDelta = newEntryData.price - origEntry;
-              prim.setEntryPrice(origEntry + priceDelta);
-              if (origTp != null) prim.setTpPrice(origTp + priceDelta);
-              if (origSl != null) prim.setSlPrice(origSl + priceDelta);
-              // Also shift time range horizontally
-              const timeDelta = newEntryData.time - origTimeRange.start;
-              prim.setTimeRange({
-                start: origTimeRange.start + timeDelta,
-                end: origTimeRange.end + timeDelta,
-              });
-            }
-          }
-        }
-
-        e.preventDefault();
-        e.stopPropagation();
+      // ── Drag/resize of existing text & position drawings (extracted) ──
+      if (applyTextAndPositionDrag({
+        dragging: draggingRef.current,
+        pos,
+        e,
+        primitivesRef,
+        screenToData,
+        dataToScreen,
+        screenToDrawingData,
+        refreshSelectedTextUi,
+        drawingSnapEnabledRef,
+        chartContainerRef,
+      })) {
         return;
       }
 
@@ -1268,109 +823,23 @@ export function useDrawing({
       if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool) || SHAPE_TOOL_IDS.has(tool)) {
         // Dragging
         if (draggingRef.current) {
-          const { id, type, pointIndex, startMouse, origPoints, origDataPoint, zone, origBox } = draggingRef.current;
-          const prim = primitivesRef.current.find((p) => p.id === id);
-          if (!prim) return;
-
-          if (type === "text" && prim instanceof TextDrawingPrimitive) {
-            const dx = pos.x - startMouse.x;
-            const dy = pos.y - startMouse.y;
-            const origScreen = dataToScreen(origDataPoint);
-            if (!origScreen) return;
-            const newData = screenToDrawingData(origScreen.x + dx, origScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
-            if (!newData) return;
-            prim.setDataPoint(newData);
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
-
-          if (type === "axis-line" && prim instanceof AxisLineDrawingPrimitive) {
-            const axisLineType = prim.axisLineType;
-            const dataPoint = screenToDrawingData(pos.x, pos.y, {
-              snap: drawingSnapEnabledRef.current && !e.altKey,
-              time: axisLineType !== "horizontal",
-              price: axisLineType !== "vertical",
-            });
-            if (!dataPoint) return;
-            const basePoint = origDataPoint || prim.dataPoint || dataPoint;
-            let nextPoint = dataPoint;
-            if (axisLineType === "horizontal") {
-              nextPoint = { ...basePoint, price: dataPoint.price };
-            } else if (axisLineType === "vertical") {
-              nextPoint = { ...basePoint, time: dataPoint.time, logical: dataPoint.logical };
-            }
-            prim.setDataPoint(nextPoint);
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
-
-          if (type === "shape" && prim instanceof ShapeDrawingPrimitive) {
-            if (zone && zone !== "body" && origBox) {
-              const nextBox = resizedShapeBoxFromHandle(origBox, zone, pos);
-              if (!nextBox) return;
-              const newA = screenToData(nextBox.x, nextBox.y);
-              const newB = screenToData(nextBox.x + nextBox.width, nextBox.y + nextBox.height);
-              if (!newA || !newB) return;
-              prim.setDataPoints([newA, newB]);
-            } else {
-              const dx = pos.x - startMouse.x;
-              const dy = pos.y - startMouse.y;
-              const sa0 = dataToScreen(origPoints[0]);
-              const sb0 = dataToScreen(origPoints[1]);
-              if (!sa0 || !sb0) return;
-              const newA = screenToData(sa0.x + dx, sa0.y + dy);
-              const newB = screenToData(sb0.x + dx, sb0.y + dy);
-              if (!newA || !newB) return;
-              prim.setDataPoints([newA, newB]);
-            }
-
-            e.preventDefault();
-            e.stopPropagation();
-            return;
-          }
-
-          if (!(prim instanceof LineDrawingPrimitive) && !(prim instanceof FibonacciDrawingPrimitive) && !(prim instanceof AngleMeasurementPrimitive)) return;
-
-          if (pointIndex >= 0) {
-            // Drag single endpoint
-            const newData = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
-            if (!newData) return;
-            const newPoints = [...prim.dataPoints];
-            newPoints[pointIndex] = newData;
-            prim.setDataPoints(newPoints);
-          } else {
-            // Move entire line
-            const dx = pos.x - startMouse.x;
-            const dy = pos.y - startMouse.y;
-            const sa0 = dataToScreen(origPoints[0]);
-            const sb0 = dataToScreen(origPoints[1]);
-            if (!sa0 || !sb0) return;
-            const newA = screenToData(sa0.x + dx, sa0.y + dy);
-            const newB = screenToData(sb0.x + dx, sb0.y + dy);
-            if (!newA || !newB) return;
-            prim.setDataPoints([newA, newB]);
-          }
-
-          e.preventDefault();
-          e.stopPropagation();
+          applyLineFibShapeDrag({
+            dragging: draggingRef.current,
+            pos,
+            e,
+            primitivesRef,
+            screenToData,
+            dataToScreen,
+            screenToDrawingData,
+            drawingSnapEnabledRef,
+          });
           return;
         }
 
         // Preview line: update second point
-        if (anchorDataRef.current && previewRef.current) {
-          let targetPos = pos;
-          if (SHAPE_TOOL_IDS.has(tool) && e.shiftKey) {
-            const anchorScreen = dataToScreen(anchorDataRef.current);
-            targetPos = constrainShapeScreenPoint(anchorScreen, pos);
-          }
-          const dataB = screenToDrawingData(targetPos.x, targetPos.y, { snap: drawingSnapEnabledRef.current && !e.altKey && !(SHAPE_TOOL_IDS.has(tool) && e.shiftKey) });
-          if (dataB) {
-            previewRef.current.setDataPoints([anchorDataRef.current, dataB]);
-          }
-          return;
-        }
+        if (updateTwoPointPreview({
+          tool, pos, e, anchorDataRef, previewRef, screenToDrawingData, dataToScreen, drawingSnapEnabledRef,
+        })) return;
 
         // Hover feedback on lines, fibs and text
         const hit = hitTestAll(pos.x, pos.y);
@@ -1521,42 +990,21 @@ export function useDrawing({
     [removePreview],
   );
 
-  // ── KEYBOARD: Escape / Delete ──
+  // ── KEYBOARD: Escape / Delete (extracted) ──
 
-  useEffect(() => {
-    if (!isLineTool && !isFibTool && !isShapeTool && !isPenTool && !isHighlighterTool && !isEraserTool && !isTextTool && !isPositionTool && !selectedPrimId && !editingTextId) return;
-
-    const handleKeyDown = (e) => {
-      // Don't intercept if editing text
-      if (editingTextIdRef.current) return;
-
-      if (e.key === "Escape") {
-        if (anchorDataRef.current) {
-          removePreview();
-        } else if (selectedIdRef.current) {
-          deselectAll();
-        }
-      }
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedIdRef.current) {
-        // Don't delete if focused on an input
-        if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return;
-
-        const id = selectedIdRef.current;
-        const idx = primitivesRef.current.findIndex((p) => p.id === id);
-        if (idx >= 0) {
-          detachPrim(primitivesRef.current[idx]);
-          primitivesRef.current.splice(idx, 1);
-          persistDrawings();
-        }
-        selectedIdRef.current = null;
-        setSelectedPrimId(null);
-        setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, selectedPrimId, editingTextId, removePreview, deselectAll, detachPrim, persistDrawings]);
+  useDrawingKeyboard({
+    active: isLineTool || isFibTool || isShapeTool || isPenTool || isHighlighterTool || isEraserTool || isTextTool || isPositionTool || !!selectedPrimId || !!editingTextId,
+    anchorDataRef,
+    selectedIdRef,
+    editingTextIdRef,
+    primitivesRef,
+    removePreview,
+    deselectAll,
+    detachPrim,
+    persistDrawings,
+    setSelectedPrimId,
+    setSelectedTextUi,
+  });
 
   // ── Clean up when tool changes ──
 
@@ -1590,7 +1038,7 @@ export function useDrawing({
         prim.setHovered(false);
       }
     }
-  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing]);
+  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing, selectedIdRef]);
 
   useDrawingPointerEvents({
     chartContainerRef,
@@ -1619,7 +1067,7 @@ export function useDrawing({
     currentFreehandRef.current = null;
     cancelTextEditing();
     clearSavedDrawings(symbolRef.current);
-  }, [detachPrim, removePreview, cancelTextEditing]);
+  }, [detachPrim, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi]);
 
   /**
    * Toggle visibility of all drawings without deleting them.
@@ -1645,6 +1093,7 @@ export function useDrawing({
       if (typeof prim.setHidden === "function") {
         prim.setHidden(value, false);
       } else {
+        // eslint-disable-next-line react-hooks/immutability -- mutating the primitive object, not the ref container
         prim._hidden = value;
       }
       if (!updateRequested && typeof prim.requestUpdate === "function" && prim._series) {
@@ -1676,7 +1125,7 @@ export function useDrawing({
       refreshSelectedTextUi(id);
       persistDrawings();
     }
-  }, [getPrimitiveById, refreshSelectedTextUi, persistDrawings]);
+  }, [getPrimitiveById, refreshSelectedTextUi, persistDrawings, selectedIdRef]);
 
   /** Delete the currently selected primitive (any type). */
   const deleteSelected = useCallback(() => {
@@ -1690,7 +1139,7 @@ export function useDrawing({
     setSelectedPrimId(null);
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     persistDrawings();
-  }, [detachPrim, persistDrawings]);
+  }, [detachPrim, persistDrawings, selectedIdRef, setSelectedPrimId, setSelectedTextUi]);
 
   /**
    * Update the color and/or lineWidth of the currently selected
@@ -1719,7 +1168,7 @@ export function useDrawing({
       setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(prim));
       persistDrawings();
     }
-  }, [persistDrawings]);
+  }, [persistDrawings, selectedIdRef, setSelectedDrawingMeta]);
 
   const selectedTextSnapshot = selectedTextUi.snapshot;
   const selectedTextBox = selectedTextUi.box;

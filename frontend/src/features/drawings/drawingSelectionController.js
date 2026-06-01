@@ -6,6 +6,7 @@ import { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
 import { PositionDrawingPrimitive } from "./primitives/PositionDrawingPrimitive.js";
 import { ShapeDrawingPrimitive } from "./primitives/ShapeDrawingPrimitive.js";
 import { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export const EMPTY_SELECTED_TEXT_UI = { snapshot: null, box: null };
 
@@ -100,4 +101,83 @@ export function hitTestDrawingPrimitives(primitives, x, y, hitRadius = 8) {
     }
   }
   return null;
+}
+
+/**
+ * useDrawingSelection — selection state + selection lifecycle.
+ *
+ * Owns which primitive is currently selected and keeps the toolbar-facing
+ * derived state (selectedTextUi for the floating text toolbar, selectedDrawingMeta
+ * for the style editor) in sync. Extracted from the main interaction controller
+ * so selection ownership lives in one place; the host controller asks this hook
+ * to select / deselect a primitive after its own hit-testing.
+ */
+export function useDrawingSelection({ primitivesRef }) {
+  const selectedIdRef = useRef(null);
+  const [selectedPrimId, setSelectedPrimId] = useState(null);
+  const [selectedTextUi, setSelectedTextUi] = useState(EMPTY_SELECTED_TEXT_UI);
+  const [selectedDrawingMeta, setSelectedDrawingMeta] = useState(null);
+
+  // Whenever the selection is cleared from any of the many code paths that
+  // touch `selectedPrimId`, also drop the toolbar-facing meta so the style
+  // editor goes away. selectPrimitive() sets meta directly, so this only
+  // needs to handle the deselect case.
+  useEffect(() => {
+    if (selectedPrimId == null) {
+      setSelectedDrawingMeta(null);
+    }
+  }, [selectedPrimId]);
+
+  const selectPrimitive = useCallback((id) => {
+    selectedIdRef.current = id;
+    setSelectedPrimId(id);
+    let selectedPrim = null;
+    for (const prim of primitivesRef.current) {
+      if (isSelectablePrimitive(prim)) {
+        prim.setSelected(prim.id === id);
+        if (prim.id === id) selectedPrim = prim;
+      }
+    }
+    if (!selectedPrim) {
+      // Freehand strokes don't have setSelected; locate by id directly
+      selectedPrim = primitivesRef.current.find((p) => p.id === id) || null;
+    }
+    setSelectedTextUi(selectedTextUiFromPrimitive(selectedPrim));
+    setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(selectedPrim));
+  }, [primitivesRef]);
+
+  const deselectAll = useCallback(() => {
+    selectedIdRef.current = null;
+    setSelectedPrimId(null);
+    setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
+    setSelectedDrawingMeta(null);
+    for (const prim of primitivesRef.current) {
+      if (isSelectablePrimitive(prim)) {
+        prim.setSelected(false);
+      }
+    }
+  }, [primitivesRef]);
+
+  const getPrimitiveById = useCallback((id) => {
+    return primitivesRef.current.find((p) => p.id === id) || null;
+  }, [primitivesRef]);
+
+  const refreshSelectedTextUi = useCallback((id = selectedIdRef.current) => {
+    const prim = id ? primitivesRef.current.find((p) => p.id === id) : null;
+    setSelectedTextUi(selectedTextUiFromPrimitive(prim));
+  }, [primitivesRef]);
+
+  return {
+    selectedIdRef,
+    selectedPrimId,
+    selectedTextUi,
+    selectedDrawingMeta,
+    setSelectedPrimId,
+    setSelectedTextUi,
+    setSelectedDrawingMeta,
+    selectPrimitive,
+    deselectAll,
+    getPrimitiveById,
+    refreshSelectedTextUi,
+  };
 }

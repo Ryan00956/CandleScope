@@ -1,0 +1,108 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  isPassiveCursorTool,
+  cursorStyleForPassiveTool,
+  isFiniteNumber,
+  shapeTypeFromTool,
+  axisLineTypeFromTool,
+  constrainShapeScreenPoint,
+  resizedShapeBoxFromHandle,
+  decimateScreenPoints,
+  nextDrawingId,
+} from "../drawingModel.js";
+
+test("isPassiveCursorTool treats empty and cursor tools as passive", () => {
+  assert.equal(isPassiveCursorTool(""), true);
+  assert.equal(isPassiveCursorTool(null), true);
+  assert.equal(isPassiveCursorTool("cursor-default"), true);
+  assert.equal(isPassiveCursorTool("cursor-crosshair"), true);
+  assert.equal(isPassiveCursorTool("pen"), false);
+  assert.equal(isPassiveCursorTool("text"), false);
+});
+
+test("cursorStyleForPassiveTool maps tools to CSS cursors", () => {
+  assert.equal(cursorStyleForPassiveTool("cursor-crosshair"), "crosshair");
+  assert.equal(cursorStyleForPassiveTool("cursor-dot"), "none");
+  assert.equal(cursorStyleForPassiveTool("cursor-highlighter"), "none");
+  assert.equal(cursorStyleForPassiveTool("cursor-default"), "default");
+  assert.equal(cursorStyleForPassiveTool("anything-else"), "default");
+});
+
+test("isFiniteNumber accepts only finite numbers", () => {
+  assert.equal(isFiniteNumber(0), true);
+  assert.equal(isFiniteNumber(-3.5), true);
+  assert.equal(isFiniteNumber(NaN), false);
+  assert.equal(isFiniteNumber(Infinity), false);
+  assert.equal(isFiniteNumber("5"), false);
+  assert.equal(isFiniteNumber(null), false);
+});
+
+test("shapeTypeFromTool resolves shape tools", () => {
+  assert.equal(shapeTypeFromTool("shape-ellipse"), "ellipse");
+  assert.equal(shapeTypeFromTool("shape-rectangle"), "rectangle");
+  assert.equal(shapeTypeFromTool("line-segment"), null);
+});
+
+test("axisLineTypeFromTool resolves axis line orientation", () => {
+  assert.equal(axisLineTypeFromTool("line-vertical"), "vertical");
+  assert.equal(axisLineTypeFromTool("line-cross"), "cross");
+  assert.equal(axisLineTypeFromTool("line-horizontal"), "horizontal");
+  assert.equal(axisLineTypeFromTool("whatever"), "horizontal");
+});
+
+test("constrainShapeScreenPoint produces a square offset from anchor", () => {
+  const anchor = { x: 100, y: 100 };
+  // dx larger than dy -> snaps to dx magnitude, preserving signs
+  assert.deepEqual(constrainShapeScreenPoint(anchor, { x: 160, y: 120 }), { x: 160, y: 160 });
+  // negative direction preserved
+  assert.deepEqual(constrainShapeScreenPoint(anchor, { x: 70, y: 40 }), { x: 40, y: 40 });
+  // missing args returns pointer unchanged
+  const p = { x: 1, y: 2 };
+  assert.equal(constrainShapeScreenPoint(null, p), p);
+});
+
+test("resizedShapeBoxFromHandle resizes from the correct edges with a minimum size", () => {
+  const box = { x: 10, y: 10, width: 100, height: 100 };
+  const resized = resizedShapeBoxFromHandle(box, "br", { x: 200, y: 150 });
+  assert.deepEqual(resized, { x: 10, y: 10, width: 190, height: 140 });
+
+  // dragging the right handle in(ward) past the left edge clamps to minSize
+  const clamped = resizedShapeBoxFromHandle(box, "r", { x: 11 });
+  assert.equal(clamped.width, 4);
+
+  assert.equal(resizedShapeBoxFromHandle(null, "br", { x: 0, y: 0 }), null);
+});
+
+test("decimateScreenPoints removes near-collinear interior points", () => {
+  const straight = [
+    { x: 0, y: 0 },
+    { x: 5, y: 0 },
+    { x: 10, y: 0 },
+  ];
+  assert.deepEqual(decimateScreenPoints(straight, 1), [
+    { x: 0, y: 0 },
+    { x: 10, y: 0 },
+  ]);
+
+  // a sharp deviation must be preserved
+  const peak = [
+    { x: 0, y: 0 },
+    { x: 5, y: 50 },
+    { x: 10, y: 0 },
+  ];
+  assert.deepEqual(decimateScreenPoints(peak, 1), peak);
+
+  // two-or-fewer points pass through untouched
+  const pair = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+  assert.equal(decimateScreenPoints(pair, 1), pair);
+});
+
+test("nextDrawingId returns unique, prefixed, increasing ids", () => {
+  const a = nextDrawingId("d");
+  const b = nextDrawingId("d");
+  assert.notEqual(a, b);
+  assert.match(a, /^d_\d+$/);
+  assert.match(nextDrawingId("preview"), /^preview_\d+$/);
+});

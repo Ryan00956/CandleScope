@@ -13,7 +13,7 @@
  *   - Hit-testing for eraser deletion
  */
 
-import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 const DEFAULT_HIGHLIGHTER_OPACITY = 0.35;
 const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION = "multiply";
@@ -155,7 +155,7 @@ class FreehandPaneView {
         }
       }
       if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
@@ -178,7 +178,7 @@ class FreehandPaneView {
   }
 
   zOrder() {
-    return "normal";
+    return "top";
   }
 }
 
@@ -328,7 +328,7 @@ export class FreehandDrawingPrimitive {
         }
       }
       if ((sx == null || !isFinite(sx)) && dp.logical != null) {
-        sx = timeScale.logicalToCoordinate(dp.logical);
+        sx = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       const sy = this._series.priceToCoordinate(dp.price);
       if (sx != null && sy != null) {

@@ -1,4 +1,4 @@
-import { timeToCoordinateInterpolated } from "./coordinateBridge.js";
+import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateBridge.js";
 
 function getRefValue(refOrValue) {
   return refOrValue && typeof refOrValue === "object" && "current" in refOrValue
@@ -26,8 +26,10 @@ export function createLightweightChartAdapter({ chartRef, seriesRef }) {
     attachPrimitive: (primitive) => {
       const series = getSeries();
       if (!series || !primitive) return false;
-      safeCall(() => series.attachPrimitive(primitive), null);
-      return true;
+      return safeCall(() => {
+        series.attachPrimitive(primitive);
+        return true;
+      }, false);
     },
     detachPrimitive: (primitive) => {
       if (!primitive) return false;
@@ -54,6 +56,10 @@ export function createLightweightChartAdapter({ chartRef, seriesRef }) {
     coordinateToTime: (x) => safeCall(() => getChart()?.timeScale().coordinateToTime(x), null),
     coordinateToLogical: (x) => safeCall(() => getChart()?.timeScale().coordinateToLogical(x), null),
     logicalToCoordinate: (logical) => safeCall(() => getChart()?.timeScale().logicalToCoordinate(logical), null),
+    logicalToCoordinateInterpolated: (logical) => safeCall(
+      () => logicalToCoordinateInterpolated(getChart()?.timeScale(), logical),
+      null,
+    ),
     getBarSpacing: () => safeCall(() => getChart()?.timeScale().options?.().barSpacing, null),
     getVisibleTimeRange: () => safeCall(() => getChart()?.timeScale().getVisibleRange(), null),
     getVisibleRange: () => safeCall(() => {

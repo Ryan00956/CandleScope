@@ -9,7 +9,7 @@
  *   - Inverted mode (first click = level 1 instead of level 0)
  */
 
-import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 export const DEFAULT_FIB_LEVELS = [
   { level: 0, color: "#787b86", enabled: true },
@@ -242,7 +242,7 @@ class FibPaneView {
         }
       }
       if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
@@ -268,7 +268,7 @@ class FibPaneView {
   }
 
   zOrder() {
-    return "normal";
+    return "top";
   }
 }
 
@@ -387,7 +387,7 @@ export class FibonacciDrawingPrimitive {
         }
       }
       if ((sx == null || !isFinite(sx)) && dp.logical != null) {
-        sx = timeScale.logicalToCoordinate(dp.logical);
+        sx = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       return { x: sx, y: this._series.priceToCoordinate(dp.price) };
     });

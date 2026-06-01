@@ -6,7 +6,7 @@
  * angle arc, and degree label are rendered in screen space.
  */
 
-import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 function isFiniteCoord(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -270,7 +270,7 @@ class AnglePaneView {
         }
       }
       if ((x == null || !Number.isFinite(x)) && dp.logical != null) {
-        x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
@@ -293,7 +293,7 @@ class AnglePaneView {
   }
 
   zOrder() {
-    return "normal";
+    return "top";
   }
 }
 
@@ -402,7 +402,7 @@ export class AngleMeasurementPrimitive {
         }
       }
       if ((x == null || !Number.isFinite(x)) && dp.logical != null) {
-        x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       const y = this._series.priceToCoordinate(dp.price);
       if (!isFiniteCoord(x) || !isFiniteCoord(y)) return null;

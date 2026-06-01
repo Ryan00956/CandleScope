@@ -29,28 +29,48 @@ export function useDrawingPointerEvents({
     const container = chartContainerRef?.current;
     if (!container) return undefined;
 
-    container.addEventListener("mousedown", handleMouseDown, true);
-    document.addEventListener("mousemove", handleMouseMove, true);
-    document.addEventListener("mouseup", handleMouseUp, true);
-    container.addEventListener("mouseleave", handleMouseLeave);
+    const supportsPointerEvents = typeof window !== "undefined" && "PointerEvent" in window;
+
+    if (supportsPointerEvents) {
+      container.addEventListener("pointerdown", handleMouseDown, true);
+      document.addEventListener("pointermove", handleMouseMove, true);
+      document.addEventListener("pointerup", handleMouseUp, true);
+      document.addEventListener("pointercancel", handleMouseUp, true);
+      container.addEventListener("pointerleave", handleMouseLeave);
+    } else {
+      container.addEventListener("mousedown", handleMouseDown, true);
+      document.addEventListener("mousemove", handleMouseMove, true);
+      document.addEventListener("mouseup", handleMouseUp, true);
+      container.addEventListener("mouseleave", handleMouseLeave);
+      container.addEventListener("touchstart", handleMouseDown, { passive: false, capture: true });
+      container.addEventListener("touchmove", handleMouseMove, { passive: false });
+      container.addEventListener("touchend", handleMouseUp);
+      container.addEventListener("touchcancel", handleMouseUp);
+    }
+
     container.addEventListener("dblclick", handleDblClick);
     container.addEventListener("contextmenu", handleContextMenu);
-    container.addEventListener("touchstart", handleMouseDown, { passive: false, capture: true });
-    container.addEventListener("touchmove", handleMouseMove, { passive: false });
-    container.addEventListener("touchend", handleMouseUp);
-    container.addEventListener("touchcancel", handleMouseUp);
 
     return () => {
-      container.removeEventListener("mousedown", handleMouseDown, true);
-      document.removeEventListener("mousemove", handleMouseMove, true);
-      document.removeEventListener("mouseup", handleMouseUp, true);
-      container.removeEventListener("mouseleave", handleMouseLeave);
+      if (supportsPointerEvents) {
+        container.removeEventListener("pointerdown", handleMouseDown, true);
+        document.removeEventListener("pointermove", handleMouseMove, true);
+        document.removeEventListener("pointerup", handleMouseUp, true);
+        document.removeEventListener("pointercancel", handleMouseUp, true);
+        container.removeEventListener("pointerleave", handleMouseLeave);
+      } else {
+        container.removeEventListener("mousedown", handleMouseDown, true);
+        document.removeEventListener("mousemove", handleMouseMove, true);
+        document.removeEventListener("mouseup", handleMouseUp, true);
+        container.removeEventListener("mouseleave", handleMouseLeave);
+        container.removeEventListener("touchstart", handleMouseDown, true);
+        container.removeEventListener("touchmove", handleMouseMove);
+        container.removeEventListener("touchend", handleMouseUp);
+        container.removeEventListener("touchcancel", handleMouseUp);
+      }
+
       container.removeEventListener("dblclick", handleDblClick);
       container.removeEventListener("contextmenu", handleContextMenu);
-      container.removeEventListener("touchstart", handleMouseDown, true);
-      container.removeEventListener("touchmove", handleMouseMove);
-      container.removeEventListener("touchend", handleMouseUp);
-      container.removeEventListener("touchcancel", handleMouseUp);
     };
   }, [
     chartContainerRef,

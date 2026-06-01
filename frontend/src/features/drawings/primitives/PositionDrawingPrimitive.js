@@ -625,7 +625,7 @@ class PositionPaneView {
   }
 
   zOrder() {
-    return "normal";
+    return "top";
   }
 }
 

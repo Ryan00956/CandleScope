@@ -15,7 +15,7 @@
  *   - Hover highlight for eraser tool
  */
 
-import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 // ── Word-wrap helper (CSS-px space) ──
 //
@@ -290,7 +290,7 @@ class TextPaneView {
   }
 
   renderer() { return this._renderer; }
-  zOrder() { return "normal"; }
+  zOrder() { return "top"; }
 }
 
 // ── The Primitive ──
@@ -442,7 +442,7 @@ export class TextDrawingPrimitive {
       }
     }
     if ((sx == null || !isFinite(sx)) && this._dataPoint.logical != null) {
-      sx = timeScale.logicalToCoordinate(this._dataPoint.logical);
+        sx = logicalToCoordinateInterpolated(timeScale, this._dataPoint.logical);
     }
     const sy = this._series.priceToCoordinate(this._dataPoint.price);
     if (sx == null || sy == null || !isFinite(sx) || !isFinite(sy)) return null;

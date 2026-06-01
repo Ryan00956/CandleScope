@@ -21,7 +21,11 @@ import { renderMarkers } from "../chart-adapter/markerRenderer";
 import { applyBarColors } from "../chart-adapter/barColorRenderer";
 import { renderBgcolorOverlay } from "../chart-adapter/bgcolorRenderer";
 import { createIndicatorSeries, removeSeriesEntries } from "../chart-adapter/seriesLifecycle";
-import { shouldLoadDrawingEngine } from "../features/drawings/drawingEngineLoader";
+import {
+    loadDrawingEngineHost,
+    preloadDrawingEngineHost,
+    shouldLoadDrawingEngine,
+} from "../features/drawings/drawingEngineLoader";
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
 import { recordPerfEvent } from "../runtime/performance/perfMarks";
 
@@ -901,9 +905,33 @@ const ChartPane = forwardRef(function ChartPane({
         shouldLoadDrawingEngine({ activeTool: drawingTool, drawingKey });
 
     useEffect(() => {
+        if (DrawingEngineHost || seriesReady <= 0 || !drawingAnchorReady) return undefined;
+
+        let cancelled = false;
+        const startPreload = () => {
+            if (cancelled) return;
+            preloadDrawingEngineHost();
+        };
+
+        if (typeof window.requestIdleCallback === "function") {
+            const idleId = window.requestIdleCallback(startPreload, { timeout: 1000 });
+            return () => {
+                cancelled = true;
+                window.cancelIdleCallback?.(idleId);
+            };
+        }
+
+        const timerId = window.setTimeout(startPreload, 250);
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timerId);
+        };
+    }, [DrawingEngineHost, drawingAnchorReady, seriesReady]);
+
+    useEffect(() => {
         if (!shouldMountDrawingEngine || DrawingEngineHost) return undefined;
         let cancelled = false;
-        import("../features/drawings/DrawingEngineHost").then((module) => {
+        loadDrawingEngineHost().then((module) => {
             if (!cancelled) setDrawingEngineHost(() => module.default);
         });
         return () => {
@@ -979,6 +1007,7 @@ const ChartPane = forwardRef(function ChartPane({
 
             {DrawingEngineHost && shouldMountDrawingEngine && (
                 <DrawingEngineHost
+                    key={`${drawingKey}:pointer-events`}
                     chartAdapter={chartAdapter}
                     chartContainerRef={containerRef}
                     activeTool={drawingTool}

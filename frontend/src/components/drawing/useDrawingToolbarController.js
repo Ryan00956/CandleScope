@@ -66,13 +66,10 @@ export function useDrawingToolbarController({ activeTool, onToolChange, onToggle
     setChartType(id);
   }, []);
 
-  const handleCursorClick = useCallback(() => {
-    if (cursorClickTimerRef.current) return;
-    cursorClickTimerRef.current = setTimeout(() => {
-      cursorClickTimerRef.current = null;
-      onToolChange(isCursorActive ? activeTool : cursorVariant);
-      setFlyoutOpen(null);
-    }, 200);
+  const handleCursorClick = useCallback((event) => {
+    if (event?.detail > 1) return;
+    onToolChange(isCursorActive ? activeTool : cursorVariant);
+    setFlyoutOpen(null);
   }, [activeTool, cursorVariant, isCursorActive, onToolChange]);
 
   const handleCursorDblClick = useCallback(() => {
@@ -100,11 +97,17 @@ export function useDrawingToolbarController({ activeTool, onToolChange, onToggle
     [onToolChange],
   );
 
-  const handleFreehandClick = useCallback(() => {
+  const handleFreehandClick = useCallback((event) => {
+    if (event?.detail > 1) return;
+    if (!isFreehandActive) {
+      onToolChange(freehandVariant);
+      setFlyoutOpen(null);
+      return;
+    }
     if (freehandClickTimerRef.current) return;
     freehandClickTimerRef.current = setTimeout(() => {
       freehandClickTimerRef.current = null;
-      onToolChange(isFreehandActive ? null : freehandVariant);
+      onToolChange(null);
       setFlyoutOpen(null);
     }, 200);
   }, [freehandVariant, isFreehandActive, onToolChange]);
@@ -161,11 +164,17 @@ export function useDrawingToolbarController({ activeTool, onToolChange, onToggle
     [handleToggleFibonacciSettings],
   );
 
-  const handleLineClick = useCallback(() => {
+  const handleLineClick = useCallback((event) => {
+    if (event?.detail > 1) return;
+    if (!isLineActive) {
+      onToolChange(lineVariant);
+      setFlyoutOpen(null);
+      return;
+    }
     if (clickTimerRef.current) return;
     clickTimerRef.current = setTimeout(() => {
       clickTimerRef.current = null;
-      onToolChange(isLineActive ? null : lineVariant);
+      onToolChange(null);
       setFlyoutOpen(null);
     }, 200);
   }, [isLineActive, lineVariant, onToolChange]);
@@ -195,11 +204,17 @@ export function useDrawingToolbarController({ activeTool, onToolChange, onToggle
     [onToolChange],
   );
 
-  const handleShapeClick = useCallback(() => {
+  const handleShapeClick = useCallback((event) => {
+    if (event?.detail > 1) return;
+    if (!isShapeActive) {
+      onToolChange(shapeVariant);
+      setFlyoutOpen(null);
+      return;
+    }
     if (shapeClickTimerRef.current) return;
     shapeClickTimerRef.current = setTimeout(() => {
       shapeClickTimerRef.current = null;
-      onToolChange(isShapeActive ? null : shapeVariant);
+      onToolChange(null);
       setFlyoutOpen(null);
     }, 200);
   }, [isShapeActive, onToolChange, shapeVariant]);
@@ -229,11 +244,17 @@ export function useDrawingToolbarController({ activeTool, onToolChange, onToggle
     [onToolChange],
   );
 
-  const handlePositionClick = useCallback(() => {
+  const handlePositionClick = useCallback((event) => {
+    if (event?.detail > 1) return;
+    if (!isPositionActive) {
+      onToolChange(posVariant);
+      setFlyoutOpen(null);
+      return;
+    }
     if (posClickTimerRef.current) return;
     posClickTimerRef.current = setTimeout(() => {
       posClickTimerRef.current = null;
-      onToolChange(isPositionActive ? null : posVariant);
+      onToolChange(null);
       setFlyoutOpen(null);
     }, 200);
   }, [isPositionActive, onToolChange, posVariant]);

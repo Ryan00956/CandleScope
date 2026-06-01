@@ -55,6 +55,10 @@ import { useDrawingTextEdit } from "./drawingTextEditController.js";
 import { useDrawingKeyboard } from "./drawingKeyboardController.js";
 import { applyTextAndPositionDrag, applyLineFibShapeDrag } from "./drawingDragResizeController.js";
 import {
+  coordinateToFractionalLogical,
+  logicalToInterpolatedSeriesTime,
+} from "../../chart-adapter/coordinateBridge.js";
+import {
   beginAxisLineDrawing,
   beginTwoPointDrawing,
   commitTwoPointDrawing,
@@ -173,105 +177,43 @@ export function useDrawing({
   // to map the continuous timestamp back to a screen x-coordinate by
   // interpolating between the two bracketing candles in the current dataset.
 
-  /**
-   * Interpolate a continuous timestamp from a fractional logical index.
-   * The logical index 0 corresponds to the first visible data point,
-   * 1 to the second, etc. Fractional values (e.g. 3.4) sit between
-   * candles. We look up the actual candle times from the series data
-   * and linearly interpolate to produce a timestamp that is independent
-   * of any particular timeframe.
-   */
-  const logicalToInterpolatedTime = useCallback(
-    (logicalIndex) => {
-      const adapter = getChartAdapter();
-      if (!adapter?.isReady?.()) return null;
-
-      // Get the full data array from the series
-      // Lightweight Charts v5: series.data() returns the current dataset
-      const seriesData = adapter.getSeriesData?.();
-      if (!seriesData || seriesData.length === 0) return null;
-
-      // Compute the offset between logical index and data array index.
-      // The first data point has a logical index that depends on how much
-      // the chart has been scrolled. We find it via coordinateToLogical
-      // round-tripping the first data point.
-      const firstTime = seriesData[0].time;
-      const firstCoord = adapter.timeToCoordinate?.(firstTime);
-      if (firstCoord == null) return null;
-      const firstLogical = adapter.coordinateToLogical?.(firstCoord);
-      if (firstLogical == null) return null;
-
-      // dataIndex is the (fractional) index into the seriesData array
-      const dataIndex = logicalIndex - firstLogical;
-
-      const floorIdx = Math.floor(dataIndex);
-      const frac = dataIndex - floorIdx;
-
-      // Clamp / edge cases
-      if (floorIdx < 0) {
-        // Extrapolate before the first candle
-        if (seriesData.length >= 2) {
-          const dt = seriesData[1].time - seriesData[0].time;
-          return seriesData[0].time + dataIndex * dt;
-        }
-        return seriesData[0].time;
-      }
-      if (floorIdx >= seriesData.length - 1) {
-        // Extrapolate after the last candle
-        if (seriesData.length >= 2) {
-          const dt = seriesData[seriesData.length - 1].time - seriesData[seriesData.length - 2].time;
-          return seriesData[seriesData.length - 1].time + (dataIndex - (seriesData.length - 1)) * dt;
-        }
-        return seriesData[seriesData.length - 1].time;
-      }
-
-      const tA = seriesData[floorIdx].time;
-      const tB = seriesData[floorIdx + 1].time;
-      return tA + frac * (tB - tA);
-    },
-    [getChartAdapter],
-  );
-
   const screenToData = useCallback(
     (x, y) => {
       const adapter = getChartAdapter();
       if (!adapter?.isReady?.()) return null;
       try {
-        const intLogical = adapter.coordinateToLogical?.(x);
+        const fracLogical = coordinateToFractionalLogical(adapter, x);
         const price = adapter.coordinateToPrice?.(y);
-        if (intLogical == null || price == null || !isFinite(intLogical) || !isFinite(price)) return null;
+        if (fracLogical == null || price == null || !isFinite(fracLogical) || !isFinite(price)) return null;
 
-        // coordinateToLogical returns an integer (snapped to nearest candle).
-        // To get sub-candle precision we compute a fractional offset by
-        // checking where `x` falls between the pixel positions of the
-        // two bracketing integer logical indices.
-        let fracLogical = intLogical;
-        const x0 = adapter.logicalToCoordinate?.(intLogical);
-        if (x0 != null && isFinite(x0)) {
-          // Determine which direction the fraction goes
-          const delta = x - x0;
-          const neighbor = delta >= 0 ? intLogical + 1 : intLogical - 1;
-          const x1 = adapter.logicalToCoordinate?.(neighbor);
-          if (x1 != null && isFinite(x1)) {
-            const span = Math.abs(x1 - x0);
-            if (span > 0) {
-              fracLogical = intLogical + delta / (x1 - x0);
+        const snappedTime = adapter.coordinateToTime?.(x);
+        let time = null;
+        if (snappedTime != null && isFinite(snappedTime)) {
+          const seriesData = adapter.getSeriesData?.() || [];
+          const snappedIndex = seriesData.findIndex((bar) => bar?.time === snappedTime);
+          const snappedX = adapter.timeToCoordinate?.(snappedTime);
+          if (snappedIndex >= 0 && snappedX != null && isFinite(snappedX)) {
+            const neighborIndex = x >= snappedX ? snappedIndex + 1 : snappedIndex - 1;
+            const neighborTime = seriesData[neighborIndex]?.time;
+            const neighborX = neighborTime == null ? null : adapter.timeToCoordinate?.(neighborTime);
+            if (neighborTime != null && neighborX != null && isFinite(neighborX) && neighborX !== snappedX) {
+              const ratio = (x - snappedX) / (neighborX - snappedX);
+              time = snappedTime + ratio * (neighborTime - snappedTime);
             }
+          }
+          if (time == null || !isFinite(time)) {
+            time = snappedTime;
           }
         }
 
-        // Compute a *continuous* timestamp by interpolating between candle
-        // boundaries using the fractional logical index.
-        const time = logicalToInterpolatedTime(fracLogical);
+        // Fallback for chart adapters that cannot convert directly from
+        // coordinate to time.
+        if (time == null || !isFinite(time)) {
+          time = logicalToInterpolatedSeriesTime(adapter, fracLogical);
+        }
 
         if (time != null && isFinite(time)) {
           return { time, price };
-        }
-
-        // Fallback: try coordinateToTime (snapped)
-  const snappedTime = adapter.coordinateToTime?.(x);
-        if (snappedTime != null && isFinite(snappedTime)) {
-          return { time: snappedTime, price };
         }
 
         return { time: null, price, logical: fracLogical };
@@ -279,7 +221,7 @@ export function useDrawing({
         return null;
       }
     },
-    [getChartAdapter, logicalToInterpolatedTime],
+    [getChartAdapter],
   );
 
   const dataToScreen = useCallback(
@@ -299,7 +241,7 @@ export function useDrawing({
         }
         // Fallback to logical if time-based conversion failed
         if ((x == null || !isFinite(x)) && dp.logical != null) {
-          x = adapter.logicalToCoordinate?.(dp.logical);
+          x = adapter.logicalToCoordinateInterpolated?.(dp.logical);
         }
         const y = adapter.priceToCoordinate?.(dp.price);
         if (x == null || y == null || !isFinite(x) || !isFinite(y)) return null;
@@ -339,7 +281,10 @@ export function useDrawing({
       const adapter = getChartAdapter();
       if (!adapter?.hasSeries?.()) return;
       prim.setHidden?.(hiddenRef.current, false);
-      adapter.attachPrimitive?.(prim);
+      if (adapter.attachPrimitive?.(prim)) {
+        prim.requestUpdate?.();
+        adapter.requestSeriesUpdate?.();
+      }
     },
     [getChartAdapter],
   );

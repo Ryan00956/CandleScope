@@ -7,7 +7,7 @@
  * timeframe switches.
  */
 
-import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 const HANDLE_KEYS = ["tl", "t", "tr", "r", "br", "b", "bl", "l"];
 
@@ -242,7 +242,7 @@ class ShapePaneView {
         }
       }
       if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
@@ -268,7 +268,7 @@ class ShapePaneView {
   }
 
   zOrder() {
-    return "normal";
+    return "top";
   }
 }
 
@@ -398,7 +398,7 @@ export class ShapeDrawingPrimitive {
         }
       }
       if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       const y = this._series.priceToCoordinate(dp.price);
       if (x == null || y == null || !isFinite(x) || !isFinite(y)) return null;

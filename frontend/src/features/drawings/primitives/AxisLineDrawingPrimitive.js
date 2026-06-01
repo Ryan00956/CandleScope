@@ -7,7 +7,7 @@
  * remain stable.
  */
 
-import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 function normalizeAxisLineType(value) {
   if (value === "vertical" || value === "cross") return value;
@@ -167,7 +167,7 @@ class AxisLinePaneView {
       }
     }
     if ((x == null || !Number.isFinite(x)) && dp.logical != null) {
-      x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
     }
     if (dp.price != null) {
       y = series.priceToCoordinate(dp.price);
@@ -190,7 +190,7 @@ class AxisLinePaneView {
   }
 
   zOrder() {
-    return "normal";
+    return "top";
   }
 }
 
@@ -300,7 +300,7 @@ export class AxisLineDrawingPrimitive {
       }
     }
     if ((x == null || !Number.isFinite(x)) && dp.logical != null) {
-      x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
     }
     if (dp.price != null) {
       y = this._series.priceToCoordinate(dp.price);

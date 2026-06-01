@@ -14,7 +14,7 @@
  *   - hit-testing for selection, endpoint dragging, and whole-line dragging
  */
 
-import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
 
 // ── Geometry helpers ──
 
@@ -249,7 +249,7 @@ class LinePaneView {
       }
       // Fallback to logical index (for preview lines or legacy data)
       if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
@@ -272,8 +272,7 @@ class LinePaneView {
   }
 
   zOrder() {
-    // Render on top of candles but below crosshair
-    return "normal";
+    return "top";
   }
 }
 
@@ -408,7 +407,7 @@ export class LineDrawingPrimitive {
         }
       }
       if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = timeScale.logicalToCoordinate(dp.logical);
+        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
       }
       return { x, y: this._series.priceToCoordinate(dp.price) };
     });

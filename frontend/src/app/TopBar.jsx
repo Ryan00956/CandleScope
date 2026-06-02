@@ -30,7 +30,7 @@ export default function TopBar({ symbolSearch, controls, marketSummary }) {
   return (
     <header className="top-bar" id="top-bar">
       <div className="logo">
-        <div className="logo-icon">馃搱</div>
+        <div className="logo-icon">📈</div>
         <span className="logo-text">CandleScope</span>
       </div>
 
@@ -63,15 +63,15 @@ export default function TopBar({ symbolSearch, controls, marketSummary }) {
           display: "flex",
         }}
       >
-        鈿欙笍
+        ⚙️
       </button>
 
       <button
         className={`indicator-toggle-btn ${indicatorPanelOpen ? "active" : ""}`}
         onClick={onToggleIndicatorPanel}
-        title="鎸囨爣 (Indicators)"
+        title="指标 (Indicators)"
       >
-        馃搳
+        📊
         {activeIndicatorCount > 0 && (
           <span className="indicator-badge">{activeIndicatorCount}</span>
         )}
@@ -80,9 +80,9 @@ export default function TopBar({ symbolSearch, controls, marketSummary }) {
       <button
         className={`indicator-toggle-btn alert-toggle-btn ${alertPanelOpen ? "active" : ""}`}
         onClick={onToggleAlertPanel}
-        title="璀︽姤 (Alerts)"
+        title="警报 (Alerts)"
       >
-        馃敂
+        🔔
       </button>
 
       {displayData && (
@@ -91,7 +91,7 @@ export default function TopBar({ symbolSearch, controls, marketSummary }) {
             {formatPrice(displayData.close)}
           </span>
           <span className={`price-change ${isUp ? "change-positive" : "change-negative"}`}>
-            {isUp ? "鈻?" : "鈻?"} {Math.abs(priceChange).toFixed(2)}%
+            {isUp ? "▲" : "▼"} {Math.abs(priceChange).toFixed(2)}%
           </span>
         </div>
       )}
@@ -125,7 +125,7 @@ export default function TopBar({ symbolSearch, controls, marketSummary }) {
             <span className="ohlcv-value">{formatVolume(displayData.volume)}</span>
           </div>
           <div className="ohlcv-item">
-            <span className="ohlcv-label">娑ㄨ穼</span>
+            <span className="ohlcv-label">涨跌</span>
             <span
               className="ohlcv-value"
               style={{ color: isUp ? "var(--candle-up)" : "var(--candle-down)" }}
@@ -134,7 +134,7 @@ export default function TopBar({ symbolSearch, controls, marketSummary }) {
             </span>
           </div>
           <div className="ohlcv-item">
-            <span className="ohlcv-label">鎸箙</span>
+            <span className="ohlcv-label">振幅</span>
             <span className="ohlcv-value">{amplitude}%</span>
           </div>
         </div>

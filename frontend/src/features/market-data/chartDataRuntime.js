@@ -16,6 +16,21 @@ export function deduplicateByTime(data) {
   return Array.from(seen.values()).sort((a, b) => a.time - b.time);
 }
 
+export function klineRowsEqual(a, b) {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i] || {};
+    const right = b[i] || {};
+    const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+    for (const key of keys) {
+      if (left[key] !== right[key]) return false;
+    }
+  }
+  return true;
+}
+
 function resolveTailGapNow(options) {
   if (!options?.includeTailGap) return null;
   if (options.nowSecs != null && Number.isFinite(Number(options.nowSecs))) {

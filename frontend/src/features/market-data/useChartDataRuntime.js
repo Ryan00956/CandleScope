@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks";
-import { deduplicateByTime, mergeByTime, upsertRealtimeKline } from "./chartDataRuntime";
+import { deduplicateByTime, klineRowsEqual, mergeByTime, upsertRealtimeKline } from "./chartDataRuntime";
 
 function inferCommitStatus(source, data, extra = {}) {
   if (extra.status) return extra.status;
@@ -75,6 +75,7 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
       if (!incoming?.length) return getCache(sym, intv, options);
       const existing = getCache(sym, intv, options);
       const merged = existing && existing.length > 0 ? mergeByTime(incoming, existing) : incoming;
+      if (existing && klineRowsEqual(existing, merged)) return existing;
       setCache(sym, intv, merged, options);
       return merged;
     },
@@ -153,7 +154,12 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
 
   const commitMergedChartData = useCallback((sym, intv, incoming, { onMerged, source = "merge" } = {}) => {
     if (!incoming?.length) return;
-    const merged = mergeByTime(incoming, chartDataRef.current);
+    const previous = chartDataRef.current;
+    const merged = mergeByTime(incoming, previous);
+    if (klineRowsEqual(previous, merged)) {
+      if (onMerged) onMerged(previous);
+      return;
+    }
     chartDataRef.current = merged;
     saveToCache(sym, intv, merged);
     recordChartDataCommit(sym, intv, merged, source, { incomingBars: incoming.length, status: "ready" });

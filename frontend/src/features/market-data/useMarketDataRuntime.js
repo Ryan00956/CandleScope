@@ -168,7 +168,6 @@ export function useMarketDataRuntime({
     setError,
     setConnectionStatus,
     setLoading,
-    setDatasetKey: setDatasetVersion,
   });
 
   useKlineStreamRuntime({
@@ -210,7 +209,7 @@ export function useMarketDataRuntime({
     getIntervalDays,
     getCache,
     mergeCacheData,
-    replaceChartData,
+    commitMergedChartData,
     requestIndicatorRange: requestGapRecoveryIndicatorRange,
     updateLastPrice,
   });

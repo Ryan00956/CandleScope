@@ -73,6 +73,57 @@ function buildTimeSet(data) {
   return new Set((data || []).map((item) => item?.time).filter((time) => time != null));
 }
 
+function readVisibleRangeSnapshot(chart) {
+  const timeScale = chart?.timeScale?.();
+  if (!timeScale) return null;
+  const options = timeScale.options?.();
+  const time = timeScale.getVisibleRange();
+  const logical = timeScale.getVisibleLogicalRange();
+  const scrollPosition = timeScale.scrollPosition?.();
+  if (!time && !logical && !Number.isFinite(scrollPosition)) return null;
+  return {
+    time,
+    logical,
+    scrollPosition,
+    barSpacing: options?.barSpacing,
+  };
+}
+
+function restoreVisibleRangeSnapshotNow(chart, snapshot) {
+  const timeScale = chart?.timeScale?.();
+  if (!timeScale || !snapshot) return false;
+  if (Number.isFinite(snapshot.barSpacing)) {
+    timeScale.applyOptions({ barSpacing: snapshot.barSpacing });
+  }
+  if (snapshot.time) {
+    try {
+      timeScale.setVisibleRange(snapshot.time);
+      return true;
+    } catch { /* fall through */ }
+  }
+  if (Number.isFinite(snapshot.scrollPosition)) {
+    timeScale.scrollToPosition(snapshot.scrollPosition, false);
+    return true;
+  }
+  if (snapshot.logical) {
+    try {
+      timeScale.setVisibleLogicalRange(snapshot.logical);
+      return true;
+    } catch { /* fall through */ }
+  }
+  return false;
+}
+
+function restoreVisibleRangeSnapshot(chart, snapshot) {
+  const restored = restoreVisibleRangeSnapshotNow(chart, snapshot);
+  if (typeof window !== "undefined" && window.requestAnimationFrame && snapshot) {
+    window.requestAnimationFrame(() => {
+      restoreVisibleRangeSnapshotNow(chart, snapshot);
+    });
+  }
+  return restored;
+}
+
 function getPaneRenderState(mapRef, paneId) {
   let state = mapRef.current.get(paneId);
   if (!state) {
@@ -417,12 +468,17 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
   useEffect(() => {
     const series = mainSeriesRef.current;
+    const chart = chartRef.current;
     if (!series || !data?.length) return;
 
     const candleData = data.map(toCandlePoint);
+    const canUseTrailingUpdate = canUseTrailingCandleUpdate(prevCandleDataRef.current, candleData);
+    const visibleRangeSnapshot = !canUseTrailingUpdate && prevCandleDataRef.current.length > 0
+      ? readVisibleRangeSnapshot(chart)
+      : null;
     try {
       isSyncingRef.current = true;
-      if (canUseTrailingCandleUpdate(prevCandleDataRef.current, candleData)) {
+      if (canUseTrailingUpdate) {
         const start = Math.max(0, prevCandleDataRef.current.length - 1);
         for (let i = start; i < candleData.length; i += 1) series.update(candleData[i]);
         recordPerfEvent("chart.candleSeries.update", {
@@ -438,6 +494,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           reason: "single-chart-full",
           points: candleData.length,
         });
+        restoreVisibleRangeSnapshot(chart, visibleRangeSnapshot);
       }
       prevCandleDataRef.current = candleData;
     } finally {

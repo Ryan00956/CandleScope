@@ -30,7 +30,6 @@ export function useBackfillCompletionRuntime({
   setError,
   setConnectionStatus,
   setLoading,
-  setDatasetKey,
 }) {
   const backfillReloadInFlightRef = useRef(new Set());
 
@@ -122,7 +121,6 @@ export function useBackfillCompletionRuntime({
           setConnectionStatus("connected");
           setLoading(false);
         }
-        setDatasetKey((version) => version + 1);
       }
       return true;
     };
@@ -195,7 +193,6 @@ export function useBackfillCompletionRuntime({
                     parseIntervalSeconds(bfInterval),
                   );
                 }
-                setDatasetKey((version) => version + 1);
               }
               pendingLoadMoreLeftRef.current.delete(pendingKey);
             } else if (beforeResult && beforeResult.has_more === false) {
@@ -229,7 +226,6 @@ export function useBackfillCompletionRuntime({
     pendingLoadMoreLeftRef,
     requestIndicatorRange,
     setConnectionStatus,
-    setDatasetKey,
     setError,
     setLastPrice,
     setLoading,

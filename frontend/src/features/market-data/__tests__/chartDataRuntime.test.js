@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { detectGaps } from "../chartDataRuntime.js";
+import { detectGaps, klineRowsEqual } from "../chartDataRuntime.js";
 
 test("detectGaps reports internal K-line gaps", () => {
   const gaps = detectGaps([
@@ -40,4 +40,22 @@ test("detectGaps can report an explicit tail gap when a current time is supplied
     missingBars: 8,
     isTailGap: true,
   }]);
+});
+
+test("klineRowsEqual compares rows by value instead of array identity", () => {
+  assert.equal(
+    klineRowsEqual(
+      [{ time: 1000, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 }],
+      [{ time: 1000, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 }],
+    ),
+    true,
+  );
+
+  assert.equal(
+    klineRowsEqual(
+      [{ time: 1000, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 }],
+      [{ time: 1000, open: 1, high: 2, low: 0.5, close: 1.6, volume: 10 }],
+    ),
+    false,
+  );
 });

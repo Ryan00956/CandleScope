@@ -95,6 +95,7 @@ export function buildChartPaneOptions({
   return {
     width: container.clientWidth,
     height: container.clientHeight,
+    autoSize: true,
     layout: {
       background: { color: bgColor },
       textColor,

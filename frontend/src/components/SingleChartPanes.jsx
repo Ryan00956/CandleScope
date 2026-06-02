@@ -12,6 +12,7 @@ import { createIndicatorSeries, createMainSeries, removeSeriesEntries } from "..
 import { ensurePane, readPaneHeights, setPaneHeights } from "../chart-adapter/paneManager";
 import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRenderer";
 import { renderMarkers } from "../chart-adapter/markerRenderer";
+import { renderBgcolors } from "../chart-adapter/bgcolorPrimitiveRenderer";
 import { applyBarColors } from "../chart-adapter/barColorRenderer";
 import {
   alignIndicatorBgcolorsToTimes,
@@ -82,6 +83,8 @@ function getPaneRenderState(mapRef, paneId) {
       hlinesStateRef: { current: { target: null, signature: "unknown" } },
       fillSeriesRef: { current: [] },
       fillSeriesStateRef: { current: { chart: null, signature: "unknown" } },
+      bgcolorPrimitiveRef: { current: null },
+      bgcolorStateRef: { current: { pane: null, signature: "unknown" } },
     };
     mapRef.current.set(paneId, state);
   }
@@ -306,16 +309,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       }
     };
 
-    const resizeObserver = new ResizeObserver((entries) => {
-      const { width, height } = entries[0].contentRect;
-      if (width > 0 && height > 0) chart.applyOptions({ width, height });
-    });
-    resizeObserver.observe(container);
     chart.subscribeCrosshairMove(handleCrosshairMove);
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
 
     return () => {
-      resizeObserver.disconnect();
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
       chart.remove();
@@ -615,10 +612,21 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
     for (const pane of paneDescriptors) {
       const state = getPaneRenderState(paneRenderStateRef, pane.id);
+      const paneApi = chart.panes?.()?.[pane.paneIndex] || null;
       const targetSeries = pane.id === "main"
         ? mainSeriesRef.current
         : indicatorSeriesRef.current.find((entry) => entry.paneId === pane.id)?.series;
 
+      renderBgcolors({
+        chart,
+        pane: paneApi,
+        indicatorBgcolors: pane.bgcolors,
+        bgcolorPrimitiveRef: state.bgcolorPrimitiveRef,
+        bgcolorStateRef: state.bgcolorStateRef,
+        paneId: pane.id,
+        recordPerfEvent,
+        onError: (err) => console.warn("SingleChartPanes: failed to render bgcolors:", err),
+      });
       renderMarkers({
         targetSeries,
         indicatorMarkers: pane.markers,

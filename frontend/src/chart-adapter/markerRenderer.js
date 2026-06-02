@@ -1,3 +1,5 @@
+import { createSeriesMarkers } from "lightweight-charts";
+
 const SHAPE_MAP = {
   triangleup: "arrowUp",
   triangle_up: "arrowUp",
@@ -48,20 +50,30 @@ export function renderMarkers({
   recordPerfEvent,
   onError,
 }) {
-  if (markerTargetRef.current && markerTargetRef.current !== targetSeries) {
-    try { markerTargetRef.current.setMarkers([]); } catch { /* */ }
+  if (markerTargetRef.current && markerTargetRef.current.series !== targetSeries) {
+    try { markerTargetRef.current.plugin.detach(); } catch { /* */ }
+    markerTargetRef.current = null;
     markerStateRef.current = { target: null, state: "empty" };
     recordPerfEvent("chart.markerSeries.clear", {
       paneId,
       reason: "target-change",
     });
   }
-  markerTargetRef.current = targetSeries;
   if (!targetSeries) return;
+
+  function getPlugin() {
+    if (markerTargetRef.current?.series === targetSeries) {
+      return markerTargetRef.current.plugin;
+    }
+    const plugin = createSeriesMarkers(targetSeries, []);
+    markerTargetRef.current = { series: targetSeries, plugin };
+    return plugin;
+  }
+
   if (!indicatorMarkers || indicatorMarkers.length === 0) {
     const markerState = markerStateRef.current;
     if (markerState.target !== targetSeries || markerState.state !== "empty") {
-      try { targetSeries.setMarkers([]); } catch { /* */ }
+      try { getPlugin().setMarkers([]); } catch { /* */ }
       markerStateRef.current = { target: targetSeries, state: "empty" };
       recordPerfEvent("chart.markerSeries.clear", {
         paneId,
@@ -74,7 +86,7 @@ export function renderMarkers({
   const allMarkers = flattenIndicatorMarkers(indicatorMarkers);
 
   try {
-    targetSeries.setMarkers(allMarkers);
+    getPlugin().setMarkers(allMarkers);
     markerStateRef.current = { target: targetSeries, state: "markers" };
     recordPerfEvent("chart.markerSeries.setMarkers", {
       paneId,

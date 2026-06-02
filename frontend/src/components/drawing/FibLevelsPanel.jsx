@@ -28,6 +28,7 @@ export default function FibLevelsPanel({
 }) {
   const panelRef = useRef(null);
   const [newLevelInput, setNewLevelInput] = useState("");
+  const panelLevels = Array.isArray(levels) ? levels : DEFAULT_FIB_LEVELS;
 
   useEffect(() => {
     const handler = (event) => {
@@ -45,28 +46,28 @@ export default function FibLevelsPanel({
   }, [anchorRef, onClose]);
 
   const toggleLevel = (index) => {
-    onLevelsChange(levels.map((level, itemIndex) => (
+    onLevelsChange(panelLevels.map((level, itemIndex) => (
       itemIndex === index ? { ...level, enabled: !level.enabled } : level
     )));
   };
 
   const changeLevelColor = (index, color) => {
-    onLevelsChange(levels.map((level, itemIndex) => (
+    onLevelsChange(panelLevels.map((level, itemIndex) => (
       itemIndex === index ? { ...level, color } : level
     )));
   };
 
   const removeLevel = (index) => {
-    onLevelsChange(levels.filter((_, itemIndex) => itemIndex !== index));
+    onLevelsChange(panelLevels.filter((_, itemIndex) => itemIndex !== index));
   };
 
   const addCustomLevel = () => {
     const value = parseFloat(newLevelInput);
     if (Number.isNaN(value)) return;
-    if (levels.some((level) => Math.abs(level.level - value) < 0.0001)) return;
+    if (panelLevels.some((level) => Math.abs(level.level - value) < 0.0001)) return;
 
-    const color = FIB_RANDOM_COLORS[levels.length % FIB_RANDOM_COLORS.length];
-    const next = [...levels, { level: value, color, enabled: true }]
+    const color = FIB_RANDOM_COLORS[panelLevels.length % FIB_RANDOM_COLORS.length];
+    const next = [...panelLevels, { level: value, color, enabled: true }]
       .sort((a, b) => a.level - b.level);
     onLevelsChange(next);
     setNewLevelInput("");
@@ -111,7 +112,7 @@ export default function FibLevelsPanel({
       <div className="fib-levels-divider" />
 
       <div className="fib-levels-list">
-        {levels.map((level, index) => (
+        {panelLevels.map((level, index) => (
           <div key={index} className="fib-level-row">
             <input
               type="checkbox"

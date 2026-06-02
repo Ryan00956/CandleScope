@@ -9,7 +9,7 @@
  *   - Inverted mode (first click = level 1 instead of level 0)
  */
 
-import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { dataPointToCoordinate } from "./coordinateUtils.js";
 
 export const DEFAULT_FIB_LEVELS = [
   { level: 0, color: "#787b86", enabled: true },
@@ -230,20 +230,10 @@ class FibPaneView {
 
     if (!series || !chart) return;
 
-    const timeScale = chart.timeScale();
     const points = [];
 
     for (const dp of source._dataPoints) {
-      let x = null;
-      if (dp.time != null) {
-        x = timeScale.timeToCoordinate(dp.time);
-        if (x == null || !isFinite(x)) {
-          x = timeToCoordinateInterpolated(chart, series, dp.time);
-        }
-      }
-      if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
-      }
+      const x = dataPointToCoordinate(chart, series, dp);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -377,18 +367,8 @@ export class FibonacciDrawingPrimitive {
     if (!this._series || !this._chart) return null;
     if (this._dataPoints.length < 2) return null;
 
-    const timeScale = this._chart.timeScale();
     const screenPoints = this._dataPoints.map((dp) => {
-      let sx = null;
-      if (dp.time != null) {
-        sx = timeScale.timeToCoordinate(dp.time);
-        if (sx == null || !isFinite(sx)) {
-          sx = timeToCoordinateInterpolated(this._chart, this._series, dp.time);
-        }
-      }
-      if ((sx == null || !isFinite(sx)) && dp.logical != null) {
-        sx = logicalToCoordinateInterpolated(timeScale, dp.logical);
-      }
+      const sx = dataPointToCoordinate(this._chart, this._series, dp);
       return { x: sx, y: this._series.priceToCoordinate(dp.price) };
     });
 

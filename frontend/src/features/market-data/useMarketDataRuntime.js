@@ -3,14 +3,12 @@ import { useBackfillCompletionRuntime } from "./useBackfillCompletionRuntime";
 import { useKlineStreamRuntime } from "./useKlineStreamRuntime";
 import { useChartBackgroundPrefetch } from "./useChartBackgroundPrefetch";
 import { useChartDataRuntime } from "./useChartDataRuntime";
-import { buildRenderableChartData } from "./chartDataRuntime";
 import { buildChartDisplayState } from "./marketDataView";
 import { useChartGapRecovery } from "./useChartGapRecovery";
 import { useChartInitialLoad } from "./useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./useChartLoadMoreLeft";
 import { useSessionTransitionReset } from "./useSessionTransitionReset";
 import { INDICATOR_RANGE_REQUEST_REASONS, useMarketDataEvents } from "./marketDataEvents";
-import { parseIntervalSeconds } from "../../utils/intervals";
 
 export function useMarketDataRuntime({
   session,
@@ -71,11 +69,6 @@ export function useMarketDataRuntime({
     commitMergedChartData,
     commitPatchedChartData,
   } = useChartDataRuntime({ exchange, marketType, symbol, interval });
-
-  const renderChartData = useMemo(
-    () => buildRenderableChartData(chartData, parseIntervalSeconds(interval)),
-    [chartData, interval],
-  );
 
   const [loading, setLoading] = useState(true);
   const loadingRef = useRef(loading);
@@ -217,7 +210,7 @@ export function useMarketDataRuntime({
     getIntervalDays,
     getCache,
     mergeCacheData,
-    commitMergedChartData,
+    replaceChartData,
     requestIndicatorRange: requestGapRecoveryIndicatorRange,
     updateLastPrice,
   });
@@ -269,7 +262,6 @@ export function useMarketDataRuntime({
   return {
     view: {
       bars: chartData,
-      renderBars: renderChartData,
       meta: chartDataMeta,
       loading,
       error,

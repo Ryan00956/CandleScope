@@ -7,7 +7,7 @@
  * timeframe switches.
  */
 
-import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { dataPointToCoordinate } from "./coordinateUtils.js";
 
 const HANDLE_KEYS = ["tl", "t", "tr", "r", "br", "b", "bl", "l"];
 
@@ -230,20 +230,10 @@ class ShapePaneView {
     const chart = source._chart;
     if (!series || !chart) return;
 
-    const timeScale = chart.timeScale();
     const points = [];
 
     for (const dp of source._dataPoints) {
-      let x = null;
-      if (dp.time != null) {
-        x = timeScale.timeToCoordinate(dp.time);
-        if (x == null || !isFinite(x)) {
-          x = timeToCoordinateInterpolated(chart, series, dp.time);
-        }
-      }
-      if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
-      }
+      const x = dataPointToCoordinate(chart, series, dp);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -386,20 +376,10 @@ export class ShapeDrawingPrimitive {
 
   _screenPoints() {
     if (!this._series || !this._chart || this._dataPoints.length < 2) return null;
-    const timeScale = this._chart.timeScale();
     const points = [];
 
     for (const dp of this._dataPoints) {
-      let x = null;
-      if (dp.time != null) {
-        x = timeScale.timeToCoordinate(dp.time);
-        if (x == null || !isFinite(x)) {
-          x = timeToCoordinateInterpolated(this._chart, this._series, dp.time);
-        }
-      }
-      if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
-      }
+      const x = dataPointToCoordinate(this._chart, this._series, dp);
       const y = this._series.priceToCoordinate(dp.price);
       if (x == null || y == null || !isFinite(x) || !isFinite(y)) return null;
       points.push({ x, y });

@@ -570,27 +570,48 @@ async function getRect(cdp, selector) {
 }
 
 async function dispatchClick(cdp, x, y) {
+  await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const x = ${JSON.stringify(x)};
+      const y = ${JSON.stringify(y)};
+      const target = document.elementFromPoint(x, y);
+      if (!target) return false;
+      const common = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0 };
+      target.dispatchEvent(new PointerEvent("pointerdown", { ...common, pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1 }));
+      target.dispatchEvent(new MouseEvent("mousedown", { ...common, buttons: 1 }));
+      target.dispatchEvent(new PointerEvent("pointerup", { ...common, pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 0 }));
+      target.dispatchEvent(new MouseEvent("mouseup", { ...common, buttons: 0 }));
+      target.dispatchEvent(new MouseEvent("click", common));
+      return true;
+    })()`,
+    returnByValue: true,
+  });
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none" });
   await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
 }
 
 async function readSavedDrawingCount(cdp, drawingKey) {
+  const drawings = await readSavedDrawings(cdp, drawingKey);
+  return drawings.length;
+}
+
+async function readSavedDrawings(cdp, drawingKey) {
   const storageKey = `candlescope-drawings-${drawingKey}`;
   const result = await cdp.send("Runtime.evaluate", {
     expression: `(() => {
       try {
         const raw = localStorage.getItem(${JSON.stringify(storageKey)});
-        if (!raw) return 0;
+        if (!raw) return [];
         const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed.length : 0;
+        return Array.isArray(parsed) ? parsed : [];
       } catch {
-        return -1;
+        return [];
       }
     })()`,
     returnByValue: true,
   });
-  return Number(result.result?.value || 0);
+  return Array.isArray(result.result?.value) ? result.result.value : [];
 }
 
 async function waitForSavedDrawing(cdp, drawingKey, timeoutMs = 5_000) {
@@ -605,9 +626,9 @@ async function waitForSavedDrawing(cdp, drawingKey, timeoutMs = 5_000) {
 }
 
 async function verifyDrawingWorkflow(cdp, timeoutMs) {
-  const drawingKey = "binance:spot:BTCUSDT";
+  const drawingKey = "binance:spot:BTCUSDT__main";
   const lineButtonSelector = '[data-drawing-tool="line-segment"]';
-  const chartSelector = '.chart-pane[data-pane-id="main"] .chart-pane-container';
+  const chartSelector = '.chart-pane[data-pane-id="main"] .chart-pane-container, .chart-pane[data-pane-id="single-chart"]';
 
   const lineToolClicked = await clickSelector(cdp, lineButtonSelector);
   await wait(250);
@@ -624,6 +645,7 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
   let drawingPersistedCount = 0;
   let drawingRestoredCount = 0;
   let reloadLoadedAtMs = null;
+  let futureAnchorStored = false;
 
   if (rect && lineToolActive && drawingEngineReady) {
     const y = Math.round(rect.y + rect.height * 0.45);
@@ -633,6 +655,18 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
     drawingPersistedCount = await waitForSavedDrawing(cdp, drawingKey);
 
     if (drawingPersistedCount > 0) {
+      await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.94), Math.round(rect.y + rect.height * 0.35));
+      await wait(150);
+      await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.97), Math.round(rect.y + rect.height * 0.43));
+      await wait(500);
+      const savedDrawings = await readSavedDrawings(cdp, drawingKey);
+      futureAnchorStored = savedDrawings.some((drawing) => (
+        Array.isArray(drawing?.dataPoints)
+        && drawing.dataPoints.some((point) => (
+          Number.isFinite(point?.barOffsetFromLast)
+          && point.time == null
+        ))
+      ));
       await cdp.send("Page.reload", { ignoreCache: true });
       const reloadResult = await waitForChartReady(cdp, timeoutMs);
       reloadLoadedAtMs = reloadResult.loadedAt;
@@ -646,6 +680,7 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
     drawingEngineReady,
     drawingChartRectFound: Boolean(rect),
     drawingPersistedCount,
+    futureAnchorStored,
     drawingReloadLoadedAtMs: reloadLoadedAtMs,
     drawingRestoredCount,
   };
@@ -786,6 +821,7 @@ async function main() {
         || !drawingWorkflow?.drawingEngineReady
         || !drawingWorkflow?.drawingChartRectFound
         || drawingWorkflow?.drawingPersistedCount <= 0
+        || !drawingWorkflow?.futureAnchorStored
         || drawingWorkflow?.drawingRestoredCount <= 0
       ))
       || (args.seedIndicators && !performanceTimings?.timings?.indicatorHostedSnapshotMs)

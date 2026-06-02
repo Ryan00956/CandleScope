@@ -1,6 +1,6 @@
 import { chartSeriesTypes } from "./lightweightChartSurface.js";
 
-export function createMainSeries(chart, { upColor, downColor }) {
+export function createMainSeries(chart, { upColor, downColor, paneIndex } = {}) {
   return chart.addSeries(chartSeriesTypes.candlestick, {
     upColor: upColor || "#22c55e",
     downColor: downColor || "#ef4444",
@@ -8,22 +8,10 @@ export function createMainSeries(chart, { upColor, downColor }) {
     borderUpColor: upColor || "#22c55e",
     wickDownColor: downColor || "#ef4444",
     wickUpColor: upColor || "#22c55e",
-  });
+  }, paneIndex);
 }
 
-export function createAlignmentSeries(chart) {
-  return chart.addSeries(chartSeriesTypes.line, {
-    color: "transparent",
-    lineWidth: 0,
-    priceScaleId: "",
-    lastValueVisible: false,
-    priceLineVisible: false,
-    crosshairMarkerVisible: false,
-    visible: false,
-  });
-}
-
-export function createIndicatorSeries(chart, line, { crosshairMarkerVisible = true } = {}) {
+export function createIndicatorSeries(chart, line, { crosshairMarkerVisible = true, paneIndex } = {}) {
   const isHistogram = line?.type === "histogram";
   const seriesType = isHistogram ? chartSeriesTypes.histogram : chartSeriesTypes.line;
   const options = {
@@ -45,7 +33,7 @@ export function createIndicatorSeries(chart, line, { crosshairMarkerVisible = tr
     options.priceFormat = { type: "volume" };
   }
 
-  return chart.addSeries(seriesType, options);
+  return chart.addSeries(seriesType, options, paneIndex);
 }
 
 export function removeSeriesEntries(chart, entries = []) {

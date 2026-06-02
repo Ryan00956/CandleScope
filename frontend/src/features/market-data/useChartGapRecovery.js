@@ -20,7 +20,7 @@ export function useChartGapRecovery({
   getIntervalDays,
   getCache,
   mergeCacheData,
-  commitMergedChartData,
+  replaceChartData,
   requestIndicatorRange,
   updateLastPrice,
 }) {
@@ -53,17 +53,16 @@ export function useChartGapRecovery({
       const result = await fetchKlinesHistory(sym, intv, days, marketType, exchange);
 
       if (result?.data?.length > 0) {
-        commitMergedChartData(sym, intv, result.data, {
+        replaceChartData(sym, intv, result.data, {
+          cache: true,
           source: "gap-fill-history",
-          onMerged: (merged) => {
-            const remaining = detectGaps(merged, intvSecs);
-            if (remaining.length > 0) {
-              console.warn(`[GapFill] ${remaining.length} gap(s) remain after history reload`);
-            } else {
-              console.log(`[GapFill] All gaps filled successfully (${merged.length} total bars)`);
-            }
-          },
         });
+        const remaining = detectGaps(result.data, intvSecs);
+        if (remaining.length > 0) {
+          console.warn(`[GapFill] ${remaining.length} gap(s) remain after history reload`);
+        } else {
+          console.log(`[GapFill] All gaps filled successfully (${result.data.length} total bars)`);
+        }
         for (const gap of gaps) {
           requestIndicatorRangeInChunks(
             requestIndicatorRange,
@@ -80,7 +79,7 @@ export function useChartGapRecovery({
         gapFillInFlightRef.current.delete(reloadKey);
       }, GAP_RECOVERY_RELEASE_MS);
     }
-  }, [commitMergedChartData, exchange, getIntervalDays, marketType, requestIndicatorRange]);
+  }, [exchange, getIntervalDays, marketType, replaceChartData, requestIndicatorRange]);
 
   useEffect(() => {
     recoverGapsRef.current = recoverGaps;
@@ -128,17 +127,16 @@ export function useChartGapRecovery({
         const historyResult = await fetchKlinesHistory(symbol, currentIntv, days, marketType, exchange);
 
         if (historyResult?.data?.length > 0) {
-          commitMergedChartData(symbol, currentIntv, historyResult.data, {
+          replaceChartData(symbol, currentIntv, historyResult.data, {
+            cache: true,
             source: "tab-recovery-history",
-            onMerged: (merged) => {
-              const remaining = detectGaps(merged, intvSecs);
-              if (remaining.length > 0) {
-                console.warn(`[TabRecovery] ${remaining.length} gap(s) remain after history reload`);
-              } else {
-                console.log(`[TabRecovery] All gaps filled (${merged.length} total bars)`);
-              }
-            },
           });
+          const remaining = detectGaps(historyResult.data, intvSecs);
+          if (remaining.length > 0) {
+            console.warn(`[TabRecovery] ${remaining.length} gap(s) remain after history reload`);
+          } else {
+            console.log(`[TabRecovery] All gaps filled (${historyResult.data.length} total bars)`);
+          }
           requestIndicatorRangeInChunks(
             requestIndicatorRange,
             historyResult.data[0]?.time,
@@ -174,13 +172,13 @@ export function useChartGapRecovery({
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, [
-    commitMergedChartData,
     exchange,
     getCache,
     getIntervalDays,
     intervalRef,
     marketType,
     mergeCacheData,
+    replaceChartData,
     requestIndicatorRange,
     symbol,
     trackedIntervalsRef,

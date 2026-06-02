@@ -1,5 +1,5 @@
 import React from "react";
-import MultiPaneChart from "../components/MultiPaneChart";
+import SingleChartPanes from "../components/SingleChartPanes";
 import { ChartErrorBoundary } from "./AppProviders";
 
 const ExportPanel = React.lazy(() => import("../features/export/ExportPanel"));
@@ -48,7 +48,7 @@ export default function ChartWorkspace({
           </div>
         ) : (
           <Boundary>
-            <MultiPaneChart {...chart.chartProps} />
+            <SingleChartPanes {...chart.chartProps} />
           </Boundary>
         )}
       </div>

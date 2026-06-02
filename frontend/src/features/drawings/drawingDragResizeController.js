@@ -26,6 +26,32 @@ import { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
 import { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
 import { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitive.js";
 
+function horizontalAnchorFromDataPoint(dataPoint) {
+  if (!dataPoint) return null;
+  if (typeof dataPoint.barOffsetFromLast === "number" && Number.isFinite(dataPoint.barOffsetFromLast)) {
+    return { barOffsetFromLast: dataPoint.barOffsetFromLast };
+  }
+  if (dataPoint.time != null && Number.isFinite(Number(dataPoint.time))) {
+    return { time: dataPoint.time };
+  }
+  if (typeof dataPoint.logical === "number" && Number.isFinite(dataPoint.logical)) {
+    return { logical: dataPoint.logical };
+  }
+  return null;
+}
+
+function dataPointFromHorizontalAnchor(anchor, price) {
+  if (anchor == null) return null;
+  if (typeof anchor === "number" && Number.isFinite(anchor)) return { time: anchor, price };
+  if (typeof anchor !== "object") return null;
+  return { ...anchor, price };
+}
+
+function preserveHorizontalAnchor(nextPoint, originalPoint) {
+  const anchor = horizontalAnchorFromDataPoint(originalPoint);
+  return anchor ? { ...nextPoint, ...anchor } : nextPoint;
+}
+
 /**
  * Handle the tool-independent drags (text handle resize, text body, position).
  * Returns true when the event was consumed (the caller should then return).
@@ -88,7 +114,7 @@ export function applyTextAndPositionDrag({
         const newBoxH = origBox.height * scale;
         const newAnchorY = origBox.y + origBox.height - newBoxH;
         const newDp = screenToData(origBox.x, newAnchorY);
-        if (newDp) prim.setDataPoint({ ...newDp, time: origDataPoint.time });
+        if (newDp) prim.setDataPoint(preserveHorizontalAnchor(newDp, origDataPoint));
       }
       refreshSelectedTextUi(id);
       e.preventDefault();
@@ -196,28 +222,31 @@ export function applyTextAndPositionDrag({
       prim.setSlPrice(newSl);
     } else if (type === "position-left") {
       // Drag left edge: update timeRange.start
-      prim.setTimeRange({ ...prim.timeRange, start: dataPoint.time });
+      prim.setTimeRange({ ...prim.timeRange, start: horizontalAnchorFromDataPoint(dataPoint) });
     } else if (type === "position-right") {
       // Drag right edge: update timeRange.end
-      prim.setTimeRange({ ...prim.timeRange, end: dataPoint.time });
+      prim.setTimeRange({ ...prim.timeRange, end: horizontalAnchorFromDataPoint(dataPoint) });
     } else if (type === "position-move") {
       const { origEntry, origTp, origSl, startMouse: sm, origTimeRange } = dragging;
       const dy = pos.y - sm.y;
       const dx = pos.x - sm.x;
-      // Convert dy to price difference
-      const origScreen = dataToScreen({ time: origTimeRange.start, price: origEntry });
-      if (origScreen) {
-        const newEntryData = screenToDrawingData(origScreen.x + dx, origScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
+      const startPoint = dataPointFromHorizontalAnchor(origTimeRange.start, origEntry);
+      const endPoint = dataPointFromHorizontalAnchor(origTimeRange.end, origEntry);
+      const origStartScreen = startPoint ? dataToScreen(startPoint) : null;
+      const origEndScreen = endPoint ? dataToScreen(endPoint) : null;
+      if (origStartScreen) {
+        const newEntryData = screenToDrawingData(origStartScreen.x + dx, origStartScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
         if (newEntryData) {
           const priceDelta = newEntryData.price - origEntry;
           prim.setEntryPrice(origEntry + priceDelta);
           if (origTp != null) prim.setTpPrice(origTp + priceDelta);
           if (origSl != null) prim.setSlPrice(origSl + priceDelta);
-          // Also shift time range horizontally
-          const timeDelta = newEntryData.time - origTimeRange.start;
+          const nextStart = horizontalAnchorFromDataPoint(newEntryData);
+          const movedEndData = origEndScreen ? screenToData(origEndScreen.x + dx, origEndScreen.y) : null;
+          const nextEnd = movedEndData ? horizontalAnchorFromDataPoint(movedEndData) : origTimeRange.end;
           prim.setTimeRange({
-            start: origTimeRange.start + timeDelta,
-            end: origTimeRange.end + timeDelta,
+            start: nextStart,
+            end: nextEnd,
           });
         }
       }

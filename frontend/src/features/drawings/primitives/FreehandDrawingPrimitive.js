@@ -13,7 +13,7 @@
  *   - Hit-testing for eraser deletion
  */
 
-import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { dataPointToCoordinate } from "./coordinateUtils.js";
 
 const DEFAULT_HIGHLIGHTER_OPACITY = 0.35;
 const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION = "multiply";
@@ -143,20 +143,10 @@ class FreehandPaneView {
 
     if (!series || !chart) return;
 
-    const timeScale = chart.timeScale();
     const points = [];
 
     for (const dp of source._dataPoints) {
-      let x = null;
-      if (dp.time != null) {
-        x = timeScale.timeToCoordinate(dp.time);
-        if (x == null || !isFinite(x)) {
-          x = timeToCoordinateInterpolated(chart, series, dp.time);
-        }
-      }
-      if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
-      }
+      const x = dataPointToCoordinate(chart, series, dp);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -316,20 +306,10 @@ export class FreehandDrawingPrimitive {
     if (!this._series || !this._chart) return false;
     if (this._dataPoints.length < 2) return false;
 
-    const timeScale = this._chart.timeScale();
     const screenPoints = [];
 
     for (const dp of this._dataPoints) {
-      let sx = null;
-      if (dp.time != null) {
-        sx = timeScale.timeToCoordinate(dp.time);
-        if (sx == null || !isFinite(sx)) {
-          sx = timeToCoordinateInterpolated(this._chart, this._series, dp.time);
-        }
-      }
-      if ((sx == null || !isFinite(sx)) && dp.logical != null) {
-        sx = logicalToCoordinateInterpolated(timeScale, dp.logical);
-      }
+      const sx = dataPointToCoordinate(this._chart, this._series, dp);
       const sy = this._series.priceToCoordinate(dp.price);
       if (sx != null && sy != null) {
         screenPoints.push({ x: sx, y: sy });

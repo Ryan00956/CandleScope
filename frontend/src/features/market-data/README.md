@@ -11,7 +11,7 @@ warming, gap recovery, and header price state.
 
 ```js
 {
-  view: { bars, renderBars, meta, loading, error, lastPrice, dataSource, wsStatus },
+  view: { bars, meta, loading, error, lastPrice, dataSource, wsStatus },
   actions: { retry, loadMoreLeft, onVisibleRangeChange, consumeIndicatorRangeRequest },
   status: { hasMoreLeft, loadingMoreLeft, activeChartReady, indicatorRangeRequests },
 }

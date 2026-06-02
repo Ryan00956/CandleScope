@@ -18,6 +18,7 @@ export function renderFillSeries({
   fillSeriesRef,
   fillSeriesStateRef,
   paneId,
+  paneIndex,
   definitionsCount,
   recordPerfEvent,
   onError,
@@ -60,7 +61,7 @@ export function renderFillSeries({
         lastValueVisible: false,
         priceLineVisible: false,
         crosshairMarkerVisible: false,
-      });
+      }, paneIndex);
       areaSeries.setData(entry.upperData);
       fillSeriesRef.current.push(areaSeries);
       createdFillSeries += 1;
@@ -74,7 +75,7 @@ export function renderFillSeries({
         lastValueVisible: false,
         priceLineVisible: false,
         crosshairMarkerVisible: false,
-      });
+      }, paneIndex);
       lowerSeries.setData(entry.lowerData);
       fillSeriesRef.current.push(lowerSeries);
       createdFillSeries += 1;

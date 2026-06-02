@@ -1,6 +1,3 @@
-const MAX_RENDER_GAP_POINTS_PER_GAP = 5_000;
-const MAX_RENDER_GAP_POINTS_TOTAL = 20_000;
-
 export function mergeByTime(older, current) {
   const merged = [...older, ...current];
   const uniq = new Map();
@@ -19,55 +16,26 @@ export function deduplicateByTime(data) {
   return Array.from(seen.values()).sort((a, b) => a.time - b.time);
 }
 
-export function buildRenderableChartData(data, intervalSeconds) {
-  if (!data || data.length <= 1 || !intervalSeconds || intervalSeconds <= 0) {
-    return data || [];
+function resolveTailGapNow(options) {
+  if (!options?.includeTailGap) return null;
+  if (options.nowSecs != null && Number.isFinite(Number(options.nowSecs))) {
+    return Math.floor(Number(options.nowSecs));
   }
-
-  const sorted = deduplicateByTime(data);
-  const rendered = [];
-  let insertedTotal = 0;
-
-  for (let i = 0; i < sorted.length; i += 1) {
-    const current = sorted[i];
-    if (i > 0) {
-      const previous = sorted[i - 1];
-      const diff = current.time - previous.time;
-      const missingBars = Math.round(diff / intervalSeconds) - 1;
-
-      if (missingBars > 0) {
-        const canInsertFullGap =
-          missingBars <= MAX_RENDER_GAP_POINTS_PER_GAP &&
-          insertedTotal + missingBars <= MAX_RENDER_GAP_POINTS_TOTAL;
-
-        if (canInsertFullGap) {
-          for (let t = previous.time + intervalSeconds; t < current.time; t += intervalSeconds) {
-            rendered.push({ time: t, __whitespace: true });
-            insertedTotal += 1;
-          }
-        } else {
-          const firstMissing = previous.time + intervalSeconds;
-          const lastMissing = current.time - intervalSeconds;
-          rendered.push({ time: firstMissing, __whitespace: true });
-          insertedTotal += 1;
-          if (lastMissing > firstMissing) {
-            rendered.push({ time: lastMissing, __whitespace: true });
-            insertedTotal += 1;
-          }
-        }
-      }
-    }
-    rendered.push(current);
+  if (options.nowMs != null && Number.isFinite(Number(options.nowMs))) {
+    return Math.floor(Number(options.nowMs) / 1000);
   }
-
-  return rendered;
+  return null;
 }
 
 /**
- * Detect gaps in a sorted K-line array.
+ * Detect internal gaps in a sorted K-line array.
  * Returns gap boundaries in unix seconds.
+ *
+ * Tail-gap detection is opt-in and must pass an explicit current time. The
+ * frontend recovery loop should not infer exchange trading sessions from
+ * Date.now(), because inactive sessions can look like missing bars forever.
  */
-export function detectGaps(data, intervalSeconds) {
+export function detectGaps(data, intervalSeconds, options = {}) {
   if (!data || data.length < 2 || !intervalSeconds || intervalSeconds <= 0) return [];
   const gaps = [];
   const threshold = intervalSeconds * 1.5;
@@ -83,10 +51,10 @@ export function detectGaps(data, intervalSeconds) {
     }
   }
 
-  const nowSecs = Math.floor(Date.now() / 1000);
+  const nowSecs = resolveTailGapNow(options);
   const latestBarTime = data[data.length - 1].time;
-  const tailGap = nowSecs - latestBarTime;
-  if (tailGap > intervalSeconds * 3) {
+  const tailGap = nowSecs == null ? 0 : nowSecs - latestBarTime;
+  if (nowSecs != null && tailGap > intervalSeconds * 3) {
     gaps.push({
       from: latestBarTime,
       to: nowSecs,

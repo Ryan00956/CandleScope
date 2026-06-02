@@ -15,7 +15,7 @@
  *   - Hover highlight for eraser tool
  */
 
-import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { dataPointToCoordinate } from "./coordinateUtils.js";
 
 // ── Word-wrap helper (CSS-px space) ──
 //
@@ -433,17 +433,7 @@ export class TextDrawingPrimitive {
   // ── Anchor → screen coords (CSS px relative to chart container) ──
   _anchorScreen() {
     if (!this._series || !this._chart) return null;
-    const timeScale = this._chart.timeScale();
-    let sx = null;
-    if (this._dataPoint.time != null) {
-      sx = timeScale.timeToCoordinate(this._dataPoint.time);
-      if (sx == null || !isFinite(sx)) {
-        sx = timeToCoordinateInterpolated(this._chart, this._series, this._dataPoint.time);
-      }
-    }
-    if ((sx == null || !isFinite(sx)) && this._dataPoint.logical != null) {
-        sx = logicalToCoordinateInterpolated(timeScale, this._dataPoint.logical);
-    }
+    const sx = dataPointToCoordinate(this._chart, this._series, this._dataPoint);
     const sy = this._series.priceToCoordinate(this._dataPoint.price);
     if (sx == null || sy == null || !isFinite(sx) || !isFinite(sy)) return null;
     return { x: sx, y: sy };

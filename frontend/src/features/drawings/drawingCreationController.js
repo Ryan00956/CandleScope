@@ -27,6 +27,20 @@ import {
   createTwoPointDrawingPrimitive,
 } from "./drawingPrimitiveFactory.js";
 
+function horizontalAnchorFromDataPoint(dataPoint) {
+  if (!dataPoint) return null;
+  if (typeof dataPoint.barOffsetFromLast === "number" && Number.isFinite(dataPoint.barOffsetFromLast)) {
+    return { barOffsetFromLast: dataPoint.barOffsetFromLast };
+  }
+  if (dataPoint.time != null && Number.isFinite(Number(dataPoint.time))) {
+    return { time: dataPoint.time };
+  }
+  if (typeof dataPoint.logical === "number" && Number.isFinite(dataPoint.logical)) {
+    return { logical: dataPoint.logical };
+  }
+  return null;
+}
+
 /** Pen / highlighter: begin a freehand stroke. */
 export function startFreehandStroke({
   tool,
@@ -115,13 +129,23 @@ export function placePositionDrawing({
 
   // Calculate visible time range to auto-span ~30% of visible chart
   const adapter = getChartAdapter();
-  let startTime = dataA.time;
-  let endTime = dataA.time;
+  let startAnchor = horizontalAnchorFromDataPoint(dataA);
+  let endAnchor = horizontalAnchorFromDataPoint(dataA);
   if (adapter?.isReady?.()) {
     const vr = adapter.getVisibleTimeRange?.();
-    if (vr) {
+    if (vr && dataA.time != null) {
       const visibleSpan = vr.to - vr.from;
-      endTime = dataA.time + visibleSpan * 0.15;
+      endAnchor = { time: dataA.time + visibleSpan * 0.15 };
+    } else if (dataA.barOffsetFromLast != null) {
+      const logicalRange = adapter.getVisibleRange?.()?.logical;
+      const visibleBars = logicalRange ? Math.max(1, logicalRange.to - logicalRange.from) : 20;
+      endAnchor = {
+        barOffsetFromLast: dataA.barOffsetFromLast + Math.max(1, Math.round(visibleBars * 0.15)),
+      };
+    } else if (dataA.logical != null) {
+      const logicalRange = adapter.getVisibleRange?.()?.logical;
+      const visibleBars = logicalRange ? Math.max(1, logicalRange.to - logicalRange.from) : 20;
+      endAnchor = { logical: dataA.logical + Math.max(1, Math.round(visibleBars * 0.15)) };
     }
   }
 
@@ -146,7 +170,7 @@ export function placePositionDrawing({
   const posPrim = createPositionPrimitive({
     tool,
     dataPoint: dataA,
-    timeRange: { start: startTime, end: endTime },
+    timeRange: { start: startAnchor, end: endAnchor },
     tpOffset,
     slOffset,
     positionSize: positionSizeRef.current || 1000,

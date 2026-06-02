@@ -19,6 +19,38 @@ function storageKey(symbol) {
   return `${STORAGE_PREFIX}-${symbol}`;
 }
 
+function serializeDataPoint(dataPoint) {
+  const source = dataPoint || {};
+  const out = {};
+  if (source.time != null && isFinite(Number(source.time))) out.time = source.time;
+  if (typeof source.logical === "number" && Number.isFinite(source.logical)) out.logical = source.logical;
+  if (typeof source.barOffsetFromLast === "number" && Number.isFinite(source.barOffsetFromLast)) {
+    out.barOffsetFromLast = source.barOffsetFromLast;
+    delete out.time;
+    delete out.logical;
+  }
+  if (source.price != null && isFinite(Number(source.price))) out.price = source.price;
+  return out;
+}
+
+function serializeDataPoints(points) {
+  return (points || []).map(serializeDataPoint);
+}
+
+function serializeHorizontalAnchor(anchor) {
+  if (anchor == null) return null;
+  if (typeof anchor === "number" && Number.isFinite(anchor)) return anchor;
+  if (typeof anchor !== "object") return null;
+  const out = {};
+  if (typeof anchor.barOffsetFromLast === "number" && Number.isFinite(anchor.barOffsetFromLast)) {
+    out.barOffsetFromLast = anchor.barOffsetFromLast;
+    return out;
+  }
+  if (anchor.time != null && isFinite(Number(anchor.time))) out.time = anchor.time;
+  if (typeof anchor.logical === "number" && Number.isFinite(anchor.logical)) out.logical = anchor.logical;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 /**
  * Serialize a primitive instance to a plain JSON-safe object.
  */
@@ -30,10 +62,7 @@ function serializePrimitive(prim) {
       type: "line",
       id: prim._id,
       lineType: prim._lineType,
-      dataPoints: prim._dataPoints.map((dp) => ({
-        time: dp.time,
-        price: dp.price,
-      })),
+      dataPoints: serializeDataPoints(prim._dataPoints),
       color: prim._color,
       lineWidth: prim._lineWidth,
     };
@@ -44,10 +73,7 @@ function serializePrimitive(prim) {
       type: "axis-line",
       id: prim._id,
       axisLineType: prim._axisLineType,
-      dataPoint: {
-        time: prim._dataPoint?.time,
-        price: prim._dataPoint?.price,
-      },
+      dataPoint: serializeDataPoint(prim._dataPoint),
       color: prim._color,
       lineWidth: prim._lineWidth,
     };
@@ -57,10 +83,7 @@ function serializePrimitive(prim) {
     return {
       type: "angle-measure",
       id: prim._id,
-      dataPoints: prim._dataPoints.map((dp) => ({
-        time: dp.time,
-        price: dp.price,
-      })),
+      dataPoints: serializeDataPoints(prim._dataPoints),
       color: prim._color,
       lineWidth: prim._lineWidth,
     };
@@ -71,10 +94,7 @@ function serializePrimitive(prim) {
     return {
       type: "text",
       id: prim._id,
-      dataPoint: {
-        time: prim._dataPoint.time,
-        price: prim._dataPoint.price,
-      },
+      dataPoint: serializeDataPoint(prim._dataPoint),
       text: prim._text,
       color: prim._color,
       fontSize: prim._fontSize,
@@ -96,10 +116,7 @@ function serializePrimitive(prim) {
     return {
       type: "fibonacci",
       id: prim._id,
-      dataPoints: prim._dataPoints.map((dp) => ({
-        time: dp.time,
-        price: dp.price,
-      })),
+      dataPoints: serializeDataPoints(prim._dataPoints),
       color: prim._color,
       lineWidth: prim._lineWidth,
       levels: prim._levels,
@@ -115,7 +132,10 @@ function serializePrimitive(prim) {
       entryPrice: prim._entryPrice,
       tpPrice: prim._tpPrice,
       slPrice: prim._slPrice,
-      timeRange: { ...prim._timeRange },
+      timeRange: {
+        start: serializeHorizontalAnchor(prim._timeRange?.start),
+        end: serializeHorizontalAnchor(prim._timeRange?.end),
+      },
       positionSize: prim._positionSize,
       infoPanelOffset: prim._infoPanelOffset ? { ...prim._infoPanelOffset } : undefined,
     };
@@ -126,10 +146,7 @@ function serializePrimitive(prim) {
       type: "shape",
       id: prim._id,
       shapeType: prim._shapeType,
-      dataPoints: prim._dataPoints.map((dp) => ({
-        time: dp.time,
-        price: dp.price,
-      })),
+      dataPoints: serializeDataPoints(prim._dataPoints),
       color: prim._color,
       lineWidth: prim._lineWidth,
       fillColor: prim._fillColor,
@@ -142,10 +159,7 @@ function serializePrimitive(prim) {
     return {
       type: "highlighter",
       id: prim._id,
-      dataPoints: prim._dataPoints.map((dp) => ({
-        time: dp.time,
-        price: dp.price,
-      })),
+      dataPoints: serializeDataPoints(prim._dataPoints),
       color: prim._color,
       lineWidth: prim._lineWidth,
       opacity: prim._opacity,
@@ -158,10 +172,7 @@ function serializePrimitive(prim) {
   return {
     type: "freehand",
     id: prim._id,
-    dataPoints: prim._dataPoints.map((dp) => ({
-      time: dp.time,
-      price: dp.price,
-    })),
+    dataPoints: serializeDataPoints(prim._dataPoints),
     color: prim._color,
     lineWidth: prim._lineWidth,
   };

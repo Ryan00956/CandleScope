@@ -7,7 +7,7 @@
  * remain stable.
  */
 
-import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { dataPointToCoordinate } from "./coordinateUtils.js";
 
 function normalizeAxisLineType(value) {
   if (value === "vertical" || value === "cross") return value;
@@ -156,19 +156,9 @@ class AxisLinePaneView {
     if (!series || !chart) return;
 
     const dp = source._dataPoint || {};
-    const timeScale = chart.timeScale();
-    let x = null;
+    let x = dataPointToCoordinate(chart, series, dp);
     let y = null;
 
-    if (dp.time != null) {
-      x = timeScale.timeToCoordinate(dp.time);
-      if (x == null || !Number.isFinite(x)) {
-        x = timeToCoordinateInterpolated(chart, series, dp.time);
-      }
-    }
-    if ((x == null || !Number.isFinite(x)) && dp.logical != null) {
-        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
-    }
     if (dp.price != null) {
       y = series.priceToCoordinate(dp.price);
     }
@@ -289,19 +279,9 @@ export class AxisLineDrawingPrimitive {
   _screenPoint() {
     if (!this._series || !this._chart || !this._dataPoint) return null;
     const dp = this._dataPoint;
-    const timeScale = this._chart.timeScale();
-    let x = null;
+    let x = dataPointToCoordinate(this._chart, this._series, dp);
     let y = null;
 
-    if (dp.time != null) {
-      x = timeScale.timeToCoordinate(dp.time);
-      if (x == null || !Number.isFinite(x)) {
-        x = timeToCoordinateInterpolated(this._chart, this._series, dp.time);
-      }
-    }
-    if ((x == null || !Number.isFinite(x)) && dp.logical != null) {
-        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
-    }
     if (dp.price != null) {
       y = this._series.priceToCoordinate(dp.price);
     }

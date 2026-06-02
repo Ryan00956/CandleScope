@@ -15,7 +15,7 @@
  *   - Uses K-line colors from CSS variables
  */
 
-import { timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { dataPointToCoordinate } from "./coordinateUtils.js";
 
 // ── Color helpers ──
 
@@ -60,6 +60,27 @@ function normalizeInfoPanelOffset(offset) {
     x: Number.isFinite(x) ? x : 0,
     y: Number.isFinite(y) ? y : 0,
   };
+}
+
+function normalizeHorizontalAnchor(anchor) {
+  if (anchor == null) return null;
+  if (typeof anchor === "number" && Number.isFinite(anchor)) return { time: anchor };
+  if (typeof anchor !== "object") return null;
+
+  const out = {};
+  if (typeof anchor.barOffsetFromLast === "number" && Number.isFinite(anchor.barOffsetFromLast)) {
+    out.barOffsetFromLast = anchor.barOffsetFromLast;
+  } else if (anchor.time != null && Number.isFinite(Number(anchor.time))) {
+    out.time = anchor.time;
+  } else if (typeof anchor.logical === "number" && Number.isFinite(anchor.logical)) {
+    out.logical = anchor.logical;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function horizontalAnchorToDataPoint(anchor, price) {
+  const normalized = normalizeHorizontalAnchor(anchor);
+  return normalized ? { ...normalized, price } : null;
 }
 
 // ── Smart price formatter ──
@@ -552,16 +573,10 @@ class PositionPaneView {
 
     if (!series || !chart) return;
 
-    const timeScale = chart.timeScale();
-
     // Convert time coords to screen X
-    const toScreenX = (time) => {
-      if (time == null) return null;
-      let x = timeScale.timeToCoordinate(time);
-      if (x == null || !isFinite(x)) {
-        x = timeToCoordinateInterpolated(chart, series, time);
-      }
-      return x;
+    const toScreenX = (anchor) => {
+      const dataPoint = horizontalAnchorToDataPoint(anchor, source._entryPrice);
+      return dataPointToCoordinate(chart, series, dataPoint);
     };
 
     const entryY = series.priceToCoordinate(source._entryPrice);
@@ -699,12 +714,10 @@ export class PositionDrawingPrimitive {
   get selected() { return this._selected; }
   get dataPoints() {
     const points = [];
-    if (this._timeRange.start != null) {
-      points.push({ time: this._timeRange.start, price: this._entryPrice });
-    }
-    if (this._timeRange.end != null) {
-      points.push({ time: this._timeRange.end, price: this._entryPrice });
-    }
+    const start = horizontalAnchorToDataPoint(this._timeRange.start, this._entryPrice);
+    const end = horizontalAnchorToDataPoint(this._timeRange.end, this._entryPrice);
+    if (start) points.push(start);
+    if (end) points.push(end);
     return points;
   }
 
@@ -766,7 +779,10 @@ export class PositionDrawingPrimitive {
 
   setDataPoints(points) {
     if (points.length >= 2) {
-      this._timeRange = { start: points[0].time, end: points[1].time };
+      this._timeRange = {
+        start: normalizeHorizontalAnchor(points[0]),
+        end: normalizeHorizontalAnchor(points[1]),
+      };
       this._entryPrice = points[0].price;
     }
     this._requestUpdate?.();
@@ -790,16 +806,11 @@ export class PositionDrawingPrimitive {
     if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
 
-    const timeScale = this._chart.timeScale();
     const series = this._series;
 
-    const toScreenX = (time) => {
-      if (time == null) return null;
-      let sx = timeScale.timeToCoordinate(time);
-      if (sx == null || !isFinite(sx)) {
-        sx = timeToCoordinateInterpolated(this._chart, series, time);
-      }
-      return sx;
+    const toScreenX = (anchor) => {
+      const dataPoint = horizontalAnchorToDataPoint(anchor, this._entryPrice);
+      return dataPointToCoordinate(this._chart, series, dataPoint);
     };
 
     const leftX = toScreenX(this._timeRange.start);

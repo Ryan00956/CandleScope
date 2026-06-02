@@ -14,7 +14,7 @@
  *   - hit-testing for selection, endpoint dragging, and whole-line dragging
  */
 
-import { logicalToCoordinateInterpolated, timeToCoordinateInterpolated } from "./coordinateUtils.js";
+import { dataPointToCoordinate } from "./coordinateUtils.js";
 
 // ── Geometry helpers ──
 
@@ -234,23 +234,10 @@ class LinePaneView {
 
     if (!series || !chart) return;
 
-    const timeScale = chart.timeScale();
     const points = [];
 
     for (const dp of source._dataPoints) {
-      let x = null;
-      // Prefer time-based coordinate (survives timeframe switches)
-      if (dp.time != null) {
-        x = timeScale.timeToCoordinate(dp.time);
-        // If exact match failed, interpolate between bracketing candles
-        if (x == null || !isFinite(x)) {
-          x = timeToCoordinateInterpolated(chart, series, dp.time);
-        }
-      }
-      // Fallback to logical index (for preview lines or legacy data)
-      if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
-      }
+      const x = dataPointToCoordinate(chart, series, dp);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -396,19 +383,8 @@ export class LineDrawingPrimitive {
     if (!this._series || !this._chart) return null;
     if (this._dataPoints.length < 2) return null;
 
-    const timeScale = this._chart.timeScale();
-
     const screenPoints = this._dataPoints.map((dp) => {
-      let x = null;
-      if (dp.time != null) {
-        x = timeScale.timeToCoordinate(dp.time);
-        if (x == null || !isFinite(x)) {
-          x = timeToCoordinateInterpolated(this._chart, this._series, dp.time);
-        }
-      }
-      if ((x == null || !isFinite(x)) && dp.logical != null) {
-        x = logicalToCoordinateInterpolated(timeScale, dp.logical);
-      }
+      const x = dataPointToCoordinate(this._chart, this._series, dp);
       return { x, y: this._series.priceToCoordinate(dp.price) };
     });
 

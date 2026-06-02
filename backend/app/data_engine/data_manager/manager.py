@@ -521,6 +521,7 @@ class DataManager:
         market_type: str = "spot",
         backfill_reason: str | None = "visible_load_more",
         backfill_requester: str = "query_before",
+        auto_backfill: bool | None = None,
     ) -> QueryResult:
         """Get bars before a timestamp (for pagination / load-more)."""
         market_type = self._normalize_market_type(market_type)
@@ -531,6 +532,7 @@ class DataManager:
             limit,
             exchange=exchange,
             market_type=market_type,
+            auto_backfill=auto_backfill,
         )
         return self._submit_missing_ranges(
             result,

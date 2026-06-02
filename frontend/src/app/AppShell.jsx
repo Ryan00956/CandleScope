@@ -1,0 +1,56 @@
+import IntervalSelector from "../components/IntervalSelector";
+import ChartWorkspace from "./ChartWorkspace";
+import LazyFeatureSurfaces from "./LazyFeatureSurfaces";
+import StatusBar from "./StatusBar";
+import TopBar from "./TopBar";
+import { buildAppShellViewModel } from "./appShellViewModel";
+
+export default function AppShell({
+  pageExportRef,
+  chartSurfaceRef,
+  session,
+  marketData,
+  drawings,
+  indicators,
+  settings,
+  priceScale,
+  watchlist,
+  exportFlow,
+  alerts,
+}) {
+  const model = buildAppShellViewModel({
+    session,
+    marketData,
+    drawings,
+    indicators,
+    settings,
+    priceScale,
+    watchlist,
+    exportFlow,
+    alerts,
+  });
+  const chartWorkspace = {
+    ...model.chartWorkspace,
+    chart: {
+        ...model.chartWorkspace.chart,
+      chartProps: {
+        ...model.chartWorkspace.chart.chartProps,
+        ref: chartSurfaceRef,
+      },
+    },
+  };
+
+  return (
+    <div className="app-layout" ref={pageExportRef}>
+      <TopBar {...model.topBar} />
+
+      <IntervalSelector {...model.intervalSelector} />
+
+      <ChartWorkspace {...chartWorkspace} />
+
+      <LazyFeatureSurfaces surfaces={model.lazySurfaces} />
+
+      <StatusBar status={model.statusBar} />
+    </div>
+  );
+}

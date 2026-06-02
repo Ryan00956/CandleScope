@@ -415,6 +415,16 @@ async def get_klines_history(
     days: float = Query(7, ge=0.001, le=3650, description="Historical days (supports fractional, e.g. 0.04)"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    max_wait_ms: int = Query(
+        2500,
+        ge=0,
+        le=8000,
+        description=(
+            "Cold-start budget (ms) to briefly wait for an initial backfill to "
+            "deliver bars before returning. Only applies when cache/storage are "
+            "empty and a backfill was triggered; warm queries return immediately."
+        ),
+    ),
 ):
     """Get historical K-line bars for a time range."""
     _validate_interval(interval)
@@ -429,18 +439,37 @@ async def get_klines_history(
         interval_secs = parse_custom_interval(interval) or 60
         needed_limit = int((end_ms - start_ms) / 1000 / interval_secs) + 100
 
-        result = await run_storage(
-            _call_data_manager_method,
-            dm.query,
-            symbol, interval,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            limit=needed_limit,
-            exchange=exchange,
-            market_type=market_type,
-            backfill_reason="initial_history",
-            backfill_requester="klines_history",
-        )
+        async def _run_history_query(auto_backfill=None):
+            return await run_storage(
+                _call_data_manager_method,
+                dm.query,
+                symbol, interval,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=needed_limit,
+                exchange=exchange,
+                market_type=market_type,
+                auto_backfill=auto_backfill,
+                backfill_reason="initial_history",
+                backfill_requester="klines_history",
+            )
+
+        result = await _run_history_query()
+        backfill_triggered = bool(result.backfill_triggered)
+
+        # Cold-start path: the first query of an uncached series returns no bars
+        # and only schedules an *async* backfill. Without a brief wait the chart
+        # paints blank and depends entirely on the client retry loop / WS event
+        # to recover, which is what makes K-lines "sometimes" fail to load.
+        # Poll the (fast, ~sub-second) backfill within a bounded budget so the
+        # very first response already carries data. Poll re-queries pass
+        # auto_backfill=False so we wait for the already-scheduled backfill
+        # instead of spamming duplicate backfill requests.
+        if max_wait_ms > 0 and not result.bars and backfill_triggered:
+            deadline = time.monotonic() + (max_wait_ms / 1000)
+            while not result.bars and time.monotonic() < deadline:
+                await asyncio.sleep(0.2)
+                result = await _run_history_query(auto_backfill=False)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager history query failed: {exc}") from exc
 
@@ -480,7 +509,7 @@ async def get_klines_history(
         "source": result.source.value,
         "fetched": result.total,
         "has_tail_gap": result.has_tail_gap,
-        "backfill_triggered": result.backfill_triggered,
+        "backfill_triggered": backfill_triggered,
         "verified_contiguous": verification["verified_contiguous"],
         "missing_ranges": missing_ranges,
         "cache": result.metadata,
@@ -640,6 +669,18 @@ async def get_klines_before(
     bars: int = Query(500, ge=1, le=1000, description="How many bars to load"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
+    max_wait_ms: int = Query(
+        2500,
+        ge=0,
+        le=8000,
+        description=(
+            "Cold-start budget (ms) to briefly wait for a load-more backfill to "
+            "deliver bars before returning. Only applies when the older region is "
+            "uncached and a backfill was triggered. This keeps candles in sync "
+            "with the server-computed indicator stream during drag-left, which "
+            "otherwise paints indicators for bars the chart has not yet received."
+        ),
+    ),
 ):
     """Paginated historical data — load bars before a timestamp."""
     _validate_interval(interval)
@@ -650,15 +691,39 @@ async def get_klines_before(
     dm = _require_data_manager(request)
     try:
         before_ms = before * 1000
-        result = await run_storage(
-            _call_data_manager_method,
-            dm.query_before,
-            symbol, interval, before_ms, bars,
-            exchange,
-            market_type=market_type,
-            backfill_reason="visible_load_more",
-            backfill_requester="klines_history_before",
-        )
+
+        async def _run_before_query(auto_backfill=None):
+            return await run_storage(
+                _call_data_manager_method,
+                dm.query_before,
+                symbol, interval, before_ms, bars,
+                exchange,
+                market_type=market_type,
+                auto_backfill=auto_backfill,
+                backfill_reason="visible_load_more",
+                backfill_requester="klines_history_before",
+            )
+
+        result = await _run_before_query()
+        backfill_triggered = bool(result.backfill_triggered)
+        has_more = bool(result.has_more)
+
+        # Cold drag-left: an uncached older region returns no bars and only
+        # schedules an async backfill. Poll the (fast) backfill within a bounded
+        # budget so the first response carries candles, instead of leaving a
+        # multi-second window where server-streamed indicators are drawn but the
+        # candle series is still empty. Poll re-queries pass auto_backfill=False
+        # to avoid spamming duplicate backfill requests.
+        if max_wait_ms > 0 and not result.bars and backfill_triggered:
+            deadline = time.monotonic() + (max_wait_ms / 1000)
+            while not result.bars and time.monotonic() < deadline:
+                await asyncio.sleep(0.2)
+                result = await _run_before_query(auto_backfill=False)
+            # If the wait timed out before the backfill delivered bars, keep
+            # has_more=True (data is still on the way) so the client retries
+            # instead of concluding there is no more history. Re-queries made
+            # with auto_backfill=False would otherwise report has_more=False.
+            has_more = bool(result.has_more) if result.bars else True
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager before query failed: {exc}") from exc
 
@@ -671,10 +736,10 @@ async def get_klines_before(
         "before": before,
         "bars": bars,
         "count": len(data),
-        "has_more": result.has_more,
+        "has_more": has_more,
         "source": result.source.value,
         "fetched": result.total,
-        "backfill_triggered": result.backfill_triggered,
+        "backfill_triggered": backfill_triggered,
         "missing_ranges": [r.to_dict() for r in result.missing_ranges],
         "cache": result.metadata,
         "data": data,

@@ -1,0 +1,144 @@
+export function buildLocalizationOptions(timezone = "Local", interval = "1h") {
+  const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
+  try {
+    const showSeconds = /^\d+s$/.test(String(interval));
+    const tooltipFormatOptions = {
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    };
+    const datePartsOptions = {
+      year: "numeric", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+    };
+    if (timeZoneOpt) {
+      tooltipFormatOptions.timeZone = timeZoneOpt;
+      datePartsOptions.timeZone = timeZoneOpt;
+    }
+    const tooltipFormatter = new Intl.DateTimeFormat("en-GB", tooltipFormatOptions);
+    const partsFormatter = new Intl.DateTimeFormat("en-GB", datePartsOptions);
+
+    return {
+      localization: {
+        timeFormatter: (ts) => tooltipFormatter.format(new Date(ts * 1000)),
+      },
+      timeScale: {
+        tickMarkFormatter: (ts, tickMarkType) => {
+          const parts = partsFormatter.formatToParts(new Date(ts * 1000));
+          const get = (type) => parts.find((part) => part.type === type)?.value;
+          const year = get("year");
+          const month = get("month");
+          const day = get("day");
+          const hour = get("hour");
+          const min = get("minute");
+          const sec = get("second");
+
+          switch (tickMarkType) {
+            case 0:
+              return year;
+            case 1:
+              return `${month} '${year.slice(-2)}`;
+            case 2:
+              return `${day} ${month}`;
+            case 3:
+              return showSeconds ? `${hour}:${min}:${sec}` : `${hour}:${min}`;
+            case 4:
+              return `${hour}:${min}:${sec}`;
+            default:
+              return `${day} ${month}`;
+          }
+        },
+      },
+    };
+  } catch {
+    return {};
+  }
+}
+
+export function buildCrosshairOptions(visible = true) {
+  return {
+    mode: 0,
+    vertLine: {
+      color: "rgba(59, 130, 246, 0.4)", width: 1, style: 2,
+      labelBackgroundColor: "#3b82f6",
+      visible,
+      labelVisible: visible,
+    },
+    horzLine: {
+      color: "rgba(59, 130, 246, 0.4)", width: 1, style: 2,
+      labelBackgroundColor: "#3b82f6",
+      visible,
+      labelVisible: visible,
+    },
+  };
+}
+
+function getPaneThemeColors({ theme, customBg }) {
+  return {
+    bgColor: theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17"),
+    textColor: theme === "light" ? "#1e293b" : "#94a3b8",
+    gridColor: theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)",
+    borderColor: theme === "light" ? "#e2e8f0" : "#1e293b",
+  };
+}
+
+export function buildChartPaneOptions({
+  container,
+  theme,
+  customBg,
+  timezone,
+  interval,
+  showTimeScale,
+}) {
+  const loc = buildLocalizationOptions(timezone, interval);
+  const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({ theme, customBg });
+
+  return {
+    width: container.clientWidth,
+    height: container.clientHeight,
+    autoSize: true,
+    layout: {
+      background: { color: bgColor },
+      textColor,
+      fontFamily: "'Inter', sans-serif",
+      fontSize: 12,
+      attributionLogo: false,
+    },
+    grid: {
+      vertLines: { color: gridColor },
+      horzLines: { color: gridColor },
+    },
+    crosshair: buildCrosshairOptions(true),
+    rightPriceScale: {
+      alignLabels: false,
+      entireTextOnly: true,
+      borderColor,
+      scaleMargins: { top: 0.05, bottom: 0.05 },
+      autoScale: true,
+      minimumWidth: 80,
+    },
+    ...(loc.localization ? { localization: loc.localization } : {}),
+    timeScale: {
+      borderColor,
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 5,
+      barSpacing: 8,
+      visible: showTimeScale,
+      ...(loc.timeScale ? { tickMarkFormatter: loc.timeScale.tickMarkFormatter } : {}),
+    },
+    handleScroll: { vertTouchDrag: false },
+  };
+}
+
+export function applyChartPaneAppearance(chart, { theme, customBg, timezone, interval }) {
+  const loc = buildLocalizationOptions(timezone, interval);
+  const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({ theme, customBg });
+  chart.applyOptions({
+    layout: { background: { color: bgColor }, textColor },
+    grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
+    rightPriceScale: { borderColor },
+    timeScale: { borderColor },
+    ...(loc.localization ? { localization: loc.localization } : {}),
+    ...(loc.timeScale ? { timeScale: { tickMarkFormatter: loc.timeScale.tickMarkFormatter } } : {}),
+  });
+}

@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "check:architecture": "node scripts/check-architecture.mjs",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "smoke": "node scripts/smoke.mjs",
+    "test:drawing": "node --test src/features/drawings/__tests__/*.test.js"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

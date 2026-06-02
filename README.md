@@ -50,6 +50,10 @@ npm install
 npm run dev
 ```
 
+In local development the frontend uses same-origin `/api/v1`; Vite proxies
+HTTP and WebSocket traffic to `http://localhost:8000`. Both
+`http://localhost:5173` and `http://127.0.0.1:5173` are valid dev entrypoints.
+
 Default URLs:
 
 | Service | URL |
@@ -161,19 +165,26 @@ Core backend modules:
 
 The frontend is a React + Vite app using Lightweight Charts v5.
 
+Frontend architecture notes:
+
+- [Frontend Architecture](frontend/ARCHITECTURE.md)
+- [Runtime Boundaries](frontend/src/runtime/README.md)
+
 Important frontend pieces:
 
 | Path | Purpose |
 |---|---|
-| `frontend/src/App.jsx` | Main application shell |
+| `frontend/src/App.jsx` | Composition root for runtime hooks and UI surfaces |
 | `frontend/src/components/MultiPaneChart.jsx` | Multi-pane chart layout |
 | `frontend/src/components/ChartWidget.jsx` | Lightweight Charts wrapper |
 | `frontend/src/components/DrawingToolbar.jsx` | Drawing tool controls |
-| `frontend/src/components/IndicatorPanel.jsx` | Indicator browsing/configuration |
-| `frontend/src/components/IndicatorEditor.jsx` | Pyne/custom indicator editor |
+| `frontend/src/components/IndicatorPanel.jsx` | Lazy-loaded indicator browsing/configuration |
+| `frontend/src/components/IndicatorEditor.jsx` | Pyne/custom indicator editor, loaded through indicator workflows |
 | `frontend/src/components/SymbolSearch*.jsx` | Exchange-aware symbol search |
 | `frontend/src/components/WatchlistSidebar.jsx` | Watchlists and price tracking |
-| `frontend/src/components/SettingsModal.jsx` | Proxy, data, chart, and maintenance settings |
+| `frontend/src/components/SettingsModal.jsx` | Lazy-loaded proxy, data, chart, and maintenance settings |
+| `frontend/src/runtime` | Runtime orchestration grouped by chart, streams, exchange, preferences, and workflows |
+| `frontend/src/services/apiConfig.js` | API base and HTTP-to-WebSocket URL configuration |
 | `frontend/src/services/api.js` | Main backend API client |
 | `frontend/src/services/indicatorApi.js` | Indicator API client |
 | `frontend/src/hooks/useIndicators.js` | Indicator HTTP/WS integration |
@@ -186,6 +197,7 @@ cd frontend
 npm run dev
 npm run build
 npm run lint
+npm run smoke -- --url http://127.0.0.1:5173/
 ```
 
 ## Indicators And Pyne
@@ -306,10 +318,17 @@ npm run build
 npm run lint
 ```
 
+For rendered frontend smoke checks, start the backend and Vite, then run
+`npm run smoke -- --url http://127.0.0.1:5173/`. The smoke check confirms the
+status bar reaches `Connected to Binance`, shows non-zero `bars`, reports
+`Live (WebSocket)`, loads the drawing toolbar, and opens the lazy-loaded symbol
+search and Settings panels.
+
 ## Notes
 
 - Configure proxy settings in the app settings panel or through `/api/v1/settings/proxy` if your exchange access requires a proxy.
 - Runtime proxy settings are persisted under `backend/data/proxy_settings.json` by default.
+- On Windows, if backend startup fails while printing status symbols, start it with `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`.
 - SQLite data is local and ignored by git.
 - Pyne scripts execute locally in the backend process/process pool according to the configured security mode. Only use `unsafe` for scripts you trust.
 - This repository is licensed under GNU GPL-3.0. See [LICENSE](LICENSE).

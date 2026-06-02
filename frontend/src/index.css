@@ -121,6 +121,9 @@ body {
 }
 .watchlist-sidebar.collapsed { width: 40px !important; }
 .watchlist-sidebar.resizing { transition: none; }
+.watchlist-sidebar-loading {
+  opacity: 0.65;
+}
 
 /* ── Sidebar header ── */
 .wl-header {
@@ -2188,6 +2191,9 @@ body {
   border-right: 1px solid var(--border-color);
   flex-shrink: 0;
   z-index: 10;
+}
+.drawing-toolbar-loading {
+  opacity: 0.65;
 }
 
 .drawing-tool-btn {

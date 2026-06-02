@@ -23,22 +23,3 @@ export function eraseDrawingAtPointer({
   persistDrawings();
   return true;
 }
-
-export function updateEraserHoverState(primitives, x, y) {
-  let hitId = null;
-  for (let index = primitives.length - 1; index >= 0; index -= 1) {
-    const prim = primitives[index];
-    let isHit = false;
-    if (typeof prim.hitTest === "function") {
-      const hit = prim.hitTest(x, y);
-      isHit = hit != null && hit !== false;
-    }
-    if (isHit && !hitId) {
-      hitId = prim.id;
-      prim.setHovered(true);
-    } else {
-      prim.setHovered(false);
-    }
-  }
-  return hitId;
-}

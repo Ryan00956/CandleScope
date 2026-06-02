@@ -339,8 +339,11 @@ export class AngleMeasurementPrimitive {
   }
 
   setSelected(v) {
-    this._selected = !!v;
-    this._requestUpdate?.();
+    const next = !!v;
+    if (this._selected !== next) {
+      this._selected = next;
+      this._requestUpdate?.();
+    }
   }
 
   setHovered(v) {

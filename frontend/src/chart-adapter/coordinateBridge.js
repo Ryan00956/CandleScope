@@ -1,4 +1,23 @@
-export function timeToCoordinateInterpolated(chart, series, timestamp) {
+function getCachedSeriesData(series, context) {
+  if (context && Object.prototype.hasOwnProperty.call(context, "seriesData")) {
+    return context.seriesData;
+  }
+
+  let data;
+  try {
+    data = series?.data?.() || [];
+  } catch {
+    data = [];
+  }
+
+  if (context) {
+    context.seriesData = data;
+  }
+
+  return data;
+}
+
+export function timeToCoordinateInterpolated(chart, series, timestamp, context) {
   if (!chart || !series || timestamp == null) return null;
 
   const timeScale = chart.timeScale();
@@ -10,12 +29,7 @@ export function timeToCoordinateInterpolated(chart, series, timestamp) {
     // Fall through to interpolation.
   }
 
-  let data;
-  try {
-    data = series.data();
-  } catch {
-    return null;
-  }
+  const data = getCachedSeriesData(series, context);
   if (!data || data.length === 0) return null;
 
   let lo = 0;
@@ -62,17 +76,13 @@ function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function getSeriesData(series) {
-  try {
-    return series?.data?.() || [];
-  } catch {
-    return [];
-  }
+function getSeriesData(series, context) {
+  return getCachedSeriesData(series, context);
 }
 
-function getLastSeriesLogical(chart, series) {
+function getLastSeriesLogical(chart, series, context) {
   if (!chart || !series) return null;
-  const data = getSeriesData(series);
+  const data = getSeriesData(series, context);
   if (!data.length) return null;
 
   const last = data[data.length - 1];
@@ -92,26 +102,27 @@ function getLastSeriesLogical(chart, series) {
   return data.length - 1;
 }
 
-export function barOffsetFromLastToCoordinate(chart, series, barOffsetFromLast) {
+export function barOffsetFromLastToCoordinate(chart, series, barOffsetFromLast, context) {
   if (!isFiniteNumber(barOffsetFromLast)) return null;
-  const lastLogical = getLastSeriesLogical(chart, series);
+  const lastLogical = getLastSeriesLogical(chart, series, context);
   if (!isFiniteNumber(lastLogical)) return null;
   return logicalToCoordinateInterpolated(chart?.timeScale?.(), lastLogical + barOffsetFromLast);
 }
 
-export function dataPointToCoordinate(chart, series, dataPoint) {
+export function dataPointToCoordinate(chart, series, dataPoint, context) {
   if (!chart || !series || !dataPoint) return null;
 
   if (isFiniteNumber(dataPoint.barOffsetFromLast)) {
-    const offsetX = barOffsetFromLastToCoordinate(chart, series, dataPoint.barOffsetFromLast);
+    const offsetX = barOffsetFromLastToCoordinate(chart, series, dataPoint.barOffsetFromLast, context);
     if (isFiniteNumber(offsetX)) return offsetX;
   }
 
   const timeScale = chart.timeScale();
+
   if (dataPoint.time != null) {
     let x = timeScale.timeToCoordinate(dataPoint.time);
     if (!isFiniteNumber(x)) {
-      x = timeToCoordinateInterpolated(chart, series, dataPoint.time);
+      x = timeToCoordinateInterpolated(chart, series, dataPoint.time, context);
     }
     if (isFiniteNumber(x)) return x;
   }

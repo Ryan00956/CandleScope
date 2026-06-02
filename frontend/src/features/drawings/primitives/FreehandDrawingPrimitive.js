@@ -144,9 +144,10 @@ class FreehandPaneView {
     if (!series || !chart) return;
 
     const points = [];
+    const coordinateContext = {};
 
     for (const dp of source._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp);
+      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -256,8 +257,9 @@ export class FreehandDrawingPrimitive {
   }
 
   setHovered(v) {
-    if (this._hovered !== v) {
-      this._hovered = v;
+    const next = !!v;
+    if (this._hovered !== next) {
+      this._hovered = next;
       this._requestUpdate?.();
     }
   }
@@ -307,9 +309,10 @@ export class FreehandDrawingPrimitive {
     if (this._dataPoints.length < 2) return false;
 
     const screenPoints = [];
+    const coordinateContext = {};
 
     for (const dp of this._dataPoints) {
-      const sx = dataPointToCoordinate(this._chart, this._series, dp);
+      const sx = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
       const sy = this._series.priceToCoordinate(dp.price);
       if (sx != null && sy != null) {
         screenPoints.push({ x: sx, y: sy });

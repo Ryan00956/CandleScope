@@ -316,13 +316,19 @@ export class FibonacciDrawingPrimitive {
   }
 
   setSelected(v) {
-    this._selected = v;
-    this._requestUpdate?.();
+    const next = !!v;
+    if (this._selected !== next) {
+      this._selected = next;
+      this._requestUpdate?.();
+    }
   }
 
   setHovered(v) {
-    this._hovered = v;
-    this._requestUpdate?.();
+    const next = !!v;
+    if (this._hovered !== next) {
+      this._hovered = next;
+      this._requestUpdate?.();
+    }
   }
 
   setColor(c) {

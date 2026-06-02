@@ -144,5 +144,5 @@ export function decimateScreenPoints(points, epsilon) {
 }
 
 export function setCursor(el, cursor) {
-  if (el) el.style.setProperty("cursor", cursor);
+  if (el && el.style.cursor !== cursor) el.style.setProperty("cursor", cursor);
 }

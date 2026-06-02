@@ -20,14 +20,7 @@
  *   - Clear all drawings
  */
 import { useCallback, useEffect, useRef } from "react";
-import { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
-import { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
 import { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
-import { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
-import { PositionDrawingPrimitive } from "./primitives/PositionDrawingPrimitive.js";
-import { ShapeDrawingPrimitive } from "./primitives/ShapeDrawingPrimitive.js";
-import { AxisLineDrawingPrimitive } from "./primitives/AxisLineDrawingPrimitive.js";
-import { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitive.js";
 import { clearSavedDrawings } from "./drawingPersistence.js";
 import {
   AXIS_LINE_TOOL_IDS,
@@ -48,7 +41,17 @@ import {
   useDrawingSelection,
 } from "./drawingSelectionController.js";
 import { snapDataPointAtPointer } from "./drawingSnapController.js";
-import { eraseDrawingAtPointer, updateEraserHoverState } from "./drawingEraseController.js";
+import { eraseDrawingAtPointer } from "./drawingEraseController.js";
+import {
+  clearHoveredPrimitive,
+  cursorForLineToolHit,
+  cursorForPositionToolHit,
+  cursorForShapeToolHit,
+  cursorForTextToolHit,
+  hoverTargetForTool,
+  shouldAppendFreehandPoint,
+  syncHoveredPrimitive,
+} from "./drawingHoverController.js";
 import { useDrawingPersistenceLifecycle } from "./useDrawingPersistenceLifecycle.js";
 import { useChartPointerPosition, useDrawingPointerEvents } from "./drawingPointerController.js";
 import { useDrawingTextEdit } from "./drawingTextEditController.js";
@@ -119,6 +122,10 @@ export function useDrawing({
   // ── Freehand-specific state ──
   const currentFreehandRef = useRef(null); // FreehandDrawingPrimitive being drawn
   const isDrawingFreehandRef = useRef(false);
+  const lastFreehandScreenPointRef = useRef(null);
+  const hoveredPrimRef = useRef(null);
+  const hoverFrameRef = useRef(0);
+  const pendingHoverRef = useRef(null);
 
   // ── Tool refs (avoid stale closures) ──
   const activeToolRef = useRef(activeTool);
@@ -179,7 +186,7 @@ export function useDrawing({
   // interpolating between the two bracketing candles in the current dataset.
 
   const screenToData = useCallback(
-    (x, y) => {
+    (x, y, options = {}) => {
       const adapter = getChartAdapter();
       if (!adapter?.isReady?.()) return null;
       try {
@@ -219,7 +226,11 @@ export function useDrawing({
         }
 
         if (time != null && isFinite(time)) {
-          return { time, price };
+          const dataPoint = { time, price };
+          if (options.includeLogical) {
+            dataPoint.logical = fracLogical;
+          }
+          return dataPoint;
         }
 
         return { time: null, price, logical: fracLogical };
@@ -228,6 +239,11 @@ export function useDrawing({
       }
     },
     [getChartAdapter],
+  );
+
+  const screenToFreehandData = useCallback(
+    (x, y) => screenToData(x, y, { includeLogical: true }),
+    [screenToData],
   );
 
   const dataToScreen = useCallback(
@@ -376,6 +392,66 @@ export function useDrawing({
 
   const getChartPos = useChartPointerPosition(chartContainerRef);
 
+  const cancelPendingHoverFrame = useCallback(() => {
+    if (!hoverFrameRef.current) return;
+    if (typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(hoverFrameRef.current);
+    } else {
+      clearTimeout(hoverFrameRef.current);
+    }
+    hoverFrameRef.current = 0;
+    pendingHoverRef.current = null;
+  }, []);
+
+  const clearHoverFeedback = useCallback(() => {
+    cancelPendingHoverFrame();
+    clearHoveredPrimitive(hoveredPrimRef);
+  }, [cancelPendingHoverFrame]);
+
+  const applyHoverFeedback = useCallback(
+    ({ tool, x, y }) => {
+      const hit = hitTestAll(x, y);
+      syncHoveredPrimitive(hoveredPrimRef, hoverTargetForTool(tool, hit));
+
+      const container = chartContainerRef?.current;
+      if (!container) return;
+
+      if (LINE_TOOL_IDS.has(tool)) {
+        setCursor(container, cursorForLineToolHit(hit));
+      } else if (SHAPE_TOOL_IDS.has(tool)) {
+        setCursor(container, cursorForShapeToolHit(hit));
+      } else if (POSITION_TOOL_IDS.has(tool)) {
+        setCursor(container, cursorForPositionToolHit(hit));
+      } else if (tool === "text") {
+        setCursor(container, cursorForTextToolHit(hit));
+      }
+    },
+    [chartContainerRef, hitTestAll],
+  );
+
+  const scheduleHoverFeedback = useCallback(
+    ({ tool, x, y }) => {
+      pendingHoverRef.current = { tool, x, y };
+      if (hoverFrameRef.current) return;
+
+      const schedule = typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame
+        : (callback) => setTimeout(callback, 16);
+
+      hoverFrameRef.current = schedule(() => {
+        hoverFrameRef.current = 0;
+        const next = pendingHoverRef.current;
+        pendingHoverRef.current = null;
+        if (next) applyHoverFeedback(next);
+      });
+    },
+    [applyHoverFeedback],
+  );
+
+  useEffect(() => () => {
+    cancelPendingHoverFrame();
+  }, [cancelPendingHoverFrame]);
+
   const beginTextDrag = useCallback((prim, hit, pos) => {
     if (!(prim instanceof TextDrawingPrimitive) || !hit || !pos) return false;
 
@@ -471,6 +547,7 @@ export function useDrawing({
           let hit = false;
           try { hit = sel.hitTest(pos.x, pos.y); } catch { /* ignore */ }
           if (hit) {
+            clearHoverFeedback();
             beginTextDrag(sel, hit, pos);
             e.preventDefault();
             e.stopPropagation();
@@ -492,6 +569,7 @@ export function useDrawing({
       // ── ERASER: click to delete ──
       if (tool === "eraser") {
         const hit = hitTestAll(pos.x, pos.y);
+        clearHoverFeedback();
         eraseDrawingAtPointer({
           detachPrim,
           hit,
@@ -510,8 +588,12 @@ export function useDrawing({
       if (tool === "pen" || tool === "highlighter") {
         if (startFreehandStroke({
           tool, pos, e, primitivesRef, currentFreehandRef, isDrawingFreehandRef,
-          attachPrim, screenToData, penColorRef, penSizeRef,
-        })) return;
+          attachPrim, screenToData: screenToFreehandData, penColorRef, penSizeRef,
+        })) {
+          lastFreehandScreenPointRef.current = currentFreehandRef.current ? { x: pos.x, y: pos.y } : null;
+          clearHoverFeedback();
+          return;
+        }
       }
 
       // ── TEXT TOOL ──
@@ -520,6 +602,7 @@ export function useDrawing({
         const hit = hitTestAll(pos.x, pos.y);
         if (hit && hit.type === "text") {
           selectPrimitive(hit.prim.id);
+          clearHoverFeedback();
           beginTextDrag(hit.prim, hit, pos);
           e.preventDefault();
           e.stopPropagation();
@@ -594,6 +677,7 @@ export function useDrawing({
             };
           }
 
+          clearHoverFeedback();
           e.preventDefault();
           e.stopPropagation();
           return;
@@ -667,6 +751,7 @@ export function useDrawing({
             };
           }
 
+          clearHoverFeedback();
           e.preventDefault();
           e.stopPropagation();
           return;
@@ -680,6 +765,7 @@ export function useDrawing({
             startMouse: pos,
             origDataPoint: { ...hit.prim.dataPoint },
           };
+          clearHoverFeedback();
           e.preventDefault();
           e.stopPropagation();
           return;
@@ -708,7 +794,7 @@ export function useDrawing({
         })) return;
       }
     },
-    [getChartPos, screenToData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi],
+    [getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
   );
 
   // ════════════════════════════════════════════════════
@@ -742,15 +828,22 @@ export function useDrawing({
 
       // ── ERASER: hover highlight ──
       if (tool === "eraser") {
-        updateEraserHoverState(primitivesRef.current, pos.x, pos.y);
+        scheduleHoverFeedback({ tool, x: pos.x, y: pos.y });
         return;
       }
 
       // ── PEN / HIGHLIGHTER (freehand): extend stroke ──
       if ((tool === "pen" || tool === "highlighter") && isDrawingFreehandRef.current && currentFreehandRef.current) {
-        const dataPoint = screenToData(pos.x, pos.y);
+        const minDistance = tool === "highlighter" ? 1.5 : 1;
+        if (!shouldAppendFreehandPoint(lastFreehandScreenPointRef.current, pos, minDistance)) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        const dataPoint = screenToFreehandData(pos.x, pos.y);
         if (dataPoint) {
           currentFreehandRef.current.addPoint(dataPoint);
+          lastFreehandScreenPointRef.current = { x: pos.x, y: pos.y };
         }
         e.preventDefault();
         e.stopPropagation();
@@ -796,92 +889,20 @@ export function useDrawing({
         })) return;
 
         // Hover feedback on lines, fibs and text
-        const hit = hitTestAll(pos.x, pos.y);
-        for (const prim of primitivesRef.current) {
-          if (prim instanceof LineDrawingPrimitive || prim instanceof AxisLineDrawingPrimitive || prim instanceof AngleMeasurementPrimitive || prim instanceof FibonacciDrawingPrimitive || prim instanceof PositionDrawingPrimitive || prim instanceof ShapeDrawingPrimitive) {
-            prim.setHovered(hit?.prim?.id === prim.id);
-          }
-        }
-
-        if (LINE_TOOL_IDS.has(tool) && !draggingRef.current) {
-          const container = chartContainerRef?.current;
-          if (container) {
-            if (hit?.type === "axis-line") {
-              const axisLineType = hit.prim.axisLineType;
-              if (axisLineType === "horizontal") setCursor(container, "ns-resize");
-              else if (axisLineType === "vertical") setCursor(container, "ew-resize");
-              else setCursor(container, "move");
-            } else if (hit?.type === "angle") {
-              setCursor(container, hit.pointIndex >= 0 ? "crosshair" : "move");
-            } else if (hit?.type === "line") {
-              setCursor(container, hit.pointIndex >= 0 ? "crosshair" : "move");
-            } else {
-              setCursor(container, "crosshair");
-            }
-          }
-        }
-
-        if (SHAPE_TOOL_IDS.has(tool) && !draggingRef.current) {
-          const container = chartContainerRef?.current;
-          if (container) {
-            if (hit?.type === "shape") {
-              if (hit.zone === "l" || hit.zone === "r") setCursor(container, "ew-resize");
-              else if (hit.zone === "t" || hit.zone === "b") setCursor(container, "ns-resize");
-              else if (hit.zone === "tl" || hit.zone === "br") setCursor(container, "nwse-resize");
-              else if (hit.zone === "tr" || hit.zone === "bl") setCursor(container, "nesw-resize");
-              else setCursor(container, "move");
-            } else {
-              setCursor(container, "crosshair");
-            }
-          }
-        }
+        scheduleHoverFeedback({ tool, x: pos.x, y: pos.y });
       }
 
       // ── POSITION TOOL: hover feedback ──
       if (POSITION_TOOL_IDS.has(tool) && !draggingRef.current) {
-        const container = chartContainerRef?.current;
-        if (container) {
-          const hit = hitTestAll(pos.x, pos.y);
-          if (hit?.type === "position") {
-            if (hit.zone === "tp" || hit.zone === "sl") {
-              setCursor(container, "ns-resize");
-            } else if (hit.zone === "panel") {
-              setCursor(container, "grab");
-            } else if (hit.zone === "left" || hit.zone === "right") {
-              setCursor(container, "ew-resize");
-            } else if (hit.zone === "entry" || hit.zone === "body") {
-              setCursor(container, "move");
-            }
-          } else {
-            setCursor(container, "crosshair");
-          }
-          // Hover feedback
-          for (const prim of primitivesRef.current) {
-            if (prim instanceof PositionDrawingPrimitive) {
-              prim.setHovered(hit?.prim?.id === prim.id);
-            }
-          }
-        }
+        scheduleHoverFeedback({ tool, x: pos.x, y: pos.y });
       }
 
       // ── TEXT TOOL: hover feedback for existing text + handle cursors ──
       if (tool === "text" && !draggingRef.current) {
-        const container = chartContainerRef?.current;
-        if (container) {
-          const hit = hitTestAll(pos.x, pos.y);
-          if (hit?.type === "text") {
-            if (hit.handle === "l" || hit.handle === "r") setCursor(container, "ew-resize");
-            else if (hit.handle === "t" || hit.handle === "b") setCursor(container, "ns-resize");
-            else if (hit.handle === "tl" || hit.handle === "br") setCursor(container, "nwse-resize");
-            else if (hit.handle === "tr" || hit.handle === "bl") setCursor(container, "nesw-resize");
-            else setCursor(container, "move");
-          } else {
-            setCursor(container, "crosshair");
-          }
-        }
+        scheduleHoverFeedback({ tool, x: pos.x, y: pos.y });
       }
     },
-    [getChartPos, screenToData, screenToDrawingData, dataToScreen, hitTestAll, refreshSelectedTextUi, chartContainerRef],
+    [getChartPos, screenToData, screenToFreehandData, screenToDrawingData, dataToScreen, refreshSelectedTextUi, chartContainerRef, scheduleHoverFeedback],
   );
 
   // ════════════════════════════════════════════════════
@@ -909,6 +930,7 @@ export function useDrawing({
       }
       isDrawingFreehandRef.current = false;
       currentFreehandRef.current = null;
+      lastFreehandScreenPointRef.current = null;
       changed = true;
     }
     // End dragging
@@ -966,6 +988,7 @@ export function useDrawing({
     if (!isLineTool && !isFibTool && !isShapeTool) {
       removePreview();
       draggingRef.current = null;
+      clearHoverFeedback();
     }
     if (!isLineTool && !isFibTool && !isShapeTool && !isTextTool && !isPositionTool) {
       // Keep a currently-selected text primitive selected even after we
@@ -982,17 +1005,15 @@ export function useDrawing({
     if (!isPenTool && !isHighlighterTool) {
       isDrawingFreehandRef.current = false;
       currentFreehandRef.current = null;
+      lastFreehandScreenPointRef.current = null;
     }
     if (!isTextTool) {
       cancelTextEditing();
     }
     if (!isEraserTool) {
-      // Clear hover state
-      for (const prim of primitivesRef.current) {
-        prim.setHovered(false);
-      }
+      clearHoverFeedback();
     }
-  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing, selectedIdRef]);
+  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing, selectedIdRef, clearHoverFeedback]);
 
   useDrawingPointerEvents({
     chartContainerRef,
@@ -1013,6 +1034,7 @@ export function useDrawing({
     }
     primitivesRef.current = [];
     removePreview();
+    clearHoverFeedback();
     selectedIdRef.current = null;
     setSelectedPrimId(null);
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
@@ -1021,7 +1043,7 @@ export function useDrawing({
     currentFreehandRef.current = null;
     cancelTextEditing();
     clearSavedDrawings(symbolRef.current);
-  }, [detachPrim, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi]);
+  }, [detachPrim, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback]);
 
   /**
    * Toggle visibility of all drawings without deleting them.
@@ -1037,9 +1059,11 @@ export function useDrawing({
       // Also drop preview / transient edit state so nothing stays on screen.
       removePreview();
       cancelTextEditing();
+      clearHoverFeedback();
       draggingRef.current = null;
       isDrawingFreehandRef.current = false;
       currentFreehandRef.current = null;
+      lastFreehandScreenPointRef.current = null;
     }
 
     let updateRequested = false;
@@ -1061,7 +1085,7 @@ export function useDrawing({
       // can request one themselves.
       getChartAdapter()?.requestSeriesUpdate?.();
     }
-  }, [getChartAdapter, removePreview, cancelTextEditing]);
+  }, [getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback]);
 
   // ── Selected-text helpers (consumed by floating format toolbar) ──
 

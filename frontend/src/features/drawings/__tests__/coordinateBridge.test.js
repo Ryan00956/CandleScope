@@ -89,3 +89,55 @@ test("dataPointToCoordinate renders barOffsetFromLast against the current last b
   assertAlmostEqual(dataPointToCoordinate(makeChart(20), series, { barOffsetFromLast: 2, price: 1 }), 22 * 8);
   assertAlmostEqual(dataPointToCoordinate(makeChart(24), series, { barOffsetFromLast: 2, price: 1 }), 26 * 8);
 });
+
+test("dataPointToCoordinate prefers time over stale logical when both are present", () => {
+  let dataCalls = 0;
+  const chart = {
+    timeScale: () => ({
+      timeToCoordinate: (time) => {
+        if (time === 1000) return 0;
+        if (time === 1060) return 10;
+        return null;
+      },
+      logicalToCoordinate: (logical) => logical * 10,
+    }),
+  };
+  const series = {
+    data: () => {
+      dataCalls += 1;
+      return [{ time: 1000 }, { time: 1060 }];
+    },
+  };
+
+  assertAlmostEqual(
+    dataPointToCoordinate(chart, series, { time: 1030, logical: 99, price: 1 }),
+    5,
+  );
+  assert.equal(dataCalls, 1);
+});
+
+test("dataPointToCoordinate reuses cached series data for legacy fractional time points", () => {
+  let dataCalls = 0;
+  const chart = {
+    timeScale: () => ({
+      timeToCoordinate: (time) => {
+        if (time === 1000) return 0;
+        if (time === 1060) return 10;
+        if (time === 1120) return 20;
+        return null;
+      },
+      logicalToCoordinate: (logical) => logical * 10,
+    }),
+  };
+  const series = {
+    data: () => {
+      dataCalls += 1;
+      return [{ time: 1000 }, { time: 1060 }, { time: 1120 }];
+    },
+  };
+  const context = {};
+
+  assertAlmostEqual(dataPointToCoordinate(chart, series, { time: 1030, price: 1 }, context), 5);
+  assertAlmostEqual(dataPointToCoordinate(chart, series, { time: 1090, price: 1 }, context), 15);
+  assert.equal(dataCalls, 1);
+});

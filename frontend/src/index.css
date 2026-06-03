@@ -5989,9 +5989,10 @@ body {
 
 /* ── Price scale context menu ──────────────────────────────── */
 .price-scale-context-menu {
-  position: absolute;
-  z-index: 200;
-  min-width: 180px;
+  position: fixed;
+  z-index: 10000;
+  width: 220px;
+  min-width: 220px;
   background: rgba(15, 23, 42, 0.96);
   border: 1px solid rgba(59, 130, 246, 0.25);
   border-radius: 8px;

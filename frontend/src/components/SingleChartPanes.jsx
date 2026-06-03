@@ -39,6 +39,9 @@ const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
 const DRAWING_TOOL_IDS = new Set(["pen", "highlighter", "eraser", "line-segment", "line-ray", "line-infinite", "line-horizontal", "line-vertical", "line-cross", "angle-measure", "shape-rectangle", "shape-ellipse", "text", "fibonacci", "position-long", "position-short"]);
 const SINGLE_PANE_HEIGHT_KEY_PREFIX = "single:";
 const PRICE_SCALE_CONTEXT_HIT_WIDTH = 96;
+const PRICE_SCALE_CONTEXT_MENU_WIDTH = 220;
+const PRICE_SCALE_CONTEXT_MENU_HEIGHT = 236;
+const PRICE_SCALE_CONTEXT_MENU_MARGIN = 8;
 const PRICE_SCALE_MODES = [
   { value: 0, label: "常规", labelEn: "Regular" },
   { value: 1, label: "对数", labelEn: "Logarithmic" },
@@ -438,7 +441,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     if (event.clientX < rect.right - PRICE_SCALE_CONTEXT_HIT_WIDTH) return;
     event.preventDefault();
     event.stopPropagation();
-    setContextMenu({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+    const margin = PRICE_SCALE_CONTEXT_MENU_MARGIN;
+    const maxX = Math.max(rect.left + margin, rect.right - PRICE_SCALE_CONTEXT_MENU_WIDTH - margin);
+    const maxY = Math.max(rect.top + margin, rect.bottom - PRICE_SCALE_CONTEXT_MENU_HEIGHT - margin);
+    setContextMenu({
+      x: Math.min(Math.max(event.clientX, rect.left + margin), maxX),
+      y: Math.min(Math.max(event.clientY, rect.top + margin), maxY),
+    });
   }, []);
 
   useEffect(() => {

@@ -59,7 +59,6 @@ import { useDrawingKeyboard } from "./drawingKeyboardController.js";
 import { applyTextAndPositionDrag, applyLineFibShapeDrag } from "./drawingDragResizeController.js";
 import {
   coordinateToFractionalLogical,
-  futureBarOffsetFromLogical,
   logicalToInterpolatedSeriesTime,
 } from "../../chart-adapter/coordinateBridge.js";
 import {
@@ -194,11 +193,6 @@ export function useDrawing({
         const price = adapter.coordinateToPrice?.(y);
         if (fracLogical == null || price == null || !isFinite(fracLogical) || !isFinite(price)) return null;
 
-        const futureOffset = futureBarOffsetFromLogical(adapter, fracLogical);
-        if (futureOffset != null) {
-          return { barOffsetFromLast: futureOffset, price };
-        }
-
         const snappedTime = adapter.coordinateToTime?.(x);
         let time = null;
         if (snappedTime != null && isFinite(snappedTime)) {
@@ -252,9 +246,6 @@ export function useDrawing({
       if (!adapter?.isReady?.() || !dp) return null;
       try {
         let x = null;
-        if (dp.barOffsetFromLast != null) {
-          x = adapter.barOffsetFromLastToCoordinate?.(dp.barOffsetFromLast);
-        }
         if (dp.time != null) {
           // Try exact match first (fast path)
           if (x == null || !isFinite(x)) x = adapter.timeToCoordinate?.(dp.time);

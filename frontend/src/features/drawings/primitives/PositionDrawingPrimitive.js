@@ -68,9 +68,7 @@ function normalizeHorizontalAnchor(anchor) {
   if (typeof anchor !== "object") return null;
 
   const out = {};
-  if (typeof anchor.barOffsetFromLast === "number" && Number.isFinite(anchor.barOffsetFromLast)) {
-    out.barOffsetFromLast = anchor.barOffsetFromLast;
-  } else if (anchor.time != null && Number.isFinite(Number(anchor.time))) {
+  if (anchor.time != null && Number.isFinite(Number(anchor.time))) {
     out.time = anchor.time;
   } else if (typeof anchor.logical === "number" && Number.isFinite(anchor.logical)) {
     out.logical = anchor.logical;

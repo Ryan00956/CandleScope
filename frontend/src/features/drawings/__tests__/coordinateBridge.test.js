@@ -4,7 +4,6 @@ import test from "node:test";
 import {
   coordinateToFractionalLogical,
   dataPointToCoordinate,
-  futureBarOffsetFromLogical,
   logicalToCoordinateInterpolated,
   logicalToInterpolatedSeriesTime,
 } from "../../../chart-adapter/coordinateBridge.js";
@@ -61,7 +60,7 @@ test("logicalToCoordinateInterpolated keeps fractional logical fallback away fro
   assertAlmostEqual(logicalToCoordinateInterpolated(timeScale, 10.5), 10.5 * barSpacing);
 });
 
-test("futureBarOffsetFromLogical stores right-side drawing anchors relative to the last bar", () => {
+test("logicalToInterpolatedSeriesTime stores right-side drawing anchors as absolute future time", () => {
   const seriesData = Array.from({ length: 10 }, (_, index) => ({ time: 1000 + index * 60 }));
   const adapter = {
     isReady: () => true,
@@ -70,24 +69,27 @@ test("futureBarOffsetFromLogical stores right-side drawing anchors relative to t
     coordinateToLogical: (x) => x / 8,
   };
 
-  assert.equal(futureBarOffsetFromLogical(adapter, 12.2), 3);
-  assert.equal(futureBarOffsetFromLogical(adapter, 9), null);
+  assertAlmostEqual(logicalToInterpolatedSeriesTime(adapter, 12.2), 1000 + 12.2 * 60);
+  assertAlmostEqual(logicalToInterpolatedSeriesTime(adapter, 9), 1000 + 9 * 60);
 });
 
-test("dataPointToCoordinate renders barOffsetFromLast against the current last bar", () => {
-  const makeChart = (lastLogical) => ({
+test("dataPointToCoordinate extrapolates absolute future time from the last two bars", () => {
+  const chart = {
     timeScale: () => ({
-      timeToCoordinate: (time) => (time === 2000 ? lastLogical * 8 : null),
+      timeToCoordinate: (time) => {
+        if (time === 1000) return 0;
+        if (time === 1060) return 8;
+        return null;
+      },
       coordinateToLogical: (x) => x / 8,
       logicalToCoordinate: (logical) => logical * 8,
     }),
-  });
+  };
   const series = {
-    data: () => [{ time: 1000 }, { time: 2000 }],
+    data: () => [{ time: 1000 }, { time: 1060 }],
   };
 
-  assertAlmostEqual(dataPointToCoordinate(makeChart(20), series, { barOffsetFromLast: 2, price: 1 }), 22 * 8);
-  assertAlmostEqual(dataPointToCoordinate(makeChart(24), series, { barOffsetFromLast: 2, price: 1 }), 26 * 8);
+  assertAlmostEqual(dataPointToCoordinate(chart, series, { time: 1180, price: 1 }), 24);
 });
 
 test("dataPointToCoordinate prefers time over stale logical when both are present", () => {

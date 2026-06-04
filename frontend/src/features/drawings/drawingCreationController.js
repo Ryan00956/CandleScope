@@ -29,9 +29,6 @@ import {
 
 function horizontalAnchorFromDataPoint(dataPoint) {
   if (!dataPoint) return null;
-  if (typeof dataPoint.barOffsetFromLast === "number" && Number.isFinite(dataPoint.barOffsetFromLast)) {
-    return { barOffsetFromLast: dataPoint.barOffsetFromLast };
-  }
   if (dataPoint.time != null && Number.isFinite(Number(dataPoint.time))) {
     return { time: dataPoint.time };
   }
@@ -136,12 +133,6 @@ export function placePositionDrawing({
     if (vr && dataA.time != null) {
       const visibleSpan = vr.to - vr.from;
       endAnchor = { time: dataA.time + visibleSpan * 0.15 };
-    } else if (dataA.barOffsetFromLast != null) {
-      const logicalRange = adapter.getVisibleRange?.()?.logical;
-      const visibleBars = logicalRange ? Math.max(1, logicalRange.to - logicalRange.from) : 20;
-      endAnchor = {
-        barOffsetFromLast: dataA.barOffsetFromLast + Math.max(1, Math.round(visibleBars * 0.15)),
-      };
     } else if (dataA.logical != null) {
       const logicalRange = adapter.getVisibleRange?.()?.logical;
       const visibleBars = logicalRange ? Math.max(1, logicalRange.to - logicalRange.from) : 20;

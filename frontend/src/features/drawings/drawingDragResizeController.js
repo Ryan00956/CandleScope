@@ -28,9 +28,6 @@ import { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitiv
 
 function horizontalAnchorFromDataPoint(dataPoint) {
   if (!dataPoint) return null;
-  if (typeof dataPoint.barOffsetFromLast === "number" && Number.isFinite(dataPoint.barOffsetFromLast)) {
-    return { barOffsetFromLast: dataPoint.barOffsetFromLast };
-  }
   if (dataPoint.time != null && Number.isFinite(Number(dataPoint.time))) {
     return { time: dataPoint.time };
   }

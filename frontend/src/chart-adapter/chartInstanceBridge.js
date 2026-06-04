@@ -1,5 +1,4 @@
 import {
-  barOffsetFromLastToCoordinate,
   logicalToCoordinateInterpolated,
   timeToCoordinateInterpolated,
 } from "./coordinateBridge.js";
@@ -64,23 +63,6 @@ export function createLightweightChartAdapter({ chartRef, seriesRef }) {
       () => logicalToCoordinateInterpolated(getChart()?.timeScale(), logical),
       null,
     ),
-    barOffsetFromLastToCoordinate: (offset) => safeCall(
-      () => barOffsetFromLastToCoordinate(getChart(), getSeries(), offset),
-      null,
-    ),
-    getLastBarLogical: () => safeCall(() => {
-      const chart = getChart();
-      const series = getSeries();
-      const data = series?.data?.() || [];
-      if (!chart || !data.length) return null;
-      const lastTime = data[data.length - 1]?.time;
-      const lastX = lastTime == null ? null : chart.timeScale().timeToCoordinate(lastTime);
-      if (lastX != null && Number.isFinite(lastX)) {
-        const logical = chart.timeScale().coordinateToLogical(lastX);
-        if (logical != null && Number.isFinite(logical)) return logical;
-      }
-      return data.length - 1;
-    }, null),
     getBarSpacing: () => safeCall(() => getChart()?.timeScale().options?.().barSpacing, null),
     getVisibleTimeRange: () => safeCall(() => getChart()?.timeScale().getVisibleRange(), null),
     getVisibleRange: () => safeCall(() => {

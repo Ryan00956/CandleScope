@@ -1,5 +1,4 @@
 export {
-  barOffsetFromLastToCoordinate,
   dataPointToCoordinate,
   logicalToCoordinateInterpolated,
   timeToCoordinateInterpolated,

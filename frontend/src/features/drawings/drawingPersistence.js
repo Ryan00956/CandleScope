@@ -24,11 +24,6 @@ function serializeDataPoint(dataPoint) {
   const out = {};
   if (source.time != null && isFinite(Number(source.time))) out.time = source.time;
   if (typeof source.logical === "number" && Number.isFinite(source.logical)) out.logical = source.logical;
-  if (typeof source.barOffsetFromLast === "number" && Number.isFinite(source.barOffsetFromLast)) {
-    out.barOffsetFromLast = source.barOffsetFromLast;
-    delete out.time;
-    delete out.logical;
-  }
   if (source.price != null && isFinite(Number(source.price))) out.price = source.price;
   return out;
 }
@@ -42,10 +37,6 @@ function serializeHorizontalAnchor(anchor) {
   if (typeof anchor === "number" && Number.isFinite(anchor)) return anchor;
   if (typeof anchor !== "object") return null;
   const out = {};
-  if (typeof anchor.barOffsetFromLast === "number" && Number.isFinite(anchor.barOffsetFromLast)) {
-    out.barOffsetFromLast = anchor.barOffsetFromLast;
-    return out;
-  }
   if (anchor.time != null && isFinite(Number(anchor.time))) out.time = anchor.time;
   if (typeof anchor.logical === "number" && Number.isFinite(anchor.logical)) out.logical = anchor.logical;
   return Object.keys(out).length > 0 ? out : null;

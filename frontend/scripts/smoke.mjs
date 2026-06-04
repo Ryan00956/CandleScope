@@ -614,6 +614,32 @@ async function readSavedDrawings(cdp, drawingKey) {
   return Array.isArray(result.result?.value) ? result.result.value : [];
 }
 
+async function readLatestChartLastTime(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const report = window.__CANDLESCOPE_PERF__?.report?.();
+      const events = Array.isArray(report?.events) ? report.events : [];
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const event = events[i];
+        if (event?.name !== "chart.data.commit") continue;
+        const detail = event.detail || {};
+        if (
+          detail.symbol === "BTCUSDT"
+          && detail.interval === "1h"
+          && (detail.status === "ready" || detail.status === "provisional")
+          && Number.isFinite(detail.lastTime)
+        ) {
+          return detail.lastTime;
+        }
+      }
+      return null;
+    })()`,
+    returnByValue: true,
+  });
+  const value = result.result?.value;
+  return Number.isFinite(value) ? value : null;
+}
+
 async function waitForSavedDrawing(cdp, drawingKey, timeoutMs = 5_000) {
   const started = Date.now();
   let count = await readSavedDrawingCount(cdp, drawingKey);
@@ -646,8 +672,10 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
   let drawingRestoredCount = 0;
   let reloadLoadedAtMs = null;
   let futureAnchorStored = false;
+  let chartLastTime = null;
 
   if (rect && lineToolActive && drawingEngineReady) {
+    chartLastTime = await readLatestChartLastTime(cdp);
     const y = Math.round(rect.y + rect.height * 0.45);
     await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.35), y);
     await wait(150);
@@ -662,9 +690,12 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
       const savedDrawings = await readSavedDrawings(cdp, drawingKey);
       futureAnchorStored = savedDrawings.some((drawing) => (
         Array.isArray(drawing?.dataPoints)
+        && drawing.dataPoints.length > 0
+        && drawing.dataPoints.every((point) => Number.isFinite(point?.time))
         && drawing.dataPoints.some((point) => (
-          Number.isFinite(point?.barOffsetFromLast)
-          && point.time == null
+          chartLastTime != null
+          && point.time > chartLastTime
+          && !Number.isFinite(point?.barOffsetFromLast)
         ))
       ));
       await cdp.send("Page.reload", { ignoreCache: true });

@@ -158,7 +158,7 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
                 )
             elif action == "unsubscribe":
                 client_id = str(msg.get("clientId") or "").strip()
-                _unsubscribe_indicator_client(
+                await _unsubscribe_indicator_client(
                     client_id,
                     dm=dm,
                     indicator_engine=indicator_engine,
@@ -193,19 +193,18 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
         except (asyncio.CancelledError, Exception):
             pass
         indicator_engine.remove_listener(_listener)
-        for key in list(subscribed.values()):
-            try:
-                indicator_engine.unsubscribe(key)
-            except Exception:
-                pass
+        client_ids = set(subscribed) | set(custom_handles) | set(custom_tasks) | set(client_meta)
+        for client_id in list(client_ids):
+            await _unsubscribe_indicator_client(
+                client_id,
+                dm=dm,
+                indicator_engine=indicator_engine,
+                subscribed=subscribed,
+                custom_handles=custom_handles,
+                custom_tasks=custom_tasks,
+                client_meta=client_meta,
+            )
         subscribed.clear()
-        for handle in list(custom_handles.values()):
-            try:
-                dm.unsubscribe(handle)
-            except Exception:
-                pass
-        for task in list(custom_tasks.values()):
-            task.cancel()
         custom_handles.clear()
         custom_tasks.clear()
         client_meta.clear()
@@ -280,6 +279,10 @@ async def _handle_indicator_subscribe(
             security_mode=msg.get("securityMode"),
             history_limit=history_limit,
             send_json=send_json,
+            stream_consumer_id=(
+                f"ws:indicator:{exchange}:{market_type}:{symbol}:{interval}:"
+                f"{client_id}:{id(websocket)}"
+            ),
             unsubscribe_client=lambda cid: _unsubscribe_indicator_client(
                 cid,
                 dm=dm,
@@ -317,7 +320,7 @@ async def _handle_indicator_subscribe(
         ))
         return
 
-    _unsubscribe_indicator_client(
+    await _unsubscribe_indicator_client(
         client_id,
         dm=dm,
         indicator_engine=indicator_engine,
@@ -327,35 +330,63 @@ async def _handle_indicator_subscribe(
         client_meta=client_meta,
     )
 
-    await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
-    query_result = dm.query_latest(
-        symbol,
-        interval,
-        limit=history_limit,
-        exchange=exchange,
-        market_type=market_type,
+    consumer_id = (
+        f"ws:indicator:{exchange}:{market_type}:{symbol}:{interval}:"
+        f"{client_id}:{id(websocket)}"
     )
+    stream_ensured = False
+    meta_registered = False
+    try:
+        await dm.ensure_stream(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            focus_scope="websocket",
+            subscription_tier="indicator",
+            consumer_id=consumer_id,
+        )
+        stream_ensured = True
+        query_result = dm.query_latest(
+            symbol,
+            interval,
+            limit=history_limit,
+            exchange=exchange,
+            market_type=market_type,
+        )
 
-    key, result = indicator_engine.subscribe(
-        symbol=symbol,
-        interval=interval,
-        market_type=market_type,
-        indicator_name=indicator_name,
-        params=params,
-        bars=query_result.bars,
-        exchange=exchange,
-    )
-    subscribed[client_id] = key
-    client_meta[client_id] = {
-        "kind": "builtin",
-        "exchange": exchange,
-        "symbol": symbol,
-        "interval": interval,
-        "market_type": market_type,
-        "name": indicator_name,
-        "params": params,
-        "indicatorId": key.uid,
-    }
+        key, result = indicator_engine.subscribe(
+            symbol=symbol,
+            interval=interval,
+            market_type=market_type,
+            indicator_name=indicator_name,
+            params=params,
+            bars=query_result.bars,
+            exchange=exchange,
+        )
+        subscribed[client_id] = key
+        client_meta[client_id] = {
+            "kind": "builtin",
+            "exchange": exchange,
+            "symbol": symbol,
+            "interval": interval,
+            "market_type": market_type,
+            "name": indicator_name,
+            "params": params,
+            "indicatorId": key.uid,
+            "streamConsumerId": consumer_id,
+        }
+        meta_registered = True
+    except Exception:
+        if stream_ensured and not meta_registered:
+            await _release_indicator_stream(dm, {
+                "exchange": exchange,
+                "market_type": market_type,
+                "symbol": symbol,
+                "interval": interval,
+                "streamConsumerId": consumer_id,
+            })
+        raise
 
     await send_json(build_indicator_snapshot_payload(
         client_id=client_id,
@@ -370,7 +401,7 @@ async def _handle_indicator_subscribe(
     ))
 
 
-def _unsubscribe_indicator_client(
+async def _unsubscribe_indicator_client(
     client_id: str,
     dm,
     indicator_engine,
@@ -396,7 +427,27 @@ def _unsubscribe_indicator_client(
 
     meta = client_meta.pop(client_id, None)
     if meta is not None:
+        await _release_indicator_stream(dm, meta)
         _release_pyne_incremental_meta(meta)
+
+
+async def _release_indicator_stream(dm, meta: dict) -> None:
+    release_stream = getattr(dm, "release_stream", None)
+    consumer_id = meta.get("streamConsumerId")
+    if not callable(release_stream) or not consumer_id:
+        return
+    try:
+        await release_stream(
+            meta["symbol"],
+            meta["interval"],
+            exchange=meta.get("exchange", "binance"),
+            market_type=meta.get("market_type", "spot"),
+            focus_scope="websocket",
+            subscription_tier="indicator",
+            consumer_id=consumer_id,
+        )
+    except Exception:
+        pass
 
 
 def _queue_indicator_message(queue: asyncio.Queue, msg: dict) -> None:

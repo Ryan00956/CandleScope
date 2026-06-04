@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import enum
+import json
 import logging
 import sqlite3
 import time
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from app.data_engine.interval_policy import parse_custom_interval
 from app.exchanges.symbols import normalize_symbol as normalize_exchange_symbol
 
 logger = logging.getLogger("data_manager.subscriptions")
@@ -26,7 +28,21 @@ class SubscriptionDataManagerLike(Protocol):
         *,
         focus_scope: str = "foreground",
         subscription_tier: str | None = None,
+        consumer_id: str | None = None,
     ) -> Any:
+        ...
+
+    async def release_stream(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        *,
+        consumer_id: str | None = None,
+        focus_scope: str = "foreground",
+        subscription_tier: str | None = None,
+    ) -> None:
         ...
 
     async def stop_stream(
@@ -134,21 +150,51 @@ def normalize_subscription_key(symbol: str) -> str:
     return format_subscription_key(exchange, market_type, raw_symbol)
 
 
+def normalize_subscription_intervals(intervals: Any) -> list[str]:
+    """Normalize persisted/requested intervals while keeping stable order."""
+    if intervals is None:
+        return []
+    if isinstance(intervals, str):
+        candidates: list[Any] = [intervals]
+    elif isinstance(intervals, (list, tuple, set)):
+        candidates = list(intervals)
+    else:
+        return []
+
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for item in candidates:
+        interval = str(item or "").strip()
+        if not interval or interval in seen:
+            continue
+        if parse_custom_interval(interval) is None:
+            continue
+        seen.add(interval)
+        normalized.append(interval)
+    return normalized
+
+
 @dataclass(slots=True)
 class SymbolSubscription:
     symbol: str
     tier: SubscriptionTier = SubscriptionTier.NONE
     added_at: int = 0
+    intervals: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        self.intervals = normalize_subscription_intervals(self.intervals)
 
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
             "tier": self.tier.value,
             "added_at": self.added_at,
+            "intervals": list(self.intervals or []),
         }
 
 
 FULL_TIER_SOFT_LIMIT = 5
+LEGACY_FULL_INTERVALS = ["1m"]
 
 
 class SubscriptionService:
@@ -175,24 +221,70 @@ class SubscriptionService:
         for sub in list(self._subs.values()):
             try:
                 if sub.tier == SubscriptionTier.FULL:
-                    await self._activate_full(sub.symbol)
+                    await self._activate_full(sub.symbol, sub.intervals)
                     await self._activate_price(sub.symbol)
                 elif sub.tier == SubscriptionTier.PRICE_ONLY:
                     await self._activate_price(sub.symbol)
             except Exception as exc:
                 logger.warning("Failed to restore subscription for %s: %s", sub.symbol, exc)
 
-    async def set_tier(self, symbol: str, tier: SubscriptionTier) -> dict:
+    async def set_tier(
+        self,
+        symbol: str,
+        tier: SubscriptionTier,
+        *,
+        intervals: Any | None = None,
+        consumer_id: str | None = None,
+    ) -> dict:
         key = self.normalize_symbol(symbol)
         now_ms = int(time.time() * 1000)
 
         old_sub = self._subs.get(key)
         old_tier = old_sub.tier if old_sub else None
-        if old_tier == tier:
+        requested_intervals = (
+            normalize_subscription_intervals(intervals)
+            if intervals is not None
+            else list(old_sub.intervals or []) if old_sub is not None else []
+        )
+        if (
+            tier == SubscriptionTier.FULL
+            and intervals is not None
+            and not requested_intervals
+        ):
+            raise ValueError("Full subscriptions require at least one valid interval.")
+        if (
+            tier == SubscriptionTier.FULL
+            and intervals is None
+            and old_tier != SubscriptionTier.FULL
+        ):
+            raise ValueError("Full subscriptions require intervals.")
+        next_intervals = requested_intervals if tier == SubscriptionTier.FULL else []
+        old_intervals = list(old_sub.intervals or []) if old_sub is not None else []
+        if old_tier == tier and (intervals is None or old_intervals == next_intervals):
+            if tier == SubscriptionTier.FULL:
+                await self._activate_full(
+                    key,
+                    old_intervals,
+                    consumer_id=consumer_id,
+                )
+                await self._activate_price(key)
+            elif tier == SubscriptionTier.PRICE_ONLY:
+                await self._activate_price(key)
             return {"symbol": key, "tier": tier.value, "changed": False}
 
-        if old_tier == SubscriptionTier.FULL:
-            await self._deactivate_full(key)
+        if old_tier == SubscriptionTier.FULL and tier == SubscriptionTier.FULL:
+            await self._sync_full_intervals(
+                key,
+                old_intervals=old_intervals,
+                next_intervals=next_intervals,
+                consumer_id=consumer_id,
+            )
+        elif old_tier == SubscriptionTier.FULL:
+            await self._deactivate_full(
+                key,
+                old_intervals,
+                consumer_id=consumer_id,
+            )
         if old_tier in (SubscriptionTier.FULL, SubscriptionTier.PRICE_ONLY) and tier == SubscriptionTier.NONE:
             await self._deactivate_price(key)
 
@@ -200,11 +292,17 @@ class SubscriptionService:
             symbol=key,
             tier=tier,
             added_at=old_sub.added_at if old_sub else now_ms,
+            intervals=next_intervals if tier == SubscriptionTier.FULL else [],
         )
 
         warning = None
         if tier == SubscriptionTier.FULL:
-            await self._activate_full(key)
+            if old_tier != SubscriptionTier.FULL:
+                await self._activate_full(
+                    key,
+                    next_intervals,
+                    consumer_id=consumer_id,
+                )
             await self._activate_price(key)
             full_count = sum(1 for item in self._subs.values() if item.tier == SubscriptionTier.FULL) + (
                 0 if old_tier == SubscriptionTier.FULL else 1
@@ -229,7 +327,7 @@ class SubscriptionService:
         key = self.normalize_symbol(symbol)
         old_sub = self._subs.get(key)
         if old_sub is not None and old_sub.tier == SubscriptionTier.FULL:
-            await self._deactivate_full(key)
+            await self._deactivate_full(key, old_sub.intervals)
         if old_sub is not None and old_sub.tier in (SubscriptionTier.FULL, SubscriptionTier.PRICE_ONLY):
             await self._deactivate_price(key)
         self._subs.pop(key, None)
@@ -248,36 +346,77 @@ class SubscriptionService:
     def get_full_count(self) -> int:
         return sum(1 for sub in self._subs.values() if sub.tier == SubscriptionTier.FULL)
 
-    async def _activate_full(self, key: str) -> None:
+    async def _activate_full(
+        self,
+        key: str,
+        intervals: Any,
+        *,
+        consumer_id: str | None = None,
+    ) -> None:
         if self._data_manager is None:
             return
         exchange, market_type, raw_symbol = parse_subscription_key(key)
-        await self._data_manager.ensure_stream(
-            raw_symbol,
-            "1m",
-            exchange=exchange,
-            market_type=market_type,
-            focus_scope="subscription",
-            subscription_tier=SubscriptionTier.FULL.value,
-        )
+        consumer = self._subscription_consumer_id(key, consumer_id)
+        for interval in self._effective_full_intervals(intervals):
+            await self._data_manager.ensure_stream(
+                raw_symbol,
+                interval,
+                exchange=exchange,
+                market_type=market_type,
+                focus_scope="subscription",
+                subscription_tier=SubscriptionTier.FULL.value,
+                consumer_id=consumer,
+            )
 
-    async def _deactivate_full(self, key: str) -> None:
+    async def _deactivate_full(
+        self,
+        key: str,
+        intervals: Any,
+        *,
+        consumer_id: str | None = None,
+    ) -> None:
         if self._data_manager is None:
             return
         exchange, market_type, raw_symbol = parse_subscription_key(key)
-        streams = self._data_manager.get_all_streams()
-        for info in streams:
-            if (
-                info.key.symbol == raw_symbol
-                and info.key.exchange == exchange
-                and info.key.market_type == market_type
-            ):
-                await self._data_manager.stop_stream(
-                    raw_symbol,
-                    info.key.interval,
-                    exchange=exchange,
-                    market_type=market_type,
-                )
+        consumer = self._subscription_consumer_id(key, consumer_id)
+        for interval in self._effective_full_intervals(intervals):
+            await self._data_manager.release_stream(
+                raw_symbol,
+                interval,
+                exchange=exchange,
+                market_type=market_type,
+                focus_scope="subscription",
+                subscription_tier=SubscriptionTier.FULL.value,
+                consumer_id=consumer,
+            )
+
+    async def _sync_full_intervals(
+        self,
+        key: str,
+        *,
+        old_intervals: Any,
+        next_intervals: Any,
+        consumer_id: str | None = None,
+    ) -> None:
+        old_effective = self._effective_full_intervals(old_intervals)
+        next_effective = self._effective_full_intervals(next_intervals)
+        old_set = set(old_effective)
+        next_set = set(next_effective)
+        removed = [interval for interval in old_effective if interval not in next_set]
+        added = [interval for interval in next_effective if interval not in old_set]
+        if removed:
+            await self._deactivate_full(key, removed, consumer_id=consumer_id)
+        if added:
+            await self._activate_full(key, added, consumer_id=consumer_id)
+
+    @staticmethod
+    def _effective_full_intervals(intervals: Any) -> list[str]:
+        normalized = normalize_subscription_intervals(intervals)
+        return normalized or list(LEGACY_FULL_INTERVALS)
+
+    @staticmethod
+    def _subscription_consumer_id(key: str, consumer_id: str | None) -> str:
+        return f"watchlist:global:{key}"
 
     async def _activate_price(self, key: str) -> None:
         if self._data_manager is None:
@@ -305,43 +444,82 @@ class SubscriptionService:
                 CREATE TABLE IF NOT EXISTS subscriptions (
                     symbol   TEXT PRIMARY KEY,
                     tier     TEXT NOT NULL DEFAULT 'none',
-                    added_at INTEGER NOT NULL DEFAULT 0
+                    added_at INTEGER NOT NULL DEFAULT 0,
+                    intervals_json TEXT NOT NULL DEFAULT '[]'
                 )
             """)
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()
+            }
+            if "intervals_json" not in columns:
+                conn.execute(
+                    "ALTER TABLE subscriptions "
+                    "ADD COLUMN intervals_json TEXT NOT NULL DEFAULT '[]'"
+                )
             conn.commit()
 
     def _load_from_db(self) -> None:
         with sqlite3.connect(self._db_path) as conn:
-            rows = conn.execute("SELECT symbol, tier, added_at FROM subscriptions").fetchall()
-        rewrites: list[tuple[str, str, int, str]] = []
-        for symbol, tier_str, added_at in rows:
+            rows = conn.execute(
+                "SELECT symbol, tier, added_at, intervals_json FROM subscriptions"
+            ).fetchall()
+        rewrites: list[tuple[str, str, int, str, str]] = []
+        for symbol, tier_str, added_at, intervals_json in rows:
             try:
                 tier = SubscriptionTier(tier_str)
             except ValueError:
                 tier = SubscriptionTier.NONE
+            try:
+                raw_intervals = json.loads(intervals_json or "[]")
+            except (TypeError, json.JSONDecodeError):
+                raw_intervals = []
+            intervals = normalize_subscription_intervals(raw_intervals)
+            stored_intervals = intervals if tier == SubscriptionTier.FULL else []
             normalized = self.normalize_symbol(symbol)
             self._subs[normalized] = SymbolSubscription(
                 symbol=normalized,
                 tier=tier,
                 added_at=added_at,
+                intervals=stored_intervals,
             )
-            if normalized != symbol:
-                rewrites.append((normalized, tier.value, added_at, symbol))
+            normalized_intervals_json = json.dumps(stored_intervals, separators=(",", ":"))
+            if normalized != symbol or normalized_intervals_json != (intervals_json or "[]"):
+                rewrites.append((
+                    normalized,
+                    tier.value,
+                    added_at,
+                    normalized_intervals_json,
+                    symbol,
+                ))
         if rewrites:
             with sqlite3.connect(self._db_path) as conn:
-                for normalized, tier_value, added_at, original in rewrites:
+                for normalized, tier_value, added_at, intervals_json, original in rewrites:
                     conn.execute("DELETE FROM subscriptions WHERE symbol = ?", (original,))
                     conn.execute(
-                        "INSERT OR REPLACE INTO subscriptions (symbol, tier, added_at) VALUES (?, ?, ?)",
-                        (normalized, tier_value, added_at),
+                        """
+                        INSERT OR REPLACE INTO subscriptions
+                            (symbol, tier, added_at, intervals_json)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (normalized, tier_value, added_at, intervals_json),
                     )
                 conn.commit()
 
     def _save_to_db(self, symbol: str, sub: SymbolSubscription) -> None:
         with sqlite3.connect(self._db_path) as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO subscriptions (symbol, tier, added_at) VALUES (?, ?, ?)",
-                (sub.symbol, sub.tier.value, sub.added_at),
+                """
+                INSERT OR REPLACE INTO subscriptions
+                    (symbol, tier, added_at, intervals_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    sub.symbol,
+                    sub.tier.value,
+                    sub.added_at,
+                    json.dumps(list(sub.intervals or []), separators=(",", ":")),
+                ),
             )
             conn.commit()
 

@@ -29,6 +29,8 @@ router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
 class SetTierRequest(BaseModel):
     tier: str  # "full" | "price" | "none"
+    intervals: list[str] | None = None
+    consumer_id: str | None = None
 
 
 class SyncWatchlistRequest(BaseModel):
@@ -109,7 +111,7 @@ async def get_subscription(request: Request, symbol: str):
     mgr = _get_sub_manager(request)
     sub = mgr.get(symbol)
     if sub is None:
-        return {"symbol": mgr.normalize_symbol(symbol), "tier": "none"}
+        return {"symbol": mgr.normalize_symbol(symbol), "tier": "none", "intervals": []}
     return sub.to_dict()
 
 
@@ -124,7 +126,12 @@ async def set_subscription_tier(request: Request, symbol: str, body: SetTierRequ
 
     mgr = _get_sub_manager(request)
     try:
-        result = await mgr.set_tier(symbol, tier)
+        result = await mgr.set_tier(
+            symbol,
+            tier,
+            intervals=body.intervals,
+            consumer_id=body.consumer_id,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return result

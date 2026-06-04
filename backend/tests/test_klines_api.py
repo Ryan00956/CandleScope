@@ -11,6 +11,7 @@ from app.data_engine.data_manager.models import BarData, QueryResult, QuerySourc
 class _FakeDataManager:
     def __init__(self) -> None:
         self.ensure_stream_calls: list[dict] = []
+        self.release_stream_calls: list[dict] = []
         self.query_latest_calls: list[dict] = []
 
     async def ensure_stream(
@@ -20,12 +21,35 @@ class _FakeDataManager:
         *,
         exchange: str,
         market_type: str,
+        focus_scope: str = "foreground",
+        consumer_id: str | None = None,
     ) -> None:
         self.ensure_stream_calls.append({
             "symbol": symbol,
             "interval": interval,
             "exchange": exchange,
             "market_type": market_type,
+            "focus_scope": focus_scope,
+            "consumer_id": consumer_id,
+        })
+
+    async def release_stream(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        exchange: str,
+        market_type: str,
+        focus_scope: str = "foreground",
+        consumer_id: str | None = None,
+    ) -> None:
+        self.release_stream_calls.append({
+            "symbol": symbol,
+            "interval": interval,
+            "exchange": exchange,
+            "market_type": market_type,
+            "focus_scope": focus_scope,
+            "consumer_id": consumer_id,
         })
 
     def query_latest(
@@ -124,6 +148,21 @@ def test_get_klines_uses_data_manager_when_available() -> None:
             "interval": "1m",
             "exchange": "binance",
             "market_type": "spot",
+            "focus_scope": "rest",
+            "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
+        }
+    ]
+    assert dm.ensure_stream_calls[0]["consumer_id"].startswith(
+        "rest:klines:binance:spot:BTCUSDT:1m:"
+    )
+    assert dm.release_stream_calls == [
+        {
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "exchange": "binance",
+            "market_type": "spot",
+            "focus_scope": "rest",
+            "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
         }
     ]
     assert dm.query_latest_calls == [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import pytest
 from fastapi import HTTPException
@@ -651,6 +652,76 @@ def test_builtin_indicator_engine_preview_does_not_commit_state() -> None:
     assert engine._instances[key].get_latest() == {"ma": 102.0}
 
 
+@pytest.mark.anyio
+async def test_indicator_unsubscribe_releases_stream_consumer() -> None:
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.unsubscribed: list[object] = []
+            self.release_stream_calls: list[dict] = []
+
+        def unsubscribe(self, handle) -> None:
+            self.unsubscribed.append(handle)
+
+        async def release_stream(self, *args, **kwargs) -> None:
+            self.release_stream_calls.append({"args": args, "kwargs": kwargs})
+
+    class FakeIndicatorEngine:
+        def __init__(self) -> None:
+            self.unsubscribed: list[object] = []
+
+        def unsubscribe(self, key) -> None:
+            self.unsubscribed.append(key)
+
+    async def wait_forever() -> None:
+        await asyncio.sleep(60)
+
+    dm = FakeDataManager()
+    indicator_engine = FakeIndicatorEngine()
+    task = asyncio.create_task(wait_forever())
+    subscribed = {"client-1": "indicator-key"}
+    custom_handles = {"client-1": "dm-handle"}
+    custom_tasks = {"client-1": task}
+    client_meta = {
+        "client-1": {
+            "kind": "builtin",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "market_type": "spot",
+            "streamConsumerId": "ws:indicator:binance:spot:BTCUSDT:1m:client-1:test",
+        }
+    }
+
+    await stream_api._unsubscribe_indicator_client(
+        "client-1",
+        dm=dm,
+        indicator_engine=indicator_engine,
+        subscribed=subscribed,
+        custom_handles=custom_handles,
+        custom_tasks=custom_tasks,
+        client_meta=client_meta,
+    )
+
+    assert indicator_engine.unsubscribed == ["indicator-key"]
+    assert dm.unsubscribed == ["dm-handle"]
+    assert task.cancelled() or task.cancelling()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert client_meta == {}
+    assert dm.release_stream_calls == [
+        {
+            "args": ("BTCUSDT", "1m"),
+            "kwargs": {
+                "exchange": "binance",
+                "market_type": "spot",
+                "focus_scope": "websocket",
+                "subscription_tier": "indicator",
+                "consumer_id": "ws:indicator:binance:spot:BTCUSDT:1m:client-1:test",
+            },
+        }
+    ]
+
+
 def test_pyne_ws_snapshot_message_runs_script() -> None:
     class FakeDataManager:
         def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
@@ -1011,7 +1082,11 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
     monkeypatch.setattr(pyne_stream_api, "_stream_custom_store", store)
 
     class FakeDataManager:
+        def __init__(self) -> None:
+            self.ensure_stream_calls: list[dict] = []
+
         async def ensure_stream(self, *args, **kwargs):
+            self.ensure_stream_calls.append({"args": args, "kwargs": kwargs})
             return None
 
         def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
@@ -1034,8 +1109,13 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
     client_meta = {}
     queue = asyncio.Queue()
 
+    dm = FakeDataManager()
+
+    async def unsubscribe_client(_client_id: str) -> None:
+        return None
+
     await pyne_stream_api.handle_pyne_indicator_subscribe(
-        dm=FakeDataManager(),
+        dm=dm,
         custom_handles=custom_handles,
         custom_tasks=custom_tasks,
         queue=queue,
@@ -1052,7 +1132,8 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
         security_mode=None,
         history_limit=100,
         send_json=send_json,
-        unsubscribe_client=lambda _client_id: None,
+        stream_consumer_id="ws:indicator:binance:spot:BTCUSDT:1m:saved-1:test",
+        unsubscribe_client=unsubscribe_client,
         queue_message=stream_api._queue_indicator_message,
     )
 
@@ -1060,6 +1141,12 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
     assert sent[0]["ok"] is True
     assert sent[0]["lines"][0]["name"] == "Saved"
     assert sent[0]["params"] == {"length": 5}
+    assert dm.ensure_stream_calls[0]["kwargs"]["consumer_id"] == (
+        "ws:indicator:binance:spot:BTCUSDT:1m:saved-1:test"
+    )
+    assert client_meta["saved-1"]["streamConsumerId"] == (
+        "ws:indicator:binance:spot:BTCUSDT:1m:saved-1:test"
+    )
 
 
 @pytest.mark.anyio

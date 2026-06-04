@@ -508,15 +508,31 @@ Pyne 默认使用 process executor，并受 `PYNE_*` 配置控制。safe mode �
 
 tier 值：
 
-- `full`：K 线流 + 价格流
+- `full`：价格流 + 请求的 K 线周期流
 - `price`：仅价格流
-- `none`：停止相关实时任务
+- `none`：不保活 watchlist 拥有的价格或 K 线实时任务
 
 设置等级请求体：
 
 ```json
 { "tier": "price" }
 ```
+
+`full` 请求应带上前端希望后台保活的完整周期集合。前端从交易所插件的
+native intervals 加上用户保存的 custom intervals 生成这个集合。
+`consumer_id` 用于标识前端 lease owner，让重复的自选或主图订阅能够共享
+同一个后端 upstream stream。
+
+```json
+{
+  "tier": "full",
+  "intervals": ["1m", "5m", "1h", "45m"],
+  "consumer_id": "watchlist:client-instance:binance:spot:ETHUSDT"
+}
+```
+
+`GET /subscriptions/` 和 `GET /subscriptions/{symbol}` 会返回已持久化 full
+订阅的 `intervals`。旧版本缺少周期数据的 full 订阅在恢复时降级使用 `1m`。
 
 同步请求体：
 

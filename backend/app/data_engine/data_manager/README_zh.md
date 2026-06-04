@@ -21,14 +21,14 @@ ingestion -> bar_aggregator -> DataManager -> API / WS / Indicator
 | 门面 | `DataManager` | 查询、stream、subscription、maintenance、diagnostics 的公共方法 |
 | Cache | `KlineCache` | 带 size/TTL 限制的内存序列缓存 |
 | Query | `QueryEngine` | Cache -> Storage -> Backfill 解析，并返回 missing-range metadata |
-| Streams | `StreamCoordinator` / `StreamEnsurePlanner` | 启停 ingestion 和 bar aggregator targets |
+| Streams | `StreamCoordinator` / `StreamEnsurePlanner` | 启停 ingestion 和 bar aggregator targets；跨 consumer lease 共享 upstream stream |
 | Events | `DataEventBus` | callback 和 async-iterator 事件分发 |
 | Aggregation Bridge | `AggregatorBridge` | 持久化 bar events、合并 cache、发出 `DataEvent` |
 | Backfill | `BackfillCoordinator` | request 去重、合并、retry、cancel、storage 回读、事件映射 |
 | Custom Query | `CustomQueryEngine` | 自定义周期一致查询 |
 | Warm Start | `AggregatorWarmStartService` | 启动时从 storage seed aggregator state |
 | Price | `IngestionPriceSource` / `PriceSnapshotCache` | 轻量实时价格流和快照 |
-| Subscription | `SubscriptionService` | watchlist tier：`full`、`price`、`none` |
+| Subscription | `SubscriptionService` | watchlist tier：`full`、`price`、`none`；持久化 full 周期和 consumer lease |
 | Maintenance | `maintenance.py`、`retention.py` | storage repair、gap scan、retention limits |
 
 ## 公共 API
@@ -43,7 +43,8 @@ ingestion -> bar_aggregator -> DataManager -> API / WS / Indicator
 | `query_before()` | 按 timestamp 向前分页 |
 | `get_bounds()` | 某个序列的 storage metadata |
 | `scan_storage_gaps()` | 只扫描连续性，不触发修复 |
-| `ensure_stream()` | 确保实时 ingestion + aggregation 正在运行 |
+| `ensure_stream()` | 确保实时 ingestion + aggregation 正在运行，可注册到 consumer lease |
+| `release_stream()` | 释放 consumer lease，不强制停止其他 consumer 仍在使用的流 |
 | `subscribe()` / `unsubscribe()` | callback 事件订阅 |
 | `subscribe_iter()` | async iterator 事件订阅 |
 | `on_bar_event()` | 消费 `BarAggregator` events |

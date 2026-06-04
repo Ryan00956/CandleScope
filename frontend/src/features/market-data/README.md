@@ -29,6 +29,9 @@ on this feature contract rather than calling those implementation hooks.
   loading, error, visible-data, and gap-recovery state for the active session.
 - May use internal chart data and stream helpers from this feature directory.
 - May call backend K-line services through existing runtime hooks.
+- May read `features/watchlist-full-cache` through its resolver during initial
+  symbol/interval load, before falling back to the market-data memory cache or
+  backend queries.
 - May publish indicator range request events after K-line history expands or is
   repaired; indicators own the actual range request side effects.
 
@@ -40,3 +43,5 @@ on this feature contract rather than calling those implementation hooks.
 - Do not expose K-line reset setters back to chart-session or `App.jsx`.
 - Do not own drawing, export, watchlist, settings, or alert UI state.
 - Do not expose raw Lightweight Charts objects in the public contract.
+- Do not mutate watchlist full-cache rows; market-data may consume a resolved
+  warm array and then continue its own chart reconciliation.

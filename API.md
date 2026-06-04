@@ -508,15 +508,33 @@ Response includes backward-compatible `lines` plus normalized output fields such
 
 Tier values:
 
-- `full`: K-line stream plus price stream
+- `full`: price stream plus the requested K-line intervals
 - `price`: price stream only
-- `none`: stop related realtime work
+- `none`: no watchlist-owned price or K-line realtime work
 
 Set tier body:
 
 ```json
 { "tier": "price" }
 ```
+
+For `full`, clients should send the complete interval set they want kept warm.
+The frontend builds this from the exchange plugin's native intervals plus the
+user's saved custom intervals. `consumer_id` identifies the frontend owner of
+the lease so repeated frontend or chart subscriptions can share the same
+backend upstream stream.
+
+```json
+{
+  "tier": "full",
+  "intervals": ["1m", "5m", "1h", "45m"],
+  "consumer_id": "watchlist:client-instance:binance:spot:ETHUSDT"
+}
+```
+
+`GET /subscriptions/` and `GET /subscriptions/{symbol}` include `intervals` for
+persisted full subscriptions. Older full subscriptions without interval data
+fall back to `1m` when restored.
 
 Sync body:
 

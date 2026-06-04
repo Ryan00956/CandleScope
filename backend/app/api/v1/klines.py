@@ -336,8 +336,18 @@ async def get_klines(
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
 
     dm = _require_data_manager(request)
+    consumer_id = f"rest:klines:{exchange}:{market_type}:{symbol}:{interval}:{id(request)}"
+    stream_ensured = False
     try:
-        await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
+        await dm.ensure_stream(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            focus_scope="rest",
+            consumer_id=consumer_id,
+        )
+        stream_ensured = True
         result = await run_storage(
             dm.query_latest, symbol, interval, limit,
             exchange,
@@ -345,6 +355,20 @@ async def get_klines(
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager query failed: {exc}") from exc
+    finally:
+        release_stream = getattr(dm, "release_stream", None)
+        if stream_ensured and callable(release_stream):
+            try:
+                await release_stream(
+                    symbol,
+                    interval,
+                    exchange=exchange,
+                    market_type=market_type,
+                    focus_scope="rest",
+                    consumer_id=consumer_id,
+                )
+            except Exception:
+                pass
 
     data = _bars_to_dicts(result.bars)
     return {
@@ -377,8 +401,18 @@ async def get_latest_klines(
     symbol = normalize_symbol(symbol, exchange=exchange, market_type=market_type)
 
     dm = _require_data_manager(request)
+    consumer_id = f"rest:klines_latest:{exchange}:{market_type}:{symbol}:{interval}:{id(request)}"
+    stream_ensured = False
     try:
-        await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
+        await dm.ensure_stream(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            focus_scope="rest",
+            consumer_id=consumer_id,
+        )
+        stream_ensured = True
         result = await run_storage(
             _call_data_manager_method,
             dm.query_latest, symbol, interval, limit,
@@ -390,6 +424,20 @@ async def get_latest_klines(
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager latest query failed: {exc}") from exc
+    finally:
+        release_stream = getattr(dm, "release_stream", None)
+        if stream_ensured and callable(release_stream):
+            try:
+                await release_stream(
+                    symbol,
+                    interval,
+                    exchange=exchange,
+                    market_type=market_type,
+                    focus_scope="rest",
+                    consumer_id=consumer_id,
+                )
+            except Exception:
+                pass
 
     data = _bars_to_dicts(result.bars)
     return {

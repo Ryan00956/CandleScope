@@ -82,7 +82,8 @@ CandleScope is a local-first market charting application with:
 - Realtime K-line WebSocket streams with single-interval and multi-interval modes.
 - Demand-aware historical backfill scheduling: current chart history first,
   related intervals next, subscriptions and background audits later.
-- Watchlists, price-only subscriptions, realtime price snapshots, and price streams.
+- Watchlists with `none` / price-only / full subscription tiers, realtime price
+  snapshots, and full-tier background K-line warm caches.
 - Built-in indicators: `MA`, `EMA`, `MACD`, `RSI`, `BOLL`, `ATR`, and `VOL`.
 - Pyne, a Pine-style Python runtime for custom indicators.
 - Interactive chart tools: line variants, freehand drawing, text annotations, Fibonacci retracement, and long/short position tools.
@@ -258,7 +259,7 @@ Important endpoints:
 | `/api/v1/stream/prices` | WebSocket | Realtime price stream |
 | `/api/v1/stream/indicators` | WebSocket | Realtime indicator stream |
 | `/api/v1/indicators/compute` | `POST` | Built-in or Pyne script indicator compute |
-| `/api/v1/subscriptions/` | `GET` | List subscriptions |
+| `/api/v1/subscriptions/` | `GET` | List watchlist subscription tiers and full intervals |
 | `/api/v1/settings/storage/health` | `GET` | Gap/backfill health |
 | `/api/v1/exchanges/` | `GET` | Exchange capabilities |
 | `/api/v1/symbols/exchange-info` | `GET` | Symbol metadata search |

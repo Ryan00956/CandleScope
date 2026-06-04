@@ -21,14 +21,14 @@ ingestion -> bar_aggregator -> DataManager -> API / WS / Indicator
 | Facade | `DataManager` | Public methods for query, stream, subscription, maintenance, and diagnostics |
 | Cache | `KlineCache` | In-memory series cache with size/TTL limits |
 | Query | `QueryEngine` | Resolve Cache -> Storage -> Backfill with missing-range metadata |
-| Streams | `StreamCoordinator` / `StreamEnsurePlanner` | Start and stop ingestion + bar aggregator targets |
+| Streams | `StreamCoordinator` / `StreamEnsurePlanner` | Start and stop ingestion + bar aggregator targets; share upstream streams across consumer leases |
 | Events | `DataEventBus` | Callback and async-iterator event distribution |
 | Aggregation Bridge | `AggregatorBridge` | Persist bar events, merge cache, emit `DataEvent` |
 | Backfill | `BackfillCoordinator` | Request dedup, merge, retry, cancel, storage readback, event mapping |
 | Custom Query | `CustomQueryEngine` | Query custom intervals consistently |
 | Warm Start | `AggregatorWarmStartService` | Seed aggregator state from storage on startup |
 | Price | `IngestionPriceSource` / `PriceSnapshotCache` | Lightweight realtime price stream and snapshots |
-| Subscription | `SubscriptionService` | Watchlist tiers: `full`, `price`, `none` |
+| Subscription | `SubscriptionService` | Watchlist tiers: `full`, `price`, `none`; persisted full intervals and consumer leases |
 | Maintenance | `maintenance.py`, `retention.py` | storage repair, gap scan, retention limits |
 
 ## Public API
@@ -43,7 +43,8 @@ Common methods on `DataManager`:
 | `query_before()` | Pagination before a timestamp |
 | `get_bounds()` | Storage metadata for a series |
 | `scan_storage_gaps()` | Continuity scan without repair |
-| `ensure_stream()` | Ensure realtime ingestion + aggregation is running |
+| `ensure_stream()` | Ensure realtime ingestion + aggregation is running, optionally registered to a consumer lease |
+| `release_stream()` | Release a consumer lease without forcing unrelated consumers to stop |
 | `subscribe()` / `unsubscribe()` | Callback event subscription |
 | `subscribe_iter()` | Async iterator event subscription |
 | `on_bar_event()` | Consume `BarAggregator` events |

@@ -9,6 +9,7 @@ import { useChartInitialLoad } from "./useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./useChartLoadMoreLeft";
 import { useSessionTransitionReset } from "./useSessionTransitionReset";
 import { INDICATOR_RANGE_REQUEST_REASONS, useMarketDataEvents } from "./marketDataEvents";
+import { resolveInitialRows as resolveWatchlistInitialRows } from "../watchlist-full-cache/watchlistFullCacheResolver";
 
 export function useMarketDataRuntime({
   session,
@@ -110,6 +111,20 @@ export function useMarketDataRuntime({
     });
   }, [realtimePriceRef]);
 
+  const resolveInitialRows = useCallback(
+    (sym, intv, mt, ex) => resolveWatchlistInitialRows({
+      symbol: sym,
+      interval: intv,
+      marketType: mt,
+      exchange: ex,
+      getMemoryRows: (cacheSymbol, cacheInterval) => getCache(cacheSymbol, cacheInterval, {
+        marketType: mt,
+        exchange: ex,
+      }),
+    }),
+    [getCache],
+  );
+
   const {
     loadingMoreLeft,
     setLoadingMoreLeft,
@@ -135,6 +150,7 @@ export function useMarketDataRuntime({
     marketType,
     getIntervalDays,
     getFromCache,
+    resolveInitialRows,
     replaceChartData,
     clearChartData,
     commitMergedChartData,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+
+import pytest
 
 from app.data_engine.interval_policy import compute_bucket_start_ms
 from app.data_engine.data_manager import DataManager
@@ -14,12 +17,86 @@ from app.data_engine.data_manager.price_cache import (
 from app.data_engine.data_manager.subscriptions import (
     SubscriptionService,
     SubscriptionTier,
+    normalize_subscription_intervals,
 )
 from app.data_engine.ingestion import factory as ingestion_factory
 from app.data_engine.ingestion.factory import ExchangeIngestionFactory
 from app.data_engine.ingestion.models import DataSource, MarketEvent, StreamType
 
 DAY_MS = 86_400_000
+
+
+class _RecordingSubscriptionDataManager:
+    def __init__(self) -> None:
+        self.stream_started: list[tuple[str, str, str, str, str, str | None, str | None]] = []
+        self.stream_released: list[tuple[str, str, str, str, str, str | None, str | None]] = []
+        self.stream_stopped: list[tuple[str, str, str, str]] = []
+        self.price_started: list[tuple[str, str, str]] = []
+        self.price_stopped: list[tuple[str, str, str]] = []
+
+    async def ensure_stream(
+        self,
+        symbol,
+        interval,
+        exchange="binance",
+        market_type="spot",
+        *,
+        focus_scope="foreground",
+        subscription_tier=None,
+        consumer_id=None,
+    ):
+        self.stream_started.append((
+            exchange,
+            market_type,
+            symbol,
+            interval,
+            focus_scope,
+            subscription_tier,
+            consumer_id,
+        ))
+
+    async def release_stream(
+        self,
+        symbol,
+        interval,
+        exchange="binance",
+        market_type="spot",
+        *,
+        consumer_id=None,
+        focus_scope="foreground",
+        subscription_tier=None,
+    ):
+        self.stream_released.append((
+            exchange,
+            market_type,
+            symbol,
+            interval,
+            focus_scope,
+            subscription_tier,
+            consumer_id,
+        ))
+
+    async def stop_stream(self, symbol, interval, exchange="binance", market_type="spot"):
+        self.stream_stopped.append((exchange, market_type, symbol, interval))
+
+    def get_all_streams(self):
+        return []
+
+    async def ensure_price_stream(self, symbol, exchange="binance", market_type="spot"):
+        self.price_started.append((exchange, market_type, symbol))
+
+    async def stop_price_stream(self, symbol, exchange="binance", market_type="spot"):
+        self.price_stopped.append((exchange, market_type, symbol))
+
+
+def test_normalize_subscription_intervals_keeps_valid_unique_values() -> None:
+    assert normalize_subscription_intervals(["1h", " 1h ", "45m", "", None, "bogus"]) == [
+        "1h",
+        "45m",
+    ]
+    assert normalize_subscription_intervals("4h") == ["4h"]
+    assert normalize_subscription_intervals({"1d", "1d"}) == ["1d"]
+    assert normalize_subscription_intervals({"not": "a-list"}) == []
 
 
 def test_price_snapshot_cache_normalizes_updates_and_watched_snapshot() -> None:
@@ -344,77 +421,63 @@ def test_data_manager_daily_open_marks_price_only_priority_metadata() -> None:
 
 def test_subscription_service_full_price_none_lifecycle(tmp_path) -> None:
     async def _run() -> None:
-        class _StreamInfo:
-            def __init__(self, key: SeriesKey) -> None:
-                self.key = key
-
-        class _DataManager:
-            def __init__(self) -> None:
-                self.stream_started: list[tuple[str, str, str, str, str, str | None]] = []
-                self.stream_stopped: list[tuple[str, str, str, str]] = []
-                self.price_started: list[tuple[str, str, str]] = []
-                self.price_stopped: list[tuple[str, str, str]] = []
-                self.streams: list[_StreamInfo] = []
-
-            async def ensure_stream(
-                self,
-                symbol,
-                interval,
-                exchange="binance",
-                market_type="spot",
-                *,
-                focus_scope="foreground",
-                subscription_tier=None,
-            ):
-                self.stream_started.append((
-                    exchange,
-                    market_type,
-                    symbol,
-                    interval,
-                    focus_scope,
-                    subscription_tier,
-                ))
-                self.streams.append(_StreamInfo(
-                    SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
-                ))
-
-            async def stop_stream(self, symbol, interval, exchange="binance", market_type="spot"):
-                self.stream_stopped.append((exchange, market_type, symbol, interval))
-                self.streams = [
-                    item for item in self.streams
-                    if item.key != SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
-                ]
-
-            def get_all_streams(self):
-                return list(self.streams)
-
-            async def ensure_price_stream(self, symbol, exchange="binance", market_type="spot"):
-                self.price_started.append((exchange, market_type, symbol))
-
-            async def stop_price_stream(self, symbol, exchange="binance", market_type="spot"):
-                self.price_stopped.append((exchange, market_type, symbol))
-
-        dm = _DataManager()
+        dm = _RecordingSubscriptionDataManager()
         service = SubscriptionService(tmp_path / "subs.db")
         service.set_data_manager(dm)
 
-        full = await service.set_tier("okx:spot:BTC-USDT", SubscriptionTier.FULL)
+        full = await service.set_tier(
+            "okx:spot:BTC-USDT",
+            SubscriptionTier.FULL,
+            intervals=["1h", "45m"],
+        )
         assert full["changed"] is True
         assert full["tier"] == "full"
         assert service.get_tier("okx:spot:BTC-USDT") == SubscriptionTier.FULL
-        assert dm.stream_started == [(
-            "okx",
-            "spot",
-            "BTC-USDT",
-            "1m",
-            "subscription",
-            "full",
-        )]
+        assert dm.stream_started == [
+            (
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "1h",
+                "subscription",
+                "full",
+                "watchlist:global:okx:spot:BTC-USDT",
+            ),
+            (
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "45m",
+                "subscription",
+                "full",
+                "watchlist:global:okx:spot:BTC-USDT",
+            ),
+        ]
         assert dm.price_started == [("okx", "spot", "BTC-USDT")]
 
         price_only = await service.set_tier("okx:spot:BTC-USDT", SubscriptionTier.PRICE_ONLY)
         assert price_only == {"symbol": "okx:spot:BTC-USDT", "tier": "price", "changed": True}
-        assert dm.stream_stopped == [("okx", "spot", "BTC-USDT", "1m")]
+        assert dm.stream_released == [
+            (
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "1h",
+                "subscription",
+                "full",
+                "watchlist:global:okx:spot:BTC-USDT",
+            ),
+            (
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "45m",
+                "subscription",
+                "full",
+                "watchlist:global:okx:spot:BTC-USDT",
+            ),
+        ]
+        assert dm.stream_stopped == []
         assert dm.price_stopped == []
         assert service.get_tier("okx:spot:BTC-USDT") == SubscriptionTier.PRICE_ONLY
 
@@ -428,54 +491,264 @@ def test_subscription_service_full_price_none_lifecycle(tmp_path) -> None:
 
 def test_subscription_service_restores_persisted_full_and_price_tiers(tmp_path) -> None:
     async def _run() -> None:
-        class _DataManager:
-            def __init__(self) -> None:
-                self.stream_started: list[tuple[str, str, str, str, str, str | None]] = []
-                self.price_started: list[tuple[str, str, str]] = []
-
-            async def ensure_stream(
-                self,
-                symbol,
-                interval,
-                exchange="binance",
-                market_type="spot",
-                *,
-                focus_scope="foreground",
-                subscription_tier=None,
-            ):
-                self.stream_started.append((
-                    exchange,
-                    market_type,
-                    symbol,
-                    interval,
-                    focus_scope,
-                    subscription_tier,
-                ))
-
-            async def ensure_price_stream(self, symbol, exchange="binance", market_type="spot"):
-                self.price_started.append((exchange, market_type, symbol))
-
         db_path = tmp_path / "subs.db"
         seed = SubscriptionService(db_path)
-        await seed.set_tier("spot:BTCUSDT", SubscriptionTier.FULL)
+        await seed.set_tier(
+            "spot:BTCUSDT",
+            SubscriptionTier.FULL,
+            intervals=["1h", "4h"],
+        )
         await seed.set_tier("okx:spot:ETH-USDT", SubscriptionTier.PRICE_ONLY)
 
-        dm = _DataManager()
+        dm = _RecordingSubscriptionDataManager()
         restored = SubscriptionService(db_path)
         restored.set_data_manager(dm)
         await restored.start()
 
-        assert dm.stream_started == [(
-            "binance",
-            "spot",
-            "BTCUSDT",
-            "1m",
-            "subscription",
-            "full",
-        )]
+        assert dm.stream_started == [
+            (
+                "binance",
+                "spot",
+                "BTCUSDT",
+                "1h",
+                "subscription",
+                "full",
+                "watchlist:global:spot:BTCUSDT",
+            ),
+            (
+                "binance",
+                "spot",
+                "BTCUSDT",
+                "4h",
+                "subscription",
+                "full",
+                "watchlist:global:spot:BTCUSDT",
+            ),
+        ]
         assert dm.price_started == [
             ("binance", "spot", "BTCUSDT"),
             ("okx", "spot", "ETH-USDT"),
         ]
 
     asyncio.run(_run())
+
+
+def test_subscription_service_full_interval_diff_ensures_added_and_releases_removed(tmp_path) -> None:
+    async def _run() -> None:
+        dm = _RecordingSubscriptionDataManager()
+        service = SubscriptionService(tmp_path / "subs.db")
+        service.set_data_manager(dm)
+
+        await service.set_tier(
+            "okx:spot:BTC-USDT",
+            SubscriptionTier.FULL,
+            intervals=["1m", "1h"],
+            consumer_id="client-a",
+        )
+        result = await service.set_tier(
+            "okx:spot:BTC-USDT",
+            SubscriptionTier.FULL,
+            intervals=["1h", "4h"],
+            consumer_id="client-a",
+        )
+
+        assert result == {"symbol": "okx:spot:BTC-USDT", "tier": "full", "changed": True}
+        assert dm.stream_released == [(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1m",
+            "subscription",
+            "full",
+            "watchlist:global:okx:spot:BTC-USDT",
+        )]
+        assert dm.stream_started[-1] == (
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "4h",
+            "subscription",
+            "full",
+            "watchlist:global:okx:spot:BTC-USDT",
+        )
+        assert service.get("okx:spot:BTC-USDT").intervals == ["1h", "4h"]
+
+    asyncio.run(_run())
+
+
+def test_subscription_service_full_repeated_subscription_uses_global_consumer(tmp_path) -> None:
+    async def _run() -> None:
+        dm = _RecordingSubscriptionDataManager()
+        service = SubscriptionService(tmp_path / "subs.db")
+        service.set_data_manager(dm)
+
+        await service.set_tier(
+            "okx:spot:BTC-USDT",
+            SubscriptionTier.FULL,
+            intervals=["1h"],
+            consumer_id="client-a",
+        )
+        result = await service.set_tier(
+            "okx:spot:BTC-USDT",
+            SubscriptionTier.FULL,
+            intervals=["1h"],
+            consumer_id="client-b",
+        )
+
+        assert result == {"symbol": "okx:spot:BTC-USDT", "tier": "full", "changed": False}
+        assert dm.stream_started == [
+            (
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "1h",
+                "subscription",
+                "full",
+                "watchlist:global:okx:spot:BTC-USDT",
+            ),
+            (
+                "okx",
+                "spot",
+                "BTC-USDT",
+                "1h",
+                "subscription",
+                "full",
+                "watchlist:global:okx:spot:BTC-USDT",
+            ),
+        ]
+
+    asyncio.run(_run())
+
+
+def test_subscription_service_rejects_new_full_without_valid_intervals(tmp_path) -> None:
+    async def _run() -> None:
+        service = SubscriptionService(tmp_path / "subs.db")
+
+        with pytest.raises(ValueError, match="Full subscriptions require intervals"):
+            await service.set_tier("okx:spot:BTC-USDT", SubscriptionTier.FULL)
+
+        with pytest.raises(ValueError, match="at least one valid interval"):
+            await service.set_tier(
+                "okx:spot:BTC-USDT",
+                SubscriptionTier.FULL,
+                intervals=["", "bogus"],
+            )
+
+        assert service.get("okx:spot:BTC-USDT") is None
+
+    asyncio.run(_run())
+
+
+def test_subscription_service_legacy_empty_full_intervals_restore_uses_1m(tmp_path) -> None:
+    async def _run() -> None:
+        db_path = tmp_path / "subs.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE subscriptions (
+                    symbol   TEXT PRIMARY KEY,
+                    tier     TEXT NOT NULL DEFAULT 'none',
+                    added_at INTEGER NOT NULL DEFAULT 0,
+                    intervals_json TEXT NOT NULL DEFAULT '[]'
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO subscriptions
+                    (symbol, tier, added_at, intervals_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("okx:spot:BTC-USDT", "full", 123, "[]"),
+            )
+            conn.commit()
+
+        dm = _RecordingSubscriptionDataManager()
+        service = SubscriptionService(db_path)
+        service.set_data_manager(dm)
+        await service.start()
+
+        assert dm.stream_started == [(
+            "okx",
+            "spot",
+            "BTC-USDT",
+            "1m",
+            "subscription",
+            "full",
+            "watchlist:global:okx:spot:BTC-USDT",
+        )]
+
+    asyncio.run(_run())
+
+
+def test_subscription_service_persists_full_intervals(tmp_path) -> None:
+    async def _run() -> None:
+        db_path = tmp_path / "subs.db"
+        service = SubscriptionService(db_path)
+        await service.set_tier(
+            "okx:spot:BTC-USDT",
+            SubscriptionTier.FULL,
+            intervals=["1h", "45m", "1h", "bogus"],
+        )
+
+        restored = SubscriptionService(db_path)
+        sub = restored.get("okx:spot:BTC-USDT")
+
+        assert sub is not None
+        assert sub.to_dict() == {
+            "symbol": "okx:spot:BTC-USDT",
+            "tier": "full",
+            "added_at": sub.added_at,
+            "intervals": ["1h", "45m"],
+        }
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT intervals_json FROM subscriptions WHERE symbol = ?",
+                ("okx:spot:BTC-USDT",),
+            ).fetchone()
+        assert row == ('["1h","45m"]',)
+
+    asyncio.run(_run())
+
+
+def test_subscription_service_migrates_legacy_subscription_table(tmp_path) -> None:
+    db_path = tmp_path / "subs.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE subscriptions (
+                symbol   TEXT PRIMARY KEY,
+                tier     TEXT NOT NULL DEFAULT 'none',
+                added_at INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO subscriptions (symbol, tier, added_at) VALUES (?, ?, ?)",
+            ("binance:spot:BTC-USDT", "full", 123),
+        )
+        conn.commit()
+
+    service = SubscriptionService(db_path)
+    sub = service.get("spot:BTCUSDT")
+
+    assert sub is not None
+    assert sub.to_dict() == {
+        "symbol": "spot:BTCUSDT",
+        "tier": "full",
+        "added_at": 123,
+        "intervals": [],
+    }
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(subscriptions)").fetchall()
+        }
+        row = conn.execute(
+            "SELECT symbol, tier, added_at, intervals_json FROM subscriptions"
+        ).fetchone()
+
+    assert "intervals_json" in columns
+    assert row == ("spot:BTCUSDT", "full", 123, "[]")

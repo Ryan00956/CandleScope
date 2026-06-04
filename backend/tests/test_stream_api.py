@@ -13,11 +13,13 @@ from app.data_engine.data_manager.models import (
     DataEventType,
     SeriesKey,
 )
+from app.data_engine.data_manager.subscriptions import SubscriptionTier
 
 
 class _SingleStreamDataManager:
     def __init__(self, event_type: DataEventType = DataEventType.BAR_UPDATED) -> None:
         self.ensure_stream_calls: list[dict] = []
+        self.release_stream_calls: list[dict] = []
         self.event_type = event_type
 
     async def ensure_stream(
@@ -27,12 +29,35 @@ class _SingleStreamDataManager:
         *,
         exchange: str,
         market_type: str,
+        focus_scope: str = "foreground",
+        consumer_id: str | None = None,
     ) -> None:
         self.ensure_stream_calls.append({
             "symbol": symbol,
             "interval": interval,
             "exchange": exchange,
             "market_type": market_type,
+            "focus_scope": focus_scope,
+            "consumer_id": consumer_id,
+        })
+
+    async def release_stream(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        exchange: str,
+        market_type: str,
+        focus_scope: str = "foreground",
+        consumer_id: str | None = None,
+    ) -> None:
+        self.release_stream_calls.append({
+            "symbol": symbol,
+            "interval": interval,
+            "exchange": exchange,
+            "market_type": market_type,
+            "focus_scope": focus_scope,
+            "consumer_id": consumer_id,
         })
 
     async def subscribe_iter(self, *, symbol, interval, exchange, market_type, event_types):
@@ -44,10 +69,12 @@ class _SingleStreamDataManager:
 
 
 class _MultiStreamDataManager:
-    def __init__(self) -> None:
+    def __init__(self, *, emit_backfill: bool = True) -> None:
         self.ensure_stream_calls: list[dict] = []
+        self.release_stream_calls: list[dict] = []
         self.subscribe_calls: list[dict] = []
         self.unsubscribed: list[object] = []
+        self.emit_backfill = emit_backfill
 
     async def ensure_stream(
         self,
@@ -56,12 +83,35 @@ class _MultiStreamDataManager:
         *,
         exchange: str,
         market_type: str,
+        focus_scope: str = "foreground",
+        consumer_id: str | None = None,
     ) -> None:
         self.ensure_stream_calls.append({
             "symbol": symbol,
             "interval": interval,
             "exchange": exchange,
             "market_type": market_type,
+            "focus_scope": focus_scope,
+            "consumer_id": consumer_id,
+        })
+
+    async def release_stream(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        exchange: str,
+        market_type: str,
+        focus_scope: str = "foreground",
+        consumer_id: str | None = None,
+    ) -> None:
+        self.release_stream_calls.append({
+            "symbol": symbol,
+            "interval": interval,
+            "exchange": exchange,
+            "market_type": market_type,
+            "focus_scope": focus_scope,
+            "consumer_id": consumer_id,
         })
 
     def subscribe(
@@ -90,7 +140,8 @@ class _MultiStreamDataManager:
                 detail={"bars_count": 2},
             ))
 
-        asyncio.create_task(_emit())
+        if self.emit_backfill:
+            asyncio.create_task(_emit())
         return object()
 
     def unsubscribe(self, handle) -> None:
@@ -119,6 +170,56 @@ class _PriceDataManager:
                 }
             },
         )
+
+
+class _SubscriptionService:
+    def __init__(self) -> None:
+        self.subscriptions: dict[str, dict] = {}
+        self.set_tier_calls: list[dict] = []
+
+    def normalize_symbol(self, symbol: str) -> str:
+        return symbol
+
+    def get_tier(self, symbol: str) -> SubscriptionTier:
+        sub = self.subscriptions.get(symbol)
+        if sub is None:
+            return SubscriptionTier.NONE
+        return SubscriptionTier(sub["tier"])
+
+    async def set_tier(
+        self,
+        symbol: str,
+        tier: SubscriptionTier,
+        *,
+        intervals=None,
+        consumer_id=None,
+    ) -> dict:
+        self.set_tier_calls.append({
+            "symbol": symbol,
+            "tier": tier,
+            "intervals": intervals,
+            "consumer_id": consumer_id,
+        })
+        self.subscriptions[symbol] = {
+            "symbol": symbol,
+            "tier": tier.value,
+            "intervals": intervals or [],
+        }
+        return {"symbol": symbol, "tier": tier.value, "changed": True}
+
+    def get(self, symbol: str):
+        return None
+
+    def get_all(self) -> list[dict]:
+        return list(self.subscriptions.values())
+
+
+class _SubscriptionDataManager:
+    def __init__(self, service: _SubscriptionService) -> None:
+        self.service = service
+
+    def get_subscription_service(self) -> _SubscriptionService:
+        return self.service
 
 
 def _stream_client(data_manager) -> TestClient:
@@ -171,6 +272,19 @@ def test_kline_ws_forwards_bar_updated_event_from_data_manager() -> None:
         "interval": "1m",
         "exchange": "binance",
         "market_type": "spot",
+        "focus_scope": "websocket",
+        "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
+    }]
+    assert dm.ensure_stream_calls[0]["consumer_id"].startswith(
+        "ws:klines:binance:spot:BTCUSDT:1m:"
+    )
+    assert dm.release_stream_calls == [{
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "exchange": "binance",
+        "market_type": "spot",
+        "focus_scope": "websocket",
+        "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
     }]
 
 
@@ -208,8 +322,49 @@ def test_kline_multi_ws_forwards_backfill_completed_event() -> None:
         "interval": "1m",
         "exchange": "binance",
         "market_type": "spot",
+        "focus_scope": "websocket",
+        "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
+    }]
+    assert dm.ensure_stream_calls[0]["consumer_id"].startswith(
+        "ws:klines_multi:binance:spot:BTCUSDT:"
+    )
+    assert dm.release_stream_calls == [{
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "exchange": "binance",
+        "market_type": "spot",
+        "focus_scope": "websocket",
+        "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
     }]
     assert len(dm.subscribe_calls) == 1
+
+
+def test_kline_multi_ws_unsubscribe_releases_stream_consumer() -> None:
+    dm = _MultiStreamDataManager(emit_backfill=False)
+    client = _stream_client(dm)
+
+    with client.websocket_connect("/api/v1/stream/klines_multi?symbol=BTCUSDT") as ws:
+        assert ws.receive_json()["type"] == "connected"
+        ws.send_json({"action": "subscribe", "intervals": ["1m"]})
+        assert ws.receive_json()["type"] == "subscribed"
+
+        ws.send_json({"action": "unsubscribe", "intervals": ["1m"]})
+        assert ws.receive_json() == {
+            "type": "unsubscribed",
+            "exchange": "binance",
+            "symbol": "BTCUSDT",
+            "intervals": ["1m"],
+            "market_type": "spot",
+        }
+
+    assert dm.release_stream_calls == [{
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "exchange": "binance",
+        "market_type": "spot",
+        "focus_scope": "websocket",
+        "consumer_id": dm.ensure_stream_calls[0]["consumer_id"],
+    }]
 
 
 def test_subscriptions_prices_returns_data_manager_price_snapshot() -> None:
@@ -227,6 +382,52 @@ def test_subscriptions_prices_returns_data_manager_price_snapshot() -> None:
             "price": 100.0,
         }]
     }
+
+
+def test_set_subscription_tier_accepts_intervals_and_consumer_id() -> None:
+    service = _SubscriptionService()
+    client = _subscription_client(_SubscriptionDataManager(service))
+
+    response = client.put(
+        "/api/v1/subscriptions/okx:spot:BTC-USDT",
+        json={
+            "tier": "full",
+            "intervals": ["1h", "45m"],
+            "consumer_id": "watchlist:client-a:okx:spot:BTC-USDT",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "symbol": "okx:spot:BTC-USDT",
+        "tier": "full",
+        "changed": True,
+    }
+    assert service.set_tier_calls == [{
+        "symbol": "okx:spot:BTC-USDT",
+        "tier": SubscriptionTier.FULL,
+        "intervals": ["1h", "45m"],
+        "consumer_id": "watchlist:client-a:okx:spot:BTC-USDT",
+    }]
+
+
+def test_sync_watchlist_does_not_forward_interval_details() -> None:
+    service = _SubscriptionService()
+    client = _subscription_client(_SubscriptionDataManager(service))
+
+    response = client.post(
+        "/api/v1/subscriptions/sync",
+        json={"symbols": ["spot:BTCUSDT"], "intervals": ["1h"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"synced": 1, "auto_registered": 1}
+    assert service.set_tier_calls == [{
+        "symbol": "spot:BTCUSDT",
+        "tier": SubscriptionTier.PRICE_ONLY,
+        "intervals": None,
+        "consumer_id": None,
+    }]
 
 
 def test_price_ws_forwards_price_updated_event_from_data_manager() -> None:

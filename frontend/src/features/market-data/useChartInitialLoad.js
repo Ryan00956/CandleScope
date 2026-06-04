@@ -12,6 +12,7 @@ export function useChartInitialLoad({
   marketType,
   getIntervalDays,
   getFromCache,
+  resolveInitialRows,
   replaceChartData,
   clearChartData,
   commitMergedChartData,
@@ -35,14 +36,23 @@ export function useChartInitialLoad({
     const controller = new AbortController();
     abortRef.current = controller;
 
-    const cached = getFromCache(sym, intv);
+    const initialRows = resolveInitialRows?.(sym, intv, mt, ex) || {
+      rows: getFromCache(sym, intv),
+      source: "memory-cache-hit",
+      needsRepair: false,
+    };
+    const cached = initialRows.rows;
     const hasCacheHit = cached && cached.length > 0;
     let shownInitialData = false;
 
     if (hasCacheHit) {
-      replaceChartData(sym, intv, cached, { source: "memory-cache-hit" });
+      replaceChartData(sym, intv, cached, {
+        cache: initialRows.tier === "watchlist-full",
+        source: initialRows.source || "memory-cache-hit",
+      });
       updateLastPrice(cached[cached.length - 1], intv);
-      setConnectionStatus("connected");
+      setConnectionStatus(initialRows.needsRepair ? "loading" : "connected");
+      setDataSource(initialRows.source || "memory-cache-hit");
       setDatasetKey((version) => version + 1);
       setLoading(false);
       setError(null);
@@ -238,6 +248,7 @@ export function useChartInitialLoad({
     marketType,
     pendingInitialHistoryRef,
     replaceChartData,
+    resolveInitialRows,
     setConnectionStatus,
     setCrosshairData,
     setDataSource,

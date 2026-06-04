@@ -38,6 +38,7 @@ async def handle_pyne_indicator_subscribe(
     security_mode: str | None,
     history_limit: int,
     send_json,
+    stream_consumer_id: str,
     unsubscribe_client,
     queue_message,
 ) -> None:
@@ -84,9 +85,17 @@ async def handle_pyne_indicator_subscribe(
         ))
         return
 
-    unsubscribe_client(client_id)
+    await unsubscribe_client(client_id)
 
-    await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
+    await dm.ensure_stream(
+        symbol,
+        interval,
+        exchange=exchange,
+        market_type=market_type,
+        focus_scope="websocket",
+        subscription_tier="indicator",
+        consumer_id=stream_consumer_id,
+    )
     meta = {
         "kind": "script",
         "exchange": exchange,
@@ -100,6 +109,7 @@ async def handle_pyne_indicator_subscribe(
         "params": params,
         "securityMode": security_mode,
         "historyLimit": history_limit,
+        "streamConsumerId": stream_consumer_id,
     }
     try:
         incremental_script = is_incremental_pyne_script(script)

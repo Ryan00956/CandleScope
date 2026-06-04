@@ -543,6 +543,178 @@ def test_stream_policy_plans_okx_base_stream_without_facade_logic() -> None:
     assert [key.interval for key in plan.prerequisite_streams] == ["1m"]
 
 
+def test_data_manager_stream_leases_reuse_upstream_until_last_consumer() -> None:
+    async def _run() -> None:
+        class _Handle:
+            def __init__(self) -> None:
+                self.stopped = 0
+
+            async def stop(self) -> None:
+                self.stopped += 1
+
+        class _Factory:
+            def __init__(self) -> None:
+                self.starts = []
+                self.handles = {}
+
+            async def start(
+                self,
+                symbol,
+                interval,
+                on_market_event,
+                exchange="binance",
+                market_type="spot",
+                on_gap=None,
+            ):
+                key = (exchange, market_type, symbol, interval)
+                self.starts.append(key)
+                handle = _Handle()
+                self.handles[key] = handle
+                return handle
+
+        dm = DataManager()
+        factory = _Factory()
+        dm.set_ingestion_factory(factory)
+
+        await dm.ensure_stream(
+            "BTC-USDT",
+            "1m",
+            exchange="okx",
+            market_type="spot",
+            consumer_id="watchlist:a",
+        )
+        await dm.ensure_stream(
+            "BTC-USDT",
+            "1m",
+            exchange="okx",
+            market_type="spot",
+            consumer_id="chart:b",
+        )
+
+        key = ("okx", "spot", "BTC-USDT", "1m")
+        assert factory.starts == [key]
+
+        await dm.release_stream(
+            "BTC-USDT",
+            "1m",
+            exchange="okx",
+            market_type="spot",
+            consumer_id="watchlist:a",
+        )
+
+        assert (
+            dm.get_stream_info("BTC-USDT", "1m", exchange="okx", market_type="spot")
+            is not None
+        )
+        assert factory.handles[key].stopped == 0
+
+        await dm.release_stream(
+            "BTC-USDT",
+            "1m",
+            exchange="okx",
+            market_type="spot",
+            consumer_id="chart:b",
+        )
+
+        assert factory.handles[key].stopped == 1
+        assert (
+            dm.get_stream_info("BTC-USDT", "1m", exchange="okx", market_type="spot")
+            is None
+        )
+
+    asyncio.run(_run())
+
+
+def test_data_manager_stream_leases_keep_prerequisite_until_last_dependent() -> None:
+    async def _run() -> None:
+        class _Handle:
+            def __init__(self) -> None:
+                self.stopped = 0
+
+            async def stop(self) -> None:
+                self.stopped += 1
+
+        class _Factory:
+            def __init__(self) -> None:
+                self.starts = []
+                self.handles = {}
+
+            async def start(
+                self,
+                symbol,
+                interval,
+                on_market_event,
+                exchange="binance",
+                market_type="spot",
+                on_gap=None,
+            ):
+                key = (exchange, market_type, symbol, interval)
+                self.starts.append(key)
+                handle = _Handle()
+                self.handles[key] = handle
+                return handle
+
+        dm = DataManager()
+        factory = _Factory()
+        dm.set_ingestion_factory(factory)
+
+        await dm.ensure_stream(
+            "BTC-USDT",
+            "1h",
+            exchange="okx",
+            market_type="spot",
+            consumer_id="watchlist:a",
+        )
+        await dm.ensure_stream(
+            "BTC-USDT",
+            "4h",
+            exchange="okx",
+            market_type="spot",
+            consumer_id="chart:b",
+        )
+
+        base_key = ("okx", "spot", "BTC-USDT", "1m")
+        one_hour_key = ("okx", "spot", "BTC-USDT", "1h")
+        four_hour_key = ("okx", "spot", "BTC-USDT", "4h")
+        assert factory.starts == [base_key, one_hour_key, four_hour_key]
+
+        await dm.release_stream(
+            "BTC-USDT",
+            "1h",
+            exchange="okx",
+            market_type="spot",
+            consumer_id="watchlist:a",
+        )
+
+        assert factory.handles[one_hour_key].stopped == 1
+        assert factory.handles[base_key].stopped == 0
+        assert (
+            dm.get_stream_info("BTC-USDT", "1m", exchange="okx", market_type="spot")
+            is not None
+        )
+        assert (
+            dm.get_stream_info("BTC-USDT", "4h", exchange="okx", market_type="spot")
+            is not None
+        )
+
+        await dm.release_stream(
+            "BTC-USDT",
+            "4h",
+            exchange="okx",
+            market_type="spot",
+            consumer_id="chart:b",
+        )
+
+        assert factory.handles[four_hour_key].stopped == 1
+        assert factory.handles[base_key].stopped == 1
+        assert (
+            dm.get_stream_info("BTC-USDT", "1m", exchange="okx", market_type="spot")
+            is None
+        )
+
+    asyncio.run(_run())
+
+
 def test_data_manager_on_bar_event_preserves_exchange() -> None:
     async def _run() -> None:
         dm = DataManager()

@@ -1,10 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchSubscriptions,
   getPriceStreamUrl,
   syncWatchlistSymbols,
   updateSubscriptionTier,
 } from "../../services/api";
+import { getNativeIntervals } from "../chart-session/exchangeCatalogRuntime";
+import { parseSymbolKey } from "../../utils/symbolKey";
+import {
+  getFullSubscriptionResourceSummary,
+  getSubscriptionTierRequestOptions,
+} from "./watchlistSubscriptionPolicy";
 
 const WATCHLIST_SYNC_DEBOUNCE_MS = 500;
 const PRICE_WS_RECONNECT_MS = 3_000;
@@ -17,12 +23,21 @@ function buildTierMap(subscriptions) {
   return tiers;
 }
 
-export function useWatchlistSubscriptionRuntime({ watchlists }) {
+export function useWatchlistSubscriptionRuntime({
+  watchlists,
+  subscriptionContext = {},
+}) {
   const [subscriptionTiers, setSubscriptionTiers] = useState({});
   const [symbolPrices, setSymbolPrices] = useState({});
   const syncTimerRef = useRef(null);
   const priceWsRef = useRef(null);
   const subscriptionTiersRef = useRef(subscriptionTiers);
+  const {
+    exchange = "binance",
+    exchangeCatalog = null,
+    nativeIntervals = [],
+    customIntervalRecords = [],
+  } = subscriptionContext;
 
   useEffect(() => {
     subscriptionTiersRef.current = subscriptionTiers;
@@ -34,14 +49,38 @@ export function useWatchlistSubscriptionRuntime({ watchlists }) {
     return response;
   }, []);
 
+  const resolveNativeIntervals = useCallback((symbol) => {
+    const parsed = parseSymbolKey(symbol);
+    if (parsed.exchange === exchange) return nativeIntervals;
+    return getNativeIntervals(parsed.exchange, exchangeCatalog);
+  }, [exchange, exchangeCatalog, nativeIntervals]);
+
+  const subscriptionResourceSummaries = useMemo(() => {
+    const summaries = {};
+    const symbols = new Set(watchlists.flatMap((watchlist) => watchlist.symbols || []));
+    for (const symbol of symbols) {
+      summaries[symbol] = getFullSubscriptionResourceSummary({
+        nativeIntervals: resolveNativeIntervals(symbol),
+        customIntervalRecords,
+      });
+    }
+    return summaries;
+  }, [customIntervalRecords, resolveNativeIntervals, watchlists]);
+
   const handleTierChange = useCallback((symbol, tier) => {
     const prevTier = subscriptionTiersRef.current[symbol] || "none";
+    const options = getSubscriptionTierRequestOptions({
+      symbol,
+      tier,
+      nativeIntervals: resolveNativeIntervals(symbol),
+      customIntervalRecords,
+    });
     setSubscriptionTiers((prev) => ({ ...prev, [symbol]: tier }));
-    updateSubscriptionTier(symbol, tier).catch((err) => {
+    updateSubscriptionTier(symbol, tier, options).catch((err) => {
       console.warn("Failed to update tier:", err);
       setSubscriptionTiers((current) => ({ ...current, [symbol]: prevTier }));
     });
-  }, []);
+  }, [customIntervalRecords, resolveNativeIntervals]);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,6 +163,7 @@ export function useWatchlistSubscriptionRuntime({ watchlists }) {
 
   return {
     subscriptionTiers,
+    subscriptionResourceSummaries,
     setSubscriptionTiers,
     symbolPrices,
     refreshSubscriptions,

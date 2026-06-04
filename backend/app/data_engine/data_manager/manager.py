@@ -78,6 +78,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
 from app.core.executors import run_storage
@@ -135,6 +136,13 @@ class PriceStreamControllerLike(Protocol):
 
     def set_watched_symbols(self, symbols: set[str]) -> Any:
         ...
+
+
+@dataclass(slots=True)
+class _StreamLease:
+    """Consumer ownership for one backend stream entry."""
+
+    consumers: set[str] = field(default_factory=set)
 
 
 class DataManager:
@@ -203,6 +211,7 @@ class DataManager:
         self.price_cache = PriceSnapshotCache()
         self._subscriptions: Any = None
         self._price_stream_controller: PriceStreamControllerLike | None = None
+        self._stream_leases: dict[SeriesKey, _StreamLease] = {}
 
         # Wire BarAggregator output → DataManager → Cache + EventBus
         self.bar_aggregator.publisher.on_bar_event(self.aggregator_bridge.on_bar_event)
@@ -821,6 +830,7 @@ class DataManager:
         *,
         focus_scope: str = "foreground",
         subscription_tier: str | None = None,
+        consumer_id: str | None = None,
     ) -> StreamInfo:
         """Ensure a live data stream is running.
 
@@ -864,6 +874,15 @@ class DataManager:
             market_type=plan.requested.market_type,
         )
 
+        self._register_stream_leases(
+            self._stream_plan_lease_keys(plan),
+            consumer_id=self._stream_consumer_id(
+                consumer_id,
+                focus_scope=focus_scope,
+                subscription_tier=subscription_tier,
+            ),
+        )
+
         await self.warm_start.seed_if_needed(
             plan.requested.symbol,
             plan.requested.interval,
@@ -876,6 +895,53 @@ class DataManager:
 
         return info
 
+    async def release_stream(
+        self,
+        symbol: str,
+        interval: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        *,
+        consumer_id: str | None = None,
+        focus_scope: str = "foreground",
+        subscription_tier: str | None = None,
+    ) -> None:
+        """Release one consumer's claim on a stream.
+
+        The underlying backend stream is stopped only after the last
+        registered consumer for that stream has released it.
+        """
+        market_type = self._normalize_market_type(market_type)
+        plan = self.stream_policy.plan(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+        )
+        consumer = self._stream_consumer_id(
+            consumer_id,
+            focus_scope=focus_scope,
+            subscription_tier=subscription_tier,
+        )
+        empty_keys = self._release_stream_leases(
+            self._stream_plan_lease_keys(plan),
+            consumer_id=consumer,
+        )
+
+        for key in empty_keys:
+            await self.coordinator.stop_stream(
+                key.symbol,
+                key.interval,
+                exchange=key.exchange,
+                market_type=key.market_type,
+            )
+            self.bar_aggregator.remove_target(
+                key.symbol,
+                key.interval,
+                exchange=key.exchange,
+                market_type=key.market_type,
+            )
+
     async def stop_stream(
         self,
         symbol: str,
@@ -885,10 +951,65 @@ class DataManager:
     ) -> None:
         """Stop a running data stream."""
         market_type = self._normalize_market_type(market_type)
+        self._stream_leases.pop(
+            SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
+            None,
+        )
         await self.coordinator.stop_stream(symbol, interval, exchange=exchange, market_type=market_type)
         self.bar_aggregator.remove_target(
             symbol, interval, exchange=exchange, market_type=market_type,
         )
+
+    def _stream_consumer_id(
+        self,
+        consumer_id: str | None,
+        *,
+        focus_scope: str,
+        subscription_tier: str | None,
+    ) -> str:
+        if consumer_id and consumer_id.strip():
+            return consumer_id.strip()
+        tier = (
+            subscription_tier.strip()
+            if isinstance(subscription_tier, str) and subscription_tier.strip()
+            else "adhoc"
+        )
+        scope = focus_scope.strip() if focus_scope.strip() else "foreground"
+        return f"{scope}:{tier}:default"
+
+    @staticmethod
+    def _stream_plan_lease_keys(plan: Any) -> tuple[SeriesKey, ...]:
+        keys: list[SeriesKey] = [plan.requested]
+        keys.extend(plan.aggregation_targets)
+        keys.extend(plan.prerequisite_streams)
+        return tuple(dict.fromkeys(keys))
+
+    def _register_stream_leases(
+        self,
+        keys: tuple[SeriesKey, ...],
+        *,
+        consumer_id: str,
+    ) -> None:
+        for key in keys:
+            lease = self._stream_leases.setdefault(key, _StreamLease())
+            lease.consumers.add(consumer_id)
+
+    def _release_stream_leases(
+        self,
+        keys: tuple[SeriesKey, ...],
+        *,
+        consumer_id: str,
+    ) -> list[SeriesKey]:
+        empty_keys: list[SeriesKey] = []
+        for key in keys:
+            lease = self._stream_leases.get(key)
+            if lease is None:
+                continue
+            lease.consumers.discard(consumer_id)
+            if not lease.consumers:
+                self._stream_leases.pop(key, None)
+                empty_keys.append(key)
+        return empty_keys
 
     # ═══════════════════════════════════════════════════════════
     #  Price Streams

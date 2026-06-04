@@ -82,7 +82,7 @@ CandleScope 是本地优先的行情图表应用，当前包括：
 - 基于 SQLite 的 cache-first 历史查询。
 - 单周期和多周期实时 K 线 WebSocket。
 - 通过独立 backfill pipeline 进行后台缺口检测和修复。
-- 自选列表、price-only 订阅、实时价格快照和价格流。
+- 自选列表三档订阅：不订阅、仅价格、完全订阅；包含实时价格快照，以及 full 档后台 K 线 warm cache。
 - 内置指标：`MA`、`EMA`、`MACD`、`RSI`、`BOLL`、`ATR`、`VOL`。
 - Pyne：Pine 风格 Python 自定义指标 runtime。
 - 交互式绘图工具：线段/射线/直线、自由画笔、文字、斐波那契回撤、多空仓位工具。
@@ -281,7 +281,7 @@ API 参考独立维护：
 | `/api/v1/stream/prices` | WebSocket | 实时价格流 |
 | `/api/v1/stream/indicators` | WebSocket | 实时指标流 |
 | `/api/v1/indicators/compute` | `POST` | 内置或 Pyne 脚本指标计算 |
-| `/api/v1/subscriptions/` | `GET` | 列出订阅 |
+| `/api/v1/subscriptions/` | `GET` | 列出自选订阅等级和 full 周期 |
 | `/api/v1/settings/storage/health` | `GET` | gap/backfill 健康信息 |
 | `/api/v1/exchanges/` | `GET` | 交易所能力 |
 | `/api/v1/symbols/exchange-info` | `GET` | 交易对元数据搜索 |

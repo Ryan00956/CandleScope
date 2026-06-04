@@ -23,8 +23,16 @@ async def stream_single_kline(
     market_type: str = "spot",
 ) -> None:
     """Stream bars for a single interval using DataManager's EventBus."""
+    consumer_id = f"ws:klines:{exchange}:{market_type}:{symbol}:{interval}:{id(websocket)}"
     try:
-        await dm.ensure_stream(symbol, interval, exchange=exchange, market_type=market_type)
+        await dm.ensure_stream(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            focus_scope="websocket",
+            consumer_id=consumer_id,
+        )
 
         await send_json_with_timeout(websocket, {
             "type": "subscribed",
@@ -69,6 +77,20 @@ async def stream_single_kline(
             await websocket.close()
         except Exception:
             pass
+    finally:
+        release_stream = getattr(dm, "release_stream", None)
+        if callable(release_stream):
+            try:
+                await release_stream(
+                    symbol,
+                    interval,
+                    exchange=exchange,
+                    market_type=market_type,
+                    focus_scope="websocket",
+                    consumer_id=consumer_id,
+                )
+            except Exception:
+                pass
 
 
 async def stream_multi_kline(
@@ -83,6 +105,7 @@ async def stream_multi_kline(
     event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
     subscriptions = {}
     ws_closed = False
+    consumer_id = f"ws:klines_multi:{exchange}:{market_type}:{symbol}:{id(websocket)}"
 
     async def safe_send_json(data: dict) -> bool:
         nonlocal ws_closed
@@ -195,7 +218,14 @@ async def stream_multi_kline(
                 if action == "subscribe":
                     for iv in valid:
                         if iv not in active_intervals:
-                            await dm.ensure_stream(symbol, iv, exchange=exchange, market_type=market_type)
+                            await dm.ensure_stream(
+                                symbol,
+                                iv,
+                                exchange=exchange,
+                                market_type=market_type,
+                                focus_scope="websocket",
+                                consumer_id=consumer_id,
+                            )
                             handle = dm.subscribe(
                                 callback=event_callback,
                                 symbol=symbol,
@@ -222,6 +252,7 @@ async def stream_multi_kline(
 
                 elif action == "unsubscribe":
                     for iv in valid:
+                        was_active = iv in active_intervals
                         active_intervals.discard(iv)
                         handle = subscriptions.pop(iv, None)
                         if handle is not None:
@@ -229,6 +260,20 @@ async def stream_multi_kline(
                                 dm.unsubscribe(handle)
                             except Exception:
                                 pass
+                        if was_active:
+                            release_stream = getattr(dm, "release_stream", None)
+                            if callable(release_stream):
+                                try:
+                                    await release_stream(
+                                        symbol,
+                                        iv,
+                                        exchange=exchange,
+                                        market_type=market_type,
+                                        focus_scope="websocket",
+                                        consumer_id=consumer_id,
+                                    )
+                                except Exception:
+                                    pass
                     await safe_send_json({
                         "type": "unsubscribed",
                         "exchange": exchange,
@@ -254,11 +299,27 @@ async def stream_multi_kline(
 
     finally:
         ws_closed = True
+        release_stream = getattr(dm, "release_stream", None)
+        intervals_to_release = list(active_intervals)
         for handle in list(subscriptions.values()):
             try:
                 dm.unsubscribe(handle)
             except Exception:
                 pass
+        if callable(release_stream):
+            for iv in intervals_to_release:
+                try:
+                    await release_stream(
+                        symbol,
+                        iv,
+                        exchange=exchange,
+                        market_type=market_type,
+                        focus_scope="websocket",
+                        consumer_id=consumer_id,
+                    )
+                except Exception:
+                    pass
+        active_intervals.clear()
         subscriptions.clear()
 
 

@@ -10,6 +10,7 @@ import { useChartSettingsRuntime } from "../features/settings/chartAppearanceSet
 import { useDrawingRuntime } from "../features/drawings/useDrawingRuntime";
 import { usePriceScalePrefs } from "../features/settings/priceScalePrefsRuntime";
 import { useWatchlistRuntime } from "../features/watchlist/useWatchlistRuntime";
+import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime";
 import AppProviders from "./AppProviders";
 import AppShell from "./AppShell";
 import "../index.css";
@@ -57,7 +58,27 @@ export default function App() {
     updateUserPref,
   });
 
-  const watchlist = useWatchlistRuntime();
+  const watchlist = useWatchlistRuntime({
+    subscriptionContext: {
+      exchange: chartSession.view.exchange,
+      exchangeCatalog: chartSession.view.exchangeCatalog,
+      nativeIntervals: chartSession.view.nativeIntervals,
+      customIntervalRecords: chartSession.view.customIntervalRecords,
+    },
+  });
+  useWatchlistFullCacheRuntime({
+    watchlists: watchlist.view.watchlists,
+    subscriptionTiers: watchlist.view.subscriptionTiers,
+    exchangeCatalog: chartSession.view.exchangeCatalog,
+    nativeIntervals: chartSession.view.nativeIntervals,
+    customIntervalRecords: chartSession.view.customIntervalRecords,
+    currentSession: {
+      symbol: chartSession.view.symbol,
+      exchange: chartSession.view.exchange,
+      marketType: chartSession.view.marketType,
+      interval: chartSession.view.interval,
+    },
+  });
 
   const { cacheLimits, ephemeralCacheBars } = settings;
   useCacheLimitsSync({ cacheLimits, ephemeralCacheBars });

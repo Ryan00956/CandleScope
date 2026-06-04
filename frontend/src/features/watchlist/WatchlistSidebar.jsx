@@ -42,9 +42,9 @@ function formatPct(pct) {
 }
 
 const TIER_OPTIONS = [
-  { value: "full", label: "完全订阅", desc: "自动同步所有K线" },
-  { value: "price", label: "仅价格", desc: "只推送最新价格" },
-  { value: "none", label: "仅收藏", desc: "不消耗后端资源" },
+  { value: "none", label: "不订阅", desc: "不消耗行情资源", title: "不订阅：不保活 ticker 或 K 线" },
+  { value: "price", label: "仅价格", desc: "保活价格列", title: "仅价格：保活价格列" },
+  { value: "full", label: "完全订阅", desc: "价格 + K线快切", title: "完全订阅：保活价格和可切换周期 K 线" },
 ];
 
 const EMPTY_COLLAPSED_LISTS = [];
@@ -58,7 +58,7 @@ export default function WatchlistSidebar({
   watchlists = [], onWatchlistsChange,
   layout,
   actions,
-  prices, subscriptionTiers, onTierChange,
+  prices, subscriptionTiers, subscriptionResourceSummaries, onTierChange,
   upColor, downColor,
 }) {
   const setWatchlists = useCallback((updater) => {
@@ -466,6 +466,9 @@ export default function WatchlistSidebar({
     const tierKnown = Object.prototype.hasOwnProperty.call(subscriptionTiers || {}, compositeKey);
     const tierVal = tierKnown ? subscriptionTiers[compositeKey] : (tick ? "price" : "none");
     const tierDot = tierVal === "full" ? "wl-tier-full" : tierVal === "price" ? "wl-tier-price" : "";
+    const tierTitle = tierVal === "full"
+      ? subscriptionResourceSummaries?.[compositeKey]?.tooltip || "完全订阅：保活价格和可切换周期 K 线"
+      : "仅价格：保活价格列";
     const flashDir = flashStates[compositeKey]; // "up" | "down" | undefined
 
     // Use daily (1D) change data from backend (matches 1D chart)
@@ -502,7 +505,7 @@ export default function WatchlistSidebar({
           </span>
 
           {/* Tier dot */}
-          {tierDot && <span className={`wl-tier-dot ${tierDot}`} title={tierVal === "full" ? "完全订阅" : "仅价格"}/>}
+          {tierDot && <span className={`wl-tier-dot ${tierDot}`} title={tierTitle}/>}
 
           {/* Symbol name + market badge + exchange badge */}
           <span className="wl-sym-name">
@@ -754,6 +757,7 @@ export default function WatchlistSidebar({
           ) : (() => {
               const { symbol: ctxSym } = parseSymbolKey(contextMenu.symbol);
               const ctxCompositeKey = contextMenu.symbol;
+              const fullSummary = subscriptionResourceSummaries?.[ctxCompositeKey];
               return (
             <>
               <div className="wl-ctx-header">{ctxSym}</div>
@@ -763,12 +767,15 @@ export default function WatchlistSidebar({
                   <div className="wl-ctx-sub-header">订阅级别</div>
                   {TIER_OPTIONS.map((opt) => {
                     const currentTier = subscriptionTiers?.[ctxCompositeKey] || "none";
+                    const desc = opt.value === "full" && fullSummary ? fullSummary.shortText : opt.desc;
+                    const title = opt.value === "full" && fullSummary ? fullSummary.tooltip : opt.title;
                     return (
                       <button key={opt.value} className={`wl-ctx-item ${currentTier === opt.value ? "wl-ctx-item-selected" : ""}`}
+                        title={title}
                         onClick={() => { onTierChange(ctxCompositeKey, opt.value); setContextMenu(null); }}>
                         <span className={`wl-tier-dot ${opt.value === "full" ? "wl-tier-full" : opt.value === "price" ? "wl-tier-price" : ""}`}/>
                         <span>{opt.label}</span>
-                        <span className="wl-ctx-item-desc">{opt.desc}</span>
+                        <span className="wl-ctx-item-desc">{desc}</span>
                       </button>
                     );
                   })}

@@ -2,8 +2,13 @@
  * CandleScope API service layer.
  */
 import { API_BASE, httpBaseToWsBase } from "./apiConfig";
+import { buildSubscriptionTierRequestBody } from "./subscriptionApiPolicy";
 
 const CLIENT_INSTANCE_ID = Math.random().toString(36).slice(2, 10);
+
+export function getClientInstanceId() {
+    return CLIENT_INSTANCE_ID;
+}
 
 export class ApiError extends Error {
     constructor({ status, detail, url }) {
@@ -261,11 +266,11 @@ export async function fetchSubscription(symbol) {
     return request(url);
 }
 
-export async function updateSubscriptionTier(symbol, tier) {
+export async function updateSubscriptionTier(symbol, tier, options = {}) {
     const url = `${API_BASE}/subscriptions/${encodeURIComponent(symbol)}`;
     return request(url, {
         method: "PUT",
-        body: { tier },
+        body: buildSubscriptionTierRequestBody(tier, options),
     });
 }
 

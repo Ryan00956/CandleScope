@@ -1,85 +1,9 @@
-"""Small in-process cache exposed to Pyne scripts."""
+"""Cache facade backed by the standalone ``pyne_runtime`` package."""
 from __future__ import annotations
 
-import threading
-import time
-from dataclasses import dataclass
 from typing import Any, Callable
 
-from app.core import config
-
-
-@dataclass
-class _CacheEntry:
-    value: Any
-    created_at: float
-    last_access: float
-    ttl: float | None
-
-    def expired(self, now: float) -> bool:
-        return self.ttl is not None and (self.ttl <= 0 or now - self.created_at > self.ttl)
-
-
-class PyneCache:
-    """Thread-safe process-local cache for expensive user objects."""
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._items: dict[str, _CacheEntry] = {}
-
-    def get_or_load(self, key: str, loader: Callable[[], Any], ttl: float | None = None) -> Any:
-        if not callable(loader):
-            raise TypeError("pyne.cache loader must be callable")
-        normalized_key = str(key)
-        now = time.time()
-        with self._lock:
-            entry = self._items.get(normalized_key)
-            if entry is not None and not entry.expired(now):
-                entry.last_access = now
-                return entry.value
-            if entry is not None:
-                self._items.pop(normalized_key, None)
-
-        value = loader()
-
-        with self._lock:
-            now = time.time()
-            self._items[normalized_key] = _CacheEntry(
-                value=value,
-                created_at=now,
-                last_access=now,
-                ttl=float(ttl) if ttl is not None else None,
-            )
-            self._enforce_limit()
-        return value
-
-    def clear(self, key: str | None = None) -> int:
-        with self._lock:
-            if key is None:
-                count = len(self._items)
-                self._items.clear()
-                return count
-            return 1 if self._items.pop(str(key), None) is not None else 0
-
-    def stats(self) -> dict[str, Any]:
-        with self._lock:
-            return {
-                "size": len(self._items),
-                "maxItems": max(int(config.PYNE_CACHE_MAX_ITEMS), 1),
-                "keys": list(self._items.keys()),
-            }
-
-    def _enforce_limit(self) -> None:
-        max_items = max(int(config.PYNE_CACHE_MAX_ITEMS), 1)
-        while len(self._items) > max_items:
-            oldest_key = min(
-                self._items,
-                key=lambda key: self._items[key].last_access,
-            )
-            self._items.pop(oldest_key, None)
-
-
-pyne_cache = PyneCache()
+from .external_runtime import pyne_cache
 
 
 class PyneCacheNamespace:
@@ -92,7 +16,8 @@ class PyneCacheNamespace:
         return pyne_cache.clear(key)
 
     def cache_stats(self) -> dict[str, Any]:
-        return pyne_cache.stats()
+        stats = pyne_cache.stats()
+        return dict(stats) if isinstance(stats, dict) else {}
 
 
 pyne = PyneCacheNamespace()

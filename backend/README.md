@@ -187,6 +187,26 @@ Built-ins include `MA`, `EMA`, `MACD`, `RSI`, `BOLL`, `ATR`, and `VOL`.
 
 Pyne scripts run through `execute_pyne_script()` with process execution by default. Security modes are `safe`, `research`, and `unsafe`.
 
+The backend imports Pyne through `app.indicator.pyne`, backed by the bundled
+`packages/pyne-runtime` package in this repository. The backend loads that
+source tree automatically, so a normal backend install is enough:
+
+```powershell
+cd backend
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+```
+
+Diagnostics expose the selected runtime package under
+`/api/v1/indicators/diagnostics -> pyne.runtimeBackend`.
+
+If you want to test a newer external Pyne checkout temporarily, override the
+source path for that shell session:
+
+```powershell
+$env:CANDLESCOPE_PYNE_RUNTIME_SRC = "<path-to-pyne-runtime>\src"
+```
+
 HTTP indicator compute is offloaded through dedicated executors:
 
 - Builtin indicator HTTP compute uses one-shot engine instances so it does not mutate the app-wide realtime `IndicatorEngine`.

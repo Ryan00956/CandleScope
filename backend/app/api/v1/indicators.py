@@ -28,6 +28,7 @@ from app.indicator import registry, IndicatorEngine, create_engine
 from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.pyne.cache import pyne_cache
 from app.indicator.pyne.executor import execute_pyne_script
+from app.indicator.pyne.external_runtime import RuntimeBackendSnapshot, cache_stats
 from app.indicator.pyne.security import PyneSecurityPolicy
 from app.indicator.serialization import (
     build_error_payload,
@@ -371,6 +372,7 @@ def _build_diagnostics_snapshot(
             "error": custom_error,
         },
         "pyne": {
+            "runtimeBackend": RuntimeBackendSnapshot.current().to_dict(),
             "security": policy,
             "executor": {
                 "mode": config.PYNE_EXECUTOR_MODE,
@@ -382,7 +384,7 @@ def _build_diagnostics_snapshot(
                 "maxOutputSeries": config.PYNE_MAX_OUTPUT_SERIES,
                 "maxOutputPoints": config.PYNE_MAX_OUTPUT_POINTS,
             },
-            "cache": pyne_cache.stats(),
+            "cache": cache_stats() or pyne_cache.stats(),
         },
         "websocket": {
             "maxSubscriptions": config.INDICATOR_WS_MAX_SUBSCRIPTIONS,

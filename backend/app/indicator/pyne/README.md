@@ -1,8 +1,10 @@
-# Pyne Runtime
+# Pyne Runtime Facade
 
 [中文](README_zh.md)
 
-> Pine-style Python scripting runtime for CandleScope indicators. Pyne lets users write backend-hosted scripts with familiar `ta.*`, `input.*`, `plot()`, and `color.*` APIs while running inside a controlled execution policy.
+> Pine-style Python scripting runtime for CandleScope indicators. CandleScope
+> imports it through `app.indicator.pyne`, while the implementation is provided
+> by the bundled `packages/pyne-runtime` package.
 
 ## Runtime Flow
 
@@ -12,9 +14,9 @@ script + OHLCV + params
 execute_pyne_script()
         ├── process executor (default) or inline executor
         ▼
-PyneRuntime.execute()
+pyne_runtime.PyneRuntime.execute()
         ├── validate security policy
-        ├── build PyneContext
+        ├── build runtime context
         ├── inject namespace
         ├── exec(script)
         ├── collect outputs
@@ -25,17 +27,16 @@ PyneRuntime.execute()
 
 | File | Responsibility |
 |---|---|
-| [runtime.py](runtime.py) | Main execution runtime and `PyneResult` |
-| [executor.py](executor.py) | Inline/process execution strategy and hard process timeout |
-| [security.py](security.py) | Security modes, import policy, timeout, output limits, builtins |
-| [context.py](context.py) | OHLCV arrays and derived sources |
-| [ta.py](ta.py) | Technical analysis functions |
-| [input.py](input.py) | `input.*` parameter declarations and UI schema collection |
-| [plot.py](plot.py) | `indicator`, `plot`, `bar`, `hline`, `fill`, `marker`, `bgcolor`, `barcolor`, signals |
-| [color.py](color.py) | Color constants and `color.new()` |
-| [math_ext.py](math_ext.py) | Array-aware math namespace |
-| [utils.py](utils.py) | `nz`, `shift`, crossovers, rolling helpers, pivots, etc. |
-| [cache.py](cache.py) | Process-local TTL cache for scripts |
+| [external_runtime.py](external_runtime.py) | CandleScope settings and payload bridge to `pyne_runtime` |
+| [__init__.py](__init__.py) | Public `app.indicator.pyne` facade |
+| [executor.py](executor.py) | CandleScope execution entrypoints backed by `pyne_runtime` |
+| [cache.py](cache.py) | Cache facade backed by `pyne_runtime.pyne_cache` |
+| [security.py](security.py) | Security facade backed by `pyne_runtime.security` |
+| `runtime.py`, `incremental.py`, `context.py`, `ta.py`, `input.py`, `plot.py`, `color.py`, `math_ext.py`, `utils.py` | Compatibility shims that re-export the matching `pyne_runtime.*` modules |
+
+The bundled source path is loaded automatically from
+`packages/pyne-runtime/src`. Set `CANDLESCOPE_PYNE_RUNTIME_SRC` only when you
+want to temporarily test another checkout.
 
 ## Quick Start
 
@@ -272,7 +273,8 @@ Incremental WebSocket subscriptions share one in-process session when symbol, in
 
 ## Security Modes
 
-Modes are defined in [security.py](security.py):
+Modes are defined by `pyne_runtime.security` and re-exported through
+[security.py](security.py):
 
 | Mode | Behavior |
 |---|---|

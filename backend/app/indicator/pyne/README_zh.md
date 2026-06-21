@@ -1,8 +1,10 @@
-# Pyne Runtime
+# Pyne Runtime Facade
 
 [English](README.md)
 
-> CandleScope 指标使用的 Pine 风格 Python 脚本运行时。Pyne 允许用户用熟悉的 `ta.*`、`input.*`、`plot()`、`color.*` API 编写后端托管脚本，并在受控执行策略下运行。
+> CandleScope 指标使用的 Pine 风格 Python 脚本运行时。CandleScope 仍通过
+> `app.indicator.pyne` 导入它，但实际实现由本仓库内置的
+> `packages/pyne-runtime` 包提供。
 
 ## Runtime 流程
 
@@ -12,9 +14,9 @@ script + OHLCV + params
 execute_pyne_script()
         ├── process executor（默认）或 inline executor
         ▼
-PyneRuntime.execute()
+pyne_runtime.PyneRuntime.execute()
         ├── validate security policy
-        ├── build PyneContext
+        ├── build runtime context
         ├── inject namespace
         ├── exec(script)
         ├── collect outputs
@@ -25,17 +27,15 @@ PyneRuntime.execute()
 
 | 文件 | 职责 |
 |---|---|
-| [runtime.py](runtime.py) | 主执行 runtime 和 `PyneResult` |
-| [executor.py](executor.py) | inline/process 执行策略和硬进程 timeout |
-| [security.py](security.py) | security modes、import policy、timeout、output limits、builtins |
-| [context.py](context.py) | OHLCV arrays 和派生数据源 |
-| [ta.py](ta.py) | 技术分析函数 |
-| [input.py](input.py) | `input.*` 参数声明和 UI schema 收集 |
-| [plot.py](plot.py) | `indicator`、`plot`、`bar`、`hline`、`fill`、`marker`、`bgcolor`、`barcolor`、signals |
-| [color.py](color.py) | 颜色常量和 `color.new()` |
-| [math_ext.py](math_ext.py) | 支持数组的 math namespace |
-| [utils.py](utils.py) | `nz`、`shift`、crossovers、rolling helpers、pivots 等 |
-| [cache.py](cache.py) | 脚本可用的进程内 TTL cache |
+| [external_runtime.py](external_runtime.py) | CandleScope 配置和 payload 到 `pyne_runtime` 的桥接 |
+| [__init__.py](__init__.py) | 公开的 `app.indicator.pyne` facade |
+| [executor.py](executor.py) | 由 `pyne_runtime` 支撑的 CandleScope 执行入口 |
+| [cache.py](cache.py) | 转发到 `pyne_runtime.pyne_cache` 的 cache facade |
+| [security.py](security.py) | 转发到 `pyne_runtime.security` 的 security facade |
+| `runtime.py`, `incremental.py`, `context.py`, `ta.py`, `input.py`, `plot.py`, `color.py`, `math_ext.py`, `utils.py` | 转发到对应 `pyne_runtime.*` 模块的兼容 shim |
+
+内置源码路径会自动从 `packages/pyne-runtime/src` 加载。只有临时联调其他
+checkout 时才需要设置 `CANDLESCOPE_PYNE_RUNTIME_SRC`。
 
 ## 快速开始
 
@@ -272,7 +272,7 @@ Incremental WebSocket 订阅会在品种、周期、脚本、参数、安全模�
 
 ## Security Modes
 
-模式定义在 [security.py](security.py)：
+模式由 `pyne_runtime.security` 定义，并通过 [security.py](security.py) 转发：
 
 | 模式 | 行为 |
 |---|---|

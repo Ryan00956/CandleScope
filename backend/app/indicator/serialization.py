@@ -288,9 +288,12 @@ def serialize_pyne_result(result: Any, *, lines_on_error: bool = True) -> dict[s
     if not result.ok:
         code = result.code or "PYNE_EXECUTION_FAILED"
         payload["code"] = code
-        payload["errorDetail"] = result.error_detail or error_detail(
+        payload["errorDetail"] = error_detail(
             code,
             result.error or "Pyne execution failed",
+            line=result.line,
+            column=result.column,
+            hint=_pyne_hint(code, result.hint),
         )
 
     for key in PYNE_EXTENDED_OUTPUT_KEYS:
@@ -306,6 +309,15 @@ def serialize_pyne_result(result: Any, *, lines_on_error: bool = True) -> dict[s
         payload["meta"] = result.meta
 
     return payload
+
+
+def _pyne_hint(code: str, fallback: str | None) -> str | None:
+    """Keep CandleScope-facing Pyne errors localized across runtime backends."""
+    if code == "PYNE_SYNTAX_ERROR":
+        return "这是 Python/Pyne 语法错误，请检查报错行附近的括号、缩进、逗号或赋值写法。"
+    if code == "PYNE_IMPORT_BLOCKED":
+        return "当前安全模式不允许该 import。可切换 research/unsafe，或配置 PYNE_ALLOWED_IMPORTS。"
+    return fallback
 
 
 def serialize_indicator_result(result: Any) -> dict[str, Any]:

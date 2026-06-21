@@ -15,7 +15,12 @@ from app.indicator import create_engine
 from app.data_engine.data_manager.models import BarData
 from app.indicator.events import IndicatorEvent, IndicatorEventType
 from app.indicator.custom_store import CustomIndicatorStore
-from app.indicator.pyne import PyneIncrementalSession, PyneIncrementalSessionManager, PyneRuntime
+from app.indicator.pyne import (
+    PyneIncrementalSession,
+    PyneIncrementalSessionManager,
+    PyneRuntime,
+    execute_pyne_script,
+)
 from app.indicator.pyne.cache import pyne_cache
 from app.indicator.pyne.executor import execute_pyne_script_in_process
 from app.indicator.pyne import security as pyne_security
@@ -56,7 +61,7 @@ add_line(close, title="Close", color="#ff0000", overlay=False, line_width=3, lin
 @pytest.mark.anyio
 async def test_pyne_add_line_histogram_output_with_color_data() -> None:
     script = """
-colors = [{"time": int(time[i]), "color": "#00ff00"} for i in range(len(time))]
+colors = ["#00ff00" for _ in range(len(volume))]
 add_line(volume, title="VOL", type="histogram", pane="volume", colorData=colors)
 """
 
@@ -69,6 +74,19 @@ add_line(volume, title="VOL", type="histogram", pane="volume", colorData=colors)
     assert payload["lines"][0]["type"] == "histogram"
     assert payload["lines"][0]["pane"] == "volume"
     assert payload["lines"][0]["data"][0]["color"] == "#00ff00"
+
+
+@pytest.mark.anyio
+async def test_pyne_package_execute_export_runs_new_runtime_plot_script() -> None:
+    script = """
+plot(close * 2, title="Double close", color=color.green)
+"""
+    result = execute_pyne_script(script=script, ohlcv=_bars(5), executor_mode="inline")
+
+    assert result.error is None
+    line = result.lines[0]
+    assert line["name"] == "Double close"
+    assert [point["value"] for point in line["data"][-3:]] == [204, 206, 208]
 
 
 @pytest.mark.anyio
@@ -472,6 +490,10 @@ def test_indicator_diagnostics_snapshot_reports_runtime_state(tmp_path) -> None:
     assert payload["registry"]["count"] >= 1
     assert payload["engine"]["instance_count"] == 1
     assert payload["customIndicators"]["count"] == 1
+    assert payload["pyne"]["runtimeBackend"]["package"] == "pyne_runtime"
+    assert payload["pyne"]["runtimeBackend"]["active"] == "external"
+    assert "packages" in payload["pyne"]["runtimeBackend"]["sourcePath"]
+    assert "pyne-runtime" in payload["pyne"]["runtimeBackend"]["sourcePath"]
     assert payload["pyne"]["security"]["mode"] in {"safe", "research", "unsafe"}
     assert payload["pyne"]["executor"]["mode"] in {"inline", "process"}
     assert payload["pyne"]["cache"]["maxItems"] >= 1

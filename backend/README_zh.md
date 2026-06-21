@@ -187,6 +187,25 @@ Exchange plugin 暴露 capabilities、symbol normalization、REST/WS protocol sp
 
 Pyne 脚本通过 `execute_pyne_script()` 执行，默认使用 process executor。Security modes 为 `safe`、`research`、`unsafe`。
 
+后端仍通过 `app.indicator.pyne` 导入 Pyne，但实际实现由本仓库内置的
+`packages/pyne-runtime` 包提供。后端会自动加载这个源码目录，所以正常安装
+后端依赖即可：
+
+```powershell
+cd backend
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+```
+
+诊断接口会在 `/api/v1/indicators/diagnostics -> pyne.runtimeBackend` 返回
+当前实际使用的 runtime 包。
+
+如果临时要联调外部新版 Pyne，可以只在当前 shell 里覆盖源码路径：
+
+```powershell
+$env:CANDLESCOPE_PYNE_RUNTIME_SRC = "<path-to-pyne-runtime>\src"
+```
+
 HTTP 指标计算通过专用 executor 隔离：
 
 - 内置指标 HTTP compute 使用 one-shot engine，不会修改全局实时 `IndicatorEngine`。

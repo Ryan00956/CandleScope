@@ -142,6 +142,10 @@ class FreehandPaneView {
     const chart = source._chart;
 
     if (!series || !chart) return;
+    if (source._hidden) {
+      this._renderer.update({ points: [], hidden: true });
+      return;
+    }
 
     const points = [];
     const coordinateContext = {};

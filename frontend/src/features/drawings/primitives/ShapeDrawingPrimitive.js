@@ -229,11 +229,16 @@ class ShapePaneView {
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
+    if (source._hidden) {
+      this._renderer.update({ points: [], hidden: true });
+      return;
+    }
 
     const points = [];
+    const coordinateContext = {};
 
     for (const dp of source._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp);
+      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -380,9 +385,10 @@ export class ShapeDrawingPrimitive {
   _screenPoints() {
     if (!this._series || !this._chart || this._dataPoints.length < 2) return null;
     const points = [];
+    const coordinateContext = {};
 
     for (const dp of this._dataPoints) {
-      const x = dataPointToCoordinate(this._chart, this._series, dp);
+      const x = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
       const y = this._series.priceToCoordinate(dp.price);
       if (x == null || y == null || !isFinite(x) || !isFinite(y)) return null;
       points.push({ x, y });

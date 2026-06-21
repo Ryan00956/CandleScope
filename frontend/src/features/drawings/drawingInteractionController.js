@@ -71,6 +71,8 @@ import {
   updateTwoPointPreview,
 } from "./drawingCreationController.js";
 
+const TEXT_UI_STABLE_FRAME_LIMIT = 12;
+
 export function useDrawing({
   chartAdapter,
   chartContainerRef,
@@ -598,11 +600,8 @@ export function useDrawing({
     return true;
   }, []);
 
-  // ── While editing OR a text is selected, keep both the textarea AND the
-  // floating format toolbar pinned to the underlying primitive, even on
-  // wheel zoom / pan / auto-scale. We piggy-back on requestAnimationFrame
-  // because Lightweight Charts does not expose a single subscription that
-  // covers both time-scale changes and price-scale auto-scale updates.
+  // ── While editing OR a text is selected, keep the textarea and toolbar
+  // pinned during chart interactions, then stop once the position stabilizes.
   useEffect(() => {
     const activeId = editingTextId || selectedPrimId;
     if (!activeId) return;
@@ -610,6 +609,14 @@ export function useDrawing({
     let raf = 0;
     let lastX = NaN;
     let lastY = NaN;
+    let stableFrames = 0;
+
+    const stop = () => {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+    };
 
     const tick = () => {
       const prim = primitivesRef.current.find((p) => p.id === activeId);
@@ -623,15 +630,43 @@ export function useDrawing({
           } else {
             refreshSelectedTextUi(activeId);
           }
+          stableFrames = 0;
+        } else {
+          stableFrames += 1;
         }
+      } else {
+        stableFrames += 1;
       }
+
+      if (stableFrames < TEXT_UI_STABLE_FRAME_LIMIT) {
+        raf = requestAnimationFrame(tick);
+      } else {
+        raf = 0;
+      }
+    };
+
+    const start = () => {
+      if (raf) return;
+      stableFrames = 0;
       raf = requestAnimationFrame(tick);
     };
-    raf = requestAnimationFrame(tick);
+
+    start();
+
+    const container = chartContainerRef?.current;
+    container?.addEventListener("wheel", start, { passive: true });
+    container?.addEventListener("pointerdown", start, true);
+    container?.addEventListener("pointermove", start, { passive: true });
+    window.addEventListener("resize", start);
+
     return () => {
-      if (raf) cancelAnimationFrame(raf);
+      stop();
+      container?.removeEventListener("wheel", start);
+      container?.removeEventListener("pointerdown", start, true);
+      container?.removeEventListener("pointermove", start);
+      window.removeEventListener("resize", start);
     };
-  }, [editingTextId, selectedPrimId, dataToScreen, refreshSelectedTextUi, setEditingTextPos]);
+  }, [editingTextId, selectedPrimId, dataToScreen, refreshSelectedTextUi, setEditingTextPos, chartContainerRef]);
 
   // ════════════════════════════════════════════════════
   //  MOUSE DOWN

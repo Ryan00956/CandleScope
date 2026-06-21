@@ -260,6 +260,10 @@ class TextPaneView {
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
+    if (source._hidden) {
+      this._renderer.update({ x: null, y: null, hidden: true });
+      return;
+    }
 
     const screen = source._anchorScreen();
     if (!screen) {
@@ -435,7 +439,8 @@ export class TextDrawingPrimitive {
   // ── Anchor → screen coords (CSS px relative to chart container) ──
   _anchorScreen() {
     if (!this._series || !this._chart) return null;
-    const sx = dataPointToCoordinate(this._chart, this._series, this._dataPoint);
+    const coordinateContext = {};
+    const sx = dataPointToCoordinate(this._chart, this._series, this._dataPoint, coordinateContext);
     const sy = this._series.priceToCoordinate(this._dataPoint.price);
     if (sx == null || sy == null || !isFinite(sx) || !isFinite(sy)) return null;
     return { x: sx, y: sy };

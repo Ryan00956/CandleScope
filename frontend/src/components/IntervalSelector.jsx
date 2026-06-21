@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   formatIntervalDescription,
   formatSecondsCompact,
@@ -84,7 +84,7 @@ function createStatusForValue(value, nativeValueSet, customValueSet) {
   return { ok: true, kind: "new", text: `将添加 ${formatIntervalDescription(normalized)} 自定义周期。` };
 }
 
-export default function IntervalSelector({
+function IntervalSelector({
   interval,
   nativeIntervals,
   intervalGroups,
@@ -527,3 +527,5 @@ export default function IntervalSelector({
     </div>
   );
 }
+
+export default memo(IntervalSelector);

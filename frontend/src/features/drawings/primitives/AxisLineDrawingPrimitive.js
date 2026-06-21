@@ -154,9 +154,14 @@ class AxisLinePaneView {
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
+    if (source._hidden) {
+      this._renderer.update({ point: null, hidden: true });
+      return;
+    }
 
     const dp = source._dataPoint || {};
-    let x = dataPointToCoordinate(chart, series, dp);
+    const coordinateContext = {};
+    let x = dataPointToCoordinate(chart, series, dp, coordinateContext);
     let y = null;
 
     if (dp.price != null) {
@@ -282,7 +287,8 @@ export class AxisLineDrawingPrimitive {
   _screenPoint() {
     if (!this._series || !this._chart || !this._dataPoint) return null;
     const dp = this._dataPoint;
-    let x = dataPointToCoordinate(this._chart, this._series, dp);
+    const coordinateContext = {};
+    let x = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
     let y = null;
 
     if (dp.price != null) {

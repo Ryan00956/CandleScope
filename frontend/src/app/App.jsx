@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useChartSurfaceRuntime } from "../chart-adapter/useChartSurfaceRuntime";
 import { loadUserPrefs, updateUserPref } from "../features/chart-session/chartSessionModel";
 import { useChartSession } from "../features/chart-session/useChartSession";
@@ -41,6 +41,14 @@ export default function App() {
 
   const [showIndicatorPanel, setShowIndicatorPanel] = useState(false);
   const [showAlertsPanel, setShowAlertsPanel] = useState(false);
+  const openIndicatorPanel = useCallback(() => setShowIndicatorPanel(true), []);
+  const closeIndicatorPanel = useCallback(() => setShowIndicatorPanel(false), []);
+  const toggleIndicatorPanel = useCallback(() => setShowIndicatorPanel((prev) => !prev), []);
+  const openSettingsPanel = useCallback(() => setShowSettings(true), []);
+  const closeSettingsPanel = useCallback(() => setShowSettings(false), []);
+  const openAlertsPanel = useCallback(() => setShowAlertsPanel(true), []);
+  const closeAlertsPanel = useCallback(() => setShowAlertsPanel(false), []);
+  const toggleAlertsPanel = useCallback(() => setShowAlertsPanel((prev) => !prev), []);
   const indicators = useIndicatorRuntime({
     session: chartSession,
     marketData,
@@ -83,6 +91,83 @@ export default function App() {
   const { cacheLimits, ephemeralCacheBars } = settings;
   useCacheLimitsSync({ cacheLimits, ephemeralCacheBars });
 
+  const indicatorRuntime = useMemo(() => ({
+    view: {
+      ...indicators.view,
+      isPanelOpen: showIndicatorPanel,
+    },
+    actions: {
+      ...indicators.actions,
+      openPanel: openIndicatorPanel,
+      closePanel: closeIndicatorPanel,
+      togglePanel: toggleIndicatorPanel,
+    },
+    status: indicators.status,
+  }), [
+    indicators.view,
+    indicators.actions,
+    indicators.status,
+    showIndicatorPanel,
+    openIndicatorPanel,
+    closeIndicatorPanel,
+    toggleIndicatorPanel,
+  ]);
+
+  const settingsRuntime = useMemo(() => ({
+    view: {
+      settings,
+      resolvedTheme,
+      isOpen: showSettings,
+    },
+    actions: {
+      update: setSettings,
+      openPanel: openSettingsPanel,
+      closePanel: closeSettingsPanel,
+    },
+    status: {},
+  }), [
+    settings,
+    resolvedTheme,
+    showSettings,
+    setSettings,
+    openSettingsPanel,
+    closeSettingsPanel,
+  ]);
+
+  const priceScaleRuntime = useMemo(() => ({
+    view: {
+      invertScale,
+      priceScaleMode,
+    },
+    actions: {
+      setInvertScale: handleInvertScaleChange,
+      setPriceScaleMode: handlePriceScaleModeChange,
+    },
+    status: {},
+  }), [
+    invertScale,
+    priceScaleMode,
+    handleInvertScaleChange,
+    handlePriceScaleModeChange,
+  ]);
+
+  const alertsRuntime = useMemo(() => ({
+    view: {
+      isOpen: showAlertsPanel,
+    },
+    actions: {
+      openPanel: openAlertsPanel,
+      closePanel: closeAlertsPanel,
+      togglePanel: toggleAlertsPanel,
+    },
+    status: {},
+  }), [
+    showAlertsPanel,
+    openAlertsPanel,
+    closeAlertsPanel,
+    toggleAlertsPanel,
+  ]);
+
   return (
     <AppProviders>
       <AppShell
@@ -91,56 +176,12 @@ export default function App() {
         session={chartSession}
         marketData={marketData}
         drawings={drawings}
-        indicators={{
-          view: {
-            ...indicators.view,
-            isPanelOpen: showIndicatorPanel,
-          },
-          actions: {
-            ...indicators.actions,
-            openPanel: () => setShowIndicatorPanel(true),
-            closePanel: () => setShowIndicatorPanel(false),
-            togglePanel: () => setShowIndicatorPanel((prev) => !prev),
-          },
-          status: indicators.status,
-        }}
-        settings={{
-          view: {
-            settings,
-            resolvedTheme,
-            isOpen: showSettings,
-          },
-          actions: {
-            update: setSettings,
-            openPanel: () => setShowSettings(true),
-            closePanel: () => setShowSettings(false),
-          },
-          status: {},
-        }}
-        priceScale={{
-          view: {
-            invertScale,
-            priceScaleMode,
-          },
-          actions: {
-            setInvertScale: handleInvertScaleChange,
-            setPriceScaleMode: handlePriceScaleModeChange,
-          },
-          status: {},
-        }}
+        indicators={indicatorRuntime}
+        settings={settingsRuntime}
+        priceScale={priceScaleRuntime}
         watchlist={watchlist}
         exportFlow={exportFlow}
-        alerts={{
-          view: {
-            isOpen: showAlertsPanel,
-          },
-          actions: {
-            openPanel: () => setShowAlertsPanel(true),
-            closePanel: () => setShowAlertsPanel(false),
-            togglePanel: () => setShowAlertsPanel((prev) => !prev),
-          },
-          status: {},
-        }}
+        alerts={alertsRuntime}
       />
     </AppProviders>
   );

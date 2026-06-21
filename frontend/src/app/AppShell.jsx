@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import IntervalSelector from "../components/IntervalSelector";
 import ChartWorkspace from "./ChartWorkspace";
 import LazyFeatureSurfaces from "./LazyFeatureSurfaces";
@@ -5,7 +6,7 @@ import StatusBar from "./StatusBar";
 import TopBar from "./TopBar";
 import { buildAppShellViewModel } from "./appShellViewModel";
 
-export default function AppShell({
+function AppShell({
   pageExportRef,
   chartSurfaceRef,
   session,
@@ -18,27 +19,41 @@ export default function AppShell({
   exportFlow,
   alerts,
 }) {
-  const model = buildAppShellViewModel({
-    session,
-    marketData,
-    drawings,
-    indicators,
-    settings,
-    priceScale,
-    watchlist,
-    exportFlow,
-    alerts,
-  });
-  const chartWorkspace = {
+  const model = useMemo(
+    () => buildAppShellViewModel({
+      session,
+      marketData,
+      drawings,
+      indicators,
+      settings,
+      priceScale,
+      watchlist,
+      exportFlow,
+      alerts,
+    }),
+    [
+      session,
+      marketData,
+      drawings,
+      indicators,
+      settings,
+      priceScale,
+      watchlist,
+      exportFlow,
+      alerts,
+    ],
+  );
+
+  const chartWorkspace = useMemo(() => ({
     ...model.chartWorkspace,
     chart: {
-        ...model.chartWorkspace.chart,
+      ...model.chartWorkspace.chart,
       chartProps: {
         ...model.chartWorkspace.chart.chartProps,
         ref: chartSurfaceRef,
       },
     },
-  };
+  }), [model.chartWorkspace, chartSurfaceRef]);
 
   return (
     <div className="app-layout" ref={pageExportRef}>
@@ -54,3 +69,5 @@ export default function AppShell({
     </div>
   );
 }
+
+export default memo(AppShell);

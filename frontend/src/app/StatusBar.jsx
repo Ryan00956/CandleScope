@@ -1,4 +1,6 @@
-export default function StatusBar({ status }) {
+import { memo } from "react";
+
+function StatusBar({ status }) {
   const {
     connectionStatus,
     dataSource,
@@ -46,3 +48,5 @@ export default function StatusBar({ status }) {
     </footer>
   );
 }
+
+export default memo(StatusBar);

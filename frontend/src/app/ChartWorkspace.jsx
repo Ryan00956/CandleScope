@@ -6,7 +6,7 @@ const ExportPanel = React.lazy(() => import("../features/export/ExportPanel"));
 const DrawingToolbar = React.lazy(() => import("../features/drawings/DrawingToolbar"));
 const WatchlistSidebar = React.lazy(() => import("../features/watchlist/WatchlistSidebar"));
 
-export default function ChartWorkspace({
+function ChartWorkspace({
   drawingToolbar,
   exportPanel,
   chart,
@@ -67,3 +67,5 @@ export default function ChartWorkspace({
     </div>
   );
 }
+
+export default React.memo(ChartWorkspace);

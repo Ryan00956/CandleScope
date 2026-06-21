@@ -257,11 +257,21 @@ class AnglePaneView {
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
+    if (source._hidden) {
+      source._labelBox = null;
+      this._renderer.update({
+        points: [],
+        hidden: true,
+        setLabelBox: (box) => { source._labelBox = box; },
+      });
+      return;
+    }
 
     const points = [];
+    const coordinateContext = {};
 
     for (const dp of source._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp);
+      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -384,9 +394,10 @@ export class AngleMeasurementPrimitive {
   _screenPoints() {
     if (!this._series || !this._chart || this._dataPoints.length < 2) return null;
     const points = [];
+    const coordinateContext = {};
 
     for (const dp of this._dataPoints) {
-      const x = dataPointToCoordinate(this._chart, this._series, dp);
+      const x = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
       const y = this._series.priceToCoordinate(dp.price);
       if (!isFiniteCoord(x) || !isFiniteCoord(y)) return null;
       points.push({ x, y });

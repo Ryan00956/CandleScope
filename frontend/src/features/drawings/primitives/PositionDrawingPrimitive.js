@@ -570,11 +570,20 @@ class PositionPaneView {
     const chart = source._chart;
 
     if (!series || !chart) return;
+    if (source._hidden) {
+      source._infoPanelBox = null;
+      this._renderer.update({
+        hidden: true,
+        setInfoPanelBox: (box) => { source._infoPanelBox = box; },
+      });
+      return;
+    }
 
     // Convert time coords to screen X
+    const coordinateContext = {};
     const toScreenX = (anchor) => {
       const dataPoint = horizontalAnchorToDataPoint(anchor, source._entryPrice);
-      return dataPointToCoordinate(chart, series, dataPoint);
+      return dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
     };
 
     const entryY = series.priceToCoordinate(source._entryPrice);
@@ -811,10 +820,11 @@ export class PositionDrawingPrimitive {
     if (!this._series || !this._chart) return null;
 
     const series = this._series;
+    const coordinateContext = {};
 
     const toScreenX = (anchor) => {
       const dataPoint = horizontalAnchorToDataPoint(anchor, this._entryPrice);
-      return dataPointToCoordinate(this._chart, series, dataPoint);
+      return dataPointToCoordinate(this._chart, series, dataPoint, coordinateContext);
     };
 
     const leftX = toScreenX(this._timeRange.start);

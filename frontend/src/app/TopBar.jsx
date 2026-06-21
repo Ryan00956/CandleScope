@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { memo, useSyncExternalStore } from "react";
 import SymbolSearch from "../features/symbol-search/SymbolSearch";
 import { markPerf } from "../runtime/performance/perfMarks";
 import { loadSettingsModal } from "./lazySurfaceLoaders";
@@ -13,7 +13,7 @@ import {
   formatVolume,
 } from "../features/market-data/marketDataView";
 
-export default function TopBar({ symbolSearch, controls, marketSummary }) {
+function TopBar({ symbolSearch, controls, marketSummary }) {
   const {
     currentSymbol,
     currentMarketType,
@@ -155,3 +155,5 @@ export default function TopBar({ symbolSearch, controls, marketSummary }) {
     </header>
   );
 }
+
+export default memo(TopBar);

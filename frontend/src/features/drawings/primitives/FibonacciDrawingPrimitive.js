@@ -229,11 +229,16 @@ class FibPaneView {
     const chart = source._chart;
 
     if (!series || !chart) return;
+    if (source._hidden) {
+      this._renderer.update({ points: [], hidden: true });
+      return;
+    }
 
     const points = [];
+    const coordinateContext = {};
 
     for (const dp of source._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp);
+      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -373,8 +378,9 @@ export class FibonacciDrawingPrimitive {
     if (!this._series || !this._chart) return null;
     if (this._dataPoints.length < 2) return null;
 
+    const coordinateContext = {};
     const screenPoints = this._dataPoints.map((dp) => {
-      const sx = dataPointToCoordinate(this._chart, this._series, dp);
+      const sx = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
       return { x: sx, y: this._series.priceToCoordinate(dp.price) };
     });
 

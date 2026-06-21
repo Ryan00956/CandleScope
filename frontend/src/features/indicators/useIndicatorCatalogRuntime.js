@@ -64,13 +64,13 @@ export function useIndicatorCatalogRuntime({ isOpen }) {
 
     let cancelled = false;
     const loadIndicators = async () => {
-      loadedRef.current = true;
       setPresetsLoading(true);
       try {
         const [presetData, customData] = await Promise.all([fetchPresets(), fetchCustomIndicators()]);
         if (cancelled) return;
         setPresets(presetData);
         setCustomIndicators((customData || []).map(normalizeCustomIndicator));
+        loadedRef.current = true;
       } catch (error) {
         console.error("Failed to load presets:", error);
       } finally {

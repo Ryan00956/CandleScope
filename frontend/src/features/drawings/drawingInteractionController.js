@@ -199,10 +199,10 @@ export function useDrawing({
         const snappedTime = adapter.coordinateToTime?.(x);
         let time = null;
         if (snappedTime != null && isFinite(snappedTime)) {
-          const seriesData = adapter.getSeriesData?.() || [];
-          const snappedIndex = seriesData.findIndex((bar) => bar?.time === snappedTime);
+          const snappedIndex = adapter.getSeriesIndexByTime?.(snappedTime) ?? -1;
           const snappedX = adapter.timeToCoordinate?.(snappedTime);
           if (snappedIndex >= 0 && snappedX != null && isFinite(snappedX)) {
+            const seriesData = adapter.getSeriesData?.() || [];
             const neighborIndex = x >= snappedX ? snappedIndex + 1 : snappedIndex - 1;
             const neighborTime = seriesData[neighborIndex]?.time;
             const neighborX = neighborTime == null ? null : adapter.timeToCoordinate?.(neighborTime);

@@ -17,15 +17,38 @@ function safeCall(fn, fallback = null) {
   }
 }
 
-export function createLightweightChartAdapter({ chartRef, seriesRef }) {
+export function createLightweightChartAdapter({
+  chartRef,
+  seriesRef,
+  seriesDataRef = null,
+  seriesDataMapRef = null,
+  seriesDataIndexRef = null,
+}) {
   const getChart = () => getRefValue(chartRef);
   const getSeries = () => getRefValue(seriesRef);
+  const getSeriesData = () => {
+    const data = getRefValue(seriesDataRef);
+    if (Array.isArray(data)) return data;
+    return safeCall(() => getSeries()?.data?.() || [], []);
+  };
+  const getSeriesDataMap = () => getRefValue(seriesDataMapRef);
+  const getSeriesDataIndex = () => getRefValue(seriesDataIndexRef);
 
   return {
     isReady: () => !!(getChart() && getSeries()),
     hasSeries: () => !!getSeries(),
     getMainSeries: getSeries,
-    getSeriesData: () => safeCall(() => getSeries()?.data?.() || [], []),
+    getSeriesData,
+    getSeriesItemByTime: (time) => {
+      const dataMap = getSeriesDataMap();
+      if (dataMap?.has?.(time)) return dataMap.get(time);
+      return getSeriesData().find((bar) => bar?.time === time) || null;
+    },
+    getSeriesIndexByTime: (time) => {
+      const dataIndex = getSeriesDataIndex();
+      if (dataIndex?.has?.(time)) return dataIndex.get(time);
+      return getSeriesData().findIndex((bar) => bar?.time === time);
+    },
     attachPrimitive: (primitive) => {
       const series = getSeries();
       if (!series || !primitive) return false;
@@ -52,7 +75,7 @@ export function createLightweightChartAdapter({ chartRef, seriesRef }) {
     priceToCoordinate: (price) => safeCall(() => getSeries()?.priceToCoordinate(price), null),
     timeToCoordinate: (time) => safeCall(() => getChart()?.timeScale().timeToCoordinate(time), null),
     timeToCoordinateInterpolated: (time) => safeCall(
-      () => timeToCoordinateInterpolated(getChart(), getSeries(), time),
+      () => timeToCoordinateInterpolated(getChart(), getSeries(), time, { seriesData: getSeriesData() }),
       null,
     ),
     coordinateToPrice: (y) => safeCall(() => getSeries()?.coordinateToPrice(y), null),

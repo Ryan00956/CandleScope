@@ -234,6 +234,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const paneRenderStateRef = useRef(new Map());
   const dataRef = useRef([]);
   const dataMapRef = useRef(new Map());
+  const dataIndexMapRef = useRef(new Map());
   const prevCandleDataRef = useRef([]);
   const prevBarcoloredDataRef = useRef([]);
   const prevIndicatorKeyRef = useRef("");
@@ -254,7 +255,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
   const drawingKey = `${drawingKeyBase || symbol}__main`;
   const chartAdapter = useMemo(
-    () => createLightweightChartAdapter({ chartRef, seriesRef: mainSeriesRef }),
+    () => createLightweightChartAdapter({
+      chartRef,
+      seriesRef: mainSeriesRef,
+      seriesDataRef: dataRef,
+      seriesDataMapRef: dataMapRef,
+      seriesDataIndexRef: dataIndexMapRef,
+    }),
     [],
   );
 
@@ -293,8 +300,14 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
   useEffect(() => {
     const map = new Map();
-    for (const d of data || []) map.set(d.time, d);
+    const indexMap = new Map();
+    for (let index = 0; index < (data || []).length; index += 1) {
+      const d = data[index];
+      map.set(d.time, d);
+      indexMap.set(d.time, index);
+    }
     dataMapRef.current = map;
+    dataIndexMapRef.current = indexMap;
   }, [data]);
 
   const scheduleVisibleRangeSave = useCallback(() => {

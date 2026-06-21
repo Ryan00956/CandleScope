@@ -1,4 +1,7 @@
-import { mergeIndicatorItems } from "./indicatorPayloadRuntime";
+import {
+  mergeIndicatorItems,
+  replaceIndicatorItemsRange,
+} from "./indicatorPayloadRuntime";
 
 const OUTPUT_KEYS = ["markers", "fills", "hlines", "bgcolors", "barcolors", "signals"];
 
@@ -81,6 +84,21 @@ function mergeIndicatorPatchOutputs(state, indicatorId, normalized) {
   };
 }
 
+function replaceIndicatorRangeOutputs(state, indicatorId, normalized, range) {
+  const next = { ...state };
+  for (const key of OUTPUT_KEYS) {
+    next[key] = [
+      ...withoutIndicator(state[key], indicatorId),
+      ...replaceIndicatorItemsRange(
+        state[key].filter((item) => item.indicatorId === indicatorId),
+        normalized[key] || [],
+        range,
+      ),
+    ];
+  }
+  return next;
+}
+
 function mergeParamSchemas(state, schemas) {
   if (!schemas || Object.keys(schemas).length === 0) return state.paramSchemas;
   return { ...state.paramSchemas, ...schemas };
@@ -102,6 +120,13 @@ export function indicatorOutputReducer(state, action) {
     }
     case "patch":
       return mergeIndicatorPatchOutputs(state, action.indicatorId, action.normalized);
+    case "replace-range":
+      return replaceIndicatorRangeOutputs(
+        state,
+        action.indicatorId,
+        action.normalized,
+        action.range,
+      );
     case "compute-results": {
       const processedIds = new Set(action.processedIds || []);
       return {

@@ -179,6 +179,55 @@ def _patch_from_snapshot(
     return patch
 
 
+def _replace_range_from_snapshot(
+    payload: dict[str, Any],
+    *,
+    reason: str,
+    start_s: int,
+    end_s: int,
+) -> dict[str, Any]:
+    replacement = _filter_payload_to_range(payload, start_s, end_s)
+    replacement.update({
+        "type": "indicator.replace_range",
+        "reason": reason,
+        "range": {"start": start_s, "end": end_s},
+    })
+    return replacement
+
+
+def _series_payload_time_range(payload: dict[str, Any]) -> tuple[int, int] | None:
+    times: list[int] = []
+    for line in payload.get("lines") or []:
+        for point in line.get("data") or []:
+            try:
+                times.append(int(point.get("time")))
+            except (TypeError, ValueError):
+                continue
+    if not times:
+        for series in payload.get("series") or []:
+            for point in series.get("data") or []:
+                try:
+                    times.append(int(point.get("time")))
+                except (TypeError, ValueError):
+                    continue
+    if not times:
+        return None
+    return min(times), max(times)
+
+
+def _recompute_event_range(event: IndicatorEvent, payload: dict[str, Any]) -> tuple[int, int] | None:
+    detail_range = event.detail.get("range") if isinstance(event.detail, dict) else None
+    if isinstance(detail_range, dict):
+        try:
+            start_s = int(detail_range.get("start"))
+            end_s = int(detail_range.get("end"))
+        except (TypeError, ValueError):
+            start_s = end_s = 0
+        if start_s > 0 and end_s >= start_s:
+            return start_s, end_s
+    return _series_payload_time_range(payload)
+
+
 async def _handle_indicator_range_request(
     *,
     dm,
@@ -660,7 +709,7 @@ def _indicator_event_to_ws_message(
         return {**base, "type": "indicator.update", "values": event.values}
     if event.event_type == IndicatorEventType.INDICATOR_RECOMPUTED:
         result = event.full_result
-        return build_indicator_snapshot_payload(
+        payload = build_indicator_snapshot_payload(
             client_id=client_id,
             indicator_id=event.key.uid,
             exchange=event.key.exchange,
@@ -671,6 +720,16 @@ def _indicator_event_to_ws_message(
             params=dict(event.key.params),
             result=result,
             bar_time=event.bar_timestamp,
+        )
+        recompute_range = _recompute_event_range(event, payload)
+        if recompute_range is None:
+            return payload
+        start_s, end_s = recompute_range
+        return _replace_range_from_snapshot(
+            payload,
+            reason="recompute",
+            start_s=start_s,
+            end_s=end_s,
         )
     if event.event_type == IndicatorEventType.INDICATOR_ERROR:
         message = str(event.detail or "Indicator compute error")

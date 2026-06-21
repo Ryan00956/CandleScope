@@ -546,6 +546,39 @@ def test_indicator_ws_error_message_has_structured_detail() -> None:
     assert msg["errorDetail"]["code"] == "INDICATOR_COMPUTE_ERROR"
 
 
+def test_indicator_ws_recomputed_message_replaces_range() -> None:
+    bars = [BarData.from_dict(item) for item in _bars(30)]
+    params = {"period": 3}
+    result = create_engine().compute(
+        symbol="BTCUSDT",
+        interval="1m",
+        market_type="spot",
+        indicator_name="MA",
+        params=params,
+        bars=bars,
+    )
+    key = IndicatorKey("BTCUSDT", "1m", "MA", params)
+    event = IndicatorEvent(
+        event_type=IndicatorEventType.INDICATOR_RECOMPUTED,
+        key=key,
+        full_result=result,
+        detail={"range": {"start": bars[0].time, "end": bars[-1].time}},
+    )
+
+    msg = payload_api._indicator_event_to_ws_message(
+        "client-1",
+        event,
+        {"exchange": "binance"},
+    )
+
+    assert msg["type"] == "indicator.replace_range"
+    assert msg["reason"] == "recompute"
+    assert msg["range"] == {"start": bars[0].time, "end": bars[-1].time}
+    assert msg["clientId"] == "client-1"
+    assert msg["lines"][0]["data"][0]["time"] >= bars[0].time
+    assert msg["lines"][0]["data"][-1]["time"] == bars[-1].time
+
+
 def test_indicator_ws_queue_coalesces_preview_when_full() -> None:
     queue: asyncio.Queue = asyncio.Queue(maxsize=2)
     stream_api._queue_indicator_message(

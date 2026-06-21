@@ -353,6 +353,12 @@ class IndicatorEngine:
                 self._emit(
                     IndicatorEventType.INDICATOR_RECOMPUTED, key,
                     full_result=result,
+                    detail={
+                        "range": {
+                            "start": int(bars[0].time),
+                            "end": int(bars[-1].time),
+                        }
+                    },
                 )
                 logger.info("Recomputed %s after backfill (%d bars)", key.uid, len(bars))
             except Exception as exc:

@@ -20,6 +20,7 @@ export function useIndicatorStreamController({
   activeIndicators,
   activeIndicatorsRef,
   applyWsPatch,
+  applyWsReplaceRange,
   applyWsSnapshot,
   applyWsValues,
   candleDownColor,
@@ -151,6 +152,10 @@ export function useIndicatorStreamController({
               recordPerfEvent("indicator.ws.patch", { indicatorId });
               applyWsPatch(indicatorId, payload);
             },
+            onReplaceRange: (indicatorId, payload) => {
+              recordPerfEvent("indicator.ws.replace_range", { indicatorId });
+              applyWsReplaceRange(indicatorId, payload);
+            },
             onValues: applyWsValues,
             onError: (indicatorId, payload) => {
               setIndicatorError(indicatorId, formatIndicatorError(payload, "Indicator WS error"));
@@ -192,6 +197,7 @@ export function useIndicatorStreamController({
     };
   }, [
     applyWsPatch,
+    applyWsReplaceRange,
     applyWsSnapshot,
     applyWsValues,
     chartDataReady,

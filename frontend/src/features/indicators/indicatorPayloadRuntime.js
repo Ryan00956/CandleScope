@@ -170,6 +170,43 @@ function mergeTimeData(existing = [], incoming = []) {
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
 }
 
+function normalizeRange(range) {
+  const start = Math.floor(Number(range?.start));
+  const end = Math.floor(Number(range?.end));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) return null;
+  return { start, end };
+}
+
+function pointTime(item) {
+  const time = Number(item?.time);
+  return Number.isFinite(time) ? time : null;
+}
+
+function isInRange(item, range) {
+  const time = pointTime(item);
+  return time != null && time >= range.start && time <= range.end;
+}
+
+function hasTimedData(items = []) {
+  return (items || []).some((item) => pointTime(item) != null);
+}
+
+function replaceTimeDataRange(existing = [], incoming = [], rangeInput = null) {
+  const range = normalizeRange(rangeInput);
+  if (!range) return mergeTimeData(existing, incoming);
+
+  const byTime = new Map();
+  for (const item of existing || []) {
+    if (item?.time == null || isInRange(item, range)) continue;
+    byTime.set(item.time, item);
+  }
+  for (const item of incoming || []) {
+    if (item?.time == null || !isInRange(item, range)) continue;
+    byTime.set(item.time, { ...(byTime.get(item.time) || {}), ...item });
+  }
+  return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
+}
+
 function lineIdentity(line, index = 0) {
   return String(line?.outputName || line?.id || line?.localId || line?.name || line?.title || `line-${index}`);
 }
@@ -203,6 +240,47 @@ export function mergeIndicatorLines(existing = [], incoming = []) {
   return merged;
 }
 
+export function replaceIndicatorLinesRange(existing = [], incoming = [], rangeInput = null) {
+  const range = normalizeRange(rangeInput);
+  if (!range) return mergeIndicatorLines(existing, incoming);
+
+  const merged = (existing || []).map((line) => ({
+    ...line,
+    data: replaceTimeDataRange(line.data, [], range),
+    ...(line.colorData ? { colorData: replaceTimeDataRange(line.colorData, [], range) } : {}),
+  }));
+  const indexByKey = new Map();
+  merged.forEach((line, index) => {
+    indexByKey.set(lineIdentity(line, index), index);
+  });
+
+  incoming.forEach((line, incomingIndex) => {
+    const key = lineIdentity(line, incomingIndex);
+    const existingIndex = indexByKey.get(key);
+    const incomingLine = {
+      ...line,
+      data: replaceTimeDataRange([], line.data, range),
+      ...(line.colorData ? { colorData: replaceTimeDataRange([], line.colorData, range) } : {}),
+    };
+    if (existingIndex == null) {
+      merged.push(incomingLine);
+      indexByKey.set(key, merged.length - 1);
+      return;
+    }
+    const current = merged[existingIndex];
+    merged[existingIndex] = {
+      ...current,
+      ...line,
+      data: replaceTimeDataRange(current.data, line.data, range),
+      ...(current.colorData || line.colorData
+        ? { colorData: replaceTimeDataRange(current.colorData, line.colorData, range) }
+        : {}),
+    };
+  });
+
+  return merged;
+}
+
 function itemIdentity(item, index = 0) {
   return String(item?.id || item?.name || item?.title || item?.indicatorId || `item-${index}`);
 }
@@ -228,6 +306,42 @@ export function mergeIndicatorItems(existing = [], incoming = []) {
       data: mergeTimeData(current.data, item.data),
     };
   });
+  return merged;
+}
+
+export function replaceIndicatorItemsRange(existing = [], incoming = [], rangeInput = null) {
+  const range = normalizeRange(rangeInput);
+  if (!range) return mergeIndicatorItems(existing, incoming);
+
+  const merged = (existing || []).map((item) => {
+    if (!hasTimedData(item.data)) return item;
+    return { ...item, data: replaceTimeDataRange(item.data, [], range) };
+  });
+  const indexByKey = new Map();
+  merged.forEach((item, index) => {
+    indexByKey.set(itemIdentity(item, index), index);
+  });
+
+  incoming.forEach((item, incomingIndex) => {
+    const key = itemIdentity(item, incomingIndex);
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex == null) {
+      merged.push({
+        ...item,
+        ...(hasTimedData(item.data) ? { data: replaceTimeDataRange([], item.data, range) } : {}),
+      });
+      indexByKey.set(key, merged.length - 1);
+      return;
+    }
+    const current = merged[existingIndex];
+    const timed = hasTimedData(current.data) || hasTimedData(item.data);
+    merged[existingIndex] = {
+      ...current,
+      ...item,
+      ...(timed ? { data: replaceTimeDataRange(current.data, item.data, range) } : {}),
+    };
+  });
+
   return merged;
 }
 

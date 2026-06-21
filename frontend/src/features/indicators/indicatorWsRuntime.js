@@ -63,10 +63,9 @@ export function buildHostedSubscriptionMessage(indicator, context) {
 }
 
 export function buildHostedSubscriptionSignature(indicator, context) {
-  const { chartData = [], chartDataMeta = {} } = context;
   const message = buildHostedSubscriptionMessage(indicator, {
     ...context,
-    chartDataLength: chartData.length,
+    chartDataLength: context?.chartData?.length || 0,
   });
 
   return JSON.stringify({
@@ -79,10 +78,6 @@ export function buildHostedSubscriptionSignature(indicator, context) {
     scriptHash: stringSignature(message.script || ""),
     securityMode: message.securityMode || "",
     params: message.params || {},
-    historyLimit: message.historyLimit,
-    historyFirstTime: chartDataMeta.firstTime ?? chartData[0]?.time ?? null,
-    historyLastTime: chartDataMeta.lastTime ?? chartData[chartData.length - 1]?.time ?? null,
-    chartDataStatus: chartDataMeta.status || "idle",
   });
 }
 
@@ -144,6 +139,11 @@ export function dispatchIndicatorWsMessage(message, handlers) {
 
   if (message.type === "indicator.patch") {
     handlers.onPatch?.(message.clientId, message);
+    return true;
+  }
+
+  if (message.type === "indicator.replace_range") {
+    handlers.onReplaceRange?.(message.clientId, message);
     return true;
   }
 

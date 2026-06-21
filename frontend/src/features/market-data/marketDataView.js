@@ -28,6 +28,21 @@ export function formatVolume(volume) {
   return volume.toFixed(2);
 }
 
+export function buildMarketSummary(displayData) {
+  const priceChange = displayData ? ((displayData.close - displayData.open) / displayData.open) * 100 : 0;
+  const isUp = priceChange >= 0;
+  const amplitude = displayData?.open
+    ? ((displayData.high - displayData.low) / displayData.open * 100).toFixed(2)
+    : "0.00";
+
+  return {
+    displayData,
+    priceChange,
+    isUp,
+    amplitude,
+  };
+}
+
 export function buildChartDisplayState({
   crosshairData,
   lastPrice,
@@ -37,11 +52,7 @@ export function buildChartDisplayState({
   marketType,
 }) {
   const displayData = crosshairData || lastPrice;
-  const priceChange = displayData ? ((displayData.close - displayData.open) / displayData.open) * 100 : 0;
-  const isUp = priceChange >= 0;
-  const amplitude = displayData?.open
-    ? ((displayData.high - displayData.low) / displayData.open * 100).toFixed(2)
-    : "0.00";
+  const marketSummary = buildMarketSummary(displayData);
   const wsStatusLabel = {
     idle: "Realtime idle",
     loading: "Realtime waiting",
@@ -59,10 +70,7 @@ export function buildChartDisplayState({
     || (marketType === "futures" ? "Futures" : "Spot");
 
   return {
-    displayData,
-    priceChange,
-    isUp,
-    amplitude,
+    ...marketSummary,
     wsStatusLabel,
     exchangeLabel,
     marketLabel,

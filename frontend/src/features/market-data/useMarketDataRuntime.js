@@ -4,6 +4,7 @@ import { useKlineStreamRuntime } from "./useKlineStreamRuntime";
 import { useChartBackgroundPrefetch } from "./useChartBackgroundPrefetch";
 import { useChartDataRuntime } from "./useChartDataRuntime";
 import { buildChartDisplayState } from "./marketDataView";
+import { publishCrosshairData } from "./crosshairDisplayStore";
 import { useChartGapRecovery } from "./useChartGapRecovery";
 import { useChartInitialLoad } from "./useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./useChartLoadMoreLeft";
@@ -78,7 +79,6 @@ export function useMarketDataRuntime({
   }, [loading]);
 
   const [error, setError] = useState(null);
-  const [crosshairData, setCrosshairData] = useState(null);
   const [lastPrice, setLastPrice] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState("loading");
   const [dataSource, setDataSource] = useState(null);
@@ -163,7 +163,7 @@ export function useMarketDataRuntime({
     setError,
     setLoadingMoreLeft,
     setHasMoreLeft,
-    setCrosshairData,
+    setCrosshairData: publishCrosshairData,
     setDataSource,
   });
 
@@ -237,7 +237,7 @@ export function useMarketDataRuntime({
     realtimePriceRef,
     resetGapRecovery,
     sessionKey,
-    setCrosshairData,
+    setCrosshairData: publishCrosshairData,
     setError,
     setHasMoreLeft,
     setLastPrice,
@@ -264,14 +264,13 @@ export function useMarketDataRuntime({
 
   const display = useMemo(
     () => buildChartDisplayState({
-      crosshairData,
       lastPrice,
       wsStatus,
       exchange,
       exchangeConfig,
       marketType,
     }),
-    [crosshairData, exchange, exchangeConfig, lastPrice, marketType, wsStatus],
+    [exchange, exchangeConfig, lastPrice, marketType, wsStatus],
   );
 
   return {
@@ -280,7 +279,7 @@ export function useMarketDataRuntime({
       meta: chartDataMeta,
       loading,
       error,
-      crosshairData,
+      crosshairData: null,
       lastPrice,
       connectionStatus,
       dataSource,
@@ -290,7 +289,7 @@ export function useMarketDataRuntime({
     actions: {
       retry,
       loadMoreLeft: handleNeedMoreLeft,
-      onCrosshairMove: setCrosshairData,
+      onCrosshairMove: publishCrosshairData,
       onVisibleRangeChange: (range) => handleVisibleRangeChange(range, chartDataMeta),
       consumeIndicatorRangeRequest,
     },

@@ -258,6 +258,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     [],
   );
 
+  useEffect(() => {
+    onCrosshairMove?.(null);
+  }, [datasetKey, interval, onCrosshairMove, symbol]);
+
   const dataTimeSet = useMemo(() => buildTimeSet(data), [data]);
   const paneDescriptors = useMemo(() => buildPaneDescriptors({
     dataTimeSet,
@@ -369,6 +373,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     return () => {
       chart.unsubscribeCrosshairMove(handleCrosshairMove);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
+      onCrosshairMove?.(null);
       chart.remove();
       chartRef.current = null;
       mainSeriesRef.current = null;

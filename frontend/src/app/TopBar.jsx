@@ -1,7 +1,13 @@
+import { useSyncExternalStore } from "react";
 import SymbolSearch from "../features/symbol-search/SymbolSearch";
 import { markPerf } from "../runtime/performance/perfMarks";
 import { loadSettingsModal } from "./lazySurfaceLoaders";
 import {
+  getCrosshairSnapshot,
+  subscribeCrosshairData,
+} from "../features/market-data/crosshairDisplayStore";
+import {
+  buildMarketSummary,
   formatPrice,
   formatPriceDiff,
   formatVolume,
@@ -25,7 +31,14 @@ export default function TopBar({ symbolSearch, controls, marketSummary }) {
     onToggleAlertPanel,
     activeIndicatorCount,
   } = controls;
-  const { displayData, isUp, priceChange, amplitude } = marketSummary;
+  const crosshairData = useSyncExternalStore(
+    subscribeCrosshairData,
+    getCrosshairSnapshot,
+    getCrosshairSnapshot,
+  );
+  const { displayData, isUp, priceChange, amplitude } = buildMarketSummary(
+    crosshairData || marketSummary.displayData,
+  );
 
   return (
     <header className="top-bar" id="top-bar">

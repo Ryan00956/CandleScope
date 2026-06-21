@@ -18,16 +18,19 @@ from __future__ import annotations
 
 import numpy as np
 
+from .series import PyneSeries, to_numpy, wrap_like
+from .values import is_na, is_na_value, na as _na, to_missing_scalar
+
 
 # ═══════════════════════════════════════════════════════════════
 #  NaN Handling
 # ═══════════════════════════════════════════════════════════════
 
 # Pine's ``na`` value — alias for NaN
-na = np.nan
+na = _na
 
 
-def nz(src: np.ndarray | float, replacement: float = 0.0) -> np.ndarray | float:
+def nz(src: PyneSeries | np.ndarray | float, replacement: float = 0.0) -> PyneSeries | np.ndarray | float:
     """Replace NaN values with a replacement value.
 
     Pine equivalent: ``nz(x, 0)``
@@ -39,14 +42,34 @@ def nz(src: np.ndarray | float, replacement: float = 0.0) -> np.ndarray | float:
     Returns:
         Array/scalar with NaN replaced.
     """
+    replacement = to_missing_scalar(replacement)
+    if isinstance(src, PyneSeries):
+        values = src.to_numpy()
+        mask = to_numpy(is_na(src), dtype=bool)
+        return src.with_values(np.where(mask, replacement, values))
     if isinstance(src, np.ndarray):
-        return np.nan_to_num(src, nan=replacement)
-    if src is None or (isinstance(src, float) and np.isnan(src)):
+        mask = is_na(src)
+        return np.where(mask, replacement, src)
+    if is_na_value(src):
         return replacement
     return src
 
 
-def na_check(src: np.ndarray) -> np.ndarray:
+def fixnan(src: PyneSeries | np.ndarray | list | tuple | float) -> PyneSeries | np.ndarray | float:
+    """Carry the latest non-missing value forward through later missing values."""
+    if isinstance(src, PyneSeries):
+        values = _fixnan_array(to_numpy(src, dtype=np.float64))
+        return src.with_values(values)
+    if isinstance(src, np.ndarray):
+        return _fixnan_array(np.asarray(src, dtype=np.float64))
+    if isinstance(src, list | tuple):
+        return _fixnan_array(np.asarray(src, dtype=np.float64))
+    if is_na_value(src):
+        return np.nan
+    return src
+
+
+def na_check(src: PyneSeries | np.ndarray) -> PyneSeries | np.ndarray:
     """Check which elements are NaN.
 
     Pine equivalent: ``na(x)``
@@ -57,7 +80,8 @@ def na_check(src: np.ndarray) -> np.ndarray:
     Returns:
         Boolean array — True where value is NaN.
     """
-    return np.isnan(src)
+    result = is_na(src)
+    return result if isinstance(result, PyneSeries) else wrap_like(result, src)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -65,7 +89,19 @@ def na_check(src: np.ndarray) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════
 
 
-def shift(src: np.ndarray, periods: int = 1) -> np.ndarray:
+def _fixnan_array(values: np.ndarray) -> np.ndarray:
+    result = np.array(values, dtype=np.float64, copy=True)
+    last = np.nan
+    for idx, value in enumerate(result):
+        if np.isnan(value):
+            if not np.isnan(last):
+                result[idx] = last
+            continue
+        last = value
+    return result
+
+
+def shift(src: PyneSeries | np.ndarray, periods: int = 1) -> PyneSeries | np.ndarray:
     """Shift an array by N periods (like Pine's ``close[1]``).
 
     Pine equivalent: ``close[n]`` → ``shift(close, n)``
@@ -82,15 +118,14 @@ def shift(src: np.ndarray, periods: int = 1) -> np.ndarray:
         prev_close = shift(close, 1)  # previous bar's close
         two_bars_ago = shift(close, 2)
     """
-    result = np.full_like(src, np.nan, dtype=np.float64)
-    if periods >= 0:
-        if periods < len(src):
-            result[periods:] = src[:len(src) - periods]
-    else:
-        n = abs(periods)
-        if n < len(src):
-            result[:len(src) - n] = src[n:]
-    return result
+    periods = int(periods)
+    if periods < 0:
+        raise IndexError("shift() does not support forward history references")
+    source = to_numpy(src, dtype=np.float64)
+    result = np.full_like(source, np.nan, dtype=np.float64)
+    if periods < len(source):
+        result[periods:] = source[:len(source) - periods]
+    return wrap_like(result, src)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -98,7 +133,7 @@ def shift(src: np.ndarray, periods: int = 1) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════
 
 
-def crossover(a: np.ndarray, b: np.ndarray | float) -> np.ndarray:
+def crossover(a: PyneSeries | np.ndarray, b: PyneSeries | np.ndarray | float) -> PyneSeries | np.ndarray:
     """Detect where ``a`` crosses above ``b`` (bullish cross / golden cross).
 
     Pine equivalent: ``ta.crossover(a, b)``
@@ -112,19 +147,19 @@ def crossover(a: np.ndarray, b: np.ndarray | float) -> np.ndarray:
     Returns:
         Boolean array — True at crossover points.
     """
-    if isinstance(b, (int, float)):
-        b = np.full_like(a, b)
-    result = np.zeros(len(a), dtype=bool)
-    if len(a) < 2:
-        return result
-    prev_a = shift(a, 1)
-    prev_b = shift(b, 1)
-    valid = ~(np.isnan(prev_a) | np.isnan(prev_b) | np.isnan(a) | np.isnan(b))
-    result[valid] = (prev_a[valid] <= prev_b[valid]) & (a[valid] > b[valid])
-    return result
+    a_arr = to_numpy(a, dtype=np.float64)
+    b_arr = np.full_like(a_arr, b, dtype=np.float64) if isinstance(b, (int, float)) else to_numpy(b, dtype=np.float64)
+    result = np.zeros(len(a_arr), dtype=bool)
+    if len(a_arr) < 2:
+        return wrap_like(result, a, b)
+    prev_a = to_numpy(shift(a_arr, 1), dtype=np.float64)
+    prev_b = to_numpy(shift(b_arr, 1), dtype=np.float64)
+    valid = ~(np.isnan(prev_a) | np.isnan(prev_b) | np.isnan(a_arr) | np.isnan(b_arr))
+    result[valid] = (prev_a[valid] <= prev_b[valid]) & (a_arr[valid] > b_arr[valid])
+    return wrap_like(result, a, b)
 
 
-def crossunder(a: np.ndarray, b: np.ndarray | float) -> np.ndarray:
+def crossunder(a: PyneSeries | np.ndarray, b: PyneSeries | np.ndarray | float) -> PyneSeries | np.ndarray:
     """Detect where ``a`` crosses below ``b`` (bearish cross / death cross).
 
     Pine equivalent: ``ta.crossunder(a, b)``
@@ -138,16 +173,24 @@ def crossunder(a: np.ndarray, b: np.ndarray | float) -> np.ndarray:
     Returns:
         Boolean array — True at crossunder points.
     """
-    if isinstance(b, (int, float)):
-        b = np.full_like(a, b)
-    result = np.zeros(len(a), dtype=bool)
-    if len(a) < 2:
-        return result
-    prev_a = shift(a, 1)
-    prev_b = shift(b, 1)
-    valid = ~(np.isnan(prev_a) | np.isnan(prev_b) | np.isnan(a) | np.isnan(b))
-    result[valid] = (prev_a[valid] >= prev_b[valid]) & (a[valid] < b[valid])
-    return result
+    a_arr = to_numpy(a, dtype=np.float64)
+    b_arr = np.full_like(a_arr, b, dtype=np.float64) if isinstance(b, (int, float)) else to_numpy(b, dtype=np.float64)
+    result = np.zeros(len(a_arr), dtype=bool)
+    if len(a_arr) < 2:
+        return wrap_like(result, a, b)
+    prev_a = to_numpy(shift(a_arr, 1), dtype=np.float64)
+    prev_b = to_numpy(shift(b_arr, 1), dtype=np.float64)
+    valid = ~(np.isnan(prev_a) | np.isnan(prev_b) | np.isnan(a_arr) | np.isnan(b_arr))
+    result[valid] = (prev_a[valid] >= prev_b[valid]) & (a_arr[valid] < b_arr[valid])
+    return wrap_like(result, a, b)
+
+
+def cross(a: PyneSeries | np.ndarray, b: PyneSeries | np.ndarray | float) -> PyneSeries | np.ndarray:
+    """Detect any cross between ``a`` and ``b``.
+
+    Pine equivalent: ``ta.cross(a, b)``.
+    """
+    return crossover(a, b) | crossunder(a, b)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -155,7 +198,7 @@ def crossunder(a: np.ndarray, b: np.ndarray | float) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════
 
 
-def highest(src: np.ndarray, period: int) -> np.ndarray:
+def highest(src: PyneSeries | np.ndarray, period: int) -> PyneSeries | np.ndarray:
     """Rolling highest value over the last ``period`` bars.
 
     Pine equivalent: ``ta.highest(high, 20)``
@@ -165,17 +208,23 @@ def highest(src: np.ndarray, period: int) -> np.ndarray:
         period: Lookback window size.
 
     Returns:
-        Array of rolling maximums. NaN for the first ``period-1`` bars.
+        Array of rolling maximums over the available history up to ``period`` bars.
     """
-    n = len(src)
+    source = to_numpy(src, dtype=np.float64)
+    n = len(source)
     result = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        window = src[i - period + 1: i + 1]
-        result[i] = np.nanmax(window)
-    return result
+    if period <= 0:
+        return wrap_like(result, src)
+    for i in range(n):
+        start = max(0, i - period + 1)
+        window = source[start: i + 1]
+        valid = ~np.isnan(window)
+        if np.any(valid):
+            result[i] = np.nanmax(window)
+    return wrap_like(result, src)
 
 
-def lowest(src: np.ndarray, period: int) -> np.ndarray:
+def lowest(src: PyneSeries | np.ndarray, period: int) -> PyneSeries | np.ndarray:
     """Rolling lowest value over the last ``period`` bars.
 
     Pine equivalent: ``ta.lowest(low, 20)``
@@ -185,14 +234,62 @@ def lowest(src: np.ndarray, period: int) -> np.ndarray:
         period: Lookback window size.
 
     Returns:
-        Array of rolling minimums. NaN for the first ``period-1`` bars.
+        Array of rolling minimums over the available history up to ``period`` bars.
     """
-    n = len(src)
+    source = to_numpy(src, dtype=np.float64)
+    n = len(source)
     result = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        window = src[i - period + 1: i + 1]
-        result[i] = np.nanmin(window)
-    return result
+    if period <= 0:
+        return wrap_like(result, src)
+    for i in range(n):
+        start = max(0, i - period + 1)
+        window = source[start: i + 1]
+        valid = ~np.isnan(window)
+        if np.any(valid):
+            result[i] = np.nanmin(window)
+    return wrap_like(result, src)
+
+
+def highestbars(src: PyneSeries | np.ndarray, period: int) -> PyneSeries | np.ndarray:
+    """Bars back to the highest value in the last ``period`` bars.
+
+    Pine equivalent: ``ta.highestbars(source, length)``.
+    Returns ``0`` when the current bar is the highest value, or a negative
+    offset when the most recent highest value is in the past. If the highest
+    value appears more than once in the window, the most recent occurrence wins.
+    """
+    return _extreme_bars(src, period, highest=True)
+
+
+def lowestbars(src: PyneSeries | np.ndarray, period: int) -> PyneSeries | np.ndarray:
+    """Bars back to the lowest value in the last ``period`` bars.
+
+    Pine equivalent: ``ta.lowestbars(source, length)``.
+    Returns ``0`` when the current bar is the lowest value, or a negative
+    offset when the most recent lowest value is in the past. If the lowest value
+    appears more than once in the window, the most recent occurrence wins.
+    """
+    return _extreme_bars(src, period, highest=False)
+
+
+def _extreme_bars(src: PyneSeries | np.ndarray, period: int, *, highest: bool) -> PyneSeries | np.ndarray:
+    source = to_numpy(src, dtype=np.float64)
+    n = len(source)
+    result = np.full(n, np.nan)
+    if period <= 0:
+        return wrap_like(result, src)
+
+    for idx in range(n):
+        start = max(0, idx - period + 1)
+        window = source[start: idx + 1]
+        valid = ~np.isnan(window)
+        if not np.any(valid):
+            continue
+        target = np.nanmax(window) if highest else np.nanmin(window)
+        matches = np.where((window == target) & valid)[0]
+        if len(matches):
+            result[idx] = float(matches[-1] - (len(window) - 1))
+    return wrap_like(result, src)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -200,7 +297,7 @@ def lowest(src: np.ndarray, period: int) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════
 
 
-def change(src: np.ndarray, period: int = 1) -> np.ndarray:
+def change(src: PyneSeries | np.ndarray, period: int = 1) -> PyneSeries | np.ndarray:
     """Difference between current and previous value.
 
     Pine equivalent: ``ta.change(close)`` or ``ta.change(close, 5)``
@@ -212,13 +309,14 @@ def change(src: np.ndarray, period: int = 1) -> np.ndarray:
     Returns:
         Array of differences. NaN for the first ``period`` bars.
     """
-    result = np.full_like(src, np.nan, dtype=np.float64)
-    if period < len(src):
-        result[period:] = src[period:] - src[:len(src) - period]
-    return result
+    source = to_numpy(src, dtype=np.float64)
+    result = np.full_like(source, np.nan, dtype=np.float64)
+    if period < len(source):
+        result[period:] = source[period:] - source[:len(source) - period]
+    return wrap_like(result, src)
 
 
-def roc(src: np.ndarray, period: int = 1) -> np.ndarray:
+def roc(src: PyneSeries | np.ndarray, period: int = 1) -> PyneSeries | np.ndarray:
     """Rate of Change — percentage change over ``period`` bars.
 
     Pine equivalent: ``ta.roc(close, 10)``
@@ -232,13 +330,14 @@ def roc(src: np.ndarray, period: int = 1) -> np.ndarray:
     Returns:
         Array of percentage changes. NaN where undefined.
     """
-    result = np.full_like(src, np.nan, dtype=np.float64)
-    if period < len(src):
-        prev = src[:len(src) - period]
-        curr = src[period:]
+    source = to_numpy(src, dtype=np.float64)
+    result = np.full_like(source, np.nan, dtype=np.float64)
+    if period < len(source):
+        prev = source[:len(source) - period]
+        curr = source[period:]
         with np.errstate(divide="ignore", invalid="ignore"):
             result[period:] = np.where(prev != 0, (curr - prev) / prev * 100, np.nan)
-    return result
+    return wrap_like(result, src)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -246,7 +345,7 @@ def roc(src: np.ndarray, period: int = 1) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════
 
 
-def barssince(condition: np.ndarray) -> np.ndarray:
+def barssince(condition: PyneSeries | np.ndarray) -> PyneSeries | np.ndarray:
     """Number of bars since condition was last True.
 
     Pine equivalent: ``ta.barssince(crossover(fast, slow))``
@@ -257,18 +356,23 @@ def barssince(condition: np.ndarray) -> np.ndarray:
     Returns:
         Integer array — bars since last True. NaN if never True before.
     """
-    n = len(condition)
+    flags = to_numpy(condition).astype(bool)
+    n = len(flags)
     result = np.full(n, np.nan)
     last_true = -1
     for i in range(n):
-        if condition[i]:
+        if flags[i]:
             last_true = i
         if last_true >= 0:
             result[i] = float(i - last_true)
-    return result
+    return wrap_like(result, condition)
 
 
-def valuewhen(condition: np.ndarray, src: np.ndarray, occurrence: int = 0) -> np.ndarray:
+def valuewhen(
+    condition: PyneSeries | np.ndarray,
+    src: PyneSeries | np.ndarray,
+    occurrence: int = 0,
+) -> PyneSeries | np.ndarray:
     """Value of ``src`` when ``condition`` was True.
 
     Pine equivalent: ``ta.valuewhen(crossover(fast, slow), close, 0)``
@@ -281,17 +385,19 @@ def valuewhen(condition: np.ndarray, src: np.ndarray, occurrence: int = 0) -> np
     Returns:
         Array where each element is the value of src at the nth most recent True.
     """
-    n = len(condition)
+    flags = to_numpy(condition).astype(bool)
+    source = to_numpy(src, dtype=np.float64)
+    n = len(flags)
     result = np.full(n, np.nan)
     true_indices: list[int] = []
 
     for i in range(n):
-        if condition[i]:
+        if flags[i]:
             true_indices.append(i)
         if len(true_indices) > occurrence:
             idx = true_indices[-(occurrence + 1)]
-            result[i] = src[idx]
-    return result
+            result[i] = source[idx]
+    return wrap_like(result, src, condition)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -299,7 +405,7 @@ def valuewhen(condition: np.ndarray, src: np.ndarray, occurrence: int = 0) -> np
 # ═══════════════════════════════════════════════════════════════
 
 
-def pivothigh(src: np.ndarray, left: int, right: int) -> np.ndarray:
+def pivothigh(src: PyneSeries | np.ndarray, left: int, right: int) -> PyneSeries | np.ndarray:
     """Detect pivot highs.
 
     Pine equivalent: ``ta.pivothigh(high, 5, 5)``
@@ -316,19 +422,20 @@ def pivothigh(src: np.ndarray, left: int, right: int) -> np.ndarray:
         Array with pivot high values at pivot bars, NaN elsewhere.
         Note: Results are delayed by ``right`` bars.
     """
-    n = len(src)
+    source = to_numpy(src, dtype=np.float64)
+    n = len(source)
     result = np.full(n, np.nan)
 
     for i in range(left, n - right):
-        window = src[i - left: i + right + 1]
+        window = source[i - left: i + right + 1]
         if not np.any(np.isnan(window)):
-            if src[i] == np.max(window) and np.sum(window == src[i]) == 1:
-                result[i] = src[i]
+            if source[i] == np.max(window) and np.sum(window == source[i]) == 1:
+                result[i] = source[i]
 
-    return result
+    return wrap_like(result, src)
 
 
-def pivotlow(src: np.ndarray, left: int, right: int) -> np.ndarray:
+def pivotlow(src: PyneSeries | np.ndarray, left: int, right: int) -> PyneSeries | np.ndarray:
     """Detect pivot lows.
 
     Pine equivalent: ``ta.pivotlow(low, 5, 5)``
@@ -344,16 +451,17 @@ def pivotlow(src: np.ndarray, left: int, right: int) -> np.ndarray:
     Returns:
         Array with pivot low values at pivot bars, NaN elsewhere.
     """
-    n = len(src)
+    source = to_numpy(src, dtype=np.float64)
+    n = len(source)
     result = np.full(n, np.nan)
 
     for i in range(left, n - right):
-        window = src[i - left: i + right + 1]
+        window = source[i - left: i + right + 1]
         if not np.any(np.isnan(window)):
-            if src[i] == np.min(window) and np.sum(window == src[i]) == 1:
-                result[i] = src[i]
+            if source[i] == np.min(window) and np.sum(window == source[i]) == 1:
+                result[i] = source[i]
 
-    return result
+    return wrap_like(result, src)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -361,7 +469,7 @@ def pivotlow(src: np.ndarray, left: int, right: int) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════
 
 
-def cum(src: np.ndarray) -> np.ndarray:
+def cum(src: PyneSeries | np.ndarray) -> PyneSeries | np.ndarray:
     """Cumulative sum.
 
     Pine equivalent: ``ta.cum(close)``
@@ -372,10 +480,10 @@ def cum(src: np.ndarray) -> np.ndarray:
     Returns:
         Cumulative sum array (NaN-aware).
     """
-    return np.nancumsum(src)
+    return wrap_like(np.nancumsum(to_numpy(src, dtype=np.float64)), src)
 
 
-def sum_(src: np.ndarray, period: int) -> np.ndarray:
+def sum_(src: PyneSeries | np.ndarray, period: int) -> PyneSeries | np.ndarray:
     """Rolling sum over the last ``period`` bars.
 
     Pine equivalent: ``math.sum(src, period)``
@@ -387,20 +495,21 @@ def sum_(src: np.ndarray, period: int) -> np.ndarray:
     Returns:
         Rolling sum array. NaN for the first ``period-1`` bars.
     """
-    n = len(src)
+    source = to_numpy(src, dtype=np.float64)
+    n = len(source)
     result = np.full(n, np.nan)
     rolling = 0.0
     nan_count = 0
 
     for i in range(n):
-        val = src[i]
+        val = source[i]
         if np.isnan(val):
             nan_count += 1
         else:
             rolling += val
 
         if i >= period:
-            old = src[i - period]
+            old = source[i - period]
             if np.isnan(old):
                 nan_count -= 1
             else:
@@ -409,7 +518,7 @@ def sum_(src: np.ndarray, period: int) -> np.ndarray:
         if i >= period - 1 and nan_count == 0:
             result[i] = rolling
 
-    return result
+    return wrap_like(result, src)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -417,39 +526,41 @@ def sum_(src: np.ndarray, period: int) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════
 
 
-def rising(src: np.ndarray, period: int = 1) -> np.ndarray:
+def rising(src: PyneSeries | np.ndarray, period: int = 1) -> PyneSeries | np.ndarray:
     """True when src has been rising for ``period`` consecutive bars.
 
     Pine equivalent: ``ta.rising(close, 5)``
     """
-    result = np.zeros(len(src), dtype=bool)
-    for i in range(period, len(src)):
+    source = to_numpy(src, dtype=np.float64)
+    result = np.zeros(len(source), dtype=bool)
+    for i in range(period, len(source)):
         is_rising = True
         for j in range(period):
-            if np.isnan(src[i - j]) or np.isnan(src[i - j - 1]):
+            if np.isnan(source[i - j]) or np.isnan(source[i - j - 1]):
                 is_rising = False
                 break
-            if src[i - j] <= src[i - j - 1]:
+            if source[i - j] <= source[i - j - 1]:
                 is_rising = False
                 break
         result[i] = is_rising
-    return result
+    return wrap_like(result, src)
 
 
-def falling(src: np.ndarray, period: int = 1) -> np.ndarray:
+def falling(src: PyneSeries | np.ndarray, period: int = 1) -> PyneSeries | np.ndarray:
     """True when src has been falling for ``period`` consecutive bars.
 
     Pine equivalent: ``ta.falling(close, 5)``
     """
-    result = np.zeros(len(src), dtype=bool)
-    for i in range(period, len(src)):
+    source = to_numpy(src, dtype=np.float64)
+    result = np.zeros(len(source), dtype=bool)
+    for i in range(period, len(source)):
         is_falling = True
         for j in range(period):
-            if np.isnan(src[i - j]) or np.isnan(src[i - j - 1]):
+            if np.isnan(source[i - j]) or np.isnan(source[i - j - 1]):
                 is_falling = False
                 break
-            if src[i - j] >= src[i - j - 1]:
+            if source[i - j] >= source[i - j - 1]:
                 is_falling = False
                 break
         result[i] = is_falling
-    return result
+    return wrap_like(result, src)

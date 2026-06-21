@@ -1,0 +1,1023 @@
+{
+  "cases": [
+    {
+      "name": "short_bracket_stop_first_costs",
+      "source": "Pyne-defined short bracket strategy fixture with a Pine-equivalent scaffold for external TradingView export comparison.",
+      "script": "strategy(\"Pine Equivalent Short Stop First\", overlay=True, initial_capital=1000, slippage=1, mintick=0.1, commission_type=strategy.commission.cash_per_order, commission_value=0.5, process_orders_on_close=True)\nstrategy.entry(\"Short\", strategy.short, qty=1, when=bar_index == 0, price=close)\nstrategy.exit(\"Bracket\", from_entry=\"Short\", stop=11, limit=9)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\nplot(strategy.closedtrades.commission(0), \"Closed Commission\")\n",
+      "pine_equivalent": "//@version=5\nstrategy(\"Pine Equivalent Short Stop First\", overlay=true, initial_capital=1000, slippage=1, commission_type=strategy.commission.cash_per_order, commission_value=0.5, process_orders_on_close=true)\nif bar_index == 0\n    strategy.entry(\"Short\", strategy.short, qty=1)\nstrategy.exit(\"Bracket\", from_entry=\"Short\", stop=11, limit=9)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\nplot(strategy.closedtrades.commission(0), \"Closed Commission\")\n",
+      "pine_equivalent_notes": [
+        "Both stop and limit are touched on the exit bar; Pyne's default deterministic policy chooses the stop side.",
+        "Short entry sell fills subtract slippage ticks, while the stop exit buy fill adds slippage ticks."
+      ],
+      "external_capture": {
+        "provider": "tradingview",
+        "status": "captured",
+        "assertion": "parity",
+        "tolerance": 1e-09,
+        "values": {
+          "Position": [
+            0.0,
+            0.0
+          ],
+          "Equity": [
+            1000.0,
+            998.8000000000029
+          ],
+          "Net Profit": [
+            0.0,
+            -1.1999999999970896
+          ],
+          "Open Profit": [
+            0.0,
+            0.0
+          ],
+          "Closed Trades": [
+            0.0,
+            1.0
+          ],
+          "Closed Commission": [
+            0.0,
+            1.0
+          ]
+        },
+        "bars": [
+          {
+            "time": 1780290000,
+            "open": 73497.5,
+            "high": 73507.9,
+            "low": 73283.5,
+            "close": 73319.5,
+            "volume": 2267.135
+          },
+          {
+            "time": 1780293600,
+            "open": 73319.5,
+            "high": 73339.3,
+            "low": 72917.0,
+            "close": 73106.6,
+            "volume": 7954.82
+          }
+        ],
+        "notes": [
+          "TradingView export 2026-06-01, BINANCE:BTCUSDT.P 60m, copied from user-provided CSV BINANCE_BTCUSDT.P, 60_af8b2.csv"
+        ]
+      },
+      "bars": [
+        {
+          "time": 1,
+          "open": 10,
+          "high": 10.5,
+          "low": 9.5,
+          "close": 10,
+          "volume": 100
+        },
+        {
+          "time": 2,
+          "open": 10,
+          "high": 12,
+          "low": 8,
+          "close": 9,
+          "volume": 100
+        }
+      ],
+      "orders": [
+        {
+          "time": 1,
+          "id": "Short",
+          "type": "entry",
+          "side": "short",
+          "qty": 1.0,
+          "price": 9.9,
+          "position_after": -1.0,
+          "comment": "",
+          "commission": 0.5
+        },
+        {
+          "time": 2,
+          "id": "Bracket",
+          "from_entry": "Short",
+          "type": "exit",
+          "side": "flat",
+          "qty": 1.0,
+          "price": 11.1,
+          "position_after": 0.0,
+          "reason": "stop",
+          "comment": "",
+          "commission": 0.5
+        }
+      ],
+      "lifecycle": [
+        {
+          "id": "Short",
+          "type": "entry",
+          "status": "filled",
+          "phase": "market_fill",
+          "submitted_time": 1,
+          "filled_time": 1,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "short",
+          "qty": 1.0,
+          "price": 9.9,
+          "position_after": -1.0,
+          "comment": "",
+          "commission": 0.5,
+          "requested_qty": 1.0,
+          "filled_qty": 1.0
+        },
+        {
+          "id": "Bracket",
+          "type": "exit",
+          "status": "filled",
+          "phase": "exit_fill",
+          "submitted_time": 2,
+          "filled_time": 2,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "flat",
+          "qty": 1.0,
+          "price": 11.1,
+          "position_after": 0.0,
+          "from_entry": "Short",
+          "reason": "stop",
+          "comment": "",
+          "commission": 0.5,
+          "requested_qty": 1.0,
+          "filled_qty": 1.0,
+          "target_qty": 1.0
+        }
+      ],
+      "closedtrades": [
+        {
+          "entry_time": 1,
+          "exit_time": 2,
+          "entry_id": "Short",
+          "exit_id": "Bracket",
+          "side": "short",
+          "qty": 1.0,
+          "entry_price": 9.9,
+          "exit_price": 11.1,
+          "profit": -1.2,
+          "commission": 1.0,
+          "net_profit": -2.2
+        }
+      ],
+      "opentrades": [],
+      "values": {
+        "Position": [
+          0.0,
+          0.0
+        ],
+        "Equity": [
+          1000.0,
+          997.8
+        ],
+        "Net Profit": [
+          0.0,
+          -2.2
+        ],
+        "Open Profit": [
+          0.0,
+          0.0
+        ],
+        "Closed Trades": [
+          0.0,
+          1.0
+        ],
+        "Closed Commission": [
+          0.0,
+          1.0
+        ]
+      },
+      "summary": {
+        "initial_capital": 1000.0,
+        "currency": "",
+        "equity": 997.8,
+        "netprofit": -2.2,
+        "openprofit": 0.0,
+        "grossprofit": 0.0,
+        "grossloss": -1.2,
+        "commission": 1.0,
+        "backtest_fill_limits_assumption": 0,
+        "same_bar_fill_priority": "stop_first",
+        "intrabar_path": "same_bar_priority",
+        "margin_long": 0.0,
+        "margin_short": 0.0
+      },
+      "risk": {
+        "locked": false,
+        "max_drawdown": null,
+        "max_drawdown_type": "percent_of_equity",
+        "max_intraday_loss": null,
+        "max_intraday_loss_type": "percent_of_equity",
+        "max_position_size": null,
+        "max_intraday_filled_orders": null
+      }
+    },
+    {
+      "name": "short_bracket_limit_first_costs",
+      "source": "Pyne-defined short bracket strategy fixture with a Pine-equivalent scaffold for external TradingView export comparison.",
+      "script": "strategy(\"Pine Equivalent Short Limit First\", overlay=True, initial_capital=1000, slippage=1, mintick=0.1, commission_type=strategy.commission.cash_per_order, commission_value=0.5, process_orders_on_close=True, same_bar_fill_priority=strategy.same_bar.limit_first)\nstrategy.entry(\"Short\", strategy.short, qty=1, when=bar_index == 0, price=close)\nstrategy.exit(\"Bracket\", from_entry=\"Short\", stop=11, limit=9)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\nplot(strategy.closedtrades.commission(0), \"Closed Commission\")\n",
+      "pine_equivalent": "//@version=5\nstrategy(\"Pine Equivalent Short Limit First\", overlay=true, initial_capital=1000, slippage=1, commission_type=strategy.commission.cash_per_order, commission_value=0.5, process_orders_on_close=true)\nif bar_index == 0\n    strategy.entry(\"Short\", strategy.short, qty=1)\nstrategy.exit(\"Bracket\", from_entry=\"Short\", stop=11, limit=9)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\nplot(strategy.closedtrades.commission(0), \"Closed Commission\")\n",
+      "pine_equivalent_notes": [
+        "Both stop and limit are touched on the exit bar; this Pyne fixture selects the limit side through an explicit deterministic policy.",
+        "TradingView does not expose Pyne's same_bar_fill_priority knob, so the external capture records the closest Pine-equivalent bracket on the same bars.",
+        "Short entry sell fills subtract slippage ticks, while the selected exit buy fill adds slippage ticks."
+      ],
+      "external_capture": {
+        "provider": "tradingview",
+        "status": "captured",
+        "assertion": "parity",
+        "tolerance": 1e-09,
+        "values": {
+          "Position": [
+            0.0,
+            0.0
+          ],
+          "Equity": [
+            1000.0,
+            998.8000000000029
+          ],
+          "Net Profit": [
+            0.0,
+            -1.1999999999970896
+          ],
+          "Open Profit": [
+            0.0,
+            0.0
+          ],
+          "Closed Trades": [
+            0.0,
+            1.0
+          ],
+          "Closed Commission": [
+            0.0,
+            1.0
+          ]
+        },
+        "bars": [
+          {
+            "time": 1780290000,
+            "open": 73497.5,
+            "high": 73507.9,
+            "low": 73283.5,
+            "close": 73319.5,
+            "volume": 2267.135
+          },
+          {
+            "time": 1780293600,
+            "open": 73319.5,
+            "high": 73339.3,
+            "low": 72917.0,
+            "close": 73106.6,
+            "volume": 7954.82
+          }
+        ],
+        "notes": [
+          "TradingView export 2026-06-01, BINANCE:BTCUSDT.P 60m, copied from user-provided CSV BINANCE_BTCUSDT.P, 60_3104c.csv"
+        ]
+      },
+      "bars": [
+        {
+          "time": 1,
+          "open": 10,
+          "high": 10.5,
+          "low": 9.5,
+          "close": 10,
+          "volume": 100
+        },
+        {
+          "time": 2,
+          "open": 10,
+          "high": 12,
+          "low": 8,
+          "close": 9,
+          "volume": 100
+        }
+      ],
+      "orders": [
+        {
+          "time": 1,
+          "id": "Short",
+          "type": "entry",
+          "side": "short",
+          "qty": 1.0,
+          "price": 9.9,
+          "position_after": -1.0,
+          "comment": "",
+          "commission": 0.5
+        },
+        {
+          "time": 2,
+          "id": "Bracket",
+          "from_entry": "Short",
+          "type": "exit",
+          "side": "flat",
+          "qty": 1.0,
+          "price": 9.1,
+          "position_after": 0.0,
+          "reason": "limit",
+          "comment": "",
+          "commission": 0.5
+        }
+      ],
+      "lifecycle": [
+        {
+          "id": "Short",
+          "type": "entry",
+          "status": "filled",
+          "phase": "market_fill",
+          "submitted_time": 1,
+          "filled_time": 1,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "short",
+          "qty": 1.0,
+          "price": 9.9,
+          "position_after": -1.0,
+          "comment": "",
+          "commission": 0.5,
+          "requested_qty": 1.0,
+          "filled_qty": 1.0
+        },
+        {
+          "id": "Bracket",
+          "type": "exit",
+          "status": "filled",
+          "phase": "exit_fill",
+          "submitted_time": 2,
+          "filled_time": 2,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "flat",
+          "qty": 1.0,
+          "price": 9.1,
+          "position_after": 0.0,
+          "from_entry": "Short",
+          "reason": "limit",
+          "comment": "",
+          "commission": 0.5,
+          "requested_qty": 1.0,
+          "filled_qty": 1.0,
+          "target_qty": 1.0
+        }
+      ],
+      "closedtrades": [
+        {
+          "entry_time": 1,
+          "exit_time": 2,
+          "entry_id": "Short",
+          "exit_id": "Bracket",
+          "side": "short",
+          "qty": 1.0,
+          "entry_price": 9.9,
+          "exit_price": 9.1,
+          "profit": 0.8,
+          "commission": 1.0,
+          "net_profit": -0.2
+        }
+      ],
+      "opentrades": [],
+      "values": {
+        "Position": [
+          0.0,
+          0.0
+        ],
+        "Equity": [
+          1000.0,
+          999.8
+        ],
+        "Net Profit": [
+          0.0,
+          -0.2
+        ],
+        "Open Profit": [
+          0.0,
+          0.0
+        ],
+        "Closed Trades": [
+          0.0,
+          1.0
+        ],
+        "Closed Commission": [
+          0.0,
+          1.0
+        ]
+      },
+      "summary": {
+        "initial_capital": 1000.0,
+        "currency": "",
+        "equity": 999.8,
+        "netprofit": -0.2,
+        "openprofit": 0.0,
+        "grossprofit": 0.8,
+        "grossloss": 0.0,
+        "commission": 1.0,
+        "backtest_fill_limits_assumption": 0,
+        "same_bar_fill_priority": "limit_first",
+        "intrabar_path": "same_bar_priority",
+        "margin_long": 0.0,
+        "margin_short": 0.0
+      },
+      "risk": {
+        "locked": false,
+        "max_drawdown": null,
+        "max_drawdown_type": "percent_of_equity",
+        "max_intraday_loss": null,
+        "max_intraday_loss_type": "percent_of_equity",
+        "max_position_size": null,
+        "max_intraday_filled_orders": null
+      }
+    },
+    {
+      "name": "short_max_position_size_caps_entry",
+      "source": "Pyne-defined short max-position-size strategy fixture with a Pine-equivalent scaffold for external TradingView export comparison.",
+      "script": "strategy(\"Pine Equivalent Short Max Size\", overlay=True, initial_capital=1000, pyramiding=2, commission_type=strategy.commission.cash_per_contract, commission_value=0.25, process_orders_on_close=True)\nstrategy.risk.max_position_size(3)\nstrategy.entry(\"Short\", strategy.short, qty=5, when=bar_index == 0, price=close)\nstrategy.entry(\"More\", strategy.short, qty=2, when=bar_index == 1, price=close)\nstrategy.close_all(when=bar_index == 2, price=close)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\nplot(strategy.closedtrades.commission(0), \"Closed Commission\")\n",
+      "pine_equivalent": "//@version=5\nstrategy(\"Pine Equivalent Short Max Size\", overlay=true, initial_capital=1000, pyramiding=2, commission_type=strategy.commission.cash_per_contract, commission_value=0.25, process_orders_on_close=true)\nstrategy.risk.max_position_size(3)\nif bar_index == 0\n    strategy.entry(\"Short\", strategy.short, qty=5)\nif bar_index == 1\n    strategy.entry(\"More\", strategy.short, qty=2)\nif bar_index == 2\n    strategy.close_all()\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\nplot(strategy.closedtrades.commission(0), \"Closed Commission\")\n",
+      "pine_equivalent_notes": [
+        "max_position_size caps the first requested short entry from 5 contracts to 3 contracts.",
+        "The later same-direction short entry is rejected because the capped position is already at the configured maximum."
+      ],
+      "external_capture": {
+        "provider": "tradingview",
+        "status": "captured",
+        "assertion": "parity",
+        "tolerance": 1e-09,
+        "values": {
+          "Position": [
+            0.0,
+            -3.0,
+            -3.0
+          ],
+          "Equity": [
+            1000.0,
+            1533.5500000000175,
+            2172.25
+          ],
+          "Net Profit": [
+            0.0,
+            -0.75,
+            -0.75
+          ],
+          "Open Profit": [
+            0.0,
+            534.3000000000175,
+            1173.0
+          ],
+          "Closed Trades": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "Closed Commission": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "bars": [
+          {
+            "time": 1780286400,
+            "open": 73731.4,
+            "high": 73815.9,
+            "low": 73307.7,
+            "close": 73497.6,
+            "volume": 4968.162
+          },
+          {
+            "time": 1780290000,
+            "open": 73497.5,
+            "high": 73507.9,
+            "low": 73283.5,
+            "close": 73319.5,
+            "volume": 2267.135
+          },
+          {
+            "time": 1780293600,
+            "open": 73319.5,
+            "high": 73339.3,
+            "low": 72917.0,
+            "close": 73106.6,
+            "volume": 7954.82
+          }
+        ],
+        "notes": [
+          "TradingView export 2026-06-01, BINANCE:BTCUSDT.P 60m, copied from user-provided CSV BINANCE_BTCUSDT.P, 60_5a33d.csv"
+        ]
+      },
+      "bars": [
+        {
+          "time": 1,
+          "open": 12,
+          "high": 13,
+          "low": 11,
+          "close": 12,
+          "volume": 100
+        },
+        {
+          "time": 2,
+          "open": 11,
+          "high": 12,
+          "low": 10,
+          "close": 11,
+          "volume": 100
+        },
+        {
+          "time": 3,
+          "open": 10,
+          "high": 11,
+          "low": 9,
+          "close": 10,
+          "volume": 100
+        }
+      ],
+      "orders": [
+        {
+          "time": 1,
+          "id": "Short",
+          "type": "entry",
+          "side": "short",
+          "qty": 3.0,
+          "price": 12.0,
+          "position_after": -3.0,
+          "comment": "",
+          "commission": 0.75
+        },
+        {
+          "time": 3,
+          "id": "close_all",
+          "type": "close_all",
+          "side": "flat",
+          "qty": 3.0,
+          "price": 10.0,
+          "position_after": 0.0,
+          "comment": "",
+          "commission": 0.75
+        }
+      ],
+      "lifecycle": [
+        {
+          "id": "Short",
+          "type": "entry",
+          "status": "filled",
+          "phase": "market_fill",
+          "submitted_time": 1,
+          "filled_time": 1,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "short",
+          "qty": 3.0,
+          "price": 12.0,
+          "position_after": -3.0,
+          "comment": "",
+          "commission": 0.75,
+          "requested_qty": 5.0,
+          "filled_qty": 3.0
+        },
+        {
+          "id": "More",
+          "type": "entry",
+          "status": "rejected",
+          "phase": "rejected",
+          "submitted_time": 2,
+          "filled_time": null,
+          "canceled_time": null,
+          "rejected_time": 2,
+          "side": "short",
+          "qty": 2.0,
+          "price": 11.0,
+          "position_after": 0.0,
+          "comment": "",
+          "requested_qty": 2.0,
+          "filled_qty": 0.0,
+          "rejected_reason": "max_position_size"
+        },
+        {
+          "id": "close_all",
+          "type": "close_all",
+          "status": "filled",
+          "phase": "close_all_fill",
+          "submitted_time": 3,
+          "filled_time": 3,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "flat",
+          "qty": 3.0,
+          "price": 10.0,
+          "position_after": 0.0,
+          "comment": "",
+          "commission": 0.75,
+          "requested_qty": 3.0,
+          "filled_qty": 3.0,
+          "target_qty": 3.0
+        }
+      ],
+      "closedtrades": [
+        {
+          "entry_time": 1,
+          "exit_time": 3,
+          "entry_id": "Short",
+          "exit_id": "close_all",
+          "side": "short",
+          "qty": 3.0,
+          "entry_price": 12.0,
+          "exit_price": 10.0,
+          "profit": 6.0,
+          "commission": 1.5,
+          "net_profit": 4.5
+        }
+      ],
+      "opentrades": [],
+      "values": {
+        "Position": [
+          0.0,
+          -3.0,
+          -3.0
+        ],
+        "Equity": [
+          1000.0,
+          1002.25,
+          1005.25
+        ],
+        "Net Profit": [
+          0.0,
+          -0.75,
+          -0.75
+        ],
+        "Open Profit": [
+          0.0,
+          3.0,
+          6.0
+        ],
+        "Closed Trades": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "Closed Commission": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "summary": {
+        "initial_capital": 1000.0,
+        "currency": "",
+        "equity": 1005.25,
+        "netprofit": -0.75,
+        "openprofit": 6.0,
+        "grossprofit": 6.0,
+        "grossloss": 0.0,
+        "commission": 1.5,
+        "backtest_fill_limits_assumption": 0,
+        "same_bar_fill_priority": "stop_first",
+        "intrabar_path": "same_bar_priority",
+        "margin_long": 0.0,
+        "margin_short": 0.0
+      },
+      "risk": {
+        "locked": false,
+        "max_drawdown": null,
+        "max_drawdown_type": "percent_of_equity",
+        "max_intraday_loss": null,
+        "max_intraday_loss_type": "percent_of_equity",
+        "max_position_size": 3.0,
+        "max_intraday_filled_orders": null
+      }
+    },
+    {
+      "name": "short_oca_reduce_costs_use_reduced_quantity",
+      "source": "Pyne-defined short OCA reduce strategy fixture with a Pine-equivalent scaffold for external TradingView export comparison.",
+      "script": "strategy(\"Pine Equivalent Short OCA Reduce\", overlay=True, initial_capital=1000, slippage=1, mintick=0.1, commission_type=strategy.commission.cash_per_contract, commission_value=0.25, process_orders_on_close=True)\nstrategy.entry(\"First\", strategy.short, qty=1, when=bar_index == 0, stop=8, oca_name=\"short_scale\", oca_type=strategy.oca.reduce)\nstrategy.order(\"Second\", strategy.short, qty=2, when=bar_index == 0, stop=7, oca_name=\"short_scale\", oca_type=strategy.oca.reduce)\nstrategy.close_all(when=bar_index == 3, price=close)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\nplot(strategy.closedtrades.commission(0), \"First Closed Commission\")\nplot(strategy.closedtrades.commission(1), \"Last Closed Commission\")\n",
+      "pine_equivalent": "//@version=5\nstrategy(\"Pine Equivalent Short OCA Reduce\", overlay=true, initial_capital=1000, slippage=1, commission_type=strategy.commission.cash_per_contract, commission_value=0.25, process_orders_on_close=true)\nif bar_index == 0\n    strategy.entry(\"First\", strategy.short, qty=1, stop=8, oca_name=\"short_scale\", oca_type=strategy.oca.reduce)\n    strategy.order(\"Second\", strategy.short, qty=2, stop=7, oca_name=\"short_scale\", oca_type=strategy.oca.reduce)\nif bar_index == 3\n    strategy.close_all()\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\nplot(strategy.closedtrades.commission(0), \"First Closed Commission\")\nplot(strategy.closedtrades.commission(1), \"Last Closed Commission\")\n",
+      "pine_equivalent_notes": [
+        "The first short stop fill reduces the sibling pending order quantity from 2 to 1.",
+        "Cash-per-contract commission is charged on the reduced filled quantity, not the original sibling request."
+      ],
+      "external_capture": {
+        "provider": "tradingview",
+        "status": "captured",
+        "assertion": "parity",
+        "tolerance": 1e-09,
+        "values": {
+          "Position": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "Equity": [
+            1000.0,
+            1000.0,
+            1000.0,
+            1000.0
+          ],
+          "Net Profit": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "Open Profit": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "Closed Trades": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "First Closed Commission": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "Last Closed Commission": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "bars": [
+          {
+            "time": 1780293600,
+            "open": 73319.5,
+            "high": 73339.3,
+            "low": 72917.0,
+            "close": 73106.6,
+            "volume": 7954.82
+          },
+          {
+            "time": 1780297200,
+            "open": 73106.6,
+            "high": 73177.8,
+            "low": 72668.0,
+            "close": 72776.1,
+            "volume": 6817.045
+          },
+          {
+            "time": 1780300800,
+            "open": 72776.1,
+            "high": 72907.8,
+            "low": 72573.5,
+            "close": 72875.7,
+            "volume": 6995.32
+          },
+          {
+            "time": 1780304400,
+            "open": 72875.8,
+            "high": 73084.0,
+            "low": 72801.1,
+            "close": 72855.2,
+            "volume": 5876.471
+          }
+        ],
+        "notes": [
+          "TradingView export 2026-06-01, BINANCE:BTCUSDT.P 60m, copied from user-provided CSV BINANCE_BTCUSDT.P, 60_d910f.csv"
+        ]
+      },
+      "bars": [
+        {
+          "time": 1,
+          "open": 10,
+          "high": 10.5,
+          "low": 9.5,
+          "close": 10,
+          "volume": 100
+        },
+        {
+          "time": 2,
+          "open": 8.5,
+          "high": 9,
+          "low": 7.8,
+          "close": 8,
+          "volume": 100
+        },
+        {
+          "time": 3,
+          "open": 7.5,
+          "high": 8,
+          "low": 6.8,
+          "close": 7,
+          "volume": 100
+        },
+        {
+          "time": 4,
+          "open": 6.5,
+          "high": 7,
+          "low": 6,
+          "close": 6,
+          "volume": 100
+        }
+      ],
+      "orders": [
+        {
+          "time": 2,
+          "id": "First",
+          "type": "entry",
+          "side": "short",
+          "qty": 1.0,
+          "price": 7.9,
+          "position_after": -1.0,
+          "comment": "",
+          "reason": "stop",
+          "oca_name": "short_scale",
+          "oca_type": "reduce",
+          "commission": 0.25
+        },
+        {
+          "time": 3,
+          "id": "Second",
+          "type": "order",
+          "side": "short",
+          "qty": 1.0,
+          "price": 6.9,
+          "position_after": -2.0,
+          "comment": "",
+          "reason": "stop",
+          "oca_name": "short_scale",
+          "oca_type": "reduce",
+          "commission": 0.25
+        },
+        {
+          "time": 4,
+          "id": "close_all",
+          "type": "close_all",
+          "side": "flat",
+          "qty": 2.0,
+          "price": 6.1,
+          "position_after": 0.0,
+          "comment": "",
+          "commission": 0.5
+        }
+      ],
+      "lifecycle": [
+        {
+          "id": "First",
+          "type": "entry",
+          "status": "filled",
+          "phase": "pending_fill",
+          "submitted_time": 1,
+          "filled_time": 2,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "short",
+          "qty": 1.0,
+          "price": 7.9,
+          "position_after": -1.0,
+          "reason": "stop",
+          "comment": "",
+          "commission": 0.25,
+          "oca_name": "short_scale",
+          "oca_type": "reduce",
+          "stop": 8.0,
+          "requested_qty": 1.0,
+          "filled_qty": 1.0
+        },
+        {
+          "id": "Second",
+          "type": "order",
+          "status": "filled",
+          "phase": "pending_fill",
+          "submitted_time": 1,
+          "filled_time": 3,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "short",
+          "qty": 1.0,
+          "price": 6.9,
+          "position_after": -2.0,
+          "reason": "stop",
+          "comment": "",
+          "commission": 0.25,
+          "oca_name": "short_scale",
+          "oca_type": "reduce",
+          "stop": 7.0,
+          "requested_qty": 2.0,
+          "filled_qty": 1.0
+        },
+        {
+          "id": "close_all",
+          "type": "close_all",
+          "status": "filled",
+          "phase": "close_all_fill",
+          "submitted_time": 4,
+          "filled_time": 4,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "flat",
+          "qty": 2.0,
+          "price": 6.1,
+          "position_after": 0.0,
+          "comment": "",
+          "commission": 0.5,
+          "requested_qty": 2.0,
+          "filled_qty": 2.0,
+          "target_qty": 2.0
+        }
+      ],
+      "closedtrades": [
+        {
+          "entry_time": 2,
+          "exit_time": 4,
+          "entry_id": "First",
+          "exit_id": "close_all",
+          "side": "short",
+          "qty": 1.0,
+          "entry_price": 7.9,
+          "exit_price": 6.1,
+          "profit": 1.8,
+          "commission": 0.5,
+          "net_profit": 1.3
+        },
+        {
+          "entry_time": 3,
+          "exit_time": 4,
+          "entry_id": "Second",
+          "exit_id": "close_all",
+          "side": "short",
+          "qty": 1.0,
+          "entry_price": 6.9,
+          "exit_price": 6.1,
+          "profit": 0.8,
+          "commission": 0.5,
+          "net_profit": 0.3
+        }
+      ],
+      "opentrades": [],
+      "values": {
+        "Position": [
+          0.0,
+          0.0,
+          -1.0,
+          -2.0
+        ],
+        "Equity": [
+          1000.0,
+          1000.0,
+          1000.65,
+          1002.3
+        ],
+        "Net Profit": [
+          0.0,
+          0.0,
+          -0.25,
+          -0.5
+        ],
+        "Open Profit": [
+          0.0,
+          0.0,
+          0.9,
+          2.8
+        ],
+        "Closed Trades": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "First Closed Commission": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "Last Closed Commission": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "summary": {
+        "initial_capital": 1000.0,
+        "currency": "",
+        "equity": 1002.3,
+        "netprofit": -0.5,
+        "openprofit": 2.8,
+        "grossprofit": 2.6,
+        "grossloss": 0.0,
+        "commission": 1.0,
+        "backtest_fill_limits_assumption": 0,
+        "same_bar_fill_priority": "stop_first",
+        "intrabar_path": "same_bar_priority",
+        "margin_long": 0.0,
+        "margin_short": 0.0
+      },
+      "risk": {
+        "locked": false,
+        "max_drawdown": null,
+        "max_drawdown_type": "percent_of_equity",
+        "max_intraday_loss": null,
+        "max_intraday_loss_type": "percent_of_equity",
+        "max_position_size": null,
+        "max_intraday_filled_orders": null
+      }
+    }
+  ]
+}

@@ -1,0 +1,535 @@
+{
+  "name": "request_security_time_close_capture",
+  "source": "Pyne-defined request.security time_close capture fixture",
+  "chart_bars": [
+    {
+      "time": 0,
+      "open": 100,
+      "high": 106,
+      "low": 96,
+      "close": 102,
+      "volume": 1000
+    },
+    {
+      "time": 60,
+      "open": 110,
+      "high": 116,
+      "low": 106,
+      "close": 112,
+      "volume": 1050
+    },
+    {
+      "time": 120,
+      "open": 120,
+      "high": 126,
+      "low": 116,
+      "close": 122,
+      "volume": 1100
+    },
+    {
+      "time": 180,
+      "open": 130,
+      "high": 136,
+      "low": 126,
+      "close": 132,
+      "volume": 1150
+    },
+    {
+      "time": 240,
+      "open": 140,
+      "high": 146,
+      "low": 136,
+      "close": 142,
+      "volume": 1200
+    },
+    {
+      "time": 300,
+      "open": 150,
+      "high": 156,
+      "low": 146,
+      "close": 152,
+      "volume": 1250
+    },
+    {
+      "time": 360,
+      "open": 160,
+      "high": 166,
+      "low": 156,
+      "close": 162,
+      "volume": 1300
+    },
+    {
+      "time": 420,
+      "open": 170,
+      "high": 176,
+      "low": 166,
+      "close": 172,
+      "volume": 1350
+    },
+    {
+      "time": 480,
+      "open": 180,
+      "high": 186,
+      "low": 176,
+      "close": 182,
+      "volume": 1400
+    },
+    {
+      "time": 540,
+      "open": 190,
+      "high": 196,
+      "low": 186,
+      "close": 192,
+      "volume": 1450
+    },
+    {
+      "time": 600,
+      "open": 200,
+      "high": 206,
+      "low": 196,
+      "close": 202,
+      "volume": 1500
+    },
+    {
+      "time": 660,
+      "open": 210,
+      "high": 216,
+      "low": 206,
+      "close": 212,
+      "volume": 1550
+    }
+  ],
+  "provider_bars": [
+    {
+      "time": 0,
+      "open": 1000,
+      "high": 1020,
+      "low": 990,
+      "close": 1005,
+      "volume": 5000
+    },
+    {
+      "time": 240,
+      "open": 1100,
+      "high": 1120,
+      "low": 1090,
+      "close": 1105,
+      "volume": 5500
+    },
+    {
+      "time": 480,
+      "open": 1200,
+      "high": 1220,
+      "low": 1190,
+      "close": 1205,
+      "volume": 6000
+    }
+  ],
+  "script": "indicator(\"Request Time Close Capture\", overlay=True)\nhtf_time = request.security(\"BTCUSDT\", \"240\", \"time\", gaps=barmerge.gaps_on)\nhtf_time_close = request.security(\"BTCUSDT\", \"240\", \"time_close\", gaps=barmerge.gaps_on)\nhtf_close = request.security(\"BTCUSDT\", \"240\", \"close\", gaps=barmerge.gaps_on)\nprovider_time, provider_open, provider_high, provider_low, provider_close, provider_volume = request.security(\n    \"BTCUSDT\",\n    \"240\",\n    (\"time\", \"open\", \"high\", \"low\", \"close\", \"volume\"),\n    gaps=barmerge.gaps_on,\n)\nplot(htf_time, \"HTF Time\")\nplot(htf_time_close, \"HTF Time Close\")\nplot(htf_time_close - htf_time, \"HTF Duration\")\nplot(htf_close, \"HTF Close\")\nplot(provider_open, \"HTF Open\")\nplot(provider_high, \"HTF High\")\nplot(provider_low, \"HTF Low\")\nplot(provider_close, \"HTF Provider Close\")\nplot(provider_volume, \"HTF Volume\")\n",
+  "pine_script": "//@version=5\n_pyne_capture_bars = 12\n_pyne_capture_use_last_bars = input.bool(true, \"Pyne capture: use last chart bars\")\n_pyne_capture_start_time = input.int(1704067200000, \"Pyne capture: start time (ms)\")\n_pyne_capture_start_hit = time >= _pyne_capture_start_time and (na(time[1]) or time[1] < _pyne_capture_start_time)\n_pyne_capture_from_time = ta.barssince(_pyne_capture_start_hit)\n_pyne_capture_from_last = bar_index - (last_bar_index - _pyne_capture_bars)\n_pyne_capture_index = _pyne_capture_use_last_bars ? _pyne_capture_from_last : _pyne_capture_from_time\n_pyne_capture_active = _pyne_capture_index >= 0 and _pyne_capture_index < _pyne_capture_bars\nindicator(\"Pyne Request Capture - Time Close\", overlay=true)\nplot(_pyne_capture_active ? _pyne_capture_index : na, \"Pyne Capture Index\")\n_htf_time = request.security(syminfo.tickerid, \"240\", time, gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)\n_htf_time_close = request.security(syminfo.tickerid, \"240\", time_close, gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)\n_htf_close = request.security(syminfo.tickerid, \"240\", close, gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)\n[_provider_time, _provider_open, _provider_high, _provider_low, _provider_close, _provider_volume] = request.security(syminfo.tickerid, \"240\", [time, open, high, low, close, volume], gaps=barmerge.gaps_on, lookahead=barmerge.lookahead_off)\nplot(_pyne_capture_active ? _htf_time : na, \"HTF Time\")\nplot(_pyne_capture_active ? _htf_time_close / 1000 : na, \"HTF Time Close\")\nplot(_pyne_capture_active ? (_htf_time_close - _htf_time) / 1000 : na, \"HTF Duration\")\nplot(_pyne_capture_active ? _htf_close : na, \"HTF Close\")\nplot(_pyne_capture_active ? _provider_open : na, \"HTF Open\")\nplot(_pyne_capture_active ? _provider_high : na, \"HTF High\")\nplot(_pyne_capture_active ? _provider_low : na, \"HTF Low\")\nplot(_pyne_capture_active ? _provider_close : na, \"HTF Provider Close\")\nplot(_pyne_capture_active ? _provider_volume : na, \"HTF Volume\")\n",
+  "expected_provider_calls": [
+    [
+      "BTCUSDT",
+      "240",
+      0,
+      660
+    ]
+  ],
+  "expected_series": {
+    "HTF Time": [
+      {
+        "time": 180,
+        "value": 0.0
+      },
+      {
+        "time": 420,
+        "value": 240.0
+      },
+      {
+        "time": 660,
+        "value": 480.0
+      }
+    ],
+    "HTF Time Close": [
+      {
+        "time": 180,
+        "value": 240.0
+      },
+      {
+        "time": 420,
+        "value": 480.0
+      },
+      {
+        "time": 660,
+        "value": 14880.0
+      }
+    ],
+    "HTF Duration": [
+      {
+        "time": 180,
+        "value": 240.0
+      },
+      {
+        "time": 420,
+        "value": 240.0
+      },
+      {
+        "time": 660,
+        "value": 14400.0
+      }
+    ],
+    "HTF Close": [
+      {
+        "time": 180,
+        "value": 1005.0
+      },
+      {
+        "time": 420,
+        "value": 1105.0
+      },
+      {
+        "time": 660,
+        "value": 1205.0
+      }
+    ],
+    "HTF Open": [
+      {
+        "time": 180,
+        "value": 1000.0
+      },
+      {
+        "time": 420,
+        "value": 1100.0
+      },
+      {
+        "time": 660,
+        "value": 1200.0
+      }
+    ],
+    "HTF High": [
+      {
+        "time": 180,
+        "value": 1020.0
+      },
+      {
+        "time": 420,
+        "value": 1120.0
+      },
+      {
+        "time": 660,
+        "value": 1220.0
+      }
+    ],
+    "HTF Low": [
+      {
+        "time": 180,
+        "value": 990.0
+      },
+      {
+        "time": 420,
+        "value": 1090.0
+      },
+      {
+        "time": 660,
+        "value": 1190.0
+      }
+    ],
+    "HTF Provider Close": [
+      {
+        "time": 180,
+        "value": 1005.0
+      },
+      {
+        "time": 420,
+        "value": 1105.0
+      },
+      {
+        "time": 660,
+        "value": 1205.0
+      }
+    ],
+    "HTF Volume": [
+      {
+        "time": 180,
+        "value": 5000.0
+      },
+      {
+        "time": 420,
+        "value": 5500.0
+      },
+      {
+        "time": 660,
+        "value": 6000.0
+      }
+    ]
+  },
+  "external_capture": {
+    "provider": "tradingview",
+    "status": "captured",
+    "assertion": "parity",
+    "tolerance": 1e-09,
+    "series": {
+      "HTF Time": [
+        {
+          "time": 1780628400,
+          "value": 1780617600
+        },
+        {
+          "time": 1780642800,
+          "value": 1780632000
+        },
+        {
+          "time": 1780657200,
+          "value": 1780646400
+        }
+      ],
+      "HTF Time Close": [
+        {
+          "time": 1780628400,
+          "value": 1780632000.0
+        },
+        {
+          "time": 1780642800,
+          "value": 1780646400.0
+        },
+        {
+          "time": 1780657200,
+          "value": 1780660800.0
+        }
+      ],
+      "HTF Duration": [
+        {
+          "time": 1780628400,
+          "value": 14400.0
+        },
+        {
+          "time": 1780642800,
+          "value": 14400.0
+        },
+        {
+          "time": 1780657200,
+          "value": 14400.0
+        }
+      ],
+      "HTF Close": [
+        {
+          "time": 1780628400,
+          "value": 62699.7
+        },
+        {
+          "time": 1780642800,
+          "value": 63075.6
+        },
+        {
+          "time": 1780657200,
+          "value": 61929.5
+        }
+      ],
+      "HTF Open": [
+        {
+          "time": 1780628400,
+          "value": 63853.4
+        },
+        {
+          "time": 1780642800,
+          "value": 62700.0
+        },
+        {
+          "time": 1780657200,
+          "value": 63075.5
+        }
+      ],
+      "HTF High": [
+        {
+          "time": 1780628400,
+          "value": 63955.0
+        },
+        {
+          "time": 1780642800,
+          "value": 63674.9
+        },
+        {
+          "time": 1780657200,
+          "value": 63231.8
+        }
+      ],
+      "HTF Low": [
+        {
+          "time": 1780628400,
+          "value": 62300.0
+        },
+        {
+          "time": 1780642800,
+          "value": 61067.6
+        },
+        {
+          "time": 1780657200,
+          "value": 61928.3
+        }
+      ],
+      "HTF Provider Close": [
+        {
+          "time": 1780628400,
+          "value": 62699.7
+        },
+        {
+          "time": 1780642800,
+          "value": 63075.6
+        },
+        {
+          "time": 1780657200,
+          "value": 61929.5
+        }
+      ],
+      "HTF Volume": [
+        {
+          "time": 1780628400,
+          "value": 39487.449
+        },
+        {
+          "time": 1780642800,
+          "value": 95582.01
+        },
+        {
+          "time": 1780657200,
+          "value": 37751.827
+        }
+      ]
+    },
+    "bars": [
+      {
+        "time": 1780617600,
+        "open": 63853.4,
+        "high": 63955.0,
+        "low": 63366.0,
+        "close": 63398.3,
+        "volume": 6077.139
+      },
+      {
+        "time": 1780621200,
+        "open": 63398.3,
+        "high": 63547.5,
+        "low": 63011.0,
+        "close": 63347.0,
+        "volume": 8705.901
+      },
+      {
+        "time": 1780624800,
+        "open": 63347.0,
+        "high": 63416.9,
+        "low": 62552.2,
+        "close": 62585.5,
+        "volume": 12937.021
+      },
+      {
+        "time": 1780628400,
+        "open": 62585.6,
+        "high": 62861.0,
+        "low": 62300.0,
+        "close": 62699.7,
+        "volume": 11767.388
+      },
+      {
+        "time": 1780632000,
+        "open": 62700.0,
+        "high": 63629.9,
+        "low": 62456.0,
+        "close": 63588.9,
+        "volume": 12198.337
+      },
+      {
+        "time": 1780635600,
+        "open": 63589.0,
+        "high": 63674.9,
+        "low": 62229.6,
+        "close": 62294.4,
+        "volume": 17219.625
+      },
+      {
+        "time": 1780639200,
+        "open": 62294.1,
+        "high": 62614.2,
+        "low": 61067.6,
+        "close": 61916.8,
+        "volume": 43244.607
+      },
+      {
+        "time": 1780642800,
+        "open": 61916.7,
+        "high": 63084.4,
+        "low": 61330.5,
+        "close": 63075.6,
+        "volume": 22919.441
+      },
+      {
+        "time": 1780646400,
+        "open": 63075.5,
+        "high": 63088.0,
+        "low": 62234.3,
+        "close": 62429.9,
+        "volume": 11546.341
+      },
+      {
+        "time": 1780650000,
+        "open": 62429.9,
+        "high": 63231.8,
+        "low": 62405.1,
+        "close": 62832.5,
+        "volume": 10276.57
+      },
+      {
+        "time": 1780653600,
+        "open": 62832.4,
+        "high": 62910.5,
+        "low": 62342.1,
+        "close": 62510.1,
+        "volume": 6267.222
+      },
+      {
+        "time": 1780657200,
+        "open": 62510.0,
+        "high": 62621.9,
+        "low": 61928.3,
+        "close": 61929.5,
+        "volume": 9661.694
+      }
+    ],
+    "provider_bars": [
+      {
+        "time": 1780617600,
+        "open": 63853.4,
+        "high": 63955.0,
+        "low": 62300.0,
+        "close": 62699.7,
+        "volume": 39487.449
+      },
+      {
+        "time": 1780632000,
+        "open": 62700.0,
+        "high": 63674.9,
+        "low": 61067.6,
+        "close": 63075.6,
+        "volume": 95582.01
+      },
+      {
+        "time": 1780646400,
+        "open": 63075.5,
+        "high": 63231.8,
+        "low": 61928.3,
+        "close": 61929.5,
+        "volume": 37751.827
+      }
+    ],
+    "provider_bar_plots": {
+      "time": "HTF Time",
+      "open": "HTF Open",
+      "high": "HTF High",
+      "low": "HTF Low",
+      "close": "HTF Provider Close",
+      "volume": "HTF Volume"
+    },
+    "notes": [
+      "TradingView export 2026-06-05"
+    ]
+  }
+}

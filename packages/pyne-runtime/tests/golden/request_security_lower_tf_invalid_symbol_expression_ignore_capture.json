@@ -1,0 +1,829 @@
+{
+  "name": "request_security_lower_tf_invalid_symbol_expression_ignore_capture",
+  "source": "Pyne-defined request.security_lower_tf invalid-symbol expression ignore capture fixture",
+  "chart_bars": [
+    {
+      "time": 64800,
+      "open": 100,
+      "high": 101,
+      "low": 99,
+      "close": 100,
+      "volume": 1000
+    },
+    {
+      "time": 68400,
+      "open": 101,
+      "high": 102,
+      "low": 100,
+      "close": 101,
+      "volume": 1010
+    },
+    {
+      "time": 72000,
+      "open": 102,
+      "high": 103,
+      "low": 101,
+      "close": 102,
+      "volume": 1020
+    },
+    {
+      "time": 75600,
+      "open": 103,
+      "high": 104,
+      "low": 102,
+      "close": 103,
+      "volume": 1030
+    },
+    {
+      "time": 79200,
+      "open": 104,
+      "high": 105,
+      "low": 103,
+      "close": 104,
+      "volume": 1040
+    },
+    {
+      "time": 82800,
+      "open": 105,
+      "high": 106,
+      "low": 104,
+      "close": 105,
+      "volume": 1050
+    },
+    {
+      "time": 86400,
+      "open": 106,
+      "high": 107,
+      "low": 105,
+      "close": 106,
+      "volume": 1060
+    },
+    {
+      "time": 90000,
+      "open": 107,
+      "high": 108,
+      "low": 106,
+      "close": 107,
+      "volume": 1070
+    },
+    {
+      "time": 93600,
+      "open": 108,
+      "high": 109,
+      "low": 107,
+      "close": 108,
+      "volume": 1080
+    },
+    {
+      "time": 97200,
+      "open": 109,
+      "high": 110,
+      "low": 108,
+      "close": 109,
+      "volume": 1090
+    },
+    {
+      "time": 100800,
+      "open": 110,
+      "high": 111,
+      "low": 109,
+      "close": 110,
+      "volume": 1100
+    },
+    {
+      "time": 104400,
+      "open": 111,
+      "high": 112,
+      "low": 110,
+      "close": 111,
+      "volume": 1110
+    }
+  ],
+  "provider_bars": [],
+  "invalid_symbols": [
+    "BINANCE:PYNE_MISSING_SYMBOL"
+  ],
+  "script": "indicator(\"Request Lower TF Invalid Symbol Expression Ignore Capture\", overlay=True)\ninvalid_mid = request.security_lower_tf(\n    \"BINANCE:PYNE_MISSING_SYMBOL\",\n    \"15\",\n    lambda ctx: (ctx.high + ctx.low) / 2,\n    ignore_invalid_symbol=True,\n)\nplot(invalid_mid.size(), \"Invalid LTF Expr Mid Count\")\nplot(invalid_mid.first(default=-111), \"Invalid LTF Expr Mid First\")\nplot(invalid_mid.last(default=-222), \"Invalid LTF Expr Mid Last\")\nplot(invalid_mid.sum(default=0), \"Invalid LTF Expr Mid Sum\")\nplot(invalid_mid.avg(default=-333), \"Invalid LTF Expr Mid Avg\")\nplot(invalid_mid.size() == 0, \"Invalid LTF Expr Mid Is Empty\")\n",
+  "pine_script": "//@version=5\n_pyne_capture_bars = 12\n_pyne_capture_use_last_bars = input.bool(true, \"Pyne capture: use last chart bars\")\n_pyne_capture_start_time = input.int(1704067200000, \"Pyne capture: start time (ms)\")\n_pyne_capture_invalid_symbol = input.string(\"BINANCE:PYNE_MISSING_SYMBOL\", \"Pyne capture: invalid symbol\")\n_pyne_capture_start_hit = time >= _pyne_capture_start_time and (na(time[1]) or time[1] < _pyne_capture_start_time)\n_pyne_capture_from_time = ta.barssince(_pyne_capture_start_hit)\n_pyne_capture_from_last = bar_index - (last_bar_index - _pyne_capture_bars)\n_pyne_capture_index = _pyne_capture_use_last_bars ? _pyne_capture_from_last : _pyne_capture_from_time\n_pyne_capture_active = _pyne_capture_index >= 0 and _pyne_capture_index < _pyne_capture_bars\n_pyne_ltf_size(array<float> arr) =>\n    not na(arr) ? array.size(arr) : 0\n_pyne_ltf_first(array<float> arr, float fallback) =>\n    _pyne_ltf_size(arr) > 0 ? array.get(arr, 0) : fallback\n_pyne_ltf_last(array<float> arr, float fallback) =>\n    _pyne_ltf_size(arr) > 0 ? array.get(arr, array.size(arr) - 1) : fallback\n_pyne_ltf_sum(array<float> arr, float fallback) =>\n    _pyne_ltf_size(arr) > 0 ? array.sum(arr) : fallback\n_pyne_ltf_avg(array<float> arr, float fallback) =>\n    _pyne_ltf_size(arr) > 0 ? array.avg(arr) : fallback\n\nindicator(\"Pyne Request Capture - Lower TF Invalid Symbol Expression Ignore\", overlay=true)\nplot(_pyne_capture_active ? _pyne_capture_index : na, \"Pyne Capture Index\")\n\n_invalid_mid = request.security_lower_tf(_pyne_capture_invalid_symbol, \"15\", (high + low) / 2, ignore_invalid_symbol=true)\nplot(_pyne_capture_active ? _pyne_ltf_size(_invalid_mid) : na, \"Invalid LTF Expr Mid Count\")\nplot(_pyne_capture_active ? _pyne_ltf_first(_invalid_mid, -111) : na, \"Invalid LTF Expr Mid First\")\nplot(_pyne_capture_active ? _pyne_ltf_last(_invalid_mid, -222) : na, \"Invalid LTF Expr Mid Last\")\nplot(_pyne_capture_active ? _pyne_ltf_sum(_invalid_mid, 0) : na, \"Invalid LTF Expr Mid Sum\")\nplot(_pyne_capture_active ? _pyne_ltf_avg(_invalid_mid, -333) : na, \"Invalid LTF Expr Mid Avg\")\nplot(_pyne_capture_active ? (_pyne_ltf_size(_invalid_mid) == 0 ? 1 : 0) : na, \"Invalid LTF Expr Mid Is Empty\")\n",
+  "expected_provider_calls": [
+    [
+      "BINANCE:PYNE_MISSING_SYMBOL",
+      "15",
+      64800,
+      104400
+    ]
+  ],
+  "expected_series": {
+    "Invalid LTF Expr Mid Count": [
+      {
+        "time": 64800,
+        "value": 0.0
+      },
+      {
+        "time": 68400,
+        "value": 0.0
+      },
+      {
+        "time": 72000,
+        "value": 0.0
+      },
+      {
+        "time": 75600,
+        "value": 0.0
+      },
+      {
+        "time": 79200,
+        "value": 0.0
+      },
+      {
+        "time": 82800,
+        "value": 0.0
+      },
+      {
+        "time": 86400,
+        "value": 0.0
+      },
+      {
+        "time": 90000,
+        "value": 0.0
+      },
+      {
+        "time": 93600,
+        "value": 0.0
+      },
+      {
+        "time": 97200,
+        "value": 0.0
+      },
+      {
+        "time": 100800,
+        "value": 0.0
+      },
+      {
+        "time": 104400,
+        "value": 0.0
+      }
+    ],
+    "Invalid LTF Expr Mid First": [
+      {
+        "time": 64800,
+        "value": -111.0
+      },
+      {
+        "time": 68400,
+        "value": -111.0
+      },
+      {
+        "time": 72000,
+        "value": -111.0
+      },
+      {
+        "time": 75600,
+        "value": -111.0
+      },
+      {
+        "time": 79200,
+        "value": -111.0
+      },
+      {
+        "time": 82800,
+        "value": -111.0
+      },
+      {
+        "time": 86400,
+        "value": -111.0
+      },
+      {
+        "time": 90000,
+        "value": -111.0
+      },
+      {
+        "time": 93600,
+        "value": -111.0
+      },
+      {
+        "time": 97200,
+        "value": -111.0
+      },
+      {
+        "time": 100800,
+        "value": -111.0
+      },
+      {
+        "time": 104400,
+        "value": -111.0
+      }
+    ],
+    "Invalid LTF Expr Mid Last": [
+      {
+        "time": 64800,
+        "value": -222.0
+      },
+      {
+        "time": 68400,
+        "value": -222.0
+      },
+      {
+        "time": 72000,
+        "value": -222.0
+      },
+      {
+        "time": 75600,
+        "value": -222.0
+      },
+      {
+        "time": 79200,
+        "value": -222.0
+      },
+      {
+        "time": 82800,
+        "value": -222.0
+      },
+      {
+        "time": 86400,
+        "value": -222.0
+      },
+      {
+        "time": 90000,
+        "value": -222.0
+      },
+      {
+        "time": 93600,
+        "value": -222.0
+      },
+      {
+        "time": 97200,
+        "value": -222.0
+      },
+      {
+        "time": 100800,
+        "value": -222.0
+      },
+      {
+        "time": 104400,
+        "value": -222.0
+      }
+    ],
+    "Invalid LTF Expr Mid Sum": [
+      {
+        "time": 64800,
+        "value": 0.0
+      },
+      {
+        "time": 68400,
+        "value": 0.0
+      },
+      {
+        "time": 72000,
+        "value": 0.0
+      },
+      {
+        "time": 75600,
+        "value": 0.0
+      },
+      {
+        "time": 79200,
+        "value": 0.0
+      },
+      {
+        "time": 82800,
+        "value": 0.0
+      },
+      {
+        "time": 86400,
+        "value": 0.0
+      },
+      {
+        "time": 90000,
+        "value": 0.0
+      },
+      {
+        "time": 93600,
+        "value": 0.0
+      },
+      {
+        "time": 97200,
+        "value": 0.0
+      },
+      {
+        "time": 100800,
+        "value": 0.0
+      },
+      {
+        "time": 104400,
+        "value": 0.0
+      }
+    ],
+    "Invalid LTF Expr Mid Avg": [
+      {
+        "time": 64800,
+        "value": -333.0
+      },
+      {
+        "time": 68400,
+        "value": -333.0
+      },
+      {
+        "time": 72000,
+        "value": -333.0
+      },
+      {
+        "time": 75600,
+        "value": -333.0
+      },
+      {
+        "time": 79200,
+        "value": -333.0
+      },
+      {
+        "time": 82800,
+        "value": -333.0
+      },
+      {
+        "time": 86400,
+        "value": -333.0
+      },
+      {
+        "time": 90000,
+        "value": -333.0
+      },
+      {
+        "time": 93600,
+        "value": -333.0
+      },
+      {
+        "time": 97200,
+        "value": -333.0
+      },
+      {
+        "time": 100800,
+        "value": -333.0
+      },
+      {
+        "time": 104400,
+        "value": -333.0
+      }
+    ],
+    "Invalid LTF Expr Mid Is Empty": [
+      {
+        "time": 64800,
+        "value": 1.0
+      },
+      {
+        "time": 68400,
+        "value": 1.0
+      },
+      {
+        "time": 72000,
+        "value": 1.0
+      },
+      {
+        "time": 75600,
+        "value": 1.0
+      },
+      {
+        "time": 79200,
+        "value": 1.0
+      },
+      {
+        "time": 82800,
+        "value": 1.0
+      },
+      {
+        "time": 86400,
+        "value": 1.0
+      },
+      {
+        "time": 90000,
+        "value": 1.0
+      },
+      {
+        "time": 93600,
+        "value": 1.0
+      },
+      {
+        "time": 97200,
+        "value": 1.0
+      },
+      {
+        "time": 100800,
+        "value": 1.0
+      },
+      {
+        "time": 104400,
+        "value": 1.0
+      }
+    ]
+  },
+  "external_capture": {
+    "provider": "tradingview",
+    "status": "captured",
+    "assertion": "parity",
+    "tolerance": 1e-09,
+    "series": {
+      "Invalid LTF Expr Mid Count": [
+        {
+          "time": 1781449200,
+          "value": 0.0
+        },
+        {
+          "time": 1781452800,
+          "value": 0.0
+        },
+        {
+          "time": 1781456400,
+          "value": 0.0
+        },
+        {
+          "time": 1781460000,
+          "value": 0.0
+        },
+        {
+          "time": 1781463600,
+          "value": 0.0
+        },
+        {
+          "time": 1781467200,
+          "value": 0.0
+        },
+        {
+          "time": 1781470800,
+          "value": 0.0
+        },
+        {
+          "time": 1781474400,
+          "value": 0.0
+        },
+        {
+          "time": 1781478000,
+          "value": 0.0
+        },
+        {
+          "time": 1781481600,
+          "value": 0.0
+        },
+        {
+          "time": 1781485200,
+          "value": 0.0
+        },
+        {
+          "time": 1781488800,
+          "value": 0.0
+        }
+      ],
+      "Invalid LTF Expr Mid First": [
+        {
+          "time": 1781449200,
+          "value": -111.0
+        },
+        {
+          "time": 1781452800,
+          "value": -111.0
+        },
+        {
+          "time": 1781456400,
+          "value": -111.0
+        },
+        {
+          "time": 1781460000,
+          "value": -111.0
+        },
+        {
+          "time": 1781463600,
+          "value": -111.0
+        },
+        {
+          "time": 1781467200,
+          "value": -111.0
+        },
+        {
+          "time": 1781470800,
+          "value": -111.0
+        },
+        {
+          "time": 1781474400,
+          "value": -111.0
+        },
+        {
+          "time": 1781478000,
+          "value": -111.0
+        },
+        {
+          "time": 1781481600,
+          "value": -111.0
+        },
+        {
+          "time": 1781485200,
+          "value": -111.0
+        },
+        {
+          "time": 1781488800,
+          "value": -111.0
+        }
+      ],
+      "Invalid LTF Expr Mid Last": [
+        {
+          "time": 1781449200,
+          "value": -222.0
+        },
+        {
+          "time": 1781452800,
+          "value": -222.0
+        },
+        {
+          "time": 1781456400,
+          "value": -222.0
+        },
+        {
+          "time": 1781460000,
+          "value": -222.0
+        },
+        {
+          "time": 1781463600,
+          "value": -222.0
+        },
+        {
+          "time": 1781467200,
+          "value": -222.0
+        },
+        {
+          "time": 1781470800,
+          "value": -222.0
+        },
+        {
+          "time": 1781474400,
+          "value": -222.0
+        },
+        {
+          "time": 1781478000,
+          "value": -222.0
+        },
+        {
+          "time": 1781481600,
+          "value": -222.0
+        },
+        {
+          "time": 1781485200,
+          "value": -222.0
+        },
+        {
+          "time": 1781488800,
+          "value": -222.0
+        }
+      ],
+      "Invalid LTF Expr Mid Sum": [
+        {
+          "time": 1781449200,
+          "value": 0.0
+        },
+        {
+          "time": 1781452800,
+          "value": 0.0
+        },
+        {
+          "time": 1781456400,
+          "value": 0.0
+        },
+        {
+          "time": 1781460000,
+          "value": 0.0
+        },
+        {
+          "time": 1781463600,
+          "value": 0.0
+        },
+        {
+          "time": 1781467200,
+          "value": 0.0
+        },
+        {
+          "time": 1781470800,
+          "value": 0.0
+        },
+        {
+          "time": 1781474400,
+          "value": 0.0
+        },
+        {
+          "time": 1781478000,
+          "value": 0.0
+        },
+        {
+          "time": 1781481600,
+          "value": 0.0
+        },
+        {
+          "time": 1781485200,
+          "value": 0.0
+        },
+        {
+          "time": 1781488800,
+          "value": 0.0
+        }
+      ],
+      "Invalid LTF Expr Mid Avg": [
+        {
+          "time": 1781449200,
+          "value": -333.0
+        },
+        {
+          "time": 1781452800,
+          "value": -333.0
+        },
+        {
+          "time": 1781456400,
+          "value": -333.0
+        },
+        {
+          "time": 1781460000,
+          "value": -333.0
+        },
+        {
+          "time": 1781463600,
+          "value": -333.0
+        },
+        {
+          "time": 1781467200,
+          "value": -333.0
+        },
+        {
+          "time": 1781470800,
+          "value": -333.0
+        },
+        {
+          "time": 1781474400,
+          "value": -333.0
+        },
+        {
+          "time": 1781478000,
+          "value": -333.0
+        },
+        {
+          "time": 1781481600,
+          "value": -333.0
+        },
+        {
+          "time": 1781485200,
+          "value": -333.0
+        },
+        {
+          "time": 1781488800,
+          "value": -333.0
+        }
+      ],
+      "Invalid LTF Expr Mid Is Empty": [
+        {
+          "time": 1781449200,
+          "value": 1.0
+        },
+        {
+          "time": 1781452800,
+          "value": 1.0
+        },
+        {
+          "time": 1781456400,
+          "value": 1.0
+        },
+        {
+          "time": 1781460000,
+          "value": 1.0
+        },
+        {
+          "time": 1781463600,
+          "value": 1.0
+        },
+        {
+          "time": 1781467200,
+          "value": 1.0
+        },
+        {
+          "time": 1781470800,
+          "value": 1.0
+        },
+        {
+          "time": 1781474400,
+          "value": 1.0
+        },
+        {
+          "time": 1781478000,
+          "value": 1.0
+        },
+        {
+          "time": 1781481600,
+          "value": 1.0
+        },
+        {
+          "time": 1781485200,
+          "value": 1.0
+        },
+        {
+          "time": 1781488800,
+          "value": 1.0
+        }
+      ]
+    },
+    "bars": [
+      {
+        "time": 1781449200,
+        "open": 63953.7,
+        "high": 64123.8,
+        "low": 63945.8,
+        "close": 63995.2,
+        "volume": 4281.19
+      },
+      {
+        "time": 1781452800,
+        "open": 63995.2,
+        "high": 64183.4,
+        "low": 63901.3,
+        "close": 63913.8,
+        "volume": 3323.998
+      },
+      {
+        "time": 1781456400,
+        "open": 63913.8,
+        "high": 64000.0,
+        "low": 63650.0,
+        "close": 63706.1,
+        "volume": 5470.458
+      },
+      {
+        "time": 1781460000,
+        "open": 63706.2,
+        "high": 63791.9,
+        "low": 63650.9,
+        "close": 63783.9,
+        "volume": 3170.311
+      },
+      {
+        "time": 1781463600,
+        "open": 63783.9,
+        "high": 63830.9,
+        "low": 63702.0,
+        "close": 63777.3,
+        "volume": 1358.481
+      },
+      {
+        "time": 1781467200,
+        "open": 63777.4,
+        "high": 64070.0,
+        "low": 63761.5,
+        "close": 63978.1,
+        "volume": 3073.059
+      },
+      {
+        "time": 1781470800,
+        "open": 63978.2,
+        "high": 65652.0,
+        "low": 63973.4,
+        "close": 65284.4,
+        "volume": 27695.963
+      },
+      {
+        "time": 1781474400,
+        "open": 65284.4,
+        "high": 65555.0,
+        "low": 64918.2,
+        "close": 65389.2,
+        "volume": 14246.288
+      },
+      {
+        "time": 1781478000,
+        "open": 65389.2,
+        "high": 65775.0,
+        "low": 65217.0,
+        "close": 65702.1,
+        "volume": 9775.909
+      },
+      {
+        "time": 1781481600,
+        "open": 65702.1,
+        "high": 65880.0,
+        "low": 65444.0,
+        "close": 65591.4,
+        "volume": 9044.986
+      },
+      {
+        "time": 1781485200,
+        "open": 65591.4,
+        "high": 65705.6,
+        "low": 65314.3,
+        "close": 65482.6,
+        "volume": 5936.809
+      },
+      {
+        "time": 1781488800,
+        "open": 65482.6,
+        "high": 65749.0,
+        "low": 65383.6,
+        "close": 65429.3,
+        "volume": 3923.62
+      }
+    ],
+    "provider_bars": [],
+    "provider_bar_plots": [],
+    "notes": [
+      "TradingView export 2026-06-15: request.security_lower_tf invalid symbol calculated expression with ignore_invalid_symbol=true, BINANCE:BTCUSDT.P 60m."
+    ]
+  }
+}

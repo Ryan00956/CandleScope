@@ -1,0 +1,62 @@
+{
+  "name": "request_security_lower_tf_alignment",
+  "source": "Pyne-defined lower-timeframe grouping semantics",
+  "chart_bars": [
+    {"time": 10, "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": 100},
+    {"time": 20, "open": 2, "high": 3, "low": 1.5, "close": 2.5, "volume": 120},
+    {"time": 30, "open": 3, "high": 4, "low": 2.5, "close": 3.5, "volume": 140},
+    {"time": 40, "open": 4, "high": 5, "low": 3.5, "close": 4.5, "volume": 160}
+  ],
+  "provider_bars": [
+    {"time": 10, "open": 10, "high": 11, "low": 9, "close": 10, "volume": 1000},
+    {"time": 12, "open": 12, "high": 13, "low": 11, "close": 12, "volume": 1200},
+    {"time": 18, "open": 18, "high": 19, "low": 17, "close": 18, "volume": 1800},
+    {"time": 20, "open": 20, "high": 21, "low": 19, "close": 20, "volume": 2000},
+    {"time": 22, "open": 22, "high": 23, "low": 21, "close": 22, "volume": 2200},
+    {"time": 29, "open": 29, "high": 30, "low": 28, "close": 29, "volume": 2900},
+    {"time": 30, "open": 30, "high": 31, "low": 29, "close": 30, "volume": 3000},
+    {"time": 39, "open": 39, "high": 40, "low": 38, "close": 39, "volume": 3900},
+    {"time": 40, "open": 40, "high": 41, "low": 39, "close": 40, "volume": 4000}
+  ],
+  "script": "indicator(\"Lower TF Golden\", overlay=True)\nlower = request.security_lower_tf(\"BTCUSDT\", \"1\", lambda ctx: ctx.close)\nplot(lower.size(), \"Lower Count\")\nplot(lower.last(), \"Lower Last\")\nplot(lower[1].last(), \"Previous Lower Last\")\nplot(lower.sum(), \"Lower Sum\")\nplot(lower.max(), \"Lower Max\")\nplot(lower.get(1, default=0), \"Lower Second\")\n",
+  "expected_provider_calls": [
+    ["BTCUSDT", "1", 10, 40]
+  ],
+  "expected_series": {
+    "Lower Count": [
+      {"time": 10, "value": 3.0},
+      {"time": 20, "value": 3.0},
+      {"time": 30, "value": 2.0},
+      {"time": 40, "value": 1.0}
+    ],
+    "Lower Last": [
+      {"time": 10, "value": 18.0},
+      {"time": 20, "value": 29.0},
+      {"time": 30, "value": 39.0},
+      {"time": 40, "value": 40.0}
+    ],
+    "Previous Lower Last": [
+      {"time": 20, "value": 18.0},
+      {"time": 30, "value": 29.0},
+      {"time": 40, "value": 39.0}
+    ],
+    "Lower Sum": [
+      {"time": 10, "value": 40.0},
+      {"time": 20, "value": 71.0},
+      {"time": 30, "value": 69.0},
+      {"time": 40, "value": 40.0}
+    ],
+    "Lower Max": [
+      {"time": 10, "value": 18.0},
+      {"time": 20, "value": 29.0},
+      {"time": 30, "value": 39.0},
+      {"time": 40, "value": 40.0}
+    ],
+    "Lower Second": [
+      {"time": 10, "value": 12.0},
+      {"time": 20, "value": 22.0},
+      {"time": 30, "value": 39.0},
+      {"time": 40, "value": 0.0}
+    ]
+  }
+}

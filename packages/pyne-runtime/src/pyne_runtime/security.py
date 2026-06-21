@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
+from .schema import OUTPUT_KEYS
 from .settings import PyneSettings
 
 
@@ -55,6 +56,10 @@ class PyneSecurityPolicy:
     max_bars: int = 50_000
     max_output_series: int = 20
     max_output_points: int = 1_000_000
+    max_array_size: int = 100_000
+    max_map_size: int = 100_000
+    max_matrix_cells: int = 100_000
+    max_collection_depth: int = 8
 
     @classmethod
     def from_settings(
@@ -71,6 +76,10 @@ class PyneSecurityPolicy:
             max_bars=settings.max_bars,
             max_output_series=settings.max_output_series,
             max_output_points=settings.max_output_points,
+            max_array_size=settings.max_array_size,
+            max_map_size=settings.max_map_size,
+            max_matrix_cells=settings.max_matrix_cells,
+            max_collection_depth=settings.max_collection_depth,
         )
 
     @classmethod
@@ -86,6 +95,10 @@ class PyneSecurityPolicy:
             "maxBars": self.max_bars,
             "maxOutputSeries": self.max_output_series,
             "maxOutputPoints": self.max_output_points,
+            "maxArraySize": self.max_array_size,
+            "maxMapSize": self.max_map_size,
+            "maxMatrixCells": self.max_matrix_cells,
+            "maxCollectionDepth": self.max_collection_depth,
         }
 
 
@@ -108,10 +121,7 @@ def validate_script_security(script: str, policy: PyneSecurityPolicy) -> None:
     if policy.mode == "unsafe":
         return
 
-    try:
-        tree = ast.parse(script)
-    except SyntaxError:
-        return
+    tree = ast.parse(script)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -134,24 +144,44 @@ def build_builtins(policy: PyneSecurityPolicy) -> Any:
 
 
 def enforce_output_limits(output: dict[str, Any], policy: PyneSecurityPolicy) -> None:
-    series_keys = ("lines", "histograms", "bars")
-    series_count = sum(len(output.get(key, []) or []) for key in series_keys)
-    series_count += len(output.get("markers", []) or [])
+    series_count = _count_output_collections(output)
     if series_count > policy.max_output_series:
         raise PyneSecurityError(
             f"Too many output series ({series_count}, max {policy.max_output_series})"
         )
 
-    point_count = 0
-    for key in ("lines", "histograms", "bars", "markers"):
-        for item in output.get(key, []) or []:
-            data = item.get("data") if isinstance(item, dict) else None
-            if isinstance(data, list):
-                point_count += len(data)
+    point_count = _count_output_points(output)
     if point_count > policy.max_output_points:
         raise PyneSecurityError(
             f"Too many output points ({point_count}, max {policy.max_output_points})"
         )
+
+
+def _count_output_collections(output: dict[str, Any]) -> int:
+    count = 0
+    for key in OUTPUT_KEYS:
+        value = output.get(key)
+        if isinstance(value, list):
+            count += len(value)
+        elif key == "objects" and isinstance(value, dict):
+            count += sum(len(items) for items in value.values() if isinstance(items, list))
+        elif key == "strategy" and value:
+            count += 1
+    return count
+
+
+def _count_output_points(value: Any) -> int:
+    if isinstance(value, dict):
+        count = 0
+        for key, item in value.items():
+            if key in {"data", "regions"} and isinstance(item, list):
+                count += len(item)
+            else:
+                count += _count_output_points(item)
+        return count
+    if isinstance(value, list):
+        return sum(_count_output_points(item) for item in value)
+    return 0
 
 
 @contextmanager

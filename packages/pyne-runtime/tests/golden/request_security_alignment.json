@@ -1,0 +1,141 @@
+{
+  "name": "request_security_alignment",
+  "source": "Pyne-defined request.security higher-timeframe alignment semantics",
+  "chart_bars": [
+    {
+      "time": 10,
+      "open": 1,
+      "high": 2,
+      "low": 1,
+      "close": 1.5,
+      "volume": 100
+    },
+    {
+      "time": 20,
+      "open": 2,
+      "high": 3,
+      "low": 1.5,
+      "close": 2.5,
+      "volume": 120
+    },
+    {
+      "time": 30,
+      "open": 3,
+      "high": 4,
+      "low": 2.5,
+      "close": 3.5,
+      "volume": 140
+    },
+    {
+      "time": 40,
+      "open": 4,
+      "high": 5,
+      "low": 3.5,
+      "close": 4.5,
+      "volume": 160
+    }
+  ],
+  "provider_bars": [
+    {
+      "time": 10,
+      "open": 95,
+      "high": 110,
+      "low": 90,
+      "close": 100,
+      "volume": 1000
+    },
+    {
+      "time": 30,
+      "open": 295,
+      "high": 330,
+      "low": 270,
+      "close": 300,
+      "volume": 3000
+    }
+  ],
+  "script": "indicator(\"Security Golden\", overlay=True)\nhigher = request.security(\"BTCUSDT\", \"2\", \"close\")\ngapped = request.security(\"BTCUSDT\", \"2\", \"close\", gaps=\"on\")\nahead = request.security(\"BTCUSDT\", \"2\", \"close\", lookahead=\"on\")\nprevious = request.security(\"BTCUSDT\", \"2\", close[1])\nhigher_high, higher_low = request.security(\"BTCUSDT\", \"2\", (\"high\", \"low\"), gaps=\"on\")\nhigher_sma = request.security(\"BTCUSDT\", \"2\", lambda ctx: ctx.ta.sma(ctx.close, 2))\nplot(higher, \"Higher\")\nplot(gapped, \"Gapped\")\nplot(ahead, \"Ahead\")\nplot(previous, \"Previous\")\nplot(higher_high, \"Higher High\")\nplot(higher_low, \"Higher Low\")\nplot(higher_sma, \"Higher SMA\")\n",
+  "expected_provider_calls": [
+    [
+      "BTCUSDT",
+      "2",
+      10,
+      40
+    ]
+  ],
+  "expected_series": {
+    "Higher": [
+      {
+        "time": 20,
+        "value": 100.0
+      },
+      {
+        "time": 30,
+        "value": 100.0
+      },
+      {
+        "time": 40,
+        "value": 300.0
+      }
+    ],
+    "Gapped": [
+      {
+        "time": 20,
+        "value": 100.0
+      },
+      {
+        "time": 40,
+        "value": 300.0
+      }
+    ],
+    "Ahead": [
+      {
+        "time": 10,
+        "value": 100.0
+      },
+      {
+        "time": 20,
+        "value": 100.0
+      },
+      {
+        "time": 30,
+        "value": 300.0
+      },
+      {
+        "time": 40,
+        "value": 300.0
+      }
+    ],
+    "Previous": [
+      {
+        "time": 40,
+        "value": 100.0
+      }
+    ],
+    "Higher High": [
+      {
+        "time": 20,
+        "value": 110.0
+      },
+      {
+        "time": 40,
+        "value": 330.0
+      }
+    ],
+    "Higher Low": [
+      {
+        "time": 20,
+        "value": 90.0
+      },
+      {
+        "time": 40,
+        "value": 270.0
+      }
+    ],
+    "Higher SMA": [
+      {
+        "time": 40,
+        "value": 200.0
+      }
+    ]
+  }
+}

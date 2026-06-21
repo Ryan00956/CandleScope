@@ -8,6 +8,7 @@ Important fields:
 - `lines`
 - `output`
 - `param_schema`
+- `param_schema_version`
 - `meta`
 - `error_detail`
 

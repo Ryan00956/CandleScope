@@ -3,7 +3,7 @@
 Install Pyne Runtime from this repository:
 
 ```bash
-python -m pip install -e packages/pyne-runtime
+python -m pip install -e .[dev]
 ```
 
 Run a script from Python:
@@ -30,19 +30,19 @@ print(result.latest("Close"))
 Run a script from the command line:
 
 ```bash
-pyne run packages/pyne-runtime/examples/ma_cross.py --ohlcv packages/pyne-runtime/examples/sample_ohlcv.csv --out result.json
+pyne run examples/ma_cross.py --ohlcv examples/sample_ohlcv.csv --out result.json
 ```
 
 Override script inputs from the command line:
 
 ```bash
-pyne run packages/pyne-runtime/examples/ma_cross.py --ohlcv packages/pyne-runtime/examples/sample_ohlcv.csv --param Length=20
+pyne run examples/ma_cross.py --ohlcv examples/sample_ohlcv.csv --param Length=20
 ```
 
 Validate a script:
 
 ```bash
-pyne validate packages/pyne-runtime/examples/ma_cross.py
+pyne validate examples/ma_cross.py
 ```
 
 Inspect package metadata and schema:

@@ -20,6 +20,13 @@ Create it from Pandas:
 data = pn.from_pandas(df)
 ```
 
+Optional `time_close` data can be supplied through OHLCV dicts, CSV column maps,
+or Pandas column mapping:
+
+```python
+data = pn.from_pandas(df, time_close="close_time")
+```
+
 Methods:
 
 - `to_ohlcv()`
@@ -39,6 +46,7 @@ Column names can also be accessed with item syntax:
 
 ```python
 closes = data["close"]
+close_times = data["time_close"]
 first_bar = data[0]
 first_ten = data[:10]
 ```

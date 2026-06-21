@@ -1,0 +1,261 @@
+{
+  "cases": [
+    {
+      "name": "oca_cancel_sibling_has_no_commission",
+      "source": "pyne-defined deterministic strategy OCA cost replay semantics",
+      "script": "strategy(\"OCA Cancel Cost\", overlay=True, initial_capital=1000, slippage=1, mintick=0.1, commission_type=strategy.commission.cash_per_order, commission_value=0.5)\nstrategy.entry(\n    \"Breakout\",\n    strategy.long,\n    qty=1,\n    when=bar_index == 0,\n    stop=12,\n    oca_name=\"group\",\n    oca_type=strategy.oca.cancel,\n)\nstrategy.order(\n    \"Fade\",\n    strategy.short,\n    qty=1,\n    when=bar_index == 0,\n    limit=13,\n    oca_name=\"group\",\n    oca_type=strategy.oca.cancel,\n)\nstrategy.close_all(when=bar_index == 2, price=close)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.closedtrades.commission(0), \"Closed Commission\")\n",
+      "bars": [
+        {"time": 1, "open": 10, "high": 11, "low": 9, "close": 10, "volume": 100},
+        {"time": 2, "open": 11, "high": 12.5, "low": 10.5, "close": 12, "volume": 120},
+        {"time": 3, "open": 13, "high": 13.5, "low": 12.5, "close": 13, "volume": 140}
+      ],
+      "orders": [
+        {"time": 2, "id": "Breakout", "type": "entry", "side": "long", "qty": 1.0, "price": 12.1, "position_after": 1.0, "comment": "", "reason": "stop", "oca_name": "group", "oca_type": "cancel", "commission": 0.5},
+        {"time": 3, "id": "close_all", "type": "close_all", "side": "flat", "qty": 1.0, "price": 12.9, "position_after": 0.0, "comment": "", "commission": 0.5}
+      ],
+      "lifecycle": [
+        {
+          "id": "Breakout",
+          "type": "entry",
+          "status": "filled",
+          "phase": "pending_fill",
+          "submitted_time": 1,
+          "filled_time": 2,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "long",
+          "qty": 1.0,
+          "price": 12.1,
+          "position_after": 1.0,
+          "reason": "stop",
+          "comment": "",
+          "commission": 0.5,
+          "oca_name": "group",
+          "oca_type": "cancel",
+          "stop": 12.0,
+          "requested_qty": 1.0,
+          "filled_qty": 1.0
+        },
+        {
+          "id": "Fade",
+          "type": "order",
+          "status": "canceled",
+          "phase": "pending_canceled",
+          "submitted_time": 1,
+          "filled_time": null,
+          "canceled_time": 2,
+          "rejected_time": null,
+          "side": "short",
+          "qty": 1.0,
+          "price": 10.0,
+          "position_after": 0.0,
+          "comment": "",
+          "limit": 13.0,
+          "canceled_by": "Breakout"
+        },
+        {
+          "id": "close_all",
+          "type": "close_all",
+          "status": "filled",
+          "phase": "close_all_fill",
+          "submitted_time": 3,
+          "filled_time": 3,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "flat",
+          "qty": 1.0,
+          "price": 12.9,
+          "position_after": 0.0,
+          "comment": "",
+          "commission": 0.5,
+          "requested_qty": 1.0,
+          "filled_qty": 1.0,
+          "target_qty": 1.0
+        }
+      ],
+      "closedtrades": [
+        {
+          "entry_time": 2,
+          "exit_time": 3,
+          "entry_id": "Breakout",
+          "exit_id": "close_all",
+          "side": "long",
+          "qty": 1.0,
+          "entry_price": 12.1,
+          "exit_price": 12.9,
+          "profit": 0.8,
+          "commission": 1.0,
+          "net_profit": -0.2
+        }
+      ],
+      "opentrades": [],
+      "position": [0.0, 1.0, 0.0],
+      "equity": [1000.0, 999.4, 999.8],
+      "netprofit": [0.0, -0.5, -0.2],
+      "closed_commission": [1.0, 1.0, 1.0],
+      "summary": {
+        "initial_capital": 1000.0,
+        "currency": "",
+        "equity": 999.8,
+        "netprofit": -0.2,
+        "openprofit": 0.0,
+        "grossprofit": 0.8,
+        "grossloss": 0.0,
+        "commission": 1.0,
+        "backtest_fill_limits_assumption": 0,
+        "same_bar_fill_priority": "stop_first",
+        "intrabar_path": "same_bar_priority",
+        "margin_long": 0.0,
+        "margin_short": 0.0
+      },
+      "risk": {
+        "locked": false,
+        "max_drawdown": null,
+        "max_drawdown_type": "percent_of_equity",
+        "max_intraday_loss": null,
+        "max_intraday_loss_type": "percent_of_equity",
+        "max_position_size": null,
+        "max_intraday_filled_orders": null
+      }
+    },
+    {
+      "name": "oca_reduce_costs_use_reduced_fill_quantity",
+      "source": "pyne-defined deterministic strategy OCA cost replay semantics",
+      "script": "strategy(\"OCA Reduce Cost\", overlay=True, initial_capital=1000, slippage=1, mintick=0.1, commission_type=strategy.commission.cash_per_contract, commission_value=0.25)\nstrategy.entry(\n    \"First\",\n    strategy.long,\n    qty=1,\n    when=bar_index == 0,\n    stop=12,\n    oca_name=\"scale\",\n    oca_type=strategy.oca.reduce,\n)\nstrategy.order(\n    \"Second\",\n    strategy.long,\n    qty=2,\n    when=bar_index == 0,\n    stop=13,\n    oca_name=\"scale\",\n    oca_type=strategy.oca.reduce,\n)\nstrategy.close_all(when=bar_index == 3, price=close)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.closedtrades.commission(0), \"First Closed Commission\")\nplot(strategy.closedtrades.commission(1), \"Last Closed Commission\")\n",
+      "bars": [
+        {"time": 1, "open": 10, "high": 11, "low": 9, "close": 10, "volume": 100},
+        {"time": 2, "open": 11, "high": 12.5, "low": 10.5, "close": 12, "volume": 120},
+        {"time": 3, "open": 12.5, "high": 13.5, "low": 12, "close": 13, "volume": 140},
+        {"time": 4, "open": 14, "high": 14.5, "low": 13.5, "close": 14, "volume": 160}
+      ],
+      "orders": [
+        {"time": 2, "id": "First", "type": "entry", "side": "long", "qty": 1.0, "price": 12.1, "position_after": 1.0, "comment": "", "reason": "stop", "oca_name": "scale", "oca_type": "reduce", "commission": 0.25},
+        {"time": 3, "id": "Second", "type": "order", "side": "long", "qty": 1.0, "price": 13.1, "position_after": 2.0, "comment": "", "reason": "stop", "oca_name": "scale", "oca_type": "reduce", "commission": 0.25},
+        {"time": 4, "id": "close_all", "type": "close_all", "side": "flat", "qty": 2.0, "price": 13.9, "position_after": 0.0, "comment": "", "commission": 0.5}
+      ],
+      "lifecycle": [
+        {
+          "id": "First",
+          "type": "entry",
+          "status": "filled",
+          "phase": "pending_fill",
+          "submitted_time": 1,
+          "filled_time": 2,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "long",
+          "qty": 1.0,
+          "price": 12.1,
+          "position_after": 1.0,
+          "reason": "stop",
+          "comment": "",
+          "commission": 0.25,
+          "oca_name": "scale",
+          "oca_type": "reduce",
+          "stop": 12.0,
+          "requested_qty": 1.0,
+          "filled_qty": 1.0
+        },
+        {
+          "id": "Second",
+          "type": "order",
+          "status": "filled",
+          "phase": "pending_fill",
+          "submitted_time": 1,
+          "filled_time": 3,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "long",
+          "qty": 1.0,
+          "price": 13.1,
+          "position_after": 2.0,
+          "reason": "stop",
+          "comment": "",
+          "commission": 0.25,
+          "oca_name": "scale",
+          "oca_type": "reduce",
+          "stop": 13.0,
+          "requested_qty": 2.0,
+          "filled_qty": 1.0
+        },
+        {
+          "id": "close_all",
+          "type": "close_all",
+          "status": "filled",
+          "phase": "close_all_fill",
+          "submitted_time": 4,
+          "filled_time": 4,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "flat",
+          "qty": 2.0,
+          "price": 13.9,
+          "position_after": 0.0,
+          "comment": "",
+          "commission": 0.5,
+          "requested_qty": 2.0,
+          "filled_qty": 2.0,
+          "target_qty": 2.0
+        }
+      ],
+      "closedtrades": [
+        {
+          "entry_time": 2,
+          "exit_time": 4,
+          "entry_id": "First",
+          "exit_id": "close_all",
+          "side": "long",
+          "qty": 1.0,
+          "entry_price": 12.1,
+          "exit_price": 13.9,
+          "profit": 1.8,
+          "commission": 0.5,
+          "net_profit": 1.3
+        },
+        {
+          "entry_time": 3,
+          "exit_time": 4,
+          "entry_id": "Second",
+          "exit_id": "close_all",
+          "side": "long",
+          "qty": 1.0,
+          "entry_price": 13.1,
+          "exit_price": 13.9,
+          "profit": 0.8,
+          "commission": 0.5,
+          "net_profit": 0.3
+        }
+      ],
+      "opentrades": [],
+      "position": [0.0, 1.0, 2.0, 0.0],
+      "equity": [1000.0, 999.65, 1000.3, 1001.6],
+      "netprofit": [0.0, -0.25, -0.5, 1.6],
+      "first_closed_commission": [0.5, 0.5, 0.5, 0.5],
+      "last_closed_commission": [0.5, 0.5, 0.5, 0.5],
+      "summary": {
+        "initial_capital": 1000.0,
+        "currency": "",
+        "equity": 1001.6,
+        "netprofit": 1.6,
+        "openprofit": 0.0,
+        "grossprofit": 2.6,
+        "grossloss": 0.0,
+        "commission": 1.0,
+        "backtest_fill_limits_assumption": 0,
+        "same_bar_fill_priority": "stop_first",
+        "intrabar_path": "same_bar_priority",
+        "margin_long": 0.0,
+        "margin_short": 0.0
+      },
+      "risk": {
+        "locked": false,
+        "max_drawdown": null,
+        "max_drawdown_type": "percent_of_equity",
+        "max_intraday_loss": null,
+        "max_intraday_loss_type": "percent_of_equity",
+        "max_position_size": null,
+        "max_intraday_filled_orders": null
+      }
+    }
+  ]
+}

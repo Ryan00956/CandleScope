@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-DOCS_BASE_URL = "https://github.com/CandleScope/CandleScope/tree/main/packages/pyne-runtime/docs"
+DOCS_BASE_URL = "https://github.com/Ryan00956/pyne-runtime/tree/main/docs"
 
 
 ERROR_HINTS: dict[str, str] = {
@@ -30,12 +30,20 @@ ERROR_HINTS: dict[str, str] = {
     "PYNE_INVALID_OHLCV": (
         "Provide at least one OHLCV bar with time, open, high, low, close, and volume."
     ),
+    "PYNE_INVALID_SYMBOL": (
+        "Check the requested symbol or use ignore_invalid_symbol=True when missing symbols are expected."
+    ),
     "PYNE_INVALID_PARAM": "Check script input declarations and provided params.",
+    "PYNE_MIGRATION_HINT": "Use Pyne's Python-native alternatives for Pine-specific syntax patterns.",
     "PYNE_LENGTH_MISMATCH": "Make sure custom arrays have the same length as the OHLCV input.",
     "PYNE_UNSUPPORTED_FEATURE": "This Pyne feature is not supported by the current runtime.",
     "PYNE_PROCESS_FAILED": (
         "The worker process exited unexpectedly. Check third-party imports, native "
         "extensions, and resource usage."
+    ),
+    "PYNE_PROCESS_SERIALIZATION_ERROR": (
+        "Process mode can only receive pickle-serializable scripts, data, params, "
+        "settings, and host-provided objects such as data providers."
     ),
     "PYNE_SECURITY_ERROR": "The selected Pyne security policy rejected the script.",
 }
@@ -100,7 +108,7 @@ def error_docs_url(code: str) -> str | None:
 
 
 def classify_security_error(message: str) -> str:
-    if "output series" in message or "output points" in message:
+    if "output series" in message or "output points" in message or "Drawing object limit" in message:
         return "PYNE_OUTPUT_LIMIT_EXCEEDED"
     if "Import" in message or "import" in message:
         return "PYNE_IMPORT_BLOCKED"

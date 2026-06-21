@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -44,25 +45,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         try:
             params = _load_params(args.param, args.params_json)
-        except ValueError as exc:
-            parser.error(str(exc))
-
-        data = read_ohlcv(args.ohlcv)
-        result = run(
-            Path(args.script),
-            data,
-            params=params,
-            security_mode=args.security_mode,
-            executor_mode=args.executor_mode,
-        )
-        payload = result.to_dict()
-        if args.out:
-            Path(args.out).write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            data = read_ohlcv(args.ohlcv)
+            result = run(
+                Path(args.script),
+                data,
+                params=params,
+                security_mode=args.security_mode,
+                executor_mode=args.executor_mode,
             )
-        else:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            payload = result.to_dict()
+            if args.out:
+                Path(args.out).write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            else:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            return _emit_cli_error("PYNE_CLI_INPUT_ERROR", str(exc))
         return 0 if result.ok else 1
 
     if args.command == "validate":
@@ -118,6 +118,23 @@ def _parse_param_value(value: str) -> Any:
         return json.loads(raw)
     except json.JSONDecodeError:
         return value
+
+
+def _emit_cli_error(code: str, message: str) -> int:
+    print(
+        json.dumps(
+            {
+                "ok": False,
+                "error": {
+                    "code": code,
+                    "message": message,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        file=sys.stderr,
+    )
+    return 2
 
 
 if __name__ == "__main__":  # pragma: no cover

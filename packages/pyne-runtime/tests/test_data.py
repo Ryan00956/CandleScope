@@ -28,6 +28,31 @@ def test_pyne_data_requires_ohlcv_fields() -> None:
         pn.PyneData.from_ohlcv([{"time": 1, "close": 2}])
 
 
+def test_pyne_data_rejects_duplicate_or_non_monotonic_times() -> None:
+    bars = [
+        {"time": 1, "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": 100},
+        {"time": 1, "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": 100},
+    ]
+
+    with pytest.raises(ValueError, match="unique"):
+        pn.PyneData.from_ohlcv(bars)
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        pn.PyneData.from_ohlcv([bars[0], {**bars[1], "time": 0}])
+
+
+def test_pyne_data_rejects_invalid_ohlc_relationships() -> None:
+    with pytest.raises(ValueError, match="high must cover"):
+        pn.PyneData.from_ohlcv([
+            {"time": 1, "open": 3, "high": 2, "low": 1, "close": 1.5, "volume": 100},
+        ])
+
+    with pytest.raises(ValueError, match="volume"):
+        pn.PyneData.from_ohlcv([
+            {"time": 1, "open": 1, "high": 2, "low": 1, "close": 1.5, "volume": -1},
+        ])
+
+
 def test_pyne_data_column_and_row_helpers() -> None:
     data = pn.PyneData.from_ohlcv([
         {"time": 1, "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 100},

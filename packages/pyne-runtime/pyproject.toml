@@ -28,11 +28,18 @@ dependencies = [
   "numpy>=1.26",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Ryan00956/pyne-runtime"
+Repository = "https://github.com/Ryan00956/pyne-runtime"
+Documentation = "https://github.com/Ryan00956/pyne-runtime/tree/main/docs"
+Issues = "https://github.com/Ryan00956/pyne-runtime/issues"
+
 [project.optional-dependencies]
 pandas = ["pandas>=2"]
 plot = ["matplotlib>=3"]
 dev = [
   "build>=1",
+  "hatchling>=1.25",
   "pytest>=7",
   "ruff>=0.5",
   "twine>=5",

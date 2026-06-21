@@ -1,0 +1,408 @@
+{
+  "cases": [
+    {
+      "name": "bracket_limit_exit",
+      "source": "Pyne-defined bracket-exit strategy fixture with a Pine-equivalent scaffold for external TradingView export comparison.",
+      "script": "strategy(\"Pine Equivalent Bracket Limit\", overlay=True, initial_capital=1000, pyramiding=0, process_orders_on_close=True)\nstrategy.entry(\"Long\", strategy.long, qty=1, when=bar_index == 0, price=close)\nstrategy.exit(\"Bracket\", from_entry=\"Long\", stop=9, limit=12)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\n",
+      "pine_equivalent": "//@version=5\nstrategy(\"Pine Equivalent Bracket Limit\", overlay=true, initial_capital=1000, pyramiding=0, process_orders_on_close=true)\nif bar_index == 0\n    strategy.entry(\"Long\", strategy.long, qty=1)\nstrategy.exit(\"Bracket\", from_entry=\"Long\", stop=9, limit=12)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\n",
+      "pine_equivalent_notes": [
+        "The Pyne entry pins price=close to match process_orders_on_close-style Pine fills.",
+        "The second bar touches only the limit side of the bracket, avoiding same-bar stop/limit ambiguity."
+      ],
+      "external_capture": {
+        "provider": "tradingview",
+        "status": "captured",
+        "assertion": "parity",
+        "tolerance": 1e-09,
+        "values": {
+          "Position": [
+            0.0,
+            0.0
+          ],
+          "Equity": [
+            1000.0,
+            1000.0
+          ],
+          "Net Profit": [
+            0.0,
+            0.0
+          ],
+          "Open Profit": [
+            0.0,
+            0.0
+          ],
+          "Closed Trades": [
+            0.0,
+            1.0
+          ]
+        },
+        "bars": [
+          {
+            "time": 1779955200,
+            "open": 73467.0,
+            "high": 73474.8,
+            "low": 73309.9,
+            "close": 73334.8,
+            "volume": 385.037
+          },
+          {
+            "time": 1779955380,
+            "open": 73334.8,
+            "high": 73358.5,
+            "low": 73317.1,
+            "close": 73355.0,
+            "volume": 195.774
+          }
+        ],
+        "notes": [
+          "TradingView export 2026-05-28, BINANCE:BTCUSDT.P, 3m, capture-window export"
+        ]
+      },
+      "bars": [
+        {
+          "time": 1,
+          "open": 10,
+          "high": 10.5,
+          "low": 9.5,
+          "close": 10,
+          "volume": 100
+        },
+        {
+          "time": 2,
+          "open": 11,
+          "high": 12.2,
+          "low": 10.8,
+          "close": 12,
+          "volume": 100
+        }
+      ],
+      "orders": [
+        {
+          "time": 1,
+          "id": "Long",
+          "type": "entry",
+          "side": "long",
+          "qty": 1.0,
+          "price": 10.0,
+          "position_after": 1.0,
+          "comment": ""
+        },
+        {
+          "time": 2,
+          "id": "Bracket",
+          "from_entry": "Long",
+          "type": "exit",
+          "side": "flat",
+          "qty": 1.0,
+          "price": 12.0,
+          "position_after": 0.0,
+          "reason": "limit",
+          "comment": ""
+        }
+      ],
+      "lifecycle": [
+        {
+          "id": "Long",
+          "type": "entry",
+          "status": "filled",
+          "phase": "market_fill",
+          "submitted_time": 1,
+          "filled_time": 1,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "long",
+          "qty": 1.0,
+          "price": 10.0,
+          "position_after": 1.0,
+          "comment": "",
+          "requested_qty": 1.0,
+          "filled_qty": 1.0
+        },
+        {
+          "id": "Bracket",
+          "type": "exit",
+          "status": "filled",
+          "phase": "exit_fill",
+          "submitted_time": 2,
+          "filled_time": 2,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "flat",
+          "qty": 1.0,
+          "price": 12.0,
+          "position_after": 0.0,
+          "from_entry": "Long",
+          "reason": "limit",
+          "comment": "",
+          "requested_qty": 1.0,
+          "filled_qty": 1.0,
+          "target_qty": 1.0
+        }
+      ],
+      "closedtrades": [
+        {
+          "entry_time": 1,
+          "exit_time": 2,
+          "entry_id": "Long",
+          "exit_id": "Bracket",
+          "side": "long",
+          "qty": 1.0,
+          "entry_price": 10.0,
+          "exit_price": 12.0,
+          "profit": 2.0,
+          "commission": 0.0,
+          "net_profit": 2.0
+        }
+      ],
+      "opentrades": [],
+      "values": {
+        "Position": [
+          0.0,
+          0.0
+        ],
+        "Equity": [
+          1000.0,
+          1002.0
+        ],
+        "Net Profit": [
+          0.0,
+          2.0
+        ],
+        "Open Profit": [
+          0.0,
+          0.0
+        ],
+        "Closed Trades": [
+          0.0,
+          1.0
+        ]
+      },
+      "summary": {
+        "initial_capital": 1000.0,
+        "currency": "",
+        "equity": 1002.0,
+        "netprofit": 2.0,
+        "openprofit": 0.0,
+        "grossprofit": 2.0,
+        "grossloss": 0.0,
+        "commission": 0.0,
+        "backtest_fill_limits_assumption": 0,
+        "same_bar_fill_priority": "stop_first",
+        "intrabar_path": "same_bar_priority",
+        "margin_long": 0.0,
+        "margin_short": 0.0
+      },
+      "risk": {
+        "locked": false,
+        "max_drawdown": null,
+        "max_drawdown_type": "percent_of_equity",
+        "max_intraday_loss": null,
+        "max_intraday_loss_type": "percent_of_equity",
+        "max_position_size": null,
+        "max_intraday_filled_orders": null
+      }
+    },
+    {
+      "name": "bracket_stop_exit",
+      "source": "Pyne-defined bracket-exit strategy fixture with a Pine-equivalent scaffold for external TradingView export comparison.",
+      "script": "strategy(\"Pine Equivalent Bracket Stop\", overlay=True, initial_capital=1000, pyramiding=0, process_orders_on_close=True)\nstrategy.entry(\"Long\", strategy.long, qty=1, when=bar_index == 0, price=close)\nstrategy.exit(\"Bracket\", from_entry=\"Long\", stop=9, limit=12)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\n",
+      "pine_equivalent": "//@version=5\nstrategy(\"Pine Equivalent Bracket Stop\", overlay=true, initial_capital=1000, pyramiding=0, process_orders_on_close=true)\nif bar_index == 0\n    strategy.entry(\"Long\", strategy.long, qty=1)\nstrategy.exit(\"Bracket\", from_entry=\"Long\", stop=9, limit=12)\nplot(strategy.position_size, \"Position\")\nplot(strategy.equity, \"Equity\")\nplot(strategy.netprofit, \"Net Profit\")\nplot(strategy.openprofit, \"Open Profit\")\nplot(strategy.closedtrades, \"Closed Trades\")\n",
+      "pine_equivalent_notes": [
+        "The Pyne entry pins price=close to match process_orders_on_close-style Pine fills.",
+        "The second bar touches only the stop side of the bracket, avoiding same-bar stop/limit ambiguity."
+      ],
+      "external_capture": {
+        "provider": "tradingview",
+        "status": "captured",
+        "assertion": "parity",
+        "tolerance": 1e-09,
+        "values": {
+          "Position": [
+            0.0,
+            0.0
+          ],
+          "Equity": [
+            1000.0,
+            1000.0
+          ],
+          "Net Profit": [
+            0.0,
+            0.0
+          ],
+          "Open Profit": [
+            0.0,
+            0.0
+          ],
+          "Closed Trades": [
+            0.0,
+            1.0
+          ]
+        },
+        "bars": [
+          {
+            "time": 1779956820,
+            "open": 73258.3,
+            "high": 73260.3,
+            "low": 73189.2,
+            "close": 73240.8,
+            "volume": 210.97
+          },
+          {
+            "time": 1779957000,
+            "open": 73240.8,
+            "high": 73267.3,
+            "low": 73167.4,
+            "close": 73224.9,
+            "volume": 357.214
+          }
+        ],
+        "notes": [
+          "TradingView export 2026-05-28, BINANCE:BTCUSDT.P, 3m, capture-window export"
+        ]
+      },
+      "bars": [
+        {
+          "time": 1,
+          "open": 10,
+          "high": 10.5,
+          "low": 9.5,
+          "close": 10,
+          "volume": 100
+        },
+        {
+          "time": 2,
+          "open": 9.5,
+          "high": 9.8,
+          "low": 8.8,
+          "close": 9,
+          "volume": 100
+        }
+      ],
+      "orders": [
+        {
+          "time": 1,
+          "id": "Long",
+          "type": "entry",
+          "side": "long",
+          "qty": 1.0,
+          "price": 10.0,
+          "position_after": 1.0,
+          "comment": ""
+        },
+        {
+          "time": 2,
+          "id": "Bracket",
+          "from_entry": "Long",
+          "type": "exit",
+          "side": "flat",
+          "qty": 1.0,
+          "price": 9.0,
+          "position_after": 0.0,
+          "reason": "stop",
+          "comment": ""
+        }
+      ],
+      "lifecycle": [
+        {
+          "id": "Long",
+          "type": "entry",
+          "status": "filled",
+          "phase": "market_fill",
+          "submitted_time": 1,
+          "filled_time": 1,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "long",
+          "qty": 1.0,
+          "price": 10.0,
+          "position_after": 1.0,
+          "comment": "",
+          "requested_qty": 1.0,
+          "filled_qty": 1.0
+        },
+        {
+          "id": "Bracket",
+          "type": "exit",
+          "status": "filled",
+          "phase": "exit_fill",
+          "submitted_time": 2,
+          "filled_time": 2,
+          "canceled_time": null,
+          "rejected_time": null,
+          "side": "flat",
+          "qty": 1.0,
+          "price": 9.0,
+          "position_after": 0.0,
+          "from_entry": "Long",
+          "reason": "stop",
+          "comment": "",
+          "requested_qty": 1.0,
+          "filled_qty": 1.0,
+          "target_qty": 1.0
+        }
+      ],
+      "closedtrades": [
+        {
+          "entry_time": 1,
+          "exit_time": 2,
+          "entry_id": "Long",
+          "exit_id": "Bracket",
+          "side": "long",
+          "qty": 1.0,
+          "entry_price": 10.0,
+          "exit_price": 9.0,
+          "profit": -1.0,
+          "commission": 0.0,
+          "net_profit": -1.0
+        }
+      ],
+      "opentrades": [],
+      "values": {
+        "Position": [
+          0.0,
+          0.0
+        ],
+        "Equity": [
+          1000.0,
+          999.0
+        ],
+        "Net Profit": [
+          0.0,
+          -1.0
+        ],
+        "Open Profit": [
+          0.0,
+          0.0
+        ],
+        "Closed Trades": [
+          0.0,
+          1.0
+        ]
+      },
+      "summary": {
+        "initial_capital": 1000.0,
+        "currency": "",
+        "equity": 999.0,
+        "netprofit": -1.0,
+        "openprofit": 0.0,
+        "grossprofit": 0.0,
+        "grossloss": -1.0,
+        "commission": 0.0,
+        "backtest_fill_limits_assumption": 0,
+        "same_bar_fill_priority": "stop_first",
+        "intrabar_path": "same_bar_priority",
+        "margin_long": 0.0,
+        "margin_short": 0.0
+      },
+      "risk": {
+        "locked": false,
+        "max_drawdown": null,
+        "max_drawdown_type": "percent_of_equity",
+        "max_intraday_loss": null,
+        "max_intraday_loss_type": "percent_of_equity",
+        "max_position_size": null,
+        "max_intraday_filled_orders": null
+      }
+    }
+  ]
+}

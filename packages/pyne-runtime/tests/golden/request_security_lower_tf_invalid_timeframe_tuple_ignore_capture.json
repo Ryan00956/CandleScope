@@ -1,0 +1,1219 @@
+{
+  "name": "request_security_lower_tf_invalid_timeframe_tuple_ignore_capture",
+  "source": "Pyne-defined request.security_lower_tf invalid-timeframe tuple ignore capture fixture",
+  "chart_bars": [
+    {
+      "time": 64800,
+      "open": 100,
+      "high": 101,
+      "low": 99,
+      "close": 100,
+      "volume": 1000
+    },
+    {
+      "time": 68400,
+      "open": 101,
+      "high": 102,
+      "low": 100,
+      "close": 101,
+      "volume": 1010
+    },
+    {
+      "time": 72000,
+      "open": 102,
+      "high": 103,
+      "low": 101,
+      "close": 102,
+      "volume": 1020
+    },
+    {
+      "time": 75600,
+      "open": 103,
+      "high": 104,
+      "low": 102,
+      "close": 103,
+      "volume": 1030
+    },
+    {
+      "time": 79200,
+      "open": 104,
+      "high": 105,
+      "low": 103,
+      "close": 104,
+      "volume": 1040
+    },
+    {
+      "time": 82800,
+      "open": 105,
+      "high": 106,
+      "low": 104,
+      "close": 105,
+      "volume": 1050
+    },
+    {
+      "time": 86400,
+      "open": 106,
+      "high": 107,
+      "low": 105,
+      "close": 106,
+      "volume": 1060
+    },
+    {
+      "time": 90000,
+      "open": 107,
+      "high": 108,
+      "low": 106,
+      "close": 107,
+      "volume": 1070
+    },
+    {
+      "time": 93600,
+      "open": 108,
+      "high": 109,
+      "low": 107,
+      "close": 108,
+      "volume": 1080
+    },
+    {
+      "time": 97200,
+      "open": 109,
+      "high": 110,
+      "low": 108,
+      "close": 109,
+      "volume": 1090
+    },
+    {
+      "time": 100800,
+      "open": 110,
+      "high": 111,
+      "low": 109,
+      "close": 110,
+      "volume": 1100
+    },
+    {
+      "time": 104400,
+      "open": 111,
+      "high": 112,
+      "low": 110,
+      "close": 111,
+      "volume": 1110
+    }
+  ],
+  "provider_bars": [],
+  "script": "indicator(\"Request Lower TF Invalid Timeframe Tuple Ignore Capture\", overlay=True)\ninvalid_open, invalid_close = request.security_lower_tf(\n    \"BTCUSDT\",\n    \"240\",\n    (\"open\", \"close\"),\n    ignore_invalid_timeframe=True,\n)\nplot(invalid_open.size(), \"Invalid TF Tuple Open Count\")\nplot(invalid_close.size(), \"Invalid TF Tuple Close Count\")\nplot(invalid_open.first(default=-111), \"Invalid TF Tuple Open First\")\nplot(invalid_close.first(default=-222), \"Invalid TF Tuple Close First\")\nplot(invalid_open.last(default=-333), \"Invalid TF Tuple Open Last\")\nplot(invalid_close.last(default=-444), \"Invalid TF Tuple Close Last\")\nplot(invalid_open.sum(default=0), \"Invalid TF Tuple Open Sum\")\nplot(invalid_close.sum(default=0), \"Invalid TF Tuple Close Sum\")\nplot(invalid_open.size() == 0, \"Invalid TF Tuple Open Is Empty\")\nplot(invalid_close.size() == 0, \"Invalid TF Tuple Close Is Empty\")\n",
+  "pine_script": "//@version=5\n_pyne_capture_bars = 12\n_pyne_capture_use_last_bars = input.bool(true, \"Pyne capture: use last chart bars\")\n_pyne_capture_start_time = input.int(1704067200000, \"Pyne capture: start time (ms)\")\n_pyne_capture_start_hit = time >= _pyne_capture_start_time and (na(time[1]) or time[1] < _pyne_capture_start_time)\n_pyne_capture_from_time = ta.barssince(_pyne_capture_start_hit)\n_pyne_capture_from_last = bar_index - (last_bar_index - _pyne_capture_bars)\n_pyne_capture_index = _pyne_capture_use_last_bars ? _pyne_capture_from_last : _pyne_capture_from_time\n_pyne_capture_active = _pyne_capture_index >= 0 and _pyne_capture_index < _pyne_capture_bars\n_pyne_ltf_size(array<float> arr) =>\n    not na(arr) ? array.size(arr) : 0\n_pyne_ltf_first(array<float> arr, float fallback) =>\n    _pyne_ltf_size(arr) > 0 ? array.get(arr, 0) : fallback\n_pyne_ltf_last(array<float> arr, float fallback) =>\n    _pyne_ltf_size(arr) > 0 ? array.get(arr, array.size(arr) - 1) : fallback\n_pyne_ltf_sum(array<float> arr, float fallback) =>\n    _pyne_ltf_size(arr) > 0 ? array.sum(arr) : fallback\n\nindicator(\"Pyne Request Capture - Lower TF Invalid Timeframe Tuple Ignore\", overlay=true)\nplot(_pyne_capture_active ? _pyne_capture_index : na, \"Pyne Capture Index\")\n\n[_invalid_open, _invalid_close] = request.security_lower_tf(syminfo.tickerid, \"240\", [open, close], ignore_invalid_timeframe=true)\nplot(_pyne_capture_active ? _pyne_ltf_size(_invalid_open) : na, \"Invalid TF Tuple Open Count\")\nplot(_pyne_capture_active ? _pyne_ltf_size(_invalid_close) : na, \"Invalid TF Tuple Close Count\")\nplot(_pyne_capture_active ? _pyne_ltf_first(_invalid_open, -111) : na, \"Invalid TF Tuple Open First\")\nplot(_pyne_capture_active ? _pyne_ltf_first(_invalid_close, -222) : na, \"Invalid TF Tuple Close First\")\nplot(_pyne_capture_active ? _pyne_ltf_last(_invalid_open, -333) : na, \"Invalid TF Tuple Open Last\")\nplot(_pyne_capture_active ? _pyne_ltf_last(_invalid_close, -444) : na, \"Invalid TF Tuple Close Last\")\nplot(_pyne_capture_active ? _pyne_ltf_sum(_invalid_open, 0) : na, \"Invalid TF Tuple Open Sum\")\nplot(_pyne_capture_active ? _pyne_ltf_sum(_invalid_close, 0) : na, \"Invalid TF Tuple Close Sum\")\nplot(_pyne_capture_active ? (_pyne_ltf_size(_invalid_open) == 0 ? 1 : 0) : na, \"Invalid TF Tuple Open Is Empty\")\nplot(_pyne_capture_active ? (_pyne_ltf_size(_invalid_close) == 0 ? 1 : 0) : na, \"Invalid TF Tuple Close Is Empty\")\n",
+  "expected_provider_calls": [],
+  "expected_series": {
+    "Invalid TF Tuple Open Count": [
+      {
+        "time": 64800,
+        "value": 0.0
+      },
+      {
+        "time": 68400,
+        "value": 0.0
+      },
+      {
+        "time": 72000,
+        "value": 0.0
+      },
+      {
+        "time": 75600,
+        "value": 0.0
+      },
+      {
+        "time": 79200,
+        "value": 0.0
+      },
+      {
+        "time": 82800,
+        "value": 0.0
+      },
+      {
+        "time": 86400,
+        "value": 0.0
+      },
+      {
+        "time": 90000,
+        "value": 0.0
+      },
+      {
+        "time": 93600,
+        "value": 0.0
+      },
+      {
+        "time": 97200,
+        "value": 0.0
+      },
+      {
+        "time": 100800,
+        "value": 0.0
+      },
+      {
+        "time": 104400,
+        "value": 0.0
+      }
+    ],
+    "Invalid TF Tuple Close Count": [
+      {
+        "time": 64800,
+        "value": 0.0
+      },
+      {
+        "time": 68400,
+        "value": 0.0
+      },
+      {
+        "time": 72000,
+        "value": 0.0
+      },
+      {
+        "time": 75600,
+        "value": 0.0
+      },
+      {
+        "time": 79200,
+        "value": 0.0
+      },
+      {
+        "time": 82800,
+        "value": 0.0
+      },
+      {
+        "time": 86400,
+        "value": 0.0
+      },
+      {
+        "time": 90000,
+        "value": 0.0
+      },
+      {
+        "time": 93600,
+        "value": 0.0
+      },
+      {
+        "time": 97200,
+        "value": 0.0
+      },
+      {
+        "time": 100800,
+        "value": 0.0
+      },
+      {
+        "time": 104400,
+        "value": 0.0
+      }
+    ],
+    "Invalid TF Tuple Open First": [
+      {
+        "time": 64800,
+        "value": -111.0
+      },
+      {
+        "time": 68400,
+        "value": -111.0
+      },
+      {
+        "time": 72000,
+        "value": -111.0
+      },
+      {
+        "time": 75600,
+        "value": -111.0
+      },
+      {
+        "time": 79200,
+        "value": -111.0
+      },
+      {
+        "time": 82800,
+        "value": -111.0
+      },
+      {
+        "time": 86400,
+        "value": -111.0
+      },
+      {
+        "time": 90000,
+        "value": -111.0
+      },
+      {
+        "time": 93600,
+        "value": -111.0
+      },
+      {
+        "time": 97200,
+        "value": -111.0
+      },
+      {
+        "time": 100800,
+        "value": -111.0
+      },
+      {
+        "time": 104400,
+        "value": -111.0
+      }
+    ],
+    "Invalid TF Tuple Close First": [
+      {
+        "time": 64800,
+        "value": -222.0
+      },
+      {
+        "time": 68400,
+        "value": -222.0
+      },
+      {
+        "time": 72000,
+        "value": -222.0
+      },
+      {
+        "time": 75600,
+        "value": -222.0
+      },
+      {
+        "time": 79200,
+        "value": -222.0
+      },
+      {
+        "time": 82800,
+        "value": -222.0
+      },
+      {
+        "time": 86400,
+        "value": -222.0
+      },
+      {
+        "time": 90000,
+        "value": -222.0
+      },
+      {
+        "time": 93600,
+        "value": -222.0
+      },
+      {
+        "time": 97200,
+        "value": -222.0
+      },
+      {
+        "time": 100800,
+        "value": -222.0
+      },
+      {
+        "time": 104400,
+        "value": -222.0
+      }
+    ],
+    "Invalid TF Tuple Open Last": [
+      {
+        "time": 64800,
+        "value": -333.0
+      },
+      {
+        "time": 68400,
+        "value": -333.0
+      },
+      {
+        "time": 72000,
+        "value": -333.0
+      },
+      {
+        "time": 75600,
+        "value": -333.0
+      },
+      {
+        "time": 79200,
+        "value": -333.0
+      },
+      {
+        "time": 82800,
+        "value": -333.0
+      },
+      {
+        "time": 86400,
+        "value": -333.0
+      },
+      {
+        "time": 90000,
+        "value": -333.0
+      },
+      {
+        "time": 93600,
+        "value": -333.0
+      },
+      {
+        "time": 97200,
+        "value": -333.0
+      },
+      {
+        "time": 100800,
+        "value": -333.0
+      },
+      {
+        "time": 104400,
+        "value": -333.0
+      }
+    ],
+    "Invalid TF Tuple Close Last": [
+      {
+        "time": 64800,
+        "value": -444.0
+      },
+      {
+        "time": 68400,
+        "value": -444.0
+      },
+      {
+        "time": 72000,
+        "value": -444.0
+      },
+      {
+        "time": 75600,
+        "value": -444.0
+      },
+      {
+        "time": 79200,
+        "value": -444.0
+      },
+      {
+        "time": 82800,
+        "value": -444.0
+      },
+      {
+        "time": 86400,
+        "value": -444.0
+      },
+      {
+        "time": 90000,
+        "value": -444.0
+      },
+      {
+        "time": 93600,
+        "value": -444.0
+      },
+      {
+        "time": 97200,
+        "value": -444.0
+      },
+      {
+        "time": 100800,
+        "value": -444.0
+      },
+      {
+        "time": 104400,
+        "value": -444.0
+      }
+    ],
+    "Invalid TF Tuple Open Sum": [
+      {
+        "time": 64800,
+        "value": 0.0
+      },
+      {
+        "time": 68400,
+        "value": 0.0
+      },
+      {
+        "time": 72000,
+        "value": 0.0
+      },
+      {
+        "time": 75600,
+        "value": 0.0
+      },
+      {
+        "time": 79200,
+        "value": 0.0
+      },
+      {
+        "time": 82800,
+        "value": 0.0
+      },
+      {
+        "time": 86400,
+        "value": 0.0
+      },
+      {
+        "time": 90000,
+        "value": 0.0
+      },
+      {
+        "time": 93600,
+        "value": 0.0
+      },
+      {
+        "time": 97200,
+        "value": 0.0
+      },
+      {
+        "time": 100800,
+        "value": 0.0
+      },
+      {
+        "time": 104400,
+        "value": 0.0
+      }
+    ],
+    "Invalid TF Tuple Close Sum": [
+      {
+        "time": 64800,
+        "value": 0.0
+      },
+      {
+        "time": 68400,
+        "value": 0.0
+      },
+      {
+        "time": 72000,
+        "value": 0.0
+      },
+      {
+        "time": 75600,
+        "value": 0.0
+      },
+      {
+        "time": 79200,
+        "value": 0.0
+      },
+      {
+        "time": 82800,
+        "value": 0.0
+      },
+      {
+        "time": 86400,
+        "value": 0.0
+      },
+      {
+        "time": 90000,
+        "value": 0.0
+      },
+      {
+        "time": 93600,
+        "value": 0.0
+      },
+      {
+        "time": 97200,
+        "value": 0.0
+      },
+      {
+        "time": 100800,
+        "value": 0.0
+      },
+      {
+        "time": 104400,
+        "value": 0.0
+      }
+    ],
+    "Invalid TF Tuple Open Is Empty": [
+      {
+        "time": 64800,
+        "value": 1.0
+      },
+      {
+        "time": 68400,
+        "value": 1.0
+      },
+      {
+        "time": 72000,
+        "value": 1.0
+      },
+      {
+        "time": 75600,
+        "value": 1.0
+      },
+      {
+        "time": 79200,
+        "value": 1.0
+      },
+      {
+        "time": 82800,
+        "value": 1.0
+      },
+      {
+        "time": 86400,
+        "value": 1.0
+      },
+      {
+        "time": 90000,
+        "value": 1.0
+      },
+      {
+        "time": 93600,
+        "value": 1.0
+      },
+      {
+        "time": 97200,
+        "value": 1.0
+      },
+      {
+        "time": 100800,
+        "value": 1.0
+      },
+      {
+        "time": 104400,
+        "value": 1.0
+      }
+    ],
+    "Invalid TF Tuple Close Is Empty": [
+      {
+        "time": 64800,
+        "value": 1.0
+      },
+      {
+        "time": 68400,
+        "value": 1.0
+      },
+      {
+        "time": 72000,
+        "value": 1.0
+      },
+      {
+        "time": 75600,
+        "value": 1.0
+      },
+      {
+        "time": 79200,
+        "value": 1.0
+      },
+      {
+        "time": 82800,
+        "value": 1.0
+      },
+      {
+        "time": 86400,
+        "value": 1.0
+      },
+      {
+        "time": 90000,
+        "value": 1.0
+      },
+      {
+        "time": 93600,
+        "value": 1.0
+      },
+      {
+        "time": 97200,
+        "value": 1.0
+      },
+      {
+        "time": 100800,
+        "value": 1.0
+      },
+      {
+        "time": 104400,
+        "value": 1.0
+      }
+    ]
+  },
+  "external_capture": {
+    "provider": "tradingview",
+    "status": "captured",
+    "assertion": "parity",
+    "tolerance": 1e-09,
+    "series": {
+      "Invalid TF Tuple Open Count": [
+        {
+          "time": 1780682400,
+          "value": 0.0
+        },
+        {
+          "time": 1780686000,
+          "value": 0.0
+        },
+        {
+          "time": 1780689600,
+          "value": 0.0
+        },
+        {
+          "time": 1780693200,
+          "value": 0.0
+        },
+        {
+          "time": 1780696800,
+          "value": 0.0
+        },
+        {
+          "time": 1780700400,
+          "value": 0.0
+        },
+        {
+          "time": 1780704000,
+          "value": 0.0
+        },
+        {
+          "time": 1780707600,
+          "value": 0.0
+        },
+        {
+          "time": 1780711200,
+          "value": 0.0
+        },
+        {
+          "time": 1780714800,
+          "value": 0.0
+        },
+        {
+          "time": 1780718400,
+          "value": 0.0
+        },
+        {
+          "time": 1780722000,
+          "value": 0.0
+        }
+      ],
+      "Invalid TF Tuple Close Count": [
+        {
+          "time": 1780682400,
+          "value": 0.0
+        },
+        {
+          "time": 1780686000,
+          "value": 0.0
+        },
+        {
+          "time": 1780689600,
+          "value": 0.0
+        },
+        {
+          "time": 1780693200,
+          "value": 0.0
+        },
+        {
+          "time": 1780696800,
+          "value": 0.0
+        },
+        {
+          "time": 1780700400,
+          "value": 0.0
+        },
+        {
+          "time": 1780704000,
+          "value": 0.0
+        },
+        {
+          "time": 1780707600,
+          "value": 0.0
+        },
+        {
+          "time": 1780711200,
+          "value": 0.0
+        },
+        {
+          "time": 1780714800,
+          "value": 0.0
+        },
+        {
+          "time": 1780718400,
+          "value": 0.0
+        },
+        {
+          "time": 1780722000,
+          "value": 0.0
+        }
+      ],
+      "Invalid TF Tuple Open First": [
+        {
+          "time": 1780682400,
+          "value": -111.0
+        },
+        {
+          "time": 1780686000,
+          "value": -111.0
+        },
+        {
+          "time": 1780689600,
+          "value": -111.0
+        },
+        {
+          "time": 1780693200,
+          "value": -111.0
+        },
+        {
+          "time": 1780696800,
+          "value": -111.0
+        },
+        {
+          "time": 1780700400,
+          "value": -111.0
+        },
+        {
+          "time": 1780704000,
+          "value": -111.0
+        },
+        {
+          "time": 1780707600,
+          "value": -111.0
+        },
+        {
+          "time": 1780711200,
+          "value": -111.0
+        },
+        {
+          "time": 1780714800,
+          "value": -111.0
+        },
+        {
+          "time": 1780718400,
+          "value": -111.0
+        },
+        {
+          "time": 1780722000,
+          "value": -111.0
+        }
+      ],
+      "Invalid TF Tuple Close First": [
+        {
+          "time": 1780682400,
+          "value": -222.0
+        },
+        {
+          "time": 1780686000,
+          "value": -222.0
+        },
+        {
+          "time": 1780689600,
+          "value": -222.0
+        },
+        {
+          "time": 1780693200,
+          "value": -222.0
+        },
+        {
+          "time": 1780696800,
+          "value": -222.0
+        },
+        {
+          "time": 1780700400,
+          "value": -222.0
+        },
+        {
+          "time": 1780704000,
+          "value": -222.0
+        },
+        {
+          "time": 1780707600,
+          "value": -222.0
+        },
+        {
+          "time": 1780711200,
+          "value": -222.0
+        },
+        {
+          "time": 1780714800,
+          "value": -222.0
+        },
+        {
+          "time": 1780718400,
+          "value": -222.0
+        },
+        {
+          "time": 1780722000,
+          "value": -222.0
+        }
+      ],
+      "Invalid TF Tuple Open Last": [
+        {
+          "time": 1780682400,
+          "value": -333.0
+        },
+        {
+          "time": 1780686000,
+          "value": -333.0
+        },
+        {
+          "time": 1780689600,
+          "value": -333.0
+        },
+        {
+          "time": 1780693200,
+          "value": -333.0
+        },
+        {
+          "time": 1780696800,
+          "value": -333.0
+        },
+        {
+          "time": 1780700400,
+          "value": -333.0
+        },
+        {
+          "time": 1780704000,
+          "value": -333.0
+        },
+        {
+          "time": 1780707600,
+          "value": -333.0
+        },
+        {
+          "time": 1780711200,
+          "value": -333.0
+        },
+        {
+          "time": 1780714800,
+          "value": -333.0
+        },
+        {
+          "time": 1780718400,
+          "value": -333.0
+        },
+        {
+          "time": 1780722000,
+          "value": -333.0
+        }
+      ],
+      "Invalid TF Tuple Close Last": [
+        {
+          "time": 1780682400,
+          "value": -444.0
+        },
+        {
+          "time": 1780686000,
+          "value": -444.0
+        },
+        {
+          "time": 1780689600,
+          "value": -444.0
+        },
+        {
+          "time": 1780693200,
+          "value": -444.0
+        },
+        {
+          "time": 1780696800,
+          "value": -444.0
+        },
+        {
+          "time": 1780700400,
+          "value": -444.0
+        },
+        {
+          "time": 1780704000,
+          "value": -444.0
+        },
+        {
+          "time": 1780707600,
+          "value": -444.0
+        },
+        {
+          "time": 1780711200,
+          "value": -444.0
+        },
+        {
+          "time": 1780714800,
+          "value": -444.0
+        },
+        {
+          "time": 1780718400,
+          "value": -444.0
+        },
+        {
+          "time": 1780722000,
+          "value": -444.0
+        }
+      ],
+      "Invalid TF Tuple Open Sum": [
+        {
+          "time": 1780682400,
+          "value": 0.0
+        },
+        {
+          "time": 1780686000,
+          "value": 0.0
+        },
+        {
+          "time": 1780689600,
+          "value": 0.0
+        },
+        {
+          "time": 1780693200,
+          "value": 0.0
+        },
+        {
+          "time": 1780696800,
+          "value": 0.0
+        },
+        {
+          "time": 1780700400,
+          "value": 0.0
+        },
+        {
+          "time": 1780704000,
+          "value": 0.0
+        },
+        {
+          "time": 1780707600,
+          "value": 0.0
+        },
+        {
+          "time": 1780711200,
+          "value": 0.0
+        },
+        {
+          "time": 1780714800,
+          "value": 0.0
+        },
+        {
+          "time": 1780718400,
+          "value": 0.0
+        },
+        {
+          "time": 1780722000,
+          "value": 0.0
+        }
+      ],
+      "Invalid TF Tuple Close Sum": [
+        {
+          "time": 1780682400,
+          "value": 0.0
+        },
+        {
+          "time": 1780686000,
+          "value": 0.0
+        },
+        {
+          "time": 1780689600,
+          "value": 0.0
+        },
+        {
+          "time": 1780693200,
+          "value": 0.0
+        },
+        {
+          "time": 1780696800,
+          "value": 0.0
+        },
+        {
+          "time": 1780700400,
+          "value": 0.0
+        },
+        {
+          "time": 1780704000,
+          "value": 0.0
+        },
+        {
+          "time": 1780707600,
+          "value": 0.0
+        },
+        {
+          "time": 1780711200,
+          "value": 0.0
+        },
+        {
+          "time": 1780714800,
+          "value": 0.0
+        },
+        {
+          "time": 1780718400,
+          "value": 0.0
+        },
+        {
+          "time": 1780722000,
+          "value": 0.0
+        }
+      ],
+      "Invalid TF Tuple Open Is Empty": [
+        {
+          "time": 1780682400,
+          "value": 1.0
+        },
+        {
+          "time": 1780686000,
+          "value": 1.0
+        },
+        {
+          "time": 1780689600,
+          "value": 1.0
+        },
+        {
+          "time": 1780693200,
+          "value": 1.0
+        },
+        {
+          "time": 1780696800,
+          "value": 1.0
+        },
+        {
+          "time": 1780700400,
+          "value": 1.0
+        },
+        {
+          "time": 1780704000,
+          "value": 1.0
+        },
+        {
+          "time": 1780707600,
+          "value": 1.0
+        },
+        {
+          "time": 1780711200,
+          "value": 1.0
+        },
+        {
+          "time": 1780714800,
+          "value": 1.0
+        },
+        {
+          "time": 1780718400,
+          "value": 1.0
+        },
+        {
+          "time": 1780722000,
+          "value": 1.0
+        }
+      ],
+      "Invalid TF Tuple Close Is Empty": [
+        {
+          "time": 1780682400,
+          "value": 1.0
+        },
+        {
+          "time": 1780686000,
+          "value": 1.0
+        },
+        {
+          "time": 1780689600,
+          "value": 1.0
+        },
+        {
+          "time": 1780693200,
+          "value": 1.0
+        },
+        {
+          "time": 1780696800,
+          "value": 1.0
+        },
+        {
+          "time": 1780700400,
+          "value": 1.0
+        },
+        {
+          "time": 1780704000,
+          "value": 1.0
+        },
+        {
+          "time": 1780707600,
+          "value": 1.0
+        },
+        {
+          "time": 1780711200,
+          "value": 1.0
+        },
+        {
+          "time": 1780714800,
+          "value": 1.0
+        },
+        {
+          "time": 1780718400,
+          "value": 1.0
+        },
+        {
+          "time": 1780722000,
+          "value": 1.0
+        }
+      ]
+    },
+    "bars": [
+      {
+        "time": 1780682400,
+        "open": 60786.5,
+        "high": 60933.0,
+        "low": 59105.4,
+        "close": 59362.2,
+        "volume": 32030.644
+      },
+      {
+        "time": 1780686000,
+        "open": 59362.1,
+        "high": 60435.2,
+        "low": 59080.0,
+        "close": 60267.7,
+        "volume": 23692.266
+      },
+      {
+        "time": 1780689600,
+        "open": 60267.4,
+        "high": 61800.0,
+        "low": 59903.8,
+        "close": 61586.2,
+        "volume": 22351.565
+      },
+      {
+        "time": 1780693200,
+        "open": 61586.1,
+        "high": 61985.1,
+        "low": 61400.0,
+        "close": 61639.5,
+        "volume": 12170.417
+      },
+      {
+        "time": 1780696800,
+        "open": 61639.4,
+        "high": 61942.4,
+        "low": 61169.1,
+        "close": 61556.6,
+        "volume": 13850.543
+      },
+      {
+        "time": 1780700400,
+        "open": 61556.7,
+        "high": 61745.0,
+        "low": 60458.0,
+        "close": 61022.0,
+        "volume": 14163.427
+      },
+      {
+        "time": 1780704000,
+        "open": 61022.0,
+        "high": 61500.0,
+        "low": 61012.0,
+        "close": 61238.4,
+        "volume": 7564.048
+      },
+      {
+        "time": 1780707600,
+        "open": 61238.4,
+        "high": 61349.7,
+        "low": 60912.3,
+        "close": 61025.6,
+        "volume": 4623.78
+      },
+      {
+        "time": 1780711200,
+        "open": 61025.6,
+        "high": 61164.5,
+        "low": 60642.4,
+        "close": 60918.4,
+        "volume": 5765.277
+      },
+      {
+        "time": 1780714800,
+        "open": 60918.3,
+        "high": 60940.5,
+        "low": 60490.0,
+        "close": 60662.6,
+        "volume": 5489.751
+      },
+      {
+        "time": 1780718400,
+        "open": 60662.6,
+        "high": 60847.5,
+        "low": 59451.3,
+        "close": 60068.4,
+        "volume": 22031.624
+      },
+      {
+        "time": 1780722000,
+        "open": 60068.5,
+        "high": 61070.2,
+        "low": 59578.8,
+        "close": 60918.9,
+        "volume": 20702.862
+      }
+    ],
+    "provider_bars": [],
+    "provider_bar_plots": [],
+    "notes": [
+      "TradingView export 2026-06-06: request.security_lower_tf invalid timeframe tuple with ignore_invalid_timeframe=true, BINANCE:BTCUSDT.P 60m."
+    ]
+  }
+}

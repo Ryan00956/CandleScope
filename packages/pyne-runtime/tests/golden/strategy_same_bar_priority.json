@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "name": "exit_stop_first",
+      "script": "strategy(\"Same Bar Exit\", overlay=True)\nstrategy.entry_when(bar_index == 0, \"Long\", strategy.long, qty=1, price=close)\nstrategy.exit(\"Bracket\", from_entry=\"Long\", stop=9, limit=12)\n",
+      "bars": [
+        {"time": 1, "open": 10, "high": 10.5, "low": 9.5, "close": 10, "volume": 100},
+        {"time": 2, "open": 10, "high": 13, "low": 8, "close": 11, "volume": 100}
+      ],
+      "orders": [
+        {"time": 1, "id": "Long", "type": "entry", "side": "long", "qty": 1.0, "price": 10.0, "position_after": 1.0, "comment": ""},
+        {"time": 2, "id": "Bracket", "from_entry": "Long", "type": "exit", "side": "flat", "qty": 1.0, "price": 9.0, "position_after": 0.0, "reason": "stop", "comment": ""}
+      ],
+      "same_bar_fill_priority": "stop_first",
+      "intrabar_path": "same_bar_priority"
+    },
+    {
+      "name": "exit_limit_first",
+      "script": "strategy(\"Same Bar Exit\", overlay=True, same_bar_fill_priority=strategy.same_bar.limit_first)\nstrategy.entry_when(bar_index == 0, \"Long\", strategy.long, qty=1, price=close)\nstrategy.exit(\"Bracket\", from_entry=\"Long\", stop=9, limit=12)\n",
+      "bars": [
+        {"time": 1, "open": 10, "high": 10.5, "low": 9.5, "close": 10, "volume": 100},
+        {"time": 2, "open": 10, "high": 13, "low": 8, "close": 11, "volume": 100}
+      ],
+      "orders": [
+        {"time": 1, "id": "Long", "type": "entry", "side": "long", "qty": 1.0, "price": 10.0, "position_after": 1.0, "comment": ""},
+        {"time": 2, "id": "Bracket", "from_entry": "Long", "type": "exit", "side": "flat", "qty": 1.0, "price": 12.0, "position_after": 0.0, "reason": "limit", "comment": ""}
+      ],
+      "same_bar_fill_priority": "limit_first",
+      "intrabar_path": "same_bar_priority"
+    },
+    {
+      "name": "exit_path_high_low",
+      "script": "strategy(\"Path Exit\", overlay=True, intrabar_path=strategy.intrabar.open_high_low_close)\nstrategy.entry_when(bar_index == 0, \"Long\", strategy.long, qty=1, price=close)\nstrategy.exit(\"Bracket\", from_entry=\"Long\", stop=9, limit=12)\n",
+      "bars": [
+        {"time": 1, "open": 10, "high": 10.5, "low": 9.5, "close": 10, "volume": 100},
+        {"time": 2, "open": 10, "high": 13, "low": 8, "close": 11, "volume": 100}
+      ],
+      "orders": [
+        {"time": 1, "id": "Long", "type": "entry", "side": "long", "qty": 1.0, "price": 10.0, "position_after": 1.0, "comment": ""},
+        {"time": 2, "id": "Bracket", "from_entry": "Long", "type": "exit", "side": "flat", "qty": 1.0, "price": 12.0, "position_after": 0.0, "reason": "limit", "comment": ""}
+      ],
+      "same_bar_fill_priority": "stop_first",
+      "intrabar_path": "open_high_low_close"
+    },
+    {
+      "name": "exit_path_low_high",
+      "script": "strategy(\"Path Exit\", overlay=True, intrabar_path=strategy.intrabar.open_low_high_close)\nstrategy.entry_when(bar_index == 0, \"Long\", strategy.long, qty=1, price=close)\nstrategy.exit(\"Bracket\", from_entry=\"Long\", stop=9, limit=12)\n",
+      "bars": [
+        {"time": 1, "open": 10, "high": 10.5, "low": 9.5, "close": 10, "volume": 100},
+        {"time": 2, "open": 10, "high": 13, "low": 8, "close": 11, "volume": 100}
+      ],
+      "orders": [
+        {"time": 1, "id": "Long", "type": "entry", "side": "long", "qty": 1.0, "price": 10.0, "position_after": 1.0, "comment": ""},
+        {"time": 2, "id": "Bracket", "from_entry": "Long", "type": "exit", "side": "flat", "qty": 1.0, "price": 9.0, "position_after": 0.0, "reason": "stop", "comment": ""}
+      ],
+      "same_bar_fill_priority": "stop_first",
+      "intrabar_path": "open_low_high_close"
+    }
+  ]
+}

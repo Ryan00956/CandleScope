@@ -1,0 +1,767 @@
+{
+  "name": "request_security_lower_tf_capture",
+  "source": "Pyne-defined request.security_lower_tf capture fixture",
+  "chart_bars": [
+    {
+      "time": 0,
+      "open": 10,
+      "high": 12,
+      "low": 9,
+      "close": 11,
+      "volume": 1000
+    },
+    {
+      "time": 120,
+      "open": 11,
+      "high": 13,
+      "low": 10,
+      "close": 12,
+      "volume": 1100
+    },
+    {
+      "time": 240,
+      "open": 12,
+      "high": 14,
+      "low": 11,
+      "close": 13,
+      "volume": 1200
+    },
+    {
+      "time": 360,
+      "open": 13,
+      "high": 15,
+      "low": 12,
+      "close": 14,
+      "volume": 1300
+    }
+  ],
+  "provider_bars": [
+    {
+      "time": 0,
+      "open": 99.5,
+      "high": 101,
+      "low": 99,
+      "close": 100,
+      "volume": 1000
+    },
+    {
+      "time": 60,
+      "open": 100.5,
+      "high": 102,
+      "low": 100,
+      "close": 101,
+      "volume": 1010
+    },
+    {
+      "time": 120,
+      "open": 109.5,
+      "high": 111,
+      "low": 109,
+      "close": 110,
+      "volume": 1100
+    },
+    {
+      "time": 240,
+      "open": 119.5,
+      "high": 121,
+      "low": 119,
+      "close": 120,
+      "volume": 1200
+    },
+    {
+      "time": 300,
+      "open": 120.5,
+      "high": 122,
+      "low": 120,
+      "close": 121,
+      "volume": 1210
+    },
+    {
+      "time": 360,
+      "open": 129.5,
+      "high": 131,
+      "low": 129,
+      "close": 130,
+      "volume": 1300
+    }
+  ],
+  "script": "indicator(\"Request LTF Capture\", overlay=True)\nlower_close = request.security_lower_tf(\"BTCUSDT\", \"60\", lambda ctx: ctx.close)\nlower_mid, lower_range = request.security_lower_tf(\n    \"BTCUSDT\",\n    \"60\",\n    lambda ctx: ((ctx.high + ctx.low) / 2, ctx.high - ctx.low),\n)\nltf_time, ltf_open, ltf_high, ltf_low, ltf_provider_close, ltf_volume = request.security_lower_tf(\n    \"BTCUSDT\",\n    \"60\",\n    (\"time\", \"open\", \"high\", \"low\", \"close\", \"volume\"),\n)\nplot(lower_close.size(), \"LTF Count\")\nplot(lower_close.first(), \"LTF First Close\")\nplot(lower_close.get(1, default=0), \"LTF Second Close\")\nplot(lower_close.last(), \"LTF Last Close\")\nplot(lower_close.sum(), \"LTF Sum Close\")\nplot(lower_close.avg(), \"LTF Avg Close\")\nplot(lower_mid.first(), \"LTF Tuple Mid First\")\nplot(lower_range.sum(), \"LTF Tuple Range Sum\")\nplot(ltf_time.get(0), \"LTF Time 0\")\nplot(ltf_open.get(0), \"LTF Open 0\")\nplot(ltf_high.get(0), \"LTF High 0\")\nplot(ltf_low.get(0), \"LTF Low 0\")\nplot(ltf_provider_close.get(0), \"LTF Provider Close 0\")\nplot(ltf_volume.get(0), \"LTF Volume 0\")\nplot(ltf_time.get(1), \"LTF Time 1\")\nplot(ltf_open.get(1), \"LTF Open 1\")\nplot(ltf_high.get(1), \"LTF High 1\")\nplot(ltf_low.get(1), \"LTF Low 1\")\nplot(ltf_provider_close.get(1), \"LTF Provider Close 1\")\nplot(ltf_volume.get(1), \"LTF Volume 1\")\n",
+  "pine_script": "//@version=5\n_pyne_capture_bars = 4\n_pyne_capture_use_last_bars = input.bool(true, \"Pyne capture: use last chart bars\")\n_pyne_capture_start_time = input.int(1704067200000, \"Pyne capture: start time (ms)\")\n_pyne_capture_start_hit = time >= _pyne_capture_start_time and (na(time[1]) or time[1] < _pyne_capture_start_time)\n_pyne_capture_from_time = ta.barssince(_pyne_capture_start_hit)\n_pyne_capture_from_last = bar_index - (last_bar_index - _pyne_capture_bars)\n_pyne_capture_index = _pyne_capture_use_last_bars ? _pyne_capture_from_last : _pyne_capture_from_time\n_pyne_capture_active = _pyne_capture_index >= 0 and _pyne_capture_index < _pyne_capture_bars\n_pyne_ltf_get(array<float> arr, int idx, float fallback) =>\n    array.size(arr) > idx ? array.get(arr, idx) : fallback\n_pyne_ltf_last(array<float> arr, float fallback) =>\n    array.size(arr) > 0 ? array.get(arr, array.size(arr) - 1) : fallback\nindicator(\"Pyne Request Capture - LTF Grouping\", overlay=true)\nplot(_pyne_capture_active ? _pyne_capture_index : na, \"Pyne Capture Index\")\n_ltf_close = request.security_lower_tf(syminfo.tickerid, \"60\", close)\n[_ltf_mid, _ltf_range] = request.security_lower_tf(syminfo.tickerid, \"60\", [(high + low) / 2, high - low])\n[_ltf_time, _ltf_open, _ltf_high, _ltf_low, _ltf_provider_close, _ltf_volume] = request.security_lower_tf(syminfo.tickerid, \"60\", [time, open, high, low, close, volume])\nplot(_pyne_capture_active ? array.size(_ltf_close) : na, \"LTF Count\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_close, 0, na) : na, \"LTF First Close\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_close, 1, 0.0) : na, \"LTF Second Close\")\nplot(_pyne_capture_active ? _pyne_ltf_last(_ltf_close, na) : na, \"LTF Last Close\")\nplot(_pyne_capture_active ? array.sum(_ltf_close) : na, \"LTF Sum Close\")\nplot(_pyne_capture_active ? array.avg(_ltf_close) : na, \"LTF Avg Close\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_mid, 0, na) : na, \"LTF Tuple Mid First\")\nplot(_pyne_capture_active ? array.sum(_ltf_range) : na, \"LTF Tuple Range Sum\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_time, 0, na) : na, \"LTF Time 0\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_open, 0, na) : na, \"LTF Open 0\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_high, 0, na) : na, \"LTF High 0\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_low, 0, na) : na, \"LTF Low 0\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_provider_close, 0, na) : na, \"LTF Provider Close 0\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_volume, 0, na) : na, \"LTF Volume 0\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_time, 1, na) : na, \"LTF Time 1\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_open, 1, na) : na, \"LTF Open 1\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_high, 1, na) : na, \"LTF High 1\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_low, 1, na) : na, \"LTF Low 1\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_provider_close, 1, na) : na, \"LTF Provider Close 1\")\nplot(_pyne_capture_active ? _pyne_ltf_get(_ltf_volume, 1, na) : na, \"LTF Volume 1\")\n",
+  "expected_provider_calls": [
+    [
+      "BTCUSDT",
+      "60",
+      0,
+      360
+    ]
+  ],
+  "expected_series": {
+    "LTF Count": [
+      {
+        "time": 0,
+        "value": 2.0
+      },
+      {
+        "time": 120,
+        "value": 1.0
+      },
+      {
+        "time": 240,
+        "value": 2.0
+      },
+      {
+        "time": 360,
+        "value": 1.0
+      }
+    ],
+    "LTF First Close": [
+      {
+        "time": 0,
+        "value": 100.0
+      },
+      {
+        "time": 120,
+        "value": 110.0
+      },
+      {
+        "time": 240,
+        "value": 120.0
+      },
+      {
+        "time": 360,
+        "value": 130.0
+      }
+    ],
+    "LTF Second Close": [
+      {
+        "time": 0,
+        "value": 101.0
+      },
+      {
+        "time": 120,
+        "value": 0.0
+      },
+      {
+        "time": 240,
+        "value": 121.0
+      },
+      {
+        "time": 360,
+        "value": 0.0
+      }
+    ],
+    "LTF Last Close": [
+      {
+        "time": 0,
+        "value": 101.0
+      },
+      {
+        "time": 120,
+        "value": 110.0
+      },
+      {
+        "time": 240,
+        "value": 121.0
+      },
+      {
+        "time": 360,
+        "value": 130.0
+      }
+    ],
+    "LTF Sum Close": [
+      {
+        "time": 0,
+        "value": 201.0
+      },
+      {
+        "time": 120,
+        "value": 110.0
+      },
+      {
+        "time": 240,
+        "value": 241.0
+      },
+      {
+        "time": 360,
+        "value": 130.0
+      }
+    ],
+    "LTF Avg Close": [
+      {
+        "time": 0,
+        "value": 100.5
+      },
+      {
+        "time": 120,
+        "value": 110.0
+      },
+      {
+        "time": 240,
+        "value": 120.5
+      },
+      {
+        "time": 360,
+        "value": 130.0
+      }
+    ],
+    "LTF Tuple Mid First": [
+      {
+        "time": 0,
+        "value": 100.0
+      },
+      {
+        "time": 120,
+        "value": 110.0
+      },
+      {
+        "time": 240,
+        "value": 120.0
+      },
+      {
+        "time": 360,
+        "value": 130.0
+      }
+    ],
+    "LTF Tuple Range Sum": [
+      {
+        "time": 0,
+        "value": 4.0
+      },
+      {
+        "time": 120,
+        "value": 2.0
+      },
+      {
+        "time": 240,
+        "value": 4.0
+      },
+      {
+        "time": 360,
+        "value": 2.0
+      }
+    ],
+    "LTF Time 0": [
+      {
+        "time": 0,
+        "value": 0.0
+      },
+      {
+        "time": 120,
+        "value": 120.0
+      },
+      {
+        "time": 240,
+        "value": 240.0
+      },
+      {
+        "time": 360,
+        "value": 360.0
+      }
+    ],
+    "LTF Open 0": [
+      {
+        "time": 0,
+        "value": 99.5
+      },
+      {
+        "time": 120,
+        "value": 109.5
+      },
+      {
+        "time": 240,
+        "value": 119.5
+      },
+      {
+        "time": 360,
+        "value": 129.5
+      }
+    ],
+    "LTF High 0": [
+      {
+        "time": 0,
+        "value": 101.0
+      },
+      {
+        "time": 120,
+        "value": 111.0
+      },
+      {
+        "time": 240,
+        "value": 121.0
+      },
+      {
+        "time": 360,
+        "value": 131.0
+      }
+    ],
+    "LTF Low 0": [
+      {
+        "time": 0,
+        "value": 99.0
+      },
+      {
+        "time": 120,
+        "value": 109.0
+      },
+      {
+        "time": 240,
+        "value": 119.0
+      },
+      {
+        "time": 360,
+        "value": 129.0
+      }
+    ],
+    "LTF Provider Close 0": [
+      {
+        "time": 0,
+        "value": 100.0
+      },
+      {
+        "time": 120,
+        "value": 110.0
+      },
+      {
+        "time": 240,
+        "value": 120.0
+      },
+      {
+        "time": 360,
+        "value": 130.0
+      }
+    ],
+    "LTF Volume 0": [
+      {
+        "time": 0,
+        "value": 1000.0
+      },
+      {
+        "time": 120,
+        "value": 1100.0
+      },
+      {
+        "time": 240,
+        "value": 1200.0
+      },
+      {
+        "time": 360,
+        "value": 1300.0
+      }
+    ],
+    "LTF Time 1": [
+      {
+        "time": 0,
+        "value": 60.0
+      },
+      {
+        "time": 240,
+        "value": 300.0
+      }
+    ],
+    "LTF Open 1": [
+      {
+        "time": 0,
+        "value": 100.5
+      },
+      {
+        "time": 240,
+        "value": 120.5
+      }
+    ],
+    "LTF High 1": [
+      {
+        "time": 0,
+        "value": 102.0
+      },
+      {
+        "time": 240,
+        "value": 122.0
+      }
+    ],
+    "LTF Low 1": [
+      {
+        "time": 0,
+        "value": 100.0
+      },
+      {
+        "time": 240,
+        "value": 120.0
+      }
+    ],
+    "LTF Provider Close 1": [
+      {
+        "time": 0,
+        "value": 101.0
+      },
+      {
+        "time": 240,
+        "value": 121.0
+      }
+    ],
+    "LTF Volume 1": [
+      {
+        "time": 0,
+        "value": 1010.0
+      },
+      {
+        "time": 240,
+        "value": 1210.0
+      }
+    ]
+  },
+  "external_capture": {
+    "provider": "tradingview",
+    "status": "captured",
+    "assertion": "parity",
+    "tolerance": 1e-09,
+    "series": {
+      "LTF Count": [
+        {
+          "time": 1780642800,
+          "value": 1.0
+        },
+        {
+          "time": 1780646400,
+          "value": 1.0
+        },
+        {
+          "time": 1780650000,
+          "value": 1.0
+        },
+        {
+          "time": 1780653600,
+          "value": 1.0
+        }
+      ],
+      "LTF First Close": [
+        {
+          "time": 1780642800,
+          "value": 63075.6
+        },
+        {
+          "time": 1780646400,
+          "value": 62429.9
+        },
+        {
+          "time": 1780650000,
+          "value": 62832.5
+        },
+        {
+          "time": 1780653600,
+          "value": 62510.1
+        }
+      ],
+      "LTF Second Close": [
+        {
+          "time": 1780642800,
+          "value": 0.0
+        },
+        {
+          "time": 1780646400,
+          "value": 0.0
+        },
+        {
+          "time": 1780650000,
+          "value": 0.0
+        },
+        {
+          "time": 1780653600,
+          "value": 0.0
+        }
+      ],
+      "LTF Last Close": [
+        {
+          "time": 1780642800,
+          "value": 63075.6
+        },
+        {
+          "time": 1780646400,
+          "value": 62429.9
+        },
+        {
+          "time": 1780650000,
+          "value": 62832.5
+        },
+        {
+          "time": 1780653600,
+          "value": 62510.1
+        }
+      ],
+      "LTF Sum Close": [
+        {
+          "time": 1780642800,
+          "value": 63075.6
+        },
+        {
+          "time": 1780646400,
+          "value": 62429.9
+        },
+        {
+          "time": 1780650000,
+          "value": 62832.5
+        },
+        {
+          "time": 1780653600,
+          "value": 62510.1
+        }
+      ],
+      "LTF Avg Close": [
+        {
+          "time": 1780642800,
+          "value": 63075.6
+        },
+        {
+          "time": 1780646400,
+          "value": 62429.9
+        },
+        {
+          "time": 1780650000,
+          "value": 62832.5
+        },
+        {
+          "time": 1780653600,
+          "value": 62510.1
+        }
+      ],
+      "LTF Tuple Mid First": [
+        {
+          "time": 1780642800,
+          "value": 62207.45
+        },
+        {
+          "time": 1780646400,
+          "value": 62661.15
+        },
+        {
+          "time": 1780650000,
+          "value": 62818.45
+        },
+        {
+          "time": 1780653600,
+          "value": 62626.3
+        }
+      ],
+      "LTF Tuple Range Sum": [
+        {
+          "time": 1780642800,
+          "value": 1753.9000000000015
+        },
+        {
+          "time": 1780646400,
+          "value": 853.6999999999971
+        },
+        {
+          "time": 1780650000,
+          "value": 826.7000000000044
+        },
+        {
+          "time": 1780653600,
+          "value": 568.4000000000015
+        }
+      ],
+      "LTF Time 0": [
+        {
+          "time": 1780642800,
+          "value": 1780642800
+        },
+        {
+          "time": 1780646400,
+          "value": 1780646400
+        },
+        {
+          "time": 1780650000,
+          "value": 1780650000
+        },
+        {
+          "time": 1780653600,
+          "value": 1780653600
+        }
+      ],
+      "LTF Open 0": [
+        {
+          "time": 1780642800,
+          "value": 61916.7
+        },
+        {
+          "time": 1780646400,
+          "value": 63075.5
+        },
+        {
+          "time": 1780650000,
+          "value": 62429.9
+        },
+        {
+          "time": 1780653600,
+          "value": 62832.4
+        }
+      ],
+      "LTF High 0": [
+        {
+          "time": 1780642800,
+          "value": 63084.4
+        },
+        {
+          "time": 1780646400,
+          "value": 63088.0
+        },
+        {
+          "time": 1780650000,
+          "value": 63231.8
+        },
+        {
+          "time": 1780653600,
+          "value": 62910.5
+        }
+      ],
+      "LTF Low 0": [
+        {
+          "time": 1780642800,
+          "value": 61330.5
+        },
+        {
+          "time": 1780646400,
+          "value": 62234.3
+        },
+        {
+          "time": 1780650000,
+          "value": 62405.1
+        },
+        {
+          "time": 1780653600,
+          "value": 62342.1
+        }
+      ],
+      "LTF Provider Close 0": [
+        {
+          "time": 1780642800,
+          "value": 63075.6
+        },
+        {
+          "time": 1780646400,
+          "value": 62429.9
+        },
+        {
+          "time": 1780650000,
+          "value": 62832.5
+        },
+        {
+          "time": 1780653600,
+          "value": 62510.1
+        }
+      ],
+      "LTF Volume 0": [
+        {
+          "time": 1780642800,
+          "value": 22919.441
+        },
+        {
+          "time": 1780646400,
+          "value": 11546.341
+        },
+        {
+          "time": 1780650000,
+          "value": 10276.57
+        },
+        {
+          "time": 1780653600,
+          "value": 6267.2220000000025
+        }
+      ],
+      "LTF Time 1": [],
+      "LTF Open 1": [],
+      "LTF High 1": [],
+      "LTF Low 1": [],
+      "LTF Provider Close 1": [],
+      "LTF Volume 1": []
+    },
+    "bars": [
+      {
+        "time": 1780642800,
+        "open": 61916.7,
+        "high": 63084.4,
+        "low": 61330.5,
+        "close": 63075.6,
+        "volume": 22919.441
+      },
+      {
+        "time": 1780646400,
+        "open": 63075.5,
+        "high": 63088.0,
+        "low": 62234.3,
+        "close": 62429.9,
+        "volume": 11546.341
+      },
+      {
+        "time": 1780650000,
+        "open": 62429.9,
+        "high": 63231.8,
+        "low": 62405.1,
+        "close": 62832.5,
+        "volume": 10276.57
+      },
+      {
+        "time": 1780653600,
+        "open": 62832.4,
+        "high": 62910.5,
+        "low": 62342.1,
+        "close": 62510.1,
+        "volume": 6267.222
+      }
+    ],
+    "provider_bars": [
+      {
+        "time": 1780642800,
+        "open": 61916.7,
+        "high": 63084.4,
+        "low": 61330.5,
+        "close": 63075.6,
+        "volume": 22919.441
+      },
+      {
+        "time": 1780646400,
+        "open": 63075.5,
+        "high": 63088.0,
+        "low": 62234.3,
+        "close": 62429.9,
+        "volume": 11546.341
+      },
+      {
+        "time": 1780650000,
+        "open": 62429.9,
+        "high": 63231.8,
+        "low": 62405.1,
+        "close": 62832.5,
+        "volume": 10276.57
+      },
+      {
+        "time": 1780653600,
+        "open": 62832.4,
+        "high": 62910.5,
+        "low": 62342.1,
+        "close": 62510.1,
+        "volume": 6267.2220000000025
+      }
+    ],
+    "provider_bar_plots": [
+      {
+        "time": "LTF Time 0",
+        "open": "LTF Open 0",
+        "high": "LTF High 0",
+        "low": "LTF Low 0",
+        "close": "LTF Provider Close 0",
+        "volume": "LTF Volume 0"
+      },
+      {
+        "time": "LTF Time 1",
+        "open": "LTF Open 1",
+        "high": "LTF High 1",
+        "low": "LTF Low 1",
+        "close": "LTF Provider Close 1",
+        "volume": "LTF Volume 1"
+      }
+    ],
+    "notes": [
+      "TradingView export 2026-06-05"
+    ]
+  }
+}

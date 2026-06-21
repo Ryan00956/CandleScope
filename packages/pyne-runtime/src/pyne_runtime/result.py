@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .errors import error_detail, error_hint
-from .schema import PYNE_OUTPUT_SCHEMA_VERSION
+from .schema import PYNE_OUTPUT_SCHEMA_VERSION, PYNE_PARAM_SCHEMA_VERSION
 
 
 @dataclass
@@ -22,8 +22,10 @@ class PyneResult:
     lines: list[dict[str, Any]] = field(default_factory=list)
     output: dict[str, Any] = field(default_factory=dict)
     param_schema: list[dict[str, Any]] = field(default_factory=list)
+    param_schema_version: int = PYNE_PARAM_SCHEMA_VERSION
     meta: dict[str, Any] = field(default_factory=dict)
     schema_version: int = PYNE_OUTPUT_SCHEMA_VERSION
+    error_context: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -38,6 +40,7 @@ class PyneResult:
             "lines": self.lines,
             "output": self.output,
             "param_schema": self.param_schema,
+            "paramSchemaVersion": self.param_schema_version,
             "meta": self.meta,
         }
 
@@ -79,14 +82,17 @@ class PyneResult:
             ) from exc
 
         rows: dict[int, dict[str, Any]] = {}
+        name_counts: dict[str, int] = {}
         for line in self.lines:
-            name = line.get("name") or line.get("title") or line.get("id") or "value"
+            raw_name = str(line.get("name") or line.get("title") or line.get("id") or "value")
+            name_counts[raw_name] = name_counts.get(raw_name, 0) + 1
+            name = raw_name if name_counts[raw_name] == 1 else f"{raw_name}_{name_counts[raw_name]}"
             for point in line.get("data") or []:
                 timestamp = point.get("time")
                 if timestamp is None:
                     continue
                 row = rows.setdefault(timestamp, {"time": timestamp})
-                row[str(name)] = point.get("value")
+                row[name] = point.get("value")
         return pd.DataFrame(rows.values()).sort_values("time").reset_index(drop=True)
 
     def plot(self) -> Any:
@@ -131,8 +137,12 @@ class PyneResult:
             lines=data.get("lines") if isinstance(data.get("lines"), list) else [],
             output=data.get("output") if isinstance(data.get("output"), dict) else {},
             param_schema=data.get("param_schema") if isinstance(data.get("param_schema"), list) else [],
+            param_schema_version=int(
+                data.get("paramSchemaVersion") or PYNE_PARAM_SCHEMA_VERSION
+            ),
             meta=data.get("meta") if isinstance(data.get("meta"), dict) else {},
             schema_version=int(data.get("schemaVersion") or PYNE_OUTPUT_SCHEMA_VERSION),
+            error_context=_extra_error_context(data.get("errorDetail")),
         )
 
     @property
@@ -145,9 +155,16 @@ class PyneResult:
             line=self.line,
             column=self.column,
             hint=self.hint,
-        )
+        ) | self.error_context
 
 
 def _series_name(line: dict[str, Any]) -> str:
     value = line.get("name") or line.get("title") or line.get("id")
     return str(value) if value is not None else ""
+
+
+def _extra_error_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    standard = {"code", "message", "line", "column", "hint", "docsUrl"}
+    return {key: item for key, item in value.items() if key not in standard}

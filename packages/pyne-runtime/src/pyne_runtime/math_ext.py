@@ -13,93 +13,119 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import utils
+from .series import wrap_like
+
 
 class PyneMath:
     """Pine-style math namespace. Injected as ``math`` in scripts."""
 
-    @staticmethod
-    def abs(x):
-        return np.abs(x)
+    def __init__(self, *, mintick: float = 1.0) -> None:
+        self.mintick = float(mintick) if float(mintick) > 0 else 1.0
 
-    @staticmethod
-    def log(x):
-        return np.log(x)
+    def abs(self, x):
+        return wrap_like(np.abs(x), x)
 
-    @staticmethod
-    def log10(x):
-        return np.log10(x)
+    def log(self, x):
+        return wrap_like(np.log(x), x)
 
-    @staticmethod
-    def sqrt(x):
-        return np.sqrt(x)
+    def log10(self, x):
+        return wrap_like(np.log10(x), x)
 
-    @staticmethod
-    def exp(x):
-        return np.exp(x)
+    def sqrt(self, x):
+        return wrap_like(np.sqrt(x), x)
 
-    @staticmethod
-    def pow(base, exp):
-        return np.power(base, exp)
+    def exp(self, x):
+        return wrap_like(np.exp(x), x)
 
-    @staticmethod
-    def ceil(x):
-        return np.ceil(x)
+    def pow(self, base, exp):
+        return wrap_like(np.power(base, exp), base, exp)
 
-    @staticmethod
-    def floor(x):
-        return np.floor(x)
+    def ceil(self, x):
+        return wrap_like(np.ceil(x), x)
 
-    @staticmethod
-    def round(x, digits=0):
-        return np.round(x, digits)
+    def floor(self, x):
+        return wrap_like(np.floor(x), x)
 
-    @staticmethod
-    def max(a, b):
-        return np.maximum(a, b)
+    def round(self, x, precision=0, *, digits=None):
+        if digits is not None:
+            precision = digits
+        return wrap_like(np.round(x, int(precision)), x)
 
-    @staticmethod
-    def min(a, b):
-        return np.minimum(a, b)
+    def trunc(self, x):
+        return wrap_like(np.trunc(x), x)
 
-    @staticmethod
-    def sign(x):
-        return np.sign(x)
+    def fixnan(self, x):
+        return utils.fixnan(x)
 
-    @staticmethod
-    def avg(*args):
-        return sum(args) / len(args)
+    def max(self, *args):
+        if not args:
+            raise TypeError("math.max() requires at least one argument")
+        result = args[0]
+        for item in args[1:]:
+            result = np.maximum(result, item)
+        return wrap_like(result, *args)
 
-    @staticmethod
-    def sin(x):
-        return np.sin(x)
+    def min(self, *args):
+        if not args:
+            raise TypeError("math.min() requires at least one argument")
+        result = args[0]
+        for item in args[1:]:
+            result = np.minimum(result, item)
+        return wrap_like(result, *args)
 
-    @staticmethod
-    def cos(x):
-        return np.cos(x)
+    def sign(self, x):
+        return wrap_like(np.sign(x), x)
 
-    @staticmethod
-    def tan(x):
-        return np.tan(x)
+    def avg(self, *args):
+        if not args:
+            raise TypeError("math.avg() requires at least one argument")
+        return wrap_like(sum(args) / len(args), *args)
 
-    @staticmethod
-    def asin(x):
-        return np.arcsin(x)
+    def sum(self, src, period: int):
+        return utils.sum_(src, int(period))
 
-    @staticmethod
-    def acos(x):
-        return np.arccos(x)
+    def round_to_mintick(self, x):
+        values = np.asarray(x, dtype=np.float64)
+        rounded = np.floor(values / self.mintick + 0.5) * self.mintick
+        rounded = np.round(rounded, 10)
+        if np.asarray(x).ndim == 0:
+            return float(rounded)
+        return wrap_like(rounded, x)
 
-    @staticmethod
-    def atan(x):
-        return np.arctan(x)
+    def random(self, min: float = 0.0, max: float = 1.0, seed: int | None = None):
+        rng = np.random.default_rng(None if seed is None else int(seed))
+        low = np.asarray(min, dtype=np.float64)
+        high = np.asarray(max, dtype=np.float64)
+        shape = np.broadcast(low, high).shape
+        value = rng.uniform(low, high, size=shape or None)
+        if np.asarray(min).ndim == 0 and np.asarray(max).ndim == 0:
+            return float(value)
+        return wrap_like(value, min, max)
 
-    @staticmethod
-    def todegrees(x):
-        return np.degrees(x)
+    def sin(self, x):
+        return wrap_like(np.sin(x), x)
 
-    @staticmethod
-    def toradians(x):
-        return np.radians(x)
+    def cos(self, x):
+        return wrap_like(np.cos(x), x)
+
+    def tan(self, x):
+        return wrap_like(np.tan(x), x)
+
+    def asin(self, x):
+        return wrap_like(np.arcsin(x), x)
+
+    def acos(self, x):
+        return wrap_like(np.arccos(x), x)
+
+    def atan(self, x):
+        return wrap_like(np.arctan(x), x)
+
+    def todegrees(self, x):
+        return wrap_like(np.degrees(x), x)
+
+    def toradians(self, x):
+        return wrap_like(np.radians(x), x)
 
     # Constants
     pi = np.pi

@@ -1,9 +1,9 @@
 import { useCallback, useEffect } from "react";
 
-export function getChartPointerPosition(chartContainerRef, event) {
+export function getChartPointerPosition(chartContainerRef, event, rectOverride = null) {
   const container = chartContainerRef?.current;
   if (!container) return null;
-  const rect = container.getBoundingClientRect();
+  const rect = rectOverride || container.getBoundingClientRect();
   const clientX = event.touches ? event.touches[0].clientX : event.clientX;
   const clientY = event.touches ? event.touches[0].clientY : event.clientY;
   return { x: clientX - rect.left, y: clientY - rect.top };
@@ -11,7 +11,7 @@ export function getChartPointerPosition(chartContainerRef, event) {
 
 export function useChartPointerPosition(chartContainerRef) {
   return useCallback(
-    (event) => getChartPointerPosition(chartContainerRef, event),
+    (event, rectOverride = null) => getChartPointerPosition(chartContainerRef, event, rectOverride),
     [chartContainerRef],
   );
 }

@@ -125,6 +125,9 @@ export function useDrawing({
   const hoveredPrimRef = useRef(null);
   const hoverFrameRef = useRef(0);
   const pendingHoverRef = useRef(null);
+  const activeMoveFrameRef = useRef(0);
+  const pendingActiveMoveRef = useRef(null);
+  const pointerRectRef = useRef(null);
 
   // ── Tool refs (avoid stale closures) ──
   const activeToolRef = useRef(activeTool);
@@ -383,6 +386,26 @@ export function useDrawing({
 
   const getChartPos = useChartPointerPosition(chartContainerRef);
 
+  const getCachedPointerRect = useCallback(() => {
+    const container = chartContainerRef?.current;
+    if (!container) return null;
+    if (!pointerRectRef.current) {
+      pointerRectRef.current = container.getBoundingClientRect();
+    }
+    return pointerRectRef.current;
+  }, [chartContainerRef]);
+
+  const clearCachedPointerRect = useCallback(() => {
+    pointerRectRef.current = null;
+  }, []);
+
+  const makePointerEventSnapshot = useCallback((e) => ({
+    altKey: !!e.altKey,
+    shiftKey: !!e.shiftKey,
+    preventDefault() {},
+    stopPropagation() {},
+  }), []);
+
   const cancelPendingHoverFrame = useCallback(() => {
     if (!hoverFrameRef.current) return;
     if (typeof cancelAnimationFrame === "function") {
@@ -442,6 +465,112 @@ export function useDrawing({
   useEffect(() => () => {
     cancelPendingHoverFrame();
   }, [cancelPendingHoverFrame]);
+
+  const applyActiveDrawingMove = useCallback(
+    ({ tool, pos, positions, e }) => {
+      // ── PEN / HIGHLIGHTER (freehand): extend stroke ──
+      if ((tool === "pen" || tool === "highlighter") && isDrawingFreehandRef.current && currentFreehandRef.current) {
+        const minDistance = tool === "highlighter" ? 1.5 : 1;
+        for (const point of positions?.length ? positions : [pos]) {
+          if (!point || !shouldAppendFreehandPoint(lastFreehandScreenPointRef.current, point, minDistance)) {
+            continue;
+          }
+          const dataPoint = screenToFreehandData(point.x, point.y);
+          if (dataPoint) {
+            currentFreehandRef.current.addPoint(dataPoint);
+            lastFreehandScreenPointRef.current = { x: point.x, y: point.y };
+          }
+        }
+        return true;
+      }
+
+      // ── Drag/resize of existing text & position drawings (extracted) ──
+      if (applyTextAndPositionDrag({
+        dragging: draggingRef.current,
+        pos,
+        e,
+        primitivesRef,
+        screenToData,
+        dataToScreen,
+        screenToDrawingData,
+        refreshSelectedTextUi,
+        drawingSnapEnabledRef,
+        chartContainerRef,
+      })) {
+        return true;
+      }
+
+      // ── LINE / FIB / SHAPE TOOLS ──
+      if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool) || SHAPE_TOOL_IDS.has(tool)) {
+        if (draggingRef.current) {
+          applyLineFibShapeDrag({
+            dragging: draggingRef.current,
+            pos,
+            e,
+            primitivesRef,
+            screenToData,
+            dataToScreen,
+            screenToDrawingData,
+            drawingSnapEnabledRef,
+          });
+          return true;
+        }
+
+        if (updateTwoPointPreview({
+          tool, pos, e, anchorDataRef, previewRef, screenToDrawingData, dataToScreen, drawingSnapEnabledRef,
+        })) return true;
+      }
+
+      return false;
+    },
+    [screenToFreehandData, screenToData, dataToScreen, screenToDrawingData, refreshSelectedTextUi, chartContainerRef],
+  );
+
+  const cancelActiveMoveFrame = useCallback(() => {
+    if (!activeMoveFrameRef.current) return;
+    if (typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(activeMoveFrameRef.current);
+    } else {
+      clearTimeout(activeMoveFrameRef.current);
+    }
+    activeMoveFrameRef.current = 0;
+  }, []);
+
+  const flushActiveDrawingMove = useCallback(() => {
+    cancelActiveMoveFrame();
+    const next = pendingActiveMoveRef.current;
+    pendingActiveMoveRef.current = null;
+    if (next) applyActiveDrawingMove(next);
+  }, [applyActiveDrawingMove, cancelActiveMoveFrame]);
+
+  const cancelActiveDrawingMove = useCallback(() => {
+    cancelActiveMoveFrame();
+    pendingActiveMoveRef.current = null;
+    clearCachedPointerRect();
+  }, [cancelActiveMoveFrame, clearCachedPointerRect]);
+
+  const scheduleActiveDrawingMove = useCallback(
+    (payload) => {
+      pendingActiveMoveRef.current = payload;
+      if (activeMoveFrameRef.current) return;
+
+      const schedule = typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame
+        : (callback) => setTimeout(callback, 16);
+
+      activeMoveFrameRef.current = schedule(() => {
+        activeMoveFrameRef.current = 0;
+        const next = pendingActiveMoveRef.current;
+        pendingActiveMoveRef.current = null;
+        if (next) applyActiveDrawingMove(next);
+      });
+    },
+    [applyActiveDrawingMove],
+  );
+
+  useEffect(() => () => {
+    cancelActiveDrawingMove();
+  }, [cancelActiveDrawingMove]);
 
   const beginTextDrag = useCallback((prim, hit, pos) => {
     if (!(prim instanceof TextDrawingPrimitive) || !hit || !pos) return false;
@@ -510,6 +639,7 @@ export function useDrawing({
 
   const handleMouseDown = useCallback(
     (e) => {
+      flushActiveDrawingMove();
       const tool = activeToolRef.current;
       const pos = getChartPos(e);
       if (!pos) return;
@@ -785,7 +915,7 @@ export function useDrawing({
         })) return;
       }
     },
-    [getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
+    [flushActiveDrawingMove, getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
   );
 
   // ════════════════════════════════════════════════════
@@ -814,6 +944,37 @@ export function useDrawing({
   const handleMouseMove = useCallback(
     (e) => {
       const tool = activeToolRef.current;
+      const hasFreehandMove = (tool === "pen" || tool === "highlighter")
+        && isDrawingFreehandRef.current
+        && currentFreehandRef.current;
+      const hasDragMove = !!draggingRef.current;
+      const hasPreviewMove = (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool) || SHAPE_TOOL_IDS.has(tool))
+        && anchorDataRef.current
+        && previewRef.current;
+
+      if (hasFreehandMove || hasDragMove || hasPreviewMove) {
+        const rect = getCachedPointerRect();
+        const coalescedEvents = hasFreehandMove && typeof e.getCoalescedEvents === "function"
+          ? e.getCoalescedEvents()
+          : null;
+        const sourceEvents = coalescedEvents?.length ? coalescedEvents : [e];
+        const positions = sourceEvents
+          .map((event) => getChartPos(event, rect))
+          .filter(Boolean);
+        const pos = positions[positions.length - 1] || getChartPos(e, rect);
+        if (!pos) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        scheduleActiveDrawingMove({
+          tool,
+          pos,
+          positions,
+          e: makePointerEventSnapshot(e),
+        });
+        return;
+      }
+
       const pos = getChartPos(e);
       if (!pos) return;
 
@@ -823,62 +984,8 @@ export function useDrawing({
         return;
       }
 
-      // ── PEN / HIGHLIGHTER (freehand): extend stroke ──
-      if ((tool === "pen" || tool === "highlighter") && isDrawingFreehandRef.current && currentFreehandRef.current) {
-        const minDistance = tool === "highlighter" ? 1.5 : 1;
-        if (!shouldAppendFreehandPoint(lastFreehandScreenPointRef.current, pos, minDistance)) {
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
-        const dataPoint = screenToFreehandData(pos.x, pos.y);
-        if (dataPoint) {
-          currentFreehandRef.current.addPoint(dataPoint);
-          lastFreehandScreenPointRef.current = { x: pos.x, y: pos.y };
-        }
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-
-      // ── Drag/resize of existing text & position drawings (extracted) ──
-      if (applyTextAndPositionDrag({
-        dragging: draggingRef.current,
-        pos,
-        e,
-        primitivesRef,
-        screenToData,
-        dataToScreen,
-        screenToDrawingData,
-        refreshSelectedTextUi,
-        drawingSnapEnabledRef,
-        chartContainerRef,
-      })) {
-        return;
-      }
-
       // ── LINE / FIB / SHAPE TOOLS ──
       if (LINE_TOOL_IDS.has(tool) || FIB_TOOL_IDS.has(tool) || SHAPE_TOOL_IDS.has(tool)) {
-        // Dragging
-        if (draggingRef.current) {
-          applyLineFibShapeDrag({
-            dragging: draggingRef.current,
-            pos,
-            e,
-            primitivesRef,
-            screenToData,
-            dataToScreen,
-            screenToDrawingData,
-            drawingSnapEnabledRef,
-          });
-          return;
-        }
-
-        // Preview line: update second point
-        if (updateTwoPointPreview({
-          tool, pos, e, anchorDataRef, previewRef, screenToDrawingData, dataToScreen, drawingSnapEnabledRef,
-        })) return;
-
         // Hover feedback on lines, fibs and text
         scheduleHoverFeedback({ tool, x: pos.x, y: pos.y });
       }
@@ -893,7 +1000,7 @@ export function useDrawing({
         scheduleHoverFeedback({ tool, x: pos.x, y: pos.y });
       }
     },
-    [getChartPos, screenToData, screenToFreehandData, screenToDrawingData, dataToScreen, refreshSelectedTextUi, chartContainerRef, scheduleHoverFeedback],
+    [getCachedPointerRect, getChartPos, makePointerEventSnapshot, scheduleActiveDrawingMove, scheduleHoverFeedback],
   );
 
   // ════════════════════════════════════════════════════
@@ -901,6 +1008,7 @@ export function useDrawing({
   // ════════════════════════════════════════════════════
 
   const handleMouseUp = useCallback(() => {
+    flushActiveDrawingMove();
     let changed = false;
     // End freehand drawing
     if (isDrawingFreehandRef.current) {
@@ -932,7 +1040,8 @@ export function useDrawing({
     if (changed) {
       persistDrawings();
     }
-  }, [persistDrawings, dataToScreen]);
+    clearCachedPointerRect();
+  }, [flushActiveDrawingMove, persistDrawings, dataToScreen, clearCachedPointerRect]);
 
   const handleMouseLeave = useCallback((e) => {
     // Text overlays are siblings of the chart canvas container. Moving the
@@ -976,6 +1085,7 @@ export function useDrawing({
   // ── Clean up when tool changes ──
 
   useEffect(() => {
+    cancelActiveDrawingMove();
     if (!isLineTool && !isFibTool && !isShapeTool) {
       removePreview();
       draggingRef.current = null;
@@ -1004,7 +1114,7 @@ export function useDrawing({
     if (!isEraserTool) {
       clearHoverFeedback();
     }
-  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing, selectedIdRef, clearHoverFeedback]);
+  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing, selectedIdRef, clearHoverFeedback, cancelActiveDrawingMove]);
 
   useDrawingPointerEvents({
     chartContainerRef,
@@ -1030,11 +1140,12 @@ export function useDrawing({
     setSelectedPrimId(null);
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     draggingRef.current = null;
+    cancelActiveDrawingMove();
     isDrawingFreehandRef.current = false;
     currentFreehandRef.current = null;
     cancelTextEditing();
     clearSavedDrawings(symbolRef.current);
-  }, [detachPrim, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback]);
+  }, [detachPrim, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, cancelActiveDrawingMove]);
 
   /**
    * Toggle visibility of all drawings without deleting them.
@@ -1051,6 +1162,7 @@ export function useDrawing({
       removePreview();
       cancelTextEditing();
       clearHoverFeedback();
+      cancelActiveDrawingMove();
       draggingRef.current = null;
       isDrawingFreehandRef.current = false;
       currentFreehandRef.current = null;
@@ -1076,7 +1188,7 @@ export function useDrawing({
       // can request one themselves.
       getChartAdapter()?.requestSeriesUpdate?.();
     }
-  }, [getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback]);
+  }, [getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove]);
 
   // ── Selected-text helpers (consumed by floating format toolbar) ──
 

@@ -1,4 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  createAlertRule,
+  deleteAlertRule,
+  evaluateAlertExpression,
+  fetchAlertHistory,
+  fetchAlertRules,
+  setAlertRuleEnabled,
+  updateAlertRule,
+} from "../../services/alertsApi";
+import {
+  ALERT_COMPARATOR_OPTIONS,
+  ALERT_RIGHT_TYPE_OPTIONS,
+  ALERT_SOURCE_OPTIONS,
+  buildAlertPayloadFromDraft,
+  createDefaultAlertDraft,
+  createDraftFromRule,
+  describeAlertChannels,
+  describeExpression,
+  describeAlertRule,
+  expressionDraftReducer,
+  formatAlertTime,
+} from "../../features/alerts/alertRuleModel";
 import { parseSymbolKey } from "../../utils/symbolKey";
 
 const MARKET_LABELS = {
@@ -12,19 +34,30 @@ const TAB_OPTIONS = [
   { key: "history", label: "触发历史" },
 ];
 
-const CONDITION_SOURCES = [
-  "最新价",
-  "收盘价",
-  "最高价",
-  "最低价",
-  "成交量",
-  "RSI(14)",
-  "MACD Histogram",
-  "MA(20)",
+const TRIGGER_OPTIONS = [
+  { value: "realtime", label: "实时更新" },
+  { value: "bar_update", label: "K线更新中" },
+  { value: "bar_close", label: "K线收盘" },
 ];
 
-const CONDITION_OPERATORS = ["上穿", "下穿", "穿过", "大于", "小于", "等于", "介于区间", "离开区间"];
-const RIGHT_VALUE_TYPES = ["固定数值", "另一指标", "价格字段", "百分比变化", "区间上下限"];
+const CHANNEL_OPTIONS = [
+  { key: "in_app", title: "应用内提示", desc: "右上角 Toast" },
+  { key: "browser", title: "浏览器通知", desc: "需要授权后启用" },
+  { key: "sound", title: "声音提醒", desc: "默认关闭" },
+  { key: "history", title: "触发历史", desc: "始终记录" },
+];
+
+const TEST_VALUE_FIELDS = [
+  { key: "close", label: "收盘价" },
+  { key: "last", label: "最新价" },
+  { key: "rsi", label: "RSI(14)" },
+  { key: "macdHist", label: "MACD Hist" },
+  { key: "ma20", label: "MA(20)" },
+  { key: "volume", label: "成交量" },
+];
+
+const RANGE_COMPARATORS = new Set(["between", "outsideRange"]);
+const PERCENT_CHANGE_COMPARATORS = new Set(["percentChangeAbove", "percentChangeBelow"]);
 
 function formatPrice(value) {
   const num = Number(value);
@@ -118,42 +151,131 @@ function ProductSummary({ product, fallbackSymbol, fallbackMarketType, fallbackE
   );
 }
 
-function ConditionCard({ index, source, operator, rightType, value, not = false, tone = "blue" }) {
+function ConditionCard({ node, index, onAction, canDelete }) {
+  const update = (patch) => onAction({ type: "update-node", nodeId: node.id, patch });
+  const isRangeComparator = RANGE_COMPARATORS.has(node.comparator);
+  const isPercentComparator = PERCENT_CHANGE_COMPARATORS.has(node.comparator);
+  const sourceChoices = node.rightType === "indicator"
+    ? ALERT_SOURCE_OPTIONS.filter((item) => ["rsi", "macdHist", "ma20"].includes(item.value))
+    : ALERT_SOURCE_OPTIONS;
+  const updateComparator = (value) => {
+    const patch = { comparator: value };
+    if (RANGE_COMPARATORS.has(value)) {
+      patch.rangeMin = node.rangeMin || "30";
+      patch.rangeMax = node.rangeMax || "70";
+    }
+    if (PERCENT_CHANGE_COMPARATORS.has(value)) {
+      patch.percentValue = node.percentValue || "2";
+    }
+    update(patch);
+  };
+
   return (
-    <div className={`alert-condition-card tone-${tone}`}>
+    <div className="alert-condition-card tone-blue">
       <div className="alert-condition-topline">
         <span className="alert-condition-index">条件 {index}</span>
-        <label className="alert-not-toggle">
-          <input type="checkbox" defaultChecked={not} />
-          <span>NOT</span>
-        </label>
+        <div className="alert-inline-actions">
+          <label className="alert-not-toggle">
+            <input type="checkbox" checked={Boolean(node.not)} onChange={(event) => update({ not: event.target.checked })} />
+            <span>NOT</span>
+          </label>
+          <button type="button" onClick={() => onAction({ type: "duplicate-node", nodeId: node.id })}>复制</button>
+          <button type="button" onClick={() => onAction({ type: "delete-node", nodeId: node.id })} disabled={!canDelete}>删除</button>
+        </div>
       </div>
       <div className="alert-condition-grid">
         <label className="alert-field compact">
           <span>左值</span>
-          <select defaultValue={source}>
-            {CONDITION_SOURCES.map((item) => <option key={item}>{item}</option>)}
+          <select value={node.left} onChange={(event) => update({ left: event.target.value })}>
+            {ALERT_SOURCE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
           </select>
         </label>
         <label className="alert-field compact">
           <span>操作符</span>
-          <select defaultValue={operator}>
-            {CONDITION_OPERATORS.map((item) => <option key={item}>{item}</option>)}
+          <select value={node.comparator} onChange={(event) => updateComparator(event.target.value)}>
+            {ALERT_COMPARATOR_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
           </select>
         </label>
-        <label className="alert-field compact">
-          <span>右值类型</span>
-          <select defaultValue={rightType}>
-            {RIGHT_VALUE_TYPES.map((item) => <option key={item}>{item}</option>)}
-          </select>
-        </label>
-        <label className="alert-field compact">
-          <span>右值</span>
-          <input type="text" defaultValue={value} />
-        </label>
+        {isRangeComparator ? (
+          <>
+            <label className="alert-field compact">
+              <span>区间下限</span>
+              <input type="number" value={node.rangeMin} onChange={(event) => update({ rangeMin: event.target.value })} />
+            </label>
+            <label className="alert-field compact">
+              <span>区间上限</span>
+              <input type="number" value={node.rangeMax} onChange={(event) => update({ rangeMax: event.target.value })} />
+            </label>
+          </>
+        ) : isPercentComparator ? (
+          <label className="alert-field compact alert-field-wide">
+            <span>变化阈值（%）</span>
+            <input type="number" value={node.percentValue} onChange={(event) => update({ percentValue: event.target.value })} />
+          </label>
+        ) : (
+          <>
+            <label className="alert-field compact">
+              <span>右值类型</span>
+              <select value={node.rightType} onChange={(event) => update({ rightType: event.target.value, rightValue: event.target.value === "number" ? node.rightValue : "close" })}>
+                {ALERT_RIGHT_TYPE_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </label>
+            <label className="alert-field compact">
+              <span>右值</span>
+              {node.rightType === "number" ? (
+                <input type="number" value={node.rightValue} onChange={(event) => update({ rightValue: event.target.value })} />
+              ) : (
+                <select value={node.rightValue || "close"} onChange={(event) => update({ rightValue: event.target.value })}>
+                  {sourceChoices.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+              )}
+            </label>
+          </>
+        )}
       </div>
     </div>
   );
+}
+
+function numericInputValue(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? String(num) : "";
+}
+
+function createDefaultTestContext(price) {
+  const current = Number(price);
+  const safePrice = Number.isFinite(current) && current > 0 ? current : 0;
+  return {
+    previous: {
+      close: numericInputValue(safePrice ? safePrice * 0.995 : 0),
+      last: numericInputValue(safePrice ? safePrice * 0.995 : 0),
+      rsi: "68",
+      macdHist: "-0.1",
+      ma20: numericInputValue(safePrice ? safePrice * 0.99 : 0),
+      volume: "900",
+    },
+    values: {
+      close: numericInputValue(safePrice),
+      last: numericInputValue(safePrice),
+      rsi: "72",
+      macdHist: "0.1",
+      ma20: numericInputValue(safePrice ? safePrice * 0.99 : 0),
+      volume: "1200",
+    },
+  };
+}
+
+function normalizeTestContext(context) {
+  const normalizeBucket = (bucket = {}) => Object.fromEntries(
+    TEST_VALUE_FIELDS.map(({ key }) => {
+      const value = Number(bucket[key]);
+      return [key, Number.isFinite(value) ? value : null];
+    }).filter(([, value]) => value !== null),
+  );
+  return {
+    previous: normalizeBucket(context.previous),
+    values: normalizeBucket(context.values),
+  };
 }
 
 function LogicConnector({ value }) {
@@ -164,85 +286,111 @@ function LogicConnector({ value }) {
   );
 }
 
-function NestedLogicBuilder({ formattedPrice }) {
+function LogicGroupEditor({ node, onAction, depth = 0, path = "根", canDelete = false }) {
+  const update = (patch) => onAction({ type: "update-node", nodeId: node.id, patch });
+  const children = Array.isArray(node.children) ? node.children : [];
+
   return (
-    <div className="alert-logic-builder">
-      <div className="alert-logic-group root">
-        <div className="alert-logic-group-header">
-          <div>
-            <div className="alert-logic-title">根逻辑组</div>
-            <div className="alert-logic-desc">当此组为真时触发警报</div>
-          </div>
-          <div className="alert-logic-actions">
-            <label className="alert-not-toggle">
-              <input type="checkbox" />
-              <span>NOT</span>
-            </label>
-            <select defaultValue="AND" className="alert-logic-select">
-              <option>AND</option>
-              <option>OR</option>
-            </select>
-          </div>
+    <div className={`alert-logic-group ${depth === 0 ? "root" : "nested"}`}>
+      <div className={`alert-logic-group-header ${depth > 0 ? "compact" : ""}`}>
+        <div>
+          <div className="alert-logic-title">{path}逻辑组</div>
+          <div className="alert-logic-desc">{children.length} 个子节点，组内按 {node.op || "AND"} 判断</div>
         </div>
-
-        <ConditionCard index="A" source="最新价" operator="上穿" rightType="固定数值" value={formattedPrice} tone="amber" />
-        <LogicConnector value="AND" />
-
-        <div className="alert-logic-group nested">
-          <div className="alert-logic-group-header compact">
-            <div>
-              <div className="alert-logic-title">子逻辑组</div>
-              <div className="alert-logic-desc">指标条件满足其一即可</div>
-            </div>
-            <div className="alert-logic-actions">
-              <label className="alert-not-toggle">
-                <input type="checkbox" />
-                <span>NOT</span>
-              </label>
-              <select defaultValue="OR" className="alert-logic-select">
-                <option>AND</option>
-                <option>OR</option>
-              </select>
-            </div>
-          </div>
-          <ConditionCard index="B1" source="RSI(14)" operator="大于" rightType="固定数值" value="70" tone="purple" />
-          <LogicConnector value="OR" />
-          <ConditionCard index="B2" source="MACD Histogram" operator="上穿" rightType="固定数值" value="0" tone="blue" />
+        <div className="alert-logic-actions">
+          <label className="alert-not-toggle">
+            <input type="checkbox" checked={Boolean(node.not)} onChange={(event) => update({ not: event.target.checked })} />
+            <span>NOT</span>
+          </label>
+          <select value={node.op || "AND"} onChange={(event) => update({ op: event.target.value })} className="alert-logic-select">
+            <option value="AND">AND</option>
+            <option value="OR">OR</option>
+          </select>
+          <button type="button" onClick={() => onAction({ type: "duplicate-node", nodeId: node.id })} disabled={depth === 0}>复制组</button>
+          <button type="button" onClick={() => onAction({ type: "delete-node", nodeId: node.id })} disabled={!canDelete}>删除组</button>
         </div>
+      </div>
 
-        <div className="alert-logic-footer">
-          <button className="alert-btn alert-btn-secondary" type="button" disabled>+ 添加条件</button>
-          <button className="alert-btn alert-btn-secondary" type="button" disabled>+ 添加子组</button>
-          <button className="alert-btn alert-btn-secondary" type="button" disabled>复制组</button>
-          <button className="alert-btn alert-btn-secondary danger" type="button" disabled>删除组</button>
+      {children.map((child, index) => (
+        <div key={child.id} className="alert-logic-node">
+          {index > 0 && <LogicConnector value={node.op || "AND"} />}
+          {child.type === "group" ? (
+            <LogicGroupEditor
+              node={child}
+              onAction={onAction}
+              depth={depth + 1}
+              path={`${path}.${index + 1}`}
+              canDelete={children.length > 1}
+            />
+          ) : (
+            <ConditionCard
+              node={child}
+              index={`${path}.${index + 1}`}
+              onAction={onAction}
+              canDelete={children.length > 1}
+            />
+          )}
         </div>
+      ))}
+
+      <div className="alert-logic-footer">
+        <button className="alert-btn alert-btn-secondary" type="button" onClick={() => onAction({ type: "add-condition", nodeId: node.id })}>+ 添加条件</button>
+        <button className="alert-btn alert-btn-secondary" type="button" onClick={() => onAction({ type: "add-group", nodeId: node.id })}>+ 添加子组</button>
       </div>
     </div>
   );
 }
 
-function ExpirationAndNotification() {
+function NestedLogicBuilder({ expression, onAction }) {
+  return (
+    <div className="alert-logic-builder">
+      <LogicGroupEditor node={expression} onAction={onAction} />
+    </div>
+  );
+}
+
+function ExpirationAndNotification({ draft, onDraftChange }) {
+  const update = (patch) => onDraftChange((prev) => ({ ...prev, ...patch }));
+  const updateChannel = (key, checked) => {
+    onDraftChange((prev) => ({
+      ...prev,
+      channels: { ...prev.channels, [key]: checked },
+    }));
+  };
+
   return (
     <div className="alert-two-column">
       <section className="alert-settings-card">
         <SectionHeader
           kicker="步骤 4"
           title="到期条件"
-          desc="按触发次数或时间自动停用，当前只做版面。"
+          desc="按触发次数或时间自动停用。"
         />
         <div className="alert-form-grid single">
           <label className="alert-field">
+            <span>触发时机</span>
+            <select value={draft.triggerOn} onChange={(event) => update({ triggerOn: event.target.value })}>
+              {TRIGGER_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </label>
+          <label className="alert-field">
             <span>触发次数</span>
-            <select defaultValue="once">
+            <select value={draft.maxTriggerMode} onChange={(event) => update({ maxTriggerMode: event.target.value })}>
               <option value="once">仅一次</option>
               <option value="3">3 次</option>
               <option value="custom">自定义次数</option>
               <option value="unlimited">无限制</option>
             </select>
           </label>
+          {draft.maxTriggerMode === "custom" && (
+            <label className="alert-field">
+              <span>自定义次数</span>
+              <input type="number" min="1" step="1" value={draft.customMaxTriggers} onChange={(event) => update({ customMaxTriggers: event.target.value })} />
+            </label>
+          )}
           <label className="alert-field">
             <span>时间到期</span>
-            <select defaultValue="never">
+            <select value={draft.expiresMode} onChange={(event) => update({ expiresMode: event.target.value })}>
               <option value="1h">1 小时后</option>
               <option value="today">当天结束</option>
               <option value="7d">7 天后</option>
@@ -250,9 +398,15 @@ function ExpirationAndNotification() {
               <option value="never">永不过期</option>
             </select>
           </label>
+          {draft.expiresMode === "custom" && (
+            <label className="alert-field">
+              <span>到期时间</span>
+              <input type="datetime-local" value={draft.customExpiresAt} onChange={(event) => update({ customExpiresAt: event.target.value })} />
+            </label>
+          )}
           <label className="alert-field">
             <span>触发后行为</span>
-            <select defaultValue="auto-disable">
+            <select value={draft.afterTrigger} onChange={(event) => update({ afterTrigger: event.target.value })}>
               <option value="auto-disable">达到限制后自动停用</option>
               <option value="keep">始终保持启用</option>
               <option value="pause">触发后暂停</option>
@@ -268,14 +422,14 @@ function ExpirationAndNotification() {
           desc="选择发送什么通知，以及如何发送。"
         />
         <div className="alert-channel-grid">
-          {[
-            ["应用内提示", "右上角 Toast"],
-            ["浏览器通知", "需要授权后启用"],
-            ["声音提醒", "默认关闭"],
-            ["触发历史", "始终记录"],
-          ].map(([title, desc], index) => (
-            <label key={title} className="alert-channel-card">
-              <input type="checkbox" defaultChecked={index === 0 || index === 3} />
+          {CHANNEL_OPTIONS.map(({ key, title, desc }) => (
+            <label key={key} className="alert-channel-card">
+              <input
+                type="checkbox"
+                checked={Boolean(draft.channels?.[key])}
+                disabled={key === "history"}
+                onChange={(event) => updateChannel(key, event.target.checked)}
+              />
               <span>
                 <strong>{title}</strong>
                 <small>{desc}</small>
@@ -285,35 +439,148 @@ function ExpirationAndNotification() {
         </div>
         <label className="alert-field alert-message-template">
           <span>消息模板</span>
-          <textarea defaultValue="{{symbol}} {{interval}} 命中警报：{{condition}}，当前值 {{value}}" rows={3} />
+          <textarea value={draft.messageTemplate} onChange={(event) => update({ messageTemplate: event.target.value })} rows={3} />
         </label>
         <label className="alert-field">
           <span>通知冷却</span>
-          <select defaultValue="30s">
+          <select value={draft.cooldownMode} onChange={(event) => update({ cooldownMode: event.target.value })}>
             <option value="always">每次触发都通知</option>
             <option value="30s">冷却 30 秒</option>
             <option value="5m">冷却 5 分钟</option>
             <option value="custom">自定义</option>
           </select>
         </label>
+        {draft.cooldownMode === "custom" && (
+          <label className="alert-field">
+            <span>冷却秒数</span>
+            <input type="number" min="0" step="1" value={draft.customCooldownSeconds} onChange={(event) => update({ customCooldownSeconds: event.target.value })} />
+          </label>
+        )}
       </section>
     </div>
   );
 }
 
-function RulePreview({ product, fallbackSymbol, interval, formattedPrice }) {
+function RulePreview({ draft, product, fallbackSymbol, interval }) {
   const symbol = product?.symbol || fallbackSymbol || "BTCUSDT";
+  const maxTriggers = draft.maxTriggerMode === "unlimited"
+    ? "无限制触发"
+    : `最多触发 ${draft.maxTriggerMode === "custom" ? draft.customMaxTriggers : (draft.maxTriggerMode === "3" ? 3 : 1)} 次`;
   return (
     <div className="alert-rule-preview-box">
       <div className="alert-preview-label">规则摘要预览</div>
       <div className="alert-preview-text">
-        {symbol} {interval}：价格上穿 {formattedPrice} 且 (RSI(14) 大于 70 或 MACD Histogram 上穿 0) 时提醒；仅触发一次，通知到应用内提示与触发历史。
+        {symbol} {interval}：当 {describeExpression(draft.expression)} 时提醒；{maxTriggers}，冷却策略 {draft.cooldownMode}。
       </div>
     </div>
   );
 }
 
-function RuleListCard({ title, symbol, summary, status, expiry, channels }) {
+function AlertTraceNode({ node, depth = 0 }) {
+  if (!node) return null;
+  const statusLabel = {
+    matched: "命中",
+    not_matched: "未命中",
+    missing_value: "缺少当前值",
+    missing_previous: "缺少上一值",
+    unsupported_comparator: "暂不支持",
+    invalid: "无效",
+  }[node.status] || node.status || "--";
+  const details = node.details || {};
+  const hasDetails = Object.keys(details).length > 0;
+  return (
+    <div className={`alert-test-trace-node depth-${Math.min(depth, 3)} ${node.result ? "is-true" : "is-false"}`}>
+      <div className="alert-test-trace-main">
+        <span className="alert-test-result-dot" />
+        <div>
+          <div className="alert-test-trace-title">{node.summary || "条件"}</div>
+          {hasDetails && (
+            <div className="alert-test-trace-details">
+              当前 {details.left ?? "--"} / 右值 {details.right ?? "--"}
+              {details.previousLeft !== undefined && ` · 上一 ${details.previousLeft ?? "--"}`}
+              {details.previousRight !== undefined && ` / 上一右值 ${details.previousRight ?? "--"}`}
+              {details.rangeMin !== undefined && ` · 区间 ${details.rangeMin} 到 ${details.rangeMax}`}
+              {details.percentChange !== undefined && ` · 涨跌幅 ${Number(details.percentChange).toFixed(2)}%`}
+            </div>
+          )}
+        </div>
+        <span className="alert-test-status">{statusLabel}</span>
+      </div>
+      {Array.isArray(node.children) && node.children.length > 0 && (
+        <div className="alert-test-trace-children">
+          {node.children.map((child) => (
+            <AlertTraceNode key={child.path} node={child} depth={depth + 1} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuleTestPanel({
+  testContext,
+  testResult,
+  testLoading,
+  onContextChange,
+  onResetContext,
+  onRunTest,
+}) {
+  return (
+    <section className="alert-editor-card alert-test-card">
+      <SectionHeader
+        kicker="步骤 6"
+        title="测试规则"
+        desc="用一组可调整的当前/上一根样本值 dry-run 规则，保存前确认每个条件的真假。"
+        action={<span className={`alert-chip ${testResult?.result ? "success" : ""}`}>{testResult ? (testResult.result ? "整体命中" : "整体未命中") : "未测试"}</span>}
+      />
+      <div className="alert-test-grid">
+        <div className="alert-test-column">
+          <div className="alert-test-column-title">上一根样本</div>
+          {TEST_VALUE_FIELDS.map((field) => (
+            <label key={`previous-${field.key}`} className="alert-field compact">
+              <span>{field.label}</span>
+              <input
+                type="number"
+                value={testContext.previous[field.key] ?? ""}
+                onChange={(event) => onContextChange("previous", field.key, event.target.value)}
+              />
+            </label>
+          ))}
+        </div>
+        <div className="alert-test-column">
+          <div className="alert-test-column-title">当前样本</div>
+          {TEST_VALUE_FIELDS.map((field) => (
+            <label key={`values-${field.key}`} className="alert-field compact">
+              <span>{field.label}</span>
+              <input
+                type="number"
+                value={testContext.values[field.key] ?? ""}
+                onChange={(event) => onContextChange("values", field.key, event.target.value)}
+              />
+            </label>
+          ))}
+        </div>
+      </div>
+      <div className="alert-test-actions">
+        <button className="alert-btn alert-btn-secondary" type="button" onClick={onResetContext} disabled={testLoading}>重置为图表价</button>
+        <button className="alert-btn alert-btn-primary" type="button" onClick={onRunTest} disabled={testLoading}>
+          {testLoading ? "测试中..." : "测试规则"}
+        </button>
+      </div>
+      {testResult && (
+        <div className="alert-test-result">
+          <div className="alert-test-summary">
+            <strong>{testResult.result ? "这组样本会触发警报" : "这组样本不会触发警报"}</strong>
+            <span>结果由后端 evaluator 返回，和未来实时触发判断共用同一套逻辑。</span>
+          </div>
+          <AlertTraceNode node={testResult.trace} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RuleListCard({ title, symbol, summary, status, expiry, channels, enabled, onToggle, onDelete, onDuplicate, onEdit, busy }) {
   return (
     <div className="alert-rule-card detailed">
       <div className="alert-rule-main">
@@ -329,15 +596,16 @@ function RuleListCard({ title, symbol, summary, status, expiry, channels }) {
         </div>
       </div>
       <div className="alert-card-actions">
-        <button type="button" disabled>编辑</button>
-        <button type="button" disabled>复制</button>
-        <button type="button" disabled>停用</button>
+        <button type="button" onClick={onEdit} disabled={busy}>编辑</button>
+        <button type="button" onClick={onDuplicate} disabled={busy}>复制</button>
+        <button type="button" onClick={onToggle} disabled={busy}>{enabled ? "停用" : "启用"}</button>
+        <button type="button" onClick={onDelete} disabled={busy}>删除</button>
       </div>
     </div>
   );
 }
 
-function HistoryItem({ time, symbol, title, value, channels }) {
+function HistoryItem({ time, symbol, title, value, channels, onViewRule }) {
   return (
     <div className="alert-history-item">
       <div className="alert-timeline-dot" />
@@ -347,7 +615,7 @@ function HistoryItem({ time, symbol, title, value, channels }) {
         <div className="alert-timeline-time">{time} · {channels}</div>
         <div className="alert-history-actions">
           <button type="button" disabled>确认</button>
-          <button type="button" disabled>查看规则</button>
+          <button type="button" onClick={onViewRule} disabled={!onViewRule}>查看规则</button>
         </div>
       </div>
     </div>
@@ -369,6 +637,23 @@ export default function AlertsPanel({
   const [panelWidth, setPanelWidth] = useState(520);
   const [isResizing, setIsResizing] = useState(false);
   const [selectedProductKey, setSelectedProductKey] = useState("");
+  const [selectedInterval, setSelectedInterval] = useState("");
+  const [rules, setRules] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [alertLoading, setAlertLoading] = useState(false);
+  const [alertSaving, setAlertSaving] = useState(false);
+  const [alertError, setAlertError] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [editingRuleId, setEditingRuleId] = useState("");
+  const [draft, setDraft] = useState(() => createDefaultAlertDraft({
+    symbol: currentSymbol,
+    interval: currentInterval || "1m",
+    price: displayPrice,
+  }));
+  const [testContext, setTestContext] = useState(() => createDefaultTestContext(displayPrice));
+  const [testLoading, setTestLoading] = useState(false);
+  const [testResult, setTestResult] = useState(null);
 
   const marketLabel = MARKET_LABELS[currentMarketType] || currentMarketType || "--";
   const formattedPrice = formatPrice(displayPrice);
@@ -388,6 +673,247 @@ export default function AlertsPanel({
   const effectiveSelectedProductKey = selectedProductExists ? selectedProductKey : defaultProductKey;
   const selectedProduct = watchlistProducts.find((item) => item.key === effectiveSelectedProductKey) || null;
   const currentProductMissing = Boolean(currentSymbol) && !currentWatchProduct;
+  const effectiveInterval = selectedInterval || (intervalLabel !== "--" ? intervalLabel : "1m");
+  const canCreateAlert = Boolean(selectedProduct?.symbol || currentSymbol) && !alertSaving;
+  const editorModeLabel = editingRuleId ? "更新警报" : "创建警报";
+
+  const loadAlerts = useCallback(async (signal) => {
+    setAlertLoading(true);
+    setAlertError("");
+    try {
+      const [nextRules, nextHistory] = await Promise.all([
+        fetchAlertRules({ signal }),
+        fetchAlertHistory({ limit: 100 }, { signal }),
+      ]);
+      setRules(Array.isArray(nextRules) ? nextRules : []);
+      setHistory(Array.isArray(nextHistory) ? nextHistory : []);
+    } catch (err) {
+      if (err?.name === "AbortError") return;
+      setAlertError(err?.detail || err?.message || "警报数据加载失败");
+    } finally {
+      setAlertLoading(false);
+    }
+  }, []);
+
+  const filteredRules = useMemo(() => {
+    const needle = searchTerm.trim().toLowerCase();
+    return rules.filter((rule) => {
+      if (statusFilter === "enabled" && !rule.enabled) return false;
+      if (statusFilter === "paused" && rule.enabled) return false;
+      if (statusFilter === "expired") {
+        const expiresAt = Number(rule.expiresAt);
+        if (!Number.isFinite(expiresAt) || expiresAt > Date.now()) return false;
+      }
+      if (!needle) return true;
+      const target = rule.target || {};
+      return [
+        rule.name,
+        rule.description,
+        target.symbol,
+        target.exchange,
+        target.marketType,
+        describeAlertRule(rule),
+        describeAlertChannels(rule),
+      ].some((value) => String(value || "").toLowerCase().includes(needle));
+    });
+  }, [rules, searchTerm, statusFilter]);
+
+  const ruleById = useMemo(() => new Map(rules.map((rule) => [rule.id, rule])), [rules]);
+
+  const filteredHistory = useMemo(() => {
+    const needle = searchTerm.trim().toLowerCase();
+    if (!needle) return history;
+    return history.filter((event) => {
+      const rule = ruleById.get(event.ruleId);
+      const target = event.target || rule?.target || {};
+      return [
+        event.message,
+        event.ruleId,
+        target.symbol,
+        rule?.name,
+        JSON.stringify(event.values || {}),
+      ].some((value) => String(value || "").toLowerCase().includes(needle));
+    });
+  }, [history, ruleById, searchTerm]);
+
+  const resetDraft = useCallback(() => {
+    setEditingRuleId("");
+    setDraft(createDefaultAlertDraft({
+      symbol: selectedProduct?.symbol || currentSymbol,
+      interval: effectiveInterval,
+      price: displayPrice,
+    }));
+    setTestResult(null);
+    setTab("add");
+  }, [currentSymbol, displayPrice, effectiveInterval, selectedProduct]);
+
+  const applyExpressionAction = useCallback((action) => {
+    setDraft((prev) => ({
+      ...prev,
+      expression: expressionDraftReducer(prev.expression, action),
+    }));
+    setTestResult(null);
+  }, []);
+
+  const updateTestContext = useCallback((bucket, key, value) => {
+    setTestContext((prev) => ({
+      ...prev,
+      [bucket]: {
+        ...(prev[bucket] || {}),
+        [key]: value,
+      },
+    }));
+    setTestResult(null);
+  }, []);
+
+  const resetTestContext = useCallback(() => {
+    setTestContext(createDefaultTestContext(displayPrice));
+    setTestResult(null);
+  }, [displayPrice]);
+
+  const runRuleTest = useCallback(async () => {
+    if (!canCreateAlert) return;
+    setTestLoading(true);
+    setAlertError("");
+    try {
+      const payload = buildAlertPayloadFromDraft({
+        draft,
+        product: selectedProduct,
+        fallbackSymbol: currentSymbol,
+        fallbackMarketType: currentMarketType,
+        fallbackExchange: normalizedExchange,
+        interval: effectiveInterval,
+      });
+      const result = await evaluateAlertExpression({
+        expression: payload.expression,
+        context: normalizeTestContext(testContext),
+      });
+      setTestResult(result);
+    } catch (err) {
+      setAlertError(err?.detail || err?.message || "测试规则失败");
+    } finally {
+      setTestLoading(false);
+    }
+  }, [
+    canCreateAlert,
+    currentMarketType,
+    currentSymbol,
+    draft,
+    effectiveInterval,
+    normalizedExchange,
+    selectedProduct,
+    testContext,
+  ]);
+
+  const createCurrentAlert = useCallback(async () => {
+    if (!canCreateAlert) return;
+    setAlertSaving(true);
+    setAlertError("");
+    try {
+      const payload = buildAlertPayloadFromDraft({
+        draft,
+        product: selectedProduct,
+        fallbackSymbol: currentSymbol,
+        fallbackMarketType: currentMarketType,
+        fallbackExchange: normalizedExchange,
+        interval: effectiveInterval,
+      });
+      if (editingRuleId) {
+        await updateAlertRule(editingRuleId, payload);
+      } else {
+        await createAlertRule(payload);
+      }
+      await loadAlerts();
+      setEditingRuleId("");
+      setTab("all");
+    } catch (err) {
+      setAlertError(err?.detail || err?.message || `${editorModeLabel}失败`);
+    } finally {
+      setAlertSaving(false);
+    }
+  }, [
+    canCreateAlert,
+    currentMarketType,
+    currentSymbol,
+    draft,
+    editingRuleId,
+    editorModeLabel,
+    effectiveInterval,
+    loadAlerts,
+    normalizedExchange,
+    selectedProduct,
+  ]);
+
+  const editRule = useCallback((rule) => {
+    if (!rule?.id) return;
+    const target = rule.target || {};
+    setEditingRuleId(rule.id);
+    setDraft(createDraftFromRule(rule));
+    setTestResult(null);
+    setSelectedInterval(target.interval || "");
+    const nextProductKey = buildProductKey({
+      symbol: target.symbol,
+      marketType: target.marketType,
+      exchange: target.exchange,
+    });
+    if (watchlistProducts.some((item) => item.key === nextProductKey)) {
+      setSelectedProductKey(nextProductKey);
+    }
+    setTab("add");
+  }, [watchlistProducts]);
+
+  const toggleRule = useCallback(async (rule) => {
+    if (!rule?.id) return;
+    setAlertSaving(true);
+    setAlertError("");
+    try {
+      const updated = await setAlertRuleEnabled(rule.id, !rule.enabled);
+      setRules((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+    } catch (err) {
+      setAlertError(err?.detail || err?.message || "更新警报状态失败");
+    } finally {
+      setAlertSaving(false);
+    }
+  }, []);
+
+  const removeRule = useCallback(async (rule) => {
+    if (!rule?.id) return;
+    setAlertSaving(true);
+    setAlertError("");
+    try {
+      await deleteAlertRule(rule.id);
+      setRules((prev) => prev.filter((item) => item.id !== rule.id));
+      setHistory((prev) => prev.filter((item) => item.ruleId !== rule.id));
+    } catch (err) {
+      setAlertError(err?.detail || err?.message || "删除警报失败");
+    } finally {
+      setAlertSaving(false);
+    }
+  }, []);
+
+  const duplicateRule = useCallback(async (rule) => {
+    if (!rule) return;
+    setAlertSaving(true);
+    setAlertError("");
+    try {
+      const { id, createdAt, updatedAt, triggerCount, lastTriggeredAt, ...payload } = rule;
+      void id;
+      void createdAt;
+      void updatedAt;
+      void triggerCount;
+      void lastTriggeredAt;
+      await createAlertRule({
+        ...payload,
+        name: `${rule.name || "警报"} 副本`,
+        enabled: false,
+      });
+      await loadAlerts();
+    } catch (err) {
+      setAlertError(err?.detail || err?.message || "复制警报失败");
+    } finally {
+      setAlertSaving(false);
+    }
+  }, [loadAlerts]);
 
   const startResizing = useCallback((event) => {
     setIsResizing(true);
@@ -416,6 +942,19 @@ export default function AlertsPanel({
     };
   }, [isResizing, resize, stopResizing]);
 
+  useEffect(() => {
+    if (intervalLabel && intervalLabel !== "--") {
+      setSelectedInterval((prev) => prev || intervalLabel);
+    }
+  }, [intervalLabel]);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const controller = new AbortController();
+    loadAlerts(controller.signal);
+    return () => controller.abort();
+  }, [isOpen, loadAlerts]);
+
   if (!isOpen) return null;
 
   return (
@@ -433,10 +972,10 @@ export default function AlertsPanel({
         <div className="alert-panel-header">
           <div>
             <h3 className="alert-panel-title">
-              🔔 警报中心
-              <span className="alert-layout-pill">页面设计</span>
+              警报中心
+              <span className="alert-layout-pill">{rules.length} 条规则</span>
             </h3>
-            <div className="alert-panel-subtitle">基于自选商品构建复杂触发规则；本轮不保存、不触发、不发送通知。</div>
+            <div className="alert-panel-subtitle">规则保存 · 触发历史 · 当前图表上下文</div>
           </div>
           <button className="alert-panel-close" onClick={onClose} type="button">✕</button>
         </div>
@@ -466,6 +1005,18 @@ export default function AlertsPanel({
             </button>
           ))}
         </div>
+
+        {(alertError || alertLoading) && (
+          <div className="alert-guidance-box">
+            <div>
+              <strong>{alertError ? "警报系统提示" : "正在同步警报数据"}</strong>
+              <span>{alertError || "正在从后端读取规则和触发历史。"}</span>
+            </div>
+            <button className="alert-btn alert-btn-secondary" type="button" onClick={() => loadAlerts()} disabled={alertLoading}>
+              刷新
+            </button>
+          </div>
+        )}
 
         <div className="alert-panel-content">
           {tab === "add" && (
@@ -500,8 +1051,8 @@ export default function AlertsPanel({
                     </label>
                     <label className="alert-field small">
                       <span>周期</span>
-                      <select defaultValue={intervalLabel}>
-                        {[intervalLabel, "1m", "5m", "15m", "1h", "4h", "1d"].filter(Boolean).map((item) => (
+                      <select value={effectiveInterval} onChange={(event) => setSelectedInterval(event.target.value)}>
+                        {Array.from(new Set([intervalLabel, "1m", "5m", "15m", "1h", "4h", "1d"].filter(Boolean))).map((item) => (
                           <option key={item}>{item}</option>
                         ))}
                       </select>
@@ -524,6 +1075,17 @@ export default function AlertsPanel({
                     <button className="alert-btn alert-btn-primary" type="button" disabled>加入自选并继续</button>
                   </div>
                 )}
+
+                <div className="alert-form-grid single alert-draft-meta">
+                  <label className="alert-field">
+                    <span>规则名称</span>
+                    <input value={draft.name} onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))} />
+                  </label>
+                  <label className="alert-field">
+                    <span>规则说明</span>
+                    <textarea value={draft.description} onChange={(event) => setDraft((prev) => ({ ...prev, description: event.target.value }))} rows={2} />
+                  </label>
+                </div>
               </section>
 
               <section className="alert-editor-card">
@@ -533,21 +1095,33 @@ export default function AlertsPanel({
                   desc="单个条件使用“左值 + 操作符 + 右值”；多个条件可通过 AND / OR / NOT 组成任意嵌套逻辑树。"
                   action={<span className="alert-chip">规则树</span>}
                 />
-                <NestedLogicBuilder formattedPrice={formattedPrice} />
+                <NestedLogicBuilder expression={draft.expression} onAction={applyExpressionAction} />
               </section>
 
-              <ExpirationAndNotification />
+              <ExpirationAndNotification draft={draft} onDraftChange={setDraft} />
 
               <RulePreview
+                draft={draft}
                 product={selectedProduct}
                 fallbackSymbol={symbolLabel}
                 interval={intervalLabel}
-                formattedPrice={formattedPrice}
+              />
+
+              <RuleTestPanel
+                testContext={testContext}
+                testResult={testResult}
+                testLoading={testLoading}
+                onContextChange={updateTestContext}
+                onResetContext={resetTestContext}
+                onRunTest={runRuleTest}
               />
 
               <div className="alert-editor-actions sticky-actions">
-                <button className="alert-btn alert-btn-secondary" type="button" disabled>保存草稿（待实现）</button>
-                <button className="alert-btn alert-btn-primary" type="button" disabled>创建警报（待实现）</button>
+                <button className="alert-btn alert-btn-secondary" type="button" onClick={resetDraft} disabled={alertSaving}>新建草稿</button>
+                <button className="alert-btn alert-btn-secondary" type="button" onClick={() => loadAlerts()} disabled={alertLoading || alertSaving}>刷新规则</button>
+                <button className="alert-btn alert-btn-primary" type="button" onClick={createCurrentAlert} disabled={!canCreateAlert}>
+                  {alertSaving ? "保存中..." : editorModeLabel}
+                </button>
               </div>
             </div>
           )}
@@ -555,14 +1129,20 @@ export default function AlertsPanel({
           {tab === "all" && (
             <div className="alert-section-stack">
               <div className="alert-toolbar-row no-margin">
-                <input className="alert-search" placeholder="搜索商品、条件或通知方式（版面预览）" />
-                <select className="alert-filter-select" defaultValue="all">
+                <input
+                  className="alert-search"
+                  placeholder="搜索商品、条件或通知方式"
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                />
+                <select className="alert-filter-select" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
                   <option value="all">全部状态</option>
                   <option value="enabled">启用</option>
                   <option value="paused">停用</option>
                   <option value="expired">已过期</option>
                 </select>
-                <button className="alert-btn alert-btn-primary" type="button" disabled>+ 添加警报</button>
+                <button className="alert-btn alert-btn-secondary" type="button" onClick={() => loadAlerts()} disabled={alertLoading}>刷新</button>
+                <button className="alert-btn alert-btn-primary" type="button" onClick={resetDraft}>+ 添加警报</button>
               </div>
 
               <div className="alert-filter-chip-row">
@@ -573,34 +1153,44 @@ export default function AlertsPanel({
                 <span>通知渠道</span>
               </div>
 
-              <RuleListCard
-                title="价格 + 指标组合警报"
-                symbol={selectedProduct?.symbol || symbolLabel}
-                summary={`价格上穿 ${formattedPrice} 且 (RSI > 70 或 MACD 上穿 0)`}
-                status="启用 · 版面示例"
-                expiry="仅一次"
-                channels="Toast / 历史"
-              />
-              <RuleListCard
-                title="成交量突破"
-                symbol="ETHUSDT"
-                summary="当前成交量大于 20 根均量的 2 倍"
-                status="停用 · 版面示例"
-                expiry="7 天后到期"
-                channels="浏览器通知 / 声音"
-              />
+              {filteredRules.map((rule) => (
+                <RuleListCard
+                  key={rule.id}
+                  title={rule.name}
+                  symbol={rule.target?.symbol || "--"}
+                  summary={describeAlertRule(rule)}
+                  status={`${rule.enabled ? "启用" : "停用"} · 已触发 ${rule.triggerCount || 0} 次`}
+                  expiry={rule.maxTriggers ? `最多 ${rule.maxTriggers} 次` : "无限制"}
+                  channels={describeAlertChannels(rule)}
+                  enabled={rule.enabled}
+                  busy={alertSaving}
+                  onEdit={() => editRule(rule)}
+                  onToggle={() => toggleRule(rule)}
+                  onDuplicate={() => duplicateRule(rule)}
+                  onDelete={() => {
+                    if (window.confirm(`删除警报“${rule.name}”？`)) removeRule(rule);
+                  }}
+                />
+              ))}
 
-              <div className="alert-empty-state compact">
-                <div className="alert-empty-title">真实规则列表尚未接入</div>
-                <div className="alert-empty-desc">后续保存逻辑完成后，这里会显示所有警报并支持编辑、复制、停用和删除。</div>
-              </div>
+              {filteredRules.length === 0 && (
+                <div className="alert-empty-state compact">
+                  <div className="alert-empty-title">{rules.length === 0 ? "暂无警报规则" : "没有匹配的警报"}</div>
+                  <div className="alert-empty-desc">可以从当前商品快速创建第一条规则，后续触发引擎接入后会自动记录命中历史。</div>
+                </div>
+              )}
             </div>
           )}
 
           {tab === "history" && (
             <div className="alert-section-stack">
               <div className="alert-toolbar-row no-margin">
-                <input className="alert-search" placeholder="筛选商品或规则（版面预览）" />
+                <input
+                  className="alert-search"
+                  placeholder="筛选商品或规则"
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                />
                 <select className="alert-filter-select" defaultValue="7d">
                   <option value="today">今天</option>
                   <option value="7d">最近 7 天</option>
@@ -611,30 +1201,38 @@ export default function AlertsPanel({
                   <option value="unread">未确认</option>
                   <option value="ack">已确认</option>
                 </select>
-                <button className="alert-btn alert-btn-secondary" type="button" disabled>清空历史</button>
+                <button className="alert-btn alert-btn-secondary" type="button" onClick={() => loadAlerts()} disabled={alertLoading}>刷新历史</button>
               </div>
 
               <div className="alert-history-list">
-                <HistoryItem
-                  time="刚刚 · 示例"
-                  symbol={selectedProduct?.symbol || symbolLabel}
-                  title="价格 + 指标组合警报命中"
-                  value={formattedPrice}
-                  channels="Toast / 历史"
-                />
-                <HistoryItem
-                  time="昨日 21:30 · 示例"
-                  symbol="ETHUSDT"
-                  title="成交量突破警报命中"
-                  value="2.4x 均量"
-                  channels="浏览器通知 / 声音"
-                />
+                {filteredHistory.map((event) => {
+                  const rule = ruleById.get(event.ruleId);
+                  const target = event.target || rule?.target || {};
+                  const values = event.values || {};
+                  const valueText = values.close ?? values.value ?? Object.values(values)[0] ?? "--";
+                  return (
+                    <HistoryItem
+                      key={event.id}
+                      time={formatAlertTime(event.createdAt)}
+                      symbol={target.symbol || rule?.target?.symbol || "--"}
+                      title={event.message || `${rule?.name || "警报"} 命中`}
+                      value={valueText}
+                      channels={rule ? describeAlertChannels(rule) : "历史"}
+                      onViewRule={rule ? () => {
+                        setSearchTerm(rule.name || rule.id);
+                        setTab("all");
+                      } : null}
+                    />
+                  );
+                })}
               </div>
 
-              <div className="alert-empty-state compact">
-                <div className="alert-empty-title">暂无真实触发历史</div>
-                <div className="alert-empty-desc">触发逻辑接入后，这里会展示命中条件、触发值、通知渠道和确认状态。</div>
-              </div>
+              {filteredHistory.length === 0 && (
+                <div className="alert-empty-state compact">
+                  <div className="alert-empty-title">暂无触发历史</div>
+                  <div className="alert-empty-desc">触发逻辑接入后，这里会展示命中条件、触发值、通知渠道和确认状态。</div>
+                </div>
+              )}
             </div>
           )}
         </div>

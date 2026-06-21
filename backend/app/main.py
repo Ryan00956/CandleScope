@@ -41,6 +41,7 @@ except Exception:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.v1.alerts import router as alerts_router
 from app.api.v1.indicators import router as indicators_router  # indicator engine v2
 from app.api.v1.exchanges import router as exchanges_router
 from app.api.v1.klines import router as klines_router
@@ -73,6 +74,7 @@ app.add_middleware(
 app.include_router(klines_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
+app.include_router(alerts_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(exchanges_router, prefix="/api/v1")
 app.include_router(symbols_router, prefix="/api/v1")
@@ -88,6 +90,8 @@ app.include_router(price_ws_router, prefix="/api/v1")
 async def _init_data_manager() -> None:
     """Create and start the DataEngine runtime."""
     try:
+        from app.alerts.facade import AlertFacade
+        from app.alerts.runtime import AlertRuntimeEngine
         from app.data_engine.runtime import start_data_engine
         from app.indicator.data_manager_bridge import bridge_indicator_engine
 
@@ -101,6 +105,17 @@ async def _init_data_manager() -> None:
         except Exception as exc:
             logger.warning("IndicatorEngine bridge failed: %s", exc)
             print(f"[startup] IndicatorEngine bridge failed: {exc}")
+
+        try:
+            alert_facade = AlertFacade()
+            alert_runtime = AlertRuntimeEngine(facade=alert_facade, data_manager=runtime.data_manager)
+            app.state.alert_facade = alert_facade
+            app.state.alert_runtime = alert_runtime
+            await alert_runtime.start()
+            print("[startup] AlertRuntime bridged to DataManager ✓")
+        except Exception as exc:
+            logger.warning("AlertRuntime bridge failed: %s", exc, exc_info=True)
+            print(f"[startup] AlertRuntime bridge failed: {exc}")
 
     except Exception as exc:
         logger.error("DataManager initialization failed: %s", exc, exc_info=True)
@@ -150,6 +165,14 @@ async def shutdown_event() -> None:
             print("[shutdown] IndicatorEngine shut down ✓")
         except Exception as exc:
             print(f"[shutdown] IndicatorEngine shutdown error: {exc}")
+
+    alert_runtime = getattr(app.state, "alert_runtime", None)
+    if alert_runtime is not None:
+        try:
+            await alert_runtime.stop()
+            print("[shutdown] AlertRuntime shut down ✓")
+        except Exception as exc:
+            print(f"[shutdown] AlertRuntime shutdown error: {exc}")
 
     runtime = getattr(app.state, "data_engine_runtime", None)
     if runtime is not None:

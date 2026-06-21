@@ -39,7 +39,14 @@ Start the backend:
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+```
+
+On Windows, you can use the helper script instead:
+
+```powershell
+cd backend
+.\dev-server.ps1
 ```
 
 Start the frontend:
@@ -51,17 +58,17 @@ npm run dev
 ```
 
 In local development the frontend uses same-origin `/api/v1`; Vite proxies
-HTTP and WebSocket traffic to `http://localhost:8000`. Both
-`http://localhost:5173` and `http://127.0.0.1:5173` are valid dev entrypoints.
+HTTP and WebSocket traffic to `http://127.0.0.1:18080` by default. Vite serves
+the app at `http://127.0.0.1:15173`.
 
 Default URLs:
 
 | Service | URL |
 |---|---|
-| Frontend | `http://localhost:5173` |
-| Backend | `http://localhost:8000` |
-| Swagger / OpenAPI | `http://localhost:8000/docs` |
-| Health | `http://localhost:8000/health` |
+| Frontend | `http://127.0.0.1:15173` |
+| Backend | `http://127.0.0.1:18080` |
+| Swagger / OpenAPI | `http://127.0.0.1:18080/docs` |
+| Health | `http://127.0.0.1:18080/health` |
 
 On Linux/WSL, create a virtual environment first if desired:
 
@@ -198,7 +205,7 @@ cd frontend
 npm run dev
 npm run build
 npm run lint
-npm run smoke -- --url http://127.0.0.1:5173/
+npm run smoke -- --url http://127.0.0.1:15173/
 ```
 
 ## Indicators And Pyne
@@ -320,7 +327,7 @@ npm run lint
 ```
 
 For rendered frontend smoke checks, start the backend and Vite, then run
-`npm run smoke -- --url http://127.0.0.1:5173/`. The smoke check confirms the
+`npm run smoke -- --url http://127.0.0.1:15173/`. The smoke check confirms the
 status bar reaches `Connected to Binance`, shows non-zero `bars`, reports
 `Live (WebSocket)`, loads the drawing toolbar, and opens the lazy-loaded symbol
 search and Settings panels.

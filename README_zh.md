@@ -40,7 +40,14 @@ CandleScope 是基于 FastAPI、React、Vite 和 Lightweight Charts 构建的轻
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+```
+
+Windows 下也可以直接用脚本：
+
+```powershell
+cd backend
+.\dev-server.ps1
 ```
 
 启动前端：
@@ -52,17 +59,17 @@ npm run dev
 ```
 
 本地开发时，前端默认使用同源 `/api/v1`；Vite 会把 HTTP 和 WebSocket 请求代理到
-`http://localhost:8000`。`http://localhost:5173` 和
-`http://127.0.0.1:5173` 都可以作为开发入口。
+`http://127.0.0.1:18080`。Vite 默认把前端服务跑在
+`http://127.0.0.1:15173`。
 
 默认地址：
 
 | 服务 | URL |
 |---|---|
-| 前端 | `http://localhost:5173` |
-| 后端 | `http://localhost:8000` |
-| Swagger / OpenAPI | `http://localhost:8000/docs` |
-| 健康检查 | `http://localhost:8000/health` |
+| 前端 | `http://127.0.0.1:15173` |
+| 后端 | `http://127.0.0.1:18080` |
+| Swagger / OpenAPI | `http://127.0.0.1:18080/docs` |
+| 健康检查 | `http://127.0.0.1:18080/health` |
 
 Linux/WSL 可先创建虚拟环境：
 
@@ -218,7 +225,7 @@ cd frontend
 npm run dev
 npm run build
 npm run lint
-npm run smoke -- --url http://127.0.0.1:5173/
+npm run smoke -- --url http://127.0.0.1:15173/
 ```
 
 ## 指标和 Pyne
@@ -342,7 +349,7 @@ npm run lint
 ```
 
 渲染层 smoke 检查：启动后端和 Vite 后，运行
-`npm run smoke -- --url http://127.0.0.1:5173/`。该检查会确认状态栏达到
+`npm run smoke -- --url http://127.0.0.1:15173/`。该检查会确认状态栏达到
 `Connected to Binance`、显示非零 `bars`、显示 `Live (WebSocket)`，确认
 drawing toolbar 已加载，并打开懒加载的 symbol search 和 Settings 面板。
 

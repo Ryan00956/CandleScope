@@ -18,26 +18,33 @@
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+```
+
+On Windows, `dev-server.ps1` runs the same development server with UTF-8 output
+enabled:
+
+```powershell
+.\dev-server.ps1
 ```
 
 Default API base:
 
 ```text
-http://localhost:8000
+http://127.0.0.1:18080
 ```
 
 Interactive docs:
 
 ```text
-http://localhost:8000/docs
+http://127.0.0.1:18080/docs
 ```
 
 Health checks:
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/debug/snapshot
+curl http://127.0.0.1:18080/health
+curl http://127.0.0.1:18080/debug/snapshot
 ```
 
 ## Startup Sequence
@@ -218,10 +225,10 @@ HTTP indicator compute is offloaded through dedicated executors:
 Diagnostics are exposed through existing endpoints:
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/debug/snapshot
-curl http://localhost:8000/api/v1/indicators/diagnostics
-curl http://localhost:8000/api/v1/settings/storage/health
+curl http://127.0.0.1:18080/health
+curl http://127.0.0.1:18080/debug/snapshot
+curl http://127.0.0.1:18080/api/v1/indicators/diagnostics
+curl http://127.0.0.1:18080/api/v1/settings/storage/health
 ```
 
 Important fields:
@@ -241,7 +248,7 @@ Run the concurrency benchmark against a live backend:
 
 ```bash
 cd backend
-python scripts/bench_concurrency.py --base-url http://127.0.0.1:8000
+python scripts/bench_concurrency.py --base-url http://127.0.0.1:18080
 ```
 
 The benchmark exercises K-line latest queries, builtin indicator compute, Pyne compute, visible range repair, and the main WebSocket streams, then prints latency percentiles plus diagnostics before/after the run.

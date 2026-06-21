@@ -19,15 +19,15 @@ React/Vite charting UI for CandleScope.
 ## Backend Connection
 
 The frontend uses same-origin `/api/v1` by default. During local development,
-Vite proxies `/api` HTTP and WebSocket traffic to `http://localhost:8000`, so
-both `http://localhost:5173` and `http://127.0.0.1:5173` work without browser
-CORS differences.
+Vite proxies `/api` HTTP and WebSocket traffic to
+`http://127.0.0.1:18080`. The default dev entrypoint is
+`http://127.0.0.1:15173`.
 
 Use `VITE_API_BASE` only when the backend is not reachable through the Vite
 proxy, for example:
 
 ```bash
-VITE_API_BASE=http://localhost:8000/api/v1 npm run dev
+VITE_API_BASE=http://127.0.0.1:18080/api/v1 npm run dev
 ```
 
 ## Exchange Capabilities
@@ -61,7 +61,7 @@ With the backend and Vite running, use the browser smoke check to verify the
 rendered chart, drawing toolbar, lazy symbol search, and lazy Settings panel:
 
 ```bash
-npm run smoke -- --url http://127.0.0.1:5173/
+npm run smoke -- --url http://127.0.0.1:15173/
 ```
 
 On this Windows Codex desktop environment, use the bundled Node executable if `npm` or `node` is not available on `PATH`.

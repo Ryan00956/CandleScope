@@ -18,26 +18,32 @@
 ```bash
 cd backend
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 18080
+```
+
+Windows 下 `dev-server.ps1` 会用同样的开发端口启动，并启用 UTF-8 输出：
+
+```powershell
+.\dev-server.ps1
 ```
 
 默认 API base：
 
 ```text
-http://localhost:8000
+http://127.0.0.1:18080
 ```
 
 交互式文档：
 
 ```text
-http://localhost:8000/docs
+http://127.0.0.1:18080/docs
 ```
 
 健康检查：
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/debug/snapshot
+curl http://127.0.0.1:18080/health
+curl http://127.0.0.1:18080/debug/snapshot
 ```
 
 ## 启动流程
@@ -217,10 +223,10 @@ HTTP 指标计算通过专用 executor 隔离：
 诊断信息挂在现有 endpoints 上：
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/debug/snapshot
-curl http://localhost:8000/api/v1/indicators/diagnostics
-curl http://localhost:8000/api/v1/settings/storage/health
+curl http://127.0.0.1:18080/health
+curl http://127.0.0.1:18080/debug/snapshot
+curl http://127.0.0.1:18080/api/v1/indicators/diagnostics
+curl http://127.0.0.1:18080/api/v1/settings/storage/health
 ```
 
 重要字段：
@@ -240,7 +246,7 @@ curl http://localhost:8000/api/v1/settings/storage/health
 
 ```bash
 cd backend
-python scripts/bench_concurrency.py --base-url http://127.0.0.1:8000
+python scripts/bench_concurrency.py --base-url http://127.0.0.1:18080
 ```
 
 压测会覆盖 K 线 latest 查询、内置指标 compute、Pyne compute、可见区间 repair 和主要 WebSocket 流，并输出延迟分位数以及压测前后的 diagnostics。

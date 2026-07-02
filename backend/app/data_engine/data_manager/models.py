@@ -309,6 +309,42 @@ class DataEventType(str, enum.Enum):
     PRICE_UPDATED = "price.updated"
 
 
+USER_VISIBLE_BACKFILL_REASONS: frozenset[str] = frozenset({
+    "initial_history",
+    "visible_load_more",
+    "visible_range_gap",
+    "visible_seed_gap",
+    "tail_gap",
+})
+
+INTERNAL_BACKFILL_REASONS: frozenset[str] = frozenset({
+    "related_interval_warmup",
+    "full_subscription_warmup",
+    "startup_gap_scan",
+    "background_gap_audit",
+    "latest_refresh",
+    "query_gap",
+    "query_empty",
+    "query_tail_gap",
+    "query_left_gap",
+    "query_shortfall",
+    "query_interior_gap",
+    "price_daily_open",
+})
+
+
+def audience_for_backfill_reason(reason: str | None) -> str:
+    """Classify a backfill completion for browser delivery."""
+    parts = [
+        part.strip()
+        for part in str(reason or "").split("+")
+        if part.strip()
+    ]
+    if any(part in USER_VISIBLE_BACKFILL_REASONS for part in parts):
+        return "user"
+    return "internal"
+
+
 @dataclass(slots=True)
 class DataEvent:
     """Unified event wrapper for the event bus.
@@ -328,11 +364,13 @@ class DataEvent:
     bar: BarData | None = None
     previous_bar: BarData | None = None
     detail: dict[str, Any] = field(default_factory=dict)
+    audience: str = "user"
     timestamp_ms: int = field(default_factory=lambda: int(time.time() * 1000))
 
     def to_dict(self) -> dict:
         d: dict[str, Any] = {
             "event_type": self.event_type.value,
+            "audience": self.audience,
             "exchange": self.key.exchange,
             "symbol": self.key.symbol,
             "interval": self.key.interval,

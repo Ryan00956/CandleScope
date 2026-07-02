@@ -1,10 +1,6 @@
-import { useCallback, useEffect, useRef } from "react";
-import {
-  fetchKlinesHistory,
-  fetchLatestKlines,
-  getMultiStreamUrl,
-} from "../../services/api";
+import { useEffect, useRef } from "react";
 import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks";
+import { parseIntervalSeconds } from "../../utils/intervals";
 
 const WS_RECONNECT_BASE_DELAY = 2_000;
 const WS_RECONNECT_MAX_DELAY = 60_000;
@@ -12,6 +8,8 @@ const WS_MAX_RECONNECT_ATTEMPTS = 20;
 const WS_PING_INTERVAL = 30_000;
 const WS_INITIAL_FALLBACK_DELAY = 4_000;
 const POLLING_INTERVAL_MS = 1_000;
+const WS_RECOVERY_COUNT_BACK = 1_500;
+const TAB_RECOVERY_MIN_HIDDEN_MS = 15_000;
 
 export function useKlineStreamRuntime({
   symbol,
@@ -19,8 +17,7 @@ export function useKlineStreamRuntime({
   marketType,
   trackedIntervals,
   intervalRef,
-  getIntervalDays,
-  commitMergedChartData,
+  seriesDataFeed,
   commitPatchedChartData,
   patchCacheTick,
   updateLastPrice,
@@ -28,42 +25,16 @@ export function useKlineStreamRuntime({
   handleBackfillCompleted,
   setWsStatus,
 }) {
-  const socketRef = useRef(null);
-  const liveSubscribedIntervalsRef = useRef(new Set());
+  const subscriptionRef = useRef(null);
   const trackedIntervalsRef = useRef(trackedIntervals);
 
   useEffect(() => {
     trackedIntervalsRef.current = trackedIntervals;
   }, [trackedIntervals]);
 
-  const syncSocketSubscriptions = useCallback((socket, desiredIntervals) => {
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
-    const desired = new Set(desiredIntervals);
-    const active = liveSubscribedIntervalsRef.current;
-    const toSubscribe = desiredIntervals.filter((intv) => !active.has(intv));
-    const toUnsubscribe = Array.from(active).filter((intv) => !desired.has(intv));
-
-    if (toSubscribe.length > 0) {
-      socket.send(JSON.stringify({
-        action: "subscribe",
-        intervals: toSubscribe,
-      }));
-      toSubscribe.forEach((intv) => active.add(intv));
-    }
-
-    if (toUnsubscribe.length > 0) {
-      socket.send(JSON.stringify({
-        action: "unsubscribe",
-        intervals: toUnsubscribe,
-      }));
-      toUnsubscribe.forEach((intv) => active.delete(intv));
-    }
-  }, []);
-
   useEffect(() => {
     let active = true;
-    let socket = null;
+    let subscription = null;
     let reconnectTimer = null;
     let pingTimer = null;
     let pollInterval = null;
@@ -81,9 +52,7 @@ export function useKlineStreamRuntime({
     const startPing = () => {
       stopPing();
       pingTimer = setInterval(() => {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          try { socket.send("ping"); } catch { /* ignore */ }
-        }
+        subscription?.sendPing();
       }, WS_PING_INTERVAL);
     };
 
@@ -96,10 +65,12 @@ export function useKlineStreamRuntime({
         pollingInFlight = true;
         try {
           const currentIntv = intervalRef.current;
-          const result = await fetchLatestKlines(symbol, currentIntv, 2, marketType, exchange);
+          const result = await seriesDataFeed.getLatest(
+            { exchange, marketType, symbol, interval: currentIntv },
+            { limit: 2, source: "polling-latest", commit: "patch-active" },
+          );
           if (!result?.data?.length) return;
 
-          commitPatchedChartData(symbol, currentIntv, result.data, { source: "polling-latest" });
           const latestTick = result.data[result.data.length - 1];
           updateLastPrice(latestTick, currentIntv);
           setWsStatus((prev) => (prev === "live" ? prev : "fallback"));
@@ -138,68 +109,60 @@ export function useKlineStreamRuntime({
       if (!active) return;
       setWsStatus("connecting");
 
-      if (socket) {
-        try { socket.close(); } catch { /* ignore */ }
-        socket = null;
+      if (subscription) {
+        subscription.close();
+        subscription = null;
       }
 
       try {
-        const url = getMultiStreamUrl(symbol, marketType, exchange);
-        socket = new WebSocket(url);
-        socketRef.current = socket;
-
-        socket.onopen = () => {
-          if (!active) return;
-          markPerfOnce("ws.kline.open", { symbol, marketType, exchange });
-
-          const isReconnection = reconnectAttempts > 0;
-          reconnectDelay = WS_RECONNECT_BASE_DELAY;
-          reconnectAttempts = 0;
-
-          liveSubscribedIntervalsRef.current = new Set();
-          syncSocketSubscriptions(socket, trackedIntervalsRef.current);
-          setWsStatus("live");
-          markPerfOnce("ws.kline.live", {
-            symbol,
-            marketType,
-            exchange,
+        subscription = seriesDataFeed.subscribeBars(
+          { exchange, marketType, symbol },
+          {
             intervals: trackedIntervalsRef.current,
-            source: "socket-open",
-          });
+            onOpen: () => {
+              if (!active) return;
+              markPerfOnce("ws.kline.open", { symbol, marketType, exchange });
 
-          if (pollInterval) {
-            clearInterval(pollInterval);
-            pollInterval = null;
-          }
+              const isReconnection = reconnectAttempts > 0;
+              reconnectDelay = WS_RECONNECT_BASE_DELAY;
+              reconnectAttempts = 0;
 
-          startPing();
-
-          if (isReconnection) {
-            const currentIntv = intervalRef.current;
-            const days = getIntervalDays(currentIntv, exchange);
-            console.log(`[WS-Recovery] Reconnected, reloading full history for ${symbol}@${currentIntv}`);
-            fetchKlinesHistory(symbol, currentIntv, days, marketType, exchange)
-              .then((result) => {
-                if (!active || !result?.data?.length) return;
-                commitMergedChartData(symbol, currentIntv, result.data, { source: "ws-reconnect-history" });
-                const latest = result.data[result.data.length - 1];
-                updateLastPrice(latest, currentIntv);
-                console.log(`[WS-Recovery] Reloaded ${result.data.length} bars after reconnect`);
-              })
-              .catch((err) => {
-                console.warn("[WS-Recovery] Failed to recover after reconnect:", err);
+              setWsStatus("live");
+              markPerfOnce("ws.kline.live", {
+                symbol,
+                marketType,
+                exchange,
+                intervals: trackedIntervalsRef.current,
+                source: "socket-open",
               });
-          }
-        };
 
-        socket.onmessage = (event) => {
-          if (!active) return;
-          try {
-            if (event.data === "pong") return;
+              if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+              }
 
-            const msg = JSON.parse(event.data);
+              startPing();
 
-            if (msg.type === "stream_status") {
+              if (isReconnection) {
+                const currentIntv = intervalRef.current;
+                console.log(`[WS-Recovery] Reconnected, reloading recent bars for ${symbol}@${currentIntv}`);
+                seriesDataFeed.getBars(
+                  { exchange, marketType, symbol, interval: currentIntv },
+                  { countBack: WS_RECOVERY_COUNT_BACK, source: "ws-reconnect-history" },
+                )
+                  .then((result) => {
+                    if (!active || !result?.data?.length) return;
+                    const latest = result.data[result.data.length - 1];
+                    updateLastPrice(latest, currentIntv);
+                    console.log(`[WS-Recovery] Reloaded ${result.data.length} bars after reconnect`);
+                  })
+                  .catch((err) => {
+                    console.warn("[WS-Recovery] Failed to recover after reconnect:", err);
+                  });
+              }
+            },
+            onStreamStatus: (msg) => {
+              if (!active) return;
               if (msg.interval === intervalRef.current) {
                 if (msg.status === "live") {
                   setWsStatus("live");
@@ -213,53 +176,47 @@ export function useKlineStreamRuntime({
                 }
                 if (msg.status === "reconnecting") setWsStatus("reconnecting");
               }
-              return;
-            }
+            },
+            onBackfillCompleted: (msg) => {
+              if (!active) return false;
+              return handleBackfillCompleted(msg);
+            },
+            onKline: ({ interval: msgInterval, tick }) => {
+              if (!active) return;
+              const currentIntv = intervalRef.current;
 
-            if (
-              msg.type === "subscribed" ||
-              msg.type === "connected" ||
-              msg.type === "warning" ||
-              msg.type === "error"
-            ) {
-              return;
-            }
+              if (msgInterval === "1m") {
+                updateRealtimePrice(tick.close);
+              }
 
-            if (handleBackfillCompleted(msg)) return;
-
-            if (msg.type !== "kline" || !msg.data) return;
-
-            const msgInterval = msg.interval;
-            const tick = msg.data;
-            const currentIntv = intervalRef.current;
-
-            if (msgInterval === "1m") {
-              updateRealtimePrice(tick.close);
-            }
-
-            patchCacheTick(symbol, msgInterval, tick, { marketType, exchange });
-
-            if (msgInterval === currentIntv) {
-              markPerfOnce("ws.kline.firstTick", { symbol, marketType, exchange, interval: currentIntv });
-              commitPatchedChartData(symbol, currentIntv, [tick], { source: "kline-ws" });
-              updateLastPrice(tick, currentIntv);
-            }
-          } catch (parseErr) {
-            console.error("WS parse failed:", parseErr);
-          }
-        };
-
-        socket.onerror = () => {
-          if (!active) return;
-          startPolling();
-        };
-
-        socket.onclose = () => {
-          if (!active) return;
-          stopPing();
-          startPolling();
-          scheduleReconnect();
-        };
+              if (msgInterval === currentIntv) {
+                // The active interval shares one window store with the cache;
+                // commitPatchedChartData applies the tick and keeps React
+                // meta (barCount, coverage) in sync. Applying it twice via
+                // patchCacheTick first would turn the commit into a NOOP.
+                markPerfOnce("ws.kline.firstTick", { symbol, marketType, exchange, interval: currentIntv });
+                commitPatchedChartData(symbol, currentIntv, [tick], { source: "kline-ws" });
+                updateLastPrice(tick, currentIntv);
+              } else {
+                patchCacheTick(symbol, msgInterval, tick, { marketType, exchange });
+              }
+            },
+            onParseError: (parseErr) => {
+              console.error("WS parse failed:", parseErr);
+            },
+            onError: () => {
+              if (!active) return;
+              startPolling();
+            },
+            onClose: () => {
+              if (!active) return;
+              stopPing();
+              startPolling();
+              scheduleReconnect();
+            },
+          },
+        );
+        subscriptionRef.current = subscription;
       } catch (connectErr) {
         console.warn("WS initialization failed:", connectErr);
         startPolling();
@@ -270,7 +227,7 @@ export function useKlineStreamRuntime({
     connect();
 
     const initialFallbackTimer = setTimeout(() => {
-      if (active && !pollInterval && (!socket || socket.readyState !== WebSocket.OPEN)) {
+      if (active && !pollInterval && !subscription?.isOpen()) {
         startPolling();
       }
     }, WS_INITIAL_FALLBACK_DELAY);
@@ -284,31 +241,66 @@ export function useKlineStreamRuntime({
       }
       stopPing();
       if (pollInterval) clearInterval(pollInterval);
-      if (socket) {
-        try { socket.close(); } catch { /* ignore */ }
+      if (subscription) {
+        subscription.close();
       }
-      if (socketRef.current === socket) {
-        socketRef.current = null;
+      if (subscriptionRef.current === subscription) {
+        subscriptionRef.current = null;
       }
-      liveSubscribedIntervalsRef.current = new Set();
     };
   }, [
-    commitMergedChartData,
     commitPatchedChartData,
     exchange,
-    getIntervalDays,
     handleBackfillCompleted,
     intervalRef,
     marketType,
     patchCacheTick,
+    seriesDataFeed,
     setWsStatus,
     symbol,
-    syncSocketSubscriptions,
     updateLastPrice,
     updateRealtimePrice,
   ]);
 
   useEffect(() => {
-    syncSocketSubscriptions(socketRef.current, trackedIntervals);
-  }, [syncSocketSubscriptions, trackedIntervals]);
+    subscriptionRef.current?.updateIntervals(trackedIntervals);
+  }, [trackedIntervals]);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    let hiddenAt = null;
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
+      const hiddenMs = hiddenAt ? Date.now() - hiddenAt : 0;
+      hiddenAt = null;
+      if (hiddenMs < TAB_RECOVERY_MIN_HIDDEN_MS) return;
+
+      // Browsers throttle or drop WS ticks for hidden tabs while the backend
+      // keeps ingesting, so the tail hole exists only client-side and no
+      // backfill event will ever repair it. Pull the newest bars to catch up.
+      const currentIntv = intervalRef.current;
+      const intervalSecs = parseIntervalSeconds(currentIntv) || 60;
+      const missedBars = Math.ceil(hiddenMs / 1000 / intervalSecs) + 5;
+      const countBack = Math.max(50, Math.min(WS_RECOVERY_COUNT_BACK, missedBars));
+      recordPerfEvent("ws.kline.tabRecovery", { symbol, marketType, exchange, interval: currentIntv, hiddenMs, countBack });
+      seriesDataFeed.getBars(
+        { exchange, marketType, symbol, interval: currentIntv },
+        { countBack, source: "tab-visibility-recovery" },
+      )
+        .then((result) => {
+          if (!result?.data?.length) return;
+          updateLastPrice(result.data[result.data.length - 1], currentIntv);
+        })
+        .catch((err) => {
+          console.warn("[TabRecovery] Tail catch-up failed:", err);
+        });
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [exchange, intervalRef, marketType, seriesDataFeed, symbol, updateLastPrice]);
 }

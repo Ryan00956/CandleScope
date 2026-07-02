@@ -4,7 +4,6 @@ import {
   buildSortedIntervals,
   getBaseWsIntervals,
   getExchangeConfig,
-  getIntervalDays,
   getNativeIntervals,
   isNativeIntervalSupported,
   useExchangeCatalog,
@@ -22,6 +21,8 @@ import {
   CHART_SESSION_TRANSITION_TYPES,
   createChartSessionTransition,
 } from "./chartSessionTransition";
+import { buildChartDatasetKey } from "./chartDatasetKey";
+import { buildRealtimeTrackedIntervals } from "./trackedIntervalsPolicy";
 import { getVisibleRangeForInterval, saveVisibleRangeForInterval } from "./visibleRangeStorage";
 
 export function useChartSession({ chartSurfaceActions } = {}) {
@@ -30,7 +31,6 @@ export function useChartSession({ chartSurfaceActions } = {}) {
   const [exchange, setExchange] = useState(initialSession.exchange);
   const [marketType, setMarketType] = useState(initialSession.marketType);
   const [interval, setInterval] = useState(initialSession.interval);
-  const [datasetVersion, setDatasetVersion] = useState(0);
   const [lastTransition, setLastTransition] = useState(null);
   const transitionIdRef = useRef(0);
 
@@ -75,6 +75,10 @@ export function useChartSession({ chartSurfaceActions } = {}) {
     [exchange, exchangeCatalog],
   );
   const trackedIntervals = useMemo(
+    () => buildRealtimeTrackedIntervals(interval),
+    [interval],
+  );
+  const prefetchIntervals = useMemo(
     () => Array.from(new Set([...baseWsIntervals, ...savedCustomIntervals, interval])),
     [baseWsIntervals, interval, savedCustomIntervals],
   );
@@ -84,8 +88,8 @@ export function useChartSession({ chartSurfaceActions } = {}) {
   }, [trackedIntervals]);
 
   const datasetKey = useMemo(
-    () => `${exchange}-${marketType}-${symbol}-${interval}-${datasetVersion}`,
-    [datasetVersion, exchange, interval, marketType, symbol],
+    () => buildChartDatasetKey({ exchange, marketType, symbol, interval }),
+    [exchange, interval, marketType, symbol],
   );
   const savedVisibleRange = useMemo(
     () => getVisibleRangeForInterval(symbol, interval, marketType, exchange),
@@ -114,20 +118,9 @@ export function useChartSession({ chartSurfaceActions } = {}) {
     }));
   }, [exchange, interval, marketType, symbol]);
 
-  const setDatasetVersionCompat = useCallback((nextVersion) => {
-    setDatasetVersion((currentVersion) => (
-      typeof nextVersion === "function" ? nextVersion(currentVersion) : nextVersion
-    ));
-  }, []);
+  const setDatasetVersionCompat = useCallback(() => {}, []);
 
-  const refreshDataset = useCallback(() => {
-    setDatasetVersion((version) => version + 1);
-  }, []);
-
-  const getExchangeIntervalDays = useCallback(
-    (targetInterval, targetExchange = exchange) => getIntervalDays(targetInterval, targetExchange, exchangeCatalog),
-    [exchange, exchangeCatalog],
-  );
+  const refreshDataset = useCallback(() => {}, []);
 
   const saveCurrentVisibleRange = useCallback((dataMeta = visibleRangeDataMetaRef.current) => {
     const range = chartSurfaceActions?.getVisibleRange?.();
@@ -203,7 +196,6 @@ export function useChartSession({ chartSurfaceActions } = {}) {
       symbol: nextSymbol,
       interval: nextInterval,
     });
-    refreshDataset();
 
     setExchange(nextExchange);
     setMarketType(nextMarketType);
@@ -215,7 +207,6 @@ export function useChartSession({ chartSurfaceActions } = {}) {
     interval,
     marketType,
     publishTransition,
-    refreshDataset,
     savedCustomIntervals,
     symbol,
   ]);
@@ -338,7 +329,7 @@ export function useChartSession({ chartSurfaceActions } = {}) {
       interval,
       sessionKey,
       datasetKey,
-      datasetVersion,
+      datasetVersion: 0,
       exchangeCatalog,
       exchangeConfig,
       exchangeMarketTypes,
@@ -346,6 +337,7 @@ export function useChartSession({ chartSurfaceActions } = {}) {
       intervalGroups,
       baseWsIntervals,
       trackedIntervals,
+      prefetchIntervals,
       customIntervalRecords,
       savedCustomIntervals,
       intervalNotice,
@@ -357,7 +349,6 @@ export function useChartSession({ chartSurfaceActions } = {}) {
       selectMarketType,
       refreshDataset,
       setDatasetVersion: setDatasetVersionCompat,
-      getIntervalDays: getExchangeIntervalDays,
       saveCurrentVisibleRange,
       handleVisibleRangeChange,
       updateVisibleRangeDataMeta,

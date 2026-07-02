@@ -2,10 +2,9 @@ import { useCallback, useRef } from "react";
 
 export function useSessionTransitionReset({
   clearCache,
-  clearChartData,
   interval,
+  markChartDataTransition,
   realtimePriceRef,
-  resetGapRecovery,
   sessionKey,
   setCrosshairData,
   setError,
@@ -25,8 +24,7 @@ export function useSessionTransitionReset({
       clearCache();
     }
     if (realtimePriceRef) realtimePriceRef.current = null;
-    clearChartData(`${transition.type}-clear`, symbol, interval);
-    resetGapRecovery();
+    markChartDataTransition(symbol, interval, `${transition.type}-optimistic`);
     setLastPrice(null);
     setCrosshairData(null);
     setLoading(true);
@@ -34,10 +32,9 @@ export function useSessionTransitionReset({
     setHasMoreLeft(true);
   }, [
     clearCache,
-    clearChartData,
     interval,
+    markChartDataTransition,
     realtimePriceRef,
-    resetGapRecovery,
     sessionKey,
     setCrosshairData,
     setError,

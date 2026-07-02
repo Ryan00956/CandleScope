@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useBackfillCompletionRuntime } from "./useBackfillCompletionRuntime";
 import { useKlineStreamRuntime } from "./useKlineStreamRuntime";
 import { useChartBackgroundPrefetch } from "./useChartBackgroundPrefetch";
 import { useChartDataRuntime } from "./useChartDataRuntime";
 import { buildChartDisplayState } from "./marketDataView";
 import { publishCrosshairData } from "./crosshairDisplayStore";
-import { useChartGapRecovery } from "./useChartGapRecovery";
+import { requestIndicatorRangeForWindowMeta } from "./indicatorRangeRuntime";
 import { useChartInitialLoad } from "./useChartInitialLoad";
 import { useChartLoadMoreLeft } from "./useChartLoadMoreLeft";
 import { useSessionTransitionReset } from "./useSessionTransitionReset";
 import { INDICATOR_RANGE_REQUEST_REASONS, useMarketDataEvents } from "./marketDataEvents";
+import { defaultKlineApi } from "./feed/klineApi";
+import { SeriesDataFeed } from "./feed/seriesDataFeed";
 import { resolveInitialRows as resolveWatchlistInitialRows } from "../watchlist-full-cache/watchlistFullCacheResolver";
 
 export function useMarketDataRuntime({
@@ -23,11 +24,10 @@ export function useMarketDataRuntime({
     interval,
     sessionKey,
     trackedIntervals,
+    prefetchIntervals,
     exchangeConfig,
   } = session.view;
   const {
-    setDatasetVersion,
-    getIntervalDays,
     handleVisibleRangeChange,
     updateVisibleRangeDataMeta,
   } = session.actions;
@@ -41,27 +41,18 @@ export function useMarketDataRuntime({
     consumeIndicatorRangeRequest,
     createIndicatorRangeRequester,
   } = useMarketDataEvents({ interval, sessionKey });
-  const requestLoadMoreIndicatorRange = useMemo(
-    () => createIndicatorRangeRequester(INDICATOR_RANGE_REQUEST_REASONS.LOAD_MORE_LEFT),
-    [createIndicatorRangeRequester],
-  );
-  const requestBackfillIndicatorRange = useMemo(
-    () => createIndicatorRangeRequester(INDICATOR_RANGE_REQUEST_REASONS.BACKFILL_COMPLETED),
-    [createIndicatorRangeRequester],
-  );
-  const requestGapRecoveryIndicatorRange = useMemo(
-    () => createIndicatorRangeRequester(INDICATOR_RANGE_REQUEST_REASONS.GAP_RECOVERY),
+  const requestWindowDeltaIndicatorRange = useMemo(
+    () => createIndicatorRangeRequester(INDICATOR_RANGE_REQUEST_REASONS.WINDOW_DELTA),
     [createIndicatorRangeRequester],
   );
 
   const {
     chartData,
     chartDataMeta,
+    activeSeriesStore,
     pendingInitialHistoryRef,
-    cacheKey,
     getFromCache,
     getCache,
-    setCache,
     hasCache,
     clearCache,
     getCacheDiagnostics,
@@ -70,6 +61,7 @@ export function useMarketDataRuntime({
     patchCacheTick,
     replaceChartData,
     clearChartData,
+    markChartDataTransition,
     commitMergedChartData,
     commitPatchedChartData,
   } = useChartDataRuntime({ exchange, marketType, symbol, interval });
@@ -92,6 +84,10 @@ export function useMarketDataRuntime({
     updateVisibleRangeDataMeta?.(chartDataMeta);
   }, [chartDataMeta, updateVisibleRangeDataMeta]);
 
+  useEffect(() => {
+    requestIndicatorRangeForWindowMeta(requestWindowDeltaIndicatorRange, chartDataMeta);
+  }, [chartDataMeta, requestWindowDeltaIndicatorRange]);
+
   const updateLastPrice = useCallback((candidate, intv) => {
     setLastPrice((prev) => {
       if (!candidate || candidate.time == null) return prev;
@@ -113,6 +109,33 @@ export function useMarketDataRuntime({
     });
   }, [realtimePriceRef]);
 
+  const seriesDataFeed = useMemo(() => new SeriesDataFeed(), []);
+  useEffect(() => {
+    seriesDataFeed.configure({
+      api: defaultKlineApi,
+      getActiveSeries: () => ({
+        exchange,
+        marketType,
+        symbol,
+        interval,
+      }),
+      mergeCacheData,
+      commitMergedChartData,
+      commitPatchedChartData,
+      patchCacheTick,
+    });
+  }, [
+    commitMergedChartData,
+    commitPatchedChartData,
+    exchange,
+    interval,
+    marketType,
+    mergeCacheData,
+    patchCacheTick,
+    seriesDataFeed,
+    symbol,
+  ]);
+
   const resolveInitialRows = useCallback(
     (sym, intv, mt, ex) => resolveWatchlistInitialRows({
       symbol: sym,
@@ -132,7 +155,6 @@ export function useMarketDataRuntime({
     setLoadingMoreLeft,
     hasMoreLeft,
     setHasMoreLeft,
-    pendingLoadMoreLeftRef,
     handleNeedMoreLeft,
   } = useChartLoadMoreLeft({
     symbol,
@@ -142,25 +164,30 @@ export function useMarketDataRuntime({
     chartData,
     loading,
     dataSource,
-    cacheKey,
+    seriesDataFeed,
     commitMergedChartData,
-    requestIndicatorRange: requestLoadMoreIndicatorRange,
   });
+
+  useEffect(() => {
+    if (chartDataMeta?.trimmedLeft > 0) {
+      setHasMoreLeft(true);
+    }
+  }, [chartDataMeta?.trimmedLeft, setHasMoreLeft]);
 
   const loadData = useChartInitialLoad({
     exchange,
     marketType,
-    getIntervalDays,
     getFromCache,
     resolveInitialRows,
+    seriesDataFeed,
     replaceChartData,
     clearChartData,
+    markChartDataTransition,
     commitMergedChartData,
     commitPatchedChartData,
     pendingInitialHistoryRef,
     updateLastPrice,
     setConnectionStatus,
-    setDatasetKey: setDatasetVersion,
     setLoading,
     setError,
     setLoadingMoreLeft,
@@ -169,24 +196,40 @@ export function useMarketDataRuntime({
     setDataSource,
   });
 
-  const handleBackfillCompleted = useBackfillCompletionRuntime({
-    symbol,
-    exchange,
-    marketType,
-    intervalRef,
-    loadingRef,
-    pendingInitialHistoryRef,
-    pendingLoadMoreLeftRef,
-    cacheKey,
-    getIntervalDays,
-    mergeCacheData,
-    commitMergedChartData,
-    requestIndicatorRange: requestBackfillIndicatorRange,
+  const handleBackfillCompleted = useCallback((msg) => seriesDataFeed.handleBackfillCompleted(msg, {
+    activeSeries: {
+      exchange,
+      marketType,
+      symbol,
+      interval: intervalRef.current,
+    },
+    loading: loadingRef.current,
+    pendingInitial: pendingInitialHistoryRef.current,
+    clearPendingInitial: () => {
+      pendingInitialHistoryRef.current = null;
+    },
+    getCacheRows: (series) => getCache(series.symbol, series.interval, {
+      marketType: series.marketType,
+      exchange: series.exchange,
+    }),
     setLastPrice,
     setError,
     setConnectionStatus,
     setLoading,
-  });
+  }), [
+    exchange,
+    getCache,
+    intervalRef,
+    loadingRef,
+    marketType,
+    pendingInitialHistoryRef,
+    seriesDataFeed,
+    setConnectionStatus,
+    setError,
+    setLastPrice,
+    setLoading,
+    symbol,
+  ]);
 
   useKlineStreamRuntime({
     symbol,
@@ -195,8 +238,7 @@ export function useMarketDataRuntime({
     trackedIntervals,
     trackedIntervalsRef,
     intervalRef,
-    getIntervalDays,
-    commitMergedChartData,
+    seriesDataFeed,
     commitPatchedChartData,
     patchCacheTick,
     updateLastPrice,
@@ -209,35 +251,17 @@ export function useMarketDataRuntime({
     symbol,
     exchange,
     marketType,
-    trackedIntervals,
+    trackedIntervals: prefetchIntervals,
     hasCache,
-    setCache,
+    seriesDataFeed,
     enabled: activeChartReady,
-  });
-
-  const { resetGapRecovery } = useChartGapRecovery({
-    loading,
-    dataReady: activeChartReady,
-    dataSource,
-    symbol,
-    exchange,
-    marketType,
-    intervalRef,
-    trackedIntervalsRef,
-    getIntervalDays,
-    getCache,
-    mergeCacheData,
-    commitMergedChartData,
-    requestIndicatorRange: requestGapRecoveryIndicatorRange,
-    updateLastPrice,
   });
 
   const resetForSessionTransition = useSessionTransitionReset({
     clearCache,
-    clearChartData,
     interval,
+    markChartDataTransition,
     realtimePriceRef,
-    resetGapRecovery,
     sessionKey,
     setCrosshairData: publishCrosshairData,
     setError,
@@ -278,6 +302,7 @@ export function useMarketDataRuntime({
   return {
     view: {
       bars: chartData,
+      seriesStore: activeSeriesStore,
       meta: chartDataMeta,
       loading,
       error,

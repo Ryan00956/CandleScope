@@ -7,7 +7,14 @@ import {
 } from "../cache-gc/cacheRegistry.js";
 import { recordFrontendCacheAccess } from "../cache-gc/cacheAccessRuntime.js";
 import { markPerfOnce, recordPerfEvent } from "../../runtime/performance/perfMarks";
-import { deduplicateByTime, klineRowsEqual, mergeByTime, upsertRealtimeKline } from "./chartDataRuntime";
+import { assertWindowBudget } from "../../runtime/performance/windowBudgetAssert";
+import { parseIntervalSeconds } from "../../utils/intervals";
+import { MAX_SERIES_BARS } from "./phase1WindowPolicy";
+import { WINDOW_DELTA_TYPES } from "./window/windowDeltas";
+import {
+  buildSeriesWindowKey,
+  SeriesWindowRegistry,
+} from "./window/windowRegistry";
 
 const KLINE_ROW_ESTIMATED_BYTES = 200;
 
@@ -37,14 +44,22 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
     coverage: null,
     committedAt: null,
   });
-  const chartDataCacheRef = useRef(new Map());
-  const chartDataCacheMetaRef = useRef(new Map());
+  const [activeSeriesStore, setActiveSeriesStore] = useState(null);
+  const windowRegistryRef = useRef(null);
+  if (windowRegistryRef.current == null) {
+    windowRegistryRef.current = new SeriesWindowRegistry({ maxBars: MAX_SERIES_BARS });
+  }
   const chartDataVersionRef = useRef(0);
   const chartDataCommitMetaRef = useRef(null);
   const pendingInitialHistoryRef = useRef(null);
 
   const cacheKey = useCallback(
-    (sym, intv, mt = marketType, ex = exchange) => `${ex}-${mt}-${sym}-${intv}`,
+    (sym, intv, mt = marketType, ex = exchange) => buildSeriesWindowKey({
+      exchange: ex,
+      marketType: mt,
+      symbol: sym,
+      interval: intv,
+    }),
     [exchange, marketType],
   );
 
@@ -70,118 +85,217 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
   }, []);
 
   const touchCacheMeta = useCallback((key, patch = {}) => {
-    const current = chartDataCacheMetaRef.current.get(key) || {};
-    chartDataCacheMetaRef.current.set(key, {
-      ...current,
-      ...patch,
-      lastAccessMs: Date.now(),
-    });
+    windowRegistryRef.current.touchMeta(key, patch);
   }, []);
 
-  const saveToCache = useCallback((sym, intv, data) => {
-    const key = cacheKey(sym, intv);
-    chartDataCacheRef.current.set(key, data);
+  const getStore = useCallback((
+    sym,
+    intv,
+    {
+      marketType: cacheMarketType = marketType,
+      exchange: cacheExchange = exchange,
+      create = true,
+      meta = {},
+    } = {},
+  ) => {
+    const key = cacheKey(sym, intv, cacheMarketType, cacheExchange);
+    if (!create) return windowRegistryRef.current.get(key);
+    return windowRegistryRef.current.getOrCreate(key, {
+      intervalSeconds: parseIntervalSeconds(intv),
+      meta: {
+        symbol: sym,
+        interval: intv,
+        marketType: cacheMarketType,
+        exchange: cacheExchange,
+        ...meta,
+      },
+    });
+  }, [cacheKey, exchange, marketType]);
+
+  const registerStoreResource = useCallback((
+    key,
+    store,
+    {
+      symbol: cacheSymbol,
+      interval: cacheInterval,
+      marketType: cacheMarketType = marketType,
+      exchange: cacheExchange = exchange,
+      source,
+    },
+  ) => {
+    const stats = store.describe();
+    if (stats.bars <= 0) {
+      unregisterCacheResource("chart-data-cache", key);
+      return;
+    }
+    registerCacheResource("chart-data-cache", key, {
+      type: "kline",
+      dependencyKey: dependencyKeyFor(cacheSymbol, cacheInterval, cacheMarketType, cacheExchange),
+      symbol: cacheSymbol,
+      interval: cacheInterval,
+      marketType: cacheMarketType,
+      exchange: cacheExchange,
+      bars: stats.bars,
+      estimatedBytes: stats.bars * KLINE_ROW_ESTIMATED_BYTES,
+      source,
+    });
+  }, [dependencyKeyFor, exchange, marketType]);
+
+  const recordCacheAccess = useCallback(({
+    key,
+    symbol: cacheSymbol,
+    interval: cacheInterval,
+    marketType: cacheMarketType = marketType,
+    exchange: cacheExchange = exchange,
+    action,
+    source,
+  }) => {
     recordFrontendCacheAccess({
       owner: "chart-data-cache",
       key,
-      exchange,
-      marketType,
-      symbol: sym,
-      interval: intv,
-      action: "chart-active",
-      source: "chart-commit",
+      exchange: cacheExchange,
+      marketType: cacheMarketType,
+      symbol: cacheSymbol,
+      interval: cacheInterval,
+      action,
+      source,
     });
-    const stats = describeRows(data);
-    registerCacheResource("chart-data-cache", key, {
-      type: "kline",
-      dependencyKey: dependencyKeyFor(sym, intv),
+  }, [exchange, marketType]);
+
+  const saveToCache = useCallback((
+    sym,
+    intv,
+    data,
+    {
+      marketType: cacheMarketType = marketType,
+      exchange: cacheExchange = exchange,
+      source = "chart-commit",
+    } = {},
+  ) => {
+    const key = cacheKey(sym, intv, cacheMarketType, cacheExchange);
+    const store = getStore(sym, intv, {
+      marketType: cacheMarketType,
+      exchange: cacheExchange,
+      meta: { source },
+    });
+    const delta = store.replace(data, { source });
+    recordCacheAccess({
+      key,
       symbol: sym,
       interval: intv,
-      marketType,
-      exchange,
-      bars: stats.bars,
-      estimatedBytes: stats.estimatedBytes,
-      source: "chart-commit",
+      marketType: cacheMarketType,
+      exchange: cacheExchange,
+      action: "chart-active",
+      source,
+    });
+    registerStoreResource(key, store, {
+      symbol: sym,
+      interval: intv,
+      marketType: cacheMarketType,
+      exchange: cacheExchange,
+      source,
     });
     touchCacheMeta(key, {
       symbol: sym,
       interval: intv,
-      marketType,
-      exchange,
+      marketType: cacheMarketType,
+      exchange: cacheExchange,
       lastUpdatedMs: Date.now(),
-      source: "chart-commit",
+      source,
+      trimmedLeft: delta.trimmedLeft || 0,
     });
-  }, [cacheKey, dependencyKeyFor, describeRows, exchange, marketType, touchCacheMeta]);
-
-  const getFromCache = useCallback(
-    (sym, intv) => {
-      const key = cacheKey(sym, intv);
-      const value = chartDataCacheRef.current.get(key);
-      if (value) {
-        touchCacheMeta(key);
-        recordFrontendCacheAccess({
-          owner: "chart-data-cache",
-          key,
-          exchange,
-          marketType,
-          symbol: sym,
-          interval: intv,
-          action: "chart-switch",
-          source: "memory-cache-hit",
-        });
-      }
-      return value;
-    },
-    [cacheKey, exchange, marketType, touchCacheMeta],
-  );
+    return store.snapshot();
+  }, [
+    cacheKey,
+    exchange,
+    getStore,
+    marketType,
+    recordCacheAccess,
+    registerStoreResource,
+    touchCacheMeta,
+  ]);
 
   const getCache = useCallback(
     (sym, intv, { marketType: cacheMarketType = marketType, exchange: cacheExchange = exchange } = {}) => {
       const key = cacheKey(sym, intv, cacheMarketType, cacheExchange);
-      const value = chartDataCacheRef.current.get(key);
-      if (value) {
+      const store = getStore(sym, intv, {
+        marketType: cacheMarketType,
+        exchange: cacheExchange,
+        create: false,
+      });
+      if (store && !store.isEmpty()) {
         touchCacheMeta(key);
-        recordFrontendCacheAccess({
-          owner: "chart-data-cache",
+        recordCacheAccess({
           key,
-          exchange: cacheExchange,
-          marketType: cacheMarketType,
           symbol: sym,
           interval: intv,
+          marketType: cacheMarketType,
+          exchange: cacheExchange,
           action: "chart-switch",
           source: "memory-cache-hit",
         });
+        return store.snapshot();
       }
-      return value;
+      return undefined;
     },
-    [cacheKey, exchange, marketType, touchCacheMeta],
+    [cacheKey, exchange, getStore, marketType, recordCacheAccess, touchCacheMeta],
   );
 
+  const getFromCache = useCallback((sym, intv) => getCache(sym, intv), [getCache]);
+
   const setCache = useCallback(
-    (sym, intv, data, { marketType: cacheMarketType = marketType, exchange: cacheExchange = exchange } = {}) => {
+    (sym, intv, data, { marketType: cacheMarketType = marketType, exchange: cacheExchange = exchange } = {}) =>
+      saveToCache(sym, intv, data, {
+        marketType: cacheMarketType,
+        exchange: cacheExchange,
+        source: "cache-set",
+      }),
+    [exchange, marketType, saveToCache],
+  );
+
+  const hasCache = useCallback(
+    (sym, intv, { marketType: cacheMarketType = marketType, exchange: cacheExchange = exchange } = {}) =>
+      windowRegistryRef.current.has(cacheKey(sym, intv, cacheMarketType, cacheExchange)),
+    [cacheKey, exchange, marketType],
+  );
+
+  const clearCache = useCallback(() => {
+    const keys = windowRegistryRef.current.clear();
+    for (const key of keys) {
+      unregisterCacheResource("chart-data-cache", key);
+    }
+    setActiveSeriesStore(null);
+  }, []);
+
+  const mergeCacheData = useCallback(
+    (sym, intv, incoming, options = {}) => {
+      if (!incoming?.length) return getCache(sym, intv, options);
+      const cacheMarketType = options.marketType ?? marketType;
+      const cacheExchange = options.exchange ?? exchange;
       const key = cacheKey(sym, intv, cacheMarketType, cacheExchange);
-      chartDataCacheRef.current.set(key, data);
-      recordFrontendCacheAccess({
-        owner: "chart-data-cache",
-        key,
-        exchange: cacheExchange,
+      const store = getStore(sym, intv, {
         marketType: cacheMarketType,
-        symbol: sym,
-        interval: intv,
-        action: "chart-active",
-        source: "cache-set",
+        exchange: cacheExchange,
+        meta: { source: "cache-merge" },
       });
-      const stats = describeRows(data);
-      registerCacheResource("chart-data-cache", key, {
-        type: "kline",
-        dependencyKey: dependencyKeyFor(sym, intv, cacheMarketType, cacheExchange),
+      const delta = store.applyRange(incoming, { source: "cache-merge" });
+      const rows = store.snapshot({ force: delta.changed });
+      if (delta.type === WINDOW_DELTA_TYPES.NOOP) return rows;
+      recordCacheAccess({
+        key,
         symbol: sym,
         interval: intv,
         marketType: cacheMarketType,
         exchange: cacheExchange,
-        bars: stats.bars,
-        estimatedBytes: stats.estimatedBytes,
-        source: "cache-set",
+        action: "chart-active",
+        source: "cache-merge",
+      });
+      registerStoreResource(key, store, {
+        symbol: sym,
+        interval: intv,
+        marketType: cacheMarketType,
+        exchange: cacheExchange,
+        source: "cache-merge",
       });
       touchCacheMeta(key, {
         symbol: sym,
@@ -189,47 +303,56 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
         marketType: cacheMarketType,
         exchange: cacheExchange,
         lastUpdatedMs: Date.now(),
-        source: "cache-set",
+        source: "cache-merge",
+        trimmedLeft: delta.trimmedLeft || 0,
       });
+      return rows;
     },
-    [cacheKey, dependencyKeyFor, describeRows, exchange, marketType, touchCacheMeta],
-  );
-
-  const hasCache = useCallback(
-    (sym, intv, { marketType: cacheMarketType = marketType, exchange: cacheExchange = exchange } = {}) =>
-      chartDataCacheRef.current.has(cacheKey(sym, intv, cacheMarketType, cacheExchange)),
-    [cacheKey, exchange, marketType],
-  );
-
-  const clearCache = useCallback(() => {
-    for (const key of chartDataCacheRef.current.keys()) {
-      unregisterCacheResource("chart-data-cache", key);
-    }
-    chartDataCacheRef.current.clear();
-    chartDataCacheMetaRef.current.clear();
-  }, []);
-
-  const mergeCacheData = useCallback(
-    (sym, intv, incoming, options = {}) => {
-      if (!incoming?.length) return getCache(sym, intv, options);
-      const existing = getCache(sym, intv, options);
-      const merged = existing && existing.length > 0 ? mergeByTime(incoming, existing) : incoming;
-      if (existing && klineRowsEqual(existing, merged)) return existing;
-      setCache(sym, intv, merged, options);
-      return merged;
-    },
-    [getCache, setCache],
+    [
+      cacheKey,
+      exchange,
+      getCache,
+      getStore,
+      marketType,
+      recordCacheAccess,
+      registerStoreResource,
+      touchCacheMeta,
+    ],
   );
 
   const patchCacheTick = useCallback(
     (sym, intv, tick, options = {}) => {
-      const existing = getCache(sym, intv, options);
-      if (!existing || existing.length === 0) return existing;
-      const updated = deduplicateByTime(upsertRealtimeKline(existing, tick));
-      setCache(sym, intv, updated, options);
-      return updated;
+      const cacheMarketType = options.marketType ?? marketType;
+      const cacheExchange = options.exchange ?? exchange;
+      const key = cacheKey(sym, intv, cacheMarketType, cacheExchange);
+      const store = getStore(sym, intv, {
+        marketType: cacheMarketType,
+        exchange: cacheExchange,
+        create: false,
+      });
+      if (!store || store.isEmpty()) return undefined;
+      const delta = store.applyTick(tick, { source: "cache-tick" });
+      const rows = store.snapshot({ force: delta.changed });
+      if (delta.type === WINDOW_DELTA_TYPES.NOOP) return rows;
+      registerStoreResource(key, store, {
+        symbol: sym,
+        interval: intv,
+        marketType: cacheMarketType,
+        exchange: cacheExchange,
+        source: "cache-tick",
+      });
+      touchCacheMeta(key, {
+        symbol: sym,
+        interval: intv,
+        marketType: cacheMarketType,
+        exchange: cacheExchange,
+        lastUpdatedMs: Date.now(),
+        source: "cache-tick",
+        trimmedLeft: delta.trimmedLeft || 0,
+      });
+      return rows;
     },
-    [getCache, setCache],
+    [cacheKey, exchange, getStore, marketType, registerStoreResource, touchCacheMeta],
   );
 
   const recordChartDataCommit = useCallback((sym, intv, data, source, extra = {}) => {
@@ -241,11 +364,12 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
     const bars = data?.length || 0;
     const status = inferCommitStatus(source, data, extra);
     chartDataVersionRef.current = version;
+    const seriesKey = cacheKey(sym, intv);
     const commitMeta = {
       version,
       status,
       source,
-      seriesKey: cacheKey(sym, intv),
+      seriesKey,
       symbol: sym,
       interval: intv,
       bars,
@@ -255,20 +379,17 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
       committedAt: Date.now(),
       ...metaExtra,
     };
-    if (bars > 0) {
-      registerCacheResource("chart-data-cache", commitMeta.seriesKey, {
-        type: "kline",
-        dependencyKey: dependencyKeyFor(sym, intv),
+    const store = windowRegistryRef.current.get(seriesKey);
+    if (store && bars > 0) {
+      registerStoreResource(seriesKey, store, {
         symbol: sym,
         interval: intv,
         marketType,
         exchange,
-        bars,
-        estimatedBytes: bars * KLINE_ROW_ESTIMATED_BYTES,
         source,
       });
     } else {
-      unregisterCacheResource("chart-data-cache", commitMeta.seriesKey);
+      unregisterCacheResource("chart-data-cache", seriesKey);
     }
     chartDataCommitMetaRef.current = commitMeta;
     setChartDataMeta(commitMeta);
@@ -281,6 +402,26 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
       firstTime,
       lastTime,
     });
+    if (metaExtra.trimmedLeft > 0 || metaExtra.trimmedRight > 0) {
+      recordPerfEvent("chart.data.trim", {
+        source,
+        symbol: sym,
+        interval: intv,
+        bars,
+        originalBars: metaExtra.originalBars,
+        trimmedLeft: metaExtra.trimmedLeft || 0,
+        trimmedRight: metaExtra.trimmedRight || 0,
+      });
+    }
+    assertWindowBudget({
+      seriesKey,
+      symbol: sym,
+      interval: intv,
+      exchange,
+      marketType,
+      bars,
+      source,
+    });
     if (bars > 0) {
       markPerfOnce("chart.firstBars", { source, status, symbol: sym, interval: intv, bars });
       if (status === "ready" || status === "provisional") {
@@ -288,12 +429,37 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
       }
     }
     return version;
-  }, [cacheKey, dependencyKeyFor, exchange, marketType]);
+  }, [cacheKey, exchange, marketType, registerStoreResource]);
+
+  const markChartDataTransition = useCallback((sym, intv, source = "session-transition") => {
+    const previous = chartDataCommitMetaRef.current;
+    const version = chartDataVersionRef.current + 1;
+    chartDataVersionRef.current = version;
+    const transitionMeta = {
+      ...(previous || {}),
+      version,
+      status: "loading",
+      source,
+      targetSeriesKey: cacheKey(sym, intv),
+      targetSymbol: sym,
+      targetInterval: intv,
+      committedAt: Date.now(),
+      optimistic: true,
+    };
+    chartDataCommitMetaRef.current = transitionMeta;
+    setChartDataMeta(transitionMeta);
+    recordPerfEvent("chart.data.transition", {
+      source,
+      symbol: sym,
+      interval: intv,
+      retainedBars: chartDataRef.current.length,
+    });
+  }, [cacheKey]);
 
   const getCacheDiagnostics = useCallback(() => {
     const activeKey = cacheKey(symbol, interval);
-    const entries = Array.from(chartDataCacheRef.current.entries()).map(([key, rows]) => {
-      const meta = chartDataCacheMetaRef.current.get(key) || {};
+    const entries = windowRegistryRef.current.entries().map(({ key, store, meta }) => {
+      const stats = describeRows(store.snapshot());
       return {
         owner: "chart-data-cache",
         key,
@@ -305,25 +471,9 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
         source: meta.source || "cache",
         lastAccessMs: meta.lastAccessMs || null,
         lastUpdatedMs: meta.lastUpdatedMs || null,
-        ...describeRows(rows),
+        ...stats,
       };
     });
-
-    if (chartDataRef.current.length > 0 && !entries.some((entry) => entry.key === activeKey)) {
-      entries.push({
-        owner: "chart-data-cache",
-        key: activeKey,
-        tier: "active",
-        symbol,
-        interval,
-        exchange,
-        marketType,
-        source: chartDataCommitMetaRef.current?.source || "active-chart",
-        lastAccessMs: chartDataCommitMetaRef.current?.committedAt || null,
-        lastUpdatedMs: chartDataCommitMetaRef.current?.committedAt || null,
-        ...describeRows(chartDataRef.current),
-      });
-    }
 
     const totalBars = entries.reduce((total, entry) => total + entry.bars, 0);
     return {
@@ -342,15 +492,16 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
     const removed = [];
     for (const key of keys) {
       if (key === activeKey) continue;
-      const rows = chartDataCacheRef.current.get(key);
-      if (!rows) continue;
-      chartDataCacheRef.current.delete(key);
-      chartDataCacheMetaRef.current.delete(key);
+      const evicted = windowRegistryRef.current.evict(key);
+      if (!evicted) continue;
       unregisterCacheResource("chart-data-cache", key);
       removed.push({
         owner: "chart-data-cache",
         key,
-        ...describeRows(rows),
+        bars: evicted.bars,
+        firstTime: evicted.firstTime,
+        lastTime: evicted.lastTime,
+        estimatedBytes: evicted.bars * KLINE_ROW_ESTIMATED_BYTES,
       });
     }
     return {
@@ -360,7 +511,7 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
       removedEstimatedBytes: removed.reduce((total, entry) => total + entry.estimatedBytes, 0),
       removed,
     };
-  }, [cacheKey, describeRows, interval, symbol]);
+  }, [cacheKey, interval, symbol]);
 
   useEffect(() => acquireCacheLease("chart-data-cache", cacheKey(symbol, interval), "active-chart", {
     dependencyKey: dependencyKeyFor(symbol, interval),
@@ -371,70 +522,258 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
   }), [cacheKey, dependencyKeyFor, exchange, interval, marketType, symbol]);
 
   const replaceChartData = useCallback((sym, intv, data, { cache = false, source = "replace" } = {}) => {
-    const next = data || [];
+    const key = cacheKey(sym, intv);
+    const store = getStore(sym, intv, { meta: { source } });
+    const delta = store.replace(data, { source });
+    const next = store.snapshot({ force: true });
     if (cache && next.length > 0) {
-      saveToCache(sym, intv, next);
+      recordCacheAccess({
+        key,
+        symbol: sym,
+        interval: intv,
+        action: "chart-active",
+        source,
+      });
     }
+    touchCacheMeta(key, {
+      symbol: sym,
+      interval: intv,
+      marketType,
+      exchange,
+      lastUpdatedMs: Date.now(),
+      source,
+      trimmedLeft: delta.trimmedLeft || 0,
+    });
     chartDataRef.current = next;
-    recordChartDataCommit(sym, intv, next, source, cache ? { status: "ready" } : {});
+    recordChartDataCommit(sym, intv, next, source, {
+      ...(cache ? { status: "ready" } : {}),
+      originalBars: delta.originalBars,
+      trimmedLeft: delta.trimmedLeft,
+      trimmedRight: delta.trimmedRight,
+    });
+    setActiveSeriesStore(store);
     setChartData(next);
-  }, [recordChartDataCommit, saveToCache]);
+  }, [
+    cacheKey,
+    exchange,
+    getStore,
+    marketType,
+    recordCacheAccess,
+    recordChartDataCommit,
+    touchCacheMeta,
+  ]);
 
   const clearChartData = useCallback((source = "clear", sym = symbol, intv = interval) => {
+    const key = cacheKey(sym, intv);
+    const store = getStore(sym, intv);
+    store.clear({ source });
     chartDataRef.current = [];
+    setActiveSeriesStore(store);
+    touchCacheMeta(key, {
+      symbol: sym,
+      interval: intv,
+      marketType,
+      exchange,
+      lastUpdatedMs: Date.now(),
+      source,
+    });
     recordChartDataCommit(sym, intv, [], source);
     setChartData([]);
-  }, [interval, recordChartDataCommit, symbol]);
+  }, [cacheKey, exchange, getStore, interval, marketType, recordChartDataCommit, symbol, touchCacheMeta]);
 
   const commitMergedChartData = useCallback((sym, intv, incoming, { onMerged, source = "merge" } = {}) => {
     if (!incoming?.length) return;
-    const previous = chartDataRef.current;
-    const merged = mergeByTime(incoming, previous);
-    if (klineRowsEqual(previous, merged)) {
-      if (onMerged) onMerged(previous);
+    const key = cacheKey(sym, intv);
+    const store = getStore(sym, intv, { meta: { source } });
+    // Re-seed only when the currently rendered rows belong to this exact
+    // series (e.g. the active store was evicted while still displayed).
+    // During optimistic session transitions chartDataRef still holds the
+    // previous series' rows, which must never leak into the new store.
+    if (
+      store.isEmpty()
+      && chartDataRef.current.length > 0
+      && chartDataCommitMetaRef.current?.seriesKey === key
+    ) {
+      store.replace(chartDataRef.current, { source: "active-seed" });
+    }
+    const delta = store.applyRange(incoming, { source });
+    const next = store.snapshot({ force: delta.changed });
+    if (delta.type === WINDOW_DELTA_TYPES.NOOP) {
+      if (onMerged) onMerged(next);
       return;
     }
-    chartDataRef.current = merged;
-    saveToCache(sym, intv, merged);
-    recordChartDataCommit(sym, intv, merged, source, { incomingBars: incoming.length, status: "ready" });
-    if (onMerged) onMerged(merged);
-    setChartData(merged);
-  }, [recordChartDataCommit, saveToCache]);
+    chartDataRef.current = next;
+    setActiveSeriesStore(store);
+    registerStoreResource(key, store, { symbol: sym, interval: intv, source });
+    touchCacheMeta(key, {
+      symbol: sym,
+      interval: intv,
+      marketType,
+      exchange,
+      lastUpdatedMs: Date.now(),
+      source,
+      trimmedLeft: delta.trimmedLeft || 0,
+    });
+    recordChartDataCommit(sym, intv, next, source, {
+      incomingBars: incoming.length,
+      incomingFirstTime: incoming[0]?.time ?? null,
+      incomingLastTime: incoming[incoming.length - 1]?.time ?? null,
+      status: "ready",
+      originalBars: delta.originalBars,
+      trimmedLeft: delta.trimmedLeft,
+      trimmedRight: delta.trimmedRight,
+      windowDeltaType: delta.type,
+      addedLeft: delta.addedLeft || 0,
+      addedRight: delta.addedRight || 0,
+    });
+    if (onMerged) onMerged(next);
+    setChartData(next);
+  }, [
+    cacheKey,
+    exchange,
+    getStore,
+    marketType,
+    recordChartDataCommit,
+    registerStoreResource,
+    touchCacheMeta,
+  ]);
 
   const commitPatchedChartData = useCallback((sym, intv, ticks, { seedIfEmpty = false, source = "patch" } = {}) => {
     if (!ticks?.length) return;
-    const prev = chartDataRef.current;
-    if (prev.length === 0 && seedIfEmpty) {
-      const seeded = deduplicateByTime(ticks);
-      chartDataRef.current = seeded;
-      saveToCache(sym, intv, seeded);
-      recordChartDataCommit(sym, intv, seeded, source, {
+    const key = cacheKey(sym, intv);
+    const store = getStore(sym, intv, { meta: { source } });
+    const prev = store.snapshot();
+
+    if (store.isEmpty() && seedIfEmpty) {
+      const delta = store.replace(ticks, { source });
+      const nextSeeded = store.snapshot({ force: true });
+      chartDataRef.current = nextSeeded;
+      registerStoreResource(key, store, { symbol: sym, interval: intv, source });
+      touchCacheMeta(key, {
+        symbol: sym,
+        interval: intv,
+        marketType,
+        exchange,
+        lastUpdatedMs: Date.now(),
+        source,
+        trimmedLeft: delta.trimmedLeft || 0,
+      });
+      recordChartDataCommit(sym, intv, nextSeeded, source, {
         incomingBars: ticks.length,
         provisional: source?.includes("latest"),
         seeded: true,
+        originalBars: delta.originalBars,
+        trimmedLeft: delta.trimmedLeft,
+        trimmedRight: delta.trimmedRight,
       });
-      setChartData(seeded);
+      setActiveSeriesStore(store);
+      setChartData(nextSeeded);
       return;
     }
 
-    let updated = prev;
-    ticks.forEach((tick) => {
-      updated = upsertRealtimeKline(updated, tick);
+    if (store.isEmpty()) return;
+
+    if (ticks.length > 1) {
+      const delta = store.applyRange(ticks, { source });
+      if (delta.type === WINDOW_DELTA_TYPES.NOOP) return;
+
+      const next = store.snapshot({ force: true });
+      chartDataRef.current = next;
+      setActiveSeriesStore(store);
+      registerStoreResource(key, store, { symbol: sym, interval: intv, source });
+      touchCacheMeta(key, {
+        symbol: sym,
+        interval: intv,
+        marketType,
+        exchange,
+        lastUpdatedMs: Date.now(),
+        source,
+        trimmedLeft: delta.trimmedLeft || 0,
+      });
+      recordChartDataCommit(sym, intv, next, source, {
+        incomingBars: ticks.length,
+        status: source?.includes("latest") ? "provisional" : chartDataCommitMetaRef.current?.status,
+        seeded: false,
+        originalBars: delta.originalBars,
+        trimmedLeft: delta.trimmedLeft,
+        trimmedRight: delta.trimmedRight,
+        windowDeltaType: delta.type,
+        addedLeft: delta.addedLeft || 0,
+        addedRight: delta.addedRight || 0,
+      });
+      setChartData(next);
+      return;
+    }
+
+    let changed = false;
+    let appended = false;
+    let replaced = false;
+    let structural = false;
+    let trimmedLeft = 0;
+    let trimmedRight = 0;
+    for (const tick of ticks) {
+      const delta = store.applyTick(tick, { source });
+      if (delta.type === WINDOW_DELTA_TYPES.NOOP) continue;
+      changed = true;
+      structural = structural || delta.type !== WINDOW_DELTA_TYPES.TICK;
+      appended = appended || Boolean(delta.appended);
+      replaced = replaced || Boolean(delta.replaced);
+      trimmedLeft += delta.trimmedLeft || 0;
+      trimmedRight += delta.trimmedRight || 0;
+    }
+    if (!changed) return;
+
+    if (!structural && !appended && replaced && trimmedLeft === 0 && trimmedRight === 0) {
+      // Replace-last fast path: the store patched its snapshot in place, so
+      // chartDataRef stays current without an O(N) rebuild or React commit.
+      recordPerfEvent("chart.data.tick", {
+        source,
+        symbol: sym,
+        interval: intv,
+        ticks: ticks.length,
+        bars: store.barCount,
+      });
+      return;
+    }
+
+    const next = store.snapshot({ force: true });
+    chartDataRef.current = next;
+    setActiveSeriesStore(store);
+    registerStoreResource(key, store, { symbol: sym, interval: intv, source });
+    touchCacheMeta(key, {
+      symbol: sym,
+      interval: intv,
+      marketType,
+      exchange,
+      lastUpdatedMs: Date.now(),
+      source,
+      trimmedLeft,
     });
-    const deduped = deduplicateByTime(updated);
-    chartDataRef.current = deduped;
-    saveToCache(sym, intv, deduped);
-    recordChartDataCommit(sym, intv, deduped, source, {
+
+    recordChartDataCommit(sym, intv, next, source, {
       incomingBars: ticks.length,
       status: prev.length > 0 ? chartDataCommitMetaRef.current?.status : undefined,
       seeded: false,
+      originalBars: next.length + trimmedLeft + trimmedRight,
+      trimmedLeft,
+      trimmedRight,
+      windowDeltaType: structural ? WINDOW_DELTA_TYPES.MID_MERGE : WINDOW_DELTA_TYPES.TICK,
     });
-    setChartData(deduped);
-  }, [recordChartDataCommit, saveToCache]);
+    setChartData(next);
+  }, [
+    cacheKey,
+    exchange,
+    getStore,
+    marketType,
+    recordChartDataCommit,
+    registerStoreResource,
+    touchCacheMeta,
+  ]);
 
   return {
     chartData,
     chartDataMeta,
+    activeSeriesStore,
     pendingInitialHistoryRef,
     cacheKey,
     getFromCache,
@@ -448,6 +787,7 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
     patchCacheTick,
     replaceChartData,
     clearChartData,
+    markChartDataTransition,
     commitMergedChartData,
     commitPatchedChartData,
   };

@@ -19,6 +19,8 @@ const RULES = {
   appNoRawChartWidgetRef: "app-no-raw-chart-widget-ref",
   featureNoComponentPrimitivesImport: "feature-no-component-primitives-import",
   featureRuntimeNoLegacyCompatFields: "feature-runtime-no-legacy-compat-fields",
+  marketDataKlineFetchOnlyFeed: "market-data-kline-fetch-only-feed",
+  componentNoRawTimeScaleWrite: "component-no-raw-time-scale-write",
 };
 
 const allowlist = [];
@@ -260,6 +262,21 @@ function checkImports(absPath, filePath, content) {
         message: "drawing primitives belong under features/drawings/primitives, not components/primitives",
       });
     }
+
+    if (
+      filePath.startsWith("src/features/market-data/") &&
+      !filePath.startsWith("src/features/market-data/feed/") &&
+      normalizedTarget === "src/services/api" &&
+      /\bfetchKlines(?:History|Before|Range|Latest)\b/.test(content)
+    ) {
+      addViolation({
+        rule: RULES.marketDataKlineFetchOnlyFeed,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: "market-data K-line REST fetches must go through SeriesDataFeed",
+      });
+    }
   }
 }
 
@@ -274,6 +291,21 @@ function checkLocalStorage(filePath, content) {
       filePath,
       line: lineNumberAt(stripped, match.index),
       message: "component/app layer accesses localStorage directly",
+    });
+  }
+}
+
+function checkComponentRawTimeScaleWrites(filePath, content) {
+  if (!isComponentOrAppPath(filePath)) return;
+  const stripped = stripCommentsAndStrings(content);
+  const rawTimeScaleWritePattern = /(?:\.timeScale\s*\(\s*\)|\btimeScale)\s*\.\s*(applyOptions|setVisibleRange|setVisibleLogicalRange|scrollToPosition|fitContent)\b/g;
+  let match;
+  while ((match = rawTimeScaleWritePattern.exec(stripped))) {
+    addViolation({
+      rule: RULES.componentNoRawTimeScaleWrite,
+      filePath,
+      line: lineNumberAt(stripped, match.index),
+      message: `component/app layer writes chart viewport via ${match[1]}; use ViewportController`,
     });
   }
 }
@@ -399,6 +431,7 @@ for (const absPath of walkSourceFiles(srcRoot)) {
   const content = fs.readFileSync(absPath, "utf8");
   checkImports(absPath, filePath, content);
   checkLocalStorage(filePath, content);
+  checkComponentRawTimeScaleWrites(filePath, content);
   checkFeatureRuntimeJsx(filePath, content);
   checkAppRuntimeBridge(filePath, content);
   checkFeatureRuntimeLegacyCompatFields(filePath, content);

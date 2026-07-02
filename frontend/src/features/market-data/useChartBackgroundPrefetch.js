@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { fetchLatestKlines } from "../../services/api";
 
 const PREFETCH_DELAY_MS = 2_000;
 const PREFETCH_INTERVAL_GAP_MS = 200;
@@ -11,7 +10,7 @@ export function useChartBackgroundPrefetch({
   marketType,
   trackedIntervals,
   hasCache,
-  setCache,
+  seriesDataFeed,
   enabled = true,
 }) {
   useEffect(() => {
@@ -24,18 +23,16 @@ export function useChartBackgroundPrefetch({
         if (hasCache(symbol, intv, { marketType, exchange })) continue;
 
         try {
-          const result = await fetchLatestKlines(
-            symbol,
-            intv,
-            PREFETCH_BAR_LIMIT,
-            marketType,
-            exchange,
-            "background-prefetch",
+          await seriesDataFeed.getLatest(
+            { exchange, marketType, symbol, interval: intv },
+            {
+              limit: PREFETCH_BAR_LIMIT,
+              source: "background-prefetch",
+              apiSource: "background-prefetch",
+              commit: "cache",
+            },
           );
           if (cancelled) break;
-          if (result?.data?.length) {
-            setCache(symbol, intv, result.data, { marketType, exchange });
-          }
         } catch {
           // Best-effort warming only; active interval loading owns user-visible errors.
         }
@@ -49,5 +46,5 @@ export function useChartBackgroundPrefetch({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [enabled, exchange, hasCache, marketType, setCache, symbol, trackedIntervals]);
+  }, [enabled, exchange, hasCache, marketType, seriesDataFeed, symbol, trackedIntervals]);
 }

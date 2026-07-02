@@ -1,0 +1,129 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { ViewportController } from "../viewportController.js";
+
+function createChart() {
+  const calls = [];
+  const timeScale = {
+    range: { from: 10, to: 20 },
+    options: () => ({ barSpacing: 6 }),
+    applyOptions: (options) => calls.push(["applyOptions", options]),
+    fitContent: () => calls.push(["fitContent"]),
+    setVisibleRange: (range) => calls.push(["setVisibleRange", range]),
+    setVisibleLogicalRange: (range) => {
+      calls.push(["setVisibleLogicalRange", range]);
+      timeScale.range = range;
+    },
+    getVisibleLogicalRange: () => timeScale.range,
+    scrollToPosition: (position, animated) => calls.push(["scrollToPosition", position, animated]),
+  };
+  return {
+    calls,
+    chart: { timeScale: () => timeScale },
+  };
+}
+
+test("fitOnce is idempotent per session", () => {
+  const { chart, calls } = createChart();
+  const controller = new ViewportController({ chartProvider: () => chart });
+
+  assert.equal(controller.fitOnce("a"), true);
+  assert.equal(controller.fitOnce("a"), false);
+  assert.equal(controller.fitOnce("b"), true);
+  assert.deepEqual(calls, [["fitContent"], ["fitContent"]]);
+});
+
+test("interaction lock queues the highest priority intent", () => {
+  const { chart, calls } = createChart();
+  let unlock;
+  const controller = new ViewportController({
+    chartProvider: () => chart,
+    setTimer: (fn) => {
+      unlock = fn;
+      return 1;
+    },
+    clearTimer: () => {},
+  });
+
+  controller.markUserInteracting();
+  assert.equal(controller.fitOnce("a"), false);
+  controller.compensateInsert(3);
+  assert.deepEqual(calls, []);
+
+  unlock();
+  assert.deepEqual(calls, [["setVisibleLogicalRange", { from: 13, to: 23 }]]);
+});
+
+test("applySessionRestore applies spacing and time range", () => {
+  const { chart, calls } = createChart();
+  const controller = new ViewportController({ chartProvider: () => chart });
+
+  assert.equal(controller.applySessionRestore({
+    mode: "time",
+    barSpacing: 8,
+    timeRange: { from: 100, to: 200 },
+    scrollPosition: 2,
+  }), true);
+
+  assert.deepEqual(calls, [
+    ["applyOptions", { barSpacing: 8 }],
+    ["setVisibleRange", { from: 100, to: 200 }],
+    ["scrollToPosition", 2, false],
+  ]);
+});
+
+test("applySessionRestore applies anchor restore with right offset", () => {
+  const { chart, calls } = createChart();
+  const controller = new ViewportController({ chartProvider: () => chart });
+
+  assert.equal(controller.applySessionRestore({
+    mode: "anchor",
+    barSpacing: 10,
+    rightOffset: 4,
+    rightmostTime: 123,
+  }), true);
+
+  // rightOffset carries scrollPosition semantics and must never be written
+  // into the timeScale rightOffset option (permanent whitespace setting).
+  assert.deepEqual(calls, [
+    ["applyOptions", { barSpacing: 10 }],
+    ["scrollToPosition", 4, false],
+  ]);
+});
+
+test("queueShift accumulates shifts during one interaction", () => {
+  const { chart, calls } = createChart();
+  let unlock;
+  const controller = new ViewportController({
+    chartProvider: () => chart,
+    setTimer: (fn) => {
+      unlock = fn;
+      return 1;
+    },
+    clearTimer: () => {},
+  });
+
+  controller.markUserInteracting();
+  controller.queueShift(3);
+  controller.queueShift(-1);
+  assert.deepEqual(calls, []);
+
+  unlock();
+  assert.deepEqual(calls, [["setVisibleLogicalRange", { from: 12, to: 22 }]]);
+});
+
+test("applyAnchorShift shifts by the anchor index delta", () => {
+  const { chart, calls } = createChart();
+  const controller = new ViewportController({ chartProvider: () => chart });
+
+  const anchor = controller.captureAnchor([
+    { time: 100 }, { time: 110 }, { time: 120 }, { time: 130 },
+    { time: 140 }, { time: 150 }, { time: 160 }, { time: 170 },
+    { time: 180 }, { time: 190 }, { time: 200 },
+  ]);
+  assert.deepEqual(anchor, { time: 200, index: 10 });
+
+  assert.equal(controller.applyAnchorShift(anchor, () => 14), true);
+  assert.deepEqual(calls, [["setVisibleLogicalRange", { from: 14, to: 24 }]]);
+});

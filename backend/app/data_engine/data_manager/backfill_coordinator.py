@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 from app.core.executors import run_storage
 from app.data_engine.interval_policy import parse_interval_ms
-from .models import BarData, DataEvent, DataEventType, SeriesKey
+from .models import BarData, DataEvent, DataEventType, SeriesKey, audience_for_backfill_reason
 
 logger = logging.getLogger("data_manager.backfill_coordinator")
 
@@ -1223,6 +1223,7 @@ class BackfillCoordinator:
                 exchange=request.exchange,
                 market_type=request.market_type,
             ),
+            audience=audience_for_backfill_reason(request.reason),
             detail={
                 "request_id": request.request_id,
                 "status": self._status_value(report.status),

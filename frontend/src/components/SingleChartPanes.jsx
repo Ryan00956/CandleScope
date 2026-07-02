@@ -4,7 +4,7 @@
  * Uses one chart instance for main candles and all indicator panes so every
  * series shares the same time scale.
  */
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
 import { applyChartPaneAppearance, buildChartPaneOptions } from "../chart-adapter/chartPaneLifecycle";
 import { buildPaneLayoutOptions, createChartInstance } from "../chart-adapter/lightweightChartSurface";
@@ -14,6 +14,8 @@ import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRe
 import { renderMarkers } from "../chart-adapter/markerRenderer";
 import { renderBgcolors } from "../chart-adapter/bgcolorPrimitiveRenderer";
 import { applyBarColors } from "../chart-adapter/barColorRenderer";
+import { renderCandleDataTransition, renderSeriesDelta } from "../chart-adapter/seriesDeltaRenderer";
+import { createViewportController } from "../chart-adapter/viewportController";
 import {
   alignIndicatorBgcolorsToTimes,
   alignIndicatorLinesToTimes,
@@ -72,59 +74,68 @@ function filterFillsForLines(fills, lines) {
   ));
 }
 
-function buildTimeSet(data) {
-  return new Set((data || []).map((item) => item?.time).filter((time) => time != null));
+function resolveDataTimeSet(seriesStore) {
+  return seriesStore?.timeSet?.() || new Set();
 }
 
-function readVisibleRangeSnapshot(chart) {
-  const timeScale = chart?.timeScale?.();
-  if (!timeScale) return null;
-  const options = timeScale.options?.();
-  const time = timeScale.getVisibleRange();
-  const logical = timeScale.getVisibleLogicalRange();
-  const scrollPosition = timeScale.scrollPosition?.();
-  if (!time && !logical && !Number.isFinite(scrollPosition)) return null;
-  return {
-    time,
-    logical,
-    scrollPosition,
-    barSpacing: options?.barSpacing,
+function candleSnapshotFromStore(store) {
+  return (store?.snapshot?.({ force: true }) || []).map(toCandlePoint);
+}
+
+function rowsFromStore(store) {
+  return store?.snapshot?.() || [];
+}
+
+function syncSeriesDataRefsFromStore({ store, dataRef, dataMapRef, dataIndexMapRef }) {
+  const rows = rowsFromStore(store);
+  dataRef.current = rows;
+  dataMapRef.current = {
+    get: (time) => store?.getByTime?.(time) || null,
+    has: (time) => Boolean(store?.hasTime?.(time)),
+  };
+  dataIndexMapRef.current = {
+    get: (time) => store?.indexOfTime?.(time) ?? -1,
+    has: (time) => (store?.indexOfTime?.(time) ?? -1) >= 0,
   };
 }
 
-function restoreVisibleRangeSnapshotNow(chart, snapshot) {
-  const timeScale = chart?.timeScale?.();
-  if (!timeScale || !snapshot) return false;
-  if (Number.isFinite(snapshot.barSpacing)) {
-    timeScale.applyOptions({ barSpacing: snapshot.barSpacing });
+function syncPreviousCandleDataFromDelta({ delta, store, prevRef }) {
+  if (!delta || delta.type === "noop") return;
+  if (delta.type === "clear") {
+    prevRef.current = [];
+    return;
   }
-  if (snapshot.time) {
-    try {
-      timeScale.setVisibleRange(snapshot.time);
-      return true;
-    } catch { /* fall through */ }
-  }
-  if (Number.isFinite(snapshot.scrollPosition)) {
-    timeScale.scrollToPosition(snapshot.scrollPosition, false);
-    return true;
-  }
-  if (snapshot.logical) {
-    try {
-      timeScale.setVisibleLogicalRange(snapshot.logical);
-      return true;
-    } catch { /* fall through */ }
-  }
-  return false;
-}
 
-function restoreVisibleRangeSnapshot(chart, snapshot) {
-  const restored = restoreVisibleRangeSnapshotNow(chart, snapshot);
-  if (typeof window !== "undefined" && window.requestAnimationFrame && snapshot) {
-    window.requestAnimationFrame(() => {
-      restoreVisibleRangeSnapshotNow(chart, snapshot);
-    });
+  const current = prevRef.current || [];
+
+  if (delta.type === "tick" && delta.bar && current.length > 0) {
+    const point = toCandlePoint(delta.bar);
+    const last = current[current.length - 1];
+    if (last?.time === point.time) {
+      current[current.length - 1] = point;
+      if (delta.trimmedLeft > 0) current.splice(0, delta.trimmedLeft);
+      prevRef.current = current;
+      return;
+    }
+    if (point.time > last?.time) {
+      current.push(point);
+      if (delta.trimmedLeft > 0) current.splice(0, delta.trimmedLeft);
+      prevRef.current = current;
+      return;
+    }
   }
-  return restored;
+
+  if (delta.type === "append" && delta.addedRight > 0 && current.length > 0) {
+    const added = (store?.snapshot?.({ force: true }) || [])
+      .slice(-Math.max(0, delta.addedRight))
+      .map(toCandlePoint);
+    current.push(...added);
+    if (delta.trimmedLeft > 0) current.splice(0, delta.trimmedLeft);
+    prevRef.current = current;
+    return;
+  }
+
+  prevRef.current = candleSnapshotFromStore(store);
 }
 
 function getPaneRenderState(mapRef, paneId) {
@@ -185,7 +196,7 @@ function buildPaneDescriptors({
 }
 
 const SingleChartPanes = forwardRef(function SingleChartPanes({
-  data,
+  seriesStore = null,
   symbol,
   drawingKeyBase = "",
   interval,
@@ -229,6 +240,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const wrapperRef = useRef(null);
   const containerRef = useRef(null);
   const chartRef = useRef(null);
+  const viewportControllerRef = useRef(null);
   const mainSeriesRef = useRef(null);
   const indicatorSeriesRef = useRef([]);
   const paneRenderStateRef = useRef(new Map());
@@ -270,7 +282,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     onCrosshairMove?.(null);
   }, [datasetKey, interval, onCrosshairMove, symbol]);
 
-  const dataTimeSet = useMemo(() => buildTimeSet(data), [data]);
+  const dataTimeSet = resolveDataTimeSet(seriesStore);
   const paneDescriptors = useMemo(() => buildPaneDescriptors({
     dataTimeSet,
     mainOverlayLines,
@@ -294,23 +306,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     [subPanes],
   );
 
-  useEffect(() => { dataRef.current = data || []; }, [data]);
   useEffect(() => { intervalRef.current = interval; }, [interval]);
   useEffect(() => { onNeedMoreLeftRef.current = onNeedMoreLeft; }, [onNeedMoreLeft]);
   useEffect(() => { canLoadMoreLeftRef.current = canLoadMoreLeft; }, [canLoadMoreLeft]);
   useEffect(() => { onVisibleRangeChangeRef.current = onVisibleRangeChange; }, [onVisibleRangeChange]);
-
-  useEffect(() => {
-    const map = new Map();
-    const indexMap = new Map();
-    for (let index = 0; index < (data || []).length; index += 1) {
-      const d = data[index];
-      map.set(d.time, d);
-      indexMap.set(d.time, index);
-    }
-    dataMapRef.current = map;
-    dataIndexMapRef.current = indexMap;
-  }, [data]);
 
   const scheduleVisibleRangeSave = useCallback(() => {
     if (visibleRangeSaveTimerRef.current) clearTimeout(visibleRangeSaveTimerRef.current);
@@ -318,13 +317,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       const chart = chartRef.current;
       if (!chart || !onVisibleRangeChangeRef.current) return;
       const timeScale = chart.timeScale();
+      const timeRange = timeScale.getVisibleRange();
       const range = {
-        logical: timeScale.getVisibleLogicalRange(),
-        time: timeScale.getVisibleRange(),
         barSpacing: timeScale.options().barSpacing,
-        scrollPosition: timeScale.scrollPosition(),
+        rightOffset: timeScale.scrollPosition(),
+        rightmostTime: timeRange?.to,
       };
-      if (range.logical && range.time) onVisibleRangeChangeRef.current(range);
+      if (Number.isFinite(range.rightmostTime)) onVisibleRangeChangeRef.current(range);
     }, VISIBLE_RANGE_SAVE_DEBOUNCE_MS);
   }, []);
 
@@ -348,6 +347,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const chart = createChartInstance(container, options);
     const mainSeries = createMainSeries(chart, { upColor, downColor, paneIndex: 0 });
     chartRef.current = chart;
+    viewportControllerRef.current = createViewportController({
+      chartProvider: () => chartRef.current,
+    });
     mainSeriesRef.current = mainSeries;
     setSeriesReady((prev) => prev + 1);
 
@@ -391,6 +393,8 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       onCrosshairMove?.(null);
       chart.remove();
       chartRef.current = null;
+      viewportControllerRef.current?.dispose();
+      viewportControllerRef.current = null;
       mainSeriesRef.current = null;
       indicatorSeriesRef.current = [];
     };
@@ -399,7 +403,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   useEffect(() => {
     const wrapper = wrapperRef.current;
     if (!wrapper) return undefined;
-    const markUserInteracted = () => { userInteractedRef.current = true; };
+    const markUserInteracted = () => {
+      userInteractedRef.current = true;
+      viewportControllerRef.current?.markUserInteracting();
+    };
     const saveNativePaneHeights = () => {
       const chart = chartRef.current;
       if (!chart || subPanes.length === 0) return;
@@ -490,51 +497,74 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   useEffect(() => {
     userInteractedRef.current = false;
     hasRestoredRangeRef.current = false;
-    prevCandleDataRef.current = [];
     prevBarcoloredDataRef.current = [];
-    mainSeriesRef.current?.setData([]);
+    viewportControllerRef.current?.resetFit();
   }, [datasetKey]);
 
   useEffect(() => {
     const series = mainSeriesRef.current;
-    const chart = chartRef.current;
-    if (!series || !data?.length) return;
+    const store = seriesStore;
+    if (!series || !store) return undefined;
 
-    const candleData = data.map(toCandlePoint);
-    const canUseTrailingUpdate = canUseTrailingCandleUpdate(prevCandleDataRef.current, candleData);
-    const visibleRangeSnapshot = !canUseTrailingUpdate && prevCandleDataRef.current.length > 0
-      ? readVisibleRangeSnapshot(chart)
-      : null;
     try {
       isSyncingRef.current = true;
-      if (canUseTrailingUpdate) {
-        const start = Math.max(0, prevCandleDataRef.current.length - 1);
-        for (let i = start; i < candleData.length; i += 1) series.update(candleData[i]);
-        recordPerfEvent("chart.candleSeries.update", {
-          paneId: "main",
-          reason: "single-chart-trailing",
-          points: candleData.length - start,
-          totalPoints: candleData.length,
-        });
-      } else {
-        series.setData(candleData);
-        recordPerfEvent("chart.candleSeries.setData", {
-          paneId: "main",
-          reason: "single-chart-full",
-          points: candleData.length,
-        });
-        restoreVisibleRangeSnapshot(chart, visibleRangeSnapshot);
-      }
+      syncSeriesDataRefsFromStore({
+        store,
+        dataRef,
+        dataMapRef,
+        dataIndexMapRef,
+      });
+      const candleData = candleSnapshotFromStore(store);
+      renderCandleDataTransition({
+        series,
+        previousData: prevCandleDataRef.current,
+        nextData: candleData,
+        viewportController: viewportControllerRef.current,
+        paneId: "main",
+        recordPerfEvent,
+      });
       prevCandleDataRef.current = candleData;
     } finally {
       isSyncingRef.current = false;
     }
-  }, [data]);
+
+    return store.subscribe((delta, currentStore) => {
+      const currentSeries = mainSeriesRef.current;
+      if (!currentSeries) return;
+      try {
+        isSyncingRef.current = true;
+        renderSeriesDelta({
+          series: currentSeries,
+          delta,
+          store: currentStore,
+          previousRows: prevCandleDataRef.current,
+          viewportController: viewportControllerRef.current,
+          toPoint: toCandlePoint,
+          paneId: "main",
+          recordPerfEvent,
+        });
+        syncPreviousCandleDataFromDelta({
+          delta,
+          store: currentStore,
+          prevRef: prevCandleDataRef,
+        });
+        syncSeriesDataRefsFromStore({
+          store: currentStore,
+          dataRef,
+          dataMapRef,
+          dataIndexMapRef,
+        });
+      } finally {
+        isSyncingRef.current = false;
+      }
+    });
+  }, [seriesReady, seriesStore]);
 
   useEffect(() => {
+    const rows = rowsFromStore(seriesStore);
     applyBarColors({
       series: mainSeriesRef.current,
-      data,
+      data: rows,
       indicatorBarcolors,
       prevBarcoloredDataRef,
       isSyncingRef,
@@ -547,36 +577,17 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         err,
       ),
     });
-  }, [data, indicatorBarcolors]);
+  }, [dataMeta?.version, indicatorBarcolors, seriesStore]);
 
   useEffect(() => {
-    const chart = chartRef.current;
-    if (!chart || !data?.length || hasRestoredRangeRef.current) return;
+    const rows = rowsFromStore(seriesStore);
+    if (!rows.length || hasRestoredRangeRef.current) return;
+    if (dataMeta?.status === "loading" || dataMeta?.seriesKey !== datasetKey) return;
 
-    const restorePlan = planVisibleRangeRestore(savedVisibleRange, data, dataMeta);
-    let restored = false;
-
-    if (restorePlan.barSpacing != null) {
-      chart.timeScale().applyOptions({ barSpacing: restorePlan.barSpacing });
-    }
-    if (restorePlan.mode === "time") {
-      try {
-        chart.timeScale().setVisibleRange(restorePlan.timeRange);
-        restored = true;
-      } catch { /* */ }
-    }
-    if (!restored && restorePlan.mode === "logical") {
-      try {
-        chart.timeScale().setVisibleLogicalRange(restorePlan.logicalRange);
-        restored = true;
-      } catch { /* */ }
-    }
-    if (restored && restorePlan.scrollPosition != null) {
-      chart.timeScale().scrollToPosition(restorePlan.scrollPosition, false);
-    }
-    if (!restored) chart.timeScale().fitContent();
+    const restorePlan = planVisibleRangeRestore(savedVisibleRange, rows, dataMeta);
+    viewportControllerRef.current?.applySessionRestore(restorePlan, { sessionKey: datasetKey });
     hasRestoredRangeRef.current = true;
-  }, [data, dataMeta, datasetKey, savedVisibleRange]);
+  }, [dataMeta, datasetKey, savedVisibleRange, seriesStore]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -786,11 +797,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       const chart = chartRef.current;
       if (!chart) return null;
       const timeScale = chart.timeScale();
+      const timeRange = timeScale.getVisibleRange();
       return {
         logical: timeScale.getVisibleLogicalRange(),
-        time: timeScale.getVisibleRange(),
+        time: timeRange,
         barSpacing: timeScale.options().barSpacing,
-        scrollPosition: timeScale.scrollPosition(),
+        rightOffset: timeScale.scrollPosition(),
+        rightmostTime: timeRange?.to,
       };
     },
     clearAllDrawings,
@@ -922,4 +935,4 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   );
 });
 
-export default SingleChartPanes;
+export default memo(SingleChartPanes);

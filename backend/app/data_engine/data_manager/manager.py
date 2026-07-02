@@ -104,6 +104,7 @@ from .models import (
     StreamInfo,
     StreamStatus,
     SubscriptionHandle,
+    audience_for_backfill_reason,
 )
 from .maintenance import MaintenanceService, RepairRequester
 from .price_cache import PriceSnapshot, PriceSnapshotCache, normalize_price_key, price_key
@@ -1775,6 +1776,7 @@ class DataManager:
         await self.event_bus.emit(DataEvent(
             event_type=DataEventType.BACKFILL_COMPLETED,
             key=key,
+            audience=audience_for_backfill_reason(detail.get("reason")),
             detail=detail,
         ))
 

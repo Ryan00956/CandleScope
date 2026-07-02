@@ -14,6 +14,13 @@ from app.api.v1.stream_utils import (
 from app.data_engine.data_manager.models import DataEventType
 
 
+def should_forward_browser_event(event) -> bool:
+    """Return whether a DataManager event should be sent to browser K-line clients."""
+    if event.event_type != DataEventType.BACKFILL_COMPLETED:
+        return True
+    return getattr(event, "audience", "user") != "internal"
+
+
 async def stream_single_kline(
     websocket: WebSocket,
     dm,
@@ -131,6 +138,8 @@ async def stream_multi_kline(
 
     async def event_callback(event):
         if ws_closed:
+            return
+        if not should_forward_browser_event(event):
             return
         try:
             if event.event_type == DataEventType.BACKFILL_COMPLETED:

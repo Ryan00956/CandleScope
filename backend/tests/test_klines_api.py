@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api.v1.klines import router as klines_router
+from app.api.v1.klines import _schedule_related_interval_warmup, router as klines_router
 from app.data_engine.data_manager import DataManager
 from app.data_engine.data_manager.models import BarData, QueryResult, QuerySource
 
@@ -211,6 +211,36 @@ def test_history_query_triggers_data_manager_backfill_request_when_empty() -> No
     assert [call[1] for call in calls[1:]] == ["15m", "4h", "5m"]
 
 
+def test_history_count_back_overrides_days_window() -> None:
+    calls: list[tuple[str, str, int, int, str, str]] = []
+    dm = DataManager()
+    dm.set_backfill_trigger(
+        lambda symbol, interval, start_ms, end_ms, exchange, market_type: calls.append(
+            (symbol, interval, start_ms, end_ms, exchange, market_type)
+        )
+    )
+    client = _client(dm)
+
+    response = client.get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1h",
+            "days": 30,
+            "count_back": 10,
+            "max_wait_ms": 0,
+            "exchange": "binance",
+            "market_type": "spot",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count_back"] == 10
+    _symbol, _interval, start_ms, end_ms, _exchange, _market_type = calls[0]
+    assert end_ms - start_ms == 9 * 60 * 60 * 1000
+
+
 def test_latest_endpoint_does_not_trigger_backfill_when_storage_is_empty() -> None:
     calls: list[tuple] = []
     dm = DataManager()
@@ -332,6 +362,118 @@ def test_range_query_reports_exact_visible_gap() -> None:
             "status": "detected",
         }
     ]
+
+
+def test_range_query_caps_huge_range_from_newest_end() -> None:
+    class _CappedRangeDataManager:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+        ) -> QueryResult:
+            self.calls.append({
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "limit": limit,
+                "auto_backfill": auto_backfill,
+            })
+            bars = [
+                BarData(
+                    time=(start_ms // 1000) + (index * 60),
+                    open=1,
+                    high=2,
+                    low=1,
+                    close=2,
+                    volume=10,
+                )
+                for index in range(5_000)
+            ]
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(bars),
+            )
+
+    dm = _CappedRangeDataManager()
+    client = _client(dm)
+
+    response = client.get(
+        "/api/v1/klines/range",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "start_ms": 60_000,
+            "end_ms": 360_060_000,
+            "exchange": "binance",
+            "market_type": "spot",
+            "repair": "none",
+            "strict": "true",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    expected_query_start = 360_060_000 - (4_999 * 60_000)
+    assert dm.calls == [{
+        "start_ms": expected_query_start,
+        "end_ms": 360_060_000,
+        "limit": 5_000,
+        "auto_backfill": False,
+    }]
+    assert payload["truncated"] is True
+    assert payload["query_start_ms"] == expected_query_start
+    assert payload["query_end_ms"] == 360_060_000
+    assert payload["next_end_ms"] == expected_query_start - 60_000
+    assert payload["expected_bars"] == 5_000
+    assert payload["actual_bars"] == 5_000
+    assert payload["verified_contiguous"] is True
+
+
+def test_related_interval_warmup_caps_each_interval_to_target_bars() -> None:
+    class _WarmupDataManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple, dict]] = []
+
+        def request_backfill(self, *args, **kwargs) -> None:
+            self.calls.append((args, kwargs))
+
+    dm = _WarmupDataManager()
+
+    _schedule_related_interval_warmup(
+        dm,
+        symbol="BTCUSDT",
+        current_interval="1d",
+        start_ms=0,
+        end_ms=10_000_000_000,
+        exchange="binance",
+        market_type="spot",
+    )
+
+    by_interval = {args[1]: (args, kwargs) for args, kwargs in dm.calls}
+    assert list(by_interval) == ["4h", "1h", "15m"]
+    args, kwargs = by_interval["15m"]
+    assert args[2] == 10_000_000_000 - (1_000 * 15 * 60 * 1_000)
+    assert args[3] == 10_000_000_000
+    assert kwargs["metadata"]["visible_range"] == {"start_ms": 0, "end_ms": 10_000_000_000}
+    assert kwargs["metadata"]["warmup_range"] == {
+        "start_ms": args[2],
+        "end_ms": 10_000_000_000,
+        "target_bars": 1_000,
+    }
 
 
 def test_continuity_endpoint_returns_storage_gap_report() -> None:

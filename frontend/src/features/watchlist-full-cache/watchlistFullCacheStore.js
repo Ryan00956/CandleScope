@@ -1,8 +1,5 @@
 import {
-  deduplicateByTime,
   klineRowsEqual,
-  mergeByTime,
-  upsertRealtimeKline,
 } from "../market-data/chartDataRuntime.js";
 import {
   klineDependencyKey,
@@ -13,6 +10,50 @@ import { parseSymbolKey } from "../../utils/symbolKey.js";
 
 const entries = new Map();
 const KLINE_ROW_ESTIMATED_BYTES = 200;
+
+function mergeByTime(older, current) {
+  const merged = [...older, ...current];
+  const uniq = new Map();
+  for (const item of merged) {
+    uniq.set(item.time, item);
+  }
+  return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
+}
+
+function deduplicateByTime(data) {
+  if (!data || data.length <= 1) return data;
+  const seen = new Map();
+  for (const item of data) {
+    seen.set(item.time, item);
+  }
+  return Array.from(seen.values()).sort((a, b) => a.time - b.time);
+}
+
+function upsertRealtimeKline(current, incoming) {
+  if (!current || current.length === 0) return current;
+  if (!incoming || incoming.time == null) return current;
+  const next = { ...incoming };
+
+  const firstTime = current[0].time;
+  const lastIndex = current.length - 1;
+  const lastTime = current[lastIndex].time;
+
+  if (next.time < firstTime) return current;
+  if (next.time === lastTime) {
+    const updated = [...current];
+    updated[lastIndex] = next;
+    return updated;
+  }
+  if (next.time > lastTime) {
+    return [...current, next];
+  }
+
+  const idx = current.findIndex((item) => item.time === next.time);
+  if (idx === -1) return current;
+  const updated = [...current];
+  updated[idx] = next;
+  return updated;
+}
 
 export function fullCacheKey(symbolKey, interval) {
   return `${symbolKey}::${interval}`;

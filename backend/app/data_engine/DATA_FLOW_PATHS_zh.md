@@ -13,6 +13,10 @@
 | `DataEvent` | `DataManager` / `AggregatorBridge` / `BackfillCoordinator` | API WS、indicator bridge、订阅者 | 后端公开 event bus 消息。 |
 | `PriceSnapshot` | `DataManager.on_price_ticks()` | 价格 REST/WS 消费者 | watchlist 价格轻量状态，和 OHLCV K 线分离。 |
 
+`DataEvent` 带 audience 分级。用于用户可见窗口的事件才进入 API WS
+广播；内部修复、审计、后台维护事件默认留在服务端或定向消费者，避免前端因
+无关 backfill/recompute 重新拉取几万根历史。
+
 ## 实时 K 线路径
 
 ```text
@@ -45,6 +49,8 @@ WS /stream/klines 或 /stream/klines_multi
 - 实时 cache 修改发生在 `BarAggregator` 产出 `BarEvent` 后，由 `AggregatorBridge` 完成。
 - 自定义周期在 `StreamEnsurePlanner` 要求时复用 base interval 输入。
 - 非默认 `exchange` 和非 spot `market_type` 都属于 stream identity。
+- API K-line WebSocket 按订阅 identity 和 event audience 过滤，只给当前
+  用户可见序列发送需要前端处理的事件。
 
 ## 历史修复路径
 

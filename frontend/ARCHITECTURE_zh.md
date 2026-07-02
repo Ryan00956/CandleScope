@@ -26,7 +26,7 @@ Phase 10 后，`src/app` 拥有应用组合根和 Shell。Phase 11 后，原先�
 | 分组 | 所有权 |
 |---|---|
 | `chart-session/` | 当前 symbol、exchange、market type、interval、dataset key、自定义周期、交易所 capability、可见范围存储 |
-| `market-data/` | K 线缓存、首屏历史加载、左侧分页、backfill completion、K 线 WebSocket、背景预取、gap recovery、header 行情展示状态 |
+| `market-data/` | K 线 `SeriesDataFeed`、有界 `SeriesWindowStore`、delta 渲染输入、首屏历史加载、左侧分页、backfill completion、K 线 WebSocket、背景预取、gap recovery、header 行情展示状态 |
 | `indicators/` | active indicators、计算调度、hosted indicator WebSocket、输出 reducer、pane projection、catalog 和 Pyne 安全策略 |
 | `drawings/` | 绘图工具状态、primitive 交互、选择、snap、持久化、lazy drawing engine host |
 | `watchlist/` | 自选列表、侧栏布局、订阅层级、watchlist price stream |
@@ -68,6 +68,8 @@ CORS 阻止访问 `http://localhost:8000`，导致 K 线 HTTP 请求失败。
 | 前端性能 marks 和 smoke timing report | 已完成 |
 | K 线优先于指标和后台任务的首屏加载 | 已完成 |
 | 保守的 chart series 尾部增量更新路径 | 已完成 |
+| K 线窗口预算、feed 收敛、delta 渲染、指标窗口化和乐观切换 | 已完成 |
+| `check:architecture` 迁移 allowlist 清零 | 已完成 |
 | symbol search 和 Settings 的意图预加载 | 已完成 |
 | React、Lightweight Charts、editor、export 库的构建期 vendor chunk | 已完成 |
 | Phase 10 app shell 和 lazy surfaces 迁入 `src/app` | 已完成 |
@@ -110,10 +112,9 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 - 收紧 lazy surface 的 smoke timing 粒度；当前浏览器 smoke 循环对产品验证是安全的，
   但有 500 ms 的粗轮询下限。
-- 继续以实测为依据优化 fills、markers、hlines、overlays 和 visible-range restore
-  相关的图表渲染成本，再考虑更大的 chart component 重构。
-- `ChartPane` 内部简化继续以证据驱动。它仍然是最密集的图表模块，但
-  Lightweight Charts 所有权应继续留在 chart components 内。
+- 继续以实测为依据优化 fills、markers、hlines 和 overlays 的图表渲染成本。
+- `SingleChartPanes` 内部简化继续以证据驱动。它仍然是最密集的图表模块，但
+  Lightweight Charts 写操作应继续经 `chart-adapter`。
 - 当本地 smoke 数字稳定到适合跨机器比较后，可以考虑把性能预算报告接入 CI。
 - 继续把仍留在 `src/components` 的 feature UI 实现逐步迁入对应 feature，避免只为了目录整齐而移动仍不稳定的代码。
 - 当前端 feature 边界变化时，同步更新顶层 README 和本文档。

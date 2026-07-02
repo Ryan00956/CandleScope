@@ -7,3 +7,21 @@ export function requestIndicatorRangeInChunks(requestRange, start, end) {
   }
   requestRange(startSec, endSec);
 }
+
+export function resolveIndicatorRangeFromWindowMeta(meta = {}) {
+  const type = meta?.windowDeltaType;
+  if (type !== "prepend" && type !== "mid-merge") return null;
+  const start = Math.floor(Number(meta.incomingFirstTime));
+  const end = Math.floor(Number(meta.incomingLastTime));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= 0 || start > end) {
+    return null;
+  }
+  return { start, end, reason: `window-${type}` };
+}
+
+export function requestIndicatorRangeForWindowMeta(requestRange, meta = {}) {
+  const range = resolveIndicatorRangeFromWindowMeta(meta);
+  if (!range) return false;
+  requestIndicatorRangeInChunks(requestRange, range.start, range.end);
+  return true;
+}

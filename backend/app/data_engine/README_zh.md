@@ -70,6 +70,10 @@ DataEngineRuntime
 
 不要在 API 层直接持有 `BackfillEngine`、`BarAggregator`、`TransportLayer` 等内部对象。边界测试会保护这一点。
 
+DataManager 对外发布的 `DataEvent` 必须带清晰 audience。API WebSocket
+只转发用户可见的 K 线更新、可见窗口 backfill completion 和必要的连接状态；
+内部 backfill、审计和缓存维护事件不应驱动前端全量刷新。
+
 ## 运行时职责
 
 `start_data_engine()` 的主要步骤：

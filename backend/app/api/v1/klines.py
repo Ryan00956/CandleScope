@@ -43,6 +43,8 @@ router = APIRouter(prefix="/klines", tags=["klines"])
 logger = logging.getLogger("api.klines")
 
 RELATED_WARMUP_INTERVALS = ("1m", "5m", "15m", "1h", "4h", "1d")
+MAX_RANGE_RESPONSE_BARS = 5_000
+RELATED_WARMUP_TARGET_BARS = 1_000
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -156,6 +158,54 @@ def _first_expected_open_ms(start_ms: int, interval: str) -> int:
 def _next_expected_open_ms(open_ms: int, interval: str) -> int:
     interval_ms = parse_interval_ms(interval) or 60_000
     return compute_bucket_end_ms(open_ms, interval_ms, interval=interval)
+
+
+def _interval_ms_for_request(interval: str) -> int:
+    interval_ms = parse_interval_ms(interval)
+    if interval_ms is not None and interval_ms > 0:
+        return interval_ms
+    custom_seconds = parse_custom_interval(interval) or 60
+    return int(custom_seconds * 1000)
+
+
+def _cap_range_request(
+    *,
+    start_ms: int,
+    end_ms: int,
+    interval: str,
+    max_bars: int = MAX_RANGE_RESPONSE_BARS,
+) -> dict[str, Any]:
+    interval_ms = _interval_ms_for_request(interval)
+    if interval_ms <= 0 or end_ms < start_ms:
+        return {
+            "query_start_ms": start_ms,
+            "query_end_ms": end_ms,
+            "needed_limit": 0,
+            "truncated": False,
+            "next_end_ms": None,
+            "interval_ms": interval_ms,
+        }
+
+    requested_bars = int((end_ms - start_ms) / interval_ms) + 1
+    if requested_bars <= max_bars:
+        return {
+            "query_start_ms": start_ms,
+            "query_end_ms": end_ms,
+            "needed_limit": min(max_bars, int((end_ms - start_ms) / interval_ms) + 100),
+            "truncated": False,
+            "next_end_ms": None,
+            "interval_ms": interval_ms,
+        }
+
+    query_start_ms = max(start_ms, end_ms - ((max_bars - 1) * interval_ms))
+    return {
+        "query_start_ms": query_start_ms,
+        "query_end_ms": end_ms,
+        "needed_limit": max_bars,
+        "truncated": True,
+        "next_end_ms": query_start_ms - interval_ms if query_start_ms > start_ms else None,
+        "interval_ms": interval_ms,
+    }
 
 
 def _verify_range_continuity(
@@ -282,11 +332,13 @@ def _schedule_related_interval_warmup(
 
     for interval in _related_warmup_intervals(current_interval):
         try:
+            interval_ms = _interval_ms_for_request(interval)
+            warmup_start_ms = max(start_ms, end_ms - (RELATED_WARMUP_TARGET_BARS * interval_ms))
             _call_data_manager_method(
                 request_backfill,
                 symbol,
                 interval,
-                start_ms,
+                warmup_start_ms,
                 end_ms,
                 exchange,
                 market_type,
@@ -299,6 +351,11 @@ def _schedule_related_interval_warmup(
                     "visible_range": {
                         "start_ms": start_ms,
                         "end_ms": end_ms,
+                    },
+                    "warmup_range": {
+                        "start_ms": warmup_start_ms,
+                        "end_ms": end_ms,
+                        "target_bars": RELATED_WARMUP_TARGET_BARS,
                     },
                 },
             )
@@ -461,6 +518,7 @@ async def get_klines_history(
     symbol: str = Query("BTCUSDT", description="Trading symbol"),
     interval: str = Query("1h", description="Kline interval"),
     days: float = Query(7, ge=0.001, le=3650, description="Historical days (supports fractional, e.g. 0.04)"),
+    count_back: int | None = Query(None, ge=1, le=MAX_RANGE_RESPONSE_BARS, description="Newest bar count to return; overrides days window when provided"),
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
     max_wait_ms: int = Query(
@@ -483,9 +541,13 @@ async def get_klines_history(
     dm = _require_data_manager(request)
     try:
         end_ms = min(int(time.time() * 1000), _last_closed_open_ms(interval))
-        start_ms = end_ms - int(days * 24 * 60 * 60 * 1000)
         interval_secs = parse_custom_interval(interval) or 60
-        needed_limit = int((end_ms - start_ms) / 1000 / interval_secs) + 100
+        if count_back is not None:
+            start_ms = end_ms - int((count_back - 1) * interval_secs * 1000)
+            needed_limit = min(MAX_RANGE_RESPONSE_BARS, count_back)
+        else:
+            start_ms = end_ms - int(days * 24 * 60 * 60 * 1000)
+            needed_limit = int((end_ms - start_ms) / 1000 / interval_secs) + 100
 
         async def _run_history_query(auto_backfill=None):
             return await run_storage(
@@ -551,6 +613,7 @@ async def get_klines_history(
         "symbol": symbol.upper(),
         "interval": interval,
         "days": days,
+        "count_back": count_back,
         "start_ms": start_ms,
         "end_ms": end_ms,
         "count": len(data),
@@ -602,6 +665,10 @@ async def get_klines_range(
             "start_ms": start_ms,
             "end_ms": end_ms,
             "effective_end_ms": effective_end_ms,
+            "query_start_ms": start_ms,
+            "query_end_ms": effective_end_ms,
+            "truncated": False,
+            "next_end_ms": None,
             "count": 0,
             "source": "empty",
             "fetched": 0,
@@ -615,8 +682,14 @@ async def get_klines_range(
             "base_interval": None,
         }
 
-    interval_secs = parse_custom_interval(interval) or 60
-    needed_limit = int((effective_end_ms - start_ms) / 1000 / interval_secs) + 100
+    range_cap = _cap_range_request(
+        start_ms=start_ms,
+        end_ms=effective_end_ms,
+        interval=interval,
+    )
+    query_start_ms = range_cap["query_start_ms"]
+    query_end_ms = range_cap["query_end_ms"]
+    needed_limit = range_cap["needed_limit"]
 
     dm = _require_data_manager(request)
     try:
@@ -625,8 +698,8 @@ async def get_klines_range(
             dm.query,
             symbol,
             interval,
-            start_ms=start_ms,
-            end_ms=effective_end_ms,
+            start_ms=query_start_ms,
+            end_ms=query_end_ms,
             limit=needed_limit,
             exchange=exchange,
             market_type=market_type,
@@ -641,8 +714,8 @@ async def get_klines_range(
             interval=interval,
             exchange=exchange,
             market_type=market_type,
-            start_ms=start_ms,
-            end_ms=effective_end_ms,
+            start_ms=query_start_ms,
+            end_ms=query_end_ms,
         )
 
         if (
@@ -657,8 +730,8 @@ async def get_klines_range(
                 dm.query,
                 symbol,
                 interval,
-                start_ms=start_ms,
-                end_ms=effective_end_ms,
+                start_ms=query_start_ms,
+                end_ms=query_end_ms,
                 limit=needed_limit,
                 exchange=exchange,
                 market_type=market_type,
@@ -673,8 +746,8 @@ async def get_klines_range(
                 interval=interval,
                 exchange=exchange,
                 market_type=market_type,
-                start_ms=start_ms,
-                end_ms=effective_end_ms,
+                start_ms=query_start_ms,
+                end_ms=query_end_ms,
             )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager range query failed: {exc}") from exc
@@ -692,6 +765,10 @@ async def get_klines_range(
         "start_ms": start_ms,
         "end_ms": end_ms,
         "effective_end_ms": effective_end_ms,
+        "query_start_ms": query_start_ms,
+        "query_end_ms": query_end_ms,
+        "truncated": range_cap["truncated"],
+        "next_end_ms": range_cap["next_end_ms"],
         "count": len(data),
         "source": result.source.value,
         "fetched": result.total,

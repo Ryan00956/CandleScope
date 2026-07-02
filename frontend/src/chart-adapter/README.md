@@ -32,6 +32,11 @@ chart operations, not feature state.
 - `lightweightChartSurface.js` owns direct `lightweight-charts` imports and
   exposes the chart factory plus series type tokens used by chart renderers.
 - `coordinateBridge.js` owns Lightweight Charts coordinate interpolation helpers.
+- `viewportController.js` serializes fit/restore/compensate intents so user
+  interaction is not fighting automatic visible-range writes.
+- `seriesDeltaRenderer.js` applies `SeriesWindowStore` deltas directly to chart
+  series, using tick/update paths where possible and compensating prepends via
+  `ViewportController`.
 - `ChartPane` still creates and owns chart instances, series, pane sync, and
   rendering lifecycle, but it receives Lightweight Charts factory/type objects
   through this adapter boundary. Business-facing code should receive the adapter
@@ -48,6 +53,7 @@ These are still chart operations; they must not grow business rules.
 - Adapter modules may import generic helpers from `src/shared`.
 - Chart rendering components may own chart lifecycle only through adapter
   modules; direct `lightweight-charts` imports must stay inside this directory.
+- Viewport writes should flow through `ViewportController`.
 
 ## Forbidden Dependencies
 

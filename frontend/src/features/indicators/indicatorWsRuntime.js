@@ -1,12 +1,13 @@
-import { buildIndicatorComputeParams } from "./indicatorComputeRuntime.js";
+import {
+  buildIndicatorComputeParams,
+  INDICATOR_HISTORY_LIMIT,
+} from "./indicatorComputeRuntime.js";
 import {
   getBuiltinIndicatorName,
   isBuiltinIndicator,
   isWsHostedIndicator,
   stringSignature,
 } from "./indicatorPayloadRuntime.js";
-
-const INDICATOR_WS_SEED_HISTORY_LIMIT = 50_000;
 
 export function getVisibleHostedIndicators(indicators = []) {
   return indicators.filter((indicator) => (
@@ -41,7 +42,7 @@ export function buildHostedSubscriptionMessage(indicator, context) {
   const builtin = isBuiltinIndicator(indicator);
   const historyLimit = Math.min(
     Math.max(chartDataLength, 1),
-    INDICATOR_WS_SEED_HISTORY_LIMIT,
+    INDICATOR_HISTORY_LIMIT,
   );
 
   return {

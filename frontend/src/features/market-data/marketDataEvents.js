@@ -4,6 +4,7 @@ export const INDICATOR_RANGE_REQUEST_REASONS = Object.freeze({
   LOAD_MORE_LEFT: "load-more-left",
   BACKFILL_COMPLETED: "backfill-completed",
   GAP_RECOVERY: "gap-recovery",
+  WINDOW_DELTA: "window-delta",
 });
 
 function normalizeRangeBoundary(value) {

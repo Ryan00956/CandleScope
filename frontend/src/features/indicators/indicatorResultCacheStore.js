@@ -213,6 +213,59 @@ function trimNormalizedBefore(normalized = {}, keepStart) {
   };
 }
 
+function samePlainObject(left, right) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  for (const key of keys) {
+    if (left[key] !== right[key]) return false;
+  }
+  return true;
+}
+
+function lineIdentity(line = {}) {
+  return line.id || line.outputName || line.name || "";
+}
+
+function clonePointWithSharing(point, previousPoint) {
+  return samePlainObject(point, previousPoint) ? previousPoint : { ...point };
+}
+
+function clonePointArrayWithSharing(points = [], previousPoints = []) {
+  let changed = points.length !== previousPoints.length;
+  const next = points.map((point, index) => {
+    const shared = clonePointWithSharing(point, previousPoints[index]);
+    if (shared !== previousPoints[index]) changed = true;
+    return shared;
+  });
+  return changed ? next : previousPoints;
+}
+
+function normalizeLinesWithSharing(lines = [], previousLines = []) {
+  const previousByIdentity = new Map(previousLines.map((line) => [lineIdentity(line), line]));
+  return (lines || []).map((line, index) => {
+    const previous = previousByIdentity.get(lineIdentity(line)) || previousLines[index] || null;
+    const data = clonePointArrayWithSharing(line.data || [], previous?.data || []);
+    const colorData = line.colorData
+      ? clonePointArrayWithSharing(line.colorData, previous?.colorData || [])
+      : undefined;
+    const base = {
+      ...line,
+      data,
+      ...(colorData ? { colorData } : {}),
+    };
+    if (
+      previous
+      && data === previous.data
+      && (!line.colorData || colorData === previous.colorData)
+      && samePlainObject({ ...base, data: undefined, colorData: undefined }, { ...previous, data: undefined, colorData: undefined })
+    ) {
+      return previous;
+    }
+    return base;
+  });
+}
+
 function enforceLimit() {
   while (entries.size > MAX_INDICATOR_CACHE_ENTRIES) {
     const oldestKey = entries.keys().next().value;
@@ -323,9 +376,10 @@ export function updateCachedIndicatorLines(indicator, context, lines) {
   if (!indicator?.id) return null;
   const key = buildIndicatorResultCacheKey(indicator, context);
   const current = entries.get(key);
+  const baseNormalized = current?.normalized || emptyNormalized();
   const nextNormalized = {
-    ...(current?.normalized || emptyNormalized()),
-    lines: clone(lines) || [],
+    ...baseNormalized,
+    lines: normalizeLinesWithSharing(lines, baseNormalized.lines || []),
   };
   return putEntry(key, {
     indicatorId: indicator.id,

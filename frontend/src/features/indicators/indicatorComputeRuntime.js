@@ -6,8 +6,10 @@ import {
   stringSignature,
 } from "./indicatorPayloadRuntime.js";
 
-export const INDICATOR_DATA_DEBOUNCE_MS = 500;
-export const PROVISIONAL_INDICATOR_DELAY_MS = 1200;
+// Indicator compute is viewport-window scoped; older history is filled by range requests.
+export const INDICATOR_HISTORY_LIMIT = 2_000;
+export const INDICATOR_DATA_DEBOUNCE_MS = 150;
+export const PROVISIONAL_INDICATOR_DELAY_MS = 300;
 export const SERIES_READY_COMPUTE_DELAY_MS = 50;
 
 export function buildCandleColorKey(candleUpColor, candleDownColor) {
@@ -22,8 +24,14 @@ export function buildIndicatorMutationSignature(indicators = []) {
     .join("|");
 }
 
-export function buildIndicatorOhlcv(chartData = []) {
-  return chartData.map((bar) => ({
+export function limitIndicatorHistory(chartData = [], limit = INDICATOR_HISTORY_LIMIT) {
+  if (!Array.isArray(chartData)) return [];
+  const maxBars = Math.max(1, Math.floor(Number(limit) || INDICATOR_HISTORY_LIMIT));
+  return chartData.length > maxBars ? chartData.slice(-maxBars) : chartData;
+}
+
+export function buildIndicatorOhlcv(chartData = [], { limit = INDICATOR_HISTORY_LIMIT } = {}) {
+  return limitIndicatorHistory(chartData, limit).map((bar) => ({
     time: bar.time,
     open: bar.open,
     high: bar.high,

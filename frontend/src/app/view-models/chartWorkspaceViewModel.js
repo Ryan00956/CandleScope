@@ -77,7 +77,7 @@ export function buildChartWorkspaceViewModel({
       error: marketView.error,
       onRetryLoad: marketActions.retry,
       chartProps: {
-        data: marketView.bars,
+        seriesStore: marketView.seriesStore,
         symbol,
         drawingKeyBase: chartStorageKeyBase,
         interval,

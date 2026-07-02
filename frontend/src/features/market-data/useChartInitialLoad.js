@@ -1,26 +1,27 @@
 import { useCallback, useRef } from "react";
-import { fetchKlinesHistory, fetchLatestKlines } from "../../services/api";
 import { markPerf, recordPerfEvent } from "../../runtime/performance/perfMarks";
 import { numericRange } from "./rangeRuntime";
 
 const INITIAL_BACKFILL_RETRY_MS = 3_000;
 const INITIAL_BACKFILL_TIMEOUT_MS = 10_000;
 const INITIAL_BACKFILL_MAX_WAIT_MS = 60_000;
+const INITIAL_HISTORY_COUNT_BACK = 1_500;
+const OPTIMISTIC_SWITCH_EMPTY_TIMEOUT_MS = 3_000;
 
 export function useChartInitialLoad({
   exchange,
   marketType,
-  getIntervalDays,
   getFromCache,
   resolveInitialRows,
+  seriesDataFeed,
   replaceChartData,
   clearChartData,
+  markChartDataTransition,
   commitMergedChartData,
   commitPatchedChartData,
   pendingInitialHistoryRef,
   updateLastPrice,
   setConnectionStatus,
-  setDatasetKey,
   setLoading,
   setError,
   setLoadingMoreLeft,
@@ -44,6 +45,14 @@ export function useChartInitialLoad({
     const cached = initialRows.rows;
     const hasCacheHit = cached && cached.length > 0;
     let shownInitialData = false;
+    let fallbackClearTimer = null;
+    const markInitialDataShown = () => {
+      shownInitialData = true;
+      if (fallbackClearTimer) {
+        clearTimeout(fallbackClearTimer);
+        fallbackClearTimer = null;
+      }
+    };
 
     if (hasCacheHit) {
       replaceChartData(sym, intv, cached, {
@@ -53,15 +62,18 @@ export function useChartInitialLoad({
       updateLastPrice(cached[cached.length - 1], intv);
       setConnectionStatus(initialRows.needsRepair ? "loading" : "connected");
       setDataSource(initialRows.source || "memory-cache-hit");
-      setDatasetKey((version) => version + 1);
       setLoading(false);
       setError(null);
-      shownInitialData = true;
+      markInitialDataShown();
     } else {
-      clearChartData("load-start-clear", sym, intv);
+      markChartDataTransition(sym, intv, "load-start-optimistic");
       setLoading(true);
       setError(null);
       setConnectionStatus("loading");
+      fallbackClearTimer = setTimeout(() => {
+        if (controller.signal.aborted || shownInitialData) return;
+        clearChartData("load-start-timeout-clear", sym, intv);
+      }, OPTIMISTIC_SWITCH_EMPTY_TIMEOUT_MS);
     }
 
     setLoadingMoreLeft(false);
@@ -69,7 +81,8 @@ export function useChartInitialLoad({
     setCrosshairData(null);
     pendingInitialHistoryRef.current = null;
 
-    const days = getIntervalDays(intv, ex);
+    const series = { exchange: ex, marketType: mt, symbol: sym, interval: intv };
+    seriesDataFeed.beginEpoch(series);
 
     function commitQuickResult(quickResult) {
       if (controller.signal.aborted || !quickResult?.data?.length) return;
@@ -77,18 +90,19 @@ export function useChartInitialLoad({
         source: quickResult.source || "unknown",
         bars: quickResult.data.length,
       });
-      commitPatchedChartData(sym, intv, quickResult.data, {
-        seedIfEmpty: true,
-        source: "initial-latest",
-      });
+      if (!quickResult.committed) {
+        commitPatchedChartData(sym, intv, quickResult.data, {
+          seedIfEmpty: true,
+          source: "initial-latest",
+        });
+      }
       const latestTick = quickResult.data[quickResult.data.length - 1];
       updateLastPrice(latestTick, intv);
       setDataSource(quickResult.source || "unknown");
 
       if (!shownInitialData) {
-        setDatasetKey((version) => version + 1);
         setLoading(false);
-        shownInitialData = true;
+        markInitialDataShown();
       }
     }
 
@@ -126,15 +140,16 @@ export function useChartInitialLoad({
         source: historyResult.source || "unknown",
         bars: historyResult.data.length,
       });
-      commitMergedChartData(sym, intv, historyResult.data, { source: "initial-history" });
+      if (!historyResult.committed) {
+        commitMergedChartData(sym, intv, historyResult.data, { source: "initial-history" });
+      }
       const latest = historyResult.data[historyResult.data.length - 1];
       updateLastPrice(latest, intv);
       setDataSource(historyResult.source || "unknown");
       setConnectionStatus(historyResult.source === "mock" ? "loading" : "connected");
 
       if (!shownInitialData) {
-        setDatasetKey((version) => version + 1);
-        shownInitialData = true;
+        markInitialDataShown();
       }
       pendingInitialHistoryRef.current = null;
 
@@ -156,7 +171,9 @@ export function useChartInitialLoad({
       const retryInitialHistory = async () => {
         if (controller.signal.aborted || stoppedRetrying) return false;
         try {
-          const retryResult = await fetchKlinesHistory(sym, intv, days, mt, ex, {
+          const retryResult = await seriesDataFeed.getBars(series, {
+            countBack: INITIAL_HISTORY_COUNT_BACK,
+            source: "initial-history-retry",
             signal: controller.signal,
           });
           if (controller.signal.aborted || stoppedRetrying) return false;
@@ -198,7 +215,6 @@ export function useChartInitialLoad({
         if (!shownInitialData) {
           markPerf("chart.initialLoad.retry.timeout", { exchange: ex, marketType: mt, symbol: sym, interval: intv });
           setLoading(false);
-          setDatasetKey((version) => version + 1);
         }
       }, INITIAL_BACKFILL_TIMEOUT_MS);
 
@@ -206,14 +222,26 @@ export function useChartInitialLoad({
         stoppedRetrying = true;
         if (retryTimer) clearTimeout(retryTimer);
         if (safetyTimer) clearTimeout(safetyTimer);
+        if (fallbackClearTimer) clearTimeout(fallbackClearTimer);
       });
     }
 
     markPerf("chart.initialLoad.latest.request", { exchange: ex, marketType: mt, symbol: sym, interval: intv, limit: 5 });
-    markPerf("chart.initialLoad.history.request", { exchange: ex, marketType: mt, symbol: sym, interval: intv, days });
+    markPerf("chart.initialLoad.history.request", {
+      exchange: ex,
+      marketType: mt,
+      symbol: sym,
+      interval: intv,
+      countBack: INITIAL_HISTORY_COUNT_BACK,
+    });
 
     await Promise.all([
-      fetchLatestKlines(sym, intv, 5, mt, ex, "", { signal: controller.signal })
+      seriesDataFeed.getLatest(series, {
+        limit: 5,
+        source: "initial-latest",
+        signal: controller.signal,
+        commit: "patch-active",
+      })
         .then((result) => {
           markPerf("chart.initialLoad.latest.response", {
             source: result?.source || "unknown",
@@ -222,7 +250,11 @@ export function useChartInitialLoad({
           commitQuickResult(result);
         })
         .catch(() => null),
-      fetchKlinesHistory(sym, intv, days, mt, ex, { signal: controller.signal })
+      seriesDataFeed.getBars(series, {
+        countBack: INITIAL_HISTORY_COUNT_BACK,
+        source: "initial-history",
+        signal: controller.signal,
+      })
         .then((result) => {
           markPerf("chart.initialLoad.history.response", {
             source: result?.source || "unknown",
@@ -238,21 +270,22 @@ export function useChartInitialLoad({
     if (shownInitialData) {
       setLoading(false);
     }
+    if (shownInitialData && fallbackClearTimer) clearTimeout(fallbackClearTimer);
   }, [
     clearChartData,
     commitMergedChartData,
     commitPatchedChartData,
     exchange,
     getFromCache,
-    getIntervalDays,
+    markChartDataTransition,
     marketType,
     pendingInitialHistoryRef,
     replaceChartData,
     resolveInitialRows,
+    seriesDataFeed,
     setConnectionStatus,
     setCrosshairData,
     setDataSource,
-    setDatasetKey,
     setError,
     setHasMoreLeft,
     setLoading,

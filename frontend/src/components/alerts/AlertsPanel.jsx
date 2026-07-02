@@ -7,7 +7,7 @@ import {
   fetchAlertRules,
   setAlertRuleEnabled,
   updateAlertRule,
-} from "../../services/alertsApi";
+} from "../../features/alerts/alertsClient";
 import {
   ALERT_COMPARATOR_OPTIONS,
   ALERT_RIGHT_TYPE_OPTIONS,

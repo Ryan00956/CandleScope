@@ -91,6 +91,7 @@ export async function fetchKlinesHistory(
         symbol,
         interval,
         days,
+        count_back: options.countBack,
         exchange,
         market_type: marketType,
     }), { signal: options.signal });

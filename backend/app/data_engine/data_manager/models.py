@@ -89,6 +89,7 @@ class BarData:
     low: float
     close: float
     volume: float
+    is_closed: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -99,6 +100,20 @@ class BarData:
             "close": round(self.close, 8),
             "volume": round(self.volume, 8),
         }
+
+    @staticmethod
+    def _coerce_is_closed(value: Any, default: bool = True) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"false", "0", "no", "n", "open", "forming"}:
+                return False
+            if normalized in {"true", "1", "yes", "y", "closed", "final"}:
+                return True
+        return bool(value)
 
     @classmethod
     def from_dict(cls, d: dict) -> BarData:
@@ -117,6 +132,10 @@ class BarData:
             low=float(d["low"]),
             close=float(d["close"]),
             volume=float(d.get("volume", 0)),
+            is_closed=cls._coerce_is_closed(
+                d.get("is_closed", d.get("isClosed")),
+                default=True,
+            ),
         )
 
     @classmethod
@@ -129,11 +148,15 @@ class BarData:
             low=round(float(row["low"]), 8),
             close=round(float(row["close"]), 8),
             volume=round(float(row.get("volume", 0)), 8),
+            is_closed=cls._coerce_is_closed(row.get("is_closed"), default=True),
         )
 
     @classmethod
-    def from_bar_state(cls, bar_state: Any) -> BarData:
+    def from_bar_state(cls, bar_state: Any, is_closed: bool | None = None) -> BarData:
         """Create from a ``bar_aggregator.BarState`` instance."""
+        if is_closed is None:
+            status = getattr(bar_state, "status", None)
+            is_closed = getattr(status, "value", status) == "closed"
         return cls(
             time=bar_state.bucket_start_ms // 1000,
             open=round(bar_state.open, 8),
@@ -141,6 +164,19 @@ class BarData:
             low=round(bar_state.low, 8),
             close=round(bar_state.close, 8),
             volume=round(bar_state.volume, 8),
+            is_closed=bool(is_closed),
+        )
+
+    def with_closed_state(self, is_closed: bool) -> BarData:
+        """Return a copy with the same OHLCV values and explicit close state."""
+        return BarData(
+            time=self.time,
+            open=self.open,
+            high=self.high,
+            low=self.low,
+            close=self.close,
+            volume=self.volume,
+            is_closed=bool(is_closed),
         )
 
     @property

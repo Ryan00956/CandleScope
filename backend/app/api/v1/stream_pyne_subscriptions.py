@@ -10,10 +10,12 @@ from app.api.v1.stream_indicator_payloads import (
     _pyne_incremental_session_key,
     _pyne_incremental_sessions,
 )
+from app.core import config
 from app.api.v1.stream_utils import validate_ws_interval as _validate_ws_interval
 from app.data_engine.data_manager.models import DataEventType
 from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.pyne import PyneIncrementalSession, is_incremental_pyne_script
+from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.serialization import build_ws_error_payload
 
 _stream_custom_store = CustomIndicatorStore()
@@ -86,6 +88,7 @@ async def handle_pyne_indicator_subscribe(
         return
 
     await unsubscribe_client(client_id)
+    digest = script_hash(script)
 
     await dm.ensure_stream(
         symbol,
@@ -104,7 +107,8 @@ async def handle_pyne_indicator_subscribe(
         "market_type": market_type,
         "name": name,
         "customId": custom_id or None,
-        "indicatorId": f"pyne:{exchange}:{market_type}:{symbol}:{interval}:{client_id}",
+        "indicatorId": f"pyne:{exchange}:{market_type}:{symbol}:{interval}:{short_script_hash(script)}:{client_id}",
+        "scriptHash": digest,
         "script": script,
         "params": params,
         "securityMode": security_mode,
@@ -138,8 +142,27 @@ async def handle_pyne_indicator_subscribe(
         )
     client_meta[client_id] = meta
 
-    initial = await _compute_pyne_snapshot_message_async(client_id, dm, meta)
-    await send_json(initial)
+    seeded = False
+    if incremental_script:
+        initial = await _compute_pyne_snapshot_message_async(client_id, dm, meta)
+        seeded = initial.get("ok") is not False
+        if not seeded:
+            await send_json(initial)
+
+    await send_json({
+        "type": "indicator.subscribed",
+        "clientId": client_id,
+        "indicatorId": meta["indicatorId"],
+        "kind": "script",
+        "exchange": exchange,
+        "symbol": symbol,
+        "interval": interval,
+        "market_type": market_type,
+        "name": name,
+        "customId": custom_id or None,
+        "seeded": seeded,
+        "seedBars": min(max(int(history_limit), 1), max(int(config.PYNE_MAX_BARS), 1)) if incremental_script else 0,
+    })
 
     async def _on_data_event(event) -> None:
         if event.event_type == DataEventType.BACKFILL_COMPLETED:

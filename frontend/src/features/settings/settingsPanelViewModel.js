@@ -14,6 +14,10 @@ export function buildSettingsPanelViewModel({ view, actions }) {
         ...view.cacheLimits,
         ...actions.cacheLimits,
       },
+      cacheDiagnostics: {
+        ...view.cacheDiagnostics,
+        ...actions.cacheDiagnostics,
+      },
       maintenance: {
         ...view.maintenance,
         ...actions.maintenance,

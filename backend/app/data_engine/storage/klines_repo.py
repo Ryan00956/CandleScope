@@ -675,6 +675,10 @@ class KlinesRepoAdapter:
             market_type=market_type or self._market_type,
         )
 
+    def list_all_series(self, custom_only: bool = False) -> list[dict]:
+        """Return stored series summaries across all exchanges and markets."""
+        return list_series_summaries(custom_only=custom_only)
+
     def scan_gaps(
         self,
         symbol: str,
@@ -739,6 +743,7 @@ class KlinesRepoAdapter:
         symbol: str,
         interval: str,
         keep: int,
+        exchange: str | None = None,
         market_type: str | None = None,
     ) -> int:
         """Delete oldest bars, keeping only the most recent *keep* rows."""
@@ -746,9 +751,36 @@ class KlinesRepoAdapter:
             symbol=symbol,
             interval=interval,
             keep=keep,
-            exchange=self._exchange,
+            exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
         )
+
+    def delete_oldest_batch(
+        self,
+        symbol: str,
+        interval: str,
+        keep: int,
+        batch_size: int = 10_000,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> int:
+        """Delete one bounded batch of oldest bars while keeping newest rows."""
+        return delete_oldest_klines_batch(
+            symbol=symbol,
+            interval=interval,
+            keep=keep,
+            batch_size=batch_size,
+            exchange=exchange or self._exchange,
+            market_type=market_type or self._market_type,
+        )
+
+    def wal_checkpoint_truncate(self) -> dict:
+        """Run a WAL truncate checkpoint."""
+        return wal_checkpoint_truncate()
+
+    def vacuum(self) -> dict:
+        """Run VACUUM manually."""
+        return vacuum_database()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -989,3 +1021,69 @@ def delete_oldest_klines(
         )
         conn.commit()
         return cur.rowcount
+
+
+def delete_oldest_klines_batch(
+    symbol: str,
+    interval: str,
+    keep: int,
+    batch_size: int = 10_000,
+    *,
+    exchange: str = DEFAULT_EXCHANGE,
+    market_type: str = DEFAULT_MARKET_TYPE,
+) -> int:
+    """Delete at most *batch_size* oldest bars while keeping newest *keep* rows."""
+    if keep < 0:
+        keep = 0
+    batch_size = max(1, int(batch_size or 1))
+
+    with _connect() as conn:
+        count_row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM klines "
+            "WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ?",
+            (exchange, market_type, symbol, interval),
+        ).fetchone()
+        total = count_row["cnt"] if count_row else 0
+        to_delete = min(batch_size, max(0, total - keep))
+        if to_delete <= 0:
+            return 0
+
+        cur = conn.execute(
+            """
+            DELETE FROM klines
+            WHERE rowid IN (
+                SELECT rowid FROM klines
+                WHERE exchange = ? AND market_type = ? AND symbol = ? AND interval = ?
+                ORDER BY open_time ASC
+                LIMIT ?
+            )
+            """,
+            (exchange, market_type, symbol, interval, to_delete),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+def wal_checkpoint_truncate() -> dict:
+    """Run a WAL truncate checkpoint and return SQLite's result tuple."""
+    with _connect() as conn:
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
+    values = tuple(row) if row is not None else ()
+    return {
+        "mode": "TRUNCATE",
+        "result": list(values),
+        "busy": int(values[0]) if len(values) > 0 else None,
+        "log": int(values[1]) if len(values) > 1 else None,
+        "checkpointed": int(values[2]) if len(values) > 2 else None,
+    }
+
+
+def vacuum_database() -> dict:
+    """Run VACUUM. This can lock the database and should be manually triggered."""
+    started = time.time()
+    with _connect() as conn:
+        conn.execute("VACUUM;")
+    return {
+        "status": "ok",
+        "elapsed_ms": int((time.time() - started) * 1000),
+    }

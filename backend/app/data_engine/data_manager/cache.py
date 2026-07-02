@@ -343,6 +343,16 @@ class BarCache:
             if series:
                 logger.debug("Invalidated cache for %s (%d bars)", key, series.count)
 
+    def remove_series(self, key: SeriesKey) -> int:
+        """Remove one cached series and return its previous bar count."""
+        with self._lock:
+            series = self._series.pop(key, None)
+            if series is None:
+                return 0
+            removed = series.count
+            logger.debug("Removed cache series %s (%d bars)", key, removed)
+            return removed
+
     def clear(self) -> None:
         """Remove all cached data."""
         with self._lock:

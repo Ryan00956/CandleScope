@@ -1,4 +1,5 @@
 import AboutSettingsPanel from "./panels/AboutSettingsPanel";
+import CacheDiagnosticsPanel from "./panels/CacheDiagnosticsPanel";
 import CacheLimitsPanel from "./panels/CacheLimitsPanel";
 import ChartAppearancePanel from "./panels/ChartAppearancePanel";
 import DatabaseManagementPanel from "./panels/DatabaseManagementPanel";
@@ -17,6 +18,7 @@ export default function SettingsPanelHost({ activeCategory, panelModel }) {
     case "data":
       return (
         <>
+          <CacheDiagnosticsPanel {...panelModel.data.cacheDiagnostics} />
           <CacheLimitsPanel {...panelModel.data.cacheLimits} />
           <StorageMaintenancePanel {...panelModel.data.maintenance} />
         </>

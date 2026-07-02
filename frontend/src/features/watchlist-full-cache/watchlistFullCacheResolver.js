@@ -1,4 +1,5 @@
 import { symbolKey } from "../../utils/symbolKey.js";
+import { recordFrontendCacheAccess } from "../cache-gc/cacheAccessRuntime.js";
 import { getWarmRows } from "./watchlistFullCacheStore.js";
 
 const LIVE_STATUSES = new Set(["live"]);
@@ -51,6 +52,16 @@ export function resolveInitialRows({
     exchange,
   });
   if (warm) {
+    recordFrontendCacheAccess({
+      owner: "watchlist-full-cache",
+      key: warm.symbolKey || symbolKey(symbol, marketType, exchange),
+      exchange,
+      marketType,
+      symbol,
+      interval,
+      action: "frontend-full-cache-hit",
+      source: warm.source || "watchlist-full",
+    });
     return {
       ...warm,
       tier: "watchlist-full",

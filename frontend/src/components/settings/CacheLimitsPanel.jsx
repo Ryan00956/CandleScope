@@ -6,6 +6,7 @@ const EPHEMERAL_CACHE_OPTIONS = [
 ];
 
 const DEFAULT_EPHEMERAL_BARS = 86400;
+const DEFAULT_FRONTEND_CACHE_BUDGET_BYTES = 64 * 1024 * 1024;
 
 const DB_TIERS = [
     {
@@ -73,10 +74,37 @@ function barsToMemorySize(bars) {
     return `≈ ${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function bytesToGbInput(bytes) {
+    const value = Number(bytes || 0);
+    if (!value) return '';
+    return (value / 1024 / 1024 / 1024).toFixed(2);
+}
+
+function gbInputToBytes(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return null;
+    return Math.round(parsed * 1024 * 1024 * 1024);
+}
+
+function bytesToMbInput(bytes) {
+    const value = Number(bytes || 0);
+    if (!value) return '';
+    return Math.round(value / 1024 / 1024);
+}
+
+function mbInputToBytes(value) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_FRONTEND_CACHE_BUDGET_BYTES;
+    return Math.round(parsed * 1024 * 1024);
+}
+
 export default function CacheLimitsPanel({ settings, onUpdate, showAdvanced, onToggleAdvanced }) {
     const currentPreset = settings.cachePreset || 'standard';
     const currentLimits = settings.cacheLimits || { ...DEFAULT_DB_LIMITS };
     const currentEphemeralBars = settings.ephemeralCacheBars ?? DEFAULT_EPHEMERAL_BARS;
+    const currentFrontendBudget = settings.frontendCacheBudgetBytes ?? DEFAULT_FRONTEND_CACHE_BUDGET_BYTES;
+    const currentSqliteBudget = settings.sqliteStorageBudgetBytes ?? null;
+    const rowLimitsEnabled = Boolean(settings.storageRowLimitsEnabled);
     const isCustomPreset = currentPreset === 'custom';
 
     const handlePresetChange = (presetKey) => {
@@ -106,6 +134,27 @@ export default function CacheLimitsPanel({ settings, onUpdate, showAdvanced, onT
         onUpdate({
             ...settings,
             ephemeralCacheBars: value,
+        });
+    };
+
+    const handleFrontendBudgetChange = (value) => {
+        onUpdate({
+            ...settings,
+            frontendCacheBudgetBytes: mbInputToBytes(value),
+        });
+    };
+
+    const handleSqliteBudgetChange = (value) => {
+        onUpdate({
+            ...settings,
+            sqliteStorageBudgetBytes: gbInputToBytes(value),
+        });
+    };
+
+    const handleRowLimitsEnabledChange = (enabled) => {
+        onUpdate({
+            ...settings,
+            storageRowLimitsEnabled: enabled,
         });
     };
 
@@ -153,7 +202,49 @@ export default function CacheLimitsPanel({ settings, onUpdate, showAdvanced, onT
                     <span className="st-badge st-badge-db">持久化</span>
                 </div>
                 <div className="st-group-desc">
-                    分钟级及以上的 K 线数据持久化到数据库。选择预设方案或展开高级选项自定义每个级别的保留上限。
+                    分钟级及以上的 K 线数据持久化到数据库。优先按 SQLite 预算治理；未设置预算时自动数据库 GC 只诊断不删库。
+                </div>
+
+                <div className="st-tier-table">
+                    <div className="st-tier-row">
+                        <div className="st-tier-col-name">
+                            <span className="st-tier-label">前端缓存预算</span>
+                            <span className="st-tier-desc">浏览器内 warm/cold K 线与指标缓存</span>
+                        </div>
+                        <div className="st-tier-col-limit">
+                            <input
+                                type="number"
+                                className="st-tier-input"
+                                value={bytesToMbInput(currentFrontendBudget)}
+                                min={16}
+                                step={16}
+                                onChange={(event) => handleFrontendBudgetChange(event.target.value)}
+                                title="前端缓存最大估算内存 MB"
+                            />
+                        </div>
+                        <span className="st-tier-col-time">MB</span>
+                        <span className="st-tier-col-size">{barsToMemorySize(Math.floor(currentFrontendBudget / 200))}</span>
+                    </div>
+                    <div className="st-tier-row">
+                        <div className="st-tier-col-name">
+                            <span className="st-tier-label">SQLite 数据库预算</span>
+                            <span className="st-tier-desc">包含 DB/WAL/SHM 文件；留空表示不自动删库</span>
+                        </div>
+                        <div className="st-tier-col-limit">
+                            <input
+                                type="number"
+                                className="st-tier-input"
+                                value={bytesToGbInput(currentSqliteBudget)}
+                                min={0}
+                                step={0.25}
+                                placeholder="未设置"
+                                onChange={(event) => handleSqliteBudgetChange(event.target.value)}
+                                title="SQLite 最大占用 GB，留空表示不自动删库"
+                            />
+                        </div>
+                        <span className="st-tier-col-time">GB</span>
+                        <span className="st-tier-col-size">{currentSqliteBudget ? barsToStorageSize(Math.floor(currentSqliteBudget / 200)) : '未启用'}</span>
+                    </div>
                 </div>
 
                 <div className="st-preset-cards">
@@ -179,7 +270,7 @@ export default function CacheLimitsPanel({ settings, onUpdate, showAdvanced, onT
 
             <div className="st-group">
                 <div className="st-group-title-row">
-                    <div className="st-group-title" style={{ marginBottom: 0 }}>各级别保留详情</div>
+                    <div className="st-group-title" style={{ marginBottom: 0 }}>高级行数上限 / 保护策略</div>
                     <button
                         className={`st-advanced-toggle ${showAdvanced ? 'active' : ''}`}
                         onClick={onToggleAdvanced}
@@ -188,8 +279,17 @@ export default function CacheLimitsPanel({ settings, onUpdate, showAdvanced, onT
                     </button>
                 </div>
                 <div className="st-group-desc">
-                    每个数据系列（交易对 × 周期）独立计算。级别按 K 线持续时间自动判定，<strong>自定义周期</strong>（如 7m、45m、2h）也按此规则归入对应级别。
+                    这些上限只在启用后作为额外硬规则。预算 GC 仍会优先参考冷热、活跃订阅、自定义周期和 storage intent 风险。
                 </div>
+
+                <label className="st-info-box" style={{ marginTop: 0 }}>
+                    <input
+                        type="checkbox"
+                        checked={rowLimitsEnabled}
+                        onChange={(event) => handleRowLimitsEnabledChange(event.target.checked)}
+                    />
+                    <span>启用每系列行数上限</span>
+                </label>
 
                 <div className="st-tier-table">
                     <div className="st-tier-header">
@@ -207,7 +307,7 @@ export default function CacheLimitsPanel({ settings, onUpdate, showAdvanced, onT
                                     <span className="st-tier-desc">{tier.desc}</span>
                                 </div>
                                 <div className="st-tier-col-limit">
-                                    {showAdvanced && tier.key !== 'daily' ? (
+                                    {showAdvanced && rowLimitsEnabled && tier.key !== 'daily' ? (
                                         <input
                                             type="number"
                                             className="st-tier-input"
@@ -219,7 +319,7 @@ export default function CacheLimitsPanel({ settings, onUpdate, showAdvanced, onT
                                         />
                                     ) : (
                                         <span className={`st-tier-value ${limit === 0 ? 'unlimited' : ''}`}>
-                                            {limit === 0 ? '∞' : limit.toLocaleString()}
+                                            {!rowLimitsEnabled ? '关闭' : limit === 0 ? '∞' : limit.toLocaleString()}
                                         </span>
                                     )}
                                 </div>
@@ -236,7 +336,7 @@ export default function CacheLimitsPanel({ settings, onUpdate, showAdvanced, onT
 
                 {showAdvanced && (
                     <div className="st-advanced-hint">
-                        <span>💡 输入 <strong>0</strong> 表示不限制（不清理该级别数据）。天级+数据量极小，始终保留。修改后如不匹配预设则切换为「自定义」。</span>
+                        <span>输入 <strong>0</strong> 表示该级别不使用行数上限。预算治理仍由 SQLite 数据库预算控制。</span>
                     </div>
                 )}
             </div>

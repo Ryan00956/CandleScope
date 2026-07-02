@@ -549,6 +549,9 @@ class StreamCoordinator:
             event_type: BAR_CREATED, BAR_UPDATED, or BAR_CLOSED.
         """
         key = SeriesKey(symbol, interval, exchange=exchange, market_type=market_type)
+        bar = bar.with_closed_state(
+            event_type in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED),
+        )
 
         # Update cache
         if self._cache is not None:

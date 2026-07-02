@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useActiveIndicatorStore } from "./activeIndicatorStore";
+import { computeIndicatorRange } from "../../services/indicatorApi";
 import { useIndicatorComputeController } from "./indicatorComputeController";
-import { parseIntervalSeconds } from "../../utils/intervals";
+import { parseIntervalParts, parseIntervalSeconds } from "../../utils/intervals";
 import {
   createIndicatorOutputState,
   indicatorOutputReducer,
@@ -10,8 +11,24 @@ import { buildIndicatorPaneData } from "./indicatorPaneProjection";
 import { useIndicatorStreamController } from "./indicatorStreamController";
 import {
   getVisibleHostedIndicators,
+  buildHostedSubscriptionMessage,
 } from "./indicatorWsRuntime";
 import {
+  estimateOutputWarmupBars,
+  planDeferredRightCatchup,
+  RIGHT_CATCHUP_GRACE_MS,
+  resolveInitialHostedRange,
+} from "./indicatorRangePlanning";
+import {
+  buildIndicatorCacheContext,
+  cacheIndicatorSnapshot,
+  patchCachedIndicatorResult,
+  replaceCachedIndicatorRange,
+  resolveCachedIndicatorResults,
+  upsertCachedIndicatorLinePoint,
+} from "./indicatorResultCacheStore";
+import {
+  clearIndicatorLineData,
   formatIndicatorError,
   mergeIndicatorLines,
   normalizeIndicatorPayload,
@@ -43,18 +60,22 @@ function resolveRuntimeInputs(options = {}) {
     chartDataMeta: options.chartDataMeta ?? marketDataView.meta ?? null,
     datasetKey: options.datasetKey ?? sessionView.datasetKey,
     exchange: options.exchange ?? sessionView.exchange ?? "binance",
+    getCurrentVisibleRange: options.getCurrentVisibleRange,
     interval: options.interval ?? sessionView.interval,
     indicatorRangeRequests: options.indicatorRangeRequests ?? marketDataStatus.indicatorRangeRequests ?? [],
     consumeIndicatorRangeRequest: options.consumeIndicatorRangeRequest ?? marketDataActions.consumeIndicatorRangeRequest,
     marketType: options.marketType ?? sessionView.marketType,
     seriesReady: options.seriesReady ?? (marketDataStatus.activeChartReady ? 1 : 0),
     sessionKey: options.sessionKey ?? sessionView.sessionKey,
+    savedVisibleRange: options.savedVisibleRange ?? sessionView.savedVisibleRange ?? null,
     symbol: options.symbol ?? sessionView.symbol,
   };
 }
 
-const INDICATOR_RANGE_REQUEST_MAX_BARS = 5_000;
 const INDICATOR_RANGE_RETRY_MS = 500;
+const INDICATOR_HTTP_RANGE_RETRY_MAX_ATTEMPTS = 3;
+const INDICATOR_HTTP_RANGE_DEDUP_WINDOW_MS = 10_000;
+const INDICATOR_HTTP_RANGE_REQUEST_STATE_TTL_MS = 60_000;
 
 function normalizeRangeBoundary(value) {
   const normalized = Math.floor(Number(value));
@@ -76,27 +97,20 @@ function inferIntervalSecondsFromChartData(chartData = []) {
   return deltas[Math.floor(deltas.length / 2)];
 }
 
-function requestIndicatorRangeInChunks(requestRange, start, end, intervalSeconds) {
+function requestIndicatorRangeOnce(requestRange, start, end, reason = "range") {
   if (typeof requestRange !== "function") return false;
   const startSec = normalizeRangeBoundary(start);
   const endSec = normalizeRangeBoundary(end);
   if (!startSec || !endSec || startSec > endSec) return false;
+  return Boolean(requestRange(startSec, endSec, reason));
+}
 
-  if (!intervalSeconds || intervalSeconds <= 0) {
-    return Boolean(requestRange(startSec, endSec));
+function pruneRangeRequestState(startedAtMap, nowMs) {
+  for (const [key, startedAt] of startedAtMap.entries()) {
+    if (nowMs - startedAt > INDICATOR_HTTP_RANGE_REQUEST_STATE_TTL_MS) {
+      startedAtMap.delete(key);
+    }
   }
-
-  let sentAny = false;
-  const chunkSpan = (INDICATOR_RANGE_REQUEST_MAX_BARS - 1) * intervalSeconds;
-  for (
-    let chunkStart = startSec;
-    chunkStart <= endSec;
-    chunkStart += INDICATOR_RANGE_REQUEST_MAX_BARS * intervalSeconds
-  ) {
-    const chunkEnd = Math.min(endSec, chunkStart + chunkSpan);
-    sentAny = Boolean(requestRange(chunkStart, chunkEnd)) || sentAny;
-  }
-  return sentAny;
 }
 
 function buildHostedCatchupSignature({
@@ -121,26 +135,6 @@ function buildHostedCatchupSignature({
   return [exchange, marketType, symbol, interval, start, end, indicatorSig].join("::");
 }
 
-function paramInt(params, key, fallback) {
-  const value = Number.parseInt(params?.[key], 10);
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function estimateOutputWarmupBars(indicator) {
-  const name = String(indicator?.engineName || "").toUpperCase();
-  const params = indicator?.params || {};
-  if (name === "VOL") return 0;
-  if (name === "MA" || name === "SMA" || name === "BOLL") {
-    return Math.max(0, paramInt(params, "period", 20) - 1);
-  }
-  if (name === "EMA") return Math.max(0, paramInt(params, "period", 20) - 1);
-  if (name === "RSI" || name === "ATR") return paramInt(params, "period", 14);
-  if (name === "MACD") {
-    return paramInt(params, "slow", 26) + paramInt(params, "signal", 9);
-  }
-  return Math.max(0, paramInt(params, "warmup", 0));
-}
-
 function earliestLineTime(indicator) {
   let earliest = null;
   for (const line of indicator?.lines || []) {
@@ -151,6 +145,18 @@ function earliestLineTime(indicator) {
     }
   }
   return earliest;
+}
+
+function latestLineTime(indicator) {
+  let latest = null;
+  for (const line of indicator?.lines || []) {
+    for (const point of line?.data || []) {
+      const time = normalizeRangeBoundary(point?.time);
+      if (!time) continue;
+      latest = latest == null ? time : Math.max(latest, time);
+    }
+  }
+  return latest;
 }
 
 function resolveMissingHostedRange(chartData, hostedIndicators) {
@@ -174,6 +180,39 @@ function resolveMissingHostedRange(chartData, hostedIndicators) {
   return { start, end, intervalSeconds };
 }
 
+function resolveMissingHostedRightRange(chartData, hostedIndicators) {
+  const end = normalizeRangeBoundary(chartData?.[chartData.length - 1]?.time);
+  if (!end) return null;
+  const intervalSeconds = inferIntervalSecondsFromChartData(chartData);
+  if (!intervalSeconds || intervalSeconds <= 0) return null;
+
+  let start = null;
+  for (const indicator of hostedIndicators) {
+    const lastIndicatorTime = latestLineTime(indicator);
+    if (!lastIndicatorTime) continue;
+    const candidateStart = lastIndicatorTime + intervalSeconds;
+    if (candidateStart <= end) {
+      start = start == null ? candidateStart : Math.min(start, candidateStart);
+    }
+  }
+
+  if (start == null || start > end) return null;
+  return { start, end, intervalSeconds };
+}
+
+function isContinuousChartRange(chartData, intervalSeconds) {
+  if (!Array.isArray(chartData) || chartData.length < 2) return true;
+  if (!intervalSeconds || intervalSeconds <= 0) return true;
+  const tolerance = Math.max(1, Math.floor(intervalSeconds * 0.01));
+  for (let index = 1; index < chartData.length; index += 1) {
+    const prev = Number(chartData[index - 1]?.time);
+    const current = Number(chartData[index]?.time);
+    if (!Number.isFinite(prev) || !Number.isFinite(current)) return false;
+    if (Math.abs((current - prev) - intervalSeconds) > tolerance) return false;
+  }
+  return true;
+}
+
 export function useIndicatorRuntime(options = {}) {
   const {
     candleDownColor,
@@ -182,12 +221,14 @@ export function useIndicatorRuntime(options = {}) {
     chartDataMeta,
     datasetKey,
     exchange,
+    getCurrentVisibleRange,
     interval,
     indicatorRangeRequests,
     consumeIndicatorRangeRequest,
     marketType,
     seriesReady,
     sessionKey,
+    savedVisibleRange,
     symbol,
   } = resolveRuntimeInputs(options);
   const onIndicatorRemoved = options.onIndicatorRemoved;
@@ -207,16 +248,17 @@ export function useIndicatorRuntime(options = {}) {
     updateIndicatorScript,
   } = useActiveIndicatorStore({ onRequireCompute: requireIndicatorCompute });
 
-  const removeIndicator = useCallback((indicatorId) => {
-    removeActiveIndicator(indicatorId);
-    onIndicatorRemoved?.(indicatorId);
-  }, [onIndicatorRemoved, removeActiveIndicator]);
-
   const [outputState, outputDispatch] = useReducer(
     indicatorOutputReducer,
     undefined,
     createIndicatorOutputState,
   );
+
+  const removeIndicator = useCallback((indicatorId) => {
+    removeActiveIndicator(indicatorId);
+    outputDispatch({ type: "remove-indicator", indicatorId });
+    onIndicatorRemoved?.(indicatorId);
+  }, [onIndicatorRemoved, removeActiveIndicator]);
 
   const activeIndicatorsRef = useLatestRef(activeIndicators);
   const chartDataRef = useLatestRef(chartData);
@@ -225,15 +267,46 @@ export function useIndicatorRuntime(options = {}) {
   const candleDownColorRef = useLatestRef(candleDownColor);
   const consumedIndicatorRangeRequestIdsRef = useRef(new Set());
   const autoCatchupRangeSignaturesRef = useRef(new Set());
+  const autoRightCatchupRangeSignaturesRef = useRef(new Set());
+  const autoRightCatchupPendingRef = useRef(null);
+  const autoRightCatchupTimerRef = useRef(null);
+  const initialHostedRangeSignaturesRef = useRef(new Set());
+  const rangeRetryAttemptsRef = useRef(new Map());
+  const rangeRequestInFlightRef = useRef(new Set());
+  const rangeRequestStartedAtRef = useRef(new Map());
   const [rangeRetryTick, setRangeRetryTick] = useState(0);
+  const runtimeContextRef = useLatestRef({
+    exchange,
+    interval,
+    marketType,
+    sessionKey,
+    symbol,
+  });
 
   const chartDataStatus = chartDataMeta?.status || "idle";
   const chartDataReady = Boolean(chartData?.length && chartDataStatus === "ready");
+
+  const getIndicatorCacheContext = useCallback(() => {
+    const requestContext = runtimeContextRef.current;
+    return buildIndicatorCacheContext({
+      candleDownColor: candleDownColorRef.current,
+      candleUpColor: candleUpColorRef.current,
+      exchange: requestContext.exchange,
+      interval: requestContext.interval,
+      marketType: requestContext.marketType,
+      symbol: requestContext.symbol,
+    });
+  }, [candleDownColorRef, candleUpColorRef, runtimeContextRef]);
 
   const applyWsSnapshot = useCallback((indicatorId, payload) => {
     const error = payload?.ok === false ? formatIndicatorError(payload) : null;
     const schema = normalizeParamSchema(payload?.param_schema);
     const normalized = normalizeIndicatorPayload(payload, indicatorId);
+    const indicator = activeIndicatorsRef.current.find((item) => item.id === indicatorId);
+    if (!indicator) return;
+    if (!error) {
+      cacheIndicatorSnapshot(indicator, getIndicatorCacheContext(), normalized, schema);
+    }
 
     setActiveIndicators((prev) =>
       prev.map((indicator) =>
@@ -254,10 +327,15 @@ export function useIndicatorRuntime(options = {}) {
       normalized,
       schema,
     });
-  }, [setActiveIndicators]);
+  }, [activeIndicatorsRef, getIndicatorCacheContext, setActiveIndicators]);
 
   const applyWsPatch = useCallback((indicatorId, payload) => {
     const normalized = normalizeIndicatorPayload(payload, indicatorId);
+    const indicator = activeIndicatorsRef.current.find((item) => item.id === indicatorId);
+    if (!indicator) return;
+    if (payload?.ok !== false) {
+      patchCachedIndicatorResult(indicator, getIndicatorCacheContext(), normalized);
+    }
 
     setActiveIndicators((prev) =>
       prev.map((indicator) =>
@@ -276,11 +354,16 @@ export function useIndicatorRuntime(options = {}) {
       indicatorId,
       normalized,
     });
-  }, [setActiveIndicators]);
+  }, [activeIndicatorsRef, getIndicatorCacheContext, setActiveIndicators]);
 
   const applyWsReplaceRange = useCallback((indicatorId, payload) => {
     const normalized = normalizeIndicatorPayload(payload, indicatorId);
     const range = payload?.range;
+    const indicator = activeIndicatorsRef.current.find((item) => item.id === indicatorId);
+    if (!indicator) return;
+    if (payload?.ok !== false) {
+      replaceCachedIndicatorRange(indicator, getIndicatorCacheContext(), normalized, range);
+    }
 
     setActiveIndicators((prev) =>
       prev.map((indicator) =>
@@ -300,9 +383,9 @@ export function useIndicatorRuntime(options = {}) {
       normalized,
       range,
     });
-  }, [setActiveIndicators]);
+  }, [activeIndicatorsRef, getIndicatorCacheContext, setActiveIndicators]);
 
-  const applyWsValues = useCallback((indicatorId, values, barTime) => {
+  const applyWsValues = useCallback((indicatorId, values, barTime, isFinal = true) => {
     if (!values || !barTime) return;
     const currentChartData = chartDataRef.current || [];
     const bar = currentChartData.find((item) => item.time === barTime);
@@ -313,6 +396,15 @@ export function useIndicatorRuntime(options = {}) {
     setActiveIndicators((prev) =>
       prev.map((indicator) => {
         if (indicator.id !== indicatorId || !Array.isArray(indicator.lines)) return indicator;
+        if (isFinal) {
+          upsertCachedIndicatorLinePoint(
+            indicator,
+            getIndicatorCacheContext(),
+            values,
+            barTime,
+            histogramColor,
+          );
+        }
         const isSingleLine = indicator.lines.length === 1 && Object.keys(values).length === 1;
         const lines = indicator.lines.map((line) => {
           const value = resolveWsValue(line, values, isSingleLine);
@@ -326,7 +418,13 @@ export function useIndicatorRuntime(options = {}) {
         return { ...indicator, lines, error: null };
       })
     );
-  }, [candleDownColorRef, candleUpColorRef, chartDataRef, setActiveIndicators]);
+  }, [
+    candleDownColorRef,
+    candleUpColorRef,
+    chartDataRef,
+    getIndicatorCacheContext,
+    setActiveIndicators,
+  ]);
 
   const setIndicatorError = useCallback((indicatorId, error) => {
     setActiveIndicators((prev) =>
@@ -334,7 +432,170 @@ export function useIndicatorRuntime(options = {}) {
     );
   }, [setActiveIndicators]);
 
-  const { forceHostedSubscriptions, requestIndicatorRange } = useIndicatorStreamController({
+  const requestIndicatorRange = useCallback((start, end, reason = "range", options = {}) => {
+    const startSec = normalizeRangeBoundary(start);
+    const endSec = normalizeRangeBoundary(end);
+    if (!startSec || !endSec || startSec > endSec) return false;
+
+    const targetIds = Array.isArray(options.indicatorIds)
+      ? new Set(options.indicatorIds.map((item) => String(item)))
+      : null;
+    const hostedIndicators = getVisibleHostedIndicators(activeIndicatorsRef.current)
+      .filter((indicator) => !targetIds || targetIds.has(String(indicator.id)));
+    if (hostedIndicators.length === 0) return false;
+
+    const requestContext = runtimeContextRef.current;
+    const contextKey = [
+      requestContext.sessionKey,
+      requestContext.exchange,
+      requestContext.marketType,
+      requestContext.symbol,
+      requestContext.interval,
+    ].join("|");
+    const colorContext = {
+      candleDownColor: candleDownColorRef.current,
+      candleUpColor: candleUpColorRef.current,
+      chartData: chartDataRef.current || [],
+      chartDataLength: chartDataRef.current?.length || 0,
+      exchange: requestContext.exchange,
+      interval: requestContext.interval,
+      marketType: requestContext.marketType,
+      symbol: requestContext.symbol,
+    };
+
+    hostedIndicators.forEach((indicator) => {
+      const message = buildHostedSubscriptionMessage(indicator, colorContext);
+      const retryKey = [
+        contextKey,
+        indicator.id,
+        startSec,
+        endSec,
+        reason,
+        JSON.stringify(message.params || {}),
+      ].join("|");
+      const rangeRequestKey = [
+        contextKey,
+        indicator.id,
+        message.kind || "",
+        message.name || "",
+        stringSignature(message.script || ""),
+        message.securityMode || "",
+        JSON.stringify(message.params || {}),
+        startSec,
+        endSec,
+      ].join("|");
+      const nowMs = Date.now();
+      pruneRangeRequestState(rangeRequestStartedAtRef.current, nowMs);
+      const lastStartedAt = rangeRequestStartedAtRef.current.get(rangeRequestKey) || 0;
+      if (
+        rangeRequestInFlightRef.current.has(rangeRequestKey)
+        || nowMs - lastStartedAt < INDICATOR_HTTP_RANGE_DEDUP_WINDOW_MS
+      ) {
+        return;
+      }
+      rangeRequestInFlightRef.current.add(rangeRequestKey);
+      rangeRequestStartedAtRef.current.set(rangeRequestKey, nowMs);
+
+      const settleRangeRequest = (ok, detail = {}) => {
+        if (typeof options.onSettled === "function") {
+          options.onSettled(ok, { indicatorId: indicator.id, ...detail });
+        }
+      };
+
+      const finishRangeRequest = () => {
+        rangeRequestInFlightRef.current.delete(rangeRequestKey);
+      };
+
+      const run = async () => {
+        try {
+          const payload = await computeIndicatorRange({
+            clientId: indicator.id,
+            kind: message.kind,
+            exchange: message.exchange,
+            marketType: message.marketType,
+            symbol: message.symbol,
+            interval: message.interval,
+            name: message.name || message.displayName,
+            customId: message.customId,
+            script: message.script,
+            securityMode: message.securityMode,
+            params: message.params,
+            start: startSec,
+            end: endSec,
+            reason,
+          });
+          const latestContext = runtimeContextRef.current;
+          const latestContextKey = [
+            latestContext.sessionKey,
+            latestContext.exchange,
+            latestContext.marketType,
+            latestContext.symbol,
+            latestContext.interval,
+          ].join("|");
+          if (latestContextKey !== contextKey) {
+            finishRangeRequest();
+            return;
+          }
+          if (!activeIndicatorsRef.current.some((item) => item.id === indicator.id)) {
+            finishRangeRequest();
+            return;
+          }
+
+          if (payload?.ok === false) {
+            if (payload.code === "INDICATOR_RANGE_EMPTY") {
+              rangeRetryAttemptsRef.current.delete(retryKey);
+              settleRangeRequest(true, { code: payload.code, payload });
+              finishRangeRequest();
+              return;
+            }
+            if (payload.code === "INDICATOR_RANGE_NOT_READY") {
+              const attempts = rangeRetryAttemptsRef.current.get(retryKey) || 0;
+              if (attempts < INDICATOR_HTTP_RANGE_RETRY_MAX_ATTEMPTS) {
+                rangeRetryAttemptsRef.current.set(retryKey, attempts + 1);
+                const retryAfter = Number(payload.detail?.retryAfterMs || 3000);
+                setTimeout(run, Number.isFinite(retryAfter) ? retryAfter : 3000);
+                return;
+              }
+            }
+            if (String(reason || "").startsWith("auto-")) {
+              console.warn("Indicator range auto-catchup failed", payload);
+            } else {
+              setIndicatorError(indicator.id, formatIndicatorError(payload, "Indicator range error"));
+            }
+            settleRangeRequest(false, { code: payload.code, payload });
+            finishRangeRequest();
+            return;
+          }
+
+          rangeRetryAttemptsRef.current.delete(retryKey);
+          applyWsReplaceRange(indicator.id, payload);
+          settleRangeRequest(true, { payload });
+          finishRangeRequest();
+        } catch (err) {
+          if (!activeIndicatorsRef.current.some((item) => item.id === indicator.id)) {
+            finishRangeRequest();
+            return;
+          }
+          setIndicatorError(indicator.id, err?.message || "Indicator range request failed");
+          settleRangeRequest(false, { error: err });
+          finishRangeRequest();
+        }
+      };
+      run();
+    });
+
+    return true;
+  }, [
+    activeIndicatorsRef,
+    applyWsReplaceRange,
+    candleDownColorRef,
+    candleUpColorRef,
+    chartDataRef,
+    runtimeContextRef,
+    setIndicatorError,
+  ]);
+
+  const { forceHostedSubscriptions } = useIndicatorStreamController({
     activeIndicators,
     activeIndicatorsRef,
     applyWsPatch,
@@ -353,6 +614,7 @@ export function useIndicatorRuntime(options = {}) {
     exchange,
     interval,
     marketType,
+    requestIndicatorRange,
     setIndicatorError,
     symbol,
   });
@@ -372,13 +634,11 @@ export function useIndicatorRuntime(options = {}) {
       if (!request || request.sessionKey !== sessionKey) continue;
       if (consumedIndicatorRangeRequestIdsRef.current.has(request.id)) continue;
       consumedIndicatorRangeRequestIdsRef.current.add(request.id);
-      const intervalSeconds = parseIntervalSeconds(request.interval || interval)
-        || inferIntervalSecondsFromChartData(chartData);
-      const sent = requestIndicatorRangeInChunks(
+      const sent = requestIndicatorRangeOnce(
         requestIndicatorRange,
         request.start,
         request.end,
-        intervalSeconds,
+        request.reason,
       );
       if (sent) {
         consumeIndicatorRangeRequest?.(request.id);
@@ -406,7 +666,73 @@ export function useIndicatorRuntime(options = {}) {
 
   useEffect(() => {
     autoCatchupRangeSignaturesRef.current.clear();
+    autoRightCatchupRangeSignaturesRef.current.clear();
+    autoRightCatchupPendingRef.current = null;
+    if (autoRightCatchupTimerRef.current) {
+      clearTimeout(autoRightCatchupTimerRef.current);
+      autoRightCatchupTimerRef.current = null;
+    }
+    initialHostedRangeSignaturesRef.current.clear();
+    rangeRetryAttemptsRef.current.clear();
+    rangeRequestInFlightRef.current.clear();
+    rangeRequestStartedAtRef.current.clear();
   }, [exchange, interval, marketType, sessionKey, symbol]);
+
+  useEffect(() => {
+    if (!chartDataReady || !Array.isArray(chartData) || chartData.length === 0) return;
+    const hostedIndicators = getVisibleHostedIndicators(activeIndicators);
+    if (hostedIndicators.length === 0) return;
+
+    const currentVisibleRange = typeof getCurrentVisibleRange === "function"
+      ? getCurrentVisibleRange()
+      : null;
+    const initialRange = resolveInitialHostedRange(
+      chartData,
+      hostedIndicators,
+      currentVisibleRange || savedVisibleRange,
+    );
+    if (!initialRange) return;
+
+    const intervalParts = parseIntervalParts(interval);
+    const intervalSeconds = parseIntervalSeconds(interval) || inferIntervalSecondsFromChartData(chartData);
+    if (intervalParts?.unit !== "M") {
+      const segment = chartData.slice(initialRange.startIndex, initialRange.endIndex + 1);
+      if (!isContinuousChartRange(segment, intervalSeconds)) return;
+    }
+
+    const signature = buildHostedCatchupSignature({
+      exchange,
+      marketType,
+      symbol,
+      interval,
+      hostedIndicators,
+      start: initialRange.start,
+      end: initialRange.end,
+    });
+    if (initialHostedRangeSignaturesRef.current.has(signature)) return;
+    let failed = false;
+    if (requestIndicatorRange(initialRange.start, initialRange.end, "initial-visible", {
+      onSettled: (ok) => {
+        if (!ok && !failed) {
+          failed = true;
+          initialHostedRangeSignaturesRef.current.delete(signature);
+        }
+      },
+    })) {
+      initialHostedRangeSignaturesRef.current.add(signature);
+    }
+  }, [
+    activeIndicators,
+    chartData,
+    chartDataReady,
+    exchange,
+    getCurrentVisibleRange,
+    interval,
+    marketType,
+    requestIndicatorRange,
+    savedVisibleRange,
+    symbol,
+  ]);
 
   useEffect(() => {
     if (!chartDataReady || !Array.isArray(chartData) || chartData.length === 0) {
@@ -430,15 +756,119 @@ export function useIndicatorRuntime(options = {}) {
     });
     if (autoCatchupRangeSignaturesRef.current.has(signature)) return;
 
-    const sent = requestIndicatorRangeInChunks(
+    const sent = requestIndicatorRangeOnce(
       requestIndicatorRange,
       missingRange.start,
       missingRange.end,
-      missingRange.intervalSeconds,
+      "auto-catchup",
     );
     if (sent) {
       autoCatchupRangeSignaturesRef.current.add(signature);
     }
+  }, [
+    activeIndicators,
+    chartData,
+    chartDataReady,
+    exchange,
+    interval,
+    marketType,
+    requestIndicatorRange,
+    symbol,
+  ]);
+
+  useEffect(() => {
+    if (!chartDataReady || !Array.isArray(chartData) || chartData.length === 0) {
+      autoRightCatchupPendingRef.current = null;
+      if (autoRightCatchupTimerRef.current) {
+        clearTimeout(autoRightCatchupTimerRef.current);
+        autoRightCatchupTimerRef.current = null;
+      }
+      return;
+    }
+
+    const hostedIndicators = getVisibleHostedIndicators(activeIndicators);
+    if (hostedIndicators.length === 0) {
+      autoRightCatchupPendingRef.current = null;
+      if (autoRightCatchupTimerRef.current) {
+        clearTimeout(autoRightCatchupTimerRef.current);
+        autoRightCatchupTimerRef.current = null;
+      }
+      return;
+    }
+
+    const missingRange = resolveMissingHostedRightRange(chartData, hostedIndicators);
+    if (!missingRange) {
+      autoRightCatchupPendingRef.current = null;
+      if (autoRightCatchupTimerRef.current) {
+        clearTimeout(autoRightCatchupTimerRef.current);
+        autoRightCatchupTimerRef.current = null;
+      }
+      return;
+    }
+
+    const signature = buildHostedCatchupSignature({
+      exchange,
+      marketType,
+      symbol,
+      interval,
+      hostedIndicators,
+      start: missingRange.start,
+      end: missingRange.end,
+    });
+    if (autoRightCatchupRangeSignaturesRef.current.has(signature)) return;
+
+    const pendingKey = buildHostedCatchupSignature({
+      exchange,
+      marketType,
+      symbol,
+      interval,
+      hostedIndicators,
+      start: missingRange.start,
+      end: "pending-right",
+    });
+    const pending = planDeferredRightCatchup(
+      autoRightCatchupPendingRef.current,
+      {
+        key: pendingKey,
+        signature,
+        range: { start: missingRange.start, end: missingRange.end },
+      },
+      Date.now(),
+      RIGHT_CATCHUP_GRACE_MS,
+    );
+    autoRightCatchupPendingRef.current = pending;
+
+    if (autoRightCatchupTimerRef.current) {
+      clearTimeout(autoRightCatchupTimerRef.current);
+      autoRightCatchupTimerRef.current = null;
+    }
+
+    autoRightCatchupTimerRef.current = setTimeout(() => {
+      const latest = autoRightCatchupPendingRef.current;
+      autoRightCatchupTimerRef.current = null;
+      if (!latest || latest.key !== pendingKey) return;
+      if (autoRightCatchupRangeSignaturesRef.current.has(latest.signature)) {
+        autoRightCatchupPendingRef.current = null;
+        return;
+      }
+      const sent = requestIndicatorRangeOnce(
+        requestIndicatorRange,
+        latest.range.start,
+        latest.range.end,
+        "auto-right-catchup",
+      );
+      if (sent) {
+        autoRightCatchupRangeSignaturesRef.current.add(latest.signature);
+        autoRightCatchupPendingRef.current = null;
+      }
+    }, pending?.delayMs ?? RIGHT_CATCHUP_GRACE_MS);
+
+    return () => {
+      if (autoRightCatchupTimerRef.current) {
+        clearTimeout(autoRightCatchupTimerRef.current);
+        autoRightCatchupTimerRef.current = null;
+      }
+    };
   }, [
     activeIndicators,
     chartData,
@@ -474,15 +904,29 @@ export function useIndicatorRuntime(options = {}) {
   });
 
   useEffect(() => {
+    const cachedEntries = resolveCachedIndicatorResults(activeIndicatorsRef.current, getIndicatorCacheContext());
+    const cachedById = new Map(cachedEntries.map((entry) => [entry.indicatorId, entry]));
     setActiveIndicators((prev) =>
-      prev.map((indicator) => ({
-        ...indicator,
-        lines: [],
-        error: null,
-      }))
+      prev.map((indicator) => {
+        const cached = cachedById.get(indicator.id);
+        return {
+          ...indicator,
+          lines: cached?.normalized?.lines || clearIndicatorLineData(indicator.lines || []),
+          error: null,
+          ...(cached?.schema?.length > 0 ? { paramSchema: cached.schema } : {}),
+        };
+      })
     );
-    outputDispatch({ type: "reset-context" });
-  }, [exchange, interval, marketType, setActiveIndicators, symbol]);
+    outputDispatch({ type: "hydrate-cache", entries: cachedEntries });
+  }, [
+    activeIndicatorsRef,
+    exchange,
+    getIndicatorCacheContext,
+    interval,
+    marketType,
+    setActiveIndicators,
+    symbol,
+  ]);
 
   const paneData = useMemo(
     () => buildIndicatorPaneData(activeIndicators),

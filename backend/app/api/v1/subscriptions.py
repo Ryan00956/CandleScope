@@ -88,6 +88,9 @@ async def sync_watchlist(request: Request, body: SyncWatchlistRequest):
         for s in body.symbols
         if s.strip()
     }
+    sync_intents = getattr(mgr, "sync_watchlist_storage_intents", None)
+    if callable(sync_intents):
+        sync_intents(watchlist_set)
 
     # Auto-register new symbols as PRICE_ONLY
     results = []
@@ -100,7 +103,7 @@ async def sync_watchlist(request: Request, body: SyncWatchlistRequest):
     # Downgrade removed symbols (symbols in backend but not in watchlist)
     for sub in mgr.get_all():
         if sub["symbol"] not in watchlist_set and sub["tier"] != "none":
-            await mgr.set_tier(sub["symbol"], SubscriptionTier.NONE)
+            await mgr.set_tier(sub["symbol"], SubscriptionTier.NONE, storage_intent=False)
 
     return {"synced": len(watchlist_set), "auto_registered": len(results)}
 

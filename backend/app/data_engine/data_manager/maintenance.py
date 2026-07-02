@@ -617,6 +617,147 @@ class MaintenanceService:
         )
         return int(deleted or 0)
 
+    async def run_storage_gc(
+        self,
+        *,
+        plan: dict,
+        batch_size: int = 10_000,
+    ) -> dict:
+        """Execute a previously generated SQLite retention GC plan."""
+        storage = self._storage()
+        if self._lock.locked():
+            raise MaintenanceBusyError("库维护任务正在运行，请稍后再试")
+
+        async with self._lock:
+            started_at_ms = int(time.time() * 1000)
+            batch_size = max(1, int(batch_size or 1))
+            results: list[dict] = []
+            errors: list[str] = []
+            total_deleted = 0
+            affected_series = 0
+
+            for victim in plan.get("series", []) or []:
+                symbol = str(victim.get("symbol") or "").upper()
+                interval = str(victim.get("interval") or "")
+                exchange = str(victim.get("exchange") or "binance")
+                market_type = str(victim.get("market_type") or "spot")
+                keep_rows = int(victim.get("keep_rows", 0) or 0)
+                expected = int(victim.get("would_delete_rows", 0) or 0)
+                deleted = 0
+                batches = 0
+                status = "skipped"
+                message = ""
+
+                if not symbol or not interval or expected <= 0:
+                    results.append({
+                        **victim,
+                        "deleted_rows": 0,
+                        "batches": 0,
+                        "status": status,
+                        "message": "没有可删除行",
+                    })
+                    continue
+
+                try:
+                    while deleted < expected:
+                        remaining = expected - deleted
+                        step = min(batch_size, remaining)
+                        delete_batch = getattr(storage, "delete_oldest_batch", None)
+                        if callable(delete_batch):
+                            count = await run_storage(
+                                delete_batch,
+                                symbol=symbol,
+                                interval=interval,
+                                keep=keep_rows,
+                                batch_size=step,
+                                exchange=exchange,
+                                market_type=market_type,
+                            )
+                        else:
+                            count = await run_storage(
+                                storage.delete_oldest,
+                                symbol=symbol,
+                                interval=interval,
+                                keep=keep_rows,
+                                exchange=exchange,
+                                market_type=market_type,
+                            )
+                        count = int(count or 0)
+                        if count <= 0:
+                            break
+                        deleted += count
+                        batches += 1
+
+                    if deleted > 0:
+                        self._cache_invalidator(
+                            symbol,
+                            interval,
+                            exchange=exchange,
+                            market_type=market_type,
+                        )
+                        total_deleted += deleted
+                        affected_series += 1
+                        status = "deleted"
+                        message = f"已删除 {deleted} 行"
+                    else:
+                        status = "unchanged"
+                        message = "执行时已无需删除"
+                except Exception as exc:
+                    status = "error"
+                    message = str(exc)
+                    errors.append(f"{exchange}:{market_type}:{symbol}@{interval}: {exc}")
+
+                results.append({
+                    **victim,
+                    "deleted_rows": deleted,
+                    "batches": batches,
+                    "status": status,
+                    "message": message,
+                })
+
+            checkpoint_result = None
+            checkpoint = getattr(storage, "wal_checkpoint_truncate", None)
+            if callable(checkpoint) and total_deleted > 0:
+                try:
+                    checkpoint_result = await run_storage(checkpoint)
+                except Exception as exc:
+                    errors.append(f"wal_checkpoint_truncate: {exc}")
+                    checkpoint_result = {"status": "error", "error": str(exc)}
+
+            return {
+                **plan,
+                "mode": "execute",
+                "status": "ok" if not errors else "partial",
+                "batch_size": batch_size,
+                "deleted_rows": total_deleted,
+                "affected_series": affected_series,
+                "elapsed_ms": int(time.time() * 1000) - started_at_ms,
+                "errors": errors,
+                "checkpoint_result": checkpoint_result,
+                "vacuum_recommended": bool(plan.get("vacuum_recommended")) or total_deleted > 0,
+                "results": results,
+            }
+
+    async def vacuum_storage(self) -> dict:
+        """Run SQLite VACUUM under the maintenance lock."""
+        storage = self._storage()
+        if self._lock.locked():
+            raise MaintenanceBusyError("库维护任务正在运行，请稍后再试")
+        vacuum = getattr(storage, "vacuum", None)
+        if not callable(vacuum):
+            raise MaintenanceUnavailableError("Storage backend 不支持 VACUUM")
+
+        async with self._lock:
+            started_at_ms = int(time.time() * 1000)
+            result = await run_storage(vacuum)
+            return {
+                "mode": "vacuum",
+                "owner": "sqlite-storage",
+                "status": "ok",
+                "elapsed_ms": int(time.time() * 1000) - started_at_ms,
+                "result": result,
+            }
+
     def _storage(self) -> Any:
         storage = self._storage_provider()
         if storage is None:

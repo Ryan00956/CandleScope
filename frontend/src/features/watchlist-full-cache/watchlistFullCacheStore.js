@@ -4,8 +4,15 @@ import {
   mergeByTime,
   upsertRealtimeKline,
 } from "../market-data/chartDataRuntime.js";
+import {
+  klineDependencyKey,
+  registerCacheResource,
+  unregisterCacheResource,
+} from "../cache-gc/cacheRegistry.js";
+import { parseSymbolKey } from "../../utils/symbolKey.js";
 
 const entries = new Map();
+const KLINE_ROW_ESTIMATED_BYTES = 200;
 
 export function fullCacheKey(symbolKey, interval) {
   return `${symbolKey}::${interval}`;
@@ -20,6 +27,28 @@ function buildCoverage(rows) {
   };
 }
 
+function registerKlineEntry(entry) {
+  const parsed = parseSymbolKey(entry.symbolKey);
+  const bars = entry.rows?.length || 0;
+  registerCacheResource("watchlist-full-cache", entry.key, {
+    type: "kline",
+    dependencyKey: klineDependencyKey({
+      exchange: parsed.exchange,
+      marketType: parsed.marketType,
+      symbol: parsed.symbol,
+      interval: entry.interval,
+    }),
+    symbol: parsed.symbol,
+    interval: entry.interval,
+    marketType: parsed.marketType,
+    exchange: parsed.exchange,
+    bars,
+    estimatedBytes: bars * KLINE_ROW_ESTIMATED_BYTES,
+    status: entry.status,
+    source: entry.source,
+  });
+}
+
 function createEntry(symbolKey, interval, patch = {}) {
   const rows = patch.rows || [];
   return {
@@ -30,6 +59,7 @@ function createEntry(symbolKey, interval, patch = {}) {
     status: patch.status || "idle",
     source: patch.source || "cache",
     lastUpdatedMs: patch.lastUpdatedMs || Date.now(),
+    lastAccessMs: patch.lastAccessMs || null,
     lastRealtimeMs: patch.lastRealtimeMs || null,
     lastError: patch.lastError || null,
     coverage: buildCoverage(rows),
@@ -46,10 +76,12 @@ export function ensureFullCacheEntry(symbolKey, interval, patch = {}) {
       lastUpdatedMs: patch.lastUpdatedMs || Date.now(),
     };
     entries.set(key, next);
+    registerKlineEntry(next);
     return next;
   }
   const entry = createEntry(symbolKey, interval, patch);
   entries.set(key, entry);
+  registerKlineEntry(entry);
   return entry;
 }
 
@@ -75,6 +107,7 @@ export function mergeFullCacheRows(symbolKey, interval, rows, options = {}) {
     coverage: buildCoverage(merged),
   };
   entries.set(next.key, next);
+  registerKlineEntry(next);
   return next;
 }
 
@@ -101,6 +134,7 @@ export function patchFullCacheRealtimeKline(symbolKey, interval, tick, options =
     coverage: buildCoverage(patched),
   };
   entries.set(next.key, next);
+  registerKlineEntry(next);
   return next;
 }
 
@@ -112,7 +146,11 @@ export function markFullCacheError(symbolKey, interval, error) {
 }
 
 export function getFullCacheEntry(symbolKey, interval) {
-  return entries.get(fullCacheKey(symbolKey, interval)) || null;
+  const entry = entries.get(fullCacheKey(symbolKey, interval)) || null;
+  if (entry) {
+    entry.lastAccessMs = Date.now();
+  }
+  return entry;
 }
 
 export function getWarmRows(symbolKey, interval) {
@@ -131,6 +169,76 @@ export function snapshotFullCacheEntries() {
   return Array.from(entries.values());
 }
 
+export function snapshotWatchlistFullCacheDiagnostics() {
+  const snapshot = Array.from(entries.values()).map((entry) => {
+    const bars = entry.rows?.length || 0;
+    return {
+      owner: "watchlist-full-cache",
+      key: entry.key,
+      symbolKey: entry.symbolKey,
+      interval: entry.interval,
+      tier: entry.status === "live" ? "subscribed" : "warm",
+      status: entry.status,
+      source: entry.source,
+      bars,
+      firstTime: entry.coverage?.firstTime ?? null,
+      lastTime: entry.coverage?.lastTime ?? null,
+      estimatedBytes: bars * KLINE_ROW_ESTIMATED_BYTES,
+      lastAccessMs: entry.lastAccessMs || null,
+      lastUpdatedMs: entry.lastUpdatedMs || null,
+      lastRealtimeMs: entry.lastRealtimeMs || null,
+      lastError: entry.lastError || null,
+    };
+  });
+  const statusCounts = snapshot.reduce((counts, entry) => ({
+    ...counts,
+    [entry.status]: (counts[entry.status] || 0) + 1,
+  }), {});
+  const totalBars = snapshot.reduce((total, entry) => total + entry.bars, 0);
+  return {
+    owner: "watchlist-full-cache",
+    seriesCount: snapshot.length,
+    totalBars,
+    estimatedBytes: totalBars * KLINE_ROW_ESTIMATED_BYTES,
+    statusCounts,
+    entries: snapshot,
+  };
+}
+
+export function trimWatchlistFullCacheEntries(victims = []) {
+  const keys = new Set(victims.map((victim) => victim?.key).filter(Boolean));
+  const removed = [];
+  const skipped = [];
+  for (const key of keys) {
+    const entry = entries.get(key);
+    if (!entry) continue;
+    if (entry.status === "live") {
+      skipped.push({ owner: "watchlist-full-cache", key, reason: "live-entry-protected" });
+      continue;
+    }
+    entries.delete(key);
+    unregisterCacheResource("watchlist-full-cache", key);
+    const bars = entry.rows?.length || 0;
+    removed.push({
+      owner: "watchlist-full-cache",
+      key,
+      bars,
+      estimatedBytes: bars * KLINE_ROW_ESTIMATED_BYTES,
+    });
+  }
+  return {
+    owner: "watchlist-full-cache",
+    removedCount: removed.length,
+    removedBars: removed.reduce((total, entry) => total + entry.bars, 0),
+    removedEstimatedBytes: removed.reduce((total, entry) => total + entry.estimatedBytes, 0),
+    skipped,
+    removed,
+  };
+}
+
 export function resetWatchlistFullCache() {
+  for (const key of entries.keys()) {
+    unregisterCacheResource("watchlist-full-cache", key);
+  }
   entries.clear();
 }

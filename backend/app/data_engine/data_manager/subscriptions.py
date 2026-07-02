@@ -73,6 +73,37 @@ class SubscriptionDataManagerLike(Protocol):
     ) -> None:
         ...
 
+    def register_storage_intent(
+        self,
+        symbol: str,
+        interval: str = "*",
+        *,
+        source: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        priority: str = "weak",
+        storage_allowed: bool = True,
+        frontend_cache_allowed: bool = False,
+        stream_required: bool = False,
+        keep_rows: int | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    def unregister_storage_intent(
+        self,
+        symbol: str,
+        interval: str = "*",
+        *,
+        source: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> None:
+        ...
+
+    def unregister_storage_intents_for_source(self, source_prefix: str) -> int:
+        ...
+
 
 class SubscriptionTier(str, enum.Enum):
     """Resource tier for a watched symbol."""
@@ -220,6 +251,7 @@ class SubscriptionService:
         """Restore FULL subscriptions and watched price streams."""
         for sub in list(self._subs.values()):
             try:
+                self._register_watchlist_storage_intent(sub.symbol, sub.tier, sub.intervals)
                 if sub.tier == SubscriptionTier.FULL:
                     await self._activate_full(sub.symbol, sub.intervals)
                     await self._activate_price(sub.symbol)
@@ -235,6 +267,7 @@ class SubscriptionService:
         *,
         intervals: Any | None = None,
         consumer_id: str | None = None,
+        storage_intent: bool = True,
     ) -> dict:
         key = self.normalize_symbol(symbol)
         now_ms = int(time.time() * 1000)
@@ -261,6 +294,8 @@ class SubscriptionService:
         next_intervals = requested_intervals if tier == SubscriptionTier.FULL else []
         old_intervals = list(old_sub.intervals or []) if old_sub is not None else []
         if old_tier == tier and (intervals is None or old_intervals == next_intervals):
+            if storage_intent:
+                self._register_watchlist_storage_intent(key, tier, next_intervals)
             if tier == SubscriptionTier.FULL:
                 await self._activate_full(
                     key,
@@ -294,6 +329,8 @@ class SubscriptionService:
             added_at=old_sub.added_at if old_sub else now_ms,
             intervals=next_intervals if tier == SubscriptionTier.FULL else [],
         )
+        if storage_intent:
+            self._register_watchlist_storage_intent(key, tier, sub.intervals)
 
         warning = None
         if tier == SubscriptionTier.FULL:
@@ -326,6 +363,8 @@ class SubscriptionService:
     async def remove(self, symbol: str) -> None:
         key = self.normalize_symbol(symbol)
         old_sub = self._subs.get(key)
+        if old_sub is not None:
+            self._unregister_watchlist_storage_intents(key)
         if old_sub is not None and old_sub.tier == SubscriptionTier.FULL:
             await self._deactivate_full(key, old_sub.intervals)
         if old_sub is not None and old_sub.tier in (SubscriptionTier.FULL, SubscriptionTier.PRICE_ONLY):
@@ -346,6 +385,20 @@ class SubscriptionService:
     def get_full_count(self) -> int:
         return sum(1 for sub in self._subs.values() if sub.tier == SubscriptionTier.FULL)
 
+    def sync_watchlist_storage_intents(self, symbols: set[str]) -> None:
+        """Keep storage intents aligned with the current frontend watchlist set."""
+        normalized = {self.normalize_symbol(symbol) for symbol in symbols if str(symbol or "").strip()}
+        for key in normalized:
+            sub = self._subs.get(key)
+            self._register_watchlist_storage_intent(
+                key,
+                sub.tier if sub is not None else SubscriptionTier.NONE,
+                sub.intervals if sub is not None else [],
+            )
+        for key in list(self._subs):
+            if key not in normalized:
+                self._unregister_watchlist_storage_intents(key)
+
     async def _activate_full(
         self,
         key: str,
@@ -358,6 +411,7 @@ class SubscriptionService:
         exchange, market_type, raw_symbol = parse_subscription_key(key)
         consumer = self._subscription_consumer_id(key, consumer_id)
         for interval in self._effective_full_intervals(intervals):
+            self._register_watchlist_full_storage_intent(key, interval)
             await self._data_manager.ensure_stream(
                 raw_symbol,
                 interval,
@@ -380,6 +434,7 @@ class SubscriptionService:
         exchange, market_type, raw_symbol = parse_subscription_key(key)
         consumer = self._subscription_consumer_id(key, consumer_id)
         for interval in self._effective_full_intervals(intervals):
+            self._unregister_watchlist_full_storage_intent(key, interval)
             await self._data_manager.release_stream(
                 raw_symbol,
                 interval,
@@ -437,6 +492,97 @@ class SubscriptionService:
             exchange=exchange,
             market_type=market_type,
         )
+
+    def _register_watchlist_storage_intent(
+        self,
+        key: str,
+        tier: SubscriptionTier,
+        intervals: Any,
+    ) -> None:
+        if self._data_manager is None:
+            return
+        exchange, market_type, raw_symbol = parse_subscription_key(key)
+        priority = {
+            SubscriptionTier.FULL: "strong",
+            SubscriptionTier.PRICE_ONLY: "normal",
+            SubscriptionTier.NONE: "weak",
+        }.get(tier, "weak")
+        register = getattr(self._data_manager, "register_storage_intent", None)
+        if callable(register):
+            register(
+                raw_symbol,
+                "*",
+                exchange=exchange,
+                market_type=market_type,
+                source=f"watchlist:{key}",
+                priority=priority,
+                storage_allowed=True,
+                frontend_cache_allowed=False,
+                stream_required=False,
+                detail={"tier": tier.value, "scope": "watchlist"},
+            )
+        record_access = getattr(
+            self._data_manager,
+            "record_cache_access_deferred",
+            None,
+        ) or getattr(self._data_manager, "record_cache_access", None)
+        if callable(record_access):
+            record_access(
+                raw_symbol,
+                "*",
+                exchange=exchange,
+                market_type=market_type,
+                action="watchlist-tier",
+                source=tier.value,
+                detail={"tier": tier.value, "scope": "watchlist"},
+            )
+        if tier == SubscriptionTier.FULL:
+            for interval in self._effective_full_intervals(intervals):
+                self._register_watchlist_full_storage_intent(key, interval)
+
+    def _register_watchlist_full_storage_intent(self, key: str, interval: str) -> None:
+        if self._data_manager is None:
+            return
+        exchange, market_type, raw_symbol = parse_subscription_key(key)
+        register = getattr(self._data_manager, "register_storage_intent", None)
+        if not callable(register):
+            return
+        register(
+            raw_symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            source=f"watchlist-full:{key}:{interval}",
+            priority="strong",
+            storage_allowed=True,
+            frontend_cache_allowed=True,
+            stream_required=True,
+            detail={"tier": SubscriptionTier.FULL.value, "scope": "watchlist-full"},
+        )
+
+    def _unregister_watchlist_full_storage_intent(self, key: str, interval: str) -> None:
+        if self._data_manager is None:
+            return
+        exchange, market_type, raw_symbol = parse_subscription_key(key)
+        unregister = getattr(self._data_manager, "unregister_storage_intent", None)
+        if not callable(unregister):
+            return
+        unregister(
+            raw_symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            source=f"watchlist-full:{key}:{interval}",
+        )
+
+    def _unregister_watchlist_storage_intents(self, key: str) -> None:
+        if self._data_manager is None:
+            return
+        unregister = getattr(self._data_manager, "unregister_storage_intents_for_source", None)
+        if not callable(unregister):
+            return
+        unregister(f"watchlist:{key}")
+        unregister(f"watchlist-full:{key}:")
 
     def _init_db(self) -> None:
         with sqlite3.connect(self._db_path) as conn:

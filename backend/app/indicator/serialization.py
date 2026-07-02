@@ -393,6 +393,7 @@ def build_pyne_snapshot_payload(
     params: dict[str, Any],
     result: Any,
     bar_time: int = 0,
+    script_hash: str | None = None,
 ) -> dict[str, Any]:
     """Build a WebSocket snapshot payload for a backend-hosted Pyne script."""
     payload = serialize_pyne_result(result, lines_on_error=False)
@@ -417,6 +418,7 @@ def build_pyne_snapshot_payload(
         "market_type": market_type,
         "name": name,
         "params": params,
+        **({"scriptHash": script_hash} if script_hash else {}),
         "barTime": bar_time,
         **payload,
     }

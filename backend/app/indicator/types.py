@@ -41,6 +41,7 @@ class IndicatorKey:
     params: dict[str, Any] = field(default_factory=dict)
     market_type: str = "spot"
     exchange: str = "binance"
+    code_hash: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbol", self.symbol.upper().strip())
@@ -48,6 +49,7 @@ class IndicatorKey:
         object.__setattr__(self, "market_type", self.market_type.strip().lower())
         object.__setattr__(self, "exchange", self.exchange.strip().lower())
         object.__setattr__(self, "indicator_name", self.indicator_name.upper().strip())
+        object.__setattr__(self, "code_hash", self.code_hash.strip())
         # Freeze params into a hashable form
         if isinstance(self.params, dict):
             object.__setattr__(self, "params", _freeze_dict(self.params))
@@ -61,7 +63,11 @@ class IndicatorKey:
     @property
     def uid(self) -> str:
         """Human-readable unique ID including exchange and market type."""
-        return f"{self.exchange}:{self.market_type}:{self.symbol}:{self.interval}:{self.indicator_name}:{self.params_hash}"
+        code_part = self.code_hash or "no-code-hash"
+        return (
+            f"{self.exchange}:{self.market_type}:{self.symbol}:{self.interval}:"
+            f"{self.indicator_name}:{code_part}:{self.params_hash}"
+        )
 
     @property
     def series_topic(self) -> str:

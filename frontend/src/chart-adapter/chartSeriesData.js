@@ -103,7 +103,18 @@ export function canUseTrailingCandleUpdate(previousData, nextData) {
 }
 
 export function applyLineSeriesData(series, nextData, previousData, detail, recordPerfEvent) {
-  if (!nextData?.length) return "empty";
+  if (!nextData?.length) {
+    if (previousData?.length) {
+      series.setData([]);
+      recordPerfEvent?.("chart.indicatorSeries.setData", {
+        ...detail,
+        points: 0,
+        reason: "clear",
+      });
+      return "clear";
+    }
+    return "empty";
+  }
   if (canUseTrailingSeriesUpdate(previousData, nextData)) {
     const start = Math.max(0, previousData.length - 1);
     for (let i = start; i < nextData.length; i += 1) {

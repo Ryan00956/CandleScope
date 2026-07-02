@@ -33,6 +33,9 @@ class _RecordingSubscriptionDataManager:
         self.stream_stopped: list[tuple[str, str, str, str]] = []
         self.price_started: list[tuple[str, str, str]] = []
         self.price_stopped: list[tuple[str, str, str]] = []
+        self.storage_intents: list[dict] = []
+        self.removed_storage_intents: list[tuple[str, str, str, str, str]] = []
+        self.removed_storage_prefixes: list[str] = []
 
     async def ensure_stream(
         self,
@@ -87,6 +90,52 @@ class _RecordingSubscriptionDataManager:
 
     async def stop_price_stream(self, symbol, exchange="binance", market_type="spot"):
         self.price_stopped.append((exchange, market_type, symbol))
+
+    def register_storage_intent(
+        self,
+        symbol,
+        interval="*",
+        *,
+        source,
+        exchange="binance",
+        market_type="spot",
+        priority="weak",
+        storage_allowed=True,
+        frontend_cache_allowed=False,
+        stream_required=False,
+        keep_rows=None,
+        detail=None,
+    ):
+        intent = {
+            "exchange": exchange,
+            "market_type": market_type,
+            "symbol": symbol,
+            "interval": interval,
+            "source": source,
+            "priority": priority,
+            "storage_allowed": storage_allowed,
+            "frontend_cache_allowed": frontend_cache_allowed,
+            "stream_required": stream_required,
+            "keep_rows": keep_rows,
+            "detail": detail or {},
+        }
+        self.storage_intents.append(intent)
+        return intent
+
+    def unregister_storage_intent(
+        self,
+        symbol,
+        interval="*",
+        *,
+        source,
+        exchange="binance",
+        market_type="spot",
+    ):
+        self.removed_storage_intents.append((exchange, market_type, symbol, interval, source))
+
+    def unregister_storage_intents_for_source(self, source_prefix):
+        self.removed_storage_prefixes.append(source_prefix)
+        return 0
 
 
 def test_normalize_subscription_intervals_keeps_valid_unique_values() -> None:
@@ -454,6 +503,14 @@ def test_subscription_service_full_price_none_lifecycle(tmp_path) -> None:
             ),
         ]
         assert dm.price_started == [("okx", "spot", "BTC-USDT")]
+        assert {
+            (item["symbol"], item["interval"], item["source"], item["priority"], item["frontend_cache_allowed"])
+            for item in dm.storage_intents
+        } >= {
+            ("BTC-USDT", "*", "watchlist:okx:spot:BTC-USDT", "strong", False),
+            ("BTC-USDT", "1h", "watchlist-full:okx:spot:BTC-USDT:1h", "strong", True),
+            ("BTC-USDT", "45m", "watchlist-full:okx:spot:BTC-USDT:45m", "strong", True),
+        }
 
         price_only = await service.set_tier("okx:spot:BTC-USDT", SubscriptionTier.PRICE_ONLY)
         assert price_only == {"symbol": "okx:spot:BTC-USDT", "tier": "price", "changed": True}
@@ -485,6 +542,14 @@ def test_subscription_service_full_price_none_lifecycle(tmp_path) -> None:
         assert none == {"symbol": "okx:spot:BTC-USDT", "tier": "none", "changed": True}
         assert dm.price_stopped == [("okx", "spot", "BTC-USDT")]
         assert service.get_tier("okx:spot:BTC-USDT") == SubscriptionTier.NONE
+        assert ("okx", "spot", "BTC-USDT", "1h", "watchlist-full:okx:spot:BTC-USDT:1h") in dm.removed_storage_intents
+        assert any(
+            item["symbol"] == "BTC-USDT"
+            and item["interval"] == "*"
+            and item["source"] == "watchlist:okx:spot:BTC-USDT"
+            and item["priority"] == "weak"
+            for item in dm.storage_intents
+        )
 
     asyncio.run(_run())
 

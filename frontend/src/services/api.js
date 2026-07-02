@@ -223,14 +223,94 @@ export async function testProxyConnection({ mode, custom_proxy }) {
     });
 }
 
-export async function updateCacheLimits({ dbLimits, ephemeralBars }) {
+export async function updateCacheLimits({
+    dbLimits,
+    ephemeralBars,
+    sqliteBudgetBytes,
+    storageRowLimitsEnabled,
+}) {
     const url = `${API_BASE}/settings/cache-limits`;
     return request(url, {
         method: "POST",
         body: {
             db_limits: dbLimits,
             ephemeral_bars: ephemeralBars,
+            sqlite_budget_bytes: sqliteBudgetBytes ?? null,
+            storage_row_limits_enabled: Boolean(storageRowLimitsEnabled),
         },
+    });
+}
+
+export async function fetchCacheDiagnostics(options = {}) {
+    return request(`${API_BASE}/settings/cache-diagnostics`, { signal: options.signal });
+}
+
+export async function recordCacheAccess(event = {}) {
+    return request(`${API_BASE}/settings/cache-access`, {
+        method: "POST",
+        body: {
+            exchange: event.exchange || "binance",
+            market_type: event.marketType || event.market_type || "spot",
+            symbol: event.symbol,
+            interval: event.interval || "*",
+            action: event.action || "frontend-access",
+            source: event.source || event.owner || "frontend",
+            weight: event.weight ?? null,
+            detail: event.detail || { key: event.key, owner: event.owner },
+            occurred_at_ms: event.occurredAtMs || event.occurred_at_ms || null,
+        },
+    });
+}
+
+export async function planBackendMemoryGc(policy = {}) {
+    return request(`${API_BASE}/settings/cache-gc/backend-memory/dry-run`, {
+        method: "POST",
+        body: policy,
+    });
+}
+
+export async function runBackendMemoryGc(policy = {}) {
+    return request(`${API_BASE}/settings/cache-gc/backend-memory/run`, {
+        method: "POST",
+        body: policy,
+    });
+}
+
+export async function runAutoGc(policy = {}) {
+    return request(`${API_BASE}/settings/cache-gc/auto/run`, {
+        method: "POST",
+        body: policy,
+    });
+}
+
+export async function planStorageGc(policy = {}) {
+    return request(`${API_BASE}/settings/cache-gc/storage/dry-run`, {
+        method: "POST",
+        body: {
+            db_limits: policy.dbLimits,
+            sqlite_budget_bytes: policy.sqliteBudgetBytes ?? null,
+            storage_row_limits_enabled: policy.storageRowLimitsEnabled,
+        },
+    });
+}
+
+export async function runStorageGc({ batchSize = 10000, policy = {} } = {}) {
+    return request(`${API_BASE}/settings/cache-gc/storage/run`, {
+        method: "POST",
+        body: {
+            db_limits: policy.dbLimits,
+            sqlite_budget_bytes: policy.sqliteBudgetBytes ?? null,
+            storage_row_limits_enabled: policy.storageRowLimitsEnabled,
+            confirm: true,
+            batch_size: batchSize,
+        },
+    });
+}
+
+export async function vacuumStorage() {
+    return request(`${API_BASE}/settings/cache-gc/storage/vacuum`, {
+        method: "POST",
+        body: { confirm: true },
     });
 }
 

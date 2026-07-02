@@ -4,7 +4,8 @@ import asyncio
 import contextlib
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from app.api.v1 import indicators as indicators_api
 from app.api.v1 import stream_indicator_payloads as payload_api
@@ -24,7 +25,31 @@ from app.indicator.pyne import (
 from app.indicator.pyne.cache import pyne_cache
 from app.indicator.pyne.executor import execute_pyne_script_in_process
 from app.indicator.pyne import security as pyne_security
+from app.indicator.engine import indicator_code_hash
+from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.types import IndicatorKey
+
+
+class _QueryResult:
+    def __init__(self, bars: list[BarData], missing_ranges: list[object] | None = None) -> None:
+        self.bars = bars
+        self.missing_ranges = missing_ranges or []
+
+
+class _RangeDataManager:
+    def __init__(self, bars: list[BarData], missing_ranges: list[object] | None = None) -> None:
+        self.bars = bars
+        self.missing_ranges = missing_ranges or []
+
+    def query(self, *args, **kwargs):
+        return _QueryResult(self.bars, self.missing_ranges)
+
+
+def _indicator_client(data_manager) -> TestClient:
+    app = FastAPI()
+    app.include_router(indicators_api.router, prefix="/api/v1")
+    app.state.data_manager = data_manager
+    return TestClient(app)
 
 
 def _bars(count: int = 30) -> list[dict]:
@@ -504,6 +529,178 @@ def test_indicator_diagnostics_snapshot_reports_runtime_state(tmp_path) -> None:
     assert payload["executors"]["storage"]["max_workers"] >= 1
 
 
+def test_indicator_range_http_allows_more_than_5000_builtin_bars() -> None:
+    bars = [BarData.from_dict(item) for item in _bars(6005)]
+    client = _indicator_client(_RangeDataManager(bars))
+
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ma-1",
+        "kind": "builtin",
+        "exchange": "binance",
+        "marketType": "spot",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+        "reason": "unit-test",
+    })
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["type"] == "indicator.replace_range"
+    assert payload["range"] == {"start": bars[0].time, "end": bars[-1].time}
+    assert payload["targetBars"] > 5000
+    assert payload["lines"][0]["data"][-1]["time"] == bars[-1].time
+
+
+@pytest.mark.parametrize(
+    ("indicator_name", "params"),
+    [
+        ("BOLL", {"period": 20, "mult": 2.0, "source": "close"}),
+        ("MACD", {"fast": 12, "slow": 26, "signal": 9, "source": "close"}),
+    ],
+)
+def test_indicator_range_patch_stops_before_forming_latest_bar(
+    indicator_name: str,
+    params: dict,
+) -> None:
+    closed_bars = [BarData.from_dict(item).with_closed_state(True) for item in _bars(80)]
+    forming_bar = BarData.from_dict(_bars(81)[-1]).with_closed_state(False)
+    bars = [*closed_bars, forming_bar]
+
+    payload = payload_api._compute_builtin_range_patch(
+        "indicator-1",
+        _RangeDataManager(bars),
+        {
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "name": indicator_name,
+            "params": params,
+            "indicatorId": "indicator-1",
+        },
+        closed_bars[-2].time,
+        forming_bar.time,
+        "auto-right-catchup",
+        3,
+    )
+
+    assert payload["type"] == "indicator.replace_range"
+    assert payload["range"] == {"start": closed_bars[-2].time, "end": closed_bars[-1].time}
+    returned_times = [
+        point["time"]
+        for line in payload["lines"]
+        for point in line["data"]
+    ]
+    assert returned_times
+    assert max(returned_times) == closed_bars[-1].time
+    assert forming_bar.time not in returned_times
+
+
+def test_indicator_range_http_reports_not_ready_for_missing_target_range() -> None:
+    bars = [BarData.from_dict(item) for item in _bars(5)]
+
+    class Missing:
+        start_ms = bars[0].time * 1000
+        end_ms = bars[-1].time * 1000
+
+    client = _indicator_client(_RangeDataManager(bars, [Missing()]))
+
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ma-1",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RANGE_NOT_READY"
+    assert payload["detail"]["retryAfterMs"] == 3000
+
+
+def test_indicator_range_http_reports_empty_for_forming_only_target_range() -> None:
+    closed_bars = [BarData.from_dict(item).with_closed_state(True) for item in _bars(5)]
+    forming_bar = BarData.from_dict(_bars(6)[-1]).with_closed_state(False)
+    client = _indicator_client(_RangeDataManager([*closed_bars, forming_bar]))
+
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "ma-1",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "MA",
+        "params": {"period": 3},
+        "start": forming_bar.time,
+        "end": forming_bar.time,
+    })
+
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RANGE_EMPTY"
+    assert "retryAfterMs" not in payload.get("detail", {})
+
+
+def test_indicator_range_http_enforces_pyne_runtime_bar_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    bars = [BarData.from_dict(item) for item in _bars(10)]
+    monkeypatch.setattr(indicators_api.config, "PYNE_MAX_BARS", 5)
+    client = _indicator_client(_RangeDataManager(bars))
+
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "custom-1",
+        "kind": "script",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "script": 'plot(close, title="Close")',
+        "params": {},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    })
+
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RANGE_LIMIT"
+    assert "Too many Pyne bars" in payload["error"]
+
+
+def test_indicator_range_http_rejects_oversized_pyne_before_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    class CountingRangeDataManager(_RangeDataManager):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.query_calls = 0
+
+        def query(self, *args, **kwargs):
+            self.query_calls += 1
+            raise AssertionError("oversized Pyne range must not query K-lines")
+
+    dm = CountingRangeDataManager()
+    monkeypatch.setattr(indicators_api.config, "PYNE_MAX_BARS", 5)
+    client = _indicator_client(dm)
+
+    response = client.post("/api/v1/indicators/range", json={
+        "clientId": "custom-1",
+        "kind": "script",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "script": 'plot(close, title="Close")',
+        "params": {},
+        "start": 1_700_000_000,
+        "end": 1_700_000_000 + 9 * 60,
+    })
+
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "INDICATOR_RANGE_LIMIT"
+    assert dm.query_calls == 0
+
+
 def test_indicator_ws_event_message_shape() -> None:
     key = IndicatorKey("BTCUSDT", "1m", "MA", {"period": 20})
     event = IndicatorEvent(
@@ -546,7 +743,7 @@ def test_indicator_ws_error_message_has_structured_detail() -> None:
     assert msg["errorDetail"]["code"] == "INDICATOR_COMPUTE_ERROR"
 
 
-def test_indicator_ws_recomputed_message_replaces_range() -> None:
+def test_indicator_ws_recomputed_message_notifies_range_refresh() -> None:
     bars = [BarData.from_dict(item) for item in _bars(30)]
     params = {"period": 3}
     result = create_engine().compute(
@@ -571,12 +768,11 @@ def test_indicator_ws_recomputed_message_replaces_range() -> None:
         {"exchange": "binance"},
     )
 
-    assert msg["type"] == "indicator.replace_range"
-    assert msg["reason"] == "recompute"
-    assert msg["range"] == {"start": bars[0].time, "end": bars[-1].time}
+    assert msg["type"] == "indicator.recomputed"
     assert msg["clientId"] == "client-1"
-    assert msg["lines"][0]["data"][0]["time"] >= bars[0].time
-    assert msg["lines"][0]["data"][-1]["time"] == bars[-1].time
+    assert msg["indicatorId"] == key.uid
+    assert msg["reason"] == "backfill-recomputed"
+    assert msg["range"] == {"start": bars[0].time, "end": bars[-1].time}
 
 
 def test_indicator_ws_queue_coalesces_preview_when_full() -> None:
@@ -610,6 +806,74 @@ def test_indicator_key_includes_exchange_in_identity_and_topic() -> None:
     assert okx_key.uid.startswith("okx:spot:BTCUSDT:1m:MA:")
     assert binance_key.series_topic == "BTCUSDT@1m"
     assert okx_key.series_topic == "okx:BTCUSDT@1m"
+
+
+def test_indicator_key_includes_backend_code_hash_in_identity() -> None:
+    code_hash = indicator_code_hash("MA")
+    key = create_engine().compute(
+        symbol="BTCUSDT",
+        interval="1m",
+        market_type="spot",
+        indicator_name="MA",
+        params={"period": 3},
+        bars=[BarData.from_dict(item) for item in _bars(5)],
+    ).key
+
+    assert code_hash
+    assert key.code_hash == code_hash
+    assert f":MA:{code_hash}:" in key.uid
+
+
+def test_range_meta_includes_pyne_script_hash_in_identity() -> None:
+    script_a = 'plot(close, title="Close A")'
+    script_b = 'plot(close + 1, title="Close B")'
+    req_a = indicators_api.IndicatorRangeRequest(
+        clientId="script-1",
+        kind="script",
+        symbol="BTCUSDT",
+        interval="1m",
+        script=script_a,
+        start=1,
+        end=2,
+    )
+    req_b = req_a.model_copy(update={"script": script_b})
+
+    meta_a = indicators_api._build_range_meta(req_a)
+    meta_b = indicators_api._build_range_meta(req_b)
+
+    assert meta_a["scriptHash"] == script_hash(script_a)
+    assert f":{short_script_hash(script_a)}:" in meta_a["indicatorId"]
+    assert meta_a["indicatorId"] != meta_b["indicatorId"]
+
+
+def test_range_meta_builtin_indicator_id_matches_ws_key_with_params_hash() -> None:
+    params_a = {"period": 20}
+    params_b = {"period": 50}
+    req_a = indicators_api.IndicatorRangeRequest(
+        clientId="ma-20",
+        kind="builtin",
+        symbol="BTCUSDT",
+        interval="1m",
+        name="MA",
+        params=params_a,
+        start=1,
+        end=2,
+    )
+    req_b = req_a.model_copy(update={"clientId": "ma-50", "params": params_b})
+
+    meta_a = indicators_api._build_range_meta(req_a)
+    meta_b = indicators_api._build_range_meta(req_b)
+    expected_key = IndicatorKey(
+        "BTCUSDT",
+        "1m",
+        "MA",
+        params_a,
+        code_hash=indicator_code_hash("MA"),
+    )
+
+    assert meta_a["indicatorId"] == expected_key.uid
+    assert meta_a["paramsHash"] == expected_key.params_hash
+    assert meta_a["indicatorId"] != meta_b["indicatorId"]
 
 
 def test_indicator_engine_routes_exchange_scoped_updates() -> None:
@@ -705,6 +969,61 @@ def test_builtin_indicator_engine_preview_does_not_commit_state() -> None:
     update_events = [event for event in events if event.event_type == IndicatorEventType.INDICATOR_UPDATED]
     assert update_events[-1].values == {"ma": 102.0}
     assert engine._instances[key].get_latest() == {"ma": 102.0}
+
+
+def _assert_indicator_values_close(actual: dict, expected: dict) -> None:
+    assert set(actual) == set(expected)
+    for key, expected_value in expected.items():
+        actual_value = actual[key]
+        if expected_value is None:
+            assert actual_value is None
+        else:
+            assert actual_value == pytest.approx(expected_value)
+
+
+@pytest.mark.parametrize(
+    ("indicator_name", "params"),
+    [
+        ("BOLL", {"period": 20, "mult": 2.0, "source": "close"}),
+        ("MACD", {"fast": 12, "slow": 26, "signal": 9, "source": "close"}),
+    ],
+)
+def test_indicator_seed_excludes_forming_latest_bar_for_preview(indicator_name: str, params: dict) -> None:
+    bars = [BarData.from_dict(item) for item in _bars(60)]
+    closed_history = [bar.with_closed_state(True) for bar in bars[:-1]]
+    forming_bar = bars[-1].with_closed_state(False)
+    clean_closed_bars = [*closed_history, forming_bar.with_closed_state(True)]
+
+    seed_bars = payload_api.confirmed_indicator_seed_bars([*closed_history, forming_bar])
+    assert seed_bars == closed_history
+
+    expected = create_engine().compute(
+        symbol="BTCUSDT",
+        interval="1m",
+        market_type="spot",
+        indicator_name=indicator_name,
+        params=params,
+        bars=clean_closed_bars,
+    ).get_latest()
+
+    engine = create_engine()
+    key, result = engine.subscribe(
+        "BTCUSDT",
+        "1m",
+        "spot",
+        indicator_name,
+        params,
+        seed_bars,
+        exchange="binance",
+    )
+    committed_before_preview = engine._instances[key].get_latest()
+
+    engine.on_bar_updated("BTCUSDT", "1m", forming_bar)
+    _assert_indicator_values_close(engine._instances[key].get_preview(), expected)
+    _assert_indicator_values_close(engine._instances[key].get_latest(), committed_before_preview)
+
+    engine.on_bar_closed("BTCUSDT", "1m", forming_bar.with_closed_state(True))
+    _assert_indicator_values_close(engine._instances[key].get_latest(), expected)
 
 
 @pytest.mark.anyio
@@ -813,14 +1132,50 @@ def test_pyne_ws_snapshot_message_runs_script() -> None:
     assert msg["markers"][0]["data"][0]["text"] == "X"
 
 
-def test_indicator_range_command_supports_load_before_and_clamps_bars() -> None:
+def test_pyne_ws_tick_snapshot_clamps_recompute_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeDataManager:
+        def __init__(self) -> None:
+            self.limits: list[int] = []
+
+        def query_latest(self, symbol, interval, limit, exchange="binance", market_type="spot"):
+            self.limits.append(limit)
+
+            class Result:
+                bars = [BarData.from_dict(item) for item in _bars(30)]
+
+            return Result()
+
+    dm = FakeDataManager()
+    monkeypatch.setattr(payload_api.config, "PYNE_TICK_RECOMPUTE_MAX_BARS", 5)
+
+    payload_api._compute_pyne_snapshot_message(
+        "custom-1",
+        dm,
+        {
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "name": "Custom",
+            "script": 'plot(close, title="Close")',
+            "params": {},
+            "securityMode": "safe",
+            "historyLimit": 100,
+        },
+        bar_time=1_700_000_000,
+    )
+
+    assert dm.limits == [5]
+
+
+def test_indicator_range_command_supports_load_before_without_5000_clamp() -> None:
     start_s, end_s, bars = payload_api._range_from_indicator_command(
         action="load_before",
-        msg={"before": 1_700_000_000, "bars": payload_api.INDICATOR_MAX_RANGE_BARS + 100},
+        msg={"before": 1_700_000_000, "bars": 6000},
         interval="1h",
     )
 
-    assert bars == payload_api.INDICATOR_MAX_RANGE_BARS
+    assert bars == 6000
     assert end_s == 1_700_000_000 - 3600
     assert start_s == end_s - (bars - 1) * 3600
 
@@ -1192,10 +1547,11 @@ async def test_pyne_ws_subscription_loads_saved_custom_indicator(tmp_path, monke
         queue_message=stream_api._queue_indicator_message,
     )
 
-    assert sent[0]["type"] == "indicator.snapshot"
-    assert sent[0]["ok"] is True
-    assert sent[0]["lines"][0]["name"] == "Saved"
-    assert sent[0]["params"] == {"length": 5}
+    assert sent[0]["type"] == "indicator.subscribed"
+    assert sent[0]["kind"] == "script"
+    assert sent[0]["clientId"] == "saved-1"
+    assert sent[0]["name"] == "Saved Double"
+    assert sent[0]["customId"] == saved["id"]
     assert dm.ensure_stream_calls[0]["kwargs"]["consumer_id"] == (
         "ws:indicator:binance:spot:BTCUSDT:1m:saved-1:test"
     )

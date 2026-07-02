@@ -157,6 +157,14 @@ export function upsertLinePoint(data, point) {
   return next;
 }
 
+export function clearIndicatorLineData(lines = []) {
+  return (lines || []).map((line) => ({
+    ...line,
+    data: [],
+    ...(Array.isArray(line?.colorData) ? { colorData: [] } : {}),
+  }));
+}
+
 function mergeTimeData(existing = [], incoming = []) {
   const byTime = new Map();
   for (const item of existing || []) {

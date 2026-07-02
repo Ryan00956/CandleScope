@@ -193,12 +193,14 @@ class _SubscriptionService:
         *,
         intervals=None,
         consumer_id=None,
+        storage_intent=True,
     ) -> dict:
         self.set_tier_calls.append({
             "symbol": symbol,
             "tier": tier,
             "intervals": intervals,
             "consumer_id": consumer_id,
+            "storage_intent": storage_intent,
         })
         self.subscriptions[symbol] = {
             "symbol": symbol,
@@ -212,6 +214,9 @@ class _SubscriptionService:
 
     def get_all(self) -> list[dict]:
         return list(self.subscriptions.values())
+
+    def sync_watchlist_storage_intents(self, symbols: set[str]) -> None:
+        self.synced_storage_intents = set(symbols)
 
 
 class _SubscriptionDataManager:
@@ -408,6 +413,7 @@ def test_set_subscription_tier_accepts_intervals_and_consumer_id() -> None:
         "tier": SubscriptionTier.FULL,
         "intervals": ["1h", "45m"],
         "consumer_id": "watchlist:client-a:okx:spot:BTC-USDT",
+        "storage_intent": True,
     }]
 
 
@@ -427,6 +433,7 @@ def test_sync_watchlist_does_not_forward_interval_details() -> None:
         "tier": SubscriptionTier.PRICE_ONLY,
         "intervals": None,
         "consumer_id": None,
+        "storage_intent": True,
     }]
 
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { markPerf } from "../../runtime/performance/perfMarks";
 import { SETTINGS_ACTION_TYPES } from "./settingsActionTypes";
+import { useCacheDiagnosticsRuntime } from "./cacheDiagnosticsSettingsRuntime";
 import { useExchangeSettingsRuntime } from "./exchangeSettingsRuntime";
 import { useProxySettingsRuntime } from "./proxySettingsRuntime";
 import { useSettingsMaintenanceRuntime } from "./maintenanceSettingsRuntime";
@@ -22,6 +23,8 @@ export function useSettingsRuntime({
   currentMarketType = "spot",
   currentExchange = "binance",
   watchlists = [],
+  chartDataCacheDiagnostics = null,
+  trimChartDataCacheEntries = null,
 }) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const exchangeRuntime = useExchangeSettingsRuntime({ isOpen });
@@ -32,6 +35,12 @@ export function useSettingsRuntime({
     currentMarketType,
     currentExchange,
     watchlists,
+  });
+  const cacheDiagnosticsRuntime = useCacheDiagnosticsRuntime({
+    chartDataCacheDiagnostics,
+    isOpen,
+    settings,
+    trimChartDataCacheEntries,
   });
 
   useEffect(() => {
@@ -58,6 +67,7 @@ export function useSettingsRuntime({
         onUpdate,
         showAdvanced,
       },
+      cacheDiagnostics: cacheDiagnosticsRuntime,
       maintenance: {
         currentSymbol,
         currentMarketType,
@@ -84,6 +94,16 @@ export function useSettingsRuntime({
       },
       cacheLimits: {
         onToggleAdvanced: handleToggleAdvanced,
+      },
+      cacheDiagnostics: {
+        onPlanBackendMemoryGc: cacheDiagnosticsRuntime.onPlanBackendMemoryGc,
+        onPlanFrontendGc: cacheDiagnosticsRuntime.onPlanFrontendGc,
+        onPlanStorageGc: cacheDiagnosticsRuntime.onPlanStorageGc,
+        onRunBackendMemoryGc: cacheDiagnosticsRuntime.onRunBackendMemoryGc,
+        onRunFrontendGc: cacheDiagnosticsRuntime.onRunFrontendGc,
+        onRunStorageGc: cacheDiagnosticsRuntime.onRunStorageGc,
+        onRefresh: cacheDiagnosticsRuntime.onRefresh,
+        onVacuumStorage: cacheDiagnosticsRuntime.onVacuumStorage,
       },
       maintenance: {
         onStorageRepair: maintenanceRuntime.handleStorageRepair,

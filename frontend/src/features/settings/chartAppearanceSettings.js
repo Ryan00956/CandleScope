@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 const SETTINGS_STORAGE_KEY = "candlescope-settings";
-const DEFAULT_SETTINGS = {
+export const DEFAULT_SETTINGS = {
   theme: "dark",
   customBg: "#0f172a",
   upColor: "#22c55e",
@@ -9,7 +9,14 @@ const DEFAULT_SETTINGS = {
   cachePreset: "standard",
   cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
   ephemeralCacheBars: 86400,
+  frontendCacheBudgetBytes: 64 * 1024 * 1024,
+  sqliteStorageBudgetBytes: null,
+  storageRowLimitsEnabled: false,
 };
+
+export function normalizeSettings(settings = {}) {
+  return { ...DEFAULT_SETTINGS, ...(settings || {}) };
+}
 
 function getSystemTheme() {
   if (typeof window === "undefined" || !window.matchMedia) return "dark";
@@ -19,9 +26,9 @@ function getSystemTheme() {
 function loadSettings() {
   const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
   if (saved) {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+    return normalizeSettings(JSON.parse(saved));
   }
-  return DEFAULT_SETTINGS;
+  return normalizeSettings();
 }
 
 export function useChartSettingsRuntime() {

@@ -6,6 +6,7 @@ export function buildLazySurfaceViewModel({
   indicatorActions,
   indicatorComputing,
   indicatorView,
+  marketStatus,
   marketView,
   sessionView,
   settingsActions,
@@ -53,6 +54,8 @@ export function buildLazySurfaceViewModel({
       currentMarketType: marketType,
       currentExchange: exchange,
       watchlists: watchlistView.watchlists,
+      chartDataCacheDiagnostics: marketStatus.cacheDiagnostics,
+      trimChartDataCacheEntries: marketStatus.trimCacheEntries,
     },
   };
 }

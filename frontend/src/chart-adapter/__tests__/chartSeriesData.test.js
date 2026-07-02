@@ -4,6 +4,7 @@ import {
   alignIndicatorBgcolorsToTimes,
   alignIndicatorLinesToTimes,
   alignIndicatorMarkersToTimes,
+  applyLineSeriesData,
   buildFillRenderEntries,
 } from "../chartSeriesData.js";
 
@@ -58,4 +59,22 @@ test("buildFillRenderEntries only uses shared clipped line times", () => {
   assert.equal(payload.matchedFillCount, 1);
   assert.deepEqual(payload.entries[0].upperData, [{ time: 10, value: 3 }]);
   assert.deepEqual(payload.entries[0].lowerData, [{ time: 10, value: 1 }]);
+});
+
+test("applyLineSeriesData clears existing indicator series when next data is empty", () => {
+  const calls = [];
+  const events = [];
+  const result = applyLineSeriesData(
+    { setData: (data) => calls.push(data) },
+    [],
+    [{ time: 10, value: 1 }],
+    { paneId: "volume", line: "hist" },
+    (name, detail) => events.push({ name, detail }),
+  );
+
+  assert.equal(result, "clear");
+  assert.deepEqual(calls, [[]]);
+  assert.equal(events[0].name, "chart.indicatorSeries.setData");
+  assert.equal(events[0].detail.points, 0);
+  assert.equal(events[0].detail.reason, "clear");
 });

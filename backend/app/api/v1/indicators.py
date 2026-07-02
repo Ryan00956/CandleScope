@@ -20,15 +20,28 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.api.v1.stream_indicator_payloads import (
+    IndicatorRangeEmptyError,
+    compute_indicator_range_payload_async,
+)
+from app.api.v1.stream_utils import (
+    normalize_exchange as _normalize_exchange,
+    normalize_market_type as _normalize_market_type,
+    validate_ws_interval as _validate_interval_name,
+)
 from app.core import config
-from app.core.executors import executors_snapshot, run_indicator, run_pyne_wait
+from app.core.executors import executors_snapshot, run_indicator, run_pyne_wait, run_storage
 from app.core.runtime_metrics import ws_runtime_metrics
 from app.data_engine.data_manager.models import BarData
 from app.indicator import registry, IndicatorEngine, create_engine
 from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.pyne.cache import pyne_cache
+from app.indicator.pyne import is_incremental_pyne_script
 from app.indicator.pyne.executor import execute_pyne_script
 from app.indicator.pyne.external_runtime import RuntimeBackendSnapshot, cache_stats
+from app.indicator.script_identity import script_hash, short_script_hash
+from app.indicator.engine import indicator_code_hash
+from app.indicator.types import IndicatorKey
 from app.indicator.pyne.security import PyneSecurityPolicy
 from app.indicator.serialization import (
     build_error_payload,
@@ -77,6 +90,27 @@ class CustomIndicatorPayload(BaseModel):
     paramSchema: list[dict[str, Any]] = Field(default_factory=list, description="Parameter schema")
     renderHints: dict[str, Any] = Field(default_factory=dict, description="Optional rendering hints")
     securityMode: str | None = Field(None, description="Preferred Pyne security mode")
+
+
+class IndicatorRangeRequest(BaseModel):
+    """HTTP request for server-side indicator history/range computation."""
+
+    clientId: str = Field(..., description="Frontend indicator client id")
+    kind: str | None = Field(None, description="'builtin', 'script', 'custom', or 'pyne'")
+    exchange: str = Field("binance", description="Exchange context")
+    marketType: str | None = Field(None, description="Camel-case market type context")
+    market_type: str | None = Field(None, description="Snake-case market type context")
+    symbol: str = Field("BTCUSDT", description="Trading symbol")
+    interval: str = Field("1m", description="K-line interval")
+    name: str | None = Field(None, description="Builtin indicator name or display name")
+    customId: str | None = Field(None, description="Saved custom indicator id")
+    customIndicatorId: str | None = Field(None, description="Saved custom indicator id alias")
+    script: str | None = Field(None, description="Pyne/custom script")
+    securityMode: str | None = Field(None, description="Pyne security mode")
+    params: dict[str, Any] = Field(default_factory=dict, description="Indicator parameters")
+    start: int = Field(..., description="Inclusive range start, unix seconds")
+    end: int = Field(..., description="Inclusive range end, unix seconds")
+    reason: str = Field("range", description="Client reason for the range compute")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -406,6 +440,213 @@ async def get_indicator_diagnostics(request: Request):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  HTTP range endpoint — chart history/backfill path
+# ═══════════════════════════════════════════════════════════════
+
+def _require_data_manager(request: Request):
+    dm = getattr(request.app.state, "data_manager", None)
+    if dm is None:
+        raise HTTPException(status_code=503, detail="DataManager not initialized")
+    return dm
+
+
+def _resolve_range_market_type(req: IndicatorRangeRequest) -> str:
+    return _normalize_market_type(str(req.market_type or req.marketType or "spot"))
+
+
+def _resolve_range_script(req: IndicatorRangeRequest) -> tuple[str, str, str | None]:
+    script = req.script or ""
+    custom_id = (req.customId or req.customIndicatorId or "").strip()
+    name = req.name or req.clientId
+    security_mode = req.securityMode
+    if custom_id and not script.strip():
+        try:
+            record = _custom_store.get(custom_id)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if record is None:
+            raise LookupError(f"Custom indicator '{custom_id}' not found.")
+        script = str(record.get("script") or "")
+        name = str(req.name or record.get("name") or custom_id)
+        if not req.params and isinstance(record.get("params"), dict):
+            req.params.update(record["params"])
+        if security_mode is None:
+            security_mode = record.get("securityMode")
+    return script, name, security_mode
+
+
+def _build_range_meta(req: IndicatorRangeRequest) -> dict[str, Any]:
+    exchange = _normalize_exchange(req.exchange)
+    market_type = _resolve_range_market_type(req)
+    symbol = req.symbol.upper().strip()
+    interval = req.interval.strip()
+    params = req.params if isinstance(req.params, dict) else {}
+    kind = str(req.kind or "").strip().lower()
+    script = req.script or ""
+    name = (req.name or "").strip()
+    custom_id = (req.customId or req.customIndicatorId or "").strip()
+    indicator_name = name.upper()
+
+    if not _validate_interval_name(interval):
+        raise ValueError(f"Unsupported interval: {interval}.")
+
+    is_script = kind in {"script", "custom", "pyne"} or bool(custom_id) or (script and not indicator_name)
+    if is_script:
+        script, display_name, security_mode = _resolve_range_script(req)
+        if not script.strip():
+            raise ValueError("Pyne script is required.")
+        digest = script_hash(script)
+        meta = {
+            "kind": "script",
+            "exchange": exchange,
+            "symbol": symbol,
+            "interval": interval,
+            "market_type": market_type,
+            "name": display_name,
+            "customId": custom_id or None,
+            "indicatorId": f"pyne:{exchange}:{market_type}:{symbol}:{interval}:{short_script_hash(script)}:{req.clientId}",
+            "scriptHash": digest,
+            "script": script,
+            "params": params,
+            "securityMode": security_mode,
+        }
+        try:
+            if is_incremental_pyne_script(script):
+                meta["scriptMode"] = "incremental"
+        except SyntaxError:
+            pass
+        return meta
+
+    if not indicator_name and script.startswith(_ENGINE_SCRIPT_MARKER):
+        first_line = script.split("\n")[0]
+        indicator_name = first_line[len(_ENGINE_SCRIPT_MARKER):].strip().upper()
+    if not indicator_name:
+        raise ValueError("Builtin indicator name is required.")
+    if registry.get(indicator_name) is None:
+        raise LookupError(f"Unknown builtin indicator: {indicator_name}.")
+    code_hash = indicator_code_hash(indicator_name)
+    key = IndicatorKey(
+        symbol,
+        interval,
+        indicator_name,
+        params,
+        market_type=market_type,
+        exchange=exchange,
+        code_hash=code_hash,
+    )
+    return {
+        "kind": "builtin",
+        "exchange": exchange,
+        "symbol": symbol,
+        "interval": interval,
+        "market_type": market_type,
+        "name": indicator_name,
+        "params": params,
+        "indicatorId": key.uid,
+        "codeHash": code_hash,
+        "paramsHash": key.params_hash,
+    }
+
+
+@router.post("/range")
+async def compute_range(req: IndicatorRangeRequest, request: Request):
+    """Compute an indicator over a server-side K-line range.
+
+    This is the chart history/backfill transport. Realtime updates remain on
+    the indicator WebSocket; range requests return replace-range payloads.
+    """
+    client_id = str(req.clientId or "").strip()
+    if not client_id:
+        return build_error_payload(
+            "INDICATOR_CLIENT_ID_REQUIRED",
+            "clientId is required.",
+            hint="每个指标历史请求都需要稳定 clientId，用于合并结果。",
+        )
+    start_s = int(req.start or 0)
+    end_s = int(req.end or 0)
+    if start_s <= 0 or end_s <= 0 or start_s > end_s:
+        return build_error_payload(
+            "INVALID_INDICATOR_RANGE",
+            "start/end must be positive unix timestamps with start <= end",
+            hint="请检查指标历史请求的 start/end 参数。",
+        )
+
+    try:
+        meta = _build_range_meta(req)
+        dm = _require_data_manager(request)
+        record_access = getattr(dm, "record_cache_access", None)
+        if callable(record_access):
+            await run_storage(
+                record_access,
+                meta["symbol"],
+                meta["interval"],
+                exchange=meta["exchange"],
+                market_type=meta["market_type"],
+                action="indicator-range",
+                source=meta.get("kind") or "indicator",
+                detail={"clientId": client_id, "indicatorId": meta.get("indicatorId")},
+            )
+    except LookupError as exc:
+        return build_error_payload(
+            "INDICATOR_NOT_FOUND",
+            str(exc),
+            hint="请检查指标名称或自定义指标 id 是否存在。",
+        )
+    except ValueError as exc:
+        return build_error_payload(
+            "INVALID_INDICATOR_RANGE_REQUEST",
+            str(exc),
+            hint="请检查指标类型、周期、脚本和参数。",
+        )
+
+    try:
+        payload = await compute_indicator_range_payload_async(
+            dm=dm,
+            meta=meta,
+            client_id=client_id,
+            start_s=start_s,
+            end_s=end_s,
+            reason=req.reason or "range",
+        )
+    except IndicatorRangeEmptyError as exc:
+        payload = build_error_payload(
+            "INDICATOR_RANGE_EMPTY",
+            str(exc),
+            hint="目标区间暂时没有已收盘 K 线，等待下一根 K 线后会自动更新。",
+        )
+        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+        return payload
+    except RuntimeError as exc:
+        payload = build_error_payload(
+            "INDICATOR_RANGE_NOT_READY",
+            str(exc),
+            hint="K 线历史仍在补齐，稍后重试该指标区间。",
+        )
+        payload["detail"] = {
+            "range": {"start": start_s, "end": end_s},
+            "retryAfterMs": 3000,
+        }
+        return payload
+    except ValueError as exc:
+        payload = build_error_payload(
+            "INDICATOR_RANGE_LIMIT",
+            str(exc),
+            hint="指标历史区间超过运行时限制，请缩小窗口或提高后端安全上限。",
+        )
+        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+        return payload
+    except Exception as exc:
+        payload = build_error_payload(
+            "INDICATOR_RANGE_COMPUTE_FAILED",
+            str(exc),
+            hint="指标历史区间计算失败，请检查指标参数或脚本。",
+        )
+        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+        return payload
+    return payload
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Compute endpoint — unified
 # ═══════════════════════════════════════════════════════════════
 
@@ -556,7 +797,9 @@ async def _compute_script(req: ComputeRequest) -> dict:
             hint="脚本执行超时，请减少循环、缩小窗口，或调整 INDICATOR_HTTP_TIMEOUT_SECONDS。",
         )
 
-    return serialize_pyne_result(result)
+    payload = serialize_pyne_result(result)
+    payload["scriptHash"] = script_hash(req.script or "")
+    return payload
 
 
 async def _run_indicator_http_compute(func, *args, executor_kind: str = "indicator", **kwargs):

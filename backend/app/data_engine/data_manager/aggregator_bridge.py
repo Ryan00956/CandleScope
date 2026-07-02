@@ -43,7 +43,6 @@ class AggregatorBridge:
             return
 
         bar_state: BarState = event.bar
-        bar_data = BarData.from_bar_state(bar_state)
         key = SeriesKey(
             bar_state.symbol,
             bar_state.interval,
@@ -58,6 +57,10 @@ class AggregatorBridge:
             BarEventType.AMENDED: DataEventType.BAR_AMENDED,
             BarEventType.EXPIRED: DataEventType.BAR_EXPIRED,
         }.get(event.event_type, DataEventType.BAR_UPDATED)
+        bar_data = BarData.from_bar_state(
+            bar_state,
+            is_closed=dm_event_type in (DataEventType.BAR_CLOSED, DataEventType.BAR_AMENDED),
+        )
 
         await self._persist_bar_event(bar_state, dm_event_type)
 

@@ -1,12 +1,12 @@
-import { buildIndicatorComputeParams } from "./indicatorComputeRuntime";
+import { buildIndicatorComputeParams } from "./indicatorComputeRuntime.js";
 import {
   getBuiltinIndicatorName,
   isBuiltinIndicator,
   isWsHostedIndicator,
   stringSignature,
-} from "./indicatorPayloadRuntime";
+} from "./indicatorPayloadRuntime.js";
 
-const INDICATOR_WS_INITIAL_HISTORY_LIMIT = 5000;
+const INDICATOR_WS_SEED_HISTORY_LIMIT = 50_000;
 
 export function getVisibleHostedIndicators(indicators = []) {
   return indicators.filter((indicator) => (
@@ -41,7 +41,7 @@ export function buildHostedSubscriptionMessage(indicator, context) {
   const builtin = isBuiltinIndicator(indicator);
   const historyLimit = Math.min(
     Math.max(chartDataLength, 1),
-    INDICATOR_WS_INITIAL_HISTORY_LIMIT,
+    INDICATOR_WS_SEED_HISTORY_LIMIT,
   );
 
   return {
@@ -79,30 +79,6 @@ export function buildHostedSubscriptionSignature(indicator, context) {
     securityMode: message.securityMode || "",
     params: message.params || {},
   });
-}
-
-export function buildIndicatorRangeRequest(start, end) {
-  const startSec = Math.floor(Number(start));
-  const endSec = Math.floor(Number(end));
-  if (
-    !Number.isFinite(startSec)
-    || !Number.isFinite(endSec)
-    || startSec <= 0
-    || endSec <= 0
-    || startSec > endSec
-  ) {
-    return null;
-  }
-  return { start: startSec, end: endSec };
-}
-
-export function buildHostedRangeMessage(clientId, range) {
-  return {
-    action: "load_range",
-    clientId,
-    start: range.start,
-    end: range.end,
-  };
 }
 
 export function parseIndicatorWsMessage(rawData) {
@@ -147,8 +123,22 @@ export function dispatchIndicatorWsMessage(message, handlers) {
     return true;
   }
 
+  if (message.type === "indicator.recomputed") {
+    handlers.onRecomputed?.(message.clientId, message);
+    return true;
+  }
+
+  if (message.type === "indicator.subscribed") {
+    return true;
+  }
+
   if (message.type === "indicator.preview" || message.type === "indicator.update") {
-    handlers.onValues?.(message.clientId, message.values || {}, message.barTime);
+    handlers.onValues?.(
+      message.clientId,
+      message.values || {},
+      message.barTime,
+      message.type === "indicator.update",
+    );
     return true;
   }
 

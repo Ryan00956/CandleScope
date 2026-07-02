@@ -2,9 +2,32 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clearIndicatorLineData,
   replaceIndicatorItemsRange,
   replaceIndicatorLinesRange,
 } from "../indicatorPayloadRuntime.js";
+
+test("clearIndicatorLineData keeps line identity and style while clearing timed data", () => {
+  const cleared = clearIndicatorLineData([{
+    id: "hist",
+    outputName: "volume",
+    pane: "volume",
+    type: "histogram",
+    color: "#f59e0b",
+    data: [{ time: 10, value: 100 }],
+    colorData: [{ time: 10, color: "#22c55e" }],
+  }]);
+
+  assert.deepEqual(cleared, [{
+    id: "hist",
+    outputName: "volume",
+    pane: "volume",
+    type: "histogram",
+    color: "#f59e0b",
+    data: [],
+    colorData: [],
+  }]);
+});
 
 test("replaceIndicatorLinesRange replaces only the target time window", () => {
   const lines = replaceIndicatorLinesRange(

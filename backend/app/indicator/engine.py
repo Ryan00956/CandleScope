@@ -32,12 +32,21 @@ from app.data_engine.data_manager.models import BarData
 from .base import Indicator
 from .events import IndicatorEvent, IndicatorEventType
 from .registry import registry
+from .script_identity import object_source_hash
 from .types import IndicatorKey, IndicatorResult
 
 logger = logging.getLogger("candlescope.indicator.engine")
 
 # Type alias for event listeners
 EventListener = Callable[[IndicatorEvent], None]
+
+
+def indicator_code_hash(indicator_name: str) -> str:
+    """Hash the implementation file for a registered builtin indicator."""
+    cls = registry.get(indicator_name.upper().strip())
+    if cls is None:
+        return ""
+    return object_source_hash(cls)
 
 
 class IndicatorEngine:
@@ -117,6 +126,7 @@ class IndicatorEngine:
             params,
             market_type=market_type,
             exchange=exchange,
+            code_hash=indicator_code_hash(indicator_name),
         )
 
         # Get or create instance
@@ -165,6 +175,7 @@ class IndicatorEngine:
             params,
             market_type=market_type,
             exchange=exchange,
+            code_hash=indicator_code_hash(indicator_name),
         )
         instance = self._get_or_create(key)
         if instance is None:
@@ -453,6 +464,7 @@ class IndicatorEngine:
                     "symbol": key.symbol,
                     "interval": key.interval,
                     "params": dict(key.params),
+                    "code_hash": key.code_hash,
                     "initialized": inst.is_initialized,
                     "bar_count": inst.bar_count,
                     "refcount": self._refcounts.get(key, 0),

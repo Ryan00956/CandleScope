@@ -11,6 +11,7 @@ import { useDrawingRuntime } from "../features/drawings/useDrawingRuntime";
 import { usePriceScalePrefs } from "../features/settings/priceScalePrefsRuntime";
 import { useWatchlistRuntime } from "../features/watchlist/useWatchlistRuntime";
 import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/useWatchlistFullCacheRuntime";
+import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime";
 import AppProviders from "./AppProviders";
 import AppShell from "./AppShell";
 import "../index.css";
@@ -54,6 +55,7 @@ export default function App() {
     marketData,
     candleUpColor: settings.upColor,
     candleDownColor: settings.downColor,
+    getCurrentVisibleRange: chartSurface.actions.getVisibleRange,
     onIndicatorRemoved: drawings.actions.handleIndicatorRemoved,
   });
   const exportFlow = useExportRuntime({
@@ -88,8 +90,27 @@ export default function App() {
     },
   });
 
-  const { cacheLimits, ephemeralCacheBars } = settings;
-  useCacheLimitsSync({ cacheLimits, ephemeralCacheBars });
+  const {
+    cacheLimits,
+    ephemeralCacheBars,
+    frontendCacheBudgetBytes,
+    sqliteStorageBudgetBytes,
+    storageRowLimitsEnabled,
+  } = settings;
+  useCacheLimitsSync({
+    cacheLimits,
+    ephemeralCacheBars,
+    sqliteStorageBudgetBytes,
+    storageRowLimitsEnabled,
+  });
+  const frontendAutoGcPolicy = useMemo(() => ({
+    maxEstimatedBytes: frontendCacheBudgetBytes,
+  }), [frontendCacheBudgetBytes]);
+  useFrontendAutoGcRuntime({
+    chartDataCacheDiagnostics: marketData.status.cacheDiagnostics,
+    policy: frontendAutoGcPolicy,
+    trimChartDataCacheEntries: marketData.status.trimCacheEntries,
+  });
 
   const indicatorRuntime = useMemo(() => ({
     view: {

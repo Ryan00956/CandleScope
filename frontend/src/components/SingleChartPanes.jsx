@@ -238,6 +238,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const prevCandleDataRef = useRef([]);
   const prevBarcoloredDataRef = useRef([]);
   const prevIndicatorKeyRef = useRef("");
+  const intervalRef = useRef(interval);
   const isSyncingRef = useRef(false);
   const userInteractedRef = useRef(false);
   const hasRestoredRangeRef = useRef(false);
@@ -294,6 +295,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   );
 
   useEffect(() => { dataRef.current = data || []; }, [data]);
+  useEffect(() => { intervalRef.current = interval; }, [interval]);
   useEffect(() => { onNeedMoreLeftRef.current = onNeedMoreLeft; }, [onNeedMoreLeft]);
   useEffect(() => { canLoadMoreLeftRef.current = canLoadMoreLeft; }, [canLoadMoreLeft]);
   useEffect(() => { onVisibleRangeChangeRef.current = onVisibleRangeChange; }, [onVisibleRangeChange]);
@@ -335,7 +337,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       theme,
       customBg,
       timezone,
-      interval,
+      interval: intervalRef.current,
       showTimeScale: true,
     });
     options.layout = {
@@ -392,7 +394,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       mainSeriesRef.current = null;
       indicatorSeriesRef.current = [];
     };
-  }, [customBg, downColor, interval, onCrosshairMove, scheduleVisibleRangeSave, theme, timezone, upColor]);
+  }, [customBg, downColor, onCrosshairMove, scheduleVisibleRangeSave, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;

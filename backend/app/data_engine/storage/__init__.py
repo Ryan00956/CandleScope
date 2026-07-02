@@ -6,6 +6,7 @@ from .klines_repo import (
     KlinesRepoAdapter,
     dataframe_to_rows,
     delete_klines,
+    delete_oldest_klines_batch,
     delete_oldest_klines,
     fetch_before,
     get_bounds,
@@ -15,6 +16,8 @@ from .klines_repo import (
     query_klines,
     scan_klines_gaps,
     upsert_klines,
+    vacuum_database,
+    wal_checkpoint_truncate,
 )
 from .gap_ledger import GapLedger
 
@@ -26,6 +29,7 @@ __all__ = [
     "KlinesRepoAdapter",
     "dataframe_to_rows",
     "delete_klines",
+    "delete_oldest_klines_batch",
     "delete_oldest_klines",
     "fetch_before",
     "get_bounds",
@@ -35,5 +39,7 @@ __all__ = [
     "query_klines",
     "scan_klines_gaps",
     "upsert_klines",
+    "vacuum_database",
+    "wal_checkpoint_truncate",
     "GapLedger",
 ]

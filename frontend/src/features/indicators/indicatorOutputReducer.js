@@ -1,7 +1,7 @@
 import {
   mergeIndicatorItems,
   replaceIndicatorItemsRange,
-} from "./indicatorPayloadRuntime";
+} from "./indicatorPayloadRuntime.js";
 
 const OUTPUT_KEYS = ["markers", "fills", "hlines", "bgcolors", "barcolors", "signals"];
 
@@ -99,9 +99,36 @@ function replaceIndicatorRangeOutputs(state, indicatorId, normalized, range) {
   return next;
 }
 
+function removeIndicatorOutputs(state, indicatorId) {
+  const next = { ...state };
+  for (const key of OUTPUT_KEYS) {
+    next[key] = withoutIndicator(state[key], indicatorId);
+  }
+  const { [indicatorId]: _removed, ...paramSchemas } = state.paramSchemas || {};
+  next.paramSchemas = paramSchemas;
+  return next;
+}
+
 function mergeParamSchemas(state, schemas) {
   if (!schemas || Object.keys(schemas).length === 0) return state.paramSchemas;
   return { ...state.paramSchemas, ...schemas };
+}
+
+function hydrateCachedOutputs(state, entries = []) {
+  let next = {
+    ...createIndicatorOutputState(),
+    paramSchemas: state.paramSchemas,
+  };
+  const schemas = {};
+  for (const entry of entries) {
+    if (!entry?.indicatorId || !entry.normalized) continue;
+    next = replaceIndicatorOutputs(next, entry.indicatorId, entry.normalized);
+    if (entry.schema?.length > 0) {
+      schemas[entry.indicatorId] = entry.schema;
+    }
+  }
+  next.paramSchemas = mergeParamSchemas(next, schemas);
+  return next;
 }
 
 export function indicatorOutputReducer(state, action) {
@@ -111,6 +138,8 @@ export function indicatorOutputReducer(state, action) {
         ...createIndicatorOutputState(),
         paramSchemas: state.paramSchemas,
       };
+    case "hydrate-cache":
+      return hydrateCachedOutputs(state, action.entries);
     case "snapshot": {
       const next = replaceIndicatorOutputs(state, action.indicatorId, action.normalized);
       if (action.schema?.length > 0) {
@@ -127,6 +156,8 @@ export function indicatorOutputReducer(state, action) {
         action.normalized,
         action.range,
       );
+    case "remove-indicator":
+      return removeIndicatorOutputs(state, action.indicatorId);
     case "compute-results": {
       const processedIds = new Set(action.processedIds || []);
       return {

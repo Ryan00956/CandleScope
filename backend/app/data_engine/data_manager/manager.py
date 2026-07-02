@@ -85,10 +85,13 @@ from app.core.executors import run_storage
 from app.data_engine.interval_policy import parse_interval_ms
 
 from .aggregator_bridge import AggregatorBridge
+from .auto_gc import AutoGcPolicy, auto_gc_loop, run_auto_gc_once
 from .cache import BarCache
 from .config import DataManagerConfig
 from .coordinator import IngestionFactory, StreamCoordinator
 from .event_bus import DataEventBus, MiddlewareHook
+from .cache_behavior import CacheAccessEvent, CacheBehaviorStore
+from .gc import plan_memory_gc, run_memory_gc
 from .daily_open import DailyOpenService
 from .models import (
     BarData,
@@ -107,6 +110,8 @@ from .price_cache import PriceSnapshot, PriceSnapshotCache, normalize_price_key,
 from .query import BackfillTrigger, QueryEngine
 from .backfill_coordinator import priority_for_reason
 from .retention import RetentionService
+from .runtime_pressure import disk_pressure_snapshot, process_memory_snapshot
+from .storage_intents import StorageIntentRegistry, WILDCARD_INTERVAL
 from .stream_policy import StreamEnsurePlanner
 from .warm_start import AggregatorWarmStartService
 
@@ -180,6 +185,9 @@ class DataManager:
         self._started = False
         self._ttl_task: asyncio.Task | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._auto_gc_task: asyncio.Task | None = None
+        self._cache_access_loop: asyncio.AbstractEventLoop | None = None
+        self._cache_access_tasks: set[asyncio.Task] = set()
         self._backfill_trigger: BackfillTrigger | None = None
 
         # ── BarAggregator (L1–L5) ───────────────────────────
@@ -209,9 +217,15 @@ class DataManager:
             backfill_trigger_provider=lambda: self._backfill_trigger,
         )
         self.price_cache = PriceSnapshotCache()
+        self.storage_intents = StorageIntentRegistry()
+        self.cache_behavior = CacheBehaviorStore()
         self._subscriptions: Any = None
         self._price_stream_controller: PriceStreamControllerLike | None = None
         self._stream_leases: dict[SeriesKey, _StreamLease] = {}
+        self._memory_gc_last_report: dict[str, Any] | None = None
+        self._storage_gc_last_report: dict[str, Any] | None = None
+        self._auto_gc_last_report: dict[str, Any] | None = None
+        self._auto_gc_policy = AutoGcPolicy.from_env()
 
         # Wire BarAggregator output → DataManager → Cache + EventBus
         self.bar_aggregator.publisher.on_bar_event(self.aggregator_bridge.on_bar_event)
@@ -390,6 +404,7 @@ class DataManager:
         if self._started:
             return
         self._started = True
+        self._cache_access_loop = asyncio.get_running_loop()
         logger.info("DataManager starting...")
 
         # Start BarAggregator
@@ -410,6 +425,11 @@ class DataManager:
 
         # Ephemeral trim loop (every 30 min)
         self._cleanup_task = asyncio.create_task(self.retention.ephemeral_trim_loop())
+        if self._auto_gc_policy.enabled:
+            self._auto_gc_task = asyncio.create_task(
+                auto_gc_loop(self, self._auto_gc_policy),
+                name="data-manager-auto-gc",
+            )
 
         logger.info("DataManager started")
 
@@ -435,6 +455,20 @@ class DataManager:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
+            self._cleanup_task = None
+
+        if self._auto_gc_task is not None:
+            self._auto_gc_task.cancel()
+            try:
+                await self._auto_gc_task
+            except asyncio.CancelledError:
+                pass
+            self._auto_gc_task = None
+
+        if self._cache_access_tasks:
+            await asyncio.gather(*self._cache_access_tasks, return_exceptions=True)
+            self._cache_access_tasks.clear()
+        self._cache_access_loop = None
 
         # Stop coordinator (stops ingestion streams)
         await self.coordinator.shutdown()
@@ -481,6 +515,14 @@ class DataManager:
             ``QueryResult`` with bars sorted ascending and metadata.
         """
         market_type = self._normalize_market_type(market_type)
+        self._record_cache_access_deferred(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            action="range-query" if start_ms is not None or end_ms is not None else "history-query",
+            source=backfill_requester,
+        )
         result = self.query_engine.query(
             symbol=symbol,
             interval=interval,
@@ -510,6 +552,14 @@ class DataManager:
     ) -> QueryResult:
         """Get the latest N bars.  Shorthand for ``query(limit=N)``."""
         market_type = self._normalize_market_type(market_type)
+        self._record_cache_access_deferred(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            action="history-query",
+            source=backfill_requester,
+        )
         result = self.query_engine.query_latest(
             symbol,
             interval,
@@ -534,6 +584,14 @@ class DataManager:
     ) -> QueryResult:
         """Get bars before a timestamp (for pagination / load-more)."""
         market_type = self._normalize_market_type(market_type)
+        self._record_cache_access_deferred(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            action="query-before",
+            source=backfill_requester,
+        )
         result = self.query_engine.query_before(
             symbol,
             interval,
@@ -874,24 +932,56 @@ class DataManager:
             market_type=plan.requested.market_type,
         )
 
-        self._register_stream_leases(
-            self._stream_plan_lease_keys(plan),
-            consumer_id=self._stream_consumer_id(
-                consumer_id,
-                focus_scope=focus_scope,
-                subscription_tier=subscription_tier,
-            ),
-        )
-
-        await self.warm_start.seed_if_needed(
-            plan.requested.symbol,
-            plan.requested.interval,
-            exchange=plan.requested.exchange,
-            market_type=plan.requested.market_type,
-            had_stream=had_stream,
+        lease_keys = self._stream_plan_lease_keys(plan)
+        stream_consumer = self._stream_consumer_id(
+            consumer_id,
             focus_scope=focus_scope,
             subscription_tier=subscription_tier,
         )
+        self._register_stream_leases(
+            lease_keys,
+            consumer_id=stream_consumer,
+        )
+        self._register_stream_storage_intents(
+            lease_keys,
+            consumer_id=stream_consumer,
+            focus_scope=focus_scope,
+            subscription_tier=subscription_tier,
+        )
+
+        try:
+            await self.warm_start.seed_if_needed(
+                plan.requested.symbol,
+                plan.requested.interval,
+                exchange=plan.requested.exchange,
+                market_type=plan.requested.market_type,
+                had_stream=had_stream,
+                focus_scope=focus_scope,
+                subscription_tier=subscription_tier,
+            )
+        except Exception:
+            empty_keys = self._release_stream_leases(
+                lease_keys,
+                consumer_id=stream_consumer,
+            )
+            self._release_stream_storage_intents(
+                lease_keys,
+                consumer_id=stream_consumer,
+            )
+            for key in empty_keys:
+                await self.coordinator.stop_stream(
+                    key.symbol,
+                    key.interval,
+                    exchange=key.exchange,
+                    market_type=key.market_type,
+                )
+                self.bar_aggregator.remove_target(
+                    key.symbol,
+                    key.interval,
+                    exchange=key.exchange,
+                    market_type=key.market_type,
+                )
+            raise
 
         return info
 
@@ -912,6 +1002,19 @@ class DataManager:
         registered consumer for that stream has released it.
         """
         market_type = self._normalize_market_type(market_type)
+        self._record_cache_access_deferred(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=market_type,
+            action=(
+                "alert-stream" if str(subscription_tier or "").lower() == "alerts"
+                else "indicator-range" if str(subscription_tier or "").lower() == "indicator"
+                else "stream"
+            ),
+            source=subscription_tier or focus_scope,
+            detail={"focus_scope": focus_scope, "subscription_tier": subscription_tier},
+        )
         plan = self.stream_policy.plan(
             symbol,
             interval,
@@ -924,6 +1027,10 @@ class DataManager:
             subscription_tier=subscription_tier,
         )
         empty_keys = self._release_stream_leases(
+            self._stream_plan_lease_keys(plan),
+            consumer_id=consumer,
+        )
+        self._release_stream_storage_intents(
             self._stream_plan_lease_keys(plan),
             consumer_id=consumer,
         )
@@ -1011,6 +1118,57 @@ class DataManager:
                 empty_keys.append(key)
         return empty_keys
 
+    def _register_stream_storage_intents(
+        self,
+        keys: tuple[SeriesKey, ...],
+        *,
+        consumer_id: str,
+        focus_scope: str,
+        subscription_tier: str | None,
+    ) -> None:
+        priority, frontend_cache_allowed = self._storage_intent_policy(
+            focus_scope=focus_scope,
+            subscription_tier=subscription_tier,
+        )
+        for key in keys:
+            self.storage_intents.register(
+                key,
+                source=f"stream:{consumer_id}",
+                priority=priority,
+                storage_allowed=True,
+                frontend_cache_allowed=frontend_cache_allowed,
+                stream_required=True,
+                detail={
+                    "focus_scope": focus_scope,
+                    "subscription_tier": subscription_tier,
+                },
+            )
+
+    def _release_stream_storage_intents(
+        self,
+        keys: tuple[SeriesKey, ...],
+        *,
+        consumer_id: str,
+    ) -> None:
+        for key in keys:
+            self.storage_intents.unregister(key, source=f"stream:{consumer_id}")
+
+    @staticmethod
+    def _storage_intent_policy(
+        *,
+        focus_scope: str,
+        subscription_tier: str | None,
+    ) -> tuple[str, bool]:
+        tier = str(subscription_tier or "").strip().lower()
+        scope = str(focus_scope or "").strip().lower()
+        if tier in {"full", "alerts"}:
+            return "strong", tier == "full"
+        if tier == "indicator":
+            return "normal", False
+        if scope in {"foreground", "websocket"}:
+            return "normal", True
+        return "weak", False
+
     # ═══════════════════════════════════════════════════════════
     #  Price Streams
     # ═══════════════════════════════════════════════════════════
@@ -1037,6 +1195,28 @@ class DataManager:
             normalized_symbol,
             exchange=normalized_exchange,
             market_type=normalized_market,
+        )
+        self._record_cache_access_deferred(
+            normalized_symbol,
+            WILDCARD_INTERVAL,
+            exchange=normalized_exchange,
+            market_type=normalized_market,
+            action="price-stream",
+            source="price",
+        )
+        self.storage_intents.register(
+            SeriesKey(
+                normalized_symbol,
+                WILDCARD_INTERVAL,
+                exchange=normalized_exchange,
+                market_type=normalized_market,
+            ),
+            source=f"price:{normalized_exchange}:{normalized_market}:{normalized_symbol}",
+            priority="weak",
+            storage_allowed=True,
+            frontend_cache_allowed=False,
+            stream_required=False,
+            detail={"stream_type": "price"},
         )
         await self._ensure_price_stream_controller(
             normalized_symbol,
@@ -1077,6 +1257,15 @@ class DataManager:
             normalized_symbol,
             exchange=normalized_exchange,
             market_type=normalized_market,
+        )
+        self.storage_intents.unregister(
+            SeriesKey(
+                normalized_symbol,
+                WILDCARD_INTERVAL,
+                exchange=normalized_exchange,
+                market_type=normalized_market,
+            ),
+            source=f"price:{normalized_exchange}:{normalized_market}:{normalized_symbol}",
         )
         await self._stop_price_stream_controller(
             normalized_symbol,
@@ -1202,6 +1391,265 @@ class DataManager:
     def cache_clear(self) -> None:
         """Clear all cached data."""
         self.cache.clear()
+
+    def plan_memory_gc(
+        self,
+        policy: dict[str, Any] | None = None,
+        *,
+        scoring: str = "smart",
+    ) -> dict[str, Any]:
+        """Return a dry-run plan for DataManager memory cache cleanup."""
+        report = plan_memory_gc(
+            self,
+            policy,
+            behavior_heat=self.cache_behavior.heat_map(),
+            runtime_pressure=self.runtime_pressure_snapshot(),
+            scoring=scoring,
+        )
+        self._memory_gc_last_report = report
+        return report
+
+    def run_memory_gc(self, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Execute DataManager memory cache cleanup and return a report."""
+        report = run_memory_gc(self, policy)
+        self._memory_gc_last_report = report
+        return report
+
+    async def run_auto_gc(self, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Execute one conservative automatic GC pass."""
+        report = await run_auto_gc_once(self, policy or self._auto_gc_policy)
+        self._auto_gc_last_report = report
+        self._memory_gc_last_report = report.get("memory") or self._memory_gc_last_report
+        self._storage_gc_last_report = report.get("storage") or self._storage_gc_last_report
+        return report
+
+    def auto_gc_snapshot(self) -> dict[str, Any]:
+        """Return automatic GC configuration and last execution report."""
+        return {
+            "owner": "auto-gc",
+            "policy": self._auto_gc_policy.to_dict(),
+            "last_report": self._auto_gc_last_report or {
+                "mode": "not-run",
+                "status": "idle",
+            },
+        }
+
+    def plan_storage_gc(
+        self,
+        *,
+        db_limits: dict[str, int] | None = None,
+        sqlite_budget_bytes: int | None = None,
+        storage_row_limits_enabled: bool | None = None,
+        file_snapshot: dict[str, Any] | None = None,
+        scoring: str = "smart",
+    ) -> dict[str, Any]:
+        """Return a dry-run plan for SQLite retention cleanup."""
+        report = self.retention.plan_storage_gc(
+            db_limits=db_limits,
+            sqlite_budget_bytes=sqlite_budget_bytes,
+            storage_row_limits_enabled=storage_row_limits_enabled,
+            protected_keys=self._protected_storage_keys(),
+            storage_intents=self.storage_intents,
+            behavior_heat=self.cache_behavior.heat_map(),
+            runtime_pressure=self.runtime_pressure_snapshot(file_snapshot=file_snapshot),
+            scoring=scoring,
+            file_snapshot=file_snapshot,
+        )
+        self._storage_gc_last_report = report
+        return report
+
+    def register_storage_intent(
+        self,
+        symbol: str,
+        interval: str = WILDCARD_INTERVAL,
+        *,
+        source: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        priority: str = "weak",
+        storage_allowed: bool = True,
+        frontend_cache_allowed: bool = False,
+        stream_required: bool = False,
+        keep_rows: int | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Register a retention intent for a stored K-line series or symbol."""
+        intent = self.storage_intents.register(
+            SeriesKey(
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=self._normalize_market_type(market_type),
+            ),
+            source=source,
+            priority=priority,
+            storage_allowed=storage_allowed,
+            frontend_cache_allowed=frontend_cache_allowed,
+            stream_required=stream_required,
+            keep_rows=keep_rows,
+            detail=detail,
+        )
+        return intent.to_dict()
+
+    def unregister_storage_intent(
+        self,
+        symbol: str,
+        interval: str = WILDCARD_INTERVAL,
+        *,
+        source: str,
+        exchange: str = "binance",
+        market_type: str = "spot",
+    ) -> None:
+        """Remove one retention intent."""
+        self.storage_intents.unregister(
+            SeriesKey(
+                symbol,
+                interval,
+                exchange=exchange,
+                market_type=self._normalize_market_type(market_type),
+            ),
+            source=source,
+        )
+
+    def unregister_storage_intents_for_source(self, source_prefix: str) -> int:
+        """Remove all retention intents whose source starts with a prefix."""
+        return self.storage_intents.unregister_source_prefix(source_prefix)
+
+    def storage_intent_snapshot(self) -> dict[str, Any]:
+        """Return diagnostic storage retention intents."""
+        return self.storage_intents.snapshot()
+
+    def _record_cache_access_deferred(
+        self,
+        symbol: str,
+        interval: str,
+        **kwargs: Any,
+    ) -> None:
+        """Record cache behavior off the caller's hot path when the loop is running."""
+        loop = self._cache_access_loop
+        if loop is None or loop.is_closed():
+            self.record_cache_access(symbol, interval, **kwargs)
+            return
+
+        def _submit() -> None:
+            task = asyncio.create_task(run_storage(self.record_cache_access, symbol, interval, **kwargs))
+            self._cache_access_tasks.add(task)
+
+            def _done(done_task: asyncio.Task) -> None:
+                self._cache_access_tasks.discard(done_task)
+                try:
+                    done_task.result()
+                except Exception as exc:
+                    logger.debug("deferred cache access recording failed: %s", exc)
+
+            task.add_done_callback(_done)
+
+        try:
+            loop.call_soon_threadsafe(_submit)
+        except RuntimeError:
+            self.record_cache_access(symbol, interval, **kwargs)
+
+    def record_cache_access_deferred(
+        self,
+        symbol: str,
+        interval: str,
+        **kwargs: Any,
+    ) -> None:
+        """Record one cache access signal without blocking the caller."""
+        self._record_cache_access_deferred(symbol, interval, **kwargs)
+
+    def record_cache_access(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        exchange: str = "binance",
+        market_type: str = "spot",
+        action: str = "access",
+        source: str = "backend",
+        weight: float | None = None,
+        detail: dict[str, Any] | None = None,
+        occurred_at_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Persist one cache access signal for future GC scoring."""
+        key = SeriesKey(
+            symbol,
+            interval,
+            exchange=exchange,
+            market_type=self._normalize_market_type(market_type),
+        )
+        try:
+            return self.cache_behavior.record(CacheAccessEvent(
+                key=key,
+                action=action,
+                source=source,
+                weight=weight,
+                detail=detail,
+                occurred_at_ms=occurred_at_ms,
+            ))
+        except Exception as exc:
+            logger.debug("cache access recording failed for %s: %s", key, exc)
+            return {}
+
+    def cache_behavior_snapshot(self, *, limit: int = 50) -> dict[str, Any]:
+        """Return learned cache behavior heat for diagnostics."""
+        try:
+            return self.cache_behavior.snapshot(limit=limit)
+        except Exception as exc:
+            return {
+                "owner": "cache-behavior",
+                "available": False,
+                "error": str(exc),
+                "series": [],
+            }
+
+    def runtime_pressure_snapshot(
+        self,
+        *,
+        file_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return process and storage pressure for GC scoring."""
+        storage_path = None
+        if file_snapshot:
+            storage_path = file_snapshot.get("path")
+        storage_path = storage_path or getattr(getattr(self.query_engine, "storage", None), "db_path", None)
+        if storage_path is None:
+            from app.core.config import KLINES_DB_PATH
+            storage_path = KLINES_DB_PATH
+        return {
+            "processMemory": process_memory_snapshot(),
+            "disk": disk_pressure_snapshot(storage_path),
+        }
+
+    async def run_storage_gc(
+        self,
+        *,
+        db_limits: dict[str, int] | None = None,
+        sqlite_budget_bytes: int | None = None,
+        storage_row_limits_enabled: bool | None = None,
+        file_snapshot: dict[str, Any] | None = None,
+        batch_size: int = 10_000,
+    ) -> dict[str, Any]:
+        """Execute SQLite retention cleanup using a fresh dry-run plan."""
+        plan = await run_storage(
+            self.plan_storage_gc,
+            db_limits=db_limits,
+            sqlite_budget_bytes=sqlite_budget_bytes,
+            storage_row_limits_enabled=storage_row_limits_enabled,
+            file_snapshot=file_snapshot,
+        )
+        report = await self.maintenance.run_storage_gc(
+            plan=plan,
+            batch_size=batch_size,
+        )
+        self._storage_gc_last_report = report
+        return report
+
+    async def vacuum_storage(self) -> dict[str, Any]:
+        """Run SQLite VACUUM through the maintenance lock."""
+        report = await self.maintenance.vacuum_storage()
+        self._storage_gc_last_report = report
+        return report
 
     # ═══════════════════════════════════════════════════════════
     #  Maintenance Facade
@@ -1357,7 +1805,19 @@ class DataManager:
             "coordinator": self.coordinator.snapshot(),
             "bar_aggregator": self.bar_aggregator.snapshot(),
             "retention": self.retention.snapshot(),
+            "storage_intents": self.storage_intents.snapshot(),
+            "behavior_heat": self.cache_behavior_snapshot(),
+            "runtimePressure": self.runtime_pressure_snapshot(),
             "price_cache": self.price_cache.diagnostics(),
+            "auto_gc": self.auto_gc_snapshot(),
+            "memory_gc": self._memory_gc_last_report or {
+                "mode": "not-run",
+                "owner": "data-manager-memory",
+            },
+            "storage_gc": self._storage_gc_last_report or {
+                "mode": "not-run",
+                "owner": "sqlite-storage",
+            },
         }
 
     @property
@@ -1368,6 +1828,17 @@ class DataManager:
     @staticmethod
     def _normalize_market_type(market_type: str) -> str:
         return (market_type or "spot").strip().lower()
+
+    def _protected_storage_keys(self) -> set[SeriesKey]:
+        keys: set[SeriesKey] = set()
+        keys.update(self.event_bus.get_all_subscribed_keys())
+        keys.update(self._stream_leases.keys())
+        for info in self.coordinator.get_all_streams():
+            if info.status in (StreamStatus.ACTIVE, StreamStatus.STARTING):
+                keys.add(info.key)
+        for exchange, market_type, symbol, interval in self.bar_aggregator.get_targets():
+            keys.add(SeriesKey(symbol, interval, exchange=exchange, market_type=market_type))
+        return keys
 
     # ═══════════════════════════════════════════════════════════
     #  Async Context Manager
@@ -1405,6 +1876,8 @@ class DataManager:
         self,
         db_limits: dict[str, int] | None = None,
         ephemeral_bars: int | None = None,
+        sqlite_budget_bytes: int | None = None,
+        storage_row_limits_enabled: bool | None = None,
     ) -> None:
         """Update data retention limits from frontend settings.
 
@@ -1415,6 +1888,8 @@ class DataManager:
         self.retention.update_limits(
             db_limits=db_limits,
             ephemeral_bars=ephemeral_bars,
+            sqlite_budget_bytes=sqlite_budget_bytes,
+            storage_row_limits_enabled=storage_row_limits_enabled,
         )
 
     def retention_snapshot(self) -> dict:

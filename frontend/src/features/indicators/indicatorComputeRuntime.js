@@ -4,7 +4,7 @@ import {
   normalizeIndicatorPayload,
   normalizeParamSchema,
   stringSignature,
-} from "./indicatorPayloadRuntime";
+} from "./indicatorPayloadRuntime.js";
 
 export const INDICATOR_DATA_DEBOUNCE_MS = 500;
 export const PROVISIONAL_INDICATOR_DELAY_MS = 1200;
@@ -101,6 +101,7 @@ export function collectIndicatorComputeResults(results) {
     processedResults.push({
       id,
       mappedLines: normalized.lines,
+      normalized,
       visible,
       error: null,
     });

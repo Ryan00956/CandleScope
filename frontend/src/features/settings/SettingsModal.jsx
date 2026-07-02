@@ -14,6 +14,8 @@ export default function SettingsModal({
     currentMarketType = 'spot',
     currentExchange = 'binance',
     watchlists = [],
+    chartDataCacheDiagnostics = null,
+    trimChartDataCacheEntries = null,
 }) {
     const [activeCategory, setActiveCategory] = useState('appearance');
   const settingsRuntime = useSettingsRuntime({
@@ -24,6 +26,8 @@ export default function SettingsModal({
         currentMarketType,
         currentExchange,
         watchlists,
+        chartDataCacheDiagnostics,
+        trimChartDataCacheEntries,
     });
   const { view, actions } = settingsRuntime;
 

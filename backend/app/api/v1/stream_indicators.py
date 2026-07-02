@@ -8,9 +8,9 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.api.v1.stream_indicator_payloads import (
-    _handle_indicator_range_request,
     _indicator_event_to_ws_message,
     _release_pyne_incremental_meta,
+    confirmed_indicator_seed_bars,
 )
 from app.api.v1.stream_pyne_subscriptions import handle_pyne_indicator_subscribe
 from app.api.v1.stream_utils import (
@@ -25,7 +25,6 @@ from app.core.runtime_metrics import ws_runtime_metrics
 from app.indicator import registry as indicator_registry
 from app.indicator.events import IndicatorEvent
 from app.indicator.serialization import (
-    build_indicator_snapshot_payload,
     build_ws_error_payload,
 )
 
@@ -147,15 +146,6 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
                     send_json=_safe_send_json,
                     msg=msg,
                 )
-            elif action in {"load_range", "load_before"}:
-                await _handle_indicator_range_request(
-                    dm=dm,
-                    client_meta=client_meta,
-                    client_id=str(msg.get("clientId") or "").strip(),
-                    action=action,
-                    msg=msg,
-                    send_json=_safe_send_json,
-                )
             elif action == "unsubscribe":
                 client_id = str(msg.get("clientId") or "").strip()
                 await _unsubscribe_indicator_client(
@@ -175,7 +165,7 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
                 await _safe_send_json(build_ws_error_payload(
                     "UNKNOWN_ACTION",
                     f"Unknown action: {action}",
-                    hint="指标 WS 当前支持 subscribe、unsubscribe、load_range、load_before。",
+                    hint="指标 WS 当前只支持 subscribe、unsubscribe 和 ping；历史区间请使用 HTTP /indicators/range。",
                 ))
 
     except WebSocketDisconnect:
@@ -230,7 +220,7 @@ async def _handle_indicator_subscribe(
     indicator_name = str(msg.get("name") or msg.get("indicator") or "").upper().strip()
     params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
     history_limit = int(msg.get("historyLimit") or 500)
-    history_limit = min(max(history_limit, 1), 5000)
+    history_limit = min(max(history_limit, 1), max(int(config.PYNE_MAX_BARS), 1))
     kind = str(msg.get("kind") or "").strip().lower()
     script = msg.get("script") if isinstance(msg.get("script"), str) else ""
     custom_id = str(
@@ -355,13 +345,14 @@ async def _handle_indicator_subscribe(
             market_type=market_type,
         )
 
+        seed_bars = confirmed_indicator_seed_bars(query_result.bars)
         key, result = indicator_engine.subscribe(
             symbol=symbol,
             interval=interval,
             market_type=market_type,
             indicator_name=indicator_name,
             params=params,
-            bars=query_result.bars,
+            bars=seed_bars,
             exchange=exchange,
         )
         subscribed[client_id] = key
@@ -388,17 +379,19 @@ async def _handle_indicator_subscribe(
             })
         raise
 
-    await send_json(build_indicator_snapshot_payload(
-        client_id=client_id,
-        indicator_id=key.uid,
-        exchange=key.exchange,
-        symbol=symbol,
-        interval=interval,
-        market_type=market_type,
-        name=indicator_name,
-        params=params,
-        result=result,
-    ))
+    await send_json({
+        "type": "indicator.subscribed",
+        "clientId": client_id,
+        "indicatorId": key.uid,
+        "kind": "builtin",
+        "exchange": key.exchange,
+        "symbol": symbol,
+        "interval": interval,
+        "market_type": market_type,
+        "name": indicator_name,
+        "seeded": result is not None,
+        "seedBars": len(seed_bars),
+    })
 
 
 async def _unsubscribe_indicator_client(

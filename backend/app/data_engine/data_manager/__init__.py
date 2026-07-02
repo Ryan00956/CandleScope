@@ -39,6 +39,7 @@ from .models import (
     SubscriptionHandle,
 )
 from .maintenance import MaintenanceBusyError, MaintenanceUnavailableError
+from .storage_intents import StorageIntentRegistry
 from .subscriptions import SubscriptionTier
 from .manager import DataManager
 
@@ -68,5 +69,6 @@ __all__ = [
     # Exceptions / enums
     "MaintenanceBusyError",
     "MaintenanceUnavailableError",
+    "StorageIntentRegistry",
     "SubscriptionTier",
 ]

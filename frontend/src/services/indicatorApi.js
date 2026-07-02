@@ -108,6 +108,45 @@ export async function computeIndicator({ mode, securityMode, name, script, ohlcv
   });
 }
 
+/** Compute server-hosted indicator output for a K-line history range. */
+export async function computeIndicatorRange({
+  clientId,
+  kind,
+  securityMode,
+  name,
+  customId,
+  script,
+  params,
+  symbol,
+  interval,
+  marketType,
+  exchange,
+  start,
+  end,
+  reason,
+}) {
+  return request(`${API_BASE}/indicators/range`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      clientId,
+      kind,
+      exchange,
+      marketType,
+      symbol,
+      interval,
+      name,
+      customId,
+      script,
+      securityMode,
+      params: params || {},
+      start,
+      end,
+      reason,
+    }),
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  Custom indicator endpoints (placeholder for future)
 // ═══════════════════════════════════════════════════════════════

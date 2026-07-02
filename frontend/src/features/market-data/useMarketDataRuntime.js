@@ -64,6 +64,8 @@ export function useMarketDataRuntime({
     setCache,
     hasCache,
     clearCache,
+    getCacheDiagnostics,
+    trimCacheEntries,
     mergeCacheData,
     patchCacheTick,
     replaceChartData,
@@ -299,6 +301,8 @@ export function useMarketDataRuntime({
       activeChartReady,
       canLoadMoreLeft: hasMoreLeft && !loadingMoreLeft && !loading,
       barCount: chartData.length,
+      cacheDiagnostics: getCacheDiagnostics,
+      trimCacheEntries,
       indicatorRangeRequests,
     },
   };

@@ -18,6 +18,10 @@ import {
   resolveSeriesReadyComputeDelay,
   shouldDeferIndicatorCompute,
 } from "./indicatorComputeRuntime";
+import {
+  buildIndicatorCacheContext,
+  cacheIndicatorSnapshot,
+} from "./indicatorResultCacheStore";
 
 export function useIndicatorComputeController({
   activeIndicators,
@@ -137,6 +141,19 @@ export function useIndicatorComputeController({
         allSignals,
         newParamSchemas,
       } = collectIndicatorComputeResults(results);
+      const indicatorById = new Map(indicators.map((indicator) => [indicator.id, indicator]));
+      const cacheContext = buildIndicatorCacheContext({
+        candleDownColor: candleDownColorRef.current,
+        candleUpColor: candleUpColorRef.current,
+        exchange,
+        interval,
+        marketType,
+        symbol,
+      });
+      for (const { id, normalized, error } of processedResults) {
+        if (error || !normalized) continue;
+        cacheIndicatorSnapshot(indicatorById.get(id), cacheContext, normalized, newParamSchemas[id]);
+      }
 
       startTransition(() => {
         outputDispatch({

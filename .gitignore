@@ -208,6 +208,10 @@ backend/data/*.db-wal
 backend/data/*.sqlite*
 backend/data/custom_indicators.json
 backend/data/custom_indicators.json.tmp
+backend/data/cache_gc_audit.jsonl
+
+# CandleScope generated perf/test artifacts
+docs/perf-baselines/
 
 # CandleScope local-only agent state and construction notes
 .codex

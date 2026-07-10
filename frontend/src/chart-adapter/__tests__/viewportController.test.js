@@ -55,6 +55,60 @@ test("interaction lock queues the highest priority intent", () => {
   assert.deepEqual(calls, [["setVisibleLogicalRange", { from: 13, to: 23 }]]);
 });
 
+test("resetSession drops interaction state and queued intents between datasets", () => {
+  const { chart, calls } = createChart();
+  let unlock;
+  const clearedTimers = [];
+  const controller = new ViewportController({
+    chartProvider: () => chart,
+    setTimer: (fn) => {
+      unlock = fn;
+      return 7;
+    },
+    clearTimer: (timer) => clearedTimers.push(timer),
+  });
+
+  assert.equal(controller.fitOnce("shared-key"), true);
+  controller.markUserInteracting();
+  assert.equal(controller.applySessionRestore({
+    mode: "logical",
+    logicalRange: { from: 30, to: 40 },
+  }, { sessionKey: "old-dataset" }), false);
+  assert.equal(controller.isLocked(), true);
+
+  controller.resetSession();
+
+  assert.deepEqual(clearedTimers, [7]);
+  assert.equal(controller.isLocked(), false);
+  assert.equal(controller.pendingIntent, null);
+  assert.equal(controller.unlockTimer, null);
+
+  // Even if a test invokes the captured callback after clearTimer, the old
+  // queued restore has already been discarded and cannot affect the dataset.
+  unlock();
+  assert.deepEqual(calls, [["fitContent"]]);
+
+  // Fit state is session-local, so the same key is eligible in the new data
+  // session instead of inheriting the previous dataset's completed fit.
+  assert.equal(controller.fitOnce("shared-key"), true);
+  assert.deepEqual(calls, [["fitContent"], ["fitContent"]]);
+});
+
+test("transient logical-range failures are contained during dataset replacement", () => {
+  const chart = {
+    timeScale: () => ({
+      getVisibleLogicalRange() {
+        throw new Error("Value is null");
+      },
+    }),
+  };
+  const controller = new ViewportController({ chartProvider: () => chart });
+
+  assert.equal(controller.captureAnchor([{ time: 100 }]), null);
+  assert.equal(controller.applyLogicalShiftNow(1), false);
+  assert.equal(controller.queueShift(1), false);
+});
+
 test("applySessionRestore applies spacing and time range", () => {
   const { chart, calls } = createChart();
   const controller = new ViewportController({ chartProvider: () => chart });

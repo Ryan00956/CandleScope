@@ -321,16 +321,15 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   useEffect(() => { onVisibleRangeChangeRef.current = onVisibleRangeChange; }, [onVisibleRangeChange]);
 
   const captureVisibleRange = useCallback(() => {
-    const chart = chartRef.current;
-    if (!chart) return null;
-    const timeScale = chart.timeScale();
+    const visibleRange = chartAdapter.getVisibleRange();
+    if (!visibleRange) return null;
     return buildVisibleRangeSnapshot({
-      barSpacing: timeScale.options().barSpacing,
-      logicalRange: timeScale.getVisibleLogicalRange(),
-      rightOffset: timeScale.scrollPosition(),
-      timeRange: timeScale.getVisibleRange(),
+      barSpacing: visibleRange.barSpacing,
+      logicalRange: visibleRange.logical,
+      rightOffset: visibleRange.scrollPosition,
+      timeRange: visibleRange.time,
     });
-  }, []);
+  }, [chartAdapter]);
 
   const publishViewportRangeChange = useCallback((visibleRange = null) => {
     const range = visibleRange || captureVisibleRange();
@@ -422,15 +421,24 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
 
     return () => {
-      chart.unsubscribeCrosshairMove(handleCrosshairMove);
-      chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
-      onCrosshairMove?.(null);
-      chart.remove();
+      // Stop exposing the old chart before touching the underlying LWC
+      // instance.  During interval/session transitions its API object can
+      // remain reachable briefly even though its internal time points have
+      // already been cleared.
       chartRef.current = null;
-      viewportControllerRef.current?.dispose();
-      viewportControllerRef.current = null;
       mainSeriesRef.current = null;
       indicatorSeriesRef.current = [];
+      const viewportController = viewportControllerRef.current;
+      viewportControllerRef.current = null;
+      viewportController?.dispose();
+      try {
+        chart.unsubscribeCrosshairMove(handleCrosshairMove);
+        chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
+      } catch { /* chart may already be disposing */ }
+      onCrosshairMove?.(null);
+      try {
+        chart.remove();
+      } catch { /* best-effort teardown */ }
     };
   }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishViewportRangeChange, scheduleVisibleRangeSave, theme, timezone, upColor]);
 
@@ -533,7 +541,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     hasRestoredRangeRef.current = false;
     lastViewportRestoreSourceRef.current = null;
     prevBarcoloredDataRef.current = [];
-    viewportControllerRef.current?.resetFit();
+    viewportControllerRef.current?.resetSession();
   }, [datasetKey]);
 
   useEffect(() => {
@@ -641,12 +649,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       bars: rows.length,
       datasetKey,
       mode: restorePlan?.mode || "fit",
-      visibleLogicalRange: chartRef.current?.timeScale?.().getVisibleLogicalRange?.() || null,
+      visibleLogicalRange: captureVisibleRange()?.logical || null,
     });
     hasRestoredRangeRef.current = true;
     lastViewportRestoreSourceRef.current = dataMeta?.source || null;
     if (restored) publishViewportRangeChange();
-  }, [dataMeta, datasetKey, publishViewportRangeChange, savedVisibleRange, seriesStore]);
+  }, [captureVisibleRange, dataMeta, datasetKey, publishViewportRangeChange, savedVisibleRange, seriesStore]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -869,19 +877,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   }, []);
 
   useImperativeHandle(ref, () => ({
-    getVisibleRange: () => {
-      const chart = chartRef.current;
-      if (!chart) return null;
-      const timeScale = chart.timeScale();
-      const timeRange = timeScale.getVisibleRange();
-      return {
-        logical: timeScale.getVisibleLogicalRange(),
-        time: timeRange,
-        barSpacing: timeScale.options().barSpacing,
-        rightOffset: timeScale.scrollPosition(),
-        rightmostTime: timeRange?.to,
-      };
-    },
+    getVisibleRange: captureVisibleRange,
     clearAllDrawings,
     setDrawingsHidden,
     updateSelectedDrawingStyle,
@@ -897,12 +893,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         rect: wrapperRef.current?.getBoundingClientRect?.() || null,
       },
       subPanes: paneDescriptors.filter((pane) => pane.id !== "main").map((pane) => ({ id: pane.id, paneType: "sub" })),
-      visibleRange: chartAdapter.getVisibleRange(),
+      visibleRange: captureVisibleRange(),
       loading,
     }),
     seriesReady,
   }), [
-    chartAdapter,
+    captureVisibleRange,
     clearAllDrawings,
     loading,
     paneDescriptors,

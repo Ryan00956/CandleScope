@@ -55,9 +55,15 @@ export class ViewportController {
   }
 
   dispose() {
-    if (this.unlockTimer) this.clearTimer(this.unlockTimer);
+    this.resetSession();
+  }
+
+  resetSession() {
+    if (this.unlockTimer != null) this.clearTimer(this.unlockTimer);
     this.unlockTimer = null;
+    this.userInteracting = false;
     this.pendingIntent = null;
+    this.fitSessionKeys.clear();
   }
 
   applyIntent(name, priority, apply) {
@@ -140,7 +146,7 @@ export class ViewportController {
   captureAnchor(previousRows) {
     if (!previousRows?.length) return null;
     const timeScale = this.getTimeScale();
-    const range = timeScale?.getVisibleLogicalRange?.();
+    const range = safeCall(() => timeScale?.getVisibleLogicalRange?.(), null);
     if (!range || !Number.isFinite(range.from)) return null;
     const index = Math.min(previousRows.length - 1, Math.max(0, Math.round(range.from)));
     const time = previousRows[index]?.time;
@@ -162,7 +168,7 @@ export class ViewportController {
     ) return false;
 
     const timeScale = this.getTimeScale();
-    const currentRange = timeScale?.getVisibleLogicalRange?.();
+    const currentRange = safeCall(() => timeScale?.getVisibleLogicalRange?.(), null);
     if (
       !currentRange
       || !Number.isFinite(currentRange.from)
@@ -182,7 +188,7 @@ export class ViewportController {
     if (Math.abs(shift) <= LOGICAL_SHIFT_EPSILON) return true;
 
     const timeScale = this.getTimeScale();
-    const range = currentRange || timeScale?.getVisibleLogicalRange?.();
+    const range = currentRange || safeCall(() => timeScale?.getVisibleLogicalRange?.(), null);
     if (
       !timeScale
       || !range
@@ -216,7 +222,7 @@ export class ViewportController {
       shift,
     };
     intent.apply = (timeScale) => {
-      const range = timeScale.getVisibleLogicalRange?.();
+      const range = safeCall(() => timeScale.getVisibleLogicalRange?.(), null);
       if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to)) return false;
       timeScale.setVisibleLogicalRange?.({
         from: range.from + intent.shift,

@@ -1,3 +1,5 @@
+import { parseIntervalParts, parseIntervalSeconds } from "../../utils/intervals.js";
+
 const INITIAL_VISIBLE_FALLBACK_BARS = 600;
 const INITIAL_VISIBLE_PADDING_MIN_BARS = 120;
 const INITIAL_VISIBLE_PADDING_RATIO = 0.35;
@@ -89,6 +91,31 @@ function resolveVisibleIndexesFromLogical(chartData, logicalRange) {
 function resolveVisibleIndexes(chartData, visibleRange) {
   return resolveVisibleIndexesFromTime(chartData, visibleRange?.time)
     || resolveVisibleIndexesFromLogical(chartData, visibleRange?.logical);
+}
+
+export function inferFixedIntervalClosedThrough(chartData, interval, nowMs = Date.now()) {
+  const parts = parseIntervalParts(interval);
+  const step = parseIntervalSeconds(interval);
+  const nowSec = Math.floor(Number(nowMs) / 1_000);
+  if (
+    parts?.unit === "M"
+    || !Number.isFinite(step)
+    || step <= 0
+    || !Number.isFinite(nowSec)
+    || nowSec <= 0
+    || !Array.isArray(chartData)
+    || chartData.length === 0
+  ) {
+    return null;
+  }
+
+  for (let index = chartData.length - 1; index >= 0; index -= 1) {
+    const barTime = normalizeRangeBoundary(chartData[index]?.time);
+    if (barTime && barTime + step <= nowSec) return barTime;
+  }
+
+  const firstTime = normalizeRangeBoundary(chartData[0]?.time);
+  return firstTime ? Math.max(1, firstTime - step) : null;
 }
 
 export function resolveInitialHostedRange(chartData, hostedIndicators, visibleRange) {

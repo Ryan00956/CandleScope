@@ -131,6 +131,11 @@ async def compute_indicator_range_batch_async(
             compute=_compute,
         )
         snapshot_range = snapshot.get("range") if isinstance(snapshot, dict) else None
+        available_start = (
+            int(snapshot_range.get("start", job.start))
+            if isinstance(snapshot_range, dict)
+            else job.start
+        )
         available_end = (
             int(snapshot_range.get("end", job.end))
             if isinstance(snapshot_range, dict)
@@ -139,7 +144,7 @@ async def compute_indicator_range_batch_async(
         payload = _replace_range_from_snapshot(
             snapshot,
             reason=job.reason,
-            start_s=job.start,
+            start_s=max(job.start, available_start),
             end_s=min(job.end, available_end),
         )
         payload["clientId"] = job.client_id

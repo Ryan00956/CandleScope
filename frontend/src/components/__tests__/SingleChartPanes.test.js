@@ -1,11 +1,45 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildVisibleRangeSnapshot,
   resolveDataTimeSet,
   shouldAdvanceIndicatorSeriesReady,
+  shouldPublishUserViewportRange,
   shouldRequestMoreLeft,
   shouldRestoreChartViewport,
 } from "../singleChartPaneLifecycle.js";
+
+test("visible range snapshots include the fitted time and logical coverage", () => {
+  assert.deepEqual(buildVisibleRangeSnapshot({
+    barSpacing: 0.5,
+    logicalRange: { from: -0.5, to: 1_500.5 },
+    rightOffset: 0,
+    timeRange: { from: 1_640_995_200, to: 1_770_652_800 },
+  }), {
+    barSpacing: 0.5,
+    logical: { from: -0.5, to: 1_500.5 },
+    rightOffset: 0,
+    rightmostTime: 1_770_652_800,
+    time: { from: 1_640_995_200, to: 1_770_652_800 },
+  });
+});
+
+test("only user-driven viewport changes publish persistence and interactive coverage", () => {
+  const range = { from: 0, to: 1_500 };
+
+  assert.equal(shouldPublishUserViewportRange({ range, userInteracted: true }), true);
+  assert.equal(shouldPublishUserViewportRange({ range, userInteracted: false }), false);
+  assert.equal(shouldPublishUserViewportRange({
+    isProgrammatic: true,
+    range,
+    userInteracted: true,
+  }), false);
+  assert.equal(shouldPublishUserViewportRange({
+    isSyncing: true,
+    range,
+    userInteracted: true,
+  }), false);
+});
 
 test("resolveDataTimeSet reuses one empty set until a series store exists", () => {
   const first = resolveDataTimeSet(null);
@@ -61,6 +95,20 @@ test("viewport restore waits for full ready history instead of a provisional lat
     hasRows: true,
     lastRestoreSource: "memory-cache-hit",
   }), true);
+  assert.equal(shouldRestoreChartViewport({
+    dataMeta: { status: "ready", seriesKey: datasetKey, source: "initial-history" },
+    datasetKey,
+    hasRestored: true,
+    hasRows: true,
+    lastRestoreSource: "memory-cache-hit",
+    userInteracted: true,
+  }), false);
+  assert.equal(shouldRestoreChartViewport({
+    dataMeta: { status: "ready", seriesKey: datasetKey, source: "initial-history" },
+    datasetKey,
+    hasRows: true,
+    userInteracted: true,
+  }), false);
 });
 
 test("fitting a fresh chart does not auto-load left history before user interaction", () => {

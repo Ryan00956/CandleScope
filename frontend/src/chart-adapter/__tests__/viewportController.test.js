@@ -48,7 +48,7 @@ test("interaction lock queues the highest priority intent", () => {
 
   controller.markUserInteracting();
   assert.equal(controller.fitOnce("a"), false);
-  controller.compensateInsert(3);
+  controller.queueShift(3);
   assert.deepEqual(calls, []);
 
   unlock();
@@ -122,8 +122,43 @@ test("applyAnchorShift shifts by the anchor index delta", () => {
     { time: 140 }, { time: 150 }, { time: 160 }, { time: 170 },
     { time: 180 }, { time: 190 }, { time: 200 },
   ]);
-  assert.deepEqual(anchor, { time: 200, index: 10 });
+  assert.deepEqual(anchor, { time: 200, index: 10, screenOffset: 0 });
 
   assert.equal(controller.applyAnchorShift(anchor, () => 14), true);
   assert.deepEqual(calls, [["setVisibleLogicalRange", { from: 14, to: 24 }]]);
+});
+
+test("applyAnchorShift does not double compensate an auto-rebased prepend", () => {
+  const { chart, calls } = createChart();
+  const controller = new ViewportController({ chartProvider: () => chart });
+  const anchor = controller.captureAnchor([
+    { time: 100 }, { time: 110 }, { time: 120 }, { time: 130 },
+    { time: 140 }, { time: 150 }, { time: 160 }, { time: 170 },
+    { time: 180 }, { time: 190 }, { time: 200 },
+  ]);
+
+  chart.timeScale().range = { from: 14, to: 24 };
+
+  assert.equal(controller.applyAnchorShift(anchor, () => 14), true);
+  assert.deepEqual(calls, []);
+});
+
+test("structural compensation bypasses the interaction lock", () => {
+  const { chart, calls } = createChart();
+  let unlock;
+  const controller = new ViewportController({
+    chartProvider: () => chart,
+    setTimer: (fn) => {
+      unlock = fn;
+      return 1;
+    },
+    clearTimer: () => {},
+  });
+
+  controller.markUserInteracting();
+  assert.equal(controller.compensateInsert(3), true);
+  assert.deepEqual(calls, [["setVisibleLogicalRange", { from: 13, to: 23 }]]);
+
+  unlock();
+  assert.deepEqual(calls, [["setVisibleLogicalRange", { from: 13, to: 23 }]]);
 });

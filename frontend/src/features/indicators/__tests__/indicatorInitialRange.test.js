@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  inferFixedIntervalClosedThrough,
   planDeferredRightCatchup,
   resolveInitialHostedRange,
 } from "../indicatorRangePlanning.js";
@@ -9,6 +10,23 @@ import {
 function bars(count) {
   return Array.from({ length: count }, (_, index) => ({ time: 1_700_000_000 + index * 60 }));
 }
+
+test("inferFixedIntervalClosedThrough excludes the current forming bar", () => {
+  const day = 86_400;
+  const chartData = Array.from({ length: 3 }, (_, index) => ({
+    time: 1_700_006_400 + index * day,
+  }));
+
+  assert.equal(
+    inferFixedIntervalClosedThrough(chartData, "1d", (chartData[2].time + day / 2) * 1_000),
+    chartData[1].time,
+  );
+  assert.equal(
+    inferFixedIntervalClosedThrough(chartData, "1d", (chartData[2].time + day) * 1_000),
+    chartData[2].time,
+  );
+  assert.equal(inferFixedIntervalClosedThrough(chartData, "1M", Date.now()), null);
+});
 
 test("resolveInitialHostedRange prioritizes visible bars with warmup and left padding", () => {
   const chartData = bars(2_000);
@@ -47,6 +65,28 @@ test("resolveInitialHostedRange falls back to the latest viewport-sized slice", 
   assert.equal(range.endIndex, 1_999);
   assert.equal(range.start, chartData[1_190].time);
   assert.equal(range.end, chartData[1_999].time);
+});
+
+test("resolveInitialHostedRange covers all bars after a full-content fit", () => {
+  const chartData = bars(1_501);
+  const range = resolveInitialHostedRange(
+    chartData,
+    [
+      { id: "boll", engineName: "BOLL", params: { period: 20 } },
+      { id: "macd", engineName: "MACD", params: { slow: 26, signal: 9 } },
+    ],
+    {
+      logical: { from: -0.5, to: 1_500.5 },
+      time: { from: chartData[0].time, to: chartData[1_500].time },
+    },
+  );
+
+  assert.equal(range.visibleStartIndex, 0);
+  assert.equal(range.visibleEndIndex, 1_500);
+  assert.equal(range.startIndex, 0);
+  assert.equal(range.endIndex, 1_500);
+  assert.equal(range.start, chartData[0].time);
+  assert.equal(range.end, chartData[1_500].time);
 });
 
 test("resolveInitialHostedRange handles irregular monthly spacing", () => {

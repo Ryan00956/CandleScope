@@ -23,12 +23,44 @@ export function resolveDataTimeSet(seriesStore) {
   return seriesStore?.timeSet?.() || EMPTY_DATA_TIME_SET;
 }
 
+export function buildVisibleRangeSnapshot({
+  barSpacing,
+  logicalRange,
+  rightOffset,
+  timeRange,
+} = {}) {
+  const snapshot = {};
+  if (Number.isFinite(barSpacing)) snapshot.barSpacing = barSpacing;
+  if (Number.isFinite(rightOffset)) snapshot.rightOffset = rightOffset;
+
+  if (Number.isFinite(timeRange?.from) && Number.isFinite(timeRange?.to)) {
+    snapshot.time = { from: timeRange.from, to: timeRange.to };
+    snapshot.rightmostTime = timeRange.to;
+  }
+
+  if (Number.isFinite(logicalRange?.from) && Number.isFinite(logicalRange?.to)) {
+    snapshot.logical = { from: logicalRange.from, to: logicalRange.to };
+  }
+
+  return snapshot.time || snapshot.logical ? snapshot : null;
+}
+
+export function shouldPublishUserViewportRange({
+  isProgrammatic = false,
+  isSyncing = false,
+  range = null,
+  userInteracted = false,
+} = {}) {
+  return Boolean(range && userInteracted && !isProgrammatic && !isSyncing);
+}
+
 export function shouldRestoreChartViewport({
   dataMeta,
   datasetKey,
   hasRestored = false,
   hasRows = false,
   lastRestoreSource = null,
+  userInteracted = false,
 } = {}) {
   const readyForDataset = Boolean(
     hasRows
@@ -36,6 +68,7 @@ export function shouldRestoreChartViewport({
     && dataMeta?.seriesKey === datasetKey
   );
   if (!readyForDataset) return false;
+  if (userInteracted) return false;
   if (!hasRestored) return true;
 
   const source = String(dataMeta?.source || "");

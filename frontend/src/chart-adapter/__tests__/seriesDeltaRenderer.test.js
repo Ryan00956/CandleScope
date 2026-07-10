@@ -5,6 +5,7 @@ import {
   renderCandleDataTransition,
   renderSeriesDelta,
 } from "../seriesDeltaRenderer.js";
+import { ViewportController } from "../viewportController.js";
 
 function createSeries() {
   const calls = [];
@@ -41,7 +42,7 @@ test("renderSeriesDelta appends only added right rows", () => {
   assert.deepEqual(calls, [["update", { time: 20 }], ["update", { time: 30 }]]);
 });
 
-test("renderSeriesDelta compensates visible logical range on prepend", () => {
+test("renderSeriesDelta leaves count fallback unused for prepend", () => {
   const { series, calls } = createSeries();
   const compensated = [];
 
@@ -53,7 +54,7 @@ test("renderSeriesDelta compensates visible logical range on prepend", () => {
   });
 
   assert.deepEqual(calls, [["setData", [{ time: 1 }, { time: 2 }]]]);
-  assert.deepEqual(compensated, [3]);
+  assert.deepEqual(compensated, []);
 });
 
 test("renderSeriesDelta uses net shift when prepend hits the trim budget", () => {
@@ -71,7 +72,7 @@ test("renderSeriesDelta uses net shift when prepend hits the trim budget", () =>
   assert.deepEqual(compensated, []);
 });
 
-test("renderSeriesDelta escalates trimming ticks to setData", () => {
+test("renderSeriesDelta escalates trimming ticks without count fallback", () => {
   const { series, calls } = createSeries();
   const compensated = [];
 
@@ -83,7 +84,7 @@ test("renderSeriesDelta escalates trimming ticks to setData", () => {
   });
 
   assert.deepEqual(calls, [["setData", [{ time: 20 }, { time: 30 }]]]);
-  assert.deepEqual(compensated, [-1]);
+  assert.deepEqual(compensated, []);
 });
 
 test("renderSeriesDelta prefers anchor-based compensation when possible", () => {
@@ -110,6 +111,104 @@ test("renderSeriesDelta prefers anchor-based compensation when possible", () => 
 
   assert.deepEqual(calls, [["setData", [{ time: 5 }, { time: 10 }, { time: 20 }]]]);
   assert.deepEqual(shifts, [1]);
+});
+
+function createHighFidelityViewportHarness({ initialRange, onSetData } = {}) {
+  const events = [];
+  let unlock = null;
+  const timeScale = {
+    range: { ...initialRange },
+    getVisibleLogicalRange: () => timeScale.range,
+    setVisibleLogicalRange: (range) => {
+      timeScale.range = range;
+      events.push(["setVisibleLogicalRange", range]);
+    },
+  };
+  const controller = new ViewportController({
+    chartProvider: () => ({ timeScale: () => timeScale }),
+    setTimer: (fn) => {
+      unlock = fn;
+      return 1;
+    },
+    clearTimer: () => {},
+  });
+  const series = {
+    setData: (rows) => {
+      events.push(["setData", rows.map((row) => row.time)]);
+      onSetData?.(timeScale, rows);
+    },
+    update: (row) => events.push(["update", row]),
+  };
+  return {
+    controller,
+    events,
+    series,
+    timeScale,
+    unlock: () => unlock?.(),
+  };
+}
+
+test("prepend keeps the LWC auto-rebased viewport without double compensation", () => {
+  const previousRows = [100, 110, 120, 130, 140, 150, 160, 170]
+    .map((time) => ({ time }));
+  const nextRows = [70, 80, 90, ...previousRows.map((row) => row.time)]
+    .map((time) => ({ time }));
+  const harness = createHighFidelityViewportHarness({
+    initialRange: { from: 2.25, to: 6.25 },
+    onSetData: (timeScale) => {
+      // This mirrors Lightweight Charts: prepending three points rebases the
+      // logical viewport by +3 before our residual compensation runs.
+      timeScale.range = { from: 5.25, to: 9.25 };
+    },
+  });
+  const store = {
+    indexOfTime: (time) => nextRows.findIndex((row) => row.time === time),
+    snapshot: () => nextRows,
+  };
+
+  harness.controller.markUserInteracting();
+  renderSeriesDelta({
+    series: harness.series,
+    delta: { type: "prepend", addedLeft: 3 },
+    store,
+    previousRows,
+    viewportController: harness.controller,
+  });
+
+  assert.deepEqual(harness.events, [["setData", nextRows.map((row) => row.time)]]);
+  assert.deepEqual(harness.timeScale.range, { from: 5.25, to: 9.25 });
+
+  harness.unlock();
+  assert.deepEqual(harness.events, [["setData", nextRows.map((row) => row.time)]]);
+});
+
+test("mid-merge applies only the residual shift synchronously while locked", () => {
+  const previousRows = [100, 200, 400, 500].map((time) => ({ time }));
+  const nextRows = [100, 150, 200, 300, 400, 500].map((time) => ({ time }));
+  const harness = createHighFidelityViewportHarness({
+    initialRange: { from: 1.25, to: 3.25 },
+  });
+  const store = {
+    indexOfTime: (time) => nextRows.findIndex((row) => row.time === time),
+    snapshot: () => nextRows,
+  };
+
+  harness.controller.markUserInteracting();
+  renderSeriesDelta({
+    series: harness.series,
+    delta: { type: "mid-merge", addedLeft: 0 },
+    store,
+    previousRows,
+    viewportController: harness.controller,
+  });
+
+  assert.deepEqual(harness.events, [
+    ["setData", nextRows.map((row) => row.time)],
+    ["setVisibleLogicalRange", { from: 2.25, to: 4.25 }],
+  ]);
+
+  harness.unlock();
+  assert.equal(harness.events.length, 2);
 });
 
 test("renderCandleDataTransition uses trailing updates when possible", () => {

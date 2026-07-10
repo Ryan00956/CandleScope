@@ -106,6 +106,54 @@ def test_builtin_batch_queries_bars_once_and_reuses_results():
     asyncio.run(_run())
 
 
+def test_partial_batch_result_does_not_cover_or_cache_uncomputed_prefix():
+    async def _run() -> None:
+        bars = _bars()
+        dm = _CountingDataManager(bars[-3:])
+        service = IndicatorRangeResultService(
+            enabled=True,
+            max_entries=16,
+            ttl_seconds=60,
+            revision_registry=SeriesRevisionRegistry(server_epoch="test"),
+        )
+        job = _job("VOL", {}, bars)
+
+        first = await compute_indicator_range_batch_async(
+            dm=dm,
+            jobs=[job],
+            range_service=service,
+        )
+
+        assert not isinstance(first[0], BaseException)
+        assert first[0]["cacheHit"] is False
+        assert first[0]["range"] == {
+            "start": bars[-3].time,
+            "end": bars[-1].time,
+        }
+        assert dm.query_calls == 1
+
+        dm.bars = bars
+        second = await compute_indicator_range_batch_async(
+            dm=dm,
+            jobs=[job],
+            range_service=service,
+        )
+        third = await compute_indicator_range_batch_async(
+            dm=dm,
+            jobs=[job],
+            range_service=service,
+        )
+
+        assert not isinstance(second[0], BaseException)
+        assert second[0]["cacheHit"] is False
+        assert second[0]["range"] == {"start": job.start, "end": job.end}
+        assert not isinstance(third[0], BaseException)
+        assert third[0]["cacheHit"] is True
+        assert dm.query_calls == 2
+
+    asyncio.run(_run())
+
+
 def test_batch_http_contract_preserves_request_order_and_queries_once():
     bars = _bars()
     dm = _CountingDataManager(bars)

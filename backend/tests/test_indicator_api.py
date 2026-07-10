@@ -600,6 +600,67 @@ def test_indicator_range_patch_stops_before_forming_latest_bar(
     assert forming_bar.time not in returned_times
 
 
+def test_builtin_range_patch_reports_only_actual_target_bar_coverage() -> None:
+    all_bars = [BarData.from_dict(item).with_closed_state(True) for item in _bars(10)]
+    available_tail = all_bars[-3:]
+
+    payload = payload_api._compute_builtin_range_patch_from_bars(
+        "vol-1",
+        {
+            "kind": "builtin",
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "name": "VOL",
+            "params": {},
+            "indicatorId": "vol-1",
+        },
+        all_bars[0].time,
+        all_bars[-1].time,
+        available_tail,
+        "unit-test",
+        len(all_bars),
+    )
+
+    assert payload["range"] == {
+        "start": available_tail[0].time,
+        "end": available_tail[-1].time,
+    }
+    assert payload["lines"][0]["data"][0]["time"] == available_tail[0].time
+
+
+def test_pyne_range_patch_reports_only_actual_target_bar_coverage() -> None:
+    all_bars = [BarData.from_dict(item).with_closed_state(True) for item in _bars(10)]
+    available_tail = all_bars[-3:]
+
+    payload = payload_api._compute_pyne_range_patch_from_bars(
+        "script-1",
+        {
+            "kind": "script",
+            "exchange": "binance",
+            "market_type": "spot",
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "name": "Close",
+            "script": 'plot(close, title="Close")',
+            "params": {},
+            "indicatorId": "script-1",
+        },
+        all_bars[0].time,
+        all_bars[-1].time,
+        available_tail,
+        "unit-test",
+        len(all_bars),
+    )
+
+    assert payload["range"] == {
+        "start": available_tail[0].time,
+        "end": available_tail[-1].time,
+    }
+    assert payload["lines"][0]["data"][0]["time"] == available_tail[0].time
+
+
 def test_indicator_range_http_reports_not_ready_for_missing_target_range() -> None:
     bars = [BarData.from_dict(item) for item in _bars(5)]
 

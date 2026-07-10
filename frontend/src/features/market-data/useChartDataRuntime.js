@@ -396,6 +396,7 @@ export function useChartDataRuntime({ exchange, marketType, symbol, interval }) 
     recordPerfEvent("chart.data.commit", {
       source,
       status,
+      datasetKey: seriesKey,
       symbol: sym,
       interval: intv,
       bars,

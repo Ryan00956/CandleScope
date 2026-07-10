@@ -108,7 +108,10 @@ export function renderSeriesDelta({
     const anchorApplied = anchor
       ? viewportController.applyAnchorShift?.(anchor, (time) => resolveIndexOfTime(store, rows, time))
       : false;
-    if (!anchorApplied) {
+    if (!anchorApplied && delta.type === DELTA_TYPES.MID_MERGE) {
+      // A pure prepend is already rebased by Lightweight Charts. Only a
+      // mid-window insertion needs a count-based fallback when its exact
+      // time anchor cannot be resolved.
       const netShift = (delta.addedLeft || 0) - trimmedLeft;
       if (netShift !== 0) viewportController.compensateInsert(netShift);
     }

@@ -153,6 +153,7 @@ export function useIndicatorStreamController({
     let reconnectTimer = null;
     let lastSeq = 0;
     let gapResubscribeTimer = null;
+    let socketGeneration = 0;
 
     const subscribeAll = () => {
       syncHostedSubscriptionsRef.current(true);
@@ -160,11 +161,13 @@ export function useIndicatorStreamController({
 
     const connect = () => {
       if (stopped) return;
+      socketGeneration += 1;
+      const wsGeneration = socketGeneration;
       socket = new WebSocket(getIndicatorStreamUrl());
       indicatorWsRef.current = socket;
 
       socket.onopen = () => {
-        markPerf("indicator.ws.open", { symbol, interval, marketType, exchange });
+        markPerf("indicator.ws.open", { symbol, interval, marketType, exchange, wsGeneration });
         lastSeq = 0;
         wsSubscriptions.clear();
         resetHostedSubscriptionReadiness?.();
@@ -189,8 +192,8 @@ export function useIndicatorStreamController({
               applyWsSnapshot(indicatorId, payload);
             },
             onPatch: (indicatorId, payload) => {
-              recordPerfEvent("indicator.ws.patch", { indicatorId });
               applyWsPatch(indicatorId, payload);
+              recordPerfEvent("indicator.ws.patch", { indicatorId, interval, wsGeneration });
             },
             onReplaceRange: (indicatorId, payload) => {
               recordPerfEvent("indicator.ws.replace_range", { indicatorId });
@@ -201,9 +204,14 @@ export function useIndicatorStreamController({
               requestRecomputedRange(indicatorId, payload);
             },
             onSubscribed: (indicatorId, payload) => {
+              const dataRevision = payload?.dataRevision || payload?.data_revision || payload?.revision || {};
               recordPerfEvent("indicator.ws.subscribed", {
                 indicatorId,
+                interval: payload?.interval || interval,
+                wsGeneration,
                 resumeStatus: payload?.resumeStatus || payload?.resume_status || "legacy",
+                resumeReason: payload?.resumeReason || payload?.resume_reason || null,
+                closedThrough: dataRevision?.closedThrough ?? dataRevision?.closed_through ?? null,
               });
               handleIndicatorSubscribed?.(indicatorId, payload);
             },

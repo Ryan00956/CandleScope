@@ -10,6 +10,10 @@ import {
   createIndicatorRangeNetworkCapture,
   INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS,
 } from "./indicator-range-network-capture.mjs";
+import {
+  resolveShortSwitchStepTransition,
+  summarizeShortSwitchIndicatorReadiness,
+} from "./short-switch-readiness.mjs";
 
 const DEFAULT_URL = "http://127.0.0.1:5173/";
 const DEFAULT_TIMEOUT_MS = 45_000;
@@ -477,7 +481,7 @@ async function waitForSeededIndicatorReport(cdp, args) {
 
   const started = Date.now();
   let report = await readPerfReport(cdp);
-  const timeoutMs = Math.max(15_000, Math.min(args.timeoutMs, 30_000));
+  const timeoutMs = Math.max(5_000, Math.min(args.timeoutMs, 30_000));
   while (Date.now() - started < timeoutMs) {
     if (hasSeededIndicatorCoverage(report, { overlayHeavy: args.overlayHeavy })) return report;
     await wait(500);
@@ -516,9 +520,15 @@ async function waitForExpression(cdp, expression, timeoutMs = 5_000, pollMs = 50
   return false;
 }
 
-async function readBrowserNow(cdp) {
+async function markShortSwitchStepStart(cdp, phase, interval) {
   const result = await cdp.send("Runtime.evaluate", {
-    expression: "performance.now()",
+    expression: `(() => {
+      const event = window.__CANDLESCOPE_PERF__?.event?.(
+        "smoke.shortSwitch.step.start",
+        { phase: ${JSON.stringify(phase)}, interval: ${JSON.stringify(interval)} }
+      );
+      return Math.max(0, Math.floor(Number(event?.at ?? performance.now())));
+    })()`,
     returnByValue: true,
   });
   return Number(result.result?.value) || 0;
@@ -583,13 +593,72 @@ async function waitForIntervalReady(cdp, interval, sincePerfMs, timeoutMs) {
   return { ready: false, elapsedMs: Date.now() - started, detail };
 }
 
-async function runShortSwitchStep(cdp, networkCapture, interval, phase, args) {
+function buildShortSwitchReadinessOptions(interval, datasetKey, sincePerfMs, args) {
+  const expectedIndicatorIds = (args.overlayHeavy
+    ? SMOKE_OVERLAY_HEAVY_INDICATORS
+    : SMOKE_ACTIVE_INDICATORS)
+    .map((indicator) => indicator.id);
+  const expectedSeriesCounts = args.overlayHeavy
+    ? { ma: 1, vol: 1, boll: 3, rsi: 1 }
+    : { ma: 1 };
+  return {
+    datasetKey,
+    expectedIndicatorIds,
+    expectedSeriesCounts,
+    interval,
+    sinceAtMs: sincePerfMs,
+  };
+}
+
+async function waitForShortSwitchIndicatorBarrier(cdp, readinessOptions, args) {
+  const started = Date.now();
+  const timeoutMs = Math.max(15_000, Math.min(args.timeoutMs, 30_000));
+  let detail = summarizeShortSwitchIndicatorReadiness(null, readinessOptions);
+  while (Date.now() - started < timeoutMs) {
+    const performanceReport = await readPerfReport(cdp);
+    detail = summarizeShortSwitchIndicatorReadiness(performanceReport, readinessOptions);
+    if (detail.ready) {
+      return { ready: true, elapsedMs: Date.now() - started, detail };
+    }
+    await wait(100);
+  }
+  return { ready: false, elapsedMs: Date.now() - started, detail };
+}
+
+async function runShortSwitchStep(
+  cdp,
+  networkCapture,
+  interval,
+  phase,
+  args,
+  { allowInitialPrime = false } = {},
+) {
   networkCapture.startPhase(phase);
-  const sincePerfMs = Math.max(0, (await readBrowserNow(cdp)) - 5);
+  const sincePerfMs = await markShortSwitchStepStart(cdp, phase, interval);
   const startedAtMs = Date.now();
   const click = await clickInterval(cdp, interval);
-  const ready = click.ok
-    ? await waitForIntervalReady(cdp, interval, click.wasActive ? 0 : sincePerfMs, args.timeoutMs)
+  const transition = resolveShortSwitchStepTransition({
+    allowInitialPrime,
+    clickOk: click.ok,
+    wasActive: click.wasActive,
+  });
+  const readinessSincePerfMs = transition.primedFromInitial ? 0 : sincePerfMs;
+  const ready = transition.readyEligible
+    ? await waitForIntervalReady(cdp, interval, readinessSincePerfMs, args.timeoutMs)
+    : {
+      ready: false,
+      elapsedMs: 0,
+      detail: { reason: click.wasActive ? "already-active-no-transition" : click.reason || "click-failed" },
+    };
+  const datasetKey = ready.detail?.commit?.detail?.datasetKey || null;
+  const readinessOptions = buildShortSwitchReadinessOptions(
+    interval,
+    datasetKey,
+    readinessSincePerfMs,
+    args,
+  );
+  const indicatorBarrierWait = ready.ready
+    ? await waitForShortSwitchIndicatorBarrier(cdp, readinessOptions, args)
     : { ready: false, elapsedMs: 0, detail: null };
   await wait(Math.max(0, args.shortSwitchSettleMs));
   const networkIdle = await networkCapture.waitForIdle({
@@ -597,17 +666,27 @@ async function runShortSwitchStep(cdp, networkCapture, interval, phase, args) {
     timeoutMs: Math.max(5_000, args.shortSwitchSettleMs + 5_000),
   });
   const performanceReport = await readPerfReport(cdp);
-  const indicatorDataReady = hasIndicatorSeriesDataCoverage(performanceReport, {
-    overlayHeavy: args.overlayHeavy,
-    sinceAtMs: click.wasActive ? null : sincePerfMs,
-  });
+  const finalBarrierDetail = summarizeShortSwitchIndicatorReadiness(
+    performanceReport,
+    readinessOptions,
+  );
+  const indicatorBarrier = {
+    ...indicatorBarrierWait,
+    ready: Boolean(indicatorBarrierWait.ready && finalBarrierDetail.indicatorDataReady),
+    detail: finalBarrierDetail,
+  };
+  const indicatorDataReady = Boolean(finalBarrierDetail.indicatorDataReady);
   return {
     phase,
     interval,
     startedAtMs,
     elapsedMs: Date.now() - startedAtMs,
+    sincePerfMs,
+    transitioned: transition.transitioned,
+    primedFromInitial: transition.primedFromInitial,
     click,
     ready,
+    indicatorBarrier,
     networkIdle,
     indicatorDataReady,
     indicatorRangeNetwork: networkCapture.summary({ phase }),
@@ -627,6 +706,7 @@ async function runShortSwitchAcceptance(cdp, networkCapture, args) {
     first,
     `short-switch-warm:${first}`,
     args,
+    { allowInitialPrime: true },
   ));
   steps.push(await runShortSwitchStep(
     cdp,
@@ -655,6 +735,7 @@ async function runShortSwitchAcceptance(cdp, networkCapture, args) {
   const stepsReady = steps.every((step) => (
     step.click.ok
     && step.ready.ready
+    && step.indicatorBarrier?.ready
     && step.networkIdle
     && step.indicatorDataReady
   ));

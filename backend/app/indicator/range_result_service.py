@@ -352,63 +352,72 @@ class IndicatorRangeResultService:
             return computed, False, self.data_revision_for_meta(meta)
 
         identity = self.identity_from_meta(meta)
-        joined = False
-        async with self._flight_lock:
+        ignored_flights: set[asyncio.Task[dict[str, Any]]] = set()
+        while True:
+            joined = False
+            async with self._flight_lock:
+                hit = self.lookup_snapshot(
+                    meta, start, end, revision_token=token, count_stats=False,
+                )
+                if hit is not None:
+                    self._stats["hits"] += 1
+                    return hit, True, data_revision
+                flight = next((
+                    item for item in self._flights
+                    if item.identity == identity
+                    and item.revision_token == token
+                    and item.start <= start
+                    and item.end >= end
+                    and item.task not in ignored_flights
+                    and not item.task.done()
+                ), None)
+                if flight is None:
+                    task = asyncio.create_task(
+                        self._compute_and_cache(
+                            meta=meta,
+                            start=start,
+                            end=end,
+                            revision_token=token,
+                            compute=compute,
+                        ),
+                        name=f"indicator-range:{identity[-20:]}:{start}-{end}",
+                    )
+                    flight = _InFlight(identity, token, start, end, task)
+                    self._flights.append(flight)
+                    self._stats["computes"] += 1
+                    task.add_done_callback(
+                        lambda _task, current=flight: asyncio.create_task(self._drop_flight(current))
+                    )
+                else:
+                    joined = True
+                    self._stats["singleflightJoins"] += 1
+
+            computed = await asyncio.shield(flight.task)
+            if self.revision_token_for_meta(meta) != token:
+                if _revision_retries > 0:
+                    return await self.get_or_compute(
+                        meta=meta,
+                        start=start,
+                        end=end,
+                        compute=compute,
+                        _revision_retries=_revision_retries - 1,
+                    )
+                raise IndicatorRangeRevisionChangedError(
+                    "K-line history changed repeatedly during indicator computation"
+                )
             hit = self.lookup_snapshot(
                 meta, start, end, revision_token=token, count_stats=False,
             )
             if hit is not None:
-                self._stats["hits"] += 1
-                return hit, True, data_revision
-            flight = next((
-                item for item in self._flights
-                if item.identity == identity
-                and item.revision_token == token
-                and item.start <= start
-                and item.end >= end
-            ), None)
-            if flight is None:
-                task = asyncio.create_task(
-                    self._compute_and_cache(
-                        meta=meta,
-                        start=start,
-                        end=end,
-                        revision_token=token,
-                        compute=compute,
-                    ),
-                    name=f"indicator-range:{identity[-20:]}:{start}-{end}",
-                )
-                flight = _InFlight(identity, token, start, end, task)
-                self._flights.append(flight)
-                self._stats["computes"] += 1
-                task.add_done_callback(
-                    lambda _task, current=flight: asyncio.create_task(self._drop_flight(current))
-                )
-            else:
-                joined = True
-                self._stats["singleflightJoins"] += 1
+                return hit, joined, self.data_revision_for_meta(meta)
+            if not joined:
+                return copy.deepcopy(computed), False, self.data_revision_for_meta(meta)
 
-        computed = await asyncio.shield(flight.task)
-        if self.revision_token_for_meta(meta) != token:
-            if _revision_retries > 0:
-                return await self.get_or_compute(
-                    meta=meta,
-                    start=start,
-                    end=end,
-                    compute=compute,
-                    _revision_retries=_revision_retries - 1,
-                )
-            raise IndicatorRangeRevisionChangedError(
-                "K-line history changed repeatedly during indicator computation"
-            )
-        hit = self.lookup_snapshot(
-            meta, start, end, revision_token=token, count_stats=False,
-        )
-        return (
-            hit if hit is not None else copy.deepcopy(computed),
-            bool(hit is not None and joined),
-            self.data_revision_for_meta(meta),
-        )
+            # The joined flight was selected by its requested bounds, but its
+            # actual payload covered less data.  It cannot satisfy this caller;
+            # retry against the caller's own compute closure instead of
+            # returning a partial or non-overlapping payload.
+            ignored_flights.add(flight.task)
 
     async def _compute_and_cache(
         self,

@@ -12,8 +12,10 @@ import { useIndicatorStreamController } from "./indicatorStreamController";
 import {
   getVisibleHostedIndicators,
   buildHostedSubscriptionMessage,
+  resolveIndicatorSubscriptionCachePolicy,
 } from "./indicatorWsRuntime";
 import {
+  inferFixedIntervalClosedThrough,
   planDeferredRightCatchup,
   RIGHT_CATCHUP_GRACE_MS,
   resolveInitialHostedRange,
@@ -624,13 +626,25 @@ export function useIndicatorRuntime(options = {}) {
     const cachedRevision = hostedIndicators
       .map((indicator) => getCachedIndicatorResult(indicator, cacheContext)?.revision)
       .find(Boolean);
-    const revision = normalizeIndicatorRevision(
+    const serverRevision = normalizeIndicatorRevision(
       options.revision
         || chartDataMetaRef.current?.dataRevision
         || normalizeIndicatorRevision(chartDataMetaRef.current)
         || seriesRevisionRef.current
         || cachedRevision,
     );
+    const inferredClosedThrough = inferFixedIntervalClosedThrough(
+      chartDataRef.current,
+      requestContext.interval,
+    );
+    const revision = inferredClosedThrough
+      ? {
+        ...(serverRevision || {}),
+        closedThrough: serverRevision?.closedThrough
+          ? Math.min(serverRevision.closedThrough, inferredClosedThrough)
+          : inferredClosedThrough,
+      }
+      : serverRevision;
     const clampedRange = clampIndicatorRangeToClosedThrough(
       { start: startSec, end: endSec },
       revision,
@@ -844,15 +858,16 @@ export function useIndicatorRuntime(options = {}) {
       markHostedSubscriptionReady(indicatorId);
     }
     const cacheContext = getIndicatorCacheContext();
-    const revision = normalizeIndicatorRevision(payload);
+    const subscriptionCachePolicy = resolveIndicatorSubscriptionCachePolicy(payload);
+    const { revision } = subscriptionCachePolicy;
     if (revision) seriesRevisionRef.current = revision;
     const cachedSegments = getCachedIndicatorComputedSegments(indicator, cacheContext);
-    const explicitDirtyRange = normalizeIndicatorRange(
-      revision?.dirtyRange || payload?.dirtyRange || payload?.dirty_range,
-    );
-    const historyInvalid = Boolean(revision?.historyInvalid || payload?.historyInvalid || payload?.history_invalid);
+    const explicitDirtyRange = subscriptionCachePolicy.dirtyRange;
 
-    if (!historyInvalid && !explicitDirtyRange && resumeStatus !== "history_required") {
+    // `history_required` only means the server cannot produce a bounded WS
+    // resume patch. It does not invalidate compatible frontend history by
+    // itself; only an explicit revision invalidation or dirty range does.
+    if (!subscriptionCachePolicy.invalidate) {
       if (revision) rebaseCachedIndicatorRevision(indicator, cacheContext, revision);
       return;
     }

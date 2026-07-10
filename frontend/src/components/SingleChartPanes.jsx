@@ -29,8 +29,10 @@ import {
 import { planVisibleRangeRestore } from "../features/chart-session/visibleRangeStorage";
 import { buildPaneConfigKey, loadPaneHeights, savePaneHeights } from "../features/chart-session/paneLayoutStorage";
 import {
+  buildVisibleRangeSnapshot,
   resolveDataTimeSet,
   shouldAdvanceIndicatorSeriesReady,
+  shouldPublishUserViewportRange,
   shouldRequestMoreLeft,
   shouldRestoreChartViewport,
 } from "./singleChartPaneLifecycle";
@@ -214,6 +216,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   timezone = "Local",
   savedVisibleRange = null,
   dataMeta = null,
+  onViewportRangeChange = null,
   onVisibleRangeChange = null,
   drawingTool = null,
   onDrawingToolChange,
@@ -254,6 +257,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const prevIndicatorKeyRef = useRef("");
   const intervalRef = useRef(interval);
   const isSyncingRef = useRef(false);
+  const isRestoringViewportRef = useRef(false);
   const userInteractedRef = useRef(false);
   const hasRestoredRangeRef = useRef(false);
   const lastViewportRestoreSourceRef = useRef(null);
@@ -261,6 +265,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const prevSubPaneIdsRef = useRef(new Set());
   const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
+  const onViewportRangeChangeRef = useRef(onViewportRangeChange);
   const onVisibleRangeChangeRef = useRef(onVisibleRangeChange);
   const drawingApiRef = useRef(null);
   const drawingsHiddenRef = useRef(false);
@@ -312,23 +317,35 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   useEffect(() => { intervalRef.current = interval; }, [interval]);
   useEffect(() => { onNeedMoreLeftRef.current = onNeedMoreLeft; }, [onNeedMoreLeft]);
   useEffect(() => { canLoadMoreLeftRef.current = canLoadMoreLeft; }, [canLoadMoreLeft]);
+  useEffect(() => { onViewportRangeChangeRef.current = onViewportRangeChange; }, [onViewportRangeChange]);
   useEffect(() => { onVisibleRangeChangeRef.current = onVisibleRangeChange; }, [onVisibleRangeChange]);
 
-  const scheduleVisibleRangeSave = useCallback(() => {
+  const captureVisibleRange = useCallback(() => {
+    const chart = chartRef.current;
+    if (!chart) return null;
+    const timeScale = chart.timeScale();
+    return buildVisibleRangeSnapshot({
+      barSpacing: timeScale.options().barSpacing,
+      logicalRange: timeScale.getVisibleLogicalRange(),
+      rightOffset: timeScale.scrollPosition(),
+      timeRange: timeScale.getVisibleRange(),
+    });
+  }, []);
+
+  const publishViewportRangeChange = useCallback((visibleRange = null) => {
+    const range = visibleRange || captureVisibleRange();
+    if (range) onViewportRangeChangeRef.current?.(range);
+  }, [captureVisibleRange]);
+
+  const scheduleVisibleRangeSave = useCallback((visibleRange = null) => {
+    const range = visibleRange || captureVisibleRange();
+    if (!range) return;
     if (visibleRangeSaveTimerRef.current) clearTimeout(visibleRangeSaveTimerRef.current);
     visibleRangeSaveTimerRef.current = setTimeout(() => {
-      const chart = chartRef.current;
-      if (!chart || !onVisibleRangeChangeRef.current) return;
-      const timeScale = chart.timeScale();
-      const timeRange = timeScale.getVisibleRange();
-      const range = {
-        barSpacing: timeScale.options().barSpacing,
-        rightOffset: timeScale.scrollPosition(),
-        rightmostTime: timeRange?.to,
-      };
-      if (Number.isFinite(range.rightmostTime)) onVisibleRangeChangeRef.current(range);
+      visibleRangeSaveTimerRef.current = null;
+      onVisibleRangeChangeRef.current?.(range);
     }, VISIBLE_RANGE_SAVE_DEBOUNCE_MS);
-  }, []);
+  }, [captureVisibleRange]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -379,8 +396,15 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     };
 
     const handleVisibleLogicalRangeChange = (range) => {
-      if (isSyncingRef.current || !range) return;
-      if (userInteractedRef.current) scheduleVisibleRangeSave();
+      if (!shouldPublishUserViewportRange({
+        isProgrammatic: isRestoringViewportRef.current,
+        isSyncing: isSyncingRef.current,
+        range,
+        userInteracted: userInteractedRef.current,
+      })) return;
+      const visibleRange = captureVisibleRange();
+      publishViewportRangeChange(visibleRange);
+      scheduleVisibleRangeSave(visibleRange);
       const currentData = dataRef.current;
       if (shouldRequestMoreLeft({
         canLoad: canLoadMoreLeftRef.current,
@@ -408,7 +432,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       mainSeriesRef.current = null;
       indicatorSeriesRef.current = [];
     };
-  }, [customBg, downColor, onCrosshairMove, scheduleVisibleRangeSave, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishViewportRangeChange, scheduleVisibleRangeSave, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -598,13 +622,20 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       hasRestored: hasRestoredRangeRef.current,
       hasRows: rows.length > 0,
       lastRestoreSource: lastViewportRestoreSourceRef.current,
+      userInteracted: userInteractedRef.current,
     })) return;
 
     const restorePlan = planVisibleRangeRestore(savedVisibleRange, rows, dataMeta);
-    const restored = viewportControllerRef.current?.applySessionRestore(
-      restorePlan,
-      { sessionKey: datasetKey },
-    );
+    let restored = false;
+    isRestoringViewportRef.current = true;
+    try {
+      restored = viewportControllerRef.current?.applySessionRestore(
+        restorePlan,
+        { sessionKey: datasetKey },
+      );
+    } finally {
+      isRestoringViewportRef.current = false;
+    }
     recordPerfEvent("chart.viewport.restore", {
       applied: Boolean(restored),
       bars: rows.length,
@@ -614,7 +645,8 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     });
     hasRestoredRangeRef.current = true;
     lastViewportRestoreSourceRef.current = dataMeta?.source || null;
-  }, [dataMeta, datasetKey, savedVisibleRange, seriesStore]);
+    if (restored) publishViewportRangeChange();
+  }, [dataMeta, datasetKey, publishViewportRangeChange, savedVisibleRange, seriesStore]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -651,6 +683,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         if (!line) continue;
         const validData = normalizeLineSeriesData(line, dataTimeSet);
         applyLineSeriesData(entry.series, validData, entry.data, {
+          datasetKey,
+          indicatorId: line.indicatorId,
+          interval,
           paneId: entry.paneId,
           line: line.name || line.id,
           type: line.type || "line",
@@ -685,6 +720,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           if (validData.length > 0) {
             series.setData(validData);
             recordPerfEvent("chart.indicatorSeries.setData", {
+              datasetKey,
+              indicatorId: line.indicatorId,
+              interval,
               paneId: pane.id,
               line: line.name || line.id,
               type: line.type || "line",
@@ -720,7 +758,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     })) {
       setSeriesReady((prev) => prev + 1);
     }
-  }, [dataTimeSet, drawingTool, paneDescriptors]);
+  }, [dataTimeSet, datasetKey, drawingTool, interval, paneDescriptors]);
 
   useEffect(() => {
     const chart = chartRef.current;

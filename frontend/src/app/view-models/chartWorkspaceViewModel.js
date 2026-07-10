@@ -94,10 +94,8 @@ export function buildChartWorkspaceViewModel({
         timezone: chartSettings.timezone,
         savedVisibleRange,
         dataMeta: marketView.meta,
-        onVisibleRangeChange: (range) => {
-          marketActions.onVisibleRangeChange?.(range);
-          indicatorActions?.ensureVisibleIndicatorRange?.(range);
-        },
+        onViewportRangeChange: (range) => indicatorActions?.ensureVisibleIndicatorRange?.(range),
+        onVisibleRangeChange: (range) => marketActions.onVisibleRangeChange?.(range),
         drawingTool: drawingView.drawingTool,
         onDrawingToolChange: drawingActions.setDrawingTool,
         penColor: drawingView.penColor,

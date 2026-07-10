@@ -489,7 +489,7 @@ async def _query_indicator_compute_bars_async(
     return _closed_indicator_compute_bars(result, start_s, end_s, start_ms, end_ms)
 
 
-def _confirmed_target_range_end(bars: list[Any], start_s: int, end_s: int) -> int:
+def _confirmed_target_range(bars: list[Any], start_s: int, end_s: int) -> tuple[int, int]:
     target_times = [
         int(bar.time)
         for bar in bars
@@ -497,7 +497,7 @@ def _confirmed_target_range_end(bars: list[Any], start_s: int, end_s: int) -> in
     ]
     if not target_times:
         raise RuntimeError("target K-line range is not available yet")
-    return max(target_times)
+    return min(target_times), max(target_times)
 
 
 def _compute_builtin_range_patch(
@@ -560,8 +560,13 @@ def _compute_builtin_range_patch_from_bars(
         params=params,
         result=result,
     )
-    range_end_s = _confirmed_target_range_end(bars, start_s, end_s)
-    patch = _replace_range_from_snapshot(payload, reason=reason, start_s=start_s, end_s=range_end_s)
+    range_start_s, range_end_s = _confirmed_target_range(bars, start_s, end_s)
+    patch = _replace_range_from_snapshot(
+        payload,
+        reason=reason,
+        start_s=range_start_s,
+        end_s=range_end_s,
+    )
     patch["warmupBars"] = warmup
     patch["targetBars"] = target_bars
     return patch
@@ -882,8 +887,13 @@ def _compute_pyne_range_patch_from_bars(
         result=result,
         script_hash=meta.get("scriptHash"),
     )
-    range_end_s = _confirmed_target_range_end(bars, start_s, end_s)
-    patch = _replace_range_from_snapshot(payload, reason=reason, start_s=start_s, end_s=range_end_s)
+    range_start_s, range_end_s = _confirmed_target_range(bars, start_s, end_s)
+    patch = _replace_range_from_snapshot(
+        payload,
+        reason=reason,
+        start_s=range_start_s,
+        end_s=range_end_s,
+    )
     patch["warmupBars"] = warmup
     if target_bars is not None:
         patch["targetBars"] = target_bars

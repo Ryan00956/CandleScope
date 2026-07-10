@@ -5,6 +5,7 @@ const PRIORITY = {
   compensate: 30,
 };
 const COMPENSATE_INTENT = "compensateShift";
+const LOGICAL_SHIFT_EPSILON = 1e-7;
 
 function safeCall(fn, fallback = null) {
   try {
@@ -144,17 +145,62 @@ export class ViewportController {
     const index = Math.min(previousRows.length - 1, Math.max(0, Math.round(range.from)));
     const time = previousRows[index]?.time;
     if (time == null) return null;
-    return { time, index };
+    return {
+      time,
+      index,
+      screenOffset: index - range.from,
+    };
   }
 
   applyAnchorShift(anchor, indexOfTime) {
     if (!anchor || typeof indexOfTime !== "function") return false;
     const newIndex = indexOfTime(anchor.time);
-    if (!Number.isFinite(newIndex) || newIndex < 0) return false;
-    const shift = newIndex - anchor.index;
-    if (shift === 0) return true;
-    this.queueShift(shift);
-    return true;
+    if (
+      !Number.isFinite(newIndex)
+      || newIndex < 0
+      || !Number.isFinite(anchor.screenOffset)
+    ) return false;
+
+    const timeScale = this.getTimeScale();
+    const currentRange = timeScale?.getVisibleLogicalRange?.();
+    if (
+      !currentRange
+      || !Number.isFinite(currentRange.from)
+      || !Number.isFinite(currentRange.to)
+    ) return false;
+
+    // Lightweight Charts rebases the logical range automatically for a pure
+    // prepend. Preserve the anchor's screen offset and apply only any residual
+    // shift left after setData (for example, a mid-window merge). This avoids
+    // double-shifting prepends while keeping structural updates pixel-stable.
+    const desiredFrom = newIndex - anchor.screenOffset;
+    return this.applyLogicalShiftNow(desiredFrom - currentRange.from, currentRange);
+  }
+
+  applyLogicalShiftNow(shift, currentRange = null) {
+    if (!Number.isFinite(shift)) return false;
+    if (Math.abs(shift) <= LOGICAL_SHIFT_EPSILON) return true;
+
+    const timeScale = this.getTimeScale();
+    const range = currentRange || timeScale?.getVisibleLogicalRange?.();
+    if (
+      !timeScale
+      || !range
+      || !Number.isFinite(range.from)
+      || !Number.isFinite(range.to)
+    ) return false;
+
+    // Structural compensation is coordinate rebasing, not an independent
+    // navigation intent. It must happen synchronously with setData even while
+    // the user-interaction lock is active, otherwise one wrong frame is shown
+    // and the queued correction becomes a visible jump.
+    return safeCall(() => {
+      timeScale.setVisibleLogicalRange?.({
+        from: range.from + shift,
+        to: range.to + shift,
+      });
+      return true;
+    }, false);
   }
 
   queueShift(shift) {
@@ -190,7 +236,7 @@ export class ViewportController {
   }
 
   compensateInsert(addedLeft = 0) {
-    return this.queueShift(Number(addedLeft) || 0);
+    return this.applyLogicalShiftNow(Number(addedLeft) || 0);
   }
 }
 

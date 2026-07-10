@@ -106,6 +106,70 @@ def test_result_service_singleflight_and_revision_invalidation() -> None:
     asyncio.run(_run())
 
 
+def test_singleflight_join_recomputes_when_wide_flight_only_returns_tail() -> None:
+    async def _run() -> None:
+        service = IndicatorRangeResultService(
+            revision_registry=SeriesRevisionRegistry(server_epoch="epoch-test"),
+            ttl_seconds=60,
+            max_entries=8,
+        )
+        meta = _meta()
+        start = 1_700_000_000
+        prefix_end = start + 4 * 60
+        tail_start = start + 7 * 60
+        end = start + 9 * 60
+        wide_started = asyncio.Event()
+        release_wide = asyncio.Event()
+        wide_calls = 0
+        prefix_calls = 0
+
+        async def compute_wide_tail() -> dict:
+            nonlocal wide_calls
+            wide_calls += 1
+            wide_started.set()
+            await release_wide.wait()
+            return _payload(tail_start, end)
+
+        async def compute_prefix() -> dict:
+            nonlocal prefix_calls
+            prefix_calls += 1
+            return _payload(start, prefix_end)
+
+        wide_task = asyncio.create_task(service.get_or_compute(
+            meta=meta,
+            start=start,
+            end=end,
+            compute=compute_wide_tail,
+        ))
+        await wide_started.wait()
+        prefix_task = asyncio.create_task(service.get_or_compute(
+            meta=meta,
+            start=start,
+            end=prefix_end,
+            compute=compute_prefix,
+        ))
+
+        for _ in range(10):
+            await asyncio.sleep(0)
+            if service.snapshot()["singleflightJoins"] == 1:
+                break
+        assert service.snapshot()["singleflightJoins"] == 1
+
+        release_wide.set()
+        wide_result, prefix_result = await asyncio.gather(wide_task, prefix_task)
+
+        assert wide_result[0]["range"] == {"start": tail_start, "end": end}
+        assert wide_result[1] is False
+        assert prefix_result[0]["range"] == {"start": start, "end": prefix_end}
+        assert prefix_result[1] is False
+        assert wide_calls == 1
+        assert prefix_calls == 1
+        assert service.lookup_snapshot(meta, start, prefix_end) is not None
+        assert service.snapshot()["computes"] == 2
+
+    asyncio.run(_run())
+
+
 def test_result_service_recomputes_when_revision_changes_mid_compute() -> None:
     async def _run() -> None:
         service = IndicatorRangeResultService(
@@ -272,6 +336,53 @@ def test_http_range_reuses_app_scoped_result_without_second_query() -> None:
     assert second.json()["dataRevision"]["closedThrough"] == bars[-1].time
     assert second.json()["range"] == {"start": bars[5].time, "end": bars[-1].time}
     assert second.json()["result"]["outputs"]["ma"]["data"][0]["time"] >= bars[5].time
+
+
+def test_partial_http_result_does_not_cache_uncomputed_prefix_as_covered() -> None:
+    bars = _bars(10)
+    dm = _CountingRangeDataManager(bars[-3:])
+    app = FastAPI()
+    app.include_router(indicators_api.router, prefix="/api/v1")
+    app.state.data_manager = dm
+    app.state.indicator_range_service = IndicatorRangeResultService(
+        ttl_seconds=60,
+        max_entries=8,
+    )
+    client = TestClient(app)
+    body = {
+        "clientId": "ma-partial",
+        "kind": "builtin",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "MA",
+        "params": {"period": 3},
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    }
+
+    first = client.post("/api/v1/indicators/range", json=body)
+
+    assert first.status_code == 200
+    assert first.json()["cacheHit"] is False
+    assert first.json()["range"] == {
+        "start": bars[-3].time,
+        "end": bars[-1].time,
+    }
+    assert dm.calls == 1
+
+    dm.bars = bars
+    second = client.post("/api/v1/indicators/range", json=body)
+    third = client.post("/api/v1/indicators/range", json=body)
+
+    assert second.status_code == 200
+    assert second.json()["cacheHit"] is False
+    assert second.json()["range"] == {
+        "start": bars[0].time,
+        "end": bars[-1].time,
+    }
+    assert third.status_code == 200
+    assert third.json()["cacheHit"] is True
+    assert dm.calls == 2
 
 
 def test_http_range_waits_for_exact_backfill_future_then_requeries() -> None:

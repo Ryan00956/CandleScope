@@ -3,6 +3,10 @@ import {
   INDICATOR_HISTORY_LIMIT,
 } from "./indicatorComputeRuntime.js";
 import {
+  normalizeIndicatorRange,
+  normalizeIndicatorRevision,
+} from "./indicatorRangeCoverage.js";
+import {
   getBuiltinIndicatorName,
   isBuiltinIndicator,
   isWsHostedIndicator,
@@ -92,6 +96,22 @@ export function buildHostedSubscriptionSignature(indicator, context) {
     securityMode: message.securityMode || "",
     params: message.params || {},
   });
+}
+
+export function resolveIndicatorSubscriptionCachePolicy(payload = {}) {
+  const revision = normalizeIndicatorRevision(payload);
+  const dirtyRange = normalizeIndicatorRange(
+    revision?.dirtyRange || payload?.dirtyRange || payload?.dirty_range,
+  );
+  const historyInvalid = Boolean(
+    revision?.historyInvalid || payload?.historyInvalid || payload?.history_invalid,
+  );
+  return {
+    dirtyRange,
+    historyInvalid,
+    invalidate: historyInvalid || Boolean(dirtyRange),
+    revision,
+  };
 }
 
 export function parseIndicatorWsMessage(rawData) {

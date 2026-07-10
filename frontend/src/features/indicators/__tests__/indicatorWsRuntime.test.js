@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildHostedSubscriptionMessage,
   dispatchIndicatorWsMessage,
+  resolveIndicatorSubscriptionCachePolicy,
 } from "../indicatorWsRuntime.js";
 
 test("indicator.recomputed dispatches a targeted range refresh notification", () => {
@@ -88,4 +89,40 @@ test("indicator.subscribed dispatches revision and resume acknowledgement", () =
   }), true);
   assert.equal(calls[0].indicatorId, "ma-1");
   assert.equal(calls[0].payload.resumeStatus, "up_to_date");
+});
+
+test("history-required preserves compatible cache unless revision data invalidates it", () => {
+  const compatible = resolveIndicatorSubscriptionCachePolicy({
+    resumeStatus: "history_required",
+    resumeReason: "resume-gap-too-large",
+    dataRevision: {
+      serverEpoch: "boot-1",
+      correctionRevision: 4,
+      closedThrough: 1_700_000_000,
+    },
+  });
+  assert.equal(compatible.invalidate, false);
+  assert.equal(compatible.historyInvalid, false);
+  assert.equal(compatible.dirtyRange, null);
+
+  const expired = resolveIndicatorSubscriptionCachePolicy({
+    resumeStatus: "history_required",
+    dataRevision: {
+      serverEpoch: "boot-2",
+      correctionRevision: 0,
+      historyInvalid: true,
+    },
+  });
+  assert.equal(expired.invalidate, true);
+
+  const dirty = resolveIndicatorSubscriptionCachePolicy({
+    resumeStatus: "history_required",
+    dataRevision: {
+      serverEpoch: "boot-1",
+      correctionRevision: 5,
+      dirtyRange: { start: 100, end: 200 },
+    },
+  });
+  assert.equal(dirty.invalidate, true);
+  assert.deepEqual(dirty.dirtyRange, { start: 100, end: 200 });
 });

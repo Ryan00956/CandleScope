@@ -658,11 +658,20 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
             compute=_compute_uncached,
         )
         snapshot_range = snapshot.get("range") if isinstance(snapshot, dict) else None
-        available_end = int(snapshot_range.get("end", end_s)) if isinstance(snapshot_range, dict) else end_s
+        available_start = (
+            int(snapshot_range.get("start", start_s))
+            if isinstance(snapshot_range, dict)
+            else start_s
+        )
+        available_end = (
+            int(snapshot_range.get("end", end_s))
+            if isinstance(snapshot_range, dict)
+            else end_s
+        )
         payload = _replace_range_from_snapshot(
             snapshot,
             reason=req.reason or "range",
-            start_s=start_s,
+            start_s=max(start_s, available_start),
             end_s=min(end_s, available_end),
         )
         payload["clientId"] = client_id

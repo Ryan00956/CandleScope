@@ -75,6 +75,7 @@ class IndicatorEngine:
         # Zero-ref instances stay warm for fast interval switches.  They are
         # detached from stream dispatch and catch up from subscribe seed bars.
         self._idle_since: dict[IndicatorKey, float] = {}
+        self._first_committed: dict[IndicatorKey, int] = {}
         self._last_committed: dict[IndicatorKey, int] = {}
         self._warm_ttl_seconds = max(0.0, float(
             config.INDICATOR_ENGINE_WARM_TTL_SECONDS
@@ -104,6 +105,7 @@ class IndicatorEngine:
         self._instances.clear()
         self._refcounts.clear()
         self._idle_since.clear()
+        self._first_committed.clear()
         self._last_committed.clear()
         self._stream_keys.clear()
         self._started = False
@@ -217,16 +219,21 @@ class IndicatorEngine:
         if bars and not instance.is_initialized:
             try:
                 instance.init(bars)
-                self._last_committed[key] = max(int(bar.time) for bar in bars)
+                input_range = {
+                    "start": min(int(bar.time) for bar in bars),
+                    "end": max(int(bar.time) for bar in bars),
+                }
+                self._first_committed[key] = input_range["start"]
+                self._last_committed[key] = input_range["end"]
                 result = instance.build_result(key)
                 self._emit(
                     IndicatorEventType.INSTANCE_INITIALIZED,
                     key,
                     full_result=result,
-                    detail={"range": {
-                        "start": min(int(bar.time) for bar in bars),
-                        "end": max(int(bar.time) for bar in bars),
-                    }},
+                    detail={
+                        "range": dict(input_range),
+                        "computedRange": dict(input_range),
+                    },
                 )
             except Exception as exc:
                 logger.error("Init failed for %s: %s", key.uid, exc, exc_info=True)
@@ -234,36 +241,57 @@ class IndicatorEngine:
         elif bars and instance.is_initialized:
             try:
                 last_committed = self._last_committed.get(key, 0)
+                first_committed = self._first_committed.get(key)
                 confirmed = sorted(
                     (bar for bar in bars if getattr(bar, "is_closed", True)),
                     key=lambda bar: int(bar.time),
                 )
                 confirmed_times = {int(bar.time) for bar in confirmed}
+                confirmed_start = min(confirmed_times) if confirmed_times else 0
+                confirmed_end = max(confirmed_times) if confirmed_times else 0
+                extends_left = bool(
+                    confirmed
+                    and (
+                        first_committed is None
+                        or confirmed_start < first_committed
+                    )
+                )
                 truncated_before_tail = bool(
                     last_committed
                     and confirmed
-                    and min(confirmed_times) > last_committed
+                    and confirmed_start > last_committed
                     and last_committed not in confirmed_times
                 )
-                if truncated_before_tail:
-                    # The seed no longer overlaps the warm checkpoint, so an
-                    # append-only catch-up could silently skip closed bars.
+                if extends_left or truncated_before_tail:
+                    # A warm instance only supports append-only catch-up.  If
+                    # the seed adds older history (or no longer overlaps the
+                    # right checkpoint), recompute so the full result really
+                    # covers every bar we advertise to range-cache consumers.
                     instance.recompute(confirmed)
-                    self._last_committed[key] = max(confirmed_times)
+                    self._first_committed[key] = confirmed_start
+                    self._last_committed[key] = confirmed_end
                 else:
                     catch_up = [bar for bar in confirmed if int(bar.time) > last_committed]
                     for bar in catch_up:
                         instance.update_closed(bar)
                         self._last_committed[key] = int(bar.time)
                 result = instance.build_result(key)
+                supplied_range = {
+                    "start": min(int(bar.time) for bar in bars),
+                    "end": max(int(bar.time) for bar in bars),
+                }
+                computed_range = {
+                    "start": self._first_committed.get(key, supplied_range["start"]),
+                    "end": self._last_committed.get(key, supplied_range["end"]),
+                }
                 self._emit(
                     IndicatorEventType.INSTANCE_INITIALIZED,
                     key,
                     full_result=result,
-                    detail={"range": {
-                        "start": min(int(bar.time) for bar in bars),
-                        "end": max(int(bar.time) for bar in bars),
-                    }},
+                    detail={
+                        "range": supplied_range,
+                        "computedRange": computed_range,
+                    },
                 )
             except Exception as exc:
                 logger.error("Warm resume failed for %s: %s", key.uid, exc, exc_info=True)
@@ -308,6 +336,7 @@ class IndicatorEngine:
         self._instances.pop(key, None)
         self._refcounts.pop(key, None)
         self._idle_since.pop(key, None)
+        self._first_committed.pop(key, None)
         self._last_committed.pop(key, None)
 
         self._detach_from_stream(key)
@@ -473,6 +502,7 @@ class IndicatorEngine:
 
             try:
                 instance.recompute(bars)
+                self._first_committed[key] = min(int(bar.time) for bar in bars)
                 self._last_committed[key] = max(int(bar.time) for bar in bars)
                 result = instance.build_result(key)
                 computed_range = {
@@ -597,6 +627,7 @@ class IndicatorEngine:
                     "bar_count": inst.bar_count,
                     "refcount": self._refcounts.get(key, 0),
                     "idle": key in self._idle_since,
+                    "first_committed": self._first_committed.get(key),
                     "last_committed": self._last_committed.get(key),
                 }
                 for key, inst in self._instances.items()

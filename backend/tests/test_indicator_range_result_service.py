@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.api.v1 import indicators as indicators_api
 from app.data_engine.data_manager.models import BarData
 from app.indicator import create_engine
+from app.indicator.events import IndicatorEvent, IndicatorEventType
 from app.indicator.range_result_service import IndicatorRangeResultService
 from app.indicator.series_revision import SeriesRevisionRegistry
 
@@ -290,6 +291,130 @@ def test_engine_warm_resume_full_recomputes_when_seed_no_longer_overlaps_checkpo
     )
 
     assert resumed.to_dict() == fresh.to_dict()
+
+
+def test_engine_warm_resume_full_recomputes_when_seed_extends_left() -> None:
+    engine = create_engine()
+    engine._warm_ttl_seconds = 60
+    engine._warm_max_instances = 8
+    full_history = _bars(12)
+    initial_tail = full_history[5:10]
+    initialized_events: list[IndicatorEvent] = []
+    engine.add_listener(
+        lambda event: initialized_events.append(event)
+        if event.event_type == IndicatorEventType.INSTANCE_INITIALIZED
+        else None
+    )
+
+    key, _ = engine.subscribe(
+        "BTCUSDT", "1m", "spot", "MA", {"period": 3}, initial_tail,
+    )
+    first_instance = engine.get_instance(key)
+    engine.unsubscribe(key)
+
+    resumed_key, resumed = engine.subscribe(
+        "BTCUSDT", "1m", "spot", "MA", {"period": 3}, full_history,
+    )
+    fresh = create_engine().compute(
+        "BTCUSDT", "1m", "spot", "MA", {"period": 3}, full_history,
+    )
+
+    assert resumed_key == key
+    assert engine.get_instance(key) is first_instance
+    assert resumed.to_dict() == fresh.to_dict()
+    assert engine.get_instance(key).bar_count == len(full_history)
+    assert initialized_events[-1].detail["computedRange"] == {
+        "start": full_history[0].time,
+        "end": full_history[-1].time,
+    }
+    instance_snapshot = next(
+        item for item in engine.snapshot()["instances"] if item["key"] == key.uid
+    )
+    assert instance_snapshot["first_committed"] == full_history[0].time
+    assert instance_snapshot["last_committed"] == full_history[-1].time
+
+
+def test_engine_prepend_resume_caches_complete_wide_result() -> None:
+    service = IndicatorRangeResultService(ttl_seconds=60, max_entries=8)
+    engine = create_engine()
+    service.bind_engine(engine)
+    full_history = _bars(12)
+    initial_tail = full_history[-5:]
+
+    key, _ = engine.subscribe(
+        "BTCUSDT", "1m", "spot", "VOL", {}, initial_tail,
+        exchange="binance",
+    )
+    engine.unsubscribe(key)
+    engine.subscribe(
+        "BTCUSDT", "1m", "spot", "VOL", {}, full_history,
+        exchange="binance",
+    )
+    meta = {
+        "kind": "builtin",
+        "exchange": "binance",
+        "market_type": "spot",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "VOL",
+        "params": {},
+        "indicatorId": key.uid,
+    }
+
+    cached = service.lookup_snapshot(
+        meta, full_history[0].time, full_history[-1].time,
+    )
+
+    assert cached is not None
+    assert cached["range"] == {
+        "start": full_history[0].time,
+        "end": full_history[-1].time,
+    }
+    assert len(cached["series"][0]["data"]) == len(full_history)
+    assert cached["series"][0]["data"][0]["time"] == full_history[0].time
+    assert cached["series"][0]["data"][-1]["time"] == full_history[-1].time
+
+
+def test_engine_event_range_without_computed_range_cannot_poison_wide_cache() -> None:
+    service = IndicatorRangeResultService(ttl_seconds=60, max_entries=8)
+    engine = create_engine()
+    full_history = _bars(12)
+    actual_tail = full_history[-5:]
+    key, result = engine.subscribe(
+        "BTCUSDT", "1m", "spot", "VOL", {}, actual_tail,
+        exchange="binance",
+    )
+    service._on_engine_event(IndicatorEvent(
+        event_type=IndicatorEventType.INSTANCE_INITIALIZED,
+        key=key,
+        full_result=result,
+        detail={"range": {
+            "start": full_history[0].time,
+            "end": full_history[-1].time,
+        }},
+    ))
+    meta = {
+        "kind": "builtin",
+        "exchange": "binance",
+        "market_type": "spot",
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "name": "VOL",
+        "params": {},
+        "indicatorId": key.uid,
+    }
+
+    assert service.lookup_snapshot(
+        meta, full_history[0].time, full_history[-1].time,
+    ) is None
+    cached_tail = service.lookup_snapshot(
+        meta, actual_tail[0].time, actual_tail[-1].time,
+    )
+    assert cached_tail is not None
+    assert cached_tail["range"] == {
+        "start": actual_tail[0].time,
+        "end": actual_tail[-1].time,
+    }
 
 
 class _CountingRangeDataManager:

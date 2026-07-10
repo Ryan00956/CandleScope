@@ -488,8 +488,10 @@ class IndicatorRangeResultService:
             return
         coverage = event.detail.get("computedRange") if isinstance(event.detail, dict) else None
         if not isinstance(coverage, dict):
-            coverage = event.detail.get("range") if isinstance(event.detail, dict) else None
-        if not isinstance(coverage, dict):
+            # ``detail.range`` may describe newly supplied seed bars rather
+            # than the bars actually represented by a reused warm instance.
+            # Without an explicit computedRange, the serialized result hull is
+            # the only safe cache boundary and must not be widened.
             coverage = self._result_time_range(event.full_result)
         if not isinstance(coverage, dict):
             return

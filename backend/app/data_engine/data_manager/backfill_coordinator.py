@@ -37,6 +37,13 @@ BACKFILL_REASON_PRIORITIES: dict[str, int] = {
     "background_gap_audit": 150,
 }
 
+# Public API waits are capped at eight seconds, so one minute preserves useful
+# late-wait resolution while the count limits protect a long-running process.
+_SCHEDULER_OUTCOME_HISTORY_LIMIT = 256
+_COORDINATOR_OUTCOME_HISTORY_LIMIT = 512
+_REQUEST_ID_ALIAS_HISTORY_LIMIT = 2048
+_RETAINED_OUTCOME_TTL_SECONDS = 60.0
+
 
 def priority_for_reason(reason: str | None, default: int = 100) -> int:
     """Return the scheduler priority for a demand reason."""
@@ -258,6 +265,7 @@ class _BackfillScheduler:
         self._buckets: dict[str, _TokenBucket] = {}
         self._coverage: dict[tuple[str, str, str, str], list[dict[str, int]]] = {}
         self._outcomes: dict[str, RepairOutcome] = {}
+        self._max_retained_outcomes = _SCHEDULER_OUTCOME_HISTORY_LIMIT
         self._seq = 0
         self._shutdown = False
         self._drain_timer: asyncio.TimerHandle | None = None
@@ -585,7 +593,7 @@ class _BackfillScheduler:
 
         if state.failed is not None or state.completed >= state.total:
             final = self._aggregate_outcome(state)
-            self._outcomes[state.request.request_id] = final
+            self._retain_outcome(state.request.request_id, final)
             self._complete(state.request, final)
             self._requests.pop(state.request.request_id, None)
             if series is not None and not series.pending and series.active is None:
@@ -594,6 +602,12 @@ class _BackfillScheduler:
             # Remaining chunks are already in the global queue. Keep the parent
             # visible in pending diagnostics while it waits for the next turn.
             series.pending.append(state.request.request_id)
+
+    def _retain_outcome(self, request_id: str, outcome: RepairOutcome) -> None:
+        self._outcomes[request_id] = outcome
+        while len(self._outcomes) > self._max_retained_outcomes:
+            oldest_request_id = next(iter(self._outcomes))
+            self._outcomes.pop(oldest_request_id, None)
 
     def _discard_remaining_chunks(self, state: _RequestState) -> None:
         for chunk_id in state.chunk_ids:
@@ -774,6 +788,12 @@ class BackfillCoordinator:
 
         self._futures: dict[str, asyncio.Future[RepairOutcome]] = {}
         self._outcomes: dict[str, RepairOutcome] = {}
+        self._outcome_expires_at: dict[str, float] = {}
+        self._request_id_aliases: dict[str, str] = {}
+        self._request_id_alias_expires_at: dict[str, float | None] = {}
+        self._max_retained_outcomes = _COORDINATOR_OUTCOME_HISTORY_LIMIT
+        self._max_request_id_aliases = _REQUEST_ID_ALIAS_HISTORY_LIMIT
+        self._retained_outcome_ttl_seconds = _RETAINED_OUTCOME_TTL_SECONDS
         self._shutdown = False
         self._scheduler = _BackfillScheduler(
             execute=self._run_with_retries,
@@ -800,9 +820,9 @@ class BackfillCoordinator:
         priority: int | None = None,
         requester: str = "query",
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> str:
         """Synchronous QueryEngine-compatible callback."""
-        self.request(RepairRequest(
+        return self.request(RepairRequest(
             symbol=symbol,
             interval=interval,
             start_ms=int(start_ms),
@@ -837,6 +857,20 @@ class BackfillCoordinator:
     async def request_and_wait(self, request: RepairRequest) -> RepairOutcome:
         request_id, future = self._request_in_loop(request)
         return await future
+
+    async def wait_for_request(self, request_id: str) -> RepairOutcome | None:
+        """Wait for an already-submitted repair request by id."""
+        while not self._shutdown:
+            self._prune_retained_state()
+            canonical_id = self._canonical_request_id(request_id)
+            outcome = self._outcomes.get(canonical_id)
+            if outcome is not None:
+                return outcome
+            future = self._futures.get(canonical_id)
+            if future is not None:
+                return await asyncio.shield(future)
+            await asyncio.sleep(0.01)
+        return None
 
     async def startup_scan(
         self,
@@ -1032,7 +1066,80 @@ class BackfillCoordinator:
         if self._shutdown:
             raise RuntimeError("BackfillCoordinator is shut down")
 
-        return self._scheduler.submit(request)
+        self._prune_retained_state()
+        canonical_id, future = self._scheduler.submit(request)
+        if canonical_id != request.request_id:
+            self._request_id_aliases[request.request_id] = canonical_id
+            self._request_id_alias_expires_at[request.request_id] = None
+            self._prune_retained_state()
+        return canonical_id, future
+
+    def _canonical_request_id(self, request_id: str) -> str:
+        canonical_id = request_id
+        seen: set[str] = set()
+        while canonical_id not in seen:
+            seen.add(canonical_id)
+            next_id = self._request_id_aliases.get(canonical_id)
+            if next_id is None:
+                break
+            canonical_id = next_id
+        return canonical_id
+
+    def _prune_retained_state(self, now: float | None = None) -> None:
+        current = time.monotonic() if now is None else now
+        expired_outcomes = [
+            request_id
+            for request_id, expires_at in self._outcome_expires_at.items()
+            if expires_at <= current
+        ]
+        for request_id in expired_outcomes:
+            self._drop_retained_outcome(request_id)
+
+        expired_aliases = [
+            request_id
+            for request_id, expires_at in self._request_id_alias_expires_at.items()
+            if expires_at is not None and expires_at <= current
+        ]
+        for request_id in expired_aliases:
+            self._drop_request_id_alias(request_id)
+
+        while len(self._outcomes) > self._max_retained_outcomes:
+            self._drop_retained_outcome(next(iter(self._outcomes)))
+        while len(self._request_id_aliases) > self._max_request_id_aliases:
+            self._drop_request_id_alias(next(iter(self._request_id_aliases)))
+
+    def _drop_retained_outcome(self, request_id: str) -> None:
+        self._outcomes.pop(request_id, None)
+        self._outcome_expires_at.pop(request_id, None)
+        aliases = [
+            alias_id
+            for alias_id in self._request_id_aliases
+            if self._canonical_request_id(alias_id) == request_id
+        ]
+        for alias_id in aliases:
+            self._drop_request_id_alias(alias_id)
+
+    def _drop_request_id_alias(self, request_id: str) -> None:
+        self._request_id_aliases.pop(request_id, None)
+        self._request_id_alias_expires_at.pop(request_id, None)
+
+    def _retain_completed_outcome(
+        self,
+        request: RepairRequest,
+        outcome: RepairOutcome,
+    ) -> None:
+        now = time.monotonic()
+        expires_at = now + self._retained_outcome_ttl_seconds
+        self._outcomes[request.request_id] = outcome
+        self._outcome_expires_at[request.request_id] = expires_at
+        aliases = [
+            alias_id
+            for alias_id in self._request_id_aliases
+            if self._canonical_request_id(alias_id) == request.request_id
+        ]
+        for alias_id in aliases:
+            self._request_id_alias_expires_at[alias_id] = expires_at
+        self._prune_retained_state(now)
 
     def _future_for(self, request: RepairRequest) -> asyncio.Future[RepairOutcome]:
         future = self._futures.get(request.request_id)
@@ -1444,7 +1551,7 @@ class BackfillCoordinator:
             return []
 
     def _complete(self, request: RepairRequest, outcome: RepairOutcome) -> None:
-        self._outcomes[request.request_id] = outcome
+        self._retain_completed_outcome(request, outcome)
         future = self._futures.pop(request.request_id, None)
         if future is not None and not future.done():
             future.set_result(outcome)

@@ -62,6 +62,37 @@ def test_gap_detector_reports_fully_empty_requested_interior_range() -> None:
     asyncio.run(_run())
 
 
+def test_gap_detector_reports_single_missing_native_3m_bar() -> None:
+    async def _run() -> None:
+        missing_open_ms = 1_783_648_260_000
+        interval_ms = 3 * 60 * 1000
+        detector = GapDetector(
+            BackfillConfig(gap_tolerance_bars=0),
+            _Storage({
+                missing_open_ms - interval_ms,
+                missing_open_ms + interval_ms,
+            }),
+        )
+
+        gaps = await detector.detect(
+            symbol="BTCUSDT",
+            intervals=["3m"],
+            range_start_ms=missing_open_ms,
+            range_end_ms=missing_open_ms,
+            exchange="binance",
+            market_type="spot",
+        )
+
+        assert len(gaps) == 1
+        gap = gaps[0]
+        assert gap.gap_type == GapType.INTERIOR
+        assert gap.start_ms == missing_open_ms
+        assert gap.end_ms == missing_open_ms
+        assert gap.missing_bars == 1
+
+    asyncio.run(_run())
+
+
 def test_gap_detector_monthly_uses_calendar_open_sequence() -> None:
     async def _run() -> None:
         detector = GapDetector(

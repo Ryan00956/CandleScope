@@ -200,6 +200,7 @@ def test_main_delegates_data_engine_runtime_wiring() -> None:
     assert offenders == []
     assert "start_data_engine" in text
     assert "bridge_indicator_engine" in text
+    assert "backfill_coordinator=runtime.backfill_coordinator" in text
 
 
 def test_runtime_attaches_only_stable_app_state_handles() -> None:
@@ -532,6 +533,36 @@ def test_data_manager_submits_query_missing_ranges_explicitly() -> None:
     assert result.backfill_triggered is True
     assert [r.reason for r in result.missing_ranges] == ["query_empty"]
     assert calls == [("BTC-USDT", "1m", 60_000, 120_000, "okx", "spot")]
+
+
+def test_data_manager_exposes_backfill_request_ids_from_trigger() -> None:
+    class _Storage:
+        def query_bars(self, **kwargs):
+            return []
+
+    calls: list[tuple] = []
+    dm = DataManager()
+    dm.set_storage(_Storage())  # type: ignore[arg-type]
+
+    def _trigger(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "request-123"
+
+    dm.set_backfill_trigger(_trigger)
+
+    result = dm.query(
+        "BTC-USDT",
+        "1m",
+        start_ms=60_000,
+        end_ms=120_000,
+        limit=2,
+        exchange="okx",
+        market_type="spot",
+    )
+
+    assert result.backfill_triggered is True
+    assert result.metadata["backfill_request_ids"] == ["request-123"]
+    assert calls[0][1]["reason"] == "query_empty"
 
 
 def test_stream_policy_plans_okx_base_stream_without_facade_logic() -> None:

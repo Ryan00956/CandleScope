@@ -140,6 +140,209 @@ def test_backfill_coordinator_merges_pending_requests_for_same_series() -> None:
     asyncio.run(_run())
 
 
+def test_backfill_coordinator_waits_for_cross_thread_deduped_request() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.started.set()
+                await self.release.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+
+        canonical_id = coord.request(_request(0, 60_000, request_id="canonical"))
+        await engine.started.wait()
+
+        provisional_id = await asyncio.to_thread(
+            coord.trigger,
+            "BTCUSDT",
+            "1m",
+            0,
+            60_000,
+            "binance",
+            "spot",
+        )
+        assert provisional_id != canonical_id
+
+        engine.release.set()
+        outcome = await asyncio.wait_for(
+            coord.wait_for_request(provisional_id),
+            timeout=1.0,
+        )
+
+        assert outcome is not None
+        assert outcome.request.request_id == canonical_id
+        assert coord.snapshot()["deduped"] == 1
+        assert coord._request_id_aliases[provisional_id] == canonical_id
+        assert list(coord._outcomes) == [canonical_id]
+        assert await coord.wait_for_request(provisional_id) is outcome
+
+    asyncio.run(_run())
+
+
+def test_backfill_coordinator_waits_for_cross_thread_merged_request() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+
+        coord.request(_request(0, 100_000, request_id="current"))
+        await engine.first_started.wait()
+        canonical_id = coord.request(
+            _request(200_000, 300_000, request_id="pending")
+        )
+
+        provisional_id = await asyncio.to_thread(
+            coord.trigger,
+            "BTCUSDT",
+            "1m",
+            250_000,
+            500_000,
+            "binance",
+            "spot",
+        )
+        assert provisional_id != canonical_id
+        await _wait_until(lambda: coord.snapshot()["merged"] == 1)
+
+        engine.release_first.set()
+        outcome = await asyncio.wait_for(
+            coord.wait_for_request(provisional_id),
+            timeout=1.0,
+        )
+
+        assert outcome is not None
+        assert outcome.request.request_id == canonical_id
+        assert outcome.request.start_ms == 200_000
+        assert outcome.request.end_ms == 500_000
+        assert coord._request_id_aliases[provisional_id] == canonical_id
+        assert provisional_id not in coord._outcomes
+        assert await coord.wait_for_request(provisional_id) is outcome
+
+    asyncio.run(_run())
+
+
+def test_backfill_coordinator_bounds_aliases_without_copying_outcomes() -> None:
+    async def _run() -> None:
+        class _Engine:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def run(self, **kwargs):
+                self.started.set()
+                await self.release.wait()
+                return _RepairReport(status="completed")
+
+        engine = _Engine()
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=engine,
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+        coord._max_request_id_aliases = 3
+
+        canonical_id = coord.request(_request(0, 60_000, request_id="canonical"))
+        await engine.started.wait()
+        provisional_ids = []
+        for _ in range(5):
+            provisional_ids.append(await asyncio.to_thread(
+                coord.trigger,
+                "BTCUSDT",
+                "1m",
+                0,
+                60_000,
+                "binance",
+                "spot",
+            ))
+        await _wait_until(lambda: coord.snapshot()["deduped"] == 5)
+
+        assert len(coord._request_id_aliases) == 3
+        assert provisional_ids[-1] in coord._request_id_aliases
+
+        engine.release.set()
+        outcome = await asyncio.wait_for(
+            coord.wait_for_request(provisional_ids[-1]),
+            timeout=1.0,
+        )
+
+        assert outcome is not None
+        assert outcome.request.request_id == canonical_id
+        assert list(coord._outcomes) == [canonical_id]
+        assert all(request_id not in coord._outcomes for request_id in provisional_ids)
+
+    asyncio.run(_run())
+
+
+def test_backfill_coordinator_bounds_canonical_and_scheduler_outcomes() -> None:
+    async def _run() -> None:
+        class _Engine:
+            async def run(self, **kwargs):
+                return _RepairReport(status="completed")
+
+        dm = _DataManager()
+        coord = BackfillCoordinator(
+            storage=_Storage(),
+            bars_backfilled=dm.on_bars_backfilled,
+            emit_event=dm.event_bus.emit,
+            engine=_Engine(),
+            loop=asyncio.get_running_loop(),
+            base_delay_seconds=0,
+        )
+        coord._max_retained_outcomes = 2
+        coord._scheduler._max_retained_outcomes = 2
+
+        for index in range(4):
+            await coord.request_and_wait(
+                _request(
+                    index * 120_000,
+                    index * 120_000 + 60_000,
+                    request_id=f"request-{index}",
+                )
+            )
+
+        assert list(coord._outcomes) == ["request-2", "request-3"]
+        assert list(coord._scheduler._outcomes) == ["request-2", "request-3"]
+
+    asyncio.run(_run())
+
+
 def test_backfill_coordinator_preserves_highest_priority_when_merging_pending() -> None:
     async def _run() -> None:
         class _Engine:

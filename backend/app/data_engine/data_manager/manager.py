@@ -620,6 +620,7 @@ class DataManager:
             return result
 
         submitted = 0
+        request_ids: list[str] = []
         for missing in result.missing_ranges:
             demand_reason = reason or self._semantic_reason_for_missing(missing.reason)
             metadata = {
@@ -630,7 +631,7 @@ class DataManager:
                 },
             }
             try:
-                self._call_backfill_trigger(
+                request_id = self._call_backfill_trigger(
                     missing.symbol,
                     missing.interval,
                     missing.start_ms,
@@ -642,6 +643,8 @@ class DataManager:
                     requester=requester,
                     metadata=metadata,
                 )
+                if isinstance(request_id, str) and request_id:
+                    request_ids.append(request_id)
                 submitted += 1
             except Exception as exc:
                 logger.error(
@@ -658,6 +661,8 @@ class DataManager:
 
         if submitted:
             result.backfill_triggered = True
+            if request_ids:
+                result.metadata["backfill_request_ids"] = request_ids
             self.query_engine.note_backfill_triggered(submitted)
         return result
 
@@ -674,10 +679,10 @@ class DataManager:
         priority: int | None = None,
         requester: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> Any:
         trigger = self._backfill_trigger
         if trigger is None:
-            return
+            return None
 
         raw_kwargs = {
             "reason": reason,
@@ -701,7 +706,7 @@ class DataManager:
         except (TypeError, ValueError):
             pass
 
-        trigger(symbol, interval, start_ms, end_ms, exchange, market_type, **kwargs)
+        return trigger(symbol, interval, start_ms, end_ms, exchange, market_type, **kwargs)
 
     def request_backfill(
         self,

@@ -29,6 +29,12 @@ import {
 import { planVisibleRangeRestore } from "../features/chart-session/visibleRangeStorage";
 import { buildPaneConfigKey, loadPaneHeights, savePaneHeights } from "../features/chart-session/paneLayoutStorage";
 import {
+  resolveDataTimeSet,
+  shouldAdvanceIndicatorSeriesReady,
+  shouldRequestMoreLeft,
+  shouldRestoreChartViewport,
+} from "./singleChartPaneLifecycle";
+import {
   loadDrawingEngineHost,
   preloadDrawingEngineHost,
   shouldLoadDrawingEngine,
@@ -72,10 +78,6 @@ function filterFillsForLines(fills, lines) {
     lineKeys.has(`${fill.indicatorId || ""}:${fill.plot1_id}`)
     && lineKeys.has(`${fill.indicatorId || ""}:${fill.plot2_id}`)
   ));
-}
-
-function resolveDataTimeSet(seriesStore) {
-  return seriesStore?.timeSet?.() || new Set();
 }
 
 function candleSnapshotFromStore(store) {
@@ -254,6 +256,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const isSyncingRef = useRef(false);
   const userInteractedRef = useRef(false);
   const hasRestoredRangeRef = useRef(false);
+  const lastViewportRestoreSourceRef = useRef(null);
   const visibleRangeSaveTimerRef = useRef(null);
   const prevSubPaneIdsRef = useRef(new Set());
   const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
@@ -378,9 +381,16 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const handleVisibleLogicalRangeChange = (range) => {
       if (isSyncingRef.current || !range) return;
       if (userInteractedRef.current) scheduleVisibleRangeSave();
-      if (onNeedMoreLeftRef.current && canLoadMoreLeftRef.current && range.from <= LEFT_EDGE_TRIGGER_BARS) {
-        const currentData = dataRef.current;
-        if (currentData?.length > 0) onNeedMoreLeftRef.current(currentData[0].time);
+      const currentData = dataRef.current;
+      if (shouldRequestMoreLeft({
+        canLoad: canLoadMoreLeftRef.current,
+        hasData: currentData?.length > 0,
+        hasHandler: Boolean(onNeedMoreLeftRef.current),
+        rangeFrom: range.from,
+        triggerBars: LEFT_EDGE_TRIGGER_BARS,
+        userInteracted: userInteractedRef.current,
+      })) {
+        onNeedMoreLeftRef.current(currentData[0].time);
       }
     };
 
@@ -497,6 +507,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   useEffect(() => {
     userInteractedRef.current = false;
     hasRestoredRangeRef.current = false;
+    lastViewportRestoreSourceRef.current = null;
     prevBarcoloredDataRef.current = [];
     viewportControllerRef.current?.resetFit();
   }, [datasetKey]);
@@ -581,18 +592,36 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);
-    if (!rows.length || hasRestoredRangeRef.current) return;
-    if (dataMeta?.status === "loading" || dataMeta?.seriesKey !== datasetKey) return;
+    if (!shouldRestoreChartViewport({
+      dataMeta,
+      datasetKey,
+      hasRestored: hasRestoredRangeRef.current,
+      hasRows: rows.length > 0,
+      lastRestoreSource: lastViewportRestoreSourceRef.current,
+    })) return;
 
     const restorePlan = planVisibleRangeRestore(savedVisibleRange, rows, dataMeta);
-    viewportControllerRef.current?.applySessionRestore(restorePlan, { sessionKey: datasetKey });
+    const restored = viewportControllerRef.current?.applySessionRestore(
+      restorePlan,
+      { sessionKey: datasetKey },
+    );
+    recordPerfEvent("chart.viewport.restore", {
+      applied: Boolean(restored),
+      bars: rows.length,
+      datasetKey,
+      mode: restorePlan?.mode || "fit",
+      visibleLogicalRange: chartRef.current?.timeScale?.().getVisibleLogicalRange?.() || null,
+    });
     hasRestoredRangeRef.current = true;
+    lastViewportRestoreSourceRef.current = dataMeta?.source || null;
   }, [dataMeta, datasetKey, savedVisibleRange, seriesStore]);
 
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
     const expectedPaneCount = Math.max(1, paneDescriptors.length);
+    const paneCountBefore = chart.panes?.()?.length ?? 1;
+    const paneStructureChanged = paneCountBefore !== expectedPaneCount;
 
     for (let paneIndex = 1; paneIndex < expectedPaneCount; paneIndex += 1) {
       ensurePane(chart, paneIndex);
@@ -643,6 +672,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     }
     indicatorSeriesRef.current = [];
 
+    let createdSeriesCount = 0;
     for (const pane of paneDescriptors) {
       for (const line of pane.lines || []) {
         if (!line.data?.length) continue;
@@ -669,6 +699,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
             path: "single-rebuild",
           });
           indicatorSeriesRef.current.push({ paneId: pane.id, paneIndex: pane.paneIndex, series, lineConfig: line, data: validData });
+          createdSeriesCount += 1;
         } catch (err) {
           console.warn("SingleChartPanes: failed to add indicator series:", err);
         }
@@ -681,7 +712,14 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         chart.removePane(paneIndex);
       } catch { /* */ }
     }
-    setSeriesReady((prev) => prev + 1);
+    if (shouldAdvanceIndicatorSeriesReady({
+      createdSeriesCount,
+      paneStructureChanged,
+      removedSeriesCount,
+      structureChanged,
+    })) {
+      setSeriesReady((prev) => prev + 1);
+    }
   }, [dataTimeSet, drawingTool, paneDescriptors]);
 
   useEffect(() => {

@@ -17,6 +17,7 @@ import asyncio
 import inspect
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -55,6 +56,19 @@ RELATED_WARMUP_TARGET_BARS = 1_000
 def _get_data_manager(request: Request) -> Any:
     """Retrieve the DataManager from app state."""
     return getattr(request.app.state, "data_manager", None)
+
+
+def _get_data_engine_runtime(request: Request) -> Any:
+    return getattr(request.app.state, "data_engine_runtime", None)
+
+
+def _get_backfill_coordinator(request: Request) -> Any:
+    runtime = _get_data_engine_runtime(request)
+    if runtime is not None:
+        get_coordinator = getattr(runtime, "get_backfill_coordinator", None)
+        if callable(get_coordinator):
+            return get_coordinator()
+    return getattr(request.app.state, "backfill_coordinator", None)
 
 
 def _require_data_manager(request: Request) -> Any:
@@ -135,6 +149,87 @@ def _call_data_manager_method(method: Any, *args: Any, **kwargs: Any) -> Any:
     except (TypeError, ValueError):
         pass
     return method(*args, **kwargs)
+
+
+def _backfill_request_ids(result: Any) -> list[str]:
+    metadata = getattr(result, "metadata", None) or {}
+    raw_ids = metadata.get("backfill_request_ids") or []
+    if isinstance(raw_ids, str):
+        raw_ids = [raw_ids]
+    ids: list[str] = []
+    seen: set[str] = set()
+    for raw_id in raw_ids:
+        request_id = str(raw_id or "").strip()
+        if request_id and request_id not in seen:
+            ids.append(request_id)
+            seen.add(request_id)
+    return ids
+
+
+async def _wait_for_backfill_requests(
+    request: Request,
+    result: Any,
+) -> bool:
+    request_ids = _backfill_request_ids(result)
+    if not request_ids:
+        return False
+
+    coordinator = _get_backfill_coordinator(request)
+    wait_for_request = getattr(coordinator, "wait_for_request", None)
+    if not callable(wait_for_request):
+        return False
+
+    try:
+        await asyncio.gather(*(wait_for_request(request_id) for request_id in request_ids))
+        return True
+    except Exception:
+        logger.debug("Waiting for backfill requests failed", exc_info=True)
+        return False
+
+
+async def _poll_backfill_storage(
+    request: Request,
+    result: Any,
+    *,
+    timeout_seconds: float,
+    requery: Callable[[bool], Awaitable[Any]],
+) -> Any:
+    """Interleave exact backfill waiting with bounded storage re-queries."""
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    wait_task: asyncio.Task[bool] | None = asyncio.create_task(
+        _wait_for_backfill_requests(request, result)
+    )
+    exact_wait_completed = False
+
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                wait_seconds = min(0.2, remaining)
+                if wait_task is None:
+                    await asyncio.sleep(wait_seconds)
+                else:
+                    done, _pending = await asyncio.wait(
+                        {wait_task},
+                        timeout=wait_seconds,
+                    )
+                    if wait_task in done:
+                        exact_wait_completed = await wait_task
+                        wait_task = None
+
+            # Always inspect storage after each bounded wait, including the
+            # final timeout. One chunk may have committed while another exact
+            # request is still pending.
+            result = await requery(False)
+            if result.bars or exact_wait_completed or time.monotonic() >= deadline:
+                return result
+    finally:
+        if wait_task is not None:
+            wait_task.cancel()
+            try:
+                await wait_task
+            except asyncio.CancelledError:
+                pass
 
 
 def _last_closed_open_ms(interval: str, now_ms: int | None = None) -> int:
@@ -522,7 +617,7 @@ async def get_klines_history(
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
     max_wait_ms: int = Query(
-        2500,
+        3500,
         ge=0,
         le=8000,
         description=(
@@ -576,10 +671,12 @@ async def get_klines_history(
         # auto_backfill=False so we wait for the already-scheduled backfill
         # instead of spamming duplicate backfill requests.
         if max_wait_ms > 0 and not result.bars and backfill_triggered:
-            deadline = time.monotonic() + (max_wait_ms / 1000)
-            while not result.bars and time.monotonic() < deadline:
-                await asyncio.sleep(0.2)
-                result = await _run_history_query(auto_backfill=False)
+            result = await _poll_backfill_storage(
+                request,
+                result,
+                timeout_seconds=max_wait_ms / 1000,
+                requery=_run_history_query,
+            )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DataManager history query failed: {exc}") from exc
 
@@ -795,7 +892,7 @@ async def get_klines_before(
     exchange: str = Query(DEFAULT_EXCHANGE, description="Exchange, e.g. binance"),
     market_type: str = Query(DEFAULT_MARKET_TYPE, description="Market type: spot, futures, swap"),
     max_wait_ms: int = Query(
-        2500,
+        4500,
         ge=0,
         le=8000,
         description=(
@@ -840,10 +937,12 @@ async def get_klines_before(
         # candle series is still empty. Poll re-queries pass auto_backfill=False
         # to avoid spamming duplicate backfill requests.
         if max_wait_ms > 0 and not result.bars and backfill_triggered:
-            deadline = time.monotonic() + (max_wait_ms / 1000)
-            while not result.bars and time.monotonic() < deadline:
-                await asyncio.sleep(0.2)
-                result = await _run_before_query(auto_backfill=False)
+            result = await _poll_backfill_storage(
+                request,
+                result,
+                timeout_seconds=max_wait_ms / 1000,
+                requery=_run_before_query,
+            )
             # If the wait timed out before the backfill delivered bars, keep
             # has_more=True (data is still on the way) so the client retries
             # instead of concluding there is no more history. Re-queries made

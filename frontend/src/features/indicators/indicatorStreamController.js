@@ -83,10 +83,14 @@ export function useIndicatorStreamController({
       indicatorId,
       start,
       end,
-      payload?.timestampMs || "",
     ].join("|");
     if (recomputedRangeSignaturesRef.current.has(signature)) return;
-    if (requestIndicatorRange(start, end, "recomputed", { indicatorIds: [indicatorId] })) {
+    if (requestIndicatorRange(start, end, "recomputed", {
+      indicatorIds: [indicatorId],
+      onSettled: (ok) => {
+        if (!ok) recomputedRangeSignaturesRef.current.delete(signature);
+      },
+    })) {
       recomputedRangeSignaturesRef.current.add(signature);
     }
   }, [exchange, interval, marketType, requestIndicatorRange, symbol]);

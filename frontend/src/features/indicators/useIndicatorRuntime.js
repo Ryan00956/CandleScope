@@ -73,9 +73,36 @@ function resolveRuntimeInputs(options = {}) {
 }
 
 const INDICATOR_RANGE_RETRY_MS = 500;
-const INDICATOR_HTTP_RANGE_RETRY_MAX_ATTEMPTS = 3;
+const INDICATOR_HTTP_RANGE_RETRY_MAX_ATTEMPTS = 1;
+const INDICATOR_HTTP_RANGE_RETRY_DEFAULT_MS = 3000;
 const INDICATOR_HTTP_RANGE_DEDUP_WINDOW_MS = 10_000;
 const INDICATOR_HTTP_RANGE_REQUEST_STATE_TTL_MS = 60_000;
+
+export function planIndicatorRangeRetry({
+  attempts,
+  retryAfterMs,
+  maxAttempts = INDICATOR_HTTP_RANGE_RETRY_MAX_ATTEMPTS,
+} = {}) {
+  const normalizedAttempts = Math.max(0, Math.floor(Number(attempts) || 0));
+  const normalizedMaxAttempts = Math.max(0, Math.floor(Number(maxAttempts) || 0));
+  if (normalizedAttempts >= normalizedMaxAttempts) {
+    return {
+      delayMs: null,
+      nextAttempts: normalizedAttempts,
+      shouldRetry: false,
+    };
+  }
+
+  const requestedDelayMs = Number(retryAfterMs);
+  const delayMs = Number.isFinite(requestedDelayMs) && requestedDelayMs > 0
+    ? Math.max(INDICATOR_HTTP_RANGE_RETRY_DEFAULT_MS, Math.floor(requestedDelayMs))
+    : INDICATOR_HTTP_RANGE_RETRY_DEFAULT_MS;
+  return {
+    delayMs,
+    nextAttempts: normalizedAttempts + 1,
+    shouldRetry: true,
+  };
+}
 
 function normalizeRangeBoundary(value) {
   const normalized = Math.floor(Number(value));
@@ -550,13 +577,29 @@ export function useIndicatorRuntime(options = {}) {
             }
             if (payload.code === "INDICATOR_RANGE_NOT_READY") {
               const attempts = rangeRetryAttemptsRef.current.get(retryKey) || 0;
-              if (attempts < INDICATOR_HTTP_RANGE_RETRY_MAX_ATTEMPTS) {
-                rangeRetryAttemptsRef.current.set(retryKey, attempts + 1);
-                const retryAfter = Number(payload.detail?.retryAfterMs || 3000);
-                setTimeout(run, Number.isFinite(retryAfter) ? retryAfter : 3000);
+              const retryPlan = planIndicatorRangeRetry({
+                attempts,
+                retryAfterMs: payload.detail?.retryAfterMs,
+              });
+              if (retryPlan.shouldRetry) {
+                rangeRetryAttemptsRef.current.set(retryKey, retryPlan.nextAttempts);
+                setTimeout(run, retryPlan.delayMs);
                 return;
               }
+              // Backfill completion/recomputed events are the primary wake-up.
+              // Do not turn a readiness probe into an unbounded polling loop,
+              // and release dedup so the completion event can retry immediately.
+              rangeRetryAttemptsRef.current.delete(retryKey);
+              rangeRequestStartedAtRef.current.delete(rangeRequestKey);
+              settleRangeRequest(false, {
+                code: payload.code,
+                deferred: true,
+                payload,
+              });
+              finishRangeRequest();
+              return;
             }
+            rangeRetryAttemptsRef.current.delete(retryKey);
             if (String(reason || "").startsWith("auto-")) {
               console.warn("Indicator range auto-catchup failed", payload);
             } else {

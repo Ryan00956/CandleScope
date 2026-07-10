@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const PENDING_LOAD_MORE_LEFT_SAFETY_MAX_ATTEMPTS = 1;
-const PENDING_LOAD_MORE_LEFT_SAFETY_MS = 6_000;
+const PENDING_LOAD_MORE_LEFT_SAFETY_MS = 3_000;
 const LOAD_MORE_PAGE_SIZE = 500;
 
 export function useChartLoadMoreLeft({
@@ -45,7 +45,7 @@ export function useChartLoadMoreLeft({
             commitMergedChartData(symbol, interval, older, { source: "history-before-page" });
           }
         } else if (result.has_more) {
-          console.log(`[LoadMoreLeft] 0 bars returned for ${interval}, backfill likely in progress - will retry in 5s`);
+          console.log(`[LoadMoreLeft] 0 bars returned for ${interval}, backfill likely in progress - will retry soon`);
 
           setTimeout(() => {
             if (!seriesDataFeed.markBeforePageSafetyRetry(

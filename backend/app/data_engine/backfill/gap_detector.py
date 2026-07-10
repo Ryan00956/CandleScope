@@ -447,7 +447,7 @@ class GapDetector:
         Queries all existing open_times and checks for non-contiguous
         sequences.
         """
-        if scan_start >= scan_end:
+        if scan_start > scan_end:
             return []
 
         try:

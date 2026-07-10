@@ -152,7 +152,7 @@ export class SeriesDataFeed {
     setError = () => {},
     setConnectionStatus = () => {},
     setLoading = () => {},
-    cooldownMs = 10_000,
+    cooldownMs = 3_000,
     completionMaxAttempts = 3,
   } = {}) {
     if (msg?.type !== "backfill_completed") return false;
@@ -304,8 +304,8 @@ export class SeriesDataFeed {
     signal,
     commit = "active",
     cooldownMs = 3_000,
-    pendingCooldownMs = 5_000,
-    errorCooldownMs = 5_000,
+    pendingCooldownMs = 2_000,
+    errorCooldownMs = 3_000,
   } = {}) {
     if (this.isBeforePageCoolingDown(series)) {
       return { skipped: true, reason: "cooldown", data: [], rows: [] };

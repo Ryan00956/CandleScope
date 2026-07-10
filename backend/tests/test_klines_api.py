@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import time
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -98,6 +101,20 @@ def _client(data_manager=None) -> TestClient:
     return TestClient(app)
 
 
+def _client_with_runtime(data_manager=None, backfill_coordinator=None) -> TestClient:
+    class _Runtime:
+        def get_backfill_coordinator(self):
+            return backfill_coordinator
+
+    app = FastAPI()
+    app.include_router(klines_router, prefix="/api/v1")
+    if data_manager is not None:
+        app.state.data_manager = data_manager
+    if backfill_coordinator is not None:
+        app.state.data_engine_runtime = _Runtime()
+    return TestClient(app)
+
+
 def test_get_klines_returns_503_without_data_manager() -> None:
     client = _client()
 
@@ -174,6 +191,303 @@ def test_get_klines_uses_data_manager_when_available() -> None:
             "market_type": "spot",
         }
     ]
+
+
+def test_history_before_waits_for_backfill_future_before_returning_rows() -> None:
+    class _BeforeDataManager:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        def query_before(
+            self,
+            symbol: str,
+            interval: str,
+            before_ms: int,
+            limit: int,
+            exchange: str,
+            *,
+            market_type: str,
+            auto_backfill: bool | None = None,
+            backfill_reason: str | None = None,
+            backfill_requester: str | None = None,
+        ) -> QueryResult:
+            self.calls.append({
+                "auto_backfill": auto_backfill,
+                "backfill_reason": backfill_reason,
+                "backfill_requester": backfill_requester,
+            })
+            if len(self.calls) == 1:
+                return QueryResult(
+                    bars=[],
+                    symbol=symbol,
+                    interval=interval,
+                    exchange=exchange,
+                    market_type=market_type,
+                    source=QuerySource.EMPTY,
+                    total=0,
+                    has_more=True,
+                    backfill_triggered=True,
+                    metadata={"backfill_request_ids": ["req-before-1"]},
+                )
+            bars = [BarData(time=(before_ms // 1000) - 60, open=1, high=2, low=1, close=2, volume=10)]
+            return QueryResult(
+                bars=bars,
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.STORAGE,
+                total=len(bars),
+                has_more=True,
+            )
+
+    class _BackfillCoordinator:
+        def __init__(self) -> None:
+            self.waited: list[str] = []
+
+        async def wait_for_request(self, request_id: str):
+            self.waited.append(request_id)
+            return object()
+
+    dm = _BeforeDataManager()
+    coordinator = _BackfillCoordinator()
+    client = _client_with_runtime(dm, coordinator)
+
+    response = client.get(
+        "/api/v1/klines/history/before",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "before": 1_700_000_000,
+            "bars": 500,
+            "exchange": "binance",
+            "market_type": "spot",
+            "max_wait_ms": 1000,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["source"] == "storage"
+    assert coordinator.waited == ["req-before-1"]
+    assert dm.calls == [
+        {
+            "auto_backfill": None,
+            "backfill_reason": "visible_load_more",
+            "backfill_requester": "klines_history_before",
+        },
+        {
+            "auto_backfill": False,
+            "backfill_reason": "visible_load_more",
+            "backfill_requester": "klines_history_before",
+        },
+    ]
+
+
+def test_history_requeries_storage_after_backfill_future_times_out() -> None:
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.calls: list[bool | None] = []
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+        ) -> QueryResult:
+            self.calls.append(auto_backfill)
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.EMPTY,
+                total=0,
+                backfill_triggered=len(self.calls) == 1,
+                metadata={"backfill_request_ids": ["req-history-timeout"]},
+            )
+
+    class _NeverCompletesCoordinator:
+        async def wait_for_request(self, request_id: str):
+            assert request_id == "req-history-timeout"
+            await asyncio.Event().wait()
+
+    dm = _HistoryDataManager()
+    client = _client_with_runtime(dm, _NeverCompletesCoordinator())
+
+    response = client.get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "days": 0.001,
+            "exchange": "binance",
+            "market_type": "spot",
+            "max_wait_ms": 10,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 0
+    assert response.json()["backfill_triggered"] is True
+    assert dm.calls[0] is None
+    assert len(dm.calls) >= 2
+    assert all(auto_backfill is False for auto_backfill in dm.calls[1:])
+
+
+def test_history_returns_promptly_when_completed_backfill_has_no_rows() -> None:
+    class _HistoryDataManager:
+        def __init__(self) -> None:
+            self.calls: list[bool | None] = []
+
+        def query(
+            self,
+            symbol: str,
+            interval: str,
+            *,
+            start_ms: int,
+            end_ms: int,
+            limit: int,
+            exchange: str,
+            market_type: str,
+            auto_backfill: bool | None = None,
+        ) -> QueryResult:
+            self.calls.append(auto_backfill)
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.EMPTY,
+                total=0,
+                backfill_triggered=len(self.calls) == 1,
+                metadata={"backfill_request_ids": ["req-history-completed"]},
+            )
+
+    class _CompletedCoordinator:
+        async def wait_for_request(self, request_id: str):
+            assert request_id == "req-history-completed"
+            return object()
+
+    dm = _HistoryDataManager()
+    client = _client_with_runtime(dm, _CompletedCoordinator())
+
+    started = time.perf_counter()
+    response = client.get(
+        "/api/v1/klines/history",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "days": 0.001,
+            "exchange": "binance",
+            "market_type": "spot",
+            "max_wait_ms": 2000,
+        },
+    )
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    assert response.json()["count"] == 0
+    assert dm.calls == [None, False]
+    assert elapsed < 1.0
+
+
+def test_history_before_returns_partial_write_when_aggregate_wait_times_out() -> None:
+    class _BeforeDataManager:
+        def __init__(self) -> None:
+            self.calls: list[bool | None] = []
+            self.partial_write_committed = False
+
+        def query_before(
+            self,
+            symbol: str,
+            interval: str,
+            before_ms: int,
+            limit: int,
+            exchange: str,
+            *,
+            market_type: str,
+            auto_backfill: bool | None = None,
+        ) -> QueryResult:
+            self.calls.append(auto_backfill)
+            if self.partial_write_committed:
+                bars = [
+                    BarData(
+                        time=(before_ms // 1000) - 60,
+                        open=1,
+                        high=2,
+                        low=1,
+                        close=2,
+                        volume=10,
+                    )
+                ]
+                return QueryResult(
+                    bars=bars,
+                    symbol=symbol,
+                    interval=interval,
+                    exchange=exchange,
+                    market_type=market_type,
+                    source=QuerySource.STORAGE,
+                    total=len(bars),
+                    has_more=True,
+                )
+            return QueryResult(
+                bars=[],
+                symbol=symbol,
+                interval=interval,
+                exchange=exchange,
+                market_type=market_type,
+                source=QuerySource.EMPTY,
+                total=0,
+                has_more=True,
+                backfill_triggered=True,
+                metadata={
+                    "backfill_request_ids": ["req-before-written", "req-before-pending"],
+                },
+            )
+
+    class _PartialCoordinator:
+        async def wait_for_request(self, request_id: str):
+            if request_id == "req-before-written":
+                dm.partial_write_committed = True
+                return object()
+            assert request_id == "req-before-pending"
+            await asyncio.Event().wait()
+
+    dm = _BeforeDataManager()
+    client = _client_with_runtime(dm, _PartialCoordinator())
+
+    started = time.perf_counter()
+    response = client.get(
+        "/api/v1/klines/history/before",
+        params={
+            "symbol": "BTCUSDT",
+            "interval": "1m",
+            "before": 1_700_000_000,
+            "bars": 500,
+            "exchange": "binance",
+            "market_type": "spot",
+            "max_wait_ms": 2000,
+        },
+    )
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    assert payload["source"] == "storage"
+    assert payload["has_more"] is True
+    assert dm.calls == [None, False]
+    assert elapsed < 1.0
 
 
 def test_history_query_triggers_data_manager_backfill_request_when_empty() -> None:

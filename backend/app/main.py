@@ -99,7 +99,10 @@ async def _init_data_manager() -> None:
         runtime.attach_to_app_state(app.state)
 
         try:
-            indicator_engine = bridge_indicator_engine(runtime.data_manager)
+            indicator_engine = bridge_indicator_engine(
+                runtime.data_manager,
+                backfill_coordinator=runtime.backfill_coordinator,
+            )
             app.state.indicator_engine = indicator_engine
             print("[startup] IndicatorEngine bridged to DataManager ✓")
         except Exception as exc:

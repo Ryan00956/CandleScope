@@ -27,6 +27,7 @@ import logging
 import time
 from typing import Any, Callable
 
+from app.core import config
 from app.data_engine.data_manager.models import BarData
 
 from .base import Indicator
@@ -61,11 +62,28 @@ class IndicatorEngine:
         for real-time push to frontends.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        warm_ttl_seconds: float | None = None,
+        warm_max_instances: int | None = None,
+    ) -> None:
         # Instance cache: IndicatorKey -> Indicator
         self._instances: dict[IndicatorKey, Indicator] = {}
         # Reference counting: IndicatorKey -> subscriber count
         self._refcounts: dict[IndicatorKey, int] = {}
+        # Zero-ref instances stay warm for fast interval switches.  They are
+        # detached from stream dispatch and catch up from subscribe seed bars.
+        self._idle_since: dict[IndicatorKey, float] = {}
+        self._last_committed: dict[IndicatorKey, int] = {}
+        self._warm_ttl_seconds = max(0.0, float(
+            config.INDICATOR_ENGINE_WARM_TTL_SECONDS
+            if warm_ttl_seconds is None else warm_ttl_seconds
+        ))
+        self._warm_max_instances = max(0, int(
+            config.INDICATOR_ENGINE_WARM_MAX_INSTANCES
+            if warm_max_instances is None else warm_max_instances
+        ))
         # Event listeners
         self._listeners: list[EventListener] = []
         # Track which (symbol, interval) streams have active instances
@@ -85,6 +103,8 @@ class IndicatorEngine:
         """Stop the engine and destroy all instances."""
         self._instances.clear()
         self._refcounts.clear()
+        self._idle_since.clear()
+        self._last_committed.clear()
         self._stream_keys.clear()
         self._started = False
         logger.info("IndicatorEngine stopped -- all instances destroyed")
@@ -168,6 +188,7 @@ class IndicatorEngine:
         Returns:
             (key, result) -- result is None if bars not provided.
         """
+        self._prune_idle_instances()
         key = IndicatorKey(
             symbol,
             interval,
@@ -183,6 +204,7 @@ class IndicatorEngine:
 
         # Bump refcount
         self._refcounts[key] = self._refcounts.get(key, 0) + 1
+        self._idle_since.pop(key, None)
 
         # Track stream
         topic = key.series_topic
@@ -195,24 +217,73 @@ class IndicatorEngine:
         if bars and not instance.is_initialized:
             try:
                 instance.init(bars)
+                self._last_committed[key] = max(int(bar.time) for bar in bars)
                 result = instance.build_result(key)
-                self._emit(IndicatorEventType.INSTANCE_INITIALIZED, key, full_result=result)
+                self._emit(
+                    IndicatorEventType.INSTANCE_INITIALIZED,
+                    key,
+                    full_result=result,
+                    detail={"range": {
+                        "start": min(int(bar.time) for bar in bars),
+                        "end": max(int(bar.time) for bar in bars),
+                    }},
+                )
             except Exception as exc:
                 logger.error("Init failed for %s: %s", key.uid, exc, exc_info=True)
 
         elif bars and instance.is_initialized:
-            result = instance.build_result(key)
+            try:
+                last_committed = self._last_committed.get(key, 0)
+                confirmed = sorted(
+                    (bar for bar in bars if getattr(bar, "is_closed", True)),
+                    key=lambda bar: int(bar.time),
+                )
+                confirmed_times = {int(bar.time) for bar in confirmed}
+                truncated_before_tail = bool(
+                    last_committed
+                    and confirmed
+                    and min(confirmed_times) > last_committed
+                    and last_committed not in confirmed_times
+                )
+                if truncated_before_tail:
+                    # The seed no longer overlaps the warm checkpoint, so an
+                    # append-only catch-up could silently skip closed bars.
+                    instance.recompute(confirmed)
+                    self._last_committed[key] = max(confirmed_times)
+                else:
+                    catch_up = [bar for bar in confirmed if int(bar.time) > last_committed]
+                    for bar in catch_up:
+                        instance.update_closed(bar)
+                        self._last_committed[key] = int(bar.time)
+                result = instance.build_result(key)
+                self._emit(
+                    IndicatorEventType.INSTANCE_INITIALIZED,
+                    key,
+                    full_result=result,
+                    detail={"range": {
+                        "start": min(int(bar.time) for bar in bars),
+                        "end": max(int(bar.time) for bar in bars),
+                    }},
+                )
+            except Exception as exc:
+                logger.error("Warm resume failed for %s: %s", key.uid, exc, exc_info=True)
 
         return key, result
 
     def unsubscribe(self, key: IndicatorKey) -> None:
-        """Unsubscribe from an indicator.  Destroys instance when refcount hits 0."""
+        """Unsubscribe, keeping a bounded zero-ref instance warm when enabled."""
         if key not in self._refcounts:
             return
 
         self._refcounts[key] -= 1
         if self._refcounts[key] <= 0:
-            self._destroy_instance(key)
+            self._refcounts[key] = 0
+            self._detach_from_stream(key)
+            if self._warm_ttl_seconds <= 0 or self._warm_max_instances <= 0:
+                self._destroy_instance(key)
+            else:
+                self._idle_since[key] = time.monotonic()
+                self._enforce_warm_budget()
 
     def _get_or_create(self, key: IndicatorKey) -> Indicator | None:
         """Get existing instance or create a new one."""
@@ -236,15 +307,40 @@ class IndicatorEngine:
         """Destroy an indicator instance and clean up."""
         self._instances.pop(key, None)
         self._refcounts.pop(key, None)
+        self._idle_since.pop(key, None)
+        self._last_committed.pop(key, None)
 
+        self._detach_from_stream(key)
+
+        self._emit(IndicatorEventType.INSTANCE_DESTROYED, key)
+        logger.debug("Destroyed instance: %s", key.uid)
+
+    def _detach_from_stream(self, key: IndicatorKey) -> None:
+        """Stop realtime dispatch for an idle/destroyed instance."""
         topic = key.series_topic
         if topic in self._stream_keys:
             self._stream_keys[topic].discard(key)
             if not self._stream_keys[topic]:
                 del self._stream_keys[topic]
 
-        self._emit(IndicatorEventType.INSTANCE_DESTROYED, key)
-        logger.debug("Destroyed instance: %s", key.uid)
+    def _prune_idle_instances(self, now: float | None = None) -> None:
+        if not self._idle_since:
+            return
+        current = time.monotonic() if now is None else now
+        expired = [
+            key for key, idle_since in self._idle_since.items()
+            if current - idle_since >= self._warm_ttl_seconds
+        ]
+        for key in expired:
+            self._destroy_instance(key)
+
+    def _enforce_warm_budget(self) -> None:
+        overflow = len(self._idle_since) - self._warm_max_instances
+        if overflow <= 0:
+            return
+        oldest = sorted(self._idle_since, key=self._idle_since.get)
+        for key in oldest[:overflow]:
+            self._destroy_instance(key)
 
     # =============================================================
     #  Bar Event Handlers (called by DataManager bridge)
@@ -271,15 +367,19 @@ class IndicatorEngine:
             exchange=exchange,
         ).series_topic
         topic = key_topic
+        self._prune_idle_instances()
         keys = self._stream_keys.get(topic, set())
 
         for key in keys:
             instance = self._instances.get(key)
             if instance is None or not instance.is_initialized:
                 continue
+            if int(bar.time) <= self._last_committed.get(key, 0):
+                continue
 
             try:
                 instance.update_closed(bar)
+                self._last_committed[key] = int(bar.time)
                 values = instance.get_latest()
                 self._emit(
                     IndicatorEventType.INDICATOR_UPDATED, key,
@@ -313,6 +413,7 @@ class IndicatorEngine:
             exchange=exchange,
         ).series_topic
         topic = key_topic
+        self._prune_idle_instances()
         keys = self._stream_keys.get(topic, set())
 
         for key in keys:
@@ -337,6 +438,8 @@ class IndicatorEngine:
         bars: list[BarData],
         market_type: str = "spot",
         exchange: str = "binance",
+        dirty_range: dict[str, int] | None = None,
+        data_revision: dict[str, Any] | None = None,
     ) -> None:
         """Handle historical bars being inserted (backfill/correction).
 
@@ -351,6 +454,16 @@ class IndicatorEngine:
             exchange=exchange,
         ).series_topic
         topic = key_topic
+        self._prune_idle_instances()
+        # An idle instance is detached from realtime dispatch.  Its rolling
+        # state cannot be repaired safely by append-only catch-up after a
+        # historical correction, so evict it and force a clean seed on resume.
+        idle_for_series = [
+            key for key in self._idle_since
+            if key.series_topic == topic
+        ]
+        for key in idle_for_series:
+            self._destroy_instance(key)
         keys = self._stream_keys.get(topic, set())
 
         for key in keys:
@@ -360,16 +473,24 @@ class IndicatorEngine:
 
             try:
                 instance.recompute(bars)
+                self._last_committed[key] = max(int(bar.time) for bar in bars)
                 result = instance.build_result(key)
+                computed_range = {
+                    "start": int(bars[0].time),
+                    "end": int(bars[-1].time),
+                }
+                detail = {
+                    "range": dict(dirty_range or computed_range),
+                    "computedRange": computed_range,
+                }
+                if dirty_range is not None:
+                    detail["dirtyRange"] = dict(dirty_range)
+                if data_revision is not None:
+                    detail["dataRevision"] = dict(data_revision)
                 self._emit(
                     IndicatorEventType.INDICATOR_RECOMPUTED, key,
                     full_result=result,
-                    detail={
-                        "range": {
-                            "start": int(bars[0].time),
-                            "end": int(bars[-1].time),
-                        }
-                    },
+                    detail=detail,
                 )
                 logger.info("Recomputed %s after backfill (%d bars)", key.uid, len(bars))
             except Exception as exc:
@@ -420,10 +541,12 @@ class IndicatorEngine:
 
     def get_instance(self, key: IndicatorKey) -> Indicator | None:
         """Get an indicator instance by key."""
+        self._prune_idle_instances()
         return self._instances.get(key)
 
     def get_result(self, key: IndicatorKey) -> IndicatorResult | None:
         """Get the current result for an indicator instance."""
+        self._prune_idle_instances()
         instance = self._instances.get(key)
         if instance is None:
             return None
@@ -431,6 +554,7 @@ class IndicatorEngine:
 
     def list_instances(self, symbol: str | None = None, interval: str | None = None) -> list[IndicatorKey]:
         """List active indicator instance keys, optionally filtered."""
+        self._prune_idle_instances()
         keys = list(self._instances.keys())
         if symbol:
             keys = [k for k in keys if k.symbol == symbol.upper()]
@@ -451,11 +575,15 @@ class IndicatorEngine:
 
     def snapshot(self) -> dict:
         """Return a diagnostic snapshot of the engine state."""
+        self._prune_idle_instances()
         return {
             "started": self._started,
             "instance_count": len(self._instances),
             "stream_count": len(self._stream_keys),
             "listener_count": len(self._listeners),
+            "warm_idle_count": len(self._idle_since),
+            "warm_ttl_seconds": self._warm_ttl_seconds,
+            "warm_max_instances": self._warm_max_instances,
             "instances": [
                 {
                     "key": key.uid,
@@ -468,6 +596,8 @@ class IndicatorEngine:
                     "initialized": inst.is_initialized,
                     "bar_count": inst.bar_count,
                     "refcount": self._refcounts.get(key, 0),
+                    "idle": key in self._idle_since,
+                    "last_committed": self._last_committed.get(key),
                 }
                 for key, inst in self._instances.items()
             ],

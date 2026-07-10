@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 from app.api.v1.stream_indicator_payloads import (
     _indicator_event_to_ws_message,
+    _patch_from_snapshot,
     _release_pyne_incremental_meta,
     confirmed_indicator_seed_bars,
 )
@@ -22,9 +24,12 @@ from app.api.v1.stream_utils import (
 )
 from app.core import config
 from app.core.runtime_metrics import ws_runtime_metrics
+from app.data_engine.interval_policy import parse_interval_ms
 from app.indicator import registry as indicator_registry
 from app.indicator.events import IndicatorEvent
+from app.indicator.resume import plan_indicator_resume
 from app.indicator.serialization import (
+    build_indicator_snapshot_payload,
     build_ws_error_payload,
 )
 
@@ -36,6 +41,7 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
     custom_handles: dict[str, Any] = {}
     custom_tasks: dict[str, asyncio.Task] = {}
     client_meta: dict[str, dict] = {}
+    seed_query_cache: dict[tuple[str, str, str, str, int], dict[str, Any]] = {}
     ws_closed = False
     seq = 0
 
@@ -50,6 +56,9 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
             meta = client_meta.get(client_id, {})
             msg = _indicator_event_to_ws_message(client_id, event, meta)
             if msg is not None:
+                range_service = getattr(indicator_engine, "indicator_range_service", None)
+                if range_service is not None:
+                    msg["dataRevision"] = range_service.data_revision_for_meta(meta)
                 loop.call_soon_threadsafe(_queue_indicator_message, queue, msg)
 
     indicator_engine.add_listener(_listener)
@@ -143,6 +152,7 @@ async def stream_indicators(websocket: WebSocket, dm, indicator_engine) -> None:
                     custom_tasks=custom_tasks,
                     queue=queue,
                     client_meta=client_meta,
+                    seed_query_cache=seed_query_cache,
                     send_json=_safe_send_json,
                     msg=msg,
                 )
@@ -209,6 +219,7 @@ async def _handle_indicator_subscribe(
     custom_tasks: dict[str, asyncio.Task],
     queue: asyncio.Queue,
     client_meta: dict[str, dict],
+    seed_query_cache: dict[tuple[str, str, str, str, int], dict[str, Any]],
     send_json,
     msg: dict,
 ) -> None:
@@ -251,6 +262,26 @@ async def _handle_indicator_subscribe(
         ))
         return
     if is_script:
+        range_service = getattr(indicator_engine, "indicator_range_service", None)
+        script_revision = (
+            _indicator_subscription_revision(
+                range_service,
+                {
+                    "exchange": exchange,
+                    "market_type": market_type,
+                    "symbol": symbol,
+                    "interval": interval,
+                },
+                client_server_epoch=msg.get("serverEpoch") or msg.get("server_epoch"),
+                client_correction_revision=(
+                    msg.get("correctionRevision")
+                    if msg.get("correctionRevision") is not None
+                    else msg.get("correction_revision")
+                ),
+            )
+            if range_service is not None
+            else None
+        )
         await handle_pyne_indicator_subscribe(
             dm=dm,
             custom_handles=custom_handles,
@@ -283,6 +314,15 @@ async def _handle_indicator_subscribe(
                 client_meta=client_meta,
             ),
             queue_message=_queue_indicator_message,
+            range_service=range_service,
+            data_revision=script_revision,
+            resume_from=msg.get("resumeFrom") or msg.get("resume_from"),
+            client_server_epoch=msg.get("serverEpoch") or msg.get("server_epoch"),
+            client_correction_revision=(
+                msg.get("correctionRevision")
+                if msg.get("correctionRevision") is not None
+                else msg.get("correction_revision")
+            ),
         )
         return
     if not indicator_name:
@@ -337,13 +377,54 @@ async def _handle_indicator_subscribe(
             consumer_id=consumer_id,
         )
         stream_ensured = True
-        query_result = dm.query_latest(
-            symbol,
-            interval,
-            limit=history_limit,
-            exchange=exchange,
-            market_type=market_type,
+        range_service = getattr(indicator_engine, "indicator_range_service", None)
+        series_meta = {
+            "exchange": exchange,
+            "market_type": market_type,
+            "symbol": symbol,
+            "interval": interval,
+        }
+        seed_cache_key = (exchange, market_type, symbol, interval, history_limit)
+        cached_seed = seed_query_cache.get(seed_cache_key)
+        current_revision = (
+            range_service.data_revision_for_meta(series_meta)
+            if range_service is not None
+            else None
         )
+        cache_age = (
+            time.monotonic() - float(cached_seed.get("at", 0))
+            if cached_seed is not None
+            else float("inf")
+        )
+        current_correction = (
+            str(current_revision.get("correctionRevision", "0"))
+            if isinstance(current_revision, dict)
+            else "0"
+        )
+        cached_until = int(cached_seed.get("closedThrough", 0)) if cached_seed else 0
+        current_closed = int((current_revision or {}).get("closedThrough") or 0)
+        if (
+            cached_seed is not None
+            and cache_age <= max(0.0, float(config.INDICATOR_WS_SEED_CACHE_SECONDS))
+            and str(cached_seed.get("correctionRevision", "0")) == current_correction
+            and current_closed <= cached_until
+        ):
+            query_result = cached_seed["result"]
+        else:
+            query_result = dm.query_latest(
+                symbol,
+                interval,
+                limit=history_limit,
+                exchange=exchange,
+                market_type=market_type,
+            )
+            query_bars = list(query_result.bars or [])
+            seed_query_cache[seed_cache_key] = {
+                "at": time.monotonic(),
+                "result": query_result,
+                "correctionRevision": current_correction,
+                "closedThrough": max((int(bar.time) for bar in query_bars), default=0),
+            }
 
         seed_bars = confirmed_indicator_seed_bars(query_result.bars)
         key, result = indicator_engine.subscribe(
@@ -379,7 +460,7 @@ async def _handle_indicator_subscribe(
             })
         raise
 
-    await send_json({
+    subscribed_payload = {
         "type": "indicator.subscribed",
         "clientId": client_id,
         "indicatorId": key.uid,
@@ -391,7 +472,99 @@ async def _handle_indicator_subscribe(
         "name": indicator_name,
         "seeded": result is not None,
         "seedBars": len(seed_bars),
-    })
+    }
+    range_service = getattr(indicator_engine, "indicator_range_service", None)
+    resume_patch = None
+    if range_service is not None:
+        data_revision = _indicator_subscription_revision(
+            range_service,
+            client_meta[client_id],
+            client_server_epoch=msg.get("serverEpoch") or msg.get("server_epoch"),
+            client_correction_revision=(
+                msg.get("correctionRevision")
+                if msg.get("correctionRevision") is not None
+                else msg.get("correction_revision")
+            ),
+        )
+        interval_ms = parse_interval_ms(interval)
+        resume_plan = plan_indicator_resume(
+            resume_from=msg.get("resumeFrom") or msg.get("resume_from"),
+            client_server_epoch=msg.get("serverEpoch") or msg.get("server_epoch"),
+            client_correction_revision=(
+                msg.get("correctionRevision")
+                if msg.get("correctionRevision") is not None
+                else msg.get("correction_revision")
+            ),
+            data_revision=data_revision,
+            closed_bar_times=(int(bar.time) for bar in seed_bars),
+            max_patch_bars=max(0, int(config.INDICATOR_WS_RESUME_MAX_BARS)),
+            interval_seconds=(max(interval_ms // 1000, 1) if interval_ms else None),
+        )
+        subscribed_payload["dataRevision"] = data_revision
+        subscribed_payload["resumeStatus"] = resume_plan.status
+        subscribed_payload["resumeReason"] = resume_plan.reason
+        if resume_plan.start is not None and resume_plan.end is not None:
+            subscribed_payload["resumeRange"] = {
+                "start": resume_plan.start,
+                "end": resume_plan.end,
+            }
+        if resume_plan.status == "patch" and result is not None:
+            snapshot = build_indicator_snapshot_payload(
+                client_id=client_id,
+                indicator_id=key.uid,
+                exchange=key.exchange,
+                symbol=symbol,
+                interval=interval,
+                market_type=market_type,
+                name=indicator_name,
+                params=params,
+                result=result,
+            )
+            resume_patch = _patch_from_snapshot(
+                snapshot,
+                reason="ws-resume",
+                start_s=int(resume_plan.start),
+                end_s=int(resume_plan.end),
+            )
+            resume_patch["dataRevision"] = data_revision
+    await send_json(subscribed_payload)
+    if resume_patch is not None:
+        await send_json(resume_patch)
+
+
+def _indicator_subscription_revision(
+    range_service: Any,
+    meta: dict[str, Any],
+    *,
+    client_server_epoch: Any = None,
+    client_correction_revision: Any = None,
+) -> dict[str, Any]:
+    """Return current revision plus changes since the reconnecting client."""
+    current = range_service.data_revision_for_meta(meta)
+    current_epoch = str(current.get("serverEpoch") or "")
+    if client_server_epoch is None or str(client_server_epoch) != current_epoch:
+        if client_server_epoch is not None:
+            current["historyInvalid"] = True
+        return current
+    if client_correction_revision is None:
+        current["historyInvalid"] = True
+        return current
+    try:
+        since = int(client_correction_revision)
+    except (TypeError, ValueError):
+        current["historyInvalid"] = True
+        return current
+    revisions = range_service.revisions.snapshot(
+        str(meta.get("symbol") or ""),
+        str(meta.get("interval") or ""),
+        exchange=str(meta.get("exchange") or "binance"),
+        market_type=str(meta.get("market_type") or meta.get("marketType") or "spot"),
+        since_correction_revision=since,
+    )
+    revisions["revisionToken"] = (
+        f"{revisions['serverEpoch']}:{revisions['correctionRevision']}"
+    )
+    return revisions
 
 
 async def _unsubscribe_indicator_client(

@@ -94,14 +94,25 @@ async def _init_data_manager() -> None:
         from app.alerts.runtime import AlertRuntimeEngine
         from app.data_engine.runtime import start_data_engine
         from app.indicator.data_manager_bridge import bridge_indicator_engine
+        from app.indicator.range_result_service import IndicatorRangeResultService
+        from app.indicator.series_revision import SeriesRevisionRegistry
 
         runtime = await start_data_engine()
         runtime.attach_to_app_state(app.state)
 
         try:
+            revision_registry = SeriesRevisionRegistry()
+            indicator_range_service = IndicatorRangeResultService.from_config(
+                revision_registry=revision_registry,
+            )
+            # One authoritative revision registry is shared by WS events,
+            # range cache entries and HTTP response metadata.
+            app.state.indicator_series_revisions = revision_registry
+            app.state.indicator_range_service = indicator_range_service
             indicator_engine = bridge_indicator_engine(
                 runtime.data_manager,
                 backfill_coordinator=runtime.backfill_coordinator,
+                result_service=indicator_range_service,
             )
             app.state.indicator_engine = indicator_engine
             print("[startup] IndicatorEngine bridged to DataManager ✓")
@@ -168,6 +179,11 @@ async def shutdown_event() -> None:
             print("[shutdown] IndicatorEngine shut down ✓")
         except Exception as exc:
             print(f"[shutdown] IndicatorEngine shutdown error: {exc}")
+
+    indicator_range_service = getattr(app.state, "indicator_range_service", None)
+    if indicator_range_service is not None:
+        indicator_range_service.unbind_all()
+        indicator_range_service.clear()
 
     alert_runtime = getattr(app.state, "alert_runtime", None)
     if alert_runtime is not None:

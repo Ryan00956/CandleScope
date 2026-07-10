@@ -30,6 +30,7 @@ exposes:
     updateIndicatorParams,
     updateIndicatorScript,
     recompute,
+    ensureVisibleIndicatorRange,
     requestIndicatorRange,
   },
   status: { computing },
@@ -44,9 +45,11 @@ on legacy flat fields.
 - `activeIndicatorStore.js` owns active indicator persistence and mutation.
 - `useIndicatorCatalogRuntime.js` owns preset/custom indicator catalog loading
   and custom indicator save/delete actions.
-- `indicatorComputeController.js` owns local/backend compute scheduling.
+- `indicatorComputeController.js` owns local indicator compute scheduling.
+- `indicatorRangeScheduler.js` owns hosted history coverage, request coalescing,
+  in-flight barriers, cancellation, and stale-response protection.
 - `indicatorStreamController.js` owns hosted indicator WebSocket subscriptions,
-  snapshots, patches, range requests, and sequence recovery.
+  snapshots, patches, resume acknowledgements, and sequence recovery.
 - `indicatorOutputReducer.js` owns marker/fill/hline/bgcolor/barcolor/signal
   output updates.
 - `indicatorPaneProjection.js` maps active indicator lines into main overlays and

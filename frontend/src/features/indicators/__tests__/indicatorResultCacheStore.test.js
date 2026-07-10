@@ -3,7 +3,10 @@ import test from "node:test";
 
 import {
   cacheIndicatorSnapshot,
+  buildIndicatorCacheHydrationSignature,
+  getCachedIndicatorComputedSegments,
   getCachedIndicatorResult,
+  invalidateCachedIndicatorRange,
   replaceCachedIndicatorRange,
   resetIndicatorResultCache,
   snapshotIndicatorResultCacheDiagnostics,
@@ -63,6 +66,19 @@ test("indicator result cache is scoped by chart series context", () => {
   );
 });
 
+test("cache hydration identity changes on re-add but ignores runtime line updates", () => {
+  const absent = buildIndicatorCacheHydrationSignature([], baseContext);
+  const added = buildIndicatorCacheHydrationSignature([maIndicator], baseContext);
+  const rendered = buildIndicatorCacheHydrationSignature([{
+    ...maIndicator,
+    lines: [{ outputName: "ma", data: [{ time: 10, value: 100 }] }],
+    error: null,
+  }], baseContext);
+
+  assert.notEqual(added, absent);
+  assert.equal(rendered, added);
+});
+
 test("replaceCachedIndicatorRange replaces only the requested time window", () => {
   resetIndicatorResultCache();
   resetCacheRegistry();
@@ -91,6 +107,45 @@ test("replaceCachedIndicatorRange replaces only the requested time window", () =
       { time: 10, value: 1 },
       { time: 20, value: 200 },
     ],
+  );
+});
+
+test("successful range records computed coverage even when warmup produces no output points", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+
+  replaceCachedIndicatorRange(maIndicator, baseContext, { lines: [] }, { start: 60, end: 180 }, {
+    revision: { serverEpoch: "boot-1", correctionRevision: 4 },
+  });
+
+  assert.deepEqual(getCachedIndicatorComputedSegments(maIndicator, baseContext), [{
+    start: 60,
+    end: 180,
+    revision: { serverEpoch: "boot-1", correctionRevision: "4" },
+  }]);
+  assert.equal(getCachedIndicatorResult(maIndicator, baseContext).outputCoverage, null);
+});
+
+test("computed coverage is revision-aware and dirty invalidation keeps only the safe prefix", () => {
+  resetIndicatorResultCache();
+  resetCacheRegistry();
+  registerBaseKline();
+
+  replaceCachedIndicatorRange(maIndicator, baseContext, { lines: [] }, { start: 60, end: 300 }, {
+    revision: { correctionRevision: 1 },
+  });
+  assert.deepEqual(
+    getCachedIndicatorComputedSegments(maIndicator, baseContext, { correctionRevision: 2 }),
+    [],
+  );
+
+  invalidateCachedIndicatorRange(maIndicator, baseContext, { start: 180, end: 180 }, {
+    revision: { correctionRevision: 2 },
+  });
+  assert.deepEqual(
+    getCachedIndicatorComputedSegments(maIndicator, baseContext, { correctionRevision: 2 }),
+    [{ start: 60, end: 120, revision: { correctionRevision: "2" } }],
   );
 });
 

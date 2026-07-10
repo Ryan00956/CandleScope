@@ -18,11 +18,18 @@ import textwrap
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.api.v1.stream_indicator_payloads import (
     IndicatorRangeEmptyError,
+    IndicatorRangeNotReadyError,
+    _replace_range_from_snapshot,
     compute_indicator_range_payload_async,
+)
+from app.api.v1.indicator_range_batch import (
+    IndicatorRangeBatchJob,
+    compute_indicator_range_batch_async,
 )
 from app.api.v1.stream_utils import (
     normalize_exchange as _normalize_exchange,
@@ -43,6 +50,7 @@ from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.engine import indicator_code_hash
 from app.indicator.types import IndicatorKey
 from app.indicator.pyne.security import PyneSecurityPolicy
+from app.indicator.range_result_service import IndicatorRangeResultService
 from app.indicator.serialization import (
     build_error_payload,
     serialize_indicator_result,
@@ -111,6 +119,12 @@ class IndicatorRangeRequest(BaseModel):
     start: int = Field(..., description="Inclusive range start, unix seconds")
     end: int = Field(..., description="Inclusive range end, unix seconds")
     reason: str = Field("range", description="Client reason for the range compute")
+
+
+class IndicatorRangeBatchRequest(BaseModel):
+    """Same-series indicator range requests coalesced into one HTTP call."""
+
+    requests: list[IndicatorRangeRequest] = Field(default_factory=list)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -380,6 +394,7 @@ def _build_diagnostics_snapshot(
     *,
     engine: IndicatorEngine,
     store: CustomIndicatorStore,
+    range_service: IndicatorRangeResultService | None = None,
 ) -> dict[str, Any]:
     """Build a compact, stable diagnostics payload for support/debugging."""
     custom_error = None
@@ -427,6 +442,7 @@ def _build_diagnostics_snapshot(
             "metrics": ws_runtime_metrics.snapshot(),
         },
         "executors": executors_snapshot(),
+        "rangeCache": range_service.snapshot() if range_service is not None else None,
     }
 
 
@@ -436,6 +452,7 @@ async def get_indicator_diagnostics(request: Request):
     return _build_diagnostics_snapshot(
         engine=_resolve_runtime_engine(request),
         store=_custom_store,
+        range_service=getattr(request.app.state, "indicator_range_service", None),
     )
 
 
@@ -448,6 +465,27 @@ def _require_data_manager(request: Request):
     if dm is None:
         raise HTTPException(status_code=503, detail="DataManager not initialized")
     return dm
+
+
+def _resolve_indicator_range_service(request: Request) -> IndicatorRangeResultService:
+    service = getattr(request.app.state, "indicator_range_service", None)
+    if isinstance(service, IndicatorRangeResultService):
+        return service
+    revision_registry = getattr(request.app.state, "indicator_series_revisions", None)
+    service = IndicatorRangeResultService.from_config(revision_registry=revision_registry)
+    request.app.state.indicator_range_service = service
+    engine = getattr(request.app.state, "indicator_engine", None)
+    if isinstance(engine, IndicatorEngine):
+        service.bind_engine(engine)
+    return service
+
+
+def _resolve_backfill_coordinator(request: Request) -> Any | None:
+    runtime = getattr(request.app.state, "data_engine_runtime", None)
+    get_coordinator = getattr(runtime, "get_backfill_coordinator", None)
+    if callable(get_coordinator):
+        return get_coordinator()
+    return getattr(request.app.state, "backfill_coordinator", None)
 
 
 def _resolve_range_market_type(req: IndicatorRangeRequest) -> str:
@@ -574,6 +612,8 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
     try:
         meta = _build_range_meta(req)
         dm = _require_data_manager(request)
+        range_service = _resolve_indicator_range_service(request)
+        backfill_coordinator = _resolve_backfill_coordinator(request)
         record_access = getattr(dm, "record_cache_access", None)
         if callable(record_access):
             await run_storage(
@@ -600,14 +640,39 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
         )
 
     try:
-        payload = await compute_indicator_range_payload_async(
-            dm=dm,
+        async def _compute_uncached() -> dict[str, Any]:
+            return await compute_indicator_range_payload_async(
+                dm=dm,
+                meta=meta,
+                client_id=client_id,
+                start_s=start_s,
+                end_s=end_s,
+                reason=req.reason or "range",
+                backfill_coordinator=backfill_coordinator,
+            )
+
+        snapshot, cache_hit, data_revision = await range_service.get_or_compute(
             meta=meta,
-            client_id=client_id,
-            start_s=start_s,
-            end_s=end_s,
-            reason=req.reason or "range",
+            start=start_s,
+            end=end_s,
+            compute=_compute_uncached,
         )
+        snapshot_range = snapshot.get("range") if isinstance(snapshot, dict) else None
+        available_end = int(snapshot_range.get("end", end_s)) if isinstance(snapshot_range, dict) else end_s
+        payload = _replace_range_from_snapshot(
+            snapshot,
+            reason=req.reason or "range",
+            start_s=start_s,
+            end_s=min(end_s, available_end),
+        )
+        payload["clientId"] = client_id
+        payload["dataRevision"] = data_revision
+        meta_payload = payload.get("meta")
+        if not isinstance(meta_payload, dict):
+            meta_payload = {}
+            payload["meta"] = meta_payload
+        meta_payload["dataRevision"] = data_revision
+        payload["cacheHit"] = cache_hit
     except IndicatorRangeEmptyError as exc:
         payload = build_error_payload(
             "INDICATOR_RANGE_EMPTY",
@@ -616,6 +681,18 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
         )
         payload["detail"] = {"range": {"start": start_s, "end": end_s}}
         return payload
+    except IndicatorRangeNotReadyError as exc:
+        payload = build_error_payload(
+            "INDICATOR_RANGE_NOT_READY",
+            str(exc),
+            hint="K 线历史仍在补齐；后端已等待对应修复任务，无需定时盲重试。",
+        )
+        payload["detail"] = {
+            "range": {"start": start_s, "end": end_s},
+            "backfillRequestIds": exc.request_ids,
+            "waitedMs": exc.waited_ms,
+        }
+        return JSONResponse(status_code=202, content=payload)
     except RuntimeError as exc:
         payload = build_error_payload(
             "INDICATOR_RANGE_NOT_READY",
@@ -644,6 +721,132 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
         payload["detail"] = {"range": {"start": start_s, "end": end_s}}
         return payload
     return payload
+
+
+def _batch_range_error_payload(
+    exc: BaseException,
+    *,
+    start_s: int,
+    end_s: int,
+) -> dict[str, Any]:
+    if isinstance(exc, IndicatorRangeEmptyError):
+        payload = build_error_payload(
+            "INDICATOR_RANGE_EMPTY",
+            str(exc),
+            hint="目标区间暂时没有已收盘 K 线，等待下一根 K 线后会自动更新。",
+        )
+    elif isinstance(exc, IndicatorRangeNotReadyError):
+        payload = build_error_payload(
+            "INDICATOR_RANGE_NOT_READY",
+            str(exc),
+            hint="K 线历史仍在补齐；后端已等待对应修复任务，无需定时盲重试。",
+        )
+        payload["detail"] = {
+            "range": {"start": start_s, "end": end_s},
+            "backfillRequestIds": exc.request_ids,
+            "waitedMs": exc.waited_ms,
+        }
+        return payload
+    elif isinstance(exc, RuntimeError):
+        payload = build_error_payload(
+            "INDICATOR_RANGE_NOT_READY",
+            str(exc),
+            hint="K 线历史仍在补齐，等待完成事件后再请求该区间。",
+        )
+    elif isinstance(exc, ValueError):
+        payload = build_error_payload(
+            "INDICATOR_RANGE_LIMIT",
+            str(exc),
+            hint="指标历史区间超过运行时限制，请缩小窗口或提高后端安全上限。",
+        )
+    else:
+        payload = build_error_payload(
+            "INDICATOR_RANGE_COMPUTE_FAILED",
+            str(exc),
+            hint="指标历史区间计算失败，请检查指标参数或脚本。",
+        )
+    payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+    return payload
+
+
+@router.post("/range/batch")
+async def compute_range_batch(req: IndicatorRangeBatchRequest, request: Request):
+    """Compute up to 32 same-series indicators with one shared K-line query."""
+    if not req.requests or len(req.requests) > 32:
+        return build_error_payload(
+            "INVALID_INDICATOR_RANGE_BATCH",
+            "requests must contain between 1 and 32 indicator range items.",
+            hint="请把同一商品和周期下的指标合并为不超过 32 项的一批。",
+        )
+
+    jobs: list[IndicatorRangeBatchJob] = []
+    try:
+        dm = _require_data_manager(request)
+        range_service = _resolve_indicator_range_service(request)
+        backfill_coordinator = _resolve_backfill_coordinator(request)
+        for item in req.requests:
+            client_id = str(item.clientId or "").strip()
+            start_s = int(item.start or 0)
+            end_s = int(item.end or 0)
+            if not client_id:
+                raise ValueError("clientId is required for every batch item")
+            if start_s <= 0 or end_s <= 0 or start_s > end_s:
+                raise ValueError("every batch item requires positive start <= end")
+            jobs.append(IndicatorRangeBatchJob(
+                client_id=client_id,
+                meta=_build_range_meta(item),
+                start=start_s,
+                end=end_s,
+                reason=item.reason or "range",
+            ))
+        series_keys = {
+            IndicatorRangeResultService.series_key_from_meta(job.meta)
+            for job in jobs
+        }
+        if len(series_keys) != 1:
+            raise ValueError("all batch items must use the same exchange/market/symbol/interval")
+
+        first_meta = jobs[0].meta
+        record_access = getattr(dm, "record_cache_access", None)
+        if callable(record_access):
+            await run_storage(
+                record_access,
+                first_meta["symbol"],
+                first_meta["interval"],
+                exchange=first_meta["exchange"],
+                market_type=first_meta["market_type"],
+                action="indicator-range-batch",
+                source="indicator",
+                detail={"clientIds": [job.client_id for job in jobs]},
+            )
+    except (LookupError, ValueError) as exc:
+        return build_error_payload(
+            "INVALID_INDICATOR_RANGE_BATCH",
+            str(exc),
+            hint="请检查批量指标的类型、商品、周期、脚本、参数和范围。",
+        )
+
+    computed = await compute_indicator_range_batch_async(
+        dm=dm,
+        jobs=jobs,
+        range_service=range_service,
+        backfill_coordinator=backfill_coordinator,
+    )
+    results = []
+    for job, value in zip(jobs, computed, strict=True):
+        payload = (
+            _batch_range_error_payload(value, start_s=job.start, end_s=job.end)
+            if isinstance(value, BaseException)
+            else value
+        )
+        results.append({"clientId": job.client_id, "payload": payload})
+    return {
+        "schemaVersion": 1,
+        "ok": all(item["payload"].get("ok") is not False for item in results),
+        "type": "indicator.range_batch",
+        "dataRevision": range_service.data_revision_for_meta(jobs[0].meta),
+        "results": results,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════

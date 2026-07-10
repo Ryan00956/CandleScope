@@ -86,10 +86,27 @@ INDICATOR_THREAD_WORKERS = int(os.getenv("INDICATOR_THREAD_WORKERS", "2"))
 PYNE_HTTP_THREAD_WORKERS = int(os.getenv("PYNE_HTTP_THREAD_WORKERS", "2"))
 STORAGE_THREAD_WORKERS = int(os.getenv("STORAGE_THREAD_WORKERS", "4"))
 
+# Indicator history reuse.  These caches only hold data derived from K-lines;
+# they are deliberately bounded and can be disabled without changing API
+# behaviour.
+INDICATOR_RANGE_CACHE_ENABLED = os.getenv(
+    "INDICATOR_RANGE_CACHE_ENABLED", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+INDICATOR_RANGE_CACHE_MAX_ENTRIES = int(os.getenv("INDICATOR_RANGE_CACHE_MAX_ENTRIES", "128"))
+INDICATOR_RANGE_CACHE_TTL_SECONDS = float(os.getenv("INDICATOR_RANGE_CACHE_TTL_SECONDS", "180"))
+INDICATOR_RANGE_BACKFILL_WAIT_SECONDS = float(os.getenv("INDICATOR_RANGE_BACKFILL_WAIT_SECONDS", "3"))
+
+# Keep unsubscribed builtin engines warm briefly so a quick interval switch can
+# resume from the cached state instead of replaying the full seed history.
+INDICATOR_ENGINE_WARM_TTL_SECONDS = float(os.getenv("INDICATOR_ENGINE_WARM_TTL_SECONDS", "120"))
+INDICATOR_ENGINE_WARM_MAX_INSTANCES = int(os.getenv("INDICATOR_ENGINE_WARM_MAX_INSTANCES", "64"))
+
 # Indicator WebSocket stability tuning.
 INDICATOR_WS_MAX_SUBSCRIPTIONS = int(os.getenv("INDICATOR_WS_MAX_SUBSCRIPTIONS", "50"))
 INDICATOR_WS_QUEUE_SIZE = int(os.getenv("INDICATOR_WS_QUEUE_SIZE", "1000"))
 INDICATOR_WS_HEARTBEAT_SECONDS = float(os.getenv("INDICATOR_WS_HEARTBEAT_SECONDS", "15"))
+INDICATOR_WS_RESUME_MAX_BARS = int(os.getenv("INDICATOR_WS_RESUME_MAX_BARS", "32"))
+INDICATOR_WS_SEED_CACHE_SECONDS = float(os.getenv("INDICATOR_WS_SEED_CACHE_SECONDS", "1"))
 WS_SEND_TIMEOUT_SECONDS = float(os.getenv("WS_SEND_TIMEOUT_SECONDS", "2"))
 EVENT_LOOP_LAG_INTERVAL_SECONDS = float(os.getenv("EVENT_LOOP_LAG_INTERVAL_SECONDS", "1"))
 

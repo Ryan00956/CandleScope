@@ -17,6 +17,16 @@ import {
   registerCacheResource,
   unregisterCacheResource,
 } from "../cache-gc/cacheRegistry.js";
+import { parseIntervalSeconds } from "../../utils/intervals.js";
+import {
+  indicatorRangeRightEdge,
+  indicatorRevisionsCompatible,
+  invalidateIndicatorRangeSegments,
+  mergeIndicatorRangeSegments,
+  normalizeIndicatorRange,
+  normalizeIndicatorRevision,
+  subtractIndicatorRange,
+} from "./indicatorRangeCoverage.js";
 
 const MAX_INDICATOR_CACHE_ENTRIES = 80;
 const OUTPUT_KEYS = ["markers", "fills", "hlines", "bgcolors", "barcolors", "signals"];
@@ -120,7 +130,7 @@ function retargetNormalized(normalized, indicatorId) {
   return next;
 }
 
-function buildCoverage(normalized = {}) {
+function buildOutputCoverage(normalized = {}) {
   let firstTime = null;
   let lastTime = null;
   let points = 0;
@@ -196,6 +206,27 @@ function buildRangeSegments(coverage) {
     end: coverage.lastTime,
     points: coverage.points,
   }];
+}
+
+function rangeStep(context = {}) {
+  return parseIntervalSeconds(context.interval) || 1;
+}
+
+function appendComputedRange(segments, rangeInput, revision, context) {
+  const range = normalizeIndicatorRange(rangeInput);
+  if (!range) return mergeIndicatorRangeSegments(segments, { step: rangeStep(context) });
+  const normalizedRevision = normalizeIndicatorRevision(revision);
+  return mergeIndicatorRangeSegments([
+    ...(segments || []),
+    { ...range, ...(normalizedRevision ? { revision: normalizedRevision } : {}) },
+  ], { step: rangeStep(context) });
+}
+
+function clearStaleRange(segments, rangeInput, context) {
+  const range = normalizeIndicatorRange(rangeInput);
+  if (!range) return segments || [];
+  const step = rangeStep(context);
+  return (segments || []).flatMap((segment) => subtractIndicatorRange(segment, [range], { step }));
 }
 
 function trimNormalizedBefore(normalized = {}, keepStart) {
@@ -315,20 +346,39 @@ export function buildIndicatorResultCacheKey(indicator, context = {}) {
   ].join("::");
 }
 
-export function cacheIndicatorSnapshot(indicator, context, normalized, schema = []) {
+export function buildIndicatorCacheHydrationSignature(indicators = [], context = {}) {
+  return (indicators || [])
+    .map((indicator) => buildIndicatorResultCacheKey(indicator, context))
+    .join("\n");
+}
+
+export function cacheIndicatorSnapshot(indicator, context, normalized, schema = [], metadata = {}) {
   if (!indicator?.id) return null;
   const key = buildIndicatorResultCacheKey(indicator, context);
+  const current = entries.get(key);
+  const normalizedContext = normalizeContext(context);
   const payload = normalizeCachedPayload(normalized);
+  const revision = normalizeIndicatorRevision(metadata.revision || metadata.dataRevision || metadata);
+  const computedSegments = appendComputedRange(
+    current?.computedSegments,
+    metadata.range,
+    revision,
+    normalizedContext,
+  );
   return putEntry(key, {
     indicatorId: indicator.id,
-    context: normalizeContext(context),
+    context: normalizedContext,
     normalized: payload,
     schema: clone(schema) || [],
-    coverage: buildCoverage(payload),
+    outputCoverage: buildOutputCoverage(payload),
+    coverage: buildOutputCoverage(payload),
+    computedSegments,
+    staleSegments: clearStaleRange(current?.staleSegments, metadata.range, normalizedContext),
+    revision: revision || current?.revision || null,
   });
 }
 
-export function patchCachedIndicatorResult(indicator, context, normalized) {
+export function patchCachedIndicatorResult(indicator, context, normalized, metadata = {}) {
   if (!indicator?.id) return null;
   const key = buildIndicatorResultCacheKey(indicator, context);
   const current = entries.get(key);
@@ -341,16 +391,22 @@ export function patchCachedIndicatorResult(indicator, context, normalized) {
   for (const outputKey of OUTPUT_KEYS) {
     nextNormalized[outputKey] = mergeIndicatorItems(base[outputKey], incoming[outputKey]);
   }
+  const normalizedContext = normalizeContext(context);
+  const revision = normalizeIndicatorRevision(metadata.revision || metadata.dataRevision || metadata);
   return putEntry(key, {
     indicatorId: indicator.id,
-    context: normalizeContext(context),
+    context: normalizedContext,
     normalized: nextNormalized,
     schema: current?.schema || [],
-    coverage: buildCoverage(nextNormalized),
+    outputCoverage: buildOutputCoverage(nextNormalized),
+    coverage: buildOutputCoverage(nextNormalized),
+    computedSegments: appendComputedRange(current?.computedSegments, metadata.range, revision, normalizedContext),
+    staleSegments: clearStaleRange(current?.staleSegments, metadata.range, normalizedContext),
+    revision: revision || current?.revision || null,
   });
 }
 
-export function replaceCachedIndicatorRange(indicator, context, normalized, range) {
+export function replaceCachedIndicatorRange(indicator, context, normalized, range, metadata = {}) {
   if (!indicator?.id) return null;
   const key = buildIndicatorResultCacheKey(indicator, context);
   const current = entries.get(key);
@@ -363,12 +419,18 @@ export function replaceCachedIndicatorRange(indicator, context, normalized, rang
   for (const outputKey of OUTPUT_KEYS) {
     nextNormalized[outputKey] = replaceIndicatorItemsRange(base[outputKey], incoming[outputKey], range);
   }
+  const normalizedContext = normalizeContext(context);
+  const revision = normalizeIndicatorRevision(metadata.revision || metadata.dataRevision || metadata);
   return putEntry(key, {
     indicatorId: indicator.id,
-    context: normalizeContext(context),
+    context: normalizedContext,
     normalized: nextNormalized,
     schema: current?.schema || [],
-    coverage: buildCoverage(nextNormalized),
+    outputCoverage: buildOutputCoverage(nextNormalized),
+    coverage: buildOutputCoverage(nextNormalized),
+    computedSegments: appendComputedRange(current?.computedSegments, range, revision, normalizedContext),
+    staleSegments: clearStaleRange(current?.staleSegments, range, normalizedContext),
+    revision: revision || current?.revision || null,
   });
 }
 
@@ -386,7 +448,11 @@ export function updateCachedIndicatorLines(indicator, context, lines) {
     context: normalizeContext(context),
     normalized: nextNormalized,
     schema: current?.schema || [],
-    coverage: buildCoverage(nextNormalized),
+    outputCoverage: buildOutputCoverage(nextNormalized),
+    coverage: buildOutputCoverage(nextNormalized),
+    computedSegments: current?.computedSegments || [],
+    staleSegments: current?.staleSegments || [],
+    revision: current?.revision || null,
   });
 }
 
@@ -429,9 +495,24 @@ export function upsertCachedIndicatorLinePoint(indicator, context, values, barTi
     context: normalizeContext(context),
     normalized: nextNormalized,
     schema: current?.schema || [],
+    outputCoverage: removedPoint
+      ? buildOutputCoverage(nextNormalized)
+      : extendCoverage(current.outputCoverage || current.coverage, barTime, pointDelta),
     coverage: removedPoint
-      ? buildCoverage(nextNormalized)
-      : extendCoverage(current.coverage, barTime, pointDelta),
+      ? buildOutputCoverage(nextNormalized)
+      : extendCoverage(current.outputCoverage || current.coverage, barTime, pointDelta),
+    computedSegments: appendComputedRange(
+      current.computedSegments,
+      { start: barTime, end: barTime },
+      current.revision,
+      current.context,
+    ),
+    staleSegments: clearStaleRange(
+      current.staleSegments,
+      { start: barTime, end: barTime },
+      current.context,
+    ),
+    revision: current.revision || null,
   });
 }
 
@@ -451,9 +532,81 @@ export function getCachedIndicatorResult(indicator, context) {
     indicatorId: indicator.id,
     normalized: retargetNormalized(entry.normalized, indicator.id),
     schema: clone(entry.schema) || [],
-    coverage: clone(entry.coverage),
+    outputCoverage: clone(entry.outputCoverage || entry.coverage),
+    coverage: clone(entry.outputCoverage || entry.coverage),
+    computedSegments: clone(entry.computedSegments || []),
+    staleSegments: clone(entry.staleSegments || []),
+    revision: clone(entry.revision),
     lastUpdatedMs: entry.lastUpdatedMs,
   };
+}
+
+export function getCachedIndicatorComputedSegments(indicator, context, revision = null) {
+  if (!indicator?.id) return [];
+  const entry = entries.get(buildIndicatorResultCacheKey(indicator, context));
+  if (!entry || !dependencyAvailable(entry.dependencyKey || indicatorDependencyKey(entry.context))) return [];
+  const step = rangeStep(entry.context);
+  return mergeIndicatorRangeSegments(entry.computedSegments || [], { step, revision }).map(clone);
+}
+
+export function getCachedIndicatorResumeState(indicator, context) {
+  if (!indicator?.id) return null;
+  const entry = entries.get(buildIndicatorResultCacheKey(indicator, context));
+  if (!entry || !dependencyAvailable(entry.dependencyKey || indicatorDependencyKey(entry.context))) return null;
+  const revision = normalizeIndicatorRevision(entry.revision);
+  const resumeFrom = indicatorRangeRightEdge(entry.computedSegments || [], revision);
+  if (!resumeFrom) return null;
+  return {
+    resumeFrom,
+    ...(revision?.serverEpoch ? { serverEpoch: revision.serverEpoch } : {}),
+    ...(revision?.correctionRevision ? { correctionRevision: revision.correctionRevision } : {}),
+  };
+}
+
+export function invalidateCachedIndicatorRange(indicator, context, range, options = {}) {
+  if (!indicator?.id) return null;
+  const key = buildIndicatorResultCacheKey(indicator, context);
+  const current = entries.get(key);
+  if (!current) return null;
+  const revision = normalizeIndicatorRevision(options.revision || options.dataRevision || options);
+  const normalizedRange = normalizeIndicatorRange(range);
+  if (!normalizedRange) return current;
+  const step = rangeStep(current.context);
+  const cascadeRight = options.cascadeRight !== false;
+  const invalidatedEnd = cascadeRight
+    ? (current.computedSegments || []).reduce(
+      (latest, segment) => Math.max(latest, Number(segment.end) || normalizedRange.end),
+      normalizedRange.end,
+    )
+    : normalizedRange.end;
+  const staleRange = { start: normalizedRange.start, end: invalidatedEnd };
+  return putEntry(key, {
+    ...current,
+    computedSegments: invalidateIndicatorRangeSegments(current.computedSegments, normalizedRange, {
+      cascadeRight,
+      revision,
+      step,
+    }),
+    staleSegments: mergeIndicatorRangeSegments([
+      ...(current.staleSegments || []),
+      staleRange,
+    ], { step }),
+    revision: revision || current.revision || null,
+  });
+}
+
+export function rebaseCachedIndicatorRevision(indicator, context, revisionInput) {
+  if (!indicator?.id) return null;
+  const key = buildIndicatorResultCacheKey(indicator, context);
+  const current = entries.get(key);
+  const revision = normalizeIndicatorRevision(revisionInput);
+  if (!current || !revision) return current || null;
+  if (current.revision && !indicatorRevisionsCompatible(current.revision, revision)) return current;
+  return putEntry(key, {
+    ...current,
+    computedSegments: (current.computedSegments || []).map((segment) => ({ ...segment, revision })),
+    revision,
+  });
 }
 
 export function resolveCachedIndicatorResults(indicators = [], context = {}) {
@@ -495,8 +648,14 @@ export function snapshotIndicatorResultCacheDiagnostics() {
         [key]: Array.isArray(normalized[key]) ? normalized[key].length : 0,
       }), {}),
       estimatedBytes: points * INDICATOR_POINT_ESTIMATED_BYTES + items * OUTPUT_ITEM_ESTIMATED_BYTES,
-      coverage: clone(entry.coverage),
-      rangeSegments: buildRangeSegments(entry.coverage),
+      coverage: clone(entry.outputCoverage || entry.coverage),
+      outputCoverage: clone(entry.outputCoverage || entry.coverage),
+      computedSegments: clone(entry.computedSegments || []),
+      staleSegments: clone(entry.staleSegments || []),
+      revision: clone(entry.revision),
+      rangeSegments: clone(entry.computedSegments?.length
+        ? entry.computedSegments
+        : buildRangeSegments(entry.outputCoverage || entry.coverage)),
       trimSafety: analyzeTrimSafety(normalized),
       lastAccessMs: entry.lastAccessMs || null,
       lastUpdatedMs: entry.lastUpdatedMs || null,
@@ -536,7 +695,13 @@ export function trimIndicatorResultCacheEntries(victims = []) {
         const nextEntry = {
           ...entry,
           normalized: nextNormalized,
-          coverage: buildCoverage(nextNormalized),
+          outputCoverage: buildOutputCoverage(nextNormalized),
+          coverage: buildOutputCoverage(nextNormalized),
+          computedSegments: (entry.computedSegments || []).flatMap((segment) => (
+            subtractIndicatorRange(segment, [{ start: 1, end: Number(victim.keepStart) - 1 }], {
+              step: rangeStep(entry.context),
+            })
+          )),
           lastUpdatedMs: Date.now(),
         };
         entries.set(key, nextEntry);

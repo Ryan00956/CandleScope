@@ -31,9 +31,13 @@ export function useIndicatorStreamController({
   chartDataReady,
   chartDataRef,
   exchange,
+  getIndicatorResumeState,
+  handleIndicatorRecomputed,
+  handleIndicatorSubscriptionPending,
+  handleIndicatorSubscribed,
   interval,
   marketType,
-  requestIndicatorRange,
+  resetHostedSubscriptionReadiness,
   setIndicatorError,
   symbol,
 }) {
@@ -61,17 +65,22 @@ export function useIndicatorStreamController({
   }), [candleDownColorRef, candleUpColorRef, chartDataMetaRef, chartDataRef, exchange, interval, marketType, symbol]);
 
   const buildHostedMessage = useCallback((indicator) => {
-    return buildHostedSubscriptionMessage(indicator, getHostedSubscriptionContext());
-  }, [getHostedSubscriptionContext]);
+    const resumeState = getIndicatorResumeState?.(indicator) || null;
+    return buildHostedSubscriptionMessage(indicator, {
+      ...getHostedSubscriptionContext(),
+      ...(resumeState || {}),
+    });
+  }, [getHostedSubscriptionContext, getIndicatorResumeState]);
 
   const hostedSubscriptionSignature = useCallback((indicator) => {
     return buildHostedSubscriptionSignature(indicator, getHostedSubscriptionContext());
   }, [getHostedSubscriptionContext]);
 
   const requestRecomputedRange = useCallback((indicatorId, payload) => {
-    if (typeof requestIndicatorRange !== "function") return;
-    const start = Math.floor(Number(payload?.range?.start));
-    const end = Math.floor(Number(payload?.range?.end));
+    if (typeof handleIndicatorRecomputed !== "function") return;
+    const dirtyRange = payload?.dirtyRange || payload?.dirty_range || payload?.range;
+    const start = Math.floor(Number(dirtyRange?.start));
+    const end = Math.floor(Number(dirtyRange?.end));
     if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= 0 || start > end) {
       return;
     }
@@ -83,17 +92,12 @@ export function useIndicatorStreamController({
       indicatorId,
       start,
       end,
+      JSON.stringify(payload?.dataRevision || payload?.data_revision || payload?.revision || {}),
     ].join("|");
     if (recomputedRangeSignaturesRef.current.has(signature)) return;
-    if (requestIndicatorRange(start, end, "recomputed", {
-      indicatorIds: [indicatorId],
-      onSettled: (ok) => {
-        if (!ok) recomputedRangeSignaturesRef.current.delete(signature);
-      },
-    })) {
-      recomputedRangeSignaturesRef.current.add(signature);
-    }
-  }, [exchange, interval, marketType, requestIndicatorRange, symbol]);
+    recomputedRangeSignaturesRef.current.add(signature);
+    handleIndicatorRecomputed(indicatorId, payload);
+  }, [exchange, handleIndicatorRecomputed, interval, marketType, symbol]);
 
   const syncHostedSubscriptions = useCallback((force = false) => {
     const socket = indicatorWsRef.current;
@@ -108,6 +112,7 @@ export function useIndicatorStreamController({
       if (!force && indicatorWsSubscriptionsRef.current.get(indicator.id) === signature) {
         continue;
       }
+      handleIndicatorSubscriptionPending?.(indicator.id);
       socket.send(JSON.stringify(buildHostedMessage(indicator)));
       indicatorWsSubscriptionsRef.current.set(indicator.id, signature);
     }
@@ -119,7 +124,12 @@ export function useIndicatorStreamController({
     }
 
     return true;
-  }, [activeIndicatorsRef, buildHostedMessage, hostedSubscriptionSignature]);
+  }, [
+    activeIndicatorsRef,
+    buildHostedMessage,
+    handleIndicatorSubscriptionPending,
+    hostedSubscriptionSignature,
+  ]);
 
   useLayoutEffect(() => {
     syncHostedSubscriptionsRef.current = syncHostedSubscriptions;
@@ -157,6 +167,7 @@ export function useIndicatorStreamController({
         markPerf("indicator.ws.open", { symbol, interval, marketType, exchange });
         lastSeq = 0;
         wsSubscriptions.clear();
+        resetHostedSubscriptionReadiness?.();
         if (!stopped) subscribeAll();
       };
 
@@ -189,6 +200,13 @@ export function useIndicatorStreamController({
               recordPerfEvent("indicator.ws.recomputed", { indicatorId });
               requestRecomputedRange(indicatorId, payload);
             },
+            onSubscribed: (indicatorId, payload) => {
+              recordPerfEvent("indicator.ws.subscribed", {
+                indicatorId,
+                resumeStatus: payload?.resumeStatus || payload?.resume_status || "legacy",
+              });
+              handleIndicatorSubscribed?.(indicatorId, payload);
+            },
             onValues: applyWsValues,
             onError: (indicatorId, payload) => {
               setIndicatorError(indicatorId, formatIndicatorError(payload, "Indicator WS error"));
@@ -205,6 +223,7 @@ export function useIndicatorStreamController({
           wsSubscriptions.clear();
           recomputedSignatures.clear();
         }
+        if (!stopped) resetHostedSubscriptionReadiness?.();
         if (!stopped) {
           reconnectTimer = setTimeout(connect, INDICATOR_WS_RECONNECT_MS);
         }
@@ -238,9 +257,11 @@ export function useIndicatorStreamController({
     chartDataReady,
     exchange,
     hasWsHostedIndicators,
+    handleIndicatorSubscribed,
     interval,
     marketType,
     requestRecomputedRange,
+    resetHostedSubscriptionReadiness,
     setIndicatorError,
     symbol,
   ]);

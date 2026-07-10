@@ -77,6 +77,21 @@ def _backfill_event(request_id: str | None = "parent-1") -> Any:
     )
 
 
+def _amended_event() -> Any:
+    return SimpleNamespace(
+        event_type=DataEventType.BAR_AMENDED,
+        key=SimpleNamespace(
+            exchange="binance",
+            market_type="spot",
+            symbol="BTCUSDT",
+            interval="3m",
+        ),
+        bar=SimpleNamespace(time=300),
+        detail={},
+        timestamp_ms=123,
+    )
+
+
 async def _wait_until(predicate: Any, *, timeout: float = 1.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
@@ -198,5 +213,25 @@ def test_bridge_clears_failed_request_so_later_event_can_retry(monkeypatch: Any)
 
         assert len(dm.query_calls) == 2
         assert coordinator.wait_calls == ["parent-1", "parent-1"]
+
+    asyncio.run(_run())
+
+
+def test_bridge_recomputes_after_historical_bar_amendment(monkeypatch: Any) -> None:
+    async def _run() -> None:
+        engine = _IndicatorEngine()
+        dm = _DataManager()
+        _install_bridge_fakes(monkeypatch, engine)
+        bridge_module.bridge_indicator_engine(dm)
+        callback = next(
+            callback for callback, event_types in dm.subscriptions
+            if event_types == {DataEventType.BAR_AMENDED}
+        )
+
+        await callback(_amended_event())
+        await _wait_until(lambda: len(engine.recomputed) == 1)
+
+        assert len(dm.query_calls) == 1
+        assert engine.recomputed[0][1]["dirty_range"] == {"start": 300, "end": 300}
 
     asyncio.run(_run())

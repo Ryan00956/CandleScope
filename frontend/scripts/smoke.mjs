@@ -6,6 +6,11 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  createIndicatorRangeNetworkCapture,
+  INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS,
+} from "./indicator-range-network-capture.mjs";
+
 const DEFAULT_URL = "http://127.0.0.1:5173/";
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
@@ -84,6 +89,15 @@ function parseArgs(argv) {
     seedIndicators: process.env.SMOKE_SEED_INDICATORS !== "0",
     overlayHeavy: process.env.SMOKE_OVERLAY_HEAVY === "1",
     drawingCheck: process.env.SMOKE_DRAWING_CHECK === "1",
+    shortSwitch: process.env.SMOKE_SHORT_SWITCH === "1",
+    shortSwitchIntervals: (process.env.SMOKE_SHORT_SWITCH_INTERVALS || "15m,3m")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+    shortSwitchSettleMs: Number(process.env.SMOKE_SHORT_SWITCH_SETTLE_MS || 4_000),
+    shortSwitchMaxIndicatorRequests: Number(
+      process.env.SMOKE_SHORT_SWITCH_MAX_INDICATOR_REQUESTS || 0,
+    ),
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -95,6 +109,17 @@ function parseArgs(argv) {
     else if (arg === "--no-seed-indicators") args.seedIndicators = false;
     else if (arg === "--overlay-heavy") args.overlayHeavy = true;
     else if (arg === "--drawing-check") args.drawingCheck = true;
+    else if (arg === "--short-switch") args.shortSwitch = true;
+    else if (arg === "--short-switch-intervals") {
+      args.shortSwitchIntervals = String(argv[++i] || "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+    } else if (arg === "--short-switch-settle-ms") {
+      args.shortSwitchSettleMs = Number(argv[++i]);
+    } else if (arg === "--short-switch-max-indicator-requests") {
+      args.shortSwitchMaxIndicatorRequests = Number(argv[++i]);
+    }
   }
 
   return args;
@@ -406,24 +431,55 @@ function getIndicatorSnapshotIds(performanceReport) {
   );
 }
 
-function hasOverlayHeavyCoverage(performanceReport) {
-  const expectedSnapshotIds = ["ma", "vol", "boll", "rsi"];
-  const snapshotIds = getIndicatorSnapshotIds(performanceReport);
+function getIndicatorReadyIds(performanceReport) {
+  const events = Array.isArray(performanceReport?.events) ? performanceReport.events : [];
+  return new Set(
+    events
+      .filter((event) => (
+        event?.name === "indicator.ws.snapshot"
+        || event?.name === "indicator.ws.subscribed"
+      ) && event.detail?.indicatorId)
+      .map((event) => event.detail.indicatorId),
+  );
+}
+
+function indicatorSeriesDataEvents(performanceReport, { sinceAtMs = null } = {}) {
+  const events = Array.isArray(performanceReport?.events) ? performanceReport.events : [];
+  return events.filter((event) => (
+    event?.name === "chart.indicatorSeries.setData"
+    && Number(event.detail?.points) > 0
+    && (sinceAtMs == null || Number(event.atMs) >= Number(sinceAtMs))
+  ));
+}
+
+function hasIndicatorSeriesDataCoverage(
+  performanceReport,
+  { overlayHeavy = false, sinceAtMs = null } = {},
+) {
+  const expectedSeriesCount = overlayHeavy ? 6 : 1;
+  return indicatorSeriesDataEvents(performanceReport, { sinceAtMs }).length >= expectedSeriesCount;
+}
+
+function hasSeededIndicatorCoverage(performanceReport, { overlayHeavy = false } = {}) {
+  const expectedIds = overlayHeavy ? ["ma", "vol", "boll", "rsi"] : ["ma"];
+  const readyIds = getIndicatorReadyIds(performanceReport);
   const { chartEventCounts } = summarizePerformanceEvents(performanceReport);
-  return expectedSnapshotIds.every((id) => snapshotIds.has(id))
-    && (chartEventCounts["chart.fillSeries.create"] || 0) > 0
+  if (!expectedIds.every((id) => readyIds.has(id))) return false;
+  if ((chartEventCounts["chart.indicatorSeries.create"] || 0) <= 0) return false;
+  if (!hasIndicatorSeriesDataCoverage(performanceReport, { overlayHeavy })) return false;
+  if (!overlayHeavy) return true;
+  return (chartEventCounts["chart.fillSeries.create"] || 0) > 0
     && (chartEventCounts["chart.hline.create"] || 0) > 0;
 }
 
 async function waitForSeededIndicatorReport(cdp, args) {
   if (!args.seedIndicators) return readPerfReport(cdp);
-  if (!args.overlayHeavy) return waitForPerfTiming(cdp, "indicatorHostedSnapshotMs");
 
   const started = Date.now();
   let report = await readPerfReport(cdp);
   const timeoutMs = Math.max(15_000, Math.min(args.timeoutMs, 30_000));
   while (Date.now() - started < timeoutMs) {
-    if (hasOverlayHeavyCoverage(report)) return report;
+    if (hasSeededIndicatorCoverage(report, { overlayHeavy: args.overlayHeavy })) return report;
     await wait(500);
     report = await readPerfReport(cdp);
   }
@@ -458,6 +514,163 @@ async function waitForExpression(cdp, expression, timeoutMs = 5_000, pollMs = 50
     await wait(pollMs);
   }
   return false;
+}
+
+async function readBrowserNow(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: "performance.now()",
+    returnByValue: true,
+  });
+  return Number(result.result?.value) || 0;
+}
+
+async function clickInterval(cdp, interval) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const interval = ${JSON.stringify(interval)};
+      const direct = document.getElementById("interval-" + interval);
+      const candidates = direct ? [direct] : Array.from(document.querySelectorAll(
+        '#toolbar button, .interval-presets button, .interval-panel-row, button'
+      ));
+      const target = candidates.find((element) => {
+        const text = (element.textContent || '').trim();
+        const title = (element.getAttribute('title') || '').trim();
+        const aria = (element.getAttribute('aria-label') || '').trim();
+        return element === direct || text === interval || title === interval || aria === interval;
+      });
+      if (!target) return { ok: false, interval, reason: 'button-not-found' };
+      const wasActive = Boolean(
+        target.classList.contains('active')
+        || document.querySelector('.interval-more-value')?.textContent?.trim() === interval
+      );
+      target.click();
+      return { ok: true, interval, text: (target.textContent || '').trim(), wasActive };
+    })()`,
+    returnByValue: true,
+  });
+  return result.result?.value || { ok: false, interval, reason: "evaluation-failed" };
+}
+
+async function waitForIntervalReady(cdp, interval, sincePerfMs, timeoutMs) {
+  const started = Date.now();
+  let detail = null;
+  while (Date.now() - started < timeoutMs) {
+    const result = await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const interval = ${JSON.stringify(interval)};
+        const since = ${JSON.stringify(sincePerfMs)};
+        const activeButton = document.getElementById("interval-" + interval);
+        const activeValue = document.querySelector('.interval-more-value')?.textContent?.trim();
+        const active = Boolean(activeButton?.classList.contains('active') || activeValue === interval);
+        const events = window.__CANDLESCOPE_PERF__?.report?.()?.events || [];
+        const commit = [...events].reverse().find((event) => (
+          event?.name === 'chart.data.commit'
+          && event.atMs >= since
+          && event.detail?.interval === interval
+          && event.detail?.status === 'ready'
+          && Number(event.detail?.bars || 0) > 0
+        ));
+        return { active, commit: commit || null };
+      })()`,
+      returnByValue: true,
+    });
+    detail = result.result?.value || null;
+    if (detail?.active && detail?.commit) {
+      return { ready: true, elapsedMs: Date.now() - started, detail };
+    }
+    await wait(100);
+  }
+  return { ready: false, elapsedMs: Date.now() - started, detail };
+}
+
+async function runShortSwitchStep(cdp, networkCapture, interval, phase, args) {
+  networkCapture.startPhase(phase);
+  const sincePerfMs = Math.max(0, (await readBrowserNow(cdp)) - 5);
+  const startedAtMs = Date.now();
+  const click = await clickInterval(cdp, interval);
+  const ready = click.ok
+    ? await waitForIntervalReady(cdp, interval, click.wasActive ? 0 : sincePerfMs, args.timeoutMs)
+    : { ready: false, elapsedMs: 0, detail: null };
+  await wait(Math.max(0, args.shortSwitchSettleMs));
+  const networkIdle = await networkCapture.waitForIdle({
+    quietMs: 1_000,
+    timeoutMs: Math.max(5_000, args.shortSwitchSettleMs + 5_000),
+  });
+  const performanceReport = await readPerfReport(cdp);
+  const indicatorDataReady = hasIndicatorSeriesDataCoverage(performanceReport, {
+    overlayHeavy: args.overlayHeavy,
+    sinceAtMs: click.wasActive ? null : sincePerfMs,
+  });
+  return {
+    phase,
+    interval,
+    startedAtMs,
+    elapsedMs: Date.now() - startedAtMs,
+    click,
+    ready,
+    networkIdle,
+    indicatorDataReady,
+    indicatorRangeNetwork: networkCapture.summary({ phase }),
+  };
+}
+
+async function runShortSwitchAcceptance(cdp, networkCapture, args) {
+  const [first, second] = args.shortSwitchIntervals;
+  if (!first || !second) {
+    throw new Error("--short-switch-intervals requires exactly two comma-separated intervals");
+  }
+
+  const steps = [];
+  steps.push(await runShortSwitchStep(
+    cdp,
+    networkCapture,
+    first,
+    `short-switch-warm:${first}`,
+    args,
+  ));
+  steps.push(await runShortSwitchStep(
+    cdp,
+    networkCapture,
+    second,
+    `short-switch-warm:${second}`,
+    args,
+  ));
+  steps.push(await runShortSwitchStep(
+    cdp,
+    networkCapture,
+    first,
+    `short-switch-measured:${first}`,
+    args,
+  ));
+  steps.push(await runShortSwitchStep(
+    cdp,
+    networkCapture,
+    second,
+    `short-switch-measured:${second}`,
+    args,
+  ));
+
+  const measured = networkCapture.summary({ phasePrefix: "short-switch-measured:" });
+  const maxIndicatorRequests = Math.max(0, args.shortSwitchMaxIndicatorRequests);
+  const stepsReady = steps.every((step) => (
+    step.click.ok
+    && step.ready.ready
+    && step.networkIdle
+    && step.indicatorDataReady
+  ));
+  return {
+    intervals: [first, second],
+    sequence: [first, second, first, second],
+    settleMs: args.shortSwitchSettleMs,
+    steps,
+    measured,
+    acceptance: {
+      maxIndicatorRangeRequests: maxIndicatorRequests,
+      actualIndicatorRangeRequests: measured.requestCount,
+      stepsReady,
+      passed: stepsReady && measured.requestCount <= maxIndicatorRequests,
+    },
+  };
 }
 
 async function openSettings(cdp) {
@@ -719,6 +932,21 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.shortSwitch && args.shortSwitchIntervals.length !== 2) {
+    throw new Error("--short-switch-intervals requires exactly two comma-separated intervals");
+  }
+  if (args.shortSwitch && !args.seedIndicators) {
+    throw new Error("--short-switch requires seeded indicators; remove --no-seed-indicators");
+  }
+  if (!Number.isFinite(args.shortSwitchSettleMs) || args.shortSwitchSettleMs < 0) {
+    throw new Error("--short-switch-settle-ms must be a non-negative number");
+  }
+  if (
+    !Number.isFinite(args.shortSwitchMaxIndicatorRequests)
+    || args.shortSwitchMaxIndicatorRequests < 0
+  ) {
+    throw new Error("--short-switch-max-indicator-requests must be a non-negative number");
+  }
   const chromePath = findChrome(args.chromePath);
   if (!chromePath) {
     throw new Error("Chrome or Edge was not found. Set CHROME_PATH to the browser executable.");
@@ -746,12 +974,14 @@ async function main() {
   const responses = [];
   const requestUrls = new Map();
   let cdp;
+  let indicatorRangeNetworkCapture;
 
   try {
     await waitForDevTools(debugBase);
     const target = await readHttpJson(`${debugBase}/json/new?${encodeURIComponent("about:blank")}`, { method: "PUT" });
     cdp = new CdpConnection(target.webSocketDebuggerUrl);
     await cdp.connect();
+    indicatorRangeNetworkCapture = createIndicatorRangeNetworkCapture(cdp);
 
     cdp.on("Runtime.consoleAPICalled", (event) => {
       if (["warning", "error"].includes(event.type)) {
@@ -778,7 +1008,7 @@ async function main() {
     });
 
     await cdp.send("Runtime.enable");
-    await cdp.send("Network.enable");
+    await cdp.send("Network.enable", INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS);
     await cdp.send("Page.enable");
     if (args.seedIndicators) {
       const activeIndicators = args.overlayHeavy ? SMOKE_OVERLAY_HEAVY_INDICATORS : SMOKE_ACTIVE_INDICATORS;
@@ -800,13 +1030,30 @@ async function main() {
     await cdp.send("Page.navigate", { url: args.url });
 
     const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
+    let shortSwitch = null;
+    let initialSeededIndicatorReport = null;
+    if (args.shortSwitch) {
+      initialSeededIndicatorReport = await waitForSeededIndicatorReport(cdp, args);
+      await indicatorRangeNetworkCapture.waitForIdle({ quietMs: 1_000, timeoutMs: 10_000 });
+      shortSwitch = await runShortSwitchAcceptance(cdp, indicatorRangeNetworkCapture, args);
+      indicatorRangeNetworkCapture.startPhase("post-short-switch");
+    }
     const drawingWorkflow = args.drawingCheck ? await verifyDrawingWorkflow(cdp, args.timeoutMs) : null;
     const lazySurfaces = await verifyLazySurfaces(cdp);
     const settings = await openSettings(cdp);
     const performanceTimings = await waitForSeededIndicatorReport(cdp, args);
     const performanceEventSummary = summarizePerformanceEvents(performanceTimings);
-    const overlayHeavyCoverage = args.overlayHeavy ? hasOverlayHeavyCoverage(performanceTimings) : null;
+    const seededIndicatorCoverage = hasSeededIndicatorCoverage(performanceTimings, {
+      overlayHeavy: args.overlayHeavy,
+    }) || hasSeededIndicatorCoverage(initialSeededIndicatorReport, {
+      overlayHeavy: args.overlayHeavy,
+    });
+    const overlayHeavyCoverage = args.overlayHeavy ? seededIndicatorCoverage : null;
     const indicatorSnapshotIds = Array.from(getIndicatorSnapshotIds(performanceTimings));
+    await indicatorRangeNetworkCapture.waitForIdle({ quietMs: 500, timeoutMs: 3_000 });
+    await indicatorRangeNetworkCapture.flush();
+    const indicatorRangeRequests = indicatorRangeNetworkCapture.records();
+    const indicatorRangeNetwork = indicatorRangeNetworkCapture.summary();
     const screenshotData = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true });
     fs.writeFileSync(screenshot, Buffer.from(screenshotData.data, "base64"));
 
@@ -828,7 +1075,13 @@ async function main() {
       performance: performanceTimings,
       performanceEventSummary,
       indicatorSnapshotIds,
+      seededIndicatorCoverage,
       overlayHeavyCoverage,
+      indicatorRangeNetwork: {
+        ...indicatorRangeNetwork,
+        requests: indicatorRangeRequests,
+      },
+      shortSwitch,
       apiResponses: responses.slice(0, 20),
       failures,
       warnings: warnings.slice(0, 20),
@@ -836,6 +1089,7 @@ async function main() {
       seededIndicators: args.seedIndicators,
       overlayHeavy: args.overlayHeavy,
       drawingCheck: args.drawingCheck,
+      shortSwitchCheck: args.shortSwitch,
     };
 
     console.log(JSON.stringify(report, null, 2));
@@ -855,8 +1109,9 @@ async function main() {
         || !drawingWorkflow?.futureAnchorStored
         || drawingWorkflow?.drawingRestoredCount <= 0
       ))
-      || (args.seedIndicators && !performanceTimings?.timings?.indicatorHostedSnapshotMs)
+      || (args.seedIndicators && !seededIndicatorCoverage)
       || (args.seedIndicators && args.overlayHeavy && !overlayHeavyCoverage)
+      || (args.shortSwitch && !shortSwitch?.acceptance?.passed)
       || failures.length > 0;
     process.exitCode = failed ? 1 : 0;
   } finally {

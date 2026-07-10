@@ -7,14 +7,17 @@ from typing import Any
 from app.api.v1.stream_indicator_payloads import (
     _compute_incremental_pyne_bar_message_async,
     _compute_pyne_snapshot_message_async,
+    _patch_from_snapshot,
     _pyne_incremental_session_key,
     _pyne_incremental_sessions,
 )
 from app.core import config
 from app.api.v1.stream_utils import validate_ws_interval as _validate_ws_interval
 from app.data_engine.data_manager.models import DataEventType
+from app.data_engine.interval_policy import parse_interval_ms
 from app.indicator.custom_store import CustomIndicatorStore
 from app.indicator.pyne import PyneIncrementalSession, is_incremental_pyne_script
+from app.indicator.resume import plan_indicator_resume
 from app.indicator.script_identity import script_hash, short_script_hash
 from app.indicator.serialization import build_ws_error_payload
 
@@ -43,6 +46,11 @@ async def handle_pyne_indicator_subscribe(
     stream_consumer_id: str,
     unsubscribe_client,
     queue_message,
+    range_service=None,
+    data_revision: dict[str, Any] | None = None,
+    resume_from: int | None = None,
+    client_server_epoch: str | None = None,
+    client_correction_revision: int | str | None = None,
 ) -> None:
     if custom_id and not script.strip():
         try:
@@ -140,16 +148,51 @@ async def handle_pyne_indicator_subscribe(
                 security_mode=security_mode,
             ),
         )
+        if isinstance(data_revision, dict) and (
+            data_revision.get("dirtyRange") or data_revision.get("historyInvalid")
+        ):
+            reset_once = getattr(_pyne_incremental_sessions, "reset_once", None)
+            if callable(reset_once):
+                reset_once(
+                    session_key,
+                    (
+                        "resume-revision",
+                        data_revision.get("serverEpoch"),
+                        data_revision.get("correctionRevision"),
+                    ),
+                    lambda: PyneIncrementalSession(
+                        script=script,
+                        params=params,
+                        security_mode=security_mode,
+                    ),
+                )
     client_meta[client_id] = meta
 
     seeded = False
+    initial = None
     if incremental_script:
         initial = await _compute_pyne_snapshot_message_async(client_id, dm, meta)
         seeded = initial.get("ok") is not False
         if not seeded:
             await send_json(initial)
 
-    await send_json({
+    if seeded and range_service is not None and isinstance(initial, dict):
+        coverage = initial.get("range")
+        if isinstance(coverage, dict):
+            range_service.put_payload(
+                meta,
+                initial,
+                start=int(coverage["start"]),
+                end=int(coverage["end"]),
+            )
+        current_revision = range_service.data_revision_for_meta(meta)
+        if isinstance(data_revision, dict):
+            for field in ("dirtyRange", "historyInvalid"):
+                if field in data_revision:
+                    current_revision[field] = data_revision[field]
+        data_revision = current_revision
+
+    subscribed_payload = {
         "type": "indicator.subscribed",
         "clientId": client_id,
         "indicatorId": meta["indicatorId"],
@@ -162,17 +205,121 @@ async def handle_pyne_indicator_subscribe(
         "customId": custom_id or None,
         "seeded": seeded,
         "seedBars": min(max(int(history_limit), 1), max(int(config.PYNE_MAX_BARS), 1)) if incremental_script else 0,
-    })
+    }
+    resume_patch = None
+    if range_service is not None and isinstance(data_revision, dict):
+        closed_times = _payload_times(initial) if isinstance(initial, dict) else []
+        interval_ms = parse_interval_ms(interval)
+        resume_plan = plan_indicator_resume(
+            resume_from=resume_from,
+            client_server_epoch=client_server_epoch,
+            client_correction_revision=client_correction_revision,
+            data_revision=data_revision,
+            closed_bar_times=closed_times,
+            max_patch_bars=max(0, int(config.INDICATOR_WS_RESUME_MAX_BARS)),
+            interval_seconds=(max(interval_ms // 1000, 1) if interval_ms else None),
+        )
+        if incremental_script and not seeded:
+            resume_plan = type(resume_plan)("history_required", "pyne-seed-unavailable")
+        subscribed_payload["dataRevision"] = data_revision
+        subscribed_payload["resumeStatus"] = resume_plan.status
+        subscribed_payload["resumeReason"] = resume_plan.reason
+        if resume_plan.start is not None and resume_plan.end is not None:
+            subscribed_payload["resumeRange"] = {
+                "start": resume_plan.start,
+                "end": resume_plan.end,
+            }
+        if resume_plan.status == "patch" and isinstance(initial, dict):
+            resume_patch = _patch_from_snapshot(
+                initial,
+                reason="ws-resume",
+                start_s=int(resume_plan.start),
+                end_s=int(resume_plan.end),
+            )
+            resume_patch["dataRevision"] = data_revision
+
+    await send_json(subscribed_payload)
+    if resume_patch is not None:
+        await send_json(resume_patch)
 
     async def _on_data_event(event) -> None:
-        if event.event_type == DataEventType.BACKFILL_COMPLETED:
-            return
-
         existing = custom_tasks.get(client_id)
         if existing is not None and not existing.done():
             existing.cancel()
 
         async def _run() -> None:
+            if event.event_type in {DataEventType.BACKFILL_COMPLETED, DataEventType.BAR_AMENDED}:
+                dirty_range = _correction_range(event)
+                event_detail = event.detail if isinstance(event.detail, dict) else {}
+                request_id = str(event_detail.get("request_id") or "").strip()
+                reset_key = (
+                    f"backfill:{request_id}"
+                    if request_id
+                    else (
+                        event.event_type.value,
+                        dirty_range["start"],
+                        dirty_range["end"],
+                        getattr(event, "timestamp_ms", 0),
+                    )
+                )
+                correction_event_id = (
+                    f"backfill:{request_id}"
+                    if request_id
+                    else f"{event.event_type.value}:{symbol}:{interval}:"
+                    f"{dirty_range['start']}:{dirty_range['end']}:"
+                    f"{getattr(event, 'timestamp_ms', 0)}"
+                )
+                correction_revision = None
+                if range_service is not None:
+                    correction_revision = range_service.note_correction(
+                        series_key=f"{exchange}:{market_type}:{symbol}:{interval}",
+                        start=dirty_range["start"],
+                        end=dirty_range["end"],
+                        event_id=correction_event_id,
+                    )
+                if meta.get("scriptMode") == "incremental":
+                    reset_once = getattr(_pyne_incremental_sessions, "reset_once", None)
+                    if callable(reset_once):
+                        reset_once(
+                            str(meta.get("pyneSessionKey") or ""),
+                            reset_key,
+                            lambda: PyneIncrementalSession(
+                                script=meta["script"],
+                                params=meta.get("params") if isinstance(meta.get("params"), dict) else {},
+                                security_mode=meta.get("securityMode"),
+                            ),
+                        )
+                    refreshed = await _compute_pyne_snapshot_message_async(client_id, dm, meta)
+                    coverage = refreshed.get("range") if isinstance(refreshed, dict) else None
+                    if (
+                        range_service is not None
+                        and refreshed.get("ok") is not False
+                        and isinstance(coverage, dict)
+                    ):
+                        range_service.put_payload(
+                            meta,
+                            refreshed,
+                            start=int(coverage["start"]),
+                            end=int(coverage["end"]),
+                        )
+                queue_message(queue, {
+                    "type": "indicator.recomputed",
+                    "clientId": client_id,
+                    "indicatorId": meta["indicatorId"],
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "interval": interval,
+                    "market_type": market_type,
+                    "reason": "backfill-recomputed",
+                    "range": dirty_range,
+                    "dirtyRange": dirty_range,
+                    **(
+                        {"dataRevision": correction_revision}
+                        if isinstance(correction_revision, dict)
+                        else {}
+                    ),
+                })
+                return
             if meta.get("scriptMode") == "incremental" and event.bar is not None:
                 msg = await _compute_incremental_pyne_bar_message_async(
                     client_id,
@@ -187,6 +334,8 @@ async def handle_pyne_indicator_subscribe(
                     meta,
                     bar_time=event.bar.time if event.bar else 0,
                 )
+            if range_service is not None:
+                msg["dataRevision"] = range_service.data_revision_for_meta(meta)
             queue_message(queue, msg)
 
         custom_tasks[client_id] = asyncio.create_task(_run(), name=f"pyne_indicator_{client_id}")
@@ -200,7 +349,45 @@ async def handle_pyne_indicator_subscribe(
         event_types={
             DataEventType.BAR_UPDATED,
             DataEventType.BAR_CLOSED,
+            DataEventType.BAR_AMENDED,
             DataEventType.BACKFILL_COMPLETED,
         },
     )
     custom_handles[client_id] = handle
+
+
+def _payload_times(payload: dict[str, Any] | None) -> list[int]:
+    times: set[int] = set()
+    if not isinstance(payload, dict):
+        return []
+    for line in payload.get("lines") or []:
+        for point in line.get("data") or []:
+            try:
+                times.add(int(point["time"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    if not times:
+        coverage = payload.get("range")
+        if isinstance(coverage, dict):
+            try:
+                times.update((int(coverage["start"]), int(coverage["end"])))
+            except (KeyError, TypeError, ValueError):
+                pass
+    return sorted(times)
+
+
+def _correction_range(event: Any) -> dict[str, int]:
+    if event.event_type == DataEventType.BAR_AMENDED and event.bar is not None:
+        timestamp = int(event.bar.time)
+        return {"start": timestamp, "end": timestamp}
+    detail = event.detail if isinstance(event.detail, dict) else {}
+    start = detail.get("earliest")
+    end = detail.get("latest")
+    if start is None:
+        start_ms = detail.get("request_start_ms") or detail.get("range_start_ms")
+        start = int(start_ms) // 1000 if start_ms is not None else 0
+    if end is None:
+        end_ms = detail.get("request_end_ms") or detail.get("range_end_ms")
+        end = int(end_ms) // 1000 if end_ms is not None else start
+    start_s = int(start or 0)
+    return {"start": start_s, "end": max(start_s, int(end or start_s))}

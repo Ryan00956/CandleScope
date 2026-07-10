@@ -5,6 +5,12 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  createIndicatorRangeNetworkCapture,
+  INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS,
+  summarizeIndicatorRangeRequests,
+} from "./indicator-range-network-capture.mjs";
+
 const DEFAULT_URL = "http://127.0.0.1:15173/";
 const DEFAULT_DURATION_MS = 30 * 60 * 1000;
 const DEFAULT_SAMPLE_MS = 5_000;
@@ -163,13 +169,21 @@ async function connectWebSocket(wsUrl) {
 
   let nextId = 1;
   const pending = new Map();
+  const handlers = new Map();
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
-    if (!message.id || !pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
-    pending.delete(message.id);
-    if (message.error) reject(new Error(message.error.message || JSON.stringify(message.error)));
-    else resolve(message);
+    if (message.id && pending.has(message.id)) {
+      const { resolve, reject } = pending.get(message.id);
+      pending.delete(message.id);
+      if (message.error) reject(new Error(message.error.message || JSON.stringify(message.error)));
+      else resolve(message);
+      return;
+    }
+    if (message.method) {
+      for (const handler of handlers.get(message.method) || []) {
+        handler(message.params);
+      }
+    }
   });
 
   return {
@@ -180,6 +194,11 @@ async function connectWebSocket(wsUrl) {
       return new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject });
       });
+    },
+    on(event, handler) {
+      if (!handlers.has(event)) handlers.set(event, new Set());
+      handlers.get(event).add(handler);
+      return () => handlers.get(event)?.delete(handler);
     },
     close() {
       socket.close();
@@ -282,6 +301,13 @@ function summarizeHeap(samples) {
   };
 }
 
+function summarizeIndicatorNetworkByPhase(records) {
+  const phases = Array.from(new Set(records.map((record) => record.phase).filter(Boolean)));
+  return Object.fromEntries(
+    phases.map((phase) => [phase, summarizeIndicatorRangeRequests(records, { phase })]),
+  );
+}
+
 function dedupeKey(event) {
   return [
     event.name,
@@ -294,28 +320,38 @@ function dedupeKey(event) {
 }
 
 async function readPerfSample(cdp) {
-  return evaluateJson(cdp, `() => {
-    const report = window.__CANDLESCOPE_PERF__?.report?.() || null;
-    const memory = performance.memory ? {
-      usedJSHeapSize: performance.memory.usedJSHeapSize,
-      totalJSHeapSize: performance.memory.totalJSHeapSize,
-      jsHeapSizeLimit: performance.memory.jsHeapSizeLimit,
-    } : null;
-    return { atMs: Date.now(), report, memory };
-  }`);
+  try {
+    return await evaluateJson(cdp, `() => {
+      const report = window.__CANDLESCOPE_PERF__?.report?.() || null;
+      const memory = performance.memory ? {
+        usedJSHeapSize: performance.memory.usedJSHeapSize,
+        totalJSHeapSize: performance.memory.totalJSHeapSize,
+        jsHeapSizeLimit: performance.memory.jsHeapSizeLimit,
+      } : null;
+      return { atMs: Date.now(), report, memory };
+    }`);
+  } catch (error) {
+    return {
+      atMs: Date.now(),
+      report: null,
+      memory: null,
+      error: error?.message || String(error),
+    };
+  }
 }
 
 async function clickInterval(cdp, interval) {
   return evaluateJson(cdp, `() => {
     const interval = ${JSON.stringify(interval)};
-    const candidates = Array.from(document.querySelectorAll(
-      '#toolbar button, .interval-presets button, .interval-option button, .interval-item button, button'
+    const direct = document.getElementById('interval-' + interval);
+    const candidates = direct ? [direct] : Array.from(document.querySelectorAll(
+      '#toolbar button, .interval-presets button, .interval-panel-row, button'
     ));
     const button = candidates.find((element) => {
       const text = (element.textContent || '').trim();
       const title = (element.getAttribute('title') || '').trim();
       const aria = (element.getAttribute('aria-label') || '').trim();
-      return text === interval || title === interval || aria === interval;
+      return element === direct || text === interval || title === interval || aria === interval;
     });
     if (!button) return { ok: false, interval, reason: 'button-not-found' };
     button.click();
@@ -343,17 +379,21 @@ async function run() {
     "--no-first-run",
     "--no-default-browser-check",
     `--window-size=${DEFAULT_VIEWPORT.width},${DEFAULT_VIEWPORT.height}`,
-    args.url,
+    "about:blank",
   ], { stdio: "ignore" });
 
   let cdp;
+  let indicatorRangeNetworkCapture;
   try {
     const targets = await waitForDebugTarget(port);
     const page = targets.find((target) => target.type === "page") || targets[0];
     cdp = await connectWebSocket(page.webSocketDebuggerUrl);
+    indicatorRangeNetworkCapture = createIndicatorRangeNetworkCapture(cdp);
     await cdp.send("Runtime.enable");
+    await cdp.send("Network.enable", INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS);
     await cdp.send("Page.enable");
     await cdp.send("Page.bringToFront");
+    await cdp.send("Page.navigate", { url: args.url });
 
     const startedAtMs = Date.now();
     const seenEvents = new Set();
@@ -373,6 +413,7 @@ async function run() {
         atMs: sample.atMs,
         timings: sample.report?.timings || null,
         eventCount: sample.report?.events?.length || 0,
+        error: sample.error || null,
       });
       if (sample.memory) heapSamples.push({ atMs: sample.atMs, ...sample.memory });
 
@@ -385,6 +426,7 @@ async function run() {
 
       if (switchIndex < args.switches && Date.now() >= nextSwitchAt && args.switchList.length > 0) {
         const interval = args.switchList[switchIndex % args.switchList.length];
+        indicatorRangeNetworkCapture.startPhase(`switch-${switchIndex + 1}:${interval}`);
         const result = await clickInterval(cdp, interval);
         switchAttempts.push({ atMs: Date.now(), ...result });
         switchIndex += 1;
@@ -395,8 +437,12 @@ async function run() {
     }
 
     const durationMs = Date.now() - startedAtMs;
+    await indicatorRangeNetworkCapture.waitForIdle({ quietMs: 1_000, timeoutMs: 10_000 });
+    await indicatorRangeNetworkCapture.flush();
+    const indicatorRangeRequests = indicatorRangeNetworkCapture.records();
+    const indicatorRangeNetwork = indicatorRangeNetworkCapture.summary();
     const output = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       phase: args.phase,
       generatedAt: new Date().toISOString(),
       config: {
@@ -414,12 +460,17 @@ async function run() {
           succeeded: switchAttempts.filter((item) => item.ok).length,
           failed: switchAttempts.filter((item) => !item.ok).length,
         },
+        indicatorRangeNetwork: {
+          ...indicatorRangeNetwork,
+          byPhase: summarizeIndicatorNetworkByPhase(indicatorRangeRequests),
+        },
       },
       raw: {
         samples,
         heapSamples,
         switchAttempts,
         events,
+        indicatorRangeRequests,
       },
     };
 

@@ -11,15 +11,20 @@
  *   GET  /indicators/registry         → list raw indicator specs (advanced)
  *   POST /indicators/compute          → compute indicator (engine or script)
  */
-import { API_BASE, httpBaseToWsBase } from "./apiConfig";
+import { API_BASE, httpBaseToWsBase } from "./apiConfig.js";
 
 async function request(url, options = {}) {
-  const response = await fetch(url, options);
+  const { includeHttpStatus = false, ...fetchOptions } = options;
+  const response = await fetch(url, fetchOptions);
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.detail || `HTTP ${response.status}`);
   }
-  return response.json();
+  const payload = await response.json();
+  if (includeHttpStatus && payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return { ...payload, __httpStatus: response.status };
+  }
+  return payload;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -124,10 +129,13 @@ export async function computeIndicatorRange({
   start,
   end,
   reason,
+  signal,
 }) {
   return request(`${API_BASE}/indicators/range`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
+    includeHttpStatus: true,
     body: JSON.stringify({
       clientId,
       kind,
@@ -144,6 +152,16 @@ export async function computeIndicatorRange({
       end,
       reason,
     }),
+  });
+}
+
+/** Compute multiple same-series indicator ranges using one shared backend K-line query. */
+export async function computeIndicatorRangeBatch({ requests = [], signal } = {}) {
+  return request(`${API_BASE}/indicators/range/batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({ requests }),
   });
 }
 

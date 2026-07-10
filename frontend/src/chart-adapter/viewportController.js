@@ -18,8 +18,8 @@ export class ViewportController {
   constructor({
     chartProvider,
     unlockDelayMs = DEFAULT_UNLOCK_DELAY_MS,
-    setTimer = setTimeout,
-    clearTimer = clearTimeout,
+    setTimer = (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimer = (timer) => clearTimeout(timer),
   } = {}) {
     this.chartProvider = chartProvider || (() => null);
     this.unlockDelayMs = unlockDelayMs;

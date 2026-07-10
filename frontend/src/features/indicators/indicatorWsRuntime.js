@@ -37,6 +37,9 @@ export function buildHostedSubscriptionMessage(indicator, context) {
     exchange,
     interval,
     marketType,
+    resumeFrom,
+    serverEpoch,
+    correctionRevision,
     symbol,
   } = context;
   const builtin = isBuiltinIndicator(indicator);
@@ -60,6 +63,15 @@ export function buildHostedSubscriptionMessage(indicator, context) {
     securityMode: builtin ? undefined : indicator.securityMode,
     params: buildIndicatorComputeParams(indicator, { candleUpColor, candleDownColor }),
     historyLimit,
+    ...(Number.isFinite(Number(resumeFrom)) && Number(resumeFrom) > 0
+      ? { resumeFrom: Math.floor(Number(resumeFrom)) }
+      : {}),
+    ...(serverEpoch !== undefined && serverEpoch !== null && serverEpoch !== ""
+      ? { serverEpoch: String(serverEpoch) }
+      : {}),
+    ...(correctionRevision !== undefined && correctionRevision !== null && correctionRevision !== ""
+      ? { correctionRevision: String(correctionRevision) }
+      : {}),
   };
 }
 
@@ -130,6 +142,7 @@ export function dispatchIndicatorWsMessage(message, handlers) {
   }
 
   if (message.type === "indicator.subscribed") {
+    handlers.onSubscribed?.(message.clientId, message);
     return true;
   }
 
@@ -139,6 +152,7 @@ export function dispatchIndicatorWsMessage(message, handlers) {
       message.values || {},
       message.barTime,
       message.type === "indicator.update",
+      message,
     );
     return true;
   }

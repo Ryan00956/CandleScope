@@ -111,7 +111,39 @@ function syncSeriesDataRefsFromStore({ store, dataRef, dataMapRef, dataIndexMapR
   };
 }
 
-function syncPreviousMainSeriesDataFromDelta({ delta, store, prevRef, renderOptions }) {
+function sameOhlcRow(left, right) {
+  if (left?.__whitespace || right?.__whitespace) {
+    return Boolean(left?.__whitespace) === Boolean(right?.__whitespace);
+  }
+  return ["open", "high", "low", "close"].every((key) => (
+    Number.isFinite(Number(left?.[key]))
+    && Number(left[key]) === Number(right?.[key])
+  ));
+}
+
+function resolveHeikinAshiTrimAnchor({
+  delta,
+  nextRows,
+  previousRows,
+  previousSeriesData,
+  renderOptions,
+}) {
+  if (renderOptions?.chartType !== "heikin-ashi" || (delta?.trimmedLeft || 0) <= 0) return null;
+  const firstRow = nextRows?.[0];
+  if (!firstRow) return null;
+  const previousIndex = (previousRows || []).findIndex((row) => row?.time === firstRow.time);
+  if (previousIndex < 0 || !sameOhlcRow(previousRows[previousIndex], firstRow)) return null;
+  const point = previousSeriesData?.[previousIndex];
+  return point?.time === firstRow.time ? point : null;
+}
+
+function syncPreviousMainSeriesDataFromDelta({
+  delta,
+  store,
+  prevRef,
+  previousRows,
+  renderOptions,
+}) {
   if (!delta || delta.type === "noop") return;
   if (delta.type === "clear") {
     prevRef.current = [];
@@ -122,13 +154,24 @@ function syncPreviousMainSeriesDataFromDelta({ delta, store, prevRef, renderOpti
   const rows = rowsFromStore(store);
   const hasTrim = (delta.trimmedLeft || 0) > 0 || (delta.trimmedRight || 0) > 0;
   if (hasTrim) {
-    prevRef.current = buildMainSeriesData(rows, renderOptions);
+    const initialDerivedPoint = resolveHeikinAshiTrimAnchor({
+      delta,
+      nextRows: rows,
+      previousRows,
+      previousSeriesData: current,
+      renderOptions,
+    });
+    prevRef.current = buildMainSeriesData(rows, { ...renderOptions, initialDerivedPoint });
     return;
   }
 
   if (delta.type === "tick" && delta.bar && current.length > 0) {
     const startIndex = resolveMainSeriesDeltaStartIndex(delta, rows, store);
-    const toPoint = createMainSeriesPointConverter(rows, { ...renderOptions, startIndex });
+    const toPoint = createMainSeriesPointConverter(rows, {
+      ...renderOptions,
+      previousSeriesData: current,
+      startIndex,
+    });
     const point = toPoint(delta.bar);
     const last = current[current.length - 1];
     if (last?.time === point.time) {
@@ -147,7 +190,11 @@ function syncPreviousMainSeriesDataFromDelta({ delta, store, prevRef, renderOpti
 
   if (delta.type === "append" && delta.addedRight > 0 && current.length > 0) {
     const startIndex = Math.max(0, rows.length - delta.addedRight);
-    const toPoint = createMainSeriesPointConverter(rows, { ...renderOptions, startIndex });
+    const toPoint = createMainSeriesPointConverter(rows, {
+      ...renderOptions,
+      previousSeriesData: current,
+      startIndex,
+    });
     const added = rows.slice(startIndex).map(toPoint);
     current.push(...added);
     if (delta.trimmedLeft > 0) current.splice(0, delta.trimmedLeft);
@@ -436,6 +483,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       const crosshairValue = buildMainSeriesCrosshairValue(
         param.time,
         dataMapRef.current.get(param.time),
+        {
+          chartType: mainSeriesTypeRef.current,
+          displayRow: param.seriesData?.get?.(mainSeriesRef.current),
+        },
       );
       if (!crosshairValue) {
         onCrosshairMove(null);
@@ -686,8 +737,17 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         };
         const rows = rowsFromStore(currentStore);
         const startIndex = resolveMainSeriesDeltaStartIndex(delta, rows, currentStore);
+        const initialDerivedPoint = resolveHeikinAshiTrimAnchor({
+          delta,
+          nextRows: rows,
+          previousRows: dataRef.current,
+          previousSeriesData: prevMainSeriesDataRef.current,
+          renderOptions: currentRenderOptions,
+        });
         const toPoint = createMainSeriesPointConverter(rows, {
           ...currentRenderOptions,
+          initialDerivedPoint,
+          previousSeriesData: prevMainSeriesDataRef.current,
           startIndex,
         });
         renderSeriesDelta({
@@ -704,6 +764,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           delta,
           store: currentStore,
           prevRef: prevMainSeriesDataRef,
+          previousRows: dataRef.current,
           renderOptions: currentRenderOptions,
         });
         syncSeriesDataRefsFromStore({

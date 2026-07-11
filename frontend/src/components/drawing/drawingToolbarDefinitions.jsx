@@ -190,6 +190,26 @@ const CandlestickChartIcon = (
   </svg>
 );
 
+const HollowCandlestickChartIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="7" y1="3" x2="7" y2="21" />
+    <rect x="4.5" y="7" width="5" height="9" rx="0.8" fill="none" />
+    <line x1="17" y1="4" x2="17" y2="20" />
+    <rect x="14.5" y="9" width="5" height="7" rx="0.8" fill="currentColor" stroke="none" opacity="0.75" />
+  </svg>
+);
+
+const HeikinAshiChartIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="5" y1="8" x2="5" y2="20" />
+    <rect x="3" y="11" width="4" height="6" rx="0.8" fill="currentColor" stroke="none" opacity="0.45" />
+    <line x1="12" y1="3" x2="12" y2="18" />
+    <rect x="10" y="7" width="4" height="8" rx="0.8" fill="currentColor" stroke="none" opacity="0.65" />
+    <line x1="19" y1="5" x2="19" y2="16" />
+    <rect x="17" y="7" width="4" height="6" rx="0.8" fill="currentColor" stroke="none" opacity="0.85" />
+  </svg>
+);
+
 const OhlcBarChartIcon = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <line x1="7" y1="5" x2="7" y2="19" />
@@ -204,11 +224,34 @@ const OhlcBarChartIcon = (
   </svg>
 );
 
+const HighLowChartIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="4" y="8" width="3" height="11" rx="0.6" fill="currentColor" stroke="none" opacity="0.7" />
+    <rect x="10.5" y="4" width="3" height="12" rx="0.6" fill="currentColor" stroke="none" opacity="0.7" />
+    <rect x="17" y="6" width="3" height="14" rx="0.6" fill="currentColor" stroke="none" opacity="0.7" />
+  </svg>
+);
+
 const ChartLineIcon = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <polyline points="3,17 8,12 12,14 17,7 21,10" />
-    <circle cx="8" cy="12" r="1.4" fill="currentColor" stroke="none" />
-    <circle cx="17" cy="7" r="1.4" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const ChartLineWithMarkersIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="3,17 8,12 12,14 17,7 21,10" />
+    <circle cx="3" cy="17" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="8" cy="12" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="12" cy="14" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="17" cy="7" r="1.5" fill="currentColor" stroke="none" />
+    <circle cx="21" cy="10" r="1.5" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+const ChartStepLineIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="3,17 8,17 8,13 13,13 13,8 18,8 18,11 21,11" />
   </svg>
 );
 
@@ -284,8 +327,13 @@ const POSITION_TOOL_IDS = new Set(POSITION_VARIANTS.map((v) => v.id));
 
 const CHART_TYPE_VARIANTS = [
   { id: "candlestick", label: "Candles", description: "Open, high, low and close candles", icon: CandlestickChartIcon },
+  { id: "hollow-candlestick", label: "Hollow candles", description: "Body fill and price-change color", icon: HollowCandlestickChartIcon },
+  { id: "heikin-ashi", label: "Heikin Ashi", description: "Smoothed synthetic OHLC candles", icon: HeikinAshiChartIcon },
   { id: "bar", label: "OHLC bars", description: "Open, high, low and close bars", icon: OhlcBarChartIcon },
+  { id: "high-low", label: "High-low", description: "Filled high-to-low price ranges", icon: HighLowChartIcon },
   { id: "line", label: "Line", description: "Close-price line", icon: ChartLineIcon },
+  { id: "line-with-markers", label: "Line with markers", description: "Close-price line with point markers", icon: ChartLineWithMarkersIcon },
+  { id: "step-line", label: "Step line", description: "Close-price line drawn in steps", icon: ChartStepLineIcon },
   { id: "area", label: "Area", description: "Close-price area", icon: ChartAreaIcon },
   { id: "baseline", label: "Baseline", description: "Close price vs first loaded close", icon: ChartBaselineIcon },
   { id: "histogram", label: "Columns", description: "Close-price columns colored by change", icon: ChartHistogramIcon },

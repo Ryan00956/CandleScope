@@ -18,5 +18,7 @@ test("settings normalization backfills cache budget defaults for old saved setti
 
 test("settings normalization preserves supported chart types and rejects stale values", () => {
   assert.equal(normalizeSettings({ chartType: "area" }).chartType, "area");
+  assert.equal(normalizeSettings({ chartType: "heikin-ashi" }).chartType, "heikin-ashi");
+  assert.equal(normalizeSettings({ chartType: "line-with-markers" }).chartType, "line-with-markers");
   assert.equal(normalizeSettings({ chartType: "renko" }).chartType, "candlestick");
 });

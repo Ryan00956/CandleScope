@@ -1,6 +1,7 @@
 import { chartSeriesTypes } from "./lightweightChartSurface.js";
+import { createHighLowSeriesPaneView } from "./highLowSeries.js";
 import { buildMainSeriesData, buildMainSeriesOptions } from "./mainSeriesModel.js";
-import { normalizeMainChartType } from "../shared/mainChartTypes.js";
+import { mainChartSeriesKind, normalizeMainChartType } from "../shared/mainChartTypes.js";
 
 export function createMainSeries(chart, {
   chartType,
@@ -10,11 +11,12 @@ export function createMainSeries(chart, {
   upColor,
 } = {}) {
   const resolvedType = normalizeMainChartType(chartType);
-  return chart.addSeries(
-    chartSeriesTypes[resolvedType],
-    buildMainSeriesOptions(resolvedType, { upColor, downColor }, data),
-    paneIndex,
-  );
+  const options = buildMainSeriesOptions(resolvedType, { upColor, downColor }, data);
+  const seriesKind = mainChartSeriesKind(resolvedType);
+  if (seriesKind === "high-low") {
+    return chart.addCustomSeries(createHighLowSeriesPaneView(), options, paneIndex);
+  }
+  return chart.addSeries(chartSeriesTypes[seriesKind], options, paneIndex);
 }
 
 export function replaceMainSeries(chart, previousSeries, {

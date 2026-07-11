@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { LineType } from "lightweight-charts";
 
+import { createHighLowSeriesPaneView } from "../highLowSeries.js";
 import { chartSeriesTypes } from "../lightweightChartSurface.js";
 import {
   buildMainSeriesCrosshairValue,
@@ -9,10 +11,12 @@ import {
   buildMainSeriesStyleOptions,
   createMainSeriesPointConverter,
   resolveMainSeriesDeltaStartIndex,
+  toMainSeriesPoint,
 } from "../mainSeriesModel.js";
 import { createMainSeries, replaceMainSeries } from "../seriesLifecycle.js";
 import {
   MAIN_CHART_TYPES,
+  mainChartSeriesKind,
   normalizeMainChartType,
 } from "../../shared/mainChartTypes.js";
 
@@ -22,11 +26,16 @@ const ROWS = [
   { time: 30, __whitespace: true },
 ];
 
-test("all six built-in Lightweight Charts main series types are mapped", () => {
+test("all eleven main chart types map to their built-in or custom series", () => {
   assert.deepEqual(MAIN_CHART_TYPES, [
     "candlestick",
+    "hollow-candlestick",
+    "heikin-ashi",
     "bar",
+    "high-low",
     "line",
+    "line-with-markers",
+    "step-line",
     "area",
     "baseline",
     "histogram",
@@ -36,13 +45,24 @@ test("all six built-in Lightweight Charts main series types are mapped", () => {
     const calls = [];
     const chart = {
       addSeries: (...args) => {
-        calls.push(args);
+        calls.push(["built-in", ...args]);
+        return { type: chartType };
+      },
+      addCustomSeries: (...args) => {
+        calls.push(["custom", ...args]);
         return { type: chartType };
       },
     };
     createMainSeries(chart, { chartType, data: ROWS, paneIndex: 0 });
-    assert.strictEqual(calls[0][0], chartSeriesTypes[chartType]);
-    assert.equal(calls[0][2], 0);
+    const seriesKind = mainChartSeriesKind(chartType);
+    if (chartType === "high-low") {
+      assert.equal(calls[0][0], "custom");
+      assert.equal(typeof calls[0][1].priceValueBuilder, "function");
+    } else {
+      assert.equal(calls[0][0], "built-in");
+      assert.strictEqual(calls[0][1], chartSeriesTypes[seriesKind]);
+    }
+    assert.equal(calls[0][3], 0);
   }
 });
 
@@ -58,7 +78,7 @@ test("unknown chart types safely fall back to candlesticks", () => {
   assert.strictEqual(calls[0][0], chartSeriesTypes.candlestick);
 });
 
-test("OHLC types retain OHLC while value types use the close price", () => {
+test("ordinary OHLC types retain OHLC while close-value types use close", () => {
   for (const chartType of ["candlestick", "bar"]) {
     assert.deepEqual(buildMainSeriesData(ROWS, { chartType }), [
       { time: 10, open: 100, high: 112, low: 98, close: 110 },
@@ -67,13 +87,152 @@ test("OHLC types retain OHLC while value types use the close price", () => {
     ]);
   }
 
-  for (const chartType of ["line", "area", "baseline"]) {
+  for (const chartType of ["line", "line-with-markers", "step-line", "area", "baseline"]) {
     assert.deepEqual(buildMainSeriesData(ROWS, { chartType }), [
       { time: 10, value: 110 },
       { time: 20, value: 104 },
       { time: 30 },
     ]);
   }
+});
+
+test("high-low retains the source range and ignores open/close direction when rendering", () => {
+  const rows = [
+    { time: 10, open: 108, high: 112, low: 98, close: 100 },
+    { time: 20, open: 100, high: 112, low: 98, close: 108 },
+  ];
+  assert.deepEqual(buildMainSeriesData(rows, { chartType: "high-low" }), rows);
+
+  const paneView = createHighLowSeriesPaneView();
+  assert.deepEqual(paneView.priceValueBuilder(rows[0]), [112, 98, 100]);
+  assert.equal(paneView.isWhitespace({ time: 30 }), true);
+
+  const rectangles = [];
+  const context = {
+    fillStyle: "",
+    fillRect: (...args) => rectangles.push({ args, color: context.fillStyle }),
+  };
+  paneView.update({
+    barSpacing: 10,
+    conflationFactor: 1,
+    visibleRange: { from: 0, to: 2 },
+    bars: rows.map((originalData, index) => ({
+      x: 10 + index * 10,
+      originalData,
+      barColor: "#123456",
+    })),
+  }, { color: "#abcdef" });
+  paneView.renderer().draw({
+    useBitmapCoordinateSpace: (draw) => draw({
+      context,
+      horizontalPixelRatio: 1,
+      verticalPixelRatio: 1,
+    }),
+  }, (price) => 200 - price);
+
+  assert.equal(rectangles.length, 2);
+  assert.deepEqual(rectangles[0].args.slice(1), rectangles[1].args.slice(1));
+  assert.equal(rectangles[0].color, "#123456");
+});
+
+test("hollow candles separate body fill from previous-close trend color", () => {
+  const rows = [
+    { time: 10, open: 100, high: 108, low: 98, close: 105 },
+    { time: 20, open: 110, high: 112, low: 104, close: 106 },
+    { time: 30, open: 100, high: 108, low: 99, close: 104 },
+    { time: 40, open: 105, high: 106, low: 99, close: 101 },
+  ];
+  const data = buildMainSeriesData(rows, {
+    chartType: "hollow-candlestick",
+    upColor: "green",
+    downColor: "red",
+  });
+  assert.deepEqual(data.map(({ color, borderColor, wickColor }) => ({
+    color,
+    borderColor,
+    wickColor,
+  })), [
+    { color: "rgba(0, 0, 0, 0)", borderColor: "green", wickColor: "green" },
+    { color: "green", borderColor: "green", wickColor: "green" },
+    { color: "rgba(0, 0, 0, 0)", borderColor: "red", wickColor: "red" },
+    { color: "red", borderColor: "red", wickColor: "red" },
+  ]);
+
+  assert.deepEqual(toMainSeriesPoint(rows[0], {
+    chartType: "hollow-candlestick",
+    indicatorColor: "purple",
+  }), {
+    ...rows[0],
+    color: "rgba(0, 0, 0, 0)",
+    borderColor: "purple",
+    wickColor: "purple",
+  });
+});
+
+test("Heikin Ashi derives synthetic OHLC without mutating source rows", () => {
+  const rows = [
+    { time: 10, open: 100, high: 110, low: 90, close: 106 },
+    { time: 20, open: 106, high: 120, low: 100, close: 116 },
+    { time: 30, __whitespace: true },
+    { time: 40, open: 116, high: 118, low: 94, close: 96 },
+  ];
+  const snapshot = structuredClone(rows);
+  assert.deepEqual(buildMainSeriesData(rows, { chartType: "heikin-ashi" }), [
+    { time: 10, open: 103, high: 110, low: 90, close: 101.5 },
+    { time: 20, open: 102.25, high: 120, low: 100, close: 110.5 },
+    { time: 30 },
+    { time: 40, open: 106.375, high: 118, low: 94, close: 106 },
+  ]);
+  assert.deepEqual(rows, snapshot);
+});
+
+test("Heikin Ashi incremental conversion equals a full rebuild", () => {
+  const rows = [
+    { time: 10, open: 100, high: 110, low: 90, close: 106 },
+    { time: 20, open: 106, high: 120, low: 100, close: 116 },
+    { time: 30, open: 116, high: 118, low: 94, close: 96 },
+  ];
+  const full = buildMainSeriesData(rows, { chartType: "heikin-ashi" });
+  const previousSeriesData = full.slice(0, 1);
+  const toPoint = createMainSeriesPointConverter(rows, {
+    chartType: "heikin-ashi",
+    previousSeriesData,
+    startIndex: 1,
+  });
+  assert.deepEqual(rows.slice(1).map(toPoint), full.slice(1));
+
+  const recoverFromRows = createMainSeriesPointConverter(rows, {
+    chartType: "heikin-ashi",
+    startIndex: 2,
+  });
+  assert.deepEqual(recoverFromRows(rows[2]), full[2]);
+});
+
+test("Heikin Ashi can preserve the retained first point after a left trim", () => {
+  const rows = [
+    { time: 10, open: 100, high: 110, low: 90, close: 106 },
+    { time: 20, open: 106, high: 120, low: 100, close: 116 },
+    { time: 30, open: 116, high: 118, low: 94, close: 96 },
+  ];
+  const beforeTrim = buildMainSeriesData(rows, { chartType: "heikin-ashi" });
+  const nextRows = [
+    rows[1],
+    rows[2],
+    { time: 40, open: 96, high: 105, low: 92, close: 102 },
+  ];
+  const retained = buildMainSeriesData(nextRows, {
+    chartType: "heikin-ashi",
+    initialDerivedPoint: beforeTrim[1],
+  });
+
+  assert.deepEqual(retained.slice(0, 2), beforeTrim.slice(1));
+  assert.deepEqual(retained[2], {
+    time: 40,
+    open: (beforeTrim[2].open + beforeTrim[2].close) / 2,
+    high: (beforeTrim[2].open + beforeTrim[2].close) / 2,
+    low: 92,
+    close: 98.75,
+  });
 });
 
 test("price columns use close values, price-change colors, and barcolor overrides", () => {
@@ -180,6 +339,13 @@ test("type-specific styles respect rise and fall colors", () => {
   assert.equal(baseline.topLineColor, "#010203");
   assert.equal(baseline.bottomLineColor, "#040506");
   assert.match(baseline.topFillColor1, /^rgba\(1, 2, 3, /);
+
+  assert.equal(buildMainSeriesStyleOptions("step-line").lineType, LineType.WithSteps);
+  assert.equal(buildMainSeriesStyleOptions("step-line").pointMarkersVisible, false);
+  const markedLine = buildMainSeriesStyleOptions("line-with-markers");
+  assert.equal(markedLine.lineType, LineType.Simple);
+  assert.equal(markedLine.pointMarkersVisible, true);
+  assert.equal(markedLine.pointMarkersRadius, 3);
 });
 
 test("switching creates and populates the new series before removing the old one", () => {
@@ -229,4 +395,18 @@ test("single-value charts still publish OHLCV from the raw K-line row", () => {
     volume: 12,
   });
   assert.equal(buildMainSeriesCrosshairValue(10, { close: 110 }), null);
+});
+
+test("Heikin Ashi crosshair publishes displayed synthetic OHLC with raw volume", () => {
+  assert.deepEqual(buildMainSeriesCrosshairValue(10, ROWS[0], {
+    chartType: "heikin-ashi",
+    displayRow: { time: 10, open: 103, high: 112, low: 98, close: 105 },
+  }), {
+    time: 10,
+    open: 103,
+    high: 112,
+    low: 98,
+    close: 105,
+    volume: 12,
+  });
 });

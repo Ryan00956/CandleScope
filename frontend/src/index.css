@@ -3171,6 +3171,8 @@ body {
 
 .chart-type-flyout {
   min-width: 188px;
+  max-height: min(70vh, 620px);
+  overflow-y: auto;
 }
 
 .chart-type-flyout .tool-flyout-item {

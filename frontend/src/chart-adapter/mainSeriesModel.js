@@ -1,3 +1,4 @@
+import { LineType } from "lightweight-charts";
 import {
   isOhlcMainChartType,
   normalizeMainChartType,
@@ -6,6 +7,7 @@ import {
 const DEFAULT_UP_COLOR = "#22c55e";
 const DEFAULT_DOWN_COLOR = "#ef4444";
 const PRICE_LINE_COLOR = "#2962ff";
+const TRANSPARENT_BODY_COLOR = "rgba(0, 0, 0, 0)";
 
 function finiteNumber(value) {
   if (value == null || value === "") return null;
@@ -16,6 +18,63 @@ function finiteNumber(value) {
 function validClose(row) {
   if (row?.__whitespace) return null;
   return finiteNumber(row?.close);
+}
+
+function validOhlc(row) {
+  if (row?.__whitespace) return null;
+  const open = finiteNumber(row?.open);
+  const high = finiteNumber(row?.high);
+  const low = finiteNumber(row?.low);
+  const close = finiteNumber(row?.close);
+  return open == null || high == null || low == null || close == null
+    ? null
+    : { open, high, low, close };
+}
+
+function isValidOhlcPoint(point) {
+  return finiteNumber(point?.open) != null
+    && finiteNumber(point?.high) != null
+    && finiteNumber(point?.low) != null
+    && finiteNumber(point?.close) != null;
+}
+
+function copyOhlcPoint(point) {
+  if (!isValidOhlcPoint(point) || point?.time == null) return null;
+  return {
+    time: point.time,
+    open: Number(point.open),
+    high: Number(point.high),
+    low: Number(point.low),
+    close: Number(point.close),
+  };
+}
+
+function buildHeikinAshiPoint(row, previousPoint = null) {
+  const time = row?.time;
+  const ohlc = validOhlc(row);
+  if (!ohlc || time == null) return { time };
+
+  const close = (ohlc.open + ohlc.high + ohlc.low + ohlc.close) / 4;
+  const open = isValidOhlcPoint(previousPoint)
+    ? (Number(previousPoint.open) + Number(previousPoint.close)) / 2
+    : (ohlc.open + ohlc.close) / 2;
+  return {
+    time,
+    open,
+    high: Math.max(ohlc.high, open, close),
+    low: Math.min(ohlc.low, open, close),
+    close,
+  };
+}
+
+function withCandlestickColor(point, color) {
+  if (!color) return point;
+  return {
+    ...point,
+    color,
+    borderColor: color,
+    wickColor: color,
+  };
 }
 
 function colorWithAlpha(color, alpha, fallback) {
@@ -48,28 +107,44 @@ export function toMainSeriesPoint(row, {
   downColor = DEFAULT_DOWN_COLOR,
   indicatorColor = null,
   previousClose = null,
+  previousDerivedPoint = null,
   upColor = DEFAULT_UP_COLOR,
 } = {}) {
   const resolvedType = normalizeMainChartType(chartType);
   const time = row?.time;
   if (row?.__whitespace || time == null) return { time };
 
-  if (isOhlcMainChartType(resolvedType)) {
-    const open = finiteNumber(row.open);
-    const high = finiteNumber(row.high);
-    const low = finiteNumber(row.low);
-    const close = finiteNumber(row.close);
-    if (open == null || high == null || low == null || close == null) return { time };
+  if (resolvedType === "heikin-ashi") {
+    const point = buildHeikinAshiPoint(row, previousDerivedPoint);
+    return isValidOhlcPoint(point) ? withCandlestickColor(point, indicatorColor) : point;
+  }
 
-    const point = { time, open, high, low, close };
+  if (isOhlcMainChartType(resolvedType)) {
+    const ohlc = validOhlc(row);
+    if (!ohlc) return { time };
+    const point = { time, ...ohlc };
+
+    if (resolvedType === "high-low") {
+      return indicatorColor ? { ...point, color: indicatorColor } : point;
+    }
+
+    if (resolvedType === "hollow-candlestick") {
+      const reference = finiteNumber(previousClose);
+      const trendColor = indicatorColor || (
+        reference == null ? (ohlc.close >= ohlc.open ? upColor : downColor)
+          : (ohlc.close >= reference ? upColor : downColor)
+      );
+      return {
+        ...point,
+        color: ohlc.close >= ohlc.open ? TRANSPARENT_BODY_COLOR : trendColor,
+        borderColor: trendColor,
+        wickColor: trendColor,
+      };
+    }
+
     if (!indicatorColor) return point;
     if (resolvedType === "bar") return { ...point, color: indicatorColor };
-    return {
-      ...point,
-      color: indicatorColor,
-      borderColor: indicatorColor,
-      wickColor: indicatorColor,
-    };
+    return withCandlestickColor(point, indicatorColor);
   }
 
   const close = validClose(row);
@@ -92,28 +167,60 @@ function previousCloseBefore(rows, startIndex) {
   return null;
 }
 
+function previousHeikinAshiPoint(rows, startIndex, previousSeriesData = []) {
+  const lastIndex = Math.min(startIndex - 1, rows.length - 1);
+  for (let index = lastIndex; index >= 0; index -= 1) {
+    const candidate = previousSeriesData[index];
+    if (candidate?.time === rows[index]?.time && isValidOhlcPoint(candidate)) return candidate;
+  }
+
+  let previousPoint = null;
+  for (let index = 0; index <= lastIndex; index += 1) {
+    const point = buildHeikinAshiPoint(rows[index], previousPoint);
+    if (isValidOhlcPoint(point)) previousPoint = point;
+  }
+  return previousPoint;
+}
+
 export function createMainSeriesPointConverter(rows = [], {
   chartType,
   downColor = DEFAULT_DOWN_COLOR,
+  initialDerivedPoint = null,
   indicatorBarColorMap = null,
   indicatorBarcolors = [],
+  previousSeriesData = [],
   startIndex = 0,
   upColor = DEFAULT_UP_COLOR,
 } = {}) {
   const resolvedType = normalizeMainChartType(chartType);
   const colorMap = indicatorBarColorMap || buildIndicatorBarColorMap(indicatorBarcolors);
   let previousClose = previousCloseBefore(rows, startIndex);
+  let previousDerivedPoint = resolvedType === "heikin-ashi"
+    ? previousHeikinAshiPoint(rows, startIndex, previousSeriesData)
+    : null;
+  let pendingInitialPoint = resolvedType === "heikin-ashi"
+    && startIndex === 0
+    && initialDerivedPoint?.time === rows[0]?.time
+    ? copyOhlcPoint(initialDerivedPoint)
+    : null;
 
   return (row) => {
     const close = validClose(row);
-    const point = toMainSeriesPoint(row, {
-      chartType: resolvedType,
-      downColor,
-      indicatorColor: colorMap.get(row?.time) || null,
-      previousClose,
-      upColor,
-    });
+    const indicatorColor = colorMap.get(row?.time) || null;
+    const useInitialPoint = pendingInitialPoint?.time === row?.time;
+    const point = useInitialPoint
+      ? withCandlestickColor(pendingInitialPoint, indicatorColor)
+      : toMainSeriesPoint(row, {
+        chartType: resolvedType,
+        downColor,
+        indicatorColor,
+        previousClose,
+        previousDerivedPoint,
+        upColor,
+      });
+    pendingInitialPoint = null;
     if (close != null) previousClose = close;
+    if (resolvedType === "heikin-ashi" && isValidOhlcPoint(point)) previousDerivedPoint = point;
     return point;
   };
 }
@@ -179,7 +286,9 @@ export function buildMainSeriesStyleOptions(chartType, {
   upColor = DEFAULT_UP_COLOR,
 } = {}) {
   const resolvedType = normalizeMainChartType(chartType);
-  if (resolvedType === "candlestick") {
+  if (resolvedType === "candlestick"
+    || resolvedType === "hollow-candlestick"
+    || resolvedType === "heikin-ashi") {
     return {
       upColor,
       downColor,
@@ -197,10 +306,18 @@ export function buildMainSeriesStyleOptions(chartType, {
       thinBars: true,
     };
   }
-  if (resolvedType === "line") {
+  if (resolvedType === "high-low") {
+    return { color: PRICE_LINE_COLOR };
+  }
+  if (resolvedType === "line"
+    || resolvedType === "line-with-markers"
+    || resolvedType === "step-line") {
     return {
       color: PRICE_LINE_COLOR,
       lineWidth: 2,
+      lineType: resolvedType === "step-line" ? LineType.WithSteps : LineType.Simple,
+      pointMarkersVisible: resolvedType === "line-with-markers",
+      ...(resolvedType === "line-with-markers" ? { pointMarkersRadius: 3 } : {}),
       crosshairMarkerVisible: true,
     };
   }
@@ -234,11 +351,17 @@ export function buildMainSeriesOptions(chartType, options = {}, rows = []) {
   };
 }
 
-export function buildMainSeriesCrosshairValue(time, row) {
-  const open = finiteNumber(row?.open);
-  const high = finiteNumber(row?.high);
-  const low = finiteNumber(row?.low);
-  const close = finiteNumber(row?.close);
+export function buildMainSeriesCrosshairValue(time, row, {
+  chartType,
+  displayRow = null,
+} = {}) {
+  const priceRow = normalizeMainChartType(chartType) === "heikin-ashi" && displayRow
+    ? displayRow
+    : row;
+  const open = finiteNumber(priceRow?.open);
+  const high = finiteNumber(priceRow?.high);
+  const low = finiteNumber(priceRow?.low);
+  const close = finiteNumber(priceRow?.close);
   if (time == null || open == null || high == null || low == null || close == null) return null;
   return {
     time,

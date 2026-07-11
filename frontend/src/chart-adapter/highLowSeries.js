@@ -46,7 +46,10 @@ class HighLowSeriesRenderer {
         const top = Math.round(Math.min(highCoordinate, lowCoordinate) * verticalPixelRatio);
         const bottom = Math.round(Math.max(highCoordinate, lowCoordinate) * verticalPixelRatio);
 
-        context.fillStyle = bar.barColor || this.options?.color || DEFAULT_HIGH_LOW_COLOR;
+        context.fillStyle = bar?.originalData?.color
+          || bar.barColor
+          || this.options?.color
+          || DEFAULT_HIGH_LOW_COLOR;
         context.fillRect(left, top, width, Math.max(1, bottom - top));
       }
     });

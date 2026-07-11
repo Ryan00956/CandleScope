@@ -26,17 +26,24 @@ export function replaceMainSeries(chart, previousSeries, {
   indicatorBarColorMap = null,
   indicatorBarcolors = [],
   paneIndex,
+  previousSeriesData = null,
+  seriesData = null,
   upColor,
 } = {}) {
   const resolvedType = normalizeMainChartType(chartType);
-  const seriesData = buildMainSeriesData(data, {
-    chartType: resolvedType,
-    downColor,
-    indicatorBarColorMap,
-    indicatorBarcolors,
-    upColor,
-  });
+  const nextSeriesData = Array.isArray(seriesData)
+    ? seriesData
+    : buildMainSeriesData(data, {
+      chartType: resolvedType,
+      downColor,
+      indicatorBarColorMap,
+      indicatorBarcolors,
+      upColor,
+    });
   const previousOrder = previousSeries?.seriesOrder?.();
+  const rollbackData = Array.isArray(previousSeriesData)
+    ? previousSeriesData
+    : (typeof previousSeries?.data === "function" ? previousSeries.data() : null);
   const series = createMainSeries(chart, {
     chartType: resolvedType,
     data,
@@ -46,17 +53,25 @@ export function replaceMainSeries(chart, previousSeries, {
   });
 
   try {
-    series.setData(seriesData);
+    // Avoid registering the same time points on two main-series instances at
+    // once. Lightweight Charts can otherwise leave stale logical indexes when
+    // the old series is removed, especially while another pane shares the
+    // time scale.
+    previousSeries?.setData?.([]);
+    series.setData(nextSeriesData);
     if (Number.isFinite(previousOrder) && typeof series.setSeriesOrder === "function") {
       series.setSeriesOrder(previousOrder);
     }
     chart.removeSeries(previousSeries);
   } catch (error) {
     try { chart.removeSeries(series); } catch { /* best-effort rollback */ }
+    try {
+      if (Array.isArray(rollbackData)) previousSeries?.setData?.(rollbackData);
+    } catch { /* best-effort rollback */ }
     throw error;
   }
 
-  return { chartType: resolvedType, data: seriesData, series };
+  return { chartType: resolvedType, data: nextSeriesData, series };
 }
 
 export function createIndicatorSeries(chart, line, { crosshairMarkerVisible = true, paneIndex } = {}) {

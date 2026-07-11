@@ -18,16 +18,16 @@ import { ensurePane, readPaneHeights, setPaneHeights } from "../chart-adapter/pa
 import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRenderer";
 import { renderMarkers } from "../chart-adapter/markerRenderer";
 import { renderBgcolors } from "../chart-adapter/bgcolorPrimitiveRenderer";
-import { renderCandleDataTransition, renderSeriesDelta } from "../chart-adapter/seriesDeltaRenderer";
+import {
+  buildMainSeriesProjectionPatch,
+  renderMainSeriesProjectionPatch,
+} from "../chart-adapter/projectionSeriesRenderer";
 import { createViewportController } from "../chart-adapter/viewportController";
 import {
-  buildMainSeriesData,
   buildMainSeriesCrosshairValue,
   buildMainSeriesReferenceOptions,
   buildMainSeriesStyleOptions,
   buildIndicatorBarColorMap,
-  createMainSeriesPointConverter,
-  resolveMainSeriesDeltaStartIndex,
 } from "../chart-adapter/mainSeriesModel";
 import {
   alignIndicatorBgcolorsToTimes,
@@ -54,6 +54,11 @@ import {
   shouldLoadDrawingEngine,
 } from "../features/drawings/drawingEngineLoader";
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
+import {
+  createProjector,
+  getChartTypeDescriptor,
+  ProjectionStore,
+} from "../features/chart-representation/index.js";
 import { recordPerfEvent } from "../runtime/performance/perfMarks";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
@@ -98,111 +103,61 @@ function rowsFromStore(store) {
   return store?.snapshot?.() || [];
 }
 
-function syncSeriesDataRefsFromStore({ store, dataRef, dataMapRef, dataIndexMapRef }) {
+function createProjectionStore(chartType) {
+  const descriptor = getChartTypeDescriptor(chartType);
+  return new ProjectionStore({
+    projector: createProjector(descriptor.projectionId),
+  });
+}
+
+function syncSourceDataRefsFromStore({ store, rowsRef, rowMapRef, rowIndexMapRef }) {
   const rows = rowsFromStore(store);
-  dataRef.current = rows;
-  dataMapRef.current = {
+  rowsRef.current = rows;
+  rowMapRef.current = {
     get: (time) => store?.getByTime?.(time) || null,
     has: (time) => Boolean(store?.hasTime?.(time)),
   };
-  dataIndexMapRef.current = {
+  rowIndexMapRef.current = {
     get: (time) => store?.indexOfTime?.(time) ?? -1,
     has: (time) => (store?.indexOfTime?.(time) ?? -1) >= 0,
   };
 }
 
-function sameOhlcRow(left, right) {
-  if (left?.__whitespace || right?.__whitespace) {
-    return Boolean(left?.__whitespace) === Boolean(right?.__whitespace);
-  }
-  return ["open", "high", "low", "close"].every((key) => (
-    Number.isFinite(Number(left?.[key]))
-    && Number(left[key]) === Number(right?.[key])
-  ));
+function syncDisplayDataRefsFromProjection({ store, rowsRef, rowMapRef, rowIndexMapRef }) {
+  const rows = store?.displaySnapshot?.() || [];
+  rowsRef.current = rows;
+  rowMapRef.current = {
+    get: (time) => store?.getDisplayByTime?.(time) || null,
+    has: (time) => Boolean(store?.getDisplayByTime?.(time)),
+  };
+  rowIndexMapRef.current = {
+    get: (time) => store?.indexOfDisplayTime?.(time) ?? -1,
+    has: (time) => (store?.indexOfDisplayTime?.(time) ?? -1) >= 0,
+  };
 }
 
-function resolveHeikinAshiTrimAnchor({
-  delta,
-  nextRows,
-  previousRows,
-  previousSeriesData,
-  renderOptions,
-}) {
-  if (renderOptions?.chartType !== "heikin-ashi" || (delta?.trimmedLeft || 0) <= 0) return null;
-  const firstRow = nextRows?.[0];
-  if (!firstRow) return null;
-  const previousIndex = (previousRows || []).findIndex((row) => row?.time === firstRow.time);
-  if (previousIndex < 0 || !sameOhlcRow(previousRows[previousIndex], firstRow)) return null;
-  const point = previousSeriesData?.[previousIndex];
-  return point?.time === firstRow.time ? point : null;
+function resolveSourceTime(axisTime, displayRow = null) {
+  const displaySourceTime = Number(displayRow?.sourceTime);
+  if (Number.isFinite(displaySourceTime)) return displaySourceTime;
+  const lineageSourceTime = Number(
+    displayRow?.customValues?.chartProjection?.sourceToTime
+      ?? displayRow?.customValues?.chartProjection?.sourceFromTime,
+  );
+  if (Number.isFinite(lineageSourceTime)) return lineageSourceTime;
+  if (axisTime && typeof axisTime === "object") {
+    const axisSourceTime = Number(axisTime.sourceTime);
+    return Number.isFinite(axisSourceTime) ? axisSourceTime : null;
+  }
+  const numericTime = Number(axisTime);
+  return Number.isFinite(numericTime) ? numericTime : null;
 }
 
-function syncPreviousMainSeriesDataFromDelta({
-  delta,
-  store,
-  prevRef,
-  previousRows,
-  renderOptions,
-}) {
-  if (!delta || delta.type === "noop") return;
-  if (delta.type === "clear") {
-    prevRef.current = [];
-    return;
-  }
-
-  const current = prevRef.current || [];
-  const rows = rowsFromStore(store);
-  const hasTrim = (delta.trimmedLeft || 0) > 0 || (delta.trimmedRight || 0) > 0;
-  if (hasTrim) {
-    const initialDerivedPoint = resolveHeikinAshiTrimAnchor({
-      delta,
-      nextRows: rows,
-      previousRows,
-      previousSeriesData: current,
-      renderOptions,
-    });
-    prevRef.current = buildMainSeriesData(rows, { ...renderOptions, initialDerivedPoint });
-    return;
-  }
-
-  if (delta.type === "tick" && delta.bar && current.length > 0) {
-    const startIndex = resolveMainSeriesDeltaStartIndex(delta, rows, store);
-    const toPoint = createMainSeriesPointConverter(rows, {
-      ...renderOptions,
-      previousSeriesData: current,
-      startIndex,
-    });
-    const point = toPoint(delta.bar);
-    const last = current[current.length - 1];
-    if (last?.time === point.time) {
-      current[current.length - 1] = point;
-      if (delta.trimmedLeft > 0) current.splice(0, delta.trimmedLeft);
-      prevRef.current = current;
-      return;
-    }
-    if (point.time > last?.time) {
-      current.push(point);
-      if (delta.trimmedLeft > 0) current.splice(0, delta.trimmedLeft);
-      prevRef.current = current;
-      return;
-    }
-  }
-
-  if (delta.type === "append" && delta.addedRight > 0 && current.length > 0) {
-    const startIndex = Math.max(0, rows.length - delta.addedRight);
-    const toPoint = createMainSeriesPointConverter(rows, {
-      ...renderOptions,
-      previousSeriesData: current,
-      startIndex,
-    });
-    const added = rows.slice(startIndex).map(toPoint);
-    current.push(...added);
-    if (delta.trimmedLeft > 0) current.splice(0, delta.trimmedLeft);
-    prevRef.current = current;
-    return;
-  }
-
-  prevRef.current = buildMainSeriesData(rows, renderOptions);
+function shouldPreserveProjectionViewport(delta) {
+  const type = delta?.type;
+  const hasTrim = (delta?.trimmedLeft || 0) > 0 || (delta?.trimmedRight || 0) > 0;
+  return type === "prepend"
+    || type === "mid-merge"
+    || ((type === "tick" || type === "append") && hasTrim);
 }
 
 function getPaneRenderState(mapRef, paneId) {
@@ -313,10 +268,16 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const mainSeriesRef = useRef(null);
   const indicatorSeriesRef = useRef([]);
   const paneRenderStateRef = useRef(new Map());
-  const dataRef = useRef([]);
-  const dataMapRef = useRef(new Map());
-  const dataIndexMapRef = useRef(new Map());
-  const prevMainSeriesDataRef = useRef([]);
+  const sourceRowsRef = useRef([]);
+  const sourceRowMapRef = useRef(new Map());
+  const sourceRowIndexMapRef = useRef(new Map());
+  const displayRowsRef = useRef([]);
+  const displayRowMapRef = useRef(new Map());
+  const displayRowIndexMapRef = useRef(new Map());
+  const renderedMainSeriesDataRef = useRef([]);
+  const projectionStoreRef = useRef(null);
+  const projectionGenerationRef = useRef(0);
+  const projectionRenderContextRef = useRef(null);
   const mainSeriesTypeRef = useRef(null);
   const mainSeriesReferenceRef = useRef({ series: null, signature: "" });
   const requestedChartTypeRef = useRef(normalizeMainChartType(chartType));
@@ -358,9 +319,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     () => createLightweightChartAdapter({
       chartRef,
       seriesRef: mainSeriesRef,
-      seriesDataRef: dataRef,
-      seriesDataMapRef: dataMapRef,
-      seriesDataIndexRef: dataIndexMapRef,
+      seriesDataRef: displayRowsRef,
+      seriesDataMapRef: displayRowMapRef,
+      seriesDataIndexRef: displayRowIndexMapRef,
     }),
     [],
   );
@@ -452,9 +413,28 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       ...buildPaneLayoutOptions(),
     };
 
-    const chart = createChartInstance(container, options);
     const initialChartType = requestedChartTypeRef.current;
+    const initialDescriptor = getChartTypeDescriptor(initialChartType);
+    const chart = createChartInstance(container, options, {
+      axisMode: initialDescriptor.axisMode,
+    });
     const initialRows = rowsFromStore(seriesStoreRef.current);
+    syncSourceDataRefsFromStore({
+      store: seriesStoreRef.current,
+      rowsRef: sourceRowsRef,
+      rowMapRef: sourceRowMapRef,
+      rowIndexMapRef: sourceRowIndexMapRef,
+    });
+    const initialProjectionStore = createProjectionStore(initialChartType);
+    initialProjectionStore.reset(initialRows);
+    projectionStoreRef.current = initialProjectionStore;
+    projectionGenerationRef.current += 1;
+    syncDisplayDataRefsFromProjection({
+      store: initialProjectionStore,
+      rowsRef: displayRowsRef,
+      rowMapRef: displayRowMapRef,
+      rowIndexMapRef: displayRowIndexMapRef,
+    });
     const mainSeries = createMainSeries(chart, {
       chartType: initialChartType,
       data: initialRows,
@@ -480,13 +460,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         onCrosshairMove(null);
         return;
       }
+      const displayRow = displayRowMapRef.current.get(param.time);
+      const sourceTime = resolveSourceTime(param.time, displayRow);
+      const sourceRow = sourceTime == null ? null : sourceRowMapRef.current.get(sourceTime);
       const crosshairValue = buildMainSeriesCrosshairValue(
-        param.time,
-        dataMapRef.current.get(param.time),
-        {
-          chartType: mainSeriesTypeRef.current,
-          displayRow: param.seriesData?.get?.(mainSeriesRef.current),
-        },
+        sourceTime,
+        displayRow || sourceRow,
+        { volumeRow: sourceRow },
       );
       if (!crosshairValue) {
         onCrosshairMove(null);
@@ -505,7 +485,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       const visibleRange = captureVisibleRange();
       publishViewportRangeChange(visibleRange);
       scheduleVisibleRangeSave(visibleRange);
-      const currentData = dataRef.current;
+      const currentData = sourceRowsRef.current;
       if (shouldRequestMoreLeft({
         canLoad: canLoadMoreLeftRef.current,
         hasData: currentData?.length > 0,
@@ -530,7 +510,16 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       mainSeriesRef.current = null;
       mainSeriesTypeRef.current = null;
       mainSeriesReferenceRef.current = { series: null, signature: "" };
-      prevMainSeriesDataRef.current = [];
+      sourceRowsRef.current = [];
+      sourceRowMapRef.current = new Map();
+      sourceRowIndexMapRef.current = new Map();
+      displayRowsRef.current = [];
+      displayRowMapRef.current = new Map();
+      displayRowIndexMapRef.current = new Map();
+      renderedMainSeriesDataRef.current = [];
+      projectionStoreRef.current = null;
+      projectionGenerationRef.current += 1;
+      projectionRenderContextRef.current = null;
       indicatorSeriesRef.current = [];
       const viewportController = viewportControllerRef.current;
       viewportControllerRef.current = null;
@@ -598,18 +587,52 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     try {
       isSyncingRef.current = true;
       const previousType = mainSeriesTypeRef.current;
+      const previousDescriptor = getChartTypeDescriptor(previousType);
+      const nextDescriptor = getChartTypeDescriptor(resolvedChartType);
+      if (previousDescriptor.axisMode !== nextDescriptor.axisMode) {
+        throw new Error("switching horizontal-axis modes requires recreating the chart surface");
+      }
+      const nextProjectionStore = createProjectionStore(resolvedChartType);
+      const projectionPatch = nextProjectionStore.reset(rows);
+      const displayRows = nextProjectionStore.displaySnapshot();
+      const renderedPatch = buildMainSeriesProjectionPatch({
+        displayRows,
+        previousSeriesData: [],
+        projectionPatch,
+        renderOptions: {
+          ...mainSeriesRenderContext,
+          chartType: resolvedChartType,
+        },
+      });
       const result = replaceMainSeries(chart, previousSeries, {
         chartType: resolvedChartType,
         data: rows,
         downColor,
         indicatorBarColorMap,
         paneIndex: 0,
+        previousSeriesData: renderedMainSeriesDataRef.current,
+        seriesData: renderedPatch.nextData,
         upColor,
       });
 
       mainSeriesRef.current = result.series;
       mainSeriesTypeRef.current = result.chartType;
-      prevMainSeriesDataRef.current = result.data;
+      renderedMainSeriesDataRef.current = result.data;
+      projectionStoreRef.current = nextProjectionStore;
+      projectionGenerationRef.current += 1;
+      projectionRenderContextRef.current = mainSeriesRenderContext;
+      syncSourceDataRefsFromStore({
+        store: seriesStore,
+        rowsRef: sourceRowsRef,
+        rowMapRef: sourceRowMapRef,
+        rowIndexMapRef: sourceRowIndexMapRef,
+      });
+      syncDisplayDataRefsFromProjection({
+        store: nextProjectionStore,
+        rowsRef: displayRowsRef,
+        rowMapRef: displayRowMapRef,
+        rowIndexMapRef: displayRowIndexMapRef,
+      });
       mainSeriesReferenceRef.current = {
         series: result.series,
         signature: JSON.stringify(buildMainSeriesReferenceOptions(resolvedChartType, rows)),
@@ -632,6 +655,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     chartAdapter,
     downColor,
     indicatorBarColorMap,
+    mainSeriesRenderContext,
     resolvedChartType,
     seriesStore,
     upColor,
@@ -689,7 +713,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     userInteractedRef.current = false;
     hasRestoredRangeRef.current = false;
     lastViewportRestoreSourceRef.current = null;
-    prevMainSeriesDataRef.current = [];
+    renderedMainSeriesDataRef.current = [];
+    displayRowsRef.current = [];
+    displayRowMapRef.current = new Map();
+    displayRowIndexMapRef.current = new Map();
+    projectionStoreRef.current = null;
+    projectionGenerationRef.current += 1;
+    projectionRenderContextRef.current = null;
     viewportControllerRef.current?.resetSession();
   }, [datasetKey]);
 
@@ -697,36 +727,67 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const series = mainSeriesRef.current;
     const store = seriesStore;
     if (!series || !store) return undefined;
+    const activeChartType = mainSeriesTypeRef.current;
     const activeRenderOptions = {
       ...mainSeriesRenderContext,
-      chartType: mainSeriesTypeRef.current,
+      chartType: activeChartType,
     };
+    const descriptor = getChartTypeDescriptor(activeChartType);
+    const existingProjectionStore = projectionStoreRef.current;
+    const canReuseProjection = existingProjectionStore?.projector?.id === descriptor.projectionId;
+    const projectionStore = canReuseProjection
+      ? existingProjectionStore
+      : createProjectionStore(activeChartType);
+    const generation = projectionGenerationRef.current + 1;
+    projectionGenerationRef.current = generation;
+    projectionStoreRef.current = projectionStore;
 
     try {
       isSyncingRef.current = true;
-      syncSeriesDataRefsFromStore({
+      syncSourceDataRefsFromStore({
         store,
-        dataRef,
-        dataMapRef,
-        dataIndexMapRef,
+        rowsRef: sourceRowsRef,
+        rowMapRef: sourceRowMapRef,
+        rowIndexMapRef: sourceRowIndexMapRef,
       });
       const rows = rowsFromStore(store);
-      const nextData = buildMainSeriesData(rows, activeRenderOptions);
-      renderCandleDataTransition({
-        series,
-        previousData: prevMainSeriesDataRef.current,
-        nextData,
-        viewportController: viewportControllerRef.current,
-        paneId: "main",
+      const previousDisplayRows = displayRowsRef.current;
+      const projectionPatch = canReuseProjection
+        ? projectionStore.applySourceDelta({ type: "replace" }, rows)
+        : projectionStore.reset(rows);
+      const effectiveProjectionPatch = projectionRenderContextRef.current === mainSeriesRenderContext
+        ? projectionPatch
+        : { ...projectionPatch, fromOutputIndex: 0 };
+      const displayRows = projectionStore.displaySnapshot();
+      const renderedPatch = buildMainSeriesProjectionPatch({
+        displayRows,
+        previousSeriesData: renderedMainSeriesDataRef.current,
+        projectionPatch: effectiveProjectionPatch,
+        renderOptions: activeRenderOptions,
+      });
+      renderMainSeriesProjectionPatch({
+        indexOfDisplayTime: (time) => projectionStore.indexOfDisplayTime(time),
+        previousDisplayRows,
+        patch: renderedPatch,
         recordPerfEvent,
+        series,
+        viewportController: viewportControllerRef.current,
+      });
+      syncDisplayDataRefsFromProjection({
+        store: projectionStore,
+        rowsRef: displayRowsRef,
+        rowMapRef: displayRowMapRef,
+        rowIndexMapRef: displayRowIndexMapRef,
       });
       updateMainSeriesReference(series, rows);
-      prevMainSeriesDataRef.current = nextData;
+      renderedMainSeriesDataRef.current = renderedPatch.nextData;
+      projectionRenderContextRef.current = mainSeriesRenderContext;
     } finally {
       isSyncingRef.current = false;
     }
 
     return store.subscribe((delta, currentStore) => {
+      if (projectionGenerationRef.current !== generation || delta?.type === "noop") return;
       const currentSeries = mainSeriesRef.current;
       if (!currentSeries) return;
       try {
@@ -736,42 +797,36 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           chartType: mainSeriesTypeRef.current,
         };
         const rows = rowsFromStore(currentStore);
-        const startIndex = resolveMainSeriesDeltaStartIndex(delta, rows, currentStore);
-        const initialDerivedPoint = resolveHeikinAshiTrimAnchor({
-          delta,
-          nextRows: rows,
-          previousRows: dataRef.current,
-          previousSeriesData: prevMainSeriesDataRef.current,
+        const previousDisplayRows = projectionStore.displaySnapshot();
+        const projectionPatch = projectionStore.applySourceDelta(delta, rows);
+        const displayRows = projectionStore.displaySnapshot();
+        const renderedPatch = buildMainSeriesProjectionPatch({
+          displayRows,
+          previousSeriesData: renderedMainSeriesDataRef.current,
+          projectionPatch,
           renderOptions: currentRenderOptions,
         });
-        const toPoint = createMainSeriesPointConverter(rows, {
-          ...currentRenderOptions,
-          initialDerivedPoint,
-          previousSeriesData: prevMainSeriesDataRef.current,
-          startIndex,
-        });
-        renderSeriesDelta({
-          series: currentSeries,
-          delta,
-          store: currentStore,
-          previousRows: prevMainSeriesDataRef.current,
-          viewportController: viewportControllerRef.current,
-          toPoint,
-          paneId: "main",
+        renderMainSeriesProjectionPatch({
+          indexOfDisplayTime: (time) => projectionStore.indexOfDisplayTime(time),
+          previousDisplayRows,
+          patch: renderedPatch,
+          preserveViewport: shouldPreserveProjectionViewport(delta),
           recordPerfEvent,
+          series: currentSeries,
+          viewportController: viewportControllerRef.current,
         });
-        syncPreviousMainSeriesDataFromDelta({
-          delta,
+        renderedMainSeriesDataRef.current = renderedPatch.nextData;
+        syncSourceDataRefsFromStore({
           store: currentStore,
-          prevRef: prevMainSeriesDataRef,
-          previousRows: dataRef.current,
-          renderOptions: currentRenderOptions,
+          rowsRef: sourceRowsRef,
+          rowMapRef: sourceRowMapRef,
+          rowIndexMapRef: sourceRowIndexMapRef,
         });
-        syncSeriesDataRefsFromStore({
-          store: currentStore,
-          dataRef,
-          dataMapRef,
-          dataIndexMapRef,
+        syncDisplayDataRefsFromProjection({
+          store: projectionStore,
+          rowsRef: displayRowsRef,
+          rowMapRef: displayRowMapRef,
+          rowIndexMapRef: displayRowIndexMapRef,
         });
         updateMainSeriesReference(currentSeries, rows);
       } finally {

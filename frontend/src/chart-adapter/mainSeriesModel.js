@@ -31,42 +31,6 @@ function validOhlc(row) {
     : { open, high, low, close };
 }
 
-function isValidOhlcPoint(point) {
-  return finiteNumber(point?.open) != null
-    && finiteNumber(point?.high) != null
-    && finiteNumber(point?.low) != null
-    && finiteNumber(point?.close) != null;
-}
-
-function copyOhlcPoint(point) {
-  if (!isValidOhlcPoint(point) || point?.time == null) return null;
-  return {
-    time: point.time,
-    open: Number(point.open),
-    high: Number(point.high),
-    low: Number(point.low),
-    close: Number(point.close),
-  };
-}
-
-function buildHeikinAshiPoint(row, previousPoint = null) {
-  const time = row?.time;
-  const ohlc = validOhlc(row);
-  if (!ohlc || time == null) return { time };
-
-  const close = (ohlc.open + ohlc.high + ohlc.low + ohlc.close) / 4;
-  const open = isValidOhlcPoint(previousPoint)
-    ? (Number(previousPoint.open) + Number(previousPoint.close)) / 2
-    : (ohlc.open + ohlc.close) / 2;
-  return {
-    time,
-    open,
-    high: Math.max(ohlc.high, open, close),
-    low: Math.min(ohlc.low, open, close),
-    close,
-  };
-}
-
 function withCandlestickColor(point, color) {
   if (!color) return point;
   return {
@@ -107,25 +71,22 @@ export function toMainSeriesPoint(row, {
   downColor = DEFAULT_DOWN_COLOR,
   indicatorColor = null,
   previousClose = null,
-  previousDerivedPoint = null,
   upColor = DEFAULT_UP_COLOR,
 } = {}) {
   const resolvedType = normalizeMainChartType(chartType);
   const time = row?.time;
-  if (row?.__whitespace || time == null) return { time };
-
-  if (resolvedType === "heikin-ashi") {
-    const point = buildHeikinAshiPoint(row, previousDerivedPoint);
-    return isValidOhlcPoint(point) ? withCandlestickColor(point, indicatorColor) : point;
-  }
+  const finish = (point) => (row?.customValues
+    ? { ...point, customValues: row.customValues }
+    : point);
+  if (row?.__whitespace || time == null) return finish({ time });
 
   if (isOhlcMainChartType(resolvedType)) {
     const ohlc = validOhlc(row);
-    if (!ohlc) return { time };
+    if (!ohlc) return finish({ time });
     const point = { time, ...ohlc };
 
     if (resolvedType === "high-low") {
-      return indicatorColor ? { ...point, color: indicatorColor } : point;
+      return finish(indicatorColor ? { ...point, color: indicatorColor } : point);
     }
 
     if (resolvedType === "hollow-candlestick") {
@@ -134,29 +95,29 @@ export function toMainSeriesPoint(row, {
         reference == null ? (ohlc.close >= ohlc.open ? upColor : downColor)
           : (ohlc.close >= reference ? upColor : downColor)
       );
-      return {
+      return finish({
         ...point,
         color: ohlc.close >= ohlc.open ? TRANSPARENT_BODY_COLOR : trendColor,
         borderColor: trendColor,
         wickColor: trendColor,
-      };
+      });
     }
 
-    if (!indicatorColor) return point;
-    if (resolvedType === "bar") return { ...point, color: indicatorColor };
-    return withCandlestickColor(point, indicatorColor);
+    if (!indicatorColor) return finish(point);
+    if (resolvedType === "bar") return finish({ ...point, color: indicatorColor });
+    return finish(withCandlestickColor(point, indicatorColor));
   }
 
   const close = validClose(row);
-  if (close == null) return { time };
-  if (resolvedType !== "histogram") return { time, value: close };
+  if (close == null) return finish({ time });
+  if (resolvedType !== "histogram") return finish({ time, value: close });
 
   const reference = finiteNumber(previousClose);
-  return {
+  return finish({
     time,
     value: close,
     color: indicatorColor || (reference == null || close >= reference ? upColor : downColor),
-  };
+  });
 }
 
 function previousCloseBefore(rows, startIndex) {
@@ -167,60 +128,29 @@ function previousCloseBefore(rows, startIndex) {
   return null;
 }
 
-function previousHeikinAshiPoint(rows, startIndex, previousSeriesData = []) {
-  const lastIndex = Math.min(startIndex - 1, rows.length - 1);
-  for (let index = lastIndex; index >= 0; index -= 1) {
-    const candidate = previousSeriesData[index];
-    if (candidate?.time === rows[index]?.time && isValidOhlcPoint(candidate)) return candidate;
-  }
-
-  let previousPoint = null;
-  for (let index = 0; index <= lastIndex; index += 1) {
-    const point = buildHeikinAshiPoint(rows[index], previousPoint);
-    if (isValidOhlcPoint(point)) previousPoint = point;
-  }
-  return previousPoint;
-}
-
 export function createMainSeriesPointConverter(rows = [], {
   chartType,
   downColor = DEFAULT_DOWN_COLOR,
-  initialDerivedPoint = null,
   indicatorBarColorMap = null,
   indicatorBarcolors = [],
-  previousSeriesData = [],
   startIndex = 0,
   upColor = DEFAULT_UP_COLOR,
 } = {}) {
   const resolvedType = normalizeMainChartType(chartType);
   const colorMap = indicatorBarColorMap || buildIndicatorBarColorMap(indicatorBarcolors);
   let previousClose = previousCloseBefore(rows, startIndex);
-  let previousDerivedPoint = resolvedType === "heikin-ashi"
-    ? previousHeikinAshiPoint(rows, startIndex, previousSeriesData)
-    : null;
-  let pendingInitialPoint = resolvedType === "heikin-ashi"
-    && startIndex === 0
-    && initialDerivedPoint?.time === rows[0]?.time
-    ? copyOhlcPoint(initialDerivedPoint)
-    : null;
 
   return (row) => {
     const close = validClose(row);
     const indicatorColor = colorMap.get(row?.time) || null;
-    const useInitialPoint = pendingInitialPoint?.time === row?.time;
-    const point = useInitialPoint
-      ? withCandlestickColor(pendingInitialPoint, indicatorColor)
-      : toMainSeriesPoint(row, {
-        chartType: resolvedType,
-        downColor,
-        indicatorColor,
-        previousClose,
-        previousDerivedPoint,
-        upColor,
-      });
-    pendingInitialPoint = null;
+    const point = toMainSeriesPoint(row, {
+      chartType: resolvedType,
+      downColor,
+      indicatorColor,
+      previousClose,
+      upColor,
+    });
     if (close != null) previousClose = close;
-    if (resolvedType === "heikin-ashi" && isValidOhlcPoint(point)) previousDerivedPoint = point;
     return point;
   };
 }
@@ -228,19 +158,6 @@ export function createMainSeriesPointConverter(rows = [], {
 export function buildMainSeriesData(rows = [], options = {}) {
   const toPoint = createMainSeriesPointConverter(rows, { ...options, startIndex: 0 });
   return (rows || []).map(toPoint);
-}
-
-export function resolveMainSeriesDeltaStartIndex(delta, rows = [], store = null) {
-  const hasTrim = (delta?.trimmedLeft || 0) > 0 || (delta?.trimmedRight || 0) > 0;
-  if (hasTrim) return 0;
-  if (delta?.type === "tick" && delta.bar?.time != null) {
-    const index = store?.indexOfTime?.(delta.bar.time);
-    return Number.isFinite(index) && index >= 0 ? index : Math.max(0, rows.length - 1);
-  }
-  if (delta?.type === "append" && delta.addedRight > 0) {
-    return Math.max(0, rows.length - delta.addedRight);
-  }
-  return 0;
 }
 
 function finiteCloses(rows = []) {
@@ -351,17 +268,13 @@ export function buildMainSeriesOptions(chartType, options = {}, rows = []) {
   };
 }
 
-export function buildMainSeriesCrosshairValue(time, row, {
-  chartType,
-  displayRow = null,
+export function buildMainSeriesCrosshairValue(time, displayRow, {
+  volumeRow = displayRow,
 } = {}) {
-  const priceRow = normalizeMainChartType(chartType) === "heikin-ashi" && displayRow
-    ? displayRow
-    : row;
-  const open = finiteNumber(priceRow?.open);
-  const high = finiteNumber(priceRow?.high);
-  const low = finiteNumber(priceRow?.low);
-  const close = finiteNumber(priceRow?.close);
+  const open = finiteNumber(displayRow?.open);
+  const high = finiteNumber(displayRow?.high);
+  const low = finiteNumber(displayRow?.low);
+  const close = finiteNumber(displayRow?.close);
   if (time == null || open == null || high == null || low == null || close == null) return null;
   return {
     time,
@@ -369,6 +282,6 @@ export function buildMainSeriesCrosshairValue(time, row, {
     high,
     low,
     close,
-    volume: finiteNumber(row?.volume) || 0,
+    volume: finiteNumber(volumeRow?.volume) || 0,
   };
 }

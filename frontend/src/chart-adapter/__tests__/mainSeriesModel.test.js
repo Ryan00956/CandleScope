@@ -10,7 +10,6 @@ import {
   buildMainSeriesReferenceOptions,
   buildMainSeriesStyleOptions,
   createMainSeriesPointConverter,
-  resolveMainSeriesDeltaStartIndex,
   toMainSeriesPoint,
 } from "../mainSeriesModel.js";
 import { createMainSeries, replaceMainSeries } from "../seriesLifecycle.js";
@@ -96,6 +95,22 @@ test("ordinary OHLC types retain OHLC while close-value types use close", () => 
   }
 });
 
+test("rendered points preserve projection lineage carried in customValues", () => {
+  const customValues = {
+    chartProjection: {
+      projectorId: "identity",
+      sourceFromTime: 10,
+      sourceToTime: 10,
+      sourceOrdinal: 0,
+    },
+  };
+  assert.deepEqual(toMainSeriesPoint({ ...ROWS[0], customValues }, { chartType: "line" }), {
+    time: 10,
+    value: 110,
+    customValues,
+  });
+});
+
 test("high-low retains the source range and ignores open/close direction when rendering", () => {
   const rows = [
     { time: 10, open: 108, high: 112, low: 98, close: 100 },
@@ -118,8 +133,8 @@ test("high-low retains the source range and ignores open/close direction when re
     visibleRange: { from: 0, to: 2 },
     bars: rows.map((originalData, index) => ({
       x: 10 + index * 10,
-      originalData,
-      barColor: "#123456",
+      originalData: index === 0 ? { ...originalData, color: "#123456" } : originalData,
+      barColor: index === 0 ? "#fedcba" : "#123456",
     })),
   }, { color: "#abcdef" });
   paneView.renderer().draw({
@@ -169,12 +184,12 @@ test("hollow candles separate body fill from previous-close trend color", () => 
   });
 });
 
-test("Heikin Ashi derives synthetic OHLC without mutating source rows", () => {
+test("Heikin Ashi renders projected semantic OHLC without deriving it again", () => {
   const rows = [
-    { time: 10, open: 100, high: 110, low: 90, close: 106 },
-    { time: 20, open: 106, high: 120, low: 100, close: 116 },
+    { time: 10, open: 103, high: 110, low: 90, close: 101.5 },
+    { time: 20, open: 102.25, high: 120, low: 100, close: 110.5 },
     { time: 30, __whitespace: true },
-    { time: 40, open: 116, high: 118, low: 94, close: 96 },
+    { time: 40, open: 106.375, high: 118, low: 94, close: 106 },
   ];
   const snapshot = structuredClone(rows);
   assert.deepEqual(buildMainSeriesData(rows, { chartType: "heikin-ashi" }), [
@@ -184,55 +199,6 @@ test("Heikin Ashi derives synthetic OHLC without mutating source rows", () => {
     { time: 40, open: 106.375, high: 118, low: 94, close: 106 },
   ]);
   assert.deepEqual(rows, snapshot);
-});
-
-test("Heikin Ashi incremental conversion equals a full rebuild", () => {
-  const rows = [
-    { time: 10, open: 100, high: 110, low: 90, close: 106 },
-    { time: 20, open: 106, high: 120, low: 100, close: 116 },
-    { time: 30, open: 116, high: 118, low: 94, close: 96 },
-  ];
-  const full = buildMainSeriesData(rows, { chartType: "heikin-ashi" });
-  const previousSeriesData = full.slice(0, 1);
-  const toPoint = createMainSeriesPointConverter(rows, {
-    chartType: "heikin-ashi",
-    previousSeriesData,
-    startIndex: 1,
-  });
-  assert.deepEqual(rows.slice(1).map(toPoint), full.slice(1));
-
-  const recoverFromRows = createMainSeriesPointConverter(rows, {
-    chartType: "heikin-ashi",
-    startIndex: 2,
-  });
-  assert.deepEqual(recoverFromRows(rows[2]), full[2]);
-});
-
-test("Heikin Ashi can preserve the retained first point after a left trim", () => {
-  const rows = [
-    { time: 10, open: 100, high: 110, low: 90, close: 106 },
-    { time: 20, open: 106, high: 120, low: 100, close: 116 },
-    { time: 30, open: 116, high: 118, low: 94, close: 96 },
-  ];
-  const beforeTrim = buildMainSeriesData(rows, { chartType: "heikin-ashi" });
-  const nextRows = [
-    rows[1],
-    rows[2],
-    { time: 40, open: 96, high: 105, low: 92, close: 102 },
-  ];
-  const retained = buildMainSeriesData(nextRows, {
-    chartType: "heikin-ashi",
-    initialDerivedPoint: beforeTrim[1],
-  });
-
-  assert.deepEqual(retained.slice(0, 2), beforeTrim.slice(1));
-  assert.deepEqual(retained[2], {
-    time: 40,
-    open: (beforeTrim[2].open + beforeTrim[2].close) / 2,
-    high: (beforeTrim[2].open + beforeTrim[2].close) / 2,
-    low: 92,
-    close: 98.75,
-  });
 });
 
 test("price columns use close values, price-change colors, and barcolor overrides", () => {
@@ -296,24 +262,15 @@ test("ordinary chart types do not scan the full window for reference options", (
   assert.deepEqual(buildMainSeriesReferenceOptions("line", rows), {});
 });
 
-test("trimmed deltas rebuild histogram colors from the new first row", () => {
+test("tail conversion can rebuild histogram colors from a new first row", () => {
   const rows = [
     { time: 20, close: 90 },
     { time: 30, close: 80 },
   ];
-  const delta = {
-    type: "tick",
-    bar: rows[1],
-    trimmedLeft: 1,
-  };
-  const startIndex = resolveMainSeriesDeltaStartIndex(delta, rows, {
-    indexOfTime: () => 1,
-  });
-  assert.equal(startIndex, 0);
   const toPoint = createMainSeriesPointConverter(rows, {
     chartType: "histogram",
     downColor: "red",
-    startIndex,
+    startIndex: 0,
     upColor: "green",
   });
   assert.deepEqual(rows.map(toPoint), [
@@ -385,6 +342,27 @@ test("switching creates and populates the new series before removing the old one
   assert.strictEqual(events[3][1], oldSeries);
 });
 
+test("switching accepts projection-rendered series data without rebuilding it", () => {
+  const rendered = [{ time: 10, value: 999 }];
+  let received = null;
+  const oldSeries = { seriesOrder: () => 0 };
+  const nextSeries = {
+    setData: (data) => { received = data; },
+    setSeriesOrder: () => {},
+  };
+  const result = replaceMainSeries({
+    addSeries: () => nextSeries,
+    removeSeries: () => {},
+  }, oldSeries, {
+    chartType: "line",
+    data: ROWS,
+    seriesData: rendered,
+  });
+
+  assert.strictEqual(received, rendered);
+  assert.strictEqual(result.data, rendered);
+});
+
 test("single-value charts still publish OHLCV from the raw K-line row", () => {
   assert.deepEqual(buildMainSeriesCrosshairValue(10, ROWS[0]), {
     time: 10,
@@ -397,11 +375,14 @@ test("single-value charts still publish OHLCV from the raw K-line row", () => {
   assert.equal(buildMainSeriesCrosshairValue(10, { close: 110 }), null);
 });
 
-test("Heikin Ashi crosshair publishes displayed synthetic OHLC with raw volume", () => {
-  assert.deepEqual(buildMainSeriesCrosshairValue(10, ROWS[0], {
-    chartType: "heikin-ashi",
-    displayRow: { time: 10, open: 103, high: 112, low: 98, close: 105 },
-  }), {
+test("crosshair publishes displayed semantic OHLC with source volume", () => {
+  assert.deepEqual(buildMainSeriesCrosshairValue(
+    10,
+    { time: 10, open: 103, high: 112, low: 98, close: 105 },
+    {
+      volumeRow: ROWS[0],
+    },
+  ), {
     time: 10,
     open: 103,
     high: 112,

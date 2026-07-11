@@ -4,9 +4,11 @@ import {
   BaselineSeries,
   CandlestickSeries,
   createChart,
+  createChartEx,
   HistogramSeries,
   LineSeries,
 } from "lightweight-charts";
+import { createOrdinalHorzScaleBehavior } from "./ordinalHorzScaleBehavior.js";
 
 export const chartSeriesTypes = Object.freeze({
   candlestick: CandlestickSeries,
@@ -31,6 +33,9 @@ export function buildPaneLayoutOptions({
   };
 }
 
-export function createChartInstance(container, options) {
+export function createChartInstance(container, options, { axisMode = "time" } = {}) {
+  if (axisMode === "ordinal" || axisMode === "derived-ordinal") {
+    return createChartEx(container, createOrdinalHorzScaleBehavior(), options);
+  }
   return createChart(container, options);
 }

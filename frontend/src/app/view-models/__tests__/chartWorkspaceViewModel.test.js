@@ -3,9 +3,14 @@ import test from "node:test";
 
 import { buildChartWorkspaceViewModel } from "../chartWorkspaceViewModel.js";
 
-function buildContext({ indicatorActions = {}, marketActions = {}, settingsActions = {} } = {}) {
+function buildContext({
+  chartSettings = { chartType: "candlestick" },
+  indicatorActions = {},
+  marketActions = {},
+  settingsActions = {},
+} = {}) {
   return {
-    chartSettings: { chartType: "candlestick" },
+    chartSettings,
     drawingActions: {},
     drawingView: {},
     exportActions: {},
@@ -44,6 +49,32 @@ test("chart type is controlled by persisted appearance settings and shared with 
   assert.equal(model.chart.chartProps.chartType, "candlestick");
   model.drawingToolbar.onChartTypeChange("area");
   assert.deepEqual(updates, [{ chartType: "area" }]);
+});
+
+test("Point & Figure projection settings reach the chart surface", () => {
+  const model = buildChartWorkspaceViewModel(buildContext({
+    chartSettings: {
+      chartType: "point-and-figure",
+      pointFigureBoxSizeMode: "traditional",
+      pointFigureAtrLength: 21,
+      pointFigureBoxSize: 25,
+      pointFigureReversalAmount: 4,
+    },
+  }));
+
+  assert.deepEqual({
+    chartType: model.chart.chartProps.chartType,
+    mode: model.chart.chartProps.pointFigureBoxSizeMode,
+    atrLength: model.chart.chartProps.pointFigureAtrLength,
+    boxSize: model.chart.chartProps.pointFigureBoxSize,
+    reversalAmount: model.chart.chartProps.pointFigureReversalAmount,
+  }, {
+    chartType: "point-and-figure",
+    mode: "traditional",
+    atrLength: 21,
+    boxSize: 25,
+    reversalAmount: 4,
+  });
 });
 
 test("chart range handlers separate indicator coverage from user persistence", () => {

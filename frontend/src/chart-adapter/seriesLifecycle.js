@@ -1,7 +1,9 @@
 import { chartSeriesTypes } from "./lightweightChartSurface.js";
 import { createHighLowSeriesPaneView } from "./highLowSeries.js";
+import { createPointFigureSeriesPaneView } from "./pointFigureSeries.js";
 import { buildMainSeriesData, buildMainSeriesOptions } from "./mainSeriesModel.js";
-import { mainChartSeriesKind, normalizeMainChartType } from "../shared/mainChartTypes.js";
+import { getChartTypeDescriptor } from "../features/chart-representation/chartTypeRegistry.js";
+import { normalizeMainChartType } from "../shared/mainChartTypes.js";
 
 export function createMainSeries(chart, {
   chartType,
@@ -12,11 +14,16 @@ export function createMainSeries(chart, {
 } = {}) {
   const resolvedType = normalizeMainChartType(chartType);
   const options = buildMainSeriesOptions(resolvedType, { upColor, downColor }, data);
-  const seriesKind = mainChartSeriesKind(resolvedType);
-  if (seriesKind === "high-low") {
+  const rendererId = getChartTypeDescriptor(resolvedType).rendererId;
+  if (rendererId === "high-low") {
     return chart.addCustomSeries(createHighLowSeriesPaneView(), options, paneIndex);
   }
-  return chart.addSeries(chartSeriesTypes[seriesKind], options, paneIndex);
+  if (rendererId === "point-and-figure") {
+    return chart.addCustomSeries(createPointFigureSeriesPaneView(), options, paneIndex);
+  }
+  const seriesType = chartSeriesTypes[rendererId];
+  if (!seriesType) throw new Error(`unknown main-series renderer: ${rendererId}`);
+  return chart.addSeries(seriesType, options, paneIndex);
 }
 
 export function replaceMainSeries(chart, previousSeries, {

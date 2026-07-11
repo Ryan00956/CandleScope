@@ -14,6 +14,10 @@ test("settings normalization backfills cache budget defaults for old saved setti
   assert.equal(settings.renkoBoxSizeMode, "atr");
   assert.equal(settings.renkoAtrLength, 14);
   assert.equal(settings.renkoBoxSize, 1);
+  assert.equal(settings.pointFigureBoxSizeMode, "atr");
+  assert.equal(settings.pointFigureAtrLength, 14);
+  assert.equal(settings.pointFigureBoxSize, 1);
+  assert.equal(settings.pointFigureReversalAmount, 3);
   assert.equal(settings.frontendCacheBudgetBytes, 64 * 1024 * 1024);
   assert.equal(settings.sqliteStorageBudgetBytes, null);
   assert.equal(settings.storageRowLimitsEnabled, false);
@@ -24,7 +28,7 @@ test("settings normalization preserves supported chart types and rejects stale v
   assert.equal(normalizeSettings({ chartType: "heikin-ashi" }).chartType, "heikin-ashi");
   assert.equal(normalizeSettings({ chartType: "line-with-markers" }).chartType, "line-with-markers");
   assert.equal(normalizeSettings({ chartType: "renko" }).chartType, "renko");
-  assert.equal(normalizeSettings({ chartType: "point-and-figure" }).chartType, "candlestick");
+  assert.equal(normalizeSettings({ chartType: "point-and-figure" }).chartType, "point-and-figure");
 });
 
 test("settings normalization validates Renko runtime options", () => {
@@ -44,4 +48,26 @@ test("settings normalization validates Renko runtime options", () => {
   assert.equal(fallback.renkoBoxSizeMode, "atr");
   assert.equal(fallback.renkoAtrLength, 14);
   assert.equal(fallback.renkoBoxSize, 1);
+});
+
+test("settings normalization validates Point & Figure runtime options", () => {
+  assert.deepEqual(
+    {
+      mode: normalizeSettings({ pointFigureBoxSizeMode: "traditional" }).pointFigureBoxSizeMode,
+      atr: normalizeSettings({ pointFigureAtrLength: 21 }).pointFigureAtrLength,
+      box: normalizeSettings({ pointFigureBoxSize: 25.5 }).pointFigureBoxSize,
+      reversal: normalizeSettings({ pointFigureReversalAmount: 5 }).pointFigureReversalAmount,
+    },
+    { mode: "traditional", atr: 21, box: 25.5, reversal: 5 },
+  );
+  const fallback = normalizeSettings({
+    pointFigureBoxSizeMode: "unknown",
+    pointFigureAtrLength: 1,
+    pointFigureBoxSize: 0,
+    pointFigureReversalAmount: 0,
+  });
+  assert.equal(fallback.pointFigureBoxSizeMode, "atr");
+  assert.equal(fallback.pointFigureAtrLength, 14);
+  assert.equal(fallback.pointFigureBoxSize, 1);
+  assert.equal(fallback.pointFigureReversalAmount, 3);
 });

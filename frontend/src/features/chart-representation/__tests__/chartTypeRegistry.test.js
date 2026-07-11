@@ -21,8 +21,9 @@ test("default registry describes every currently supported main chart type", () 
     "baseline",
     "histogram",
     "renko",
+    "point-and-figure",
   ]);
-  for (const descriptor of DEFAULT_CHART_TYPE_DESCRIPTORS.filter((item) => item.id !== "renko")) {
+  for (const descriptor of DEFAULT_CHART_TYPE_DESCRIPTORS.filter((item) => item.axisMode === "time")) {
     assert.equal(descriptor.axisMode, "time");
     assert.ok(descriptor.projectionId);
     assert.ok(descriptor.rendererId);
@@ -34,6 +35,12 @@ test("default registry describes every currently supported main chart type", () 
     axisMode: "derived-ordinal",
     projectionId: "renko",
     rendererId: "candlestick",
+  });
+  assert.deepEqual(getChartTypeDescriptor("point-and-figure"), {
+    id: "point-and-figure",
+    axisMode: "derived-ordinal",
+    projectionId: "point-and-figure",
+    rendererId: "point-and-figure",
   });
   assert.equal(getChartTypeDescriptor("unknown").id, "candlestick");
 });

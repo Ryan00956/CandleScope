@@ -4,6 +4,7 @@ import test from "node:test";
 import { ProjectionStore } from "../projectionStore.js";
 import { HeikinAshiProjector } from "../projectors/heikinAshiProjector.js";
 import { IdentityProjector } from "../projectors/identityProjector.js";
+import { PointFigureProjector } from "../projectors/pointFigureProjector.js";
 import { RenkoProjector } from "../projectors/renkoProjector.js";
 
 function row(time, { close = time + 2, open = time, high = time + 5, low = time - 3 } = {}) {
@@ -258,4 +259,73 @@ test("stateful projection can trim the entire source prefix and append from fina
     patch.nextData.map((point) => [point.open, point.close, point.time.order]),
     [[54, 56, 1]],
   );
+});
+
+test("Point & Figure trim-left carries an unchanged active column", () => {
+  const store = new ProjectionStore({
+    projector: new PointFigureProjector({ boxSize: 1, minTick: 1 }),
+  });
+  const source = [
+    row(1, { open: 10, high: 10, low: 10, close: 10 }),
+    row(2, { open: 13, high: 13, low: 13, close: 13 }),
+    row(3, { open: 12, high: 12, low: 12, close: 12 }),
+    row(4, { open: 12, high: 12, low: 12, close: 12 }),
+  ];
+  store.reset(source);
+
+  const patch = store.applySourceDelta(
+    { type: "trim-left", trimmedLeft: 2 },
+    source.slice(2),
+  );
+
+  assert.deepEqual(
+    patch.nextData.map((point) => [point.open, point.high, point.low, point.close, point.time.order]),
+    [[11, 13, 11, 13, 0]],
+  );
+});
+
+test("Point & Figure trim-left keeps the active extreme for extension and exact reversal", () => {
+  const projector = new PointFigureProjector({ boxSize: 1, minTick: 1 });
+  const store = new ProjectionStore({ projector });
+  const initial = [
+    row(1, { open: 10, high: 10, low: 10, close: 10 }),
+    row(2, { open: 13, high: 13, low: 13, close: 13 }),
+  ];
+  store.reset(initial);
+  const extended = [
+    row(3, { open: 15, high: 15, low: 15, close: 15 }),
+    row(4, { open: 12, high: 12, low: 12, close: 12 }),
+  ];
+
+  const patch = store.applySourceDelta(
+    { type: "append", addedRight: 2, trimmedLeft: 2 },
+    extended,
+  );
+
+  assert.deepEqual(
+    patch.nextData.map((point) => [point.open, point.high, point.low, point.close, point.time.order]),
+    [
+      [11, 15, 11, 15, 0],
+      [14, 14, 12, 12, 1],
+    ],
+  );
+});
+
+test("Point & Figure trim-left clears display when the source window becomes empty", () => {
+  const store = new ProjectionStore({
+    projector: new PointFigureProjector({ boxSize: 1, minTick: 1 }),
+  });
+  const source = [
+    row(1, { open: 10, high: 10, low: 10, close: 10 }),
+    row(2, { open: 13, high: 13, low: 13, close: 13 }),
+  ];
+  store.reset(source);
+
+  const patch = store.applySourceDelta(
+    { type: "trim-left", trimmedLeft: source.length },
+    [],
+  );
+
+  assert.deepEqual(patch.nextData, []);
+  assert.equal(patch.nextLength, 0);
 });

@@ -135,6 +135,67 @@ export default function ChartAppearancePanel({ settings, onUpdate }) {
                 </div>
             )}
 
+            {settings.chartType === 'point-and-figure' && (
+                <div className="st-group">
+                    <div className="st-group-title">Point &amp; Figure 点数图</div>
+                    <div className="st-group-desc">
+                        使用源周期收盘价生成严格交替的 X/O 列。ATR 模式在进入图表时确定固定箱格；传统模式使用手动箱格。
+                    </div>
+                    <label className="st-field">
+                        <span>箱格计算</span>
+                        <select
+                            className="st-select"
+                            value={settings.pointFigureBoxSizeMode || 'atr'}
+                            onChange={(event) => handleUpdate('pointFigureBoxSizeMode', event.target.value)}
+                        >
+                            <option value="atr">ATR 自动</option>
+                            <option value="traditional">传统固定箱格</option>
+                        </select>
+                    </label>
+                    {(settings.pointFigureBoxSizeMode || 'atr') === 'atr' ? (
+                        <label className="st-field">
+                            <span>ATR 长度</span>
+                            <input
+                                className="st-input"
+                                type="number"
+                                min="2"
+                                max="500"
+                                step="1"
+                                value={settings.pointFigureAtrLength || 14}
+                                onChange={(event) => handleUpdate('pointFigureAtrLength', Number(event.target.value))}
+                            />
+                        </label>
+                    ) : (
+                        <label className="st-field">
+                            <span>固定箱格</span>
+                            <input
+                                className="st-input"
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={settings.pointFigureBoxSize || 1}
+                                onChange={(event) => handleUpdate('pointFigureBoxSize', Number(event.target.value))}
+                            />
+                        </label>
+                    )}
+                    <label className="st-field">
+                        <span>反转格数</span>
+                        <input
+                            className="st-input"
+                            type="number"
+                            min="1"
+                            max="100"
+                            step="1"
+                            value={settings.pointFigureReversalAmount || 3}
+                            onChange={(event) => handleUpdate('pointFigureReversalAmount', Number(event.target.value))}
+                        />
+                    </label>
+                    <div className="st-group-desc">
+                        点数图是合成价格结构；V1 不支持 High/Low 路径、Percentage 和 One Step Back，也不应用作精确成交价。
+                    </div>
+                </div>
+            )}
+
             <div className="st-group">
                 <div className="st-group-title">显示时区</div>
                 <div className="st-group-desc">图表坐标轴及十字线时间标签使用的时区</div>

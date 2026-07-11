@@ -3,6 +3,7 @@ import test from "node:test";
 import { LineType } from "lightweight-charts";
 
 import { createHighLowSeriesPaneView } from "../highLowSeries.js";
+import { createPointFigureSeriesPaneView } from "../pointFigureSeries.js";
 import { chartSeriesTypes } from "../lightweightChartSurface.js";
 import {
   buildMainSeriesCrosshairValue,
@@ -15,9 +16,9 @@ import {
 import { createMainSeries, replaceMainSeries } from "../seriesLifecycle.js";
 import {
   MAIN_CHART_TYPES,
-  mainChartSeriesKind,
   normalizeMainChartType,
 } from "../../shared/mainChartTypes.js";
+import { getChartTypeDescriptor } from "../../features/chart-representation/chartTypeRegistry.js";
 
 const ROWS = [
   { time: 10, open: 100, high: 112, low: 98, close: 110, volume: 12 },
@@ -25,12 +26,13 @@ const ROWS = [
   { time: 30, __whitespace: true },
 ];
 
-test("all twelve main chart types map to their built-in or custom series", () => {
+test("all thirteen main chart types map to their built-in or custom series", () => {
   assert.deepEqual(MAIN_CHART_TYPES, [
     "candlestick",
     "hollow-candlestick",
     "heikin-ashi",
     "renko",
+    "point-and-figure",
     "bar",
     "high-low",
     "line",
@@ -54,27 +56,27 @@ test("all twelve main chart types map to their built-in or custom series", () =>
       },
     };
     createMainSeries(chart, { chartType, data: ROWS, paneIndex: 0 });
-    const seriesKind = mainChartSeriesKind(chartType);
-    if (chartType === "high-low") {
+    const rendererId = getChartTypeDescriptor(chartType).rendererId;
+    if (chartType === "high-low" || chartType === "point-and-figure") {
       assert.equal(calls[0][0], "custom");
       assert.equal(typeof calls[0][1].priceValueBuilder, "function");
     } else {
       assert.equal(calls[0][0], "built-in");
-      assert.strictEqual(calls[0][1], chartSeriesTypes[seriesKind]);
+      assert.strictEqual(calls[0][1], chartSeriesTypes[rendererId]);
     }
     assert.equal(calls[0][3], 0);
   }
 });
 
 test("unknown chart types safely fall back to candlesticks", () => {
-  assert.equal(normalizeMainChartType("point-and-figure"), "candlestick");
+  assert.equal(normalizeMainChartType("kagi"), "candlestick");
   const calls = [];
   createMainSeries({
     addSeries: (...args) => {
       calls.push(args);
       return {};
     },
-  }, { chartType: "point-and-figure" });
+  }, { chartType: "kagi" });
   assert.strictEqual(calls[0][0], chartSeriesTypes.candlestick);
 });
 
@@ -149,6 +151,23 @@ test("high-low retains the source range and ignores open/close direction when re
   assert.equal(rectangles.length, 2);
   assert.deepEqual(rectangles[0].args.slice(1), rectangles[1].args.slice(1));
   assert.equal(rectangles[0].color, "#123456");
+});
+
+test("Point & Figure retains semantic OHLC and custom column metadata", () => {
+  const row = {
+    time: 10,
+    open: 101,
+    high: 103,
+    low: 101,
+    close: 103,
+    customValues: {
+      pointAndFigure: { boxSize: 1, direction: "x", reversalAmount: 3, source: "close" },
+    },
+  };
+  assert.deepEqual(buildMainSeriesData([row], { chartType: "point-and-figure" }), [row]);
+  const paneView = createPointFigureSeriesPaneView();
+  assert.deepEqual(paneView.priceValueBuilder(row), [103, 101, 103]);
+  assert.equal(paneView.isWhitespace(row), false);
 });
 
 test("hollow candles separate body fill from previous-close trend color", () => {
@@ -304,6 +323,14 @@ test("type-specific styles respect rise and fall colors", () => {
   assert.equal(markedLine.lineType, LineType.Simple);
   assert.equal(markedLine.pointMarkersVisible, true);
   assert.equal(markedLine.pointMarkersRadius, 3);
+  assert.deepEqual(buildMainSeriesStyleOptions("point-and-figure", {
+    upColor: "green",
+    downColor: "red",
+  }), {
+    upColor: "green",
+    downColor: "red",
+    lineWidth: 2,
+  });
 });
 
 test("switching creates and populates the new series before removing the old one", () => {
@@ -390,5 +417,23 @@ test("crosshair publishes displayed semantic OHLC with source volume", () => {
     low: 98,
     close: 105,
     volume: 12,
+  });
+});
+
+test("derived chart crosshair does not present one source bar as synthetic volume", () => {
+  assert.deepEqual(buildMainSeriesCrosshairValue(
+    10,
+    { time: 10, open: 101, high: 103, low: 101, close: 103 },
+    {
+      includeVolume: false,
+      volumeRow: ROWS[0],
+    },
+  ), {
+    time: 10,
+    open: 101,
+    high: 103,
+    low: 101,
+    close: 103,
+    volume: null,
   });
 });

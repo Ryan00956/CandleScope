@@ -203,6 +203,9 @@ export function buildMainSeriesStyleOptions(chartType, {
   upColor = DEFAULT_UP_COLOR,
 } = {}) {
   const resolvedType = normalizeMainChartType(chartType);
+  if (resolvedType === "point-and-figure") {
+    return { upColor, downColor, lineWidth: 2 };
+  }
   if (resolvedType === "candlestick"
     || resolvedType === "hollow-candlestick"
     || resolvedType === "heikin-ashi"
@@ -270,6 +273,7 @@ export function buildMainSeriesOptions(chartType, options = {}, rows = []) {
 }
 
 export function buildMainSeriesCrosshairValue(time, displayRow, {
+  includeVolume = true,
   volumeRow = displayRow,
 } = {}) {
   const open = finiteNumber(displayRow?.open);
@@ -283,6 +287,6 @@ export function buildMainSeriesCrosshairValue(time, displayRow, {
     high,
     low,
     close,
-    volume: finiteNumber(volumeRow?.volume) || 0,
+    volume: includeVolume ? (finiteNumber(volumeRow?.volume) || 0) : null,
   };
 }

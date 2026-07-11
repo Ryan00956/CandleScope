@@ -59,6 +59,7 @@ import {
   getChartTypeDescriptor,
   mapSourceTimeRangeToDisplayLogicalRange,
   ProjectionStore,
+  resolvePointFigureProjectorOptions,
   resolveRenkoProjectorOptions,
   sourceTimeFromAxisTime,
 } from "../features/chart-representation/index.js";
@@ -108,11 +109,15 @@ function rowsFromStore(store) {
 
 function resolveProjectionRuntime(chartType, rows, settings = {}) {
   const descriptor = getChartTypeDescriptor(chartType);
-  if (descriptor.projectionId !== "renko") {
-    return { descriptor, options: {}, configKey: descriptor.projectionId };
+  if (descriptor.projectionId === "renko") {
+    const options = resolveRenkoProjectorOptions(rows, settings);
+    return { descriptor, options, configKey: options.configKey };
   }
-  const options = resolveRenkoProjectorOptions(rows, settings);
-  return { descriptor, options, configKey: options.configKey };
+  if (descriptor.projectionId === "point-and-figure") {
+    const options = resolvePointFigureProjectorOptions(rows, settings);
+    return { descriptor, options, configKey: options.configKey };
+  }
+  return { descriptor, options: {}, configKey: descriptor.projectionId };
 }
 
 function createProjectionStore(chartType, rows = [], settings = {}) {
@@ -290,6 +295,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   renkoBoxSizeMode = "atr",
   renkoAtrLength = 14,
   renkoBoxSize = 1,
+  pointFigureBoxSizeMode = "atr",
+  pointFigureAtrLength = 14,
+  pointFigureBoxSize = 1,
+  pointFigureReversalAmount = 3,
   theme,
   customBg,
   timezone = "Local",
@@ -369,14 +378,36 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const resolvedDescriptor = getChartTypeDescriptor(resolvedChartType);
   const resolvedAxisMode = resolvedDescriptor.axisMode;
   const supportsAuxiliaryChartFeatures = resolvedAxisMode === "time";
-  const projectionSettings = useMemo(() => ({
-    mode: renkoBoxSizeMode,
-    atrLength: renkoAtrLength,
-    boxSize: renkoBoxSize,
-  }), [renkoAtrLength, renkoBoxSize, renkoBoxSizeMode]);
-  const projectionSettingsKey = `${renkoBoxSizeMode}:${renkoAtrLength}:${renkoBoxSize}`;
-  const surfaceConfigKey = resolvedChartType === "renko"
-    ? `${resolvedAxisMode}:${projectionSettingsKey}`
+  const projectionSettings = useMemo(() => {
+    if (resolvedChartType === "renko") {
+      return {
+        mode: renkoBoxSizeMode,
+        atrLength: renkoAtrLength,
+        boxSize: renkoBoxSize,
+      };
+    }
+    if (resolvedChartType === "point-and-figure") {
+      return {
+        mode: pointFigureBoxSizeMode,
+        atrLength: pointFigureAtrLength,
+        boxSize: pointFigureBoxSize,
+        reversalAmount: pointFigureReversalAmount,
+      };
+    }
+    return {};
+  }, [
+    pointFigureAtrLength,
+    pointFigureBoxSize,
+    pointFigureBoxSizeMode,
+    pointFigureReversalAmount,
+    renkoAtrLength,
+    renkoBoxSize,
+    renkoBoxSizeMode,
+    resolvedChartType,
+  ]);
+  const projectionSettingsKey = JSON.stringify(projectionSettings);
+  const surfaceConfigKey = resolvedAxisMode === "derived-ordinal"
+    ? `${resolvedAxisMode}:${resolvedChartType}:${projectionSettingsKey}`
     : resolvedAxisMode;
   requestedChartTypeRef.current = resolvedChartType;
   requestedProjectionSettingsRef.current = projectionSettings;
@@ -565,7 +596,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       const crosshairValue = buildMainSeriesCrosshairValue(
         sourceTime,
         displayRow || sourceRow,
-        { volumeRow: sourceRow },
+        { includeVolume: supportsAuxiliaryChartFeatures, volumeRow: sourceRow },
       );
       if (!crosshairValue) {
         onCrosshairMove(null);
@@ -642,7 +673,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         chart.remove();
       } catch { /* best-effort teardown */ }
     };
-  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishViewportRangeChange, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishViewportRangeChange, scheduleVisibleRangeSave, supportsAuxiliaryChartFeatures, surfaceConfigKey, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -1272,13 +1303,24 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
       {!supportsAuxiliaryChartFeatures && (
         <div className="synthetic-chart-notice" role="status">
-          <strong>Renko · Close</strong>
-          <span>
-            {projectionSettings.mode === "traditional"
-              ? `固定砖高 ${projectionSettings.boxSize}`
-              : `ATR ${projectionSettings.atrLength}`}
-            {" · 指标、成交量和绘图暂不显示"}
-          </span>
+          <strong>
+            {resolvedChartType === "point-and-figure" ? "Point & Figure · Close" : "Renko · Close"}
+          </strong>
+          {resolvedChartType === "point-and-figure" ? (
+            <span>
+              {projectionSettings.mode === "traditional"
+                ? `固定箱格 ${projectionSettings.boxSize}`
+                : `ATR ${projectionSettings.atrLength}`}
+              {` · ${projectionSettings.reversalAmount} 格反转 · 指标、成交量和绘图暂不显示`}
+            </span>
+          ) : (
+            <span>
+              {projectionSettings.mode === "traditional"
+                ? `固定砖高 ${projectionSettings.boxSize}`
+                : `ATR ${projectionSettings.atrLength}`}
+              {" · 指标、成交量和绘图暂不显示"}
+            </span>
+          )}
         </div>
       )}
 

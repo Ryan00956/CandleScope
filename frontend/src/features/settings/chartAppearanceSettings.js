@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { normalizeMainChartType } from "../../shared/mainChartTypes.js";
 
 const SETTINGS_STORAGE_KEY = "candlescope-settings";
-const RENKO_BOX_SIZE_MODES = new Set(["atr", "traditional"]);
+const PRICE_BOX_SIZE_MODES = new Set(["atr", "traditional"]);
 export const DEFAULT_SETTINGS = {
   theme: "dark",
   customBg: "#0f172a",
@@ -12,6 +12,10 @@ export const DEFAULT_SETTINGS = {
   renkoBoxSizeMode: "atr",
   renkoAtrLength: 14,
   renkoBoxSize: 1,
+  pointFigureBoxSizeMode: "atr",
+  pointFigureAtrLength: 14,
+  pointFigureBoxSize: 1,
+  pointFigureReversalAmount: 3,
   cachePreset: "standard",
   cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
   ephemeralCacheBars: 86400,
@@ -23,7 +27,7 @@ export const DEFAULT_SETTINGS = {
 export function normalizeSettings(settings = {}) {
   const normalized = { ...DEFAULT_SETTINGS, ...(settings || {}) };
   normalized.chartType = normalizeMainChartType(normalized.chartType);
-  normalized.renkoBoxSizeMode = RENKO_BOX_SIZE_MODES.has(normalized.renkoBoxSizeMode)
+  normalized.renkoBoxSizeMode = PRICE_BOX_SIZE_MODES.has(normalized.renkoBoxSizeMode)
     ? normalized.renkoBoxSizeMode
     : DEFAULT_SETTINGS.renkoBoxSizeMode;
   const atrLength = Math.trunc(Number(normalized.renkoAtrLength));
@@ -34,6 +38,25 @@ export function normalizeSettings(settings = {}) {
   normalized.renkoBoxSize = Number.isFinite(boxSize) && boxSize > 0
     ? boxSize
     : DEFAULT_SETTINGS.renkoBoxSize;
+  normalized.pointFigureBoxSizeMode = PRICE_BOX_SIZE_MODES.has(normalized.pointFigureBoxSizeMode)
+    ? normalized.pointFigureBoxSizeMode
+    : DEFAULT_SETTINGS.pointFigureBoxSizeMode;
+  const pointFigureAtrLength = Math.trunc(Number(normalized.pointFigureAtrLength));
+  normalized.pointFigureAtrLength = Number.isFinite(pointFigureAtrLength)
+    && pointFigureAtrLength >= 2
+    && pointFigureAtrLength <= 500
+    ? pointFigureAtrLength
+    : DEFAULT_SETTINGS.pointFigureAtrLength;
+  const pointFigureBoxSize = Number(normalized.pointFigureBoxSize);
+  normalized.pointFigureBoxSize = Number.isFinite(pointFigureBoxSize) && pointFigureBoxSize > 0
+    ? pointFigureBoxSize
+    : DEFAULT_SETTINGS.pointFigureBoxSize;
+  const pointFigureReversalAmount = Math.trunc(Number(normalized.pointFigureReversalAmount));
+  normalized.pointFigureReversalAmount = Number.isFinite(pointFigureReversalAmount)
+    && pointFigureReversalAmount >= 1
+    && pointFigureReversalAmount <= 100
+    ? pointFigureReversalAmount
+    : DEFAULT_SETTINGS.pointFigureReversalAmount;
   return normalized;
 }
 

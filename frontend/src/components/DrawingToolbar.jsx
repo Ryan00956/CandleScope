@@ -8,6 +8,10 @@
  * All drawing is native (Plugin API), no pixel overlays.
  */
 import { memo, useCallback, useEffect } from "react";
+import {
+  CHART_AXIS_MODES,
+  getChartTypeDescriptor,
+} from "../features/chart-representation/chartTypeRegistry.js";
 import { markPerfOnce } from "../runtime/performance/perfMarks";
 import DrawingActionButtons from "./drawing/DrawingActionButtons.jsx";
 import DrawingStyleControls from "./drawing/DrawingStyleControls.jsx";
@@ -161,8 +165,8 @@ const DrawingToolbar = memo(function DrawingToolbar({
       onSelectedDrawingStyleChange?.({ lineWidth });
     }
   }, [onPenSizeChange, onSelectedDrawingStyleChange, selectedDrawing]);
-  const drawingToolsDisabled = chartType === "renko";
-  const drawingToolTitle = "Renko 暂不支持绘图工具";
+  const drawingToolsDisabled = getChartTypeDescriptor(chartType).axisMode !== CHART_AXIS_MODES.TIME;
+  const drawingToolTitle = `${currentChartType.label} 暂不支持绘图工具`;
 
   return (
     <div className="drawing-toolbar">

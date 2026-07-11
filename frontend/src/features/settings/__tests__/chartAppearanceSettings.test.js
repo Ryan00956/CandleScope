@@ -18,6 +18,9 @@ test("settings normalization backfills cache budget defaults for old saved setti
   assert.equal(settings.pointFigureAtrLength, 14);
   assert.equal(settings.pointFigureBoxSize, 1);
   assert.equal(settings.pointFigureReversalAmount, 3);
+  assert.equal(settings.kagiReversalMode, "atr");
+  assert.equal(settings.kagiAtrLength, 14);
+  assert.equal(settings.kagiReversalAmount, 1);
   assert.equal(settings.frontendCacheBudgetBytes, 64 * 1024 * 1024);
   assert.equal(settings.sqliteStorageBudgetBytes, null);
   assert.equal(settings.storageRowLimitsEnabled, false);
@@ -29,6 +32,7 @@ test("settings normalization preserves supported chart types and rejects stale v
   assert.equal(normalizeSettings({ chartType: "line-with-markers" }).chartType, "line-with-markers");
   assert.equal(normalizeSettings({ chartType: "renko" }).chartType, "renko");
   assert.equal(normalizeSettings({ chartType: "point-and-figure" }).chartType, "point-and-figure");
+  assert.equal(normalizeSettings({ chartType: "kagi" }).chartType, "kagi");
 });
 
 test("settings normalization validates Renko runtime options", () => {
@@ -70,4 +74,23 @@ test("settings normalization validates Point & Figure runtime options", () => {
   assert.equal(fallback.pointFigureAtrLength, 14);
   assert.equal(fallback.pointFigureBoxSize, 1);
   assert.equal(fallback.pointFigureReversalAmount, 3);
+});
+
+test("settings normalization validates Kagi runtime options", () => {
+  assert.deepEqual(
+    {
+      mode: normalizeSettings({ kagiReversalMode: "traditional" }).kagiReversalMode,
+      atr: normalizeSettings({ kagiAtrLength: 21 }).kagiAtrLength,
+      reversal: normalizeSettings({ kagiReversalAmount: 25.5 }).kagiReversalAmount,
+    },
+    { mode: "traditional", atr: 21, reversal: 25.5 },
+  );
+  const fallback = normalizeSettings({
+    kagiReversalMode: "unknown",
+    kagiAtrLength: 1,
+    kagiReversalAmount: 0,
+  });
+  assert.equal(fallback.kagiReversalMode, "atr");
+  assert.equal(fallback.kagiAtrLength, 14);
+  assert.equal(fallback.kagiReversalAmount, 1);
 });

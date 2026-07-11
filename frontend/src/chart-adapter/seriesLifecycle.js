@@ -1,5 +1,6 @@
 import { chartSeriesTypes } from "./lightweightChartSurface.js";
 import { createHighLowSeriesPaneView } from "./highLowSeries.js";
+import { createKagiSeriesPaneView } from "./kagiSeries.js";
 import { createPointFigureSeriesPaneView } from "./pointFigureSeries.js";
 import { buildMainSeriesData, buildMainSeriesOptions } from "./mainSeriesModel.js";
 import { getChartTypeDescriptor } from "../features/chart-representation/chartTypeRegistry.js";
@@ -20,6 +21,9 @@ export function createMainSeries(chart, {
   }
   if (rendererId === "point-and-figure") {
     return chart.addCustomSeries(createPointFigureSeriesPaneView(), options, paneIndex);
+  }
+  if (rendererId === "kagi") {
+    return chart.addCustomSeries(createKagiSeriesPaneView(), options, paneIndex);
   }
   const seriesType = chartSeriesTypes[rendererId];
   if (!seriesType) throw new Error(`unknown main-series renderer: ${rendererId}`);

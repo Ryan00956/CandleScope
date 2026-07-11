@@ -4,6 +4,7 @@ import test from "node:test";
 import { ProjectionStore } from "../projectionStore.js";
 import { HeikinAshiProjector } from "../projectors/heikinAshiProjector.js";
 import { IdentityProjector } from "../projectors/identityProjector.js";
+import { KagiProjector } from "../projectors/kagiProjector.js";
 import { PointFigureProjector } from "../projectors/pointFigureProjector.js";
 import { RenkoProjector } from "../projectors/renkoProjector.js";
 
@@ -318,6 +319,75 @@ test("Point & Figure trim-left clears display when the source window becomes emp
   const source = [
     row(1, { open: 10, high: 10, low: 10, close: 10 }),
     row(2, { open: 13, high: 13, low: 13, close: 13 }),
+  ];
+  store.reset(source);
+
+  const patch = store.applySourceDelta(
+    { type: "trim-left", trimmedLeft: source.length },
+    [],
+  );
+
+  assert.deepEqual(patch.nextData, []);
+  assert.equal(patch.nextLength, 0);
+});
+
+test("Kagi trim-left carries an unchanged active leg", () => {
+  const store = new ProjectionStore({
+    projector: new KagiProjector({ minTick: 1, reversalTicks: 3 }),
+  });
+  const source = [
+    row(1, { open: 10, high: 10, low: 10, close: 10 }),
+    row(2, { open: 15, high: 15, low: 15, close: 15 }),
+    row(3, { open: 14, high: 14, low: 14, close: 14 }),
+    row(4, { open: 13, high: 13, low: 13, close: 13 }),
+  ];
+  store.reset(source);
+
+  const patch = store.applySourceDelta(
+    { type: "trim-left", trimmedLeft: 2 },
+    source.slice(2),
+  );
+
+  assert.deepEqual(
+    patch.nextData.map((point) => [point.open, point.close, point.time.order]),
+    [[10, 15, 0]],
+  );
+});
+
+test("Kagi checkpoints retain shoulder state and split a post-trim breakout leg", () => {
+  const store = new ProjectionStore({
+    projector: new KagiProjector({ minTick: 1, reversalTicks: 3 }),
+  });
+  const initial = [
+    row(1, { open: 10, high: 10, low: 10, close: 10 }),
+    row(2, { open: 15, high: 15, low: 15, close: 15 }),
+    row(3, { open: 11, high: 11, low: 11, close: 11 }),
+  ];
+  store.reset(initial);
+  const next = [row(4, { open: 16, high: 16, low: 16, close: 16 })];
+
+  const patch = store.applySourceDelta(
+    { type: "append", addedRight: 1, trimmedLeft: initial.length },
+    next,
+  );
+
+  assert.deepEqual(
+    patch.nextData.map((point) => [point.open, point.close, point.time.order]),
+    [[15, 11, 1], [11, 16, 2]],
+  );
+  assert.deepEqual(patch.nextData[1].customValues.kagi.sections, [
+    { from: 11, to: 15, style: "yin" },
+    { from: 15, to: 16, style: "yang" },
+  ]);
+});
+
+test("Kagi trim-left clears display when the source window becomes empty", () => {
+  const store = new ProjectionStore({
+    projector: new KagiProjector({ minTick: 1, reversalTicks: 3 }),
+  });
+  const source = [
+    row(1, { open: 10, high: 10, low: 10, close: 10 }),
+    row(2, { open: 15, high: 15, low: 15, close: 15 }),
   ];
   store.reset(source);
 

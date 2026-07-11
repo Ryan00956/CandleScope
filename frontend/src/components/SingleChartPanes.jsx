@@ -59,6 +59,7 @@ import {
   getChartTypeDescriptor,
   mapSourceTimeRangeToDisplayLogicalRange,
   ProjectionStore,
+  resolveKagiProjectorOptions,
   resolvePointFigureProjectorOptions,
   resolveRenkoProjectorOptions,
   sourceTimeFromAxisTime,
@@ -115,6 +116,10 @@ function resolveProjectionRuntime(chartType, rows, settings = {}) {
   }
   if (descriptor.projectionId === "point-and-figure") {
     const options = resolvePointFigureProjectorOptions(rows, settings);
+    return { descriptor, options, configKey: options.configKey };
+  }
+  if (descriptor.projectionId === "kagi") {
+    const options = resolveKagiProjectorOptions(rows, settings);
     return { descriptor, options, configKey: options.configKey };
   }
   return { descriptor, options: {}, configKey: descriptor.projectionId };
@@ -299,6 +304,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   pointFigureAtrLength = 14,
   pointFigureBoxSize = 1,
   pointFigureReversalAmount = 3,
+  kagiReversalMode = "atr",
+  kagiAtrLength = 14,
+  kagiReversalAmount = 1,
   theme,
   customBg,
   timezone = "Local",
@@ -394,8 +402,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         reversalAmount: pointFigureReversalAmount,
       };
     }
+    if (resolvedChartType === "kagi") {
+      return {
+        mode: kagiReversalMode,
+        atrLength: kagiAtrLength,
+        reversalAmount: kagiReversalAmount,
+      };
+    }
     return {};
   }, [
+    kagiAtrLength,
+    kagiReversalAmount,
+    kagiReversalMode,
     pointFigureAtrLength,
     pointFigureBoxSize,
     pointFigureBoxSizeMode,
@@ -1303,15 +1321,22 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
       {!supportsAuxiliaryChartFeatures && (
         <div className="synthetic-chart-notice" role="status">
-          <strong>
-            {resolvedChartType === "point-and-figure" ? "Point & Figure · Close" : "Renko · Close"}
-          </strong>
+          <strong>{resolvedChartType === "point-and-figure"
+            ? "Point & Figure · Close"
+            : (resolvedChartType === "kagi" ? "Kagi · Close" : "Renko · Close")}</strong>
           {resolvedChartType === "point-and-figure" ? (
             <span>
               {projectionSettings.mode === "traditional"
                 ? `固定箱格 ${projectionSettings.boxSize}`
                 : `ATR ${projectionSettings.atrLength}`}
               {` · ${projectionSettings.reversalAmount} 格反转 · 指标、成交量和绘图暂不显示`}
+            </span>
+          ) : (resolvedChartType === "kagi" ? (
+            <span>
+              {projectionSettings.mode === "traditional"
+                ? `固定反转距离 ${projectionSettings.reversalAmount}`
+                : `ATR ${projectionSettings.atrLength}`}
+              {" · 经典 Yang/Yin 粗细 · 指标、成交量和绘图暂不显示"}
             </span>
           ) : (
             <span>
@@ -1320,7 +1345,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
                 : `ATR ${projectionSettings.atrLength}`}
               {" · 指标、成交量和绘图暂不显示"}
             </span>
-          )}
+          ))}
         </div>
       )}
 

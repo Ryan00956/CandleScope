@@ -16,6 +16,9 @@ export const DEFAULT_SETTINGS = {
   pointFigureAtrLength: 14,
   pointFigureBoxSize: 1,
   pointFigureReversalAmount: 3,
+  kagiReversalMode: "atr",
+  kagiAtrLength: 14,
+  kagiReversalAmount: 1,
   cachePreset: "standard",
   cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
   ephemeralCacheBars: 86400,
@@ -57,6 +60,20 @@ export function normalizeSettings(settings = {}) {
     && pointFigureReversalAmount <= 100
     ? pointFigureReversalAmount
     : DEFAULT_SETTINGS.pointFigureReversalAmount;
+  normalized.kagiReversalMode = PRICE_BOX_SIZE_MODES.has(normalized.kagiReversalMode)
+    ? normalized.kagiReversalMode
+    : DEFAULT_SETTINGS.kagiReversalMode;
+  const kagiAtrLength = Math.trunc(Number(normalized.kagiAtrLength));
+  normalized.kagiAtrLength = Number.isFinite(kagiAtrLength)
+    && kagiAtrLength >= 2
+    && kagiAtrLength <= 500
+    ? kagiAtrLength
+    : DEFAULT_SETTINGS.kagiAtrLength;
+  const kagiReversalAmount = Number(normalized.kagiReversalAmount);
+  normalized.kagiReversalAmount = Number.isFinite(kagiReversalAmount)
+    && kagiReversalAmount > 0
+    ? kagiReversalAmount
+    : DEFAULT_SETTINGS.kagiReversalAmount;
   return normalized;
 }
 

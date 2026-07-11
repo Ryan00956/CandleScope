@@ -196,6 +196,55 @@ export default function ChartAppearancePanel({ settings, onUpdate }) {
                 </div>
             )}
 
+            {settings.chartType === 'kagi' && (
+                <div className="st-group">
+                    <div className="st-group-title">Kagi 卡吉图</div>
+                    <div className="st-group-desc">
+                        使用源周期收盘价生成无时间比例的转折线。突破前肩切换为 Yang 粗线，跌破前腰切换为 Yin 细线；粗细与涨跌方向独立。
+                    </div>
+                    <label className="st-field">
+                        <span>反转距离</span>
+                        <select
+                            className="st-select"
+                            value={settings.kagiReversalMode || 'atr'}
+                            onChange={(event) => handleUpdate('kagiReversalMode', event.target.value)}
+                        >
+                            <option value="atr">ATR 自动</option>
+                            <option value="traditional">传统固定距离</option>
+                        </select>
+                    </label>
+                    {(settings.kagiReversalMode || 'atr') === 'atr' ? (
+                        <label className="st-field">
+                            <span>ATR 长度</span>
+                            <input
+                                className="st-input"
+                                type="number"
+                                min="2"
+                                max="500"
+                                step="1"
+                                value={settings.kagiAtrLength || 14}
+                                onChange={(event) => handleUpdate('kagiAtrLength', Number(event.target.value))}
+                            />
+                        </label>
+                    ) : (
+                        <label className="st-field">
+                            <span>固定反转距离</span>
+                            <input
+                                className="st-input"
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={settings.kagiReversalAmount || 1}
+                                onChange={(event) => handleUpdate('kagiReversalAmount', Number(event.target.value))}
+                            />
+                        </label>
+                    )}
+                    <div className="st-group-desc">
+                        Kagi 是合成价格结构；V1 使用 Close，不支持 Percentage，也不应用作精确成交价或回测成交价。
+                    </div>
+                </div>
+            )}
+
             <div className="st-group">
                 <div className="st-group-title">显示时区</div>
                 <div className="st-group-desc">图表坐标轴及十字线时间标签使用的时区</div>

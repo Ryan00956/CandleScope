@@ -3,6 +3,7 @@ import test from "node:test";
 import { LineType } from "lightweight-charts";
 
 import { createHighLowSeriesPaneView } from "../highLowSeries.js";
+import { createKagiSeriesPaneView } from "../kagiSeries.js";
 import { createPointFigureSeriesPaneView } from "../pointFigureSeries.js";
 import { chartSeriesTypes } from "../lightweightChartSurface.js";
 import {
@@ -26,13 +27,14 @@ const ROWS = [
   { time: 30, __whitespace: true },
 ];
 
-test("all thirteen main chart types map to their built-in or custom series", () => {
+test("all fourteen main chart types map to their built-in or custom series", () => {
   assert.deepEqual(MAIN_CHART_TYPES, [
     "candlestick",
     "hollow-candlestick",
     "heikin-ashi",
     "renko",
     "point-and-figure",
+    "kagi",
     "bar",
     "high-low",
     "line",
@@ -57,7 +59,7 @@ test("all thirteen main chart types map to their built-in or custom series", () 
     };
     createMainSeries(chart, { chartType, data: ROWS, paneIndex: 0 });
     const rendererId = getChartTypeDescriptor(chartType).rendererId;
-    if (chartType === "high-low" || chartType === "point-and-figure") {
+    if (chartType === "high-low" || chartType === "point-and-figure" || chartType === "kagi") {
       assert.equal(calls[0][0], "custom");
       assert.equal(typeof calls[0][1].priceValueBuilder, "function");
     } else {
@@ -69,14 +71,14 @@ test("all thirteen main chart types map to their built-in or custom series", () 
 });
 
 test("unknown chart types safely fall back to candlesticks", () => {
-  assert.equal(normalizeMainChartType("kagi"), "candlestick");
+  assert.equal(normalizeMainChartType("line-break"), "candlestick");
   const calls = [];
   createMainSeries({
     addSeries: (...args) => {
       calls.push(args);
       return {};
     },
-  }, { chartType: "kagi" });
+  }, { chartType: "line-break" });
   assert.strictEqual(calls[0][0], chartSeriesTypes.candlestick);
 });
 
@@ -167,6 +169,28 @@ test("Point & Figure retains semantic OHLC and custom column metadata", () => {
   assert.deepEqual(buildMainSeriesData([row], { chartType: "point-and-figure" }), [row]);
   const paneView = createPointFigureSeriesPaneView();
   assert.deepEqual(paneView.priceValueBuilder(row), [103, 101, 103]);
+  assert.equal(paneView.isWhitespace(row), false);
+});
+
+test("Kagi retains semantic OHLC and custom leg metadata", () => {
+  const row = {
+    time: 10,
+    open: 101,
+    high: 105,
+    low: 101,
+    close: 105,
+    customValues: {
+      kagi: {
+        direction: "up",
+        sections: [{ from: 101, to: 105, style: "yin" }],
+        source: "close",
+        state: "yin",
+      },
+    },
+  };
+  assert.deepEqual(buildMainSeriesData([row], { chartType: "kagi" }), [row]);
+  const paneView = createKagiSeriesPaneView();
+  assert.deepEqual(paneView.priceValueBuilder(row), [105, 101, 105]);
   assert.equal(paneView.isWhitespace(row), false);
 });
 
@@ -330,6 +354,15 @@ test("type-specific styles respect rise and fall colors", () => {
     upColor: "green",
     downColor: "red",
     lineWidth: 2,
+  });
+  assert.deepEqual(buildMainSeriesStyleOptions("kagi", {
+    upColor: "green",
+    downColor: "red",
+  }), {
+    upColor: "green",
+    downColor: "red",
+    lineWidth: 2,
+    thickLineWidth: 4,
   });
 });
 

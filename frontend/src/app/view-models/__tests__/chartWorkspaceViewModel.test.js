@@ -77,6 +77,29 @@ test("Point & Figure projection settings reach the chart surface", () => {
   });
 });
 
+test("Kagi projection settings reach the chart surface", () => {
+  const model = buildChartWorkspaceViewModel(buildContext({
+    chartSettings: {
+      chartType: "kagi",
+      kagiReversalMode: "traditional",
+      kagiAtrLength: 21,
+      kagiReversalAmount: 25,
+    },
+  }));
+
+  assert.deepEqual({
+    chartType: model.chart.chartProps.chartType,
+    mode: model.chart.chartProps.kagiReversalMode,
+    atrLength: model.chart.chartProps.kagiAtrLength,
+    reversalAmount: model.chart.chartProps.kagiReversalAmount,
+  }, {
+    chartType: "kagi",
+    mode: "traditional",
+    atrLength: 21,
+    reversalAmount: 25,
+  });
+});
+
 test("chart range handlers separate indicator coverage from user persistence", () => {
   const indicatorRanges = [];
   const persistedRanges = [];

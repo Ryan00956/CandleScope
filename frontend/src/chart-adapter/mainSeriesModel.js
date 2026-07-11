@@ -206,6 +206,9 @@ export function buildMainSeriesStyleOptions(chartType, {
   if (resolvedType === "point-and-figure") {
     return { upColor, downColor, lineWidth: 2 };
   }
+  if (resolvedType === "kagi") {
+    return { upColor, downColor, lineWidth: 2, thickLineWidth: 4 };
+  }
   if (resolvedType === "candlestick"
     || resolvedType === "hollow-candlestick"
     || resolvedType === "heikin-ashi"

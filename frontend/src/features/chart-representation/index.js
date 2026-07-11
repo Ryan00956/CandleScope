@@ -15,6 +15,7 @@ export {
   resolveRenkoProjectorOptions,
 } from "./renkoProjectionOptions.js";
 export { resolvePointFigureProjectorOptions } from "./pointFigureProjectionOptions.js";
+export { resolveKagiProjectorOptions } from "./kagiProjectionOptions.js";
 export {
   axisTimeKey,
   compareAxisTime,
@@ -28,6 +29,7 @@ export {
 } from "./axisTime.js";
 export { HeikinAshiProjector } from "./projectors/heikinAshiProjector.js";
 export { IdentityProjector } from "./projectors/identityProjector.js";
+export { KagiProjector } from "./projectors/kagiProjector.js";
 export { PointFigureProjector } from "./projectors/pointFigureProjector.js";
 export { RenkoProjector } from "./projectors/renkoProjector.js";
 export { PROJECTION_METADATA_KEY } from "./projectors/projectorData.js";

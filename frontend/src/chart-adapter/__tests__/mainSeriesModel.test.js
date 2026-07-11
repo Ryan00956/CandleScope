@@ -27,7 +27,7 @@ const ROWS = [
   { time: 30, __whitespace: true },
 ];
 
-test("all fourteen main chart types map to their built-in or custom series", () => {
+test("all fifteen main chart types map to their built-in or custom series", () => {
   assert.deepEqual(MAIN_CHART_TYPES, [
     "candlestick",
     "hollow-candlestick",
@@ -35,6 +35,7 @@ test("all fourteen main chart types map to their built-in or custom series", () 
     "renko",
     "point-and-figure",
     "kagi",
+    "line-break",
     "bar",
     "high-low",
     "line",
@@ -71,14 +72,14 @@ test("all fourteen main chart types map to their built-in or custom series", () 
 });
 
 test("unknown chart types safely fall back to candlesticks", () => {
-  assert.equal(normalizeMainChartType("line-break"), "candlestick");
+  assert.equal(normalizeMainChartType("range"), "candlestick");
   const calls = [];
   createMainSeries({
     addSeries: (...args) => {
       calls.push(args);
       return {};
     },
-  }, { chartType: "line-break" });
+  }, { chartType: "range" });
   assert.strictEqual(calls[0][0], chartSeriesTypes.candlestick);
 });
 
@@ -192,6 +193,20 @@ test("Kagi retains semantic OHLC and custom leg metadata", () => {
   const paneView = createKagiSeriesPaneView();
   assert.deepEqual(paneView.priceValueBuilder(row), [105, 101, 105]);
   assert.equal(paneView.isWhitespace(row), false);
+});
+
+test("Line Break retains synthetic OHLC and breakout metadata", () => {
+  const row = {
+    time: 10,
+    open: 101,
+    high: 105,
+    low: 101,
+    close: 105,
+    customValues: {
+      lineBreak: { direction: "up", numberOfLines: 3, source: "close" },
+    },
+  };
+  assert.deepEqual(buildMainSeriesData([row], { chartType: "line-break" }), [row]);
 });
 
 test("hollow candles separate body fill from previous-close trend color", () => {
@@ -363,6 +378,16 @@ test("type-specific styles respect rise and fall colors", () => {
     downColor: "red",
     lineWidth: 2,
     thickLineWidth: 4,
+  });
+  assert.deepEqual(buildMainSeriesStyleOptions("line-break", {
+    upColor: "green",
+    downColor: "red",
+  }), {
+    upColor: "green",
+    downColor: "red",
+    borderDownColor: "red",
+    borderUpColor: "green",
+    wickVisible: false,
   });
 });
 

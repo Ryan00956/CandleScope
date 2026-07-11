@@ -236,6 +236,14 @@ const KagiChartIcon = (
   </svg>
 );
 
+const LineBreakChartIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round">
+    <rect x="3" y="9" width="5" height="8" rx="0.7" fill="currentColor" opacity="0.45" />
+    <rect x="9.5" y="6" width="5" height="7" rx="0.7" fill="currentColor" opacity="0.65" />
+    <rect x="16" y="3" width="5" height="8" rx="0.7" fill="currentColor" opacity="0.85" />
+  </svg>
+);
+
 const OhlcBarChartIcon = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <line x1="7" y1="5" x2="7" y2="19" />
@@ -358,6 +366,7 @@ const CHART_TYPE_VARIANTS = [
   { id: "renko", label: "Renko", description: "Close-based synthetic bricks", icon: RenkoChartIcon },
   { id: "point-and-figure", label: "Point & Figure", description: "Close-based X/O columns", icon: PointFigureChartIcon },
   { id: "kagi", label: "Kagi", description: "Close-based reversal lines", icon: KagiChartIcon },
+  { id: "line-break", label: "Line Break", description: "Close breaks of recent line ranges", icon: LineBreakChartIcon },
   { id: "bar", label: "OHLC bars", description: "Open, high, low and close bars", icon: OhlcBarChartIcon },
   { id: "high-low", label: "High-low", description: "Filled high-to-low price ranges", icon: HighLowChartIcon },
   { id: "line", label: "Line", description: "Close-price line", icon: ChartLineIcon },

@@ -103,6 +103,7 @@ export function buildChartWorkspaceViewModel({
         kagiReversalMode: chartSettings.kagiReversalMode,
         kagiAtrLength: chartSettings.kagiAtrLength,
         kagiReversalAmount: chartSettings.kagiReversalAmount,
+        lineBreakNumberOfLines: chartSettings.lineBreakNumberOfLines,
         theme: resolvedTheme,
         customBg: chartSettings.customBg,
         timezone: chartSettings.timezone,

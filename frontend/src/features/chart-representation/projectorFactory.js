@@ -1,6 +1,7 @@
 import { HeikinAshiProjector } from "./projectors/heikinAshiProjector.js";
 import { IdentityProjector } from "./projectors/identityProjector.js";
 import { KagiProjector } from "./projectors/kagiProjector.js";
+import { LineBreakProjector } from "./projectors/lineBreakProjector.js";
 import { PointFigureProjector } from "./projectors/pointFigureProjector.js";
 import { RenkoProjector } from "./projectors/renkoProjector.js";
 
@@ -10,6 +11,7 @@ const PROJECTOR_FACTORIES = new Map([
   ["renko", (options) => new RenkoProjector(options)],
   ["point-and-figure", (options) => new PointFigureProjector(options)],
   ["kagi", (options) => new KagiProjector(options)],
+  ["line-break", (options) => new LineBreakProjector(options)],
 ]);
 
 export function registerProjectorFactory(id, factory, { replace = false } = {}) {

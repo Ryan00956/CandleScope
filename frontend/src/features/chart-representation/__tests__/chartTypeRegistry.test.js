@@ -23,6 +23,7 @@ test("default registry describes every currently supported main chart type", () 
     "renko",
     "point-and-figure",
     "kagi",
+    "line-break",
   ]);
   for (const descriptor of DEFAULT_CHART_TYPE_DESCRIPTORS.filter((item) => item.axisMode === "time")) {
     assert.equal(descriptor.axisMode, "time");
@@ -48,6 +49,12 @@ test("default registry describes every currently supported main chart type", () 
     axisMode: "derived-ordinal",
     projectionId: "kagi",
     rendererId: "kagi",
+  });
+  assert.deepEqual(getChartTypeDescriptor("line-break"), {
+    id: "line-break",
+    axisMode: "derived-ordinal",
+    projectionId: "line-break",
+    rendererId: "candlestick",
   });
   assert.equal(getChartTypeDescriptor("unknown").id, "candlestick");
 });

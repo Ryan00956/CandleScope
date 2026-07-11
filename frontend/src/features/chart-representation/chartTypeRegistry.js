@@ -9,6 +9,7 @@ export const CHART_PROJECTION_IDS = Object.freeze({
   RENKO: "renko",
   POINT_AND_FIGURE: "point-and-figure",
   KAGI: "kagi",
+  LINE_BREAK: "line-break",
 });
 
 export const DEFAULT_CHART_TYPE_DESCRIPTORS = Object.freeze([
@@ -26,6 +27,7 @@ export const DEFAULT_CHART_TYPE_DESCRIPTORS = Object.freeze([
   { id: "renko", axisMode: "derived-ordinal", projectionId: "renko", rendererId: "candlestick" },
   { id: "point-and-figure", axisMode: "derived-ordinal", projectionId: "point-and-figure", rendererId: "point-and-figure" },
   { id: "kagi", axisMode: "derived-ordinal", projectionId: "kagi", rendererId: "kagi" },
+  { id: "line-break", axisMode: "derived-ordinal", projectionId: "line-break", rendererId: "candlestick" },
 ].map((descriptor) => Object.freeze(descriptor)));
 
 function normalizeDescriptor(descriptor) {

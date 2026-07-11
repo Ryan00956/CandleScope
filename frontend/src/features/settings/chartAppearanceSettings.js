@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS = {
   kagiReversalMode: "atr",
   kagiAtrLength: 14,
   kagiReversalAmount: 1,
+  lineBreakNumberOfLines: 3,
   cachePreset: "standard",
   cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
   ephemeralCacheBars: 86400,
@@ -74,6 +75,12 @@ export function normalizeSettings(settings = {}) {
     && kagiReversalAmount > 0
     ? kagiReversalAmount
     : DEFAULT_SETTINGS.kagiReversalAmount;
+  const lineBreakNumberOfLines = Math.trunc(Number(normalized.lineBreakNumberOfLines));
+  normalized.lineBreakNumberOfLines = Number.isFinite(lineBreakNumberOfLines)
+    && lineBreakNumberOfLines >= 1
+    && lineBreakNumberOfLines <= 50
+    ? lineBreakNumberOfLines
+    : DEFAULT_SETTINGS.lineBreakNumberOfLines;
   return normalized;
 }
 

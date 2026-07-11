@@ -60,6 +60,7 @@ import {
   mapSourceTimeRangeToDisplayLogicalRange,
   ProjectionStore,
   resolveKagiProjectorOptions,
+  resolveLineBreakProjectorOptions,
   resolvePointFigureProjectorOptions,
   resolveRenkoProjectorOptions,
   sourceTimeFromAxisTime,
@@ -122,7 +123,42 @@ function resolveProjectionRuntime(chartType, rows, settings = {}) {
     const options = resolveKagiProjectorOptions(rows, settings);
     return { descriptor, options, configKey: options.configKey };
   }
+  if (descriptor.projectionId === "line-break") {
+    const options = resolveLineBreakProjectorOptions(rows, settings);
+    return { descriptor, options, configKey: options.configKey };
+  }
   return { descriptor, options: {}, configKey: descriptor.projectionId };
+}
+
+function buildSyntheticChartNotice(chartType, settings = {}) {
+  if (chartType === "point-and-figure") {
+    const size = settings.mode === "traditional"
+      ? `固定箱格 ${settings.boxSize}`
+      : `ATR ${settings.atrLength}`;
+    return {
+      title: "Point & Figure · Close",
+      detail: `${size} · ${settings.reversalAmount} 格反转`,
+    };
+  }
+  if (chartType === "kagi") {
+    const size = settings.mode === "traditional"
+      ? `固定反转距离 ${settings.reversalAmount}`
+      : `ATR ${settings.atrLength}`;
+    return {
+      title: "Kagi · Close",
+      detail: `${size} · 经典 Yang/Yin 粗细`,
+    };
+  }
+  if (chartType === "line-break") {
+    return {
+      title: "Line Break · Close",
+      detail: `${settings.numberOfLines} 线突破`,
+    };
+  }
+  const size = settings.mode === "traditional"
+    ? `固定砖高 ${settings.boxSize}`
+    : `ATR ${settings.atrLength}`;
+  return { title: "Renko · Close", detail: size };
 }
 
 function createProjectionStore(chartType, rows = [], settings = {}) {
@@ -307,6 +343,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   kagiReversalMode = "atr",
   kagiAtrLength = 14,
   kagiReversalAmount = 1,
+  lineBreakNumberOfLines = 3,
   theme,
   customBg,
   timezone = "Local",
@@ -409,11 +446,15 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         reversalAmount: kagiReversalAmount,
       };
     }
+    if (resolvedChartType === "line-break") {
+      return { numberOfLines: lineBreakNumberOfLines };
+    }
     return {};
   }, [
     kagiAtrLength,
     kagiReversalAmount,
     kagiReversalMode,
+    lineBreakNumberOfLines,
     pointFigureAtrLength,
     pointFigureBoxSize,
     pointFigureBoxSizeMode,
@@ -423,6 +464,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     renkoBoxSizeMode,
     resolvedChartType,
   ]);
+  const syntheticChartNotice = buildSyntheticChartNotice(resolvedChartType, projectionSettings);
   const projectionSettingsKey = JSON.stringify(projectionSettings);
   const surfaceConfigKey = resolvedAxisMode === "derived-ordinal"
     ? `${resolvedAxisMode}:${resolvedChartType}:${projectionSettingsKey}`
@@ -1321,31 +1363,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
       {!supportsAuxiliaryChartFeatures && (
         <div className="synthetic-chart-notice" role="status">
-          <strong>{resolvedChartType === "point-and-figure"
-            ? "Point & Figure · Close"
-            : (resolvedChartType === "kagi" ? "Kagi · Close" : "Renko · Close")}</strong>
-          {resolvedChartType === "point-and-figure" ? (
-            <span>
-              {projectionSettings.mode === "traditional"
-                ? `固定箱格 ${projectionSettings.boxSize}`
-                : `ATR ${projectionSettings.atrLength}`}
-              {` · ${projectionSettings.reversalAmount} 格反转 · 指标、成交量和绘图暂不显示`}
-            </span>
-          ) : (resolvedChartType === "kagi" ? (
-            <span>
-              {projectionSettings.mode === "traditional"
-                ? `固定反转距离 ${projectionSettings.reversalAmount}`
-                : `ATR ${projectionSettings.atrLength}`}
-              {" · 经典 Yang/Yin 粗细 · 指标、成交量和绘图暂不显示"}
-            </span>
-          ) : (
-            <span>
-              {projectionSettings.mode === "traditional"
-                ? `固定砖高 ${projectionSettings.boxSize}`
-                : `ATR ${projectionSettings.atrLength}`}
-              {" · 指标、成交量和绘图暂不显示"}
-            </span>
-          ))}
+          <strong>{syntheticChartNotice.title}</strong>
+          <span>
+            {`${syntheticChartNotice.detail} · 指标、成交量和绘图暂不显示`}
+          </span>
         </div>
       )}
 

@@ -209,6 +209,15 @@ export function buildMainSeriesStyleOptions(chartType, {
   if (resolvedType === "kagi") {
     return { upColor, downColor, lineWidth: 2, thickLineWidth: 4 };
   }
+  if (resolvedType === "line-break") {
+    return {
+      upColor,
+      downColor,
+      borderDownColor: downColor,
+      borderUpColor: upColor,
+      wickVisible: false,
+    };
+  }
   if (resolvedType === "candlestick"
     || resolvedType === "hollow-candlestick"
     || resolvedType === "heikin-ashi"

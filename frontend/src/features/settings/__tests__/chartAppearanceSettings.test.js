@@ -21,6 +21,7 @@ test("settings normalization backfills cache budget defaults for old saved setti
   assert.equal(settings.kagiReversalMode, "atr");
   assert.equal(settings.kagiAtrLength, 14);
   assert.equal(settings.kagiReversalAmount, 1);
+  assert.equal(settings.lineBreakNumberOfLines, 3);
   assert.equal(settings.frontendCacheBudgetBytes, 64 * 1024 * 1024);
   assert.equal(settings.sqliteStorageBudgetBytes, null);
   assert.equal(settings.storageRowLimitsEnabled, false);
@@ -33,6 +34,7 @@ test("settings normalization preserves supported chart types and rejects stale v
   assert.equal(normalizeSettings({ chartType: "renko" }).chartType, "renko");
   assert.equal(normalizeSettings({ chartType: "point-and-figure" }).chartType, "point-and-figure");
   assert.equal(normalizeSettings({ chartType: "kagi" }).chartType, "kagi");
+  assert.equal(normalizeSettings({ chartType: "line-break" }).chartType, "line-break");
 });
 
 test("settings normalization validates Renko runtime options", () => {
@@ -93,4 +95,12 @@ test("settings normalization validates Kagi runtime options", () => {
   assert.equal(fallback.kagiReversalMode, "atr");
   assert.equal(fallback.kagiAtrLength, 14);
   assert.equal(fallback.kagiReversalAmount, 1);
+});
+
+test("settings normalization validates Line Break runtime options", () => {
+  assert.equal(normalizeSettings({ lineBreakNumberOfLines: 5 }).lineBreakNumberOfLines, 5);
+  assert.equal(normalizeSettings({ lineBreakNumberOfLines: 4.9 }).lineBreakNumberOfLines, 4);
+  for (const value of [0, -1, 51, "invalid"]) {
+    assert.equal(normalizeSettings({ lineBreakNumberOfLines: value }).lineBreakNumberOfLines, 3);
+  }
 });

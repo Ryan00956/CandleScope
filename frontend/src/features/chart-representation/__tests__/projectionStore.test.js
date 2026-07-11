@@ -5,6 +5,7 @@ import { ProjectionStore } from "../projectionStore.js";
 import { HeikinAshiProjector } from "../projectors/heikinAshiProjector.js";
 import { IdentityProjector } from "../projectors/identityProjector.js";
 import { KagiProjector } from "../projectors/kagiProjector.js";
+import { LineBreakProjector } from "../projectors/lineBreakProjector.js";
 import { PointFigureProjector } from "../projectors/pointFigureProjector.js";
 import { RenkoProjector } from "../projectors/renkoProjector.js";
 
@@ -388,6 +389,81 @@ test("Kagi trim-left clears display when the source window becomes empty", () =>
   const source = [
     row(1, { open: 10, high: 10, low: 10, close: 10 }),
     row(2, { open: 15, high: 15, low: 15, close: 15 }),
+  ];
+  store.reset(source);
+
+  const patch = store.applySourceDelta(
+    { type: "trim-left", trimmedLeft: source.length },
+    [],
+  );
+
+  assert.deepEqual(patch.nextData, []);
+  assert.equal(patch.nextLength, 0);
+});
+
+test("Line Break trim-left carries the latest line and preserves the N-line threshold", () => {
+  const store = new ProjectionStore({
+    projector: new LineBreakProjector({ minTick: 1, numberOfLines: 3 }),
+  });
+  const source = [
+    row(1, { open: 10, high: 10, low: 10, close: 10 }),
+    row(2, { open: 12, high: 12, low: 12, close: 12 }),
+    row(3, { open: 13, high: 13, low: 13, close: 13 }),
+    row(4, { open: 14, high: 14, low: 14, close: 14 }),
+    row(5, { open: 13, high: 13, low: 13, close: 13 }),
+    row(6, { open: 12, high: 12, low: 12, close: 12 }),
+    row(7, { open: 9, high: 9, low: 9, close: 9 }),
+  ];
+  store.reset(source);
+
+  const patch = store.applySourceDelta(
+    { type: "trim-left", trimmedLeft: 4 },
+    source.slice(4),
+  );
+
+  assert.deepEqual(
+    patch.nextData.map((point) => [point.open, point.close, point.time.order]),
+    [[13, 14, 2], [13, 9, 3]],
+  );
+  assert.deepEqual(patch.nextData[1].customValues.lineBreak, {
+    direction: "down",
+    numberOfLines: 3,
+    source: "close",
+    referenceHigh: 14,
+    referenceLow: 10,
+  });
+});
+
+test("Line Break can trim the entire source and append from final state", () => {
+  const store = new ProjectionStore({
+    projector: new LineBreakProjector({ minTick: 1, numberOfLines: 3 }),
+  });
+  const initial = [
+    row(1, { open: 10, high: 10, low: 10, close: 10 }),
+    row(2, { open: 12, high: 12, low: 12, close: 12 }),
+    row(3, { open: 13, high: 13, low: 13, close: 13 }),
+  ];
+  store.reset(initial);
+  const next = [row(4, { open: 14, high: 14, low: 14, close: 14 })];
+
+  const patch = store.applySourceDelta(
+    { type: "append", addedRight: 1, trimmedLeft: initial.length },
+    next,
+  );
+
+  assert.deepEqual(
+    patch.nextData.map((point) => [point.open, point.close, point.time.order]),
+    [[12, 13, 1], [13, 14, 2]],
+  );
+});
+
+test("Line Break trim-left clears display when the source window becomes empty", () => {
+  const store = new ProjectionStore({
+    projector: new LineBreakProjector({ minTick: 1, numberOfLines: 3 }),
+  });
+  const source = [
+    row(1, { open: 10, high: 10, low: 10, close: 10 }),
+    row(2, { open: 12, high: 12, low: 12, close: 12 }),
   ];
   store.reset(source);
 

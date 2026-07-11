@@ -245,6 +245,30 @@ export default function ChartAppearancePanel({ settings, onUpdate }) {
                 </div>
             )}
 
+            {settings.chartType === 'line-break' && (
+                <div className="st-group">
+                    <div className="st-group-title">Line Break 新价线</div>
+                    <div className="st-group-desc">
+                        使用源周期收盘价与最近若干条合成线的高低区间比较；只有严格突破区间才生成新线。
+                    </div>
+                    <label className="st-field">
+                        <span>参考线数量</span>
+                        <input
+                            className="st-input"
+                            type="number"
+                            min="1"
+                            max="50"
+                            step="1"
+                            value={settings.lineBreakNumberOfLines || 3}
+                            onChange={(event) => handleUpdate('lineBreakNumberOfLines', Number(event.target.value))}
+                        />
+                    </label>
+                    <div className="st-group-desc">
+                        常用设置为 3。最新未收盘源 K 触发的 line 可能随价格回撤消失；合成价格不应用作精确成交价或回测成交价。
+                    </div>
+                </div>
+            )}
+
             <div className="st-group">
                 <div className="st-group-title">显示时区</div>
                 <div className="st-group-desc">图表坐标轴及十字线时间标签使用的时区</div>

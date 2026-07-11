@@ -100,6 +100,18 @@ test("Kagi projection settings reach the chart surface", () => {
   });
 });
 
+test("Line Break projection settings reach the chart surface", () => {
+  const model = buildChartWorkspaceViewModel(buildContext({
+    chartSettings: {
+      chartType: "line-break",
+      lineBreakNumberOfLines: 5,
+    },
+  }));
+
+  assert.equal(model.chart.chartProps.chartType, "line-break");
+  assert.equal(model.chart.chartProps.lineBreakNumberOfLines, 5);
+});
+
 test("chart range handlers separate indicator coverage from user persistence", () => {
   const indicatorRanges = [];
   const persistedRanges = [];

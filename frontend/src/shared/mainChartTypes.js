@@ -7,6 +7,7 @@ export const MAIN_CHART_TYPES = Object.freeze([
   "renko",
   "point-and-figure",
   "kagi",
+  "line-break",
   "bar",
   "high-low",
   "line",
@@ -31,6 +32,7 @@ export function isOhlcMainChartType(value) {
     || chartType === "renko"
     || chartType === "point-and-figure"
     || chartType === "kagi"
+    || chartType === "line-break"
     || chartType === "bar"
     || chartType === "high-low";
 }

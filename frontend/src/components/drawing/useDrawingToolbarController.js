@@ -20,13 +20,18 @@ import {
 
 const findVariant = (variants, id) => variants.find((variant) => variant.id === id);
 
-export function useDrawingToolbarController({ activeTool, onToolChange, onToggleExportPanel }) {
+export function useDrawingToolbarController({
+  activeTool,
+  chartType = "candlestick",
+  onChartTypeChange,
+  onToolChange,
+  onToggleExportPanel,
+}) {
   const [cursorVariant, setCursorVariant] = useState("cursor-default");
   const [freehandVariant, setFreehandVariant] = useState("pen");
   const [lineVariant, setLineVariant] = useState("line-segment");
   const [shapeVariant, setShapeVariant] = useState("shape-rectangle");
   const [posVariant, setPosVariant] = useState("position-long");
-  const [chartType, setChartType] = useState("candlestick");
   const [flyoutOpen, setFlyoutOpen] = useState(null);
 
   const chartTypeBtnRef = useRef(null);
@@ -63,8 +68,8 @@ export function useDrawingToolbarController({ activeTool, onToolChange, onToggle
   }, []);
 
   const handleSelectChartType = useCallback((id) => {
-    setChartType(id);
-  }, []);
+    onChartTypeChange?.(id);
+  }, [onChartTypeChange]);
 
   const handleCursorClick = useCallback((event) => {
     if (event?.detail > 1) return;

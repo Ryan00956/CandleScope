@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { normalizeMainChartType } from "../../shared/mainChartTypes.js";
 
 const SETTINGS_STORAGE_KEY = "candlescope-settings";
 export const DEFAULT_SETTINGS = {
@@ -6,6 +7,7 @@ export const DEFAULT_SETTINGS = {
   customBg: "#0f172a",
   upColor: "#22c55e",
   downColor: "#ef4444",
+  chartType: "candlestick",
   cachePreset: "standard",
   cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
   ephemeralCacheBars: 86400,
@@ -15,7 +17,9 @@ export const DEFAULT_SETTINGS = {
 };
 
 export function normalizeSettings(settings = {}) {
-  return { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  const normalized = { ...DEFAULT_SETTINGS, ...(settings || {}) };
+  normalized.chartType = normalizeMainChartType(normalized.chartType);
+  return normalized;
 }
 
 function getSystemTheme() {

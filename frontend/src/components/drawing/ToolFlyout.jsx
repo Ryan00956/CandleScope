@@ -31,6 +31,7 @@ export default function ToolFlyout({
         <button
           key={variant.id}
           className={`tool-flyout-item ${currentId === variant.id ? "selected" : ""}`}
+          data-tool-variant={variant.id}
           onClick={() => {
             onSelect(variant.id);
             onClose();

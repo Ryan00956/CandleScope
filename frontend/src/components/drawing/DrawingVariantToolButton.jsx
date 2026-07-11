@@ -18,6 +18,7 @@ export default function DrawingVariantToolButton({
   buttonClassName = "",
   children,
   currentId,
+  dataChartType,
   dataDrawingTool,
   flyoutClassName = "",
   flyoutKey,
@@ -37,6 +38,7 @@ export default function DrawingVariantToolButton({
       <button
         type="button"
         className={`drawing-tool-btn ${buttonClassName} ${active ? "active" : ""}`.trim()}
+        data-chart-type={dataChartType}
         data-drawing-tool={dataDrawingTool}
         onClick={onClick}
         onDoubleClick={onDoubleClick}

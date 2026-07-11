@@ -1,14 +1,60 @@
 import { chartSeriesTypes } from "./lightweightChartSurface.js";
+import { buildMainSeriesData, buildMainSeriesOptions } from "./mainSeriesModel.js";
+import { normalizeMainChartType } from "../shared/mainChartTypes.js";
 
-export function createMainSeries(chart, { upColor, downColor, paneIndex } = {}) {
-  return chart.addSeries(chartSeriesTypes.candlestick, {
-    upColor: upColor || "#22c55e",
-    downColor: downColor || "#ef4444",
-    borderDownColor: downColor || "#ef4444",
-    borderUpColor: upColor || "#22c55e",
-    wickDownColor: downColor || "#ef4444",
-    wickUpColor: upColor || "#22c55e",
-  }, paneIndex);
+export function createMainSeries(chart, {
+  chartType,
+  data = [],
+  downColor,
+  paneIndex,
+  upColor,
+} = {}) {
+  const resolvedType = normalizeMainChartType(chartType);
+  return chart.addSeries(
+    chartSeriesTypes[resolvedType],
+    buildMainSeriesOptions(resolvedType, { upColor, downColor }, data),
+    paneIndex,
+  );
+}
+
+export function replaceMainSeries(chart, previousSeries, {
+  chartType,
+  data = [],
+  downColor,
+  indicatorBarColorMap = null,
+  indicatorBarcolors = [],
+  paneIndex,
+  upColor,
+} = {}) {
+  const resolvedType = normalizeMainChartType(chartType);
+  const seriesData = buildMainSeriesData(data, {
+    chartType: resolvedType,
+    downColor,
+    indicatorBarColorMap,
+    indicatorBarcolors,
+    upColor,
+  });
+  const previousOrder = previousSeries?.seriesOrder?.();
+  const series = createMainSeries(chart, {
+    chartType: resolvedType,
+    data,
+    downColor,
+    paneIndex,
+    upColor,
+  });
+
+  try {
+    series.setData(seriesData);
+    if (Number.isFinite(previousOrder) && typeof series.setSeriesOrder === "function") {
+      series.setSeriesOrder(previousOrder);
+    }
+    chart.removeSeries(previousSeries);
+  } catch (error) {
+    try { chart.removeSeries(series); } catch { /* best-effort rollback */ }
+    throw error;
+  }
+
+  return { chartType: resolvedType, data: seriesData, series };
 }
 
 export function createIndicatorSeries(chart, line, { crosshairMarkerVisible = true, paneIndex } = {}) {

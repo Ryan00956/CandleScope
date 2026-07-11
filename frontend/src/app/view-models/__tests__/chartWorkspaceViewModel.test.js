@@ -3,9 +3,9 @@ import test from "node:test";
 
 import { buildChartWorkspaceViewModel } from "../chartWorkspaceViewModel.js";
 
-function buildContext({ indicatorActions = {}, marketActions = {} } = {}) {
+function buildContext({ indicatorActions = {}, marketActions = {}, settingsActions = {} } = {}) {
   return {
-    chartSettings: {},
+    chartSettings: { chartType: "candlestick" },
     drawingActions: {},
     drawingView: {},
     exportActions: {},
@@ -28,10 +28,23 @@ function buildContext({ indicatorActions = {}, marketActions = {} } = {}) {
       marketType: "spot",
       symbol: "BTCUSDT",
     },
+    settingsActions,
     watchlistActions: {},
     watchlistView: {},
   };
 }
+
+test("chart type is controlled by persisted appearance settings and shared with the chart", () => {
+  const updates = [];
+  const model = buildChartWorkspaceViewModel(buildContext({
+    settingsActions: { update: (settings) => updates.push(settings) },
+  }));
+
+  assert.equal(model.drawingToolbar.chartType, "candlestick");
+  assert.equal(model.chart.chartProps.chartType, "candlestick");
+  model.drawingToolbar.onChartTypeChange("area");
+  assert.deepEqual(updates, [{ chartType: "area" }]);
+});
 
 test("chart range handlers separate indicator coverage from user persistence", () => {
   const indicatorRanges = [];

@@ -63,13 +63,14 @@ const DrawingToolbar = memo(function DrawingToolbar({
   exportPanelOpen = false,
   exportInProgress = false,
   onToggleExportPanel,
+  chartType = "candlestick",
+  onChartTypeChange,
 }) {
   useEffect(() => {
     markPerfOnce("lazy.drawingToolbar.ready");
   }, []);
 
   const {
-    chartType,
     chartTypeBtnRef,
     closeFlyout,
     currentChartType,
@@ -139,7 +140,13 @@ const DrawingToolbar = memo(function DrawingToolbar({
     showPositionOptions,
     showShapeOptions,
     showTextOptions,
-  } = useDrawingToolbarController({ activeTool, onToolChange, onToggleExportPanel });
+  } = useDrawingToolbarController({
+    activeTool,
+    chartType,
+    onChartTypeChange,
+    onToolChange,
+    onToggleExportPanel,
+  });
 
   const handleStrokeColorChange = useCallback((color) => {
     onPenColorChange?.(color);
@@ -162,6 +169,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={chartTypeBtnRef}
         buttonClassName="chart-type-tool-btn"
         currentId={chartType}
+        dataChartType={chartType}
         flyoutClassName="chart-type-flyout"
         flyoutKey="chart-type"
         flyoutOpen={flyoutOpen}

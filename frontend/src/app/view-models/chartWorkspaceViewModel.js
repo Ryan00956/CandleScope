@@ -16,6 +16,7 @@ export function buildChartWorkspaceViewModel({
   resolvedTheme,
   sessionActions,
   sessionView,
+  settingsActions,
   watchlistActions,
   watchlistView,
 }) {
@@ -59,6 +60,8 @@ export function buildChartWorkspaceViewModel({
       exportPanelOpen: exportView.isOpen,
       exportInProgress,
       onToggleExportPanel: exportActions.togglePanel,
+      chartType: chartSettings.chartType,
+      onChartTypeChange: (chartType) => settingsActions.update({ ...chartSettings, chartType }),
     },
     exportPanel: {
       isOpen: exportView.isOpen,
@@ -89,6 +92,7 @@ export function buildChartWorkspaceViewModel({
         datasetKey,
         upColor: chartSettings.upColor,
         downColor: chartSettings.downColor,
+        chartType: chartSettings.chartType,
         theme: resolvedTheme,
         customBg: chartSettings.customBg,
         timezone: chartSettings.timezone,

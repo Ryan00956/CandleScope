@@ -283,12 +283,12 @@ const POSITION_VARIANTS = [
 const POSITION_TOOL_IDS = new Set(POSITION_VARIANTS.map((v) => v.id));
 
 const CHART_TYPE_VARIANTS = [
-  { id: "candlestick", label: "Candles", description: "Current main chart style", icon: CandlestickChartIcon },
-  { id: "bar", label: "OHLC bars", description: "Available in library; switch not wired yet", icon: OhlcBarChartIcon },
-  { id: "line", label: "Line", description: "Available in library; switch not wired yet", icon: ChartLineIcon },
-  { id: "area", label: "Area", description: "Available in library; switch not wired yet", icon: ChartAreaIcon },
-  { id: "baseline", label: "Baseline", description: "Available in library; switch not wired yet", icon: ChartBaselineIcon },
-  { id: "histogram", label: "Histogram", description: "Available in library; better for volume", icon: ChartHistogramIcon },
+  { id: "candlestick", label: "Candles", description: "Open, high, low and close candles", icon: CandlestickChartIcon },
+  { id: "bar", label: "OHLC bars", description: "Open, high, low and close bars", icon: OhlcBarChartIcon },
+  { id: "line", label: "Line", description: "Close-price line", icon: ChartLineIcon },
+  { id: "area", label: "Area", description: "Close-price area", icon: ChartAreaIcon },
+  { id: "baseline", label: "Baseline", description: "Close price vs first loaded close", icon: ChartBaselineIcon },
+  { id: "histogram", label: "Columns", description: "Close-price columns colored by change", icon: ChartHistogramIcon },
 ];
 
 export {

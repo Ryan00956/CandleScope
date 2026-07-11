@@ -1,10 +1,20 @@
-import { createChart, CandlestickSeries, LineSeries, HistogramSeries, AreaSeries } from "lightweight-charts";
+import {
+  AreaSeries,
+  BarSeries,
+  BaselineSeries,
+  CandlestickSeries,
+  createChart,
+  HistogramSeries,
+  LineSeries,
+} from "lightweight-charts";
 
 export const chartSeriesTypes = Object.freeze({
   candlestick: CandlestickSeries,
+  bar: BarSeries,
   line: LineSeries,
   histogram: HistogramSeries,
   area: AreaSeries,
+  baseline: BaselineSeries,
 });
 
 export function buildPaneLayoutOptions({

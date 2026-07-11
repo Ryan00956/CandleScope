@@ -1,31 +1,43 @@
 /**
  * SingleChartPanes — lightweight-charts v5 native panes path.
  *
- * Uses one chart instance for main candles and all indicator panes so every
+ * Uses one chart instance for the selected main price series and all indicator panes so every
  * series shares the same time scale.
  */
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
 import { applyChartPaneAppearance, buildChartPaneOptions } from "../chart-adapter/chartPaneLifecycle";
 import { buildPaneLayoutOptions, createChartInstance } from "../chart-adapter/lightweightChartSurface";
-import { createIndicatorSeries, createMainSeries, removeSeriesEntries } from "../chart-adapter/seriesLifecycle";
+import {
+  createIndicatorSeries,
+  createMainSeries,
+  removeSeriesEntries,
+  replaceMainSeries,
+} from "../chart-adapter/seriesLifecycle";
 import { ensurePane, readPaneHeights, setPaneHeights } from "../chart-adapter/paneManager";
 import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRenderer";
 import { renderMarkers } from "../chart-adapter/markerRenderer";
 import { renderBgcolors } from "../chart-adapter/bgcolorPrimitiveRenderer";
-import { applyBarColors } from "../chart-adapter/barColorRenderer";
 import { renderCandleDataTransition, renderSeriesDelta } from "../chart-adapter/seriesDeltaRenderer";
 import { createViewportController } from "../chart-adapter/viewportController";
+import {
+  buildMainSeriesData,
+  buildMainSeriesCrosshairValue,
+  buildMainSeriesReferenceOptions,
+  buildMainSeriesStyleOptions,
+  buildIndicatorBarColorMap,
+  createMainSeriesPointConverter,
+  resolveMainSeriesDeltaStartIndex,
+} from "../chart-adapter/mainSeriesModel";
 import {
   alignIndicatorBgcolorsToTimes,
   alignIndicatorLinesToTimes,
   alignIndicatorMarkersToTimes,
   applyLineSeriesData,
   buildFillRenderEntries,
-  canUseTrailingCandleUpdate,
   normalizeLineSeriesData,
-  toCandlePoint,
 } from "../chart-adapter/chartSeriesData";
+import { normalizeMainChartType } from "../shared/mainChartTypes";
 import { planVisibleRangeRestore } from "../features/chart-session/visibleRangeStorage";
 import { buildPaneConfigKey, loadPaneHeights, savePaneHeights } from "../features/chart-session/paneLayoutStorage";
 import {
@@ -82,10 +94,6 @@ function filterFillsForLines(fills, lines) {
   ));
 }
 
-function candleSnapshotFromStore(store) {
-  return (store?.snapshot?.({ force: true }) || []).map(toCandlePoint);
-}
-
 function rowsFromStore(store) {
   return store?.snapshot?.() || [];
 }
@@ -103,7 +111,7 @@ function syncSeriesDataRefsFromStore({ store, dataRef, dataMapRef, dataIndexMapR
   };
 }
 
-function syncPreviousCandleDataFromDelta({ delta, store, prevRef }) {
+function syncPreviousMainSeriesDataFromDelta({ delta, store, prevRef, renderOptions }) {
   if (!delta || delta.type === "noop") return;
   if (delta.type === "clear") {
     prevRef.current = [];
@@ -111,9 +119,17 @@ function syncPreviousCandleDataFromDelta({ delta, store, prevRef }) {
   }
 
   const current = prevRef.current || [];
+  const rows = rowsFromStore(store);
+  const hasTrim = (delta.trimmedLeft || 0) > 0 || (delta.trimmedRight || 0) > 0;
+  if (hasTrim) {
+    prevRef.current = buildMainSeriesData(rows, renderOptions);
+    return;
+  }
 
   if (delta.type === "tick" && delta.bar && current.length > 0) {
-    const point = toCandlePoint(delta.bar);
+    const startIndex = resolveMainSeriesDeltaStartIndex(delta, rows, store);
+    const toPoint = createMainSeriesPointConverter(rows, { ...renderOptions, startIndex });
+    const point = toPoint(delta.bar);
     const last = current[current.length - 1];
     if (last?.time === point.time) {
       current[current.length - 1] = point;
@@ -130,16 +146,16 @@ function syncPreviousCandleDataFromDelta({ delta, store, prevRef }) {
   }
 
   if (delta.type === "append" && delta.addedRight > 0 && current.length > 0) {
-    const added = (store?.snapshot?.({ force: true }) || [])
-      .slice(-Math.max(0, delta.addedRight))
-      .map(toCandlePoint);
+    const startIndex = Math.max(0, rows.length - delta.addedRight);
+    const toPoint = createMainSeriesPointConverter(rows, { ...renderOptions, startIndex });
+    const added = rows.slice(startIndex).map(toPoint);
     current.push(...added);
     if (delta.trimmedLeft > 0) current.splice(0, delta.trimmedLeft);
     prevRef.current = current;
     return;
   }
 
-  prevRef.current = candleSnapshotFromStore(store);
+  prevRef.current = buildMainSeriesData(rows, renderOptions);
 }
 
 function getPaneRenderState(mapRef, paneId) {
@@ -211,6 +227,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   datasetKey,
   upColor,
   downColor,
+  chartType = "candlestick",
   theme,
   customBg,
   timezone = "Local",
@@ -252,8 +269,11 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const dataRef = useRef([]);
   const dataMapRef = useRef(new Map());
   const dataIndexMapRef = useRef(new Map());
-  const prevCandleDataRef = useRef([]);
-  const prevBarcoloredDataRef = useRef([]);
+  const prevMainSeriesDataRef = useRef([]);
+  const mainSeriesTypeRef = useRef(null);
+  const mainSeriesReferenceRef = useRef({ series: null, signature: "" });
+  const requestedChartTypeRef = useRef(normalizeMainChartType(chartType));
+  const seriesStoreRef = useRef(seriesStore);
   const prevIndicatorKeyRef = useRef("");
   const intervalRef = useRef(interval);
   const isSyncingRef = useRef(false);
@@ -274,6 +294,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const [isAutoScale, setIsAutoScale] = useState(true);
   const [contextMenu, setContextMenu] = useState(null);
 
+  const resolvedChartType = normalizeMainChartType(chartType);
+  requestedChartTypeRef.current = resolvedChartType;
+  seriesStoreRef.current = seriesStore;
+  const indicatorBarColorMap = useMemo(
+    () => buildIndicatorBarColorMap(indicatorBarcolors),
+    [indicatorBarcolors],
+  );
+  const mainSeriesRenderContext = useMemo(() => ({
+    downColor,
+    indicatorBarColorMap,
+    upColor,
+  }), [downColor, indicatorBarColorMap, upColor]);
   const drawingKey = `${drawingKeyBase || symbol}__main`;
   const chartAdapter = useMemo(
     () => createLightweightChartAdapter({
@@ -346,6 +378,16 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     }, VISIBLE_RANGE_SAVE_DEBOUNCE_MS);
   }, [captureVisibleRange]);
 
+  const updateMainSeriesReference = useCallback((series, rows, nextChartType = mainSeriesTypeRef.current) => {
+    if (!series || !nextChartType) return;
+    const options = buildMainSeriesReferenceOptions(nextChartType, rows);
+    const signature = JSON.stringify(options);
+    const previous = mainSeriesReferenceRef.current;
+    if (previous.series === series && previous.signature === signature) return;
+    if (Object.keys(options).length > 0) series.applyOptions(options);
+    mainSeriesReferenceRef.current = { series, signature };
+  }, []);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
@@ -364,34 +406,42 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     };
 
     const chart = createChartInstance(container, options);
-    const mainSeries = createMainSeries(chart, { upColor, downColor, paneIndex: 0 });
+    const initialChartType = requestedChartTypeRef.current;
+    const initialRows = rowsFromStore(seriesStoreRef.current);
+    const mainSeries = createMainSeries(chart, {
+      chartType: initialChartType,
+      data: initialRows,
+      upColor,
+      downColor,
+      paneIndex: 0,
+    });
     chartRef.current = chart;
     viewportControllerRef.current = createViewportController({
       chartProvider: () => chartRef.current,
     });
     mainSeriesRef.current = mainSeries;
+    mainSeriesTypeRef.current = initialChartType;
+    mainSeriesReferenceRef.current = {
+      series: mainSeries,
+      signature: JSON.stringify(buildMainSeriesReferenceOptions(initialChartType, initialRows)),
+    };
     setSeriesReady((prev) => prev + 1);
 
     const handleCrosshairMove = (param) => {
       if (isSyncingRef.current || !onCrosshairMove) return;
-      if (!param.time || !param.seriesData) {
+      if (param.time == null) {
         onCrosshairMove(null);
         return;
       }
-      const cd = param.seriesData.get(mainSeries);
-      if (!cd || cd.open == null || cd.high == null || cd.low == null || cd.close == null) {
+      const crosshairValue = buildMainSeriesCrosshairValue(
+        param.time,
+        dataMapRef.current.get(param.time),
+      );
+      if (!crosshairValue) {
         onCrosshairMove(null);
         return;
       }
-      const rawItem = dataMapRef.current.get(param.time);
-      onCrosshairMove({
-        time: param.time,
-        open: cd.open,
-        high: cd.high,
-        low: cd.low,
-        close: cd.close,
-        volume: rawItem ? rawItem.volume : 0,
-      });
+      onCrosshairMove(crosshairValue);
     };
 
     const handleVisibleLogicalRangeChange = (range) => {
@@ -427,6 +477,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       // already been cleared.
       chartRef.current = null;
       mainSeriesRef.current = null;
+      mainSeriesTypeRef.current = null;
+      mainSeriesReferenceRef.current = { series: null, signature: "" };
+      prevMainSeriesDataRef.current = [];
       indicatorSeriesRef.current = [];
       const viewportController = viewportControllerRef.current;
       viewportControllerRef.current = null;
@@ -478,15 +531,60 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   }, [customBg, interval, theme, timezone]);
 
   useEffect(() => {
-    mainSeriesRef.current?.applyOptions({
-      upColor,
-      downColor,
-      borderDownColor: downColor,
-      borderUpColor: upColor,
-      wickDownColor: downColor,
-      wickUpColor: upColor,
-    });
-  }, [downColor, upColor]);
+    const activeType = mainSeriesTypeRef.current || resolvedChartType;
+    mainSeriesRef.current?.applyOptions(
+      buildMainSeriesStyleOptions(activeType, { upColor, downColor }),
+    );
+  }, [downColor, resolvedChartType, upColor]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const previousSeries = mainSeriesRef.current;
+    if (!chart || !previousSeries || mainSeriesTypeRef.current === resolvedChartType) return;
+
+    const rows = rowsFromStore(seriesStore);
+    const visibleRange = captureVisibleRange();
+    try {
+      isSyncingRef.current = true;
+      const previousType = mainSeriesTypeRef.current;
+      const result = replaceMainSeries(chart, previousSeries, {
+        chartType: resolvedChartType,
+        data: rows,
+        downColor,
+        indicatorBarColorMap,
+        paneIndex: 0,
+        upColor,
+      });
+
+      mainSeriesRef.current = result.series;
+      mainSeriesTypeRef.current = result.chartType;
+      prevMainSeriesDataRef.current = result.data;
+      mainSeriesReferenceRef.current = {
+        series: result.series,
+        signature: JSON.stringify(buildMainSeriesReferenceOptions(resolvedChartType, rows)),
+      };
+
+      if (visibleRange) chartAdapter.restoreVisibleRange(visibleRange);
+      recordPerfEvent("chart.mainSeries.switch", {
+        bars: result.data.length,
+        from: previousType,
+        to: resolvedChartType,
+      });
+      setSeriesReady((prev) => prev + 1);
+    } catch (error) {
+      console.warn("SingleChartPanes: failed to switch main chart type:", error);
+    } finally {
+      isSyncingRef.current = false;
+    }
+  }, [
+    captureVisibleRange,
+    chartAdapter,
+    downColor,
+    indicatorBarColorMap,
+    resolvedChartType,
+    seriesStore,
+    upColor,
+  ]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -540,7 +638,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     userInteractedRef.current = false;
     hasRestoredRangeRef.current = false;
     lastViewportRestoreSourceRef.current = null;
-    prevBarcoloredDataRef.current = [];
+    prevMainSeriesDataRef.current = [];
     viewportControllerRef.current?.resetSession();
   }, [datasetKey]);
 
@@ -548,6 +646,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const series = mainSeriesRef.current;
     const store = seriesStore;
     if (!series || !store) return undefined;
+    const activeRenderOptions = {
+      ...mainSeriesRenderContext,
+      chartType: mainSeriesTypeRef.current,
+    };
 
     try {
       isSyncingRef.current = true;
@@ -557,16 +659,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         dataMapRef,
         dataIndexMapRef,
       });
-      const candleData = candleSnapshotFromStore(store);
+      const rows = rowsFromStore(store);
+      const nextData = buildMainSeriesData(rows, activeRenderOptions);
       renderCandleDataTransition({
         series,
-        previousData: prevCandleDataRef.current,
-        nextData: candleData,
+        previousData: prevMainSeriesDataRef.current,
+        nextData,
         viewportController: viewportControllerRef.current,
         paneId: "main",
         recordPerfEvent,
       });
-      prevCandleDataRef.current = candleData;
+      updateMainSeriesReference(series, rows);
+      prevMainSeriesDataRef.current = nextData;
     } finally {
       isSyncingRef.current = false;
     }
@@ -576,20 +680,31 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       if (!currentSeries) return;
       try {
         isSyncingRef.current = true;
+        const currentRenderOptions = {
+          ...mainSeriesRenderContext,
+          chartType: mainSeriesTypeRef.current,
+        };
+        const rows = rowsFromStore(currentStore);
+        const startIndex = resolveMainSeriesDeltaStartIndex(delta, rows, currentStore);
+        const toPoint = createMainSeriesPointConverter(rows, {
+          ...currentRenderOptions,
+          startIndex,
+        });
         renderSeriesDelta({
           series: currentSeries,
           delta,
           store: currentStore,
-          previousRows: prevCandleDataRef.current,
+          previousRows: prevMainSeriesDataRef.current,
           viewportController: viewportControllerRef.current,
-          toPoint: toCandlePoint,
+          toPoint,
           paneId: "main",
           recordPerfEvent,
         });
-        syncPreviousCandleDataFromDelta({
+        syncPreviousMainSeriesDataFromDelta({
           delta,
           store: currentStore,
-          prevRef: prevCandleDataRef,
+          prevRef: prevMainSeriesDataRef,
+          renderOptions: currentRenderOptions,
         });
         syncSeriesDataRefsFromStore({
           store: currentStore,
@@ -597,30 +712,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           dataMapRef,
           dataIndexMapRef,
         });
+        updateMainSeriesReference(currentSeries, rows);
       } finally {
         isSyncingRef.current = false;
       }
     });
-  }, [seriesReady, seriesStore]);
-
-  useEffect(() => {
-    const rows = rowsFromStore(seriesStore);
-    applyBarColors({
-      series: mainSeriesRef.current,
-      data: rows,
-      indicatorBarcolors,
-      prevBarcoloredDataRef,
-      isSyncingRef,
-      paneId: "main",
-      recordPerfEvent,
-      toCandlePoint,
-      canUseTrailingCandleUpdate,
-      onError: (err, phase) => console.warn(
-        phase === "clear" ? "SingleChartPanes: failed to clear barcolors:" : "SingleChartPanes: failed to apply barcolors:",
-        err,
-      ),
-    });
-  }, [dataMeta?.version, indicatorBarcolors, seriesStore]);
+  }, [mainSeriesRenderContext, seriesReady, seriesStore, updateMainSeriesReference]);
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);
@@ -914,6 +1011,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       <div
         ref={containerRef}
         className="chart-pane"
+        data-chart-type={resolvedChartType}
         data-pane-id="single-chart"
         data-pane-type="native-panes"
         onContextMenu={handlePriceScaleContextMenu}

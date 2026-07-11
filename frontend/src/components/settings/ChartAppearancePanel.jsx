@@ -86,6 +86,55 @@ export default function ChartAppearancePanel({ settings, onUpdate }) {
                 </div>
             </div>
 
+            {settings.chartType === 'renko' && (
+                <div className="st-group">
+                    <div className="st-group-title">Renko 砖块</div>
+                    <div className="st-group-desc">
+                        使用源周期收盘价生成合成砖块。ATR 模式会在进入图表时确定固定砖高；传统模式使用手动砖高。
+                    </div>
+                    <label className="st-field">
+                        <span>砖高计算</span>
+                        <select
+                            className="st-select"
+                            value={settings.renkoBoxSizeMode || 'atr'}
+                            onChange={(event) => handleUpdate('renkoBoxSizeMode', event.target.value)}
+                        >
+                            <option value="atr">ATR 自动</option>
+                            <option value="traditional">传统固定砖高</option>
+                        </select>
+                    </label>
+                    {(settings.renkoBoxSizeMode || 'atr') === 'atr' ? (
+                        <label className="st-field">
+                            <span>ATR 长度</span>
+                            <input
+                                className="st-input"
+                                type="number"
+                                min="2"
+                                max="500"
+                                step="1"
+                                value={settings.renkoAtrLength || 14}
+                                onChange={(event) => handleUpdate('renkoAtrLength', Number(event.target.value))}
+                            />
+                        </label>
+                    ) : (
+                        <label className="st-field">
+                            <span>固定砖高</span>
+                            <input
+                                className="st-input"
+                                type="number"
+                                min="0"
+                                step="any"
+                                value={settings.renkoBoxSize || 1}
+                                onChange={(event) => handleUpdate('renkoBoxSize', Number(event.target.value))}
+                            />
+                        </label>
+                    )}
+                    <div className="st-group-desc">
+                        Renko 价格是合成值，不应用作精确成交价或回测成交价。
+                    </div>
+                </div>
+            )}
+
             <div className="st-group">
                 <div className="st-group-title">显示时区</div>
                 <div className="st-group-desc">图表坐标轴及十字线时间标签使用的时区</div>

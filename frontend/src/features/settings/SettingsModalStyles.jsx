@@ -313,6 +313,15 @@ input[type="color"] {
   border-radius: 6px;
 }
 
+.st-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--text-secondary, #cbd5e1);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 /* ── Select ─────────────────────────────────────────────── */
 .st-select {
   width: 100%;

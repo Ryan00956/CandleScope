@@ -9,6 +9,23 @@ export {
 } from "./chartTypeRegistry.js";
 export { createProjector, registerProjectorFactory } from "./projectorFactory.js";
 export { ProjectionStore } from "./projectionStore.js";
+export {
+  calculateRenkoAtr,
+  inferRenkoMinimumTick,
+  resolveRenkoProjectorOptions,
+} from "./renkoProjectionOptions.js";
+export {
+  axisTimeKey,
+  compareAxisTime,
+  findLastDisplayIndexForSourceTime,
+  isOrdinalAxisTime,
+  mapSourceTimeRangeToDisplayLogicalRange,
+  mapSourceViewportAnchorToDisplayLogicalRange,
+  sourceTimeFromAxisTime,
+  sourceTimeFromDisplayRow,
+  sourceTimeRangeFromDisplayRow,
+} from "./axisTime.js";
 export { HeikinAshiProjector } from "./projectors/heikinAshiProjector.js";
 export { IdentityProjector } from "./projectors/identityProjector.js";
+export { RenkoProjector } from "./projectors/renkoProjector.js";
 export { PROJECTION_METADATA_KEY } from "./projectors/projectorData.js";

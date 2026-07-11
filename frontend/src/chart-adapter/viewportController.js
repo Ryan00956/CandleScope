@@ -143,6 +143,20 @@ export class ViewportController {
     });
   }
 
+  restoreProjectionRange(logicalRange, { barSpacing = null } = {}) {
+    return this.applyIntent("projectionRestore", PRIORITY.restore, (timeScale) => {
+      if (Number.isFinite(barSpacing)) {
+        timeScale.applyOptions?.({ barSpacing });
+      }
+      if (Number.isFinite(logicalRange?.from) && Number.isFinite(logicalRange?.to)) {
+        timeScale.setVisibleLogicalRange?.(logicalRange);
+        return true;
+      }
+      timeScale.fitContent?.();
+      return true;
+    });
+  }
+
   captureAnchor(previousRows) {
     if (!previousRows?.length) return null;
     const timeScale = this.getTimeScale();

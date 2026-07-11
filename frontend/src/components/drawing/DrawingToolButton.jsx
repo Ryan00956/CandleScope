@@ -15,6 +15,7 @@ export default function DrawingToolButton({
   anchorRef,
   children,
   dataDrawingTool,
+  disabled = false,
   icon,
   onClick,
   onContextMenu,
@@ -28,6 +29,7 @@ export default function DrawingToolButton({
         type="button"
         className={`drawing-tool-btn ${active ? "active" : ""}`.trim()}
         data-drawing-tool={dataDrawingTool}
+        disabled={disabled}
         onClick={onClick}
         onDoubleClick={onDoubleClick}
         onContextMenu={onContextMenu}
@@ -37,7 +39,7 @@ export default function DrawingToolButton({
         {icon}
         {showVariantIndicator && CornerTriangle}
       </button>
-      {children}
+      {!disabled && children}
     </div>
   );
 }

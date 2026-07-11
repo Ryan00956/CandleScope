@@ -4,6 +4,7 @@ import test from "node:test";
 import { ProjectionStore } from "../projectionStore.js";
 import { HeikinAshiProjector } from "../projectors/heikinAshiProjector.js";
 import { IdentityProjector } from "../projectors/identityProjector.js";
+import { RenkoProjector } from "../projectors/renkoProjector.js";
 
 function row(time, { close = time + 2, open = time, high = time + 5, low = time - 3 } = {}) {
   return { time, open, high, low, close, volume: time * 10 };
@@ -209,5 +210,52 @@ test("non-one-to-one projectors fall back to a correct full projection", () => {
   assert.deepEqual(
     patch.nextData.map((item) => [item.time.order, item.time.sourceTime, item.time.sourceOrdinal]),
     [[0, 10, 0], [1, 10, 1], [2, 20, 0], [3, 20, 1], [4, 30, 0], [5, 30, 1]],
+  );
+});
+
+test("stateful non-one-to-one projection keeps its path seed across trim-left", () => {
+  const store = new ProjectionStore({
+    projector: new RenkoProjector({ boxSize: 2, minTick: 1 }),
+  });
+  const source = [
+    row(1, { open: 52, high: 52, low: 52, close: 52 }),
+    row(2, { open: 54, high: 54, low: 54, close: 54 }),
+    row(3, { open: 51, high: 51, low: 51, close: 51 }),
+    row(4, { open: 50, high: 50, low: 50, close: 50 }),
+    row(5, { open: 48, high: 48, low: 48, close: 48 }),
+  ];
+  store.reset(source);
+
+  const patch = store.applySourceDelta(
+    { type: "trim-left", trimmedLeft: 2 },
+    source.slice(2),
+  );
+
+  assert.equal(patch.fromOutputIndex, 0);
+  assert.deepEqual(
+    patch.nextData.map((point) => [point.open, point.close, point.time.order, point.time.sourceTime]),
+    [[52, 50, 1, 4], [50, 48, 2, 5]],
+  );
+});
+
+test("stateful projection can trim the entire source prefix and append from final checkpoint", () => {
+  const store = new ProjectionStore({
+    projector: new RenkoProjector({ boxSize: 2, minTick: 1 }),
+  });
+  const initial = [
+    row(1, { open: 52, high: 52, low: 52, close: 52 }),
+    row(2, { open: 54, high: 54, low: 54, close: 54 }),
+  ];
+  store.reset(initial);
+  const next = [row(3, { open: 56, high: 56, low: 56, close: 56 })];
+
+  const patch = store.applySourceDelta(
+    { type: "append", addedRight: 1, trimmedLeft: 2 },
+    next,
+  );
+
+  assert.deepEqual(
+    patch.nextData.map((point) => [point.open, point.close, point.time.order]),
+    [[54, 56, 1]],
   );
 });

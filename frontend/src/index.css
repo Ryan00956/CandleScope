@@ -6605,6 +6605,34 @@ body {
   overflow: hidden;
 }
 
+.synthetic-chart-notice {
+  position: absolute;
+  top: 8px;
+  right: 104px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, calc(100% - 150px));
+  padding: 5px 9px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  background: rgba(15, 23, 42, 0.78);
+  font-size: 11px;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.synthetic-chart-notice strong {
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+[data-theme='light'] .synthetic-chart-notice {
+  background: rgba(255, 255, 255, 0.86);
+}
+
 /* Wrapper for each pane — height set dynamically via inline style */
 .chart-pane-wrapper {
   position: relative;

@@ -20,6 +20,7 @@ export default function DrawingVariantToolButton({
   currentId,
   dataChartType,
   dataDrawingTool,
+  disabled = false,
   flyoutClassName = "",
   flyoutKey,
   flyoutOpen,
@@ -40,6 +41,7 @@ export default function DrawingVariantToolButton({
         className={`drawing-tool-btn ${buttonClassName} ${active ? "active" : ""}`.trim()}
         data-chart-type={dataChartType}
         data-drawing-tool={dataDrawingTool}
+        disabled={disabled}
         onClick={onClick}
         onDoubleClick={onDoubleClick}
         onContextMenu={onContextMenu}
@@ -49,7 +51,7 @@ export default function DrawingVariantToolButton({
         {icon}
         {CornerTriangle}
       </button>
-      {flyoutOpen === flyoutKey && (
+      {!disabled && flyoutOpen === flyoutKey && (
         <ToolFlyout
           variants={variants}
           currentId={currentId}
@@ -59,7 +61,7 @@ export default function DrawingVariantToolButton({
           className={flyoutClassName}
         />
       )}
-      {children}
+      {!disabled && children}
     </div>
   );
 }

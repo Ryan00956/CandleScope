@@ -33,9 +33,45 @@ export function buildPaneLayoutOptions({
   };
 }
 
+function ordinalSourceTime(value) {
+  const sourceTime = Number(value?.sourceTime);
+  return Number.isFinite(sourceTime) ? sourceTime : value;
+}
+
+export function buildOrdinalChartOptions(options = {}) {
+  const timeFormatter = options?.localization?.timeFormatter;
+  const tickMarkFormatter = options?.timeScale?.tickMarkFormatter;
+  return {
+    ...options,
+    ...(options.localization ? {
+      localization: {
+        ...options.localization,
+        ...(typeof timeFormatter === "function" ? {
+          timeFormatter: (value) => timeFormatter(ordinalSourceTime(value)),
+        } : {}),
+      },
+    } : {}),
+    ...(options.timeScale ? {
+      timeScale: {
+        ...options.timeScale,
+        ...(typeof tickMarkFormatter === "function" ? {
+          tickMarkFormatter: (value, ...args) => tickMarkFormatter(
+            ordinalSourceTime(value),
+            ...args,
+          ),
+        } : {}),
+      },
+    } : {}),
+  };
+}
+
 export function createChartInstance(container, options, { axisMode = "time" } = {}) {
   if (axisMode === "ordinal" || axisMode === "derived-ordinal") {
-    return createChartEx(container, createOrdinalHorzScaleBehavior(), options);
+    return createChartEx(
+      container,
+      createOrdinalHorzScaleBehavior(),
+      buildOrdinalChartOptions(options),
+    );
   }
   return createChart(container, options);
 }

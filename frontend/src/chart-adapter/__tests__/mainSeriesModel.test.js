@@ -25,11 +25,12 @@ const ROWS = [
   { time: 30, __whitespace: true },
 ];
 
-test("all eleven main chart types map to their built-in or custom series", () => {
+test("all twelve main chart types map to their built-in or custom series", () => {
   assert.deepEqual(MAIN_CHART_TYPES, [
     "candlestick",
     "hollow-candlestick",
     "heikin-ashi",
+    "renko",
     "bar",
     "high-low",
     "line",
@@ -66,14 +67,14 @@ test("all eleven main chart types map to their built-in or custom series", () =>
 });
 
 test("unknown chart types safely fall back to candlesticks", () => {
-  assert.equal(normalizeMainChartType("renko"), "candlestick");
+  assert.equal(normalizeMainChartType("point-and-figure"), "candlestick");
   const calls = [];
   createMainSeries({
     addSeries: (...args) => {
       calls.push(args);
       return {};
     },
-  }, { chartType: "renko" });
+  }, { chartType: "point-and-figure" });
   assert.strictEqual(calls[0][0], chartSeriesTypes.candlestick);
 });
 

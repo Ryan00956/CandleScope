@@ -146,6 +146,22 @@ test("applySessionRestore applies anchor restore with right offset", () => {
   ]);
 });
 
+test("restoreProjectionRange owns logical writes and falls back to fit", () => {
+  const { chart, calls } = createChart();
+  const controller = new ViewportController({ chartProvider: () => chart });
+
+  assert.equal(controller.restoreProjectionRange(
+    { from: 2, to: 12 },
+    { barSpacing: 9 },
+  ), true);
+  assert.equal(controller.restoreProjectionRange(null), true);
+  assert.deepEqual(calls, [
+    ["applyOptions", { barSpacing: 9 }],
+    ["setVisibleLogicalRange", { from: 2, to: 12 }],
+    ["fitContent"],
+  ]);
+});
+
 test("queueShift accumulates shifts during one interaction", () => {
   const { chart, calls } = createChart();
   let unlock;

@@ -210,6 +210,14 @@ const HeikinAshiChartIcon = (
   </svg>
 );
 
+const RenkoChartIcon = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
+    <rect x="3" y="13" width="6" height="5" rx="0.8" fill="currentColor" opacity="0.45" />
+    <rect x="9" y="8" width="6" height="5" rx="0.8" fill="currentColor" opacity="0.65" />
+    <rect x="15" y="3" width="6" height="5" rx="0.8" fill="currentColor" opacity="0.85" />
+  </svg>
+);
+
 const OhlcBarChartIcon = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <line x1="7" y1="5" x2="7" y2="19" />
@@ -329,6 +337,7 @@ const CHART_TYPE_VARIANTS = [
   { id: "candlestick", label: "Candles", description: "Open, high, low and close candles", icon: CandlestickChartIcon },
   { id: "hollow-candlestick", label: "Hollow candles", description: "Body fill and price-change color", icon: HollowCandlestickChartIcon },
   { id: "heikin-ashi", label: "Heikin Ashi", description: "Smoothed synthetic OHLC candles", icon: HeikinAshiChartIcon },
+  { id: "renko", label: "Renko", description: "Close-based synthetic bricks", icon: RenkoChartIcon },
   { id: "bar", label: "OHLC bars", description: "Open, high, low and close bars", icon: OhlcBarChartIcon },
   { id: "high-low", label: "High-low", description: "Filled high-to-low price ranges", icon: HighLowChartIcon },
   { id: "line", label: "Line", description: "Close-price line", icon: ChartLineIcon },

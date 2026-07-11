@@ -50,6 +50,9 @@ export class ProjectionStore {
     this._display = [];
     this._displayTimeIndex = new Map();
     this._displayTimeSet = new Set();
+    this._projectionSeedState = null;
+    this._projectionFinalState = null;
+    this._sourceCheckpoints = [];
   }
 
   sourceSnapshot() {
@@ -79,7 +82,8 @@ export class ProjectionStore {
   reset(rows = []) {
     const previousLength = this._display.length;
     this._source = Array.from(rows || []);
-    this._display = this.projector.project(this._source);
+    this._projectionSeedState = null;
+    this._display = this._projectRows(this._source, { seedState: null });
     this._rebuildDisplayTimeIndex();
     return patchResult(0, previousLength, this._display.slice(), this._display);
   }
@@ -96,7 +100,10 @@ export class ProjectionStore {
     if (trimmedRight === 0 && this._canApplyTailDelta(detail, currentRows, trimmedLeft)) {
       return this._applyTailDelta(detail, currentRows, trimmedLeft);
     }
-    return this._reprojectStructural(currentRows, { trimmedLeft });
+    return this._reprojectStructural(currentRows, {
+      deltaType: detail.type,
+      trimmedLeft,
+    });
   }
 
   _canApplyTailDelta(delta, currentRows, trimmedLeft) {
@@ -156,12 +163,17 @@ export class ProjectionStore {
     return patchResult(previousLength, previousLength, projectedTail, this._display);
   }
 
-  _reprojectStructural(currentRows, { trimmedLeft = 0 } = {}) {
+  _reprojectStructural(currentRows, { deltaType = "", trimmedLeft = 0 } = {}) {
     const previousLength = this._display.length;
     const nextSource = Array.from(currentRows || []);
     if (this.projector.oneToOne !== true) {
+      const seedState = this._seedStateForStructuralProjection({
+        deltaType,
+        trimmedLeft,
+      });
       this._source = nextSource;
-      this._display = this.projector.project(nextSource);
+      this._projectionSeedState = seedState;
+      this._display = this._projectRows(nextSource, { seedState });
       this._rebuildDisplayTimeIndex();
       return patchResult(0, previousLength, this._display.slice(), this._display);
     }
@@ -187,6 +199,34 @@ export class ProjectionStore {
     this._display = this._display.slice(0, fromOutputIndex).concat(projectedTail);
     this._rebuildDisplayTimeIndex();
     return patchResult(fromOutputIndex, previousLength, projectedTail, this._display);
+  }
+
+  _seedStateForStructuralProjection({ deltaType, trimmedLeft }) {
+    if (typeof this.projector.projectWithState !== "function") return null;
+    if (deltaType === "prepend") return null;
+    if (trimmedLeft <= 0) return this._projectionSeedState;
+    if (trimmedLeft < this._sourceCheckpoints.length) {
+      return this._sourceCheckpoints[trimmedLeft];
+    }
+    if (trimmedLeft === this._source.length) return this._projectionFinalState;
+    return null;
+  }
+
+  _projectRows(rows, { seedState = null } = {}) {
+    if (typeof this.projector.projectWithState !== "function") {
+      this._sourceCheckpoints = [];
+      this._projectionFinalState = null;
+      return this.projector.project(rows);
+    }
+    const projection = this.projector.projectWithState(rows, { seedState });
+    if (!projection || !Array.isArray(projection.data)) {
+      throw new TypeError("stateful projector must return { data, state, checkpoints }");
+    }
+    this._sourceCheckpoints = Array.isArray(projection.checkpoints)
+      ? projection.checkpoints
+      : [];
+    this._projectionFinalState = projection.state ?? null;
+    return projection.data;
   }
 
   _resolvePreviousDisplayRow(rows) {

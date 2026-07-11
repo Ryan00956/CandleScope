@@ -205,7 +205,8 @@ export function buildMainSeriesStyleOptions(chartType, {
   const resolvedType = normalizeMainChartType(chartType);
   if (resolvedType === "candlestick"
     || resolvedType === "hollow-candlestick"
-    || resolvedType === "heikin-ashi") {
+    || resolvedType === "heikin-ashi"
+    || resolvedType === "renko") {
     return {
       upColor,
       downColor,

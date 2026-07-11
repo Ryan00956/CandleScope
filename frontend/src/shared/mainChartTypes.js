@@ -4,6 +4,7 @@ export const MAIN_CHART_TYPES = Object.freeze([
   "candlestick",
   "hollow-candlestick",
   "heikin-ashi",
+  "renko",
   "bar",
   "high-low",
   "line",
@@ -18,6 +19,7 @@ const MAIN_CHART_SERIES_KINDS = Object.freeze({
   candlestick: "candlestick",
   "hollow-candlestick": "candlestick",
   "heikin-ashi": "candlestick",
+  renko: "candlestick",
   bar: "bar",
   "high-low": "high-low",
   line: "line",
@@ -43,6 +45,7 @@ export function isOhlcMainChartType(value) {
   return chartType === "candlestick"
     || chartType === "hollow-candlestick"
     || chartType === "heikin-ashi"
+    || chartType === "renko"
     || chartType === "bar"
     || chartType === "high-low";
 }

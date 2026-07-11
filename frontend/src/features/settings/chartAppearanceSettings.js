@@ -2,12 +2,16 @@ import { useEffect, useState } from "react";
 import { normalizeMainChartType } from "../../shared/mainChartTypes.js";
 
 const SETTINGS_STORAGE_KEY = "candlescope-settings";
+const RENKO_BOX_SIZE_MODES = new Set(["atr", "traditional"]);
 export const DEFAULT_SETTINGS = {
   theme: "dark",
   customBg: "#0f172a",
   upColor: "#22c55e",
   downColor: "#ef4444",
   chartType: "candlestick",
+  renkoBoxSizeMode: "atr",
+  renkoAtrLength: 14,
+  renkoBoxSize: 1,
   cachePreset: "standard",
   cacheLimits: { minutes: 200000, hours: 50000, daily: 0 },
   ephemeralCacheBars: 86400,
@@ -19,6 +23,17 @@ export const DEFAULT_SETTINGS = {
 export function normalizeSettings(settings = {}) {
   const normalized = { ...DEFAULT_SETTINGS, ...(settings || {}) };
   normalized.chartType = normalizeMainChartType(normalized.chartType);
+  normalized.renkoBoxSizeMode = RENKO_BOX_SIZE_MODES.has(normalized.renkoBoxSizeMode)
+    ? normalized.renkoBoxSizeMode
+    : DEFAULT_SETTINGS.renkoBoxSizeMode;
+  const atrLength = Math.trunc(Number(normalized.renkoAtrLength));
+  normalized.renkoAtrLength = Number.isFinite(atrLength) && atrLength >= 2 && atrLength <= 500
+    ? atrLength
+    : DEFAULT_SETTINGS.renkoAtrLength;
+  const boxSize = Number(normalized.renkoBoxSize);
+  normalized.renkoBoxSize = Number.isFinite(boxSize) && boxSize > 0
+    ? boxSize
+    : DEFAULT_SETTINGS.renkoBoxSize;
   return normalized;
 }
 

@@ -161,6 +161,8 @@ const DrawingToolbar = memo(function DrawingToolbar({
       onSelectedDrawingStyleChange?.({ lineWidth });
     }
   }, [onPenSizeChange, onSelectedDrawingStyleChange, selectedDrawing]);
+  const drawingToolsDisabled = chartType === "renko";
+  const drawingToolTitle = "Renko 暂不支持绘图工具";
 
   return (
     <div className="drawing-toolbar">
@@ -189,6 +191,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={cursorBtnRef}
         currentId={currentCursorId}
         dataDrawingTool="cursor"
+        disabled={drawingToolsDisabled}
         flyoutKey="cursor"
         flyoutOpen={flyoutOpen}
         icon={currentCursorIcon}
@@ -197,7 +200,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleCursorContextMenu}
         onDoubleClick={handleCursorDblClick}
         onSelect={handleSelectCursorVariant}
-        title={`${currentCursorLabel} (right-click or double-click to switch cursor)`}
+        title={drawingToolsDisabled ? drawingToolTitle : `${currentCursorLabel} (right-click or double-click to switch cursor)`}
         variants={CURSOR_VARIANTS}
       />
 
@@ -206,6 +209,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={freehandBtnRef}
         currentId={currentFreehandId}
         dataDrawingTool={currentFreehandId}
+        disabled={drawingToolsDisabled}
         flyoutKey="freehand"
         flyoutOpen={flyoutOpen}
         icon={currentFreehandIcon}
@@ -214,16 +218,17 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleFreehandContextMenu}
         onDoubleClick={handleFreehandDblClick}
         onSelect={handleSelectFreehandVariant}
-        title={`${currentFreehandLabel} (right-click or double-click to switch pen type)`}
+        title={drawingToolsDisabled ? drawingToolTitle : `${currentFreehandLabel} (right-click or double-click to switch pen type)`}
         variants={FREEHAND_VARIANTS}
       />
 
       <DrawingToolButton
         active={isEraserActive}
         dataDrawingTool="eraser"
+        disabled={drawingToolsDisabled}
         icon={EraserIcon}
         onClick={handleEraserClick}
-        title="Eraser"
+        title={drawingToolsDisabled ? drawingToolTitle : "Eraser"}
       />
 
       <DrawingVariantToolButton
@@ -231,6 +236,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={lineBtnRef}
         currentId={lineVariant}
         dataDrawingTool={lineVariant}
+        disabled={drawingToolsDisabled}
         flyoutKey="line"
         flyoutOpen={flyoutOpen}
         icon={currentLineIcon}
@@ -239,7 +245,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleLineContextMenu}
         onDoubleClick={handleLineDblClick}
         onSelect={handleSelectLineVariant}
-        title={`${currentLineLabel} (right-click or double-click to switch mode)`}
+        title={drawingToolsDisabled ? drawingToolTitle : `${currentLineLabel} (right-click or double-click to switch mode)`}
         variants={LINE_VARIANTS}
       />
 
@@ -248,6 +254,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={shapeBtnRef}
         currentId={shapeVariant}
         dataDrawingTool={shapeVariant}
+        disabled={drawingToolsDisabled}
         flyoutKey="shape"
         flyoutOpen={flyoutOpen}
         icon={currentShapeIcon}
@@ -256,28 +263,30 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleShapeContextMenu}
         onDoubleClick={handleShapeDblClick}
         onSelect={handleSelectShapeVariant}
-        title={`${currentShapeLabel} (right-click or double-click to switch shape; Shift locks square/circle)`}
+        title={drawingToolsDisabled ? drawingToolTitle : `${currentShapeLabel} (right-click or double-click to switch shape; Shift locks square/circle)`}
         variants={SHAPE_VARIANTS}
       />
 
       <DrawingToolButton
         active={isTextActive}
         dataDrawingTool="text"
+        disabled={drawingToolsDisabled}
         icon={TextIcon}
         onClick={handleTextClick}
-        title="Text note"
+        title={drawingToolsDisabled ? drawingToolTitle : "Text note"}
       />
 
       <DrawingToolButton
         active={isFibonacciActive}
         anchorRef={fibBtnRef}
         dataDrawingTool="fibonacci"
+        disabled={drawingToolsDisabled}
         icon={FibonacciIcon}
         onClick={handleFibonacciClick}
         onContextMenu={handleFibonacciSettingsContextMenu}
         onDoubleClick={handleToggleFibonacciSettings}
         showVariantIndicator
-        title="Fibonacci retracement (right-click or double-click for settings)"
+        title={drawingToolsDisabled ? drawingToolTitle : "Fibonacci retracement (right-click or double-click for settings)"}
       >
         {flyoutOpen === "fib-levels" && (
           <FibLevelsPanel
@@ -296,6 +305,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={posBtnRef}
         currentId={posVariant}
         dataDrawingTool={posVariant}
+        disabled={drawingToolsDisabled}
         flyoutKey="position"
         flyoutOpen={flyoutOpen}
         icon={currentPosIcon}
@@ -304,7 +314,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handlePositionContextMenu}
         onDoubleClick={handlePositionDblClick}
         onSelect={handleSelectPositionVariant}
-        title={`${currentPosLabel} (right-click or double-click to switch long/short)`}
+        title={drawingToolsDisabled ? drawingToolTitle : `${currentPosLabel} (right-click or double-click to switch long/short)`}
         variants={POSITION_VARIANTS}
       >
         {flyoutOpen === "position-settings" && (
@@ -319,15 +329,18 @@ const DrawingToolbar = memo(function DrawingToolbar({
 
       <DrawingToolButton
         active={drawingSnapEnabled}
+        disabled={drawingToolsDisabled}
         icon={MagnetIcon}
         onClick={() => onDrawingSnapEnabledChange?.(!drawingSnapEnabled)}
-        title={drawingSnapEnabled ? "Snap enabled (hold Alt to disable temporarily)" : "Snap disabled"}
+        title={drawingToolsDisabled
+          ? drawingToolTitle
+          : (drawingSnapEnabled ? "Snap enabled (hold Alt to disable temporarily)" : "Snap disabled")}
       />
 
       {/* Divider */}
       <div className="drawing-toolbar-divider" />
 
-      <DrawingStyleControls
+      {!drawingToolsDisabled && <DrawingStyleControls
         freehandOptionLabel={freehandOptionLabel}
         onOpenPositionSettings={handleTogglePositionSettings}
         onPenColorChange={handleStrokeColorChange}
@@ -347,7 +360,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         textBold={textBold}
         textFontSize={textFontSize}
         textItalic={textItalic}
-      />
+      />}
 
       <DrawingActionButtons
         drawingsHidden={drawingsHidden}

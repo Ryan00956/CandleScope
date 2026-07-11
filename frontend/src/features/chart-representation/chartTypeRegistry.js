@@ -6,6 +6,7 @@ export const CHART_AXIS_MODES = Object.freeze({
 export const CHART_PROJECTION_IDS = Object.freeze({
   IDENTITY: "identity",
   HEIKIN_ASHI: "heikin-ashi",
+  RENKO: "renko",
 });
 
 export const DEFAULT_CHART_TYPE_DESCRIPTORS = Object.freeze([
@@ -20,6 +21,7 @@ export const DEFAULT_CHART_TYPE_DESCRIPTORS = Object.freeze([
   { id: "area", axisMode: "time", projectionId: "identity", rendererId: "area" },
   { id: "baseline", axisMode: "time", projectionId: "identity", rendererId: "baseline" },
   { id: "histogram", axisMode: "time", projectionId: "identity", rendererId: "histogram" },
+  { id: "renko", axisMode: "derived-ordinal", projectionId: "renko", rendererId: "candlestick" },
 ].map((descriptor) => Object.freeze(descriptor)));
 
 function normalizeDescriptor(descriptor) {

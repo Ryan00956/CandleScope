@@ -20,14 +20,21 @@ test("default registry describes every currently supported main chart type", () 
     "area",
     "baseline",
     "histogram",
+    "renko",
   ]);
-  for (const descriptor of DEFAULT_CHART_TYPE_DESCRIPTORS) {
+  for (const descriptor of DEFAULT_CHART_TYPE_DESCRIPTORS.filter((item) => item.id !== "renko")) {
     assert.equal(descriptor.axisMode, "time");
     assert.ok(descriptor.projectionId);
     assert.ok(descriptor.rendererId);
   }
   assert.equal(getChartTypeDescriptor("heikin-ashi").projectionId, "heikin-ashi");
   assert.equal(getChartTypeDescriptor("high-low").rendererId, "high-low");
+  assert.deepEqual(getChartTypeDescriptor("renko"), {
+    id: "renko",
+    axisMode: "derived-ordinal",
+    projectionId: "renko",
+    rendererId: "candlestick",
+  });
   assert.equal(getChartTypeDescriptor("unknown").id, "candlestick");
 });
 

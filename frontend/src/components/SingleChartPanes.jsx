@@ -584,6 +584,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       seriesDataIndexRef: displayRowIndexMapRef,
       sourceTimeHorizonRef: drawingSourceTimeHorizonRef,
       projectionConfigRef: drawingProjectionConfigRef,
+      drawingCoordinateSnapshotProvider: () => (
+        projectionStoreRef.current?.drawingCoordinateSnapshot?.() || null
+      ),
     }),
     [],
   );

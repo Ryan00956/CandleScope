@@ -12,6 +12,7 @@ import {
   resolveDrawingAnchorToDisplayRow,
   timeToCoordinateInterpolated,
 } from "../../../chart-adapter/coordinateBridge.js";
+import { createDrawingLineageIndex } from "../../chart-representation/drawingLineageIndex.js";
 
 function assertAlmostEqual(actual, expected, epsilon = 1e-9) {
   assert.ok(
@@ -239,6 +240,152 @@ test("registered drawing series context uses stable display data across primitiv
   assert.equal(dataCalls, 0);
   assert.ok(readsAfterFirstResolve > firstReadsBeforeResolve);
   assert.equal(projectionMetadataReads, readsAfterFirstResolve);
+});
+
+test("registered coordinate snapshots avoid rescanning a replaced derived tail", () => {
+  const prefix = displayRow(0, 100, 0, { from: 80, to: 100 });
+  const oldTail = displayRow(1, 200, 0, { from: 101, to: 200 });
+  const nextTail = displayRow(1, 220, 0, { from: 101, to: 220 });
+  const previousRows = [prefix, oldTail];
+  const nextRows = [prefix, nextTail];
+  const index = createDrawingLineageIndex(previousRows);
+  assert.equal(index.replaceTail({
+    previousSeriesData: previousRows,
+    fromOutputIndex: 1,
+    insert: [nextTail],
+    nextSeriesData: nextRows,
+  }), true);
+
+  Object.defineProperty(prefix, "customValues", {
+    configurable: true,
+    get() {
+      throw new Error("stable prefix metadata was rescanned");
+    },
+  });
+
+  let fallbackDataCalls = 0;
+  let snapshotCalls = 0;
+  const chart = {
+    timeScale: () => ({ timeToCoordinate: (time) => time.order * 10 }),
+  };
+  const series = {
+    data: () => {
+      fallbackDataCalls += 1;
+      return previousRows;
+    },
+  };
+  registerDrawingSeriesContext(series, {
+    coordinateSnapshotProvider: () => {
+      snapshotCalls += 1;
+      return {
+        indexRevision: index.revision,
+        ordinalSeriesIndex: index,
+        seriesData: nextRows,
+      };
+    },
+    sourceTimeHorizonProvider: () => 220,
+  });
+
+  assert.equal(dataPointToCoordinate(chart, series, { time: 90 }), 0);
+  assert.equal(dataPointToCoordinate(chart, series, { time: 150 }), 10);
+  assert.equal(snapshotCalls, 2);
+  assert.equal(fallbackDataCalls, 0);
+});
+
+test("stale coordinate snapshot revisions fall back when array identity is unchanged", () => {
+  const oldTail = displayRow(1, 200);
+  const rows = [displayRow(0, 100), oldTail];
+  const index = createDrawingLineageIndex(rows);
+  const staleRevision = index.revision;
+  index.reset(rows);
+  const replacementTail = displayRow(1, 200);
+  rows[1] = replacementTail;
+
+  assert.strictEqual(resolveDrawingAnchorToDisplayRow(rows, { time: 200 }, {
+    drawingOrdinalSeriesIndex: index,
+    drawingOrdinalSeriesIndexRevision: staleRevision,
+  }), replacementTail);
+});
+
+test("projection-owned lineage indexes preserve fallback anchor semantics", () => {
+  const rows = [
+    displayRow(0, 100, 0, { from: 80, to: 100 }),
+    displayRow(1, 280, 0, { from: 150, to: 280 }),
+    displayRow(2, 280, 1, { from: 150, to: 280 }),
+    displayRow(3, 300, 0, { from: 101, to: 300 }),
+    displayRow(4, 500, 0, { from: 401, to: 500 }),
+  ];
+  const previousRows = rows.slice(0, 3);
+  const index = createDrawingLineageIndex(previousRows);
+  assert.equal(index.replaceTail({
+    previousSeriesData: previousRows,
+    fromOutputIndex: previousRows.length,
+    insert: rows.slice(previousRows.length),
+    nextSeriesData: rows,
+  }), true);
+  const fallbackContext = {
+    drawingProjectionConfig: "dataset-a:renko:10",
+    sourceTimeHorizon: 500,
+  };
+  const indexedContext = {
+    ...fallbackContext,
+    drawingOrdinalSeriesIndex: index,
+    drawingOrdinalSeriesIndexRevision: index.revision,
+  };
+  const cases = [
+    {
+      anchor: {
+        time: 280,
+        sourceOrdinal: 0,
+        sourceProjection: "renko",
+        sourceProjectionConfig: "dataset-a:renko:10",
+      },
+      expected: rows[1],
+    },
+    {
+      anchor: {
+        time: 280,
+        sourceOrdinal: 1,
+        sourceProjection: "renko",
+        sourceProjectionConfig: "dataset-a:renko:10",
+      },
+      expected: rows[2],
+    },
+    {
+      anchor: {
+        time: 280,
+        sourceOrdinal: 5,
+        sourceProjection: "renko",
+        sourceProjectionConfig: "dataset-a:renko:10",
+      },
+      expected: rows[2],
+    },
+    { anchor: { time: 280 }, expected: rows[2] },
+    {
+      anchor: {
+        time: 280,
+        sourceOrdinal: 0,
+        sourceProjection: "renko",
+        sourceProjectionConfig: "dataset-a:renko:20",
+      },
+      expected: rows[2],
+    },
+    { anchor: { time: 200 }, expected: rows[2] },
+    { anchor: { time: 350 }, expected: rows[3] },
+    { anchor: { time: 50 }, expected: null },
+    { anchor: { time: 501 }, expected: null },
+  ];
+
+  for (const { anchor, expected } of cases) {
+    assert.strictEqual(
+      resolveDrawingAnchorToDisplayRow(rows, anchor, indexedContext),
+      expected,
+    );
+    assert.strictEqual(
+      resolveDrawingAnchorToDisplayRow(rows, anchor, fallbackContext),
+      expected,
+    );
+  }
 });
 
 test("derived data points resolve through source anchors and never fall back to logical future", () => {

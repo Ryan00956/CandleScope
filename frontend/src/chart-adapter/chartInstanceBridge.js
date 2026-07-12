@@ -37,6 +37,8 @@ export function createLightweightChartAdapter({
   seriesDataIndexRef = null,
   sourceTimeHorizonRef = null,
   projectionConfigRef = null,
+  ordinalSeriesIndexProvider = null,
+  drawingCoordinateSnapshotProvider = null,
 }) {
   const getChart = () => getRefValue(chartRef);
   const getSeries = () => getRefValue(seriesRef);
@@ -49,7 +51,17 @@ export function createLightweightChartAdapter({
   const getSeriesDataIndex = () => getRefValue(seriesDataIndexRef);
   const getSourceTimeHorizon = () => getRefValue(sourceTimeHorizonRef);
   const getProjectionConfig = () => getRefValue(projectionConfigRef);
+  const getOrdinalSeriesIndex = () => safeCall(
+    () => ordinalSeriesIndexProvider?.(),
+    null,
+  );
+  const getDrawingCoordinateSnapshot = () => safeCall(
+    () => drawingCoordinateSnapshotProvider?.(),
+    null,
+  );
   const drawingSeriesProviders = {
+    coordinateSnapshotProvider: getDrawingCoordinateSnapshot,
+    ordinalSeriesIndexProvider: getOrdinalSeriesIndex,
     projectionConfigProvider: getProjectionConfig,
     seriesDataProvider: getSeriesData,
     sourceTimeHorizonProvider: getSourceTimeHorizon,
@@ -59,11 +71,21 @@ export function createLightweightChartAdapter({
     if (series) registerDrawingSeriesContext(series, drawingSeriesProviders);
     return series;
   };
-  const createDrawingCoordinateContext = () => ({
-    drawingProjectionConfig: getProjectionConfig(),
-    seriesData: getSeriesData(),
-    sourceTimeHorizon: getSourceTimeHorizon(),
-  });
+  const createDrawingCoordinateContext = () => {
+    const snapshot = getDrawingCoordinateSnapshot();
+    const hasSnapshotData = Array.isArray(snapshot?.seriesData);
+    return {
+      drawingOrdinalSeriesIndex: hasSnapshotData
+        ? snapshot.ordinalSeriesIndex || null
+        : getOrdinalSeriesIndex(),
+      ...(hasSnapshotData
+        ? { drawingOrdinalSeriesIndexRevision: snapshot.indexRevision ?? null }
+        : {}),
+      drawingProjectionConfig: getProjectionConfig(),
+      seriesData: hasSnapshotData ? snapshot.seriesData : getSeriesData(),
+      sourceTimeHorizon: getSourceTimeHorizon(),
+    };
+  };
 
   return {
     isReady: () => !!(getChart() && getSeries()),

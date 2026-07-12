@@ -1,6 +1,12 @@
+import {
+  createDrawingLineageIndex,
+  isDrawingLineageIndexForSeries,
+} from "../features/chart-representation/drawingLineageIndex.js";
+
 const PROJECTION_METADATA_KEY = "chartProjection";
 const ordinalSeriesIndexCache = new WeakMap();
 const drawingSeriesContextRegistry = new WeakMap();
+const hydratedCoordinateSnapshotContexts = new WeakMap();
 
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -39,11 +45,19 @@ export function registerDrawingSeriesContext(series, {
   seriesDataProvider = null,
   sourceTimeHorizonProvider = null,
   projectionConfigProvider = null,
+  ordinalSeriesIndexProvider = null,
+  coordinateSnapshotProvider = null,
 } = {}) {
   if (!isRegistryKey(series)) return false;
   drawingSeriesContextRegistry.set(series, {
     projectionConfigProvider: typeof projectionConfigProvider === "function"
       ? projectionConfigProvider
+      : null,
+    ordinalSeriesIndexProvider: typeof ordinalSeriesIndexProvider === "function"
+      ? ordinalSeriesIndexProvider
+      : null,
+    coordinateSnapshotProvider: typeof coordinateSnapshotProvider === "function"
+      ? coordinateSnapshotProvider
       : null,
     seriesDataProvider: typeof seriesDataProvider === "function" ? seriesDataProvider : null,
     sourceTimeHorizonProvider: typeof sourceTimeHorizonProvider === "function"
@@ -59,6 +73,18 @@ function hydrateCoordinateContext(series, context) {
     : null;
   if (!context || typeof context !== "object" || !registration) return registration;
 
+  let hasCoordinateSnapshot = hydratedCoordinateSnapshotContexts.get(context) === true;
+  if (registration.coordinateSnapshotProvider
+    && !hydratedCoordinateSnapshotContexts.has(context)) {
+    const snapshot = safeProviderValue(registration.coordinateSnapshotProvider, null);
+    if (Array.isArray(snapshot?.seriesData)) {
+      hasCoordinateSnapshot = true;
+      context.seriesData = snapshot.seriesData;
+      context.drawingOrdinalSeriesIndex = snapshot.ordinalSeriesIndex || null;
+      context.drawingOrdinalSeriesIndexRevision = snapshot.indexRevision ?? null;
+    }
+    hydratedCoordinateSnapshotContexts.set(context, hasCoordinateSnapshot);
+  }
   if (registration.sourceTimeHorizonProvider) {
     context.sourceTimeHorizon = safeProviderValue(
       registration.sourceTimeHorizonProvider,
@@ -70,6 +96,13 @@ function hydrateCoordinateContext(series, context) {
       registration.projectionConfigProvider,
       null,
     );
+  }
+  if (!hasCoordinateSnapshot && registration.ordinalSeriesIndexProvider) {
+    context.drawingOrdinalSeriesIndex = safeProviderValue(
+      registration.ordinalSeriesIndexProvider,
+      null,
+    );
+    delete context.drawingOrdinalSeriesIndexRevision;
   }
   return registration;
 }
@@ -96,21 +129,6 @@ function projectorIdFromRow(row) {
     : null;
 }
 
-function sourceRangeFromRow(row) {
-  const metadata = projectionMetadataFromRow(row);
-  const axisSourceTime = isOrdinalAxisTime(row?.time) ? row.time.sourceTime : null;
-  const rowSourceTime = isFiniteNumber(row?.sourceTime) ? row.sourceTime : null;
-  const fallback = rowSourceTime ?? axisSourceTime;
-  const from = isFiniteNumber(metadata?.sourceFromTime)
-    ? metadata.sourceFromTime
-    : fallback;
-  const to = isFiniteNumber(metadata?.sourceToTime)
-    ? metadata.sourceToTime
-    : fallback;
-  if (!isFiniteNumber(from) || !isFiniteNumber(to)) return null;
-  return from <= to ? { from, to } : { from: to, to: from };
-}
-
 function sourceOrdinalFromRow(row) {
   if (isOrdinalAxisTime(row?.time)) return row.time.sourceOrdinal;
   const ordinal = projectionMetadataFromRow(row)?.sourceOrdinal;
@@ -135,49 +153,6 @@ function firstOrdinalRow(seriesData) {
 
 function usesOrdinalSeriesData(seriesData) {
   return isOrdinalAxisTime(firstSeriesTime(seriesData));
-}
-
-function buildOrdinalSeriesIndex(seriesData) {
-  const ordinalRows = [];
-  const exactRowsBySourceTime = new Map();
-  const rowRanges = [];
-  let latestLineage = Number.NEGATIVE_INFINITY;
-  let currentProjection = null;
-  let rowRangesMonotonic = true;
-  let previousRangeFrom = Number.NEGATIVE_INFINITY;
-  let previousRangeTo = Number.NEGATIVE_INFINITY;
-
-  for (const row of seriesData) {
-    if (!isOrdinalAxisTime(row?.time)) continue;
-    ordinalRows.push(row);
-    let exactRows = exactRowsBySourceTime.get(row.time.sourceTime);
-    if (!exactRows) {
-      exactRows = [];
-      exactRowsBySourceTime.set(row.time.sourceTime, exactRows);
-    }
-    exactRows.push(row);
-
-    const range = sourceRangeFromRow(row);
-    if (range) {
-      if (range.from < previousRangeFrom || range.to < previousRangeTo) {
-        rowRangesMonotonic = false;
-      }
-      previousRangeFrom = range.from;
-      previousRangeTo = range.to;
-      rowRanges.push({ row, range });
-      if (range.to > latestLineage) latestLineage = range.to;
-    }
-    currentProjection ||= projectorIdFromRow(row);
-  }
-
-  return {
-    currentProjection,
-    exactRowsBySourceTime,
-    latestLineage,
-    ordinalRows,
-    rowRanges,
-    rowRangesMonotonic,
-  };
 }
 
 function firstRangeIndexWithToAtLeast(rowRanges, target) {
@@ -271,9 +246,22 @@ function resolveUnorderedSourceRange(rowRanges, target) {
 
 function getOrdinalSeriesIndex(seriesData, context = null) {
   if (!usesOrdinalSeriesData(seriesData)) return null;
+  const contextIndex = context?.drawingOrdinalSeriesIndex;
+  const contextRevisionMatches = !Object.prototype.hasOwnProperty.call(
+    context || {},
+    "drawingOrdinalSeriesIndexRevision",
+  ) || context.drawingOrdinalSeriesIndexRevision === contextIndex?.revision;
+  if (isDrawingLineageIndexForSeries(
+    contextIndex,
+    seriesData,
+  ) && contextRevisionMatches) {
+    if (context) context.drawingOrdinalSeriesData = seriesData;
+    return contextIndex;
+  }
   if (context?.drawingOrdinalSeriesData === seriesData
-    && context.drawingOrdinalSeriesIndex) {
-    return context.drawingOrdinalSeriesIndex;
+    && isDrawingLineageIndexForSeries(contextIndex, seriesData)
+    && contextRevisionMatches) {
+    return contextIndex;
   }
 
   const firstRow = seriesData[0] || null;
@@ -288,11 +276,12 @@ function getOrdinalSeriesIndex(seriesData, context = null) {
     if (context) {
       context.drawingOrdinalSeriesData = seriesData;
       context.drawingOrdinalSeriesIndex = cached.index;
+      delete context.drawingOrdinalSeriesIndexRevision;
     }
     return cached.index;
   }
 
-  const index = buildOrdinalSeriesIndex(seriesData);
+  const index = createDrawingLineageIndex(seriesData);
   // ProjectionStore replaces the display array for structural and tail
   // changes; its provisional overlay also changes the array edge. Keep a
   // first/last identity guard for callers that retain the same array object.
@@ -307,6 +296,7 @@ function getOrdinalSeriesIndex(seriesData, context = null) {
   if (context) {
     context.drawingOrdinalSeriesData = seriesData;
     context.drawingOrdinalSeriesIndex = index;
+    delete context.drawingOrdinalSeriesIndexRevision;
   }
   return index;
 }

@@ -352,19 +352,53 @@ test("stateful display changes stay copy-on-write while semantic no-ops retain i
   store.reset(initial);
   const beforeAppend = store.displaySnapshot();
   const beforeAppendValue = structuredClone(beforeAppend);
+  const lineageIndex = store.drawingLineageIndex();
+  const beforeAppendRevision = lineageIndex.revision;
   const appended = [...initial, row(5, 15)];
 
   store.applySourceDelta({ type: "tick", appended: true }, appended);
   const afterAppend = store.displaySnapshot();
   assert.notStrictEqual(afterAppend, beforeAppend);
   assert.deepEqual(beforeAppend, beforeAppendValue);
+  assert.strictEqual(store.drawingLineageIndex(), lineageIndex);
+  assert.equal(lineageIndex.revision, beforeAppendRevision + 1);
 
   const noOpRows = [
     ...appended.slice(0, -1),
     { ...appended.at(-1), volume: 9999 },
   ];
+  const beforeNoOpRevision = lineageIndex.revision;
   store.applySourceDelta({ type: "tick", replaced: true }, noOpRows);
   assert.strictEqual(store.displaySnapshot(), afterAppend);
+  assert.strictEqual(store.drawingLineageIndex(), lineageIndex);
+  assert.equal(lineageIndex.revision, beforeNoOpRevision);
+});
+
+test("drawing lineage snapshots recover after clearing an ordinal display", () => {
+  const store = new ProjectionStore({
+    projector: new LineBreakProjector({ minTick: 1, numberOfLines: 3 }),
+  });
+  store.reset(source([10, 12, 13]));
+  assert.ok(store.drawingLineageIndex());
+
+  store.applySourceDelta({ type: "clear" }, []);
+  const emptySnapshot = store.drawingCoordinateSnapshot();
+  assert.deepEqual(emptySnapshot.seriesData, []);
+  assert.equal(emptySnapshot.ordinalSeriesIndex, null);
+
+  const baselineRows = [row(10, 20)];
+  store.applySourceDelta({ type: "tick", appended: true }, baselineRows);
+  assert.equal(store.drawingCoordinateSnapshot().ordinalSeriesIndex, null);
+
+  const nextRows = [...baselineRows, row(11, 21)];
+  store.applySourceDelta({ type: "tick", appended: true }, nextRows);
+  const restoredSnapshot = store.drawingCoordinateSnapshot();
+  assert.strictEqual(restoredSnapshot.seriesData, store.displaySnapshot());
+  assert.strictEqual(
+    restoredSnapshot.ordinalSeriesIndex.seriesData,
+    restoredSnapshot.seriesData,
+  );
+  assert.equal(restoredSnapshot.ordinalSeriesIndex.latestLineage, 11);
 });
 
 test("stateful tail patches update the private time index and lazily version the public time set", () => {
@@ -503,6 +537,13 @@ for (const operation of ["append", "replace"]) {
         return Reflect.get(target, property, receiver);
       },
     }));
+    // This test intentionally replaces the store's private display array to
+    // instrument reads. Keep the projection-owned drawing lookup on that same
+    // array identity, then measure only the following realtime tail update.
+    store._drawingLineageIndex.reset(store._display);
+    const drawingLineageIndex = store.drawingLineageIndex();
+    const drawingLineageRevision = drawingLineageIndex.revision;
+    displayTimeReads = 0;
     const next = operation === "append"
       ? [...initial, row(size + 1, 100 + size)]
       : [...initial.slice(0, -1), row(size, 100 + size + 5)];
@@ -524,6 +565,9 @@ for (const operation of ["append", "replace"]) {
     assert.ok(checkpointReads < 4, `read ${checkpointReads} checkpoints`);
     assert.ok(displayTimeReads < 64, `read ${displayTimeReads} display times`);
     assert.strictEqual(store._sourceCheckpoints, checkpointCache);
+    assert.strictEqual(store.drawingLineageIndex(), drawingLineageIndex);
+    assert.strictEqual(drawingLineageIndex.seriesData, store.displaySnapshot());
+    assert.equal(drawingLineageIndex.revision, drawingLineageRevision + 1);
     assertDisplayIndexIntegrity(store);
   });
 }

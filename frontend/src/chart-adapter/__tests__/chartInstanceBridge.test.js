@@ -3,6 +3,9 @@ import test from "node:test";
 
 import { createLightweightChartAdapter } from "../chartInstanceBridge.js";
 import { dataPointToCoordinate } from "../coordinateBridge.js";
+import { createDrawingLineageIndex } from "../../features/chart-representation/drawingLineageIndex.js";
+import { ProjectionStore } from "../../features/chart-representation/projectionStore.js";
+import { LineBreakProjector } from "../../features/chart-representation/projectors/lineBreakProjector.js";
 
 function ordinal(order, sourceTime, sourceOrdinal = 0) {
   return { order, sourceTime, sourceOrdinal };
@@ -19,6 +22,18 @@ function displayRow(order, sourceTime, sourceOrdinal = 0) {
         sourceToTime: sourceTime,
       },
     },
+  };
+}
+
+function sourceRow(time, close) {
+  return {
+    time,
+    open: close - 1,
+    high: close + 1,
+    low: close - 2,
+    close,
+    volume: 1,
+    is_closed: true,
   };
 }
 
@@ -94,7 +109,9 @@ test("adapter exposes persistence-safe ordinal drawing coordinates", () => {
 
 test("adapter registers stable drawing context before primitive attachment", () => {
   const rows = [displayRow(0, 100, 0), displayRow(1, 200, 0)];
+  const lineageIndex = createDrawingLineageIndex(rows);
   let fallbackDataCalls = 0;
+  let snapshotCalls = 0;
   let attachedCoordinate = null;
   const chart = {
     timeScale: () => ({
@@ -116,11 +133,78 @@ test("adapter registers stable drawing context before primitive attachment", () 
     seriesDataRef: { current: rows },
     sourceTimeHorizonRef: { current: 400 },
     projectionConfigRef: { current: "dataset-a:renko:10" },
+    drawingCoordinateSnapshotProvider: () => {
+      snapshotCalls += 1;
+      return {
+        indexRevision: lineageIndex.revision,
+        ordinalSeriesIndex: lineageIndex,
+        seriesData: rows,
+      };
+    },
   });
 
   assert.equal(adapter.attachPrimitive({}), true);
   assert.equal(attachedCoordinate, 10);
   assert.equal(fallbackDataCalls, 0);
+  assert.equal(snapshotCalls, 1);
+});
+
+test("projection snapshots keep primitive coordinates on the current incremental tail", () => {
+  const size = 2_000;
+  const sourceRows = Array.from(
+    { length: size },
+    (_, index) => sourceRow(index + 1, 100 + index),
+  );
+  const store = new ProjectionStore({
+    projector: new LineBreakProjector({ minTick: 1, numberOfLines: 3 }),
+  });
+  store.reset(sourceRows);
+  const staleDisplayRows = store.displaySnapshot();
+  const nextSourceRows = sourceRows.concat(sourceRow(size + 1, 100 + size));
+  store.applySourceDelta({ type: "tick", appended: true }, nextSourceRows);
+  const currentDisplayRows = store.displaySnapshot();
+  const firstRow = currentDisplayRows[0];
+  const lastRow = currentDisplayRows[currentDisplayRows.length - 1];
+  Object.defineProperty(firstRow, "customValues", {
+    configurable: true,
+    get() {
+      throw new Error("stable projected prefix metadata was rescanned");
+    },
+  });
+
+  let fallbackDataCalls = 0;
+  let attachedCoordinates = null;
+  const chart = {
+    timeScale: () => ({ timeToCoordinate: (time) => time.order * 5 }),
+  };
+  const series = {
+    attachPrimitive: () => {
+      const context = {};
+      attachedCoordinates = [
+        dataPointToCoordinate(chart, series, { time: firstRow.time.sourceTime }, context),
+        dataPointToCoordinate(chart, series, { time: lastRow.time.sourceTime }, context),
+      ];
+    },
+    data: () => {
+      fallbackDataCalls += 1;
+      return staleDisplayRows;
+    },
+  };
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    drawingCoordinateSnapshotProvider: () => store.drawingCoordinateSnapshot(),
+    seriesDataRef: { current: staleDisplayRows },
+    seriesRef: { current: series },
+    sourceTimeHorizonRef: { current: size + 1 },
+  });
+
+  assert.equal(adapter.attachPrimitive({}), true);
+  assert.deepEqual(attachedCoordinates, [firstRow.time.order * 5, lastRow.time.order * 5]);
+  assert.equal(fallbackDataCalls, 0);
+  assert.strictEqual(
+    store.drawingCoordinateSnapshot().ordinalSeriesIndex.seriesData,
+    currentDisplayRows,
+  );
 });
 
 test("adapter keeps numeric drawing anchor behavior for time axes", () => {

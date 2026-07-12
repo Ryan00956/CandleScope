@@ -1,5 +1,6 @@
 import { IdentityProjector } from "./projectors/identityProjector.js";
 import { findDisplayIndexForAxisAnchor } from "./axisTime.js";
+import { createDrawingLineageIndex } from "./drawingLineageIndex.js";
 
 const PROVISIONAL_SOURCE_STATES = new Set([
   "false",
@@ -191,6 +192,7 @@ export class ProjectionStore {
     this.projector = projector;
     this._source = [];
     this._display = [];
+    this._drawingLineageIndex = createDrawingLineageIndex();
     this._displayTimeIndex = new Map();
     this._displayTimeSet = new Set();
     this._hasStrictlyIncreasingDisplayOrders = true;
@@ -209,6 +211,22 @@ export class ProjectionStore {
 
   displaySnapshot() {
     return this._display;
+  }
+
+  drawingLineageIndex() {
+    return this._drawingLineageIndex.seriesData === this._display
+      && this._drawingLineageIndex.isOrdinal
+      ? this._drawingLineageIndex
+      : null;
+  }
+
+  drawingCoordinateSnapshot() {
+    const ordinalSeriesIndex = this.drawingLineageIndex();
+    return {
+      indexRevision: ordinalSeriesIndex?.revision ?? null,
+      ordinalSeriesIndex,
+      seriesData: this._display,
+    };
   }
 
   getDisplayByTime(time) {
@@ -373,6 +391,12 @@ export class ProjectionStore {
     this._display = nextDisplay;
     if (displayChanged) {
       this._replaceDisplayTimeIndexTail(displayTimeIndexPlan);
+      this._replaceDrawingLineageIndexTail({
+        fromOutputIndex: tail.fromOutputIndex,
+        insert: tail.insert,
+        nextDisplay,
+        previousDisplay,
+      });
     }
     return patchResult(
       tail.fromOutputIndex,
@@ -637,6 +661,35 @@ export class ProjectionStore {
     this._displayTimeSet = null;
   }
 
+  _replaceDrawingLineageIndexTail({
+    previousDisplay,
+    fromOutputIndex,
+    insert,
+    nextDisplay,
+  }) {
+    try {
+      const patched = this._drawingLineageIndex.replaceTail({
+        previousSeriesData: previousDisplay,
+        fromOutputIndex,
+        insert,
+        nextSeriesData: nextDisplay,
+      });
+      if (patched) return;
+    } catch {
+      // Fall through to the correctness-first rebuild below. Projection rows
+      // are adapter input, so a malformed metadata getter must not leave a
+      // partially patched drawing lookup behind.
+    }
+    try {
+      this._drawingLineageIndex.reset(nextDisplay);
+    } catch {
+      // Keep the projection commit usable even if third-party projected
+      // metadata is hostile. The empty identity deliberately makes the public
+      // snapshot reject this lookup and use the bridge's safe fallback.
+      this._drawingLineageIndex.reset([]);
+    }
+  }
+
   _rebuildDisplayTimeIndex() {
     this._displayTimeIndex.clear();
     const displayTimes = [];
@@ -657,5 +710,6 @@ export class ProjectionStore {
     }
     this._displayTimeSet = new Set(displayTimes);
     this._hasStrictlyIncreasingDisplayOrders = strictlyIncreasingOrders;
+    this._drawingLineageIndex.reset(this._display);
   }
 }

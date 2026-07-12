@@ -68,12 +68,16 @@ Response:
       "high": 42100.0,
       "low": 41950.0,
       "close": 42050.0,
-      "volume": 12.5
+      "volume": 12.5,
+      "is_closed": false
     }
   ],
   "base_interval": null
 }
 ```
+
+`is_closed` is `false` only for a still-forming live bar. Clients may treat the
+missing field from older servers or stored historical rows as confirmed.
 
 ### `GET /klines/latest`
 

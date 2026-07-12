@@ -9,6 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from app.data_engine.interval_policy import (
+    aggregate_tail_is_closed,
     aggregate_rows_by_month,
     compute_bucket_start,
     compute_bucket_start_ms,
@@ -68,6 +69,7 @@ def _bar_data_to_storage_rows(
             "low": bar.low,
             "close": bar.close,
             "volume": bar.volume,
+            "is_closed": bool(bar.is_closed),
         })
     return rows
 
@@ -77,6 +79,7 @@ def _aggregate_rows_to_interval(
     custom_interval_seconds: int,
     *,
     interval: str | None = None,
+    source_interval_seconds: int | None = None,
 ) -> list[dict]:
     """Aggregate lightweight-chart rows into a custom interval."""
     if not base_rows:
@@ -102,6 +105,11 @@ def _aggregate_rows_to_interval(
             "low": min(row["low"] for row in rows),
             "close": rows[-1]["close"],
             "volume": round(sum(row["volume"] for row in rows), 8),
+            "is_closed": aggregate_tail_is_closed(
+                rows,
+                bucket_end_seconds=bucket_start + custom_interval_seconds,
+                source_interval_seconds=source_interval_seconds,
+            ),
         })
     return result
 
@@ -332,7 +340,12 @@ class CustomIntervalQueryService:
         if custom_seconds is None or not base_bars:
             return []
 
-        result = self._aggregate_read_only(base_bars, interval, custom_seconds)
+        result = self._aggregate_read_only(
+            base_bars,
+            interval,
+            custom_seconds,
+            source_interval=source_interval,
+        )
         if self._bar_aggregator is not None and source_interval is not None:
             try:
                 states = _run_async_blocking(self._bar_aggregator.aggregate_batch(
@@ -372,19 +385,29 @@ class CustomIntervalQueryService:
         base_bars: list[BarData],
         interval: str,
         custom_seconds: int,
+        *,
+        source_interval: str | None = None,
     ) -> list[BarData]:
         """Read-only aggregation used for partial buckets and fallback."""
+        source_interval_ms = parse_interval_ms(source_interval) if source_interval else None
+        source_interval_seconds = (
+            source_interval_ms // 1000
+            if source_interval_ms is not None
+            else None
+        )
         month_count = parse_monthly_count(interval)
         if month_count is not None:
             aggregated = aggregate_rows_by_month(
                 [bar.to_dict() for bar in base_bars],
                 months=month_count,
+                source_interval_seconds=source_interval_seconds,
             )
         else:
             aggregated = _aggregate_rows_to_interval(
                 [bar.to_dict() for bar in base_bars],
                 custom_seconds,
                 interval=interval,
+                source_interval_seconds=source_interval_seconds,
             )
 
         return [BarData.from_dict(row) for row in aggregated]

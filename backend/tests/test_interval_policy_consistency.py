@@ -9,10 +9,15 @@ from app.data_engine.backfill.reconciler import Reconciler
 from app.data_engine.bar_aggregator import BarAggregator, BarAggregatorConfig
 from app.data_engine.data_manager.cache import BarCache
 from app.data_engine.data_manager.config import QueryConfig
-from app.data_engine.data_manager.custom_query import CustomIntervalQueryService
+from app.data_engine.data_manager.custom_query import (
+    CustomIntervalQueryService,
+    _aggregate_rows_to_interval,
+    _bar_data_to_storage_rows,
+)
 from app.data_engine.data_manager.maintenance import _aggregate_custom_rows
 from app.data_engine.data_manager.models import BarData, QueryResult, QuerySource
 from app.data_engine.interval_policy import (
+    aggregate_rows_by_month,
     compute_bucket_close_ms,
     compute_bucket_end_ms,
     compute_bucket_start,
@@ -104,6 +109,7 @@ async def _aggregate_with_query(
         "low": bar.low,
         "close": bar.close,
         "volume": bar.volume,
+        "is_closed": bar.is_closed,
     } for bar in result.bars]
 
 
@@ -202,6 +208,116 @@ def test_interval_policy_weekly_and_monthly_calendar_alignment() -> None:
     assert compute_month_bucket(april // 1000, 2) == march_bucket // 1000
     assert compute_bucket_end_ms(march_bucket, two_month_ms, interval="2M") == may_bucket
     assert compute_bucket_close_ms(march_bucket, two_month_ms, interval="2M") == may_bucket - 1
+
+
+def test_custom_interval_aggregation_preserves_forming_state() -> None:
+    bars = [
+        BarData(time=0, open=1, high=2, low=1, close=2, volume=10, is_closed=True),
+        BarData(time=60, open=2, high=3, low=2, close=3, volume=20, is_closed=False),
+    ]
+    rows = [bar.to_dict() for bar in bars]
+
+    fixed = _aggregate_rows_to_interval(
+        rows,
+        120,
+        interval="2m",
+        source_interval_seconds=60,
+    )
+    monthly = aggregate_rows_by_month(
+        rows,
+        months=1,
+        source_interval_seconds=60,
+    )
+    read_only = CustomIntervalQueryService._aggregate_read_only(
+        bars,
+        "2m",
+        120,
+        source_interval="1m",
+    )
+    storage_rows = _bar_data_to_storage_rows(bars, "1m")
+
+    assert fixed[0]["is_closed"] is False
+    assert monthly[0]["is_closed"] is False
+    assert read_only[0].is_closed is False
+    assert storage_rows[-1]["is_closed"] is False
+
+    recovered_rows = [
+        {**rows[0], "is_closed": False},
+        {**rows[1], "is_closed": True},
+    ]
+    recovered_bars = [BarData.from_dict(item) for item in recovered_rows]
+    assert _aggregate_rows_to_interval(
+        recovered_rows,
+        120,
+        interval="2m",
+        source_interval_seconds=60,
+    )[0]["is_closed"] is True
+    assert CustomIntervalQueryService._aggregate_read_only(
+        recovered_bars,
+        "2m",
+        120,
+        source_interval="1m",
+    )[0].is_closed is True
+
+    end_of_month_rows = [
+        {**rows[0], "time": _ms(2024, 1, 30) // 1000, "is_closed": False},
+        {**rows[1], "time": _ms(2024, 1, 31) // 1000, "is_closed": True},
+    ]
+    assert aggregate_rows_by_month(
+        end_of_month_rows,
+        months=1,
+        source_interval_seconds=86_400,
+    )[0]["is_closed"] is True
+
+
+def test_custom_query_bar_aggregator_preserves_forming_state() -> None:
+    async def _run() -> None:
+        now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+        bucket_start_ms = (
+            compute_bucket_start_ms(now_ms, 120_000, interval="2m") + 120_000
+        )
+        rows = _rows(bucket_start_ms, 2, 60_000)
+        rows[0]["is_closed"] = True
+        rows[1]["is_closed"] = False
+
+        aggregated = await _aggregate_with_query("2m", "1m", rows)
+
+        assert aggregated[0]["is_closed"] is False
+
+    asyncio.run(_run())
+
+
+def test_custom_query_paths_agree_when_a_newer_component_implies_close() -> None:
+    async def _run() -> None:
+        now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+        bucket_start_ms = (
+            compute_bucket_start_ms(now_ms, 120_000, interval="2m") + 120_000
+        )
+        rows = _rows(bucket_start_ms, 2, 60_000)
+        rows[0]["is_closed"] = False
+        rows[1]["is_closed"] = True
+
+        aggregated = await _aggregate_with_query("2m", "1m", rows)
+
+        assert aggregated[0]["is_closed"] is True
+
+    asyncio.run(_run())
+
+
+def test_custom_query_keeps_a_partial_target_bucket_forming() -> None:
+    async def _run() -> None:
+        now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+        bucket_start_ms = (
+            compute_bucket_start_ms(now_ms, 120_000, interval="2m") + 120_000
+        )
+        rows = _rows(bucket_start_ms, 1, 60_000)
+        rows[0]["is_closed"] = True
+
+        aggregated = await _aggregate_with_query("2m", "1m", rows)
+
+        assert aggregated[0]["is_closed"] is False
+
+    asyncio.run(_run())
 
 
 def test_custom_interval_paths_match_for_45m_91m_and_2m() -> None:

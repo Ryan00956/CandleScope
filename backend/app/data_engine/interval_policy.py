@@ -45,6 +45,37 @@ INTERVAL_SECONDS = {
     "1M": 2592000,
 }
 
+
+def row_is_closed(row: dict, default: bool = True) -> bool:
+    """Read the canonical close state while tolerating legacy wire aliases."""
+    value = row.get("is_closed", row.get("isClosed"))
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"false", "0", "no", "n", "open", "forming"}:
+            return False
+        if normalized in {"true", "1", "yes", "y", "closed", "final"}:
+            return True
+    return bool(value)
+
+
+def aggregate_tail_is_closed(
+    rows: list[dict],
+    *,
+    bucket_end_seconds: int,
+    source_interval_seconds: int | None = None,
+) -> bool:
+    """Return true only when the latest closed component reaches the bucket end."""
+    if not rows or not row_is_closed(rows[-1]):
+        return False
+    if source_interval_seconds is None:
+        return True
+    return int(rows[-1]["time"]) + source_interval_seconds >= bucket_end_seconds
+
+
 STANDARD_INTERVAL_MS = {key: value * 1000 for key, value in INTERVAL_SECONDS.items()}
 STANDARD_INTERVALS = STANDARD_INTERVAL_MS
 EPHEMERAL_INTERVALS: set[str] = {"1s"}
@@ -295,6 +326,8 @@ def next_month_bucket(bucket_start_seconds: int, months: int = 1) -> int:
 def aggregate_rows_by_month(
     base_rows: list[dict],
     months: int = 1,
+    *,
+    source_interval_seconds: int | None = None,
 ) -> list[dict]:
     """Aggregate lightweight-chart rows into calendar-month buckets."""
     if not base_rows:
@@ -315,6 +348,14 @@ def aggregate_rows_by_month(
             "low": min(row["low"] for row in rows),
             "close": rows[-1]["close"],
             "volume": round(sum(row["volume"] for row in rows), 8),
+            # A newer component implicitly confirms any older component whose
+            # explicit close event was missed, but a partial target bucket is
+            # still forming until that component reaches its calendar end.
+            "is_closed": aggregate_tail_is_closed(
+                rows,
+                bucket_end_seconds=next_month_bucket(bucket_start, months),
+                source_interval_seconds=source_interval_seconds,
+            ),
         })
     return result
 

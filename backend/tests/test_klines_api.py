@@ -12,7 +12,8 @@ from app.data_engine.data_manager.models import BarData, QueryResult, QuerySourc
 
 
 class _FakeDataManager:
-    def __init__(self) -> None:
+    def __init__(self, *, is_closed: bool = True) -> None:
+        self.is_closed = is_closed
         self.ensure_stream_calls: list[dict] = []
         self.release_stream_calls: list[dict] = []
         self.query_latest_calls: list[dict] = []
@@ -79,6 +80,7 @@ class _FakeDataManager:
                 low=0.5,
                 close=1.5,
                 volume=10,
+                is_closed=self.is_closed,
             )
         ]
         return QueryResult(
@@ -157,6 +159,7 @@ def test_get_klines_uses_data_manager_when_available() -> None:
             "low": 0.5,
             "close": 1.5,
             "volume": 10,
+            "is_closed": True,
         }
     ]
     assert dm.ensure_stream_calls == [
@@ -191,6 +194,18 @@ def test_get_klines_uses_data_manager_when_available() -> None:
             "market_type": "spot",
         }
     ]
+
+
+def test_get_klines_preserves_forming_bar_state() -> None:
+    client = _client(_FakeDataManager(is_closed=False))
+
+    response = client.get(
+        "/api/v1/klines/",
+        params={"symbol": "BTCUSDT", "interval": "1m", "limit": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["is_closed"] is False
 
 
 def test_history_before_waits_for_backfill_future_before_returning_rows() -> None:

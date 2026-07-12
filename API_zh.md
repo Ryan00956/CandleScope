@@ -68,12 +68,16 @@ WebSocket API: ws://localhost:8000/api/v1
       "high": 42100.0,
       "low": 41950.0,
       "close": 42050.0,
-      "volume": 12.5
+      "volume": 12.5,
+      "is_closed": false
     }
   ],
   "base_interval": null
 }
 ```
+
+只有仍在形成中的实时 K 线，其 `is_closed` 才为 `false`。兼容旧服务或历史存储时，
+客户端可将缺少该字段的 K 线视为已确认。
 
 ### `GET /klines/latest`
 

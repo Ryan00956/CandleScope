@@ -99,6 +99,7 @@ class BarData:
             "low": round(self.low, 8),
             "close": round(self.close, 8),
             "volume": round(self.volume, 8),
+            "is_closed": bool(self.is_closed),
         }
 
     @staticmethod

@@ -489,7 +489,10 @@ class EventRouter:
                     close=float(bar["close"]),
                     volume=float(bar.get("volume", 0)),
                     source=BarInputSource.BACKFILL,
-                    is_closed=True,  # backfill bars are always closed
+                    # Persisted backfill rows omit this field and remain
+                    # closed by default. Custom read aggregation can also pass
+                    # the live forming tail through this batch adapter.
+                    is_closed=bool(bar.get("is_closed", True)),
                     market_type=str(bar.get("market_type", market_type)),
                     quote_volume=float(bar.get("quote_volume", 0)),
                     trades=int(bar.get("trades", 0)),
@@ -511,7 +514,7 @@ class EventRouter:
                     close=float(getattr(bar, "close", 0)),
                     volume=float(getattr(bar, "volume", 0)),
                     source=BarInputSource.BACKFILL,
-                    is_closed=True,
+                    is_closed=bool(getattr(bar, "is_closed", True)),
                     market_type=str(getattr(bar, "market_type", market_type)),
                     quote_volume=float(getattr(bar, "quote_volume", 0)),
                     trades=int(getattr(bar, "trades", 0)),

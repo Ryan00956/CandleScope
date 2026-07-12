@@ -1,5 +1,14 @@
 import { IdentityProjector } from "./projectors/identityProjector.js";
 
+const PROVISIONAL_SOURCE_STATES = new Set([
+  "false",
+  "0",
+  "no",
+  "n",
+  "open",
+  "forming",
+]);
+
 function sameSourceRow(left, right) {
   if (left === right) return true;
   if (!left || !right) return false;
@@ -88,6 +97,34 @@ function hasStrictlyIncreasingOutputOrders(rows) {
   return true;
 }
 
+function isExplicitlyProvisionalSourceRow(row) {
+  const value = row?.is_closed ?? row?.isClosed;
+  if (value === false || value === 0) return true;
+  if (typeof value !== "string") return false;
+  return PROVISIONAL_SOURCE_STATES.has(value.trim().toLowerCase());
+}
+
+function validStatefulProjection(projection, sourceLength) {
+  return projection
+    && Array.isArray(projection.data)
+    && Array.isArray(projection.checkpoints)
+    && projection.checkpoints.length === sourceLength
+    && projection.state != null;
+}
+
+function overlayProjectedRows(confirmedRows, provisionalRows) {
+  if (provisionalRows.length === 0) return confirmedRows;
+  const provisionalOrder = outputOrder(provisionalRows[0]);
+  const overlayIndex = lowerBoundOutputOrder(confirmedRows, provisionalOrder);
+  if (overlayIndex == null) return null;
+  // Projectors return an owned data array. Reuse it here so a forming tail on
+  // reset does not create another full-size synthetic display copy.
+  confirmedRows.length = overlayIndex;
+  for (const row of provisionalRows) confirmedRows.push(row);
+  const combined = confirmedRows;
+  return hasStrictlyIncreasingOutputOrders(combined) ? combined : null;
+}
+
 function hasStrictOutputOrderSeam(previousRows, fromOutputIndex, insert) {
   if (insert.length === 0 || fromOutputIndex === 0) return true;
   try {
@@ -159,6 +196,7 @@ export class ProjectionStore {
     this._projectionSeedState = null;
     this._projectionFinalState = null;
     this._sourceCheckpoints = [];
+    this._confirmedSourceLength = 0;
   }
 
   sourceSnapshot() {
@@ -222,6 +260,8 @@ export class ProjectionStore {
       return this._applyTailDelta(detail, currentRows, trimmedLeft);
     }
     return this._reprojectStructural(currentRows, {
+      confirmTrimmedTail: detail.appended === true
+        || Math.max(0, Number(detail.addedRight) || 0) > 0,
       deltaType: detail.type,
       trimmedLeft,
     });
@@ -274,20 +314,19 @@ export class ProjectionStore {
   _applyStatefulTailDelta(delta, currentRows) {
     const previousLength = this._display.length;
     const replacingLast = delta.type === "tick" && delta.replaced;
-    const sourceStart = replacingLast ? this._source.length - 1 : this._source.length;
-    const seedState = replacingLast
+    const defaultSourceStart = replacingLast
+      ? this._source.length - 1
+      : this._source.length;
+    // A new timestamp implicitly confirms an older forming tail even when its
+    // explicit close event was missed. Reproject from that tail's checkpoint
+    // so the old row is committed before the new provisional overlay is tried.
+    const sourceStart = Math.min(this._confirmedSourceLength, defaultSourceStart);
+    const seedState = sourceStart < this._sourceCheckpoints.length
       ? this._sourceCheckpoints[sourceStart]
       : this._projectionFinalState;
     const affectedRows = sourceTail(currentRows, sourceStart);
-    const projection = this.projector.projectWithState(affectedRows, { seedState });
-    if (!projection
-      || !Array.isArray(projection.data)
-      || !Array.isArray(projection.checkpoints)
-      || projection.checkpoints.length !== affectedRows.length
-      || projection.state == null
-      || !hasStrictlyIncreasingOutputOrders(projection.data)) {
-      return null;
-    }
+    const projection = this._projectStatefulRows(affectedRows, { seedState });
+    if (!projection || !hasStrictlyIncreasingOutputOrders(projection.data)) return null;
 
     const candidateOrder = outputOrder(projection.data[0]) ?? seedState?.nextOrder;
     const initialOutputIndex = lowerBoundOutputOrder(this._display, candidateOrder);
@@ -322,10 +361,10 @@ export class ProjectionStore {
     this._commitStatefulSourceTail({
       affectedRows,
       checkpoints: projection.checkpoints,
-      replacingLast,
       sourceStart,
     });
     this._projectionFinalState = projection.state;
+    this._confirmedSourceLength = sourceStart + projection.confirmedSourceLength;
     this._display = nextDisplay;
     if (displayChanged) {
       this._replaceDisplayTimeIndexTail(displayTimeIndexPlan);
@@ -395,11 +434,16 @@ export class ProjectionStore {
     return patchResult(previousLength, previousLength, projectedTail, this._display);
   }
 
-  _reprojectStructural(currentRows, { deltaType = "", trimmedLeft = 0 } = {}) {
+  _reprojectStructural(currentRows, {
+    confirmTrimmedTail = false,
+    deltaType = "",
+    trimmedLeft = 0,
+  } = {}) {
     const previousLength = this._display.length;
     const nextSource = Array.from(currentRows || []);
     if (this.projector.oneToOne !== true) {
       const seedState = this._seedStateForStructuralProjection({
+        confirmTrimmedTail,
         deltaType,
         trimmedLeft,
       });
@@ -433,14 +477,37 @@ export class ProjectionStore {
     return patchResult(fromOutputIndex, previousLength, projectedTail, this._display);
   }
 
-  _seedStateForStructuralProjection({ deltaType, trimmedLeft }) {
+  _seedStateForStructuralProjection({
+    confirmTrimmedTail,
+    deltaType,
+    trimmedLeft,
+  }) {
     if (typeof this.projector.projectWithState !== "function") return null;
     if (deltaType === "prepend") return null;
     if (trimmedLeft <= 0) return this._projectionSeedState;
     if (trimmedLeft < this._sourceCheckpoints.length) {
       return this._sourceCheckpoints[trimmedLeft];
     }
-    if (trimmedLeft === this._source.length) return this._projectionFinalState;
+    if (trimmedLeft === this._source.length) {
+      if (confirmTrimmedTail && this._confirmedSourceLength < this._source.length) {
+        const trimmedProvisionalRows = this._source.slice(this._confirmedSourceLength);
+        const confirmedProjection = this.projector.projectWithState(
+          trimmedProvisionalRows,
+          {
+            provisional: false,
+            seedState: this._projectionFinalState,
+          },
+        );
+        if (!validStatefulProjection(
+          confirmedProjection,
+          trimmedProvisionalRows.length,
+        )) {
+          throw new TypeError("stateful projector could not confirm the trimmed tail");
+        }
+        return confirmedProjection.state;
+      }
+      return this._projectionFinalState;
+    }
     return null;
   }
 
@@ -448,17 +515,66 @@ export class ProjectionStore {
     if (typeof this.projector.projectWithState !== "function") {
       this._sourceCheckpoints = [];
       this._projectionFinalState = null;
+      this._confirmedSourceLength = rows.length;
       return this.projector.project(rows);
     }
-    const projection = this.projector.projectWithState(rows, { seedState });
-    if (!projection || !Array.isArray(projection.data)) {
+    const projection = this._projectStatefulRows(rows, { seedState });
+    if (!projection) {
       throw new TypeError("stateful projector must return { data, state, checkpoints }");
     }
-    this._sourceCheckpoints = Array.isArray(projection.checkpoints)
-      ? projection.checkpoints
-      : [];
-    this._projectionFinalState = projection.state ?? null;
+    this._sourceCheckpoints = projection.checkpoints;
+    this._projectionFinalState = projection.state;
+    this._confirmedSourceLength = projection.confirmedSourceLength;
     return projection.data;
+  }
+
+  _projectStatefulRows(rows, { seedState = null } = {}) {
+    // Stateful projectors opt into returning call-owned mutable `data` and
+    // `checkpoints` containers. Their state/checkpoint values may stay frozen;
+    // only the two fresh containers are extended for the provisional overlay.
+    const sourceRows = Array.isArray(rows) ? rows : Array.from(rows || []);
+    const hasProvisionalTail = sourceRows.length > 0
+      && isExplicitlyProvisionalSourceRow(sourceRows[sourceRows.length - 1]);
+    const confirmedSourceLength = sourceRows.length - Number(hasProvisionalTail);
+    const confirmedRows = hasProvisionalTail
+      ? sourceRows.slice(0, confirmedSourceLength)
+      : sourceRows;
+    const confirmedProjection = this.projector.projectWithState(confirmedRows, {
+      provisional: false,
+      seedState,
+    });
+    if (!validStatefulProjection(confirmedProjection, confirmedRows.length)) return null;
+    if (!hasProvisionalTail) {
+      return {
+        ...confirmedProjection,
+        confirmedSourceLength,
+      };
+    }
+
+    const provisionalProjection = this.projector.projectWithState(
+      [sourceRows[sourceRows.length - 1]],
+      {
+        provisional: true,
+        seedState: confirmedProjection.state,
+      },
+    );
+    if (!validStatefulProjection(provisionalProjection, 1)) return null;
+    const data = overlayProjectedRows(
+      confirmedProjection.data,
+      provisionalProjection.data,
+    );
+    if (data == null) return null;
+    for (const checkpoint of provisionalProjection.checkpoints) {
+      confirmedProjection.checkpoints.push(checkpoint);
+    }
+    return {
+      checkpoints: confirmedProjection.checkpoints,
+      confirmedSourceLength,
+      data,
+      // The provisional trial state is deliberately discarded. Every forming
+      // update starts again from this confirmed state and can fully retract.
+      state: confirmedProjection.state,
+    };
   }
 
   _resolvePreviousDisplayRow(rows) {
@@ -471,14 +587,10 @@ export class ProjectionStore {
   _commitStatefulSourceTail({
     affectedRows,
     checkpoints,
-    replacingLast,
     sourceStart,
   }) {
-    if (replacingLast) {
-      this._source[sourceStart] = affectedRows[0];
-      this._sourceCheckpoints[sourceStart] = checkpoints[0];
-      return;
-    }
+    this._source.length = sourceStart;
+    this._sourceCheckpoints.length = sourceStart;
     for (const row of affectedRows) this._source.push(row);
     for (const checkpoint of checkpoints) this._sourceCheckpoints.push(checkpoint);
   }

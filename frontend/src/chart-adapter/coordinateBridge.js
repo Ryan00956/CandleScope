@@ -65,6 +65,8 @@ function numericSeriesBounds(seriesData, context) {
 export function registerDrawingSeriesContext(series, {
   seriesDataProvider = null,
   sourceTimeHorizonProvider = null,
+  sourceIntervalProvider = null,
+  sourceIntervalSecondsProvider = null,
   projectionConfigProvider = null,
   ordinalSeriesIndexProvider = null,
   coordinateSnapshotProvider = null,
@@ -81,6 +83,12 @@ export function registerDrawingSeriesContext(series, {
       ? coordinateSnapshotProvider
       : null,
     seriesDataProvider: typeof seriesDataProvider === "function" ? seriesDataProvider : null,
+    sourceIntervalProvider: typeof sourceIntervalProvider === "function"
+      ? sourceIntervalProvider
+      : null,
+    sourceIntervalSecondsProvider: typeof sourceIntervalSecondsProvider === "function"
+      ? sourceIntervalSecondsProvider
+      : null,
     sourceTimeHorizonProvider: typeof sourceTimeHorizonProvider === "function"
       ? sourceTimeHorizonProvider
       : null,
@@ -94,8 +102,14 @@ function hydrateCoordinateContext(series, context) {
     : null;
   if (!context || typeof context !== "object" || !registration) return registration;
 
-  let hasCoordinateSnapshot = hydratedCoordinateSnapshotContexts.get(context) === true;
+  const owns = (field) => Object.prototype.hasOwnProperty.call(context, field);
+  const hasOwnCoordinateSnapshot = owns("seriesData")
+    || owns("drawingOrdinalSeriesIndex")
+    || owns("drawingOrdinalSeriesIndexRevision");
+  let hasCoordinateSnapshot = hasOwnCoordinateSnapshot
+    || hydratedCoordinateSnapshotContexts.get(context) === true;
   if (registration.coordinateSnapshotProvider
+    && !hasOwnCoordinateSnapshot
     && !hydratedCoordinateSnapshotContexts.has(context)) {
     const snapshot = safeProviderValue(registration.coordinateSnapshotProvider, null);
     if (Array.isArray(snapshot?.seriesData)) {
@@ -103,22 +117,45 @@ function hydrateCoordinateContext(series, context) {
       context.seriesData = snapshot.seriesData;
       context.drawingOrdinalSeriesIndex = snapshot.ordinalSeriesIndex || null;
       context.drawingOrdinalSeriesIndexRevision = snapshot.indexRevision ?? null;
+      if (Object.prototype.hasOwnProperty.call(snapshot, "sourceTimeHorizon")) {
+        context.sourceTimeHorizon = snapshot.sourceTimeHorizon;
+      }
+      if (Object.prototype.hasOwnProperty.call(snapshot, "sourceInterval")) {
+        context.sourceInterval = snapshot.sourceInterval;
+      }
+      if (Object.prototype.hasOwnProperty.call(snapshot, "sourceIntervalSeconds")) {
+        context.sourceIntervalSeconds = snapshot.sourceIntervalSeconds;
+      }
     }
     hydratedCoordinateSnapshotContexts.set(context, hasCoordinateSnapshot);
   }
-  if (registration.sourceTimeHorizonProvider) {
+  if (registration.sourceTimeHorizonProvider && !owns("sourceTimeHorizon")) {
     context.sourceTimeHorizon = safeProviderValue(
       registration.sourceTimeHorizonProvider,
       null,
     );
   }
-  if (registration.projectionConfigProvider) {
+  if (registration.sourceIntervalSecondsProvider && !owns("sourceIntervalSeconds")) {
+    context.sourceIntervalSeconds = safeProviderValue(
+      registration.sourceIntervalSecondsProvider,
+      null,
+    );
+  }
+  if (registration.sourceIntervalProvider && !owns("sourceInterval")) {
+    context.sourceInterval = safeProviderValue(
+      registration.sourceIntervalProvider,
+      null,
+    );
+  }
+  if (registration.projectionConfigProvider && !owns("drawingProjectionConfig")) {
     context.drawingProjectionConfig = safeProviderValue(
       registration.projectionConfigProvider,
       null,
     );
   }
-  if (!hasCoordinateSnapshot && registration.ordinalSeriesIndexProvider) {
+  if (!hasCoordinateSnapshot
+    && !owns("drawingOrdinalSeriesIndex")
+    && registration.ordinalSeriesIndexProvider) {
     context.drawingOrdinalSeriesIndex = safeProviderValue(
       registration.ordinalSeriesIndexProvider,
       null,
@@ -374,6 +411,280 @@ export function drawingAnchorFromAxisTime(axisTime, seriesData = [], context = n
   const projectionConfig = projectionConfigFromContext(context);
   if (projectionConfig) anchor.sourceProjectionConfig = projectionConfig;
   return anchor;
+}
+
+function isSafeTimeMagnitude(value) {
+  return isFiniteNumber(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER;
+}
+
+function calendarMonthInterval(value) {
+  if (typeof value !== "string") return { matched: false, months: null };
+  const normalized = value.trim();
+  if (!normalized.endsWith("M")) return { matched: false, months: null };
+  const match = /^([1-9]\d*)M$/.exec(normalized);
+  if (!match) return { matched: true, months: null };
+  const months = Number(match[1]);
+  return {
+    matched: true,
+    months: Number.isSafeInteger(months) ? months : null,
+  };
+}
+
+function utcDateParts(time) {
+  if (!isSafeTimeMagnitude(time)) return null;
+  const milliseconds = time * 1_000;
+  if (!isFiniteNumber(milliseconds)) return null;
+  const date = new Date(milliseconds);
+  const clippedMilliseconds = date.getTime();
+  if (!isFiniteNumber(clippedMilliseconds)) return null;
+  return {
+    date,
+    subMillisecond: milliseconds - clippedMilliseconds,
+  };
+}
+
+function addUtcCalendarMonths(time, months) {
+  if (!Number.isSafeInteger(months) || months < 0) return null;
+  const source = utcDateParts(time);
+  if (!source) return null;
+
+  const day = source.date.getUTCDate();
+  const target = new Date(source.date.getTime());
+  target.setUTCDate(1);
+  target.setUTCFullYear(
+    target.getUTCFullYear(),
+    target.getUTCMonth() + months,
+    1,
+  );
+  if (!isFiniteNumber(target.getTime())) return null;
+
+  const lastDay = new Date(target.getTime());
+  lastDay.setUTCMonth(lastDay.getUTCMonth() + 1, 0);
+  if (!isFiniteNumber(lastDay.getTime())) return null;
+  target.setUTCDate(Math.min(day, lastDay.getUTCDate()));
+
+  const result = (target.getTime() + source.subMillisecond) / 1_000;
+  return isSafeTimeMagnitude(result) ? result : null;
+}
+
+function calendarBoundaryTime(horizon, monthsPerCell, cell) {
+  if (!Number.isSafeInteger(monthsPerCell)
+    || monthsPerCell < 1
+    || !Number.isSafeInteger(cell)
+    || cell < 0) {
+    return null;
+  }
+  const monthOffset = monthsPerCell * cell;
+  return Number.isSafeInteger(monthOffset)
+    ? addUtcCalendarMonths(horizon, monthOffset)
+    : null;
+}
+
+function calendarFutureTime(horizon, monthsPerCell, cellDistance) {
+  if (!isFiniteNumber(cellDistance) || cellDistance <= 0) return null;
+  const wholeCells = Math.floor(cellDistance);
+  if (!Number.isSafeInteger(wholeCells) || wholeCells < 0) return null;
+  const lower = calendarBoundaryTime(horizon, monthsPerCell, wholeCells);
+  if (lower === null) return null;
+
+  const fraction = cellDistance - wholeCells;
+  if (fraction === 0) return lower;
+  const upper = calendarBoundaryTime(horizon, monthsPerCell, wholeCells + 1);
+  if (upper === null || upper <= lower) return null;
+  const time = lower + (upper - lower) * fraction;
+  return isSafeTimeMagnitude(time) ? time : null;
+}
+
+function calendarFutureCellDistance(horizon, monthsPerCell, time) {
+  if (!isSafeTimeMagnitude(time) || time <= horizon) return null;
+  const start = utcDateParts(horizon);
+  const target = utcDateParts(time);
+  if (!start || !target) return null;
+
+  const monthDelta = (target.date.getUTCFullYear() - start.date.getUTCFullYear()) * 12
+    + target.date.getUTCMonth() - start.date.getUTCMonth();
+  if (!Number.isSafeInteger(monthDelta)) return null;
+  let wholeCells = Math.max(0, Math.floor(monthDelta / monthsPerCell));
+  let lower = calendarBoundaryTime(horizon, monthsPerCell, wholeCells);
+  if (lower === null) return null;
+
+  // Month-end clamping can put the calendar estimate one cell on either side.
+  if (lower > time && wholeCells > 0) {
+    wholeCells -= 1;
+    lower = calendarBoundaryTime(horizon, monthsPerCell, wholeCells);
+    if (lower === null) return null;
+  }
+  let upper = calendarBoundaryTime(horizon, monthsPerCell, wholeCells + 1);
+  if (upper === null) return null;
+  if (upper <= time) {
+    wholeCells += 1;
+    lower = upper;
+    upper = calendarBoundaryTime(horizon, monthsPerCell, wholeCells + 1);
+    if (upper === null) return null;
+  }
+  if (lower > time || upper <= lower || time >= upper) return null;
+
+  const fraction = (time - lower) / (upper - lower);
+  const distance = wholeCells + fraction;
+  return isFiniteNumber(distance) && distance > 0 ? distance : null;
+}
+
+function ordinalCellWidth(timeScale, tailX) {
+  let logical = null;
+  try {
+    logical = timeScale.coordinateToLogical?.(tailX);
+  } catch {
+    logical = null;
+  }
+  if (isFiniteNumber(logical)) {
+    let center = null;
+    let next = null;
+    let previous = null;
+    try {
+      center = timeScale.logicalToCoordinate?.(logical);
+      next = timeScale.logicalToCoordinate?.(logical + 1);
+      previous = timeScale.logicalToCoordinate?.(logical - 1);
+    } catch {
+      center = null;
+      next = null;
+      previous = null;
+    }
+    const rightWidth = isFiniteNumber(center) && isFiniteNumber(next)
+      ? next - center
+      : null;
+    if (isFiniteNumber(rightWidth) && rightWidth > 0) return rightWidth;
+    const leftWidth = isFiniteNumber(center) && isFiniteNumber(previous)
+      ? center - previous
+      : null;
+    if (isFiniteNumber(leftWidth) && leftWidth > 0) return leftWidth;
+  }
+
+  let barSpacing = null;
+  try {
+    barSpacing = timeScale.options?.().barSpacing;
+  } catch {
+    barSpacing = null;
+  }
+  return isFiniteNumber(barSpacing) && barSpacing > 0 ? barSpacing : null;
+}
+
+function ordinalFutureCoordinateBasis(timeScale, seriesData, context, ordinalIndex = null) {
+  const index = ordinalIndex || getOrdinalSeriesIndex(seriesData, context);
+  const tailRow = index?.ordinalRows?.[index.ordinalRows.length - 1] || null;
+  const horizon = context?.sourceTimeHorizon;
+  const step = context?.sourceIntervalSeconds;
+  const calendarInterval = calendarMonthInterval(context?.sourceInterval);
+  if (!tailRow
+    || !isSafeTimeMagnitude(horizon)
+    || (calendarInterval.matched && calendarInterval.months === null)
+    || (!calendarInterval.matched && (!isFiniteNumber(step) || step <= 0))) {
+    return null;
+  }
+
+  let tailX = null;
+  try {
+    tailX = timeScale.timeToCoordinate(tailRow.time);
+  } catch {
+    tailX = null;
+  }
+  if (!isFiniteNumber(tailX)) return null;
+  const cellWidth = ordinalCellWidth(timeScale, tailX);
+  return isFiniteNumber(cellWidth) && cellWidth > 0
+    ? {
+        calendarMonths: calendarInterval.months,
+        cellWidth,
+        horizon,
+        index,
+        step,
+        tailRow,
+        tailX,
+      }
+    : null;
+}
+
+function futureTimeFromCellDistance(basis, cellDistance) {
+  if (basis.calendarMonths !== null) {
+    return calendarFutureTime(basis.horizon, basis.calendarMonths, cellDistance);
+  }
+  const time = basis.horizon + cellDistance * basis.step;
+  return isSafeTimeMagnitude(time) ? time : null;
+}
+
+function futureCellDistanceFromTime(basis, time) {
+  if (basis.calendarMonths !== null) {
+    return calendarFutureCellDistance(basis.horizon, basis.calendarMonths, time);
+  }
+  const distance = (time - basis.horizon) / basis.step;
+  return isFiniteNumber(distance) && distance > 0 ? distance : null;
+}
+
+/**
+ * Capture a persistence-safe drawing anchor directly from a chart coordinate.
+ * Existing ordinal cells retain complete source lineage; right-side whitespace
+ * becomes an absolute source time with no projection-local order/logical data.
+ */
+export function drawingAnchorFromCoordinate(chart, series, x, context = null) {
+  if (!chart || !series || !isFiniteNumber(x)) return null;
+  const coordinateContext = context || {};
+  const seriesData = getCachedSeriesData(series, coordinateContext);
+  if (!Array.isArray(seriesData) || seriesData.length === 0) return null;
+
+  const timeScale = chart.timeScale?.();
+  if (!timeScale) return null;
+  const ordinalIndex = getOrdinalSeriesIndex(seriesData, coordinateContext);
+  if (!ordinalIndex) {
+    let axisTime = null;
+    try {
+      axisTime = timeScale.coordinateToTime?.(x);
+    } catch {
+      axisTime = null;
+    }
+    return isFiniteNumber(axisTime) ? { time: axisTime } : null;
+  }
+
+  const tailRow = ordinalIndex.ordinalRows[ordinalIndex.ordinalRows.length - 1] || null;
+  let tailX = null;
+  try {
+    tailX = timeScale.timeToCoordinate(tailRow?.time);
+  } catch {
+    tailX = null;
+  }
+  if (isFiniteNumber(tailX) && x > tailX) {
+    const basis = ordinalFutureCoordinateBasis(
+      timeScale,
+      seriesData,
+      coordinateContext,
+      ordinalIndex,
+    );
+    if (!basis) return null;
+    const delta = x - basis.tailX;
+    const bars = delta / basis.cellWidth;
+    const time = futureTimeFromCellDistance(basis, bars);
+    return isFiniteNumber(delta)
+      && delta > 0
+      && isFiniteNumber(bars)
+      && bars > 0
+      && time !== null
+      ? { time }
+      : null;
+  }
+
+  let axisTime = null;
+  try {
+    axisTime = timeScale.coordinateToTime?.(x);
+  } catch {
+    axisTime = null;
+  }
+  if (!isOrdinalAxisTime(axisTime)) return null;
+  const exactRow = exactOrdinalRow(ordinalIndex, {
+    time: axisTime.sourceTime,
+    sourceOrdinal: axisTime.sourceOrdinal,
+  });
+  if (exactRow?.time?.order !== axisTime.order) return null;
+  const anchor = drawingAnchorFromAxisTime(axisTime, seriesData, coordinateContext);
+  return anchor?.sourceProjection && anchor?.sourceProjectionConfig
+    ? anchor
+    : null;
 }
 
 function normalizeDrawingAnchor(anchor, seriesData, context) {
@@ -922,6 +1233,24 @@ export function dataPointToCoordinate(chart, series, dataPoint, context) {
   const data = getCachedSeriesData(series, coordinateContext);
 
   if (usesOrdinalSeriesData(data)) {
+    const anchorTime = isFiniteNumber(dataPoint.time) ? dataPoint.time : null;
+    const horizon = coordinateContext.sourceTimeHorizon;
+    if (anchorTime !== null && isSafeTimeMagnitude(horizon) && anchorTime > horizon) {
+      if (!isSafeTimeMagnitude(anchorTime)) return null;
+      const basis = ordinalFutureCoordinateBasis(timeScale, data, coordinateContext);
+      if (!basis) return null;
+      const delta = anchorTime - basis.horizon;
+      const bars = futureCellDistanceFromTime(basis, anchorTime);
+      if (bars === null) return null;
+      const x = basis.tailX + bars * basis.cellWidth;
+      return isFiniteNumber(delta)
+        && delta > 0
+        && isFiniteNumber(bars)
+        && bars > 0
+        && isFiniteNumber(x)
+        ? x
+        : null;
+    }
     const row = resolveDrawingAnchorToDisplayRow(data, dataPoint, coordinateContext);
     if (!row) return null;
     try {

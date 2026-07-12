@@ -6,6 +6,7 @@ import {
   coordinateToFractionalLogical,
   dataPointToCoordinate,
   drawingAnchorFromAxisTime,
+  drawingAnchorFromCoordinate,
   isOrdinalAxisTime,
   logicalToCoordinateInterpolated,
   logicalToInterpolatedSeriesTime,
@@ -100,6 +101,350 @@ test("drawing anchors resolve exact and clamped same-source ordinals", () => {
     sourceProjection: "point-and-figure",
     sourceProjectionConfig: "dataset-a:renko:10",
   }, context), rows[1]);
+});
+
+function futureAnchorChart(rows, { cellWidth = 8, barSpacing = 50 } = {}) {
+  const tailOrder = rows[rows.length - 1]?.time?.order ?? 0;
+  const tailX = tailOrder * 10;
+  return {
+    timeScale: () => ({
+      coordinateToLogical: () => 100,
+      coordinateToTime: (x) => {
+        let closest = rows[0] || null;
+        for (const candidate of rows) {
+          if (Math.abs(candidate.time.order * 10 - x)
+            < Math.abs((closest?.time?.order ?? 0) * 10 - x)) {
+            closest = candidate;
+          }
+        }
+        return closest?.time || null;
+      },
+      logicalToCoordinate: (logical) => tailX + (logical - 100) * cellWidth,
+      options: () => ({ barSpacing }),
+      timeToCoordinate: (time) => (
+        isOrdinalAxisTime(time) ? time.order * 10 : null
+      ),
+    }),
+  };
+}
+
+function futureAnchorRows() {
+  return [
+    displayRow(0, 100, 0, { from: 100, to: 100 }),
+    displayRow(1, 200, 0, { from: 101, to: 200 }),
+    displayRow(2, 200, 1, { from: 200, to: 200 }),
+  ];
+}
+
+test("ordinal coordinate anchors round-trip fractional future source time", () => {
+  const rows = futureAnchorRows();
+  const chart = futureAnchorChart(rows);
+  const series = { data: () => rows };
+  const context = {
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceIntervalSeconds: 60,
+    sourceTimeHorizon: 200,
+  };
+
+  assert.deepEqual(drawingAnchorFromCoordinate(chart, series, 20, context), {
+    time: 200,
+    sourceOrdinal: 1,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:10",
+  });
+  const future = drawingAnchorFromCoordinate(chart, series, 22.8, context);
+  assertAlmostEqual(future.time, 221);
+  assert.deepEqual(Object.keys(future), ["time"]);
+  assert.equal(Object.hasOwn(future, "order"), false);
+  assert.equal(Object.hasOwn(future, "logical"), false);
+  assertAlmostEqual(dataPointToCoordinate(chart, series, future, context), 22.8);
+
+  assert.deepEqual(drawingAnchorFromCoordinate(chart, series, 32, context), { time: 290 });
+  assertAlmostEqual(dataPointToCoordinate(chart, series, { time: 290 }, context), 32);
+
+  const fallbackChart = {
+    timeScale: () => ({
+      coordinateToLogical: () => null,
+      coordinateToTime: (x) => (x <= 20 ? rows[2].time : null),
+      logicalToCoordinate: () => null,
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time) => (isOrdinalAxisTime(time) ? time.order * 10 : null),
+    }),
+  };
+  assert.deepEqual(drawingAnchorFromCoordinate(
+    fallbackChart,
+    series,
+    25,
+    context,
+  ), { time: 230 });
+  assertAlmostEqual(dataPointToCoordinate(
+    fallbackChart,
+    series,
+    { time: 230 },
+    context,
+  ), 25);
+});
+
+test("calendar-month future anchors use UTC month cells and round-trip fractional cells", () => {
+  const december = Date.UTC(2023, 11, 1) / 1_000;
+  const january = Date.UTC(2024, 0, 1) / 1_000;
+  const february = Date.UTC(2024, 1, 1) / 1_000;
+  const march = Date.UTC(2024, 2, 1) / 1_000;
+  const may = Date.UTC(2024, 4, 1) / 1_000;
+  const rows = [
+    displayRow(0, december, 0, { from: december, to: december }),
+    displayRow(1, january, 0, { from: december + 1, to: january }),
+    displayRow(2, january, 1, { from: january, to: january }),
+  ];
+  const chart = futureAnchorChart(rows, { cellWidth: 10 });
+  const series = { data: () => rows };
+  const context = {
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceInterval: "1M",
+    sourceIntervalSeconds: 30 * 86_400,
+    sourceTimeHorizon: january,
+  };
+
+  const oneMonth = drawingAnchorFromCoordinate(chart, series, 30, context);
+  assert.deepEqual(oneMonth, { time: february });
+  assertAlmostEqual(dataPointToCoordinate(chart, series, oneMonth, context), 30);
+
+  const halfway = drawingAnchorFromCoordinate(chart, series, 35, context);
+  assertAlmostEqual(halfway.time, february + (march - february) / 2);
+  assertAlmostEqual(dataPointToCoordinate(chart, series, halfway, context), 35);
+
+  const twoMonthContext = { ...context, sourceInterval: "2M" };
+  assert.deepEqual(
+    drawingAnchorFromCoordinate(chart, series, 30, twoMonthContext),
+    { time: march },
+  );
+  const twoMonthHalfway = drawingAnchorFromCoordinate(chart, series, 35, twoMonthContext);
+  assertAlmostEqual(twoMonthHalfway.time, march + (may - march) / 2);
+  assertAlmostEqual(
+    dataPointToCoordinate(chart, series, twoMonthHalfway, twoMonthContext),
+    35,
+  );
+
+  const nextRows = rows.concat(
+    displayRow(3, february, 0, { from: january + 1, to: february }),
+    displayRow(4, february, 1, { from: february, to: february }),
+  );
+  assert.equal(dataPointToCoordinate(
+    futureAnchorChart(nextRows, { cellWidth: 10 }),
+    { data: () => nextRows },
+    oneMonth,
+    { ...context, seriesData: nextRows, sourceTimeHorizon: february },
+  ), 40);
+});
+
+test("invalid calendar-month future anchors fail closed instead of using fixed 30-day seconds", () => {
+  const rows = futureAnchorRows();
+  const chart = futureAnchorChart(rows, { cellWidth: 10 });
+  const series = { data: () => rows };
+  const context = {
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceInterval: "0M",
+    sourceIntervalSeconds: 30 * 86_400,
+    sourceTimeHorizon: Date.UTC(2024, 0, 1) / 1_000,
+  };
+
+  assert.equal(drawingAnchorFromCoordinate(chart, series, 30, context), null);
+  assert.equal(dataPointToCoordinate(chart, series, {
+    time: Date.UTC(2024, 1, 1) / 1_000,
+  }, context), null);
+  assert.equal(drawingAnchorFromCoordinate(chart, series, 30, {
+    ...context,
+    sourceInterval: "1M",
+    sourceTimeHorizon: 8_640_000_000_001,
+  }), null);
+});
+
+test("future ordinal anchors automatically return to lineage after the horizon crosses", () => {
+  const previousRows = futureAnchorRows();
+  const previousChart = futureAnchorChart(previousRows);
+  const previousContext = {
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: previousRows,
+    sourceIntervalSeconds: 60,
+    sourceTimeHorizon: 200,
+  };
+  assertAlmostEqual(dataPointToCoordinate(
+    previousChart,
+    { data: () => previousRows },
+    { time: 260 },
+    previousContext,
+  ), 28);
+
+  const nextRows = previousRows.concat(
+    displayRow(3, 260, 0, { from: 201, to: 260 }),
+    displayRow(4, 260, 1, { from: 260, to: 260 }),
+  );
+  const nextContext = {
+    ...previousContext,
+    seriesData: nextRows,
+    sourceTimeHorizon: 260,
+  };
+  assert.equal(dataPointToCoordinate(
+    futureAnchorChart(nextRows),
+    { data: () => nextRows },
+    { time: 260 },
+    nextContext,
+  ), 40);
+});
+
+test("future ordinal anchors fail closed for empty data, invalid steps, left space, and unsafe time", () => {
+  const rows = futureAnchorRows();
+  const chart = futureAnchorChart(rows);
+  const series = { data: () => rows };
+  const context = {
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceIntervalSeconds: 0,
+    sourceTimeHorizon: 200,
+  };
+
+  assert.equal(drawingAnchorFromCoordinate(chart, series, 25, context), null);
+  assert.equal(dataPointToCoordinate(chart, series, { time: 260 }, context), null);
+  assert.equal(drawingAnchorFromCoordinate(chart, series, 25, {
+    ...context,
+    seriesData: [],
+    sourceIntervalSeconds: 60,
+  }), null);
+  assert.equal(dataPointToCoordinate(chart, { data: () => [] }, { time: 260 }, {
+    ...context,
+    seriesData: [],
+    sourceIntervalSeconds: 60,
+  }), null);
+  assert.equal(drawingAnchorFromCoordinate({
+    timeScale: () => ({
+      coordinateToTime: () => null,
+      timeToCoordinate: (time) => time.order * 10,
+    }),
+  }, series, 15, {
+    ...context,
+    sourceIntervalSeconds: 60,
+  }), null);
+  assert.equal(dataPointToCoordinate(chart, series, {
+    time: Number.MAX_SAFE_INTEGER + 1,
+  }, {
+    ...context,
+    sourceIntervalSeconds: 60,
+  }), null);
+});
+
+test("explicit future-anchor context wins over registered providers", () => {
+  const rows = futureAnchorRows();
+  const index = createDrawingLineageIndex(rows);
+  const chart = futureAnchorChart(rows);
+  const calls = {
+    config: 0,
+    horizon: 0,
+    interval: 0,
+    intervalSeconds: 0,
+    snapshot: 0,
+  };
+  const series = { data: () => rows };
+  registerDrawingSeriesContext(series, {
+    coordinateSnapshotProvider: () => {
+      calls.snapshot += 1;
+      return {
+        indexRevision: index.revision,
+        ordinalSeriesIndex: index,
+        seriesData: rows,
+      };
+    },
+    projectionConfigProvider: () => {
+      calls.config += 1;
+      return "provider:renko:10";
+    },
+    sourceIntervalProvider: () => {
+      calls.interval += 1;
+      return "2m";
+    },
+    sourceIntervalSecondsProvider: () => {
+      calls.intervalSeconds += 1;
+      return 120;
+    },
+    sourceTimeHorizonProvider: () => {
+      calls.horizon += 1;
+      return 300;
+    },
+  });
+  const explicit = {
+    drawingOrdinalSeriesIndex: index,
+    drawingOrdinalSeriesIndexRevision: index.revision,
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceInterval: "1m",
+    sourceIntervalSeconds: 60,
+    sourceTimeHorizon: 200,
+  };
+
+  assert.deepEqual(drawingAnchorFromCoordinate(chart, series, 28, explicit), { time: 260 });
+  assert.deepEqual(calls, {
+    config: 0,
+    horizon: 0,
+    interval: 0,
+    intervalSeconds: 0,
+    snapshot: 0,
+  });
+
+  const hydrated = drawingAnchorFromCoordinate(chart, series, 28, {});
+  assert.deepEqual(hydrated, { time: 420 });
+  assert.deepEqual(calls, {
+    config: 1,
+    horizon: 1,
+    interval: 1,
+    intervalSeconds: 1,
+    snapshot: 1,
+  });
+});
+
+test("registered primitive contexts keep snapshot-owned future interval inputs atomic", () => {
+  const january = Date.UTC(2024, 0, 1) / 1_000;
+  const february = Date.UTC(2024, 1, 1) / 1_000;
+  const rows = [
+    displayRow(0, Date.UTC(2023, 11, 1) / 1_000),
+    displayRow(1, january),
+  ];
+  const index = createDrawingLineageIndex(rows);
+  const chart = futureAnchorChart(rows, { cellWidth: 10 });
+  const calls = { horizon: 0, interval: 0, intervalSeconds: 0, snapshot: 0 };
+  const series = { data: () => rows };
+  registerDrawingSeriesContext(series, {
+    coordinateSnapshotProvider: () => {
+      calls.snapshot += 1;
+      return {
+        indexRevision: index.revision,
+        ordinalSeriesIndex: index,
+        seriesData: rows,
+        sourceInterval: "1M",
+        sourceIntervalSeconds: 30 * 86_400,
+        sourceTimeHorizon: january,
+      };
+    },
+    sourceIntervalProvider: () => {
+      calls.interval += 1;
+      return "2M";
+    },
+    sourceIntervalSecondsProvider: () => {
+      calls.intervalSeconds += 1;
+      return 1;
+    },
+    sourceTimeHorizonProvider: () => {
+      calls.horizon += 1;
+      return january + 1;
+    },
+  });
+
+  const context = {};
+  const future = drawingAnchorFromCoordinate(chart, series, 20, context);
+  assert.deepEqual(future, { time: february });
+  assertAlmostEqual(dataPointToCoordinate(chart, series, future, context), 20);
+  assert.deepEqual(calls, { horizon: 0, interval: 0, intervalSeconds: 0, snapshot: 1 });
 });
 
 function sourceLineageSpan(overrides = {}) {

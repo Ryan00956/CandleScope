@@ -478,26 +478,20 @@ test("position creation refuses a duplicate or unresolved second display row", (
   assert.equal(result.persisted, 0);
 });
 
-test("derived position candidates stay inside materialized display-row coordinates", () => {
-  const rows = [
-    { time: { order: 0, sourceTime: 50, sourceOrdinal: 0 } },
-    { time: { order: 5, sourceTime: 200, sourceOrdinal: 0 } },
-  ];
+test("derived positions may extend from materialized lineage into absolute future time", () => {
   const result = placeDerivedPosition("position-long", {
-    pointerX: 800,
-    adapterOverrides: {
-      usesOrdinalTime: () => true,
-      getSeriesData: () => rows,
-      timeToCoordinate: (time) => (time.order === 0 ? 100 : 850),
-    },
-    candidateForX: (x) => (x < 750
-      ? derivedPoint(50, 0, 100)
-      : derivedPoint(200, 0, 100)),
+    pointerX: 700,
+    adapterOverrides: { getTimeScaleWidth: () => 900 },
+    candidateForX: (x) => (x > 800 && x < 900
+      ? { time: 300.5, price: 100 }
+      : null),
   });
 
   assert.equal(result.attached.length, 1);
-  assert.ok(result.convertedXs.slice(1).every((x) => x >= 100 && x <= 850));
-  assert.ok(Math.abs(result.convertedXs[1] - 687.5) < 1);
-  assert.equal(result.attached[0].timeRange.start.time, 50);
-  assert.equal(result.attached[0].timeRange.end.time, 100);
+  assert.ok(Math.abs(result.convertedXs[1] - 834.85) < 1);
+  assert.ok(result.convertedXs[1] < 900);
+  assert.equal(result.attached[0].timeRange.start.time, 100);
+  assert.deepEqual(result.attached[0].timeRange.end, { time: 300.5 });
+  assert.equal(JSON.stringify(result.attached[0].timeRange).includes("logical"), false);
+  assert.equal(JSON.stringify(result.attached[0].timeRange).includes("order"), false);
 });

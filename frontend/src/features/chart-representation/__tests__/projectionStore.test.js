@@ -158,6 +158,64 @@ test("identity projection remains source-equivalent across reset, append and loo
   assert.deepEqual([...store.displayTimeSet()], [10, 20, 30]);
 });
 
+test("drawing coordinate snapshots atomically version the numeric source horizon", () => {
+  const store = new ProjectionStore({ projector: new IdentityProjector() });
+  const emptySnapshot = store.drawingCoordinateSnapshot();
+  assert.equal(emptySnapshot.sourceTimeHorizon, null);
+  assert.deepEqual(emptySnapshot.seriesData, []);
+
+  const initial = rows([10, 20]);
+  store.reset(initial);
+  const resetSnapshot = store.drawingCoordinateSnapshot();
+  assert.equal(resetSnapshot.sourceTimeHorizon, 20);
+  assert.strictEqual(resetSnapshot.seriesData, store.displaySnapshot());
+
+  const replaced = [initial[0], row(20, { close: 41 })];
+  store.applySourceDelta({ type: "tick", replaced: true }, replaced);
+  const replacedSnapshot = store.drawingCoordinateSnapshot();
+  assert.equal(replacedSnapshot.sourceTimeHorizon, 20);
+  assert.strictEqual(replacedSnapshot.seriesData, store.displaySnapshot());
+
+  const appended = [...replaced, row(30)];
+  store.applySourceDelta({ type: "tick", appended: true }, appended);
+  const appendedSnapshot = store.drawingCoordinateSnapshot();
+  assert.equal(appendedSnapshot.sourceTimeHorizon, 30);
+  assert.strictEqual(appendedSnapshot.seriesData, store.displaySnapshot());
+
+  const trimmedLeft = appended.slice(1);
+  store.applySourceDelta({ type: "trim-left", trimmedLeft: 1 }, trimmedLeft);
+  const leftTrimSnapshot = store.drawingCoordinateSnapshot();
+  assert.equal(leftTrimSnapshot.sourceTimeHorizon, 30);
+  assert.strictEqual(leftTrimSnapshot.seriesData, store.displaySnapshot());
+
+  const trimmedRight = trimmedLeft.slice(0, -1);
+  store.applySourceDelta({ type: "trim-right", trimmedRight: 1 }, trimmedRight);
+  const rightTrimSnapshot = store.drawingCoordinateSnapshot();
+  assert.equal(rightTrimSnapshot.sourceTimeHorizon, 20);
+  assert.strictEqual(rightTrimSnapshot.seriesData, store.displaySnapshot());
+
+  store.applySourceDelta({ type: "clear" }, []);
+  assert.equal(store.drawingCoordinateSnapshot().sourceTimeHorizon, null);
+
+  // Previously returned snapshots retain primitive horizon values and their
+  // versioned display arrays after later tail mutations.
+  assert.equal(resetSnapshot.sourceTimeHorizon, 20);
+  assert.equal(resetSnapshot.seriesData.at(-1).close, initial.at(-1).close);
+  assert.equal(appendedSnapshot.sourceTimeHorizon, 30);
+  assert.equal(leftTrimSnapshot.sourceTimeHorizon, 30);
+});
+
+test("drawing coordinate horizon ignores non-numeric and non-finite source tail times", () => {
+  const store = new ProjectionStore({ projector: new IdentityProjector() });
+  store.reset([
+    row(10),
+    { ...row(20), time: "20" },
+    { ...row(30), time: Number.NaN },
+  ]);
+
+  assert.equal(store.drawingCoordinateSnapshot().sourceTimeHorizon, 10);
+});
+
 test("clear emits a full replace-tail deletion", () => {
   const store = new ProjectionStore();
   store.reset(rows([10, 20]));

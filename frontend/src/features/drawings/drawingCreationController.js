@@ -75,27 +75,10 @@ function sameHorizontalAnchor(first, second) {
     && first.sourceProjectionConfig === second.sourceProjectionConfig;
 }
 
-function positionSpanCandidateXs(pointerX, containerWidth, adapter) {
+function positionSpanCandidateXs(pointerX, containerWidth) {
   const hasWidth = Number.isFinite(containerWidth) && containerWidth > 1;
   let leftEdge = 0;
   let rightEdge = hasWidth ? containerWidth - 1 : pointerX + 80;
-
-  // Ordinal axes have no meaningful future coordinate. Restrict candidates to
-  // the materialized display rows so right-side whitespace can never become a
-  // fabricated synthetic anchor.
-  if (adapter?.usesOrdinalTime?.() === true) {
-    const rows = adapter.getSeriesData?.() || [];
-    const firstX = rows[0]?.time == null ? null : adapter.timeToCoordinate?.(rows[0].time);
-    const lastX = rows.at(-1)?.time == null ? null : adapter.timeToCoordinate?.(rows.at(-1).time);
-    if (Number.isFinite(firstX) && Number.isFinite(lastX)) {
-      leftEdge = hasWidth
-        ? Math.max(leftEdge, Math.min(firstX, lastX))
-        : Math.min(firstX, lastX);
-      rightEdge = hasWidth
-        ? Math.min(rightEdge, Math.max(firstX, lastX))
-        : Math.max(firstX, lastX);
-    }
-  }
 
   if (rightEdge <= leftEdge) return [];
   const span = hasWidth ? Math.max(1, (rightEdge - leftEdge) * 0.15) : 80;
@@ -118,9 +101,9 @@ function positionSpanCandidateXs(pointerX, containerWidth, adapter) {
 }
 
 /**
- * Pick both position endpoints from actual screen/display rows. This avoids
- * treating an ordinal axis time object as a number and guarantees that a
- * derived position never stores projection-local order/logical coordinates.
+ * Pick both position endpoints through the shared screen-coordinate bridge.
+ * On ordinal axes this may combine materialized lineage with an absolute
+ * source-time future anchor, but never stores projection-local order/logical.
  */
 function positionTimeRangeFromScreen({
   dataPoint,
@@ -132,8 +115,15 @@ function positionTimeRangeFromScreen({
   const pointerAnchor = horizontalAnchorFromDataPoint(dataPoint);
   if (!pointerAnchor) return null;
 
-  const width = Number(chartContainerRef?.current?.clientWidth);
-  for (const candidateX of positionSpanCandidateXs(pos.x, width, adapter)) {
+  const containerWidth = Number(chartContainerRef?.current?.clientWidth);
+  let timeScaleWidth = null;
+  try {
+    timeScaleWidth = Number(adapter?.getTimeScaleWidth?.());
+  } catch { /* fall back to the container width */ }
+  const safeWidths = [containerWidth, timeScaleWidth]
+    .filter((width) => Number.isFinite(width) && width > 1);
+  const width = safeWidths.length > 0 ? Math.min(...safeWidths) : null;
+  for (const candidateX of positionSpanCandidateXs(pos.x, width)) {
     const candidateData = screenToDrawingData(candidateX, pos.y, {
       price: false,
       snap: false,

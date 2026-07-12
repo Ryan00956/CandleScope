@@ -131,6 +131,30 @@ test("serializeDataPoint preserves legacy time-axis logical fallback", () => {
   });
 });
 
+test("absolute future source anchors round-trip without projection-local fields", () => {
+  withMemoryLocalStorage((values) => {
+    saveDrawings("derived-future", [{
+      _id: "future-line",
+      _lineType: "line-segment",
+      _dataPoints: [
+        { time: 1_700_000_180.5, price: 100 },
+        { time: 1_700_000_360.25, price: 101 },
+      ],
+      _color: "#fff",
+      _lineWidth: 2,
+    }]);
+
+    const raw = values.get(drawingStorageKey("derived-future"));
+    assert.ok(raw);
+    assert.equal(recursiveKeys(JSON.parse(raw)).has("order"), false);
+    assert.equal(recursiveKeys(JSON.parse(raw)).has("logical"), false);
+    assert.deepEqual(loadDrawings("derived-future")[0].dataPoints, [
+      { time: 1_700_000_180.5, price: 100 },
+      { time: 1_700_000_360.25, price: 101 },
+    ]);
+  });
+});
+
 test("serializeHorizontalAnchor safely round-trips position source metadata", () => {
   assert.deepEqual(serializeHorizontalAnchor({
     time: 200,

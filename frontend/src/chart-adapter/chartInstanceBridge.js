@@ -1,6 +1,7 @@
 import {
   captureSourceLineageFreehandStrokeBatch,
   dataPointToCoordinate as resolveDataPointCoordinate,
+  drawingAnchorFromCoordinate,
   drawingAnchorFromAxisTime,
   isOrdinalAxisTime,
   logicalToCoordinateInterpolated,
@@ -37,6 +38,8 @@ export function createLightweightChartAdapter({
   seriesDataMapRef = null,
   seriesDataIndexRef = null,
   sourceTimeHorizonRef = null,
+  sourceIntervalRef = null,
+  sourceIntervalSecondsRef = null,
   projectionConfigRef = null,
   ordinalSeriesIndexProvider = null,
   drawingCoordinateSnapshotProvider = null,
@@ -56,6 +59,8 @@ export function createLightweightChartAdapter({
   const getSeriesDataMap = () => getRefValue(seriesDataMapRef);
   const getSeriesDataIndex = () => getRefValue(seriesDataIndexRef);
   const getSourceTimeHorizon = () => getRefValue(sourceTimeHorizonRef);
+  const getSourceInterval = () => getRefValue(sourceIntervalRef);
+  const getSourceIntervalSeconds = () => getRefValue(sourceIntervalSecondsRef);
   const getProjectionConfig = () => getRefValue(projectionConfigRef);
   const getOrdinalSeriesIndex = () => safeCall(
     () => ordinalSeriesIndexProvider?.(),
@@ -71,6 +76,8 @@ export function createLightweightChartAdapter({
     projectionConfigProvider: getProjectionConfig,
     seriesDataProvider: getSeriesData,
     sourceTimeHorizonProvider: getSourceTimeHorizon,
+    sourceIntervalProvider: getSourceInterval,
+    sourceIntervalSecondsProvider: getSourceIntervalSeconds,
   };
   const registerCurrentDrawingSeries = () => {
     const series = getSeries();
@@ -80,6 +87,12 @@ export function createLightweightChartAdapter({
   const createDrawingCoordinateContext = () => {
     const snapshot = getDrawingCoordinateSnapshot();
     const hasSnapshotData = Array.isArray(snapshot?.seriesData);
+    const hasSnapshotHorizon = snapshot != null
+      && Object.prototype.hasOwnProperty.call(snapshot, "sourceTimeHorizon");
+    const hasSnapshotInterval = snapshot != null
+      && Object.prototype.hasOwnProperty.call(snapshot, "sourceIntervalSeconds");
+    const hasSnapshotIntervalId = snapshot != null
+      && Object.prototype.hasOwnProperty.call(snapshot, "sourceInterval");
     return {
       drawingOrdinalSeriesIndex: hasSnapshotData
         ? snapshot.ordinalSeriesIndex || null
@@ -89,7 +102,15 @@ export function createLightweightChartAdapter({
         : {}),
       drawingProjectionConfig: getProjectionConfig(),
       seriesData: hasSnapshotData ? snapshot.seriesData : getSeriesData(),
-      sourceTimeHorizon: getSourceTimeHorizon(),
+      sourceInterval: hasSnapshotIntervalId
+        ? snapshot.sourceInterval
+        : getSourceInterval(),
+      sourceIntervalSeconds: hasSnapshotInterval
+        ? snapshot.sourceIntervalSeconds
+        : getSourceIntervalSeconds(),
+      sourceTimeHorizon: hasSnapshotHorizon
+        ? snapshot.sourceTimeHorizon
+        : getSourceTimeHorizon(),
     };
   };
   let lastFreehandCaptureIdentity = null;
@@ -130,7 +151,21 @@ export function createLightweightChartAdapter({
       // pointer batch on that immutable local snapshot.
       const snapshot = getDrawingCoordinateSnapshot();
       const projectionConfig = getProjectionConfig();
-      const sourceTimeHorizon = getSourceTimeHorizon();
+      const hasSnapshotIntervalId = snapshot != null
+        && Object.prototype.hasOwnProperty.call(snapshot, "sourceInterval");
+      const sourceInterval = hasSnapshotIntervalId
+        ? snapshot.sourceInterval
+        : getSourceInterval();
+      const hasSnapshotInterval = snapshot != null
+        && Object.prototype.hasOwnProperty.call(snapshot, "sourceIntervalSeconds");
+      const sourceIntervalSeconds = hasSnapshotInterval
+        ? snapshot.sourceIntervalSeconds
+        : getSourceIntervalSeconds();
+      const hasSnapshotHorizon = snapshot != null
+        && Object.prototype.hasOwnProperty.call(snapshot, "sourceTimeHorizon");
+      const sourceTimeHorizon = hasSnapshotHorizon
+        ? snapshot.sourceTimeHorizon
+        : getSourceTimeHorizon();
       const hasSnapshotProvider = typeof drawingCoordinateSnapshotProvider === "function";
       if (hasSnapshotProvider && !Array.isArray(snapshot?.seriesData)) return null;
 
@@ -143,6 +178,8 @@ export function createLightweightChartAdapter({
       const context = {
         drawingProjectionConfig: projectionConfig,
         seriesData,
+        sourceInterval,
+        sourceIntervalSeconds,
         sourceTimeHorizon,
       };
       if (hasSnapshotProvider || typeof ordinalSeriesIndexProvider === "function") {
@@ -171,6 +208,15 @@ export function createLightweightChartAdapter({
       registerCurrentDrawingSeries();
       const context = createDrawingCoordinateContext();
       return drawingAnchorFromAxisTime(time, context.seriesData, context);
+    }, null),
+    coordinateToDrawingAnchor: (x) => safeCall(() => {
+      const series = registerCurrentDrawingSeries();
+      return drawingAnchorFromCoordinate(
+        getChart(),
+        series,
+        x,
+        createDrawingCoordinateContext(),
+      );
     }, null),
     dataPointToCoordinate: (dataPoint) => safeCall(() => {
       const series = registerCurrentDrawingSeries();
@@ -234,6 +280,10 @@ export function createLightweightChartAdapter({
       null,
     ),
     getBarSpacing: () => safeCall(() => getChart()?.timeScale().options?.().barSpacing, null),
+    getTimeScaleWidth: () => safeCall(() => {
+      const width = getChart()?.timeScale().width?.();
+      return Number.isFinite(width) && width > 0 ? width : null;
+    }, null),
     getVisibleTimeRange: () => safeCall(() => getChart()?.timeScale().getVisibleRange(), null),
     getVisibleRange: () => safeCall(() => {
       const timeScale = getChart()?.timeScale();

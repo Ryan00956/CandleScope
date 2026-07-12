@@ -184,6 +184,14 @@ function firstDifference(previousRows, nextRows) {
   return previousRows.length === nextRows.length ? -1 : shared;
 }
 
+function latestFiniteSourceTime(rows) {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const time = rows[index]?.time;
+    if (typeof time === "number" && Number.isFinite(time)) return time;
+  }
+  return null;
+}
+
 export class ProjectionStore {
   constructor({ projector = new IdentityProjector() } = {}) {
     if (!projector || typeof projector.project !== "function") {
@@ -221,11 +229,21 @@ export class ProjectionStore {
   }
 
   drawingCoordinateSnapshot() {
-    const ordinalSeriesIndex = this.drawingLineageIndex();
+    // Capture every coordinate input synchronously from this store version.
+    // The numeric horizon is a primitive value, so an older snapshot cannot
+    // drift when a realtime delta later replaces the store's source tail.
+    const seriesData = this._display;
+    const lineageIndex = this._drawingLineageIndex;
+    const ordinalSeriesIndex = lineageIndex.seriesData === seriesData
+      && lineageIndex.isOrdinal
+      ? lineageIndex
+      : null;
+    const sourceTimeHorizon = latestFiniteSourceTime(this._source);
     return {
       indexRevision: ordinalSeriesIndex?.revision ?? null,
       ordinalSeriesIndex,
-      seriesData: this._display,
+      seriesData,
+      sourceTimeHorizon,
     };
   }
 

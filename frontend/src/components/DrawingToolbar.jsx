@@ -223,8 +223,8 @@ const DrawingToolbar = memo(function DrawingToolbar({
   const drawingToolTitle = `${currentChartType.label} 当前坐标模式暂不支持此绘图工具`;
   const snapTitle = usesSourceLineageAnchors
     ? (drawingSnapEnabled
-        ? "Synthetic anchors stay on existing points; hold Alt to disable price snap"
-        : "Price snap disabled; synthetic anchors stay on existing points")
+        ? "Snap enabled; point-based drawings use absolute source time in future space (hold Alt to disable price snap)"
+        : "Price snap disabled; point-based drawings still use absolute source time in future space")
     : (drawingSnapEnabled
         ? "Snap enabled (hold Alt to disable temporarily)"
         : "Snap disabled");

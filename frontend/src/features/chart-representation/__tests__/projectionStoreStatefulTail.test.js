@@ -385,10 +385,13 @@ test("drawing lineage snapshots recover after clearing an ordinal display", () =
   const emptySnapshot = store.drawingCoordinateSnapshot();
   assert.deepEqual(emptySnapshot.seriesData, []);
   assert.equal(emptySnapshot.ordinalSeriesIndex, null);
+  assert.equal(emptySnapshot.sourceTimeHorizon, null);
 
   const baselineRows = [row(10, 20)];
   store.applySourceDelta({ type: "tick", appended: true }, baselineRows);
-  assert.equal(store.drawingCoordinateSnapshot().ordinalSeriesIndex, null);
+  const baselineSnapshot = store.drawingCoordinateSnapshot();
+  assert.equal(baselineSnapshot.ordinalSeriesIndex, null);
+  assert.equal(baselineSnapshot.sourceTimeHorizon, 10);
 
   const nextRows = [...baselineRows, row(11, 21)];
   store.applySourceDelta({ type: "tick", appended: true }, nextRows);
@@ -399,6 +402,9 @@ test("drawing lineage snapshots recover after clearing an ordinal display", () =
     restoredSnapshot.seriesData,
   );
   assert.equal(restoredSnapshot.ordinalSeriesIndex.latestLineage, 11);
+  assert.equal(restoredSnapshot.sourceTimeHorizon, 11);
+  assert.equal(emptySnapshot.sourceTimeHorizon, null);
+  assert.equal(baselineSnapshot.sourceTimeHorizon, 10);
 });
 
 test("stateful tail patches update the private time index and lazily version the public time set", () => {

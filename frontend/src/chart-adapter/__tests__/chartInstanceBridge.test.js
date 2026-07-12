@@ -59,6 +59,19 @@ test("visible range reads return null while Lightweight Charts is between datase
   assert.equal(adapter.getVisibleTimeRange(), null);
 });
 
+test("adapter exposes the drawable time-scale width separately from the chart container", () => {
+  const adapter = createLightweightChartAdapter({
+    chartRef: {
+      current: {
+        timeScale: () => ({ width: () => 912 }),
+      },
+    },
+    seriesRef: { current: {} },
+  });
+
+  assert.equal(adapter.getTimeScaleWidth(), 912);
+});
+
 test("adapter exposes persistence-safe ordinal drawing coordinates", () => {
   const rows = [
     displayRow(0, 100, 0),
@@ -105,6 +118,79 @@ test("adapter exposes persistence-safe ordinal drawing coordinates", () => {
   assert.equal(adapter.dataPointToCoordinate({ time: 300, logical: 99 }), 24);
   assert.equal(adapter.dataPointToCoordinate({ time: 500, logical: 99 }), null);
   assert.equal(logicalCalls, 0);
+});
+
+test("future drawing anchors use one atomic snapshot and persist only absolute source time", () => {
+  const rows = [displayRow(0, 100, 0), displayRow(1, 200, 0)];
+  const lineageIndex = createDrawingLineageIndex(rows);
+  let snapshotCalls = 0;
+  let intervalIdReads = 0;
+  let intervalReads = 0;
+  let horizonReads = 0;
+  let snapshotOwnsHorizon = true;
+  const adapter = createLightweightChartAdapter({
+    chartRef: {
+      current: {
+        timeScale: () => ({
+          coordinateToLogical: (x) => x / 10,
+          coordinateToTime: (x) => rows.find((row) => row.time.order === Math.round(x / 10))?.time || null,
+          logicalToCoordinate: (logical) => logical * 10,
+          options: () => ({ barSpacing: 10 }),
+          timeToCoordinate: (time) => time.order * 10,
+        }),
+      },
+    },
+    seriesRef: { current: {} },
+    sourceIntervalRef: {
+      get current() {
+        intervalIdReads += 1;
+        return "2m";
+      },
+    },
+    sourceIntervalSecondsRef: {
+      get current() {
+        intervalReads += 1;
+        return 120;
+      },
+    },
+    sourceTimeHorizonRef: {
+      get current() {
+        horizonReads += 1;
+        return 300;
+      },
+    },
+    projectionConfigRef: { current: "dataset-a:renko:10" },
+    drawingCoordinateSnapshotProvider: () => {
+      snapshotCalls += 1;
+      return {
+        indexRevision: lineageIndex.revision,
+        ordinalSeriesIndex: lineageIndex,
+        seriesData: rows,
+        ...(snapshotOwnsHorizon ? {
+          sourceInterval: "1m",
+          sourceIntervalSeconds: 60,
+          sourceTimeHorizon: 200,
+        } : {}),
+      };
+    },
+  });
+
+  const fromSnapshot = adapter.coordinateToDrawingAnchor(15);
+  assert.deepEqual(fromSnapshot, { time: 230 });
+  assert.equal(snapshotCalls, 1);
+  assert.equal(intervalIdReads, 0);
+  assert.equal(intervalReads, 0);
+  assert.equal(horizonReads, 0);
+  assert.equal(JSON.stringify(fromSnapshot).includes("order"), false);
+  assert.equal(JSON.stringify(fromSnapshot).includes("logical"), false);
+
+  snapshotOwnsHorizon = false;
+  const fromFallbackRef = adapter.coordinateToDrawingAnchor(15);
+  assert.deepEqual(fromFallbackRef, { time: 360 });
+  assert.equal(snapshotCalls, 2);
+  assert.equal(intervalIdReads, 1);
+  assert.equal(intervalReads, 1);
+  assert.equal(horizonReads, 1);
 });
 
 test("adapter registers stable drawing context before primitive attachment", () => {
@@ -233,6 +319,8 @@ test("freehand capture reads one atomic snapshot per batch and keeps tail-stable
   let snapshotCalls = 0;
   let configReads = 0;
   let horizonReads = 0;
+  let intervalIdReads = 0;
+  let intervalReads = 0;
   let seriesReads = 0;
   const configRef = {
     get current() {
@@ -266,6 +354,18 @@ test("freehand capture reads one atomic snapshot per batch and keeps tail-stable
     chartRef: { current: chart },
     seriesRef,
     projectionConfigRef: configRef,
+    sourceIntervalRef: {
+      get current() {
+        intervalIdReads += 1;
+        return "1m";
+      },
+    },
+    sourceIntervalSecondsRef: {
+      get current() {
+        intervalReads += 1;
+        return 60;
+      },
+    },
     sourceTimeHorizonRef: horizonRef,
     drawingCoordinateSnapshotProvider: () => {
       snapshotCalls += 1;
@@ -286,6 +386,8 @@ test("freehand capture reads one atomic snapshot per batch and keeps tail-stable
   assert.equal(snapshotCalls, 1);
   assert.equal(configReads, 1);
   assert.equal(horizonReads, 1);
+  assert.equal(intervalIdReads, 1);
+  assert.equal(intervalReads, 1);
   assert.equal(seriesReads, 1);
   assert.equal(JSON.stringify(first).includes("order"), false);
   assert.equal(JSON.stringify(first).includes("logical"), false);
@@ -305,6 +407,8 @@ test("freehand capture reads one atomic snapshot per batch and keeps tail-stable
   assert.equal(snapshotCalls, 2);
   assert.equal(configReads, 2);
   assert.equal(horizonReads, 2);
+  assert.equal(intervalIdReads, 2);
+  assert.equal(intervalReads, 2);
   assert.equal(seriesReads, 2);
   assert.equal(Object.isFrozen(first.captureIdentity), true);
   assert.equal(Object.keys(first.captureIdentity).length, 0);

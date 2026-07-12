@@ -70,6 +70,60 @@ export function canonicalDrawingAnchorFromAxisTime(adapter, axisTime) {
     : null;
 }
 
+/**
+ * Capture a durable horizontal anchor directly from a screen coordinate.
+ *
+ * Ordinal adapters may return either an already-materialized lineage anchor
+ * or an absolute source-time anchor for the right-side blank area.  Keep the
+ * latter deliberately minimal: future placement must never persist a
+ * projection-local order/logical coordinate or a guessed source ordinal.
+ */
+export function canonicalDrawingAnchorFromCoordinate(adapter, x) {
+  if (!adapterUsesOrdinalTime(adapter) || !isFiniteNumber(x)) return null;
+
+  if (typeof adapter?.coordinateToDrawingAnchor !== "function") {
+    let axisTime = null;
+    try {
+      axisTime = adapter?.coordinateToTime?.(x) ?? null;
+    } catch {
+      axisTime = null;
+    }
+    return canonicalDrawingAnchorFromAxisTime(adapter, axisTime);
+  }
+
+  let anchor = null;
+  try {
+    anchor = adapter.coordinateToDrawingAnchor(x) || null;
+  } catch {
+    anchor = null;
+  }
+  if (!anchor || !isFiniteNumber(anchor.time)) return null;
+
+  const sourceOrdinal = isSafeSourceOrdinal(anchor.sourceOrdinal)
+    ? anchor.sourceOrdinal
+    : null;
+  const sourceProjection = isSafeSourceProjection(anchor.sourceProjection)
+    ? anchor.sourceProjection
+    : null;
+  const sourceProjectionConfig = isSafeProjectionConfig(anchor.sourceProjectionConfig)
+    ? anchor.sourceProjectionConfig
+    : null;
+
+  if (sourceOrdinal !== null && sourceProjection !== null) {
+    return {
+      time: anchor.time,
+      sourceOrdinal,
+      sourceProjection,
+      ...(sourceProjectionConfig !== null ? { sourceProjectionConfig } : {}),
+    };
+  }
+
+  const hasLineageMetadata = anchor.sourceOrdinal != null
+    || anchor.sourceProjection != null
+    || anchor.sourceProjectionConfig != null;
+  return hasLineageMetadata ? null : { time: anchor.time };
+}
+
 function replaceHorizontalAnchor(dataPoint, anchor, { ordinal = false } = {}) {
   const next = { ...dataPoint };
   delete next.order;
@@ -222,11 +276,16 @@ export function snapDataPointAtPointer(dataPoint, x, y, options, adapter) {
   if (!target) return dataPoint;
 
   let next = { ...dataPoint };
+  const preserveFutureSourceTime = adapterUsesOrdinalTime(adapter)
+    && isFiniteNumber(dataPoint.time)
+    && !isSafeSourceOrdinal(dataPoint.sourceOrdinal)
+    && dataPoint.sourceProjection == null
+    && dataPoint.sourceProjectionConfig == null;
   let snappedAxisTime = null;
   if (allowPrice && target.price) {
     next.price = target.price.price;
-    if (allowTime) snappedAxisTime = target.price.time;
-  } else if (allowTime && target.time) {
+    if (allowTime && !preserveFutureSourceTime) snappedAxisTime = target.price.time;
+  } else if (allowTime && target.time && !preserveFutureSourceTime) {
     snappedAxisTime = target.time.time;
   }
 

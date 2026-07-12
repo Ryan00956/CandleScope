@@ -39,6 +39,7 @@ import {
   normalizeLineSeriesData,
 } from "../chart-adapter/chartSeriesData";
 import { normalizeMainChartType } from "../shared/mainChartTypes";
+import { parseIntervalSeconds } from "../utils/intervals";
 import { planVisibleRangeRestore } from "../features/chart-session/visibleRangeStorage";
 import { buildPaneConfigKey, loadPaneHeights, savePaneHeights } from "../features/chart-session/paneLayoutStorage";
 import {
@@ -466,6 +467,11 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const displayRowIndexMapRef = useRef(new Map());
   const renderedMainSeriesDataRef = useRef([]);
   const projectionStoreRef = useRef(null);
+  const drawingProjectionSnapshotOwnerRef = useRef({
+    sourceInterval: interval,
+    sourceIntervalSeconds: parseIntervalSeconds(interval),
+    store: null,
+  });
   const projectionGenerationRef = useRef(0);
   const projectionRenderContextRef = useRef(null);
   const mainSeriesTypeRef = useRef(null);
@@ -475,6 +481,8 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const pendingSurfaceViewportRef = useRef(null);
   const surfaceAxisModeRef = useRef("time");
   const drawingSourceTimeHorizonRef = useRef(null);
+  const drawingSourceIntervalRef = useRef(interval);
+  const drawingSourceIntervalSecondsRef = useRef(parseIntervalSeconds(interval));
   const seriesStoreRef = useRef(seriesStore);
   const prevIndicatorKeyRef = useRef("");
   const intervalRef = useRef(interval);
@@ -502,6 +510,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     rows: [],
     surfaceConfigKey: null,
   });
+  const publishDrawingProjectionStore = useCallback((store) => {
+    const sourceInterval = intervalRef.current;
+    const sourceIntervalSeconds = parseIntervalSeconds(intervalRef.current);
+    projectionStoreRef.current = store;
+    drawingSourceIntervalRef.current = sourceInterval;
+    drawingSourceIntervalSecondsRef.current = sourceIntervalSeconds;
+    drawingProjectionSnapshotOwnerRef.current = {
+      sourceInterval,
+      sourceIntervalSeconds,
+      store,
+    };
+  }, []);
   const [DrawingEngineHost, setDrawingEngineHost] = useState(null);
   const [isAutoScale, setIsAutoScale] = useState(true);
   const [contextMenu, setContextMenu] = useState(null);
@@ -583,10 +603,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       seriesDataMapRef: displayRowMapRef,
       seriesDataIndexRef: displayRowIndexMapRef,
       sourceTimeHorizonRef: drawingSourceTimeHorizonRef,
+      sourceIntervalRef: drawingSourceIntervalRef,
+      sourceIntervalSecondsRef: drawingSourceIntervalSecondsRef,
       projectionConfigRef: drawingProjectionConfigRef,
-      drawingCoordinateSnapshotProvider: () => (
-        projectionStoreRef.current?.drawingCoordinateSnapshot?.() || null
-      ),
+      drawingCoordinateSnapshotProvider: () => {
+        const owner = drawingProjectionSnapshotOwnerRef.current;
+        const snapshot = owner.store?.drawingCoordinateSnapshot?.() || null;
+        return snapshot ? {
+          ...snapshot,
+          sourceInterval: owner.sourceInterval,
+          sourceIntervalSeconds: owner.sourceIntervalSeconds,
+        } : null;
+      },
     }),
     [],
   );
@@ -727,7 +755,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     );
     drawingProjectionConfigRef.current = `${datasetKeyRef.current || ""}:${initialProjectionStore.configurationKey}`;
     initialProjectionStore.reset(initialRows);
-    projectionStoreRef.current = initialProjectionStore;
+    publishDrawingProjectionStore(initialProjectionStore);
     projectionGenerationRef.current += 1;
     syncDisplayDataRefsFromProjection({
       store: initialProjectionStore,
@@ -837,7 +865,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       displayRowMapRef.current = new Map();
       displayRowIndexMapRef.current = new Map();
       renderedMainSeriesDataRef.current = [];
-      projectionStoreRef.current = null;
+      publishDrawingProjectionStore(null);
       projectionGenerationRef.current += 1;
       projectionRenderContextRef.current = null;
       indicatorSeriesRef.current = [];
@@ -858,7 +886,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         beforeRemove: () => drawingApiRef.current?.prepareSurfaceDispose?.(),
       });
     };
-  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishViewportRangeChange, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishDrawingProjectionStore, publishViewportRangeChange, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -949,7 +977,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       mainSeriesRef.current = result.series;
       mainSeriesTypeRef.current = result.chartType;
       renderedMainSeriesDataRef.current = result.data;
-      projectionStoreRef.current = nextProjectionStore;
+      publishDrawingProjectionStore(nextProjectionStore);
       projectionGenerationRef.current += 1;
       projectionRenderContextRef.current = mainSeriesRenderContext;
       syncSourceDataRefsFromStore({
@@ -996,6 +1024,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     indicatorBarColorMap,
     mainSeriesRenderContext,
     projectionSettings,
+    publishDrawingProjectionStore,
     resolvedChartType,
     seriesStore,
     upColor,
@@ -1065,13 +1094,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     displayRowsRef.current = [];
     displayRowMapRef.current = new Map();
     displayRowIndexMapRef.current = new Map();
-    projectionStoreRef.current = null;
+    publishDrawingProjectionStore(null);
     drawingProjectionConfigRef.current = null;
     setAuxiliaryDisplayState({ datasetKey: null, rows: [], surfaceConfigKey: null });
     projectionGenerationRef.current += 1;
     projectionRenderContextRef.current = null;
     viewportControllerRef.current?.resetSession();
-  }, [datasetKey]);
+  }, [datasetKey, publishDrawingProjectionStore]);
 
   useEffect(() => {
     const series = mainSeriesRef.current;
@@ -1098,7 +1127,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     drawingProjectionConfigRef.current = `${datasetKeyRef.current || ""}:${projectionStore.configurationKey}`;
     const generation = projectionGenerationRef.current + 1;
     projectionGenerationRef.current = generation;
-    projectionStoreRef.current = projectionStore;
+    publishDrawingProjectionStore(projectionStore);
     if (shouldAdvanceDrawingCoordinateGeneration({
       axisMode: getChartTypeDescriptor(activeChartType).axisMode,
       canReuseProjection,
@@ -1274,7 +1303,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         isSyncingRef.current = false;
       }
     });
-  }, [chartAdapter, mainSeriesRenderContext, projectionSettings, seriesReady, seriesStore, updateMainSeriesReference]);
+  }, [chartAdapter, mainSeriesRenderContext, projectionSettings, publishDrawingProjectionStore, seriesReady, seriesStore, updateMainSeriesReference]);
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);
@@ -1599,7 +1628,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         <div className="synthetic-chart-notice" role="status">
           <strong>{syntheticChartNotice.title}</strong>
           <span>
-            {`${syntheticChartNotice.detail} · 指标按原始 K 线映射 · 成交量仅落末个合成点 · 绘图锚定已有合成点，未来区暂不支持`}
+            {`${syntheticChartNotice.detail} · 指标按原始 K 线映射 · 成交量仅落末个合成点 · 绘图支持绝对时间未来锚点（自由笔需至少两个连续合成点）`}
           </span>
         </div>
       )}

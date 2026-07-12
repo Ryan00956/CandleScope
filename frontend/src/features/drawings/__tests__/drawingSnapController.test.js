@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canonicalDrawingAnchorFromCoordinate,
   canonicalDrawingAnchorFromAxisTime,
   snapDataPointAtPointer,
 } from "../drawingSnapController.js";
@@ -53,6 +54,57 @@ test("canonicalDrawingAnchorFromAxisTime drops projection-local ordinal order", 
   });
 });
 
+test("coordinate capture keeps materialized lineage but stores future space as absolute time", () => {
+  const { adapter } = ordinalAdapter({ projection: "kagi" });
+  adapter.coordinateToDrawingAnchor = (x) => (x < 20 ? {
+    time: 1_700_000_000,
+    sourceOrdinal: 2,
+    sourceProjection: "kagi",
+    sourceProjectionConfig: "derived-ordinal:kagi:{}",
+    order: 7,
+    logical: 9,
+  } : {
+    time: 1_700_000_180.5,
+    order: 99,
+    logical: 12.25,
+  });
+
+  assert.deepEqual(canonicalDrawingAnchorFromCoordinate(adapter, 10), {
+    time: 1_700_000_000,
+    sourceOrdinal: 2,
+    sourceProjection: "kagi",
+    sourceProjectionConfig: "derived-ordinal:kagi:{}",
+  });
+  assert.deepEqual(canonicalDrawingAnchorFromCoordinate(adapter, 30), {
+    time: 1_700_000_180.5,
+  });
+});
+
+test("coordinate capture rejects malformed mixed future lineage metadata", () => {
+  const { adapter } = ordinalAdapter();
+  for (const anchor of [
+    { time: 200, sourceOrdinal: 0 },
+    { time: 200, sourceProjection: "renko" },
+    { time: 200, sourceProjectionConfig: "derived-ordinal:renko:{}" },
+    { time: 200, sourceOrdinal: -1, logical: 12 },
+  ]) {
+    adapter.coordinateToDrawingAnchor = () => anchor;
+    assert.equal(canonicalDrawingAnchorFromCoordinate(adapter, 30), null);
+  }
+});
+
+test("coordinate capture falls back to the existing axis-time adapter contract", () => {
+  const { adapter, axisTime } = ordinalAdapter();
+  adapter.coordinateToTime = () => axisTime;
+
+  assert.deepEqual(canonicalDrawingAnchorFromCoordinate(adapter, 10), {
+    time: 1_700_000_000,
+    sourceOrdinal: 2,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "derived-ordinal:renko:{}",
+  });
+});
+
 test("derived snapping replaces stale horizontal metadata with a canonical anchor", () => {
   const { adapter } = ordinalAdapter();
   const snapped = snapDataPointAtPointer({
@@ -70,6 +122,19 @@ test("derived snapping replaces stale horizontal metadata with a canonical ancho
     sourceOrdinal: 2,
     sourceProjection: "renko",
     sourceProjectionConfig: "derived-ordinal:renko:{}",
+    price: 100,
+  });
+});
+
+test("derived snapping preserves an absolute future time while still snapping price", () => {
+  const { adapter } = ordinalAdapter();
+  const snapped = snapDataPointAtPointer({
+    time: 1_700_000_180.5,
+    price: 1,
+  }, 10, 20, { snap: true }, adapter);
+
+  assert.deepEqual(snapped, {
+    time: 1_700_000_180.5,
     price: 100,
   });
 });

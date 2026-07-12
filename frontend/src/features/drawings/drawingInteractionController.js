@@ -41,7 +41,7 @@ import {
   useDrawingSelection,
 } from "./drawingSelectionController.js";
 import {
-  canonicalDrawingAnchorFromAxisTime,
+  canonicalDrawingAnchorFromCoordinate,
   snapDataPointAtPointer,
 } from "./drawingSnapController.js";
 import { eraseDrawingAtPointer } from "./drawingEraseController.js";
@@ -218,9 +218,7 @@ export function useDrawing({
         if (price == null || !isFinite(price)) return null;
 
         if (adapter.usesOrdinalTime?.() === true) {
-          const axisTime = adapter.coordinateToTime?.(x);
-          if (axisTime == null) return null;
-          const anchor = canonicalDrawingAnchorFromAxisTime(adapter, axisTime);
+          const anchor = canonicalDrawingAnchorFromCoordinate(adapter, x);
           return anchor ? { ...anchor, price } : null;
         }
 

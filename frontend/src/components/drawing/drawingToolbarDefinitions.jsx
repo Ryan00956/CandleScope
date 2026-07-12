@@ -340,7 +340,12 @@ const LINE_VARIANTS = [
   { id: "line-horizontal", label: "Horizontal line", icon: HorizontalLineIcon },
   { id: "line-vertical", label: "Vertical line", icon: VerticalLineIcon },
   { id: "line-cross", label: "Cross line", icon: CrossLineIcon },
-  { id: "angle-measure", label: "Angle", icon: AngleMeasureIcon },
+  {
+    id: "angle-measure",
+    label: "Angle",
+    description: "Visual angle on the current scale",
+    icon: AngleMeasureIcon,
+  },
 ];
 
 const LINE_TOOL_IDS = new Set(LINE_VARIANTS.map((v) => v.id));

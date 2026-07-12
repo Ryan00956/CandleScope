@@ -3,11 +3,13 @@ import {
 } from "../chart-representation/chartTypeRegistry.js";
 import {
   AXIS_LINE_TOOL_IDS,
+  ANGLE_TOOL_IDS,
   BASIC_LINE_TOOL_IDS,
   CURSOR_TOOL_IDS,
   DEFAULT_CURSOR_TOOL,
   DRAWING_ENGINE_TOOL_IDS,
   FIB_TOOL_IDS,
+  SHAPE_TOOL_IDS,
 } from "./drawingModel.js";
 
 const SOURCE_TIME_TOOL_IDS = new Set([
@@ -20,7 +22,10 @@ const SOURCE_LINEAGE_TOOL_IDS = new Set([
   "eraser",
   ...BASIC_LINE_TOOL_IDS,
   ...AXIS_LINE_TOOL_IDS,
+  ...ANGLE_TOOL_IDS,
   ...FIB_TOOL_IDS,
+  ...SHAPE_TOOL_IDS,
+  "text",
 ]);
 
 const HIT_TYPE_TOOL_IDS = Object.freeze({

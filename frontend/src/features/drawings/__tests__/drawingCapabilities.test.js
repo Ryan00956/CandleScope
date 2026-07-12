@@ -41,34 +41,34 @@ test("source-lineage drawing anchors expose only the verified ordinal-safe tools
     "line-horizontal",
     "line-vertical",
     "line-cross",
+    "angle-measure",
     "fibonacci",
+    "shape-rectangle",
+    "shape-ellipse",
+    "text",
   ]) {
     assert.equal(supportsDrawingTool(mode, tool), true, tool);
   }
   for (const tool of [
     "pen",
     "highlighter",
-    "angle-measure",
-    "shape-rectangle",
-    "shape-ellipse",
-    "text",
     "position-long",
     "position-short",
   ]) {
     assert.equal(supportsDrawingTool(mode, tool), false, tool);
   }
-  assert.equal(drawingToolForAnchorMode(mode, "angle-measure"), "cursor-default");
+  assert.equal(drawingToolForAnchorMode(mode, "position-long"), "cursor-default");
   assert.equal(hasSupportedDrawingVariant(mode, [
     { id: "line-segment" },
     { id: "angle-measure" },
   ]), true);
-  assert.equal(hasSupportedDrawingVariant(mode, [{ id: "shape-rectangle" }]), false);
+  assert.equal(hasSupportedDrawingVariant(mode, [{ id: "shape-rectangle" }]), true);
   assert.equal(supportsDrawingHitType(mode, "line"), true);
   assert.equal(supportsDrawingHitType(mode, "axis-line"), true);
   assert.equal(supportsDrawingHitType(mode, "fibonacci"), true);
-  assert.equal(supportsDrawingHitType(mode, "angle"), false);
-  assert.equal(supportsDrawingHitType(mode, "shape"), false);
-  assert.equal(supportsDrawingHitType(mode, "text"), false);
+  assert.equal(supportsDrawingHitType(mode, "angle"), true);
+  assert.equal(supportsDrawingHitType(mode, "shape"), true);
+  assert.equal(supportsDrawingHitType(mode, "text"), true);
   assert.equal(supportsDrawingHitType(mode, "position"), false);
 });
 

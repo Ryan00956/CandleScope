@@ -2180,6 +2180,7 @@ body {
 
 /* ── 画图工具栏（图表左侧） ──────────────────────────────── */
 .drawing-toolbar {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -2190,7 +2191,10 @@ body {
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-color);
   flex-shrink: 0;
-  z-index: 10;
+  /* Lightweight Charts creates positioned children up to z-index: 50.
+     Keep variant flyouts in a higher sibling stacking context so their lower
+     rows remain clickable when they extend over the chart canvas. */
+  z-index: 160;
 }
 .drawing-toolbar-loading {
   opacity: 0.65;

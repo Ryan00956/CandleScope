@@ -12,9 +12,12 @@ import {
   DEFAULT_HIGHLIGHTER_OPACITY,
   nextDrawingId,
 } from "./drawingModel.js";
+import { normalizeSavedFreehandPayload } from "./freehandStrokeModel.js";
 
 export function createPrimitiveFromSavedDrawing(item) {
   if (!item) return null;
+  const hasStroke = Object.prototype.hasOwnProperty.call(item, "stroke");
+  if (hasStroke && item.type !== "freehand" && item.type !== "highlighter") return null;
   if (item.type === "line") {
     return new LineDrawingPrimitive({
       id: item.id || nextDrawingId("ln"),
@@ -95,10 +98,12 @@ export function createPrimitiveFromSavedDrawing(item) {
     });
   }
   if (item.type === "highlighter") {
+    const payload = normalizeSavedFreehandPayload(item);
+    if (!payload) return null;
     return new FreehandDrawingPrimitive({
       id: item.id || nextDrawingId("hl"),
       type: "highlighter",
-      dataPoints: item.dataPoints,
+      ...payload,
       color: item.color,
       lineWidth: item.lineWidth,
       opacity: item.opacity ?? DEFAULT_HIGHLIGHTER_OPACITY,
@@ -107,9 +112,11 @@ export function createPrimitiveFromSavedDrawing(item) {
     });
   }
   if (item.type === "freehand") {
+    const payload = normalizeSavedFreehandPayload(item);
+    if (!payload) return null;
     return new FreehandDrawingPrimitive({
       id: item.id || nextDrawingId("fh"),
-      dataPoints: item.dataPoints,
+      ...payload,
       color: item.color,
       lineWidth: item.lineWidth,
     });

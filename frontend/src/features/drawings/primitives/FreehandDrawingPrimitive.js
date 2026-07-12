@@ -13,7 +13,11 @@
  *   - Hit-testing for eraser deletion
  */
 
-import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { normalizeFreehandStrokeV2 } from "../freehandStrokeModel.js";
+import {
+  dataPointToCoordinate,
+  freehandStrokeV2ToCoordinates,
+} from "./coordinateUtils.js";
 
 const DEFAULT_HIGHLIGHTER_OPACITY = 0.35;
 const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION = "multiply";
@@ -46,6 +50,67 @@ function distToSegment(px, py, ax, ay, bx, by) {
   return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
 }
 
+function screenPathsForSource(source) {
+  const series = source._series;
+  const chart = source._chart;
+  const coordinateContext = {};
+
+  if (source._stroke) {
+    const paths = [];
+    let currentPath = [];
+    const horizontalPoints = freehandStrokeV2ToCoordinates(
+      chart,
+      series,
+      source._stroke,
+      coordinateContext,
+    );
+    for (const point of horizontalPoints) {
+      const y = point ? series.priceToCoordinate(point.price) : null;
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(y)) {
+        if (currentPath.length > 0) paths.push(currentPath);
+        currentPath = [];
+        continue;
+      }
+      currentPath.push({ x: point.x, y });
+    }
+    if (currentPath.length > 0) paths.push(currentPath);
+    return paths;
+  }
+
+  // Preserve the legacy v1 behavior: invalid time-axis points are omitted and
+  // the remaining points stay in one path.
+  const path = [];
+  for (const dataPoint of source._dataPoints) {
+    const x = dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
+    const y = series.priceToCoordinate(dataPoint.price);
+    if (x != null && y != null) path.push({ x, y });
+  }
+  return path.length > 0 ? [path] : [];
+}
+
+function tracePath(context, path, isSquareBrush) {
+  context.moveTo(path[0].bx, path[0].by);
+  if (path.length === 2 || isSquareBrush) {
+    for (let index = 1; index < path.length; index += 1) {
+      context.lineTo(path[index].bx, path[index].by);
+    }
+    return;
+  }
+
+  for (let index = 1; index < path.length - 1; index += 1) {
+    const midX = (path[index].bx + path[index + 1].bx) / 2;
+    const midY = (path[index].by + path[index + 1].by) / 2;
+    context.quadraticCurveTo(path[index].bx, path[index].by, midX, midY);
+  }
+  const last = path[path.length - 1];
+  context.quadraticCurveTo(
+    path[path.length - 2].bx,
+    path[path.length - 2].by,
+    last.bx,
+    last.by,
+  );
+}
+
 // ── Pane Renderer ──
 
 class FreehandRenderer {
@@ -59,14 +124,14 @@ class FreehandRenderer {
 
   draw(target) {
     const data = this._data;
-    if (!data || !data.points || data.points.length < 2) return;
+    if (!data || !Array.isArray(data.paths)) return;
     if (data.hidden) return;
 
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
       const hRatio = scope.horizontalPixelRatio;
       const vRatio = scope.verticalPixelRatio;
-      const { points, color, lineWidth, hovered, opacity, compositeOperation, brushShape } = data;
+      const { paths, color, lineWidth, hovered, opacity, compositeOperation, brushShape } = data;
       const isSquareBrush = brushShape === "square";
 
       ctx.save();
@@ -85,43 +150,18 @@ class FreehandRenderer {
         ctx.globalAlpha = normalizeOpacity(opacity, 1);
       }
 
-      // Filter out invalid points first
-      const valid = [];
-      for (const pt of points) {
-        if (pt.x != null && pt.y != null) {
-          valid.push({ bx: pt.x * hRatio, by: pt.y * vRatio });
-        }
-      }
-
-      if (valid.length < 2) { ctx.restore(); return; }
-
       ctx.beginPath();
-      ctx.moveTo(valid[0].bx, valid[0].by);
-
-      if (valid.length === 2 || isSquareBrush) {
-        // Square brushes should keep hard edges, so draw straight segments
-        // instead of smoothing through quadratic curves.
-        for (let i = 1; i < valid.length; i++) {
-          ctx.lineTo(valid[i].bx, valid[i].by);
-        }
-      } else {
-        // Smooth curve using quadratic Bezier through midpoints:
-        // Each original sample point becomes a control point, and
-        // the midpoint between consecutive samples becomes the
-        // curve endpoint — this produces C1-continuous curves.
-        for (let i = 1; i < valid.length - 1; i++) {
-          const midX = (valid[i].bx + valid[i + 1].bx) / 2;
-          const midY = (valid[i].by + valid[i + 1].by) / 2;
-          ctx.quadraticCurveTo(valid[i].bx, valid[i].by, midX, midY);
-        }
-        // Final segment: curve to the last point
-        const last = valid[valid.length - 1];
-        ctx.quadraticCurveTo(
-          valid[valid.length - 2].bx, valid[valid.length - 2].by,
-          last.bx, last.by
-        );
+      let traced = false;
+      for (const path of paths) {
+        if (!Array.isArray(path) || path.length < 2) continue;
+        const scaledPath = path.map((point) => ({
+          bx: point.x * hRatio,
+          by: point.y * vRatio,
+        }));
+        tracePath(ctx, scaledPath, isSquareBrush);
+        traced = true;
       }
-      ctx.stroke();
+      if (traced) ctx.stroke();
 
       ctx.restore();
     });
@@ -143,21 +183,14 @@ class FreehandPaneView {
 
     if (!series || !chart) return;
     if (source._hidden) {
-      this._renderer.update({ points: [], hidden: true });
+      this._renderer.update({ paths: [], hidden: true });
       return;
     }
 
-    const points = [];
-    const coordinateContext = {};
-
-    for (const dp of source._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
-      const y = series.priceToCoordinate(dp.price);
-      points.push({ x, y });
-    }
+    const paths = screenPathsForSource(source);
 
     this._renderer.update({
-      points,
+      paths,
       color: source._color,
       lineWidth: source._lineWidth,
       opacity: source._opacity,
@@ -195,6 +228,7 @@ export class FreehandDrawingPrimitive {
     this._id = opts.id;
     this._type = normalizeFreehandType(opts.type);
     this._dataPoints = opts.dataPoints || [];
+    this._stroke = normalizeFreehandStrokeV2(opts.stroke);
     this._color = opts.color || "#f59e0b";
     this._lineWidth = opts.lineWidth || 2;
     this._opacity = normalizeOpacity(
@@ -243,6 +277,7 @@ export class FreehandDrawingPrimitive {
 
   get id() { return this._id; }
   get dataPoints() { return this._dataPoints; }
+  get stroke() { return this._stroke; }
   get color() { return this._color; }
   get lineWidth() { return this._lineWidth; }
   get type() { return this._type; }
@@ -310,33 +345,32 @@ export class FreehandDrawingPrimitive {
   hitTest(x, y, hitRadius = 8) {
     if (this._hidden) return false;
     if (!this._series || !this._chart) return false;
-    if (this._dataPoints.length < 2) return false;
+    if (this._stroke ? this._stroke.points.length < 2 : this._dataPoints.length < 2) return false;
 
-    const screenPoints = [];
-    const coordinateContext = {};
-
-    for (const dp of this._dataPoints) {
-      const sx = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
-      const sy = this._series.priceToCoordinate(dp.price);
-      if (sx != null && sy != null) {
-        screenPoints.push({ x: sx, y: sy });
-      }
-    }
+    const screenPaths = screenPathsForSource(this);
 
     const totalRadius = hitRadius + this._lineWidth / 2;
 
     // Check each point
-    for (const pt of screenPoints) {
-      const dx = pt.x - x;
-      const dy = pt.y - y;
-      if (Math.sqrt(dx * dx + dy * dy) <= totalRadius) return true;
-    }
+    for (const screenPoints of screenPaths) {
+      // The renderer intentionally skips singleton paths because Canvas has
+      // no visible segment to stroke. Hit testing must follow the same rule.
+      if (screenPoints.length < 2) continue;
+      for (const point of screenPoints) {
+        const dx = point.x - x;
+        const dy = point.y - y;
+        if (Math.sqrt(dx * dx + dy * dy) <= totalRadius) return true;
+      }
 
-    // Check each segment
-    for (let i = 0; i < screenPoints.length - 1; i++) {
-      const a = screenPoints[i];
-      const b = screenPoints[i + 1];
-      if (distToSegment(x, y, a.x, a.y, b.x, b.y) <= totalRadius) return true;
+      // Segments are checked within one resolved path only. A v2 null marker
+      // starts a new path and can never create an eraser hit across the gap.
+      for (let index = 0; index < screenPoints.length - 1; index += 1) {
+        const left = screenPoints[index];
+        const right = screenPoints[index + 1];
+        if (distToSegment(x, y, left.x, left.y, right.x, right.y) <= totalRadius) {
+          return true;
+        }
+      }
     }
 
     return false;

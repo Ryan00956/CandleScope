@@ -13,7 +13,37 @@
  *   - data coordinates (time + price) — NOT screen pixels
  */
 
+import {
+  normalizeFreehandStrokeV2,
+  normalizeLegacyFreehandDataPoints,
+  normalizeSavedFreehandPayload,
+} from "./freehandStrokeModel.js";
+
 const STORAGE_PREFIX = "candlescope-drawings";
+export const MAX_DRAWING_STORAGE_CHARS = 2_000_000;
+export const MAX_SAVED_DRAWINGS = 512;
+export const MAX_SAVED_FREEHAND_POINTS = 32_768;
+export const MAX_SAVED_FREEHAND_SPANS = 16_384;
+
+const SAVED_DRAWING_TYPES = new Set([
+  "line",
+  "axis-line",
+  "angle-measure",
+  "text",
+  "fibonacci",
+  "position",
+  "shape",
+  "freehand",
+  "highlighter",
+]);
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isRecord(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
 
 function storageKey(symbol) {
   return `${STORAGE_PREFIX}-${symbol}`;
@@ -76,6 +106,120 @@ export function serializeDataPoint(dataPoint) {
 
 function serializeDataPoints(points) {
   return (points || []).map(serializeDataPoint);
+}
+
+function normalizeSavedFreehandItem(item) {
+  const payload = normalizeSavedFreehandPayload(item);
+  if (!payload) return null;
+
+  const normalized = { type: item.type, ...payload };
+  if (typeof item.id === "string" && item.id.length <= 256) normalized.id = item.id;
+  if (typeof item.color === "string" && item.color.length <= 128) normalized.color = item.color;
+  if (typeof item.lineWidth === "number"
+    && Number.isFinite(item.lineWidth)
+    && item.lineWidth > 0
+    && item.lineWidth <= 100) {
+    normalized.lineWidth = item.lineWidth;
+  }
+  if (item.type === "highlighter") {
+    if (typeof item.opacity === "number"
+      && Number.isFinite(item.opacity)
+      && item.opacity >= 0
+      && item.opacity <= 1) {
+      normalized.opacity = item.opacity;
+    }
+    if (typeof item.compositeOperation === "string"
+      && item.compositeOperation.length <= 32) {
+      normalized.compositeOperation = item.compositeOperation;
+    }
+    if (item.brushShape === "round" || item.brushShape === "square") {
+      normalized.brushShape = item.brushShape;
+    }
+  }
+  return normalized;
+}
+
+function normalizeSavedDrawingItem(item) {
+  if (!isRecord(item) || !SAVED_DRAWING_TYPES.has(item.type)) return null;
+  if (item.type === "freehand" || item.type === "highlighter") {
+    return normalizeSavedFreehandItem(item);
+  }
+  return hasOwn(item, "stroke") ? null : item;
+}
+
+function freehandPayloadCounts(item) {
+  if (item.type !== "freehand" && item.type !== "highlighter") {
+    return { points: 0, spans: 0 };
+  }
+  if (hasOwn(item, "stroke")) {
+    return {
+      points: item.stroke.points.length,
+      spans: item.stroke.spans.length,
+    };
+  }
+  return { points: item.dataPoints.length, spans: 0 };
+}
+
+function declaredFreehandPayloadCounts(item) {
+  if (!isRecord(item)
+    || (item.type !== "freehand" && item.type !== "highlighter")) {
+    return { points: 0, spans: 0 };
+  }
+  const legacyPoints = Array.isArray(item.dataPoints) ? item.dataPoints.length : 0;
+  const strokePoints = Array.isArray(item.stroke?.points) ? item.stroke.points.length : 0;
+  const strokeSpans = Array.isArray(item.stroke?.spans) ? item.stroke.spans.length : 0;
+  return {
+    points: legacyPoints + strokePoints,
+    spans: strokeSpans,
+  };
+}
+
+function normalizeSavedDrawingArray(value) {
+  if (!Array.isArray(value) || value.length > MAX_SAVED_DRAWINGS) return [];
+
+  let totalPoints = 0;
+  let totalSpans = 0;
+  for (const item of value) {
+    const counts = declaredFreehandPayloadCounts(item);
+    totalPoints += counts.points;
+    totalSpans += counts.spans;
+    if (totalPoints > MAX_SAVED_FREEHAND_POINTS
+      || totalSpans > MAX_SAVED_FREEHAND_SPANS) {
+      return [];
+    }
+  }
+
+  const drawings = [];
+  for (const item of value) {
+    const normalized = normalizeSavedDrawingItem(item);
+    if (!normalized) continue;
+    drawings.push(normalized);
+  }
+  return drawings;
+}
+
+function readSavedDrawingArray(symbol, warnOnError = false) {
+  try {
+    const raw = localStorage.getItem(storageKey(symbol));
+    if (!raw) return [];
+    if (raw.length > MAX_DRAWING_STORAGE_CHARS) {
+      if (warnOnError) console.warn("Failed to load drawings: stored payload is too large");
+      return [];
+    }
+    return normalizeSavedDrawingArray(JSON.parse(raw));
+  } catch (err) {
+    if (warnOnError) console.warn("Failed to load drawings:", err);
+    return [];
+  }
+}
+
+function serializeFreehandPayload(prim) {
+  if (prim._stroke != null) {
+    const stroke = normalizeFreehandStrokeV2(prim._stroke);
+    return stroke ? { stroke } : null;
+  }
+  const dataPoints = normalizeLegacyFreehandDataPoints(prim._dataPoints);
+  return dataPoints ? { dataPoints } : null;
 }
 
 export function serializeHorizontalAnchor(anchor) {
@@ -191,10 +335,12 @@ function serializePrimitive(prim) {
   }
 
   if (prim._type === "highlighter") {
+    const payload = serializeFreehandPayload(prim);
+    if (!payload) return null;
     return {
       type: "highlighter",
       id: prim._id,
-      dataPoints: serializeDataPoints(prim._dataPoints),
+      ...payload,
       color: prim._color,
       lineWidth: prim._lineWidth,
       opacity: prim._opacity,
@@ -203,14 +349,19 @@ function serializePrimitive(prim) {
     };
   }
 
-  // FreehandDrawingPrimitive (default)
-  return {
-    type: "freehand",
-    id: prim._id,
-    dataPoints: serializeDataPoints(prim._dataPoints),
-    color: prim._color,
-    lineWidth: prim._lineWidth,
-  };
+  if (prim._type === "freehand") {
+    const payload = serializeFreehandPayload(prim);
+    if (!payload) return null;
+    return {
+      type: "freehand",
+      id: prim._id,
+      ...payload,
+      color: prim._color,
+      lineWidth: prim._lineWidth,
+    };
+  }
+
+  return null;
 }
 
 /**
@@ -222,10 +373,39 @@ export function saveDrawings(symbol, primitives) {
   if (!symbol) return;
   try {
     // Filter out preview primitives
-    const data = primitives
-      .filter((p) => p._id !== "__preview__" && !p._isPreview)
-      .map(serializePrimitive);
-    localStorage.setItem(storageKey(symbol), JSON.stringify(data));
+    const candidates = primitives
+      .filter((p) => p._id !== "__preview__" && !p._isPreview);
+    if (candidates.length > MAX_SAVED_DRAWINGS) {
+      console.warn("Failed to save drawings: drawing count exceeds the storage limit");
+      return;
+    }
+
+    const data = [];
+    let totalPoints = 0;
+    let totalSpans = 0;
+    for (const prim of candidates) {
+      const item = serializePrimitive(prim);
+      if (!item) {
+        console.warn("Failed to save drawings: a drawing could not be serialized");
+        return;
+      }
+      const counts = freehandPayloadCounts(item);
+      totalPoints += counts.points;
+      totalSpans += counts.spans;
+      if (totalPoints > MAX_SAVED_FREEHAND_POINTS
+        || totalSpans > MAX_SAVED_FREEHAND_SPANS) {
+        console.warn("Failed to save drawings: freehand data exceeds the storage limit");
+        return;
+      }
+      data.push(item);
+    }
+
+    const raw = JSON.stringify(data);
+    if (raw.length > MAX_DRAWING_STORAGE_CHARS) {
+      console.warn("Failed to save drawings: serialized payload is too large");
+      return;
+    }
+    localStorage.setItem(storageKey(symbol), raw);
   } catch (err) {
     console.warn("Failed to save drawings:", err);
   }
@@ -241,15 +421,7 @@ export function saveDrawings(symbol, primitives) {
  */
 export function loadDrawings(symbol) {
   if (!symbol) return [];
-  try {
-    const raw = localStorage.getItem(storageKey(symbol));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    console.warn("Failed to load drawings:", err);
-    return [];
-  }
+  return readSavedDrawingArray(symbol, true);
 }
 
 /**
@@ -262,14 +434,7 @@ export function loadDrawings(symbol) {
  */
 export function hasSavedDrawings(symbol) {
   if (!symbol) return false;
-  try {
-    const raw = localStorage.getItem(storageKey(symbol));
-    if (!raw) return false;
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length > 0;
-  } catch {
-    return false;
-  }
+  return readSavedDrawingArray(symbol).length > 0;
 }
 
 /**

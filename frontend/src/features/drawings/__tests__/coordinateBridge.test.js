@@ -10,6 +10,7 @@ import {
   logicalToInterpolatedSeriesTime,
   registerDrawingSeriesContext,
   resolveDrawingAnchorToDisplayRow,
+  resolveSourceLineageSpanToCoordinates,
   timeToCoordinateInterpolated,
 } from "../../../chart-adapter/coordinateBridge.js";
 import { createDrawingLineageIndex } from "../../chart-representation/drawingLineageIndex.js";
@@ -98,6 +99,220 @@ test("drawing anchors resolve exact and clamped same-source ordinals", () => {
     sourceProjection: "point-and-figure",
     sourceProjectionConfig: "dataset-a:renko:10",
   }, context), rows[1]);
+});
+
+function sourceLineageSpan(overrides = {}) {
+  return {
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:10",
+    exact: {
+      left: { time: 200, sourceOrdinal: 0 },
+      right: { time: 200, sourceOrdinal: 1 },
+    },
+    fallback: {
+      fromTime: 100,
+      toTime: 200,
+      leftRatio: 0.25,
+      rightRatio: 0.75,
+    },
+    ...overrides,
+  };
+}
+
+function spanChart(barSpacing = 10) {
+  return {
+    timeScale: () => ({
+      options: () => ({ barSpacing }),
+      timeToCoordinate: (time) => time.order * barSpacing,
+    }),
+  };
+}
+
+test("freehand source spans keep same-time ordinals distinct in exact mode", () => {
+  const rows = [
+    displayRow(0, 200, 0, { from: 100, to: 200 }),
+    displayRow(1, 200, 1, { from: 200, to: 200 }),
+  ];
+
+  assert.deepEqual(resolveSourceLineageSpanToCoordinates(
+    spanChart(),
+    { data: () => rows },
+    sourceLineageSpan(),
+    {
+      drawingProjectionConfig: "dataset-a:renko:10",
+      sourceTimeHorizon: 200,
+    },
+  ), { left: 0, right: 10 });
+});
+
+test("freehand source spans use monotonic cell envelopes across synthetic projectors", () => {
+  for (const projectorId of ["renko", "point-and-figure", "kagi", "line-break"]) {
+    const rows = [
+      displayRow(0, 120, 0, { from: 80, projectorId, to: 120 }),
+      displayRow(1, 180, 0, { from: 121, projectorId, to: 180 }),
+      displayRow(2, 220, 0, { from: 181, projectorId, to: 220 }),
+    ];
+    const result = resolveSourceLineageSpanToCoordinates(
+      spanChart(),
+      { data: () => rows },
+      sourceLineageSpan(),
+      {
+        drawingProjectionConfig: `dataset-b:${projectorId}:changed`,
+        sourceTimeHorizon: 220,
+      },
+    );
+
+    assert.deepEqual(result, { left: 2.5, right: 17.5 }, projectorId);
+    assert.ok(result.left < result.right, projectorId);
+  }
+});
+
+test("freehand fallback ratios retain width inside one target display cell", () => {
+  const rows = [displayRow(0, 200, 0, {
+    from: 200,
+    projectorId: "point-and-figure",
+    to: 200,
+  })];
+
+  assert.deepEqual(resolveSourceLineageSpanToCoordinates(
+    spanChart(),
+    { data: () => rows },
+    sourceLineageSpan({
+      fallback: {
+        fromTime: 200,
+        toTime: 200,
+        leftRatio: 0.25,
+        rightRatio: 0.75,
+      },
+    }),
+    {
+      drawingProjectionConfig: "dataset-b:point-and-figure:changed",
+      sourceTimeHorizon: 200,
+    },
+  ), { left: -2.5, right: 2.5 });
+});
+
+test("freehand source spans fall back on config mismatch or missing exact ordinals", () => {
+  const rows = [
+    displayRow(0, 200, 0, { from: 100, to: 200 }),
+    displayRow(1, 200, 1, { from: 200, to: 200 }),
+  ];
+  const series = { data: () => rows };
+  const expectedFallback = { left: 0, right: 10 };
+
+  assert.deepEqual(resolveSourceLineageSpanToCoordinates(
+    spanChart(),
+    series,
+    sourceLineageSpan(),
+    {
+      drawingProjectionConfig: "dataset-a:renko:20",
+      sourceTimeHorizon: 200,
+    },
+  ), expectedFallback);
+  assert.deepEqual(resolveSourceLineageSpanToCoordinates(
+    spanChart(),
+    series,
+    sourceLineageSpan({
+      exact: {
+        left: { time: 200, sourceOrdinal: 0 },
+        right: { time: 200, sourceOrdinal: 9 },
+      },
+    }),
+    {
+      drawingProjectionConfig: "dataset-a:renko:10",
+      sourceTimeHorizon: 200,
+    },
+  ), expectedFallback);
+});
+
+test("freehand source spans stay unresolved outside the raw source horizon", () => {
+  const rows = [displayRow(0, 200, 0, { from: 100, to: 200 })];
+
+  assert.equal(resolveSourceLineageSpanToCoordinates(
+    spanChart(),
+    { data: () => rows },
+    sourceLineageSpan({
+      fallback: {
+        fromTime: 200,
+        toTime: 300,
+        leftRatio: 0.25,
+        rightRatio: 0.75,
+      },
+    }),
+    {
+      drawingProjectionConfig: "dataset-a:renko:20",
+      sourceTimeHorizon: 250,
+    },
+  ), null);
+});
+
+test("freehand source spans fall back to a continuous source-time cell envelope", () => {
+  const rows = [{ time: 100 }, { time: 200 }];
+  const chart = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time) => {
+        if (time === 100) return 0;
+        if (time === 200) return 10;
+        return null;
+      },
+    }),
+  };
+
+  assert.deepEqual(resolveSourceLineageSpanToCoordinates(
+    chart,
+    { data: () => rows },
+    sourceLineageSpan(),
+  ), { left: 0, right: 10 });
+});
+
+test("freehand source-time spans scan numeric coverage once per coordinate context", () => {
+  let timeReads = 0;
+  let dataCalls = 0;
+  const rows = Array.from({ length: 1_000 }, (_, index) => {
+    const row = {};
+    Object.defineProperty(row, "time", {
+      enumerable: true,
+      get() {
+        timeReads += 1;
+        return 100 + index;
+      },
+    });
+    return row;
+  });
+  const chart = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time) => time,
+    }),
+  };
+  const series = {
+    data: () => {
+      dataCalls += 1;
+      return rows;
+    },
+  };
+  const context = {};
+
+  for (let index = 0; index < 100; index += 1) {
+    const fromTime = 200 + index;
+    assert.ok(resolveSourceLineageSpanToCoordinates(
+      chart,
+      series,
+      sourceLineageSpan({
+        fallback: {
+          fromTime,
+          toTime: fromTime + 10,
+          leftRatio: 0.25,
+          rightRatio: 0.75,
+        },
+      }),
+      context,
+    ));
+  }
+
+  assert.equal(dataCalls, 1);
+  assert.ok(timeReads < 5_000, `unexpected numeric coverage rescans: ${timeReads}`);
 });
 
 test("same projector ignores source ordinal when projection config identity changes", () => {

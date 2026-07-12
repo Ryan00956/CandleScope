@@ -111,3 +111,86 @@ test("drawing lineage reset rolls back atomically when projected metadata throws
   assert.equal(index.revision, initialRevision);
   assert.deepEqual(index.ordinalRows, initialRows);
 });
+
+test("drawing lineage index resolves monotonic source envelopes including repeated rows", () => {
+  const rows = [
+    displayRow(0, 100, 0, { from: 80, to: 100 }),
+    displayRow(1, 200, 0, { from: 101, to: 200 }),
+    displayRow(2, 200, 1, { from: 200, to: 200 }),
+    displayRow(3, 300, 0, { from: 201, to: 300 }),
+  ];
+  const index = createDrawingLineageIndex(rows);
+
+  assert.deepEqual(index.rowsOverlappingSourceEnvelope({
+    fromTime: 200,
+    toTime: 200,
+  }), {
+    first: rows[1],
+    last: rows[2],
+  });
+  assert.deepEqual(index.rowsOverlappingSourceEnvelope({
+    fromTime: 90,
+    toTime: 250,
+  }), {
+    first: rows[0],
+    last: rows[3],
+  });
+  assert.equal(index.rowsOverlappingSourceEnvelope({
+    fromTime: 301,
+    toTime: 400,
+  }), null);
+});
+
+test("drawing lineage index fails closed for non-monotonic source envelopes", () => {
+  const rows = [
+    displayRow(0, 300, 0, { from: 200, to: 300 }),
+    displayRow(1, 150, 0, { from: 100, to: 150 }),
+    displayRow(2, 250, 0, { from: 151, to: 250 }),
+  ];
+  const index = createDrawingLineageIndex(rows);
+  assert.equal(index.rowRangesMonotonic, false);
+
+  assert.equal(index.rowsOverlappingSourceEnvelope({
+    fromTime: 140,
+    toTime: 220,
+  }), null);
+});
+
+test("drawing lineage index fails closed across an internal lineage hole", () => {
+  const rows = [
+    displayRow(0, 10, 0, { from: 0, to: 10 }),
+    displayRow(1, 110, 0, { from: 100, to: 110 }),
+  ];
+  const index = createDrawingLineageIndex(rows);
+  assert.equal(index.rowRangesMonotonic, true);
+
+  assert.equal(index.rowsOverlappingSourceEnvelope({
+    fromTime: 5,
+    toTime: 105,
+  }), null);
+  assert.deepEqual(index.rowsOverlappingSourceEnvelope({
+    fromTime: 100,
+    toTime: 105,
+  }), { first: rows[1], last: rows[1] });
+});
+
+test("drawing lineage index restores coverage groups after replacing a gapped tail", () => {
+  const rows = [
+    displayRow(0, 10, 0, { from: 0, to: 10 }),
+    displayRow(1, 110, 0, { from: 100, to: 110 }),
+  ];
+  const index = createDrawingLineageIndex(rows);
+  const replacement = displayRow(1, 20, 0, { from: 11, to: 20 });
+  const nextRows = [rows[0], replacement];
+
+  assert.equal(index.replaceTail({
+    previousSeriesData: rows,
+    fromOutputIndex: 1,
+    insert: [replacement],
+    nextSeriesData: nextRows,
+  }), true);
+  assert.deepEqual(index.rowsOverlappingSourceEnvelope({
+    fromTime: 5,
+    toTime: 15,
+  }), { first: rows[0], last: replacement });
+});

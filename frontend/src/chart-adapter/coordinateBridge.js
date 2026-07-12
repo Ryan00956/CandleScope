@@ -7,6 +7,7 @@ const PROJECTION_METADATA_KEY = "chartProjection";
 const ordinalSeriesIndexCache = new WeakMap();
 const drawingSeriesContextRegistry = new WeakMap();
 const hydratedCoordinateSnapshotContexts = new WeakMap();
+const numericSeriesBoundsContexts = new WeakMap();
 
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -33,6 +34,25 @@ function projectionConfigFromContext(context) {
   return normalizeProjectionConfig(
     context?.drawingProjectionConfig ?? context?.projectionConfig,
   );
+}
+
+function numericSeriesBounds(seriesData, context) {
+  if (!Array.isArray(seriesData) || !context || typeof context !== "object") return null;
+  const cached = numericSeriesBoundsContexts.get(context);
+  if (cached?.seriesData === seriesData) return cached.bounds;
+
+  let firstTime = null;
+  let lastTime = null;
+  for (const row of seriesData) {
+    if (!isFiniteNumber(row?.time)) continue;
+    if (firstTime === null) firstTime = row.time;
+    lastTime = row.time;
+  }
+  const bounds = firstTime !== null && lastTime !== null && firstTime <= lastTime
+    ? { firstTime, lastTime }
+    : null;
+  numericSeriesBoundsContexts.set(context, { bounds, seriesData });
+  return bounds;
 }
 
 /**
@@ -133,6 +153,18 @@ function sourceOrdinalFromRow(row) {
   if (isOrdinalAxisTime(row?.time)) return row.time.sourceOrdinal;
   const ordinal = projectionMetadataFromRow(row)?.sourceOrdinal;
   return Number.isSafeInteger(ordinal) && ordinal >= 0 ? ordinal : null;
+}
+
+function exactOrdinalRow(ordinalIndex, anchor) {
+  if (!Number.isFinite(anchor?.time)
+    || !Number.isSafeInteger(anchor?.sourceOrdinal)
+    || anchor.sourceOrdinal < 0) {
+    return null;
+  }
+  for (const row of ordinalIndex?.exactRowsBySourceTime?.get(anchor.time) || []) {
+    if (sourceOrdinalFromRow(row) === anchor.sourceOrdinal) return row;
+  }
+  return null;
 }
 
 function firstSeriesTime(seriesData) {
@@ -414,6 +446,128 @@ export function resolveDrawingAnchorToDisplayRow(seriesData, anchor, context = n
   return rowRangesMonotonic
     ? resolveMonotonicSourceRange(rowRanges, normalized.time)
     : resolveUnorderedSourceRange(rowRanges, normalized.time);
+}
+
+/**
+ * Resolve one freehand v2 source-lineage span to CSS-pixel x coordinates.
+ * Exact ordinal row centers are used only for an unchanged projector/config.
+ * Otherwise the source envelope maps to the full cell envelope of the target
+ * overlap run, preserving continuous positions even when only one row remains.
+ */
+export function resolveSourceLineageSpanToCoordinates(
+  chart,
+  series,
+  {
+    sourceProjection,
+    sourceProjectionConfig,
+    exact,
+    fallback,
+  } = {},
+  context = null,
+) {
+  if (!chart || !series) return null;
+  const coordinateContext = context || {};
+  const seriesData = getCachedSeriesData(series, coordinateContext);
+  const timeScale = chart.timeScale?.();
+  if (!timeScale) return null;
+  const coordinateForRow = (row) => {
+    if (!row) return null;
+    try {
+      const coordinate = timeScale.timeToCoordinate(row.time);
+      return isFiniteNumber(coordinate) ? coordinate : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const fromTime = isFiniteNumber(fallback?.fromTime) ? fallback.fromTime : null;
+  const toTime = isFiniteNumber(fallback?.toTime) ? fallback.toTime : null;
+  const leftRatio = isFiniteNumber(fallback?.leftRatio) ? fallback.leftRatio : null;
+  const rightRatio = isFiniteNumber(fallback?.rightRatio) ? fallback.rightRatio : null;
+  if (fromTime === null
+    || toTime === null
+    || fromTime > toTime
+    || leftRatio === null
+    || rightRatio === null
+    || leftRatio < 0
+    || rightRatio > 1
+    || leftRatio >= rightRatio) {
+    return null;
+  }
+
+  const ordinalIndex = getOrdinalSeriesIndex(seriesData, coordinateContext);
+  const exactContextMatches = ordinalIndex
+    && sourceProjection === ordinalIndex.currentProjection
+    && normalizeProjectionConfig(sourceProjectionConfig) !== null
+    && sourceProjectionConfig === projectionConfigFromContext(coordinateContext);
+  if (exactContextMatches) {
+    const left = coordinateForRow(exactOrdinalRow(ordinalIndex, exact?.left));
+    const right = coordinateForRow(exactOrdinalRow(ordinalIndex, exact?.right));
+    if (left !== null && right !== null && left < right) return { left, right };
+  }
+
+  let barSpacing = null;
+  try {
+    barSpacing = timeScale.options?.().barSpacing;
+  } catch {
+    barSpacing = null;
+  }
+  if (!isFiniteNumber(barSpacing) || barSpacing <= 0) return null;
+
+  if (!ordinalIndex) {
+    const bounds = numericSeriesBounds(seriesData, coordinateContext);
+    if (!bounds || fromTime < bounds.firstTime || toTime > bounds.lastTime) return null;
+    const envelopeLeftCenter = timeToCoordinateInterpolated(
+      chart,
+      series,
+      fromTime,
+      coordinateContext,
+    );
+    const envelopeRightCenter = timeToCoordinateInterpolated(
+      chart,
+      series,
+      toTime,
+      coordinateContext,
+    );
+    if (!isFiniteNumber(envelopeLeftCenter)
+      || !isFiniteNumber(envelopeRightCenter)
+      || envelopeLeftCenter > envelopeRightCenter) {
+      return null;
+    }
+    const envelopeLeft = envelopeLeftCenter - barSpacing / 2;
+    const envelopeRight = envelopeRightCenter + barSpacing / 2;
+    return {
+      left: envelopeLeft + (envelopeRight - envelopeLeft) * leftRatio,
+      right: envelopeLeft + (envelopeRight - envelopeLeft) * rightRatio,
+    };
+  }
+
+  const sourceTimeHorizon = isFiniteNumber(coordinateContext.sourceTimeHorizon)
+    ? coordinateContext.sourceTimeHorizon
+    : null;
+  if ((sourceTimeHorizon !== null && toTime > sourceTimeHorizon)
+    || (sourceTimeHorizon === null
+      && (!Number.isFinite(ordinalIndex.latestLineage)
+        || toTime > ordinalIndex.latestLineage))) {
+    return null;
+  }
+
+  const overlap = ordinalIndex.rowsOverlappingSourceEnvelope({ fromTime, toTime });
+  if (!overlap) return null;
+  const firstCenter = coordinateForRow(overlap.first);
+  const lastCenter = coordinateForRow(overlap.last);
+  if (firstCenter === null
+    || lastCenter === null
+    || firstCenter > lastCenter) {
+    return null;
+  }
+
+  const envelopeLeft = firstCenter - barSpacing / 2;
+  const envelopeRight = lastCenter + barSpacing / 2;
+  return {
+    left: envelopeLeft + (envelopeRight - envelopeLeft) * leftRatio,
+    right: envelopeLeft + (envelopeRight - envelopeLeft) * rightRatio,
+  };
 }
 
 function getCachedSeriesData(series, context) {

@@ -24,6 +24,28 @@ function usesOrdinalSeriesData(seriesData) {
   return false;
 }
 
+function firstRangeIndexWithToAtLeast(rowRanges, target) {
+  let left = 0;
+  let right = rowRanges.length;
+  while (left < right) {
+    const middle = (left + right) >> 1;
+    if (rowRanges[middle].range.to < target) left = middle + 1;
+    else right = middle;
+  }
+  return left;
+}
+
+function firstRangeIndexWithFromGreaterThan(rowRanges, target, fromIndex = 0) {
+  let left = fromIndex;
+  let right = rowRanges.length;
+  while (left < right) {
+    const middle = (left + right) >> 1;
+    if (rowRanges[middle].range.from <= target) left = middle + 1;
+    else right = middle;
+  }
+  return left;
+}
+
 /**
  * Mutable, projection-owned lookup for resolving stable drawing anchors.
  *
@@ -45,6 +67,7 @@ export class DrawingLineageIndex {
     this.latestLineage = Number.NEGATIVE_INFINITY;
     this.rowRangesMonotonic = true;
     this._records = [];
+    this._coverageGroup = 0;
     this._previousRangeFrom = Number.NEGATIVE_INFINITY;
     this._previousRangeTo = Number.NEGATIVE_INFINITY;
     this.reset(seriesData);
@@ -61,6 +84,7 @@ export class DrawingLineageIndex {
       previousRangeFrom: this._previousRangeFrom,
       previousRangeTo: this._previousRangeTo,
       records: this._records,
+      coverageGroup: this._coverageGroup,
       rowRanges: this.rowRanges,
       rowRangesMonotonic: this.rowRangesMonotonic,
       seriesData: this.seriesData,
@@ -74,6 +98,7 @@ export class DrawingLineageIndex {
     this.latestLineage = Number.NEGATIVE_INFINITY;
     this.rowRangesMonotonic = true;
     this._records = [];
+    this._coverageGroup = 0;
     this._previousRangeFrom = Number.NEGATIVE_INFINITY;
     this._previousRangeTo = Number.NEGATIVE_INFINITY;
 
@@ -90,6 +115,7 @@ export class DrawingLineageIndex {
       this._previousRangeFrom = previousState.previousRangeFrom;
       this._previousRangeTo = previousState.previousRangeTo;
       this._records = previousState.records;
+      this._coverageGroup = previousState.coverageGroup;
       this.rowRanges = previousState.rowRanges;
       this.rowRangesMonotonic = previousState.rowRangesMonotonic;
       this.seriesData = previousState.seriesData;
@@ -136,6 +162,42 @@ export class DrawingLineageIndex {
     return true;
   }
 
+  /**
+   * Resolve the axis-ordered run whose source lineage overlaps an inclusive
+   * source-time envelope. Monotonic projector lineage uses two binary searches;
+   * unusual/non-monotonic or internally discontinuous metadata fails closed.
+   */
+  rowsOverlappingSourceEnvelope({ fromTime, toTime } = {}) {
+    if (!Number.isFinite(fromTime)
+      || !Number.isFinite(toTime)
+      || fromTime > toTime
+      || this.rowRanges.length === 0) {
+      return null;
+    }
+
+    // A first/last axis run is only meaningful when lineage itself follows
+    // axis order. Fail closed rather than spanning unrelated non-monotonic rows.
+    if (!this.rowRangesMonotonic) return null;
+
+    const firstIndex = firstRangeIndexWithToAtLeast(this.rowRanges, fromTime);
+    const endIndex = firstRangeIndexWithFromGreaterThan(
+      this.rowRanges,
+      toTime,
+      firstIndex,
+    );
+    if (firstIndex >= endIndex) return null;
+    const firstEntry = this.rowRanges[firstIndex];
+    const lastEntry = this.rowRanges[endIndex - 1];
+    if (firstEntry.range.from > fromTime
+      || firstEntry.range.to < fromTime
+      || lastEntry.range.from > toTime
+      || lastEntry.range.to < toTime
+      || firstEntry.coverageGroup !== lastEntry.coverageGroup) {
+      return null;
+    }
+    return { first: firstEntry.row, last: lastEntry.row };
+  }
+
   _removeTail(fromOutputIndex) {
     for (let index = this._records.length - 1; index >= fromOutputIndex; index -= 1) {
       const record = this._records[index];
@@ -158,6 +220,7 @@ export class DrawingLineageIndex {
     this.currentProjection = retained?.currentProjection || null;
     this.latestLineage = retained?.latestLineage ?? Number.NEGATIVE_INFINITY;
     this.rowRangesMonotonic = retained?.rowRangesMonotonic ?? true;
+    this._coverageGroup = retained?.coverageGroup ?? 0;
     this._previousRangeFrom = retained?.previousRangeFrom ?? Number.NEGATIVE_INFINITY;
     this._previousRangeTo = retained?.previousRangeTo ?? Number.NEGATIVE_INFINITY;
   }
@@ -192,9 +255,15 @@ export class DrawingLineageIndex {
         if (range.from < this._previousRangeFrom || range.to < this._previousRangeTo) {
           this.rowRangesMonotonic = false;
         }
+        // Projector lineage ranges normally overlap at their boundary. Allow
+        // adjacent inclusive integer ranges as well, while assigning a new
+        // group to a genuine hole so envelope queries remain O(log n).
+        if (this.rowRanges.length > 0 && range.from > this._previousRangeTo + 1) {
+          this._coverageGroup += 1;
+        }
         this._previousRangeFrom = range.from;
         this._previousRangeTo = range.to;
-        this.rowRanges.push({ row, range });
+        this.rowRanges.push({ coverageGroup: this._coverageGroup, row, range });
         if (range.to > this.latestLineage) this.latestLineage = range.to;
       }
       this.currentProjection ||= projectorId;
@@ -202,6 +271,7 @@ export class DrawingLineageIndex {
 
     this._records.push({
       currentProjection: this.currentProjection,
+      coverageGroup: this._coverageGroup,
       latestLineage: this.latestLineage,
       ordinalCount: this.ordinalRows.length,
       ordinalIncluded,

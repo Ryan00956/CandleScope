@@ -20,6 +20,7 @@ import { renderMarkers } from "../chart-adapter/markerRenderer";
 import { renderBgcolors } from "../chart-adapter/bgcolorPrimitiveRenderer";
 import {
   buildMainSeriesProjectionPatch,
+  materializeMainSeriesProjectionPatch,
   renderMainSeriesProjectionPatch,
 } from "../chart-adapter/projectionSeriesRenderer";
 import { createViewportController } from "../chart-adapter/viewportController";
@@ -808,6 +809,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           chartType: resolvedChartType,
         },
       });
+      const nextSeriesData = materializeMainSeriesProjectionPatch(renderedPatch);
       const result = replaceMainSeries(chart, previousSeries, {
         chartType: resolvedChartType,
         data: rows,
@@ -815,7 +817,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         indicatorBarColorMap,
         paneIndex: 0,
         previousSeriesData: renderedMainSeriesDataRef.current,
-        seriesData: renderedPatch.nextData,
+        seriesData: nextSeriesData,
         upColor,
       });
 
@@ -975,14 +977,29 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         projectionPatch: effectiveProjectionPatch,
         renderOptions: activeRenderOptions,
       });
-      renderMainSeriesProjectionPatch({
-        indexOfDisplayTime: (time) => projectionStore.indexOfDisplayTime(time),
-        previousDisplayRows,
-        patch: renderedPatch,
-        recordPerfEvent,
-        series,
-        viewportController: viewportControllerRef.current,
-      });
+      let projectionRendered = false;
+      try {
+        const renderResult = renderMainSeriesProjectionPatch({
+          indexOfDisplayTime: (time) => projectionStore.indexOfDisplayTime(time),
+          previousDisplayRows,
+          patch: renderedPatch,
+          recordPerfEvent,
+          series,
+          viewportController: viewportControllerRef.current,
+        });
+        renderedMainSeriesDataRef.current = renderResult.nextData;
+        projectionRendered = true;
+      } catch (error) {
+        // The chart may be partially mutated when both an incremental write
+        // and its setData recovery fail. A null cache forces the next delta to
+        // rebuild from output index zero instead of compounding that state.
+        renderedMainSeriesDataRef.current = null;
+        recordPerfEvent("chart.candleSeries.renderError", {
+          message: error instanceof Error ? error.message : String(error),
+          paneId: "main",
+          phase: "sync",
+        });
+      }
       syncDisplayDataRefsFromProjection({
         store: projectionStore,
         rowsRef: displayRowsRef,
@@ -990,9 +1007,8 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         rowIndexMapRef: displayRowIndexMapRef,
       });
       updateMainSeriesReference(series, rows);
-      renderedMainSeriesDataRef.current = renderedPatch.nextData;
       projectionRenderContextRef.current = mainSeriesRenderContext;
-      if (pendingSurfaceViewportRef.current && displayRows.length > 0) {
+      if (projectionRendered && pendingSurfaceViewportRef.current && displayRows.length > 0) {
         isRestoringViewportRef.current = true;
         try {
           restoreSurfaceViewport(
@@ -1030,16 +1046,25 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           projectionPatch,
           renderOptions: currentRenderOptions,
         });
-        renderMainSeriesProjectionPatch({
-          indexOfDisplayTime: (time) => projectionStore.indexOfDisplayTime(time),
-          previousDisplayRows,
-          patch: renderedPatch,
-          preserveViewport: shouldPreserveProjectionViewport(delta),
-          recordPerfEvent,
-          series: currentSeries,
-          viewportController: viewportControllerRef.current,
-        });
-        renderedMainSeriesDataRef.current = renderedPatch.nextData;
+        try {
+          const renderResult = renderMainSeriesProjectionPatch({
+            indexOfDisplayTime: (time) => projectionStore.indexOfDisplayTime(time),
+            previousDisplayRows,
+            patch: renderedPatch,
+            preserveViewport: shouldPreserveProjectionViewport(delta),
+            recordPerfEvent,
+            series: currentSeries,
+            viewportController: viewportControllerRef.current,
+          });
+          renderedMainSeriesDataRef.current = renderResult.nextData;
+        } catch (error) {
+          renderedMainSeriesDataRef.current = null;
+          recordPerfEvent("chart.candleSeries.renderError", {
+            message: error instanceof Error ? error.message : String(error),
+            paneId: "main",
+            phase: "delta",
+          });
+        }
         syncSourceDataRefsFromStore({
           store: currentStore,
           rowsRef: sourceRowsRef,

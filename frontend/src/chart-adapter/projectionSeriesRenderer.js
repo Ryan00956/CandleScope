@@ -1,6 +1,7 @@
 import { createMainSeriesPointConverter } from "./mainSeriesModel.js";
 
 const MAX_INCREMENTAL_TAIL_MUTATIONS = 64;
+const materializedPatchData = new WeakMap();
 
 function clampTailStart(value, length) {
   const index = Number(value);
@@ -26,24 +27,101 @@ export function buildMainSeriesProjectionPatch({
     startIndex: fromOutputIndex,
   });
   const insert = rows.slice(fromOutputIndex).map(toPoint);
-  const nextData = [
-    ...previous.slice(0, fromOutputIndex),
-    ...insert,
-  ];
 
   return {
     kind: "replace-tail",
     fromOutputIndex,
     deleteCount: Math.max(0, previous.length - fromOutputIndex),
     insert,
-    nextData,
+    previousData: previous,
     previousLength: previous.length,
-    nextLength: nextData.length,
+    nextLength: fromOutputIndex + insert.length,
   };
 }
 
+export function materializeMainSeriesProjectionPatch(patch) {
+  if (Array.isArray(patch?.nextData)) return patch.nextData;
+  if (patch && typeof patch === "object" && materializedPatchData.has(patch)) {
+    return materializedPatchData.get(patch);
+  }
+  const previous = Array.isArray(patch?.previousData) ? patch.previousData : [];
+  const fromOutputIndex = clampTailStart(patch?.fromOutputIndex, previous.length);
+  const insert = Array.isArray(patch?.insert) ? patch.insert : [];
+  const nextData = previous.slice(0, fromOutputIndex).concat(insert);
+  if (patch && typeof patch === "object") materializedPatchData.set(patch, nextData);
+  return nextData;
+}
+
+function isValidTailPatchShape(patch) {
+  const fromOutputIndex = Number(patch?.fromOutputIndex);
+  const deleteCount = Number(patch?.deleteCount);
+  const previousLength = Number(patch?.previousLength);
+  const nextLength = Number(patch?.nextLength);
+  const insert = patch?.insert;
+  if (!Array.isArray(insert)
+    || !Number.isInteger(fromOutputIndex)
+    || !Number.isInteger(deleteCount)
+    || !Number.isInteger(previousLength)
+    || !Number.isInteger(nextLength)
+    || fromOutputIndex < 0
+    || deleteCount < 0
+    || previousLength < 0
+    || nextLength < 0
+    || fromOutputIndex > previousLength
+    || deleteCount !== previousLength - fromOutputIndex
+    || nextLength !== fromOutputIndex + insert.length) {
+    return false;
+  }
+  return true;
+}
+
+function hasValidPreviousData(patch) {
+  return Array.isArray(patch?.previousData)
+    && patch.previousData.length === patch.previousLength;
+}
+
+function cacheCommittedPatchData(patch, data) {
+  if (patch && typeof patch === "object") materializedPatchData.set(patch, data);
+  return data;
+}
+
+function commitMainSeriesProjectionPatch(patch) {
+  const previous = patch?.previousData;
+  const insert = Array.isArray(patch?.insert) ? patch.insert : [];
+  const fromOutputIndex = Number(patch?.fromOutputIndex);
+  if (!hasValidPreviousData(patch) || !isValidTailPatchShape(patch)) {
+    return materializeMainSeriesProjectionPatch(patch);
+  }
+  if (patch && typeof patch === "object" && materializedPatchData.has(patch)) {
+    return materializedPatchData.get(patch);
+  }
+
+  if (fromOutputIndex === previous.length && insert.length === 0) {
+    return cacheCommittedPatchData(patch, previous);
+  }
+  if (!Object.isExtensible(previous) || Object.isSealed(previous) || Object.isFrozen(previous)) {
+    return materializeMainSeriesProjectionPatch(patch);
+  }
+
+  try {
+    previous.length = fromOutputIndex;
+    for (const point of insert) previous.push(point);
+    return cacheCommittedPatchData(patch, previous);
+  } catch {
+    return materializeMainSeriesProjectionPatch(patch);
+  }
+}
+
+function renderResult(mode, nextData) {
+  return { mode, nextData };
+}
+
 function record(recordPerfEvent, name, detail) {
-  recordPerfEvent?.(name, detail);
+  try {
+    recordPerfEvent?.(name, detail);
+  } catch {
+    // Performance instrumentation must never interrupt chart state commits.
+  }
 }
 
 export function renderMainSeriesProjectionPatch({
@@ -56,10 +134,42 @@ export function renderMainSeriesProjectionPatch({
   series,
   viewportController,
 } = {}) {
-  if (!series || !patch) return "noop";
+  if (!patch) return renderResult("noop", []);
+  if (!series) {
+    return renderResult(
+      "noop",
+      Array.isArray(patch.previousData) ? patch.previousData : (patch.nextData || []),
+    );
+  }
+  if (!isValidTailPatchShape(patch)) {
+    if (!Array.isArray(patch.nextData)) {
+      throw new TypeError("projection patch must describe a complete rendered tail replacement");
+    }
+    series.setData(patch.nextData);
+    record(recordPerfEvent, "chart.candleSeries.setData", {
+      paneId,
+      points: patch.nextData.length,
+      reason: "projection-invalid-patch-rebuild",
+    });
+    return renderResult("setData", patch.nextData);
+  }
+  if (!hasValidPreviousData(patch)) {
+    if (!Array.isArray(patch.nextData)) {
+      throw new TypeError("incremental projection patches require previous rendered data");
+    }
+    series.setData(patch.nextData);
+    record(recordPerfEvent, "chart.candleSeries.setData", {
+      paneId,
+      points: patch.nextData.length,
+      reason: "projection-explicit-data-rebuild",
+    });
+    return renderResult("setData", patch.nextData);
+  }
   if (patch.deleteCount === 0
     && patch.insert?.length === 0
-    && patch.previousLength === patch.nextLength) return "noop";
+    && patch.previousLength === patch.nextLength) {
+    return renderResult("noop", commitMainSeriesProjectionPatch(patch));
+  }
 
   if (patch.nextLength === 0) {
     series.setData([]);
@@ -68,17 +178,18 @@ export function renderMainSeriesProjectionPatch({
       points: 0,
       reason: "projection-clear",
     });
-    return "setData";
+    return renderResult("setData", commitMainSeriesProjectionPatch(patch));
   }
 
   if (patch.previousLength === 0) {
-    series.setData(patch.nextData);
+    const nextData = materializeMainSeriesProjectionPatch(patch);
+    series.setData(nextData);
     record(recordPerfEvent, "chart.candleSeries.setData", {
       paneId,
       points: patch.nextLength,
       reason: "projection-initial",
     });
-    return "setData";
+    return renderResult("setData", nextData);
   }
 
   const isPureAppend = patch.deleteCount === 0
@@ -91,13 +202,14 @@ export function renderMainSeriesProjectionPatch({
     try {
       for (const point of patch.insert) series.update(point);
     } catch {
-      series.setData(patch.nextData);
+      const nextData = materializeMainSeriesProjectionPatch(patch);
+      series.setData(nextData);
       record(recordPerfEvent, "chart.candleSeries.setData", {
         paneId,
         points: patch.nextLength,
         reason: "projection-tail-update-fallback",
       });
-      return "setData";
+      return renderResult("setData", nextData);
     }
     record(recordPerfEvent, "chart.candleSeries.update", {
       paneId,
@@ -105,7 +217,7 @@ export function renderMainSeriesProjectionPatch({
       reason: isPureAppend ? "projection-append" : "projection-tail-replace",
       totalPoints: patch.nextLength,
     });
-    return "update";
+    return renderResult("update", commitMainSeriesProjectionPatch(patch));
   }
 
   const tailMutationCount = patch.deleteCount + patch.insert.length;
@@ -119,13 +231,14 @@ export function renderMainSeriesProjectionPatch({
       series.pop(patch.deleteCount);
       for (const point of patch.insert) series.update(point);
     } catch {
-      series.setData(patch.nextData);
+      const nextData = materializeMainSeriesProjectionPatch(patch);
+      series.setData(nextData);
       record(recordPerfEvent, "chart.candleSeries.setData", {
         paneId,
         points: patch.nextLength,
         reason: "projection-tail-pop-update-fallback",
       });
-      return "setData";
+      return renderResult("setData", nextData);
     }
     record(recordPerfEvent, "chart.candleSeries.update", {
       paneId,
@@ -134,20 +247,25 @@ export function renderMainSeriesProjectionPatch({
       reason: "projection-tail-pop-update",
       totalPoints: patch.nextLength,
     });
-    return "pop-update";
+    return renderResult("pop-update", commitMainSeriesProjectionPatch(patch));
   }
 
   const anchor = preserveViewport
     ? viewportController?.captureAnchor?.(previousDisplayRows) || null
     : null;
-  series.setData(patch.nextData);
+  const nextData = materializeMainSeriesProjectionPatch(patch);
+  series.setData(nextData);
   record(recordPerfEvent, "chart.candleSeries.setData", {
     paneId,
     points: patch.nextLength,
     reason: "projection-tail-rebuild",
   });
   if (anchor && typeof indexOfDisplayTime === "function") {
-    viewportController?.applyAnchorShift?.(anchor, indexOfDisplayTime);
+    try {
+      viewportController?.applyAnchorShift?.(anchor, indexOfDisplayTime);
+    } catch {
+      // Data has already committed; viewport compensation is best-effort.
+    }
   }
-  return "setData";
+  return renderResult("setData", nextData);
 }

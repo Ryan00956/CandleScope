@@ -88,6 +88,17 @@ function hasStrictlyIncreasingOutputOrders(rows) {
   return true;
 }
 
+function hasStrictOutputOrderSeam(previousRows, fromOutputIndex, insert) {
+  if (insert.length === 0 || fromOutputIndex === 0) return true;
+  try {
+    const previousOrder = outputOrder(previousRows[fromOutputIndex - 1]);
+    const nextOrder = outputOrder(insert[0]);
+    return previousOrder != null && nextOrder != null && previousOrder < nextOrder;
+  } catch {
+    return false;
+  }
+}
+
 function trimSharedProjectedPrefix(previousRows, startIndex, projectedRows) {
   let shared = 0;
   while (startIndex + shared < previousRows.length
@@ -121,6 +132,11 @@ function patchResult(fromOutputIndex, previousLength, insert, nextData) {
   };
 }
 
+function sourceTail(rows, startIndex) {
+  if (Array.isArray(rows)) return rows.slice(startIndex);
+  return Array.from(rows || []).slice(startIndex);
+}
+
 function firstDifference(previousRows, nextRows) {
   const shared = Math.min(previousRows.length, nextRows.length);
   for (let index = 0; index < shared; index += 1) {
@@ -139,13 +155,17 @@ export class ProjectionStore {
     this._display = [];
     this._displayTimeIndex = new Map();
     this._displayTimeSet = new Set();
+    this._hasStrictlyIncreasingDisplayOrders = true;
     this._projectionSeedState = null;
     this._projectionFinalState = null;
     this._sourceCheckpoints = [];
   }
 
   sourceSnapshot() {
-    return this._source;
+    // The source cache is updated in place on realtime tail deltas. Return an
+    // owned array so callers cannot mutate its structure and previously read
+    // snapshots do not change underneath them. Row objects remain shared.
+    return this._source.slice();
   }
 
   displaySnapshot() {
@@ -165,6 +185,13 @@ export class ProjectionStore {
   }
 
   displayTimeSet() {
+    if (this._displayTimeSet == null) {
+      const displayTimes = [];
+      for (const row of this._display) {
+        if (displayAxisKey(row?.time) != null) displayTimes.push(row.time);
+      }
+      this._displayTimeSet = new Set(displayTimes);
+    }
     return this._displayTimeSet;
   }
 
@@ -210,6 +237,7 @@ export class ProjectionStore {
       || this.projector.supportsStatefulTailProjection !== true
       || typeof this.projector.projectWithState !== "function"
       || trimmedLeft !== 0
+      || this._hasStrictlyIncreasingDisplayOrders !== true
       || this._sourceCheckpoints.length !== this._source.length
       || this._projectionFinalState == null) {
       return false;
@@ -250,7 +278,7 @@ export class ProjectionStore {
     const seedState = replacingLast
       ? this._sourceCheckpoints[sourceStart]
       : this._projectionFinalState;
-    const affectedRows = Array.from(currentRows || []).slice(sourceStart);
+    const affectedRows = sourceTail(currentRows, sourceStart);
     const projection = this.projector.projectWithState(affectedRows, { seedState });
     if (!projection
       || !Array.isArray(projection.data)
@@ -269,18 +297,39 @@ export class ProjectionStore {
       initialOutputIndex,
       projection.data,
     );
-    const nextDisplay = [
-      ...this._display.slice(0, tail.fromOutputIndex),
-      ...tail.insert,
-    ];
+    const displayChanged = tail.fromOutputIndex !== previousLength
+      || tail.insert.length > 0;
+    const previousDisplay = this._display;
+    if (displayChanged && !hasStrictOutputOrderSeam(
+      previousDisplay,
+      tail.fromOutputIndex,
+      tail.insert,
+    )) {
+      return null;
+    }
+    const displayTimeIndexPlan = displayChanged
+      ? this._planDisplayTimeIndexTail(
+        previousDisplay,
+        tail.fromOutputIndex,
+        tail.insert,
+      )
+      : null;
+    if (displayChanged && displayTimeIndexPlan == null) return null;
+    const nextDisplay = displayChanged
+      ? previousDisplay.slice(0, tail.fromOutputIndex).concat(tail.insert)
+      : previousDisplay;
 
-    this._source = Array.from(currentRows || []);
-    this._sourceCheckpoints = replacingLast
-      ? this._sourceCheckpoints.slice(0, sourceStart).concat(projection.checkpoints)
-      : this._sourceCheckpoints.concat(projection.checkpoints);
+    this._commitStatefulSourceTail({
+      affectedRows,
+      checkpoints: projection.checkpoints,
+      replacingLast,
+      sourceStart,
+    });
     this._projectionFinalState = projection.state;
     this._display = nextDisplay;
-    this._rebuildDisplayTimeIndex();
+    if (displayChanged) {
+      this._replaceDisplayTimeIndexTail(displayTimeIndexPlan);
+    }
     return patchResult(
       tail.fromOutputIndex,
       previousLength,
@@ -419,17 +468,77 @@ export class ProjectionStore {
     return rows[rows.length - 1] || null;
   }
 
+  _commitStatefulSourceTail({
+    affectedRows,
+    checkpoints,
+    replacingLast,
+    sourceStart,
+  }) {
+    if (replacingLast) {
+      this._source[sourceStart] = affectedRows[0];
+      this._sourceCheckpoints[sourceStart] = checkpoints[0];
+      return;
+    }
+    for (const row of affectedRows) this._source.push(row);
+    for (const checkpoint of checkpoints) this._sourceCheckpoints.push(checkpoint);
+  }
+
+  _planDisplayTimeIndexTail(previousDisplay, fromOutputIndex, insert) {
+    try {
+      const remove = [];
+      const add = [];
+      for (let index = fromOutputIndex; index < previousDisplay.length; index += 1) {
+        remove.push({
+          index,
+          key: displayAxisKey(previousDisplay[index]?.time),
+        });
+      }
+      for (let offset = 0; offset < insert.length; offset += 1) {
+        add.push({
+          index: fromOutputIndex + offset,
+          key: displayAxisKey(insert[offset]?.time),
+        });
+      }
+      return { add, remove };
+    } catch {
+      return null;
+    }
+  }
+
+  _replaceDisplayTimeIndexTail({ add, remove }) {
+    for (const { index, key } of remove) {
+      if (key != null && this._displayTimeIndex.get(key) === index) {
+        this._displayTimeIndex.delete(key);
+      }
+    }
+    for (const { index, key } of add) {
+      if (key != null) this._displayTimeIndex.set(key, index);
+    }
+    // displayTimeSet() is public and previously returned a versioned Set.
+    // Invalidate instead of mutating it so already returned sets stay stable;
+    // rebuilding is deferred until a caller actually asks for the set.
+    this._displayTimeSet = null;
+  }
+
   _rebuildDisplayTimeIndex() {
     this._displayTimeIndex.clear();
     const displayTimes = [];
+    let previousOrder = null;
+    let strictlyIncreasingOrders = true;
     for (let index = 0; index < this._display.length; index += 1) {
       const time = this._display[index]?.time;
       const key = displayAxisKey(time);
+      const order = outputOrder(this._display[index]);
+      if (order == null || (previousOrder != null && order <= previousOrder)) {
+        strictlyIncreasingOrders = false;
+      }
+      previousOrder = order;
       if (key != null) {
         this._displayTimeIndex.set(key, index);
         displayTimes.push(time);
       }
     }
     this._displayTimeSet = new Set(displayTimes);
+    this._hasStrictlyIncreasingDisplayOrders = strictlyIncreasingOrders;
   }
 }

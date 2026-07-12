@@ -302,6 +302,232 @@ for (const descriptor of PROJECTORS) {
   });
 }
 
+function numericIndex(property) {
+  return /^(0|[1-9]\d*)$/.test(String(property));
+}
+
+function assertDisplayIndexIntegrity(store) {
+  const display = store.displaySnapshot();
+  const timeSet = store.displayTimeSet();
+  assert.equal(store._displayTimeIndex.size, display.length);
+  assert.equal(timeSet.size, display.length);
+  assert.deepEqual([...timeSet], display.map((item) => item.time));
+  [...timeSet].forEach((time, index) => assert.strictEqual(time, display[index].time));
+  for (let index = 0; index < display.length; index += 1) {
+    assert.equal(store.indexOfDisplayTime(display[index].time), index);
+    assert.equal(store.indexOfDisplayTime({ ...display[index].time }), index);
+    assert.strictEqual(store.getDisplayByTime(display[index].time), display[index]);
+  }
+}
+
+test("stateful tail updates keep an independent source array and preserve prior snapshots", () => {
+  const store = new ProjectionStore({
+    projector: new LineBreakProjector({ minTick: 1, numberOfLines: 3 }),
+  });
+  const initial = source([10, 12, 13, 14]);
+  store.reset(initial);
+  const sourceCache = store._source;
+  const checkpointCache = store._sourceCheckpoints;
+  const oldSnapshot = store.sourceSnapshot();
+  const next = [...initial, row(5, 15)];
+
+  store.applySourceDelta({ type: "tick", appended: true }, next);
+
+  assert.strictEqual(store._source, sourceCache);
+  assert.strictEqual(store._sourceCheckpoints, checkpointCache);
+  assert.deepEqual(oldSnapshot, initial);
+  assert.deepEqual(store.sourceSnapshot(), next);
+  next[next.length - 1] = row(5, 999);
+  assert.equal(store.sourceSnapshot().at(-1).close, 15);
+  const callerSnapshot = store.sourceSnapshot();
+  callerSnapshot.length = 0;
+  assert.equal(store.sourceSnapshot().length, next.length);
+});
+
+test("stateful display changes stay copy-on-write while semantic no-ops retain identity", () => {
+  const store = new ProjectionStore({
+    projector: new LineBreakProjector({ minTick: 1, numberOfLines: 3 }),
+  });
+  const initial = source([10, 12, 13, 14]);
+  store.reset(initial);
+  const beforeAppend = store.displaySnapshot();
+  const beforeAppendValue = structuredClone(beforeAppend);
+  const appended = [...initial, row(5, 15)];
+
+  store.applySourceDelta({ type: "tick", appended: true }, appended);
+  const afterAppend = store.displaySnapshot();
+  assert.notStrictEqual(afterAppend, beforeAppend);
+  assert.deepEqual(beforeAppend, beforeAppendValue);
+
+  const noOpRows = [
+    ...appended.slice(0, -1),
+    { ...appended.at(-1), volume: 9999 },
+  ];
+  store.applySourceDelta({ type: "tick", replaced: true }, noOpRows);
+  assert.strictEqual(store.displaySnapshot(), afterAppend);
+});
+
+test("stateful tail patches update the private time index and lazily version the public time set", () => {
+  const store = new ProjectionStore({
+    projector: new LineBreakProjector({ minTick: 1, numberOfLines: 3 }),
+  });
+  const initial = source([10, 12, 13, 14]);
+  store.reset(initial);
+  const oldDisplay = store.displaySnapshot();
+  const oldLastTime = oldDisplay.at(-1).time;
+  const oldTimeSet = store.displayTimeSet();
+  const originalClear = store._displayTimeIndex.clear;
+  store._displayTimeIndex.clear = () => assert.fail("tail patch rebuilt the full time index");
+  const replaced = [...initial.slice(0, -1), row(4, 13)];
+
+  store.applySourceDelta({ type: "tick", replaced: true }, replaced);
+
+  store._displayTimeIndex.clear = originalClear;
+  assert.equal(store.indexOfDisplayTime(oldLastTime), -1);
+  assert.equal(oldTimeSet.size, oldDisplay.length);
+  const nextTimeSet = store.displayTimeSet();
+  assert.notStrictEqual(nextTimeSet, oldTimeSet);
+  assert.strictEqual(store.displayTimeSet(), nextTimeSet);
+  assertDisplayIndexIntegrity(store);
+});
+
+test("a malformed projector with duplicate display orders never enters the incremental index path", () => {
+  const projector = {
+    oneToOne: false,
+    projectedRows: 0,
+    supportsStatefulTailProjection: true,
+    project(rows, options) {
+      return this.projectWithState(rows, options).data;
+    },
+    projectWithState(rows) {
+      this.projectedRows += rows.length;
+      return {
+        checkpoints: rows.map((_, index) => ({ nextOrder: index })),
+        data: rows.map((item, index) => ({
+          ...item,
+          time: {
+            order: index === 2 ? 1 : index,
+            sourceOrdinal: 0,
+            sourceTime: item.time,
+          },
+        })),
+        state: { nextOrder: rows.length },
+      };
+    },
+  };
+  const store = new ProjectionStore({ projector });
+  const initial = source([10, 12, 14]);
+  store.reset(initial);
+  projector.projectedRows = 0;
+  const next = [...initial.slice(0, -1), row(3, 16)];
+
+  const patch = store.applySourceDelta({ type: "tick", replaced: true }, next);
+
+  assert.equal(projector.projectedRows, next.length);
+  assert.equal(patch.fromOutputIndex, 0);
+  assert.equal(store.indexOfDisplayTime({ order: 1 }), 2);
+});
+
+test("throwing tail time accessors fall back before committing partial index state", () => {
+  const projector = {
+    calls: 0,
+    oneToOne: false,
+    supportsStatefulTailProjection: true,
+    project(rows, options) {
+      return this.projectWithState(rows, options).data;
+    },
+    projectWithState(rows, { seedState = null } = {}) {
+      this.calls += 1;
+      const startOrder = seedState?.nextOrder || 0;
+      const data = rows.map((item, index) => ({
+        ...item,
+        time: {
+          order: startOrder + index,
+          sourceOrdinal: 0,
+          sourceTime: item.time,
+        },
+      }));
+      if (this.calls === 2 && data.length > 0) {
+        const time = data[0].time;
+        let reads = 0;
+        Object.defineProperty(data[0], "time", {
+          configurable: true,
+          get() {
+            reads += 1;
+            if (reads >= 4) throw new Error("time getter failed");
+            return time;
+          },
+        });
+      }
+      return {
+        checkpoints: rows.map((_, index) => ({ nextOrder: startOrder + index })),
+        data,
+        state: { nextOrder: startOrder + rows.length },
+      };
+    },
+  };
+  const store = new ProjectionStore({ projector });
+  const initial = source([10, 12]);
+  store.reset(initial);
+  const next = [...initial, row(3, 14)];
+
+  const patch = store.applySourceDelta({ type: "tick", appended: true }, next);
+
+  assert.equal(projector.calls, 3);
+  assert.equal(patch.fromOutputIndex, 0);
+  assert.deepEqual(store.sourceSnapshot(), next);
+  assertDisplayIndexIntegrity(store);
+});
+
+for (const operation of ["append", "replace"]) {
+  test(`stateful ${operation} reads only a constant-sized source/checkpoint tail`, () => {
+    const size = 2000;
+    const store = new ProjectionStore({
+      projector: new LineBreakProjector({ minTick: 1, numberOfLines: 3 }),
+    });
+    const initial = Array.from({ length: size }, (_, index) => row(index + 1, 100 + index));
+    store.reset(initial);
+    let sourceReads = 0;
+    let checkpointReads = 0;
+    let displayTimeReads = 0;
+    const checkpointCache = new Proxy(store._sourceCheckpoints, {
+      get(target, property, receiver) {
+        if (numericIndex(property)) checkpointReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    store._sourceCheckpoints = checkpointCache;
+    store._display = store._display.map((item) => new Proxy(item, {
+      get(target, property, receiver) {
+        if (property === "time") displayTimeReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    }));
+    const next = operation === "append"
+      ? [...initial, row(size + 1, 100 + size)]
+      : [...initial.slice(0, -1), row(size, 100 + size + 5)];
+    const observedRows = new Proxy(next, {
+      get(target, property, receiver) {
+        if (numericIndex(property)) sourceReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+
+    store.applySourceDelta(
+      operation === "append"
+        ? { type: "tick", appended: true }
+        : { type: "tick", replaced: true },
+      observedRows,
+    );
+
+    assert.ok(sourceReads < 20, `read ${sourceReads} source rows`);
+    assert.ok(checkpointReads < 4, `read ${checkpointReads} checkpoints`);
+    assert.ok(displayTimeReads < 64, `read ${displayTimeReads} display times`);
+    assert.strictEqual(store._sourceCheckpoints, checkpointCache);
+    assertDisplayIndexIntegrity(store);
+  });
+}
+
 for (const descriptor of PROJECTORS) {
   test(`${descriptor.name} projects only a multi-row append tail`, () => {
     const counting = new CountingStatefulProjector(descriptor.create());
@@ -339,6 +565,7 @@ for (const [descriptorIndex, descriptor] of PROJECTORS.entries()) {
     store.reset(current);
 
     for (let operation = 0; operation < 160; operation += 1) {
+      const previousDisplay = store.displaySnapshot();
       const close = 85 + Math.floor(random() * 40);
       if (random() < 0.65) {
         current = [...current.slice(0, -1), row(current.length, close)];
@@ -358,6 +585,13 @@ for (const [descriptorIndex, descriptor] of PROJECTORS.entries()) {
         descriptor.create().project(current),
         `${descriptor.name} diverged after operation ${operation}`,
       );
+      assertDisplayIndexIntegrity(store);
+      const retainedOrders = new Set(outputOrders(store.displaySnapshot()));
+      for (const previousRow of previousDisplay) {
+        if (!retainedOrders.has(previousRow.time.order)) {
+          assert.equal(store.indexOfDisplayTime(previousRow.time), -1);
+        }
+      }
     }
   });
 }

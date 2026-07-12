@@ -1,5 +1,9 @@
 import {
+  dataPointToCoordinate as resolveDataPointCoordinate,
+  drawingAnchorFromAxisTime,
+  isOrdinalAxisTime,
   logicalToCoordinateInterpolated,
+  registerDrawingSeriesContext,
   timeToCoordinateInterpolated,
 } from "./coordinateBridge.js";
 
@@ -17,12 +21,22 @@ function safeCall(fn, fallback = null) {
   }
 }
 
+function usesOrdinalData(data) {
+  if (!Array.isArray(data)) return false;
+  for (const row of data) {
+    if (row?.time != null) return isOrdinalAxisTime(row.time);
+  }
+  return false;
+}
+
 export function createLightweightChartAdapter({
   chartRef,
   seriesRef,
   seriesDataRef = null,
   seriesDataMapRef = null,
   seriesDataIndexRef = null,
+  sourceTimeHorizonRef = null,
+  projectionConfigRef = null,
 }) {
   const getChart = () => getRefValue(chartRef);
   const getSeries = () => getRefValue(seriesRef);
@@ -33,12 +47,44 @@ export function createLightweightChartAdapter({
   };
   const getSeriesDataMap = () => getRefValue(seriesDataMapRef);
   const getSeriesDataIndex = () => getRefValue(seriesDataIndexRef);
+  const getSourceTimeHorizon = () => getRefValue(sourceTimeHorizonRef);
+  const getProjectionConfig = () => getRefValue(projectionConfigRef);
+  const drawingSeriesProviders = {
+    projectionConfigProvider: getProjectionConfig,
+    seriesDataProvider: getSeriesData,
+    sourceTimeHorizonProvider: getSourceTimeHorizon,
+  };
+  const registerCurrentDrawingSeries = () => {
+    const series = getSeries();
+    if (series) registerDrawingSeriesContext(series, drawingSeriesProviders);
+    return series;
+  };
+  const createDrawingCoordinateContext = () => ({
+    drawingProjectionConfig: getProjectionConfig(),
+    seriesData: getSeriesData(),
+    sourceTimeHorizon: getSourceTimeHorizon(),
+  });
 
   return {
     isReady: () => !!(getChart() && getSeries()),
     hasSeries: () => !!getSeries(),
+    usesOrdinalTime: () => usesOrdinalData(getSeriesData()),
     getMainSeries: getSeries,
     getSeriesData,
+    axisTimeToDrawingAnchor: (time) => safeCall(() => {
+      registerCurrentDrawingSeries();
+      const context = createDrawingCoordinateContext();
+      return drawingAnchorFromAxisTime(time, context.seriesData, context);
+    }, null),
+    dataPointToCoordinate: (dataPoint) => safeCall(() => {
+      const series = registerCurrentDrawingSeries();
+      return resolveDataPointCoordinate(
+        getChart(),
+        series,
+        dataPoint,
+        createDrawingCoordinateContext(),
+      );
+    }, null),
     getSeriesItemByTime: (time) => {
       const dataMap = getSeriesDataMap();
       if (dataMap?.has?.(time)) return dataMap.get(time);
@@ -50,7 +96,7 @@ export function createLightweightChartAdapter({
       return getSeriesData().findIndex((bar) => bar?.time === time);
     },
     attachPrimitive: (primitive) => {
-      const series = getSeries();
+      const series = registerCurrentDrawingSeries();
       if (!series || !primitive) return false;
       return safeCall(() => {
         series.attachPrimitive(primitive);
@@ -74,10 +120,15 @@ export function createLightweightChartAdapter({
     },
     priceToCoordinate: (price) => safeCall(() => getSeries()?.priceToCoordinate(price), null),
     timeToCoordinate: (time) => safeCall(() => getChart()?.timeScale().timeToCoordinate(time), null),
-    timeToCoordinateInterpolated: (time) => safeCall(
-      () => timeToCoordinateInterpolated(getChart(), getSeries(), time, { seriesData: getSeriesData() }),
-      null,
-    ),
+    timeToCoordinateInterpolated: (time) => safeCall(() => {
+      const series = registerCurrentDrawingSeries();
+      return timeToCoordinateInterpolated(
+        getChart(),
+        series,
+        time,
+        createDrawingCoordinateContext(),
+      );
+    }, null),
     coordinateToPrice: (y) => safeCall(() => getSeries()?.coordinateToPrice(y), null),
     coordinateToTime: (x) => safeCall(() => getChart()?.timeScale().coordinateToTime(x), null),
     coordinateToLogical: (x) => safeCall(() => getChart()?.timeScale().coordinateToLogical(x), null),

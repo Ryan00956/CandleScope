@@ -19,11 +19,57 @@ function storageKey(symbol) {
   return `${STORAGE_PREFIX}-${symbol}`;
 }
 
-function serializeDataPoint(dataPoint) {
-  const source = dataPoint || {};
+function safeSourceOrdinal(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function safeSourceProjection(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 64
+    && /^[a-z0-9][a-z0-9-]*$/.test(value)
+    ? value
+    : null;
+}
+
+function safeProjectionConfig(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 512) return null;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return null;
+  }
+  return value;
+}
+
+function serializeHorizontalFields(source) {
   const out = {};
-  if (source.time != null && isFinite(Number(source.time))) out.time = source.time;
-  if (typeof source.logical === "number" && Number.isFinite(source.logical)) out.logical = source.logical;
+  const hasTime = source.time != null && isFinite(Number(source.time));
+  if (hasTime) out.time = source.time;
+
+  const sourceOrdinal = hasTime ? safeSourceOrdinal(source.sourceOrdinal) : null;
+  const sourceProjection = hasTime ? safeSourceProjection(source.sourceProjection) : null;
+  const sourceProjectionConfig = hasTime
+    ? safeProjectionConfig(source.sourceProjectionConfig)
+    : null;
+  if (sourceOrdinal !== null) out.sourceOrdinal = sourceOrdinal;
+  if (sourceProjection !== null) out.sourceProjection = sourceProjection;
+  if (sourceProjectionConfig !== null) out.sourceProjectionConfig = sourceProjectionConfig;
+
+  // Logical positions are projection-local. Keep the legacy time-axis fallback,
+  // but never persist it alongside a canonical ordinal source anchor.
+  if (sourceOrdinal === null
+    && sourceProjection === null
+    && sourceProjectionConfig === null
+    && typeof source.logical === "number"
+    && Number.isFinite(source.logical)) {
+    out.logical = source.logical;
+  }
+  return out;
+}
+
+export function serializeDataPoint(dataPoint) {
+  const source = dataPoint || {};
+  const out = serializeHorizontalFields(source);
   if (source.price != null && isFinite(Number(source.price))) out.price = source.price;
   return out;
 }
@@ -32,13 +78,11 @@ function serializeDataPoints(points) {
   return (points || []).map(serializeDataPoint);
 }
 
-function serializeHorizontalAnchor(anchor) {
+export function serializeHorizontalAnchor(anchor) {
   if (anchor == null) return null;
   if (typeof anchor === "number" && Number.isFinite(anchor)) return anchor;
   if (typeof anchor !== "object") return null;
-  const out = {};
-  if (anchor.time != null && isFinite(Number(anchor.time))) out.time = anchor.time;
-  if (typeof anchor.logical === "number" && Number.isFinite(anchor.logical)) out.logical = anchor.logical;
+  const out = serializeHorizontalFields(anchor);
   return Object.keys(out).length > 0 ? out : null;
 }
 

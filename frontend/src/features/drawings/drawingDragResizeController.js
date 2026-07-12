@@ -29,7 +29,25 @@ import { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitiv
 function horizontalAnchorFromDataPoint(dataPoint) {
   if (!dataPoint) return null;
   if (dataPoint.time != null && Number.isFinite(Number(dataPoint.time))) {
-    return { time: dataPoint.time };
+    const anchor = { time: dataPoint.time };
+    if (Number.isSafeInteger(dataPoint.sourceOrdinal) && dataPoint.sourceOrdinal >= 0) {
+      anchor.sourceOrdinal = dataPoint.sourceOrdinal;
+    }
+    if (typeof dataPoint.sourceProjection === "string" && dataPoint.sourceProjection) {
+      anchor.sourceProjection = dataPoint.sourceProjection;
+    }
+    if (typeof dataPoint.sourceProjectionConfig === "string"
+      && dataPoint.sourceProjectionConfig) {
+      anchor.sourceProjectionConfig = dataPoint.sourceProjectionConfig;
+    }
+    if (anchor.sourceOrdinal == null
+      && anchor.sourceProjection == null
+      && anchor.sourceProjectionConfig == null
+      && typeof dataPoint.logical === "number"
+      && Number.isFinite(dataPoint.logical)) {
+      anchor.logical = dataPoint.logical;
+    }
+    return anchor;
   }
   if (typeof dataPoint.logical === "number" && Number.isFinite(dataPoint.logical)) {
     return { logical: dataPoint.logical };
@@ -46,7 +64,28 @@ function dataPointFromHorizontalAnchor(anchor, price) {
 
 function preserveHorizontalAnchor(nextPoint, originalPoint) {
   const anchor = horizontalAnchorFromDataPoint(originalPoint);
-  return anchor ? { ...nextPoint, ...anchor } : nextPoint;
+  if (!anchor) return nextPoint;
+  const next = { ...nextPoint };
+  delete next.order;
+  delete next.time;
+  delete next.logical;
+  delete next.sourceOrdinal;
+  delete next.sourceProjection;
+  delete next.sourceProjectionConfig;
+  return { ...next, ...anchor };
+}
+
+function replaceHorizontalAnchor(nextPoint, dataPoint) {
+  const anchor = horizontalAnchorFromDataPoint(dataPoint);
+  if (!anchor) return null;
+  const next = { ...nextPoint };
+  delete next.order;
+  delete next.time;
+  delete next.logical;
+  delete next.sourceOrdinal;
+  delete next.sourceProjection;
+  delete next.sourceProjectionConfig;
+  return { ...next, ...anchor };
 }
 
 /**
@@ -300,10 +339,19 @@ export function applyLineFibShapeDrag({
     const basePoint = origDataPoint || prim.dataPoint || dataPoint;
     let nextPoint = dataPoint;
     if (axisLineType === "horizontal") {
-      nextPoint = { ...basePoint, price: dataPoint.price };
+      nextPoint = preserveHorizontalAnchor(
+        { ...basePoint, price: dataPoint.price },
+        basePoint,
+      );
     } else if (axisLineType === "vertical") {
-      nextPoint = { ...basePoint, time: dataPoint.time, logical: dataPoint.logical };
+      nextPoint = replaceHorizontalAnchor(basePoint, dataPoint);
+    } else {
+      nextPoint = replaceHorizontalAnchor(
+        { ...dataPoint, price: dataPoint.price },
+        dataPoint,
+      );
     }
+    if (!nextPoint) return;
     prim.setDataPoint(nextPoint);
     e.preventDefault();
     e.stopPropagation();

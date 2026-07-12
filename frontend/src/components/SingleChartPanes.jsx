@@ -43,17 +43,24 @@ import { planVisibleRangeRestore } from "../features/chart-session/visibleRangeS
 import { buildPaneConfigKey, loadPaneHeights, savePaneHeights } from "../features/chart-session/paneLayoutStorage";
 import {
   buildVisibleRangeSnapshot,
+  disposeChartPaneSurface,
   resolveDataTimeSet,
+  shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
   shouldPublishUserViewportRange,
   shouldRequestMoreLeft,
   shouldRestoreChartViewport,
 } from "./singleChartPaneLifecycle";
 import {
+  DRAWING_ENGINE_TOOL_IDS,
   loadDrawingEngineHost,
   preloadDrawingEngineHost,
   shouldLoadDrawingEngine,
 } from "../features/drawings/drawingEngineLoader";
+import {
+  drawingToolForAnchorMode,
+  supportsDrawingAnchorMode,
+} from "../features/drawings/drawingCapabilities";
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
 import {
   buildDisplaySourceTimeIndex,
@@ -74,7 +81,6 @@ import { recordPerfEvent } from "../runtime/performance/perfMarks";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
-const DRAWING_TOOL_IDS = new Set(["pen", "highlighter", "eraser", "line-segment", "line-ray", "line-infinite", "line-horizontal", "line-vertical", "line-cross", "angle-measure", "shape-rectangle", "shape-ellipse", "text", "fibonacci", "position-long", "position-short"]);
 const SINGLE_PANE_HEIGHT_KEY_PREFIX = "single:";
 const PRICE_SCALE_CONTEXT_HIT_WIDTH = 96;
 const PRICE_SCALE_CONTEXT_MENU_WIDTH = 220;
@@ -112,6 +118,15 @@ function filterFillsForLines(fills, lines) {
 
 function rowsFromStore(store) {
   return store?.snapshot?.() || [];
+}
+
+function latestFiniteSourceTime(rows) {
+  if (!Array.isArray(rows)) return null;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const time = rows[index]?.time;
+    if (typeof time === "number" && Number.isFinite(time)) return time;
+  }
+  return null;
 }
 
 function resolveProjectionRuntime(chartType, rows, settings = {}) {
@@ -459,6 +474,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const requestedProjectionSettingsRef = useRef(null);
   const pendingSurfaceViewportRef = useRef(null);
   const surfaceAxisModeRef = useRef("time");
+  const drawingSourceTimeHorizonRef = useRef(null);
   const seriesStoreRef = useRef(seriesStore);
   const prevIndicatorKeyRef = useRef("");
   const intervalRef = useRef(interval);
@@ -473,11 +489,14 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
   const datasetKeyRef = useRef(datasetKey);
   const surfaceConfigKeyRef = useRef(null);
+  const drawingProjectionConfigRef = useRef(null);
   const onViewportRangeChangeRef = useRef(onViewportRangeChange);
   const onVisibleRangeChangeRef = useRef(onVisibleRangeChange);
   const drawingApiRef = useRef(null);
   const drawingsHiddenRef = useRef(false);
   const [seriesReady, setSeriesReady] = useState(0);
+  const [drawingSeriesGeneration, setDrawingSeriesGeneration] = useState(0);
+  const [drawingCoordinateGeneration, setDrawingCoordinateGeneration] = useState(0);
   const [auxiliaryDisplayState, setAuxiliaryDisplayState] = useState({
     datasetKey: null,
     rows: [],
@@ -491,7 +510,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const resolvedDescriptor = getChartTypeDescriptor(resolvedChartType);
   const resolvedAxisMode = resolvedDescriptor.axisMode;
   const usesDerivedAxis = resolvedAxisMode === "derived-ordinal";
-  const supportsDrawingFeatures = !usesDerivedAxis;
+  const drawingAnchorMode = resolvedDescriptor.drawingAnchorMode;
+  const supportsDrawingFeatures = supportsDrawingAnchorMode(drawingAnchorMode);
+  const effectiveDrawingTool = drawingToolForAnchorMode(drawingAnchorMode, drawingTool);
   const projectionSettings = useMemo(() => {
     if (resolvedChartType === "renko") {
       return {
@@ -538,6 +559,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const surfaceConfigKey = resolvedAxisMode === "derived-ordinal"
     ? `${resolvedAxisMode}:${resolvedChartType}:${projectionSettingsKey}`
     : resolvedAxisMode;
+  const drawingCoordinateKey = `${datasetKey || ""}:${surfaceConfigKey}:${drawingCoordinateGeneration}`;
   requestedChartTypeRef.current = resolvedChartType;
   requestedProjectionSettingsRef.current = projectionSettings;
   seriesStoreRef.current = seriesStore;
@@ -560,6 +582,8 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       seriesDataRef: displayRowsRef,
       seriesDataMapRef: displayRowMapRef,
       seriesDataIndexRef: displayRowIndexMapRef,
+      sourceTimeHorizonRef: drawingSourceTimeHorizonRef,
+      projectionConfigRef: drawingProjectionConfigRef,
     }),
     [],
   );
@@ -686,6 +710,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       axisMode: initialDescriptor.axisMode,
     });
     const initialRows = rowsFromStore(seriesStoreRef.current);
+    drawingSourceTimeHorizonRef.current = latestFiniteSourceTime(initialRows);
     syncSourceDataRefsFromStore({
       store: seriesStoreRef.current,
       rowsRef: sourceRowsRef,
@@ -697,6 +722,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       initialRows,
       requestedProjectionSettingsRef.current,
     );
+    drawingProjectionConfigRef.current = `${datasetKeyRef.current || ""}:${initialProjectionStore.configurationKey}`;
     initialProjectionStore.reset(initialRows);
     projectionStoreRef.current = initialProjectionStore;
     projectionGenerationRef.current += 1;
@@ -732,6 +758,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       signature: JSON.stringify(buildMainSeriesReferenceOptions(initialChartType, initialRows)),
     };
     setSeriesReady((prev) => prev + 1);
+    setDrawingSeriesGeneration((prev) => prev + 1);
 
     const handleCrosshairMove = (param) => {
       if (isSyncingRef.current || !onCrosshairMove) return;
@@ -821,9 +848,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
       } catch { /* chart may already be disposing */ }
       onCrosshairMove?.(null);
-      try {
-        chart.remove();
-      } catch { /* best-effort teardown */ }
+      disposeChartPaneSurface(chart, {
+        // Drawing primitives keep a requestUpdate callback supplied by their
+        // owning series. Detach them before remove() so a later re-attach
+        // cannot enqueue work on this disposed surface.
+        beforeRemove: () => drawingApiRef.current?.prepareSurfaceDispose?.(),
+      });
     };
   }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishViewportRangeChange, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
@@ -889,6 +919,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         rows,
         projectionSettings,
       );
+      drawingProjectionConfigRef.current = `${datasetKeyRef.current || ""}:${nextProjectionStore.configurationKey}`;
       const projectionPatch = nextProjectionStore.reset(rows);
       const displayRows = nextProjectionStore.displaySnapshot();
       const renderedPatch = buildMainSeriesProjectionPatch({
@@ -949,6 +980,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         to: resolvedChartType,
       });
       setSeriesReady((prev) => prev + 1);
+      setDrawingSeriesGeneration((prev) => prev + 1);
     } catch (error) {
       console.warn("SingleChartPanes: failed to switch main chart type:", error);
     } finally {
@@ -1026,10 +1058,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     hasRestoredRangeRef.current = false;
     lastViewportRestoreSourceRef.current = null;
     renderedMainSeriesDataRef.current = [];
+    drawingSourceTimeHorizonRef.current = null;
     displayRowsRef.current = [];
     displayRowMapRef.current = new Map();
     displayRowIndexMapRef.current = new Map();
     projectionStoreRef.current = null;
+    drawingProjectionConfigRef.current = null;
     setAuxiliaryDisplayState({ datasetKey: null, rows: [], surfaceConfigKey: null });
     projectionGenerationRef.current += 1;
     projectionRenderContextRef.current = null;
@@ -1046,6 +1080,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       chartType: activeChartType,
     };
     const rows = rowsFromStore(store);
+    drawingSourceTimeHorizonRef.current = latestFiniteSourceTime(rows);
     const desiredProjectionStore = createProjectionStore(
       activeChartType,
       rows,
@@ -1057,9 +1092,19 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const projectionStore = canReuseProjection
       ? existingProjectionStore
       : desiredProjectionStore;
+    drawingProjectionConfigRef.current = `${datasetKeyRef.current || ""}:${projectionStore.configurationKey}`;
     const generation = projectionGenerationRef.current + 1;
     projectionGenerationRef.current = generation;
     projectionStoreRef.current = projectionStore;
+    if (shouldAdvanceDrawingCoordinateGeneration({
+      axisMode: getChartTypeDescriptor(activeChartType).axisMode,
+      canReuseProjection,
+    })) {
+      // Resolved ATR/minTick values can change while the requested settings
+      // key stays the same. Cancel transient drawing state across that
+      // structural coordinate reprojection even though the series survives.
+      setDrawingCoordinateGeneration((previous) => previous + 1);
+    }
 
     try {
       isSyncingRef.current = true;
@@ -1160,6 +1205,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           chartType: mainSeriesTypeRef.current,
         };
         const rows = rowsFromStore(currentStore);
+        const previousSourceTimeHorizon = drawingSourceTimeHorizonRef.current;
+        const nextSourceTimeHorizon = latestFiniteSourceTime(rows);
+        drawingSourceTimeHorizonRef.current = nextSourceTimeHorizon;
+        const sourceTimeHorizonChanged = nextSourceTimeHorizon !== previousSourceTimeHorizon;
         const previousDisplayRows = projectionStore.displaySnapshot();
         const projectionPatch = projectionStore.applySourceDelta(delta, rows);
         const displayRows = projectionStore.displaySnapshot();
@@ -1214,11 +1263,15 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           });
         }
         updateMainSeriesReference(currentSeries, rows);
+        if (sourceTimeHorizonChanged
+          && getChartTypeDescriptor(mainSeriesTypeRef.current).axisMode === "derived-ordinal") {
+          chartAdapter.requestSeriesUpdate();
+        }
       } finally {
         isSyncingRef.current = false;
       }
     });
-  }, [mainSeriesRenderContext, projectionSettings, seriesReady, seriesStore, updateMainSeriesReference]);
+  }, [chartAdapter, mainSeriesRenderContext, projectionSettings, seriesReady, seriesStore, updateMainSeriesReference]);
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);
@@ -1320,7 +1373,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         try {
           const series = createIndicatorSeries(chart, line, {
             paneIndex: pane.paneIndex,
-            crosshairMarkerVisible: !DRAWING_TOOL_IDS.has(drawingTool),
+            crosshairMarkerVisible: !DRAWING_ENGINE_TOOL_IDS.has(effectiveDrawingTool),
           });
           const validData = normalizeLineSeriesData(line, renderDataTimeSet);
           if (validData.length > 0) {
@@ -1364,7 +1417,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     })) {
       setSeriesReady((prev) => prev + 1);
     }
-  }, [datasetKey, drawingTool, interval, paneDescriptors, renderDataTimeSet, seriesReady, usesDerivedAxis]);
+  }, [datasetKey, effectiveDrawingTool, interval, paneDescriptors, renderDataTimeSet, seriesReady, usesDerivedAxis]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1454,22 +1507,29 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   }, [drawingKeyBase, subPanes, symbol]);
 
   const shouldMountDrawingEngine = supportsDrawingFeatures
-    && shouldLoadDrawingEngine({ activeTool: drawingTool, drawingKey });
+    && shouldLoadDrawingEngine({ activeTool: effectiveDrawingTool, drawingKey });
   const drawingAnchorReady = !!mainSeriesRef.current;
 
   useEffect(() => {
     if (!supportsDrawingFeatures
       || DrawingEngineHost
-      || seriesReady <= 0
+      || drawingSeriesGeneration <= 0
       || !drawingAnchorReady) return undefined;
-    if (!shouldMountDrawingEngine && !DRAWING_TOOL_IDS.has(drawingTool)) return undefined;
+    if (!shouldMountDrawingEngine && !DRAWING_ENGINE_TOOL_IDS.has(effectiveDrawingTool)) return undefined;
     let cancelled = false;
     preloadDrawingEngineHost();
     loadDrawingEngineHost().then((module) => {
       if (!cancelled) setDrawingEngineHost(() => module.default);
     });
     return () => { cancelled = true; };
-  }, [DrawingEngineHost, drawingAnchorReady, drawingTool, seriesReady, shouldMountDrawingEngine, supportsDrawingFeatures]);
+  }, [
+    DrawingEngineHost,
+    drawingAnchorReady,
+    drawingSeriesGeneration,
+    effectiveDrawingTool,
+    shouldMountDrawingEngine,
+    supportsDrawingFeatures,
+  ]);
 
   const clearAllDrawings = useCallback(() => {
     drawingApiRef.current?.clearAll?.();
@@ -1483,6 +1543,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   }, []);
   const prepareDrawingExport = useCallback(() => {
     drawingApiRef.current?.prepareExport?.();
+  }, []);
+  const handleDrawingApiChange = useCallback((api) => {
+    drawingApiRef.current = api;
   }, []);
 
   useImperativeHandle(ref, () => ({
@@ -1533,7 +1596,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         <div className="synthetic-chart-notice" role="status">
           <strong>{syntheticChartNotice.title}</strong>
           <span>
-            {`${syntheticChartNotice.detail} · 指标按原始 K 线映射 · 成交量仅落末个合成点 · 绘图暂不支持`}
+            {`${syntheticChartNotice.detail} · 指标按原始 K 线映射 · 成交量仅落末个合成点 · 绘图锚定已有合成点，未来区暂不支持`}
           </span>
         </div>
       )}
@@ -1597,7 +1660,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         <DrawingEngineHost
           chartAdapter={chartAdapter}
           chartContainerRef={containerRef}
-          activeTool={drawingTool}
+          activeTool={effectiveDrawingTool}
           onToolChange={onDrawingToolChange}
           penColor={penColor}
           penSize={penSize}
@@ -1609,9 +1672,11 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           positionSize={positionSize}
           drawingSnapEnabled={drawingSnapEnabled}
           drawingKey={drawingKey}
-          seriesReady={seriesReady}
+          drawingSeriesGeneration={drawingSeriesGeneration}
+          drawingCoordinateKey={drawingCoordinateKey}
+          drawingAnchorMode={drawingAnchorMode}
           initialHidden={drawingsHiddenRef.current}
-          onApiChange={(api) => { drawingApiRef.current = api; }}
+          onApiChange={handleDrawingApiChange}
           onSelectedDrawingChange={onSelectedDrawingChange}
         />
       )}

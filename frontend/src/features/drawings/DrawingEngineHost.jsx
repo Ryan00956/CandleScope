@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDrawing } from "./drawingInteractionController.js";
 import TextEditOverlay from "../../components/TextEditOverlay";
 import TextFormatBar from "../../components/TextFormatBar";
@@ -18,7 +18,9 @@ export default function DrawingEngineHost({
     positionSize,
     drawingSnapEnabled,
     drawingKey,
-    seriesReady,
+    drawingSeriesGeneration,
+    drawingCoordinateKey,
+    drawingAnchorMode,
     initialHidden = false,
     onApiChange,
     onSelectedDrawingChange,
@@ -38,10 +40,34 @@ export default function DrawingEngineHost({
         positionSize,
         drawingSnapEnabled,
         symbol: drawingKey,
-        seriesReady,
+        seriesReady: drawingSeriesGeneration,
+        drawingCoordinateKey,
+        drawingAnchorMode,
     });
+    const {
+        clearAll,
+        commitTextEditing,
+        editingTextId,
+        prepareSurfaceDispose,
+        selectedDrawingMeta,
+        setHidden,
+        updateSelectedDrawingStyle,
+    } = drawing;
     const appliedInitialHiddenRef = useRef(false);
+    const editingTextIdRef = useRef(editingTextId);
+    const commitTextEditingRef = useRef(commitTextEditing);
     const [chartContainerWidth, setChartContainerWidth] = useState(0);
+
+    useEffect(() => {
+        editingTextIdRef.current = editingTextId;
+        commitTextEditingRef.current = commitTextEditing;
+    }, [commitTextEditing, editingTextId]);
+
+    const prepareExport = useCallback(() => {
+        if (editingTextIdRef.current) {
+            commitTextEditingRef.current?.({ clearSelection: true, exitTool: false });
+        }
+    }, []);
 
     useEffect(() => {
         const el = chartContainerRef.current;
@@ -63,38 +89,36 @@ export default function DrawingEngineHost({
     useEffect(() => {
         if (appliedInitialHiddenRef.current) return;
         appliedInitialHiddenRef.current = true;
-        if (initialHidden) drawing.setHidden(true);
-    }, [drawing, initialHidden]);
+        if (initialHidden) setHidden(true);
+    }, [initialHidden, setHidden]);
 
     useEffect(() => {
-        onSelectedDrawingChange?.(drawing.selectedDrawingMeta);
-    }, [drawing.selectedDrawingMeta, onSelectedDrawingChange]);
+        onSelectedDrawingChange?.(selectedDrawingMeta);
+    }, [onSelectedDrawingChange, selectedDrawingMeta]);
+
+    useEffect(() => () => {
+        onSelectedDrawingChange?.(null);
+    }, [onSelectedDrawingChange]);
 
     useEffect(() => {
         onApiChange?.({
-            clearAll: drawing.clearAll,
-            setHidden: drawing.setHidden,
-            updateSelectedDrawingStyle: drawing.updateSelectedDrawingStyle,
-            prepareExport: () => {
-                if (drawing.editingTextId) {
-                    drawing.commitTextEditing({ clearSelection: true, exitTool: false });
-                }
-            },
+            clearAll,
+            prepareSurfaceDispose,
+            setHidden,
+            updateSelectedDrawingStyle,
+            prepareExport,
         });
 
         return () => {
             onApiChange?.(null);
-            onSelectedDrawingChange?.(null);
         };
     }, [
-        drawing,
-        drawing.clearAll,
-        drawing.commitTextEditing,
-        drawing.editingTextId,
-        drawing.setHidden,
-        drawing.updateSelectedDrawingStyle,
+        clearAll,
         onApiChange,
-        onSelectedDrawingChange,
+        prepareExport,
+        prepareSurfaceDispose,
+        setHidden,
+        updateSelectedDrawingStyle,
     ]);
 
     return (

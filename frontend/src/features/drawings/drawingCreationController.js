@@ -30,7 +30,25 @@ import {
 function horizontalAnchorFromDataPoint(dataPoint) {
   if (!dataPoint) return null;
   if (dataPoint.time != null && Number.isFinite(Number(dataPoint.time))) {
-    return { time: dataPoint.time };
+    const anchor = { time: dataPoint.time };
+    if (Number.isSafeInteger(dataPoint.sourceOrdinal) && dataPoint.sourceOrdinal >= 0) {
+      anchor.sourceOrdinal = dataPoint.sourceOrdinal;
+    }
+    if (typeof dataPoint.sourceProjection === "string" && dataPoint.sourceProjection) {
+      anchor.sourceProjection = dataPoint.sourceProjection;
+    }
+    if (typeof dataPoint.sourceProjectionConfig === "string"
+      && dataPoint.sourceProjectionConfig) {
+      anchor.sourceProjectionConfig = dataPoint.sourceProjectionConfig;
+    }
+    if (anchor.sourceOrdinal == null
+      && anchor.sourceProjection == null
+      && anchor.sourceProjectionConfig == null
+      && typeof dataPoint.logical === "number"
+      && Number.isFinite(dataPoint.logical)) {
+      anchor.logical = dataPoint.logical;
+    }
+    return anchor;
   }
   if (typeof dataPoint.logical === "number" && Number.isFinite(dataPoint.logical)) {
     return { logical: dataPoint.logical };

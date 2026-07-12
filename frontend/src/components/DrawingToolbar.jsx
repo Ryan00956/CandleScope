@@ -9,9 +9,15 @@
  */
 import { memo, useCallback, useEffect } from "react";
 import {
-  CHART_AXIS_MODES,
+  CHART_DRAWING_ANCHOR_MODES,
   getChartTypeDescriptor,
 } from "../features/chart-representation/chartTypeRegistry.js";
+import {
+  drawingToolForAnchorMode,
+  hasSupportedDrawingVariant,
+  supportsDrawingAnchorMode,
+  supportsDrawingTool,
+} from "../features/drawings/drawingCapabilities.js";
 import { markPerfOnce } from "../runtime/performance/perfMarks";
 import DrawingActionButtons from "./drawing/DrawingActionButtons.jsx";
 import DrawingStyleControls from "./drawing/DrawingStyleControls.jsx";
@@ -32,6 +38,9 @@ import {
 import FibLevelsPanel from "./drawing/FibLevelsPanel.jsx";
 import PositionSettingsPanel from "./drawing/PositionSettingsPanel.jsx";
 import { useDrawingToolbarController } from "./drawing/useDrawingToolbarController.js";
+
+const DEFAULT_LINE_VARIANT = LINE_VARIANTS.find((variant) => variant.id === "line-segment")
+  || LINE_VARIANTS[0];
 
 const DrawingToolbar = memo(function DrawingToolbar({
   activeTool,
@@ -73,6 +82,22 @@ const DrawingToolbar = memo(function DrawingToolbar({
   useEffect(() => {
     markPerfOnce("lazy.drawingToolbar.ready");
   }, []);
+
+  const chartTypeDescriptor = getChartTypeDescriptor(chartType);
+  const drawingAnchorMode = chartTypeDescriptor.drawingAnchorMode;
+  const usesSourceLineageAnchors = drawingAnchorMode
+    === CHART_DRAWING_ANCHOR_MODES.SOURCE_LINEAGE;
+  const drawingFeaturesEnabled = supportsDrawingAnchorMode(drawingAnchorMode);
+  const effectiveActiveTool = drawingToolForAnchorMode(drawingAnchorMode, activeTool);
+  const handleCapabilityToolChange = useCallback((nextTool) => {
+    if (nextTool == null || supportsDrawingTool(drawingAnchorMode, nextTool)) {
+      onToolChange?.(nextTool);
+    }
+  }, [drawingAnchorMode, onToolChange]);
+  const isVariantDisabled = useCallback(
+    (variant) => !supportsDrawingTool(drawingAnchorMode, variant?.id),
+    [drawingAnchorMode],
+  );
 
   const {
     chartTypeBtnRef,
@@ -145,10 +170,10 @@ const DrawingToolbar = memo(function DrawingToolbar({
     showShapeOptions,
     showTextOptions,
   } = useDrawingToolbarController({
-    activeTool,
+    activeTool: effectiveActiveTool,
     chartType,
     onChartTypeChange,
-    onToolChange,
+    onToolChange: handleCapabilityToolChange,
     onToggleExportPanel,
   });
 
@@ -165,8 +190,44 @@ const DrawingToolbar = memo(function DrawingToolbar({
       onSelectedDrawingStyleChange?.({ lineWidth });
     }
   }, [onPenSizeChange, onSelectedDrawingStyleChange, selectedDrawing]);
-  const drawingToolsDisabled = getChartTypeDescriptor(chartType).axisMode !== CHART_AXIS_MODES.TIME;
-  const drawingToolTitle = `${currentChartType.label} 暂不支持绘图工具`;
+  const drawingToolsDisabled = !drawingFeaturesEnabled;
+  const cursorToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, CURSOR_VARIANTS);
+  const freehandToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, FREEHAND_VARIANTS);
+  const eraserDisabled = !supportsDrawingTool(drawingAnchorMode, "eraser");
+  const lineToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, LINE_VARIANTS);
+  const shapeToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, SHAPE_VARIANTS);
+  const textDisabled = !supportsDrawingTool(drawingAnchorMode, "text");
+  const fibonacciDisabled = !supportsDrawingTool(drawingAnchorMode, "fibonacci");
+  const positionToolsDisabled = !hasSupportedDrawingVariant(drawingAnchorMode, POSITION_VARIANTS);
+  const lineVariantSupported = supportsDrawingTool(drawingAnchorMode, lineVariant);
+  const displayedLineVariant = lineVariantSupported
+    ? (LINE_VARIANTS.find((variant) => variant.id === lineVariant) || DEFAULT_LINE_VARIANT)
+    : DEFAULT_LINE_VARIANT;
+  const handleCapabilityLineClick = useCallback((event) => {
+    if (lineVariantSupported) {
+      handleLineClick(event);
+      return;
+    }
+    if (event?.detail > 1) return;
+    if (isLineActive) handleCapabilityToolChange(null);
+    else handleSelectLineVariant(DEFAULT_LINE_VARIANT.id);
+    closeFlyout();
+  }, [
+    closeFlyout,
+    handleCapabilityToolChange,
+    handleLineClick,
+    handleSelectLineVariant,
+    isLineActive,
+    lineVariantSupported,
+  ]);
+  const drawingToolTitle = `${currentChartType.label} 当前坐标模式暂不支持此绘图工具`;
+  const snapTitle = usesSourceLineageAnchors
+    ? (drawingSnapEnabled
+        ? "Synthetic anchors stay on existing points; hold Alt to disable price snap"
+        : "Price snap disabled; synthetic anchors stay on existing points")
+    : (drawingSnapEnabled
+        ? "Snap enabled (hold Alt to disable temporarily)"
+        : "Snap disabled");
 
   return (
     <div className="drawing-toolbar">
@@ -195,7 +256,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={cursorBtnRef}
         currentId={currentCursorId}
         dataDrawingTool="cursor"
-        disabled={drawingToolsDisabled}
+        disabled={cursorToolsDisabled}
         flyoutKey="cursor"
         flyoutOpen={flyoutOpen}
         icon={currentCursorIcon}
@@ -204,8 +265,9 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleCursorContextMenu}
         onDoubleClick={handleCursorDblClick}
         onSelect={handleSelectCursorVariant}
-        title={drawingToolsDisabled ? drawingToolTitle : `${currentCursorLabel} (right-click or double-click to switch cursor)`}
+        title={cursorToolsDisabled ? drawingToolTitle : `${currentCursorLabel} (right-click or double-click to switch cursor)`}
         variants={CURSOR_VARIANTS}
+        isVariantDisabled={isVariantDisabled}
       />
 
       <DrawingVariantToolButton
@@ -213,7 +275,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={freehandBtnRef}
         currentId={currentFreehandId}
         dataDrawingTool={currentFreehandId}
-        disabled={drawingToolsDisabled}
+        disabled={freehandToolsDisabled}
         flyoutKey="freehand"
         flyoutOpen={flyoutOpen}
         icon={currentFreehandIcon}
@@ -222,35 +284,37 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleFreehandContextMenu}
         onDoubleClick={handleFreehandDblClick}
         onSelect={handleSelectFreehandVariant}
-        title={drawingToolsDisabled ? drawingToolTitle : `${currentFreehandLabel} (right-click or double-click to switch pen type)`}
+        title={freehandToolsDisabled ? drawingToolTitle : `${currentFreehandLabel} (right-click or double-click to switch pen type)`}
         variants={FREEHAND_VARIANTS}
+        isVariantDisabled={isVariantDisabled}
       />
 
       <DrawingToolButton
         active={isEraserActive}
         dataDrawingTool="eraser"
-        disabled={drawingToolsDisabled}
+        disabled={eraserDisabled}
         icon={EraserIcon}
         onClick={handleEraserClick}
-        title={drawingToolsDisabled ? drawingToolTitle : "Eraser"}
+        title={eraserDisabled ? drawingToolTitle : "Eraser"}
       />
 
       <DrawingVariantToolButton
         active={isLineActive}
         anchorRef={lineBtnRef}
-        currentId={lineVariant}
-        dataDrawingTool={lineVariant}
-        disabled={drawingToolsDisabled}
+        currentId={displayedLineVariant.id}
+        dataDrawingTool={displayedLineVariant.id}
+        disabled={lineToolsDisabled}
         flyoutKey="line"
         flyoutOpen={flyoutOpen}
-        icon={currentLineIcon}
-        onClick={handleLineClick}
+        icon={lineVariantSupported ? currentLineIcon : displayedLineVariant.icon}
+        onClick={handleCapabilityLineClick}
         onCloseFlyout={closeFlyout}
         onContextMenu={handleLineContextMenu}
         onDoubleClick={handleLineDblClick}
         onSelect={handleSelectLineVariant}
-        title={drawingToolsDisabled ? drawingToolTitle : `${currentLineLabel} (right-click or double-click to switch mode)`}
+        title={lineToolsDisabled ? drawingToolTitle : `${lineVariantSupported ? currentLineLabel : displayedLineVariant.label} (right-click or double-click to switch mode)`}
         variants={LINE_VARIANTS}
+        isVariantDisabled={isVariantDisabled}
       />
 
       <DrawingVariantToolButton
@@ -258,7 +322,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={shapeBtnRef}
         currentId={shapeVariant}
         dataDrawingTool={shapeVariant}
-        disabled={drawingToolsDisabled}
+        disabled={shapeToolsDisabled}
         flyoutKey="shape"
         flyoutOpen={flyoutOpen}
         icon={currentShapeIcon}
@@ -267,30 +331,31 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handleShapeContextMenu}
         onDoubleClick={handleShapeDblClick}
         onSelect={handleSelectShapeVariant}
-        title={drawingToolsDisabled ? drawingToolTitle : `${currentShapeLabel} (right-click or double-click to switch shape; Shift locks square/circle)`}
+        title={shapeToolsDisabled ? drawingToolTitle : `${currentShapeLabel} (right-click or double-click to switch shape; Shift locks square/circle)`}
         variants={SHAPE_VARIANTS}
+        isVariantDisabled={isVariantDisabled}
       />
 
       <DrawingToolButton
         active={isTextActive}
         dataDrawingTool="text"
-        disabled={drawingToolsDisabled}
+        disabled={textDisabled}
         icon={TextIcon}
         onClick={handleTextClick}
-        title={drawingToolsDisabled ? drawingToolTitle : "Text note"}
+        title={textDisabled ? drawingToolTitle : "Text note"}
       />
 
       <DrawingToolButton
         active={isFibonacciActive}
         anchorRef={fibBtnRef}
         dataDrawingTool="fibonacci"
-        disabled={drawingToolsDisabled}
+        disabled={fibonacciDisabled}
         icon={FibonacciIcon}
         onClick={handleFibonacciClick}
         onContextMenu={handleFibonacciSettingsContextMenu}
         onDoubleClick={handleToggleFibonacciSettings}
         showVariantIndicator
-        title={drawingToolsDisabled ? drawingToolTitle : "Fibonacci retracement (right-click or double-click for settings)"}
+        title={fibonacciDisabled ? drawingToolTitle : "Fibonacci retracement (right-click or double-click for settings)"}
       >
         {flyoutOpen === "fib-levels" && (
           <FibLevelsPanel
@@ -309,7 +374,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         anchorRef={posBtnRef}
         currentId={posVariant}
         dataDrawingTool={posVariant}
-        disabled={drawingToolsDisabled}
+        disabled={positionToolsDisabled}
         flyoutKey="position"
         flyoutOpen={flyoutOpen}
         icon={currentPosIcon}
@@ -318,8 +383,9 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onContextMenu={handlePositionContextMenu}
         onDoubleClick={handlePositionDblClick}
         onSelect={handleSelectPositionVariant}
-        title={drawingToolsDisabled ? drawingToolTitle : `${currentPosLabel} (right-click or double-click to switch long/short)`}
+        title={positionToolsDisabled ? drawingToolTitle : `${currentPosLabel} (right-click or double-click to switch long/short)`}
         variants={POSITION_VARIANTS}
+        isVariantDisabled={isVariantDisabled}
       >
         {flyoutOpen === "position-settings" && (
           <PositionSettingsPanel
@@ -338,7 +404,7 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onClick={() => onDrawingSnapEnabledChange?.(!drawingSnapEnabled)}
         title={drawingToolsDisabled
           ? drawingToolTitle
-          : (drawingSnapEnabled ? "Snap enabled (hold Alt to disable temporarily)" : "Snap disabled")}
+          : snapTitle}
       />
 
       {/* Divider */}

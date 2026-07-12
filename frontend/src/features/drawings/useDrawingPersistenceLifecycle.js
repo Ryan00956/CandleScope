@@ -98,5 +98,16 @@ export function useDrawingPersistenceLifecycle({
     symbol,
   ]);
 
+  useEffect(() => () => {
+    const adapter = getChartAdapter();
+    for (const prim of primitivesRef.current) {
+      try {
+        adapter?.detachPrimitive?.(prim);
+      } catch {
+        // Best-effort teardown. The owning chart may already be disposing.
+      }
+    }
+  }, [getChartAdapter, primitivesRef]);
+
   return { persistDrawings };
 }

@@ -2,12 +2,58 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildVisibleRangeSnapshot,
+  disposeChartPaneSurface,
   resolveDataTimeSet,
+  shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
   shouldPublishUserViewportRange,
   shouldRequestMoreLeft,
   shouldRestoreChartViewport,
 } from "../singleChartPaneLifecycle.js";
+
+test("chart disposal detaches drawings and disables auto-size before removal", () => {
+  const calls = [];
+  disposeChartPaneSurface({
+    applyOptions: (options) => calls.push(["options", options]),
+    remove: () => calls.push(["remove"]),
+  }, {
+    beforeRemove: () => calls.push(["drawings"]),
+  });
+
+  assert.deepEqual(calls, [
+    ["drawings"],
+    ["options", { autoSize: false }],
+    ["remove"],
+  ]);
+});
+
+test("chart disposal still removes a surface when disabling auto-size fails", () => {
+  const calls = [];
+  assert.doesNotThrow(() => disposeChartPaneSurface({
+    applyOptions: () => {
+      calls.push("options");
+      throw new Error("already disposing");
+    },
+    remove: () => calls.push("remove"),
+  }));
+
+  assert.deepEqual(calls, ["options", "remove"]);
+});
+
+test("chart disposal continues when drawing teardown fails", () => {
+  const calls = [];
+  assert.doesNotThrow(() => disposeChartPaneSurface({
+    applyOptions: () => calls.push("options"),
+    remove: () => calls.push("remove"),
+  }, {
+    beforeRemove: () => {
+      calls.push("drawings");
+      throw new Error("stale drawing runtime");
+    },
+  }));
+
+  assert.deepEqual(calls, ["drawings", "options", "remove"]);
+});
 
 test("visible range snapshots include the fitted time and logical coverage", () => {
   assert.deepEqual(buildVisibleRangeSnapshot({
@@ -138,4 +184,19 @@ test("real indicator or pane structure changes advance series readiness", () => 
   ]) {
     assert.equal(shouldAdvanceIndicatorSeriesReady(change), true);
   }
+});
+
+test("resolved derived projection replacement advances drawing coordinates", () => {
+  assert.equal(shouldAdvanceDrawingCoordinateGeneration({
+    axisMode: "derived-ordinal",
+    canReuseProjection: false,
+  }), true);
+  assert.equal(shouldAdvanceDrawingCoordinateGeneration({
+    axisMode: "derived-ordinal",
+    canReuseProjection: true,
+  }), false);
+  assert.equal(shouldAdvanceDrawingCoordinateGeneration({
+    axisMode: "time",
+    canReuseProjection: false,
+  }), false);
 });

@@ -40,7 +40,10 @@ import {
   selectedDrawingMetaFromPrimitive,
   useDrawingSelection,
 } from "./drawingSelectionController.js";
-import { snapDataPointAtPointer } from "./drawingSnapController.js";
+import {
+  canonicalDrawingAnchorFromAxisTime,
+  snapDataPointAtPointer,
+} from "./drawingSnapController.js";
 import { eraseDrawingAtPointer } from "./drawingEraseController.js";
 import {
   clearHoveredPrimitive,
@@ -61,6 +64,7 @@ import {
   coordinateToFractionalLogical,
   logicalToInterpolatedSeriesTime,
 } from "../../chart-adapter/coordinateBridge.js";
+import { supportsDrawingHitType } from "./drawingCapabilities.js";
 import {
   beginAxisLineDrawing,
   beginTwoPointDrawing,
@@ -88,6 +92,8 @@ export function useDrawing({
   drawingSnapEnabled = true,
   symbol,
   seriesReady,
+  drawingCoordinateKey,
+  drawingAnchorMode,
   // Optional callback so the hook can flip the active tool back to null after
   // committing a text edit (PPT-style: clicking elsewhere exits text mode).
   onToolChange,
@@ -172,31 +178,46 @@ export function useDrawing({
   const isTextTool = activeTool === "text";
   const isEraserTool = activeTool === "eraser";
 
-  useEffect(() => {
+  const resetCursorForActiveTool = useCallback(() => {
     const container = chartContainerRef?.current;
-    if (!container || !isPassiveCursorTool(activeTool)) return;
-    setCursor(container, cursorStyleForPassiveTool(activeTool));
-  }, [activeTool, chartContainerRef]);
+    if (!container) return;
+    const tool = activeToolRef.current;
+    setCursor(
+      container,
+      isPassiveCursorTool(tool) ? cursorStyleForPassiveTool(tool) : "crosshair",
+    );
+  }, [chartContainerRef]);
+
+  useEffect(() => {
+    resetCursorForActiveTool();
+  }, [activeTool, resetCursorForActiveTool]);
 
   // ── Coordinate helpers ──
-  // Data points are stored as { time, price } so drawings survive timeframe switches.
-  // time = Unix timestamp (seconds) — computed via interpolation so it is a
-  // *continuous* value (not snapped to candle boundaries). This ensures
-  // drawings render at the correct position even after the user switches
-  // to a different K-line interval whose candle boundaries differ.
+  // Data points keep source-domain Unix time so drawings survive timeframe
+  // and chart-representation switches. Time axes preserve a continuous
+  // interpolated timestamp. Derived ordinal axes add sourceOrdinal and the
+  // projection identity, but never persist projection-local order/logical.
   //
-  // During rendering, primitives use the helper `timeToCoordinateInterpolated`
-  // to map the continuous timestamp back to a screen x-coordinate by
-  // interpolating between the two bracketing candles in the current dataset.
+  // During rendering every primitive goes through the shared coordinate
+  // bridge, which either interpolates time data or resolves source lineage.
 
   const screenToData = useCallback(
     (x, y, options = {}) => {
       const adapter = getChartAdapter();
       if (!adapter?.isReady?.()) return null;
       try {
-        const fracLogical = coordinateToFractionalLogical(adapter, x);
         const price = adapter.coordinateToPrice?.(y);
-        if (fracLogical == null || price == null || !isFinite(fracLogical) || !isFinite(price)) return null;
+        if (price == null || !isFinite(price)) return null;
+
+        if (adapter.usesOrdinalTime?.() === true) {
+          const axisTime = adapter.coordinateToTime?.(x);
+          if (axisTime == null) return null;
+          const anchor = canonicalDrawingAnchorFromAxisTime(adapter, axisTime);
+          return anchor ? { ...anchor, price } : null;
+        }
+
+        const fracLogical = coordinateToFractionalLogical(adapter, x);
+        if (fracLogical == null || !isFinite(fracLogical)) return null;
 
         const snappedTime = adapter.coordinateToTime?.(x);
         let time = null;
@@ -251,7 +272,12 @@ export function useDrawing({
       if (!adapter?.isReady?.() || !dp) return null;
       try {
         let x = null;
-        if (dp.time != null) {
+        if (typeof adapter.dataPointToCoordinate === "function") {
+          x = adapter.dataPointToCoordinate(dp);
+        }
+        if ((x == null || !isFinite(x))
+          && adapter.usesOrdinalTime?.() !== true
+          && dp.time != null) {
           // Try exact match first (fast path)
           if (x == null || !isFinite(x)) x = adapter.timeToCoordinate?.(dp.time);
 
@@ -261,7 +287,9 @@ export function useDrawing({
           }
         }
         // Fallback to logical if time-based conversion failed
-        if ((x == null || !isFinite(x)) && dp.logical != null) {
+        if ((x == null || !isFinite(x))
+          && adapter.usesOrdinalTime?.() !== true
+          && dp.logical != null) {
           x = adapter.logicalToCoordinateInterpolated?.(dp.logical);
         }
         const y = adapter.priceToCoordinate?.(dp.price);
@@ -345,6 +373,14 @@ export function useDrawing({
     [],
   );
 
+  const hitTestInteractive = useCallback(
+    (x, y, hitRadius = 8) => {
+      const hit = hitTestAll(x, y, hitRadius);
+      return supportsDrawingHitType(drawingAnchorMode, hit?.type) ? hit : null;
+    },
+    [drawingAnchorMode, hitTestAll],
+  );
+
   // ── Remove line preview ──
 
   const removePreview = useCallback(() => {
@@ -426,7 +462,9 @@ export function useDrawing({
 
   const applyHoverFeedback = useCallback(
     ({ tool, x, y }) => {
-      const hit = hitTestAll(x, y);
+      const hit = tool === "eraser"
+        ? hitTestAll(x, y)
+        : hitTestInteractive(x, y);
       syncHoveredPrimitive(hoveredPrimRef, hoverTargetForTool(tool, hit));
 
       const container = chartContainerRef?.current;
@@ -442,7 +480,7 @@ export function useDrawing({
         setCursor(container, cursorForTextToolHit(hit));
       }
     },
-    [chartContainerRef, hitTestAll],
+    [chartContainerRef, hitTestAll, hitTestInteractive],
   );
 
   const scheduleHoverFeedback = useCallback(
@@ -570,9 +608,54 @@ export function useDrawing({
     [applyActiveDrawingMove],
   );
 
+  useEffect(() => {
+    if (!seriesReady) return;
+
+    cancelActiveDrawingMove();
+    removePreview();
+    clearHoverFeedback();
+    cancelTextEditing();
+    deselectAll();
+    draggingRef.current = null;
+    resetCursorForActiveTool();
+
+    if (isDrawingFreehandRef.current && currentFreehandRef.current) {
+      const transient = currentFreehandRef.current;
+      detachPrim(transient);
+      primitivesRef.current = primitivesRef.current.filter((prim) => prim !== transient);
+      persistDrawings();
+    }
+    isDrawingFreehandRef.current = false;
+    currentFreehandRef.current = null;
+    lastFreehandScreenPointRef.current = null;
+  }, [
+    cancelActiveDrawingMove,
+    cancelTextEditing,
+    clearHoverFeedback,
+    detachPrim,
+    deselectAll,
+    drawingCoordinateKey,
+    persistDrawings,
+    removePreview,
+    resetCursorForActiveTool,
+    seriesReady,
+  ]);
+
   useEffect(() => () => {
     cancelActiveDrawingMove();
-  }, [cancelActiveDrawingMove]);
+    removePreview();
+    clearHoverFeedback();
+    draggingRef.current = null;
+    isDrawingFreehandRef.current = false;
+    currentFreehandRef.current = null;
+    lastFreehandScreenPointRef.current = null;
+    setCursor(chartContainerRef?.current, "default");
+  }, [
+    cancelActiveDrawingMove,
+    chartContainerRef,
+    clearHoverFeedback,
+    removePreview,
+  ]);
 
   const beginTextDrag = useCallback((prim, hit, pos) => {
     if (!(prim instanceof TextDrawingPrimitive) || !hit || !pos) return false;
@@ -666,7 +749,16 @@ export function useDrawing({
       container?.removeEventListener("pointermove", start);
       window.removeEventListener("resize", start);
     };
-  }, [editingTextId, selectedPrimId, dataToScreen, refreshSelectedTextUi, setEditingTextPos, chartContainerRef]);
+  }, [
+    chartContainerRef,
+    dataToScreen,
+    drawingCoordinateKey,
+    editingTextId,
+    refreshSelectedTextUi,
+    selectedPrimId,
+    seriesReady,
+    setEditingTextPos,
+  ]);
 
   // ════════════════════════════════════════════════════
   //  MOUSE DOWN
@@ -683,7 +775,7 @@ export function useDrawing({
       // for blank clicks, text clicks, and text-tool clicks so blur does not
       // become a separate hidden state transition.
       if (editingTextIdRef.current) {
-        const hit = hitTestAll(pos.x, pos.y);
+        const hit = hitTestInteractive(pos.x, pos.y);
         const clickedTextId = hit?.type === "text" ? hit.prim.id : null;
         commitTextEditing({ clearSelection: !clickedTextId, exitTool: true });
         if (clickedTextId && primitivesRef.current.some((p) => p.id === clickedTextId)) {
@@ -700,14 +792,16 @@ export function useDrawing({
       if (isPassiveCursorTool(tool) && selectedIdRef.current) {
         const sel = getPrimitiveById(selectedIdRef.current);
         if (sel instanceof TextDrawingPrimitive) {
-          let hit = false;
-          try { hit = sel.hitTest(pos.x, pos.y); } catch { /* ignore */ }
-          if (hit) {
-            clearHoverFeedback();
-            beginTextDrag(sel, hit, pos);
-            e.preventDefault();
-            e.stopPropagation();
-            return;
+          if (supportsDrawingHitType(drawingAnchorMode, "text")) {
+            let hit = false;
+            try { hit = sel.hitTest(pos.x, pos.y); } catch { /* ignore */ }
+            if (hit) {
+              clearHoverFeedback();
+              beginTextDrag(sel, hit, pos);
+              e.preventDefault();
+              e.stopPropagation();
+              return;
+            }
           }
           // Clicked outside the selected text → drop selection.
           deselectAll();
@@ -755,7 +849,7 @@ export function useDrawing({
       // ── TEXT TOOL ──
       if (tool === "text") {
         // Check if clicking on existing text → select it (or grab a handle)
-        const hit = hitTestAll(pos.x, pos.y);
+        const hit = hitTestInteractive(pos.x, pos.y);
         if (hit && hit.type === "text") {
           selectPrimitive(hit.prim.id);
           clearHoverFeedback();
@@ -780,7 +874,7 @@ export function useDrawing({
       // ── POSITION TOOLS ──
       if (POSITION_TOOL_IDS.has(tool)) {
         // Clicking on existing position → select
-        const hit = hitTestAll(pos.x, pos.y);
+        const hit = hitTestInteractive(pos.x, pos.y);
         if (hit && hit.type === "position") {
           selectPrimitive(hit.prim.id);
 
@@ -866,7 +960,7 @@ export function useDrawing({
         })) return;
 
         // Hit existing element?
-        const hit = hitTestAll(pos.x, pos.y);
+        const hit = hitTestInteractive(pos.x, pos.y);
         if (hit && (hit.type === "line" || hit.type === "axis-line" || hit.type === "angle" || hit.type === "fibonacci" || hit.type === "shape")) {
           selectPrimitive(hit.prim.id);
 
@@ -950,7 +1044,7 @@ export function useDrawing({
         })) return;
       }
     },
-    [flushActiveDrawingMove, getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
+    [flushActiveDrawingMove, getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
   );
 
   // ════════════════════════════════════════════════════
@@ -962,14 +1056,14 @@ export function useDrawing({
       const pos = getChartPos(e);
       if (!pos) return;
 
-      const hit = hitTestAll(pos.x, pos.y);
+      const hit = hitTestInteractive(pos.x, pos.y);
       if (hit && hit.type === "text") {
         startTextEditing(hit.prim);
         e.preventDefault();
         e.stopPropagation();
       }
     },
-    [getChartPos, hitTestAll, startTextEditing],
+    [getChartPos, hitTestInteractive, startTextEditing],
   );
 
   // ════════════════════════════════════════════════════
@@ -1163,6 +1257,23 @@ export function useDrawing({
 
   // ── Public API ──
 
+  /**
+   * Release every primitive from its current series without changing the
+   * saved drawing model. The chart surface calls this synchronously before it
+   * disposes/recreates Lightweight Charts; the persistence lifecycle then
+   * attaches the same primitives to the replacement series.
+   */
+  const prepareSurfaceDispose = useCallback(() => {
+    cancelActiveDrawingMove();
+    removePreview();
+    clearHoverFeedback();
+    draggingRef.current = null;
+    resetCursorForActiveTool();
+    for (const prim of primitivesRef.current) {
+      detachPrim(prim);
+    }
+  }, [cancelActiveDrawingMove, clearHoverFeedback, detachPrim, removePreview, resetCursorForActiveTool]);
+
   /** Clear all drawings (lines + freehand + text) */
   const clearAll = useCallback(() => {
     for (const prim of primitivesRef.current) {
@@ -1291,6 +1402,7 @@ export function useDrawing({
 
   return {
     clearAll,
+    prepareSurfaceDispose,
     setHidden,
     primitivesRef,
     selectedPrimId,

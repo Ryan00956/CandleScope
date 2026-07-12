@@ -70,6 +70,23 @@ function normalizeHorizontalAnchor(anchor) {
   const out = {};
   if (anchor.time != null && Number.isFinite(Number(anchor.time))) {
     out.time = anchor.time;
+    if (Number.isSafeInteger(anchor.sourceOrdinal) && anchor.sourceOrdinal >= 0) {
+      out.sourceOrdinal = anchor.sourceOrdinal;
+    }
+    if (typeof anchor.sourceProjection === "string" && anchor.sourceProjection) {
+      out.sourceProjection = anchor.sourceProjection;
+    }
+    if (typeof anchor.sourceProjectionConfig === "string"
+      && anchor.sourceProjectionConfig) {
+      out.sourceProjectionConfig = anchor.sourceProjectionConfig;
+    }
+    if (out.sourceOrdinal == null
+      && out.sourceProjection == null
+      && out.sourceProjectionConfig == null
+      && typeof anchor.logical === "number"
+      && Number.isFinite(anchor.logical)) {
+      out.logical = anchor.logical;
+    }
   } else if (typeof anchor.logical === "number" && Number.isFinite(anchor.logical)) {
     out.logical = anchor.logical;
   }

@@ -6,6 +6,87 @@ const SNAP_PRICE_CANDLE_DISTANCE_PX = 18;
 const SNAP_CANDIDATE_SCAN_RADIUS = 3;
 const SNAP_PRICE_FIELDS = ["open", "high", "low", "close"];
 
+function isSafeSourceOrdinal(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function isSafeSourceProjection(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 64
+    && /^[a-z0-9][a-z0-9-]*$/.test(value);
+}
+
+function isSafeProjectionConfig(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 512) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return false;
+  }
+  return true;
+}
+
+function adapterUsesOrdinalTime(adapter) {
+  try {
+    return adapter?.usesOrdinalTime?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Convert a chart-axis value into the durable drawing-anchor schema.
+ * Ordinal `order` is deliberately discarded because it is projection-local.
+ */
+export function canonicalDrawingAnchorFromAxisTime(adapter, axisTime) {
+  if (adapterUsesOrdinalTime(adapter)) {
+    let anchor = null;
+    try {
+      anchor = adapter?.axisTimeToDrawingAnchor?.(axisTime) || null;
+    } catch {
+      anchor = null;
+    }
+    if (!anchor
+      || typeof anchor.time !== "number"
+      || !Number.isFinite(anchor.time)
+      || !isSafeSourceOrdinal(anchor.sourceOrdinal)
+      || !isSafeSourceProjection(anchor.sourceProjection)
+      || (anchor.sourceProjectionConfig != null
+        && !isSafeProjectionConfig(anchor.sourceProjectionConfig))) {
+      return null;
+    }
+    return {
+      time: anchor.time,
+      sourceOrdinal: anchor.sourceOrdinal,
+      sourceProjection: anchor.sourceProjection,
+      ...(anchor.sourceProjectionConfig != null
+        ? { sourceProjectionConfig: anchor.sourceProjectionConfig }
+        : {}),
+    };
+  }
+
+  return typeof axisTime === "number" && Number.isFinite(axisTime)
+    ? { time: axisTime }
+    : null;
+}
+
+function replaceHorizontalAnchor(dataPoint, anchor, { ordinal = false } = {}) {
+  const next = { ...dataPoint };
+  delete next.order;
+  delete next.sourceOrdinal;
+  delete next.sourceProjection;
+  delete next.sourceProjectionConfig;
+  if (ordinal) delete next.logical;
+  if (!anchor) return next;
+  next.time = anchor.time;
+  if (anchor.sourceOrdinal != null) next.sourceOrdinal = anchor.sourceOrdinal;
+  if (anchor.sourceProjection != null) next.sourceProjection = anchor.sourceProjection;
+  if (anchor.sourceProjectionConfig != null) {
+    next.sourceProjectionConfig = anchor.sourceProjectionConfig;
+  }
+  return next;
+}
+
 function getSnapPriceCandidates(item) {
   if (!item) return [];
   const candidates = [];
@@ -140,12 +221,19 @@ export function snapDataPointAtPointer(dataPoint, x, y, options, adapter) {
   const target = findSnapTargetForPointer(adapter, x, y);
   if (!target) return dataPoint;
 
-  const next = { ...dataPoint };
+  let next = { ...dataPoint };
+  let snappedAxisTime = null;
   if (allowPrice && target.price) {
     next.price = target.price.price;
-    if (allowTime) next.time = target.price.time;
+    if (allowTime) snappedAxisTime = target.price.time;
   } else if (allowTime && target.time) {
-    next.time = target.time.time;
+    snappedAxisTime = target.time.time;
+  }
+
+  if (allowTime && snappedAxisTime != null) {
+    const ordinal = adapterUsesOrdinalTime(adapter);
+    const anchor = canonicalDrawingAnchorFromAxisTime(adapter, snappedAxisTime);
+    if (anchor) next = replaceHorizontalAnchor(next, anchor, { ordinal });
   }
   return next;
 }

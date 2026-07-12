@@ -90,3 +90,38 @@ export function shouldAdvanceIndicatorSeriesReady({
     || createdSeriesCount > 0
   );
 }
+
+export function shouldAdvanceDrawingCoordinateGeneration({
+  axisMode,
+  canReuseProjection = true,
+} = {}) {
+  return axisMode === "derived-ordinal" && !canReuseProjection;
+}
+
+/**
+ * Tear down a Lightweight Charts surface without leaving its auto-size
+ * observer able to enqueue work against already-disposed canvas bindings.
+ * Both operations are best-effort because cleanup can run after a partial
+ * chart construction failure.
+ */
+export function disposeChartPaneSurface(chart, { beforeRemove } = {}) {
+  if (!chart) return;
+
+  try {
+    beforeRemove?.();
+  } catch {
+    // Drawing teardown is best-effort; chart disposal must still continue.
+  }
+
+  try {
+    chart.applyOptions?.({ autoSize: false });
+  } catch {
+    // The chart may already be partially disposed.
+  }
+
+  try {
+    chart.remove?.();
+  } catch {
+    // Best-effort teardown.
+  }
+}

@@ -25,6 +25,7 @@ export default function DrawingVariantToolButton({
   flyoutKey,
   flyoutOpen,
   icon,
+  isVariantDisabled,
   onClick,
   onCloseFlyout,
   onContextMenu,
@@ -59,6 +60,7 @@ export default function DrawingVariantToolButton({
           onClose={onCloseFlyout}
           anchorRef={anchorRef}
           className={flyoutClassName}
+          isVariantDisabled={isVariantDisabled}
         />
       )}
       {!disabled && children}

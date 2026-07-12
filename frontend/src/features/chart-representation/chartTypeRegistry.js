@@ -3,6 +3,11 @@ export const CHART_AXIS_MODES = Object.freeze({
   DERIVED_ORDINAL: "derived-ordinal",
 });
 
+export const CHART_DRAWING_ANCHOR_MODES = Object.freeze({
+  SOURCE_TIME: "source-time",
+  SOURCE_LINEAGE: "source-lineage",
+});
+
 export const CHART_PROJECTION_IDS = Object.freeze({
   IDENTITY: "identity",
   HEIKIN_ASHI: "heikin-ashi",
@@ -13,21 +18,21 @@ export const CHART_PROJECTION_IDS = Object.freeze({
 });
 
 export const DEFAULT_CHART_TYPE_DESCRIPTORS = Object.freeze([
-  { id: "candlestick", axisMode: "time", projectionId: "identity", rendererId: "candlestick" },
-  { id: "hollow-candlestick", axisMode: "time", projectionId: "identity", rendererId: "candlestick" },
-  { id: "heikin-ashi", axisMode: "time", projectionId: "heikin-ashi", rendererId: "candlestick" },
-  { id: "bar", axisMode: "time", projectionId: "identity", rendererId: "bar" },
-  { id: "high-low", axisMode: "time", projectionId: "identity", rendererId: "high-low" },
-  { id: "line", axisMode: "time", projectionId: "identity", rendererId: "line" },
-  { id: "line-with-markers", axisMode: "time", projectionId: "identity", rendererId: "line" },
-  { id: "step-line", axisMode: "time", projectionId: "identity", rendererId: "line" },
-  { id: "area", axisMode: "time", projectionId: "identity", rendererId: "area" },
-  { id: "baseline", axisMode: "time", projectionId: "identity", rendererId: "baseline" },
-  { id: "histogram", axisMode: "time", projectionId: "identity", rendererId: "histogram" },
-  { id: "renko", axisMode: "derived-ordinal", projectionId: "renko", rendererId: "candlestick" },
-  { id: "point-and-figure", axisMode: "derived-ordinal", projectionId: "point-and-figure", rendererId: "point-and-figure" },
-  { id: "kagi", axisMode: "derived-ordinal", projectionId: "kagi", rendererId: "kagi" },
-  { id: "line-break", axisMode: "derived-ordinal", projectionId: "line-break", rendererId: "candlestick" },
+  { id: "candlestick", axisMode: "time", projectionId: "identity", rendererId: "candlestick", drawingAnchorMode: "source-time" },
+  { id: "hollow-candlestick", axisMode: "time", projectionId: "identity", rendererId: "candlestick", drawingAnchorMode: "source-time" },
+  { id: "heikin-ashi", axisMode: "time", projectionId: "heikin-ashi", rendererId: "candlestick", drawingAnchorMode: "source-time" },
+  { id: "bar", axisMode: "time", projectionId: "identity", rendererId: "bar", drawingAnchorMode: "source-time" },
+  { id: "high-low", axisMode: "time", projectionId: "identity", rendererId: "high-low", drawingAnchorMode: "source-time" },
+  { id: "line", axisMode: "time", projectionId: "identity", rendererId: "line", drawingAnchorMode: "source-time" },
+  { id: "line-with-markers", axisMode: "time", projectionId: "identity", rendererId: "line", drawingAnchorMode: "source-time" },
+  { id: "step-line", axisMode: "time", projectionId: "identity", rendererId: "line", drawingAnchorMode: "source-time" },
+  { id: "area", axisMode: "time", projectionId: "identity", rendererId: "area", drawingAnchorMode: "source-time" },
+  { id: "baseline", axisMode: "time", projectionId: "identity", rendererId: "baseline", drawingAnchorMode: "source-time" },
+  { id: "histogram", axisMode: "time", projectionId: "identity", rendererId: "histogram", drawingAnchorMode: "source-time" },
+  { id: "renko", axisMode: "derived-ordinal", projectionId: "renko", rendererId: "candlestick", drawingAnchorMode: "source-lineage" },
+  { id: "point-and-figure", axisMode: "derived-ordinal", projectionId: "point-and-figure", rendererId: "point-and-figure", drawingAnchorMode: "source-lineage" },
+  { id: "kagi", axisMode: "derived-ordinal", projectionId: "kagi", rendererId: "kagi", drawingAnchorMode: "source-lineage" },
+  { id: "line-break", axisMode: "derived-ordinal", projectionId: "line-break", rendererId: "candlestick", drawingAnchorMode: "source-lineage" },
 ].map((descriptor) => Object.freeze(descriptor)));
 
 function normalizeDescriptor(descriptor) {
@@ -38,10 +43,24 @@ function normalizeDescriptor(descriptor) {
   const axisMode = String(descriptor.axisMode || "").trim();
   const projectionId = String(descriptor.projectionId || "").trim();
   const rendererId = String(descriptor.rendererId || "").trim();
+  const drawingAnchorMode = descriptor.drawingAnchorMode == null
+    ? null
+    : String(descriptor.drawingAnchorMode).trim();
   if (!id || !axisMode || !projectionId || !rendererId) {
     throw new TypeError("chart type descriptor requires id, axisMode, projectionId and rendererId");
   }
-  return Object.freeze({ ...descriptor, id, axisMode, projectionId, rendererId });
+  if (drawingAnchorMode !== null
+    && !Object.values(CHART_DRAWING_ANCHOR_MODES).includes(drawingAnchorMode)) {
+    throw new TypeError(`unsupported chart drawing anchor mode: ${drawingAnchorMode}`);
+  }
+  return Object.freeze({
+    ...descriptor,
+    id,
+    axisMode,
+    projectionId,
+    rendererId,
+    drawingAnchorMode,
+  });
 }
 
 export class ChartTypeRegistry {

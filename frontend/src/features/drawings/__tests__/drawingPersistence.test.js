@@ -125,3 +125,64 @@ test("save and load round-trip canonical source metadata without ordinal order",
     else globalThis.localStorage = previousLocalStorage;
   }
 });
+
+test("position persistence keeps both canonical endpoints across projection switches", () => {
+  const previousLocalStorage = globalThis.localStorage;
+  const values = new Map();
+  globalThis.localStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+  };
+
+  try {
+    saveDrawings("derived-position", [{
+      _id: "position-1",
+      _type: "position",
+      _direction: "long",
+      _entryPrice: 100,
+      _tpPrice: 110,
+      _slPrice: 95,
+      _timeRange: {
+        start: {
+          time: 100,
+          sourceOrdinal: 1,
+          sourceProjection: "renko",
+          sourceProjectionConfig: "dataset-a:renko:10",
+          order: 3,
+          logical: 30,
+        },
+        end: {
+          time: 200,
+          sourceOrdinal: 0,
+          sourceProjection: "renko",
+          sourceProjectionConfig: "dataset-a:renko:10",
+          order: 8,
+          logical: 80,
+        },
+      },
+      _positionSize: 1000,
+    }]);
+
+    const [saved] = loadDrawings("derived-position");
+    assert.deepEqual(saved.timeRange, {
+      start: {
+        time: 100,
+        sourceOrdinal: 1,
+        sourceProjection: "renko",
+        sourceProjectionConfig: "dataset-a:renko:10",
+      },
+      end: {
+        time: 200,
+        sourceOrdinal: 0,
+        sourceProjection: "renko",
+        sourceProjectionConfig: "dataset-a:renko:10",
+      },
+    });
+    assert.equal(JSON.stringify(saved.timeRange).includes("order"), false);
+    assert.equal(JSON.stringify(saved.timeRange).includes("logical"), false);
+  } finally {
+    if (previousLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousLocalStorage;
+  }
+});

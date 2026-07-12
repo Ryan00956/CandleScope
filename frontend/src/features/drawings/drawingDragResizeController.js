@@ -88,6 +88,26 @@ function replaceHorizontalAnchor(nextPoint, dataPoint) {
   return { ...next, ...anchor };
 }
 
+function sameHorizontalAnchor(first, second) {
+  if (!first || !second) return false;
+  return first.time === second.time
+    && first.logical === second.logical
+    && first.sourceOrdinal === second.sourceOrdinal
+    && first.sourceProjection === second.sourceProjection
+    && first.sourceProjectionConfig === second.sourceProjectionConfig;
+}
+
+function positionVisualAnchorKeys(timeRange, entryPrice, dataToScreen) {
+  const startPoint = dataPointFromHorizontalAnchor(timeRange?.start, entryPrice);
+  const endPoint = dataPointFromHorizontalAnchor(timeRange?.end, entryPrice);
+  const startScreen = startPoint ? dataToScreen(startPoint) : null;
+  const endScreen = endPoint ? dataToScreen(endPoint) : null;
+  if (!startScreen || !endScreen) return null;
+  return startScreen.x <= endScreen.x
+    ? { endScreen, leftKey: "start", rightKey: "end", startScreen }
+    : { endScreen, leftKey: "end", rightKey: "start", startScreen };
+}
+
 /**
  * Handle the tool-independent drags (text handle resize, text body, position).
  * Returns true when the event was consumed (the caller should then return).
@@ -233,13 +253,67 @@ export function applyTextAndPositionDrag({
       return true;
     }
 
-    const dataPoint = type === "position-move"
-      ? screenToData(pos.x, pos.y)
-      : screenToDrawingData(pos.x, pos.y, {
-          snap: drawingSnapEnabledRef.current && !e.altKey,
-          time: type === "position-left" || type === "position-right",
-          price: type !== "position-left" && type !== "position-right",
-        });
+    if (type === "position-move") {
+      const { origEntry, origTp, origSl, startMouse: sm, origTimeRange } = dragging;
+      const dy = pos.y - sm.y;
+      const dx = pos.x - sm.x;
+      const startPoint = dataPointFromHorizontalAnchor(origTimeRange.start, origEntry);
+      const endPoint = dataPointFromHorizontalAnchor(origTimeRange.end, origEntry);
+      const origStartScreen = startPoint ? dataToScreen(startPoint) : null;
+      const origEndScreen = endPoint ? dataToScreen(endPoint) : null;
+      if (!origStartScreen || !origEndScreen) return true;
+
+      // Snap the reference endpoint, then apply that endpoint's *actual* screen
+      // delta to the other endpoint without independently snapping it. Both
+      // endpoints still resolve before any geometry is mutated.
+      const nextStartData = screenToDrawingData(
+        origStartScreen.x + dx,
+        origStartScreen.y + dy,
+        { snap: drawingSnapEnabledRef.current && !e.altKey },
+      );
+      if (!nextStartData) return true;
+      const nextStartScreen = dataToScreen(nextStartData);
+      if (!nextStartScreen) return true;
+      const appliedDx = nextStartScreen.x - origStartScreen.x;
+      const appliedDy = nextStartScreen.y - origStartScreen.y;
+      const nextEndData = screenToDrawingData(
+        origEndScreen.x + appliedDx,
+        origEndScreen.y + appliedDy,
+        { snap: false },
+      );
+      const nextStart = horizontalAnchorFromDataPoint(nextStartData);
+      const nextEnd = horizontalAnchorFromDataPoint(nextEndData);
+      if (!nextStartData || !nextEndData || !nextStart || !nextEnd) return true;
+
+      const priceDelta = nextStartData.price - origEntry;
+      if (!Number.isFinite(priceDelta)) return true;
+
+      const originalCollapsed = Math.abs(origStartScreen.x - origEndScreen.x) < 0.5;
+      const nextCollapsed = sameHorizontalAnchor(nextStart, nextEnd);
+      const preserveHorizontalRange = Math.abs(appliedDx) < 0.5
+        || originalCollapsed
+        || nextCollapsed;
+      const nextTimeRange = preserveHorizontalRange
+        ? origTimeRange
+        : { start: nextStart, end: nextEnd };
+
+      prim.setGeometry({
+        entryPrice: origEntry + priceDelta,
+        tpPrice: origTp == null ? null : origTp + priceDelta,
+        slPrice: origSl == null ? null : origSl + priceDelta,
+        timeRange: nextTimeRange,
+      });
+
+      e.preventDefault();
+      e.stopPropagation();
+      return true;
+    }
+
+    const dataPoint = screenToDrawingData(pos.x, pos.y, {
+      snap: drawingSnapEnabledRef.current && !e.altKey,
+      time: type === "position-left" || type === "position-right",
+      price: type !== "position-left" && type !== "position-right",
+    });
     if (!dataPoint) return true;
 
     if (type === "position-tp") {
@@ -257,34 +331,38 @@ export function applyTextAndPositionDrag({
       else newSl = Math.max(newSl, prim.entryPrice);
       prim.setSlPrice(newSl);
     } else if (type === "position-left") {
-      // Drag left edge: update timeRange.start
-      prim.setTimeRange({ ...prim.timeRange, start: horizontalAnchorFromDataPoint(dataPoint) });
+      const candidate = horizontalAnchorFromDataPoint(dataPoint);
+      const candidatePoint = dataPointFromHorizontalAnchor(candidate, prim.entryPrice);
+      const candidateScreen = candidatePoint ? dataToScreen(candidatePoint) : null;
+      const visualKeys = positionVisualAnchorKeys(
+        dragging.origTimeRange || prim.timeRange,
+        prim.entryPrice,
+        dataToScreen,
+      );
+      const otherKey = visualKeys?.rightKey;
+      const otherScreen = otherKey === "start"
+        ? visualKeys?.startScreen
+        : visualKeys?.endScreen;
+      if (candidate && candidateScreen && visualKeys && otherScreen
+        && candidateScreen.x < otherScreen.x - 0.5) {
+        prim.setTimeRange({ ...prim.timeRange, [visualKeys.leftKey]: candidate });
+      }
     } else if (type === "position-right") {
-      // Drag right edge: update timeRange.end
-      prim.setTimeRange({ ...prim.timeRange, end: horizontalAnchorFromDataPoint(dataPoint) });
-    } else if (type === "position-move") {
-      const { origEntry, origTp, origSl, startMouse: sm, origTimeRange } = dragging;
-      const dy = pos.y - sm.y;
-      const dx = pos.x - sm.x;
-      const startPoint = dataPointFromHorizontalAnchor(origTimeRange.start, origEntry);
-      const endPoint = dataPointFromHorizontalAnchor(origTimeRange.end, origEntry);
-      const origStartScreen = startPoint ? dataToScreen(startPoint) : null;
-      const origEndScreen = endPoint ? dataToScreen(endPoint) : null;
-      if (origStartScreen) {
-        const newEntryData = screenToDrawingData(origStartScreen.x + dx, origStartScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
-        if (newEntryData) {
-          const priceDelta = newEntryData.price - origEntry;
-          prim.setEntryPrice(origEntry + priceDelta);
-          if (origTp != null) prim.setTpPrice(origTp + priceDelta);
-          if (origSl != null) prim.setSlPrice(origSl + priceDelta);
-          const nextStart = horizontalAnchorFromDataPoint(newEntryData);
-          const movedEndData = origEndScreen ? screenToData(origEndScreen.x + dx, origEndScreen.y) : null;
-          const nextEnd = movedEndData ? horizontalAnchorFromDataPoint(movedEndData) : origTimeRange.end;
-          prim.setTimeRange({
-            start: nextStart,
-            end: nextEnd,
-          });
-        }
+      const candidate = horizontalAnchorFromDataPoint(dataPoint);
+      const candidatePoint = dataPointFromHorizontalAnchor(candidate, prim.entryPrice);
+      const candidateScreen = candidatePoint ? dataToScreen(candidatePoint) : null;
+      const visualKeys = positionVisualAnchorKeys(
+        dragging.origTimeRange || prim.timeRange,
+        prim.entryPrice,
+        dataToScreen,
+      );
+      const otherKey = visualKeys?.leftKey;
+      const otherScreen = otherKey === "start"
+        ? visualKeys?.startScreen
+        : visualKeys?.endScreen;
+      if (candidate && candidateScreen && visualKeys && otherScreen
+        && candidateScreen.x > otherScreen.x + 0.5) {
+        prim.setTimeRange({ ...prim.timeRange, [visualKeys.rightKey]: candidate });
       }
     }
 

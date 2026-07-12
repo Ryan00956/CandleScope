@@ -98,6 +98,44 @@ function horizontalAnchorToDataPoint(anchor, price) {
   return normalized ? { ...normalized, price } : null;
 }
 
+function normalizePositionTimeRange(range) {
+  const start = normalizeHorizontalAnchor(range?.start);
+  const end = normalizeHorizontalAnchor(range?.end);
+  return start && end ? { start, end } : null;
+}
+
+function positionMinimumScreenWidth(chart) {
+  let spacing = null;
+  try {
+    spacing = chart?.timeScale?.()?.options?.()?.barSpacing;
+  } catch {
+    spacing = null;
+  }
+  return Number.isFinite(spacing) ? Math.max(24, Math.min(40, spacing)) : 24;
+}
+
+/**
+ * Keep source anchors untouched when another projection folds them onto one
+ * display row. Renderer and hit testing share this compact visual expansion,
+ * so the position remains selectable without inventing a neighboring anchor.
+ */
+export function normalizedPositionScreenRange(startX, endX, minimumWidth = 24) {
+  if (!Number.isFinite(startX) || !Number.isFinite(endX)) return null;
+  let leftX = Math.min(startX, endX);
+  let rightX = Math.max(startX, endX);
+  const collapsed = Math.abs(rightX - leftX) < 0.5;
+  const requestedWidth = Number.isFinite(minimumWidth) && minimumWidth > 0
+    ? minimumWidth
+    : 24;
+  const width = Math.max(24, requestedWidth);
+  if (rightX - leftX < width) {
+    const center = (leftX + rightX) / 2;
+    leftX = center - width / 2;
+    rightX = center + width / 2;
+  }
+  return { collapsed, leftX, rightX };
+}
+
 // ── Smart price formatter ──
 
 function formatPrice(price) {
@@ -607,8 +645,13 @@ class PositionPaneView {
     const tpY = source._tpPrice != null ? series.priceToCoordinate(source._tpPrice) : null;
     const slY = source._slPrice != null ? series.priceToCoordinate(source._slPrice) : null;
 
-    const leftX = toScreenX(source._timeRange.start);
-    const rightX = toScreenX(source._timeRange.end);
+    const screenRange = normalizedPositionScreenRange(
+      toScreenX(source._timeRange.start),
+      toScreenX(source._timeRange.end),
+      positionMinimumScreenWidth(chart),
+    );
+    const leftX = screenRange?.leftX ?? null;
+    const rightX = screenRange?.rightX ?? null;
 
     // Read K-line colors from CSS variables on the chart container
     let upColor = "#22c55e";
@@ -688,7 +731,8 @@ export class PositionDrawingPrimitive {
     this._entryPrice = opts.entryPrice;
     this._tpPrice = opts.tpPrice ?? null;
     this._slPrice = opts.slPrice ?? null;
-    this._timeRange = opts.timeRange || { start: null, end: null };
+    this._timeRange = normalizePositionTimeRange(opts.timeRange)
+      || { start: null, end: null };
     this._positionSize = opts.positionSize || 1000;
     this._infoPanelOffset = normalizeInfoPanelOffset(opts.infoPanelOffset);
     this._infoPanelBox = null;
@@ -761,8 +805,32 @@ export class PositionDrawingPrimitive {
   }
 
   setTimeRange(range) {
-    this._timeRange = range;
+    const nextRange = normalizePositionTimeRange(range);
+    if (!nextRange) return false;
+    this._timeRange = nextRange;
     this._requestUpdate?.();
+    return true;
+  }
+
+  setGeometry({ entryPrice, tpPrice, slPrice, timeRange }) {
+    const nextEntry = Number(entryPrice);
+    const nextTp = tpPrice == null ? null : Number(tpPrice);
+    const nextSl = slPrice == null ? null : Number(slPrice);
+    const nextRange = normalizePositionTimeRange(timeRange);
+    if (!Number.isFinite(nextEntry)
+      || (nextTp !== null && !Number.isFinite(nextTp))
+      || (nextSl !== null && !Number.isFinite(nextSl))
+      || !nextRange) {
+      return false;
+    }
+
+    // Validate every field before mutating any of them, then emit one update.
+    this._entryPrice = nextEntry;
+    this._tpPrice = nextTp;
+    this._slPrice = nextSl;
+    this._timeRange = nextRange;
+    this._requestUpdate?.();
+    return true;
   }
 
   setPositionSize(size) {
@@ -809,11 +877,11 @@ export class PositionDrawingPrimitive {
 
   setDataPoints(points) {
     if (points.length >= 2) {
-      this._timeRange = {
-        start: normalizeHorizontalAnchor(points[0]),
-        end: normalizeHorizontalAnchor(points[1]),
-      };
-      this._entryPrice = points[0].price;
+      const nextRange = normalizePositionTimeRange({ start: points[0], end: points[1] });
+      if (nextRange && Number.isFinite(Number(points[0].price))) {
+        this._timeRange = nextRange;
+        this._entryPrice = points[0].price;
+      }
     }
     this._requestUpdate?.();
   }
@@ -844,10 +912,13 @@ export class PositionDrawingPrimitive {
       return dataPointToCoordinate(this._chart, series, dataPoint, coordinateContext);
     };
 
-    const leftX = toScreenX(this._timeRange.start);
-    const rightX = toScreenX(this._timeRange.end);
-
-    if (leftX == null || rightX == null) return null;
+    const screenRange = normalizedPositionScreenRange(
+      toScreenX(this._timeRange.start),
+      toScreenX(this._timeRange.end),
+      positionMinimumScreenWidth(this._chart),
+    );
+    if (!screenRange) return null;
+    const { leftX, rightX } = screenRange;
 
     // Info panel is a separate draggable surface and may sit outside the
     // position box, so test it before rejecting by the main box extent.
@@ -861,8 +932,8 @@ export class PositionDrawingPrimitive {
       }
     }
 
-    const minX = Math.min(leftX, rightX);
-    const maxX = Math.max(leftX, rightX);
+    const minX = leftX;
+    const maxX = rightX;
 
     // Expand horizontal tolerance for edge detection
     if (x < minX - 20 || x > maxX + 20) return null;
@@ -883,16 +954,6 @@ export class PositionDrawingPrimitive {
     const boxTop = Math.min(...allYs);
     const boxBottom = Math.max(...allYs);
 
-    // ── Left/Right edge hit (prioritize if selected) ──
-    if (this._selected) {
-      if (Math.abs(x - minX) <= EDGE_HIT && y >= boxTop - 10 && y <= boxBottom + 10) {
-        return { zone: "left", pointIndex: -1 };
-      }
-      if (Math.abs(x - maxX) <= EDGE_HIT && y >= boxTop - 10 && y <= boxBottom + 10) {
-        return { zone: "right", pointIndex: -1 };
-      }
-    }
-
     // Check TP line hit (for dragging)
     if (tpY != null && Math.abs(y - tpY) <= HIT_RADIUS && x >= minX - 5 && x <= maxX + 5) {
       return { zone: "tp", pointIndex: -1 };
@@ -906,6 +967,18 @@ export class PositionDrawingPrimitive {
     // Check entry line hit
     if (Math.abs(y - entryY) <= HIT_RADIUS && x >= minX - 5 && x <= maxX + 5) {
       return { zone: "entry", pointIndex: -1 };
+    }
+
+    // Edge handles are secondary to the price lines. Select the nearest edge
+    // explicitly so a compact/folded span can never make left swallow right.
+    if (this._selected && y >= boxTop - 10 && y <= boxBottom + 10) {
+      const leftDistance = Math.abs(x - minX);
+      const rightDistance = Math.abs(x - maxX);
+      const nearestEdge = leftDistance <= rightDistance ? "left" : "right";
+      const nearestDistance = Math.min(leftDistance, rightDistance);
+      if (nearestDistance <= EDGE_HIT) {
+        return { zone: nearestEdge, pointIndex: -1 };
+      }
     }
 
     // Check if inside the TP zone

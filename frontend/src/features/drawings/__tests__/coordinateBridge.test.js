@@ -126,6 +126,47 @@ test("same projector ignores source ordinal when projection config identity chan
   }), rows[1]);
 });
 
+test("position endpoint lineage recovers across all derived projections and may conservatively fold", () => {
+  const anchors = [{
+    time: 120,
+    sourceOrdinal: 1,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:10",
+  }, {
+    time: 180,
+    sourceOrdinal: 0,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:10",
+  }];
+
+  for (const projectorId of ["renko", "point-and-figure", "kagi", "line-break"]) {
+    const rows = projectorId === "point-and-figure"
+      ? [displayRow(0, 200, 0, { from: 80, projectorId, to: 220 })]
+      : [
+          displayRow(0, 140, 0, { from: 80, projectorId, to: 140 }),
+          displayRow(1, 220, 0, { from: 141, projectorId, to: 220 }),
+        ];
+    const context = {
+      drawingProjectionConfig: `dataset-a:${projectorId}:current`,
+      sourceTimeHorizon: 220,
+    };
+    const resolved = anchors.map((anchor) => (
+      resolveDrawingAnchorToDisplayRow(rows, anchor, context)
+    ));
+
+    assert.ok(resolved.every(Boolean), projectorId);
+    if (projectorId === "point-and-figure") {
+      assert.strictEqual(resolved[0], resolved[1]);
+    } else {
+      assert.notStrictEqual(resolved[0], resolved[1]);
+    }
+    // Resolution is read-only: the durable Renko endpoints remain recoverable
+    // after a target projection temporarily folds them onto one display row.
+    assert.equal(anchors[0].sourceProjection, "renko");
+    assert.equal(anchors[1].sourceProjection, "renko");
+  }
+});
+
 test("drawing anchors use current lineage and reject unmaterialized future time", () => {
   const rows = [
     displayRow(0, 100, 0, { from: 80, to: 100 }),

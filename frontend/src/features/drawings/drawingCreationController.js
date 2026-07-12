@@ -56,6 +56,90 @@ function horizontalAnchorFromDataPoint(dataPoint) {
   return null;
 }
 
+function sameHorizontalAnchor(first, second) {
+  if (!first || !second) return false;
+  return first.time === second.time
+    && first.logical === second.logical
+    && first.sourceOrdinal === second.sourceOrdinal
+    && first.sourceProjection === second.sourceProjection
+    && first.sourceProjectionConfig === second.sourceProjectionConfig;
+}
+
+function positionSpanCandidateXs(pointerX, containerWidth, adapter) {
+  const hasWidth = Number.isFinite(containerWidth) && containerWidth > 1;
+  let leftEdge = 0;
+  let rightEdge = hasWidth ? containerWidth - 1 : pointerX + 80;
+
+  // Ordinal axes have no meaningful future coordinate. Restrict candidates to
+  // the materialized display rows so right-side whitespace can never become a
+  // fabricated synthetic anchor.
+  if (adapter?.usesOrdinalTime?.() === true) {
+    const rows = adapter.getSeriesData?.() || [];
+    const firstX = rows[0]?.time == null ? null : adapter.timeToCoordinate?.(rows[0].time);
+    const lastX = rows.at(-1)?.time == null ? null : adapter.timeToCoordinate?.(rows.at(-1).time);
+    if (Number.isFinite(firstX) && Number.isFinite(lastX)) {
+      leftEdge = hasWidth
+        ? Math.max(leftEdge, Math.min(firstX, lastX))
+        : Math.min(firstX, lastX);
+      rightEdge = hasWidth
+        ? Math.min(rightEdge, Math.max(firstX, lastX))
+        : Math.max(firstX, lastX);
+    }
+  }
+
+  if (rightEdge <= leftEdge) return [];
+  const span = hasWidth ? Math.max(1, (rightEdge - leftEdge) * 0.15) : 80;
+  const clampToDataRegion = (x) => Math.max(leftEdge, Math.min(rightEdge, x));
+  const originX = clampToDataRegion(pointerX);
+  const sides = [
+    { available: rightEdge - originX, edge: rightEdge, target: originX + span },
+    { available: originX - leftEdge, edge: leftEdge, target: originX - span },
+  ];
+  const fullSpanCandidates = sides
+    .filter(({ available }) => available + 0.5 >= span)
+    .map(({ target }) => clampToDataRegion(target));
+  const fallbackEdges = [...sides]
+    .sort((first, second) => second.available - first.available)
+    .map(({ edge }) => edge);
+  const candidates = [...fullSpanCandidates, ...fallbackEdges];
+  return candidates.filter((candidate, index) => Number.isFinite(candidate)
+    && Math.abs(candidate - pointerX) >= 0.5
+    && candidates.findIndex((value) => Math.abs(value - candidate) < 0.5) === index);
+}
+
+/**
+ * Pick both position endpoints from actual screen/display rows. This avoids
+ * treating an ordinal axis time object as a number and guarantees that a
+ * derived position never stores projection-local order/logical coordinates.
+ */
+function positionTimeRangeFromScreen({
+  dataPoint,
+  pos,
+  screenToDrawingData,
+  chartContainerRef,
+  adapter,
+}) {
+  const pointerAnchor = horizontalAnchorFromDataPoint(dataPoint);
+  if (!pointerAnchor) return null;
+
+  const width = Number(chartContainerRef?.current?.clientWidth);
+  for (const candidateX of positionSpanCandidateXs(pos.x, width, adapter)) {
+    const candidateData = screenToDrawingData(candidateX, pos.y, {
+      price: false,
+      snap: false,
+    });
+    const candidateAnchor = horizontalAnchorFromDataPoint(candidateData);
+    if (!candidateAnchor || sameHorizontalAnchor(pointerAnchor, candidateAnchor)) continue;
+    return candidateX < pos.x
+      ? { start: candidateAnchor, end: pointerAnchor }
+      : { start: pointerAnchor, end: candidateAnchor };
+  }
+
+  // A one-row/singular projection cannot express a safe horizontal span.
+  // Do not fabricate an ordinal neighbor or silently persist duplicate anchors.
+  return null;
+}
+
 /** Pen / highlighter: begin a freehand stroke. */
 export function startFreehandStroke({
   tool,
@@ -141,22 +225,19 @@ export function placePositionDrawing({
   if (!dataA) return true;
 
   const entryPrice = dataA.price;
-
-  // Calculate visible time range to auto-span ~30% of visible chart
   const adapter = getChartAdapter();
-  let startAnchor = horizontalAnchorFromDataPoint(dataA);
-  let endAnchor = horizontalAnchorFromDataPoint(dataA);
-  if (adapter?.isReady?.()) {
-    const vr = adapter.getVisibleTimeRange?.();
-    if (vr && dataA.time != null) {
-      const visibleSpan = vr.to - vr.from;
-      endAnchor = { time: dataA.time + visibleSpan * 0.15 };
-    } else if (dataA.logical != null) {
-      const logicalRange = adapter.getVisibleRange?.()?.logical;
-      const visibleBars = logicalRange ? Math.max(1, logicalRange.to - logicalRange.from) : 20;
-      endAnchor = { logical: dataA.logical + Math.max(1, Math.round(visibleBars * 0.15)) };
-    }
-  }
+
+  // Resolve the default span from two real screen/display rows. In particular,
+  // derived visible-range endpoints are ordinal objects and must never be
+  // subtracted as if they were timestamps.
+  const timeRange = positionTimeRangeFromScreen({
+    dataPoint: dataA,
+    pos,
+    screenToDrawingData,
+    chartContainerRef,
+    adapter,
+  });
+  if (!timeRange) return true;
 
   // Default TP/SL based on visible price range — ensures proper proportions on any timeframe
   let tpOffset, slOffset;
@@ -179,7 +260,7 @@ export function placePositionDrawing({
   const posPrim = createPositionPrimitive({
     tool,
     dataPoint: dataA,
-    timeRange: { start: startAnchor, end: endAnchor },
+    timeRange,
     tpOffset,
     slOffset,
     positionSize: positionSizeRef.current || 1000,

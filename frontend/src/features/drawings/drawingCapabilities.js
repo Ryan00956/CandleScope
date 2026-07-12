@@ -9,6 +9,7 @@ import {
   DEFAULT_CURSOR_TOOL,
   DRAWING_ENGINE_TOOL_IDS,
   FIB_TOOL_IDS,
+  POSITION_TOOL_IDS,
   SHAPE_TOOL_IDS,
 } from "./drawingModel.js";
 
@@ -25,6 +26,7 @@ const SOURCE_LINEAGE_TOOL_IDS = new Set([
   ...ANGLE_TOOL_IDS,
   ...FIB_TOOL_IDS,
   ...SHAPE_TOOL_IDS,
+  ...POSITION_TOOL_IDS,
   "text",
 ]);
 

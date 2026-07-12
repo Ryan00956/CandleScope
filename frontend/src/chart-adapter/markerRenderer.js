@@ -1,4 +1,5 @@
 import { createSeriesMarkers } from "lightweight-charts";
+import { compareChartTimes } from "./chartTime.js";
 
 const SHAPE_MAP = {
   triangleup: "arrowUp",
@@ -37,7 +38,7 @@ export function flattenIndicatorMarkers(indicatorMarkers = []) {
       });
     }
   }
-  allMarkers.sort((a, b) => a.time - b.time);
+  allMarkers.sort((a, b) => compareChartTimes(a.time, b.time));
   return allMarkers;
 }
 

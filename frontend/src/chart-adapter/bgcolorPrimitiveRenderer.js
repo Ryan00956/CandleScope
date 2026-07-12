@@ -1,4 +1,6 @@
-function flattenBgcolorRegions(indicatorBgcolors = []) {
+import { chartTimeKey, compareChartTimes } from "./chartTime.js";
+
+export function flattenBgcolorRegions(indicatorBgcolors = []) {
   const regions = [];
   for (const bg of indicatorBgcolors || []) {
     const color = bg?.color || "rgba(59,130,246,0.1)";
@@ -7,13 +9,13 @@ function flattenBgcolorRegions(indicatorBgcolors = []) {
       regions.push({ time: region.time, color });
     }
   }
-  regions.sort((a, b) => a.time - b.time);
+  regions.sort((a, b) => compareChartTimes(a.time, b.time));
   return regions;
 }
 
-function buildBgcolorSignature(regions = []) {
+export function buildBgcolorSignature(regions = []) {
   if (!regions.length) return "empty";
-  return regions.map((region) => `${region.time}:${region.color}`).join("|");
+  return JSON.stringify(regions.map((region) => [chartTimeKey(region.time), region.color]));
 }
 
 class BgcolorPaneRenderer {

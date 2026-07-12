@@ -3,6 +3,7 @@ import {
   isOhlcMainChartType,
   normalizeMainChartType,
 } from "../shared/mainChartTypes.js";
+import { sourceTimeFromChartTime } from "./chartTime.js";
 
 const DEFAULT_UP_COLOR = "#22c55e";
 const DEFAULT_DOWN_COLOR = "#ef4444";
@@ -128,6 +129,16 @@ function previousCloseBefore(rows, startIndex) {
   return null;
 }
 
+function indicatorColorForRow(colorMap, row) {
+  const time = row?.time;
+  if (colorMap.has(time)) return colorMap.get(time) || null;
+  const sourceTime = sourceTimeFromChartTime(time);
+  if (sourceTime !== null && sourceTime !== time) {
+    return colorMap.get(sourceTime) || null;
+  }
+  return null;
+}
+
 export function createMainSeriesPointConverter(rows = [], {
   chartType,
   downColor = DEFAULT_DOWN_COLOR,
@@ -142,7 +153,7 @@ export function createMainSeriesPointConverter(rows = [], {
 
   return (row) => {
     const close = validClose(row);
-    const indicatorColor = colorMap.get(row?.time) || null;
+    const indicatorColor = indicatorColorForRow(colorMap, row);
     const point = toMainSeriesPoint(row, {
       chartType: resolvedType,
       downColor,

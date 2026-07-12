@@ -301,6 +301,34 @@ test("barcolor overrides use fields supported by each OHLC series", () => {
   });
 });
 
+test("derived rows reuse source barcolors while exact ordinal colors take precedence", () => {
+  const exactTime = { order: 0, sourceTime: 10, sourceOrdinal: 0 };
+  const siblingTime = { order: 1, sourceTime: 10, sourceOrdinal: 1 };
+  const rows = [
+    { time: exactTime, open: 100, high: 102, low: 99, close: 101 },
+    { time: siblingTime, open: 101, high: 103, low: 100, close: 102 },
+  ];
+
+  const data = buildMainSeriesData(rows, {
+    chartType: "renko",
+    indicatorBarcolors: [{
+      data: [
+        { time: 10, color: "purple" },
+        { time: exactTime, color: "orange" },
+      ],
+    }],
+  });
+
+  assert.deepEqual(data.map(({ color, borderColor, wickColor }) => ({
+    color,
+    borderColor,
+    wickColor,
+  })), [
+    { color: "orange", borderColor: "orange", wickColor: "orange" },
+    { color: "purple", borderColor: "purple", wickColor: "purple" },
+  ]);
+});
+
 test("baseline and price-column references avoid the library's unhelpful zero defaults", () => {
   assert.deepEqual(buildMainSeriesReferenceOptions("baseline", ROWS), {
     baseValue: { type: "price", price: 110 },

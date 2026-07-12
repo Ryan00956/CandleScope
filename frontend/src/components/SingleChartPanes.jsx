@@ -56,10 +56,13 @@ import {
 } from "../features/drawings/drawingEngineLoader";
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
 import {
+  buildDisplaySourceTimeIndex,
   createProjector,
   getChartTypeDescriptor,
+  isLastDisplayTargetForSourceTime,
   mapSourceTimeRangeToDisplayLogicalRange,
   ProjectionStore,
+  projectPaneDescriptorsToDisplay,
   resolveKagiProjectorOptions,
   resolveLineBreakProjectorOptions,
   resolvePointFigureProjectorOptions,
@@ -255,13 +258,88 @@ function getPaneRenderState(mapRef, paneId) {
       hlinesRef: { current: [] },
       hlinesStateRef: { current: { target: null, signature: "unknown" } },
       fillSeriesRef: { current: [] },
-      fillSeriesStateRef: { current: { chart: null, signature: "unknown" } },
+      fillSeriesStateRef: {
+        current: { chart: null, paneIndex: null, signature: "unknown" },
+      },
       bgcolorPrimitiveRef: { current: null },
       bgcolorStateRef: { current: { pane: null, signature: "unknown" } },
     };
     mapRef.current.set(paneId, state);
   }
   return state;
+}
+
+const EMPTY_FILL_RENDER_PAYLOAD = {
+  entries: [],
+  matchedFillCount: 0,
+  pointCount: 0,
+  signature: "empty",
+};
+
+function clearPaneAuxiliaryRenderState(chart, paneId, state) {
+  renderBgcolors({
+    chart,
+    pane: null,
+    indicatorBgcolors: [],
+    bgcolorPrimitiveRef: state.bgcolorPrimitiveRef,
+    bgcolorStateRef: state.bgcolorStateRef,
+    paneId,
+    recordPerfEvent,
+  });
+  renderMarkers({
+    targetSeries: null,
+    indicatorMarkers: [],
+    markerTargetRef: state.markerTargetRef,
+    markerStateRef: state.markerStateRef,
+    paneId,
+    recordPerfEvent,
+  });
+  renderHlines({
+    series: null,
+    indicatorHlines: [],
+    hlinesRef: state.hlinesRef,
+    hlinesStateRef: state.hlinesStateRef,
+    paneId,
+    recordPerfEvent,
+  });
+  renderFillSeries({
+    chart,
+    fillPayload: EMPTY_FILL_RENDER_PAYLOAD,
+    fillSeriesRef: state.fillSeriesRef,
+    fillSeriesStateRef: state.fillSeriesStateRef,
+    paneId,
+    paneIndex: 0,
+    definitionsCount: 0,
+    recordPerfEvent,
+  });
+}
+
+function clearAuxiliaryChartState({
+  chart,
+  indicatorSeriesRef,
+  paneRenderStateRef,
+  prevIndicatorKeyRef,
+  reason,
+}) {
+  if (chart) {
+    for (const [paneId, state] of paneRenderStateRef.current) {
+      clearPaneAuxiliaryRenderState(chart, paneId, state);
+    }
+  }
+  paneRenderStateRef.current = new Map();
+
+  const removedSeriesCount = chart
+    ? removeSeriesEntries(chart, indicatorSeriesRef.current)
+    : 0;
+  indicatorSeriesRef.current = [];
+  prevIndicatorKeyRef.current = "";
+  if (removedSeriesCount > 0) {
+    recordPerfEvent("chart.indicatorSeries.remove", {
+      paneId: "single-chart",
+      reason,
+      series: removedSeriesCount,
+    });
+  }
 }
 
 function buildPaneDescriptors({
@@ -302,17 +380,6 @@ function buildPaneDescriptors({
 
   return descriptors;
 }
-
-const DERIVED_MAIN_PANE_DESCRIPTOR = Object.freeze({
-  id: "main",
-  paneIndex: 0,
-  label: "",
-  lines: [],
-  markers: [],
-  fills: [],
-  hlines: [],
-  bgcolors: [],
-});
 
 const SingleChartPanes = forwardRef(function SingleChartPanes({
   seriesStore = null,
@@ -404,11 +471,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const prevSubPaneIdsRef = useRef(new Set());
   const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
+  const datasetKeyRef = useRef(datasetKey);
+  const surfaceConfigKeyRef = useRef(null);
   const onViewportRangeChangeRef = useRef(onViewportRangeChange);
   const onVisibleRangeChangeRef = useRef(onVisibleRangeChange);
   const drawingApiRef = useRef(null);
   const drawingsHiddenRef = useRef(false);
   const [seriesReady, setSeriesReady] = useState(0);
+  const [auxiliaryDisplayState, setAuxiliaryDisplayState] = useState({
+    datasetKey: null,
+    rows: [],
+    surfaceConfigKey: null,
+  });
   const [DrawingEngineHost, setDrawingEngineHost] = useState(null);
   const [isAutoScale, setIsAutoScale] = useState(true);
   const [contextMenu, setContextMenu] = useState(null);
@@ -416,7 +490,8 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const resolvedChartType = normalizeMainChartType(chartType);
   const resolvedDescriptor = getChartTypeDescriptor(resolvedChartType);
   const resolvedAxisMode = resolvedDescriptor.axisMode;
-  const supportsAuxiliaryChartFeatures = resolvedAxisMode === "time";
+  const usesDerivedAxis = resolvedAxisMode === "derived-ordinal";
+  const supportsDrawingFeatures = !usesDerivedAxis;
   const projectionSettings = useMemo(() => {
     if (resolvedChartType === "renko") {
       return {
@@ -466,6 +541,8 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   requestedChartTypeRef.current = resolvedChartType;
   requestedProjectionSettingsRef.current = projectionSettings;
   seriesStoreRef.current = seriesStore;
+  datasetKeyRef.current = datasetKey;
+  surfaceConfigKeyRef.current = surfaceConfigKey;
   const indicatorBarColorMap = useMemo(
     () => buildIndicatorBarColorMap(indicatorBarcolors),
     [indicatorBarcolors],
@@ -492,6 +569,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   }, [datasetKey, interval, onCrosshairMove, symbol]);
 
   const dataTimeSet = resolveDataTimeSet(seriesStore);
+  const derivedAuxiliaryIndex = useMemo(() => {
+    if (
+      !usesDerivedAxis
+      || auxiliaryDisplayState.datasetKey !== datasetKey
+      || auxiliaryDisplayState.surfaceConfigKey !== surfaceConfigKey
+    ) {
+      return null;
+    }
+
+    return buildDisplaySourceTimeIndex(auxiliaryDisplayState.rows);
+  }, [auxiliaryDisplayState, datasetKey, surfaceConfigKey, usesDerivedAxis]);
+  const renderDataTimeSet = derivedAuxiliaryIndex?.displayTimeSet || dataTimeSet;
   const sourcePaneDescriptors = useMemo(() => buildPaneDescriptors({
     dataTimeSet,
     mainOverlayLines,
@@ -510,15 +599,14 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     indicatorBgcolors,
   ]);
   const paneDescriptors = useMemo(
-    () => (supportsAuxiliaryChartFeatures
-      ? sourcePaneDescriptors
-      : [DERIVED_MAIN_PANE_DESCRIPTOR]),
-    [sourcePaneDescriptors, supportsAuxiliaryChartFeatures],
+    () => {
+      if (!usesDerivedAxis) return sourcePaneDescriptors;
+      if (!derivedAuxiliaryIndex) return [];
+      return projectPaneDescriptorsToDisplay(sourcePaneDescriptors, derivedAuxiliaryIndex);
+    },
+    [derivedAuxiliaryIndex, sourcePaneDescriptors, usesDerivedAxis],
   );
-  const activeSubPanes = useMemo(
-    () => (supportsAuxiliaryChartFeatures ? subPanes : []),
-    [subPanes, supportsAuxiliaryChartFeatures],
-  );
+  const activeSubPanes = subPanes;
   const subPaneIdsKey = useMemo(
     () => activeSubPanes.map((pane) => pane.id).join(","),
     [activeSubPanes],
@@ -618,6 +706,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       rowMapRef: displayRowMapRef,
       rowIndexMapRef: displayRowIndexMapRef,
     });
+    setAuxiliaryDisplayState(initialDescriptor.axisMode === "derived-ordinal"
+      ? {
+          datasetKey: datasetKeyRef.current,
+          rows: displayRowsRef.current,
+          surfaceConfigKey: surfaceConfigKeyRef.current,
+        }
+      : { datasetKey: null, rows: [], surfaceConfigKey: null });
     const mainSeries = createMainSeries(chart, {
       chartType: initialChartType,
       data: initialRows,
@@ -645,12 +740,15 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         return;
       }
       const displayRow = displayRowMapRef.current.get(param.time);
+      const displayIndex = displayRowIndexMapRef.current.get(param.time);
       const sourceTime = resolveSourceTime(param.time, displayRow);
       const sourceRow = sourceTime == null ? null : sourceRowMapRef.current.get(sourceTime);
+      const includeVolume = initialDescriptor.axisMode === "time"
+        || isLastDisplayTargetForSourceTime(displayRowsRef.current, displayIndex);
       const crosshairValue = buildMainSeriesCrosshairValue(
         sourceTime,
         displayRow || sourceRow,
-        { includeVolume: supportsAuxiliaryChartFeatures, volumeRow: sourceRow },
+        { includeVolume, volumeRow: sourceRow },
       );
       if (!crosshairValue) {
         onCrosshairMove(null);
@@ -727,7 +825,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         chart.remove();
       } catch { /* best-effort teardown */ }
     };
-  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishViewportRangeChange, scheduleVisibleRangeSave, supportsAuxiliaryChartFeatures, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishViewportRangeChange, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -832,6 +930,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         rowMapRef: displayRowMapRef,
         rowIndexMapRef: displayRowIndexMapRef,
       });
+      setAuxiliaryDisplayState(nextDescriptor.axisMode === "derived-ordinal"
+        ? {
+            datasetKey: datasetKeyRef.current,
+            rows: displayRowsRef.current,
+            surfaceConfigKey: surfaceConfigKeyRef.current,
+          }
+        : { datasetKey: null, rows: [], surfaceConfigKey: null });
       mainSeriesReferenceRef.current = {
         series: result.series,
         signature: JSON.stringify(buildMainSeriesReferenceOptions(resolvedChartType, rows)),
@@ -910,6 +1015,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   }, [contextMenu]);
 
   useEffect(() => {
+    clearAuxiliaryChartState({
+      chart: chartRef.current,
+      indicatorSeriesRef,
+      paneRenderStateRef,
+      prevIndicatorKeyRef,
+      reason: "dataset-change",
+    });
     userInteractedRef.current = false;
     hasRestoredRangeRef.current = false;
     lastViewportRestoreSourceRef.current = null;
@@ -918,6 +1030,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     displayRowMapRef.current = new Map();
     displayRowIndexMapRef.current = new Map();
     projectionStoreRef.current = null;
+    setAuxiliaryDisplayState({ datasetKey: null, rows: [], surfaceConfigKey: null });
     projectionGenerationRef.current += 1;
     projectionRenderContextRef.current = null;
     viewportControllerRef.current?.resetSession();
@@ -1008,6 +1121,14 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         rowMapRef: displayRowMapRef,
         rowIndexMapRef: displayRowIndexMapRef,
       });
+      if (getChartTypeDescriptor(activeChartType).axisMode === "derived-ordinal"
+        && previousDisplayRows !== displayRows) {
+        setAuxiliaryDisplayState({
+          datasetKey: datasetKeyRef.current,
+          rows: displayRows,
+          surfaceConfigKey: surfaceConfigKeyRef.current,
+        });
+      }
       updateMainSeriesReference(series, rows);
       projectionRenderContextRef.current = mainSeriesRenderContext;
       if (projectionRendered && pendingSurfaceViewportRef.current && displayRows.length > 0) {
@@ -1084,6 +1205,14 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           rowMapRef: displayRowMapRef,
           rowIndexMapRef: displayRowIndexMapRef,
         });
+        if (getChartTypeDescriptor(mainSeriesTypeRef.current).axisMode === "derived-ordinal"
+          && previousDisplayRows !== displayRows) {
+          setAuxiliaryDisplayState({
+            datasetKey: datasetKeyRef.current,
+            rows: displayRows,
+            surfaceConfigKey: surfaceConfigKeyRef.current,
+          });
+        }
         updateMainSeriesReference(currentSeries, rows);
       } finally {
         isSyncingRef.current = false;
@@ -1158,7 +1287,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           ?.lines
           ?.find((candidate) => (candidate.id || candidate.name) === (entry.lineConfig.id || entry.lineConfig.name));
         if (!line) continue;
-        const validData = normalizeLineSeriesData(line, dataTimeSet);
+        const validData = normalizeLineSeriesData(line, renderDataTimeSet);
         applyLineSeriesData(entry.series, validData, entry.data, {
           datasetKey,
           indicatorId: line.indicatorId,
@@ -1167,7 +1296,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           line: line.name || line.id,
           type: line.type || "line",
           path: "single-fast",
-        }, recordPerfEvent);
+        }, recordPerfEvent, { preferSetData: usesDerivedAxis });
         entry.lineConfig = line;
         entry.data = validData;
       }
@@ -1193,7 +1322,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
             paneIndex: pane.paneIndex,
             crosshairMarkerVisible: !DRAWING_TOOL_IDS.has(drawingTool),
           });
-          const validData = normalizeLineSeriesData(line, dataTimeSet);
+          const validData = normalizeLineSeriesData(line, renderDataTimeSet);
           if (validData.length > 0) {
             series.setData(validData);
             recordPerfEvent("chart.indicatorSeries.setData", {
@@ -1235,7 +1364,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     })) {
       setSeriesReady((prev) => prev + 1);
     }
-  }, [dataTimeSet, datasetKey, drawingTool, interval, paneDescriptors, seriesReady]);
+  }, [datasetKey, drawingTool, interval, paneDescriptors, renderDataTimeSet, seriesReady, usesDerivedAxis]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1259,6 +1388,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const chart = chartRef.current;
     if (!chart) return;
     const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
+    const activePaneIds = new Set(paneDescriptors.map((pane) => pane.id));
 
     for (const pane of paneDescriptors) {
       const state = getPaneRenderState(paneRenderStateRef, pane.id);
@@ -1307,6 +1437,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         onError: (err) => console.warn("SingleChartPanes: failed to create fill area:", err),
       });
     }
+
+    for (const [paneId, state] of paneRenderStateRef.current) {
+      if (activePaneIds.has(paneId)) continue;
+      clearPaneAuxiliaryRenderState(chart, paneId, state);
+      paneRenderStateRef.current.delete(paneId);
+    }
   }, [customBg, paneDescriptors, seriesReady, theme]);
 
   useEffect(() => {
@@ -1317,12 +1453,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     prevSubPaneIdsRef.current = currentIds;
   }, [drawingKeyBase, subPanes, symbol]);
 
-  const shouldMountDrawingEngine = supportsAuxiliaryChartFeatures
+  const shouldMountDrawingEngine = supportsDrawingFeatures
     && shouldLoadDrawingEngine({ activeTool: drawingTool, drawingKey });
   const drawingAnchorReady = !!mainSeriesRef.current;
 
   useEffect(() => {
-    if (!supportsAuxiliaryChartFeatures
+    if (!supportsDrawingFeatures
       || DrawingEngineHost
       || seriesReady <= 0
       || !drawingAnchorReady) return undefined;
@@ -1333,7 +1469,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       if (!cancelled) setDrawingEngineHost(() => module.default);
     });
     return () => { cancelled = true; };
-  }, [DrawingEngineHost, drawingAnchorReady, drawingTool, seriesReady, shouldMountDrawingEngine, supportsAuxiliaryChartFeatures]);
+  }, [DrawingEngineHost, drawingAnchorReady, drawingTool, seriesReady, shouldMountDrawingEngine, supportsDrawingFeatures]);
 
   const clearAllDrawings = useCallback(() => {
     drawingApiRef.current?.clearAll?.();
@@ -1393,11 +1529,11 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         onContextMenu={handlePriceScaleContextMenu}
       />
 
-      {!supportsAuxiliaryChartFeatures && (
+      {usesDerivedAxis && (
         <div className="synthetic-chart-notice" role="status">
           <strong>{syntheticChartNotice.title}</strong>
           <span>
-            {`${syntheticChartNotice.detail} · 指标、成交量和绘图暂不显示`}
+            {`${syntheticChartNotice.detail} · 指标按原始 K 线映射 · 成交量仅落末个合成点 · 绘图暂不支持`}
           </span>
         </div>
       )}

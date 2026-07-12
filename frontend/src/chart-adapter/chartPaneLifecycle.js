@@ -1,3 +1,9 @@
+function formatterSourceTime(value) {
+  const candidate = value?.sourceTime ?? value?._ordinal_sourceTime ?? value;
+  const numeric = Number(candidate);
+  return Number.isFinite(numeric) ? numeric : candidate;
+}
+
 export function buildLocalizationOptions(timezone = "Local", interval = "1h") {
   const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
   try {
@@ -19,11 +25,15 @@ export function buildLocalizationOptions(timezone = "Local", interval = "1h") {
 
     return {
       localization: {
-        timeFormatter: (ts) => tooltipFormatter.format(new Date(ts * 1000)),
+        timeFormatter: (ts) => tooltipFormatter.format(
+          new Date(formatterSourceTime(ts) * 1000),
+        ),
       },
       timeScale: {
         tickMarkFormatter: (ts, tickMarkType) => {
-          const parts = partsFormatter.formatToParts(new Date(ts * 1000));
+          const parts = partsFormatter.formatToParts(
+            new Date(formatterSourceTime(ts) * 1000),
+          );
           const get = (type) => parts.find((part) => part.type === type)?.value;
           const year = get("year");
           const month = get("month");

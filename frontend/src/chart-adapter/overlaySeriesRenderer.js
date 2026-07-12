@@ -26,6 +26,7 @@ export function renderFillSeries({
   if (
     fillSeriesStateRef.current.chart === chart
     && fillSeriesStateRef.current.signature === fillPayload.signature
+    && fillSeriesStateRef.current.paneIndex === paneIndex
   ) {
     return;
   }
@@ -45,7 +46,7 @@ export function renderFillSeries({
     });
   }
   fillSeriesRef.current = [];
-  fillSeriesStateRef.current = { chart, signature: fillPayload.signature };
+  fillSeriesStateRef.current = { chart, paneIndex, signature: fillPayload.signature };
 
   if (fillPayload.entries.length === 0) return;
 

@@ -11,6 +11,13 @@ export { createProjector, registerProjectorFactory } from "./projectorFactory.js
 export { ProjectionStore } from "./projectionStore.js";
 export { shouldPreserveProjectionViewport } from "./projectionViewportPolicy.js";
 export {
+  buildDisplaySourceTimeIndex,
+  isLastDisplayTargetForSourceTime,
+  projectBarcolorGroupsToDisplay,
+  projectPaneDescriptorsToDisplay,
+  projectSourceTimedEntries,
+} from "./derivedAuxiliaryProjection.js";
+export {
   calculateRenkoAtr,
   inferRenkoMinimumTick,
   resolveRenkoProjectorOptions,

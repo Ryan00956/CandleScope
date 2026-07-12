@@ -1,3 +1,5 @@
+import { chartTimeKey, chartTimesEqual, compareChartTimes } from "./chartTime.js";
+
 export function toCandlePoint(d) {
   if (
     d?.__whitespace
@@ -13,7 +15,17 @@ export function toCandlePoint(d) {
 
 export function filterEntriesByTime(entries = [], allowedTimeSet) {
   if (!allowedTimeSet) return entries || [];
-  return (entries || []).filter((entry) => entry?.time != null && allowedTimeSet.has(entry.time));
+  const allowedKeys = new Set();
+  for (const time of allowedTimeSet) {
+    const key = chartTimeKey(time);
+    if (key !== null) allowedKeys.add(key);
+  }
+  return (entries || []).filter((entry) => {
+    if (entry?.time == null) return false;
+    if (allowedTimeSet.has(entry.time)) return true;
+    const key = chartTimeKey(entry.time);
+    return key !== null && allowedKeys.has(key);
+  });
 }
 
 export function normalizeLineSeriesData(line, allowedTimeSet) {
@@ -21,12 +33,15 @@ export function normalizeLineSeriesData(line, allowedTimeSet) {
   const sourceData = filterEntriesByTime(line?.data, allowedTimeSet);
   if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
     const colorMap = new Map();
-    for (const cd of filterEntriesByTime(line.colorData, allowedTimeSet)) colorMap.set(cd.time, cd.color);
+    for (const cd of filterEntriesByTime(line.colorData, allowedTimeSet)) {
+      const key = chartTimeKey(cd.time);
+      if (key !== null) colorMap.set(key, cd.color);
+    }
     return sourceData
       .filter((d) => d?.time != null && d?.value != null && isFinite(d.value))
       .map((d) => {
         const entry = { time: d.time, value: d.value };
-        const c = colorMap.get(d.time);
+        const c = colorMap.get(chartTimeKey(d.time));
         if (c) entry.color = c;
         return entry;
       });
@@ -60,13 +75,13 @@ export function alignIndicatorBgcolorsToTimes(indicatorBgcolors = [], allowedTim
 }
 
 export function linePointEquals(a, b) {
-  return a?.time === b?.time
+  return chartTimesEqual(a?.time, b?.time)
     && a?.value === b?.value
     && (a?.color || null) === (b?.color || null);
 }
 
 export function candlePointEquals(a, b) {
-  return a?.time === b?.time
+  return chartTimesEqual(a?.time, b?.time)
     && a?.open === b?.open
     && a?.high === b?.high
     && a?.low === b?.low
@@ -79,8 +94,11 @@ export function candlePointEquals(a, b) {
 export function canUseTrailingSeriesUpdate(previousData, nextData) {
   if (!previousData?.length || !nextData?.length) return false;
   if (nextData.length < previousData.length || nextData.length > previousData.length + 1) return false;
-  if (nextData[0]?.time !== previousData[0]?.time) return false;
-  if (nextData[previousData.length - 1]?.time !== previousData[previousData.length - 1]?.time) return false;
+  if (!chartTimesEqual(nextData[0]?.time, previousData[0]?.time)) return false;
+  if (!chartTimesEqual(
+    nextData[previousData.length - 1]?.time,
+    previousData[previousData.length - 1]?.time,
+  )) return false;
 
   const stableCount = Math.max(0, previousData.length - 1);
   for (let i = 0; i < stableCount; i += 1) {
@@ -92,8 +110,11 @@ export function canUseTrailingSeriesUpdate(previousData, nextData) {
 export function canUseTrailingCandleUpdate(previousData, nextData) {
   if (!previousData?.length || !nextData?.length) return false;
   if (nextData.length < previousData.length || nextData.length > previousData.length + 1) return false;
-  if (nextData[0]?.time !== previousData[0]?.time) return false;
-  if (nextData[previousData.length - 1]?.time !== previousData[previousData.length - 1]?.time) return false;
+  if (!chartTimesEqual(nextData[0]?.time, previousData[0]?.time)) return false;
+  if (!chartTimesEqual(
+    nextData[previousData.length - 1]?.time,
+    previousData[previousData.length - 1]?.time,
+  )) return false;
 
   const stableCount = Math.max(0, previousData.length - 1);
   for (let i = 0; i < stableCount; i += 1) {
@@ -102,7 +123,14 @@ export function canUseTrailingCandleUpdate(previousData, nextData) {
   return true;
 }
 
-export function applyLineSeriesData(series, nextData, previousData, detail, recordPerfEvent) {
+export function applyLineSeriesData(
+  series,
+  nextData,
+  previousData,
+  detail,
+  recordPerfEvent,
+  { preferSetData = false } = {},
+) {
   if (!nextData?.length) {
     if (previousData?.length) {
       series.setData([]);
@@ -115,7 +143,7 @@ export function applyLineSeriesData(series, nextData, previousData, detail, reco
     }
     return "empty";
   }
-  if (canUseTrailingSeriesUpdate(previousData, nextData)) {
+  if (!preferSetData && canUseTrailingSeriesUpdate(previousData, nextData)) {
     const start = Math.max(0, previousData.length - 1);
     for (let i = start; i < nextData.length; i += 1) {
       series.update(nextData[i]);
@@ -164,25 +192,45 @@ export function buildFillRenderEntries(indicatorFills = [], indicatorLines = [],
     const map1 = new Map();
     const map2 = new Map();
     for (const d of data1) {
-      if (d?.time != null && d?.value != null && isFinite(d.value)) map1.set(d.time, d.value);
+      const key = chartTimeKey(d?.time);
+      if (key !== null && d?.value != null && isFinite(d.value)) {
+        map1.set(key, { time: d.time, value: d.value });
+      }
     }
     for (const d of data2) {
-      if (d?.time != null && d?.value != null && isFinite(d.value)) map2.set(d.time, d.value);
+      const key = chartTimeKey(d?.time);
+      if (key !== null && d?.value != null && isFinite(d.value)) {
+        map2.set(key, { time: d.time, value: d.value });
+      }
     }
 
-    const times = [];
-    for (const t of map1.keys()) {
-      if (map2.has(t)) times.push(t);
+    const sharedPoints = [];
+    for (const [key, first] of map1) {
+      const second = map2.get(key);
+      if (second) sharedPoints.push({ key, first, second });
     }
-    times.sort((a, b) => a - b);
-    if (times.length === 0) continue;
+    sharedPoints.sort((a, b) => compareChartTimes(a.first.time, b.first.time));
+    if (sharedPoints.length === 0) continue;
 
-    const upperData = times.map((t) => ({ time: t, value: Math.max(map1.get(t), map2.get(t)) }));
-    const lowerData = times.map((t) => ({ time: t, value: Math.min(map1.get(t), map2.get(t)) }));
+    const upperData = sharedPoints.map(({ first, second }) => ({
+      time: first.time,
+      value: Math.max(first.value, second.value),
+    }));
+    const lowerData = sharedPoints.map(({ first, second }) => ({
+      time: first.time,
+      value: Math.min(first.value, second.value),
+    }));
     const fillColor = fillDef.color || "rgba(59,130,246,0.15)";
     entries.push({ upperData, lowerData, fillColor, backgroundColor });
-    signatureParts.push(`${scope}:${plot1_id}:${plot2_id}:${fillColor}:${times[0]}:${times[times.length - 1]}:${times.length}`);
-    pointCount += times.length;
+    signatureParts.push(JSON.stringify([
+      scope,
+      plot1_id,
+      plot2_id,
+      fillColor,
+      backgroundColor,
+      sharedPoints.map(({ key, first, second }) => [key, first.value, second.value]),
+    ]));
+    pointCount += sharedPoints.length;
   }
 
   return {

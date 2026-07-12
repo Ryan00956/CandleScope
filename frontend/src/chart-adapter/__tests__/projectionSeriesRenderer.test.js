@@ -219,7 +219,7 @@ test("projection renderer preserves viewport through setData instead of popping"
   const viewportEvents = [];
   const nextData = [{ time: 10 }, { time: 20 }, { time: 30 }];
   const result = renderMainSeriesProjectionPatch({
-    indexOfDisplayTime: (time) => ({ 10: 0, 20: 1, 30: 2 }[time] ?? -1),
+    resolveDisplayAnchorIndex: (time) => ({ 10: 0, 20: 1, 30: 2 }[time] ?? -1),
     preserveViewport: true,
     previousDisplayRows: [{ time: 10 }, { time: 20 }, { time: 40 }, { time: 50 }],
     series: {
@@ -354,7 +354,7 @@ test("projection renderer rebuilds structural tails", () => {
   };
   const nextData = [{ time: 5 }, { time: 10 }, { time: 20 }];
   const result = renderMainSeriesProjectionPatch({
-    indexOfDisplayTime: (time) => ({ 5: 0, 10: 1, 20: 2 }[time] ?? -1),
+    resolveDisplayAnchorIndex: (time) => ({ 5: 0, 10: 1, 20: 2 }[time] ?? -1),
     previousDisplayRows: [{ time: 10 }, { time: 20 }],
     preserveViewport: true,
     series,
@@ -712,7 +712,7 @@ test("frozen patch objects can materialize and commit incremental data", () => {
 test("viewport compensation failure cannot undo a successful data commit", () => {
   const nextData = [{ time: 1 }, { time: 2 }, { time: 3 }];
   const result = renderMainSeriesProjectionPatch({
-    indexOfDisplayTime: () => 0,
+    resolveDisplayAnchorIndex: () => 0,
     patch: {
       deleteCount: 2,
       fromOutputIndex: 1,

@@ -64,6 +64,7 @@ import {
   resolveLineBreakProjectorOptions,
   resolvePointFigureProjectorOptions,
   resolveRenkoProjectorOptions,
+  shouldPreserveProjectionViewport,
   sourceTimeFromAxisTime,
 } from "../features/chart-representation/index.js";
 import { recordPerfEvent } from "../runtime/performance/perfMarks";
@@ -243,14 +244,6 @@ function restoreSurfaceViewport(viewportController, displayRows, transfer, axisM
   return viewportController.restoreProjectionRange(range, {
     barSpacing: transfer.axisMode === axisMode ? transfer.barSpacing : null,
   });
-}
-
-function shouldPreserveProjectionViewport(delta) {
-  const type = delta?.type;
-  const hasTrim = (delta?.trimmedLeft || 0) > 0 || (delta?.trimmedRight || 0) > 0;
-  return type === "prepend"
-    || type === "mid-merge"
-    || ((type === "tick" || type === "append") && hasTrim);
 }
 
 function getPaneRenderState(mapRef, paneId) {
@@ -980,10 +973,19 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       let projectionRendered = false;
       try {
         const renderResult = renderMainSeriesProjectionPatch({
-          indexOfDisplayTime: (time) => projectionStore.indexOfDisplayTime(time),
           previousDisplayRows,
           patch: renderedPatch,
+          preserveViewport: shouldPreserveProjectionViewport(
+            { type: "replace" },
+            {
+              hasDisplay: previousDisplayRows.length > 0,
+              userInteracted: userInteractedRef.current,
+            },
+          ),
           recordPerfEvent,
+          resolveDisplayAnchorIndex: (time) => (
+            projectionStore.resolveDisplayAnchorIndex(time)
+          ),
           series,
           viewportController: viewportControllerRef.current,
         });
@@ -1048,11 +1050,16 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         });
         try {
           const renderResult = renderMainSeriesProjectionPatch({
-            indexOfDisplayTime: (time) => projectionStore.indexOfDisplayTime(time),
             previousDisplayRows,
             patch: renderedPatch,
-            preserveViewport: shouldPreserveProjectionViewport(delta),
+            preserveViewport: shouldPreserveProjectionViewport(delta, {
+              hasDisplay: previousDisplayRows.length > 0,
+              userInteracted: userInteractedRef.current,
+            }),
             recordPerfEvent,
+            resolveDisplayAnchorIndex: (time) => (
+              projectionStore.resolveDisplayAnchorIndex(time)
+            ),
             series: currentSeries,
             viewportController: viewportControllerRef.current,
           });

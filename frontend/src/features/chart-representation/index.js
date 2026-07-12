@@ -9,6 +9,7 @@ export {
 } from "./chartTypeRegistry.js";
 export { createProjector, registerProjectorFactory } from "./projectorFactory.js";
 export { ProjectionStore } from "./projectionStore.js";
+export { shouldPreserveProjectionViewport } from "./projectionViewportPolicy.js";
 export {
   calculateRenkoAtr,
   inferRenkoMinimumTick,
@@ -23,6 +24,7 @@ export {
 export {
   axisTimeKey,
   compareAxisTime,
+  findDisplayIndexForAxisAnchor,
   findLastDisplayIndexForSourceTime,
   isOrdinalAxisTime,
   mapSourceTimeRangeToDisplayLogicalRange,

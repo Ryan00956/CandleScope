@@ -182,6 +182,10 @@ test("ordinal display rows can be looked up with an equivalent axis item", () =>
 
   assert.equal(store.indexOfDisplayTime({ order: 1, sourceTime: 20, sourceOrdinal: 0 }), 1);
   assert.equal(
+    store.resolveDisplayAnchorIndex({ order: 0, sourceTime: 20, sourceOrdinal: 0 }),
+    1,
+  );
+  assert.equal(
     store.getDisplayByTime({ order: 0, sourceTime: 10, sourceOrdinal: 0 }).close,
     12,
   );

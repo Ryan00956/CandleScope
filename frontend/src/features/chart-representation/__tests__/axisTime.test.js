@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   axisTimeKey,
   compareAxisTime,
+  findDisplayIndexForAxisAnchor,
   findLastDisplayIndexForSourceTime,
   isOrdinalAxisTime,
   mapSourceTimeRangeToDisplayLogicalRange,
@@ -73,6 +74,62 @@ test("same-source lookup deliberately selects the last emitted brick", () => {
   assert.equal(findLastDisplayIndexForSourceTime(rows, 100), 1);
   assert.equal(findLastDisplayIndexForSourceTime(rows, 200), 2);
   assert.equal(findLastDisplayIndexForSourceTime(rows, 150), -1);
+});
+
+test("display anchor lookup ignores reassigned output orders", () => {
+  const rows = [
+    displayRow(0, 50, 0),
+    displayRow(1, 100, 0),
+    displayRow(2, 200, 0),
+  ];
+
+  // The captured order now belongs to source 100 after structural reprojection.
+  assert.equal(findDisplayIndexForAxisAnchor(rows, ordinal(1, 200, 0)), 2);
+});
+
+test("display anchor lookup preserves or predecessor-clamps a 1:N source ordinal", () => {
+  const rows = [
+    displayRow(4, 100, 0),
+    displayRow(5, 100, 2),
+    displayRow(6, 200, 0),
+  ];
+
+  assert.equal(findDisplayIndexForAxisAnchor(rows, ordinal(20, 100, 2)), 1);
+  assert.equal(findDisplayIndexForAxisAnchor(rows, ordinal(20, 100, 1)), 0);
+  assert.equal(findDisplayIndexForAxisAnchor(rows, ordinal(20, 100, 3)), 1);
+
+  // If every surviving ordinal is to the right, clamp to the first successor.
+  assert.equal(
+    findDisplayIndexForAxisAnchor([displayRow(5, 100, 2)], ordinal(20, 100, 0)),
+    0,
+  );
+});
+
+test("display anchor lookup uses lineage before causal predecessor fallback", () => {
+  const rows = [
+    displayRow(0, 100, 0, { from: 80, to: 100 }),
+    displayRow(1, 280, 0, { from: 50, to: 280 }),
+    displayRow(2, 280, 1, { from: 150, to: 280 }),
+    displayRow(3, 280, 2, { from: 150, to: 280 }),
+    displayRow(4, 300, 0, { from: 101, to: 300 }),
+    displayRow(5, 500, 0, { from: 401, to: 500 }),
+  ];
+
+  // Prefer the containing lineage that closes nearest the target, then starts
+  // latest, then the last emitted output for an otherwise identical range.
+  assert.equal(findDisplayIndexForAxisAnchor(rows, 200), 3);
+  assert.equal(findDisplayIndexForAxisAnchor(rows, 350), 4);
+});
+
+test("display anchor lookup falls to the first retained row after a left trim", () => {
+  const rows = [
+    displayRow(10, 300, 0),
+    displayRow(11, 400, 0),
+  ];
+
+  assert.equal(findDisplayIndexForAxisAnchor(rows, ordinal(2, 200, 0)), 0);
+  assert.equal(findDisplayIndexForAxisAnchor([], ordinal(2, 200, 0)), -1);
+  assert.equal(findDisplayIndexForAxisAnchor(rows, { order: 2 }), -1);
 });
 
 test("source-time ranges map to every overlapping projected element", () => {

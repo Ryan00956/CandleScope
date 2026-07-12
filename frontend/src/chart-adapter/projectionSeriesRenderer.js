@@ -125,12 +125,12 @@ function record(recordPerfEvent, name, detail) {
 }
 
 export function renderMainSeriesProjectionPatch({
-  indexOfDisplayTime,
   paneId = "main",
   patch,
   preserveViewport = false,
   previousDisplayRows = [],
   recordPerfEvent,
+  resolveDisplayAnchorIndex,
   series,
   viewportController,
 } = {}) {
@@ -260,9 +260,9 @@ export function renderMainSeriesProjectionPatch({
     points: patch.nextLength,
     reason: "projection-tail-rebuild",
   });
-  if (anchor && typeof indexOfDisplayTime === "function") {
+  if (anchor && typeof resolveDisplayAnchorIndex === "function") {
     try {
-      viewportController?.applyAnchorShift?.(anchor, indexOfDisplayTime);
+      viewportController?.applyAnchorShift?.(anchor, resolveDisplayAnchorIndex);
     } catch {
       // Data has already committed; viewport compensation is best-effort.
     }

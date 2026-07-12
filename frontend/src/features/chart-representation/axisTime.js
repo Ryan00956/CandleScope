@@ -98,19 +98,108 @@ export function findLastDisplayIndexForSourceTime(displayRows, sourceTime) {
   return match;
 }
 
-function findAnchorDisplayIndex(displayRows, sourceTime) {
-  const exact = findLastDisplayIndexForSourceTime(displayRows, sourceTime);
-  if (exact >= 0) return exact;
+function sourceOrdinalFromDisplayRow(row) {
+  if (isOrdinalAxisTime(row?.time)) return row.time.sourceOrdinal;
+  const ordinal = row?.customValues?.[PROJECTION_METADATA_KEY]?.sourceOrdinal;
+  return Number.isSafeInteger(ordinal) && ordinal >= 0 ? ordinal : null;
+}
 
-  let atOrBefore = -1;
-  let firstAfter = -1;
-  for (let index = 0; index < displayRows.length; index += 1) {
-    const rowTime = sourceTimeFromDisplayRow(displayRows[index]);
-    if (rowTime === null) continue;
-    if (rowTime <= sourceTime) atOrBefore = index;
-    else if (firstAfter < 0) firstAfter = index;
+/**
+ * Resolve a captured axis anchor against a newly projected display.
+ *
+ * Synthetic `order` values are projection-local and may be reassigned by a
+ * structural rebuild, so they are deliberately never used here. Source
+ * lineage is stable across those rebuilds. Within a 1:N source emission the
+ * original source ordinal is preferred; if that exact output disappeared, the
+ * closest predecessor ordinal is retained before falling forward.
+ */
+export function findDisplayIndexForAxisAnchor(displayRows, axisTime) {
+  const targetSourceTime = sourceTimeFromAxisTime(axisTime);
+  if (targetSourceTime === null
+    || !Array.isArray(displayRows)
+    || displayRows.length === 0) {
+    return -1;
   }
-  return atOrBefore >= 0 ? atOrBefore : firstAfter;
+
+  const targetSourceOrdinal = isOrdinalAxisTime(axisTime)
+    ? axisTime.sourceOrdinal
+    : null;
+  let lastExactSourceIndex = -1;
+  let exactOrdinalIndex = -1;
+  let predecessorOrdinalIndex = -1;
+  let predecessorOrdinal = -1;
+  let successorOrdinalIndex = -1;
+  let successorOrdinal = Number.POSITIVE_INFINITY;
+  let hasExactSourceOrdinal = false;
+
+  for (let index = 0; index < displayRows.length; index += 1) {
+    const row = displayRows[index];
+    const rowSourceTime = sourceTimeFromAxisTime(row?.time)
+      ?? sourceTimeFromDisplayRow(row);
+    if (rowSourceTime !== targetSourceTime) continue;
+
+    lastExactSourceIndex = index;
+    if (targetSourceOrdinal === null) continue;
+    const rowSourceOrdinal = sourceOrdinalFromDisplayRow(row);
+    if (rowSourceOrdinal === null) continue;
+    hasExactSourceOrdinal = true;
+    if (rowSourceOrdinal === targetSourceOrdinal) {
+      exactOrdinalIndex = index;
+    } else if (rowSourceOrdinal < targetSourceOrdinal
+      && rowSourceOrdinal >= predecessorOrdinal) {
+      predecessorOrdinal = rowSourceOrdinal;
+      predecessorOrdinalIndex = index;
+    } else if (rowSourceOrdinal > targetSourceOrdinal
+      && rowSourceOrdinal < successorOrdinal) {
+      successorOrdinal = rowSourceOrdinal;
+      successorOrdinalIndex = index;
+    }
+  }
+
+  if (exactOrdinalIndex >= 0) return exactOrdinalIndex;
+  if (predecessorOrdinalIndex >= 0) return predecessorOrdinalIndex;
+  if (successorOrdinalIndex >= 0) return successorOrdinalIndex;
+  if (lastExactSourceIndex >= 0 && !hasExactSourceOrdinal) {
+    return lastExactSourceIndex;
+  }
+
+  let containingIndex = -1;
+  let containingTo = Number.POSITIVE_INFINITY;
+  let containingFrom = Number.NEGATIVE_INFINITY;
+  let predecessorIndex = -1;
+  let predecessorTime = Number.NEGATIVE_INFINITY;
+  let firstAfterIndex = -1;
+  let firstAfterTime = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < displayRows.length; index += 1) {
+    const lineage = sourceTimeRangeFromDisplayRow(displayRows[index]);
+    if (!lineage) continue;
+    if (lineage.from <= targetSourceTime && targetSourceTime <= lineage.to) {
+      if (lineage.to < containingTo
+        || (lineage.to === containingTo && lineage.from > containingFrom)
+        || (lineage.to === containingTo
+          && lineage.from === containingFrom
+          && index > containingIndex)) {
+        containingTo = lineage.to;
+        containingFrom = lineage.from;
+        containingIndex = index;
+      }
+      continue;
+    }
+    if (lineage.to < targetSourceTime && lineage.to >= predecessorTime) {
+      predecessorTime = lineage.to;
+      predecessorIndex = index;
+    } else if (lineage.from > targetSourceTime && lineage.from < firstAfterTime) {
+      firstAfterTime = lineage.from;
+      firstAfterIndex = index;
+    }
+  }
+
+  if (containingIndex >= 0) return containingIndex;
+  return predecessorIndex >= 0 ? predecessorIndex : firstAfterIndex;
+}
+
+function findAnchorDisplayIndex(displayRows, sourceTime) {
+  return findDisplayIndexForAxisAnchor(displayRows, sourceTime);
 }
 
 /**

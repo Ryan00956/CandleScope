@@ -1,4 +1,5 @@
 import { IdentityProjector } from "./projectors/identityProjector.js";
+import { findDisplayIndexForAxisAnchor } from "./axisTime.js";
 
 const PROVISIONAL_SOURCE_STATES = new Set([
   "false",
@@ -220,6 +221,10 @@ export class ProjectionStore {
     if (key == null) return -1;
     const index = this._displayTimeIndex.get(key);
     return Number.isInteger(index) ? index : -1;
+  }
+
+  resolveDisplayAnchorIndex(axisTime) {
+    return findDisplayIndexForAxisAnchor(this._display, axisTime);
   }
 
   displayTimeSet() {

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  beginAxisLineDrawing,
+  beginTwoPointDrawing,
   commitTwoPointDrawing,
   placePositionDrawing,
   placeTextDrawing,
@@ -152,6 +154,142 @@ test("source-lineage freehand creation fails closed without an atomic capture", 
   assert.equal(freehandDraftRef.current, null);
   assert.equal(isDrawingFreehandRef.current, false);
   assert.deepEqual(tracked.calls, { preventDefault: 1, stopPropagation: 1 });
+});
+
+test("active text and position tools retain pointer ownership when first capture fails", () => {
+  const textEvent = trackedEventStub();
+  assert.equal(placeTextDrawing({
+    pos: { x: 10, y: 20 },
+    e: textEvent.event,
+    primitivesRef: { current: [] },
+    attachPrim() {},
+    startTextEditing() {},
+    screenToDrawingData: () => null,
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    textFontSizeRef: { current: 14 },
+    textBoldRef: { current: false },
+    textItalicRef: { current: false },
+  }), true);
+  assert.deepEqual(textEvent.calls, { preventDefault: 1, stopPropagation: 1 });
+
+  const positionEvent = trackedEventStub();
+  assert.equal(placePositionDrawing({
+    tool: "position-long",
+    pos: { x: 10, y: 20 },
+    e: positionEvent.event,
+    primitivesRef: { current: [] },
+    attachPrim() {},
+    selectPrimitive() {},
+    persistDrawings() {},
+    screenToDrawingData: () => null,
+    getChartAdapter: () => { throw new Error("adapter should not be read"); },
+    chartContainerRef: { current: null },
+    drawingSnapEnabledRef: { current: true },
+    positionSizeRef: { current: 1000 },
+  }), true);
+  assert.deepEqual(positionEvent.calls, { preventDefault: 1, stopPropagation: 1 });
+});
+
+test("position tool retains pointer ownership when its second row cannot resolve", () => {
+  const tracked = trackedEventStub();
+  const primitivesRef = { current: [] };
+  let persisted = 0;
+  assert.equal(placePositionDrawing({
+    tool: "position-short",
+    pos: { x: 100, y: 20 },
+    e: tracked.event,
+    primitivesRef,
+    attachPrim() {},
+    selectPrimitive() {},
+    persistDrawings: () => { persisted += 1; },
+    screenToDrawingData: (x) => (x === 100 ? derivedPoint(100, 0, 10) : null),
+    getChartAdapter: () => ({ isReady: () => true }),
+    chartContainerRef: { current: { clientHeight: 400, clientWidth: 800 } },
+    drawingSnapEnabledRef: { current: true },
+    positionSizeRef: { current: 1000 },
+  }), true);
+  assert.deepEqual(tracked.calls, { preventDefault: 1, stopPropagation: 1 });
+  assert.deepEqual(primitivesRef.current, []);
+  assert.equal(persisted, 0);
+});
+
+test("pending two-point placement owns a failed second capture, but an inapplicable commit does not", () => {
+  const pendingEvent = trackedEventStub();
+  const anchor = derivedPoint(100, 0, 10);
+  const preview = { id: "__preview__" };
+  const anchorDataRef = { current: anchor };
+  const previewRef = { current: preview };
+  assert.equal(commitTwoPointDrawing({
+    tool: "line-segment",
+    pos: { x: 20, y: 30 },
+    e: pendingEvent.event,
+    primitivesRef: { current: [] },
+    anchorDataRef,
+    previewRef,
+    attachPrim() {},
+    detachPrim() {},
+    selectPrimitive() {},
+    persistDrawings() {},
+    screenToDrawingData: () => null,
+    dataToScreen: () => ({ x: 0, y: 0 }),
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    fibLevelsRef: { current: [] },
+    fibInvertedRef: { current: false },
+  }), true);
+  assert.deepEqual(pendingEvent.calls, { preventDefault: 1, stopPropagation: 1 });
+  assert.strictEqual(anchorDataRef.current, anchor);
+  assert.strictEqual(previewRef.current, preview);
+
+  const inactiveEvent = trackedEventStub();
+  assert.equal(commitTwoPointDrawing({
+    tool: "line-segment",
+    pos: { x: 20, y: 30 },
+    e: inactiveEvent.event,
+    anchorDataRef: { current: null },
+    previewRef: { current: null },
+  }), false);
+  assert.deepEqual(inactiveEvent.calls, { preventDefault: 0, stopPropagation: 0 });
+});
+
+test("axis-line and first two-point capture failures retain active-tool pointer ownership", () => {
+  const axisEvent = trackedEventStub();
+  assert.equal(beginAxisLineDrawing({
+    tool: "line-vertical",
+    pos: { x: 10, y: 20 },
+    e: axisEvent.event,
+    primitivesRef: { current: [] },
+    anchorDataRef: { current: null },
+    previewRef: { current: null },
+    draggingRef: { current: null },
+    attachPrim() {},
+    selectPrimitive() {},
+    removePreview() {},
+    screenToDrawingData: () => null,
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+  }), true);
+  assert.deepEqual(axisEvent.calls, { preventDefault: 1, stopPropagation: 1 });
+
+  const twoPointEvent = trackedEventStub();
+  assert.equal(beginTwoPointDrawing({
+    tool: "shape-rectangle",
+    pos: { x: 10, y: 20 },
+    e: twoPointEvent.event,
+    anchorDataRef: { current: null },
+    previewRef: { current: null },
+    attachPrim() {},
+    screenToDrawingData: () => null,
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    fibLevelsRef: { current: [] },
+    fibInvertedRef: { current: false },
+  }), true);
+  assert.deepEqual(twoPointEvent.calls, { preventDefault: 1, stopPropagation: 1 });
 });
 
 function commitDerivedTwoPointTool(tool) {

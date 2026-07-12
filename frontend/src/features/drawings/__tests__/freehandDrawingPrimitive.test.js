@@ -76,6 +76,28 @@ function attachedPrimitive() {
   return primitive;
 }
 
+function renderedPathMoves(primitive) {
+  primitive.updateAllViews();
+  const moves = [];
+  const context = {
+    beginPath() {},
+    lineTo() {},
+    moveTo: (x, y) => moves.push([x, y]),
+    quadraticCurveTo() {},
+    restore() {},
+    save() {},
+    stroke() {},
+  };
+  primitive.paneViews()[0].renderer().draw({
+    useBitmapCoordinateSpace: (draw) => draw({
+      context,
+      horizontalPixelRatio: 1,
+      verticalPixelRatio: 1,
+    }),
+  });
+  return moves;
+}
+
 test("freehand v2 renderer and hit testing never bridge an unresolved span", () => {
   const primitive = attachedPrimitive();
 
@@ -131,6 +153,75 @@ test("freehand v2 hit testing skips unresolved singleton paths omitted by the re
   primitive.attached({ chart, series, requestUpdate: () => {} });
 
   assert.equal(primitive.hitTest(5, 0, 0.1), false);
+});
+
+test("legacy freehand and highlighter split unresolved points on ordinal axes", () => {
+  const rows = [
+    row(0, 100, 100, 100),
+    row(1, 200, 101, 200),
+    row(2, 300, 201, 300),
+    row(3, 400, 301, 400),
+  ];
+  const chart = {
+    timeScale: () => ({ timeToCoordinate: (time) => time.order * 10 }),
+  };
+  const series = {
+    data: () => rows,
+    priceToCoordinate: (price) => price,
+  };
+
+  for (const type of ["freehand", "highlighter"]) {
+    const primitive = new FreehandDrawingPrimitive({
+      id: `legacy-ordinal-${type}`,
+      type,
+      dataPoints: [
+        { time: 100, price: 0 },
+        { time: 200, price: 0 },
+        { time: 500, price: 0 },
+        { time: 300, price: 0 },
+        { time: 400, price: 0 },
+      ],
+      lineWidth: 2,
+    });
+    primitive.attached({ chart, series, requestUpdate: () => {} });
+
+    assert.equal(primitive.hitTest(5, 0, 0.1), true, type);
+    assert.equal(primitive.hitTest(15, 0, 0.1), false, type);
+    assert.equal(primitive.hitTest(25, 0, 0.1), true, type);
+    assert.deepEqual(renderedPathMoves(primitive), [[0, 0], [20, 0]], type);
+  }
+});
+
+test("legacy freehand keeps filtering invalid points into one path on time axes", () => {
+  const coordinates = new Map([
+    [100, 0],
+    [200, 10],
+    [250, 15],
+    [300, 20],
+    [400, 30],
+  ]);
+  const chart = {
+    timeScale: () => ({ timeToCoordinate: (time) => coordinates.get(time) ?? null }),
+  };
+  const series = {
+    data: () => [{ time: 100 }, { time: 200 }, { time: 300 }, { time: 400 }],
+    priceToCoordinate: (price) => (price === 999 ? null : price),
+  };
+  const primitive = new FreehandDrawingPrimitive({
+    id: "legacy-time-axis",
+    dataPoints: [
+      { time: 100, price: 0 },
+      { time: 200, price: 0 },
+      { time: 250, price: 999 },
+      { time: 300, price: 0 },
+      { time: 400, price: 0 },
+    ],
+    lineWidth: 2,
+  });
+  primitive.attached({ chart, series, requestUpdate: () => {} });
+
+  assert.equal(primitive.hitTest(15, 0, 0.1), true);
+  assert.deepEqual(renderedPathMoves(primitive), [[0, 0]]);
 });
 
 test("freehand preview renders screen-space paths and commit clears transient state", () => {

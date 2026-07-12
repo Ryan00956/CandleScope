@@ -21,6 +21,7 @@ import {
   dataPointToCoordinate,
   freehandStrokeV2ToCoordinates,
 } from "./coordinateUtils.js";
+import { isOrdinalAxisTime } from "../../../chart-adapter/coordinateBridge.js";
 
 const DEFAULT_HIGHLIGHTER_OPACITY = 0.35;
 const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION = "multiply";
@@ -112,15 +113,29 @@ function screenPathsForSource(source) {
     return paths;
   }
 
-  // Preserve the legacy v1 behavior: invalid time-axis points are omitted and
-  // the remaining points stay in one path.
-  const path = [];
+  // Preserve the legacy v1 time-axis behavior, but never bridge an unresolved
+  // legacy point after the same saved stroke is rendered on an ordinal axis.
+  const paths = [];
+  let path = [];
+  let splitOnUnresolved = null;
   for (const dataPoint of source._dataPoints) {
     const x = dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
     const y = series.priceToCoordinate(dataPoint.price);
-    if (x != null && y != null) path.push({ x, y });
+    if (splitOnUnresolved === null) {
+      const firstDataTime = coordinateContext.seriesData?.find(
+        (row) => row?.time != null,
+      )?.time;
+      splitOnUnresolved = isOrdinalAxisTime(firstDataTime);
+    }
+    if (x != null && y != null) {
+      path.push({ x, y });
+    } else if (splitOnUnresolved) {
+      if (path.length > 0) paths.push(path);
+      path = [];
+    }
   }
-  return path.length > 0 ? [path] : [];
+  if (path.length > 0) paths.push(path);
+  return paths;
 }
 
 function tracePath(context, path, isSquareBrush) {

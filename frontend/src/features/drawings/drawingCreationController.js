@@ -32,6 +32,11 @@ import {
   getFreehandStrokeDraftPreviewPoints,
 } from "./freehandStrokeModel.js";
 
+function consumePointerEvent(event) {
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+}
+
 function horizontalAnchorFromDataPoint(dataPoint) {
   if (!dataPoint) return null;
   if (dataPoint.time != null && Number.isFinite(Number(dataPoint.time))) {
@@ -164,8 +169,7 @@ export function startFreehandStroke({
 }) {
   // The drawing tool owns this gesture even when atomic capture fails closed;
   // never leak the same pointerdown into Lightweight Charts pan/selection.
-  e.preventDefault();
-  e.stopPropagation();
+  consumePointerEvent(e);
 
   let dataPoint = null;
   let draft = null;
@@ -216,6 +220,7 @@ export function placeTextDrawing({
   textBoldRef,
   textItalicRef,
 }) {
+  consumePointerEvent(e);
   const dataPoint = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
   if (!dataPoint) return true;
 
@@ -232,8 +237,6 @@ export function placeTextDrawing({
   // Immediately open text editor
   startTextEditing(textPrim);
 
-  e.preventDefault();
-  e.stopPropagation();
   return true;
 }
 
@@ -252,6 +255,7 @@ export function placePositionDrawing({
   drawingSnapEnabledRef,
   positionSizeRef,
 }) {
+  consumePointerEvent(e);
   const dataA = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
   if (!dataA) return true;
 
@@ -302,8 +306,6 @@ export function placePositionDrawing({
   selectPrimitive(posPrim.id);
   persistDrawings();
 
-  e.preventDefault();
-  e.stopPropagation();
   return true;
 }
 
@@ -335,6 +337,7 @@ export function commitTwoPointDrawing({
   const shapeType = shapeTypeFromTool(tool);
 
   if (isAxisLineTool || !anchorDataRef.current || !previewRef.current) return false;
+  consumePointerEvent(e);
 
   let targetPos = pos;
   if (isShapeDrawingTool && e.shiftKey) {
@@ -364,8 +367,6 @@ export function commitTwoPointDrawing({
   selectPrimitive(finalPrim.id);
   persistDrawings();
 
-  e.preventDefault();
-  e.stopPropagation();
   return true;
 }
 
@@ -389,6 +390,7 @@ export function beginAxisLineDrawing({
   penColorRef,
   penSizeRef,
 }) {
+  consumePointerEvent(e);
   if (anchorDataRef.current || previewRef.current) {
     removePreview();
   }
@@ -417,8 +419,6 @@ export function beginAxisLineDrawing({
     origDataPoint: { ...dataA },
   };
 
-  e.preventDefault();
-  e.stopPropagation();
   return true;
 }
 
@@ -440,6 +440,7 @@ export function beginTwoPointDrawing({
   fibLevelsRef,
   fibInvertedRef,
 }) {
+  consumePointerEvent(e);
   const isShapeDrawingTool = SHAPE_TOOL_IDS.has(tool);
   const shapeType = shapeTypeFromTool(tool);
 
@@ -459,8 +460,6 @@ export function beginTwoPointDrawing({
   previewRef.current = preview;
   attachPrim(preview);
 
-  e.preventDefault();
-  e.stopPropagation();
   return true;
 }
 

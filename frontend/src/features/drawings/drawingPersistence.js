@@ -14,7 +14,7 @@
  */
 
 import {
-  normalizeFreehandStrokeV2,
+  normalizeFreehandStroke,
   normalizeLegacyFreehandDataPoints,
   normalizeSavedFreehandPayload,
 } from "./freehandStrokeModel.js";
@@ -215,7 +215,7 @@ function readSavedDrawingArray(symbol, warnOnError = false) {
 
 function serializeFreehandPayload(prim) {
   if (prim._stroke != null) {
-    const stroke = normalizeFreehandStrokeV2(prim._stroke);
+    const stroke = normalizeFreehandStroke(prim._stroke);
     return stroke ? { stroke } : null;
   }
   const dataPoints = normalizeLegacyFreehandDataPoints(prim._dataPoints);

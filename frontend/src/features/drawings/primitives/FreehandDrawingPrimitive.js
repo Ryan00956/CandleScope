@@ -14,12 +14,12 @@
  */
 
 import {
-  normalizeFreehandStrokeV2,
+  normalizeFreehandStroke,
   normalizeLegacyFreehandDataPoints,
 } from "../freehandStrokeModel.js";
 import {
   dataPointToCoordinate,
-  freehandStrokeV2ToCoordinates,
+  freehandStrokeToCoordinates,
 } from "./coordinateUtils.js";
 import { isOrdinalAxisTime } from "../../../chart-adapter/coordinateBridge.js";
 
@@ -94,7 +94,7 @@ function screenPathsForSource(source) {
   if (source._stroke) {
     const paths = [];
     let currentPath = [];
-    const horizontalPoints = freehandStrokeV2ToCoordinates(
+    const horizontalPoints = freehandStrokeToCoordinates(
       chart,
       series,
       source._stroke,
@@ -278,7 +278,7 @@ export class FreehandDrawingPrimitive {
     this._id = opts.id;
     this._type = normalizeFreehandType(opts.type);
     this._dataPoints = opts.dataPoints || [];
-    this._stroke = normalizeFreehandStrokeV2(opts.stroke);
+    this._stroke = normalizeFreehandStroke(opts.stroke);
     const previewPoints = opts.previewPoints === undefined
       ? null
       : normalizePreviewPoints(opts.previewPoints);
@@ -373,9 +373,21 @@ export class FreehandDrawingPrimitive {
     return true;
   }
 
-  /** Promote a validated v2 stroke and atomically discard all preview state. */
+  /** Append one validated pointer-frame delta without cloning the full draft. */
+  appendPreviewPoints(points) {
+    const normalized = normalizePreviewPoints(points);
+    if (!normalized || this._previewCancelled) return false;
+    if (normalized.length === 0) return true;
+    if (this._previewScreenPoints === null) this._previewScreenPoints = [];
+    this._previewScreenPoints.push(...normalized);
+    this._isPreview = true;
+    this._requestUpdate?.();
+    return true;
+  }
+
+  /** Promote a validated v2/v3 stroke and atomically discard all preview state. */
   commitStroke(stroke) {
-    const normalized = normalizeFreehandStrokeV2(stroke);
+    const normalized = normalizeFreehandStroke(stroke);
     if (!normalized || this._previewCancelled) return false;
     this._stroke = normalized;
     this._dataPoints = [];
@@ -468,7 +480,7 @@ export class FreehandDrawingPrimitive {
         if (Math.sqrt(dx * dx + dy * dy) <= totalRadius) return true;
       }
 
-      // Segments are checked within one resolved path only. A v2 null marker
+      // Segments are checked within one resolved path only. An unresolved marker
       // starts a new path and can never create an eraser hit across the gap.
       for (let index = 0; index < screenPoints.length - 1; index += 1) {
         const left = screenPoints[index];

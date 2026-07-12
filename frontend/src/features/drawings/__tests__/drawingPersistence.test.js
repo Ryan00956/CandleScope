@@ -12,7 +12,10 @@ import {
   serializeDataPoint,
   serializeHorizontalAnchor,
 } from "../drawingPersistence.js";
-import { createPrimitiveFromSavedDrawing } from "../drawingPrimitiveFactory.js";
+import {
+  createFreehandPrimitive,
+  createPrimitiveFromSavedDrawing,
+} from "../drawingPrimitiveFactory.js";
 import {
   MAX_FREEHAND_STROKE_POINTS,
   MAX_FREEHAND_STROKE_SPANS,
@@ -45,6 +48,68 @@ function freehandStrokeV2() {
   };
 }
 
+function freehandStrokeV3() {
+  const v2 = freehandStrokeV2();
+  return {
+    version: 3,
+    sourceProjection: v2.sourceProjection,
+    sourceProjectionConfig: v2.sourceProjectionConfig,
+    spans: v2.spans.map((span) => ({
+      ...span,
+      order: 10,
+      logical: 20,
+      horizon: 300,
+      interval: 60,
+      offset: 2,
+      sourceTimeHorizon: 300,
+      sourceInterval: "1m",
+      sourceIntervalSeconds: 60,
+      barOffsetFromLast: 2,
+      cellOffset: 2,
+    })),
+    points: [
+      {
+        span: 0,
+        ratio: 0,
+        price: 100,
+        order: 1,
+        logical: 2,
+        horizon: 300,
+        interval: 60,
+        offset: 3,
+        sourceTimeHorizon: 300,
+        sourceInterval: "1m",
+        barOffsetFromLast: 3,
+      },
+      {
+        time: 1_700_000_180.5,
+        price: 101,
+        order: 4,
+        logical: 5,
+        horizon: 300,
+        interval: 60,
+        offset: 6,
+        capturedHorizon: 300,
+        capturedInterval: "1m",
+        cellOffset: 6,
+      },
+      {
+        anchor: { time: 1_700_000_000, sourceOrdinal: 2, order: 9 },
+        price: 102,
+        logical: 7,
+      },
+    ],
+    order: 7,
+    logical: 8,
+    horizon: 300,
+    interval: 60,
+    offset: 9,
+    sourceTimeHorizon: 300,
+    sourceInterval: "1m",
+    sourceIntervalSeconds: 60,
+  };
+}
+
 function recursiveKeys(value, keys = new Set()) {
   if (!value || typeof value !== "object") return keys;
   for (const [key, child] of Object.entries(value)) {
@@ -73,6 +138,23 @@ function withMemoryLocalStorage(run) {
     else globalThis.localStorage = previousLocalStorage;
   }
 }
+
+test("restoring a persisted drawing reserves its numeric id suffix", () => {
+  const restored = createPrimitiveFromSavedDrawing({
+    type: "freehand",
+    id: "fh_1000000",
+    stroke: freehandStrokeV2(),
+  });
+  assert.equal(restored.id, "fh_1000000");
+
+  const created = createFreehandPrimitive({
+    tool: "pen",
+    dataPoint: { time: 100, price: 10 },
+    color: "#fff",
+    lineWidth: 2,
+  });
+  assert.ok(Number(created.id.split("_").at(-1)) > 1_000_000);
+});
 
 function linePrimitive(id = "line") {
   return {
@@ -343,7 +425,58 @@ test("freehand v2 persistence round-trips an allowlisted stroke without local ax
   }
 });
 
-test("freehand v2 load fails closed for mixed, null, unknown, or malformed stroke payloads", () => {
+test("freehand v3 persistence and factory round-trip lineage plus absolute-time points", () => {
+  withMemoryLocalStorage((values) => {
+    const symbol = "derived-freehand-v3";
+    saveDrawings(symbol, [
+      strokePrimitive(freehandStrokeV3(), "freehand-v3"),
+      strokePrimitive(freehandStrokeV3(), "highlighter-v3", "highlighter"),
+    ]);
+
+    const raw = values.get(drawingStorageKey(symbol));
+    assert.ok(raw);
+    const rawDrawings = JSON.parse(raw);
+    assert.equal(rawDrawings.length, 2);
+    for (const item of rawDrawings) {
+      assert.equal(item.stroke.version, 3);
+      assert.deepEqual(item.stroke.points, [
+        { span: 0, ratio: 0, price: 100 },
+        { time: 1_700_000_180.5, price: 101 },
+        { anchor: { time: 1_700_000_000, sourceOrdinal: 2 }, price: 102 },
+      ]);
+      const keys = recursiveKeys(item.stroke);
+      for (const forbidden of [
+        "barOffsetFromLast",
+        "capturedHorizon",
+        "capturedInterval",
+        "cellOffset",
+        "horizon",
+        "interval",
+        "logical",
+        "offset",
+        "order",
+        "sourceInterval",
+        "sourceIntervalSeconds",
+        "sourceTimeHorizon",
+      ]) {
+        assert.equal(keys.has(forbidden), false, forbidden);
+      }
+    }
+
+    const loaded = loadDrawings(symbol);
+    assert.equal(loaded.length, 2);
+    assert.equal(loaded[0].type, "freehand");
+    assert.equal(loaded[1].type, "highlighter");
+    for (const item of loaded) {
+      const restored = createPrimitiveFromSavedDrawing(item);
+      assert.ok(restored);
+      assert.deepEqual(restored.stroke, item.stroke);
+      assert.deepEqual(restored.dataPoints, []);
+    }
+  });
+});
+
+test("freehand load fails closed for mixed, null, unknown, or malformed stroke payloads", () => {
   const valid = freehandStrokeV2();
   assert.equal(createPrimitiveFromSavedDrawing({
     type: "freehand",
@@ -353,7 +486,13 @@ test("freehand v2 load fails closed for mixed, null, unknown, or malformed strok
   assert.equal(createPrimitiveFromSavedDrawing({ type: "freehand", stroke: null }), null);
   assert.equal(createPrimitiveFromSavedDrawing({
     type: "freehand",
-    stroke: { ...valid, version: 3 },
+    stroke: { ...valid, version: 4 },
+  }), null);
+  const mixedV3 = freehandStrokeV3();
+  mixedV3.points[0] = { ...mixedV3.points[0], time: 100 };
+  assert.equal(createPrimitiveFromSavedDrawing({
+    type: "freehand",
+    stroke: mixedV3,
   }), null);
   assert.equal(createPrimitiveFromSavedDrawing({
     type: "freehand",

@@ -2,19 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  FREEHAND_STROKE_V3_VERSION,
   MAX_FREEHAND_STROKE_POINTS,
   MAX_FREEHAND_STROKE_SPANS,
   MAX_LEGACY_FREEHAND_POINTS,
   appendFreehandStrokeCapture,
   appendFreehandStrokeCaptureBatch,
+  appendFreehandStrokeCaptureBatchIncremental,
   cancelFreehandStrokeDraft,
   createFreehandStrokeDraft,
   finalizeFreehandStrokeDraft,
   getFreehandStrokeDraftPreviewPoints,
+  getFreehandStrokeDraftRemainingCapacity,
+  isFreehandStrokeDraftSaturated,
   normalizeLegacyFreehandDataPoints,
   normalizeSavedFreehandPayload,
+  normalizeFreehandStroke,
   normalizeFreehandStrokeV2,
+  normalizeFreehandStrokeV3,
+  resolveFreehandStrokePoints,
   resolveFreehandStrokeV2Points,
+  resolveFreehandStrokeV3Points,
 } from "../freehandStrokeModel.js";
 
 function stroke(overrides = {}) {
@@ -37,6 +45,20 @@ function stroke(overrides = {}) {
     points: [
       { span: 0, ratio: 0, price: 10 },
       { span: 0, ratio: 0.5, price: 11 },
+      { span: 0, ratio: 1, price: 12 },
+    ],
+    ...overrides,
+  };
+}
+
+function strokeV3(overrides = {}) {
+  const base = stroke();
+  return {
+    ...base,
+    version: FREEHAND_STROKE_V3_VERSION,
+    points: [
+      { span: 0, ratio: 0, price: 10 },
+      { time: 250.5, price: 11 },
       { span: 0, ratio: 1, price: 12 },
     ],
     ...overrides,
@@ -180,6 +202,142 @@ test("freehand v2 enforces span and point caps before normalization", () => {
   })), null);
 });
 
+test("freehand v3 normalizes frozen span, exact-anchor, and absolute point unions", () => {
+  const value = strokeV3({ order: 99, logical: 42 });
+  value.points.splice(2, 0, {
+    anchor: { time: 200, sourceOrdinal: 0, order: 99 },
+    price: 11.5,
+  });
+  value.points[0].logical = 12;
+  value.points[1].order = 13;
+
+  const normalized = normalizeFreehandStrokeV3(value);
+
+  assert.deepEqual(normalized.points, [
+    { span: 0, ratio: 0, price: 10 },
+    { time: 250.5, price: 11 },
+    { anchor: { time: 200, sourceOrdinal: 0 }, price: 11.5 },
+    { span: 0, ratio: 1, price: 12 },
+  ]);
+  assert.equal(Object.isFrozen(normalized), true);
+  assert.equal(Object.isFrozen(normalized.spans), true);
+  assert.equal(Object.isFrozen(normalized.points), true);
+  assert.equal(Object.isFrozen(normalized.points[1]), true);
+  assert.equal(Object.isFrozen(normalized.points[2].anchor), true);
+  assert.strictEqual(normalizeFreehandStroke(normalized), normalized);
+  assert.strictEqual(normalizeFreehandStrokeV3(normalized), normalized);
+  assert.equal(normalizeFreehandStrokeV2(normalized), null);
+});
+
+test("freehand v3 permits empty spans for absolute-time strokes", () => {
+  const normalized = normalizeFreehandStrokeV3(strokeV3({
+    spans: [],
+    points: [
+      { time: -10.25, price: 10 },
+      { time: Number.MAX_SAFE_INTEGER, price: 11 },
+    ],
+  }));
+
+  assert.deepEqual(normalized.spans, []);
+  assert.deepEqual(normalized.points, [
+    { time: -10.25, price: 10 },
+    { time: Number.MAX_SAFE_INTEGER, price: 11 },
+  ]);
+});
+
+test("freehand v3 rejects mixed point shapes, unsafe times, and invalid span references", () => {
+  const invalidPoints = [
+    { time: 250, span: 0, ratio: 0.5, price: 10 },
+    { time: 250, ratio: 0.5, price: 10 },
+    { span: 0, price: 10 },
+    { ratio: 0.5, price: 10 },
+    { time: Number.MAX_SAFE_INTEGER + 1, price: 10 },
+    { anchor: { time: 250 }, price: 10 },
+    { anchor: { time: 250, sourceOrdinal: -1 }, price: 10 },
+    { anchor: { time: 250, sourceOrdinal: 0 }, time: 250, price: 10 },
+    { anchor: { time: 250, sourceOrdinal: 0 }, span: 0, ratio: 0.5, price: 10 },
+  ];
+  for (const point of invalidPoints) {
+    assert.equal(normalizeFreehandStrokeV3(strokeV3({
+      points: [point, { time: 300, price: 11 }],
+    })), null);
+  }
+
+  assert.equal(normalizeFreehandStrokeV3(strokeV3({
+    spans: [],
+    points: [
+      { span: 0, ratio: 0.5, price: 10 },
+      { time: 300, price: 11 },
+    ],
+  })), null);
+  assert.equal(normalizeFreehandStrokeV3(strokeV3({
+    spans: Array(MAX_FREEHAND_STROKE_SPANS + 1).fill(stroke().spans[0]),
+  })), null);
+  assert.equal(normalizeFreehandStrokeV3(strokeV3({
+    points: Array(MAX_FREEHAND_STROKE_POINTS + 1).fill({ time: 300, price: 10 }),
+  })), null);
+});
+
+test("freehand version dispatcher and saved payload reject unknown or mixed schemas", () => {
+  assert.equal(normalizeFreehandStroke({ ...strokeV3(), version: 4 }), null);
+  assert.deepEqual(resolveFreehandStrokePoints({ ...strokeV3(), version: 4 }), []);
+  assert.equal(normalizeSavedFreehandPayload({
+    stroke: strokeV3(),
+    dataPoints: [{ time: 100, price: 10 }, { time: 200, price: 11 }],
+  }), null);
+
+  const payload = normalizeSavedFreehandPayload({ stroke: strokeV3() });
+  assert.equal(payload.stroke.version, FREEHAND_STROKE_V3_VERSION);
+  assert.equal(Object.hasOwn(payload, "dataPoints"), false);
+});
+
+test("freehand generic resolver preserves v3 gaps and resolves each span once", () => {
+  const value = strokeV3({
+    points: [
+      { span: 0, ratio: 0, price: 10 },
+      { time: 250.5, price: 11 },
+      { span: 0, ratio: 1, price: 12 },
+      { anchor: { time: 200, sourceOrdinal: 0 }, price: 12.5 },
+      { time: 300, price: 13 },
+    ],
+  });
+  const spanCalls = [];
+  const timeCalls = [];
+  const anchorCalls = [];
+  const resolvers = {
+    resolveAnchor: (anchor, index) => {
+      anchorCalls.push([anchor, index]);
+      return 30;
+    },
+    resolveSpan: (_span, index) => {
+      spanCalls.push(index);
+      return { left: 10, right: 20 };
+    },
+    resolveTime: (time, index) => {
+      timeCalls.push([time, index]);
+      if (time === 300) throw new Error("unresolved");
+      return 40.5;
+    },
+  };
+
+  assert.deepEqual(resolveFreehandStrokePoints(value, resolvers), [
+    { x: 10, price: 10 },
+    { x: 40.5, price: 11 },
+    { x: 20, price: 12 },
+    { x: 30, price: 12.5 },
+    null,
+  ]);
+  assert.deepEqual(spanCalls, [0]);
+  assert.deepEqual(timeCalls, [[250.5, 1], [300, 4]]);
+  assert.deepEqual(anchorCalls, [[{ time: 200, sourceOrdinal: 0 }, 3]]);
+  assert.deepEqual(resolveFreehandStrokeV3Points(value, {
+    resolveSpan: resolvers.resolveSpan,
+  }), [{ x: 10, price: 10 }, null, { x: 20, price: 12 }, null, null]);
+  assert.deepEqual(resolveFreehandStrokeV3Points(value, {
+    resolveTime: () => 30,
+  }), [null, { x: 30, price: 11 }, null, null, { x: 30, price: 13 }]);
+});
+
 test("legacy freehand normalization stays v1 and removes unsafe point fields", () => {
   const payload = normalizeSavedFreehandPayload({
     dataPoints: [{
@@ -227,10 +385,23 @@ test("freehand v2 rejects zero-width resolved spans", () => {
     stroke(),
     () => ({ left: 10, right: 10 }),
   ), [null, null, null]);
+  assert.deepEqual(resolveFreehandStrokeV2Points(stroke()), []);
 });
 
 function capture(span, x, y, ratio = 0.5, price = y) {
   return { span, ratio, price, screen: x === null ? null : { x, y } };
+}
+
+function absoluteCapture(time, x, y, price = y) {
+  return { time, price, screen: x === null ? null : { x, y } };
+}
+
+function exactAnchorCapture(time, sourceOrdinal, x, y, price = y) {
+  return {
+    anchor: { time, sourceOrdinal },
+    price,
+    screen: x === null ? null : { x, y },
+  };
 }
 
 function draftBatch(identity, captures) {
@@ -255,8 +426,122 @@ test("freehand draft deduplicates structurally equal spans", () => {
   ])), true);
   const finalized = finalizeFreehandStrokeDraft(draft, { captureIdentity: identity, epsilon: 0 });
 
+  assert.equal(finalized.version, 2);
   assert.equal(finalized.spans.length, 1);
   assert.deepEqual(finalized.points.map((point) => point.span), [0, 0, 0]);
+});
+
+test("freehand draft finalizes absolute-only captures as v3 with no spans", () => {
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
+    absoluteCapture(200.25, 0, 10),
+    absoluteCapture(250.5, 1, 20, 11),
+    absoluteCapture(300.75, 2, 10),
+  ])), true);
+
+  const finalized = finalizeFreehandStrokeDraft(draft, {
+    captureIdentity: identity,
+    epsilon: 0,
+  });
+  assert.equal(finalized.version, FREEHAND_STROKE_V3_VERSION);
+  assert.deepEqual(finalized.spans, []);
+  assert.deepEqual(finalized.points, [
+    { time: 200.25, price: 10 },
+    { time: 250.5, price: 11 },
+    { time: 300.75, price: 10 },
+  ]);
+});
+
+test("freehand draft preserves an exact materialized anchor beside future time", () => {
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
+    exactAnchorCapture(200, 0, 0, 10),
+    absoluteCapture(250.5, 1, 20, 11),
+    exactAnchorCapture(200, 1, 2, 12),
+  ])), true);
+
+  const finalized = finalizeFreehandStrokeDraft(draft, {
+    captureIdentity: identity,
+    epsilon: 0,
+  });
+  assert.equal(finalized.version, FREEHAND_STROKE_V3_VERSION);
+  assert.deepEqual(finalized.points, [
+    { anchor: { time: 200, sourceOrdinal: 0 }, price: 10 },
+    { time: 250.5, price: 11 },
+    { anchor: { time: 200, sourceOrdinal: 1 }, price: 12 },
+  ]);
+});
+
+test("freehand draft retains mixed v3 point types and null-screen separators", () => {
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  const lineageSpan = stroke().spans[0];
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
+    capture(lineageSpan, 0, 0, 0),
+    capture(lineageSpan, 1, 0, 0.2),
+    absoluteCapture(250.5, null, 0),
+    absoluteCapture(300.5, 100, 0),
+    absoluteCapture(350.5, 101, 0),
+  ])), true);
+
+  const finalized = finalizeFreehandStrokeDraft(draft, {
+    captureIdentity: identity,
+    epsilon: 10_000,
+  });
+  assert.equal(finalized.version, FREEHAND_STROKE_V3_VERSION);
+  assert.deepEqual(finalized.points, [
+    { span: 0, ratio: 0, price: 0 },
+    { span: 0, ratio: 0.2, price: 0 },
+    { time: 250.5, price: 0 },
+    { time: 300.5, price: 0 },
+    { time: 350.5, price: 0 },
+  ]);
+});
+
+test("freehand draft chooses the minimum schema after RDP", () => {
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  const lineageSpan = stroke().spans[0];
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
+    capture(lineageSpan, 0, 0, 0),
+    absoluteCapture(250.5, 1, 0),
+    capture(lineageSpan, 2, 0, 1),
+  ])), true);
+
+  const finalized = finalizeFreehandStrokeDraft(draft, {
+    captureIdentity: identity,
+    epsilon: 1,
+  });
+  assert.equal(finalized.version, 2);
+  assert.deepEqual(finalized.points, [
+    { span: 0, ratio: 0, price: 0 },
+    { span: 0, ratio: 1, price: 0 },
+  ]);
+});
+
+test("freehand draft rejects malformed mixed captures atomically", () => {
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  const lineageSpan = stroke().spans[0];
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
+    capture(lineageSpan, 0, 0, 0),
+    absoluteCapture(250.5, 1, 0),
+  ])), true);
+  const preview = getFreehandStrokeDraftPreviewPoints(draft);
+
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
+    absoluteCapture(300.5, 2, 0),
+    {
+      span: lineageSpan,
+      ratio: 0.5,
+      time: 300.5,
+      price: 10,
+      screen: { x: 3, y: 0 },
+    },
+  ])), false);
+  assert.deepEqual(getFreehandStrokeDraftPreviewPoints(draft), preview);
 });
 
 test("freehand draft keeps null screen captures as path gaps", () => {
@@ -328,12 +613,74 @@ test("freehand draft decimation is iterative at the point cap", () => {
     capture(span, index, 0, index / (MAX_FREEHAND_STROKE_POINTS - 1), index)
   ));
   assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, captures)), true);
+  assert.equal(isFreehandStrokeDraftSaturated(draft), true);
   const finalized = finalizeFreehandStrokeDraft(draft, {
     captureIdentity: identity,
     epsilon: 0.1,
   });
   assert.equal(finalized.points.length, 2);
   assert.deepEqual(finalized.points.map((point) => point.price), [0, MAX_FREEHAND_STROKE_POINTS - 1]);
+});
+
+test("incremental freehand append preserves a saturated draft for mouseup commit", () => {
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  const span = stroke().spans[0];
+  const initial = Array.from(
+    { length: MAX_FREEHAND_STROKE_POINTS - 1 },
+    (_value, index) => capture(
+      span,
+      index,
+      0,
+      index / (MAX_FREEHAND_STROKE_POINTS - 1),
+      index,
+    ),
+  );
+  assert.equal(appendFreehandStrokeCaptureBatch(
+    draft,
+    draftBatch(identity, initial),
+  ), true);
+  assert.equal(getFreehandStrokeDraftRemainingCapacity(draft), 1);
+
+  const result = appendFreehandStrokeCaptureBatchIncremental(draft, draftBatch(identity, [
+    capture(span, MAX_FREEHAND_STROKE_POINTS - 1, 0, 1, MAX_FREEHAND_STROKE_POINTS - 1),
+    capture(span, MAX_FREEHAND_STROKE_POINTS, 0, 1, 99_999),
+  ]));
+  assert.deepEqual(result, {
+    appendedCount: 1,
+    previewPoints: [{ x: MAX_FREEHAND_STROKE_POINTS - 1, y: 0 }],
+    saturated: true,
+  });
+  assert.equal(isFreehandStrokeDraftSaturated(draft), true);
+  assert.equal(getFreehandStrokeDraftRemainingCapacity(draft), 0);
+  assert.deepEqual(
+    appendFreehandStrokeCaptureBatchIncremental(draft, draftBatch(identity, [
+      capture(span, MAX_FREEHAND_STROKE_POINTS + 1, 0, 1, 100_000),
+    ])),
+    { appendedCount: 0, previewPoints: [], saturated: true },
+  );
+
+  const finalized = finalizeFreehandStrokeDraft(draft, {
+    captureIdentity: identity,
+    epsilon: 0.1,
+  });
+  assert.ok(finalized);
+  assert.deepEqual(finalized.points.map((point) => point.price), [
+    0,
+    MAX_FREEHAND_STROKE_POINTS - 1,
+  ]);
+});
+
+test("incremental freehand append still fails closed on identity drift", () => {
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  const span = stroke().spans[0];
+  assert.equal(appendFreehandStrokeCaptureBatchIncremental(
+    draft,
+    draftBatch({}, [capture(span, 0, 0)]),
+  ), null);
+  assert.equal(isFreehandStrokeDraftSaturated(draft), false);
+  assert.deepEqual(getFreehandStrokeDraftPreviewPoints(draft), []);
 });
 
 test("freehand draft fails closed on identity, caps, invalid input, and cancel", () => {
@@ -346,6 +693,7 @@ test("freehand draft fails closed on identity, caps, invalid input, and cancel",
     Array(MAX_FREEHAND_STROKE_POINTS + 1).fill(capture(span, 0, 0)))), false);
   assert.equal(getFreehandStrokeDraftPreviewPoints(draft).length, 0);
   assert.equal(cancelFreehandStrokeDraft(draft), true);
+  assert.equal(getFreehandStrokeDraftRemainingCapacity(draft), null);
   assert.equal(appendFreehandStrokeCapture(draft, capture(span, 0, 0), identity), false);
   assert.equal(finalizeFreehandStrokeDraft(draft, { captureIdentity: identity }), null);
 });

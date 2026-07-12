@@ -38,6 +38,19 @@ export function nextDrawingId(prefix = "d") {
   return `${prefix}_${idCounter}`;
 }
 
+/** Advance the process-local allocator past an id restored from persistence. */
+export function observeDrawingId(id) {
+  if (typeof id !== "string") return false;
+  const match = /_(\d+)$/.exec(id);
+  if (!match) return false;
+  const suffix = Number(match[1]);
+  if (!Number.isSafeInteger(suffix) || suffix < 1 || suffix >= Number.MAX_SAFE_INTEGER) {
+    return false;
+  }
+  idCounter = Math.max(idCounter, suffix);
+  return true;
+}
+
 export function isPassiveCursorTool(tool) {
   return !tool || CURSOR_TOOL_IDS.has(tool);
 }

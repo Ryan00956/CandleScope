@@ -93,6 +93,8 @@ export function createLightweightChartAdapter({
       && Object.prototype.hasOwnProperty.call(snapshot, "sourceIntervalSeconds");
     const hasSnapshotIntervalId = snapshot != null
       && Object.prototype.hasOwnProperty.call(snapshot, "sourceInterval");
+    const hasSnapshotProjectionConfig = snapshot != null
+      && Object.prototype.hasOwnProperty.call(snapshot, "drawingProjectionConfig");
     return {
       drawingOrdinalSeriesIndex: hasSnapshotData
         ? snapshot.ordinalSeriesIndex || null
@@ -100,7 +102,9 @@ export function createLightweightChartAdapter({
       ...(hasSnapshotData
         ? { drawingOrdinalSeriesIndexRevision: snapshot.indexRevision ?? null }
         : {}),
-      drawingProjectionConfig: getProjectionConfig(),
+      drawingProjectionConfig: hasSnapshotProjectionConfig
+        ? snapshot.drawingProjectionConfig
+        : getProjectionConfig(),
       seriesData: hasSnapshotData ? snapshot.seriesData : getSeriesData(),
       sourceInterval: hasSnapshotIntervalId
         ? snapshot.sourceInterval
@@ -150,7 +154,11 @@ export function createLightweightChartAdapter({
       // Read every mutable provider once, then keep the complete coalesced
       // pointer batch on that immutable local snapshot.
       const snapshot = getDrawingCoordinateSnapshot();
-      const projectionConfig = getProjectionConfig();
+      const hasSnapshotProjectionConfig = snapshot != null
+        && Object.prototype.hasOwnProperty.call(snapshot, "drawingProjectionConfig");
+      const projectionConfig = hasSnapshotProjectionConfig
+        ? snapshot.drawingProjectionConfig
+        : getProjectionConfig();
       const hasSnapshotIntervalId = snapshot != null
         && Object.prototype.hasOwnProperty.call(snapshot, "sourceInterval");
       const sourceInterval = hasSnapshotIntervalId

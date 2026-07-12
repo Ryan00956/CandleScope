@@ -8,6 +8,8 @@ const ordinalSeriesIndexCache = new WeakMap();
 const drawingSeriesContextRegistry = new WeakMap();
 const hydratedCoordinateSnapshotContexts = new WeakMap();
 const numericSeriesBoundsContexts = new WeakMap();
+const ordinalFutureBasisContexts = new WeakMap();
+const ordinalFutureBasisTransactions = new WeakSet();
 const MAX_FREEHAND_CAPTURE_BATCH_POINTS = 4_096;
 
 function isFiniteNumber(value) {
@@ -35,6 +37,17 @@ function projectionConfigFromContext(context) {
   return normalizeProjectionConfig(
     context?.drawingProjectionConfig ?? context?.projectionConfig,
   );
+}
+
+/**
+ * Create a short-lived context for resolving one primitive path. Future-basis
+ * memoization is deliberately limited to this transaction so zoom/pan changes
+ * can never reuse viewport coordinates from an older render.
+ */
+export function createDrawingCoordinateTransactionContext(context = null) {
+  const transaction = context && typeof context === "object" ? { ...context } : {};
+  ordinalFutureBasisTransactions.add(transaction);
+  return transaction;
 }
 
 function numericSeriesBounds(seriesData, context) {
@@ -125,6 +138,9 @@ function hydrateCoordinateContext(series, context) {
       }
       if (Object.prototype.hasOwnProperty.call(snapshot, "sourceIntervalSeconds")) {
         context.sourceIntervalSeconds = snapshot.sourceIntervalSeconds;
+      }
+      if (Object.prototype.hasOwnProperty.call(snapshot, "drawingProjectionConfig")) {
+        context.drawingProjectionConfig = snapshot.drawingProjectionConfig;
       }
     }
     hydratedCoordinateSnapshotContexts.set(context, hasCoordinateSnapshot);
@@ -602,6 +618,43 @@ function ordinalFutureCoordinateBasis(timeScale, seriesData, context, ordinalInd
     : null;
 }
 
+function cachedOrdinalFutureCoordinateBasis(
+  timeScale,
+  seriesData,
+  context,
+  ordinalIndex = null,
+) {
+  const canCache = context
+    && typeof context === "object"
+    && ordinalFutureBasisTransactions.has(context);
+  if (canCache) {
+    const cached = ordinalFutureBasisContexts.get(context);
+    if (cached
+      && cached.timeScale === timeScale
+      && cached.seriesData === seriesData
+      && cached.sourceTimeHorizon === context.sourceTimeHorizon
+      && cached.sourceInterval === context.sourceInterval
+      && cached.sourceIntervalSeconds === context.sourceIntervalSeconds
+      && (!ordinalIndex || cached.ordinalIndex === ordinalIndex)) {
+      return cached.basis;
+    }
+  }
+
+  const basis = ordinalFutureCoordinateBasis(timeScale, seriesData, context, ordinalIndex);
+  if (canCache) {
+    ordinalFutureBasisContexts.set(context, {
+      basis,
+      ordinalIndex: ordinalIndex || basis?.index || null,
+      seriesData,
+      sourceInterval: context.sourceInterval,
+      sourceIntervalSeconds: context.sourceIntervalSeconds,
+      sourceTimeHorizon: context.sourceTimeHorizon,
+      timeScale,
+    });
+  }
+  return basis;
+}
+
 function futureTimeFromCellDistance(basis, cellDistance) {
   if (basis.calendarMonths !== null) {
     return calendarFutureTime(basis.horizon, basis.calendarMonths, cellDistance);
@@ -783,9 +836,10 @@ export function resolveDrawingAnchorToDisplayRow(seriesData, anchor, context = n
 }
 
 /**
- * Atomically convert one coalesced pointer batch into portable source-lineage
- * freehand captures. Axis-local order is used only for chart lookup and is
- * never copied into the returned persistence payload.
+ * Atomically convert one coalesced pointer batch into portable synthetic-chart
+ * freehand captures. Materialized cells retain source-lineage spans while
+ * right-side whitespace becomes an absolute source-time point. Axis-local
+ * order is used only for chart lookup and is never persisted.
  */
 export function captureSourceLineageFreehandStrokeBatch(
   chart,
@@ -816,7 +870,7 @@ export function captureSourceLineageFreehandStrokeBatch(
     : getOrdinalSeriesIndex(seriesData, coordinateContext);
   if (!ordinalIndex
     || !ordinalIndex.rowRangesMonotonic
-    || ordinalIndex.ordinalRows.length < 2
+    || ordinalIndex.ordinalRows.length < 1
     || ordinalIndex.rowRanges.length !== ordinalIndex.ordinalRows.length) {
     return null;
   }
@@ -858,6 +912,28 @@ export function captureSourceLineageFreehandStrokeBatch(
     const normalized = isFiniteNumber(coordinate) ? coordinate : null;
     coordinateCache.set(index, normalized);
     return normalized;
+  };
+  const tailX = coordinateAt(rows.length - 1);
+  let drawableWidth = null;
+  try {
+    drawableWidth = timeScale.width?.();
+  } catch {
+    drawableWidth = null;
+  }
+  if (!isFiniteNumber(drawableWidth) || drawableWidth <= 0) drawableWidth = null;
+  let futureBasis = null;
+  let futureBasisResolved = false;
+  const getFutureBasis = () => {
+    if (!futureBasisResolved) {
+      futureBasis = ordinalFutureCoordinateBasis(
+        timeScale,
+        seriesData,
+        coordinateContext,
+        ordinalIndex,
+      );
+      futureBasisResolved = true;
+    }
+    return futureBasis;
   };
 
   const pairForCoordinate = (x) => {
@@ -973,18 +1049,61 @@ export function captureSourceLineageFreehandStrokeBatch(
     const x = point?.x;
     const y = point?.y;
     if (!isFiniteNumber(x) || !isFiniteNumber(y)) return null;
-    const pairIndex = pairForCoordinate(x);
-    if (pairIndex === null) return null;
-    const left = coordinateAt(pairIndex);
-    const right = coordinateAt(pairIndex + 1);
-    const span = spanForPair(pairIndex);
+    if (drawableWidth !== null && (x < 0 || x >= drawableWidth)) return null;
     let price = null;
     try {
       price = series.coordinateToPrice?.(y);
     } catch {
       price = null;
     }
-    if (!span || left === null || right === null || left >= right || !isFiniteNumber(price)) {
+    if (!isFiniteNumber(price)) return null;
+
+    if (tailX !== null && x > tailX) {
+      const basis = getFutureBasis();
+      if (!basis) return null;
+      const cellDistance = (x - basis.tailX) / basis.cellWidth;
+      const time = futureTimeFromCellDistance(basis, cellDistance);
+      if (!isFiniteNumber(cellDistance)
+        || cellDistance <= 0
+        || time === null
+        || time <= sourceTimeHorizon) {
+        return null;
+      }
+      captures.push(Object.freeze({
+        time,
+        price,
+        screen: Object.freeze({ x, y }),
+      }));
+      continue;
+    }
+
+    if (rows.length === 1 && tailX !== null) {
+      const cellWidth = getFutureBasis()?.cellWidth ?? ordinalCellWidth(timeScale, tailX);
+      const tailTime = rows[0]?.time?.sourceTime;
+      if (!isFiniteNumber(cellWidth)
+        || cellWidth <= 0
+        || x < tailX - cellWidth / 2
+        || x > tailX
+        || !isSafeTimeMagnitude(tailTime)) {
+        return null;
+      }
+      captures.push(Object.freeze({
+        anchor: Object.freeze({
+          time: tailTime,
+          sourceOrdinal: rows[0].time.sourceOrdinal,
+        }),
+        price,
+        screen: Object.freeze({ x, y }),
+      }));
+      continue;
+    }
+
+    const pairIndex = pairForCoordinate(x);
+    if (pairIndex === null) return null;
+    const left = coordinateAt(pairIndex);
+    const right = coordinateAt(pairIndex + 1);
+    const span = spanForPair(pairIndex);
+    if (!span || left === null || right === null || left >= right) {
       return null;
     }
     const ratio = (x - left) / (right - left);
@@ -1237,7 +1356,7 @@ export function dataPointToCoordinate(chart, series, dataPoint, context) {
     const horizon = coordinateContext.sourceTimeHorizon;
     if (anchorTime !== null && isSafeTimeMagnitude(horizon) && anchorTime > horizon) {
       if (!isSafeTimeMagnitude(anchorTime)) return null;
-      const basis = ordinalFutureCoordinateBasis(timeScale, data, coordinateContext);
+      const basis = cachedOrdinalFutureCoordinateBasis(timeScale, data, coordinateContext);
       if (!basis) return null;
       const delta = anchorTime - basis.horizon;
       const bars = futureCellDistanceFromTime(basis, anchorTime);

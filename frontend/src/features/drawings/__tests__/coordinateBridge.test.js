@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   captureSourceLineageFreehandStrokeBatch,
   coordinateToFractionalLogical,
+  createDrawingCoordinateTransactionContext,
   dataPointToCoordinate,
   drawingAnchorFromAxisTime,
   drawingAnchorFromCoordinate,
@@ -412,7 +413,13 @@ test("registered primitive contexts keep snapshot-owned future interval inputs a
   ];
   const index = createDrawingLineageIndex(rows);
   const chart = futureAnchorChart(rows, { cellWidth: 10 });
-  const calls = { horizon: 0, interval: 0, intervalSeconds: 0, snapshot: 0 };
+  const calls = {
+    config: 0,
+    horizon: 0,
+    interval: 0,
+    intervalSeconds: 0,
+    snapshot: 0,
+  };
   const series = { data: () => rows };
   registerDrawingSeriesContext(series, {
     coordinateSnapshotProvider: () => {
@@ -421,10 +428,15 @@ test("registered primitive contexts keep snapshot-owned future interval inputs a
         indexRevision: index.revision,
         ordinalSeriesIndex: index,
         seriesData: rows,
+        drawingProjectionConfig: "snapshot:renko:10",
         sourceInterval: "1M",
         sourceIntervalSeconds: 30 * 86_400,
         sourceTimeHorizon: january,
       };
+    },
+    projectionConfigProvider: () => {
+      calls.config += 1;
+      return "provider:renko:20";
     },
     sourceIntervalProvider: () => {
       calls.interval += 1;
@@ -444,7 +456,14 @@ test("registered primitive contexts keep snapshot-owned future interval inputs a
   const future = drawingAnchorFromCoordinate(chart, series, 20, context);
   assert.deepEqual(future, { time: february });
   assertAlmostEqual(dataPointToCoordinate(chart, series, future, context), 20);
-  assert.deepEqual(calls, { horizon: 0, interval: 0, intervalSeconds: 0, snapshot: 1 });
+  assert.equal(context.drawingProjectionConfig, "snapshot:renko:10");
+  assert.deepEqual(calls, {
+    config: 0,
+    horizon: 0,
+    interval: 0,
+    intervalSeconds: 0,
+    snapshot: 1,
+  });
 });
 
 function sourceLineageSpan(overrides = {}) {
@@ -519,6 +538,198 @@ test("freehand capture batches persist adjacent source lineage without axis-loca
   assert.equal(result.captures[1].ratio, 0);
   assert.equal(JSON.stringify(result).includes("order"), false);
   assert.equal(JSON.stringify(result).includes("logical"), false);
+});
+
+test("freehand capture atomically mixes materialized lineage with absolute future time", () => {
+  const rows = [
+    displayRow(0, 100, 0, { from: 100, to: 100 }),
+    displayRow(1, 200, 0, { from: 100, to: 200 }),
+  ];
+  const index = createDrawingLineageIndex(rows);
+  const result = captureSourceLineageFreehandStrokeBatch(
+    spanChart(10, rows),
+    { data: () => rows, coordinateToPrice: (y) => 100 - y },
+    [{ x: 5, y: 10 }, { x: 15, y: 20 }],
+    {
+      drawingOrdinalSeriesIndex: index,
+      drawingOrdinalSeriesIndexRevision: index.revision,
+      drawingProjectionConfig: "dataset-a:renko:10",
+      seriesData: rows,
+      sourceInterval: "1m",
+      sourceIntervalSeconds: 60,
+      sourceTimeHorizon: 200,
+    },
+  );
+
+  assert.deepEqual(result.captures[0].span.exact, {
+    left: { time: 100, sourceOrdinal: 0 },
+    right: { time: 200, sourceOrdinal: 0 },
+  });
+  assert.equal(result.captures[0].ratio, 0.5);
+  assert.deepEqual(result.captures[1], {
+    time: 230,
+    price: 80,
+    screen: { x: 15, y: 20 },
+  });
+  assert.equal(JSON.stringify(result).includes("order"), false);
+  assert.equal(JSON.stringify(result).includes("logical"), false);
+  assert.equal(JSON.stringify(result).includes("sourceTimeHorizon"), false);
+  assert.equal(JSON.stringify(result).includes("sourceInterval"), false);
+});
+
+test("future-only freehand capture works with one synthetic row and calendar months", () => {
+  const horizon = Date.UTC(2024, 0, 1) / 1_000;
+  const rows = [displayRow(0, horizon, 0, { from: horizon, to: horizon })];
+  const index = createDrawingLineageIndex(rows);
+  const chart = spanChart(10, rows);
+  const fixed = captureSourceLineageFreehandStrokeBatch(
+    chart,
+    { data: () => rows, coordinateToPrice: (y) => y },
+    [{ x: 5, y: 10 }, { x: 10, y: 20 }],
+    {
+      drawingOrdinalSeriesIndex: index,
+      drawingOrdinalSeriesIndexRevision: index.revision,
+      drawingProjectionConfig: "dataset-a:renko:10",
+      seriesData: rows,
+      sourceInterval: "1m",
+      sourceIntervalSeconds: 60,
+      sourceTimeHorizon: horizon,
+    },
+  );
+  assert.deepEqual(fixed.captures.map(({ time }) => time), [
+    horizon + 30,
+    horizon + 60,
+  ]);
+
+  const futureToTail = captureSourceLineageFreehandStrokeBatch(
+    chart,
+    { data: () => rows, coordinateToPrice: (y) => y },
+    [{ x: 5, y: 10 }, { x: 0, y: 20 }],
+    {
+      drawingOrdinalSeriesIndex: index,
+      drawingOrdinalSeriesIndexRevision: index.revision,
+      drawingProjectionConfig: "dataset-a:renko:10",
+      seriesData: rows,
+      sourceInterval: "1m",
+      sourceIntervalSeconds: 60,
+      sourceTimeHorizon: horizon,
+    },
+  );
+  assert.deepEqual(futureToTail.captures, [
+    { time: horizon + 30, price: 10, screen: { x: 5, y: 10 } },
+    {
+      anchor: { time: horizon, sourceOrdinal: 0 },
+      price: 20,
+      screen: { x: 0, y: 20 },
+    },
+  ]);
+
+  const calendar = captureSourceLineageFreehandStrokeBatch(
+    chart,
+    { data: () => rows, coordinateToPrice: (y) => y },
+    [{ x: 5, y: 10 }, { x: 15, y: 20 }],
+    {
+      drawingOrdinalSeriesIndex: index,
+      drawingOrdinalSeriesIndexRevision: index.revision,
+      drawingProjectionConfig: "dataset-a:renko:10",
+      seriesData: rows,
+      sourceInterval: "1M",
+      sourceIntervalSeconds: null,
+      sourceTimeHorizon: horizon,
+    },
+  );
+  assert.deepEqual(calendar.captures.map(({ time }) => time), [
+    Date.UTC(2024, 0, 16, 12) / 1_000,
+    Date.UTC(2024, 1, 15, 12) / 1_000,
+  ]);
+});
+
+test("future freehand capture rejects the price scale and invalid interval basis", () => {
+  const rows = [displayRow(0, 100, 0, { from: 100, to: 100 })];
+  const index = createDrawingLineageIndex(rows);
+  const context = {
+    drawingOrdinalSeriesIndex: index,
+    drawingOrdinalSeriesIndexRevision: index.revision,
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceInterval: "1m",
+    sourceIntervalSeconds: 60,
+    sourceTimeHorizon: 100,
+  };
+  const chart = {
+    timeScale: () => ({
+      coordinateToTime: () => null,
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: () => 0,
+      width: () => 20,
+    }),
+  };
+  const series = { coordinateToPrice: (y) => y, data: () => rows };
+
+  assert.equal(captureSourceLineageFreehandStrokeBatch(
+    chart, series, [{ x: 20, y: 1 }], context,
+  ), null);
+  assert.equal(captureSourceLineageFreehandStrokeBatch(
+    chart, series, [{ x: 5, y: 1 }], {
+      ...context,
+      sourceInterval: "bad",
+      sourceIntervalSeconds: null,
+    },
+  ), null);
+});
+
+test("future freehand coordinates reuse one basis per shared render context", () => {
+  const rows = [displayRow(0, 100, 0, { from: 100, to: 100 })];
+  let tailCoordinateReads = 0;
+  let spacingReads = 0;
+  const timeScale = {
+    coordinateToLogical: () => null,
+    options: () => {
+      spacingReads += 1;
+      return { barSpacing: 10 };
+    },
+    timeToCoordinate: () => {
+      tailCoordinateReads += 1;
+      return 0;
+    },
+  };
+  const chart = { timeScale: () => timeScale };
+  const series = { data: () => rows };
+  const context = createDrawingCoordinateTransactionContext({
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceInterval: "1m",
+    sourceIntervalSeconds: 60,
+    sourceTimeHorizon: 100,
+  });
+
+  assert.equal(dataPointToCoordinate(chart, series, { time: 130 }, context), 5);
+  assert.equal(dataPointToCoordinate(chart, series, { time: 160 }, context), 10);
+  assert.equal(tailCoordinateReads, 1);
+  assert.equal(spacingReads, 1);
+});
+
+test("ordinary coordinate contexts recompute future basis after viewport spacing changes", () => {
+  const rows = [displayRow(0, 100, 0, { from: 100, to: 100 })];
+  let barSpacing = 10;
+  const timeScale = {
+    coordinateToLogical: () => null,
+    options: () => ({ barSpacing }),
+    timeToCoordinate: () => 0,
+  };
+  const chart = { timeScale: () => timeScale };
+  const series = { data: () => rows };
+  const context = {
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceInterval: "1m",
+    sourceIntervalSeconds: 60,
+    sourceTimeHorizon: 100,
+  };
+
+  assert.equal(dataPointToCoordinate(chart, series, { time: 160 }, context), 10);
+  barSpacing = 20;
+  assert.equal(dataPointToCoordinate(chart, series, { time: 160 }, context), 20);
 });
 
 test("freehand capture only requires the visible adjacent pair when history is offscreen", () => {
@@ -609,7 +820,7 @@ test("freehand capture batches fail closed on bounds, gaps, stale indexes, and i
   assert.equal(captureSourceLineageFreehandStrokeBatch(
     spanChart(10, oneRow),
     { data: () => oneRow, coordinateToPrice: (y) => y },
-    [{ x: 0, y: 1 }],
+    [{ x: -6, y: 1 }],
     {
       drawingProjectionConfig: "dataset-a:renko:10",
       seriesData: oneRow,

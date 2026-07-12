@@ -11,6 +11,7 @@ import {
   resizedShapeBoxFromHandle,
   decimateScreenPoints,
   nextDrawingId,
+  observeDrawingId,
 } from "../drawingModel.js";
 
 test("isPassiveCursorTool treats empty and cursor tools as passive", () => {
@@ -105,4 +106,16 @@ test("nextDrawingId returns unique, prefixed, increasing ids", () => {
   assert.notEqual(a, b);
   assert.match(a, /^d_\d+$/);
   assert.match(nextDrawingId("preview"), /^preview_\d+$/);
+});
+
+test("restored drawing ids advance the allocator without accepting malformed suffixes", () => {
+  const before = Number(nextDrawingId("before").split("_").at(-1));
+  const restoredSuffix = before + 100;
+  assert.equal(observeDrawingId(`fh_${restoredSuffix}`), true);
+  assert.equal(observeDrawingId("fh_invalid"), false);
+  assert.equal(observeDrawingId(`fh_${Number.MAX_SAFE_INTEGER}`), false);
+  assert.equal(observeDrawingId(`fh_${Number.MAX_SAFE_INTEGER}0`), false);
+
+  const after = Number(nextDrawingId("after").split("_").at(-1));
+  assert.equal(after, restoredSuffix + 1);
 });

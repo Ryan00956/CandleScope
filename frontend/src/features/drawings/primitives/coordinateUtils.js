@@ -1,19 +1,30 @@
 import {
+  createDrawingCoordinateTransactionContext,
+  dataPointToCoordinate,
   resolveSourceLineageSpanToCoordinates,
 } from "../../../chart-adapter/coordinateBridge.js";
-import { resolveFreehandStrokeV2Points } from "../freehandStrokeModel.js";
+import { resolveFreehandStrokePoints } from "../freehandStrokeModel.js";
 
 export {
-  dataPointToCoordinate,
   logicalToCoordinateInterpolated,
   timeToCoordinateInterpolated,
 } from "../../../chart-adapter/coordinateBridge.js";
+export { dataPointToCoordinate };
 
-export function freehandStrokeV2ToCoordinates(chart, series, stroke, context = null) {
-  const coordinateContext = context || {};
-  return resolveFreehandStrokeV2Points(
-    stroke,
-    (span, _index, normalizedStroke) => resolveSourceLineageSpanToCoordinates(
+export function freehandStrokeToCoordinates(chart, series, stroke, context = null) {
+  const coordinateContext = createDrawingCoordinateTransactionContext(context);
+  return resolveFreehandStrokePoints(stroke, {
+    resolveAnchor: (anchor, _index, _point, normalizedStroke) => dataPointToCoordinate(
+      chart,
+      series,
+      {
+        ...anchor,
+        sourceProjection: normalizedStroke.sourceProjection,
+        sourceProjectionConfig: normalizedStroke.sourceProjectionConfig,
+      },
+      coordinateContext,
+    ),
+    resolveSpan: (span, _index, normalizedStroke) => resolveSourceLineageSpanToCoordinates(
       chart,
       series,
       {
@@ -23,5 +34,14 @@ export function freehandStrokeV2ToCoordinates(chart, series, stroke, context = n
       },
       coordinateContext,
     ),
-  );
+    resolveTime: (time) => dataPointToCoordinate(
+      chart,
+      series,
+      { time },
+      coordinateContext,
+    ),
+  });
 }
+
+// Keep the narrow export for callers compiled against the v2-only bridge.
+export const freehandStrokeV2ToCoordinates = freehandStrokeToCoordinates;

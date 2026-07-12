@@ -468,6 +468,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const renderedMainSeriesDataRef = useRef([]);
   const projectionStoreRef = useRef(null);
   const drawingProjectionSnapshotOwnerRef = useRef({
+    drawingProjectionConfig: null,
     sourceInterval: interval,
     sourceIntervalSeconds: parseIntervalSeconds(interval),
     store: null,
@@ -511,12 +512,17 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     surfaceConfigKey: null,
   });
   const publishDrawingProjectionStore = useCallback((store) => {
+    const drawingProjectionConfig = store
+      ? `${datasetKeyRef.current || ""}:${store.configurationKey}`
+      : null;
     const sourceInterval = intervalRef.current;
     const sourceIntervalSeconds = parseIntervalSeconds(intervalRef.current);
     projectionStoreRef.current = store;
+    drawingProjectionConfigRef.current = drawingProjectionConfig;
     drawingSourceIntervalRef.current = sourceInterval;
     drawingSourceIntervalSecondsRef.current = sourceIntervalSeconds;
     drawingProjectionSnapshotOwnerRef.current = {
+      drawingProjectionConfig,
       sourceInterval,
       sourceIntervalSeconds,
       store,
@@ -611,6 +617,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         const snapshot = owner.store?.drawingCoordinateSnapshot?.() || null;
         return snapshot ? {
           ...snapshot,
+          drawingProjectionConfig: owner.drawingProjectionConfig,
           sourceInterval: owner.sourceInterval,
           sourceIntervalSeconds: owner.sourceIntervalSeconds,
         } : null;
@@ -753,7 +760,6 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       initialRows,
       requestedProjectionSettingsRef.current,
     );
-    drawingProjectionConfigRef.current = `${datasetKeyRef.current || ""}:${initialProjectionStore.configurationKey}`;
     initialProjectionStore.reset(initialRows);
     publishDrawingProjectionStore(initialProjectionStore);
     projectionGenerationRef.current += 1;
@@ -950,7 +956,6 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         rows,
         projectionSettings,
       );
-      drawingProjectionConfigRef.current = `${datasetKeyRef.current || ""}:${nextProjectionStore.configurationKey}`;
       const projectionPatch = nextProjectionStore.reset(rows);
       const displayRows = nextProjectionStore.displaySnapshot();
       const renderedPatch = buildMainSeriesProjectionPatch({
@@ -1095,7 +1100,6 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     displayRowMapRef.current = new Map();
     displayRowIndexMapRef.current = new Map();
     publishDrawingProjectionStore(null);
-    drawingProjectionConfigRef.current = null;
     setAuxiliaryDisplayState({ datasetKey: null, rows: [], surfaceConfigKey: null });
     projectionGenerationRef.current += 1;
     projectionRenderContextRef.current = null;
@@ -1124,7 +1128,6 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const projectionStore = canReuseProjection
       ? existingProjectionStore
       : desiredProjectionStore;
-    drawingProjectionConfigRef.current = `${datasetKeyRef.current || ""}:${projectionStore.configurationKey}`;
     const generation = projectionGenerationRef.current + 1;
     projectionGenerationRef.current = generation;
     publishDrawingProjectionStore(projectionStore);
@@ -1628,7 +1631,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         <div className="synthetic-chart-notice" role="status">
           <strong>{syntheticChartNotice.title}</strong>
           <span>
-            {`${syntheticChartNotice.detail} · 指标按原始 K 线映射 · 成交量仅落末个合成点 · 绘图支持绝对时间未来锚点（自由笔需至少两个连续合成点）`}
+            {`${syntheticChartNotice.detail} · 指标按原始 K 线映射 · 成交量仅落末个合成点 · 绘图支持绝对时间未来锚点（含自由笔与荧光笔）`}
           </span>
         </div>
       )}

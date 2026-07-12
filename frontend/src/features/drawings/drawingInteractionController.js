@@ -75,11 +75,16 @@ import {
   updateTwoPointPreview,
 } from "./drawingCreationController.js";
 import {
-  appendFreehandStrokeCaptureBatch,
+  appendFreehandStrokeCaptureBatchIncremental,
   cancelFreehandStrokeDraft,
   finalizeFreehandStrokeDraft,
-  getFreehandStrokeDraftPreviewPoints,
+  getFreehandStrokeDraftRemainingCapacity,
+  isFreehandStrokeDraftSaturated,
 } from "./freehandStrokeModel.js";
+import {
+  limitFreehandCapturePositions,
+  mergePendingActiveDrawingMove,
+} from "./drawingMoveBatch.js";
 
 const TEXT_UI_STABLE_FRAME_LIMIT = 12;
 
@@ -134,7 +139,7 @@ export function useDrawing({
 
   // ── Freehand-specific state ──
   const currentFreehandRef = useRef(null); // FreehandDrawingPrimitive being drawn
-  const freehandDraftRef = useRef(null); // source-lineage v2 draft, never persisted
+  const freehandDraftRef = useRef(null); // transient synthetic v2/v3 draft, never persisted
   const freehandCaptureIdentityRef = useRef(null); // last successful atomic batch identity
   const isDrawingFreehandRef = useRef(false);
   const lastFreehandScreenPointRef = useRef(null);
@@ -547,19 +552,38 @@ export function useDrawing({
 
         const draft = freehandDraftRef.current;
         if (draft) {
-          const batch = getChartAdapter()?.captureFreehandStrokeBatch?.(accepted);
-          if (!batch || !appendFreehandStrokeCaptureBatch(draft, batch)) {
+          if (isFreehandStrokeDraftSaturated(draft)) return true;
+          const remainingCapacity = getFreehandStrokeDraftRemainingCapacity(draft);
+          if (!Number.isSafeInteger(remainingCapacity)) {
+            cancelActiveFreehandStroke();
+            return true;
+          }
+          const capturePositions = limitFreehandCapturePositions(
+            accepted,
+            remainingCapacity,
+          );
+          if (capturePositions.length === 0) return true;
+          const batch = getChartAdapter()?.captureFreehandStrokeBatch?.(capturePositions);
+          const appendResult = batch
+            ? appendFreehandStrokeCaptureBatchIncremental(draft, batch)
+            : null;
+          if (!appendResult) {
             cancelActiveFreehandStroke();
             return true;
           }
           freehandCaptureIdentityRef.current = batch.captureIdentity;
-          if (!currentFreehandRef.current.setPreviewPoints(
-            getFreehandStrokeDraftPreviewPoints(draft),
-          )) {
+          if (appendResult.previewPoints.length > 0
+            && !currentFreehandRef.current.appendPreviewPoints(
+              appendResult.previewPoints,
+            )) {
             cancelActiveFreehandStroke();
             return true;
           }
-          lastFreehandScreenPointRef.current = latestPoint;
+          const lastPreviewPoint = appendResult.previewPoints
+            .findLast((point) => point !== null);
+          if (lastPreviewPoint) {
+            lastFreehandScreenPointRef.current = { ...lastPreviewPoint };
+          }
           return true;
         }
 
@@ -639,7 +663,10 @@ export function useDrawing({
 
   const scheduleActiveDrawingMove = useCallback(
     (payload) => {
-      pendingActiveMoveRef.current = payload;
+      pendingActiveMoveRef.current = mergePendingActiveDrawingMove(
+        pendingActiveMoveRef.current,
+        payload,
+      );
       if (activeMoveFrameRef.current) return;
 
       const schedule = typeof requestAnimationFrame === "function"

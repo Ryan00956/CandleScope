@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { registerDrawingSeriesContext } from "../../../chart-adapter/coordinateBridge.js";
 import { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
+import { freehandStrokeToCoordinates } from "../primitives/coordinateUtils.js";
 
-function row(order, sourceTime, from, to) {
+function row(order, sourceTime, from, to, sourceOrdinal = 0) {
   return {
-    time: { order, sourceTime, sourceOrdinal: 0 },
+    time: { order, sourceTime, sourceOrdinal },
     customValues: {
       chartProjection: {
         projectorId: "renko",
         sourceFromTime: from,
-        sourceOrdinal: 0,
+        sourceOrdinal,
         sourceToTime: to,
       },
     },
@@ -49,6 +51,22 @@ function strokeWithUnresolvedMiddle() {
       { span: 0, ratio: 0, price: 0 },
       { span: 0, ratio: 0.2, price: 0 },
       { span: 1, ratio: 0.5, price: 0 },
+      { span: 0, ratio: 0.8, price: 0 },
+      { span: 0, ratio: 1, price: 0 },
+    ],
+  };
+}
+
+function strokeV3WithAbsoluteMiddle() {
+  const v2 = strokeWithUnresolvedMiddle();
+  return {
+    ...v2,
+    version: 3,
+    spans: [v2.spans[0]],
+    points: [
+      { span: 0, ratio: 0, price: 0 },
+      { span: 0, ratio: 0.2, price: 0 },
+      { time: 500, price: 0 },
       { span: 0, ratio: 0.8, price: 0 },
       { span: 0, ratio: 1, price: 0 },
     ],
@@ -153,6 +171,149 @@ test("freehand v2 hit testing skips unresolved singleton paths omitted by the re
   primitive.attached({ chart, series, requestUpdate: () => {} });
 
   assert.equal(primitive.hitTest(5, 0, 0.1), false);
+});
+
+test("freehand v3 renderer and hit testing split at unresolved absolute-time points", () => {
+  const rows = [row(0, 100, 100, 100), row(1, 200, 101, 200)];
+  const chart = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time) => time.order * 10,
+    }),
+  };
+  const series = {
+    data: () => rows,
+    priceToCoordinate: (price) => price,
+  };
+  const primitive = new FreehandDrawingPrimitive({
+    id: "v3-gap",
+    stroke: strokeV3WithAbsoluteMiddle(),
+    lineWidth: 2,
+  });
+  primitive.attached({ chart, series, requestUpdate: () => {} });
+
+  assert.equal(primitive.hitTest(1, 0, 0.1), true);
+  assert.equal(primitive.hitTest(5, 0, 0.1), false);
+  assert.equal(primitive.hitTest(9, 0, 0.1), true);
+  assert.deepEqual(renderedPathMoves(primitive), [[0, 0], [8, 0]]);
+});
+
+test("freehand v3 resolves lineage and future time points from one coordinate snapshot", () => {
+  const rows = [row(0, 100, 100, 100), row(1, 200, 101, 200)];
+  let snapshots = 0;
+  const chart = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time) => time.order * 10,
+    }),
+  };
+  const series = {
+    data: () => {
+      throw new Error("the atomic drawing snapshot owns series data");
+    },
+    priceToCoordinate: (price) => price,
+  };
+  registerDrawingSeriesContext(series, {
+    coordinateSnapshotProvider: () => {
+      snapshots += 1;
+      return {
+        seriesData: rows,
+        sourceTimeHorizon: 200,
+        sourceInterval: "100s",
+        sourceIntervalSeconds: 100,
+      };
+    },
+  });
+  const stroke = strokeV3WithAbsoluteMiddle();
+  stroke.points = [
+    { span: 0, ratio: 0, price: 0 },
+    { span: 0, ratio: 0.2, price: 0 },
+    { time: 500, price: 0 },
+    { time: 600, price: 0 },
+  ];
+  const primitive = new FreehandDrawingPrimitive({ id: "v3-future", stroke, lineWidth: 2 });
+  primitive.attached({ chart, series, requestUpdate: () => {} });
+
+  primitive.updateAllViews();
+  assert.equal(snapshots, 1);
+  assert.equal(primitive.hitTest(45, 0, 0.1), true);
+  assert.equal(snapshots, 2);
+});
+
+test("freehand v3 exact anchors do not drift to a later same-time synthetic ordinal", () => {
+  const rows = [
+    row(0, 100, 100, 100, 0),
+    row(1, 100, 100, 100, 1),
+  ];
+  const chart = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time) => time.order * 10,
+    }),
+  };
+  const series = { data: () => rows };
+  const context = {
+    drawingProjectionConfig: "dataset-a:renko:old",
+    seriesData: rows,
+    sourceTimeHorizon: 100,
+  };
+  const exactStroke = {
+    version: 3,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:old",
+    spans: [],
+    points: [
+      { anchor: { time: 100, sourceOrdinal: 0 }, price: 0 },
+      { anchor: { time: 100, sourceOrdinal: 0 }, price: 1 },
+    ],
+  };
+  const bareTimeStroke = {
+    ...exactStroke,
+    points: [
+      { time: 100, price: 0 },
+      { time: 100, price: 1 },
+    ],
+  };
+
+  assert.deepEqual(
+    freehandStrokeToCoordinates(chart, series, exactStroke, context).map((point) => point.x),
+    [0, 0],
+  );
+  assert.deepEqual(
+    freehandStrokeToCoordinates(chart, series, bareTimeStroke, context).map((point) => point.x),
+    [10, 10],
+  );
+});
+
+test("freehand primitive accepts known stroke versions and rejects unknown or mixed v3", () => {
+  const v2 = strokeWithUnresolvedMiddle();
+  const v3 = strokeV3WithAbsoluteMiddle();
+  const primitive = new FreehandDrawingPrimitive({ id: "known-v3", stroke: v3 });
+  assert.equal(primitive.stroke.version, 3);
+
+  const preview = new FreehandDrawingPrimitive({
+    id: "known-v2",
+    isPreview: true,
+    previewPoints: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+  });
+  assert.equal(preview.commitStroke(v2), true);
+  assert.equal(preview.stroke.version, 2);
+
+  const rejected = new FreehandDrawingPrimitive({
+    id: "unknown",
+    stroke: { ...v3, version: 4 },
+    isPreview: true,
+    previewPoints: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+  });
+  assert.equal(rejected.stroke, null);
+  assert.equal(rejected.commitStroke({
+    ...v3,
+    points: [
+      { span: 0, ratio: 0, time: 100, price: 0 },
+      { time: 500, price: 0 },
+    ],
+  }), false);
+  assert.equal(rejected.isPreview, true);
 });
 
 test("legacy freehand and highlighter split unresolved points on ordinal axes", () => {
@@ -272,6 +433,33 @@ test("freehand preview renders screen-space paths and commit clears transient st
   assert.deepEqual(primitive.previewPoints, []);
   assert.equal(Object.isFrozen(primitive.stroke), true);
   assert.equal(updates, 2);
+});
+
+test("freehand preview appends frame deltas without replacing prior geometry", () => {
+  let updates = 0;
+  const delta = [{ x: 2, y: 0 }, null, { x: 8, y: 0 }];
+  const primitive = new FreehandDrawingPrimitive({
+    id: "incremental-preview",
+    isPreview: true,
+    previewPoints: [{ x: 0, y: 0 }],
+  });
+  primitive.attached({
+    chart: {},
+    series: {},
+    requestUpdate: () => { updates += 1; },
+  });
+
+  assert.equal(primitive.appendPreviewPoints(delta), true);
+  assert.deepEqual(primitive.previewPoints, [
+    { x: 0, y: 0 },
+    { x: 2, y: 0 },
+    null,
+    { x: 8, y: 0 },
+  ]);
+  delta[0].x = 99;
+  assert.equal(primitive.previewPoints[1].x, 2);
+  assert.equal(primitive.appendPreviewPoints([]), true);
+  assert.equal(updates, 1);
 });
 
 test("freehand preview cancel is terminal and remains persistence-filtered", () => {

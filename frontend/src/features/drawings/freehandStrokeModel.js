@@ -1,4 +1,5 @@
 export const FREEHAND_STROKE_VERSION = 2;
+export const FREEHAND_STROKE_V3_VERSION = 3;
 export const MAX_FREEHAND_STROKE_SPANS = 2_048;
 export const MAX_FREEHAND_STROKE_POINTS = 4_096;
 export const MAX_LEGACY_FREEHAND_POINTS = MAX_FREEHAND_STROKE_POINTS;
@@ -10,6 +11,15 @@ const draftStates = new WeakMap();
 
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function safeTime(value) {
+  const time = finiteNumber(value);
+  return time !== null
+    && time >= Number.MIN_SAFE_INTEGER
+    && time <= Number.MAX_SAFE_INTEGER
+    ? time
+    : null;
 }
 
 function safeSourceOrdinal(value) {
@@ -85,7 +95,7 @@ export function normalizeLegacyFreehandDataPoints(value) {
 }
 
 /**
- * Use own-property presence as the only v1/v2 discriminator. An item with a
+ * Use own-property presence as the only v1/stroke discriminator. An item with a
  * `stroke` field is never allowed to fall back to legacy `dataPoints`.
  */
 export function normalizeSavedFreehandPayload(item) {
@@ -96,7 +106,7 @@ export function normalizeSavedFreehandPayload(item) {
     return dataPoints ? { dataPoints } : null;
   }
   if (Object.prototype.hasOwnProperty.call(item, "dataPoints")) return null;
-  const stroke = normalizeFreehandStrokeV2(item.stroke);
+  const stroke = normalizeFreehandStroke(item.stroke);
   return stroke ? { stroke } : null;
 }
 
@@ -167,6 +177,43 @@ function normalizePoint(value, spanCount) {
   return { span, ratio, price };
 }
 
+function normalizeV3Span(value) {
+  const span = normalizeSpan(value);
+  if (!span
+    || safeTime(span.exact.left.time) === null
+    || safeTime(span.exact.right.time) === null
+    || safeTime(span.fallback.fromTime) === null
+    || safeTime(span.fallback.toTime) === null) {
+    return null;
+  }
+  return span;
+}
+
+function normalizeV3Point(value, spanCount) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const hasSpan = Object.prototype.hasOwnProperty.call(value, "span");
+  const hasRatio = Object.prototype.hasOwnProperty.call(value, "ratio");
+  const hasTime = Object.prototype.hasOwnProperty.call(value, "time");
+  const hasAnchor = Object.prototype.hasOwnProperty.call(value, "anchor");
+  const price = finiteNumber(value.price);
+  const representationCount = Number(hasTime)
+    + Number(hasAnchor)
+    + Number(hasSpan || hasRatio);
+  if (price === null || representationCount !== 1) return null;
+
+  if (hasTime) {
+    const time = safeTime(value.time);
+    return time === null ? null : { time, price };
+  }
+  if (hasAnchor) {
+    const anchor = normalizeExactAnchor(value.anchor);
+    return !anchor || safeTime(anchor.time) === null ? null : { anchor, price };
+  }
+  if (!hasSpan || !hasRatio) return null;
+  return normalizePoint(value, spanCount);
+}
+
 function freezeNormalizedStroke(stroke) {
   for (const span of stroke.spans) {
     Object.freeze(span.exact.left);
@@ -175,7 +222,10 @@ function freezeNormalizedStroke(stroke) {
     Object.freeze(span.fallback);
     Object.freeze(span);
   }
-  for (const point of stroke.points) Object.freeze(point);
+  for (const point of stroke.points) {
+    if (point.anchor) Object.freeze(point.anchor);
+    Object.freeze(point);
+  }
   Object.freeze(stroke.spans);
   Object.freeze(stroke.points);
   return Object.freeze(stroke);
@@ -189,7 +239,9 @@ function freezeNormalizedStroke(stroke) {
  * projection, while the fallback envelope remains portable across projectors.
  */
 export function normalizeFreehandStrokeV2(value) {
-  if (value && typeof value === "object" && normalizedStrokes.has(value)) return value;
+  if (value && typeof value === "object" && normalizedStrokes.has(value)) {
+    return value.version === FREEHAND_STROKE_VERSION ? value : null;
+  }
   if (value?.version !== FREEHAND_STROKE_VERSION
     || !Array.isArray(value.spans)
     || value.spans.length === 0
@@ -220,6 +272,51 @@ export function normalizeFreehandStrokeV2(value) {
   return normalized;
 }
 
+/**
+ * Validate and clone the persistence-safe freehand stroke v3 schema. V3 keeps
+ * the v2 span representation while permitting exact materialized anchors and
+ * absolute source-time points. Each point is exactly one representation.
+ */
+export function normalizeFreehandStrokeV3(value) {
+  if (value && typeof value === "object" && normalizedStrokes.has(value)) {
+    return value.version === FREEHAND_STROKE_V3_VERSION ? value : null;
+  }
+  if (value?.version !== FREEHAND_STROKE_V3_VERSION
+    || !Array.isArray(value.spans)
+    || value.spans.length > MAX_FREEHAND_STROKE_SPANS
+    || !Array.isArray(value.points)
+    || value.points.length < 2
+    || value.points.length > MAX_FREEHAND_STROKE_POINTS) {
+    return null;
+  }
+
+  const sourceProjection = safeProjectionId(value.sourceProjection);
+  const sourceProjectionConfig = safeProjectionConfig(value.sourceProjectionConfig);
+  if (!sourceProjection || !sourceProjectionConfig) return null;
+
+  const spans = value.spans.map(normalizeV3Span);
+  if (spans.some((span) => span === null)) return null;
+  const points = value.points.map((point) => normalizeV3Point(point, spans.length));
+  if (points.some((point) => point === null)) return null;
+
+  const normalized = freezeNormalizedStroke({
+    version: FREEHAND_STROKE_V3_VERSION,
+    sourceProjection,
+    sourceProjectionConfig,
+    spans,
+    points,
+  });
+  normalizedStrokes.add(normalized);
+  return normalized;
+}
+
+/** Dispatch only known persistent stroke versions. Unknown versions fail closed. */
+export function normalizeFreehandStroke(value) {
+  if (value?.version === FREEHAND_STROKE_VERSION) return normalizeFreehandStrokeV2(value);
+  if (value?.version === FREEHAND_STROKE_V3_VERSION) return normalizeFreehandStrokeV3(value);
+  return null;
+}
+
 function spanKey(span) {
   const { left, right } = span.exact;
   const fallback = span.fallback;
@@ -237,10 +334,8 @@ function spanKey(span) {
 
 function normalizeDraftCapture(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const span = normalizeSpan(value.span);
-  const ratio = finiteNumber(value.ratio);
   const price = finiteNumber(value.price);
-  if (!span || ratio === null || ratio < 0 || ratio > 1 || price === null) return null;
+  if (price === null) return null;
 
   let screen = null;
   if (value.screen !== null) {
@@ -249,6 +344,31 @@ function normalizeDraftCapture(value) {
     if (x === null || y === null) return null;
     screen = { x, y };
   }
+
+  const hasSpan = Object.prototype.hasOwnProperty.call(value, "span");
+  const hasRatio = Object.prototype.hasOwnProperty.call(value, "ratio");
+  const hasTime = Object.prototype.hasOwnProperty.call(value, "time");
+  const hasAnchor = Object.prototype.hasOwnProperty.call(value, "anchor");
+  const representationCount = Number(hasTime)
+    + Number(hasAnchor)
+    + Number(hasSpan || hasRatio);
+  if (representationCount !== 1) return null;
+
+  if (hasTime) {
+    const time = safeTime(value.time);
+    return time === null ? null : { time, price, screen };
+  }
+  if (hasAnchor) {
+    const anchor = normalizeExactAnchor(value.anchor);
+    return !anchor || safeTime(anchor.time) === null
+      ? null
+      : { anchor, price, screen };
+  }
+
+  if (!hasSpan || !hasRatio) return null;
+  const span = normalizeSpan(value.span);
+  const ratio = finiteNumber(value.ratio);
+  if (!span || ratio === null || ratio < 0 || ratio > 1) return null;
   return { span, ratio, price, screen };
 }
 
@@ -315,7 +435,7 @@ function retainedDraftIndexes(samples, epsilon) {
 }
 
 /**
- * Create a helper-managed mutable v2 draft. `captureIdentity` is deliberately
+ * Create a helper-managed mutable v2/v3 draft. `captureIdentity` is deliberately
  * opaque and compared by reference; it is never copied into the saved stroke.
  */
 export function createFreehandStrokeDraft({
@@ -336,9 +456,39 @@ export function createFreehandStrokeDraft({
     spans: [],
     spanIndexes: new Map(),
     samples: [],
+    saturated: false,
     cancelled: false,
   });
   return draft;
+}
+
+function appendNormalizedDraftCapture(state, normalized) {
+  if (normalized.span) {
+    const key = spanKey(normalized.span);
+    let span = state.spanIndexes.get(key);
+    if (span === undefined) {
+      if (state.spans.length >= MAX_FREEHAND_STROKE_SPANS) return false;
+      span = state.spans.length;
+      state.spanIndexes.set(key, span);
+      state.spans.push(normalized.span);
+    }
+    state.samples.push({
+      point: { span, ratio: normalized.ratio, price: normalized.price },
+      screen: normalized.screen,
+    });
+  } else if (Object.prototype.hasOwnProperty.call(normalized, "time")) {
+    state.samples.push({
+      point: { time: normalized.time, price: normalized.price },
+      screen: normalized.screen,
+    });
+  } else {
+    state.samples.push({
+      point: { anchor: normalized.anchor, price: normalized.price },
+      screen: normalized.screen,
+    });
+  }
+  if (state.samples.length >= MAX_FREEHAND_STROKE_POINTS) state.saturated = true;
+  return true;
 }
 
 /** Append one capture. The draft is unchanged when validation fails. */
@@ -347,24 +497,13 @@ export function appendFreehandStrokeCapture(draft, capture, captureIdentity) {
   const normalized = normalizeDraftCapture(capture);
   if (!state
     || state.cancelled
+    || state.saturated
     || captureIdentity !== state.captureIdentity
     || !normalized
     || state.samples.length >= MAX_FREEHAND_STROKE_POINTS) {
     return false;
   }
-  const key = spanKey(normalized.span);
-  let span = state.spanIndexes.get(key);
-  if (span === undefined) {
-    if (state.spans.length >= MAX_FREEHAND_STROKE_SPANS) return false;
-    span = state.spans.length;
-    state.spanIndexes.set(key, span);
-    state.spans.push(normalized.span);
-  }
-  state.samples.push({
-    point: { span, ratio: normalized.ratio, price: normalized.price },
-    screen: normalized.screen,
-  });
-  return true;
+  return appendNormalizedDraftCapture(state, normalized);
 }
 
 /** Append a capture batch atomically. */
@@ -372,6 +511,7 @@ export function appendFreehandStrokeCaptureBatch(draft, batch) {
   const state = draftStates.get(draft);
   if (!state
     || state.cancelled
+    || state.saturated
     || batch?.captureIdentity !== state.captureIdentity
     || batch?.sourceProjection !== state.sourceProjection
     || batch?.sourceProjectionConfig !== state.sourceProjectionConfig
@@ -385,15 +525,84 @@ export function appendFreehandStrokeCaptureBatch(draft, batch) {
   if (normalizedCaptures.some((capture) => capture === null)) return false;
   const newKeys = new Set();
   for (const capture of normalizedCaptures) {
+    if (!capture.span) continue;
     const key = spanKey(capture.span);
     if (!state.spanIndexes.has(key)) newKeys.add(key);
   }
   if (state.spans.length + newKeys.size > MAX_FREEHAND_STROKE_SPANS) return false;
 
   for (const capture of normalizedCaptures) {
-    appendFreehandStrokeCapture(draft, capture, batch.captureIdentity);
+    if (!appendNormalizedDraftCapture(state, capture)) return false;
   }
   return true;
+}
+
+function previewPointFromCapture(capture) {
+  return capture.screen ? { ...capture.screen } : null;
+}
+
+/**
+ * Append as much of one live pointer batch as the bounded draft can retain.
+ * Invalid identity/data returns `null` without mutation. Capacity exhaustion is
+ * a successful terminal state: callers keep the draft and commit it on mouseup.
+ */
+export function appendFreehandStrokeCaptureBatchIncremental(draft, batch) {
+  const state = draftStates.get(draft);
+  if (!state
+    || state.cancelled
+    || batch?.captureIdentity !== state.captureIdentity
+    || batch?.sourceProjection !== state.sourceProjection
+    || batch?.sourceProjectionConfig !== state.sourceProjectionConfig
+    || !Array.isArray(batch?.captures)
+    || batch.captures.length === 0) {
+    return null;
+  }
+  if (state.saturated) {
+    return { appendedCount: 0, previewPoints: [], saturated: true };
+  }
+
+  const normalizedCaptures = batch.captures.map(normalizeDraftCapture);
+  if (normalizedCaptures.some((capture) => capture === null)) return null;
+
+  const availablePoints = MAX_FREEHAND_STROKE_POINTS - state.samples.length;
+  const availableSpans = MAX_FREEHAND_STROKE_SPANS - state.spans.length;
+  const pendingSpanKeys = new Set();
+  let appendCount = 0;
+  for (const capture of normalizedCaptures) {
+    if (appendCount >= availablePoints) break;
+    if (capture.span) {
+      const key = spanKey(capture.span);
+      if (!state.spanIndexes.has(key) && !pendingSpanKeys.has(key)) {
+        if (pendingSpanKeys.size >= availableSpans) break;
+        pendingSpanKeys.add(key);
+      }
+    }
+    appendCount += 1;
+  }
+
+  const accepted = normalizedCaptures.slice(0, appendCount);
+  for (const capture of accepted) {
+    if (!appendNormalizedDraftCapture(state, capture)) return null;
+  }
+  if (appendCount < normalizedCaptures.length) state.saturated = true;
+
+  return {
+    appendedCount: appendCount,
+    previewPoints: accepted.map(previewPointFromCapture),
+    saturated: state.saturated,
+  };
+}
+
+export function isFreehandStrokeDraftSaturated(draft) {
+  const state = draftStates.get(draft);
+  return !!state && !state.cancelled && state.saturated;
+}
+
+export function getFreehandStrokeDraftRemainingCapacity(draft) {
+  const state = draftStates.get(draft);
+  return state && !state.cancelled
+    ? Math.max(0, MAX_FREEHAND_STROKE_POINTS - state.samples.length)
+    : null;
 }
 
 /** Return a defensive screen-space preview, preserving null path gaps. */
@@ -437,7 +646,13 @@ export function finalizeFreehandStrokeDraft(draft, {
   const keptSamples = state.samples.filter((_sample, index) => retained.has(index));
   if (keptSamples.length < 2) return null;
 
-  const usedSpans = new Set(keptSamples.map(({ point }) => point.span));
+  const usesV3Point = keptSamples.some(({ point }) => (
+    Object.prototype.hasOwnProperty.call(point, "time")
+      || Object.prototype.hasOwnProperty.call(point, "anchor")
+  ));
+  const usedSpans = new Set(keptSamples
+    .map(({ point }) => point.span)
+    .filter((span) => span !== undefined));
   const remap = new Map();
   const spans = [];
   for (let index = 0; index < state.spans.length; index += 1) {
@@ -445,13 +660,21 @@ export function finalizeFreehandStrokeDraft(draft, {
     remap.set(index, spans.length);
     spans.push(state.spans[index]);
   }
-  const points = keptSamples.map(({ point }) => ({
-    span: remap.get(point.span),
-    ratio: point.ratio,
-    price: point.price,
-  }));
-  return normalizeFreehandStrokeV2({
-    version: FREEHAND_STROKE_VERSION,
+  const points = keptSamples.map(({ point }) => {
+    if (Object.prototype.hasOwnProperty.call(point, "time")) {
+      return { time: point.time, price: point.price };
+    }
+    if (Object.prototype.hasOwnProperty.call(point, "anchor")) {
+      return { anchor: point.anchor, price: point.price };
+    }
+    return {
+        span: remap.get(point.span),
+        ratio: point.ratio,
+        price: point.price,
+    };
+  });
+  return normalizeFreehandStroke({
+    version: usesV3Point ? FREEHAND_STROKE_V3_VERSION : FREEHAND_STROKE_VERSION,
     sourceProjection: state.sourceProjection,
     sourceProjectionConfig: state.sourceProjectionConfig,
     spans,
@@ -467,27 +690,46 @@ function normalizeResolvedSpan(value) {
     : null;
 }
 
-/**
- * Resolve a stroke with at most one bridge call per referenced span.
- * Unresolved spans become `null` path gaps; callers must not reconnect across
- * those markers.
- */
-export function resolveFreehandStrokeV2Points(value, resolveSpan) {
-  const stroke = normalizeFreehandStrokeV2(value);
-  if (!stroke || typeof resolveSpan !== "function") return [];
-
+function resolveNormalizedFreehandStrokePoints(stroke, {
+  resolveAnchor,
+  resolveSpan,
+  resolveTime,
+}) {
   const resolvedSpans = new Map();
-  return stroke.points.map((point) => {
+  return stroke.points.map((point, pointIndex) => {
+    if (Object.prototype.hasOwnProperty.call(point, "time")) {
+      if (typeof resolveTime !== "function") return null;
+      let x = null;
+      try {
+        x = finiteNumber(resolveTime(point.time, pointIndex, point, stroke));
+      } catch {
+        x = null;
+      }
+      return x === null ? null : { x, price: point.price };
+    }
+    if (Object.prototype.hasOwnProperty.call(point, "anchor")) {
+      if (typeof resolveAnchor !== "function") return null;
+      let x = null;
+      try {
+        x = finiteNumber(resolveAnchor(point.anchor, pointIndex, point, stroke));
+      } catch {
+        x = null;
+      }
+      return x === null ? null : { x, price: point.price };
+    }
+
     if (!resolvedSpans.has(point.span)) {
       let resolved = null;
-      try {
-        resolved = normalizeResolvedSpan(resolveSpan(
-          stroke.spans[point.span],
-          point.span,
-          stroke,
-        ));
-      } catch {
-        resolved = null;
+      if (typeof resolveSpan === "function") {
+        try {
+          resolved = normalizeResolvedSpan(resolveSpan(
+            stroke.spans[point.span],
+            point.span,
+            stroke,
+          ));
+        } catch {
+          resolved = null;
+        }
       }
       resolvedSpans.set(point.span, resolved);
     }
@@ -499,4 +741,47 @@ export function resolveFreehandStrokeV2Points(value, resolveSpan) {
       price: point.price,
     };
   });
+}
+
+/**
+ * Resolve a v2 stroke with at most one bridge call per referenced span.
+ * Unresolved spans become `null` path gaps; callers must not reconnect across
+ * those markers.
+ */
+export function resolveFreehandStrokeV2Points(value, resolveSpan) {
+  const stroke = normalizeFreehandStrokeV2(value);
+  return stroke && typeof resolveSpan === "function"
+    ? resolveNormalizedFreehandStrokePoints(stroke, {
+        resolveAnchor: null,
+        resolveSpan,
+        resolveTime: null,
+      })
+    : [];
+}
+
+/** Resolve a strict v3 stroke through lineage-span and absolute-time bridges. */
+export function resolveFreehandStrokeV3Points(value, {
+  resolveAnchor = null,
+  resolveSpan = null,
+  resolveTime = null,
+} = {}) {
+  const stroke = normalizeFreehandStrokeV3(value);
+  return stroke
+    ? resolveNormalizedFreehandStrokePoints(stroke, { resolveAnchor, resolveSpan, resolveTime })
+    : [];
+}
+
+/** Resolve any known persistent stroke version; unknown versions fail closed. */
+export function resolveFreehandStrokePoints(value, {
+  resolveAnchor = null,
+  resolveSpan = null,
+  resolveTime = null,
+} = {}) {
+  if (value?.version === FREEHAND_STROKE_VERSION) {
+    return resolveFreehandStrokeV2Points(value, resolveSpan);
+  }
+  if (value?.version === FREEHAND_STROKE_V3_VERSION) {
+    return resolveFreehandStrokeV3Points(value, { resolveAnchor, resolveSpan, resolveTime });
+  }
+  return [];
 }

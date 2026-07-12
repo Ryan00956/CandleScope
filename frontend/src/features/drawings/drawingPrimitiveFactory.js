@@ -11,11 +11,13 @@ import {
   DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION,
   DEFAULT_HIGHLIGHTER_OPACITY,
   nextDrawingId,
+  observeDrawingId,
 } from "./drawingModel.js";
 import { normalizeSavedFreehandPayload } from "./freehandStrokeModel.js";
 
 export function createPrimitiveFromSavedDrawing(item) {
   if (!item) return null;
+  observeDrawingId(item.id);
   const hasStroke = Object.prototype.hasOwnProperty.call(item, "stroke");
   if (hasStroke && item.type !== "freehand" && item.type !== "highlighter") return null;
   if (item.type === "line") {

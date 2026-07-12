@@ -100,6 +100,49 @@ test("source-lineage freehand creation starts a transient v2 draft preview", () 
   assert.deepEqual(attached[0].dataPoints, []);
 });
 
+test("synthetic freehand creation may start directly from an absolute future capture", () => {
+  const identity = {};
+  const primitivesRef = { current: [] };
+  const currentFreehandRef = { current: null };
+  const freehandDraftRef = { current: null };
+  const freehandCaptureIdentityRef = { current: null };
+  const isDrawingFreehandRef = { current: false };
+  const attached = [];
+  const captureBatch = {
+    captureIdentity: identity,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:atr:14:10:0.01",
+    captures: [{
+      time: 300.5,
+      price: 10,
+      screen: { x: 200, y: 30 },
+    }],
+  };
+
+  assert.equal(startFreehandStroke({
+    tool: "pen",
+    pos: { x: 200, y: 30 },
+    e: eventStub(),
+    primitivesRef,
+    currentFreehandRef,
+    freehandDraftRef,
+    isDrawingFreehandRef,
+    attachPrim: (primitive) => attached.push(primitive),
+    screenToData: () => { throw new Error("synthetic future capture must not use v1"); },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    sourceLineage: true,
+    captureBatch,
+    freehandCaptureIdentityRef,
+  }), true);
+
+  assert.equal(attached.length, 1);
+  assert.ok(freehandDraftRef.current);
+  assert.strictEqual(freehandCaptureIdentityRef.current, identity);
+  assert.equal(isDrawingFreehandRef.current, true);
+  assert.deepEqual(attached[0].previewPoints, [{ x: 200, y: 30 }]);
+});
+
 test("source-time freehand creation keeps the legacy model transient until pointerup", () => {
   const primitivesRef = { current: [] };
   const currentFreehandRef = { current: null };

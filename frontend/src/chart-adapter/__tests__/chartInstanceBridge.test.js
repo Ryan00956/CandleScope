@@ -120,6 +120,41 @@ test("adapter exposes persistence-safe ordinal drawing coordinates", () => {
   assert.equal(logicalCalls, 0);
 });
 
+test("coordinate contexts prefer one atomic snapshot projection config over a conflicting ref", () => {
+  const rows = [displayRow(0, 100, 0), displayRow(1, 200, 0)];
+  const lineageIndex = createDrawingLineageIndex(rows);
+  let snapshotReads = 0;
+  let configRefReads = 0;
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: {} },
+    seriesRef: { current: {} },
+    projectionConfigRef: {
+      get current() {
+        configRefReads += 1;
+        return "dataset-stale:kagi:5";
+      },
+    },
+    drawingCoordinateSnapshotProvider: () => {
+      snapshotReads += 1;
+      return {
+        drawingProjectionConfig: "dataset-a:renko:10",
+        indexRevision: lineageIndex.revision,
+        ordinalSeriesIndex: lineageIndex,
+        seriesData: rows,
+      };
+    },
+  });
+
+  assert.deepEqual(adapter.axisTimeToDrawingAnchor(rows[1].time), {
+    time: 200,
+    sourceOrdinal: 0,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:10",
+  });
+  assert.equal(snapshotReads, 1);
+  assert.equal(configRefReads, 0);
+});
+
 test("future drawing anchors use one atomic snapshot and persist only absolute source time", () => {
   const rows = [displayRow(0, 100, 0), displayRow(1, 200, 0)];
   const lineageIndex = createDrawingLineageIndex(rows);
@@ -325,7 +360,7 @@ test("freehand capture reads one atomic snapshot per batch and keeps tail-stable
   const configRef = {
     get current() {
       configReads += 1;
-      return "dataset-a:renko:10";
+      return "dataset-stale:kagi:5";
     },
   };
   const horizonRef = {
@@ -370,6 +405,7 @@ test("freehand capture reads one atomic snapshot per batch and keeps tail-stable
     drawingCoordinateSnapshotProvider: () => {
       snapshotCalls += 1;
       return {
+        drawingProjectionConfig: "dataset-a:renko:10",
         indexRevision: index.revision,
         ordinalSeriesIndex: index,
         seriesData: rows,
@@ -383,8 +419,9 @@ test("freehand capture reads one atomic snapshot per batch and keeps tail-stable
     left: { time: 100, sourceOrdinal: 0 },
     right: { time: 100, sourceOrdinal: 1 },
   });
+  assert.equal(first.sourceProjectionConfig, "dataset-a:renko:10");
   assert.equal(snapshotCalls, 1);
-  assert.equal(configReads, 1);
+  assert.equal(configReads, 0);
   assert.equal(horizonReads, 1);
   assert.equal(intervalIdReads, 1);
   assert.equal(intervalReads, 1);
@@ -405,11 +442,83 @@ test("freehand capture reads one atomic snapshot per batch and keeps tail-stable
   assert.ok(second);
   assert.strictEqual(second.captureIdentity, first.captureIdentity);
   assert.equal(snapshotCalls, 2);
-  assert.equal(configReads, 2);
+  assert.equal(configReads, 0);
   assert.equal(horizonReads, 2);
   assert.equal(intervalIdReads, 2);
   assert.equal(intervalReads, 2);
   assert.equal(seriesReads, 2);
   assert.equal(Object.isFrozen(first.captureIdentity), true);
   assert.equal(Object.keys(first.captureIdentity).length, 0);
+});
+
+test("freehand future capture uses snapshot-owned config, horizon, and interval", () => {
+  const rows = [displayRow(0, 100, 0), displayRow(1, 200, 0)];
+  const index = createDrawingLineageIndex(rows);
+  const reads = { config: 0, horizon: 0, interval: 0, intervalSeconds: 0, snapshot: 0 };
+  const adapter = createLightweightChartAdapter({
+    chartRef: {
+      current: {
+        timeScale: () => ({
+          coordinateToTime: (x) => rows.find(
+            (row) => row.time.order === Math.round(x / 10),
+          )?.time || null,
+          options: () => ({ barSpacing: 10 }),
+          timeToCoordinate: (time) => time.order * 10,
+          width: () => 100,
+        }),
+      },
+    },
+    seriesRef: { current: { coordinateToPrice: (y) => 100 - y } },
+    projectionConfigRef: {
+      get current() {
+        reads.config += 1;
+        return "dataset-stale:kagi:5";
+      },
+    },
+    sourceTimeHorizonRef: {
+      get current() {
+        reads.horizon += 1;
+        return 999;
+      },
+    },
+    sourceIntervalRef: {
+      get current() {
+        reads.interval += 1;
+        return "2m";
+      },
+    },
+    sourceIntervalSecondsRef: {
+      get current() {
+        reads.intervalSeconds += 1;
+        return 120;
+      },
+    },
+    drawingCoordinateSnapshotProvider: () => {
+      reads.snapshot += 1;
+      return {
+        drawingProjectionConfig: "dataset-a:renko:10",
+        indexRevision: index.revision,
+        ordinalSeriesIndex: index,
+        seriesData: rows,
+        sourceInterval: "1m",
+        sourceIntervalSeconds: 60,
+        sourceTimeHorizon: 200,
+      };
+    },
+  });
+
+  const batch = adapter.captureFreehandStrokeBatch([{ x: 15, y: 20 }]);
+  assert.deepEqual(batch.captures[0], {
+    time: 230,
+    price: 80,
+    screen: { x: 15, y: 20 },
+  });
+  assert.equal(batch.sourceProjectionConfig, "dataset-a:renko:10");
+  assert.deepEqual(reads, {
+    config: 0,
+    horizon: 0,
+    interval: 0,
+    intervalSeconds: 0,
+    snapshot: 1,
+  });
 });

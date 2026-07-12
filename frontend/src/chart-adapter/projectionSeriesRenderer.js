@@ -1,5 +1,7 @@
 import { createMainSeriesPointConverter } from "./mainSeriesModel.js";
 
+const MAX_INCREMENTAL_TAIL_MUTATIONS = 64;
+
 function clampTailStart(value, length) {
   const index = Number(value);
   if (!Number.isFinite(index)) return 0;
@@ -86,7 +88,17 @@ export function renderMainSeriesProjectionPatch({
     && patch.insert.length > 0;
 
   if (isPureAppend || isReplaceLastAndAppend) {
-    for (const point of patch.insert) series.update(point);
+    try {
+      for (const point of patch.insert) series.update(point);
+    } catch {
+      series.setData(patch.nextData);
+      record(recordPerfEvent, "chart.candleSeries.setData", {
+        paneId,
+        points: patch.nextLength,
+        reason: "projection-tail-update-fallback",
+      });
+      return "setData";
+    }
     record(recordPerfEvent, "chart.candleSeries.update", {
       paneId,
       points: patch.insert.length,
@@ -94,6 +106,35 @@ export function renderMainSeriesProjectionPatch({
       totalPoints: patch.nextLength,
     });
     return "update";
+  }
+
+  const tailMutationCount = patch.deleteCount + patch.insert.length;
+  const canMutateTail = !preserveViewport
+    && patch.fromOutputIndex > 0
+    && patch.deleteCount > 0
+    && tailMutationCount <= MAX_INCREMENTAL_TAIL_MUTATIONS
+    && typeof series.pop === "function";
+  if (canMutateTail) {
+    try {
+      series.pop(patch.deleteCount);
+      for (const point of patch.insert) series.update(point);
+    } catch {
+      series.setData(patch.nextData);
+      record(recordPerfEvent, "chart.candleSeries.setData", {
+        paneId,
+        points: patch.nextLength,
+        reason: "projection-tail-pop-update-fallback",
+      });
+      return "setData";
+    }
+    record(recordPerfEvent, "chart.candleSeries.update", {
+      paneId,
+      points: patch.insert.length,
+      removedPoints: patch.deleteCount,
+      reason: "projection-tail-pop-update",
+      totalPoints: patch.nextLength,
+    });
+    return "pop-update";
   }
 
   const anchor = preserveViewport

@@ -197,6 +197,7 @@ export class KagiProjector {
   constructor({ minTick = 0.01, reversalTicks = 1 } = {}) {
     this.id = "kagi";
     this.oneToOne = false;
+    this.supportsStatefulTailProjection = true;
     this.minTick = positiveFiniteNumber(minTick, "minTick");
     this.reversalTicks = positiveSafeInteger(reversalTicks, "reversalTicks");
     this.pricePrecision = Math.min(12, decimalPlaces(this.minTick));

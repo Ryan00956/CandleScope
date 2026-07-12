@@ -163,6 +163,7 @@ export class PointFigureProjector {
   } = {}) {
     this.id = "point-and-figure";
     this.oneToOne = false;
+    this.supportsStatefulTailProjection = true;
     this.boxSize = positiveFiniteNumber(boxSize, "boxSize");
     this.minTick = positiveFiniteNumber(minTick, "minTick");
     this.reversalAmount = positiveSafeInteger(reversalAmount, "reversalAmount");

@@ -112,6 +112,7 @@ export class RenkoProjector {
   } = {}) {
     this.id = "renko";
     this.oneToOne = false;
+    this.supportsStatefulTailProjection = true;
     this.boxSize = positiveFiniteNumber(boxSize, "boxSize");
     this.minTick = positiveFiniteNumber(minTick, "minTick");
     const boxRatio = this.boxSize / this.minTick;

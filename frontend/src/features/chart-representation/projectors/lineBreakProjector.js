@@ -183,6 +183,7 @@ export class LineBreakProjector {
   constructor({ minTick = 0.01, numberOfLines = 3 } = {}) {
     this.id = "line-break";
     this.oneToOne = false;
+    this.supportsStatefulTailProjection = true;
     this.minTick = positiveFiniteNumber(minTick, "minTick");
     this.numberOfLines = positiveSafeInteger(numberOfLines, "numberOfLines");
     this.pricePrecision = Math.min(12, decimalPlaces(this.minTick));

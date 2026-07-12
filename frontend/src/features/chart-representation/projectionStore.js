@@ -12,6 +12,95 @@ function sameSourceRow(left, right) {
   return true;
 }
 
+function sameProjectedValue(left, right, memo = null) {
+  if (Object.is(left, right)) return true;
+  if (left == null || right == null || typeof left !== "object" || typeof right !== "object") {
+    return false;
+  }
+  const leftIsArray = Array.isArray(left);
+  const rightIsArray = Array.isArray(right);
+  if (leftIsArray !== rightIsArray) return false;
+  const leftPrototype = Object.getPrototypeOf(left);
+  const rightPrototype = Object.getPrototypeOf(right);
+  if (leftPrototype !== rightPrototype
+    || (!leftIsArray && leftPrototype !== Object.prototype && leftPrototype !== null)) {
+    return false;
+  }
+  const pairs = memo || {
+    leftToRight: new WeakMap(),
+    rightToLeft: new WeakMap(),
+  };
+  const hasLeft = pairs.leftToRight.has(left);
+  const hasRight = pairs.rightToLeft.has(right);
+  if (hasLeft || hasRight) {
+    return hasLeft
+      && hasRight
+      && pairs.leftToRight.get(left) === right
+      && pairs.rightToLeft.get(right) === left;
+  }
+  pairs.leftToRight.set(left, right);
+  pairs.rightToLeft.set(right, left);
+  if (leftIsArray) {
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index += 1) {
+      if (!sameProjectedValue(left[index], right[index], pairs)) return false;
+    }
+    return true;
+  }
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of leftKeys) {
+    if (!Object.prototype.hasOwnProperty.call(right, key)
+      || !sameProjectedValue(left[key], right[key], pairs)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function outputOrder(row) {
+  const order = row?.time?.order;
+  return Number.isSafeInteger(order) ? order : null;
+}
+
+function lowerBoundOutputOrder(rows, targetOrder) {
+  if (!Number.isSafeInteger(targetOrder)) return null;
+  let left = 0;
+  let right = rows.length;
+  while (left < right) {
+    const middle = left + Math.floor((right - left) / 2);
+    const order = outputOrder(rows[middle]);
+    if (order == null) return null;
+    if (order < targetOrder) left = middle + 1;
+    else right = middle;
+  }
+  return left;
+}
+
+function hasStrictlyIncreasingOutputOrders(rows) {
+  let previousOrder = null;
+  for (const row of rows) {
+    const order = outputOrder(row);
+    if (order == null || (previousOrder != null && order <= previousOrder)) return false;
+    previousOrder = order;
+  }
+  return true;
+}
+
+function trimSharedProjectedPrefix(previousRows, startIndex, projectedRows) {
+  let shared = 0;
+  while (startIndex + shared < previousRows.length
+    && shared < projectedRows.length
+    && sameProjectedValue(previousRows[startIndex + shared], projectedRows[shared])) {
+    shared += 1;
+  }
+  return {
+    fromOutputIndex: startIndex + shared,
+    insert: projectedRows.slice(shared),
+  };
+}
+
 function displayAxisKey(time) {
   if (time && typeof time === "object" && Number.isSafeInteger(time.order)) {
     return `order:${time.order}`;
@@ -97,6 +186,11 @@ export class ProjectionStore {
 
     const trimmedLeft = Math.max(0, Number(detail.trimmedLeft) || 0);
     const trimmedRight = Math.max(0, Number(detail.trimmedRight) || 0);
+    if (trimmedRight === 0
+      && this._canApplyStatefulTailDelta(detail, currentRows, trimmedLeft)) {
+      const patch = this._applyStatefulTailDelta(detail, currentRows);
+      if (patch) return patch;
+    }
     if (trimmedRight === 0 && this._canApplyTailDelta(detail, currentRows, trimmedLeft)) {
       return this._applyTailDelta(detail, currentRows, trimmedLeft);
     }
@@ -104,6 +198,95 @@ export class ProjectionStore {
       deltaType: detail.type,
       trimmedLeft,
     });
+  }
+
+  _canApplyStatefulTailDelta(delta, currentRows, trimmedLeft) {
+    // Opt-in projector contract: every source row has a checkpoint, state
+    // exposes the next synthetic order, and emitted rows use strictly
+    // increasing time.order values. Prefix comparison includes metadata so a
+    // reused custom-series point is semantically identical, not merely the
+    // same ordinal.
+    if (this.projector.oneToOne === true
+      || this.projector.supportsStatefulTailProjection !== true
+      || typeof this.projector.projectWithState !== "function"
+      || trimmedLeft !== 0
+      || this._sourceCheckpoints.length !== this._source.length
+      || this._projectionFinalState == null) {
+      return false;
+    }
+    const previousLength = this._source.length;
+    const nextLength = currentRows?.length || 0;
+    const appendSeamMatches = previousLength === 0 || sameSourceRow(
+      currentRows[previousLength - 1],
+      this._source[previousLength - 1],
+    );
+    if (delta.type === "tick") {
+      if (delta.appended) return nextLength === previousLength + 1 && appendSeamMatches;
+      if (delta.replaced) {
+        return nextLength === previousLength
+          && previousLength > 0
+          && currentRows[nextLength - 1]?.time === this._source[previousLength - 1]?.time
+          && (previousLength === 1 || sameSourceRow(
+            currentRows[previousLength - 2],
+            this._source[previousLength - 2],
+          ))
+          && this._sourceCheckpoints[previousLength - 1] != null;
+      }
+      return false;
+    }
+    if (delta.type === "append") {
+      const addedRight = Math.max(0, Number(delta.addedRight) || 0);
+      return addedRight > 0
+        && nextLength === previousLength + addedRight
+        && appendSeamMatches;
+    }
+    return false;
+  }
+
+  _applyStatefulTailDelta(delta, currentRows) {
+    const previousLength = this._display.length;
+    const replacingLast = delta.type === "tick" && delta.replaced;
+    const sourceStart = replacingLast ? this._source.length - 1 : this._source.length;
+    const seedState = replacingLast
+      ? this._sourceCheckpoints[sourceStart]
+      : this._projectionFinalState;
+    const affectedRows = Array.from(currentRows || []).slice(sourceStart);
+    const projection = this.projector.projectWithState(affectedRows, { seedState });
+    if (!projection
+      || !Array.isArray(projection.data)
+      || !Array.isArray(projection.checkpoints)
+      || projection.checkpoints.length !== affectedRows.length
+      || projection.state == null
+      || !hasStrictlyIncreasingOutputOrders(projection.data)) {
+      return null;
+    }
+
+    const candidateOrder = outputOrder(projection.data[0]) ?? seedState?.nextOrder;
+    const initialOutputIndex = lowerBoundOutputOrder(this._display, candidateOrder);
+    if (initialOutputIndex == null) return null;
+    const tail = trimSharedProjectedPrefix(
+      this._display,
+      initialOutputIndex,
+      projection.data,
+    );
+    const nextDisplay = [
+      ...this._display.slice(0, tail.fromOutputIndex),
+      ...tail.insert,
+    ];
+
+    this._source = Array.from(currentRows || []);
+    this._sourceCheckpoints = replacingLast
+      ? this._sourceCheckpoints.slice(0, sourceStart).concat(projection.checkpoints)
+      : this._sourceCheckpoints.concat(projection.checkpoints);
+    this._projectionFinalState = projection.state;
+    this._display = nextDisplay;
+    this._rebuildDisplayTimeIndex();
+    return patchResult(
+      tail.fromOutputIndex,
+      previousLength,
+      tail.insert,
+      this._display,
+    );
   }
 
   _canApplyTailDelta(delta, currentRows, trimmedLeft) {

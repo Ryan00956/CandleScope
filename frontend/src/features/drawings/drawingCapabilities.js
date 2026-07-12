@@ -28,6 +28,8 @@ const SOURCE_LINEAGE_TOOL_IDS = new Set([
   ...SHAPE_TOOL_IDS,
   ...POSITION_TOOL_IDS,
   "text",
+  "pen",
+  "highlighter",
 ]);
 
 const HIT_TYPE_TOOL_IDS = Object.freeze({

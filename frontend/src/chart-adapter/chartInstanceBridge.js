@@ -1,4 +1,5 @@
 import {
+  captureSourceLineageFreehandStrokeBatch,
   dataPointToCoordinate as resolveDataPointCoordinate,
   drawingAnchorFromAxisTime,
   isOrdinalAxisTime,
@@ -47,6 +48,11 @@ export function createLightweightChartAdapter({
     if (Array.isArray(data)) return data;
     return safeCall(() => getSeries()?.data?.() || [], []);
   };
+  const getSeriesDataForSeries = (series) => {
+    const data = getRefValue(seriesDataRef);
+    if (Array.isArray(data)) return data;
+    return safeCall(() => series?.data?.() || [], []);
+  };
   const getSeriesDataMap = () => getRefValue(seriesDataMapRef);
   const getSeriesDataIndex = () => getRefValue(seriesDataIndexRef);
   const getSourceTimeHorizon = () => getRefValue(sourceTimeHorizonRef);
@@ -86,6 +92,28 @@ export function createLightweightChartAdapter({
       sourceTimeHorizon: getSourceTimeHorizon(),
     };
   };
+  let lastFreehandCaptureIdentity = null;
+  const captureIdentityFor = (series, sourceProjection, sourceProjectionConfig) => {
+    if (lastFreehandCaptureIdentity?.series === series
+      && lastFreehandCaptureIdentity.sourceProjection === sourceProjection
+      && lastFreehandCaptureIdentity.sourceProjectionConfig === sourceProjectionConfig) {
+      return lastFreehandCaptureIdentity.identity;
+    }
+    const identity = {};
+    Object.defineProperties(identity, {
+      series: { value: series },
+      sourceProjection: { value: sourceProjection },
+      sourceProjectionConfig: { value: sourceProjectionConfig },
+    });
+    Object.freeze(identity);
+    lastFreehandCaptureIdentity = {
+      identity,
+      series,
+      sourceProjection,
+      sourceProjectionConfig,
+    };
+    return identity;
+  };
 
   return {
     isReady: () => !!(getChart() && getSeries()),
@@ -93,6 +121,52 @@ export function createLightweightChartAdapter({
     usesOrdinalTime: () => usesOrdinalData(getSeriesData()),
     getMainSeries: getSeries,
     getSeriesData,
+    captureFreehandStrokeBatch: (screenPoints) => safeCall(() => {
+      const chart = getChart();
+      const series = getSeries();
+      if (!chart || !series) return null;
+
+      // Read every mutable provider once, then keep the complete coalesced
+      // pointer batch on that immutable local snapshot.
+      const snapshot = getDrawingCoordinateSnapshot();
+      const projectionConfig = getProjectionConfig();
+      const sourceTimeHorizon = getSourceTimeHorizon();
+      const hasSnapshotProvider = typeof drawingCoordinateSnapshotProvider === "function";
+      if (hasSnapshotProvider && !Array.isArray(snapshot?.seriesData)) return null;
+
+      const seriesData = hasSnapshotProvider
+        ? snapshot.seriesData
+        : getSeriesDataForSeries(series);
+      const ordinalSeriesIndex = hasSnapshotProvider
+        ? snapshot.ordinalSeriesIndex
+        : getOrdinalSeriesIndex();
+      const context = {
+        drawingProjectionConfig: projectionConfig,
+        seriesData,
+        sourceTimeHorizon,
+      };
+      if (hasSnapshotProvider || typeof ordinalSeriesIndexProvider === "function") {
+        context.drawingOrdinalSeriesIndex = ordinalSeriesIndex;
+        context.drawingOrdinalSeriesIndexRevision = hasSnapshotProvider
+          ? snapshot.indexRevision ?? null
+          : ordinalSeriesIndex?.revision ?? null;
+      }
+      const batch = captureSourceLineageFreehandStrokeBatch(
+        chart,
+        series,
+        screenPoints,
+        context,
+      );
+      if (!batch) return null;
+      return Object.freeze({
+        captureIdentity: captureIdentityFor(
+          series,
+          batch.sourceProjection,
+          batch.sourceProjectionConfig,
+        ),
+        ...batch,
+      });
+    }, null),
     axisTimeToDrawingAnchor: (time) => safeCall(() => {
       registerCurrentDrawingSeries();
       const context = createDrawingCoordinateContext();

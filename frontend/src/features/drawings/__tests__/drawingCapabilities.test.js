@@ -51,12 +51,8 @@ test("source-lineage drawing anchors expose only the verified ordinal-safe tools
   ]) {
     assert.equal(supportsDrawingTool(mode, tool), true, tool);
   }
-  for (const tool of [
-    "pen",
-    "highlighter",
-  ]) {
-    assert.equal(supportsDrawingTool(mode, tool), false, tool);
-  }
+  assert.equal(supportsDrawingTool(mode, "pen"), true);
+  assert.equal(supportsDrawingTool(mode, "highlighter"), true);
   assert.equal(drawingToolForAnchorMode(mode, "position-long"), "position-long");
   assert.equal(hasSupportedDrawingVariant(mode, [
     { id: "line-segment" },
@@ -70,6 +66,8 @@ test("source-lineage drawing anchors expose only the verified ordinal-safe tools
   assert.equal(supportsDrawingHitType(mode, "shape"), true);
   assert.equal(supportsDrawingHitType(mode, "text"), true);
   assert.equal(supportsDrawingHitType(mode, "position"), true);
+  assert.equal(supportsDrawingHitType(mode, "freehand"), true);
+  assert.equal(supportsDrawingHitType(mode, "highlighter"), true);
 });
 
 test("unknown drawing anchor modes default to disabled", () => {

@@ -25,6 +25,7 @@ export function useDrawingKeyboard({
   persistDrawings,
   setSelectedPrimId,
   setSelectedTextUi,
+  cancelActiveFreehandStroke = null,
 }) {
   useEffect(() => {
     if (!active) return undefined;
@@ -34,6 +35,10 @@ export function useDrawingKeyboard({
       if (editingTextIdRef.current) return;
 
       if (e.key === "Escape") {
+        if (cancelActiveFreehandStroke?.()) {
+          e.preventDefault();
+          return;
+        }
         if (anchorDataRef.current) {
           removePreview();
         } else if (selectedIdRef.current) {
@@ -59,7 +64,7 @@ export function useDrawingKeyboard({
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [active, anchorDataRef, selectedIdRef, editingTextIdRef, primitivesRef, removePreview, deselectAll, detachPrim, persistDrawings, setSelectedPrimId, setSelectedTextUi]);
+  }, [active, anchorDataRef, selectedIdRef, editingTextIdRef, primitivesRef, removePreview, deselectAll, detachPrim, persistDrawings, setSelectedPrimId, setSelectedTextUi, cancelActiveFreehandStroke]);
 }
 
 export default useDrawingKeyboard;

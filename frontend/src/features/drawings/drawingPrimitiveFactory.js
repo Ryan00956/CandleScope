@@ -124,12 +124,21 @@ export function createPrimitiveFromSavedDrawing(item) {
   return null;
 }
 
-export function createFreehandPrimitive({ tool, dataPoint, color, lineWidth }) {
+export function createFreehandPrimitive({
+  tool,
+  dataPoint = null,
+  color,
+  lineWidth,
+  previewPoints,
+  isPreview = false,
+}) {
   const isHighlighter = tool === "highlighter";
   return new FreehandDrawingPrimitive({
     id: nextDrawingId(isHighlighter ? "hl" : "fh"),
     type: isHighlighter ? "highlighter" : "freehand",
-    dataPoints: [dataPoint],
+    dataPoints: dataPoint ? [dataPoint] : [],
+    ...(previewPoints === undefined ? {} : { previewPoints }),
+    isPreview,
     color,
     lineWidth,
     opacity: isHighlighter ? DEFAULT_HIGHLIGHTER_OPACITY : 1,

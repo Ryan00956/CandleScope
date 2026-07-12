@@ -13,7 +13,10 @@
  *   - Hit-testing for eraser deletion
  */
 
-import { normalizeFreehandStrokeV2 } from "../freehandStrokeModel.js";
+import {
+  normalizeFreehandStrokeV2,
+  normalizeLegacyFreehandDataPoints,
+} from "../freehandStrokeModel.js";
 import {
   dataPointToCoordinate,
   freehandStrokeV2ToCoordinates,
@@ -36,6 +39,35 @@ function normalizeBrushShape(value, fallback = "round") {
   return value === "square" ? "square" : fallback;
 }
 
+function normalizePreviewPoints(value) {
+  if (!Array.isArray(value)) return null;
+  const points = [];
+  for (const point of value) {
+    if (point === null) {
+      points.push(null);
+      continue;
+    }
+    if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return null;
+    points.push({ x: point.x, y: point.y });
+  }
+  return points;
+}
+
+function splitScreenPaths(points) {
+  const paths = [];
+  let currentPath = [];
+  for (const point of points) {
+    if (!point) {
+      if (currentPath.length > 0) paths.push(currentPath);
+      currentPath = [];
+      continue;
+    }
+    currentPath.push(point);
+  }
+  if (currentPath.length > 0) paths.push(currentPath);
+  return paths;
+}
+
 // ── Geometry helper ──
 
 function distToSegment(px, py, ax, ay, bx, by) {
@@ -51,6 +83,9 @@ function distToSegment(px, py, ax, ay, bx, by) {
 }
 
 function screenPathsForSource(source) {
+  if (source._previewScreenPoints !== null) {
+    return splitScreenPaths(source._previewScreenPoints);
+  }
   const series = source._series;
   const chart = source._chart;
   const coordinateContext = {};
@@ -229,6 +264,12 @@ export class FreehandDrawingPrimitive {
     this._type = normalizeFreehandType(opts.type);
     this._dataPoints = opts.dataPoints || [];
     this._stroke = normalizeFreehandStrokeV2(opts.stroke);
+    const previewPoints = opts.previewPoints === undefined
+      ? null
+      : normalizePreviewPoints(opts.previewPoints);
+    this._previewScreenPoints = previewPoints;
+    this._isPreview = !!opts.isPreview || previewPoints !== null;
+    this._previewCancelled = false;
     this._color = opts.color || "#f59e0b";
     this._lineWidth = opts.lineWidth || 2;
     this._opacity = normalizeOpacity(
@@ -278,6 +319,10 @@ export class FreehandDrawingPrimitive {
   get id() { return this._id; }
   get dataPoints() { return this._dataPoints; }
   get stroke() { return this._stroke; }
+  get isPreview() { return this._isPreview; }
+  get previewPoints() {
+    return this._previewScreenPoints?.map((point) => (point ? { ...point } : null)) || [];
+  }
   get color() { return this._color; }
   get lineWidth() { return this._lineWidth; }
   get type() { return this._type; }
@@ -301,6 +346,51 @@ export class FreehandDrawingPrimitive {
       this._hovered = next;
       this._requestUpdate?.();
     }
+  }
+
+  /** Replace transient CSS-pixel preview geometry without touching saved data. */
+  setPreviewPoints(points) {
+    const normalized = normalizePreviewPoints(points);
+    if (!normalized || this._previewCancelled) return false;
+    this._previewScreenPoints = normalized;
+    this._isPreview = true;
+    this._requestUpdate?.();
+    return true;
+  }
+
+  /** Promote a validated v2 stroke and atomically discard all preview state. */
+  commitStroke(stroke) {
+    const normalized = normalizeFreehandStrokeV2(stroke);
+    if (!normalized || this._previewCancelled) return false;
+    this._stroke = normalized;
+    this._dataPoints = [];
+    this._previewScreenPoints = null;
+    this._isPreview = false;
+    this._requestUpdate?.();
+    return true;
+  }
+
+  /** Promote a completed legacy source-time stroke out of preview mode. */
+  commitDataPoints(points = this._dataPoints) {
+    const normalized = normalizeLegacyFreehandDataPoints(points);
+    if (!normalized || this._previewCancelled) return false;
+    this._dataPoints = normalized;
+    this._stroke = null;
+    this._previewScreenPoints = null;
+    this._isPreview = false;
+    this._requestUpdate?.();
+    return true;
+  }
+
+  /** Make an abandoned preview inert while keeping it persistence-filtered. */
+  cancelPreview() {
+    if (!this._isPreview || this._previewCancelled) return false;
+    this._previewCancelled = true;
+    this._previewScreenPoints = [];
+    this._stroke = null;
+    this._dataPoints = [];
+    this._requestUpdate?.();
+    return true;
   }
 
   setColor(c) {
@@ -344,6 +434,7 @@ export class FreehandDrawingPrimitive {
 
   hitTest(x, y, hitRadius = 8) {
     if (this._hidden) return false;
+    if (this._isPreview) return false;
     if (!this._series || !this._chart) return false;
     if (this._stroke ? this._stroke.points.length < 2 : this._dataPoints.length < 2) return false;
 

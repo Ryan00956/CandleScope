@@ -74,6 +74,12 @@ import {
   startFreehandStroke,
   updateTwoPointPreview,
 } from "./drawingCreationController.js";
+import {
+  appendFreehandStrokeCaptureBatch,
+  cancelFreehandStrokeDraft,
+  finalizeFreehandStrokeDraft,
+  getFreehandStrokeDraftPreviewPoints,
+} from "./freehandStrokeModel.js";
 
 const TEXT_UI_STABLE_FRAME_LIMIT = 12;
 
@@ -128,6 +134,8 @@ export function useDrawing({
 
   // ── Freehand-specific state ──
   const currentFreehandRef = useRef(null); // FreehandDrawingPrimitive being drawn
+  const freehandDraftRef = useRef(null); // source-lineage v2 draft, never persisted
+  const freehandCaptureIdentityRef = useRef(null); // last successful atomic batch identity
   const isDrawingFreehandRef = useRef(false);
   const lastFreehandScreenPointRef = useRef(null);
   const hoveredPrimRef = useRef(null);
@@ -362,6 +370,23 @@ export function useDrawing({
     symbolRef,
   });
 
+  const cancelActiveFreehandStroke = useCallback(() => {
+    const draft = freehandDraftRef.current;
+    const primitive = currentFreehandRef.current;
+    if (draft) cancelFreehandStrokeDraft(draft);
+    if (primitive) {
+      primitive.cancelPreview?.();
+      detachPrim(primitive);
+      primitivesRef.current = primitivesRef.current.filter((item) => item !== primitive);
+    }
+    freehandDraftRef.current = null;
+    freehandCaptureIdentityRef.current = null;
+    currentFreehandRef.current = null;
+    isDrawingFreehandRef.current = false;
+    lastFreehandScreenPointRef.current = null;
+    return !!primitive;
+  }, [detachPrim]);
+
   // ── Selection helpers are provided by useDrawingSelection above ──
 
   // ── Hit-test all primitives ──
@@ -511,15 +536,40 @@ export function useDrawing({
       // ── PEN / HIGHLIGHTER (freehand): extend stroke ──
       if ((tool === "pen" || tool === "highlighter") && isDrawingFreehandRef.current && currentFreehandRef.current) {
         const minDistance = tool === "highlighter" ? 1.5 : 1;
+        const accepted = [];
+        let latestPoint = lastFreehandScreenPointRef.current;
         for (const point of positions?.length ? positions : [pos]) {
-          if (!point || !shouldAppendFreehandPoint(lastFreehandScreenPointRef.current, point, minDistance)) {
+          if (!point || !shouldAppendFreehandPoint(latestPoint, point, minDistance)) {
             continue;
           }
-          const dataPoint = screenToFreehandData(point.x, point.y);
-          if (dataPoint) {
-            currentFreehandRef.current.addPoint(dataPoint);
-            lastFreehandScreenPointRef.current = { x: point.x, y: point.y };
+          accepted.push(point);
+          latestPoint = { x: point.x, y: point.y };
+        }
+        if (accepted.length === 0) return true;
+
+        const draft = freehandDraftRef.current;
+        if (draft) {
+          const batch = getChartAdapter()?.captureFreehandStrokeBatch?.(accepted);
+          if (!batch || !appendFreehandStrokeCaptureBatch(draft, batch)) {
+            cancelActiveFreehandStroke();
+            return true;
           }
+          freehandCaptureIdentityRef.current = batch.captureIdentity;
+          if (!currentFreehandRef.current.setPreviewPoints(
+            getFreehandStrokeDraftPreviewPoints(draft),
+          )) {
+            cancelActiveFreehandStroke();
+            return true;
+          }
+          lastFreehandScreenPointRef.current = latestPoint;
+          return true;
+        }
+
+        for (const point of accepted) {
+          const dataPoint = screenToFreehandData(point.x, point.y);
+          if (!dataPoint) continue;
+          currentFreehandRef.current.addPoint(dataPoint);
+          lastFreehandScreenPointRef.current = { x: point.x, y: point.y };
         }
         return true;
       }
@@ -563,7 +613,7 @@ export function useDrawing({
 
       return false;
     },
-    [screenToFreehandData, screenToData, dataToScreen, screenToDrawingData, refreshSelectedTextUi, chartContainerRef],
+    [cancelActiveFreehandStroke, getChartAdapter, screenToFreehandData, screenToData, dataToScreen, screenToDrawingData, refreshSelectedTextUi, chartContainerRef],
   );
 
   const cancelActiveMoveFrame = useCallback(() => {
@@ -619,23 +669,14 @@ export function useDrawing({
     draggingRef.current = null;
     resetCursorForActiveTool();
 
-    if (isDrawingFreehandRef.current && currentFreehandRef.current) {
-      const transient = currentFreehandRef.current;
-      detachPrim(transient);
-      primitivesRef.current = primitivesRef.current.filter((prim) => prim !== transient);
-      persistDrawings();
-    }
-    isDrawingFreehandRef.current = false;
-    currentFreehandRef.current = null;
-    lastFreehandScreenPointRef.current = null;
+    cancelActiveFreehandStroke();
   }, [
     cancelActiveDrawingMove,
     cancelTextEditing,
     clearHoverFeedback,
-    detachPrim,
     deselectAll,
     drawingCoordinateKey,
-    persistDrawings,
+    cancelActiveFreehandStroke,
     removePreview,
     resetCursorForActiveTool,
     seriesReady,
@@ -643,15 +684,14 @@ export function useDrawing({
 
   useEffect(() => () => {
     cancelActiveDrawingMove();
+    cancelActiveFreehandStroke();
     removePreview();
     clearHoverFeedback();
     draggingRef.current = null;
-    isDrawingFreehandRef.current = false;
-    currentFreehandRef.current = null;
-    lastFreehandScreenPointRef.current = null;
     setCursor(chartContainerRef?.current, "default");
   }, [
     cancelActiveDrawingMove,
+    cancelActiveFreehandStroke,
     chartContainerRef,
     clearHoverFeedback,
     removePreview,
@@ -836,9 +876,15 @@ export function useDrawing({
 
       // ── PEN / HIGHLIGHTER (freehand): start stroke ──
       if (tool === "pen" || tool === "highlighter") {
+        const adapter = getChartAdapter();
+        const sourceLineage = adapter?.usesOrdinalTime?.() === true;
+        const captureBatch = sourceLineage
+          ? adapter.captureFreehandStrokeBatch?.([pos]) || null
+          : null;
         if (startFreehandStroke({
           tool, pos, e, primitivesRef, currentFreehandRef, isDrawingFreehandRef,
-          attachPrim, screenToData: screenToFreehandData, penColorRef, penSizeRef,
+          freehandDraftRef, attachPrim, screenToData: screenToFreehandData,
+          freehandCaptureIdentityRef, penColorRef, penSizeRef, sourceLineage, captureBatch,
         })) {
           lastFreehandScreenPointRef.current = currentFreehandRef.current ? { x: pos.x, y: pos.y } : null;
           clearHoverFeedback();
@@ -1143,7 +1189,15 @@ export function useDrawing({
     if (isDrawingFreehandRef.current) {
       // ── Decimate stroke via RDP to reduce render cost ──
       const prim = currentFreehandRef.current;
-      if (prim && prim.dataPoints.length > 3) {
+      const draft = freehandDraftRef.current;
+      let committed = false;
+      if (prim && draft) {
+        const stroke = finalizeFreehandStrokeDraft(draft, {
+          captureIdentity: freehandCaptureIdentityRef.current,
+          epsilon: 1.5,
+        });
+        committed = !!stroke && prim.commitStroke?.(stroke) === true;
+      } else if (prim && prim.dataPoints.length > 3) {
         // Convert data points to screen coordinates for pixel-space RDP
         const indexed = [];
         for (let i = 0; i < prim.dataPoints.length; i++) {
@@ -1155,11 +1209,21 @@ export function useDrawing({
           const decimated = kept.map((sp) => prim.dataPoints[sp._i]);
           prim.setDataPoints(decimated);
         }
+        committed = prim.commitDataPoints?.() === true;
+      } else if (prim) {
+        committed = prim.commitDataPoints?.() === true;
       }
-      isDrawingFreehandRef.current = false;
-      currentFreehandRef.current = null;
-      lastFreehandScreenPointRef.current = null;
-      changed = true;
+      if (committed) {
+        if (draft) cancelFreehandStrokeDraft(draft);
+        freehandDraftRef.current = null;
+        freehandCaptureIdentityRef.current = null;
+        isDrawingFreehandRef.current = false;
+        currentFreehandRef.current = null;
+        lastFreehandScreenPointRef.current = null;
+        changed = true;
+      } else {
+        cancelActiveFreehandStroke();
+      }
     }
     // End dragging
     if (draggingRef.current) {
@@ -1170,7 +1234,17 @@ export function useDrawing({
       persistDrawings();
     }
     clearCachedPointerRect();
-  }, [flushActiveDrawingMove, persistDrawings, dataToScreen, clearCachedPointerRect]);
+  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, persistDrawings, dataToScreen, clearCachedPointerRect]);
+
+  const handlePointerCancel = useCallback(() => {
+    if (!isDrawingFreehandRef.current) {
+      handleMouseUp();
+      return;
+    }
+    cancelActiveDrawingMove();
+    cancelActiveFreehandStroke();
+    clearCachedPointerRect();
+  }, [cancelActiveDrawingMove, cancelActiveFreehandStroke, clearCachedPointerRect, handleMouseUp]);
 
   const handleMouseLeave = useCallback((e) => {
     // Text overlays are siblings of the chart canvas container. Moving the
@@ -1209,6 +1283,7 @@ export function useDrawing({
     persistDrawings,
     setSelectedPrimId,
     setSelectedTextUi,
+    cancelActiveFreehandStroke,
   });
 
   // ── Clean up when tool changes ──
@@ -1232,10 +1307,12 @@ export function useDrawing({
         deselectAll();
       }
     }
-    if (!isPenTool && !isHighlighterTool) {
-      isDrawingFreehandRef.current = false;
-      currentFreehandRef.current = null;
-      lastFreehandScreenPointRef.current = null;
+    const expectedFreehandType = isHighlighterTool
+      ? "highlighter"
+      : (isPenTool ? "freehand" : null);
+    if (isDrawingFreehandRef.current
+      && currentFreehandRef.current?.type !== expectedFreehandType) {
+      cancelActiveFreehandStroke();
     }
     if (!isTextTool) {
       cancelTextEditing();
@@ -1243,7 +1320,7 @@ export function useDrawing({
     if (!isEraserTool) {
       clearHoverFeedback();
     }
-  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing, selectedIdRef, clearHoverFeedback, cancelActiveDrawingMove]);
+  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing, selectedIdRef, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke]);
 
   useDrawingPointerEvents({
     chartContainerRef,
@@ -1253,6 +1330,7 @@ export function useDrawing({
     handleMouseLeave,
     handleMouseMove,
     handleMouseUp,
+    handlePointerCancel,
   });
 
   // ── Public API ──
@@ -1265,6 +1343,7 @@ export function useDrawing({
    */
   const prepareSurfaceDispose = useCallback(() => {
     cancelActiveDrawingMove();
+    cancelActiveFreehandStroke();
     removePreview();
     clearHoverFeedback();
     draggingRef.current = null;
@@ -1272,10 +1351,11 @@ export function useDrawing({
     for (const prim of primitivesRef.current) {
       detachPrim(prim);
     }
-  }, [cancelActiveDrawingMove, clearHoverFeedback, detachPrim, removePreview, resetCursorForActiveTool]);
+  }, [cancelActiveDrawingMove, cancelActiveFreehandStroke, clearHoverFeedback, detachPrim, removePreview, resetCursorForActiveTool]);
 
   /** Clear all drawings (lines + freehand + text) */
   const clearAll = useCallback(() => {
+    cancelActiveFreehandStroke();
     for (const prim of primitivesRef.current) {
       detachPrim(prim);
     }
@@ -1287,11 +1367,9 @@ export function useDrawing({
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     draggingRef.current = null;
     cancelActiveDrawingMove();
-    isDrawingFreehandRef.current = false;
-    currentFreehandRef.current = null;
     cancelTextEditing();
     clearSavedDrawings(symbolRef.current);
-  }, [detachPrim, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, cancelActiveDrawingMove]);
+  }, [detachPrim, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke]);
 
   /**
    * Toggle visibility of all drawings without deleting them.
@@ -1309,10 +1387,8 @@ export function useDrawing({
       cancelTextEditing();
       clearHoverFeedback();
       cancelActiveDrawingMove();
+      cancelActiveFreehandStroke();
       draggingRef.current = null;
-      isDrawingFreehandRef.current = false;
-      currentFreehandRef.current = null;
-      lastFreehandScreenPointRef.current = null;
     }
 
     let updateRequested = false;
@@ -1334,7 +1410,7 @@ export function useDrawing({
       // can request one themselves.
       getChartAdapter()?.requestSeriesUpdate?.();
     }
-  }, [getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove]);
+  }, [getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke]);
 
   // ── Selected-text helpers (consumed by floating format toolbar) ──
 

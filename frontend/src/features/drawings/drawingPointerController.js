@@ -24,6 +24,7 @@ export function useDrawingPointerEvents({
   handleMouseLeave,
   handleMouseMove,
   handleMouseUp,
+  handlePointerCancel = handleMouseUp,
 }) {
   useEffect(() => {
     const container = chartContainerRef?.current;
@@ -35,7 +36,7 @@ export function useDrawingPointerEvents({
       container.addEventListener("pointerdown", handleMouseDown, true);
       document.addEventListener("pointermove", handleMouseMove, true);
       document.addEventListener("pointerup", handleMouseUp, true);
-      document.addEventListener("pointercancel", handleMouseUp, true);
+      document.addEventListener("pointercancel", handlePointerCancel, true);
       container.addEventListener("pointerleave", handleMouseLeave);
     } else {
       container.addEventListener("mousedown", handleMouseDown, true);
@@ -45,7 +46,7 @@ export function useDrawingPointerEvents({
       container.addEventListener("touchstart", handleMouseDown, { passive: false, capture: true });
       container.addEventListener("touchmove", handleMouseMove, { passive: false });
       container.addEventListener("touchend", handleMouseUp);
-      container.addEventListener("touchcancel", handleMouseUp);
+      container.addEventListener("touchcancel", handlePointerCancel);
     }
 
     container.addEventListener("dblclick", handleDblClick);
@@ -56,7 +57,7 @@ export function useDrawingPointerEvents({
         container.removeEventListener("pointerdown", handleMouseDown, true);
         document.removeEventListener("pointermove", handleMouseMove, true);
         document.removeEventListener("pointerup", handleMouseUp, true);
-        document.removeEventListener("pointercancel", handleMouseUp, true);
+        document.removeEventListener("pointercancel", handlePointerCancel, true);
         container.removeEventListener("pointerleave", handleMouseLeave);
       } else {
         container.removeEventListener("mousedown", handleMouseDown, true);
@@ -66,7 +67,7 @@ export function useDrawingPointerEvents({
         container.removeEventListener("touchstart", handleMouseDown, true);
         container.removeEventListener("touchmove", handleMouseMove);
         container.removeEventListener("touchend", handleMouseUp);
-        container.removeEventListener("touchcancel", handleMouseUp);
+        container.removeEventListener("touchcancel", handlePointerCancel);
       }
 
       container.removeEventListener("dblclick", handleDblClick);
@@ -80,5 +81,6 @@ export function useDrawingPointerEvents({
     handleMouseLeave,
     handleMouseMove,
     handleMouseUp,
+    handlePointerCancel,
   ]);
 }

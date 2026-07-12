@@ -5,6 +5,7 @@ import {
   commitTwoPointDrawing,
   placePositionDrawing,
   placeTextDrawing,
+  startFreehandStroke,
 } from "../drawingCreationController.js";
 
 function eventStub() {
@@ -13,6 +14,19 @@ function eventStub() {
     shiftKey: false,
     preventDefault() {},
     stopPropagation() {},
+  };
+}
+
+function trackedEventStub() {
+  const calls = { preventDefault: 0, stopPropagation: 0 };
+  return {
+    calls,
+    event: {
+      altKey: false,
+      shiftKey: false,
+      preventDefault() { calls.preventDefault += 1; },
+      stopPropagation() { calls.stopPropagation += 1; },
+    },
   };
 }
 
@@ -25,6 +39,120 @@ function derivedPoint(time, sourceOrdinal, price) {
     price,
   };
 }
+
+function sourceLineageCaptureBatch(identity = {}) {
+  return {
+    captureIdentity: identity,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:atr:14:10:0.01",
+    captures: [{
+      span: {
+        exact: {
+          left: { time: 100, sourceOrdinal: 0 },
+          right: { time: 100, sourceOrdinal: 1 },
+        },
+        fallback: {
+          fromTime: 100,
+          toTime: 100,
+          leftRatio: 0.25,
+          rightRatio: 0.75,
+        },
+      },
+      ratio: 0.4,
+      price: 10,
+      screen: { x: 20, y: 30 },
+    }],
+  };
+}
+
+test("source-lineage freehand creation starts a transient v2 draft preview", () => {
+  const primitivesRef = { current: [] };
+  const currentFreehandRef = { current: null };
+  const freehandDraftRef = { current: null };
+  const isDrawingFreehandRef = { current: false };
+  const attached = [];
+
+  assert.equal(startFreehandStroke({
+    tool: "pen",
+    pos: { x: 20, y: 30 },
+    e: eventStub(),
+    primitivesRef,
+    currentFreehandRef,
+    freehandDraftRef,
+    isDrawingFreehandRef,
+    attachPrim: (primitive) => attached.push(primitive),
+    screenToData: () => { throw new Error("source lineage must not fall back to v1"); },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    sourceLineage: true,
+    captureBatch: sourceLineageCaptureBatch(),
+  }), true);
+
+  assert.equal(attached.length, 1);
+  assert.strictEqual(primitivesRef.current[0], attached[0]);
+  assert.strictEqual(currentFreehandRef.current, attached[0]);
+  assert.ok(freehandDraftRef.current);
+  assert.equal(isDrawingFreehandRef.current, true);
+  assert.equal(attached[0].isPreview, true);
+  assert.deepEqual(attached[0].previewPoints, [{ x: 20, y: 30 }]);
+  assert.deepEqual(attached[0].dataPoints, []);
+});
+
+test("source-time freehand creation keeps the legacy model transient until pointerup", () => {
+  const primitivesRef = { current: [] };
+  const currentFreehandRef = { current: null };
+  const freehandDraftRef = { current: "stale" };
+  const isDrawingFreehandRef = { current: false };
+  const point = { time: 100, logical: 1.5, price: 10 };
+
+  assert.equal(startFreehandStroke({
+    tool: "highlighter",
+    pos: { x: 20, y: 30 },
+    e: eventStub(),
+    primitivesRef,
+    currentFreehandRef,
+    freehandDraftRef,
+    isDrawingFreehandRef,
+    attachPrim() {},
+    screenToData: () => point,
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 8 },
+  }), true);
+
+  assert.equal(freehandDraftRef.current, null);
+  assert.equal(currentFreehandRef.current.isPreview, true);
+  assert.deepEqual(currentFreehandRef.current.dataPoints, [point]);
+});
+
+test("source-lineage freehand creation fails closed without an atomic capture", () => {
+  const primitivesRef = { current: [] };
+  const currentFreehandRef = { current: null };
+  const freehandDraftRef = { current: null };
+  const isDrawingFreehandRef = { current: false };
+
+  const tracked = trackedEventStub();
+  assert.equal(startFreehandStroke({
+    tool: "pen",
+    pos: { x: 20, y: 30 },
+    e: tracked.event,
+    primitivesRef,
+    currentFreehandRef,
+    freehandDraftRef,
+    isDrawingFreehandRef,
+    attachPrim() {},
+    screenToData: () => derivedPoint(100, 0, 10),
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    sourceLineage: true,
+    captureBatch: null,
+  }), true);
+
+  assert.deepEqual(primitivesRef.current, []);
+  assert.equal(currentFreehandRef.current, null);
+  assert.equal(freehandDraftRef.current, null);
+  assert.equal(isDrawingFreehandRef.current, false);
+  assert.deepEqual(tracked.calls, { preventDefault: 1, stopPropagation: 1 });
+});
 
 function commitDerivedTwoPointTool(tool) {
   const first = derivedPoint(100, 1, 10);

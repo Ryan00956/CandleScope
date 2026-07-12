@@ -225,3 +225,87 @@ test("adapter keeps numeric drawing anchor behavior for time axes", () => {
   assert.deepEqual(adapter.axisTimeToDrawingAnchor(150), { time: 150 });
   assert.equal(adapter.dataPointToCoordinate({ time: 150 }), 15);
 });
+
+test("freehand capture reads one atomic snapshot per batch and keeps tail-stable identity", () => {
+  const prefix = [displayRow(0, 100, 0), displayRow(1, 100, 1)];
+  let rows = prefix.concat(displayRow(2, 200, 0));
+  const index = createDrawingLineageIndex(rows);
+  let snapshotCalls = 0;
+  let configReads = 0;
+  let horizonReads = 0;
+  let seriesReads = 0;
+  const configRef = {
+    get current() {
+      configReads += 1;
+      return "dataset-a:renko:10";
+    },
+  };
+  const horizonRef = {
+    get current() {
+      horizonReads += 1;
+      return 300;
+    },
+  };
+  const chart = {
+    timeScale: () => ({
+      coordinateToTime: (x) => (
+        rows.find((row) => row.time.order === Math.round(x / 10))?.time || null
+      ),
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time) => time.order * 10,
+    }),
+  };
+  const series = { coordinateToPrice: (y) => 100 - y };
+  const seriesRef = {
+    get current() {
+      seriesReads += 1;
+      return series;
+    },
+  };
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    seriesRef,
+    projectionConfigRef: configRef,
+    sourceTimeHorizonRef: horizonRef,
+    drawingCoordinateSnapshotProvider: () => {
+      snapshotCalls += 1;
+      return {
+        indexRevision: index.revision,
+        ordinalSeriesIndex: index,
+        seriesData: rows,
+      };
+    },
+  });
+
+  const first = adapter.captureFreehandStrokeBatch([{ x: 5, y: 10 }]);
+  assert.ok(first);
+  assert.deepEqual(first.captures[0].span.exact, {
+    left: { time: 100, sourceOrdinal: 0 },
+    right: { time: 100, sourceOrdinal: 1 },
+  });
+  assert.equal(snapshotCalls, 1);
+  assert.equal(configReads, 1);
+  assert.equal(horizonReads, 1);
+  assert.equal(seriesReads, 1);
+  assert.equal(JSON.stringify(first).includes("order"), false);
+  assert.equal(JSON.stringify(first).includes("logical"), false);
+
+  const nextTail = displayRow(2, 201, 0);
+  const nextRows = prefix.concat(nextTail);
+  assert.equal(index.replaceTail({
+    previousSeriesData: rows,
+    fromOutputIndex: 2,
+    insert: [nextTail],
+    nextSeriesData: nextRows,
+  }), true);
+  rows = nextRows;
+  const second = adapter.captureFreehandStrokeBatch([{ x: 5, y: 20 }]);
+  assert.ok(second);
+  assert.strictEqual(second.captureIdentity, first.captureIdentity);
+  assert.equal(snapshotCalls, 2);
+  assert.equal(configReads, 2);
+  assert.equal(horizonReads, 2);
+  assert.equal(seriesReads, 2);
+  assert.equal(Object.isFrozen(first.captureIdentity), true);
+  assert.equal(Object.keys(first.captureIdentity).length, 0);
+});

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  captureSourceLineageFreehandStrokeBatch,
   coordinateToFractionalLogical,
   dataPointToCoordinate,
   drawingAnchorFromAxisTime,
@@ -119,14 +120,176 @@ function sourceLineageSpan(overrides = {}) {
   };
 }
 
-function spanChart(barSpacing = 10) {
+function spanChart(barSpacing = 10, seriesRows = null) {
   return {
     timeScale: () => ({
+      coordinateToTime: (x) => {
+        const order = Math.round(x / barSpacing);
+        return seriesRows?.find((row) => row?.time?.order === order)?.time || null;
+      },
       options: () => ({ barSpacing }),
       timeToCoordinate: (time) => time.order * barSpacing,
     }),
   };
 }
+
+test("freehand capture batches persist adjacent source lineage without axis-local keys", () => {
+  const rows = [
+    displayRow(0, 200, 0, { from: 100, to: 200 }),
+    displayRow(1, 200, 1, { from: 200, to: 200 }),
+    displayRow(2, 300, 0, { from: 201, to: 300 }),
+  ];
+  const index = createDrawingLineageIndex(rows);
+  const result = captureSourceLineageFreehandStrokeBatch(
+    spanChart(10, rows),
+    { data: () => rows, coordinateToPrice: (y) => 100 - y },
+    [{ x: 5, y: 10 }, { x: 10, y: 20 }],
+    {
+      drawingOrdinalSeriesIndex: index,
+      drawingOrdinalSeriesIndexRevision: index.revision,
+      drawingProjectionConfig: "dataset-a:renko:10",
+      seriesData: rows,
+      sourceTimeHorizon: 300,
+    },
+  );
+
+  assert.equal(result.sourceProjection, "renko");
+  assert.equal(result.sourceProjectionConfig, "dataset-a:renko:10");
+  assert.deepEqual(result.captures[0], {
+    span: {
+      exact: {
+        left: { time: 200, sourceOrdinal: 0 },
+        right: { time: 200, sourceOrdinal: 1 },
+      },
+      fallback: { fromTime: 100, toTime: 200, leftRatio: 0.25, rightRatio: 0.75 },
+    },
+    ratio: 0.5,
+    price: 90,
+    screen: { x: 5, y: 10 },
+  });
+  assert.deepEqual(result.captures[1].span.exact, {
+    left: { time: 200, sourceOrdinal: 1 },
+    right: { time: 300, sourceOrdinal: 0 },
+  });
+  assert.equal(result.captures[1].ratio, 0);
+  assert.equal(JSON.stringify(result).includes("order"), false);
+  assert.equal(JSON.stringify(result).includes("logical"), false);
+});
+
+test("freehand capture only requires the visible adjacent pair when history is offscreen", () => {
+  const rows = [
+    displayRow(0, 100, 0, { from: 100, to: 100 }),
+    displayRow(1, 200, 0, { from: 100, to: 200 }),
+    displayRow(2, 300, 0, { from: 200, to: 300 }),
+    displayRow(3, 400, 0, { from: 300, to: 400 }),
+    displayRow(4, 500, 0, { from: 400, to: 500 }),
+  ];
+  const index = createDrawingLineageIndex(rows);
+  const chart = {
+    timeScale: () => ({
+      coordinateToTime: () => rows[3].time,
+      timeToCoordinate: (time) => (
+        time.order === 2 || time.order === 3 ? time.order * 10 : null
+      ),
+    }),
+  };
+
+  const result = captureSourceLineageFreehandStrokeBatch(
+    chart,
+    { coordinateToPrice: (y) => 100 - y },
+    [{ x: 25, y: 10 }],
+    {
+      drawingOrdinalSeriesIndex: index,
+      drawingOrdinalSeriesIndexRevision: index.revision,
+      drawingProjectionConfig: "dataset-a:renko:10",
+      seriesData: rows,
+      sourceTimeHorizon: 500,
+    },
+  );
+
+  assert.deepEqual(result.captures[0], {
+    span: {
+      exact: {
+        left: { time: 300, sourceOrdinal: 0 },
+        right: { time: 400, sourceOrdinal: 0 },
+      },
+      fallback: {
+        fromTime: 200,
+        toTime: 400,
+        leftRatio: 0.375,
+        rightRatio: 0.625,
+      },
+    },
+    ratio: 0.5,
+    price: 90,
+    screen: { x: 25, y: 10 },
+  });
+});
+
+test("freehand capture batches fail closed on bounds, gaps, stale indexes, and invalid prices", () => {
+  const rows = [
+    displayRow(0, 100, 0, { from: 100, to: 100 }),
+    displayRow(1, 300, 0, { from: 300, to: 300 }),
+  ];
+  const index = createDrawingLineageIndex(rows);
+  const context = {
+    drawingOrdinalSeriesIndex: index,
+    drawingOrdinalSeriesIndexRevision: index.revision,
+    drawingProjectionConfig: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceTimeHorizon: 300,
+  };
+  const series = { data: () => rows, coordinateToPrice: (y) => y };
+
+  assert.equal(captureSourceLineageFreehandStrokeBatch(
+    spanChart(10, rows), series, [{ x: 5, y: 1 }], context,
+  ), null);
+  assert.equal(captureSourceLineageFreehandStrokeBatch(
+    spanChart(10, rows), series, [{ x: -1, y: 1 }], context,
+  ), null);
+  assert.equal(captureSourceLineageFreehandStrokeBatch(
+    spanChart(10, rows), series, [{ x: 5, y: 1 }], {
+      ...context,
+      drawingOrdinalSeriesIndexRevision: index.revision - 1,
+    },
+  ), null);
+  assert.equal(captureSourceLineageFreehandStrokeBatch(
+    spanChart(10, rows), { ...series, coordinateToPrice: () => Number.NaN }, [{ x: 5, y: 1 }], {
+      ...context,
+      seriesData: rows,
+    },
+  ), null);
+
+  const oneRow = [displayRow(0, 100)];
+  assert.equal(captureSourceLineageFreehandStrokeBatch(
+    spanChart(10, oneRow),
+    { data: () => oneRow, coordinateToPrice: (y) => y },
+    [{ x: 0, y: 1 }],
+    {
+      drawingProjectionConfig: "dataset-a:renko:10",
+      seriesData: oneRow,
+      sourceTimeHorizon: 100,
+    },
+  ), null);
+
+  const nonmonotonicRows = [
+    displayRow(0, 200, 0, { from: 150, to: 200 }),
+    displayRow(1, 100, 0, { from: 100, to: 100 }),
+  ];
+  const nonmonotonicIndex = createDrawingLineageIndex(nonmonotonicRows);
+  assert.equal(captureSourceLineageFreehandStrokeBatch(
+    spanChart(10, nonmonotonicRows),
+    { data: () => nonmonotonicRows, coordinateToPrice: (y) => y },
+    [{ x: 5, y: 1 }],
+    {
+      drawingOrdinalSeriesIndex: nonmonotonicIndex,
+      drawingOrdinalSeriesIndexRevision: nonmonotonicIndex.revision,
+      drawingProjectionConfig: "dataset-a:renko:10",
+      seriesData: nonmonotonicRows,
+      sourceTimeHorizon: 200,
+    },
+  ), null);
+});
 
 test("freehand source spans keep same-time ordinals distinct in exact mode", () => {
   const rows = [

@@ -6,6 +6,7 @@ export const MAX_LEGACY_FREEHAND_POINTS = MAX_FREEHAND_STROKE_POINTS;
 const MAX_PROJECTION_ID_LENGTH = 64;
 const MAX_PROJECTION_CONFIG_LENGTH = 512;
 const normalizedStrokes = new WeakSet();
+const draftStates = new WeakMap();
 
 function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -217,6 +218,245 @@ export function normalizeFreehandStrokeV2(value) {
   });
   normalizedStrokes.add(normalized);
   return normalized;
+}
+
+function spanKey(span) {
+  const { left, right } = span.exact;
+  const fallback = span.fallback;
+  return JSON.stringify([
+    left.time,
+    left.sourceOrdinal,
+    right.time,
+    right.sourceOrdinal,
+    fallback.fromTime,
+    fallback.toTime,
+    fallback.leftRatio,
+    fallback.rightRatio,
+  ]);
+}
+
+function normalizeDraftCapture(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const span = normalizeSpan(value.span);
+  const ratio = finiteNumber(value.ratio);
+  const price = finiteNumber(value.price);
+  if (!span || ratio === null || ratio < 0 || ratio > 1 || price === null) return null;
+
+  let screen = null;
+  if (value.screen !== null) {
+    const x = finiteNumber(value.screen?.x);
+    const y = finiteNumber(value.screen?.y);
+    if (x === null || y === null) return null;
+    screen = { x, y };
+  }
+  return { span, ratio, price, screen };
+}
+
+function perpendicularDistance(point, start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) return Math.hypot(point.x - start.x, point.y - start.y);
+  const amount = Math.max(0, Math.min(1,
+    ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared));
+  return Math.hypot(
+    point.x - (start.x + amount * dx),
+    point.y - (start.y + amount * dy),
+  );
+}
+
+function retainPathIndexes(samples, start, end, epsilon, retained) {
+  retained.add(start);
+  retained.add(end);
+  const stack = [[start, end]];
+  while (stack.length > 0) {
+    const [left, right] = stack.pop();
+    if (right - left <= 1) continue;
+    let farthestIndex = -1;
+    let farthestDistance = 0;
+    for (let index = left + 1; index < right; index += 1) {
+      const distance = perpendicularDistance(
+        samples[index].screen,
+        samples[left].screen,
+        samples[right].screen,
+      );
+      if (distance > farthestDistance) {
+        farthestDistance = distance;
+        farthestIndex = index;
+      }
+    }
+    if (farthestIndex >= 0 && farthestDistance > epsilon) {
+      retained.add(farthestIndex);
+      stack.push([left, farthestIndex], [farthestIndex, right]);
+    }
+  }
+}
+
+function retainedDraftIndexes(samples, epsilon) {
+  const retained = new Set();
+  let pathStart = -1;
+  let hasRenderablePath = false;
+  for (let index = 0; index <= samples.length; index += 1) {
+    const isPathPoint = index < samples.length && samples[index].screen !== null;
+    if (isPathPoint && pathStart < 0) pathStart = index;
+    if (isPathPoint) continue;
+
+    if (pathStart >= 0) {
+      const pathEnd = index - 1;
+      if (pathEnd > pathStart) hasRenderablePath = true;
+      retainPathIndexes(samples, pathStart, pathEnd, epsilon, retained);
+      pathStart = -1;
+    }
+    // A valid capture whose screen coordinate could not be resolved is a path
+    // separator and must survive decimation so later rendering cannot bridge it.
+    if (index < samples.length) retained.add(index);
+  }
+  return hasRenderablePath ? retained : null;
+}
+
+/**
+ * Create a helper-managed mutable v2 draft. `captureIdentity` is deliberately
+ * opaque and compared by reference; it is never copied into the saved stroke.
+ */
+export function createFreehandStrokeDraft({
+  sourceProjection,
+  sourceProjectionConfig,
+  captureIdentity,
+} = {}) {
+  const projection = safeProjectionId(sourceProjection);
+  const config = safeProjectionConfig(sourceProjectionConfig);
+  if (!projection || !config || captureIdentity === null || captureIdentity === undefined) {
+    return null;
+  }
+  const draft = {};
+  draftStates.set(draft, {
+    sourceProjection: projection,
+    sourceProjectionConfig: config,
+    captureIdentity,
+    spans: [],
+    spanIndexes: new Map(),
+    samples: [],
+    cancelled: false,
+  });
+  return draft;
+}
+
+/** Append one capture. The draft is unchanged when validation fails. */
+export function appendFreehandStrokeCapture(draft, capture, captureIdentity) {
+  const state = draftStates.get(draft);
+  const normalized = normalizeDraftCapture(capture);
+  if (!state
+    || state.cancelled
+    || captureIdentity !== state.captureIdentity
+    || !normalized
+    || state.samples.length >= MAX_FREEHAND_STROKE_POINTS) {
+    return false;
+  }
+  const key = spanKey(normalized.span);
+  let span = state.spanIndexes.get(key);
+  if (span === undefined) {
+    if (state.spans.length >= MAX_FREEHAND_STROKE_SPANS) return false;
+    span = state.spans.length;
+    state.spanIndexes.set(key, span);
+    state.spans.push(normalized.span);
+  }
+  state.samples.push({
+    point: { span, ratio: normalized.ratio, price: normalized.price },
+    screen: normalized.screen,
+  });
+  return true;
+}
+
+/** Append a capture batch atomically. */
+export function appendFreehandStrokeCaptureBatch(draft, batch) {
+  const state = draftStates.get(draft);
+  if (!state
+    || state.cancelled
+    || batch?.captureIdentity !== state.captureIdentity
+    || batch?.sourceProjection !== state.sourceProjection
+    || batch?.sourceProjectionConfig !== state.sourceProjectionConfig
+    || !Array.isArray(batch?.captures)
+    || batch.captures.length === 0
+    || state.samples.length + batch.captures.length > MAX_FREEHAND_STROKE_POINTS) {
+    return false;
+  }
+
+  const normalizedCaptures = batch.captures.map(normalizeDraftCapture);
+  if (normalizedCaptures.some((capture) => capture === null)) return false;
+  const newKeys = new Set();
+  for (const capture of normalizedCaptures) {
+    const key = spanKey(capture.span);
+    if (!state.spanIndexes.has(key)) newKeys.add(key);
+  }
+  if (state.spans.length + newKeys.size > MAX_FREEHAND_STROKE_SPANS) return false;
+
+  for (const capture of normalizedCaptures) {
+    appendFreehandStrokeCapture(draft, capture, batch.captureIdentity);
+  }
+  return true;
+}
+
+/** Return a defensive screen-space preview, preserving null path gaps. */
+export function getFreehandStrokeDraftPreviewPoints(draft) {
+  const state = draftStates.get(draft);
+  if (!state || state.cancelled) return [];
+  return state.samples.map(({ screen }) => (screen ? { ...screen } : null));
+}
+
+/** Cancel and empty a draft. It cannot subsequently be appended or finalized. */
+export function cancelFreehandStrokeDraft(draft) {
+  const state = draftStates.get(draft);
+  if (!state || state.cancelled) return false;
+  state.cancelled = true;
+  state.spans.length = 0;
+  state.samples.length = 0;
+  state.spanIndexes.clear();
+  return true;
+}
+
+/**
+ * Finalize with iterative, path-local screen-space RDP. Kept sample indexes
+ * select the persistent points, after which unused spans are removed/remapped.
+ */
+export function finalizeFreehandStrokeDraft(draft, {
+  captureIdentity,
+  epsilon = 1.5,
+} = {}) {
+  const state = draftStates.get(draft);
+  const tolerance = finiteNumber(epsilon);
+  if (!state
+    || state.cancelled
+    || captureIdentity !== state.captureIdentity
+    || tolerance === null
+    || tolerance < 0
+    || state.samples.length < 2) {
+    return null;
+  }
+  const retained = retainedDraftIndexes(state.samples, tolerance);
+  if (!retained) return null;
+  const keptSamples = state.samples.filter((_sample, index) => retained.has(index));
+  if (keptSamples.length < 2) return null;
+
+  const usedSpans = new Set(keptSamples.map(({ point }) => point.span));
+  const remap = new Map();
+  const spans = [];
+  for (let index = 0; index < state.spans.length; index += 1) {
+    if (!usedSpans.has(index)) continue;
+    remap.set(index, spans.length);
+    spans.push(state.spans[index]);
+  }
+  const points = keptSamples.map(({ point }) => ({
+    span: remap.get(point.span),
+    ratio: point.ratio,
+    price: point.price,
+  }));
+  return normalizeFreehandStrokeV2({
+    version: FREEHAND_STROKE_VERSION,
+    sourceProjection: state.sourceProjection,
+    sourceProjectionConfig: state.sourceProjectionConfig,
+    spans,
+    points,
+  });
 }
 
 function normalizeResolvedSpan(value) {

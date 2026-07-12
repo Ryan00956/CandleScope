@@ -132,3 +132,84 @@ test("freehand v2 hit testing skips unresolved singleton paths omitted by the re
 
   assert.equal(primitive.hitTest(5, 0, 0.1), false);
 });
+
+test("freehand preview renders screen-space paths and commit clears transient state", () => {
+  let updates = 0;
+  const primitive = new FreehandDrawingPrimitive({
+    id: "v2-preview",
+    isPreview: true,
+    previewPoints: [],
+    lineWidth: 2,
+  });
+  primitive.attached({
+    chart: {},
+    series: {},
+    requestUpdate: () => { updates += 1; },
+  });
+  assert.equal(primitive.setPreviewPoints([
+    { x: 0, y: 0 },
+    { x: 2, y: 0 },
+    null,
+    { x: 8, y: 0 },
+    { x: 10, y: 0 },
+  ]), true);
+  primitive.updateAllViews();
+  const moves = [];
+  const lines = [];
+  const context = {
+    beginPath() {},
+    lineTo: (x, y) => lines.push([x, y]),
+    moveTo: (x, y) => moves.push([x, y]),
+    quadraticCurveTo() {},
+    restore() {},
+    save() {},
+    stroke() {},
+  };
+  primitive.paneViews()[0].renderer().draw({
+    useBitmapCoordinateSpace: (draw) => draw({
+      context,
+      horizontalPixelRatio: 1,
+      verticalPixelRatio: 1,
+    }),
+  });
+  assert.deepEqual(moves, [[0, 0], [8, 0]]);
+  assert.deepEqual(lines, [[2, 0], [10, 0]]);
+  assert.equal(primitive.hitTest(1, 0), false);
+
+  assert.equal(primitive.commitStroke(strokeWithUnresolvedMiddle()), true);
+  assert.equal(primitive.isPreview, false);
+  assert.deepEqual(primitive.previewPoints, []);
+  assert.equal(Object.isFrozen(primitive.stroke), true);
+  assert.equal(updates, 2);
+});
+
+test("freehand preview cancel is terminal and remains persistence-filtered", () => {
+  const primitive = new FreehandDrawingPrimitive({
+    id: "v2-cancel",
+    isPreview: true,
+    previewPoints: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+  });
+  assert.equal(primitive.cancelPreview(), true);
+  assert.equal(primitive.isPreview, true);
+  assert.deepEqual(primitive.previewPoints, []);
+  assert.equal(primitive.commitStroke(strokeWithUnresolvedMiddle()), false);
+  assert.equal(primitive.cancelPreview(), false);
+});
+
+test("legacy freehand preview commits canonical data points on pointerup", () => {
+  const primitive = new FreehandDrawingPrimitive({
+    id: "legacy-preview",
+    isPreview: true,
+    dataPoints: [
+      { time: 100, logical: 1.5, order: 7, price: 10 },
+      { time: 200, logical: 2.5, order: 8, price: 11 },
+    ],
+  });
+
+  assert.equal(primitive.commitDataPoints(), true);
+  assert.equal(primitive.isPreview, false);
+  assert.deepEqual(primitive.dataPoints, [
+    { time: 100, logical: 1.5, price: 10 },
+    { time: 200, logical: 2.5, price: 11 },
+  ]);
+});

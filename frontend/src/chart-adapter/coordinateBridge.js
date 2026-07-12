@@ -8,6 +8,7 @@ const ordinalSeriesIndexCache = new WeakMap();
 const drawingSeriesContextRegistry = new WeakMap();
 const hydratedCoordinateSnapshotContexts = new WeakMap();
 const numericSeriesBoundsContexts = new WeakMap();
+const MAX_FREEHAND_CAPTURE_BATCH_POINTS = 4_096;
 
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -165,6 +166,28 @@ function exactOrdinalRow(ordinalIndex, anchor) {
     if (sourceOrdinalFromRow(row) === anchor.sourceOrdinal) return row;
   }
   return null;
+}
+
+function compareSourceAnchors(left, right) {
+  if (left.time !== right.time) return left.time < right.time ? -1 : 1;
+  if (left.sourceOrdinal === right.sourceOrdinal) return 0;
+  return left.sourceOrdinal < right.sourceOrdinal ? -1 : 1;
+}
+
+function persistenceSafeProjectionId(value) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 64
+    && /^[a-z0-9][a-z0-9-]*$/.test(value);
+}
+
+function persistenceSafeProjectionConfig(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 512) return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return false;
+  }
+  return true;
 }
 
 function firstSeriesTime(seriesData) {
@@ -446,6 +469,235 @@ export function resolveDrawingAnchorToDisplayRow(seriesData, anchor, context = n
   return rowRangesMonotonic
     ? resolveMonotonicSourceRange(rowRanges, normalized.time)
     : resolveUnorderedSourceRange(rowRanges, normalized.time);
+}
+
+/**
+ * Atomically convert one coalesced pointer batch into portable source-lineage
+ * freehand captures. Axis-local order is used only for chart lookup and is
+ * never copied into the returned persistence payload.
+ */
+export function captureSourceLineageFreehandStrokeBatch(
+  chart,
+  series,
+  screenPoints,
+  context = null,
+) {
+  if (!chart
+    || !series
+    || !Array.isArray(screenPoints)
+    || screenPoints.length === 0
+    || screenPoints.length > MAX_FREEHAND_CAPTURE_BATCH_POINTS) {
+    return null;
+  }
+
+  const coordinateContext = context || {};
+  const seriesData = getCachedSeriesData(series, coordinateContext);
+  const suppliedIndex = coordinateContext.drawingOrdinalSeriesIndex;
+  const hasSuppliedIndex = Object.prototype.hasOwnProperty.call(
+    coordinateContext,
+    "drawingOrdinalSeriesIndex",
+  );
+  if (hasSuppliedIndex && !isDrawingLineageIndexForSeries(suppliedIndex, seriesData)) {
+    return null;
+  }
+  const ordinalIndex = hasSuppliedIndex
+    ? suppliedIndex
+    : getOrdinalSeriesIndex(seriesData, coordinateContext);
+  if (!ordinalIndex
+    || !ordinalIndex.rowRangesMonotonic
+    || ordinalIndex.ordinalRows.length < 2
+    || ordinalIndex.rowRanges.length !== ordinalIndex.ordinalRows.length) {
+    return null;
+  }
+
+  const expectedRevision = ordinalIndex.revision;
+  if (Object.prototype.hasOwnProperty.call(
+    coordinateContext,
+    "drawingOrdinalSeriesIndexRevision",
+  ) && coordinateContext.drawingOrdinalSeriesIndexRevision !== expectedRevision) {
+    return null;
+  }
+  const sourceProjection = ordinalIndex.currentProjection;
+  const sourceProjectionConfig = projectionConfigFromContext(coordinateContext);
+  const sourceTimeHorizon = coordinateContext.sourceTimeHorizon;
+  if (!persistenceSafeProjectionId(sourceProjection)
+    || !persistenceSafeProjectionConfig(sourceProjectionConfig)
+    || !isFiniteNumber(sourceTimeHorizon)
+    || ordinalIndex.latestLineage > sourceTimeHorizon) {
+    return null;
+  }
+
+  const timeScale = chart.timeScale?.();
+  if (!timeScale) return null;
+
+  const rows = ordinalIndex.ordinalRows;
+  const ranges = ordinalIndex.rowRanges;
+  const originalLength = seriesData.length;
+  const originalFirst = seriesData[0];
+  const originalLast = seriesData[originalLength - 1];
+  const coordinateCache = new Map();
+  const coordinateAt = (index) => {
+    if (coordinateCache.has(index)) return coordinateCache.get(index);
+    let coordinate = null;
+    try {
+      coordinate = timeScale.timeToCoordinate(rows[index]?.time);
+    } catch {
+      coordinate = null;
+    }
+    const normalized = isFiniteNumber(coordinate) ? coordinate : null;
+    coordinateCache.set(index, normalized);
+    return normalized;
+  };
+
+  const pairForCoordinate = (x) => {
+    let snappedTime = null;
+    try {
+      snappedTime = timeScale.coordinateToTime?.(x);
+    } catch {
+      snappedTime = null;
+    }
+    if (!isOrdinalAxisTime(snappedTime)) return null;
+
+    let left = 0;
+    let right = rows.length;
+    while (left < right) {
+      const middle = (left + right) >> 1;
+      const order = rows[middle]?.time?.order;
+      if (!Number.isSafeInteger(order)) return null;
+      if (order < snappedTime.order) left = middle + 1;
+      else right = middle;
+    }
+    const snappedRow = rows[left];
+    if (!isOrdinalAxisTime(snappedRow?.time)
+      || snappedRow.time.order !== snappedTime.order
+      || snappedRow.time.sourceTime !== snappedTime.sourceTime
+      || snappedRow.time.sourceOrdinal !== snappedTime.sourceOrdinal) {
+      return null;
+    }
+    const center = coordinateAt(left);
+    if (center === null) return null;
+    if (x < center) return left > 0 ? left - 1 : null;
+    if (x > center) return left < rows.length - 1 ? left : null;
+    return left < rows.length - 1 ? left : (left > 0 ? left - 1 : null);
+  };
+
+  const spanCache = new Map();
+  const spanForPair = (pairIndex) => {
+    if (spanCache.has(pairIndex)) return spanCache.get(pairIndex);
+    const leftRow = rows[pairIndex];
+    const rightRow = rows[pairIndex + 1];
+    const leftEntry = ranges[pairIndex];
+    const rightEntry = ranges[pairIndex + 1];
+    if (leftEntry?.row !== leftRow
+      || rightEntry?.row !== rightRow
+      || leftEntry.coverageGroup !== rightEntry.coverageGroup
+      || projectorIdFromRow(leftRow) !== sourceProjection
+      || projectorIdFromRow(rightRow) !== sourceProjection) {
+      return null;
+    }
+    const exact = {
+      left: {
+        time: leftRow.time.sourceTime,
+        sourceOrdinal: leftRow.time.sourceOrdinal,
+      },
+      right: {
+        time: rightRow.time.sourceTime,
+        sourceOrdinal: rightRow.time.sourceOrdinal,
+      },
+    };
+    const fromTime = leftEntry.range?.from;
+    const toTime = rightEntry.range?.to;
+    if (compareSourceAnchors(exact.left, exact.right) >= 0
+      || !isFiniteNumber(fromTime)
+      || !isFiniteNumber(toTime)
+      || fromTime > toTime
+      || exact.left.time < fromTime
+      || exact.left.time > toTime
+      || exact.right.time < fromTime
+      || exact.right.time > toTime
+      || toTime > sourceTimeHorizon) {
+      return null;
+    }
+
+    const overlapFirst = firstRangeIndexWithToAtLeast(ranges, fromTime);
+    const overlapEnd = firstRangeIndexWithFromGreaterThan(ranges, toTime, overlapFirst);
+    if (overlapFirst > pairIndex
+      || overlapEnd <= pairIndex + 1
+      || overlapFirst >= overlapEnd
+      || ranges[overlapFirst].coverageGroup !== ranges[overlapEnd - 1].coverageGroup) {
+      return null;
+    }
+    const leftCenter = coordinateAt(pairIndex);
+    const rightCenter = coordinateAt(pairIndex + 1);
+    if (leftCenter === null
+      || rightCenter === null
+      || leftCenter >= rightCenter) {
+      return null;
+    }
+    const cellCount = overlapEnd - overlapFirst;
+    const leftRatio = (pairIndex - overlapFirst + 0.5) / cellCount;
+    const rightRatio = (pairIndex - overlapFirst + 1.5) / cellCount;
+    if (!Number.isSafeInteger(cellCount)
+      || cellCount <= 0
+      || !isFiniteNumber(leftRatio)
+      || !isFiniteNumber(rightRatio)
+      || leftRatio < 0
+      || rightRatio > 1
+      || leftRatio >= rightRatio) {
+      return null;
+    }
+    const span = Object.freeze({
+      exact: Object.freeze({
+        left: Object.freeze(exact.left),
+        right: Object.freeze(exact.right),
+      }),
+      fallback: Object.freeze({ fromTime, toTime, leftRatio, rightRatio }),
+    });
+    spanCache.set(pairIndex, span);
+    return span;
+  };
+
+  const captures = [];
+  for (const point of screenPoints) {
+    const x = point?.x;
+    const y = point?.y;
+    if (!isFiniteNumber(x) || !isFiniteNumber(y)) return null;
+    const pairIndex = pairForCoordinate(x);
+    if (pairIndex === null) return null;
+    const left = coordinateAt(pairIndex);
+    const right = coordinateAt(pairIndex + 1);
+    const span = spanForPair(pairIndex);
+    let price = null;
+    try {
+      price = series.coordinateToPrice?.(y);
+    } catch {
+      price = null;
+    }
+    if (!span || left === null || right === null || left >= right || !isFiniteNumber(price)) {
+      return null;
+    }
+    const ratio = (x - left) / (right - left);
+    if (!isFiniteNumber(ratio) || ratio < 0 || ratio > 1) return null;
+    captures.push(Object.freeze({
+      span,
+      ratio,
+      price,
+      screen: Object.freeze({ x, y }),
+    }));
+  }
+
+  if (ordinalIndex.revision !== expectedRevision
+    || ordinalIndex.seriesData !== seriesData
+    || seriesData.length !== originalLength
+    || seriesData[0] !== originalFirst
+    || seriesData[originalLength - 1] !== originalLast) {
+    return null;
+  }
+  return Object.freeze({
+    sourceProjection,
+    sourceProjectionConfig,
+    captures: Object.freeze(captures),
+  });
 }
 
 /**

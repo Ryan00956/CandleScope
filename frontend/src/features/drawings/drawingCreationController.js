@@ -26,6 +26,11 @@ import {
   createTextPrimitive,
   createTwoPointDrawingPrimitive,
 } from "./drawingPrimitiveFactory.js";
+import {
+  appendFreehandStrokeCaptureBatch,
+  createFreehandStrokeDraft,
+  getFreehandStrokeDraftPreviewPoints,
+} from "./freehandStrokeModel.js";
 
 function horizontalAnchorFromDataPoint(dataPoint) {
   if (!dataPoint) return null;
@@ -147,27 +152,53 @@ export function startFreehandStroke({
   e,
   primitivesRef,
   currentFreehandRef,
+  freehandDraftRef,
   isDrawingFreehandRef,
   attachPrim,
   screenToData,
   penColorRef,
   penSizeRef,
+  sourceLineage = false,
+  captureBatch = null,
+  freehandCaptureIdentityRef = null,
 }) {
-  const dataPoint = screenToData(pos.x, pos.y);
-  if (!dataPoint) return true;
+  // The drawing tool owns this gesture even when atomic capture fails closed;
+  // never leak the same pointerdown into Lightweight Charts pan/selection.
+  e.preventDefault();
+  e.stopPropagation();
+
+  let dataPoint = null;
+  let draft = null;
+  let previewPoints;
+  if (sourceLineage) {
+    if (!captureBatch) return true;
+    draft = createFreehandStrokeDraft({
+      sourceProjection: captureBatch.sourceProjection,
+      sourceProjectionConfig: captureBatch.sourceProjectionConfig,
+      captureIdentity: captureBatch.captureIdentity,
+    });
+    if (!draft || !appendFreehandStrokeCaptureBatch(draft, captureBatch)) return true;
+    previewPoints = getFreehandStrokeDraftPreviewPoints(draft);
+  } else {
+    dataPoint = screenToData(pos.x, pos.y);
+    if (!dataPoint) return true;
+  }
   const freehand = createFreehandPrimitive({
     tool,
     dataPoint,
+    previewPoints,
+    isPreview: true,
     color: penColorRef.current,
     lineWidth: penSizeRef.current,
   });
   attachPrim(freehand);
   primitivesRef.current.push(freehand);
   currentFreehandRef.current = freehand;
+  freehandDraftRef.current = draft;
+  if (freehandCaptureIdentityRef) {
+    freehandCaptureIdentityRef.current = draft ? captureBatch.captureIdentity : null;
+  }
   isDrawingFreehandRef.current = true;
-
-  e.preventDefault();
-  e.stopPropagation();
   return true;
 }
 

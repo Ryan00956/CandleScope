@@ -1,4 +1,16 @@
-export function buildSettingsPanelViewModel({ view, actions }) {
+import type {
+  SettingsPanelViewModel,
+  SettingsRuntimeActions,
+  SettingsRuntimeView,
+} from "./settingsTypes.js";
+
+export function buildSettingsPanelViewModel({
+  view,
+  actions,
+}: {
+  view: SettingsRuntimeView;
+  actions: SettingsRuntimeActions;
+}): SettingsPanelViewModel {
   return {
     appearance: view.appearance,
     network: {

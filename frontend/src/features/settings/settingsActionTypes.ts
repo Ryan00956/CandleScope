@@ -1,8 +1,13 @@
+import type {
+  SettingsActionDescriptor,
+  SettingsActionType,
+} from "./settingsTypes.js";
+
 export const SETTINGS_ACTION_TYPE = {
   MOCK: "mock",
   LOCAL_ONLY: "local_only",
   BACKEND_ENDPOINT: "backend_endpoint",
-};
+} as const satisfies Record<string, SettingsActionType>;
 
 export const SETTINGS_ACTION_TYPES = {
   chartAppearance: {
@@ -35,4 +40,4 @@ export const SETTINGS_ACTION_TYPES = {
     label: "mock",
     description: "Database inventory, scan, backfill, and delete actions use the current mock database tool service.",
   },
-};
+} as const satisfies Record<string, SettingsActionDescriptor>;

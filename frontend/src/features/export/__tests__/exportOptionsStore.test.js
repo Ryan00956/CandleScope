@@ -37,3 +37,17 @@ test("saveExportOptions writes through the chart export preference key", () => {
 
   assert.deepEqual(writes, [{ key: "chartExportOptions", value: options }]);
 });
+
+test("loadExportOptions rejects malformed preference shapes", () => {
+  assert.deepEqual(loadExportOptions(() => ({ chartExportOptions: "damaged" })), {
+    scope: "chart",
+    format: "png",
+    scale: 2,
+    quality: 0.92,
+    backgroundColor: "auto",
+    hideDrawings: false,
+    watermarkEnabled: false,
+    watermarkText: "",
+    filenamePrefix: "candlescope",
+  });
+});

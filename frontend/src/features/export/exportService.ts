@@ -5,8 +5,18 @@ import {
   buildExportFilename,
   getExportMimeType,
 } from "../../utils/exportFilename.js";
+import type { ExportFormat } from "../../utils/exportFilename.js";
+import type {
+  CanvasCropPlan,
+  ExportImageResult,
+  ExportMetadata,
+  ExportOptions,
+  ExportRect,
+  ExportScope,
+  ExportSnapshot,
+} from "./exportTypes.js";
 
-export const DEFAULT_EXPORT_OPTIONS = {
+export const DEFAULT_EXPORT_OPTIONS: ExportOptions = {
   scope: "chart",
   format: "png",
   scale: 2,
@@ -29,16 +39,20 @@ const EXCLUDED_SELECTORS = [
   ".loading-overlay",
 ];
 
-function isTransparentColor(value) {
+function isTransparentColor(value: string | null | undefined): boolean {
   if (!value) return true;
   const normalized = value.replace(/\s+/g, "").toLowerCase();
   return normalized === "transparent" || normalized === "rgba(0,0,0,0)";
 }
 
-function resolveBackgroundColor(targetElement, value, format) {
+function resolveBackgroundColor(
+  targetElement: HTMLElement,
+  value: string,
+  format: ExportFormat,
+): string | undefined {
   if (value && value !== "auto") return value === "transparent" ? undefined : value;
 
-  let element = targetElement;
+  let element: HTMLElement | null = targetElement;
   while (element && element !== document.documentElement) {
     const color = window.getComputedStyle(element).backgroundColor;
     if (!isTransparentColor(color)) return color;
@@ -49,12 +63,16 @@ function resolveBackgroundColor(targetElement, value, format) {
   return undefined;
 }
 
-function shouldIncludeNode(node) {
+function shouldIncludeNode(node: HTMLElement): boolean {
   if (!(node instanceof Element)) return true;
   return !EXCLUDED_SELECTORS.some((selector) => node.matches(selector) || node.closest(selector));
 }
 
-export function canvasToBlob(canvas, format, quality) {
+export function canvasToBlob(
+  canvas: Pick<HTMLCanvasElement, "toBlob">,
+  format: ExportFormat,
+  quality: number,
+): Promise<Blob> {
   const mimeType = getExportMimeType(format);
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
@@ -72,9 +90,9 @@ export function canvasToBlob(canvas, format, quality) {
   });
 }
 
-function waitForFrames(count = 2) {
+function waitForFrames(count = 2): Promise<void> {
   return new Promise((resolve) => {
-    const tick = (remaining) => {
+    const tick = (remaining: number): void => {
       if (remaining <= 0) {
         resolve();
         return;
@@ -85,7 +103,14 @@ function waitForFrames(count = 2) {
   });
 }
 
-function drawRoundedRect(ctx, x, y, width, height, radius) {
+function drawRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+): void {
   const r = Math.min(radius, width / 2, height / 2);
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -100,7 +125,11 @@ function drawRoundedRect(ctx, x, y, width, height, radius) {
   ctx.closePath();
 }
 
-function drawWatermark(ctx, canvas, text) {
+function drawWatermark(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  text: string,
+): void {
   const lines = String(text || "").split("\n").map((line) => line.trim()).filter(Boolean);
   if (lines.length === 0) return;
 
@@ -131,7 +160,11 @@ function drawWatermark(ctx, canvas, text) {
   ctx.restore();
 }
 
-function finalizeCanvas(sourceCanvas, options, targetElement) {
+function finalizeCanvas(
+  sourceCanvas: HTMLCanvasElement,
+  options: ExportOptions,
+  targetElement: HTMLElement,
+): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
   canvas.width = sourceCanvas.width;
   canvas.height = sourceCanvas.height;
@@ -160,7 +193,13 @@ export function buildCanvasCropPlan({
   targetWidth,
   targetHeight,
   cropRect,
-} = {}) {
+}: {
+  sourceWidth?: unknown;
+  sourceHeight?: unknown;
+  targetWidth?: unknown;
+  targetHeight?: unknown;
+  cropRect?: Partial<ExportRect> | null;
+} = {}): CanvasCropPlan | null {
   const sourceW = Number(sourceWidth);
   const sourceH = Number(sourceHeight);
   const targetW = Number(targetWidth);
@@ -192,7 +231,11 @@ export function buildCanvasCropPlan({
   return { sx, sy, sw, sh };
 }
 
-function cropCapturedCanvas(sourceCanvas, cropRect, targetElement) {
+function cropCapturedCanvas(
+  sourceCanvas: HTMLCanvasElement,
+  cropRect: ExportRect | null | undefined,
+  targetElement: HTMLElement,
+): HTMLCanvasElement {
   if (!cropRect) return sourceCanvas;
   const targetRect = targetElement.getBoundingClientRect();
   const plan = buildCanvasCropPlan({
@@ -223,7 +266,10 @@ function cropCapturedCanvas(sourceCanvas, cropRect, targetElement) {
   return canvas;
 }
 
-function captureCanvasFallback(targetElement, options) {
+function captureCanvasFallback(
+  targetElement: HTMLElement,
+  options: ExportOptions,
+): HTMLCanvasElement {
   const rect = targetElement.getBoundingClientRect();
   const scale = Number(options.scale) || 1;
   assertExportPixelBudget(rect.width, rect.height, scale);
@@ -257,7 +303,10 @@ function captureCanvasFallback(targetElement, options) {
   return canvas;
 }
 
-async function captureElementToCanvas(targetElement, options) {
+async function captureElementToCanvas(
+  targetElement: HTMLElement,
+  options: ExportOptions,
+): Promise<HTMLCanvasElement> {
   const rect = targetElement.getBoundingClientRect();
   const scale = Number(options.scale) || 1;
   assertExportPixelBudget(rect.width, rect.height, scale);
@@ -285,25 +334,85 @@ async function captureElementToCanvas(targetElement, options) {
   }
 }
 
-function selectTargetElement(snapshot, options) {
+function selectTargetElement(
+  snapshot: ExportSnapshot | null | undefined,
+  options: ExportOptions,
+): HTMLElement | null {
   if (options.scope === "page") {
-    return options.pageElement || document.querySelector(".app-layout") || document.body;
+    return options.pageElement
+      || document.querySelector<HTMLElement>(".app-layout")
+      || document.body;
   }
   if (options.scope === "main-pane") {
-    return snapshot?.mainPane?.rootElement || snapshot?.rootElement;
+    return snapshot?.mainPane?.rootElement || snapshot?.rootElement || null;
   }
-  return snapshot?.rootElement;
+  return snapshot?.rootElement || null;
 }
 
-export function normalizeExportOptions(rawOptions = {}) {
-  const options = { ...DEFAULT_EXPORT_OPTIONS, ...rawOptions };
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function exportFormat(value: unknown): ExportFormat {
+  return value === "jpeg" || value === "webp" || value === "png" ? value : "png";
+}
+
+function exportScope(value: unknown): ExportScope {
+  return value === "main-pane" || value === "page" || value === "chart" ? value : "chart";
+}
+
+function finiteInRange(value: unknown, fallback: number, min: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= min && value <= max
+    ? value
+    : fallback;
+}
+
+function metadataFrom(value: unknown): ExportMetadata | undefined {
+  if (!isRecord(value)) return undefined;
+  const metadata: ExportMetadata = {};
+  for (const key of ["exchange", "marketType", "symbol", "interval", "theme"] as const) {
+    if (typeof value[key] === "string") metadata[key] = value[key];
+  }
+  return metadata;
+}
+
+export function normalizeExportOptions(rawOptions: unknown = {}): ExportOptions {
+  const raw = isRecord(rawOptions) ? rawOptions : {};
+  const metadata = metadataFrom(raw.metadata);
+  const pageElement = typeof HTMLElement !== "undefined" && raw.pageElement instanceof HTMLElement
+    ? raw.pageElement
+    : null;
+  const options: ExportOptions = {
+    scope: exportScope(raw.scope),
+    format: exportFormat(raw.format),
+    scale: finiteInRange(raw.scale, DEFAULT_EXPORT_OPTIONS.scale, 1, 3),
+    quality: finiteInRange(raw.quality, DEFAULT_EXPORT_OPTIONS.quality, 0.1, 1),
+    backgroundColor: typeof raw.backgroundColor === "string"
+      ? raw.backgroundColor
+      : DEFAULT_EXPORT_OPTIONS.backgroundColor,
+    hideDrawings: typeof raw.hideDrawings === "boolean"
+      ? raw.hideDrawings
+      : DEFAULT_EXPORT_OPTIONS.hideDrawings,
+    watermarkEnabled: typeof raw.watermarkEnabled === "boolean"
+      ? raw.watermarkEnabled
+      : DEFAULT_EXPORT_OPTIONS.watermarkEnabled,
+    watermarkText: typeof raw.watermarkText === "string"
+      ? raw.watermarkText
+      : DEFAULT_EXPORT_OPTIONS.watermarkText,
+    filenamePrefix: typeof raw.filenamePrefix === "string" && raw.filenamePrefix
+      ? raw.filenamePrefix
+      : DEFAULT_EXPORT_OPTIONS.filenamePrefix,
+    ...(typeof raw.filename === "string" && raw.filename ? { filename: raw.filename } : {}),
+    ...(metadata ? { metadata } : {}),
+    ...(pageElement ? { pageElement } : {}),
+  };
   if (options.format === "jpeg" && options.backgroundColor === "transparent") {
     options.backgroundColor = "auto";
   }
   return options;
 }
 
-export function buildExportOptionsKey(rawOptions = {}) {
+export function buildExportOptionsKey(rawOptions: unknown = {}): string {
   const options = normalizeExportOptions(rawOptions);
   const metadata = options.metadata || {};
   return JSON.stringify({
@@ -325,7 +434,10 @@ export function buildExportOptionsKey(rawOptions = {}) {
   });
 }
 
-export async function renderExportImage(snapshot, rawOptions = {}) {
+export async function renderExportImage(
+  snapshot: ExportSnapshot | null | undefined,
+  rawOptions: unknown = {},
+): Promise<ExportImageResult> {
   const options = normalizeExportOptions(rawOptions);
   const targetElement = selectTargetElement(snapshot, options);
   if (!targetElement) {
@@ -359,11 +471,14 @@ export async function renderExportImage(snapshot, rawOptions = {}) {
   };
 }
 
-export async function exportChartSnapshot(snapshot, rawOptions = {}) {
+export async function exportChartSnapshot(
+  snapshot: ExportSnapshot | null | undefined,
+  rawOptions: unknown = {},
+): Promise<ExportImageResult> {
   return renderExportImage(snapshot, rawOptions);
 }
 
-export function downloadBlob(blob, filename) {
+export function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

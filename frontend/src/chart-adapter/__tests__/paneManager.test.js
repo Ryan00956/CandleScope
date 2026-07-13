@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ensurePane, readPaneHeights, removePaneSeries, setPaneHeights } from "../paneManager.js";
+import {
+  ensurePane,
+  readPaneHeights,
+  removePaneSeries,
+  setPaneHeights,
+  trimPanes,
+} from "../paneManager.js";
 
 function createFakePane(height = 100) {
   return {
@@ -58,4 +64,15 @@ test("removePaneSeries removes direct series and entry-wrapped series", () => {
 
   assert.equal(removePaneSeries(chart, [seriesA, { series: seriesB }, null]), 2);
   assert.deepEqual(removed, ["a", "b"]);
+});
+
+test("trimPanes removes auxiliary panes from right to left", () => {
+  const removed = [];
+  const chart = {
+    panes: () => [{}, {}, {}, {}],
+    removePane: (index) => removed.push(index),
+  };
+
+  assert.equal(trimPanes(chart, 2), 2);
+  assert.deepEqual(removed, [3, 2]);
 });

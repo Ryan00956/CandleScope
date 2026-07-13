@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   buildVisibleRangeSnapshot,
   disposeChartPaneSurface,
+  hasCurrentDatasetOwnership,
+  resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
@@ -97,6 +99,80 @@ test("resolveDataTimeSet reuses one empty set until a series store exists", () =
     resolveDataTimeSet({ timeSet: () => storeTimes }),
     storeTimes,
   );
+});
+
+test("indicator reconciliation requires metadata and store ownership for the current dataset", () => {
+  const datasetKey = "binance-spot-BTCUSDT-5m";
+  const currentStore = { seriesKey: datasetKey };
+
+  assert.equal(hasCurrentDatasetOwnership({
+    dataMeta: { status: "provisional", seriesKey: datasetKey },
+    datasetKey,
+    seriesStore: currentStore,
+  }), true);
+  assert.equal(hasCurrentDatasetOwnership({
+    dataMeta: { seriesKey: "binance-spot-BTCUSDT-1m" },
+    datasetKey,
+    seriesStore: currentStore,
+  }), false);
+  assert.equal(hasCurrentDatasetOwnership({
+    dataMeta: { seriesKey: datasetKey },
+    datasetKey,
+    seriesStore: { seriesKey: "binance-spot-BTCUSDT-1m" },
+  }), false);
+  assert.equal(hasCurrentDatasetOwnership({
+    dataMeta: { optimistic: true, seriesKey: datasetKey },
+    datasetKey,
+    seriesStore: currentStore,
+  }), false);
+});
+
+test("interval replay prefers committed data and never restores old data onto a replacement series", () => {
+  const scheduledSeries = {};
+  const replacementSeries = {};
+  const fallbackData = [{ time: 1 }];
+  const committedData = [{ time: 2 }];
+
+  assert.strictEqual(resolveIntervalTransitionReplayData({
+    currentData: committedData,
+    currentGeneration: 2,
+    currentSeries: scheduledSeries,
+    fallbackData,
+    scheduledGeneration: 1,
+    scheduledSeries,
+  }), committedData);
+  assert.strictEqual(resolveIntervalTransitionReplayData({
+    currentData: [],
+    currentGeneration: 1,
+    currentSeries: scheduledSeries,
+    fallbackData,
+    scheduledGeneration: 1,
+    scheduledSeries,
+  }), fallbackData);
+  assert.deepEqual(resolveIntervalTransitionReplayData({
+    currentData: [],
+    currentGeneration: 2,
+    currentSeries: scheduledSeries,
+    fallbackData,
+    scheduledGeneration: 1,
+    scheduledSeries,
+  }), []);
+  assert.equal(resolveIntervalTransitionReplayData({
+    currentData: null,
+    currentGeneration: 2,
+    currentSeries: scheduledSeries,
+    fallbackData,
+    scheduledGeneration: 1,
+    scheduledSeries,
+  }), null);
+  assert.deepEqual(resolveIntervalTransitionReplayData({
+    currentData: [],
+    currentGeneration: 1,
+    currentSeries: replacementSeries,
+    fallbackData,
+    scheduledGeneration: 1,
+    scheduledSeries,
+  }), []);
 });
 
 test("an empty indicator rebuild does not advance series readiness", () => {

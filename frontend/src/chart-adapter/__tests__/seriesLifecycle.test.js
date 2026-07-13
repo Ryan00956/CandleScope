@@ -4,6 +4,7 @@ import {
   INDICATOR_SERIES_INCREMENTAL_GRACE_MS,
   removeSeriesEntries,
   replaceMainSeries,
+  resyncSeriesTimeScaleIndexes,
   shouldPreferIndicatorSetData,
 } from "../seriesLifecycle.js";
 
@@ -153,6 +154,30 @@ test("removeSeriesEntries still detaches a stale series when clearing it fails",
 
   assert.equal(removeSeriesEntries(chart, [{ series }]), 1);
   assert.deepEqual(removed, [series]);
+});
+
+test("interval transitions refresh a series from the complete application snapshot", () => {
+  const data = [
+    { time: 1 },
+    { time: 2, open: 1.5, high: 3, low: 1, close: 2.5, color: "purple" },
+  ];
+  const writes = [];
+  const series = {
+    data: () => {
+      throw new Error("public data projection must not be used for replay");
+    },
+    setData: (nextData) => writes.push(nextData),
+  };
+
+  assert.equal(resyncSeriesTimeScaleIndexes(series, data), data.length);
+  assert.deepEqual(writes, [data]);
+  assert.strictEqual(writes[0], data);
+});
+
+test("series logical-index refresh is a no-op without replayable data", () => {
+  assert.equal(resyncSeriesTimeScaleIndexes(null), 0);
+  assert.equal(resyncSeriesTimeScaleIndexes({ setData() {} }, []), 0);
+  assert.equal(resyncSeriesTimeScaleIndexes({ setData() {} }, null), 0);
 });
 
 test("indicator series use setData during their startup grace window", () => {

@@ -14,9 +14,10 @@ import {
   createMainSeries,
   removeSeriesEntries,
   replaceMainSeries,
+  resyncSeriesTimeScaleIndexes,
   shouldPreferIndicatorSetData,
 } from "../chart-adapter/seriesLifecycle";
-import { ensurePane, readPaneHeights, setPaneHeights } from "../chart-adapter/paneManager";
+import { ensurePane, readPaneHeights, setPaneHeights, trimPanes } from "../chart-adapter/paneManager";
 import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRenderer";
 import { renderMarkers } from "../chart-adapter/markerRenderer";
 import { renderBgcolors } from "../chart-adapter/bgcolorPrimitiveRenderer";
@@ -47,6 +48,8 @@ import { buildPaneConfigKey, loadPaneHeights, savePaneHeights } from "../feature
 import {
   buildVisibleRangeSnapshot,
   disposeChartPaneSurface,
+  hasCurrentDatasetOwnership,
+  resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
@@ -349,6 +352,7 @@ function clearAuxiliaryChartState({
   const removedSeriesCount = chart
     ? removeSeriesEntries(chart, indicatorSeriesRef.current)
     : 0;
+  if (chart) trimPanes(chart, 1);
   indicatorSeriesRef.current = [];
   prevIndicatorKeyRef.current = "";
   if (removedSeriesCount > 0) {
@@ -468,6 +472,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const displayRowMapRef = useRef(new Map());
   const displayRowIndexMapRef = useRef(new Map());
   const renderedMainSeriesDataRef = useRef([]);
+  const renderedMainSeriesGenerationRef = useRef(0);
   const projectionStoreRef = useRef(null);
   const drawingProjectionSnapshotOwnerRef = useRef({
     drawingProjectionConfig: null,
@@ -489,6 +494,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const seriesStoreRef = useRef(seriesStore);
   const prevIndicatorKeyRef = useRef("");
   const intervalRef = useRef(interval);
+  const appliedAppearanceIntervalRef = useRef(interval);
   const isSyncingRef = useRef(false);
   const isRestoringViewportRef = useRef(false);
   const userInteractedRef = useRef(false);
@@ -597,6 +603,11 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     () => buildIndicatorBarColorMap(indicatorBarcolors),
     [indicatorBarcolors],
   );
+  const indicatorDatasetOwned = hasCurrentDatasetOwnership({
+    dataMeta,
+    datasetKey,
+    seriesStore,
+  });
   const mainSeriesRenderContext = useMemo(() => ({
     downColor,
     indicatorBarColorMap,
@@ -749,6 +760,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const chart = createChartInstance(container, options, {
       axisMode: initialDescriptor.axisMode,
     });
+    appliedAppearanceIntervalRef.current = intervalRef.current;
     const initialRows = rowsFromStore(seriesStoreRef.current);
     drawingSourceTimeHorizonRef.current = latestFiniteSourceTime(initialRows);
     syncSourceDataRefsFromStore({
@@ -927,8 +939,66 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    applyChartPaneAppearance(chart, { theme, customBg, timezone, interval });
-    chart.applyOptions({ layout: buildPaneLayoutOptions() });
+    const applyAppearance = () => {
+      applyChartPaneAppearance(chart, { theme, customBg, timezone, interval });
+      chart.applyOptions({ layout: buildPaneLayoutOptions() });
+      appliedAppearanceIntervalRef.current = interval;
+    };
+    if (appliedAppearanceIntervalRef.current === interval) {
+      applyAppearance();
+      return undefined;
+    }
+
+    const scheduledMainSeries = mainSeriesRef.current;
+    const fallbackMainData = renderedMainSeriesDataRef.current;
+    const scheduledMainGeneration = renderedMainSeriesGenerationRef.current;
+    const frameId = requestAnimationFrame(() => {
+      if (chartRef.current !== chart) return;
+      try {
+        const currentMainSeries = mainSeriesRef.current;
+        const currentMainData = renderedMainSeriesDataRef.current;
+        const replayMainData = resolveIntervalTransitionReplayData({
+          currentData: currentMainData,
+          currentGeneration: renderedMainSeriesGenerationRef.current,
+          currentSeries: currentMainSeries,
+          fallbackData: fallbackMainData,
+          scheduledGeneration: scheduledMainGeneration,
+          scheduledSeries: scheduledMainSeries,
+        });
+        const mainPoints = resyncSeriesTimeScaleIndexes(currentMainSeries, replayMainData);
+        let indicatorPoints = 0;
+        let indicatorSeries = 0;
+        for (const entry of indicatorSeriesRef.current) {
+          const points = resyncSeriesTimeScaleIndexes(entry.series, entry.data);
+          if (points <= 0) continue;
+          indicatorPoints += points;
+          indicatorSeries += 1;
+        }
+        if (mainPoints > 0) {
+          recordPerfEvent("chart.candleSeries.setData", {
+            paneId: "main",
+            points: mainPoints,
+            reason: "interval-transition-reindex",
+          });
+        }
+        if (indicatorSeries > 0) {
+          recordPerfEvent("chart.indicatorSeries.setData", {
+            paneId: "single-chart",
+            path: "interval-transition-reindex",
+            points: indicatorPoints,
+            series: indicatorSeries,
+          });
+        }
+      } catch (error) {
+        recordPerfEvent("chart.intervalTransition.reindexError", {
+          message: error instanceof Error ? error.message : String(error),
+          paneId: "single-chart",
+        });
+      } finally {
+        applyAppearance();
+      }
+    });
+    return () => cancelAnimationFrame(frameId);
   }, [customBg, interval, theme, timezone]);
 
   useEffect(() => {
@@ -984,6 +1054,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       mainSeriesRef.current = result.series;
       mainSeriesTypeRef.current = result.chartType;
       renderedMainSeriesDataRef.current = result.data;
+      renderedMainSeriesGenerationRef.current += 1;
       publishDrawingProjectionStore(nextProjectionStore);
       projectionGenerationRef.current += 1;
       projectionRenderContextRef.current = mainSeriesRenderContext;
@@ -1185,12 +1256,14 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           viewportController: viewportControllerRef.current,
         });
         renderedMainSeriesDataRef.current = renderResult.nextData;
+        renderedMainSeriesGenerationRef.current += 1;
         projectionRendered = true;
       } catch (error) {
         // The chart may be partially mutated when both an incremental write
         // and its setData recovery fail. A null cache forces the next delta to
         // rebuild from output index zero instead of compounding that state.
         renderedMainSeriesDataRef.current = null;
+        renderedMainSeriesGenerationRef.current += 1;
         recordPerfEvent("chart.candleSeries.renderError", {
           message: error instanceof Error ? error.message : String(error),
           paneId: "main",
@@ -1271,8 +1344,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
             viewportController: viewportControllerRef.current,
           });
           renderedMainSeriesDataRef.current = renderResult.nextData;
+          renderedMainSeriesGenerationRef.current += 1;
         } catch (error) {
           renderedMainSeriesDataRef.current = null;
+          renderedMainSeriesGenerationRef.current += 1;
           recordPerfEvent("chart.candleSeries.renderError", {
             message: error instanceof Error ? error.message : String(error),
             paneId: "main",
@@ -1346,7 +1421,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart) return;
+    if (!chart || !indicatorDatasetOwned) return;
     const expectedPaneCount = Math.max(1, paneDescriptors.length);
     const paneCountBefore = chart.panes?.()?.length ?? 1;
     const paneStructureChanged = paneCountBefore !== expectedPaneCount;
@@ -1477,12 +1552,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     }
     indicatorSeriesRef.current = nextEntries;
 
-    const panes = chart.panes?.() || [];
-    for (let paneIndex = panes.length - 1; paneIndex >= expectedPaneCount; paneIndex -= 1) {
-      try {
-        chart.removePane(paneIndex);
-      } catch { /* */ }
-    }
+    trimPanes(chart, expectedPaneCount);
     if (shouldAdvanceIndicatorSeriesReady({
       createdSeriesCount,
       paneStructureChanged,
@@ -1491,7 +1561,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     })) {
       setSeriesReady((prev) => prev + 1);
     }
-  }, [datasetKey, effectiveDrawingTool, interval, paneDescriptors, renderDataTimeSet, seriesReady, usesDerivedAxis]);
+  }, [datasetKey, effectiveDrawingTool, indicatorDatasetOwned, interval, paneDescriptors, renderDataTimeSet, seriesReady, usesDerivedAxis]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1513,7 +1583,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart) return;
+    if (!chart || !indicatorDatasetOwned) return;
     const bgColor = theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17");
     const activePaneIds = new Set(paneDescriptors.map((pane) => pane.id));
 
@@ -1570,7 +1640,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       clearPaneAuxiliaryRenderState(chart, paneId, state);
       paneRenderStateRef.current.delete(paneId);
     }
-  }, [customBg, paneDescriptors, seriesReady, theme]);
+  }, [customBg, indicatorDatasetOwned, paneDescriptors, seriesReady, theme]);
 
   useEffect(() => {
     const currentIds = new Set(subPanes.map((p) => p.id));

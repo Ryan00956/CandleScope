@@ -23,6 +23,36 @@ export function resolveDataTimeSet(seriesStore) {
   return seriesStore?.timeSet?.() || EMPTY_DATA_TIME_SET;
 }
 
+export function hasCurrentDatasetOwnership({
+  dataMeta,
+  datasetKey,
+  seriesStore,
+} = {}) {
+  return Boolean(
+    datasetKey
+    && !dataMeta?.optimistic
+    && dataMeta?.seriesKey === datasetKey
+    && seriesStore?.seriesKey === datasetKey
+  );
+}
+
+export function resolveIntervalTransitionReplayData({
+  currentData,
+  currentGeneration,
+  currentSeries,
+  fallbackData,
+  scheduledGeneration,
+  scheduledSeries,
+} = {}) {
+  if (
+    currentSeries !== scheduledSeries
+    || currentGeneration !== scheduledGeneration
+  ) {
+    return currentData;
+  }
+  return fallbackData;
+}
+
 export function buildVisibleRangeSnapshot({
   barSpacing,
   logicalRange,

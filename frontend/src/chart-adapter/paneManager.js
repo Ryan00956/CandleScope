@@ -30,6 +30,22 @@ export function readPaneHeights(chart) {
   return (chart.panes?.() || []).map((pane) => pane.getHeight?.()).filter(Number.isFinite);
 }
 
+export function trimPanes(chart, retainCount = 1) {
+  if (!chart || typeof chart.removePane !== "function") return 0;
+  const panes = chart.panes?.() || [];
+  const safeRetainCount = Math.max(1, Math.floor(Number(retainCount) || 1));
+  let removed = 0;
+  for (let paneIndex = panes.length - 1; paneIndex >= safeRetainCount; paneIndex -= 1) {
+    try {
+      chart.removePane(paneIndex);
+      removed += 1;
+    } catch {
+      // Pane cleanup is best-effort because series removal can collapse panes.
+    }
+  }
+  return removed;
+}
+
 export function removePaneSeries(chart, entries = []) {
   if (!chart) return 0;
   let removed = 0;

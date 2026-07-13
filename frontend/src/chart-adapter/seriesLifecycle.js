@@ -21,6 +21,20 @@ export function shouldPreferIndicatorSetData({
   return now - created < INDICATOR_SERIES_INCREMENTAL_GRACE_MS;
 }
 
+export function resyncSeriesTimeScaleIndexes(series, data) {
+  if (typeof series?.setData !== "function") return 0;
+  if (!Array.isArray(data) || data.length === 0) return 0;
+
+  // Lightweight Charts v5 keeps logical-index lookup state per series. During
+  // a multi-pane interval transition, series can update the shared time scale
+  // just before interval-specific chart options trigger a full repaint.
+  // Replaying CandleScope's complete render snapshot refreshes that lookup
+  // state without dropping whitespace or custom-series fields that are not
+  // recoverable through the public series.data() projection.
+  series.setData(data);
+  return data.length;
+}
+
 export function createMainSeries(chart, {
   chartType,
   data = [],

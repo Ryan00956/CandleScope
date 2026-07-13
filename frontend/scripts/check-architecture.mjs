@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const srcRoot = path.join(projectRoot, "src");
 
-const SOURCE_EXTENSIONS = new Set([".js", ".jsx"]);
+const SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx"]);
 
 const RULES = {
   componentNoServiceImport: "component-no-service-import",
@@ -29,10 +29,10 @@ const usedAllowlistEntries = new Set();
 const violations = [];
 
 const strictRuntimeContractFiles = new Set([
-  "src/features/indicators/useIndicatorRuntime.js",
-  "src/features/drawings/useDrawingRuntime.js",
-  "src/features/market-data/useMarketDataRuntime.js",
-  "src/features/watchlist/useWatchlistRuntime.js",
+  "src/features/indicators/useIndicatorRuntime",
+  "src/features/drawings/useDrawingRuntime",
+  "src/features/market-data/useMarketDataRuntime",
+  "src/features/watchlist/useWatchlistRuntime",
 ]);
 
 const allowedRuntimeContractFields = new Set(["view", "actions", "status"]);
@@ -42,7 +42,7 @@ function toProjectPath(filePath) {
 }
 
 function normalizeModulePath(modulePath) {
-  return modulePath.replace(/\.(?:mjs|cjs|js|jsx)$/, "");
+  return modulePath.replace(/\.(?:mjs|cjs|mts|cts|js|jsx|ts|tsx)$/, "");
 }
 
 function allowlistKey(entry) {
@@ -100,7 +100,7 @@ function resolveImportSpecifier(importerPath, specifier) {
 }
 
 function* importSpecifiers(content) {
-  const importPattern = /\b(?:import|export)\b(?:[^'\"]*?\bfrom\s*)?["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/gs;
+  const importPattern = /\b(?:import|export)\b(?:[^'\"]*?\bfrom\s*|\s*)["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/gs;
   let match;
   while ((match = importPattern.exec(content))) {
     yield {
@@ -205,7 +205,7 @@ function isFeatureRuntimePath(filePath) {
   if (!filePath.startsWith("src/features/")) return false;
   const parts = filePath.split("/");
   if (parts[3] === "runtime") return true;
-  return /Runtime\.jsx?$/.test(parts.at(-1));
+  return /Runtime\.(?:js|jsx|ts|tsx)$/.test(parts.at(-1));
 }
 
 function checkImports(absPath, filePath, content) {
@@ -322,7 +322,7 @@ function checkFeatureRuntimeJsx(filePath, content) {
 }
 
 function checkAppRuntimeBridge(filePath, content) {
-  if (filePath !== "src/app/App.jsx") return;
+  if (normalizeModulePath(filePath) !== "src/app/App") return;
   const stripped = stripCommentsAndStrings(content);
   const appBridgePatterns = [
     {
@@ -408,7 +408,7 @@ function objectPropertyName(segment) {
 }
 
 function checkFeatureRuntimeLegacyCompatFields(filePath, content) {
-  if (!strictRuntimeContractFiles.has(filePath)) return;
+  if (!strictRuntimeContractFiles.has(normalizeModulePath(filePath))) return;
   const stripped = stripCommentsAndStrings(content);
   const returnObject = findLastReturnObject(stripped);
   if (!returnObject) return;

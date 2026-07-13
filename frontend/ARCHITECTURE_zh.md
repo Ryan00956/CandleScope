@@ -6,6 +6,8 @@
 [前端优化执行文档](OPTIMIZATION_EXECUTION_zh.md)。
 当前阶段审查和推荐后续工作见
 [前端优化阶段审查](OPTIMIZATION_PHASE_REVIEW_zh.md)。
+TypeScript 渐进迁移的分阶段步骤、验证门和回滚条件见
+[前端 TypeScript 渐进迁移执行文档](FRONTEND_TYPESCRIPT_MIGRATION_EXECUTION_zh.md)。
 
 ## 目标
 

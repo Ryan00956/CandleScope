@@ -1,5 +1,3 @@
-export const DEFAULT_MAIN_CHART_TYPE = "candlestick";
-
 export const MAIN_CHART_TYPES = Object.freeze([
   "candlestick",
   "hollow-candlestick",
@@ -16,15 +14,23 @@ export const MAIN_CHART_TYPES = Object.freeze([
   "area",
   "baseline",
   "histogram",
-]);
+] as const);
 
-const MAIN_CHART_TYPE_SET = new Set(MAIN_CHART_TYPES);
+export type MainChartType = (typeof MAIN_CHART_TYPES)[number];
 
-export function normalizeMainChartType(value) {
-  return MAIN_CHART_TYPE_SET.has(value) ? value : DEFAULT_MAIN_CHART_TYPE;
+export const DEFAULT_MAIN_CHART_TYPE: MainChartType = "candlestick";
+
+const MAIN_CHART_TYPE_SET: ReadonlySet<string> = new Set(MAIN_CHART_TYPES);
+
+function isMainChartType(value: unknown): value is MainChartType {
+  return typeof value === "string" && MAIN_CHART_TYPE_SET.has(value);
 }
 
-export function isOhlcMainChartType(value) {
+export function normalizeMainChartType(value: unknown): MainChartType {
+  return isMainChartType(value) ? value : DEFAULT_MAIN_CHART_TYPE;
+}
+
+export function isOhlcMainChartType(value: unknown): boolean {
   const chartType = normalizeMainChartType(value);
   return chartType === "candlestick"
     || chartType === "hollow-candlestick"

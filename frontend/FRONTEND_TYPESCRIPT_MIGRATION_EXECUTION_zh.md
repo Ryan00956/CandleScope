@@ -1891,7 +1891,7 @@ rg --files src -g "*.js" -g "*.jsx"
 | T6 | 已完成 | `306c90c` | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 24 个 chart-adapter owner 迁为 TS，新增统一 adapter contract；adapter 专项 146/146、drawing coordinate 44/44 通过 |
 | T7 | 已完成 | `5edce5d`…`a2eaef5` | 通过 | 740/740 通过 | 通过 | basic/release 通过 | 8 个 owner 切片独立提交；26 个既有 owner 迁为 TS，新增 8 个类型模块；聚合专项 58/58 通过 |
 | T8 | 已完成 | `69576e8`…`c37113a` | 通过 | 747/747 通过 | 通过 | basic/release 通过 | 13 个既有 owner 迁为 TS；raw indicator HTTP/WS payload、range/revision、cache/output 与 Monaco contract 已收紧；专项 60/60 通过 |
-| T9 | 待执行 |  |  |  |  |  |  |
+| T9 | 已完成 | `166264d` | 通过 | 748/748 通过 | 通过 | drawing-check 通过 | 22 个既有 drawing owner 迁为 TS；统一 anchor、saved schema、primitive 与交互 controller contract；drawing 专项 159/159 通过 |
 | T10 | 待执行 |  |  |  |  |  |  |
 | T11 | 待执行 |  |  |  |  |  |  |
 | T12 | 待执行 |  |  |  |  |  |  |
@@ -2113,6 +2113,24 @@ rg --files src -g "*.js" -g "*.jsx"
 | Smoke 捕获并修复 | 首次 basic smoke 发现后端 numeric `correctionRevision` 被首版 string-only parser 拒绝，导致合法 WS message 丢弃与 sequence-gap warnings；`c37113a` 统一 string/finite-number 输入后，focused test、完整门禁、basic/release smoke 全部通过 |
 | 范围约束 | 未修改 indicator 计算算法、cache 窗口、重算范围、WS 重连策略或 Pyne UI；`T4-UNKNOWN-01` 仍只覆盖 `src/services/api.ts` 中未迁的非 indicator endpoints，状态不变 |
 | 新增 `any` / TS directive suppression | 0；T8 路径无 `Record<string, any>`、显式 `any`、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error` 或 `as unknown as` |
+
+### T9 drawing core、persistence 与 primitives 验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `81327f0` |
+| 完成 Commit | `166264d` |
+| 生产模块 | 计划中的 22 个既有 JS owner 全部迁为 TS，对应 JS owner 残留 0；新增 `drawingTypes.ts`、`drawingContracts.ts` 与 adapter 内的 `drawingPrimitiveTypes.ts`，合计 25 个 T9 TS 模块；React hooks、selection/text-edit/tool-state 与 `useDrawing` 保留到 T10 |
+| 核心 contract | 建立 `DrawingToolId` / `DrawingKind`、`DrawingDataPoint`、普通 source-time / synthetic lineage / legacy logical anchor 判别联合、`SavedDrawing` 判别联合、freehand v2/v3 stroke、primitive options、命中结果、拖拽 descriptor 与坐标转换类型 |
+| Persistence 边界 | `JSON.parse` 结果先作为 `unknown`，逐 kind allowlist 解析；损坏 anchor、未知 kind 与畸形 freehand fail closed；旧 logical fallback 可读；synthetic `sourceOrdinal` / projection identity 可读写；projection-local `order` 永不持久化 |
+| Primitive / adapter 边界 | 8 个 Lightweight Charts drawing primitive、pane renderer/view、坐标工具和动态 engine loader 全部类型化；第三方 plugin 类型通过 `chart-adapter/drawingPrimitiveTypes.ts` 隔离，feature 层没有新增 Lightweight Charts 直连或 architecture allowlist |
+| 创建与交互语义 | freehand capture、text/position placement、line/fib/shape/axis creation、drag/resize、erase、hover、snap 与 primitive factory 均使用统一 drawing contract；未改变吸附阈值、拖拽/缩放规则、future-anchor、synthetic fold 或 UX |
+| 兼容 fixture | 新增 corrupted anchor、unknown kind、old logical 与 synthetic lineage 四类存储 fixture；前两类拒绝，后两类规范化恢复，并验证 `order` 被剥离 |
+| 定向测试 | `npm run test:drawing` 159/159 通过；较 T8 新增 1 个 schema fixture 测试，无既有 drawing 测试丢失 |
+| 完整门禁 | architecture、typecheck、lint 全部通过；748/748 tests 通过；Vite 7.3.1 build 通过，295 modules transformed |
+| Drawing smoke | 干净 Vite `15180` 实例通过；1500 bars、connected/live；drawing engine ready；创建后持久化 1 个 drawing，future anchor 已保存，reload 后恢复 2 个 drawings；failures/warnings/exceptions 为 0 |
+| 范围约束 | 未迁 `drawingInteractionController.js`、`drawingSelectionController.js`、text editing、tool state、persistence lifecycle hooks 与 React host；这些 owner 继续留给 T10 |
+| 新增 `any` / TS directive suppression | 0；T9 路径无显式 `any`、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error` 或 `as unknown as` |
 
 ### Suppression ledger
 

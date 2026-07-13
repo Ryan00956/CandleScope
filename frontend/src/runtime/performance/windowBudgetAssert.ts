@@ -23,7 +23,7 @@ function viteEnv(): Record<string, unknown> {
 }
 
 function globalObject(): Record<string, unknown> | null {
-  if (typeof globalThis !== "undefined") return globalThis as Record<string, unknown>;
+  if (typeof globalThis !== "undefined") return globalThis;
   return null;
 }
 

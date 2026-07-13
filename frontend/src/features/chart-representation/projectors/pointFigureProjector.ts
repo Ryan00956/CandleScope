@@ -1,5 +1,6 @@
 import type {
   DisplayRow,
+  PointFigureDisplayRow,
   ProjectionCustomValues,
   ProjectionProjectOptions,
   ProjectionResult,
@@ -207,7 +208,7 @@ function projectionCustomValues(row: SourceBar, {
   provisional: boolean;
   reversalAmount: number;
   sourceFromTime: number;
-}): ProjectionCustomValues {
+}): PointFigureDisplayRow["customValues"] {
   return {
     ...(row?.customValues || {}),
     chartProjection: Object.freeze({
@@ -235,7 +236,11 @@ function projectionCustomValues(row: SourceBar, {
  * can reconstruct every glyph from high/low and pointAndFigure.boxSize.
  * Prices are converted to integer minimum-tick units before comparisons.
  */
-export class PointFigureProjector implements Projector<PointFigureState> {
+export class PointFigureProjector implements Projector<
+  PointFigureState,
+  Record<string, unknown>,
+  PointFigureDisplayRow
+> {
   readonly id: "point-and-figure";
   readonly oneToOne: false;
   readonly supportsStatefulTailProjection: true;
@@ -272,16 +277,16 @@ export class PointFigureProjector implements Projector<PointFigureState> {
   project(
     rows: readonly SourceBar[] = [],
     options: ProjectionProjectOptions<PointFigureState> = {},
-  ): DisplayRow[] {
+  ): PointFigureDisplayRow[] {
     return this.projectWithState(rows, options).data;
   }
 
   projectWithState(
     rows: readonly SourceBar[] = [],
     { provisional = false, seedState = null }: ProjectionProjectOptions<PointFigureState> = {},
-  ): ProjectionResult<PointFigureState> {
+  ): ProjectionResult<PointFigureState, PointFigureDisplayRow> {
     const state = normalizeSeedState(seedState, this);
-    const data: DisplayRow[] = [];
+    const data: PointFigureDisplayRow[] = [];
     const checkpoints: Readonly<PointFigureState>[] = [];
 
     // The active column may have started before a trim-left checkpoint. Carry
@@ -342,7 +347,7 @@ export class PointFigureProjector implements Projector<PointFigureState> {
   }
 
   _startFirstColumn(
-    data: DisplayRow[],
+    data: PointFigureDisplayRow[],
     state: PointFigureState,
     row: SourceBar,
     closeTicks: number,
@@ -363,7 +368,7 @@ export class PointFigureProjector implements Projector<PointFigureState> {
   }
 
   _processXColumn(
-    data: DisplayRow[],
+    data: PointFigureDisplayRow[],
     state: PointFigureState,
     row: SourceBar,
     closeTicks: number,
@@ -392,7 +397,7 @@ export class PointFigureProjector implements Projector<PointFigureState> {
   }
 
   _processOColumn(
-    data: DisplayRow[],
+    data: PointFigureDisplayRow[],
     state: PointFigureState,
     row: SourceBar,
     closeTicks: number,
@@ -421,7 +426,7 @@ export class PointFigureProjector implements Projector<PointFigureState> {
   }
 
   _startColumn(
-    data: DisplayRow[],
+    data: PointFigureDisplayRow[],
     state: PointFigureState,
     row: SourceBar,
     direction: Exclude<PointFigureDirection, null>,
@@ -445,7 +450,7 @@ export class PointFigureProjector implements Projector<PointFigureState> {
   }
 
   _upsertCurrentColumn(
-    data: DisplayRow[],
+    data: PointFigureDisplayRow[],
     state: PointFigureState,
     row: SourceBar,
     provisional: boolean,
@@ -455,7 +460,7 @@ export class PointFigureProjector implements Projector<PointFigureState> {
     const direction = requiredDirection(state.direction);
     const columnOrder = requiredInteger(state.columnOrder, "columnOrder");
     const isX = direction === "x";
-    const point: DisplayRow = {
+    const point: PointFigureDisplayRow = {
       time: {
         order: columnOrder,
         sourceTime: row.time,

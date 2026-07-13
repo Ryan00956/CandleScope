@@ -189,7 +189,7 @@ export function renderHlines({
         color: hline.color || "#787b86",
         lineWidth: 1,
         lineStyle: typeof hline.linestyle === "number"
-          ? hline.linestyle as LineStyle
+          ? hline.linestyle
           : (typeof hline.linestyle === "string" ? lineStyleMap[hline.linestyle] ?? 2 : 2),
         axisLabelVisible: true,
         title: hline.title || "",

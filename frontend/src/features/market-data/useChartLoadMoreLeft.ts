@@ -83,7 +83,7 @@ export function useChartLoadMoreLeft({
             )) {
               return;
             }
-            handleNeedMoreLeftRef.current?.(before);
+            void handleNeedMoreLeftRef.current?.(before);
           }, PENDING_LOAD_MORE_LEFT_SAFETY_MS);
         }
 

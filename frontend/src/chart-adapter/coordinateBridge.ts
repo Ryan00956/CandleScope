@@ -17,7 +17,7 @@ import type { FutureIntervalBasis } from "../utils/intervalTimeline.js";
 const PROJECTION_METADATA_KEY = "chartProjection";
 type ValueProvider<T = unknown> = (() => T) | null;
 
-interface DrawingAnchor {
+export interface DrawingAnchor extends CoordinateDataPoint {
   time: number;
   sourceOrdinal?: number;
   sourceProjection?: string;
@@ -86,7 +86,7 @@ export interface ScreenPoint {
   y?: unknown;
 }
 
-interface SourceLineageSpan {
+export interface SourceLineageSpan {
   exact: Readonly<{
     left: Readonly<DrawingAnchor>;
     right: Readonly<DrawingAnchor>;
@@ -99,12 +99,31 @@ interface SourceLineageSpan {
   }>;
 }
 
-interface SourceLineageSpanInput {
+export interface SourceLineageFreehandCapture extends Record<string, unknown> {
+  anchor?: Readonly<DrawingAnchor>;
+  price: number;
+  ratio?: number;
+  screen: Readonly<{ x: number; y: number }>;
+  span?: Readonly<SourceLineageSpan>;
+  time?: number;
+}
+
+export interface SourceLineageSpanInput {
   sourceProjection?: unknown;
   sourceProjectionConfig?: unknown;
   exact?: {
-    left?: DrawingAnchor;
-    right?: DrawingAnchor;
+    left?: Readonly<{
+      time?: unknown;
+      sourceOrdinal?: unknown;
+      sourceProjection?: unknown;
+      sourceProjectionConfig?: unknown;
+    }>;
+    right?: Readonly<{
+      time?: unknown;
+      sourceOrdinal?: unknown;
+      sourceProjection?: unknown;
+      sourceProjectionConfig?: unknown;
+    }>;
   };
   fallback?: {
     fromTime?: unknown;
@@ -119,7 +138,7 @@ export interface CoordinateDataPoint extends Record<string, unknown> {
   logical?: unknown;
 }
 
-interface InterpolatedCoordinateAdapter {
+export interface InterpolatedCoordinateAdapter {
   isReady?(): boolean;
   coordinateToLogical?(coordinate: number): number | null | undefined;
   logicalToCoordinate?(logical: number): number | null | undefined;
@@ -127,7 +146,7 @@ interface InterpolatedCoordinateAdapter {
   timeToCoordinate?(time: number): number | null | undefined;
 }
 
-interface TimeScaleBridge {
+export interface TimeScaleBridge {
   coordinateToLogical?(coordinate: number): number | null;
   coordinateToTime?(coordinate: number): unknown;
   logicalToCoordinate?(logical: number): number | null;
@@ -398,14 +417,16 @@ function sourceOrdinalFromRow(row: DisplayRow | null | undefined): number | null
 
 function exactOrdinalRow(
   ordinalIndex: DrawingLineageIndex | null | undefined,
-  anchor: DrawingAnchor | null | undefined,
+  anchor: unknown,
 ): DisplayRow | null {
-  const anchorTime = anchor?.time;
-  const sourceOrdinal = anchor?.sourceOrdinal;
+  if (anchor === null || typeof anchor !== "object") return null;
+  const candidate = anchor as Record<string, unknown>;
+  const anchorTime = candidate.time;
+  const sourceOrdinal = candidate.sourceOrdinal;
   if (!isFiniteNumber(anchorTime)
     || !Number.isSafeInteger(sourceOrdinal)
     || sourceOrdinal == null
-    || sourceOrdinal < 0) {
+    || Number(sourceOrdinal) < 0) {
     return null;
   }
   for (const row of ordinalIndex?.exactRowsBySourceTime?.get(anchorTime) || []) {
@@ -955,7 +976,7 @@ export function captureSourceLineageFreehandStrokeBatch(
 ): Readonly<{
   sourceProjection: string;
   sourceProjectionConfig: string;
-  captures: readonly Readonly<Record<string, unknown>>[];
+  captures: readonly Readonly<SourceLineageFreehandCapture>[];
 }> | null {
   if (!chart
     || !series
@@ -1156,7 +1177,7 @@ export function captureSourceLineageFreehandStrokeBatch(
     return span;
   };
 
-  const captures: Readonly<Record<string, unknown>>[] = [];
+  const captures: Readonly<SourceLineageFreehandCapture>[] = [];
   for (const point of screenPoints) {
     const x = point?.x;
     const y = point?.y;
@@ -1599,7 +1620,7 @@ export function logicalToInterpolatedSeriesTime(
 }
 
 export function logicalToCoordinateInterpolated(
-  timeScale: TimeScaleBridge | null | undefined,
+  timeScale: Pick<TimeScaleBridge, "logicalToCoordinate"> | null | undefined,
   logical: number | null | undefined,
 ): number | null {
   if (!timeScale || logical == null || !isFinite(logical)) return null;

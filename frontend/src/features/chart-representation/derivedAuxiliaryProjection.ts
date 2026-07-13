@@ -176,6 +176,10 @@ export function projectPaneDescriptorsToDisplay(
   });
 }
 
+export function projectBarcolorGroupsToDisplay<TGroup>(
+  groups: readonly TGroup[],
+  index: DisplaySourceTimeIndex,
+): TGroup[];
 export function projectBarcolorGroupsToDisplay(
   groups: readonly unknown[] = [],
   index: DisplaySourceTimeIndex,

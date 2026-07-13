@@ -84,7 +84,7 @@ export default function IndicatorEditor({
 
   const handleSave = useCallback(() => {
     if (readOnly) return;
-    onSave({
+    void onSave({
       id: indicator?.id || previewState?.id || null,
       name,
       script,

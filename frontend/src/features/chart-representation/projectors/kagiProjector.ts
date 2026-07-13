@@ -1,5 +1,6 @@
 import type {
   DisplayRow,
+  KagiDisplayRow,
   ProjectionCustomValues,
   ProjectionProjectOptions,
   ProjectionResult,
@@ -263,7 +264,7 @@ function projectionCustomValues(row: SourceBar, {
   sourceFromTime: number;
   state: KagiStyle;
   turnPrice: number | null;
-}): ProjectionCustomValues {
+}): KagiDisplayRow["customValues"] {
   return {
     ...(row?.customValues || {}),
     chartProjection: Object.freeze({
@@ -296,7 +297,7 @@ function projectionCustomValues(row: SourceBar, {
  * strictly breaking the previous waist. Mid-leg style changes are retained in
  * customValues.kagi.sections without allocating another ordinal-axis item.
  */
-export class KagiProjector implements Projector<KagiState> {
+export class KagiProjector implements Projector<KagiState, Record<string, unknown>, KagiDisplayRow> {
   readonly id: "kagi";
   readonly oneToOne: false;
   readonly supportsStatefulTailProjection: true;
@@ -321,16 +322,16 @@ export class KagiProjector implements Projector<KagiState> {
   project(
     rows: readonly SourceBar[] = [],
     options: ProjectionProjectOptions<KagiState> = {},
-  ): DisplayRow[] {
+  ): KagiDisplayRow[] {
     return this.projectWithState(rows, options).data;
   }
 
   projectWithState(
     rows: readonly SourceBar[] = [],
     { provisional = false, seedState = null }: ProjectionProjectOptions<KagiState> = {},
-  ): ProjectionResult<KagiState> {
+  ): ProjectionResult<KagiState, KagiDisplayRow> {
     const state = normalizeSeedState(seedState, this);
-    const data: DisplayRow[] = [];
+    const data: KagiDisplayRow[] = [];
     const checkpoints: Readonly<KagiState>[] = [];
 
     const hasRetainedSource = (rows || []).some((row) => row?.time != null);
@@ -397,7 +398,7 @@ export class KagiProjector implements Projector<KagiState> {
     return Object.is(price, -0) ? 0 : price;
   }
 
-  _processUpLeg(data: DisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
+  _processUpLeg(data: KagiDisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
     const legEndTicks = requiredInteger(state.legEndTicks, "legEndTicks");
     if (closeTicks > legEndTicks) {
       this._extendActiveLeg(data, state, row, closeTicks, provisional);
@@ -418,7 +419,7 @@ export class KagiProjector implements Projector<KagiState> {
     }
   }
 
-  _processDownLeg(data: DisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
+  _processDownLeg(data: KagiDisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
     const legEndTicks = requiredInteger(state.legEndTicks, "legEndTicks");
     if (closeTicks < legEndTicks) {
       this._extendActiveLeg(data, state, row, closeTicks, provisional);
@@ -439,7 +440,7 @@ export class KagiProjector implements Projector<KagiState> {
     }
   }
 
-  _extendActiveLeg(data: DisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
+  _extendActiveLeg(data: KagiDisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
     state.legEndTicks = closeTicks;
     state.legSourceToTime = row.time;
     state.legCustomValues = cloneCustomValues(row.customValues);
@@ -448,7 +449,7 @@ export class KagiProjector implements Projector<KagiState> {
   }
 
   _startLeg(
-    data: DisplayRow[],
+    data: KagiDisplayRow[],
     state: KagiState,
     row: SourceBar,
     direction: Exclude<KagiDirection, null>,
@@ -527,7 +528,7 @@ export class KagiProjector implements Projector<KagiState> {
   }
 
   _upsertActiveLeg(
-    data: DisplayRow[],
+    data: KagiDisplayRow[],
     state: KagiState,
     row: SourceBar,
     provisional: boolean,
@@ -537,7 +538,7 @@ export class KagiProjector implements Projector<KagiState> {
     const direction = requiredDirection(state.direction);
     const legOrder = requiredInteger(state.legOrder, "legOrder");
     const { sections, tailStyle } = this._sectionsForState(state);
-    const point: DisplayRow = {
+    const point: KagiDisplayRow = {
       time: {
         order: legOrder,
         sourceTime: row.time,

@@ -320,7 +320,7 @@ export function useMarketDataRuntime({
 
   useEffect(() => {
     resetForSessionTransition(lastSessionTransition);
-    loadData(symbol, interval, marketType, exchange);
+    void loadData(symbol, interval, marketType, exchange);
   }, [
     exchange,
     interval,
@@ -332,7 +332,7 @@ export function useMarketDataRuntime({
   ]);
 
   const retry = useCallback(() => {
-    loadData(symbol, interval, marketType, exchange);
+    void loadData(symbol, interval, marketType, exchange);
   }, [exchange, interval, loadData, marketType, symbol]);
 
   const display = useMemo(

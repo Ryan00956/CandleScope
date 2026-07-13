@@ -423,7 +423,9 @@ export class SeriesDataFeed {
         }
       }
 
-      if (!loadedAny && lastError) throw lastError;
+      if (!loadedAny && lastError) {
+        throw lastError instanceof Error ? lastError : new Error(String(lastError));
+      }
     };
 
     void readBackfilledData()

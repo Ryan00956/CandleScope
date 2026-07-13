@@ -1114,7 +1114,7 @@ export default function AlertsPanel({
   useEffect(() => {
     if (!isOpen) return undefined;
     const controller = new AbortController();
-    loadAlerts(controller.signal);
+    void loadAlerts(controller.signal);
     return () => controller.abort();
   }, [isOpen, loadAlerts]);
 
@@ -1331,7 +1331,7 @@ export default function AlertsPanel({
                   onToggle={() => toggleRule(rule)}
                   onDuplicate={() => duplicateRule(rule)}
                   onDelete={() => {
-                    if (window.confirm(`删除警报“${rule.name}”？`)) removeRule(rule);
+                    if (window.confirm(`删除警报“${rule.name}”？`)) void removeRule(rule);
                   }}
                 />
               ))}

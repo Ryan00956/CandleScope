@@ -329,7 +329,7 @@ export function useCacheDiagnosticsRuntime({
   useEffect(() => {
     if (!isOpen) return undefined;
     const controller = new AbortController();
-    refresh({ signal: controller.signal });
+    void refresh({ signal: controller.signal });
     return () => controller.abort();
   }, [isOpen, refresh]);
 

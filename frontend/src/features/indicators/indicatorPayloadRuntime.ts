@@ -438,7 +438,7 @@ export function mergeIndicatorItems<T extends IndicatorAuxiliaryItem>(
       ...(currentData || itemData
         ? { data: mergeTimeData(currentData || [], itemData || []) }
         : {}),
-    } as T;
+    };
   });
   return merged;
 }
@@ -454,7 +454,7 @@ export function replaceIndicatorItemsRange<T extends IndicatorAuxiliaryItem>(
   const merged = (existing || []).map((item) => {
     const data = auxiliaryData(item);
     if (!data || !hasTimedData(data)) return item;
-    return { ...item, data: replaceTimeDataRange(data, [], range) } as T;
+    return { ...item, data: replaceTimeDataRange(data, [], range) };
   });
   const indexByKey = new Map<string, number>();
   merged.forEach((item, index) => {
@@ -471,7 +471,7 @@ export function replaceIndicatorItemsRange<T extends IndicatorAuxiliaryItem>(
         ...(itemData && hasTimedData(itemData)
           ? { data: replaceTimeDataRange([], itemData, range) }
           : {}),
-      } as T);
+      });
       indexByKey.set(key, merged.length - 1);
       return;
     }
@@ -485,7 +485,7 @@ export function replaceIndicatorItemsRange<T extends IndicatorAuxiliaryItem>(
       ...(timed
         ? { data: replaceTimeDataRange(currentData || [], itemData || [], range) }
         : {}),
-    } as T;
+    };
   });
 
   return merged;

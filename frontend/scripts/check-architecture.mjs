@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const srcRoot = path.join(projectRoot, "src");
 
-const SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx"]);
+const SOURCE_EXTENSIONS = new Set([".ts", ".tsx"]);
+const LEGACY_SOURCE_EXTENSIONS = new Set([".js", ".jsx"]);
 
 const RULES = {
   componentNoServiceImport: "component-no-service-import",
@@ -21,6 +22,7 @@ const RULES = {
   featureRuntimeNoLegacyCompatFields: "feature-runtime-no-legacy-compat-fields",
   marketDataKlineFetchOnlyFeed: "market-data-kline-fetch-only-feed",
   componentNoRawTimeScaleWrite: "component-no-raw-time-scale-write",
+  sourceTypescriptOnly: "source-typescript-only",
 };
 
 const allowlist = [];
@@ -78,7 +80,8 @@ function walkSourceFiles(directory) {
       files.push(...walkSourceFiles(entryPath));
       continue;
     }
-    if (SOURCE_EXTENSIONS.has(path.extname(entry.name))) {
+    const extension = path.extname(entry.name);
+    if (SOURCE_EXTENSIONS.has(extension) || LEGACY_SOURCE_EXTENSIONS.has(extension)) {
       files.push(entryPath);
     }
   }
@@ -100,7 +103,7 @@ function resolveImportSpecifier(importerPath, specifier) {
 }
 
 function* importSpecifiers(content) {
-  const importPattern = /\b(?:import|export)\b(?:[^'\"]*?\bfrom\s*|\s*)["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/gs;
+  const importPattern = /\b(?:import|export)\b(?:[^'"]*?\bfrom\s*|\s*)["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/gs;
   let match;
   while ((match = importPattern.exec(content))) {
     yield {
@@ -280,6 +283,13 @@ function checkImports(absPath, filePath, content) {
   }
 }
 
+export function sourceFileKind(fileName) {
+  const extension = path.extname(fileName);
+  if (SOURCE_EXTENSIONS.has(extension)) return "typescript";
+  if (LEGACY_SOURCE_EXTENSIONS.has(extension)) return "legacy-javascript";
+  return null;
+}
+
 function checkLocalStorage(filePath, content) {
   if (!isComponentOrAppPath(filePath)) return;
   const stripped = stripCommentsAndStrings(content);
@@ -429,35 +439,49 @@ function checkFeatureRuntimeLegacyCompatFields(filePath, content) {
   }
 }
 
-for (const absPath of walkSourceFiles(srcRoot)) {
-  const filePath = toProjectPath(absPath);
-  const content = fs.readFileSync(absPath, "utf8");
-  checkImports(absPath, filePath, content);
-  checkLocalStorage(filePath, content);
-  checkComponentRawTimeScaleWrites(filePath, content);
-  checkFeatureRuntimeJsx(filePath, content);
-  checkAppRuntimeBridge(filePath, content);
-  checkFeatureRuntimeLegacyCompatFields(filePath, content);
-}
+export function runArchitectureCheck() {
+  for (const absPath of walkSourceFiles(srcRoot)) {
+    const filePath = toProjectPath(absPath);
+    if (sourceFileKind(absPath) === "legacy-javascript") {
+      addViolation({
+        rule: RULES.sourceTypescriptOnly,
+        filePath,
+        line: 1,
+        message: "src must contain only TypeScript source files; migrate this file to .ts or .tsx",
+      });
+      continue;
+    }
+    const content = fs.readFileSync(absPath, "utf8");
+    checkImports(absPath, filePath, content);
+    checkLocalStorage(filePath, content);
+    checkComponentRawTimeScaleWrites(filePath, content);
+    checkFeatureRuntimeJsx(filePath, content);
+    checkAppRuntimeBridge(filePath, content);
+    checkFeatureRuntimeLegacyCompatFields(filePath, content);
+  }
 
-for (const entry of allowlist) {
-  const key = allowlistKey(entry);
-  if (!usedAllowlistEntries.has(key)) {
-    violations.push({
-      rule: "stale-architecture-allowlist",
-      filePath: entry.path,
-      line: 1,
-      message: `remove unused allowlist entry for ${entry.rule}: ${entry.reason}`,
-    });
+  for (const entry of allowlist) {
+    const key = allowlistKey(entry);
+    if (!usedAllowlistEntries.has(key)) {
+      violations.push({
+        rule: "stale-architecture-allowlist",
+        filePath: entry.path,
+        line: 1,
+        message: `remove unused allowlist entry for ${entry.rule}: ${entry.reason}`,
+      });
+    }
+  }
+
+  if (violations.length > 0) {
+    console.error(`Architecture check failed with ${violations.length} violation(s):`);
+    for (const violation of violations) {
+      console.error(`- ${violation.rule}: ${violation.filePath}:${violation.line} - ${violation.message}`);
+    }
+    process.exitCode = 1;
+  } else {
+    console.log(`Architecture check passed (${allowlist.length} migration allowlist entries active).`);
   }
 }
 
-if (violations.length > 0) {
-  console.error(`Architecture check failed with ${violations.length} violation(s):`);
-  for (const violation of violations) {
-    console.error(`- ${violation.rule}: ${violation.filePath}:${violation.line} - ${violation.message}`);
-  }
-  process.exitCode = 1;
-} else {
-  console.log(`Architecture check passed (${allowlist.length} migration allowlist entries active).`);
-}
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) runArchitectureCheck();

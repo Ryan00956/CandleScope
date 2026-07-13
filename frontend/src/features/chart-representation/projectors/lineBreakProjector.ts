@@ -1,5 +1,5 @@
 import type {
-  DisplayRow,
+  LineBreakDisplayRow,
   ProjectionCustomValues,
   ProjectionProjectOptions,
   ProjectionResult,
@@ -217,7 +217,7 @@ function projectionCustomValues(line: Readonly<LineBreakLine>, {
   provisional: boolean;
   referenceHigh: number;
   referenceLow: number;
-}): ProjectionCustomValues {
+}): LineBreakDisplayRow["customValues"] {
   return {
     ...line.customValues,
     chartProjection: Object.freeze({
@@ -249,7 +249,11 @@ function projectionCustomValues(line: Readonly<LineBreakLine>, {
  * convention: a new up line opens at the previous confirmed line's high and a
  * new down line opens at its low.
  */
-export class LineBreakProjector implements Projector<LineBreakState> {
+export class LineBreakProjector implements Projector<
+  LineBreakState,
+  Record<string, unknown>,
+  LineBreakDisplayRow
+> {
   readonly id: "line-break";
   readonly oneToOne: false;
   readonly supportsStatefulTailProjection: true;
@@ -269,16 +273,16 @@ export class LineBreakProjector implements Projector<LineBreakState> {
   project(
     rows: readonly SourceBar[] = [],
     options: ProjectionProjectOptions<LineBreakState> = {},
-  ): DisplayRow[] {
+  ): LineBreakDisplayRow[] {
     return this.projectWithState(rows, options).data;
   }
 
   projectWithState(
     rows: readonly SourceBar[] = [],
     { provisional = false, seedState = null }: ProjectionProjectOptions<LineBreakState> = {},
-  ): ProjectionResult<LineBreakState> {
+  ): ProjectionResult<LineBreakState, LineBreakDisplayRow> {
     const state = normalizeSeedState(seedState, this);
-    const data: DisplayRow[] = [];
+    const data: LineBreakDisplayRow[] = [];
     const checkpoints: Readonly<LineBreakState>[] = [];
 
     const hasRetainedSource = (rows || []).some((row) => row?.time != null);
@@ -377,7 +381,7 @@ export class LineBreakProjector implements Projector<LineBreakState> {
     return { referenceHighTicks, referenceLowTicks };
   }
 
-  _appendLine(data: DisplayRow[], state: LineBreakState, row: SourceBar, {
+  _appendLine(data: LineBreakDisplayRow[], state: LineBreakState, row: SourceBar, {
     closeTicks,
     direction,
     openTicks,
@@ -408,7 +412,7 @@ export class LineBreakProjector implements Projector<LineBreakState> {
   }
 
   _emitLine(
-    data: DisplayRow[],
+    data: LineBreakDisplayRow[],
     line: Readonly<LineBreakLine>,
     provisional: boolean,
   ): void {

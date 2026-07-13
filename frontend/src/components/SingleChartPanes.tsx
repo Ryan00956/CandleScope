@@ -2493,7 +2493,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     if (!shouldMountDrawingEngine && !drawingEngineToolActive) return undefined;
     let cancelled = false;
     preloadDrawingEngineHost();
-    loadDrawingEngineHost().then((module) => {
+    void loadDrawingEngineHost().then((module) => {
       if (!cancelled) setDrawingEngineHost(() => module.default);
     });
     return () => { cancelled = true; };

@@ -76,7 +76,7 @@ export interface CacheDiagnosticsEntry extends Record<string, unknown> {
   lastAccessMs?: unknown;
   lastUpdatedMs?: unknown;
   lastRealtimeMs?: unknown;
-  dependencyState?: { orphan?: unknown };
+  dependencyState?: { orphan?: unknown; missingDependencies?: unknown };
   trimSafety?: { safeRangeTrim?: unknown };
   coverage?: { firstTime?: unknown; lastTime?: unknown };
   scores?: Partial<GcScores>;

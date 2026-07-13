@@ -26,6 +26,45 @@ export interface ProjectionCustomValues extends Record<string, unknown> {
   chartProjection?: Readonly<ProjectionMetadata>;
 }
 
+export interface RenkoProjectionValues {
+  direction: "up" | "down";
+  boxSize: number;
+  source: "close";
+  wickPolicy: "none";
+}
+
+export interface PointFigureProjectionValues {
+  direction: "x" | "o";
+  boxSize: number;
+  reversalAmount: number;
+  source: "close";
+}
+
+export interface KagiProjectionSection {
+  from: number;
+  to: number;
+  style: "yang" | "yin";
+}
+
+export interface KagiProjectionValues {
+  direction: "up" | "down";
+  state: "yang" | "yin";
+  reversalKind: "shoulder" | "waist" | null;
+  turnPrice: number | null;
+  reversalAmount: number;
+  reversalTicks: number;
+  source: "close";
+  sections: readonly Readonly<KagiProjectionSection>[];
+}
+
+export interface LineBreakProjectionValues {
+  direction: "up" | "down";
+  numberOfLines: number;
+  source: "close";
+  referenceHigh: number;
+  referenceLow: number;
+}
+
 export interface SourceBar extends Record<string, unknown> {
   time: number;
   open?: number;
@@ -57,6 +96,27 @@ export interface DisplayRow extends Record<string, unknown> {
   customValues?: ProjectionCustomValues;
 }
 
+export type ProjectedDisplayRow<
+  TProjectionValues extends object,
+  TProjectionKey extends string,
+> = Omit<DisplayRow, "time" | "customValues"> & {
+  time: OrdinalAxisTime;
+  customValues: ProjectionCustomValues & {
+    chartProjection: Readonly<ProjectionMetadata>;
+  } & Record<TProjectionKey, Readonly<TProjectionValues>>;
+};
+
+export type RenkoDisplayRow = ProjectedDisplayRow<RenkoProjectionValues, "renko">;
+export type PointFigureDisplayRow = ProjectedDisplayRow<
+  PointFigureProjectionValues,
+  "pointAndFigure"
+>;
+export type KagiDisplayRow = ProjectedDisplayRow<KagiProjectionValues, "kagi">;
+export type LineBreakDisplayRow = ProjectedDisplayRow<
+  LineBreakProjectionValues,
+  "lineBreak"
+>;
+
 export interface ProjectionState extends Record<string, unknown> {
   nextOrder?: number;
 }
@@ -67,15 +127,19 @@ export interface ProjectionProjectOptions<TState extends ProjectionState = Proje
   seedState?: Readonly<TState> | null;
 }
 
-export interface ProjectionResult<TState extends ProjectionState = ProjectionState> {
+export interface ProjectionResult<
+  TState extends ProjectionState = ProjectionState,
+  TRow extends DisplayRow = DisplayRow,
+> {
   checkpoints: Readonly<TState>[];
-  data: DisplayRow[];
+  data: TRow[];
   state: Readonly<TState>;
 }
 
 export interface Projector<
   TState extends ProjectionState = ProjectionState,
   TConfig extends Record<string, unknown> = Record<string, unknown>,
+  TRow extends DisplayRow = DisplayRow,
 > {
   readonly id: string;
   readonly oneToOne: boolean;
@@ -84,11 +148,11 @@ export interface Projector<
   project(
     rows?: readonly SourceBar[],
     options?: ProjectionProjectOptions<TState>,
-  ): DisplayRow[];
+  ): TRow[];
   projectWithState?(
     rows?: readonly SourceBar[],
     options?: ProjectionProjectOptions<TState>,
-  ): ProjectionResult<TState>;
+  ): ProjectionResult<TState, TRow>;
   resolvePreviousDisplayRow?(rows?: readonly DisplayRow[]): DisplayRow | null;
 }
 

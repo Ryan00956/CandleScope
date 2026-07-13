@@ -228,7 +228,9 @@ export async function runExportMatrix({
             elapsedMs: Date.now() - started,
           };
         }
-      } catch {}
+      } catch {
+        // The download may still be moving from its temporary browser filename.
+      }
       await delay(100);
     }
     return { path: target, size: 0, magicValid: false, elapsedMs: Date.now() - started };

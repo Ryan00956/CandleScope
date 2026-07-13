@@ -188,7 +188,7 @@ function recordValue(value: unknown): Record<string, unknown> {
 
 function asIndicatorVisibleRange(value: unknown): IndicatorVisibleRange | null {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? value as IndicatorVisibleRange
+    ? value
     : null;
 }
 

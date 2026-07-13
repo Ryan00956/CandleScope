@@ -1,10 +1,10 @@
 import type {
-  DisplayRow,
   ProjectionCustomValues,
   ProjectionProjectOptions,
   ProjectionResult,
   ProjectionState,
   Projector,
+  RenkoDisplayRow,
   SourceBar,
 } from "../chartRepresentationTypes.js";
 
@@ -129,7 +129,7 @@ function projectionCustomValues(row: SourceBar, {
   sourceFromTime: number;
   sourceOrdinal: number;
   provisional: boolean;
-}): ProjectionCustomValues {
+}): RenkoDisplayRow["customValues"] {
   return {
     ...(row?.customValues || {}),
     chartProjection: Object.freeze({
@@ -155,7 +155,7 @@ function projectionCustomValues(row: SourceBar, {
  * V1 intentionally uses source closes and body-only bricks. Prices are
  * converted to integer minimum-tick units before any threshold comparison.
  */
-export class RenkoProjector implements Projector<RenkoState> {
+export class RenkoProjector implements Projector<RenkoState, Record<string, unknown>, RenkoDisplayRow> {
   readonly id: "renko";
   readonly oneToOne: false;
   readonly supportsStatefulTailProjection: true;
@@ -195,16 +195,16 @@ export class RenkoProjector implements Projector<RenkoState> {
   project(
     rows: readonly SourceBar[] = [],
     options: ProjectionProjectOptions<RenkoState> = {},
-  ): DisplayRow[] {
+  ): RenkoDisplayRow[] {
     return this.projectWithState(rows, options).data;
   }
 
   projectWithState(
     rows: readonly SourceBar[] = [],
     { provisional = false, seedState = null }: ProjectionProjectOptions<RenkoState> = {},
-  ): ProjectionResult<RenkoState> {
+  ): ProjectionResult<RenkoState, RenkoDisplayRow> {
     const state = normalizeSeedState(seedState, this);
-    const data: DisplayRow[] = [];
+    const data: RenkoDisplayRow[] = [];
     const checkpoints: Readonly<RenkoState>[] = [];
 
     for (const row of rows || []) {
@@ -278,7 +278,7 @@ export class RenkoProjector implements Projector<RenkoState> {
   }
 
   _emitBrick(
-    data: DisplayRow[],
+    data: RenkoDisplayRow[],
     state: RenkoState,
     row: SourceBar,
     direction: Exclude<RenkoDirection, null>,
@@ -319,7 +319,7 @@ export class RenkoProjector implements Projector<RenkoState> {
   }
 
   _emitContinuation(
-    data: DisplayRow[],
+    data: RenkoDisplayRow[],
     state: RenkoState,
     row: SourceBar,
     direction: Exclude<RenkoDirection, null>,
@@ -349,7 +349,7 @@ export class RenkoProjector implements Projector<RenkoState> {
   }
 
   _emitReversal(
-    data: DisplayRow[],
+    data: RenkoDisplayRow[],
     state: RenkoState,
     row: SourceBar,
     direction: Exclude<RenkoDirection, null>,

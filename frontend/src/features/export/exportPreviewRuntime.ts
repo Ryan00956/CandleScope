@@ -251,7 +251,7 @@ export function useExportPreviewRuntime({
 
       if (shouldRunAgain) {
         pendingRef.current = false;
-        window.setTimeout(() => runGenerationRef.current?.(), 0);
+        window.setTimeout(() => { void runGenerationRef.current?.(); }, 0);
       } else if (mountedRef.current && openRef.current) {
         setLoading(false);
       }
@@ -269,7 +269,7 @@ export function useExportPreviewRuntime({
     setError(null);
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
-      runGenerationRef.current?.();
+      void runGenerationRef.current?.();
     }, debounceMs);
 
     return () => clearTimer();

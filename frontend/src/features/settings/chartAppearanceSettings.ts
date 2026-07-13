@@ -75,7 +75,7 @@ function normalizeBoxSizeMode(value: unknown, fallback: PriceBoxSizeMode): Price
 
 export function normalizeSettings(settings: unknown = {}): ChartSettings {
   const source = isRecord(settings) ? settings : {};
-  const normalized = { ...DEFAULT_SETTINGS, ...source } as ChartSettings;
+  const normalized = { ...DEFAULT_SETTINGS, ...source };
   normalized.chartType = normalizeMainChartType(source.chartType ?? normalized.chartType);
   normalized.renkoBoxSizeMode = normalizeBoxSizeMode(
     source.renkoBoxSizeMode,

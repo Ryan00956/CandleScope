@@ -38,7 +38,7 @@ export function useExchangeSettingsRuntime({
 
   useEffect(() => {
     if (!isOpen) return;
-    loadSupportedExchanges();
+    void loadSupportedExchanges();
   }, [isOpen, loadSupportedExchanges]);
 
   return {

@@ -1892,7 +1892,7 @@ rg --files src -g "*.js" -g "*.jsx"
 | T7 | 已完成 | `5edce5d`…`a2eaef5` | 通过 | 740/740 通过 | 通过 | basic/release 通过 | 8 个 owner 切片独立提交；26 个既有 owner 迁为 TS，新增 8 个类型模块；聚合专项 58/58 通过 |
 | T8 | 已完成 | `69576e8`…`c37113a` | 通过 | 747/747 通过 | 通过 | basic/release 通过 | 13 个既有 owner 迁为 TS；raw indicator HTTP/WS payload、range/revision、cache/output 与 Monaco contract 已收紧；专项 60/60 通过 |
 | T9 | 已完成 | `166264d` | 通过 | 748/748 通过 | 通过 | drawing-check 通过 | 22 个既有 drawing owner 迁为 TS；统一 anchor、saved schema、primitive 与交互 controller contract；drawing 专项 159/159 通过 |
-| T10 | 待执行 |  |  |  |  |  |  |
+| T10 | 已完成 | `e1aae04` | 通过 | 748/748 通过 | 通过 | basic/overlay-heavy/drawing-check 通过 | 44 个既有 feature runtime/hook owner 迁为 TS；aggregate contract、ref/timer/browser handle 与 raw payload 边界已类型化；指标专项 53/53、drawing 专项 159/159 通过 |
 | T11 | 待执行 |  |  |  |  |  |  |
 | T12 | 待执行 |  |  |  |  |  |  |
 | T13 | 待执行 |  |  |  |  |  |  |
@@ -2132,12 +2132,33 @@ rg --files src -g "*.js" -g "*.jsx"
 | 范围约束 | 未迁 `drawingInteractionController.js`、`drawingSelectionController.js`、text editing、tool state、persistence lifecycle hooks 与 React host；这些 owner 继续留给 T10 |
 | 新增 `any` / TS directive suppression | 0；T9 路径无显式 `any`、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error` 或 `as unknown as` |
 
+### T10 feature React runtimes/hooks 验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `ca9ba25` |
+| 完成 Commit | `e1aae04` |
+| 生产模块 | 计划中的 44 个既有 JS/JSX owner 全部迁为 TS/TSX，对应旧 owner 残留 0；覆盖 chart-session 4、market-data 7、cache/watchlist 4、indicators 6、drawings 9、export 2、settings/database service 10、symbol-search 2 个 owner；`SettingsPanelHost.jsx` 属于 T11 UI，不计入本阶段 |
+| Runtime contract | 为各 hook/controller 声明 options、return、callback 与 owner 类型；聚合 runtime 保持稳定 `{ view, actions, status, events? }` 结构，没有拆分大型 hook，也没有把匿名业务 shape 复制到调用方 |
+| Ref / timer / browser handle | nullable ref/state 显式建模；timeout 使用 `ReturnType<typeof setTimeout>`；WebSocket、AbortSignal/AbortController、ResizeObserver、DOM/chart handle 使用浏览器类型；effect cleanup 与 lazy host 边界均已收紧 |
+| 外部数据边界 | symbol、settings、cache、maintenance、database 与 watchlist runtime 把共享 transport 的 `unknown` raw payload 在活跃 owner consumer 边界按 record/array/字段 shape 收窄；底层 `request()` 与当前未消费 endpoint 继续正确返回 `Promise<unknown>`，不引入欺骗性泛型；`T4-UNKNOWN-01` 关闭 |
+| Drawing / adapter | interaction、pointer、keyboard、selection、text edit、tool state、persistence lifecycle、aggregate hook 与 React host 使用 T9 drawing contract；第三方 primitive attach/detach 结构差异限制在 adapter helper；snap、drag、resize、future anchor 与存储 schema 语义不变 |
+| 定向测试 | indicator feature 53/53、drawing 159/159、export 10/10、settings 9/9、symbol-search 2/2 通过 |
+| 完整门禁 | architecture 通过且 migration allowlist 活跃项为 0；typecheck、lint 全部通过；748/748 tests 通过；Vite 7.3.1 build 通过，295 modules transformed |
+| Basic smoke | Vite `15181` 实例通过；1500 bars、connected/live；drawing toolbar、symbol search、settings 与 MA/VOL hosted indicator coverage 有效；指标 WS 单次建立；failures/warnings/exceptions 为 0 |
+| Overlay-heavy smoke | MA/VOL/BOLL/RSI 托管指标、主图 overlay 与独立 pane coverage 全部通过；HTTP range batch 成功；指标 WS 单次建立；failures/warnings/exceptions 为 0 |
+| Drawing smoke | drawing engine ready；创建后持久化 1 个 drawing，future anchor 已保存，reload 后恢复 2 个 drawings；failures/warnings/exceptions 为 0 |
+| Smoke 捕获并修复 | 首次 overlay-heavy 发现约 35 秒内 `indicator.ws.open` 216 次；根因是迁移时在 `resolveRuntimeInputs()` 内每次 render 新建 `getCurrentVisibleRange` 包装函数，沿 callback 依赖链触发 stream effect 重订阅。恢复原函数引用身份、在消费结果时做边界归一化后，focused tests、完整门禁和三组 smoke 均通过，最终 WS open 为 1 次 |
+| Smoke 命令 | 本机 npm 对 `npm run smoke -- --url ...` 的参数转发会误吞 `--url`，因此按同一脚本语义直接执行 `npx tsx scripts/smoke.mjs --url http://127.0.0.1:15181/`，并分别追加 `--overlay-heavy`、`--drawing-check` |
+| 范围约束 | 未修改缓存预算、K 线加载/重试、指标计算/重连策略、drawing UX 或 settings 行为；未拆 `useIndicatorRuntime` 与 `drawingInteractionController`；下一阶段只迁 feature UI 与普通组件 |
+| 新增 `any` / TS directive suppression | 0；T10 路径无显式 `any`、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error`、`as unknown as` 或非空断言 |
+
 ### Suppression ledger
 
 | ID | 文件 | suppression/cast | 原因 | 保护测试 | 最迟删除 Phase | 状态 |
 |---|---|---|---|---|---|---|
 | T3-CAST-01 | `src/features/market-data/feed/seriesDataFeed.ts` | `KlineStreamSubscription as unknown as constructor` | 尚未迁移的 JS constructor 把默认空 intervals 推断为 `never[]`；adapter 只包住 T4 transport owner 边界 | `seriesDataFeed.test.js` subscribeBars；release smoke | T4 | 已删除（T4） |
-| T4-UNKNOWN-01 | `src/services/api.ts` | 尚未迁 owner 的 symbol/settings/cache/maintenance/price/resolve endpoint 返回 `Promise<unknown>` | T4 只验证已有 TS consumer 依赖的 endpoint；提前声明业务 shape 会制造错误安全感 | 完整测试；basic/release smoke | T10 | 活跃 |
+| T4-UNKNOWN-01 | `src/services/api.ts` | 尚未迁 owner 的 symbol/settings/cache/maintenance/price/resolve endpoint 返回 `Promise<unknown>` | T4 只验证已有 TS consumer 依赖的 endpoint；提前声明业务 shape 会制造错误安全感 | 完整测试；basic/overlay-heavy/drawing-check smoke | T10 | 已关闭（T10：所有活跃 owner consumer 已收窄 raw payload；未消费 endpoint 与 transport 保持 `unknown` boundary） |
 | T6-LWC-01 | `src/chart-adapter/ordinalHorzScaleBehavior.ts` | 默认 time behavior options 局部断言为 ordinal `ChartOptionsImpl` | Lightweight Charts 只导出同一 behavior contract 的不同 horizontal item 泛型；运行时 options 结构相同，适配只存在于 custom ordinal behavior | ordinal behavior 7/7；chart type matrix | T13 | 活跃 |
 | T6-LWC-02 | `src/chart-adapter/seriesLifecycle.ts` | 动态 series factory 结果从 `unknown` 局部断言为 adapter handle | 运行时在 15 种 built-in/custom series 间选择，库的互斥 series 泛型无法由动态 descriptor 单次穷尽；断言限制在两个 factory helper | main series model 22/22；series lifecycle 9/9；chart type matrix | T13 | 活跃 |
 | T6-LWC-03 | `src/chart-adapter/overlaySeriesRenderer.ts` | `0 as LineWidth` 与数字 line style 局部断言 | 库声明的 `LineWidth` 排除运行时支持的 0；现有 area fill 以 0 隐藏边线，hline payload 仍使用持久化数字 style | overlay renderer 专项；export/drawing/overlay-heavy smoke | T13 | 活跃 |

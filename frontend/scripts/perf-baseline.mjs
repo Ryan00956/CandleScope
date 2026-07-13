@@ -10,12 +10,19 @@ import {
   INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS,
   summarizeIndicatorRangeRequests,
 } from "./indicator-range-network-capture.mjs";
+import {
+  buildHeapAcceptance,
+  summarizeHeapSamples,
+} from "./perf-baseline-metrics.mjs";
 
 const DEFAULT_URL = "http://127.0.0.1:15173/";
 const DEFAULT_DURATION_MS = 30 * 60 * 1000;
 const DEFAULT_SAMPLE_MS = 5_000;
 const DEFAULT_OUT = "docs/perf-baselines/2026-07-phase0.json";
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
+const ACCEPTANCE_MAX_BARS = 10_000;
+const ACCEPTANCE_MAX_HEAP_DELTA_PCT = 10;
+const DEFAULT_MIN_HEAP_DURATION_MS = 60 * 60 * 1000;
 
 function parseArgs(argv) {
   const args = {
@@ -26,6 +33,9 @@ function parseArgs(argv) {
     phase: process.env.PERF_BASELINE_PHASE || "phase0",
     chromePath: process.env.CHROME_PATH || "",
     switches: Number(process.env.PERF_BASELINE_SWITCHES || 10),
+    minHeapDurationMs: Number(
+      process.env.PERF_BASELINE_MIN_HEAP_DURATION_MS || DEFAULT_MIN_HEAP_DURATION_MS,
+    ),
     switchList: (process.env.PERF_BASELINE_SWITCH_LIST || "1m,5m,15m,1h")
       .split(",")
       .map((value) => value.trim())
@@ -41,6 +51,7 @@ function parseArgs(argv) {
     else if (arg === "--phase") args.phase = argv[++i];
     else if (arg === "--chrome") args.chromePath = argv[++i];
     else if (arg === "--switches") args.switches = Number(argv[++i]);
+    else if (arg === "--min-heap-duration-ms") args.minHeapDurationMs = Number(argv[++i]);
     else if (arg === "--switch-list") {
       args.switchList = String(argv[++i] || "")
         .split(",")
@@ -285,27 +296,108 @@ function summarizeEvents(events, durationMs) {
   };
 }
 
-function summarizeHeap(samples) {
-  const used = samples
-    .map((sample) => Number(sample.usedJSHeapSize))
-    .filter(Number.isFinite);
-  const first = used[0] ?? null;
-  const last = used[used.length - 1] ?? null;
-  return {
-    samples: used.length,
-    firstUsedJSHeapSize: first,
-    lastUsedJSHeapSize: last,
-    maxUsedJSHeapSize: used.length ? Math.max(...used) : null,
-    deltaBytes: first != null && last != null ? last - first : null,
-    deltaPct: first > 0 && last != null ? Number((((last - first) / first) * 100).toFixed(3)) : null,
-  };
-}
-
 function summarizeIndicatorNetworkByPhase(records) {
   const phases = Array.from(new Set(records.map((record) => record.phase).filter(Boolean)));
   return Object.fromEntries(
     phases.map((phase) => [phase, summarizeIndicatorRangeRequests(records, { phase })]),
   );
+}
+
+function remoteObjectSummary(value) {
+  if (!value || typeof value !== "object") return null;
+  const summary = {
+    type: value.type || null,
+    subtype: value.subtype || null,
+  };
+  if (value.unserializableValue != null) {
+    summary.value = String(value.unserializableValue);
+  } else if (Object.hasOwn(value, "value")) {
+    summary.value = value.value == null || ["string", "number", "boolean"].includes(typeof value.value)
+      ? value.value ?? null
+      : String(value.description || "[object]");
+  } else if (value.description != null) {
+    summary.value = String(value.description);
+  } else {
+    summary.value = null;
+  }
+  return summary;
+}
+
+function stackTraceSummary(stackTrace) {
+  if (!Array.isArray(stackTrace?.callFrames)) return [];
+  return stackTrace.callFrames.map((frame) => ({
+    functionName: frame.functionName || "",
+    url: frame.url || "",
+    lineNumber: Number.isFinite(frame.lineNumber) ? frame.lineNumber : null,
+    columnNumber: Number.isFinite(frame.columnNumber) ? frame.columnNumber : null,
+  }));
+}
+
+function summarizeCapturedErrors({ samples, consoleErrors, runtimeExceptions, networkFailures }) {
+  return {
+    sampleErrors: samples.filter((sample) => sample.error).length,
+    consoleErrors: consoleErrors.length,
+    runtimeExceptions: runtimeExceptions.length,
+    networkLoadingFailed: networkFailures.length,
+  };
+}
+
+function acceptanceCheck(actual, expected, passed, extra = {}) {
+  return { actual, expected, passed, ...extra };
+}
+
+function buildAcceptance({
+  errors,
+  heap,
+  requestedSwitches,
+  requiredHeapDurationMs,
+  switches,
+  chartDataCommit,
+}) {
+  const latestBars = chartDataCommit?.bars?.latest;
+  const maxBars = chartDataCommit?.bars?.max;
+  const checks = {
+    sampleErrors: acceptanceCheck(errors.sampleErrors, 0, errors.sampleErrors === 0),
+    consoleErrors: acceptanceCheck(errors.consoleErrors, 0, errors.consoleErrors === 0),
+    runtimeExceptions: acceptanceCheck(
+      errors.runtimeExceptions,
+      0,
+      errors.runtimeExceptions === 0,
+    ),
+    networkLoadingFailed: acceptanceCheck(
+      errors.networkLoadingFailed,
+      0,
+      errors.networkLoadingFailed === 0,
+      { note: "Canceled requests are excluded." },
+    ),
+    intervalSwitches: {
+      requested: requestedSwitches,
+      attempted: switches.attempted,
+      succeeded: switches.succeeded,
+      failed: switches.failed,
+      passed: switches.attempted === requestedSwitches
+        && switches.succeeded === requestedSwitches
+        && switches.failed === 0,
+    },
+    latestBars: acceptanceCheck(
+      latestBars,
+      `finite value <= ${ACCEPTANCE_MAX_BARS}`,
+      Number.isFinite(latestBars) && latestBars <= ACCEPTANCE_MAX_BARS,
+    ),
+    maxBars: acceptanceCheck(
+      maxBars,
+      `finite value <= ${ACCEPTANCE_MAX_BARS}`,
+      Number.isFinite(maxBars) && maxBars <= ACCEPTANCE_MAX_BARS,
+    ),
+    heapDeltaPct: buildHeapAcceptance(heap, {
+      requiredDurationMs: requiredHeapDurationMs,
+      maxDeltaPct: ACCEPTANCE_MAX_HEAP_DELTA_PCT,
+    }),
+  };
+  return {
+    passed: Object.values(checks).every((check) => check.passed !== false),
+    checks,
+  };
 }
 
 function dedupeKey(event) {
@@ -367,6 +459,9 @@ async function run() {
   if (!Number.isFinite(args.sampleMs) || args.sampleMs <= 0) {
     throw new Error("--sample-ms must be a positive number");
   }
+  if (!Number.isFinite(args.minHeapDurationMs) || args.minHeapDurationMs <= 0) {
+    throw new Error("--min-heap-duration-ms must be a positive number");
+  }
 
   const chromePath = findChrome(args.chromePath);
   if (!chromePath) throw new Error("Chrome or Edge executable not found. Pass --chrome <path>.");
@@ -378,6 +473,7 @@ async function run() {
     `--user-data-dir=${profileDir}`,
     "--no-first-run",
     "--no-default-browser-check",
+    "--enable-precise-memory-info",
     `--window-size=${DEFAULT_VIEWPORT.width},${DEFAULT_VIEWPORT.height}`,
     "about:blank",
   ], { stdio: "ignore" });
@@ -389,6 +485,46 @@ async function run() {
     const page = targets.find((target) => target.type === "page") || targets[0];
     cdp = await connectWebSocket(page.webSocketDebuggerUrl);
     indicatorRangeNetworkCapture = createIndicatorRangeNetworkCapture(cdp);
+    const consoleErrors = [];
+    const runtimeExceptions = [];
+    const networkFailures = [];
+    cdp.on("Runtime.consoleAPICalled", (event) => {
+      if (event?.type !== "error") return;
+      consoleErrors.push({
+        atMs: Date.now(),
+        timestamp: event.timestamp ?? null,
+        executionContextId: event.executionContextId ?? null,
+        args: (event.args || []).map(remoteObjectSummary),
+        stackTrace: stackTraceSummary(event.stackTrace),
+      });
+    });
+    cdp.on("Runtime.exceptionThrown", (event) => {
+      const detail = event?.exceptionDetails || {};
+      runtimeExceptions.push({
+        atMs: Date.now(),
+        timestamp: event?.timestamp ?? null,
+        exceptionId: detail.exceptionId ?? null,
+        text: detail.text || "",
+        url: detail.url || "",
+        lineNumber: Number.isFinite(detail.lineNumber) ? detail.lineNumber : null,
+        columnNumber: Number.isFinite(detail.columnNumber) ? detail.columnNumber : null,
+        exception: remoteObjectSummary(detail.exception),
+        stackTrace: stackTraceSummary(detail.stackTrace),
+      });
+    });
+    cdp.on("Network.loadingFailed", (event) => {
+      const canceled = Boolean(event?.canceled || event?.errorText === "net::ERR_ABORTED");
+      if (canceled) return;
+      networkFailures.push({
+        atMs: Date.now(),
+        requestId: event?.requestId || null,
+        timestamp: event?.timestamp ?? null,
+        type: event?.type || null,
+        errorText: event?.errorText || null,
+        blockedReason: event?.blockedReason || null,
+        corsErrorStatus: event?.corsErrorStatus || null,
+      });
+    });
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable", INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS);
     await cdp.send("Page.enable");
@@ -441,34 +577,57 @@ async function run() {
     await indicatorRangeNetworkCapture.flush();
     const indicatorRangeRequests = indicatorRangeNetworkCapture.records();
     const indicatorRangeNetwork = indicatorRangeNetworkCapture.summary();
+    const eventSummary = summarizeEvents(events, durationMs);
+    const heapSummary = summarizeHeapSamples(heapSamples, durationMs);
+    const switchesSummary = {
+      attempted: switchAttempts.length,
+      succeeded: switchAttempts.filter((item) => item.ok).length,
+      failed: switchAttempts.filter((item) => !item.ok).length,
+    };
+    const errorsSummary = summarizeCapturedErrors({
+      samples,
+      consoleErrors,
+      runtimeExceptions,
+      networkFailures,
+    });
+    const acceptance = buildAcceptance({
+      errors: errorsSummary,
+      heap: heapSummary,
+      requiredHeapDurationMs: args.minHeapDurationMs,
+      requestedSwitches: args.switches,
+      switches: switchesSummary,
+      chartDataCommit: eventSummary.chartDataCommit,
+    });
     const output = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       phase: args.phase,
       generatedAt: new Date().toISOString(),
       config: {
         url: args.url,
         durationMs,
         sampleMs: args.sampleMs,
+        minHeapDurationMs: args.minHeapDurationMs,
         switchesRequested: args.switches,
         switchList: args.switchList,
       },
       summary: {
-        ...summarizeEvents(events, durationMs),
-        heap: summarizeHeap(heapSamples),
-        switches: {
-          attempted: switchAttempts.length,
-          succeeded: switchAttempts.filter((item) => item.ok).length,
-          failed: switchAttempts.filter((item) => !item.ok).length,
-        },
+        ...eventSummary,
+        heap: heapSummary,
+        switches: switchesSummary,
+        errors: errorsSummary,
         indicatorRangeNetwork: {
           ...indicatorRangeNetwork,
           byPhase: summarizeIndicatorNetworkByPhase(indicatorRangeRequests),
         },
+        acceptance,
       },
       raw: {
         samples,
         heapSamples,
         switchAttempts,
+        consoleErrors,
+        runtimeExceptions,
+        networkFailures,
         events,
         indicatorRangeRequests,
       },
@@ -478,6 +637,7 @@ async function run() {
     fs.writeFileSync(args.out, `${JSON.stringify(output, null, 2)}\n`, "utf8");
     console.log(`Wrote ${args.phase} performance baseline to ${args.out}`);
     console.log(JSON.stringify(output.summary, null, 2));
+    if (!acceptance.passed) process.exitCode = 1;
   } finally {
     cdp?.close?.();
     if (chrome.exitCode === null) chrome.kill();

@@ -1,6 +1,6 @@
 import { memo, useMemo } from "react";
 import ExportPreviewPanel from "./ExportPreviewPanel";
-import { buildExportFilename } from "../../utils/exportFilename";
+import { buildExportFilename } from "../../utils/exportFilename.js";
 
 const SCOPE_OPTIONS = [
   { value: "chart", label: "整张图表", desc: "包含主图和所有指标窗格" },
@@ -17,7 +17,11 @@ const FORMAT_OPTIONS = [
 const SCALE_OPTIONS = [1, 2, 3];
 
 function patchOptions(options, onChange, patch) {
-  onChange({ ...options, ...patch });
+  const nextOptions = { ...options, ...patch };
+  if (nextOptions.format === "jpeg" && nextOptions.backgroundColor === "transparent") {
+    nextOptions.backgroundColor = "auto";
+  }
+  onChange(nextOptions);
 }
 
 const ExportPanel = memo(function ExportPanel({
@@ -74,6 +78,7 @@ const ExportPanel = memo(function ExportPanel({
                 <button
                   key={item.value}
                   type="button"
+                  data-export-scope={item.value}
                   className={`export-option-card ${options.scope === item.value ? "active" : ""}`}
                   onClick={() => patchOptions(options, onOptionsChange, { scope: item.value })}
                 >
@@ -91,6 +96,7 @@ const ExportPanel = memo(function ExportPanel({
                 <button
                   key={item.value}
                   type="button"
+                  data-export-format={item.value}
                   className={`export-option-card ${options.format === item.value ? "active" : ""}`}
                   onClick={() => patchOptions(options, onOptionsChange, { format: item.value })}
                 >
@@ -121,11 +127,12 @@ const ExportPanel = memo(function ExportPanel({
               <div className="export-section-label">背景</div>
               <select
                 className="export-select"
+                data-export-option="background"
                 value={options.backgroundColor || "auto"}
                 onChange={(event) => patchOptions(options, onOptionsChange, { backgroundColor: event.target.value })}
               >
                 <option value="auto">跟随图表</option>
-                <option value="transparent">透明</option>
+                <option value="transparent" disabled={options.format === "jpeg"}>透明（PNG / WebP）</option>
                 <option value="#0f172a">深色</option>
                 <option value="#ffffff">白色</option>
               </select>
@@ -151,6 +158,7 @@ const ExportPanel = memo(function ExportPanel({
             <label className="export-checkbox-row">
               <input
                 type="checkbox"
+                data-export-option="hide-drawings"
                 checked={!!options.hideDrawings}
                 onChange={(event) => patchOptions(options, onOptionsChange, { hideDrawings: event.target.checked })}
               />
@@ -162,6 +170,7 @@ const ExportPanel = memo(function ExportPanel({
             <label className="export-checkbox-row">
               <input
                 type="checkbox"
+                data-export-option="watermark-enabled"
                 checked={!!options.watermarkEnabled}
                 onChange={(event) => patchOptions(options, onOptionsChange, { watermarkEnabled: event.target.checked })}
               />
@@ -177,6 +186,7 @@ const ExportPanel = memo(function ExportPanel({
               <div className="export-section-label">水印文本</div>
               <textarea
                 className="export-textarea"
+                data-export-option="watermark-text"
                 rows={2}
                 placeholder="留空则自动生成"
                 value={options.watermarkText || ""}
@@ -202,6 +212,7 @@ const ExportPanel = memo(function ExportPanel({
             <button type="button" className="export-secondary-btn" onClick={onClose} disabled={inProgress}>关闭</button>
             <button
               type="button"
+              data-export-action="save"
               className="export-primary-btn"
               onClick={() => onExport(options)}
               disabled={saveDisabled}

@@ -478,6 +478,8 @@ frontend/src/chart-adapter/
   - `frontend/ARCHITECTURE_zh.md` 总图更新。
 - [ ] **7.5 终验性能采集**:重跑 Phase 0 脚本,产出 `docs/perf-baselines/2026-XX-phase7.json`,逐项对照 §1.5 预算,写入本文档"终验记录"。
   - 2026-07-02 已产出 2 分钟 quick baseline:`docs/perf-baselines/2026-07-phase7.json`;4 次周期切换均成功,latest bars=1502,`setData/update=0.142857`。
+  - 2026-07-13 收口后 quick baseline:`docs/perf-baselines/2026-07-release-quick.json`;4/4 周期切换成功,latest/max bars=1501/1502,四类运行时错误均为 0;预热后约 55 秒的首尾窗口 heap 中位数变化 +1.384%(短样本仅记录,不作为 1 小时预算结论)。
+  - 已提供 `npm run perf:soak:1h` / `npm run perf:soak:4h`;命令会额外运行 6 分钟覆盖预热,以首尾稳定窗口中位数计算 heap,并对有效观测时长、bars 上限、周期切换、console/runtime/network 错误及 heap <10% 返回失败退出码。
   - 该样本不是 1 小时/4 小时 soak,不能关闭 heap 增幅与长期稳定性预算。
 
 ### 验收(终验)

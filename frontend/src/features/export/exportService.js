@@ -4,7 +4,7 @@ import {
   buildDefaultWatermark,
   buildExportFilename,
   getExportMimeType,
-} from "../../utils/exportFilename";
+} from "../../utils/exportFilename.js";
 
 export const DEFAULT_EXPORT_OPTIONS = {
   scope: "chart",
@@ -60,6 +60,11 @@ export function canvasToBlob(canvas, format, quality) {
     canvas.toBlob((blob) => {
       if (!blob) {
         reject(new Error("浏览器未能生成图片 Blob。"));
+        return;
+      }
+      if (blob.type !== mimeType) {
+        const actualType = blob.type || "未知格式";
+        reject(new Error(`浏览器不支持当前导出格式（期望 ${mimeType}，实际 ${actualType}）。`));
         return;
       }
       resolve(blob);
@@ -149,6 +154,75 @@ function finalizeCanvas(sourceCanvas, options, targetElement) {
   return canvas;
 }
 
+export function buildCanvasCropPlan({
+  sourceWidth,
+  sourceHeight,
+  targetWidth,
+  targetHeight,
+  cropRect,
+} = {}) {
+  const sourceW = Number(sourceWidth);
+  const sourceH = Number(sourceHeight);
+  const targetW = Number(targetWidth);
+  const targetH = Number(targetHeight);
+  if (
+    !cropRect
+    || !Number.isFinite(sourceW)
+    || !Number.isFinite(sourceH)
+    || !Number.isFinite(targetW)
+    || !Number.isFinite(targetH)
+    || sourceW <= 0
+    || sourceH <= 0
+    || targetW <= 0
+    || targetH <= 0
+  ) return null;
+
+  const scaleX = sourceW / targetW;
+  const scaleY = sourceH / targetH;
+  const left = Math.max(0, Number(cropRect.x) || 0);
+  const top = Math.max(0, Number(cropRect.y) || 0);
+  const width = Number(cropRect.width);
+  const height = Number(cropRect.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+
+  const sx = Math.min(sourceW - 1, Math.round(left * scaleX));
+  const sy = Math.min(sourceH - 1, Math.round(top * scaleY));
+  const sw = Math.min(sourceW - sx, Math.max(1, Math.round(width * scaleX)));
+  const sh = Math.min(sourceH - sy, Math.max(1, Math.round(height * scaleY)));
+  return { sx, sy, sw, sh };
+}
+
+function cropCapturedCanvas(sourceCanvas, cropRect, targetElement) {
+  if (!cropRect) return sourceCanvas;
+  const targetRect = targetElement.getBoundingClientRect();
+  const plan = buildCanvasCropPlan({
+    sourceWidth: sourceCanvas.width,
+    sourceHeight: sourceCanvas.height,
+    targetWidth: targetRect.width,
+    targetHeight: targetRect.height,
+    cropRect,
+  });
+  if (!plan) return sourceCanvas;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = plan.sw;
+  canvas.height = plan.sh;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("无法创建主窗格导出画布。 ");
+  ctx.drawImage(
+    sourceCanvas,
+    plan.sx,
+    plan.sy,
+    plan.sw,
+    plan.sh,
+    0,
+    0,
+    plan.sw,
+    plan.sh,
+  );
+  return canvas;
+}
+
 function captureCanvasFallback(targetElement, options) {
   const rect = targetElement.getBoundingClientRect();
   const scale = Number(options.scale) || 1;
@@ -221,8 +295,12 @@ function selectTargetElement(snapshot, options) {
   return snapshot?.rootElement;
 }
 
-function normalizeExportOptions(rawOptions = {}) {
-  return { ...DEFAULT_EXPORT_OPTIONS, ...rawOptions };
+export function normalizeExportOptions(rawOptions = {}) {
+  const options = { ...DEFAULT_EXPORT_OPTIONS, ...rawOptions };
+  if (options.format === "jpeg" && options.backgroundColor === "transparent") {
+    options.backgroundColor = "auto";
+  }
+  return options;
 }
 
 export function buildExportOptionsKey(rawOptions = {}) {
@@ -243,6 +321,7 @@ export function buildExportOptionsKey(rawOptions = {}) {
     marketType: metadata.marketType || "",
     symbol: metadata.symbol || "",
     interval: metadata.interval || "",
+    theme: metadata.theme || "",
   });
 }
 
@@ -255,7 +334,10 @@ export async function renderExportImage(snapshot, rawOptions = {}) {
 
   await waitForFrames();
   const capturedCanvas = await captureElementToCanvas(targetElement, options);
-  const finalCanvas = finalizeCanvas(capturedCanvas, options, targetElement);
+  const scopedCanvas = options.scope === "main-pane"
+    ? cropCapturedCanvas(capturedCanvas, snapshot?.mainPane?.captureRect, targetElement)
+    : capturedCanvas;
+  const finalCanvas = finalizeCanvas(scopedCanvas, options, targetElement);
   const blob = await canvasToBlob(finalCanvas, options.format, options.quality);
   const filename = options.filename || buildExportFilename({
     prefix: options.filenamePrefix,
@@ -272,7 +354,7 @@ export async function renderExportImage(snapshot, rawOptions = {}) {
     filename,
     width: finalCanvas.width,
     height: finalCanvas.height,
-    mimeType: getExportMimeType(options.format),
+    mimeType: blob.type,
     optionsKey: buildExportOptionsKey(options),
   };
 }

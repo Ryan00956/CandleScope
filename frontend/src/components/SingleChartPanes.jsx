@@ -9,10 +9,12 @@ import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBri
 import { applyChartPaneAppearance, buildChartPaneOptions } from "../chart-adapter/chartPaneLifecycle";
 import { buildPaneLayoutOptions, createChartInstance } from "../chart-adapter/lightweightChartSurface";
 import {
+  buildIndicatorSeriesOptions,
   createIndicatorSeries,
   createMainSeries,
   removeSeriesEntries,
   replaceMainSeries,
+  shouldPreferIndicatorSetData,
 } from "../chart-adapter/seriesLifecycle";
 import { ensurePane, readPaneHeights, setPaneHeights } from "../chart-adapter/paneManager";
 import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRenderer";
@@ -1368,75 +1370,112 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const structureChanged = structuralKey !== prevIndicatorKeyRef.current;
     prevIndicatorKeyRef.current = structuralKey;
 
-    if (!structureChanged && indicatorSeriesRef.current.length > 0) {
-      for (const entry of indicatorSeriesRef.current) {
-        const line = paneDescriptors
-          .find((pane) => pane.id === entry.paneId)
-          ?.lines
-          ?.find((candidate) => (candidate.id || candidate.name) === (entry.lineConfig.id || entry.lineConfig.name));
-        if (!line) continue;
-        const validData = normalizeLineSeriesData(line, renderDataTimeSet);
-        applyLineSeriesData(entry.series, validData, entry.data, {
-          datasetKey,
-          indicatorId: line.indicatorId,
-          interval,
-          paneId: entry.paneId,
-          line: line.name || line.id,
-          type: line.type || "line",
-          path: "single-fast",
-        }, recordPerfEvent, { preferSetData: usesDerivedAxis });
-        entry.lineConfig = line;
-        entry.data = validData;
-      }
-      return;
+    const entryKey = (pane, line) => JSON.stringify([
+      pane.id,
+      pane.paneIndex,
+      line.indicatorId || "",
+      line.id || line.name || "",
+      line.type || "line",
+    ]);
+    const existingByKey = new Map();
+    for (const entry of indicatorSeriesRef.current) {
+      const key = entry.key || JSON.stringify([
+        entry.paneId,
+        entry.paneIndex,
+        entry.lineConfig?.indicatorId || "",
+        entry.lineConfig?.id || entry.lineConfig?.name || "",
+        entry.lineConfig?.type || "line",
+      ]);
+      const matches = existingByKey.get(key) || [];
+      matches.push(entry);
+      existingByKey.set(key, matches);
     }
 
-    const removedSeriesCount = removeSeriesEntries(chart, indicatorSeriesRef.current);
-    if (removedSeriesCount > 0) {
-      recordPerfEvent("chart.indicatorSeries.remove", {
-        paneId: "single-chart",
-        reason: "rebuild",
-        series: removedSeriesCount,
-      });
-    }
-    indicatorSeriesRef.current = [];
-
+    const nextEntries = [];
+    const retainedEntries = new Set();
     let createdSeriesCount = 0;
     for (const pane of paneDescriptors) {
       for (const line of pane.lines || []) {
-        if (!line.data?.length) continue;
+        const key = entryKey(pane, line);
+        const matches = existingByKey.get(key) || [];
+        const existing = matches.shift() || null;
+        const validData = normalizeLineSeriesData(line, renderDataTimeSet);
+        const detail = {
+          datasetKey,
+          indicatorId: line.indicatorId,
+          interval,
+          paneId: pane.id,
+          line: line.name || line.id,
+          type: line.type || "line",
+        };
+
+        if (existing) {
+          existing.series.applyOptions?.(buildIndicatorSeriesOptions(line, {
+            crosshairMarkerVisible: !DRAWING_ENGINE_TOOL_IDS.has(effectiveDrawingTool),
+          }));
+          applyLineSeriesData(existing.series, validData, existing.data, {
+            ...detail,
+            path: "single-fast",
+          }, recordPerfEvent, {
+            preferSetData: shouldPreferIndicatorSetData({
+              createdAtMs: existing.createdAtMs,
+              usesDerivedAxis,
+            }),
+          });
+          existing.key = key;
+          existing.paneId = pane.id;
+          existing.paneIndex = pane.paneIndex;
+          existing.lineConfig = line;
+          existing.data = validData;
+          retainedEntries.add(existing);
+          nextEntries.push(existing);
+          continue;
+        }
+
+        if (validData.length === 0) continue;
         try {
           const series = createIndicatorSeries(chart, line, {
             paneIndex: pane.paneIndex,
             crosshairMarkerVisible: !DRAWING_ENGINE_TOOL_IDS.has(effectiveDrawingTool),
           });
-          const validData = normalizeLineSeriesData(line, renderDataTimeSet);
-          if (validData.length > 0) {
-            series.setData(validData);
-            recordPerfEvent("chart.indicatorSeries.setData", {
-              datasetKey,
-              indicatorId: line.indicatorId,
-              interval,
-              paneId: pane.id,
-              line: line.name || line.id,
-              type: line.type || "line",
-              path: "single-rebuild",
-              points: validData.length,
-            });
-          }
+          series.setData(validData);
+          recordPerfEvent("chart.indicatorSeries.setData", {
+            ...detail,
+            path: "single-reconcile",
+            points: validData.length,
+          });
           recordPerfEvent("chart.indicatorSeries.create", {
             paneId: pane.id,
-            line: line.name || line.id || indicatorSeriesRef.current.length,
+            line: line.name || line.id || nextEntries.length,
             type: line.type || "line",
-            path: "single-rebuild",
+            path: "single-reconcile",
           });
-          indicatorSeriesRef.current.push({ paneId: pane.id, paneIndex: pane.paneIndex, series, lineConfig: line, data: validData });
+          nextEntries.push({
+            createdAtMs: Date.now(),
+            key,
+            paneId: pane.id,
+            paneIndex: pane.paneIndex,
+            series,
+            lineConfig: line,
+            data: validData,
+          });
           createdSeriesCount += 1;
         } catch (err) {
           console.warn("SingleChartPanes: failed to add indicator series:", err);
         }
       }
     }
+
+    const staleEntries = indicatorSeriesRef.current.filter((entry) => !retainedEntries.has(entry));
+    const removedSeriesCount = removeSeriesEntries(chart, staleEntries);
+    if (removedSeriesCount > 0) {
+      recordPerfEvent("chart.indicatorSeries.remove", {
+        paneId: "single-chart",
+        reason: "reconcile",
+        series: removedSeriesCount,
+      });
+    }
+    indicatorSeriesRef.current = nextEntries;
 
     const panes = chart.panes?.() || [];
     for (let paneIndex = panes.length - 1; paneIndex >= expectedPaneCount; paneIndex -= 1) {
@@ -1590,19 +1629,37 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     updateSelectedDrawingStyle,
     resetAutoScale,
     prepareExport: prepareDrawingExport,
-    getExportSnapshot: () => ({
-      rootElement: wrapperRef.current,
-      mainPane: {
-        paneId: "main",
-        paneType: "main",
-        rootElement: wrapperRef.current,
-        chartElement: containerRef.current,
-        rect: wrapperRef.current?.getBoundingClientRect?.() || null,
-      },
-      subPanes: paneDescriptors.filter((pane) => pane.id !== "main").map((pane) => ({ id: pane.id, paneType: "sub" })),
-      visibleRange: captureVisibleRange(),
-      loading,
-    }),
+    getExportSnapshot: () => {
+      const rootElement = wrapperRef.current;
+      const rootRect = rootElement?.getBoundingClientRect?.() || null;
+      const panes = chartRef.current?.panes?.() || [];
+      const mainPaneHeight = panes[0]?.getHeight?.();
+      const captureRect = panes.length > 1
+        && rootRect
+        && Number.isFinite(mainPaneHeight)
+        && mainPaneHeight > 0
+        ? {
+            x: 0,
+            y: 0,
+            width: rootRect.width,
+            height: Math.min(rootRect.height, mainPaneHeight),
+          }
+        : null;
+      return {
+        rootElement,
+        mainPane: {
+          paneId: "main",
+          paneType: "main",
+          rootElement,
+          chartElement: containerRef.current,
+          rect: rootRect,
+          captureRect,
+        },
+        subPanes: paneDescriptors.filter((pane) => pane.id !== "main").map((pane) => ({ id: pane.id, paneType: "sub" })),
+        visibleRange: captureVisibleRange(),
+        loading,
+      };
+    },
     seriesReady,
   }), [
     captureVisibleRange,

@@ -96,10 +96,12 @@ function strokeWidths(options, data, horizontalPixelRatio, verticalPixelRatio) {
   };
 }
 
-function strokeColor(direction, options) {
-  return direction === "down"
+function strokeColor(direction, options, data, bar) {
+  return data?.color
+    || bar?.barColor
+    || (direction === "down"
     ? (options?.downColor || DEFAULT_DOWN_COLOR)
-    : (options?.upColor || DEFAULT_UP_COLOR);
+    : (options?.upColor || DEFAULT_UP_COLOR));
 }
 
 function drawSegment(context, fromX, fromY, toX, toY, { color, lineWidth }) {
@@ -179,14 +181,14 @@ class KagiSeriesRenderer {
               centerX,
               turnY,
               {
-                color: strokeColor(previousDirection, this.options),
+                color: strokeColor(previousDirection, this.options, previousData, previousBar),
                 lineWidth: widths[style],
               },
             );
           }
         }
 
-        const color = strokeColor(direction, this.options);
+        const color = strokeColor(direction, this.options, originalData, bar);
         for (const section of sections) {
           const fromY = toY(section.from);
           const sectionToY = toY(section.to);

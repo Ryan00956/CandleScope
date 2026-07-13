@@ -6,6 +6,21 @@ import { buildMainSeriesData, buildMainSeriesOptions } from "./mainSeriesModel.j
 import { getChartTypeDescriptor } from "../features/chart-representation/chartTypeRegistry.js";
 import { normalizeMainChartType } from "../shared/mainChartTypes.js";
 
+export const INDICATOR_SERIES_INCREMENTAL_GRACE_MS = 1_500;
+
+export function shouldPreferIndicatorSetData({
+  createdAtMs,
+  nowMs = Date.now(),
+  usesDerivedAxis = false,
+} = {}) {
+  if (usesDerivedAxis) return true;
+  if (createdAtMs == null || nowMs == null) return true;
+  const created = Number(createdAtMs);
+  const now = Number(nowMs);
+  if (!Number.isFinite(created) || !Number.isFinite(now)) return true;
+  return now - created < INDICATOR_SERIES_INCREMENTAL_GRACE_MS;
+}
+
 export function createMainSeries(chart, {
   chartType,
   data = [],
@@ -85,9 +100,8 @@ export function replaceMainSeries(chart, previousSeries, {
   return { chartType: resolvedType, data: nextSeriesData, series };
 }
 
-export function createIndicatorSeries(chart, line, { crosshairMarkerVisible = true, paneIndex } = {}) {
+export function buildIndicatorSeriesOptions(line, { crosshairMarkerVisible = true } = {}) {
   const isHistogram = line?.type === "histogram";
-  const seriesType = isHistogram ? chartSeriesTypes.histogram : chartSeriesTypes.line;
   const options = {
     color: line?.color || "#f59e0b",
     lineWidth: isHistogram ? undefined : (line?.lineWidth || 2),
@@ -107,12 +121,29 @@ export function createIndicatorSeries(chart, line, { crosshairMarkerVisible = tr
     options.priceFormat = { type: "volume" };
   }
 
+  return options;
+}
+
+export function createIndicatorSeries(chart, line, { crosshairMarkerVisible = true, paneIndex } = {}) {
+  const isHistogram = line?.type === "histogram";
+  const seriesType = isHistogram ? chartSeriesTypes.histogram : chartSeriesTypes.line;
+  const options = buildIndicatorSeriesOptions(line, { crosshairMarkerVisible });
+
   return chart.addSeries(seriesType, options, paneIndex);
 }
 
 export function removeSeriesEntries(chart, entries = []) {
   let removed = 0;
   for (const entry of entries) {
+    try {
+      // Invalidate pending pane views before detaching the series. Hosted
+      // indicator snapshots can rebuild several line series within one frame;
+      // removing populated series directly lets Lightweight Charts render a
+      // stale view against an already-empty bar store.
+      entry.series?.setData?.([]);
+    } catch {
+      // Continue with detach; the series may already be partially torn down.
+    }
     try {
       chart.removeSeries(entry.series);
       removed += 1;

@@ -87,9 +87,11 @@ class PointFigureSeriesRenderer {
         );
         const halfSize = Math.max(1, Math.min(symbolWidth, symbolHeight) / 2);
         const centerX = bar.x * horizontalPixelRatio;
-        context.strokeStyle = direction === "x"
-          ? (this.options?.upColor || DEFAULT_UP_COLOR)
-          : (this.options?.downColor || DEFAULT_DOWN_COLOR);
+        context.strokeStyle = originalData?.color
+          || bar?.barColor
+          || (direction === "x"
+            ? (this.options?.upColor || DEFAULT_UP_COLOR)
+            : (this.options?.downColor || DEFAULT_DOWN_COLOR));
 
         // At this density individual glyphs cannot be distinguished anyway.
         // Draw a bounded column spine instead of allocating or painting tens

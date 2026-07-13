@@ -3,13 +3,14 @@ import test from "node:test";
 
 import { createPointFigureSeriesPaneView } from "../pointFigureSeries.js";
 
-function column({ direction, low, high, open, close }) {
+function column({ color, direction, low, high, open, close }) {
   return {
     time: 1,
     open,
     high,
     low,
     close,
+    ...(color ? { color } : {}),
     customValues: {
       pointAndFigure: { boxSize: 1, direction, reversalAmount: 3, source: "close" },
     },
@@ -67,9 +68,55 @@ test("Point & Figure renderer draws one X or O for every box in a visible column
   assert.deepEqual(strokes, ["green", "green", "green", "red", "red", "red"]);
 });
 
+test("Point & Figure renderer applies per-column barcolor overrides", () => {
+  const paneView = createPointFigureSeriesPaneView();
+  const strokes = [];
+  const context = {
+    beginPath() {},
+    ellipse() {},
+    lineTo() {},
+    moveTo() {},
+    stroke() { strokes.push(this.strokeStyle); },
+    lineCap: "",
+    lineJoin: "",
+    lineWidth: 0,
+    strokeStyle: "",
+  };
+  const columns = [
+    column({ color: "orange", direction: "x", low: 101, high: 102, open: 101, close: 102 }),
+    column({ direction: "o", low: 100, high: 101, open: 101, close: 100 }),
+  ];
+  paneView.update({
+    barSpacing: 12,
+    conflationFactor: 1,
+    visibleRange: { from: 0, to: 2 },
+    bars: [
+      { x: 10, originalData: columns[0], barColor: "cyan" },
+      { x: 22, originalData: columns[1], barColor: "purple" },
+    ],
+  }, { upColor: "green", downColor: "red", lineWidth: 2 });
+
+  paneView.renderer().draw({
+    useBitmapCoordinateSpace: (draw) => draw({
+      context,
+      horizontalPixelRatio: 1,
+      verticalPixelRatio: 1,
+    }),
+  }, (price) => 1200 - price * 10);
+
+  assert.deepEqual(strokes, ["orange", "orange", "purple", "purple"]);
+});
+
 test("dense Point & Figure columns remain autoscaled and use a bounded rendering fallback", () => {
   const paneView = createPointFigureSeriesPaneView();
-  const dense = column({ direction: "x", low: 1, high: 20_001, open: 1, close: 20_001 });
+  const dense = column({
+    color: "orange",
+    direction: "x",
+    low: 1,
+    high: 20_001,
+    open: 1,
+    close: 20_001,
+  });
   assert.equal(paneView.isWhitespace(dense), false);
 
   const moves = [];
@@ -100,5 +147,5 @@ test("dense Point & Figure columns remain autoscaled and use a bounded rendering
   }, (price) => 30_000 - price);
 
   assert.equal(moves.length, 1);
-  assert.deepEqual(strokes, ["green"]);
+  assert.deepEqual(strokes, ["orange"]);
 });

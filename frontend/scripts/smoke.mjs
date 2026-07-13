@@ -10,12 +10,14 @@ import {
   createIndicatorRangeNetworkCapture,
   INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS,
 } from "./indicator-range-network-capture.mjs";
+import { runExportMatrix } from "./export-matrix.mjs";
 import {
   resolveShortSwitchStepTransition,
   summarizeShortSwitchIndicatorReadiness,
 } from "./short-switch-readiness.mjs";
+import { runChartTypeMatrix } from "./chart-type-matrix.mjs";
 
-const DEFAULT_URL = "http://127.0.0.1:5173/";
+const DEFAULT_URL = "http://127.0.0.1:15173/";
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 };
 const SMOKE_MA_INDICATOR = {
@@ -93,6 +95,8 @@ function parseArgs(argv) {
     seedIndicators: process.env.SMOKE_SEED_INDICATORS !== "0",
     overlayHeavy: process.env.SMOKE_OVERLAY_HEAVY === "1",
     drawingCheck: process.env.SMOKE_DRAWING_CHECK === "1",
+    chartTypeMatrix: process.env.SMOKE_CHART_TYPE_MATRIX === "1",
+    exportMatrix: process.env.SMOKE_EXPORT_MATRIX === "1",
     shortSwitch: process.env.SMOKE_SHORT_SWITCH === "1",
     shortSwitchIntervals: (process.env.SMOKE_SHORT_SWITCH_INTERVALS || "15m,3m")
       .split(",")
@@ -113,6 +117,8 @@ function parseArgs(argv) {
     else if (arg === "--no-seed-indicators") args.seedIndicators = false;
     else if (arg === "--overlay-heavy") args.overlayHeavy = true;
     else if (arg === "--drawing-check") args.drawingCheck = true;
+    else if (arg === "--chart-type-matrix") args.chartTypeMatrix = true;
+    else if (arg === "--export-matrix") args.exportMatrix = true;
     else if (arg === "--short-switch") args.shortSwitch = true;
     else if (arg === "--short-switch-intervals") {
       args.shortSwitchIntervals = String(argv[++i] || "")
@@ -174,6 +180,17 @@ async function stopProcess(processHandle) {
     }),
     wait(2_000),
   ]);
+}
+
+async function removeDirectoryWithRetries(directory, attempts = 10) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      fs.rmSync(directory, { recursive: true, force: true });
+      return;
+    } catch {
+      if (attempt < attempts - 1) await wait(500);
+    }
+  }
 }
 
 function readHttpJson(url, options = {}) {
@@ -885,6 +902,41 @@ async function dispatchClick(cdp, x, y) {
   await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
 }
 
+async function dispatchDrag(cdp, fromX, fromY, toX, toY, steps = 8) {
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: fromX,
+    y: fromY,
+    button: "none",
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: fromX,
+    y: fromY,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  for (let step = 1; step <= steps; step += 1) {
+    const progress = step / steps;
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: Math.round(fromX + (toX - fromX) * progress),
+      y: Math.round(fromY + (toY - fromY) * progress),
+      button: "left",
+      buttons: 1,
+    });
+  }
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: toX,
+    y: toY,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+}
+
 async function readSavedDrawingCount(cdp, drawingKey) {
   const drawings = await readSavedDrawings(cdp, drawingKey);
   return drawings.length;
@@ -977,9 +1029,21 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
     drawingPersistedCount = await waitForSavedDrawing(cdp, drawingKey);
 
     if (drawingPersistedCount > 0) {
-      await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.94), Math.round(rect.y + rect.height * 0.35));
+      await clickSelector(cdp, '[data-drawing-tool="cursor"]');
       await wait(150);
-      await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.97), Math.round(rect.y + rect.height * 0.43));
+      await dispatchDrag(
+        cdp,
+        Math.round(rect.x + rect.width * 0.72),
+        Math.round(rect.y + rect.height * 0.58),
+        Math.round(rect.x + rect.width * 0.38),
+        Math.round(rect.y + rect.height * 0.58),
+      );
+      await wait(300);
+      await clickSelector(cdp, lineButtonSelector);
+      await wait(150);
+      await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.76), Math.round(rect.y + rect.height * 0.35));
+      await wait(150);
+      await dispatchClick(cdp, Math.round(rect.x + rect.width * 0.86), Math.round(rect.y + rect.height * 0.43));
       await wait(500);
       const savedDrawings = await readSavedDrawings(cdp, drawingKey);
       futureAnchorStored = savedDrawings.some((drawing) => (
@@ -1034,6 +1098,7 @@ async function main() {
   }
 
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "candlescope-smoke-"));
+  const downloadDir = fs.mkdtempSync(path.join(os.tmpdir(), "candlescope-downloads-"));
   const screenshot = args.screenshot || path.join(os.tmpdir(), "candlescope-smoke.png");
   const debugPort = await getFreePort();
   const debugBase = `http://127.0.0.1:${debugPort}`;
@@ -1051,6 +1116,7 @@ async function main() {
   ], { stdio: ["ignore", "ignore", "pipe"] });
 
   const warnings = [];
+  const exceptions = [];
   const failures = [];
   const responses = [];
   const requestUrls = new Map();
@@ -1072,6 +1138,18 @@ async function main() {
         });
       }
     });
+    cdp.on("Runtime.exceptionThrown", (event) => {
+      exceptions.push({
+        atMs: Date.now(),
+        timestamp: event.timestamp ?? null,
+        text: event.exceptionDetails?.exception?.description
+          || event.exceptionDetails?.text
+          || "Uncaught runtime exception",
+        url: event.exceptionDetails?.url || "",
+        lineNumber: event.exceptionDetails?.lineNumber ?? null,
+        columnNumber: event.exceptionDetails?.columnNumber ?? null,
+      });
+    });
     cdp.on("Network.requestWillBeSent", (event) => {
       if (event.requestId && event.request?.url) requestUrls.set(event.requestId, event.request.url);
     });
@@ -1091,6 +1169,13 @@ async function main() {
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable", INDICATOR_RANGE_NETWORK_ENABLE_OPTIONS);
     await cdp.send("Page.enable");
+    if (args.exportMatrix) {
+      await cdp.send("Browser.setDownloadBehavior", {
+        behavior: "allow",
+        downloadPath: downloadDir,
+        eventsEnabled: true,
+      });
+    }
     if (args.seedIndicators) {
       const activeIndicators = args.overlayHeavy ? SMOKE_OVERLAY_HEAVY_INDICATORS : SMOKE_ACTIVE_INDICATORS;
       await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
@@ -1111,6 +1196,16 @@ async function main() {
     await cdp.send("Page.navigate", { url: args.url });
 
     const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
+    const chartTypeMatrix = args.chartTypeMatrix
+      ? await runChartTypeMatrix({
+          args,
+          cdp,
+          consoleMessages: warnings,
+          wait,
+          waitForChartReady,
+          waitForExpression,
+        })
+      : null;
     let shortSwitch = null;
     let initialSeededIndicatorReport = null;
     if (args.shortSwitch) {
@@ -1120,6 +1215,18 @@ async function main() {
       indicatorRangeNetworkCapture.startPhase("post-short-switch");
     }
     const drawingWorkflow = args.drawingCheck ? await verifyDrawingWorkflow(cdp, args.timeoutMs) : null;
+    const exportMatrix = args.exportMatrix
+      ? await runExportMatrix({
+          cdp,
+          args,
+          downloadDir,
+          clickSelector,
+          wait,
+          waitForExpression,
+          waitForSelector,
+          getRuntimeIssueCount: () => exceptions.length,
+        })
+      : null;
     const lazySurfaces = await verifyLazySurfaces(cdp);
     const settings = await openSettings(cdp);
     const performanceTimings = await waitForSeededIndicatorReport(cdp, args);
@@ -1147,6 +1254,7 @@ async function main() {
       ...lazySurfaces,
       ...settings,
       drawingWorkflow,
+      exportMatrix,
       smokeTimings: {
         chartLoadedAtMs: loadedAt,
         drawingToolbarReadyMs: lazySurfaces.drawingToolbarReadyMs,
@@ -1163,13 +1271,17 @@ async function main() {
         requests: indicatorRangeRequests,
       },
       shortSwitch,
+      chartTypeMatrix,
       apiResponses: responses.slice(0, 20),
       failures,
       warnings: warnings.slice(0, 20),
+      exceptions: exceptions.slice(0, 20),
       screenshot,
       seededIndicators: args.seedIndicators,
       overlayHeavy: args.overlayHeavy,
       drawingCheck: args.drawingCheck,
+      chartTypeMatrixCheck: args.chartTypeMatrix,
+      exportMatrixCheck: args.exportMatrix,
       shortSwitchCheck: args.shortSwitch,
     };
 
@@ -1193,19 +1305,17 @@ async function main() {
       || (args.seedIndicators && !seededIndicatorCoverage)
       || (args.seedIndicators && args.overlayHeavy && !overlayHeavyCoverage)
       || (args.shortSwitch && !shortSwitch?.acceptance?.passed)
+      || (args.chartTypeMatrix && !chartTypeMatrix?.passed)
+      || (args.exportMatrix && !exportMatrix?.passed)
+      || exceptions.length > 0
+      || responses.some((response) => response.status >= 400)
       || failures.length > 0;
     process.exitCode = failed ? 1 : 0;
   } finally {
     if (cdp) cdp.close();
     await stopProcess(chrome);
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      try {
-        fs.rmSync(userDataDir, { recursive: true, force: true });
-        break;
-      } catch {
-        if (attempt < 9) await wait(500);
-      }
-    }
+    await removeDirectoryWithRetries(userDataDir);
+    await removeDirectoryWithRetries(downloadDir);
   }
 }
 

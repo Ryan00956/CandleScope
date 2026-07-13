@@ -88,17 +88,21 @@ node ./node_modules/vite/bin/vite.js build
 
 浏览器 smoke 验证：
 
-1. 启动后端到 `http://localhost:8000`。
-2. 启动 Vite 到 `5173`。
+1. 启动后端到 `http://localhost:18080`。
+2. 启动 Vite 到 `15173`。
 3. 运行仓库内 smoke 检查：
 
    ```bash
-   npm run smoke -- --url http://127.0.0.1:5173/
+   npm run smoke -- --url http://127.0.0.1:15173/
+   npm run smoke:release
    ```
 
    该检查会确认页面达到 `Connected to Binance`、非零 `bars`、
    `Live (WebSocket)`，确认 drawing toolbar 已加载，并确认懒加载的
    symbol search 和 Settings 面板可以打开。
+
+   `smoke:release` 额外验收 15 种主图类型的切换/刷新恢复，以及
+   PNG/JPEG/WebP、三个导出范围、水印、绘图隐藏和真实下载文件。
 
 Windows 下如果后端启动日志因为控制台编码失败，可用 UTF-8 输出启动：
 
@@ -110,8 +114,7 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ## 剩余工作
 
-- 收紧 lazy surface 的 smoke timing 粒度；当前浏览器 smoke 循环对产品验证是安全的，
-  但有 500 ms 的粗轮询下限。
+- 把 `smoke:release` 接入 CI，并为无交易所网络环境提供确定性的 mock 数据入口。
 - 继续以实测为依据优化 fills、markers、hlines 和 overlays 的图表渲染成本。
 - `SingleChartPanes` 内部简化继续以证据驱动。它仍然是最密集的图表模块，但
   Lightweight Charts 写操作应继续经 `chart-adapter`。

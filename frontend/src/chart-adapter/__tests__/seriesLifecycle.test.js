@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { replaceMainSeries } from "../seriesLifecycle.js";
+import {
+  INDICATOR_SERIES_INCREMENTAL_GRACE_MS,
+  removeSeriesEntries,
+  replaceMainSeries,
+  shouldPreferIndicatorSetData,
+} from "../seriesLifecycle.js";
 
 function createHarness({ failNextSetData = false } = {}) {
   const operations = [];
@@ -106,4 +111,63 @@ test("replaceMainSeries does not leak a replacement if reading rollback data fai
     "previous.seriesOrder",
     "previous.data",
   ]);
+});
+
+test("removeSeriesEntries clears indicator data before detaching each series", () => {
+  const operations = [];
+  const entries = [1, 2].map((id) => ({
+    series: {
+      id,
+      setData(data) {
+        operations.push(["setData", id, data]);
+      },
+    },
+  }));
+  const chart = {
+    removeSeries(series) {
+      operations.push(["removeSeries", series.id]);
+    },
+  };
+
+  assert.equal(removeSeriesEntries(chart, entries), 2);
+  assert.deepEqual(operations, [
+    ["setData", 1, []],
+    ["removeSeries", 1],
+    ["setData", 2, []],
+    ["removeSeries", 2],
+  ]);
+});
+
+test("removeSeriesEntries still detaches a stale series when clearing it fails", () => {
+  const removed = [];
+  const series = {
+    setData() {
+      throw new Error("already detached");
+    },
+  };
+  const chart = {
+    removeSeries(value) {
+      removed.push(value);
+    },
+  };
+
+  assert.equal(removeSeriesEntries(chart, [{ series }]), 1);
+  assert.deepEqual(removed, [series]);
+});
+
+test("indicator series use setData during their startup grace window", () => {
+  assert.equal(shouldPreferIndicatorSetData({
+    createdAtMs: 10_000,
+    nowMs: 10_000 + INDICATOR_SERIES_INCREMENTAL_GRACE_MS - 1,
+  }), true);
+  assert.equal(shouldPreferIndicatorSetData({
+    createdAtMs: 10_000,
+    nowMs: 10_000 + INDICATOR_SERIES_INCREMENTAL_GRACE_MS,
+  }), false);
+  assert.equal(shouldPreferIndicatorSetData({
+    createdAtMs: 10_000,
+    nowMs: 99_000,
+    usesDerivedAxis: true,
+  }), true);
+  assert.equal(shouldPreferIndicatorSetData({ createdAtMs: null, nowMs: 99_000 }), true);
 });

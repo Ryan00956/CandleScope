@@ -95,17 +95,22 @@ node ./node_modules/vite/bin/vite.js build
 
 For rendered smoke validation:
 
-1. Start the backend on `http://localhost:8000`.
-2. Start Vite on port `5173`.
+1. Start the backend on `http://localhost:18080`.
+2. Start Vite on port `15173`.
 3. Run the committed smoke check:
 
    ```bash
-   npm run smoke -- --url http://127.0.0.1:5173/
+   npm run smoke -- --url http://127.0.0.1:15173/
+   npm run smoke:release
    ```
 
    The smoke check confirms the page reaches `Connected to Binance`, non-zero
    `bars`, `Live (WebSocket)`, that the drawing toolbar loads, and that the
    lazy-loaded symbol search and Settings panels open.
+
+   `smoke:release` additionally validates all 15 main-chart types across
+   switching and reload restoration, plus PNG/JPEG/WebP, all three export
+   scopes, watermarking, drawing visibility, and real downloaded files.
 
 On Windows, if backend startup logs fail with a console encoding error, start
 the backend with UTF-8 output enabled:
@@ -118,8 +123,8 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ## Remaining Work
 
-- Tighten smoke timing granularity for lazy surfaces; the current browser
-  smoke loop is product-safe but has a coarse 500 ms polling floor.
+- Add `smoke:release` to CI and provide a deterministic mock-data entry point
+  for environments without exchange network access.
 - Continue measured chart rendering work around fills, markers, hlines,
   overlays, and visible-range restoration before attempting broader chart
   component refactors.

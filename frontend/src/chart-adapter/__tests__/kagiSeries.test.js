@@ -5,6 +5,7 @@ import { createKagiSeriesPaneView } from "../kagiSeries.js";
 
 function kagiRow({
   close,
+  color,
   direction,
   high,
   low,
@@ -20,6 +21,7 @@ function kagiRow({
     high,
     low,
     close,
+    ...(color ? { color } : {}),
     customValues: {
       kagi: {
         direction,
@@ -172,6 +174,39 @@ test("Kagi renderer draws vertical sections and a horizontal turn connector", ()
     ["moveTo", 44, 282],
     ["lineTo", 44, 300],
   ]);
+});
+
+test("Kagi renderer applies barcolor to legs and the preceding reversal connector", () => {
+  const paneView = createKagiSeriesPaneView();
+  const rows = [
+    kagiRow({
+      time: 10,
+      open: 100,
+      high: 110,
+      low: 100,
+      close: 110,
+      color: "orange",
+      direction: "up",
+      sections: [{ from: 100, to: 110, style: "yang" }],
+      state: "yang",
+    }),
+    kagiRow({
+      time: 20,
+      open: 110,
+      high: 110,
+      low: 100,
+      close: 100,
+      color: "purple",
+      direction: "down",
+      sections: [{ from: 110, to: 100, style: "yin" }],
+      state: "yin",
+      turnPrice: 110,
+    }),
+  ];
+
+  const strokes = draw(paneView, rows);
+
+  assert.deepEqual(strokes.map(({ color }) => color), ["orange", "orange", "purple"]);
 });
 
 test("Kagi renderer falls back to OHLC when metadata or valid sections are missing", () => {

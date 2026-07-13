@@ -206,7 +206,15 @@ npm run dev
 npm run build
 npm run lint
 npm run smoke -- --url http://127.0.0.1:15173/
+npm run smoke:chart-types
+npm run smoke:export
+npm run smoke:release
 ```
+
+`smoke:chart-types` switches through and reload-restores all 15 main chart
+types. `smoke:export` validates PNG/JPEG/WebP, all three capture scopes,
+drawing visibility, watermarking, and real downloaded files. `smoke:release`
+runs both matrices with drawing and indicator coverage.
 
 ## Indicators And Pyne
 
@@ -331,6 +339,10 @@ For rendered frontend smoke checks, start the backend and Vite, then run
 status bar reaches `Connected to Binance`, shows non-zero `bars`, reports
 `Live (WebSocket)`, loads the drawing toolbar, and opens the lazy-loaded symbol
 search and Settings panels.
+Changes to main chart types or export behavior should also run
+`npm run smoke:release`. Use `npm run perf:soak:1h` and
+`npm run perf:soak:4h` for long-running stability captures; reports are written
+under `docs/perf-baselines/`.
 
 ## Notes
 

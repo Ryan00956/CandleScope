@@ -8,9 +8,14 @@
     "build": "vite build",
     "check:architecture": "node scripts/check-architecture.mjs",
     "perf:baseline": "node scripts/perf-baseline.mjs",
+    "perf:soak:1h": "node scripts/perf-baseline.mjs --url http://127.0.0.1:15173/ --duration-ms 3960000 --min-heap-duration-ms 3600000 --sample-ms 5000 --out ../docs/perf-baselines/2026-07-release-1h.json --phase release-1h",
+    "perf:soak:4h": "node scripts/perf-baseline.mjs --url http://127.0.0.1:15173/ --duration-ms 14760000 --min-heap-duration-ms 14400000 --sample-ms 5000 --out ../docs/perf-baselines/2026-07-release-4h.json --phase release-4h",
     "lint": "eslint .",
     "preview": "vite preview",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:chart-types": "node scripts/smoke.mjs --url http://127.0.0.1:15173/ --chart-type-matrix --no-seed-indicators",
+    "smoke:export": "node scripts/smoke.mjs --url http://127.0.0.1:15173/ --export-matrix --drawing-check --overlay-heavy",
+    "smoke:release": "node scripts/smoke.mjs --url http://127.0.0.1:15173/ --chart-type-matrix --export-matrix --drawing-check --overlay-heavy",
     "test:drawing": "node --test src/features/drawings/__tests__/*.test.js"
   },
   "dependencies": {

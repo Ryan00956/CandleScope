@@ -226,7 +226,14 @@ npm run dev
 npm run build
 npm run lint
 npm run smoke -- --url http://127.0.0.1:15173/
+npm run smoke:chart-types
+npm run smoke:export
+npm run smoke:release
 ```
+
+`smoke:chart-types` 会逐一切换并刷新恢复全部 15 种主图类型；
+`smoke:export` 会验证 PNG/JPEG/WebP、三个导出范围、绘图隐藏、水印和真实下载文件；
+`smoke:release` 合并运行两套矩阵及绘图、指标覆盖。
 
 ## 指标和 Pyne
 
@@ -352,6 +359,9 @@ npm run lint
 `npm run smoke -- --url http://127.0.0.1:15173/`。该检查会确认状态栏达到
 `Connected to Binance`、显示非零 `bars`、显示 `Live (WebSocket)`，确认
 drawing toolbar 已加载，并打开懒加载的 symbol search 和 Settings 面板。
+主图类型或导出链路变更还应运行 `npm run smoke:release`。长时稳定性采集可分别运行
+`npm run perf:soak:1h` 和 `npm run perf:soak:4h`，结果写入
+`docs/perf-baselines/`。
 
 ## 说明
 

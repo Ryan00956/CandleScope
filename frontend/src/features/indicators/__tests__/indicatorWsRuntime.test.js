@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildHostedSubscriptionMessage,
   dispatchIndicatorWsMessage,
+  parseIndicatorWsMessage,
   resolveIndicatorSubscriptionCachePolicy,
 } from "../indicatorWsRuntime.js";
 
@@ -125,4 +126,38 @@ test("history-required preserves compatible cache unless revision data invalidat
   });
   assert.equal(dirty.invalidate, true);
   assert.deepEqual(dirty.dirtyRange, { start: 100, end: 200 });
+});
+
+test("WebSocket parser returns a typed patch message", () => {
+  const parsed = parseIndicatorWsMessage(JSON.stringify({
+    type: "indicator.patch",
+    clientId: "ma-1",
+    seq: 8,
+    range: { start: 100, end: 200 },
+    lines: [{ outputName: "ma", data: [{ time: 100, value: 10 }] }],
+  }));
+
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.message.type, "indicator.patch");
+  assert.equal(parsed.message.seq, 8);
+  assert.deepEqual(parsed.message.range, { start: 100, end: 200 });
+});
+
+test("WebSocket parser rejects malformed snapshot, patch, and replace-range messages", () => {
+  const malformed = [
+    { type: "indicator.snapshot", lines: [] },
+    { type: "indicator.patch", clientId: "ma-1", range: { start: 200, end: 100 } },
+    {
+      type: "indicator.replace_range",
+      clientId: "ma-1",
+      range: { start: 100, end: 200 },
+      lines: [{ data: [{ time: 100, value: "bad" }] }],
+    },
+  ];
+
+  for (const message of malformed) {
+    const parsed = parseIndicatorWsMessage(JSON.stringify(message));
+    assert.equal(parsed.ok, false);
+    assert.match(parsed.error.message, /Invalid indicator payload/);
+  }
 });

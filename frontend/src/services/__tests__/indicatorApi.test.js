@@ -75,3 +75,46 @@ test("batch serializes requests while keeping signal in fetch options", async (c
     requests: [{ clientId: "vol", start: 100, end: 200 }],
   });
 });
+
+test("range rejects malformed indicator output points", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ok: true,
+    lines: [{ outputName: "ma", data: [{ time: 100, value: "bad" }] }],
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+
+  await assert.rejects(
+    computeIndicatorRange({
+      clientId: "ma-1",
+      exchange: "binance",
+      marketType: "spot",
+      symbol: "BTCUSDT",
+      interval: "1m",
+      name: "MA",
+      start: 100,
+      end: 200,
+    }),
+    /indicator\.range\.lines\[0\]\.data\[0\]\.value/,
+  );
+});
+
+test("batch rejects malformed nested payload envelopes", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ok: true,
+    results: [{ clientId: "ma-1", payload: "not-an-object" }],
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+
+  await assert.rejects(
+    computeIndicatorRangeBatch({ requests: [] }),
+    /indicator\.rangeBatch\.results\[0\]\.payload/,
+  );
+});

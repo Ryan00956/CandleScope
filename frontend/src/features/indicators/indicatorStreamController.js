@@ -176,7 +176,12 @@ export function useIndicatorStreamController({
 
       socket.onmessage = (event) => {
         try {
-          const message = parseIndicatorWsMessage(event.data);
+          const parsed = parseIndicatorWsMessage(event.data);
+          if (!parsed.ok) {
+            console.warn("Indicator WS message parse failed:", parsed.error);
+            return;
+          }
+          const message = parsed.message;
           const seqState = resolveIndicatorWsSequenceState(message, lastSeq);
           if (seqState.hasGap && !gapResubscribeTimer) {
             console.warn(`Indicator WS sequence gap: expected ${seqState.expectedSeq}, got ${seqState.actualSeq}`);

@@ -403,9 +403,52 @@ export interface CustomIndicatorSaveInput extends Omit<
 }
 
 export interface PyneSecurityPolicy {
-  defaultMode: string;
-  allowedModes: string[];
+  mode: string;
+  timeoutSeconds: number;
   [key: string]: unknown;
+}
+
+export interface IndicatorDeleteResponse {
+  ok: true;
+  id: string;
+}
+
+export interface IndicatorWsParseSuccess {
+  ok: true;
+  message: IndicatorWsMessage;
+}
+
+export interface IndicatorWsParseFailure {
+  ok: false;
+  error: Error;
+}
+
+export type IndicatorWsParseResult =
+  IndicatorWsParseSuccess | IndicatorWsParseFailure;
+
+export interface IndicatorWsHandlers {
+  onSnapshot?: (indicatorId: string, message: IndicatorSnapshotMessage) => void;
+  onPatch?: (indicatorId: string, message: IndicatorPatchMessage) => void;
+  onReplaceRange?: (
+    indicatorId: string,
+    message: IndicatorReplaceRangeMessage,
+  ) => void;
+  onRecomputed?: (
+    indicatorId: string,
+    message: IndicatorRecomputedMessage,
+  ) => void;
+  onSubscribed?: (
+    indicatorId: string,
+    message: IndicatorSubscribedMessage,
+  ) => void;
+  onValues?: (
+    indicatorId: string,
+    values: Record<string, unknown>,
+    barTime: number,
+    isFinal: boolean,
+    message: IndicatorValuesMessage,
+  ) => void;
+  onError?: (indicatorId: string, message: IndicatorErrorMessage) => void;
 }
 
 export interface IndicatorCacheContext {

@@ -12,16 +12,56 @@
  *   POST /indicators/compute          → compute indicator (engine or script)
  */
 import { API_BASE, httpBaseToWsBase } from "./apiConfig.js";
+import {
+  isIndicatorRecord,
+  parseCustomIndicatorList,
+  parseCustomIndicatorRecord,
+  parseIndicatorDeleteResponse,
+  parseIndicatorPayloadEnvelope,
+  parseIndicatorPreset,
+  parseIndicatorPresetList,
+  parseIndicatorRangeBatchResponse,
+  parseIndicatorRegistryList,
+  parseIndicatorRegistrySpec,
+  parsePyneSecurityPolicy,
+} from "../features/indicators/indicatorContracts.js";
+import type {
+  CustomIndicatorRecord,
+  CustomIndicatorSaveInput,
+  IndicatorComputeRequest,
+  IndicatorDeleteResponse,
+  IndicatorPayloadEnvelope,
+  IndicatorPreset,
+  IndicatorRangeBatchResponse,
+  IndicatorRangeRequest,
+  IndicatorRegistrySpec,
+  PyneSecurityPolicy,
+} from "../features/indicators/indicatorTypes.js";
 
-async function request(url, options = {}) {
+interface IndicatorRequestOptions extends RequestInit {
+  includeHttpStatus?: boolean;
+}
+
+async function request(
+  url: string,
+  options: IndicatorRequestOptions = {},
+): Promise<unknown> {
   const { includeHttpStatus = false, ...fetchOptions } = options;
   const response = await fetch(url, fetchOptions);
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.detail || `HTTP ${response.status}`);
+    const detail = isIndicatorRecord(errorData) ? errorData.detail : undefined;
+    throw new Error(
+      typeof detail === "string" ? detail : `HTTP ${response.status}`,
+    );
   }
   const payload = await response.json();
-  if (includeHttpStatus && payload && typeof payload === "object" && !Array.isArray(payload)) {
+  if (
+    includeHttpStatus &&
+    payload &&
+    typeof payload === "object" &&
+    !Array.isArray(payload)
+  ) {
     return { ...payload, __httpStatus: response.status };
   }
   return payload;
@@ -32,23 +72,35 @@ async function request(url, options = {}) {
 // ═══════════════════════════════════════════════════════════════
 
 /** Fetch built-in preset indicators list */
-export async function fetchPresets() {
-  return request(`${API_BASE}/indicators/presets`);
+export async function fetchPresets(): Promise<IndicatorPreset[]> {
+  return parseIndicatorPresetList(
+    await request(`${API_BASE}/indicators/presets`),
+  );
 }
 
 /** Fetch a single preset with full script */
-export async function fetchPreset(presetId) {
-  return request(`${API_BASE}/indicators/presets/${presetId}`);
+export async function fetchPreset(presetId: string): Promise<IndicatorPreset> {
+  const payload = await request(
+    `${API_BASE}/indicators/presets/${encodeURIComponent(presetId)}`,
+  );
+  return parseIndicatorPreset(payload);
 }
 
 /** Fetch raw indicator specs from registry (advanced) */
-export async function fetchRegistry() {
-  return request(`${API_BASE}/indicators/registry`);
+export async function fetchRegistry(): Promise<IndicatorRegistrySpec[]> {
+  return parseIndicatorRegistryList(
+    await request(`${API_BASE}/indicators/registry`),
+  );
 }
 
 /** Fetch a single indicator spec from registry */
-export async function fetchRegistrySpec(name) {
-  return request(`${API_BASE}/indicators/registry/${name}`);
+export async function fetchRegistrySpec(
+  name: string,
+): Promise<IndicatorRegistrySpec> {
+  const payload = await request(
+    `${API_BASE}/indicators/registry/${encodeURIComponent(name)}`,
+  );
+  return parseIndicatorRegistrySpec(payload);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -77,8 +129,19 @@ export async function fetchRegistrySpec(name) {
  * @param {string} [options.exchange] - Exchange context (default "binance")
  * @returns {Promise<{ok: boolean, error: string|null, lines: Array, result: Object|null}>}
  */
-export async function computeIndicator({ mode, securityMode, name, script, ohlcv, params, symbol, interval, marketType, exchange }) {
-  const body = { ohlcv, params: params || {} };
+export async function computeIndicator({
+  mode,
+  securityMode,
+  name,
+  script,
+  ohlcv,
+  params,
+  symbol,
+  interval,
+  marketType,
+  exchange,
+}: IndicatorComputeRequest): Promise<IndicatorPayloadEnvelope> {
+  const body: Record<string, unknown> = { ohlcv, params: params || {} };
 
   if (mode) {
     body.mode = mode;
@@ -106,11 +169,12 @@ export async function computeIndicator({ mode, securityMode, name, script, ohlcv
     body.market_type = marketType;
   }
 
-  return request(`${API_BASE}/indicators/compute`, {
+  const payload = await request(`${API_BASE}/indicators/compute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  return parseIndicatorPayloadEnvelope(payload, "indicator.compute");
 }
 
 /** Compute server-hosted indicator output for a K-line history range. */
@@ -130,8 +194,8 @@ export async function computeIndicatorRange({
   end,
   reason,
   signal,
-}) {
-  return request(`${API_BASE}/indicators/range`, {
+}: IndicatorRangeRequest): Promise<IndicatorPayloadEnvelope> {
+  const payload = await request(`${API_BASE}/indicators/range`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
@@ -153,16 +217,24 @@ export async function computeIndicatorRange({
       reason,
     }),
   });
+  return parseIndicatorPayloadEnvelope(payload, "indicator.range");
 }
 
 /** Compute multiple same-series indicator ranges using one shared backend K-line query. */
-export async function computeIndicatorRangeBatch({ requests = [], signal } = {}) {
-  return request(`${API_BASE}/indicators/range/batch`, {
+export async function computeIndicatorRangeBatch({
+  requests = [],
+  signal,
+}: {
+  requests?: IndicatorRangeRequest[];
+  signal?: AbortSignal;
+} = {}): Promise<IndicatorRangeBatchResponse> {
+  const payload = await request(`${API_BASE}/indicators/range/batch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal,
     body: JSON.stringify({ requests }),
   });
+  return parseIndicatorRangeBatchResponse(payload);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -170,18 +242,33 @@ export async function computeIndicatorRangeBatch({ requests = [], signal } = {})
 // ═══════════════════════════════════════════════════════════════
 
 /** Fetch user-saved custom indicators */
-export async function fetchCustomIndicators() {
+export async function fetchCustomIndicators(): Promise<
+  CustomIndicatorRecord[]
+> {
+  let payload: unknown;
   try {
-    return await request(`${API_BASE}/indicators/custom`);
+    payload = await request(`${API_BASE}/indicators/custom`);
   } catch {
     // Endpoint may not exist yet — return empty list
     return [];
   }
+  return parseCustomIndicatorList(payload);
 }
 
 /** Save (create/update) a custom indicator */
-export async function saveCustomIndicator({ id, kind, name, script, description, params, paramSchema, renderHints, schemaVersion, securityMode }) {
-  return request(`${API_BASE}/indicators/custom`, {
+export async function saveCustomIndicator({
+  id,
+  kind,
+  name,
+  script,
+  description,
+  params,
+  paramSchema,
+  renderHints,
+  schemaVersion,
+  securityMode,
+}: CustomIndicatorSaveInput): Promise<CustomIndicatorRecord> {
+  const payload = await request(`${API_BASE}/indicators/custom`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -197,21 +284,30 @@ export async function saveCustomIndicator({ id, kind, name, script, description,
       securityMode,
     }),
   });
+  return parseCustomIndicatorRecord(payload);
 }
 
 /** Fetch current Pyne security defaults */
-export async function fetchPyneSecurityPolicy() {
-  return request(`${API_BASE}/indicators/pyne/security`);
+export async function fetchPyneSecurityPolicy(): Promise<PyneSecurityPolicy> {
+  return parsePyneSecurityPolicy(
+    await request(`${API_BASE}/indicators/pyne/security`),
+  );
 }
 
 /** WebSocket URL for backend-managed builtin indicator updates */
-export function getIndicatorStreamUrl() {
+export function getIndicatorStreamUrl(): string {
   return `${httpBaseToWsBase(API_BASE)}/stream/indicators`;
 }
 
 /** Delete a custom indicator */
-export async function deleteCustomIndicator(indicatorId) {
-  return request(`${API_BASE}/indicators/custom/${indicatorId}`, {
-    method: "DELETE",
-  });
+export async function deleteCustomIndicator(
+  indicatorId: string,
+): Promise<IndicatorDeleteResponse> {
+  const payload = await request(
+    `${API_BASE}/indicators/custom/${encodeURIComponent(indicatorId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+  return parseIndicatorDeleteResponse(payload);
 }

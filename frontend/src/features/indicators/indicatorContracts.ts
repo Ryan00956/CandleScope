@@ -4,6 +4,8 @@ import type {
   IndicatorBarColor,
   IndicatorBgColor,
   IndicatorColorPoint,
+  CustomIndicatorRecord,
+  IndicatorDeleteResponse,
   IndicatorErrorDetail,
   IndicatorFill,
   IndicatorHLine,
@@ -11,12 +13,16 @@ import type {
   IndicatorMarker,
   IndicatorParameterSchema,
   IndicatorPayloadEnvelope,
+  IndicatorPreset,
   IndicatorRange,
+  IndicatorRangeBatchResponse,
+  IndicatorRegistrySpec,
   IndicatorRevision,
   IndicatorSignal,
   IndicatorUnifiedAnnotation,
   IndicatorUnifiedSeries,
   IndicatorValuePoint,
+  PyneSecurityPolicy,
 } from "./indicatorTypes.js";
 
 export class IndicatorPayloadError extends TypeError {
@@ -737,5 +743,216 @@ export function parseIndicatorPayloadEnvelope(
       record.__httpStatus,
       `${path}.__httpStatus`,
     ),
+  };
+}
+
+function parseIndicatorParams(
+  value: unknown,
+  path: string,
+): Record<string, unknown> {
+  return value === undefined || value === null
+    ? {}
+    : expectIndicatorRecord(value, path);
+}
+
+export function parseIndicatorPreset(
+  value: unknown,
+  path = "indicator.preset",
+): IndicatorPreset {
+  const record = expectIndicatorRecord(value, path);
+  return {
+    id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
+    name: expectIndicatorNonEmptyString(record.name, `${path}.name`),
+    engineName: expectIndicatorNonEmptyString(
+      record.engineName,
+      `${path}.engineName`,
+    ),
+    script: expectIndicatorString(record.script, `${path}.script`),
+    params: parseIndicatorParams(record.params, `${path}.params`),
+    description:
+      optionalIndicatorString(record.description, `${path}.description`) ?? "",
+    category:
+      optionalIndicatorString(record.category, `${path}.category`) ?? "",
+    paramSchema: parseIndicatorParameterSchemas(
+      record.paramSchema,
+      `${path}.paramSchema`,
+    ),
+    outputs:
+      record.outputs === undefined
+        ? []
+        : indicatorStringArray(record.outputs, `${path}.outputs`),
+    is_builtin:
+      record.is_builtin === undefined
+        ? true
+        : expectIndicatorBoolean(record.is_builtin, `${path}.is_builtin`),
+    defaultEnabled:
+      record.defaultEnabled === undefined
+        ? false
+        : expectIndicatorBoolean(
+            record.defaultEnabled,
+            `${path}.defaultEnabled`,
+          ),
+    paneTarget:
+      optionalIndicatorString(record.paneTarget, `${path}.paneTarget`) ?? "sub",
+    isPreset: true,
+  };
+}
+
+export function parseIndicatorPresetList(
+  value: unknown,
+  path = "indicator.presets",
+): IndicatorPreset[] {
+  return expectIndicatorArray(value, path).map((item, index) =>
+    parseIndicatorPreset(item, `${path}[${index}]`),
+  );
+}
+
+export function parseIndicatorRegistrySpec(
+  value: unknown,
+  path = "indicator.registry",
+): IndicatorRegistrySpec {
+  const record = expectIndicatorRecord(value, path);
+  return {
+    name: expectIndicatorNonEmptyString(record.name, `${path}.name`),
+    display_name: expectIndicatorNonEmptyString(
+      record.display_name,
+      `${path}.display_name`,
+    ),
+    description:
+      optionalIndicatorString(record.description, `${path}.description`) ?? "",
+    category:
+      optionalIndicatorString(record.category, `${path}.category`) ?? "",
+    inputs:
+      record.inputs === undefined
+        ? []
+        : indicatorStringArray(record.inputs, `${path}.inputs`),
+    outputs:
+      record.outputs === undefined
+        ? []
+        : indicatorStringArray(record.outputs, `${path}.outputs`),
+    params: parseIndicatorParams(record.params, `${path}.params`),
+    paramSchema: parseIndicatorParameterSchemas(
+      record.paramSchema,
+      `${path}.paramSchema`,
+    ),
+    is_builtin:
+      record.is_builtin === undefined
+        ? true
+        : expectIndicatorBoolean(record.is_builtin, `${path}.is_builtin`),
+  };
+}
+
+export function parseIndicatorRegistryList(
+  value: unknown,
+  path = "indicator.registry",
+): IndicatorRegistrySpec[] {
+  return expectIndicatorArray(value, path).map((item, index) =>
+    parseIndicatorRegistrySpec(item, `${path}[${index}]`),
+  );
+}
+
+export function parseCustomIndicatorRecord(
+  value: unknown,
+  path = "indicator.custom",
+): CustomIndicatorRecord {
+  const record = expectIndicatorRecord(value, path);
+  const securityMode = record.securityMode;
+  return {
+    schemaVersion:
+      optionalIndicatorFiniteNumber(
+        record.schemaVersion,
+        `${path}.schemaVersion`,
+      ) ?? 1,
+    id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
+    kind: expectIndicatorNonEmptyString(record.kind, `${path}.kind`),
+    name: expectIndicatorNonEmptyString(record.name, `${path}.name`),
+    description:
+      optionalIndicatorString(record.description, `${path}.description`) ?? "",
+    script: expectIndicatorString(record.script, `${path}.script`),
+    params: parseIndicatorParams(record.params, `${path}.params`),
+    paramSchema: parseIndicatorParameterSchemas(
+      record.paramSchema,
+      `${path}.paramSchema`,
+    ),
+    renderHints: parseIndicatorParams(
+      record.renderHints,
+      `${path}.renderHints`,
+    ),
+    securityMode:
+      securityMode === null
+        ? null
+        : optionalIndicatorString(securityMode, `${path}.securityMode`),
+    createdAt: optionalIndicatorFiniteNumber(
+      record.createdAt ?? record.created_at,
+      `${path}.createdAt`,
+    ),
+    updatedAt: optionalIndicatorFiniteNumber(
+      record.updatedAt ?? record.updated_at,
+      `${path}.updatedAt`,
+    ),
+  };
+}
+
+export function parseCustomIndicatorList(
+  value: unknown,
+  path = "indicator.custom",
+): CustomIndicatorRecord[] {
+  return expectIndicatorArray(value, path).map((item, index) =>
+    parseCustomIndicatorRecord(item, `${path}[${index}]`),
+  );
+}
+
+export function parsePyneSecurityPolicy(
+  value: unknown,
+  path = "indicator.pyneSecurity",
+): PyneSecurityPolicy {
+  const record = expectIndicatorRecord(value, path);
+  return {
+    ...record,
+    mode: expectIndicatorNonEmptyString(record.mode, `${path}.mode`),
+    timeoutSeconds: expectIndicatorFiniteNumber(
+      record.timeoutSeconds,
+      `${path}.timeoutSeconds`,
+    ),
+  };
+}
+
+export function parseIndicatorRangeBatchResponse(
+  value: unknown,
+  path = "indicator.rangeBatch",
+): IndicatorRangeBatchResponse {
+  const record = expectIndicatorRecord(value, path);
+  return {
+    ok: expectIndicatorBoolean(record.ok, `${path}.ok`),
+    results: expectIndicatorArray(record.results, `${path}.results`).map(
+      (item, index) => {
+        const itemPath = `${path}.results[${index}]`;
+        const result = expectIndicatorRecord(item, itemPath);
+        return {
+          clientId: expectIndicatorNonEmptyString(
+            result.clientId,
+            `${itemPath}.clientId`,
+          ),
+          payload: parseIndicatorPayloadEnvelope(
+            result.payload,
+            `${itemPath}.payload`,
+          ),
+        };
+      },
+    ),
+  };
+}
+
+export function parseIndicatorDeleteResponse(
+  value: unknown,
+  path = "indicator.delete",
+): IndicatorDeleteResponse {
+  const record = expectIndicatorRecord(value, path);
+  if (expectIndicatorBoolean(record.ok, `${path}.ok`) !== true) {
+    throw new IndicatorPayloadError(`${path}.ok`, "expected true");
+  }
+  return {
+    ok: true,
+    id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
   };
 }

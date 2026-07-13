@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchSupportedExchanges } from "../../services/api";
 import type { ExchangeCapabilityPayload } from "../../services/apiPayloadParsers.js";
+export type { ExchangeCapabilityPayload } from "../../services/apiPayloadParsers.js";
 
 export interface ExchangeSettingsRuntime {
   supportedExchanges: ExchangeCapabilityPayload[];

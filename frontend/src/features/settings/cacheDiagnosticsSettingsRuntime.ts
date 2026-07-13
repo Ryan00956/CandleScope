@@ -21,7 +21,94 @@ import type {
   GcVictim,
 } from "../cache-gc/cacheGcTypes.js";
 
-type BackendDiagnosticsResult = Record<string, unknown>;
+export interface BackendGcVictim extends Record<string, unknown> {
+  owner?: string;
+  key: string;
+  reason?: string;
+  estimatedBytes?: number;
+  estimated_bytes?: number;
+  would_free_estimated_bytes?: number;
+}
+
+export interface StorageGcSeries extends Record<string, unknown> {
+  owner?: string;
+  key: string;
+  reason?: string;
+  would_delete_rows?: number;
+  risk_flags?: string[];
+}
+
+export interface StorageFilesSummary extends Record<string, unknown> {
+  exists?: boolean;
+  db_size_bytes?: number;
+  wal_size_bytes?: number;
+  total_size_bytes?: number;
+}
+
+export interface StorageWatermarks extends Record<string, unknown> {
+  budget_bytes?: number;
+  level?: string;
+  budget_usage_ratio?: number;
+}
+
+export interface BackendDiagnosticsResult extends Record<string, unknown> {
+  data_manager?: {
+    cache?: Record<string, unknown> & {
+      total_series?: number;
+      max_series?: number;
+      total_bars?: number;
+      max_bars_per_series?: number;
+      hits?: number;
+      misses?: number;
+    };
+  };
+  storage?: {
+    files?: StorageFilesSummary;
+    series?: Record<string, unknown> & {
+      series_count?: number;
+      total_rows?: number;
+      largest_series?: Array<{
+        exchange?: string;
+        market_type?: string;
+        symbol?: string;
+        interval?: string;
+        total_count?: number;
+      }>;
+    };
+    watermarks?: StorageWatermarks;
+  };
+  indicator?: {
+    pyne_cache?: Record<string, unknown> & {
+      size?: number;
+      items?: number;
+      max_items?: number;
+      maxItems?: number;
+    };
+  };
+  victims?: BackendGcVictim[];
+  series?: StorageGcSeries[];
+  pressure?: Record<string, number | undefined>;
+  watermarks?: StorageWatermarks;
+  would_free_estimated_bytes?: number;
+  would_free_bars?: number;
+  would_remove_series?: number;
+  protected_count?: number;
+  removed_series?: number;
+  trimmed_series?: number;
+  removed_bars?: number;
+  removed_estimated_bytes?: number;
+  would_delete_rows?: number;
+  victim_count?: number;
+  vacuum_recommended?: boolean;
+  unable_to_reach_budget?: boolean;
+  budget_gap_bytes?: number;
+  deleted_rows?: number;
+  affected_series?: number;
+  elapsed_ms?: number;
+  checkpoint_result?: unknown;
+  status?: string;
+  storage_files_after?: StorageFilesSummary;
+}
 type TrimChartDataCacheEntries = (victims: GcVictim[]) => CacheTrimOwnerResult;
 
 export interface CacheDiagnosticsRuntime extends Record<string, unknown> {

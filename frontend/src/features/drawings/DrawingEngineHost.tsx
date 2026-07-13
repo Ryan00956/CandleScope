@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useDrawing } from "./drawingInteractionController.js";
 import TextEditOverlay from "../../components/TextEditOverlay";
 import TextFormatBar from "../../components/TextFormatBar";
-import type { ComponentType, Dispatch, MutableRefObject, SetStateAction } from "react";
+import type { MutableRefObject } from "react";
 import type {
     DrawingAnchorMode,
     DrawingChartAdapter,
@@ -11,29 +11,6 @@ import type {
 } from "./drawingTypes.js";
 import type { DrawingStylePatch } from "./drawingInteractionController.js";
 import type { SelectedDrawingMeta } from "./drawingSelectionController.js";
-import type { ScreenPoint, TextAlign } from "./drawingTypes.js";
-
-interface TextEditOverlayProps {
-    box: ScreenPoint;
-    value: string;
-    onChange: Dispatch<SetStateAction<string>>;
-    onCommit(): boolean;
-    onCancel(): void;
-    fontSize: number;
-    fontFamily?: string;
-    bold: boolean;
-    italic: boolean;
-    underline: boolean;
-    align: TextAlign;
-    color: string;
-    bgColor: string | null;
-    borderColor: string | null;
-    padding: number;
-    widthPx: number | null;
-    inputRef: MutableRefObject<HTMLTextAreaElement | null>;
-}
-
-const DrawingTextEditOverlay = TextEditOverlay as ComponentType<TextEditOverlayProps>;
 
 export interface DrawingEngineApi {
     clearAll(): void;
@@ -189,7 +166,7 @@ export default function DrawingEngineHost({
             <span data-drawing-engine="ready" hidden />
 
             {drawing.editingTextId && drawing.editingTextPos && (
-                <DrawingTextEditOverlay
+                <TextEditOverlay
                     box={drawing.editingTextPos}
                     value={drawing.editingTextValue}
                     onChange={drawing.setEditingTextValue}

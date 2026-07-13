@@ -9,7 +9,17 @@ export type ProxyMode = "system" | "custom" | "none";
 
 export interface ProxyTestResult extends Record<string, unknown> {
   success?: boolean;
+  partial?: boolean;
   message?: string;
+  proxy_used?: string;
+  results?: ProxyExchangeTestResult[];
+}
+
+export interface ProxyExchangeTestResult {
+  exchange: string;
+  success: boolean;
+  label: string;
+  message: string;
 }
 
 export interface ProxySaveMessage {

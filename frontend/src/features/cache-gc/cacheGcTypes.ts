@@ -90,9 +90,21 @@ export interface CacheDiagnostics extends Record<string, unknown> {
   indicatorPoints?: unknown;
   runtimePressure?: Partial<BrowserRuntimePressure>;
   owners?: {
-    chart?: { entries?: CacheDiagnosticsEntry[] };
-    watchlist?: { entries?: CacheDiagnosticsEntry[] };
-    indicators?: { entries?: CacheDiagnosticsEntry[] };
+    chart?: {
+      entries?: CacheDiagnosticsEntry[];
+      totalBars?: number;
+      seriesCount?: number;
+    };
+    watchlist?: {
+      entries?: CacheDiagnosticsEntry[];
+      totalBars?: number;
+      seriesCount?: number;
+    };
+    indicators?: {
+      entries?: CacheDiagnosticsEntry[];
+      totalPoints?: number;
+      entryCount?: number;
+    };
   };
 }
 

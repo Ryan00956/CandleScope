@@ -33,6 +33,10 @@ export interface WatchlistSubscriptionContext {
 export interface WatchlistPriceTick extends Record<string, unknown> {
   symbol: string;
   price?: number;
+  open?: number;
+  daily_change?: number;
+  daily_change_pct?: number;
+  change_pct?: number;
 }
 
 export interface UseWatchlistSubscriptionRuntimeOptions {
@@ -55,6 +59,25 @@ function buildTierMap(subscriptions: SubscriptionPayload[] | null | undefined): 
     tiers[subscription.symbol] = subscription.tier;
   }
   return tiers;
+}
+
+function optionalFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function parseWatchlistPriceTick(value: unknown): WatchlistPriceTick | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.symbol !== "string") return null;
+  return {
+    ...record,
+    symbol: record.symbol,
+    price: optionalFiniteNumber(record.price),
+    open: optionalFiniteNumber(record.open),
+    daily_change: optionalFiniteNumber(record.daily_change),
+    daily_change_pct: optionalFiniteNumber(record.daily_change_pct),
+    change_pct: optionalFiniteNumber(record.change_pct),
+  };
 }
 
 export function useWatchlistSubscriptionRuntime({
@@ -174,10 +197,9 @@ export function useWatchlistSubscriptionRuntime({
             setSymbolPrices((prev) => {
               const next = { ...prev };
               for (const tick of ticks) {
-                if (!tick || typeof tick !== "object" || Array.isArray(tick)) continue;
-                const record = tick as Record<string, unknown>;
-                if (typeof record.symbol !== "string") continue;
-                next[record.symbol] = record as WatchlistPriceTick;
+                const parsed = parseWatchlistPriceTick(tick);
+                if (!parsed) continue;
+                next[parsed.symbol] = parsed;
               }
               return next;
             });

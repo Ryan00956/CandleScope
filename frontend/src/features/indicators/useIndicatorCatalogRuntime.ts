@@ -23,7 +23,7 @@ export type CatalogCustomIndicator = CustomIndicatorRecord
     securityMode: string;
   };
 
-type CatalogIndicator = IndicatorPreset | CatalogCustomIndicator | IndicatorDefinition;
+export type CatalogIndicator = IndicatorPreset | CatalogCustomIndicator | IndicatorDefinition;
 type CatalogFallback = Partial<CustomIndicatorRecord>
   & Partial<Pick<IndicatorDefinition, "category" | "paneTarget">>;
 

@@ -59,7 +59,7 @@ export function formatVolume(volume: number | null | undefined): string {
 
 export function buildMarketSummary(
   displayData: MarketDisplayData | null | undefined,
-): MarketSummary {
+): MarketSummary & { displayData: MarketDisplayData | null } {
   const normalizedDisplayData = displayData || null;
   const priceChange = normalizedDisplayData
     ? ((normalizedDisplayData.close - normalizedDisplayData.open) / normalizedDisplayData.open) * 100

@@ -8,7 +8,34 @@ import { parseSymbolKey } from "../../utils/symbolKey";
 import type { WatchlistGroup } from "../watchlist/watchlistTypes.js";
 
 export type MaintenanceScope = "current" | "watchlist";
-export type MaintenanceResult = Record<string, unknown>;
+export interface MaintenanceSeriesResult extends Record<string, unknown> {
+  symbol?: string;
+  interval: string;
+  status?: string;
+  message?: string;
+  total_bars?: number;
+  latest_data?: string;
+  bars_filled?: number;
+}
+
+export interface MaintenanceResult extends Record<string, unknown> {
+  status?: string;
+  message?: string;
+  exchange?: string;
+  market_type?: string;
+  symbols_filter?: string[];
+  checked_series?: number;
+  repaired_series?: number;
+  unchanged_series?: number;
+  failed_series?: number;
+  total_deleted_rows?: number;
+  total_written_rows?: number;
+  gaps_found?: number;
+  gaps_filled?: number;
+  total_bars_filled?: number;
+  elapsed_ms?: number;
+  results?: MaintenanceSeriesResult[];
+}
 
 export interface SettingsMaintenanceRuntime {
   currentScopeSymbols: string[];

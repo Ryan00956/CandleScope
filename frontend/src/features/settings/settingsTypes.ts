@@ -1,5 +1,14 @@
 export type SettingsActionType = "mock" | "local_only" | "backend_endpoint";
 
+import type { AboutSettingsPanelProps } from "../../components/settings/AboutSettingsPanel.js";
+import type { CacheDiagnosticsPanelProps } from "../../components/settings/CacheDiagnosticsPanel.js";
+import type { CacheLimitsPanelProps } from "../../components/settings/CacheLimitsPanel.js";
+import type { ChartAppearancePanelProps } from "../../components/settings/ChartAppearancePanel.js";
+import type { DatabaseManagementPanelProps } from "../../components/settings/DatabaseManagementPanel.js";
+import type { ExchangeSettingsPanelProps } from "../../components/settings/ExchangeSettingsPanel.js";
+import type { ProxySettingsPanelProps } from "../../components/settings/ProxySettingsPanel.js";
+import type { StorageMaintenancePanelProps } from "../../components/settings/StorageMaintenancePanel.js";
+
 export type SettingsCategory =
   | "appearance"
   | "network"
@@ -20,35 +29,45 @@ export interface SettingsCategoryDescriptor {
   icon: string;
 }
 
-type SettingsPanelFields = Record<string, unknown>;
-
 export interface SettingsRuntimeView {
-  appearance: SettingsPanelFields;
-  proxy: SettingsPanelFields;
-  exchanges: SettingsPanelFields;
-  cacheLimits: SettingsPanelFields;
-  cacheDiagnostics: SettingsPanelFields;
-  maintenance: SettingsPanelFields;
-  database: SettingsPanelFields;
+  appearance: ChartAppearancePanelProps;
+  proxy: Omit<ProxySettingsPanelProps,
+    "onProxyModeChange" | "onCustomProxyChange" | "onProxyTest" | "onProxySave">;
+  exchanges: Omit<ExchangeSettingsPanelProps, "onRefreshExchanges">;
+  cacheLimits: Omit<CacheLimitsPanelProps, "onToggleAdvanced">;
+  cacheDiagnostics: CacheDiagnosticsPanelProps;
+  maintenance: Omit<StorageMaintenancePanelProps,
+    "onStorageRepair" | "onGapScan" | "onExchangeRefresh">;
+  database: DatabaseManagementPanelProps;
 }
 
 export interface SettingsRuntimeActions {
-  proxy: SettingsPanelFields;
-  exchanges: SettingsPanelFields;
-  cacheLimits: SettingsPanelFields;
-  cacheDiagnostics: SettingsPanelFields;
-  maintenance: SettingsPanelFields;
+  proxy: Pick<ProxySettingsPanelProps,
+    "onProxyModeChange" | "onCustomProxyChange" | "onProxyTest" | "onProxySave">;
+  exchanges: Pick<ExchangeSettingsPanelProps, "onRefreshExchanges">;
+  cacheLimits: Pick<CacheLimitsPanelProps, "onToggleAdvanced">;
+  cacheDiagnostics: Pick<CacheDiagnosticsPanelProps,
+    | "onPlanBackendMemoryGc"
+    | "onPlanFrontendGc"
+    | "onPlanStorageGc"
+    | "onRunBackendMemoryGc"
+    | "onRunFrontendGc"
+    | "onRunStorageGc"
+    | "onRefresh"
+    | "onVacuumStorage">;
+  maintenance: Pick<StorageMaintenancePanelProps,
+    "onStorageRepair" | "onGapScan" | "onExchangeRefresh">;
 }
 
 export interface SettingsPanelViewModel {
-  appearance: SettingsPanelFields;
-  network: SettingsPanelFields;
-  exchanges: SettingsPanelFields;
+  appearance: ChartAppearancePanelProps;
+  network: ProxySettingsPanelProps;
+  exchanges: ExchangeSettingsPanelProps;
   data: {
-    cacheLimits: SettingsPanelFields;
-    cacheDiagnostics: SettingsPanelFields;
-    maintenance: SettingsPanelFields;
+    cacheLimits: CacheLimitsPanelProps;
+    cacheDiagnostics: CacheDiagnosticsPanelProps;
+    maintenance: StorageMaintenancePanelProps;
   };
-  database: SettingsPanelFields;
-  about: SettingsPanelFields;
+  database: DatabaseManagementPanelProps;
+  about: AboutSettingsPanelProps;
 }

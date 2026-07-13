@@ -5,40 +5,42 @@
  * with distinctive colors to make scripts more readable.
  */
 
+import type * as Monaco from "monaco-editor";
+
 /**
  * Define and register the Pyne dark theme on a Monaco instance.
  *
  * @param {import('monaco-editor')} monaco
  */
-export function registerPyneTheme(monaco) {
-  monaco.editor.defineTheme("pyne-dark", {
+export function registerPyneTheme(monaco: typeof Monaco): void {
+  const theme: Monaco.editor.IStandaloneThemeData = {
     base: "vs-dark",
     inherit: true,
     rules: [
       // Python keywords
-      { token: "keyword", foreground: "c586c0" },       // purple-pink
+      { token: "keyword", foreground: "c586c0" }, // purple-pink
       { token: "keyword.control", foreground: "c586c0" },
 
       // Strings
-      { token: "string", foreground: "ce9178" },        // warm orange
+      { token: "string", foreground: "ce9178" }, // warm orange
       { token: "string.escape", foreground: "d7ba7d" },
 
       // Numbers
-      { token: "number", foreground: "b5cea8" },        // soft green
+      { token: "number", foreground: "b5cea8" }, // soft green
 
       // Comments
       { token: "comment", foreground: "6a9955", fontStyle: "italic" },
 
       // Functions / methods
-      { token: "identifier", foreground: "9cdcfe" },    // light blue
-      { token: "type", foreground: "4ec9b0" },          // teal
+      { token: "identifier", foreground: "9cdcfe" }, // light blue
+      { token: "type", foreground: "4ec9b0" }, // teal
 
       // Operators
       { token: "operator", foreground: "d4d4d4" },
       { token: "delimiter", foreground: "d4d4d4" },
 
       // Decorators
-      { token: "tag", foreground: "569cd6" },            // blue
+      { token: "tag", foreground: "569cd6" }, // blue
     ],
     colors: {
       // Editor background
@@ -96,7 +98,8 @@ export function registerPyneTheme(monaco) {
       // Minimap (disabled but just in case)
       "minimap.background": "#0d1117",
     },
-  });
+  };
+  monaco.editor.defineTheme("pyne-dark", theme);
 }
 
 /**
@@ -106,11 +109,14 @@ export function registerPyneTheme(monaco) {
  * @param {object} [overrides] — Additional Monaco editor options
  * @returns {object} Monaco IStandaloneEditorConstructionOptions
  */
-export function getPyneEditorOptions(overrides = {}) {
+export function getPyneEditorOptions(
+  overrides: Partial<Monaco.editor.IStandaloneEditorConstructionOptions> = {},
+): Monaco.editor.IStandaloneEditorConstructionOptions {
   return {
     // Typography
     fontSize: 14,
-    fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
+    fontFamily:
+      "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
     fontLigatures: true,
     lineHeight: 24,
     letterSpacing: 0.3,
@@ -146,7 +152,7 @@ export function getPyneEditorOptions(overrides = {}) {
     snippetSuggestions: "bottom",
     suggest: {
       showSnippets: true,
-      showWords: false,       // Don't suggest random words from file
+      showWords: false, // Don't suggest random words from file
       showKeywords: true,
       preview: true,
       shareSuggestSelections: true,

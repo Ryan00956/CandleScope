@@ -16,6 +16,48 @@
  */
 
 import { dataPointToCoordinate } from "./coordinateUtils.js";
+import type {
+  DrawingAttachedParameter,
+  DrawingDataPoint,
+  DrawingHit,
+  PrimitiveCanvasTarget,
+  PrimitivePaneRenderer,
+  PrimitivePaneView,
+  ScreenPoint,
+  TextAlign,
+  TextDrawingPatch,
+  TextPrimitiveOptions,
+} from "../drawingTypes.js";
+
+interface FontDescriptor {
+  italic: boolean;
+  bold: boolean;
+  fontSize: number;
+  fontFamily: string;
+}
+
+interface TextRenderData extends FontDescriptor {
+  x: number | null;
+  y: number | null;
+  hidden: boolean;
+  text: string;
+  color: string;
+  underline: boolean;
+  align: TextAlign;
+  bgColor: string | null;
+  borderColor: string | null;
+  borderWidth: number;
+  widthPx: number | null;
+  padding: number;
+  selected: boolean;
+  hovered: boolean;
+}
+
+interface TextBox extends ScreenPoint {
+  width: number;
+  height: number;
+  lineCount: number;
+}
 
 // ── Word-wrap helper (CSS-px space) ──
 //
@@ -23,12 +65,16 @@ import { dataPointToCoordinate } from "./coordinateUtils.js";
 // lines so each fits within `maxWidth` (CSS px). Falls back to per-character
 // breaking when a single token exceeds maxWidth (CJK-friendly).
 
-function wrapLine(ctx, line, maxWidth) {
+function wrapLine(
+  ctx: CanvasRenderingContext2D,
+  line: string,
+  maxWidth: number | null,
+): string[] {
   if (!line) return [""];
   if (maxWidth == null || maxWidth <= 0) return [line];
   if (ctx.measureText(line).width <= maxWidth) return [line];
 
-  const out = [];
+  const out: string[] = [];
 
   // Try splitting on whitespace first.
   const tokens = line.split(/(\s+)/); // keep separators
@@ -64,7 +110,7 @@ function wrapLine(ctx, line, maxWidth) {
   return out.length ? out : [""];
 }
 
-function buildFontString({ italic, bold, fontSize, fontFamily }) {
+function buildFontString({ italic, bold, fontSize, fontFamily }: FontDescriptor): string {
   let s = "";
   if (italic) s += "italic ";
   if (bold) s += "bold ";
@@ -74,19 +120,23 @@ function buildFontString({ italic, bold, fontSize, fontFamily }) {
 
 // ── Pane Renderer ──
 
-class TextRenderer {
+class TextRenderer implements PrimitivePaneRenderer {
+  _data: TextRenderData | null;
+
   constructor() {
     this._data = null;
   }
 
-  update(data) {
+  update(data: TextRenderData): void {
     this._data = data;
   }
 
-  draw(target) {
+  draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
     if (!data || data.x == null || data.y == null) return;
     if (data.hidden) return;
+    const renderX = data.x;
+    const renderY = data.y;
 
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
@@ -98,7 +148,7 @@ class TextRenderer {
       ctx.scale(hRatio, vRatio);
 
       const {
-        x, y, text, color, fontSize, fontFamily, bold, italic, underline,
+        text, color, fontSize, fontFamily, bold, italic, underline,
         align, bgColor, borderColor, borderWidth,
         widthPx, padding,
         selected, hovered,
@@ -111,7 +161,7 @@ class TextRenderer {
       const explicitLines = (text || "").split("\n");
       const innerWidthCap = widthPx ? Math.max(0, widthPx - 2 * padding) : null;
 
-      const lines = [];
+      const lines: string[] = [];
       for (const raw of explicitLines) {
         const wrapped = wrapLine(ctx, raw, innerWidthCap);
         for (const w of wrapped) lines.push(w);
@@ -129,8 +179,8 @@ class TextRenderer {
       const innerHeight = lines.length * lineHeight;
 
       // Box (screen / CSS-px) — anchored at (x, y) top-left
-      const boxX = x;
-      const boxY = y;
+      const boxX = renderX;
+      const boxY = renderY;
       const boxW = innerWidth + 2 * padding;
       const boxH = innerHeight + 2 * padding;
 
@@ -217,9 +267,15 @@ class TextRenderer {
 
 // ── Helpers ──
 
-const HANDLE_KEYS = ["tl", "t", "tr", "r", "br", "b", "bl", "l"];
+const HANDLE_KEYS = ["tl", "t", "tr", "r", "br", "b", "bl", "l"] as const;
+type TextHandleKey = typeof HANDLE_KEYS[number];
 
-function computeHandlePositions(x, y, w, h) {
+function computeHandlePositions(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): Record<TextHandleKey, ScreenPoint> {
   return {
     tl: { x, y },
     t:  { x: x + w / 2, y },
@@ -232,7 +288,14 @@ function computeHandlePositions(x, y, w, h) {
   };
 }
 
-function roundedRect(ctx, x, y, w, h, r) {
+function roundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number,
+): void {
   const rr = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
   ctx.moveTo(x + rr, y);
@@ -249,32 +312,21 @@ function roundedRect(ctx, x, y, w, h, r) {
 
 // ── Pane View ──
 
-class TextPaneView {
-  constructor(source) {
+class TextPaneView implements PrimitivePaneView {
+  _source: TextDrawingPrimitive;
+  _renderer: TextRenderer;
+
+  constructor(source: TextDrawingPrimitive) {
     this._source = source;
     this._renderer = new TextRenderer();
   }
 
-  update() {
+  update(): void {
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
-    if (source._hidden) {
-      this._renderer.update({ x: null, y: null, hidden: true });
-      return;
-    }
-
-    const screen = source._anchorScreen();
-    if (!screen) {
-      this._renderer.update({ x: null, y: null });
-      return;
-    }
-
-    this._renderer.update({
-      x: screen.x,
-      y: screen.y,
-      hidden: source._hidden,
+    const base: Omit<TextRenderData, "x" | "y" | "hidden"> = {
       text: source._text,
       color: source._color,
       fontSize: source._fontSize,
@@ -290,16 +342,56 @@ class TextPaneView {
       padding: source._padding,
       selected: source._selected,
       hovered: source._hovered,
+    };
+    if (source._hidden) {
+      this._renderer.update({ x: null, y: null, hidden: true, ...base });
+      return;
+    }
+
+    const screen = source._anchorScreen();
+    if (!screen) {
+      this._renderer.update({ x: null, y: null, hidden: false, ...base });
+      return;
+    }
+
+    this._renderer.update({
+      x: screen.x,
+      y: screen.y,
+      hidden: false,
+      ...base,
     });
   }
 
-  renderer() { return this._renderer; }
-  zOrder() { return "top"; }
+  renderer(): TextRenderer { return this._renderer; }
+  zOrder(): "top" { return "top"; }
 }
 
 // ── The Primitive ──
 
 export class TextDrawingPrimitive {
+  _id: string;
+  _dataPoint: DrawingDataPoint;
+  _text: string;
+  _color: string;
+  _fontSize: number;
+  _fontFamily: string;
+  _bold: boolean;
+  _italic: boolean;
+  _underline: boolean;
+  _align: TextAlign;
+  _bgColor: string | null;
+  _borderColor: string | null;
+  _borderWidth: number;
+  _widthPx: number | null;
+  _padding: number;
+  _selected: boolean;
+  _hovered: boolean;
+  _hidden: boolean;
+  _series: DrawingAttachedParameter["series"] | null;
+  _chart: DrawingAttachedParameter["chart"] | null;
+  _paneView: TextPaneView;
+  _requestUpdate: (() => void) | null;
+
   /**
    * @param {object} opts
    * @param {string} opts.id
@@ -318,7 +410,7 @@ export class TextDrawingPrimitive {
    * @param {number|null} [opts.widthPx] - if set, text word-wraps to fit this width (CSS px)
    * @param {number} [opts.padding]
    */
-  constructor(opts) {
+  constructor(opts: TextPrimitiveOptions) {
     this._id = opts.id;
     this._dataPoint = opts.dataPoint || { logical: 0, price: 0 };
     this._text = opts.text != null ? opts.text : "Text";
@@ -347,18 +439,18 @@ export class TextDrawingPrimitive {
 
   // ── ISeriesPrimitive ──
 
-  attached({ chart, series, requestUpdate }) {
+  attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
     this._requestUpdate = requestUpdate;
   }
-  detached() {
+  detached(): void {
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
   }
-  updateAllViews() { this._paneView.update(); }
-  paneViews() { return [this._paneView]; }
+  updateAllViews(): void { this._paneView.update(); }
+  paneViews(): readonly PrimitivePaneView[] { return [this._paneView]; }
 
   // ── Public getters ──
 
@@ -381,63 +473,64 @@ export class TextDrawingPrimitive {
 
   // ── Setters ──
 
-  setText(t) { this._text = t; this._requestUpdate?.(); }
-  setDataPoint(dp) { this._dataPoint = dp; this._requestUpdate?.(); }
-  setColor(c) { this._color = c; this._requestUpdate?.(); }
-  setFontSize(s) { this._fontSize = s; this._requestUpdate?.(); }
-  setFontFamily(f) { this._fontFamily = f; this._requestUpdate?.(); }
-  setBold(v) { this._bold = !!v; this._requestUpdate?.(); }
-  setItalic(v) { this._italic = !!v; this._requestUpdate?.(); }
-  setUnderline(v) { this._underline = !!v; this._requestUpdate?.(); }
-  setAlign(a) { this._align = a; this._requestUpdate?.(); }
-  setBgColor(c) { this._bgColor = c; this._requestUpdate?.(); }
-  setBorderColor(c) { this._borderColor = c; this._requestUpdate?.(); }
-  setBorderWidth(w) { this._borderWidth = w; this._requestUpdate?.(); }
-  setWidthPx(w) { this._widthPx = (w == null || !isFinite(w)) ? null : w; this._requestUpdate?.(); }
-  setPadding(p) { this._padding = p; this._requestUpdate?.(); }
+  setText(t: string): void { this._text = t; this._requestUpdate?.(); }
+  setDataPoint(dp: DrawingDataPoint): void { this._dataPoint = dp; this._requestUpdate?.(); }
+  setColor(c: string): void { this._color = c; this._requestUpdate?.(); }
+  setFontSize(s: number): void { this._fontSize = s; this._requestUpdate?.(); }
+  setFontFamily(f: string): void { this._fontFamily = f; this._requestUpdate?.(); }
+  setBold(v: boolean): void { this._bold = !!v; this._requestUpdate?.(); }
+  setItalic(v: boolean): void { this._italic = !!v; this._requestUpdate?.(); }
+  setUnderline(v: boolean): void { this._underline = !!v; this._requestUpdate?.(); }
+  setAlign(a: TextAlign): void { this._align = a; this._requestUpdate?.(); }
+  setBgColor(c: string | null): void { this._bgColor = c; this._requestUpdate?.(); }
+  setBorderColor(c: string | null): void { this._borderColor = c; this._requestUpdate?.(); }
+  setBorderWidth(w: number): void { this._borderWidth = w; this._requestUpdate?.(); }
+  setWidthPx(w: number | null): void {
+    this._widthPx = (w == null || !isFinite(w)) ? null : w;
+    this._requestUpdate?.();
+  }
+  setPadding(p: number): void { this._padding = p; this._requestUpdate?.(); }
 
-  setSelected(v) {
+  setSelected(v: boolean): void {
     const next = !!v;
     if (this._selected !== next) { this._selected = next; this._requestUpdate?.(); }
   }
-  setHovered(v) {
+  setHovered(v: boolean): void {
     const next = !!v;
     if (this._hovered !== next) { this._hovered = next; this._requestUpdate?.(); }
   }
-  setHidden(v, request = true) {
+  setHidden(v: boolean, request = true): void {
     const next = !!v;
     if (this._hidden !== next) {
       this._hidden = next;
       if (request) this._requestUpdate?.();
     }
   }
-  requestUpdate() { this._requestUpdate?.(); }
+  requestUpdate(): void { this._requestUpdate?.(); }
 
   /** Apply many properties at once (skip undefined keys). Returns true if anything changed. */
-  applyPatch(patch) {
+  applyPatch(patch: TextDrawingPatch | null | undefined): boolean {
     if (!patch) return false;
     let changed = false;
-    const map = {
-      text: "_text", color: "_color", fontSize: "_fontSize",
-      fontFamily: "_fontFamily", bold: "_bold", italic: "_italic",
-      underline: "_underline", align: "_align",
-      bgColor: "_bgColor", borderColor: "_borderColor",
-      borderWidth: "_borderWidth", widthPx: "_widthPx", padding: "_padding",
-    };
-    for (const k of Object.keys(patch)) {
-      const slot = map[k];
-      if (!slot) continue;
-      if (this[slot] !== patch[k]) {
-        this[slot] = patch[k];
-        changed = true;
-      }
-    }
+    if (patch.text !== undefined && this._text !== patch.text) { this._text = patch.text; changed = true; }
+    if (patch.color !== undefined && this._color !== patch.color) { this._color = patch.color; changed = true; }
+    if (patch.fontSize !== undefined && this._fontSize !== patch.fontSize) { this._fontSize = patch.fontSize; changed = true; }
+    if (patch.fontFamily !== undefined && this._fontFamily !== patch.fontFamily) { this._fontFamily = patch.fontFamily; changed = true; }
+    if (patch.bold !== undefined && this._bold !== patch.bold) { this._bold = patch.bold; changed = true; }
+    if (patch.italic !== undefined && this._italic !== patch.italic) { this._italic = patch.italic; changed = true; }
+    if (patch.underline !== undefined && this._underline !== patch.underline) { this._underline = patch.underline; changed = true; }
+    if (patch.align !== undefined && this._align !== patch.align) { this._align = patch.align; changed = true; }
+    if (patch.bgColor !== undefined && this._bgColor !== patch.bgColor) { this._bgColor = patch.bgColor; changed = true; }
+    if (patch.borderColor !== undefined && this._borderColor !== patch.borderColor) { this._borderColor = patch.borderColor; changed = true; }
+    if (patch.borderWidth !== undefined && this._borderWidth !== patch.borderWidth) { this._borderWidth = patch.borderWidth; changed = true; }
+    if (patch.widthPx !== undefined && this._widthPx !== patch.widthPx) { this._widthPx = patch.widthPx; changed = true; }
+    if (patch.padding !== undefined && this._padding !== patch.padding) { this._padding = patch.padding; changed = true; }
     if (changed) this._requestUpdate?.();
     return changed;
   }
 
   // ── Anchor → screen coords (CSS px relative to chart container) ──
-  _anchorScreen() {
+  _anchorScreen(): ScreenPoint | null {
     if (!this._series || !this._chart) return null;
     const coordinateContext = {};
     const sx = dataPointToCoordinate(this._chart, this._series, this._dataPoint, coordinateContext);
@@ -452,12 +545,13 @@ export class TextDrawingPrimitive {
    * of the box (including padding). Used by hit-testing AND by the React
    * overlay (edit textarea + format toolbar).
    */
-  getBoundingBoxScreen() {
+  getBoundingBoxScreen(): TextBox | null {
     const screen = this._anchorScreen();
     if (!screen) return null;
 
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
     ctx.font = buildFontString({
       italic: this._italic, bold: this._bold,
       fontSize: this._fontSize, fontFamily: this._fontFamily,
@@ -466,7 +560,7 @@ export class TextDrawingPrimitive {
     const padding = this._padding;
     const innerWidthCap = this._widthPx ? Math.max(0, this._widthPx - 2 * padding) : null;
     const explicitLines = (this._text || "").split("\n");
-    const lines = [];
+    const lines: string[] = [];
     for (const raw of explicitLines) {
       const wrapped = wrapLine(ctx, raw, innerWidthCap);
       for (const w of wrapped) lines.push(w);
@@ -498,7 +592,7 @@ export class TextDrawingPrimitive {
    *   { handle: 'tl'|'t'|'tr'|'r'|'br'|'b'|'bl'|'l' }   — handle hit (only when selected)
    *   { body: true }                                       — body hit
    */
-  hitTest(x, y) {
+  hitTest(x: number, y: number): DrawingHit | false {
     if (this._hidden) return false;
     const box = this.getBoundingBoxScreen();
     if (!box) return false;

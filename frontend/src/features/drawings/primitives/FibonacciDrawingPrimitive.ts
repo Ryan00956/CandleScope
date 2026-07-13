@@ -10,8 +10,37 @@
  */
 
 import { dataPointToCoordinate } from "./coordinateUtils.js";
+import type {
+  DrawingAttachedParameter,
+  DrawingDataPoint,
+  DrawingHit,
+  FibonacciLevel,
+  FibonacciPrimitiveOptions,
+  PrimitiveCanvasTarget,
+  PrimitivePaneRenderer,
+  PrimitivePaneView,
+} from "../drawingTypes.js";
 
-export const DEFAULT_FIB_LEVELS = [
+interface FibRenderPoint {
+  x: number | null;
+  y: number | null;
+}
+
+interface FibRenderData {
+  points: FibRenderPoint[];
+  logicalAPrice: number;
+  logicalBPrice: number;
+  color: string;
+  lineWidth: number;
+  selected: boolean;
+  isPreview: boolean;
+  hovered: boolean;
+  levels: FibonacciLevel[];
+  inverted: boolean;
+  hidden: boolean;
+}
+
+export const DEFAULT_FIB_LEVELS: FibonacciLevel[] = [
   { level: 0, color: "#787b86", enabled: true },
   { level: 0.236, color: "#f44336", enabled: true },
   { level: 0.382, color: "#81c784", enabled: true },
@@ -26,16 +55,18 @@ export const DEFAULT_FIB_LEVELS = [
   { level: 4.236, color: "#607d8b", enabled: false },
 ];
 
-class FibRenderer {
+class FibRenderer implements PrimitivePaneRenderer {
+  _data: FibRenderData | null;
+
   constructor() {
     this._data = null;
   }
 
-  update(data) {
+  update(data: FibRenderData): void {
     this._data = data;
   }
 
-  draw(target) {
+  draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
     if (data.hidden) return;
@@ -189,7 +220,7 @@ class FibRenderer {
   }
 }
 
-function adjustAlpha(hex, alpha) {
+function adjustAlpha(hex: string, alpha: number): string {
   let r = 0, g = 0, b = 0;
   if (hex.length === 4) {
     r = parseInt(hex[1] + hex[1], 16);
@@ -205,7 +236,7 @@ function adjustAlpha(hex, alpha) {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 
-function distToSegment(px, py, ax, ay, bx, by) {
+function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax;
   const dy = by - ay;
   const lenSq = dx * dx + dy * dy;
@@ -217,24 +248,39 @@ function distToSegment(px, py, ax, ay, bx, by) {
   return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
 }
 
-class FibPaneView {
-  constructor(source) {
+class FibPaneView implements PrimitivePaneView {
+  _source: FibonacciDrawingPrimitive;
+  _renderer: FibRenderer;
+
+  constructor(source: FibonacciDrawingPrimitive) {
     this._source = source;
     this._renderer = new FibRenderer();
   }
 
-  update() {
+  update(): void {
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
 
     if (!series || !chart) return;
     if (source._hidden) {
-      this._renderer.update({ points: [], hidden: true });
+      this._renderer.update({
+        points: [],
+        logicalAPrice: 0,
+        logicalBPrice: 0,
+        color: source._color,
+        lineWidth: source._lineWidth,
+        selected: source._selected,
+        isPreview: source._isPreview,
+        hovered: source._hovered,
+        levels: source._levels,
+        inverted: source._inverted,
+        hidden: true,
+      });
       return;
     }
 
-    const points = [];
+    const points: FibRenderPoint[] = [];
     const coordinateContext = {};
 
     for (const dp of source._dataPoints) {
@@ -245,8 +291,8 @@ class FibPaneView {
 
     this._renderer.update({
       points,
-      logicalAPrice: source._dataPoints[0]?.price,
-      logicalBPrice: source._dataPoints[1]?.price,
+      logicalAPrice: source._dataPoints[0]?.price ?? 0,
+      logicalBPrice: source._dataPoints[1]?.price ?? 0,
       color: source._color,
       lineWidth: source._lineWidth,
       selected: source._selected,
@@ -258,17 +304,33 @@ class FibPaneView {
     });
   }
 
-  renderer() {
+  renderer(): FibRenderer {
     return this._renderer;
   }
 
-  zOrder() {
+  zOrder(): "top" {
     return "top";
   }
 }
 
 export class FibonacciDrawingPrimitive {
-  constructor(opts) {
+  _id: string;
+  _type: "fibonacci";
+  _dataPoints: DrawingDataPoint[];
+  _color: string;
+  _lineWidth: number;
+  _selected: boolean;
+  _isPreview: boolean;
+  _hovered: boolean;
+  _levels: FibonacciLevel[];
+  _inverted: boolean;
+  _hidden: boolean;
+  _series: DrawingAttachedParameter["series"] | null;
+  _chart: DrawingAttachedParameter["chart"] | null;
+  _paneView: FibPaneView;
+  _requestUpdate: (() => void) | null;
+
+  constructor(opts: FibonacciPrimitiveOptions) {
     this._id = opts.id;
     this._dataPoints = opts.dataPoints || [];
     this._color = opts.color || "#0ea5e9";
@@ -287,23 +349,23 @@ export class FibonacciDrawingPrimitive {
     this._requestUpdate = null;
   }
 
-  attached({ chart, series, requestUpdate }) {
+  attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
     this._requestUpdate = requestUpdate;
   }
 
-  detached() {
+  detached(): void {
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
   }
 
-  updateAllViews() {
+  updateAllViews(): void {
     this._paneView.update();
   }
 
-  paneViews() {
+  paneViews(): readonly PrimitivePaneView[] {
     return [this._paneView];
   }
 
@@ -315,12 +377,12 @@ export class FibonacciDrawingPrimitive {
   get levels() { return this._levels; }
   get inverted() { return this._inverted; }
 
-  setDataPoints(points) {
+  setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
     this._requestUpdate?.();
   }
 
-  setSelected(v) {
+  setSelected(v: boolean): void {
     const next = !!v;
     if (this._selected !== next) {
       this._selected = next;
@@ -328,7 +390,7 @@ export class FibonacciDrawingPrimitive {
     }
   }
 
-  setHovered(v) {
+  setHovered(v: boolean): void {
     const next = !!v;
     if (this._hovered !== next) {
       this._hovered = next;
@@ -336,32 +398,32 @@ export class FibonacciDrawingPrimitive {
     }
   }
 
-  setColor(c) {
+  setColor(c: string): void {
     this._color = c;
     this._requestUpdate?.();
   }
 
-  setLineWidth(w) {
+  setLineWidth(w: number): void {
     this._lineWidth = w;
     this._requestUpdate?.();
   }
 
-  setPreview(v) {
+  setPreview(v: boolean): void {
     this._isPreview = v;
     this._requestUpdate?.();
   }
 
-  setLevels(levels) {
+  setLevels(levels: FibonacciLevel[]): void {
     this._levels = levels;
     this._requestUpdate?.();
   }
 
-  setInverted(v) {
+  setInverted(v: boolean): void {
     this._inverted = v;
     this._requestUpdate?.();
   }
 
-  setHidden(v, request = true) {
+  setHidden(v: boolean, request = true): void {
     const next = !!v;
     if (this._hidden !== next) {
       this._hidden = next;
@@ -369,19 +431,21 @@ export class FibonacciDrawingPrimitive {
     }
   }
 
-  requestUpdate() {
+  requestUpdate(): void {
     this._requestUpdate?.();
   }
 
-  hitTest(x, y) {
+  hitTest(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
     if (this._dataPoints.length < 2) return null;
 
+    const series = this._series;
+    const chart = this._chart;
     const coordinateContext = {};
     const screenPoints = this._dataPoints.map((dp) => {
-      const sx = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
-      return { x: sx, y: this._series.priceToCoordinate(dp.price) };
+      const sx = dataPointToCoordinate(chart, series, dp, coordinateContext);
+      return { x: sx, y: series.priceToCoordinate(dp.price) };
     });
 
     const [sa, sb] = screenPoints;
@@ -390,8 +454,12 @@ export class FibonacciDrawingPrimitive {
     const HANDLE_RADIUS = 7 + this._lineWidth;
     const LINE_HIT_RADIUS = 8 + this._lineWidth / 2;
 
-    for (let i = 0; i < 2; i++) {
-      const pt = i === 0 ? sa : sb;
+    const resolvedScreenPoints = [
+      { x: sa.x, y: sa.y },
+      { x: sb.x, y: sb.y },
+    ];
+    for (let i = 0; i < resolvedScreenPoints.length; i++) {
+      const pt = resolvedScreenPoints[i];
       const dx = pt.x - x;
       const dy = pt.y - y;
       if (Math.sqrt(dx * dx + dy * dy) <= HANDLE_RADIUS) {

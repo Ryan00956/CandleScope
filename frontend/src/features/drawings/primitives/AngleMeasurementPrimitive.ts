@@ -7,12 +7,51 @@
  */
 
 import { dataPointToCoordinate } from "./coordinateUtils.js";
+import type {
+  AnglePrimitiveOptions,
+  DrawingAttachedParameter,
+  DrawingDataPoint,
+  DrawingHit,
+  PrimitiveCanvasTarget,
+  PrimitivePaneRenderer,
+  PrimitivePaneView,
+  ScreenBox,
+  ScreenPoint,
+} from "../drawingTypes.js";
 
-function isFiniteCoord(value) {
+interface AngleGeometry {
+  refDir: number;
+  refLen: number;
+  startAngle: number;
+  delta: number;
+  radius: number;
+  degrees: number;
+  labelAngle: number;
+  labelX: number;
+  labelY: number;
+}
+
+interface AngleRenderPoint {
+  x: number | null;
+  y: number | null;
+}
+
+interface AngleRenderData {
+  points: AngleRenderPoint[];
+  color: string;
+  lineWidth: number;
+  selected: boolean;
+  hovered: boolean;
+  isPreview: boolean;
+  hidden: boolean;
+  setLabelBox: (box: ScreenBox | null) => void;
+}
+
+function isFiniteCoord(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function adjustAlpha(color, alpha) {
+function adjustAlpha(color: string, alpha: number): string {
   if (!color || color === "transparent") return "transparent";
   const a = Math.max(0, Math.min(1, Number(alpha)));
 
@@ -44,7 +83,7 @@ function adjustAlpha(color, alpha) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-function distToSegment(px, py, ax, ay, bx, by) {
+function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax;
   const dy = by - ay;
   const lenSq = dx * dx + dy * dy;
@@ -56,26 +95,26 @@ function distToSegment(px, py, ax, ay, bx, by) {
   return Math.hypot(px - projX, py - projY);
 }
 
-function shortestAngleDelta(from, to) {
+function shortestAngleDelta(from: number, to: number): number {
   let delta = to - from;
   while (delta > Math.PI) delta -= Math.PI * 2;
   while (delta < -Math.PI) delta += Math.PI * 2;
   return delta;
 }
 
-function formatAngle(degrees) {
+function formatAngle(degrees: number): string {
   if (!Number.isFinite(degrees)) return "--°";
   const rounded = degrees >= 10 ? Math.round(degrees * 10) / 10 : Math.round(degrees * 100) / 100;
   return `${rounded.toFixed(rounded % 1 === 0 ? 0 : 1)}°`;
 }
 
-function angleBetweenIsWithin(pointAngle, startAngle, delta) {
+function angleBetweenIsWithin(pointAngle: number, startAngle: number, delta: number): boolean {
   const pointDelta = shortestAngleDelta(startAngle, pointAngle);
   if (delta >= 0) return pointDelta >= -0.08 && pointDelta <= delta + 0.08;
   return pointDelta <= 0.08 && pointDelta >= delta - 0.08;
 }
 
-function computeGeometry(a, b) {
+function computeGeometry(a: ScreenPoint, b: ScreenPoint): AngleGeometry | null {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const distance = Math.hypot(dx, dy);
@@ -104,16 +143,18 @@ function computeGeometry(a, b) {
   };
 }
 
-class AngleRenderer {
+class AngleRenderer implements PrimitivePaneRenderer {
+  _data: AngleRenderData | null;
+
   constructor() {
     this._data = null;
   }
 
-  update(data) {
+  update(data: AngleRenderData): void {
     this._data = data;
   }
 
-  draw(target) {
+  draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
     if (!data || data.hidden || !data.points || data.points.length < 2) return;
 
@@ -246,13 +287,16 @@ class AngleRenderer {
   }
 }
 
-class AnglePaneView {
-  constructor(source) {
+class AnglePaneView implements PrimitivePaneView {
+  _source: AngleMeasurementPrimitive;
+  _renderer: AngleRenderer;
+
+  constructor(source: AngleMeasurementPrimitive) {
     this._source = source;
     this._renderer = new AngleRenderer();
   }
 
-  update() {
+  update(): void {
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
@@ -261,13 +305,18 @@ class AnglePaneView {
       source._labelBox = null;
       this._renderer.update({
         points: [],
+        color: source._color,
+        lineWidth: source._lineWidth,
+        selected: source._selected,
+        hovered: source._hovered,
+        isPreview: source._isPreview,
         hidden: true,
-        setLabelBox: (box) => { source._labelBox = box; },
+        setLabelBox: (box: ScreenBox | null) => { source._labelBox = box; },
       });
       return;
     }
 
-    const points = [];
+    const points: AngleRenderPoint[] = [];
     const coordinateContext = {};
 
     for (const dp of source._dataPoints) {
@@ -284,21 +333,36 @@ class AnglePaneView {
       hovered: source._hovered,
       isPreview: source._isPreview,
       hidden: source._hidden,
-      setLabelBox: (box) => { source._labelBox = box; },
+      setLabelBox: (box: ScreenBox | null) => { source._labelBox = box; },
     });
   }
 
-  renderer() {
+  renderer(): AngleRenderer {
     return this._renderer;
   }
 
-  zOrder() {
+  zOrder(): "top" {
     return "top";
   }
 }
 
 export class AngleMeasurementPrimitive {
-  constructor(opts) {
+  _id: string;
+  _type: "angle-measure";
+  _dataPoints: DrawingDataPoint[];
+  _color: string;
+  _lineWidth: number;
+  _selected: boolean;
+  _hovered: boolean;
+  _isPreview: boolean;
+  _hidden: boolean;
+  _labelBox: ScreenBox | null;
+  _series: DrawingAttachedParameter["series"] | null;
+  _chart: DrawingAttachedParameter["chart"] | null;
+  _paneView: AnglePaneView;
+  _requestUpdate: (() => void) | null;
+
+  constructor(opts: AnglePrimitiveOptions) {
     this._id = opts.id;
     this._type = "angle-measure";
     this._dataPoints = opts.dataPoints || [];
@@ -316,23 +380,23 @@ export class AngleMeasurementPrimitive {
     this._requestUpdate = null;
   }
 
-  attached({ chart, series, requestUpdate }) {
+  attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
     this._requestUpdate = requestUpdate;
   }
 
-  detached() {
+  detached(): void {
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
   }
 
-  updateAllViews() {
+  updateAllViews(): void {
     this._paneView.update();
   }
 
-  paneViews() {
+  paneViews(): readonly PrimitivePaneView[] {
     return [this._paneView];
   }
 
@@ -343,12 +407,12 @@ export class AngleMeasurementPrimitive {
   get lineWidth() { return this._lineWidth; }
   get selected() { return this._selected; }
 
-  setDataPoints(points) {
+  setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
     this._requestUpdate?.();
   }
 
-  setSelected(v) {
+  setSelected(v: boolean): void {
     const next = !!v;
     if (this._selected !== next) {
       this._selected = next;
@@ -356,7 +420,7 @@ export class AngleMeasurementPrimitive {
     }
   }
 
-  setHovered(v) {
+  setHovered(v: boolean): void {
     const next = !!v;
     if (this._hovered !== next) {
       this._hovered = next;
@@ -364,22 +428,22 @@ export class AngleMeasurementPrimitive {
     }
   }
 
-  setColor(color) {
+  setColor(color: string): void {
     this._color = color;
     this._requestUpdate?.();
   }
 
-  setLineWidth(width) {
+  setLineWidth(width: number): void {
     this._lineWidth = width;
     this._requestUpdate?.();
   }
 
-  setPreview(v) {
+  setPreview(v: boolean): void {
     this._isPreview = !!v;
     this._requestUpdate?.();
   }
 
-  setHidden(v, request = true) {
+  setHidden(v: boolean, request = true): void {
     const next = !!v;
     if (this._hidden !== next) {
       this._hidden = next;
@@ -387,11 +451,11 @@ export class AngleMeasurementPrimitive {
     }
   }
 
-  requestUpdate() {
+  requestUpdate(): void {
     this._requestUpdate?.();
   }
 
-  _screenPoints() {
+  _screenPoints(): ScreenPoint[] | null {
     if (!this._series || !this._chart || this._dataPoints.length < 2) return null;
     const points = [];
     const coordinateContext = {};
@@ -406,7 +470,7 @@ export class AngleMeasurementPrimitive {
     return points;
   }
 
-  hitTest(x, y) {
+  hitTest(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
 
     if (this._labelBox) {

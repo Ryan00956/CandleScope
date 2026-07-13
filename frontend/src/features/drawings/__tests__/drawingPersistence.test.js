@@ -612,6 +612,63 @@ test("load filters invalid entries and restores canonical v1 and v2 highlighter 
   });
 });
 
+test("drawing schema fixtures reject corrupt anchors and preserve compatible anchor forms", () => {
+  withMemoryLocalStorage((values) => {
+    const symbol = "anchor-schema-fixtures";
+    values.set(drawingStorageKey(symbol), JSON.stringify([
+      {
+        type: "line",
+        id: "corrupt-anchor",
+        dataPoints: [{ time: "not-a-time", price: 1 }, { time: 200, price: 2 }],
+      },
+      { type: "future-drawing-kind", id: "unknown-kind" },
+      {
+        type: "line",
+        id: "legacy-logical",
+        dataPoints: [
+          { time: 100, logical: 1.5, order: 7, price: 1 },
+          { time: 200, logical: 2.5, order: 8, price: 2 },
+        ],
+      },
+      {
+        type: "line",
+        id: "synthetic-lineage",
+        dataPoints: [
+          {
+            time: 300,
+            sourceOrdinal: 4,
+            sourceProjection: "renko",
+            sourceProjectionConfig: "derived-ordinal:renko:{\"boxSize\":10}",
+            logical: 9,
+            order: 11,
+            price: 3,
+          },
+          { time: 400, price: 4 },
+        ],
+      },
+    ]));
+
+    const drawings = loadDrawings(symbol);
+    assert.deepEqual(drawings.map((drawing) => drawing.id), [
+      "legacy-logical",
+      "synthetic-lineage",
+    ]);
+    assert.deepEqual(drawings[0].dataPoints[0], {
+      time: 100,
+      logical: 1.5,
+      price: 1,
+    });
+    assert.deepEqual(drawings[1].dataPoints[0], {
+      time: 300,
+      sourceOrdinal: 4,
+      sourceProjection: "renko",
+      sourceProjectionConfig: "derived-ordinal:renko:{\"boxSize\":10}",
+      price: 3,
+    });
+    assert.equal(recursiveKeys(drawings).has("order"), false);
+  });
+});
+
 test("load rejects aggregate legacy point budgets above the symbol limit", () => {
   withMemoryLocalStorage((values) => {
     const symbol = "aggregate-points";

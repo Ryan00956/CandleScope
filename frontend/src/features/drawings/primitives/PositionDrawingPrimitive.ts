@@ -16,10 +16,72 @@
  */
 
 import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { isRecord, parseDrawingAnchor } from "../drawingContracts.js";
+import type {
+  DrawingAttachedParameter,
+  DrawingDataPoint,
+  DrawingHit,
+  HorizontalDrawingAnchor,
+  PositionDirection,
+  PositionInfoPanelOffset,
+  PositionPrimitiveOptions,
+  PositionTimeRange,
+  PrimitiveCanvasTarget,
+  PrimitivePaneRenderer,
+  PrimitivePaneView,
+  ScreenBox,
+} from "../drawingTypes.js";
+
+interface PositionScreenRange {
+  collapsed: boolean;
+  leftX: number;
+  rightX: number;
+}
+
+interface PositionGeometry {
+  entryPrice: unknown;
+  tpPrice: unknown;
+  slPrice: unknown;
+  timeRange: unknown;
+}
+
+interface PositionInfoLine {
+  label: string;
+  value: string;
+  extra?: string | null;
+  color: string;
+}
+
+interface PositionVisibleRenderData {
+  hidden: false;
+  entryY: number | null;
+  tpY: number | null;
+  slY: number | null;
+  leftX: number | null;
+  rightX: number | null;
+  direction: PositionDirection;
+  selected: boolean;
+  hovered: boolean;
+  isPreview: boolean;
+  entryPrice: number;
+  tpPrice: number | null;
+  slPrice: number | null;
+  positionSize: number;
+  infoPanelOffset: PositionInfoPanelOffset;
+  upColor: string;
+  downColor: string;
+  currentPrice: number | null;
+  setInfoPanelBox: (box: ScreenBox | null) => void;
+}
+
+type PositionRenderData = PositionVisibleRenderData | {
+  hidden: true;
+  setInfoPanelBox: (box: ScreenBox | null) => void;
+};
 
 // ── Color helpers ──
 
-function adjustAlpha(hex, alpha) {
+function adjustAlpha(hex: string, alpha: number): string {
   let r = 0, g = 0, b = 0;
   if (hex.startsWith("rgba")) {
     const match = hex.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
@@ -46,72 +108,54 @@ function adjustAlpha(hex, alpha) {
  * For long:  (price - entry) / entry
  * For short: (entry - price) / entry   ← price drops = profit
  */
-function calcPnlPct(entryPrice, price, isLong) {
+function calcPnlPct(entryPrice: number, price: number, isLong: boolean): number {
   if (!entryPrice || entryPrice === 0) return 0;
   return isLong
     ? ((price - entryPrice) / entryPrice) * 100
     : ((entryPrice - price) / entryPrice) * 100;
 }
 
-function normalizeInfoPanelOffset(offset) {
-  const x = Number(offset?.x);
-  const y = Number(offset?.y);
+function normalizeInfoPanelOffset(offset: unknown): PositionInfoPanelOffset {
+  const x = isRecord(offset) ? Number(offset.x) : Number.NaN;
+  const y = isRecord(offset) ? Number(offset.y) : Number.NaN;
   return {
     x: Number.isFinite(x) ? x : 0,
     y: Number.isFinite(y) ? y : 0,
   };
 }
 
-function normalizeHorizontalAnchor(anchor) {
+function normalizeHorizontalAnchor(anchor: unknown): HorizontalDrawingAnchor | null {
   if (anchor == null) return null;
   if (typeof anchor === "number" && Number.isFinite(anchor)) return { time: anchor };
-  if (typeof anchor !== "object") return null;
-
-  const out = {};
-  if (anchor.time != null && Number.isFinite(Number(anchor.time))) {
-    out.time = anchor.time;
-    if (Number.isSafeInteger(anchor.sourceOrdinal) && anchor.sourceOrdinal >= 0) {
-      out.sourceOrdinal = anchor.sourceOrdinal;
-    }
-    if (typeof anchor.sourceProjection === "string" && anchor.sourceProjection) {
-      out.sourceProjection = anchor.sourceProjection;
-    }
-    if (typeof anchor.sourceProjectionConfig === "string"
-      && anchor.sourceProjectionConfig) {
-      out.sourceProjectionConfig = anchor.sourceProjectionConfig;
-    }
-    if (out.sourceOrdinal == null
-      && out.sourceProjection == null
-      && out.sourceProjectionConfig == null
-      && typeof anchor.logical === "number"
-      && Number.isFinite(anchor.logical)) {
-      out.logical = anchor.logical;
-    }
-  } else if (typeof anchor.logical === "number" && Number.isFinite(anchor.logical)) {
-    out.logical = anchor.logical;
-  }
-  return Object.keys(out).length > 0 ? out : null;
+  return parseDrawingAnchor(anchor);
 }
 
-function horizontalAnchorToDataPoint(anchor, price) {
+function horizontalAnchorToDataPoint(
+  anchor: HorizontalDrawingAnchor | null,
+  price: number,
+): DrawingDataPoint | null {
   const normalized = normalizeHorizontalAnchor(anchor);
+  if (typeof normalized === "number") return { time: normalized, price };
   return normalized ? { ...normalized, price } : null;
 }
 
-function normalizePositionTimeRange(range) {
-  const start = normalizeHorizontalAnchor(range?.start);
-  const end = normalizeHorizontalAnchor(range?.end);
+function normalizePositionTimeRange(range: unknown): PositionTimeRange | null {
+  if (!isRecord(range)) return null;
+  const start = normalizeHorizontalAnchor(range.start);
+  const end = normalizeHorizontalAnchor(range.end);
   return start && end ? { start, end } : null;
 }
 
-function positionMinimumScreenWidth(chart) {
-  let spacing = null;
+function positionMinimumScreenWidth(chart: DrawingAttachedParameter["chart"]): number {
+  let spacing: unknown = null;
   try {
     spacing = chart?.timeScale?.()?.options?.()?.barSpacing;
   } catch {
     spacing = null;
   }
-  return Number.isFinite(spacing) ? Math.max(24, Math.min(40, spacing)) : 24;
+  return typeof spacing === "number" && Number.isFinite(spacing)
+    ? Math.max(24, Math.min(40, spacing))
+    : 24;
 }
 
 /**
@@ -119,8 +163,13 @@ function positionMinimumScreenWidth(chart) {
  * display row. Renderer and hit testing share this compact visual expansion,
  * so the position remains selectable without inventing a neighboring anchor.
  */
-export function normalizedPositionScreenRange(startX, endX, minimumWidth = 24) {
+export function normalizedPositionScreenRange(
+  startX: number | null | undefined,
+  endX: number | null | undefined,
+  minimumWidth = 24,
+): PositionScreenRange | null {
   if (!Number.isFinite(startX) || !Number.isFinite(endX)) return null;
+  if (startX == null || endX == null) return null;
   let leftX = Math.min(startX, endX);
   let rightX = Math.max(startX, endX);
   const collapsed = Math.abs(rightX - leftX) < 0.5;
@@ -138,7 +187,7 @@ export function normalizedPositionScreenRange(startX, endX, minimumWidth = 24) {
 
 // ── Smart price formatter ──
 
-function formatPrice(price) {
+function formatPrice(price: number | null): string {
   if (price == null) return "--";
   if (price >= 1000) return price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   if (price >= 1) return price.toFixed(4);
@@ -148,16 +197,18 @@ function formatPrice(price) {
 
 // ── Renderer ──
 
-class PositionRenderer {
+class PositionRenderer implements PrimitivePaneRenderer {
+  _data: PositionRenderData | null;
+
   constructor() {
     this._data = null;
   }
 
-  update(data) {
+  update(data: PositionRenderData): void {
     this._data = data;
   }
 
-  draw(target) {
+  draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
     if (!data) return;
     if (data.hidden) return;
@@ -335,7 +386,16 @@ class PositionRenderer {
     });
   }
 
-  _drawHandle(ctx, x, y, r, lineW, color, ratio, vRatio) {
+  _drawHandle(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    r: number,
+    lineW: number,
+    color: string,
+    ratio: number,
+    vRatio: number,
+  ): void {
     ctx.fillStyle = "#ffffff";
     ctx.strokeStyle = color;
     ctx.lineWidth = lineW;
@@ -348,7 +408,16 @@ class PositionRenderer {
     ctx.shadowBlur = 0;
   }
 
-  _drawDragBar(ctx, lX, rX, y, color, ratio, vRatio, arrowDir) {
+  _drawDragBar(
+    ctx: CanvasRenderingContext2D,
+    lX: number,
+    rX: number,
+    y: number,
+    color: string,
+    ratio: number,
+    vRatio: number,
+    arrowDir: "up" | "down",
+  ): void {
     const barH = 6 * vRatio;
     const barW = Math.min(60 * ratio, (rX - lX) * 0.4);
     const midX = (lX + rX) / 2;
@@ -375,7 +444,16 @@ class PositionRenderer {
     ctx.fill();
   }
 
-  _drawEdgeHandle(ctx, x, midY, topY, botY, color, ratio, vRatio) {
+  _drawEdgeHandle(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    midY: number,
+    topY: number,
+    botY: number,
+    color: string,
+    ratio: number,
+    vRatio: number,
+  ): void {
     const handleW = 4 * ratio;
     const handleH = Math.min(24 * vRatio, Math.abs(botY - topY) * 0.4);
     if (handleH < 4 * vRatio) return;
@@ -405,7 +483,17 @@ class PositionRenderer {
    * Draw a price label badge next to the TP/SL line.
    * pct and pnl are pre-calculated with correct long/short logic.
    */
-  _drawPriceLabel(ctx, ratio, vRatio, rX, y, price, pct, pnl, color) {
+  _drawPriceLabel(
+    ctx: CanvasRenderingContext2D,
+    ratio: number,
+    vRatio: number,
+    rX: number,
+    y: number,
+    price: number,
+    pct: number,
+    pnl: number,
+    color: string,
+  ): void {
     const priceText = formatPrice(price);
     const pctText = `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
     const pnlText = pnl !== 0 ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}` : "";
@@ -435,14 +523,23 @@ class PositionRenderer {
     ctx.fillText(text, boxX + padX, y);
   }
 
-  _drawInfoPanel(ctx, ratio, vRatio, rX, eY, tY, sY, data) {
+  _drawInfoPanel(
+    ctx: CanvasRenderingContext2D,
+    ratio: number,
+    vRatio: number,
+    rX: number,
+    eY: number,
+    _tY: number | null,
+    _sY: number | null,
+    data: PositionVisibleRenderData,
+  ): ScreenBox | undefined {
     const { entryPrice, tpPrice, slPrice, positionSize, direction, currentPrice, upColor, downColor, infoPanelOffset, selected } = data;
     const isLong = direction === "long";
     const kUpColor = upColor || "#22c55e";
     const kDownColor = downColor || "#ef4444";
 
     // Calculate R:R
-    let rrRatio = null;
+    let rrRatio: number | null = null;
     if (tpPrice != null && slPrice != null && entryPrice) {
       const reward = Math.abs(tpPrice - entryPrice);
       const risk = Math.abs(slPrice - entryPrice);
@@ -452,7 +549,7 @@ class PositionRenderer {
     }
 
     // Build info lines
-    const lines = [];
+    const lines: PositionInfoLine[] = [];
     lines.push({ label: "入场", value: formatPrice(entryPrice), color: "#2196f3" });
 
     if (tpPrice != null) {
@@ -596,7 +693,14 @@ class PositionRenderer {
     };
   }
 
-  _roundRect(ctx, x, y, w, h, r) {
+  _roundRect(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    r: number,
+  ): void {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
     ctx.lineTo(x + w - r, y);
@@ -613,13 +717,16 @@ class PositionRenderer {
 
 // ── Pane View ──
 
-class PositionPaneView {
-  constructor(source) {
+class PositionPaneView implements PrimitivePaneView {
+  _source: PositionDrawingPrimitive;
+  _renderer: PositionRenderer;
+
+  constructor(source: PositionDrawingPrimitive) {
     this._source = source;
     this._renderer = new PositionRenderer();
   }
 
-  update() {
+  update(): void {
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
@@ -629,14 +736,14 @@ class PositionPaneView {
       source._infoPanelBox = null;
       this._renderer.update({
         hidden: true,
-        setInfoPanelBox: (box) => { source._infoPanelBox = box; },
+        setInfoPanelBox: (box: ScreenBox | null) => { source._infoPanelBox = box; },
       });
       return;
     }
 
     // Convert time coords to screen X
     const coordinateContext = {};
-    const toScreenX = (anchor) => {
+    const toScreenX = (anchor: HorizontalDrawingAnchor | null): number | null => {
       const dataPoint = horizontalAnchorToDataPoint(anchor, source._entryPrice);
       return dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
     };
@@ -668,13 +775,13 @@ class PositionPaneView {
     } catch { /* use defaults */ }
 
     // Get current price from the last data point of the series
-    let currentPrice = null;
+    let currentPrice: number | null = null;
     try {
       // Try reading the last bar from the series data
       const lastBar = series.dataByIndex(Infinity, -1);
-      if (lastBar && lastBar.close != null) {
+      if (isRecord(lastBar) && typeof lastBar.close === "number") {
         currentPrice = lastBar.close;
-      } else if (lastBar && lastBar.value != null) {
+      } else if (isRecord(lastBar) && typeof lastBar.value === "number") {
         currentPrice = lastBar.value;
       }
     } catch { /* */ }
@@ -697,16 +804,16 @@ class PositionPaneView {
       upColor,
       downColor,
       currentPrice,
-      hidden: source._hidden,
-      setInfoPanelBox: (box) => { source._infoPanelBox = box; },
+      hidden: false,
+      setInfoPanelBox: (box: ScreenBox | null) => { source._infoPanelBox = box; },
     });
   }
 
-  renderer() {
+  renderer(): PrimitivePaneRenderer {
     return this._renderer;
   }
 
-  zOrder() {
+  zOrder(): "top" {
     return "top";
   }
 }
@@ -714,6 +821,25 @@ class PositionPaneView {
 // ── The Primitive ──
 
 export class PositionDrawingPrimitive {
+  _id: string;
+  _type: "position";
+  _direction: PositionDirection;
+  _entryPrice: number;
+  _tpPrice: number | null;
+  _slPrice: number | null;
+  _timeRange: PositionTimeRange;
+  _positionSize: number;
+  _infoPanelOffset: PositionInfoPanelOffset;
+  _infoPanelBox: ScreenBox | null;
+  _selected: boolean;
+  _isPreview: boolean;
+  _hovered: boolean;
+  _hidden: boolean;
+  _series: DrawingAttachedParameter["series"] | null;
+  _chart: DrawingAttachedParameter["chart"] | null;
+  _paneView: PositionPaneView;
+  _requestUpdate: (() => void) | null;
+
   /**
    * @param {object} opts
    * @param {string} opts.id
@@ -724,7 +850,7 @@ export class PositionDrawingPrimitive {
    * @param {{start: number, end: number}} opts.timeRange - Unix timestamps
    * @param {number} opts.positionSize - position amount in base currency
    */
-  constructor(opts) {
+  constructor(opts: PositionPrimitiveOptions) {
     this._id = opts.id;
     this._type = "position";
     this._direction = opts.direction || "long";
@@ -749,39 +875,39 @@ export class PositionDrawingPrimitive {
 
   // ── ISeriesPrimitive interface ──
 
-  attached({ chart, series, requestUpdate }) {
+  attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
     this._requestUpdate = requestUpdate;
   }
 
-  detached() {
+  detached(): void {
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
   }
 
-  updateAllViews() {
+  updateAllViews(): void {
     this._paneView.update();
   }
 
-  paneViews() {
+  paneViews(): PrimitivePaneView[] {
     return [this._paneView];
   }
 
   // ── Public API ──
 
-  get id() { return this._id; }
-  get direction() { return this._direction; }
-  get entryPrice() { return this._entryPrice; }
-  get tpPrice() { return this._tpPrice; }
-  get slPrice() { return this._slPrice; }
-  get timeRange() { return this._timeRange; }
-  get positionSize() { return this._positionSize; }
-  get infoPanelOffset() { return this._infoPanelOffset; }
-  get selected() { return this._selected; }
-  get dataPoints() {
-    const points = [];
+  get id(): string { return this._id; }
+  get direction(): PositionDirection { return this._direction; }
+  get entryPrice(): number { return this._entryPrice; }
+  get tpPrice(): number | null { return this._tpPrice; }
+  get slPrice(): number | null { return this._slPrice; }
+  get timeRange(): PositionTimeRange { return this._timeRange; }
+  get positionSize(): number { return this._positionSize; }
+  get infoPanelOffset(): PositionInfoPanelOffset { return this._infoPanelOffset; }
+  get selected(): boolean { return this._selected; }
+  get dataPoints(): DrawingDataPoint[] {
+    const points: DrawingDataPoint[] = [];
     const start = horizontalAnchorToDataPoint(this._timeRange.start, this._entryPrice);
     const end = horizontalAnchorToDataPoint(this._timeRange.end, this._entryPrice);
     if (start) points.push(start);
@@ -789,22 +915,22 @@ export class PositionDrawingPrimitive {
     return points;
   }
 
-  setEntryPrice(price) {
+  setEntryPrice(price: number): void {
     this._entryPrice = price;
     this._requestUpdate?.();
   }
 
-  setTpPrice(price) {
+  setTpPrice(price: number | null): void {
     this._tpPrice = price;
     this._requestUpdate?.();
   }
 
-  setSlPrice(price) {
+  setSlPrice(price: number | null): void {
     this._slPrice = price;
     this._requestUpdate?.();
   }
 
-  setTimeRange(range) {
+  setTimeRange(range: unknown): boolean {
     const nextRange = normalizePositionTimeRange(range);
     if (!nextRange) return false;
     this._timeRange = nextRange;
@@ -812,7 +938,7 @@ export class PositionDrawingPrimitive {
     return true;
   }
 
-  setGeometry({ entryPrice, tpPrice, slPrice, timeRange }) {
+  setGeometry({ entryPrice, tpPrice, slPrice, timeRange }: PositionGeometry): boolean {
     const nextEntry = Number(entryPrice);
     const nextTp = tpPrice == null ? null : Number(tpPrice);
     const nextSl = slPrice == null ? null : Number(slPrice);
@@ -833,28 +959,28 @@ export class PositionDrawingPrimitive {
     return true;
   }
 
-  setPositionSize(size) {
+  setPositionSize(size: number): void {
     this._positionSize = size;
     this._requestUpdate?.();
   }
 
-  setInfoPanelOffset(offset) {
+  setInfoPanelOffset(offset: unknown): void {
     const next = normalizeInfoPanelOffset(offset);
     if (next.x === this._infoPanelOffset.x && next.y === this._infoPanelOffset.y) return;
     this._infoPanelOffset = next;
     this._requestUpdate?.();
   }
 
-  resetInfoPanelOffset() {
+  resetInfoPanelOffset(): void {
     this.setInfoPanelOffset({ x: 0, y: 0 });
   }
 
-  setDirection(dir) {
+  setDirection(dir: PositionDirection): void {
     this._direction = dir;
     this._requestUpdate?.();
   }
 
-  setSelected(v) {
+  setSelected(v: boolean): void {
     const next = !!v;
     if (this._selected !== next) {
       this._selected = next;
@@ -862,7 +988,7 @@ export class PositionDrawingPrimitive {
     }
   }
 
-  setHovered(v) {
+  setHovered(v: boolean): void {
     const next = !!v;
     if (this._hovered !== next) {
       this._hovered = next;
@@ -870,12 +996,12 @@ export class PositionDrawingPrimitive {
     }
   }
 
-  setPreview(v) {
+  setPreview(v: boolean): void {
     this._isPreview = v;
     this._requestUpdate?.();
   }
 
-  setDataPoints(points) {
+  setDataPoints(points: DrawingDataPoint[]): void {
     if (points.length >= 2) {
       const nextRange = normalizePositionTimeRange({ start: points[0], end: points[1] });
       if (nextRange && Number.isFinite(Number(points[0].price))) {
@@ -886,7 +1012,7 @@ export class PositionDrawingPrimitive {
     this._requestUpdate?.();
   }
 
-  setHidden(v, request = true) {
+  setHidden(v: boolean, request = true): void {
     const next = !!v;
     if (this._hidden !== next) {
       this._hidden = next;
@@ -894,28 +1020,29 @@ export class PositionDrawingPrimitive {
     }
   }
 
-  requestUpdate() {
+  requestUpdate(): void {
     this._requestUpdate?.();
   }
 
   // ── Hit testing ──
 
-  hitTest(x, y) {
+  hitTest(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
 
     const series = this._series;
+    const chart = this._chart;
     const coordinateContext = {};
 
-    const toScreenX = (anchor) => {
+    const toScreenX = (anchor: HorizontalDrawingAnchor | null): number | null => {
       const dataPoint = horizontalAnchorToDataPoint(anchor, this._entryPrice);
-      return dataPointToCoordinate(this._chart, series, dataPoint, coordinateContext);
+      return dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
     };
 
     const screenRange = normalizedPositionScreenRange(
       toScreenX(this._timeRange.start),
       toScreenX(this._timeRange.end),
-      positionMinimumScreenWidth(this._chart),
+      positionMinimumScreenWidth(chart),
     );
     if (!screenRange) return null;
     const { leftX, rightX } = screenRange;

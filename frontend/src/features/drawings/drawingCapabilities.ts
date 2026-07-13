@@ -12,13 +12,19 @@ import {
   POSITION_TOOL_IDS,
   SHAPE_TOOL_IDS,
 } from "./drawingModel.js";
+import type {
+  DrawingAnchorMode,
+  DrawingHitType,
+  DrawingToolId,
+  DrawingVariant,
+} from "./drawingTypes.js";
 
-const SOURCE_TIME_TOOL_IDS = new Set([
+const SOURCE_TIME_TOOL_IDS = new Set<string>([
   ...CURSOR_TOOL_IDS,
   ...DRAWING_ENGINE_TOOL_IDS,
 ]);
 
-const SOURCE_LINEAGE_TOOL_IDS = new Set([
+const SOURCE_LINEAGE_TOOL_IDS = new Set<string>([
   ...CURSOR_TOOL_IDS,
   "eraser",
   ...BASIC_LINE_TOOL_IDS,
@@ -32,7 +38,7 @@ const SOURCE_LINEAGE_TOOL_IDS = new Set([
   "highlighter",
 ]);
 
-const HIT_TYPE_TOOL_IDS = Object.freeze({
+const HIT_TYPE_TOOL_IDS: Readonly<Record<DrawingHitType, DrawingToolId>> = Object.freeze({
   line: "line-segment",
   "axis-line": "line-horizontal",
   angle: "angle-measure",
@@ -44,12 +50,15 @@ const HIT_TYPE_TOOL_IDS = Object.freeze({
   highlighter: "highlighter",
 });
 
-export function supportsDrawingAnchorMode(anchorMode) {
+export function supportsDrawingAnchorMode(anchorMode: DrawingAnchorMode): boolean {
   return anchorMode === CHART_DRAWING_ANCHOR_MODES.SOURCE_TIME
     || anchorMode === CHART_DRAWING_ANCHOR_MODES.SOURCE_LINEAGE;
 }
 
-export function supportsDrawingTool(anchorMode, tool) {
+export function supportsDrawingTool(
+  anchorMode: DrawingAnchorMode,
+  tool: DrawingToolId | null | undefined,
+): boolean {
   if (tool == null) return supportsDrawingAnchorMode(anchorMode);
   if (anchorMode === CHART_DRAWING_ANCHOR_MODES.SOURCE_TIME) {
     return SOURCE_TIME_TOOL_IDS.has(tool);
@@ -60,14 +69,20 @@ export function supportsDrawingTool(anchorMode, tool) {
   return false;
 }
 
-export function drawingToolForAnchorMode(anchorMode, tool) {
-  if (supportsDrawingTool(anchorMode, tool)) return tool;
+export function drawingToolForAnchorMode(
+  anchorMode: DrawingAnchorMode,
+  tool: DrawingToolId | null | undefined,
+): DrawingToolId | null {
+  if (supportsDrawingTool(anchorMode, tool)) return tool ?? null;
   return supportsDrawingTool(anchorMode, DEFAULT_CURSOR_TOOL)
     ? DEFAULT_CURSOR_TOOL
     : null;
 }
 
-export function hasSupportedDrawingVariant(anchorMode, variants = []) {
+export function hasSupportedDrawingVariant(
+  anchorMode: DrawingAnchorMode,
+  variants: readonly DrawingVariant[] = [],
+): boolean {
   return variants.some((variant) => supportsDrawingTool(anchorMode, variant?.id));
 }
 
@@ -76,7 +91,10 @@ export function hasSupportedDrawingVariant(anchorMode, variants = []) {
  * representations. Keep unsupported legacy primitives visible/erasable, but
  * do not let another active tool edit their anchors in a stricter mode.
  */
-export function supportsDrawingHitType(anchorMode, hitType) {
+export function supportsDrawingHitType(
+  anchorMode: DrawingAnchorMode,
+  hitType: DrawingHitType,
+): boolean {
   const tool = HIT_TYPE_TOOL_IDS[hitType];
   return typeof tool === "string" && supportsDrawingTool(anchorMode, tool);
 }

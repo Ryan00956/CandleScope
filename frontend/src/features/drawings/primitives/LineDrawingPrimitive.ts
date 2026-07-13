@@ -15,10 +15,51 @@
  */
 
 import { dataPointToCoordinate } from "./coordinateUtils.js";
+import type {
+  BasicLineToolId,
+  DrawingAttachedParameter,
+  DrawingDataPoint,
+  DrawingHit,
+  LinePrimitiveOptions,
+  PrimitiveCanvasTarget,
+  PrimitivePaneRenderer,
+  PrimitivePaneView,
+} from "../drawingTypes.js";
+
+interface ExtendedLineCoordinates {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+interface LineRenderPoint {
+  x: number | null;
+  y: number | null;
+}
+
+interface LineRenderData {
+  points: LineRenderPoint[];
+  color: string;
+  lineWidth: number;
+  lineType: BasicLineToolId;
+  selected: boolean;
+  isPreview: boolean;
+  hovered: boolean;
+  hidden: boolean;
+}
 
 // ── Geometry helpers ──
 
-function extendLineCoords(ax, ay, bx, by, type, canvasWidth, canvasHeight) {
+function extendLineCoords(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  type: BasicLineToolId,
+  canvasWidth: number,
+  canvasHeight: number,
+): ExtendedLineCoordinates {
   const dx = bx - ax;
   const dy = by - ay;
   const d = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -43,7 +84,7 @@ function extendLineCoords(ax, ay, bx, by, type, canvasWidth, canvasHeight) {
   };
 }
 
-function distToSegment(px, py, ax, ay, bx, by) {
+function distToSegment(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax;
   const dy = by - ay;
   const lenSq = dx * dx + dy * dy;
@@ -56,7 +97,14 @@ function distToSegment(px, py, ax, ay, bx, by) {
 }
 
 // Distance from point (px,py) to the infinite line through A and B.
-function distToInfiniteLine(px, py, ax, ay, bx, by) {
+function distToInfiniteLine(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
   const dx = bx - ax;
   const dy = by - ay;
   const lenSq = dx * dx + dy * dy;
@@ -65,7 +113,7 @@ function distToInfiniteLine(px, py, ax, ay, bx, by) {
 }
 
 // Distance from point (px,py) to the ray starting at A and passing through B (extending past B to infinity).
-function distToRay(px, py, ax, ay, bx, by) {
+function distToRay(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
   const dx = bx - ax;
   const dy = by - ay;
   const lenSq = dx * dx + dy * dy;
@@ -81,16 +129,18 @@ function distToRay(px, py, ax, ay, bx, by) {
 
 // ── Pane Renderer ──
 
-class LineRenderer {
+class LineRenderer implements PrimitivePaneRenderer {
+  _data: LineRenderData | null;
+
   constructor() {
     this._data = null;
   }
 
-  update(data) {
+  update(data: LineRenderData): void {
     this._data = data;
   }
 
-  draw(target) {
+  draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
     if (data.hidden) return;
@@ -201,7 +251,7 @@ class LineRenderer {
   }
 }
 
-function adjustAlpha(hex, alpha) {
+function adjustAlpha(hex: string, alpha: number): string {
   // Convert hex to rgba
   let r = 0, g = 0, b = 0;
   if (hex.length === 4) {
@@ -220,13 +270,16 @@ function adjustAlpha(hex, alpha) {
 
 // ── Pane View ──
 
-class LinePaneView {
-  constructor(source) {
+class LinePaneView implements PrimitivePaneView {
+  _source: LineDrawingPrimitive;
+  _renderer: LineRenderer;
+
+  constructor(source: LineDrawingPrimitive) {
     this._source = source;
     this._renderer = new LineRenderer();
   }
 
-  update() {
+  update(): void {
     // Called by the chart before rendering. Convert data coords → screen coords.
     const source = this._source;
     const series = source._series;
@@ -234,11 +287,20 @@ class LinePaneView {
 
     if (!series || !chart) return;
     if (source._hidden) {
-      this._renderer.update({ points: [], hidden: true });
+      this._renderer.update({
+        points: [],
+        color: source._color,
+        lineWidth: source._lineWidth,
+        lineType: source._lineType,
+        selected: source._selected,
+        isPreview: source._isPreview,
+        hovered: source._hovered,
+        hidden: true,
+      });
       return;
     }
 
-    const points = [];
+    const points: LineRenderPoint[] = [];
     const coordinateContext = {};
 
     for (const dp of source._dataPoints) {
@@ -259,11 +321,11 @@ class LinePaneView {
     });
   }
 
-  renderer() {
+  renderer(): LineRenderer {
     return this._renderer;
   }
 
-  zOrder() {
+  zOrder(): "top" {
     return "top";
   }
 }
@@ -271,6 +333,20 @@ class LinePaneView {
 // ── The Primitive (ISeriesPrimitive implementation) ──
 
 export class LineDrawingPrimitive {
+  _id: string;
+  _lineType: BasicLineToolId;
+  _dataPoints: DrawingDataPoint[];
+  _color: string;
+  _lineWidth: number;
+  _selected: boolean;
+  _isPreview: boolean;
+  _hovered: boolean;
+  _hidden: boolean;
+  _series: DrawingAttachedParameter["series"] | null;
+  _chart: DrawingAttachedParameter["chart"] | null;
+  _paneView: LinePaneView;
+  _requestUpdate: (() => void) | null;
+
   /**
    * @param {object} opts
    * @param {string} opts.id - unique identifier
@@ -282,9 +358,9 @@ export class LineDrawingPrimitive {
    * @param {boolean} [opts.isPreview] - whether this is a preview line (dashed)
    * @param {boolean} [opts.hovered] - whether this line is hovered
    */
-  constructor(opts) {
+  constructor(opts: LinePrimitiveOptions) {
     this._id = opts.id;
-    this._lineType = opts.lineType;
+    this._lineType = opts.lineType ?? "line-segment";
     this._dataPoints = opts.dataPoints || [];
     this._color = opts.color || "#f59e0b";
     this._lineWidth = opts.lineWidth || 2;
@@ -303,23 +379,23 @@ export class LineDrawingPrimitive {
 
   // ── ISeriesPrimitive interface ──
 
-  attached({ chart, series, requestUpdate }) {
+  attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
     this._requestUpdate = requestUpdate;
   }
 
-  detached() {
+  detached(): void {
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
   }
 
-  updateAllViews() {
+  updateAllViews(): void {
     this._paneView.update();
   }
 
-  paneViews() {
+  paneViews(): readonly PrimitivePaneView[] {
     return [this._paneView];
   }
 
@@ -332,12 +408,12 @@ export class LineDrawingPrimitive {
   get lineWidth() { return this._lineWidth; }
   get selected() { return this._selected; }
 
-  setDataPoints(points) {
+  setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
     this._requestUpdate?.();
   }
 
-  setSelected(v) {
+  setSelected(v: boolean): void {
     const next = !!v;
     if (this._selected !== next) {
       this._selected = next;
@@ -345,7 +421,7 @@ export class LineDrawingPrimitive {
     }
   }
 
-  setHovered(v) {
+  setHovered(v: boolean): void {
     const next = !!v;
     if (this._hovered !== next) {
       this._hovered = next;
@@ -353,22 +429,22 @@ export class LineDrawingPrimitive {
     }
   }
 
-  setColor(c) {
+  setColor(c: string): void {
     this._color = c;
     this._requestUpdate?.();
   }
 
-  setLineWidth(w) {
+  setLineWidth(w: number): void {
     this._lineWidth = w;
     this._requestUpdate?.();
   }
 
-  setPreview(v) {
+  setPreview(v: boolean): void {
     this._isPreview = v;
     this._requestUpdate?.();
   }
 
-  setHidden(v, request = true) {
+  setHidden(v: boolean, request = true): void {
     const next = !!v;
     if (this._hidden !== next) {
       this._hidden = next;
@@ -376,7 +452,7 @@ export class LineDrawingPrimitive {
     }
   }
 
-  requestUpdate() {
+  requestUpdate(): void {
     this._requestUpdate?.();
   }
 
@@ -389,15 +465,17 @@ export class LineDrawingPrimitive {
    * @returns {{ pointIndex: number } | null}
    *   pointIndex: 0 or 1 for endpoint hit, -1 for body hit
    */
-  hitTest(x, y) {
+  hitTest(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
     if (this._dataPoints.length < 2) return null;
 
+    const series = this._series;
+    const chart = this._chart;
     const coordinateContext = {};
     const screenPoints = this._dataPoints.map((dp) => {
-      const x = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
-      return { x, y: this._series.priceToCoordinate(dp.price) };
+      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
+      return { x, y: series.priceToCoordinate(dp.price) };
     });
 
     const [sa, sb] = screenPoints;
@@ -407,8 +485,12 @@ export class LineDrawingPrimitive {
     const LINE_HIT_RADIUS = 8 + this._lineWidth / 2;
 
     // Check endpoints
-    for (let i = 0; i < 2; i++) {
-      const pt = i === 0 ? sa : sb;
+    const resolvedScreenPoints = [
+      { x: sa.x, y: sa.y },
+      { x: sb.x, y: sb.y },
+    ];
+    for (let i = 0; i < resolvedScreenPoints.length; i++) {
+      const pt = resolvedScreenPoints[i];
       const dx = pt.x - x;
       const dy = pt.y - y;
       if (Math.sqrt(dx * dx + dy * dy) <= HANDLE_RADIUS) {
@@ -418,7 +500,7 @@ export class LineDrawingPrimitive {
 
     // Check body — use the appropriate distance function so the entire visible
     // line (including ray/infinite extensions) is hit-testable, not just A→B.
-    let bodyDist;
+    let bodyDist: number;
     if (this._lineType === "line-infinite") {
       bodyDist = distToInfiniteLine(x, y, sa.x, sa.y, sb.x, sb.y);
     } else if (this._lineType === "line-ray") {

@@ -25,70 +25,164 @@ import { ShapeDrawingPrimitive } from "./primitives/ShapeDrawingPrimitive.js";
 import { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
 import { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
 import { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitive.js";
+import { parseDrawingAnchor } from "./drawingContracts.js";
+import type {
+  DrawingAnchor,
+  DrawingDataPoint,
+  DrawingDataToScreen,
+  DrawingPointerEvent,
+  DrawingPrimitive,
+  HorizontalDrawingAnchor,
+  MutableRef,
+  PositionInfoPanelOffset,
+  PositionTimeRange,
+  ScreenBox,
+  ScreenPoint,
+  ScreenToDrawingData,
+} from "./drawingTypes.js";
 
-function horizontalAnchorFromDataPoint(dataPoint) {
-  if (!dataPoint) return null;
-  if (dataPoint.time != null && Number.isFinite(Number(dataPoint.time))) {
-    const anchor = { time: dataPoint.time };
-    if (Number.isSafeInteger(dataPoint.sourceOrdinal) && dataPoint.sourceOrdinal >= 0) {
-      anchor.sourceOrdinal = dataPoint.sourceOrdinal;
-    }
-    if (typeof dataPoint.sourceProjection === "string" && dataPoint.sourceProjection) {
-      anchor.sourceProjection = dataPoint.sourceProjection;
-    }
-    if (typeof dataPoint.sourceProjectionConfig === "string"
-      && dataPoint.sourceProjectionConfig) {
-      anchor.sourceProjectionConfig = dataPoint.sourceProjectionConfig;
-    }
-    if (anchor.sourceOrdinal == null
-      && anchor.sourceProjection == null
-      && anchor.sourceProjectionConfig == null
-      && typeof dataPoint.logical === "number"
-      && Number.isFinite(dataPoint.logical)) {
-      anchor.logical = dataPoint.logical;
-    }
-    return anchor;
-  }
-  if (typeof dataPoint.logical === "number" && Number.isFinite(dataPoint.logical)) {
-    return { logical: dataPoint.logical };
-  }
-  return null;
+interface DragBase {
+  id: string;
+  startMouse: ScreenPoint;
 }
 
-function dataPointFromHorizontalAnchor(anchor, price) {
+interface TextHandleDrag extends DragBase {
+  type: "text-handle";
+  handle: string;
+  origBox: ScreenBox;
+  origFontSize: number;
+  origWidthPx: number | null;
+  origDataPoint: DrawingDataPoint;
+}
+
+interface TextDrag extends DragBase {
+  type: "text";
+  origDataPoint: DrawingDataPoint;
+}
+
+interface PositionPriceDrag extends DragBase {
+  type: "position-tp" | "position-sl";
+}
+
+interface PositionMoveDrag extends DragBase {
+  type: "position-move";
+  origEntry: number;
+  origTp: number | null;
+  origSl: number | null;
+  origTimeRange: PositionTimeRange;
+}
+
+interface PositionEdgeDrag extends DragBase {
+  type: "position-left" | "position-right";
+  origTimeRange: PositionTimeRange;
+}
+
+interface PositionPanelDrag extends DragBase {
+  type: "position-panel";
+  origInfoPanelOffset: PositionInfoPanelOffset;
+}
+
+interface AxisLineDrag extends DragBase {
+  type: "axis-line";
+  zone: string;
+  origDataPoint: DrawingDataPoint;
+}
+
+interface ShapeDrag extends DragBase {
+  type: "shape";
+  zone: string;
+  origPoints: DrawingDataPoint[];
+  origBox: ScreenBox | null;
+}
+
+interface LineLikeDrag extends DragBase {
+  type: "line" | "angle" | "fibonacci";
+  pointIndex: number;
+  origPoints: DrawingDataPoint[];
+}
+
+export type DrawingDragDescriptor = TextHandleDrag
+  | TextDrag
+  | PositionPriceDrag
+  | PositionMoveDrag
+  | PositionEdgeDrag
+  | PositionPanelDrag
+  | AxisLineDrag
+  | ShapeDrag
+  | LineLikeDrag;
+
+interface DragControllerOptions {
+  dragging: DrawingDragDescriptor | null;
+  pos: ScreenPoint;
+  e: DrawingPointerEvent;
+  primitivesRef: MutableRef<DrawingPrimitive[]>;
+  screenToData: ScreenToDrawingData;
+  dataToScreen: DrawingDataToScreen;
+  screenToDrawingData: ScreenToDrawingData;
+  drawingSnapEnabledRef: MutableRef<boolean>;
+}
+
+interface TextAndPositionDragOptions extends DragControllerOptions {
+  refreshSelectedTextUi: (id: string) => void;
+  chartContainerRef: MutableRef<HTMLElement | null>;
+}
+
+interface PositionVisualAnchorKeys {
+  endScreen: ScreenPoint;
+  leftKey: "start" | "end";
+  rightKey: "start" | "end";
+  startScreen: ScreenPoint;
+}
+
+function horizontalAnchorFromDataPoint(
+  dataPoint: DrawingDataPoint | null,
+): DrawingAnchor | null {
+  return dataPoint ? parseDrawingAnchor(dataPoint) : null;
+}
+
+function dataPointFromHorizontalAnchor(
+  anchor: HorizontalDrawingAnchor | null,
+  price: number,
+): DrawingDataPoint | null {
   if (anchor == null) return null;
   if (typeof anchor === "number" && Number.isFinite(anchor)) return { time: anchor, price };
   if (typeof anchor !== "object") return null;
   return { ...anchor, price };
 }
 
-function preserveHorizontalAnchor(nextPoint, originalPoint) {
+function preserveHorizontalAnchor(
+  nextPoint: DrawingDataPoint,
+  originalPoint: DrawingDataPoint,
+): DrawingDataPoint {
   const anchor = horizontalAnchorFromDataPoint(originalPoint);
   if (!anchor) return nextPoint;
-  const next = { ...nextPoint };
+  const next: Record<string, unknown> = { ...nextPoint };
   delete next.order;
   delete next.time;
   delete next.logical;
   delete next.sourceOrdinal;
   delete next.sourceProjection;
   delete next.sourceProjectionConfig;
-  return { ...next, ...anchor };
+  return { ...next, ...anchor, price: nextPoint.price };
 }
 
-function replaceHorizontalAnchor(nextPoint, dataPoint) {
+function replaceHorizontalAnchor(
+  nextPoint: DrawingDataPoint,
+  dataPoint: DrawingDataPoint,
+): DrawingDataPoint | null {
   const anchor = horizontalAnchorFromDataPoint(dataPoint);
   if (!anchor) return null;
-  const next = { ...nextPoint };
+  const next: Record<string, unknown> = { ...nextPoint };
   delete next.order;
   delete next.time;
   delete next.logical;
   delete next.sourceOrdinal;
   delete next.sourceProjection;
   delete next.sourceProjectionConfig;
-  return { ...next, ...anchor };
+  return { ...next, ...anchor, price: nextPoint.price };
 }
 
-function sameHorizontalAnchor(first, second) {
+function sameHorizontalAnchor(first: DrawingAnchor | null, second: DrawingAnchor | null): boolean {
   if (!first || !second) return false;
   return first.time === second.time
     && first.logical === second.logical
@@ -97,7 +191,11 @@ function sameHorizontalAnchor(first, second) {
     && first.sourceProjectionConfig === second.sourceProjectionConfig;
 }
 
-function positionVisualAnchorKeys(timeRange, entryPrice, dataToScreen) {
+function positionVisualAnchorKeys(
+  timeRange: PositionTimeRange,
+  entryPrice: number,
+  dataToScreen: DrawingDataToScreen,
+): PositionVisualAnchorKeys | null {
   const startPoint = dataPointFromHorizontalAnchor(timeRange?.start, entryPrice);
   const endPoint = dataPointFromHorizontalAnchor(timeRange?.end, entryPrice);
   const startScreen = startPoint ? dataToScreen(startPoint) : null;
@@ -123,7 +221,7 @@ export function applyTextAndPositionDrag({
   refreshSelectedTextUi,
   drawingSnapEnabledRef,
   chartContainerRef,
-}) {
+}: TextAndPositionDragOptions): boolean {
   // ── TEXT TOOL: 8-handle resize drag (corners = scale, sides = wrap width) ──
   if (dragging && dragging.type === "text-handle") {
     const { id, handle, startMouse, origBox, origFontSize, origWidthPx, origDataPoint } = dragging;
@@ -388,15 +486,16 @@ export function applyLineFibShapeDrag({
   dataToScreen,
   screenToDrawingData,
   drawingSnapEnabledRef,
-}) {
-  const { id, type, pointIndex, startMouse, origPoints, origDataPoint, zone, origBox } = dragging;
+}: DragControllerOptions): void {
+  if (!dragging) return;
+  const { id, type, startMouse } = dragging;
   const prim = primitivesRef.current.find((p) => p.id === id);
   if (!prim) return;
 
   if (type === "text" && prim instanceof TextDrawingPrimitive) {
     const dx = pos.x - startMouse.x;
     const dy = pos.y - startMouse.y;
-    const origScreen = dataToScreen(origDataPoint);
+    const origScreen = dataToScreen(dragging.origDataPoint);
     if (!origScreen) return;
     const newData = screenToDrawingData(origScreen.x + dx, origScreen.y + dy, { snap: drawingSnapEnabledRef.current && !e.altKey });
     if (!newData) return;
@@ -414,8 +513,8 @@ export function applyLineFibShapeDrag({
       price: axisLineType !== "vertical",
     });
     if (!dataPoint) return;
-    const basePoint = origDataPoint || prim.dataPoint || dataPoint;
-    let nextPoint = dataPoint;
+    const basePoint = dragging.origDataPoint || prim.dataPoint || dataPoint;
+    let nextPoint: DrawingDataPoint | null = dataPoint;
     if (axisLineType === "horizontal") {
       nextPoint = preserveHorizontalAnchor(
         { ...basePoint, price: dataPoint.price },
@@ -437,6 +536,7 @@ export function applyLineFibShapeDrag({
   }
 
   if (type === "shape" && prim instanceof ShapeDrawingPrimitive) {
+    const { zone, origBox, origPoints } = dragging;
     if (zone && zone !== "body" && origBox) {
       const nextBox = resizedShapeBoxFromHandle(origBox, zone, pos);
       if (!nextBox) return;
@@ -461,7 +561,12 @@ export function applyLineFibShapeDrag({
     return;
   }
 
-  if (!(prim instanceof LineDrawingPrimitive) && !(prim instanceof FibonacciDrawingPrimitive) && !(prim instanceof AngleMeasurementPrimitive)) return;
+  if (type !== "line" && type !== "fibonacci" && type !== "angle") return;
+  if (!(prim instanceof LineDrawingPrimitive)
+    && !(prim instanceof FibonacciDrawingPrimitive)
+    && !(prim instanceof AngleMeasurementPrimitive)) return;
+
+  const { pointIndex, origPoints } = dragging;
 
   if (pointIndex >= 0) {
     // Drag single endpoint

@@ -14,8 +14,79 @@ import {
   observeDrawingId,
 } from "./drawingModel.js";
 import { normalizeSavedFreehandPayload } from "./freehandStrokeModel.js";
+import type {
+  AngleToolId,
+  AxisLineType,
+  BasicLineToolId,
+  DrawingDataPoint,
+  DrawingPrimitive,
+  FibonacciLevel,
+  FibonacciToolId,
+  FreehandToolId,
+  PositionTimeRange,
+  PositionToolId,
+  SavedDrawing,
+  ScreenPoint,
+  ShapeToolId,
+  ShapeType,
+} from "./drawingTypes.js";
 
-export function createPrimitiveFromSavedDrawing(item) {
+interface FreehandFactoryOptions {
+  tool: FreehandToolId;
+  dataPoint?: DrawingDataPoint | null;
+  color: string;
+  lineWidth: number;
+  previewPoints?: Array<ScreenPoint | null>;
+  isPreview?: boolean;
+}
+
+interface TextFactoryOptions {
+  dataPoint: DrawingDataPoint;
+  color: string;
+  fontSize?: number;
+  bold?: boolean;
+  italic?: boolean;
+}
+
+interface PositionFactoryOptions {
+  tool: PositionToolId;
+  dataPoint: DrawingDataPoint;
+  timeRange: PositionTimeRange;
+  tpOffset: number;
+  slOffset: number;
+  positionSize?: number;
+}
+
+interface AxisLineFactoryOptions {
+  axisLineType: AxisLineType;
+  dataPoint: DrawingDataPoint;
+  color: string;
+  lineWidth: number;
+}
+
+type TwoPointFactoryTool = BasicLineToolId | AngleToolId | FibonacciToolId | ShapeToolId;
+type TwoPointDrawingPrimitive = LineDrawingPrimitive
+  | AngleMeasurementPrimitive
+  | FibonacciDrawingPrimitive
+  | ShapeDrawingPrimitive;
+
+interface TwoPointFactoryOptions {
+  tool: TwoPointFactoryTool;
+  shapeType?: ShapeType | null;
+  dataPoints: DrawingDataPoint[];
+  color: string;
+  lineWidth: number;
+  fibLevels?: FibonacciLevel[];
+  fibInverted?: boolean;
+}
+
+interface PreviewFactoryOptions extends Omit<TwoPointFactoryOptions, "dataPoints"> {
+  dataPoint: DrawingDataPoint;
+}
+
+export function createPrimitiveFromSavedDrawing(
+  item: SavedDrawing | null | undefined,
+): DrawingPrimitive | null {
   if (!item) return null;
   observeDrawingId(item.id);
   const hasStroke = Object.prototype.hasOwnProperty.call(item, "stroke");
@@ -76,6 +147,7 @@ export function createPrimitiveFromSavedDrawing(item) {
     });
   }
   if (item.type === "position") {
+    if (typeof item.entryPrice !== "number") return null;
     return new PositionDrawingPrimitive({
       id: item.id || nextDrawingId("pos"),
       direction: item.direction,
@@ -133,7 +205,7 @@ export function createFreehandPrimitive({
   lineWidth,
   previewPoints,
   isPreview = false,
-}) {
+}: FreehandFactoryOptions): FreehandDrawingPrimitive {
   const isHighlighter = tool === "highlighter";
   return new FreehandDrawingPrimitive({
     id: nextDrawingId(isHighlighter ? "hl" : "fh"),
@@ -149,7 +221,13 @@ export function createFreehandPrimitive({
   });
 }
 
-export function createTextPrimitive({ dataPoint, color, fontSize, bold, italic }) {
+export function createTextPrimitive({
+  dataPoint,
+  color,
+  fontSize,
+  bold,
+  italic,
+}: TextFactoryOptions): TextDrawingPrimitive {
   return new TextDrawingPrimitive({
     id: nextDrawingId("tx"),
     dataPoint,
@@ -161,7 +239,14 @@ export function createTextPrimitive({ dataPoint, color, fontSize, bold, italic }
   });
 }
 
-export function createPositionPrimitive({ tool, dataPoint, timeRange, tpOffset, slOffset, positionSize }) {
+export function createPositionPrimitive({
+  tool,
+  dataPoint,
+  timeRange,
+  tpOffset,
+  slOffset,
+  positionSize,
+}: PositionFactoryOptions): PositionDrawingPrimitive {
   const isLong = tool === "position-long";
   const entryPrice = dataPoint.price;
   return new PositionDrawingPrimitive({
@@ -175,7 +260,12 @@ export function createPositionPrimitive({ tool, dataPoint, timeRange, tpOffset, 
   });
 }
 
-export function createAxisLinePrimitive({ axisLineType, dataPoint, color, lineWidth }) {
+export function createAxisLinePrimitive({
+  axisLineType,
+  dataPoint,
+  color,
+  lineWidth,
+}: AxisLineFactoryOptions): AxisLineDrawingPrimitive {
   return new AxisLineDrawingPrimitive({
     id: nextDrawingId("ax"),
     axisLineType,
@@ -185,7 +275,15 @@ export function createAxisLinePrimitive({ axisLineType, dataPoint, color, lineWi
   });
 }
 
-export function createTwoPointDrawingPrimitive({ tool, shapeType, dataPoints, color, lineWidth, fibLevels, fibInverted }) {
+export function createTwoPointDrawingPrimitive({
+  tool,
+  shapeType,
+  dataPoints,
+  color,
+  lineWidth,
+  fibLevels,
+  fibInverted,
+}: TwoPointFactoryOptions): TwoPointDrawingPrimitive {
   if (shapeType) {
     return new ShapeDrawingPrimitive({
       id: nextDrawingId("sh"),
@@ -215,6 +313,9 @@ export function createTwoPointDrawingPrimitive({ tool, shapeType, dataPoints, co
       inverted: fibInverted || false,
     });
   }
+  if (tool === "shape-rectangle" || tool === "shape-ellipse") {
+    throw new TypeError("Shape drawing creation requires a shapeType");
+  }
   return new LineDrawingPrimitive({
     id: nextDrawingId("ln"),
     lineType: tool,
@@ -224,7 +325,15 @@ export function createTwoPointDrawingPrimitive({ tool, shapeType, dataPoints, co
   });
 }
 
-export function createPreviewPrimitive({ tool, shapeType, dataPoint, color, lineWidth, fibLevels, fibInverted }) {
+export function createPreviewPrimitive({
+  tool,
+  shapeType,
+  dataPoint,
+  color,
+  lineWidth,
+  fibLevels,
+  fibInverted,
+}: PreviewFactoryOptions): TwoPointDrawingPrimitive {
   const dataPoints = [dataPoint, dataPoint];
   if (shapeType) {
     return new ShapeDrawingPrimitive({
@@ -257,6 +366,9 @@ export function createPreviewPrimitive({ tool, shapeType, dataPoint, color, line
       levels: fibLevels ? fibLevels.map((level) => ({ ...level })) : undefined,
       inverted: fibInverted || false,
     });
+  }
+  if (tool === "shape-rectangle" || tool === "shape-ellipse") {
+    throw new TypeError("Shape preview creation requires a shapeType");
   }
   return new LineDrawingPrimitive({
     id: "__preview__",

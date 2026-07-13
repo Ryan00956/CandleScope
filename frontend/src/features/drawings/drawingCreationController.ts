@@ -12,7 +12,6 @@
  * primitives are still produced by drawingPrimitiveFactory.
  */
 import {
-  AXIS_LINE_TOOL_IDS,
   SHAPE_TOOL_IDS,
   axisLineTypeFromTool,
   constrainShapeScreenPoint,
@@ -31,42 +30,177 @@ import {
   createFreehandStrokeDraft,
   getFreehandStrokeDraftPreviewPoints,
 } from "./freehandStrokeModel.js";
+import { parseDrawingAnchor } from "./drawingContracts.js";
+import type { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
+import type { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
+import type { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitive.js";
+import type { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
+import type { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
+import type { ShapeDrawingPrimitive } from "./primitives/ShapeDrawingPrimitive.js";
+import type {
+  AngleToolId,
+  AxisLineToolId,
+  DrawingAnchor,
+  DrawingChartAdapter,
+  DrawingDataPoint,
+  DrawingDataToScreen,
+  DrawingPointerEvent,
+  DrawingPrimitive,
+  FibonacciLevel,
+  FibonacciToolId,
+  FreehandCaptureBatch,
+  FreehandStrokeDraft,
+  FreehandToolId,
+  MutableRef,
+  PositionTimeRange,
+  PositionToolId,
+  ScreenPoint,
+  ScreenToDrawingData,
+  ShapeToolId,
+  BasicLineToolId,
+} from "./drawingTypes.js";
 
-function consumePointerEvent(event) {
+type TwoPointCreationTool = BasicLineToolId | AngleToolId | FibonacciToolId | ShapeToolId;
+type TwoPointDrawingPrimitive = LineDrawingPrimitive
+  | AngleMeasurementPrimitive
+  | FibonacciDrawingPrimitive
+  | ShapeDrawingPrimitive;
+type AttachPrimitive = (primitive: DrawingPrimitive) => void;
+type SelectPrimitive = (id: string) => void;
+
+interface PositionSpanOptions {
+  dataPoint: DrawingDataPoint;
+  pos: ScreenPoint;
+  screenToDrawingData: ScreenToDrawingData;
+  chartContainerRef: MutableRef<HTMLElement | null>;
+  adapter: DrawingChartAdapter | null;
+}
+
+interface StartFreehandStrokeOptions {
+  tool: FreehandToolId;
+  pos: ScreenPoint;
+  e: DrawingPointerEvent;
+  primitivesRef: MutableRef<DrawingPrimitive[]>;
+  currentFreehandRef: MutableRef<FreehandDrawingPrimitive | null>;
+  freehandDraftRef: MutableRef<FreehandStrokeDraft | null>;
+  isDrawingFreehandRef: MutableRef<boolean>;
+  attachPrim: AttachPrimitive;
+  screenToData: ScreenToDrawingData;
+  penColorRef: MutableRef<string>;
+  penSizeRef: MutableRef<number>;
+  sourceLineage?: boolean;
+  captureBatch?: FreehandCaptureBatch | null;
+  freehandCaptureIdentityRef?: MutableRef<unknown> | null;
+}
+
+interface PlaceTextDrawingOptions {
+  pos: ScreenPoint;
+  e: DrawingPointerEvent;
+  primitivesRef: MutableRef<DrawingPrimitive[]>;
+  attachPrim: AttachPrimitive;
+  startTextEditing: (primitive: TextDrawingPrimitive) => void;
+  screenToDrawingData: ScreenToDrawingData;
+  drawingSnapEnabledRef: MutableRef<boolean>;
+  penColorRef: MutableRef<string>;
+  textFontSizeRef: MutableRef<number>;
+  textBoldRef: MutableRef<boolean>;
+  textItalicRef: MutableRef<boolean>;
+}
+
+interface PlacePositionDrawingOptions {
+  tool: PositionToolId;
+  pos: ScreenPoint;
+  e: DrawingPointerEvent;
+  primitivesRef: MutableRef<DrawingPrimitive[]>;
+  attachPrim: AttachPrimitive;
+  selectPrimitive: SelectPrimitive;
+  persistDrawings: () => void;
+  screenToDrawingData: ScreenToDrawingData;
+  getChartAdapter: () => DrawingChartAdapter | null;
+  chartContainerRef: MutableRef<HTMLElement | null>;
+  drawingSnapEnabledRef: MutableRef<boolean>;
+  positionSizeRef: MutableRef<number>;
+}
+
+interface TwoPointRefs {
+  anchorDataRef: MutableRef<DrawingDataPoint | null>;
+  previewRef: MutableRef<TwoPointDrawingPrimitive | null>;
+}
+
+interface TwoPointStyleRefs {
+  penColorRef: MutableRef<string>;
+  penSizeRef: MutableRef<number>;
+  fibLevelsRef: MutableRef<FibonacciLevel[]>;
+  fibInvertedRef: MutableRef<boolean>;
+}
+
+interface CommitTwoPointDrawingOptions extends TwoPointRefs, TwoPointStyleRefs {
+  tool: TwoPointCreationTool;
+  pos: ScreenPoint;
+  e: DrawingPointerEvent;
+  primitivesRef: MutableRef<DrawingPrimitive[]>;
+  attachPrim: AttachPrimitive;
+  detachPrim: AttachPrimitive;
+  selectPrimitive: SelectPrimitive;
+  persistDrawings: () => void;
+  screenToDrawingData: ScreenToDrawingData;
+  dataToScreen: DrawingDataToScreen;
+  drawingSnapEnabledRef: MutableRef<boolean>;
+}
+
+interface AxisLineCreationDrag {
+  id: string;
+  type: "axis-line";
+  zone: "center";
+  startMouse: ScreenPoint;
+  origDataPoint: DrawingDataPoint;
+}
+
+interface BeginAxisLineDrawingOptions extends TwoPointRefs {
+  tool: AxisLineToolId;
+  pos: ScreenPoint;
+  e: DrawingPointerEvent;
+  primitivesRef: MutableRef<DrawingPrimitive[]>;
+  draggingRef: MutableRef<AxisLineCreationDrag | null>;
+  attachPrim: AttachPrimitive;
+  selectPrimitive: SelectPrimitive;
+  removePreview: () => void;
+  screenToDrawingData: ScreenToDrawingData;
+  drawingSnapEnabledRef: MutableRef<boolean>;
+  penColorRef: MutableRef<string>;
+  penSizeRef: MutableRef<number>;
+}
+
+interface BeginTwoPointDrawingOptions extends TwoPointRefs, TwoPointStyleRefs {
+  tool: TwoPointCreationTool;
+  pos: ScreenPoint;
+  e: DrawingPointerEvent;
+  attachPrim: AttachPrimitive;
+  screenToDrawingData: ScreenToDrawingData;
+  drawingSnapEnabledRef: MutableRef<boolean>;
+}
+
+interface UpdateTwoPointPreviewOptions extends TwoPointRefs {
+  tool: TwoPointCreationTool;
+  pos: ScreenPoint;
+  e: DrawingPointerEvent;
+  screenToDrawingData: ScreenToDrawingData;
+  dataToScreen: DrawingDataToScreen;
+  drawingSnapEnabledRef: MutableRef<boolean>;
+}
+
+function consumePointerEvent(event: DrawingPointerEvent | null | undefined): void {
   event?.preventDefault?.();
   event?.stopPropagation?.();
 }
 
-function horizontalAnchorFromDataPoint(dataPoint) {
-  if (!dataPoint) return null;
-  if (dataPoint.time != null && Number.isFinite(Number(dataPoint.time))) {
-    const anchor = { time: dataPoint.time };
-    if (Number.isSafeInteger(dataPoint.sourceOrdinal) && dataPoint.sourceOrdinal >= 0) {
-      anchor.sourceOrdinal = dataPoint.sourceOrdinal;
-    }
-    if (typeof dataPoint.sourceProjection === "string" && dataPoint.sourceProjection) {
-      anchor.sourceProjection = dataPoint.sourceProjection;
-    }
-    if (typeof dataPoint.sourceProjectionConfig === "string"
-      && dataPoint.sourceProjectionConfig) {
-      anchor.sourceProjectionConfig = dataPoint.sourceProjectionConfig;
-    }
-    if (anchor.sourceOrdinal == null
-      && anchor.sourceProjection == null
-      && anchor.sourceProjectionConfig == null
-      && typeof dataPoint.logical === "number"
-      && Number.isFinite(dataPoint.logical)) {
-      anchor.logical = dataPoint.logical;
-    }
-    return anchor;
-  }
-  if (typeof dataPoint.logical === "number" && Number.isFinite(dataPoint.logical)) {
-    return { logical: dataPoint.logical };
-  }
-  return null;
+function horizontalAnchorFromDataPoint(
+  dataPoint: DrawingDataPoint | null,
+): DrawingAnchor | null {
+  return dataPoint ? parseDrawingAnchor(dataPoint) : null;
 }
 
-function sameHorizontalAnchor(first, second) {
+function sameHorizontalAnchor(first: DrawingAnchor | null, second: DrawingAnchor | null): boolean {
   if (!first || !second) return false;
   return first.time === second.time
     && first.logical === second.logical
@@ -75,14 +209,19 @@ function sameHorizontalAnchor(first, second) {
     && first.sourceProjectionConfig === second.sourceProjectionConfig;
 }
 
-function positionSpanCandidateXs(pointerX, containerWidth) {
-  const hasWidth = Number.isFinite(containerWidth) && containerWidth > 1;
-  let leftEdge = 0;
-  let rightEdge = hasWidth ? containerWidth - 1 : pointerX + 80;
+function positionSpanCandidateXs(pointerX: number, containerWidth: number | null): number[] {
+  const usableWidth = typeof containerWidth === "number"
+    && Number.isFinite(containerWidth)
+    && containerWidth > 1
+    ? containerWidth
+    : null;
+  const hasWidth = usableWidth !== null;
+  const leftEdge = 0;
+  const rightEdge = usableWidth !== null ? usableWidth - 1 : pointerX + 80;
 
   if (rightEdge <= leftEdge) return [];
   const span = hasWidth ? Math.max(1, (rightEdge - leftEdge) * 0.15) : 80;
-  const clampToDataRegion = (x) => Math.max(leftEdge, Math.min(rightEdge, x));
+  const clampToDataRegion = (x: number): number => Math.max(leftEdge, Math.min(rightEdge, x));
   const originX = clampToDataRegion(pointerX);
   const sides = [
     { available: rightEdge - originX, edge: rightEdge, target: originX + span },
@@ -111,7 +250,7 @@ function positionTimeRangeFromScreen({
   screenToDrawingData,
   chartContainerRef,
   adapter,
-}) {
+}: PositionSpanOptions): PositionTimeRange | null {
   const pointerAnchor = horizontalAnchorFromDataPoint(dataPoint);
   if (!pointerAnchor) return null;
 
@@ -121,7 +260,9 @@ function positionTimeRangeFromScreen({
     timeScaleWidth = Number(adapter?.getTimeScaleWidth?.());
   } catch { /* fall back to the container width */ }
   const safeWidths = [containerWidth, timeScaleWidth]
-    .filter((width) => Number.isFinite(width) && width > 1);
+    .filter((width): width is number => typeof width === "number"
+      && Number.isFinite(width)
+      && width > 1);
   const width = safeWidths.length > 0 ? Math.min(...safeWidths) : null;
   for (const candidateX of positionSpanCandidateXs(pos.x, width)) {
     const candidateData = screenToDrawingData(candidateX, pos.y, {
@@ -156,14 +297,14 @@ export function startFreehandStroke({
   sourceLineage = false,
   captureBatch = null,
   freehandCaptureIdentityRef = null,
-}) {
+}: StartFreehandStrokeOptions): boolean {
   // The drawing tool owns this gesture even when atomic capture fails closed;
   // never leak the same pointerdown into Lightweight Charts pan/selection.
   consumePointerEvent(e);
 
-  let dataPoint = null;
-  let draft = null;
-  let previewPoints;
+  let dataPoint: DrawingDataPoint | null = null;
+  let draft: FreehandStrokeDraft | null = null;
+  let previewPoints: Array<ScreenPoint | null> | undefined;
   if (sourceLineage) {
     if (!captureBatch) return true;
     draft = createFreehandStrokeDraft({
@@ -190,7 +331,7 @@ export function startFreehandStroke({
   currentFreehandRef.current = freehand;
   freehandDraftRef.current = draft;
   if (freehandCaptureIdentityRef) {
-    freehandCaptureIdentityRef.current = draft ? captureBatch.captureIdentity : null;
+    freehandCaptureIdentityRef.current = draft ? captureBatch?.captureIdentity ?? null : null;
   }
   isDrawingFreehandRef.current = true;
   return true;
@@ -209,7 +350,7 @@ export function placeTextDrawing({
   textFontSizeRef,
   textBoldRef,
   textItalicRef,
-}) {
+}: PlaceTextDrawingOptions): boolean {
   consumePointerEvent(e);
   const dataPoint = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
   if (!dataPoint) return true;
@@ -244,7 +385,7 @@ export function placePositionDrawing({
   chartContainerRef,
   drawingSnapEnabledRef,
   positionSizeRef,
-}) {
+}: PlacePositionDrawingOptions): boolean {
   consumePointerEvent(e);
   const dataA = screenToDrawingData(pos.x, pos.y, { snap: drawingSnapEnabledRef.current && !e.altKey });
   if (!dataA) return true;
@@ -265,7 +406,8 @@ export function placePositionDrawing({
   if (!timeRange) return true;
 
   // Default TP/SL based on visible price range — ensures proper proportions on any timeframe
-  let tpOffset, slOffset;
+  let tpOffset: number | undefined;
+  let slOffset: number | undefined;
   if (adapter?.isReady?.()) {
     try {
       // Get the visible price range from the chart container's pixel height
@@ -321,12 +463,11 @@ export function commitTwoPointDrawing({
   penSizeRef,
   fibLevelsRef,
   fibInvertedRef,
-}) {
-  const isAxisLineTool = AXIS_LINE_TOOL_IDS.has(tool);
+}: CommitTwoPointDrawingOptions): boolean {
   const isShapeDrawingTool = SHAPE_TOOL_IDS.has(tool);
   const shapeType = shapeTypeFromTool(tool);
 
-  if (isAxisLineTool || !anchorDataRef.current || !previewRef.current) return false;
+  if (!anchorDataRef.current || !previewRef.current) return false;
   consumePointerEvent(e);
 
   let targetPos = pos;
@@ -379,7 +520,7 @@ export function beginAxisLineDrawing({
   drawingSnapEnabledRef,
   penColorRef,
   penSizeRef,
-}) {
+}: BeginAxisLineDrawingOptions): boolean {
   consumePointerEvent(e);
   if (anchorDataRef.current || previewRef.current) {
     removePreview();
@@ -429,7 +570,7 @@ export function beginTwoPointDrawing({
   penSizeRef,
   fibLevelsRef,
   fibInvertedRef,
-}) {
+}: BeginTwoPointDrawingOptions): boolean {
   consumePointerEvent(e);
   const isShapeDrawingTool = SHAPE_TOOL_IDS.has(tool);
   const shapeType = shapeTypeFromTool(tool);
@@ -466,7 +607,7 @@ export function updateTwoPointPreview({
   screenToDrawingData,
   dataToScreen,
   drawingSnapEnabledRef,
-}) {
+}: UpdateTwoPointPreviewOptions): boolean {
   if (!anchorDataRef.current || !previewRef.current) return false;
 
   let targetPos = pos;

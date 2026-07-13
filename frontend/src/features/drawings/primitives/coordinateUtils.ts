@@ -3,7 +3,13 @@ import {
   dataPointToCoordinate,
   resolveSourceLineageSpanToCoordinates,
 } from "../../../chart-adapter/coordinateBridge.js";
+import type {
+  CoordinateChartBridge,
+  CoordinateSeriesBridge,
+  DrawingCoordinateContext,
+} from "../../../chart-adapter/coordinateBridge.js";
 import { resolveFreehandStrokePoints } from "../freehandStrokeModel.js";
+import type { ResolvedFreehandPoint } from "../drawingTypes.js";
 
 export {
   logicalToCoordinateInterpolated,
@@ -11,7 +17,12 @@ export {
 } from "../../../chart-adapter/coordinateBridge.js";
 export { dataPointToCoordinate };
 
-export function freehandStrokeToCoordinates(chart, series, stroke, context = null) {
+export function freehandStrokeToCoordinates(
+  chart: CoordinateChartBridge,
+  series: CoordinateSeriesBridge,
+  stroke: unknown,
+  context: DrawingCoordinateContext | null = null,
+): Array<ResolvedFreehandPoint | null> {
   const coordinateContext = createDrawingCoordinateTransactionContext(context);
   return resolveFreehandStrokePoints(stroke, {
     resolveAnchor: (anchor, _index, _point, normalizedStroke) => dataPointToCoordinate(

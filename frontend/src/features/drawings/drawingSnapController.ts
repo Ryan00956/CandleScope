@@ -1,23 +1,63 @@
 import { isFiniteNumber } from "./drawingModel.js";
+import type { DisplayRow } from "../chart-representation/chartRepresentationTypes.js";
+import type {
+  DrawingChartAdapter,
+  DrawingDataPoint,
+  OrdinalLineageAnchor,
+  SourceTimeAnchor,
+} from "./drawingTypes.js";
 
 const SNAP_TIME_DISTANCE_PX = 12;
 const SNAP_PRICE_DISTANCE_PX = 10;
 const SNAP_PRICE_CANDLE_DISTANCE_PX = 18;
 const SNAP_CANDIDATE_SCAN_RADIUS = 3;
-const SNAP_PRICE_FIELDS = ["open", "high", "low", "close"];
+const SNAP_PRICE_FIELDS = ["open", "high", "low", "close"] as const;
 
-function isSafeSourceOrdinal(value) {
-  return Number.isSafeInteger(value) && value >= 0;
+type CanonicalDrawingAnchor = SourceTimeAnchor | OrdinalLineageAnchor;
+type SnapPriceSource = typeof SNAP_PRICE_FIELDS[number] | "value";
+
+interface SnapPriceCandidate {
+  value: number;
+  source: SnapPriceSource;
 }
 
-function isSafeSourceProjection(value) {
+interface TimeSnapTarget {
+  time: unknown;
+  x: number;
+  dx: number;
+  index: number;
+}
+
+interface PriceSnapTarget extends TimeSnapTarget {
+  price: number;
+  y: number;
+  dy: number;
+  source: SnapPriceSource;
+}
+
+interface PointerSnapTarget {
+  time: TimeSnapTarget | null;
+  price: PriceSnapTarget | null;
+}
+
+interface SnapDataPointOptions {
+  snap?: boolean;
+  time?: boolean;
+  price?: boolean;
+}
+
+function isSafeSourceOrdinal(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isSafeSourceProjection(value: unknown): value is string {
   return typeof value === "string"
     && value.length > 0
     && value.length <= 64
     && /^[a-z0-9][a-z0-9-]*$/.test(value);
 }
 
-function isSafeProjectionConfig(value) {
+function isSafeProjectionConfig(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > 512) return false;
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
@@ -26,7 +66,9 @@ function isSafeProjectionConfig(value) {
   return true;
 }
 
-function adapterUsesOrdinalTime(adapter) {
+function adapterUsesOrdinalTime(
+  adapter: DrawingChartAdapter | null | undefined,
+): boolean {
   try {
     return adapter?.usesOrdinalTime?.() === true;
   } catch {
@@ -38,7 +80,10 @@ function adapterUsesOrdinalTime(adapter) {
  * Convert a chart-axis value into the durable drawing-anchor schema.
  * Ordinal `order` is deliberately discarded because it is projection-local.
  */
-export function canonicalDrawingAnchorFromAxisTime(adapter, axisTime) {
+export function canonicalDrawingAnchorFromAxisTime(
+  adapter: DrawingChartAdapter | null | undefined,
+  axisTime: unknown,
+): CanonicalDrawingAnchor | null {
   if (adapterUsesOrdinalTime(adapter)) {
     let anchor = null;
     try {
@@ -78,7 +123,10 @@ export function canonicalDrawingAnchorFromAxisTime(adapter, axisTime) {
  * latter deliberately minimal: future placement must never persist a
  * projection-local order/logical coordinate or a guessed source ordinal.
  */
-export function canonicalDrawingAnchorFromCoordinate(adapter, x) {
+export function canonicalDrawingAnchorFromCoordinate(
+  adapter: DrawingChartAdapter | null | undefined,
+  x: number,
+): CanonicalDrawingAnchor | null {
   if (!adapterUsesOrdinalTime(adapter) || !isFiniteNumber(x)) return null;
 
   if (typeof adapter?.coordinateToDrawingAnchor !== "function") {
@@ -124,7 +172,11 @@ export function canonicalDrawingAnchorFromCoordinate(adapter, x) {
   return hasLineageMetadata ? null : { time: anchor.time };
 }
 
-function replaceHorizontalAnchor(dataPoint, anchor, { ordinal = false } = {}) {
+function replaceHorizontalAnchor(
+  dataPoint: DrawingDataPoint,
+  anchor: CanonicalDrawingAnchor | null,
+  { ordinal = false }: { ordinal?: boolean } = {},
+): DrawingDataPoint {
   const next = { ...dataPoint };
   delete next.order;
   delete next.sourceOrdinal;
@@ -141,10 +193,10 @@ function replaceHorizontalAnchor(dataPoint, anchor, { ordinal = false } = {}) {
   return next;
 }
 
-function getSnapPriceCandidates(item) {
+function getSnapPriceCandidates(item: DisplayRow | null | undefined): SnapPriceCandidate[] {
   if (!item) return [];
-  const candidates = [];
-  const seen = new Set();
+  const candidates: SnapPriceCandidate[] = [];
+  const seen = new Set<number>();
 
   for (const field of SNAP_PRICE_FIELDS) {
     const value = item[field];
@@ -160,16 +212,20 @@ function getSnapPriceCandidates(item) {
   return candidates;
 }
 
-export function findSnapTargetForPointer(adapter, x, y) {
+export function findSnapTargetForPointer(
+  adapter: DrawingChartAdapter | null | undefined,
+  x: number,
+  y: number,
+): PointerSnapTarget | null {
   if (!adapter?.isReady?.()) return null;
 
   const seriesData = adapter.getSeriesData?.();
   if (!Array.isArray(seriesData) || seriesData.length === 0) return null;
 
-  let logical = null;
-  let firstLogical = null;
+  let logical: number | null = null;
+  let firstLogical: number | null = null;
   try {
-    logical = adapter.coordinateToLogical?.(x);
+    logical = adapter.coordinateToLogical?.(x) ?? null;
   } catch {
     logical = null;
   }
@@ -183,7 +239,7 @@ export function findSnapTargetForPointer(adapter, x, y) {
     firstLogical = null;
   }
 
-  let centerIdx = null;
+  let centerIdx: number | null = null;
   if (isFiniteNumber(logical) && isFiniteNumber(firstLogical)) {
     centerIdx = Math.round(logical - firstLogical);
   } else {
@@ -191,8 +247,8 @@ export function findSnapTargetForPointer(adapter, x, y) {
     for (let index = 0; index < seriesData.length; index += 1) {
       const item = seriesData[index];
       if (!item || item.time == null) continue;
-      let cx = null;
-      try { cx = adapter.timeToCoordinate?.(item.time); } catch { cx = null; }
+      let cx: number | null = null;
+      try { cx = adapter.timeToCoordinate?.(item.time) ?? null; } catch { cx = null; }
       if (!isFiniteNumber(cx)) continue;
       const dx = Math.abs(cx - x);
       if (dx < bestDx) {
@@ -217,17 +273,17 @@ export function findSnapTargetForPointer(adapter, x, y) {
 
   const start = Math.max(0, centerIdx - SNAP_CANDIDATE_SCAN_RADIUS);
   const end = Math.min(seriesData.length - 1, centerIdx + SNAP_CANDIDATE_SCAN_RADIUS);
-  let bestTimeSnap = null;
+  let bestTimeSnap: TimeSnapTarget | null = null;
   let bestTimeDistance = Infinity;
-  let bestPriceSnap = null;
+  let bestPriceSnap: PriceSnapTarget | null = null;
   let bestPriceScore = Infinity;
 
   for (let index = start; index <= end; index += 1) {
     const item = seriesData[index];
     if (!item || item.time == null) continue;
 
-    let cx = null;
-    try { cx = adapter.timeToCoordinate?.(item.time); } catch { cx = null; }
+    let cx: number | null = null;
+    try { cx = adapter.timeToCoordinate?.(item.time) ?? null; } catch { cx = null; }
     if (!isFiniteNumber(cx)) continue;
 
     const dx = Math.abs(cx - x);
@@ -239,8 +295,8 @@ export function findSnapTargetForPointer(adapter, x, y) {
     if (dx > priceCandidateMaxDx) continue;
 
     for (const candidate of getSnapPriceCandidates(item)) {
-      let py = null;
-      try { py = adapter.priceToCoordinate?.(candidate.value); } catch { py = null; }
+      let py: number | null = null;
+      try { py = adapter.priceToCoordinate?.(candidate.value) ?? null; } catch { py = null; }
       if (!isFiniteNumber(py)) continue;
       const dy = Math.abs(py - y);
       if (dy > SNAP_PRICE_DISTANCE_PX) continue;
@@ -266,7 +322,13 @@ export function findSnapTargetForPointer(adapter, x, y) {
   return { time: bestTimeSnap, price: bestPriceSnap };
 }
 
-export function snapDataPointAtPointer(dataPoint, x, y, options, adapter) {
+export function snapDataPointAtPointer(
+  dataPoint: DrawingDataPoint | null,
+  x: number,
+  y: number,
+  options: SnapDataPointOptions,
+  adapter: DrawingChartAdapter | null | undefined,
+): DrawingDataPoint | null {
   if (!dataPoint || options.snap === false) return dataPoint;
   const allowTime = options.time !== false;
   const allowPrice = options.price !== false;
@@ -281,7 +343,7 @@ export function snapDataPointAtPointer(dataPoint, x, y, options, adapter) {
     && !isSafeSourceOrdinal(dataPoint.sourceOrdinal)
     && dataPoint.sourceProjection == null
     && dataPoint.sourceProjectionConfig == null;
-  let snappedAxisTime = null;
+  let snappedAxisTime: unknown = null;
   if (allowPrice && target.price) {
     next.price = target.price.price;
     if (allowTime && !preserveFutureSourceTime) snappedAxisTime = target.price.time;

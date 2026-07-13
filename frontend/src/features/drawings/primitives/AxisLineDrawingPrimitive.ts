@@ -8,17 +8,38 @@
  */
 
 import { dataPointToCoordinate } from "./coordinateUtils.js";
+import type {
+  AxisLinePrimitiveOptions,
+  AxisLineType,
+  DrawingAttachedParameter,
+  DrawingDataPoint,
+  DrawingHit,
+  PrimitiveCanvasTarget,
+  PrimitivePaneRenderer,
+  PrimitivePaneView,
+} from "../drawingTypes.js";
 
-function normalizeAxisLineType(value) {
+interface AxisLineRenderData {
+  point: { x: number | null; y: number | null } | null;
+  axisLineType: AxisLineType;
+  color: string;
+  lineWidth: number;
+  selected: boolean;
+  hovered: boolean;
+  isPreview: boolean;
+  hidden: boolean;
+}
+
+function normalizeAxisLineType(value: unknown): AxisLineType {
   if (value === "vertical" || value === "cross") return value;
   return "horizontal";
 }
 
-function isFiniteCoord(value) {
+function isFiniteCoord(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function adjustAlpha(color, alpha) {
+function adjustAlpha(color: string, alpha: number): string {
   if (!color || color === "transparent") return "transparent";
   const a = Math.max(0, Math.min(1, Number(alpha)));
 
@@ -50,30 +71,33 @@ function adjustAlpha(color, alpha) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-class AxisLineRenderer {
+class AxisLineRenderer implements PrimitivePaneRenderer {
+  _data: AxisLineRenderData | null;
+
   constructor() {
     this._data = null;
   }
 
-  update(data) {
+  update(data: AxisLineRenderData): void {
     this._data = data;
   }
 
-  draw(target) {
+  draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
     if (!data || data.hidden || !data.point) return;
+    const point = data.point;
 
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
       const hRatio = scope.horizontalPixelRatio;
       const vRatio = scope.verticalPixelRatio;
       const minRatio = Math.min(hRatio, vRatio);
-      const { point, axisLineType, color, lineWidth, selected, hovered, isPreview } = data;
+      const { axisLineType, color, lineWidth, selected, hovered, isPreview } = data;
 
-      const hasX = isFiniteCoord(point.x);
-      const hasY = isFiniteCoord(point.y);
-      const x = hasX ? point.x * hRatio : null;
-      const y = hasY ? point.y * vRatio : null;
+      const x = isFiniteCoord(point.x) ? point.x * hRatio : null;
+      const y = isFiniteCoord(point.y) ? point.y * vRatio : null;
+      const hasX = x !== null;
+      const hasY = y !== null;
       const drawHorizontal = (axisLineType === "horizontal" || axisLineType === "cross") && hasY;
       const drawVertical = (axisLineType === "vertical" || axisLineType === "cross") && hasX;
       if (!drawHorizontal && !drawVertical) return;
@@ -90,11 +114,11 @@ class AxisLineRenderer {
         ctx.strokeStyle = adjustAlpha(color, selected ? 0.18 : 0.14);
         ctx.lineWidth = Math.max(scaledWidth + 10 * minRatio, 12 * minRatio);
         ctx.beginPath();
-        if (drawHorizontal) {
+        if (drawHorizontal && y !== null) {
           ctx.moveTo(0, y);
           ctx.lineTo(cw, y);
         }
-        if (drawVertical) {
+        if (drawVertical && x !== null) {
           ctx.moveTo(x, 0);
           ctx.lineTo(x, ch);
         }
@@ -109,11 +133,11 @@ class AxisLineRenderer {
       }
 
       ctx.beginPath();
-      if (drawHorizontal) {
+      if (drawHorizontal && y !== null) {
         ctx.moveTo(0, y);
         ctx.lineTo(cw, y);
       }
-      if (drawVertical) {
+      if (drawVertical && x !== null) {
         ctx.moveTo(x, 0);
         ctx.lineTo(x, ch);
       }
@@ -123,7 +147,7 @@ class AxisLineRenderer {
       ctx.globalAlpha = 1;
 
       // Draw a single anchor handle when the source anchor is visible.
-      if ((selected || isPreview) && hasX && hasY) {
+      if ((selected || isPreview) && x !== null && y !== null) {
         const handleR = (selected ? 6 : 4) * minRatio;
         const handleLineW = (selected ? 2 : 1.5) * minRatio;
         ctx.fillStyle = selected ? "#ffffff" : adjustAlpha(color, 0.45);
@@ -143,28 +167,40 @@ class AxisLineRenderer {
   }
 }
 
-class AxisLinePaneView {
-  constructor(source) {
+class AxisLinePaneView implements PrimitivePaneView {
+  _source: AxisLineDrawingPrimitive;
+  _renderer: AxisLineRenderer;
+
+  constructor(source: AxisLineDrawingPrimitive) {
     this._source = source;
     this._renderer = new AxisLineRenderer();
   }
 
-  update() {
+  update(): void {
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
     if (source._hidden) {
-      this._renderer.update({ point: null, hidden: true });
+      this._renderer.update({
+        point: null,
+        axisLineType: source._axisLineType,
+        color: source._color,
+        lineWidth: source._lineWidth,
+        selected: source._selected,
+        hovered: source._hovered,
+        isPreview: source._isPreview,
+        hidden: true,
+      });
       return;
     }
 
-    const dp = source._dataPoint || {};
+    const dp = source._dataPoint;
     const coordinateContext = {};
-    let x = dataPointToCoordinate(chart, series, dp, coordinateContext);
-    let y = null;
+    const x = dp ? dataPointToCoordinate(chart, series, dp, coordinateContext) : null;
+    let y: number | null = null;
 
-    if (dp.price != null) {
+    if (dp?.price != null) {
       y = series.priceToCoordinate(dp.price);
     }
 
@@ -180,17 +216,32 @@ class AxisLinePaneView {
     });
   }
 
-  renderer() {
+  renderer(): AxisLineRenderer {
     return this._renderer;
   }
 
-  zOrder() {
+  zOrder(): "top" {
     return "top";
   }
 }
 
 export class AxisLineDrawingPrimitive {
-  constructor(opts) {
+  _id: string;
+  _type: "axis-line";
+  _axisLineType: AxisLineType;
+  _dataPoint: DrawingDataPoint | null;
+  _color: string;
+  _lineWidth: number;
+  _selected: boolean;
+  _hovered: boolean;
+  _isPreview: boolean;
+  _hidden: boolean;
+  _series: DrawingAttachedParameter["series"] | null;
+  _chart: DrawingAttachedParameter["chart"] | null;
+  _paneView: AxisLinePaneView;
+  _requestUpdate: (() => void) | null;
+
+  constructor(opts: AxisLinePrimitiveOptions) {
     this._id = opts.id;
     this._type = "axis-line";
     this._axisLineType = normalizeAxisLineType(opts.axisLineType);
@@ -208,23 +259,23 @@ export class AxisLineDrawingPrimitive {
     this._requestUpdate = null;
   }
 
-  attached({ chart, series, requestUpdate }) {
+  attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
     this._requestUpdate = requestUpdate;
   }
 
-  detached() {
+  detached(): void {
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
   }
 
-  updateAllViews() {
+  updateAllViews(): void {
     this._paneView.update();
   }
 
-  paneViews() {
+  paneViews(): readonly PrimitivePaneView[] {
     return [this._paneView];
   }
 
@@ -236,12 +287,12 @@ export class AxisLineDrawingPrimitive {
   get lineWidth() { return this._lineWidth; }
   get selected() { return this._selected; }
 
-  setDataPoint(point) {
+  setDataPoint(point: DrawingDataPoint | null): void {
     this._dataPoint = point;
     this._requestUpdate?.();
   }
 
-  setSelected(v) {
+  setSelected(v: boolean): void {
     const next = !!v;
     if (this._selected !== next) {
       this._selected = next;
@@ -249,7 +300,7 @@ export class AxisLineDrawingPrimitive {
     }
   }
 
-  setHovered(v) {
+  setHovered(v: boolean): void {
     const next = !!v;
     if (this._hovered !== next) {
       this._hovered = next;
@@ -257,22 +308,22 @@ export class AxisLineDrawingPrimitive {
     }
   }
 
-  setColor(color) {
+  setColor(color: string): void {
     this._color = color;
     this._requestUpdate?.();
   }
 
-  setLineWidth(width) {
+  setLineWidth(width: number): void {
     this._lineWidth = width;
     this._requestUpdate?.();
   }
 
-  setPreview(v) {
+  setPreview(v: boolean): void {
     this._isPreview = !!v;
     this._requestUpdate?.();
   }
 
-  setHidden(v, request = true) {
+  setHidden(v: boolean, request = true): void {
     const next = !!v;
     if (this._hidden !== next) {
       this._hidden = next;
@@ -280,15 +331,15 @@ export class AxisLineDrawingPrimitive {
     }
   }
 
-  requestUpdate() {
+  requestUpdate(): void {
     this._requestUpdate?.();
   }
 
-  _screenPoint() {
+  _screenPoint(): { x: number | null; y: number | null } | null {
     if (!this._series || !this._chart || !this._dataPoint) return null;
     const dp = this._dataPoint;
     const coordinateContext = {};
-    let x = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
+    const x = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
     let y = null;
 
     if (dp.price != null) {
@@ -298,7 +349,7 @@ export class AxisLineDrawingPrimitive {
     return { x, y };
   }
 
-  hitTest(x, y) {
+  hitTest(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     const point = this._screenPoint();
     if (!point) return null;
@@ -309,18 +360,18 @@ export class AxisLineDrawingPrimitive {
     const LINE_HIT_RADIUS = 8 + this._lineWidth / 2;
 
     if (this._selected && hasX && hasY) {
-      const dx = point.x - x;
-      const dy = point.y - y;
+      const dx = (point.x ?? x) - x;
+      const dy = (point.y ?? y) - y;
       if (Math.hypot(dx, dy) <= HANDLE_RADIUS) {
         return { pointIndex: 0, zone: "center" };
       }
     }
 
     const horizontalDist = hasY && (this._axisLineType === "horizontal" || this._axisLineType === "cross")
-      ? Math.abs(point.y - y)
+      ? Math.abs((point.y ?? y) - y)
       : Infinity;
     const verticalDist = hasX && (this._axisLineType === "vertical" || this._axisLineType === "cross")
-      ? Math.abs(point.x - x)
+      ? Math.abs((point.x ?? x) - x)
       : Infinity;
 
     if (horizontalDist <= LINE_HIT_RADIUS || verticalDist <= LINE_HIT_RADIUS) {

@@ -22,41 +22,78 @@ import {
   freehandStrokeToCoordinates,
 } from "./coordinateUtils.js";
 import { isOrdinalAxisTime } from "../../../chart-adapter/coordinateBridge.js";
+import type { DrawingCoordinateContext } from "../../../chart-adapter/coordinateBridge.js";
+import type {
+  BrushShape,
+  DrawingAttachedParameter,
+  DrawingDataPoint,
+  FreehandKind,
+  FreehandPrimitiveOptions,
+  FreehandStroke,
+  PrimitiveCanvasTarget,
+  PrimitivePaneRenderer,
+  PrimitivePaneView,
+  ScreenPoint,
+} from "../drawingTypes.js";
+
+interface BitmapPoint {
+  bx: number;
+  by: number;
+}
+
+interface FreehandVisibleRenderData {
+  hidden: false;
+  paths: ScreenPoint[][];
+  color: string;
+  lineWidth: number;
+  hovered: boolean;
+  opacity: number;
+  compositeOperation: GlobalCompositeOperation;
+  brushShape: BrushShape;
+}
+
+type FreehandRenderData = FreehandVisibleRenderData | {
+  hidden: true;
+  paths: [];
+};
 
 const DEFAULT_HIGHLIGHTER_OPACITY = 0.35;
-const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION = "multiply";
+const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION: GlobalCompositeOperation = "multiply";
 
-function normalizeFreehandType(value) {
+function normalizeFreehandType(value: unknown): FreehandKind {
   return value === "highlighter" ? "highlighter" : "freehand";
 }
 
-function normalizeOpacity(value, fallback = 1) {
+function normalizeOpacity(value: unknown, fallback = 1): number {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(0, Math.min(1, n));
 }
 
-function normalizeBrushShape(value, fallback = "round") {
+function normalizeBrushShape(value: unknown, fallback: BrushShape = "round"): BrushShape {
   return value === "square" ? "square" : fallback;
 }
 
-function normalizePreviewPoints(value) {
+function normalizePreviewPoints(value: unknown): Array<ScreenPoint | null> | null {
   if (!Array.isArray(value)) return null;
-  const points = [];
+  const points: Array<ScreenPoint | null> = [];
   for (const point of value) {
     if (point === null) {
       points.push(null);
       continue;
     }
-    if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return null;
-    points.push({ x: point.x, y: point.y });
+    if (typeof point !== "object" || point === null) return null;
+    const candidate = point as Record<string, unknown>;
+    if (typeof candidate.x !== "number" || !Number.isFinite(candidate.x)
+      || typeof candidate.y !== "number" || !Number.isFinite(candidate.y)) return null;
+    points.push({ x: candidate.x, y: candidate.y });
   }
   return points;
 }
 
-function splitScreenPaths(points) {
-  const paths = [];
-  let currentPath = [];
+function splitScreenPaths(points: Array<ScreenPoint | null>): ScreenPoint[][] {
+  const paths: ScreenPoint[][] = [];
+  let currentPath: ScreenPoint[] = [];
   for (const point of points) {
     if (!point) {
       if (currentPath.length > 0) paths.push(currentPath);
@@ -71,7 +108,14 @@ function splitScreenPaths(points) {
 
 // ── Geometry helper ──
 
-function distToSegment(px, py, ax, ay, bx, by) {
+function distToSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
   const dx = bx - ax;
   const dy = by - ay;
   const lenSq = dx * dx + dy * dy;
@@ -83,17 +127,18 @@ function distToSegment(px, py, ax, ay, bx, by) {
   return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
 }
 
-function screenPathsForSource(source) {
+function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][] {
   if (source._previewScreenPoints !== null) {
     return splitScreenPaths(source._previewScreenPoints);
   }
   const series = source._series;
   const chart = source._chart;
-  const coordinateContext = {};
+  if (!series || !chart) return [];
+  const coordinateContext: DrawingCoordinateContext = {};
 
   if (source._stroke) {
-    const paths = [];
-    let currentPath = [];
+    const paths: ScreenPoint[][] = [];
+    let currentPath: ScreenPoint[] = [];
     const horizontalPoints = freehandStrokeToCoordinates(
       chart,
       series,
@@ -102,7 +147,7 @@ function screenPathsForSource(source) {
     );
     for (const point of horizontalPoints) {
       const y = point ? series.priceToCoordinate(point.price) : null;
-      if (!point || !Number.isFinite(point.x) || !Number.isFinite(y)) {
+      if (!point || !Number.isFinite(point.x) || typeof y !== "number" || !Number.isFinite(y)) {
         if (currentPath.length > 0) paths.push(currentPath);
         currentPath = [];
         continue;
@@ -115,9 +160,9 @@ function screenPathsForSource(source) {
 
   // Preserve the legacy v1 time-axis behavior, but never bridge an unresolved
   // legacy point after the same saved stroke is rendered on an ordinal axis.
-  const paths = [];
-  let path = [];
-  let splitOnUnresolved = null;
+  const paths: ScreenPoint[][] = [];
+  let path: ScreenPoint[] = [];
+  let splitOnUnresolved: boolean | null = null;
   for (const dataPoint of source._dataPoints) {
     const x = dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
     const y = series.priceToCoordinate(dataPoint.price);
@@ -138,7 +183,11 @@ function screenPathsForSource(source) {
   return paths;
 }
 
-function tracePath(context, path, isSquareBrush) {
+function tracePath(
+  context: CanvasRenderingContext2D,
+  path: BitmapPoint[],
+  isSquareBrush: boolean,
+): void {
   context.moveTo(path[0].bx, path[0].by);
   if (path.length === 2 || isSquareBrush) {
     for (let index = 1; index < path.length; index += 1) {
@@ -163,16 +212,18 @@ function tracePath(context, path, isSquareBrush) {
 
 // ── Pane Renderer ──
 
-class FreehandRenderer {
+class FreehandRenderer implements PrimitivePaneRenderer {
+  _data: FreehandRenderData | null;
+
   constructor() {
     this._data = null;
   }
 
-  update(data) {
+  update(data: FreehandRenderData): void {
     this._data = data;
   }
 
-  draw(target) {
+  draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
     if (!data || !Array.isArray(data.paths)) return;
     if (data.hidden) return;
@@ -220,13 +271,16 @@ class FreehandRenderer {
 
 // ── Pane View ──
 
-class FreehandPaneView {
-  constructor(source) {
+class FreehandPaneView implements PrimitivePaneView {
+  _source: FreehandDrawingPrimitive;
+  _renderer: FreehandRenderer;
+
+  constructor(source: FreehandDrawingPrimitive) {
     this._source = source;
     this._renderer = new FreehandRenderer();
   }
 
-  update() {
+  update(): void {
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
@@ -247,15 +301,15 @@ class FreehandPaneView {
       compositeOperation: source._compositeOperation,
       brushShape: source._brushShape,
       hovered: source._hovered,
-      hidden: source._hidden,
+      hidden: false,
     });
   }
 
-  renderer() {
+  renderer(): PrimitivePaneRenderer {
     return this._renderer;
   }
 
-  zOrder() {
+  zOrder(): "top" {
     return "top";
   }
 }
@@ -263,6 +317,25 @@ class FreehandPaneView {
 // ── The Primitive ──
 
 export class FreehandDrawingPrimitive {
+  _id: string;
+  _type: FreehandKind;
+  _dataPoints: DrawingDataPoint[];
+  _stroke: FreehandStroke | null;
+  _previewScreenPoints: Array<ScreenPoint | null> | null;
+  _isPreview: boolean;
+  _previewCancelled: boolean;
+  _color: string;
+  _lineWidth: number;
+  _opacity: number;
+  _compositeOperation: GlobalCompositeOperation;
+  _brushShape: BrushShape;
+  _hovered: boolean;
+  _hidden: boolean;
+  _series: DrawingAttachedParameter["series"] | null;
+  _chart: DrawingAttachedParameter["chart"] | null;
+  _paneView: FreehandPaneView;
+  _requestUpdate: (() => void) | null;
+
   /**
    * @param {object} opts
    * @param {string} opts.id - unique identifier
@@ -274,7 +347,7 @@ export class FreehandDrawingPrimitive {
    * @param {string} [opts.compositeOperation] - Canvas composite mode
   * @param {"round"|"square"} [opts.brushShape] - brush cap/join shape
    */
-  constructor(opts) {
+  constructor(opts: FreehandPrimitiveOptions) {
     this._id = opts.id;
     this._type = normalizeFreehandType(opts.type);
     this._dataPoints = opts.dataPoints || [];
@@ -309,53 +382,53 @@ export class FreehandDrawingPrimitive {
 
   // ── ISeriesPrimitive interface ──
 
-  attached({ chart, series, requestUpdate }) {
+  attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
     this._requestUpdate = requestUpdate;
   }
 
-  detached() {
+  detached(): void {
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
   }
 
-  updateAllViews() {
+  updateAllViews(): void {
     this._paneView.update();
   }
 
-  paneViews() {
+  paneViews(): PrimitivePaneView[] {
     return [this._paneView];
   }
 
   // ── Public API ──
 
-  get id() { return this._id; }
-  get dataPoints() { return this._dataPoints; }
-  get stroke() { return this._stroke; }
-  get isPreview() { return this._isPreview; }
-  get previewPoints() {
+  get id(): string { return this._id; }
+  get dataPoints(): DrawingDataPoint[] { return this._dataPoints; }
+  get stroke(): FreehandStroke | null { return this._stroke; }
+  get isPreview(): boolean { return this._isPreview; }
+  get previewPoints(): Array<ScreenPoint | null> {
     return this._previewScreenPoints?.map((point) => (point ? { ...point } : null)) || [];
   }
-  get color() { return this._color; }
-  get lineWidth() { return this._lineWidth; }
-  get type() { return this._type; }
-  get opacity() { return this._opacity; }
-  get compositeOperation() { return this._compositeOperation; }
-  get brushShape() { return this._brushShape; }
+  get color(): string { return this._color; }
+  get lineWidth(): number { return this._lineWidth; }
+  get type(): FreehandKind { return this._type; }
+  get opacity(): number { return this._opacity; }
+  get compositeOperation(): GlobalCompositeOperation { return this._compositeOperation; }
+  get brushShape(): BrushShape { return this._brushShape; }
 
-  addPoint(dp) {
+  addPoint(dp: DrawingDataPoint): void {
     this._dataPoints.push(dp);
     this._requestUpdate?.();
   }
 
-  setDataPoints(points) {
+  setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
     this._requestUpdate?.();
   }
 
-  setHovered(v) {
+  setHovered(v: boolean): void {
     const next = !!v;
     if (this._hovered !== next) {
       this._hovered = next;
@@ -364,7 +437,7 @@ export class FreehandDrawingPrimitive {
   }
 
   /** Replace transient CSS-pixel preview geometry without touching saved data. */
-  setPreviewPoints(points) {
+  setPreviewPoints(points: unknown): boolean {
     const normalized = normalizePreviewPoints(points);
     if (!normalized || this._previewCancelled) return false;
     this._previewScreenPoints = normalized;
@@ -374,7 +447,7 @@ export class FreehandDrawingPrimitive {
   }
 
   /** Append one validated pointer-frame delta without cloning the full draft. */
-  appendPreviewPoints(points) {
+  appendPreviewPoints(points: unknown): boolean {
     const normalized = normalizePreviewPoints(points);
     if (!normalized || this._previewCancelled) return false;
     if (normalized.length === 0) return true;
@@ -386,7 +459,7 @@ export class FreehandDrawingPrimitive {
   }
 
   /** Promote a validated v2/v3 stroke and atomically discard all preview state. */
-  commitStroke(stroke) {
+  commitStroke(stroke: unknown): boolean {
     const normalized = normalizeFreehandStroke(stroke);
     if (!normalized || this._previewCancelled) return false;
     this._stroke = normalized;
@@ -398,7 +471,7 @@ export class FreehandDrawingPrimitive {
   }
 
   /** Promote a completed legacy source-time stroke out of preview mode. */
-  commitDataPoints(points = this._dataPoints) {
+  commitDataPoints(points: unknown = this._dataPoints): boolean {
     const normalized = normalizeLegacyFreehandDataPoints(points);
     if (!normalized || this._previewCancelled) return false;
     this._dataPoints = normalized;
@@ -410,7 +483,7 @@ export class FreehandDrawingPrimitive {
   }
 
   /** Make an abandoned preview inert while keeping it persistence-filtered. */
-  cancelPreview() {
+  cancelPreview(): boolean {
     if (!this._isPreview || this._previewCancelled) return false;
     this._previewCancelled = true;
     this._previewScreenPoints = [];
@@ -420,32 +493,32 @@ export class FreehandDrawingPrimitive {
     return true;
   }
 
-  setColor(c) {
+  setColor(c: string): void {
     this._color = c;
     this._requestUpdate?.();
   }
 
-  setLineWidth(w) {
+  setLineWidth(w: number): void {
     this._lineWidth = w;
     this._requestUpdate?.();
   }
 
-  setOpacity(opacity) {
+  setOpacity(opacity: unknown): void {
     this._opacity = normalizeOpacity(opacity, this._opacity);
     this._requestUpdate?.();
   }
 
-  setCompositeOperation(compositeOperation) {
+  setCompositeOperation(compositeOperation: GlobalCompositeOperation | null | undefined): void {
     this._compositeOperation = compositeOperation || "source-over";
     this._requestUpdate?.();
   }
 
-  setBrushShape(brushShape) {
+  setBrushShape(brushShape: unknown): void {
     this._brushShape = normalizeBrushShape(brushShape, this._brushShape);
     this._requestUpdate?.();
   }
 
-  setHidden(v, request = true) {
+  setHidden(v: boolean, request = true): void {
     const next = !!v;
     if (this._hidden !== next) {
       this._hidden = next;
@@ -453,13 +526,13 @@ export class FreehandDrawingPrimitive {
     }
   }
 
-  requestUpdate() {
+  requestUpdate(): void {
     this._requestUpdate?.();
   }
 
   // ── Hit testing (screen/CSS-pixel coordinates) ──
 
-  hitTest(x, y, hitRadius = 8) {
+  hitTest(x: number, y: number, hitRadius = 8): boolean {
     if (this._hidden) return false;
     if (this._isPreview) return false;
     if (!this._series || !this._chart) return false;

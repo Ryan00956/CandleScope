@@ -1,10 +1,16 @@
 import { MAX_FREEHAND_STROKE_POINTS } from "./freehandStrokeModel.js";
+import type { ActiveDrawingMovePayload, ScreenPoint } from "./drawingTypes.js";
 
-function isFreehandMovePayload(payload) {
+function isFreehandMovePayload(
+  payload: ActiveDrawingMovePayload | null | undefined,
+): payload is ActiveDrawingMovePayload & { tool: "pen" | "highlighter" } {
   return payload?.tool === "pen" || payload?.tool === "highlighter";
 }
 
-export function limitFreehandCapturePositions(positions, remainingCapacity) {
+export function limitFreehandCapturePositions(
+  positions: readonly ScreenPoint[] | null | undefined,
+  remainingCapacity: number,
+): ScreenPoint[] {
   if (!Array.isArray(positions)
     || !Number.isSafeInteger(remainingCapacity)
     || remainingCapacity < 0) {
@@ -15,10 +21,10 @@ export function limitFreehandCapturePositions(positions, remainingCapacity) {
 
 /** Merge all pen samples observed before the next RAF; other tools stay latest-wins. */
 export function mergePendingActiveDrawingMove(
-  pending,
-  payload,
+  pending: ActiveDrawingMovePayload | null | undefined,
+  payload: ActiveDrawingMovePayload | null | undefined,
   maxPositions = MAX_FREEHAND_STROKE_POINTS,
-) {
+): ActiveDrawingMovePayload | null | undefined {
   const limit = Number.isSafeInteger(maxPositions) && maxPositions > 0
     ? maxPositions
     : MAX_FREEHAND_STROKE_POINTS;

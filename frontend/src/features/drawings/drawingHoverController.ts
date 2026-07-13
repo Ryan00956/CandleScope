@@ -1,6 +1,37 @@
-const LINE_HOVER_TYPES = new Set(["line", "axis-line", "angle", "fibonacci", "position", "shape"]);
+import type {
+  AxisLineType,
+  DrawingHitType,
+  DrawingToolId,
+  MutableRef,
+  ScreenPoint,
+} from "./drawingTypes.js";
 
-export function syncHoveredPrimitive(hoveredRef, nextPrim) {
+interface HoverablePrimitive {
+  setHovered?: (value: boolean) => void;
+  axisLineType?: AxisLineType;
+}
+
+interface HoverDrawingHit {
+  type: DrawingHitType;
+  prim: HoverablePrimitive;
+  pointIndex?: number;
+  zone?: string;
+  handle?: string;
+}
+
+const LINE_HOVER_TYPES = new Set<DrawingHitType>([
+  "line",
+  "axis-line",
+  "angle",
+  "fibonacci",
+  "position",
+  "shape",
+]);
+
+export function syncHoveredPrimitive(
+  hoveredRef: MutableRef<HoverablePrimitive | null>,
+  nextPrim: HoverablePrimitive | null | undefined,
+): boolean {
   const previous = hoveredRef.current || null;
   const next = nextPrim || null;
   if (previous === next) return false;
@@ -16,11 +47,16 @@ export function syncHoveredPrimitive(hoveredRef, nextPrim) {
   return true;
 }
 
-export function clearHoveredPrimitive(hoveredRef) {
+export function clearHoveredPrimitive(
+  hoveredRef: MutableRef<HoverablePrimitive | null>,
+): boolean {
   return syncHoveredPrimitive(hoveredRef, null);
 }
 
-export function hoverTargetForTool(tool, hit) {
+export function hoverTargetForTool(
+  tool: DrawingToolId | null | undefined,
+  hit: HoverDrawingHit | null | undefined,
+): HoverablePrimitive | null {
   if (!hit?.prim) return null;
   if (tool === "eraser") return hit.prim;
   if (tool === "position-long" || tool === "position-short") {
@@ -30,7 +66,7 @@ export function hoverTargetForTool(tool, hit) {
   return null;
 }
 
-export function cursorForLineToolHit(hit) {
+export function cursorForLineToolHit(hit: HoverDrawingHit | null | undefined): string {
   if (hit?.type === "axis-line") {
     const axisLineType = hit.prim.axisLineType;
     if (axisLineType === "horizontal") return "ns-resize";
@@ -38,12 +74,12 @@ export function cursorForLineToolHit(hit) {
     return "move";
   }
   if (hit?.type === "angle" || hit?.type === "line") {
-    return hit.pointIndex >= 0 ? "crosshair" : "move";
+    return (hit.pointIndex ?? -1) >= 0 ? "crosshair" : "move";
   }
   return "crosshair";
 }
 
-export function cursorForShapeToolHit(hit) {
+export function cursorForShapeToolHit(hit: HoverDrawingHit | null | undefined): string {
   if (hit?.type !== "shape") return "crosshair";
   if (hit.zone === "l" || hit.zone === "r") return "ew-resize";
   if (hit.zone === "t" || hit.zone === "b") return "ns-resize";
@@ -52,7 +88,7 @@ export function cursorForShapeToolHit(hit) {
   return "move";
 }
 
-export function cursorForPositionToolHit(hit) {
+export function cursorForPositionToolHit(hit: HoverDrawingHit | null | undefined): string {
   if (hit?.type !== "position") return "crosshair";
   if (hit.zone === "tp" || hit.zone === "sl") return "ns-resize";
   if (hit.zone === "panel") return "grab";
@@ -61,7 +97,7 @@ export function cursorForPositionToolHit(hit) {
   return "crosshair";
 }
 
-export function cursorForTextToolHit(hit) {
+export function cursorForTextToolHit(hit: HoverDrawingHit | null | undefined): string {
   if (hit?.type !== "text") return "crosshair";
   if (hit.handle === "l" || hit.handle === "r") return "ew-resize";
   if (hit.handle === "t" || hit.handle === "b") return "ns-resize";
@@ -70,7 +106,11 @@ export function cursorForTextToolHit(hit) {
   return "move";
 }
 
-export function shouldAppendFreehandPoint(previousScreenPoint, nextScreenPoint, minDistancePx = 1) {
+export function shouldAppendFreehandPoint(
+  previousScreenPoint: ScreenPoint | null | undefined,
+  nextScreenPoint: ScreenPoint | null | undefined,
+  minDistancePx = 1,
+): boolean {
   if (!previousScreenPoint || !nextScreenPoint) return true;
   const dx = nextScreenPoint.x - previousScreenPoint.x;
   const dy = nextScreenPoint.y - previousScreenPoint.y;

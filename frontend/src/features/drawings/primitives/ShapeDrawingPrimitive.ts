@@ -8,20 +8,60 @@
  */
 
 import { dataPointToCoordinate } from "./coordinateUtils.js";
+import type {
+  DrawingAttachedParameter,
+  DrawingDataPoint,
+  DrawingHit,
+  PrimitiveCanvasTarget,
+  PrimitivePaneRenderer,
+  PrimitivePaneView,
+  ScreenPoint,
+  ShapeLineStyle,
+  ShapePrimitiveOptions,
+  ShapeType,
+} from "../drawingTypes.js";
 
-const HANDLE_KEYS = ["tl", "t", "tr", "r", "br", "b", "bl", "l"];
+const HANDLE_KEYS = ["tl", "t", "tr", "r", "br", "b", "bl", "l"] as const;
+type ShapeHandleKey = typeof HANDLE_KEYS[number];
+type ShapeHandlePositions = Record<ShapeHandleKey, ScreenPoint>;
 
-function normalizeShapeType(value) {
+interface ShapeBox extends ScreenPoint {
+  width: number;
+  height: number;
+  right: number;
+  bottom: number;
+}
+
+interface ShapeRenderPoint {
+  x: number | null;
+  y: number | null;
+}
+
+interface ShapeRenderData {
+  points: ShapeRenderPoint[];
+  shapeType: ShapeType;
+  color: string;
+  lineWidth: number;
+  fillColor: string;
+  fillOpacity: number;
+  lineStyle: ShapeLineStyle;
+  selected: boolean;
+  hovered: boolean;
+  isPreview: boolean;
+  hidden: boolean;
+}
+
+function normalizeShapeType(value: unknown): ShapeType {
   return value === "ellipse" ? "ellipse" : "rectangle";
 }
 
-function normalizeOpacity(value) {
+function normalizeOpacity(value: unknown): number {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0.12;
   return Math.max(0, Math.min(1, n));
 }
 
-function adjustAlpha(color, alpha) {
+function adjustAlpha(color: string, alpha: number): string {
   if (!color || color === "transparent") return "transparent";
   const a = Math.max(0, Math.min(1, Number(alpha)));
 
@@ -53,7 +93,14 @@ function adjustAlpha(color, alpha) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
-function drawShapePath(ctx, shapeType, x, y, w, h) {
+function drawShapePath(
+  ctx: CanvasRenderingContext2D,
+  shapeType: ShapeType,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void {
   ctx.beginPath();
   if (shapeType === "ellipse") {
     ctx.ellipse(x + w / 2, y + h / 2, Math.abs(w / 2), Math.abs(h / 2), 0, 0, Math.PI * 2);
@@ -62,7 +109,7 @@ function drawShapePath(ctx, shapeType, x, y, w, h) {
   }
 }
 
-function computeHandlePositions(x, y, w, h) {
+function computeHandlePositions(x: number, y: number, w: number, h: number): ShapeHandlePositions {
   return {
     tl: { x, y },
     t:  { x: x + w / 2, y },
@@ -75,7 +122,7 @@ function computeHandlePositions(x, y, w, h) {
   };
 }
 
-function boxFromPoints(a, b) {
+function boxFromPoints(a: ScreenPoint, b: ScreenPoint): ShapeBox {
   const left = Math.min(a.x, b.x);
   const top = Math.min(a.y, b.y);
   const right = Math.max(a.x, b.x);
@@ -90,14 +137,14 @@ function boxFromPoints(a, b) {
   };
 }
 
-function isPointInBox(x, y, box, margin = 0) {
+function isPointInBox(x: number, y: number, box: ShapeBox, margin = 0): boolean {
   return (
     x >= box.x - margin && x <= box.right + margin &&
     y >= box.y - margin && y <= box.bottom + margin
   );
 }
 
-function isPointInEllipse(x, y, box, margin = 0) {
+function isPointInEllipse(x: number, y: number, box: ShapeBox, margin = 0): boolean {
   const rx = box.width / 2;
   const ry = box.height / 2;
   if (rx <= 0 || ry <= 0) return false;
@@ -108,16 +155,18 @@ function isPointInEllipse(x, y, box, margin = 0) {
   return nx * nx + ny * ny <= 1;
 }
 
-class ShapeRenderer {
+class ShapeRenderer implements PrimitivePaneRenderer {
+  _data: ShapeRenderData | null;
+
   constructor() {
     this._data = null;
   }
 
-  update(data) {
+  update(data: ShapeRenderData): void {
     this._data = data;
   }
 
-  draw(target) {
+  draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
     if (data.hidden) return;
@@ -218,23 +267,38 @@ class ShapeRenderer {
   }
 }
 
-class ShapePaneView {
-  constructor(source) {
+class ShapePaneView implements PrimitivePaneView {
+  _source: ShapeDrawingPrimitive;
+  _renderer: ShapeRenderer;
+
+  constructor(source: ShapeDrawingPrimitive) {
     this._source = source;
     this._renderer = new ShapeRenderer();
   }
 
-  update() {
+  update(): void {
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
     if (source._hidden) {
-      this._renderer.update({ points: [], hidden: true });
+      this._renderer.update({
+        points: [],
+        shapeType: source._shapeType,
+        color: source._color,
+        lineWidth: source._lineWidth,
+        fillColor: source._fillColor,
+        fillOpacity: source._fillOpacity,
+        lineStyle: source._lineStyle,
+        selected: source._selected,
+        hovered: source._hovered,
+        isPreview: source._isPreview,
+        hidden: true,
+      });
       return;
     }
 
-    const points = [];
+    const points: ShapeRenderPoint[] = [];
     const coordinateContext = {};
 
     for (const dp of source._dataPoints) {
@@ -258,17 +322,35 @@ class ShapePaneView {
     });
   }
 
-  renderer() {
+  renderer(): ShapeRenderer {
     return this._renderer;
   }
 
-  zOrder() {
+  zOrder(): "top" {
     return "top";
   }
 }
 
 export class ShapeDrawingPrimitive {
-  constructor(opts) {
+  _id: string;
+  _type: "shape";
+  _shapeType: ShapeType;
+  _dataPoints: DrawingDataPoint[];
+  _color: string;
+  _lineWidth: number;
+  _fillColor: string;
+  _fillOpacity: number;
+  _lineStyle: ShapeLineStyle;
+  _selected: boolean;
+  _hovered: boolean;
+  _isPreview: boolean;
+  _hidden: boolean;
+  _series: DrawingAttachedParameter["series"] | null;
+  _chart: DrawingAttachedParameter["chart"] | null;
+  _paneView: ShapePaneView;
+  _requestUpdate: (() => void) | null;
+
+  constructor(opts: ShapePrimitiveOptions) {
     this._id = opts.id;
     this._type = "shape";
     this._shapeType = normalizeShapeType(opts.shapeType);
@@ -289,23 +371,23 @@ export class ShapeDrawingPrimitive {
     this._requestUpdate = null;
   }
 
-  attached({ chart, series, requestUpdate }) {
+  attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
     this._requestUpdate = requestUpdate;
   }
 
-  detached() {
+  detached(): void {
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
   }
 
-  updateAllViews() {
+  updateAllViews(): void {
     this._paneView.update();
   }
 
-  paneViews() {
+  paneViews(): readonly PrimitivePaneView[] {
     return [this._paneView];
   }
 
@@ -319,12 +401,12 @@ export class ShapeDrawingPrimitive {
   get lineStyle() { return this._lineStyle; }
   get selected() { return this._selected; }
 
-  setDataPoints(points) {
+  setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
     this._requestUpdate?.();
   }
 
-  setSelected(v) {
+  setSelected(v: boolean): void {
     const next = !!v;
     if (this._selected !== next) {
       this._selected = next;
@@ -332,7 +414,7 @@ export class ShapeDrawingPrimitive {
     }
   }
 
-  setHovered(v) {
+  setHovered(v: boolean): void {
     const next = !!v;
     if (this._hovered !== next) {
       this._hovered = next;
@@ -340,37 +422,37 @@ export class ShapeDrawingPrimitive {
     }
   }
 
-  setColor(color) {
+  setColor(color: string): void {
     this._color = color;
     this._requestUpdate?.();
   }
 
-  setLineWidth(width) {
+  setLineWidth(width: number): void {
     this._lineWidth = width;
     this._requestUpdate?.();
   }
 
-  setFillColor(color) {
+  setFillColor(color: string): void {
     this._fillColor = color;
     this._requestUpdate?.();
   }
 
-  setFillOpacity(opacity) {
+  setFillOpacity(opacity: unknown): void {
     this._fillOpacity = normalizeOpacity(opacity);
     this._requestUpdate?.();
   }
 
-  setLineStyle(style) {
+  setLineStyle(style: ShapeLineStyle | null | undefined): void {
     this._lineStyle = style || "solid";
     this._requestUpdate?.();
   }
 
-  setPreview(v) {
+  setPreview(v: boolean): void {
     this._isPreview = !!v;
     this._requestUpdate?.();
   }
 
-  setHidden(v, request = true) {
+  setHidden(v: boolean, request = true): void {
     const next = !!v;
     if (this._hidden !== next) {
       this._hidden = next;
@@ -378,18 +460,20 @@ export class ShapeDrawingPrimitive {
     }
   }
 
-  requestUpdate() {
+  requestUpdate(): void {
     this._requestUpdate?.();
   }
 
-  _screenPoints() {
+  _screenPoints(): ScreenPoint[] | null {
     if (!this._series || !this._chart || this._dataPoints.length < 2) return null;
-    const points = [];
+    const series = this._series;
+    const chart = this._chart;
+    const points: ScreenPoint[] = [];
     const coordinateContext = {};
 
     for (const dp of this._dataPoints) {
-      const x = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
-      const y = this._series.priceToCoordinate(dp.price);
+      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
+      const y = series.priceToCoordinate(dp.price);
       if (x == null || y == null || !isFinite(x) || !isFinite(y)) return null;
       points.push({ x, y });
     }
@@ -397,13 +481,13 @@ export class ShapeDrawingPrimitive {
     return points;
   }
 
-  getBoundingBoxScreen() {
+  getBoundingBoxScreen(): ShapeBox | null {
     const points = this._screenPoints();
     if (!points || points.length < 2) return null;
     return boxFromPoints(points[0], points[1]);
   }
 
-  hitTest(x, y) {
+  hitTest(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     const box = this.getBoundingBoxScreen();
     if (!box) return null;

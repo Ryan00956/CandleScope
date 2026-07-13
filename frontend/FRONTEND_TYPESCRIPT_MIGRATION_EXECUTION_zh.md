@@ -1890,7 +1890,7 @@ rg --files src -g "*.js" -g "*.jsx"
 | T5 | 已完成 | `cb28b4e` | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 21 个 chart-representation owner 迁为 TS，新增统一投影 contract；专项测试 200/200 通过 |
 | T6 | 已完成 | `306c90c` | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 24 个 chart-adapter owner 迁为 TS，新增统一 adapter contract；adapter 专项 146/146、drawing coordinate 44/44 通过 |
 | T7 | 已完成 | `5edce5d`…`a2eaef5` | 通过 | 740/740 通过 | 通过 | basic/release 通过 | 8 个 owner 切片独立提交；26 个既有 owner 迁为 TS，新增 8 个类型模块；聚合专项 58/58 通过 |
-| T8 | 待执行 |  |  |  |  |  |  |
+| T8 | 已完成 | `69576e8`…`c37113a` | 通过 | 747/747 通过 | 通过 | basic/release 通过 | 13 个既有 owner 迁为 TS；raw indicator HTTP/WS payload、range/revision、cache/output 与 Monaco contract 已收紧；专项 60/60 通过 |
 | T9 | 待执行 |  |  |  |  |  |  |
 | T10 | 待执行 |  |  |  |  |  |  |
 | T11 | 待执行 |  |  |  |  |  |  |
@@ -2092,6 +2092,27 @@ rg --files src -g "*.js" -g "*.jsx"
 | Release smoke | 15 种 chart type 与持久化恢复通过；PNG/JPEG/WebP 三组导出、drawing check、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
 | 独立回滚 | 8 个 owner 切片各自独立提交；未改 GC 阈值、watchlist 订阅语义、storage key、export 视觉结果或 React UI owner |
 | 新增 `any` / TS directive suppression | 0；T7 路径无 `@ts-ignore`、`@ts-nocheck`、`@ts-expect-error`、`as unknown as` 或显式 `any` |
+
+### T8 indicator core、API、WebSocket 与 editor 验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `477cbd3` |
+| 切片提交 | range kernels `69576e8`；payload/compute/output `9d8be0c`；transport/cache `1a7ba53`；Pyne editor `c7f54b2`；numeric revision 兼容修复 `c37113a` |
+| 生产模块 | 计划中的 13 个既有 JS owner 全部迁为 TS，对应 JS 残留 0；新增 `indicatorTypes.ts`、`indicatorContracts.ts`，合计 15 个 T8 TS 模块；React controllers/hooks 保留到 T10，仅 `indicatorStreamController.js` 适配 typed parse result |
+| 核心 contract | 建立 indicator definition、parameter schema、line/marker/fill/hline/bgcolor/barcolor/signal、判别式 `IndicatorOutput`、range intent/coverage/revision、cache entry/result、HTTP request/response、snapshot/patch/replace-range/subscribed/recomputed/value/error WS message 与 Monaco Pyne item 类型 |
+| Payload 边界 | `normalizeIndicatorPayload()` 接收 `unknown`；HTTP `request()` 返回 `Promise<unknown>`，preset/registry/compute/range/batch/custom/security/delete endpoint 各自解析；缺失的可选 output 数组规范化为空数组，存在但畸形的 point、annotation、range、revision 或嵌套 batch payload 立即失败 |
+| WS 边界 | `parseIndicatorWsMessage()` 返回 typed success/failure；snapshot、patch、replace-range、recomputed、subscribed、preview/update、error 与 control message 分支显式校验；controller 丢弃失败结果；合法 sequence gap、history invalid、dirty range 与 reconnect 行为保持 |
+| Output / cache | `IndicatorOutput` 与 reducer switch 均带 `never` 穷尽检查；cache key 显式包含 exchange、market type、symbol、interval、indicator/script signature、security mode、params 与 candle colors；逐点 upsert、共享数组、range replace、revision-aware coverage、stale segment 和 K-line dependency 语义不变 |
+| Snake/camel 兼容 | range/revision、output name、style、custom timestamp 与 WS resume 字段只在 parser/normalizer 边界兼容；内部统一 camelCase；`correctionRevision` 接受后端实际的有限数字或字符串并统一为字符串 |
+| Pyne editor | `pyneLanguage.ts` / `pyneTheme.ts` 直接使用 Monaco 的 completion、hover、disposable、theme 与 editor options 类型；completion、hover、snippet、theme 和 lazy editor 加载行为不变 |
+| 定向测试 | indicator feature、market-data indicator range 与 indicator API 聚合 60/60 通过；新增 unified output 五类、畸形 line/annotation、WS snapshot/patch/replace-range、HTTP range/batch 及 numeric revision 覆盖 |
+| 完整门禁 | architecture、typecheck、lint 全部通过；747/747 tests 通过；Vite 7.3.1 build 通过，294 modules transformed |
+| Basic smoke | 干净 Vite `15179` 实例通过；1500 bars、connected/live，MA/VOL hosted indicator coverage 有效；failures/warnings/exceptions 为 0 |
+| Release smoke | 15 种 chart type 与持久化恢复通过；PNG/JPEG/WebP 三组导出、drawing persistence、MA/VOL/BOLL/RSI overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
+| Smoke 捕获并修复 | 首次 basic smoke 发现后端 numeric `correctionRevision` 被首版 string-only parser 拒绝，导致合法 WS message 丢弃与 sequence-gap warnings；`c37113a` 统一 string/finite-number 输入后，focused test、完整门禁、basic/release smoke 全部通过 |
+| 范围约束 | 未修改 indicator 计算算法、cache 窗口、重算范围、WS 重连策略或 Pyne UI；`T4-UNKNOWN-01` 仍只覆盖 `src/services/api.ts` 中未迁的非 indicator endpoints，状态不变 |
+| 新增 `any` / TS directive suppression | 0；T8 路径无 `Record<string, any>`、显式 `any`、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error` 或 `as unknown as` |
 
 ### Suppression ledger
 

@@ -1,15 +1,21 @@
 import { normalizeIntervalValue } from "../../utils/intervals.js";
+import type { IntervalString } from "../../utils/intervals.js";
+import type {
+  FullSubscriptionOptions,
+  IntervalCandidate,
+  SubscriptionTierRequestOptions,
+} from "./watchlistTypes.js";
 
-function intervalValue(item) {
+function intervalValue(item: IntervalCandidate): unknown {
   return typeof item === "string" ? item : item?.value;
 }
 
 export function getFullSubscriptionIntervals({
   nativeIntervals = [],
   customIntervalRecords = [],
-} = {}) {
-  const seen = new Set();
-  const intervals = [];
+}: FullSubscriptionOptions = {}): IntervalString[] {
+  const seen = new Set<IntervalString>();
+  const intervals: IntervalString[] = [];
 
   for (const item of [...nativeIntervals, ...customIntervalRecords]) {
     const value = normalizeIntervalValue(intervalValue(item));
@@ -21,9 +27,9 @@ export function getFullSubscriptionIntervals({
   return intervals;
 }
 
-function normalizedUniqueValues(items) {
-  const seen = new Set();
-  const values = [];
+function normalizedUniqueValues(items: IntervalCandidate[] = []): IntervalString[] {
+  const seen = new Set<IntervalString>();
+  const values: IntervalString[] = [];
   for (const item of items || []) {
     const value = normalizeIntervalValue(intervalValue(item));
     if (!value || seen.has(value)) continue;
@@ -36,7 +42,13 @@ function normalizedUniqueValues(items) {
 export function getFullSubscriptionResourceSummary({
   nativeIntervals = [],
   customIntervalRecords = [],
-} = {}) {
+}: FullSubscriptionOptions = {}): {
+  nativeCount: number;
+  customCount: number;
+  totalIntervals: number;
+  shortText: string;
+  tooltip: string;
+} {
   const nativeValues = normalizedUniqueValues(nativeIntervals);
   const nativeSet = new Set(nativeValues);
   const customValues = normalizedUniqueValues(customIntervalRecords)
@@ -52,7 +64,7 @@ export function getFullSubscriptionResourceSummary({
   };
 }
 
-export function buildWatchlistConsumerId(symbol) {
+export function buildWatchlistConsumerId(symbol: unknown): string {
   return `watchlist:global:${symbol}`;
 }
 
@@ -61,8 +73,11 @@ export function getSubscriptionTierRequestOptions({
   tier,
   nativeIntervals = [],
   customIntervalRecords = [],
-} = {}) {
-  const options = {
+}: SubscriptionTierRequestOptions = {}): {
+  consumerId: string;
+  intervals?: IntervalString[];
+} {
+  const options: { consumerId: string; intervals?: IntervalString[] } = {
     consumerId: buildWatchlistConsumerId(symbol),
   };
 

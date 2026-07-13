@@ -23,6 +23,10 @@ import {
   type TransportKlineResponse,
 } from "./apiPayloadParsers.js";
 import { buildSubscriptionTierRequestBody } from "./subscriptionApiPolicy.js";
+import type {
+  SubscriptionRequestOptions,
+  SubscriptionTier,
+} from "../features/watchlist/watchlistTypes.js";
 
 const CLIENT_INSTANCE_ID = Math.random().toString(36).slice(2, 10);
 
@@ -455,8 +459,8 @@ export async function fetchSubscription(symbol: string): Promise<SubscriptionPay
 
 export async function updateSubscriptionTier(
   symbol: string,
-  tier: string,
-  options: UnknownRecord = {},
+  tier: SubscriptionTier,
+  options: SubscriptionRequestOptions = {},
 ): Promise<SubscriptionPayload> {
   const payload = await request(`${API_BASE}/subscriptions/${encodeURIComponent(symbol)}`, {
     method: "PUT",

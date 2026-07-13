@@ -1,4 +1,7 @@
-export function buildRealtimeTrackedIntervals(interval, fallbackInterval = "1m") {
+export function buildRealtimeTrackedIntervals(
+  interval: unknown,
+  fallbackInterval: unknown = "1m",
+): string[] {
   const desired = [interval, fallbackInterval]
     .map((value) => String(value || "").trim())
     .filter(Boolean);

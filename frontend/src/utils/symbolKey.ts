@@ -1,14 +1,20 @@
-/**
- * Shared helpers for composite symbol keys.
- *
- * A composite key uniquely identifies a symbol across markets:
- *   "spot:BTCUSDT"  /  "futures:ETHUSDT" / "okx:spot:BTC-USDT"
- *
- * This avoids collisions when spot and futures share the same
- * symbol string (e.g. both have "BTCUSDT").
- */
+/** Shared helpers for composite symbol keys. */
 
-export function inferExchangeFromSymbol(symbol, fallback = "binance") {
+export type ExchangeId = string;
+export type MarketType = string;
+export type SymbolCode = string;
+export type CompositeSymbolKey = string;
+
+export interface SymbolIdentity {
+  exchange: ExchangeId;
+  marketType: MarketType;
+  symbol: SymbolCode;
+}
+
+export function inferExchangeFromSymbol(
+  symbol: unknown,
+  fallback: ExchangeId = "binance",
+): ExchangeId {
   const normalized = String(symbol || "").toUpperCase().trim();
   if (!normalized) return fallback;
   if (normalized.includes("-")) return "okx";
@@ -16,7 +22,11 @@ export function inferExchangeFromSymbol(symbol, fallback = "binance") {
 }
 
 /** Build a composite key, keeping Binance keys backward-compatible. */
-export function symbolKey(symbol, marketType = "spot", exchange = "binance") {
+export function symbolKey(
+  symbol: unknown,
+  marketType: unknown = "spot",
+  exchange: unknown = "binance",
+): CompositeSymbolKey {
   const normalizedSymbol = String(symbol || "").toUpperCase().trim();
   const normalizedMarketType = String(marketType || "spot").toLowerCase().trim();
   const normalizedExchange = String(
@@ -29,7 +39,7 @@ export function symbolKey(symbol, marketType = "spot", exchange = "binance") {
 }
 
 /** Parse a composite key back into { symbol, marketType, exchange }. */
-export function parseSymbolKey(key) {
+export function parseSymbolKey(key: unknown): SymbolIdentity {
   if (!key) return { symbol: "", marketType: "spot", exchange: "binance" };
   const parts = String(key)
     .split(":")
@@ -59,6 +69,6 @@ export function parseSymbolKey(key) {
 }
 
 /** Extract just the display name (symbol) from a composite key. */
-export function displayName(key) {
+export function displayName(key: unknown): SymbolCode {
   return parseSymbolKey(key).symbol;
 }

@@ -1882,9 +1882,9 @@ rg --files src -g "*.js" -g "*.jsx"
 
 | Phase | 状态 | Commit/PR | typecheck | unit tests | build | smoke | 备注 |
 |---|---|---|---|---|---|---|---|
-| T0 | 已完成 | 未提交（当前工作区） | N/A（T1 建立） | 702/702 通过 | 通过 | basic/release 通过 | 2026-07-13；迁移前基线已冻结 |
-| T1 | 已完成 | 未提交（当前工作区） | 通过 | 703/703 通过 | 通过 | chart-types 通过 | mixed-mode 五条解析链全部验证；新增 suppression 0 |
-| T2 | 待执行 |  |  |  |  |  |  |
+| T0 | 已完成 | `45c901c` | N/A（T1 建立） | 702/702 通过 | 通过 | basic/release 通过 | 2026-07-13；迁移前基线已冻结 |
+| T1 | 已完成 | `45c901c` | 通过 | 703/703 通过 | 通过 | chart-types 通过 | mixed-mode 五条解析链全部验证；新增 suppression 0 |
+| T2 | 已完成 | 未提交（当前工作区） | 通过 | 719/719 通过 | 通过 | basic/release 通过 | 12 个生产模块迁为 TS；新增 suppression 0 |
 | T3 | 待执行 |  |  |  |  |  |  |
 | T4 | 待执行 |  |  |  |  |  |  |
 | T5 | 待执行 |  |  |  |  |  |  |
@@ -1976,6 +1976,27 @@ rg --files src -g "*.js" -g "*.jsx"
 | Chart type smoke | 通过；15 种类型、持久化和恢复均通过；failures/warnings/exceptions 为 0 |
 | 已知测试噪声 | 两个既有 Vite middleware 测试并发时会提示 HMR 端口 24678 占用；已用原 `node --test` 独立复现，不是 tsx 回归 |
 | 新增 suppression | 0 |
+
+### T2 shared、utils 和 chart-session 验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `45c901c` |
+| 生产模块 | 迁移 11 个既有 JS 文件并新增 `chartSessionTypes.ts`，合计 12 个 TS 模块 |
+| 核心类型 | `IntervalUnit`、`IntervalString`、`SymbolIdentity`、`ChartSession`、`ChartSessionTransition`、`DatasetKey`、`VisibleRangeSnapshot`、`PaneHeights` |
+| Interval 兼容 | `m` 和 `M` 保持大小写语义；非法值 fail closed；`1M` 月周期 timeline 逻辑不变 |
+| Symbol key 兼容 | Binance 继续使用两段 key；OKX/其他交易所使用三段 key；parse/build round-trip 通过 |
+| User prefs 边界 | `JSON.parse` 结果从 `unknown` 验证；损坏、`null` 或数组回退 `{}`；非法 interval 回退 `1h` |
+| Pane storage 边界 | 只读取/写入有限正数数组；storage key 不变 |
+| Visible range 边界 | 非 object JSON fail closed；复合 identity key 不变；旧 interval-only key 继续可读 |
+| 定向测试 | 40/40 通过；覆盖 utils、session transition、interval fallback 和三类 storage |
+| 完整测试 | 719/719 通过；较 T1 新增 16 个测试，无原测试丢失 |
+| Architecture / typecheck / lint | 全部通过；0 migration allowlist entries active |
+| Build | 通过；289 modules transformed |
+| Basic smoke | 通过；1501 bars、connected/live；failures/warnings/exceptions 为 0 |
+| Release smoke | 通过；chart type、export、drawing、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
+| 运行环境旁路 | 首次 release smoke 在经历批量 rename 的旧 Vite 进程上出现空白页；模块探测确认解析正常，干净重启后 basic/release 均通过；未修改业务代码规避该环境状态 |
+| 新增 `any` / TS suppression | 0 |
 
 ### Suppression ledger
 

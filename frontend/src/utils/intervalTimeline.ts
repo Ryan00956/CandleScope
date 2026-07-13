@@ -1,12 +1,34 @@
-function finiteNumber(value) {
+interface CalendarMonthInterval {
+  matched: boolean;
+  months: number | null;
+}
+
+interface UtcDateParts {
+  date: Date;
+  subMillisecond: number;
+}
+
+export interface FutureIntervalBasis {
+  calendarMonths: number | null;
+  horizon: number;
+  step: number;
+}
+
+export interface CreateFutureIntervalBasisOptions {
+  horizon?: unknown;
+  sourceInterval?: unknown;
+  sourceIntervalSeconds?: unknown;
+}
+
+function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function safeTimeMagnitude(value) {
+function safeTimeMagnitude(value: unknown): value is number {
   return finiteNumber(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER;
 }
 
-function calendarMonthInterval(value) {
+function calendarMonthInterval(value: unknown): CalendarMonthInterval {
   if (typeof value !== "string") return { matched: false, months: null };
   const normalized = value.trim();
   if (!normalized.endsWith("M")) return { matched: false, months: null };
@@ -19,7 +41,7 @@ function calendarMonthInterval(value) {
   };
 }
 
-function utcDateParts(time) {
+function utcDateParts(time: unknown): UtcDateParts | null {
   if (!safeTimeMagnitude(time)) return null;
   const milliseconds = time * 1_000;
   if (!finiteNumber(milliseconds)) return null;
@@ -32,8 +54,8 @@ function utcDateParts(time) {
   };
 }
 
-export function addUtcCalendarMonths(time, months) {
-  if (!Number.isSafeInteger(months) || months < 0) return null;
+export function addUtcCalendarMonths(time: unknown, months: unknown): number | null {
+  if (typeof months !== "number" || !Number.isSafeInteger(months) || months < 0) return null;
   const source = utcDateParts(time);
   if (!source) return null;
 
@@ -56,7 +78,7 @@ export function addUtcCalendarMonths(time, months) {
   return safeTimeMagnitude(result) ? result : null;
 }
 
-function calendarBoundaryTime(horizon, monthsPerCell, cell) {
+function calendarBoundaryTime(horizon: number, monthsPerCell: number, cell: number): number | null {
   if (!Number.isSafeInteger(monthsPerCell)
     || monthsPerCell < 1
     || !Number.isSafeInteger(cell)
@@ -69,7 +91,11 @@ function calendarBoundaryTime(horizon, monthsPerCell, cell) {
     : null;
 }
 
-function calendarFutureTime(horizon, monthsPerCell, cellDistance) {
+function calendarFutureTime(
+  horizon: number,
+  monthsPerCell: number,
+  cellDistance: unknown,
+): number | null {
   if (!finiteNumber(cellDistance) || cellDistance <= 0) return null;
   const wholeCells = Math.floor(cellDistance);
   if (!Number.isSafeInteger(wholeCells) || wholeCells < 0) return null;
@@ -84,7 +110,11 @@ function calendarFutureTime(horizon, monthsPerCell, cellDistance) {
   return safeTimeMagnitude(time) ? time : null;
 }
 
-function calendarFutureCellDistance(horizon, monthsPerCell, time) {
+function calendarFutureCellDistance(
+  horizon: number,
+  monthsPerCell: number,
+  time: unknown,
+): number | null {
   if (!safeTimeMagnitude(time) || time <= horizon) return null;
   const start = utcDateParts(horizon);
   const target = utcDateParts(time);
@@ -117,11 +147,13 @@ function calendarFutureCellDistance(horizon, monthsPerCell, time) {
   return finiteNumber(distance) && distance > 0 ? distance : null;
 }
 
-export function createFutureIntervalBasis({
-  horizon,
-  sourceInterval,
-  sourceIntervalSeconds,
-} = {}) {
+export function createFutureIntervalBasis(
+  {
+    horizon,
+    sourceInterval,
+    sourceIntervalSeconds,
+  }: CreateFutureIntervalBasisOptions = {},
+): FutureIntervalBasis | null {
   if (!safeTimeMagnitude(horizon)) return null;
   const calendarInterval = calendarMonthInterval(sourceInterval);
   const step = Number(sourceIntervalSeconds);
@@ -136,7 +168,10 @@ export function createFutureIntervalBasis({
   };
 }
 
-export function futureTimeFromIntervalDistance(basis, cellDistance) {
+export function futureTimeFromIntervalDistance(
+  basis: FutureIntervalBasis | null | undefined,
+  cellDistance: unknown,
+): number | null {
   if (!basis || !finiteNumber(cellDistance) || cellDistance <= 0) return null;
   if (basis.calendarMonths !== null) {
     return calendarFutureTime(basis.horizon, basis.calendarMonths, cellDistance);
@@ -145,7 +180,10 @@ export function futureTimeFromIntervalDistance(basis, cellDistance) {
   return safeTimeMagnitude(time) ? time : null;
 }
 
-export function futureIntervalDistanceFromTime(basis, time) {
+export function futureIntervalDistanceFromTime(
+  basis: FutureIntervalBasis | null | undefined,
+  time: number,
+): number | null {
   if (!basis) return null;
   if (basis.calendarMonths !== null) {
     return calendarFutureCellDistance(basis.horizon, basis.calendarMonths, time);

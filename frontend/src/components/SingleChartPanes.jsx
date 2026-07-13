@@ -10,6 +10,7 @@ import { applyChartPaneAppearance, buildChartPaneOptions } from "../chart-adapte
 import { buildPaneLayoutOptions, createChartInstance } from "../chart-adapter/lightweightChartSurface";
 import {
   buildIndicatorSeriesOptions,
+  createFutureTimeAxisSeries,
   createIndicatorSeries,
   createMainSeries,
   removeSeriesEntries,
@@ -33,6 +34,13 @@ import {
   buildMainSeriesStyleOptions,
   buildIndicatorBarColorMap,
 } from "../chart-adapter/mainSeriesModel";
+import {
+  canReuseFutureTimeAxisData,
+  countFutureTimeAxisPointsAfter,
+  FUTURE_TIME_AXIS_INITIAL_POINTS,
+  planFutureTimeAxis,
+  resolveFutureTimeAxisPointCount,
+} from "../chart-adapter/futureTimeAxis";
 import {
   alignIndicatorBgcolorsToTimes,
   alignIndicatorLinesToTimes,
@@ -463,6 +471,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const chartRef = useRef(null);
   const viewportControllerRef = useRef(null);
   const mainSeriesRef = useRef(null);
+  const futureTimeAxisSeriesRef = useRef(null);
+  const futureTimeAxisDataRef = useRef([]);
+  const futureTimeAxisPlanKeyRef = useRef(null);
+  const futureTimeAxisPointCountRef = useRef(FUTURE_TIME_AXIS_INITIAL_POINTS);
+  const futureTimeAxisCoverageFrameRef = useRef(null);
+  const futureTimeAxisCoveragePendingRef = useRef(false);
+  const isChartPointerActiveRef = useRef(false);
   const indicatorSeriesRef = useRef([]);
   const paneRenderStateRef = useRef(new Map());
   const sourceRowsRef = useRef([]);
@@ -536,6 +551,117 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       store,
     };
   }, []);
+  const clearFutureTimeAxis = useCallback(({ force = false, resetPointCount = false } = {}) => {
+    const series = futureTimeAxisSeriesRef.current;
+    let cleared = true;
+    try {
+      if (series && (force
+        || futureTimeAxisDataRef.current.length > 0
+        || futureTimeAxisPlanKeyRef.current)) {
+        series.setData([]);
+      }
+    } catch (error) {
+      cleared = false;
+      recordPerfEvent("chart.futureTimeAxis.renderError", {
+        message: error instanceof Error ? error.message : String(error),
+        phase: "clear",
+      });
+    } finally {
+      // Never retain an owned snapshot after Lightweight Charts may have
+      // partially mutated the carrier and thrown during setData().
+      futureTimeAxisDataRef.current = [];
+      futureTimeAxisPlanKeyRef.current = null;
+      if (resetPointCount) {
+        futureTimeAxisPointCountRef.current = FUTURE_TIME_AXIS_INITIAL_POINTS;
+      }
+    }
+    return cleared;
+  }, []);
+  const createFutureTimeAxisPlan = useCallback((
+    displayRows = displayRowsRef.current,
+    { force = false } = {},
+  ) => {
+    const axisMode = surfaceAxisModeRef.current;
+    if (!force && canReuseFutureTimeAxisData({
+      axisMode,
+      currentData: futureTimeAxisDataRef.current,
+      displayRows,
+      sourceTimeHorizon: drawingSourceTimeHorizonRef.current,
+    })) {
+      return {
+        changed: false,
+        data: null,
+        key: futureTimeAxisPlanKeyRef.current,
+      };
+    }
+    return planFutureTimeAxis({
+      axisMode,
+      currentKey: futureTimeAxisPlanKeyRef.current,
+      displayRows,
+      pointCount: futureTimeAxisPointCountRef.current,
+      sourceInterval: intervalRef.current,
+      sourceIntervalSeconds: parseIntervalSeconds(intervalRef.current),
+      sourceTimeHorizon: drawingSourceTimeHorizonRef.current,
+    });
+  }, []);
+  const commitFutureTimeAxisPlan = useCallback((plan, reason) => {
+    if (!plan?.changed) return false;
+    const series = futureTimeAxisSeriesRef.current;
+    if (!series || !Array.isArray(plan.data)) return false;
+    series.setData(plan.data);
+    futureTimeAxisDataRef.current = plan.data;
+    futureTimeAxisPlanKeyRef.current = plan.key;
+    recordPerfEvent("chart.futureTimeAxis.setData", {
+      axisMode: surfaceAxisModeRef.current,
+      points: plan.data.length,
+      reason,
+    });
+    return true;
+  }, []);
+  const scheduleFutureTimeAxisCoverage = useCallback(() => {
+    futureTimeAxisCoveragePendingRef.current = true;
+    if (isChartPointerActiveRef.current || futureTimeAxisCoverageFrameRef.current != null) return;
+    futureTimeAxisCoverageFrameRef.current = requestAnimationFrame(() => {
+      futureTimeAxisCoverageFrameRef.current = null;
+      if (isChartPointerActiveRef.current) return;
+      futureTimeAxisCoveragePendingRef.current = false;
+      const chart = chartRef.current;
+      const displayRows = displayRowsRef.current;
+      if (!chart || displayRows.length === 0) return;
+      const visibleLogicalRange = chart.timeScale?.().getVisibleLogicalRange?.();
+      const axisMode = surfaceAxisModeRef.current;
+      const availableCount = axisMode === "time"
+        ? countFutureTimeAxisPointsAfter(
+            futureTimeAxisDataRef.current,
+            drawingSourceTimeHorizonRef.current,
+          )
+        : futureTimeAxisDataRef.current.length;
+      const nextCount = resolveFutureTimeAxisPointCount({
+        allocatedCount: futureTimeAxisPointCountRef.current,
+        contentLastLogical: displayRows.length - 1,
+        currentCount: availableCount,
+        visibleLogicalRange,
+      });
+      const previousCount = futureTimeAxisPointCountRef.current;
+      if (nextCount <= availableCount && nextCount >= previousCount) return;
+
+      futureTimeAxisPointCountRef.current = nextCount;
+      const plan = createFutureTimeAxisPlan(displayRows, { force: true });
+      try {
+        isSyncingRef.current = true;
+        commitFutureTimeAxisPlan(plan, "viewport-extend");
+      } catch (error) {
+        futureTimeAxisPointCountRef.current = previousCount;
+        try { clearFutureTimeAxis({ force: true }); } catch { /* best-effort carrier cleanup */ }
+        recordPerfEvent("chart.futureTimeAxis.renderError", {
+          message: error instanceof Error ? error.message : String(error),
+          phase: "viewport-extend",
+        });
+      } finally {
+        isSyncingRef.current = false;
+      }
+    });
+  }, [clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan]);
   const [DrawingEngineHost, setDrawingEngineHost] = useState(null);
   const [isAutoScale, setIsAutoScale] = useState(true);
   const [contextMenu, setContextMenu] = useState(null);
@@ -797,11 +923,20 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       downColor,
       paneIndex: 0,
     });
+    const futureTimeAxisSeries = createFutureTimeAxisSeries(chart, { paneIndex: 0 });
     chartRef.current = chart;
     viewportControllerRef.current = createViewportController({
       chartProvider: () => chartRef.current,
+      contentLogicalRangeProvider: () => {
+        const displayLength = displayRowsRef.current.length;
+        return displayLength > 0 ? { from: 0, to: displayLength - 1 } : null;
+      },
     });
     mainSeriesRef.current = mainSeries;
+    futureTimeAxisSeriesRef.current = futureTimeAxisSeries;
+    futureTimeAxisDataRef.current = [];
+    futureTimeAxisPlanKeyRef.current = null;
+    futureTimeAxisPointCountRef.current = FUTURE_TIME_AXIS_INITIAL_POINTS;
     mainSeriesTypeRef.current = initialChartType;
     surfaceAxisModeRef.current = initialDescriptor.axisMode;
     mainSeriesReferenceRef.current = {
@@ -836,6 +971,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     };
 
     const handleVisibleLogicalRangeChange = (range) => {
+      scheduleFutureTimeAxisCoverage();
       if (!shouldPublishUserViewportRange({
         isProgrammatic: isRestoringViewportRef.current,
         isSyncing: isSyncingRef.current,
@@ -876,6 +1012,15 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       // already been cleared.
       chartRef.current = null;
       mainSeriesRef.current = null;
+      futureTimeAxisSeriesRef.current = null;
+      futureTimeAxisDataRef.current = [];
+      futureTimeAxisPlanKeyRef.current = null;
+      if (futureTimeAxisCoverageFrameRef.current != null) {
+        cancelAnimationFrame(futureTimeAxisCoverageFrameRef.current);
+        futureTimeAxisCoverageFrameRef.current = null;
+      }
+      futureTimeAxisCoveragePendingRef.current = false;
+      isChartPointerActiveRef.current = false;
       mainSeriesTypeRef.current = null;
       mainSeriesReferenceRef.current = { series: null, signature: "" };
       sourceRowsRef.current = [];
@@ -906,7 +1051,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         beforeRemove: () => drawingApiRef.current?.prepareSurfaceDispose?.(),
       });
     };
-  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishDrawingProjectionStore, publishViewportRangeChange, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishDrawingProjectionStore, publishViewportRangeChange, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -914,6 +1059,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const markUserInteracted = () => {
       userInteractedRef.current = true;
       viewportControllerRef.current?.markUserInteracting();
+    };
+    const markPointerActive = () => {
+      isChartPointerActiveRef.current = true;
+      markUserInteracted();
     };
     const saveNativePaneHeights = () => {
       const chart = chartRef.current;
@@ -924,17 +1073,30 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       saved[paneHeightStorageKey] = heights;
       savePaneHeights(saved);
     };
+    const releasePointer = () => {
+      if (!isChartPointerActiveRef.current) return;
+      isChartPointerActiveRef.current = false;
+      saveNativePaneHeights();
+      if (futureTimeAxisCoveragePendingRef.current) scheduleFutureTimeAxisCoverage();
+    };
     wrapper.addEventListener("wheel", markUserInteracted, { passive: true });
-    wrapper.addEventListener("mousedown", markUserInteracted);
-    wrapper.addEventListener("touchstart", markUserInteracted, { passive: true });
-    wrapper.addEventListener("mouseup", saveNativePaneHeights);
+    wrapper.addEventListener("mousedown", markPointerActive);
+    wrapper.addEventListener("touchstart", markPointerActive, { passive: true });
+    window.addEventListener("mouseup", releasePointer);
+    window.addEventListener("touchend", releasePointer, { passive: true });
+    window.addEventListener("touchcancel", releasePointer, { passive: true });
+    window.addEventListener("blur", releasePointer);
     return () => {
       wrapper.removeEventListener("wheel", markUserInteracted);
-      wrapper.removeEventListener("mousedown", markUserInteracted);
-      wrapper.removeEventListener("touchstart", markUserInteracted);
-      wrapper.removeEventListener("mouseup", saveNativePaneHeights);
+      wrapper.removeEventListener("mousedown", markPointerActive);
+      wrapper.removeEventListener("touchstart", markPointerActive);
+      window.removeEventListener("mouseup", releasePointer);
+      window.removeEventListener("touchend", releasePointer);
+      window.removeEventListener("touchcancel", releasePointer);
+      window.removeEventListener("blur", releasePointer);
+      isChartPointerActiveRef.current = false;
     };
-  }, [activeSubPanes.length, paneHeightStorageKey]);
+  }, [activeSubPanes.length, paneHeightStorageKey, scheduleFutureTimeAxisCoverage]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -955,6 +1117,10 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const frameId = requestAnimationFrame(() => {
       if (chartRef.current !== chart) return;
       try {
+        const futureTimeAxisPoints = resyncSeriesTimeScaleIndexes(
+          futureTimeAxisSeriesRef.current,
+          futureTimeAxisDataRef.current,
+        );
         const currentMainSeries = mainSeriesRef.current;
         const currentMainData = renderedMainSeriesDataRef.current;
         const replayMainData = resolveIntervalTransitionReplayData({
@@ -978,6 +1144,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           recordPerfEvent("chart.candleSeries.setData", {
             paneId: "main",
             points: mainPoints,
+            reason: "interval-transition-reindex",
+          });
+        }
+        if (futureTimeAxisPoints > 0) {
+          recordPerfEvent("chart.futureTimeAxis.setData", {
+            paneId: "main",
+            points: futureTimeAxisPoints,
             reason: "interval-transition-reindex",
           });
         }
@@ -1157,6 +1330,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   }, [contextMenu]);
 
   useEffect(() => {
+    if (futureTimeAxisCoverageFrameRef.current != null) {
+      cancelAnimationFrame(futureTimeAxisCoverageFrameRef.current);
+      futureTimeAxisCoverageFrameRef.current = null;
+    }
+    futureTimeAxisCoveragePendingRef.current = false;
+    clearFutureTimeAxis({ force: true, resetPointCount: true });
     clearAuxiliaryChartState({
       chart: chartRef.current,
       indicatorSeriesRef,
@@ -1177,7 +1356,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     projectionGenerationRef.current += 1;
     projectionRenderContextRef.current = null;
     viewportControllerRef.current?.resetSession();
-  }, [datasetKey, publishDrawingProjectionStore]);
+  }, [clearFutureTimeAxis, datasetKey, publishDrawingProjectionStore]);
 
   useEffect(() => {
     const series = mainSeriesRef.current;
@@ -1230,6 +1409,11 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         ? projectionPatch
         : { ...projectionPatch, fromOutputIndex: 0 };
       const displayRows = projectionStore.displaySnapshot();
+      const axisMode = getChartTypeDescriptor(activeChartType).axisMode;
+      const futureTimeAxisPlan = createFutureTimeAxisPlan(displayRows);
+      const futureTimeAxisCanCommit = axisMode !== "derived-ordinal"
+        || !futureTimeAxisPlan.changed
+        || clearFutureTimeAxis({ force: true });
       const renderedPatch = buildMainSeriesProjectionPatch({
         displayRows,
         previousSeriesData: renderedMainSeriesDataRef.current,
@@ -1269,6 +1453,17 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           paneId: "main",
           phase: "sync",
         });
+      }
+      if (projectionRendered && futureTimeAxisCanCommit) {
+        try {
+          commitFutureTimeAxisPlan(futureTimeAxisPlan, "projection-sync");
+        } catch (error) {
+          try { clearFutureTimeAxis({ force: true }); } catch { /* best-effort carrier cleanup */ }
+          recordPerfEvent("chart.futureTimeAxis.renderError", {
+            message: error instanceof Error ? error.message : String(error),
+            phase: "projection-sync",
+          });
+        }
       }
       syncDisplayDataRefsFromProjection({
         store: projectionStore,
@@ -1322,12 +1517,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         const previousDisplayRows = projectionStore.displaySnapshot();
         const projectionPatch = projectionStore.applySourceDelta(delta, rows);
         const displayRows = projectionStore.displaySnapshot();
+        const axisMode = getChartTypeDescriptor(mainSeriesTypeRef.current).axisMode;
+        const futureTimeAxisPlan = createFutureTimeAxisPlan(displayRows);
+        const futureTimeAxisCanCommit = axisMode !== "derived-ordinal"
+          || !futureTimeAxisPlan.changed
+          || clearFutureTimeAxis({ force: true });
         const renderedPatch = buildMainSeriesProjectionPatch({
           displayRows,
           previousSeriesData: renderedMainSeriesDataRef.current,
           projectionPatch,
           renderOptions: currentRenderOptions,
         });
+        let projectionRendered = false;
         try {
           const renderResult = renderMainSeriesProjectionPatch({
             previousDisplayRows,
@@ -1345,6 +1546,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           });
           renderedMainSeriesDataRef.current = renderResult.nextData;
           renderedMainSeriesGenerationRef.current += 1;
+          projectionRendered = true;
         } catch (error) {
           renderedMainSeriesDataRef.current = null;
           renderedMainSeriesGenerationRef.current += 1;
@@ -1353,6 +1555,17 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
             paneId: "main",
             phase: "delta",
           });
+        }
+        if (projectionRendered && futureTimeAxisCanCommit) {
+          try {
+            commitFutureTimeAxisPlan(futureTimeAxisPlan, "projection-delta");
+          } catch (error) {
+            try { clearFutureTimeAxis({ force: true }); } catch { /* best-effort carrier cleanup */ }
+            recordPerfEvent("chart.futureTimeAxis.renderError", {
+              message: error instanceof Error ? error.message : String(error),
+              phase: "projection-delta",
+            });
+          }
         }
         syncSourceDataRefsFromStore({
           store: currentStore,
@@ -1383,7 +1596,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         isSyncingRef.current = false;
       }
     });
-  }, [chartAdapter, mainSeriesRenderContext, projectionSettings, publishDrawingProjectionStore, seriesReady, seriesStore, updateMainSeriesReference]);
+  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, mainSeriesRenderContext, projectionSettings, publishDrawingProjectionStore, seriesReady, seriesStore, updateMainSeriesReference]);
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);

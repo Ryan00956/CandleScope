@@ -18,11 +18,13 @@ function safeCall(fn, fallback = null) {
 export class ViewportController {
   constructor({
     chartProvider,
+    contentLogicalRangeProvider = null,
     unlockDelayMs = DEFAULT_UNLOCK_DELAY_MS,
     setTimer = (callback, delayMs) => setTimeout(callback, delayMs),
     clearTimer = (timer) => clearTimeout(timer),
   } = {}) {
     this.chartProvider = chartProvider || (() => null);
+    this.contentLogicalRangeProvider = contentLogicalRangeProvider;
     this.unlockDelayMs = unlockDelayMs;
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
@@ -85,12 +87,32 @@ export class ViewportController {
     return this.applyIntent(intent.name, intent.priority, intent.apply);
   }
 
+  fitSemanticContent(timeScale) {
+    const contentRange = safeCall(() => this.contentLogicalRangeProvider?.(), null);
+    if (Number.isFinite(contentRange?.from)
+      && Number.isFinite(contentRange?.to)
+      && contentRange.from <= contentRange.to
+      && typeof timeScale?.setVisibleLogicalRange === "function") {
+      const configuredRightOffset = safeCall(
+        () => Number(timeScale.options?.().rightOffset),
+        0,
+      );
+      const rightOffset = Number.isFinite(configuredRightOffset)
+        ? Math.max(0, configuredRightOffset)
+        : 0;
+      const to = Math.max(contentRange.from + 1, contentRange.to + rightOffset);
+      timeScale.setVisibleLogicalRange({ from: contentRange.from, to });
+      return true;
+    }
+    timeScale?.fitContent?.();
+    return true;
+  }
+
   fitOnce(sessionKey = "default") {
     if (this.fitSessionKeys.has(sessionKey)) return false;
     this.fitSessionKeys.add(sessionKey);
     return this.applyIntent("fitOnce", PRIORITY.fit, (timeScale) => {
-      timeScale.fitContent?.();
-      return true;
+      return this.fitSemanticContent(timeScale);
     });
   }
 
@@ -136,7 +158,7 @@ export class ViewportController {
         timeScale.scrollToPosition?.(plan.scrollPosition, false);
       }
       if (!restored) {
-        timeScale.fitContent?.();
+        this.fitSemanticContent(timeScale);
       }
       this.fitSessionKeys.add(sessionKey);
       return true;
@@ -152,8 +174,7 @@ export class ViewportController {
         timeScale.setVisibleLogicalRange?.(logicalRange);
         return true;
       }
-      timeScale.fitContent?.();
-      return true;
+      return this.fitSemanticContent(timeScale);
     });
   }
 

@@ -7,7 +7,7 @@ function createChart() {
   const calls = [];
   const timeScale = {
     range: { from: 10, to: 20 },
-    options: () => ({ barSpacing: 6 }),
+    options: () => ({ barSpacing: 6, rightOffset: 5 }),
     applyOptions: (options) => calls.push(["applyOptions", options]),
     fitContent: () => calls.push(["fitContent"]),
     setVisibleRange: (range) => calls.push(["setVisibleRange", range]),
@@ -32,6 +32,30 @@ test("fitOnce is idempotent per session", () => {
   assert.equal(controller.fitOnce("a"), false);
   assert.equal(controller.fitOnce("b"), true);
   assert.deepEqual(calls, [["fitContent"], ["fitContent"]]);
+});
+
+test("semantic fit excludes render-only future time-axis points", () => {
+  const { chart, calls } = createChart();
+  const controller = new ViewportController({
+    chartProvider: () => chart,
+    contentLogicalRangeProvider: () => ({ from: 0, to: 99 }),
+  });
+
+  assert.equal(controller.fitOnce("semantic"), true);
+  assert.deepEqual(calls, [
+    ["setVisibleLogicalRange", { from: 0, to: 104 }],
+  ]);
+});
+
+test("semantic fit falls back when the content provider has no usable range", () => {
+  const { chart, calls } = createChart();
+  const controller = new ViewportController({
+    chartProvider: () => chart,
+    contentLogicalRangeProvider: () => null,
+  });
+
+  assert.equal(controller.fitOnce("fallback"), true);
+  assert.deepEqual(calls, [["fitContent"]]);
 });
 
 test("interaction lock queues the highest priority intent", () => {

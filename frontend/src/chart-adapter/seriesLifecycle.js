@@ -59,6 +59,16 @@ export function createMainSeries(chart, {
   return chart.addSeries(seriesType, options, paneIndex);
 }
 
+export function createFutureTimeAxisSeries(chart, { paneIndex = 0 } = {}) {
+  return chart.addSeries(chartSeriesTypes.line, {
+    crosshairMarkerVisible: false,
+    lastValueVisible: false,
+    priceLineVisible: false,
+    title: "",
+    visible: false,
+  }, paneIndex);
+}
+
 export function replaceMainSeries(chart, previousSeries, {
   chartType,
   data = [],

@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createFutureTimeAxisSeries,
   INDICATOR_SERIES_INCREMENTAL_GRACE_MS,
   removeSeriesEntries,
   replaceMainSeries,
   resyncSeriesTimeScaleIndexes,
   shouldPreferIndicatorSetData,
 } from "../seriesLifecycle.js";
+import { chartSeriesTypes } from "../lightweightChartSurface.js";
 
 function createHarness({ failNextSetData = false } = {}) {
   const operations = [];
@@ -44,6 +46,28 @@ function createHarness({ failNextSetData = false } = {}) {
   };
   return { chart, nextSeries, operations, previousData, previousSeries };
 }
+
+test("future time-axis carrier is an invisible line series in the main pane", () => {
+  const calls = [];
+  const carrier = {};
+  const chart = {
+    addSeries: (...args) => {
+      calls.push(args);
+      return carrier;
+    },
+  };
+
+  assert.equal(createFutureTimeAxisSeries(chart), carrier);
+  assert.strictEqual(calls[0][0], chartSeriesTypes.line);
+  assert.deepEqual(calls[0][1], {
+    crosshairMarkerVisible: false,
+    lastValueVisible: false,
+    priceLineVisible: false,
+    title: "",
+    visible: false,
+  });
+  assert.equal(calls[0][2], 0);
+});
 
 test("replaceMainSeries clears duplicate main-series time points before registering the replacement", () => {
   const harness = createHarness();

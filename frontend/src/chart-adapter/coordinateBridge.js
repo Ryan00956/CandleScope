@@ -2,6 +2,11 @@ import {
   createDrawingLineageIndex,
   isDrawingLineageIndexForSeries,
 } from "../features/chart-representation/drawingLineageIndex.js";
+import {
+  createFutureIntervalBasis,
+  futureIntervalDistanceFromTime,
+  futureTimeFromIntervalDistance,
+} from "../utils/intervalTimeline.js";
 
 const PROJECTION_METADATA_KEY = "chartProjection";
 const ordinalSeriesIndexCache = new WeakMap();
@@ -433,118 +438,6 @@ function isSafeTimeMagnitude(value) {
   return isFiniteNumber(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER;
 }
 
-function calendarMonthInterval(value) {
-  if (typeof value !== "string") return { matched: false, months: null };
-  const normalized = value.trim();
-  if (!normalized.endsWith("M")) return { matched: false, months: null };
-  const match = /^([1-9]\d*)M$/.exec(normalized);
-  if (!match) return { matched: true, months: null };
-  const months = Number(match[1]);
-  return {
-    matched: true,
-    months: Number.isSafeInteger(months) ? months : null,
-  };
-}
-
-function utcDateParts(time) {
-  if (!isSafeTimeMagnitude(time)) return null;
-  const milliseconds = time * 1_000;
-  if (!isFiniteNumber(milliseconds)) return null;
-  const date = new Date(milliseconds);
-  const clippedMilliseconds = date.getTime();
-  if (!isFiniteNumber(clippedMilliseconds)) return null;
-  return {
-    date,
-    subMillisecond: milliseconds - clippedMilliseconds,
-  };
-}
-
-function addUtcCalendarMonths(time, months) {
-  if (!Number.isSafeInteger(months) || months < 0) return null;
-  const source = utcDateParts(time);
-  if (!source) return null;
-
-  const day = source.date.getUTCDate();
-  const target = new Date(source.date.getTime());
-  target.setUTCDate(1);
-  target.setUTCFullYear(
-    target.getUTCFullYear(),
-    target.getUTCMonth() + months,
-    1,
-  );
-  if (!isFiniteNumber(target.getTime())) return null;
-
-  const lastDay = new Date(target.getTime());
-  lastDay.setUTCMonth(lastDay.getUTCMonth() + 1, 0);
-  if (!isFiniteNumber(lastDay.getTime())) return null;
-  target.setUTCDate(Math.min(day, lastDay.getUTCDate()));
-
-  const result = (target.getTime() + source.subMillisecond) / 1_000;
-  return isSafeTimeMagnitude(result) ? result : null;
-}
-
-function calendarBoundaryTime(horizon, monthsPerCell, cell) {
-  if (!Number.isSafeInteger(monthsPerCell)
-    || monthsPerCell < 1
-    || !Number.isSafeInteger(cell)
-    || cell < 0) {
-    return null;
-  }
-  const monthOffset = monthsPerCell * cell;
-  return Number.isSafeInteger(monthOffset)
-    ? addUtcCalendarMonths(horizon, monthOffset)
-    : null;
-}
-
-function calendarFutureTime(horizon, monthsPerCell, cellDistance) {
-  if (!isFiniteNumber(cellDistance) || cellDistance <= 0) return null;
-  const wholeCells = Math.floor(cellDistance);
-  if (!Number.isSafeInteger(wholeCells) || wholeCells < 0) return null;
-  const lower = calendarBoundaryTime(horizon, monthsPerCell, wholeCells);
-  if (lower === null) return null;
-
-  const fraction = cellDistance - wholeCells;
-  if (fraction === 0) return lower;
-  const upper = calendarBoundaryTime(horizon, monthsPerCell, wholeCells + 1);
-  if (upper === null || upper <= lower) return null;
-  const time = lower + (upper - lower) * fraction;
-  return isSafeTimeMagnitude(time) ? time : null;
-}
-
-function calendarFutureCellDistance(horizon, monthsPerCell, time) {
-  if (!isSafeTimeMagnitude(time) || time <= horizon) return null;
-  const start = utcDateParts(horizon);
-  const target = utcDateParts(time);
-  if (!start || !target) return null;
-
-  const monthDelta = (target.date.getUTCFullYear() - start.date.getUTCFullYear()) * 12
-    + target.date.getUTCMonth() - start.date.getUTCMonth();
-  if (!Number.isSafeInteger(monthDelta)) return null;
-  let wholeCells = Math.max(0, Math.floor(monthDelta / monthsPerCell));
-  let lower = calendarBoundaryTime(horizon, monthsPerCell, wholeCells);
-  if (lower === null) return null;
-
-  // Month-end clamping can put the calendar estimate one cell on either side.
-  if (lower > time && wholeCells > 0) {
-    wholeCells -= 1;
-    lower = calendarBoundaryTime(horizon, monthsPerCell, wholeCells);
-    if (lower === null) return null;
-  }
-  let upper = calendarBoundaryTime(horizon, monthsPerCell, wholeCells + 1);
-  if (upper === null) return null;
-  if (upper <= time) {
-    wholeCells += 1;
-    lower = upper;
-    upper = calendarBoundaryTime(horizon, monthsPerCell, wholeCells + 1);
-    if (upper === null) return null;
-  }
-  if (lower > time || upper <= lower || time >= upper) return null;
-
-  const fraction = (time - lower) / (upper - lower);
-  const distance = wholeCells + fraction;
-  return isFiniteNumber(distance) && distance > 0 ? distance : null;
-}
-
 function ordinalCellWidth(timeScale, tailX) {
   let logical = null;
   try {
@@ -587,15 +480,12 @@ function ordinalCellWidth(timeScale, tailX) {
 function ordinalFutureCoordinateBasis(timeScale, seriesData, context, ordinalIndex = null) {
   const index = ordinalIndex || getOrdinalSeriesIndex(seriesData, context);
   const tailRow = index?.ordinalRows?.[index.ordinalRows.length - 1] || null;
-  const horizon = context?.sourceTimeHorizon;
-  const step = context?.sourceIntervalSeconds;
-  const calendarInterval = calendarMonthInterval(context?.sourceInterval);
-  if (!tailRow
-    || !isSafeTimeMagnitude(horizon)
-    || (calendarInterval.matched && calendarInterval.months === null)
-    || (!calendarInterval.matched && (!isFiniteNumber(step) || step <= 0))) {
-    return null;
-  }
+  const intervalBasis = createFutureIntervalBasis({
+    horizon: context?.sourceTimeHorizon,
+    sourceInterval: context?.sourceInterval,
+    sourceIntervalSeconds: context?.sourceIntervalSeconds,
+  });
+  if (!tailRow || !intervalBasis) return null;
 
   let tailX = null;
   try {
@@ -607,11 +497,9 @@ function ordinalFutureCoordinateBasis(timeScale, seriesData, context, ordinalInd
   const cellWidth = ordinalCellWidth(timeScale, tailX);
   return isFiniteNumber(cellWidth) && cellWidth > 0
     ? {
-        calendarMonths: calendarInterval.months,
+        ...intervalBasis,
         cellWidth,
-        horizon,
         index,
-        step,
         tailRow,
         tailX,
       }
@@ -655,22 +543,6 @@ function cachedOrdinalFutureCoordinateBasis(
   return basis;
 }
 
-function futureTimeFromCellDistance(basis, cellDistance) {
-  if (basis.calendarMonths !== null) {
-    return calendarFutureTime(basis.horizon, basis.calendarMonths, cellDistance);
-  }
-  const time = basis.horizon + cellDistance * basis.step;
-  return isSafeTimeMagnitude(time) ? time : null;
-}
-
-function futureCellDistanceFromTime(basis, time) {
-  if (basis.calendarMonths !== null) {
-    return calendarFutureCellDistance(basis.horizon, basis.calendarMonths, time);
-  }
-  const distance = (time - basis.horizon) / basis.step;
-  return isFiniteNumber(distance) && distance > 0 ? distance : null;
-}
-
 /**
  * Capture a persistence-safe drawing anchor directly from a chart coordinate.
  * Existing ordinal cells retain complete source lineage; right-side whitespace
@@ -712,7 +584,7 @@ export function drawingAnchorFromCoordinate(chart, series, x, context = null) {
     if (!basis) return null;
     const delta = x - basis.tailX;
     const bars = delta / basis.cellWidth;
-    const time = futureTimeFromCellDistance(basis, bars);
+    const time = futureTimeFromIntervalDistance(basis, bars);
     return isFiniteNumber(delta)
       && delta > 0
       && isFiniteNumber(bars)
@@ -1062,7 +934,7 @@ export function captureSourceLineageFreehandStrokeBatch(
       const basis = getFutureBasis();
       if (!basis) return null;
       const cellDistance = (x - basis.tailX) / basis.cellWidth;
-      const time = futureTimeFromCellDistance(basis, cellDistance);
+      const time = futureTimeFromIntervalDistance(basis, cellDistance);
       if (!isFiniteNumber(cellDistance)
         || cellDistance <= 0
         || time === null
@@ -1359,7 +1231,7 @@ export function dataPointToCoordinate(chart, series, dataPoint, context) {
       const basis = cachedOrdinalFutureCoordinateBasis(timeScale, data, coordinateContext);
       if (!basis) return null;
       const delta = anchorTime - basis.horizon;
-      const bars = futureCellDistanceFromTime(basis, anchorTime);
+      const bars = futureIntervalDistanceFromTime(basis, anchorTime);
       if (bars === null) return null;
       const x = basis.tailX + bars * basis.cellWidth;
       return isFiniteNumber(delta)

@@ -56,8 +56,7 @@ export interface IndicatorColorPoint {
   value?: number;
 }
 
-export interface IndicatorAnnotationPoint {
-  time: number;
+interface IndicatorAnnotationPointFields {
   value?: number;
   color?: string;
   text?: string;
@@ -66,6 +65,10 @@ export interface IndicatorAnnotationPoint {
   size?: string;
   endTime?: number;
 }
+
+export type IndicatorAnnotationPoint =
+  | (IndicatorAnnotationPointFields & { time: number })
+  | (IndicatorAnnotationPointFields & { value: number; time?: number });
 
 export interface IndicatorLine {
   data: IndicatorValuePoint[];
@@ -171,7 +174,18 @@ export interface NormalizedIndicatorPayload {
   signals: IndicatorSignal[];
 }
 
-export type IndicatorAuxiliaryKey = Exclude<keyof NormalizedIndicatorPayload, "lines">;
+export type IndicatorAuxiliaryItem =
+  | IndicatorMarker
+  | IndicatorFill
+  | IndicatorHLine
+  | IndicatorBgColor
+  | IndicatorBarColor
+  | IndicatorSignal;
+
+export type IndicatorAuxiliaryKey = Exclude<
+  keyof NormalizedIndicatorPayload,
+  "lines"
+>;
 
 export interface IndicatorErrorDetail {
   message: string;
@@ -198,7 +212,8 @@ export interface IndicatorUnifiedSeries {
   zIndex?: number;
 }
 
-export type IndicatorAnnotationType = "marker" | "hline" | "bgcolor" | "barcolor" | "signal";
+export type IndicatorAnnotationType =
+  "marker" | "hline" | "bgcolor" | "barcolor" | "signal";
 
 export interface IndicatorUnifiedAnnotation {
   id: string;
@@ -379,7 +394,10 @@ export interface CustomIndicatorRecord {
   updatedAt?: number;
 }
 
-export interface CustomIndicatorSaveInput extends Omit<CustomIndicatorRecord, "id" | "schemaVersion"> {
+export interface CustomIndicatorSaveInput extends Omit<
+  CustomIndicatorRecord,
+  "id" | "schemaVersion"
+> {
   id?: string;
   schemaVersion?: number;
 }
@@ -474,21 +492,24 @@ interface IndicatorWsBase {
   clientId?: string;
 }
 
-export interface IndicatorSnapshotMessage extends IndicatorWsBase, IndicatorPayloadEnvelope {
+export interface IndicatorSnapshotMessage
+  extends IndicatorWsBase, IndicatorPayloadEnvelope {
   type: "indicator.snapshot";
   clientId: string;
   indicatorId?: string;
   barTime?: number;
 }
 
-export interface IndicatorPatchMessage extends IndicatorWsBase, IndicatorPayloadEnvelope {
+export interface IndicatorPatchMessage
+  extends IndicatorWsBase, IndicatorPayloadEnvelope {
   type: "indicator.patch";
   clientId: string;
   range: IndicatorRange;
   reason?: string;
 }
 
-export interface IndicatorReplaceRangeMessage extends IndicatorWsBase, IndicatorPayloadEnvelope {
+export interface IndicatorReplaceRangeMessage
+  extends IndicatorWsBase, IndicatorPayloadEnvelope {
   type: "indicator.replace_range";
   clientId: string;
   range: IndicatorRange;
@@ -564,18 +585,32 @@ export interface IndicatorOutputState {
 export type IndicatorOutputAction =
   | { type: "reset-context" }
   | { type: "hydrate-cache"; entries: IndicatorCacheResult[] }
-  | { type: "snapshot"; indicatorId: string; normalized: NormalizedIndicatorPayload; schema?: IndicatorParameterSchema[] }
-  | { type: "patch"; indicatorId: string; normalized: NormalizedIndicatorPayload }
-  | { type: "replace-range"; indicatorId: string; normalized: NormalizedIndicatorPayload; range: IndicatorRange }
+  | {
+      type: "snapshot";
+      indicatorId: string;
+      normalized: NormalizedIndicatorPayload;
+      schema?: IndicatorParameterSchema[];
+    }
+  | {
+      type: "patch";
+      indicatorId: string;
+      normalized: NormalizedIndicatorPayload;
+    }
+  | {
+      type: "replace-range";
+      indicatorId: string;
+      normalized: NormalizedIndicatorPayload;
+      range: IndicatorRange;
+    }
   | { type: "remove-indicator"; indicatorId: string }
   | {
-    type: "compute-results";
-    processedIds?: string[];
-    markers?: IndicatorMarker[];
-    fills?: IndicatorFill[];
-    hlines?: IndicatorHLine[];
-    bgcolors?: IndicatorBgColor[];
-    barcolors?: IndicatorBarColor[];
-    signals?: IndicatorSignal[];
-    paramSchemas?: Record<string, IndicatorParameterSchema[]>;
-  };
+      type: "compute-results";
+      processedIds?: string[];
+      markers?: IndicatorMarker[];
+      fills?: IndicatorFill[];
+      hlines?: IndicatorHLine[];
+      bgcolors?: IndicatorBgColor[];
+      barcolors?: IndicatorBarColor[];
+      signals?: IndicatorSignal[];
+      paramSchemas?: Record<string, IndicatorParameterSchema[]>;
+    };

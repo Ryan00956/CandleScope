@@ -1,6 +1,21 @@
-export function buildIndicatorPaneData(indicators = []) {
-  const overlayLines = [];
-  const paneMap = new Map();
+import type { IndicatorDefinition, IndicatorLine } from "./indicatorTypes.js";
+
+export interface IndicatorSubPane {
+  id: string;
+  label: string;
+  lines: IndicatorLine[];
+}
+
+export interface IndicatorPaneData {
+  mainOverlayLines: IndicatorLine[];
+  subPanes: IndicatorSubPane[];
+}
+
+export function buildIndicatorPaneData(
+  indicators: IndicatorDefinition[] = [],
+): IndicatorPaneData {
+  const overlayLines: IndicatorLine[] = [];
+  const paneMap = new Map<string, IndicatorSubPane>();
 
   for (const indicator of indicators) {
     if (!indicator.visible || !indicator.lines || indicator.lines.length === 0) continue;
@@ -22,7 +37,7 @@ export function buildIndicatorPaneData(indicators = []) {
           lines: [],
         });
       }
-      paneMap.get(paneId).lines.push(lineWithId);
+      paneMap.get(paneId)?.lines.push(lineWithId);
     }
   }
 

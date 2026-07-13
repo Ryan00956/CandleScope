@@ -5,6 +5,23 @@ import {
   normalizeParamSchema,
   stringSignature,
 } from "./indicatorPayloadRuntime.js";
+import type { KlineBar } from "../market-data/marketDataTypes.js";
+import type {
+  IndicatorDefinition,
+  IndicatorParameterSchema,
+  IndicatorPayloadEnvelope,
+} from "./indicatorTypes.js";
+
+interface IndicatorComputeColors {
+  candleUpColor?: string;
+  candleDownColor?: string;
+}
+
+interface IndicatorComputeResultItem {
+  id: string;
+  result: IndicatorPayloadEnvelope;
+  visible: boolean;
+}
 
 // Indicator compute is viewport-window scoped; older history is filled by range requests.
 export const INDICATOR_HISTORY_LIMIT = 2_000;
@@ -12,11 +29,11 @@ export const INDICATOR_DATA_DEBOUNCE_MS = 150;
 export const PROVISIONAL_INDICATOR_DELAY_MS = 300;
 export const SERIES_READY_COMPUTE_DELAY_MS = 50;
 
-export function buildCandleColorKey(candleUpColor, candleDownColor) {
+export function buildCandleColorKey(candleUpColor?: string, candleDownColor?: string): string {
   return `${candleUpColor}|${candleDownColor}`;
 }
 
-export function buildIndicatorMutationSignature(indicators = []) {
+export function buildIndicatorMutationSignature(indicators: IndicatorDefinition[] = []): string {
   return indicators
     .map((indicator) => (
       `${indicator.id}:${stringSignature(indicator.script || "")}:${JSON.stringify(indicator.params || {})}`
@@ -24,13 +41,19 @@ export function buildIndicatorMutationSignature(indicators = []) {
     .join("|");
 }
 
-export function limitIndicatorHistory(chartData = [], limit = INDICATOR_HISTORY_LIMIT) {
+export function limitIndicatorHistory(
+  chartData: KlineBar[] = [],
+  limit = INDICATOR_HISTORY_LIMIT,
+): KlineBar[] {
   if (!Array.isArray(chartData)) return [];
   const maxBars = Math.max(1, Math.floor(Number(limit) || INDICATOR_HISTORY_LIMIT));
   return chartData.length > maxBars ? chartData.slice(-maxBars) : chartData;
 }
 
-export function buildIndicatorOhlcv(chartData = [], { limit = INDICATOR_HISTORY_LIMIT } = {}) {
+export function buildIndicatorOhlcv(
+  chartData: KlineBar[] = [],
+  { limit = INDICATOR_HISTORY_LIMIT }: { limit?: number } = {},
+) {
   return limitIndicatorHistory(chartData, limit).map((bar) => ({
     time: bar.time,
     open: bar.open,
@@ -41,7 +64,10 @@ export function buildIndicatorOhlcv(chartData = [], { limit = INDICATOR_HISTORY_
   }));
 }
 
-export function buildIndicatorComputeParams(indicator, { candleUpColor, candleDownColor } = {}) {
+export function buildIndicatorComputeParams(
+  indicator: IndicatorDefinition,
+  { candleUpColor, candleDownColor }: IndicatorComputeColors = {},
+) {
   const params = indicator.params || {};
   if (
     (indicator.id !== "vol" && indicator.engineName !== "VOL")
@@ -57,26 +83,34 @@ export function buildIndicatorComputeParams(indicator, { candleUpColor, candleDo
   };
 }
 
-export function hasVolumeIndicator(indicators = []) {
+export function hasVolumeIndicator(indicators: IndicatorDefinition[] = []): boolean {
   return indicators.some((indicator) => indicator.id === "vol" || indicator.engineName === "VOL");
 }
 
-export function resolveIndicatorComputeDelay({ chartDataMeta, force }) {
+export function resolveIndicatorComputeDelay({
+  chartDataMeta,
+  force,
+}: {
+  chartDataMeta?: { status?: unknown } | null;
+  force?: boolean;
+}): number {
   if (isProvisionalChartData(chartDataMeta)) return PROVISIONAL_INDICATOR_DELAY_MS;
   return force ? 0 : INDICATOR_DATA_DEBOUNCE_MS;
 }
 
-export function shouldDeferIndicatorCompute(chartDataMeta) {
+export function shouldDeferIndicatorCompute(chartDataMeta?: { status?: unknown } | null): boolean {
   return isProvisionalChartData(chartDataMeta);
 }
 
-export function resolveSeriesReadyComputeDelay(chartDataMeta) {
+export function resolveSeriesReadyComputeDelay(chartDataMeta?: { status?: unknown } | null): number {
   return isProvisionalChartData(chartDataMeta)
     ? PROVISIONAL_INDICATOR_DELAY_MS
     : SERIES_READY_COMPUTE_DELAY_MS;
 }
 
-export function collectIndicatorComputeResults(results) {
+export function collectIndicatorComputeResults(
+  results: PromiseSettledResult<IndicatorComputeResultItem>[],
+) {
   const processedResults = [];
   const allMarkers = [];
   const allFills = [];
@@ -84,7 +118,7 @@ export function collectIndicatorComputeResults(results) {
   const allBgcolors = [];
   const allBarcolors = [];
   const allSignals = [];
-  const newParamSchemas = {};
+  const newParamSchemas: Record<string, IndicatorParameterSchema[]> = {};
 
   for (const item of results) {
     if (item.status !== "fulfilled") continue;

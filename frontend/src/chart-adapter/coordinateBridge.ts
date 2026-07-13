@@ -121,10 +121,10 @@ export interface CoordinateDataPoint extends Record<string, unknown> {
 
 interface InterpolatedCoordinateAdapter {
   isReady?(): boolean;
-  coordinateToLogical?(coordinate: number): number | null;
-  logicalToCoordinate?(logical: number): number | null;
+  coordinateToLogical?(coordinate: number): number | null | undefined;
+  logicalToCoordinate?(logical: number): number | null | undefined;
   getSeriesData?(): DisplayRow[];
-  timeToCoordinate?(time: number): number | null;
+  timeToCoordinate?(time: number): number | null | undefined;
 }
 
 interface TimeScaleBridge {

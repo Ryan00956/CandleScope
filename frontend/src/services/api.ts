@@ -343,7 +343,7 @@ interface CacheAccessEvent extends UnknownRecord {
   action?: string;
   source?: string;
   owner?: string;
-  weight?: number | null;
+  weight?: unknown;
   detail?: unknown;
   key?: string;
   occurredAtMs?: number | null;

@@ -5,7 +5,7 @@ import type {
   WatchlistGroup,
 } from "../watchlist/watchlistTypes.js";
 
-export type FullCacheStatus = "idle" | "warm" | "stale" | "partial" | "live" | "error";
+export type FullCacheStatus = "idle" | "loading" | "warm" | "stale" | "partial" | "live" | "error";
 
 export interface FullCacheCoverage {
   firstTime: number | null;

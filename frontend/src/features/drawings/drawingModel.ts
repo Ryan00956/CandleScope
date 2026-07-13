@@ -154,7 +154,7 @@ function perpendicularDist(point: ScreenPoint, start: ScreenPoint, end: ScreenPo
   return Math.hypot(point.x - (start.x + t * dx), point.y - (start.y + t * dy));
 }
 
-export function decimateScreenPoints(points: ScreenPoint[], epsilon: number): ScreenPoint[] {
+export function decimateScreenPoints<T extends ScreenPoint>(points: T[], epsilon: number): T[] {
   if (points.length <= 2) return points;
   let maxDistance = 0;
   let maxIndex = 0;

@@ -3,7 +3,7 @@ import { snapshotWatchlistFullCacheDiagnostics } from "../watchlist-full-cache/w
 import { snapshotCacheRegistry } from "./cacheRegistry.js";
 import { collectBrowserRuntimePressure } from "./browserPressure.js";
 import { snapshotFrontendCacheAccessEvents } from "./cacheAccessRuntime.js";
-import type { CacheDiagnosticsEntry } from "./cacheGcTypes.js";
+import type { CacheDiagnostics, CacheDiagnosticsEntry } from "./cacheGcTypes.js";
 
 const KLINE_ROW_ESTIMATED_BYTES = 200;
 const INDICATOR_POINT_ESTIMATED_BYTES = 80;
@@ -102,7 +102,7 @@ function normalizeIndicatorSnapshot(snapshotValue: unknown = {}) {
 
 export function collectFrontendCacheDiagnostics({
   chartDataCache = null,
-}: { chartDataCache?: SnapshotProvider | unknown } = {}) {
+}: { chartDataCache?: SnapshotProvider | unknown } = {}): CacheDiagnostics {
   const chart = normalizeChartSnapshot(
     typeof chartDataCache === "function" ? chartDataCache() : chartDataCache,
   );
@@ -139,12 +139,12 @@ export function collectFrontendCacheDiagnostics({
 
 export async function collectFrontendCacheDiagnosticsAsync({
   chartDataCache = null,
-}: { chartDataCache?: SnapshotProvider | unknown } = {}) {
+}: { chartDataCache?: SnapshotProvider | unknown } = {}): Promise<CacheDiagnostics> {
   const diagnostics = collectFrontendCacheDiagnostics({ chartDataCache });
   return {
     ...diagnostics,
     runtimePressure: await collectBrowserRuntimePressure({
-      estimatedBytes: diagnostics.estimatedBytes,
+      estimatedBytes: Number(diagnostics.estimatedBytes || 0),
     }),
   };
 }

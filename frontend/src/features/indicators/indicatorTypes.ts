@@ -14,11 +14,15 @@ export interface IndicatorDefinition {
   securityMode?: IndicatorSecurityMode | string;
   visible?: boolean;
   lines?: IndicatorLine[];
+  error?: string | null;
   description?: string;
   category?: string;
   paneTarget?: string;
   paramSchema?: IndicatorParameterSchema[];
   isPreset?: boolean;
+  is_builtin?: boolean;
+  kind?: IndicatorKind | string;
+  renderHints?: Record<string, unknown>;
 }
 
 interface IndicatorParameterBase {
@@ -262,6 +266,7 @@ export interface IndicatorRevision {
   token?: string;
   dirtyRange?: IndicatorRange;
   historyInvalid?: true;
+  closed_through?: number;
 }
 
 export interface IndicatorRangeSegment extends IndicatorRange {
@@ -564,7 +569,10 @@ export interface IndicatorRecomputedMessage extends IndicatorWsBase {
   clientId: string;
   range: IndicatorRange;
   dirtyRange?: IndicatorRange;
+  dirty_range?: IndicatorRange;
   dataRevision?: IndicatorRevision;
+  data_revision?: IndicatorRevision;
+  revision?: IndicatorRevision;
   timestampMs?: number;
 }
 
@@ -573,9 +581,18 @@ export interface IndicatorSubscribedMessage extends IndicatorWsBase {
   clientId: string;
   indicatorId?: string;
   resumeStatus?: string;
+  resume_status?: string;
   resumeReason?: string | null;
+  resume_reason?: string | null;
   dataRevision?: IndicatorRevision;
+  data_revision?: IndicatorRevision;
+  revision?: IndicatorRevision;
   interval?: string;
+  range?: IndicatorRange;
+  resumeRange?: IndicatorRange;
+  resume_range?: IndicatorRange;
+  historyRange?: IndicatorRange;
+  history_range?: IndicatorRange;
 }
 
 export interface IndicatorValuesMessage extends IndicatorWsBase {

@@ -1,1 +1,1 @@
-export { default } from "../features/drawings/DrawingEngineHost.jsx";
+export { default } from "../features/drawings/DrawingEngineHost.js";

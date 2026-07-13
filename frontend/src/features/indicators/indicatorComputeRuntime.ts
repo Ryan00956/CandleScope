@@ -19,7 +19,7 @@ interface IndicatorComputeColors {
 
 interface IndicatorComputeResultItem {
   id: string;
-  result: IndicatorPayloadEnvelope;
+  result: Partial<IndicatorPayloadEnvelope>;
   visible: boolean;
 }
 
@@ -56,10 +56,10 @@ export function buildIndicatorOhlcv(
 ) {
   return limitIndicatorHistory(chartData, limit).map((bar) => ({
     time: bar.time,
-    open: bar.open,
-    high: bar.high,
-    low: bar.low,
-    close: bar.close,
+    open: Number(bar.open ?? 0),
+    high: Number(bar.high ?? 0),
+    low: Number(bar.low ?? 0),
+    close: Number(bar.close ?? 0),
     volume: bar.volume || 0,
   }));
 }

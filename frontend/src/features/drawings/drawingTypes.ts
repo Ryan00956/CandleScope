@@ -106,7 +106,7 @@ export interface OrdinalLineageAnchor {
 /** Read-only compatibility fallback for drawings saved before canonical anchors. */
 export interface LegacyLogicalAnchor {
   logical: number;
-  time?: number;
+  time?: number | null;
   sourceOrdinal?: never;
   sourceProjection?: never;
   sourceProjectionConfig?: never;

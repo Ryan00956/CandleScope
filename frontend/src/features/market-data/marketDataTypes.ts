@@ -4,6 +4,11 @@ import type {
   MarketType,
   SymbolCode,
 } from "../../utils/symbolKey.js";
+import type { SeriesDataFeed } from "./feed/seriesDataFeed.js";
+import type {
+  ChartSessionKey,
+  ChartSessionTransition,
+} from "../chart-session/chartSessionTypes.js";
 
 declare const epochSecondsBrand: unique symbol;
 declare const epochMillisecondsBrand: unique symbol;
@@ -75,6 +80,47 @@ export interface SeriesWindowIndexRef {
   segmentIndex: number;
   rowIndex: number;
 }
+
+export interface MarketCacheIdentity {
+  marketType: MarketType;
+  exchange: ExchangeId;
+}
+
+export type HasMarketCache = (
+  symbol: SymbolCode,
+  interval: IntervalString,
+  identity: MarketCacheIdentity,
+) => boolean;
+
+export interface UseChartBackgroundPrefetchOptions
+  extends Pick<MarketSeries, "exchange" | "marketType" | "symbol"> {
+  trackedIntervals: readonly IntervalString[];
+  hasCache: HasMarketCache;
+  seriesDataFeed: SeriesDataFeed;
+  enabled?: boolean;
+}
+
+export interface UseSessionTransitionResetOptions {
+  clearCache(): void;
+  interval: IntervalString;
+  markChartDataTransition(
+    symbol: SymbolCode,
+    interval: IntervalString,
+    reason: string,
+  ): void;
+  realtimePriceRef?: { current: number | null } | null;
+  sessionKey: ChartSessionKey;
+  setCrosshairData(value: null): void;
+  setError(value: null): void;
+  setHasMoreLeft(value: boolean): void;
+  setLastPrice(value: null): void;
+  setLoading(value: boolean): void;
+  symbol: SymbolCode;
+}
+
+export type SessionTransitionReset = (
+  transition: ChartSessionTransition | null | undefined,
+) => void;
 
 export function toEpochSeconds(value: unknown): EpochSeconds | null {
   const parsed = Number(value);

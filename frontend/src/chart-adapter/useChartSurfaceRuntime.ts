@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef } from "react";
 import { callChartSurface, EMPTY_CHART_SURFACE_VIEW } from "./chartSurfaceContract";
+import type { ExportSnapshot } from "../features/export/exportTypes.js";
 
 export interface ChartSurfaceHandle {
   getVisibleRange(): unknown;
@@ -7,7 +8,7 @@ export interface ChartSurfaceHandle {
   setDrawingsHidden(hidden: boolean): void;
   prepareExport(): void;
   updateSelectedDrawingStyle(patch: Record<string, unknown>): void;
-  getExportSnapshot(): unknown;
+  getExportSnapshot(): ExportSnapshot | null;
 }
 
 export function useChartSurfaceRuntime() {
@@ -60,3 +61,6 @@ export function useChartSurfaceRuntime() {
     status: {},
   };
 }
+
+export type ChartSurfaceRuntime = ReturnType<typeof useChartSurfaceRuntime>;
+export type ChartSurfaceActions = ChartSurfaceRuntime["actions"];

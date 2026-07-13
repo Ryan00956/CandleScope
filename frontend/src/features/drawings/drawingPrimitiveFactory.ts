@@ -76,7 +76,7 @@ interface TwoPointFactoryOptions {
   dataPoints: DrawingDataPoint[];
   color: string;
   lineWidth: number;
-  fibLevels?: FibonacciLevel[];
+  fibLevels?: FibonacciLevel[] | null;
   fibInverted?: boolean;
 }
 

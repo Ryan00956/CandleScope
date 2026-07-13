@@ -211,7 +211,7 @@ export class SeriesDataFeed {
   }
 
   subscribeBars(
-    series: MarketSeries,
+    series: Pick<MarketSeries, "exchange" | "marketType" | "symbol">,
     options: KlineStreamOptions = {},
   ): KlineStreamController {
     const api = this.resolveSyncApi();

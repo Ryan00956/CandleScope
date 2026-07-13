@@ -53,6 +53,10 @@ export type FetchPlan =
 export interface KlineFetchResult extends Record<string, unknown> {
   data?: KlineBar[];
   has_more?: boolean;
+  has_tail_gap?: boolean;
+  source?: string;
+  start_ms?: unknown;
+  end_ms?: unknown;
   truncated?: boolean;
   next_end_ms?: EpochMilliseconds | number | null;
 }
@@ -248,6 +252,8 @@ export interface KlineStreamSocket {
 
 export interface KlineStreamStatusMessage extends Record<string, unknown> {
   type: "stream_status";
+  interval?: IntervalString;
+  status?: string;
 }
 
 export interface KlineStreamControlMessage extends Record<string, unknown> {

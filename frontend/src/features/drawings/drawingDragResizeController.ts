@@ -62,6 +62,8 @@ interface TextDrag extends DragBase {
 
 interface PositionPriceDrag extends DragBase {
   type: "position-tp" | "position-sl";
+  origTpPrice?: number | null;
+  origSlPrice?: number | null;
 }
 
 interface PositionMoveDrag extends DragBase {

@@ -32,6 +32,7 @@ import {
 } from "./freehandStrokeModel.js";
 import { parseDrawingAnchor } from "./drawingContracts.js";
 import type { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
+import type { DrawingDragDescriptor } from "./drawingDragResizeController.js";
 import type { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
 import type { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitive.js";
 import type { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
@@ -130,7 +131,7 @@ interface TwoPointRefs {
 interface TwoPointStyleRefs {
   penColorRef: MutableRef<string>;
   penSizeRef: MutableRef<number>;
-  fibLevelsRef: MutableRef<FibonacciLevel[]>;
+  fibLevelsRef: MutableRef<FibonacciLevel[] | null>;
   fibInvertedRef: MutableRef<boolean>;
 }
 
@@ -148,20 +149,12 @@ interface CommitTwoPointDrawingOptions extends TwoPointRefs, TwoPointStyleRefs {
   drawingSnapEnabledRef: MutableRef<boolean>;
 }
 
-interface AxisLineCreationDrag {
-  id: string;
-  type: "axis-line";
-  zone: "center";
-  startMouse: ScreenPoint;
-  origDataPoint: DrawingDataPoint;
-}
-
 interface BeginAxisLineDrawingOptions extends TwoPointRefs {
   tool: AxisLineToolId;
   pos: ScreenPoint;
   e: DrawingPointerEvent;
   primitivesRef: MutableRef<DrawingPrimitive[]>;
-  draggingRef: MutableRef<AxisLineCreationDrag | null>;
+  draggingRef: MutableRef<DrawingDragDescriptor | null>;
   attachPrim: AttachPrimitive;
   selectPrimitive: SelectPrimitive;
   removePreview: () => void;

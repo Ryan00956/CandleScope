@@ -4,13 +4,13 @@ import type { DrawingToolId } from "./drawingTypes.js";
 
 export { DRAWING_ENGINE_TOOL_IDS };
 
-type DrawingEngineHostModule = typeof import("./DrawingEngineHost.jsx");
+type DrawingEngineHostModule = typeof import("./DrawingEngineHost.js");
 
 let drawingEngineHostPromise: Promise<DrawingEngineHostModule> | null = null;
 
 export function loadDrawingEngineHost(): Promise<DrawingEngineHostModule> {
   if (!drawingEngineHostPromise) {
-    drawingEngineHostPromise = import("./DrawingEngineHost.jsx");
+    drawingEngineHostPromise = import("./DrawingEngineHost.js");
   }
   return drawingEngineHostPromise;
 }

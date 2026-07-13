@@ -19,8 +19,8 @@ interface FrontendAutoGcAuditEntry {
   removedEstimatedBytes: number;
 }
 
-type AutoGcPolicyPatch = Partial<AutoGcPolicy & GcPolicy>;
-type ChartTrimFunction = (victims: GcVictim[]) => CacheTrimOwnerResult;
+export type AutoGcPolicyPatch = Partial<AutoGcPolicy & GcPolicy>;
+export type ChartTrimFunction = (victims: GcVictim[]) => CacheTrimOwnerResult;
 
 const DEFAULT_AUTO_GC_POLICY: AutoGcPolicy = {
   enabled: true,

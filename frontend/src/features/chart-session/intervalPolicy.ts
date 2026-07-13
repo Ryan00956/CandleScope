@@ -1,6 +1,7 @@
 import { parseIntervalSeconds } from "../../utils/intervals.js";
 import type {
   CustomIntervalRecord,
+  ExchangeCatalog,
   ExchangeConfig,
   ExchangeId,
   IntervalString,
@@ -26,7 +27,7 @@ export function getFallbackNativeInterval(
 export interface ResolveSupportedIntervalOptions {
   exchange: ExchangeId;
   interval: IntervalString;
-  exchangeCatalog: unknown;
+  exchangeCatalog: ExchangeCatalog | null;
   savedCustomIntervals: readonly IntervalString[];
   nativeIntervals: readonly NativeInterval[];
   isNativeIntervalSupported: NativeIntervalSupport;

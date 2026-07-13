@@ -134,12 +134,14 @@ test("WebSocket parser returns a typed patch message", () => {
     clientId: "ma-1",
     seq: 8,
     range: { start: 100, end: 200 },
+    dataRevision: { serverEpoch: "boot-1", correctionRevision: 3 },
     lines: [{ outputName: "ma", data: [{ time: 100, value: 10 }] }],
   }));
 
   assert.equal(parsed.ok, true);
   assert.equal(parsed.message.type, "indicator.patch");
   assert.equal(parsed.message.seq, 8);
+  assert.equal(parsed.message.dataRevision.correctionRevision, "3");
   assert.deepEqual(parsed.message.range, { start: 100, end: 200 });
 });
 

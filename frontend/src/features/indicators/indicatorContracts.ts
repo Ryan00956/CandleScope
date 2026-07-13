@@ -610,15 +610,31 @@ export function parseIndicatorRevision(
       "expected true when present",
     );
   }
+  const correctionRevisionValue =
+    record.correctionRevision ?? record.correction_revision;
+  let correctionRevision: string | undefined;
+  if (typeof correctionRevisionValue === "string") {
+    correctionRevision = correctionRevisionValue;
+  } else if (
+    typeof correctionRevisionValue === "number" &&
+    Number.isFinite(correctionRevisionValue)
+  ) {
+    correctionRevision = String(correctionRevisionValue);
+  } else if (
+    correctionRevisionValue !== undefined &&
+    correctionRevisionValue !== null
+  ) {
+    throw new IndicatorPayloadError(
+      `${path}.correctionRevision`,
+      "expected a string or finite number",
+    );
+  }
   return {
     serverEpoch: optionalIndicatorString(
       record.serverEpoch ?? record.server_epoch,
       `${path}.serverEpoch`,
     ),
-    correctionRevision: optionalIndicatorString(
-      record.correctionRevision ?? record.correction_revision,
-      `${path}.correctionRevision`,
-    ),
+    correctionRevision,
     closedThrough: optionalIndicatorFiniteNumber(
       record.closedThrough ?? record.closed_through,
       `${path}.closedThrough`,

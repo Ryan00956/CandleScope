@@ -1888,8 +1888,8 @@ rg --files src -g "*.js" -g "*.jsx"
 | T3 | 已完成 | `7915a98` | 通过 | 720/720 通过 | 通过 | basic/release 通过 | 15 个 market-data TS 模块；局部 adapter cast 已在 T4 删除 |
 | T4 | 已完成 | `cbf6108` | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 4 个 transport owner 迁为 TS，新增 raw payload parsers；未迁 endpoint 保持 `unknown` 并登记 ledger |
 | T5 | 已完成 | `cb28b4e` | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 21 个 chart-representation owner 迁为 TS，新增统一投影 contract；专项测试 200/200 通过 |
-| T6 | 已完成 | 未提交（当前工作区） | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 24 个 chart-adapter owner 迁为 TS，新增统一 adapter contract；adapter 专项 146/146、drawing coordinate 44/44 通过 |
-| T7 | 待执行 |  |  |  |  |  |  |
+| T6 | 已完成 | `306c90c` | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 24 个 chart-adapter owner 迁为 TS，新增统一 adapter contract；adapter 专项 146/146、drawing coordinate 44/44 通过 |
+| T7 | 已完成 | `5edce5d`…`a2eaef5` | 通过 | 740/740 通过 | 通过 | basic/release 通过 | 8 个 owner 切片独立提交；26 个既有 owner 迁为 TS，新增 8 个类型模块；聚合专项 58/58 通过 |
 | T8 | 待执行 |  |  |  |  |  |  |
 | T9 | 待执行 |  |  |  |  |  |  |
 | T10 | 待执行 |  |  |  |  |  |  |
@@ -2072,6 +2072,26 @@ rg --files src -g "*.js" -g "*.jsx"
 | Release smoke | 15 种 chart type 与持久化恢复通过；PNG/JPEG/WebP 三组导出、drawing check、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
 | Import 解析 | mixed-mode 继续使用源码 `.js` specifier；JS tests、tsx、architecture resolver 与 Vite 均解析到 TS owner；未引入 `.ts` URL specifier 或兼容 facade |
 | 新增 `any` / TS directive suppression | 0；无 `@ts-ignore`、`@ts-nocheck`、`@ts-expect-error` 或 `as unknown as` |
+
+### T7 支撑 feature kernels 验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `306c90c` |
+| 切片提交 | cache-gc `5edce5d`；runtime performance `04186e3`；watchlist `9383a8d`；watchlist full cache `64ef504`；export `6f3ef55`；settings pure `c54f4a1`；symbol search `ca5efd4`；alerts `a2eaef5` |
+| 生产模块 | 计划中的 26 个既有 JS owner 全部迁为 TS，原 JS owner 残留 0；新增 `cacheGcTypes.ts`、`performanceTypes.ts`、`watchlistTypes.ts`、`watchlistFullCacheTypes.ts`、`exportTypes.ts`、`settingsTypes.ts`、`symbolSearchTypes.ts`、`alertTypes.ts`，合计 34 个 T7 TS 模块 |
+| 核心 contract | 建立 `CacheDiagnostics`、`GcPlan` / `GcAction`、`PerformanceMarkName` / `WindowBudgetResult`、`WatchlistItem` / `WatchlistGroup` / `SubscriptionTier`、`WarmCacheRow`、`ExportOptions`、`SettingsCategory`、`SymbolSearchItem`、`AlertRule` / 递归 `AlertExpression` 类型 |
+| Storage 边界 | auto-GC audit、watchlist groups/collapsed ids、export prefs 和 symbol favorites 的 `JSON.parse` 结果均先按 `unknown` 验证；损坏或错误 shape fail closed；既有 storage key、默认值和用户数据不变 |
+| Watchlist / cache 语义 | full tier intervals、consumer id、warm rows、repair 标记、preload 优先级、socket targets、GC victim 排序与阈值不变；`cacheTrim` 只依赖各 cache owner 的公开 contract |
+| Export / settings 语义 | export scope/format/scale/quality/metadata 和 DOM element 边界显式验证；JPEG transparent fallback、文件名、像素预算与视觉输出不变；settings category/action/view model 由纯 registry owner 管理，React runtime 保持兼容 re-export |
+| Alerts 边界 | CRUD、启停、删除、history 和 evaluate response 在 endpoint 处从 `unknown` 验证；payload 与后端 camelCase contract 对齐；AND/OR/NOT 表达式 parser 校验 comparator/right shape、NOT 单子节点、最大 32 层并拒绝循环引用 |
+| 定向测试 | 17 个聚合测试文件 58/58 通过；新增 storage 损坏 shape、settings registry、symbol filter、alerts 合法/非法递归树与 API response contract 覆盖 |
+| 完整门禁 | architecture、typecheck、lint 全部通过；740/740 tests 通过；Vite 7.3.1 build 通过，293 modules transformed |
+| Export smoke | export 切片后在干净 Vite `15177` 实例验证 PNG/JPEG/WebP，三组预览和下载均通过；failures/warnings/exceptions 为 0 |
+| Basic smoke | 干净 Vite `15178` 实例通过；1500 bars、connected/live；failures/warnings/exceptions 为 0 |
+| Release smoke | 15 种 chart type 与持久化恢复通过；PNG/JPEG/WebP 三组导出、drawing check、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
+| 独立回滚 | 8 个 owner 切片各自独立提交；未改 GC 阈值、watchlist 订阅语义、storage key、export 视觉结果或 React UI owner |
+| 新增 `any` / TS directive suppression | 0；T7 路径无 `@ts-ignore`、`@ts-nocheck`、`@ts-expect-error`、`as unknown as` 或显式 `any` |
 
 ### Suppression ledger
 

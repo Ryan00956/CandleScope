@@ -227,21 +227,73 @@ export interface BackfillCompletedOptions {
 }
 
 export interface KlineStreamController {
+  readyState(): number | undefined;
+  isOpen(): boolean;
+  send(payload: string): boolean;
+  sendPing(): boolean;
   updateIntervals(intervals: readonly IntervalString[]): void;
   close(): void;
 }
 
+export interface KlineStreamSocket {
+  readonly OPEN?: number;
+  readonly readyState: number;
+  onopen: ((event: Event) => unknown) | null;
+  onmessage: ((event: MessageEvent<string>) => unknown) | null;
+  onerror: ((event: Event) => unknown) | null;
+  onclose: ((event: CloseEvent) => unknown) | null;
+  send(payload: string): void;
+  close(): void;
+}
+
+export interface KlineStreamStatusMessage extends Record<string, unknown> {
+  type: "stream_status";
+}
+
+export interface KlineStreamControlMessage extends Record<string, unknown> {
+  type: "subscribed" | "connected" | "warning" | "error";
+}
+
+export interface KlineStreamBackfillMessage extends BackfillCompletedMessage, Record<string, unknown> {
+  type: "backfill_completed";
+}
+
+export interface KlineStreamDataMessage extends Record<string, unknown> {
+  type: "kline";
+  interval: IntervalString;
+  data: KlineBar;
+}
+
+export interface KlineStreamTickEvent {
+  interval: IntervalString;
+  tick: KlineBar;
+  message: KlineStreamDataMessage;
+}
+
 export interface KlineStreamOptions extends Record<string, unknown> {
-  intervals?: IntervalString[];
-  socketFactory?: (url: string) => WebSocket;
-  onOpen?: (...args: unknown[]) => void;
-  onStreamStatus?: (...args: unknown[]) => void;
-  onControlMessage?: (...args: unknown[]) => void;
-  onBackfillCompleted?: (...args: unknown[]) => boolean;
-  onKline?: (...args: unknown[]) => void;
-  onError?: (...args: unknown[]) => void;
-  onClose?: (...args: unknown[]) => void;
-  onParseError?: (...args: unknown[]) => void;
+  intervals?: readonly IntervalString[];
+  socketFactory?: (url: string) => KlineStreamSocket;
+  onOpen?: (controller: KlineStreamController) => void;
+  onStreamStatus?: (
+    message: KlineStreamStatusMessage,
+    controller: KlineStreamController,
+  ) => void;
+  onControlMessage?: (
+    message: KlineStreamControlMessage,
+    controller: KlineStreamController,
+  ) => void;
+  onBackfillCompleted?: (
+    message: KlineStreamBackfillMessage,
+    controller: KlineStreamController,
+  ) => boolean;
+  onKline?: (event: KlineStreamTickEvent, controller: KlineStreamController) => void;
+  onError?: (event: Event, controller: KlineStreamController) => void;
+  onClose?: (event: CloseEvent, controller: KlineStreamController) => void;
+  onParseError?: (
+    error: unknown,
+    event: MessageEvent<string>,
+    controller: KlineStreamController,
+  ) => void;
 }
 
 export interface RangeEventDetail {

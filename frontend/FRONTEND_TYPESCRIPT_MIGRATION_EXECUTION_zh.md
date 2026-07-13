@@ -1885,8 +1885,8 @@ rg --files src -g "*.js" -g "*.jsx"
 | T0 | 已完成 | `45c901c` | N/A（T1 建立） | 702/702 通过 | 通过 | basic/release 通过 | 2026-07-13；迁移前基线已冻结 |
 | T1 | 已完成 | `45c901c` | 通过 | 703/703 通过 | 通过 | chart-types 通过 | mixed-mode 五条解析链全部验证；新增 suppression 0 |
 | T2 | 已完成 | `741b5d1` | 通过 | 719/719 通过 | 通过 | basic/release 通过 | 12 个生产模块迁为 TS；新增 suppression 0 |
-| T3 | 已完成 | 未提交（当前工作区） | 通过 | 720/720 通过 | 通过 | basic/release 通过 | 15 个 market-data TS 模块；1 个 T4 删除的局部 adapter cast |
-| T4 | 待执行 |  |  |  |  |  |  |
+| T3 | 已完成 | `7915a98` | 通过 | 720/720 通过 | 通过 | basic/release 通过 | 15 个 market-data TS 模块；局部 adapter cast 已在 T4 删除 |
+| T4 | 已完成 | 未提交（当前工作区） | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 4 个 transport owner 迁为 TS，新增 raw payload parsers；未迁 endpoint 保持 `unknown` 并登记 ledger |
 | T5 | 待执行 |  |  |  |  |  |  |
 | T6 | 待执行 |  |  |  |  |  |  |
 | T7 | 待执行 |  |  |  |  |  |  |
@@ -2017,13 +2017,32 @@ rg --files src -g "*.js" -g "*.jsx"
 | Basic smoke | 通过；1500 bars、connected/live；failures/warnings/exceptions 为 0 |
 | Release smoke | 通过；chart type、export、drawing、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
 | 验证工具附带修复 | architecture JSX 文本检查跳过无法承载 JSX 的 `.ts`，避免泛型误报；export matrix 已独立验证预览和下载字节后，将被替换预览的 `blob:` URL 晚到 `ERR_FILE_NOT_FOUND` 归类为取消事件，真实 API、页面异常和导出失败仍会使 smoke 失败 |
-| 临时逃生口 | `SeriesDataFeed` 对仍属 T4 的 JS `KlineStreamSubscription` 使用 1 个最小 constructor adapter cast；已登记 ledger，T4 迁移 owner 后删除 |
+| 临时逃生口 | `SeriesDataFeed` 对当时仍属 T4 的 JS `KlineStreamSubscription` 使用过 1 个最小 constructor adapter cast；已在 T4 owner 迁移后删除 |
+
+### T4 HTTP、K 线 WebSocket 与 transport 边界验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `7915a98` |
+| 生产模块 | `apiConfig.js`、`api.js`、`feed/klineApi.js`、`feed/klineStreamSubscription.js` 迁为 TS；新增 `apiPayloadParsers.ts`，合计 5 个 transport TS 模块 |
+| HTTP 边界 | 低层 `request()` 固定返回 `Promise<unknown>`；`ApiError` 保留 status/detail/url；AbortError 不包装；request method、headers、body、signal 显式类型化 |
+| REST parser | K 线 history/before/range/latest、exchange list/capabilities、subscription list/detail/update/remove/sync 在 endpoint 边界校验；K 线校验 data、秒级 time、有限 OHLCV、boolean/meta 字段 |
+| WS parser | `JSON.parse` 结果先视为 `unknown`；通过 `stream_status`、control、backfill、kline 判别联合分发；未知 type、缺字段、错误 time unit 和非法 JSON 只进入诊断回调，不触发图表更新；`pong`、订阅同步顺序和 close 行为不变 |
+| T3 逃生口 | 删除 `SeriesDataFeed` 的 `KlineStreamSubscription as unknown as constructor`；直接实例化 TS owner，`T3-CAST-01` 关闭 |
+| 定向测试 | 21/21 通过；覆盖 REST payload、ApiError、AbortSignal/AbortError、非法 JSON、exchange/subscription parser、WS 无效消息和合法 tick |
+| 完整门禁 | architecture、typecheck、lint 全部通过；727/727 tests 通过；Vite 7.3.1 build 通过，292 modules transformed |
+| Basic smoke | 干净 Vite `15174` 实例通过；1500 bars、connected/live；failures/warnings/exceptions 为 0 |
+| Release smoke | chart type、export、drawing、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
+| 冒烟调用说明 | 当前 npm 会把 `npm run smoke -- --url ...` 中的 `--url` 当作 npm 参数吞掉；验证改为直接执行 `npx tsx scripts/smoke.mjs --url http://127.0.0.1:15174/ ...`，未修改业务行为 |
+| Import 解析 | mixed-mode 继续使用源码 `.js` specifier；architecture resolver、全量测试和 Vite build 均确认 TS owner 可解析；未引入 `.ts` URL specifier 或 facade |
+| 新增 `any` / TS directive suppression | 0 |
 
 ### Suppression ledger
 
 | ID | 文件 | suppression/cast | 原因 | 保护测试 | 最迟删除 Phase | 状态 |
 |---|---|---|---|---|---|---|
-| T3-CAST-01 | `src/features/market-data/feed/seriesDataFeed.ts` | `KlineStreamSubscription as unknown as constructor` | 尚未迁移的 JS constructor 把默认空 intervals 推断为 `never[]`；adapter 只包住 T4 transport owner 边界 | `seriesDataFeed.test.js` subscribeBars；release smoke | T4 | 活跃 |
+| T3-CAST-01 | `src/features/market-data/feed/seriesDataFeed.ts` | `KlineStreamSubscription as unknown as constructor` | 尚未迁移的 JS constructor 把默认空 intervals 推断为 `never[]`；adapter 只包住 T4 transport owner 边界 | `seriesDataFeed.test.js` subscribeBars；release smoke | T4 | 已删除（T4） |
+| T4-UNKNOWN-01 | `src/services/api.ts` | 尚未迁 owner 的 symbol/settings/cache/maintenance/price/resolve endpoint 返回 `Promise<unknown>` | T4 只验证已有 TS consumer 依赖的 endpoint；提前声明业务 shape 会制造错误安全感 | 完整测试；basic/release smoke | T10 | 活跃 |
 
 ### 行为问题旁路记录
 

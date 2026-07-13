@@ -36,6 +36,10 @@ class FakeSocket {
   emit(payload) {
     this.onmessage?.({ data: JSON.stringify(payload) });
   }
+
+  emitRaw(data) {
+    this.onmessage?.({ data });
+  }
 }
 
 test("dedupes exact range requests", async () => {
@@ -456,8 +460,59 @@ test("subscribeBars syncs socket subscriptions and dispatches kline messages", (
     intervals: ["1h"],
   });
 
-  socket.emit({ type: "kline", interval: "1m", data: { time: 10, close: 100 } });
-  assert.deepEqual(ticks, [{ interval: "1m", tick: { time: 10, close: 100 } }]);
+  const tick = {
+    time: 10,
+    open: 95,
+    high: 105,
+    low: 90,
+    close: 100,
+    volume: 12,
+    is_closed: false,
+  };
+  socket.emit({ type: "kline", interval: "1m", data: tick });
+  assert.deepEqual(ticks, [{ interval: "1m", tick }]);
   subscription.close();
   assert.equal(socket.closed, true);
+});
+
+test("subscribeBars diagnoses invalid WebSocket payloads without updating chart data", () => {
+  let socket = null;
+  const ticks = [];
+  const diagnostics = [];
+  const feed = new SeriesDataFeed({
+    api: {
+      getMultiStreamUrl: () => "ws://example.test/klines",
+    },
+  });
+
+  feed.subscribeBars(
+    { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" },
+    {
+      socketFactory: (url) => {
+        socket = new FakeSocket(url);
+        return socket;
+      },
+      onKline: (event) => ticks.push(event),
+      onParseError: (error) => diagnostics.push(error),
+    },
+  );
+
+  socket.emitRaw("{invalid");
+  socket.emit({ type: "mystery", data: {} });
+  socket.emit({ type: "kline", interval: "1m" });
+  socket.emit({
+    type: "kline",
+    interval: "1m",
+    data: { time: 1_700_000_000_000, open: 1, high: 2, low: 0, close: 1, volume: 1 },
+  });
+  socket.emit({ type: "unsubscribed", intervals: ["1m"] });
+  socket.emit({
+    type: "kline",
+    interval: "1m",
+    data: { time: 10, open: 1, high: 2, low: 0, close: 1, volume: 1 },
+  });
+
+  assert.equal(diagnostics.length, 4);
+  assert.equal(ticks.length, 1);
+  assert.equal(ticks[0].tick.time, 10);
 });

@@ -129,10 +129,6 @@ function defaultIsActiveSeries(
 const noopMergeCacheData: MergeCacheData = () => undefined;
 const noopCommitChartData: CommitChartData = () => undefined;
 const noopPatchCacheTick: PatchCacheTick = () => undefined;
-const TypedKlineStreamSubscription = KlineStreamSubscription as unknown as new (
-  config: KlineStreamOptions & { api: KlineApi; series: MarketSeries },
-) => KlineStreamController;
-
 export class SeriesDataFeed {
   inflight: InflightRegistry;
   epochBySeries: Map<SeriesKey, number>;
@@ -222,7 +218,7 @@ export class SeriesDataFeed {
     if (typeof api.getMultiStreamUrl !== "function") {
       throw new Error("SeriesDataFeed API adapter must provide getMultiStreamUrl for subscribeBars");
     }
-    return new TypedKlineStreamSubscription({
+    return new KlineStreamSubscription({
       api,
       series,
       ...options,

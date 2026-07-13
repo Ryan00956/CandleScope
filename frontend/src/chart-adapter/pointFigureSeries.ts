@@ -1,37 +1,61 @@
 import { customSeriesDefaultOptions } from "lightweight-charts";
+import type {
+  CustomSeriesWhitespaceData,
+  ICustomSeriesPaneRenderer,
+  ICustomSeriesPaneView,
+  PaneRendererCustomData,
+  PriceToCoordinateConverter,
+} from "lightweight-charts";
+import type {
+  ChartTime,
+  PointFigureCustomData,
+  PointFigureMetadata,
+  PointFigureSeriesOptions,
+} from "./chartAdapterTypes.js";
 
 const DEFAULT_UP_COLOR = "#22c55e";
 const DEFAULT_DOWN_COLOR = "#ef4444";
 const COLUMN_WIDTH_RATIO = 0.68;
 const MAX_RENDERED_BOXES_PER_COLUMN = 10_000;
 
-function finiteNumber(value) {
+function finiteNumber(value: unknown): number | null {
   if (value == null || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function positiveNumber(value) {
+function positiveNumber(value: unknown): number | null {
   const number = finiteNumber(value);
   return number != null && number > 0 ? number : null;
 }
 
-function columnMetadata(data) {
-  return data?.customValues?.pointAndFigure || null;
+function isPointFigureMetadata(value: unknown): value is PointFigureMetadata {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function columnDirection(data) {
+function columnMetadata(
+  data: PointFigureCustomData | CustomSeriesWhitespaceData<ChartTime> | null | undefined,
+): PointFigureMetadata | null {
+  const metadata = data?.customValues?.pointAndFigure;
+  return isPointFigureMetadata(metadata) ? metadata : null;
+}
+
+function columnDirection(
+  data: PointFigureCustomData | CustomSeriesWhitespaceData<ChartTime> | null | undefined,
+): "x" | "o" | null {
   const direction = columnMetadata(data)?.direction;
   if (direction === "x" || direction === "o") return direction;
-  const open = finiteNumber(data?.open);
-  const close = finiteNumber(data?.close);
+  const open = finiteNumber(data && "open" in data ? data.open : null);
+  const close = finiteNumber(data && "close" in data ? data.close : null);
   if (open == null || close == null) return null;
   return close >= open ? "x" : "o";
 }
 
-function columnBoxSpec(data) {
-  const low = finiteNumber(data?.low);
-  const high = finiteNumber(data?.high);
+function columnBoxSpec(
+  data: PointFigureCustomData | CustomSeriesWhitespaceData<ChartTime> | null | undefined,
+): { boxSize: number; count: number; high: number; low: number } | null {
+  const low = finiteNumber(data && "low" in data ? data.low : null);
+  const high = finiteNumber(data && "high" in data ? data.high : null);
   const boxSize = positiveNumber(columnMetadata(data)?.boxSize);
   if (low == null || high == null || boxSize == null || high < low) return null;
   const count = Math.floor(((high - low) / boxSize) + 1e-9) + 1;
@@ -39,20 +63,30 @@ function columnBoxSpec(data) {
   return { boxSize, count, high, low };
 }
 
-class PointFigureSeriesRenderer {
+class PointFigureSeriesRenderer implements ICustomSeriesPaneRenderer {
+  private data: PaneRendererCustomData<ChartTime, PointFigureCustomData> | null;
+  private options: PointFigureSeriesOptions | null;
+
   constructor() {
     this.data = null;
     this.options = null;
   }
 
-  update(data, options) {
+  update(
+    data: PaneRendererCustomData<ChartTime, PointFigureCustomData> | null,
+    options: PointFigureSeriesOptions | null,
+  ): void {
     this.data = data;
     this.options = options;
   }
 
-  draw(target, priceConverter) {
+  draw(
+    target: Parameters<ICustomSeriesPaneRenderer["draw"]>[0],
+    priceConverter: PriceToCoordinateConverter,
+  ): void {
     const data = this.data;
     if (!data?.visibleRange) return;
+    const visibleRange = data.visibleRange;
 
     target.useBitmapCoordinateSpace((scope) => {
       const { context, horizontalPixelRatio, verticalPixelRatio } = scope;
@@ -61,8 +95,8 @@ class PointFigureSeriesRenderer {
         2,
         effectiveSpacing * COLUMN_WIDTH_RATIO * horizontalPixelRatio,
       );
-      const from = Math.max(0, Math.floor(data.visibleRange.from));
-      const to = Math.min(data.bars.length, Math.ceil(data.visibleRange.to));
+      const from = Math.max(0, Math.floor(visibleRange.from));
+      const to = Math.min(data.bars.length, Math.ceil(visibleRange.to));
       const configuredLineWidth = positiveNumber(this.options?.lineWidth) || 2;
       context.lineCap = "round";
       context.lineJoin = "round";
@@ -80,7 +114,7 @@ class PointFigureSeriesRenderer {
 
         const nextBoxCoordinate = priceConverter(boxSpec.low + boxSpec.boxSize);
         const firstCoordinate = priceConverter(boxSpec.low);
-        if (!Number.isFinite(nextBoxCoordinate) || !Number.isFinite(firstCoordinate)) continue;
+        if (nextBoxCoordinate == null || firstCoordinate == null) continue;
         const symbolHeight = Math.max(
           2,
           Math.abs(nextBoxCoordinate - firstCoordinate) * verticalPixelRatio * 0.72,
@@ -99,7 +133,7 @@ class PointFigureSeriesRenderer {
         if (boxSpec.count > MAX_RENDERED_BOXES_PER_COLUMN) {
           const highCoordinate = priceConverter(boxSpec.high);
           const lowCoordinate = priceConverter(boxSpec.low);
-          if (!Number.isFinite(highCoordinate) || !Number.isFinite(lowCoordinate)) continue;
+          if (highCoordinate == null || lowCoordinate == null) continue;
           context.beginPath();
           context.moveTo(centerX, highCoordinate * verticalPixelRatio);
           context.lineTo(centerX, lowCoordinate * verticalPixelRatio);
@@ -110,7 +144,7 @@ class PointFigureSeriesRenderer {
         for (let boxIndex = 0; boxIndex < boxSpec.count; boxIndex += 1) {
           const level = boxSpec.low + boxIndex * boxSpec.boxSize;
           const priceCoordinate = priceConverter(level);
-          if (!Number.isFinite(priceCoordinate)) continue;
+          if (priceCoordinate == null) continue;
           const centerY = priceCoordinate * verticalPixelRatio;
           context.beginPath();
           if (direction === "x") {
@@ -128,30 +162,43 @@ class PointFigureSeriesRenderer {
   }
 }
 
-class PointFigureSeriesPaneView {
+class PointFigureSeriesPaneView implements ICustomSeriesPaneView<
+  ChartTime,
+  PointFigureCustomData,
+  PointFigureSeriesOptions
+> {
+  private readonly seriesRenderer: PointFigureSeriesRenderer;
+
   constructor() {
     this.seriesRenderer = new PointFigureSeriesRenderer();
   }
 
-  renderer() {
+  renderer(): ICustomSeriesPaneRenderer {
     return this.seriesRenderer;
   }
 
-  update(data, options) {
+  update(
+    data: PaneRendererCustomData<ChartTime, PointFigureCustomData>,
+    options: PointFigureSeriesOptions,
+  ): void {
     this.seriesRenderer.update(data, options);
   }
 
-  priceValueBuilder(data) {
+  priceValueBuilder(data: PointFigureCustomData): [number, number, number] {
     return [data.high, data.low, data.close];
   }
 
-  isWhitespace(data) {
-    return finiteNumber(data?.high) == null
-      || finiteNumber(data?.low) == null
+  isWhitespace(
+    data: PointFigureCustomData | CustomSeriesWhitespaceData<ChartTime>,
+  ): data is CustomSeriesWhitespaceData<ChartTime> {
+    return !("high" in data)
+      || !("low" in data)
+      || finiteNumber(data.high) == null
+      || finiteNumber(data.low) == null
       || columnBoxSpec(data) == null;
   }
 
-  defaultOptions() {
+  defaultOptions(): PointFigureSeriesOptions {
     return {
       ...customSeriesDefaultOptions,
       upColor: DEFAULT_UP_COLOR,
@@ -160,11 +207,15 @@ class PointFigureSeriesPaneView {
     };
   }
 
-  destroy() {
+  destroy(): void {
     this.seriesRenderer.update(null, null);
   }
 }
 
-export function createPointFigureSeriesPaneView() {
+export function createPointFigureSeriesPaneView(): ICustomSeriesPaneView<
+  ChartTime,
+  PointFigureCustomData,
+  PointFigureSeriesOptions
+> {
   return new PointFigureSeriesPaneView();
 }

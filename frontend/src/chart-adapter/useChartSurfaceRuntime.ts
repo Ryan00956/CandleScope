@@ -1,8 +1,17 @@
 import { useCallback, useMemo, useRef } from "react";
 import { callChartSurface, EMPTY_CHART_SURFACE_VIEW } from "./chartSurfaceContract";
 
+export interface ChartSurfaceHandle {
+  getVisibleRange(): unknown;
+  clearAllDrawings(): void;
+  setDrawingsHidden(hidden: boolean): void;
+  prepareExport(): void;
+  updateSelectedDrawingStyle(patch: Record<string, unknown>): void;
+  getExportSnapshot(): unknown;
+}
+
 export function useChartSurfaceRuntime() {
-  const ref = useRef(null);
+  const ref = useRef<ChartSurfaceHandle | null>(null);
 
   const getVisibleRange = useCallback(() => (
     callChartSurface(ref, "getVisibleRange", null)
@@ -12,7 +21,7 @@ export function useChartSurfaceRuntime() {
     callChartSurface(ref, "clearAllDrawings");
   }, []);
 
-  const setDrawingsHidden = useCallback((hidden) => {
+  const setDrawingsHidden = useCallback((hidden: boolean) => {
     callChartSurface(ref, "setDrawingsHidden", undefined, hidden);
   }, []);
 
@@ -20,7 +29,7 @@ export function useChartSurfaceRuntime() {
     callChartSurface(ref, "prepareExport");
   }, []);
 
-  const updateSelectedDrawingStyle = useCallback((patch) => {
+  const updateSelectedDrawingStyle = useCallback((patch: Record<string, unknown>) => {
     callChartSurface(ref, "updateSelectedDrawingStyle", undefined, patch);
   }, []);
 

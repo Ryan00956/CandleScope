@@ -1,31 +1,194 @@
 import {
+  DrawingLineageIndex,
   createDrawingLineageIndex,
   isDrawingLineageIndexForSeries,
 } from "../features/chart-representation/drawingLineageIndex.js";
+import type {
+  DisplayRow,
+  OrdinalAxisTime,
+} from "../features/chart-representation/chartRepresentationTypes.js";
 import {
   createFutureIntervalBasis,
   futureIntervalDistanceFromTime,
   futureTimeFromIntervalDistance,
 } from "../utils/intervalTimeline.js";
+import type { FutureIntervalBasis } from "../utils/intervalTimeline.js";
 
 const PROJECTION_METADATA_KEY = "chartProjection";
-const ordinalSeriesIndexCache = new WeakMap();
-const drawingSeriesContextRegistry = new WeakMap();
-const hydratedCoordinateSnapshotContexts = new WeakMap();
-const numericSeriesBoundsContexts = new WeakMap();
-const ordinalFutureBasisContexts = new WeakMap();
-const ordinalFutureBasisTransactions = new WeakSet();
+type ValueProvider<T = unknown> = (() => T) | null;
+
+interface DrawingAnchor {
+  time: number;
+  sourceOrdinal?: number;
+  sourceProjection?: string;
+  sourceProjectionConfig?: string;
+}
+
+interface SourceOrdinalAnchor extends DrawingAnchor {
+  sourceOrdinal: number;
+}
+
+interface NumericDisplayRow extends DisplayRow {
+  time: number;
+}
+
+interface DrawingCoordinateSnapshot {
+  seriesData?: DisplayRow[];
+  ordinalSeriesIndex?: DrawingLineageIndex | null;
+  indexRevision?: number | null;
+  sourceTimeHorizon?: unknown;
+  sourceInterval?: unknown;
+  sourceIntervalSeconds?: unknown;
+  drawingProjectionConfig?: unknown;
+}
+
+export interface DrawingCoordinateContext extends Record<string, unknown> {
+  seriesData?: DisplayRow[];
+  drawingOrdinalSeriesData?: DisplayRow[];
+  drawingOrdinalSeriesIndex?: DrawingLineageIndex | null;
+  drawingOrdinalSeriesIndexRevision?: number | null;
+  drawingProjectionConfig?: unknown;
+  projectionConfig?: unknown;
+  sourceTimeHorizon?: unknown;
+  sourceInterval?: unknown;
+  sourceIntervalSeconds?: unknown;
+}
+
+export interface DrawingSeriesProviders {
+  seriesDataProvider?: ValueProvider<unknown>;
+  sourceTimeHorizonProvider?: ValueProvider<unknown>;
+  sourceIntervalProvider?: ValueProvider<unknown>;
+  sourceIntervalSecondsProvider?: ValueProvider<unknown>;
+  projectionConfigProvider?: ValueProvider<unknown>;
+  ordinalSeriesIndexProvider?: ValueProvider<unknown>;
+  coordinateSnapshotProvider?: ValueProvider<unknown>;
+}
+
+interface DrawingSeriesRegistration {
+  seriesDataProvider: ValueProvider<unknown>;
+  sourceTimeHorizonProvider: ValueProvider<unknown>;
+  sourceIntervalProvider: ValueProvider<unknown>;
+  sourceIntervalSecondsProvider: ValueProvider<unknown>;
+  projectionConfigProvider: ValueProvider<unknown>;
+  ordinalSeriesIndexProvider: ValueProvider<unknown>;
+  coordinateSnapshotProvider: ValueProvider<unknown>;
+}
+
+interface OrdinalFutureCoordinateBasis extends FutureIntervalBasis {
+  cellWidth: number;
+  index: DrawingLineageIndex;
+  tailRow: DisplayRow;
+  tailX: number;
+}
+
+export interface ScreenPoint {
+  x?: unknown;
+  y?: unknown;
+}
+
+interface SourceLineageSpan {
+  exact: Readonly<{
+    left: Readonly<DrawingAnchor>;
+    right: Readonly<DrawingAnchor>;
+  }>;
+  fallback: Readonly<{
+    fromTime: number;
+    toTime: number;
+    leftRatio: number;
+    rightRatio: number;
+  }>;
+}
+
+interface SourceLineageSpanInput {
+  sourceProjection?: unknown;
+  sourceProjectionConfig?: unknown;
+  exact?: {
+    left?: DrawingAnchor;
+    right?: DrawingAnchor;
+  };
+  fallback?: {
+    fromTime?: unknown;
+    toTime?: unknown;
+    leftRatio?: unknown;
+    rightRatio?: unknown;
+  };
+}
+
+export interface CoordinateDataPoint extends Record<string, unknown> {
+  time?: unknown;
+  logical?: unknown;
+}
+
+interface InterpolatedCoordinateAdapter {
+  isReady?(): boolean;
+  coordinateToLogical?(coordinate: number): number | null;
+  logicalToCoordinate?(logical: number): number | null;
+  getSeriesData?(): DisplayRow[];
+  timeToCoordinate?(time: number): number | null;
+}
+
+interface TimeScaleBridge {
+  coordinateToLogical?(coordinate: number): number | null;
+  coordinateToTime?(coordinate: number): unknown;
+  logicalToCoordinate?(logical: number): number | null;
+  options?(): { barSpacing?: unknown };
+  timeToCoordinate(time: unknown): number | null;
+  width?(): number;
+}
+
+export interface CoordinateChartBridge {
+  timeScale(): TimeScaleBridge;
+}
+
+export interface CoordinateSeriesBridge {
+  coordinateToPrice?(coordinate: number): number | null;
+  data?(): unknown;
+}
+
+interface NumericSeriesBounds {
+  firstTime: number;
+  lastTime: number;
+}
+
+interface OrdinalSeriesIndexCacheEntry {
+  firstRow: DisplayRow | null;
+  firstTime: DisplayRow["time"] | undefined;
+  index: DrawingLineageIndex;
+  lastRow: DisplayRow | null;
+  lastTime: DisplayRow["time"] | undefined;
+  length: number;
+}
+
+interface OrdinalFutureBasisCacheEntry {
+  basis: OrdinalFutureCoordinateBasis | null;
+  ordinalIndex: DrawingLineageIndex | null;
+  seriesData: DisplayRow[];
+  sourceInterval: unknown;
+  sourceIntervalSeconds: unknown;
+  sourceTimeHorizon: unknown;
+  timeScale: TimeScaleBridge;
+}
+
+const ordinalSeriesIndexCache = new WeakMap<DisplayRow[], OrdinalSeriesIndexCacheEntry>();
+const drawingSeriesContextRegistry = new WeakMap<object, DrawingSeriesRegistration>();
+const hydratedCoordinateSnapshotContexts = new WeakMap<object, boolean>();
+const numericSeriesBoundsContexts = new WeakMap<object, {
+  bounds: NumericSeriesBounds | null;
+  seriesData: DisplayRow[];
+}>();
+const ordinalFutureBasisContexts = new WeakMap<object, OrdinalFutureBasisCacheEntry>();
+const ordinalFutureBasisTransactions = new WeakSet<object>();
 const MAX_FREEHAND_CAPTURE_BATCH_POINTS = 4_096;
 
-function isFiniteNumber(value) {
+function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function isRegistryKey(value) {
+function isRegistryKey(value: unknown): value is object {
   return (typeof value === "object" && value !== null) || typeof value === "function";
 }
 
-function safeProviderValue(provider, fallback = null) {
+function safeProviderValue<T>(provider: ValueProvider<T> | undefined, fallback: T): T {
   if (typeof provider !== "function") return fallback;
   try {
     return provider();
@@ -34,11 +197,11 @@ function safeProviderValue(provider, fallback = null) {
   }
 }
 
-function normalizeProjectionConfig(value) {
+function normalizeProjectionConfig(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function projectionConfigFromContext(context) {
+function projectionConfigFromContext(context: DrawingCoordinateContext | null): string | null {
   return normalizeProjectionConfig(
     context?.drawingProjectionConfig ?? context?.projectionConfig,
   );
@@ -49,14 +212,19 @@ function projectionConfigFromContext(context) {
  * memoization is deliberately limited to this transaction so zoom/pan changes
  * can never reuse viewport coordinates from an older render.
  */
-export function createDrawingCoordinateTransactionContext(context = null) {
-  const transaction = context && typeof context === "object" ? { ...context } : {};
+export function createDrawingCoordinateTransactionContext(
+  context: DrawingCoordinateContext | null = null,
+): DrawingCoordinateContext {
+  const transaction: DrawingCoordinateContext = context ? { ...context } : {};
   ordinalFutureBasisTransactions.add(transaction);
   return transaction;
 }
 
-function numericSeriesBounds(seriesData, context) {
-  if (!Array.isArray(seriesData) || !context || typeof context !== "object") return null;
+function numericSeriesBounds(
+  seriesData: DisplayRow[],
+  context: DrawingCoordinateContext | null,
+): NumericSeriesBounds | null {
+  if (!Array.isArray(seriesData) || !context) return null;
   const cached = numericSeriesBoundsContexts.get(context);
   if (cached?.seriesData === seriesData) return cached.bounds;
 
@@ -80,7 +248,7 @@ function numericSeriesBounds(seriesData, context) {
  * the series instance from Lightweight Charts, so this registry is the bridge
  * back to the adapter-owned refs without coupling primitives to React state.
  */
-export function registerDrawingSeriesContext(series, {
+export function registerDrawingSeriesContext(series: unknown, {
   seriesDataProvider = null,
   sourceTimeHorizonProvider = null,
   sourceIntervalProvider = null,
@@ -88,7 +256,7 @@ export function registerDrawingSeriesContext(series, {
   projectionConfigProvider = null,
   ordinalSeriesIndexProvider = null,
   coordinateSnapshotProvider = null,
-} = {}) {
+}: DrawingSeriesProviders = {}): boolean {
   if (!isRegistryKey(series)) return false;
   drawingSeriesContextRegistry.set(series, {
     projectionConfigProvider: typeof projectionConfigProvider === "function"
@@ -114,13 +282,16 @@ export function registerDrawingSeriesContext(series, {
   return true;
 }
 
-function hydrateCoordinateContext(series, context) {
+function hydrateCoordinateContext(
+  series: unknown,
+  context: DrawingCoordinateContext | null,
+): DrawingSeriesRegistration | null {
   const registration = isRegistryKey(series)
     ? drawingSeriesContextRegistry.get(series) || null
     : null;
   if (!context || typeof context !== "object" || !registration) return registration;
 
-  const owns = (field) => Object.prototype.hasOwnProperty.call(context, field);
+  const owns = (field: string) => Object.prototype.hasOwnProperty.call(context, field);
   const hasOwnCoordinateSnapshot = owns("seriesData")
     || owns("drawingOrdinalSeriesIndex")
     || owns("drawingOrdinalSeriesIndexRevision");
@@ -129,7 +300,10 @@ function hydrateCoordinateContext(series, context) {
   if (registration.coordinateSnapshotProvider
     && !hasOwnCoordinateSnapshot
     && !hydratedCoordinateSnapshotContexts.has(context)) {
-    const snapshot = safeProviderValue(registration.coordinateSnapshotProvider, null);
+    const snapshotValue = safeProviderValue(registration.coordinateSnapshotProvider, null);
+    const snapshot = snapshotValue && typeof snapshotValue === "object"
+      ? snapshotValue as DrawingCoordinateSnapshot
+      : null;
     if (Array.isArray(snapshot?.seriesData)) {
       hasCoordinateSnapshot = true;
       context.seriesData = snapshot.seriesData;
@@ -177,69 +351,83 @@ function hydrateCoordinateContext(series, context) {
   if (!hasCoordinateSnapshot
     && !owns("drawingOrdinalSeriesIndex")
     && registration.ordinalSeriesIndexProvider) {
-    context.drawingOrdinalSeriesIndex = safeProviderValue(
+    const providedIndex = safeProviderValue(
       registration.ordinalSeriesIndexProvider,
       null,
     );
+    context.drawingOrdinalSeriesIndex = providedIndex instanceof DrawingLineageIndex
+      ? providedIndex
+      : null;
     delete context.drawingOrdinalSeriesIndexRevision;
   }
   return registration;
 }
 
-export function isOrdinalAxisTime(value) {
-  return value !== null
-    && typeof value === "object"
-    && !Array.isArray(value)
-    && Number.isSafeInteger(value.order)
-    && isFiniteNumber(value.sourceTime)
-    && Number.isSafeInteger(value.sourceOrdinal)
-    && value.sourceOrdinal >= 0;
+export function isOrdinalAxisTime(value: unknown): value is OrdinalAxisTime {
+  if (value === null
+    || typeof value !== "object"
+    || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Partial<OrdinalAxisTime>;
+  return Number.isSafeInteger(candidate.order)
+    && isFiniteNumber(candidate.sourceTime)
+    && Number.isSafeInteger(candidate.sourceOrdinal)
+    && Number(candidate.sourceOrdinal) >= 0;
 }
 
-function projectionMetadataFromRow(row) {
+function projectionMetadataFromRow(row: DisplayRow | null | undefined): Record<string, unknown> | null {
   const metadata = row?.customValues?.[PROJECTION_METADATA_KEY];
   return metadata && typeof metadata === "object" ? metadata : null;
 }
 
-function projectorIdFromRow(row) {
+function projectorIdFromRow(row: DisplayRow | null | undefined): string | null {
   const projectorId = projectionMetadataFromRow(row)?.projectorId;
   return typeof projectorId === "string" && projectorId.length > 0
     ? projectorId
     : null;
 }
 
-function sourceOrdinalFromRow(row) {
+function sourceOrdinalFromRow(row: DisplayRow | null | undefined): number | null {
   if (isOrdinalAxisTime(row?.time)) return row.time.sourceOrdinal;
   const ordinal = projectionMetadataFromRow(row)?.sourceOrdinal;
-  return Number.isSafeInteger(ordinal) && ordinal >= 0 ? ordinal : null;
+  return isFiniteNumber(ordinal) && Number.isSafeInteger(ordinal) && ordinal >= 0
+    ? ordinal
+    : null;
 }
 
-function exactOrdinalRow(ordinalIndex, anchor) {
-  if (!Number.isFinite(anchor?.time)
-    || !Number.isSafeInteger(anchor?.sourceOrdinal)
-    || anchor.sourceOrdinal < 0) {
+function exactOrdinalRow(
+  ordinalIndex: DrawingLineageIndex | null | undefined,
+  anchor: DrawingAnchor | null | undefined,
+): DisplayRow | null {
+  const anchorTime = anchor?.time;
+  const sourceOrdinal = anchor?.sourceOrdinal;
+  if (!isFiniteNumber(anchorTime)
+    || !Number.isSafeInteger(sourceOrdinal)
+    || sourceOrdinal == null
+    || sourceOrdinal < 0) {
     return null;
   }
-  for (const row of ordinalIndex?.exactRowsBySourceTime?.get(anchor.time) || []) {
-    if (sourceOrdinalFromRow(row) === anchor.sourceOrdinal) return row;
+  for (const row of ordinalIndex?.exactRowsBySourceTime?.get(anchorTime) || []) {
+    if (sourceOrdinalFromRow(row) === sourceOrdinal) return row;
   }
   return null;
 }
 
-function compareSourceAnchors(left, right) {
+function compareSourceAnchors(left: SourceOrdinalAnchor, right: SourceOrdinalAnchor): number {
   if (left.time !== right.time) return left.time < right.time ? -1 : 1;
   if (left.sourceOrdinal === right.sourceOrdinal) return 0;
   return left.sourceOrdinal < right.sourceOrdinal ? -1 : 1;
 }
 
-function persistenceSafeProjectionId(value) {
+function persistenceSafeProjectionId(value: unknown): value is string {
   return typeof value === "string"
     && value.length > 0
     && value.length <= 64
     && /^[a-z0-9][a-z0-9-]*$/.test(value);
 }
 
-function persistenceSafeProjectionConfig(value) {
+function persistenceSafeProjectionConfig(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > 512) return false;
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
@@ -248,7 +436,7 @@ function persistenceSafeProjectionConfig(value) {
   return true;
 }
 
-function firstSeriesTime(seriesData) {
+function firstSeriesTime(seriesData: DisplayRow[]): DisplayRow["time"] | null {
   if (!Array.isArray(seriesData)) return null;
   for (const row of seriesData) {
     if (row?.time != null) return row.time;
@@ -256,7 +444,7 @@ function firstSeriesTime(seriesData) {
   return null;
 }
 
-function firstOrdinalRow(seriesData) {
+function firstOrdinalRow(seriesData: DisplayRow[]): DisplayRow | null {
   if (!Array.isArray(seriesData)) return null;
   for (const row of seriesData) {
     if (row?.time != null) return isOrdinalAxisTime(row.time) ? row : null;
@@ -264,11 +452,14 @@ function firstOrdinalRow(seriesData) {
   return null;
 }
 
-function usesOrdinalSeriesData(seriesData) {
+function usesOrdinalSeriesData(seriesData: DisplayRow[]): boolean {
   return isOrdinalAxisTime(firstSeriesTime(seriesData));
 }
 
-function firstRangeIndexWithToAtLeast(rowRanges, target) {
+function firstRangeIndexWithToAtLeast(
+  rowRanges: DrawingLineageIndex["rowRanges"],
+  target: number,
+): number {
   let lo = 0;
   let hi = rowRanges.length;
   while (lo < hi) {
@@ -279,7 +470,11 @@ function firstRangeIndexWithToAtLeast(rowRanges, target) {
   return lo;
 }
 
-function firstRangeIndexWithToGreaterThan(rowRanges, target, lo = 0) {
+function firstRangeIndexWithToGreaterThan(
+  rowRanges: DrawingLineageIndex["rowRanges"],
+  target: number,
+  lo = 0,
+): number {
   let left = lo;
   let right = rowRanges.length;
   while (left < right) {
@@ -290,7 +485,12 @@ function firstRangeIndexWithToGreaterThan(rowRanges, target, lo = 0) {
   return left;
 }
 
-function firstRangeIndexWithFromGreaterThan(rowRanges, target, lo = 0, hi = rowRanges.length) {
+function firstRangeIndexWithFromGreaterThan(
+  rowRanges: DrawingLineageIndex["rowRanges"],
+  target: number,
+  lo = 0,
+  hi = rowRanges.length,
+): number {
   let left = lo;
   let right = hi;
   while (left < right) {
@@ -301,7 +501,10 @@ function firstRangeIndexWithFromGreaterThan(rowRanges, target, lo = 0, hi = rowR
   return left;
 }
 
-function resolveMonotonicSourceRange(rowRanges, target) {
+function resolveMonotonicSourceRange(
+  rowRanges: DrawingLineageIndex["rowRanges"],
+  target: number,
+): DisplayRow | null {
   if (rowRanges.length === 0) return null;
 
   const firstToAtLeastTarget = firstRangeIndexWithToAtLeast(rowRanges, target);
@@ -330,7 +533,10 @@ function resolveMonotonicSourceRange(rowRanges, target) {
   return null;
 }
 
-function resolveUnorderedSourceRange(rowRanges, target) {
+function resolveUnorderedSourceRange(
+  rowRanges: DrawingLineageIndex["rowRanges"],
+  target: number,
+): DisplayRow | null {
   let containingRow = null;
   let containingTo = Number.POSITIVE_INFINITY;
   let containingFrom = Number.NEGATIVE_INFINITY;
@@ -357,13 +563,16 @@ function resolveUnorderedSourceRange(rowRanges, target) {
   return containingRow || predecessorRow;
 }
 
-function getOrdinalSeriesIndex(seriesData, context = null) {
+function getOrdinalSeriesIndex(
+  seriesData: DisplayRow[],
+  context: DrawingCoordinateContext | null = null,
+): DrawingLineageIndex | null {
   if (!usesOrdinalSeriesData(seriesData)) return null;
   const contextIndex = context?.drawingOrdinalSeriesIndex;
   const contextRevisionMatches = !Object.prototype.hasOwnProperty.call(
     context || {},
     "drawingOrdinalSeriesIndexRevision",
-  ) || context.drawingOrdinalSeriesIndexRevision === contextIndex?.revision;
+  ) || context?.drawingOrdinalSeriesIndexRevision === contextIndex?.revision;
   if (isDrawingLineageIndexForSeries(
     contextIndex,
     seriesData,
@@ -419,11 +628,15 @@ function getOrdinalSeriesIndex(seriesData, context = null) {
  * Projection-local `order` is deliberately discarded because structural
  * reprojections may assign that coordinate to different source lineage.
  */
-export function drawingAnchorFromAxisTime(axisTime, seriesData = [], context = null) {
+export function drawingAnchorFromAxisTime(
+  axisTime: unknown,
+  seriesData: DisplayRow[] = [],
+  context: DrawingCoordinateContext | null = null,
+): DrawingAnchor | null {
   if (isFiniteNumber(axisTime)) return { time: axisTime };
   if (!isOrdinalAxisTime(axisTime)) return null;
 
-  const anchor = {
+  const anchor: DrawingAnchor = {
     time: axisTime.sourceTime,
     sourceOrdinal: axisTime.sourceOrdinal,
   };
@@ -434,11 +647,11 @@ export function drawingAnchorFromAxisTime(axisTime, seriesData = [], context = n
   return anchor;
 }
 
-function isSafeTimeMagnitude(value) {
+function isSafeTimeMagnitude(value: unknown): value is number {
   return isFiniteNumber(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER;
 }
 
-function ordinalCellWidth(timeScale, tailX) {
+function ordinalCellWidth(timeScale: TimeScaleBridge, tailX: number): number | null {
   let logical = null;
   try {
     logical = timeScale.coordinateToLogical?.(tailX);
@@ -477,8 +690,14 @@ function ordinalCellWidth(timeScale, tailX) {
   return isFiniteNumber(barSpacing) && barSpacing > 0 ? barSpacing : null;
 }
 
-function ordinalFutureCoordinateBasis(timeScale, seriesData, context, ordinalIndex = null) {
+function ordinalFutureCoordinateBasis(
+  timeScale: TimeScaleBridge,
+  seriesData: DisplayRow[],
+  context: DrawingCoordinateContext,
+  ordinalIndex: DrawingLineageIndex | null = null,
+): OrdinalFutureCoordinateBasis | null {
   const index = ordinalIndex || getOrdinalSeriesIndex(seriesData, context);
+  if (!index) return null;
   const tailRow = index?.ordinalRows?.[index.ordinalRows.length - 1] || null;
   const intervalBasis = createFutureIntervalBasis({
     horizon: context?.sourceTimeHorizon,
@@ -507,11 +726,11 @@ function ordinalFutureCoordinateBasis(timeScale, seriesData, context, ordinalInd
 }
 
 function cachedOrdinalFutureCoordinateBasis(
-  timeScale,
-  seriesData,
-  context,
-  ordinalIndex = null,
-) {
+  timeScale: TimeScaleBridge,
+  seriesData: DisplayRow[],
+  context: DrawingCoordinateContext,
+  ordinalIndex: DrawingLineageIndex | null = null,
+): OrdinalFutureCoordinateBasis | null {
   const canCache = context
     && typeof context === "object"
     && ordinalFutureBasisTransactions.has(context);
@@ -548,7 +767,12 @@ function cachedOrdinalFutureCoordinateBasis(
  * Existing ordinal cells retain complete source lineage; right-side whitespace
  * becomes an absolute source time with no projection-local order/logical data.
  */
-export function drawingAnchorFromCoordinate(chart, series, x, context = null) {
+export function drawingAnchorFromCoordinate(
+  chart: CoordinateChartBridge | null | undefined,
+  series: CoordinateSeriesBridge | null | undefined,
+  x: unknown,
+  context: DrawingCoordinateContext | null = null,
+): DrawingAnchor | null {
   if (!chart || !series || !isFiniteNumber(x)) return null;
   const coordinateContext = context || {};
   const seriesData = getCachedSeriesData(series, coordinateContext);
@@ -605,29 +829,34 @@ export function drawingAnchorFromCoordinate(chart, series, x, context = null) {
     time: axisTime.sourceTime,
     sourceOrdinal: axisTime.sourceOrdinal,
   });
-  if (exactRow?.time?.order !== axisTime.order) return null;
+  if (!isOrdinalAxisTime(exactRow?.time) || exactRow.time.order !== axisTime.order) return null;
   const anchor = drawingAnchorFromAxisTime(axisTime, seriesData, coordinateContext);
   return anchor?.sourceProjection && anchor?.sourceProjectionConfig
     ? anchor
     : null;
 }
 
-function normalizeDrawingAnchor(anchor, seriesData, context) {
+function normalizeDrawingAnchor(
+  anchor: unknown,
+  seriesData: DisplayRow[],
+  context: DrawingCoordinateContext | null,
+): DrawingAnchor | null {
   if (!anchor || typeof anchor !== "object") return null;
-  if (isOrdinalAxisTime(anchor.time)) {
-    return drawingAnchorFromAxisTime(anchor.time, seriesData, context);
+  const candidate = anchor as Record<string, unknown>;
+  if (isOrdinalAxisTime(candidate.time)) {
+    return drawingAnchorFromAxisTime(candidate.time, seriesData, context);
   }
-  if (!isFiniteNumber(anchor.time)) return null;
+  if (!isFiniteNumber(candidate.time)) return null;
   return {
-    time: anchor.time,
-    ...(Number.isSafeInteger(anchor.sourceOrdinal) && anchor.sourceOrdinal >= 0
-      ? { sourceOrdinal: anchor.sourceOrdinal }
+    time: candidate.time,
+    ...(Number.isSafeInteger(candidate.sourceOrdinal) && Number(candidate.sourceOrdinal) >= 0
+      ? { sourceOrdinal: Number(candidate.sourceOrdinal) }
       : {}),
-    ...(typeof anchor.sourceProjection === "string" && anchor.sourceProjection.length > 0
-      ? { sourceProjection: anchor.sourceProjection }
+    ...(typeof candidate.sourceProjection === "string" && candidate.sourceProjection.length > 0
+      ? { sourceProjection: candidate.sourceProjection }
       : {}),
-    ...(normalizeProjectionConfig(anchor.sourceProjectionConfig)
-      ? { sourceProjectionConfig: anchor.sourceProjectionConfig }
+    ...(normalizeProjectionConfig(candidate.sourceProjectionConfig)
+      ? { sourceProjectionConfig: String(candidate.sourceProjectionConfig) }
       : {}),
   };
 }
@@ -639,7 +868,11 @@ function normalizeDrawingAnchor(anchor, seriesData, context) {
  * drawings cannot silently become relative logical anchors. When raw coverage
  * is unavailable, displayed lineage remains the conservative boundary.
  */
-export function resolveDrawingAnchorToDisplayRow(seriesData, anchor, context = null) {
+export function resolveDrawingAnchorToDisplayRow(
+  seriesData: DisplayRow[],
+  anchor: unknown,
+  context: DrawingCoordinateContext | null = null,
+): DisplayRow | null {
   if (!Array.isArray(seriesData) || seriesData.length === 0) return null;
   const normalized = normalizeDrawingAnchor(anchor, seriesData, context);
   if (!normalized) return null;
@@ -672,6 +905,7 @@ export function resolveDrawingAnchorToDisplayRow(seriesData, anchor, context = n
     && normalizeProjectionConfig(normalized.sourceProjectionConfig) !== null
     && normalized.sourceProjectionConfig
       === projectionConfigFromContext(context);
+  const targetSourceOrdinal = canUseSourceOrdinal ? normalized.sourceOrdinal : null;
 
   let lastExactSourceRow = null;
   let exactOrdinalRow = null;
@@ -682,16 +916,16 @@ export function resolveDrawingAnchorToDisplayRow(seriesData, anchor, context = n
 
   for (const row of exactRowsBySourceTime.get(normalized.time) || []) {
     lastExactSourceRow = row;
-    if (!canUseSourceOrdinal) continue;
+    if (targetSourceOrdinal == null) continue;
 
     const rowOrdinal = sourceOrdinalFromRow(row);
     if (rowOrdinal === null) continue;
-    if (rowOrdinal === normalized.sourceOrdinal) {
+    if (rowOrdinal === targetSourceOrdinal) {
       exactOrdinalRow = row;
-    } else if (rowOrdinal < normalized.sourceOrdinal && rowOrdinal >= predecessorOrdinal) {
+    } else if (rowOrdinal < targetSourceOrdinal && rowOrdinal >= predecessorOrdinal) {
       predecessorOrdinal = rowOrdinal;
       predecessorOrdinalRow = row;
-    } else if (rowOrdinal > normalized.sourceOrdinal && rowOrdinal < successorOrdinal) {
+    } else if (rowOrdinal > targetSourceOrdinal && rowOrdinal < successorOrdinal) {
       successorOrdinal = rowOrdinal;
       successorOrdinalRow = row;
     }
@@ -714,11 +948,15 @@ export function resolveDrawingAnchorToDisplayRow(seriesData, anchor, context = n
  * order is used only for chart lookup and is never persisted.
  */
 export function captureSourceLineageFreehandStrokeBatch(
-  chart,
-  series,
-  screenPoints,
-  context = null,
-) {
+  chart: CoordinateChartBridge | null | undefined,
+  series: CoordinateSeriesBridge | null | undefined,
+  screenPoints: ScreenPoint[],
+  context: DrawingCoordinateContext | null = null,
+): Readonly<{
+  sourceProjection: string;
+  sourceProjectionConfig: string;
+  captures: readonly Readonly<Record<string, unknown>>[];
+}> | null {
   if (!chart
     || !series
     || !Array.isArray(screenPoints)
@@ -772,9 +1010,9 @@ export function captureSourceLineageFreehandStrokeBatch(
   const originalLength = seriesData.length;
   const originalFirst = seriesData[0];
   const originalLast = seriesData[originalLength - 1];
-  const coordinateCache = new Map();
-  const coordinateAt = (index) => {
-    if (coordinateCache.has(index)) return coordinateCache.get(index);
+  const coordinateCache = new Map<number, number | null>();
+  const coordinateAt = (index: number): number | null => {
+    if (coordinateCache.has(index)) return coordinateCache.get(index) ?? null;
     let coordinate = null;
     try {
       coordinate = timeScale.timeToCoordinate(rows[index]?.time);
@@ -793,7 +1031,7 @@ export function captureSourceLineageFreehandStrokeBatch(
     drawableWidth = null;
   }
   if (!isFiniteNumber(drawableWidth) || drawableWidth <= 0) drawableWidth = null;
-  let futureBasis = null;
+  let futureBasis: OrdinalFutureCoordinateBasis | null = null;
   let futureBasisResolved = false;
   const getFutureBasis = () => {
     if (!futureBasisResolved) {
@@ -808,7 +1046,7 @@ export function captureSourceLineageFreehandStrokeBatch(
     return futureBasis;
   };
 
-  const pairForCoordinate = (x) => {
+  const pairForCoordinate = (x: number): number | null => {
     let snappedTime = null;
     try {
       snappedTime = timeScale.coordinateToTime?.(x);
@@ -821,8 +1059,9 @@ export function captureSourceLineageFreehandStrokeBatch(
     let right = rows.length;
     while (left < right) {
       const middle = (left + right) >> 1;
-      const order = rows[middle]?.time?.order;
-      if (!Number.isSafeInteger(order)) return null;
+      const rowTime = rows[middle]?.time;
+      const order = isOrdinalAxisTime(rowTime) ? rowTime.order : null;
+      if (order === null || !Number.isSafeInteger(order)) return null;
       if (order < snappedTime.order) left = middle + 1;
       else right = middle;
     }
@@ -840,9 +1079,9 @@ export function captureSourceLineageFreehandStrokeBatch(
     return left < rows.length - 1 ? left : (left > 0 ? left - 1 : null);
   };
 
-  const spanCache = new Map();
-  const spanForPair = (pairIndex) => {
-    if (spanCache.has(pairIndex)) return spanCache.get(pairIndex);
+  const spanCache = new Map<number, SourceLineageSpan | null>();
+  const spanForPair = (pairIndex: number): SourceLineageSpan | null => {
+    if (spanCache.has(pairIndex)) return spanCache.get(pairIndex) ?? null;
     const leftRow = rows[pairIndex];
     const rightRow = rows[pairIndex + 1];
     const leftEntry = ranges[pairIndex];
@@ -854,6 +1093,7 @@ export function captureSourceLineageFreehandStrokeBatch(
       || projectorIdFromRow(rightRow) !== sourceProjection) {
       return null;
     }
+    if (!isOrdinalAxisTime(leftRow.time) || !isOrdinalAxisTime(rightRow.time)) return null;
     const exact = {
       left: {
         time: leftRow.time.sourceTime,
@@ -905,7 +1145,7 @@ export function captureSourceLineageFreehandStrokeBatch(
       || leftRatio >= rightRatio) {
       return null;
     }
-    const span = Object.freeze({
+    const span: SourceLineageSpan = Object.freeze({
       exact: Object.freeze({
         left: Object.freeze(exact.left),
         right: Object.freeze(exact.right),
@@ -916,7 +1156,7 @@ export function captureSourceLineageFreehandStrokeBatch(
     return span;
   };
 
-  const captures = [];
+  const captures: Readonly<Record<string, unknown>>[] = [];
   for (const point of screenPoints) {
     const x = point?.x;
     const y = point?.y;
@@ -951,8 +1191,10 @@ export function captureSourceLineageFreehandStrokeBatch(
 
     if (rows.length === 1 && tailX !== null) {
       const cellWidth = getFutureBasis()?.cellWidth ?? ordinalCellWidth(timeScale, tailX);
-      const tailTime = rows[0]?.time?.sourceTime;
-      if (!isFiniteNumber(cellWidth)
+      const tailAxisTime = rows[0]?.time;
+      const tailTime = isOrdinalAxisTime(tailAxisTime) ? tailAxisTime.sourceTime : null;
+      if (!isOrdinalAxisTime(tailAxisTime)
+        || !isFiniteNumber(cellWidth)
         || cellWidth <= 0
         || x < tailX - cellWidth / 2
         || x > tailX
@@ -962,7 +1204,7 @@ export function captureSourceLineageFreehandStrokeBatch(
       captures.push(Object.freeze({
         anchor: Object.freeze({
           time: tailTime,
-          sourceOrdinal: rows[0].time.sourceOrdinal,
+          sourceOrdinal: tailAxisTime.sourceOrdinal,
         }),
         price,
         screen: Object.freeze({ x, y }),
@@ -1009,22 +1251,22 @@ export function captureSourceLineageFreehandStrokeBatch(
  * overlap run, preserving continuous positions even when only one row remains.
  */
 export function resolveSourceLineageSpanToCoordinates(
-  chart,
-  series,
+  chart: CoordinateChartBridge | null | undefined,
+  series: CoordinateSeriesBridge | null | undefined,
   {
     sourceProjection,
     sourceProjectionConfig,
     exact,
     fallback,
-  } = {},
-  context = null,
-) {
+  }: SourceLineageSpanInput = {},
+  context: DrawingCoordinateContext | null = null,
+): { left: number; right: number } | null {
   if (!chart || !series) return null;
   const coordinateContext = context || {};
   const seriesData = getCachedSeriesData(series, coordinateContext);
   const timeScale = chart.timeScale?.();
   if (!timeScale) return null;
-  const coordinateForRow = (row) => {
+  const coordinateForRow = (row: DisplayRow | null | undefined): number | null => {
     if (!row) return null;
     try {
       const coordinate = timeScale.timeToCoordinate(row.time);
@@ -1124,29 +1366,36 @@ export function resolveSourceLineageSpanToCoordinates(
   };
 }
 
-function getCachedSeriesData(series, context) {
+function getCachedSeriesData(
+  series: CoordinateSeriesBridge,
+  context: DrawingCoordinateContext,
+): DisplayRow[] {
   const registration = hydrateCoordinateContext(series, context);
   if (context && Object.prototype.hasOwnProperty.call(context, "seriesData")) {
-    return context.seriesData;
+    return Array.isArray(context.seriesData) ? context.seriesData : [];
   }
 
-  let data = safeProviderValue(registration?.seriesDataProvider, null);
+  let data: unknown = safeProviderValue(registration?.seriesDataProvider, null);
   if (!Array.isArray(data)) {
     try {
-      data = series?.data?.() || [];
+      data = series.data?.() || [];
     } catch {
       data = [];
     }
   }
 
-  if (context) {
-    context.seriesData = data;
-  }
+  const rows = Array.isArray(data) ? data as DisplayRow[] : [];
+  context.seriesData = rows;
 
-  return data;
+  return rows;
 }
 
-export function timeToCoordinateInterpolated(chart, series, timestamp, context) {
+export function timeToCoordinateInterpolated(
+  chart: CoordinateChartBridge | null | undefined,
+  series: CoordinateSeriesBridge | null | undefined,
+  timestamp: unknown,
+  context: DrawingCoordinateContext | null = null,
+): number | null {
   if (!chart || !series || timestamp == null) return null;
 
   const timeScale = chart.timeScale();
@@ -1175,38 +1424,40 @@ export function timeToCoordinateInterpolated(chart, series, timestamp, context) 
   }
 
   if (!data || data.length === 0 || !isFiniteNumber(timestamp)) return null;
+  if (data.some((row) => !isFiniteNumber(row.time))) return null;
+  const numericData = data as NumericDisplayRow[];
 
   let lo = 0;
-  let hi = data.length - 1;
+  let hi = numericData.length - 1;
 
-  if (timestamp <= data[lo].time) {
-    if (data.length < 2) return timeScale.timeToCoordinate(data[0].time);
-    const x0 = timeScale.timeToCoordinate(data[0].time);
-    const x1 = timeScale.timeToCoordinate(data[1].time);
+  if (timestamp <= numericData[lo].time) {
+    if (numericData.length < 2) return timeScale.timeToCoordinate(numericData[0].time);
+    const x0 = timeScale.timeToCoordinate(numericData[0].time);
+    const x1 = timeScale.timeToCoordinate(numericData[1].time);
     if (x0 == null || x1 == null) return null;
-    const dt = data[1].time - data[0].time;
+    const dt = numericData[1].time - numericData[0].time;
     if (dt === 0) return x0;
-    return x0 + ((timestamp - data[0].time) / dt) * (x1 - x0);
+    return x0 + ((timestamp - numericData[0].time) / dt) * (x1 - x0);
   }
 
-  if (timestamp >= data[hi].time) {
-    if (data.length < 2) return timeScale.timeToCoordinate(data[hi].time);
-    const xPrev = timeScale.timeToCoordinate(data[hi - 1].time);
-    const xLast = timeScale.timeToCoordinate(data[hi].time);
+  if (timestamp >= numericData[hi].time) {
+    if (numericData.length < 2) return timeScale.timeToCoordinate(numericData[hi].time);
+    const xPrev = timeScale.timeToCoordinate(numericData[hi - 1].time);
+    const xLast = timeScale.timeToCoordinate(numericData[hi].time);
     if (xPrev == null || xLast == null) return null;
-    const dt = data[hi].time - data[hi - 1].time;
+    const dt = numericData[hi].time - numericData[hi - 1].time;
     if (dt === 0) return xLast;
-    return xPrev + ((timestamp - data[hi - 1].time) / dt) * (xLast - xPrev);
+    return xPrev + ((timestamp - numericData[hi - 1].time) / dt) * (xLast - xPrev);
   }
 
   while (lo < hi - 1) {
     const mid = (lo + hi) >> 1;
-    if (data[mid].time <= timestamp) lo = mid;
+    if (numericData[mid].time <= timestamp) lo = mid;
     else hi = mid;
   }
 
-  const tA = data[lo].time;
-  const tB = data[hi].time;
+  const tA = numericData[lo].time;
+  const tB = numericData[hi].time;
   const xA = timeScale.timeToCoordinate(tA);
   const xB = timeScale.timeToCoordinate(tB);
   if (xA == null || xB == null) return null;
@@ -1216,7 +1467,12 @@ export function timeToCoordinateInterpolated(chart, series, timestamp, context) 
   return xA + ((timestamp - tA) / dt) * (xB - xA);
 }
 
-export function dataPointToCoordinate(chart, series, dataPoint, context) {
+export function dataPointToCoordinate(
+  chart: CoordinateChartBridge | null | undefined,
+  series: CoordinateSeriesBridge | null | undefined,
+  dataPoint: CoordinateDataPoint | null | undefined,
+  context: DrawingCoordinateContext | null = null,
+): number | null {
   if (!chart || !series || !dataPoint) return null;
 
   const timeScale = chart.timeScale();
@@ -1273,7 +1529,10 @@ export function dataPointToCoordinate(chart, series, dataPoint, context) {
   return null;
 }
 
-export function coordinateToFractionalLogical(adapter, x) {
+export function coordinateToFractionalLogical(
+  adapter: InterpolatedCoordinateAdapter | null | undefined,
+  x: number,
+): number | null {
   if (!adapter?.isReady?.()) return null;
 
   const intLogical = adapter.coordinateToLogical?.(x);
@@ -1291,15 +1550,20 @@ export function coordinateToFractionalLogical(adapter, x) {
   return fracLogical;
 }
 
-export function logicalToInterpolatedSeriesTime(adapter, logicalIndex) {
+export function logicalToInterpolatedSeriesTime(
+  adapter: InterpolatedCoordinateAdapter | null | undefined,
+  logicalIndex: number | null | undefined,
+): number | null {
   if (!adapter?.isReady?.() || logicalIndex == null || !isFinite(logicalIndex)) return null;
 
   const seriesData = adapter.getSeriesData?.();
   if (!seriesData || seriesData.length === 0) return null;
   if (usesOrdinalSeriesData(seriesData)) return null;
+  if (seriesData.some((row) => !isFiniteNumber(row.time))) return null;
+  const numericSeriesData = seriesData as NumericDisplayRow[];
 
   let dataIndex = logicalIndex;
-  const firstTime = seriesData[0]?.time;
+  const firstTime = numericSeriesData[0]?.time;
   const firstCoord = firstTime == null ? null : adapter.timeToCoordinate?.(firstTime);
   const firstLogical = firstCoord == null || !isFinite(firstCoord)
     ? null
@@ -1312,28 +1576,34 @@ export function logicalToInterpolatedSeriesTime(adapter, logicalIndex) {
   const frac = dataIndex - floorIdx;
 
   if (floorIdx < 0) {
-    if (seriesData.length >= 2) {
-      const dt = seriesData[1].time - seriesData[0].time;
-      return seriesData[0].time + dataIndex * dt;
+    if (numericSeriesData.length >= 2) {
+      const dt = numericSeriesData[1].time - numericSeriesData[0].time;
+      return numericSeriesData[0].time + dataIndex * dt;
     }
-    return seriesData[0].time;
+    return numericSeriesData[0].time;
   }
 
-  if (floorIdx >= seriesData.length - 1) {
-    if (seriesData.length >= 2) {
-      const dt = seriesData[seriesData.length - 1].time - seriesData[seriesData.length - 2].time;
-      return seriesData[seriesData.length - 1].time + (dataIndex - (seriesData.length - 1)) * dt;
+  if (floorIdx >= numericSeriesData.length - 1) {
+    if (numericSeriesData.length >= 2) {
+      const dt = numericSeriesData[numericSeriesData.length - 1].time
+        - numericSeriesData[numericSeriesData.length - 2].time;
+      return numericSeriesData[numericSeriesData.length - 1].time
+        + (dataIndex - (numericSeriesData.length - 1)) * dt;
     }
-    return seriesData[seriesData.length - 1].time;
+    return numericSeriesData[numericSeriesData.length - 1].time;
   }
 
-  const tA = seriesData[floorIdx].time;
-  const tB = seriesData[floorIdx + 1].time;
+  const tA = numericSeriesData[floorIdx].time;
+  const tB = numericSeriesData[floorIdx + 1].time;
   return tA + frac * (tB - tA);
 }
 
-export function logicalToCoordinateInterpolated(timeScale, logical) {
+export function logicalToCoordinateInterpolated(
+  timeScale: TimeScaleBridge | null | undefined,
+  logical: number | null | undefined,
+): number | null {
   if (!timeScale || logical == null || !isFinite(logical)) return null;
+  if (!timeScale.logicalToCoordinate) return null;
 
   const leftLogical = Math.floor(logical);
   const fraction = logical - leftLogical;

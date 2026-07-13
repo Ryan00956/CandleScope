@@ -2,6 +2,12 @@ import {
   createFutureIntervalBasis,
   futureTimeFromIntervalDistance,
 } from "../utils/intervalTimeline.js";
+import type {
+  ChartSeriesInputRow,
+  ChartSeriesRow,
+  ChartTime,
+  FutureTimeAxisPlan,
+} from "./chartAdapterTypes.js";
 
 export const FUTURE_TIME_AXIS_INITIAL_POINTS = 64;
 export const FUTURE_TIME_AXIS_GROWTH_POINTS = 64;
@@ -12,22 +18,30 @@ export const FUTURE_TIME_AXIS_ORDINAL_ORDER_START = Number.MAX_SAFE_INTEGER
 
 const EMPTY_PLAN_KEY = "future-time-axis:empty";
 
-function normalizedPointCount(value) {
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function normalizedPointCount(value: unknown): number {
   const count = Math.floor(Number(value));
   return Number.isFinite(count) && count > 0
     ? Math.min(count, FUTURE_TIME_AXIS_MAX_POINTS)
     : 0;
 }
 
-function lastDisplayTime(displayRows) {
+function lastDisplayTime(displayRows: ChartSeriesInputRow[]): ChartTime | null {
   if (!Array.isArray(displayRows)) return null;
   for (let index = displayRows.length - 1; index >= 0; index -= 1) {
-    if (displayRows[index]?.time != null) return displayRows[index].time;
+    const time = displayRows[index]?.time;
+    if (time != null) return time;
   }
   return null;
 }
 
-function numericDisplayTimeExists(displayRows, target) {
+function numericDisplayTimeExists(
+  displayRows: ChartSeriesInputRow[],
+  target: number,
+): boolean {
   let left = 0;
   let right = displayRows.length;
   while (left < right) {
@@ -40,8 +54,11 @@ function numericDisplayTimeExists(displayRows, target) {
   return Number(displayRows[left]?.time) === target;
 }
 
-export function countFutureTimeAxisPointsAfter(data, sourceTimeHorizon) {
-  if (!Array.isArray(data) || !Number.isFinite(sourceTimeHorizon)) return 0;
+export function countFutureTimeAxisPointsAfter(
+  data: ChartSeriesInputRow[],
+  sourceTimeHorizon: unknown,
+): number {
+  if (!Array.isArray(data) || !finiteNumber(sourceTimeHorizon)) return 0;
   let left = 0;
   let right = data.length;
   while (left < right) {
@@ -65,13 +82,19 @@ export function canReuseFutureTimeAxisData({
   displayRows = [],
   reservePoints = FUTURE_TIME_AXIS_RESERVE_POINTS,
   sourceTimeHorizon,
-} = {}) {
+}: {
+  axisMode?: string;
+  currentData?: ChartSeriesInputRow[];
+  displayRows?: ChartSeriesInputRow[];
+  reservePoints?: unknown;
+  sourceTimeHorizon?: unknown;
+} = {}): boolean {
   if (axisMode !== "time"
     || !Array.isArray(currentData)
     || currentData.length === 0
     || !Array.isArray(displayRows)
     || displayRows.length === 0
-    || !Number.isFinite(sourceTimeHorizon)) {
+    || !finiteNumber(sourceTimeHorizon)) {
     return false;
   }
 
@@ -86,7 +109,7 @@ export function canReuseFutureTimeAxisData({
   return true;
 }
 
-function emptyPlan(currentKey) {
+function emptyPlan(currentKey: string | null): FutureTimeAxisPlan {
   return {
     changed: currentKey !== EMPTY_PLAN_KEY,
     data: currentKey === EMPTY_PLAN_KEY ? null : [],
@@ -108,7 +131,15 @@ export function planFutureTimeAxis({
   sourceInterval,
   sourceIntervalSeconds,
   sourceTimeHorizon,
-} = {}) {
+}: {
+  axisMode?: string;
+  currentKey?: string | null;
+  displayRows?: ChartSeriesInputRow[];
+  pointCount?: unknown;
+  sourceInterval?: unknown;
+  sourceIntervalSeconds?: unknown;
+  sourceTimeHorizon?: unknown;
+} = {}): FutureTimeAxisPlan {
   const count = normalizedPointCount(pointCount);
   const tailTime = lastDisplayTime(displayRows);
   const intervalBasis = createFutureIntervalBasis({
@@ -119,9 +150,12 @@ export function planFutureTimeAxis({
   if (!count || tailTime == null || !intervalBasis) return emptyPlan(currentKey);
 
   const usesOrdinalAxis = axisMode === "derived-ordinal" || axisMode === "ordinal";
-  const tailOrder = usesOrdinalAxis ? Number(tailTime?.order) : null;
+  const tailOrder = usesOrdinalAxis && typeof tailTime === "object"
+    ? Number(Reflect.get(tailTime, "order"))
+    : null;
   const tailSourceTime = usesOrdinalAxis
-    ? Number(tailTime?.sourceTime)
+    && typeof tailTime === "object"
+    ? Number(Reflect.get(tailTime, "sourceTime"))
     : Number(tailTime);
   if (!Number.isFinite(tailSourceTime)
     || (usesOrdinalAxis && !Number.isSafeInteger(tailOrder))) {
@@ -139,11 +173,11 @@ export function planFutureTimeAxis({
   ]);
   if (key === currentKey) return { changed: false, data: null, key };
 
-  const data = [];
+  const data: ChartSeriesRow[] = [];
   let previousSourceTime = Math.max(intervalBasis.horizon, tailSourceTime);
   for (let cell = 1; cell <= count; cell += 1) {
     const sourceTime = futureTimeFromIntervalDistance(intervalBasis, cell);
-    if (!Number.isFinite(sourceTime) || sourceTime <= previousSourceTime) {
+    if (sourceTime == null || !Number.isFinite(sourceTime) || sourceTime <= previousSourceTime) {
       return emptyPlan(currentKey);
     }
     data.push({
@@ -170,7 +204,16 @@ export function resolveFutureTimeAxisPointCount({
   maxPoints = FUTURE_TIME_AXIS_MAX_POINTS,
   reservePoints = FUTURE_TIME_AXIS_RESERVE_POINTS,
   visibleLogicalRange,
-} = {}) {
+}: {
+  contentLastLogical?: unknown;
+  currentCount?: unknown;
+  allocatedCount?: unknown;
+  growthPoints?: unknown;
+  initialPoints?: unknown;
+  maxPoints?: unknown;
+  reservePoints?: unknown;
+  visibleLogicalRange?: { to?: unknown } | null;
+} = {}): number {
   const maximum = Math.max(1, Math.floor(Number(maxPoints)) || FUTURE_TIME_AXIS_MAX_POINTS);
   const growth = Math.max(1, Math.floor(Number(growthPoints)) || FUTURE_TIME_AXIS_GROWTH_POINTS);
   const initial = Math.max(1, Math.floor(Number(initialPoints)) || FUTURE_TIME_AXIS_INITIAL_POINTS);
@@ -181,14 +224,17 @@ export function resolveFutureTimeAxisPointCount({
     Math.max(current, Math.floor(Number(allocatedCount)) || 0),
   );
 
-  if (!Number.isFinite(contentLastLogical)
-    || !Number.isFinite(visibleLogicalRange?.to)) {
+  const contentLast = finiteNumber(contentLastLogical) ? contentLastLogical : null;
+  const visibleTo = finiteNumber(visibleLogicalRange?.to)
+    ? visibleLogicalRange.to
+    : null;
+  if (contentLast === null || visibleTo === null) {
     return allocated > 0 ? allocated : Math.min(maximum, initial);
   }
 
   const required = Math.max(
     initial,
-    Math.ceil(visibleLogicalRange.to - contentLastLogical) + reserve,
+    Math.ceil(visibleTo - contentLast) + reserve,
   );
   const rounded = Math.min(
     maximum,

@@ -1,18 +1,63 @@
-function formatterSourceTime(value) {
-  const candidate = value?.sourceTime ?? value?._ordinal_sourceTime ?? value;
-  const numeric = Number(candidate);
-  return Number.isFinite(numeric) ? numeric : candidate;
+import type {
+  ChartOptionsImpl,
+  CrosshairOptions,
+  DeepPartial,
+  HorzScaleOptions,
+  IChartApiBase,
+  TickMarkType,
+} from "lightweight-charts";
+import type { ChartTime } from "./chartAdapterTypes.js";
+
+type AdapterTickMarkFormatter = (
+  time: ChartTime,
+  tickMarkType: TickMarkType,
+  locale?: string,
+) => string;
+
+interface LocalizationBundle {
+  localization?: {
+    timeFormatter: (time: ChartTime) => string;
+  };
+  timeScale?: {
+    tickMarkFormatter: AdapterTickMarkFormatter;
+  };
 }
 
-export function buildLocalizationOptions(timezone = "Local", interval = "1h") {
+interface PaneAppearanceOptions {
+  theme?: string;
+  customBg?: string;
+  timezone?: string;
+  interval?: string;
+}
+
+type AdapterChartOptions = DeepPartial<ChartOptionsImpl<ChartTime>> & {
+  timeScale?: DeepPartial<HorzScaleOptions> & {
+    tickMarkFormatter?: AdapterTickMarkFormatter;
+  };
+};
+
+function formatterSourceTime(value: unknown): number {
+  const candidate = value !== null && typeof value === "object"
+    ? Reflect.get(value, "sourceTime")
+      ?? Reflect.get(value, "_ordinal_sourceTime")
+      ?? value
+    : value;
+  const numeric = Number(candidate);
+  return numeric;
+}
+
+export function buildLocalizationOptions(
+  timezone = "Local",
+  interval = "1h",
+): LocalizationBundle {
   const timeZoneOpt = timezone && timezone !== "Local" ? timezone : undefined;
   try {
     const showSeconds = /^\d+s$/.test(String(interval));
-    const tooltipFormatOptions = {
+    const tooltipFormatOptions: Intl.DateTimeFormatOptions = {
       year: "numeric", month: "2-digit", day: "2-digit",
       hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
     };
-    const datePartsOptions = {
+    const datePartsOptions: Intl.DateTimeFormatOptions = {
       year: "numeric", month: "short", day: "numeric",
       hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
     };
@@ -25,16 +70,18 @@ export function buildLocalizationOptions(timezone = "Local", interval = "1h") {
 
     return {
       localization: {
-        timeFormatter: (ts) => tooltipFormatter.format(
+        timeFormatter: (ts: ChartTime) => tooltipFormatter.format(
           new Date(formatterSourceTime(ts) * 1000),
         ),
       },
       timeScale: {
-        tickMarkFormatter: (ts, tickMarkType) => {
+        tickMarkFormatter: (ts: ChartTime, tickMarkType: TickMarkType) => {
           const parts = partsFormatter.formatToParts(
             new Date(formatterSourceTime(ts) * 1000),
           );
-          const get = (type) => parts.find((part) => part.type === type)?.value;
+          const get = (type: Intl.DateTimeFormatPartTypes): string => (
+            parts.find((part) => part.type === type)?.value || ""
+          );
           const year = get("year");
           const month = get("month");
           const day = get("day");
@@ -64,7 +111,7 @@ export function buildLocalizationOptions(timezone = "Local", interval = "1h") {
   }
 }
 
-export function buildCrosshairOptions(visible = true) {
+export function buildCrosshairOptions(visible = true): DeepPartial<CrosshairOptions> {
   return {
     mode: 0,
     vertLine: {
@@ -82,9 +129,16 @@ export function buildCrosshairOptions(visible = true) {
   };
 }
 
-function getPaneThemeColors({ theme, customBg }) {
+function getPaneThemeColors({ theme, customBg }: PaneAppearanceOptions): {
+  bgColor: string;
+  textColor: string;
+  gridColor: string;
+  borderColor: string;
+} {
   return {
-    bgColor: theme === "light" ? "#ffffff" : (theme === "custom" ? customBg : "#0a0e17"),
+    bgColor: theme === "light"
+      ? "#ffffff"
+      : (theme === "custom" ? customBg || "#0a0e17" : "#0a0e17"),
     textColor: theme === "light" ? "#1e293b" : "#94a3b8",
     gridColor: theme === "light" ? "rgba(0,0,0,0.05)" : "rgba(30, 41, 59, 0.5)",
     borderColor: theme === "light" ? "#e2e8f0" : "#1e293b",
@@ -98,7 +152,10 @@ export function buildChartPaneOptions({
   timezone,
   interval,
   showTimeScale,
-}) {
+}: PaneAppearanceOptions & {
+  container: HTMLElement;
+  showTimeScale?: boolean;
+}): AdapterChartOptions {
   const loc = buildLocalizationOptions(timezone, interval);
   const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({ theme, customBg });
 
@@ -140,15 +197,19 @@ export function buildChartPaneOptions({
   };
 }
 
-export function applyChartPaneAppearance(chart, { theme, customBg, timezone, interval }) {
+export function applyChartPaneAppearance(
+  chart: IChartApiBase<ChartTime>,
+  { theme, customBg, timezone, interval }: PaneAppearanceOptions,
+): void {
   const loc = buildLocalizationOptions(timezone, interval);
   const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({ theme, customBg });
-  chart.applyOptions({
+  const appearanceOptions: AdapterChartOptions = {
     layout: { background: { color: bgColor }, textColor },
     grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
     rightPriceScale: { borderColor },
     timeScale: { borderColor },
     ...(loc.localization ? { localization: loc.localization } : {}),
     ...(loc.timeScale ? { timeScale: { tickMarkFormatter: loc.timeScale.tickMarkFormatter } } : {}),
-  });
+  };
+  chart.applyOptions(appearanceOptions);
 }

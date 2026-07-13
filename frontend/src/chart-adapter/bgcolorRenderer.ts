@@ -1,3 +1,11 @@
+import type { IChartApiBase } from "lightweight-charts";
+import type { MutableRef, PerfEventRecorder } from "./chartAdapterTypes.js";
+
+interface LegacyBgcolorGroup {
+  color?: string;
+  regions?: Array<{ time: number }>;
+}
+
 export function renderBgcolorOverlay({
   chart,
   container,
@@ -6,7 +14,15 @@ export function renderBgcolorOverlay({
   bgAnimFrameRef,
   paneId,
   recordPerfEvent,
-}) {
+}: {
+  chart: IChartApiBase<number> | null | undefined;
+  container: HTMLElement | null | undefined;
+  indicatorBgcolors: LegacyBgcolorGroup[] | null | undefined;
+  bgCanvasRef: MutableRef<HTMLCanvasElement | null>;
+  bgAnimFrameRef: MutableRef<number | null>;
+  paneId: string;
+  recordPerfEvent: PerfEventRecorder;
+}): (() => void) | undefined {
   if (!chart || !container) return undefined;
   if (!indicatorBgcolors || indicatorBgcolors.length === 0) {
     // Remove existing canvas if no bgcolors
@@ -30,9 +46,10 @@ export function renderBgcolorOverlay({
     bgCanvasRef.current = canvas;
     recordPerfEvent("chart.bgcolorOverlay.create", { paneId });
   }
+  const renderCanvas = canvas;
 
   // Build time→color map from all bgcolor sources
-  const colorRegions = []; // [{time, color}]
+  const colorRegions: Array<{ time: number; color: string }> = [];
   for (const bg of indicatorBgcolors) {
     if (!bg.regions || !Array.isArray(bg.regions)) continue;
     const bgColor = bg.color || "rgba(59,130,246,0.1)";
@@ -44,7 +61,7 @@ export function renderBgcolorOverlay({
   }
   if (colorRegions.length === 0) return undefined;
 
-  const timeColorMap = new Map();
+  const timeColorMap = new Map<number, string>();
   for (const r of colorRegions) {
     timeColorMap.set(r.time, r.color);
   }
@@ -58,12 +75,12 @@ export function renderBgcolorOverlay({
 
     // Update canvas size
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    canvas.style.width = w + "px";
-    canvas.style.height = h + "px";
+    renderCanvas.width = w * dpr;
+    renderCanvas.height = h * dpr;
+    renderCanvas.style.width = w + "px";
+    renderCanvas.style.height = h + "px";
 
-    const ctx2d = canvas.getContext("2d");
+    const ctx2d = renderCanvas.getContext("2d");
     if (!ctx2d) return;
     ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx2d.clearRect(0, 0, w, h);

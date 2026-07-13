@@ -1,6 +1,25 @@
 import { chartSeriesTypes } from "./lightweightChartSurface.js";
+import type {
+  IChartApiBase,
+  IPriceLine,
+  ISeriesApi,
+  LineStyle,
+  LineWidth,
+} from "lightweight-charts";
+import type {
+  ChartTime,
+  FillRenderResult,
+  IndicatorHline,
+  MainSeriesHandle,
+  MutableRef,
+  PerfEventRecorder,
+} from "./chartAdapterTypes.js";
 
-export function buildHlineSignature(indicatorHlines = []) {
+type AreaSeriesHandle = ISeriesApi<"Area", ChartTime>;
+
+export function buildHlineSignature(
+  indicatorHlines: IndicatorHline[] | null | undefined = [],
+): string {
   if (!indicatorHlines?.length) return "empty";
   return indicatorHlines
     .map((hline) => [
@@ -22,7 +41,21 @@ export function renderFillSeries({
   definitionsCount,
   recordPerfEvent,
   onError,
-}) {
+}: {
+  chart: IChartApiBase<ChartTime>;
+  fillPayload: FillRenderResult;
+  fillSeriesRef: MutableRef<AreaSeriesHandle[]>;
+  fillSeriesStateRef: MutableRef<{
+    chart: IChartApiBase<ChartTime> | null;
+    paneIndex: number | null;
+    signature: string;
+  }>;
+  paneId: string;
+  paneIndex: number;
+  definitionsCount: number;
+  recordPerfEvent: PerfEventRecorder;
+  onError?: (error: unknown) => void;
+}): void {
   if (
     fillSeriesStateRef.current.chart === chart
     && fillSeriesStateRef.current.signature === fillPayload.signature
@@ -55,7 +88,7 @@ export function renderFillSeries({
     try {
       const areaSeries = chart.addSeries(chartSeriesTypes.area, {
         lineColor: "transparent",
-        lineWidth: 0,
+        lineWidth: 0 as LineWidth,
         topColor: entry.fillColor,
         bottomColor: "transparent",
         priceScaleId: "right",
@@ -69,7 +102,7 @@ export function renderFillSeries({
 
       const lowerSeries = chart.addSeries(chartSeriesTypes.area, {
         lineColor: "transparent",
-        lineWidth: 0,
+        lineWidth: 0 as LineWidth,
         topColor: entry.backgroundColor,
         bottomColor: entry.backgroundColor,
         priceScaleId: "right",
@@ -102,7 +135,18 @@ export function renderHlines({
   paneId,
   recordPerfEvent,
   onError,
-}) {
+}: {
+  series: MainSeriesHandle | null | undefined;
+  indicatorHlines: IndicatorHline[] | null | undefined;
+  hlinesRef: MutableRef<Array<{ series: MainSeriesHandle; priceLine: IPriceLine }>>;
+  hlinesStateRef: MutableRef<{
+    target: MainSeriesHandle | null | undefined;
+    signature: string;
+  }>;
+  paneId: string;
+  recordPerfEvent: PerfEventRecorder;
+  onError?: (error: unknown) => void;
+}): void {
   const signature = buildHlineSignature(indicatorHlines);
 
   if (hlinesStateRef.current.target === series && hlinesStateRef.current.signature === signature) {
@@ -128,7 +172,13 @@ export function renderHlines({
 
   if (!series || !indicatorHlines || indicatorHlines.length === 0) return;
 
-  const lineStyleMap = { solid: 0, dotted: 1, dashed: 2, large_dashed: 3, sparse_dotted: 4 };
+  const lineStyleMap: Readonly<Record<string, LineStyle>> = {
+    solid: 0,
+    dotted: 1,
+    dashed: 2,
+    large_dashed: 3,
+    sparse_dotted: 4,
+  };
   let createdHlines = 0;
 
   for (const hline of indicatorHlines) {
@@ -138,7 +188,9 @@ export function renderHlines({
         price: hline.price,
         color: hline.color || "#787b86",
         lineWidth: 1,
-        lineStyle: typeof hline.linestyle === "number" ? hline.linestyle : (lineStyleMap[hline.linestyle] ?? 2),
+        lineStyle: typeof hline.linestyle === "number"
+          ? hline.linestyle as LineStyle
+          : (typeof hline.linestyle === "string" ? lineStyleMap[hline.linestyle] ?? 2 : 2),
         axisLabelVisible: true,
         title: hline.title || "",
       });

@@ -1,4 +1,16 @@
-export function ensurePane(chart, paneIndex, { preserveEmptyPane = true } = {}) {
+import type { IChartApiBase } from "lightweight-charts";
+import type {
+  ChartTime,
+  PaneHandle,
+} from "./chartAdapterTypes.js";
+
+type AdapterChart = IChartApiBase<ChartTime>;
+
+export function ensurePane(
+  chart: AdapterChart | null | undefined,
+  paneIndex: number,
+  { preserveEmptyPane = true }: { preserveEmptyPane?: boolean } = {},
+): PaneHandle | null {
   if (!chart || !Number.isInteger(paneIndex) || paneIndex < 0) return null;
 
   let panes = chart.panes?.() || [];
@@ -15,7 +27,10 @@ export function ensurePane(chart, paneIndex, { preserveEmptyPane = true } = {}) 
   return pane;
 }
 
-export function setPaneHeights(chart, heightsPx = []) {
+export function setPaneHeights(
+  chart: AdapterChart | null | undefined,
+  heightsPx: number[] = [],
+): void {
   if (!chart || !Array.isArray(heightsPx)) return;
   const panes = chart.panes?.() || [];
 
@@ -33,11 +48,12 @@ export function setPaneHeights(chart, heightsPx = []) {
       : null;
   });
   const canRestoreRatios = panes.length > 0
-    && stretchValues.every((height) => Number.isFinite(height) && height > 0)
+    && stretchValues.every((height) => height != null && Number.isFinite(height) && height > 0)
     && panes.every((pane) => typeof pane?.setStretchFactor === "function");
   if (canRestoreRatios) {
     for (let index = 0; index < panes.length; index += 1) {
-      panes[index].setStretchFactor(stretchValues[index]);
+      const stretch = stretchValues[index];
+      if (stretch != null) panes[index].setStretchFactor(stretch);
     }
     return;
   }
@@ -49,7 +65,7 @@ export function setPaneHeights(chart, heightsPx = []) {
   }
 }
 
-export function readPaneHeights(chart) {
+export function readPaneHeights(chart: AdapterChart | null | undefined): number[] {
   if (!chart) return [];
   const heights = (chart.panes?.() || []).map((pane) => pane.getHeight?.());
   return heights.every((height) => Number.isFinite(height) && height > 0)
@@ -62,7 +78,11 @@ export function readPaneHeights(chart) {
  * while autoSize is active. A normal resize() is ignored in autoSize mode, so
  * temporarily opt out, perform one forced public-API resize, then restore it.
  */
-export function materializePaneLayout(chart, container, { nudgeAxis = "width" } = {}) {
+export function materializePaneLayout(
+  chart: AdapterChart | null | undefined,
+  container: HTMLElement | null | undefined,
+  { nudgeAxis = "width" }: { nudgeAxis?: "width" | "height" } = {},
+): boolean {
   if (!chart
     || typeof chart.applyOptions !== "function"
     || typeof chart.resize !== "function"
@@ -104,7 +124,10 @@ export function materializePaneLayout(chart, container, { nudgeAxis = "width" } 
   }
 }
 
-export function trimPanes(chart, retainCount = 1) {
+export function trimPanes(
+  chart: AdapterChart | null | undefined,
+  retainCount = 1,
+): number {
   if (!chart || typeof chart.removePane !== "function") return 0;
   const panes = chart.panes?.() || [];
   const safeRetainCount = Math.max(1, Math.floor(Number(retainCount) || 1));
@@ -120,14 +143,20 @@ export function trimPanes(chart, retainCount = 1) {
   return removed;
 }
 
-export function removePaneSeries(chart, entries = []) {
+export function removePaneSeries(
+  chart: AdapterChart | null | undefined,
+  entries: unknown[] = [],
+): number {
   if (!chart) return 0;
   let removed = 0;
   for (const entry of entries) {
-    const series = entry?.series || entry;
+    const wrappedSeries = entry !== null && typeof entry === "object" && "series" in entry
+      ? Reflect.get(entry, "series")
+      : null;
+    const series: unknown = wrappedSeries || entry;
     if (!series) continue;
     try {
-      chart.removeSeries(series);
+      Reflect.apply(chart.removeSeries, chart, [series]);
       removed += 1;
     } catch {
       // Series cleanup is best-effort because pane removal can detach entries.

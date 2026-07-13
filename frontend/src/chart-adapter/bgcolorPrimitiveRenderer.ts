@@ -1,7 +1,25 @@
 import { chartTimeKey, compareChartTimes } from "./chartTime.js";
+import type {
+  IChartApiBase,
+  IPanePrimitive,
+  IPanePrimitivePaneView,
+  IPrimitivePaneRenderer,
+  PaneAttachedParameter,
+  PrimitivePaneViewZOrder,
+} from "lightweight-charts";
+import type {
+  BgcolorRegion,
+  ChartTime,
+  IndicatorBgcolorGroup,
+  MutableRef,
+  PaneHandle,
+  PerfEventRecorder,
+} from "./chartAdapterTypes.js";
 
-export function flattenBgcolorRegions(indicatorBgcolors = []) {
-  const regions = [];
+export function flattenBgcolorRegions(
+  indicatorBgcolors: IndicatorBgcolorGroup[] = [],
+): BgcolorRegion[] {
+  const regions: BgcolorRegion[] = [];
   for (const bg of indicatorBgcolors || []) {
     const color = bg?.color || "rgba(59,130,246,0.1)";
     for (const region of bg?.regions || []) {
@@ -13,21 +31,28 @@ export function flattenBgcolorRegions(indicatorBgcolors = []) {
   return regions;
 }
 
-export function buildBgcolorSignature(regions = []) {
+export function buildBgcolorSignature(regions: BgcolorRegion[] = []): string {
   if (!regions.length) return "empty";
   return JSON.stringify(regions.map((region) => [chartTimeKey(region.time), region.color]));
 }
 
-class BgcolorPaneRenderer {
+interface BgcolorRendererData {
+  chart: IChartApiBase<ChartTime> | null;
+  regions: BgcolorRegion[];
+}
+
+class BgcolorPaneRenderer implements IPrimitivePaneRenderer {
+  private _data: BgcolorRendererData;
+
   constructor() {
     this._data = { chart: null, regions: [] };
   }
 
-  update(data) {
+  update(data: BgcolorRendererData): void {
     this._data = data;
   }
 
-  draw(target) {
+  draw(target: Parameters<IPrimitivePaneRenderer["draw"]>[0]): void {
     const { chart, regions } = this._data;
     if (!chart || !regions?.length) return;
 
@@ -56,57 +81,65 @@ class BgcolorPaneRenderer {
   }
 }
 
-class BgcolorPaneView {
-  constructor(source) {
+class BgcolorPaneView implements IPanePrimitivePaneView {
+  private readonly _source: BgcolorPanePrimitive;
+  private readonly _renderer: BgcolorPaneRenderer;
+
+  constructor(source: BgcolorPanePrimitive) {
     this._source = source;
     this._renderer = new BgcolorPaneRenderer();
   }
 
-  update() {
+  update(): void {
     this._renderer.update({
       chart: this._source._chart,
       regions: this._source._regions,
     });
   }
 
-  renderer() {
+  renderer(): IPrimitivePaneRenderer {
     return this._renderer;
   }
 
-  zOrder() {
+  zOrder(): PrimitivePaneViewZOrder {
     return "bottom";
   }
 }
 
-class BgcolorPanePrimitive {
-  constructor(regions) {
+class BgcolorPanePrimitive implements IPanePrimitive<ChartTime> {
+  _chart: IChartApiBase<ChartTime> | null;
+  _requestUpdate: (() => void) | null;
+  _regions: BgcolorRegion[];
+  private readonly _paneView: BgcolorPaneView;
+
+  constructor(regions: BgcolorRegion[]) {
     this._chart = null;
     this._requestUpdate = null;
     this._regions = regions;
     this._paneView = new BgcolorPaneView(this);
   }
 
-  attached({ chart, requestUpdate }) {
+  attached({ chart, requestUpdate }: PaneAttachedParameter<ChartTime>): void {
     this._chart = chart;
     this._requestUpdate = requestUpdate;
     this._requestUpdate?.();
   }
 
-  detached() {
+  detached(): void {
     this._chart = null;
     this._requestUpdate = null;
   }
 
-  setRegions(regions) {
+  setRegions(regions: BgcolorRegion[]): void {
     this._regions = regions;
     this._requestUpdate?.();
   }
 
-  updateAllViews() {
+  updateAllViews(): void {
     this._paneView.update();
   }
 
-  paneViews() {
+  paneViews(): readonly IPanePrimitivePaneView[] {
     return [this._paneView];
   }
 }
@@ -120,7 +153,19 @@ export function renderBgcolors({
   paneId,
   recordPerfEvent,
   onError,
-}) {
+}: {
+  chart: IChartApiBase<ChartTime> | null | undefined;
+  pane: PaneHandle | null | undefined;
+  indicatorBgcolors: IndicatorBgcolorGroup[];
+  bgcolorPrimitiveRef: MutableRef<BgcolorPanePrimitive | null>;
+  bgcolorStateRef: MutableRef<{
+    pane: PaneHandle | null | undefined;
+    signature: string;
+  }>;
+  paneId: string;
+  recordPerfEvent: PerfEventRecorder;
+  onError?: (error: unknown) => void;
+}): void {
   const regions = flattenBgcolorRegions(indicatorBgcolors);
   const signature = buildBgcolorSignature(regions);
 

@@ -1,3 +1,17 @@
+import type {
+  IChartApiBase,
+  ITimeScaleApi,
+  Logical,
+  LogicalRange,
+} from "lightweight-charts";
+import type {
+  ChartSeriesInputRow,
+  ChartTime,
+  ViewportAnchor,
+  ViewportLogicalRange,
+  ViewportRestorePlan,
+} from "./chartAdapterTypes.js";
+
 const DEFAULT_UNLOCK_DELAY_MS = 200;
 const PRIORITY = {
   fit: 10,
@@ -7,7 +21,26 @@ const PRIORITY = {
 const COMPENSATE_INTENT = "compensateShift";
 const LOGICAL_SHIFT_EPSILON = 1e-7;
 
-function safeCall(fn, fallback = null) {
+type AdapterChart = IChartApiBase<ChartTime>;
+type AdapterTimeScale = ITimeScaleApi<ChartTime>;
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+interface ViewportIntent {
+  name: string;
+  priority: number;
+  shift?: number;
+  apply: (timeScale: AdapterTimeScale, chart: AdapterChart | null) => unknown;
+}
+
+export interface ViewportControllerOptions {
+  chartProvider?: (() => AdapterChart | null) | null;
+  contentLogicalRangeProvider?: (() => ViewportLogicalRange | null) | null;
+  unlockDelayMs?: number;
+  setTimer?: (callback: () => void, delayMs: number) => TimerHandle;
+  clearTimer?: (timer: TimerHandle) => void;
+}
+
+function safeCall<TResult>(fn: () => TResult, fallback: TResult): TResult {
   try {
     return fn();
   } catch {
@@ -15,14 +48,35 @@ function safeCall(fn, fallback = null) {
   }
 }
 
+function finiteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function toLogicalRange(range: ViewportLogicalRange): LogicalRange {
+  return {
+    from: range.from as Logical,
+    to: range.to as Logical,
+  };
+}
+
 export class ViewportController {
+  private readonly chartProvider: () => AdapterChart | null;
+  private readonly contentLogicalRangeProvider: (() => ViewportLogicalRange | null) | null;
+  private readonly unlockDelayMs: number;
+  private readonly setTimer: (callback: () => void, delayMs: number) => TimerHandle;
+  private readonly clearTimer: (timer: TimerHandle) => void;
+  private userInteracting: boolean;
+  private unlockTimer: TimerHandle | null;
+  private pendingIntent: ViewportIntent | null;
+  private readonly fitSessionKeys: Set<string>;
+
   constructor({
     chartProvider,
     contentLogicalRangeProvider = null,
     unlockDelayMs = DEFAULT_UNLOCK_DELAY_MS,
     setTimer = (callback, delayMs) => setTimeout(callback, delayMs),
     clearTimer = (timer) => clearTimeout(timer),
-  } = {}) {
+  }: ViewportControllerOptions = {}) {
     this.chartProvider = chartProvider || (() => null);
     this.contentLogicalRangeProvider = contentLogicalRangeProvider;
     this.unlockDelayMs = unlockDelayMs;
@@ -34,19 +88,19 @@ export class ViewportController {
     this.fitSessionKeys = new Set();
   }
 
-  getChart() {
+  getChart(): AdapterChart | null {
     return this.chartProvider?.() || null;
   }
 
-  getTimeScale() {
+  getTimeScale(): AdapterTimeScale | null {
     return this.getChart()?.timeScale?.() || null;
   }
 
-  isLocked() {
+  isLocked(): boolean {
     return this.userInteracting;
   }
 
-  markUserInteracting() {
+  markUserInteracting(): void {
     this.userInteracting = true;
     if (this.unlockTimer) this.clearTimer(this.unlockTimer);
     this.unlockTimer = this.setTimer(() => {
@@ -56,11 +110,11 @@ export class ViewportController {
     }, this.unlockDelayMs);
   }
 
-  dispose() {
+  dispose(): void {
     this.resetSession();
   }
 
-  resetSession() {
+  resetSession(): void {
     if (this.unlockTimer != null) this.clearTimer(this.unlockTimer);
     this.unlockTimer = null;
     this.userInteracting = false;
@@ -68,7 +122,11 @@ export class ViewportController {
     this.fitSessionKeys.clear();
   }
 
-  applyIntent(name, priority, apply) {
+  applyIntent(
+    name: string,
+    priority: number,
+    apply: ViewportIntent["apply"],
+  ): boolean {
     if (this.userInteracting) {
       if (!this.pendingIntent || priority >= this.pendingIntent.priority) {
         this.pendingIntent = { name, priority, apply };
@@ -80,17 +138,20 @@ export class ViewportController {
     return Boolean(apply(timeScale, this.getChart()));
   }
 
-  flushPendingIntent() {
+  flushPendingIntent(): boolean {
     const intent = this.pendingIntent;
     this.pendingIntent = null;
     if (!intent) return false;
     return this.applyIntent(intent.name, intent.priority, intent.apply);
   }
 
-  fitSemanticContent(timeScale) {
-    const contentRange = safeCall(() => this.contentLogicalRangeProvider?.(), null);
-    if (Number.isFinite(contentRange?.from)
-      && Number.isFinite(contentRange?.to)
+  fitSemanticContent(timeScale: AdapterTimeScale): boolean {
+    const contentRangeProvider = this.contentLogicalRangeProvider;
+    const contentRange = contentRangeProvider
+      ? safeCall(() => contentRangeProvider(), null)
+      : null;
+    if (finiteNumber(contentRange?.from)
+      && finiteNumber(contentRange?.to)
       && contentRange.from <= contentRange.to
       && typeof timeScale?.setVisibleLogicalRange === "function") {
       const configuredRightOffset = safeCall(
@@ -101,14 +162,14 @@ export class ViewportController {
         ? Math.max(0, configuredRightOffset)
         : 0;
       const to = Math.max(contentRange.from + 1, contentRange.to + rightOffset);
-      timeScale.setVisibleLogicalRange({ from: contentRange.from, to });
+      timeScale.setVisibleLogicalRange(toLogicalRange({ from: contentRange.from, to }));
       return true;
     }
     timeScale?.fitContent?.();
     return true;
   }
 
-  fitOnce(sessionKey = "default") {
+  fitOnce(sessionKey = "default"): boolean {
     if (this.fitSessionKeys.has(sessionKey)) return false;
     this.fitSessionKeys.add(sessionKey);
     return this.applyIntent("fitOnce", PRIORITY.fit, (timeScale) => {
@@ -116,7 +177,7 @@ export class ViewportController {
     });
   }
 
-  resetFit(sessionKey = null) {
+  resetFit(sessionKey: string | null = null): void {
     if (sessionKey == null) {
       this.fitSessionKeys.clear();
       return;
@@ -124,10 +185,13 @@ export class ViewportController {
     this.fitSessionKeys.delete(sessionKey);
   }
 
-  applySessionRestore(plan, { sessionKey = "default" } = {}) {
+  applySessionRestore(
+    plan: ViewportRestorePlan | null | undefined,
+    { sessionKey = "default" }: { sessionKey?: string } = {},
+  ): boolean {
     if (!plan) return this.fitOnce(sessionKey);
     return this.applyIntent("sessionRestore", PRIORITY.restore, (timeScale) => {
-      if (Number.isFinite(plan.barSpacing)) {
+      if (finiteNumber(plan.barSpacing)) {
         timeScale.applyOptions?.({ barSpacing: plan.barSpacing });
       }
 
@@ -137,24 +201,26 @@ export class ViewportController {
         // (bars from the right edge). It must be restored through
         // scrollToPosition, never through the rightOffset option, which is
         // a permanent whitespace setting with a different meaning.
-        if (Number.isFinite(plan.rightOffset)) {
+        if (finiteNumber(plan.rightOffset)) {
           timeScale.scrollToPosition?.(plan.rightOffset, false);
         }
         restored = true;
       }
-      if (!restored && plan.mode === "time" && plan.timeRange) {
+      const timeRange = plan.timeRange;
+      if (!restored && plan.mode === "time" && timeRange) {
         restored = safeCall(() => {
-          timeScale.setVisibleRange(plan.timeRange);
+          timeScale.setVisibleRange(timeRange);
           return true;
         }, false);
       }
-      if (!restored && plan.mode === "logical" && plan.logicalRange) {
+      const logicalRange = plan.logicalRange;
+      if (!restored && plan.mode === "logical" && logicalRange) {
         restored = safeCall(() => {
-          timeScale.setVisibleLogicalRange(plan.logicalRange);
+          timeScale.setVisibleLogicalRange(toLogicalRange(logicalRange));
           return true;
         }, false);
       }
-      if (restored && Number.isFinite(plan.scrollPosition)) {
+      if (restored && finiteNumber(plan.scrollPosition)) {
         timeScale.scrollToPosition?.(plan.scrollPosition, false);
       }
       if (!restored) {
@@ -165,20 +231,23 @@ export class ViewportController {
     });
   }
 
-  restoreProjectionRange(logicalRange, { barSpacing = null } = {}) {
+  restoreProjectionRange(
+    logicalRange: ViewportLogicalRange | null | undefined,
+    { barSpacing = null }: { barSpacing?: number | null } = {},
+  ): boolean {
     return this.applyIntent("projectionRestore", PRIORITY.restore, (timeScale) => {
-      if (Number.isFinite(barSpacing)) {
+      if (finiteNumber(barSpacing)) {
         timeScale.applyOptions?.({ barSpacing });
       }
-      if (Number.isFinite(logicalRange?.from) && Number.isFinite(logicalRange?.to)) {
-        timeScale.setVisibleLogicalRange?.(logicalRange);
+      if (finiteNumber(logicalRange?.from) && finiteNumber(logicalRange?.to)) {
+        timeScale.setVisibleLogicalRange?.(toLogicalRange(logicalRange));
         return true;
       }
       return this.fitSemanticContent(timeScale);
     });
   }
 
-  captureAnchor(previousRows) {
+  captureAnchor(previousRows: ChartSeriesInputRow[]): ViewportAnchor | null {
     if (!previousRows?.length) return null;
     const timeScale = this.getTimeScale();
     const range = safeCall(() => timeScale?.getVisibleLogicalRange?.(), null);
@@ -193,7 +262,10 @@ export class ViewportController {
     };
   }
 
-  applyAnchorShift(anchor, indexOfTime) {
+  applyAnchorShift(
+    anchor: ViewportAnchor | null | undefined,
+    indexOfTime: ((time: ChartTime) => number) | null | undefined,
+  ): boolean {
     if (!anchor || typeof indexOfTime !== "function") return false;
     const newIndex = indexOfTime(anchor.time);
     if (
@@ -218,7 +290,7 @@ export class ViewportController {
     return this.applyLogicalShiftNow(desiredFrom - currentRange.from, currentRange);
   }
 
-  applyLogicalShiftNow(shift, currentRange = null) {
+  applyLogicalShiftNow(shift: number, currentRange: LogicalRange | null = null): boolean {
     if (!Number.isFinite(shift)) return false;
     if (Math.abs(shift) <= LOGICAL_SHIFT_EPSILON) return true;
 
@@ -236,33 +308,35 @@ export class ViewportController {
     // the user-interaction lock is active, otherwise one wrong frame is shown
     // and the queued correction becomes a visible jump.
     return safeCall(() => {
-      timeScale.setVisibleLogicalRange?.({
+      timeScale.setVisibleLogicalRange?.(toLogicalRange({
         from: range.from + shift,
         to: range.to + shift,
-      });
+      }));
       return true;
     }, false);
   }
 
-  queueShift(shift) {
+  queueShift(shift: number): boolean {
     if (!Number.isFinite(shift) || shift === 0) return false;
     if (this.userInteracting && this.pendingIntent?.name === COMPENSATE_INTENT) {
       // Accumulate shifts queued during one interaction so none are lost.
-      this.pendingIntent.shift += shift;
+      this.pendingIntent.shift = (this.pendingIntent.shift || 0) + shift;
       return false;
     }
-    const intent = {
+    const intent: ViewportIntent = {
       name: COMPENSATE_INTENT,
       priority: PRIORITY.compensate,
       shift,
+      apply: () => false,
     };
     intent.apply = (timeScale) => {
       const range = safeCall(() => timeScale.getVisibleLogicalRange?.(), null);
       if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to)) return false;
-      timeScale.setVisibleLogicalRange?.({
-        from: range.from + intent.shift,
-        to: range.to + intent.shift,
-      });
+      const intentShift = intent.shift || 0;
+      timeScale.setVisibleLogicalRange?.(toLogicalRange({
+        from: range.from + intentShift,
+        to: range.to + intentShift,
+      }));
       return true;
     };
     if (this.userInteracting) {
@@ -276,11 +350,13 @@ export class ViewportController {
     return Boolean(intent.apply(timeScale, this.getChart()));
   }
 
-  compensateInsert(addedLeft = 0) {
+  compensateInsert(addedLeft = 0): boolean {
     return this.applyLogicalShiftNow(Number(addedLeft) || 0);
   }
 }
 
-export function createViewportController(options = {}) {
+export function createViewportController(
+  options: ViewportControllerOptions = {},
+): ViewportController {
   return new ViewportController(options);
 }

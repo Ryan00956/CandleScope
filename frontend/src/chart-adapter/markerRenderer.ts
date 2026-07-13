@@ -1,7 +1,20 @@
 import { createSeriesMarkers } from "lightweight-charts";
+import type {
+  ISeriesMarkersPluginApi,
+  SeriesMarker,
+  SeriesMarkerBarPosition,
+  SeriesMarkerShape,
+} from "lightweight-charts";
 import { compareChartTimes } from "./chartTime.js";
+import type {
+  ChartTime,
+  IndicatorMarkerGroup,
+  MainSeriesHandle,
+  MutableRef,
+  PerfEventRecorder,
+} from "./chartAdapterTypes.js";
 
-const SHAPE_MAP = {
+const SHAPE_MAP: Readonly<Record<string, SeriesMarkerShape>> = {
   triangleup: "arrowUp",
   triangle_up: "arrowUp",
   arrow_up: "arrowUp",
@@ -14,7 +27,7 @@ const SHAPE_MAP = {
   xcross: "circle",
 };
 
-const POS_MAP = {
+const POS_MAP: Readonly<Record<string, SeriesMarkerBarPosition>> = {
   above: "aboveBar",
   below: "belowBar",
   abovebar: "aboveBar",
@@ -23,17 +36,36 @@ const POS_MAP = {
   bottom: "belowBar",
 };
 
-export function flattenIndicatorMarkers(indicatorMarkers = []) {
-  const allMarkers = [];
+function markerPosition(value: string | undefined): SeriesMarkerBarPosition {
+  const normalized = value ? POS_MAP[value] || value : "aboveBar";
+  return normalized === "aboveBar" || normalized === "belowBar" || normalized === "inBar"
+    ? normalized
+    : "aboveBar";
+}
+
+function markerShape(value: string | undefined): SeriesMarkerShape {
+  const normalized = value ? SHAPE_MAP[value] || value : "circle";
+  return normalized === "circle"
+    || normalized === "square"
+    || normalized === "arrowUp"
+    || normalized === "arrowDown"
+    ? normalized
+    : "circle";
+}
+
+export function flattenIndicatorMarkers(
+  indicatorMarkers: IndicatorMarkerGroup[] = [],
+): SeriesMarker<ChartTime>[] {
+  const allMarkers: SeriesMarker<ChartTime>[] = [];
   for (const group of indicatorMarkers) {
     if (!group.data || !Array.isArray(group.data)) continue;
     for (const m of group.data) {
       if (m.time == null) continue;
       allMarkers.push({
         time: m.time,
-        position: POS_MAP[m.position] || m.position || "aboveBar",
+        position: markerPosition(m.position),
         color: m.color || "#f59e0b",
-        shape: SHAPE_MAP[m.shape] || m.shape || "circle",
+        shape: markerShape(m.shape),
         text: m.text || "",
       });
     }
@@ -50,7 +82,21 @@ export function renderMarkers({
   paneId,
   recordPerfEvent,
   onError,
-}) {
+}: {
+  targetSeries: MainSeriesHandle | null | undefined;
+  indicatorMarkers: IndicatorMarkerGroup[] | null | undefined;
+  markerTargetRef: MutableRef<{
+    series: MainSeriesHandle;
+    plugin: ISeriesMarkersPluginApi<ChartTime>;
+  } | null>;
+  markerStateRef: MutableRef<{
+    target: MainSeriesHandle | null;
+    state: "empty" | "markers";
+  }>;
+  paneId: string;
+  recordPerfEvent: PerfEventRecorder;
+  onError?: (error: unknown) => void;
+}): void {
   if (markerTargetRef.current && markerTargetRef.current.series !== targetSeries) {
     try { markerTargetRef.current.plugin.detach(); } catch { /* */ }
     markerTargetRef.current = null;
@@ -61,13 +107,15 @@ export function renderMarkers({
     });
   }
   if (!targetSeries) return;
+  const series = targetSeries;
 
-  function getPlugin() {
-    if (markerTargetRef.current?.series === targetSeries) {
-      return markerTargetRef.current.plugin;
+  function getPlugin(): ISeriesMarkersPluginApi<ChartTime> {
+    const currentTarget = markerTargetRef.current;
+    if (currentTarget?.series === series) {
+      return currentTarget.plugin;
     }
-    const plugin = createSeriesMarkers(targetSeries, []);
-    markerTargetRef.current = { series: targetSeries, plugin };
+    const plugin = createSeriesMarkers(series, []);
+    markerTargetRef.current = { series, plugin };
     return plugin;
   }
 

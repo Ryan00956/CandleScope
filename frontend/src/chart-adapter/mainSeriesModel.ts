@@ -4,24 +4,38 @@ import {
   normalizeMainChartType,
 } from "../shared/mainChartTypes.js";
 import { sourceTimeFromChartTime } from "./chartTime.js";
+import type { MainChartType } from "../shared/mainChartTypes.js";
+import type {
+  ChartSeriesInputRow,
+  ChartTime,
+  IndicatorBarcolorGroup,
+  MainSeriesColorOptions,
+  MainSeriesCrosshairValue,
+  MainSeriesDataOptions,
+} from "./chartAdapterTypes.js";
 
 const DEFAULT_UP_COLOR = "#22c55e";
 const DEFAULT_DOWN_COLOR = "#ef4444";
 const PRICE_LINE_COLOR = "#2962ff";
 const TRANSPARENT_BODY_COLOR = "rgba(0, 0, 0, 0)";
 
-function finiteNumber(value) {
+function finiteNumber(value: unknown): number | null {
   if (value == null || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function validClose(row) {
+function validClose(row: ChartSeriesInputRow | null | undefined): number | null {
   if (row?.__whitespace) return null;
   return finiteNumber(row?.close);
 }
 
-function validOhlc(row) {
+function validOhlc(row: ChartSeriesInputRow | null | undefined): {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+} | null {
   if (row?.__whitespace) return null;
   const open = finiteNumber(row?.open);
   const high = finiteNumber(row?.high);
@@ -32,7 +46,10 @@ function validOhlc(row) {
     : { open, high, low, close };
 }
 
-function withCandlestickColor(point, color) {
+function withCandlestickColor(
+  point: ChartSeriesInputRow,
+  color: string | null | undefined,
+): ChartSeriesInputRow {
   if (!color) return point;
   return {
     ...point,
@@ -42,7 +59,7 @@ function withCandlestickColor(point, color) {
   };
 }
 
-function colorWithAlpha(color, alpha, fallback) {
+function colorWithAlpha(color: unknown, alpha: number, fallback: string): string {
   const value = String(color || "").trim();
   const shortHex = /^#([0-9a-f]{3})$/i.exec(value);
   const longHex = /^#([0-9a-f]{6})$/i.exec(value);
@@ -56,8 +73,10 @@ function colorWithAlpha(color, alpha, fallback) {
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
-export function buildIndicatorBarColorMap(indicatorBarcolors = []) {
-  const colorMap = new Map();
+export function buildIndicatorBarColorMap(
+  indicatorBarcolors: IndicatorBarcolorGroup[] = [],
+): Map<ChartTime, string> {
+  const colorMap = new Map<ChartTime, string>();
   for (const group of indicatorBarcolors || []) {
     if (!Array.isArray(group?.data)) continue;
     for (const entry of group.data) {
@@ -67,16 +86,16 @@ export function buildIndicatorBarColorMap(indicatorBarcolors = []) {
   return colorMap;
 }
 
-export function toMainSeriesPoint(row, {
+export function toMainSeriesPoint(row: ChartSeriesInputRow, {
   chartType,
   downColor = DEFAULT_DOWN_COLOR,
   indicatorColor = null,
   previousClose = null,
   upColor = DEFAULT_UP_COLOR,
-} = {}) {
+}: MainSeriesColorOptions = {}): ChartSeriesInputRow {
   const resolvedType = normalizeMainChartType(chartType);
   const time = row?.time;
-  const finish = (point) => (row?.customValues
+  const finish = (point: ChartSeriesInputRow): ChartSeriesInputRow => (row?.customValues
     ? { ...point, customValues: row.customValues }
     : point);
   if (row?.__whitespace || time == null) return finish({ time });
@@ -121,7 +140,7 @@ export function toMainSeriesPoint(row, {
   });
 }
 
-function previousCloseBefore(rows, startIndex) {
+function previousCloseBefore(rows: ChartSeriesInputRow[], startIndex: number): number | null {
   for (let index = Math.min(startIndex - 1, rows.length - 1); index >= 0; index -= 1) {
     const close = validClose(rows[index]);
     if (close != null) return close;
@@ -129,8 +148,12 @@ function previousCloseBefore(rows, startIndex) {
   return null;
 }
 
-function indicatorColorForRow(colorMap, row) {
+function indicatorColorForRow(
+  colorMap: ReadonlyMap<ChartTime, string>,
+  row: ChartSeriesInputRow,
+): string | null {
   const time = row?.time;
+  if (time == null) return null;
   if (colorMap.has(time)) return colorMap.get(time) || null;
   const sourceTime = sourceTimeFromChartTime(time);
   if (sourceTime !== null && sourceTime !== time) {
@@ -139,14 +162,14 @@ function indicatorColorForRow(colorMap, row) {
   return null;
 }
 
-export function createMainSeriesPointConverter(rows = [], {
+export function createMainSeriesPointConverter(rows: ChartSeriesInputRow[] = [], {
   chartType,
   downColor = DEFAULT_DOWN_COLOR,
   indicatorBarColorMap = null,
   indicatorBarcolors = [],
   startIndex = 0,
   upColor = DEFAULT_UP_COLOR,
-} = {}) {
+}: MainSeriesDataOptions = {}): (row: ChartSeriesInputRow) => ChartSeriesInputRow {
   const resolvedType = normalizeMainChartType(chartType);
   const colorMap = indicatorBarColorMap || buildIndicatorBarColorMap(indicatorBarcolors);
   let previousClose = previousCloseBefore(rows, startIndex);
@@ -166,13 +189,16 @@ export function createMainSeriesPointConverter(rows = [], {
   };
 }
 
-export function buildMainSeriesData(rows = [], options = {}) {
+export function buildMainSeriesData(
+  rows: ChartSeriesInputRow[] = [],
+  options: MainSeriesDataOptions = {},
+): ChartSeriesInputRow[] {
   const toPoint = createMainSeriesPointConverter(rows, { ...options, startIndex: 0 });
   return (rows || []).map(toPoint);
 }
 
-function finiteCloses(rows = []) {
-  const closes = [];
+function finiteCloses(rows: ChartSeriesInputRow[] = []): number[] {
+  const closes: number[] = [];
   for (const row of rows || []) {
     const close = validClose(row);
     if (close != null) closes.push(close);
@@ -180,7 +206,10 @@ function finiteCloses(rows = []) {
   return closes;
 }
 
-export function buildMainSeriesReferenceOptions(chartType, rows = []) {
+export function buildMainSeriesReferenceOptions(
+  chartType: MainChartType | string | null | undefined,
+  rows: ChartSeriesInputRow[] = [],
+): Record<string, unknown> {
   const resolvedType = normalizeMainChartType(chartType);
   if (resolvedType !== "baseline" && resolvedType !== "histogram") return {};
 
@@ -209,10 +238,10 @@ export function buildMainSeriesReferenceOptions(chartType, rows = []) {
   return { base };
 }
 
-export function buildMainSeriesStyleOptions(chartType, {
+export function buildMainSeriesStyleOptions(chartType: MainChartType | string | null | undefined, {
   downColor = DEFAULT_DOWN_COLOR,
   upColor = DEFAULT_UP_COLOR,
-} = {}) {
+}: Pick<MainSeriesColorOptions, "downColor" | "upColor"> = {}): Record<string, unknown> {
   const resolvedType = normalizeMainChartType(chartType);
   if (resolvedType === "point-and-figure") {
     return { upColor, downColor, lineWidth: 2 };
@@ -288,17 +317,28 @@ export function buildMainSeriesStyleOptions(chartType, {
   return { color: upColor };
 }
 
-export function buildMainSeriesOptions(chartType, options = {}, rows = []) {
+export function buildMainSeriesOptions(
+  chartType: MainChartType | string | null | undefined,
+  options: Pick<MainSeriesColorOptions, "downColor" | "upColor"> = {},
+  rows: ChartSeriesInputRow[] = [],
+): Record<string, unknown> {
   return {
     ...buildMainSeriesStyleOptions(chartType, options),
     ...buildMainSeriesReferenceOptions(chartType, rows),
   };
 }
 
-export function buildMainSeriesCrosshairValue(time, displayRow, {
+export function buildMainSeriesCrosshairValue(
+  time: ChartTime | null | undefined,
+  displayRow: ChartSeriesInputRow | null | undefined,
+  {
   includeVolume = true,
   volumeRow = displayRow,
-} = {}) {
+  }: {
+    includeVolume?: boolean;
+    volumeRow?: ChartSeriesInputRow | null;
+  } = {},
+): MainSeriesCrosshairValue | null {
   const open = finiteNumber(displayRow?.open);
   const high = finiteNumber(displayRow?.high);
   const low = finiteNumber(displayRow?.low);

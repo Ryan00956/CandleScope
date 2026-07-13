@@ -1,9 +1,28 @@
 import { createMainSeriesPointConverter } from "./mainSeriesModel.js";
+import type {
+  ChartSeriesInputRow,
+  MainSeriesDataOptions,
+  PerfEventRecorder,
+  ProjectionPatchCandidate,
+  ProjectionRenderMode,
+  ProjectionRenderPatch,
+  ProjectionRenderResult,
+  ProjectionSeriesWriter,
+  ProjectionViewportController,
+} from "./chartAdapterTypes.js";
 
 const MAX_INCREMENTAL_TAIL_MUTATIONS = 64;
-const materializedPatchData = new WeakMap();
+const materializedPatchData = new WeakMap<object, ChartSeriesInputRow[]>();
 
-function clampTailStart(value, length) {
+type ValidTailPatchShape = ProjectionPatchCandidate & {
+  fromOutputIndex: number;
+  deleteCount: number;
+  insert: ChartSeriesInputRow[];
+  previousLength: number;
+  nextLength: number;
+};
+
+function clampTailStart(value: unknown, length: number): number {
   const index = Number(value);
   if (!Number.isFinite(index)) return 0;
   return Math.max(0, Math.min(length, Math.floor(index)));
@@ -14,7 +33,12 @@ export function buildMainSeriesProjectionPatch({
   previousSeriesData = [],
   projectionPatch,
   renderOptions = {},
-} = {}) {
+}: {
+  displayRows?: ChartSeriesInputRow[];
+  previousSeriesData?: ChartSeriesInputRow[];
+  projectionPatch?: { fromOutputIndex?: unknown } | null;
+  renderOptions?: MainSeriesDataOptions;
+} = {}): ProjectionRenderPatch {
   const rows = Array.isArray(displayRows) ? displayRows : [];
   const previous = Array.isArray(previousSeriesData) ? previousSeriesData : [];
   const reusablePrefixLength = Math.min(rows.length, previous.length);
@@ -39,10 +63,12 @@ export function buildMainSeriesProjectionPatch({
   };
 }
 
-export function materializeMainSeriesProjectionPatch(patch) {
+export function materializeMainSeriesProjectionPatch(
+  patch: ProjectionPatchCandidate | null | undefined,
+): ChartSeriesInputRow[] {
   if (Array.isArray(patch?.nextData)) return patch.nextData;
   if (patch && typeof patch === "object" && materializedPatchData.has(patch)) {
-    return materializedPatchData.get(patch);
+    return materializedPatchData.get(patch) ?? [];
   }
   const previous = Array.isArray(patch?.previousData) ? patch.previousData : [];
   const fromOutputIndex = clampTailStart(patch?.fromOutputIndex, previous.length);
@@ -52,7 +78,9 @@ export function materializeMainSeriesProjectionPatch(patch) {
   return nextData;
 }
 
-function isValidTailPatchShape(patch) {
+function isValidTailPatchShape(
+  patch: ProjectionPatchCandidate | null | undefined,
+): patch is ValidTailPatchShape {
   const fromOutputIndex = Number(patch?.fromOutputIndex);
   const deleteCount = Number(patch?.deleteCount);
   const previousLength = Number(patch?.previousLength);
@@ -75,25 +103,35 @@ function isValidTailPatchShape(patch) {
   return true;
 }
 
-function hasValidPreviousData(patch) {
+function hasValidPreviousData(
+  patch: ProjectionPatchCandidate | null | undefined,
+): patch is ProjectionPatchCandidate & {
+  previousData: ChartSeriesInputRow[];
+  previousLength: number;
+} {
   return Array.isArray(patch?.previousData)
     && patch.previousData.length === patch.previousLength;
 }
 
-function cacheCommittedPatchData(patch, data) {
+function cacheCommittedPatchData(
+  patch: object,
+  data: ChartSeriesInputRow[],
+): ChartSeriesInputRow[] {
   if (patch && typeof patch === "object") materializedPatchData.set(patch, data);
   return data;
 }
 
-function commitMainSeriesProjectionPatch(patch) {
-  const previous = patch?.previousData;
-  const insert = Array.isArray(patch?.insert) ? patch.insert : [];
-  const fromOutputIndex = Number(patch?.fromOutputIndex);
+function commitMainSeriesProjectionPatch(
+  patch: ProjectionPatchCandidate,
+): ChartSeriesInputRow[] {
   if (!hasValidPreviousData(patch) || !isValidTailPatchShape(patch)) {
     return materializeMainSeriesProjectionPatch(patch);
   }
+  const previous = patch.previousData;
+  const insert = patch.insert;
+  const fromOutputIndex = patch.fromOutputIndex;
   if (patch && typeof patch === "object" && materializedPatchData.has(patch)) {
-    return materializedPatchData.get(patch);
+    return materializedPatchData.get(patch) ?? previous;
   }
 
   if (fromOutputIndex === previous.length && insert.length === 0) {
@@ -112,11 +150,18 @@ function commitMainSeriesProjectionPatch(patch) {
   }
 }
 
-function renderResult(mode, nextData) {
+function renderResult(
+  mode: ProjectionRenderMode,
+  nextData: ChartSeriesInputRow[],
+): ProjectionRenderResult {
   return { mode, nextData };
 }
 
-function record(recordPerfEvent, name, detail) {
+function record(
+  recordPerfEvent: PerfEventRecorder | null | undefined,
+  name: string,
+  detail: Readonly<Record<string, unknown>>,
+): void {
   try {
     recordPerfEvent?.(name, detail);
   } catch {
@@ -133,12 +178,24 @@ export function renderMainSeriesProjectionPatch({
   resolveDisplayAnchorIndex,
   series,
   viewportController,
-} = {}) {
+}: {
+  paneId?: string;
+  patch?: ProjectionPatchCandidate | null;
+  preserveViewport?: boolean;
+  previousDisplayRows?: ChartSeriesInputRow[];
+  recordPerfEvent?: PerfEventRecorder;
+  resolveDisplayAnchorIndex?: (anchor: unknown) => number;
+  series?: ProjectionSeriesWriter<ChartSeriesInputRow> | null;
+  viewportController?: ProjectionViewportController | null;
+} = {}): ProjectionRenderResult {
   if (!patch) return renderResult("noop", []);
   if (!series) {
+    const retainedData = Array.isArray(patch.previousData)
+      ? patch.previousData
+      : (Array.isArray(patch.nextData) ? patch.nextData : []);
     return renderResult(
       "noop",
-      Array.isArray(patch.previousData) ? patch.previousData : (patch.nextData || []),
+      retainedData,
     );
   }
   if (!isValidTailPatchShape(patch)) {

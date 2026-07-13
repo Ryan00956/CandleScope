@@ -8,14 +8,108 @@ import {
   registerDrawingSeriesContext,
   timeToCoordinateInterpolated,
 } from "./coordinateBridge.js";
+import type {
+  CoordinateChartBridge,
+  CoordinateDataPoint,
+  CoordinateSeriesBridge,
+  DrawingCoordinateContext,
+  DrawingSeriesProviders,
+  ScreenPoint,
+} from "./coordinateBridge.js";
+import type { DrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex.js";
+import type { DisplayRow } from "../features/chart-representation/chartRepresentationTypes.js";
 
-function getRefValue(refOrValue) {
+interface RefLike<T> {
+  current: T | null;
+}
+
+type RefOrValue<T> = RefLike<T> | T | null | undefined;
+
+interface AdapterTimeScale {
+  coordinateToLogical(coordinate: number): number | null;
+  coordinateToTime(coordinate: number): unknown;
+  getVisibleLogicalRange(): unknown;
+  getVisibleRange(): unknown;
+  logicalToCoordinate(logical: number): number | null;
+  options(): { barSpacing: number };
+  scrollPosition(): number;
+  setVisibleLogicalRange(range: unknown): void;
+  setVisibleRange(range: unknown): void;
+  timeToCoordinate(time: unknown): number | null;
+  width?(): number;
+}
+
+interface AdapterChart extends CoordinateChartBridge {
+  timeScale(): AdapterTimeScale;
+  subscribeCrosshairMove(handler: CrosshairHandler): void;
+  unsubscribeCrosshairMove(handler: CrosshairHandler): void;
+}
+
+interface AdapterPrimitive {
+  _series?: AdapterSeries | null;
+}
+
+interface AdapterSeries extends CoordinateSeriesBridge {
+  applyOptions(options: Record<string, never>): void;
+  attachPrimitive(primitive: AdapterPrimitive): void;
+  coordinateToPrice(coordinate: number): number | null;
+  data?(): unknown;
+  detachPrimitive(primitive: AdapterPrimitive): void;
+  priceToCoordinate(price: number): number | null;
+}
+
+interface DrawingCoordinateSnapshot {
+  seriesData?: DisplayRow[];
+  ordinalSeriesIndex?: DrawingLineageIndex | null;
+  indexRevision?: number | null;
+  sourceTimeHorizon?: unknown;
+  sourceInterval?: unknown;
+  sourceIntervalSeconds?: unknown;
+  drawingProjectionConfig?: unknown;
+}
+
+interface LookupMap {
+  has(key: unknown): boolean;
+  get(key: unknown): unknown;
+}
+
+interface LightweightChartAdapterOptions {
+  chartRef: RefOrValue<AdapterChart>;
+  seriesRef: RefOrValue<AdapterSeries>;
+  seriesDataRef?: RefOrValue<unknown>;
+  seriesDataMapRef?: RefOrValue<LookupMap>;
+  seriesDataIndexRef?: RefOrValue<LookupMap>;
+  sourceTimeHorizonRef?: RefOrValue<unknown>;
+  sourceIntervalRef?: RefOrValue<unknown>;
+  sourceIntervalSecondsRef?: RefOrValue<unknown>;
+  projectionConfigRef?: RefOrValue<unknown>;
+  ordinalSeriesIndexProvider?: (() => DrawingLineageIndex | null) | null;
+  drawingCoordinateSnapshotProvider?: (() => DrawingCoordinateSnapshot | null) | null;
+}
+
+interface FreehandCaptureIdentityRecord {
+  identity: Readonly<Record<string, never>>;
+  series: AdapterSeries;
+  sourceProjection: string;
+  sourceProjectionConfig: string;
+}
+
+interface VisibleRangeSnapshot {
+  logical?: unknown;
+  time?: unknown;
+  barSpacing?: unknown;
+  scrollPosition?: unknown;
+}
+
+type CrosshairHandler = (event: unknown) => void;
+
+function getRefValue<T>(refOrValue: RefOrValue<T>): T | null | undefined {
   return refOrValue && typeof refOrValue === "object" && "current" in refOrValue
     ? refOrValue.current
     : refOrValue;
 }
 
-function safeCall(fn, fallback = null) {
+function safeCall<T>(fn: () => T, fallback: T): T {
   try {
     return fn();
   } catch {
@@ -23,7 +117,7 @@ function safeCall(fn, fallback = null) {
   }
 }
 
-function usesOrdinalData(data) {
+function usesOrdinalData(data: unknown): boolean {
   if (!Array.isArray(data)) return false;
   for (const row of data) {
     if (row?.time != null) return isOrdinalAxisTime(row.time);
@@ -43,18 +137,20 @@ export function createLightweightChartAdapter({
   projectionConfigRef = null,
   ordinalSeriesIndexProvider = null,
   drawingCoordinateSnapshotProvider = null,
-}) {
+}: LightweightChartAdapterOptions) {
   const getChart = () => getRefValue(chartRef);
   const getSeries = () => getRefValue(seriesRef);
-  const getSeriesData = () => {
+  const getSeriesData = (): DisplayRow[] => {
     const data = getRefValue(seriesDataRef);
     if (Array.isArray(data)) return data;
-    return safeCall(() => getSeries()?.data?.() || [], []);
+    const fallbackData = safeCall(() => getSeries()?.data?.() || [], []);
+    return Array.isArray(fallbackData) ? fallbackData as DisplayRow[] : [];
   };
-  const getSeriesDataForSeries = (series) => {
+  const getSeriesDataForSeries = (series: AdapterSeries): DisplayRow[] => {
     const data = getRefValue(seriesDataRef);
     if (Array.isArray(data)) return data;
-    return safeCall(() => series?.data?.() || [], []);
+    const fallbackData = safeCall(() => series.data?.() || [], []);
+    return Array.isArray(fallbackData) ? fallbackData as DisplayRow[] : [];
   };
   const getSeriesDataMap = () => getRefValue(seriesDataMapRef);
   const getSeriesDataIndex = () => getRefValue(seriesDataIndexRef);
@@ -70,7 +166,7 @@ export function createLightweightChartAdapter({
     () => drawingCoordinateSnapshotProvider?.(),
     null,
   );
-  const drawingSeriesProviders = {
+  const drawingSeriesProviders: DrawingSeriesProviders = {
     coordinateSnapshotProvider: getDrawingCoordinateSnapshot,
     ordinalSeriesIndexProvider: getOrdinalSeriesIndex,
     projectionConfigProvider: getProjectionConfig,
@@ -84,7 +180,7 @@ export function createLightweightChartAdapter({
     if (series) registerDrawingSeriesContext(series, drawingSeriesProviders);
     return series;
   };
-  const createDrawingCoordinateContext = () => {
+  const createDrawingCoordinateContext = (): DrawingCoordinateContext => {
     const snapshot = getDrawingCoordinateSnapshot();
     const hasSnapshotData = Array.isArray(snapshot?.seriesData);
     const hasSnapshotHorizon = snapshot != null
@@ -117,14 +213,18 @@ export function createLightweightChartAdapter({
         : getSourceTimeHorizon(),
     };
   };
-  let lastFreehandCaptureIdentity = null;
-  const captureIdentityFor = (series, sourceProjection, sourceProjectionConfig) => {
+  let lastFreehandCaptureIdentity: FreehandCaptureIdentityRecord | null = null;
+  const captureIdentityFor = (
+    series: AdapterSeries,
+    sourceProjection: string,
+    sourceProjectionConfig: string,
+  ): Readonly<Record<string, never>> => {
     if (lastFreehandCaptureIdentity?.series === series
       && lastFreehandCaptureIdentity.sourceProjection === sourceProjection
       && lastFreehandCaptureIdentity.sourceProjectionConfig === sourceProjectionConfig) {
       return lastFreehandCaptureIdentity.identity;
     }
-    const identity = {};
+    const identity: Record<string, never> = {};
     Object.defineProperties(identity, {
       series: { value: series },
       sourceProjection: { value: sourceProjection },
@@ -146,7 +246,7 @@ export function createLightweightChartAdapter({
     usesOrdinalTime: () => usesOrdinalData(getSeriesData()),
     getMainSeries: getSeries,
     getSeriesData,
-    captureFreehandStrokeBatch: (screenPoints) => safeCall(() => {
+    captureFreehandStrokeBatch: (screenPoints: ScreenPoint[]) => safeCall(() => {
       const chart = getChart();
       const series = getSeries();
       if (!chart || !series) return null;
@@ -175,15 +275,15 @@ export function createLightweightChartAdapter({
         ? snapshot.sourceTimeHorizon
         : getSourceTimeHorizon();
       const hasSnapshotProvider = typeof drawingCoordinateSnapshotProvider === "function";
-      if (hasSnapshotProvider && !Array.isArray(snapshot?.seriesData)) return null;
+      if (hasSnapshotProvider && (!snapshot || !Array.isArray(snapshot.seriesData))) return null;
 
-      const seriesData = hasSnapshotProvider
+      const seriesData = hasSnapshotProvider && snapshot
         ? snapshot.seriesData
         : getSeriesDataForSeries(series);
-      const ordinalSeriesIndex = hasSnapshotProvider
+      const ordinalSeriesIndex = hasSnapshotProvider && snapshot
         ? snapshot.ordinalSeriesIndex
         : getOrdinalSeriesIndex();
-      const context = {
+      const context: DrawingCoordinateContext = {
         drawingProjectionConfig: projectionConfig,
         seriesData,
         sourceInterval,
@@ -192,7 +292,7 @@ export function createLightweightChartAdapter({
       };
       if (hasSnapshotProvider || typeof ordinalSeriesIndexProvider === "function") {
         context.drawingOrdinalSeriesIndex = ordinalSeriesIndex;
-        context.drawingOrdinalSeriesIndexRevision = hasSnapshotProvider
+        context.drawingOrdinalSeriesIndexRevision = hasSnapshotProvider && snapshot
           ? snapshot.indexRevision ?? null
           : ordinalSeriesIndex?.revision ?? null;
       }
@@ -212,12 +312,12 @@ export function createLightweightChartAdapter({
         ...batch,
       });
     }, null),
-    axisTimeToDrawingAnchor: (time) => safeCall(() => {
+    axisTimeToDrawingAnchor: (time: unknown) => safeCall(() => {
       registerCurrentDrawingSeries();
       const context = createDrawingCoordinateContext();
       return drawingAnchorFromAxisTime(time, context.seriesData, context);
     }, null),
-    coordinateToDrawingAnchor: (x) => safeCall(() => {
+    coordinateToDrawingAnchor: (x: number) => safeCall(() => {
       const series = registerCurrentDrawingSeries();
       return drawingAnchorFromCoordinate(
         getChart(),
@@ -226,7 +326,7 @@ export function createLightweightChartAdapter({
         createDrawingCoordinateContext(),
       );
     }, null),
-    dataPointToCoordinate: (dataPoint) => safeCall(() => {
+    dataPointToCoordinate: (dataPoint: CoordinateDataPoint) => safeCall(() => {
       const series = registerCurrentDrawingSeries();
       return resolveDataPointCoordinate(
         getChart(),
@@ -235,17 +335,17 @@ export function createLightweightChartAdapter({
         createDrawingCoordinateContext(),
       );
     }, null),
-    getSeriesItemByTime: (time) => {
+    getSeriesItemByTime: (time: unknown): unknown => {
       const dataMap = getSeriesDataMap();
       if (dataMap?.has?.(time)) return dataMap.get(time);
       return getSeriesData().find((bar) => bar?.time === time) || null;
     },
-    getSeriesIndexByTime: (time) => {
+    getSeriesIndexByTime: (time: unknown): unknown => {
       const dataIndex = getSeriesDataIndex();
       if (dataIndex?.has?.(time)) return dataIndex.get(time);
       return getSeriesData().findIndex((bar) => bar?.time === time);
     },
-    attachPrimitive: (primitive) => {
+    attachPrimitive: (primitive: AdapterPrimitive | null | undefined) => {
       const series = registerCurrentDrawingSeries();
       if (!series || !primitive) return false;
       return safeCall(() => {
@@ -253,7 +353,7 @@ export function createLightweightChartAdapter({
         return true;
       }, false);
     },
-    detachPrimitive: (primitive) => {
+    detachPrimitive: (primitive: AdapterPrimitive | null | undefined) => {
       if (!primitive) return false;
       const series = getSeries();
       let detached = false;
@@ -268,9 +368,9 @@ export function createLightweightChartAdapter({
       }
       return detached;
     },
-    priceToCoordinate: (price) => safeCall(() => getSeries()?.priceToCoordinate(price), null),
-    timeToCoordinate: (time) => safeCall(() => getChart()?.timeScale().timeToCoordinate(time), null),
-    timeToCoordinateInterpolated: (time) => safeCall(() => {
+    priceToCoordinate: (price: number) => safeCall(() => getSeries()?.priceToCoordinate(price), null),
+    timeToCoordinate: (time: unknown) => safeCall(() => getChart()?.timeScale().timeToCoordinate(time), null),
+    timeToCoordinateInterpolated: (time: unknown) => safeCall(() => {
       const series = registerCurrentDrawingSeries();
       return timeToCoordinateInterpolated(
         getChart(),
@@ -279,18 +379,18 @@ export function createLightweightChartAdapter({
         createDrawingCoordinateContext(),
       );
     }, null),
-    coordinateToPrice: (y) => safeCall(() => getSeries()?.coordinateToPrice(y), null),
-    coordinateToTime: (x) => safeCall(() => getChart()?.timeScale().coordinateToTime(x), null),
-    coordinateToLogical: (x) => safeCall(() => getChart()?.timeScale().coordinateToLogical(x), null),
-    logicalToCoordinate: (logical) => safeCall(() => getChart()?.timeScale().logicalToCoordinate(logical), null),
-    logicalToCoordinateInterpolated: (logical) => safeCall(
+    coordinateToPrice: (y: number) => safeCall(() => getSeries()?.coordinateToPrice(y), null),
+    coordinateToTime: (x: number) => safeCall(() => getChart()?.timeScale().coordinateToTime(x), null),
+    coordinateToLogical: (x: number) => safeCall(() => getChart()?.timeScale().coordinateToLogical(x), null),
+    logicalToCoordinate: (logical: number) => safeCall(() => getChart()?.timeScale().logicalToCoordinate(logical), null),
+    logicalToCoordinateInterpolated: (logical: number) => safeCall(
       () => logicalToCoordinateInterpolated(getChart()?.timeScale(), logical),
       null,
     ),
     getBarSpacing: () => safeCall(() => getChart()?.timeScale().options?.().barSpacing, null),
     getTimeScaleWidth: () => safeCall(() => {
       const width = getChart()?.timeScale().width?.();
-      return Number.isFinite(width) && width > 0 ? width : null;
+      return typeof width === "number" && Number.isFinite(width) && width > 0 ? width : null;
     }, null),
     getVisibleTimeRange: () => safeCall(() => getChart()?.timeScale().getVisibleRange(), null),
     getVisibleRange: () => safeCall(() => {
@@ -303,15 +403,18 @@ export function createLightweightChartAdapter({
         scrollPosition: timeScale.scrollPosition(),
       };
     }, null),
-    getVisiblePriceRange: (height) => safeCall(() => {
+    getVisiblePriceRange: (height: number) => safeCall(() => {
       const series = getSeries();
       if (!series || !Number.isFinite(height)) return null;
       const topPrice = series.coordinateToPrice(0);
       const bottomPrice = series.coordinateToPrice(height);
-      if (!Number.isFinite(topPrice) || !Number.isFinite(bottomPrice)) return null;
+      if (typeof topPrice !== "number"
+        || typeof bottomPrice !== "number"
+        || !Number.isFinite(topPrice)
+        || !Number.isFinite(bottomPrice)) return null;
       return Math.abs(topPrice - bottomPrice);
     }, null),
-    restoreVisibleRange: (range) => safeCall(() => {
+    restoreVisibleRange: (range: VisibleRangeSnapshot | null | undefined) => safeCall(() => {
       const timeScale = getChart()?.timeScale();
       if (!timeScale || !range) return false;
       if (range.logical) {
@@ -324,7 +427,7 @@ export function createLightweightChartAdapter({
       }
       return false;
     }, false),
-    subscribeCrosshair: (handler) => {
+    subscribeCrosshair: (handler: CrosshairHandler) => {
       const chart = getChart();
       if (!chart || typeof handler !== "function") return () => {};
       chart.subscribeCrosshairMove(handler);

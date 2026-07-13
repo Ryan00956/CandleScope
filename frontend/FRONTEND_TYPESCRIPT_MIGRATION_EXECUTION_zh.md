@@ -1887,8 +1887,8 @@ rg --files src -g "*.js" -g "*.jsx"
 | T2 | 已完成 | `741b5d1` | 通过 | 719/719 通过 | 通过 | basic/release 通过 | 12 个生产模块迁为 TS；新增 suppression 0 |
 | T3 | 已完成 | `7915a98` | 通过 | 720/720 通过 | 通过 | basic/release 通过 | 15 个 market-data TS 模块；局部 adapter cast 已在 T4 删除 |
 | T4 | 已完成 | `cbf6108` | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 4 个 transport owner 迁为 TS，新增 raw payload parsers；未迁 endpoint 保持 `unknown` 并登记 ledger |
-| T5 | 已完成 | 未提交（当前工作区） | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 21 个 chart-representation owner 迁为 TS，新增统一投影 contract；专项测试 200/200 通过 |
-| T6 | 待执行 |  |  |  |  |  |  |
+| T5 | 已完成 | `cb28b4e` | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 21 个 chart-representation owner 迁为 TS，新增统一投影 contract；专项测试 200/200 通过 |
+| T6 | 已完成 | 未提交（当前工作区） | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 24 个 chart-adapter owner 迁为 TS，新增统一 adapter contract；adapter 专项 146/146、drawing coordinate 44/44 通过 |
 | T7 | 待执行 |  |  |  |  |  |  |
 | T8 | 待执行 |  |  |  |  |  |  |
 | T9 | 待执行 |  |  |  |  |  |  |
@@ -2055,12 +2055,33 @@ rg --files src -g "*.js" -g "*.jsx"
 | Import 解析 | mixed-mode 继续使用源码 `.js` specifier；JS tests、tsx、architecture resolver 与 Vite 均解析到 TS owner；未引入 `.ts` URL specifier 或兼容 facade |
 | 新增 `any` / TS directive suppression | 0 |
 
+### T6 chart-adapter 与 Lightweight Charts 类型验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `cb28b4e` |
+| 生产模块 | `src/chart-adapter/` 下 24 个既有 JS owner 全部迁为 TS；新增 `chartAdapterTypes.ts`，合计 25 个 TS 模块，生产目录无 JS 残留 |
+| 核心 contract | 建立 `ChartTime`、chart/series/pane handles、series data、indicator、custom series、projection patch、viewport、future-axis、drawing coordinate context 与 React chart surface handle 类型 |
+| Lightweight Charts 边界 | chart、series、pane、custom renderer、horizontal scale、logical range 与 branded coordinate 直接使用库自带声明；custom ordinal 泛型和支持测试桩的 drawing capability interface 仅留在 adapter 内部，不向 feature 扩散 raw handle |
+| Series / pane lifecycle | 15 种主图 factory、indicator series、replacement rollback、pane move/remove、delta update 和 startup grace window 保持原顺序；动态 `addSeries` / `addCustomSeries` 的泛型摩擦集中在一个最小调用适配函数 |
+| Coordinate / future axis | 普通时间、ordinal source lineage 与 projection-local order 继续分离；future whitespace 仍只用于渲染，未来 drawing anchor 只持久化绝对 source time；未恢复 logical/bar-offset 语义 |
+| Renderer 行为 | High-Low、Point & Figure、Kagi、barcolor、bgcolor、marker、overlay 和 projection custom series 全部类型化；未新增全量 `setData()`、大数组 clone 或渲染策略变化 |
+| 定向测试 | `src/chart-adapter/__tests__/` 146/146 通过；`src/features/drawings/__tests__/coordinateBridge.test.js` 44/44 通过 |
+| 完整门禁 | architecture、typecheck、lint 全部通过；727/727 tests 通过；Vite 7.3.1 build 通过，292 modules transformed |
+| Basic smoke | 干净 Vite `15176` 实例通过；1500 bars；failures/warnings/exceptions 为 0 |
+| Release smoke | 15 种 chart type 与持久化恢复通过；PNG/JPEG/WebP 三组导出、drawing check、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
+| Import 解析 | mixed-mode 继续使用源码 `.js` specifier；JS tests、tsx、architecture resolver 与 Vite 均解析到 TS owner；未引入 `.ts` URL specifier 或兼容 facade |
+| 新增 `any` / TS directive suppression | 0；无 `@ts-ignore`、`@ts-nocheck`、`@ts-expect-error` 或 `as unknown as` |
+
 ### Suppression ledger
 
 | ID | 文件 | suppression/cast | 原因 | 保护测试 | 最迟删除 Phase | 状态 |
 |---|---|---|---|---|---|---|
 | T3-CAST-01 | `src/features/market-data/feed/seriesDataFeed.ts` | `KlineStreamSubscription as unknown as constructor` | 尚未迁移的 JS constructor 把默认空 intervals 推断为 `never[]`；adapter 只包住 T4 transport owner 边界 | `seriesDataFeed.test.js` subscribeBars；release smoke | T4 | 已删除（T4） |
 | T4-UNKNOWN-01 | `src/services/api.ts` | 尚未迁 owner 的 symbol/settings/cache/maintenance/price/resolve endpoint 返回 `Promise<unknown>` | T4 只验证已有 TS consumer 依赖的 endpoint；提前声明业务 shape 会制造错误安全感 | 完整测试；basic/release smoke | T10 | 活跃 |
+| T6-LWC-01 | `src/chart-adapter/ordinalHorzScaleBehavior.ts` | 默认 time behavior options 局部断言为 ordinal `ChartOptionsImpl` | Lightweight Charts 只导出同一 behavior contract 的不同 horizontal item 泛型；运行时 options 结构相同，适配只存在于 custom ordinal behavior | ordinal behavior 7/7；chart type matrix | T13 | 活跃 |
+| T6-LWC-02 | `src/chart-adapter/seriesLifecycle.ts` | 动态 series factory 结果从 `unknown` 局部断言为 adapter handle | 运行时在 15 种 built-in/custom series 间选择，库的互斥 series 泛型无法由动态 descriptor 单次穷尽；断言限制在两个 factory helper | main series model 22/22；series lifecycle 9/9；chart type matrix | T13 | 活跃 |
+| T6-LWC-03 | `src/chart-adapter/overlaySeriesRenderer.ts` | `0 as LineWidth` 与数字 line style 局部断言 | 库声明的 `LineWidth` 排除运行时支持的 0；现有 area fill 以 0 隐藏边线，hline payload 仍使用持久化数字 style | overlay renderer 专项；export/drawing/overlay-heavy smoke | T13 | 活跃 |
 
 ### 行为问题旁路记录
 

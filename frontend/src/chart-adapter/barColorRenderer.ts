@@ -1,3 +1,11 @@
+import type {
+  ChartSeriesInputRow,
+  IndicatorBarcolorGroup,
+  PerfEventRecorder,
+  MutableRef,
+  SeriesDataWriter,
+} from "./chartAdapterTypes.js";
+
 export function applyBarColors({
   series,
   data,
@@ -9,7 +17,21 @@ export function applyBarColors({
   toCandlePoint,
   canUseTrailingCandleUpdate,
   onError,
-}) {
+}: {
+  series: SeriesDataWriter<ChartSeriesInputRow> | null | undefined;
+  data: ChartSeriesInputRow[];
+  indicatorBarcolors: IndicatorBarcolorGroup[] | null | undefined;
+  prevBarcoloredDataRef: MutableRef<ChartSeriesInputRow[]>;
+  isSyncingRef: MutableRef<boolean>;
+  paneId: string;
+  recordPerfEvent: PerfEventRecorder;
+  toCandlePoint: (row: ChartSeriesInputRow) => ChartSeriesInputRow;
+  canUseTrailingCandleUpdate: (
+    previous: ChartSeriesInputRow[],
+    next: ChartSeriesInputRow[],
+  ) => boolean;
+  onError?: (error: unknown, action: "clear" | "apply") => void;
+}): void {
   if (!series || !data?.length) return;
   if (!indicatorBarcolors || indicatorBarcolors.length === 0) {
     if (prevBarcoloredDataRef.current.length > 0) {
@@ -33,7 +55,7 @@ export function applyBarColors({
   }
 
   // Build a time→color map from all barcolor sources
-  const colorMap = new Map();
+  const colorMap = new Map<unknown, string>();
   for (const group of indicatorBarcolors) {
     if (!group.data || !Array.isArray(group.data)) continue;
     for (const bc of group.data) {

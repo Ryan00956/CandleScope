@@ -1,6 +1,19 @@
 import { chartTimeKey, chartTimesEqual, compareChartTimes } from "./chartTime.js";
+import type {
+  ChartSeriesInputRow,
+  ChartTime,
+  FillRenderEntry,
+  FillRenderResult,
+  IndicatorBgcolorGroup,
+  IndicatorDataEntry,
+  IndicatorFillDefinition,
+  IndicatorLine,
+  IndicatorMarkerGroup,
+  PerfEventRecorder,
+  SeriesDataWriter,
+} from "./chartAdapterTypes.js";
 
-export function toCandlePoint(d) {
+export function toCandlePoint(d: ChartSeriesInputRow): ChartSeriesInputRow {
   if (
     d?.__whitespace
     || d?.open == null
@@ -13,7 +26,10 @@ export function toCandlePoint(d) {
   return { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close };
 }
 
-export function filterEntriesByTime(entries = [], allowedTimeSet) {
+export function filterEntriesByTime<TEntry extends { time?: ChartTime }>(
+  entries: TEntry[] = [],
+  allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+): TEntry[] {
   if (!allowedTimeSet) return entries || [];
   const allowedKeys = new Set();
   for (const time of allowedTimeSet) {
@@ -28,7 +44,10 @@ export function filterEntriesByTime(entries = [], allowedTimeSet) {
   });
 }
 
-export function normalizeLineSeriesData(line, allowedTimeSet) {
+export function normalizeLineSeriesData(
+  line: IndicatorLine | null | undefined,
+  allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+): IndicatorDataEntry[] {
   const isHistogram = line?.type === "histogram";
   const sourceData = filterEntriesByTime(line?.data, allowedTimeSet);
   if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
@@ -40,7 +59,7 @@ export function normalizeLineSeriesData(line, allowedTimeSet) {
     return sourceData
       .filter((d) => d?.time != null && d?.value != null && isFinite(d.value))
       .map((d) => {
-        const entry = { time: d.time, value: d.value };
+        const entry: IndicatorDataEntry = { time: d.time, value: d.value };
         const c = colorMap.get(chartTimeKey(d.time));
         if (c) entry.color = c;
         return entry;
@@ -49,7 +68,10 @@ export function normalizeLineSeriesData(line, allowedTimeSet) {
   return sourceData.filter((d) => d?.time != null && d?.value != null && isFinite(d.value));
 }
 
-export function alignIndicatorLinesToTimes(indicatorLines = [], allowedTimeSet) {
+export function alignIndicatorLinesToTimes(
+  indicatorLines: IndicatorLine[] = [],
+  allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+): IndicatorLine[] {
   return (indicatorLines || []).map((line) => ({
     ...line,
     data: normalizeLineSeriesData(line, allowedTimeSet),
@@ -59,14 +81,20 @@ export function alignIndicatorLinesToTimes(indicatorLines = [], allowedTimeSet) 
   }));
 }
 
-export function alignIndicatorMarkersToTimes(indicatorMarkers = [], allowedTimeSet) {
+export function alignIndicatorMarkersToTimes(
+  indicatorMarkers: IndicatorMarkerGroup[] = [],
+  allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+): IndicatorMarkerGroup[] {
   return (indicatorMarkers || []).map((group) => ({
     ...group,
     data: filterEntriesByTime(group?.data, allowedTimeSet),
   }));
 }
 
-export function alignIndicatorBgcolorsToTimes(indicatorBgcolors = [], allowedTimeSet) {
+export function alignIndicatorBgcolorsToTimes(
+  indicatorBgcolors: IndicatorBgcolorGroup[] = [],
+  allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
+): IndicatorBgcolorGroup[] {
   return (indicatorBgcolors || []).map((group) => ({
     ...group,
     data: filterEntriesByTime(group?.data, allowedTimeSet),
@@ -74,13 +102,19 @@ export function alignIndicatorBgcolorsToTimes(indicatorBgcolors = [], allowedTim
   }));
 }
 
-export function linePointEquals(a, b) {
+export function linePointEquals(
+  a: IndicatorDataEntry | null | undefined,
+  b: IndicatorDataEntry | null | undefined,
+): boolean {
   return chartTimesEqual(a?.time, b?.time)
     && a?.value === b?.value
     && (a?.color || null) === (b?.color || null);
 }
 
-export function candlePointEquals(a, b) {
+export function candlePointEquals(
+  a: ChartSeriesInputRow | null | undefined,
+  b: ChartSeriesInputRow | null | undefined,
+): boolean {
   return chartTimesEqual(a?.time, b?.time)
     && a?.open === b?.open
     && a?.high === b?.high
@@ -91,7 +125,10 @@ export function candlePointEquals(a, b) {
     && (a?.wickColor || null) === (b?.wickColor || null);
 }
 
-export function canUseTrailingSeriesUpdate(previousData, nextData) {
+export function canUseTrailingSeriesUpdate(
+  previousData: IndicatorDataEntry[] | null | undefined,
+  nextData: IndicatorDataEntry[] | null | undefined,
+): boolean {
   if (!previousData?.length || !nextData?.length) return false;
   if (nextData.length < previousData.length || nextData.length > previousData.length + 1) return false;
   if (!chartTimesEqual(nextData[0]?.time, previousData[0]?.time)) return false;
@@ -107,7 +144,10 @@ export function canUseTrailingSeriesUpdate(previousData, nextData) {
   return true;
 }
 
-export function canUseTrailingCandleUpdate(previousData, nextData) {
+export function canUseTrailingCandleUpdate(
+  previousData: ChartSeriesInputRow[] | null | undefined,
+  nextData: ChartSeriesInputRow[] | null | undefined,
+): boolean {
   if (!previousData?.length || !nextData?.length) return false;
   if (nextData.length < previousData.length || nextData.length > previousData.length + 1) return false;
   if (!chartTimesEqual(nextData[0]?.time, previousData[0]?.time)) return false;
@@ -124,13 +164,13 @@ export function canUseTrailingCandleUpdate(previousData, nextData) {
 }
 
 export function applyLineSeriesData(
-  series,
-  nextData,
-  previousData,
-  detail,
-  recordPerfEvent,
-  { preferSetData = false } = {},
-) {
+  series: SeriesDataWriter<IndicatorDataEntry>,
+  nextData: IndicatorDataEntry[],
+  previousData: IndicatorDataEntry[],
+  detail: Readonly<Record<string, unknown>>,
+  recordPerfEvent: PerfEventRecorder | null | undefined,
+  { preferSetData = false }: { preferSetData?: boolean } = {},
+): "clear" | "empty" | "update" | "setData" {
   if (!nextData?.length) {
     if (previousData?.length) {
       series.setData([]);
@@ -163,12 +203,16 @@ export function applyLineSeriesData(
   return "setData";
 }
 
-export function buildFillRenderEntries(indicatorFills = [], indicatorLines = [], backgroundColor) {
+export function buildFillRenderEntries(
+  indicatorFills: IndicatorFillDefinition[] = [],
+  indicatorLines: IndicatorLine[] = [],
+  backgroundColor: string,
+): FillRenderResult {
   if (!indicatorFills?.length || !indicatorLines?.length) {
     return { entries: [], signature: "empty", matchedFillCount: 0, pointCount: 0 };
   }
 
-  const plotDataMap = new Map();
+  const plotDataMap = new Map<string, IndicatorDataEntry[] | undefined>();
   for (const line of indicatorLines) {
     if (!line.id) continue;
     const scopedKey = `${line.indicatorId || ""}:${line.id}`;
@@ -178,8 +222,8 @@ export function buildFillRenderEntries(indicatorFills = [], indicatorLines = [],
     }
   }
 
-  const entries = [];
-  const signatureParts = [];
+  const entries: FillRenderEntry[] = [];
+  const signatureParts: string[] = [];
   let pointCount = 0;
 
   for (const fillDef of indicatorFills) {
@@ -189,22 +233,26 @@ export function buildFillRenderEntries(indicatorFills = [], indicatorLines = [],
     const data2 = plotDataMap.get(`${scope}:${plot2_id}`) || (!scope ? plotDataMap.get(plot2_id) : null);
     if (!data1 || !data2 || data1.length === 0 || data2.length === 0) continue;
 
-    const map1 = new Map();
-    const map2 = new Map();
+    const map1 = new Map<string, { time: ChartTime; value: number }>();
+    const map2 = new Map<string, { time: ChartTime; value: number }>();
     for (const d of data1) {
       const key = chartTimeKey(d?.time);
-      if (key !== null && d?.value != null && isFinite(d.value)) {
+      if (key !== null && d.time != null && d.value != null && isFinite(d.value)) {
         map1.set(key, { time: d.time, value: d.value });
       }
     }
     for (const d of data2) {
       const key = chartTimeKey(d?.time);
-      if (key !== null && d?.value != null && isFinite(d.value)) {
+      if (key !== null && d.time != null && d.value != null && isFinite(d.value)) {
         map2.set(key, { time: d.time, value: d.value });
       }
     }
 
-    const sharedPoints = [];
+    const sharedPoints: Array<{
+      key: string;
+      first: { time: ChartTime; value: number };
+      second: { time: ChartTime; value: number };
+    }> = [];
     for (const [key, first] of map1) {
       const second = map2.get(key);
       if (second) sharedPoints.push({ key, first, second });

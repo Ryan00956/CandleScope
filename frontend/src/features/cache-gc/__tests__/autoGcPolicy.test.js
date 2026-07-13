@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildAutoFrontendGcPlan } from "../autoGcPolicy.js";
+import {
+  appendFrontendAutoGcAudit,
+  buildAutoFrontendGcPlan,
+} from "../autoGcPolicy.js";
 
 function diagnostics(entry) {
   return {
@@ -57,4 +60,32 @@ test("auto frontend GC skips low-score non-orphan victims", () => {
 
   assert.equal(plan.victims.length, 0);
   assert.equal(plan.autoSkipped[0].reason, "score-below-threshold");
+});
+
+test("auto frontend GC audit replaces damaged storage with validated entries", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  let written = null;
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: () => "{damaged",
+      setItem: (_key, value) => {
+        written = value;
+      },
+    },
+  });
+
+  try {
+    appendFrontendAutoGcAudit({
+      plan: { victims: [], autoSkipped: [] },
+      result: { removedCount: 0, removedEstimatedBytes: 0 },
+    });
+    const stored = JSON.parse(written);
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].mode, "auto-gc");
+    assert.equal(stored[0].victimCount, 0);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "localStorage", previous);
+    else delete globalThis.localStorage;
+  }
 });

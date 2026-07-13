@@ -1,4 +1,25 @@
-export async function collectBrowserRuntimePressure({ estimatedBytes = 0 } = {}) {
+import type {
+  BrowserHeapPressure,
+  BrowserRuntimePressure,
+  BrowserStoragePressure,
+} from "./cacheGcTypes.js";
+
+interface ExtendedPerformance extends Performance {
+  measureUserAgentSpecificMemory?: () => Promise<{ bytes?: unknown }>;
+  memory?: {
+    usedJSHeapSize?: unknown;
+    totalJSHeapSize?: unknown;
+    jsHeapSizeLimit?: unknown;
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export async function collectBrowserRuntimePressure({
+  estimatedBytes = 0,
+}: { estimatedBytes?: number } = {}): Promise<BrowserRuntimePressure> {
   const heap = await browserHeapPressure(estimatedBytes);
   const storage = await browserStoragePressure();
   return {
@@ -7,9 +28,9 @@ export async function collectBrowserRuntimePressure({ estimatedBytes = 0 } = {})
   };
 }
 
-async function browserHeapPressure(estimatedBytes) {
+async function browserHeapPressure(estimatedBytes: number): Promise<BrowserHeapPressure> {
   try {
-    const perf = globalThis.performance;
+    const perf = globalThis.performance as ExtendedPerformance;
     if (perf?.measureUserAgentSpecificMemory) {
       const result = await perf.measureUserAgentSpecificMemory();
       return {
@@ -22,7 +43,7 @@ async function browserHeapPressure(estimatedBytes) {
   } catch (err) {
     return fallbackHeap(estimatedBytes, "measureUserAgentSpecificMemory-error", err);
   }
-  const memory = globalThis.performance?.memory;
+  const memory = (globalThis.performance as ExtendedPerformance | undefined)?.memory;
   if (memory) {
     return {
       available: true,
@@ -36,7 +57,7 @@ async function browserHeapPressure(estimatedBytes) {
   return fallbackHeap(estimatedBytes, "estimated-cache-bytes");
 }
 
-async function browserStoragePressure() {
+async function browserStoragePressure(): Promise<BrowserStoragePressure> {
   try {
     const nav = globalThis.navigator;
     if (nav?.storage?.estimate) {
@@ -55,7 +76,7 @@ async function browserStoragePressure() {
     return {
       available: false,
       source: "navigator.storage.estimate-error",
-      error: err?.message || String(err),
+      error: errorMessage(err),
     };
   }
   return {
@@ -64,11 +85,15 @@ async function browserStoragePressure() {
   };
 }
 
-function fallbackHeap(estimatedBytes, source, err = null) {
+function fallbackHeap(
+  estimatedBytes: number,
+  source: string,
+  error: unknown = null,
+): BrowserHeapPressure {
   return {
     available: false,
     source,
     estimatedBytes: Number(estimatedBytes || 0),
-    error: err?.message || undefined,
+    error: error == null ? undefined : errorMessage(error),
   };
 }

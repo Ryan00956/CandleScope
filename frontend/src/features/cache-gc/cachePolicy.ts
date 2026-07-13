@@ -1,4 +1,27 @@
-const DEFAULT_POLICY = {
+import type {
+  CacheDiagnostics,
+  CacheDiagnosticsEntry,
+  CacheTier,
+  GcCandidate,
+  GcPlan,
+  GcPolicy,
+  GcPressure,
+  GcVictim,
+} from "./cacheGcTypes.js";
+
+interface NormalizedGcEntry extends CacheDiagnosticsEntry {
+  owner: string;
+  key: string;
+  tier: CacheTier;
+  category: "kline" | "indicator";
+  bars: number;
+  points: number;
+  items: number;
+  estimatedBytes: number;
+  orphan?: boolean;
+}
+
+const DEFAULT_POLICY: GcPolicy = {
   maxEstimatedBytes: 64 * 1024 * 1024,
   maxIndicatorPoints: 500_000,
   maxKlineBars: 200_000,
@@ -7,7 +30,7 @@ const DEFAULT_POLICY = {
   preserveSubscribed: true,
 };
 
-const TIER_PRIORITY = {
+const TIER_PRIORITY: Record<CacheTier, number> = {
   cold: 0,
   warm: 1,
   visible: 2,
@@ -15,21 +38,21 @@ const TIER_PRIORITY = {
   active: 4,
 };
 
-function number(value) {
+function number(value: unknown): number {
   return Number.isFinite(Number(value)) ? Number(value) : 0;
 }
 
-function positiveOrDefault(value, fallback) {
+function positiveOrDefault(value: unknown, fallback: number): number {
   const parsed = number(value);
   return parsed > 0 ? parsed : fallback;
 }
 
-function ageMs(entry, nowMs) {
+function ageMs(entry: CacheDiagnosticsEntry, nowMs: number): number | null {
   const timestamp = number(entry.lastAccessMs || entry.lastUpdatedMs || entry.lastRealtimeMs);
   return timestamp > 0 ? Math.max(0, nowMs - timestamp) : null;
 }
 
-function inferTier(entry, nowMs) {
+function inferTier(entry: CacheDiagnosticsEntry, nowMs: number): CacheTier {
   if (entry.tier === "active") return "active";
   if (entry.tier === "subscribed" || entry.status === "live") return "subscribed";
   if (entry.tier === "visible") return "visible";
@@ -39,37 +62,43 @@ function inferTier(entry, nowMs) {
   return "warm";
 }
 
-function flattenDiagnostics(diagnostics = {}, nowMs) {
+function flattenDiagnostics(
+  diagnostics: CacheDiagnostics = {},
+  nowMs: number,
+): NormalizedGcEntry[] {
   const owners = diagnostics.owners || {};
   const chartEntries = owners.chart?.entries || [];
   const watchlistEntries = owners.watchlist?.entries || [];
   const indicatorEntries = owners.indicators?.entries || [];
 
   return [
-    ...chartEntries.map((entry) => ({
+    ...chartEntries.map((entry): NormalizedGcEntry => ({
       ...entry,
       owner: entry.owner || "chart-data-cache",
-      category: "kline",
+      key: String(entry.key || ""),
+      category: "kline" as const,
       tier: inferTier(entry, nowMs),
       bars: number(entry.bars),
       estimatedBytes: number(entry.estimatedBytes),
       points: 0,
       items: 0,
     })),
-    ...watchlistEntries.map((entry) => ({
+    ...watchlistEntries.map((entry): NormalizedGcEntry => ({
       ...entry,
       owner: entry.owner || "watchlist-full-cache",
-      category: "kline",
+      key: String(entry.key || ""),
+      category: "kline" as const,
       tier: inferTier(entry, nowMs),
       bars: number(entry.bars),
       estimatedBytes: number(entry.estimatedBytes),
       points: 0,
       items: 0,
     })),
-    ...indicatorEntries.map((entry) => ({
+    ...indicatorEntries.map((entry): NormalizedGcEntry => ({
       ...entry,
       owner: entry.owner || "indicator-result-cache",
-      category: "indicator",
+      key: String(entry.key || ""),
+      category: "indicator" as const,
       tier: inferTier(entry, nowMs),
       orphan: Boolean(entry.dependencyState?.orphan),
       bars: 0,
@@ -80,7 +109,7 @@ function flattenDiagnostics(diagnostics = {}, nowMs) {
   ];
 }
 
-function shouldProtect(entry, policy) {
+function shouldProtect(entry: NormalizedGcEntry, policy: GcPolicy): string {
   if (policy.preserveActive && entry.tier === "active") {
     return "protected-active";
   }
@@ -90,7 +119,7 @@ function shouldProtect(entry, policy) {
   return "";
 }
 
-function reasonFor(entry, pressure) {
+function reasonFor(entry: NormalizedGcEntry, pressure: GcPressure): string {
   if (entry.orphan) return "missing-kline-dependency";
   if (entry.tier === "cold") return "cold-cache-over-budget";
   if (entry.category === "indicator" && pressure.indicatorPoints > 0) return "indicator-points-over-budget";
@@ -99,7 +128,7 @@ function reasonFor(entry, pressure) {
   return "warm-cache-over-budget";
 }
 
-function sortCandidates(left, right) {
+function sortCandidates(left: GcCandidate, right: GcCandidate): number {
   const smartDiff = number(right.scores?.finalEvictScore) - number(left.scores?.finalEvictScore);
   if (smartDiff !== 0) return smartDiff;
   const tierDiff = (TIER_PRIORITY[left.tier] ?? 9) - (TIER_PRIORITY[right.tier] ?? 9);
@@ -109,21 +138,21 @@ function sortCandidates(left, right) {
   return String(left.key || "").localeCompare(String(right.key || ""));
 }
 
-function pressureScore(diagnostics, pressure) {
+function pressureScore(diagnostics: CacheDiagnostics, pressure: GcPressure): number {
   let score = 0;
   if (pressure.klineBars > 0) score += 20;
   if (pressure.indicatorPoints > 0) score += 20;
   if (pressure.estimatedBytes > 0) score += 20;
-  const heap = diagnostics.runtimePressure?.browserHeap || {};
-  const used = number(heap.usedJSHeapSize || heap.estimatedBytes);
-  const limit = number(heap.jsHeapSizeLimit || heap.totalJSHeapSize);
+  const heap = diagnostics.runtimePressure?.browserHeap;
+  const used = number(heap?.usedJSHeapSize || heap?.estimatedBytes);
+  const limit = number(heap?.jsHeapSizeLimit || heap?.totalJSHeapSize);
   if (limit > 0 && used / limit > 0.8) score += 40;
-  const storage = diagnostics.runtimePressure?.browserStorage || {};
-  if (number(storage.usageRatio) > 0.8) score += 15;
+  const storage = diagnostics.runtimePressure?.browserStorage;
+  if (number(storage?.usageRatio) > 0.8) score += 15;
   return score;
 }
 
-function restoreCost(entry) {
+function restoreCost(entry: NormalizedGcEntry): { score: number; reason: string } {
   if (entry.orphan) return { score: 0, reason: "orphan" };
   if (entry.category === "indicator") {
     if (entry.trimSafety?.safeRangeTrim) return { score: 45, reason: "indicator-safe-range-trim" };
@@ -133,15 +162,22 @@ function restoreCost(entry) {
   return { score: 20, reason: "memory-or-sqlite-reload" };
 }
 
-function reuseProbability(entry) {
-  const explicit = number(entry.heatScore || entry.behaviorHeat?.heat_score);
-  const access = number(entry.accessCount || entry.behaviorHeat?.access_count_24h);
-  const switches = number(entry.switchCount || entry.behaviorHeat?.switch_count_24h);
+function reuseProbability(entry: NormalizedGcEntry): number {
+  const behaviorHeat = entry.behaviorHeat && typeof entry.behaviorHeat === "object"
+    ? entry.behaviorHeat as Record<string, unknown>
+    : null;
+  const explicit = number(entry.heatScore || behaviorHeat?.heat_score);
+  const access = number(entry.accessCount || behaviorHeat?.access_count_24h);
+  const switches = number(entry.switchCount || behaviorHeat?.switch_count_24h);
   const tierBoost = { active: 100, subscribed: 75, visible: 55, warm: 20, cold: 0 }[entry.tier] ?? 0;
   return Math.min(100, tierBoost + explicit * 8 + access * 3 + switches * 10);
 }
 
-function attachScores(entry, diagnostics, pressure) {
+function attachScores(
+  entry: NormalizedGcEntry,
+  diagnostics: CacheDiagnostics,
+  pressure: GcPressure,
+): GcCandidate {
   const restore = restoreCost(entry);
   const reuse = reuseProbability(entry);
   const pScore = pressureScore(diagnostics, pressure);
@@ -154,7 +190,7 @@ function attachScores(entry, diagnostics, pressure) {
     ...entry,
     restoreCostReason: restore.reason,
     reuseReason: reuse >= 60 ? "hot-series" : reuse >= 20 ? "recently-reused" : "no-recent-heat",
-    matchedIntents: entry.matchedIntents || [],
+    matchedIntents: Array.isArray(entry.matchedIntents) ? entry.matchedIntents : [],
     scores: {
       gcValueScore: Number(gcValue.toFixed(3)),
       restoreCostScore: Number(restore.score.toFixed(3)),
@@ -165,14 +201,15 @@ function attachScores(entry, diagnostics, pressure) {
   };
 }
 
-function victimFrom(candidate, remaining) {
+function victimFrom(candidate: GcCandidate, remaining: GcPressure): GcVictim {
+  const coverage = candidate.coverage;
   const canTrimRange = candidate.category === "indicator"
     && candidate.trimSafety?.safeRangeTrim
-    && candidate.coverage?.firstTime != null
-    && candidate.coverage?.lastTime != null
+    && coverage?.firstTime != null
+    && coverage?.lastTime != null
     && number(candidate.points) > 2;
   const keepStart = canTrimRange
-    ? Math.floor((number(candidate.coverage.firstTime) + number(candidate.coverage.lastTime)) / 2)
+    ? Math.floor((number(coverage?.firstTime) + number(coverage?.lastTime)) / 2)
     : null;
   return {
     owner: candidate.owner,
@@ -190,7 +227,7 @@ function victimFrom(candidate, remaining) {
     keepStart,
     reason: reasonFor(candidate, remaining),
     scores: candidate.scores,
-    matchedIntents: candidate.matchedIntents || [],
+    matchedIntents: candidate.matchedIntents,
     restoreCostReason: candidate.restoreCostReason,
     reuseReason: candidate.reuseReason,
     trimSafety: candidate.trimSafety,
@@ -198,7 +235,7 @@ function victimFrom(candidate, remaining) {
   };
 }
 
-function buildPressure(diagnostics, policy) {
+function buildPressure(diagnostics: CacheDiagnostics, policy: GcPolicy): GcPressure {
   const totalKlineBars = number(diagnostics.klineBars);
   const totalIndicatorPoints = number(diagnostics.indicatorPoints);
   const estimatedBytes = number(diagnostics.estimatedBytes);
@@ -213,16 +250,19 @@ function buildPressure(diagnostics, policy) {
   };
 }
 
-function hasPressure(pressure) {
+function hasPressure(pressure: GcPressure): boolean {
   return pressure.klineBars > 0 || pressure.indicatorPoints > 0 || pressure.estimatedBytes > 0;
 }
 
-function pressureSatisfied(remaining) {
+function pressureSatisfied(remaining: GcPressure): boolean {
   return remaining.klineBars <= 0 && remaining.indicatorPoints <= 0 && remaining.estimatedBytes <= 0;
 }
 
-export function planFrontendGc(diagnostics = {}, policyPatch = {}) {
-  const policy = { ...DEFAULT_POLICY, ...policyPatch };
+export function planFrontendGc(
+  diagnostics: CacheDiagnostics = {},
+  policyPatch: Partial<GcPolicy> = {},
+): GcPlan {
+  const policy: GcPolicy = { ...DEFAULT_POLICY, ...policyPatch };
   policy.maxEstimatedBytes = positiveOrDefault(
     policy.frontendCacheBudgetBytes || policy.frontend_cache_budget_bytes || policy.maxEstimatedBytes,
     DEFAULT_POLICY.maxEstimatedBytes,
@@ -230,8 +270,8 @@ export function planFrontendGc(diagnostics = {}, policyPatch = {}) {
   const nowMs = number(policy.nowMs) || Date.now();
   const entries = flattenDiagnostics(diagnostics, nowMs);
   const pressure = buildPressure(diagnostics, policy);
-  const protectedEntries = [];
-  const candidates = [];
+  const protectedEntries: Array<NormalizedGcEntry & { reason: string }> = [];
+  const candidates: GcCandidate[] = [];
 
   for (const entry of entries) {
     const protectedReason = shouldProtect(entry, policy);
@@ -245,7 +285,7 @@ export function planFrontendGc(diagnostics = {}, policyPatch = {}) {
     candidates.push(attachScores(entry, diagnostics, pressure));
   }
 
-  const victims = [];
+  const victims: GcVictim[] = [];
   const remaining = { ...pressure };
   if (hasPressure(pressure)) {
     for (const candidate of [...candidates].sort(sortCandidates)) {

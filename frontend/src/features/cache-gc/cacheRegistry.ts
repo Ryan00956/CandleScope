@@ -1,12 +1,18 @@
-const resources = new Map();
-const dependencies = new Map();
-const leases = new Map();
+import type {
+  CacheLease,
+  CacheRegistrySnapshot,
+  CacheResource,
+} from "./cacheGcTypes.js";
 
-function scopedKey(owner, key) {
+const resources = new Map<string, CacheResource>();
+const dependencies = new Map<string, Set<string>>();
+const leases = new Map<string, CacheLease>();
+
+function scopedKey(owner: string, key: string): string {
   return `${owner}:${key}`;
 }
 
-function normalizePart(value, fallback = "") {
+function normalizePart(value: unknown, fallback = ""): string {
   return String(value ?? fallback).trim();
 }
 
@@ -15,7 +21,12 @@ export function klineDependencyKey({
   marketType = "spot",
   symbol = "",
   interval = "",
-} = {}) {
+}: {
+  exchange?: unknown;
+  marketType?: unknown;
+  symbol?: unknown;
+  interval?: unknown;
+} = {}): string {
   return [
     normalizePart(exchange, "binance").toLowerCase(),
     normalizePart(marketType, "spot").toLowerCase(),
@@ -24,25 +35,29 @@ export function klineDependencyKey({
   ].join(":");
 }
 
-export function registerCacheResource(owner, key, patch = {}) {
+export function registerCacheResource(
+  owner: string,
+  key: string,
+  patch: Record<string, unknown> = {},
+): CacheResource | null {
   if (!owner || !key) return null;
   const id = scopedKey(owner, key);
-  const current = resources.get(id) || {};
+  const current = resources.get(id);
   const now = Date.now();
   const next = {
-    ...current,
+    ...(current || {}),
     ...patch,
     owner,
     key,
     id,
-    registeredAtMs: current.registeredAtMs || now,
+    registeredAtMs: current?.registeredAtMs || now,
     lastSeenMs: now,
   };
   resources.set(id, next);
   return next;
 }
 
-export function unregisterCacheResource(owner, key) {
+export function unregisterCacheResource(owner: string, key: string): void {
   const id = scopedKey(owner, key);
   resources.delete(id);
   dependencies.delete(id);
@@ -51,7 +66,7 @@ export function unregisterCacheResource(owner, key) {
   }
 }
 
-export function registerCacheDependency(owner, key, dependencyKey) {
+export function registerCacheDependency(owner: string, key: string, dependencyKey: string): void {
   if (!owner || !key || !dependencyKey) return;
   const id = scopedKey(owner, key);
   const deps = dependencies.get(id) || new Set();
@@ -59,7 +74,12 @@ export function registerCacheDependency(owner, key, dependencyKey) {
   dependencies.set(id, deps);
 }
 
-export function acquireCacheLease(owner, key, leaseId, detail = {}) {
+export function acquireCacheLease(
+  owner: string,
+  key: string,
+  leaseId: string,
+  detail: Record<string, unknown> = {},
+): (() => void) | null {
   if (!owner || !key || !leaseId) return null;
   const now = Date.now();
   const id = `${scopedKey(owner, key)}:${leaseId}`;
@@ -75,11 +95,11 @@ export function acquireCacheLease(owner, key, leaseId, detail = {}) {
   return () => releaseCacheLease(owner, key, leaseId);
 }
 
-export function releaseCacheLease(owner, key, leaseId) {
+export function releaseCacheLease(owner: string, key: string, leaseId: string): void {
   leases.delete(`${scopedKey(owner, key)}:${leaseId}`);
 }
 
-export function dependencyAvailable(dependencyKey) {
+export function dependencyAvailable(dependencyKey: string): boolean {
   for (const resource of resources.values()) {
     if (
       resource.type === "kline"
@@ -92,7 +112,11 @@ export function dependencyAvailable(dependencyKey) {
   return false;
 }
 
-export function dependencyState(owner, key) {
+export function dependencyState(owner: string, key: string): {
+  dependencies: string[];
+  missingDependencies: string[];
+  orphan: boolean;
+} {
   const id = scopedKey(owner, key);
   const deps = Array.from(dependencies.get(id) || []);
   const missing = deps.filter((dependencyKey) => !dependencyAvailable(dependencyKey));
@@ -103,7 +127,7 @@ export function dependencyState(owner, key) {
   };
 }
 
-export function snapshotCacheRegistry() {
+export function snapshotCacheRegistry(): CacheRegistrySnapshot {
   return {
     resources: Array.from(resources.values()),
     dependencies: Array.from(dependencies.entries()).map(([id, deps]) => ({
@@ -114,7 +138,7 @@ export function snapshotCacheRegistry() {
   };
 }
 
-export function resetCacheRegistry() {
+export function resetCacheRegistry(): void {
   resources.clear();
   dependencies.clear();
   leases.clear();

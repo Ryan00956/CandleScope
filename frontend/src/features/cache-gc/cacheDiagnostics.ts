@@ -3,49 +3,86 @@ import { snapshotWatchlistFullCacheDiagnostics } from "../watchlist-full-cache/w
 import { snapshotCacheRegistry } from "./cacheRegistry.js";
 import { collectBrowserRuntimePressure } from "./browserPressure.js";
 import { snapshotFrontendCacheAccessEvents } from "./cacheAccessRuntime.js";
+import type { CacheDiagnosticsEntry } from "./cacheGcTypes.js";
 
 const KLINE_ROW_ESTIMATED_BYTES = 200;
 const INDICATOR_POINT_ESTIMATED_BYTES = 80;
 const OUTPUT_ITEM_ESTIMATED_BYTES = 120;
 
-function estimateKlineBytes(totalBars = 0) {
+interface SnapshotRecord extends Record<string, unknown> {
+  totalBars?: unknown;
+  seriesCount?: unknown;
+  estimatedBytes?: unknown;
+  activeKey?: unknown;
+  statusCounts?: unknown;
+  entries?: unknown;
+  totalPoints?: unknown;
+  totalItems?: unknown;
+  entryCount?: unknown;
+  maxEntries?: unknown;
+}
+
+type SnapshotProvider = (() => unknown) | null;
+
+function snapshotRecord(value: unknown): SnapshotRecord {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as SnapshotRecord
+    : {};
+}
+
+function entriesFrom(value: unknown): CacheDiagnosticsEntry[] {
+  return Array.isArray(value) ? value as CacheDiagnosticsEntry[] : [];
+}
+
+function finiteNonNegative(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function estimateKlineBytes(totalBars: unknown = 0): number {
   return Math.max(0, Number(totalBars || 0)) * KLINE_ROW_ESTIMATED_BYTES;
 }
 
-function estimateIndicatorBytes({ totalPoints = 0, totalItems = 0 } = {}) {
+function estimateIndicatorBytes({
+  totalPoints = 0,
+  totalItems = 0,
+}: { totalPoints?: unknown; totalItems?: unknown } = {}): number {
   return (
     Math.max(0, Number(totalPoints || 0)) * INDICATOR_POINT_ESTIMATED_BYTES
     + Math.max(0, Number(totalItems || 0)) * OUTPUT_ITEM_ESTIMATED_BYTES
   );
 }
 
-function normalizeChartSnapshot(snapshot = {}) {
+function normalizeChartSnapshot(snapshotValue: unknown = {}) {
+  const snapshot = snapshotRecord(snapshotValue);
   const totalBars = Number(snapshot.totalBars || 0);
   return {
     owner: "chart-data-cache",
     label: "主图 K 线缓存",
     seriesCount: Number(snapshot.seriesCount || 0),
     totalBars,
-    estimatedBytes: snapshot.estimatedBytes ?? estimateKlineBytes(totalBars),
+    estimatedBytes: finiteNonNegative(snapshot.estimatedBytes, estimateKlineBytes(totalBars)),
     activeKey: snapshot.activeKey || null,
-    entries: snapshot.entries || [],
+    entries: entriesFrom(snapshot.entries),
   };
 }
 
-function normalizeWatchlistSnapshot(snapshot = {}) {
+function normalizeWatchlistSnapshot(snapshotValue: unknown = {}) {
+  const snapshot = snapshotRecord(snapshotValue);
   const totalBars = Number(snapshot.totalBars || 0);
   return {
     owner: "watchlist-full-cache",
     label: "自选 Full 后台缓存",
     seriesCount: Number(snapshot.seriesCount || 0),
     totalBars,
-    estimatedBytes: snapshot.estimatedBytes ?? estimateKlineBytes(totalBars),
+    estimatedBytes: finiteNonNegative(snapshot.estimatedBytes, estimateKlineBytes(totalBars)),
     statusCounts: snapshot.statusCounts || {},
-    entries: snapshot.entries || [],
+    entries: entriesFrom(snapshot.entries),
   };
 }
 
-function normalizeIndicatorSnapshot(snapshot = {}) {
+function normalizeIndicatorSnapshot(snapshotValue: unknown = {}) {
+  const snapshot = snapshotRecord(snapshotValue);
   const totalPoints = Number(snapshot.totalPoints || 0);
   const totalItems = Number(snapshot.totalItems || 0);
   return {
@@ -54,13 +91,18 @@ function normalizeIndicatorSnapshot(snapshot = {}) {
     entryCount: Number(snapshot.entryCount || 0),
     totalPoints,
     totalItems,
-    estimatedBytes: snapshot.estimatedBytes ?? estimateIndicatorBytes({ totalPoints, totalItems }),
+    estimatedBytes: finiteNonNegative(
+      snapshot.estimatedBytes,
+      estimateIndicatorBytes({ totalPoints, totalItems }),
+    ),
     maxEntries: snapshot.maxEntries,
-    entries: snapshot.entries || [],
+    entries: entriesFrom(snapshot.entries),
   };
 }
 
-export function collectFrontendCacheDiagnostics({ chartDataCache = null } = {}) {
+export function collectFrontendCacheDiagnostics({
+  chartDataCache = null,
+}: { chartDataCache?: SnapshotProvider | unknown } = {}) {
   const chart = normalizeChartSnapshot(
     typeof chartDataCache === "function" ? chartDataCache() : chartDataCache,
   );
@@ -95,7 +137,9 @@ export function collectFrontendCacheDiagnostics({ chartDataCache = null } = {}) 
   };
 }
 
-export async function collectFrontendCacheDiagnosticsAsync({ chartDataCache = null } = {}) {
+export async function collectFrontendCacheDiagnosticsAsync({
+  chartDataCache = null,
+}: { chartDataCache?: SnapshotProvider | unknown } = {}) {
   const diagnostics = collectFrontendCacheDiagnostics({ chartDataCache });
   return {
     ...diagnostics,

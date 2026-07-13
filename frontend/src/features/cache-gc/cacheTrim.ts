@@ -1,8 +1,16 @@
 import { trimIndicatorResultCacheEntries } from "../indicators/indicatorResultCacheStore.js";
 import { trimWatchlistFullCacheEntries } from "../watchlist-full-cache/watchlistFullCacheStore.js";
+import type {
+  CacheTrimOwnerResult,
+  FrontendGcExecutionResult,
+  GcPlan,
+  GcVictim,
+} from "./cacheGcTypes.js";
 
-function byOwner(victims = []) {
-  return victims.reduce((groups, victim) => {
+type ChartTrimFunction = (victims: GcVictim[]) => CacheTrimOwnerResult;
+
+function byOwner(victims: GcVictim[] = []): Record<string, GcVictim[]> {
+  return victims.reduce<Record<string, GcVictim[]>>((groups, victim) => {
     if (!victim?.owner) return groups;
     if (!groups[victim.owner]) groups[victim.owner] = [];
     groups[victim.owner].push(victim);
@@ -10,12 +18,12 @@ function byOwner(victims = []) {
   }, {});
 }
 
-export function executeFrontendGcPlan(plan, {
+export function executeFrontendGcPlan(plan: GcPlan | null | undefined, {
   trimChartDataCacheEntries = null,
-} = {}) {
+}: { trimChartDataCacheEntries?: ChartTrimFunction | null } = {}): FrontendGcExecutionResult {
   const victims = plan?.victims || [];
   const groups = byOwner(victims);
-  const chartResult = typeof trimChartDataCacheEntries === "function"
+  const chartResult: CacheTrimOwnerResult = typeof trimChartDataCacheEntries === "function"
     ? trimChartDataCacheEntries(groups["chart-data-cache"] || [])
     : {
         owner: "chart-data-cache",
@@ -28,9 +36,13 @@ export function executeFrontendGcPlan(plan, {
         })) || [],
         removed: [],
       };
-  const watchlistResult = trimWatchlistFullCacheEntries(groups["watchlist-full-cache"] || []);
-  const indicatorResult = trimIndicatorResultCacheEntries(groups["indicator-result-cache"] || []);
-  const ownerResults = [chartResult, watchlistResult, indicatorResult];
+  const watchlistResult: CacheTrimOwnerResult = trimWatchlistFullCacheEntries(
+    groups["watchlist-full-cache"] || [],
+  );
+  const indicatorResult: CacheTrimOwnerResult = trimIndicatorResultCacheEntries(
+    groups["indicator-result-cache"] || [],
+  );
+  const ownerResults: CacheTrimOwnerResult[] = [chartResult, watchlistResult, indicatorResult];
 
   return {
     generatedAtMs: Date.now(),

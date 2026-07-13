@@ -5,7 +5,7 @@
  * Receives a "snapshot" of the current selected text's style fields and a
  * callback to apply patches to the live primitive.
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { SyntheticEvent } from "react";
 import type { TextDrawingPatch } from "../features/drawings/drawingTypes.js";
 import type { SelectedTextSnapshot } from "../features/drawings/drawingSelectionController.js";
@@ -100,13 +100,13 @@ export default function TextFormatBar({
 }: TextFormatBarProps) {
   // Local string state for the font-size input so the user can freely clear
   // and retype without the controlled value snapping back mid-edit.
-  const [fontSizeText, setFontSizeText] = useState(String(snapshot?.fontSize ?? 14));
-  useEffect(() => {
-    if (snapshot?.fontSize != null && String(snapshot.fontSize) !== fontSizeText) {
-      setFontSizeText(String(snapshot.fontSize));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshot?.fontSize]);
+  const snapshotFontSize = snapshot?.fontSize ?? 14;
+  const [previousSnapshotFontSize, setPreviousSnapshotFontSize] = useState(snapshotFontSize);
+  const [fontSizeText, setFontSizeText] = useState(String(snapshotFontSize));
+  if (snapshotFontSize !== previousSnapshotFontSize) {
+    setPreviousSnapshotFontSize(snapshotFontSize);
+    setFontSizeText(String(snapshotFontSize));
+  }
 
   if (!position || !snapshot) return null;
 

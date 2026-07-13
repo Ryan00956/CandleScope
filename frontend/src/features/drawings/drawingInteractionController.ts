@@ -1653,8 +1653,7 @@ export function useDrawing({
       if (typeof prim.setHidden === "function") {
         prim.setHidden(value, false);
       } else {
-        // eslint-disable-next-line react-hooks/immutability -- mutating the primitive object, not the ref container
-        prim._hidden = value;
+        Reflect.set(prim, "_hidden", value);
       }
       if (!updateRequested && typeof prim.requestUpdate === "function" && prim._series) {
         prim.requestUpdate();

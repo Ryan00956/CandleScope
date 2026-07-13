@@ -1,7 +1,14 @@
+import type {
+  PerformanceEntryRecord,
+  PerformanceMarkName,
+  PerformanceReport,
+  PerformanceStore,
+} from "./performanceTypes.js";
+
 const PERF_NAMESPACE = "__CANDLESCOPE_PERF__";
 const MAX_EVENTS = 240;
 
-const TIMING_PAIRS = {
+const TIMING_PAIRS: Record<string, readonly [PerformanceMarkName, PerformanceMarkName]> = {
   appBootToRootRequestedMs: ["app.boot.start", "app.root.render.requested"],
   latestRequestMs: ["chart.initialLoad.latest.request", "chart.initialLoad.latest.response"],
   latestCommitMs: ["chart.initialLoad.start", "chart.initialLoad.latest.commit"],
@@ -21,16 +28,20 @@ const TIMING_PAIRS = {
   drawingToolbarReadyMs: ["app.boot.start", "lazy.drawingToolbar.ready"],
 };
 
-function canUseWindow() {
+interface PerformanceWindow extends Window {
+  __CANDLESCOPE_PERF__?: PerformanceStore;
+}
+
+function canUseWindow(): boolean {
   return typeof window !== "undefined";
 }
 
-function now() {
+function now(): number {
   if (canUseWindow() && window.performance?.now) return window.performance.now();
   return Date.now();
 }
 
-function safeDetail(detail) {
+function safeDetail(detail: unknown): unknown {
   if (!detail || typeof detail !== "object") return detail ?? null;
   try {
     return JSON.parse(JSON.stringify(detail));
@@ -39,12 +50,13 @@ function safeDetail(detail) {
   }
 }
 
-function getStore() {
+function getStore(): PerformanceStore | null {
   if (!canUseWindow()) return null;
-  if (window[PERF_NAMESPACE]) return window[PERF_NAMESPACE];
+  const perfWindow = window as PerformanceWindow;
+  if (perfWindow.__CANDLESCOPE_PERF__) return perfWindow.__CANDLESCOPE_PERF__;
 
   const createdAt = now();
-  const store = {
+  const store: PerformanceStore = {
     createdAt,
     marks: {},
     events: [],
@@ -64,11 +76,11 @@ function getStore() {
       return buildPerfReport();
     },
   };
-  window[PERF_NAMESPACE] = store;
+  perfWindow.__CANDLESCOPE_PERF__ = store;
   return store;
 }
 
-function performanceMark(name, detail) {
+function performanceMark(name: PerformanceMarkName, detail: unknown): void {
   if (!canUseWindow() || !window.performance?.mark) return;
   try {
     window.performance.mark(name, detail ? { detail } : undefined);
@@ -81,7 +93,10 @@ function performanceMark(name, detail) {
   }
 }
 
-export function markPerf(name, detail = null) {
+export function markPerf(
+  name: PerformanceMarkName,
+  detail: unknown = null,
+): PerformanceEntryRecord | null {
   const store = getStore();
   if (!store || !name) return null;
   const at = now();
@@ -98,13 +113,20 @@ export function markPerf(name, detail = null) {
   return entry;
 }
 
-export function markPerfOnce(name, detail = null) {
+export function markPerfOnce(
+  name: PerformanceMarkName,
+  detail: unknown = null,
+): PerformanceEntryRecord | null {
   const store = getStore();
   if (!store || store.marks[name]) return store?.marks?.[name] || null;
   return markPerf(name, detail);
 }
 
-export function recordPerfEvent(name, detail = null, at = now()) {
+export function recordPerfEvent(
+  name: PerformanceMarkName,
+  detail: unknown = null,
+  at = now(),
+): PerformanceEntryRecord | null {
   const store = getStore();
   if (!store || !name) return null;
   const event = {
@@ -120,7 +142,11 @@ export function recordPerfEvent(name, detail = null, at = now()) {
   return event;
 }
 
-export function measurePerf(name, startName, endName) {
+export function measurePerf(
+  name: string,
+  startName: PerformanceMarkName,
+  endName: PerformanceMarkName,
+): number | null {
   const store = getStore();
   const start = store?.marks?.[startName];
   const end = store?.marks?.[endName];
@@ -136,7 +162,9 @@ export function measurePerf(name, startName, endName) {
   return durationMs;
 }
 
-function buildTimings(marks) {
+function buildTimings(
+  marks: Record<string, PerformanceEntryRecord>,
+): Record<string, number | null> {
   return Object.fromEntries(
     Object.entries(TIMING_PAIRS)
       .map(([key, [startName, endName]]) => {
@@ -148,7 +176,7 @@ function buildTimings(marks) {
   );
 }
 
-export function buildPerfReport() {
+export function buildPerfReport(): PerformanceReport | null {
   const store = getStore();
   if (!store) return null;
   const marks = Object.fromEntries(

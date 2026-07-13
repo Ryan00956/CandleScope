@@ -1,14 +1,20 @@
+import type {
+  WindowBudgetAssertOptions,
+  WindowBudgetInput,
+  WindowBudgetResult,
+} from "./performanceTypes.js";
+
 export const DEFAULT_MAX_SERIES_BARS = 10_000;
 
 const GLOBAL_ENABLE_FLAG = "__CANDLESCOPE_WINDOW_BUDGET_ASSERT__";
 const GLOBAL_REPORTS_KEY = "__CANDLESCOPE_WINDOW_BUDGET_REPORTS__";
 
-function numberOrNull(value) {
+function numberOrNull(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function viteEnv() {
+function viteEnv(): Record<string, unknown> {
   try {
     return import.meta.env || {};
   } catch {
@@ -16,12 +22,12 @@ function viteEnv() {
   }
 }
 
-function globalObject() {
-  if (typeof globalThis !== "undefined") return globalThis;
+function globalObject(): Record<string, unknown> | null {
+  if (typeof globalThis !== "undefined") return globalThis as Record<string, unknown>;
   return null;
 }
 
-export function isWindowBudgetAssertEnabled(options = {}) {
+export function isWindowBudgetAssertEnabled(options: WindowBudgetAssertOptions = {}): boolean {
   if (typeof options.enabled === "boolean") return options.enabled;
   const globalRef = options.globalRef || globalObject();
   if (globalRef?.[GLOBAL_ENABLE_FLAG] === true) return true;
@@ -36,7 +42,11 @@ export function isWindowBudgetAssertEnabled(options = {}) {
   );
 }
 
-function normalizeBudgetInput(input = {}) {
+function normalizeBudgetInput(input: WindowBudgetInput = {}): WindowBudgetInput & {
+  bars: number;
+  maxBars: number;
+  overBy: number;
+} {
   const bars = numberOrNull(input.bars);
   const maxBars = numberOrNull(input.maxBars) || DEFAULT_MAX_SERIES_BARS;
   return {
@@ -47,21 +57,27 @@ function normalizeBudgetInput(input = {}) {
   };
 }
 
-function appendReport(report, globalRef) {
+function appendReport(
+  report: WindowBudgetResult,
+  globalRef: Record<string, unknown> | null,
+): void {
   if (!globalRef) return;
-  const reports = Array.isArray(globalRef[GLOBAL_REPORTS_KEY])
-    ? globalRef[GLOBAL_REPORTS_KEY]
+  const reports: WindowBudgetResult[] = Array.isArray(globalRef[GLOBAL_REPORTS_KEY])
+    ? globalRef[GLOBAL_REPORTS_KEY] as WindowBudgetResult[]
     : [];
   reports.push(report);
   if (reports.length > 100) reports.splice(0, reports.length - 100);
   globalRef[GLOBAL_REPORTS_KEY] = reports;
 }
 
-export function assertWindowBudget(input = {}, options = {}) {
+export function assertWindowBudget(
+  input: WindowBudgetInput = {},
+  options: WindowBudgetAssertOptions = {},
+): WindowBudgetResult | null {
   if (!isWindowBudgetAssertEnabled(options)) return null;
 
   const globalRef = options.globalRef || globalObject();
-  const report = {
+  const report: WindowBudgetResult = {
     type: "window-budget",
     level: "ok",
     atMs: Date.now(),

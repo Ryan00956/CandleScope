@@ -231,17 +231,19 @@ export function mapSourceTimeRangeToDisplayLogicalRange(displayRows, sourceRange
  * Retaining it keeps the source anchor at the same horizontal screen position.
  */
 export function mapSourceViewportAnchorToDisplayLogicalRange(displayRows, {
+  anchorTime = null,
   sourceTime,
   logicalSpan,
   screenOffset = 0,
 } = {}) {
-  const target = finiteNumber(sourceTime);
+  const targetAxisTime = anchorTime ?? sourceTime;
+  const target = sourceTimeFromAxisTime(targetAxisTime);
   const span = finiteNumber(logicalSpan);
   const offset = finiteNumber(screenOffset);
   if (target === null || span === null || span < 0 || offset === null) return null;
   if (!Array.isArray(displayRows) || displayRows.length === 0) return null;
 
-  const anchorIndex = findAnchorDisplayIndex(displayRows, target);
+  const anchorIndex = findAnchorDisplayIndex(displayRows, targetAxisTime);
   if (anchorIndex < 0) return null;
   const to = anchorIndex - offset;
   return { from: to - span, to };

@@ -11,6 +11,14 @@ export { createProjector, registerProjectorFactory } from "./projectorFactory.js
 export { ProjectionStore } from "./projectionStore.js";
 export { shouldPreserveProjectionViewport } from "./projectionViewportPolicy.js";
 export {
+  buildSurfaceViewportCacheKey,
+  buildSurfaceViewportSnapshot,
+  planSurfaceViewportRestore,
+  rememberSurfaceViewport,
+  selectSurfaceViewportSnapshot,
+  SURFACE_VIEWPORT_CACHE_LIMIT,
+} from "./surfaceViewportState.js";
+export {
   buildDisplaySourceTimeIndex,
   isLastDisplayTargetForSourceTime,
   projectBarcolorGroupsToDisplay,

@@ -7,7 +7,11 @@
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
 import { applyChartPaneAppearance, buildChartPaneOptions } from "../chart-adapter/chartPaneLifecycle";
-import { buildPaneLayoutOptions, createChartInstance } from "../chart-adapter/lightweightChartSurface";
+import {
+  buildPaneLayoutOptions,
+  chartSeriesTypes,
+  createChartInstance,
+} from "../chart-adapter/lightweightChartSurface";
 import {
   buildIndicatorSeriesOptions,
   createFutureTimeAxisSeries,
@@ -18,7 +22,13 @@ import {
   resyncSeriesTimeScaleIndexes,
   shouldPreferIndicatorSetData,
 } from "../chart-adapter/seriesLifecycle";
-import { ensurePane, readPaneHeights, setPaneHeights, trimPanes } from "../chart-adapter/paneManager";
+import {
+  ensurePane,
+  materializePaneLayout,
+  readPaneHeights,
+  setPaneHeights,
+  trimPanes,
+} from "../chart-adapter/paneManager";
 import { renderFillSeries, renderHlines } from "../chart-adapter/overlaySeriesRenderer";
 import { renderMarkers } from "../chart-adapter/markerRenderer";
 import { renderBgcolors } from "../chart-adapter/bgcolorPrimitiveRenderer";
@@ -77,35 +87,117 @@ import {
 } from "../features/drawings/drawingCapabilities";
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
 import {
+  axisTimeKey,
   buildDisplaySourceTimeIndex,
+  buildSurfaceViewportSnapshot,
   createProjector,
   getChartTypeDescriptor,
   isLastDisplayTargetForSourceTime,
-  mapSourceTimeRangeToDisplayLogicalRange,
+  planSurfaceViewportRestore,
   ProjectionStore,
   projectPaneDescriptorsToDisplay,
+  rememberSurfaceViewport,
   resolveKagiProjectorOptions,
   resolveLineBreakProjectorOptions,
   resolvePointFigureProjectorOptions,
   resolveRenkoProjectorOptions,
   shouldPreserveProjectionViewport,
+  selectSurfaceViewportSnapshot,
   sourceTimeFromAxisTime,
 } from "../features/chart-representation/index.js";
 import { recordPerfEvent } from "../runtime/performance/perfMarks";
 
 const LEFT_EDGE_TRIGGER_BARS = 15;
 const VISIBLE_RANGE_SAVE_DEBOUNCE_MS = 500;
-const SINGLE_PANE_HEIGHT_KEY_PREFIX = "single:";
+// v1 layouts may contain 30px panes produced by sequential setHeight replay.
+// Keep the corrected ratio-based layout isolated from those polluted values.
+const SINGLE_PANE_HEIGHT_KEY_PREFIX = "single-v2:";
 const PRICE_SCALE_CONTEXT_HIT_WIDTH = 96;
 const PRICE_SCALE_CONTEXT_MENU_WIDTH = 220;
 const PRICE_SCALE_CONTEXT_MENU_HEIGHT = 236;
 const PRICE_SCALE_CONTEXT_MENU_MARGIN = 8;
+const EMPTY_DERIVED_AUXILIARY_INDEX = buildDisplaySourceTimeIndex([]);
 const PRICE_SCALE_MODES = [
   { value: 0, label: "常规", labelEn: "Regular" },
   { value: 1, label: "对数", labelEn: "Logarithmic" },
   { value: 2, label: "百分比", labelEn: "Percentage" },
   { value: 3, label: "基准 100", labelEn: "Indexed to 100" },
 ];
+
+function resolvePaneHeightLayout(storageKey, subPaneCount, totalHeight) {
+  const expectedPaneCount = Math.max(1, subPaneCount + 1);
+  const saved = loadPaneHeights()[storageKey];
+  if (Array.isArray(saved)
+    && saved.length === expectedPaneCount
+    && saved.every((height) => Number.isFinite(height) && height > 0)) {
+    return saved;
+  }
+  if (subPaneCount <= 0 || !Number.isFinite(totalHeight) || totalHeight <= 0) return null;
+
+  const mainHeight = Math.max(180, Math.round(totalHeight * 0.65));
+  const subHeight = Math.max(80, Math.round((totalHeight - mainHeight) / subPaneCount));
+  return [mainHeight, ...Array.from({ length: subPaneCount }, () => subHeight)];
+}
+
+function preparePaneLayout(chart, {
+  storageKey,
+  subPaneCount,
+  totalHeight,
+} = {}) {
+  if (!chart || !Number.isInteger(subPaneCount) || subPaneCount < 0) return false;
+  for (let paneIndex = 1; paneIndex <= subPaneCount; paneIndex += 1) {
+    ensurePane(chart, paneIndex);
+  }
+  const paneHeights = resolvePaneHeightLayout(storageKey, subPaneCount, totalHeight);
+  if (!paneHeights) return subPaneCount === 0;
+  setPaneHeights(chart, paneHeights);
+  return true;
+}
+
+function ensurePanePlaceholderSeries(chart, placeholderStateRef, subPaneCount, anchorTime = null) {
+  if (!chart || !placeholderStateRef || !Number.isInteger(subPaneCount) || subPaneCount < 0) return;
+  if (placeholderStateRef.current.chart !== chart) {
+    placeholderStateRef.current = { chart, seriesByPane: new Map() };
+  }
+  const seriesByPane = placeholderStateRef.current.seriesByPane;
+  const baseAnchorKey = axisTimeKey(anchorTime);
+  const anchorKey = baseAnchorKey && anchorTime && typeof anchorTime === "object"
+    ? `${baseAnchorKey}:source:${anchorTime.sourceTime}:ordinal:${anchorTime.sourceOrdinal}`
+    : baseAnchorKey;
+  for (let paneIndex = 1; paneIndex <= subPaneCount; paneIndex += 1) {
+    ensurePane(chart, paneIndex);
+    let entry = seriesByPane.get(paneIndex);
+    if (!entry) {
+      const series = chart.addSeries(chartSeriesTypes.line, {
+        color: "rgba(0, 0, 0, 0)",
+        crosshairMarkerVisible: false,
+        lastValueVisible: false,
+        priceLineVisible: false,
+        priceScaleId: "__pane-layout-placeholder",
+        title: "",
+      }, paneIndex);
+      entry = { anchorKey: null, series };
+      seriesByPane.set(paneIndex, entry);
+    }
+    if (anchorKey && entry.anchorKey !== anchorKey) {
+      entry.series.setData([{ time: anchorTime, value: 0 }]);
+      entry.anchorKey = anchorKey;
+    }
+  }
+}
+
+function trimPanePlaceholderSeries(chart, placeholderStateRef, retainPaneCount) {
+  if (!chart || placeholderStateRef?.current?.chart !== chart) return;
+  for (const [paneIndex, entry] of placeholderStateRef.current.seriesByPane) {
+    if (paneIndex < retainPaneCount) continue;
+    try {
+      chart.removeSeries(entry.series);
+    } catch {
+      // The pane may already have been removed during surface disposal.
+    }
+    placeholderStateRef.current.seriesByPane.delete(paneIndex);
+  }
+}
 
 function paneKeyForItem(item) {
   const pane = item?.pane || "main";
@@ -246,35 +338,49 @@ function resolveSourceTime(axisTime, displayRow = null) {
   return Number.isFinite(numericTime) ? numericTime : null;
 }
 
-function captureSurfaceViewport(chart, axisMode) {
+function captureSurfaceViewport(chart, {
+  axisMode,
+  datasetKey,
+  displayRows,
+  surfaceConfigKey,
+} = {}) {
   try {
     const timeScale = chart?.timeScale?.();
     const time = timeScale?.getVisibleRange?.();
     const logical = timeScale?.getVisibleLogicalRange?.();
     const from = sourceTimeFromAxisTime(time?.from);
     const to = sourceTimeFromAxisTime(time?.to);
-    if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
-    return {
+    const sourceRange = Number.isFinite(from) && Number.isFinite(to)
+      ? (from <= to ? { from, to } : { from: to, to: from })
+      : null;
+    return buildSurfaceViewportSnapshot({
       axisMode,
       barSpacing: timeScale.options?.().barSpacing,
-      logicalSpan: Number.isFinite(logical?.from) && Number.isFinite(logical?.to)
-        ? Math.max(0, logical.to - logical.from)
-        : null,
-      sourceRange: from <= to ? { from, to } : { from: to, to: from },
-    };
+      datasetKey,
+      displayRows,
+      logicalRange: logical,
+      sourceRange,
+      surfaceConfigKey,
+    });
   } catch {
     return null;
   }
 }
 
-function restoreSurfaceViewport(viewportController, displayRows, transfer, axisMode) {
+function restoreSurfaceViewport(viewportController, displayRows, transfer, {
+  axisMode,
+  datasetKey,
+  surfaceConfigKey,
+} = {}) {
   if (!viewportController || !transfer) return false;
-  const logical = mapSourceTimeRangeToDisplayLogicalRange(displayRows, transfer.sourceRange);
-  const range = logical && logical.to > logical.from
-    ? logical
-    : (logical ? { from: logical.from - 5, to: logical.to + 5 } : null);
-  return viewportController.restoreProjectionRange(range, {
-    barSpacing: transfer.axisMode === axisMode ? transfer.barSpacing : null,
+  const plan = planSurfaceViewportRestore(displayRows, transfer, {
+    axisMode,
+    datasetKey,
+    surfaceConfigKey,
+  });
+  if (!plan) return false;
+  return viewportController.restoreProjectionRange(plan.logicalRange, {
+    barSpacing: plan.barSpacing,
   });
 }
 
@@ -349,6 +455,7 @@ function clearAuxiliaryChartState({
   paneRenderStateRef,
   prevIndicatorKeyRef,
   reason,
+  retainPaneCount = 1,
 }) {
   if (chart) {
     for (const [paneId, state] of paneRenderStateRef.current) {
@@ -360,7 +467,7 @@ function clearAuxiliaryChartState({
   const removedSeriesCount = chart
     ? removeSeriesEntries(chart, indicatorSeriesRef.current)
     : 0;
-  if (chart) trimPanes(chart, 1);
+  if (chart) trimPanes(chart, retainPaneCount);
   indicatorSeriesRef.current = [];
   prevIndicatorKeyRef.current = "";
   if (removedSeriesCount > 0) {
@@ -479,6 +586,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const futureTimeAxisCoveragePendingRef = useRef(false);
   const isChartPointerActiveRef = useRef(false);
   const indicatorSeriesRef = useRef([]);
+  const panePlaceholderSeriesRef = useRef({ chart: null, seriesByPane: new Map() });
   const paneRenderStateRef = useRef(new Map());
   const sourceRowsRef = useRef([]);
   const sourceRowMapRef = useRef(new Map());
@@ -502,6 +610,13 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const requestedChartTypeRef = useRef(normalizeMainChartType(chartType));
   const requestedProjectionSettingsRef = useRef(null);
   const pendingSurfaceViewportRef = useRef(null);
+  const surfaceViewportCacheRef = useRef(new Map());
+  const activeSurfaceOwnerRef = useRef({
+    chart: null,
+    datasetKey: null,
+    paneHeightStorageKey: null,
+    surfaceConfigKey: null,
+  });
   const surfaceAxisModeRef = useRef("time");
   const drawingSourceTimeHorizonRef = useRef(null);
   const drawingSourceIntervalRef = useRef(interval);
@@ -516,6 +631,8 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const hasRestoredRangeRef = useRef(false);
   const lastViewportRestoreSourceRef = useRef(null);
   const visibleRangeSaveTimerRef = useRef(null);
+  const activeSubPaneCountRef = useRef(0);
+  const paneHeightStorageKeyRef = useRef(null);
   const prevSubPaneIdsRef = useRef(new Set());
   const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
@@ -771,17 +888,17 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
   const dataTimeSet = resolveDataTimeSet(seriesStore);
   const derivedAuxiliaryIndex = useMemo(() => {
-    if (
-      !usesDerivedAxis
-      || auxiliaryDisplayState.datasetKey !== datasetKey
-      || auxiliaryDisplayState.surfaceConfigKey !== surfaceConfigKey
-    ) {
-      return null;
+    if (!usesDerivedAxis) return null;
+    if (auxiliaryDisplayState.datasetKey !== datasetKey
+      || auxiliaryDisplayState.surfaceConfigKey !== surfaceConfigKey) {
+      return EMPTY_DERIVED_AUXILIARY_INDEX;
     }
 
     return buildDisplaySourceTimeIndex(auxiliaryDisplayState.rows);
   }, [auxiliaryDisplayState, datasetKey, surfaceConfigKey, usesDerivedAxis]);
-  const renderDataTimeSet = derivedAuxiliaryIndex?.displayTimeSet || dataTimeSet;
+  const renderDataTimeSet = usesDerivedAxis
+    ? derivedAuxiliaryIndex.displayTimeSet
+    : dataTimeSet;
   const sourcePaneDescriptors = useMemo(() => buildPaneDescriptors({
     dataTimeSet,
     mainOverlayLines,
@@ -802,12 +919,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   const paneDescriptors = useMemo(
     () => {
       if (!usesDerivedAxis) return sourcePaneDescriptors;
-      if (!derivedAuxiliaryIndex) return [];
       return projectPaneDescriptorsToDisplay(sourcePaneDescriptors, derivedAuxiliaryIndex);
     },
     [derivedAuxiliaryIndex, sourcePaneDescriptors, usesDerivedAxis],
   );
   const activeSubPanes = subPanes;
+  activeSubPaneCountRef.current = activeSubPanes.length;
   const subPaneIdsKey = useMemo(
     () => activeSubPanes.map((pane) => pane.id).join(","),
     [activeSubPanes],
@@ -816,6 +933,33 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     () => `${SINGLE_PANE_HEIGHT_KEY_PREFIX}${buildPaneConfigKey(activeSubPanes.map((pane) => pane.id))}`,
     [activeSubPanes],
   );
+  paneHeightStorageKeyRef.current = paneHeightStorageKey;
+
+  const saveCurrentPaneHeights = useCallback((
+    chart = chartRef.current,
+    storageKey = paneHeightStorageKeyRef.current,
+  ) => {
+    const heights = readPaneHeights(chart);
+    if (!storageKey || heights.length <= 1) return false;
+    try {
+      const saved = loadPaneHeights();
+      saved[storageKey] = heights;
+      savePaneHeights(saved);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const materializeRuntimePaneLayout = useCallback((chart, container, options = undefined) => {
+    const previousSyncing = isSyncingRef.current;
+    isSyncingRef.current = true;
+    try {
+      return materializePaneLayout(chart, container, options);
+    } finally {
+      isSyncingRef.current = previousSyncing;
+    }
+  }, []);
 
   useEffect(() => { intervalRef.current = interval; }, [interval]);
   useEffect(() => { onNeedMoreLeftRef.current = onNeedMoreLeft; }, [onNeedMoreLeft]);
@@ -867,6 +1011,9 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
+    const surfaceViewportCache = surfaceViewportCacheRef.current;
+    const initialSubPaneCount = activeSubPaneCountRef.current;
+    const initialPaneHeightStorageKey = paneHeightStorageKeyRef.current;
 
     const options = buildChartPaneOptions({
       container,
@@ -883,9 +1030,22 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
 
     const initialChartType = requestedChartTypeRef.current;
     const initialDescriptor = getChartTypeDescriptor(initialChartType);
+    const initialDatasetKey = datasetKeyRef.current;
+    const initialSurfaceConfigKey = surfaceConfigKey;
+    const selectedViewport = selectSurfaceViewportSnapshot(
+      surfaceViewportCache,
+      {
+        datasetKey: initialDatasetKey,
+        outgoingSnapshot: pendingSurfaceViewportRef.current,
+        surfaceConfigKey: initialSurfaceConfigKey,
+      },
+    );
+    pendingSurfaceViewportRef.current = selectedViewport.snapshot;
     const chart = createChartInstance(container, options, {
       axisMode: initialDescriptor.axisMode,
     });
+    const wrapper = wrapperRef.current;
+    const totalHeight = wrapper?.getBoundingClientRect?.().height || wrapper?.clientHeight || 0;
     appliedAppearanceIntervalRef.current = intervalRef.current;
     const initialRows = rowsFromStore(seriesStoreRef.current);
     drawingSourceTimeHorizonRef.current = latestFiniteSourceTime(initialRows);
@@ -909,6 +1069,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       rowMapRef: displayRowMapRef,
       rowIndexMapRef: displayRowIndexMapRef,
     });
+    const placeholderAnchorTime = displayRowsRef.current.at(-1)?.time ?? null;
+    ensurePanePlaceholderSeries(
+      chart,
+      panePlaceholderSeriesRef,
+      initialSubPaneCount,
+      placeholderAnchorTime,
+    );
+    preparePaneLayout(chart, {
+      storageKey: initialPaneHeightStorageKey,
+      subPaneCount: initialSubPaneCount,
+      totalHeight,
+    });
     setAuxiliaryDisplayState(initialDescriptor.axisMode === "derived-ordinal"
       ? {
           datasetKey: datasetKeyRef.current,
@@ -924,7 +1096,14 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       paneIndex: 0,
     });
     const futureTimeAxisSeries = createFutureTimeAxisSeries(chart, { paneIndex: 0 });
+    if (initialSubPaneCount > 0) materializePaneLayout(chart, container);
     chartRef.current = chart;
+    activeSurfaceOwnerRef.current = {
+      chart,
+      datasetKey: initialDatasetKey,
+      paneHeightStorageKey: initialPaneHeightStorageKey,
+      surfaceConfigKey: initialSurfaceConfigKey,
+    };
     viewportControllerRef.current = createViewportController({
       chartProvider: () => chartRef.current,
       contentLogicalRangeProvider: () => {
@@ -943,6 +1122,29 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       series: mainSeries,
       signature: JSON.stringify(buildMainSeriesReferenceOptions(initialChartType, initialRows)),
     };
+    if (pendingSurfaceViewportRef.current && displayRowsRef.current.length > 0) {
+      isRestoringViewportRef.current = true;
+      try {
+        // Apply the remembered target surface before the first painted frame.
+        // The later projection-sync restore remains as a fallback in case LWC
+        // remaps logical indexes while committing the first complete dataset.
+        const restored = restoreSurfaceViewport(
+          viewportControllerRef.current,
+          displayRowsRef.current,
+          pendingSurfaceViewportRef.current,
+          {
+            axisMode: initialDescriptor.axisMode,
+            datasetKey: initialDatasetKey,
+            surfaceConfigKey: initialSurfaceConfigKey,
+          },
+        );
+        if (restored) {
+          materializePaneLayout(chart, container, { nudgeAxis: "height" });
+        }
+      } finally {
+        isRestoringViewportRef.current = false;
+      }
+    }
     setSeriesReady((prev) => prev + 1);
     setDrawingSeriesGeneration((prev) => prev + 1);
 
@@ -998,10 +1200,25 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     chart.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
 
     return () => {
-      pendingSurfaceViewportRef.current = captureSurfaceViewport(
-        chart,
-        initialDescriptor.axisMode,
-      );
+      const owner = activeSurfaceOwnerRef.current?.chart === chart
+        ? activeSurfaceOwnerRef.current
+        : {
+            chart,
+            datasetKey: initialDatasetKey,
+            paneHeightStorageKey: initialPaneHeightStorageKey,
+            surfaceConfigKey: initialSurfaceConfigKey,
+          };
+      const outgoingViewport = captureSurfaceViewport(chart, {
+        axisMode: initialDescriptor.axisMode,
+        datasetKey: owner.datasetKey,
+        displayRows: displayRowsRef.current,
+        surfaceConfigKey: owner.surfaceConfigKey,
+      });
+      if (outgoingViewport) {
+        rememberSurfaceViewport(surfaceViewportCache, outgoingViewport);
+      }
+      pendingSurfaceViewportRef.current = outgoingViewport;
+      saveCurrentPaneHeights(chart, owner.paneHeightStorageKey);
       if (visibleRangeSaveTimerRef.current) {
         clearTimeout(visibleRangeSaveTimerRef.current);
         visibleRangeSaveTimerRef.current = null;
@@ -1011,6 +1228,15 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       // remain reachable briefly even though its internal time points have
       // already been cleared.
       chartRef.current = null;
+      if (panePlaceholderSeriesRef.current.chart === chart) {
+        panePlaceholderSeriesRef.current = { chart: null, seriesByPane: new Map() };
+      }
+      activeSurfaceOwnerRef.current = {
+        chart: null,
+        datasetKey: null,
+        paneHeightStorageKey: null,
+        surfaceConfigKey: null,
+      };
       mainSeriesRef.current = null;
       futureTimeAxisSeriesRef.current = null;
       futureTimeAxisDataRef.current = [];
@@ -1051,7 +1277,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         beforeRemove: () => drawingApiRef.current?.prepareSurfaceDispose?.(),
       });
     };
-  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishDrawingProjectionStore, publishViewportRangeChange, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
+  }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
   useEffect(() => {
     const wrapper = wrapperRef.current;
@@ -1065,13 +1291,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       markUserInteracted();
     };
     const saveNativePaneHeights = () => {
-      const chart = chartRef.current;
-      if (!chart || activeSubPanes.length === 0) return;
-      const heights = readPaneHeights(chart);
-      if (heights.length === 0) return;
-      const saved = loadPaneHeights();
-      saved[paneHeightStorageKey] = heights;
-      savePaneHeights(saved);
+      if (activeSubPanes.length > 0) saveCurrentPaneHeights();
     };
     const releasePointer = () => {
       if (!isChartPointerActiveRef.current) return;
@@ -1096,7 +1316,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       window.removeEventListener("blur", releasePointer);
       isChartPointerActiveRef.current = false;
     };
-  }, [activeSubPanes.length, paneHeightStorageKey, scheduleFutureTimeAxisCoverage]);
+  }, [activeSubPanes.length, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1243,6 +1463,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         rowMapRef: displayRowMapRef,
         rowIndexMapRef: displayRowIndexMapRef,
       });
+      ensurePanePlaceholderSeries(
+        chart,
+        panePlaceholderSeriesRef,
+        activeSubPaneCountRef.current,
+        displayRowsRef.current.at(-1)?.time ?? null,
+      );
       setAuxiliaryDisplayState(nextDescriptor.axisMode === "derived-ordinal"
         ? {
             datasetKey: datasetKeyRef.current,
@@ -1330,19 +1556,43 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
   }, [contextMenu]);
 
   useEffect(() => {
+    if (pendingSurfaceViewportRef.current?.datasetKey !== datasetKey) {
+      pendingSurfaceViewportRef.current = null;
+    }
+    if (activeSurfaceOwnerRef.current?.chart === chartRef.current) {
+      activeSurfaceOwnerRef.current = {
+        ...activeSurfaceOwnerRef.current,
+        datasetKey,
+      };
+    }
     if (futureTimeAxisCoverageFrameRef.current != null) {
       cancelAnimationFrame(futureTimeAxisCoverageFrameRef.current);
       futureTimeAxisCoverageFrameRef.current = null;
     }
     futureTimeAxisCoveragePendingRef.current = false;
     clearFutureTimeAxis({ force: true, resetPointCount: true });
+    const chart = chartRef.current;
+    const subPaneCount = activeSubPaneCountRef.current;
+    trimPanePlaceholderSeries(chart, panePlaceholderSeriesRef, subPaneCount + 1);
     clearAuxiliaryChartState({
-      chart: chartRef.current,
+      chart,
       indicatorSeriesRef,
       paneRenderStateRef,
       prevIndicatorKeyRef,
       reason: "dataset-change",
+      retainPaneCount: subPaneCount + 1,
     });
+    const wrapper = wrapperRef.current;
+    const totalHeight = wrapper?.getBoundingClientRect?.().height || wrapper?.clientHeight || 0;
+    ensurePanePlaceholderSeries(chart, panePlaceholderSeriesRef, subPaneCount);
+    preparePaneLayout(chart, {
+      storageKey: paneHeightStorageKeyRef.current,
+      subPaneCount,
+      totalHeight,
+    });
+    if (subPaneCount > 0) {
+      materializeRuntimePaneLayout(chart, containerRef.current);
+    }
     userInteractedRef.current = false;
     hasRestoredRangeRef.current = false;
     lastViewportRestoreSourceRef.current = null;
@@ -1356,7 +1606,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     projectionGenerationRef.current += 1;
     projectionRenderContextRef.current = null;
     viewportControllerRef.current?.resetSession();
-  }, [clearFutureTimeAxis, datasetKey, publishDrawingProjectionStore]);
+  }, [clearFutureTimeAxis, datasetKey, materializeRuntimePaneLayout, publishDrawingProjectionStore]);
 
   useEffect(() => {
     const series = mainSeriesRef.current;
@@ -1471,6 +1721,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         rowMapRef: displayRowMapRef,
         rowIndexMapRef: displayRowIndexMapRef,
       });
+      ensurePanePlaceholderSeries(
+        chartRef.current,
+        panePlaceholderSeriesRef,
+        activeSubPaneCountRef.current,
+        displayRows.at(-1)?.time ?? null,
+      );
       if (getChartTypeDescriptor(activeChartType).axisMode === "derived-ordinal"
         && previousDisplayRows !== displayRows) {
         setAuxiliaryDisplayState({
@@ -1484,12 +1740,23 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
       if (projectionRendered && pendingSurfaceViewportRef.current && displayRows.length > 0) {
         isRestoringViewportRef.current = true;
         try {
-          restoreSurfaceViewport(
+          const restored = restoreSurfaceViewport(
             viewportControllerRef.current,
             displayRows,
             pendingSurfaceViewportRef.current,
-            surfaceAxisModeRef.current,
+            {
+              axisMode: surfaceAxisModeRef.current,
+              datasetKey: datasetKeyRef.current,
+              surfaceConfigKey: surfaceConfigKeyRef.current,
+            },
           );
+          if (restored) {
+            materializeRuntimePaneLayout(
+              chartRef.current,
+              containerRef.current,
+              { nudgeAxis: "height" },
+            );
+          }
           pendingSurfaceViewportRef.current = null;
         } finally {
           isRestoringViewportRef.current = false;
@@ -1579,6 +1846,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
           rowMapRef: displayRowMapRef,
           rowIndexMapRef: displayRowIndexMapRef,
         });
+        ensurePanePlaceholderSeries(
+          chartRef.current,
+          panePlaceholderSeriesRef,
+          activeSubPaneCountRef.current,
+          displayRows.at(-1)?.time ?? null,
+        );
         if (getChartTypeDescriptor(mainSeriesTypeRef.current).axisMode === "derived-ordinal"
           && previousDisplayRows !== displayRows) {
           setAuxiliaryDisplayState({
@@ -1596,7 +1869,7 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
         isSyncingRef.current = false;
       }
     });
-  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, mainSeriesRenderContext, projectionSettings, publishDrawingProjectionStore, seriesReady, seriesStore, updateMainSeriesReference]);
+  }, [chartAdapter, clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan, mainSeriesRenderContext, materializeRuntimePaneLayout, projectionSettings, publishDrawingProjectionStore, seriesReady, seriesStore, updateMainSeriesReference]);
 
   useEffect(() => {
     const rows = rowsFromStore(seriesStore);
@@ -1639,9 +1912,12 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     const paneCountBefore = chart.panes?.()?.length ?? 1;
     const paneStructureChanged = paneCountBefore !== expectedPaneCount;
 
-    for (let paneIndex = 1; paneIndex < expectedPaneCount; paneIndex += 1) {
-      ensurePane(chart, paneIndex);
-    }
+    ensurePanePlaceholderSeries(
+      chart,
+      panePlaceholderSeriesRef,
+      expectedPaneCount - 1,
+      displayRowsRef.current.at(-1)?.time ?? null,
+    );
 
     const structuralKey = paneDescriptors
       .flatMap((pane) => (pane.lines || []).map((line) => [
@@ -1765,7 +2041,18 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     }
     indicatorSeriesRef.current = nextEntries;
 
+    trimPanePlaceholderSeries(chart, panePlaceholderSeriesRef, expectedPaneCount);
     trimPanes(chart, expectedPaneCount);
+    if (paneStructureChanged) {
+      const wrapper = wrapperRef.current;
+      const totalHeight = wrapper?.getBoundingClientRect?.().height || wrapper?.clientHeight || 0;
+      preparePaneLayout(chart, {
+        storageKey: paneHeightStorageKeyRef.current,
+        subPaneCount: expectedPaneCount - 1,
+        totalHeight,
+      });
+      materializeRuntimePaneLayout(chart, containerRef.current);
+    }
     if (shouldAdvanceIndicatorSeriesReady({
       createdSeriesCount,
       paneStructureChanged,
@@ -1774,25 +2061,41 @@ const SingleChartPanes = forwardRef(function SingleChartPanes({
     })) {
       setSeriesReady((prev) => prev + 1);
     }
-  }, [datasetKey, effectiveDrawingTool, indicatorDatasetOwned, interval, paneDescriptors, renderDataTimeSet, seriesReady, usesDerivedAxis]);
+  }, [datasetKey, effectiveDrawingTool, indicatorDatasetOwned, interval, materializeRuntimePaneLayout, paneDescriptors, renderDataTimeSet, seriesReady, usesDerivedAxis]);
 
   useEffect(() => {
     const chart = chartRef.current;
     const wrapper = wrapperRef.current;
     if (!chart || !wrapper || activeSubPanes.length === 0) return;
-
-    const saved = loadPaneHeights()[paneHeightStorageKey];
-    if (Array.isArray(saved) && saved.length >= paneDescriptors.length) {
-      setPaneHeights(chart, saved);
+    const expectedPaneCount = activeSubPanes.length + 1;
+    if (paneDescriptors.length !== expectedPaneCount
+      || chart.panes?.()?.length !== expectedPaneCount) {
       return;
     }
 
     const totalHeight = wrapper.getBoundingClientRect?.().height || wrapper.clientHeight || 0;
-    if (!Number.isFinite(totalHeight) || totalHeight <= 0) return;
-    const mainHeight = Math.max(180, Math.round(totalHeight * 0.65));
-    const subHeight = Math.max(80, Math.round((totalHeight - mainHeight) / Math.max(1, activeSubPanes.length)));
-    setPaneHeights(chart, [mainHeight, ...activeSubPanes.map(() => subHeight)]);
+    const paneHeights = resolvePaneHeightLayout(
+      paneHeightStorageKey,
+      activeSubPanes.length,
+      totalHeight,
+    );
+    if (paneHeights) setPaneHeights(chart, paneHeights);
   }, [activeSubPanes, paneDescriptors.length, paneHeightStorageKey, seriesReady, subPaneIdsKey]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const expectedPaneCount = activeSubPanes.length + 1;
+    if (!chart
+      || paneDescriptors.length !== expectedPaneCount
+      || chart.panes?.()?.length !== expectedPaneCount
+      || activeSurfaceOwnerRef.current?.chart !== chart) {
+      return;
+    }
+    activeSurfaceOwnerRef.current = {
+      ...activeSurfaceOwnerRef.current,
+      paneHeightStorageKey,
+    };
+  }, [activeSubPanes.length, paneDescriptors.length, paneHeightStorageKey, seriesReady]);
 
   useEffect(() => {
     const chart = chartRef.current;

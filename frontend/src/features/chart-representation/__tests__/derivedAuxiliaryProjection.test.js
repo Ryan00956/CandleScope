@@ -121,6 +121,42 @@ test("pane descriptors apply line, marker, bgcolor, and volume fanout policies",
   assert.deepEqual(panes, before);
 });
 
+test("an empty derived index preserves pane structure while clearing timed data", () => {
+  const panes = [{
+    id: "main",
+    paneIndex: 0,
+    lines: [{ id: "overlay", data: [{ time: 10, value: 1 }] }],
+  }, {
+    id: "macd",
+    paneIndex: 1,
+    lines: [{ id: "signal", data: [{ time: 10, value: 2 }] }],
+  }, {
+    id: "atr",
+    paneIndex: 2,
+    lines: [{ id: "atr", data: [{ time: 10, value: 3 }] }],
+  }, {
+    id: "volume",
+    paneIndex: 3,
+    lines: [{ id: "volume", data: [{ time: 10, value: 4 }] }],
+  }];
+
+  const projected = projectPaneDescriptorsToDisplay(
+    panes,
+    buildDisplaySourceTimeIndex([]),
+  );
+
+  assert.deepEqual(projected.map((pane) => [pane.id, pane.paneIndex]), [
+    ["main", 0],
+    ["macd", 1],
+    ["atr", 2],
+    ["volume", 3],
+  ]);
+  assert.deepEqual(
+    projected.flatMap((pane) => pane.lines.map((line) => line.data)),
+    [[], [], [], []],
+  );
+});
+
 test("barcolor groups fan out to every exact display target and drop missing targets", () => {
   const rows = derivedRows();
   const groups = [{

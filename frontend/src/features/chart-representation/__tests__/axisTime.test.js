@@ -166,6 +166,13 @@ test("viewport anchors preserve span and horizontal offset across projections", 
     screenOffset: -0.5,
   }), { from: -2.5, to: 1.5 });
 
+  assert.deepEqual(mapSourceViewportAnchorToDisplayLogicalRange(rows, {
+    anchorTime: rows[0].time,
+    sourceTime: 100,
+    logicalSpan: 4,
+    screenOffset: -0.5,
+  }), { from: -3.5, to: 0.5 });
+
   // A source bar that emitted no brick falls back to the latest brick at or
   // before that source time.
   assert.deepEqual(mapSourceViewportAnchorToDisplayLogicalRange(rows, {

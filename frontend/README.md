@@ -42,7 +42,7 @@ Frontend exchange behavior should prefer backend metadata:
 - `ws_connection_model` and `protocol_features` decide whether live WS intervals are subscribed.
 - `known_limitations` are surfaced in the status bar so exchange-specific gaps are visible to users.
 
-The local `EXCHANGE_INTERVALS` table in `src/App.jsx` is a fallback only. New exchange support should be added in the backend plugin first, then exposed through `ExchangeCapabilities`.
+The local `EXCHANGE_INTERVALS` table in `src/features/chart-session/exchangeCatalogRuntime.ts` is a fallback only. New exchange support should be added in the backend plugin first, then exposed through `ExchangeCapabilities`.
 
 ## Checks
 
@@ -53,10 +53,15 @@ Optimization execution notes:
 - [Frontend Cleanup Execution Plan](FRONTEND_CLEANUP_EXECUTION.md)
 
 ```bash
-node ./scripts/check-architecture.mjs
-node ./node_modules/vite/bin/vite.js build
-node ./node_modules/eslint/bin/eslint.js .
+npm run check:architecture
+npm run typecheck
+npm run lint
+npm test
+npm run build
 ```
+
+`npm run check` runs the same permanent gate in order. All application and test
+source under `src` is TypeScript; JavaScript remains only in Node/Vite tooling.
 
 With the backend and Vite running, use the browser smoke check to verify the
 rendered chart, drawing toolbar, lazy symbol search, and lazy Settings panel:

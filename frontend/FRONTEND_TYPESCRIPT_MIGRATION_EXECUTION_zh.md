@@ -1895,7 +1895,7 @@ rg --files src -g "*.js" -g "*.jsx"
 | T10 | 已完成 | `e1aae04` | 通过 | 748/748 通过 | 通过 | basic/overlay-heavy/drawing-check 通过 | 44 个既有 feature runtime/hook owner 迁为 TS；aggregate contract、ref/timer/browser handle 与 raw payload 边界已类型化；指标专项 53/53、drawing 专项 159/159 通过 |
 | T11 | 已完成 | `e3af38a` | 通过 | 748/748 通过 | 通过 | export/release 通过 | 49 个既有 feature UI/ordinary/app leaf owner 迁为 TS/TSX；具名 Props、React event/ref、lazy module 与 UI raw payload 边界已类型化；export 3/3、15 种图表、drawing persistence 全通过 |
 | T12 | 已完成 | `15683a5` | 通过 | 748/748 通过 | 通过 | release 通过 | 13 个剩余生产 owner 迁为 TS/TSX，新增 app shell 具名聚合 contract；生产 JS/JSX 残留 0；15 种图表、export 3/3、drawing persistence 全通过 |
-| T13 | 待执行 |  |  |  |  |  |  |
+| T13 | 已完成 | `8e49ddb`…`d47b6e3` | 通过 | 748/748 通过 | 通过 | release 通过 | 95 个测试 owner 与 harness 完成 TS 化；mixed mode/canary 和 inline lint suppression 清除，永久严格门禁生效 |
 
 ### T0 基线记录
 
@@ -2190,16 +2190,35 @@ rg --files src -g "*.js" -g "*.jsx"
 | 新增 `any` / TS directive suppression | 0；T12 路径无显式 `any` type、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error` 或 `as unknown as`；Lightweight Charts 原生/ordinal 不变泛型只在 factory 边界使用两个局部 assertion，并登记 `T12-LWC-04`；入口 root assertion 保持迁移前失败语义，不向 App contract 扩散 |
 | 范围约束 | 测试迁移、`allowJs: false`、type-aware ESLint、canary/临时设施删除与 suppression 最终清零均留给 T13；本阶段未修改严格编译配置 |
 
+### T13 测试迁移、严格门禁和 release 验收记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `3631fbe` |
+| 完成 Commit | `d47b6e3` |
+| 测试迁移 | `src` 下 95 个 `.test.js` 全部迁为 `.test.ts`，`localStorageHarness.js` 迁为 `.ts`；测试夹具优先复用生产 contract，局部/结构化 mock、畸形 parser fixture 与 defined assertion 集中在显式 test helper；没有通过整体 props cast 绕过编译器 |
+| 最终源码盘点 | `src` 共 306 个 `.ts`、54 个 `.tsx`、1 个 Vite 声明文件；`.js/.jsx` 均为 0；永久 architecture 规则会拒绝重新引入 legacy source extension |
+| Mixed-mode 清理 | 删除 `scripts/type-migration-canary/` 和 `test:canary`；`allowJs: false`，删除 `checkJs`，`include` 仅覆盖 TS/TSX/声明与需要的 TS scripts；没有 JS facade、迁移 allowlist 或临时声明文件，唯一 `.d.ts` 为标准 `vite-env.d.ts` |
+| 测试发现 | `npm test` 显式覆盖 `scripts/*.test.mjs` 与 `src/**/__tests__/*.test.ts`，避免把 test helper 当空测试；删除 canary 后新增 architecture source-extension contract test，真实测试总数保持 748 |
+| Type-aware ESLint | TS/TSX 使用 `recommendedTypeChecked` 与 project service，JS/MJS tooling 使用 `disableTypeChecked`；`no-floating-promises` 等生产 Promise 门禁保持启用，`node:test` 文件使用窄化 override；第三方 Lightweight Charts/Monaco 与动态 plugin 推断产生的 `no-unsafe-*`、对象化 runtime method reference 等项目不适配规则在 config 集中关闭，未使用源码内 `eslint-disable` |
+| 更严格编译选项评估 | 单独评估 `noUncheckedIndexedAccess` 和 `exactOptionalPropertyTypes`，分别仍有 726 与 145 个存量错误；本阶段不启用，避免把最终配置收口扩成索引访问和 optional props 语义重构 |
+| Suppression / residual | 精确扫描结果：显式 `any` type、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error`、`as unknown as` 均为 0；0 个 architecture migration allowlist；4 个 Lightweight Charts adapter 局部 assertion 仅保留在第三方不变泛型/运行时支持但声明缺失的边界，并具有删除条件和完整回归保护 |
+| 完整门禁 | `npm run check` 完整通过：architecture 0 个 migration allowlist 活跃项、typecheck、type-aware lint、748/748 tests 和 Vite 7.3.1 build 均成功，295 modules transformed |
+| Bundle/chunk 对比 | 与 T12 `3631fbe` 的隔离 build 比较，modules 保持 295；ExportPanel、SymbolSearchModal、WatchlistSidebar、DrawingToolbar、AlertsPanel、IndicatorPanel、SettingsModal 等 lazy chunk 四舍五入后尺寸不变；DrawingEngineHost `111.87 -> 111.84 kB`、gzip `30.22 -> 30.23 kB`；entry `442.02 -> 442.12 kB`、gzip `129.91 -> 129.95 kB`；lazy chunk 数量和边界不变 |
+| Release smoke | 最终提交在隔离 Vite `15183` 实例通过；1501 bars、connected/live；15 种图表菜单/切换、histogram persistence、candlestick restoration、MA/VOL/BOLL/RSI overlay/pane、PNG/JPEG/WebP 3/3 export cases 与 drawing future-anchor/reload persistence 全部通过；`failures`、`warnings`、`exceptions` 均为 0 |
+| Smoke 命令 | `npx tsx scripts/smoke.mjs --url http://127.0.0.1:15183/ --chart-type-matrix --export-matrix --drawing-check --overlay-heavy`；验证后已停止隔离 Vite，端口释放 |
+| 完成结论 | T0-T13 全部完成；前端不再处于 mixed mode，TypeScript、architecture、lint、tests、build 与 release smoke 已形成可重复执行的长期 gate |
+
 ### Suppression ledger
 
 | ID | 文件 | suppression/cast | 原因 | 保护测试 | 最迟删除 Phase | 状态 |
 |---|---|---|---|---|---|---|
 | T3-CAST-01 | `src/features/market-data/feed/seriesDataFeed.ts` | `KlineStreamSubscription as unknown as constructor` | 尚未迁移的 JS constructor 把默认空 intervals 推断为 `never[]`；adapter 只包住 T4 transport owner 边界 | `seriesDataFeed.test.js` subscribeBars；release smoke | T4 | 已删除（T4） |
 | T4-UNKNOWN-01 | `src/services/api.ts` | 尚未迁 owner 的 symbol/settings/cache/maintenance/price/resolve endpoint 返回 `Promise<unknown>` | T4 只验证已有 TS consumer 依赖的 endpoint；提前声明业务 shape 会制造错误安全感 | 完整测试；basic/overlay-heavy/drawing-check smoke | T10 | 已关闭（T10：所有活跃 owner consumer 已收窄 raw payload；未消费 endpoint 与 transport 保持 `unknown` boundary） |
-| T6-LWC-01 | `src/chart-adapter/ordinalHorzScaleBehavior.ts` | 默认 time behavior options 局部断言为 ordinal `ChartOptionsImpl` | Lightweight Charts 只导出同一 behavior contract 的不同 horizontal item 泛型；运行时 options 结构相同，适配只存在于 custom ordinal behavior | ordinal behavior 7/7；chart type matrix | T13 | 活跃 |
-| T6-LWC-02 | `src/chart-adapter/seriesLifecycle.ts` | 动态 series factory 结果从 `unknown` 局部断言为 adapter handle | 运行时在 15 种 built-in/custom series 间选择，库的互斥 series 泛型无法由动态 descriptor 单次穷尽；断言限制在两个 factory helper | main series model 22/22；series lifecycle 9/9；chart type matrix | T13 | 活跃 |
-| T6-LWC-03 | `src/chart-adapter/overlaySeriesRenderer.ts` | `0 as LineWidth` 与数字 line style 局部断言 | 库声明的 `LineWidth` 排除运行时支持的 0；现有 area fill 以 0 隐藏边线，hline payload 仍使用持久化数字 style | overlay renderer 专项；export/drawing/overlay-heavy smoke | T13 | 活跃 |
-| T12-LWC-04 | `src/chart-adapter/lightweightChartSurface.ts` | 原生 `IChartApi` 与 ordinal `IChartApiBase<OrdinalAxisTime>` 在工厂出口局部断言为 `IChartApiBase<ChartTime>` | Lightweight Charts 的 horizontal item 泛型不变，但 adapter contract 需要在同一生命周期路径承载 time/ordinal 两种互斥实例；断言限制在两个 chart factory return，不进入 `SingleChartPanes` 或 App | adapter/unit 全量；chart type matrix；export/drawing/overlay-heavy smoke | T13 | 活跃 |
+| T6-LWC-01 | `src/chart-adapter/ordinalHorzScaleBehavior.ts` | 默认 time behavior options 局部断言为 ordinal `ChartOptionsImpl` | Lightweight Charts 只导出同一 behavior contract 的不同 horizontal item 泛型；运行时 options 结构相同，适配只存在于 custom ordinal behavior | ordinal behavior 7/7；chart type matrix | 上游导出协变 horizontal behavior contract 后 | 保留（第三方边界；删除条件明确） |
+| T6-LWC-02 | `src/chart-adapter/seriesLifecycle.ts` | 动态 series factory 结果从 `unknown` 局部断言为 adapter handle | 运行时在 15 种 built-in/custom series 间选择，库的互斥 series 泛型无法由动态 descriptor 单次穷尽；断言限制在两个 factory helper | main series model 22/22；series lifecycle 9/9；chart type matrix | 上游 series factory 支持动态 descriptor 联合后 | 保留（第三方边界；删除条件明确） |
+| T6-LWC-03 | `src/chart-adapter/overlaySeriesRenderer.ts` | `0 as LineWidth` 局部断言 | 库声明的 `LineWidth` 排除运行时支持的 0；现有 area fill 以 0 隐藏边线 | overlay renderer 专项；export/drawing/overlay-heavy smoke | 上游 `LineWidth` 声明包含运行时支持的 0 后 | 保留（第三方边界；删除条件明确） |
+| T12-LWC-04 | `src/chart-adapter/lightweightChartSurface.ts` | 原生 `IChartApi` 与 ordinal `IChartApiBase<OrdinalAxisTime>` 在工厂出口局部断言为 `IChartApiBase<ChartTime>` | Lightweight Charts 的 horizontal item 泛型不变，但 adapter contract 需要在同一生命周期路径承载 time/ordinal 两种互斥实例；断言限制在两个 chart factory return，不进入 `SingleChartPanes` 或 App | adapter/unit 全量；chart type matrix；export/drawing/overlay-heavy smoke | 上游 chart API 支持 time/ordinal 协变联合后 | 保留（第三方边界；删除条件明确） |
 
 ### 行为问题旁路记录
 

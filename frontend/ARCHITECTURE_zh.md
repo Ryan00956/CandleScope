@@ -11,7 +11,7 @@ TypeScript 渐进迁移的分阶段步骤、验证门和回滚条件见
 
 ## 目标
 
-- 让 `src/app/App.jsx` 成为组合根，而不是所有数据、流、偏好和工作流逻辑的所有者。
+- 让 `src/app/App.tsx` 成为组合根，而不是所有数据、流、偏好和工作流逻辑的所有者。
 - 让 `src/features/*` 按业务能力拥有状态、runtime、storage、controller 和 feature UI 入口。
 - 让 `src/runtime` 不再承载业务所有权，只保留跨应用性能 instrumentation。
 - 让 K 线加载、指标更新、WebSocket、缺口恢复和用户工作流可以按 feature 分别理解、验证和维护。
@@ -83,10 +83,17 @@ CORS 阻止访问 `http://localhost:8000`，导致 K 线 HTTP 请求失败。
 
 ```bash
 cd frontend
-node ./scripts/check-architecture.mjs
-node ./node_modules/eslint/bin/eslint.js .
-node ./node_modules/vite/bin/vite.js build
+npm run check:architecture
+npm run typecheck
+npm run lint
+npm test
+npm run build
 ```
+
+`npm run check` 会按上述顺序执行永久门禁。`src` 内生产代码、测试和测试辅助代码
+均只允许 `.ts/.tsx/.d.ts`；architecture checker 会拒绝重新引入 `.js/.jsx`。
+ESLint 对 TypeScript 使用类型感知配置，Node/Vite 的 `.js/.mjs` 工具脚本使用
+disable-type-checked override。
 
 浏览器 smoke 验证：
 

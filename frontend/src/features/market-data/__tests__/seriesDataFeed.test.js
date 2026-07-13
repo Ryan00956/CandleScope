@@ -346,6 +346,61 @@ test("backfill completion reloads only the active overlapping range", async () =
   assert.equal(loading, false);
 });
 
+test("duplicate backfill completion releases active loading only once", async () => {
+  let releaseFetch;
+  let fetchCalls = 0;
+  let loadingReleaseCalls = 0;
+  const pendingFetch = new Promise((resolve) => {
+    releaseFetch = resolve;
+  });
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesRange: async (_symbol, _interval, start, end) => {
+        fetchCalls += 1;
+        await pendingFetch;
+        return { data: rows([start, end]) };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+  const message = {
+    type: "backfill_completed",
+    symbol: SERIES.symbol,
+    interval: SERIES.interval,
+    exchange: SERIES.exchange,
+    market_type: SERIES.marketType,
+    detail: {
+      reason: "visible_range_gap",
+      range_start_ms: 120_000,
+      range_end_ms: 180_000,
+    },
+  };
+  const options = {
+    activeSeries: SERIES,
+    loading: true,
+    getCacheRows: () => rows([100, 200]),
+    setLastPrice: () => {},
+    setError: () => {},
+    setConnectionStatus: () => {},
+    setLoading: (next) => {
+      if (next === false) loadingReleaseCalls += 1;
+    },
+    cooldownMs: 0,
+  };
+
+  assert.equal(feed.handleBackfillCompleted(message, options), true);
+  assert.equal(feed.handleBackfillCompleted(message, options), true);
+  releaseFetch();
+
+  await new Promise((resolve) => {
+    setTimeout(resolve, 0);
+  });
+
+  assert.equal(fetchCalls, 1);
+  assert.equal(loadingReleaseCalls, 1);
+});
+
 test("patches active latest rows", async () => {
   const actions = [];
   const feed = new SeriesDataFeed({

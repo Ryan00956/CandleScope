@@ -28,6 +28,7 @@ test("request key sorts params for stable dedupe", () => {
 test("normalizes valid second ranges and rejects invalid ranges", () => {
   assert.deepEqual(normalizeRangeSec({ start: "10", end: "20" }), { start: 10, end: 20 });
   assert.equal(normalizeRangeSec({ start: 20, end: 10 }), null);
+  assert.equal(normalizeRangeSec({ start: null, end: 20 }), null);
 });
 
 test("row range ignores invalid rows", () => {

@@ -1,4 +1,33 @@
-export function formatPrice(price) {
+import type { MarketSummary } from "./klineContracts.js";
+
+export interface MarketDisplayData {
+  time?: unknown;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+}
+interface ExchangeMarketConfig {
+  market_type: string;
+  label?: string;
+}
+
+interface ExchangeConfig {
+  label?: string;
+  markets: readonly ExchangeMarketConfig[];
+}
+
+interface ChartDisplayStateOptions {
+  crosshairData?: MarketDisplayData | null;
+  lastPrice?: MarketDisplayData | null;
+  wsStatus?: string;
+  exchange?: string;
+  exchangeConfig: ExchangeConfig;
+  marketType?: string;
+}
+
+export function formatPrice(price: number | null | undefined): string {
   if (price == null) return "--";
   if (price >= 1000) {
     return price.toLocaleString("en-US", {
@@ -10,17 +39,17 @@ export function formatPrice(price) {
   return price.toFixed(8);
 }
 
-export function formatPriceDiff(diff) {
+export function formatPriceDiff(diff: number | null | undefined): string {
   if (diff == null) return "--";
   const abs = Math.abs(diff);
-  let raw;
+  let raw: string;
   if (abs >= 1000) raw = abs.toFixed(2);
   else if (abs >= 1) raw = abs.toFixed(4);
   else raw = abs.toFixed(8);
   return parseFloat(raw).toString();
 }
 
-export function formatVolume(volume) {
+export function formatVolume(volume: number | null | undefined): string {
   if (volume == null) return "--";
   if (volume >= 1_000_000_000) return `${(volume / 1_000_000_000).toFixed(2)}B`;
   if (volume >= 1_000_000) return `${(volume / 1_000_000).toFixed(2)}M`;
@@ -28,15 +57,20 @@ export function formatVolume(volume) {
   return volume.toFixed(2);
 }
 
-export function buildMarketSummary(displayData) {
-  const priceChange = displayData ? ((displayData.close - displayData.open) / displayData.open) * 100 : 0;
+export function buildMarketSummary(
+  displayData: MarketDisplayData | null | undefined,
+): MarketSummary {
+  const normalizedDisplayData = displayData || null;
+  const priceChange = normalizedDisplayData
+    ? ((normalizedDisplayData.close - normalizedDisplayData.open) / normalizedDisplayData.open) * 100
+    : 0;
   const isUp = priceChange >= 0;
-  const amplitude = displayData?.open
-    ? ((displayData.high - displayData.low) / displayData.open * 100).toFixed(2)
+  const amplitude = normalizedDisplayData?.open
+    ? ((normalizedDisplayData.high - normalizedDisplayData.low) / normalizedDisplayData.open * 100).toFixed(2)
     : "0.00";
 
   return {
-    displayData,
+    displayData: normalizedDisplayData,
     priceChange,
     isUp,
     amplitude,
@@ -50,8 +84,12 @@ export function buildChartDisplayState({
   exchange,
   exchangeConfig,
   marketType,
-}) {
-  const displayData = crosshairData || lastPrice;
+}: ChartDisplayStateOptions): MarketSummary & {
+  wsStatusLabel: string;
+  exchangeLabel: string;
+  marketLabel: string;
+} {
+  const displayData = crosshairData || lastPrice || null;
   const marketSummary = buildMarketSummary(displayData);
   const wsStatusLabel = {
     idle: "Realtime idle",
@@ -62,7 +100,7 @@ export function buildChartDisplayState({
     disconnected: "Disconnected",
     fallback: "Live (Polling fallback)",
     mock: "Mock mode",
-  }[wsStatus] || "Unknown";
+  }[wsStatus || ""] || "Unknown";
   const exchangeLabel = exchangeConfig.label || (
     exchange ? `${exchange.charAt(0).toUpperCase()}${exchange.slice(1)}` : "Unknown"
   );

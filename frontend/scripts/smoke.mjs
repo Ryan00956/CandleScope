@@ -1160,7 +1160,16 @@ async function main() {
     });
     cdp.on("Network.loadingFailed", (event) => {
       const url = requestUrls.get(event.requestId) || "";
-      const isCanceled = event.canceled || event.errorText === "net::ERR_ABORTED";
+      const isReplacedExportBlob = args.exportMatrix
+        && event.errorText === "net::ERR_FILE_NOT_FOUND"
+        && url.startsWith("blob:");
+      // Export previews revoke the previous object URL after replacing it.
+      // The export matrix separately verifies the new preview and downloaded
+      // file bytes, so a late fetch against that retired blob is cancellation,
+      // not an application/network failure.
+      const isCanceled = event.canceled
+        || event.errorText === "net::ERR_ABORTED"
+        || isReplacedExportBlob;
       if (event.errorText && !isCanceled) {
         failures.push({ errorText: event.errorText, requestId: event.requestId, type: event.type, url });
       }

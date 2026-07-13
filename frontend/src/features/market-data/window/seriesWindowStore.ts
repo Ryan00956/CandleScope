@@ -1,12 +1,54 @@
+import type {
+  WindowDelta,
+  WindowDeltaDetail,
+  WindowDeltaType,
+} from "../klineContracts.js";
+import type {
+  DataRevision,
+  EpochSeconds,
+  KlineBar,
+  KlineBarInput,
+  SeriesCoverage,
+  SeriesDescription,
+  SeriesKey,
+  SeriesWindowIndexRef,
+  SeriesWindowSegment,
+} from "../marketDataTypes.js";
+import {
+  asDataRevision,
+  asSeriesKey,
+  toEpochSeconds,
+} from "../marketDataTypes.js";
 import { MAX_SERIES_BARS } from "../phase1WindowPolicy.js";
 import { createWindowDelta, WINDOW_DELTA_TYPES } from "./windowDeltas.js";
 
-function finiteTime(row) {
-  const time = Number(row?.time);
-  return Number.isFinite(time) ? time : null;
+interface SeriesWindowStoreOptions {
+  maxBars?: number;
+  intervalSeconds?: number | null;
+  seriesKey?: SeriesKey | string | null;
+}
+interface SnapshotOptions {
+  force?: boolean;
 }
 
-function sameRow(left, right) {
+interface TrimResult {
+  trimmedLeft: number;
+  trimmedRight: number;
+}
+
+export type SeriesWindowListener = (
+  delta: WindowDelta,
+  store: SeriesWindowStore,
+) => void;
+
+function finiteTime(row: KlineBarInput | null | undefined): EpochSeconds | null {
+  return toEpochSeconds(row?.time);
+}
+
+function sameRow(
+  left: Record<string, unknown> | null | undefined,
+  right: Record<string, unknown> | null | undefined,
+): boolean {
   if (left === right) return true;
   if (!left || !right) return false;
   const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
@@ -16,8 +58,8 @@ function sameRow(left, right) {
   return true;
 }
 
-function normalizeRows(rows) {
-  const byTime = new Map();
+function normalizeRows(rows: readonly KlineBarInput[] | null | undefined): KlineBar[] {
+  const byTime = new Map<EpochSeconds, KlineBar>();
   for (const row of rows || []) {
     const time = finiteTime(row);
     if (time == null) continue;
@@ -26,8 +68,8 @@ function normalizeRows(rows) {
   return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
 }
 
-function inferIntervalSeconds(rows) {
-  let best = null;
+function inferIntervalSeconds(rows: readonly KlineBar[]): number | null {
+  let best: number | null = null;
   for (let index = 1; index < rows.length; index += 1) {
     const diff = rows[index].time - rows[index - 1].time;
     if (diff <= 0) continue;
@@ -36,11 +78,14 @@ function inferIntervalSeconds(rows) {
   return best;
 }
 
-function buildSegments(rows, intervalSeconds = null) {
+function buildSegments(
+  rows: readonly KlineBar[],
+  intervalSeconds: number | null = null,
+): SeriesWindowSegment[] {
   if (!rows.length) return [];
   const step = intervalSeconds || inferIntervalSeconds(rows);
   const threshold = step ? step * 1.5 : null;
-  const segments = [];
+  const segments: SeriesWindowSegment[] = [];
   let current = [rows[0]];
   for (let index = 1; index < rows.length; index += 1) {
     const previous = rows[index - 1];
@@ -57,12 +102,23 @@ function buildSegments(rows, intervalSeconds = null) {
 }
 
 export class SeriesWindowStore {
+  seriesKey: SeriesKey | null;
+  maxBars: number;
+  intervalSeconds: number | null;
+  private _segments: SeriesWindowSegment[];
+  private _timeIndex: Map<EpochSeconds, SeriesWindowIndexRef>;
+  private _snapshot: KlineBar[];
+  private _snapshotDirty: boolean;
+  private _timeSet: Set<EpochSeconds>;
+  private _version: number;
+  private _listeners: Set<SeriesWindowListener>;
+
   constructor({
     maxBars = MAX_SERIES_BARS,
     intervalSeconds = null,
     seriesKey = null,
-  } = {}) {
-    this.seriesKey = seriesKey;
+  }: SeriesWindowStoreOptions = {}) {
+    this.seriesKey = typeof seriesKey === "string" ? asSeriesKey(seriesKey) : seriesKey;
     this.maxBars = maxBars;
     this.intervalSeconds = intervalSeconds;
     this._segments = [];
@@ -74,25 +130,25 @@ export class SeriesWindowStore {
     this._listeners = new Set();
   }
 
-  get version() {
-    return this._version;
+  get version(): DataRevision {
+    return asDataRevision(this._version);
   }
 
-  get segments() {
+  get segments(): SeriesWindowSegment[] {
     return this._segments.map((segment) => ({ bars: segment.bars.slice() }));
   }
 
-  get barCount() {
+  get barCount(): number {
     let count = 0;
     for (const segment of this._segments) count += segment.bars.length;
     return count;
   }
 
-  isEmpty() {
+  isEmpty(): boolean {
     return this.barCount === 0;
   }
 
-  snapshot({ force = false } = {}) {
+  snapshot({ force = false }: SnapshotOptions = {}): KlineBar[] {
     if (force || this._snapshotDirty) {
       this._snapshot = this._segments.flatMap((segment) => segment.bars);
       this._snapshotDirty = false;
@@ -100,22 +156,27 @@ export class SeriesWindowStore {
     return this._snapshot;
   }
 
-  timeSet() {
+  timeSet(): ReadonlySet<EpochSeconds> {
     return this._timeSet;
   }
 
-  hasTime(time) {
-    return this._timeIndex.has(Number(time));
+  hasTime(time: unknown): boolean {
+    const normalized = toEpochSeconds(time);
+    return normalized != null && this._timeIndex.has(normalized);
   }
 
-  getByTime(time) {
-    const ref = this._timeIndex.get(Number(time));
+  getByTime(time: unknown): KlineBar | null {
+    const normalized = toEpochSeconds(time);
+    if (normalized == null) return null;
+    const ref = this._timeIndex.get(normalized);
     if (!ref) return null;
     return this._segments[ref.segmentIndex]?.bars?.[ref.rowIndex] || null;
   }
 
-  indexOfTime(time) {
-    const ref = this._timeIndex.get(Number(time));
+  indexOfTime(time: unknown): number {
+    const normalized = toEpochSeconds(time);
+    if (normalized == null) return -1;
+    const ref = this._timeIndex.get(normalized);
     if (!ref) return -1;
     let offset = 0;
     for (let segmentIndex = 0; segmentIndex < ref.segmentIndex; segmentIndex += 1) {
@@ -124,16 +185,16 @@ export class SeriesWindowStore {
     return offset + ref.rowIndex;
   }
 
-  first() {
+  first(): KlineBar | null {
     return this.snapshot()[0] || null;
   }
 
-  last() {
+  last(): KlineBar | null {
     const rows = this.snapshot();
     return rows[rows.length - 1] || null;
   }
 
-  coverage() {
+  coverage(): SeriesCoverage {
     const rows = this.snapshot();
     if (!rows.length) {
       return {
@@ -143,7 +204,7 @@ export class SeriesWindowStore {
         gaps: [],
       };
     }
-    const gaps = [];
+    const gaps: SeriesCoverage["gaps"] = [];
     for (let index = 1; index < this._segments.length; index += 1) {
       const previous = this._segments[index - 1].bars;
       const next = this._segments[index].bars;
@@ -163,7 +224,7 @@ export class SeriesWindowStore {
     };
   }
 
-  describe() {
+  describe(): SeriesDescription {
     const coverage = this.coverage();
     return {
       seriesKey: this.seriesKey,
@@ -171,16 +232,16 @@ export class SeriesWindowStore {
       firstTime: coverage.firstTime,
       lastTime: coverage.lastTime,
       coverage,
-      version: this._version,
+      version: this.version,
     };
   }
 
-  subscribe(listener) {
+  subscribe(listener: SeriesWindowListener): () => boolean {
     this._listeners.add(listener);
     return () => this._listeners.delete(listener);
   }
 
-  clear(meta = {}) {
+  clear(meta: WindowDeltaDetail = {}): WindowDelta {
     if (this.barCount === 0) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
     const originalBars = this.barCount;
     this._segments = [];
@@ -198,7 +259,10 @@ export class SeriesWindowStore {
     return delta;
   }
 
-  replace(rows, meta = {}) {
+  replace(
+    rows: readonly KlineBarInput[] | null | undefined,
+    meta: WindowDeltaDetail = {},
+  ): WindowDelta {
     const normalized = normalizeRows(rows);
     const originalBars = normalized.length;
     this._replaceRows(normalized);
@@ -215,7 +279,10 @@ export class SeriesWindowStore {
     return delta;
   }
 
-  applyRange(rows, meta = {}) {
+  applyRange(
+    rows: readonly KlineBarInput[] | null | undefined,
+    meta: WindowDeltaDetail = {},
+  ): WindowDelta {
     const incoming = normalizeRows(rows);
     if (!incoming.length) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
 
@@ -224,8 +291,8 @@ export class SeriesWindowStore {
     }
 
     const previousRows = this.snapshot();
-    const previousFirst = previousRows[0]?.time;
-    const previousLast = previousRows[previousRows.length - 1]?.time;
+    const previousFirst = previousRows[0].time;
+    const previousLast = previousRows[previousRows.length - 1].time;
     const previousByTime = new Map(previousRows.map((row) => [row.time, row]));
     const byTime = new Map(previousByTime);
     let addedLeft = 0;
@@ -253,7 +320,7 @@ export class SeriesWindowStore {
 
     const incomingFirst = incoming[0].time;
     const incomingLast = incoming[incoming.length - 1].time;
-    let type = WINDOW_DELTA_TYPES.MID_MERGE;
+    let type: WindowDeltaType = WINDOW_DELTA_TYPES.MID_MERGE;
     if (incomingLast < previousFirst) type = WINDOW_DELTA_TYPES.PREPEND;
     else if (incomingFirst > previousLast) type = WINDOW_DELTA_TYPES.APPEND;
 
@@ -271,16 +338,19 @@ export class SeriesWindowStore {
     return delta;
   }
 
-  applyTick(row, meta = {}) {
+  applyTick(
+    row: KlineBarInput | null | undefined,
+    meta: WindowDeltaDetail = {},
+  ): WindowDelta {
     const time = finiteTime(row);
-    if (time == null || this.barCount === 0) {
+    if (time == null || this.barCount === 0 || !row) {
       return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
     }
 
-    const tick = { ...row, time };
+    const tick: KlineBar = { ...row, time };
     const firstTime = this._firstTime();
     const lastTime = this._lastTime();
-    if (time < firstTime) {
+    if (firstTime == null || lastTime == null || time < firstTime) {
       return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
     }
 
@@ -324,7 +394,8 @@ export class SeriesWindowStore {
       const lastSegmentIndex = this._segments.length - 1;
       const lastSegment = this._segments[lastSegmentIndex];
       const lastBar = lastSegment.bars[lastSegment.bars.length - 1];
-      const shouldExtend = !this.intervalSeconds || time - lastBar.time <= this.intervalSeconds * 1.5;
+      const shouldExtend = !this.intervalSeconds
+        || time - lastBar.time <= this.intervalSeconds * 1.5;
       if (shouldExtend) {
         lastSegment.bars.push(tick);
         this._timeIndex.set(time, {
@@ -365,7 +436,7 @@ export class SeriesWindowStore {
     return delta;
   }
 
-  trimToBudget() {
+  trimToBudget(): TrimResult {
     const count = this.barCount;
     if (count <= this.maxBars) return { trimmedLeft: 0, trimmedRight: 0 };
 
@@ -375,7 +446,7 @@ export class SeriesWindowStore {
     return { trimmedLeft, trimmedRight: 0 };
   }
 
-  _replaceRows(rows) {
+  private _replaceRows(rows: KlineBar[]): void {
     if (!this.intervalSeconds) {
       this.intervalSeconds = inferIntervalSeconds(rows);
     }
@@ -385,16 +456,16 @@ export class SeriesWindowStore {
     this._rebuildTimeIndex();
   }
 
-  _firstTime() {
+  private _firstTime(): EpochSeconds | null {
     return this._segments[0]?.bars[0]?.time ?? null;
   }
 
-  _lastTime() {
+  private _lastTime(): EpochSeconds | null {
     const lastSegment = this._segments[this._segments.length - 1];
     return lastSegment?.bars[lastSegment.bars.length - 1]?.time ?? null;
   }
 
-  _rebuildTimeIndex() {
+  private _rebuildTimeIndex(): void {
     this._timeIndex.clear();
     this._segments.forEach((segment, segmentIndex) => {
       segment.bars.forEach((row, rowIndex) => {
@@ -404,7 +475,7 @@ export class SeriesWindowStore {
     this._timeSet = new Set(this._timeIndex.keys());
   }
 
-  _emit(delta) {
+  private _emit(delta: WindowDelta): void {
     for (const listener of this._listeners) {
       listener(delta, this);
     }

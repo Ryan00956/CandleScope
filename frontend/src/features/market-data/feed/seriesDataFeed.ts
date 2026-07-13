@@ -1,3 +1,31 @@
+import type {
+  AppliedKlineResult,
+  BackfillCompletedMessage,
+  BackfillCompletedOptions,
+  CommitChartData,
+  FeedApplyMode,
+  FeedCommitMode,
+  FeedResult,
+  KlineApi,
+  KlineFetchResult,
+  KlineStreamController,
+  KlineStreamOptions,
+  MergeCacheData,
+  PatchCacheTick,
+  PendingBeforePage,
+  SeriesDataFeedConfig,
+} from "../klineContracts.js";
+import type {
+  EpochSeconds,
+  KlineBar,
+  MarketSeries,
+  SeriesKey,
+  TimeRangeMs,
+} from "../marketDataTypes.js";
+import {
+  millisecondsToSeconds,
+  toEpochMilliseconds,
+} from "../marketDataTypes.js";
 import {
   eventRangeFromDetail,
   isSameSeries,
@@ -21,105 +49,223 @@ import {
   seriesKeyFor,
 } from "./fetchPlanner.js";
 
-function defaultIsActiveSeries(series, activeSeries) {
+interface RequestBeforePageOptions {
+  before?: EpochSeconds;
+  bars?: number;
+  source?: string;
+  signal?: AbortSignal;
+  commit?: FeedCommitMode;
+  cooldownMs?: number;
+  pendingCooldownMs?: number;
+  errorCooldownMs?: number;
+}
+
+interface GetBarsOptions {
+  from?: unknown;
+  to?: unknown;
+  countBack?: unknown;
+  days?: unknown;
+  fallbackDays?: number | null;
+  source?: string;
+  signal?: AbortSignal;
+  commit?: FeedCommitMode;
+  repair?: string;
+  waitMs?: number;
+  strict?: boolean;
+}
+
+interface GetHistoryOptions {
+  days?: number | null;
+  countBack?: number | null;
+  source?: string;
+  signal?: AbortSignal;
+  commit?: FeedCommitMode;
+}
+
+interface GetBeforeOptions {
+  before?: EpochSeconds;
+  bars?: number;
+  source?: string;
+  signal?: AbortSignal;
+  commit?: FeedCommitMode;
+}
+
+interface GetRangeOptions {
+  start?: unknown;
+  end?: unknown;
+  startSec?: unknown;
+  endSec?: unknown;
+  repair?: string;
+  waitMs?: number;
+  strict?: boolean;
+  source?: string;
+  signal?: AbortSignal;
+  commit?: FeedCommitMode;
+  maxPages?: number;
+}
+
+interface GetLatestOptions {
+  limit?: number;
+  source?: string;
+  apiSource?: string;
+  signal?: AbortSignal;
+  commit?: FeedCommitMode;
+}
+
+interface ApplyResultOptions {
+  epoch: number;
+  source: string;
+  commit: FeedCommitMode;
+  mode: FeedApplyMode;
+}
+
+function defaultIsActiveSeries(
+  series: MarketSeries,
+  activeSeries: MarketSeries | null,
+): boolean {
   return isSameSeries(series, activeSeries);
 }
 
+const noopMergeCacheData: MergeCacheData = () => undefined;
+const noopCommitChartData: CommitChartData = () => undefined;
+const noopPatchCacheTick: PatchCacheTick = () => undefined;
+const TypedKlineStreamSubscription = KlineStreamSubscription as unknown as new (
+  config: KlineStreamOptions & { api: KlineApi; series: MarketSeries },
+) => KlineStreamController;
+
 export class SeriesDataFeed {
-  constructor(config = {}) {
+  inflight: InflightRegistry;
+  epochBySeries: Map<SeriesKey, number>;
+  beforePageCooldownUntil: Map<SeriesKey, number>;
+  pendingBeforePages: Map<SeriesKey, PendingBeforePage>;
+  backfillReloadInFlight: Set<SeriesKey>;
+  api: KlineApi | null;
+  getActiveSeries: () => MarketSeries | null;
+  isActiveSeries: (series: MarketSeries, activeSeries: MarketSeries | null) => boolean;
+  mergeCacheData: MergeCacheData;
+  commitMergedChartData: CommitChartData;
+  commitPatchedChartData: CommitChartData;
+  patchCacheTick: PatchCacheTick;
+
+  constructor(config: SeriesDataFeedConfig = {}) {
     this.inflight = new InflightRegistry();
     this.epochBySeries = new Map();
     this.beforePageCooldownUntil = new Map();
     this.pendingBeforePages = new Map();
     this.backfillReloadInFlight = new Set();
+    this.api = null;
+    this.getActiveSeries = () => null;
+    this.isActiveSeries = defaultIsActiveSeries;
+    this.mergeCacheData = noopMergeCacheData;
+    this.commitMergedChartData = noopCommitChartData;
+    this.commitPatchedChartData = noopCommitChartData;
+    this.patchCacheTick = noopPatchCacheTick;
     this.configure(config);
   }
 
-  configure(config = {}) {
+  configure(config: SeriesDataFeedConfig = {}): void {
     this.api = config.api || this.api || null;
     this.getActiveSeries = config.getActiveSeries || this.getActiveSeries || (() => null);
     this.isActiveSeries = config.isActiveSeries || this.isActiveSeries || defaultIsActiveSeries;
-    this.mergeCacheData = config.mergeCacheData || this.mergeCacheData || (() => undefined);
-    this.commitMergedChartData = config.commitMergedChartData || this.commitMergedChartData || (() => undefined);
-    this.commitPatchedChartData = config.commitPatchedChartData || this.commitPatchedChartData || (() => undefined);
-    this.patchCacheTick = config.patchCacheTick || this.patchCacheTick || (() => undefined);
+    this.mergeCacheData = config.mergeCacheData || this.mergeCacheData || noopMergeCacheData;
+    this.commitMergedChartData = config.commitMergedChartData
+      || this.commitMergedChartData
+      || noopCommitChartData;
+    this.commitPatchedChartData = config.commitPatchedChartData
+      || this.commitPatchedChartData
+      || noopCommitChartData;
+    this.patchCacheTick = config.patchCacheTick || this.patchCacheTick || noopPatchCacheTick;
   }
 
-  async resolveApi() {
+  async resolveApi(): Promise<KlineApi> {
     if (this.api) return this.api;
     throw new Error("SeriesDataFeed requires an API adapter before fetching");
   }
 
-  resolveSyncApi() {
+  resolveSyncApi(): KlineApi {
     if (this.api) return this.api;
     throw new Error("SeriesDataFeed requires an API adapter before subscribing");
   }
 
-  seriesKey(series) {
+  seriesKey(series: Partial<MarketSeries>): SeriesKey {
     return seriesKeyFor(series);
   }
 
-  beforePageKey(series) {
+  beforePageKey(series: Partial<MarketSeries>): SeriesKey {
     return this.seriesKey(series);
   }
 
-  beginEpoch(series) {
+  beginEpoch(series: MarketSeries): number {
     const key = this.seriesKey(series);
     const next = (this.epochBySeries.get(key) || 0) + 1;
     this.epochBySeries.set(key, next);
     return next;
   }
 
-  currentEpoch(series) {
+  currentEpoch(series: MarketSeries): number {
     return this.epochBySeries.get(this.seriesKey(series)) || 0;
   }
 
-  isCurrent(series, epoch) {
+  isCurrent(series: MarketSeries, epoch: number): boolean {
     return this.currentEpoch(series) === epoch;
   }
 
-  shouldCommitActive(series) {
+  shouldCommitActive(series: MarketSeries): boolean {
     return this.isActiveSeries(series, this.getActiveSeries());
   }
 
-  subscribeBars(series, options = {}) {
+  subscribeBars(
+    series: MarketSeries,
+    options: KlineStreamOptions = {},
+  ): KlineStreamController {
     const api = this.resolveSyncApi();
     if (typeof api.getMultiStreamUrl !== "function") {
       throw new Error("SeriesDataFeed API adapter must provide getMultiStreamUrl for subscribeBars");
     }
-    return new KlineStreamSubscription({
+    return new TypedKlineStreamSubscription({
       api,
       series,
       ...options,
     });
   }
 
-  isBeforePageCoolingDown(series, now = Date.now()) {
+  isBeforePageCoolingDown(series: MarketSeries, now = Date.now()): boolean {
     const cooldownUntil = this.beforePageCooldownUntil.get(this.beforePageKey(series)) || 0;
     return now < cooldownUntil;
   }
 
-  setBeforePageCooldown(series, durationMs, now = Date.now()) {
-    this.beforePageCooldownUntil.set(this.beforePageKey(series), now + Math.max(0, durationMs || 0));
+  setBeforePageCooldown(
+    series: MarketSeries,
+    durationMs: number | null | undefined,
+    now = Date.now(),
+  ): void {
+    this.beforePageCooldownUntil.set(
+      this.beforePageKey(series),
+      now + Math.max(0, durationMs || 0),
+    );
   }
 
-  resetBeforePageCooldown(series) {
+  resetBeforePageCooldown(series: MarketSeries): void {
     this.beforePageCooldownUntil.delete(this.beforePageKey(series));
   }
 
-  getPendingBeforePage(series) {
+  getPendingBeforePage(series: MarketSeries): PendingBeforePage | null {
     return this.pendingBeforePages.get(this.beforePageKey(series)) || null;
   }
 
-  setPendingBeforePage(series, pending) {
+  setPendingBeforePage(series: MarketSeries, pending: PendingBeforePage): void {
     this.pendingBeforePages.set(this.beforePageKey(series), pending);
   }
 
-  clearPendingBeforePage(series) {
+  clearPendingBeforePage(series: MarketSeries): void {
     this.pendingBeforePages.delete(this.beforePageKey(series));
   }
 
-  markBeforePageSafetyRetry(series, before, maxAttempts = 1) {
+  markBeforePageSafetyRetry(
+    series: MarketSeries,
+    before: EpochSeconds,
+    maxAttempts = 1,
+  ): boolean {
     const pending = this.getPendingBeforePage(series);
     if (!pending || pending.before !== before) return false;
     const attempts = pending.safetyAttempts ?? 0;
@@ -129,7 +275,10 @@ export class SeriesDataFeed {
     return true;
   }
 
-  beginBeforePageCompletionAttempt(series, maxAttempts = 3) {
+  beginBeforePageCompletionAttempt(
+    series: MarketSeries,
+    maxAttempts = 3,
+  ): PendingBeforePage | null {
     const pending = this.getPendingBeforePage(series);
     if (!pending) return null;
     const attempts = pending.completionAttempts ?? 0;
@@ -141,20 +290,23 @@ export class SeriesDataFeed {
     return pending;
   }
 
-  handleBackfillCompleted(msg, {
-    activeSeries = this.getActiveSeries(),
-    loading = false,
-    pendingInitial = null,
-    clearPendingInitial = () => {},
-    getCacheRows = () => [],
-    getFallbackDays = () => null,
-    setLastPrice = () => {},
-    setError = () => {},
-    setConnectionStatus = () => {},
-    setLoading = () => {},
-    cooldownMs = 3_000,
-    completionMaxAttempts = 3,
-  } = {}) {
+  handleBackfillCompleted(
+    msg: BackfillCompletedMessage | null | undefined,
+    {
+      activeSeries = this.getActiveSeries(),
+      loading = false,
+      pendingInitial = null,
+      clearPendingInitial = () => {},
+      getCacheRows = () => [],
+      getFallbackDays = () => null,
+      setLastPrice = () => {},
+      setError = () => {},
+      setConnectionStatus = () => {},
+      setLoading = () => {},
+      cooldownMs = 3_000,
+      completionMaxAttempts = 3,
+    }: BackfillCompletedOptions = {},
+  ): boolean {
     if (msg?.type !== "backfill_completed") return false;
 
     const detail = msg.detail || {};
@@ -163,11 +315,13 @@ export class SeriesDataFeed {
       marketType: msg.market_type || activeSeries?.marketType,
       symbol: msg.symbol || activeSeries?.symbol,
       interval: msg.interval || activeSeries?.interval,
-    };
+    } as MarketSeries;
     const eventRange = eventRangeFromDetail(detail);
     const userVisibleReason = isUserVisibleBackfillReason(detail.reason);
     const pendingBeforePage = this.getPendingBeforePage(eventSeries);
-    const isPendingInitial = pendingInitial && isSameSeries(eventSeries, pendingInitial);
+    const isPendingInitial = Boolean(
+      pendingInitial && isSameSeries(eventSeries, pendingInitial),
+    );
     const isPendingLoadMore = Boolean(pendingBeforePage);
 
     if (!userVisibleReason && !isPendingInitial && !isPendingLoadMore) {
@@ -178,7 +332,14 @@ export class SeriesDataFeed {
     const activeRows = getCacheRows(eventSeries) || [];
     const activeCoverage = activeCoverageMsFromRows(activeRows);
     const activeOverlap = intersectRanges(eventRange, activeCoverage);
-    if (userVisibleReason && eventRange && activeCoverage && !activeOverlap && !isPendingInitial && !isPendingLoadMore) {
+    if (
+      userVisibleReason
+      && eventRange
+      && activeCoverage
+      && !activeOverlap
+      && !isPendingInitial
+      && !isPendingLoadMore
+    ) {
       return true;
     }
 
@@ -189,7 +350,7 @@ export class SeriesDataFeed {
     }
     this.backfillReloadInFlight.add(reloadKey);
 
-    const canReleaseInitialLoading = (rows) => {
+    const canReleaseInitialLoading = (rows: KlineBar[]): boolean => {
       if (!isSameSeries(eventSeries, activeSeries)) return false;
       if (!loading) return true;
 
@@ -198,14 +359,17 @@ export class SeriesDataFeed {
         if (!pendingInitial.range) return true;
         if (rowsRange && rangesOverlap(rowsRange, pendingInitial.range)) return true;
         if (eventRange && rangesOverlap(eventRange, pendingInitial.range)) return true;
-        if (detail.verified_contiguous === true && rangeCovers(eventRange, pendingInitial.range)) return true;
+        if (
+          detail.verified_contiguous === true
+          && rangeCovers(eventRange, pendingInitial.range)
+        ) return true;
         return false;
       }
 
       return userVisibleReason;
     };
 
-    const afterBackfillRows = (rows) => {
+    const afterBackfillRows = (rows: KlineBar[]): boolean => {
       if (!rows?.length) return false;
       if (isSameSeries(eventSeries, activeSeries)) {
         setLastPrice((prev) => prev || rows[rows.length - 1] || prev);
@@ -219,25 +383,25 @@ export class SeriesDataFeed {
       return true;
     };
 
-    const readBackfilledData = async () => {
-      const startMs = Number(detail.range_start_ms ?? detail.request_start_ms);
-      const endMs = Number(detail.range_end_ms ?? detail.request_end_ms);
-      const requestedRange = Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs
-        ? { start: startMs, end: endMs }
-        : null;
+    const readBackfilledData = async (): Promise<void> => {
+      const startMs = toEpochMilliseconds(detail.range_start_ms ?? detail.request_start_ms);
+      const endMs = toEpochMilliseconds(detail.range_end_ms ?? detail.request_end_ms);
+      const requestedRange: TimeRangeMs | null = (
+        startMs != null && endMs != null && endMs > startMs
+      ) ? { start: startMs, end: endMs } : null;
       const fetchRange = (
         (isPendingInitial || isPendingLoadMore)
           ? requestedRange
           : (activeOverlap || intersectRanges(requestedRange, activeCoverage))
       );
       let loadedAny = false;
-      let lastError = null;
+      let lastError: unknown = null;
 
       if (fetchRange) {
         try {
           const result = await this.getBars(eventSeries, {
-            from: fetchRange.start / 1000,
-            to: fetchRange.end / 1000,
+            from: millisecondsToSeconds(fetchRange.start),
+            to: millisecondsToSeconds(fetchRange.end),
             repair: "none",
             strict: false,
             source: "backfill-completed",
@@ -266,9 +430,12 @@ export class SeriesDataFeed {
       if (!loadedAny && lastError) throw lastError;
     };
 
-    readBackfilledData()
+    void readBackfilledData()
       .then(() => {
-        const pending = this.beginBeforePageCompletionAttempt(eventSeries, completionMaxAttempts);
+        const pending = this.beginBeforePageCompletionAttempt(
+          eventSeries,
+          completionMaxAttempts,
+        );
         if (!pending) return undefined;
         return this.getBars(eventSeries, {
           to: pending.before,
@@ -281,11 +448,11 @@ export class SeriesDataFeed {
               this.clearPendingBeforePage(eventSeries);
             }
           })
-          .catch((error) => {
+          .catch((error: unknown) => {
             console.warn(`[Backfill] Pending before-page fetch failed for ${reloadKey}:`, error);
           });
       })
-      .catch((error) => {
+      .catch((error: unknown) => {
         console.warn(`Failed to reload after backfill for ${eventSeries.interval}:`, error);
       })
       .finally(() => {
@@ -297,16 +464,19 @@ export class SeriesDataFeed {
     return true;
   }
 
-  async requestBeforePage(series, {
-    before,
-    bars = 500,
-    source = "history-before-page",
-    signal,
-    commit = "active",
-    cooldownMs = 3_000,
-    pendingCooldownMs = 2_000,
-    errorCooldownMs = 3_000,
-  } = {}) {
+  async requestBeforePage(
+    series: MarketSeries,
+    {
+      before,
+      bars = 500,
+      source = "history-before-page",
+      signal,
+      commit = "active",
+      cooldownMs = 3_000,
+      pendingCooldownMs = 2_000,
+      errorCooldownMs = 3_000,
+    }: RequestBeforePageOptions = {},
+  ): Promise<FeedResult> {
     if (this.isBeforePageCoolingDown(series)) {
       return { skipped: true, reason: "cooldown", data: [], rows: [] };
     }
@@ -331,7 +501,7 @@ export class SeriesDataFeed {
         const existing = this.getPendingBeforePage(series);
         if (!existing || existing.before !== before) {
           this.setPendingBeforePage(series, {
-            before,
+            before: before as EpochSeconds,
             safetyAttempts: 0,
             completionAttempts: 0,
           });
@@ -349,19 +519,22 @@ export class SeriesDataFeed {
     }
   }
 
-  async getBars(series, {
-    from,
-    to,
-    countBack,
-    days,
-    fallbackDays,
-    source = "bars",
-    signal,
-    commit = "active",
-    repair = "async",
-    waitMs = 0,
-    strict = false,
-  } = {}) {
+  async getBars(
+    series: MarketSeries,
+    {
+      from,
+      to,
+      countBack,
+      days,
+      fallbackDays,
+      source = "bars",
+      signal,
+      commit = "active",
+      repair = "async",
+      waitMs = 0,
+      strict = false,
+    }: GetBarsOptions = {},
+  ): Promise<FeedResult> {
     const plan = planBarsFetch({
       from,
       to,
@@ -406,7 +579,16 @@ export class SeriesDataFeed {
     return { ...result, plan };
   }
 
-  async getHistory(series, { days, countBack, source = "history", signal, commit = "active" } = {}) {
+  async getHistory(
+    series: MarketSeries,
+    {
+      days,
+      countBack,
+      source = "history",
+      signal,
+      commit = "active",
+    }: GetHistoryOptions = {},
+  ): Promise<AppliedKlineResult> {
     const epoch = this.currentEpoch(series);
     const key = requestKeyFor("history", series, { countBack, days, source });
     return this.inflight.run(key, async () => {
@@ -428,7 +610,16 @@ export class SeriesDataFeed {
     });
   }
 
-  async getBefore(series, { before, bars = 500, source = "before", signal, commit = "active" } = {}) {
+  async getBefore(
+    series: MarketSeries,
+    {
+      before,
+      bars = 500,
+      source = "before",
+      signal,
+      commit = "active",
+    }: GetBeforeOptions = {},
+  ): Promise<AppliedKlineResult> {
     const epoch = this.currentEpoch(series);
     const key = requestKeyFor("before", series, { before, bars, source });
     return this.inflight.run(key, async () => {
@@ -451,19 +642,22 @@ export class SeriesDataFeed {
     });
   }
 
-  async getRange(series, {
-    start,
-    end,
-    startSec,
-    endSec,
-    repair = "async",
-    waitMs = 0,
-    strict = false,
-    source = "range",
-    signal,
-    commit = "active",
-    maxPages = 20,
-  } = {}) {
+  async getRange(
+    series: MarketSeries,
+    {
+      start,
+      end,
+      startSec,
+      endSec,
+      repair = "async",
+      waitMs = 0,
+      strict = false,
+      source = "range",
+      signal,
+      commit = "active",
+      maxPages = 20,
+    }: GetRangeOptions = {},
+  ): Promise<FeedResult> {
     const range = normalizeRangeSec({ start, end, startSec, endSec });
     if (!range) {
       return { data: [], rows: [], skipped: true, reason: "invalid-range" };
@@ -480,10 +674,10 @@ export class SeriesDataFeed {
     });
     return this.inflight.run(key, async () => {
       const api = await this.resolveApi();
-      const pages = [];
-      const combinedByTime = new Map();
+      const pages: AppliedKlineResult[] = [];
+      const combinedByTime = new Map<EpochSeconds, KlineBar>();
       let pageEnd = range.end;
-      let finalResult = null;
+      let finalResult: AppliedKlineResult | null = null;
 
       for (let page = 0; page < maxPages && pageEnd >= range.start; page += 1) {
         const result = await api.fetchKlinesRange(
@@ -507,12 +701,14 @@ export class SeriesDataFeed {
           if (row?.time != null) combinedByTime.set(row.time, row);
         }
         if (applied?.stale || !result?.truncated || result?.next_end_ms == null) break;
-        const nextEnd = Number(result.next_end_ms) / 1000;
-        if (!Number.isFinite(nextEnd) || nextEnd >= pageEnd) break;
+        const nextEndMs = toEpochMilliseconds(result.next_end_ms);
+        const nextEnd = nextEndMs == null ? null : millisecondsToSeconds(nextEndMs);
+        if (nextEnd == null || nextEnd >= pageEnd) break;
         pageEnd = nextEnd;
       }
 
-      const combinedRows = Array.from(combinedByTime.values()).sort((left, right) => left.time - right.time);
+      const combinedRows = Array.from(combinedByTime.values())
+        .sort((left, right) => left.time - right.time);
       return {
         ...(finalResult || {}),
         data: combinedRows,
@@ -525,7 +721,16 @@ export class SeriesDataFeed {
     });
   }
 
-  async getLatest(series, { limit = 2, source = "latest", apiSource = "", signal, commit = "patch-active" } = {}) {
+  async getLatest(
+    series: MarketSeries,
+    {
+      limit = 2,
+      source = "latest",
+      apiSource = "",
+      signal,
+      commit = "patch-active",
+    }: GetLatestOptions = {},
+  ): Promise<AppliedKlineResult> {
     const epoch = this.currentEpoch(series);
     const key = requestKeyFor("latest", series, { limit, source, apiSource });
     return this.inflight.run(key, async () => {
@@ -548,7 +753,11 @@ export class SeriesDataFeed {
     });
   }
 
-  applyResult(series, result, { epoch, source, commit, mode }) {
+  applyResult(
+    series: MarketSeries,
+    result: KlineFetchResult,
+    { epoch, source, commit, mode }: ApplyResultOptions,
+  ): AppliedKlineResult {
     const rows = rowsFromResult(result);
     const active = this.shouldCommitActive(series);
     if (!this.isCurrent(series, epoch)) {

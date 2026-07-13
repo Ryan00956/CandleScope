@@ -312,6 +312,9 @@ function checkComponentRawTimeScaleWrites(filePath, content) {
 
 function checkFeatureRuntimeJsx(filePath, content) {
   if (!isFeatureRuntimePath(filePath)) return;
+  // Plain .ts files cannot contain JSX syntax. Running the text heuristic on
+  // them mistakes generic types such as Partial<MarketSeries> for JSX tags.
+  if (path.extname(filePath) === ".ts") return;
   if (!hasJsx(content)) return;
   addViolation({
     rule: RULES.featureRuntimeNoJsx,

@@ -1,10 +1,15 @@
+export type InflightFactory<TResult> = () => TResult | PromiseLike<TResult>;
+
 export class InflightRegistry {
+  private inflight: Map<string, Promise<unknown>>;
+
   constructor() {
     this.inflight = new Map();
   }
 
-  run(key, factory) {
-    if (this.inflight.has(key)) return this.inflight.get(key);
+  run<TResult>(key: string, factory: InflightFactory<TResult>): Promise<TResult> {
+    const existing = this.inflight.get(key);
+    if (existing) return existing as Promise<TResult>;
 
     const promise = Promise.resolve()
       .then(factory)
@@ -18,15 +23,15 @@ export class InflightRegistry {
     return promise;
   }
 
-  has(key) {
+  has(key: string): boolean {
     return this.inflight.has(key);
   }
 
-  size() {
+  size(): number {
     return this.inflight.size;
   }
 
-  clear() {
+  clear(): void {
     this.inflight.clear();
   }
 }

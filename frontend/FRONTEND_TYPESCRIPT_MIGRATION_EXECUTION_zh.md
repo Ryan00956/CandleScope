@@ -1884,8 +1884,8 @@ rg --files src -g "*.js" -g "*.jsx"
 |---|---|---|---|---|---|---|---|
 | T0 | 已完成 | `45c901c` | N/A（T1 建立） | 702/702 通过 | 通过 | basic/release 通过 | 2026-07-13；迁移前基线已冻结 |
 | T1 | 已完成 | `45c901c` | 通过 | 703/703 通过 | 通过 | chart-types 通过 | mixed-mode 五条解析链全部验证；新增 suppression 0 |
-| T2 | 已完成 | 未提交（当前工作区） | 通过 | 719/719 通过 | 通过 | basic/release 通过 | 12 个生产模块迁为 TS；新增 suppression 0 |
-| T3 | 待执行 |  |  |  |  |  |  |
+| T2 | 已完成 | `741b5d1` | 通过 | 719/719 通过 | 通过 | basic/release 通过 | 12 个生产模块迁为 TS；新增 suppression 0 |
+| T3 | 已完成 | 未提交（当前工作区） | 通过 | 720/720 通过 | 通过 | basic/release 通过 | 15 个 market-data TS 模块；1 个 T4 删除的局部 adapter cast |
 | T4 | 待执行 |  |  |  |  |  |  |
 | T5 | 待执行 |  |  |  |  |  |  |
 | T6 | 待执行 |  |  |  |  |  |  |
@@ -1982,6 +1982,7 @@ rg --files src -g "*.js" -g "*.jsx"
 | 项目 | 结果 |
 |---|---|
 | 起始 Commit | `45c901c` |
+| 完成 Commit | `741b5d1` |
 | 生产模块 | 迁移 11 个既有 JS 文件并新增 `chartSessionTypes.ts`，合计 12 个 TS 模块 |
 | 核心类型 | `IntervalUnit`、`IntervalString`、`SymbolIdentity`、`ChartSession`、`ChartSessionTransition`、`DatasetKey`、`VisibleRangeSnapshot`、`PaneHeights` |
 | Interval 兼容 | `m` 和 `M` 保持大小写语义；非法值 fail closed；`1M` 月周期 timeline 逻辑不变 |
@@ -1998,11 +1999,31 @@ rg --files src -g "*.js" -g "*.jsx"
 | 运行环境旁路 | 首次 release smoke 在经历批量 rename 的旧 Vite 进程上出现空白页；模块探测确认解析正常，干净重启后 basic/release 均通过；未修改业务代码规避该环境状态 |
 | 新增 `any` / TS suppression | 0 |
 
+### T3 market-data 内核验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `741b5d1` |
+| 生产模块 | 按计划迁移 13 个既有 JS 文件，并新增 `marketDataTypes.ts`、`klineContracts.ts`，合计 15 个 TS 模块；`klineApi.js` 和 `klineStreamSubscription.js` 保留给 T4 |
+| 时间 contract | `EpochSeconds`、`EpochMilliseconds` 使用 branded number；秒/毫秒只通过 `secondsToMilliseconds()`、`millisecondsToSeconds()` 等命名边界转换；`normalizeRangeSec()` 返回 `TimeRangeSec \| null` |
+| K 线与 series contract | 从现有 fixture 固化 `KlineBar` 的 `time` 和可选 OHLCV 字段；新增 `MarketSeries`、`SeriesKey`、`SeriesCoverage`、`DataRevision`、`KlineApi`、`BackfillCompletedMessage` |
+| Window contract | `WindowDelta` 为 `type` 判别联合；delta 类型 switch 包含 `never` exhaustiveness check；rows、coverage、revision、segment 和 time index 全部类型化 |
+| Fetch/feed contract | `FetchPlan` 为 `range` / `before` / `history` 判别联合；`InflightRegistry.run()` 保留泛型 promise result；`SeriesDataFeed` 的 API、callback、commit mode、pending page 和 result shape 全部显式化 |
+| 行为不变量 | epoch 前进后旧结果标记 stale 且不提交；inactive series 只合并 cache；before-page completion attempts 有上限；重复 backfill completion 只释放一次 loading；window trim 继续保留最新 bars；range 分页 cursor 顺序不变 |
+| 定向测试 | 54/54 通过；覆盖 planner、window store/registry、inflight、epoch/stale/active、before-page/backfill、gap 和 range runtime |
+| 完整测试 | 720/720 通过；较 T2 新增 1 个重复 backfill completion 竞态保护测试，无原测试丢失 |
+| Architecture / typecheck / lint | 全部通过；0 migration allowlist entries active；新增 `any` 和 TS directive suppression 均为 0 |
+| Build | 通过；Vite 7.3.1，291 modules transformed；HTTP/WS transport 行为未改 |
+| Basic smoke | 通过；1500 bars、connected/live；failures/warnings/exceptions 为 0 |
+| Release smoke | 通过；chart type、export、drawing、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
+| 验证工具附带修复 | architecture JSX 文本检查跳过无法承载 JSX 的 `.ts`，避免泛型误报；export matrix 已独立验证预览和下载字节后，将被替换预览的 `blob:` URL 晚到 `ERR_FILE_NOT_FOUND` 归类为取消事件，真实 API、页面异常和导出失败仍会使 smoke 失败 |
+| 临时逃生口 | `SeriesDataFeed` 对仍属 T4 的 JS `KlineStreamSubscription` 使用 1 个最小 constructor adapter cast；已登记 ledger，T4 迁移 owner 后删除 |
+
 ### Suppression ledger
 
 | ID | 文件 | suppression/cast | 原因 | 保护测试 | 最迟删除 Phase | 状态 |
 |---|---|---|---|---|---|---|
-|  |  |  |  |  |  |  |
+| T3-CAST-01 | `src/features/market-data/feed/seriesDataFeed.ts` | `KlineStreamSubscription as unknown as constructor` | 尚未迁移的 JS constructor 把默认空 intervals 推断为 `never[]`；adapter 只包住 T4 transport owner 边界 | `seriesDataFeed.test.js` subscribeBars；release smoke | T4 | 活跃 |
 
 ### 行为问题旁路记录
 

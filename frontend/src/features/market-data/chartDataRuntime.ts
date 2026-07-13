@@ -1,4 +1,25 @@
-export function klineRowsEqual(a, b) {
+import type {
+  EpochSeconds,
+  KlineBar,
+} from "./marketDataTypes.js";
+import { toEpochSeconds } from "./marketDataTypes.js";
+
+export interface GapDetectionOptions {
+  includeTailGap?: boolean;
+  nowSecs?: unknown;
+  nowMs?: unknown;
+}
+export interface DetectedGap {
+  from: EpochSeconds;
+  to: EpochSeconds;
+  missingBars: number;
+  isTailGap?: true;
+}
+
+export function klineRowsEqual(
+  a: readonly Record<string, unknown>[] | null | undefined,
+  b: readonly Record<string, unknown>[] | null | undefined,
+): boolean {
   if (a === b) return true;
   if (!Array.isArray(a) || !Array.isArray(b)) return false;
   if (a.length !== b.length) return false;
@@ -13,13 +34,15 @@ export function klineRowsEqual(a, b) {
   return true;
 }
 
-function resolveTailGapNow(options) {
+function resolveTailGapNow(options: GapDetectionOptions): EpochSeconds | null {
   if (!options?.includeTailGap) return null;
-  if (options.nowSecs != null && Number.isFinite(Number(options.nowSecs))) {
-    return Math.floor(Number(options.nowSecs));
+  const explicitSeconds = toEpochSeconds(options.nowSecs);
+  if (options.nowSecs != null && explicitSeconds != null) {
+    return toEpochSeconds(Math.floor(explicitSeconds));
   }
-  if (options.nowMs != null && Number.isFinite(Number(options.nowMs))) {
-    return Math.floor(Number(options.nowMs) / 1000);
+  const explicitMilliseconds = Number(options.nowMs);
+  if (options.nowMs != null && Number.isFinite(explicitMilliseconds)) {
+    return toEpochSeconds(Math.floor(explicitMilliseconds / 1000));
   }
   return null;
 }
@@ -32,9 +55,13 @@ function resolveTailGapNow(options) {
  * frontend recovery loop should not infer exchange trading sessions from
  * Date.now(), because inactive sessions can look like missing bars forever.
  */
-export function detectGaps(data, intervalSeconds, options = {}) {
+export function detectGaps(
+  data: readonly KlineBar[] | null | undefined,
+  intervalSeconds: number | null | undefined,
+  options: GapDetectionOptions = {},
+): DetectedGap[] {
   if (!data || data.length < 2 || !intervalSeconds || intervalSeconds <= 0) return [];
-  const gaps = [];
+  const gaps: DetectedGap[] = [];
   const threshold = intervalSeconds * 1.5;
 
   for (let i = 1; i < data.length; i += 1) {

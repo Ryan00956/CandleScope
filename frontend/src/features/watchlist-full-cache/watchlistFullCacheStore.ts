@@ -7,29 +7,39 @@ import {
   unregisterCacheResource,
 } from "../cache-gc/cacheRegistry.js";
 import { parseSymbolKey } from "../../utils/symbolKey.js";
+import type { KlineBar } from "../market-data/marketDataTypes.js";
+import type { GcVictim } from "../cache-gc/cacheGcTypes.js";
+import type {
+  FullCacheCoverage,
+  FullCacheEntry,
+  FullCacheStatus,
+  WarmCacheRow,
+} from "./watchlistFullCacheTypes.js";
 
-const entries = new Map();
+const entries = new Map<string, FullCacheEntry>();
 const KLINE_ROW_ESTIMATED_BYTES = 200;
 
-function mergeByTime(older, current) {
+type FullCacheEntryPatch = Partial<Omit<FullCacheEntry, "key" | "symbolKey" | "interval">>;
+
+function mergeByTime(older: KlineBar[], current: KlineBar[]): KlineBar[] {
   const merged = [...older, ...current];
-  const uniq = new Map();
+  const uniq = new Map<number, KlineBar>();
   for (const item of merged) {
     uniq.set(item.time, item);
   }
   return Array.from(uniq.values()).sort((a, b) => a.time - b.time);
 }
 
-function deduplicateByTime(data) {
+function deduplicateByTime(data: KlineBar[]): KlineBar[] {
   if (!data || data.length <= 1) return data;
-  const seen = new Map();
+  const seen = new Map<number, KlineBar>();
   for (const item of data) {
     seen.set(item.time, item);
   }
   return Array.from(seen.values()).sort((a, b) => a.time - b.time);
 }
 
-function upsertRealtimeKline(current, incoming) {
+function upsertRealtimeKline(current: KlineBar[], incoming: KlineBar | null | undefined): KlineBar[] {
   if (!current || current.length === 0) return current;
   if (!incoming || incoming.time == null) return current;
   const next = { ...incoming };
@@ -55,11 +65,11 @@ function upsertRealtimeKline(current, incoming) {
   return updated;
 }
 
-export function fullCacheKey(symbolKey, interval) {
+export function fullCacheKey(symbolKey: string, interval: string): string {
   return `${symbolKey}::${interval}`;
 }
 
-function buildCoverage(rows) {
+function buildCoverage(rows: KlineBar[]): FullCacheCoverage | null {
   if (!rows?.length) return null;
   return {
     firstTime: rows[0].time ?? null,
@@ -68,7 +78,7 @@ function buildCoverage(rows) {
   };
 }
 
-function registerKlineEntry(entry) {
+function registerKlineEntry(entry: FullCacheEntry): void {
   const parsed = parseSymbolKey(entry.symbolKey);
   const bars = entry.rows?.length || 0;
   registerCacheResource("watchlist-full-cache", entry.key, {
@@ -90,7 +100,11 @@ function registerKlineEntry(entry) {
   });
 }
 
-function createEntry(symbolKey, interval, patch = {}) {
+function createEntry(
+  symbolKey: string,
+  interval: string,
+  patch: FullCacheEntryPatch = {},
+): FullCacheEntry {
   const rows = patch.rows || [];
   return {
     key: fullCacheKey(symbolKey, interval),
@@ -107,7 +121,11 @@ function createEntry(symbolKey, interval, patch = {}) {
   };
 }
 
-export function ensureFullCacheEntry(symbolKey, interval, patch = {}) {
+export function ensureFullCacheEntry(
+  symbolKey: string,
+  interval: string,
+  patch: FullCacheEntryPatch = {},
+): FullCacheEntry {
   const key = fullCacheKey(symbolKey, interval);
   const current = entries.get(key);
   if (current) {
@@ -126,19 +144,29 @@ export function ensureFullCacheEntry(symbolKey, interval, patch = {}) {
   return entry;
 }
 
-export function setFullCacheEntryStatus(symbolKey, interval, status, patch = {}) {
+export function setFullCacheEntryStatus(
+  symbolKey: string,
+  interval: string,
+  status: FullCacheStatus,
+  patch: FullCacheEntryPatch = {},
+): FullCacheEntry {
   return ensureFullCacheEntry(symbolKey, interval, {
     ...patch,
     status,
   });
 }
 
-export function mergeFullCacheRows(symbolKey, interval, rows, options = {}) {
+export function mergeFullCacheRows(
+  symbolKey: string,
+  interval: string,
+  rows: KlineBar[],
+  options: FullCacheEntryPatch & { nowMs?: number } = {},
+): FullCacheEntry {
   if (!rows?.length) return ensureFullCacheEntry(symbolKey, interval, options);
   const current = ensureFullCacheEntry(symbolKey, interval);
   const merged = current.rows.length > 0 ? mergeByTime(rows, current.rows) : deduplicateByTime(rows);
   if (klineRowsEqual(current.rows, merged)) return current;
-  const next = {
+  const next: FullCacheEntry = {
     ...current,
     rows: merged,
     status: options.status || "warm",
@@ -152,7 +180,12 @@ export function mergeFullCacheRows(symbolKey, interval, rows, options = {}) {
   return next;
 }
 
-export function patchFullCacheRealtimeKline(symbolKey, interval, tick, options = {}) {
+export function patchFullCacheRealtimeKline(
+  symbolKey: string,
+  interval: string,
+  tick: KlineBar | null | undefined,
+  options: FullCacheEntryPatch & { nowMs?: number } = {},
+): FullCacheEntry {
   const current = entries.get(fullCacheKey(symbolKey, interval));
   if (!current || !current.rows.length) {
     return mergeFullCacheRows(symbolKey, interval, tick ? [tick] : [], {
@@ -164,7 +197,7 @@ export function patchFullCacheRealtimeKline(symbolKey, interval, tick, options =
   const patched = deduplicateByTime(upsertRealtimeKline(current.rows, tick));
   if (klineRowsEqual(current.rows, patched)) return current;
   const nowMs = options.nowMs || Date.now();
-  const next = {
+  const next: FullCacheEntry = {
     ...current,
     rows: patched,
     status: "live",
@@ -179,14 +212,14 @@ export function patchFullCacheRealtimeKline(symbolKey, interval, tick, options =
   return next;
 }
 
-export function markFullCacheError(symbolKey, interval, error) {
+export function markFullCacheError(symbolKey: string, interval: string, error: unknown): FullCacheEntry {
   return ensureFullCacheEntry(symbolKey, interval, {
     status: "error",
-    lastError: error?.message || String(error || "Unknown error"),
+    lastError: error instanceof Error ? error.message : String(error || "Unknown error"),
   });
 }
 
-export function getFullCacheEntry(symbolKey, interval) {
+export function getFullCacheEntry(symbolKey: string, interval: string): FullCacheEntry | null {
   const entry = entries.get(fullCacheKey(symbolKey, interval)) || null;
   if (entry) {
     entry.lastAccessMs = Date.now();
@@ -194,7 +227,7 @@ export function getFullCacheEntry(symbolKey, interval) {
   return entry;
 }
 
-export function getWarmRows(symbolKey, interval) {
+export function getWarmRows(symbolKey: string, interval: string): WarmCacheRow | null {
   const entry = getFullCacheEntry(symbolKey, interval);
   if (!entry?.rows?.length) return null;
   return {
@@ -206,7 +239,7 @@ export function getWarmRows(symbolKey, interval) {
   };
 }
 
-export function snapshotFullCacheEntries() {
+export function snapshotFullCacheEntries(): FullCacheEntry[] {
   return Array.from(entries.values());
 }
 
@@ -231,7 +264,7 @@ export function snapshotWatchlistFullCacheDiagnostics() {
       lastError: entry.lastError || null,
     };
   });
-  const statusCounts = snapshot.reduce((counts, entry) => ({
+  const statusCounts = snapshot.reduce<Record<string, number>>((counts, entry) => ({
     ...counts,
     [entry.status]: (counts[entry.status] || 0) + 1,
   }), {});
@@ -246,10 +279,10 @@ export function snapshotWatchlistFullCacheDiagnostics() {
   };
 }
 
-export function trimWatchlistFullCacheEntries(victims = []) {
+export function trimWatchlistFullCacheEntries(victims: GcVictim[] = []) {
   const keys = new Set(victims.map((victim) => victim?.key).filter(Boolean));
-  const removed = [];
-  const skipped = [];
+  const removed: Array<{ owner: string; key: string; bars: number; estimatedBytes: number }> = [];
+  const skipped: Array<{ owner: string; key: string; reason: string }> = [];
   for (const key of keys) {
     const entry = entries.get(key);
     if (!entry) continue;
@@ -277,7 +310,7 @@ export function trimWatchlistFullCacheEntries(victims = []) {
   };
 }
 
-export function resetWatchlistFullCache() {
+export function resetWatchlistFullCache(): void {
   for (const key of entries.keys()) {
     unregisterCacheResource("watchlist-full-cache", key);
   }

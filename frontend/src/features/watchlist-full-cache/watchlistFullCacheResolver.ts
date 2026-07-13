@@ -1,16 +1,33 @@
 import { symbolKey } from "../../utils/symbolKey.js";
 import { recordFrontendCacheAccess } from "../cache-gc/cacheAccessRuntime.js";
 import { getWarmRows } from "./watchlistFullCacheStore.js";
+import type { KlineBar } from "../market-data/marketDataTypes.js";
+import type { FullCacheStatus } from "./watchlistFullCacheTypes.js";
+import type {
+  InitialRowsResolution,
+  WarmRowsResolution,
+} from "./watchlistFullCacheTypes.js";
 
 const LIVE_STATUSES = new Set(["live"]);
 const WARM_STATUSES = new Set(["warm", "stale", "partial"]);
 
+function isWarmStatus(
+  status: FullCacheStatus,
+): status is "warm" | "stale" | "partial" {
+  return WARM_STATUSES.has(status);
+}
+
 export function resolveWatchlistWarmRows({
-  symbol,
-  interval,
+  symbol = "",
+  interval = "",
   marketType = "spot",
   exchange = "binance",
-} = {}) {
+}: {
+  symbol?: string;
+  interval?: string;
+  marketType?: string;
+  exchange?: string;
+} = {}): WarmRowsResolution | null {
   const key = symbolKey(symbol, marketType, exchange);
   const warm = getWarmRows(key, interval);
   if (!warm?.rows?.length) return null;
@@ -25,7 +42,7 @@ export function resolveWatchlistWarmRows({
     };
   }
 
-  if (WARM_STATUSES.has(warm.status)) {
+  if (isWarmStatus(warm.status)) {
     return {
       ...warm,
       symbolKey: key,
@@ -39,12 +56,18 @@ export function resolveWatchlistWarmRows({
 }
 
 export function resolveInitialRows({
-  symbol,
-  interval,
-  marketType,
-  exchange,
+  symbol = "",
+  interval = "",
+  marketType = "spot",
+  exchange = "binance",
   getMemoryRows,
-} = {}) {
+}: {
+  symbol?: string;
+  interval?: string;
+  marketType?: string;
+  exchange?: string;
+  getMemoryRows?: ((symbol: string, interval: string) => KlineBar[] | null | undefined) | null;
+} = {}): InitialRowsResolution | null {
   const warm = resolveWatchlistWarmRows({
     symbol,
     interval,

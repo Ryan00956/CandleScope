@@ -3,6 +3,11 @@ import { buildIntervalSelectorViewModel } from "./view-models/intervalSelectorVi
 import { buildLazySurfaceViewModel } from "./view-models/lazySurfaceViewModel";
 import { buildStatusBarViewModel } from "./view-models/statusBarViewModel";
 import { buildTopBarViewModel } from "./view-models/topBarViewModel";
+import type {
+  AppShellRuntimeInputs,
+  AppShellViewModel,
+  AppShellViewModelContext,
+} from "./appShellContracts.js";
 
 function buildAppShellViewModelContext({
   session,
@@ -14,7 +19,7 @@ function buildAppShellViewModelContext({
   watchlist,
   exportFlow,
   alerts,
-}) {
+}: AppShellRuntimeInputs): AppShellViewModelContext {
   const sessionView = session.view;
   const marketView = marketData.view;
   const settingsView = settings.view;
@@ -52,7 +57,7 @@ function buildAppShellViewModelContext({
   };
 }
 
-export function buildAppShellViewModel(inputs) {
+export function buildAppShellViewModel(inputs: AppShellRuntimeInputs): AppShellViewModel {
   const context = buildAppShellViewModelContext(inputs);
 
   return {

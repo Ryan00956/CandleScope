@@ -9,6 +9,7 @@ import type {
   IndicatorFillDefinition,
   IndicatorLine,
   IndicatorMarkerGroup,
+  NormalizedIndicatorDataEntry,
   PerfEventRecorder,
   SeriesDataWriter,
 } from "./chartAdapterTypes.js";
@@ -47,7 +48,7 @@ export function filterEntriesByTime<TEntry extends { time?: ChartTime }>(
 export function normalizeLineSeriesData(
   line: IndicatorLine | null | undefined,
   allowedTimeSet: ReadonlySet<ChartTime> | null | undefined,
-): IndicatorDataEntry[] {
+): NormalizedIndicatorDataEntry[] {
   const isHistogram = line?.type === "histogram";
   const sourceData = filterEntriesByTime(line?.data, allowedTimeSet);
   if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
@@ -57,15 +58,19 @@ export function normalizeLineSeriesData(
       if (key !== null) colorMap.set(key, cd.color);
     }
     return sourceData
-      .filter((d) => d?.time != null && d?.value != null && isFinite(d.value))
+      .filter((d): d is NormalizedIndicatorDataEntry => (
+        d?.time != null && d?.value != null && isFinite(d.value)
+      ))
       .map((d) => {
-        const entry: IndicatorDataEntry = { time: d.time, value: d.value };
+        const entry: NormalizedIndicatorDataEntry = { time: d.time, value: d.value };
         const c = colorMap.get(chartTimeKey(d.time));
         if (c) entry.color = c;
         return entry;
       });
   }
-  return sourceData.filter((d) => d?.time != null && d?.value != null && isFinite(d.value));
+  return sourceData.filter((d): d is NormalizedIndicatorDataEntry => (
+    d?.time != null && d?.value != null && isFinite(d.value)
+  ));
 }
 
 export function alignIndicatorLinesToTimes(
@@ -228,6 +233,7 @@ export function buildFillRenderEntries(
 
   for (const fillDef of indicatorFills) {
     const { plot1_id, plot2_id } = fillDef;
+    if (!plot1_id || !plot2_id) continue;
     const scope = fillDef.indicatorId || "";
     const data1 = plotDataMap.get(`${scope}:${plot1_id}`) || (!scope ? plotDataMap.get(plot1_id) : null);
     const data2 = plotDataMap.get(`${scope}:${plot2_id}`) || (!scope ? plotDataMap.get(plot2_id) : null);

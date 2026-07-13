@@ -1,3 +1,6 @@
+import type { AppShellViewModelContext } from "../appShellContracts.js";
+import type { TopBarProps } from "../TopBar.js";
+
 export function buildTopBarViewModel({
   alertsActions,
   alertsView,
@@ -9,7 +12,7 @@ export function buildTopBarViewModel({
   settingsActions,
   watchlistActions,
   watchlistView,
-}) {
+}: AppShellViewModelContext): TopBarProps {
   const {
     symbol,
     exchange,

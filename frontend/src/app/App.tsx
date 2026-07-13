@@ -14,12 +14,18 @@ import { useWatchlistFullCacheRuntime } from "../features/watchlist-full-cache/u
 import { useFrontendAutoGcRuntime } from "../features/cache-gc/useFrontendAutoGcRuntime";
 import AppProviders from "./AppProviders";
 import AppShell from "./AppShell";
+import type {
+  AlertsShellRuntime,
+  IndicatorShellRuntime,
+  PriceScaleShellRuntime,
+  SettingsShellRuntime,
+} from "./appShellContracts.js";
 import "../index.css";
 
 export default function App() {
   const chartSurface = useChartSurfaceRuntime();
-  const pageExportRef = useRef(null);
-  const realtimePriceRef = useRef(null);
+  const pageExportRef = useRef<HTMLDivElement | null>(null);
+  const realtimePriceRef = useRef<number | null>(null);
   const chartSession = useChartSession({
     chartSurfaceActions: chartSurface.actions,
   });
@@ -112,7 +118,7 @@ export default function App() {
     trimChartDataCacheEntries: marketData.status.trimCacheEntries,
   });
 
-  const indicatorRuntime = useMemo(() => ({
+  const indicatorRuntime = useMemo<IndicatorShellRuntime>(() => ({
     view: {
       ...indicators.view,
       isPanelOpen: showIndicatorPanel,
@@ -134,7 +140,7 @@ export default function App() {
     toggleIndicatorPanel,
   ]);
 
-  const settingsRuntime = useMemo(() => ({
+  const settingsRuntime = useMemo<SettingsShellRuntime>(() => ({
     view: {
       settings,
       resolvedTheme,
@@ -155,7 +161,7 @@ export default function App() {
     closeSettingsPanel,
   ]);
 
-  const priceScaleRuntime = useMemo(() => ({
+  const priceScaleRuntime = useMemo<PriceScaleShellRuntime>(() => ({
     view: {
       invertScale,
       priceScaleMode,
@@ -172,7 +178,7 @@ export default function App() {
     handlePriceScaleModeChange,
   ]);
 
-  const alertsRuntime = useMemo(() => ({
+  const alertsRuntime = useMemo<AlertsShellRuntime>(() => ({
     view: {
       isOpen: showAlertsPanel,
     },

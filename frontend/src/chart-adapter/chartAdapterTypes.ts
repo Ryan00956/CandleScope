@@ -44,7 +44,7 @@ export interface MutableRef<T> {
 
 export type RefOrValue<T> = RefLike<T> | T | null | undefined;
 
-export interface ChartSeriesInputRow extends Record<string, unknown> {
+export interface ChartSeriesInputRow {
   time?: ChartTime;
   open?: number;
   high?: number;
@@ -75,41 +75,57 @@ export interface ChartSeriesPoint extends ChartSeriesRow {
   customValues?: ProjectionCustomValues;
 }
 
-export interface IndicatorDataEntry extends ChartSeriesInputRow {
+export interface IndicatorDataEntry {
+  time?: ChartTime;
   value?: number;
   color?: string;
 }
 
-export interface IndicatorLine extends Record<string, unknown> {
+export interface NormalizedIndicatorDataEntry extends IndicatorDataEntry {
+  time: ChartTime;
+  value: number;
+}
+
+export interface IndicatorLine {
   id?: string;
   indicatorId?: string;
+  name?: string;
+  pane?: string;
   type?: string;
   color?: string;
   lineWidth?: number;
   lineStyle?: number;
   data?: IndicatorDataEntry[];
-  colorData?: IndicatorDataEntry[];
+  colorData?: IndicatorDataEntry[] | null;
 }
 
 export interface IndicatorSeriesDefinition extends IndicatorLine {
   type?: "histogram" | "line" | string;
 }
 
-export interface IndicatorMarkerEntry extends ChartSeriesInputRow {
+export interface IndicatorMarkerEntry {
+  time?: ChartTime;
+  value?: number;
   position?: string;
   shape?: string;
   text?: string;
   color?: string;
 }
 
-export interface IndicatorMarkerGroup extends Record<string, unknown> {
+export interface IndicatorMarkerGroup {
+  id?: string;
+  indicatorId?: string;
+  pane?: string;
   data?: IndicatorMarkerEntry[];
 }
 
-export interface IndicatorBgcolorGroup extends Record<string, unknown> {
+export interface IndicatorBgcolorGroup {
+  id?: string;
+  indicatorId?: string;
+  pane?: string;
   color?: string;
-  data?: ChartSeriesInputRow[];
-  regions?: ChartSeriesInputRow[];
+  data?: IndicatorMarkerEntry[];
+  regions?: IndicatorMarkerEntry[];
 }
 
 export interface BgcolorRegion {
@@ -117,10 +133,10 @@ export interface BgcolorRegion {
   color: string;
 }
 
-export interface IndicatorFillDefinition extends Record<string, unknown> {
+export interface IndicatorFillDefinition {
   indicatorId?: string;
-  plot1_id: string;
-  plot2_id: string;
+  plot1_id?: string;
+  plot2_id?: string;
   color?: string;
 }
 
@@ -131,7 +147,7 @@ export interface FillRenderEntry {
   backgroundColor: string;
 }
 
-export interface IndicatorHline extends Record<string, unknown> {
+export interface IndicatorHline {
   price?: number;
   color?: string;
   linestyle?: number | string;
@@ -229,7 +245,7 @@ export interface DeltaViewportController<TRow extends TimedSeriesRow> {
   compensateInsert(shift: number): boolean;
 }
 
-export interface IndicatorBarcolorGroup extends Record<string, unknown> {
+export interface IndicatorBarcolorGroup {
   data?: Array<{ time?: ChartTime; color?: string }>;
 }
 

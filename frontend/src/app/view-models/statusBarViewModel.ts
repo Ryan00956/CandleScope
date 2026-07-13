@@ -1,9 +1,12 @@
+import type { AppShellViewModelContext } from "../appShellContracts.js";
+import type { StatusBarModel } from "../StatusBar.js";
+
 export function buildStatusBarViewModel({
   marketDisplay,
   marketStatus,
   marketView,
   sessionStatus,
-}) {
+}: AppShellViewModelContext): StatusBarModel {
   const {
     wsStatusLabel,
     exchangeLabel,
@@ -12,7 +15,7 @@ export function buildStatusBarViewModel({
 
   return {
     connectionStatus: marketView.connectionStatus,
-    dataSource: marketView.dataSource,
+    dataSource: marketView.dataSource || "",
     exchangeLabel,
     marketLabel,
     wsStatusLabel,

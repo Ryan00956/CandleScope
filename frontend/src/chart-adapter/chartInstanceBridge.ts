@@ -18,6 +18,7 @@ import type {
 } from "./coordinateBridge.js";
 import type { DrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex.js";
 import type { DisplayRow } from "../features/chart-representation/chartRepresentationTypes.js";
+import type { MainSeriesHandle } from "./chartAdapterTypes.js";
 
 interface RefLike<T> {
   current: T | null;
@@ -28,8 +29,8 @@ type RefOrValue<T> = RefLike<T> | T | null | undefined;
 interface AdapterTimeScale {
   coordinateToLogical(coordinate: number): number | null;
   coordinateToTime(coordinate: number): unknown;
-  getVisibleLogicalRange(): unknown;
-  getVisibleRange(): unknown;
+  getVisibleLogicalRange(): { from: number; to: number } | null;
+  getVisibleRange(): { from: unknown; to: unknown } | null;
   logicalToCoordinate(logical: number): number | null;
   options(): { barSpacing: number };
   scrollPosition(): number;
@@ -45,18 +46,10 @@ interface AdapterChart extends CoordinateChartBridge {
   unsubscribeCrosshairMove(handler: CrosshairHandler): void;
 }
 
-interface AdapterPrimitive {
+type AdapterSeries = MainSeriesHandle;
+type AdapterPrimitive = Parameters<AdapterSeries["attachPrimitive"]>[0] & {
   _series?: AdapterSeries | null;
-}
-
-interface AdapterSeries extends CoordinateSeriesBridge {
-  applyOptions(options: Record<string, never>): void;
-  attachPrimitive(primitive: AdapterPrimitive): void;
-  coordinateToPrice(coordinate: number): number | null;
-  data?(): unknown;
-  detachPrimitive(primitive: AdapterPrimitive): void;
-  priceToCoordinate(price: number): number | null;
-}
+};
 
 interface DrawingCoordinateSnapshot {
   seriesData?: DisplayRow[];
@@ -95,10 +88,10 @@ interface FreehandCaptureIdentityRecord {
 }
 
 interface VisibleRangeSnapshot {
-  logical?: unknown;
-  time?: unknown;
-  barSpacing?: unknown;
-  scrollPosition?: unknown;
+  logical?: { from: number; to: number } | null;
+  time?: { from: unknown; to: unknown } | null;
+  barSpacing?: number;
+  scrollPosition?: number;
 }
 
 type CrosshairHandler = (event: unknown) => void;

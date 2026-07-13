@@ -5,6 +5,7 @@ import LazyFeatureSurfaces from "./LazyFeatureSurfaces";
 import StatusBar from "./StatusBar";
 import TopBar from "./TopBar";
 import { buildAppShellViewModel } from "./appShellViewModel";
+import type { AppShellProps } from "./appShellContracts.js";
 
 function AppShell({
   pageExportRef,
@@ -18,7 +19,7 @@ function AppShell({
   watchlist,
   exportFlow,
   alerts,
-}) {
+}: AppShellProps) {
   const model = useMemo(
     () => buildAppShellViewModel({
       session,

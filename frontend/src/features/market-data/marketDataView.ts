@@ -84,7 +84,8 @@ export function buildChartDisplayState({
   exchange,
   exchangeConfig,
   marketType,
-}: ChartDisplayStateOptions): MarketSummary & {
+}: ChartDisplayStateOptions): Omit<MarketSummary, "displayData"> & {
+  displayData: MarketDisplayData | null;
   wsStatusLabel: string;
   exchangeLabel: string;
   marketLabel: string;

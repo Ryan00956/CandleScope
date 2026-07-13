@@ -162,7 +162,7 @@ function pointEquals(
   if (!left || !right) return false;
   const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
   for (const key of keys) {
-    if (left[key] !== right[key]) return false;
+    if (Reflect.get(left, key) !== Reflect.get(right, key)) return false;
   }
   return true;
 }

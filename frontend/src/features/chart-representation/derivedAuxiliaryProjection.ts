@@ -135,6 +135,10 @@ export function projectSourceTimedEntries(
  * target; markers and volume samples attach only to the final target emitted
  * by a source bar. Fill and horizontal-line definitions are preserved.
  */
+export function projectPaneDescriptorsToDisplay<TPane>(
+  panes: readonly TPane[],
+  index: DisplaySourceTimeIndex,
+): TPane[];
 export function projectPaneDescriptorsToDisplay(
   panes: readonly unknown[] = [],
   index: DisplaySourceTimeIndex,

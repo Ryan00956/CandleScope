@@ -1,7 +1,9 @@
 import React from "react";
 import SingleChartPanes from "../components/SingleChartPanes";
 import { ChartErrorBoundary } from "./AppProviders";
-import type { ComponentType, PropsWithChildren } from "react";
+import type { ComponentType, PropsWithChildren, RefAttributes } from "react";
+import type { ChartSurfaceHandle } from "../chart-adapter/useChartSurfaceRuntime.js";
+import type { SingleChartPanesProps } from "../components/SingleChartPanes.js";
 import type { DrawingToolbarProps } from "../components/DrawingToolbar.js";
 import type { ExportPanelProps } from "../features/export/ExportPanel.js";
 import type { WatchlistSidebarProps } from "../features/watchlist/WatchlistSidebar.js";
@@ -13,7 +15,7 @@ const WatchlistSidebar = React.lazy(() => import("../features/watchlist/Watchlis
 export interface ChartWorkspaceChartModel {
   error?: string | null;
   onRetryLoad(): void;
-  chartProps: Record<string, unknown>;
+  chartProps: SingleChartPanesProps & RefAttributes<ChartSurfaceHandle>;
 }
 
 export interface ChartWorkspaceProps {

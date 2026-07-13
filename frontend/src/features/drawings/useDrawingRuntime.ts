@@ -4,11 +4,12 @@ import { useDrawingToolState } from "./drawingToolState.js";
 import type { ChartSurfaceActions } from "../../chart-adapter/useChartSurfaceRuntime.js";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { DrawingToolStateRuntime } from "./drawingToolState.js";
+import type { DrawingStylePatch } from "./drawingInteractionController.js";
 
 export type DrawingRuntimeActions = DrawingToolStateRuntime["actions"] & {
   handleClearDrawing(): void;
   handleToggleDrawingsHidden(): void;
-  handleSelectedDrawingStyleChange(patch: Record<string, unknown>): void;
+  handleSelectedDrawingStyleChange(patch: DrawingStylePatch): void;
   setDrawingsHiddenForExport(hidden: boolean): void;
   prepareExport(): void;
   handleIndicatorRemoved(indicatorId: string | null | undefined): void;
@@ -55,7 +56,7 @@ export function useDrawingRuntime({
     chartSurfaceActions?.setDrawingsHidden?.(view.drawingsHidden);
   }, [chartSurfaceActions, view.drawingsHidden]);
 
-  const handleSelectedDrawingStyleChange = useCallback((patch: Record<string, unknown>) => {
+  const handleSelectedDrawingStyleChange = useCallback((patch: DrawingStylePatch) => {
     chartSurfaceActions?.updateSelectedDrawingStyle?.(patch);
   }, [chartSurfaceActions]);
 

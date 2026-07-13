@@ -1,13 +1,22 @@
 import { useCallback, useMemo, useRef } from "react";
 import { callChartSurface, EMPTY_CHART_SURFACE_VIEW } from "./chartSurfaceContract";
 import type { ExportSnapshot } from "../features/export/exportTypes.js";
+import type { DrawingStylePatch } from "../features/drawings/drawingInteractionController.js";
+
+export interface ChartSurfaceVisibleRange {
+  barSpacing?: number;
+  logical?: { from: number; to: number };
+  rightOffset?: number;
+  rightmostTime?: number;
+  time?: { from: number; to: number };
+}
 
 export interface ChartSurfaceHandle {
-  getVisibleRange(): unknown;
+  getVisibleRange(): ChartSurfaceVisibleRange | null;
   clearAllDrawings(): void;
   setDrawingsHidden(hidden: boolean): void;
   prepareExport(): void;
-  updateSelectedDrawingStyle(patch: Record<string, unknown>): void;
+  updateSelectedDrawingStyle(patch: DrawingStylePatch): void;
   getExportSnapshot(): ExportSnapshot | null;
 }
 
@@ -30,7 +39,7 @@ export function useChartSurfaceRuntime() {
     callChartSurface(ref, "prepareExport");
   }, []);
 
-  const updateSelectedDrawingStyle = useCallback((patch: Record<string, unknown>) => {
+  const updateSelectedDrawingStyle = useCallback((patch: DrawingStylePatch) => {
     callChartSurface(ref, "updateSelectedDrawingStyle", undefined, patch);
   }, []);
 

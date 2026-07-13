@@ -1,3 +1,12 @@
+import type { ChartWorkspaceProps } from "../ChartWorkspace.js";
+import type { AppShellViewModelContext } from "../appShellContracts.js";
+
+function errorMessage(error: unknown): string | null {
+  if (error == null) return null;
+  if (error instanceof Error) return error.message;
+  return typeof error === "string" ? error : String(error);
+}
+
 export function buildChartWorkspaceViewModel({
   chartSettings,
   drawingActions,
@@ -19,7 +28,7 @@ export function buildChartWorkspaceViewModel({
   settingsActions,
   watchlistActions,
   watchlistView,
-}) {
+}: AppShellViewModelContext): ChartWorkspaceProps {
   const {
     symbol,
     exchange,
@@ -78,7 +87,7 @@ export function buildChartWorkspaceViewModel({
       preview: exportView.preview,
     },
     chart: {
-      error: marketView.error,
+      error: errorMessage(marketView.error),
       onRetryLoad: marketActions.retry,
       chartProps: {
         seriesStore: marketView.seriesStore,

@@ -1,16 +1,27 @@
 import React from "react";
+import type { ErrorInfo, PropsWithChildren, ReactNode } from "react";
 
-export class ChartErrorBoundary extends React.Component {
-  constructor(props) {
+export type ChartErrorBoundaryProps = PropsWithChildren;
+
+interface ChartErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+export class ChartErrorBoundary extends React.Component<
+  ChartErrorBoundaryProps,
+  ChartErrorBoundaryState
+> {
+  constructor(props: ChartErrorBoundaryProps) {
     super(props);
     this.state = { hasError: false, error: null };
   }
 
-  static getDerivedStateFromError(error) {
+  static getDerivedStateFromError(error: Error): ChartErrorBoundaryState {
     return { hasError: true, error };
   }
 
-  componentDidCatch(error, errorInfo) {
+  componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
     console.error("ErrorBoundary caught:", error, errorInfo);
   }
 
@@ -45,6 +56,6 @@ export class ChartErrorBoundary extends React.Component {
   }
 }
 
-export default function AppProviders({ children }) {
+export default function AppProviders({ children }: PropsWithChildren): ReactNode {
   return children;
 }

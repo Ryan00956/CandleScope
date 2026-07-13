@@ -4,7 +4,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, RefObject } from "react";
 import type { FibonacciLevel } from "../../features/drawings/drawingTypes.js";
 
 export interface FibLevelsPanelProps {
-  levels?: FibonacciLevel[];
+  levels?: FibonacciLevel[] | null;
   onLevelsChange(levels: FibonacciLevel[]): void;
   inverted: boolean;
   onInvertedChange(inverted: boolean): void;

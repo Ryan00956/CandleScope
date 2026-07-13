@@ -1,4 +1,10 @@
-export function buildIntervalSelectorViewModel({ sessionActions, sessionView }) {
+import type { IntervalSelectorProps } from "../../components/IntervalSelector.js";
+import type { AppShellViewModelContext } from "../appShellContracts.js";
+
+export function buildIntervalSelectorViewModel({
+  sessionActions,
+  sessionView,
+}: AppShellViewModelContext): IntervalSelectorProps {
   const {
     interval,
     nativeIntervals,

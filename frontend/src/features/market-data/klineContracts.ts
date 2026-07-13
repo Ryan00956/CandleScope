@@ -337,7 +337,7 @@ export interface CrosshairData {
   high?: number;
   low?: number;
   close?: number;
-  volume?: number;
+  volume?: number | null;
 }
 
 export interface MarketSummary {

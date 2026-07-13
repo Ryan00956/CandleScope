@@ -1,3 +1,6 @@
+import type { AppShellViewModelContext } from "../appShellContracts.js";
+import type { LazyFeatureSurfaceModels } from "../LazyFeatureSurfaces.js";
+
 export function buildLazySurfaceViewModel({
   alertsActions,
   alertsView,
@@ -12,7 +15,7 @@ export function buildLazySurfaceViewModel({
   settingsActions,
   settingsView,
   watchlistView,
-}) {
+}: AppShellViewModelContext): LazyFeatureSurfaceModels {
   const {
     symbol,
     exchange,

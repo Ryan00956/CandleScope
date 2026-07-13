@@ -19,6 +19,7 @@ import type {
   Time,
 } from "lightweight-charts";
 import type { OrdinalAxisTime } from "../features/chart-representation/chartRepresentationTypes.js";
+import type { ChartTime } from "./chartAdapterTypes.js";
 import { createOrdinalHorzScaleBehavior } from "./ordinalHorzScaleBehavior.js";
 
 export const chartSeriesTypes = Object.freeze({
@@ -109,14 +110,14 @@ export function createChartInstance(
   container: string | HTMLElement,
   options: DeepPartial<ChartOptions> = {},
   { axisMode = "time" }: { axisMode?: string } = {},
-): IChartApi | IChartApiBase<OrdinalAxisTime> {
+): IChartApiBase<ChartTime> {
   if (axisMode === "ordinal" || axisMode === "derived-ordinal") {
     const ordinalBehavior = createOrdinalHorzScaleBehavior();
     return createChartEx<OrdinalAxisTime, typeof ordinalBehavior>(
       container,
       ordinalBehavior,
       buildOrdinalChartOptions(options),
-    );
+    ) as IChartApiBase<ChartTime>;
   }
-  return createChart(container, options);
+  return createChart(container, options) as IChartApiBase<ChartTime>;
 }

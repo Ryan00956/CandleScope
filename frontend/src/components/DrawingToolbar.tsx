@@ -63,8 +63,8 @@ export interface DrawingToolbarProps {
   onTextBoldChange?: (bold: boolean) => void;
   textItalic?: boolean;
   onTextItalicChange?: (italic: boolean) => void;
-  fibLevels?: FibonacciLevel[];
-  onFibLevelsChange?: (levels: FibonacciLevel[]) => void;
+  fibLevels?: FibonacciLevel[] | null;
+  onFibLevelsChange?: (levels: FibonacciLevel[] | null) => void;
   fibInverted?: boolean;
   onFibInvertedChange?: (inverted: boolean) => void;
   positionSize?: number;

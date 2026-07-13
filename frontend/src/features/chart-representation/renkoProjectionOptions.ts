@@ -1,24 +1,35 @@
 import { inferPriceMinimumTick, MAX_PRICE_DECIMALS } from "./priceTick.js";
+import type {
+  RenkoProjectionOptions,
+  ResolvedRenkoProjectionOptions,
+  SourceBar,
+} from "./chartRepresentationTypes.js";
 
 const DEFAULT_ATR_LENGTH = 14;
 
-function finiteNumber(value) {
+function finiteNumber(value: unknown): number | null {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function positiveNumber(value) {
+function positiveNumber(value: unknown): number | null {
   const number = finiteNumber(value);
   return number != null && number > 0 ? number : null;
 }
 
-export function inferRenkoMinimumTick(rows = [], preferredBoxSize = null) {
+export function inferRenkoMinimumTick(
+  rows: readonly SourceBar[] = [],
+  preferredBoxSize: unknown = null,
+): number {
   return inferPriceMinimumTick(rows, {
     preferredValues: [preferredBoxSize],
   });
 }
 
-export function calculateRenkoAtr(rows = [], length = DEFAULT_ATR_LENGTH) {
+export function calculateRenkoAtr(
+  rows: readonly SourceBar[] = [],
+  length: unknown = DEFAULT_ATR_LENGTH,
+): number | null {
   const period = Math.max(2, Math.min(500, Math.trunc(Number(length)) || DEFAULT_ATR_LENGTH));
   const trueRanges = [];
   let previousClose = null;
@@ -47,7 +58,7 @@ export function calculateRenkoAtr(rows = [], length = DEFAULT_ATR_LENGTH) {
   return positiveNumber(atr);
 }
 
-function lastFiniteClose(rows = []) {
+function lastFiniteClose(rows: readonly SourceBar[] = []): number | null {
   for (let index = (rows?.length || 0) - 1; index >= 0; index -= 1) {
     const close = positiveNumber(rows[index]?.close);
     if (close != null) return close;
@@ -55,16 +66,16 @@ function lastFiniteClose(rows = []) {
   return null;
 }
 
-function alignToTick(value, minTick) {
+function alignToTick(value: number, minTick: number): number {
   const ticks = Math.max(1, Math.round(value / minTick));
   return Number((ticks * minTick).toFixed(MAX_PRICE_DECIMALS));
 }
 
-export function resolveRenkoProjectorOptions(rows = [], {
+export function resolveRenkoProjectorOptions(rows: readonly SourceBar[] = [], {
   atrLength = DEFAULT_ATR_LENGTH,
   boxSize = 1,
   mode = "atr",
-} = {}) {
+}: RenkoProjectionOptions = {}): Readonly<ResolvedRenkoProjectionOptions> {
   const normalizedMode = mode === "traditional" ? "traditional" : "atr";
   const requestedBoxSize = positiveNumber(boxSize) ?? 1;
   const minTick = inferRenkoMinimumTick(rows, requestedBoxSize);
@@ -84,5 +95,5 @@ export function resolveRenkoProjectorOptions(rows = [], {
     mode: normalizedMode,
     atrLength: resolvedAtrLength,
     configKey: `renko:${normalizedMode}:${resolvedAtrLength}:${resolvedBoxSize}:${minTick}`,
-  });
+  } satisfies ResolvedRenkoProjectionOptions);
 }

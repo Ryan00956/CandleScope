@@ -1,6 +1,18 @@
 import { IdentityProjector } from "./projectors/identityProjector.js";
 import { findDisplayIndexForAxisAnchor } from "./axisTime.js";
 import { createDrawingLineageIndex } from "./drawingLineageIndex.js";
+import type { DrawingLineageIndex } from "./drawingLineageIndex.js";
+import type {
+  AxisTime,
+  DisplayRow,
+  ProjectionPatch,
+  ProjectionProjectOptions,
+  ProjectionResult,
+  ProjectionSourceDelta,
+  ProjectionState,
+  Projector,
+  SourceBar,
+} from "./chartRepresentationTypes.js";
 
 const PROVISIONAL_SOURCE_STATES = new Set([
   "false",
@@ -11,7 +23,29 @@ const PROVISIONAL_SOURCE_STATES = new Set([
   "forming",
 ]);
 
-function sameSourceRow(left, right) {
+interface ProjectionComparisonMemo {
+  leftToRight: WeakMap<object, object>;
+  rightToLeft: WeakMap<object, object>;
+}
+
+interface StoreProjectionResult extends ProjectionResult<ProjectionState> {
+  confirmedSourceLength: number;
+}
+
+interface DisplayTimeIndexEntry {
+  index: number;
+  key: string | null;
+}
+
+interface DisplayTimeIndexPlan {
+  add: DisplayTimeIndexEntry[];
+  remove: DisplayTimeIndexEntry[];
+}
+
+function sameSourceRow(
+  left: SourceBar | null | undefined,
+  right: SourceBar | null | undefined,
+): boolean {
   if (left === right) return true;
   if (!left || !right) return false;
   const leftKeys = Object.keys(left);
@@ -23,7 +57,11 @@ function sameSourceRow(left, right) {
   return true;
 }
 
-function sameProjectedValue(left, right, memo = null) {
+function sameProjectedValue(
+  left: unknown,
+  right: unknown,
+  memo: ProjectionComparisonMemo | null = null,
+): boolean {
   if (Object.is(left, right)) return true;
   if (left == null || right == null || typeof left !== "object" || typeof right !== "object") {
     return false;
@@ -51,32 +89,35 @@ function sameProjectedValue(left, right, memo = null) {
   }
   pairs.leftToRight.set(left, right);
   pairs.rightToLeft.set(right, left);
-  if (leftIsArray) {
+  if (Array.isArray(left) && Array.isArray(right)) {
     if (left.length !== right.length) return false;
     for (let index = 0; index < left.length; index += 1) {
       if (!sameProjectedValue(left[index], right[index], pairs)) return false;
     }
     return true;
   }
-  const leftKeys = Object.keys(left);
-  const rightKeys = Object.keys(right);
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
   if (leftKeys.length !== rightKeys.length) return false;
   for (const key of leftKeys) {
-    if (!Object.prototype.hasOwnProperty.call(right, key)
-      || !sameProjectedValue(left[key], right[key], pairs)) {
+    if (!Object.prototype.hasOwnProperty.call(rightRecord, key)
+      || !sameProjectedValue(leftRecord[key], rightRecord[key], pairs)) {
       return false;
     }
   }
   return true;
 }
 
-function outputOrder(row) {
-  const order = row?.time?.order;
+function outputOrder(row: DisplayRow | null | undefined): number | null {
+  const time = row?.time;
+  const order = time && typeof time === "object" ? time.order : null;
   return Number.isSafeInteger(order) ? order : null;
 }
 
-function lowerBoundOutputOrder(rows, targetOrder) {
-  if (!Number.isSafeInteger(targetOrder)) return null;
+function lowerBoundOutputOrder(rows: readonly DisplayRow[], targetOrder: unknown): number | null {
+  if (typeof targetOrder !== "number" || !Number.isSafeInteger(targetOrder)) return null;
   let left = 0;
   let right = rows.length;
   while (left < right) {
@@ -89,8 +130,8 @@ function lowerBoundOutputOrder(rows, targetOrder) {
   return left;
 }
 
-function hasStrictlyIncreasingOutputOrders(rows) {
-  let previousOrder = null;
+function hasStrictlyIncreasingOutputOrders(rows: readonly DisplayRow[]): boolean {
+  let previousOrder: number | null = null;
   for (const row of rows) {
     const order = outputOrder(row);
     if (order == null || (previousOrder != null && order <= previousOrder)) return false;
@@ -99,22 +140,28 @@ function hasStrictlyIncreasingOutputOrders(rows) {
   return true;
 }
 
-function isExplicitlyProvisionalSourceRow(row) {
+function isExplicitlyProvisionalSourceRow(row: SourceBar | null | undefined): boolean {
   const value = row?.is_closed ?? row?.isClosed;
   if (value === false || value === 0) return true;
   if (typeof value !== "string") return false;
   return PROVISIONAL_SOURCE_STATES.has(value.trim().toLowerCase());
 }
 
-function validStatefulProjection(projection, sourceLength) {
-  return projection
+function validStatefulProjection(
+  projection: ProjectionResult<ProjectionState> | null | undefined,
+  sourceLength: number,
+): projection is ProjectionResult<ProjectionState> {
+  return projection != null
     && Array.isArray(projection.data)
     && Array.isArray(projection.checkpoints)
     && projection.checkpoints.length === sourceLength
     && projection.state != null;
 }
 
-function overlayProjectedRows(confirmedRows, provisionalRows) {
+function overlayProjectedRows(
+  confirmedRows: DisplayRow[],
+  provisionalRows: readonly DisplayRow[],
+): DisplayRow[] | null {
   if (provisionalRows.length === 0) return confirmedRows;
   const provisionalOrder = outputOrder(provisionalRows[0]);
   const overlayIndex = lowerBoundOutputOrder(confirmedRows, provisionalOrder);
@@ -127,7 +174,11 @@ function overlayProjectedRows(confirmedRows, provisionalRows) {
   return hasStrictlyIncreasingOutputOrders(combined) ? combined : null;
 }
 
-function hasStrictOutputOrderSeam(previousRows, fromOutputIndex, insert) {
+function hasStrictOutputOrderSeam(
+  previousRows: readonly DisplayRow[],
+  fromOutputIndex: number,
+  insert: readonly DisplayRow[],
+): boolean {
   if (insert.length === 0 || fromOutputIndex === 0) return true;
   try {
     const previousOrder = outputOrder(previousRows[fromOutputIndex - 1]);
@@ -138,7 +189,11 @@ function hasStrictOutputOrderSeam(previousRows, fromOutputIndex, insert) {
   }
 }
 
-function trimSharedProjectedPrefix(previousRows, startIndex, projectedRows) {
+function trimSharedProjectedPrefix(
+  previousRows: readonly DisplayRow[],
+  startIndex: number,
+  projectedRows: readonly DisplayRow[],
+): { fromOutputIndex: number; insert: DisplayRow[] } {
   let shared = 0;
   while (startIndex + shared < previousRows.length
     && shared < projectedRows.length
@@ -151,15 +206,23 @@ function trimSharedProjectedPrefix(previousRows, startIndex, projectedRows) {
   };
 }
 
-function displayAxisKey(time) {
-  if (time && typeof time === "object" && Number.isSafeInteger(time.order)) {
-    return `order:${time.order}`;
+function displayAxisKey(time: unknown): string | null {
+  if (time && typeof time === "object") {
+    const record = time as Record<string, unknown>;
+    if (typeof record.order === "number" && Number.isSafeInteger(record.order)) {
+      return `order:${record.order}`;
+    }
   }
   const numeric = Number(time);
   return Number.isFinite(numeric) ? `time:${numeric}` : null;
 }
 
-function patchResult(fromOutputIndex, previousLength, insert, nextData) {
+function patchResult(
+  fromOutputIndex: number,
+  previousLength: number,
+  insert: DisplayRow[],
+  nextData: DisplayRow[],
+): ProjectionPatch {
   return {
     kind: "replace-tail",
     fromOutputIndex,
@@ -171,12 +234,15 @@ function patchResult(fromOutputIndex, previousLength, insert, nextData) {
   };
 }
 
-function sourceTail(rows, startIndex) {
+function sourceTail(rows: readonly SourceBar[], startIndex: number): SourceBar[] {
   if (Array.isArray(rows)) return rows.slice(startIndex);
   return Array.from(rows || []).slice(startIndex);
 }
 
-function firstDifference(previousRows, nextRows) {
+function firstDifference(
+  previousRows: readonly SourceBar[],
+  nextRows: readonly SourceBar[],
+): number {
   const shared = Math.min(previousRows.length, nextRows.length);
   for (let index = 0; index < shared; index += 1) {
     if (!sameSourceRow(previousRows[index], nextRows[index])) return index;
@@ -184,7 +250,7 @@ function firstDifference(previousRows, nextRows) {
   return previousRows.length === nextRows.length ? -1 : shared;
 }
 
-function latestFiniteSourceTime(rows) {
+function latestFiniteSourceTime(rows: readonly SourceBar[]): number | null {
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const time = rows[index]?.time;
     if (typeof time === "number" && Number.isFinite(time)) return time;
@@ -193,7 +259,19 @@ function latestFiniteSourceTime(rows) {
 }
 
 export class ProjectionStore {
-  constructor({ projector = new IdentityProjector() } = {}) {
+  projector: Projector;
+  _source: SourceBar[];
+  _display: DisplayRow[];
+  _drawingLineageIndex: DrawingLineageIndex;
+  _displayTimeIndex: Map<string, number>;
+  _displayTimeSet: Set<AxisTime> | null;
+  _hasStrictlyIncreasingDisplayOrders: boolean;
+  _projectionSeedState: Readonly<ProjectionState> | null;
+  _projectionFinalState: Readonly<ProjectionState> | null;
+  _sourceCheckpoints: Readonly<ProjectionState>[];
+  _confirmedSourceLength: number;
+
+  constructor({ projector = new IdentityProjector() }: { projector?: Projector } = {}) {
     if (!projector || typeof projector.project !== "function") {
       throw new TypeError("ProjectionStore requires a projector with project(rows, options)");
     }
@@ -210,25 +288,30 @@ export class ProjectionStore {
     this._confirmedSourceLength = 0;
   }
 
-  sourceSnapshot() {
+  sourceSnapshot(): SourceBar[] {
     // The source cache is updated in place on realtime tail deltas. Return an
     // owned array so callers cannot mutate its structure and previously read
     // snapshots do not change underneath them. Row objects remain shared.
     return this._source.slice();
   }
 
-  displaySnapshot() {
+  displaySnapshot(): DisplayRow[] {
     return this._display;
   }
 
-  drawingLineageIndex() {
+  drawingLineageIndex(): DrawingLineageIndex | null {
     return this._drawingLineageIndex.seriesData === this._display
       && this._drawingLineageIndex.isOrdinal
       ? this._drawingLineageIndex
       : null;
   }
 
-  drawingCoordinateSnapshot() {
+  drawingCoordinateSnapshot(): {
+    indexRevision: number | null;
+    ordinalSeriesIndex: DrawingLineageIndex | null;
+    seriesData: DisplayRow[];
+    sourceTimeHorizon: number | null;
+  } {
     // Capture every coordinate input synchronously from this store version.
     // The numeric horizon is a primitive value, so an older snapshot cannot
     // drift when a realtime delta later replaces the store's source tail.
@@ -247,23 +330,23 @@ export class ProjectionStore {
     };
   }
 
-  getDisplayByTime(time) {
+  getDisplayByTime(time: unknown): DisplayRow | null {
     const index = this.indexOfDisplayTime(time);
     return index >= 0 ? this._display[index] : null;
   }
 
-  indexOfDisplayTime(time) {
+  indexOfDisplayTime(time: unknown): number {
     const key = displayAxisKey(time);
     if (key == null) return -1;
     const index = this._displayTimeIndex.get(key);
-    return Number.isInteger(index) ? index : -1;
+    return typeof index === "number" && Number.isInteger(index) ? index : -1;
   }
 
-  resolveDisplayAnchorIndex(axisTime) {
+  resolveDisplayAnchorIndex(axisTime: unknown): number {
     return findDisplayIndexForAxisAnchor(this._display, axisTime);
   }
 
-  displayTimeSet() {
+  displayTimeSet(): Set<AxisTime> {
     if (this._displayTimeSet == null) {
       const displayTimes = [];
       for (const row of this._display) {
@@ -274,7 +357,7 @@ export class ProjectionStore {
     return this._displayTimeSet;
   }
 
-  reset(rows = []) {
+  reset(rows: readonly SourceBar[] = []): ProjectionPatch {
     const previousLength = this._display.length;
     this._source = Array.from(rows || []);
     this._projectionSeedState = null;
@@ -283,7 +366,10 @@ export class ProjectionStore {
     return patchResult(0, previousLength, this._display.slice(), this._display);
   }
 
-  applySourceDelta(delta, currentRows = []) {
+  applySourceDelta(
+    delta: ProjectionSourceDelta | null | undefined,
+    currentRows: readonly SourceBar[] = [],
+  ): ProjectionPatch {
     const detail = delta || {};
     if (detail.type === "noop") {
       return patchResult(this._display.length, this._display.length, [], this._display);
@@ -308,7 +394,11 @@ export class ProjectionStore {
     });
   }
 
-  _canApplyStatefulTailDelta(delta, currentRows, trimmedLeft) {
+  _canApplyStatefulTailDelta(
+    delta: ProjectionSourceDelta,
+    currentRows: readonly SourceBar[],
+    trimmedLeft: number,
+  ): boolean {
     // Opt-in projector contract: every source row has a checkpoint, state
     // exposes the next synthetic order, and emitted rows use strictly
     // increasing time.order values. Prefix comparison includes metadata so a
@@ -352,7 +442,10 @@ export class ProjectionStore {
     return false;
   }
 
-  _applyStatefulTailDelta(delta, currentRows) {
+  _applyStatefulTailDelta(
+    delta: ProjectionSourceDelta,
+    currentRows: readonly SourceBar[],
+  ): ProjectionPatch | null {
     const previousLength = this._display.length;
     const replacingLast = delta.type === "tick" && delta.replaced;
     const defaultSourceStart = replacingLast
@@ -408,6 +501,7 @@ export class ProjectionStore {
     this._confirmedSourceLength = sourceStart + projection.confirmedSourceLength;
     this._display = nextDisplay;
     if (displayChanged) {
+      if (displayTimeIndexPlan == null) return null;
       this._replaceDisplayTimeIndexTail(displayTimeIndexPlan);
       this._replaceDrawingLineageIndexTail({
         fromOutputIndex: tail.fromOutputIndex,
@@ -424,7 +518,11 @@ export class ProjectionStore {
     );
   }
 
-  _canApplyTailDelta(delta, currentRows, trimmedLeft) {
+  _canApplyTailDelta(
+    delta: ProjectionSourceDelta,
+    currentRows: readonly SourceBar[],
+    trimmedLeft: number,
+  ): boolean {
     if (this.projector.oneToOne !== true) return false;
     const previousLength = this._source.length;
     const nextLength = currentRows?.length || 0;
@@ -446,7 +544,11 @@ export class ProjectionStore {
     return false;
   }
 
-  _applyTailDelta(delta, currentRows, trimmedLeft) {
+  _applyTailDelta(
+    delta: ProjectionSourceDelta,
+    currentRows: readonly SourceBar[],
+    trimmedLeft: number,
+  ): ProjectionPatch {
     const previousLength = this._display.length;
     const retainedSource = trimmedLeft > 0 ? this._source.slice(trimmedLeft) : this._source.slice();
     const retainedDisplay = trimmedLeft > 0 ? this._display.slice(trimmedLeft) : this._display.slice();
@@ -481,11 +583,15 @@ export class ProjectionStore {
     return patchResult(previousLength, previousLength, projectedTail, this._display);
   }
 
-  _reprojectStructural(currentRows, {
+  _reprojectStructural(currentRows: readonly SourceBar[], {
     confirmTrimmedTail = false,
     deltaType = "",
     trimmedLeft = 0,
-  } = {}) {
+  }: {
+    confirmTrimmedTail?: boolean;
+    deltaType?: string;
+    trimmedLeft?: number;
+  } = {}): ProjectionPatch {
     const previousLength = this._display.length;
     const nextSource = Array.from(currentRows || []);
     if (this.projector.oneToOne !== true) {
@@ -500,7 +606,7 @@ export class ProjectionStore {
       this._rebuildDisplayTimeIndex();
       return patchResult(0, previousLength, this._display.slice(), this._display);
     }
-    let fromOutputIndex = firstDifference(this._source, nextSource);
+    const fromOutputIndex = firstDifference(this._source, nextSource);
     if (fromOutputIndex < 0) {
       this._source = nextSource;
       return patchResult(previousLength, previousLength, [], this._display);
@@ -528,7 +634,11 @@ export class ProjectionStore {
     confirmTrimmedTail,
     deltaType,
     trimmedLeft,
-  }) {
+  }: {
+    confirmTrimmedTail: boolean;
+    deltaType: string;
+    trimmedLeft: number;
+  }): Readonly<ProjectionState> | null {
     if (typeof this.projector.projectWithState !== "function") return null;
     if (deltaType === "prepend") return null;
     if (trimmedLeft <= 0) return this._projectionSeedState;
@@ -558,7 +668,10 @@ export class ProjectionStore {
     return null;
   }
 
-  _projectRows(rows, { seedState = null } = {}) {
+  _projectRows(
+    rows: readonly SourceBar[],
+    { seedState = null }: ProjectionProjectOptions = {},
+  ): DisplayRow[] {
     if (typeof this.projector.projectWithState !== "function") {
       this._sourceCheckpoints = [];
       this._projectionFinalState = null;
@@ -575,10 +688,15 @@ export class ProjectionStore {
     return projection.data;
   }
 
-  _projectStatefulRows(rows, { seedState = null } = {}) {
+  _projectStatefulRows(
+    rows: readonly SourceBar[],
+    { seedState = null }: ProjectionProjectOptions = {},
+  ): StoreProjectionResult | null {
     // Stateful projectors opt into returning call-owned mutable `data` and
     // `checkpoints` containers. Their state/checkpoint values may stay frozen;
     // only the two fresh containers are extended for the provisional overlay.
+    const projectWithState = this.projector.projectWithState;
+    if (typeof projectWithState !== "function") return null;
     const sourceRows = Array.isArray(rows) ? rows : Array.from(rows || []);
     const hasProvisionalTail = sourceRows.length > 0
       && isExplicitlyProvisionalSourceRow(sourceRows[sourceRows.length - 1]);
@@ -586,7 +704,7 @@ export class ProjectionStore {
     const confirmedRows = hasProvisionalTail
       ? sourceRows.slice(0, confirmedSourceLength)
       : sourceRows;
-    const confirmedProjection = this.projector.projectWithState(confirmedRows, {
+    const confirmedProjection = projectWithState.call(this.projector, confirmedRows, {
       provisional: false,
       seedState,
     });
@@ -598,7 +716,8 @@ export class ProjectionStore {
       };
     }
 
-    const provisionalProjection = this.projector.projectWithState(
+    const provisionalProjection = projectWithState.call(
+      this.projector,
       [sourceRows[sourceRows.length - 1]],
       {
         provisional: true,
@@ -624,7 +743,7 @@ export class ProjectionStore {
     };
   }
 
-  _resolvePreviousDisplayRow(rows) {
+  _resolvePreviousDisplayRow(rows: readonly DisplayRow[]): DisplayRow | null {
     if (typeof this.projector.resolvePreviousDisplayRow === "function") {
       return this.projector.resolvePreviousDisplayRow(rows);
     }
@@ -635,14 +754,22 @@ export class ProjectionStore {
     affectedRows,
     checkpoints,
     sourceStart,
-  }) {
+  }: {
+    affectedRows: readonly SourceBar[];
+    checkpoints: readonly Readonly<ProjectionState>[];
+    sourceStart: number;
+  }): void {
     this._source.length = sourceStart;
     this._sourceCheckpoints.length = sourceStart;
     for (const row of affectedRows) this._source.push(row);
     for (const checkpoint of checkpoints) this._sourceCheckpoints.push(checkpoint);
   }
 
-  _planDisplayTimeIndexTail(previousDisplay, fromOutputIndex, insert) {
+  _planDisplayTimeIndexTail(
+    previousDisplay: readonly DisplayRow[],
+    fromOutputIndex: number,
+    insert: readonly DisplayRow[],
+  ): DisplayTimeIndexPlan | null {
     try {
       const remove = [];
       const add = [];
@@ -664,7 +791,7 @@ export class ProjectionStore {
     }
   }
 
-  _replaceDisplayTimeIndexTail({ add, remove }) {
+  _replaceDisplayTimeIndexTail({ add, remove }: DisplayTimeIndexPlan): void {
     for (const { index, key } of remove) {
       if (key != null && this._displayTimeIndex.get(key) === index) {
         this._displayTimeIndex.delete(key);
@@ -684,7 +811,12 @@ export class ProjectionStore {
     fromOutputIndex,
     insert,
     nextDisplay,
-  }) {
+  }: {
+    previousDisplay: DisplayRow[];
+    fromOutputIndex: number;
+    insert: DisplayRow[];
+    nextDisplay: DisplayRow[];
+  }): void {
     try {
       const patched = this._drawingLineageIndex.replaceTail({
         previousSeriesData: previousDisplay,
@@ -708,10 +840,10 @@ export class ProjectionStore {
     }
   }
 
-  _rebuildDisplayTimeIndex() {
+  _rebuildDisplayTimeIndex(): void {
     this._displayTimeIndex.clear();
     const displayTimes = [];
-    let previousOrder = null;
+    let previousOrder: number | null = null;
     let strictlyIncreasingOrders = true;
     for (let index = 0; index < this._display.length; index += 1) {
       const time = this._display[index]?.time;

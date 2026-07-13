@@ -4,14 +4,29 @@ import {
   sourceOhlc,
   whitespaceDisplayRow,
 } from "./projectorData.js";
+import type {
+  DisplayRow,
+  Projector,
+  SourceBar,
+} from "../chartRepresentationTypes.js";
 
-export class HeikinAshiProjector {
+interface HeikinAshiProjectOptions {
+  previousDisplayRow?: DisplayRow | null;
+}
+
+export class HeikinAshiProjector implements Projector {
+  readonly id: "heikin-ashi";
+  readonly oneToOne: true;
+
   constructor() {
     this.id = "heikin-ashi";
     this.oneToOne = true;
   }
 
-  projectRow(row, { previousDisplayRow = null } = {}) {
+  projectRow(
+    row: SourceBar,
+    { previousDisplayRow = null }: HeikinAshiProjectOptions = {},
+  ): DisplayRow | null {
     if (row?.time == null) return null;
     const raw = sourceOhlc(row);
     if (!raw) return whitespaceDisplayRow(row, this.id, { synthetic: true });
@@ -21,7 +36,7 @@ export class HeikinAshiProjector {
     const open = previous
       ? (previous.open + previous.close) / 2
       : (raw.open + raw.close) / 2;
-    const point = {
+    const point: DisplayRow = {
       time: row.time,
       open,
       high: Math.max(raw.high, open, close),
@@ -33,15 +48,18 @@ export class HeikinAshiProjector {
     return point;
   }
 
-  resolvePreviousDisplayRow(rows = []) {
+  resolvePreviousDisplayRow(rows: readonly DisplayRow[] = []): DisplayRow | null {
     for (let index = rows.length - 1; index >= 0; index -= 1) {
       if (projectedOhlc(rows[index])) return rows[index];
     }
     return null;
   }
 
-  project(rows = [], { previousDisplayRow = null } = {}) {
-    const output = [];
+  project(
+    rows: readonly SourceBar[] = [],
+    { previousDisplayRow = null }: HeikinAshiProjectOptions = {},
+  ): DisplayRow[] {
+    const output: DisplayRow[] = [];
     let previous = previousDisplayRow;
     for (const row of rows || []) {
       const point = this.projectRow(row, { previousDisplayRow: previous });

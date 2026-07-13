@@ -17,7 +17,7 @@ export const CHART_PROJECTION_IDS = Object.freeze({
   LINE_BREAK: "line-break",
 });
 
-export const DEFAULT_CHART_TYPE_DESCRIPTORS = Object.freeze([
+export const DEFAULT_CHART_TYPE_DESCRIPTORS = Object.freeze(([
   { id: "candlestick", axisMode: "time", projectionId: "identity", rendererId: "candlestick", drawingAnchorMode: "source-time" },
   { id: "hollow-candlestick", axisMode: "time", projectionId: "identity", rendererId: "candlestick", drawingAnchorMode: "source-time" },
   { id: "heikin-ashi", axisMode: "time", projectionId: "heikin-ashi", rendererId: "candlestick", drawingAnchorMode: "source-time" },
@@ -33,43 +33,49 @@ export const DEFAULT_CHART_TYPE_DESCRIPTORS = Object.freeze([
   { id: "point-and-figure", axisMode: "derived-ordinal", projectionId: "point-and-figure", rendererId: "point-and-figure", drawingAnchorMode: "source-lineage" },
   { id: "kagi", axisMode: "derived-ordinal", projectionId: "kagi", rendererId: "kagi", drawingAnchorMode: "source-lineage" },
   { id: "line-break", axisMode: "derived-ordinal", projectionId: "line-break", rendererId: "candlestick", drawingAnchorMode: "source-lineage" },
-].map((descriptor) => Object.freeze(descriptor)));
+] satisfies ChartTypeDescriptor[]).map((descriptor) => Object.freeze(descriptor)));
 
-function normalizeDescriptor(descriptor) {
+function normalizeDescriptor(descriptor: unknown): Readonly<ChartTypeDescriptor> {
   if (!descriptor || typeof descriptor !== "object") {
     throw new TypeError("chart type descriptor must be an object");
   }
-  const id = String(descriptor.id || "").trim();
-  const axisMode = String(descriptor.axisMode || "").trim();
-  const projectionId = String(descriptor.projectionId || "").trim();
-  const rendererId = String(descriptor.rendererId || "").trim();
-  const drawingAnchorMode = descriptor.drawingAnchorMode == null
+  const record = descriptor as Record<string, unknown>;
+  const id = String(record.id || "").trim();
+  const axisMode = String(record.axisMode || "").trim();
+  const projectionId = String(record.projectionId || "").trim();
+  const rendererId = String(record.rendererId || "").trim();
+  const drawingAnchorMode = record.drawingAnchorMode == null
     ? null
-    : String(descriptor.drawingAnchorMode).trim();
+    : String(record.drawingAnchorMode).trim();
   if (!id || !axisMode || !projectionId || !rendererId) {
     throw new TypeError("chart type descriptor requires id, axisMode, projectionId and rendererId");
   }
   if (drawingAnchorMode !== null
-    && !Object.values(CHART_DRAWING_ANCHOR_MODES).includes(drawingAnchorMode)) {
+    && !Object.values<string>(CHART_DRAWING_ANCHOR_MODES).includes(drawingAnchorMode)) {
     throw new TypeError(`unsupported chart drawing anchor mode: ${drawingAnchorMode}`);
   }
   return Object.freeze({
-    ...descriptor,
+    ...record,
     id,
     axisMode,
     projectionId,
     rendererId,
-    drawingAnchorMode,
-  });
+    drawingAnchorMode: drawingAnchorMode as ChartDrawingAnchorMode | null,
+  } satisfies ChartTypeDescriptor);
 }
 
 export class ChartTypeRegistry {
-  constructor(descriptors = []) {
+  _descriptors: Map<string, Readonly<ChartTypeDescriptor>>;
+
+  constructor(descriptors: readonly unknown[] = []) {
     this._descriptors = new Map();
     for (const descriptor of descriptors) this.register(descriptor);
   }
 
-  register(descriptor, { replace = false } = {}) {
+  register(
+    descriptor: unknown,
+    { replace = false }: { replace?: boolean } = {},
+  ): Readonly<ChartTypeDescriptor> {
     const normalized = normalizeDescriptor(descriptor);
     if (!replace && this._descriptors.has(normalized.id)) {
       throw new Error(`chart type descriptor already registered: ${normalized.id}`);
@@ -78,31 +84,38 @@ export class ChartTypeRegistry {
     return normalized;
   }
 
-  has(id) {
+  has(id: string): boolean {
     return this._descriptors.has(id);
   }
 
-  get(id) {
+  get(id: string): Readonly<ChartTypeDescriptor> | null {
     return this._descriptors.get(id) || null;
   }
 
-  require(id) {
+  require(id: string): Readonly<ChartTypeDescriptor> {
     const descriptor = this.get(id);
     if (!descriptor) throw new Error(`unknown chart type: ${id}`);
     return descriptor;
   }
 
-  list() {
+  list(): Readonly<ChartTypeDescriptor>[] {
     return Array.from(this._descriptors.values());
   }
 }
 
-export function createDefaultChartTypeRegistry() {
+export function createDefaultChartTypeRegistry(): ChartTypeRegistry {
   return new ChartTypeRegistry(DEFAULT_CHART_TYPE_DESCRIPTORS);
 }
 
 export const chartTypeRegistry = createDefaultChartTypeRegistry();
 
-export function getChartTypeDescriptor(id, fallbackId = "candlestick") {
+export function getChartTypeDescriptor(
+  id: string,
+  fallbackId = "candlestick",
+): Readonly<ChartTypeDescriptor> {
   return chartTypeRegistry.get(id) || chartTypeRegistry.require(fallbackId);
 }
+import type {
+  ChartDrawingAnchorMode,
+  ChartTypeDescriptor,
+} from "./chartRepresentationTypes.js";

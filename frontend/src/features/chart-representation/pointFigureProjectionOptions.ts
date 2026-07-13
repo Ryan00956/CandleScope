@@ -1,9 +1,14 @@
 import { resolveRenkoProjectorOptions } from "./renkoProjectionOptions.js";
+import type {
+  PointFigureProjectionOptions,
+  ResolvedPointFigureProjectionOptions,
+  SourceBar,
+} from "./chartRepresentationTypes.js";
 
 const DEFAULT_REVERSAL_AMOUNT = 3;
 const MAX_REVERSAL_AMOUNT = 100;
 
-function normalizeReversalAmount(value) {
+function normalizeReversalAmount(value: unknown): number {
   const amount = Math.trunc(Number(value));
   return Number.isFinite(amount) && amount >= 1 && amount <= MAX_REVERSAL_AMOUNT
     ? amount
@@ -15,12 +20,12 @@ function normalizeReversalAmount(value) {
  * only to choose a stable box size when the projection is created; the
  * projector itself always receives deterministic integer-tick parameters.
  */
-export function resolvePointFigureProjectorOptions(rows = [], {
+export function resolvePointFigureProjectorOptions(rows: readonly SourceBar[] = [], {
   atrLength = 14,
   boxSize = 1,
   mode = "atr",
   reversalAmount = DEFAULT_REVERSAL_AMOUNT,
-} = {}) {
+}: PointFigureProjectionOptions = {}): Readonly<ResolvedPointFigureProjectionOptions> {
   const base = resolveRenkoProjectorOptions(rows, { atrLength, boxSize, mode });
   const resolvedReversalAmount = normalizeReversalAmount(reversalAmount);
   return Object.freeze({
@@ -37,5 +42,5 @@ export function resolvePointFigureProjectorOptions(rows = [], {
       base.minTick,
       resolvedReversalAmount,
     ].join(":"),
-  });
+  } satisfies ResolvedPointFigureProjectionOptions);
 }

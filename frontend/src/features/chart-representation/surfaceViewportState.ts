@@ -3,22 +3,34 @@ import {
   sourceTimeFromAxisTime,
   sourceTimeFromDisplayRow,
 } from "./axisTime.js";
+import type {
+  AxisTime,
+  DisplayRow,
+  LogicalRange,
+  SurfaceViewportSnapshot,
+} from "./chartRepresentationTypes.js";
 
 export const SURFACE_VIEWPORT_CACHE_LIMIT = 32;
 
-function finiteRange(range) {
-  const from = Number(range?.from);
-  const to = Number(range?.to);
+function finiteRange(range: unknown): LogicalRange | null {
+  const record = range && typeof range === "object"
+    ? range as Record<string, unknown>
+    : null;
+  const from = Number(record?.from);
+  const to = Number(record?.to);
   return Number.isFinite(from) && Number.isFinite(to) && from <= to
     ? { from, to }
     : null;
 }
 
-function stableAxisTime(time) {
+function stableAxisTime(time: AxisTime): AxisTime {
   return time && typeof time === "object" ? { ...time } : time;
 }
 
-export function buildSurfaceViewportCacheKey(datasetKey, surfaceConfigKey) {
+export function buildSurfaceViewportCacheKey(
+  datasetKey: unknown,
+  surfaceConfigKey: unknown,
+): string | null {
   if (!datasetKey || !surfaceConfigKey) return null;
   return JSON.stringify([datasetKey, surfaceConfigKey]);
 }
@@ -37,7 +49,15 @@ export function buildSurfaceViewportSnapshot({
   logicalRange,
   sourceRange = null,
   surfaceConfigKey,
-} = {}) {
+}: {
+  axisMode?: unknown;
+  barSpacing?: unknown;
+  datasetKey?: unknown;
+  displayRows?: readonly DisplayRow[];
+  logicalRange?: unknown;
+  sourceRange?: unknown;
+  surfaceConfigKey?: unknown;
+} = {}): SurfaceViewportSnapshot | null {
   const logical = finiteRange(logicalRange);
   if (!logical || !Array.isArray(displayRows) || displayRows.length === 0) return null;
 
@@ -47,7 +67,9 @@ export function buildSurfaceViewportSnapshot({
   const anchorTime = anchorRow?.time;
   const anchorSourceTime = sourceTimeFromAxisTime(anchorTime)
     ?? sourceTimeFromDisplayRow(anchorRow);
-  if (anchorTime == null || !Number.isFinite(anchorSourceTime)) return null;
+  if (anchorTime == null || anchorSourceTime === null || !Number.isFinite(anchorSourceTime)) {
+    return null;
+  }
 
   const normalizedSourceRange = finiteRange(sourceRange);
   const normalizedBarSpacing = Number(barSpacing);
@@ -71,11 +93,19 @@ export function buildSurfaceViewportSnapshot({
  * surface uses the full ordinal identity; a first cross-surface transfer uses
  * stable source time while retaining the old number of visible logical cells.
  */
-export function planSurfaceViewportRestore(displayRows, snapshot, {
+export function planSurfaceViewportRestore(
+  displayRows: readonly DisplayRow[],
+  snapshot: SurfaceViewportSnapshot | null | undefined,
+  {
   axisMode,
   datasetKey,
   surfaceConfigKey,
-} = {}) {
+  }: {
+    axisMode?: unknown;
+    datasetKey?: unknown;
+    surfaceConfigKey?: unknown;
+  } = {},
+): { barSpacing: number | null; logicalRange: LogicalRange | null; sameSurface: boolean } | null {
   if (!snapshot || snapshot.datasetKey !== datasetKey) return null;
   const sameSurface = snapshot.surfaceConfigKey === surfaceConfigKey
     && snapshot.axisMode === axisMode;
@@ -92,9 +122,13 @@ export function planSurfaceViewportRestore(displayRows, snapshot, {
   };
 }
 
-export function rememberSurfaceViewport(cache, snapshot, {
+export function rememberSurfaceViewport(
+  cache: Map<string, SurfaceViewportSnapshot>,
+  snapshot: SurfaceViewportSnapshot | null | undefined,
+  {
   limit = SURFACE_VIEWPORT_CACHE_LIMIT,
-} = {}) {
+  }: { limit?: unknown } = {},
+): boolean {
   const key = buildSurfaceViewportCacheKey(
     snapshot?.datasetKey,
     snapshot?.surfaceConfigKey,
@@ -105,16 +139,28 @@ export function rememberSurfaceViewport(cache, snapshot, {
   cache.set(key, snapshot);
   const safeLimit = Math.max(1, Math.floor(Number(limit)) || SURFACE_VIEWPORT_CACHE_LIMIT);
   while (cache.size > safeLimit) {
-    cache.delete(cache.keys().next().value);
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
   }
   return true;
 }
 
-export function selectSurfaceViewportSnapshot(cache, {
+export function selectSurfaceViewportSnapshot(
+  cache: Map<string, SurfaceViewportSnapshot>,
+  {
   datasetKey,
   outgoingSnapshot = null,
   surfaceConfigKey,
-} = {}) {
+  }: {
+    datasetKey?: unknown;
+    outgoingSnapshot?: SurfaceViewportSnapshot | null;
+    surfaceConfigKey?: unknown;
+  } = {},
+): {
+  snapshot: SurfaceViewportSnapshot | null;
+  source: "remembered" | "transfer" | "none";
+} {
   const key = buildSurfaceViewportCacheKey(datasetKey, surfaceConfigKey);
   const remembered = cache instanceof Map && key ? cache.get(key) : null;
   if (remembered) return { snapshot: remembered, source: "remembered" };

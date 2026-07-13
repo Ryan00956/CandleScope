@@ -1,7 +1,44 @@
-const POINT_FIGURE_STATE_VERSION = 1;
-const DIRECTIONS = new Set([null, "x", "o"]);
+import type {
+  DisplayRow,
+  ProjectionCustomValues,
+  ProjectionProjectOptions,
+  ProjectionResult,
+  ProjectionState,
+  Projector,
+  SourceBar,
+} from "../chartRepresentationTypes.js";
 
-function positiveFiniteNumber(value, name) {
+const POINT_FIGURE_STATE_VERSION = 1;
+type PointFigureDirection = "x" | "o" | null;
+
+interface PointFigureState extends ProjectionState {
+  version: 1;
+  projectorId: "point-and-figure";
+  minTick: number;
+  boxTicks: number;
+  reversalAmount: number;
+  initialized: boolean;
+  anchorTicks: number | null;
+  direction: PointFigureDirection;
+  columnLowTicks: number | null;
+  columnHighTicks: number | null;
+  columnOrder: number | null;
+  columnSourceFromTime: number | null;
+  columnSourceToTime: number | null;
+  columnCustomValues: ProjectionCustomValues;
+  nextOrder: number;
+  pendingFromTime: number | null;
+}
+
+interface PointFigureProjectorOptions {
+  boxSize?: unknown;
+  minTick?: unknown;
+  reversalAmount?: unknown;
+}
+
+const DIRECTIONS = new Set<PointFigureDirection>([null, "x", "o"]);
+
+function positiveFiniteNumber(value: unknown, name: string): number {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) {
     throw new TypeError(`Point & Figure ${name} must be a positive finite number`);
@@ -9,7 +46,7 @@ function positiveFiniteNumber(value, name) {
   return number;
 }
 
-function positiveSafeInteger(value, name) {
+function positiveSafeInteger(value: unknown, name: string): number {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < 1) {
     throw new TypeError(`Point & Figure ${name} must be a positive safe integer`);
@@ -17,19 +54,19 @@ function positiveSafeInteger(value, name) {
   return number;
 }
 
-function decimalPlaces(value) {
+function decimalPlaces(value: number): number {
   const [coefficient, exponentText] = String(value).toLowerCase().split("e");
   const fractionLength = coefficient.split(".")[1]?.length || 0;
   const exponent = Number(exponentText || 0);
   return Math.max(0, fractionLength - exponent);
 }
 
-function cloneCustomValues(customValues) {
+function cloneCustomValues(customValues: unknown): ProjectionCustomValues {
   if (!customValues || typeof customValues !== "object") return {};
   return { ...customValues };
 }
 
-function cloneState(state) {
+function cloneState(state: Readonly<PointFigureState>): PointFigureState {
   return {
     version: POINT_FIGURE_STATE_VERSION,
     projectorId: "point-and-figure",
@@ -50,13 +87,17 @@ function cloneState(state) {
   };
 }
 
-function frozenState(state) {
+function frozenState(state: Readonly<PointFigureState>): Readonly<PointFigureState> {
   const cloned = cloneState(state);
   cloned.columnCustomValues = Object.freeze(cloned.columnCustomValues);
   return Object.freeze(cloned);
 }
 
-function initialState({ boxTicks, minTick, reversalAmount }) {
+function initialState({
+  boxTicks,
+  minTick,
+  reversalAmount,
+}: Pick<PointFigureState, "boxTicks" | "minTick" | "reversalAmount">): PointFigureState {
   return {
     version: POINT_FIGURE_STATE_VERSION,
     projectorId: "point-and-figure",
@@ -77,23 +118,55 @@ function initialState({ boxTicks, minTick, reversalAmount }) {
   };
 }
 
-function validColumnState(state) {
+function validColumnState(state: Readonly<PointFigureState>): boolean {
   if (state.direction === null) {
     return state.columnLowTicks == null
       && state.columnHighTicks == null
       && state.columnOrder == null;
   }
-  return Number.isSafeInteger(state.columnLowTicks)
+  return typeof state.columnLowTicks === "number"
+    && Number.isSafeInteger(state.columnLowTicks)
+    && typeof state.columnHighTicks === "number"
     && Number.isSafeInteger(state.columnHighTicks)
     && state.columnLowTicks <= state.columnHighTicks
+    && typeof state.columnOrder === "number"
     && Number.isSafeInteger(state.columnOrder)
     && state.columnOrder >= 0
     && state.columnOrder < state.nextOrder
-    && state.columnSourceFromTime != null
-    && state.columnSourceToTime != null;
+    && typeof state.columnSourceFromTime === "number"
+    && Number.isFinite(state.columnSourceFromTime)
+    && typeof state.columnSourceToTime === "number"
+    && Number.isFinite(state.columnSourceToTime);
 }
 
-function normalizeSeedState(seedState, { boxTicks, minTick, reversalAmount }) {
+function requiredInteger(value: number | null, name: string): number {
+  if (!Number.isSafeInteger(value)) {
+    throw new TypeError(`Point & Figure active state requires ${name}`);
+  }
+  return Number(value);
+}
+
+function requiredSourceTime(value: number | null, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`Point & Figure active state requires ${name}`);
+  }
+  return value;
+}
+
+function requiredDirection(direction: PointFigureDirection): Exclude<PointFigureDirection, null> {
+  if (direction === null) throw new TypeError("Point & Figure active state requires direction");
+  return direction;
+}
+
+function displayOrder(row: DisplayRow): number | null {
+  return typeof row.time === "object" ? row.time.order : null;
+}
+
+function normalizeSeedState(
+  seedState: Readonly<PointFigureState> | null,
+  { boxTicks, minTick, reversalAmount }:
+    Pick<PointFigureState, "boxTicks" | "minTick" | "reversalAmount">,
+): PointFigureState {
   if (seedState == null) {
     return initialState({ boxTicks, minTick, reversalAmount });
   }
@@ -115,19 +188,26 @@ function normalizeSeedState(seedState, { boxTicks, minTick, reversalAmount }) {
   return cloneState(seedState);
 }
 
-function finiteClose(row) {
-  if (row?.__whitespace || row?.close == null || row.close === "") return null;
-  const close = Number(row.close);
+function finiteClose(row: SourceBar): number | null {
+  const value: unknown = row?.close;
+  if (row?.__whitespace || value == null || value === "") return null;
+  const close = Number(value);
   return Number.isFinite(close) ? close : null;
 }
 
-function projectionCustomValues(row, {
+function projectionCustomValues(row: SourceBar, {
   boxSize,
   direction,
   provisional,
   reversalAmount,
   sourceFromTime,
-}) {
+}: {
+  boxSize: number;
+  direction: Exclude<PointFigureDirection, null>;
+  provisional: boolean;
+  reversalAmount: number;
+  sourceFromTime: number;
+}): ProjectionCustomValues {
   return {
     ...(row?.customValues || {}),
     chartProjection: Object.freeze({
@@ -155,12 +235,21 @@ function projectionCustomValues(row, {
  * can reconstruct every glyph from high/low and pointAndFigure.boxSize.
  * Prices are converted to integer minimum-tick units before comparisons.
  */
-export class PointFigureProjector {
+export class PointFigureProjector implements Projector<PointFigureState> {
+  readonly id: "point-and-figure";
+  readonly oneToOne: false;
+  readonly supportsStatefulTailProjection: true;
+  readonly boxSize: number;
+  readonly minTick: number;
+  readonly reversalAmount: number;
+  readonly boxTicks: number;
+  readonly pricePrecision: number;
+
   constructor({
     boxSize = 1,
     minTick = 0.01,
     reversalAmount = 3,
-  } = {}) {
+  }: PointFigureProjectorOptions = {}) {
     this.id = "point-and-figure";
     this.oneToOne = false;
     this.supportsStatefulTailProjection = true;
@@ -180,21 +269,27 @@ export class PointFigureProjector {
     this.pricePrecision = Math.min(12, decimalPlaces(this.minTick));
   }
 
-  project(rows = [], options = {}) {
+  project(
+    rows: readonly SourceBar[] = [],
+    options: ProjectionProjectOptions<PointFigureState> = {},
+  ): DisplayRow[] {
     return this.projectWithState(rows, options).data;
   }
 
-  projectWithState(rows = [], { provisional = false, seedState = null } = {}) {
+  projectWithState(
+    rows: readonly SourceBar[] = [],
+    { provisional = false, seedState = null }: ProjectionProjectOptions<PointFigureState> = {},
+  ): ProjectionResult<PointFigureState> {
     const state = normalizeSeedState(seedState, this);
-    const data = [];
-    const checkpoints = [];
+    const data: DisplayRow[] = [];
+    const checkpoints: Readonly<PointFigureState>[] = [];
 
     // The active column may have started before a trim-left checkpoint. Carry
     // it into the new projection so a no-op retained row cannot make it vanish.
     const hasRetainedSource = (rows || []).some((row) => row?.time != null);
     if (seedState != null && state.direction !== null && hasRetainedSource) {
       this._upsertCurrentColumn(data, state, {
-        time: state.columnSourceToTime,
+        time: requiredSourceTime(state.columnSourceToTime, "columnSourceToTime"),
         customValues: state.columnCustomValues,
       }, false);
     }
@@ -233,7 +328,7 @@ export class PointFigureProjector {
     };
   }
 
-  _priceToTicks(price) {
+  _priceToTicks(price: number): number {
     const ticks = Math.round(price / this.minTick);
     if (!Number.isSafeInteger(ticks)) {
       throw new RangeError("Point & Figure source price exceeds safe integer tick range");
@@ -241,29 +336,43 @@ export class PointFigureProjector {
     return ticks;
   }
 
-  _ticksToPrice(ticks) {
+  _ticksToPrice(ticks: number): number {
     const price = Number((ticks * this.minTick).toFixed(this.pricePrecision));
     return Object.is(price, -0) ? 0 : price;
   }
 
-  _startFirstColumn(data, state, row, closeTicks, provisional) {
-    if (closeTicks >= state.anchorTicks + this.boxTicks) {
-      const boxes = Math.floor((closeTicks - state.anchorTicks) / this.boxTicks);
-      const lowTicks = state.anchorTicks + this.boxTicks;
-      const highTicks = state.anchorTicks + boxes * this.boxTicks;
+  _startFirstColumn(
+    data: DisplayRow[],
+    state: PointFigureState,
+    row: SourceBar,
+    closeTicks: number,
+    provisional: boolean,
+  ): void {
+    const anchorTicks = requiredInteger(state.anchorTicks, "anchorTicks");
+    if (closeTicks >= anchorTicks + this.boxTicks) {
+      const boxes = Math.floor((closeTicks - anchorTicks) / this.boxTicks);
+      const lowTicks = anchorTicks + this.boxTicks;
+      const highTicks = anchorTicks + boxes * this.boxTicks;
       this._startColumn(data, state, row, "x", lowTicks, highTicks, provisional);
-    } else if (closeTicks <= state.anchorTicks - this.boxTicks) {
-      const boxes = Math.floor((state.anchorTicks - closeTicks) / this.boxTicks);
-      const highTicks = state.anchorTicks - this.boxTicks;
-      const lowTicks = state.anchorTicks - boxes * this.boxTicks;
+    } else if (closeTicks <= anchorTicks - this.boxTicks) {
+      const boxes = Math.floor((anchorTicks - closeTicks) / this.boxTicks);
+      const highTicks = anchorTicks - this.boxTicks;
+      const lowTicks = anchorTicks - boxes * this.boxTicks;
       this._startColumn(data, state, row, "o", lowTicks, highTicks, provisional);
     }
   }
 
-  _processXColumn(data, state, row, closeTicks, provisional) {
-    if (closeTicks >= state.columnHighTicks + this.boxTicks) {
-      const boxes = Math.floor((closeTicks - state.columnHighTicks) / this.boxTicks);
-      state.columnHighTicks += boxes * this.boxTicks;
+  _processXColumn(
+    data: DisplayRow[],
+    state: PointFigureState,
+    row: SourceBar,
+    closeTicks: number,
+    provisional: boolean,
+  ): void {
+    const columnHighTicks = requiredInteger(state.columnHighTicks, "columnHighTicks");
+    if (closeTicks >= columnHighTicks + this.boxTicks) {
+      const boxes = Math.floor((closeTicks - columnHighTicks) / this.boxTicks);
+      state.columnHighTicks = columnHighTicks + boxes * this.boxTicks;
       state.columnSourceToTime = row.time;
       state.columnCustomValues = cloneCustomValues(row.customValues);
       this._upsertCurrentColumn(data, state, row, provisional);
@@ -274,18 +383,25 @@ export class PointFigureProjector {
     if (!Number.isSafeInteger(reversalTicks)) {
       throw new RangeError("Point & Figure reversal threshold exceeds safe integer tick range");
     }
-    if (closeTicks <= state.columnHighTicks - reversalTicks) {
-      const boxes = Math.floor((state.columnHighTicks - closeTicks) / this.boxTicks);
-      const highTicks = state.columnHighTicks - this.boxTicks;
-      const lowTicks = state.columnHighTicks - boxes * this.boxTicks;
+    if (closeTicks <= columnHighTicks - reversalTicks) {
+      const boxes = Math.floor((columnHighTicks - closeTicks) / this.boxTicks);
+      const highTicks = columnHighTicks - this.boxTicks;
+      const lowTicks = columnHighTicks - boxes * this.boxTicks;
       this._startColumn(data, state, row, "o", lowTicks, highTicks, provisional);
     }
   }
 
-  _processOColumn(data, state, row, closeTicks, provisional) {
-    if (closeTicks <= state.columnLowTicks - this.boxTicks) {
-      const boxes = Math.floor((state.columnLowTicks - closeTicks) / this.boxTicks);
-      state.columnLowTicks -= boxes * this.boxTicks;
+  _processOColumn(
+    data: DisplayRow[],
+    state: PointFigureState,
+    row: SourceBar,
+    closeTicks: number,
+    provisional: boolean,
+  ): void {
+    const columnLowTicks = requiredInteger(state.columnLowTicks, "columnLowTicks");
+    if (closeTicks <= columnLowTicks - this.boxTicks) {
+      const boxes = Math.floor((columnLowTicks - closeTicks) / this.boxTicks);
+      state.columnLowTicks = columnLowTicks - boxes * this.boxTicks;
       state.columnSourceToTime = row.time;
       state.columnCustomValues = cloneCustomValues(row.customValues);
       this._upsertCurrentColumn(data, state, row, provisional);
@@ -296,15 +412,23 @@ export class PointFigureProjector {
     if (!Number.isSafeInteger(reversalTicks)) {
       throw new RangeError("Point & Figure reversal threshold exceeds safe integer tick range");
     }
-    if (closeTicks >= state.columnLowTicks + reversalTicks) {
-      const boxes = Math.floor((closeTicks - state.columnLowTicks) / this.boxTicks);
-      const lowTicks = state.columnLowTicks + this.boxTicks;
-      const highTicks = state.columnLowTicks + boxes * this.boxTicks;
+    if (closeTicks >= columnLowTicks + reversalTicks) {
+      const boxes = Math.floor((closeTicks - columnLowTicks) / this.boxTicks);
+      const lowTicks = columnLowTicks + this.boxTicks;
+      const highTicks = columnLowTicks + boxes * this.boxTicks;
       this._startColumn(data, state, row, "x", lowTicks, highTicks, provisional);
     }
   }
 
-  _startColumn(data, state, row, direction, lowTicks, highTicks, provisional) {
+  _startColumn(
+    data: DisplayRow[],
+    state: PointFigureState,
+    row: SourceBar,
+    direction: Exclude<PointFigureDirection, null>,
+    lowTicks: number,
+    highTicks: number,
+    provisional: boolean,
+  ): void {
     const sourceFromTime = state.direction === null
       ? (state.pendingFromTime ?? row.time)
       : (state.columnSourceToTime ?? row.time);
@@ -320,13 +444,20 @@ export class PointFigureProjector {
     this._upsertCurrentColumn(data, state, row, provisional);
   }
 
-  _upsertCurrentColumn(data, state, row, provisional) {
-    const low = this._ticksToPrice(state.columnLowTicks);
-    const high = this._ticksToPrice(state.columnHighTicks);
-    const isX = state.direction === "x";
-    const point = {
+  _upsertCurrentColumn(
+    data: DisplayRow[],
+    state: PointFigureState,
+    row: SourceBar,
+    provisional: boolean,
+  ): void {
+    const low = this._ticksToPrice(requiredInteger(state.columnLowTicks, "columnLowTicks"));
+    const high = this._ticksToPrice(requiredInteger(state.columnHighTicks, "columnHighTicks"));
+    const direction = requiredDirection(state.direction);
+    const columnOrder = requiredInteger(state.columnOrder, "columnOrder");
+    const isX = direction === "x";
+    const point: DisplayRow = {
       time: {
-        order: state.columnOrder,
+        order: columnOrder,
         sourceTime: row.time,
         sourceOrdinal: 0,
       },
@@ -336,14 +467,14 @@ export class PointFigureProjector {
       close: isX ? high : low,
       customValues: projectionCustomValues(row, {
         boxSize: this._ticksToPrice(this.boxTicks),
-        direction: state.direction,
+        direction,
         provisional,
         reversalAmount: this.reversalAmount,
-        sourceFromTime: state.columnSourceFromTime,
+        sourceFromTime: requiredSourceTime(state.columnSourceFromTime, "columnSourceFromTime"),
       }),
     };
     const existingIndex = data.length - 1;
-    if (existingIndex >= 0 && data[existingIndex].time.order === state.columnOrder) {
+    if (existingIndex >= 0 && displayOrder(data[existingIndex]) === columnOrder) {
       data[existingIndex] = point;
     } else {
       data.push(point);

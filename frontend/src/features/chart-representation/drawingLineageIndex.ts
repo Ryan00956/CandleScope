@@ -1,21 +1,52 @@
 import { isOrdinalAxisTime, sourceTimeRangeFromDisplayRow } from "./axisTime.js";
 import { PROJECTION_METADATA_KEY } from "./projectors/projectorData.js";
+import type {
+  DisplayRow,
+  SourceTimeRange,
+} from "./chartRepresentationTypes.js";
 
 const DRAWING_LINEAGE_INDEX_KIND = "candlescope-drawing-lineage-index";
 
-function projectionMetadataFromRow(row) {
+interface RowRangeEntry {
+  coverageGroup: number;
+  row: DisplayRow;
+  range: SourceTimeRange;
+}
+
+interface RowDescription {
+  ordinalIncluded: boolean;
+  projectorId: string | null;
+  range: SourceTimeRange | null;
+  sourceTime: number | null;
+}
+
+interface LineageRecord {
+  currentProjection: string | null;
+  coverageGroup: number;
+  latestLineage: number;
+  ordinalCount: number;
+  ordinalIncluded: boolean;
+  previousRangeFrom: number;
+  previousRangeTo: number;
+  rangeCount: number;
+  row: DisplayRow;
+  rowRangesMonotonic: boolean;
+  sourceTime: number | null;
+}
+
+function projectionMetadataFromRow(row: DisplayRow): Record<string, unknown> | null {
   const metadata = row?.customValues?.[PROJECTION_METADATA_KEY];
   return metadata && typeof metadata === "object" ? metadata : null;
 }
 
-function projectorIdFromRow(row) {
+function projectorIdFromRow(row: DisplayRow): string | null {
   const projectorId = projectionMetadataFromRow(row)?.projectorId;
   return typeof projectorId === "string" && projectorId.length > 0
     ? projectorId
     : null;
 }
 
-function usesOrdinalSeriesData(seriesData) {
+function usesOrdinalSeriesData(seriesData: readonly DisplayRow[]): boolean {
   if (!Array.isArray(seriesData)) return false;
   for (let index = 0; index < seriesData.length; index += 1) {
     const row = seriesData[index];
@@ -24,7 +55,7 @@ function usesOrdinalSeriesData(seriesData) {
   return false;
 }
 
-function firstRangeIndexWithToAtLeast(rowRanges, target) {
+function firstRangeIndexWithToAtLeast(rowRanges: readonly RowRangeEntry[], target: number): number {
   let left = 0;
   let right = rowRanges.length;
   while (left < right) {
@@ -35,7 +66,11 @@ function firstRangeIndexWithToAtLeast(rowRanges, target) {
   return left;
 }
 
-function firstRangeIndexWithFromGreaterThan(rowRanges, target, fromIndex = 0) {
+function firstRangeIndexWithFromGreaterThan(
+  rowRanges: readonly RowRangeEntry[],
+  target: number,
+  fromIndex = 0,
+): number {
   let left = fromIndex;
   let right = rowRanges.length;
   while (left < right) {
@@ -55,7 +90,22 @@ function firstRangeIndexWithFromGreaterThan(rowRanges, target, fromIndex = 0) {
  * the complete projected history for the first primitive rendered each tick.
  */
 export class DrawingLineageIndex {
-  constructor(seriesData = []) {
+  readonly kind: typeof DRAWING_LINEAGE_INDEX_KIND;
+  revision: number;
+  seriesData: DisplayRow[];
+  isOrdinal: boolean;
+  exactRowsBySourceTime: Map<number, DisplayRow[]>;
+  ordinalRows: DisplayRow[];
+  rowRanges: RowRangeEntry[];
+  currentProjection: string | null;
+  latestLineage: number;
+  rowRangesMonotonic: boolean;
+  _records: LineageRecord[];
+  _coverageGroup: number;
+  _previousRangeFrom: number;
+  _previousRangeTo: number;
+
+  constructor(seriesData: DisplayRow[] = []) {
     this.kind = DRAWING_LINEAGE_INDEX_KIND;
     this.revision = 0;
     this.seriesData = [];
@@ -73,7 +123,7 @@ export class DrawingLineageIndex {
     this.reset(seriesData);
   }
 
-  reset(seriesData = []) {
+  reset(seriesData: DisplayRow[] = []): this {
     const rows = Array.isArray(seriesData) ? seriesData : [];
     const previousState = {
       currentProjection: this.currentProjection,
@@ -127,10 +177,15 @@ export class DrawingLineageIndex {
 
   replaceTail({
     previousSeriesData,
-    fromOutputIndex,
+    fromOutputIndex = -1,
     insert,
     nextSeriesData,
-  } = {}) {
+  }: {
+    previousSeriesData?: DisplayRow[];
+    fromOutputIndex?: number;
+    insert?: DisplayRow[];
+    nextSeriesData?: DisplayRow[];
+  } = {}): boolean {
     const insertedRows = Array.isArray(insert) ? insert : null;
     if (!Array.isArray(previousSeriesData)
       || !Array.isArray(nextSeriesData)
@@ -147,7 +202,7 @@ export class DrawingLineageIndex {
       return false;
     }
 
-    let insertedEntries;
+    let insertedEntries: RowDescription[];
     try {
       insertedEntries = insertedRows.map((row) => this._describeRow(row));
     } catch {
@@ -167,7 +222,13 @@ export class DrawingLineageIndex {
    * source-time envelope. Monotonic projector lineage uses two binary searches;
    * unusual/non-monotonic or internally discontinuous metadata fails closed.
    */
-  rowsOverlappingSourceEnvelope({ fromTime, toTime } = {}) {
+  rowsOverlappingSourceEnvelope({
+    fromTime = Number.NaN,
+    toTime = Number.NaN,
+  }: { fromTime?: number; toTime?: number } = {}): {
+    first: DisplayRow;
+    last: DisplayRow;
+  } | null {
     if (!Number.isFinite(fromTime)
       || !Number.isFinite(toTime)
       || fromTime > toTime
@@ -198,10 +259,11 @@ export class DrawingLineageIndex {
     return { first: firstEntry.row, last: lastEntry.row };
   }
 
-  _removeTail(fromOutputIndex) {
+  _removeTail(fromOutputIndex: number): void {
     for (let index = this._records.length - 1; index >= fromOutputIndex; index -= 1) {
       const record = this._records[index];
       if (!record?.ordinalIncluded) continue;
+      if (record.sourceTime === null) continue;
       const exactRows = this.exactRowsBySourceTime.get(record.sourceTime);
       if (!exactRows) continue;
       if (exactRows[exactRows.length - 1] === record.row) {
@@ -225,17 +287,18 @@ export class DrawingLineageIndex {
     this._previousRangeTo = retained?.previousRangeTo ?? Number.NEGATIVE_INFINITY;
   }
 
-  _describeRow(row) {
-    const ordinalIncluded = isOrdinalAxisTime(row?.time);
+  _describeRow(row: DisplayRow): RowDescription {
+    const ordinalTime = isOrdinalAxisTime(row?.time) ? row.time : null;
+    const ordinalIncluded = ordinalTime !== null;
     return {
       ordinalIncluded,
       projectorId: ordinalIncluded ? projectorIdFromRow(row) : null,
       range: ordinalIncluded ? sourceTimeRangeFromDisplayRow(row) : null,
-      sourceTime: ordinalIncluded ? row.time.sourceTime : null,
+      sourceTime: ordinalTime?.sourceTime ?? null,
     };
   }
 
-  _appendRow(row, description = this._describeRow(row)) {
+  _appendRow(row: DisplayRow, description = this._describeRow(row)): void {
     const {
       ordinalIncluded,
       projectorId,
@@ -243,6 +306,9 @@ export class DrawingLineageIndex {
       sourceTime,
     } = description;
     if (ordinalIncluded) {
+      if (sourceTime === null) {
+        throw new TypeError("ordinal drawing lineage requires sourceTime");
+      }
       this.ordinalRows.push(row);
       let exactRows = this.exactRowsBySourceTime.get(sourceTime);
       if (!exactRows) {
@@ -285,12 +351,16 @@ export class DrawingLineageIndex {
   }
 }
 
-export function createDrawingLineageIndex(seriesData = []) {
+export function createDrawingLineageIndex(seriesData: DisplayRow[] = []): DrawingLineageIndex {
   return new DrawingLineageIndex(seriesData);
 }
 
-export function isDrawingLineageIndexForSeries(value, seriesData) {
-  return value?.kind === DRAWING_LINEAGE_INDEX_KIND
+export function isDrawingLineageIndexForSeries(
+  value: unknown,
+  seriesData: DisplayRow[],
+): value is DrawingLineageIndex {
+  return value instanceof DrawingLineageIndex
+    && value.kind === DRAWING_LINEAGE_INDEX_KIND
     && value.isOrdinal === true
     && value.seriesData === seriesData
     && value.exactRowsBySourceTime instanceof Map

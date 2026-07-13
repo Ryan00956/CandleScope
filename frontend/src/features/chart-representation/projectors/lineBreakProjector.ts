@@ -1,7 +1,60 @@
-const LINE_BREAK_STATE_VERSION = 1;
-const DIRECTIONS = new Set(["up", "down"]);
+import type {
+  DisplayRow,
+  ProjectionCustomValues,
+  ProjectionProjectOptions,
+  ProjectionResult,
+  ProjectionState,
+  Projector,
+  SourceBar,
+} from "../chartRepresentationTypes.js";
 
-function positiveFiniteNumber(value, name) {
+const LINE_BREAK_STATE_VERSION = 1;
+type LineBreakDirection = "up" | "down";
+
+interface LineBreakLine {
+  direction: LineBreakDirection;
+  openTicks: number;
+  highTicks: number;
+  lowTicks: number;
+  closeTicks: number;
+  order: number;
+  sourceFromTime: number;
+  sourceToTime: number;
+  referenceHighTicks: number;
+  referenceLowTicks: number;
+  customValues: ProjectionCustomValues;
+}
+
+interface LineBreakState extends ProjectionState {
+  version: 1;
+  projectorId: "line-break";
+  minTick: number;
+  numberOfLines: number;
+  initialized: boolean;
+  anchorTicks: number | null;
+  pendingFromTime: number | null;
+  lineWindow: readonly Readonly<LineBreakLine>[];
+  nextOrder: number;
+}
+
+interface LineBreakProjectorOptions {
+  minTick?: unknown;
+  numberOfLines?: unknown;
+}
+
+interface AppendLineOptions {
+  closeTicks: number;
+  direction: LineBreakDirection;
+  openTicks: number;
+  provisional: boolean;
+  referenceHighTicks: number;
+  referenceLowTicks: number;
+  sourceFromTime: number;
+}
+
+const DIRECTIONS = new Set<LineBreakDirection>(["up", "down"]);
+
+function positiveFiniteNumber(value: unknown, name: string): number {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) {
     throw new TypeError(`Line Break ${name} must be a positive finite number`);
@@ -9,7 +62,7 @@ function positiveFiniteNumber(value, name) {
   return number;
 }
 
-function positiveSafeInteger(value, name) {
+function positiveSafeInteger(value: unknown, name: string): number {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < 1) {
     throw new TypeError(`Line Break ${name} must be a positive safe integer`);
@@ -17,19 +70,19 @@ function positiveSafeInteger(value, name) {
   return number;
 }
 
-function decimalPlaces(value) {
+function decimalPlaces(value: number): number {
   const [coefficient, exponentText] = String(value).toLowerCase().split("e");
   const fractionLength = coefficient.split(".")[1]?.length || 0;
   const exponent = Number(exponentText || 0);
   return Math.max(0, fractionLength - exponent);
 }
 
-function cloneCustomValues(customValues) {
+function cloneCustomValues(customValues: unknown): ProjectionCustomValues {
   if (!customValues || typeof customValues !== "object") return {};
   return { ...customValues };
 }
 
-function cloneLine(line) {
+function cloneLine(line: Readonly<LineBreakLine>): LineBreakLine {
   return {
     direction: line.direction,
     openTicks: line.openTicks,
@@ -45,19 +98,24 @@ function cloneLine(line) {
   };
 }
 
-function frozenLine(line) {
+function frozenLine(line: Readonly<LineBreakLine>): Readonly<LineBreakLine> {
   const cloned = cloneLine(line);
   cloned.customValues = Object.freeze(cloned.customValues);
   return Object.freeze(cloned);
 }
 
-function frozenLineWindow(lines) {
+function frozenLineWindow(
+  lines: readonly Readonly<LineBreakLine>[],
+): readonly Readonly<LineBreakLine>[] {
   return Object.freeze(lines.map(frozenLine));
 }
 
-const EMPTY_LINE_WINDOW = Object.freeze([]);
+const EMPTY_LINE_WINDOW: readonly Readonly<LineBreakLine>[] = Object.freeze([]);
 
-function cloneState(state, { copyWindow = false } = {}) {
+function cloneState(
+  state: Readonly<LineBreakState>,
+  { copyWindow = false }: { copyWindow?: boolean } = {},
+): LineBreakState {
   return {
     version: LINE_BREAK_STATE_VERSION,
     projectorId: "line-break",
@@ -71,12 +129,15 @@ function cloneState(state, { copyWindow = false } = {}) {
   };
 }
 
-function frozenState(state) {
+function frozenState(state: Readonly<LineBreakState>): Readonly<LineBreakState> {
   const cloned = cloneState(state);
   return Object.freeze(cloned);
 }
 
-function initialState({ minTick, numberOfLines }) {
+function initialState({
+  minTick,
+  numberOfLines,
+}: Pick<LineBreakState, "minTick" | "numberOfLines">): LineBreakState {
   return {
     version: LINE_BREAK_STATE_VERSION,
     projectorId: "line-break",
@@ -90,7 +151,7 @@ function initialState({ minTick, numberOfLines }) {
   };
 }
 
-function validLine(line, nextOrder) {
+function validLine(line: Readonly<LineBreakLine> | null, nextOrder: number): boolean {
   return line != null
     && DIRECTIONS.has(line.direction)
     && Number.isSafeInteger(line.openTicks)
@@ -108,7 +169,10 @@ function validLine(line, nextOrder) {
     && Number.isSafeInteger(line.referenceLowTicks);
 }
 
-function normalizeSeedState(seedState, { minTick, numberOfLines }) {
+function normalizeSeedState(
+  seedState: Readonly<LineBreakState> | null,
+  { minTick, numberOfLines }: Pick<LineBreakState, "minTick" | "numberOfLines">,
+): LineBreakState {
   if (seedState == null) return initialState({ minTick, numberOfLines });
   if (seedState.version !== LINE_BREAK_STATE_VERSION
     || seedState.projectorId !== "line-break"
@@ -136,18 +200,24 @@ function normalizeSeedState(seedState, { minTick, numberOfLines }) {
   return cloneState(seedState, { copyWindow: true });
 }
 
-function finiteClose(row) {
-  if (row?.__whitespace || row?.close == null || row.close === "") return null;
-  const close = Number(row.close);
+function finiteClose(row: SourceBar): number | null {
+  const value: unknown = row?.close;
+  if (row?.__whitespace || value == null || value === "") return null;
+  const close = Number(value);
   return Number.isFinite(close) ? close : null;
 }
 
-function projectionCustomValues(line, {
+function projectionCustomValues(line: Readonly<LineBreakLine>, {
   numberOfLines,
   provisional,
   referenceHigh,
   referenceLow,
-}) {
+}: {
+  numberOfLines: number;
+  provisional: boolean;
+  referenceHigh: number;
+  referenceLow: number;
+}): ProjectionCustomValues {
   return {
     ...line.customValues,
     chartProjection: Object.freeze({
@@ -179,8 +249,15 @@ function projectionCustomValues(line, {
  * convention: a new up line opens at the previous confirmed line's high and a
  * new down line opens at its low.
  */
-export class LineBreakProjector {
-  constructor({ minTick = 0.01, numberOfLines = 3 } = {}) {
+export class LineBreakProjector implements Projector<LineBreakState> {
+  readonly id: "line-break";
+  readonly oneToOne: false;
+  readonly supportsStatefulTailProjection: true;
+  readonly minTick: number;
+  readonly numberOfLines: number;
+  readonly pricePrecision: number;
+
+  constructor({ minTick = 0.01, numberOfLines = 3 }: LineBreakProjectorOptions = {}) {
     this.id = "line-break";
     this.oneToOne = false;
     this.supportsStatefulTailProjection = true;
@@ -189,14 +266,20 @@ export class LineBreakProjector {
     this.pricePrecision = Math.min(12, decimalPlaces(this.minTick));
   }
 
-  project(rows = [], options = {}) {
+  project(
+    rows: readonly SourceBar[] = [],
+    options: ProjectionProjectOptions<LineBreakState> = {},
+  ): DisplayRow[] {
     return this.projectWithState(rows, options).data;
   }
 
-  projectWithState(rows = [], { provisional = false, seedState = null } = {}) {
+  projectWithState(
+    rows: readonly SourceBar[] = [],
+    { provisional = false, seedState = null }: ProjectionProjectOptions<LineBreakState> = {},
+  ): ProjectionResult<LineBreakState> {
     const state = normalizeSeedState(seedState, this);
-    const data = [];
-    const checkpoints = [];
+    const data: DisplayRow[] = [];
+    const checkpoints: Readonly<LineBreakState>[] = [];
 
     const hasRetainedSource = (rows || []).some((row) => row?.time != null);
     if (seedState != null && state.lineWindow.length > 0 && hasRetainedSource) {
@@ -218,14 +301,18 @@ export class LineBreakProjector {
       }
 
       if (state.lineWindow.length === 0) {
-        if (closeTicks !== state.anchorTicks) {
+        const anchorTicks = state.anchorTicks;
+        if (typeof anchorTicks !== "number" || !Number.isSafeInteger(anchorTicks)) {
+          throw new TypeError("Line Break active state requires anchorTicks");
+        }
+        if (closeTicks !== anchorTicks) {
           this._appendLine(data, state, row, {
             closeTicks,
-            direction: closeTicks > state.anchorTicks ? "up" : "down",
-            openTicks: state.anchorTicks,
+            direction: closeTicks > anchorTicks ? "up" : "down",
+            openTicks: anchorTicks,
             provisional,
-            referenceHighTicks: state.anchorTicks,
-            referenceLowTicks: state.anchorTicks,
+            referenceHighTicks: anchorTicks,
+            referenceLowTicks: anchorTicks,
             sourceFromTime: state.pendingFromTime ?? row.time,
           });
         }
@@ -264,7 +351,7 @@ export class LineBreakProjector {
     };
   }
 
-  _priceToTicks(price) {
+  _priceToTicks(price: number): number {
     const ticks = Math.round(price / this.minTick);
     if (!Number.isSafeInteger(ticks)) {
       throw new RangeError("Line Break source price exceeds safe integer tick range");
@@ -272,12 +359,15 @@ export class LineBreakProjector {
     return ticks;
   }
 
-  _ticksToPrice(ticks) {
+  _ticksToPrice(ticks: number): number {
     const price = Number((ticks * this.minTick).toFixed(this.pricePrecision));
     return Object.is(price, -0) ? 0 : price;
   }
 
-  _referenceRange(lineWindow) {
+  _referenceRange(lineWindow: readonly Readonly<LineBreakLine>[]): {
+    referenceHighTicks: number;
+    referenceLowTicks: number;
+  } {
     let referenceHighTicks = -Infinity;
     let referenceLowTicks = Infinity;
     for (const line of lineWindow) {
@@ -287,7 +377,7 @@ export class LineBreakProjector {
     return { referenceHighTicks, referenceLowTicks };
   }
 
-  _appendLine(data, state, row, {
+  _appendLine(data: DisplayRow[], state: LineBreakState, row: SourceBar, {
     closeTicks,
     direction,
     openTicks,
@@ -295,7 +385,7 @@ export class LineBreakProjector {
     referenceHighTicks,
     referenceLowTicks,
     sourceFromTime,
-  }) {
+  }: AppendLineOptions): void {
     const line = frozenLine({
       direction,
       openTicks,
@@ -317,7 +407,11 @@ export class LineBreakProjector {
     this._emitLine(data, line, provisional);
   }
 
-  _emitLine(data, line, provisional) {
+  _emitLine(
+    data: DisplayRow[],
+    line: Readonly<LineBreakLine>,
+    provisional: boolean,
+  ): void {
     const open = this._ticksToPrice(line.openTicks);
     const close = this._ticksToPrice(line.closeTicks);
     const referenceHigh = this._ticksToPrice(line.referenceHighTicks);

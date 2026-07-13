@@ -1,14 +1,19 @@
 import { resolveRenkoProjectorOptions } from "./renkoProjectionOptions.js";
+import type {
+  KagiProjectionOptions,
+  ResolvedKagiProjectionOptions,
+  SourceBar,
+} from "./chartRepresentationTypes.js";
 
 /**
  * Kagi V1 resolves ATR to one fixed reversal distance when the projection is
  * created. The projector then operates only on deterministic integer ticks.
  */
-export function resolveKagiProjectorOptions(rows = [], {
+export function resolveKagiProjectorOptions(rows: readonly SourceBar[] = [], {
   atrLength = 14,
   mode = "atr",
   reversalAmount = 1,
-} = {}) {
+}: KagiProjectionOptions = {}): Readonly<ResolvedKagiProjectionOptions> {
   const base = resolveRenkoProjectorOptions(rows, {
     atrLength,
     boxSize: reversalAmount,
@@ -28,5 +33,5 @@ export function resolveKagiProjectorOptions(rows = [], {
       base.boxSize,
       base.minTick,
     ].join(":"),
-  });
+  } satisfies ResolvedKagiProjectionOptions);
 }

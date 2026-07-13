@@ -1,10 +1,16 @@
 import { PROJECTION_METADATA_KEY } from "./projectors/projectorData.js";
+import type {
+  DisplayRow,
+  LogicalRange,
+  OrdinalAxisTime,
+  SourceTimeRange,
+} from "./chartRepresentationTypes.js";
 
-function finiteNumber(value) {
+function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function compareNumbers(left, right) {
+function compareNumbers(left: number, right: number): number {
   if (left === right) return 0;
   return left < right ? -1 : 1;
 }
@@ -13,20 +19,19 @@ function compareNumbers(left, right) {
  * Returns true for the public ordinal horizontal-scale item accepted by the
  * custom Lightweight Charts behavior.
  */
-export function isOrdinalAxisTime(value) {
-  return value !== null
-    && typeof value === "object"
-    && !Array.isArray(value)
-    && Number.isSafeInteger(value.order)
-    && finiteNumber(value.sourceTime) !== null
-    && Number.isSafeInteger(value.sourceOrdinal)
-    && value.sourceOrdinal >= 0;
+export function isOrdinalAxisTime(value: unknown): value is OrdinalAxisTime {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Number.isSafeInteger(record.order)
+    && finiteNumber(record.sourceTime) !== null
+    && Number.isSafeInteger(record.sourceOrdinal)
+    && Number(record.sourceOrdinal) >= 0;
 }
 
 /**
  * Stable primitive key for chart-axis values. Invalid axis values have no key.
  */
-export function axisTimeKey(value) {
+export function axisTimeKey(value: unknown): string | null {
   if (isOrdinalAxisTime(value)) return `order:${value.order}`;
   const sourceTime = finiteNumber(value);
   return sourceTime === null ? null : `time:${sourceTime}`;
@@ -36,7 +41,7 @@ export function axisTimeKey(value) {
  * Compare values in their native axis order. Ordinal items are ordered by
  * `order`, even when their source timestamps are repeated or non-monotonic.
  */
-export function compareAxisTime(left, right) {
+export function compareAxisTime(left: unknown, right: unknown): number {
   const leftOrdinal = isOrdinalAxisTime(left);
   const rightOrdinal = isOrdinalAxisTime(right);
   if (leftOrdinal && rightOrdinal) return compareNumbers(left.order, right.order);
@@ -57,7 +62,7 @@ export function compareAxisTime(left, right) {
 /**
  * Resolve a domain/source timestamp from a public axis value.
  */
-export function sourceTimeFromAxisTime(value) {
+export function sourceTimeFromAxisTime(value: unknown): number | null {
   if (isOrdinalAxisTime(value)) return value.sourceTime;
   return finiteNumber(value);
 }
@@ -65,7 +70,9 @@ export function sourceTimeFromAxisTime(value) {
 /**
  * Resolve the inclusive source-time lineage represented by a display row.
  */
-export function sourceTimeRangeFromDisplayRow(row) {
+export function sourceTimeRangeFromDisplayRow(
+  row: DisplayRow | null | undefined,
+): SourceTimeRange | null {
   if (!row || typeof row !== "object") return null;
   const lineage = row.customValues?.[PROJECTION_METADATA_KEY];
   const rowSourceTime = finiteNumber(row.sourceTime);
@@ -80,7 +87,7 @@ export function sourceTimeRangeFromDisplayRow(row) {
 /**
  * Resolve the most recent source timestamp represented by a display row.
  */
-export function sourceTimeFromDisplayRow(row) {
+export function sourceTimeFromDisplayRow(row: DisplayRow | null | undefined): number | null {
   return sourceTimeRangeFromDisplayRow(row)?.to ?? null;
 }
 
@@ -88,7 +95,10 @@ export function sourceTimeFromDisplayRow(row) {
  * Find the last projected element emitted by exactly one source timestamp.
  * This deliberately chooses the last brick when one source bar emits many.
  */
-export function findLastDisplayIndexForSourceTime(displayRows, sourceTime) {
+export function findLastDisplayIndexForSourceTime(
+  displayRows: readonly DisplayRow[] | null | undefined,
+  sourceTime: unknown,
+): number {
   const target = finiteNumber(sourceTime);
   if (target === null || !Array.isArray(displayRows)) return -1;
   let match = -1;
@@ -98,10 +108,12 @@ export function findLastDisplayIndexForSourceTime(displayRows, sourceTime) {
   return match;
 }
 
-function sourceOrdinalFromDisplayRow(row) {
+function sourceOrdinalFromDisplayRow(row: DisplayRow): number | null {
   if (isOrdinalAxisTime(row?.time)) return row.time.sourceOrdinal;
   const ordinal = row?.customValues?.[PROJECTION_METADATA_KEY]?.sourceOrdinal;
-  return Number.isSafeInteger(ordinal) && ordinal >= 0 ? ordinal : null;
+  return typeof ordinal === "number" && Number.isSafeInteger(ordinal) && ordinal >= 0
+    ? ordinal
+    : null;
 }
 
 /**
@@ -113,7 +125,10 @@ function sourceOrdinalFromDisplayRow(row) {
  * original source ordinal is preferred; if that exact output disappeared, the
  * closest predecessor ordinal is retained before falling forward.
  */
-export function findDisplayIndexForAxisAnchor(displayRows, axisTime) {
+export function findDisplayIndexForAxisAnchor(
+  displayRows: readonly DisplayRow[] | null | undefined,
+  axisTime: unknown,
+): number {
   const targetSourceTime = sourceTimeFromAxisTime(axisTime);
   if (targetSourceTime === null
     || !Array.isArray(displayRows)
@@ -198,7 +213,7 @@ export function findDisplayIndexForAxisAnchor(displayRows, axisTime) {
   return predecessorIndex >= 0 ? predecessorIndex : firstAfterIndex;
 }
 
-function findAnchorDisplayIndex(displayRows, sourceTime) {
+function findAnchorDisplayIndex(displayRows: readonly DisplayRow[], sourceTime: unknown): number {
   return findDisplayIndexForAxisAnchor(displayRows, sourceTime);
 }
 
@@ -206,7 +221,10 @@ function findAnchorDisplayIndex(displayRows, sourceTime) {
  * Map a source-time interval to the inclusive display logical indexes whose
  * lineage overlaps that interval. Repeated timestamps include every brick.
  */
-export function mapSourceTimeRangeToDisplayLogicalRange(displayRows, sourceRange) {
+export function mapSourceTimeRangeToDisplayLogicalRange(
+  displayRows: readonly DisplayRow[] | null | undefined,
+  sourceRange: SourceTimeRange | null | undefined,
+): LogicalRange | null {
   const from = finiteNumber(sourceRange?.from);
   const to = finiteNumber(sourceRange?.to);
   if (from === null || to === null || from > to || !Array.isArray(displayRows)) {
@@ -230,12 +248,17 @@ export function mapSourceTimeRangeToDisplayLogicalRange(displayRows, sourceRange
  * `screenOffset` is the old anchor logical index minus the old range's `to`.
  * Retaining it keeps the source anchor at the same horizontal screen position.
  */
-export function mapSourceViewportAnchorToDisplayLogicalRange(displayRows, {
+export function mapSourceViewportAnchorToDisplayLogicalRange(displayRows: readonly DisplayRow[], {
   anchorTime = null,
   sourceTime,
   logicalSpan,
   screenOffset = 0,
-} = {}) {
+}: {
+  anchorTime?: unknown;
+  sourceTime?: unknown;
+  logicalSpan?: unknown;
+  screenOffset?: unknown;
+} = {}): LogicalRange | null {
   const targetAxisTime = anchorTime ?? sourceTime;
   const target = sourceTimeFromAxisTime(targetAxisTime);
   const span = finiteNumber(logicalSpan);

@@ -1886,8 +1886,8 @@ rg --files src -g "*.js" -g "*.jsx"
 | T1 | 已完成 | `45c901c` | 通过 | 703/703 通过 | 通过 | chart-types 通过 | mixed-mode 五条解析链全部验证；新增 suppression 0 |
 | T2 | 已完成 | `741b5d1` | 通过 | 719/719 通过 | 通过 | basic/release 通过 | 12 个生产模块迁为 TS；新增 suppression 0 |
 | T3 | 已完成 | `7915a98` | 通过 | 720/720 通过 | 通过 | basic/release 通过 | 15 个 market-data TS 模块；局部 adapter cast 已在 T4 删除 |
-| T4 | 已完成 | 未提交（当前工作区） | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 4 个 transport owner 迁为 TS，新增 raw payload parsers；未迁 endpoint 保持 `unknown` 并登记 ledger |
-| T5 | 待执行 |  |  |  |  |  |  |
+| T4 | 已完成 | `cbf6108` | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 4 个 transport owner 迁为 TS，新增 raw payload parsers；未迁 endpoint 保持 `unknown` 并登记 ledger |
+| T5 | 已完成 | 未提交（当前工作区） | 通过 | 727/727 通过 | 通过 | basic/release 通过 | 21 个 chart-representation owner 迁为 TS，新增统一投影 contract；专项测试 200/200 通过 |
 | T6 | 待执行 |  |  |  |  |  |  |
 | T7 | 待执行 |  |  |  |  |  |  |
 | T8 | 待执行 |  |  |  |  |  |  |
@@ -2035,6 +2035,24 @@ rg --files src -g "*.js" -g "*.jsx"
 | Release smoke | chart type、export、drawing、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
 | 冒烟调用说明 | 当前 npm 会把 `npm run smoke -- --url ...` 中的 `--url` 当作 npm 参数吞掉；验证改为直接执行 `npx tsx scripts/smoke.mjs --url http://127.0.0.1:15174/ ...`，未修改业务行为 |
 | Import 解析 | mixed-mode 继续使用源码 `.js` specifier；architecture resolver、全量测试和 Vite build 均确认 TS owner 可解析；未引入 `.ts` URL specifier 或 facade |
+| 新增 `any` / TS directive suppression | 0 |
+
+### T5 chart-representation 纯投影引擎验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `cbf6108` |
+| 生产模块 | `src/features/chart-representation/` 下 21 个既有 JS owner 全部迁为 TS；新增 `chartRepresentationTypes.ts`，合计 22 个 TS 模块，生产目录无 JS 残留 |
+| 核心 contract | 建立 `OrdinalAxisTime`、`AxisTime`、`SourceBar`、`DisplayRow`、`ProjectionMetadata`、`ProjectionResult`、`Projector<TState, TConfig>`、`ProjectionTailState`、`ProjectionPatch`、`ProjectionSourceDelta`、registry/config 与 viewport snapshot 类型 |
+| Axis time / lineage | 普通数字时间与 ordinal object 保持联合；`sourceTime`、`sourceOrdinal` 和 projection-local `order` 职责分离；相同 source time 的 1:N display lineage、drawing anchor 和 viewport 映射行为不变 |
+| Projector / Store | Identity、Heikin Ashi、Renko、Point & Figure、Kagi、Line Break 及 options/factory/registry 全部类型化；full rebuild、stateful incremental tail、provisional tail、checkpoint 与 replace-tail patch contract 显式化 |
+| 热路径不变量 | 未新增大数组 clone 或改变投影算法；100-row append/replace 的常量尾读取、copy-on-write、semantic no-op identity 和 repeated timestamp 测试继续通过 |
+| 回归防护 | 类型迁移初版使异常 `time` getter 被读取两次，专项测试即时捕获；改为先快照一次 getter 后恢复原单次读取与原子回退语义，103/103 Store 专项用例通过 |
+| 定向测试 | `src/features/chart-representation/__tests__/` 200/200 通过；覆盖 axis/options、6 个 projector、registry、lineage、derived auxiliary、viewport 和 ProjectionStore |
+| 完整门禁 | architecture、typecheck、lint 全部通过；727/727 tests 通过；Vite 7.3.1 build 通过，292 modules transformed |
+| Basic smoke | 干净 Vite `15175` 实例通过；1500 bars、connected/live；failures/warnings/exceptions 为 0 |
+| Release smoke | 15 种 chart type 与持久化恢复通过；PNG/JPEG/WebP 三组导出通过；drawing persistence、overlay-heavy 全部通过；failures/warnings/exceptions 为 0 |
+| Import 解析 | mixed-mode 继续使用源码 `.js` specifier；JS tests、tsx、architecture resolver 与 Vite 均解析到 TS owner；未引入 `.ts` URL specifier 或兼容 facade |
 | 新增 `any` / TS directive suppression | 0 |
 
 ### Suppression ledger

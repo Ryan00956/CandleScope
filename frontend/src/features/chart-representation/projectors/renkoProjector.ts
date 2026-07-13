@@ -1,7 +1,41 @@
-const RENKO_STATE_VERSION = 1;
-const DIRECTIONS = new Set([null, "up", "down"]);
+import type {
+  DisplayRow,
+  ProjectionCustomValues,
+  ProjectionProjectOptions,
+  ProjectionResult,
+  ProjectionState,
+  Projector,
+  SourceBar,
+} from "../chartRepresentationTypes.js";
 
-function positiveFiniteNumber(value, name) {
+const RENKO_STATE_VERSION = 1;
+type RenkoDirection = "up" | "down" | null;
+
+interface RenkoState extends ProjectionState {
+  version: 1;
+  projectorId: "renko";
+  minTick: number;
+  boxTicks: number;
+  initialized: boolean;
+  lastCloseTicks: number | null;
+  direction: RenkoDirection;
+  nextOrder: number;
+  pendingFromTime: number | null;
+}
+
+interface RenkoProjectorOptions {
+  boxSize?: unknown;
+  maxBricksPerSource?: unknown;
+  minTick?: unknown;
+}
+
+interface Counter {
+  value: number;
+}
+
+const DIRECTIONS = new Set<RenkoDirection>([null, "up", "down"]);
+
+function positiveFiniteNumber(value: unknown, name: string): number {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) {
     throw new TypeError(`Renko ${name} must be a positive finite number`);
@@ -9,14 +43,14 @@ function positiveFiniteNumber(value, name) {
   return number;
 }
 
-function decimalPlaces(value) {
+function decimalPlaces(value: number): number {
   const [coefficient, exponentText] = String(value).toLowerCase().split("e");
   const fractionLength = coefficient.split(".")[1]?.length || 0;
   const exponent = Number(exponentText || 0);
   return Math.max(0, fractionLength - exponent);
 }
 
-function cloneState(state) {
+function cloneState(state: Readonly<RenkoState>): RenkoState {
   return {
     version: RENKO_STATE_VERSION,
     projectorId: "renko",
@@ -30,11 +64,11 @@ function cloneState(state) {
   };
 }
 
-function frozenState(state) {
+function frozenState(state: Readonly<RenkoState>): Readonly<RenkoState> {
   return Object.freeze(cloneState(state));
 }
 
-function initialState({ boxTicks, minTick }) {
+function initialState({ boxTicks, minTick }: Pick<RenkoState, "boxTicks" | "minTick">): RenkoState {
   return {
     version: RENKO_STATE_VERSION,
     projectorId: "renko",
@@ -48,7 +82,10 @@ function initialState({ boxTicks, minTick }) {
   };
 }
 
-function normalizeSeedState(seedState, { boxTicks, minTick }) {
+function normalizeSeedState(
+  seedState: Readonly<RenkoState> | null,
+  { boxTicks, minTick }: Pick<RenkoState, "boxTicks" | "minTick">,
+): RenkoState {
   if (seedState == null) return initialState({ boxTicks, minTick });
   if (seedState.version !== RENKO_STATE_VERSION
     || seedState.projectorId !== "renko"
@@ -66,19 +103,33 @@ function normalizeSeedState(seedState, { boxTicks, minTick }) {
   return cloneState(seedState);
 }
 
-function finiteClose(row) {
-  if (row?.__whitespace || row?.close == null || row.close === "") return null;
-  const close = Number(row.close);
+function finiteClose(row: SourceBar): number | null {
+  const value: unknown = row?.close;
+  if (row?.__whitespace || value == null || value === "") return null;
+  const close = Number(value);
   return Number.isFinite(close) ? close : null;
 }
 
-function projectionCustomValues(row, {
+function activeCloseTicks(state: RenkoState): number {
+  if (!Number.isSafeInteger(state.lastCloseTicks)) {
+    throw new TypeError("Renko active state requires lastCloseTicks");
+  }
+  return Number(state.lastCloseTicks);
+}
+
+function projectionCustomValues(row: SourceBar, {
   boxSize,
   direction,
   sourceFromTime,
   sourceOrdinal,
   provisional,
-}) {
+}: {
+  boxSize: number;
+  direction: Exclude<RenkoDirection, null>;
+  sourceFromTime: number;
+  sourceOrdinal: number;
+  provisional: boolean;
+}): ProjectionCustomValues {
   return {
     ...(row?.customValues || {}),
     chartProjection: Object.freeze({
@@ -104,12 +155,21 @@ function projectionCustomValues(row, {
  * V1 intentionally uses source closes and body-only bricks. Prices are
  * converted to integer minimum-tick units before any threshold comparison.
  */
-export class RenkoProjector {
+export class RenkoProjector implements Projector<RenkoState> {
+  readonly id: "renko";
+  readonly oneToOne: false;
+  readonly supportsStatefulTailProjection: true;
+  readonly boxSize: number;
+  readonly minTick: number;
+  readonly boxTicks: number;
+  readonly maxBricksPerSource: number;
+  readonly pricePrecision: number;
+
   constructor({
     boxSize = 1,
     maxBricksPerSource = 10_000,
     minTick = 0.01,
-  } = {}) {
+  }: RenkoProjectorOptions = {}) {
     this.id = "renko";
     this.oneToOne = false;
     this.supportsStatefulTailProjection = true;
@@ -123,22 +183,29 @@ export class RenkoProjector {
       || Math.abs(boxRatio - roundedBoxTicks) > tolerance) {
       throw new TypeError("Renko boxSize must be an integer multiple of minTick");
     }
-    if (!Number.isSafeInteger(maxBricksPerSource) || maxBricksPerSource <= 0) {
+    const brickLimit = Number(maxBricksPerSource);
+    if (!Number.isSafeInteger(brickLimit) || brickLimit <= 0) {
       throw new TypeError("Renko maxBricksPerSource must be a positive safe integer");
     }
     this.boxTicks = roundedBoxTicks;
-    this.maxBricksPerSource = maxBricksPerSource;
+    this.maxBricksPerSource = brickLimit;
     this.pricePrecision = Math.min(12, decimalPlaces(this.minTick));
   }
 
-  project(rows = [], options = {}) {
+  project(
+    rows: readonly SourceBar[] = [],
+    options: ProjectionProjectOptions<RenkoState> = {},
+  ): DisplayRow[] {
     return this.projectWithState(rows, options).data;
   }
 
-  projectWithState(rows = [], { provisional = false, seedState = null } = {}) {
+  projectWithState(
+    rows: readonly SourceBar[] = [],
+    { provisional = false, seedState = null }: ProjectionProjectOptions<RenkoState> = {},
+  ): ProjectionResult<RenkoState> {
     const state = normalizeSeedState(seedState, this);
-    const data = [];
-    const checkpoints = [];
+    const data: DisplayRow[] = [];
+    const checkpoints: Readonly<RenkoState>[] = [];
 
     for (const row of rows || []) {
       checkpoints.push(frozenState(state));
@@ -160,23 +227,24 @@ export class RenkoProjector {
       if (state.pendingFromTime == null) state.pendingFromTime = row.time;
       const sourceOrdinal = { value: 0 };
       const emitted = { value: 0 };
+      const lastCloseTicks = activeCloseTicks(state);
 
       if (state.direction === null) {
-        if (closeTicks >= state.lastCloseTicks + this.boxTicks) {
+        if (closeTicks >= lastCloseTicks + this.boxTicks) {
           this._emitContinuation(data, state, row, "up", closeTicks, sourceOrdinal, emitted, provisional);
-        } else if (closeTicks <= state.lastCloseTicks - this.boxTicks) {
+        } else if (closeTicks <= lastCloseTicks - this.boxTicks) {
           this._emitContinuation(data, state, row, "down", closeTicks, sourceOrdinal, emitted, provisional);
         }
       } else if (state.direction === "up") {
-        if (closeTicks >= state.lastCloseTicks + this.boxTicks) {
+        if (closeTicks >= lastCloseTicks + this.boxTicks) {
           this._emitContinuation(data, state, row, "up", closeTicks, sourceOrdinal, emitted, provisional);
-        } else if (closeTicks <= state.lastCloseTicks - 2 * this.boxTicks) {
+        } else if (closeTicks <= lastCloseTicks - 2 * this.boxTicks) {
           this._emitReversal(data, state, row, "down", sourceOrdinal, emitted, provisional);
           this._emitContinuation(data, state, row, "down", closeTicks, sourceOrdinal, emitted, provisional);
         }
-      } else if (closeTicks <= state.lastCloseTicks - this.boxTicks) {
+      } else if (closeTicks <= lastCloseTicks - this.boxTicks) {
         this._emitContinuation(data, state, row, "down", closeTicks, sourceOrdinal, emitted, provisional);
-      } else if (closeTicks >= state.lastCloseTicks + 2 * this.boxTicks) {
+      } else if (closeTicks >= lastCloseTicks + 2 * this.boxTicks) {
         this._emitReversal(data, state, row, "up", sourceOrdinal, emitted, provisional);
         this._emitContinuation(data, state, row, "up", closeTicks, sourceOrdinal, emitted, provisional);
       }
@@ -189,7 +257,7 @@ export class RenkoProjector {
     };
   }
 
-  _priceToTicks(price) {
+  _priceToTicks(price: number): number {
     const ticks = Math.round(price / this.minTick);
     if (!Number.isSafeInteger(ticks)) {
       throw new RangeError("Renko source price exceeds safe integer tick range");
@@ -197,19 +265,29 @@ export class RenkoProjector {
     return ticks;
   }
 
-  _ticksToPrice(ticks) {
+  _ticksToPrice(ticks: number): number {
     const price = Number((ticks * this.minTick).toFixed(this.pricePrecision));
     return Object.is(price, -0) ? 0 : price;
   }
 
-  _assertBrickLimit(emitted) {
+  _assertBrickLimit(emitted: Counter): void {
     emitted.value += 1;
     if (emitted.value > this.maxBricksPerSource) {
       throw new RangeError("Renko source row exceeds maxBricksPerSource");
     }
   }
 
-  _emitBrick(data, state, row, direction, openTicks, closeTicks, sourceOrdinal, emitted, provisional) {
+  _emitBrick(
+    data: DisplayRow[],
+    state: RenkoState,
+    row: SourceBar,
+    direction: Exclude<RenkoDirection, null>,
+    openTicks: number,
+    closeTicks: number,
+    sourceOrdinal: Counter,
+    emitted: Counter,
+    provisional: boolean,
+  ): void {
     this._assertBrickLimit(emitted);
     const open = this._ticksToPrice(openTicks);
     const close = this._ticksToPrice(closeTicks);
@@ -240,13 +318,22 @@ export class RenkoProjector {
     sourceOrdinal.value += 1;
   }
 
-  _emitContinuation(data, state, row, direction, sourceTicks, sourceOrdinal, emitted, provisional) {
+  _emitContinuation(
+    data: DisplayRow[],
+    state: RenkoState,
+    row: SourceBar,
+    direction: Exclude<RenkoDirection, null>,
+    sourceTicks: number,
+    sourceOrdinal: Counter,
+    emitted: Counter,
+    provisional: boolean,
+  ): void {
     const step = direction === "up" ? this.boxTicks : -this.boxTicks;
     const reachedNextBrick = () => direction === "up"
-      ? sourceTicks >= state.lastCloseTicks + this.boxTicks
-      : sourceTicks <= state.lastCloseTicks - this.boxTicks;
+      ? sourceTicks >= activeCloseTicks(state) + this.boxTicks
+      : sourceTicks <= activeCloseTicks(state) - this.boxTicks;
     while (reachedNextBrick()) {
-      const openTicks = state.lastCloseTicks;
+      const openTicks = activeCloseTicks(state);
       this._emitBrick(
         data,
         state,
@@ -261,9 +348,17 @@ export class RenkoProjector {
     }
   }
 
-  _emitReversal(data, state, row, direction, sourceOrdinal, emitted, provisional) {
+  _emitReversal(
+    data: DisplayRow[],
+    state: RenkoState,
+    row: SourceBar,
+    direction: Exclude<RenkoDirection, null>,
+    sourceOrdinal: Counter,
+    emitted: Counter,
+    provisional: boolean,
+  ): void {
     const step = direction === "up" ? this.boxTicks : -this.boxTicks;
-    const previousCloseTicks = state.lastCloseTicks;
+    const previousCloseTicks = activeCloseTicks(state);
     this._emitBrick(
       data,
       state,

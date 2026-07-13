@@ -1,9 +1,63 @@
-const KAGI_STATE_VERSION = 1;
-const DIRECTIONS = new Set([null, "up", "down"]);
-const STYLES = new Set(["yang", "yin"]);
-const REVERSAL_KINDS = new Set([null, "shoulder", "waist"]);
+import type {
+  DisplayRow,
+  ProjectionCustomValues,
+  ProjectionProjectOptions,
+  ProjectionResult,
+  ProjectionState,
+  Projector,
+  SourceBar,
+} from "../chartRepresentationTypes.js";
 
-function positiveFiniteNumber(value, name) {
+const KAGI_STATE_VERSION = 1;
+type KagiDirection = "up" | "down" | null;
+type KagiStyle = "yang" | "yin";
+type KagiReversalKind = "shoulder" | "waist" | null;
+
+interface KagiState extends ProjectionState {
+  version: 1;
+  projectorId: "kagi";
+  minTick: number;
+  reversalTicks: number;
+  initialized: boolean;
+  anchorTicks: number | null;
+  direction: KagiDirection;
+  currentStyle: KagiStyle;
+  previousShoulderTicks: number | null;
+  previousWaistTicks: number | null;
+  legStartTicks: number | null;
+  legEndTicks: number | null;
+  legStartStyle: KagiStyle | null;
+  legOrder: number | null;
+  legReversalKind: KagiReversalKind;
+  legTurnTicks: number | null;
+  legSourceFromTime: number | null;
+  legSourceToTime: number | null;
+  legCustomValues: ProjectionCustomValues;
+  nextOrder: number;
+  pendingFromTime: number | null;
+}
+
+interface KagiProjectorOptions {
+  minTick?: unknown;
+  reversalTicks?: unknown;
+}
+
+interface KagiSection {
+  from: number;
+  to: number;
+  style: KagiStyle;
+}
+
+interface KagiSectionsResult {
+  sections: KagiSection[];
+  tailStyle: KagiStyle;
+}
+
+const DIRECTIONS = new Set<KagiDirection>([null, "up", "down"]);
+const STYLES = new Set<KagiStyle>(["yang", "yin"]);
+const REVERSAL_KINDS = new Set<KagiReversalKind>([null, "shoulder", "waist"]);
+
+function positiveFiniteNumber(value: unknown, name: string): number {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) {
     throw new TypeError(`Kagi ${name} must be a positive finite number`);
@@ -11,7 +65,7 @@ function positiveFiniteNumber(value, name) {
   return number;
 }
 
-function positiveSafeInteger(value, name) {
+function positiveSafeInteger(value: unknown, name: string): number {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < 1) {
     throw new TypeError(`Kagi ${name} must be a positive safe integer`);
@@ -19,19 +73,19 @@ function positiveSafeInteger(value, name) {
   return number;
 }
 
-function decimalPlaces(value) {
+function decimalPlaces(value: number): number {
   const [coefficient, exponentText] = String(value).toLowerCase().split("e");
   const fractionLength = coefficient.split(".")[1]?.length || 0;
   const exponent = Number(exponentText || 0);
   return Math.max(0, fractionLength - exponent);
 }
 
-function cloneCustomValues(customValues) {
+function cloneCustomValues(customValues: unknown): ProjectionCustomValues {
   if (!customValues || typeof customValues !== "object") return {};
   return { ...customValues };
 }
 
-function cloneState(state) {
+function cloneState(state: Readonly<KagiState>): KagiState {
   return {
     version: KAGI_STATE_VERSION,
     projectorId: "kagi",
@@ -57,13 +111,16 @@ function cloneState(state) {
   };
 }
 
-function frozenState(state) {
+function frozenState(state: Readonly<KagiState>): Readonly<KagiState> {
   const cloned = cloneState(state);
   cloned.legCustomValues = Object.freeze(cloned.legCustomValues);
   return Object.freeze(cloned);
 }
 
-function initialState({ minTick, reversalTicks }) {
+function initialState({
+  minTick,
+  reversalTicks,
+}: Pick<KagiState, "minTick" | "reversalTicks">): KagiState {
   return {
     version: KAGI_STATE_VERSION,
     projectorId: "kagi",
@@ -89,11 +146,11 @@ function initialState({ minTick, reversalTicks }) {
   };
 }
 
-function safeIntegerOrNull(value) {
+function safeIntegerOrNull(value: unknown): boolean {
   return value == null || Number.isSafeInteger(value);
 }
 
-function validActiveLeg(state) {
+function validActiveLeg(state: Readonly<KagiState>): boolean {
   if (state.direction === null) {
     return state.legStartTicks == null
       && state.legEndTicks == null
@@ -102,23 +159,58 @@ function validActiveLeg(state) {
       && state.legReversalKind == null
       && state.legTurnTicks == null;
   }
-  return Number.isSafeInteger(state.legStartTicks)
+  return typeof state.legStartTicks === "number"
+    && Number.isSafeInteger(state.legStartTicks)
+    && typeof state.legEndTicks === "number"
     && Number.isSafeInteger(state.legEndTicks)
     && state.legStartTicks !== state.legEndTicks
+    && state.legStartStyle !== null
     && STYLES.has(state.legStartStyle)
+    && typeof state.legOrder === "number"
     && Number.isSafeInteger(state.legOrder)
     && state.legOrder >= 0
     && state.legOrder < state.nextOrder
     && REVERSAL_KINDS.has(state.legReversalKind)
     && safeIntegerOrNull(state.legTurnTicks)
-    && state.legSourceFromTime != null
-    && state.legSourceToTime != null
+    && typeof state.legSourceFromTime === "number"
+    && Number.isFinite(state.legSourceFromTime)
+    && typeof state.legSourceToTime === "number"
+    && Number.isFinite(state.legSourceToTime)
     && (state.direction === "up"
       ? state.legEndTicks > state.legStartTicks
       : state.legEndTicks < state.legStartTicks);
 }
 
-function normalizeSeedState(seedState, { minTick, reversalTicks }) {
+function requiredInteger(value: number | null, name: string): number {
+  if (!Number.isSafeInteger(value)) throw new TypeError(`Kagi active state requires ${name}`);
+  return Number(value);
+}
+
+function requiredSourceTime(value: number | null, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`Kagi active state requires ${name}`);
+  }
+  return value;
+}
+
+function requiredDirection(direction: KagiDirection): Exclude<KagiDirection, null> {
+  if (direction === null) throw new TypeError("Kagi active state requires direction");
+  return direction;
+}
+
+function requiredStyle(style: KagiStyle | null): KagiStyle {
+  if (style === null) throw new TypeError("Kagi active state requires legStartStyle");
+  return style;
+}
+
+function displayOrder(row: DisplayRow): number | null {
+  return typeof row.time === "object" ? row.time.order : null;
+}
+
+function normalizeSeedState(
+  seedState: Readonly<KagiState> | null,
+  { minTick, reversalTicks }: Pick<KagiState, "minTick" | "reversalTicks">,
+): KagiState {
   if (seedState == null) return initialState({ minTick, reversalTicks });
   if (seedState.version !== KAGI_STATE_VERSION
     || seedState.projectorId !== "kagi"
@@ -140,17 +232,18 @@ function normalizeSeedState(seedState, { minTick, reversalTicks }) {
   return cloneState(seedState);
 }
 
-function finiteClose(row) {
-  if (row?.__whitespace || row?.close == null || row.close === "") return null;
-  const close = Number(row.close);
+function finiteClose(row: SourceBar): number | null {
+  const value: unknown = row?.close;
+  if (row?.__whitespace || value == null || value === "") return null;
+  const close = Number(value);
   return Number.isFinite(close) ? close : null;
 }
 
-function freezeSections(sections) {
+function freezeSections(sections: KagiSection[]): readonly Readonly<KagiSection>[] {
   return Object.freeze(sections.map((section) => Object.freeze(section)));
 }
 
-function projectionCustomValues(row, {
+function projectionCustomValues(row: SourceBar, {
   direction,
   provisional,
   reversalAmount,
@@ -160,7 +253,17 @@ function projectionCustomValues(row, {
   sourceFromTime,
   state,
   turnPrice,
-}) {
+}: {
+  direction: Exclude<KagiDirection, null>;
+  provisional: boolean;
+  reversalAmount: number;
+  reversalKind: KagiReversalKind;
+  reversalTicks: number;
+  sections: KagiSection[];
+  sourceFromTime: number;
+  state: KagiStyle;
+  turnPrice: number | null;
+}): ProjectionCustomValues {
   return {
     ...(row?.customValues || {}),
     chartProjection: Object.freeze({
@@ -193,8 +296,16 @@ function projectionCustomValues(row, {
  * strictly breaking the previous waist. Mid-leg style changes are retained in
  * customValues.kagi.sections without allocating another ordinal-axis item.
  */
-export class KagiProjector {
-  constructor({ minTick = 0.01, reversalTicks = 1 } = {}) {
+export class KagiProjector implements Projector<KagiState> {
+  readonly id: "kagi";
+  readonly oneToOne: false;
+  readonly supportsStatefulTailProjection: true;
+  readonly minTick: number;
+  readonly reversalTicks: number;
+  readonly pricePrecision: number;
+  readonly reversalAmount: number;
+
+  constructor({ minTick = 0.01, reversalTicks = 1 }: KagiProjectorOptions = {}) {
     this.id = "kagi";
     this.oneToOne = false;
     this.supportsStatefulTailProjection = true;
@@ -207,19 +318,25 @@ export class KagiProjector {
     }
   }
 
-  project(rows = [], options = {}) {
+  project(
+    rows: readonly SourceBar[] = [],
+    options: ProjectionProjectOptions<KagiState> = {},
+  ): DisplayRow[] {
     return this.projectWithState(rows, options).data;
   }
 
-  projectWithState(rows = [], { provisional = false, seedState = null } = {}) {
+  projectWithState(
+    rows: readonly SourceBar[] = [],
+    { provisional = false, seedState = null }: ProjectionProjectOptions<KagiState> = {},
+  ): ProjectionResult<KagiState> {
     const state = normalizeSeedState(seedState, this);
-    const data = [];
-    const checkpoints = [];
+    const data: DisplayRow[] = [];
+    const checkpoints: Readonly<KagiState>[] = [];
 
     const hasRetainedSource = (rows || []).some((row) => row?.time != null);
     if (seedState != null && state.direction !== null && hasRetainedSource) {
       this._upsertActiveLeg(data, state, {
-        time: state.legSourceToTime,
+        time: requiredSourceTime(state.legSourceToTime, "legSourceToTime"),
         customValues: state.legCustomValues,
       }, false);
     }
@@ -239,13 +356,14 @@ export class KagiProjector {
       }
 
       if (state.direction === null) {
-        if (Math.abs(closeTicks - state.anchorTicks) >= this.reversalTicks) {
+        const anchorTicks = requiredInteger(state.anchorTicks, "anchorTicks");
+        if (Math.abs(closeTicks - anchorTicks) >= this.reversalTicks) {
           this._startLeg(
             data,
             state,
             row,
-            closeTicks > state.anchorTicks ? "up" : "down",
-            state.anchorTicks,
+            closeTicks > anchorTicks ? "up" : "down",
+            anchorTicks,
             closeTicks,
             null,
             null,
@@ -266,7 +384,7 @@ export class KagiProjector {
     };
   }
 
-  _priceToTicks(price) {
+  _priceToTicks(price: number): number {
     const ticks = Math.round(price / this.minTick);
     if (!Number.isSafeInteger(ticks)) {
       throw new RangeError("Kagi source price exceeds safe integer tick range");
@@ -274,16 +392,17 @@ export class KagiProjector {
     return ticks;
   }
 
-  _ticksToPrice(ticks) {
+  _ticksToPrice(ticks: number): number {
     const price = Number((ticks * this.minTick).toFixed(this.pricePrecision));
     return Object.is(price, -0) ? 0 : price;
   }
 
-  _processUpLeg(data, state, row, closeTicks, provisional) {
-    if (closeTicks > state.legEndTicks) {
+  _processUpLeg(data: DisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
+    const legEndTicks = requiredInteger(state.legEndTicks, "legEndTicks");
+    if (closeTicks > legEndTicks) {
       this._extendActiveLeg(data, state, row, closeTicks, provisional);
-    } else if (state.legEndTicks - closeTicks >= this.reversalTicks) {
-      const turnTicks = state.legEndTicks;
+    } else if (legEndTicks - closeTicks >= this.reversalTicks) {
+      const turnTicks = legEndTicks;
       state.previousShoulderTicks = turnTicks;
       this._startLeg(
         data,
@@ -299,11 +418,12 @@ export class KagiProjector {
     }
   }
 
-  _processDownLeg(data, state, row, closeTicks, provisional) {
-    if (closeTicks < state.legEndTicks) {
+  _processDownLeg(data: DisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
+    const legEndTicks = requiredInteger(state.legEndTicks, "legEndTicks");
+    if (closeTicks < legEndTicks) {
       this._extendActiveLeg(data, state, row, closeTicks, provisional);
-    } else if (closeTicks - state.legEndTicks >= this.reversalTicks) {
-      const turnTicks = state.legEndTicks;
+    } else if (closeTicks - legEndTicks >= this.reversalTicks) {
+      const turnTicks = legEndTicks;
       state.previousWaistTicks = turnTicks;
       this._startLeg(
         data,
@@ -319,7 +439,7 @@ export class KagiProjector {
     }
   }
 
-  _extendActiveLeg(data, state, row, closeTicks, provisional) {
+  _extendActiveLeg(data: DisplayRow[], state: KagiState, row: SourceBar, closeTicks: number, provisional: boolean): void {
     state.legEndTicks = closeTicks;
     state.legSourceToTime = row.time;
     state.legCustomValues = cloneCustomValues(row.customValues);
@@ -328,15 +448,15 @@ export class KagiProjector {
   }
 
   _startLeg(
-    data,
-    state,
-    row,
-    direction,
-    startTicks,
-    endTicks,
-    reversalKind,
-    turnTicks,
-    provisional,
+    data: DisplayRow[],
+    state: KagiState,
+    row: SourceBar,
+    direction: Exclude<KagiDirection, null>,
+    startTicks: number,
+    endTicks: number,
+    reversalKind: KagiReversalKind,
+    turnTicks: number | null,
+    provisional: boolean,
   ) {
     const sourceFromTime = state.direction === null
       ? (state.pendingFromTime ?? row.time)
@@ -358,12 +478,12 @@ export class KagiProjector {
     this._upsertActiveLeg(data, state, row, provisional);
   }
 
-  _sectionsForState(state) {
-    const startTicks = state.legStartTicks;
-    const endTicks = state.legEndTicks;
-    const startStyle = state.legStartStyle;
-    let boundaryTicks = null;
-    let nextStyle = startStyle;
+  _sectionsForState(state: KagiState): KagiSectionsResult {
+    const startTicks = requiredInteger(state.legStartTicks, "legStartTicks");
+    const endTicks = requiredInteger(state.legEndTicks, "legEndTicks");
+    const startStyle = requiredStyle(state.legStartStyle);
+    let boundaryTicks: number | null = null;
+    let nextStyle: KagiStyle = startStyle;
 
     if (state.direction === "up"
       && startStyle === "yin"
@@ -390,7 +510,7 @@ export class KagiProjector {
       };
     }
 
-    const sections = [];
+    const sections: KagiSection[] = [];
     if (startTicks !== boundaryTicks) {
       sections.push({
         from: this._ticksToPrice(startTicks),
@@ -406,13 +526,20 @@ export class KagiProjector {
     return { sections, tailStyle: nextStyle };
   }
 
-  _upsertActiveLeg(data, state, row, provisional) {
-    const open = this._ticksToPrice(state.legStartTicks);
-    const close = this._ticksToPrice(state.legEndTicks);
+  _upsertActiveLeg(
+    data: DisplayRow[],
+    state: KagiState,
+    row: SourceBar,
+    provisional: boolean,
+  ): void {
+    const open = this._ticksToPrice(requiredInteger(state.legStartTicks, "legStartTicks"));
+    const close = this._ticksToPrice(requiredInteger(state.legEndTicks, "legEndTicks"));
+    const direction = requiredDirection(state.direction);
+    const legOrder = requiredInteger(state.legOrder, "legOrder");
     const { sections, tailStyle } = this._sectionsForState(state);
-    const point = {
+    const point: DisplayRow = {
       time: {
-        order: state.legOrder,
+        order: legOrder,
         sourceTime: row.time,
         sourceOrdinal: 0,
       },
@@ -421,13 +548,13 @@ export class KagiProjector {
       low: Math.min(open, close),
       close,
       customValues: projectionCustomValues(row, {
-        direction: state.direction,
+        direction,
         provisional,
         reversalAmount: this.reversalAmount,
         reversalKind: state.legReversalKind,
         reversalTicks: this.reversalTicks,
         sections,
-        sourceFromTime: state.legSourceFromTime,
+        sourceFromTime: requiredSourceTime(state.legSourceFromTime, "legSourceFromTime"),
         state: tailStyle,
         turnPrice: state.legTurnTicks == null
           ? null
@@ -435,7 +562,7 @@ export class KagiProjector {
       }),
     };
     const existingIndex = data.length - 1;
-    if (existingIndex >= 0 && data[existingIndex].time.order === state.legOrder) {
+    if (existingIndex >= 0 && displayOrder(data[existingIndex]) === legOrder) {
       data[existingIndex] = point;
     } else {
       data.push(point);

@@ -1,20 +1,46 @@
 import { sourceTimeFromAxisTime } from "./axisTime.js";
+import type {
+  AuxiliaryFanout,
+  AxisTime,
+  DisplayRow,
+  DisplaySourceTimeIndex,
+} from "./chartRepresentationTypes.js";
 
-const SUPPORTED_FANOUTS = new Set(["all", "last"]);
+type JsonRecord = Record<string, unknown>;
 
-function displaySourceTime(row) {
+interface TimedEntry extends JsonRecord {
+  time?: unknown;
+}
+
+const SUPPORTED_FANOUTS = new Set<AuxiliaryFanout>(["all", "last"]);
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function displaySourceTime(row: DisplayRow | null | undefined): number | null {
   return sourceTimeFromAxisTime(row?.time);
 }
 
-function projectTimedField(owner, field, index, fanout) {
+function projectTimedField(
+  owner: JsonRecord,
+  field: string,
+  index: DisplaySourceTimeIndex,
+  fanout: AuxiliaryFanout,
+): unknown {
   if (!Array.isArray(owner?.[field])) return owner?.[field];
   return projectSourceTimedEntries(owner[field], index, { fanout });
 }
 
-function projectGroups(groups, index, fanout, timedFields) {
+function projectGroups(
+  groups: unknown,
+  index: DisplaySourceTimeIndex,
+  fanout: AuxiliaryFanout,
+  timedFields: readonly string[],
+): unknown[] {
   if (!Array.isArray(groups)) return [];
   return groups.map((group) => {
-    if (!group || typeof group !== "object") return group;
+    if (!isRecord(group)) return group;
     const projected = { ...group };
     for (const field of timedFields) {
       if (Array.isArray(group[field])) {
@@ -31,18 +57,20 @@ function projectGroups(groups, index, fanout, timedFields) {
  * rows whose public axis time carries that exact sourceTime; lineage ranges
  * are deliberately ignored.
  */
-export function buildDisplaySourceTimeIndex(displayRows = []) {
-  const targets = [];
-  const bySourceTime = new Map();
-  const lastTargetIndexBySourceTime = new Map();
-  const displayTimeSet = new Set();
+export function buildDisplaySourceTimeIndex(
+  displayRows: readonly DisplayRow[] = [],
+): DisplaySourceTimeIndex {
+  const targets: DisplaySourceTimeIndex["targets"] = [];
+  const bySourceTime = new Map<number, AxisTime[]>();
+  const lastTargetIndexBySourceTime = new Map<number, number>();
+  const displayTimeSet = new Set<AxisTime>();
 
   for (const row of Array.isArray(displayRows) ? displayRows : []) {
     const time = row?.time;
     if (time != null) displayTimeSet.add(time);
 
     const sourceTime = displaySourceTime(row);
-    if (!Number.isFinite(sourceTime) || time == null) continue;
+    if (sourceTime === null || !Number.isFinite(sourceTime) || time == null) continue;
 
     const targetIndex = targets.length;
     targets.push({ sourceTime, time });
@@ -65,21 +93,25 @@ export function buildDisplaySourceTimeIndex(displayRows = []) {
  * use the last source entry, matching the indicator runtime's overwrite
  * semantics.
  */
-export function projectSourceTimedEntries(entries = [], index, { fanout = "all" } = {}) {
+export function projectSourceTimedEntries(
+  entries: readonly TimedEntry[] = [],
+  index: DisplaySourceTimeIndex,
+  { fanout = "all" }: { fanout?: AuxiliaryFanout } = {},
+): TimedEntry[] {
   if (!SUPPORTED_FANOUTS.has(fanout)) {
     throw new RangeError(`Unsupported derived auxiliary fanout: ${fanout}`);
   }
 
-  const sourceEntryByTime = new Map();
+  const sourceEntryByTime = new Map<number, TimedEntry>();
   for (const entry of Array.isArray(entries) ? entries : []) {
     const sourceTime = sourceTimeFromAxisTime(entry?.time);
-    if (!Number.isFinite(sourceTime)) continue;
+    if (sourceTime === null || !Number.isFinite(sourceTime)) continue;
     sourceEntryByTime.set(sourceTime, entry);
   }
 
   const targets = Array.isArray(index?.targets) ? index.targets : [];
   const lastTargetIndexBySourceTime = index?.lastTargetIndexBySourceTime;
-  const projected = [];
+  const projected: TimedEntry[] = [];
 
   for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
     const target = targets[targetIndex];
@@ -103,16 +135,19 @@ export function projectSourceTimedEntries(entries = [], index, { fanout = "all" 
  * target; markers and volume samples attach only to the final target emitted
  * by a source bar. Fill and horizontal-line definitions are preserved.
  */
-export function projectPaneDescriptorsToDisplay(panes = [], index) {
+export function projectPaneDescriptorsToDisplay(
+  panes: readonly unknown[] = [],
+  index: DisplaySourceTimeIndex,
+): unknown[] {
   if (!Array.isArray(panes)) return [];
 
   return panes.map((pane) => {
-    if (!pane || typeof pane !== "object") return pane;
+    if (!isRecord(pane)) return pane;
     const projected = { ...pane };
 
     if (Array.isArray(pane.lines)) {
       projected.lines = pane.lines.map((line) => {
-        if (!line || typeof line !== "object") return line;
+        if (!isRecord(line)) return line;
         const fanout = line.pane === "volume" ? "last" : "all";
         return {
           ...line,
@@ -137,7 +172,10 @@ export function projectPaneDescriptorsToDisplay(panes = [], index) {
   });
 }
 
-export function projectBarcolorGroupsToDisplay(groups = [], index) {
+export function projectBarcolorGroupsToDisplay(
+  groups: readonly unknown[] = [],
+  index: DisplaySourceTimeIndex,
+): unknown[] {
   return projectGroups(groups, index, "all", ["data"]);
 }
 
@@ -146,18 +184,22 @@ export function projectBarcolorGroupsToDisplay(groups = [], index) {
  * its exact sourceTime. This intentionally performs only current/next lookup
  * so high-frequency crosshair resolution remains O(1).
  */
-export function isLastDisplayTargetForSourceTime(displayRows, index) {
+export function isLastDisplayTargetForSourceTime(
+  displayRows: readonly DisplayRow[] | null | undefined,
+  index: unknown,
+): boolean {
   if (
     !Array.isArray(displayRows)
     || !Number.isInteger(index)
-    || index < 0
-    || index >= displayRows.length
+    || Number(index) < 0
+    || Number(index) >= displayRows.length
   ) {
     return false;
   }
 
-  const sourceTime = displaySourceTime(displayRows[index]);
+  const resolvedIndex = Number(index);
+  const sourceTime = displaySourceTime(displayRows[resolvedIndex]);
   if (!Number.isFinite(sourceTime)) return false;
-  if (index === displayRows.length - 1) return true;
-  return displaySourceTime(displayRows[index + 1]) !== sourceTime;
+  if (resolvedIndex === displayRows.length - 1) return true;
+  return displaySourceTime(displayRows[resolvedIndex + 1]) !== sourceTime;
 }

@@ -1,12 +1,19 @@
+import type {
+  DisplayRow,
+  OhlcValues,
+  ProjectionCustomValues,
+  SourceBar,
+} from "../chartRepresentationTypes.js";
+
 export const PROJECTION_METADATA_KEY = "chartProjection";
 
-function finiteNumber(value) {
+function finiteNumber(value: unknown): number | null {
   if (value == null || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-export function sourceOhlc(row) {
+export function sourceOhlc(row: SourceBar | DisplayRow | null | undefined): OhlcValues | null {
   if (row?.__whitespace) return null;
   const open = finiteNumber(row?.open);
   const high = finiteNumber(row?.high);
@@ -17,11 +24,15 @@ export function sourceOhlc(row) {
     : { open, high, low, close };
 }
 
-export function projectedOhlc(row) {
+export function projectedOhlc(row: DisplayRow | null | undefined): OhlcValues | null {
   return sourceOhlc(row);
 }
 
-export function projectionMetadata(row, projectorId, { synthetic = false } = {}) {
+export function projectionMetadata(
+  row: SourceBar,
+  projectorId: string,
+  { synthetic = false }: { synthetic?: boolean } = {},
+): ProjectionCustomValues {
   return {
     ...(row?.customValues || {}),
     [PROJECTION_METADATA_KEY]: Object.freeze({
@@ -34,8 +45,12 @@ export function projectionMetadata(row, projectorId, { synthetic = false } = {})
   };
 }
 
-export function whitespaceDisplayRow(row, projectorId, options = {}) {
-  const point = {
+export function whitespaceDisplayRow(
+  row: SourceBar,
+  projectorId: string,
+  options: { synthetic?: boolean } = {},
+): DisplayRow {
+  const point: DisplayRow = {
     time: row?.time,
     customValues: projectionMetadata(row, projectorId, options),
   };
@@ -43,7 +58,11 @@ export function whitespaceDisplayRow(row, projectorId, options = {}) {
   return point;
 }
 
-export function withProjectionMetadata(row, projectorId, options = {}) {
+export function withProjectionMetadata(
+  row: SourceBar,
+  projectorId: string,
+  options: { synthetic?: boolean } = {},
+): DisplayRow {
   return {
     ...row,
     customValues: projectionMetadata(row, projectorId, options),

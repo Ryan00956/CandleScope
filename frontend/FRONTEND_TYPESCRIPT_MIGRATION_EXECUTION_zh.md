@@ -1893,7 +1893,7 @@ rg --files src -g "*.js" -g "*.jsx"
 | T8 | 已完成 | `69576e8`…`c37113a` | 通过 | 747/747 通过 | 通过 | basic/release 通过 | 13 个既有 owner 迁为 TS；raw indicator HTTP/WS payload、range/revision、cache/output 与 Monaco contract 已收紧；专项 60/60 通过 |
 | T9 | 已完成 | `166264d` | 通过 | 748/748 通过 | 通过 | drawing-check 通过 | 22 个既有 drawing owner 迁为 TS；统一 anchor、saved schema、primitive 与交互 controller contract；drawing 专项 159/159 通过 |
 | T10 | 已完成 | `e1aae04` | 通过 | 748/748 通过 | 通过 | basic/overlay-heavy/drawing-check 通过 | 44 个既有 feature runtime/hook owner 迁为 TS；aggregate contract、ref/timer/browser handle 与 raw payload 边界已类型化；指标专项 53/53、drawing 专项 159/159 通过 |
-| T11 | 待执行 |  |  |  |  |  |  |
+| T11 | 已完成 | `e3af38a` | 通过 | 748/748 通过 | 通过 | export/release 通过 | 49 个既有 feature UI/ordinary/app leaf owner 迁为 TS/TSX；具名 Props、React event/ref、lazy module 与 UI raw payload 边界已类型化；export 3/3、15 种图表、drawing persistence 全通过 |
 | T12 | 待执行 |  |  |  |  |  |  |
 | T13 | 待执行 |  |  |  |  |  |  |
 
@@ -2152,6 +2152,24 @@ rg --files src -g "*.js" -g "*.jsx"
 | Smoke 命令 | 本机 npm 对 `npm run smoke -- --url ...` 的参数转发会误吞 `--url`，因此按同一脚本语义直接执行 `npx tsx scripts/smoke.mjs --url http://127.0.0.1:15181/`，并分别追加 `--overlay-heavy`、`--drawing-check` |
 | 范围约束 | 未修改缓存预算、K 线加载/重试、指标计算/重连策略、drawing UX 或 settings 行为；未拆 `useIndicatorRuntime` 与 `drawingInteractionController`；下一阶段只迁 feature UI 与普通组件 |
 | 新增 `any` / TS directive suppression | 0；T10 路径无显式 `any`、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error`、`as unknown as` 或非空断言 |
+
+### T11 feature UI 和普通组件验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `4e11f6d` |
+| 完成 Commit | `e3af38a` |
+| 生产模块 | 计划中的 49 个既有 JS/JSX owner 全部迁为 TS/TSX，对应旧 owner 残留 0；覆盖 app leaf 5、export 2、indicators 2、watchlist 1、symbol-search feature 2、drawings feature wrapper 1、settings shell 3、compatibility/ordinary components 7、alerts panel 1、drawing components/controller 9、settings components 8、settings panel wrappers 8 个 owner |
+| Component contract | 所有实际 component 均声明或透传具名 Props type；native button 事件复用 React component props，form、keyboard、mouse、drag/drop、context-menu 与 pointer callback 使用对应 React 事件类型；children、nullable refs、timer、CSS custom property 和 callback 返回值显式建模 |
+| Feature UI contract | indicators、drawings、export、watchlist、symbol search、settings 与 alerts UI 直接复用 T8-T10 runtime/domain contract；drawing tool variant 使用泛型 ID 保持 chart type、cursor、line、shape、position 回调精度；settings panel view model 使用各 panel Props 组合，不再以匿名 `Record<string, unknown>` 穿过 JSX spread |
+| 外部数据边界 | watchlist price tick、proxy test、cache diagnostics、maintenance、database inventory、exchange capabilities 与 alert evaluator/history payload 在对应 feature runtime/parser 边界收窄；component 层未直接依赖 service，architecture 首次提示的两个 type-only service import 已改由 settings feature runtime 重新导出 |
+| Lazy/chunk 边界 | `lazySurfaceLoaders`、`LazyFeatureSurfaces`、`ChartWorkspace` 与各 compatibility wrapper 保持原 default export、dynamic import 路径和 Suspense 条件；Vite build 仍独立产出 ExportPanel、DrawingToolbar、WatchlistSidebar、AlertsPanel、IndicatorPanel、SettingsModal、SymbolSearchModal 与 DrawingEngineHost chunks，未把 feature UI 合并进首屏 entry |
+| 完整门禁 | `npm test` 748/748 通过；`npm run check` 完整通过：architecture 0 个 migration allowlist 活跃项、typecheck、lint、748/748 tests 和 Vite 7.3.1 build 均成功，295 modules transformed |
+| Export smoke | 隔离 Vite `15182` 实例通过；1500 bars、connected/live；chart PNG、main-pane JPEG、page WebP 3/3 cases 通过，下载 magic/尺寸、preview invalidation、drawing hide/restore 与 panel close 均通过；drawing 创建后持久化 1 个、future anchor 已保存、reload 后恢复 2 个；failures/warnings/exceptions 为 0 |
+| Release smoke | 同一隔离实例完整执行 chart-type matrix、export matrix、drawing-check、overlay-heavy；15 种图表菜单/切换步骤、histogram persistence、candlestick restoration、MA/VOL/BOLL/RSI overlay/pane、export 3/3 与 drawing persistence 全部通过；failures/warnings/exceptions 为 0 |
+| Smoke 命令 | 本机继续使用与 npm scripts 等价的直接脚本调用：`npx tsx scripts/smoke.mjs --url http://127.0.0.1:15182/ --export-matrix --drawing-check --overlay-heavy`；release 追加 `--chart-type-matrix`；验证后已停止隔离 Vite，端口释放 |
+| 范围约束 | 未迁 `components/SingleChartPanes.jsx`、`singleChartPaneLifecycle.js`、`app/view-models/*.js`、`appShellViewModel.js`、`AppProviders.jsx`、`AppShell.jsx`、`app/App.jsx`、`src/App.jsx` 或 `src/main.jsx`；这些 owner 留给 T12；未改目录、CSS、布局、lazy 触发条件或组件业务 API |
+| 新增 `any` / TS directive suppression | 0；T11 路径无显式 `any` type、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error`、`as unknown as` 或非空断言；仅 select/union 边界使用已验证的窄 union assertion |
 
 ### Suppression ledger
 

@@ -1,4 +1,12 @@
 import { parseIntervalParts, parseIntervalSeconds } from "../../utils/intervals.js";
+import type { KlineBar } from "../market-data/marketDataTypes.js";
+import type {
+  DeferredRightCatchupPlan,
+  IndicatorDefinition,
+  IndicatorParams,
+  IndicatorVisibleRange,
+  InitialHostedRange,
+} from "./indicatorTypes.js";
 
 const INITIAL_VISIBLE_FALLBACK_BARS = 600;
 const INITIAL_VISIBLE_PADDING_MIN_BARS = 120;
@@ -7,17 +15,17 @@ const INITIAL_VISIBLE_PADDING_MAX_BARS = 1_000;
 
 export const RIGHT_CATCHUP_GRACE_MS = 1_500;
 
-function normalizeRangeBoundary(value) {
+function normalizeRangeBoundary(value: unknown): number | null {
   const normalized = Math.floor(Number(value));
   return Number.isFinite(normalized) && normalized > 0 ? normalized : null;
 }
 
-function paramInt(params, key, fallback) {
-  const value = Number.parseInt(params?.[key], 10);
+function paramInt(params: IndicatorParams, key: string, fallback: number): number {
+  const value = Number.parseInt(String(params[key] ?? ""), 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-export function estimateOutputWarmupBars(indicator) {
+export function estimateOutputWarmupBars(indicator: IndicatorDefinition | null | undefined): number {
   const name = String(indicator?.engineName || "").toUpperCase();
   const params = indicator?.params || {};
   if (name === "VOL") return 0;
@@ -32,14 +40,14 @@ export function estimateOutputWarmupBars(indicator) {
   return Math.max(0, paramInt(params, "warmup", 0));
 }
 
-function maxHostedWarmupBars(hostedIndicators = []) {
+function maxHostedWarmupBars(hostedIndicators: readonly IndicatorDefinition[] = []): number {
   return hostedIndicators.reduce(
     (maxWarmup, indicator) => Math.max(maxWarmup, estimateOutputWarmupBars(indicator)),
     0,
   );
 }
 
-function lowerBoundTime(chartData, target) {
+function lowerBoundTime(chartData: readonly KlineBar[], target: number): number {
   let lo = 0;
   let hi = chartData.length;
   while (lo < hi) {
@@ -50,7 +58,7 @@ function lowerBoundTime(chartData, target) {
   return lo;
 }
 
-function upperBoundTime(chartData, target) {
+function upperBoundTime(chartData: readonly KlineBar[], target: number): number {
   let lo = 0;
   let hi = chartData.length;
   while (lo < hi) {
@@ -61,7 +69,10 @@ function upperBoundTime(chartData, target) {
   return lo;
 }
 
-function resolveVisibleIndexesFromTime(chartData, timeRange) {
+function resolveVisibleIndexesFromTime(
+  chartData: readonly KlineBar[],
+  timeRange: IndicatorVisibleRange["time"],
+): { startIndex: number; endIndex: number } | null {
   const from = normalizeRangeBoundary(timeRange?.from);
   const to = normalizeRangeBoundary(timeRange?.to);
   if (!from || !to || from > to || !Array.isArray(chartData) || chartData.length === 0) return null;
@@ -76,7 +87,10 @@ function resolveVisibleIndexesFromTime(chartData, timeRange) {
   return { startIndex, endIndex };
 }
 
-function resolveVisibleIndexesFromLogical(chartData, logicalRange) {
+function resolveVisibleIndexesFromLogical(
+  chartData: readonly KlineBar[],
+  logicalRange: IndicatorVisibleRange["logical"],
+): { startIndex: number; endIndex: number } | null {
   if (!logicalRange || !Array.isArray(chartData) || chartData.length === 0) return null;
   const from = Math.floor(Number(logicalRange.from));
   const to = Math.ceil(Number(logicalRange.to));
@@ -88,17 +102,25 @@ function resolveVisibleIndexesFromLogical(chartData, logicalRange) {
   return { startIndex, endIndex };
 }
 
-function resolveVisibleIndexes(chartData, visibleRange) {
+function resolveVisibleIndexes(
+  chartData: readonly KlineBar[],
+  visibleRange: IndicatorVisibleRange | null | undefined,
+): { startIndex: number; endIndex: number } | null {
   return resolveVisibleIndexesFromTime(chartData, visibleRange?.time)
     || resolveVisibleIndexesFromLogical(chartData, visibleRange?.logical);
 }
 
-export function inferFixedIntervalClosedThrough(chartData, interval, nowMs = Date.now()) {
+export function inferFixedIntervalClosedThrough(
+  chartData: readonly KlineBar[],
+  interval: string,
+  nowMs = Date.now(),
+): number | null {
   const parts = parseIntervalParts(interval);
   const step = parseIntervalSeconds(interval);
   const nowSec = Math.floor(Number(nowMs) / 1_000);
   if (
     parts?.unit === "M"
+    || typeof step !== "number"
     || !Number.isFinite(step)
     || step <= 0
     || !Number.isFinite(nowSec)
@@ -118,7 +140,11 @@ export function inferFixedIntervalClosedThrough(chartData, interval, nowMs = Dat
   return firstTime ? Math.max(1, firstTime - step) : null;
 }
 
-export function resolveInitialHostedRange(chartData, hostedIndicators, visibleRange) {
+export function resolveInitialHostedRange(
+  chartData: readonly KlineBar[],
+  hostedIndicators: readonly IndicatorDefinition[],
+  visibleRange: IndicatorVisibleRange | null | undefined,
+): InitialHostedRange | null {
   if (!Array.isArray(chartData) || chartData.length === 0) return null;
   const visibleIndexes = resolveVisibleIndexes(chartData, visibleRange) || {
     startIndex: Math.max(0, chartData.length - INITIAL_VISIBLE_FALLBACK_BARS),
@@ -149,7 +175,12 @@ export function resolveInitialHostedRange(chartData, hostedIndicators, visibleRa
   };
 }
 
-export function planDeferredRightCatchup(previous, next, nowMs, graceMs = RIGHT_CATCHUP_GRACE_MS) {
+export function planDeferredRightCatchup(
+  previous: Partial<DeferredRightCatchupPlan> | null | undefined,
+  next: Partial<DeferredRightCatchupPlan> | null | undefined,
+  nowMs: number,
+  graceMs = RIGHT_CATCHUP_GRACE_MS,
+): DeferredRightCatchupPlan | null {
   if (!next?.key || !next?.signature || !next?.range) return null;
   const firstSeenAt = previous?.key === next.key
     ? Number(previous.firstSeenAt || nowMs)
@@ -157,6 +188,9 @@ export function planDeferredRightCatchup(previous, next, nowMs, graceMs = RIGHT_
   const elapsedMs = Math.max(0, nowMs - firstSeenAt);
   return {
     ...next,
+    key: next.key,
+    signature: next.signature,
+    range: next.range,
     firstSeenAt,
     delayMs: Math.max(0, graceMs - elapsedMs),
   };

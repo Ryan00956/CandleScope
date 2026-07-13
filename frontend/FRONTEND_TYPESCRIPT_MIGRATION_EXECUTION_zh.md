@@ -1894,7 +1894,7 @@ rg --files src -g "*.js" -g "*.jsx"
 | T9 | 已完成 | `166264d` | 通过 | 748/748 通过 | 通过 | drawing-check 通过 | 22 个既有 drawing owner 迁为 TS；统一 anchor、saved schema、primitive 与交互 controller contract；drawing 专项 159/159 通过 |
 | T10 | 已完成 | `e1aae04` | 通过 | 748/748 通过 | 通过 | basic/overlay-heavy/drawing-check 通过 | 44 个既有 feature runtime/hook owner 迁为 TS；aggregate contract、ref/timer/browser handle 与 raw payload 边界已类型化；指标专项 53/53、drawing 专项 159/159 通过 |
 | T11 | 已完成 | `e3af38a` | 通过 | 748/748 通过 | 通过 | export/release 通过 | 49 个既有 feature UI/ordinary/app leaf owner 迁为 TS/TSX；具名 Props、React event/ref、lazy module 与 UI raw payload 边界已类型化；export 3/3、15 种图表、drawing persistence 全通过 |
-| T12 | 待执行 |  |  |  |  |  |  |
+| T12 | 已完成 | `15683a5` | 通过 | 748/748 通过 | 通过 | release 通过 | 13 个剩余生产 owner 迁为 TS/TSX，新增 app shell 具名聚合 contract；生产 JS/JSX 残留 0；15 种图表、export 3/3、drawing persistence 全通过 |
 | T13 | 待执行 |  |  |  |  |  |  |
 
 ### T0 基线记录
@@ -2171,6 +2171,25 @@ rg --files src -g "*.js" -g "*.jsx"
 | 范围约束 | 未迁 `components/SingleChartPanes.jsx`、`singleChartPaneLifecycle.js`、`app/view-models/*.js`、`appShellViewModel.js`、`AppProviders.jsx`、`AppShell.jsx`、`app/App.jsx`、`src/App.jsx` 或 `src/main.jsx`；这些 owner 留给 T12；未改目录、CSS、布局、lazy 触发条件或组件业务 API |
 | 新增 `any` / TS directive suppression | 0；T11 路径无显式 `any` type、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error`、`as unknown as` 或非空断言；仅 select/union 边界使用已验证的窄 union assertion |
 
+### T12 `SingleChartPanes`、app 和入口验证记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始 Commit | `9581f6d` |
+| 完成 Commit | `15683a5` |
+| 生产模块 | 13 个剩余生产 JS/JSX owner 全部迁为 TS/TSX：`SingleChartPanes`、pane lifecycle、5 个 view-model、app shell view-model、`AppProviders`、`AppShell`、app `App`、src `App` 与 `main`；另新增 `appShellContracts.ts`；生产 JS/JSX 残留 0，仅测试文件留给 T13 |
+| `SingleChartPanes` contract | 导出的 `SingleChartPanesProps` 覆盖 session/chart type、market data、indicator/pane、drawing、viewport/price scale、export 与 callback 区域；没有用 `Record<string, any>` 或整体 props cast；chart workspace 直接消费 `SingleChartPanesProps` 与 `ChartSurfaceHandle` |
+| Chart surface contract | `getVisibleRange`、drawing style、chart/series/projection/pane refs、timer/state 和 imperative methods 均显式类型化；indicator row 的必需 time/value、projection helper 泛型、drawing style/fib nullable、market display/crosshair shape 等真实 owner contract 冲突在各自 owner 收口 |
+| App composition | 5 个 view-model 与 app shell builder 的输入、输出分别具名，公共聚合 contract 集中于 `appShellContracts.ts`；feature runtime 只传给合法 consumer，App 继续只负责装配 feature 与 view-model |
+| Lifecycle invariants | 未拆 `SingleChartPanes`，未调整 chart effect 顺序、lazy 触发、CSS/布局、props 语义或性能路径；`main.tsx` 依照既有入口行为处理 root nullability，没有混入新的启动失败策略 |
+| 专项验证 | `SingleChartPanes.test.js` 与 `chartWorkspaceViewModel.test.js` 合计 18/18 通过 |
+| 完整门禁 | `npm run check` 完整通过：architecture 0 个 migration allowlist 活跃项、typecheck、lint、748/748 tests 和 Vite 7.3.1 build 均成功，295 modules transformed；feature lazy chunks 保持独立 |
+| Production residual | `src` 中仅 `__tests__` / `.test.js` 尚为 JS；排除测试后的生产 `.js/.jsx` 数量为 0 |
+| Release smoke | 隔离 Vite `15182` 实例通过；1500 bars、connected/live；15 种图表、histogram persistence、candlestick restoration、MA/VOL/BOLL/RSI overlay/pane、export 3/3 与 drawing persistence 全通过；drawing 创建后持久化 1 个、future anchor 已保存、reload 后恢复 2 个；failures/warnings/exceptions 为 0 |
+| Smoke 命令 | `npx tsx scripts/smoke.mjs --url http://127.0.0.1:15182/ --chart-type-matrix --export-matrix --drawing-check --overlay-heavy`；验证后已停止隔离 Vite，端口释放 |
+| 新增 `any` / TS directive suppression | 0；T12 路径无显式 `any` type、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error` 或 `as unknown as`；Lightweight Charts 原生/ordinal 不变泛型只在 factory 边界使用两个局部 assertion，并登记 `T12-LWC-04`；入口 root assertion 保持迁移前失败语义，不向 App contract 扩散 |
+| 范围约束 | 测试迁移、`allowJs: false`、type-aware ESLint、canary/临时设施删除与 suppression 最终清零均留给 T13；本阶段未修改严格编译配置 |
+
 ### Suppression ledger
 
 | ID | 文件 | suppression/cast | 原因 | 保护测试 | 最迟删除 Phase | 状态 |
@@ -2180,6 +2199,7 @@ rg --files src -g "*.js" -g "*.jsx"
 | T6-LWC-01 | `src/chart-adapter/ordinalHorzScaleBehavior.ts` | 默认 time behavior options 局部断言为 ordinal `ChartOptionsImpl` | Lightweight Charts 只导出同一 behavior contract 的不同 horizontal item 泛型；运行时 options 结构相同，适配只存在于 custom ordinal behavior | ordinal behavior 7/7；chart type matrix | T13 | 活跃 |
 | T6-LWC-02 | `src/chart-adapter/seriesLifecycle.ts` | 动态 series factory 结果从 `unknown` 局部断言为 adapter handle | 运行时在 15 种 built-in/custom series 间选择，库的互斥 series 泛型无法由动态 descriptor 单次穷尽；断言限制在两个 factory helper | main series model 22/22；series lifecycle 9/9；chart type matrix | T13 | 活跃 |
 | T6-LWC-03 | `src/chart-adapter/overlaySeriesRenderer.ts` | `0 as LineWidth` 与数字 line style 局部断言 | 库声明的 `LineWidth` 排除运行时支持的 0；现有 area fill 以 0 隐藏边线，hline payload 仍使用持久化数字 style | overlay renderer 专项；export/drawing/overlay-heavy smoke | T13 | 活跃 |
+| T12-LWC-04 | `src/chart-adapter/lightweightChartSurface.ts` | 原生 `IChartApi` 与 ordinal `IChartApiBase<OrdinalAxisTime>` 在工厂出口局部断言为 `IChartApiBase<ChartTime>` | Lightweight Charts 的 horizontal item 泛型不变，但 adapter contract 需要在同一生命周期路径承载 time/ordinal 两种互斥实例；断言限制在两个 chart factory return，不进入 `SingleChartPanes` 或 App | adapter/unit 全量；chart type matrix；export/drawing/overlay-heavy smoke | T13 | 活跃 |
 
 ### 行为问题旁路记录
 

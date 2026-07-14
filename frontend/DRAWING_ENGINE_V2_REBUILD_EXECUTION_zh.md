@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0 已完成（2026-07-14）；Phase 1 尚未开始。
+状态：Phase 0、Phase 1 已完成（2026-07-14）；Phase 2 尚未开始。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -52,7 +52,7 @@ git -C "H:\program\CandleScope" worktree list
 | Phase | 内容 | 当前状态 |
 |---|---|---|
 | 0 | 固定重负载基准与 instrumentation | 已完成（before baseline 已固化） |
-| 1 | 原子坐标快照与批量 anchor resolver | 未开始 |
+| 1 | 原子坐标快照与批量 anchor resolver | 已完成（batch baseline 已固化） |
 | 2 | DrawingDocumentStore、commands 与 codec | 未开始 |
 | 3 | Scene shadow、culling 与 render plan | 未开始 |
 | 4 | 单一 DrawingScenePrimitive | 未开始 |
@@ -535,31 +535,31 @@ npm run perf:drawing -- --url http://127.0.0.1:15173/
 
 ### 逐步任务
 
-- [ ] 定义 <code>DrawingFrameSnapshot</code> revision contract。
-- [ ] 把现有 <code>drawingCoordinateKey</code> 纳入 snapshot generation。
-- [ ] 每个 data revision 只验证一次 numeric series data。
-- [ ] 建立 Float64 time index 和 exact time lookup。
-- [ ] 普通时间点提供 exact lookup、binary search 和有序 batch merge-walk。
-- [ ] derived ordinal 复用现有 <code>DrawingLineageIndex</code>，缓存 same-time ordinal lookup。
-- [ ] source anchor 到 logical 的结果按 entity geometry revision + data/projection/lineage revision 缓存。
-- [ ] scalar API 暂时保留，内部可以委托 batch resolver，确保旧调用方不同时爆炸式修改。
-- [ ] 移除 point projector 内的 <code>data.every(...)</code>。
-- [ ] 区分纯 anchor resolution 与必须调用 LWC API 的 final screen projection。
-- [ ] 应用几何命中方法改名为 <code>hitTestGeometry</code>，不再冒充 LWC primitive <code>hitTest</code>。
-- [ ] legacy primitive 如果保留 LWC hitTest，只能返回正确 contract 或完全不实现。
-- [ ] 增加临时 coordinate projector 开关，便于 scalar/batch parity 对照。
+- [x] 定义 <code>DrawingFrameSnapshot</code> revision contract。
+- [x] 把现有 <code>drawingCoordinateKey</code> 纳入 snapshot generation。
+- [x] 每个 data revision 只验证一次 numeric series data。
+- [x] 建立 Float64 time index 和 exact time lookup。
+- [x] 普通时间点提供 exact lookup、binary search 和有序 batch merge-walk。
+- [x] derived ordinal 复用现有 <code>DrawingLineageIndex</code>，缓存 same-time ordinal lookup。
+- [x] source anchor 到 logical 的结果按 entity geometry revision + data/projection/lineage revision 缓存。
+- [x] scalar API 暂时保留，内部可以委托 batch resolver，确保旧调用方不同时爆炸式修改。
+- [x] 移除 point projector 内的 <code>data.every(...)</code>。
+- [x] 区分纯 anchor resolution 与必须调用 LWC API 的 final screen projection。
+- [x] 应用几何命中方法改名为 <code>hitTestGeometry</code>，不再冒充 LWC primitive <code>hitTest</code>。
+- [x] legacy primitive 如果保留 LWC hitTest，只能返回正确 contract 或完全不实现。
+- [x] 增加临时 coordinate projector 开关，便于 scalar/batch parity 对照。
 
 ### 正确性测试
 
-- [ ] exact time。
-- [ ] fractional source time。
-- [ ] time + stale logical 时仍以 time 为准。
-- [ ] absolute future time。
-- [ ] same-time ordinal。
-- [ ] resolved/unresolved lineage span。
-- [ ] Renko、Kagi、P&F、Line Break。
-- [ ] data prepend、gap recovery、interval/chart-type switch。
-- [ ] normal/log/percentage/indexed/inverted price mode 的最终屏幕 parity。
+- [x] exact time。
+- [x] fractional source time。
+- [x] time + stale logical 时仍以 time 为准。
+- [x] absolute future time。
+- [x] same-time ordinal。
+- [x] resolved/unresolved lineage span。
+- [x] Renko、Kagi、P&F、Line Break。
+- [x] data prepend、gap recovery、interval/chart-type switch。
+- [x] normal/log/percentage/indexed/inverted price mode 的最终屏幕 parity。
 
 batch 与当前正确 scalar 结果的误差门：
 
@@ -1288,7 +1288,7 @@ Decision:
 ~~~text
 Phase: 0 — 固定重负载基准与 instrumentation
 Date: 2026-07-14
-Commit: 3067e1b54b54dd00a4a9ed77af1f4b617b232a72（报告如实记录 dirty=true；本次未经用户授权未提交）
+Commit: 5cfc84d3c3131e527fc10a9389edde9de99bdd3d（before 报告在 checkpoint 前生成，因此 source commit 为 3067e1b5 且如实记录 dirty=true）
 Mode: legacy
 Files: scripts/drawing-performance*.mjs、scripts/mock-api.mjs、src/features/drawings/performance/、legacy freehand/line/shape/interaction/selection/persistence instrumentation、package/vite 配置、docs/perf-baselines/drawing-engine-v2/
 Tests: npm.cmd run check 通过：architecture、typecheck、ESLint、805/805 tests、production build；Phase 0 定向测试 36/36 通过
@@ -1296,7 +1296,25 @@ Smoke: production mock + Vite preview 跑通；六场景 smoke 与 active 128/40
 Perf baseline: docs/perf-baselines/drawing-engine-v2/baseline-before-3067e1b5-20260714T083202Z-bars1500-dpr1.json
 Perf result: phase0Acceptance=true；Chrome/150.0.7871.101，1440×900，DPR 1，1500 bars，59.88Hz；6 场景各 1 warm-up + 5 measured；raw dropped=0、Event Timing 122 samples、diagnostic runs=0。64×512/32768 点场景 drawing-main p95/p99=573.3/656.1ms、frame p95/p99=650/750ms；active 4096 + 200 background entities 场景 drawing-main p95/p99=78.4/103.5ms、frame p95/p99=83.4/116.7ms。legacy target assessment 按预期未通过。
 Correctness parity: 本阶段未改变 SavedDrawing/freehand codec 或可见绘图语义；五次 active measured run 均处理 4096 输入，rawPoints 峰值 4497、visibleEntities 201、requestUpdateCount 4099，mouseup 后保存并 reload 为 201 entities / 1217 canonical points；36 个 run 的实体、类型、点数摘要均一致。
-Known limitations: 本阶段只冻结 legacy before 基线，不修复已测得的性能热点。主基线为 1500 bars / DPR 1；runner 已支持 --bars/--dpr，10000 bars 与 DPR 1.5/2 仍属于第 7 节的全局发布矩阵。legacy 重场景 p95 相对范围约 40%–60%，与单 run wall time/丢帧档位同步，非丢样或诊断错误。Phase 1 尚未开始。
+Known limitations: 本阶段只冻结 legacy before 基线，不修复已测得的性能热点。主基线为 1500 bars / DPR 1；runner 已支持 --bars/--dpr，10000 bars 与 DPR 1.5/2 仍属于第 7 节的全局发布矩阵。legacy 重场景 p95 相对范围约 40%–60%，与单 run wall time/丢帧档位同步，非丢样或诊断错误。
 Rollback verified: 回滚边界已核对为 benchmark、feature-local counters、instrumentation 调用点与 package/vite/mock 配置；未在当前未提交工作区执行破坏性回滚演练，绘图数据无需迁移。
-Decision: Phase 0 PASS；正式 before baseline 已冻结；Phase 1 未开始。
+Decision: Phase 0 PASS；正式 before baseline 已冻结；checkpoint 已提交。
+~~~
+
+### Phase 1 执行记录
+
+~~~text
+Phase: 1 — 原子坐标快照与批量 anchor resolver
+Date: 2026-07-14
+Commits: aa36dc227028c3614845b9c9ced075645a48c0ce（核心实现）；9a4b4c550376a6462b5611c03eb3cc94a5732b45（验收 runner 对齐）
+Mode: legacy renderer + batch coordinate projector；保留 scalar/parity 回滚开关
+Files: src/chart-adapter/drawingCoordinateIndex.ts、drawingFrameSnapshot.ts、coordinateBridge.ts、chartInstanceBridge.ts、SingleChartPanes.tsx、DrawingLineageIndex、freehand model、8 类 legacy primitives、对应 tests、scripts/drawing-performance.mjs、.env.example
+Tests: npm.cmd run check 通过：architecture migration allowlist=0、双 TypeScript、ESLint、840/840 tests、production build；坐标/lineage/primitive/price parity 定向回归通过
+Smoke: production build 下 parity projector 的 64×512 重场景 smoke 通过；execution、instrumentation、restore、geometry projection coverage 全部通过
+Perf baseline: docs/perf-baselines/drawing-engine-v2/baseline-after-9a4b4c55-20260714T095757Z-bars1500-dpr1.json；对照 baseline-before-3067e1b5-20260714T083202Z-bars1500-dpr1.json
+Perf result: phase1Acceptance=true、phase1Comparison=true、对照上下文全部可比；Chrome/150.0.7871.101，1440×900，DPR 1，1500 bars，59.88Hz；6 场景各 1 warm-up + 5 measured；raw dropped=0、Event Timing 112 samples、diagnostic runs=0、restore failures=0。64×512/32768 点场景 ScriptDuration p95 50.396→8.726ms（下降 82.69%），drawing-main p95 573.3→98.3ms（下降 82.85%）、p99=106.4ms，frame p95/p99=100.1/116.7ms；该 viewport-only 场景 anchorResolveCount p95/max=0/0。
+Correctness parity: exact/fractional/source time、time 优先于 stale logical、absolute future time、same-time ordinal、resolved/unresolved lineage span、Renko/Kagi/P&F/Line Break、prepend/gap/interval/chart-type 切换均有回归；normal/log/percentage/indexed/inverted 五种 price mode 中点、端点、handle ≤0.25 CSS px，自由笔 render plan ≤0.5 CSS px，canonical anchor 完全一致。旧 scalar API 仍可用，正常路径为 batch，parity 模式会双算并报告偏差。
+Known limitations: Phase 1 只消除坐标解析和验证热点，尚未引入 Phase 2 document store、Phase 3 composite scene/culling、LOD 或 worker；因此最终 V2 target assessment 按预期仍未全过，64×512 场景仍高于最终帧预算。这不是 Phase 1 验收失败。after 报告如实记录 dirty=true，dirty 项仅为三份预先存在且未纳入本任务提交的用户文档。
+Rollback verified: VITE_DRAWING_COORDINATE_PROJECTOR=scalar 可恢复旧 scalar 路径，parity 可在线对照；切换 projector 不改 document/persistence 数据。旧快照只读、LWC projection 发布失败时保留上一份 owner，避免半更新坐标状态。
+Decision: Phase 1 PASS；正式 after baseline 已冻结；Phase 2 未开始。
 ~~~

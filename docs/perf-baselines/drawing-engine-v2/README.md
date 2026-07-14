@@ -58,3 +58,28 @@ Use `--enforce-targets` only after a phase is expected to satisfy the V2 target
 budgets. The initial legacy baseline is expected to miss target performance;
 it passes Phase 0 when the harness is valid and reproduces the documented heavy
 scene and active-stroke regressions.
+
+## Phase 1 comparison
+
+The reviewed Phase 1 pair is:
+
+- before: `baseline-before-3067e1b5-20260714T083202Z-bars1500-dpr1.json`;
+- after: `baseline-after-9a4b4c55-20260714T095757Z-bars1500-dpr1.json`.
+
+From `frontend/`, reproduce the batch-projector comparison with:
+
+```powershell
+$env:VITE_DRAWING_COORDINATE_PROJECTOR = "batch"
+npm.cmd run perf:drawing -- --phase phase1 --headless --compare-before ../docs/perf-baselines/drawing-engine-v2/baseline-before-3067e1b5-20260714T083202Z-bars1500-dpr1.json
+```
+
+`phase1Acceptance` requires the full six-scenario run, production build,
+complete instrumentation and restore checks, batch mode, zero source-anchor
+re-resolution during measured viewport-only runs, and a comparable before/after
+heavy-scene result. `phase1Comparison` requires at least a 50% reduction in
+both heavy-scene ScriptDuration p95 and drawing-main-thread p95.
+
+Phase 1 does not enforce the final V2 target budgets. Those budgets depend on
+the later document-store, composite-scene, culling, LOD, overlay, and worker
+phases, so `targetAssessment` may still report expected misses while the
+Phase 1 acceptance gate passes.

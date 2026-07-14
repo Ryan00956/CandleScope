@@ -16,6 +16,7 @@ from app.data_engine.data_manager.subscriptions import SubscriptionService
 from app.data_engine.ingestion import TransportLayer
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.factory import ExchangeIngestionFactory
+from app.data_engine.market_data.service import MarketDataService
 from app.data_engine.storage import AsyncKlinesRepoAdapter, GapLedger, KlinesRepoAdapter
 
 logger = logging.getLogger("data_engine.runtime")
@@ -30,6 +31,7 @@ class DataEngineRuntime:
     backfill_transport: TransportLayer
     backfill_engine: BackfillEngine
     backfill_coordinator: BackfillCoordinator
+    market_data_service: MarketDataService
     price_stream_source: IngestionPriceSource | None = None
     subscription_service: SubscriptionService | None = None
     gap_scan_task: asyncio.Task | None = None
@@ -105,6 +107,12 @@ class DataEngineRuntime:
             step_timeout,
         )
 
+        await self._shutdown_step(
+            "MarketDataService",
+            self.market_data_service.shutdown(),
+            step_timeout,
+        )
+
         if self.price_stream_source is not None:
             await self._shutdown_step(
                 "Price source",
@@ -154,6 +162,7 @@ async def start_data_engine() -> DataEngineRuntime:
     ingestion_factory: ExchangeIngestionFactory | None = None
     transport: TransportLayer | None = None
     price_source: IngestionPriceSource | None = None
+    market_data_service: MarketDataService | None = None
 
     try:
         dm = DataManager()
@@ -166,6 +175,10 @@ async def start_data_engine() -> DataEngineRuntime:
         ingestion_factory = ExchangeIngestionFactory()
         dm.set_ingestion_factory(ingestion_factory)
         print("[startup] IngestionFactory injected ✓")
+
+        market_data_service = MarketDataService(ingestion_factory)
+        dm.set_market_data_service(market_data_service)
+        print("[startup] MarketDataService injected ✓")
 
         ingestion_cfg = IngestionConfig()
         transport = TransportLayer(ingestion_cfg)
@@ -207,6 +220,7 @@ async def start_data_engine() -> DataEngineRuntime:
             backfill_transport=transport,
             backfill_engine=backfill_engine,
             backfill_coordinator=backfill_coordinator,
+            market_data_service=market_data_service,
             price_stream_source=price_source,
             subscription_service=subscription_service,
             gap_scan_task=gap_scan_task,
@@ -222,6 +236,7 @@ async def start_data_engine() -> DataEngineRuntime:
                 ingestion_factory=ingestion_factory,
                 transport=transport,
                 price_source=price_source,
+                market_data_service=market_data_service,
             )
         raise
 
@@ -374,10 +389,14 @@ async def _cleanup_partial_start(
     ingestion_factory: ExchangeIngestionFactory | None,
     transport: TransportLayer | None,
     price_source: IngestionPriceSource | None,
+    market_data_service: MarketDataService | None,
 ) -> None:
     if price_source is not None:
         with suppress(Exception):
             await price_source.stop()
+    if market_data_service is not None:
+        with suppress(Exception):
+            await market_data_service.shutdown()
     if dm is not None:
         with suppress(Exception):
             await dm.shutdown()

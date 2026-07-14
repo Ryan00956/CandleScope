@@ -83,6 +83,7 @@ from typing import Any, AsyncIterator, Protocol
 
 from app.core.executors import run_storage
 from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.market_data.models import MarketStreamKey
 
 from .aggregator_bridge import AggregatorBridge
 from .auto_gc import AutoGcPolicy, auto_gc_loop, run_auto_gc_once
@@ -222,6 +223,7 @@ class DataManager:
         self.cache_behavior = CacheBehaviorStore()
         self._subscriptions: Any = None
         self._price_stream_controller: PriceStreamControllerLike | None = None
+        self._market_data_service: Any = None
         self._stream_leases: dict[SeriesKey, _StreamLease] = {}
         self._memory_gc_last_report: dict[str, Any] | None = None
         self._storage_gc_last_report: dict[str, Any] | None = None
@@ -277,6 +279,25 @@ class DataManager:
             dm.set_ingestion_factory(ExchangeIngestionFactory())
         """
         self.coordinator.set_ingestion_factory(factory)
+
+    def set_market_data_service(self, service: Any) -> None:
+        """Attach the independent advanced market-data service."""
+
+        required = (
+            "ensure_stream",
+            "release_stream",
+            "snapshot",
+            "history",
+            "subscribe",
+            "diagnostics",
+        )
+        if any(not callable(getattr(service, name, None)) for name in required):
+            raise TypeError("market data service does not implement the required facade")
+        self._market_data_service = service
+
+    @property
+    def market_data_ready(self) -> bool:
+        return self._market_data_service is not None
 
     def wire_backfill_reconciler(self, reconciler: BackfillReconcilerLike) -> None:
         """Attach this manager's BarAggregator to a backfill reconciler."""
@@ -797,6 +818,60 @@ class DataManager:
             market_type=market_type,
             limit=limit,
         )
+
+    # ═══════════════════════════════════════════════════════════
+    #  Advanced Market Data — independent from the bar event bus
+    # ═══════════════════════════════════════════════════════════
+
+    async def ensure_market_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_market_data_service()
+        return await service.ensure_stream(key, consumer_id=consumer_id)
+
+    async def release_market_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_market_data_service()
+        return await service.release_stream(key, consumer_id=consumer_id)
+
+    async def market_snapshot(
+        self,
+        keys: list[MarketStreamKey],
+        *,
+        refresh_missing: bool = True,
+    ) -> list[Any]:
+        service = self._require_market_data_service()
+        return await service.snapshot(keys, refresh_missing=refresh_missing)
+
+    async def market_history(
+        self,
+        key: MarketStreamKey,
+        **kwargs: Any,
+    ) -> list[Any]:
+        service = self._require_market_data_service()
+        return await service.history(key, **kwargs)
+
+    def subscribe_market(
+        self,
+        keys: list[MarketStreamKey],
+        *,
+        max_pending: int = 64,
+        replay: bool = True,
+    ) -> Any:
+        service = self._require_market_data_service()
+        return service.subscribe(keys, max_pending=max_pending, replay=replay)
+
+    def _require_market_data_service(self) -> Any:
+        if self._market_data_service is None:
+            raise RuntimeError("advanced market data service is not initialized")
+        return self._market_data_service
 
     # ═══════════════════════════════════════════════════════════
     #  Event Subscription — for real-time consumers
@@ -1816,6 +1891,11 @@ class DataManager:
             "behavior_heat": self.cache_behavior_snapshot(),
             "runtimePressure": self.runtime_pressure_snapshot(),
             "price_cache": self.price_cache.diagnostics(),
+            "market_data": (
+                self._market_data_service.diagnostics()
+                if self._market_data_service is not None
+                else {"status": "not_initialized"}
+            ),
             "auto_gc": self.auto_gc_snapshot(),
             "memory_gc": self._memory_gc_last_report or {
                 "mode": "not-run",

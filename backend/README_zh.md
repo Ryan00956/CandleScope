@@ -66,7 +66,8 @@ curl http://127.0.0.1:18080/debug/snapshot
 | 领域 | Endpoints |
 |---|---|
 | K 线 | `GET /klines/`, `/latest`, `/history`, `/range`, `/history/before`, `/resolve`, `/storage/meta`, `/continuity`, `DELETE /klines/storage` |
-| Streams | `WS /stream/klines`, `WS /stream/klines_multi`, `WS /stream/indicators`, `WS /stream/prices` |
+| 高级行情 | `GET /market/snapshot`, `GET /market/history` |
+| Streams | `WS /stream/klines`, `WS /stream/klines_multi`, `WS /stream/indicators`, `WS /stream/prices`, `WS /stream/market` |
 | Indicators | `GET /indicators/registry`, presets, custom CRUD, Pyne security, diagnostics, `POST /indicators/compute` |
 | Exchanges | `GET /exchanges/`, `GET /exchanges/diagnostics`, `GET /exchanges/{exchange}/capabilities` |
 | Symbols | `GET /symbols/exchange-info`, `POST /symbols/exchange-info/refresh` |
@@ -74,6 +75,8 @@ curl http://127.0.0.1:18080/debug/snapshot
 | Subscriptions | list、sync、prices snapshot、get/set/delete symbol tier |
 
 K 线 HTTP/WS 的增强成交量、Delta 与 CVD contribution 契约见 [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](../docs/KLINE_ORDER_FLOW_CONTRACT_zh.md)。
+
+Mark Price、Index Price、Funding Rate、Open Interest 与 Basis 的独立主链、背压和 API 契约见 [`docs/ADVANCED_MARKET_DATA_P1_BACKEND_zh.md`](../docs/ADVANCED_MARKET_DATA_P1_BACKEND_zh.md)。
 
 `/api/v1` 外的系统 endpoints：
 

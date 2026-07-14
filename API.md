@@ -245,6 +245,47 @@ Convenience SMA endpoint built from DataManager query results. Full indicator wo
 | `exchange` | string | `binance` | Registered exchange |
 | `market_type` | string | `spot` | Market type |
 
+## Advanced Market Data API (P1)
+
+This path is independent from the K-line pipeline. P1 supports Binance USD-M Futures `mark_price`, `index_price`, `funding_rate`, `open_interest`, and derived `basis`.
+
+### `GET /market/snapshot`
+
+Returns latest states for one symbol. Omitting `channel` requests all five P1 channels. Repeated and comma-separated `channel` parameters are accepted. With the default `refresh_missing=true`, missing Hub states are fetched through REST without acquiring a long-lived stream lease.
+
+```http
+GET /api/v1/market/snapshot?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=mark_price&channel=open_interest
+```
+
+The response contains `data` and an explicit `missing` key list. Records include `event_time_ms`, `received_at_ms`, `source`, and a `revision` that increases while the key remains resident in the process-local hub.
+
+### `GET /market/history`
+
+Returns one upstream history page. P1 exposes history only for `funding_rate` and `open_interest`; OI requires `period` (`5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, or `1d`). Optional parameters are `start_ms`, `end_ms`, and `limit` from 1 to 1000.
+
+```http
+GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=open_interest&period=5m&limit=500
+```
+
+`coverage.complete` is always `false` in P1 because this is a Binance REST page rather than complete local history.
+
+### `WS /stream/market`
+
+One browser WebSocket multiplexes multiple symbols and channels. After connecting, send:
+
+```json
+{
+  "action": "subscribe",
+  "request_id": "req-1",
+  "streams": [
+    {"exchange":"binance","market_type":"futures","symbol":"BTCUSDT","channel":"mark_price"},
+    {"exchange":"binance","market_type":"futures","symbol":"ETHUSDT","channel":"open_interest"}
+  ]
+}
+```
+
+The server sends `subscribed`, then `snapshot`, followed by batched `update` frames using `protocol=market.v1`. A connection may hold at most 64 logical streams. Use the same `streams` shape with `action=unsubscribe`; disconnect cleanup releases all leases.
+
 ## WebSocket API
 
 ### `WS /stream/klines`

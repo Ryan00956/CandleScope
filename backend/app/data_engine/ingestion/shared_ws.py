@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
+from app.data_engine.market_data import (
+    MarketChannel,
+    TransportMode,
+    market_channel_for_stream_type,
+)
 
 from .config import IngestionConfig
 from .metrics import LayerMetrics
@@ -30,18 +35,40 @@ class _Subscriber:
 
 
 class SharedWsSubscriptionHandle:
-    __slots__ = ("_hub", "_token", "_closed")
+    __slots__ = ("_hub", "_token", "_closed", "_unsubscribe_task")
 
     def __init__(self, hub: "SharedMultiplexHub", token: int) -> None:
         self._hub = hub
         self._token = token
         self._closed = False
+        self._unsubscribe_task: asyncio.Task | None = None
 
     async def unsubscribe(self) -> None:
         if self._closed:
             return
+        task = self._unsubscribe_task
+        if task is None:
+            task = asyncio.create_task(
+                self._hub.unsubscribe(self._token),
+                name=f"shared-ws-unsubscribe-{self._token}",
+            )
+            task.add_done_callback(self._consume_task_result)
+            self._unsubscribe_task = task
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            if self._unsubscribe_task is task:
+                self._unsubscribe_task = None
+            raise
         self._closed = True
-        await self._hub.unsubscribe(self._token)
+        self._unsubscribe_task = None
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task) -> None:
+        if not task.cancelled():
+            task.exception()
 
 
 class SharedWsSessionAdapter:
@@ -149,6 +176,9 @@ class SharedMultiplexHub:
         self._next_token = 1
         self._runner_task: asyncio.Task | None = None
         self._subscription_changed = asyncio.Event()
+        self._lifecycle_lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
+        self._last_control_send = 0.0
         self._conn = None
         self._ctx = None
         self._health = SessionHealth.DISCONNECTED
@@ -169,34 +199,74 @@ class SharedMultiplexHub:
         on_data: SharedDataCallback,
         on_health: SharedHealthCallback,
     ) -> SharedWsSubscriptionHandle:
-        token = self._next_token
-        self._next_token += 1
-        self._subscribers[token] = _Subscriber(
-            token=token,
-            descriptor=descriptor,
-            on_data=on_data,
-            on_health=on_health,
-        )
-        await self._notify_health_single(on_health, self._health, "subscribed")
-        self._subscription_changed.set()
-        self._ensure_runner()
-        return SharedWsSubscriptionHandle(self, token)
+        async with self._lifecycle_lock:
+            stream_identity = self._subscription_identity(descriptor)
+            already_requested = any(
+                self._subscription_identity(item.descriptor) == stream_identity
+                for item in self._subscribers.values()
+            )
+            token = self._next_token
+            self._next_token += 1
+            self._subscribers[token] = _Subscriber(
+                token=token,
+                descriptor=descriptor,
+                on_data=on_data,
+                on_health=on_health,
+            )
+            try:
+                await self._notify_health_single(on_health, self._health, "subscribed")
+                self._ensure_runner()
+                if self._connection_ready():
+                    if not already_requested:
+                        await self._send_dynamic_control(descriptor, subscribe=True)
+                else:
+                    self._subscription_changed.set()
+                return SharedWsSubscriptionHandle(self, token)
+            except BaseException:
+                self._subscribers.pop(token, None)
+                if not self._subscribers:
+                    await self._cleanup_empty_locked()
+                elif self._connection_ready() and not already_requested:
+                    try:
+                        await asyncio.shield(
+                            self._send_dynamic_control(descriptor, subscribe=False),
+                        )
+                    except BaseException:
+                        pass
+                else:
+                    self._subscription_changed.set()
+                raise
 
     async def unsubscribe(self, token: int) -> None:
-        removed = self._subscribers.pop(token, None)
-        if removed is None:
-            return
-        self._subscription_changed.set()
-        if not self._subscribers:
-            await self._close_connection()
-            if self._runner_task and not self._runner_task.done():
-                self._runner_task.cancel()
-                try:
-                    await self._runner_task
-                except asyncio.CancelledError:
-                    pass
-            self._runner_task = None
-            await self._set_health(SessionHealth.DISCONNECTED, "no subscribers")
+        async with self._lifecycle_lock:
+            removed = self._subscribers.pop(token, None)
+            if removed is None:
+                return
+            if not self._subscribers:
+                await self._cleanup_empty_locked()
+                return
+
+            identity = self._subscription_identity(removed.descriptor)
+            still_requested = any(
+                self._subscription_identity(item.descriptor) == identity
+                for item in self._subscribers.values()
+            )
+            if self._connection_ready():
+                if not still_requested:
+                    await self._send_dynamic_control(removed.descriptor, subscribe=False)
+            else:
+                self._subscription_changed.set()
+
+    async def _cleanup_empty_locked(self) -> None:
+        await self._close_connection()
+        if self._runner_task and not self._runner_task.done():
+            self._runner_task.cancel()
+            try:
+                await self._runner_task
+            except asyncio.CancelledError:
+                pass
+        self._runner_task = None
+        await self._set_health(SessionHealth.DISCONNECTED, "no subscribers")
 
     def _ensure_runner(self) -> None:
         if self._runner_task is None or self._runner_task.done():
@@ -263,7 +333,7 @@ class SharedMultiplexHub:
         by_key: dict[str, StreamDescriptor] = {}
         for sub in self._subscribers.values():
             by_key[sub.descriptor.key] = sub.descriptor
-        return sorted(by_key.values(), key=lambda d: d.interval or "")
+        return sorted(by_key.values(), key=lambda d: d.key)
 
     async def _send_combined_subscribe(self, descriptors: list[StreamDescriptor]) -> None:
         if self._conn is None:
@@ -271,7 +341,41 @@ class SharedMultiplexHub:
         payload = self._protocol.build_combined_subscribe(descriptors)
         if not payload:
             raise TransportError(f"no {self._exchange} subscription payload available")
-        await self._conn.send(json.dumps(payload))
+        await self._send_control_payload(payload)
+
+    async def _send_dynamic_control(
+        self,
+        descriptor: StreamDescriptor,
+        *,
+        subscribe: bool,
+    ) -> None:
+        spec = self._protocol.build_ws_subscription(descriptor)
+        payload = spec.subscribe_payload if subscribe else spec.unsubscribe_payload
+        if not payload:
+            self._subscription_changed.set()
+            await self._close_connection()
+            return
+        try:
+            await self._send_control_payload(payload)
+        except Exception:
+            self._subscription_changed.set()
+            await self._close_connection()
+
+    async def _send_control_payload(self, payload: dict) -> None:
+        async with self._send_lock:
+            if self._conn is None:
+                raise TransportError("shared WS connection not ready")
+            elapsed = time.monotonic() - self._last_control_send
+            if elapsed < 0.11:
+                await asyncio.sleep(0.11 - elapsed)
+            try:
+                await asyncio.wait_for(
+                    self._conn.send(json.dumps(payload)),
+                    timeout=max(0.1, float(self._cfg.ws_control_timeout)),
+                )
+            except asyncio.TimeoutError as exc:
+                raise TransportError("shared WS control send timed out") from exc
+            self._last_control_send = time.monotonic()
 
     async def _read_loop(self) -> None:
         assert self._conn is not None
@@ -296,6 +400,12 @@ class SharedMultiplexHub:
                     continue
                 if event == "error":
                     raise TransportError(f"{self._exchange} WS subscription rejected: {payload}")
+                if payload.get("code") not in (None, 0, "0") and "msg" in payload:
+                    raise TransportError(f"{self._exchange} WS subscription rejected: {payload}")
+                if payload.get("error") is not None:
+                    raise TransportError(f"{self._exchange} WS subscription rejected: {payload}")
+                if "result" in payload and "id" in payload:
+                    continue
 
             await self._dispatch_payload(payload)
 
@@ -354,6 +464,15 @@ class SharedMultiplexHub:
         self._conn = None
         self._ctx = None
 
+    def _connection_ready(self) -> bool:
+        return self._conn is not None and self._health == SessionHealth.CONNECTED
+
+    def _subscription_identity(self, descriptor: StreamDescriptor) -> str:
+        spec = self._protocol.build_ws_subscription(descriptor)
+        if spec.stream_name:
+            return spec.stream_name
+        return json.dumps(spec.subscribe_payload or {}, sort_keys=True, separators=(",", ":"))
+
 
 class SharedWsHubRegistry:
     def __init__(self, config: IngestionConfig, transport: TransportLayer) -> None:
@@ -364,12 +483,39 @@ class SharedWsHubRegistry:
     def get_hub(self, descriptor: StreamDescriptor) -> SharedMultiplexHub | None:
         bootstrap_default_adapters()
         plugin = get_exchange_registry().get_plugin(descriptor.exchange)
-        if (
-            plugin.capabilities().ws_connection_model != "shared_multiplex"
-            or descriptor.stream_type != StreamType.KLINE
+        capabilities = plugin.capabilities()
+        channel = market_channel_for_stream_type(descriptor.stream_type)
+        capability_v2 = getattr(capabilities, "capability_schema_version", 1) >= 2
+        capability = (
+            capabilities.channel_capability(channel, descriptor.market_type)
+            if channel is not None
+            and capability_v2
+            else None
+        )
+        connection_model = (
+            capability.connection_model
+            if capability is not None
+            else capabilities.ws_connection_model
+        )
+        if connection_model != "shared_multiplex":
+            return None
+        if capability_v2 and (
+            capability is None or not capability.supports_transport(TransportMode.WEBSOCKET)
         ):
             return None
-        key = (descriptor.exchange, descriptor.market_type, descriptor.symbol.upper())
+        if not capability_v2 and descriptor.stream_type != StreamType.KLINE:
+            return None
+        if channel in {
+            MarketChannel.MARK_PRICE,
+            MarketChannel.INDEX_PRICE,
+            MarketChannel.FUNDING_RATE,
+        }:
+            scope = "derivatives_summary"
+        elif descriptor.stream_type == StreamType.KLINE:
+            scope = descriptor.symbol.upper()
+        else:
+            return None
+        key = (descriptor.exchange, descriptor.market_type, scope)
         hub = self._hubs.get(key)
         if hub is None:
             hub = SharedMultiplexHub(
@@ -377,7 +523,7 @@ class SharedWsHubRegistry:
                 transport=self._transport,
                 exchange=descriptor.exchange,
                 market_type=descriptor.market_type,
-                symbol=descriptor.symbol,
+                symbol=scope,
             )
             self._hubs[key] = hub
         return hub

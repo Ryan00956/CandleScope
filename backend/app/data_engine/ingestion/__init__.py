@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import AsyncIterator, Callable
 
 from .config import IngestionConfig
@@ -46,7 +47,6 @@ from .models import (
     DataSource,
     SessionHealth,
 )
-from .metrics import LayerMetrics
 from .transport import TransportLayer, TransportError
 from .session import SessionLayer
 from .session_types import SessionLike
@@ -146,6 +146,7 @@ class MarketDataIngress:
         self._transport = TransportLayer(self._cfg)
         self._shared_ws = SharedWsHubRegistry(self._cfg, self._transport)
         self._pipelines: dict[str, StreamPipeline] = {}
+        self._stream_locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._started = False
 
     @property
@@ -187,34 +188,77 @@ class MarketDataIngress:
         """
         descriptor.validate()
         key = descriptor.key
+        async with self._hold_stream_lock(key):
+            if key in self._pipelines:
+                raise ValueError(f"Stream already exists: {key}")
 
-        if key in self._pipelines:
-            raise ValueError(f"Stream already exists: {key}")
+            if not self._started:
+                await self.start()
 
-        if not self._started:
-            await self.start()
-
-        pipeline = StreamPipeline(
-            self._cfg,
-            self._transport,
-            descriptor,
-            session_factory=self._create_session_factory(descriptor),
-        )
-        self._pipelines[key] = pipeline
-        await pipeline.start()
-        logger.info("Stream added: %s", key)
-        return pipeline
+            pipeline = StreamPipeline(
+                self._cfg,
+                self._transport,
+                descriptor,
+                session_factory=self._create_session_factory(descriptor),
+            )
+            self._pipelines[key] = pipeline
+            try:
+                await pipeline.start()
+            except BaseException:
+                cleanup_succeeded = False
+                try:
+                    await asyncio.shield(pipeline.stop())
+                    cleanup_succeeded = True
+                except BaseException:
+                    logger.exception(
+                        "Failed to roll back partially started stream: %s",
+                        key,
+                    )
+                if cleanup_succeeded and self._pipelines.get(key) is pipeline:
+                    self._pipelines.pop(key, None)
+                raise
+            logger.info("Stream added: %s", key)
+            return pipeline
 
     async def remove_stream(self, key: str) -> None:
         """Stop and remove a stream pipeline."""
-        pipeline = self._pipelines.pop(key, None)
-        if pipeline:
-            await pipeline.stop()
-            logger.info("Stream removed: %s", key)
+        async with self._hold_stream_lock(key):
+            pipeline = self._pipelines.get(key)
+            if pipeline:
+                await pipeline.stop()
+                if self._pipelines.get(key) is pipeline:
+                    self._pipelines.pop(key, None)
+                logger.info("Stream removed: %s", key)
 
     def get_pipeline(self, key: str) -> StreamPipeline | None:
         """Get a pipeline by its key."""
         return self._pipelines.get(key)
+
+    @asynccontextmanager
+    async def _hold_stream_lock(self, key: str) -> AsyncIterator[None]:
+        state = self._stream_locks.get(key)
+        if state is None:
+            lock = asyncio.Lock()
+            users = 0
+        else:
+            lock, users = state
+        self._stream_locks[key] = (lock, users + 1)
+
+        acquired = False
+        try:
+            await lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                lock.release()
+            current = self._stream_locks.get(key)
+            if current is not None and current[0] is lock:
+                remaining = current[1] - 1
+                if remaining <= 0:
+                    self._stream_locks.pop(key, None)
+                else:
+                    self._stream_locks[key] = (lock, remaining)
 
     def _create_session_factory(
         self,

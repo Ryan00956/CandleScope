@@ -159,6 +159,10 @@ class IngestionConfig:
     # ── L2: Session ────────────────────────────────────────────
     # WebSocket open timeout (seconds)
     ws_open_timeout: int = field(default_factory=lambda: _env_int("INGESTION_WS_OPEN_TIMEOUT", 10))
+    # WebSocket subscribe/unsubscribe control-message timeout (seconds)
+    ws_control_timeout: float = field(
+        default_factory=lambda: _env_float("INGESTION_WS_CONTROL_TIMEOUT", 2.0),
+    )
     # WebSocket ping interval (seconds) — keep-alive
     ws_ping_interval: int = field(default_factory=lambda: _env_int("INGESTION_WS_PING_INTERVAL", 20))
     # WebSocket ping timeout (seconds)

@@ -67,7 +67,8 @@ All application APIs are mounted under `/api/v1`.
 | Area | Endpoints |
 |---|---|
 | K-lines | `GET /klines/`, `/latest`, `/history`, `/range`, `/history/before`, `/resolve`, `/storage/meta`, `/continuity`, `DELETE /klines/storage` |
-| Streams | `WS /stream/klines`, `WS /stream/klines_multi`, `WS /stream/indicators`, `WS /stream/prices` |
+| Advanced market data | `GET /market/snapshot`, `GET /market/history` |
+| Streams | `WS /stream/klines`, `WS /stream/klines_multi`, `WS /stream/indicators`, `WS /stream/prices`, `WS /stream/market` |
 | Indicators | `GET /indicators/registry`, presets, custom CRUD, Pyne security, diagnostics, `POST /indicators/compute` |
 | Exchanges | `GET /exchanges/`, `GET /exchanges/diagnostics`, `GET /exchanges/{exchange}/capabilities` |
 | Symbols | `GET /symbols/exchange-info`, `POST /symbols/exchange-info/refresh` |

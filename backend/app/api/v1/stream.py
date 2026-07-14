@@ -14,6 +14,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.api.v1.stream_indicators import stream_indicators
 from app.api.v1.stream_klines import stream_multi_kline, stream_single_kline
+from app.api.v1.stream_market import stream_market
 from app.api.v1.stream_utils import (
     normalize_exchange as _normalize_exchange,
     normalize_market_type as _normalize_market_type,
@@ -152,3 +153,20 @@ async def indicator_stream(websocket: WebSocket) -> None:
         return
 
     await stream_indicators(websocket, dm, indicator_engine)
+
+
+@router.websocket("/market")
+async def market_stream(websocket: WebSocket) -> None:
+    """Multiplex Mark/Index/Funding/OI/Basis over one browser socket."""
+
+    await websocket.accept()
+    dm = _get_data_manager(websocket)
+    if dm is None or not getattr(dm, "market_data_ready", False):
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "code": "MARKET_STREAM_NOT_READY",
+            "detail": "Advanced market data is not initialized.",
+        })
+        await websocket.close(code=1013)
+        return
+    await stream_market(websocket, dm)

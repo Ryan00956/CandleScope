@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -254,6 +255,51 @@ class RateLimitManager:
         )
         self._buckets[rule.bucket_key] = bucket
         return bucket
+
+
+_LOOP_RATE_LIMIT_MANAGERS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    RateLimitManager,
+] = weakref.WeakKeyDictionary()
+_LOOP_RATE_LIMIT_SEMAPHORES: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[tuple[str, int], asyncio.Semaphore],
+] = weakref.WeakKeyDictionary()
+
+
+def get_shared_rate_limit_manager() -> RateLimitManager:
+    """Return quota state shared by components in the current runtime loop."""
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return RateLimitManager()
+    manager = _LOOP_RATE_LIMIT_MANAGERS.get(loop)
+    if manager is None:
+        manager = RateLimitManager()
+        _LOOP_RATE_LIMIT_MANAGERS[loop] = manager
+    return manager
+
+
+def get_shared_rate_limit_semaphore(
+    rule: RateLimitRule,
+    *,
+    fallback: int = 1,
+) -> asyncio.Semaphore:
+    """Return the runtime-loop concurrency gate for one quota bucket."""
+
+    limit = max(1, int(rule.max_concurrency or fallback))
+    key = (rule.bucket_key, limit)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.Semaphore(limit)
+    semaphores = _LOOP_RATE_LIMIT_SEMAPHORES.setdefault(loop, {})
+    semaphore = semaphores.get(key)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(limit)
+        semaphores[key] = semaphore
+    return semaphore
 
 
 def _normalize_headers(headers: Mapping[str, str] | None) -> dict[str, str]:

@@ -58,8 +58,13 @@ def test_every_declared_builtin_channel_has_exactly_one_contract_fixture() -> No
         for case in cases_by_exchange[exchange]:
             assert case.request.descriptor is case.descriptor
             assert case.normalizer_samples
-            expected_sources = {DataSource.WEBSOCKET, DataSource.HTTP}
-            if case.descriptor.stream_type.value in {"kline", "aggTrade"}:
+            expectation = expected[contract_case_channel_key(case)]
+            expected_sources = set()
+            if TransportMode.WEBSOCKET in expectation.realtime_transports:
+                expected_sources.add(DataSource.WEBSOCKET)
+            if TransportMode.REST_POLL in expectation.realtime_transports:
+                expected_sources.add(DataSource.HTTP)
+            if expectation.history:
                 expected_sources.add(DataSource.HTTP_BACKFILL)
             assert {sample.source for sample in case.normalizer_samples} == expected_sources
 
@@ -342,10 +347,7 @@ def _assert_channel_matches(
     expected: ChannelCapabilityExpectation,
 ) -> None:
     assert actual.realtime is True
-    assert actual.realtime_transports == (
-        TransportMode.WEBSOCKET,
-        TransportMode.REST_POLL,
-    )
+    assert actual.realtime_transports == expected.realtime_transports
     assert actual.history is expected.history
     assert actual.history_transports == (
         (TransportMode.REST_HISTORY,) if expected.history else ()

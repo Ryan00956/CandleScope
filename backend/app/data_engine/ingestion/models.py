@@ -29,6 +29,10 @@ class StreamType(str, enum.Enum):
     TICKER = "ticker"            # @ticker             (24h rolling ticker)
     MINI_TICKER = "miniTicker"   # @miniTicker         (lightweight ticker)
     DEPTH = "depth"              # @depth<levels>      (order-book depth)
+    MARK_PRICE = "markPrice"     # USD-M mark/index/funding summary stream
+    INDEX_PRICE = "indexPrice"   # logical projection of markPrice stream
+    FUNDING_RATE = "fundingRate" # logical projection + REST history
+    OPEN_INTEREST = "openInterest"  # REST snapshot/poll + REST history
 
 
 class FeedMode(str, enum.Enum):
@@ -73,6 +77,7 @@ class StreamDescriptor:
     depth_levels: int | None = None  # only for DEPTH streams (5, 10, 20)
     exchange: str = "binance"
     market_type: str = "spot"       # "spot" or "futures"
+    poll_interval_seconds: float | None = None  # REST-only stream cadence override
 
     @property
     def key(self) -> str:
@@ -107,6 +112,8 @@ class StreamDescriptor:
         """Raise ValueError if the descriptor is invalid."""
         if self.stream_type == StreamType.KLINE and not self.interval:
             raise ValueError("KLINE stream requires an interval (e.g. '1m')")
+        if self.poll_interval_seconds is not None and self.poll_interval_seconds <= 0:
+            raise ValueError("poll_interval_seconds must be positive")
 
 
 # ─── Core Output: MarketEvent ────────────────────────────────
@@ -252,6 +259,9 @@ class TransportRequest:
     limit: int = 1
     start_ms: int | None = None
     end_ms: int | None = None
+    history: bool = False
+    quota_acquired: bool = False
+    quota_semaphore_held: bool = False
 
     # Convenience properties for backward compat
     @property

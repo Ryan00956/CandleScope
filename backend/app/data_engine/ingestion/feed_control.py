@@ -43,6 +43,10 @@ _HTTP_FALLBACK_TYPES = {
     StreamType.TICKER,
     StreamType.MINI_TICKER,
     StreamType.DEPTH,
+    StreamType.MARK_PRICE,
+    StreamType.INDEX_PRICE,
+    StreamType.FUNDING_RATE,
+    StreamType.OPEN_INTEREST,
 }
 
 
@@ -261,9 +265,14 @@ class FeedControlLayer:
     async def _http_poll_loop(self) -> None:
         """Periodically fetch latest data via HTTP REST API."""
         key = self._descriptor.key
+        poll_interval = (
+            self._descriptor.poll_interval_seconds
+            if self._descriptor.poll_interval_seconds is not None
+            else self._cfg.http_poll_interval
+        )
         logger.info(
             "HTTP poll loop started: %s (interval=%.1fs)",
-            key, self._cfg.http_poll_interval,
+            key, poll_interval,
         )
         try:
             while self._running and self._mode == FeedMode.HTTP_POLL:
@@ -285,7 +294,7 @@ class FeedControlLayer:
                     self._metrics.inc("http_poll_errors")
                     logger.warning("HTTP poll failed (%s): %s", key, exc)
 
-                await asyncio.sleep(self._cfg.http_poll_interval)
+                await asyncio.sleep(poll_interval)
 
         except asyncio.CancelledError:
             pass

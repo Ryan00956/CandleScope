@@ -79,6 +79,7 @@ _FUTURES_TICKER_UNAVAILABLE_FIELDS = (
     "ask_price",
     "ask_qty",
 )
+_OPEN_INTEREST_PERIODS = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
 
 
 def _channel_capabilities() -> list[MarketChannelCapability]:
@@ -263,6 +264,76 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             known_limitations=(
                 "Current depth events are replaceable snapshots, not ordered full-book deltas",
             ),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.MARK_PRICE,
+            market_types=("futures",),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            update_intervals_ms=(1000, 3000),
+            available_fields=("mark_price",),
+            derived_fields=("basis", "basis_rate", "basis_bps"),
+            connection_model="shared_multiplex",
+            limits={"websocket.multiplex_scope": "symbols"},
+            known_limitations=("Mark-price OHLC history uses a different kline contract",),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.INDEX_PRICE,
+            market_types=("futures",),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            update_intervals_ms=(1000, 3000),
+            available_fields=("index_price",),
+            connection_model="shared_multiplex",
+            limits={"websocket.multiplex_scope": "symbols"},
+            known_limitations=(
+                "Realtime index price shares the mark-price upstream stream",
+                "Index-price OHLC history uses a different kline contract",
+            ),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.FUNDING_RATE,
+            market_types=("futures",),
+            realtime=True,
+            history=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            history_transports=(TransportMode.REST_HISTORY,),
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            update_intervals_ms=(1000, 3000),
+            available_fields=("funding_rate",),
+            connection_model="shared_multiplex",
+            limits={
+                "history.max_limit": 1000,
+                "history.shared_requests_per_5m": 500,
+            },
+            known_limitations=("Realtime funding data shares the mark-price upstream stream",),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.OPEN_INTEREST,
+            market_types=("futures",),
+            realtime=True,
+            history=True,
+            realtime_transports=(TransportMode.REST_POLL,),
+            history_transports=(TransportMode.REST_HISTORY,),
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            params={"period": list(_OPEN_INTEREST_PERIODS)},
+            update_intervals_ms=(5000,),
+            available_fields=("open_interest",),
+            connection_model="polling_only",
+            limits={
+                "history.max_limit": 500,
+                "history.max_age_ms": 2_678_400_000,
+                "history.requests_per_5m": 1000,
+                "realtime.request_weight": 1,
+                "service.max_active_streams": 64,
+            },
+            known_limitations=("Binance USD-M exposes open interest through REST, not a public WS stream",),
         ),
     ]
 

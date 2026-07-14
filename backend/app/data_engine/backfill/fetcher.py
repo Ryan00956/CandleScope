@@ -33,10 +33,11 @@ from typing import Callable, Awaitable
 from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
 from app.exchanges import (
     HistoricalRequest,
-    RateLimitManager,
     RateLimitPolicy,
     RateLimitRule,
     bootstrap_default_adapters,
+    get_shared_rate_limit_manager,
+    get_shared_rate_limit_semaphore,
     get_exchange_registry,
 )
 from app.data_engine.interval_policy import parse_interval_ms
@@ -88,8 +89,7 @@ class HistoricalFetcher:
 
         # Concurrency control
         self._semaphore = asyncio.Semaphore(self._global_fetch_concurrency())
-        self._exchange_semaphores: dict[tuple[str, str], asyncio.Semaphore] = {}
-        self._rate_limit_manager = RateLimitManager()
+        self._rate_limit_manager = get_shared_rate_limit_manager()
 
         # Extension points
         self._progress_callbacks: list[ProgressCallback] = []
@@ -291,6 +291,8 @@ class HistoricalFetcher:
                     exchange_semaphore = self._get_exchange_semaphore(task, req)
                     async with exchange_semaphore:
                         await self._rate_limit(task, req)
+                        req.quota_acquired = True
+                        req.quota_semaphore_held = True
                         try:
                             raw_messages = await self._transport.http_fetch(req)
                         except TransportError as exc:
@@ -462,14 +464,8 @@ class HistoricalFetcher:
     ) -> asyncio.Semaphore:
         historical_request = self._historical_request(task, request)
         rule = self._rate_limit_rule(task, historical_request)
-        key = (rule.bucket_key, str(rule.max_concurrency or self._cfg.fetch_concurrency))
-        sem = self._exchange_semaphores.get(key)
-        if sem is not None:
-            return sem
         limit = rule.max_concurrency or self._rate_limit_policy(task).concurrency_for(task.market_type)
-        sem = asyncio.Semaphore(max(1, int(limit)))
-        self._exchange_semaphores[key] = sem
-        return sem
+        return get_shared_rate_limit_semaphore(rule, fallback=max(1, int(limit)))
 
     def _global_fetch_concurrency(self) -> int:
         configured = getattr(self._cfg, "fetch_global_concurrency", None)

@@ -10,7 +10,7 @@ from app.data_engine.ingestion.models import (
     StreamType,
     TransportRequest,
 )
-from app.data_engine.market_data import DeliveryClass, MarketChannel
+from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
 from app.data_engine.market_data.kline_metrics import KLINE_DERIVED_FIELDS
 from app.exchanges.contracts import ExchangeContractCase, NormalizerContractSample
 
@@ -33,6 +33,10 @@ class ChannelCapabilityExpectation:
     update_intervals_ms: tuple[int, ...] = ()
     limits: tuple[tuple[str, Any], ...] = ()
     known_limitations: tuple[str, ...] = ()
+    realtime_transports: tuple[TransportMode, ...] = (
+        TransportMode.WEBSOCKET,
+        TransportMode.REST_POLL,
+    )
 
 
 _BINANCE_FIELDS = {
@@ -98,6 +102,10 @@ _BINANCE_FIELDS = {
         "quote_volume",
     }),
     MarketChannel.DEPTH: frozenset({"last_update_id", "bids", "asks"}),
+    MarketChannel.MARK_PRICE: frozenset({"mark_price"}),
+    MarketChannel.INDEX_PRICE: frozenset({"index_price"}),
+    MarketChannel.FUNDING_RATE: frozenset({"funding_rate"}),
+    MarketChannel.OPEN_INTEREST: frozenset({"open_interest"}),
 }
 
 _OKX_KLINE_FIELDS = frozenset({
@@ -258,6 +266,75 @@ _BINANCE_CHANNEL_EXPECTATIONS = {
         update_intervals_ms=(250,),
         limits=(("rest.max_limit", 1000),),
     ),
+    ("futures", MarketChannel.MARK_PRICE): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.LATEST,
+        snapshot=True,
+        delta=False,
+        history=False,
+        sequence="none",
+        resync="none",
+        connection_model="shared_multiplex",
+        available_fields=_BINANCE_FIELDS[MarketChannel.MARK_PRICE],
+        derived_fields=frozenset({"basis", "basis_rate", "basis_bps"}),
+        update_intervals_ms=(1000, 3000),
+        limits=(("websocket.multiplex_scope", "symbols"),),
+        known_limitations=("Mark-price OHLC history uses a different kline contract",),
+    ),
+    ("futures", MarketChannel.INDEX_PRICE): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.LATEST,
+        snapshot=True,
+        delta=False,
+        history=False,
+        sequence="none",
+        resync="none",
+        connection_model="shared_multiplex",
+        available_fields=_BINANCE_FIELDS[MarketChannel.INDEX_PRICE],
+        update_intervals_ms=(1000, 3000),
+        limits=(("websocket.multiplex_scope", "symbols"),),
+        known_limitations=(
+            "Realtime index price shares the mark-price upstream stream",
+            "Index-price OHLC history uses a different kline contract",
+        ),
+    ),
+    ("futures", MarketChannel.FUNDING_RATE): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.LATEST,
+        snapshot=True,
+        delta=False,
+        history=True,
+        sequence="none",
+        resync="none",
+        connection_model="shared_multiplex",
+        available_fields=_BINANCE_FIELDS[MarketChannel.FUNDING_RATE],
+        update_intervals_ms=(1000, 3000),
+        limits=(
+            ("history.max_limit", 1000),
+            ("history.shared_requests_per_5m", 500),
+        ),
+        known_limitations=("Realtime funding data shares the mark-price upstream stream",),
+    ),
+    ("futures", MarketChannel.OPEN_INTEREST): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.LATEST,
+        snapshot=True,
+        delta=False,
+        history=True,
+        sequence="none",
+        resync="none",
+        connection_model="polling_only",
+        available_fields=_BINANCE_FIELDS[MarketChannel.OPEN_INTEREST],
+        params=(("period", ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")),),
+        update_intervals_ms=(5000,),
+        limits=(
+            ("history.max_age_ms", 2_678_400_000),
+            ("history.max_limit", 500),
+            ("history.requests_per_5m", 1000),
+            ("realtime.request_weight", 1),
+            ("service.max_active_streams", 64),
+        ),
+        known_limitations=(
+            "Binance USD-M exposes open interest through REST, not a public WS stream",
+        ),
+        realtime_transports=(TransportMode.REST_POLL,),
+    ),
 }
 
 _OKX_KLINE_EXPECTATION = ChannelCapabilityExpectation(
@@ -321,6 +398,10 @@ _STREAM_TYPE_TO_CHANNEL = {
     StreamType.TICKER: MarketChannel.TICKER,
     StreamType.MINI_TICKER: MarketChannel.MINI_TICKER,
     StreamType.DEPTH: MarketChannel.DEPTH,
+    StreamType.MARK_PRICE: MarketChannel.MARK_PRICE,
+    StreamType.INDEX_PRICE: MarketChannel.INDEX_PRICE,
+    StreamType.FUNDING_RATE: MarketChannel.FUNDING_RATE,
+    StreamType.OPEN_INTEREST: MarketChannel.OPEN_INTEREST,
 }
 
 
@@ -348,6 +429,14 @@ def builtin_exchange_contract_cases() -> dict[str, list[ExchangeContractCase]]:
                 StreamType.TICKER,
                 StreamType.MINI_TICKER,
                 StreamType.DEPTH,
+            )
+        ] + [
+            _binance_case("futures", stream_type)
+            for stream_type in (
+                StreamType.MARK_PRICE,
+                StreamType.INDEX_PRICE,
+                StreamType.FUNDING_RATE,
+                StreamType.OPEN_INTEREST,
             )
         ],
         "okx": [
@@ -536,6 +625,47 @@ def _binance_payloads(
             NormalizerContractSample(payload=row, source=DataSource.HTTP),
             NormalizerContractSample(payload=ws_row, source=DataSource.WEBSOCKET),
         ]
+    if stream_type in (StreamType.MARK_PRICE, StreamType.INDEX_PRICE):
+        row = _binance_derivatives_summary_http_row()
+        return row, [
+            NormalizerContractSample(payload=row, source=DataSource.HTTP),
+            NormalizerContractSample(
+                payload=_binance_derivatives_summary_ws_row(),
+                source=DataSource.WEBSOCKET,
+            ),
+        ]
+    if stream_type == StreamType.FUNDING_RATE:
+        row = _binance_derivatives_summary_http_row()
+        history_row = {
+            "symbol": "BTCUSDT",
+            "fundingTime": 1_700_000_000_000,
+            "fundingRate": "0.0001",
+            "markPrice": "100.5",
+        }
+        return row, [
+            NormalizerContractSample(payload=row, source=DataSource.HTTP),
+            NormalizerContractSample(payload=history_row, source=DataSource.HTTP_BACKFILL),
+            NormalizerContractSample(
+                payload=_binance_derivatives_summary_ws_row(),
+                source=DataSource.WEBSOCKET,
+            ),
+        ]
+    if stream_type == StreamType.OPEN_INTEREST:
+        row = {
+            "symbol": "BTCUSDT",
+            "openInterest": "12345.5",
+            "time": 1_700_000_000_000,
+        }
+        history_row = {
+            "symbol": "BTCUSDT",
+            "sumOpenInterest": "12345.5",
+            "sumOpenInterestValue": "1240722.75",
+            "timestamp": 1_700_000_000_000,
+        }
+        return row, [
+            NormalizerContractSample(payload=row, source=DataSource.HTTP),
+            NormalizerContractSample(payload=history_row, source=DataSource.HTTP_BACKFILL),
+        ]
     raise AssertionError(f"Unhandled Binance fixture stream type: {stream_type}")
 
 
@@ -602,6 +732,31 @@ def _binance_ticker_http_row(market_type: str) -> dict[str, Any]:
         for field in ("prevClosePrice", "bidPrice", "bidQty", "askPrice", "askQty"):
             row.pop(field)
     return row
+
+
+def _binance_derivatives_summary_http_row() -> dict[str, Any]:
+    return {
+        "symbol": "BTCUSDT",
+        "markPrice": "100.5",
+        "indexPrice": "100.0",
+        "estimatedSettlePrice": "100.25",
+        "lastFundingRate": "0.0001",
+        "nextFundingTime": 1_700_028_800_000,
+        "time": 1_700_000_000_000,
+    }
+
+
+def _binance_derivatives_summary_ws_row() -> dict[str, Any]:
+    return {
+        "e": "markPriceUpdate",
+        "E": 1_700_000_000_000,
+        "s": "BTCUSDT",
+        "p": "100.5",
+        "i": "100.0",
+        "P": "100.25",
+        "r": "0.0001",
+        "T": 1_700_028_800_000,
+    }
 
 
 def _okx_kline_row() -> list[str]:

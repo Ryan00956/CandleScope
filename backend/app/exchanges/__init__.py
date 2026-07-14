@@ -27,6 +27,8 @@ from .rate_limits import (
     RateLimitPolicy,
     RateLimitRule,
     effective_rate_limit_capacity,
+    get_shared_rate_limit_manager,
+    get_shared_rate_limit_semaphore,
 )
 from .realtime import RealtimePolicy, RealtimeUpdateMode
 from .registry import (
@@ -69,6 +71,8 @@ __all__ = [
     "assert_exchange_plugin_contract",
     "bootstrap_default_adapters",
     "effective_rate_limit_capacity",
+    "get_shared_rate_limit_manager",
+    "get_shared_rate_limit_semaphore",
     "get_exchange_registry",
     "load_external_plugin",
     "load_external_plugins_from_env",

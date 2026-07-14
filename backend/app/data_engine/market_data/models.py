@@ -28,6 +28,7 @@ class MarketChannel(str, enum.Enum):
     INDEX_PRICE = "index_price"
     FUNDING_RATE = "funding_rate"
     OPEN_INTEREST = "open_interest"
+    BASIS = "basis"
     LIQUIDATION = "liquidation"
 
 
@@ -52,6 +53,29 @@ class DeliveryClass(str, enum.Enum):
 ParamPair: TypeAlias = tuple[str, str]
 ParamPairs: TypeAlias = tuple[ParamPair, ...]
 ParamsInput: TypeAlias = Mapping[object, object] | Iterable[tuple[object, object]]
+
+
+_STREAM_VALUE_TO_CHANNEL = {
+    "kline": MarketChannel.KLINE,
+    "aggTrade": MarketChannel.AGG_TRADE,
+    "trade": MarketChannel.TRADE,
+    "ticker": MarketChannel.TICKER,
+    "miniTicker": MarketChannel.MINI_TICKER,
+    "depth": MarketChannel.DEPTH,
+    "markPrice": MarketChannel.MARK_PRICE,
+    "indexPrice": MarketChannel.INDEX_PRICE,
+    "fundingRate": MarketChannel.FUNDING_RATE,
+    "openInterest": MarketChannel.OPEN_INTEREST,
+}
+
+
+def market_channel_for_stream_type(stream_type: object) -> MarketChannel | None:
+    """Map an ingestion stream enum/value to its canonical logical channel."""
+
+    value = getattr(stream_type, "value", stream_type)
+    if not isinstance(value, str):
+        return None
+    return _STREAM_VALUE_TO_CHANNEL.get(value.strip())
 
 
 def _canonical_param_component(

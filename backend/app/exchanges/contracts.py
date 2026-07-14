@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
+from app.data_engine.market_data import (
+    DeliveryClass,
+    MarketChannel,
+    TransportMode,
+    market_channel_for_stream_type,
+)
 
 from .plugin import ExchangePlugin
 
@@ -727,11 +732,8 @@ def _capability_for_descriptor(capabilities: Any | None, descriptor: Any) -> Any
 
 
 def _descriptor_channel(descriptor: Any) -> str | None:
-    stream_type = _enum_value(getattr(descriptor, "stream_type", None))
-    return {
-        "aggTrade": MarketChannel.AGG_TRADE.value,
-        "miniTicker": MarketChannel.MINI_TICKER.value,
-    }.get(stream_type, stream_type)
+    channel = market_channel_for_stream_type(getattr(descriptor, "stream_type", None))
+    return channel.value if channel is not None else None
 
 
 def _enum_value(value: Any) -> str | None:

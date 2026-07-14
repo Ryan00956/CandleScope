@@ -47,6 +47,12 @@ class BinanceNormalizer:
             return self._parse_ws_ticker(payload, msg)
         if st == StreamType.DEPTH:
             return self._parse_ws_depth(payload, msg)
+        if st in (
+            StreamType.MARK_PRICE,
+            StreamType.INDEX_PRICE,
+            StreamType.FUNDING_RATE,
+        ):
+            return self._parse_ws_derivatives_summary(payload, msg)
 
         logger.warning("No Binance WS parser for stream type: %s", st)
         return None
@@ -63,6 +69,12 @@ class BinanceNormalizer:
             return self._parse_http_ticker(msg)
         if st == StreamType.DEPTH:
             return self._parse_http_depth(msg)
+        if st in (StreamType.MARK_PRICE, StreamType.INDEX_PRICE):
+            return self._parse_http_derivatives_price(msg)
+        if st == StreamType.FUNDING_RATE:
+            return self._parse_http_funding_rate(msg)
+        if st == StreamType.OPEN_INTEREST:
+            return self._parse_http_open_interest(msg)
 
         logger.warning("No Binance HTTP parser for stream type: %s", st)
         return None
@@ -227,6 +239,30 @@ class BinanceNormalizer:
             sequence=data["last_update_id"],
         )
 
+    def _parse_ws_derivatives_summary(
+        self,
+        payload: dict,
+        msg: RawMessage,
+    ) -> MarketEvent | None:
+        if payload.get("e") != "markPriceUpdate":
+            return None
+
+        data = self._summary_data(
+            mark_price=payload.get("p"),
+            index_price=payload.get("i"),
+            estimated_settle_price=payload.get("P"),
+            funding_rate=payload.get("r"),
+            next_funding_time_ms=payload.get("T"),
+        )
+        if not self._has_required_summary_field(data):
+            return None
+        return self._event(
+            event_type=self._descriptor.stream_type,
+            event_time_ms=int(payload.get("E", msg.received_at_ms)),
+            msg=msg,
+            data=data,
+        )
+
     def _parse_http_kline(self, msg: RawMessage) -> MarketEvent | None:
         row = msg.payload
         if not isinstance(row, (list, tuple)) or len(row) < 11:
@@ -364,3 +400,101 @@ class BinanceNormalizer:
             data=data,
             sequence=data["last_update_id"],
         )
+
+    def _parse_http_derivatives_price(self, msg: RawMessage) -> MarketEvent | None:
+        payload = msg.payload
+        if not isinstance(payload, dict):
+            return None
+
+        data = self._summary_data(
+            mark_price=payload.get("markPrice"),
+            index_price=payload.get("indexPrice"),
+            estimated_settle_price=payload.get("estimatedSettlePrice"),
+            funding_rate=payload.get("lastFundingRate"),
+            next_funding_time_ms=payload.get("nextFundingTime"),
+        )
+        if not self._has_required_summary_field(data):
+            return None
+        return self._event(
+            event_type=self._descriptor.stream_type,
+            event_time_ms=int(payload.get("time", msg.received_at_ms)),
+            msg=msg,
+            data=data,
+        )
+
+    def _parse_http_funding_rate(self, msg: RawMessage) -> MarketEvent | None:
+        payload = msg.payload
+        if not isinstance(payload, dict):
+            return None
+        if "fundingTime" not in payload:
+            return self._parse_http_derivatives_price(msg)
+        if payload.get("fundingRate") in (None, ""):
+            return None
+
+        data = {
+            "funding_rate": float(payload["fundingRate"]),
+            "funding_time_ms": int(payload["fundingTime"]),
+        }
+        if payload.get("markPrice") not in (None, ""):
+            data["mark_price"] = float(payload["markPrice"])
+        return self._event(
+            event_type=StreamType.FUNDING_RATE,
+            event_time_ms=data["funding_time_ms"],
+            msg=msg,
+            data=data,
+            sequence=data["funding_time_ms"],
+        )
+
+    def _parse_http_open_interest(self, msg: RawMessage) -> MarketEvent | None:
+        payload = msg.payload
+        if not isinstance(payload, dict):
+            return None
+
+        historical = "sumOpenInterest" in payload
+        value = payload.get("sumOpenInterest" if historical else "openInterest")
+        if value in (None, ""):
+            return None
+        event_time_ms = int(
+            payload.get("timestamp" if historical else "time", msg.received_at_ms),
+        )
+        data = {"open_interest": float(value)}
+        if historical and payload.get("sumOpenInterestValue") not in (None, ""):
+            data["open_interest_value"] = float(payload["sumOpenInterestValue"])
+        return self._event(
+            event_type=StreamType.OPEN_INTEREST,
+            event_time_ms=event_time_ms,
+            msg=msg,
+            data=data,
+            sequence=event_time_ms if historical else None,
+        )
+
+    @staticmethod
+    def _summary_data(
+        *,
+        mark_price: object,
+        index_price: object,
+        estimated_settle_price: object,
+        funding_rate: object,
+        next_funding_time_ms: object,
+    ) -> dict:
+        data: dict[str, float | int] = {}
+        values = (
+            ("mark_price", mark_price, float),
+            ("index_price", index_price, float),
+            ("estimated_settle_price", estimated_settle_price, float),
+            ("funding_rate", funding_rate, float),
+            ("next_funding_time_ms", next_funding_time_ms, int),
+        )
+        for name, value, caster in values:
+            if value in (None, ""):
+                continue
+            data[name] = caster(value)
+        return data
+
+    def _has_required_summary_field(self, data: dict) -> bool:
+        required = {
+            StreamType.MARK_PRICE: "mark_price",
+            StreamType.INDEX_PRICE: "index_price",
+            StreamType.FUNDING_RATE: "funding_rate",
+        }.get(self._descriptor.stream_type)
+        return required is not None and required in data

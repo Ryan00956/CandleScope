@@ -45,6 +45,7 @@ from app.api.v1.alerts import router as alerts_router
 from app.api.v1.indicators import router as indicators_router  # indicator engine v2
 from app.api.v1.exchanges import router as exchanges_router
 from app.api.v1.klines import router as klines_router
+from app.api.v1.market import router as market_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.stream import router as stream_router
 from app.api.v1.subscriptions import router as subscriptions_router
@@ -72,6 +73,7 @@ app.add_middleware(
 )
 
 app.include_router(klines_router, prefix="/api/v1")
+app.include_router(market_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
 app.include_router(alerts_router, prefix="/api/v1")

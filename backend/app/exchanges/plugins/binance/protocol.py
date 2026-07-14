@@ -30,14 +30,27 @@ _REST_PATH: dict[str, dict[str, str]] = {
         "ticker": "/fapi/v1/ticker/24hr",
         "miniTicker": "/fapi/v1/ticker/24hr",
         "depth": "/fapi/v1/depth",
+        "markPrice": "/fapi/v1/premiumIndex",
+        "indexPrice": "/fapi/v1/premiumIndex",
+        "fundingRate": "/fapi/v1/premiumIndex",
+        "openInterest": "/fapi/v1/openInterest",
     },
 }
+
+_FUTURES_HISTORY_PATH = {
+    "fundingRate": "/fapi/v1/fundingRate",
+    "openInterest": "/futures/data/openInterestHist",
+}
+
+_MARK_PRICE_PROJECTIONS = {"markPrice", "indexPrice", "fundingRate"}
+_OPEN_INTEREST_PERIODS = {"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"}
 
 _FUTURES_MARKET_STREAMS = {
     "aggTrade",
     "kline",
     "miniTicker",
     "ticker",
+    *_MARK_PRICE_PROJECTIONS,
 }
 
 _FUTURES_PUBLIC_STREAMS = {
@@ -54,7 +67,11 @@ class BinanceExchangeProtocol:
 
     def rest_request(self, req: Any, config: Any | None = None) -> RestRequestSpec | None:
         desc = req.descriptor
-        path = self.rest_path(desc.stream_type, desc.market_type)
+        path = self.rest_path(
+            desc.stream_type,
+            desc.market_type,
+            history=bool(getattr(req, "history", False)),
+        )
         if path is None:
             return None
         return RestRequestSpec(
@@ -64,10 +81,15 @@ class BinanceExchangeProtocol:
         )
 
     def ws_connection(self, descriptor: Any, config: Any | None = None) -> WsConnectionSpec:
+        stream_type = getattr(getattr(descriptor, "stream_type", None), "value", "")
         return WsConnectionSpec(
             base_urls=self.ws_base_urls(descriptor, config=config),
             subscription=self.build_ws_subscription(descriptor),
-            connection_model="path_per_stream",
+            connection_model=(
+                "shared_multiplex"
+                if stream_type in _MARK_PRICE_PROJECTIONS
+                else "path_per_stream"
+            ),
         )
 
     def rest_base_urls(self, market_type: str = "spot", config: Any | None = None) -> list[str]:
@@ -94,7 +116,19 @@ class BinanceExchangeProtocol:
             return self._route_futures_ws_urls(urls, "public")
         return urls
 
-    def rest_path(self, stream_type: Any, market_type: str = "spot") -> str | None:
+    def rest_path(
+        self,
+        stream_type: Any,
+        market_type: str = "spot",
+        *,
+        history: bool = False,
+    ) -> str | None:
+        if history and market_type == "futures":
+            if stream_type.value in {"markPrice", "indexPrice"}:
+                return None
+            override = _FUTURES_HISTORY_PATH.get(stream_type.value)
+            if override is not None:
+                return override
         return _REST_PATH.get(market_type, _REST_PATH["spot"]).get(stream_type.value)
 
     def build_http_params(self, req: Any) -> dict[str, Any]:
@@ -124,6 +158,22 @@ class BinanceExchangeProtocol:
         elif desc.stream_type.value == "depth":
             max_limit = 1000 if desc.market_type == "futures" else 5000
             params["limit"] = min(max(int(req.limit or 1), 1), max_limit)
+        elif desc.stream_type.value in _MARK_PRICE_PROJECTIONS | {"openInterest"}:
+            history = bool(getattr(req, "history", False))
+            if history:
+                if desc.stream_type.value == "fundingRate":
+                    params["limit"] = min(max(int(req.limit or 1), 1), 1000)
+                elif desc.stream_type.value == "openInterest":
+                    if not desc.interval:
+                        raise ValueError("open-interest history requires a period")
+                    if desc.interval not in _OPEN_INTEREST_PERIODS:
+                        raise ValueError(f"unsupported open-interest period: {desc.interval}")
+                    params["period"] = desc.interval
+                    params["limit"] = min(max(int(req.limit or 1), 1), 500)
+                if req.start_ms is not None:
+                    params["startTime"] = str(max(0, int(req.start_ms)))
+                if req.end_ms is not None:
+                    params["endTime"] = str(max(0, int(req.end_ms)))
 
         return params
 
@@ -136,19 +186,59 @@ class BinanceExchangeProtocol:
             return f"{symbol}@kline_{descriptor.interval}"
         if descriptor.stream_type.value == "depth" and descriptor.depth_levels:
             return f"{symbol}@depth{descriptor.depth_levels}"
+        if descriptor.stream_type.value in _MARK_PRICE_PROJECTIONS:
+            return f"{symbol}@markPrice@1s"
         return f"{symbol}@{descriptor.stream_type.value}"
 
     def build_ws_subscription(self, descriptor: Any) -> WsSubscriptionSpec:
+        stream_name = self.build_ws_stream_name(descriptor)
+        if descriptor.stream_type.value in _MARK_PRICE_PROJECTIONS:
+            return WsSubscriptionSpec(
+                mode=WsSubscriptionMode.MESSAGE,
+                stream_name=stream_name,
+                subscribe_payload={"method": "SUBSCRIBE", "params": [stream_name], "id": 1},
+                unsubscribe_payload={"method": "UNSUBSCRIBE", "params": [stream_name], "id": 2},
+            )
         return WsSubscriptionSpec(
             mode=WsSubscriptionMode.PATH,
-            stream_name=self.build_ws_stream_name(descriptor),
+            stream_name=stream_name,
         )
 
     def build_combined_subscribe(self, descriptors: list[Any]) -> dict[str, Any]:
-        return {}
+        streams = list(dict.fromkeys(self.build_ws_stream_name(item) for item in descriptors))
+        if not streams:
+            return {}
+        return {"method": "SUBSCRIBE", "params": streams, "id": 1}
 
     def payload_matches_descriptor(self, payload: Any, descriptor: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        stream_type = descriptor.stream_type.value
+        if stream_type in _MARK_PRICE_PROJECTIONS:
+            if payload.get("e") != "markPriceUpdate":
+                return False
+            if "st" in payload and payload.get("st") != 1:
+                return False
+            payload_symbol = str(payload.get("s", "")).upper()
+            expected_symbol = self._symbols.normalize(
+                descriptor.symbol,
+                market_type=descriptor.market_type,
+            ).upper()
+            return payload_symbol == expected_symbol
         return True
+
+    def supports_ws(self, descriptor: Any) -> bool:
+        """Return channel-level WS availability for the current plugin."""
+
+        stream_type = getattr(getattr(descriptor, "stream_type", None), "value", "")
+        if getattr(descriptor, "market_type", "spot") != "futures":
+            return stream_type not in {
+                "markPrice",
+                "indexPrice",
+                "fundingRate",
+                "openInterest",
+            }
+        return stream_type != "openInterest"
 
     def extract_http_rows(self, payload: Any, stream_type: Any) -> list[Any]:
         if isinstance(payload, list):

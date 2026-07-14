@@ -245,6 +245,49 @@ WebSocket API: ws://localhost:8000/api/v1
 | `exchange` | string | `binance` | 已注册交易所 |
 | `market_type` | string | `spot` | 市场类型 |
 
+## 高级行情 API（P1）
+
+高级行情与 K 线主链独立，当前支持 Binance USD-M Futures 的 `mark_price`、`index_price`、`funding_rate`、`open_interest` 和派生 `basis`。
+
+### `GET /market/snapshot`
+
+读取一个 symbol 的最新状态。不传 `channel` 时返回全部五个 P1 频道；`channel` 可以重复，也可以用逗号分隔。`refresh_missing=true`（默认）会通过 REST 补读 Hub 中缺失的快照，但不会持有长期订阅。
+
+```http
+GET /api/v1/market/snapshot?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=mark_price&channel=open_interest
+```
+
+响应包含 `data` 和明确的 `missing` key 列表。每条数据带 `event_time_ms`、`received_at_ms`、`source`，以及该 key 在进程内 Hub 驻留期间单调递增的 `revision`。
+
+### `GET /market/history`
+
+读取一个上游历史页面。P1 只开放 `funding_rate` 与 `open_interest`；OI 必须传 `period`（`5m`、`15m`、`30m`、`1h`、`2h`、`4h`、`6h`、`12h`、`1d`）。可选 `start_ms`、`end_ms`，`limit` 为 1 到 1000。
+
+```http
+GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=open_interest&period=5m&limit=500
+```
+
+`coverage.complete` 在 P1 固定为 `false`，表示结果是 Binance REST 页面，不是本地完整历史。
+
+### `WS /stream/market`
+
+一个浏览器 WebSocket 可以 multiplex 多个 symbol/channel。连接后发送：
+
+```json
+{
+  "action": "subscribe",
+  "request_id": "req-1",
+  "streams": [
+    {"exchange":"binance","market_type":"futures","symbol":"BTCUSDT","channel":"mark_price"},
+    {"exchange":"binance","market_type":"futures","symbol":"ETHUSDT","channel":"open_interest"}
+  ]
+}
+```
+
+服务端依次返回 `subscribed`、`snapshot`，之后发送 `protocol=market.v1` 的批量 `update`。每个连接最多 64 个逻辑 stream。取消订阅复用相同 `streams` 并将 action 改成 `unsubscribe`；断连会自动释放全部租约。
+
+完整架构、物理流复用和背压语义见 [`docs/ADVANCED_MARKET_DATA_P1_BACKEND_zh.md`](docs/ADVANCED_MARKET_DATA_P1_BACKEND_zh.md)。
+
 ## WebSocket API
 
 ### `WS /stream/klines`

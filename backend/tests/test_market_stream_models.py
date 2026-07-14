@@ -80,6 +80,7 @@ def test_market_stream_enums_use_canonical_snake_case_values() -> None:
         "index_price",
         "funding_rate",
         "open_interest",
+        "basis",
         "liquidation",
     ]
     assert [mode.value for mode in TransportMode] == [

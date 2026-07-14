@@ -108,19 +108,22 @@ class BinanceExchangeProtocol:
 
         if desc.stream_type.value == "kline":
             params["interval"] = desc.interval
-            params["limit"] = req.limit
+            params["limit"] = min(max(int(req.limit or 1), 1), 1000)
             if req.start_ms is not None:
                 params["startTime"] = str(max(0, int(req.start_ms)))
             if req.end_ms is not None:
                 params["endTime"] = str(max(0, int(req.end_ms)))
-        elif desc.stream_type.value in ("aggTrade", "trade"):
-            params["limit"] = req.limit
+        elif desc.stream_type.value == "aggTrade":
+            params["limit"] = min(max(int(req.limit or 1), 1), 1000)
             if req.start_ms is not None:
                 params["startTime"] = str(max(0, int(req.start_ms)))
             if req.end_ms is not None:
                 params["endTime"] = str(max(0, int(req.end_ms)))
+        elif desc.stream_type.value == "trade":
+            params["limit"] = min(max(int(req.limit or 1), 1), 1000)
         elif desc.stream_type.value == "depth":
-            params["limit"] = min(req.limit, 5000)
+            max_limit = 1000 if desc.market_type == "futures" else 5000
+            params["limit"] = min(max(int(req.limit or 1), 1), max_limit)
 
         return params
 

@@ -174,10 +174,10 @@ Exchange plugin 暴露 capabilities、symbol normalization、REST/WS protocol sp
 
 长期稳定边界：
 
-- `ExchangeCapabilities` 包含 `plugin_api_version`、`capability_schema_version`、protocol features、limits 和 known limitations。
+- Capability schema v2 新增按市场展开的权威 `channels` 矩阵，描述 realtime/history transport、delivery class、snapshot/delta 与重同步语义、标准化字段可用性、参数、更新间隔、限额、连接模型和已知限制。schema v1 插件仍可加载，其空 channel 矩阵表示“未知”，而不是“不支持”。
 - `ExchangeRegistry.register()` 会拒绝当前后端不支持的 plugin API major version 或 capability schema version。
-- `GET /api/v1/exchanges/diagnostics` 会返回每个插件的加载状态、protocol class、adapter facade 和 policy classes。
-- `app.exchanges.contracts` 提供可复用契约测试 harness，用于验证 REST specs、WS specs、payload extraction、历史分页和 normalizer 输出 schema。
+- `GET /api/v1/exchanges/diagnostics` 会返回每个插件的加载状态、protocol class、adapter facade、policy classes 和 capability 覆盖计数。
+- `app.exchanges.contracts` 提供可复用契约测试 harness，用于验证 capability 声明、REST specs、WS 连接模型、payload extraction、历史分页、fixture 覆盖和 normalizer 输出 schema。
 - 内置 contract fixtures 放在 `tests/fixtures/exchanges/`；新增交易所应先补 fixture，再接入 runtime。
 - 外部插件可通过 `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory` 显式加载。内置插件仍先加载，外部插件加载失败会进入 diagnostics，而不是静默污染 runtime。
 - 前端通过 `/api/v1/exchanges/` 消费 interval list、market availability、WS mode 和用户可见 limitations。新增交易所 UI 行为应放在 capabilities 中，而不是写新的前端硬编码分支。

@@ -5,10 +5,17 @@ from .contracts import (
     ExchangeContractReport,
     NormalizerContractSample,
     assert_exchange_plugin_contract,
+    validate_exchange_capabilities,
     validate_exchange_plugin_contract,
 )
 from .loader import EXTERNAL_EXCHANGE_PLUGINS_ENV, load_external_plugin, load_external_plugins_from_env
-from .models import ExchangeCapabilities, ExchangeMarket, SymbolInfo
+from .models import (
+    ExchangeCapabilities,
+    ExchangeMarket,
+    MarketChannelCapability,
+    SymbolInfo,
+    serialize_exchange_capabilities,
+)
 from .pagination import HistoricalPaginationPolicy, OkxHistoricalPaginationPolicy, ReverseTimePaginationPolicy
 from .plugin import ExchangePlugin, SymbolNormalizer
 from .protocol import AdapterBackedProtocol, ExchangeProtocol, RestRequestSpec, WsConnectionSpec
@@ -38,6 +45,7 @@ __all__ = [
     "ExchangeContractIssue",
     "ExchangeContractReport",
     "ExchangeMarket",
+    "MarketChannelCapability",
     "ExchangePlugin",
     "ExchangePluginLoadStatus",
     "ExchangePluginRegistrationError",
@@ -64,5 +72,7 @@ __all__ = [
     "get_exchange_registry",
     "load_external_plugin",
     "load_external_plugins_from_env",
+    "serialize_exchange_capabilities",
+    "validate_exchange_capabilities",
     "validate_exchange_plugin_contract",
 ]

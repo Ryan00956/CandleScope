@@ -14,11 +14,254 @@ from app.core.config import (
     get_effective_proxy,
 )
 from app.core.market import VALID_INTERVALS
-from app.exchanges.models import ExchangeCapabilities, ExchangeMarket, SymbolInfo
+from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
+from app.exchanges.models import (
+    ExchangeCapabilities,
+    ExchangeMarket,
+    MarketChannelCapability,
+    SymbolInfo,
+)
 
 from .protocol import BinanceExchangeProtocol
 
 logger = logging.getLogger("candlescope.exchange.binance")
+
+_REALTIME_TRANSPORTS = (TransportMode.WEBSOCKET, TransportMode.REST_POLL)
+_KLINE_FIELDS = (
+    "interval",
+    "open_time",
+    "close_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+    "trades",
+    "taker_buy_base",
+    "taker_buy_quote",
+    "is_closed",
+)
+_AGG_TRADE_FIELDS = (
+    "agg_trade_id",
+    "price",
+    "quantity",
+    "first_trade_id",
+    "last_trade_id",
+    "trade_time_ms",
+    "is_buyer_maker",
+)
+_TICKER_FIELDS = (
+    "price_change",
+    "price_change_pct",
+    "weighted_avg_price",
+    "prev_close_price",
+    "last_price",
+    "last_qty",
+    "bid_price",
+    "bid_qty",
+    "ask_price",
+    "ask_qty",
+    "open_price",
+    "high_price",
+    "low_price",
+    "volume",
+    "quote_volume",
+    "open_time",
+    "close_time",
+    "trades",
+)
+_FUTURES_TICKER_UNAVAILABLE_FIELDS = (
+    "prev_close_price",
+    "bid_price",
+    "bid_qty",
+    "ask_price",
+    "ask_qty",
+)
+
+
+def _channel_capabilities() -> list[MarketChannelCapability]:
+    return [
+        MarketChannelCapability(
+            channel=MarketChannel.KLINE,
+            market_types=("spot",),
+            realtime=True,
+            history=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            history_transports=(TransportMode.REST_HISTORY,),
+            delivery=DeliveryClass.APPEND,
+            snapshot=True,
+            sequence="timestamp",
+            resync="replace_snapshot",
+            params={"interval": list(VALID_INTERVALS)},
+            update_intervals_ms=(1000, 2000),
+            available_fields=_KLINE_FIELDS,
+            connection_model="path_per_stream",
+            limits={"rest.max_limit": 1000},
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.KLINE,
+            market_types=("futures",),
+            realtime=True,
+            history=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            history_transports=(TransportMode.REST_HISTORY,),
+            delivery=DeliveryClass.APPEND,
+            snapshot=True,
+            sequence="timestamp",
+            resync="replace_snapshot",
+            params={"interval": [item for item in VALID_INTERVALS if item != "1s"]},
+            update_intervals_ms=(250,),
+            available_fields=_KLINE_FIELDS,
+            connection_model="path_per_stream",
+            limits={"rest.max_limit": 1000},
+            known_limitations=("The USD-M kline endpoint does not support 1s bars",),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.AGG_TRADE,
+            market_types=("spot",),
+            realtime=True,
+            history=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            history_transports=(TransportMode.REST_HISTORY,),
+            delivery=DeliveryClass.APPEND,
+            sequence="monotonic_id",
+            resync="snapshot_replay",
+            available_fields=_AGG_TRADE_FIELDS,
+            connection_model="path_per_stream",
+            limits={"rest.max_limit": 1000},
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.AGG_TRADE,
+            market_types=("futures",),
+            realtime=True,
+            history=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            history_transports=(TransportMode.REST_HISTORY,),
+            delivery=DeliveryClass.APPEND,
+            sequence="monotonic_id",
+            resync="snapshot_replay",
+            update_intervals_ms=(100,),
+            available_fields=_AGG_TRADE_FIELDS,
+            connection_model="path_per_stream",
+            limits={
+                "rest.max_limit": 1000,
+                "history.max_age_ms": 86_400_000,
+                "history.max_window_ms": 3_600_000,
+            },
+            known_limitations=(
+                "USD-M aggregate-trade history is limited to the last 24 hours",
+                "Each USD-M aggregate-trade time range must be shorter than one hour",
+            ),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.TRADE,
+            market_types=("spot", "futures"),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.APPEND,
+            sequence="monotonic_id",
+            available_fields=(
+                "trade_id",
+                "price",
+                "quantity",
+                "trade_time_ms",
+                "is_buyer_maker",
+                "buyer_order_id",
+                "seller_order_id",
+            ),
+            connection_model="path_per_stream",
+            known_limitations=(
+                "REST exposes only recent trades and is not a historical range source",
+                "Buyer and seller order IDs are WebSocket-only; REST normalizer zero placeholders are not data",
+            ),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.TICKER,
+            market_types=("spot",),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            update_intervals_ms=(1000,),
+            available_fields=_TICKER_FIELDS,
+            connection_model="path_per_stream",
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.TICKER,
+            market_types=("futures",),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            update_intervals_ms=(1000,),
+            available_fields=tuple(
+                field
+                for field in _TICKER_FIELDS
+                if field not in _FUTURES_TICKER_UNAVAILABLE_FIELDS
+            ),
+            unavailable_fields=_FUTURES_TICKER_UNAVAILABLE_FIELDS,
+            connection_model="path_per_stream",
+            known_limitations=(
+                "USD-M 24h ticker omits prev-close and best bid/ask fields; "
+                "normalizer zero placeholders are not data",
+            ),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.MINI_TICKER,
+            market_types=("spot", "futures"),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.LATEST,
+            snapshot=True,
+            update_intervals_ms=(1000,),
+            available_fields=(
+                "close_price",
+                "open_price",
+                "high_price",
+                "low_price",
+                "volume",
+                "quote_volume",
+            ),
+            connection_model="path_per_stream",
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.DEPTH,
+            market_types=("spot",),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.SNAPSHOT,
+            snapshot=True,
+            sequence="monotonic_id",
+            resync="replace_snapshot",
+            params={"depth_levels": [5, 10, 20]},
+            update_intervals_ms=(1000,),
+            available_fields=("last_update_id", "bids", "asks"),
+            connection_model="path_per_stream",
+            limits={"rest.max_limit": 5000},
+            known_limitations=(
+                "Current depth events are replaceable snapshots, not ordered full-book deltas",
+            ),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.DEPTH,
+            market_types=("futures",),
+            realtime=True,
+            realtime_transports=_REALTIME_TRANSPORTS,
+            delivery=DeliveryClass.SNAPSHOT,
+            snapshot=True,
+            sequence="monotonic_id",
+            resync="replace_snapshot",
+            params={"depth_levels": [5, 10, 20]},
+            update_intervals_ms=(250,),
+            available_fields=("last_update_id", "bids", "asks"),
+            connection_model="path_per_stream",
+            limits={"rest.max_limit": 1000},
+            known_limitations=(
+                "Current depth events are replaceable snapshots, not ordered full-book deltas",
+            ),
+        ),
+    ]
 
 
 class BinanceExchangeAdapter:
@@ -39,6 +282,7 @@ class BinanceExchangeAdapter:
         return ExchangeCapabilities(
             exchange=self.id,
             name=self.name,
+            capability_schema_version=2,
             markets=[
                 ExchangeMarket(
                     market_type="spot",
@@ -52,6 +296,7 @@ class BinanceExchangeAdapter:
                     contract_family="usdt-m",
                 ),
             ],
+            channels=_channel_capabilities(),
             native_intervals=list(VALID_INTERVALS),
             supports_multi_symbol_ticker=True,
             supports_symbol_search=True,

@@ -57,10 +57,13 @@ class OkxExchangeProtocol:
         )
 
     def ws_connection(self, descriptor: Any, config: Any | None = None) -> WsConnectionSpec:
+        stream_type = getattr(getattr(descriptor, "stream_type", None), "value", "")
         return WsConnectionSpec(
             base_urls=self.ws_base_urls(descriptor, config=config),
             subscription=self.build_ws_subscription(descriptor),
-            connection_model="shared_multiplex",
+            connection_model=(
+                "shared_multiplex" if stream_type == "kline" else "message_per_stream"
+            ),
         )
 
     def rest_base_urls(self, market_type: str = "spot", config: Any | None = None) -> list[str]:

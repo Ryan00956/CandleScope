@@ -229,6 +229,32 @@ export class DrawingLineageIndex {
   }
 
   /**
+   * Copy the current lookup without rescanning projection metadata. Projection
+   * stores mutate their owned index in place, while a drawing frame must keep
+   * the exact lineage revision it published even if the next tail arrives.
+   */
+  stableSnapshot(): DrawingLineageIndex {
+    const snapshot = new DrawingLineageIndex();
+    snapshot.revision = this.revision;
+    snapshot.seriesData = this.seriesData;
+    snapshot.isOrdinal = this.isOrdinal;
+    snapshot.exactRowsBySourceTime = new Map(Array.from(
+      this.exactRowsBySourceTime,
+      ([sourceTime, rows]) => [sourceTime, rows.slice()],
+    ));
+    snapshot.ordinalRows = this.ordinalRows.slice();
+    snapshot.rowRanges = this.rowRanges.slice();
+    snapshot.currentProjection = this.currentProjection;
+    snapshot.latestLineage = this.latestLineage;
+    snapshot.rowRangesMonotonic = this.rowRangesMonotonic;
+    snapshot._records = this._records.slice();
+    snapshot._coverageGroup = this._coverageGroup;
+    snapshot._previousRangeFrom = this._previousRangeFrom;
+    snapshot._previousRangeTo = this._previousRangeTo;
+    return snapshot;
+  }
+
+  /**
    * Resolve the axis-ordered run whose source lineage overlaps an inclusive
    * source-time envelope. Monotonic projector lineage uses two binary searches;
    * unusual/non-monotonic or internally discontinuous metadata fails closed.

@@ -18,10 +18,9 @@ import {
   normalizeLegacyFreehandDataPoints,
 } from "../freehandStrokeModel.js";
 import {
-  dataPointToCoordinate,
+  drawingDataPointsToCoordinates,
   freehandStrokeToCoordinates,
 } from "./coordinateUtils.js";
-import { isOrdinalAxisTime } from "../../../chart-adapter/coordinateBridge.js";
 import type { DrawingCoordinateContext } from "../../../chart-adapter/coordinateBridge.js";
 import type {
   BrushShape,
@@ -160,6 +159,10 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
       series,
       source._stroke,
       coordinateContext,
+      {
+        cacheToken: source,
+        geometryRevision: source._geometryRevision,
+      },
     );
     let projectedPointCount = 0;
     for (const point of horizontalPoints) {
@@ -185,17 +188,23 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
   let path: ScreenPoint[] = [];
   let splitOnUnresolved: boolean | null = null;
   let projectedPointCount = 0;
-  if (source._dataPoints.length > 0) {
-    drawingPerfCounters.recordAnchorResolve(source._dataPoints.length);
-  }
-  for (const dataPoint of source._dataPoints) {
-    const x = dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
+  const horizontalCoordinates = drawingDataPointsToCoordinates(
+    chart,
+    series,
+    source._dataPoints,
+    coordinateContext,
+    {
+      cacheToken: source,
+      geometryRevision: source._geometryRevision,
+    },
+  );
+  for (let index = 0; index < source._dataPoints.length; index += 1) {
+    const dataPoint = source._dataPoints[index];
+    if (!dataPoint) continue;
+    const x = horizontalCoordinates[index] ?? null;
     const y = series.priceToCoordinate(dataPoint.price);
     if (splitOnUnresolved === null) {
-      const firstDataTime = coordinateContext.seriesData?.find(
-        (row) => row?.time != null,
-      )?.time;
-      splitOnUnresolved = isOrdinalAxisTime(firstDataTime);
+      splitOnUnresolved = coordinateContext.drawingCoordinateIndex?.mode === "ordinal";
     }
     if (x != null && y != null) {
       path.push({ x, y });
@@ -403,6 +412,7 @@ export class FreehandDrawingPrimitive {
   _chart: DrawingAttachedParameter["chart"] | null;
   _paneView: FreehandPaneView;
   _requestUpdate: (() => void) | null;
+  _geometryRevision: number;
 
   /**
    * @param {object} opts
@@ -446,6 +456,7 @@ export class FreehandDrawingPrimitive {
     this._chart = null;
     this._paneView = new FreehandPaneView(this);
     this._requestUpdate = null;
+    this._geometryRevision = 1;
   }
 
   // ── ISeriesPrimitive interface ──
@@ -488,14 +499,17 @@ export class FreehandDrawingPrimitive {
   get opacity(): number { return this._opacity; }
   get compositeOperation(): GlobalCompositeOperation { return this._compositeOperation; }
   get brushShape(): BrushShape { return this._brushShape; }
+  get geometryRevision(): number { return this._geometryRevision; }
 
   addPoint(dp: DrawingDataPoint): void {
     this._dataPoints.push(dp);
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
   setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
@@ -537,6 +551,7 @@ export class FreehandDrawingPrimitive {
     this._dataPoints = [];
     this._previewScreenPoints = null;
     this._isPreview = false;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
     return true;
   }
@@ -549,6 +564,7 @@ export class FreehandDrawingPrimitive {
     this._stroke = null;
     this._previewScreenPoints = null;
     this._isPreview = false;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
     return true;
   }
@@ -560,6 +576,7 @@ export class FreehandDrawingPrimitive {
     this._previewScreenPoints = [];
     this._stroke = null;
     this._dataPoints = [];
+    this._geometryRevision += 1;
     this._requestUpdate?.();
     return true;
   }
@@ -603,7 +620,7 @@ export class FreehandDrawingPrimitive {
 
   // ── Hit testing (screen/CSS-pixel coordinates) ──
 
-  hitTest(x: number, y: number, hitRadius = 8): boolean {
+  hitTestGeometry(x: number, y: number, hitRadius = 8): boolean {
     if (this._hidden) return false;
     if (this._isPreview) return false;
     if (!this._series || !this._chart) return false;

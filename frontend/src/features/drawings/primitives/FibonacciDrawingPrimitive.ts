@@ -9,7 +9,7 @@
  *   - Inverted mode (first click = level 1 instead of level 0)
  */
 
-import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { drawingDataPointsToCoordinates } from "./coordinateUtils.js";
 import type {
   DrawingAttachedParameter,
   DrawingDataPoint,
@@ -284,8 +284,15 @@ class FibPaneView implements PrimitivePaneView {
     const points: FibRenderPoint[] = [];
     const coordinateContext = {};
 
-    for (const dp of source._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
+    const horizontalCoordinates = drawingDataPointsToCoordinates(
+      chart,
+      series,
+      source._dataPoints,
+      coordinateContext,
+      { cacheToken: source, geometryRevision: source._geometryRevision },
+    );
+    for (const [index, dp] of source._dataPoints.entries()) {
+      const x = horizontalCoordinates[index] ?? null;
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -326,6 +333,7 @@ export class FibonacciDrawingPrimitive {
   _levels: FibonacciLevel[];
   _inverted: boolean;
   _hidden: boolean;
+  _geometryRevision: number;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
   _paneView: FibPaneView;
@@ -343,6 +351,7 @@ export class FibonacciDrawingPrimitive {
     this._levels = opts.levels || DEFAULT_FIB_LEVELS.map((l) => ({ ...l }));
     this._inverted = opts.inverted || false;
     this._hidden = !!opts.hidden;
+    this._geometryRevision = 1;
 
     this._series = null;
     this._chart = null;
@@ -375,11 +384,13 @@ export class FibonacciDrawingPrimitive {
   get color() { return this._color; }
   get lineWidth() { return this._lineWidth; }
   get selected() { return this._selected; }
+  get geometryRevision() { return this._geometryRevision; }
   get levels() { return this._levels; }
   get inverted() { return this._inverted; }
 
   setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
@@ -436,7 +447,7 @@ export class FibonacciDrawingPrimitive {
     this._requestUpdate?.();
   }
 
-  hitTest(x: number, y: number): DrawingHit | null {
+  hitTestGeometry(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
     if (this._dataPoints.length < 2) return null;
@@ -444,8 +455,15 @@ export class FibonacciDrawingPrimitive {
     const series = this._series;
     const chart = this._chart;
     const coordinateContext = {};
-    const screenPoints = this._dataPoints.map((dp) => {
-      const sx = dataPointToCoordinate(chart, series, dp, coordinateContext);
+    const horizontalCoordinates = drawingDataPointsToCoordinates(
+      chart,
+      series,
+      this._dataPoints,
+      coordinateContext,
+      { cacheToken: this, geometryRevision: this._geometryRevision },
+    );
+    const screenPoints = this._dataPoints.map((dp, index) => {
+      const sx = horizontalCoordinates[index] ?? null;
       return { x: sx, y: series.priceToCoordinate(dp.price) };
     });
 

@@ -9,6 +9,7 @@ import {
 import type {
   DrawingDataPoint,
   ExactOrdinalAnchor,
+  FreehandBatchResolveRequest,
   FreehandAppendResult,
   FreehandCaptureBatch,
   FreehandFinalizeOptions,
@@ -808,12 +809,47 @@ function normalizeResolvedSpan(value: unknown): ResolvedFreehandSpan | null {
 
 function resolveNormalizedFreehandStrokePoints(stroke: FreehandStroke, {
   resolveAnchor,
+  resolveBatch,
   resolveSpan,
   resolveTime,
 }: FreehandStrokeResolvers): Array<ResolvedFreehandPoint | null> {
+  const batchRequests: FreehandBatchResolveRequest[] = [];
+  const batchRequestIndexes = new Map<number, number>();
+  if (stroke.version === FREEHAND_STROKE_V3_VERSION && typeof resolveBatch === "function") {
+    for (let pointIndex = 0; pointIndex < stroke.points.length; pointIndex += 1) {
+      const point = stroke.points[pointIndex];
+      if (!point || "span" in point) continue;
+      batchRequestIndexes.set(pointIndex, batchRequests.length);
+      batchRequests.push("time" in point
+        ? { kind: "time", time: point.time, pointIndex, point }
+        : { kind: "anchor", anchor: point.anchor, pointIndex, point });
+    }
+  }
+
+  let batchCoordinates: Array<number | null> | null = null;
+  if (batchRequests.length > 0 && typeof resolveBatch === "function") {
+    try {
+      const candidate = resolveBatch(batchRequests, stroke as FreehandStrokeV3);
+      if (Array.isArray(candidate)
+        && candidate.length === batchRequests.length
+        && candidate.every((value) => value === null || finiteNumber(value) !== null)) {
+        batchCoordinates = candidate.map((value) => (
+          value === null ? null : finiteNumber(value)
+        ));
+      }
+    } catch {
+      batchCoordinates = null;
+    }
+  }
+
   const resolvedSpans = new Map<number, ResolvedFreehandSpan | null>();
   return stroke.points.map((point, pointIndex) => {
     if ("time" in point) {
+      const batchIndex = batchRequestIndexes.get(pointIndex);
+      if (batchIndex !== undefined) {
+        const x = batchCoordinates?.[batchIndex] ?? null;
+        return x === null ? null : { x, price: point.price };
+      }
       if (stroke.version !== FREEHAND_STROKE_V3_VERSION || typeof resolveTime !== "function") {
         return null;
       }
@@ -826,6 +862,11 @@ function resolveNormalizedFreehandStrokePoints(stroke: FreehandStroke, {
       return x === null ? null : { x, price: point.price };
     }
     if ("anchor" in point) {
+      const batchIndex = batchRequestIndexes.get(pointIndex);
+      if (batchIndex !== undefined) {
+        const x = batchCoordinates?.[batchIndex] ?? null;
+        return x === null ? null : { x, price: point.price };
+      }
       if (stroke.version !== FREEHAND_STROKE_V3_VERSION || typeof resolveAnchor !== "function") {
         return null;
       }
@@ -877,6 +918,7 @@ export function resolveFreehandStrokeV2Points(
   return stroke && typeof resolveSpan === "function"
     ? resolveNormalizedFreehandStrokePoints(stroke, {
         resolveAnchor: null,
+        resolveBatch: null,
         resolveSpan,
         resolveTime: null,
       })
@@ -886,18 +928,25 @@ export function resolveFreehandStrokeV2Points(
 /** Resolve a strict v3 stroke through lineage-span and absolute-time bridges. */
 export function resolveFreehandStrokeV3Points(value: unknown, {
   resolveAnchor = null,
+  resolveBatch = null,
   resolveSpan = null,
   resolveTime = null,
 }: FreehandStrokeResolvers = {}): Array<ResolvedFreehandPoint | null> {
   const stroke = normalizeFreehandStrokeV3(value);
   return stroke
-    ? resolveNormalizedFreehandStrokePoints(stroke, { resolveAnchor, resolveSpan, resolveTime })
+    ? resolveNormalizedFreehandStrokePoints(stroke, {
+        resolveAnchor,
+        resolveBatch,
+        resolveSpan,
+        resolveTime,
+      })
     : [];
 }
 
 /** Resolve any known persistent stroke version; unknown versions fail closed. */
 export function resolveFreehandStrokePoints(value: unknown, {
   resolveAnchor = null,
+  resolveBatch = null,
   resolveSpan = null,
   resolveTime = null,
 }: FreehandStrokeResolvers = {}): Array<ResolvedFreehandPoint | null> {
@@ -906,7 +955,12 @@ export function resolveFreehandStrokePoints(value: unknown, {
     return resolveFreehandStrokeV2Points(value, resolveSpan);
   }
   if (value.version === FREEHAND_STROKE_V3_VERSION) {
-    return resolveFreehandStrokeV3Points(value, { resolveAnchor, resolveSpan, resolveTime });
+    return resolveFreehandStrokeV3Points(value, {
+      resolveAnchor,
+      resolveBatch,
+      resolveSpan,
+      resolveTime,
+    });
   }
   return [];
 }

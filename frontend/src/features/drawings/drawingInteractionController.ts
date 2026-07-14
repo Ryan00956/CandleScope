@@ -1079,7 +1079,7 @@ export function useDrawing({
         if (sel instanceof TextDrawingPrimitive) {
           if (supportsDrawingHitType(drawingAnchorMode, "text")) {
             let hit: DrawingHit | false = false;
-            try { hit = sel.hitTest(pos.x, pos.y); } catch { /* ignore */ }
+            try { hit = sel.hitTestGeometry(pos.x, pos.y); } catch { /* ignore */ }
             if (hit) {
               clearHoverFeedback();
               beginTextDrag(sel, hit, pos);
@@ -1093,8 +1093,8 @@ export function useDrawing({
         } else if (sel) {
           let stillOnIt = false;
           try {
-            if (typeof sel.hitTest === "function") {
-              stillOnIt = !!sel.hitTest(pos.x, pos.y);
+            if (typeof sel.hitTestGeometry === "function") {
+              stillOnIt = !!sel.hitTestGeometry(pos.x, pos.y);
             }
           } catch { /* ignore */ }
           if (!stillOnIt) deselectAll();

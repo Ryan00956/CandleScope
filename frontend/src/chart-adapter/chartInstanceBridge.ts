@@ -16,6 +16,8 @@ import type {
   DrawingSeriesProviders,
   ScreenPoint,
 } from "./coordinateBridge.js";
+import { isDrawingFrameSnapshot } from "./drawingFrameSnapshot.js";
+import type { DrawingFrameSnapshot } from "./drawingFrameSnapshot.js";
 import type { DrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex.js";
 import type { DisplayRow } from "../features/chart-representation/chartRepresentationTypes.js";
 import type { MainSeriesHandle } from "./chartAdapterTypes.js";
@@ -51,16 +53,6 @@ type AdapterPrimitive = Parameters<AdapterSeries["attachPrimitive"]>[0] & {
   _series?: AdapterSeries | null;
 };
 
-interface DrawingCoordinateSnapshot {
-  seriesData?: DisplayRow[];
-  ordinalSeriesIndex?: DrawingLineageIndex | null;
-  indexRevision?: number | null;
-  sourceTimeHorizon?: unknown;
-  sourceInterval?: unknown;
-  sourceIntervalSeconds?: unknown;
-  drawingProjectionConfig?: unknown;
-}
-
 interface LookupMap {
   has(key: unknown): boolean;
   get(key: unknown): unknown;
@@ -77,7 +69,7 @@ interface LightweightChartAdapterOptions {
   sourceIntervalSecondsRef?: RefOrValue<unknown>;
   projectionConfigRef?: RefOrValue<unknown>;
   ordinalSeriesIndexProvider?: (() => DrawingLineageIndex | null) | null;
-  drawingCoordinateSnapshotProvider?: (() => DrawingCoordinateSnapshot | null) | null;
+  drawingCoordinateSnapshotProvider?: (() => DrawingFrameSnapshot | null) | null;
 }
 
 interface FreehandCaptureIdentityRecord {
@@ -124,6 +116,19 @@ function isDisplayRowArray(value: unknown): value is DisplayRow[] {
   if (!Array.isArray(value)) return false;
   const rows: unknown[] = value;
   return rows.every(isDisplayRow);
+}
+
+function snapshotLineageRevision(
+  snapshot: DrawingFrameSnapshot | null | undefined,
+): number | null {
+  if (!snapshot) return null;
+  if (Number.isSafeInteger(snapshot.lineageIndexRevision)) {
+    return snapshot.lineageIndexRevision;
+  }
+  // Transitional compatibility for adapter tests and embedders compiled
+  // against the pre-Phase-1 atomic projection snapshot.
+  const legacyRevision = (snapshot as unknown as { indexRevision?: unknown }).indexRevision;
+  return Number.isSafeInteger(legacyRevision) ? Number(legacyRevision) : null;
 }
 
 function usesOrdinalData(data: unknown): boolean {
@@ -206,7 +211,7 @@ export function createLightweightChartAdapter({
         ? snapshot?.ordinalSeriesIndex ?? null
         : getOrdinalSeriesIndex() ?? null,
       ...(hasSnapshotData
-        ? { drawingOrdinalSeriesIndexRevision: snapshot?.indexRevision ?? null }
+        ? { drawingOrdinalSeriesIndexRevision: snapshotLineageRevision(snapshot) }
         : {}),
       drawingProjectionConfig: hasSnapshotProjectionConfig
         ? snapshot.drawingProjectionConfig
@@ -221,6 +226,7 @@ export function createLightweightChartAdapter({
       sourceTimeHorizon: hasSnapshotHorizon
         ? snapshot.sourceTimeHorizon
         : getSourceTimeHorizon(),
+      ...(isDrawingFrameSnapshot(snapshot) ? { drawingFrameSnapshot: snapshot } : {}),
     };
   };
   let lastFreehandCaptureIdentity: FreehandCaptureIdentityRecord | null = null;
@@ -304,8 +310,9 @@ export function createLightweightChartAdapter({
       if (hasSnapshotProvider || typeof ordinalSeriesIndexProvider === "function") {
         context.drawingOrdinalSeriesIndex = ordinalSeriesIndex ?? null;
         context.drawingOrdinalSeriesIndexRevision = hasSnapshotProvider && snapshot
-          ? snapshot.indexRevision ?? null
+          ? snapshotLineageRevision(snapshot)
           : ordinalSeriesIndex?.revision ?? null;
+        if (isDrawingFrameSnapshot(snapshot)) context.drawingFrameSnapshot = snapshot;
       }
       const batch = captureSourceLineageFreehandStrokeBatch(
         chart,

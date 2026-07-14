@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createLightweightChartAdapter as createProductionAdapter } from "../chartInstanceBridge.js";
-import { dataPointToCoordinate, isOrdinalAxisTime } from "../coordinateBridge.js";
+import {
+  dataPointToCoordinate,
+  isOrdinalAxisTime,
+  type DrawingCoordinateContext,
+} from "../coordinateBridge.js";
+import { createDrawingFrameSnapshotFactory } from "../drawingFrameSnapshot.js";
 import { createDrawingLineageIndex } from "../../features/chart-representation/drawingLineageIndex.js";
 import { ProjectionStore } from "../../features/chart-representation/projectionStore.js";
 import { LineBreakProjector } from "../../features/chart-representation/projectors/lineBreakProjector.js";
@@ -295,6 +300,165 @@ test("adapter registers stable drawing context before primitive attachment", () 
   assert.equal(attachedCoordinate, 10);
   assert.equal(fallbackDataCalls, 0);
   assert.equal(snapshotCalls, 1);
+});
+
+test("adapter operations hydrate one real drawing frame snapshot into the coordinate context", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }, { time: 300 }];
+  const factory = createDrawingFrameSnapshotFactory();
+  const baseInput = {
+    axisKind: "time" as const,
+    coordinateKey: "BTCUSDT:time:1m:0",
+    dpr: 1,
+    drawingProjectionConfig: "dataset-a:time:1m",
+    heightCssPx: 600,
+    projectionKey: "dataset-a:time:1m",
+    seriesData: rows,
+    sourceInterval: "1m",
+    sourceIntervalSeconds: 60,
+    sourceTimeHorizon: 300,
+    surfaceToken: "surface-a",
+    themeKey: "dark",
+    viewportKey: "viewport-a",
+    widthCssPx: 900,
+  };
+  const initialSnapshot = factory.capture(baseInput);
+  const viewportSnapshot = factory.capture({
+    ...baseInput,
+    viewportKey: "viewport-b",
+  });
+
+  assert.notStrictEqual(viewportSnapshot, initialSnapshot);
+  assert.equal(
+    viewportSnapshot.viewportRevision,
+    initialSnapshot.viewportRevision + 1,
+  );
+  assert.equal(viewportSnapshot.worldRevisionKey, initialSnapshot.worldRevisionKey);
+  assert.equal(viewportSnapshot.dataRevision, initialSnapshot.dataRevision);
+  assert.equal(viewportSnapshot.projectionRevision, initialSnapshot.projectionRevision);
+  assert.equal(
+    viewportSnapshot.lineageIndexRevision,
+    initialSnapshot.lineageIndexRevision,
+  );
+  assert.strictEqual(viewportSnapshot.coordinateIndex, initialSnapshot.coordinateIndex);
+  assert.equal(viewportSnapshot.coordinateIndex.validationCount, 1);
+
+  const reads = {
+    config: 0,
+    horizon: 0,
+    interval: 0,
+    intervalSeconds: 0,
+    seriesData: 0,
+    snapshot: 0,
+  };
+  const coordinateContext: DrawingCoordinateContext = {};
+  let attachedCoordinate: number | null = null;
+  const chart = {
+    timeScale: () => ({
+      timeToCoordinate: (time: unknown) => {
+        if (time === 100) return 10;
+        if (time === 200) return 20;
+        if (time === 300) return 30;
+        return null;
+      },
+    }),
+  };
+  const series = {
+    attachPrimitive: () => {
+      attachedCoordinate = dataPointToCoordinate(
+        chart,
+        series,
+        { time: 150 },
+        coordinateContext,
+      );
+    },
+    data: () => {
+      reads.seriesData += 1;
+      return rows;
+    },
+  };
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    seriesRef: { current: series },
+    seriesDataRef: {
+      get current() {
+        reads.seriesData += 1;
+        return rows;
+      },
+    },
+    projectionConfigRef: {
+      get current() {
+        reads.config += 1;
+        return "dataset-stale:kagi:5";
+      },
+    },
+    sourceIntervalRef: {
+      get current() {
+        reads.interval += 1;
+        return "2m";
+      },
+    },
+    sourceIntervalSecondsRef: {
+      get current() {
+        reads.intervalSeconds += 1;
+        return 120;
+      },
+    },
+    sourceTimeHorizonRef: {
+      get current() {
+        reads.horizon += 1;
+        return 999;
+      },
+    },
+    drawingCoordinateSnapshotProvider: () => {
+      reads.snapshot += 1;
+      return viewportSnapshot;
+    },
+  });
+
+  assert.equal(adapter.attachPrimitive({}), true);
+  assert.equal(attachedCoordinate, 15);
+  assert.deepEqual(reads, {
+    config: 0,
+    horizon: 0,
+    interval: 0,
+    intervalSeconds: 0,
+    seriesData: 0,
+    snapshot: 1,
+  });
+  assert.strictEqual(coordinateContext.drawingFrameSnapshot, viewportSnapshot);
+  assert.strictEqual(
+    coordinateContext.drawingCoordinateIndex,
+    viewportSnapshot.coordinateIndex,
+  );
+  assert.strictEqual(coordinateContext.seriesData, viewportSnapshot.seriesData);
+  assert.equal(
+    coordinateContext.drawingProjectionConfig,
+    viewportSnapshot.drawingProjectionConfig,
+  );
+  assert.equal(coordinateContext.sourceInterval, viewportSnapshot.sourceInterval);
+  assert.equal(
+    coordinateContext.sourceIntervalSeconds,
+    viewportSnapshot.sourceIntervalSeconds,
+  );
+  assert.equal(
+    coordinateContext.sourceTimeHorizon,
+    viewportSnapshot.sourceTimeHorizon,
+  );
+  const contextSnapshot = coordinateContext.drawingFrameSnapshot as typeof viewportSnapshot;
+  assert.strictEqual(contextSnapshot.coordinateIndex, viewportSnapshot.coordinateIndex);
+  assert.equal(contextSnapshot.dataRevision, viewportSnapshot.dataRevision);
+  assert.equal(contextSnapshot.projectionRevision, viewportSnapshot.projectionRevision);
+  assert.equal(
+    contextSnapshot.lineageIndexRevision,
+    viewportSnapshot.lineageIndexRevision,
+  );
+  assert.equal(contextSnapshot.worldRevisionKey, viewportSnapshot.worldRevisionKey);
+  assert.equal(viewportSnapshot.coordinateIndex.validationCount, 1);
+  assert.equal(
+    viewportSnapshot.coordinateIndex.stats.numericBinarySearchCount
+      + viewportSnapshot.coordinateIndex.stats.numericBatchMergeWalkCount,
+    1,
+  );
 });
 
 test("projection snapshots keep primitive coordinates on the current incremental tail", () => {

@@ -68,6 +68,40 @@ test("drawing lineage index replaces only the changed synthetic tail", () => {
   assert.equal(index.latestLineage, 9_999);
 });
 
+test("stable drawing lineage snapshots do not drift with a mutable store tail", () => {
+  const rows = [
+    displayRow(0, 100, 0, { from: 80, to: 100 }),
+    displayRow(1, 200, 0, { from: 101, to: 200 }),
+  ];
+  const index = createDrawingLineageIndex(rows);
+  const snapshot = index.stableSnapshot();
+  const snapshotRevision = snapshot.revision;
+  const replacement = displayRow(1, 250, 0, { from: 101, to: 250 });
+  const nextRows = [mustBeDefined(rows[0]), replacement];
+
+  assert.notStrictEqual(snapshot, index);
+  assert.notStrictEqual(snapshot.exactRowsBySourceTime, index.exactRowsBySourceTime);
+  assert.notStrictEqual(snapshot.ordinalRows, index.ordinalRows);
+  assert.equal(index.replaceTail({
+    previousSeriesData: rows,
+    fromOutputIndex: 1,
+    insert: [replacement],
+    nextSeriesData: nextRows,
+  }), true);
+
+  assert.equal(snapshot.revision, snapshotRevision);
+  assert.strictEqual(snapshot.seriesData, rows);
+  assert.deepEqual(snapshot.exactRowsBySourceTime.get(200), [rows[1]]);
+  assert.equal(snapshot.exactRowsBySourceTime.has(250), false);
+  assert.deepEqual(snapshot.rowsOverlappingSourceEnvelope({
+    fromTime: 150,
+    toTime: 200,
+  }), { first: rows[1], last: rows[1] });
+  assert.strictEqual(index.seriesData, nextRows);
+  assert.equal(index.exactRowsBySourceTime.has(200), false);
+  assert.deepEqual(index.exactRowsBySourceTime.get(250), [replacement]);
+});
+
 test("drawing lineage index restores prefix aggregates after a tail retraction", () => {
   const rows = [
     displayRow(0, 100, 0, { from: 80, to: 100 }),

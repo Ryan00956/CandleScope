@@ -15,7 +15,7 @@
  *   - Hover highlight for eraser tool
  */
 
-import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { drawingDataPointsToCoordinates } from "./coordinateUtils.js";
 import type {
   DrawingAttachedParameter,
   DrawingDataPoint,
@@ -388,6 +388,7 @@ export class TextDrawingPrimitive {
   _selected: boolean;
   _hovered: boolean;
   _hidden: boolean;
+  _geometryRevision: number;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
   _paneView: TextPaneView;
@@ -431,6 +432,7 @@ export class TextDrawingPrimitive {
     this._selected = !!opts.selected;
     this._hovered = false;
     this._hidden = false;
+    this._geometryRevision = 1;
 
     this._series = null;
     this._chart = null;
@@ -471,11 +473,16 @@ export class TextDrawingPrimitive {
   get widthPx() { return this._widthPx; }
   get padding() { return this._padding; }
   get selected() { return this._selected; }
+  get geometryRevision() { return this._geometryRevision; }
 
   // ── Setters ──
 
   setText(t: string): void { this._text = t; this._requestUpdate?.(); }
-  setDataPoint(dp: DrawingDataPoint): void { this._dataPoint = dp; this._requestUpdate?.(); }
+  setDataPoint(dp: DrawingDataPoint): void {
+    this._dataPoint = dp;
+    this._geometryRevision += 1;
+    this._requestUpdate?.();
+  }
   setColor(c: string): void { this._color = c; this._requestUpdate?.(); }
   setFontSize(s: number): void { this._fontSize = s; this._requestUpdate?.(); }
   setFontFamily(f: string): void { this._fontFamily = f; this._requestUpdate?.(); }
@@ -534,7 +541,13 @@ export class TextDrawingPrimitive {
   _anchorScreen(): ScreenPoint | null {
     if (!this._series || !this._chart) return null;
     const coordinateContext = {};
-    const sx = dataPointToCoordinate(this._chart, this._series, this._dataPoint, coordinateContext);
+    const sx = drawingDataPointsToCoordinates(
+      this._chart,
+      this._series,
+      [this._dataPoint],
+      coordinateContext,
+      { cacheToken: this, geometryRevision: this._geometryRevision },
+    )[0] ?? null;
     const sy = this._series.priceToCoordinate(this._dataPoint.price);
     if (sx == null || sy == null || !isFinite(sx) || !isFinite(sy)) return null;
     return { x: sx, y: sy };
@@ -593,7 +606,7 @@ export class TextDrawingPrimitive {
    *   { handle: 'tl'|'t'|'tr'|'r'|'br'|'b'|'bl'|'l' }   — handle hit (only when selected)
    *   { body: true }                                       — body hit
    */
-  hitTest(x: number, y: number): DrawingHit | false {
+  hitTestGeometry(x: number, y: number): DrawingHit | false {
     if (this._hidden) return false;
     const box = this.getBoundingBoxScreen();
     if (!box) return false;

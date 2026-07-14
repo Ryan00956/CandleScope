@@ -142,27 +142,27 @@ export function hitTestDrawingPrimitives(
       const prim = primitives[index];
 
       if (prim instanceof PositionDrawingPrimitive) {
-        const hit = prim.hitTest(x, y);
+        const hit = prim.hitTestGeometry(x, y);
         if (hit) return { prim, type: "position", ...hit };
       } else if (prim instanceof LineDrawingPrimitive) {
-        const hit = prim.hitTest(x, y);
+        const hit = prim.hitTestGeometry(x, y);
         if (hit) return { prim, type: "line", ...hit };
       } else if (prim instanceof AxisLineDrawingPrimitive) {
-        const hit = prim.hitTest(x, y);
+        const hit = prim.hitTestGeometry(x, y);
         if (hit) return { prim, type: "axis-line", ...hit };
       } else if (prim instanceof AngleMeasurementPrimitive) {
-        const hit = prim.hitTest(x, y);
+        const hit = prim.hitTestGeometry(x, y);
         if (hit) return { prim, type: "angle", ...hit };
       } else if (prim instanceof FibonacciDrawingPrimitive) {
-        const hit = prim.hitTest(x, y);
+        const hit = prim.hitTestGeometry(x, y);
         if (hit) return { prim, type: "fibonacci", ...hit };
       } else if (prim instanceof ShapeDrawingPrimitive) {
-        const hit = prim.hitTest(x, y);
+        const hit = prim.hitTestGeometry(x, y);
         if (hit) return { prim, type: "shape", ...hit };
       } else if (prim instanceof FreehandDrawingPrimitive) {
-        if (prim.hitTest(x, y, hitRadius)) return { prim, type: prim.type === "highlighter" ? "highlighter" : "freehand" };
+        if (prim.hitTestGeometry(x, y, hitRadius)) return { prim, type: prim.type === "highlighter" ? "highlighter" : "freehand" };
       } else if (prim instanceof TextDrawingPrimitive) {
-        const hit = prim.hitTest(x, y);
+        const hit = prim.hitTestGeometry(x, y);
         if (hit) return { prim, type: "text", ...hit };
       }
     }

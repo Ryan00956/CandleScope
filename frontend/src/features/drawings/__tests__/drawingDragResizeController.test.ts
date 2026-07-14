@@ -557,12 +557,12 @@ test("compact position hit testing keeps price lines, body, and both edges reach
   }));
   primitive.setSelected(true);
 
-  assert.deepEqual(primitive.hitTest(43, 80), { zone: "left", pointIndex: -1 });
-  assert.deepEqual(primitive.hitTest(65, 80), { zone: "right", pointIndex: -1 });
-  assert.deepEqual(primitive.hitTest(54, 80), { zone: "body", pointIndex: -1 });
-  assert.deepEqual(primitive.hitTest(42, 60), { zone: "tp", pointIndex: -1 });
-  assert.deepEqual(primitive.hitTest(66, 140), { zone: "sl", pointIndex: -1 });
-  assert.deepEqual(primitive.hitTest(54, 100), { zone: "entry", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(43, 80), { zone: "left", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(65, 80), { zone: "right", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(54, 80), { zone: "body", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(42, 60), { zone: "tp", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(66, 140), { zone: "sl", pointIndex: -1 });
+  assert.deepEqual(primitive.hitTestGeometry(54, 100), { zone: "entry", pointIndex: -1 });
 });
 
 function anchorTime(anchor: HorizontalDrawingAnchor | null): number | null | undefined {

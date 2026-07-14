@@ -11,6 +11,7 @@ import type {
   MutableRefObject,
 } from "react";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
+import { createDrawingFrameSnapshotFactory } from "../chart-adapter/drawingFrameSnapshot";
 import {
   applyChartPaneAppearance,
   buildChartPaneOptions,
@@ -73,6 +74,7 @@ import { normalizeMainChartType } from "../shared/mainChartTypes";
 import { parseIntervalSeconds } from "../utils/intervals";
 import { planVisibleRangeRestore } from "../features/chart-session/visibleRangeStorage";
 import { buildPaneConfigKey, loadPaneHeights, savePaneHeights } from "../features/chart-session/paneLayoutStorage";
+import { createDrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex";
 import {
   buildVisibleRangeSnapshot,
   disposeChartPaneSurface,
@@ -288,11 +290,15 @@ interface ProjectionStoreWithConfiguration extends ProjectionStore {
   configurationKey: string;
 }
 
+type ProjectionCoordinateSnapshot = ReturnType<ProjectionStore["drawingCoordinateSnapshot"]>;
+
 interface ProjectionSnapshotOwner {
+  coordinateKey: string;
   drawingProjectionConfig: string | null;
+  rawSnapshot: ProjectionCoordinateSnapshot | null;
+  snapshot: ProjectionCoordinateSnapshot | null;
   sourceInterval: IntervalString;
   sourceIntervalSeconds: number | null;
-  store: ProjectionStoreWithConfiguration | null;
 }
 
 interface ProjectionRenderContext {
@@ -900,11 +906,22 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const renderedMainSeriesGenerationRef = useRef(0);
   const projectionStoreRef = useRef<ProjectionStoreWithConfiguration | null>(null);
   const drawingProjectionSnapshotOwnerRef = useRef<ProjectionSnapshotOwner>({
+    coordinateKey: "",
     drawingProjectionConfig: null,
+    rawSnapshot: null,
+    snapshot: null,
     sourceInterval: interval,
     sourceIntervalSeconds: parseIntervalSeconds(interval),
-    store: null,
   });
+  const drawingFrameSnapshotFactoryRef = useRef<ReturnType<
+    typeof createDrawingFrameSnapshotFactory
+  > | null>(null);
+  if (!drawingFrameSnapshotFactoryRef.current) {
+    drawingFrameSnapshotFactoryRef.current = createDrawingFrameSnapshotFactory();
+  }
+  const drawingCoordinateKeyRef = useRef("");
+  const drawingThemeKeyRef = useRef("");
+  const drawingPriceProjectionKeyRef = useRef("");
   const projectionGenerationRef = useRef(0);
   const projectionRenderContextRef = useRef<ProjectionRenderContext | null>(null);
   const mainSeriesTypeRef = useRef<MainChartType | null>(null);
@@ -948,6 +965,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const [seriesReady, setSeriesReady] = useState(0);
   const [drawingSeriesGeneration, setDrawingSeriesGeneration] = useState(0);
   const [drawingCoordinateGeneration, setDrawingCoordinateGeneration] = useState(0);
+  const drawingCoordinateGenerationRef = useRef(0);
   const [auxiliaryDisplayState, setAuxiliaryDisplayState] = useState<AuxiliaryDisplayState>({
     datasetKey: null,
     rows: [],
@@ -963,11 +981,16 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     drawingProjectionConfigRef.current = drawingProjectionConfig;
     drawingSourceIntervalRef.current = sourceInterval;
     drawingSourceIntervalSecondsRef.current = sourceIntervalSeconds;
+    const rawSnapshot = store?.drawingCoordinateSnapshot?.() || null;
     drawingProjectionSnapshotOwnerRef.current = {
+      coordinateKey: `${datasetKeyRef.current || ""}:${surfaceConfigKeyRef.current || "time"}:${drawingCoordinateGenerationRef.current}`,
       drawingProjectionConfig,
+      rawSnapshot,
+      snapshot: rawSnapshot?.ordinalSeriesIndex
+        ? null
+        : rawSnapshot ? Object.freeze({ ...rawSnapshot }) : null,
       sourceInterval,
       sourceIntervalSeconds,
-      store,
     };
   }, []);
   const clearFutureTimeAxis = useCallback(({ force = false, resetPointCount = false } = {}) => {
@@ -1143,6 +1166,14 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     ? `${resolvedAxisMode}:${resolvedChartType}:${projectionSettingsKey}`
     : resolvedAxisMode;
   const drawingCoordinateKey = `${datasetKey || ""}:${surfaceConfigKey}:${drawingCoordinateGeneration}`;
+  drawingCoordinateKeyRef.current = drawingCoordinateKey;
+  drawingThemeKeyRef.current = JSON.stringify([
+    theme,
+    customBg,
+    upColor,
+    downColor,
+  ]);
+  drawingPriceProjectionKeyRef.current = JSON.stringify([invertScale, priceScaleMode]);
   requestedChartTypeRef.current = resolvedChartType;
   requestedProjectionSettingsRef.current = projectionSettings;
   seriesStoreRef.current = seriesStore;
@@ -1176,13 +1207,57 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       projectionConfigRef: drawingProjectionConfigRef,
       drawingCoordinateSnapshotProvider: () => {
         const owner = drawingProjectionSnapshotOwnerRef.current;
-        const snapshot = owner.store?.drawingCoordinateSnapshot?.() || null;
-        return snapshot ? {
-          ...snapshot,
+        let snapshot = owner.snapshot;
+        if (!snapshot && owner.rawSnapshot) {
+          const rawSnapshot = owner.rawSnapshot;
+          const ownedLineage = rawSnapshot.ordinalSeriesIndex?.seriesData === rawSnapshot.seriesData
+            ? rawSnapshot.ordinalSeriesIndex.stableSnapshot()
+            : createDrawingLineageIndex(rawSnapshot.seriesData);
+          snapshot = Object.freeze({
+            ...rawSnapshot,
+            indexRevision: ownedLineage.isOrdinal ? ownedLineage.revision : null,
+            ordinalSeriesIndex: ownedLineage.isOrdinal ? ownedLineage : null,
+          });
+          owner.snapshot = snapshot;
+        }
+        if (!snapshot) return null;
+        const chart = chartRef.current;
+        const series = mainSeriesRef.current;
+        const container = containerRef.current;
+        const rect = container?.getBoundingClientRect?.();
+        let viewportKey = "unavailable";
+        try {
+          const timeScale = chart?.timeScale?.();
+          const logical = timeScale?.getVisibleLogicalRange?.() || null;
+          viewportKey = JSON.stringify([
+            logical?.from ?? null,
+            logical?.to ?? null,
+            timeScale?.options?.().barSpacing ?? null,
+            timeScale?.scrollPosition?.() ?? null,
+            drawingPriceProjectionKeyRef.current,
+          ]);
+        } catch {
+          viewportKey = "unavailable";
+        }
+        return drawingFrameSnapshotFactoryRef.current?.capture({
+          axisKind: surfaceAxisModeRef.current === "derived-ordinal"
+            ? "derived-ordinal"
+            : "time",
+          coordinateKey: owner.coordinateKey || drawingCoordinateKeyRef.current,
+          dpr: typeof window === "undefined" ? 1 : window.devicePixelRatio,
           drawingProjectionConfig: owner.drawingProjectionConfig,
+          heightCssPx: rect?.height ?? container?.clientHeight ?? 0,
+          ordinalSeriesIndex: snapshot.ordinalSeriesIndex,
+          projectionKey: owner.drawingProjectionConfig ?? surfaceAxisModeRef.current,
+          seriesData: snapshot.seriesData,
           sourceInterval: owner.sourceInterval,
           sourceIntervalSeconds: owner.sourceIntervalSeconds,
-        } : null;
+          sourceTimeHorizon: snapshot.sourceTimeHorizon,
+          surfaceToken: series,
+          themeKey: drawingThemeKeyRef.current,
+          viewportKey,
+          widthCssPx: rect?.width ?? container?.clientWidth ?? 0,
+        }) || null;
       },
     }),
     [],
@@ -2006,7 +2081,6 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       : desiredProjectionStore;
     const generation = projectionGenerationRef.current + 1;
     projectionGenerationRef.current = generation;
-    publishDrawingProjectionStore(projectionStore);
     if (shouldAdvanceDrawingCoordinateGeneration({
       axisMode: getChartTypeDescriptor(activeChartType).axisMode,
       canReuseProjection,
@@ -2014,8 +2088,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       // Resolved ATR/minTick values can change while the requested settings
       // key stays the same. Cancel transient drawing state across that
       // structural coordinate reprojection even though the series survives.
-      setDrawingCoordinateGeneration((previous) => previous + 1);
+      drawingCoordinateGenerationRef.current += 1;
+      setDrawingCoordinateGeneration(drawingCoordinateGenerationRef.current);
     }
+    // Own the mutable store immediately, but keep drawings on the last
+    // committed immutable snapshot until the corresponding LWC render wins.
+    projectionStoreRef.current = projectionStore;
 
     try {
       isSyncingRef.current = true;
@@ -2113,6 +2191,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }
       updateMainSeriesReference(series, rows);
       projectionRenderContextRef.current = mainSeriesRenderContext;
+      if (projectionRendered) {
+        publishDrawingProjectionStore(projectionStore);
+        chartAdapter.requestSeriesUpdate();
+      }
       if (projectionRendered && pendingSurfaceViewportRef.current && displayRows.length > 0) {
         isRestoringViewportRef.current = true;
         try {
@@ -2240,7 +2322,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           });
         }
         updateMainSeriesReference(currentSeries, rows);
-        if (sourceTimeHorizonChanged
+        if (projectionRendered) {
+          publishDrawingProjectionStore(projectionStore);
+          chartAdapter.requestSeriesUpdate();
+        } else if (sourceTimeHorizonChanged
           && getChartTypeDescriptor(currentChartType).axisMode === "derived-ordinal") {
           chartAdapter.requestSeriesUpdate();
         }

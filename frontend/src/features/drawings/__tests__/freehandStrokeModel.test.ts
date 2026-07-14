@@ -379,6 +379,129 @@ test("freehand generic resolver preserves v3 gaps and resolves each span once", 
   }), [null, { x: 30, price: 11 }, null, null, { x: 30, price: 13 }]);
 });
 
+test("freehand batch resolver receives every time and anchor once in point order", () => {
+  const value = strokeV3({
+    points: [
+      { span: 0, ratio: 0, price: 10 },
+      { time: 250.5, price: 11 },
+      { span: 0, ratio: 1, price: 12 },
+      { anchor: { time: 200, sourceOrdinal: 0 }, price: 13 },
+      { time: 300, price: 14 },
+    ],
+  });
+  let batchCalls = 0;
+  const spanCalls: number[] = [];
+  const scalarCalls: string[] = [];
+
+  const resolved = resolveFreehandStrokePoints(value, {
+    resolveAnchor: () => {
+      scalarCalls.push("anchor");
+      return 999;
+    },
+    resolveBatch: (requests, normalizedStroke) => {
+      batchCalls += 1;
+      assert.equal(Object.isFrozen(normalizedStroke), true);
+      assert.strictEqual(requests[0]?.point, normalizedStroke.points[1]);
+      assert.deepEqual(requests, [{
+        kind: "time",
+        time: 250.5,
+        pointIndex: 1,
+        point: { time: 250.5, price: 11 },
+      }, {
+        kind: "anchor",
+        anchor: { time: 200, sourceOrdinal: 0 },
+        pointIndex: 3,
+        point: { anchor: { time: 200, sourceOrdinal: 0 }, price: 13 },
+      }, {
+        kind: "time",
+        time: 300,
+        pointIndex: 4,
+        point: { time: 300, price: 14 },
+      }]);
+      return [40.5, null, 60];
+    },
+    resolveSpan: (_span, index) => {
+      spanCalls.push(index);
+      return { left: 10, right: 20 };
+    },
+    resolveTime: () => {
+      scalarCalls.push("time");
+      return 999;
+    },
+  });
+
+  assert.equal(batchCalls, 1);
+  assert.deepEqual(spanCalls, [0]);
+  assert.deepEqual(scalarCalls, []);
+  assert.deepEqual(resolved, [
+    { x: 10, price: 10 },
+    { x: 40.5, price: 11 },
+    { x: 20, price: 12 },
+    null,
+    { x: 60, price: 14 },
+  ]);
+});
+
+test("freehand batch resolver fails closed without scalar fallback", () => {
+  const value = strokeV3({
+    points: [
+      { span: 0, ratio: 0.5, price: 10 },
+      { time: 250.5, price: 11 },
+      { anchor: { time: 200, sourceOrdinal: 0 }, price: 12 },
+    ],
+  });
+  const invalidResolvers: Array<() => unknown> = [
+    () => null,
+    () => [30],
+    () => [30, 40, 50],
+    () => [30, undefined],
+    () => [30, Number.NaN],
+    () => [30, Number.POSITIVE_INFINITY],
+    () => { throw new Error("batch failed"); },
+  ];
+
+  for (const resolveBatch of invalidResolvers) {
+    let scalarCalls = 0;
+    assert.deepEqual(resolveFreehandStrokeV3Points(value, {
+      resolveAnchor: () => {
+        scalarCalls += 1;
+        return 40;
+      },
+      resolveBatch,
+      resolveSpan: () => ({ left: 10, right: 20 }),
+      resolveTime: () => {
+        scalarCalls += 1;
+        return 30;
+      },
+    }), [
+      { x: 15, price: 10 },
+      null,
+      null,
+    ]);
+    assert.equal(scalarCalls, 0);
+  }
+});
+
+test("freehand batch resolver is not called for span-only strokes", () => {
+  let batchCalls = 0;
+  assert.deepEqual(resolveFreehandStrokeV3Points(strokeV3({
+    points: [
+      { span: 0, ratio: 0, price: 10 },
+      { span: 0, ratio: 1, price: 12 },
+    ],
+  }), {
+    resolveBatch: () => {
+      batchCalls += 1;
+      return [];
+    },
+    resolveSpan: () => ({ left: 10, right: 20 }),
+  }), [
+    { x: 10, price: 10 },
+    { x: 20, price: 12 },
+  ]);
+  assert.equal(batchCalls, 0);
+});
+
 test("legacy freehand normalization stays v1 and removes unsafe point fields", () => {
   const payload = normalizeSavedFreehandPayload({
     dataPoints: [{

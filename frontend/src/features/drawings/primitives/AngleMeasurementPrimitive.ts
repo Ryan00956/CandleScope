@@ -6,7 +6,7 @@
  * angle arc, and degree label are rendered in screen space.
  */
 
-import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { drawingDataPointsToCoordinates } from "./coordinateUtils.js";
 import type {
   AnglePrimitiveOptions,
   DrawingAttachedParameter,
@@ -319,8 +319,15 @@ class AnglePaneView implements PrimitivePaneView {
     const points: AngleRenderPoint[] = [];
     const coordinateContext = {};
 
-    for (const dp of source._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
+    const horizontalCoordinates = drawingDataPointsToCoordinates(
+      chart,
+      series,
+      source._dataPoints,
+      coordinateContext,
+      { cacheToken: source, geometryRevision: source._geometryRevision },
+    );
+    for (const [index, dp] of source._dataPoints.entries()) {
+      const x = horizontalCoordinates[index] ?? null;
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
     }
@@ -356,6 +363,7 @@ export class AngleMeasurementPrimitive {
   _hovered: boolean;
   _isPreview: boolean;
   _hidden: boolean;
+  _geometryRevision: number;
   _labelBox: ScreenBox | null;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
@@ -372,6 +380,7 @@ export class AngleMeasurementPrimitive {
     this._hovered = !!opts.hovered;
     this._isPreview = !!opts.isPreview;
     this._hidden = !!opts.hidden;
+    this._geometryRevision = 1;
     this._labelBox = null;
 
     this._series = null;
@@ -406,9 +415,11 @@ export class AngleMeasurementPrimitive {
   get color() { return this._color; }
   get lineWidth() { return this._lineWidth; }
   get selected() { return this._selected; }
+  get geometryRevision() { return this._geometryRevision; }
 
   setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
@@ -459,9 +470,16 @@ export class AngleMeasurementPrimitive {
     if (!this._series || !this._chart || this._dataPoints.length < 2) return null;
     const points = [];
     const coordinateContext = {};
+    const horizontalCoordinates = drawingDataPointsToCoordinates(
+      this._chart,
+      this._series,
+      this._dataPoints,
+      coordinateContext,
+      { cacheToken: this, geometryRevision: this._geometryRevision },
+    );
 
-    for (const dp of this._dataPoints) {
-      const x = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
+    for (const [index, dp] of this._dataPoints.entries()) {
+      const x = horizontalCoordinates[index] ?? null;
       const y = this._series.priceToCoordinate(dp.price);
       if (!isFiniteCoord(x) || !isFiniteCoord(y)) return null;
       points.push({ x, y });
@@ -470,7 +488,7 @@ export class AngleMeasurementPrimitive {
     return points;
   }
 
-  hitTest(x: number, y: number): DrawingHit | null {
+  hitTestGeometry(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
 
     if (this._labelBox) {

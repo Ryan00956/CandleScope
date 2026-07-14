@@ -7,8 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "check:architecture": "node scripts/check-architecture.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "tsx --test \"scripts/*.test.mjs\" \"src/**/__tests__/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "tsx --test \"scripts/*.test.mjs\" \"src/**/*.test.{ts,tsx}\"",
     "check": "npm run check:architecture && npm run typecheck && npm run lint && npm test && npm run build",
     "perf:baseline": "node scripts/perf-baseline.mjs",
     "perf:soak:1h": "node scripts/perf-baseline.mjs --url http://127.0.0.1:15173/ --duration-ms 3960000 --min-heap-duration-ms 3600000 --sample-ms 5000 --out ../docs/perf-baselines/2026-07-release-1h.json --phase release-1h",
@@ -19,7 +19,7 @@
     "smoke:chart-types": "tsx scripts/smoke.mjs --url http://127.0.0.1:15173/ --chart-type-matrix --no-seed-indicators",
     "smoke:export": "tsx scripts/smoke.mjs --url http://127.0.0.1:15173/ --export-matrix --drawing-check --overlay-heavy",
     "smoke:release": "tsx scripts/smoke.mjs --url http://127.0.0.1:15173/ --chart-type-matrix --export-matrix --drawing-check --overlay-heavy",
-    "test:drawing": "tsx --test \"src/features/drawings/__tests__/*.test.ts\""
+    "test:drawing": "tsx --test \"src/features/drawings/**/*.test.{ts,tsx}\""
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

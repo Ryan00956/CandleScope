@@ -41,12 +41,11 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: {
         ...globals.browser,
-        ...globals.node,
       },
       parserOptions: {
         ecmaVersion: 'latest',
         ecmaFeatures: { jsx: true },
-        projectService: true,
+        project: ['./tsconfig.json'],
         sourceType: 'module',
         tsconfigRootDir: import.meta.dirname,
       },
@@ -75,7 +74,21 @@ export default defineConfig([
     },
   },
   {
-    files: ['src/**/__tests__/**/*.ts', 'src/**/*.test.ts'],
+    files: [
+      'scripts/**/*.{ts,tsx}',
+      'src/**/__tests__/**/*.{ts,tsx}',
+      'src/**/*.test.{ts,tsx}',
+      'src/test/**/*.{ts,tsx}',
+    ],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.node,
+      },
+      parserOptions: {
+        project: ['./tsconfig.node.json'],
+      },
+    },
     rules: {
       '@typescript-eslint/no-floating-promises': 'off',
       '@typescript-eslint/no-misused-promises': 'off',

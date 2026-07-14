@@ -1851,24 +1851,24 @@ rg --files src -g "*.js" -g "*.jsx"
 
 迁移完成必须同时满足：
 
-- [ ] `src` 中 `.js/.jsx` 为 0。
-- [ ] `allowJs: false`。
-- [ ] `strict: true`。
-- [ ] `npm run check:architecture` 通过。
-- [ ] `npm run typecheck` 通过。
-- [ ] `npm run lint` 通过。
-- [ ] `npm test` 通过，测试数不低于 T0。
-- [ ] `npm run build` 通过。
-- [ ] `npm run smoke:release` 通过。
-- [ ] API/WS/localStorage raw payload 均从 `unknown` 开始。
-- [ ] 秒/毫秒、AxisTime、indicator output、drawing anchor 有明确类型。
-- [ ] Lightweight Charts raw handles 不越出 `chart-adapter`。
-- [ ] `SingleChartPanesProps` 和 feature runtime contracts 完整。
-- [ ] 无 `@ts-ignore`、`@ts-nocheck`。
-- [ ] 无永久 JS facade。
-- [ ] architecture allowlist 为 0，或每项都有明确短期删除条件。
-- [ ] suppression ledger 清零。
-- [ ] 文档执行记录与真实 commit/验证结果一致。
+- [x] `src` 中 `.js/.jsx` 为 0。
+- [x] `allowJs: false`。
+- [x] `strict: true`。
+- [x] `npm run check:architecture` 通过。
+- [x] `npm run typecheck` 通过。
+- [x] `npm run lint` 通过。
+- [x] `npm test` 通过，测试数不低于 T0。
+- [x] `npm run build` 通过。
+- [x] `npm run smoke:release` 通过。
+- [x] API/WS/localStorage raw payload 均从 `unknown` 开始。
+- [x] 秒/毫秒、AxisTime、indicator output、drawing anchor 有明确类型。
+- [x] Lightweight Charts raw handles 不越出 `chart-adapter`。
+- [x] `SingleChartPanesProps` 和 feature runtime contracts 完整。
+- [x] 无 `@ts-ignore`、`@ts-nocheck`。
+- [x] 无永久 JS facade。
+- [x] architecture allowlist 为 0，或每项都有明确短期删除条件。
+- [x] suppression ledger 清零。
+- [x] 文档执行记录与真实 commit/验证结果一致。
 
 只有“文件后缀都变了”不算完成。
 
@@ -2199,11 +2199,12 @@ rg --files src -g "*.js" -g "*.jsx"
 | 测试迁移 | `src` 下 95 个 `.test.js` 全部迁为 `.test.ts`，`localStorageHarness.js` 迁为 `.ts`；测试夹具优先复用生产 contract，局部/结构化 mock、畸形 parser fixture 与 defined assertion 集中在显式 test helper；没有通过整体 props cast 绕过编译器 |
 | 最终源码盘点 | `src` 共 306 个 `.ts`、54 个 `.tsx`、1 个 Vite 声明文件；`.js/.jsx` 均为 0；永久 architecture 规则会拒绝重新引入 legacy source extension |
 | Mixed-mode 清理 | 删除 `scripts/type-migration-canary/` 和 `test:canary`；`allowJs: false`，删除 `checkJs`，`include` 仅覆盖 TS/TSX/声明与需要的 TS scripts；没有 JS facade、迁移 allowlist 或临时声明文件，唯一 `.d.ts` 为标准 `vite-env.d.ts` |
-| 测试发现 | `npm test` 显式覆盖 `scripts/*.test.mjs` 与 `src/**/__tests__/*.test.ts`，避免把 test helper 当空测试；删除 canary 后新增 architecture source-extension contract test，真实测试总数保持 748 |
-| Type-aware ESLint | TS/TSX 使用 `recommendedTypeChecked` 与 project service，JS/MJS tooling 使用 `disableTypeChecked`；`no-floating-promises` 等生产 Promise 门禁保持启用，`node:test` 文件使用窄化 override；第三方 Lightweight Charts/Monaco 与动态 plugin 推断产生的 `no-unsafe-*`、对象化 runtime method reference 等项目不适配规则在 config 集中关闭，未使用源码内 `eslint-disable` |
+| 测试发现 | `npm test` 显式覆盖 `scripts/*.test.mjs` 与 `src/**/*.test.{ts,tsx}`，避免把 test helper 当空测试，同时覆盖任意深度的 `__tests__` 与源码共置测试；门禁复审新增 6 个配置/架构回归测试，并以嵌套 TSX、非 `__tests__` TS 两个真实 discovery fixture 证明不会静默漏跑，当前真实测试总数为 756 |
+| Type-aware ESLint | TS/TSX 使用 `recommendedTypeChecked`；浏览器生产源码绑定 `tsconfig.json` 且仅启用 browser globals，tests/TS tooling 绑定 `tsconfig.node.json` 并在窄化 override 中启用 Node globals；JS/MJS tooling 使用 `disableTypeChecked`；第三方 Lightweight Charts/Monaco 与动态 plugin 推断产生的 `no-unsafe-*`、对象化 runtime method reference 等项目不适配规则在 config 集中关闭，未使用源码内 `eslint-disable` |
+| 2026-07-14 门禁复审修复 | 测试发现同时覆盖 `.test.ts` / `.test.tsx`；`src` 源码扩展检查改为 fail-closed，未知或大小写变体扩展不能绕过 TypeScript gate；浏览器源码只获得 browser globals/types，Node globals/types 仅授予 TS tooling 与测试边界；新增真实 TypeScript probe 和 architecture 临时目录集成测试防止三类问题回归 |
 | 更严格编译选项评估 | 单独评估 `noUncheckedIndexedAccess` 和 `exactOptionalPropertyTypes`，分别仍有 726 与 145 个存量错误；本阶段不启用，避免把最终配置收口扩成索引访问和 optional props 语义重构 |
 | Suppression / residual | 精确扫描结果：显式 `any` type、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error`、`as unknown as` 均为 0；0 个 architecture migration allowlist；4 个 Lightweight Charts adapter 局部 assertion 仅保留在第三方不变泛型/运行时支持但声明缺失的边界，并具有删除条件和完整回归保护 |
-| 完整门禁 | `npm run check` 完整通过：architecture 0 个 migration allowlist 活跃项、typecheck、type-aware lint、748/748 tests 和 Vite 7.3.1 build 均成功，295 modules transformed |
+| 完整门禁 | `npm run check` 完整通过：architecture 0 个 migration allowlist 活跃项、browser/Node 双 project typecheck、type-aware lint、756/756 tests 和 Vite 7.3.1 build 均成功，295 modules transformed |
 | Bundle/chunk 对比 | 与 T12 `3631fbe` 的隔离 build 比较，modules 保持 295；ExportPanel、SymbolSearchModal、WatchlistSidebar、DrawingToolbar、AlertsPanel、IndicatorPanel、SettingsModal 等 lazy chunk 四舍五入后尺寸不变；DrawingEngineHost `111.87 -> 111.84 kB`、gzip `30.22 -> 30.23 kB`；entry `442.02 -> 442.12 kB`、gzip `129.91 -> 129.95 kB`；lazy chunk 数量和边界不变 |
 | Release smoke | 最终提交在隔离 Vite `15183` 实例通过；1501 bars、connected/live；15 种图表菜单/切换、histogram persistence、candlestick restoration、MA/VOL/BOLL/RSI overlay/pane、PNG/JPEG/WebP 3/3 export cases 与 drawing future-anchor/reload persistence 全部通过；`failures`、`warnings`、`exceptions` 均为 0 |
 | Smoke 命令 | `npx tsx scripts/smoke.mjs --url http://127.0.0.1:15183/ --chart-type-matrix --export-matrix --drawing-check --overlay-heavy`；验证后已停止隔离 Vite，端口释放 |

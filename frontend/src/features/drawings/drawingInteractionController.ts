@@ -346,9 +346,9 @@ export function useDrawing({
   const isDrawingFreehandRef = useRef(false);
   const lastFreehandScreenPointRef = useRef<ScreenPoint | null>(null);
   const hoveredPrimRef = useRef<DrawingPrimitive | null>(null);
-  const hoverFrameRef = useRef<number | ReturnType<typeof setTimeout>>(0);
+  const hoverFrameRef = useRef<number>(0);
   const pendingHoverRef = useRef<HoverFeedbackPayload | null>(null);
-  const activeMoveFrameRef = useRef<number | ReturnType<typeof setTimeout>>(0);
+  const activeMoveFrameRef = useRef<number>(0);
   const pendingActiveMoveRef = useRef<ActiveDrawingMovePayload | null>(null);
   const pointerRectRef = useRef<DOMRect | null>(null);
 
@@ -731,10 +731,10 @@ export function useDrawing({
       pendingHoverRef.current = { tool, x, y };
       if (hoverFrameRef.current) return;
 
-      const schedule: (callback: () => void) => number | ReturnType<typeof setTimeout> =
+      const schedule: (callback: () => void) => number =
         typeof requestAnimationFrame === "function"
           ? (callback) => requestAnimationFrame(callback)
-          : (callback) => setTimeout(callback, 16);
+          : (callback) => window.setTimeout(callback, 16);
 
       hoverFrameRef.current = schedule(() => {
         hoverFrameRef.current = 0;
@@ -892,10 +892,10 @@ export function useDrawing({
       ) ?? null;
       if (activeMoveFrameRef.current) return;
 
-      const schedule: (callback: () => void) => number | ReturnType<typeof setTimeout> =
+      const schedule: (callback: () => void) => number =
         typeof requestAnimationFrame === "function"
           ? (callback) => requestAnimationFrame(callback)
-          : (callback) => setTimeout(callback, 16);
+          : (callback) => window.setTimeout(callback, 16);
 
       activeMoveFrameRef.current = schedule(() => {
         activeMoveFrameRef.current = 0;

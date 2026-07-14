@@ -62,6 +62,11 @@ npm run build
 
 `npm run check` runs the same permanent gate in order. All application and test
 source under `src` is TypeScript; JavaScript remains only in Node/Vite tooling.
+`npm run typecheck` validates browser production code with `tsconfig.json` and
+Node-based tests/tooling with `tsconfig.node.json`; the browser project does not
+receive Node ambient globals. Test discovery accepts both `.test.ts` and
+`.test.tsx` at any depth below `src`, including nested `__tests__` directories
+and tests colocated with source files.
 
 With the backend and Vite running, use the browser smoke check to verify the
 rendered chart, drawing toolbar, lazy symbol search, and lazy Settings panel:

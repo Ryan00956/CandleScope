@@ -6,7 +6,9 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const srcRoot = path.join(projectRoot, "src");
 
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx"]);
-const LEGACY_SOURCE_EXTENSIONS = new Set([".js", ".jsx"]);
+const LEGACY_SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs"]);
+const UNSUPPORTED_TYPESCRIPT_EXTENSIONS = new Set([".mts", ".cts"]);
+const ALLOWED_NON_SOURCE_EXTENSIONS = new Set([".css", ".md", ".svg"]);
 
 const RULES = {
   componentNoServiceImport: "component-no-service-import",
@@ -39,8 +41,8 @@ const strictRuntimeContractFiles = new Set([
 
 const allowedRuntimeContractFields = new Set(["view", "actions", "status"]);
 
-function toProjectPath(filePath) {
-  return path.relative(projectRoot, filePath).split(path.sep).join("/");
+function toProjectPath(filePath, projectDirectory = projectRoot) {
+  return path.relative(projectDirectory, filePath).split(path.sep).join("/");
 }
 
 function normalizeModulePath(modulePath) {
@@ -80,8 +82,7 @@ function walkSourceFiles(directory) {
       files.push(...walkSourceFiles(entryPath));
       continue;
     }
-    const extension = path.extname(entry.name);
-    if (SOURCE_EXTENSIONS.has(extension) || LEGACY_SOURCE_EXTENSIONS.has(extension)) {
+    if (sourceFileKind(entry.name) !== null) {
       files.push(entryPath);
     }
   }
@@ -92,9 +93,9 @@ function lineNumberAt(content, index) {
   return content.slice(0, index).split(/\r\n|\r|\n/).length;
 }
 
-function resolveImportSpecifier(importerPath, specifier) {
+function resolveImportSpecifier(importerPath, specifier, projectDirectory) {
   if (specifier.startsWith(".")) {
-    return toProjectPath(path.resolve(path.dirname(importerPath), specifier));
+    return toProjectPath(path.resolve(path.dirname(importerPath), specifier), projectDirectory);
   }
   if (specifier.startsWith("src/")) {
     return specifier;
@@ -211,9 +212,9 @@ function isFeatureRuntimePath(filePath) {
   return /Runtime\.(?:js|jsx|ts|tsx)$/.test(parts.at(-1));
 }
 
-function checkImports(absPath, filePath, content) {
+function checkImports(absPath, filePath, content, projectDirectory) {
   for (const { specifier, line } of importSpecifiers(content)) {
-    const target = resolveImportSpecifier(absPath, specifier);
+    const target = resolveImportSpecifier(absPath, specifier, projectDirectory);
     const normalizedTarget = normalizeModulePath(target);
 
     if (isComponentOrAppPath(filePath) && normalizedTarget.startsWith("src/services/")) {
@@ -286,8 +287,16 @@ function checkImports(absPath, filePath, content) {
 export function sourceFileKind(fileName) {
   const extension = path.extname(fileName);
   if (SOURCE_EXTENSIONS.has(extension)) return "typescript";
-  if (LEGACY_SOURCE_EXTENSIONS.has(extension)) return "legacy-javascript";
-  return null;
+  const normalizedExtension = extension.toLowerCase();
+  if (LEGACY_SOURCE_EXTENSIONS.has(normalizedExtension)) return "legacy-javascript";
+  if (
+    UNSUPPORTED_TYPESCRIPT_EXTENSIONS.has(normalizedExtension) ||
+    SOURCE_EXTENSIONS.has(normalizedExtension)
+  ) {
+    return "unsupported-typescript";
+  }
+  if (ALLOWED_NON_SOURCE_EXTENSIONS.has(extension)) return null;
+  return "unsupported-source";
 }
 
 function checkLocalStorage(filePath, content) {
@@ -439,20 +448,34 @@ function checkFeatureRuntimeLegacyCompatFields(filePath, content) {
   }
 }
 
-export function runArchitectureCheck() {
-  for (const absPath of walkSourceFiles(srcRoot)) {
-    const filePath = toProjectPath(absPath);
-    if (sourceFileKind(absPath) === "legacy-javascript") {
+export function runArchitectureCheck({
+  sourceDirectory = srcRoot,
+  projectDirectory = projectRoot,
+  logger = console,
+  setExitCode = true,
+} = {}) {
+  usedAllowlistEntries.clear();
+  violations.length = 0;
+
+  for (const absPath of walkSourceFiles(sourceDirectory)) {
+    const filePath = toProjectPath(absPath, projectDirectory);
+    const fileKind = sourceFileKind(absPath);
+    if (fileKind !== "typescript") {
       addViolation({
         rule: RULES.sourceTypescriptOnly,
         filePath,
         line: 1,
-        message: "src must contain only TypeScript source files; migrate this file to .ts or .tsx",
+        message:
+          fileKind === "legacy-javascript"
+            ? "src must contain only TypeScript source files; migrate this file to .ts or .tsx"
+            : fileKind === "unsupported-typescript"
+              ? "src TypeScript files must use the lowercase .ts or .tsx extensions supported by tsconfig"
+              : "src contains an unapproved file extension; use .ts/.tsx or explicitly approve the non-source asset type",
       });
       continue;
     }
     const content = fs.readFileSync(absPath, "utf8");
-    checkImports(absPath, filePath, content);
+    checkImports(absPath, filePath, content, projectDirectory);
     checkLocalStorage(filePath, content);
     checkComponentRawTimeScaleWrites(filePath, content);
     checkFeatureRuntimeJsx(filePath, content);
@@ -472,15 +495,22 @@ export function runArchitectureCheck() {
     }
   }
 
-  if (violations.length > 0) {
-    console.error(`Architecture check failed with ${violations.length} violation(s):`);
+  const result = {
+    ok: violations.length === 0,
+    violations: violations.map((violation) => ({ ...violation })),
+  };
+
+  if (!result.ok) {
+    logger.error(`Architecture check failed with ${violations.length} violation(s):`);
     for (const violation of violations) {
-      console.error(`- ${violation.rule}: ${violation.filePath}:${violation.line} - ${violation.message}`);
+      logger.error(`- ${violation.rule}: ${violation.filePath}:${violation.line} - ${violation.message}`);
     }
-    process.exitCode = 1;
+    if (setExitCode) process.exitCode = 1;
   } else {
-    console.log(`Architecture check passed (${allowlist.length} migration allowlist entries active).`);
+    logger.log(`Architecture check passed (${allowlist.length} migration allowlist entries active).`);
   }
+
+  return result;
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

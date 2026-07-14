@@ -2192,9 +2192,9 @@ body {
   border-right: 1px solid var(--border-color);
   flex-shrink: 0;
   /* Lightweight Charts creates positioned children up to z-index: 50.
-     Keep variant flyouts in a higher sibling stacking context so their lower
-     rows remain clickable when they extend over the chart canvas. */
-  z-index: 160;
+     Keep variant flyouts above the chart canvas, but leave this stacking
+     context below the global indicator/alert backdrops (140+). */
+  z-index: 60;
 }
 .drawing-toolbar-loading {
   opacity: 0.65;

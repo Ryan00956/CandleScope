@@ -14,12 +14,14 @@ from app.data_engine.interval_policy import (
     compute_bucket_start,
     compute_bucket_start_ms,
     compute_month_bucket_ms,
+    enhanced_components_are_complete,
     find_best_base_interval,
     next_month_bucket,
     parse_custom_interval,
     parse_interval_ms,
     parse_monthly_count,
 )
+from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
 
 from .cache import BarCache
 from .config import QueryConfig
@@ -69,6 +71,11 @@ def _bar_data_to_storage_rows(
             "low": bar.low,
             "close": bar.close,
             "volume": bar.volume,
+            "quote_volume": bar.quote_volume,
+            "trades": bar.trades,
+            "taker_buy_base": bar.taker_buy_base,
+            "taker_buy_quote": bar.taker_buy_quote,
+            "enhanced_fields": sorted(bar.enhanced_fields),
             "is_closed": bool(bar.is_closed),
         })
     return rows
@@ -98,6 +105,23 @@ def _aggregate_rows_to_interval(
     result: list[dict] = []
     for bucket_start in sorted(buckets):
         rows = sorted(buckets[bucket_start], key=lambda row: row["time"])
+        bucket_end = bucket_start + custom_interval_seconds
+        enhanced_complete = enhanced_components_are_complete(
+            rows,
+            bucket_start_seconds=bucket_start,
+            bucket_end_seconds=bucket_end,
+            source_interval_seconds=source_interval_seconds,
+        )
+        enhanced_rows = [
+            serialize_kline_enhancements(
+                volume=row.get("volume"),
+                quote_volume=row.get("quote_volume"),
+                trades=row.get("trades"),
+                taker_buy_base=row.get("taker_buy_base"),
+                taker_buy_quote=row.get("taker_buy_quote"),
+            )
+            for row in rows
+        ]
         result.append({
             "time": bucket_start,
             "open": rows[0]["open"],
@@ -105,13 +129,36 @@ def _aggregate_rows_to_interval(
             "low": min(row["low"] for row in rows),
             "close": rows[-1]["close"],
             "volume": round(sum(row["volume"] for row in rows), 8),
+            "quote_volume": _sum_optional_field(enhanced_rows, "quote_volume")
+            if enhanced_complete else None,
+            "trades": _sum_optional_field(enhanced_rows, "trades", integer=True)
+            if enhanced_complete else None,
+            "taker_buy_base": _sum_optional_field(enhanced_rows, "taker_buy_base")
+            if enhanced_complete else None,
+            "taker_buy_quote": _sum_optional_field(enhanced_rows, "taker_buy_quote")
+            if enhanced_complete else None,
             "is_closed": aggregate_tail_is_closed(
                 rows,
-                bucket_end_seconds=bucket_start + custom_interval_seconds,
+                bucket_end_seconds=bucket_end,
                 source_interval_seconds=source_interval_seconds,
             ),
         })
     return result
+
+
+def _sum_optional_field(
+    rows: list[dict],
+    field: str,
+    *,
+    integer: bool = False,
+) -> float | int | None:
+    """Sum an additive field only when every component provides it."""
+    values = [row.get(field) for row in rows]
+    if any(value is None for value in values):
+        return None
+    if integer:
+        return sum(int(value) for value in values)
+    return round(sum(float(value) for value in values), 8)
 
 
 class CustomIntervalQueryService:
@@ -398,13 +445,13 @@ class CustomIntervalQueryService:
         month_count = parse_monthly_count(interval)
         if month_count is not None:
             aggregated = aggregate_rows_by_month(
-                [bar.to_dict() for bar in base_bars],
+                [bar.to_aggregation_dict() for bar in base_bars],
                 months=month_count,
                 source_interval_seconds=source_interval_seconds,
             )
         else:
             aggregated = _aggregate_rows_to_interval(
-                [bar.to_dict() for bar in base_bars],
+                [bar.to_aggregation_dict() for bar in base_bars],
                 custom_seconds,
                 interval=interval,
                 source_interval_seconds=source_interval_seconds,

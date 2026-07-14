@@ -162,9 +162,12 @@ async def stream_multi_kline(
                 "symbol": event.key.symbol,
                 "interval": event.key.interval,
                 "market_type": event.key.market_type,
-                "data": event.bar.to_dict() if event.bar else {},
+                "data": event.bar.to_kline_dict() if event.bar else {},
             }
-            bar_dict["data"]["is_closed"] = event.event_type == DataEventType.BAR_CLOSED
+            bar_dict["data"]["is_closed"] = event.event_type in {
+                DataEventType.BAR_CLOSED,
+                DataEventType.BAR_AMENDED,
+            }
             await asyncio.wait_for(event_queue.put(bar_dict), timeout=1.0)
         except (asyncio.TimeoutError, Exception):
             pass
@@ -245,6 +248,7 @@ async def stream_multi_kline(
                                     DataEventType.BAR_CREATED,
                                     DataEventType.BAR_UPDATED,
                                     DataEventType.BAR_CLOSED,
+                                    DataEventType.BAR_AMENDED,
                                     DataEventType.BACKFILL_COMPLETED,
                                 },
                             )
@@ -351,17 +355,37 @@ async def forward_events_to_ws(
                 DataEventType.BAR_CREATED,
                 DataEventType.BAR_UPDATED,
                 DataEventType.BAR_CLOSED,
+                DataEventType.BAR_AMENDED,
+                DataEventType.BACKFILL_COMPLETED,
             },
         ):
+            if event.event_type == DataEventType.BACKFILL_COMPLETED:
+                if not should_forward_browser_event(event):
+                    continue
+                try:
+                    await send_json_with_timeout(websocket, {
+                        "type": "backfill_completed",
+                        "exchange": event.key.exchange,
+                        "symbol": event.key.symbol,
+                        "interval": event.key.interval,
+                        "market_type": event.key.market_type,
+                        "detail": event.detail or {},
+                    })
+                except Exception:
+                    return
+                continue
             bar_dict = {
                 "type": "kline",
                 "exchange": event.key.exchange,
                 "symbol": event.key.symbol,
                 "interval": event.key.interval,
                 "market_type": event.key.market_type,
-                "data": event.bar.to_dict() if event.bar else {},
+                "data": event.bar.to_kline_dict() if event.bar else {},
             }
-            bar_dict["data"]["is_closed"] = event.event_type == DataEventType.BAR_CLOSED
+            bar_dict["data"]["is_closed"] = event.event_type in {
+                DataEventType.BAR_CLOSED,
+                DataEventType.BAR_AMENDED,
+            }
 
             try:
                 await send_json_with_timeout(websocket, bar_dict)

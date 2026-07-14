@@ -57,6 +57,8 @@ class MarketChannelCapability:
     connection_model: str | None = None
     limits: dict[str, Any] = field(default_factory=dict)
     known_limitations: tuple[str, ...] = ()
+    # Keep additive capability metadata last for positional v2 constructors.
+    derived_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.channel, MarketChannel):
@@ -82,6 +84,7 @@ class MarketChannelCapability:
         self.update_intervals_ms = tuple(self.update_intervals_ms)
         self.available_fields = _unique_strings(self.available_fields)
         self.unavailable_fields = _unique_strings(self.unavailable_fields)
+        self.derived_fields = _unique_strings(self.derived_fields)
         if self.connection_model is not None:
             self.connection_model = str(self.connection_model).strip().lower() or None
         self.limits = dict(self.limits)
@@ -122,6 +125,7 @@ class MarketChannelCapability:
             "update_intervals_ms": list(self.update_intervals_ms),
             "available_fields": list(self.available_fields),
             "unavailable_fields": list(self.unavailable_fields),
+            "derived_fields": list(self.derived_fields),
             "connection_model": self.connection_model,
             "limits": dict(self.limits),
             "known_limitations": list(self.known_limitations),

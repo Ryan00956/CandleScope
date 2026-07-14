@@ -56,11 +56,17 @@ It includes:
 - `plugin_api_version`
 - `capability_schema_version`
 - `markets`
+- `channels`
 - `native_intervals`
 - `ws_connection_model`
 - `protocol_features`
 - `limits`
 - `known_limitations`
+
+Each schema-v2 channel separately declares transport, snapshot/delta,
+sequence/resync, `available_fields`, `unavailable_fields`, and
+`derived_fields`. The P0 K-line path uses those declarations to gate enhanced
+volume and order-flow proxies so plugin placeholders never become market data.
 
 The frontend uses this metadata for interval lists, available market types,
 WS behavior, and user-visible exchange limitations. Keep new exchange UI

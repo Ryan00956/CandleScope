@@ -141,6 +141,7 @@ def test_okx_kline_marks_synthetic_zero_fields_unavailable() -> None:
             "taker_buy_quote",
         }
         assert set(kline.available_fields).isdisjoint(kline.unavailable_fields)
+        assert kline.derived_fields == ()
 
 
 def test_market_specific_capabilities_do_not_advertise_synthetic_ticker_fields() -> None:
@@ -357,6 +358,7 @@ def _assert_channel_matches(
     assert actual.connection_model == expected.connection_model
     assert set(actual.available_fields) == set(expected.available_fields)
     assert set(actual.unavailable_fields) == set(expected.unavailable_fields)
+    assert set(actual.derived_fields) == set(expected.derived_fields)
     assert _frozen_params(actual.params) == expected.params
     assert actual.update_intervals_ms == expected.update_intervals_ms
     assert tuple(sorted(actual.limits.items())) == expected.limits

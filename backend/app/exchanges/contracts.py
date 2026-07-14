@@ -462,12 +462,14 @@ def _validate_channel_capabilities(
 
         raw_available_fields = getattr(item, "available_fields", ()) or ()
         raw_unavailable_fields = getattr(item, "unavailable_fields", ()) or ()
+        raw_derived_fields = getattr(item, "derived_fields", ()) or ()
         if isinstance(raw_available_fields, (str, bytes, dict)) or isinstance(
             raw_unavailable_fields,
             (str, bytes, dict),
-        ):
+        ) or isinstance(raw_derived_fields, (str, bytes, dict)):
             available_fields = set()
             unavailable_fields = set()
+            derived_fields = set()
             report.add(
                 "capabilities.channel_fields_invalid",
                 f"channel {channel!r} field declarations must be iterable",
@@ -476,9 +478,11 @@ def _validate_channel_capabilities(
             try:
                 available_fields = set(raw_available_fields)
                 unavailable_fields = set(raw_unavailable_fields)
+                derived_fields = set(raw_derived_fields)
             except TypeError:
                 available_fields = set()
                 unavailable_fields = set()
+                derived_fields = set()
                 report.add(
                     "capabilities.channel_fields_invalid",
                     f"channel {channel!r} field declarations must be iterable",
@@ -486,7 +490,7 @@ def _validate_channel_capabilities(
         invalid_fields = sorted(
             (
                 field
-                for field in (*available_fields, *unavailable_fields)
+                for field in (*available_fields, *unavailable_fields, *derived_fields)
                 if not isinstance(field, str) or not field.strip()
             ),
             key=lambda value: repr(value),

@@ -6,6 +6,8 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.data_engine.market_data.kline_metrics import serialize_kline_enhancements
+
 
 VALID_INTERVALS = [
     "1s",
@@ -74,6 +76,34 @@ def aggregate_tail_is_closed(
     if source_interval_seconds is None:
         return True
     return int(rows[-1]["time"]) + source_interval_seconds >= bucket_end_seconds
+
+
+def enhanced_components_are_complete(
+    rows: list[dict],
+    *,
+    bucket_start_seconds: int,
+    bucket_end_seconds: int,
+    source_interval_seconds: int | None,
+) -> bool:
+    """Check that enhanced totals cover a contiguous target-bucket prefix.
+
+    A complete closed bucket must reach its end.  A forming bucket may end at
+    the latest open source component, but the first component and every step
+    before it must still be present.
+    """
+    if not rows or not source_interval_seconds or source_interval_seconds <= 0:
+        return False
+    if int(rows[0]["time"]) != bucket_start_seconds:
+        return False
+    if any(
+        int(current["time"]) - int(previous["time"]) != source_interval_seconds
+        for previous, current in zip(rows, rows[1:])
+    ):
+        return False
+    reaches_bucket_end = (
+        int(rows[-1]["time"]) + source_interval_seconds >= bucket_end_seconds
+    )
+    return reaches_bucket_end or not row_is_closed(rows[-1])
 
 
 STANDARD_INTERVAL_MS = {key: value * 1000 for key, value in INTERVAL_SECONDS.items()}
@@ -341,6 +371,23 @@ def aggregate_rows_by_month(
     result: list[dict] = []
     for bucket_start in sorted(buckets):
         rows = sorted(buckets[bucket_start], key=lambda row: row["time"])
+        bucket_end = next_month_bucket(bucket_start, months)
+        enhanced_complete = enhanced_components_are_complete(
+            rows,
+            bucket_start_seconds=bucket_start,
+            bucket_end_seconds=bucket_end,
+            source_interval_seconds=source_interval_seconds,
+        )
+        enhanced_rows = [
+            serialize_kline_enhancements(
+                volume=row.get("volume"),
+                quote_volume=row.get("quote_volume"),
+                trades=row.get("trades"),
+                taker_buy_base=row.get("taker_buy_base"),
+                taker_buy_quote=row.get("taker_buy_quote"),
+            )
+            for row in rows
+        ]
         result.append({
             "time": bucket_start,
             "open": rows[0]["open"],
@@ -348,16 +395,39 @@ def aggregate_rows_by_month(
             "low": min(row["low"] for row in rows),
             "close": rows[-1]["close"],
             "volume": round(sum(row["volume"] for row in rows), 8),
+            "quote_volume": _sum_optional_additive_field(enhanced_rows, "quote_volume")
+            if enhanced_complete else None,
+            "trades": _sum_optional_additive_field(enhanced_rows, "trades", integer=True)
+            if enhanced_complete else None,
+            "taker_buy_base": _sum_optional_additive_field(enhanced_rows, "taker_buy_base")
+            if enhanced_complete else None,
+            "taker_buy_quote": _sum_optional_additive_field(enhanced_rows, "taker_buy_quote")
+            if enhanced_complete else None,
             # A newer component implicitly confirms any older component whose
             # explicit close event was missed, but a partial target bucket is
             # still forming until that component reaches its calendar end.
             "is_closed": aggregate_tail_is_closed(
                 rows,
-                bucket_end_seconds=next_month_bucket(bucket_start, months),
+                bucket_end_seconds=bucket_end,
                 source_interval_seconds=source_interval_seconds,
             ),
         })
     return result
+
+
+def _sum_optional_additive_field(
+    rows: list[dict],
+    field: str,
+    *,
+    integer: bool = False,
+) -> float | int | None:
+    """Sum an additive field only for a complete component set."""
+    values = [row.get(field) for row in rows]
+    if any(value is None for value in values):
+        return None
+    if integer:
+        return sum(int(value) for value in values)
+    return round(sum(float(value) for value in values), 8)
 
 
 def add_months(ts_seconds: int, months: int) -> int:

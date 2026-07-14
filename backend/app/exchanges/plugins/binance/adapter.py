@@ -15,6 +15,7 @@ from app.core.config import (
 )
 from app.core.market import VALID_INTERVALS
 from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
+from app.data_engine.market_data.kline_metrics import KLINE_DERIVED_FIELDS
 from app.exchanges.models import (
     ExchangeCapabilities,
     ExchangeMarket,
@@ -96,6 +97,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             params={"interval": list(VALID_INTERVALS)},
             update_intervals_ms=(1000, 2000),
             available_fields=_KLINE_FIELDS,
+            derived_fields=KLINE_DERIVED_FIELDS,
             connection_model="path_per_stream",
             limits={"rest.max_limit": 1000},
         ),
@@ -113,6 +115,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             params={"interval": [item for item in VALID_INTERVALS if item != "1s"]},
             update_intervals_ms=(250,),
             available_fields=_KLINE_FIELDS,
+            derived_fields=KLINE_DERIVED_FIELDS,
             connection_model="path_per_stream",
             limits={"rest.max_limit": 1000},
             known_limitations=("The USD-M kline endpoint does not support 1s bars",),

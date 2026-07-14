@@ -11,6 +11,7 @@ from app.data_engine.ingestion.models import (
     TransportRequest,
 )
 from app.data_engine.market_data import DeliveryClass, MarketChannel
+from app.data_engine.market_data.kline_metrics import KLINE_DERIVED_FIELDS
 from app.exchanges.contracts import ExchangeContractCase, NormalizerContractSample
 
 
@@ -27,6 +28,7 @@ class ChannelCapabilityExpectation:
     connection_model: str
     available_fields: frozenset[str]
     unavailable_fields: frozenset[str] = frozenset()
+    derived_fields: frozenset[str] = frozenset()
     params: tuple[tuple[str, tuple[Any, ...]], ...] = ()
     update_intervals_ms: tuple[int, ...] = ()
     limits: tuple[tuple[str, Any], ...] = ()
@@ -142,6 +144,7 @@ _BINANCE_SPOT_EXPECTATIONS = {
         resync="replace_snapshot",
         connection_model="path_per_stream",
         available_fields=_BINANCE_FIELDS[MarketChannel.KLINE],
+        derived_fields=frozenset(KLINE_DERIVED_FIELDS),
         params=(("interval", tuple(VALID_INTERVALS)),),
         update_intervals_ms=(1000, 2000),
         limits=(("rest.max_limit", 1000),),

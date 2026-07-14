@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.v1.exchanges import router as exchanges_router
+from app.data_engine.market_data.kline_metrics import KLINE_DERIVED_FIELDS
 
 
 def _client() -> TestClient:
@@ -21,6 +22,18 @@ def test_exchange_capabilities_include_plugin_contract_metadata() -> None:
     assert payload["plugin_api_version"] == "1.0"
     assert "protocol_features" in payload
     assert "limits" in payload
+    kline = next(
+        channel
+        for channel in payload["channels"]
+        if channel["channel"] == "kline" and channel["market_types"] == ["spot"]
+    )
+    assert set(kline["derived_fields"]) == set(KLINE_DERIVED_FIELDS)
+
+    okx = _client().get("/api/v1/exchanges/okx/capabilities").json()
+    okx_kline = next(
+        channel for channel in okx["channels"] if channel["channel"] == "kline"
+    )
+    assert okx_kline["derived_fields"] == []
 
 
 def test_exchange_diagnostics_reports_loaded_plugins() -> None:

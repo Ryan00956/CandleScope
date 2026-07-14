@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
+
 
 # ═══════════════════════════════════════════════════════════════
 #  Enums
@@ -283,6 +285,26 @@ class FetchedBar:
     taker_buy_base: float = 0.0
     taker_buy_quote: float = 0.0
     source: str = "backfill"
+    enhanced_fields: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        values = {
+            "volume": self.volume,
+            "quote_volume": self.quote_volume
+            if "quote_volume" in self.enhanced_fields else None,
+            "trades": self.trades
+            if "trades" in self.enhanced_fields else None,
+            "taker_buy_base": self.taker_buy_base
+            if "taker_buy_base" in self.enhanced_fields else None,
+            "taker_buy_quote": self.taker_buy_quote
+            if "taker_buy_quote" in self.enhanced_fields else None,
+        }
+        self.enhanced_fields = declared_enhanced_fields(
+            self.exchange,
+            self.market_type,
+            values,
+            explicit_fields=self.enhanced_fields,
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -301,6 +323,7 @@ class FetchedBar:
             "trades": self.trades,
             "taker_buy_base": self.taker_buy_base,
             "taker_buy_quote": self.taker_buy_quote,
+            "enhanced_fields": sorted(self.enhanced_fields),
             "source": self.source,
         }
 
@@ -314,10 +337,14 @@ class FetchedBar:
             "low": self.low,
             "close": self.close,
             "volume": self.volume,
-            "quote_volume": self.quote_volume,
-            "trades": self.trades,
-            "taker_buy_base": self.taker_buy_base,
-            "taker_buy_quote": self.taker_buy_quote,
+            "quote_volume": self.quote_volume
+            if "quote_volume" in self.enhanced_fields else None,
+            "trades": self.trades
+            if "trades" in self.enhanced_fields else None,
+            "taker_buy_base": self.taker_buy_base
+            if "taker_buy_base" in self.enhanced_fields else None,
+            "taker_buy_quote": self.taker_buy_quote
+            if "taker_buy_quote" in self.enhanced_fields else None,
         }
 
     def to_lightweight(self) -> dict:
@@ -329,6 +356,14 @@ class FetchedBar:
             "low": self.low,
             "close": self.close,
             "volume": self.volume,
+            "quote_volume": self.quote_volume
+            if "quote_volume" in self.enhanced_fields else None,
+            "trades": self.trades
+            if "trades" in self.enhanced_fields else None,
+            "taker_buy_base": self.taker_buy_base
+            if "taker_buy_base" in self.enhanced_fields else None,
+            "taker_buy_quote": self.taker_buy_quote
+            if "taker_buy_quote" in self.enhanced_fields else None,
         }
 
 

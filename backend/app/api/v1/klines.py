@@ -128,8 +128,15 @@ def _resolve_interval(interval: str) -> dict:
 
 
 def _bars_to_dicts(bars: list) -> list[dict]:
-    """Convert BarData list to lightweight-charts dicts."""
-    return [b.to_dict() if hasattr(b, "to_dict") else b for b in bars]
+    """Convert bars to the enhanced Kline API contract."""
+    return [
+        b.to_kline_dict()
+        if hasattr(b, "to_kline_dict")
+        else b.to_dict()
+        if hasattr(b, "to_dict")
+        else b
+        for b in bars
+    ]
 
 
 def _call_data_manager_method(method: Any, *args: Any, **kwargs: Any) -> Any:

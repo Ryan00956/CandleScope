@@ -234,7 +234,14 @@ class QueryEngine:
                     market_type=key.market_type,
                 )
                 rows.reverse()
-                storage_bars = [BarData.from_storage_row(r) for r in rows]
+                storage_bars = [
+                    BarData.from_storage_row(
+                        row,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    )
+                    for row in rows
+                ]
             except Exception as exc:
                 logger.error("Storage query failed: %s", exc, exc_info=True)
 
@@ -477,7 +484,14 @@ class QueryEngine:
                     exchange=key.exchange,
                     market_type=key.market_type,
                 )
-                storage_bars = [BarData.from_storage_row(r) for r in rows]
+                storage_bars = [
+                    BarData.from_storage_row(
+                        row,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    )
+                    for row in rows
+                ]
                 if storage_bars:
                     self._cache.bulk_load(key, storage_bars)
             except Exception as exc:
@@ -708,7 +722,14 @@ class QueryEngine:
                     exchange=key.exchange,
                     market_type=key.market_type,
                 )
-                fill_bars = [BarData.from_storage_row(r) for r in rows]
+                fill_bars = [
+                    BarData.from_storage_row(
+                        row,
+                        exchange=key.exchange,
+                        market_type=key.market_type,
+                    )
+                    for row in rows
+                ]
                 if fill_bars:
                     all_fill_bars.extend(fill_bars)
                     logger.info(

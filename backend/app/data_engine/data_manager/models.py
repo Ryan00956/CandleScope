@@ -17,10 +17,17 @@ All timestamps follow the project convention:
 from __future__ import annotations
 
 import enum
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable, Protocol, runtime_checkable
+
+from app.data_engine.market_data.kline_metrics import (
+    KLINE_ENHANCED_FIELDS,
+    declared_enhanced_fields,
+    serialize_kline_enhancements,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -90,8 +97,13 @@ class BarData:
     close: float
     volume: float
     is_closed: bool = True
+    quote_volume: float | None = None
+    trades: int | None = None
+    taker_buy_base: float | None = None
+    taker_buy_quote: float | None = None
 
     def to_dict(self) -> dict:
+        """Return the legacy lightweight-charts OHLCV shape."""
         return {
             "time": self.time,
             "open": round(self.open, 8),
@@ -101,6 +113,36 @@ class BarData:
             "volume": round(self.volume, 8),
             "is_closed": bool(self.is_closed),
         }
+
+    def to_kline_dict(self) -> dict:
+        """Return OHLCV plus capability-gated Kline order-flow metrics."""
+        payload = self.to_dict()
+        payload.update(self._enhanced_payload())
+        return payload
+
+    def to_aggregation_dict(self) -> dict:
+        """Return the additive raw fields needed to aggregate custom bars."""
+        payload = self.to_dict()
+        enhanced = self._enhanced_payload()
+        payload.update({field: enhanced[field] for field in KLINE_ENHANCED_FIELDS})
+        return payload
+
+    @property
+    def enhanced_fields(self) -> frozenset[str]:
+        """Enhanced raw fields that contain valid, user-visible values."""
+        payload = self._enhanced_payload()
+        return frozenset(
+            field for field in KLINE_ENHANCED_FIELDS if payload[field] is not None
+        )
+
+    def _enhanced_payload(self) -> dict[str, Any]:
+        return serialize_kline_enhancements(
+            volume=self.volume,
+            quote_volume=self.quote_volume,
+            trades=self.trades,
+            taker_buy_base=self.taker_buy_base,
+            taker_buy_quote=self.taker_buy_quote,
+        )
 
     @staticmethod
     def _coerce_is_closed(value: Any, default: bool = True) -> bool:
@@ -137,11 +179,28 @@ class BarData:
                 d.get("is_closed", d.get("isClosed")),
                 default=True,
             ),
+            quote_volume=cls._optional_float(d.get("quote_volume")),
+            trades=cls._optional_int(d.get("trades")),
+            taker_buy_base=cls._optional_float(d.get("taker_buy_base")),
+            taker_buy_quote=cls._optional_float(d.get("taker_buy_quote")),
         )
 
     @classmethod
-    def from_storage_row(cls, row: dict) -> BarData:
+    def from_storage_row(
+        cls,
+        row: dict,
+        *,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> BarData:
         """Create from a storage/SQLite row dict (open_time in ms)."""
+        resolved_exchange = str(exchange or row.get("exchange") or "")
+        resolved_market_type = str(market_type or row.get("market_type") or "")
+        fields = declared_enhanced_fields(
+            resolved_exchange,
+            resolved_market_type,
+            row,
+        )
         return cls(
             time=int(row["open_time"]) // 1000,
             open=round(float(row["open"]), 8),
@@ -150,6 +209,14 @@ class BarData:
             close=round(float(row["close"]), 8),
             volume=round(float(row.get("volume", 0)), 8),
             is_closed=cls._coerce_is_closed(row.get("is_closed"), default=True),
+            quote_volume=cls._optional_float(row.get("quote_volume"))
+            if "quote_volume" in fields else None,
+            trades=cls._optional_int(row.get("trades"))
+            if "trades" in fields else None,
+            taker_buy_base=cls._optional_float(row.get("taker_buy_base"))
+            if "taker_buy_base" in fields else None,
+            taker_buy_quote=cls._optional_float(row.get("taker_buy_quote"))
+            if "taker_buy_quote" in fields else None,
         )
 
     @classmethod
@@ -158,6 +225,7 @@ class BarData:
         if is_closed is None:
             status = getattr(bar_state, "status", None)
             is_closed = getattr(status, "value", status) == "closed"
+        fields = frozenset(getattr(bar_state, "enhanced_fields", ()) or ())
         return cls(
             time=bar_state.bucket_start_ms // 1000,
             open=round(bar_state.open, 8),
@@ -166,6 +234,14 @@ class BarData:
             close=round(bar_state.close, 8),
             volume=round(bar_state.volume, 8),
             is_closed=bool(is_closed),
+            quote_volume=cls._optional_float(getattr(bar_state, "quote_volume", None))
+            if "quote_volume" in fields else None,
+            trades=cls._optional_int(getattr(bar_state, "trades", None))
+            if "trades" in fields else None,
+            taker_buy_base=cls._optional_float(getattr(bar_state, "taker_buy_base", None))
+            if "taker_buy_base" in fields else None,
+            taker_buy_quote=cls._optional_float(getattr(bar_state, "taker_buy_quote", None))
+            if "taker_buy_quote" in fields else None,
         )
 
     def with_closed_state(self, is_closed: bool) -> BarData:
@@ -178,7 +254,36 @@ class BarData:
             close=self.close,
             volume=self.volume,
             is_closed=bool(is_closed),
+            quote_volume=self.quote_volume,
+            trades=self.trades,
+            taker_buy_base=self.taker_buy_base,
+            taker_buy_quote=self.taker_buy_quote,
         )
+
+    @staticmethod
+    def _optional_float(value: Any) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(number) or number < 0:
+            return None
+        return number
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+            integer = int(number)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(number) or number < 0 or number != integer:
+            return None
+        return integer
 
     @property
     def time_ms(self) -> int:

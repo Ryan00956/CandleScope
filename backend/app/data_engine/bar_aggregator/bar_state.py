@@ -73,12 +73,14 @@ class StandardOHLCVMerge:
                 state.trades = 0
                 state.taker_buy_base = 0.0
                 state.taker_buy_quote = 0.0
+                state.enhanced_fields = frozenset()
             else:
                 state.volume = round(bar_input.volume, 8)
                 state.quote_volume = round(bar_input.quote_volume, 8)
                 state.trades = bar_input.trades
                 state.taker_buy_base = round(bar_input.taker_buy_base, 8)
                 state.taker_buy_quote = round(bar_input.taker_buy_quote, 8)
+                state.enhanced_fields = bar_input.enhanced_fields
             state.tick_count = 1
             state.first_input_at_ms = bar_input.open_time_ms
             state.last_input_at_ms = bar_input.open_time_ms
@@ -96,6 +98,9 @@ class StandardOHLCVMerge:
                 state.trades += bar_input.trades
                 state.taker_buy_base = round(state.taker_buy_base + bar_input.taker_buy_base, 8)
                 state.taker_buy_quote = round(state.taker_buy_quote + bar_input.taker_buy_quote, 8)
+                state.enhanced_fields = (
+                    state.enhanced_fields & bar_input.enhanced_fields
+                )
             elif merge_mode == MergeMode.PRICE_ONLY:
                 pass
             else:
@@ -105,6 +110,7 @@ class StandardOHLCVMerge:
                 state.trades = bar_input.trades
                 state.taker_buy_base = round(bar_input.taker_buy_base, 8)
                 state.taker_buy_quote = round(bar_input.taker_buy_quote, 8)
+                state.enhanced_fields = bar_input.enhanced_fields
 
             state.tick_count += 1
             state.last_input_at_ms = bar_input.open_time_ms
@@ -162,6 +168,7 @@ class ComponentSnapshotOHLCVMerge:
             "trades": bar_input.trades,
             "taker_buy_base": bar_input.taker_buy_base,
             "taker_buy_quote": bar_input.taker_buy_quote,
+            "enhanced_fields": bar_input.enhanced_fields,
             "is_closed": bar_input.is_closed,
             "sequence": bar_input.sequence if bar_input.sequence is not None else bar_input.open_time_ms,
         }
@@ -197,6 +204,23 @@ class ComponentSnapshotOHLCVMerge:
         state.trades = sum(int(snap["trades"]) for snap in ordered)
         state.taker_buy_base = round(sum(float(snap["taker_buy_base"]) for snap in ordered), 8)
         state.taker_buy_quote = round(sum(float(snap["taker_buy_quote"]) for snap in ordered), 8)
+        state.enhanced_fields = frozenset.intersection(*(
+            frozenset(snap["enhanced_fields"])
+            for snap in ordered
+        ))
+        components_are_contiguous = (
+            int(first["open_time_ms"]) == state.bucket_start_ms
+            and all(
+                int(current["open_time_ms"]) == int(previous["close_time_ms"]) + 1
+                for previous, current in zip(ordered, ordered[1:])
+            )
+        )
+        covers_available_bucket = (
+            int(last["close_time_ms"]) + 1 >= state.bucket_end_ms
+            or not bool(last["is_closed"])
+        )
+        if not components_are_contiguous or not covers_available_bucket:
+            state.enhanced_fields = frozenset()
         state.tick_count = len(ordered)
         state.first_input_at_ms = int(first["open_time_ms"])
         state.last_input_at_ms = int(last["open_time_ms"])

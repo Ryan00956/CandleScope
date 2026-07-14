@@ -294,6 +294,7 @@ def test_capability_validator_rejects_unknown_delivery_value() -> None:
         ({"snapshot": "false"}, "capabilities.channel_flag_invalid"),
         ({"available_fields": "last_price"}, "capabilities.channel_fields_invalid"),
         ({"available_fields": (123,)}, "capabilities.channel_fields_invalid"),
+        ({"derived_fields": "volume_delta_base"}, "capabilities.channel_fields_invalid"),
     ],
 )
 def test_capability_validator_rejects_malformed_flags_and_fields(
@@ -308,7 +309,10 @@ def test_capability_validator_rejects_malformed_flags_and_fields(
     assert any(issue.code == expected_code for issue in report.issues)
 
 
-@pytest.mark.parametrize("field_name", ["market_types", "available_fields", "known_limitations"])
+@pytest.mark.parametrize(
+    "field_name",
+    ["market_types", "available_fields", "derived_fields", "known_limitations"],
+)
 def test_channel_model_rejects_bare_string_collections(field_name: str) -> None:
     with pytest.raises(TypeError, match="iterable of strings"):
         _kline_capability(**{field_name: "spot"})

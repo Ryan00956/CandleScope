@@ -12,7 +12,9 @@ from app.data_engine.interval_policy import (
     is_standard_interval,
     parse_custom_interval,
     parse_monthly_count,
+    row_is_closed,
 )
+from app.data_engine.market_data.kline_metrics import declared_enhanced_fields
 
 from ..bar_aggregator import (
     BarAggregator,
@@ -151,6 +153,11 @@ class AggregatorWarmStartService:
         )
         base_key = SeriesKey(symbol, base_interval, exchange=exchange, market_type=market_type)
         rows_by_open_time = {int(row["open_time"]): dict(row) for row in rows}
+        for open_time_ms, row in rows_by_open_time.items():
+            row.setdefault(
+                "close_time",
+                open_time_ms + (base_seconds * 1000) - 1,
+            )
 
         cached_rows = self._cache.query(
             base_key,
@@ -171,10 +178,12 @@ class AggregatorWarmStartService:
                 "low": cached.low,
                 "close": cached.close,
                 "volume": cached.volume,
-                "quote_volume": 0.0,
-                "trades": 0,
-                "taker_buy_base": 0.0,
-                "taker_buy_quote": 0.0,
+                "quote_volume": cached.quote_volume,
+                "trades": cached.trades,
+                "taker_buy_base": cached.taker_buy_base,
+                "taker_buy_quote": cached.taker_buy_quote,
+                "enhanced_fields": sorted(cached.enhanced_fields),
+                "is_closed": bool(cached.is_closed),
             }
 
         if not is_monthly_interval(interval):
@@ -240,7 +249,12 @@ class AggregatorWarmStartService:
             exchange=exchange,
             market_type=market_type,
         )
-        if self._custom_bucket_is_synced(current_state, rows):
+        if self._custom_bucket_is_synced(
+            current_state,
+            rows,
+            exchange=exchange,
+            market_type=market_type,
+        ):
             self._cache.upsert(
                 SeriesKey(symbol, interval, exchange=exchange, market_type=market_type),
                 BarData.from_bar_state(current_state),
@@ -254,6 +268,9 @@ class AggregatorWarmStartService:
                 row.get("close_time", open_time_ms + (base_seconds * 1000) - 1)
             )
             is_closed = close_time_ms < now_ms
+            explicit_fields = row.get("enhanced_fields")
+            if isinstance(explicit_fields, (str, bytes, dict)):
+                explicit_fields = ()
             components.append(BarInput(
                 symbol=symbol,
                 source_interval=base_interval,
@@ -272,6 +289,12 @@ class AggregatorWarmStartService:
                 trades=int(row.get("trades", 0) or 0),
                 taker_buy_base=float(row.get("taker_buy_base", 0) or 0),
                 taker_buy_quote=float(row.get("taker_buy_quote", 0) or 0),
+                enhanced_fields=declared_enhanced_fields(
+                    exchange,
+                    market_type,
+                    row,
+                    explicit_fields=explicit_fields,
+                ),
                 sequence=open_time_ms,
             ))
 
@@ -292,13 +315,61 @@ class AggregatorWarmStartService:
             )
 
     @staticmethod
-    def _custom_bucket_is_synced(state: BarState | None, rows: list[dict]) -> bool:
+    def _custom_bucket_is_synced(
+        state: BarState | None,
+        rows: list[dict],
+        *,
+        exchange: str,
+        market_type: str,
+    ) -> bool:
         """Check whether the in-memory custom bar matches its base parts."""
         if state is None or not rows:
             return False
 
+        rows = [
+            row
+            for row in rows
+            if state.bucket_start_ms
+            <= int(row["open_time"])
+            < state.bucket_end_ms
+        ]
+        if not rows:
+            return False
+
         first = rows[0]
         last = rows[-1]
+        field_sets: list[frozenset[str]] = []
+        for row in rows:
+            explicit_fields = row.get("enhanced_fields")
+            if isinstance(explicit_fields, (str, bytes, dict)):
+                explicit_fields = ()
+            field_sets.append(declared_enhanced_fields(
+                exchange,
+                market_type,
+                row,
+                explicit_fields=explicit_fields,
+            ))
+        components_are_contiguous = (
+            int(first["open_time"]) == state.bucket_start_ms
+            and all(
+                int(current["open_time"]) == int(previous["close_time"]) + 1
+                for previous, current in zip(rows, rows[1:])
+            )
+        )
+        last_close_time = int(last.get("close_time", last["open_time"]))
+        last_is_forming = (
+            not row_is_closed(last)
+            or last_close_time >= int(time.time() * 1000)
+        )
+        covers_available_bucket = (
+            last_close_time + 1 >= state.bucket_end_ms
+            or last_is_forming
+        )
+        expected_enhanced_fields = (
+            frozenset.intersection(*field_sets)
+            if components_are_contiguous and covers_available_bucket
+            else frozenset()
+        )
         expected = {
             "open": float(first["open"]),
             "high": max(float(row["high"]) for row in rows),
@@ -319,6 +390,7 @@ class AggregatorWarmStartService:
                 8,
             ),
             "components": len(rows),
+            "enhanced_fields": expected_enhanced_fields,
         }
 
         def _same(a: float, b: float, tol: float = 1e-8) -> bool:
@@ -334,6 +406,7 @@ class AggregatorWarmStartService:
             and state.trades == expected["trades"]
             and _same(state.taker_buy_base, expected["taker_buy_base"])
             and _same(state.taker_buy_quote, expected["taker_buy_quote"])
+            and state.enhanced_fields == expected["enhanced_fields"]
             and state.tick_count == expected["components"]
         )
 
@@ -387,6 +460,11 @@ class AggregatorWarmStartService:
             return
 
         close_time_ms = int(row.get("close_time", open_time_ms + interval_ms - 1))
+        enhanced_fields = declared_enhanced_fields(
+            exchange,
+            market_type,
+            row,
+        )
         bar_input = BarInput(
             symbol=symbol,
             source_interval=interval,
@@ -405,6 +483,7 @@ class AggregatorWarmStartService:
             trades=int(row.get("trades", 0) or 0),
             taker_buy_base=float(row.get("taker_buy_base", 0) or 0),
             taker_buy_quote=float(row.get("taker_buy_quote", 0) or 0),
+            enhanced_fields=enhanced_fields,
             sequence=open_time_ms,
         )
 

@@ -449,6 +449,7 @@ class Reconciler:
                             taker_buy_base=bar_state.taker_buy_base,
                             taker_buy_quote=bar_state.taker_buy_quote,
                             source="backfill_aggregated_via_bar_agg",
+                            enhanced_fields=bar_state.enhanced_fields,
                         ))
                     custom_bars_from_agg.sort(key=lambda b: b.open_time)
                     generated += len(custom_bars_from_agg)
@@ -684,6 +685,16 @@ class Reconciler:
                 )
 
             if agg is not None:
+                components_cover_bucket = (
+                    bucket_bars[0].open_time == bucket_start
+                    and all(
+                        current.open_time == previous.close_time + 1
+                        for previous, current in zip(bucket_bars, bucket_bars[1:])
+                    )
+                    and bucket_bars[-1].close_time >= bucket_end
+                )
+                if not components_cover_bucket:
+                    agg.enhanced_fields = frozenset()
                 result.append(agg)
 
         return result
@@ -699,6 +710,11 @@ class Reconciler:
         """Default OHLCV aggregation: standard candle merge."""
         if not bars:
             return None
+
+        enhanced_fields = frozenset.intersection(*(
+            frozenset(bar.enhanced_fields or ())
+            for bar in bars
+        ))
 
         return FetchedBar(
             symbol=symbol,
@@ -717,6 +733,7 @@ class Reconciler:
             taker_buy_base=sum(b.taker_buy_base for b in bars),
             taker_buy_quote=sum(b.taker_buy_quote for b in bars),
             source="backfill_aggregated",
+            enhanced_fields=enhanced_fields,
         )
 
     # ── Internal: Cache push ─────────────────────────────────

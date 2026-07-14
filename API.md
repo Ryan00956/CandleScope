@@ -69,7 +69,17 @@ Response:
       "low": 41950.0,
       "close": 42050.0,
       "volume": 12.5,
-      "is_closed": false
+      "is_closed": false,
+      "quote_volume": 525000.0,
+      "trades": 320,
+      "taker_buy_base": 7.5,
+      "taker_buy_quote": 315000.0,
+      "order_flow": {
+        "taker_sell_base": 5.0,
+        "volume_delta_base": 2.5,
+        "taker_buy_ratio_base": 0.6,
+        "cvd_contribution_base": 2.5
+      }
     }
   ],
   "base_interval": null
@@ -78,6 +88,8 @@ Response:
 
 `is_closed` is `false` only for a still-forming live bar. Clients may treat the
 missing field from older servers or stored historical rows as confirmed.
+
+Enhanced fields fail closed according to the exchange/market capability; unavailable or invalid raw values are `null`, and `order_flow` is `null` when base order flow cannot be computed. `cvd_contribution_base` is the per-bar input to a prefix-summed CVD over a contiguous range. A forming-bar update replaces the current bucket instead of being added again. See [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](docs/KLINE_ORDER_FLOW_CONTRACT_zh.md) for the complete field, formula, and custom-interval contract.
 
 ### `GET /klines/latest`
 

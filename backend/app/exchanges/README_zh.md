@@ -52,11 +52,16 @@ symbol metadata 兼容；新代码应走 plugin contracts。
 - `plugin_api_version`
 - `capability_schema_version`
 - `markets`
+- `channels`
 - `native_intervals`
 - `ws_connection_model`
 - `protocol_features`
 - `limits`
 - `known_limitations`
+
+schema v2 的每个 channel 会分别声明 transport、snapshot/delta、sequence/resync、
+`available_fields`、`unavailable_fields` 和 `derived_fields`。K 线 P0 用这些字段门控
+增强成交量与订单流代理，避免把插件占位值当作真实行情。
 
 前端使用这些元数据决定 interval 列表、可用 market type、WS 行为和用户可见限制。
 新增交易所 UI 行为应放进 capabilities，而不是新增前端交易所分支。

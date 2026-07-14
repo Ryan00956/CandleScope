@@ -73,15 +73,21 @@ class _FakeDataManager:
             "market_type": market_type,
         })
         bars = [
-            BarData(
-                time=1_700_000_000,
-                open=1,
-                high=2,
-                low=0.5,
-                close=1.5,
-                volume=10,
-                is_closed=self.is_closed,
-            )
+            BarData.from_storage_row({
+                "exchange": exchange,
+                "market_type": market_type,
+                "open_time": 1_700_000_000_000,
+                "open": 1,
+                "high": 2,
+                "low": 0.5,
+                "close": 1.5,
+                "volume": 10,
+                "is_closed": self.is_closed,
+                "quote_volume": 15,
+                "trades": 7,
+                "taker_buy_base": 6,
+                "taker_buy_quote": 9,
+            })
         ]
         return QueryResult(
             bars=bars,
@@ -160,6 +166,16 @@ def test_get_klines_uses_data_manager_when_available() -> None:
             "close": 1.5,
             "volume": 10,
             "is_closed": True,
+            "quote_volume": 15,
+            "trades": 7,
+            "taker_buy_base": 6,
+            "taker_buy_quote": 9,
+            "order_flow": {
+                "taker_sell_base": 4,
+                "volume_delta_base": 2,
+                "taker_buy_ratio_base": 0.6,
+                "cvd_contribution_base": 2,
+            },
         }
     ]
     assert dm.ensure_stream_calls == [
@@ -194,6 +210,29 @@ def test_get_klines_uses_data_manager_when_available() -> None:
             "market_type": "spot",
         }
     ]
+
+
+def test_get_klines_okx_suppresses_placeholder_order_flow() -> None:
+    client = _client(_FakeDataManager())
+
+    response = client.get(
+        "/api/v1/klines/",
+        params={
+            "symbol": "BTC-USDT",
+            "interval": "1m",
+            "limit": 1,
+            "exchange": "okx",
+            "market_type": "swap",
+        },
+    )
+
+    assert response.status_code == 200
+    bar = response.json()["data"][0]
+    assert bar["quote_volume"] == 15
+    assert bar["trades"] is None
+    assert bar["taker_buy_base"] is None
+    assert bar["taker_buy_quote"] is None
+    assert bar["order_flow"] is None
 
 
 def test_get_klines_preserves_forming_bar_state() -> None:

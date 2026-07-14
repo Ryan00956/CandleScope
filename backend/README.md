@@ -74,6 +74,8 @@ All application APIs are mounted under `/api/v1`.
 | Settings | proxy get/update/test, storage repair, gap scan, storage health, cache limits |
 | Subscriptions | list, sync, prices snapshot, get/set/delete symbol tier |
 
+The enhanced K-line volume, delta, and CVD-contribution contract is documented in [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](../docs/KLINE_ORDER_FLOW_CONTRACT_zh.md).
+
 System endpoints outside `/api/v1`:
 
 - `GET /`

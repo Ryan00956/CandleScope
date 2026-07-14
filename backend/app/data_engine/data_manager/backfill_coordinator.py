@@ -1280,7 +1280,14 @@ class BackfillCoordinator:
                 exchange=written_range["exchange"],
                 market_type=written_range["market_type"],
             )
-            bars = [BarData.from_storage_row(row) for row in rows]
+            bars = [
+                BarData.from_storage_row(
+                    row,
+                    exchange=written_range["exchange"],
+                    market_type=written_range["market_type"],
+                )
+                for row in rows
+            ]
 
             if not bars:
                 continue

@@ -73,6 +73,8 @@ curl http://127.0.0.1:18080/debug/snapshot
 | Settings | proxy get/update/test、storage repair、gap scan、storage health、cache limits |
 | Subscriptions | list、sync、prices snapshot、get/set/delete symbol tier |
 
+K 线 HTTP/WS 的增强成交量、Delta 与 CVD contribution 契约见 [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](../docs/KLINE_ORDER_FLOW_CONTRACT_zh.md)。
+
 `/api/v1` 外的系统 endpoints：
 
 - `GET /`

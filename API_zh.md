@@ -69,7 +69,17 @@ WebSocket API: ws://localhost:8000/api/v1
       "low": 41950.0,
       "close": 42050.0,
       "volume": 12.5,
-      "is_closed": false
+      "is_closed": false,
+      "quote_volume": 525000.0,
+      "trades": 320,
+      "taker_buy_base": 7.5,
+      "taker_buy_quote": 315000.0,
+      "order_flow": {
+        "taker_sell_base": 5.0,
+        "volume_delta_base": 2.5,
+        "taker_buy_ratio_base": 0.6,
+        "cvd_contribution_base": 2.5
+      }
     }
   ],
   "base_interval": null
@@ -78,6 +88,8 @@ WebSocket API: ws://localhost:8000/api/v1
 
 只有仍在形成中的实时 K 线，其 `is_closed` 才为 `false`。兼容旧服务或历史存储时，
 客户端可将缺少该字段的 K 线视为已确认。
+
+增强字段按 exchange/market 的 capability fail closed；不可用或非法原始值为 `null`，无法计算 base 订单流时整个 `order_flow` 为 `null`。`cvd_contribution_base` 是连续区间 CVD 前缀和的单根贡献，形成中 K 线更新应替换当前桶，不能重复累加。完整字段、公式和自定义周期规则见 [`docs/KLINE_ORDER_FLOW_CONTRACT_zh.md`](docs/KLINE_ORDER_FLOW_CONTRACT_zh.md)。
 
 ### `GET /klines/latest`
 

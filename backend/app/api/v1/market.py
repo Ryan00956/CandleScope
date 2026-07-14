@@ -72,13 +72,26 @@ async def market_history(
             raise ValueError("start_ms must be less than or equal to end_ms")
         parsed_channel = MarketChannel(channel.strip().lower())
         key = MarketStreamKey.build(exchange, market_type, symbol, parsed_channel)
-        events = await dm.market_history(
-            key,
-            period=period,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            limit=limit,
-        )
+        page_reader = getattr(dm, "market_history_page", None)
+        if callable(page_reader):
+            page = await page_reader(
+                key,
+                period=period,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=limit,
+            )
+            events = page.events
+            fallback = bool(page.fallback)
+        else:
+            events = await dm.market_history(
+                key,
+                period=period,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=limit,
+            )
+            fallback = False
     except HTTPException:
         raise
     except ValueError as exc:
@@ -90,15 +103,18 @@ async def market_history(
     if period is not None:
         response_key["params"] = {"period": period}
 
+    page_complete = not fallback and len(events) < limit
     return {
         "type": "market.history",
         "key": response_key,
         "count": len(events),
         "data": [event.to_dict() for event in events],
+        "fallback": fallback,
+        "has_more": fallback or not page_complete,
         "coverage": {
             "earliest_ms": min((event.event_time_ms for event in events), default=None),
             "latest_ms": max((event.event_time_ms for event in events), default=None),
-            "complete": False,
+            "complete": page_complete,
         },
     }
 

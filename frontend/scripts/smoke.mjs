@@ -92,6 +92,7 @@ function parseArgs(argv) {
     timeoutMs: Number(process.env.SMOKE_TIMEOUT_MS || DEFAULT_TIMEOUT_MS),
     chromePath: process.env.CHROME_PATH || "",
     screenshot: process.env.SMOKE_SCREENSHOT || "",
+    marketType: process.env.SMOKE_MARKET_TYPE || "futures",
     seedIndicators: process.env.SMOKE_SEED_INDICATORS !== "0",
     overlayHeavy: process.env.SMOKE_OVERLAY_HEAVY === "1",
     drawingCheck: process.env.SMOKE_DRAWING_CHECK === "1",
@@ -114,6 +115,7 @@ function parseArgs(argv) {
     else if (arg === "--timeout-ms") args.timeoutMs = Number(argv[++i]);
     else if (arg === "--chrome") args.chromePath = argv[++i];
     else if (arg === "--screenshot") args.screenshot = argv[++i];
+    else if (arg === "--market-type") args.marketType = argv[++i];
     else if (arg === "--no-seed-indicators") args.seedIndicators = false;
     else if (arg === "--overlay-heavy") args.overlayHeavy = true;
     else if (arg === "--drawing-check") args.drawingCheck = true;
@@ -422,6 +424,76 @@ async function waitForChartReady(cdp, timeoutMs) {
   }
 
   return { bodyText, loadedAt };
+}
+
+async function readAdvancedMarketState(cdp) {
+  const result = await cdp.send("Runtime.evaluate", {
+    expression: `(() => {
+      const metricIds = ["mark-price", "index-price", "basis"];
+      const paneIds = ["funding-rate", "open-interest"];
+      const parseFiniteValue = (element) => {
+        if (!element) return null;
+        const candidates = [
+          element.getAttribute("data-market-value"),
+          element.getAttribute("data-value"),
+          element.getAttribute("aria-label"),
+          element.textContent,
+        ];
+        for (const candidate of candidates) {
+          const match = String(candidate || "")
+            .replaceAll(",", "")
+            .match(/[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:e[-+]?\\d+)?/i);
+          if (!match) continue;
+          const value = Number(match[0]);
+          if (Number.isFinite(value)) return value;
+        }
+        return null;
+      };
+      const metrics = Object.fromEntries(metricIds.map((id) => {
+        const selector = '[data-market-metric="' + id + '"]';
+        const element = document.querySelector(selector);
+        return [id, {
+          selector,
+          present: Boolean(element),
+          text: String(element?.textContent || "").trim(),
+          value: parseFiniteValue(element),
+        }];
+      }));
+      const panes = Object.fromEntries(paneIds.map((id) => {
+        const selector = '[data-market-pane="' + id + '"]';
+        const element = document.querySelector(selector);
+        const rect = element?.getBoundingClientRect();
+        return [id, {
+          selector,
+          present: Boolean(element),
+          visible: Boolean(rect && rect.width > 0 && rect.height > 0),
+          text: String(element?.textContent || "").trim(),
+        }];
+      }));
+      return {
+        metrics,
+        panes,
+        ready: Object.values(metrics).every((item) => Number.isFinite(item.value))
+          && Object.values(panes).every((item) => item.present && item.visible),
+      };
+    })()`,
+    returnByValue: true,
+  });
+  return result.result?.value || { metrics: {}, panes: {}, ready: false };
+}
+
+async function waitForAdvancedMarketState(cdp, timeoutMs = 15_000) {
+  const started = Date.now();
+  let state = await readAdvancedMarketState(cdp);
+  while (!state.ready && Date.now() - started < timeoutMs) {
+    await wait(250);
+    state = await readAdvancedMarketState(cdp);
+  }
+  return {
+    ...state,
+    checked: true,
+    readyAtMs: state.ready ? Date.now() - started : null,
+  };
 }
 
 async function readPerfReport(cdp) {
@@ -1077,6 +1149,10 @@ async function verifyDrawingWorkflow(cdp, timeoutMs) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  args.marketType = String(args.marketType || "").trim().toLowerCase();
+  if (!new Set(["spot", "futures"]).has(args.marketType)) {
+    throw new Error("--market-type must be either spot or futures");
+  }
   if (args.shortSwitch && args.shortSwitchIntervals.length !== 2) {
     throw new Error("--short-switch-intervals requires exactly two comma-separated intervals");
   }
@@ -1163,13 +1239,17 @@ async function main() {
       const isReplacedExportBlob = args.exportMatrix
         && event.errorText === "net::ERR_FILE_NOT_FOUND"
         && url.startsWith("blob:");
+      const isOptionalExternalFont = event.type === "Font"
+        && /^https:\/\/fonts\.(?:googleapis|gstatic)\.com\//i.test(url);
       // Export previews revoke the previous object URL after replacing it.
       // The export matrix separately verifies the new preview and downloaded
-      // file bytes, so a late fetch against that retired blob is cancellation,
-      // not an application/network failure.
+      // file bytes, so a late fetch against that retired blob is cancellation.
+      // Google Fonts are cosmetic and may be unavailable in an offline CI run;
+      // the browser fallback font does not invalidate the product smoke.
       const isCanceled = event.canceled
         || event.errorText === "net::ERR_ABORTED"
-        || isReplacedExportBlob;
+        || isReplacedExportBlob
+        || isOptionalExternalFont;
       if (event.errorText && !isCanceled) {
         failures.push({ errorText: event.errorText, requestId: event.requestId, type: event.type, url });
       }
@@ -1185,6 +1265,19 @@ async function main() {
         eventsEnabled: true,
       });
     }
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: `
+        try {
+          const raw = localStorage.getItem("candlescope-user-prefs");
+          const current = raw ? JSON.parse(raw) : {};
+          const prefs = current && typeof current === "object" ? current : {};
+          prefs.lastExchange = "binance";
+          prefs.lastMarketType = ${JSON.stringify(args.marketType)};
+          prefs.lastSymbol = "BTCUSDT";
+          localStorage.setItem("candlescope-user-prefs", JSON.stringify(prefs));
+        } catch {}
+      `,
+    });
     if (args.seedIndicators) {
       const activeIndicators = args.overlayHeavy ? SMOKE_OVERLAY_HEAVY_INDICATORS : SMOKE_ACTIVE_INDICATORS;
       await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
@@ -1205,6 +1298,16 @@ async function main() {
     await cdp.send("Page.navigate", { url: args.url });
 
     const { bodyText, loadedAt } = await waitForChartReady(cdp, args.timeoutMs);
+    const advancedMarket = args.marketType === "futures"
+      ? await waitForAdvancedMarketState(cdp, Math.min(args.timeoutMs, 15_000))
+      : {
+          checked: false,
+          ready: true,
+          readyAtMs: null,
+          reason: "advanced market data is futures-only",
+          metrics: {},
+          panes: {},
+        };
     const chartTypeMatrix = args.chartTypeMatrix
       ? await runChartTypeMatrix({
           args,
@@ -1260,6 +1363,8 @@ async function main() {
       bars: parseBarCount(bodyText),
       connected: bodyText.includes("Connected to Binance"),
       live: bodyText.includes("Live (WebSocket)"),
+      marketType: args.marketType,
+      advancedMarket,
       ...lazySurfaces,
       ...settings,
       drawingWorkflow,
@@ -1299,6 +1404,7 @@ async function main() {
     const failed = !report.connected
       || !report.live
       || report.bars <= 0
+      || !report.advancedMarket.ready
       || !report.drawingToolbarLoaded
       || !report.symbolSearchOpened
       || !report.settingsOpened

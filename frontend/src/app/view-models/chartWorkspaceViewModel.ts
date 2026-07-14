@@ -8,6 +8,8 @@ function errorMessage(error: unknown): string | null {
 }
 
 export function buildChartWorkspaceViewModel({
+  advancedMarketActions,
+  advancedMarketView,
   chartSettings,
   drawingActions,
   drawingView,
@@ -89,6 +91,7 @@ export function buildChartWorkspaceViewModel({
     chart: {
       error: errorMessage(marketView.error),
       onRetryLoad: marketActions.retry,
+      advancedMarketData: advancedMarketView,
       chartProps: {
         seriesStore: marketView.seriesStore,
         symbol,
@@ -118,7 +121,10 @@ export function buildChartWorkspaceViewModel({
         ...(chartSettings.timezone === undefined ? {} : { timezone: chartSettings.timezone }),
         savedVisibleRange,
         dataMeta: marketView.meta,
-        onViewportRangeChange: (range) => indicatorActions?.ensureVisibleIndicatorRange?.(range),
+        onViewportRangeChange: (range) => {
+          indicatorActions?.ensureVisibleIndicatorRange?.(range);
+          advancedMarketActions?.ensureVisibleRange?.(range);
+        },
         onVisibleRangeChange: (range) => marketActions.onVisibleRangeChange?.(range),
         drawingTool: drawingView.drawingTool,
         onDrawingToolChange: drawingActions.setDrawingTool,

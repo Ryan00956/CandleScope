@@ -54,7 +54,7 @@ from app.api.v1.symbols import router as symbols_router
 from app.core.config import CORS_ORIGINS, EVENT_LOOP_LAG_INTERVAL_SECONDS
 from app.core.executors import executors_snapshot
 from app.core.runtime_metrics import EventLoopLagMonitor, ws_runtime_metrics
-from app.data_engine.storage import init_klines_storage
+from app.data_engine.storage import init_klines_storage, init_market_metrics_storage
 
 logger = logging.getLogger("candlescope")
 
@@ -153,6 +153,7 @@ async def startup_event() -> None:
 
     # 1. Initialize SQLite storage
     init_klines_storage()
+    init_market_metrics_storage()
 
     # 2. Load exchange symbol info (non-blocking, best-effort)
     try:

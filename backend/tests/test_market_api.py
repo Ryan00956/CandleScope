@@ -47,14 +47,22 @@ class _MarketDataManager:
                 event_time_ms=1_700_000_000_000,
                 received_at_ms=1_700_000_000_100,
                 source=DataSource.HTTP_BACKFILL,
-                data={"funding_rate": 0.0001},
+                data={
+                    "funding_rate": 0.0001,
+                    "is_final": True,
+                    "sample_kind": "settlement",
+                },
             ),
             MarketStateEvent(
                 key=key,
                 event_time_ms=1_700_028_800_000,
                 received_at_ms=1_700_028_800_100,
                 source=DataSource.HTTP_BACKFILL,
-                data={"funding_rate": 0.0002},
+                data={
+                    "funding_rate": 0.0002,
+                    "is_final": False,
+                    "sample_kind": "preview",
+                },
             ),
         ]
 
@@ -104,7 +112,7 @@ def test_market_history_returns_coverage_and_forwards_query() -> None:
             "symbol": "ETHUSDT",
             "channel": "funding_rate",
             "start_ms": 1_699_999_999_000,
-            "limit": 2,
+            "limit": 3,
         },
     )
 
@@ -112,10 +120,18 @@ def test_market_history_returns_coverage_and_forwards_query() -> None:
     payload = response.json()
     assert payload["type"] == "market.history"
     assert payload["count"] == 2
+    assert payload["fallback"] is False
+    assert payload["has_more"] is False
+    assert payload["data"][0]["data"]["sample_kind"] == "settlement"
+    assert payload["data"][1]["data"] == {
+        "funding_rate": 0.0002,
+        "is_final": False,
+        "sample_kind": "preview",
+    }
     assert payload["coverage"] == {
         "earliest_ms": 1_700_000_000_000,
         "latest_ms": 1_700_028_800_000,
-        "complete": False,
+        "complete": True,
     }
     assert dm.history_calls == [{
         "key": MarketStreamKey.build(
@@ -127,7 +143,7 @@ def test_market_history_returns_coverage_and_forwards_query() -> None:
         "period": None,
         "start_ms": 1_699_999_999_000,
         "end_ms": None,
-        "limit": 2,
+        "limit": 3,
     }]
 
 

@@ -8,12 +8,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from app.core.executors import run_storage
 from app.data_engine.ingestion.models import (
     MarketEvent,
     StreamDescriptor,
     StreamType,
     TransportRequest,
 )
+from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.storage.market_metrics_repo import MarketMetricsRepository
 from app.exchanges import (
     bootstrap_default_adapters,
     get_exchange_registry,
@@ -23,6 +26,7 @@ from app.exchanges import (
 from .events import HubRecord, MarketStateEvent
 from .hub import MarketEventHub, MarketHubSubscription
 from .models import MarketChannel, MarketStreamKey
+from .storage_writer import MarketMetricStorageWriter
 
 
 logger = logging.getLogger("data_engine.market_data")
@@ -38,6 +42,8 @@ _HISTORY_STREAM_TYPES = {
     MarketChannel.FUNDING_RATE: StreamType.FUNDING_RATE,
     MarketChannel.OPEN_INTEREST: StreamType.OPEN_INTEREST,
 }
+_DEFAULT_OPEN_INTEREST_STORAGE_PERIOD = "5m"
+_DEFAULT_OPEN_INTEREST_STORAGE_BUCKET_MS = 5 * 60 * 1000
 
 
 @dataclass(slots=True)
@@ -56,6 +62,12 @@ class _PhysicalEntry:
     retry_stop_at: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class MarketHistoryPage:
+    events: list[MarketStateEvent]
+    fallback: bool = False
+
+
 class MarketDataService:
     """Own logical leases, physical feeds, REST reads, and the typed hub."""
 
@@ -67,6 +79,8 @@ class MarketDataService:
         open_interest_poll_seconds: float = 5.0,
         max_open_interest_streams: int = 64,
         max_summary_streams: int = 512,
+        metrics_repository: MarketMetricsRepository | None = None,
+        metrics_writer: MarketMetricStorageWriter | None = None,
     ) -> None:
         self._factory = ingestion_factory
         self.hub = hub or MarketEventHub()
@@ -79,6 +93,8 @@ class MarketDataService:
         self._snapshot_lock = asyncio.Lock()
         self._snapshot_tasks: dict[tuple[str, str, str, str], asyncio.Task] = {}
         self._rate_limits = get_shared_rate_limit_manager()
+        self._metrics_repository = metrics_repository
+        self._metrics_writer = metrics_writer
         self._metrics = {"snapshot_fetch_errors": 0, "physical_stop_errors": 0}
         self._closed = False
 
@@ -255,7 +271,30 @@ class MarketDataService:
         start_ms: int | None = None,
         end_ms: int | None = None,
     ) -> list[MarketStateEvent]:
-        """Fetch one upstream REST history page for Funding or OI."""
+        page = await self.history_page(
+            key,
+            period=period,
+            limit=limit,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+        return page.events
+
+    async def history_page(
+        self,
+        key: MarketStreamKey,
+        *,
+        period: str | None = None,
+        limit: int = 500,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> MarketHistoryPage:
+        """Refresh one Funding/OI history page and serve it from SQLite.
+
+        Without an injected repository this preserves the original upstream-
+        only behavior for tests and alternate embeddings.  With storage
+        enabled, an upstream failure falls back to an already persisted page.
+        """
 
         self._ensure_open()
         self._validate_key(key, history=True)
@@ -274,13 +313,6 @@ class MarketDataService:
             exchange=key.exchange,
             market_type=key.market_type,
         )
-        raw_events = await self._fetch_market(
-            descriptor,
-            limit=limit,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            history=True,
-        )
         event_key = (
             MarketStreamKey.build(
                 key.exchange,
@@ -292,11 +324,173 @@ class MarketDataService:
             if period is not None
             else key
         )
-        return [
+        if self._metrics_repository is None:
+            raw_events = await self._fetch_market(
+                descriptor,
+                limit=limit,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                history=True,
+            )
+            return MarketHistoryPage(events=[
+                projected
+                for event in raw_events
+                if (projected := self._project(event, event_key)) is not None
+            ])
+
+        local_events = await self._read_persisted_history(
+            event_key,
+            period=period,
+            limit=limit,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+        try:
+            raw_events = await self._fetch_market(
+                descriptor,
+                limit=limit,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                history=True,
+            )
+        except ValueError:
+            raise
+        except Exception:
+            if not local_events:
+                raise
+            logger.warning(
+                "Advanced market history refresh failed; serving persisted %s page",
+                event_key.topic,
+                exc_info=True,
+            )
+            return MarketHistoryPage(events=local_events, fallback=True)
+
+        projected_events = [
             projected
             for event in raw_events
             if (projected := self._project(event, event_key)) is not None
         ]
+        await self._persist_final_history(projected_events, period=period)
+        return MarketHistoryPage(
+            events=await self._read_persisted_history(
+                event_key,
+                period=period,
+                limit=limit,
+                start_ms=start_ms,
+                end_ms=end_ms,
+            ),
+        )
+
+    async def _read_persisted_history(
+        self,
+        key: MarketStreamKey,
+        *,
+        period: str | None,
+        limit: int,
+        start_ms: int | None,
+        end_ms: int | None,
+    ) -> list[MarketStateEvent]:
+        repository = self._metrics_repository
+        if repository is None:
+            return []
+        common = {
+            "exchange": key.exchange,
+            "market_type": key.market_type,
+            "symbol": key.symbol,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "limit": limit,
+        }
+        if key.channel == MarketChannel.FUNDING_RATE:
+            rows = await run_storage(
+                repository.query_funding,
+                oldest_first=True,
+                **common,
+            )
+            events: list[MarketStateEvent] = []
+            for row in rows:
+                is_final = bool(row["is_final"])
+                data: dict[str, Any] = {
+                    "funding_rate": row["funding_rate"],
+                    "funding_time_ms": row["funding_time_ms"],
+                    "is_final": is_final,
+                    "sample_kind": "settlement" if is_final else "preview",
+                }
+                events.append(
+                    MarketStateEvent(
+                        key=key,
+                        event_time_ms=row["funding_time_ms"],
+                        received_at_ms=row["received_at_ms"],
+                        source=row["source"],
+                        data=data,
+                        sequence=row["funding_time_ms"],
+                    ),
+                )
+            return events
+
+        if key.channel == MarketChannel.OPEN_INTEREST:
+            if not period:
+                raise ValueError("open-interest history requires period")
+            rows = await run_storage(
+                repository.query_open_interest,
+                period=period,
+                **common,
+            )
+            events = []
+            for row in rows:
+                is_final = bool(row["is_final"])
+                data = {
+                    "open_interest": row["open_interest"],
+                    "is_final": is_final,
+                    "sample_kind": "final" if is_final else "provisional",
+                }
+                if row.get("open_interest_value") is not None:
+                    data["open_interest_value"] = row["open_interest_value"]
+                events.append(
+                    MarketStateEvent(
+                        key=key,
+                        event_time_ms=row["event_time_ms"],
+                        received_at_ms=row["received_at_ms"],
+                        source=row["source"],
+                        data=data,
+                        sequence=row["event_time_ms"],
+                    ),
+                )
+            return events
+        return []
+
+    async def _persist_final_history(
+        self,
+        events: list[MarketStateEvent],
+        *,
+        period: str | None,
+    ) -> None:
+        repository = self._metrics_repository
+        if repository is None or not events:
+            return
+        channel = events[0].key.channel
+        if channel == MarketChannel.FUNDING_RATE:
+            rows = [self._funding_storage_row(event, is_final=True) for event in events]
+            if self._metrics_writer is not None:
+                await self._metrics_writer.write_funding(rows)
+            else:
+                await run_storage(repository.upsert_funding, rows)
+            return
+        if channel == MarketChannel.OPEN_INTEREST:
+            if not period:
+                raise ValueError("open-interest history requires period")
+            rows = [
+                self._open_interest_storage_row(
+                    event,
+                    period=period,
+                    is_final=True,
+                )
+                for event in events
+            ]
+            if self._metrics_writer is not None:
+                await self._metrics_writer.write_open_interest(rows)
+            else:
+                await run_storage(repository.upsert_open_interest, rows)
 
     def subscribe(
         self,
@@ -338,6 +532,8 @@ class MarketDataService:
             )
         async with self._lock:
             self._physical_entries.clear()
+        if self._metrics_writer is not None:
+            await self._metrics_writer.close()
         await self.hub.close()
 
     def diagnostics(self) -> dict[str, Any]:
@@ -368,6 +564,14 @@ class MarketDataService:
                 for entry in self._physical_entries.values()
             ],
             "hub": self.hub.diagnostics(),
+            "storage": {
+                "enabled": self._metrics_repository is not None,
+                "writer": (
+                    self._metrics_writer.diagnostics()
+                    if self._metrics_writer is not None
+                    else None
+                ),
+            },
             "rate_limits": self._rate_limits.snapshot(),
             **self._metrics,
         }
@@ -529,6 +733,99 @@ class MarketDataService:
             projected = self._project(event, key)
             if projected is not None:
                 self.hub.publish(projected)
+        self._offer_realtime_provisional(event, keys)
+
+    def _offer_realtime_provisional(
+        self,
+        event: MarketEvent,
+        keys: tuple[MarketStreamKey, ...],
+    ) -> None:
+        writer = self._metrics_writer
+        if writer is None:
+            return
+
+        funding_key = next(
+            (key for key in keys if key.channel == MarketChannel.FUNDING_RATE),
+            None,
+        )
+        if funding_key is not None and "next_funding_time_ms" in event.data:
+            projected = self._project(event, funding_key)
+            if projected is not None:
+                writer.offer_funding(
+                    self._funding_storage_row(projected, is_final=False),
+                )
+
+        open_interest_key = next(
+            (key for key in keys if key.channel == MarketChannel.OPEN_INTEREST),
+            None,
+        )
+        if open_interest_key is not None:
+            projected = self._project(event, open_interest_key)
+            if projected is not None:
+                bucket_time_ms = (
+                    projected.event_time_ms // _DEFAULT_OPEN_INTEREST_STORAGE_BUCKET_MS
+                ) * _DEFAULT_OPEN_INTEREST_STORAGE_BUCKET_MS
+                writer.offer_open_interest(
+                    self._open_interest_storage_row(
+                        projected,
+                        period=_DEFAULT_OPEN_INTEREST_STORAGE_PERIOD,
+                        is_final=False,
+                        event_time_ms=bucket_time_ms,
+                    ),
+                )
+
+    @staticmethod
+    def _funding_storage_row(
+        event: MarketStateEvent,
+        *,
+        is_final: bool,
+    ) -> dict[str, Any]:
+        time_field = "funding_time_ms" if is_final else "next_funding_time_ms"
+        funding_time_ms = event.data.get(time_field)
+        if funding_time_ms is None:
+            funding_time_ms = event.event_time_ms
+        row: dict[str, Any] = {
+            "exchange": event.key.exchange,
+            "market_type": event.key.market_type,
+            "symbol": event.key.symbol,
+            "funding_time_ms": int(funding_time_ms),
+            "funding_rate": event.data["funding_rate"],
+            "is_final": is_final,
+            "source": event.source.value,
+            "received_at_ms": event.received_at_ms,
+        }
+        return row
+
+    @staticmethod
+    def _open_interest_storage_row(
+        event: MarketStateEvent,
+        *,
+        period: str,
+        is_final: bool,
+        event_time_ms: int | None = None,
+    ) -> dict[str, Any]:
+        resolved_event_time_ms = (
+            event.event_time_ms if event_time_ms is None else event_time_ms
+        )
+        period_ms = parse_interval_ms(period)
+        if period_ms is not None and period_ms > 0:
+            resolved_event_time_ms = (
+                resolved_event_time_ms // period_ms
+            ) * period_ms
+        row: dict[str, Any] = {
+            "exchange": event.key.exchange,
+            "market_type": event.key.market_type,
+            "symbol": event.key.symbol,
+            "period": period,
+            "event_time_ms": resolved_event_time_ms,
+            "open_interest": event.data["open_interest"],
+            "is_final": is_final,
+            "source": event.source.value,
+            "received_at_ms": event.received_at_ms,
+        }
+        if event.data.get("open_interest_value") is not None:
+            row["open_interest_value"] = event.data["open_interest_value"]
+        return row
 
     @staticmethod
     def _project(event: MarketEvent, key: MarketStreamKey) -> MarketStateEvent | None:

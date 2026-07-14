@@ -7,6 +7,8 @@ import type { SingleChartPanesProps } from "../components/SingleChartPanes.js";
 import type { DrawingToolbarProps } from "../components/DrawingToolbar.js";
 import type { ExportPanelProps } from "../features/export/ExportPanel.js";
 import type { WatchlistSidebarProps } from "../features/watchlist/WatchlistSidebar.js";
+import type { AdvancedMarketRuntimeView } from "../features/advanced-market-data/advancedMarketDataTypes.js";
+import { useAdvancedMarketPanes } from "../features/advanced-market-data/useAdvancedMarketPanes.js";
 
 const ExportPanel = React.lazy(() => import("../features/export/ExportPanel"));
 const DrawingToolbar = React.lazy(() => import("../features/drawings/DrawingToolbar"));
@@ -15,6 +17,7 @@ const WatchlistSidebar = React.lazy(() => import("../features/watchlist/Watchlis
 export interface ChartWorkspaceChartModel {
   error?: string | null;
   onRetryLoad(): void;
+  advancedMarketData: AdvancedMarketRuntimeView;
   chartProps: SingleChartPanesProps & RefAttributes<ChartSurfaceHandle>;
 }
 
@@ -34,6 +37,14 @@ function ChartWorkspace({
   errorBoundary = ChartErrorBoundary,
 }: ChartWorkspaceProps) {
   const Boundary = errorBoundary;
+  const advancedPanes = useAdvancedMarketPanes(chart.advancedMarketData);
+  const chartProps = React.useMemo(() => ({
+    ...chart.chartProps,
+    subPanes: [
+      ...advancedPanes,
+      ...(chart.chartProps.subPanes || []),
+    ],
+  }), [advancedPanes, chart.chartProps]);
 
   return (
     <div className="main-content-area">
@@ -68,7 +79,7 @@ function ChartWorkspace({
           </div>
         ) : (
           <Boundary>
-            <SingleChartPanes {...chart.chartProps} />
+            <SingleChartPanes {...chartProps} />
           </Boundary>
         )}
       </div>

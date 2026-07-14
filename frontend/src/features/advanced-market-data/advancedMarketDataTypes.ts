@@ -1,0 +1,137 @@
+import type { IndicatorSubPane } from "../indicators/indicatorPaneProjection.js";
+import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
+
+export const ADVANCED_MARKET_CHANNELS = [
+  "mark_price",
+  "index_price",
+  "funding_rate",
+  "open_interest",
+  "basis",
+] as const;
+
+export type AdvancedMarketChannel = (typeof ADVANCED_MARKET_CHANNELS)[number];
+export const DEFAULT_OPEN_INTEREST_PERIOD = "5m";
+export type AdvancedMarketConnectionStatus =
+  | "disabled"
+  | "connecting"
+  | "live"
+  | "reconnecting"
+  | "disconnected";
+
+export interface AdvancedMarketIdentity {
+  exchange: string;
+  marketType: string;
+  symbol: string;
+}
+
+export interface MarketStreamKeyPayload {
+  exchange: string;
+  market_type: string;
+  symbol: string;
+  channel: AdvancedMarketChannel;
+  params: Record<string, unknown>;
+}
+
+export interface MarketStateRecord {
+  key: MarketStreamKeyPayload;
+  topic: string;
+  channel: AdvancedMarketChannel;
+  event_time_ms: number;
+  received_at_ms: number;
+  source: string;
+  sequence: number | null;
+  revision: number;
+  data: Record<string, unknown>;
+}
+
+export interface MarketSnapshotPayload {
+  type: "market.snapshot";
+  as_of_ms: number;
+  data: MarketStateRecord[];
+  missing: MarketStreamKeyPayload[];
+}
+
+export interface MarketHistoryCoverage {
+  earliest_ms: number | null;
+  latest_ms: number | null;
+  complete: boolean;
+}
+
+export interface MarketHistoryPayload {
+  type: "market.history";
+  key: MarketStreamKeyPayload;
+  count: number;
+  data: MarketStateRecord[];
+  coverage: MarketHistoryCoverage;
+  fallback?: boolean;
+  has_more?: boolean;
+  next_start_ms?: number | null;
+  next_end_ms?: number | null;
+}
+
+export type MarketSocketMessage =
+  | { type: "connected"; protocol?: string; max_subscriptions?: number }
+  | { type: "subscribed" | "unsubscribed"; request_id?: string; streams: MarketStreamKeyPayload[] }
+  | { type: "snapshot"; request_id?: string; data: MarketStateRecord[]; missing: MarketStreamKeyPayload[] }
+  | { type: "update"; protocol?: string; data: MarketStateRecord[] }
+  | { type: "error"; request_id?: string; code?: string; detail?: string };
+
+export interface AdvancedMarketSummarySnapshot {
+  markPrice: number | null;
+  indexPrice: number | null;
+  basis: number | null;
+  basisRate: number | null;
+  basisBps: number | null;
+  receivedAtMs: number | null;
+  connectionStatus: AdvancedMarketConnectionStatus;
+}
+
+export interface AdvancedMarketMetricsSnapshot {
+  fundingHistory: readonly MarketStateRecord[];
+  fundingPreview: MarketStateRecord | null;
+  openInterestHistory: readonly MarketStateRecord[];
+  openInterestPeriod: string;
+  connectionStatus: AdvancedMarketConnectionStatus;
+  revision: number;
+}
+
+export interface AdvancedMarketRuntimeView {
+  enabled: boolean;
+  identity: AdvancedMarketIdentity;
+  identityKey: string;
+  seriesStore: SeriesWindowStore | null;
+}
+
+export interface AdvancedMarketRuntime {
+  view: AdvancedMarketRuntimeView;
+  actions: {
+    ensureVisibleRange(range: unknown): boolean;
+    retry(): void;
+  };
+  status: {
+    enabled: boolean;
+  };
+}
+
+export interface AdvancedMarketPaneSnapshot {
+  panes: IndicatorSubPane[];
+  revision: number;
+}
+
+export function buildAdvancedMarketIdentityKey(identity: AdvancedMarketIdentity): string {
+  return [
+    String(identity.exchange || "").trim().toLowerCase(),
+    String(identity.marketType || "").trim().toLowerCase(),
+    String(identity.symbol || "").trim().toUpperCase(),
+  ].join(":");
+}
+
+export function normalizeAdvancedMarketIdentity(
+  identity: AdvancedMarketIdentity,
+): AdvancedMarketIdentity {
+  return {
+    exchange: String(identity.exchange || "").trim().toLowerCase(),
+    marketType: String(identity.marketType || "").trim().toLowerCase(),
+    symbol: String(identity.symbol || "").trim().toUpperCase(),
+  };
+}

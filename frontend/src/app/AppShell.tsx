@@ -12,6 +12,7 @@ function AppShell({
   chartSurfaceRef,
   session,
   marketData,
+  advancedMarketData,
   drawings,
   indicators,
   settings,
@@ -24,6 +25,7 @@ function AppShell({
     () => buildAppShellViewModel({
       session,
       marketData,
+      advancedMarketData,
       drawings,
       indicators,
       settings,
@@ -35,6 +37,7 @@ function AppShell({
     [
       session,
       marketData,
+      advancedMarketData,
       drawings,
       indicators,
       settings,

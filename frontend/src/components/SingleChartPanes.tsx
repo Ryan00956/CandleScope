@@ -252,6 +252,13 @@ interface PanePlaceholderState {
   seriesByPane: Map<number, PanePlaceholderEntry>;
 }
 
+interface PaneLabelPosition {
+  id: string;
+  label: string;
+  marketPane: "funding-rate" | "open-interest";
+  top: number;
+}
+
 interface PaneDescriptor {
   id: string;
   paneIndex: number;
@@ -1084,6 +1091,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const [DrawingEngineHost, setDrawingEngineHost] = useState<DrawingEngineHostComponent | null>(null);
   const [isAutoScale, setIsAutoScale] = useState(true);
   const [contextMenu, setContextMenu] = useState<PriceScaleContextMenuPosition | null>(null);
+  const [paneLabelPositions, setPaneLabelPositions] = useState<PaneLabelPosition[]>([]);
 
   const resolvedChartType = normalizeMainChartType(chartType);
   const resolvedDescriptor = getChartTypeDescriptor(resolvedChartType);
@@ -1240,6 +1248,45 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     [activeSubPanes],
   );
   paneHeightStorageKeyRef.current = paneHeightStorageKey;
+
+  useEffect(() => {
+    const wrapper = wrapperRef.current;
+    const chart = chartRef.current;
+    if (!wrapper || !chart) {
+      setPaneLabelPositions([]);
+      return undefined;
+    }
+
+    const syncLabels = () => {
+      const heights = readPaneHeights(chart);
+      if (heights.length !== activeSubPanes.length + 1) return;
+      let paneTop = heights[0] || 0;
+      const next: PaneLabelPosition[] = [];
+      for (const [index, pane] of activeSubPanes.entries()) {
+        if (pane.dataMarketPane) {
+          next.push({
+            id: pane.id,
+            label: pane.label,
+            marketPane: pane.dataMarketPane,
+            top: paneTop + 6,
+          });
+        }
+        paneTop += heights[index + 1] || 0;
+      }
+      setPaneLabelPositions((previous) => (
+        JSON.stringify(previous) === JSON.stringify(next) ? previous : next
+      ));
+    };
+
+    const frame = requestAnimationFrame(syncLabels);
+    wrapper.addEventListener("pointerup", syncLabels);
+    window.addEventListener("resize", syncLabels);
+    return () => {
+      cancelAnimationFrame(frame);
+      wrapper.removeEventListener("pointerup", syncLabels);
+      window.removeEventListener("resize", syncLabels);
+    };
+  }, [activeSubPanes, paneHeightStorageKey, seriesReady]);
 
   const saveCurrentPaneHeights = useCallback((
     chart = chartRef.current,
@@ -2653,6 +2700,18 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         onContextMenu={handlePriceScaleContextMenu}
         style={{ cursor: cursorStyleForDrawingTool(effectiveDrawingTool) }}
       />
+
+      {paneLabelPositions.map((position) => (
+        <div
+          key={position.id}
+          className="chart-pane-label advanced-market-pane-label"
+          data-market-pane={position.marketPane}
+          data-pane-id={position.id}
+          style={{ top: position.top }}
+        >
+          {position.label}
+        </div>
+      ))}
 
       {cursorOverlayClass && (
         <div className="chart-pane-cursor-overlay" aria-hidden="true">

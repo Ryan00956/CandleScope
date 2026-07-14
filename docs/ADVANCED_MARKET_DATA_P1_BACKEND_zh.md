@@ -15,10 +15,12 @@ P1 在现有 K 线主链旁新增独立的高级行情主链，首批覆盖 Bina
 ```text
 K 线：Exchange -> Ingestion -> BarAggregator -> Kline cache/SQLite -> Kline API/WS
 
-高级行情：Exchange -> Ingestion -> MarketDataService -> MarketEventHub -> Market API/WS
+高级行情实时：Exchange -> Ingestion -> MarketDataService -> MarketEventHub -> Market API/WS
+
+Funding/OI 历史：MarketDataService -> bounded batch writer -> 独立 SQLite 表 -> Market History API
 ```
 
-P1 的历史数据直接读取 Binance REST：Funding 支持历史，OI 支持按 period 的历史；Mark/Index 点值历史暂不开放，因为 Binance 对应历史接口返回 OHLC K 线而不是同一份点值契约。高级行情本地 SQLite 持久化留到后续阶段。
+Funding 与 OI 历史采用 cache-aside：先保留本地已积累的数据，再读取 Binance REST 当前可用页面，批量写入独立 SQLite 表并从本地有序回读；上游暂时失败且本地已有数据时可回退到本地。Mark、Index、Basis 只保留最新状态，不落库；其中 Mark/Index 点值历史暂不开放，因为 Binance 对应历史接口返回 OHLC K 线而不是同一份点值契约。
 
 ## 上游传输
 
@@ -54,6 +56,8 @@ Mark、Index、Funding、Basis 在同一 symbol 下只持有一个物理 Mark Pr
 - 每个 key 在状态驻留期间带进程内单调 `revision`。
 
 服务同时限制最多 512 条衍生品摘要物理流和 64 条 OI 轮询物理流。64 条 OI 按 5 秒周期约为每分钟 768 次当前快照请求，低于默认保守的 Futures request-weight 桶。HTTP 快照/历史共用 endpoint token bucket，并按插件规则执行并发闸门（Binance 默认每桶 1 个并发）；Funding 与 OI 历史分别使用官方的 5 分钟桶。
+
+Funding/OI 的 SQLite 写入不占用实时发布热路径：单消费者 writer 通过有界队列合批，并按自然主键合并 provisional 更新。Funding preview 以 `next_funding_time_ms` 为键持续覆盖；OI preview 以默认 `5m` 桶覆盖。REST history 写入为 final，final 行不会被后到的 provisional 覆盖。Mark、Index、Basis 不会进入该 writer。
 
 诊断信息位于 `GET /debug/snapshot` 返回的 `market_data` 字段，包括 logical/physical stream 数、Hub state 数、合并与丢弃计数。
 
@@ -108,7 +112,9 @@ OI 必须指定 Binance 支持的 period：
 GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=open_interest&period=5m&limit=500
 ```
 
-可选参数为 `start_ms`、`end_ms` 和 `limit`。P1 返回的是一个上游页面，`coverage.complete` 固定为 `false`，调用方不能把它解释为本地完整历史。
+可选参数为 `start_ms`、`end_ms` 和 `limit`。每次成功读取的上游页面都会幂等写入 SQLite，因此可跨请求逐步积累；返回数据按时间升序并从本地去重回读。响应通过 `has_more`、`coverage.complete` 和 `fallback` 明确区分页满、当前请求区间已读完、以及上游失败后仅返回本地缓存的情况。`fallback=true` 时调用方不得把当前覆盖范围当成完整历史，应保留重试；Funding 满页从 `start_ms` 向后翻，OI 满页从 `end_ms` 向前翻。
+
+Funding 数据通过 `data.is_final` 和 `data.sample_kind=settlement|preview` 区分已结算值与下一周期预估；OI 使用 `data.sample_kind=final|provisional`。两类 provisional 都只覆盖稳定自然键，不会按每秒或每 5 秒无限新增行。
 
 ## 浏览器 WebSocket
 
@@ -160,6 +166,6 @@ P1 的 stream 对象不接受自定义 `params`。单条命令最多 64 个 stre
 - 不修改现有 K 线协议或存储表；
 - 不把 Mark/Index/Funding/OI 塞入每根 K 线；
 - 不提供 Mark/Index 点值历史；
-- 不在本地持久化高级行情历史；
+- 不持久化 Mark/Index/Basis；Funding/OI 使用独立历史表；
 - 不提供 Trade、Depth、Liquidation 等 append/delta 类频道；
-- 不包含前端接入。
+- 不把前端高级行情状态并入现有 K 线 runtime 或普通指标计算链。

@@ -3,6 +3,7 @@ import { useChartSurfaceRuntime } from "../chart-adapter/useChartSurfaceRuntime"
 import { loadUserPrefs, updateUserPref } from "../features/chart-session/chartSessionModel";
 import { useChartSession } from "../features/chart-session/useChartSession";
 import { useMarketDataRuntime } from "../features/market-data/useMarketDataRuntime";
+import { useAdvancedMarketDataRuntime } from "../features/advanced-market-data/useAdvancedMarketDataRuntime";
 import { useIndicatorRuntime } from "../features/indicators/useIndicatorRuntime";
 import { useCacheLimitsSync } from "../features/settings/cacheLimitSettingsRuntime";
 import { useExportRuntime } from "../features/export/useExportRuntime";
@@ -33,6 +34,11 @@ export default function App() {
   const marketData = useMarketDataRuntime({
     session: chartSession,
     realtimePriceRef,
+  });
+  const advancedMarketData = useAdvancedMarketDataRuntime({
+    session: chartSession,
+    dataMeta: marketData.view.meta,
+    seriesStore: marketData.view.seriesStore,
   });
   const drawings = useDrawingRuntime({ chartSurfaceActions: chartSurface.actions, session: chartSession });
 
@@ -202,6 +208,7 @@ export default function App() {
         chartSurfaceRef={chartSurface.ref}
         session={chartSession}
         marketData={marketData}
+        advancedMarketData={advancedMarketData}
         drawings={drawings}
         indicators={indicatorRuntime}
         settings={settingsRuntime}

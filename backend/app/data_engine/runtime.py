@@ -17,7 +17,13 @@ from app.data_engine.ingestion import TransportLayer
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.factory import ExchangeIngestionFactory
 from app.data_engine.market_data.service import MarketDataService
-from app.data_engine.storage import AsyncKlinesRepoAdapter, GapLedger, KlinesRepoAdapter
+from app.data_engine.market_data.storage_writer import MarketMetricStorageWriter
+from app.data_engine.storage import (
+    AsyncKlinesRepoAdapter,
+    GapLedger,
+    KlinesRepoAdapter,
+    MarketMetricsRepository,
+)
 
 logger = logging.getLogger("data_engine.runtime")
 
@@ -176,7 +182,14 @@ async def start_data_engine() -> DataEngineRuntime:
         dm.set_ingestion_factory(ingestion_factory)
         print("[startup] IngestionFactory injected ✓")
 
-        market_data_service = MarketDataService(ingestion_factory)
+        market_metrics_repository = MarketMetricsRepository()
+        market_metrics_writer = MarketMetricStorageWriter(market_metrics_repository)
+        market_metrics_writer.start()
+        market_data_service = MarketDataService(
+            ingestion_factory,
+            metrics_repository=market_metrics_repository,
+            metrics_writer=market_metrics_writer,
+        )
         dm.set_market_data_service(market_data_service)
         print("[startup] MarketDataService injected ✓")
 

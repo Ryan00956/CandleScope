@@ -7,6 +7,7 @@ import { mustBeDefined, structuralMock } from "../../../test/testHelpers.js";
 type WorkspaceContext = Parameters<typeof buildChartWorkspaceViewModel>[0];
 
 interface ContextOverrides {
+  advancedMarketActions?: object;
   chartSettings?: object;
   indicatorActions?: object;
   marketActions?: object;
@@ -14,6 +15,7 @@ interface ContextOverrides {
 }
 
 function buildContext({
+  advancedMarketActions = {},
   chartSettings = { chartType: "candlestick" },
   indicatorActions = {},
   marketActions = {},
@@ -21,6 +23,13 @@ function buildContext({
 }: ContextOverrides = {}): WorkspaceContext {
   return structuralMock<WorkspaceContext>({
     chartSettings: structuralMock<WorkspaceContext["chartSettings"]>(chartSettings),
+    advancedMarketActions,
+    advancedMarketView: {
+      enabled: false,
+      identity: { exchange: "binance", marketType: "spot", symbol: "BTCUSDT" },
+      identityKey: "binance:spot:BTCUSDT",
+      seriesStore: null,
+    },
     drawingActions: {},
     drawingView: {},
     exportActions: {},
@@ -124,8 +133,12 @@ test("Line Break projection settings reach the chart surface", () => {
 
 test("chart range handlers separate indicator coverage from user persistence", () => {
   const indicatorRanges: unknown[] = [];
+  const advancedRanges: unknown[] = [];
   const persistedRanges: unknown[] = [];
   const model = buildChartWorkspaceViewModel(buildContext({
+    advancedMarketActions: {
+      ensureVisibleRange: (range: unknown) => { advancedRanges.push(range); },
+    },
     indicatorActions: {
       ensureVisibleIndicatorRange: (range: unknown) => { indicatorRanges.push(range); },
     },
@@ -140,6 +153,7 @@ test("chart range handlers separate indicator coverage from user persistence", (
 
   mustBeDefined(model.chart.chartProps.onViewportRangeChange)(range);
   assert.deepEqual(indicatorRanges, [range]);
+  assert.deepEqual(advancedRanges, [range]);
   assert.deepEqual(persistedRanges, []);
 
   mustBeDefined(model.chart.chartProps.onVisibleRangeChange)(range);

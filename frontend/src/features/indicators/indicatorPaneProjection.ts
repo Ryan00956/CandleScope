@@ -4,6 +4,7 @@ export interface IndicatorSubPane {
   id: string;
   label: string;
   lines: IndicatorLine[];
+  dataMarketPane?: "funding-rate" | "open-interest";
 }
 
 export interface IndicatorPaneData {

@@ -20,6 +20,7 @@ from .klines_repo import (
     wal_checkpoint_truncate,
 )
 from .gap_ledger import GapLedger
+from .market_metrics_repo import MarketMetricsRepository, init_market_metrics_storage
 
 __all__ = [
     "DEFAULT_EXCHANGE",
@@ -42,4 +43,6 @@ __all__ = [
     "vacuum_database",
     "wal_checkpoint_truncate",
     "GapLedger",
+    "MarketMetricsRepository",
+    "init_market_metrics_storage",
 ]

@@ -858,6 +858,14 @@ class DataManager:
         service = self._require_market_data_service()
         return await service.history(key, **kwargs)
 
+    async def market_history_page(
+        self,
+        key: MarketStreamKey,
+        **kwargs: Any,
+    ) -> Any:
+        service = self._require_market_data_service()
+        return await service.history_page(key, **kwargs)
+
     def subscribe_market(
         self,
         keys: list[MarketStreamKey],

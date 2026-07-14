@@ -76,7 +76,7 @@ import { applyTextAndPositionDrag, applyLineFibShapeDrag } from "./drawingDragRe
 import type { DrawingDragDescriptor } from "./drawingDragResizeController.js";
 import {
   coordinateToFractionalLogical,
-  logicalToInterpolatedSeriesTime,
+  coordinateToInterpolatedSeriesTime,
 } from "../../chart-adapter/coordinateBridge.js";
 import { supportsDrawingHitType } from "./drawingCapabilities.js";
 import {
@@ -432,36 +432,7 @@ export function useDrawing({
         const fracLogical = coordinateToFractionalLogical(adapter, x);
         if (fracLogical == null || !isFinite(fracLogical)) return null;
 
-        const rawSnappedTime = adapter.coordinateToTime?.(x);
-        const snappedTime = typeof rawSnappedTime === "number" && isFinite(rawSnappedTime)
-          ? rawSnappedTime
-          : null;
-        let time: number | null = null;
-        if (snappedTime != null) {
-          const rawSnappedIndex = adapter.getSeriesIndexByTime?.(snappedTime);
-          const snappedIndex = typeof rawSnappedIndex === "number" ? rawSnappedIndex : -1;
-          const snappedX = adapter.timeToCoordinate?.(snappedTime);
-          if (snappedIndex >= 0 && snappedX != null && isFinite(snappedX)) {
-            const seriesData = adapter.getSeriesData?.() || [];
-            const neighborIndex = x >= snappedX ? snappedIndex + 1 : snappedIndex - 1;
-            const rawNeighborTime = seriesData[neighborIndex]?.time;
-            const neighborTime = typeof rawNeighborTime === "number" ? rawNeighborTime : null;
-            const neighborX = neighborTime == null ? null : adapter.timeToCoordinate?.(neighborTime);
-            if (neighborTime != null && neighborX != null && isFinite(neighborX) && neighborX !== snappedX) {
-              const ratio = (x - snappedX) / (neighborX - snappedX);
-              time = snappedTime + ratio * (neighborTime - snappedTime);
-            }
-          }
-          if (time == null || !isFinite(time)) {
-            time = snappedTime;
-          }
-        }
-
-        // Fallback for chart adapters that cannot convert directly from
-        // coordinate to time.
-        if (time == null || !isFinite(time)) {
-          time = logicalToInterpolatedSeriesTime(adapter, fracLogical);
-        }
+        const time = coordinateToInterpolatedSeriesTime(adapter, x, fracLogical);
 
         if (time != null && isFinite(time)) {
           return options.includeLogical

@@ -145,7 +145,9 @@ export interface CoordinateDataPoint extends Record<string, unknown> {
 export interface InterpolatedCoordinateAdapter {
   isReady?(): boolean;
   coordinateToLogical?(coordinate: number): number | null | undefined;
+  coordinateToTime?(coordinate: number): unknown;
   logicalToCoordinate?(logical: number): number | null | undefined;
+  getSeriesIndexByTime?(time: number): unknown;
   getSeriesData?(): DisplayRow[];
   timeToCoordinate?(time: number): number | null | undefined;
 }
@@ -1599,6 +1601,71 @@ export function coordinateToFractionalLogical(
   }
 
   return fracLogical;
+}
+
+/**
+ * Resolve a screen coordinate to continuous source time on an ordinary time
+ * axis. Lightweight Charts can return a bar-snapped timestamp in right-side
+ * whitespace, so prefer logical-axis extrapolation whenever that timestamp
+ * cannot be interpolated against a real series row.
+ */
+export function coordinateToInterpolatedSeriesTime(
+  adapter: InterpolatedCoordinateAdapter | null | undefined,
+  x: number,
+  logicalIndex: number | null = coordinateToFractionalLogical(adapter, x),
+): number | null {
+  if (!adapter?.isReady?.()
+    || !isFiniteNumber(x)
+    || !isFiniteNumber(logicalIndex)) {
+    return null;
+  }
+
+  let snappedTime: number | null = null;
+  try {
+    const candidate = adapter.coordinateToTime?.(x);
+    snappedTime = isFiniteNumber(candidate) ? candidate : null;
+  } catch {
+    snappedTime = null;
+  }
+
+  if (snappedTime !== null) {
+    let snappedIndex = -1;
+    let snappedX: number | null = null;
+    try {
+      const candidateIndex = adapter.getSeriesIndexByTime?.(snappedTime);
+      snappedIndex = typeof candidateIndex === "number" ? candidateIndex : -1;
+      const candidateX = adapter.timeToCoordinate?.(snappedTime);
+      snappedX = isFiniteNumber(candidateX) ? candidateX : null;
+    } catch {
+      snappedIndex = -1;
+      snappedX = null;
+    }
+
+    if (snappedIndex >= 0 && snappedX !== null) {
+      const seriesData = adapter.getSeriesData?.() || [];
+      const neighborIndex = x >= snappedX ? snappedIndex + 1 : snappedIndex - 1;
+      const neighborTime = seriesData[neighborIndex]?.time;
+      let neighborX: number | null = null;
+      if (isFiniteNumber(neighborTime)) {
+        try {
+          const candidateX = adapter.timeToCoordinate?.(neighborTime);
+          neighborX = isFiniteNumber(candidateX) ? candidateX : null;
+        } catch {
+          neighborX = null;
+        }
+      }
+      if (isFiniteNumber(neighborTime)
+        && neighborX !== null
+        && neighborX !== snappedX) {
+        const ratio = (x - snappedX) / (neighborX - snappedX);
+        const time = snappedTime + ratio * (neighborTime - snappedTime);
+        if (isFiniteNumber(time)) return time;
+      }
+    }
+  }
+
+  const logicalTime = logicalToInterpolatedSeriesTime(adapter, logicalIndex);
+  return isFiniteNumber(logicalTime) ? logicalTime : snappedTime;
 }
 
 export function logicalToInterpolatedSeriesTime(

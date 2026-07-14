@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  coordinateToInterpolatedSeriesTime,
   captureSourceLineageFreehandStrokeBatch,
   coordinateToFractionalLogical,
   createDrawingCoordinateTransactionContext,
@@ -1474,6 +1475,32 @@ test("coordinateToFractionalLogical reverses Lightweight Charts ceil snapping", 
   assertAlmostEqual(coordinateToFractionalLogical(adapter, 10.1 * barSpacing), 10.1);
   assertAlmostEqual(coordinateToFractionalLogical(adapter, 10.5 * barSpacing), 10.5);
   assertAlmostEqual(coordinateToFractionalLogical(adapter, 10.9 * barSpacing), 10.9);
+});
+
+test("coordinateToInterpolatedSeriesTime ignores snapped future whitespace time", () => {
+  const barSpacing = 8;
+  const seriesData = Array.from({ length: 10 }, (_, index) => ({
+    time: 1000 + index * 60,
+  }));
+  const adapter: InterpolatedCoordinateAdapter = {
+    isReady: () => true,
+    coordinateToLogical: (x) => Math.ceil(x / barSpacing),
+    coordinateToTime: (x) => 1000 + Math.ceil(x / barSpacing) * 60,
+    getSeriesData: () => seriesData,
+    getSeriesIndexByTime: (time) => seriesData.findIndex((row) => row.time === time),
+    logicalToCoordinate: (logical) => logical * barSpacing,
+    timeToCoordinate: (time) => ((time - 1000) / 60) * barSpacing,
+  };
+
+  const pointerX = 10.2 * barSpacing;
+  assertAlmostEqual(
+    coordinateToInterpolatedSeriesTime(adapter, pointerX),
+    1000 + 10.2 * 60,
+  );
+  assert.notEqual(
+    coordinateToInterpolatedSeriesTime(adapter, pointerX),
+    adapter.coordinateToTime?.(pointerX),
+  );
 });
 
 test("logicalToInterpolatedSeriesTime uses the drawing series first logical as base", () => {

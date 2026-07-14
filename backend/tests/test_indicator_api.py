@@ -769,6 +769,16 @@ def test_indicator_ws_event_message_shape() -> None:
         key=key,
         values={"MA": 123.45},
         bar_timestamp=1_700_000_000,
+        detail={
+            "bar": {
+                "time": 1_700_000_000,
+                "open": 101,
+                "high": 102,
+                "low": 98,
+                "close": 99,
+                "volume": 10,
+            },
+        },
     )
 
     msg = payload_api._indicator_event_to_ws_message(
@@ -782,6 +792,53 @@ def test_indicator_ws_event_message_shape() -> None:
     assert msg["exchange"] == "binance"
     assert msg["symbol"] == "BTCUSDT"
     assert msg["values"] == {"MA": 123.45}
+    assert msg["bar"]["close"] == 99
+
+
+def test_macd_histogram_colors_follow_value_sign() -> None:
+    closes = [1, 2, 3, 4, 5, 4, 3, 2, 3, 4, 5, 4, 3]
+    bars = [
+        BarData(
+            time=1_700_000_000 + index * 60,
+            open=close,
+            high=close + 1,
+            low=close - 1,
+            close=close,
+            volume=10,
+        )
+        for index, close in enumerate(closes)
+    ]
+    result = create_engine().compute(
+        symbol="BTCUSDT",
+        interval="1m",
+        market_type="spot",
+        indicator_name="MACD",
+        params={
+            "fast": 2,
+            "slow": 3,
+            "signal": 2,
+            "hist_up_color": "#positive",
+            "hist_down_color": "#negative",
+        },
+        bars=bars,
+    )
+
+    histogram = result.outputs["hist"]
+    values_by_time = {
+        point.timestamp: point.value
+        for point in histogram.data
+        if point.value is not None
+    }
+    colors_by_time = {
+        point["time"]: point["color"]
+        for point in histogram.color_data or []
+    }
+
+    assert set(colors_by_time) == set(values_by_time)
+    assert "#positive" in colors_by_time.values()
+    assert "#negative" in colors_by_time.values()
+    for timestamp, value in values_by_time.items():
+        assert colors_by_time[timestamp] == ("#positive" if value >= 0 else "#negative")
 
 
 def test_indicator_ws_error_message_has_structured_detail() -> None:
@@ -1024,6 +1081,7 @@ def test_builtin_indicator_engine_preview_does_not_commit_state() -> None:
     preview_events = [event for event in events if event.event_type == IndicatorEventType.INDICATOR_PREVIEW]
     assert preview_events[-1].key == key
     assert preview_events[-1].values == {"ma": 401.0}
+    assert preview_events[-1].detail["bar"]["close"] == 1000
     assert engine._instances[key].get_latest() == {"ma": 101.0}
 
     engine.on_bar_closed("BTCUSDT", "1m", closed_bar)

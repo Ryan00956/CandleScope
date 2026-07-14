@@ -43,6 +43,28 @@ test("alignIndicatorLinesToTimes clips line and color data to the main bar time 
   ]);
 });
 
+test("realtime histogram point colors override historical colorData and survive missing color entries", () => {
+  const lines = alignIndicatorLinesToTimes([{
+    id: "histogram",
+    type: "histogram",
+    data: [
+      { time: 10, value: 1 },
+      { time: 20, value: -2, color: "realtime-red" },
+      { time: 30, value: 3, color: "realtime-green" },
+    ],
+    colorData: [
+      { time: 10, color: "snapshot-green" },
+      { time: 20, color: "stale-green" },
+    ],
+  }], new Set([10, 20, 30]));
+
+  assert.deepEqual(mustBeDefined(lines[0]).data, [
+    { time: 10, value: 1, color: "snapshot-green" },
+    { time: 20, value: -2, color: "realtime-red" },
+    { time: 30, value: 3, color: "realtime-green" },
+  ]);
+});
+
 test("alignIndicatorMarkersToTimes and bgcolors clip payloads to the main bar time set", () => {
   const allowed = new Set([10]);
 

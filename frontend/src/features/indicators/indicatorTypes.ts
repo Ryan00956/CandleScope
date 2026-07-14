@@ -600,6 +600,7 @@ export interface IndicatorValuesMessage extends IndicatorWsBase {
   clientId: string;
   values: Record<string, unknown>;
   barTime: number;
+  bar?: KlineBar;
 }
 
 export interface IndicatorErrorMessage extends IndicatorWsBase {

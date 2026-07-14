@@ -66,7 +66,13 @@ export function normalizeLineSeriesData(
       .map((d) => {
         const entry: NormalizedIndicatorDataEntry = { time: d.time, value: d.value };
         const key = chartTimeKey(d.time);
-        const c = key === null ? undefined : colorMap.get(key);
+        // Realtime histogram updates carry their color on the value point,
+        // while historical snapshots carry a parallel colorData series.  A
+        // snapshot can therefore have colorData without yet containing the
+        // newest realtime timestamp.  Keep the point color authoritative and
+        // use colorData only as the historical fallback; otherwise the newest
+        // volume/MACD bars silently fall back to the series default color.
+        const c = d.color || (key === null ? undefined : colorMap.get(key));
         if (c) entry.color = c;
         return entry;
       });

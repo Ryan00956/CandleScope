@@ -680,7 +680,7 @@ export function upsertCachedIndicatorLinePoint(
   context: IndicatorContextInput,
   values: Record<string, unknown>,
   barTime: number,
-  histogramColor?: string,
+  histogramColor?: string | ((line: IndicatorLine, value: unknown) => string | undefined),
 ): IndicatorCacheEntry | null {
   if (!indicator?.id || !values || !barTime) return null;
   const key = buildIndicatorResultCacheKey(indicator, context);
@@ -703,8 +703,11 @@ export function upsertCachedIndicatorLinePoint(
       time: barTime,
       value,
     };
-    if (line.type === "histogram" && histogramColor) {
-      point.color = histogramColor;
+    const resolvedHistogramColor = typeof histogramColor === "function"
+      ? histogramColor(line, value)
+      : histogramColor;
+    if (line.type === "histogram" && resolvedHistogramColor) {
+      point.color = resolvedHistogramColor;
     }
     const previousData = Array.isArray(line.data) ? line.data : [];
     const nextData = upsertLinePoint(previousData, point);

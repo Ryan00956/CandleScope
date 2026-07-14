@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  applyIndicatorPaneSeriesOrder,
+  buildIndicatorSeriesOptions,
   createFutureTimeAxisSeries,
   INDICATOR_SERIES_INCREMENTAL_GRACE_MS,
   removeSeriesEntries,
@@ -77,6 +79,42 @@ test("future time-axis carrier is an invisible line series in the main pane", ()
     visible: false,
   });
   assert.equal(addSeriesCall[2], 0);
+});
+
+test("indicator pane order keeps histograms below line series", () => {
+  const operations: Array<[string, number]> = [];
+  const entry = (name: string, type: "line" | "histogram", paneIndex = 1) => ({
+    lineConfig: { type },
+    paneIndex,
+    series: structuralMock<IndicatorSeries>({
+      setSeriesOrder(order: number) {
+        operations.push([name, order]);
+      },
+    }),
+  });
+
+  const dif = entry("dif", "line");
+  const dea = entry("dea", "line");
+  const histogram = entry("histogram", "histogram");
+  const mainOverlay = entry("main", "histogram", 0);
+
+  assert.equal(applyIndicatorPaneSeriesOrder([dif, dea, histogram, mainOverlay]), 3);
+  assert.deepEqual(operations, [
+    ["histogram", 0],
+    ["dif", 1],
+    ["dea", 2],
+  ]);
+});
+
+test("only volume-pane histograms use volume number formatting", () => {
+  assert.deepEqual(
+    buildIndicatorSeriesOptions({ type: "histogram", pane: "volume" }).priceFormat,
+    { type: "volume" },
+  );
+  assert.equal(
+    buildIndicatorSeriesOptions({ type: "histogram", pane: "separate" }).priceFormat,
+    undefined,
+  );
 });
 
 test("replaceMainSeries clears duplicate main-series time points before registering the replacement", () => {

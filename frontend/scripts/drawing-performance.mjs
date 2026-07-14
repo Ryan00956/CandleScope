@@ -1581,9 +1581,11 @@ function buildPhase1Acceptance(report, args) {
   const viewportScenarios = report.scenarios
     .filter((scenario) => viewportScenarioIds.has(scenario.id));
   const viewportAnchorCachePassed = viewportScenarios.length === viewportScenarioIds.size
-    && viewportScenarios.every((scenario) => (scenario.rawRuns || []).every((run) => (
-      Number(run.counters?.anchorResolveCount) === 0
-    )));
+    && viewportScenarios.every((scenario) => {
+      const measuredRuns = (scenario.rawRuns || []).filter((run) => !run.warmup);
+      return measuredRuns.length >= PHASE0_MIN_MEASURED_RUNS
+        && measuredRuns.every((run) => Number(run.counters?.anchorResolveCount) === 0);
+    });
   const geometryProjectionCoveragePassed = report.scenarios
     .filter((scenario) => Number(scenario.fixture?.entities) > 0)
     .every((scenario) => (scenario.rawRuns || []).every((run) => (
@@ -1692,14 +1694,18 @@ function buildPhase1Comparison(report, compareBefore) {
   const drawingReductionRatio = beforeDrawingP95 && afterDrawingP95 !== null
     ? 1 - afterDrawingP95 / beforeDrawingP95
     : null;
-  const comparable = beforeScenario?.fixture?.bars === afterScenario?.fixture?.bars
-    && beforeScenario?.fixture?.dpr === afterScenario?.fixture?.dpr
-    && beforeScenario?.fixture?.entities === afterScenario?.fixture?.entities
-    && beforeScenario?.fixture?.points === afterScenario?.fixture?.points
-    && before.configuration?.seed === report.configuration?.seed
-    && JSON.stringify(before.environment?.viewport) === JSON.stringify(report.environment?.viewport)
-    && before.environment?.dpr === report.environment?.dpr
-    && before.context?.browser?.version === report.context?.browser?.version;
+  const contextChecks = {
+    bars: beforeScenario?.fixture?.bars === afterScenario?.fixture?.bars,
+    browser: before.context?.browser?.version === report.context?.browser?.version,
+    dpr: before.environment?.dpr === report.environment?.dpr,
+    entities: beforeScenario?.fixture?.entities === afterScenario?.fixture?.entities,
+    fixtureDpr: beforeScenario?.fixture?.dpr === afterScenario?.fixture?.dpr,
+    points: beforeScenario?.fixture?.points === afterScenario?.fixture?.points,
+    seed: before.configuration?.seed === report.configuration?.seed,
+    viewportHeight: before.environment?.viewport?.height === report.environment?.viewport?.height,
+    viewportWidth: before.environment?.viewport?.width === report.environment?.viewport?.width,
+  };
+  const comparable = Object.values(contextChecks).every(Boolean);
   const scriptDurationClearlyDown = scriptReductionRatio !== null
     && scriptReductionRatio >= 0.5;
   const drawingMainClearlyDown = drawingReductionRatio !== null
@@ -1714,6 +1720,7 @@ function buildPhase1Comparison(report, compareBefore) {
     baselinePath,
     scenarioId,
     comparable,
+    contextChecks,
     minimumReductionRatio: 0.5,
     scriptDurationMs: {
       beforeP95: beforeScriptP95,

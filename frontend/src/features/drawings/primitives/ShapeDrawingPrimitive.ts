@@ -20,10 +20,20 @@ import type {
   ShapePrimitiveOptions,
   ShapeType,
 } from "../drawingTypes.js";
+import {
+  accumulateDrawingPerfFrameWork,
+  drawingPerfCounters,
+} from "../performance/drawingPerfCounters.js";
 
 const HANDLE_KEYS = ["tl", "t", "tr", "r", "br", "b", "bl", "l"] as const;
 type ShapeHandleKey = typeof HANDLE_KEYS[number];
 type ShapeHandlePositions = Record<ShapeHandleKey, ScreenPoint>;
+
+function drawingPerfNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
 
 interface ShapeBox extends ScreenPoint {
   width: number;
@@ -167,6 +177,7 @@ class ShapeRenderer implements PrimitivePaneRenderer {
   }
 
   draw(target: PrimitiveCanvasTarget): void {
+    const startedAt = drawingPerfNow();
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
     if (data.hidden) return;
@@ -264,6 +275,11 @@ class ShapeRenderer implements PrimitivePaneRenderer {
 
       ctx.restore();
     });
+    const durationMs = drawingPerfNow() - startedAt;
+    accumulateDrawingPerfFrameWork({
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+    });
   }
 }
 
@@ -277,6 +293,7 @@ class ShapePaneView implements PrimitivePaneView {
   }
 
   update(): void {
+    const startedAt = drawingPerfNow();
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
@@ -295,16 +312,35 @@ class ShapePaneView implements PrimitivePaneView {
         isPreview: source._isPreview,
         hidden: true,
       });
+      const durationMs = drawingPerfNow() - startedAt;
+      drawingPerfCounters.recordSceneRebuild();
+      accumulateDrawingPerfFrameWork({
+        geometryKey: source._id,
+        drawingMainThreadMs: durationMs,
+        sceneProjectPaintMs: durationMs,
+        rawPoints: source._dataPoints.length,
+        renderedPoints: 0,
+        visibleEntities: 0,
+        culledEntities: 1,
+      });
       return;
     }
 
     const points: ShapeRenderPoint[] = [];
     const coordinateContext = {};
+    let projectedPointCount = 0;
+    if (source._dataPoints.length > 0) {
+      drawingPerfCounters.recordAnchorResolve(source._dataPoints.length);
+    }
 
     for (const dp of source._dataPoints) {
       const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
+      if (Number.isFinite(x) && Number.isFinite(y)) projectedPointCount += 1;
+    }
+    if (projectedPointCount > 0) {
+      drawingPerfCounters.recordFinalProjection(projectedPointCount);
     }
 
     this._renderer.update({
@@ -319,6 +355,17 @@ class ShapePaneView implements PrimitivePaneView {
       hovered: source._hovered,
       isPreview: source._isPreview,
       hidden: source._hidden,
+    });
+    const durationMs = drawingPerfNow() - startedAt;
+    drawingPerfCounters.recordSceneRebuild();
+    accumulateDrawingPerfFrameWork({
+      geometryKey: source._id,
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+      rawPoints: source._dataPoints.length,
+      renderedPoints: projectedPointCount,
+      visibleEntities: projectedPointCount >= 2 ? 1 : 0,
+      culledEntities: projectedPointCount >= 2 ? 0 : 1,
     });
   }
 
@@ -374,7 +421,10 @@ export class ShapeDrawingPrimitive {
   attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
-    this._requestUpdate = requestUpdate;
+    this._requestUpdate = () => {
+      drawingPerfCounters.recordRequestUpdate();
+      requestUpdate();
+    };
   }
 
   detached(): void {

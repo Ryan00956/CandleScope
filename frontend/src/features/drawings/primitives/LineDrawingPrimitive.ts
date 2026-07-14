@@ -25,6 +25,10 @@ import type {
   PrimitivePaneRenderer,
   PrimitivePaneView,
 } from "../drawingTypes.js";
+import {
+  accumulateDrawingPerfFrameWork,
+  drawingPerfCounters,
+} from "../performance/drawingPerfCounters.js";
 
 interface ExtendedLineCoordinates {
   x1: number;
@@ -47,6 +51,12 @@ interface LineRenderData {
   isPreview: boolean;
   hovered: boolean;
   hidden: boolean;
+}
+
+function drawingPerfNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
 }
 
 // ── Geometry helpers ──
@@ -144,6 +154,7 @@ class LineRenderer implements PrimitivePaneRenderer {
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
     if (data.hidden) return;
+    const startedAt = drawingPerfNow();
 
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
@@ -248,6 +259,11 @@ class LineRenderer implements PrimitivePaneRenderer {
 
       ctx.restore();
     });
+    const durationMs = drawingPerfNow() - startedAt;
+    accumulateDrawingPerfFrameWork({
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+    });
   }
 }
 
@@ -281,6 +297,7 @@ class LinePaneView implements PrimitivePaneView {
 
   update(): void {
     // Called by the chart before rendering. Convert data coords → screen coords.
+    const startedAt = drawingPerfNow();
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
@@ -297,16 +314,38 @@ class LinePaneView implements PrimitivePaneView {
         hovered: source._hovered,
         hidden: true,
       });
+      const durationMs = drawingPerfNow() - startedAt;
+      drawingPerfCounters.recordSceneRebuild();
+      accumulateDrawingPerfFrameWork({
+        geometryKey: source._id,
+        drawingMainThreadMs: durationMs,
+        sceneProjectPaintMs: durationMs,
+        rawPoints: source._dataPoints.length,
+        renderedPoints: 0,
+        visibleEntities: 0,
+        culledEntities: 1,
+      });
       return;
     }
 
     const points: LineRenderPoint[] = [];
     const coordinateContext = {};
+    if (source._dataPoints.length > 0) {
+      drawingPerfCounters.recordAnchorResolve(source._dataPoints.length);
+    }
+    let projectedPointCount = 0;
 
     for (const dp of source._dataPoints) {
       const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
+      if (typeof x === "number" && Number.isFinite(x)
+        && typeof y === "number" && Number.isFinite(y)) {
+        projectedPointCount += 1;
+      }
+    }
+    if (projectedPointCount > 0) {
+      drawingPerfCounters.recordFinalProjection(projectedPointCount);
     }
 
     this._renderer.update({
@@ -318,6 +357,18 @@ class LinePaneView implements PrimitivePaneView {
       isPreview: source._isPreview,
       hovered: source._hovered,
       hidden: source._hidden,
+    });
+    const durationMs = drawingPerfNow() - startedAt;
+    const renderable = projectedPointCount >= 2;
+    drawingPerfCounters.recordSceneRebuild();
+    accumulateDrawingPerfFrameWork({
+      geometryKey: source._id,
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+      rawPoints: source._dataPoints.length,
+      renderedPoints: renderable ? 2 : 0,
+      visibleEntities: renderable ? 1 : 0,
+      culledEntities: renderable ? 0 : 1,
     });
   }
 
@@ -382,7 +433,10 @@ export class LineDrawingPrimitive {
   attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
-    this._requestUpdate = requestUpdate;
+    this._requestUpdate = () => {
+      drawingPerfCounters.recordRequestUpdate();
+      requestUpdate();
+    };
   }
 
   detached(): void {

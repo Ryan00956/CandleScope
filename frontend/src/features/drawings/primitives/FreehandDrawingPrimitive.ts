@@ -35,6 +35,10 @@ import type {
   PrimitivePaneView,
   ScreenPoint,
 } from "../drawingTypes.js";
+import {
+  accumulateDrawingPerfFrameWork,
+  drawingPerfCounters,
+} from "../performance/drawingPerfCounters.js";
 
 interface BitmapPoint {
   bx: number;
@@ -59,6 +63,18 @@ type FreehandRenderData = FreehandVisibleRenderData | {
 
 const DEFAULT_HIGHLIGHTER_OPACITY = 0.35;
 const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION: GlobalCompositeOperation = "multiply";
+
+function drawingPerfNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+function rawPointCountForSource(source: FreehandDrawingPrimitive): number {
+  return source._previewScreenPoints?.length
+    ?? source._stroke?.points.length
+    ?? source._dataPoints.length;
+}
 
 function normalizeFreehandType(value: unknown): FreehandKind {
   return value === "highlighter" ? "highlighter" : "freehand";
@@ -145,6 +161,7 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
       source._stroke,
       coordinateContext,
     );
+    let projectedPointCount = 0;
     for (const point of horizontalPoints) {
       const y = point ? series.priceToCoordinate(point.price) : null;
       if (!point || !Number.isFinite(point.x) || typeof y !== "number" || !Number.isFinite(y)) {
@@ -153,8 +170,12 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
         continue;
       }
       currentPath.push({ x: point.x, y });
+      projectedPointCount += 1;
     }
     if (currentPath.length > 0) paths.push(currentPath);
+    if (projectedPointCount > 0) {
+      drawingPerfCounters.recordFinalProjection(projectedPointCount);
+    }
     return paths;
   }
 
@@ -163,6 +184,10 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
   const paths: ScreenPoint[][] = [];
   let path: ScreenPoint[] = [];
   let splitOnUnresolved: boolean | null = null;
+  let projectedPointCount = 0;
+  if (source._dataPoints.length > 0) {
+    drawingPerfCounters.recordAnchorResolve(source._dataPoints.length);
+  }
   for (const dataPoint of source._dataPoints) {
     const x = dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
     const y = series.priceToCoordinate(dataPoint.price);
@@ -174,12 +199,16 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
     }
     if (x != null && y != null) {
       path.push({ x, y });
+      projectedPointCount += 1;
     } else if (splitOnUnresolved) {
       if (path.length > 0) paths.push(path);
       path = [];
     }
   }
   if (path.length > 0) paths.push(path);
+  if (projectedPointCount > 0) {
+    drawingPerfCounters.recordFinalProjection(projectedPointCount);
+  }
   return paths;
 }
 
@@ -233,6 +262,7 @@ class FreehandRenderer implements PrimitivePaneRenderer {
   }
 
   draw(target: PrimitiveCanvasTarget): void {
+    const startedAt = drawingPerfNow();
     const data = this._data;
     if (!data || !Array.isArray(data.paths)) return;
     if (data.hidden) return;
@@ -275,6 +305,11 @@ class FreehandRenderer implements PrimitivePaneRenderer {
 
       ctx.restore();
     });
+    const durationMs = drawingPerfNow() - startedAt;
+    accumulateDrawingPerfFrameWork({
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+    });
   }
 }
 
@@ -290,6 +325,7 @@ class FreehandPaneView implements PrimitivePaneView {
   }
 
   update(): void {
+    const startedAt = drawingPerfNow();
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
@@ -297,11 +333,23 @@ class FreehandPaneView implements PrimitivePaneView {
     if (!series || !chart) return;
     if (source._hidden) {
       this._renderer.update({ paths: [], hidden: true });
+      const durationMs = drawingPerfNow() - startedAt;
+      drawingPerfCounters.recordSceneRebuild();
+      accumulateDrawingPerfFrameWork({
+        geometryKey: source._id,
+        drawingMainThreadMs: durationMs,
+        sceneProjectPaintMs: durationMs,
+        rawPoints: rawPointCountForSource(source),
+        renderedPoints: 0,
+        visibleEntities: 0,
+        culledEntities: 1,
+      });
       return;
     }
 
     const paths = screenPathsForSource(source);
-
+    const rawPoints = rawPointCountForSource(source);
+    const renderedPoints = paths.reduce((sum, path) => sum + path.length, 0);
     this._renderer.update({
       paths,
       color: source._color,
@@ -311,6 +359,17 @@ class FreehandPaneView implements PrimitivePaneView {
       brushShape: source._brushShape,
       hovered: source._hovered,
       hidden: false,
+    });
+    const durationMs = drawingPerfNow() - startedAt;
+    drawingPerfCounters.recordSceneRebuild();
+    accumulateDrawingPerfFrameWork({
+      geometryKey: source._id,
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+      rawPoints,
+      renderedPoints,
+      visibleEntities: renderedPoints > 0 ? 1 : 0,
+      culledEntities: renderedPoints > 0 ? 0 : 1,
     });
   }
 
@@ -394,7 +453,10 @@ export class FreehandDrawingPrimitive {
   attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
-    this._requestUpdate = requestUpdate;
+    this._requestUpdate = () => {
+      drawingPerfCounters.recordRequestUpdate();
+      requestUpdate();
+    };
   }
 
   detached(): void {

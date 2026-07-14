@@ -1,0 +1,333 @@
+const STORAGE_PREFIX = "candlescope-drawings";
+
+export const FIXTURE_NAMES = Object.freeze([
+  "empty",
+  "singleFreehand4096",
+  "freehand64x512",
+  "entities200",
+  "entities512",
+]);
+
+export const FIXTURE_LIMITS = Object.freeze({
+  maxStorageChars: 2_000_000,
+  maxDrawings: 512,
+  maxFreehandPoints: 32_768,
+  maxFreehandSpans: 16_384,
+  maxFreehandPointsPerDrawing: 4_096,
+  maxFreehandSpansPerDrawing: 2_048,
+});
+
+export const DEFAULT_FIXTURE_OPTIONS = Object.freeze({
+  scopeKey: "binance:spot:BTCUSDT__main",
+  startTime: 1_700_000_000,
+  intervalSeconds: 60,
+  seed: 0x0cada5c0,
+});
+
+export const DEFAULT_MOCK_VISIBLE_PRICE_RANGE = Object.freeze({
+  min: 62_000,
+  max: 64_000,
+});
+
+const FIXTURE_NAME_SET = new Set(FIXTURE_NAMES);
+const COLORS = Object.freeze([
+  "#2962ff",
+  "#00bfa5",
+  "#ff6d00",
+  "#d500f9",
+  "#00b0ff",
+  "#ff1744",
+  "#64dd17",
+  "#aa00ff",
+]);
+
+function fixtureNameHash(name) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < name.length; index += 1) {
+    hash ^= name.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function createRandom(seed, fixtureName) {
+  let state = (seed ^ fixtureNameHash(fixtureName)) >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+function roundedPrice(value) {
+  return Number(value.toFixed(4));
+}
+
+function normalizeOptions(options) {
+  if (options === null || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("Drawing fixture options must be an object");
+  }
+
+  const scopeKey = options.scopeKey ?? DEFAULT_FIXTURE_OPTIONS.scopeKey;
+  const startTime = options.startTime ?? DEFAULT_FIXTURE_OPTIONS.startTime;
+  const intervalSeconds = options.intervalSeconds ?? DEFAULT_FIXTURE_OPTIONS.intervalSeconds;
+  const seed = options.seed ?? DEFAULT_FIXTURE_OPTIONS.seed;
+
+  if (typeof scopeKey !== "string" || scopeKey.length === 0) {
+    throw new TypeError("Drawing fixture scopeKey must be a non-empty string");
+  }
+  if (!Number.isFinite(startTime)
+    || startTime < Number.MIN_SAFE_INTEGER
+    || startTime > Number.MAX_SAFE_INTEGER) {
+    throw new TypeError("Drawing fixture startTime must be a finite safe-range number");
+  }
+  if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
+    throw new TypeError("Drawing fixture intervalSeconds must be a positive finite number");
+  }
+  if (!Number.isSafeInteger(seed) || seed < 0 || seed > 0xffff_ffff) {
+    throw new TypeError("Drawing fixture seed must be an unsigned 32-bit integer");
+  }
+
+  return { scopeKey, startTime, intervalSeconds, seed };
+}
+
+function absoluteTime(startTime, intervalSeconds, offset) {
+  const time = startTime + intervalSeconds * offset;
+  if (!Number.isFinite(time)
+    || time < Number.MIN_SAFE_INTEGER
+    || time > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("Drawing fixture time range exceeds the persistence-safe range");
+  }
+  return time;
+}
+
+function buildFreehandDrawing({
+  fixtureName,
+  strokeIndex,
+  pointCount,
+  startTime,
+  intervalSeconds,
+  random,
+}) {
+  const phase = random() * Math.PI * 2;
+  const center = 62_800 + (strokeIndex - 31.5) * 4;
+  const amplitude = 25 + random() * 35;
+  const frequency = 0.018 + random() * 0.022;
+  const points = new Array(pointCount);
+
+  for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
+    const wave = Math.sin(pointIndex * frequency + phase) * amplitude;
+    const secondaryWave = Math.cos(pointIndex * 0.006 + strokeIndex * 0.17) * 12;
+    const jitter = (random() - 0.5) * 3.5;
+    points[pointIndex] = {
+      time: absoluteTime(startTime, intervalSeconds, pointIndex),
+      price: roundedPrice(center + wave + secondaryWave + jitter),
+    };
+  }
+
+  return {
+    type: "freehand",
+    id: `perf-${fixtureName}-freehand-${String(strokeIndex).padStart(3, "0")}`,
+    stroke: {
+      version: 3,
+      sourceProjection: "time-axis",
+      sourceProjectionConfig: "drawing-performance-fixture:v1",
+      spans: [],
+      points,
+    },
+    color: COLORS[strokeIndex % COLORS.length],
+    lineWidth: 1 + (strokeIndex % 3),
+  };
+}
+
+function buildEntityDrawing({ index, startTime, intervalSeconds, random }) {
+  const slot = index * 2;
+  const firstTime = absoluteTime(startTime, intervalSeconds, slot);
+  const secondTime = absoluteTime(startTime, intervalSeconds, slot + 1);
+  const center = 62_500 + (index % 48) * 11 + (random() - 0.5) * 5;
+  const delta = 18 + random() * 35;
+  const color = COLORS[index % COLORS.length];
+  const dataPoints = [
+    { time: firstTime, price: roundedPrice(center - delta) },
+    { time: secondTime, price: roundedPrice(center + delta) },
+  ];
+
+  if (index % 4 !== 3) {
+    return {
+      type: "line",
+      id: `perf-entity-line-${String(index).padStart(3, "0")}`,
+      lineType: "line-segment",
+      dataPoints,
+      color,
+      lineWidth: 1 + (index % 2),
+    };
+  }
+
+  return {
+    type: "shape",
+    id: `perf-entity-shape-${String(index).padStart(3, "0")}`,
+    shapeType: index % 8 === 3 ? "rectangle" : "ellipse",
+    dataPoints,
+    color,
+    lineWidth: 1,
+    fillColor: color,
+    fillOpacity: 0.12 + (index % 3) * 0.04,
+    lineStyle: index % 8 === 3 ? "solid" : "dashed",
+  };
+}
+
+function buildDrawings(name, options, random) {
+  switch (name) {
+    case "empty":
+      return [];
+    case "singleFreehand4096":
+      return [buildFreehandDrawing({
+        fixtureName: name,
+        strokeIndex: 0,
+        pointCount: 4_096,
+        startTime: options.startTime,
+        intervalSeconds: options.intervalSeconds,
+        random,
+      })];
+    case "freehand64x512":
+      return Array.from({ length: 64 }, (_, strokeIndex) => buildFreehandDrawing({
+        fixtureName: name,
+        strokeIndex,
+        pointCount: 512,
+        startTime: options.startTime,
+        intervalSeconds: options.intervalSeconds,
+        random,
+      }));
+    case "entities200":
+    case "entities512": {
+      const count = name === "entities200" ? 200 : 512;
+      return Array.from({ length: count }, (_, index) => buildEntityDrawing({
+        index,
+        startTime: options.startTime,
+        intervalSeconds: options.intervalSeconds,
+        random,
+      }));
+    }
+    default:
+      throw new RangeError(`Unknown drawing performance fixture: ${name}`);
+  }
+}
+
+function summarizeDrawings(drawings) {
+  let freehandDrawingCount = 0;
+  let pointCount = 0;
+  let freehandPointCount = 0;
+  let freehandSpanCount = 0;
+  let maxFreehandPointsPerDrawing = 0;
+  let maxFreehandSpansPerDrawing = 0;
+  let minTime = Infinity;
+  let maxTime = -Infinity;
+  let minPrice = Infinity;
+  let maxPrice = -Infinity;
+  const drawingTypes = {};
+
+  const recordTime = (time) => {
+    if (!Number.isFinite(time)) return;
+    minTime = Math.min(minTime, time);
+    maxTime = Math.max(maxTime, time);
+  };
+  const recordPrice = (price) => {
+    if (!Number.isFinite(price)) return;
+    minPrice = Math.min(minPrice, price);
+    maxPrice = Math.max(maxPrice, price);
+  };
+
+  for (const drawing of drawings) {
+    drawingTypes[drawing.type] = (drawingTypes[drawing.type] ?? 0) + 1;
+    if (drawing.type === "freehand" || drawing.type === "highlighter") {
+      const drawingPointCount = drawing.stroke?.points?.length ?? drawing.dataPoints?.length ?? 0;
+      const spanCount = drawing.stroke?.spans?.length ?? 0;
+      freehandDrawingCount += 1;
+      pointCount += drawingPointCount;
+      freehandPointCount += drawingPointCount;
+      freehandSpanCount += spanCount;
+      maxFreehandPointsPerDrawing = Math.max(maxFreehandPointsPerDrawing, drawingPointCount);
+      maxFreehandSpansPerDrawing = Math.max(maxFreehandSpansPerDrawing, spanCount);
+      for (const point of drawing.stroke?.points ?? drawing.dataPoints ?? []) {
+        recordTime(point.time ?? point.anchor?.time);
+        recordPrice(point.price);
+      }
+      continue;
+    }
+    const dataPoints = drawing.dataPoints ?? [];
+    pointCount += dataPoints.length;
+    for (const point of dataPoints) {
+      recordTime(point.time);
+      recordPrice(point.price);
+    }
+    if (drawing.dataPoint != null) pointCount += 1;
+    recordTime(drawing.dataPoint?.time);
+    recordPrice(drawing.dataPoint?.price);
+  }
+
+  return {
+    drawingCount: drawings.length,
+    drawingTypes,
+    pointCount,
+    freehandDrawingCount,
+    freehandPointCount,
+    freehandSpanCount,
+    maxFreehandPointsPerDrawing,
+    maxFreehandSpansPerDrawing,
+    timeRange: {
+      start: minTime === Infinity ? null : minTime,
+      end: maxTime === -Infinity ? null : maxTime,
+    },
+    priceRange: {
+      min: minPrice === Infinity ? null : minPrice,
+      max: maxPrice === -Infinity ? null : maxPrice,
+    },
+  };
+}
+
+function assertWithinBudgets(summary, storageChars) {
+  if (summary.drawingCount > FIXTURE_LIMITS.maxDrawings
+    || summary.freehandPointCount > FIXTURE_LIMITS.maxFreehandPoints
+    || summary.freehandSpanCount > FIXTURE_LIMITS.maxFreehandSpans
+    || summary.maxFreehandPointsPerDrawing > FIXTURE_LIMITS.maxFreehandPointsPerDrawing
+    || summary.maxFreehandSpansPerDrawing > FIXTURE_LIMITS.maxFreehandSpansPerDrawing
+    || storageChars > FIXTURE_LIMITS.maxStorageChars) {
+    throw new RangeError("Generated drawing performance fixture exceeds a persistence budget");
+  }
+}
+
+/**
+ * Build a persistence-ready deterministic drawing fixture.
+ *
+ * `raw` is the exact value to pass to localStorage.setItem(storageKey, raw).
+ * Freehand fixtures use the current v3 codec with absolute source-time points;
+ * no primitive instance or private primitive field is involved.
+ */
+export function buildDrawingFixture(name, options = {}) {
+  if (!FIXTURE_NAME_SET.has(name)) {
+    throw new RangeError(`Unknown drawing performance fixture: ${name}`);
+  }
+  const normalizedOptions = normalizeOptions(options);
+  const random = createRandom(normalizedOptions.seed, name);
+  const drawings = buildDrawings(name, normalizedOptions, random);
+  const raw = JSON.stringify(drawings);
+  const summary = summarizeDrawings(drawings);
+  assertWithinBudgets(summary, raw.length);
+
+  return {
+    storageKey: `${STORAGE_PREFIX}-${normalizedOptions.scopeKey}`,
+    raw,
+    metadata: {
+      name,
+      scopeKey: normalizedOptions.scopeKey,
+      seed: normalizedOptions.seed,
+      startTime: normalizedOptions.startTime,
+      intervalSeconds: normalizedOptions.intervalSeconds,
+      storageChars: raw.length,
+      ...summary,
+      withinBudgets: true,
+    },
+  };
+}

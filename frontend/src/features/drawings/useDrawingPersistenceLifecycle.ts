@@ -8,6 +8,78 @@ import type {
   DrawingPrimitive,
 } from "./drawingTypes.js";
 import type { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
+import {
+  drawingPerfCounters,
+  registerDrawingPerfRuntimeSummaryProvider,
+} from "./performance/drawingPerfCounters.js";
+import type { DrawingPerfRuntimeSummary } from "./performance/drawingPerfCounters.js";
+
+function runtimeRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object"
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function runtimeArrayLength(value: unknown): number | null {
+  return Array.isArray(value) ? value.length : null;
+}
+
+function runtimePrimitiveType(record: Record<string, unknown>): string {
+  if (typeof record._lineType === "string" || typeof record.lineType === "string") return "line";
+  if (typeof record._shapeType === "string" || typeof record.shapeType === "string") return "shape";
+  const type = record.type ?? record._type;
+  if (typeof type === "string" && type.trim()) return type.trim();
+  const constructorRecord = runtimeRecord(record.constructor);
+  const constructorName = constructorRecord?.name;
+  return typeof constructorName === "string" && constructorName.trim()
+    ? constructorName.trim()
+    : "unknown";
+}
+
+function runtimePrimitivePointCount(record: Record<string, unknown>): number {
+  const stroke = runtimeRecord(record.stroke ?? record._stroke);
+  const strokePointCount = runtimeArrayLength(stroke?.points);
+  if (strokePointCount !== null) return strokePointCount;
+  const dataPointCount = runtimeArrayLength(record.dataPoints ?? record._dataPoints);
+  if (dataPointCount !== null) return dataPointCount;
+  return record.dataPoint !== undefined || record._dataPoint !== undefined ? 1 : 0;
+}
+
+export function summarizeDrawingRuntimePrimitives(
+  primitives: readonly unknown[],
+): DrawingPerfRuntimeSummary {
+  let entityCount = 0;
+  let pointCount = 0;
+  const typeCounts: Record<string, number> = {};
+  for (const primitive of primitives) {
+    const record = runtimeRecord(primitive);
+    if (!record) continue;
+    entityCount += 1;
+    const type = runtimePrimitiveType(record);
+    typeCounts[type] = (typeCounts[type] ?? 0) + 1;
+    pointCount += runtimePrimitivePointCount(record);
+  }
+  return {
+    entityCount,
+    pointCount,
+    typeCounts,
+  };
+}
+
+function persistAndMeasure(symbol: string, primitives: readonly DrawingPrimitive[]): void {
+  const startedAt = typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+  try {
+    saveDrawings(symbol, primitives);
+  } finally {
+    const endedAt = typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now()
+      : Date.now();
+    const durationMs = Math.max(0, endedAt - startedAt);
+    drawingPerfCounters.recordPersistenceDuration(durationMs);
+  }
+}
 
 export interface DrawingPersistenceAdapter {
   hasSeries?(): boolean;
@@ -47,8 +119,12 @@ export function useDrawingPersistenceLifecycle({
   symbolRef,
 }: UseDrawingPersistenceLifecycleOptions): { persistDrawings(): void } {
   const persistDrawings = useCallback(() => {
-    saveDrawings(symbolRef.current, primitivesRef.current);
+    persistAndMeasure(symbolRef.current, primitivesRef.current);
   }, [primitivesRef, symbolRef]);
+
+  useEffect(() => registerDrawingPerfRuntimeSummaryProvider(
+    () => summarizeDrawingRuntimePrimitives(primitivesRef.current),
+  ), [primitivesRef]);
 
   useEffect(() => {
     const adapter = getChartAdapter();
@@ -59,7 +135,7 @@ export function useDrawingPersistenceLifecycle({
 
     if (symbolChanged) {
       if (primitivesRef.current.length > 0) {
-        saveDrawings(prevSymbol, primitivesRef.current);
+        persistAndMeasure(prevSymbol, primitivesRef.current);
       }
 
       for (const prim of primitivesRef.current) {
@@ -109,6 +185,7 @@ export function useDrawingPersistenceLifecycle({
         primitivesRef.current.push(prim);
       }
     }
+    drawingPerfCounters.setGauge("visibleEntities", primitivesRef.current.length);
 
     prevSymbolRef.current = symbol;
   }, [

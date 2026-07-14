@@ -10,6 +10,7 @@ import type {
 } from "../../../chart-adapter/coordinateBridge.js";
 import { resolveFreehandStrokePoints } from "../freehandStrokeModel.js";
 import type { ResolvedFreehandPoint } from "../drawingTypes.js";
+import { drawingPerfCounters } from "../performance/drawingPerfCounters.js";
 
 export {
   logicalToCoordinateInterpolated,
@@ -24,7 +25,7 @@ export function freehandStrokeToCoordinates(
   context: DrawingCoordinateContext | null = null,
 ): Array<ResolvedFreehandPoint | null> {
   const coordinateContext = createDrawingCoordinateTransactionContext(context);
-  return resolveFreehandStrokePoints(stroke, {
+  const resolved = resolveFreehandStrokePoints(stroke, {
     resolveAnchor: (anchor, _index, _point, normalizedStroke) => dataPointToCoordinate(
       chart,
       series,
@@ -52,6 +53,10 @@ export function freehandStrokeToCoordinates(
       coordinateContext,
     ),
   });
+  if (resolved.length > 0) {
+    drawingPerfCounters.recordAnchorResolve(resolved.length);
+  }
+  return resolved;
 }
 
 // Keep the narrow export for callers compiled against the v2-only bridge.

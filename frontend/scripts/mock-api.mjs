@@ -2,9 +2,22 @@ import crypto from "node:crypto";
 import http from "node:http";
 
 const port = Number.parseInt(process.env.PORT || "18000", 10);
-const baseTime = Math.floor(Date.now() / 3600000) * 3600 - 239 * 3600;
-const bars = Array.from({ length: 240 }, (_, index) => {
-  const time = baseTime + index * 3600;
+const mockBarCount = Math.max(
+  2,
+  Math.min(20_000, Number.parseInt(process.env.CANDLESCOPE_MOCK_BAR_COUNT || "240", 10) || 240),
+);
+const mockIntervalSeconds = Math.max(
+  1,
+  Number.parseInt(process.env.CANDLESCOPE_MOCK_INTERVAL_SECONDS || "3600", 10) || 3600,
+);
+const defaultEndTime = Math.floor(Date.now() / mockIntervalSeconds) * mockIntervalSeconds;
+const mockEndTime = Number.parseInt(
+  process.env.CANDLESCOPE_MOCK_END_TIME || String(defaultEndTime),
+  10,
+) || defaultEndTime;
+const baseTime = mockEndTime - (mockBarCount - 1) * mockIntervalSeconds;
+const bars = Array.from({ length: mockBarCount }, (_, index) => {
+  const time = baseTime + index * mockIntervalSeconds;
   const wave = Math.sin(index / 8) * 120 + Math.cos(index / 17) * 80;
   const open = 62400 + wave + index * 4;
   const close = open + Math.sin(index / 5) * 45;
@@ -20,6 +33,10 @@ const bars = Array.from({ length: 240 }, (_, index) => {
     volume,
   };
 });
+const mockPriceRange = bars.reduce((range, bar) => ({
+  min: Math.min(range.min, bar.low),
+  max: Math.max(range.max, bar.high),
+}), { min: Number.POSITIVE_INFINITY, max: Number.NEGATIVE_INFINITY });
 
 function round(value) {
   return Math.round(value * 100) / 100;
@@ -194,6 +211,16 @@ function route(req, res) {
   const url = new URL(req.url, "http://127.0.0.1");
   const path = url.pathname;
   if (req.method === "OPTIONS") return json(res, {});
+  if (path === "/__mock__/meta") {
+    return json(res, {
+      bar_count: bars.length,
+      interval_seconds: mockIntervalSeconds,
+      start_time: bars[0]?.time ?? null,
+      end_time: bars.at(-1)?.time ?? null,
+      price_min: Number.isFinite(mockPriceRange.min) ? mockPriceRange.min : null,
+      price_max: Number.isFinite(mockPriceRange.max) ? mockPriceRange.max : null,
+    });
+  }
   if (path === "/api/v1/exchanges/" || path === "/api/v1/exchanges") return json(res, exchangePayload());
   if (path.includes("/capabilities")) return json(res, { ok: true, ws_connection_model: "multiplex" });
   if (path === "/api/v1/settings/cache-limits") return json(res, { max_days: 30, per_interval: { "1h": 30 } });
@@ -205,7 +232,12 @@ function route(req, res) {
   if (path === "/api/v1/klines/history" || path === "/api/v1/klines/range" || path === "/api/v1/klines/history/before") {
     return json(res, historyPayload());
   }
-  if (path === "/api/v1/klines/resolve") return json(res, { interval: url.searchParams.get("interval") || "1h", seconds: 3600 });
+  if (path === "/api/v1/klines/resolve") {
+    return json(res, {
+      interval: url.searchParams.get("interval") || "1h",
+      seconds: mockIntervalSeconds,
+    });
+  }
   if (path === "/api/v1/indicators/presets") return json(res, []);
   if (path.startsWith("/api/v1/indicators/presets/")) {
     const id = path.split("/").pop();

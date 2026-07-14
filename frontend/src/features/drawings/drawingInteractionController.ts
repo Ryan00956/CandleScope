@@ -123,6 +123,16 @@ import type {
   PositionToolId,
   TextDrawingPatch,
 } from "./drawingTypes.js";
+import {
+  accumulateDrawingPerfFrameWork,
+  drawingPerfCounters,
+} from "./performance/drawingPerfCounters.js";
+
+function drawingPerfNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
 
 const TEXT_UI_STABLE_FRAME_LIMIT = 12;
 
@@ -843,12 +853,22 @@ export function useDrawing({
     activeMoveFrameRef.current = 0;
   }, []);
 
+  const applyMeasuredActiveDrawingMove = useCallback((input: ActiveDrawingMoveInput) => {
+    const startedAt = drawingPerfNow();
+    const result = applyActiveDrawingMove(input);
+    const durationMs = Math.max(0, drawingPerfNow() - startedAt);
+    drawingPerfCounters.recordInteractionDuration(durationMs);
+    drawingPerfCounters.recordActiveOverlayCpuDuration(durationMs);
+    accumulateDrawingPerfFrameWork({ drawingMainThreadMs: durationMs });
+    return result;
+  }, [applyActiveDrawingMove]);
+
   const flushActiveDrawingMove = useCallback(() => {
     cancelActiveMoveFrame();
     const next = pendingActiveMoveRef.current;
     pendingActiveMoveRef.current = null;
-    if (isActiveDrawingMoveInput(next)) applyActiveDrawingMove(next);
-  }, [applyActiveDrawingMove, cancelActiveMoveFrame]);
+    if (isActiveDrawingMoveInput(next)) applyMeasuredActiveDrawingMove(next);
+  }, [applyMeasuredActiveDrawingMove, cancelActiveMoveFrame]);
 
   const cancelActiveDrawingMove = useCallback(() => {
     cancelActiveMoveFrame();
@@ -873,10 +893,10 @@ export function useDrawing({
         activeMoveFrameRef.current = 0;
         const next = pendingActiveMoveRef.current;
         pendingActiveMoveRef.current = null;
-        if (isActiveDrawingMoveInput(next)) applyActiveDrawingMove(next);
+        if (isActiveDrawingMoveInput(next)) applyMeasuredActiveDrawingMove(next);
       });
     },
-    [applyActiveDrawingMove],
+    [applyMeasuredActiveDrawingMove],
   );
 
   useEffect(() => {
@@ -1355,6 +1375,7 @@ export function useDrawing({
         && previewRef.current;
 
       if (hasFreehandMove || hasDragMove || hasPreviewMove) {
+        const inputStartedAt = drawingPerfNow();
         const rect = getCachedPointerRect();
         const coalescedEvents = hasFreehandMove
           && "getCoalescedEvents" in e
@@ -1367,6 +1388,11 @@ export function useDrawing({
           .filter((point: ScreenPoint | null): point is ScreenPoint => point !== null);
         const pos = positions[positions.length - 1] || getChartPos(e, rect);
         if (!pos) return;
+        const inputDurationMs = Math.max(0, drawingPerfNow() - inputStartedAt);
+        drawingPerfCounters.recordInputDuration(inputDurationMs);
+        if (sourceEvents.length > 1) {
+          drawingPerfCounters.incrementCounter("inputCount", sourceEvents.length - 1);
+        }
 
         e.preventDefault();
         e.stopPropagation();
@@ -1412,6 +1438,7 @@ export function useDrawing({
   // ════════════════════════════════════════════════════
 
   const handleMouseUp = useCallback(() => {
+    const mouseupStartedAt = drawingPerfNow();
     flushActiveDrawingMove();
     let changed = false;
     // End freehand drawing
@@ -1469,6 +1496,9 @@ export function useDrawing({
       persistDrawings();
     }
     clearCachedPointerRect();
+    const durationMs = Math.max(0, drawingPerfNow() - mouseupStartedAt);
+    drawingPerfCounters.recordMouseupSyncDuration(durationMs);
+    drawingPerfCounters.gestureEnded();
   }, [cancelActiveFreehandStroke, flushActiveDrawingMove, persistDrawings, dataToScreen, clearCachedPointerRect]);
 
   const handlePointerCancel = useCallback(() => {

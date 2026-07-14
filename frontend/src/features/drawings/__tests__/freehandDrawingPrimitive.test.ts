@@ -12,6 +12,10 @@ import type {
 } from "../../../chart-adapter/coordinateBridge.js";
 import { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
 import { freehandStrokeToCoordinates } from "../primitives/coordinateUtils.js";
+import {
+  drawingPerfCounters,
+  resetDrawingPerfCounters,
+} from "../performance/drawingPerfCounters.js";
 import type {
   DrawingAttachedParameter,
   FreehandStrokeV2,
@@ -524,6 +528,57 @@ test("freehand preview appends frame deltas without replacing prior geometry", (
   assert.equal(mustBeDefined(primitive.previewPoints[1]).x, 2);
   assert.equal(primitive.appendPreviewPoints([]), true);
   assert.equal(updates, 1);
+});
+
+test("active freehand preview reports transient screen points as raw geometry", () => {
+  resetDrawingPerfCounters();
+  const primitive = new FreehandDrawingPrimitive({
+    id: "instrumented-preview",
+    isPreview: true,
+    previewPoints: [
+      { x: 0, y: 0 },
+      { x: 2, y: 1 },
+      null,
+      { x: 4, y: 2 },
+    ],
+  });
+  primitive.attached(partialMock<DrawingAttachedParameter>({
+    chart: partialMock<DrawingAttachedParameter["chart"]>({}),
+    series: partialMock<DrawingAttachedParameter["series"]>({}),
+    requestUpdate: () => {},
+  }));
+
+  primitive.updateAllViews();
+  const frame = drawingPerfCounters.flushFrameWork();
+
+  assert.equal(frame?.rawPoints, 4);
+  assert.equal(frame?.renderedPoints, 3);
+  assert.equal(frame?.visibleEntities, 1);
+  assert.equal(frame?.culledEntities, 0);
+});
+
+test("hidden freehand reports its source geometry as culled", () => {
+  resetDrawingPerfCounters();
+  const primitive = new FreehandDrawingPrimitive({
+    id: "instrumented-hidden-preview",
+    isPreview: true,
+    previewPoints: [{ x: 0, y: 0 }, { x: 2, y: 1 }],
+    hidden: true,
+  });
+  primitive.attached(partialMock<DrawingAttachedParameter>({
+    chart: partialMock<DrawingAttachedParameter["chart"]>({}),
+    series: partialMock<DrawingAttachedParameter["series"]>({}),
+    requestUpdate: () => {},
+  }));
+
+  primitive.updateAllViews();
+  const frame = drawingPerfCounters.flushFrameWork();
+
+  assert.equal(frame?.rawPoints, 2);
+  assert.equal(frame?.renderedPoints, 0);
+  assert.equal(frame?.visibleEntities, 0);
+  assert.equal(frame?.culledEntities, 1);
+  assert.equal(drawingPerfCounters.snapshot().counters.sceneRebuildCount, 1);
 });
 
 test("freehand preview cancel is terminal and remains persistence-filtered", () => {

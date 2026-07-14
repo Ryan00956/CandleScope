@@ -27,7 +27,6 @@ import type { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPri
 import type { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
 import type { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
 import type { ShapeDrawingPrimitive } from "./primitives/ShapeDrawingPrimitive.js";
-import { clearSavedDrawings } from "./drawingPersistence.js";
 import {
   AXIS_LINE_TOOL_IDS,
   FIB_TOOL_IDS,
@@ -67,12 +66,22 @@ import {
   syncHoveredPrimitive,
 } from "./drawingHoverController.js";
 import { useDrawingPersistenceLifecycle } from "./useDrawingPersistenceLifecycle.js";
+import {
+  drawingCommandsForLegacyPrimitive,
+  drawingCommandsForSavedDrawing,
+} from "./core/drawingDocumentRuntime.js";
+import type { DrawingCommand } from "./core/drawingCommands.js";
+import { serializeDrawingPrimitive } from "./drawingPersistence.js";
 import { useChartPointerPosition, useDrawingPointerEvents } from "./drawingPointerController.js";
 import type { DrawingDomPointerEvent } from "./drawingPointerController.js";
 import { useDrawingTextEdit } from "./drawingTextEditController.js";
 import type { TextEditingOptions } from "./drawingTextEditController.js";
 import { useDrawingKeyboard } from "./drawingKeyboardController.js";
-import { applyTextAndPositionDrag, applyLineFibShapeDrag } from "./drawingDragResizeController.js";
+import {
+  applyTextAndPositionDrag,
+  applyLineFibShapeDrag,
+  drawingGeometryCommandForDrag,
+} from "./drawingDragResizeController.js";
 import type { DrawingDragDescriptor } from "./drawingDragResizeController.js";
 import {
   coordinateToFractionalLogical,
@@ -121,6 +130,8 @@ import type {
   ScreenToDrawingData,
   ShapeToolId,
   PositionToolId,
+  PersistableDrawingPrimitive,
+  SavedDrawing,
   TextDrawingPatch,
 } from "./drawingTypes.js";
 import {
@@ -214,16 +225,107 @@ function attachDrawingPrimitive(
   adapter: DrawingChartAdapter,
   primitive: DrawingPrimitive,
 ): boolean {
-  const attach = adapter.attachPrimitive as (value: object | null | undefined) => boolean;
-  return attach(primitive);
+  try {
+    const attach = adapter.attachPrimitive as (value: object | null | undefined) => boolean;
+    return attach(primitive) === true;
+  } catch {
+    return false;
+  }
 }
 
 function detachDrawingPrimitive(
   adapter: DrawingChartAdapter,
   primitive: DrawingPrimitive,
 ): boolean {
-  const detach = adapter.detachPrimitive as (value: object | null | undefined) => boolean;
-  return detach(primitive);
+  try {
+    const detach = adapter.detachPrimitive as (value: object | null | undefined) => boolean;
+    return detach(primitive) === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Remove a primitive from the runtime registry only after surface detach is confirmed. */
+export function detachAndRemoveDrawingPrimitive(
+  primitives: DrawingPrimitive[],
+  primitive: DrawingPrimitive,
+  detachPrimitive: (primitive: DrawingPrimitive) => boolean,
+): boolean {
+  const index = primitives.indexOf(primitive);
+  if (index < 0 || !detachPrimitive(primitive)) return false;
+  primitives.splice(index, 1);
+  return true;
+}
+
+/** Cancelling an absent freehand draft is an idempotent success. */
+export function cancelFreehandPrimitiveOnSurface(
+  primitive: FreehandDrawingPrimitive | null,
+  detachPrimitive: (primitive: DrawingPrimitive) => boolean,
+): boolean {
+  if (!primitive) return true;
+  primitive.cancelPreview?.();
+  return detachPrimitive(primitive);
+}
+
+/**
+ * Cross the document/persistence barrier before discarding interaction state.
+ * A failed barrier deliberately leaves the transient descriptor available for
+ * the next lifecycle retry.
+ */
+export function runDrawingSurfaceDisposeBarrier(
+  preparePersistenceSurfaceDispose: () => boolean,
+  finalizeTransientState: () => void,
+): boolean {
+  if (!preparePersistenceSurfaceDispose()) return false;
+  finalizeTransientState();
+  return true;
+}
+
+/**
+ * Resolve incompatible transient surface credentials before a pointerdown may
+ * publish any terminal document command. A matching two-point tool may keep
+ * its preview for the legitimate second click; freehand pointerdowns always
+ * retire an already-active stroke before starting another gesture.
+ */
+export function runDrawingPointerTransientBarrier({
+  activeTool,
+  pendingTwoPointTool,
+  hasPendingTwoPoint,
+  hasActiveFreehand,
+  removePreview,
+  cancelActiveFreehandStroke,
+}: Readonly<{
+  activeTool: DrawingToolId | null;
+  pendingTwoPointTool: DrawingToolId | null;
+  hasPendingTwoPoint: boolean;
+  hasActiveFreehand: boolean;
+  removePreview(): boolean;
+  cancelActiveFreehandStroke(): boolean;
+}>): boolean {
+  if (hasActiveFreehand && !cancelActiveFreehandStroke()) return false;
+  if (!hasPendingTwoPoint) return true;
+  if (isTwoPointCreationTool(activeTool) && activeTool === pendingTwoPointTool) return true;
+  return removePreview();
+}
+
+/** Hiding stale credentials is fail-closed; showing them must await scope ownership. */
+export function canApplyDrawingVisibilityToCurrentPrimitives(
+  scopeReady: boolean,
+  nextHidden: boolean,
+): boolean {
+  return scopeReady || nextHidden;
+}
+
+export function drawingCommandsForDrag(
+  primitives: readonly DrawingPrimitive[],
+  dragging: DrawingDragDescriptor,
+): readonly DrawingCommand[] | null {
+  const primitive = primitives.find((candidate) => candidate.id === dragging.id);
+  if (!primitive) return null;
+  return drawingCommandsForLegacyPrimitive(primitive, {
+    type: "update",
+    geometryCommand: drawingGeometryCommandForDrag(dragging),
+  });
 }
 
 function hasMutableColor(
@@ -281,7 +383,9 @@ export interface UseDrawingOptions {
 
 export interface DrawingInteractionRuntime {
   clearAll(): void;
-  prepareSurfaceDispose(): void;
+  completeSurfaceDispose(): void;
+  invalidateSurfaceCredentialsForSeriesReplacement(): void;
+  prepareSurfaceDispose(): boolean;
   setHidden(hidden: boolean): void;
   primitivesRef: MutableRefObject<DrawingPrimitive[]>;
   selectedPrimId: string | null;
@@ -291,7 +395,7 @@ export interface DrawingInteractionRuntime {
   editingTextPos: ScreenPoint | null;
   setEditingTextValue: Dispatch<SetStateAction<string>>;
   commitTextEditing(options?: TextEditingOptions): boolean;
-  cancelTextEditing(options?: TextEditingOptions): void;
+  cancelTextEditing(options?: TextEditingOptions): boolean;
   editInputRef: MutableRefObject<HTMLTextAreaElement | null>;
   selectedTextSnapshot: SelectedTextSnapshot | null;
   selectedTextBox: ScreenBox | null;
@@ -332,6 +436,7 @@ export function useDrawing({
   // ── Line-specific state ──
   const previewRef = useRef<TwoPointDrawingPrimitive | null>(null); // LineDrawingPrimitive (dashed preview)
   const anchorDataRef = useRef<DrawingDataPoint | null>(null); // { logical, price } first click
+  const pendingTwoPointToolRef = useRef<TwoPointCreationTool | null>(null);
   const draggingRef = useRef<DrawingDragDescriptor | null>(null); // { id, pointIndex, startMouse, origPoints | origDataPoint }
 
   // ── Selection state + lifecycle (extracted) ──
@@ -360,6 +465,7 @@ export function useDrawing({
   const pendingHoverRef = useRef<HoverFeedbackPayload | null>(null);
   const activeMoveFrameRef = useRef<number>(0);
   const pendingActiveMoveRef = useRef<ActiveDrawingMovePayload | null>(null);
+  const beforeScopeTransitionRef = useRef<() => boolean>(() => true);
   const pointerRectRef = useRef<DOMRect | null>(null);
 
   // ── Tool refs (avoid stale closures) ──
@@ -388,8 +494,7 @@ export function useDrawing({
     fibInvertedRef.current = fibInverted;
     positionSizeRef.current = positionSize;
     drawingSnapEnabledRef.current = drawingSnapEnabled;
-    symbolRef.current = symbol;
-  }, [onToolChange, activeTool, penColor, penSize, textFontSize, textBold, textItalic, fibLevels, fibInverted, positionSize, drawingSnapEnabled, symbol]);
+  }, [onToolChange, activeTool, penColor, penSize, textFontSize, textBold, textItalic, fibLevels, fibInverted, positionSize, drawingSnapEnabled]);
 
   // Track previous symbol so we can detect symbol switches and swap drawing sets
   const prevSymbolRef = useRef(symbol);
@@ -523,22 +628,22 @@ export function useDrawing({
   // ── Attach / detach primitive helpers ──
 
   const attachPrim = useCallback(
-    (prim: DrawingPrimitive) => {
+    (prim: DrawingPrimitive): boolean => {
       const adapter = getChartAdapter();
-      if (!adapter?.hasSeries?.()) return;
+      if (!adapter?.hasSeries?.()) return false;
       prim.setHidden?.(hiddenRef.current, false);
-      if (attachDrawingPrimitive(adapter, prim)) {
-        prim.requestUpdate?.();
-        adapter.requestSeriesUpdate?.();
-      }
+      if (!attachDrawingPrimitive(adapter, prim)) return false;
+      try { prim.requestUpdate?.(); } catch { /* attachment already succeeded */ }
+      try { adapter.requestSeriesUpdate?.(); } catch { /* attachment already succeeded */ }
+      return true;
     },
     [getChartAdapter],
   );
 
   const detachPrim = useCallback(
-    (prim: DrawingPrimitive) => {
+    (prim: DrawingPrimitive): boolean => {
       const adapter = getChartAdapter();
-      if (adapter) detachDrawingPrimitive(adapter, prim);
+      return adapter ? detachDrawingPrimitive(adapter, prim) : false;
     },
     [getChartAdapter],
   );
@@ -553,7 +658,16 @@ export function useDrawing({
     };
   }, [getChartAdapter]);
 
-  const { persistDrawings } = useDrawingPersistenceLifecycle({
+  const {
+    clearDrawings,
+    completeSurfaceDispose: completePersistenceSurfaceDispose,
+    invalidateSurfaceCredentialsForSeriesReplacement,
+    persistActiveScopeDrawings,
+    persistDrawings,
+    prepareSurfaceDispose: preparePersistenceSurfaceDispose,
+    prepareUserMutationScope,
+  } = useDrawingPersistenceLifecycle({
+    beforeScopeTransitionRef,
     currentFreehandRef,
     draggingRef,
     getChartAdapter: getDrawingPersistenceAdapter,
@@ -573,9 +687,8 @@ export function useDrawing({
     const draft = freehandDraftRef.current;
     const primitive = currentFreehandRef.current;
     if (draft) cancelFreehandStrokeDraft(draft);
+    if (!cancelFreehandPrimitiveOnSurface(primitive, detachPrim)) return false;
     if (primitive) {
-      primitive.cancelPreview?.();
-      detachPrim(primitive);
       primitivesRef.current = primitivesRef.current.filter((item) => item !== primitive);
     }
     freehandDraftRef.current = null;
@@ -583,7 +696,7 @@ export function useDrawing({
     currentFreehandRef.current = null;
     isDrawingFreehandRef.current = false;
     lastFreehandScreenPointRef.current = null;
-    return !!primitive;
+    return true;
   }, [detachPrim]);
 
   // ── Selection helpers are provided by useDrawingSelection above ──
@@ -609,11 +722,29 @@ export function useDrawing({
 
   const removePreview = useCallback(() => {
     if (previewRef.current) {
-      detachPrim(previewRef.current);
+      if (!detachPrim(previewRef.current)) return false;
       previewRef.current = null;
     }
     anchorDataRef.current = null;
+    pendingTwoPointToolRef.current = null;
+    return true;
   }, [detachPrim]);
+
+  const prepareTerminalTextMutation = useCallback(() => {
+    if (!runDrawingPointerTransientBarrier({
+      // Text commit is never a legitimate continuation of a two-point draft,
+      // even if the toolbar still reports the old line/fib/shape tool.
+      activeTool: "text",
+      pendingTwoPointTool: pendingTwoPointToolRef.current,
+      hasPendingTwoPoint: anchorDataRef.current !== null || previewRef.current !== null,
+      hasActiveFreehand: isDrawingFreehandRef.current
+        || currentFreehandRef.current !== null
+        || freehandDraftRef.current !== null,
+      removePreview,
+      cancelActiveFreehandStroke,
+    })) return false;
+    return prepareUserMutationScope();
+  }, [cancelActiveFreehandStroke, prepareUserMutationScope, removePreview]);
 
   // ── Text editing lifecycle (extracted) ──
 
@@ -628,14 +759,17 @@ export function useDrawing({
     startTextEditing,
     commitTextEditing,
     cancelTextEditing,
+    completeSurfaceDispose: completeTextSurfaceDispose,
   } = useDrawingTextEdit({
     primitivesRef,
     selectedIdRef,
     getPrimitiveById,
+    attachPrim,
     detachPrim,
     deselectAll,
     selectPrimitive,
     refreshSelectedTextUi,
+    beforeTerminalMutation: prepareTerminalTextMutation,
     persistDrawings,
     dataToScreen,
     activeToolRef,
@@ -870,6 +1004,31 @@ export function useDrawing({
     if (isActiveDrawingMoveInput(next)) applyMeasuredActiveDrawingMove(next);
   }, [applyMeasuredActiveDrawingMove, cancelActiveMoveFrame]);
 
+  const prepareDrawingScopeTransition = useCallback(() => {
+    const committedDrag = !isDrawingFreehandRef.current
+      ? draggingRef.current
+      : null;
+    flushActiveDrawingMove();
+    if (committedDrag) {
+      const commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
+      if (!commands || persistActiveScopeDrawings(commands) === false) return false;
+    }
+    const hadActiveFreehand = currentFreehandRef.current !== null;
+    if (hadActiveFreehand && !cancelActiveFreehandStroke()) return false;
+    if (!removePreview()) return false;
+    // The backing primitive of a newly-created text annotation is deliberately
+    // empty until confirmation. Cancel it before persistence snapshots the old
+    // scope so it is detached as well as excluded by the canonical filter.
+    return cancelTextEditing();
+  }, [cancelActiveFreehandStroke, cancelTextEditing, flushActiveDrawingMove, persistActiveScopeDrawings, removePreview]);
+
+  useEffect(() => {
+    beforeScopeTransitionRef.current = prepareDrawingScopeTransition;
+    return () => {
+      beforeScopeTransitionRef.current = () => true;
+    };
+  }, [prepareDrawingScopeTransition]);
+
   const cancelActiveDrawingMove = useCallback(() => {
     cancelActiveMoveFrame();
     pendingActiveMoveRef.current = null;
@@ -902,6 +1061,14 @@ export function useDrawing({
   useEffect(() => {
     if (!seriesReady) return;
 
+    const committedDrag = !isDrawingFreehandRef.current
+      ? draggingRef.current
+      : null;
+    flushActiveDrawingMove();
+    if (committedDrag) {
+      const commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
+      if (!commands || persistDrawings(commands) === false) return;
+    }
     cancelActiveDrawingMove();
     removePreview();
     clearHoverFeedback();
@@ -918,12 +1085,22 @@ export function useDrawing({
     deselectAll,
     drawingCoordinateKey,
     cancelActiveFreehandStroke,
+    flushActiveDrawingMove,
+    persistDrawings,
     removePreview,
     resetCursorForActiveTool,
     seriesReady,
   ]);
 
   useEffect(() => () => {
+    const committedDrag = !isDrawingFreehandRef.current
+      ? draggingRef.current
+      : null;
+    flushActiveDrawingMove();
+    if (committedDrag) {
+      const commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
+      if (!commands || persistDrawings(commands) === false) return;
+    }
     cancelActiveDrawingMove();
     cancelActiveFreehandStroke();
     removePreview();
@@ -936,6 +1113,8 @@ export function useDrawing({
     chartContainerRef,
     clearHoverFeedback,
     removePreview,
+    flushActiveDrawingMove,
+    persistDrawings,
   ]);
 
   const beginTextDrag = useCallback((
@@ -1056,6 +1235,31 @@ export function useDrawing({
       const pos = getChartPos(e);
       if (!pos) return;
 
+      if (!runDrawingPointerTransientBarrier({
+        activeTool: tool,
+        pendingTwoPointTool: pendingTwoPointToolRef.current,
+        hasPendingTwoPoint: anchorDataRef.current !== null || previewRef.current !== null,
+        hasActiveFreehand: isDrawingFreehandRef.current
+          || currentFreehandRef.current !== null
+          || freehandDraftRef.current !== null,
+        removePreview,
+        cancelActiveFreehandStroke,
+      })) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
+      // React may already render symbol B while a failed transition still owns
+      // symbol A's store/surface credentials. Consume this first B-side action
+      // and schedule the lifecycle effect to retry before creating, selecting,
+      // dragging, or otherwise mutating any canonical primitive.
+      if (!prepareUserMutationScope()) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
       // Editing text owns the next chart click. Commit through the same path
       // for blank clicks, text clicks, and text-tool clicks so blur does not
       // become a separate hidden state transition.
@@ -1157,7 +1361,8 @@ export function useDrawing({
 
         // Place new text
         if (placeTextDrawing({
-          pos, e, primitivesRef, attachPrim, startTextEditing, screenToDrawingData,
+          pos, e, primitivesRef, attachPrim, startTextEditing, cancelTextEditing,
+          screenToDrawingData,
           drawingSnapEnabledRef, penColorRef, textFontSizeRef, textBoldRef, textItalicRef,
         })) return;
       }
@@ -1234,7 +1439,7 @@ export function useDrawing({
 
         // Place new position: click sets entry price
         if (placePositionDrawing({
-          tool, pos, e, primitivesRef, attachPrim, selectPrimitive, persistDrawings,
+          tool, pos, e, primitivesRef, attachPrim, detachPrim, selectPrimitive, persistDrawings,
           screenToDrawingData, getChartAdapter, chartContainerRef, drawingSnapEnabledRef, positionSizeRef,
         })) return;
       }
@@ -1244,11 +1449,19 @@ export function useDrawing({
         const isAxisLineTool = isAxisLineToolId(tool);
 
         // Second click — commit new line/fib/shape
-        if (isTwoPointCreationTool(tool) && commitTwoPointDrawing({
-          tool, pos, e, primitivesRef, anchorDataRef, previewRef, attachPrim, detachPrim,
-          selectPrimitive, persistDrawings, screenToDrawingData, dataToScreen, drawingSnapEnabledRef,
-          penColorRef, penSizeRef, fibLevelsRef, fibInvertedRef,
-        })) return;
+        if (isTwoPointCreationTool(tool)) {
+          const handled = commitTwoPointDrawing({
+            tool, pos, e, primitivesRef, anchorDataRef, previewRef, attachPrim, detachPrim,
+            selectPrimitive, persistDrawings, screenToDrawingData, dataToScreen, drawingSnapEnabledRef,
+            penColorRef, penSizeRef, fibLevelsRef, fibInvertedRef,
+          });
+          if (handled) {
+            if (!previewRef.current && !anchorDataRef.current) {
+              pendingTwoPointToolRef.current = null;
+            }
+            return;
+          }
+        }
 
         // Hit existing element?
         const hit = hitTestInteractive(pos.x, pos.y);
@@ -1325,19 +1538,26 @@ export function useDrawing({
         // One-point axis lines: click creates immediately; drag before mouseup adjusts it.
         if (isAxisLineTool) {
           if (beginAxisLineDrawing({
-            tool, pos, e, primitivesRef, anchorDataRef, previewRef, draggingRef, attachPrim,
-            selectPrimitive, removePreview, screenToDrawingData, drawingSnapEnabledRef, penColorRef, penSizeRef,
+            tool, pos, e, primitivesRef, anchorDataRef, previewRef, draggingRef, attachPrim, detachPrim,
+            selectPrimitive, persistDrawings, removePreview, screenToDrawingData,
+            drawingSnapEnabledRef, penColorRef, penSizeRef,
           })) return;
         }
 
         // First click — set anchor
-        if (isTwoPointCreationTool(tool) && beginTwoPointDrawing({
-          tool, pos, e, anchorDataRef, previewRef, attachPrim, screenToDrawingData,
-          drawingSnapEnabledRef, penColorRef, penSizeRef, fibLevelsRef, fibInvertedRef,
-        })) return;
+        if (isTwoPointCreationTool(tool)) {
+          const handled = beginTwoPointDrawing({
+            tool, pos, e, anchorDataRef, previewRef, attachPrim, screenToDrawingData,
+            drawingSnapEnabledRef, penColorRef, penSizeRef, fibLevelsRef, fibInvertedRef,
+          });
+          if (handled) {
+            pendingTwoPointToolRef.current = previewRef.current ? tool : null;
+            return;
+          }
+        }
       }
     },
-    [flushActiveDrawingMove, getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, persistDrawings, removePreview, getChartAdapter, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
+    [flushActiveDrawingMove, getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, getChartAdapter, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
   );
 
   // ════════════════════════════════════════════════════
@@ -1351,12 +1571,17 @@ export function useDrawing({
 
       const hit = hitTestInteractive(pos.x, pos.y);
       if (hit && hit.type === "text") {
+        if (!prepareTerminalTextMutation()) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
         startTextEditing(hit.prim);
         e.preventDefault();
         e.stopPropagation();
       }
     },
-    [getChartPos, hitTestInteractive, startTextEditing],
+    [getChartPos, hitTestInteractive, prepareTerminalTextMutation, startTextEditing],
   );
 
   // ════════════════════════════════════════════════════
@@ -1375,6 +1600,11 @@ export function useDrawing({
         && previewRef.current;
 
       if (hasFreehandMove || hasDragMove || hasPreviewMove) {
+        if (!prepareUserMutationScope()) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
         const inputStartedAt = drawingPerfNow();
         const rect = getCachedPointerRect();
         const coalescedEvents = hasFreehandMove
@@ -1430,7 +1660,7 @@ export function useDrawing({
         scheduleHoverFeedback({ tool, x: pos.x, y: pos.y });
       }
     },
-    [getCachedPointerRect, getChartPos, makePointerEventSnapshot, scheduleActiveDrawingMove, scheduleHoverFeedback],
+    [getCachedPointerRect, getChartPos, makePointerEventSnapshot, prepareUserMutationScope, scheduleActiveDrawingMove, scheduleHoverFeedback],
   );
 
   // ════════════════════════════════════════════════════
@@ -1438,9 +1668,16 @@ export function useDrawing({
   // ════════════════════════════════════════════════════
 
   const handleMouseUp = useCallback(() => {
+    // Do not flush a B-side pointer sample into an A-side gesture. The retrying
+    // scope effect owns the old gesture and flushes its last legal A sample via
+    // the private active-scope persistence path.
+    if (!prepareUserMutationScope()) return;
     const mouseupStartedAt = drawingPerfNow();
     flushActiveDrawingMove();
-    let changed = false;
+    let commands: readonly DrawingCommand[] | null = null;
+    let completedDrag = false;
+    let completedFreehand = false;
+    let completedFreehandDraft: FreehandStrokeDraft | null = null;
     // End freehand drawing
     if (isDrawingFreehandRef.current) {
       // ── Decimate stroke via RDP to reduce render cost ──
@@ -1475,31 +1712,55 @@ export function useDrawing({
       } else if (prim) {
         committed = prim.commitDataPoints?.() === true;
       }
-      if (committed) {
-        if (draft) cancelFreehandStrokeDraft(draft);
-        freehandDraftRef.current = null;
-        freehandCaptureIdentityRef.current = null;
-        isDrawingFreehandRef.current = false;
-        currentFreehandRef.current = null;
-        lastFreehandScreenPointRef.current = null;
-        changed = true;
+      if (committed && prim) {
+        commands = drawingCommandsForLegacyPrimitive(prim, { type: "create" });
+        if (!commands) {
+          cancelActiveFreehandStroke();
+          committed = false;
+        }
+      }
+      if (committed && prim) {
+        // Keep the active descriptor until the document command is accepted.
+        // A rejected/throwing persistence boundary can then perform checked
+        // surface compensation or retain the descriptor for the next barrier.
+        completedFreehand = true;
+        completedFreehandDraft = draft;
       } else {
         cancelActiveFreehandStroke();
       }
     }
     // End dragging
-    if (draggingRef.current) {
-      draggingRef.current = null;
-      changed = true;
+    if (!completedFreehand && draggingRef.current) {
+      const committedDrag = draggingRef.current;
+      commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
+      completedDrag = true;
     }
-    if (changed) {
-      persistDrawings();
+    let persisted = !commands && !completedDrag;
+    if (commands) {
+      try {
+        persisted = persistDrawings(commands) !== false;
+      } catch {
+        persisted = false;
+      }
     }
+    if (completedFreehand) {
+      if (persisted) {
+        if (completedFreehandDraft) cancelFreehandStrokeDraft(completedFreehandDraft);
+        freehandDraftRef.current = null;
+        freehandCaptureIdentityRef.current = null;
+        isDrawingFreehandRef.current = false;
+        currentFreehandRef.current = null;
+        lastFreehandScreenPointRef.current = null;
+      } else {
+        cancelActiveFreehandStroke();
+      }
+    }
+    if (persisted && completedDrag) draggingRef.current = null;
     clearCachedPointerRect();
     const durationMs = Math.max(0, drawingPerfNow() - mouseupStartedAt);
     drawingPerfCounters.recordMouseupSyncDuration(durationMs);
     drawingPerfCounters.gestureEnded();
-  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, persistDrawings, dataToScreen, clearCachedPointerRect]);
+  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, persistDrawings, prepareUserMutationScope, dataToScreen, clearCachedPointerRect]);
 
   const handlePointerCancel = useCallback(() => {
     if (!isDrawingFreehandRef.current) {
@@ -1545,9 +1806,13 @@ export function useDrawing({
     removePreview,
     deselectAll,
     detachPrim,
+    beforeTerminalMutation: prepareTerminalTextMutation,
     persistDrawings,
     setSelectedPrimId,
     setSelectedTextUi,
+    hasActiveFreehandStroke: () => isDrawingFreehandRef.current
+      || currentFreehandRef.current !== null
+      || freehandDraftRef.current !== null,
     cancelActiveFreehandStroke,
   });
 
@@ -1606,35 +1871,51 @@ export function useDrawing({
    * disposes/recreates Lightweight Charts; the persistence lifecycle then
    * attaches the same primitives to the replacement series.
    */
-  const prepareSurfaceDispose = useCallback(() => {
-    cancelActiveDrawingMove();
-    cancelActiveFreehandStroke();
-    removePreview();
-    clearHoverFeedback();
+  const prepareSurfaceDispose = useCallback((): boolean => runDrawingSurfaceDisposeBarrier(
+    preparePersistenceSurfaceDispose,
+    () => {
+      cancelActiveDrawingMove();
+      clearHoverFeedback();
+      draggingRef.current = null;
+      resetCursorForActiveTool();
+    },
+  ), [cancelActiveDrawingMove, clearHoverFeedback, preparePersistenceSurfaceDispose, resetCursorForActiveTool]);
+
+  const completeSurfaceDispose = useCallback((): void => {
+    // The chart owner has confirmed remove(). Surface-only drafts can now be
+    // abandoned without another detach call, while the document store remains
+    // the sole source used to materialize the replacement series.
+    completeTextSurfaceDispose();
+    if (freehandDraftRef.current) cancelFreehandStrokeDraft(freehandDraftRef.current);
+    freehandDraftRef.current = null;
+    freehandCaptureIdentityRef.current = null;
+    currentFreehandRef.current = null;
+    isDrawingFreehandRef.current = false;
+    lastFreehandScreenPointRef.current = null;
+    previewRef.current = null;
+    anchorDataRef.current = null;
+    pendingTwoPointToolRef.current = null;
     draggingRef.current = null;
-    resetCursorForActiveTool();
-    for (const prim of primitivesRef.current) {
-      detachPrim(prim);
-    }
-  }, [cancelActiveDrawingMove, cancelActiveFreehandStroke, clearHoverFeedback, detachPrim, removePreview, resetCursorForActiveTool]);
+    cancelActiveDrawingMove();
+    clearHoverFeedback();
+    completePersistenceSurfaceDispose();
+  }, [cancelActiveDrawingMove, clearHoverFeedback, completePersistenceSurfaceDispose, completeTextSurfaceDispose]);
 
   /** Clear all drawings (lines + freehand + text) */
   const clearAll = useCallback(() => {
-    cancelActiveFreehandStroke();
-    for (const prim of primitivesRef.current) {
-      detachPrim(prim);
-    }
+    if (!prepareTerminalTextMutation()) return;
+    if (!cancelTextEditing()) return;
+    if (!cancelActiveFreehandStroke()) return;
+    if (!removePreview()) return;
+    cancelActiveDrawingMove();
+    if (!clearDrawings()) return;
     primitivesRef.current = [];
-    removePreview();
     clearHoverFeedback();
     selectedIdRef.current = null;
     setSelectedPrimId(null);
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     draggingRef.current = null;
-    cancelActiveDrawingMove();
-    cancelTextEditing();
-    clearSavedDrawings(symbolRef.current);
-  }, [detachPrim, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke]);
+  }, [clearDrawings, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, prepareTerminalTextMutation]);
 
   /**
    * Toggle visibility of all drawings without deleting them.
@@ -1643,10 +1924,17 @@ export function useDrawing({
    */
   const setHidden = useCallback((next: boolean) => {
     const value = !!next;
-    if (hiddenRef.current === value) return;
+    const scopeReady = prepareUserMutationScope();
+    const changed = hiddenRef.current !== value;
+    // Keep the requested visibility as an intent even while A -> B is blocked.
+    // The eventual B reconciliation reads hiddenRef. Showing is deferred so an
+    // old A credential can never be made visible on B's rendered surface;
+    // hiding is safe and remains available as a fail-closed visual operation.
     hiddenRef.current = value;
+    if (!canApplyDrawingVisibilityToCurrentPrimitives(scopeReady, value)) return;
+    if (!changed && scopeReady) return;
 
-    if (value) {
+    if (value && scopeReady) {
       // Also drop preview / transient edit state so nothing stays on screen.
       removePreview();
       cancelTextEditing();
@@ -1674,7 +1962,7 @@ export function useDrawing({
       // can request one themselves.
       getChartAdapter()?.requestSeriesUpdate?.();
     }
-  }, [getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke]);
+  }, [getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, prepareUserMutationScope]);
 
   // ── Selected-text helpers (consumed by floating format toolbar) ──
 
@@ -1687,12 +1975,45 @@ export function useDrawing({
     if (!id) return;
     const prim = getPrimitiveById(id);
     if (!prim || !(prim instanceof TextDrawingPrimitive)) return;
+    const saved = serializeDrawingPrimitive(
+      prim as unknown as PersistableDrawingPrimitive,
+    );
+    if (!saved || saved.type !== "text") return;
+    const commands = drawingCommandsForSavedDrawing(
+      { ...saved, ...patch },
+      { type: "update-style" },
+    );
+    if (!commands || !prepareTerminalTextMutation()) return;
+    const previous: TextDrawingPatch = {
+      text: prim.text,
+      color: prim.color,
+      fontSize: prim.fontSize,
+      fontFamily: prim.fontFamily,
+      bold: prim.bold,
+      italic: prim.italic,
+      underline: prim.underline,
+      align: prim.align,
+      bgColor: prim.bgColor,
+      borderColor: prim.borderColor,
+      borderWidth: prim.borderWidth,
+      widthPx: prim.widthPx,
+      padding: prim.padding,
+    };
     const changed = prim.applyPatch(patch);
     if (changed) {
+      let persisted = false;
+      try {
+        persisted = persistDrawings(commands) !== false;
+      } catch {
+        persisted = false;
+      }
+      if (!persisted) {
+        prim.applyPatch(previous);
+        return;
+      }
       refreshSelectedTextUi(id);
-      persistDrawings();
     }
-  }, [getPrimitiveById, refreshSelectedTextUi, persistDrawings, selectedIdRef]);
+  }, [getPrimitiveById, prepareTerminalTextMutation, refreshSelectedTextUi, persistDrawings, selectedIdRef]);
 
   /** Delete the currently selected primitive (any type). */
   const deleteSelected = useCallback(() => {
@@ -1702,13 +2023,25 @@ export function useDrawing({
     if (idx < 0) return;
     const primitive = primitivesRef.current[idx];
     if (!primitive) return;
-    detachPrim(primitive);
-    primitivesRef.current.splice(idx, 1);
+    if (!prepareTerminalTextMutation()) return;
+    if (!detachAndRemoveDrawingPrimitive(primitivesRef.current, primitive, detachPrim)) return;
+    let persisted = false;
+    try {
+      persisted = persistDrawings([Object.freeze({ type: "delete", id })]) !== false;
+    } catch {
+      persisted = false;
+    }
+    if (!persisted) {
+      if (!primitivesRef.current.some((candidate) => candidate.id === id)
+        && attachPrim(primitive)) {
+        primitivesRef.current.splice(Math.min(idx, primitivesRef.current.length), 0, primitive);
+      }
+      return;
+    }
     selectedIdRef.current = null;
     setSelectedPrimId(null);
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
-    persistDrawings();
-  }, [detachPrim, persistDrawings, selectedIdRef, setSelectedPrimId, setSelectedTextUi]);
+  }, [attachPrim, detachPrim, prepareTerminalTextMutation, persistDrawings, selectedIdRef, setSelectedPrimId, setSelectedTextUi]);
 
   /**
    * Update the color and/or lineWidth of the currently selected
@@ -1720,30 +2053,68 @@ export function useDrawing({
     if (!id || !patch) return;
     const prim = primitivesRef.current.find((p) => p.id === id);
     if (!prim) return;
-    let changed = false;
+    const saved = serializeDrawingPrimitive(
+      prim as unknown as PersistableDrawingPrimitive,
+    );
+    if (!saved) return;
+    const candidate = { ...saved } as SavedDrawing & {
+      color?: string;
+      lineWidth?: number;
+      opacity?: number;
+    };
+    const mutations: Array<Readonly<{ apply(): void; rollback(): void }>> = [];
     if (typeof patch.color === "string" && hasMutableColor(prim) && patch.color !== prim.color) {
-      prim.setColor(patch.color);
-      changed = true;
+      const previous = prim.color;
+      candidate.color = patch.color;
+      mutations.push({
+        apply: () => prim.setColor(patch.color as string),
+        rollback: () => prim.setColor(previous),
+      });
     }
     if (typeof patch.lineWidth === "number" && hasMutableLineWidth(prim) && patch.lineWidth !== prim.lineWidth) {
-      prim.setLineWidth(patch.lineWidth);
-      changed = true;
+      const previous = prim.lineWidth;
+      candidate.lineWidth = patch.lineWidth;
+      mutations.push({
+        apply: () => prim.setLineWidth(patch.lineWidth as number),
+        rollback: () => prim.setLineWidth(previous),
+      });
     }
     if (typeof patch.opacity === "number" && hasMutableOpacity(prim) && patch.opacity !== prim.opacity) {
-      prim.setOpacity(patch.opacity);
-      changed = true;
+      const previous = prim.opacity;
+      candidate.opacity = patch.opacity;
+      mutations.push({
+        apply: () => prim.setOpacity(patch.opacity as number),
+        rollback: () => prim.setOpacity(previous),
+      });
     }
-    if (changed) {
-      setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(prim));
-      persistDrawings();
+    if (mutations.length > 0) {
+      const commands = drawingCommandsForSavedDrawing(candidate, { type: "update-style" });
+      if (!commands || !prepareTerminalTextMutation()) return;
+      for (const mutation of mutations) mutation.apply();
+      let persisted = false;
+      try {
+        persisted = persistDrawings(commands) !== false;
+      } catch {
+        persisted = false;
+      }
+      if (!persisted) {
+        for (let index = mutations.length - 1; index >= 0; index -= 1) {
+          mutations[index]?.rollback();
+        }
+        return;
+      }
+      const current = primitivesRef.current.find((candidate) => candidate.id === id) ?? null;
+      setSelectedDrawingMeta(current ? selectedDrawingMetaFromPrimitive(current) : null);
     }
-  }, [persistDrawings, selectedIdRef, setSelectedDrawingMeta]);
+  }, [prepareTerminalTextMutation, persistDrawings, selectedIdRef, setSelectedDrawingMeta]);
 
   const selectedTextSnapshot = selectedTextUi.snapshot;
   const selectedTextBox = selectedTextUi.box;
 
   return {
     clearAll,
+    completeSurfaceDispose,
+    invalidateSurfaceCredentialsForSeriesReplacement,
     prepareSurfaceDispose,
     setHidden,
     primitivesRef,

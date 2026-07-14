@@ -388,6 +388,7 @@ export class TextDrawingPrimitive {
   _selected: boolean;
   _hovered: boolean;
   _hidden: boolean;
+  _unconfirmedText: boolean;
   _geometryRevision: number;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
@@ -432,6 +433,7 @@ export class TextDrawingPrimitive {
     this._selected = !!opts.selected;
     this._hovered = false;
     this._hidden = false;
+    this._unconfirmedText = false;
     this._geometryRevision = 1;
 
     this._series = null;
@@ -473,11 +475,14 @@ export class TextDrawingPrimitive {
   get widthPx() { return this._widthPx; }
   get padding() { return this._padding; }
   get selected() { return this._selected; }
+  get isUnconfirmedText() { return this._unconfirmedText; }
   get geometryRevision() { return this._geometryRevision; }
 
   // ── Setters ──
 
   setText(t: string): void { this._text = t; this._requestUpdate?.(); }
+  markUnconfirmedText(): void { this._unconfirmedText = true; }
+  confirmText(): void { this._unconfirmedText = false; }
   setDataPoint(dp: DrawingDataPoint): void {
     this._dataPoint = dp;
     this._geometryRevision += 1;

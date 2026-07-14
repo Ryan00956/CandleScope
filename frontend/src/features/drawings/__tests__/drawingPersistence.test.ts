@@ -8,6 +8,7 @@ import {
   MAX_SAVED_FREEHAND_SPANS,
   hasSavedDrawings,
   loadDrawings,
+  loadSavedDrawingsFailClosed,
   saveDrawings,
   serializeDataPoint,
   serializeHorizontalAnchor,
@@ -882,5 +883,56 @@ test("highlighter v2 save and load keeps stroke mode and style fields", () => {
     assert.equal(highlighter.opacity, 0.35);
     assert.equal(highlighter.compositeOperation, "multiply");
     assert.equal(highlighter.brushShape, "square");
+  });
+});
+
+test("document reader rejects an entire malformed, unknown, or over-budget payload", () => {
+  withMemoryLocalStorage((values) => {
+    const symbol = "document-fail-closed";
+    const key = drawingStorageKey(symbol);
+    const valid = {
+      type: "line",
+      id: "line-valid",
+      lineType: "line-segment",
+      dataPoints: [{ time: 100, price: 1 }, { time: 200, price: 2 }],
+      color: "#fff",
+      lineWidth: 2,
+    };
+
+    values.set(key, JSON.stringify([valid, { type: "unknown", id: "bad" }]));
+    assert.equal(loadSavedDrawingsFailClosed(symbol), null);
+    assert.deepEqual(loadDrawings(symbol), [valid], "legacy compatibility reader still skips bad entries");
+
+    values.set(key, "{not-json");
+    assert.equal(loadSavedDrawingsFailClosed(symbol), null);
+
+    values.set(key, JSON.stringify([{
+      type: "text",
+      id: "malformed-text",
+      dataPoint: { time: 1, price: 2 },
+      text: 123,
+    }]));
+    assert.equal(loadSavedDrawingsFailClosed(symbol), null);
+
+    values.set(key, JSON.stringify([{
+      type: "text",
+      id: "over-budget-text",
+      dataPoint: { time: 1, price: 2 },
+      text: "x".repeat(MAX_DRAWING_STORAGE_CHARS + 1),
+    }]));
+    assert.equal(loadSavedDrawingsFailClosed(symbol), null);
+
+    values.set(key, JSON.stringify([{
+      type: "freehand",
+      id: "too-many-points",
+      dataPoints: Array.from(
+        { length: MAX_SAVED_FREEHAND_POINTS + 1 },
+        (_, index) => ({ time: index, price: 1 }),
+      ),
+    }]));
+    assert.equal(loadSavedDrawingsFailClosed(symbol), null);
+
+    values.delete(key);
+    assert.deepEqual(loadSavedDrawingsFailClosed(symbol), []);
   });
 });

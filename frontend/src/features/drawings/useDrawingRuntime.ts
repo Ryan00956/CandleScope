@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { clearSavedDrawings } from "./drawingPersistence.js";
+import { clearDrawingScopeAuthoritatively } from "./drawingScopePersistence.js";
 import { useDrawingToolState } from "./drawingToolState.js";
 import type { ChartSurfaceActions } from "../../chart-adapter/useChartSurfaceRuntime.js";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
@@ -64,8 +64,8 @@ export function useDrawingRuntime({
     const sessionView = session?.view;
     if (!sessionView || !indicatorId) return;
     const storageKeyBase = `${sessionView.exchange}:${sessionView.marketType}:${sessionView.symbol}`;
-    clearSavedDrawings(`${storageKeyBase}-separate-${indicatorId}`);
-    clearSavedDrawings(`${storageKeyBase}-volume-${indicatorId}`);
+    clearDrawingScopeAuthoritatively(`${storageKeyBase}-separate-${indicatorId}`);
+    clearDrawingScopeAuthoritatively(`${storageKeyBase}-volume-${indicatorId}`);
   }, [session]);
 
   const actions: DrawingRuntimeActions = {

@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0、Phase 1 已完成（2026-07-14）；Phase 2 尚未开始。
+状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3 尚未开始。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -53,7 +53,7 @@ git -C "H:\program\CandleScope" worktree list
 |---|---|---|
 | 0 | 固定重负载基准与 instrumentation | 已完成（before baseline 已固化） |
 | 1 | 原子坐标快照与批量 anchor resolver | 已完成（batch baseline 已固化） |
-| 2 | DrawingDocumentStore、commands 与 codec | 未开始 |
+| 2 | DrawingDocumentStore、commands 与 codec | 已完成（document authoritative checkpoint） |
 | 3 | Scene shadow、culling 与 render plan | 未开始 |
 | 4 | 单一 DrawingScenePrimitive | 未开始 |
 | 5 | Dynamic Overlay 与 Live Ink | 未开始 |
@@ -611,17 +611,17 @@ batch 与当前正确 scalar 结果的误差门：
 
 ### 逐步任务
 
-- [ ] 定义所有 drawing kind 的纯 entity geometry/style。
-- [ ] 复用现有 SavedDrawing normalizer，建立 <code>SavedDrawing -> DrawingDocument</code> importer。
-- [ ] 建立 <code>DrawingDocument -> legacy-compatible SavedDrawing[]</code> codec。
-- [ ] 添加 create/update-style/move/resize/delete/clear/reorder command。
-- [ ] command 同步提交 document，目标主线程耗时 < 1ms。
-- [ ] document revision 与 entity geometry/style revision 分开。
-- [ ] 先让 legacy renderer 从 document snapshot 创建/更新 primitives。
-- [ ] controller 逐动作改为发 command，不再直接把 primitive 私有字段作为业务真相。
-- [ ] selection state 只保存 entity id 和派生 meta，不保存 class identity。
-- [ ] undo/redo 如本阶段实现，只保存 commands/document revisions，不保存 bitmap。
-- [ ] Host 公共 API 保持兼容。
+- [x] 定义所有 drawing kind 的纯 entity geometry/style。
+- [x] 复用现有 SavedDrawing normalizer，建立 <code>SavedDrawing -> DrawingDocument</code> importer。
+- [x] 建立 <code>DrawingDocument -> legacy-compatible SavedDrawing[]</code> codec。
+- [x] 添加 create/update-style/move/resize/delete/clear/reorder command。
+- [x] command 同步提交 document，目标主线程耗时 < 1ms。
+- [x] document revision 与 entity geometry/style revision 分开。
+- [x] 先让 legacy renderer 从 document snapshot 创建/更新 primitives。
+- [x] controller 逐动作改为发 command，不再直接把 primitive 私有字段作为业务真相。
+- [x] selection state 只保存 entity id 和派生 meta，不保存 class identity。
+- [x] 本阶段未引入 undo/redo；后续若启用只保存 commands/document revisions，不保存 bitmap。
+- [x] Host 公共 API 保持兼容。
 
 ### 推荐拆分
 
@@ -654,10 +654,10 @@ Phase 2C：
 
 ### 退出门槛
 
-- [ ] 所有用户 mutation 都可以表示为 document command。
-- [ ] primitive 不再是 persistence 输入的唯一来源。
-- [ ] legacy renderer 下现有功能、smoke、export 全部保持。
-- [ ] public drawing runtime contract 未扩大到 raw chart refs。
+- [x] 所有用户 mutation 都可以表示为 document command。
+- [x] primitive 不再是 persistence 输入的唯一来源。
+- [x] legacy renderer 下现有功能、smoke、export 全部保持。
+- [x] public drawing runtime contract 未扩大到 raw chart refs。
 
 ### 回滚
 
@@ -1317,4 +1317,22 @@ Correctness parity: exact/fractional/source time、time 优先于 stale logical�
 Known limitations: Phase 1 只消除坐标解析和验证热点，尚未引入 Phase 2 document store、Phase 3 composite scene/culling、LOD 或 worker；因此最终 V2 target assessment 按预期仍未全过，64×512 场景仍高于最终帧预算。这不是 Phase 1 验收失败。after 报告如实记录 dirty=true，dirty 项仅为三份预先存在且未纳入本任务提交的用户文档。
 Rollback verified: VITE_DRAWING_COORDINATE_PROJECTOR=scalar 可恢复旧 scalar 路径，parity 可在线对照；切换 projector 不改 document/persistence 数据。旧快照只读、LWC projection 发布失败时保留上一份 owner，避免半更新坐标状态。
 Decision: Phase 1 PASS；正式 after baseline 已冻结；Phase 2 未开始。
+~~~
+
+### Phase 2 执行记录
+
+~~~text
+Phase: 2 — DrawingDocumentStore、commands 与 codec
+Date: 2026-07-14
+Commit: 本执行记录所在 checkpoint（refactor(frontend): make drawing document authoritative）
+Mode: document authority + legacy primitive renderer；VITE_DRAWING_DOCUMENT_AUTHORITY=legacy 可精确回滚
+Files: src/features/drawings/core/、legacy/legacyPrimitiveRenderer.ts、drawingDocumentAuthority.ts、drawingScopePersistence.ts、drawing persistence/lifecycle/controllers、DrawingEngineHost.tsx、chartInstanceBridge.ts、对应 tests、.env.example 与 drawings ownership 文档
+Tests: architecture migration allowlist=0、双 TypeScript、ESLint、923/923 tests 通过；drawing 定向测试 276/276 通过；production build 307 modules 通过
+Smoke: production document-authority drawing smoke 通过 execution/restore；最新 production build 的 chart-type matrix 与标准 smoke:export 均通过，PNG/JPEG/WebP 3/3、magic/dimensions/pixel signature、drawing reload restore 全部通过，warnings/errors/exceptions 为空
+Perf baseline: Phase 1 的 baseline-after-9a4b4c55-20260714T095757Z-bars1500-dpr1.json 继续作为可见 renderer 基线；Phase 2 不以提前完成 Phase 3 scene target 为验收条件
+Perf result: 512 entities 下 style/move/reorder command 同步提交 median 0.082ms、p95 0.090ms，低于 1ms Phase 2 command budget；production smoke 的 single-freehand-4096-viewport execution/instrumentation/restore 全部通过
+Correctness parity: 9 类 drawing geometry/style、legacy import/export、freehand v1/v2/v3、unknown/malformed/over-budget fail closed、load no-dirty、style/geometry revision 隔离、失败 atomic rollback 均有回归；strict optional fields、raw attached candidate、显式 unconfirmed text credential、第 513 个 text create 拒绝恢复、create/delete attach/detach 补偿、surface dispose/rebuild、main-series replacement credential invalidation/rebind、symbol scope readiness/retry、commit 到 passive-effect stale callback 封窗、mousemove/mouseup 冻结、跨 symbol subpane cleanup 隔离、dirty empty tombstone 也已覆盖。controller 的完成态动作必须携带完整 canonical command payload；legacy primitive 只保留为 renderer 和活动手势草稿，磁盘只接收 document codec 输出。
+Known limitations: Phase 3 scene shadow/culling/render plan 尚未开始；legacy per-entity primitives 仍承担可见渲染和活动手势草稿，因此最终 V2 frame/scene 目标按计划尚未达成，不属于 Phase 2 失败。
+Rollback verified: 设置 VITE_DRAWING_DOCUMENT_AUTHORITY=legacy 即回到原 legacy adapter；继续读写相同 SavedDrawing[] key/数据，不迁移、不删除本地数据。document 模式的 dirty session 在 host reacquisition 时保留，失败提交恢复 canonical snapshot。
+Decision: Phase 2 PASS；独立最终复审无 P0/P1/exit blocker；Phase 3 未开始。
 ~~~

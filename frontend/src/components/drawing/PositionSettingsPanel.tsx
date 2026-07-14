@@ -38,7 +38,7 @@ export default function PositionSettingsPanel({
   const handleSizeChange = (value: string): void => {
     setLocalSize(value);
     const numberValue = parseFloat(value);
-    if (!Number.isNaN(numberValue) && numberValue > 0) {
+    if (Number.isFinite(numberValue) && numberValue > 0) {
       onPositionSizeChange(numberValue);
     }
   };

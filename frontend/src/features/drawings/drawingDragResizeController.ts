@@ -113,6 +113,36 @@ export type DrawingDragDescriptor = TextHandleDrag
   | ShapeDrag
   | LineLikeDrag;
 
+export type DrawingGeometryCommand = "move" | "resize";
+
+/**
+ * Preserve the semantic user intent at the primitive-to-document boundary.
+ * Body/panel drags translate an entity; handles and endpoints resize it.
+ */
+export function drawingGeometryCommandForDrag(
+  dragging: DrawingDragDescriptor,
+): DrawingGeometryCommand {
+  switch (dragging.type) {
+    case "text":
+    case "position-move":
+    case "position-panel":
+    case "axis-line":
+      return "move";
+    case "shape":
+      return dragging.zone === "body" || dragging.zone === "center" ? "move" : "resize";
+    case "line":
+    case "angle":
+    case "fibonacci":
+      return dragging.pointIndex < 0 ? "move" : "resize";
+    case "text-handle":
+    case "position-tp":
+    case "position-sl":
+    case "position-left":
+    case "position-right":
+      return "resize";
+  }
+}
+
 interface DragControllerOptions {
   dragging: DrawingDragDescriptor | null;
   pos: ScreenPoint;

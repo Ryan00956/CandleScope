@@ -1,14 +1,15 @@
 import { EMPTY_SELECTED_TEXT_UI } from "./drawingSelectionController.js";
 import type { DrawingPrimitive, MutableRef } from "./drawingTypes.js";
+import type { DrawingCommand } from "./core/drawingCommands.js";
 
 interface EraseDrawingHit {
   prim: DrawingPrimitive;
 }
 
 interface EraseDrawingOptions {
-  detachPrim: (primitive: DrawingPrimitive) => void;
+  detachPrim: (primitive: DrawingPrimitive) => boolean | void;
   hit: EraseDrawingHit | null;
-  persistDrawings: () => void;
+  persistDrawings: (commands: readonly DrawingCommand[]) => boolean | void;
   primitivesRef: MutableRef<DrawingPrimitive[]>;
   selectedIdRef: MutableRef<string | null>;
   setSelectedPrimId: (id: string | null) => void;
@@ -28,13 +29,13 @@ export function eraseDrawingAtPointer({
   const idx = primitivesRef.current.indexOf(hit.prim);
   if (idx < 0) return false;
 
-  detachPrim(hit.prim);
+  if (detachPrim(hit.prim) === false) return false;
   primitivesRef.current.splice(idx, 1);
+  if (persistDrawings([Object.freeze({ type: "delete", id: hit.prim.id })]) === false) return false;
   if (selectedIdRef.current === hit.prim.id) {
     selectedIdRef.current = null;
     setSelectedPrimId(null);
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
   }
-  persistDrawings();
   return true;
 }

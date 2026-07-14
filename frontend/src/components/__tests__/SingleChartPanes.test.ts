@@ -4,6 +4,8 @@ import {
   buildVisibleRangeSnapshot,
   disposeChartPaneSurface,
   hasCurrentDatasetOwnership as hasCurrentDatasetOwnershipProduction,
+  removedDrawingSubPaneScopeKeys,
+  prepareDrawingSurfaceForSeriesReplacement,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
   shouldAdvanceDrawingCoordinateGeneration,
@@ -28,17 +30,19 @@ function shouldRestoreChartViewport(value: object): boolean {
 
 test("chart disposal detaches drawings and disables auto-size before removal", () => {
   const calls: unknown[] = [];
-  disposeChartPaneSurface({
+  assert.equal(disposeChartPaneSurface({
     applyOptions: (options) => calls.push(["options", options]),
     remove: () => calls.push(["remove"]),
   }, {
-    beforeRemove: () => calls.push(["drawings"]),
-  });
+    beforeRemove: () => { calls.push(["drawings"]); },
+    afterRemove: () => { calls.push(["drawings-complete"]); },
+  }), true);
 
   assert.deepEqual(calls, [
     ["drawings"],
     ["options", { autoSize: false }],
     ["remove"],
+    ["drawings-complete"],
   ]);
 });
 
@@ -55,9 +59,9 @@ test("chart disposal still removes a surface when disabling auto-size fails", ()
   assert.deepEqual(calls, ["options", "remove"]);
 });
 
-test("chart disposal continues when drawing teardown fails", () => {
+test("chart disposal reports failure and continues when drawing teardown throws", () => {
   const calls: unknown[] = [];
-  assert.doesNotThrow(() => disposeChartPaneSurface({
+  assert.equal(disposeChartPaneSurface({
     applyOptions: () => calls.push("options"),
     remove: () => calls.push("remove"),
   }, {
@@ -65,9 +69,77 @@ test("chart disposal continues when drawing teardown fails", () => {
       calls.push("drawings");
       throw new Error("stale drawing runtime");
     },
-  }));
+    afterRemove: () => { calls.push("drawings-complete"); },
+  }), false);
 
-  assert.deepEqual(calls, ["drawings", "options", "remove"]);
+  assert.deepEqual(calls, ["drawings", "options", "remove", "drawings-complete"]);
+});
+
+test("sub-pane drawing cleanup never applies previous ids to a new symbol base", () => {
+  assert.deepEqual(removedDrawingSubPaneScopeKeys({
+    currentBase: "binance:spot:ETHUSDT",
+    currentIds: new Set(["rsi"]),
+    previousBase: "binance:spot:BTCUSDT",
+    previousIds: new Set(["rsi", "macd"]),
+  }), []);
+  assert.deepEqual(removedDrawingSubPaneScopeKeys({
+    currentBase: "binance:spot:BTCUSDT",
+    currentIds: new Set(["rsi"]),
+    previousBase: "binance:spot:BTCUSDT",
+    previousIds: new Set(["rsi", "macd"]),
+  }), ["binance:spot:BTCUSDT__macd"]);
+});
+
+test("main-series drawing preparation restores partial and throwing failures", () => {
+  const calls: string[] = [];
+  assert.equal(prepareDrawingSurfaceForSeriesReplacement(() => {
+    calls.push("prepare-false");
+    return false;
+  }, () => calls.push("restore-false")), false);
+  assert.equal(prepareDrawingSurfaceForSeriesReplacement(() => {
+    calls.push("prepare-throw");
+    throw new Error("partial detach");
+  }, () => calls.push("restore-throw")), false);
+  assert.equal(prepareDrawingSurfaceForSeriesReplacement(() => {
+    calls.push("prepare-success");
+    return true;
+  }, () => calls.push("restore-unexpected")), true);
+  assert.deepEqual(calls, [
+    "prepare-false",
+    "restore-false",
+    "prepare-throw",
+    "restore-throw",
+    "prepare-success",
+  ]);
+});
+
+test("chart disposal reports explicit drawing failure while still releasing the chart", () => {
+  const calls: string[] = [];
+  assert.equal(disposeChartPaneSurface({
+    applyOptions: () => calls.push("options"),
+    remove: () => calls.push("remove"),
+  }, {
+    beforeRemove: () => {
+      calls.push("drawings");
+      return false;
+    },
+    afterRemove: () => { calls.push("drawings-complete"); },
+  }), false);
+
+  assert.deepEqual(calls, ["drawings", "options", "remove", "drawings-complete"]);
+});
+
+test("chart disposal invalidates drawing credentials even when remove throws", () => {
+  const calls: string[] = [];
+  assert.equal(disposeChartPaneSurface({
+    remove: () => {
+      calls.push("remove");
+      throw new Error("remove failed");
+    },
+  }, {
+    afterRemove: () => { calls.push("drawings-complete"); },
+  }), false);
+  assert.deepEqual(calls, ["remove", "drawings-complete"]);
 });
 
 test("visible range snapshots include the fitted time and logical coverage", () => {

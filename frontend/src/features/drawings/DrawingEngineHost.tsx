@@ -14,7 +14,9 @@ import type { SelectedDrawingMeta } from "./drawingSelectionController.js";
 
 export interface DrawingEngineApi {
     clearAll(): void;
-    prepareSurfaceDispose(): void;
+    completeSurfaceDispose(): void;
+    invalidateSurfaceCredentialsForSeriesReplacement(): void;
+    prepareSurfaceDispose(): boolean;
     setHidden(hidden: boolean): void;
     updateSelectedDrawingStyle(patch: DrawingStylePatch): void;
     prepareExport(): void;
@@ -86,8 +88,10 @@ export default function DrawingEngineHost({
     });
     const {
         clearAll,
+        completeSurfaceDispose,
         commitTextEditing,
         editingTextId,
+        invalidateSurfaceCredentialsForSeriesReplacement,
         prepareSurfaceDispose,
         selectedDrawingMeta,
         setHidden,
@@ -143,6 +147,8 @@ export default function DrawingEngineHost({
     useEffect(() => {
         onApiChange?.({
             clearAll,
+            completeSurfaceDispose,
+            invalidateSurfaceCredentialsForSeriesReplacement,
             prepareSurfaceDispose,
             setHidden,
             updateSelectedDrawingStyle,
@@ -154,6 +160,8 @@ export default function DrawingEngineHost({
         };
     }, [
         clearAll,
+        completeSurfaceDispose,
+        invalidateSurfaceCredentialsForSeriesReplacement,
         onApiChange,
         prepareExport,
         prepareSurfaceDispose,

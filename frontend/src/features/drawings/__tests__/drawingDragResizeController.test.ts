@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   applyLineFibShapeDrag,
   applyTextAndPositionDrag,
+  drawingGeometryCommandForDrag,
   type DrawingDragDescriptor,
 } from "../drawingDragResizeController.js";
 import type {
@@ -34,6 +35,37 @@ function eventStub(): DrawingPointerEvent {
     stopPropagation() {},
   };
 }
+
+test("drag descriptors preserve move versus resize command semantics", () => {
+  const moveDescriptors = [
+    { type: "text" },
+    { type: "position-move" },
+    { type: "position-panel" },
+    { type: "axis-line" },
+    { type: "shape", zone: "body" },
+    { type: "line", pointIndex: -1 },
+  ];
+  const resizeDescriptors = [
+    { type: "text-handle" },
+    { type: "position-tp" },
+    { type: "position-left" },
+    { type: "shape", zone: "se" },
+    { type: "fibonacci", pointIndex: 0 },
+  ];
+
+  for (const descriptor of moveDescriptors) {
+    assert.equal(
+      drawingGeometryCommandForDrag(malformedFixture<DrawingDragDescriptor>(descriptor)),
+      "move",
+    );
+  }
+  for (const descriptor of resizeDescriptors) {
+    assert.equal(
+      drawingGeometryCommandForDrag(malformedFixture<DrawingDragDescriptor>(descriptor)),
+      "resize",
+    );
+  }
+});
 
 function dragAxisLine(
   axisLineType: AxisLineType,

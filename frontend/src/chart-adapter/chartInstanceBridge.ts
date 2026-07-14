@@ -377,12 +377,16 @@ export function createLightweightChartAdapter({
       let detached = false;
       const owningSeries = primitive._series;
       if (owningSeries && owningSeries !== series) {
-        safeCall(() => owningSeries.detachPrimitive(primitive), null);
-        detached = true;
+        detached = safeCall(() => {
+          owningSeries.detachPrimitive(primitive);
+          return true;
+        }, false) || detached;
       }
       if (series) {
-        safeCall(() => series.detachPrimitive(primitive), null);
-        detached = true;
+        detached = safeCall(() => {
+          series.detachPrimitive(primitive);
+          return true;
+        }, false) || detached;
       }
       return detached;
     },

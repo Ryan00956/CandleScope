@@ -4,6 +4,39 @@ import type { SeriesWindowStore } from "../features/market-data/window/seriesWin
 
 const EMPTY_DATA_TIME_SET: ReadonlySet<number> = new Set<number>();
 
+export function removedDrawingSubPaneScopeKeys({
+  currentBase,
+  currentIds,
+  previousBase,
+  previousIds,
+}: Readonly<{
+  currentBase: string;
+  currentIds: ReadonlySet<string>;
+  previousBase: string | null;
+  previousIds: ReadonlySet<string>;
+}>): string[] {
+  if (!currentBase || previousBase !== currentBase) return [];
+  const removed: string[] = [];
+  for (const previousId of previousIds) {
+    if (!currentIds.has(previousId)) removed.push(`${currentBase}__${previousId}`);
+  }
+  return removed;
+}
+
+export function prepareDrawingSurfaceForSeriesReplacement(
+  prepare: (() => boolean | void) | null | undefined,
+  requestRestore: () => void,
+): boolean {
+  if (!prepare) return true;
+  try {
+    if (prepare() !== false) return true;
+  } catch {
+    // A throwing prepare may already have detached a prefix.
+  }
+  requestRestore();
+  return false;
+}
+
 function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -194,14 +227,21 @@ export function disposeChartPaneSurface(
     applyOptions?(options: { autoSize: boolean }): unknown;
     remove?(): unknown;
   } | null | undefined,
-  { beforeRemove }: { beforeRemove?: (() => void) | null } = {},
-): void {
-  if (!chart) return;
+  {
+    afterRemove,
+    beforeRemove,
+  }: {
+    afterRemove?: (() => boolean | void) | null;
+    beforeRemove?: (() => boolean | void) | null;
+  } = {},
+): boolean {
+  if (!chart) return true;
 
+  let drawingsPrepared = true;
   try {
-    beforeRemove?.();
+    drawingsPrepared = beforeRemove?.() !== false;
   } catch {
-    // Drawing teardown is best-effort; chart disposal must still continue.
+    drawingsPrepared = false;
   }
 
   try {
@@ -210,9 +250,23 @@ export function disposeChartPaneSurface(
     // The chart may already be partially disposed.
   }
 
+  let removed = false;
   try {
-    chart.remove?.();
+    if (chart.remove) {
+      chart.remove();
+      removed = true;
+    }
   } catch {
     // Best-effort teardown.
   }
+  // The effect will never reuse this chart object, even when remove() throws
+  // after partially destroying it. Always invalidate drawing credentials so a
+  // replacement surface cannot mistake old-series objects for attachments.
+  let drawingsCompleted = true;
+  try {
+    drawingsCompleted = afterRemove?.() !== false;
+  } catch {
+    drawingsCompleted = false;
+  }
+  return drawingsPrepared && drawingsCompleted && removed;
 }

@@ -81,6 +81,8 @@ import {
   hasCurrentDatasetOwnership,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
+  removedDrawingSubPaneScopeKeys,
+  prepareDrawingSurfaceForSeriesReplacement,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
   shouldPublishUserViewportRange,
@@ -102,7 +104,7 @@ import {
   cursorStyleForDrawingTool,
   shouldShowCrosshairDetails,
 } from "../features/drawings/drawingModel";
-import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
+import { clearDrawingScopeAuthoritatively } from "../features/drawings/drawingScopePersistence";
 import {
   axisTimeKey,
   buildDisplaySourceTimeIndex,
@@ -952,7 +954,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const visibleRangeSaveTimerRef = useRef<TimerHandle | null>(null);
   const activeSubPaneCountRef = useRef(0);
   const paneHeightStorageKeyRef = useRef<string | null>(null);
-  const prevSubPaneIdsRef = useRef<Set<string>>(new Set());
+  const prevSubPaneScopeRef = useRef<{
+    base: string | null;
+    ids: Set<string>;
+  }>({ base: null, ids: new Set() });
   const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
   const datasetKeyRef = useRef(datasetKey);
@@ -1668,12 +1673,19 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         chart.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange);
       } catch { /* chart may already be disposing */ }
       onCrosshairMove?.(null);
-      disposeChartPaneSurface(chart, {
+      const drawingsPrepared = disposeChartPaneSurface(chart, {
         // Drawing primitives keep a requestUpdate callback supplied by their
         // owning series. Detach them before remove() so a later re-attach
         // cannot enqueue work on this disposed surface.
-        beforeRemove: () => drawingApiRef.current?.prepareSurfaceDispose?.(),
+        beforeRemove: () => drawingApiRef.current?.prepareSurfaceDispose?.() ?? true,
+        afterRemove: () => {
+          drawingApiRef.current?.completeSurfaceDispose?.();
+          return true;
+        },
       });
+      if (!drawingsPrepared) {
+        console.warn("[drawing-engine] surface disposal continued after drawing teardown failed closed");
+      }
     };
   }, [captureVisibleRange, customBg, downColor, onCrosshairMove, publishDrawingProjectionStore, publishViewportRangeChange, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage, scheduleVisibleRangeSave, surfaceConfigKey, theme, timezone, upColor]);
 
@@ -1856,6 +1868,10 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
     const rows = rowsFromStore(seriesStore);
     const visibleRange = captureVisibleRange();
+    const drawingApi = drawingApiRef.current;
+    let drawingPreparationAttempted = false;
+    let drawingSurfacePrepared = false;
+    let mainSeriesReplaced = false;
     try {
       isSyncingRef.current = true;
       const previousType = mainSeriesTypeRef.current;
@@ -1881,6 +1897,17 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         },
       });
       const nextSeriesData = materializeMainSeriesProjectionPatch(renderedPatch);
+      if (drawingApi) {
+        drawingPreparationAttempted = true;
+        drawingSurfacePrepared = prepareDrawingSurfaceForSeriesReplacement(
+          () => drawingApi.prepareSurfaceDispose(),
+          () => setDrawingSeriesGeneration((prev) => prev + 1),
+        );
+        if (!drawingSurfacePrepared) {
+          console.warn("SingleChartPanes: drawing surface blocked the main-series replacement");
+          return;
+        }
+      }
       const result = replaceMainSeries(chart, previousSeries, {
         chartType: resolvedChartType,
         data: rows,
@@ -1894,6 +1921,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
       mainSeriesRef.current = result.series;
       mainSeriesTypeRef.current = result.chartType;
+      mainSeriesReplaced = true;
+      // Publish drawing invalidation immediately after the irreversible series
+      // replacement. Later projection/layout work may throw, but the drawing
+      // lifecycle must still receive a generation and rebind every entity.
+      drawingApi?.invalidateSurfaceCredentialsForSeriesReplacement();
+      setDrawingSeriesGeneration((prev) => prev + 1);
       renderedMainSeriesDataRef.current = result.data;
       renderedMainSeriesGenerationRef.current += 1;
       publishDrawingProjectionStore(nextProjectionStore);
@@ -1936,8 +1969,13 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         to: resolvedChartType,
       });
       setSeriesReady((prev) => prev + 1);
-      setDrawingSeriesGeneration((prev) => prev + 1);
     } catch (error) {
+      if (drawingPreparationAttempted && !mainSeriesReplaced) {
+        // replaceMainSeries retained/rolled back the old series after drawings
+        // began preparing. Re-enter same-symbol binding after complete,
+        // partial, or throwing preparation to restore the retained surface.
+        setDrawingSeriesGeneration((prev) => prev + 1);
+      }
       console.warn("SingleChartPanes: failed to switch main chart type:", error);
     } finally {
       isSyncingRef.current = false;
@@ -2625,11 +2663,18 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }, [customBg, indicatorDatasetOwned, paneDescriptors, seriesReady, theme]);
 
   useEffect(() => {
+    const currentBase = drawingKeyBase || symbol;
     const currentIds = new Set(subPanes.map((p) => p.id));
-    for (const prevId of prevSubPaneIdsRef.current) {
-      if (!currentIds.has(prevId)) clearSavedDrawings(`${drawingKeyBase || symbol}__${prevId}`);
+    const previous = prevSubPaneScopeRef.current;
+    for (const scopeKey of removedDrawingSubPaneScopeKeys({
+      currentBase,
+      currentIds,
+      previousBase: previous.base,
+      previousIds: previous.ids,
+    })) {
+      clearDrawingScopeAuthoritatively(scopeKey);
     }
-    prevSubPaneIdsRef.current = currentIds;
+    prevSubPaneScopeRef.current = { base: currentBase, ids: currentIds };
   }, [drawingKeyBase, subPanes, symbol]);
 
   const shouldMountDrawingEngine = supportsDrawingFeatures

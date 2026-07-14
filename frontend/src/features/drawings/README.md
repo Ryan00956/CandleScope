@@ -47,9 +47,26 @@ on legacy flat fields.
 
 - `drawingModel.js` owns tool ids, drawing constants, id creation, and pure geometry helpers.
 - `drawingToolState.js` owns toolbar-facing drawing preferences and selected drawing style mirroring.
-- `drawingPersistence.js` owns localStorage serialization, loading, existence checks, and clearing.
-- `useDrawingPersistenceLifecycle.js` owns when saved drawings are persisted,
-  restored, re-attached, or swapped across symbols.
+- `core/drawingDocument.ts` owns the immutable nine-kind business model and
+  independent document, geometry, and style revisions.
+- `core/drawingCommands.ts` and `core/drawingDocumentStore.ts` are the only
+  committed mutation/publication path. Completed controller actions carry the
+  complete canonical payload required by create, delete, move, resize,
+  update-style, clear, or reorder; unrelated primitive drift rejects the whole
+  transaction and can never supply missing command data.
+- `core/drawingCodec.ts` owns fail-closed conversion between the canonical
+  document and the unchanged legacy `SavedDrawing[]` wire contract.
+- `drawingPersistence.js` owns the legacy-compatible localStorage wire boundary;
+  in document mode it receives codec output, never raw primitives.
+- `useDrawingPersistenceLifecycle.js` owns command commit, dirty-session retry,
+  renderer compensation, restore/rebind, surface credentials, and retryable
+  symbol/scope isolation. User mutations remain blocked until the requested
+  symbol, active store, and current chart surface agree.
+- `drawingScopePersistence.ts` clears removed pane/indicator scopes through the
+  document session registry, including retryable empty storage tombstones.
+- `legacy/legacyPrimitiveRenderer.ts` materializes document snapshots into the
+  existing primitives. Primitive private fields are transient gesture/render
+  drafts and are validated at the command barrier, not persistent business truth.
 - `drawingPrimitiveFactory.js` owns primitive creation from saved models and tool actions.
 - `drawingSnapController.js` owns magnet snapping to visible candle time/price candidates.
 - `drawingSelectionController.js` owns selected drawing metadata, selected text snapshots, and hit testing.
@@ -82,3 +99,8 @@ on legacy flat fields.
 Phase 11 removed the old `src/hooks` and `src/runtime/workflows` drawing wrappers.
 `src/services/drawingStorage.js` remains as a compatibility storage entry until
 all drawing storage imports are folded into this feature.
+
+Drawing Engine V2 Phase 2 makes document authority the default. Set
+`VITE_DRAWING_DOCUMENT_AUTHORITY=legacy` at build time for an exact renderer
+rollback; both modes continue reading and writing the same `SavedDrawing[]`
+storage keys, so rollback does not migrate or delete user data.

@@ -168,6 +168,30 @@ test("WebSocket parser returns a typed patch message", () => {
   assert.deepEqual(parsed.message.range, { start: 100, end: 200 });
 });
 
+test("WebSocket parser preserves the OHLC bar used for realtime indicator values", () => {
+  const parsed = parseIndicatorWsMessage(JSON.stringify({
+    type: "indicator.preview",
+    clientId: "vol",
+    values: { vol: 25 },
+    barTime: 100,
+    bar: {
+      time: 100,
+      open: 12,
+      high: 13,
+      low: 8,
+      close: 9,
+      volume: 25,
+    },
+  }));
+
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) assert.fail("Expected typed realtime values message");
+  assert.equal(parsed.message.type, "indicator.preview");
+  if (parsed.message.type !== "indicator.preview") assert.fail("Expected preview message");
+  assert.equal(parsed.message.bar?.close, 9);
+  assert.equal(parsed.message.bar?.open, 12);
+});
+
 test("WebSocket parser rejects malformed snapshot, patch, and replace-range messages", () => {
   const malformed = [
     { type: "indicator.snapshot", lines: [] },

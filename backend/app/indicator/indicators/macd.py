@@ -31,6 +31,8 @@ class MACDIndicator(Indicator):
         self._slow: int = int(self.params.get("slow", 26))
         self._signal: int = int(self.params.get("signal", 9))
         self._source: str = self.params.get("source", "close")
+        self._hist_up_color: str = self.params.get("hist_up_color", "#22c55e")
+        self._hist_down_color: str = self.params.get("hist_down_color", "#ef4444")
         self.warmup_period = self._slow + self._signal - 1
 
         self._fast_alpha = 2.0 / (self._fast + 1)
@@ -46,6 +48,7 @@ class MACDIndicator(Indicator):
         self._slow_sum: float = 0.0
         self._signal_count: int = 0
         self._signal_sum: float = 0.0
+        self._hist_color_data: list[dict] = []
 
     def _reset_state(self) -> None:
         self._fast_ema = None
@@ -56,6 +59,7 @@ class MACDIndicator(Indicator):
         self._slow_sum = 0.0
         self._signal_count = 0
         self._signal_sum = 0.0
+        self._hist_color_data = []
 
     def init(self, bars: list[BarData]) -> None:
         self._reset_state()
@@ -121,6 +125,11 @@ class MACDIndicator(Indicator):
             self._append_output("dif", bar.time, dif)
             self._append_output("dea", bar.time, dea)
             self._append_output("hist", bar.time, hist)
+            if hist is not None:
+                self._hist_color_data.append({
+                    "time": bar.time,
+                    "color": self._hist_up_color if hist >= 0 else self._hist_down_color,
+                })
 
         return dif, dea, hist
 
@@ -171,9 +180,10 @@ class MACDIndicator(Indicator):
             },
             "hist": {
                 "display_name": "MACD Hist",
-                "color": "#22c55e",
+                "color": self._hist_up_color,
                 "series_type": SeriesType.HISTOGRAM,
                 "pane": PaneType.SEPARATE,
+                "color_data": self._hist_color_data,
             },
         }
 
@@ -192,6 +202,15 @@ class MACDIndicator(Indicator):
                 IndicatorParam(key="signal", label="Signal Period", type="int", default=9, min=1, max=50),
                 IndicatorParam(key="source", label="Source", type="string", default="close",
                                options=["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"]),
+                IndicatorParam(key="hist_up_color", label="Histogram Up Color", type="color", default="#22c55e"),
+                IndicatorParam(key="hist_down_color", label="Histogram Down Color", type="color", default="#ef4444"),
             ],
-            default_params={"fast": 12, "slow": 26, "signal": 9, "source": "close"},
+            default_params={
+                "fast": 12,
+                "slow": 26,
+                "signal": 9,
+                "source": "close",
+                "hist_up_color": "#22c55e",
+                "hist_down_color": "#ef4444",
+            },
         )

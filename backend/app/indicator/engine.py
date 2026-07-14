@@ -413,6 +413,7 @@ class IndicatorEngine:
                 self._emit(
                     IndicatorEventType.INDICATOR_UPDATED, key,
                     values=values, bar_timestamp=bar.time,
+                    detail={"bar": bar.to_dict()},
                 )
             except Exception as exc:
                 logger.error("update_closed failed for %s: %s", key.uid, exc, exc_info=True)
@@ -456,6 +457,7 @@ class IndicatorEngine:
                 self._emit(
                     IndicatorEventType.INDICATOR_PREVIEW, key,
                     values=values, bar_timestamp=bar.time,
+                    detail={"bar": bar.to_dict()},
                 )
             except Exception as exc:
                 logger.error("update_partial failed for %s: %s", key.uid, exc, exc_info=True)

@@ -304,6 +304,18 @@ function parseIndicatorWsRecord(value: unknown): IndicatorWsMessage {
       values: expectIndicatorRecord(record.values, `${path}.values`),
       barTime: expectIndicatorFiniteNumber(record.barTime, `${path}.barTime`),
     };
+    if (record.bar !== undefined && record.bar !== null) {
+      const barRecord = expectIndicatorRecord(record.bar, `${path}.bar`);
+      const bar = {
+        time: expectIndicatorFiniteNumber(barRecord.time, `${path}.bar.time`),
+        open: expectIndicatorFiniteNumber(barRecord.open, `${path}.bar.open`),
+        high: expectIndicatorFiniteNumber(barRecord.high, `${path}.bar.high`),
+        low: expectIndicatorFiniteNumber(barRecord.low, `${path}.bar.low`),
+        close: expectIndicatorFiniteNumber(barRecord.close, `${path}.bar.close`),
+        volume: expectIndicatorFiniteNumber(barRecord.volume, `${path}.bar.volume`),
+      };
+      message.bar = bar as NonNullable<IndicatorValuesMessage["bar"]>;
+    }
     if (seq !== undefined) message.seq = seq;
     return message;
   }

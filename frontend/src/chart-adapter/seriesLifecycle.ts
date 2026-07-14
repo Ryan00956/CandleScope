@@ -240,7 +240,7 @@ export function buildIndicatorSeriesOptions(
     options.crosshairMarkerVisible = crosshairMarkerVisible;
   }
 
-  if (isHistogram) {
+  if (isHistogram && line?.pane === "volume") {
     options.priceFormat = { type: "volume" };
   }
 
@@ -265,6 +265,41 @@ export function createIndicatorSeries(
     paneIndex,
   ]);
   return series as IndicatorSeriesHandle;
+}
+
+export function applyIndicatorPaneSeriesOrder(
+  entries: Array<{
+    lineConfig?: IndicatorSeriesDefinition | null;
+    paneIndex?: number;
+    series: IndicatorSeriesHandle;
+  }> = [],
+): number {
+  const entriesByPane = new Map<number, Array<{
+    entry: (typeof entries)[number];
+    originalIndex: number;
+  }>>();
+
+  entries.forEach((entry, originalIndex) => {
+    const paneIndex = Number(entry.paneIndex);
+    if (!Number.isInteger(paneIndex) || paneIndex <= 0) return;
+    const paneEntries = entriesByPane.get(paneIndex) || [];
+    paneEntries.push({ entry, originalIndex });
+    entriesByPane.set(paneIndex, paneEntries);
+  });
+
+  let orderedSeries = 0;
+  for (const paneEntries of entriesByPane.values()) {
+    paneEntries.sort((left, right) => {
+      const leftPriority = left.entry.lineConfig?.type === "histogram" ? 0 : 1;
+      const rightPriority = right.entry.lineConfig?.type === "histogram" ? 0 : 1;
+      return leftPriority - rightPriority || left.originalIndex - right.originalIndex;
+    });
+    paneEntries.forEach(({ entry }, order) => {
+      entry.series.setSeriesOrder(order);
+      orderedSeries += 1;
+    });
+  }
+  return orderedSeries;
 }
 
 export function removeSeriesEntries(

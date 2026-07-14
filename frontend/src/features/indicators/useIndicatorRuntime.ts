@@ -6,6 +6,7 @@ import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js"
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import type { IndicatorRangeEvent } from "../market-data/klineContracts.js";
 import { useActiveIndicatorStore } from "./activeIndicatorStore.js";
+import { resolveRealtimeHistogramColor } from "./indicatorRealtimeColor.js";
 import { computeIndicatorRangeBatch } from "../../services/indicatorApi.js";
 import { useIndicatorComputeController } from "./indicatorComputeController.js";
 import { parseIntervalParts, parseIntervalSeconds } from "../../utils/intervals.js";
@@ -63,6 +64,7 @@ import {
 import type {
   DeferredRightCatchupPlan,
   IndicatorDefinition,
+  IndicatorLine,
   IndicatorOutputState,
   IndicatorParams,
   IndicatorPayloadEnvelope,
@@ -751,21 +753,31 @@ export function useIndicatorRuntime(
     const dataRevision = isFinal ? normalizeIndicatorRevision(payload) : null;
     if (dataRevision) seriesRevisionRef.current = dataRevision;
     const currentChartData = chartDataRef.current || [];
-    const bar = currentChartData.find((item) => item.time === barTime);
-    const histogramColor = bar
-      ? (Number(bar.close) >= Number(bar.open) ? candleUpColorRef.current : candleDownColorRef.current)
-      : null;
+    const payloadBar = payload?.bar;
+    const bar = payloadBar && Number(payloadBar.time) === Number(barTime)
+      ? payloadBar
+      : currentChartData.find((item) => Number(item.time) === Number(barTime));
 
     setActiveIndicators((prev) =>
       prev.map((indicator) => {
         if (indicator.id !== indicatorId || !Array.isArray(indicator.lines)) return indicator;
+        const resolveHistogramColor = (line: IndicatorLine, value: unknown) => (
+          resolveRealtimeHistogramColor({
+            bar,
+            downColor: candleDownColorRef.current,
+            indicator,
+            line,
+            upColor: candleUpColorRef.current,
+            value,
+          })
+        );
         if (isFinal) {
           upsertCachedIndicatorLinePoint(
             indicator,
             getIndicatorCacheContext(),
             values,
             barTime,
-            histogramColor || undefined,
+            resolveHistogramColor,
           );
           if (dataRevision) {
             rebaseCachedIndicatorRevision(indicator, getIndicatorCacheContext(), dataRevision);
@@ -776,6 +788,7 @@ export function useIndicatorRuntime(
           const value = resolveWsValue(line, values, isSingleLine);
           if (value === undefined) return line;
           const point: IndicatorValuePoint = { time: barTime, value: Number(value) };
+          const histogramColor = resolveHistogramColor(line, value);
           if (line.type === "histogram" && histogramColor) {
             point.color = histogramColor;
           }

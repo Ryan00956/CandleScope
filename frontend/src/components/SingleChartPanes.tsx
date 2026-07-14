@@ -22,6 +22,7 @@ import {
   createChartInstance,
 } from "../chart-adapter/lightweightChartSurface";
 import {
+  applyIndicatorPaneSeriesOrder,
   buildIndicatorSeriesOptions,
   createFutureTimeAxisSeries,
   createIndicatorSeries,
@@ -2418,6 +2419,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         series: removedSeriesCount,
       });
     }
+    applyIndicatorPaneSeriesOrder(nextEntries);
     indicatorSeriesRef.current = nextEntries;
 
     trimPanePlaceholderSeries(chart, panePlaceholderSeriesRef, expectedPaneCount);

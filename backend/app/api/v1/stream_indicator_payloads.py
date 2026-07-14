@@ -970,9 +970,27 @@ def _indicator_event_to_ws_message(
     }
 
     if event.event_type == IndicatorEventType.INDICATOR_PREVIEW:
-        return {**base, "type": "indicator.preview", "values": event.values}
+        return {
+            **base,
+            "type": "indicator.preview",
+            "values": event.values,
+            **(
+                {"bar": event.detail["bar"]}
+                if isinstance(event.detail, dict) and isinstance(event.detail.get("bar"), dict)
+                else {}
+            ),
+        }
     if event.event_type == IndicatorEventType.INDICATOR_UPDATED:
-        return {**base, "type": "indicator.update", "values": event.values}
+        return {
+            **base,
+            "type": "indicator.update",
+            "values": event.values,
+            **(
+                {"bar": event.detail["bar"]}
+                if isinstance(event.detail, dict) and isinstance(event.detail.get("bar"), dict)
+                else {}
+            ),
+        }
     if event.event_type == IndicatorEventType.INDICATOR_RECOMPUTED:
         recomputed_range = _recompute_event_range(event, {})
         if recomputed_range is None:

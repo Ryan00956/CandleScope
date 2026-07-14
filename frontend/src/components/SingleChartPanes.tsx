@@ -11,7 +11,11 @@ import type {
   MutableRefObject,
 } from "react";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
-import { applyChartPaneAppearance, buildChartPaneOptions } from "../chart-adapter/chartPaneLifecycle";
+import {
+  applyChartPaneAppearance,
+  buildChartPaneOptions,
+  buildCrosshairOptions,
+} from "../chart-adapter/chartPaneLifecycle";
 import {
   buildPaneLayoutOptions,
   chartSeriesTypes,
@@ -90,6 +94,11 @@ import {
   drawingToolForAnchorMode,
   supportsDrawingAnchorMode,
 } from "../features/drawings/drawingCapabilities";
+import {
+  cursorOverlayClassForTool,
+  cursorStyleForDrawingTool,
+  shouldShowCrosshairDetails,
+} from "../features/drawings/drawingModel";
 import { clearSavedDrawings } from "../features/drawings/drawingPersistence";
 import {
   axisTimeKey,
@@ -866,6 +875,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 }: SingleChartPanesProps, ref) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const cursorOverlayRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<AdapterChart | null>(null);
   const viewportControllerRef = useRef<ViewportController | null>(null);
   const mainSeriesRef = useRef<MainSeriesHandle | null>(null);
@@ -1083,6 +1093,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const effectiveDrawingTool = drawingToolForAnchorMode(drawingAnchorMode, drawingTool);
   const drawingEngineToolActive = effectiveDrawingTool != null
     && DRAWING_ENGINE_TOOL_IDS.has(effectiveDrawingTool);
+  const cursorOverlayClass = cursorOverlayClassForTool(effectiveDrawingTool);
+  const showCrosshairDetails = shouldShowCrosshairDetails(effectiveDrawingTool);
   const projectionSettings = useMemo(() => {
     if (resolvedChartType === "renko") {
       return {
@@ -1706,10 +1718,57 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   useEffect(() => {
     const activeType = mainSeriesTypeRef.current || resolvedChartType;
-    mainSeriesRef.current?.applyOptions(
-      buildMainSeriesStyleOptions(activeType, { upColor, downColor }),
-    );
-  }, [downColor, resolvedChartType, upColor]);
+    mainSeriesRef.current?.applyOptions({
+      ...buildMainSeriesStyleOptions(activeType, { upColor, downColor }),
+      crosshairMarkerVisible: showCrosshairDetails && !drawingEngineToolActive,
+    });
+  }, [downColor, drawingEngineToolActive, resolvedChartType, seriesReady, showCrosshairDetails, upColor]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    chart.applyOptions({
+      crosshair: buildCrosshairOptions(showCrosshairDetails),
+    });
+  }, [seriesReady, showCrosshairDetails]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    const overlay = cursorOverlayRef.current;
+    if (!container || !overlay || !cursorOverlayClass) {
+      if (overlay) overlay.style.display = "none";
+      return undefined;
+    }
+
+    const updateCursor = (event: PointerEvent) => {
+      if (event.pointerType === "touch") {
+        overlay.style.display = "none";
+        return;
+      }
+      const rect = container.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+        overlay.style.display = "none";
+        return;
+      }
+      overlay.style.display = "block";
+      overlay.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+    };
+    const hideCursor = () => {
+      overlay.style.display = "none";
+    };
+
+    container.addEventListener("pointermove", updateCursor);
+    container.addEventListener("pointerenter", updateCursor);
+    container.addEventListener("pointerleave", hideCursor);
+    return () => {
+      hideCursor();
+      container.removeEventListener("pointermove", updateCursor);
+      container.removeEventListener("pointerenter", updateCursor);
+      container.removeEventListener("pointerleave", hideCursor);
+    };
+  }, [cursorOverlayClass]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -2295,7 +2354,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
         if (existing) {
           existing.series.applyOptions?.(buildIndicatorSeriesOptions(line, {
-            crosshairMarkerVisible: !drawingEngineToolActive,
+            crosshairMarkerVisible: showCrosshairDetails && !drawingEngineToolActive,
           }));
           applyLineSeriesData(existing.series, validData, existing.data, {
             ...detail,
@@ -2320,7 +2379,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         try {
           const series = createIndicatorSeries(chart, line, {
             paneIndex: pane.paneIndex,
-            crosshairMarkerVisible: !drawingEngineToolActive,
+            crosshairMarkerVisible: showCrosshairDetails && !drawingEngineToolActive,
           });
           series.setData(validData);
           recordPerfEvent("chart.indicatorSeries.setData", {
@@ -2381,7 +2440,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     })) {
       setSeriesReady((prev) => prev + 1);
     }
-  }, [datasetKey, drawingEngineToolActive, effectiveDrawingTool, indicatorDatasetOwned, interval, materializeRuntimePaneLayout, paneDescriptors, renderDataTimeSet, seriesReady, usesDerivedAxis]);
+  }, [datasetKey, drawingEngineToolActive, indicatorDatasetOwned, interval, materializeRuntimePaneLayout, paneDescriptors, renderDataTimeSet, seriesReady, showCrosshairDetails, usesDerivedAxis]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -2590,7 +2649,17 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         data-pane-id="single-chart"
         data-pane-type="native-panes"
         onContextMenu={handlePriceScaleContextMenu}
+        style={{ cursor: cursorStyleForDrawingTool(effectiveDrawingTool) }}
       />
+
+      {cursorOverlayClass && (
+        <div className="chart-pane-cursor-overlay" aria-hidden="true">
+          <div
+            ref={cursorOverlayRef}
+            className={`chart-pane-cursor ${cursorOverlayClass}`}
+          />
+        </div>
+      )}
 
       {usesDerivedAxis && (
         <div className="synthetic-chart-notice" role="status">

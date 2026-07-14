@@ -3,8 +3,11 @@ import assert from "node:assert/strict";
 
 import {
   isPassiveCursorTool,
+  cursorOverlayClassForTool,
+  cursorStyleForDrawingTool,
   cursorStyleForPassiveTool,
   isFiniteNumber,
+  shouldShowCrosshairDetails,
   shapeTypeFromTool,
   axisLineTypeFromTool,
   constrainShapeScreenPoint,
@@ -31,6 +34,25 @@ test("cursorStyleForPassiveTool maps tools to CSS cursors", () => {
   assert.equal(cursorStyleForPassiveTool("cursor-highlighter"), "none");
   assert.equal(cursorStyleForPassiveTool("cursor-default"), "default");
   assert.equal(cursorStyleForPassiveTool(malformedFixture<DrawingToolId>("anything-else")), "default");
+});
+
+test("drawing cursor presentation keeps all toolbar cursor variants distinct", () => {
+  assert.equal(cursorStyleForDrawingTool("cursor-default"), "default");
+  assert.equal(cursorStyleForDrawingTool("cursor-crosshair"), "crosshair");
+  assert.equal(cursorStyleForDrawingTool("cursor-dot"), "none");
+  assert.equal(cursorStyleForDrawingTool("cursor-highlighter"), "none");
+  assert.equal(cursorStyleForDrawingTool("cursor-plain"), "default");
+  assert.equal(cursorStyleForDrawingTool("line-segment"), "crosshair");
+
+  assert.equal(cursorOverlayClassForTool("cursor-dot"), "chart-pane-cursor-dot");
+  assert.equal(cursorOverlayClassForTool("cursor-highlighter"), "chart-pane-cursor-highlighter");
+  assert.equal(cursorOverlayClassForTool("cursor-default"), null);
+
+  assert.equal(shouldShowCrosshairDetails("cursor-default"), true);
+  assert.equal(shouldShowCrosshairDetails("cursor-crosshair"), true);
+  assert.equal(shouldShowCrosshairDetails("cursor-dot"), false);
+  assert.equal(shouldShowCrosshairDetails("cursor-highlighter"), false);
+  assert.equal(shouldShowCrosshairDetails("cursor-plain"), false);
 });
 
 test("isFiniteNumber accepts only finite numbers", () => {

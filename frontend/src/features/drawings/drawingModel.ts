@@ -26,6 +26,15 @@ export const CURSOR_TOOL_IDS = new Set<PassiveCursorToolId>([
   "cursor-highlighter",
   "cursor-plain",
 ]);
+const CUSTOM_POINTER_TOOL_IDS = new Set<PassiveCursorToolId>([
+  "cursor-dot",
+  "cursor-highlighter",
+]);
+const HIDDEN_CROSSHAIR_TOOL_IDS = new Set<PassiveCursorToolId>([
+  "cursor-dot",
+  "cursor-highlighter",
+  "cursor-plain",
+]);
 export const DRAWING_ENGINE_TOOL_IDS = new Set<DrawingToolId>([
   "pen",
   "highlighter",
@@ -71,6 +80,21 @@ export function cursorStyleForPassiveTool(tool: DrawingToolId | null | undefined
   if (tool === "cursor-crosshair") return "crosshair";
   if (tool === "cursor-dot" || tool === "cursor-highlighter") return "none";
   return "default";
+}
+
+export function cursorStyleForDrawingTool(tool: DrawingToolId | null | undefined): string {
+  return isPassiveCursorTool(tool) ? cursorStyleForPassiveTool(tool) : "crosshair";
+}
+
+export function cursorOverlayClassForTool(tool: DrawingToolId | null | undefined): string | null {
+  if (!CUSTOM_POINTER_TOOL_IDS.has(tool as PassiveCursorToolId)) return null;
+  return tool === "cursor-dot"
+    ? "chart-pane-cursor-dot"
+    : "chart-pane-cursor-highlighter";
+}
+
+export function shouldShowCrosshairDetails(tool: DrawingToolId | null | undefined): boolean {
+  return !HIDDEN_CROSSHAIR_TOOL_IDS.has(tool as PassiveCursorToolId);
 }
 
 export function isTextOverlayTarget(target: EventTarget | null): boolean {

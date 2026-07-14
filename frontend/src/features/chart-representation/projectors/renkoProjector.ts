@@ -44,7 +44,7 @@ function positiveFiniteNumber(value: unknown, name: string): number {
 }
 
 function decimalPlaces(value: number): number {
-  const [coefficient, exponentText] = String(value).toLowerCase().split("e");
+  const [coefficient = "", exponentText] = String(value).toLowerCase().split("e");
   const fractionLength = coefficient.split(".")[1]?.length || 0;
   const exponent = Number(exponentText || 0);
   return Math.max(0, fractionLength - exponent);

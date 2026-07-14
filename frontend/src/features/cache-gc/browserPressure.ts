@@ -94,6 +94,6 @@ function fallbackHeap(
     available: false,
     source,
     estimatedBytes: Number(estimatedBytes || 0),
-    error: error == null ? undefined : errorMessage(error),
+    ...(error == null ? {} : { error: errorMessage(error) }),
   };
 }

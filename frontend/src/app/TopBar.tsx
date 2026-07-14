@@ -83,12 +83,12 @@ function TopBar({ symbolSearch, controls, marketSummary }: TopBarProps) {
 
       <SymbolSearch
         currentSymbol={currentSymbol}
-        currentMarketType={currentMarketType}
-        currentExchange={currentExchange}
-        exchangeCatalog={exchangeCatalog}
         onSelect={onSelectSymbol}
-        watchlists={watchlists}
-        onAddToWatchlist={onAddToWatchlist}
+        {...(currentMarketType === undefined ? {} : { currentMarketType })}
+        {...(currentExchange === undefined ? {} : { currentExchange })}
+        {...(exchangeCatalog === undefined ? {} : { exchangeCatalog })}
+        {...(watchlists === undefined ? {} : { watchlists })}
+        {...(onAddToWatchlist === undefined ? {} : { onAddToWatchlist })}
       />
 
       <button

@@ -11,7 +11,7 @@ export function limitFreehandCapturePositions(
   positions: readonly ScreenPoint[] | null | undefined,
   remainingCapacity: number,
 ): ScreenPoint[] {
-  if (!Array.isArray(positions)
+  if (!positions
     || !Number.isSafeInteger(remainingCapacity)
     || remainingCapacity < 0) {
     return [];
@@ -32,23 +32,26 @@ export function mergePendingActiveDrawingMove(
   if (!pending
     || !isFreehandMovePayload(pending)
     || pending.tool !== payload.tool) {
-    return Array.isArray(payload.positions) && payload.positions.length > limit
+    return payload.positions && payload.positions.length > limit
       ? { ...payload, positions: payload.positions.slice(0, limit) }
       : payload;
   }
 
-  const positions = Array.isArray(pending.positions)
+  const positions = pending.positions
     ? pending.positions
     : (pending.pos ? [pending.pos] : []);
-  const incoming = Array.isArray(payload.positions) && payload.positions.length > 0
+  const incoming = payload.positions && payload.positions.length > 0
     ? payload.positions
     : (payload.pos ? [payload.pos] : []);
   const remaining = Math.max(0, limit - positions.length);
   for (let index = 0; index < incoming.length && index < remaining; index += 1) {
-    positions.push(incoming[index]);
+    const position = incoming[index];
+    if (position) positions.push(position);
   }
   pending.positions = positions;
-  pending.pos = payload.pos;
-  pending.e = payload.e;
+  if (payload.pos) pending.pos = payload.pos;
+  else delete pending.pos;
+  if (payload.e) pending.e = payload.e;
+  else delete pending.e;
   return pending;
 }

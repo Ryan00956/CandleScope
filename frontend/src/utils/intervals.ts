@@ -51,8 +51,10 @@ function isIntervalUnit(value: string): value is IntervalUnit {
 export function parseIntervalParts(interval: unknown): IntervalParts | null {
   const match = CUSTOM_INTERVAL_RE.exec(String(interval || "").trim());
   if (!match) return null;
-  const amount = parseInt(match[1], 10);
+  const amountToken = match[1];
   const unit = match[2];
+  if (!amountToken || !unit) return null;
+  const amount = parseInt(amountToken, 10);
   if (!Number.isFinite(amount) || amount <= 0 || !isIntervalUnit(unit)) return null;
   return { amount, unit };
 }

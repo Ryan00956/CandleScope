@@ -131,10 +131,10 @@ export function useWatchlistFullCacheRuntime({
       nativeIntervals,
       customIntervalRecords,
       currentSession: {
-        exchange: currentExchange,
-        interval: currentInterval,
-        marketType: currentMarketType,
-        symbol: currentSymbol,
+        ...(currentExchange === undefined ? {} : { exchange: currentExchange }),
+        ...(currentInterval === undefined ? {} : { interval: currentInterval }),
+        ...(currentMarketType === undefined ? {} : { marketType: currentMarketType }),
+        ...(currentSymbol === undefined ? {} : { symbol: currentSymbol }),
         symbolKey: currentSymbolKey,
       },
     }),
@@ -160,9 +160,9 @@ export function useWatchlistFullCacheRuntime({
       nativeIntervals,
       customIntervalRecords,
       currentSession: {
-        exchange: currentExchange,
+        ...(currentExchange === undefined ? {} : { exchange: currentExchange }),
         interval: null,
-        marketType: currentMarketType,
+        ...(currentMarketType === undefined ? {} : { marketType: currentMarketType }),
         symbol: null,
         symbolKey: null,
       },
@@ -241,6 +241,7 @@ export function useWatchlistFullCacheRuntime({
       while (!controller.signal.aborted && index < jobs.length) {
         const job = jobs[index];
         index += 1;
+        if (!job) continue;
         setFullCacheEntryStatus(job.symbolKey, job.interval, "loading", { source: "latest" });
         try {
           const result = await fetchLatestKlines(

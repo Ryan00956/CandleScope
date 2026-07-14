@@ -11,6 +11,7 @@ import type {
   FullCacheTarget,
   FullCacheTargetOptions,
 } from "../watchlistFullCacheTypes.js";
+import { mustBeDefined } from "../../../test/testHelpers.js";
 
 test("prioritizeFullCacheIntervals puts current and common intervals first", () => {
   assert.deepEqual(
@@ -44,9 +45,10 @@ test("buildWatchlistFullCacheTargets includes only full subscriptions", () => {
   });
 
   assert.equal(targets.length, 1);
-  assert.equal(targets[0].symbolKey, "spot:BTCUSDT");
-  assert.deepEqual(targets[0].intervals, ["1m", "1h", "45m"]);
-  assert.deepEqual(targets[0].preloadIntervals, ["1h", "1m", "45m"]);
+  const target = mustBeDefined(targets[0]);
+  assert.equal(target.symbolKey, "spot:BTCUSDT");
+  assert.deepEqual(target.intervals, ["1m", "1h", "45m"]);
+  assert.deepEqual(target.preloadIntervals, ["1h", "1m", "45m"]);
 });
 
 test("buildFullCachePreloadJobs prioritizes current symbol and caps work", () => {
@@ -128,7 +130,10 @@ test("buildWatchlistFullSocketTargets ignores current interval priority", () => 
     },
   });
 
-  assert.notDeepEqual(oneHourTargets[0].preloadIntervals, customTargets[0].preloadIntervals);
+  assert.notDeepEqual(
+    mustBeDefined(oneHourTargets[0]).preloadIntervals,
+    mustBeDefined(customTargets[0]).preloadIntervals,
+  );
   assert.deepEqual(oneHourSocketTargets, customSocketTargets);
-  assert.deepEqual(oneHourSocketTargets[0].intervals, ["1m", "1h", "45m"]);
+  assert.deepEqual(mustBeDefined(oneHourSocketTargets[0]).intervals, ["1m", "1h", "45m"]);
 });

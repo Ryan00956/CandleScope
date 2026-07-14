@@ -85,14 +85,16 @@ function adjustAlpha(hex: string, alpha: number): string {
   let r = 0, g = 0, b = 0;
   if (hex.startsWith("rgba")) {
     const match = hex.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-    if (match) { r = +match[1]; g = +match[2]; b = +match[3]; }
+    const [, red, green, blue] = match ?? [];
+    if (red && green && blue) { r = +red; g = +green; b = +blue; }
   } else if (hex.startsWith("rgb")) {
     const match = hex.match(/rgb\((\d+),\s*(\d+),\s*(\d+)/);
-    if (match) { r = +match[1]; g = +match[2]; b = +match[3]; }
+    const [, red, green, blue] = match ?? [];
+    if (red && green && blue) { r = +red; g = +green; b = +blue; }
   } else if (hex.length === 4) {
-    r = parseInt(hex[1] + hex[1], 16);
-    g = parseInt(hex[2] + hex[2], 16);
-    b = parseInt(hex[3] + hex[3], 16);
+    r = parseInt(hex.charAt(1).repeat(2), 16);
+    g = parseInt(hex.charAt(2).repeat(2), 16);
+    b = parseInt(hex.charAt(3).repeat(2), 16);
   } else if (hex.length === 7) {
     r = parseInt(hex.slice(1, 3), 16);
     g = parseInt(hex.slice(3, 5), 16);
@@ -1002,11 +1004,12 @@ export class PositionDrawingPrimitive {
   }
 
   setDataPoints(points: DrawingDataPoint[]): void {
-    if (points.length >= 2) {
-      const nextRange = normalizePositionTimeRange({ start: points[0], end: points[1] });
-      if (nextRange && Number.isFinite(Number(points[0].price))) {
+    const [start, end] = points;
+    if (start && end) {
+      const nextRange = normalizePositionTimeRange({ start, end });
+      if (nextRange && Number.isFinite(Number(start.price))) {
         this._timeRange = nextRange;
-        this._entryPrice = points[0].price;
+        this._entryPrice = start.price;
       }
     }
     this._requestUpdate?.();

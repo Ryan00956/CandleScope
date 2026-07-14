@@ -15,6 +15,8 @@ import type {
 } from "./chartAdapterTypes.js";
 
 export function toCandlePoint(d: ChartSeriesInputRow): ChartSeriesInputRow {
+  const time = d.time;
+  if (time == null) return {};
   if (
     d?.__whitespace
     || d?.open == null
@@ -22,9 +24,9 @@ export function toCandlePoint(d: ChartSeriesInputRow): ChartSeriesInputRow {
     || d?.low == null
     || d?.close == null
   ) {
-    return { time: d.time };
+    return { time };
   }
-  return { time: d.time, open: d.open, high: d.high, low: d.low, close: d.close };
+  return { time, open: d.open, high: d.high, low: d.low, close: d.close };
 }
 
 export function filterEntriesByTime<TEntry extends { time?: ChartTime }>(
@@ -52,10 +54,10 @@ export function normalizeLineSeriesData(
   const isHistogram = line?.type === "histogram";
   const sourceData = filterEntriesByTime(line?.data, allowedTimeSet);
   if (isHistogram && line.colorData && Array.isArray(line.colorData)) {
-    const colorMap = new Map();
+    const colorMap = new Map<string, string>();
     for (const cd of filterEntriesByTime(line.colorData, allowedTimeSet)) {
       const key = chartTimeKey(cd.time);
-      if (key !== null) colorMap.set(key, cd.color);
+      if (key !== null && cd.color) colorMap.set(key, cd.color);
     }
     return sourceData
       .filter((d): d is NormalizedIndicatorDataEntry => (
@@ -63,7 +65,8 @@ export function normalizeLineSeriesData(
       ))
       .map((d) => {
         const entry: NormalizedIndicatorDataEntry = { time: d.time, value: d.value };
-        const c = colorMap.get(chartTimeKey(d.time));
+        const key = chartTimeKey(d.time);
+        const c = key === null ? undefined : colorMap.get(key);
         if (c) entry.color = c;
         return entry;
       });
@@ -191,7 +194,8 @@ export function applyLineSeriesData(
   if (!preferSetData && canUseTrailingSeriesUpdate(previousData, nextData)) {
     const start = Math.max(0, previousData.length - 1);
     for (let i = start; i < nextData.length; i += 1) {
-      series.update(nextData[i]);
+      const point = nextData[i];
+      if (point) series.update(point);
     }
     recordPerfEvent?.("chart.indicatorSeries.update", {
       ...detail,

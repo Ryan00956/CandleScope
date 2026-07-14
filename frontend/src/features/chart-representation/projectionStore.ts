@@ -69,8 +69,8 @@ function sameProjectedValue(
   const leftIsArray = Array.isArray(left);
   const rightIsArray = Array.isArray(right);
   if (leftIsArray !== rightIsArray) return false;
-  const leftPrototype = Object.getPrototypeOf(left);
-  const rightPrototype = Object.getPrototypeOf(right);
+  const leftPrototype = Reflect.getPrototypeOf(left);
+  const rightPrototype = Reflect.getPrototypeOf(right);
   if (leftPrototype !== rightPrototype
     || (!leftIsArray && leftPrototype !== Object.prototype && leftPrototype !== null)) {
     return false;
@@ -235,8 +235,7 @@ function patchResult(
 }
 
 function sourceTail(rows: readonly SourceBar[], startIndex: number): SourceBar[] {
-  if (Array.isArray(rows)) return rows.slice(startIndex);
-  return Array.from(rows || []).slice(startIndex);
+  return rows.slice(startIndex);
 }
 
 function firstDifference(
@@ -332,7 +331,7 @@ export class ProjectionStore {
 
   getDisplayByTime(time: unknown): DisplayRow | null {
     const index = this.indexOfDisplayTime(time);
-    return index >= 0 ? this._display[index] : null;
+    return index >= 0 ? this._display[index] ?? null : null;
   }
 
   indexOfDisplayTime(time: unknown): number {
@@ -389,7 +388,7 @@ export class ProjectionStore {
     return this._reprojectStructural(currentRows, {
       confirmTrimmedTail: detail.appended === true
         || Math.max(0, Number(detail.addedRight) || 0) > 0,
-      deltaType: detail.type,
+      deltaType: typeof detail.type === "string" ? detail.type : "",
       trimmedLeft,
     });
   }
@@ -455,9 +454,9 @@ export class ProjectionStore {
     // explicit close event was missed. Reproject from that tail's checkpoint
     // so the old row is committed before the new provisional overlay is tried.
     const sourceStart = Math.min(this._confirmedSourceLength, defaultSourceStart);
-    const seedState = sourceStart < this._sourceCheckpoints.length
+    const seedState = (sourceStart < this._sourceCheckpoints.length
       ? this._sourceCheckpoints[sourceStart]
-      : this._projectionFinalState;
+      : this._projectionFinalState) ?? null;
     const affectedRows = sourceTail(currentRows, sourceStart);
     const projection = this._projectStatefulRows(affectedRows, { seedState });
     if (!projection || !hasStrictlyIncreasingOutputOrders(projection.data)) return null;
@@ -558,9 +557,13 @@ export class ProjectionStore {
 
     if (delta.type === "tick" && delta.replaced) {
       const sourceIndex = currentRows.length - 1;
+      const replacementSource = currentRows[sourceIndex];
+      if (!replacementSource || retainedSource.length === 0) {
+        return this.reset(currentRows);
+      }
       const previousDisplayRow = this._resolvePreviousDisplayRow(retainedDisplay.slice(0, -1));
-      const insert = this.projector.project([currentRows[sourceIndex]], { previousDisplayRow });
-      retainedSource[retainedSource.length - 1] = currentRows[sourceIndex];
+      const insert = this.projector.project([replacementSource], { previousDisplayRow });
+      retainedSource[retainedSource.length - 1] = replacementSource;
       retainedDisplay.splice(Math.max(0, retainedDisplay.length - 1), 1, ...insert);
       this._source = retainedSource;
       this._display = retainedDisplay;
@@ -643,7 +646,7 @@ export class ProjectionStore {
     if (deltaType === "prepend") return null;
     if (trimmedLeft <= 0) return this._projectionSeedState;
     if (trimmedLeft < this._sourceCheckpoints.length) {
-      return this._sourceCheckpoints[trimmedLeft];
+      return this._sourceCheckpoints[trimmedLeft] ?? null;
     }
     if (trimmedLeft === this._source.length) {
       if (confirmTrimmedTail && this._confirmedSourceLength < this._source.length) {
@@ -697,9 +700,10 @@ export class ProjectionStore {
     // only the two fresh containers are extended for the provisional overlay.
     const projectWithState = this.projector.projectWithState;
     if (typeof projectWithState !== "function") return null;
-    const sourceRows = Array.isArray(rows) ? rows : Array.from(rows || []);
-    const hasProvisionalTail = sourceRows.length > 0
-      && isExplicitlyProvisionalSourceRow(sourceRows[sourceRows.length - 1]);
+    const sourceRows = rows;
+    const provisionalSourceRow = sourceRows.at(-1);
+    const hasProvisionalTail = provisionalSourceRow !== undefined
+      && isExplicitlyProvisionalSourceRow(provisionalSourceRow);
     const confirmedSourceLength = sourceRows.length - Number(hasProvisionalTail);
     const confirmedRows = hasProvisionalTail
       ? sourceRows.slice(0, confirmedSourceLength)
@@ -718,7 +722,7 @@ export class ProjectionStore {
 
     const provisionalProjection = projectWithState.call(
       this.projector,
-      [sourceRows[sourceRows.length - 1]],
+      provisionalSourceRow ? [provisionalSourceRow] : [],
       {
         provisional: true,
         seedState: confirmedProjection.state,
@@ -747,7 +751,7 @@ export class ProjectionStore {
     if (typeof this.projector.resolvePreviousDisplayRow === "function") {
       return this.projector.resolvePreviousDisplayRow(rows);
     }
-    return rows[rows.length - 1] || null;
+    return rows.at(-1) ?? null;
   }
 
   _commitStatefulSourceTail({
@@ -842,7 +846,7 @@ export class ProjectionStore {
 
   _rebuildDisplayTimeIndex(): void {
     this._displayTimeIndex.clear();
-    const displayTimes = [];
+    const displayTimes: AxisTime[] = [];
     let previousOrder: number | null = null;
     let strictlyIncreasingOrders = true;
     for (let index = 0; index < this._display.length; index += 1) {
@@ -853,7 +857,7 @@ export class ProjectionStore {
         strictlyIncreasingOrders = false;
       }
       previousOrder = order;
-      if (key != null) {
+      if (key != null && time != null) {
         this._displayTimeIndex.set(key, index);
         displayTimes.push(time);
       }

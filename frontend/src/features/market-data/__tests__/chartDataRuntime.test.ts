@@ -59,4 +59,7 @@ test("klineRowsEqual compares rows by value instead of array identity", () => {
     ),
     false,
   );
+
+  assert.equal(klineRowsEqual({ length: 0 }, { length: 0 }), false);
+  assert.equal(klineRowsEqual([{}], [null]), false);
 });

@@ -153,13 +153,13 @@ export function useSymbolSearchRuntime({
   const exchangeChips = useMemo(() => buildExchangeChips({
     allSymbols: catalog.allSymbols,
     currentExchange: currentExchangeKey,
-    exchangeCatalog,
+    ...(exchangeCatalog === undefined ? {} : { exchangeCatalog }),
   }), [catalog.allSymbols, currentExchangeKey, exchangeCatalog]);
 
   const marketTabs = useMemo(() => buildMarketTabs({
     allSymbols: catalog.allSymbols,
-    exchangeCatalog,
     exchangeFilter,
+    ...(exchangeCatalog === undefined ? {} : { exchangeCatalog }),
   }), [catalog.allSymbols, exchangeCatalog, exchangeFilter]);
 
   useEffect(() => {

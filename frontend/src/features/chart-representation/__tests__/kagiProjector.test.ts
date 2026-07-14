@@ -8,7 +8,11 @@ import type {
   ProjectionCustomValues,
   SourceBar,
 } from "../chartRepresentationTypes.js";
-import { malformedFixture } from "../../../test/testHelpers.js";
+import { malformedFixture, mustBeDefined } from "../../../test/testHelpers.js";
+
+function at<T>(values: readonly T[], index: number): T {
+  return mustBeDefined(values[index]);
+}
 
 function row(
   time: number,
@@ -52,9 +56,9 @@ test("the first leg waits for reversalTicks and same-direction closes replace it
   assert.deepEqual(data.map(body), [
     { open: 10, high: 15, low: 10, close: 15 },
   ]);
-  assert.deepEqual(data[0].time, { order: 0, sourceTime: 4, sourceOrdinal: 0 });
-  assert.equal(data[0].customValues.venue, "demo");
-  assert.deepEqual(data[0].customValues.chartProjection, {
+  assert.deepEqual(at(data, 0).time, { order: 0, sourceTime: 4, sourceOrdinal: 0 });
+  assert.equal(at(data, 0).customValues.venue, "demo");
+  assert.deepEqual(at(data, 0).customValues.chartProjection, {
     projectorId: "kagi",
     sourceFromTime: 1,
     sourceToTime: 4,
@@ -62,7 +66,7 @@ test("the first leg waits for reversalTicks and same-direction closes replace it
     synthetic: true,
     provisional: false,
   });
-  assert.deepEqual(data[0].customValues.kagi, {
+  assert.deepEqual(at(data, 0).customValues.kagi, {
     direction: "up",
     state: "yin",
     reversalKind: null,
@@ -88,10 +92,10 @@ test("counter move must reach the threshold before a shoulder reversal is append
     { open: 15, high: 15, low: 11, close: 11 },
   ]);
   assert.deepEqual(data.map((point) => point.time.order), [0, 1]);
-  assert.equal(data[1].customValues.kagi.reversalKind, "shoulder");
-  assert.equal(data[1].customValues.kagi.turnPrice, 15);
-  assert.equal(data[1].customValues.chartProjection.sourceFromTime, 2);
-  assert.equal(data[1].customValues.chartProjection.sourceToTime, 5);
+  assert.equal(at(data, 1).customValues.kagi.reversalKind, "shoulder");
+  assert.equal(at(data, 1).customValues.kagi.turnPrice, 15);
+  assert.equal(at(data, 1).customValues.chartProjection.sourceFromTime, 2);
+  assert.equal(at(data, 1).customValues.chartProjection.sourceToTime, 5);
 });
 
 test("down-to-up reversal records a waist without changing Yin state", () => {
@@ -103,10 +107,10 @@ test("down-to-up reversal records a waist without changing Yin state", () => {
   ]);
 
   assert.equal(data.length, 3);
-  assert.deepEqual(body(data[2]), { open: 11, high: 14, low: 11, close: 14 });
-  assert.equal(data[2].customValues.kagi.reversalKind, "waist");
-  assert.equal(data[2].customValues.kagi.turnPrice, 11);
-  assert.equal(data[2].customValues.kagi.state, "yin");
+  assert.deepEqual(body(at(data, 2)), { open: 11, high: 14, low: 11, close: 14 });
+  assert.equal(at(data, 2).customValues.kagi.reversalKind, "waist");
+  assert.equal(at(data, 2).customValues.kagi.turnPrice, 11);
+  assert.equal(at(data, 2).customValues.kagi.state, "yin");
 });
 
 test("strict shoulder and waist breaks split sections without adding legs", () => {
@@ -119,10 +123,10 @@ test("strict shoulder and waist breaks split sections without adding legs", () =
   ]);
 
   assert.equal(atShoulder.length, 3);
-  assert.deepEqual(atShoulder[2].customValues.kagi.sections, [
+  assert.deepEqual(at(atShoulder, 2).customValues.kagi.sections, [
     { from: 11, to: 15, style: "yin" },
   ]);
-  assert.equal(atShoulder[2].customValues.kagi.state, "yin");
+  assert.equal(at(atShoulder, 2).customValues.kagi.state, "yin");
 
   const crossedBoth = projector.project([
     row(1, 10),
@@ -135,16 +139,16 @@ test("strict shoulder and waist breaks split sections without adding legs", () =
   ]);
 
   assert.equal(crossedBoth.length, 4);
-  assert.deepEqual(crossedBoth[2].customValues.kagi.sections, [
+  assert.deepEqual(at(crossedBoth, 2).customValues.kagi.sections, [
     { from: 11, to: 15, style: "yin" },
     { from: 15, to: 16, style: "yang" },
   ]);
-  assert.equal(crossedBoth[2].customValues.kagi.state, "yang");
-  assert.deepEqual(crossedBoth[3].customValues.kagi.sections, [
+  assert.equal(at(crossedBoth, 2).customValues.kagi.state, "yang");
+  assert.deepEqual(at(crossedBoth, 3).customValues.kagi.sections, [
     { from: 16, to: 11, style: "yang" },
     { from: 11, to: 10, style: "yin" },
   ]);
-  assert.equal(crossedBoth[3].customValues.kagi.state, "yin");
+  assert.equal(at(crossedBoth, 3).customValues.kagi.state, "yin");
 });
 
 test("integer ticks avoid floating point drift", () => {
@@ -158,7 +162,7 @@ test("integer ticks avoid floating point drift", () => {
     { open: 0.24, high: 0.5, low: 0.24, close: 0.5 },
     { open: 0.5, high: 0.5, low: 0.4, close: 0.4 },
   ]);
-  assert.equal(data[1].customValues.kagi.reversalAmount, 0.1);
+  assert.equal(at(data, 1).customValues.kagi.reversalAmount, 0.1);
 });
 
 test("seeded projection carries the active leg and replaces it on extension", () => {
@@ -175,13 +179,13 @@ test("seeded projection carries the active leg and replaces it on extension", ()
   });
 
   assert.equal(noChange.data.length, 1);
-  assert.equal(noChange.data[0].time.order, 0);
-  assert.equal(noChange.data[0].time.sourceTime, 2);
-  assert.equal(noChange.data[0].customValues.phase, "confirmed");
+  assert.equal(at(noChange.data, 0).time.order, 0);
+  assert.equal(at(noChange.data, 0).time.sourceTime, 2);
+  assert.equal(at(noChange.data, 0).customValues.phase, "confirmed");
   assert.deepEqual(extended.data.map(body), [
     { open: 10, high: 15, low: 10, close: 15 },
   ]);
-  assert.equal(extended.data[0].time.order, 0);
+  assert.equal(at(extended.data, 0).time.order, 0);
 });
 
 test("seeded reversal retains the carry-in leg and appends the next order", () => {
@@ -207,7 +211,7 @@ test("checkpoints restore the active leg across a trimmed source prefix", () => 
     row(4, 12),
   ]);
   const resumed = projector.projectWithState([row(3, 13), row(4, 12)], {
-    seedState: projected.checkpoints[2],
+    seedState: at(projected.checkpoints, 2),
   });
 
   assert.deepEqual(resumed.data.map(body), [
@@ -234,10 +238,10 @@ test("provisional projection does not mutate confirmed state or checkpoints", ()
     seedState: checkpoint,
   });
 
-  assert.equal(trial.data[0].customValues.chartProjection.provisional, false);
-  assert.equal(trial.data[1].customValues.chartProjection.provisional, true);
-  assert.equal(trial.checkpoints[0].direction, "up");
-  assert.equal(trial.checkpoints[0].legEndTicks, 15);
+  assert.equal(at(trial.data, 0).customValues.chartProjection.provisional, false);
+  assert.equal(at(trial.data, 1).customValues.chartProjection.provisional, true);
+  assert.equal(at(trial.checkpoints, 0).direction, "up");
+  assert.equal(at(trial.checkpoints, 0).legEndTicks, 15);
   assert.equal(checkpoint.direction, "up");
   assert.equal(checkpoint.legEndTicks, 15);
   assert.equal(checkpoint.legCustomValues.phase, "confirmed");
@@ -246,8 +250,8 @@ test("provisional projection does not mutate confirmed state or checkpoints", ()
     seedState: checkpoint,
   });
   assert.equal(resumedConfirmed.data.length, 1);
-  assert.equal(resumedConfirmed.data[0].close, 16);
-  assert.equal(resumedConfirmed.data[0].customValues.chartProjection.provisional, false);
+  assert.equal(at(resumedConfirmed.data, 0).close, 16);
+  assert.equal(at(resumedConfirmed.data, 0).customValues.chartProjection.provisional, false);
 });
 
 test("whitespace and invalid closes do not initialize or advance Kagi state", () => {
@@ -261,6 +265,6 @@ test("whitespace and invalid closes do not initialize or advance Kagi state", ()
   assert.deepEqual(projected.data.map(body), [
     { open: 10, high: 13, low: 10, close: 13 },
   ]);
-  assert.equal(projected.data[0].customValues.chartProjection.sourceFromTime, 3);
+  assert.equal(at(projected.data, 0).customValues.chartProjection.sourceFromTime, 3);
   assert.equal(projected.checkpoints.length, 4);
 });

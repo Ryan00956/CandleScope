@@ -7,7 +7,10 @@ import {
   replaceIndicatorItemsRange,
   replaceIndicatorLinesRange,
 } from "../indicatorPayloadRuntime.js";
-import { IndicatorPayloadError } from "../indicatorContracts.js";
+import {
+  IndicatorPayloadError,
+  parseIndicatorParameterSchemas,
+} from "../indicatorContracts.js";
 import { mustBeDefined } from "../../../test/testHelpers.js";
 
 test("clearIndicatorLineData keeps line identity and style while clearing timed data", () => {
@@ -30,6 +33,21 @@ test("clearIndicatorLineData keeps line identity and style while clearing timed 
     data: [],
     colorData: [],
   }]);
+});
+
+test("parameter schemas omit absent optional fields", () => {
+  const schemas = parseIndicatorParameterSchemas([
+    { key: "period" },
+    { name: "source", label: "Source", default: null, min: 1 },
+  ]);
+
+  assert.deepEqual(schemas, [
+    { key: "period" },
+    { name: "source", label: "Source", default: null, min: 1 },
+  ]);
+  for (const field of ["label", "type", "default", "min", "max", "step", "options"]) {
+    assert.equal(Object.hasOwn(mustBeDefined(schemas[0]), field), false);
+  }
 });
 
 test("replaceIndicatorLinesRange replaces only the target time window", () => {
@@ -57,12 +75,13 @@ test("replaceIndicatorLinesRange replaces only the target time window", () => {
     { start: 20, end: 30 },
   );
 
-  assert.deepEqual(lines[0].data, [
+  const line = mustBeDefined(lines[0]);
+  assert.deepEqual(line.data, [
     { time: 10, value: 1 },
     { time: 20, value: 200 },
     { time: 40, value: 4 },
   ]);
-  assert.deepEqual(lines[0].colorData, [
+  assert.deepEqual(line.colorData, [
     { time: 10, color: "#111" },
     { time: 20, color: "#abc" },
     { time: 40, color: "#444" },
@@ -89,7 +108,7 @@ test("replaceIndicatorItemsRange deletes stale timed items inside the target win
     { start: 20, end: 30 },
   );
 
-  assert.deepEqual(markers[0].data, [
+  assert.deepEqual(mustBeDefined(markers[0]).data, [
     { time: 10, text: "keep-left" },
     { time: 30, text: "new" },
     { time: 40, text: "keep-right" },
@@ -116,15 +135,16 @@ test("normalizeIndicatorPayload parses every unified annotation output kind", ()
     ],
   }, "ma-1");
 
-  assert.equal(normalized.lines[0].indicatorId, undefined);
-  assert.equal(normalized.markers[0].indicatorId, "ma-1");
-  assert.equal(normalized.hlines[0].price, 50);
+  assert.equal(mustBeDefined(normalized.lines[0]).indicatorId, undefined);
+  assert.equal(mustBeDefined(normalized.markers[0]).indicatorId, "ma-1");
+  assert.equal(mustBeDefined(normalized.hlines[0]).price, 50);
   const bgcolors = mustBeDefined(normalized.bgcolors);
   const bgcolor = mustBeDefined(bgcolors[0]);
   const regions = mustBeDefined(bgcolor.regions);
   assert.equal(mustBeDefined(regions[0]).time, 10);
-  assert.equal(normalized.barcolors[0].data[0].color, "#def");
-  assert.equal(normalized.signals[0].name, "signal");
+  const barcolor = mustBeDefined(normalized.barcolors[0]);
+  assert.equal(mustBeDefined(barcolor.data[0]).color, "#def");
+  assert.equal(mustBeDefined(normalized.signals[0]).name, "signal");
 });
 
 test("normalizeIndicatorPayload rejects malformed line points", () => {

@@ -19,6 +19,10 @@ function ordinal(order: number, sourceTime: number, sourceOrdinal = 0): OrdinalA
   return { order, sourceTime, sourceOrdinal };
 }
 
+function at<T>(values: readonly T[], index: number): T {
+  return mustBeDefined(values[index]);
+}
+
 function derivedRows() {
   return [
     { time: ordinal(0, 10, 0) },
@@ -33,10 +37,10 @@ test("display source index keeps display order, exact source groups, and time id
   const index = buildDisplaySourceTimeIndex(rows);
 
   assert.deepEqual([...index.bySourceTime.keys()], [10, 20, 40]);
-  assert.deepEqual(index.bySourceTime.get(10), [rows[0].time, rows[1].time]);
-  assert.strictEqual(mustBeDefined(index.bySourceTime.get(20))[0], rows[2].time);
+  assert.deepEqual(index.bySourceTime.get(10), [at(rows, 0).time, at(rows, 1).time]);
+  assert.strictEqual(at(mustBeDefined(index.bySourceTime.get(20)), 0), at(rows, 2).time);
   assert.deepEqual([...index.displayTimeSet], rows.map((row) => row.time));
-  assert.strictEqual(index.targets[0].time, rows[0].time);
+  assert.strictEqual(at(index.targets, 0).time, at(rows, 0).time);
 });
 
 test("timed entries fan out in display order with exact matches and last-write-wins", () => {
@@ -52,14 +56,14 @@ test("timed entries fan out in display order with exact matches and last-write-w
 
   const all = projectSourceTimedEntries(entries, index, { fanout: "all" });
   assert.deepEqual(all.map((entry) => entry.value), ["latest", "latest", "forty"]);
-  assert.strictEqual(all[0].time, rows[0].time);
-  assert.strictEqual(all[1].time, rows[1].time);
-  assert.strictEqual(all[2].time, rows[3].time);
+  assert.strictEqual(at(all, 0).time, at(rows, 0).time);
+  assert.strictEqual(at(all, 1).time, at(rows, 1).time);
+  assert.strictEqual(at(all, 2).time, at(rows, 3).time);
 
   const last = projectSourceTimedEntries(entries, index, { fanout: "last" });
   assert.deepEqual(last.map((entry) => entry.value), ["latest", "forty"]);
-  assert.strictEqual(last[0].time, rows[1].time);
-  assert.strictEqual(last[1].time, rows[3].time);
+  assert.strictEqual(at(last, 0).time, at(rows, 1).time);
+  assert.strictEqual(at(last, 1).time, at(rows, 3).time);
   assert.deepEqual(entries, before);
   assert.throws(
     () => projectSourceTimedEntries(entries, index, {
@@ -99,31 +103,35 @@ test("pane descriptors apply line, marker, bgcolor, and volume fanout policies",
   }];
   const before = structuredClone(panes);
 
-  const [projected] = projectPaneDescriptorsToDisplay(panes, index);
+  const projected = at(projectPaneDescriptorsToDisplay(panes, index), 0);
+  const fastLine = at(projected.lines, 0);
+  const volumeLine = at(projected.lines, 1);
+  const marker = at(projected.markers, 0);
+  const bgcolor = at(projected.bgcolors, 0);
 
-  assert.deepEqual(projected.lines[0].data.map((point) => point.time), [
-    rows[0].time,
-    rows[1].time,
-    rows[2].time,
+  assert.deepEqual(fastLine.data.map((point) => point.time), [
+    at(rows, 0).time,
+    at(rows, 1).time,
+    at(rows, 2).time,
   ]);
-  assert.deepEqual(projected.lines[0].colorData.map((point) => point.time), [
-    rows[0].time,
-    rows[1].time,
+  assert.deepEqual(fastLine.colorData.map((point) => point.time), [
+    at(rows, 0).time,
+    at(rows, 1).time,
   ]);
-  assert.deepEqual(projected.lines[1].data.map((point) => point.time), [
-    rows[1].time,
-    rows[2].time,
+  assert.deepEqual(volumeLine.data.map((point) => point.time), [
+    at(rows, 1).time,
+    at(rows, 2).time,
   ]);
-  assert.deepEqual(projected.lines[1].colorData.map((point) => point.time), [
-    rows[1].time,
-    rows[2].time,
+  assert.deepEqual(volumeLine.colorData.map((point) => point.time), [
+    at(rows, 1).time,
+    at(rows, 2).time,
   ]);
-  assert.deepEqual(projected.markers[0].data.map((point) => point.time), [rows[1].time]);
-  assert.deepEqual(projected.bgcolors[0].data.map((point) => point.time), [
-    rows[0].time,
-    rows[1].time,
+  assert.deepEqual(marker.data.map((point) => point.time), [at(rows, 1).time]);
+  assert.deepEqual(bgcolor.data.map((point) => point.time), [
+    at(rows, 0).time,
+    at(rows, 1).time,
   ]);
-  assert.deepEqual(projected.bgcolors[0].regions.map((point) => point.time), [rows[2].time]);
+  assert.deepEqual(bgcolor.regions.map((point) => point.time), [at(rows, 2).time]);
   assert.strictEqual(projected.fills, fills);
   assert.strictEqual(projected.hlines, hlines);
   assert.deepEqual(panes, before);
@@ -181,14 +189,14 @@ test("barcolor groups fan out to every exact display target and drop missing tar
     buildDisplaySourceTimeIndex(rows),
   );
 
-  const projectedGroup = mustBeDefined(projected[0]);
+  const projectedGroup = at(projected, 0);
   assert.deepEqual(projectedGroup.data.map((point) => point.color), ["red", "red", "green"]);
   assert.deepEqual(projectedGroup.data.map((point) => point.time), [
-    rows[0].time,
-    rows[1].time,
-    rows[3].time,
+    at(rows, 0).time,
+    at(rows, 1).time,
+    at(rows, 3).time,
   ]);
-  assert.deepEqual(groups[0].data.map((point) => point.time), [10, 30, 40]);
+  assert.deepEqual(at(groups, 0).data.map((point) => point.time), [10, 30, 40]);
 });
 
 test("structural reprojection replaces reused orders with the new lineage objects", () => {
@@ -203,17 +211,17 @@ test("structural reprojection replaces reused orders with the new lineage object
   ];
   const source = [{ time: 10, value: 7 }];
 
-  const [oldPoint] = projectSourceTimedEntries(
+  const oldPoint = at(projectSourceTimedEntries(
     source,
     buildDisplaySourceTimeIndex(oldRows),
-  );
-  const [newPoint] = projectSourceTimedEntries(
+  ), 0);
+  const newPoint = at(projectSourceTimedEntries(
     source,
     buildDisplaySourceTimeIndex(newRows),
-  );
+  ), 0);
 
-  assert.strictEqual(oldPoint.time, oldRows[0].time);
-  assert.strictEqual(newPoint.time, newRows[1].time);
+  assert.strictEqual(oldPoint.time, at(oldRows, 0).time);
+  assert.strictEqual(newPoint.time, at(newRows, 1).time);
   assert.notStrictEqual(newPoint.time, oldPoint.time);
 });
 

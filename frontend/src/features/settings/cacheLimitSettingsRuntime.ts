@@ -18,7 +18,9 @@ export function useCacheLimitsSync({
     updateCacheLimits({
       dbLimits: cacheLimits,
       ephemeralBars: ephemeralCacheBars ?? 86400,
-      sqliteBudgetBytes: sqliteStorageBudgetBytes,
+      ...(sqliteStorageBudgetBytes === undefined ? {} : {
+        sqliteBudgetBytes: sqliteStorageBudgetBytes,
+      }),
       storageRowLimitsEnabled,
     }).catch(() => {});
   }, [cacheLimits, ephemeralCacheBars, sqliteStorageBudgetBytes, storageRowLimitsEnabled]);

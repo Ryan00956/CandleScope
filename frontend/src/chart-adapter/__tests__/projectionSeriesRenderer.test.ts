@@ -20,11 +20,14 @@ type TestRenderOptions = Omit<RenderOptions, "series"> & {
 };
 
 function renderMainSeriesProjectionPatch(options: TestRenderOptions = {}) {
+  const { series, ...renderOptions } = options;
   return renderProductionProjectionPatch({
-    ...options,
-    series: options.series
-      ? partialMock<ProjectionSeriesWriter<ChartSeriesInputRow>>(options.series)
-      : options.series,
+    ...renderOptions,
+    ...(series !== undefined ? {
+      series: series
+        ? partialMock<ProjectionSeriesWriter<ChartSeriesInputRow>>(series)
+        : null,
+    } : {}),
   });
 }
 
@@ -436,7 +439,8 @@ test("successful append commits the rendered cache in place without reading its 
   const previousSeriesData = new Proxy(backing, {
     get(target, property, receiver) {
       if (/^(0|[1-9]\d*)$/.test(String(property))) numericReads += 1;
-      return Reflect.get(target, property, receiver);
+      const value: unknown = Reflect.get(target, property, receiver);
+      return value;
     },
   });
   const patch = buildMainSeriesProjectionPatch({

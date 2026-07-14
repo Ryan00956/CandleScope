@@ -20,6 +20,14 @@ function normalizeRangeBoundary(value: unknown): number | null {
   return Number.isFinite(normalized) && normalized > 0 ? normalized : null;
 }
 
+function chartBarTimeAt(
+  chartData: readonly KlineBar[],
+  index: number,
+): unknown {
+  const bar: KlineBar | undefined = chartData[index];
+  return bar?.time;
+}
+
 function paramInt(params: IndicatorParams, key: string, fallback: number): number {
   const value = Number.parseInt(String(params[key] ?? ""), 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
@@ -52,7 +60,7 @@ function lowerBoundTime(chartData: readonly KlineBar[], target: number): number 
   let hi = chartData.length;
   while (lo < hi) {
     const mid = Math.floor((lo + hi) / 2);
-    if (Number(chartData[mid]?.time) < target) lo = mid + 1;
+    if (Number(chartBarTimeAt(chartData, mid)) < target) lo = mid + 1;
     else hi = mid;
   }
   return lo;
@@ -63,7 +71,7 @@ function upperBoundTime(chartData: readonly KlineBar[], target: number): number 
   let hi = chartData.length;
   while (lo < hi) {
     const mid = Math.floor((lo + hi) / 2);
-    if (Number(chartData[mid]?.time) <= target) lo = mid + 1;
+    if (Number(chartBarTimeAt(chartData, mid)) <= target) lo = mid + 1;
     else hi = mid;
   }
   return lo;
@@ -77,8 +85,10 @@ function resolveVisibleIndexesFromTime(
   const to = normalizeRangeBoundary(timeRange?.to);
   if (!from || !to || from > to || !Array.isArray(chartData) || chartData.length === 0) return null;
 
-  const firstTime = normalizeRangeBoundary(chartData[0]?.time);
-  const lastTime = normalizeRangeBoundary(chartData[chartData.length - 1]?.time);
+  const firstTime = normalizeRangeBoundary(chartBarTimeAt(chartData, 0));
+  const lastTime = normalizeRangeBoundary(
+    chartBarTimeAt(chartData, chartData.length - 1),
+  );
   if (!firstTime || !lastTime || to < firstTime || from > lastTime) return null;
 
   const startIndex = Math.min(chartData.length - 1, lowerBoundTime(chartData, Math.max(from, firstTime)));
@@ -132,11 +142,11 @@ export function inferFixedIntervalClosedThrough(
   }
 
   for (let index = chartData.length - 1; index >= 0; index -= 1) {
-    const barTime = normalizeRangeBoundary(chartData[index]?.time);
+    const barTime = normalizeRangeBoundary(chartBarTimeAt(chartData, index));
     if (barTime && barTime + step <= nowSec) return barTime;
   }
 
-  const firstTime = normalizeRangeBoundary(chartData[0]?.time);
+  const firstTime = normalizeRangeBoundary(chartBarTimeAt(chartData, 0));
   return firstTime ? Math.max(1, firstTime - step) : null;
 }
 
@@ -158,16 +168,20 @@ export function resolveInitialHostedRange(
   );
   const startIndex = Math.max(0, visibleIndexes.startIndex - warmupBars - paddingBars);
   const endIndex = Math.max(startIndex, visibleIndexes.endIndex);
-  const start = normalizeRangeBoundary(chartData[startIndex]?.time);
-  const end = normalizeRangeBoundary(chartData[endIndex]?.time);
+  const start = normalizeRangeBoundary(chartBarTimeAt(chartData, startIndex));
+  const end = normalizeRangeBoundary(chartBarTimeAt(chartData, endIndex));
   if (!start || !end || start > end) return null;
   return {
     start,
     end,
     startIndex,
     endIndex,
-    visibleStart: normalizeRangeBoundary(chartData[visibleIndexes.startIndex]?.time),
-    visibleEnd: normalizeRangeBoundary(chartData[visibleIndexes.endIndex]?.time),
+    visibleStart: normalizeRangeBoundary(
+      chartBarTimeAt(chartData, visibleIndexes.startIndex),
+    ),
+    visibleEnd: normalizeRangeBoundary(
+      chartBarTimeAt(chartData, visibleIndexes.endIndex),
+    ),
     visibleStartIndex: visibleIndexes.startIndex,
     visibleEndIndex: visibleIndexes.endIndex,
     warmupBars,

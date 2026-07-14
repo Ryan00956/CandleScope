@@ -91,12 +91,12 @@ export default function SymbolSearch({
             open={open}
             onClose={handleClose}
             currentSymbol={currentSymbol}
-            currentMarketType={currentMarketType}
             currentExchange={currentExchange}
-            exchangeCatalog={exchangeCatalog}
             onSelect={handleSelect}
-            watchlists={watchlists}
-            onAddToWatchlist={onAddToWatchlist}
+            {...(currentMarketType === undefined ? {} : { currentMarketType })}
+            {...(exchangeCatalog === undefined ? {} : { exchangeCatalog })}
+            {...(watchlists === undefined ? {} : { watchlists })}
+            {...(onAddToWatchlist === undefined ? {} : { onAddToWatchlist })}
           />
         </Suspense>
       )}

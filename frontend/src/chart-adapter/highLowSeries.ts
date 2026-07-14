@@ -55,8 +55,9 @@ class HighLowSeriesRenderer implements ICustomSeriesPaneRenderer {
 
       for (let index = from; index < to; index += 1) {
         const bar = data.bars[index];
-        const high = finiteNumber(bar?.originalData?.high);
-        const low = finiteNumber(bar?.originalData?.low);
+        if (!bar) continue;
+        const high = finiteNumber(bar.originalData?.high);
+        const low = finiteNumber(bar.originalData?.low);
         if (high == null || low == null) continue;
 
         const highCoordinate = priceConverter(high);
@@ -68,7 +69,7 @@ class HighLowSeriesRenderer implements ICustomSeriesPaneRenderer {
         const top = Math.round(Math.min(highCoordinate, lowCoordinate) * verticalPixelRatio);
         const bottom = Math.round(Math.max(highCoordinate, lowCoordinate) * verticalPixelRatio);
 
-        context.fillStyle = bar?.originalData?.color
+        context.fillStyle = bar.originalData?.color
           || bar.barColor
           || this.options?.color
           || DEFAULT_HIGH_LOW_COLOR;

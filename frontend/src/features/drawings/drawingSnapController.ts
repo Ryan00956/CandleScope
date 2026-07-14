@@ -230,7 +230,9 @@ export function findSnapTargetForPointer(
     logical = null;
   }
   try {
-    const firstCoord = adapter.timeToCoordinate?.(seriesData[0].time);
+    const firstRow = seriesData[0];
+    if (!firstRow) return null;
+    const firstCoord = adapter.timeToCoordinate?.(firstRow.time);
     if (isFiniteNumber(firstCoord)) {
       const value = adapter.coordinateToLogical?.(firstCoord);
       if (isFiniteNumber(value)) firstLogical = value;

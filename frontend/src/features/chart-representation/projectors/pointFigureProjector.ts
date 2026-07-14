@@ -56,7 +56,7 @@ function positiveSafeInteger(value: unknown, name: string): number {
 }
 
 function decimalPlaces(value: number): number {
-  const [coefficient, exponentText] = String(value).toLowerCase().split("e");
+  const [coefficient = "", exponentText] = String(value).toLowerCase().split("e");
   const fractionLength = coefficient.split(".")[1]?.length || 0;
   const exponent = Number(exponentText || 0);
   return Math.max(0, fractionLength - exponent);
@@ -479,7 +479,8 @@ export class PointFigureProjector implements Projector<
       }),
     };
     const existingIndex = data.length - 1;
-    if (existingIndex >= 0 && displayOrder(data[existingIndex]) === columnOrder) {
+    const existing = existingIndex >= 0 ? data[existingIndex] : undefined;
+    if (existing && displayOrder(existing) === columnOrder) {
       data[existingIndex] = point;
     } else {
       data.push(point);

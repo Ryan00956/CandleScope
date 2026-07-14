@@ -13,7 +13,7 @@ import {
 } from "../../watchlist-full-cache/watchlistFullCacheStore.js";
 import { executeFrontendGcPlan } from "../cacheTrim.js";
 import type { GcPlan, GcVictim } from "../cacheGcTypes.js";
-import { epochSeconds, partialMock } from "../../../test/testHelpers.js";
+import { epochSeconds, mustBeDefined, partialMock } from "../../../test/testHelpers.js";
 
 test("executeFrontendGcPlan dispatches victims to cache owners", () => {
   resetWatchlistFullCache();
@@ -37,7 +37,9 @@ test("executeFrontendGcPlan dispatches victims to cache owners", () => {
     },
   );
 
-  const indicatorKey = snapshotIndicatorResultCacheDiagnostics().entries[0].key;
+  const indicatorKey = mustBeDefined(
+    snapshotIndicatorResultCacheDiagnostics().entries[0],
+  ).key;
   const report = executeFrontendGcPlan(partialMock<GcPlan>({
     generatedAtMs: 100,
     victims: [

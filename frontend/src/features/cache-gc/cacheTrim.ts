@@ -12,8 +12,9 @@ type ChartTrimFunction = (victims: GcVictim[]) => CacheTrimOwnerResult;
 function byOwner(victims: GcVictim[] = []): Record<string, GcVictim[]> {
   return victims.reduce<Record<string, GcVictim[]>>((groups, victim) => {
     if (!victim?.owner) return groups;
-    if (!groups[victim.owner]) groups[victim.owner] = [];
-    groups[victim.owner].push(victim);
+    const ownerVictims = groups[victim.owner] ?? [];
+    ownerVictims.push(victim);
+    groups[victim.owner] = ownerVictims;
     return groups;
   }, {});
 }

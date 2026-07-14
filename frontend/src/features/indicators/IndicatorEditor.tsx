@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
-import type { BeforeMount, OnMount } from "@monaco-editor/react";
+import type * as Monaco from "monaco-editor";
 import { registerPyneLanguageSupport } from "../../editor/pyneLanguage";
 import { registerPyneTheme, getPyneEditorOptions } from "../../editor/pyneTheme";
 import { usePyneSecurityPolicy } from "./usePyneSecurityPolicy";
@@ -67,7 +67,7 @@ export default function IndicatorEditor({
   const [script, setScript] = useState(indicator?.script || "");
   const [securityMode, setSecurityMode] = useState(indicator?.securityMode || "safe");
   const securityPolicy = usePyneSecurityPolicy();
-  const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
+  const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
 
   const handlePreview = useCallback(() => {
     if (readOnly) return;
@@ -110,7 +110,7 @@ export default function IndicatorEditor({
    * Called before Monaco mounts — register theme so it's available
    * for the first render.
    */
-  const handleBeforeMount: BeforeMount = useCallback((monaco) => {
+  const handleBeforeMount = useCallback((monaco: typeof Monaco) => {
     registerPyneTheme(monaco);
   }, []);
 
@@ -118,7 +118,10 @@ export default function IndicatorEditor({
    * Called when Monaco editor mounts — register Pyne language
    * providers (completion, hover) once globally.
    */
-  const handleEditorMount: OnMount = useCallback((editor, monaco) => {
+  const handleEditorMount = useCallback((
+    editor: Monaco.editor.IStandaloneCodeEditor,
+    monaco: typeof Monaco,
+  ) => {
     editorRef.current = editor;
 
     // Register Pyne providers once (they're global to the Monaco instance)

@@ -91,7 +91,9 @@ test("ordinal carrier extends order while labeling cells from the raw source hor
       },
     },
   ]);
-  assert.ok(plan.data[0].time.order > displayRows[0].time.order);
+  assert.ok(
+    mustBeDefined(plan.data[0]).time.order > mustBeDefined(displayRows[0]).time.order,
+  );
 });
 
 test("ordinal carrier keeps stable isolated keys when its source horizon advances", () => {

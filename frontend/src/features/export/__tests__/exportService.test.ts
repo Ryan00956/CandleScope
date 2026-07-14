@@ -87,8 +87,11 @@ test("canvasToBlob requests and returns the exact selected MIME type", async () 
   let request: { type?: string; quality?: number } | null = null;
   const canvas: Pick<HTMLCanvasElement, "toBlob"> = {
     toBlob(callback: BlobCallback, type?: string, quality?: number) {
-      request = { type, quality };
-      callback(new Blob(["jpeg"], { type }));
+      request = {
+        ...(type === undefined ? {} : { type }),
+        ...(quality === undefined ? {} : { quality }),
+      };
+      callback(new Blob(["jpeg"], type === undefined ? {} : { type }));
     },
   };
 
@@ -101,12 +104,15 @@ test("canvasToBlob omits quality for PNG and rejects browser format fallback", a
   let pngRequest: { type?: string; quality?: number } | null = null;
   const pngCanvas: Pick<HTMLCanvasElement, "toBlob"> = {
     toBlob(callback: BlobCallback, type?: string, quality?: number) {
-      pngRequest = { type, quality };
-      callback(new Blob(["png"], { type }));
+      pngRequest = {
+        ...(type === undefined ? {} : { type }),
+        ...(quality === undefined ? {} : { quality }),
+      };
+      callback(new Blob(["png"], type === undefined ? {} : { type }));
     },
   };
   await canvasToBlob(pngCanvas, "png", 0.5);
-  assert.deepEqual(pngRequest, { type: "image/png", quality: undefined });
+  assert.deepEqual(pngRequest, { type: "image/png" });
 
   const fallbackCanvas: Pick<HTMLCanvasElement, "toBlob"> = {
     toBlob(callback: BlobCallback) {

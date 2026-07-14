@@ -45,18 +45,19 @@ export function parseSymbolKey(key: unknown): SymbolIdentity {
     .split(":")
     .map((part) => part.trim())
     .filter(Boolean);
-  if (parts.length >= 3) {
+  const [firstPart, secondPart] = parts;
+  if (parts.length >= 3 && firstPart && secondPart) {
     return {
-      exchange: parts[0].toLowerCase(),
-      marketType: parts[1].toLowerCase(),
+      exchange: firstPart.toLowerCase(),
+      marketType: secondPart.toLowerCase(),
       symbol: parts.slice(2).join(":").toUpperCase(),
     };
   }
-  if (parts.length === 2) {
-    const symbol = parts[1].toUpperCase();
+  if (parts.length === 2 && firstPart && secondPart) {
+    const symbol = secondPart.toUpperCase();
     return {
       exchange: inferExchangeFromSymbol(symbol, "binance"),
-      marketType: parts[0].toLowerCase(),
+      marketType: firstPart.toLowerCase(),
       symbol,
     };
   }

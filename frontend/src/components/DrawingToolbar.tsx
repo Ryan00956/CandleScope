@@ -78,8 +78,11 @@ export interface DrawingToolbarProps {
   onChartTypeChange?: (chartType: MainChartType) => void;
 }
 
-const DEFAULT_LINE_VARIANT = LINE_VARIANTS.find((variant) => variant.id === "line-segment")
-  || LINE_VARIANTS[0];
+const DEFAULT_LINE_VARIANT = (() => {
+  const variant = LINE_VARIANTS.find((item) => item.id === "line-segment");
+  if (!variant) throw new Error("Missing required line-segment toolbar variant");
+  return variant;
+})();
 
 const DrawingToolbar = memo(function DrawingToolbar({
   activeTool,
@@ -211,9 +214,9 @@ const DrawingToolbar = memo(function DrawingToolbar({
   } = useDrawingToolbarController({
     activeTool: effectiveActiveTool,
     chartType,
-    onChartTypeChange,
     onToolChange: handleCapabilityToolChange,
-    onToggleExportPanel,
+    ...(onChartTypeChange === undefined ? {} : { onChartTypeChange }),
+    ...(onToggleExportPanel === undefined ? {} : { onToggleExportPanel }),
   });
 
   const handleStrokeColorChange = useCallback((color: string) => {
@@ -398,10 +401,14 @@ const DrawingToolbar = memo(function DrawingToolbar({
       >
         {flyoutOpen === "fib-levels" && (
           <FibLevelsPanel
-            levels={fibLevels}
-            onLevelsChange={(levels) => onFibLevelsChange?.(levels)}
+            {...(fibLevels === undefined ? {} : { levels: fibLevels })}
+            onLevelsChange={(levels) => {
+              onFibLevelsChange?.(levels);
+            }}
             inverted={fibInverted}
-            onInvertedChange={(v) => onFibInvertedChange?.(v)}
+            onInvertedChange={(v) => {
+              onFibInvertedChange?.(v);
+            }}
             onClose={closeFlyout}
             anchorRef={fibBtnRef}
           />
@@ -454,9 +461,9 @@ const DrawingToolbar = memo(function DrawingToolbar({
         onOpenPositionSettings={handleTogglePositionSettings}
         onPenColorChange={handleStrokeColorChange}
         onPenSizeChange={handleStrokeSizeChange}
-        onTextBoldChange={onTextBoldChange}
-        onTextFontSizeChange={onTextFontSizeChange}
-        onTextItalicChange={onTextItalicChange}
+        {...(onTextBoldChange === undefined ? {} : { onTextBoldChange })}
+        {...(onTextFontSizeChange === undefined ? {} : { onTextFontSizeChange })}
+        {...(onTextItalicChange === undefined ? {} : { onTextItalicChange })}
         penColor={penColor}
         penSize={penSize}
         positionSize={positionSize}

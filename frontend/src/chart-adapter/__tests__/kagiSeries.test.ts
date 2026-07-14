@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { createKagiSeriesPaneView } from "../kagiSeries.js";
 import type { KagiCustomData, KagiSeriesOptions } from "../chartAdapterTypes.js";
-import { structuralMock } from "../../test/testHelpers.js";
+import { mustBeDefined, structuralMock } from "../../test/testHelpers.js";
 import { chartCoordinate } from "./chartAdapterTestHelpers.js";
 
 interface KagiRowOptions {
@@ -199,15 +199,15 @@ test("Kagi renderer draws vertical sections and a horizontal turn connector", ()
     ["red", 8],
     ["red", 4],
   ]);
-  assert.deepEqual(strokes[0].path, [
+  assert.deepEqual(mustBeDefined(strokes[0]).path, [
     ["moveTo", 20, 300],
     ["lineTo", 20, 285],
   ]);
-  assert.deepEqual(strokes[2].path, [
+  assert.deepEqual(mustBeDefined(strokes[2]).path, [
     ["moveTo", 20, 270],
     ["lineTo", 44, 270],
   ]);
-  assert.deepEqual(strokes[4].path, [
+  assert.deepEqual(mustBeDefined(strokes[4]).path, [
     ["moveTo", 44, 282],
     ["lineTo", 44, 300],
   ]);
@@ -297,9 +297,11 @@ test("Kagi renderer scales thick and thin strokes down for narrow bar spacing", 
   });
 
   assert.equal(strokes.length, 2);
-  assert.ok(strokes[0].lineWidth >= 1);
-  assert.ok(strokes[0].lineWidth < strokes[1].lineWidth);
-  assert.ok(strokes[1].lineWidth <= 2 * 2 * 0.72);
+  const firstStroke = mustBeDefined(strokes[0]);
+  const secondStroke = mustBeDefined(strokes[1]);
+  assert.ok(firstStroke.lineWidth >= 1);
+  assert.ok(firstStroke.lineWidth < secondStroke.lineWidth);
+  assert.ok(secondStroke.lineWidth <= 2 * 2 * 0.72);
 });
 
 test("Kagi renderer ignores invalid coordinates without affecting valid visible legs", () => {

@@ -160,8 +160,11 @@ export function decimateScreenPoints<T extends ScreenPoint>(points: T[], epsilon
   let maxIndex = 0;
   const start = points[0];
   const end = points[points.length - 1];
+  if (!start || !end) return points;
   for (let index = 1; index < points.length - 1; index += 1) {
-    const distance = perpendicularDist(points[index], start, end);
+    const point = points[index];
+    if (!point) continue;
+    const distance = perpendicularDist(point, start, end);
     if (distance > maxDistance) {
       maxDistance = distance;
       maxIndex = index;

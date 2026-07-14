@@ -160,8 +160,8 @@ export function createIndicatorRangeBatcher<
         request,
         resolve,
         settled: false,
-        signal: request.signal,
       };
+      if (request.signal !== undefined) entry.signal = request.signal;
       if (entry.signal?.aborted) {
         settleAborted(entry);
         return;

@@ -44,9 +44,10 @@ function upsertRealtimeKline(current: KlineBar[], incoming: KlineBar | null | un
   if (!incoming || incoming.time == null) return current;
   const next = { ...incoming };
 
-  const firstTime = current[0].time;
+  const firstTime = current[0]?.time;
   const lastIndex = current.length - 1;
-  const lastTime = current[lastIndex].time;
+  const lastTime = current[lastIndex]?.time;
+  if (firstTime == null || lastTime == null) return current;
 
   if (next.time < firstTime) return current;
   if (next.time === lastTime) {
@@ -72,8 +73,8 @@ export function fullCacheKey(symbolKey: string, interval: string): string {
 function buildCoverage(rows: KlineBar[]): FullCacheCoverage | null {
   if (!rows?.length) return null;
   return {
-    firstTime: rows[0].time ?? null,
-    lastTime: rows[rows.length - 1]?.time ?? null,
+    firstTime: rows.at(0)?.time ?? null,
+    lastTime: rows.at(-1)?.time ?? null,
     bars: rows.length,
   };
 }

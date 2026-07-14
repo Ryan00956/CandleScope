@@ -89,9 +89,9 @@ export function buildWatchlistFullSocketTargets(
   return buildWatchlistFullCacheTargets({
     ...options,
     currentSession: {
-      exchange: currentSession.exchange,
+      ...(currentSession.exchange === undefined ? {} : { exchange: currentSession.exchange }),
       interval: null,
-      marketType: currentSession.marketType,
+      ...(currentSession.marketType === undefined ? {} : { marketType: currentSession.marketType }),
       symbol: null,
       symbolKey: null,
     },

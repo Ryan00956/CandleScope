@@ -378,7 +378,7 @@ test("backfill completion reloads only the active overlapping range", async () =
   });
 
   assert.deepEqual(requested, [{ start: 120, end: 180 }]);
-  assert.equal(committed[0].source, "backfill-completed");
+  assert.equal(mustBeDefined(committed[0]).source, "backfill-completed");
   assert.equal(mustBeDefined<KlineBar>(lastPrice).time, 180);
   assert.equal(loading, false);
 });

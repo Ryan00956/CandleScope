@@ -1,6 +1,6 @@
 # CandleScope 前端 TypeScript 渐进迁移执行文档
 
-> 状态：待执行
+> 状态：已完成（T0-T13 与 Post-T13 严格类型债务清零）
 > 计划基线日期：2026-07-13
 > 适用范围：`frontend/`
 > 核心原则：渐进迁移，不全量重写；每个阶段独立验证、独立提交、独立回滚。
@@ -2209,6 +2209,23 @@ rg --files src -g "*.js" -g "*.jsx"
 | Release smoke | 最终提交在隔离 Vite `15183` 实例通过；1501 bars、connected/live；15 种图表菜单/切换、histogram persistence、candlestick restoration、MA/VOL/BOLL/RSI overlay/pane、PNG/JPEG/WebP 3/3 export cases 与 drawing future-anchor/reload persistence 全部通过；`failures`、`warnings`、`exceptions` 均为 0 |
 | Smoke 命令 | `npx tsx scripts/smoke.mjs --url http://127.0.0.1:15183/ --chart-type-matrix --export-matrix --drawing-check --overlay-heavy`；验证后已停止隔离 Vite，端口释放 |
 | 完成结论 | T0-T13 全部完成；前端不再处于 mixed mode，TypeScript、architecture、lint、tests、build 与 release smoke 已形成可重复执行的长期 gate |
+
+### 2026-07-14 Post-T13 严格类型债务清零记录
+
+| 项目 | 结果 |
+|---|---|
+| 起始债务 | T13 历史评估记录为 `noUncheckedIndexedAccess` 726 条、`exactOptionalPropertyTypes` 145 条，额外开启六项 `no-unsafe-*` 时为 99 条诊断。按门禁复审后的 browser/Node 双 project 重新测量，分别为 browser 370/138、Node 715/141，当前全 TS/TSX unsafe 扫描为 106；差异来自 project、文件范围与重叠诊断口径，不能相加视为独立 bug 数。 |
+| 编译器永久门禁 | `tsconfig.json` 正式启用 `noUncheckedIndexedAccess: true` 与 `exactOptionalPropertyTypes: true`；`tsconfig.node.json` 通过 `extends` 继承。browser 生产源码与 Node tests/tooling 两个 project 均为 0 诊断。 |
+| ESLint 永久门禁 | 删除生产与 test/tooling override 中对 `no-unsafe-argument`、`no-unsafe-assignment`、`no-unsafe-call`、`no-unsafe-enum-comparison`、`no-unsafe-member-access`、`no-unsafe-return` 的关闭项；生产、共置测试、嵌套 `__tests__`、`src/test` 与 TS tooling 的最终合并配置均为 severity 2。JS/MJS tooling 继续使用 `disableTypeChecked`，不伪造缺失的 TypeScript type information。 |
+| 回归门禁 | `scripts/typescript-boundaries.test.mjs` 新增 browser/Node 双 project 负例 probe，分别锁定数组索引 `TS2532` 与 exact optional `TS2375`；同时通过 ESLint `calculateConfigForFile` 检查生产、测试和 tooling 的最终合并配置，防止后置 override 静默重新关闭六项规则。 |
+| 修复方法 | 以数组边界 guard、`unknown` parser、精确可选属性 omission、具名 runtime contract 和第三方 adapter 边界收窄清理诊断；没有用批量非空断言、宽泛 `any` 或关闭规则换取通过。清债复审同时修复 watchlist 脏数值泄漏、indicator scheduler 非数组输入异常、K 线比较器非数组 fail-open、pane layout 防御性拷贝退化，并恢复投影、lineage、freehand、text renderer 等热路径的原有复杂度与分配特征。 |
+| Suppression / assertion | 本轮新增显式 `any`、`as unknown as`、普通 type assertion、非空断言、`@ts-ignore`、`@ts-nocheck`、`@ts-expect-error` 与 `eslint-disable` 均为 0。Suppression ledger 中 4 个既有 Lightweight Charts 局部断言仍只存在于已审计的第三方声明边界，删除条件与保护测试不变。 |
+| 专项验证 | chart adapter 146/146、drawing 159/159、indicator 53/53，以及清债后高风险投影/lineage/drawing/indicator/watchlist 专项 179/179 均通过；常量尾部读取与增量投影性能断言通过。 |
+| 完整门禁 | `npm run check` 完整通过：architecture 0 个 migration allowlist 活跃项、browser/Node 双 project typecheck、六项 unsafe 规则已启用的全量 lint、760/760 tests、Vite 7.3.1 build 均成功，295 modules transformed。 |
+| Release smoke | 隔离 Vite `15183` 实例通过；1500 bars、connected/live；15 种图表、histogram persistence、candlestick restoration、MA/VOL/BOLL/RSI overlay/pane、PNG/JPEG/WebP 3/3 export cases 与 drawing future-anchor/reload persistence 全通过；`failures`、`warnings`、`exceptions` 均为 0。 |
+| Smoke 命令 | `npx tsx scripts/smoke.mjs --url http://127.0.0.1:15183/ --chart-type-matrix --export-matrix --drawing-check --overlay-heavy`；验证后仅停止本轮启动的 Vite PID，端口 `15183` 已释放。 |
+| Commit | 本节与 Post-T13 严格类型清债改动在同一提交中落库。 |
+| 完成结论 | 本轮指定的最高严格度债务已清零，并由 compiler、最终 ESLint 配置、单元测试、build 与 release smoke 五层永久门禁共同约束。 |
 
 ### Suppression ledger
 

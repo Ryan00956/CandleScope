@@ -47,9 +47,9 @@ function projectorIdFromRow(row: DisplayRow): string | null {
 }
 
 function usesOrdinalSeriesData(seriesData: readonly DisplayRow[]): boolean {
-  if (!Array.isArray(seriesData)) return false;
   for (let index = 0; index < seriesData.length; index += 1) {
     const row = seriesData[index];
+    if (!row) continue;
     if (row?.time != null) return isOrdinalAxisTime(row.time);
   }
   return false;
@@ -60,7 +60,9 @@ function firstRangeIndexWithToAtLeast(rowRanges: readonly RowRangeEntry[], targe
   let right = rowRanges.length;
   while (left < right) {
     const middle = (left + right) >> 1;
-    if (rowRanges[middle].range.to < target) left = middle + 1;
+    const entry = rowRanges[middle];
+    if (!entry) return rowRanges.length;
+    if (entry.range.to < target) left = middle + 1;
     else right = middle;
   }
   return left;
@@ -75,7 +77,9 @@ function firstRangeIndexWithFromGreaterThan(
   let right = rowRanges.length;
   while (left < right) {
     const middle = (left + right) >> 1;
-    if (rowRanges[middle].range.from <= target) left = middle + 1;
+    const entry = rowRanges[middle];
+    if (!entry) return rowRanges.length;
+    if (entry.range.from <= target) left = middle + 1;
     else right = middle;
   }
   return left;
@@ -202,15 +206,22 @@ export class DrawingLineageIndex {
       return false;
     }
 
-    let insertedEntries: RowDescription[];
+    const insertedEntries: RowDescription[] = [];
     try {
-      insertedEntries = insertedRows.map((row) => this._describeRow(row));
+      for (let index = 0; index < insertedRows.length; index += 1) {
+        const row = insertedRows[index];
+        if (!row) return false;
+        insertedEntries.push(this._describeRow(row));
+      }
     } catch {
       return false;
     }
     this._removeTail(fromOutputIndex);
     for (let index = 0; index < insertedRows.length; index += 1) {
-      this._appendRow(insertedRows[index], insertedEntries[index]);
+      const row = insertedRows[index];
+      const description = insertedEntries[index];
+      if (!row || !description) return false;
+      this._appendRow(row, description);
     }
     this.seriesData = nextSeriesData;
     this.revision += 1;
@@ -249,6 +260,7 @@ export class DrawingLineageIndex {
     if (firstIndex >= endIndex) return null;
     const firstEntry = this.rowRanges[firstIndex];
     const lastEntry = this.rowRanges[endIndex - 1];
+    if (!firstEntry || !lastEntry) return null;
     if (firstEntry.range.from > fromTime
       || firstEntry.range.to < fromTime
       || lastEntry.range.from > toTime

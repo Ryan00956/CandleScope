@@ -337,12 +337,14 @@ function createDefaultTestContext(price: unknown): AlertTestContext {
 }
 
 function normalizeTestContext(context: AlertTestContext): AlertEvaluationContext {
-  const normalizeBucket = (bucket: Record<TestValueField, string>): Record<string, number> => Object.fromEntries(
-    TEST_VALUE_FIELDS.map(({ key }) => {
+  const normalizeBucket = (bucket: Record<TestValueField, string>): Record<string, number> => {
+    const normalized: Record<string, number> = {};
+    for (const { key } of TEST_VALUE_FIELDS) {
       const value = Number(bucket[key]);
-      return [key, Number.isFinite(value) ? value : null];
-    }).filter(([, value]) => value !== null),
-  );
+      if (Number.isFinite(value)) normalized[key] = value;
+    }
+    return normalized;
+  };
   return {
     previous: normalizeBucket(context.previous),
     values: normalizeBucket(context.values),
@@ -810,7 +812,7 @@ export default function AlertsPanel({
   const [statusFilter, setStatusFilter] = useState<AlertStatusFilter>("all");
   const [editingRuleId, setEditingRuleId] = useState("");
   const [draft, setDraft] = useState(() => createDefaultAlertDraft({
-    symbol: currentSymbol,
+    ...(currentSymbol === undefined ? {} : { symbol: currentSymbol }),
     interval: currentInterval || "1m",
     price: displayPrice,
   }));
@@ -826,9 +828,9 @@ export default function AlertsPanel({
 
   const watchlistProducts = useMemo(() => buildWatchlistProducts(watchlists), [watchlists]);
   const currentProductKey = buildProductKey({
-    symbol: currentSymbol,
-    marketType: currentMarketType,
-    exchange: currentExchange,
+    ...(currentSymbol === undefined ? {} : { symbol: currentSymbol }),
+    ...(currentMarketType === undefined ? {} : { marketType: currentMarketType }),
+    ...(currentExchange === undefined ? {} : { exchange: currentExchange }),
   });
   const currentWatchProduct = watchlistProducts.find((item) => item.key === currentProductKey) || null;
   const selectedProductExists = watchlistProducts.some((item) => item.key === selectedProductKey);
@@ -844,9 +846,10 @@ export default function AlertsPanel({
     setAlertLoading(true);
     setAlertError("");
     try {
+      const requestOptions = signal === undefined ? {} : { signal };
       const [nextRules, nextHistory] = await Promise.all([
-        fetchAlertRules({ signal }),
-        fetchAlertHistory({ limit: 100 }, { signal }),
+        fetchAlertRules(requestOptions),
+        fetchAlertHistory({ limit: 100 }, requestOptions),
       ]);
       setRules(Array.isArray(nextRules) ? nextRules : []);
       setHistory(Array.isArray(nextHistory) ? nextHistory : []);
@@ -902,7 +905,9 @@ export default function AlertsPanel({
   const resetDraft = useCallback(() => {
     setEditingRuleId("");
     setDraft(createDefaultAlertDraft({
-      symbol: selectedProduct?.symbol || currentSymbol,
+      ...((selectedProduct?.symbol || currentSymbol) === undefined
+        ? {}
+        : { symbol: selectedProduct?.symbol || currentSymbol }),
       interval: effectiveInterval,
       price: displayPrice,
     }));
@@ -942,8 +947,8 @@ export default function AlertsPanel({
       const payload = buildAlertPayloadFromDraft({
         draft,
         product: selectedProduct,
-        fallbackSymbol: currentSymbol,
-        fallbackMarketType: currentMarketType,
+        ...(currentSymbol === undefined ? {} : { fallbackSymbol: currentSymbol }),
+        ...(currentMarketType === undefined ? {} : { fallbackMarketType: currentMarketType }),
         fallbackExchange: normalizedExchange,
         interval: effectiveInterval,
       });
@@ -976,8 +981,8 @@ export default function AlertsPanel({
       const payload = buildAlertPayloadFromDraft({
         draft,
         product: selectedProduct,
-        fallbackSymbol: currentSymbol,
-        fallbackMarketType: currentMarketType,
+        ...(currentSymbol === undefined ? {} : { fallbackSymbol: currentSymbol }),
+        ...(currentMarketType === undefined ? {} : { fallbackMarketType: currentMarketType }),
         fallbackExchange: normalizedExchange,
         interval: effectiveInterval,
       });
@@ -1195,7 +1200,7 @@ export default function AlertsPanel({
                 <ProductSummary
                   product={selectedProduct}
                   fallbackSymbol={symbolLabel}
-                  fallbackMarketType={currentMarketType}
+                  {...(currentMarketType === undefined ? {} : { fallbackMarketType: currentMarketType })}
                   fallbackExchange={normalizedExchange}
                   currentProductMissing={currentProductMissing && !selectedProduct}
                 />
@@ -1381,10 +1386,14 @@ export default function AlertsPanel({
                       title={event.message || `${rule?.name || "警报"} 命中`}
                       value={String(valueText)}
                       channels={rule ? describeAlertChannels(rule) : "历史"}
-                      onViewRule={rule ? () => {
-                        setSearchTerm(rule.name || rule.id);
-                        setTab("all");
-                      } : undefined}
+                      {...(rule
+                        ? {
+                            onViewRule: () => {
+                              setSearchTerm(rule.name || rule.id);
+                              setTab("all");
+                            },
+                          }
+                        : {})}
                     />
                   );
                 })}

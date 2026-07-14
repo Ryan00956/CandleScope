@@ -315,7 +315,7 @@ async function captureElementToCanvas(
 
   try {
     return await toCanvas(targetElement, {
-      backgroundColor,
+      ...(backgroundColor === undefined ? {} : { backgroundColor }),
       cacheBust: true,
       filter: shouldIncludeNode,
       height: Math.ceil(rect.height),
@@ -451,12 +451,13 @@ export async function renderExportImage(
     : capturedCanvas;
   const finalCanvas = finalizeCanvas(scopedCanvas, options, targetElement);
   const blob = await canvasToBlob(finalCanvas, options.format, options.quality);
+  const metadata = options.metadata;
   const filename = options.filename || buildExportFilename({
     prefix: options.filenamePrefix,
-    exchange: options.metadata?.exchange,
-    marketType: options.metadata?.marketType,
-    symbol: options.metadata?.symbol,
-    interval: options.metadata?.interval,
+    ...(metadata?.exchange === undefined ? {} : { exchange: metadata.exchange }),
+    ...(metadata?.marketType === undefined ? {} : { marketType: metadata.marketType }),
+    ...(metadata?.symbol === undefined ? {} : { symbol: metadata.symbol }),
+    ...(metadata?.interval === undefined ? {} : { interval: metadata.interval }),
     scope: options.scope,
     format: options.format,
   });

@@ -28,7 +28,7 @@ test("indicator.recomputed dispatches a targeted range refresh notification", ()
 
   assert.equal(handled, true);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].indicatorId, "ma-1");
+  assert.equal(mustBeDefined(calls[0]).indicatorId, "ma-1");
   assert.deepEqual(
     malformedFixture<{ range: unknown }>(mustBeDefined(calls[0]).payload).range,
     { start: 10, end: 30 },
@@ -107,7 +107,7 @@ test("indicator.subscribed dispatches revision and resume acknowledgement", () =
   }), {
     onSubscribed,
   }), true);
-  assert.equal(calls[0].indicatorId, "ma-1");
+  assert.equal(mustBeDefined(calls[0]).indicatorId, "ma-1");
   assert.equal(
     malformedFixture<{ resumeStatus: unknown }>(mustBeDefined(calls[0]).payload).resumeStatus,
     "up_to_date",

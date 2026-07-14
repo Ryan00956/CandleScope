@@ -17,7 +17,7 @@ function ordinal(order: number, sourceTime = 100, sourceOrdinal = 0): OrdinalAxi
 
 test("alignIndicatorLinesToTimes clips line and color data to the main bar time set", () => {
   const allowed = new Set([10, 20]);
-  const [line] = alignIndicatorLinesToTimes([{
+  const lines = alignIndicatorLinesToTimes([{
     id: "plot",
     type: "histogram",
     data: [
@@ -32,6 +32,7 @@ test("alignIndicatorLinesToTimes clips line and color data to the main bar time 
     ],
   }], allowed);
 
+  const line = mustBeDefined(lines[0]);
   assert.deepEqual(line.data, [
     { time: 10, value: 1, color: "red" },
     { time: 20, value: 2, color: "green" },
@@ -64,8 +65,9 @@ test("buildFillRenderEntries only uses shared clipped line times", () => {
   );
 
   assert.equal(payload.matchedFillCount, 1);
-  assert.deepEqual(payload.entries[0].upperData, [{ time: 10, value: 3 }]);
-  assert.deepEqual(payload.entries[0].lowerData, [{ time: 10, value: 1 }]);
+  const entry = mustBeDefined(payload.entries[0]);
+  assert.deepEqual(entry.upperData, [{ time: 10, value: 3 }]);
+  assert.deepEqual(entry.lowerData, [{ time: 10, value: 1 }]);
 });
 
 test("buildFillRenderEntries aligns and sorts separate ordinal time objects by order", () => {
@@ -86,11 +88,12 @@ test("buildFillRenderEntries aligns and sorts separate ordinal time objects by o
     "black",
   );
 
-  assert.deepEqual(payload.entries[0].upperData, [
+  const entry = mustBeDefined(payload.entries[0]);
+  assert.deepEqual(entry.upperData, [
     { time: upperAtOne, value: 3 },
     { time: upperAtTwo, value: 5 },
   ]);
-  assert.deepEqual(payload.entries[0].lowerData, [
+  assert.deepEqual(entry.lowerData, [
     { time: upperAtOne, value: 1 },
     { time: upperAtTwo, value: 2 },
   ]);
@@ -136,7 +139,7 @@ test("buildFillRenderEntries signature includes ordinal lineage and plotted valu
 
 test("ordinal filtering and histogram colors require matching source lineage", () => {
   const allowedTime = ordinal(2, 200);
-  const [line] = alignIndicatorLinesToTimes([{
+  const lines = alignIndicatorLinesToTimes([{
     id: "histogram",
     type: "histogram",
     data: [
@@ -147,6 +150,7 @@ test("ordinal filtering and histogram colors require matching source lineage", (
     colorData: [{ time: ordinal(2, 200), color: "red" }],
   }], new Set([allowedTime]));
 
+  const line = mustBeDefined(lines[0]);
   assert.deepEqual(line.data, [{ time: ordinal(2, 200), value: 7, color: "red" }]);
 });
 
@@ -185,8 +189,9 @@ test("applyLineSeriesData clears existing indicator series when next data is emp
 
   assert.equal(result, "clear");
   assert.deepEqual(calls, [[]]);
-  assert.equal(events[0].name, "chart.indicatorSeries.setData");
-  const detail = mustBeDefined(events[0].detail);
+  const event = mustBeDefined(events[0]);
+  assert.equal(event.name, "chart.indicatorSeries.setData");
+  const detail = mustBeDefined(event.detail);
   assert.equal(detail.points, 0);
   assert.equal(detail.reason, "clear");
 });

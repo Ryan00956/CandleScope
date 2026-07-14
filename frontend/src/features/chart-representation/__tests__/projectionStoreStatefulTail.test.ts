@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ProjectionStore } from "../projectionStore.js";
+
+const getReflectedValue = Reflect.get as (
+  target: object,
+  propertyKey: PropertyKey,
+  receiver?: unknown,
+) => unknown;
 import { KagiProjector } from "../projectors/kagiProjector.js";
 import { LineBreakProjector } from "../projectors/lineBreakProjector.js";
 import { PointFigureProjector } from "../projectors/pointFigureProjector.js";
@@ -565,9 +571,10 @@ test("throwing tail time accessors fall back before committing partial index sta
         },
       }));
       if (this.calls === 2 && data.length > 0) {
-        const time = data[0].time;
+        const firstItem = mustBeDefined(data[0]);
+        const time = firstItem.time;
         let reads = 0;
-        Object.defineProperty(data[0], "time", {
+        Object.defineProperty(firstItem, "time", {
           configurable: true,
           get() {
             reads += 1;
@@ -610,14 +617,14 @@ for (const operation of ["append", "replace"]) {
     const checkpointCache = new Proxy(store._sourceCheckpoints, {
       get(target, property, receiver) {
         if (numericIndex(property)) checkpointReads += 1;
-        return Reflect.get(target, property, receiver);
+        return getReflectedValue(target, property, receiver);
       },
     });
     store._sourceCheckpoints = checkpointCache;
     store._display = store._display.map((item) => new Proxy(item, {
       get(target, property, receiver) {
         if (property === "time") displayTimeReads += 1;
-        return Reflect.get(target, property, receiver);
+        return getReflectedValue(target, property, receiver);
       },
     }));
     // This test intentionally replaces the store's private display array to
@@ -633,7 +640,7 @@ for (const operation of ["append", "replace"]) {
     const observedRows = new Proxy(next, {
       get(target, property, receiver) {
         if (numericIndex(property)) sourceReads += 1;
-        return Reflect.get(target, property, receiver);
+        return getReflectedValue(target, property, receiver);
       },
     });
 
@@ -662,7 +669,7 @@ for (const descriptor of PROJECTORS) {
     const initial = source(descriptor.appendBase);
     store.reset(initial);
     counting.resetCount();
-    const lastClose = descriptor.appendBase[descriptor.appendBase.length - 1];
+    const lastClose = mustBeDefined(descriptor.appendBase.at(-1));
     const next = [
       ...initial,
       row(initial.length + 1, lastClose + 6),
@@ -753,7 +760,7 @@ test("semantic metadata changes are not hidden by an unchanged synthetic order a
   ];
   store.reset(initial);
   const next = [
-    initial[0],
+    mustBeDefined(initial[0]),
     { ...row(2, 12), customValues: { nested: { revision: "new" } } },
   ];
 
@@ -786,7 +793,7 @@ test("cyclic metadata with different graph topology is not reused as a common pr
   ];
   store.reset(initial);
   const next = [
-    initial[0],
+    mustBeDefined(initial[0]),
     { ...row(2, 12), customValues: { graph: newGraph } },
   ];
 
@@ -814,7 +821,10 @@ test("a volume-only source tick becomes a no-op when Line Break semantics are un
   const store = new ProjectionStore({ projector });
   const initial = source([10, 12]);
   store.reset(initial);
-  const next = [initial[0], { ...initial[1], volume: 999 }];
+  const next = [
+    mustBeDefined(initial[0]),
+    { ...mustBeDefined(initial[1]), volume: 999 },
+  ];
 
   const patch = store.applySourceDelta(
     { type: "tick", replaced: true, bar: next[1] },

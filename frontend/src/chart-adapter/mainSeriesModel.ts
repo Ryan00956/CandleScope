@@ -98,7 +98,7 @@ export function toMainSeriesPoint(row: ChartSeriesInputRow, {
   const finish = (point: ChartSeriesInputRow): ChartSeriesInputRow => (row?.customValues
     ? { ...point, customValues: row.customValues }
     : point);
-  if (row?.__whitespace || time == null) return finish({ time });
+  if (row?.__whitespace || time == null) return finish(time == null ? {} : { time });
 
   if (isOhlcMainChartType(resolvedType)) {
     const ohlc = validOhlc(row);
@@ -222,12 +222,15 @@ export function buildMainSeriesReferenceOptions(
   }
 
   const closes = finiteCloses(rows);
-  if (closes.length === 0) return {};
-  let minimum = closes[0];
-  let maximum = closes[0];
+  const firstClose = closes[0];
+  if (firstClose == null) return {};
+  let minimum = firstClose;
+  let maximum = firstClose;
   for (let index = 1; index < closes.length; index += 1) {
-    minimum = Math.min(minimum, closes[index]);
-    maximum = Math.max(maximum, closes[index]);
+    const close = closes[index];
+    if (close == null) continue;
+    minimum = Math.min(minimum, close);
+    maximum = Math.max(maximum, close);
   }
   const spread = maximum - minimum;
   const padding = spread > 0

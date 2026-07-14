@@ -137,7 +137,9 @@ test("exchange endpoints validate the list and capabilities shapes", async (cont
       : jsonResponse({ count: 1, exchanges: [exchangeCapability()] })
   );
 
-  assert.equal((await fetchExchanges()).exchanges[0].exchange, "binance");
+  const firstExchange = (await fetchExchanges()).exchanges[0];
+  assert.ok(firstExchange);
+  assert.equal(firstExchange.exchange, "binance");
   assert.deepEqual((await fetchExchangeCapabilities()).native_intervals, ["1m", "1h"]);
 
   globalThis.fetch = async () => jsonResponse({ count: 1, exchanges: [{}] });
@@ -155,7 +157,9 @@ test("subscription endpoints validate list and sync payloads", async (context) =
       })
   );
 
-  assert.equal((await fetchSubscriptions()).subscriptions[0].tier, "full");
+  const firstSubscription = (await fetchSubscriptions()).subscriptions[0];
+  assert.ok(firstSubscription);
+  assert.equal(firstSubscription.tier, "full");
   assert.equal((await syncWatchlistSymbols(["BTCUSDT", "ETHUSDT"])).synced, 2);
 
   globalThis.fetch = async () => jsonResponse({ subscriptions: [{ symbol: "BTCUSDT", tier: "vip" }] });

@@ -70,7 +70,9 @@ export function useDrawingKeyboard({
         const id = selectedIdRef.current;
         const idx = primitivesRef.current.findIndex((p) => p.id === id);
         if (idx >= 0) {
-          detachPrim(primitivesRef.current[idx]);
+          const primitive = primitivesRef.current[idx];
+          if (!primitive) return;
+          detachPrim(primitive);
           primitivesRef.current.splice(idx, 1);
           persistDrawings();
         }

@@ -39,7 +39,8 @@ function projectGroups(
   timedFields: readonly string[],
 ): unknown[] {
   if (!Array.isArray(groups)) return [];
-  return groups.map((group) => {
+  const groupList: unknown[] = groups;
+  return groupList.map((group) => {
     if (!isRecord(group)) return group;
     const projected = { ...group };
     for (const field of timedFields) {
@@ -65,7 +66,7 @@ export function buildDisplaySourceTimeIndex(
   const lastTargetIndexBySourceTime = new Map<number, number>();
   const displayTimeSet = new Set<AxisTime>();
 
-  for (const row of Array.isArray(displayRows) ? displayRows : []) {
+  for (const row of displayRows) {
     const time = row?.time;
     if (time != null) displayTimeSet.add(time);
 
@@ -103,18 +104,19 @@ export function projectSourceTimedEntries(
   }
 
   const sourceEntryByTime = new Map<number, TimedEntry>();
-  for (const entry of Array.isArray(entries) ? entries : []) {
+  for (const entry of entries) {
     const sourceTime = sourceTimeFromAxisTime(entry?.time);
     if (sourceTime === null || !Number.isFinite(sourceTime)) continue;
     sourceEntryByTime.set(sourceTime, entry);
   }
 
-  const targets = Array.isArray(index?.targets) ? index.targets : [];
-  const lastTargetIndexBySourceTime = index?.lastTargetIndexBySourceTime;
+  const targets = index.targets;
+  const lastTargetIndexBySourceTime = index.lastTargetIndexBySourceTime;
   const projected: TimedEntry[] = [];
 
   for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
     const target = targets[targetIndex];
+    if (!target) continue;
     const entry = sourceEntryByTime.get(target.sourceTime);
     if (!entry) continue;
     if (
@@ -143,14 +145,13 @@ export function projectPaneDescriptorsToDisplay(
   panes: readonly unknown[] = [],
   index: DisplaySourceTimeIndex,
 ): unknown[] {
-  if (!Array.isArray(panes)) return [];
-
   return panes.map((pane) => {
     if (!isRecord(pane)) return pane;
     const projected = { ...pane };
 
     if (Array.isArray(pane.lines)) {
-      projected.lines = pane.lines.map((line) => {
+      const lines: unknown[] = pane.lines;
+      projected.lines = lines.map((line) => {
         if (!isRecord(line)) return line;
         const fanout = line.pane === "volume" ? "last" : "all";
         return {
@@ -197,7 +198,7 @@ export function isLastDisplayTargetForSourceTime(
   index: unknown,
 ): boolean {
   if (
-    !Array.isArray(displayRows)
+    !displayRows
     || !Number.isInteger(index)
     || Number(index) < 0
     || Number(index) >= displayRows.length
@@ -206,7 +207,9 @@ export function isLastDisplayTargetForSourceTime(
   }
 
   const resolvedIndex = Number(index);
-  const sourceTime = displaySourceTime(displayRows[resolvedIndex]);
+  const currentRow = displayRows[resolvedIndex];
+  if (!currentRow) return false;
+  const sourceTime = displaySourceTime(currentRow);
   if (!Number.isFinite(sourceTime)) return false;
   if (resolvedIndex === displayRows.length - 1) return true;
   return displaySourceTime(displayRows[resolvedIndex + 1]) !== sourceTime;

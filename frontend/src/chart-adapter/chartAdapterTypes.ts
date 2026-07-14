@@ -185,11 +185,11 @@ export interface ProjectionPatchCandidate {
   kind?: string;
   fromOutputIndex?: unknown;
   deleteCount?: unknown;
-  insert?: unknown;
-  previousData?: unknown;
+  insert?: ChartSeriesInputRow[];
+  previousData?: ChartSeriesInputRow[];
   previousLength?: unknown;
   nextLength?: unknown;
-  nextData?: unknown;
+  nextData?: ChartSeriesInputRow[];
 }
 
 export type ProjectionRenderMode = "noop" | "setData" | "update" | "pop-update";

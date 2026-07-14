@@ -48,7 +48,7 @@ export class SeriesWindowRegistry {
     let store = this._stores.get(key);
     if (!store) {
       store = new SeriesWindowStore({
-        maxBars: this.maxBars,
+        ...(this.maxBars === undefined ? {} : { maxBars: this.maxBars }),
         seriesKey: key,
         intervalSeconds: options.intervalSeconds ?? null,
       });

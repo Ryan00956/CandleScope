@@ -17,18 +17,22 @@ export interface DetectedGap {
 }
 
 export function klineRowsEqual(
-  a: readonly Record<string, unknown>[] | null | undefined,
-  b: readonly Record<string, unknown>[] | null | undefined,
+  a: unknown,
+  b: unknown,
 ): boolean {
   if (a === b) return true;
   if (!Array.isArray(a) || !Array.isArray(b)) return false;
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i += 1) {
-    const left = a[i] || {};
-    const right = b[i] || {};
+  const leftRows: unknown[] = a;
+  const rightRows: unknown[] = b;
+  if (leftRows.length !== rightRows.length) return false;
+  for (let i = 0; i < leftRows.length; i += 1) {
+    const left = leftRows[i];
+    const right = rightRows[i];
+    if (left === null || typeof left !== "object" || Array.isArray(left)
+      || right === null || typeof right !== "object" || Array.isArray(right)) return false;
     const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
     for (const key of keys) {
-      if (left[key] !== right[key]) return false;
+      if (Reflect.get(left, key) !== Reflect.get(right, key)) return false;
     }
   }
   return true;
@@ -65,18 +69,22 @@ export function detectGaps(
   const threshold = intervalSeconds * 1.5;
 
   for (let i = 1; i < data.length; i += 1) {
-    const diff = data[i].time - data[i - 1].time;
+    const current = data[i];
+    const previous = data[i - 1];
+    if (!current || !previous) continue;
+    const diff = current.time - previous.time;
     if (diff > threshold) {
       gaps.push({
-        from: data[i - 1].time,
-        to: data[i].time,
+        from: previous.time,
+        to: current.time,
         missingBars: Math.round(diff / intervalSeconds) - 1,
       });
     }
   }
 
   const nowSecs = resolveTailGapNow(options);
-  const latestBarTime = data[data.length - 1].time;
+  const latestBarTime = data.at(-1)?.time;
+  if (latestBarTime == null) return gaps;
   const tailGap = nowSecs == null ? 0 : nowSecs - latestBarTime;
   if (nowSecs != null && tailGap > intervalSeconds * 3) {
     gaps.push({

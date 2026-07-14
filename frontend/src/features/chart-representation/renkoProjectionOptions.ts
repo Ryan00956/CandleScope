@@ -53,7 +53,9 @@ export function calculateRenkoAtr(
   const seedLength = Math.min(period, trueRanges.length);
   let atr = trueRanges.slice(0, seedLength).reduce((sum, value) => sum + value, 0) / seedLength;
   for (let index = seedLength; index < trueRanges.length; index += 1) {
-    atr = ((atr * (period - 1)) + trueRanges[index]) / period;
+    const trueRange = trueRanges[index];
+    if (trueRange === undefined) continue;
+    atr = ((atr * (period - 1)) + trueRange) / period;
   }
   return positiveNumber(atr);
 }

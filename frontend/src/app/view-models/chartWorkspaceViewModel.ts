@@ -115,7 +115,7 @@ export function buildChartWorkspaceViewModel({
         lineBreakNumberOfLines: chartSettings.lineBreakNumberOfLines,
         theme: resolvedTheme,
         customBg: chartSettings.customBg,
-        timezone: chartSettings.timezone,
+        ...(chartSettings.timezone === undefined ? {} : { timezone: chartSettings.timezone }),
         savedVisibleRange,
         dataMeta: marketView.meta,
         onViewportRangeChange: (range) => indicatorActions?.ensureVisibleIndicatorRange?.(range),

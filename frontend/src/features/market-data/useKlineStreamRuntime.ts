@@ -105,7 +105,7 @@ export function useKlineStreamRuntime({
           if (!result?.data?.length) return;
 
           const latestTick = result.data[result.data.length - 1];
-          updateLastPrice(latestTick, currentIntv);
+          if (latestTick) updateLastPrice(latestTick, currentIntv);
           setWsStatus((prev) => (prev === "live" ? prev : "fallback"));
         } catch (pollErr) {
           console.warn("Polling fallback failed:", pollErr);
@@ -186,7 +186,7 @@ export function useKlineStreamRuntime({
                   .then((result) => {
                     if (!active || !result?.data?.length) return;
                     const latest = result.data[result.data.length - 1];
-                    updateLastPrice(latest, currentIntv);
+                    if (latest) updateLastPrice(latest, currentIntv);
                     console.log(`[WS-Recovery] Reloaded ${result.data.length} bars after reconnect`);
                   })
                   .catch((err) => {
@@ -326,7 +326,8 @@ export function useKlineStreamRuntime({
       )
         .then((result) => {
           if (!result?.data?.length) return;
-          updateLastPrice(result.data[result.data.length - 1], currentIntv);
+          const latest = result.data.at(-1);
+          if (latest) updateLastPrice(latest, currentIntv);
         })
         .catch((err) => {
           console.warn("[TabRecovery] Tail catch-up failed:", err);

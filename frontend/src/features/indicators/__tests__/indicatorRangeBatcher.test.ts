@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createIndicatorRangeBatcher } from "../indicatorRangeBatcher.js";
-import { structuralMock } from "../../../test/testHelpers.js";
+import { mustBeDefined, structuralMock } from "../../../test/testHelpers.js";
 
 type IndicatorRangeBatcher = ReturnType<typeof createIndicatorRangeBatcher>;
 type IndicatorRangeRequest = Parameters<IndicatorRangeBatcher["schedule"]>[0];
@@ -46,7 +46,7 @@ test("coalesces same-series calls into one physical batch", async () => {
   ]);
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].requests.length, 3);
+  assert.equal(mustBeDefined(calls[0]).requests.length, 3);
   assert.deepEqual(results.map((item) => item.clientId), ["vol", "boll", "macd"]);
   batcher.dispose();
 });
@@ -86,7 +86,10 @@ test("drops an item aborted before the microtask flush", async () => {
   await assert.rejects(aborted, (error) => error instanceof Error && error.name === "AbortError");
   assert.equal((await live).clientId, "live");
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].requests.map((item) => item.clientId), ["live"]);
+  assert.deepEqual(
+    mustBeDefined(calls[0]).requests.map((item) => item.clientId),
+    ["live"],
+  );
   batcher.dispose();
 });
 
@@ -114,7 +117,10 @@ test("can batch again after a dispose and lifecycle reset", async () => {
 
   await abandonedResult;
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].requests.map((item) => item.clientId), ["ma", "vol"]);
+  assert.deepEqual(
+    mustBeDefined(calls[0]).requests.map((item) => item.clientId),
+    ["ma", "vol"],
+  );
   assert.deepEqual(resumed.map((item) => item.clientId), ["ma", "vol"]);
   batcher.dispose();
 });

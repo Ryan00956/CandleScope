@@ -204,8 +204,9 @@ class TextRenderer implements PrimitivePaneRenderer {
       ctx.fillStyle = textColor;
       ctx.globalAlpha = (hovered && !selected) ? 0.8 : 1;
 
-      for (let i = 0; i < lines.length; i++) {
+      for (let i = 0; i < lines.length; i += 1) {
         const line = lines[i];
+        if (line === undefined) continue;
         const lineW = ctx.measureText(line).width;
         let lx = boxX + padding;
         if (align === "center") lx = boxX + padding + (innerWidth - lineW) / 2;

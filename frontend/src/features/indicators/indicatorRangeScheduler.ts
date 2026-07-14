@@ -16,6 +16,10 @@ interface IndicatorRangeTarget {
   id?: string;
 }
 
+function indicatorRangeTargetKey(target: IndicatorRangeTarget): string {
+  return String(target.key || target.id || "");
+}
+
 interface SchedulerExecutionContext<TTarget> {
   epoch: number;
   range: IndicatorRange;
@@ -355,17 +359,22 @@ export function createIndicatorRangeScheduler<
     revision = null,
     sessionKey: nextSessionKey,
     step = 1,
-    targets = [],
+    targets,
   }: EnsureCoverageOptions<TTarget, TResult> = {}): { accepted: boolean; epoch: number; queued: number } {
     const range = normalizeIndicatorRange(rangeInput);
-    if (!range || typeof execute !== "function" || !Array.isArray(targets) || targets.length === 0) {
+    const normalizedTargets: readonly TTarget[] = Array.isArray(targets) ? targets : [];
+    if (
+      !range ||
+      typeof execute !== "function" ||
+      normalizedTargets.length === 0
+    ) {
       return { accepted: false, epoch, queued: 0 };
     }
     const nextEpoch = setSession(nextSessionKey);
     const normalizedRevision = normalizeIndicatorRevision(revision);
     let queued = 0;
-    for (const target of targets) {
-      const targetKey = String(target.key || target.id || "");
+    for (const target of normalizedTargets) {
+      const targetKey = indicatorRangeTargetKey(target);
       if (!targetKey) continue;
       const pendingKey = `${sessionKey}|${targetKey}`;
       latestRevisionByTarget.set(pendingKey, revisionSignature(normalizedRevision));

@@ -481,10 +481,10 @@ export class SeriesDataFeed {
 
     try {
       const result = await this.getBars(series, {
-        to: before,
+        ...(before === undefined ? {} : { to: before }),
         countBack: bars,
         source,
-        signal,
+        ...(signal === undefined ? {} : { signal }),
         commit,
       });
       const rows = result?.data || [];
@@ -538,7 +538,7 @@ export class SeriesDataFeed {
       to,
       countBack,
       days,
-      fallbackDays,
+      ...(fallbackDays === undefined ? {} : { fallbackDays }),
       intervalSeconds: parseIntervalSeconds(series.interval),
     });
 
@@ -550,7 +550,7 @@ export class SeriesDataFeed {
         waitMs,
         strict,
         source,
-        signal,
+        ...(signal === undefined ? {} : { signal }),
         commit,
       });
       return { ...result, plan };
@@ -561,7 +561,7 @@ export class SeriesDataFeed {
         before: plan.before,
         bars: plan.bars,
         source,
-        signal,
+        ...(signal === undefined ? {} : { signal }),
         commit,
       });
       return { ...result, plan };
@@ -571,7 +571,7 @@ export class SeriesDataFeed {
       days: plan.days,
       countBack: plan.countBack,
       source,
-      signal,
+      ...(signal === undefined ? {} : { signal }),
       commit,
     });
     return { ...result, plan };
@@ -597,7 +597,10 @@ export class SeriesDataFeed {
         days,
         series.marketType,
         series.exchange,
-        { countBack, signal },
+        {
+          ...(countBack === undefined ? {} : { countBack }),
+          ...(signal === undefined ? {} : { signal }),
+        },
       );
       return this.applyResult(series, result, {
         epoch,
@@ -629,7 +632,7 @@ export class SeriesDataFeed {
         bars,
         series.marketType,
         series.exchange,
-        { signal },
+        signal === undefined ? {} : { signal },
       );
       return this.applyResult(series, result, {
         epoch,
@@ -685,7 +688,12 @@ export class SeriesDataFeed {
           pageEnd,
           series.marketType,
           series.exchange,
-          { repair, waitMs, strict, signal },
+          {
+            repair,
+            waitMs,
+            strict,
+            ...(signal === undefined ? {} : { signal }),
+          },
         );
         const applied = this.applyResult(series, result, {
           epoch,
@@ -714,7 +722,7 @@ export class SeriesDataFeed {
         pages,
         pageCount: pages.length,
         truncated: Boolean(finalResult?.truncated && pages.length >= maxPages),
-        plan: finalResult?.plan,
+        ...(finalResult?.plan === undefined ? {} : { plan: finalResult.plan }),
       };
     });
   }
@@ -740,7 +748,7 @@ export class SeriesDataFeed {
         series.marketType,
         series.exchange,
         apiSource,
-        { signal },
+        signal === undefined ? {} : { signal },
       );
       return this.applyResult(series, result, {
         epoch,

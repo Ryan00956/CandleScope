@@ -25,7 +25,11 @@ import {
 } from "./indicatorResultCacheStore.js";
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
-import type { IndicatorDefinition, IndicatorOutputAction } from "./indicatorTypes.js";
+import type {
+  IndicatorComputeRequest,
+  IndicatorDefinition,
+  IndicatorOutputAction,
+} from "./indicatorTypes.js";
 
 export interface UseIndicatorComputeControllerOptions {
   activeIndicators: IndicatorDefinition[];
@@ -145,18 +149,21 @@ export function useIndicatorComputeController({
               candleDownColor: candleDownColorRef.current,
             });
             const builtin = isBuiltinIndicator(indicator);
-            const result = await computeIndicator({
+            const request: IndicatorComputeRequest = {
               mode: builtin ? "builtin" : "script",
-              securityMode: indicator.securityMode,
-              name: builtin ? getBuiltinIndicatorName(indicator) : undefined,
-              script: indicator.script,
               ohlcv,
               params: computeParams,
               exchange,
               symbol,
               interval,
               marketType,
-            });
+            };
+            if (indicator.securityMode !== undefined) {
+              request.securityMode = indicator.securityMode;
+            }
+            if (builtin) request.name = getBuiltinIndicatorName(indicator);
+            if (indicator.script !== undefined) request.script = indicator.script;
+            const result = await computeIndicator(request);
             return { id: indicator.id, result, visible: Boolean(indicator.visible) };
           } catch (err) {
             return {
@@ -214,11 +221,14 @@ export function useIndicatorComputeController({
           for (const { id, mappedLines, error } of processedResults) {
             const index = updated.findIndex((indicator) => indicator.id === id);
             if (index === -1) continue;
+            const current = updated[index];
+            if (current === undefined) continue;
+            const paramSchema = newParamSchemas[id];
             updated[index] = {
-              ...updated[index],
+              ...current,
               lines: mappedLines,
               error,
-              ...(newParamSchemas[id] ? { paramSchema: newParamSchemas[id] } : {}),
+              ...(paramSchema ? { paramSchema } : {}),
             };
           }
           return updated;

@@ -269,7 +269,12 @@ export default function WatchlistSidebar({
   const confirmNewWatchlist = useCallback(() => {
     const name = newName.trim() || `列表 ${watchlists.length + 1}`;
     const colorIdx = watchlists.length % WATCHLIST_COLORS.length;
-    const newWl = { id: createWatchlistId(), name, symbols: [], color: WATCHLIST_COLORS[colorIdx] };
+    const newWl: WatchlistGroup = {
+      id: createWatchlistId(),
+      name,
+      symbols: [],
+      color: WATCHLIST_COLORS[colorIdx] ?? WATCHLIST_COLORS[0],
+    };
     setWatchlists((prev) => [...prev, newWl]);
     setCreatingNew(false);
     setNewName("");
@@ -355,6 +360,7 @@ export default function WatchlistSidebar({
       if (fromIdx === -1 || toIdx === -1) return prev;
       const next = [...prev];
       const [moved] = next.splice(fromIdx, 1);
+      if (!moved) return prev;
       const insertIdx = next.findIndex((w) => w.id === targetListId);
       const pos = dropTarget?.type === "list" && dropTarget.position === "above"
         ? insertIdx
@@ -801,7 +807,7 @@ export default function WatchlistSidebar({
             {/* ── New watchlist input ── */}
             {creatingNew && (
               <div className="wl-list-block">
-                <div className="wl-list-header wl-list-header-new" style={watchlistColorStyle(WATCHLIST_COLORS[watchlists.length % WATCHLIST_COLORS.length])}>
+                <div className="wl-list-header wl-list-header-new" style={watchlistColorStyle(WATCHLIST_COLORS[watchlists.length % WATCHLIST_COLORS.length] ?? WATCHLIST_COLORS[0])}>
                   <span className="wl-list-dot"/>
                   <input
                     ref={newInputRef}

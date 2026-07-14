@@ -22,6 +22,13 @@ type ValidTailPatchShape = ProjectionPatchCandidate & {
   nextLength: number;
 };
 
+function isArrayContainer(value: unknown): boolean {
+  // Patch element types are owned by the internal ProjectionPatchCandidate
+  // contract. This runtime check only preserves fail-closed behavior for an
+  // untyped caller without pretending to validate every element in a hot path.
+  return Array.isArray(value);
+}
+
 function clampTailStart(value: unknown, length: number): number {
   const index = Number(value);
   if (!Number.isFinite(index)) return 0;
@@ -66,13 +73,18 @@ export function buildMainSeriesProjectionPatch({
 export function materializeMainSeriesProjectionPatch(
   patch: ProjectionPatchCandidate | null | undefined,
 ): ChartSeriesInputRow[] {
-  if (Array.isArray(patch?.nextData)) return patch.nextData;
+  const explicitNextData = patch?.nextData;
+  if (explicitNextData && isArrayContainer(explicitNextData)) return explicitNextData;
   if (patch && typeof patch === "object" && materializedPatchData.has(patch)) {
     return materializedPatchData.get(patch) ?? [];
   }
-  const previous = Array.isArray(patch?.previousData) ? patch.previousData : [];
+  const previousCandidate = patch?.previousData;
+  const previous = previousCandidate && isArrayContainer(previousCandidate)
+    ? previousCandidate
+    : [];
   const fromOutputIndex = clampTailStart(patch?.fromOutputIndex, previous.length);
-  const insert = Array.isArray(patch?.insert) ? patch.insert : [];
+  const insertCandidate = patch?.insert;
+  const insert = insertCandidate && isArrayContainer(insertCandidate) ? insertCandidate : [];
   const nextData = previous.slice(0, fromOutputIndex).concat(insert);
   if (patch && typeof patch === "object") materializedPatchData.set(patch, nextData);
   return nextData;
@@ -86,7 +98,8 @@ function isValidTailPatchShape(
   const previousLength = Number(patch?.previousLength);
   const nextLength = Number(patch?.nextLength);
   const insert = patch?.insert;
-  if (!Array.isArray(insert)
+  if (!insert
+    || !isArrayContainer(insert)
     || !Number.isInteger(fromOutputIndex)
     || !Number.isInteger(deleteCount)
     || !Number.isInteger(previousLength)
@@ -109,8 +122,10 @@ function hasValidPreviousData(
   previousData: ChartSeriesInputRow[];
   previousLength: number;
 } {
-  return Array.isArray(patch?.previousData)
-    && patch.previousData.length === patch.previousLength;
+  const previousData = patch?.previousData;
+  return previousData !== undefined
+    && isArrayContainer(previousData)
+    && previousData.length === patch?.previousLength;
 }
 
 function cacheCommittedPatchData(
@@ -190,37 +205,41 @@ export function renderMainSeriesProjectionPatch({
 } = {}): ProjectionRenderResult {
   if (!patch) return renderResult("noop", []);
   if (!series) {
-    const retainedData = Array.isArray(patch.previousData)
-      ? patch.previousData
-      : (Array.isArray(patch.nextData) ? patch.nextData : []);
+    const previousData = patch.previousData;
+    const nextData = patch.nextData;
+    const retainedData = previousData && isArrayContainer(previousData)
+      ? previousData
+      : (nextData && isArrayContainer(nextData) ? nextData : []);
     return renderResult(
       "noop",
       retainedData,
     );
   }
   if (!isValidTailPatchShape(patch)) {
-    if (!Array.isArray(patch.nextData)) {
+    const nextData = patch.nextData;
+    if (!nextData || !isArrayContainer(nextData)) {
       throw new TypeError("projection patch must describe a complete rendered tail replacement");
     }
-    series.setData(patch.nextData);
+    series.setData(nextData);
     record(recordPerfEvent, "chart.candleSeries.setData", {
       paneId,
-      points: patch.nextData.length,
+      points: nextData.length,
       reason: "projection-invalid-patch-rebuild",
     });
-    return renderResult("setData", patch.nextData);
+    return renderResult("setData", nextData);
   }
   if (!hasValidPreviousData(patch)) {
-    if (!Array.isArray(patch.nextData)) {
+    const nextData = patch.nextData;
+    if (!nextData || !isArrayContainer(nextData)) {
       throw new TypeError("incremental projection patches require previous rendered data");
     }
-    series.setData(patch.nextData);
+    series.setData(nextData);
     record(recordPerfEvent, "chart.candleSeries.setData", {
       paneId,
-      points: patch.nextData.length,
+      points: nextData.length,
       reason: "projection-explicit-data-rebuild",
     });
-    return renderResult("setData", patch.nextData);
+    return renderResult("setData", nextData);
   }
   if (patch.deleteCount === 0
     && patch.insert?.length === 0

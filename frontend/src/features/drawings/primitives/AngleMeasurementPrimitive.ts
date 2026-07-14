@@ -70,9 +70,9 @@ function adjustAlpha(color: string, alpha: number): string {
 
   let r = 0, g = 0, b = 0;
   if (color.length === 4) {
-    r = parseInt(color[1] + color[1], 16);
-    g = parseInt(color[2] + color[2], 16);
-    b = parseInt(color[3] + color[3], 16);
+    r = parseInt(color.charAt(1).repeat(2), 16);
+    g = parseInt(color.charAt(2).repeat(2), 16);
+    b = parseInt(color.charAt(3).repeat(2), 16);
   } else if (color.length === 7) {
     r = parseInt(color.slice(1, 3), 16);
     g = parseInt(color.slice(3, 5), 16);
@@ -166,7 +166,7 @@ class AngleRenderer implements PrimitivePaneRenderer {
       const { points, color, lineWidth, selected, hovered, isPreview, setLabelBox } = data;
 
       const [a, b] = points;
-      if (!isFiniteCoord(a.x) || !isFiniteCoord(a.y) || !isFiniteCoord(b.x) || !isFiniteCoord(b.y)) {
+      if (!a || !b || !isFiniteCoord(a.x) || !isFiniteCoord(a.y) || !isFiniteCoord(b.x) || !isFiniteCoord(b.y)) {
         setLabelBox?.(null);
         return;
       }
@@ -483,6 +483,7 @@ export class AngleMeasurementPrimitive {
     const points = this._screenPoints();
     if (!points || points.length < 2) return null;
     const [a, b] = points;
+    if (!a || !b) return null;
 
     const HANDLE_RADIUS = 7 + this._lineWidth;
     const LINE_HIT_RADIUS = 8 + this._lineWidth / 2;

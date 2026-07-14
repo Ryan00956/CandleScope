@@ -9,7 +9,7 @@ import {
   shouldPreferIndicatorSetData,
 } from "../seriesLifecycle.js";
 import { chartSeriesTypes } from "../lightweightChartSurface.js";
-import { structuralMock } from "../../test/testHelpers.js";
+import { mustBeDefined, structuralMock } from "../../test/testHelpers.js";
 
 type AdapterChart = Parameters<typeof replaceMainSeries>[0];
 type AdapterSeries = NonNullable<Parameters<typeof replaceMainSeries>[1]>;
@@ -67,15 +67,16 @@ test("future time-axis carrier is an invisible line series in the main pane", ()
   });
 
   assert.equal(createFutureTimeAxisSeries(chart), carrier);
-  assert.strictEqual(calls[0][0], chartSeriesTypes.line);
-  assert.deepEqual(calls[0][1], {
+  const addSeriesCall = mustBeDefined(calls[0]);
+  assert.strictEqual(addSeriesCall[0], chartSeriesTypes.line);
+  assert.deepEqual(addSeriesCall[1], {
     crosshairMarkerVisible: false,
     lastValueVisible: false,
     priceLineVisible: false,
     title: "",
     visible: false,
   });
-  assert.equal(calls[0][2], 0);
+  assert.equal(addSeriesCall[2], 0);
 });
 
 test("replaceMainSeries clears duplicate main-series time points before registering the replacement", () => {
@@ -100,8 +101,8 @@ test("replaceMainSeries clears duplicate main-series time points before register
     "next.setSeriesOrder",
     "chart.removeSeries",
   ]);
-  assert.deepEqual(harness.operations[3][1], []);
-  assert.equal(harness.operations[6][1], harness.previousSeries);
+  assert.deepEqual(mustBeDefined(harness.operations[3])[1], []);
+  assert.equal(mustBeDefined(harness.operations[6])[1], harness.previousSeries);
 });
 
 test("replaceMainSeries restores the previous data if replacement registration fails", () => {
@@ -123,8 +124,8 @@ test("replaceMainSeries restores the previous data if replacement registration f
     "chart.removeSeries",
     "previous.setData",
   ]);
-  assert.equal(harness.operations[5][1], harness.nextSeries);
-  assert.equal(harness.operations[6][1], harness.previousData);
+  assert.equal(mustBeDefined(harness.operations[5])[1], harness.nextSeries);
+  assert.equal(mustBeDefined(harness.operations[6])[1], harness.previousData);
 });
 
 test("replaceMainSeries does not leak a replacement if reading rollback data fails", () => {

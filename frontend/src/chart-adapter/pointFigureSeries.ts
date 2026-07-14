@@ -107,7 +107,8 @@ class PointFigureSeriesRenderer implements ICustomSeriesPaneRenderer {
 
       for (let index = from; index < to; index += 1) {
         const bar = data.bars[index];
-        const originalData = bar?.originalData;
+        if (!bar) continue;
+        const originalData = bar.originalData;
         const direction = columnDirection(originalData);
         const boxSpec = columnBoxSpec(originalData);
         if (!direction || !boxSpec) continue;
@@ -122,7 +123,7 @@ class PointFigureSeriesRenderer implements ICustomSeriesPaneRenderer {
         const halfSize = Math.max(1, Math.min(symbolWidth, symbolHeight) / 2);
         const centerX = bar.x * horizontalPixelRatio;
         context.strokeStyle = originalData?.color
-          || bar?.barColor
+          || bar.barColor
           || (direction === "x"
             ? (this.options?.upColor || DEFAULT_UP_COLOR)
             : (this.options?.downColor || DEFAULT_DOWN_COLOR));

@@ -24,6 +24,10 @@ interface SnapshotRecord extends Record<string, unknown> {
 
 type SnapshotProvider = (() => unknown) | null;
 
+function isSnapshotProvider(value: unknown): value is () => unknown {
+  return typeof value === "function";
+}
+
 function snapshotRecord(value: unknown): SnapshotRecord {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as SnapshotRecord
@@ -104,7 +108,7 @@ export function collectFrontendCacheDiagnostics({
   chartDataCache = null,
 }: { chartDataCache?: SnapshotProvider | unknown } = {}): CacheDiagnostics {
   const chart = normalizeChartSnapshot(
-    typeof chartDataCache === "function" ? chartDataCache() : chartDataCache,
+    isSnapshotProvider(chartDataCache) ? chartDataCache() : chartDataCache,
   );
   const watchlist = normalizeWatchlistSnapshot(snapshotWatchlistFullCacheDiagnostics());
   const indicators = normalizeIndicatorSnapshot(snapshotIndicatorResultCacheDiagnostics());

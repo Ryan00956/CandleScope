@@ -69,7 +69,6 @@ export default function DrawingEngineHost({
         chartAdapter,
         chartContainerRef,
         activeTool,
-        onToolChange,
         penColor,
         penSize,
         textFontSize,
@@ -83,6 +82,7 @@ export default function DrawingEngineHost({
         seriesReady: drawingSeriesGeneration,
         drawingCoordinateKey,
         drawingAnchorMode,
+        ...(onToolChange === undefined ? {} : { onToolChange }),
     });
     const {
         clearAll,
@@ -173,7 +173,9 @@ export default function DrawingEngineHost({
                     onCommit={drawing.commitTextEditing}
                     onCancel={drawing.cancelTextEditing}
                     fontSize={drawing.selectedTextSnapshot?.fontSize ?? textFontSize}
-                    fontFamily={drawing.selectedTextSnapshot?.fontFamily}
+                    {...(drawing.selectedTextSnapshot?.fontFamily === undefined
+                        ? {}
+                        : { fontFamily: drawing.selectedTextSnapshot.fontFamily })}
                     bold={drawing.selectedTextSnapshot?.bold ?? textBold}
                     italic={drawing.selectedTextSnapshot?.italic ?? textItalic}
                     underline={drawing.selectedTextSnapshot?.underline ?? false}

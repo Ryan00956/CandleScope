@@ -71,7 +71,7 @@ function positiveSafeInteger(value: unknown, name: string): number {
 }
 
 function decimalPlaces(value: number): number {
-  const [coefficient, exponentText] = String(value).toLowerCase().split("e");
+  const [coefficient = "", exponentText] = String(value).toLowerCase().split("e");
   const fractionLength = coefficient.split(".")[1]?.length || 0;
   const exponent = Number(exponentText || 0);
   return Math.max(0, fractionLength - exponent);
@@ -180,17 +180,20 @@ function normalizeSeedState(
     || seedState.numberOfLines !== numberOfLines) {
     throw new TypeError("Line Break seed state is incompatible with projector options");
   }
+  const lineWindow: readonly Readonly<LineBreakLine>[] = seedState.lineWindow;
   if (typeof seedState.initialized !== "boolean"
     || !Array.isArray(seedState.lineWindow)
-    || seedState.lineWindow.length > numberOfLines
+    || lineWindow.length > numberOfLines
     || !Number.isSafeInteger(seedState.nextOrder)
     || seedState.nextOrder < 0
     || (seedState.initialized && !Number.isSafeInteger(seedState.anchorTicks))
-    || seedState.lineWindow.some((line) => !validLine(line, seedState.nextOrder))) {
+    || lineWindow.some((line) => !validLine(line, seedState.nextOrder))) {
     throw new TypeError("Line Break seed state is invalid");
   }
-  for (let index = 1; index < seedState.lineWindow.length; index += 1) {
-    if (seedState.lineWindow[index - 1].order >= seedState.lineWindow[index].order) {
+  for (let index = 1; index < lineWindow.length; index += 1) {
+    const previousLine = lineWindow[index - 1];
+    const currentLine = lineWindow[index];
+    if (!previousLine || !currentLine || previousLine.order >= currentLine.order) {
       throw new TypeError("Line Break seed state is invalid");
     }
   }
@@ -287,7 +290,8 @@ export class LineBreakProjector implements Projector<
 
     const hasRetainedSource = (rows || []).some((row) => row?.time != null);
     if (seedState != null && state.lineWindow.length > 0 && hasRetainedSource) {
-      this._emitLine(data, state.lineWindow[state.lineWindow.length - 1], false);
+      const retainedLine = state.lineWindow.at(-1);
+      if (retainedLine) this._emitLine(data, retainedLine, false);
     }
 
     for (const row of rows || []) {
@@ -324,7 +328,10 @@ export class LineBreakProjector implements Projector<
       }
 
       const { referenceHighTicks, referenceLowTicks } = this._referenceRange(state.lineWindow);
-      const activeLine = state.lineWindow[state.lineWindow.length - 1];
+      const activeLine = state.lineWindow.at(-1);
+      if (!activeLine) {
+        throw new TypeError("Line Break active state requires a retained line");
+      }
       if (closeTicks > referenceHighTicks) {
         this._appendLine(data, state, row, {
           closeTicks,

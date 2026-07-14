@@ -30,6 +30,17 @@ interface PaneAppearanceOptions {
   interval?: string;
 }
 
+function hasProperty<K extends PropertyKey>(
+  value: object,
+  key: K,
+): value is object & Record<K, unknown> {
+  return key in value;
+}
+
+function readUnknownProperty(value: object, key: PropertyKey): unknown {
+  return hasProperty(value, key) ? value[key] : undefined;
+}
+
 type AdapterChartOptions = DeepPartial<ChartOptionsImpl<ChartTime>> & {
   timeScale?: DeepPartial<HorzScaleOptions> & {
     tickMarkFormatter?: AdapterTickMarkFormatter;
@@ -38,8 +49,8 @@ type AdapterChartOptions = DeepPartial<ChartOptionsImpl<ChartTime>> & {
 
 function formatterSourceTime(value: unknown): number {
   const candidate = value !== null && typeof value === "object"
-    ? Reflect.get(value, "sourceTime")
-      ?? Reflect.get(value, "_ordinal_sourceTime")
+    ? readUnknownProperty(value, "sourceTime")
+      ?? readUnknownProperty(value, "_ordinal_sourceTime")
       ?? value
     : value;
   const numeric = Number(candidate);
@@ -89,7 +100,7 @@ export function buildLocalizationOptions(
           const min = get("minute");
           const sec = get("second");
 
-          switch (tickMarkType) {
+          switch (Number(tickMarkType)) {
             case 0:
               return year;
             case 1:
@@ -157,7 +168,10 @@ export function buildChartPaneOptions({
   showTimeScale?: boolean;
 }): AdapterChartOptions {
   const loc = buildLocalizationOptions(timezone, interval);
-  const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({ theme, customBg });
+  const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({
+    ...(theme !== undefined ? { theme } : {}),
+    ...(customBg !== undefined ? { customBg } : {}),
+  });
 
   return {
     width: container.clientWidth,
@@ -190,7 +204,7 @@ export function buildChartPaneOptions({
       secondsVisible: false,
       rightOffset: 5,
       barSpacing: 8,
-      visible: showTimeScale,
+      ...(showTimeScale !== undefined ? { visible: showTimeScale } : {}),
       ...(loc.timeScale ? { tickMarkFormatter: loc.timeScale.tickMarkFormatter } : {}),
     },
     handleScroll: { vertTouchDrag: false },
@@ -202,7 +216,10 @@ export function applyChartPaneAppearance(
   { theme, customBg, timezone, interval }: PaneAppearanceOptions,
 ): void {
   const loc = buildLocalizationOptions(timezone, interval);
-  const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({ theme, customBg });
+  const { bgColor, textColor, gridColor, borderColor } = getPaneThemeColors({
+    ...(theme !== undefined ? { theme } : {}),
+    ...(customBg !== undefined ? { customBg } : {}),
+  });
   const appearanceOptions: AdapterChartOptions = {
     layout: { background: { color: bgColor }, textColor },
     grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },

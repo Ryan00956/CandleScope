@@ -115,7 +115,8 @@ export function useChartInitialLoad({
         cache: initialRows.tier === "watchlist-full",
         source: initialRows.source || "memory-cache-hit",
       });
-      updateLastPrice(cached[cached.length - 1], intv);
+      const cachedLatest = cached.at(-1);
+      if (cachedLatest) updateLastPrice(cachedLatest, intv);
       setConnectionStatus(initialRows.needsRepair ? "loading" : "connected");
       setDataSource(initialRows.source || "memory-cache-hit");
       setLoading(false);
@@ -153,7 +154,7 @@ export function useChartInitialLoad({
         });
       }
       const latestTick = quickResult.data[quickResult.data.length - 1];
-      updateLastPrice(latestTick, intv);
+      if (latestTick) updateLastPrice(latestTick, intv);
       setDataSource(quickResult.source || "unknown");
 
       if (!shownInitialData) {
@@ -200,7 +201,7 @@ export function useChartInitialLoad({
         commitMergedChartData(sym, intv, historyResult.data, { source: "initial-history" });
       }
       const latest = historyResult.data[historyResult.data.length - 1];
-      updateLastPrice(latest, intv);
+      if (latest) updateLastPrice(latest, intv);
       setDataSource(historyResult.source || "unknown");
       setConnectionStatus(historyResult.source === "mock" ? "loading" : "connected");
 

@@ -148,13 +148,13 @@ function parseIndicatorValuePoint(
   path: string,
 ): IndicatorValuePoint {
   const record = expectIndicatorRecord(value, path);
-  return {
+  const point: IndicatorValuePoint = {
     time: expectIndicatorFiniteNumber(record.time, `${path}.time`),
     value: expectIndicatorFiniteNumber(record.value, `${path}.value`),
-    ...(optionalIndicatorString(record.color, `${path}.color`) !== undefined
-      ? { color: optionalIndicatorString(record.color, `${path}.color`) }
-      : {}),
   };
+  const color = optionalIndicatorString(record.color, `${path}.color`);
+  if (color !== undefined) point.color = color;
+  return point;
 }
 
 function parseIndicatorColorPoint(
@@ -286,19 +286,12 @@ function parseIndicatorUnifiedSeries(
     `${path}.style.colorData`,
     parseIndicatorColorPoint,
   );
-  return {
+  const series: IndicatorUnifiedSeries = {
     id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
     localId: expectIndicatorNonEmptyString(
       record.localId ?? record.local_id,
       `${path}.localId`,
     ),
-    indicatorId:
-      record.indicatorId === null || record.indicator_id === null
-        ? null
-        : optionalIndicatorString(
-            record.indicatorId ?? record.indicator_id,
-            `${path}.indicatorId`,
-          ),
     pane: optionalIndicatorString(record.pane, `${path}.pane`) ?? "main",
     type: optionalIndicatorString(record.type, `${path}.type`) ?? "line",
     data: parseOptionalArray(
@@ -323,12 +316,23 @@ function parseIndicatorUnifiedSeries(
         ) ?? 0,
       ...(colorData.length > 0 ? { colorData } : {}),
     },
-    scale: optionalIndicatorString(record.scale, `${path}.scale`),
-    zIndex: optionalIndicatorFiniteNumber(
-      record.zIndex ?? record.z_index,
-      `${path}.zIndex`,
-    ),
   };
+  const indicatorId =
+    record.indicatorId === null || record.indicator_id === null
+      ? null
+      : optionalIndicatorString(
+          record.indicatorId ?? record.indicator_id,
+          `${path}.indicatorId`,
+        );
+  const scale = optionalIndicatorString(record.scale, `${path}.scale`);
+  const zIndex = optionalIndicatorFiniteNumber(
+    record.zIndex ?? record.z_index,
+    `${path}.zIndex`,
+  );
+  if (indicatorId !== undefined) series.indicatorId = indicatorId;
+  if (scale !== undefined) series.scale = scale;
+  if (zIndex !== undefined) series.zIndex = zIndex;
+  return series;
 }
 
 const ANNOTATION_TYPES: ReadonlySet<string> = new Set([
@@ -351,15 +355,8 @@ function parseIndicatorUnifiedAnnotation(
       `unsupported annotation type ${JSON.stringify(type)}`,
     );
   }
-  return {
+  const annotation: IndicatorUnifiedAnnotation = {
     id: expectIndicatorNonEmptyString(record.id, `${path}.id`),
-    indicatorId:
-      record.indicatorId === null || record.indicator_id === null
-        ? null
-        : optionalIndicatorString(
-            record.indicatorId ?? record.indicator_id,
-            `${path}.indicatorId`,
-          ),
     pane: optionalIndicatorString(record.pane, `${path}.pane`) ?? "main",
     type: type as IndicatorAnnotationType,
     data: parseOptionalArray(
@@ -368,34 +365,54 @@ function parseIndicatorUnifiedAnnotation(
       parseIndicatorAnnotationPoint,
     ),
     style: parseStyleRecord(record.style, `${path}.style`),
-    scale: optionalIndicatorString(record.scale, `${path}.scale`),
-    zIndex: optionalIndicatorFiniteNumber(
-      record.zIndex ?? record.z_index,
-      `${path}.zIndex`,
-    ),
   };
+  const indicatorId =
+    record.indicatorId === null || record.indicator_id === null
+      ? null
+      : optionalIndicatorString(
+          record.indicatorId ?? record.indicator_id,
+          `${path}.indicatorId`,
+        );
+  const scale = optionalIndicatorString(record.scale, `${path}.scale`);
+  const zIndex = optionalIndicatorFiniteNumber(
+    record.zIndex ?? record.z_index,
+    `${path}.zIndex`,
+  );
+  if (indicatorId !== undefined) annotation.indicatorId = indicatorId;
+  if (scale !== undefined) annotation.scale = scale;
+  if (zIndex !== undefined) annotation.zIndex = zIndex;
+  return annotation;
 }
 
 function parseLegacyMarker(value: unknown, path: string): IndicatorMarker {
   const record = expectIndicatorRecord(value, path);
-  return {
+  const marker: IndicatorMarker = {
     data: parseOptionalArray(
       record.data,
       `${path}.data`,
       parseIndicatorAnnotationPoint,
     ),
-    indicatorId: optionalIndicatorString(
-      record.indicatorId ?? record.indicator_id,
-      `${path}.indicatorId`,
-    ),
-    id: optionalIndicatorString(record.id, `${path}.id`),
-    pane: optionalIndicatorString(record.pane, `${path}.pane`),
-    shape: optionalIndicatorString(record.shape, `${path}.shape`),
-    color: optionalIndicatorString(record.color, `${path}.color`),
-    text: optionalIndicatorString(record.text, `${path}.text`),
-    position: optionalIndicatorString(record.position, `${path}.position`),
-    size: optionalIndicatorString(record.size, `${path}.size`),
   };
+  const indicatorId = optionalIndicatorString(
+    record.indicatorId ?? record.indicator_id,
+    `${path}.indicatorId`,
+  );
+  const id = optionalIndicatorString(record.id, `${path}.id`);
+  const pane = optionalIndicatorString(record.pane, `${path}.pane`);
+  const shape = optionalIndicatorString(record.shape, `${path}.shape`);
+  const color = optionalIndicatorString(record.color, `${path}.color`);
+  const text = optionalIndicatorString(record.text, `${path}.text`);
+  const position = optionalIndicatorString(record.position, `${path}.position`);
+  const size = optionalIndicatorString(record.size, `${path}.size`);
+  if (indicatorId !== undefined) marker.indicatorId = indicatorId;
+  if (id !== undefined) marker.id = id;
+  if (pane !== undefined) marker.pane = pane;
+  if (shape !== undefined) marker.shape = shape;
+  if (color !== undefined) marker.color = color;
+  if (text !== undefined) marker.text = text;
+  if (position !== undefined) marker.position = position;
+  if (size !== undefined) marker.size = size;
+  return marker;
 }
 
 function parseLegacyFill(value: unknown, path: string): IndicatorFill {
@@ -411,20 +428,26 @@ function parseLegacyFill(value: unknown, path: string): IndicatorFill {
         ? null
         : expectIndicatorString(item, `${itemsPath}[${index}]`),
     );
-  const fill: IndicatorFill = {
-    indicatorId: optionalIndicatorString(
-      record.indicatorId ?? record.indicator_id,
-      `${path}.indicatorId`,
-    ),
-    id: optionalIndicatorString(record.id, `${path}.id`),
-    pane: optionalIndicatorString(record.pane, `${path}.pane`),
-    plot1_id: optionalIndicatorString(record.plot1_id, `${path}.plot1_id`),
-    plot2_id: optionalIndicatorString(record.plot2_id, `${path}.plot2_id`),
-    color: optionalIndicatorString(record.color, `${path}.color`),
-    title: optionalIndicatorString(record.title, `${path}.title`),
-    type: optionalIndicatorString(record.type, `${path}.type`),
-    style: parseStyleRecord(record.style, `${path}.style`),
-  };
+  const fill: IndicatorFill = { style: parseStyleRecord(record.style, `${path}.style`) };
+  const indicatorId = optionalIndicatorString(
+    record.indicatorId ?? record.indicator_id,
+    `${path}.indicatorId`,
+  );
+  const id = optionalIndicatorString(record.id, `${path}.id`);
+  const pane = optionalIndicatorString(record.pane, `${path}.pane`);
+  const plot1Id = optionalIndicatorString(record.plot1_id, `${path}.plot1_id`);
+  const plot2Id = optionalIndicatorString(record.plot2_id, `${path}.plot2_id`);
+  const color = optionalIndicatorString(record.color, `${path}.color`);
+  const title = optionalIndicatorString(record.title, `${path}.title`);
+  const type = optionalIndicatorString(record.type, `${path}.type`);
+  if (indicatorId !== undefined) fill.indicatorId = indicatorId;
+  if (id !== undefined) fill.id = id;
+  if (pane !== undefined) fill.pane = pane;
+  if (plot1Id !== undefined) fill.plot1_id = plot1Id;
+  if (plot2Id !== undefined) fill.plot2_id = plot2Id;
+  if (color !== undefined) fill.color = color;
+  if (title !== undefined) fill.title = title;
+  if (type !== undefined) fill.type = type;
   if (localSeriesIds !== undefined)
     fill.localSeriesIds = parseNullableStrings(
       localSeriesIds,
@@ -454,100 +477,117 @@ function parseLegacyHLine(value: unknown, path: string): IndicatorHLine {
       "expected a string or number",
     );
   }
-  return {
-    indicatorId: optionalIndicatorString(
-      record.indicatorId ?? record.indicator_id,
-      `${path}.indicatorId`,
-    ),
-    id: optionalIndicatorString(record.id, `${path}.id`),
-    pane: optionalIndicatorString(record.pane, `${path}.pane`),
-    price: optionalIndicatorFiniteNumber(record.price, `${path}.price`),
-    title: optionalIndicatorString(record.title, `${path}.title`),
-    color: optionalIndicatorString(record.color, `${path}.color`),
-    linestyle,
-    linewidth: optionalIndicatorFiniteNumber(
-      record.linewidth ?? record.lineWidth,
-      `${path}.linewidth`,
-    ),
-    ...(record.data !== undefined
-      ? {
-          data: parseOptionalArray(
-            record.data,
-            `${path}.data`,
-            parseIndicatorAnnotationPoint,
-          ),
-        }
-      : {}),
-  };
+  const hline: IndicatorHLine = {};
+  const indicatorId = optionalIndicatorString(
+    record.indicatorId ?? record.indicator_id,
+    `${path}.indicatorId`,
+  );
+  const id = optionalIndicatorString(record.id, `${path}.id`);
+  const pane = optionalIndicatorString(record.pane, `${path}.pane`);
+  const price = optionalIndicatorFiniteNumber(record.price, `${path}.price`);
+  const title = optionalIndicatorString(record.title, `${path}.title`);
+  const color = optionalIndicatorString(record.color, `${path}.color`);
+  const linewidth = optionalIndicatorFiniteNumber(
+    record.linewidth ?? record.lineWidth,
+    `${path}.linewidth`,
+  );
+  if (indicatorId !== undefined) hline.indicatorId = indicatorId;
+  if (id !== undefined) hline.id = id;
+  if (pane !== undefined) hline.pane = pane;
+  if (price !== undefined) hline.price = price;
+  if (title !== undefined) hline.title = title;
+  if (color !== undefined) hline.color = color;
+  if (linestyle !== undefined) hline.linestyle = linestyle;
+  if (linewidth !== undefined) hline.linewidth = linewidth;
+  if (record.data !== undefined) {
+    hline.data = parseOptionalArray(
+      record.data,
+      `${path}.data`,
+      parseIndicatorAnnotationPoint,
+    );
+  }
+  return hline;
 }
 
 function parseLegacyBgColor(value: unknown, path: string): IndicatorBgColor {
   const record = expectIndicatorRecord(value, path);
-  return {
-    indicatorId: optionalIndicatorString(
-      record.indicatorId ?? record.indicator_id,
-      `${path}.indicatorId`,
-    ),
-    id: optionalIndicatorString(record.id, `${path}.id`),
-    pane: optionalIndicatorString(record.pane, `${path}.pane`),
-    title: optionalIndicatorString(record.title, `${path}.title`),
-    color: optionalIndicatorString(record.color, `${path}.color`),
-    ...(record.regions !== undefined
-      ? {
-          regions: parseOptionalArray(
-            record.regions,
-            `${path}.regions`,
-            parseIndicatorAnnotationPoint,
-          ),
-        }
-      : {}),
-    ...(record.data !== undefined
-      ? {
-          data: parseOptionalArray(
-            record.data,
-            `${path}.data`,
-            parseIndicatorAnnotationPoint,
-          ),
-        }
-      : {}),
-  };
+  const bgcolor: IndicatorBgColor = {};
+  const indicatorId = optionalIndicatorString(
+    record.indicatorId ?? record.indicator_id,
+    `${path}.indicatorId`,
+  );
+  const id = optionalIndicatorString(record.id, `${path}.id`);
+  const pane = optionalIndicatorString(record.pane, `${path}.pane`);
+  const title = optionalIndicatorString(record.title, `${path}.title`);
+  const color = optionalIndicatorString(record.color, `${path}.color`);
+  if (indicatorId !== undefined) bgcolor.indicatorId = indicatorId;
+  if (id !== undefined) bgcolor.id = id;
+  if (pane !== undefined) bgcolor.pane = pane;
+  if (title !== undefined) bgcolor.title = title;
+  if (color !== undefined) bgcolor.color = color;
+  if (record.regions !== undefined) {
+    bgcolor.regions = parseOptionalArray(
+      record.regions,
+      `${path}.regions`,
+      parseIndicatorAnnotationPoint,
+    );
+  }
+  if (record.data !== undefined) {
+    bgcolor.data = parseOptionalArray(
+      record.data,
+      `${path}.data`,
+      parseIndicatorAnnotationPoint,
+    );
+  }
+  return bgcolor;
 }
 
 function parseLegacyBarColor(value: unknown, path: string): IndicatorBarColor {
   const record = expectIndicatorRecord(value, path);
-  return {
-    indicatorId: optionalIndicatorString(
-      record.indicatorId ?? record.indicator_id,
-      `${path}.indicatorId`,
-    ),
-    id: optionalIndicatorString(record.id, `${path}.id`),
-    pane: optionalIndicatorString(record.pane, `${path}.pane`),
+  const barcolor: IndicatorBarColor = {
     data: parseOptionalArray(
       record.data,
       `${path}.data`,
       parseIndicatorColorPoint,
     ),
   };
+  const indicatorId = optionalIndicatorString(
+    record.indicatorId ?? record.indicator_id,
+    `${path}.indicatorId`,
+  );
+  const id = optionalIndicatorString(record.id, `${path}.id`);
+  const pane = optionalIndicatorString(record.pane, `${path}.pane`);
+  if (indicatorId !== undefined) barcolor.indicatorId = indicatorId;
+  if (id !== undefined) barcolor.id = id;
+  if (pane !== undefined) barcolor.pane = pane;
+  return barcolor;
 }
 
 function parseLegacySignal(value: unknown, path: string): IndicatorSignal {
   const record = expectIndicatorRecord(value, path);
-  return {
-    indicatorId: optionalIndicatorString(
-      record.indicatorId ?? record.indicator_id,
-      `${path}.indicatorId`,
-    ),
-    id: optionalIndicatorString(record.id, `${path}.id`),
-    pane: optionalIndicatorString(record.pane, `${path}.pane`),
-    name: optionalIndicatorString(record.name, `${path}.name`),
-    side: optionalIndicatorString(record.side, `${path}.side`),
-    message: optionalIndicatorString(record.message, `${path}.message`),
+  const signal: IndicatorSignal = {
     data: parseOptionalArray(
       record.data,
       `${path}.data`,
       parseIndicatorAnnotationPoint,
     ),
   };
+  const indicatorId = optionalIndicatorString(
+    record.indicatorId ?? record.indicator_id,
+    `${path}.indicatorId`,
+  );
+  const id = optionalIndicatorString(record.id, `${path}.id`);
+  const pane = optionalIndicatorString(record.pane, `${path}.pane`);
+  const name = optionalIndicatorString(record.name, `${path}.name`);
+  const side = optionalIndicatorString(record.side, `${path}.side`);
+  const message = optionalIndicatorString(record.message, `${path}.message`);
+  if (indicatorId !== undefined) signal.indicatorId = indicatorId;
+  if (id !== undefined) signal.id = id;
+  if (pane !== undefined) signal.pane = pane;
+  if (name !== undefined) signal.name = name;
+  if (side !== undefined) signal.side = side;
+  if (message !== undefined) signal.message = message;
+  return signal;
 }
 
 export function parseIndicatorParameterSchemas(
@@ -560,15 +600,18 @@ export function parseIndicatorParameterSchemas(
     const name = optionalIndicatorString(record.name, `${itemPath}.name`);
     if (!key && !name)
       throw new IndicatorPayloadError(itemPath, "expected key or name");
-    const result = {
-      ...(key ? { key } : {}),
-      ...(name ? { name } : {}),
-      label: optionalIndicatorString(record.label, `${itemPath}.label`),
-      type: optionalIndicatorString(record.type, `${itemPath}.type`),
-      default: record.default,
-      min: optionalIndicatorFiniteNumber(record.min, `${itemPath}.min`),
-      max: optionalIndicatorFiniteNumber(record.max, `${itemPath}.max`),
-      step: optionalIndicatorFiniteNumber(record.step, `${itemPath}.step`),
+    const label = optionalIndicatorString(record.label, `${itemPath}.label`);
+    const type = optionalIndicatorString(record.type, `${itemPath}.type`);
+    const min = optionalIndicatorFiniteNumber(record.min, `${itemPath}.min`);
+    const max = optionalIndicatorFiniteNumber(record.max, `${itemPath}.max`);
+    const step = optionalIndicatorFiniteNumber(record.step, `${itemPath}.step`);
+    const fields = {
+      ...(label === undefined ? {} : { label }),
+      ...(type === undefined ? {} : { type }),
+      ...(record.default === undefined ? {} : { default: record.default }),
+      ...(min === undefined ? {} : { min }),
+      ...(max === undefined ? {} : { max }),
+      ...(step === undefined ? {} : { step }),
       ...(record.options !== undefined
         ? {
             options: indicatorStringArray(
@@ -578,7 +621,9 @@ export function parseIndicatorParameterSchemas(
           }
         : {}),
     };
-    return result as IndicatorParameterSchema;
+    if (key) return { ...fields, key, ...(name ? { name } : {}) };
+    if (name) return { ...fields, name };
+    throw new IndicatorPayloadError(itemPath, "expected key or name");
   });
 }
 
@@ -629,22 +674,27 @@ export function parseIndicatorRevision(
       "expected a string or finite number",
     );
   }
-  return {
-    serverEpoch: optionalIndicatorString(
-      record.serverEpoch ?? record.server_epoch,
-      `${path}.serverEpoch`,
-    ),
-    correctionRevision,
-    closedThrough: optionalIndicatorFiniteNumber(
-      record.closedThrough ?? record.closed_through,
-      `${path}.closedThrough`,
-    ),
-    token: optionalIndicatorString(record.token, `${path}.token`),
-    ...(dirtyRange !== undefined && dirtyRange !== null
-      ? { dirtyRange: parseIndicatorRange(dirtyRange, `${path}.dirtyRange`) }
-      : {}),
-    ...(historyInvalid === true ? { historyInvalid: true } : {}),
-  };
+  const revision: IndicatorRevision = {};
+  const serverEpoch = optionalIndicatorString(
+    record.serverEpoch ?? record.server_epoch,
+    `${path}.serverEpoch`,
+  );
+  const closedThrough = optionalIndicatorFiniteNumber(
+    record.closedThrough ?? record.closed_through,
+    `${path}.closedThrough`,
+  );
+  const token = optionalIndicatorString(record.token, `${path}.token`);
+  if (serverEpoch !== undefined) revision.serverEpoch = serverEpoch;
+  if (correctionRevision !== undefined) {
+    revision.correctionRevision = correctionRevision;
+  }
+  if (closedThrough !== undefined) revision.closedThrough = closedThrough;
+  if (token !== undefined) revision.token = token;
+  if (dirtyRange !== undefined && dirtyRange !== null) {
+    revision.dirtyRange = parseIndicatorRange(dirtyRange, `${path}.dirtyRange`);
+  }
+  if (historyInvalid === true) revision.historyInvalid = true;
+  return revision;
 }
 
 function parseIndicatorErrorDetail(
@@ -652,12 +702,16 @@ function parseIndicatorErrorDetail(
   path: string,
 ): IndicatorErrorDetail {
   const record = expectIndicatorRecord(value, path);
-  return {
+  const detail: IndicatorErrorDetail = {
     message: expectIndicatorNonEmptyString(record.message, `${path}.message`),
-    line: optionalIndicatorFiniteNumber(record.line, `${path}.line`),
-    column: optionalIndicatorFiniteNumber(record.column, `${path}.column`),
-    hint: optionalIndicatorString(record.hint, `${path}.hint`),
   };
+  const line = optionalIndicatorFiniteNumber(record.line, `${path}.line`);
+  const column = optionalIndicatorFiniteNumber(record.column, `${path}.column`);
+  const hint = optionalIndicatorString(record.hint, `${path}.hint`);
+  if (line !== undefined) detail.line = line;
+  if (column !== undefined) detail.column = column;
+  if (hint !== undefined) detail.hint = hint;
+  return detail;
 }
 
 export function parseIndicatorPayloadEnvelope(
@@ -671,29 +725,8 @@ export function parseIndicatorPayloadEnvelope(
       : expectIndicatorBoolean(record.ok, `${path}.ok`);
   const range = record.range;
   const revision = record.dataRevision ?? record.data_revision;
-  return {
+  const envelope: IndicatorPayloadEnvelope = {
     ok,
-    schemaVersion: optionalIndicatorFiniteNumber(
-      record.schemaVersion ?? record.schema_version,
-      `${path}.schemaVersion`,
-    ),
-    outputSchemaVersion: optionalIndicatorFiniteNumber(
-      record.outputSchemaVersion ?? record.output_schema_version,
-      `${path}.outputSchemaVersion`,
-    ),
-    error:
-      record.error === null
-        ? null
-        : optionalIndicatorString(record.error, `${path}.error`),
-    detail: record.detail,
-    code: optionalIndicatorString(record.code, `${path}.code`),
-    errorDetail:
-      record.errorDetail === undefined && record.error_detail === undefined
-        ? undefined
-        : parseIndicatorErrorDetail(
-            record.errorDetail ?? record.error_detail,
-            `${path}.errorDetail`,
-          ),
     lines: parseOptionalArray(
       record.lines,
       `${path}.lines`,
@@ -744,22 +777,47 @@ export function parseIndicatorPayloadEnvelope(
       record.param_schema ?? record.paramSchema,
       `${path}.param_schema`,
     ),
-    ...(range !== undefined && range !== null
-      ? { range: parseIndicatorRange(range, `${path}.range`) }
-      : {}),
-    ...(revision !== undefined && revision !== null
-      ? {
-          dataRevision: parseIndicatorRevision(
-            revision,
-            `${path}.dataRevision`,
-          ),
-        }
-      : {}),
-    __httpStatus: optionalIndicatorFiniteNumber(
-      record.__httpStatus,
-      `${path}.__httpStatus`,
-    ),
   };
+  const schemaVersion = optionalIndicatorFiniteNumber(
+    record.schemaVersion ?? record.schema_version,
+    `${path}.schemaVersion`,
+  );
+  const outputSchemaVersion = optionalIndicatorFiniteNumber(
+    record.outputSchemaVersion ?? record.output_schema_version,
+    `${path}.outputSchemaVersion`,
+  );
+  const error = record.error === null
+    ? null
+    : optionalIndicatorString(record.error, `${path}.error`);
+  const code = optionalIndicatorString(record.code, `${path}.code`);
+  const httpStatus = optionalIndicatorFiniteNumber(
+    record.__httpStatus,
+    `${path}.__httpStatus`,
+  );
+  if (schemaVersion !== undefined) envelope.schemaVersion = schemaVersion;
+  if (outputSchemaVersion !== undefined) {
+    envelope.outputSchemaVersion = outputSchemaVersion;
+  }
+  if (error !== undefined) envelope.error = error;
+  if (record.detail !== undefined) envelope.detail = record.detail;
+  if (code !== undefined) envelope.code = code;
+  if (record.errorDetail !== undefined || record.error_detail !== undefined) {
+    envelope.errorDetail = parseIndicatorErrorDetail(
+      record.errorDetail ?? record.error_detail,
+      `${path}.errorDetail`,
+    );
+  }
+  if (range !== undefined && range !== null) {
+    envelope.range = parseIndicatorRange(range, `${path}.range`);
+  }
+  if (revision !== undefined && revision !== null) {
+    envelope.dataRevision = parseIndicatorRevision(
+      revision,
+      `${path}.dataRevision`,
+    );
+  }
+  if (httpStatus !== undefined) envelope.__httpStatus = httpStatus;
+  return envelope;
 }
 
 function parseIndicatorParams(
@@ -873,7 +931,7 @@ export function parseCustomIndicatorRecord(
 ): CustomIndicatorRecord {
   const record = expectIndicatorRecord(value, path);
   const securityMode = record.securityMode;
-  return {
+  const customIndicator: CustomIndicatorRecord = {
     schemaVersion:
       optionalIndicatorFiniteNumber(
         record.schemaVersion,
@@ -894,19 +952,24 @@ export function parseCustomIndicatorRecord(
       record.renderHints,
       `${path}.renderHints`,
     ),
-    securityMode:
-      securityMode === null
-        ? null
-        : optionalIndicatorString(securityMode, `${path}.securityMode`),
-    createdAt: optionalIndicatorFiniteNumber(
-      record.createdAt ?? record.created_at,
-      `${path}.createdAt`,
-    ),
-    updatedAt: optionalIndicatorFiniteNumber(
-      record.updatedAt ?? record.updated_at,
-      `${path}.updatedAt`,
-    ),
   };
+  const normalizedSecurityMode = securityMode === null
+    ? null
+    : optionalIndicatorString(securityMode, `${path}.securityMode`);
+  const createdAt = optionalIndicatorFiniteNumber(
+    record.createdAt ?? record.created_at,
+    `${path}.createdAt`,
+  );
+  const updatedAt = optionalIndicatorFiniteNumber(
+    record.updatedAt ?? record.updated_at,
+    `${path}.updatedAt`,
+  );
+  if (normalizedSecurityMode !== undefined) {
+    customIndicator.securityMode = normalizedSecurityMode;
+  }
+  if (createdAt !== undefined) customIndicator.createdAt = createdAt;
+  if (updatedAt !== undefined) customIndicator.updatedAt = updatedAt;
+  return customIndicator;
 }
 
 export function parseCustomIndicatorList(

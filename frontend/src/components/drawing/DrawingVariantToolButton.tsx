@@ -88,7 +88,7 @@ export default function DrawingVariantToolButton<TId extends string>({
           onClose={onCloseFlyout}
           anchorRef={anchorRef}
           className={flyoutClassName}
-          isVariantDisabled={isVariantDisabled}
+          {...(isVariantDisabled === undefined ? {} : { isVariantDisabled })}
         />
       )}
       {!disabled && children}

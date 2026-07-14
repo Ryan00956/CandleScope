@@ -96,7 +96,7 @@ function tailStyle(
     return metadata.state;
   }
   const sections = kagiSections(data);
-  return sections.length > 0 ? sections[sections.length - 1].style : "yin";
+  return sections.at(-1)?.style ?? "yin";
 }
 
 function connectorPrice(

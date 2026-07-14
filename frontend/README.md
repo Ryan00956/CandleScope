@@ -64,7 +64,10 @@ npm run build
 source under `src` is TypeScript; JavaScript remains only in Node/Vite tooling.
 `npm run typecheck` validates browser production code with `tsconfig.json` and
 Node-based tests/tooling with `tsconfig.node.json`; the browser project does not
-receive Node ambient globals. Test discovery accepts both `.test.ts` and
+receive Node ambient globals. Both projects permanently enforce
+`noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`; type-aware ESLint
+keeps the six `no-unsafe-*` rules enabled for all TypeScript application, test,
+and tooling files. Test discovery accepts both `.test.ts` and
 `.test.tsx` at any depth below `src`, including nested `__tests__` directories
 and tests colocated with source files.
 

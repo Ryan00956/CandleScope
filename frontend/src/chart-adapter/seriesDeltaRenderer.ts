@@ -45,7 +45,9 @@ function resolveIndexOfTime<TRow extends TimedSeriesRow>(
   let high = rows.length - 1;
   while (low <= high) {
     const mid = (low + high) >> 1;
-    const midTime = rows[mid]?.time;
+    const midRow = rows[mid];
+    if (!midRow) return -1;
+    const midTime = midRow.time;
     if (midTime === time) return mid;
     if (midTime < time) low = mid + 1;
     else high = mid - 1;
@@ -206,9 +208,9 @@ export function renderCandleDataTransition({
         series,
         delta: { type: DELTA_TYPES.CLEAR, changed: true },
         snapshot: [],
-        viewportController,
         paneId,
-        recordPerfEvent,
+        ...(viewportController !== undefined ? { viewportController } : {}),
+        ...(recordPerfEvent !== undefined ? { recordPerfEvent } : {}),
       });
     }
     return "empty";
@@ -217,7 +219,8 @@ export function renderCandleDataTransition({
   if (canRenderTrailingUpdate(previousData, nextData)) {
     const start = Math.max(0, previousData.length - 1);
     for (let index = start; index < nextData.length; index += 1) {
-      series.update(nextData[index]);
+      const point = nextData[index];
+      if (point) series.update(point);
     }
     record(recordPerfEvent, "chart.candleSeries.update", {
       paneId,

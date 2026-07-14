@@ -8,7 +8,7 @@ import {
 } from "../indicatorComputeRuntime.js";
 import { buildHostedSubscriptionMessage } from "../indicatorWsRuntime.js";
 import type { KlineBar } from "../../market-data/marketDataTypes.js";
-import { epochSeconds } from "../../../test/testHelpers.js";
+import { epochSeconds, mustBeDefined } from "../../../test/testHelpers.js";
 
 function bars(count: number): KlineBar[] {
   return Array.from({ length: count }, (_, index) => ({
@@ -42,12 +42,15 @@ test("local indicator ohlcv is capped to the newest indicator window", () => {
   const source = bars(INDICATOR_HISTORY_LIMIT + 10);
   const limited = limitIndicatorHistory(source);
   const ohlcv = buildIndicatorOhlcv(source);
+  const firstLimited = mustBeDefined(limited[0]);
+  const firstOhlcv = mustBeDefined(ohlcv[0]);
+  const expectedSource = mustBeDefined(source[10]);
 
   assert.equal(limited.length, INDICATOR_HISTORY_LIMIT);
-  assert.equal(limited[0].time, source[10].time);
+  assert.equal(firstLimited.time, expectedSource.time);
   assert.equal(ohlcv.length, INDICATOR_HISTORY_LIMIT);
-  assert.deepEqual(ohlcv[0], {
-    time: source[10].time,
+  assert.deepEqual(firstOhlcv, {
+    time: expectedSource.time,
     open: 10,
     high: 11,
     low: 9,

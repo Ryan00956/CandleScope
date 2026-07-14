@@ -22,6 +22,7 @@ export function buildLazySurfaceViewModel({
     marketType,
     interval,
   } = sessionView;
+  const displayPrice = displayData?.close ?? marketView.lastPrice?.close;
 
   return {
     indicatorPanel: {
@@ -44,7 +45,7 @@ export function buildLazySurfaceViewModel({
       currentMarketType: marketType,
       currentExchange: exchange,
       currentInterval: interval,
-      displayPrice: displayData?.close ?? marketView.lastPrice?.close,
+      ...(displayPrice === undefined ? {} : { displayPrice }),
       wsStatus: marketView.wsStatus,
       watchlists: watchlistView.watchlists,
     },

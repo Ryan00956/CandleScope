@@ -11,7 +11,7 @@ import {
 } from "../indicatorRangeCoverage.js";
 import { createIndicatorRangeScheduler } from "../indicatorRangeScheduler.js";
 import type { IndicatorRange } from "../indicatorTypes.js";
-import { mustBeDefined } from "../../../test/testHelpers.js";
+import { malformedFixture, mustBeDefined } from "../../../test/testHelpers.js";
 
 const flushMicrotask = (): Promise<void> => new Promise((resolve) => queueMicrotask(resolve));
 const flushTimer = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -84,6 +84,22 @@ test("warm coverage produces zero work", async () => {
   });
   await scheduler.drain();
   assert.deepEqual(requests, []);
+});
+
+test("malformed non-array targets fail closed without scheduling work", () => {
+  const scheduler = createIndicatorRangeScheduler();
+  const options = malformedFixture<Parameters<typeof scheduler.ensureCoverage>[0]>({
+    sessionKey: "one",
+    targets: { length: 1 },
+    range: { start: 60, end: 180 },
+    execute: async () => ({ ok: true }),
+  });
+
+  assert.deepEqual(scheduler.ensureCoverage(options), {
+    accepted: false,
+    epoch: 0,
+    queued: 0,
+  });
 });
 
 test("overlapping intents in the same turn are unioned into one request", async () => {

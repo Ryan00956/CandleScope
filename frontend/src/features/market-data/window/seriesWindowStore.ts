@@ -71,7 +71,10 @@ function normalizeRows(rows: readonly KlineBarInput[] | null | undefined): Kline
 function inferIntervalSeconds(rows: readonly KlineBar[]): number | null {
   let best: number | null = null;
   for (let index = 1; index < rows.length; index += 1) {
-    const diff = rows[index].time - rows[index - 1].time;
+    const current = rows[index];
+    const previous = rows[index - 1];
+    if (!current || !previous) continue;
+    const diff = current.time - previous.time;
     if (diff <= 0) continue;
     best = best == null ? diff : Math.min(best, diff);
   }
@@ -86,16 +89,20 @@ function buildSegments(
   const step = intervalSeconds || inferIntervalSeconds(rows);
   const threshold = step ? step * 1.5 : null;
   const segments: SeriesWindowSegment[] = [];
-  let current = [rows[0]];
+  const firstRow = rows[0];
+  if (!firstRow) return [];
+  let current: KlineBar[] = [firstRow];
+  let previous = firstRow;
   for (let index = 1; index < rows.length; index += 1) {
-    const previous = rows[index - 1];
     const row = rows[index];
+    if (!row) continue;
     if (threshold != null && row.time - previous.time > threshold) {
       segments.push({ bars: current });
       current = [row];
     } else {
       current.push(row);
     }
+    previous = row;
   }
   segments.push({ bars: current });
   return segments;
@@ -180,18 +187,20 @@ export class SeriesWindowStore {
     if (!ref) return -1;
     let offset = 0;
     for (let segmentIndex = 0; segmentIndex < ref.segmentIndex; segmentIndex += 1) {
-      offset += this._segments[segmentIndex].bars.length;
+      const segment = this._segments[segmentIndex];
+      if (!segment) return -1;
+      offset += segment.bars.length;
     }
     return offset + ref.rowIndex;
   }
 
   first(): KlineBar | null {
-    return this.snapshot()[0] || null;
+    return this.snapshot().at(0) ?? null;
   }
 
   last(): KlineBar | null {
     const rows = this.snapshot();
-    return rows[rows.length - 1] || null;
+    return rows.at(-1) ?? null;
   }
 
   coverage(): SeriesCoverage {
@@ -206,8 +215,9 @@ export class SeriesWindowStore {
     }
     const gaps: SeriesCoverage["gaps"] = [];
     for (let index = 1; index < this._segments.length; index += 1) {
-      const previous = this._segments[index - 1].bars;
-      const next = this._segments[index].bars;
+      const previous = this._segments[index - 1]?.bars;
+      const next = this._segments[index]?.bars;
+      if (!previous || !next) continue;
       const from = previous[previous.length - 1]?.time;
       const to = next[0]?.time;
       if (from == null || to == null) continue;
@@ -216,9 +226,14 @@ export class SeriesWindowStore {
         : null;
       gaps.push({ from, to, missingBars });
     }
+    const firstRow = rows.at(0);
+    const lastRow = rows.at(-1);
+    if (!firstRow || !lastRow) {
+      return { firstTime: null, lastTime: null, bars: 0, gaps: [] };
+    }
     return {
-      firstTime: rows[0].time,
-      lastTime: rows[rows.length - 1].time,
+      firstTime: firstRow.time,
+      lastTime: lastRow.time,
       bars: rows.length,
       gaps,
     };
@@ -285,14 +300,20 @@ export class SeriesWindowStore {
   ): WindowDelta {
     const incoming = normalizeRows(rows);
     if (!incoming.length) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
+    const incomingFirst = incoming.at(0)?.time;
+    const incomingLast = incoming.at(-1)?.time;
+    if (incomingFirst == null || incomingLast == null) {
+      return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
+    }
 
     if (this.barCount === 0) {
       return this.replace(incoming, meta);
     }
 
     const previousRows = this.snapshot();
-    const previousFirst = previousRows[0].time;
-    const previousLast = previousRows[previousRows.length - 1].time;
+    const previousFirst = previousRows.at(0)?.time;
+    const previousLast = previousRows.at(-1)?.time;
+    if (previousFirst == null || previousLast == null) return this.replace(incoming, meta);
     const previousByTime = new Map(previousRows.map((row) => [row.time, row]));
     const byTime = new Map(previousByTime);
     let addedLeft = 0;
@@ -318,8 +339,6 @@ export class SeriesWindowStore {
     const trim = this.trimToBudget();
     this._version += 1;
 
-    const incomingFirst = incoming[0].time;
-    const incomingLast = incoming[incoming.length - 1].time;
     let type: WindowDeltaType = WINDOW_DELTA_TYPES.MID_MERGE;
     if (incomingLast < previousFirst) type = WINDOW_DELTA_TYPES.PREPEND;
     else if (incomingFirst > previousLast) type = WINDOW_DELTA_TYPES.APPEND;
@@ -360,7 +379,9 @@ export class SeriesWindowStore {
 
     if (existingRef) {
       const segment = this._segments[existingRef.segmentIndex];
-      if (sameRow(segment.bars[existingRef.rowIndex], tick)) {
+      const existing = segment?.bars[existingRef.rowIndex];
+      if (!segment || !existing) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
+      if (sameRow(existing, tick)) {
         return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
       }
       segment.bars[existingRef.rowIndex] = tick;
@@ -393,7 +414,8 @@ export class SeriesWindowStore {
     } else if (time > lastTime) {
       const lastSegmentIndex = this._segments.length - 1;
       const lastSegment = this._segments[lastSegmentIndex];
-      const lastBar = lastSegment.bars[lastSegment.bars.length - 1];
+      const lastBar = lastSegment?.bars.at(-1);
+      if (!lastSegment || !lastBar) return createWindowDelta(WINDOW_DELTA_TYPES.NOOP);
       const shouldExtend = !this.intervalSeconds
         || time - lastBar.time <= this.intervalSeconds * 1.5;
       if (shouldExtend) {
@@ -461,8 +483,8 @@ export class SeriesWindowStore {
   }
 
   private _lastTime(): EpochSeconds | null {
-    const lastSegment = this._segments[this._segments.length - 1];
-    return lastSegment?.bars[lastSegment.bars.length - 1]?.time ?? null;
+    const lastSegment = this._segments.at(-1);
+    return lastSegment?.bars.at(-1)?.time ?? null;
   }
 
   private _rebuildTimeIndex(): void {

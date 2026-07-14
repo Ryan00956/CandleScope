@@ -77,7 +77,10 @@ async function withFetch<T>(
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (url: string | URL | Request, options?: RequestInit) => {
-      calls.push({ url, options });
+      calls.push({
+        url,
+        ...(options === undefined ? {} : { options }),
+      });
       const payload = responses.shift();
       return new Response(JSON.stringify(payload), {
         status: 200,

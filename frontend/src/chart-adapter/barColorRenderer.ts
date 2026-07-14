@@ -89,7 +89,8 @@ export function applyBarColors({
     if (canUseTrailingCandleUpdate(prevBarcoloredDataRef.current, coloredData)) {
       const start = Math.max(0, prevBarcoloredDataRef.current.length - 1);
       for (let i = start; i < coloredData.length; i += 1) {
-        series.update(coloredData[i]);
+        const point = coloredData[i];
+        if (point) series.update(point);
       }
       recordPerfEvent("chart.candleSeries.update", {
         paneId,

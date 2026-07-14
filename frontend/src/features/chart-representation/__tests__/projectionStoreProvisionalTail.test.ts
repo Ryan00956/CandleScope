@@ -220,7 +220,7 @@ for (const descriptor of PROJECTORS) {
 
     for (const close of [descriptor.extension, descriptor.retraction, descriptor.forming]) {
       counting.projectedRows = 0;
-      rows = [rows[0], row(2, close, false)];
+      rows = [mustBeDefined(rows[0]), row(2, close, false)];
       store.applySourceDelta({ type: "tick", replaced: true }, rows);
 
       assert.equal(counting.projectedRows, 1);
@@ -228,7 +228,7 @@ for (const descriptor of PROJECTORS) {
       assertMatchesReference(store, descriptor, rows);
     }
 
-    rows = [rows[0], row(2, descriptor.forming, true)];
+    rows = [mustBeDefined(rows[0]), row(2, descriptor.forming, true)];
     const patch = store.applySourceDelta({ type: "tick", replaced: true }, rows);
 
     const expected = assertMatchesReference(store, descriptor, rows);
@@ -274,8 +274,8 @@ for (const descriptor of PROJECTORS) {
     ];
     const store = new ProjectionStore({ projector: descriptor.create() });
     store.reset(original);
-    const hiddenSeed = store._sourceCheckpoints[1];
-    const retained = [original[1]];
+    const hiddenSeed = mustBeDefined(store._sourceCheckpoints[1]);
+    const retained = [mustBeDefined(original[1])];
 
     store.applySourceDelta({ type: "trim-left", trimmedLeft: 1 }, retained);
 

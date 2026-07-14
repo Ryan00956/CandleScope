@@ -8,7 +8,11 @@ import type {
   ProjectionCustomValues,
   SourceBar,
 } from "../chartRepresentationTypes.js";
-import { malformedFixture } from "../../../test/testHelpers.js";
+import { malformedFixture, mustBeDefined } from "../../../test/testHelpers.js";
+
+function at<T>(values: readonly T[], index: number): T {
+  return mustBeDefined(values[index]);
+}
 
 function row(
   time: number,
@@ -65,8 +69,8 @@ test("close-only projection emits one semantic OHLC item per X/O column", () => 
     { order: 0, sourceTime: 3, sourceOrdinal: 0 },
     { order: 1, sourceTime: 4, sourceOrdinal: 0 },
   ]);
-  assert.equal(data[0].customValues.venue, "demo");
-  assert.deepEqual(data[0].customValues.chartProjection, {
+  assert.equal(at(data, 0).customValues.venue, "demo");
+  assert.deepEqual(at(data, 0).customValues.chartProjection, {
     projectorId: "point-and-figure",
     sourceFromTime: 1,
     sourceToTime: 3,
@@ -74,8 +78,8 @@ test("close-only projection emits one semantic OHLC item per X/O column", () => 
     synthetic: true,
     provisional: false,
   });
-  assert.equal(data[1].customValues.chartProjection.sourceFromTime, 3);
-  assert.deepEqual(data[1].customValues.pointAndFigure, {
+  assert.equal(at(data, 1).customValues.chartProjection.sourceFromTime, 3);
+  assert.deepEqual(at(data, 1).customValues.pointAndFigure, {
     direction: "o",
     boxSize: 2,
     reversalAmount: 3,
@@ -160,9 +164,9 @@ test("seeded projection carries the active column when retained rows do not chan
   assert.deepEqual(resumed.data.map(body), [
     { open: 11, high: 11, low: 11, close: 11 },
   ]);
-  assert.equal(resumed.data[0].time.order, 0);
-  assert.equal(resumed.data[0].time.sourceTime, 2);
-  assert.equal(resumed.data[0].customValues.venue, "seed");
+  assert.equal(at(resumed.data, 0).time.order, 0);
+  assert.equal(at(resumed.data, 0).time.sourceTime, 2);
+  assert.equal(at(resumed.data, 0).customValues.venue, "seed");
   assert.equal(resumed.state.columnOrder, 0);
 });
 
@@ -184,7 +188,7 @@ test("checkpoints preserve the path before each source row", () => {
   ]);
 
   const resumed = projector.projectWithState([row(3, 9)], {
-    seedState: projected.checkpoints[2],
+    seedState: at(projected.checkpoints, 2),
   });
   assert.deepEqual(resumed.data.map(body), [
     { open: 11, high: 12, low: 11, close: 12 },
@@ -204,7 +208,7 @@ test("provisional projection state is carried in source lineage", () => {
     { provisional: true },
   );
 
-  assert.equal(data[0].customValues.chartProjection.provisional, true);
+  assert.equal(at(data, 0).customValues.chartProjection.provisional, true);
 });
 
 test("provisional seeded projection does not mutate confirmed state or checkpoints", () => {
@@ -221,10 +225,10 @@ test("provisional seeded projection does not mutate confirmed state or checkpoin
   });
 
   assert.equal(trial.data.length, 1);
-  assert.equal(trial.data[0].high, 13);
-  assert.equal(trial.data[0].customValues.chartProjection.provisional, true);
-  assert.equal(trial.checkpoints[0].columnHighTicks, 11);
-  assert.equal(trial.checkpoints[0].columnCustomValues.phase, "confirmed");
+  assert.equal(at(trial.data, 0).high, 13);
+  assert.equal(at(trial.data, 0).customValues.chartProjection.provisional, true);
+  assert.equal(at(trial.checkpoints, 0).columnHighTicks, 11);
+  assert.equal(at(trial.checkpoints, 0).columnCustomValues.phase, "confirmed");
   assert.equal(confirmedCheckpoint.columnHighTicks, 11);
   assert.equal(confirmedCheckpoint.columnSourceToTime, 2);
   assert.equal(confirmedCheckpoint.columnCustomValues.phase, "confirmed");
@@ -232,8 +236,8 @@ test("provisional seeded projection does not mutate confirmed state or checkpoin
   const resumedConfirmed = projector.projectWithState([row(3, 12)], {
     seedState: confirmedCheckpoint,
   });
-  assert.equal(resumedConfirmed.data[0].high, 12);
-  assert.equal(resumedConfirmed.data[0].customValues.chartProjection.provisional, false);
+  assert.equal(at(resumedConfirmed.data, 0).high, 12);
+  assert.equal(at(resumedConfirmed.data, 0).customValues.chartProjection.provisional, false);
 });
 
 test("provisional reversal keeps the confirmed column and marks only the new column projected", () => {
@@ -268,6 +272,6 @@ test("whitespace and invalid closes do not initialize or advance columns", () =>
   assert.deepEqual(projected.data.map(body), [
     { open: 11, high: 11, low: 11, close: 11 },
   ]);
-  assert.equal(projected.data[0].customValues.chartProjection.sourceFromTime, 3);
+  assert.equal(at(projected.data, 0).customValues.chartProjection.sourceFromTime, 3);
   assert.equal(projected.checkpoints.length, 4);
 });

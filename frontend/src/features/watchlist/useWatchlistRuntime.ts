@@ -31,7 +31,7 @@ export function useWatchlistRuntime({
   const store = useWatchlistStore();
   const subscriptions = useWatchlistSubscriptionRuntime({
     watchlists: store.watchlists,
-    subscriptionContext,
+    ...(subscriptionContext === undefined ? {} : { subscriptionContext }),
   });
 
   const view = useMemo(() => ({

@@ -314,7 +314,7 @@ export function startFreehandStroke({
   const freehand = createFreehandPrimitive({
     tool,
     dataPoint,
-    previewPoints,
+    ...(previewPoints === undefined ? {} : { previewPoints }),
     isPreview: true,
     color: penColorRef.current,
     lineWidth: penSizeRef.current,

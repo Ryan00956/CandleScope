@@ -6,17 +6,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
 function normalizePaneHeights(value: unknown): PaneHeights {
   if (!isRecord(value)) return {};
   const normalized: PaneHeights = {};
   for (const [key, heights] of Object.entries(value)) {
     if (!Array.isArray(heights) || heights.length === 0) continue;
-    if (!heights.every((height) => typeof height === "number"
-      && Number.isFinite(height)
-      && height > 0)) {
-      continue;
-    }
-    normalized[key] = [...heights];
+    const candidates: unknown[] = heights;
+    if (!candidates.every(isPositiveFiniteNumber)) continue;
+    normalized[key] = [...candidates];
   }
   return normalized;
 }

@@ -59,12 +59,13 @@ export function buildSurfaceViewportSnapshot({
   surfaceConfigKey?: unknown;
 } = {}): SurfaceViewportSnapshot | null {
   const logical = finiteRange(logicalRange);
-  if (!logical || !Array.isArray(displayRows) || displayRows.length === 0) return null;
+  if (!logical || displayRows.length === 0) return null;
 
   const lastIndex = displayRows.length - 1;
   const anchorIndex = Math.max(0, Math.min(lastIndex, Math.round(logical.to)));
   const anchorRow = displayRows[anchorIndex];
-  const anchorTime = anchorRow?.time;
+  if (!anchorRow) return null;
+  const anchorTime = anchorRow.time;
   const anchorSourceTime = sourceTimeFromAxisTime(anchorTime)
     ?? sourceTimeFromDisplayRow(anchorRow);
   if (anchorTime == null || anchorSourceTime === null || !Number.isFinite(anchorSourceTime)) {

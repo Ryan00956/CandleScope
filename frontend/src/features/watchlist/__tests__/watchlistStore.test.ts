@@ -7,6 +7,7 @@ import {
   loadCollapsedLists,
   loadWatchlists,
 } from "../watchlistStore.js";
+import { mustBeDefined } from "../../../test/testHelpers.js";
 
 function withStorage(values: Record<string, string | undefined>, run: () => void): void {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -33,7 +34,7 @@ test("watchlist storage rejects damaged and malformed groups", () => {
   });
 
   withStorage({ [WATCHLISTS_KEY]: JSON.stringify([null, {}, { id: 2, name: [] }]) }, () => {
-    assert.equal(loadWatchlists()[0].id, "default");
+    assert.equal(mustBeDefined(loadWatchlists()[0]).id, "default");
   });
 });
 

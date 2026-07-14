@@ -217,13 +217,20 @@ export function buildDefaultAlertRulePayload({
   interval,
   price,
 }: AlertDefaultPayloadInput): AlertRulePayload {
+  const defaultDraftInput = {
+    ...(product?.symbol || fallbackSymbol
+      ? { symbol: product?.symbol || fallbackSymbol }
+      : {}),
+    ...(interval === undefined ? {} : { interval }),
+    ...(price === undefined ? {} : { price }),
+  };
   return buildAlertPayloadFromDraft({
-    draft: createDefaultAlertDraft({ symbol: product?.symbol || fallbackSymbol, interval, price }),
-    product,
-    fallbackSymbol,
-    fallbackMarketType,
-    fallbackExchange,
-    interval,
+    draft: createDefaultAlertDraft(defaultDraftInput),
+    ...(product === undefined ? {} : { product }),
+    ...(fallbackSymbol === undefined ? {} : { fallbackSymbol }),
+    ...(fallbackMarketType === undefined ? {} : { fallbackMarketType }),
+    ...(fallbackExchange === undefined ? {} : { fallbackExchange }),
+    ...(interval === undefined ? {} : { interval }),
   });
 }
 

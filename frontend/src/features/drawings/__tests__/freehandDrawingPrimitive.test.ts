@@ -104,7 +104,7 @@ function strokeV3WithAbsoluteMiddle(): FreehandStrokeV3 {
   return {
     ...v2,
     version: 3,
-    spans: [v2.spans[0]],
+    spans: [mustBeDefined(v2.spans[0])],
     points: [
       { span: 0, ratio: 0, price: 0 },
       { span: 0, ratio: 0.2, price: 0 },

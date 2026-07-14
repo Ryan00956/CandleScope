@@ -112,7 +112,7 @@ test("freehand v2 normalization preserves same-time ordinals without local axis 
 
   const normalized = mustBeDefined(normalizeFreehandStrokeV2(value));
 
-  assert.deepEqual(normalized.spans[0].exact, {
+  assert.deepEqual(mustBeDefined(normalized.spans[0]).exact, {
     left: { time: 200, sourceOrdinal: 0 },
     right: { time: 200, sourceOrdinal: 1 },
   });
@@ -120,7 +120,7 @@ test("freehand v2 normalization preserves same-time ordinals without local axis 
   assert.equal(keys.has("order"), false);
   assert.equal(keys.has("logical"), false);
   assert.equal(Object.isFrozen(normalized), true);
-  assert.equal(Object.isFrozen(normalized.spans[0].exact.left), true);
+  assert.equal(Object.isFrozen(mustBeDefined(normalized.spans[0]).exact.left), true);
   assert.strictEqual(normalizeFreehandStrokeV2(normalized), normalized);
 });
 
@@ -158,7 +158,7 @@ test("freehand v2 rejects ambiguous exact and fallback spans", () => {
 
 test("freehand v2 resolves each unique referenced span once", () => {
   const value = stroke({
-    spans: [stroke().spans[0], {
+    spans: [mustBeDefined(stroke().spans[0]), {
       exact: {
         left: { time: 300, sourceOrdinal: 0 },
         right: { time: 400, sourceOrdinal: 0 },
@@ -195,7 +195,7 @@ test("freehand v2 resolves each unique referenced span once", () => {
 
 test("freehand v2 emits path gaps for unresolved spans", () => {
   const value = stroke({
-    spans: [stroke().spans[0], {
+    spans: [mustBeDefined(stroke().spans[0]), {
       exact: {
         left: { time: 300, sourceOrdinal: 0 },
         right: { time: 400, sourceOrdinal: 0 },
@@ -372,7 +372,7 @@ test("freehand generic resolver preserves v3 gaps and resolves each span once", 
   assert.deepEqual(timeCalls, [[250.5, 1], [300, 4]]);
   assert.deepEqual(anchorCalls, [[{ time: 200, sourceOrdinal: 0 }, 3]]);
   assert.deepEqual(resolveFreehandStrokeV3Points(value, {
-    resolveSpan: resolvers.resolveSpan,
+    resolveSpan: mustBeDefined(resolvers.resolveSpan),
   }), [{ x: 10, price: 10 }, null, { x: 20, price: 12 }, null, null]);
   assert.deepEqual(resolveFreehandStrokeV3Points(value, {
     resolveTime: () => 30,
@@ -469,7 +469,7 @@ function draftBatch(identity: unknown, captures: unknown[]): FreehandCaptureBatc
 test("freehand draft deduplicates structurally equal spans", () => {
   const identity = Object.freeze({ series: 1 });
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const firstSpan = stroke().spans[0];
+  const firstSpan = mustBeDefined(stroke().spans[0]);
   const clonedSpan = structuredClone(firstSpan);
 
   assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
@@ -533,7 +533,7 @@ test("freehand draft preserves an exact materialized anchor beside future time",
 test("freehand draft retains mixed v3 point types and null-screen separators", () => {
   const identity = {};
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const lineageSpan = stroke().spans[0];
+  const lineageSpan = mustBeDefined(stroke().spans[0]);
   assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
     capture(lineageSpan, 0, 0, 0),
     capture(lineageSpan, 1, 0, 0.2),
@@ -559,7 +559,7 @@ test("freehand draft retains mixed v3 point types and null-screen separators", (
 test("freehand draft chooses the minimum schema after RDP", () => {
   const identity = {};
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const lineageSpan = stroke().spans[0];
+  const lineageSpan = mustBeDefined(stroke().spans[0]);
   assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
     capture(lineageSpan, 0, 0, 0),
     absoluteCapture(250.5, 1, 0),
@@ -580,7 +580,7 @@ test("freehand draft chooses the minimum schema after RDP", () => {
 test("freehand draft rejects malformed mixed captures atomically", () => {
   const identity = {};
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const lineageSpan = stroke().spans[0];
+  const lineageSpan = mustBeDefined(stroke().spans[0]);
   assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity, [
     capture(lineageSpan, 0, 0, 0),
     absoluteCapture(250.5, 1, 0),
@@ -603,7 +603,7 @@ test("freehand draft rejects malformed mixed captures atomically", () => {
 test("freehand draft keeps null screen captures as path gaps", () => {
   const identity = {};
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const firstSpan = stroke().spans[0];
+  const firstSpan = mustBeDefined(stroke().spans[0]);
   const gapSpan = {
     exact: {
       left: { time: 300, sourceOrdinal: 0 },
@@ -637,7 +637,7 @@ test("freehand draft keeps null screen captures as path gaps", () => {
 test("freehand draft drops unused spans and remaps retained point indexes", () => {
   const identity = {};
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const keptSpan = stroke().spans[0];
+  const keptSpan = mustBeDefined(stroke().spans[0]);
   const droppedSpan = {
     exact: {
       left: { time: 300, sourceOrdinal: 0 },
@@ -664,7 +664,7 @@ test("freehand draft drops unused spans and remaps retained point indexes", () =
 test("freehand draft decimation is iterative at the point cap", () => {
   const identity = {};
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const span = stroke().spans[0];
+  const span = mustBeDefined(stroke().spans[0]);
   const captures = Array.from({ length: MAX_FREEHAND_STROKE_POINTS }, (_value, index) => (
     capture(span, index, 0, index / (MAX_FREEHAND_STROKE_POINTS - 1), index)
   ));
@@ -681,7 +681,7 @@ test("freehand draft decimation is iterative at the point cap", () => {
 test("incremental freehand append preserves a saturated draft for mouseup commit", () => {
   const identity = {};
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const span = stroke().spans[0];
+  const span = mustBeDefined(stroke().spans[0]);
   const initial = Array.from(
     { length: MAX_FREEHAND_STROKE_POINTS - 1 },
     (_value, index) => capture(
@@ -730,7 +730,7 @@ test("incremental freehand append preserves a saturated draft for mouseup commit
 test("incremental freehand append still fails closed on identity drift", () => {
   const identity = {};
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const span = stroke().spans[0];
+  const span = mustBeDefined(stroke().spans[0]);
   assert.equal(appendFreehandStrokeCaptureBatchIncremental(
     draft,
     draftBatch({}, [capture(span, 0, 0)]),
@@ -742,7 +742,7 @@ test("incremental freehand append still fails closed on identity drift", () => {
 test("freehand draft fails closed on identity, caps, invalid input, and cancel", () => {
   const identity = {};
   const draft = createFreehandStrokeDraft(draftBatch(identity, []));
-  const span = stroke().spans[0];
+  const span = mustBeDefined(stroke().spans[0]);
   assert.equal(appendFreehandStrokeCapture(draft, capture(span, 0, 0), {}), false);
   assert.equal(getFreehandStrokeDraftPreviewPoints(draft).length, 0);
   assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity,

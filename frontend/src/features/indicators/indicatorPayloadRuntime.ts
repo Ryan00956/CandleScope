@@ -6,6 +6,7 @@ import {
 import type {
   IndicatorAnnotationPoint,
   IndicatorAuxiliaryItem,
+  IndicatorColorPoint,
   IndicatorDefinition,
   IndicatorFill,
   IndicatorLine,
@@ -120,8 +121,8 @@ export function getBuiltinIndicatorName(
   if (indicator?.engineName) return indicator.engineName;
   const script = indicator?.script;
   if (typeof script === "string" && script.startsWith(ENGINE_SCRIPT_MARKER)) {
-    return script
-      .split("\n")[0]
+    const markerLine = script.split("\n", 1)[0] ?? "";
+    return markerLine
       .slice(ENGINE_SCRIPT_MARKER.length)
       .trim();
   }
@@ -208,7 +209,8 @@ export function resolveWsValue(
   }
 
   const entries = Object.entries(values);
-  if (isSingleLine && entries.length === 1) return entries[0][1];
+  const onlyEntry = entries.length === 1 ? entries[0] : undefined;
+  if (isSingleLine && onlyEntry !== undefined) return onlyEntry[1];
   return undefined;
 }
 
@@ -330,6 +332,11 @@ export function mergeIndicatorLines(
       return;
     }
     const current = merged[existingIndex];
+    if (current === undefined) {
+      merged.push(line);
+      indexByKey.set(key, merged.length - 1);
+      return;
+    }
     merged[existingIndex] = {
       ...current,
       ...line,
@@ -379,6 +386,11 @@ export function replaceIndicatorLinesRange(
       return;
     }
     const current = merged[existingIndex];
+    if (current === undefined) {
+      merged.push(incomingLine);
+      indexByKey.set(key, merged.length - 1);
+      return;
+    }
     merged[existingIndex] = {
       ...current,
       ...line,
@@ -430,6 +442,11 @@ export function mergeIndicatorItems<T extends IndicatorAuxiliaryItem>(
       return;
     }
     const current = merged[existingIndex];
+    if (current === undefined) {
+      merged.push(item);
+      indexByKey.set(key, merged.length - 1);
+      return;
+    }
     const currentData = auxiliaryData(current);
     const itemData = auxiliaryData(item);
     merged[existingIndex] = {
@@ -476,6 +493,11 @@ export function replaceIndicatorItemsRange<T extends IndicatorAuxiliaryItem>(
       return;
     }
     const current = merged[existingIndex];
+    if (current === undefined) {
+      merged.push(item);
+      indexByKey.set(key, merged.length - 1);
+      return;
+    }
     const currentData = auxiliaryData(current);
     const itemData = auxiliaryData(item);
     const timed = hasTimedData(currentData || []) || hasTimedData(itemData || []);
@@ -504,14 +526,22 @@ function normalizeIndicatorFills(
 ): IndicatorFill[] {
   return (fills || []).map((fill) => {
     if (Array.isArray(fill.localSeriesIds) && fill.localSeriesIds.length >= 2) {
-      return {
-        plot1_id: fill.localSeriesIds[0] ?? undefined,
-        plot2_id: fill.localSeriesIds[1] ?? undefined,
-        color: fill.style?.color || fill.color,
+      const normalized: IndicatorFill = {
         title: fill.style?.title || fill.title || "",
-        pane: fill.pane,
         indicatorId,
       };
+      const plot1Id = fill.localSeriesIds[0];
+      const plot2Id = fill.localSeriesIds[1];
+      const color = fill.style?.color || fill.color;
+      if (plot1Id !== null && plot1Id !== undefined) {
+        normalized.plot1_id = plot1Id;
+      }
+      if (plot2Id !== null && plot2Id !== undefined) {
+        normalized.plot2_id = plot2Id;
+      }
+      if (color !== undefined) normalized.color = color;
+      if (fill.pane !== undefined) normalized.pane = fill.pane;
+      return normalized;
     }
     return { ...fill, indicatorId };
   });
@@ -563,19 +593,21 @@ function splitUnifiedAnnotations(
       });
     } else if (item.type === "hline") {
       const lineStyle = style.lineStyle;
+      const hline: Extract<IndicatorOutput, { kind: "hline" }>["value"] = {
+        ...base,
+        title: styleString(style, "title", ""),
+        color: styleString(style, "color", "#787b86"),
+        linestyle:
+          typeof lineStyle === "number" || typeof lineStyle === "string"
+            ? lineStyle
+            : "dashed",
+        linewidth: styleNumber(style, "lineWidth", 1),
+      };
+      const price = item.data[0]?.value;
+      if (price !== undefined) hline.price = price;
       outputs.push({
         kind: "hline",
-        value: {
-          ...base,
-          price: item.data[0]?.value,
-          title: styleString(style, "title", ""),
-          color: styleString(style, "color", "#787b86"),
-          linestyle:
-            typeof lineStyle === "number" || typeof lineStyle === "string"
-              ? lineStyle
-              : "dashed",
-          linewidth: styleNumber(style, "lineWidth", 1),
-        },
+        value: hline,
       });
     } else if (item.type === "bgcolor") {
       outputs.push({
@@ -588,15 +620,23 @@ function splitUnifiedAnnotations(
         },
       });
     } else if (item.type === "barcolor") {
+      const data: IndicatorColorPoint[] = [];
+      for (const point of item.data) {
+        if (typeof point.time !== "number" || typeof point.color !== "string") {
+          continue;
+        }
+        const colorPoint: IndicatorColorPoint = {
+          time: point.time,
+          color: point.color,
+        };
+        if (point.value !== undefined) colorPoint.value = point.value;
+        data.push(colorPoint);
+      }
       outputs.push({
         kind: "barcolor",
         value: {
           ...base,
-          data: item.data.flatMap((point) =>
-            typeof point.time === "number" && typeof point.color === "string"
-              ? [{ time: point.time, color: point.color, value: point.value }]
-              : [],
-          ),
+          data,
         },
       });
     } else if (item.type === "signal") {

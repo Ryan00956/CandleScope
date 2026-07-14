@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createDrawingLineageIndex } from "../drawingLineageIndex.js";
 import type { DisplayRow } from "../chartRepresentationTypes.js";
+import { mustBeDefined } from "../../../test/testHelpers.js";
 
 function displayRow(order: number, sourceTime: number, sourceOrdinal = 0, {
   from = sourceTime,
@@ -63,7 +64,7 @@ test("drawing lineage index replaces only the changed synthetic tail", () => {
   assert.equal(index.revision, revision + 1);
   assert.equal(index.exactRowsBySourceTime.has(1_000 + size - 1), false);
   assert.deepEqual(index.exactRowsBySourceTime.get(9_999), [nextTail]);
-  assert.strictEqual(index.rowRanges[index.rowRanges.length - 1].row, nextTail);
+  assert.strictEqual(mustBeDefined(index.rowRanges.at(-1)).row, nextTail);
   assert.equal(index.latestLineage, 9_999);
 });
 
@@ -75,7 +76,7 @@ test("drawing lineage index restores prefix aggregates after a tail retraction",
   ];
   const index = createDrawingLineageIndex(rows);
   const nextTail = displayRow(1, 150, 0, { from: 101, to: 150 });
-  const nextRows = [rows[0], nextTail];
+  const nextRows = [mustBeDefined(rows[0]), nextTail];
 
   assert.equal(index.replaceTail({
     previousSeriesData: rows,
@@ -183,7 +184,7 @@ test("drawing lineage index restores coverage groups after replacing a gapped ta
   ];
   const index = createDrawingLineageIndex(rows);
   const replacement = displayRow(1, 20, 0, { from: 11, to: 20 });
-  const nextRows = [rows[0], replacement];
+  const nextRows = [mustBeDefined(rows[0]), replacement];
 
   assert.equal(index.replaceTail({
     previousSeriesData: rows,
@@ -194,5 +195,5 @@ test("drawing lineage index restores coverage groups after replacing a gapped ta
   assert.deepEqual(index.rowsOverlappingSourceEnvelope({
     fromTime: 5,
     toTime: 15,
-  }), { first: rows[0], last: replacement });
+  }), { first: mustBeDefined(rows[0]), last: replacement });
 });

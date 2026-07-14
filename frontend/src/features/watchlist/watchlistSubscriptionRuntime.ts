@@ -65,19 +65,34 @@ function optionalFiniteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function parseWatchlistPriceTick(value: unknown): WatchlistPriceTick | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function parseWatchlistPriceTick(value: unknown): WatchlistPriceTick | null {
+  if (!isRecord(value)) return null;
+  const record = value;
   if (typeof record.symbol !== "string") return null;
-  return {
+  const price = optionalFiniteNumber(record.price);
+  const open = optionalFiniteNumber(record.open);
+  const dailyChange = optionalFiniteNumber(record.daily_change);
+  const dailyChangePercent = optionalFiniteNumber(record.daily_change_pct);
+  const changePercent = optionalFiniteNumber(record.change_pct);
+  const parsed: WatchlistPriceTick = {
     ...record,
     symbol: record.symbol,
-    price: optionalFiniteNumber(record.price),
-    open: optionalFiniteNumber(record.open),
-    daily_change: optionalFiniteNumber(record.daily_change),
-    daily_change_pct: optionalFiniteNumber(record.daily_change_pct),
-    change_pct: optionalFiniteNumber(record.change_pct),
   };
+  delete parsed.price;
+  delete parsed.open;
+  delete parsed.daily_change;
+  delete parsed.daily_change_pct;
+  delete parsed.change_pct;
+  if (price !== undefined) parsed.price = price;
+  if (open !== undefined) parsed.open = open;
+  if (dailyChange !== undefined) parsed.daily_change = dailyChange;
+  if (dailyChangePercent !== undefined) parsed.daily_change_pct = dailyChangePercent;
+  if (changePercent !== undefined) parsed.change_pct = changePercent;
+  return parsed;
 }
 
 export function useWatchlistSubscriptionRuntime({

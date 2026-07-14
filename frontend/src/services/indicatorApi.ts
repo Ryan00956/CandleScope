@@ -42,6 +42,10 @@ interface IndicatorRequestOptions extends RequestInit {
   includeHttpStatus?: boolean;
 }
 
+function indicatorSignalOptions(signal: AbortSignal | undefined): RequestInit {
+  return signal === undefined ? {} : { signal };
+}
+
 async function request(
   url: string,
   options: IndicatorRequestOptions = {},
@@ -49,13 +53,13 @@ async function request(
   const { includeHttpStatus = false, ...fetchOptions } = options;
   const response = await fetch(url, fetchOptions);
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
+    const errorData: unknown = await response.json().catch(() => ({}));
     const detail = isIndicatorRecord(errorData) ? errorData.detail : undefined;
     throw new Error(
       typeof detail === "string" ? detail : `HTTP ${response.status}`,
     );
   }
-  const payload = await response.json();
+  const payload: unknown = await response.json();
   if (
     includeHttpStatus &&
     payload &&
@@ -198,7 +202,7 @@ export async function computeIndicatorRange({
   const payload = await request(`${API_BASE}/indicators/range`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    signal,
+    ...indicatorSignalOptions(signal),
     includeHttpStatus: true,
     body: JSON.stringify({
       clientId,
@@ -231,7 +235,7 @@ export async function computeIndicatorRangeBatch({
   const payload = await request(`${API_BASE}/indicators/range/batch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    signal,
+    ...indicatorSignalOptions(signal),
     body: JSON.stringify({ requests }),
   });
   return parseIndicatorRangeBatchResponse(payload);

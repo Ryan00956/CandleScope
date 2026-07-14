@@ -8,7 +8,7 @@ import {
   setPaneHeights,
   trimPanes,
 } from "../paneManager.js";
-import { structuralMock } from "../../test/testHelpers.js";
+import { mustBeDefined, structuralMock } from "../../test/testHelpers.js";
 
 type AdapterChart = NonNullable<Parameters<typeof ensurePane>[0]>;
 
@@ -61,7 +61,7 @@ test("ensurePane creates missing panes and preserves empty panes", () => {
 
   assert.equal(panes.length, 3);
   assert.equal(pane, panes[2]);
-  assert.equal(panes[2].preserve, true);
+  assert.equal(mustBeDefined(panes[2]).preserve, true);
 });
 
 test("setPaneHeights and readPaneHeights round trip finite heights", () => {

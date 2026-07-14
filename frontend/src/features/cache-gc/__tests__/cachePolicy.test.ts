@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { planFrontendGc } from "../cachePolicy.js";
 import type { CacheDiagnostics } from "../cacheGcTypes.js";
+import { mustBeDefined } from "../../../test/testHelpers.js";
 
 function diagnostics(overrides: CacheDiagnostics = {}): CacheDiagnostics {
   return {
@@ -51,8 +52,9 @@ test("frontend GC dry-run chooses cold entries before warm entries", () => {
     nowMs: 1_000,
   });
 
-  assert.equal(report.victims[0].key, "binance:spot:SOLUSDT::1m");
-  assert.equal(report.victims[0].tier, "cold");
+  const firstVictim = mustBeDefined(report.victims[0]);
+  assert.equal(firstVictim.key, "binance:spot:SOLUSDT::1m");
+  assert.equal(firstVictim.tier, "cold");
 });
 
 test("frontend GC dry-run returns no victims while within budget", () => {
@@ -106,7 +108,7 @@ test("frontend GC dry-run selects orphan indicator cache without budget pressure
   });
 
   assert.equal(report.victims.length, 1);
-  assert.equal(report.victims[0].reason, "missing-kline-dependency");
+  assert.equal(mustBeDefined(report.victims[0]).reason, "missing-kline-dependency");
 });
 
 test("frontend GC dry-run can pressure indicator point budget", () => {
@@ -128,8 +130,9 @@ test("frontend GC dry-run can pressure indicator point budget", () => {
     nowMs: 1_000,
   });
 
-  assert.equal(report.victims[0].owner, "indicator-result-cache");
-  assert.equal(report.victims[0].reason, "indicator-points-over-budget");
+  const firstVictim = mustBeDefined(report.victims[0]);
+  assert.equal(firstVictim.owner, "indicator-result-cache");
+  assert.equal(firstVictim.reason, "indicator-points-over-budget");
   assert.equal(report.wouldFreeIndicatorPoints >= 400, true);
 });
 
@@ -151,7 +154,9 @@ test("frontend GC dry-run keeps hotter reusable entries longer", () => {
   });
 
   assert.equal(report.scoringVersion, 1);
-  assert.equal(report.victims[0].key, "cold");
-  assert.equal(report.victims[0].reuseReason, "no-recent-heat");
-  assert.ok(report.victims[0].scores.finalEvictScore >= report.victims[1].scores.finalEvictScore);
+  const firstVictim = mustBeDefined(report.victims[0]);
+  const secondVictim = mustBeDefined(report.victims[1]);
+  assert.equal(firstVictim.key, "cold");
+  assert.equal(firstVictim.reuseReason, "no-recent-heat");
+  assert.ok(firstVictim.scores.finalEvictScore >= secondVictim.scores.finalEvictScore);
 });

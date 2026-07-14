@@ -288,35 +288,31 @@ export function normalizeSavedDrawingItem(item: unknown): SavedDrawing | null {
       const widthPx = item.widthPx === null
         ? null
         : optionalFiniteNumber(item, "widthPx", 0);
+      const text = optionalString(item, "text", MAX_DRAWING_STORAGE_CHARS);
+      const fontSize = optionalFiniteNumber(item, "fontSize", 1, 512);
+      const fontFamily = optionalString(item, "fontFamily", 512);
+      const bold = optionalBoolean(item, "bold");
+      const italic = optionalBoolean(item, "italic");
+      const underline = optionalBoolean(item, "underline");
+      const borderWidth = optionalFiniteNumber(item, "borderWidth", 0, 100);
+      const padding = optionalFiniteNumber(item, "padding", 0, 512);
       return {
         type: "text",
         ...base,
         ...style,
         ...(dataPoint === undefined ? {} : { dataPoint }),
-        ...(optionalString(item, "text", MAX_DRAWING_STORAGE_CHARS) === undefined
-          ? {}
-          : { text: optionalString(item, "text", MAX_DRAWING_STORAGE_CHARS) }),
-        ...(optionalFiniteNumber(item, "fontSize", 1, 512) === undefined
-          ? {}
-          : { fontSize: optionalFiniteNumber(item, "fontSize", 1, 512) }),
-        ...(optionalString(item, "fontFamily", 512) === undefined
-          ? {}
-          : { fontFamily: optionalString(item, "fontFamily", 512) }),
-        ...(optionalBoolean(item, "bold") === undefined ? {} : { bold: optionalBoolean(item, "bold") }),
-        ...(optionalBoolean(item, "italic") === undefined ? {} : { italic: optionalBoolean(item, "italic") }),
-        ...(optionalBoolean(item, "underline") === undefined
-          ? {}
-          : { underline: optionalBoolean(item, "underline") }),
+        ...(text === undefined ? {} : { text }),
+        ...(fontSize === undefined ? {} : { fontSize }),
+        ...(fontFamily === undefined ? {} : { fontFamily }),
+        ...(bold === undefined ? {} : { bold }),
+        ...(italic === undefined ? {} : { italic }),
+        ...(underline === undefined ? {} : { underline }),
         ...(align === undefined ? {} : { align }),
         ...(bgColor === undefined ? {} : { bgColor }),
         ...(borderColor === undefined ? {} : { borderColor }),
-        ...(optionalFiniteNumber(item, "borderWidth", 0, 100) === undefined
-          ? {}
-          : { borderWidth: optionalFiniteNumber(item, "borderWidth", 0, 100) }),
+        ...(borderWidth === undefined ? {} : { borderWidth }),
         ...(widthPx === undefined ? {} : { widthPx }),
-        ...(optionalFiniteNumber(item, "padding", 0, 512) === undefined
-          ? {}
-          : { padding: optionalFiniteNumber(item, "padding", 0, 512) }),
+        ...(padding === undefined ? {} : { padding }),
       };
     }
     case "fibonacci": {
@@ -326,15 +322,14 @@ export function normalizeSavedDrawingItem(item: unknown): SavedDrawing | null {
       if (dataPoints === null) return null;
       const levels = hasOwn(item, "levels") ? normalizeFibonacciLevels(item.levels) : undefined;
       if (levels === null) return null;
+      const inverted = optionalBoolean(item, "inverted");
       return {
         type: "fibonacci",
         ...base,
         ...style,
         ...(dataPoints === undefined ? {} : { dataPoints }),
         ...(levels === undefined ? {} : { levels }),
-        ...(optionalBoolean(item, "inverted") === undefined
-          ? {}
-          : { inverted: optionalBoolean(item, "inverted") }),
+        ...(inverted === undefined ? {} : { inverted }),
       };
     }
     case "position": {
@@ -353,27 +348,19 @@ export function normalizeSavedDrawingItem(item: unknown): SavedDrawing | null {
       const direction = POSITION_DIRECTIONS.has(item.direction as PositionDirection)
         ? item.direction as PositionDirection
         : undefined;
+      const entryPrice = optionalFiniteNumber(item, "entryPrice");
+      const tpPrice = item.tpPrice === null ? null : optionalFiniteNumber(item, "tpPrice");
+      const slPrice = item.slPrice === null ? null : optionalFiniteNumber(item, "slPrice");
+      const positionSize = optionalFiniteNumber(item, "positionSize", 0);
       return {
         type: "position",
         ...base,
         ...(direction === undefined ? {} : { direction }),
-        ...(optionalFiniteNumber(item, "entryPrice") === undefined
-          ? {}
-          : { entryPrice: optionalFiniteNumber(item, "entryPrice") }),
-        ...(item.tpPrice === null
-          ? { tpPrice: null }
-          : optionalFiniteNumber(item, "tpPrice") === undefined
-            ? {}
-            : { tpPrice: optionalFiniteNumber(item, "tpPrice") }),
-        ...(item.slPrice === null
-          ? { slPrice: null }
-          : optionalFiniteNumber(item, "slPrice") === undefined
-            ? {}
-            : { slPrice: optionalFiniteNumber(item, "slPrice") }),
+        ...(entryPrice === undefined ? {} : { entryPrice }),
+        ...(tpPrice === undefined ? {} : { tpPrice }),
+        ...(slPrice === undefined ? {} : { slPrice }),
         ...(timeRange === undefined ? {} : { timeRange }),
-        ...(optionalFiniteNumber(item, "positionSize", 0) === undefined
-          ? {}
-          : { positionSize: optionalFiniteNumber(item, "positionSize", 0) }),
+        ...(positionSize === undefined ? {} : { positionSize }),
         ...(infoPanelOffset === undefined ? {} : { infoPanelOffset }),
       };
     }
@@ -388,18 +375,16 @@ export function normalizeSavedDrawingItem(item: unknown): SavedDrawing | null {
       const lineStyle = SHAPE_LINE_STYLES.has(item.lineStyle as ShapeLineStyle)
         ? item.lineStyle as ShapeLineStyle
         : undefined;
+      const fillColor = optionalString(item, "fillColor", 128);
+      const fillOpacity = optionalFiniteNumber(item, "fillOpacity", 0, 1);
       return {
         type: "shape",
         ...base,
         ...style,
         ...(shapeType === undefined ? {} : { shapeType }),
         ...(dataPoints === undefined ? {} : { dataPoints }),
-        ...(optionalString(item, "fillColor", 128) === undefined
-          ? {}
-          : { fillColor: optionalString(item, "fillColor", 128) }),
-        ...(optionalFiniteNumber(item, "fillOpacity", 0, 1) === undefined
-          ? {}
-          : { fillOpacity: optionalFiniteNumber(item, "fillOpacity", 0, 1) }),
+        ...(fillColor === undefined ? {} : { fillColor }),
+        ...(fillOpacity === undefined ? {} : { fillOpacity }),
         ...(lineStyle === undefined ? {} : { lineStyle }),
       };
     }

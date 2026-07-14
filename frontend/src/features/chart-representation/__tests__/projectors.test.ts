@@ -11,7 +11,9 @@ const rows = [
 ];
 
 test("HeikinAshiProjector implements the full recursive OHLC formula", () => {
-  const [first, second] = new HeikinAshiProjector().project(rows);
+  const projected = new HeikinAshiProjector().project(rows);
+  const first = mustBeDefined(projected[0]);
+  const second = mustBeDefined(projected[1]);
 
   assert.deepEqual(
     { open: first.open, high: first.high, low: first.low, close: first.close },
@@ -42,7 +44,7 @@ test("IdentityProjector preserves source fields and adds LWC customValues lineag
     color: "#123456",
     customValues: { venue: "demo" },
   };
-  const [display] = new IdentityProjector().project([source]);
+  const display = mustBeDefined(new IdentityProjector().project([source])[0]);
 
   for (const [key, value] of Object.entries(source)) {
     if (key !== "customValues") assert.equal(display[key], value);

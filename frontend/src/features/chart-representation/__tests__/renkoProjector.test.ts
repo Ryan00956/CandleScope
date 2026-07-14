@@ -8,6 +8,11 @@ import type {
   ProjectionCustomValues,
   SourceBar,
 } from "../chartRepresentationTypes.js";
+import { mustBeDefined } from "../../../test/testHelpers.js";
+
+function at<T>(values: readonly T[], index: number): T {
+  return mustBeDefined(values[index]);
+}
 
 function row(
   time: number,
@@ -54,7 +59,7 @@ test("traditional Renko anchors to the lower box grid and emits full continuatio
     { order: 1, sourceTime: 4, sourceOrdinal: 0 },
     { order: 2, sourceTime: 4, sourceOrdinal: 1 },
   ]);
-  assert.deepEqual(data[0].customValues.chartProjection, {
+  assert.deepEqual(at(data, 0).customValues.chartProjection, {
     projectorId: "renko",
     sourceFromTime: 1,
     sourceToTime: 3,
@@ -62,8 +67,8 @@ test("traditional Renko anchors to the lower box grid and emits full continuatio
     synthetic: true,
     provisional: false,
   });
-  assert.equal(data[1].customValues.chartProjection.sourceFromTime, 3);
-  assert.equal(data[2].customValues.chartProjection.sourceFromTime, 4);
+  assert.equal(at(data, 1).customValues.chartProjection.sourceFromTime, 3);
+  assert.equal(at(data, 2).customValues.chartProjection.sourceFromTime, 4);
 });
 
 test("traditional Renko requires two boxes for reversal and renders no wick", () => {
@@ -75,13 +80,13 @@ test("traditional Renko requires two boxes for reversal and renders no wick", ()
   ]);
 
   assert.equal(data.length, 2);
-  assert.deepEqual(body(data[0]), { open: 52, high: 54, low: 52, close: 54 });
-  assert.deepEqual(body(data[1]), { open: 52, high: 52, low: 50, close: 50 });
-  assert.equal(data[1].customValues.venue, "demo");
-  assert.equal(data[1].customValues.renko.direction, "down");
-  assert.equal(data[1].customValues.renko.wickPolicy, "none");
-  assert.equal(data[1].customValues.chartProjection.sourceFromTime, 2);
-  assert.equal(data[1].customValues.chartProjection.sourceToTime, 4);
+  assert.deepEqual(body(at(data, 0)), { open: 52, high: 54, low: 52, close: 54 });
+  assert.deepEqual(body(at(data, 1)), { open: 52, high: 52, low: 50, close: 50 });
+  assert.equal(at(data, 1).customValues.venue, "demo");
+  assert.equal(at(data, 1).customValues.renko.direction, "down");
+  assert.equal(at(data, 1).customValues.renko.wickPolicy, "none");
+  assert.equal(at(data, 1).customValues.chartProjection.sourceFromTime, 2);
+  assert.equal(at(data, 1).customValues.chartProjection.sourceToTime, 4);
 });
 
 test("traditional Renko applies the same two-box reversal rule after a down brick", () => {
@@ -121,7 +126,7 @@ test("Renko checkpoints resume projection without re-anchoring", () => {
   assert.deepEqual(resumed.data.map(body), [
     { open: 52, high: 52, low: 50, close: 50 },
   ]);
-  assert.equal(resumed.data[0].time.order, 1);
+  assert.equal(at(resumed.data, 0).time.order, 1);
   assert.equal(resumed.checkpoints.length, 2);
 });
 
@@ -138,5 +143,5 @@ test("provisional projection state is carried in source lineage", () => {
     { provisional: true },
   );
 
-  assert.equal(data[0].customValues.chartProjection.provisional, true);
+  assert.equal(at(data, 0).customValues.chartProjection.provisional, true);
 });

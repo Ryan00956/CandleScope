@@ -60,10 +60,10 @@ export function useExportRuntime({
 
   const sessionView = session?.view;
   const metadata = useMemo<ExportMetadata>(() => ({
-    exchange: sessionView?.exchange,
-    marketType: sessionView?.marketType,
-    symbol: sessionView?.symbol,
-    interval: sessionView?.interval,
+    ...(sessionView?.exchange === undefined ? {} : { exchange: sessionView.exchange }),
+    ...(sessionView?.marketType === undefined ? {} : { marketType: sessionView.marketType }),
+    ...(sessionView?.symbol === undefined ? {} : { symbol: sessionView.symbol }),
+    ...(sessionView?.interval === undefined ? {} : { interval: sessionView.interval }),
     theme: resolvedTheme,
   }), [
     resolvedTheme,
@@ -80,8 +80,12 @@ export function useExportRuntime({
     chartSurfaceActions,
     pageExportRef,
     drawingsHidden: drawings?.view?.drawingsHidden,
-    prepareDrawingExport: drawings?.actions?.prepareExport,
-    setDrawingsHiddenForExport: drawings?.actions?.setDrawingsHiddenForExport,
+    ...(drawings?.actions?.prepareExport === undefined
+      ? {}
+      : { prepareDrawingExport: drawings.actions.prepareExport }),
+    ...(drawings?.actions?.setDrawingsHiddenForExport === undefined
+      ? {}
+      : { setDrawingsHiddenForExport: drawings.actions.setDrawingsHiddenForExport }),
   });
 
   const updateOptions = useCallback((nextOptions: ExportOptions) => {

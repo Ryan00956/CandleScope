@@ -200,7 +200,7 @@ test("ordinal coordinate anchors round-trip fractional future source time", () =
   const fallbackChart: CoordinateChartBridge = {
     timeScale: () => ({
       coordinateToLogical: () => null,
-      coordinateToTime: (x) => (x <= 20 ? rows[2].time : null),
+      coordinateToTime: (x) => (x <= 20 ? mustBeDefined(rows[2]).time : null),
       logicalToCoordinate: () => null,
       options: () => ({ barSpacing: 10 }),
       timeToCoordinate: (time) => (isOrdinalAxisTime(time) ? time.order * 10 : null),
@@ -575,7 +575,7 @@ test("freehand capture batches persist adjacent source lineage without axis-loca
     left: { time: 200, sourceOrdinal: 1 },
     right: { time: 300, sourceOrdinal: 0 },
   });
-  assert.equal(result.captures[1].ratio, 0);
+  assert.equal(mustBeDefined(result.captures[1]).ratio, 0);
   assert.equal(JSON.stringify(result).includes("order"), false);
   assert.equal(JSON.stringify(result).includes("logical"), false);
 });
@@ -605,7 +605,7 @@ test("freehand capture atomically mixes materialized lineage with absolute futur
     left: { time: 100, sourceOrdinal: 0 },
     right: { time: 200, sourceOrdinal: 0 },
   });
-  assert.equal(result.captures[0].ratio, 0.5);
+  assert.equal(mustBeDefined(result.captures[0]).ratio, 0.5);
   assert.deepEqual(result.captures[1], {
     time: 230,
     price: 80,
@@ -783,7 +783,7 @@ test("freehand capture only requires the visible adjacent pair when history is o
   const index = createDrawingLineageIndex(rows);
   const chart: CoordinateChartBridge = {
     timeScale: () => ({
-      coordinateToTime: () => rows[3].time,
+      coordinateToTime: () => mustBeDefined(rows[3]).time,
       timeToCoordinate: (time) => (
         isOrdinalAxisTime(time) && (time.order === 2 || time.order === 3)
           ? time.order * 10
@@ -1138,8 +1138,8 @@ test("position endpoint lineage recovers across all derived projections and may 
     }
     // Resolution is read-only: the durable Renko endpoints remain recoverable
     // after a target projection temporarily folds them onto one display row.
-    assert.equal(anchors[0].sourceProjection, "renko");
-    assert.equal(anchors[1].sourceProjection, "renko");
+    assert.equal(mustBeDefined(anchors[0]).sourceProjection, "renko");
+    assert.equal(mustBeDefined(anchors[1]).sourceProjection, "renko");
   }
 });
 
@@ -1206,7 +1206,8 @@ test("derived drawing resolution reuses one series index across primitives", () 
   const rows = new Proxy(target, {
     get(array, property, receiver) {
       if (property === Symbol.iterator) iteratorReads += 1;
-      return Reflect.get(array, property, receiver);
+      const value: unknown = Reflect.get(array, property, receiver);
+      return value;
     },
   });
 
@@ -1486,7 +1487,7 @@ test("logicalToInterpolatedSeriesTime uses the drawing series first logical as b
     isReady: () => true,
     getSeriesData: () => seriesData,
     timeToCoordinate: (time) => {
-      const localIndex = (time - seriesData[0].time) / 60;
+      const localIndex = (time - mustBeDefined(seriesData[0]).time) / 60;
       return (firstGlobalLogical + localIndex) * barSpacing;
     },
     coordinateToLogical: (x) => Math.ceil(x / barSpacing),

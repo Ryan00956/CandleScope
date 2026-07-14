@@ -27,6 +27,7 @@ import type {
 import type { MainChartType } from "../../shared/mainChartTypes.js";
 import {
   malformedFixture,
+  mustBeDefined,
   structuralMock,
 } from "../../test/testHelpers.js";
 import { chartCoordinate } from "./chartAdapterTestHelpers.js";
@@ -76,21 +77,27 @@ test("all fifteen main chart types map to their built-in or custom series", () =
       },
     });
     createMainSeries(chart, { chartType, data: ROWS, paneIndex: 0 });
+    const call = mustBeDefined(calls[0]);
     const rendererId = getChartTypeDescriptor(chartType).rendererId;
     if (chartType === "high-low" || chartType === "point-and-figure" || chartType === "kagi") {
-      assert.equal(calls[0][0], "custom");
+      assert.equal(call[0], "custom");
+      const renderer = call[1];
       assert.equal(
-        typeof structuralMock<Record<string, unknown>>(Object(calls[0][1])).priceValueBuilder,
+        renderer !== null
+          && typeof renderer === "object"
+          && "priceValueBuilder" in renderer
+          ? typeof renderer.priceValueBuilder
+          : "undefined",
         "function",
       );
     } else {
-      assert.equal(calls[0][0], "built-in");
+      assert.equal(call[0], "built-in");
       assert.equal(isBuiltInRendererId(rendererId), true);
       if (isBuiltInRendererId(rendererId)) {
-        assert.strictEqual(calls[0][1], chartSeriesTypes[rendererId]);
+        assert.strictEqual(call[1], chartSeriesTypes[rendererId]);
       }
     }
-    assert.equal(calls[0][3], 0);
+    assert.equal(call[3], 0);
   }
 });
 
@@ -103,7 +110,7 @@ test("unknown chart types safely fall back to candlesticks", () => {
       return structuralMock<AdapterSeries>({});
     },
   }), { chartType: malformedFixture<MainChartType>("range") });
-  assert.strictEqual(calls[0][0], chartSeriesTypes.candlestick);
+  assert.strictEqual(mustBeDefined(calls[0])[0], chartSeriesTypes.candlestick);
 });
 
 test("ordinary OHLC types retain OHLC while close-value types use close", () => {
@@ -151,7 +158,7 @@ test("high-low retains the source range and ignores open/close direction when re
   assert.deepEqual(buildMainSeriesData(rows, { chartType: "high-low" }), rows);
 
   const paneView = createHighLowSeriesPaneView();
-  assert.deepEqual(paneView.priceValueBuilder(rows[0]), [112, 98, 100]);
+  assert.deepEqual(paneView.priceValueBuilder(mustBeDefined(rows[0])), [112, 98, 100]);
   assert.equal(paneView.isWhitespace({ time: 30 }), true);
 
   const rectangles: Array<{ args: number[]; color: CanvasRenderingContext2D["fillStyle"] }> = [];
@@ -182,8 +189,10 @@ test("high-low retains the source range and ignores open/close direction when re
   }), (price: number) => chartCoordinate(200 - price), false);
 
   assert.equal(rectangles.length, 2);
-  assert.deepEqual(rectangles[0].args.slice(1), rectangles[1].args.slice(1));
-  assert.equal(rectangles[0].color, "#123456");
+  const firstRectangle = mustBeDefined(rectangles[0]);
+  const secondRectangle = mustBeDefined(rectangles[1]);
+  assert.deepEqual(firstRectangle.args.slice(1), secondRectangle.args.slice(1));
+  assert.equal(firstRectangle.color, "#123456");
 });
 
 test("Point & Figure retains semantic OHLC and custom column metadata", () => {
@@ -264,11 +273,12 @@ test("hollow candles separate body fill from previous-close trend color", () => 
     { color: "red", borderColor: "red", wickColor: "red" },
   ]);
 
-  assert.deepEqual(toMainSeriesPoint(rows[0], {
+  const firstRow = mustBeDefined(rows[0]);
+  assert.deepEqual(toMainSeriesPoint(firstRow, {
     chartType: "hollow-candlestick",
     indicatorColor: "purple",
   }), {
-    ...rows[0],
+    ...firstRow,
     color: "rgba(0, 0, 0, 0)",
     borderColor: "purple",
     wickColor: "purple",
@@ -484,8 +494,8 @@ test("switching creates and populates the new series before removing the old one
     "setSeriesOrder",
     "removeSeries",
   ]);
-  assert.equal(events[2][1], 2);
-  assert.strictEqual(events[3][1], oldSeries);
+  assert.equal(mustBeDefined(events[2])[1], 2);
+  assert.strictEqual(mustBeDefined(events[3])[1], oldSeries);
 });
 
 test("switching accepts projection-rendered series data without rebuilding it", () => {
@@ -510,7 +520,7 @@ test("switching accepts projection-rendered series data without rebuilding it", 
 });
 
 test("single-value charts still publish OHLCV from the raw K-line row", () => {
-  assert.deepEqual(buildMainSeriesCrosshairValue(10, ROWS[0]), {
+  assert.deepEqual(buildMainSeriesCrosshairValue(10, mustBeDefined(ROWS[0])), {
     time: 10,
     open: 100,
     high: 112,
@@ -526,7 +536,7 @@ test("crosshair publishes displayed semantic OHLC with source volume", () => {
     10,
     { time: 10, open: 103, high: 112, low: 98, close: 105 },
     {
-      volumeRow: ROWS[0],
+      volumeRow: mustBeDefined(ROWS[0]),
     },
   ), {
     time: 10,
@@ -544,7 +554,7 @@ test("derived chart crosshair does not present one source bar as synthetic volum
     { time: 10, open: 101, high: 103, low: 101, close: 103 },
     {
       includeVolume: false,
-      volumeRow: ROWS[0],
+      volumeRow: mustBeDefined(ROWS[0]),
     },
   ), {
     time: 10,

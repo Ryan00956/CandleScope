@@ -32,6 +32,10 @@ interface NumericDisplayRow extends DisplayRow {
   time: number;
 }
 
+function isNumericDisplayRow(row: DisplayRow): row is NumericDisplayRow {
+  return isFiniteNumber(row.time);
+}
+
 interface DrawingCoordinateSnapshot {
   seriesData?: DisplayRow[];
   ordinalSeriesIndex?: DrawingLineageIndex | null;
@@ -485,7 +489,9 @@ function firstRangeIndexWithToAtLeast(
   let hi = rowRanges.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
-    if (rowRanges[mid].range.to < target) lo = mid + 1;
+    const entry = rowRanges[mid];
+    if (!entry) return rowRanges.length;
+    if (entry.range.to < target) lo = mid + 1;
     else hi = mid;
   }
   return lo;
@@ -500,7 +506,9 @@ function firstRangeIndexWithToGreaterThan(
   let right = rowRanges.length;
   while (left < right) {
     const mid = (left + right) >> 1;
-    if (rowRanges[mid].range.to <= target) left = mid + 1;
+    const entry = rowRanges[mid];
+    if (!entry) return rowRanges.length;
+    if (entry.range.to <= target) left = mid + 1;
     else right = mid;
   }
   return left;
@@ -516,7 +524,9 @@ function firstRangeIndexWithFromGreaterThan(
   let right = hi;
   while (left < right) {
     const mid = (left + right) >> 1;
-    if (rowRanges[mid].range.from <= target) left = mid + 1;
+    const entry = rowRanges[mid];
+    if (!entry) return right;
+    if (entry.range.from <= target) left = mid + 1;
     else right = mid;
   }
   return left;
@@ -529,9 +539,9 @@ function resolveMonotonicSourceRange(
   if (rowRanges.length === 0) return null;
 
   const firstToAtLeastTarget = firstRangeIndexWithToAtLeast(rowRanges, target);
-  if (firstToAtLeastTarget < rowRanges.length
-    && rowRanges[firstToAtLeastTarget].range.from <= target) {
-    const containingTo = rowRanges[firstToAtLeastTarget].range.to;
+  const containingEntry = rowRanges[firstToAtLeastTarget];
+  if (containingEntry && containingEntry.range.from <= target) {
+    const containingTo = containingEntry.range.to;
     const endOfContainingTo = firstRangeIndexWithToGreaterThan(
       rowRanges,
       containingTo,
@@ -550,7 +560,7 @@ function resolveMonotonicSourceRange(
 
   // The legacy scan prefers any predecessor over a future successor and uses
   // the last row when multiple ranges share the same predecessor `to`.
-  if (firstToAtLeastTarget > 0) return rowRanges[firstToAtLeastTarget - 1].row;
+  if (firstToAtLeastTarget > 0) return rowRanges[firstToAtLeastTarget - 1]?.row ?? null;
   return null;
 }
 
@@ -1107,8 +1117,12 @@ export function captureSourceLineageFreehandStrokeBatch(
     const rightRow = rows[pairIndex + 1];
     const leftEntry = ranges[pairIndex];
     const rightEntry = ranges[pairIndex + 1];
-    if (leftEntry?.row !== leftRow
-      || rightEntry?.row !== rightRow
+    if (!leftRow
+      || !rightRow
+      || !leftEntry
+      || !rightEntry
+      || leftEntry.row !== leftRow
+      || rightEntry.row !== rightRow
       || leftEntry.coverageGroup !== rightEntry.coverageGroup
       || projectorIdFromRow(leftRow) !== sourceProjection
       || projectorIdFromRow(rightRow) !== sourceProjection) {
@@ -1141,10 +1155,14 @@ export function captureSourceLineageFreehandStrokeBatch(
 
     const overlapFirst = firstRangeIndexWithToAtLeast(ranges, fromTime);
     const overlapEnd = firstRangeIndexWithFromGreaterThan(ranges, toTime, overlapFirst);
+    const firstOverlap = ranges[overlapFirst];
+    const lastOverlap = ranges[overlapEnd - 1];
     if (overlapFirst > pairIndex
       || overlapEnd <= pairIndex + 1
       || overlapFirst >= overlapEnd
-      || ranges[overlapFirst].coverageGroup !== ranges[overlapEnd - 1].coverageGroup) {
+      || !firstOverlap
+      || !lastOverlap
+      || firstOverlap.coverageGroup !== lastOverlap.coverageGroup) {
       return null;
     }
     const leftCenter = coordinateAt(pairIndex);
@@ -1445,40 +1463,52 @@ export function timeToCoordinateInterpolated(
   }
 
   if (!data || data.length === 0 || !isFiniteNumber(timestamp)) return null;
-  if (data.some((row) => !isFiniteNumber(row.time))) return null;
-  const numericData = data as NumericDisplayRow[];
+  if (!data.every(isNumericDisplayRow)) return null;
+  const numericData = data;
 
   let lo = 0;
   let hi = numericData.length - 1;
+  const firstRow = numericData[0];
+  const lastRow = numericData[hi];
+  if (!firstRow || !lastRow) return null;
 
-  if (timestamp <= numericData[lo].time) {
-    if (numericData.length < 2) return timeScale.timeToCoordinate(numericData[0].time);
-    const x0 = timeScale.timeToCoordinate(numericData[0].time);
-    const x1 = timeScale.timeToCoordinate(numericData[1].time);
+  if (timestamp <= firstRow.time) {
+    if (numericData.length < 2) return timeScale.timeToCoordinate(firstRow.time);
+    const secondRow = numericData[1];
+    if (!secondRow) return null;
+    const x0 = timeScale.timeToCoordinate(firstRow.time);
+    const x1 = timeScale.timeToCoordinate(secondRow.time);
     if (x0 == null || x1 == null) return null;
-    const dt = numericData[1].time - numericData[0].time;
+    const dt = secondRow.time - firstRow.time;
     if (dt === 0) return x0;
-    return x0 + ((timestamp - numericData[0].time) / dt) * (x1 - x0);
+    return x0 + ((timestamp - firstRow.time) / dt) * (x1 - x0);
   }
 
-  if (timestamp >= numericData[hi].time) {
-    if (numericData.length < 2) return timeScale.timeToCoordinate(numericData[hi].time);
-    const xPrev = timeScale.timeToCoordinate(numericData[hi - 1].time);
-    const xLast = timeScale.timeToCoordinate(numericData[hi].time);
+  if (timestamp >= lastRow.time) {
+    if (numericData.length < 2) return timeScale.timeToCoordinate(lastRow.time);
+    const previousRow = numericData[hi - 1];
+    if (!previousRow) return null;
+    const xPrev = timeScale.timeToCoordinate(previousRow.time);
+    const xLast = timeScale.timeToCoordinate(lastRow.time);
     if (xPrev == null || xLast == null) return null;
-    const dt = numericData[hi].time - numericData[hi - 1].time;
+    const dt = lastRow.time - previousRow.time;
     if (dt === 0) return xLast;
-    return xPrev + ((timestamp - numericData[hi - 1].time) / dt) * (xLast - xPrev);
+    return xPrev + ((timestamp - previousRow.time) / dt) * (xLast - xPrev);
   }
 
   while (lo < hi - 1) {
     const mid = (lo + hi) >> 1;
-    if (numericData[mid].time <= timestamp) lo = mid;
+    const row = numericData[mid];
+    if (!row) return null;
+    if (row.time <= timestamp) lo = mid;
     else hi = mid;
   }
 
-  const tA = numericData[lo].time;
-  const tB = numericData[hi].time;
+  const leftRow = numericData[lo];
+  const rightRow = numericData[hi];
+  if (!leftRow || !rightRow) return null;
+  const tA = leftRow.time;
+  const tB = rightRow.time;
   const xA = timeScale.timeToCoordinate(tA);
   const xB = timeScale.timeToCoordinate(tB);
   if (xA == null || xB == null) return null;
@@ -1580,12 +1610,15 @@ export function logicalToInterpolatedSeriesTime(
   const seriesData = adapter.getSeriesData?.();
   if (!seriesData || seriesData.length === 0) return null;
   if (usesOrdinalSeriesData(seriesData)) return null;
-  if (seriesData.some((row) => !isFiniteNumber(row.time))) return null;
-  const numericSeriesData = seriesData as NumericDisplayRow[];
+  if (!seriesData.every(isNumericDisplayRow)) return null;
+  const numericSeriesData = seriesData;
+  const firstRow = numericSeriesData[0];
+  const lastRow = numericSeriesData.at(-1);
+  if (!firstRow || !lastRow) return null;
 
   let dataIndex = logicalIndex;
-  const firstTime = numericSeriesData[0]?.time;
-  const firstCoord = firstTime == null ? null : adapter.timeToCoordinate?.(firstTime);
+  const firstTime = firstRow.time;
+  const firstCoord = adapter.timeToCoordinate?.(firstTime);
   const firstLogical = firstCoord == null || !isFinite(firstCoord)
     ? null
     : adapter.coordinateToLogical?.(firstCoord);
@@ -1598,24 +1631,30 @@ export function logicalToInterpolatedSeriesTime(
 
   if (floorIdx < 0) {
     if (numericSeriesData.length >= 2) {
-      const dt = numericSeriesData[1].time - numericSeriesData[0].time;
-      return numericSeriesData[0].time + dataIndex * dt;
+      const secondRow = numericSeriesData[1];
+      if (!secondRow) return null;
+      const dt = secondRow.time - firstRow.time;
+      return firstRow.time + dataIndex * dt;
     }
-    return numericSeriesData[0].time;
+    return firstRow.time;
   }
 
   if (floorIdx >= numericSeriesData.length - 1) {
     if (numericSeriesData.length >= 2) {
-      const dt = numericSeriesData[numericSeriesData.length - 1].time
-        - numericSeriesData[numericSeriesData.length - 2].time;
-      return numericSeriesData[numericSeriesData.length - 1].time
+      const previousRow = numericSeriesData[numericSeriesData.length - 2];
+      if (!previousRow) return null;
+      const dt = lastRow.time - previousRow.time;
+      return lastRow.time
         + (dataIndex - (numericSeriesData.length - 1)) * dt;
     }
-    return numericSeriesData[numericSeriesData.length - 1].time;
+    return lastRow.time;
   }
 
-  const tA = numericSeriesData[floorIdx].time;
-  const tB = numericSeriesData[floorIdx + 1].time;
+  const leftRow = numericSeriesData[floorIdx];
+  const rightRow = numericSeriesData[floorIdx + 1];
+  if (!leftRow || !rightRow) return null;
+  const tA = leftRow.time;
+  const tB = rightRow.time;
   return tA + frac * (tB - tA);
 }
 

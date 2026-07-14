@@ -58,9 +58,9 @@ function adjustAlpha(color: string, alpha: number): string {
 
   let r = 0, g = 0, b = 0;
   if (color.length === 4) {
-    r = parseInt(color[1] + color[1], 16);
-    g = parseInt(color[2] + color[2], 16);
-    b = parseInt(color[3] + color[3], 16);
+    r = parseInt(color.charAt(1).repeat(2), 16);
+    g = parseInt(color.charAt(2).repeat(2), 16);
+    b = parseInt(color.charAt(3).repeat(2), 16);
   } else if (color.length === 7) {
     r = parseInt(color.slice(1, 3), 16);
     g = parseInt(color.slice(3, 5), 16);

@@ -69,13 +69,13 @@ const ExportPanel = memo(function ExportPanel({
 }: ExportPanelProps) {
   const filenamePreview = useMemo(() => buildExportFilename({
     prefix: options.filenamePrefix || "candlescope",
-    exchange: metadata?.exchange,
-    marketType: metadata?.marketType,
-    symbol: metadata?.symbol,
-    interval: metadata?.interval,
+    ...(metadata.exchange === undefined ? {} : { exchange: metadata.exchange }),
+    ...(metadata.marketType === undefined ? {} : { marketType: metadata.marketType }),
+    ...(metadata.symbol === undefined ? {} : { symbol: metadata.symbol }),
+    ...(metadata.interval === undefined ? {} : { interval: metadata.interval }),
     scope: options.scope,
     format: options.format,
-  }), [metadata?.exchange, metadata?.interval, metadata?.marketType, metadata?.symbol, options.filenamePrefix, options.format, options.scope]);
+  }), [metadata.exchange, metadata.interval, metadata.marketType, metadata.symbol, options.filenamePrefix, options.format, options.scope]);
   const previewIsCurrent = Boolean(preview?.url && preview?.optionsKey && preview?.optionsKey === preview?.currentOptionsKey);
   const canSavePreview = Boolean(preview?.blob && previewIsCurrent && !preview?.loading && !preview?.error);
   const saveDisabled = inProgress || preview?.loading || !canSavePreview;
@@ -253,16 +253,18 @@ const ExportPanel = memo(function ExportPanel({
         </div>
 
         <ExportPreviewPanel
-          previewUrl={preview?.url}
           filename={preview?.filename || filenamePreview}
-          width={preview?.width}
-          height={preview?.height}
-          mimeType={preview?.mimeType}
-          generatedAt={preview?.generatedAt}
-          loading={!!preview?.loading}
-          error={preview?.error}
           isCurrent={previewIsCurrent}
-          onRefresh={preview?.refreshPreview}
+          {...(preview === null ? {} : {
+            previewUrl: preview.url,
+            width: preview.width,
+            height: preview.height,
+            mimeType: preview.mimeType,
+            generatedAt: preview.generatedAt,
+            loading: preview.loading,
+            error: preview.error,
+            onRefresh: preview.refreshPreview,
+          })}
         />
       </div>
     </div>

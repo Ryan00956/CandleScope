@@ -78,7 +78,7 @@ export default function FibLevelsPanel({
     if (Number.isNaN(value)) return;
     if (panelLevels.some((level) => Math.abs(level.level - value) < 0.0001)) return;
 
-    const color = FIB_RANDOM_COLORS[panelLevels.length % FIB_RANDOM_COLORS.length];
+    const color = FIB_RANDOM_COLORS.at(panelLevels.length % FIB_RANDOM_COLORS.length) ?? "#e91e63";
     const next = [...panelLevels, { level: value, color, enabled: true }]
       .sort((a, b) => a.level - b.level);
     onLevelsChange(next);

@@ -78,7 +78,7 @@ class FibRenderer implements PrimitivePaneRenderer {
       const { points, color, lineWidth, selected, isPreview, hovered, levels, inverted } = data;
 
       const [a, b] = points;
-      if (a.x == null || a.y == null || b.x == null || b.y == null) return;
+      if (!a || !b || a.x == null || a.y == null || b.x == null || b.y == null) return;
 
       const ax = a.x * ratio;
       const ay = a.y * vRatio;
@@ -135,6 +135,7 @@ class FibRenderer implements PrimitivePaneRenderer {
       for (let i = 0; i < levelData.length - 1; i++) {
         const l1 = levelData[i];
         const l2 = levelData[i + 1];
+        if (!l1 || !l2) continue;
         ctx.fillStyle = l2.color;
         ctx.fillRect(minX, l1.y, maxX - minX, l2.y - l1.y);
       }
@@ -223,9 +224,9 @@ class FibRenderer implements PrimitivePaneRenderer {
 function adjustAlpha(hex: string, alpha: number): string {
   let r = 0, g = 0, b = 0;
   if (hex.length === 4) {
-    r = parseInt(hex[1] + hex[1], 16);
-    g = parseInt(hex[2] + hex[2], 16);
-    b = parseInt(hex[3] + hex[3], 16);
+    r = parseInt(hex.charAt(1).repeat(2), 16);
+    g = parseInt(hex.charAt(2).repeat(2), 16);
+    b = parseInt(hex.charAt(3).repeat(2), 16);
   } else if (hex.length === 7) {
     r = parseInt(hex.slice(1, 3), 16);
     g = parseInt(hex.slice(3, 5), 16);
@@ -449,7 +450,7 @@ export class FibonacciDrawingPrimitive {
     });
 
     const [sa, sb] = screenPoints;
-    if (sa.x == null || sa.y == null || sb.x == null || sb.y == null) return null;
+    if (!sa || !sb || sa.x == null || sa.y == null || sb.x == null || sb.y == null) return null;
 
     const HANDLE_RADIUS = 7 + this._lineWidth;
     const LINE_HIT_RADIUS = 8 + this._lineWidth / 2;
@@ -458,8 +459,7 @@ export class FibonacciDrawingPrimitive {
       { x: sa.x, y: sa.y },
       { x: sb.x, y: sb.y },
     ];
-    for (let i = 0; i < resolvedScreenPoints.length; i++) {
-      const pt = resolvedScreenPoints[i];
+    for (const [i, pt] of resolvedScreenPoints.entries()) {
       const dx = pt.x - x;
       const dy = pt.y - y;
       if (Math.sqrt(dx * dx + dy * dy) <= HANDLE_RADIUS) {

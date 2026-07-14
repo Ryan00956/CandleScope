@@ -727,9 +727,9 @@ export function useChartDataRuntime({
     chartDataRef.current = next;
     recordChartDataCommit(sym, intv, next, source, {
       ...(cache ? { status: "ready" } : {}),
-      originalBars: delta.originalBars,
-      trimmedLeft: delta.trimmedLeft,
-      trimmedRight: delta.trimmedRight,
+      ...(delta.originalBars === undefined ? {} : { originalBars: delta.originalBars }),
+      ...(delta.trimmedLeft === undefined ? {} : { trimmedLeft: delta.trimmedLeft }),
+      ...(delta.trimmedRight === undefined ? {} : { trimmedRight: delta.trimmedRight }),
     });
     setActiveSeriesStore(store);
     setChartData(next);
@@ -808,9 +808,9 @@ export function useChartDataRuntime({
       incomingFirstTime: incoming[0]?.time ?? null,
       incomingLastTime: incoming[incoming.length - 1]?.time ?? null,
       status: "ready",
-      originalBars: delta.originalBars,
-      trimmedLeft: delta.trimmedLeft,
-      trimmedRight: delta.trimmedRight,
+      ...(delta.originalBars === undefined ? {} : { originalBars: delta.originalBars }),
+      ...(delta.trimmedLeft === undefined ? {} : { trimmedLeft: delta.trimmedLeft }),
+      ...(delta.trimmedRight === undefined ? {} : { trimmedRight: delta.trimmedRight }),
       windowDeltaType: delta.type,
       addedLeft: delta.addedLeft || 0,
       addedRight: delta.addedRight || 0,
@@ -856,9 +856,9 @@ export function useChartDataRuntime({
         incomingBars: ticks.length,
         provisional: source?.includes("latest"),
         seeded: true,
-        originalBars: delta.originalBars,
-        trimmedLeft: delta.trimmedLeft,
-        trimmedRight: delta.trimmedRight,
+        ...(delta.originalBars === undefined ? {} : { originalBars: delta.originalBars }),
+        ...(delta.trimmedLeft === undefined ? {} : { trimmedLeft: delta.trimmedLeft }),
+        ...(delta.trimmedRight === undefined ? {} : { trimmedRight: delta.trimmedRight }),
       });
       setActiveSeriesStore(store);
       setChartData(nextSeeded);
@@ -886,11 +886,15 @@ export function useChartDataRuntime({
       });
       recordChartDataCommit(sym, intv, next, source, {
         incomingBars: ticks.length,
-        status: source?.includes("latest") ? "provisional" : chartDataCommitMetaRef.current?.status,
+        ...(source?.includes("latest")
+          ? { status: "provisional" }
+          : chartDataCommitMetaRef.current?.status === undefined
+            ? {}
+            : { status: chartDataCommitMetaRef.current.status }),
         seeded: false,
-        originalBars: delta.originalBars,
-        trimmedLeft: delta.trimmedLeft,
-        trimmedRight: delta.trimmedRight,
+        ...(delta.originalBars === undefined ? {} : { originalBars: delta.originalBars }),
+        ...(delta.trimmedLeft === undefined ? {} : { trimmedLeft: delta.trimmedLeft }),
+        ...(delta.trimmedRight === undefined ? {} : { trimmedRight: delta.trimmedRight }),
         windowDeltaType: delta.type,
         addedLeft: delta.addedLeft || 0,
         addedRight: delta.addedRight || 0,
@@ -946,7 +950,9 @@ export function useChartDataRuntime({
 
     recordChartDataCommit(sym, intv, next, source, {
       incomingBars: ticks.length,
-      status: prev.length > 0 ? chartDataCommitMetaRef.current?.status : undefined,
+      ...(prev.length > 0 && chartDataCommitMetaRef.current?.status !== undefined
+        ? { status: chartDataCommitMetaRef.current.status }
+        : {}),
       seeded: false,
       originalBars: next.length + trimmedLeft + trimmedRight,
       trimmedLeft,

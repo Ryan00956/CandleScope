@@ -10,7 +10,7 @@ function positiveNumber(value: unknown): number | null {
 function decimalPlaces(value: unknown): number {
   const number = positiveNumber(value);
   if (number == null) return 0;
-  const [coefficient, exponentText] = String(number).toLowerCase().split("e");
+  const [coefficient = "", exponentText] = String(number).toLowerCase().split("e");
   const fractionLength = coefficient.split(".")[1]?.length || 0;
   const exponent = Number(exponentText || 0);
   return Math.min(MAX_PRICE_DECIMALS, Math.max(0, fractionLength - exponent));

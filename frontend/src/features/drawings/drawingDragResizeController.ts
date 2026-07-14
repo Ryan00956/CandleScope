@@ -549,8 +549,10 @@ export function applyLineFibShapeDrag({
     } else {
       const dx = pos.x - startMouse.x;
       const dy = pos.y - startMouse.y;
-      const sa0 = dataToScreen(origPoints[0]);
-      const sb0 = dataToScreen(origPoints[1]);
+      const [origA, origB] = origPoints;
+      if (!origA || !origB) return;
+      const sa0 = dataToScreen(origA);
+      const sb0 = dataToScreen(origB);
       if (!sa0 || !sb0) return;
       const newA = screenToData(sa0.x + dx, sa0.y + dy);
       const newB = screenToData(sb0.x + dx, sb0.y + dy);
@@ -581,8 +583,10 @@ export function applyLineFibShapeDrag({
     // Move entire line
     const dx = pos.x - startMouse.x;
     const dy = pos.y - startMouse.y;
-    const sa0 = dataToScreen(origPoints[0]);
-    const sb0 = dataToScreen(origPoints[1]);
+    const [origA, origB] = origPoints;
+    if (!origA || !origB) return;
+    const sa0 = dataToScreen(origA);
+    const sb0 = dataToScreen(origB);
     if (!sa0 || !sb0) return;
     const newA = screenToData(sa0.x + dx, sa0.y + dy);
     const newB = screenToData(sb0.x + dx, sb0.y + dy);

@@ -220,9 +220,9 @@ function victimFrom(candidate: GcCandidate, remaining: GcPressure): GcVictim {
     points: candidate.points,
     items: candidate.items,
     estimatedBytes: candidate.estimatedBytes,
-    lastAccessMs: candidate.lastAccessMs,
-    lastUpdatedMs: candidate.lastUpdatedMs,
-    lastRealtimeMs: candidate.lastRealtimeMs,
+    ...(candidate.lastAccessMs === undefined ? {} : { lastAccessMs: candidate.lastAccessMs }),
+    ...(candidate.lastUpdatedMs === undefined ? {} : { lastUpdatedMs: candidate.lastUpdatedMs }),
+    ...(candidate.lastRealtimeMs === undefined ? {} : { lastRealtimeMs: candidate.lastRealtimeMs }),
     action: canTrimRange ? "trim-range" : "delete-entry",
     keepStart,
     reason: reasonFor(candidate, remaining),
@@ -230,8 +230,8 @@ function victimFrom(candidate: GcCandidate, remaining: GcPressure): GcVictim {
     matchedIntents: candidate.matchedIntents,
     restoreCostReason: candidate.restoreCostReason,
     reuseReason: candidate.reuseReason,
-    trimSafety: candidate.trimSafety,
-    rangeSegments: candidate.rangeSegments,
+    ...(candidate.trimSafety === undefined ? {} : { trimSafety: candidate.trimSafety }),
+    ...(candidate.rangeSegments === undefined ? {} : { rangeSegments: candidate.rangeSegments }),
   };
 }
 

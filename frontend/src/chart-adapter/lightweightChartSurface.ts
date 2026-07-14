@@ -46,6 +46,17 @@ export interface PaneLayoutOptions {
   };
 }
 
+type TimeFormatter = (time: Time) => string;
+type TickFormatter = (time: Time, tickMarkType: TickMarkType, locale: string) => string;
+
+function isTimeFormatter(value: unknown): value is TimeFormatter {
+  return typeof value === "function";
+}
+
+function isTickFormatter(value: unknown): value is TickFormatter {
+  return typeof value === "function";
+}
+
 export function buildPaneLayoutOptions({
   separatorColor = "rgba(148, 163, 184, 0.28)",
   separatorHoverColor = "rgba(59, 130, 246, 0.6)",
@@ -74,15 +85,21 @@ function ordinalSourceTime(value: unknown): Time {
 export function buildOrdinalChartOptions(
   options: DeepPartial<ChartOptions> = {},
 ): DeepPartial<ChartOptionsImpl<OrdinalAxisTime>> {
-  const timeFormatter = options?.localization?.timeFormatter;
-  const tickMarkFormatter = options?.timeScale?.tickMarkFormatter;
+  const timeFormatterCandidate: unknown = options?.localization?.timeFormatter;
+  const tickMarkFormatterCandidate: unknown = options?.timeScale?.tickMarkFormatter;
+  const timeFormatter = isTimeFormatter(timeFormatterCandidate)
+    ? timeFormatterCandidate
+    : null;
+  const tickMarkFormatter = isTickFormatter(tickMarkFormatterCandidate)
+    ? tickMarkFormatterCandidate
+    : null;
   const { localization, timeScale, ...sharedOptions } = options;
   return {
     ...sharedOptions,
     ...(localization ? {
       localization: {
         ...localization,
-        ...(typeof timeFormatter === "function" ? {
+        ...(timeFormatter ? {
           timeFormatter: (value: OrdinalAxisTime) => timeFormatter(ordinalSourceTime(value)),
         } : {}),
       },
@@ -90,7 +107,7 @@ export function buildOrdinalChartOptions(
     ...(timeScale ? {
       timeScale: {
         ...timeScale,
-        ...(typeof tickMarkFormatter === "function" ? {
+        ...(tickMarkFormatter ? {
           tickMarkFormatter: (
             value: OrdinalAxisTime,
             tickMarkType: TickMarkType,

@@ -516,8 +516,9 @@ test("derived long and short positions use two canonical screen-row anchors", ()
     assert.equal(result.attached.length, 1);
     assert.strictEqual(result.primitivesRef.current[0], result.attached[0]);
     assert.equal(result.persisted, 1);
-    assert.equal(result.attached[0].direction, direction);
-    assert.deepEqual(result.attached[0].timeRange, {
+    const attached = mustBeDefined(result.attached[0]);
+    assert.equal(attached.direction, direction);
+    assert.deepEqual(attached.timeRange, {
       start: {
         time: 100,
         sourceOrdinal: 1,
@@ -531,10 +532,10 @@ test("derived long and short positions use two canonical screen-row anchors", ()
         sourceProjectionConfig: "dataset-a:renko:atr:14:10:0.01",
       },
     });
-    assert.equal(result.convertedXs[0], 100);
-    assert.ok(Math.abs(result.convertedXs[1] - 250) < 1);
-    assert.equal(JSON.stringify(result.attached[0].timeRange).includes("logical"), false);
-    assert.equal(JSON.stringify(result.attached[0].timeRange).includes("order"), false);
+    assert.equal(mustBeDefined(result.convertedXs[0]), 100);
+    assert.ok(Math.abs(mustBeDefined(result.convertedXs[1]) - 250) < 1);
+    assert.equal(JSON.stringify(attached.timeRange).includes("logical"), false);
+    assert.equal(JSON.stringify(attached.timeRange).includes("order"), false);
   }
 });
 
@@ -547,11 +548,12 @@ test("position creation tries the opposite screen direction near the right edge"
   });
 
   assert.equal(result.attached.length, 1);
-  assert.equal(result.convertedXs[0], 980);
-  assert.ok(Math.abs(result.convertedXs[1] - 830) < 1);
+  assert.equal(mustBeDefined(result.convertedXs[0]), 980);
+  assert.ok(Math.abs(mustBeDefined(result.convertedXs[1]) - 830) < 1);
   assert.equal(result.convertedXs.length, 2);
-  assert.equal(anchorTime(result.attached[0].timeRange.start), 50);
-  assert.equal(anchorTime(result.attached[0].timeRange.end), 100);
+  const attached = mustBeDefined(result.attached[0]);
+  assert.equal(anchorTime(attached.timeRange.start), 50);
+  assert.equal(anchorTime(attached.timeRange.end), 100);
 });
 
 test("position creation refuses a duplicate or unresolved second display row", () => {
@@ -579,12 +581,14 @@ test("derived positions may extend from materialized lineage into absolute futur
   });
 
   assert.equal(result.attached.length, 1);
-  assert.ok(Math.abs(result.convertedXs[1] - 834.85) < 1);
-  assert.ok(result.convertedXs[1] < 900);
-  assert.equal(anchorTime(result.attached[0].timeRange.start), 100);
-  assert.deepEqual(result.attached[0].timeRange.end, { time: 300.5 });
-  assert.equal(JSON.stringify(result.attached[0].timeRange).includes("logical"), false);
-  assert.equal(JSON.stringify(result.attached[0].timeRange).includes("order"), false);
+  const convertedX = mustBeDefined(result.convertedXs[1]);
+  const attached = mustBeDefined(result.attached[0]);
+  assert.ok(Math.abs(convertedX - 834.85) < 1);
+  assert.ok(convertedX < 900);
+  assert.equal(anchorTime(attached.timeRange.start), 100);
+  assert.deepEqual(attached.timeRange.end, { time: 300.5 });
+  assert.equal(JSON.stringify(attached.timeRange).includes("logical"), false);
+  assert.equal(JSON.stringify(attached.timeRange).includes("order"), false);
 });
 
 function anchorTime(anchor: HorizontalDrawingAnchor | null): number | null | undefined {

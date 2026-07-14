@@ -112,7 +112,9 @@ function getCapabilityIntervalDays(item: ExchangeCapabilityPayload): IntervalDay
 function labelInterval(value: unknown): string {
   const match = String(value || "").match(/^(\d+)([a-zA-Z]+)$/);
   if (!match) return String(value || "");
-  const [, amount, unit] = match;
+  const amount = match[1];
+  const unit = match[2];
+  if (!amount || !unit) return String(value || "");
   return ["h", "d", "w", "M"].includes(unit) ? `${amount}${unit.toUpperCase()}` : `${amount}${unit}`;
 }
 
@@ -129,17 +131,17 @@ function buildExchangeCatalog(
   for (const item of exchanges || []) {
     const exchangeId = String(item.exchange || "").toLowerCase();
     if (!exchangeId) continue;
-    const fallback = EXCHANGE_INTERVALS[exchangeId] || {};
+    const fallback = EXCHANGE_INTERVALS[exchangeId];
     const intervals = (item.native_intervals || [])
       .map(intervalItemFromValue)
       .filter((interval): interval is NativeInterval => interval !== null);
     const capabilityIntervalDays = getCapabilityIntervalDays(item);
-    const fallbackIntervalDays = fallback.intervalDays || {};
+    const fallbackIntervalDays = fallback?.intervalDays || {};
     catalog[exchangeId] = {
       id: exchangeId,
-      label: item.name || fallback.label || labelInterval(exchangeId),
+      label: item.name || fallback?.label || labelInterval(exchangeId),
       markets: Array.isArray(item.markets) ? item.markets : [],
-      nativeIntervals: intervals.length > 0 ? intervals : (fallback.intervals || []),
+      nativeIntervals: intervals.length > 0 ? intervals : (fallback?.intervals || []),
       intervalDays: Object.keys(capabilityIntervalDays).length > 0
         ? capabilityIntervalDays
         : fallbackIntervalDays,
@@ -165,7 +167,9 @@ export function getExchangeConfig(
     id: key,
     label: EXCHANGE_INTERVALS[key]?.label || labelInterval(key),
     markets: [],
-    nativeIntervals: EXCHANGE_INTERVALS[key]?.intervals || EXCHANGE_INTERVALS.binance.intervals,
+    nativeIntervals: EXCHANGE_INTERVALS[key]?.intervals
+      || EXCHANGE_INTERVALS["binance"]?.intervals
+      || [],
     intervalDays: EXCHANGE_INTERVALS[key]?.intervalDays || {},
     intervalDaysSource: "fallback",
     protocolFeatures: new Set<string>(),

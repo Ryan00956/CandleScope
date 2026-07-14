@@ -48,6 +48,18 @@ function findVariant<TId extends string>(
   return variants.find((variant) => variant.id === id);
 }
 
+function requireVariant<TId extends string>(
+  variants: readonly ToolbarVariant<TId>[],
+  id: TId,
+  fallbackId: TId,
+): ToolbarVariant<TId> {
+  const variant = findVariant(variants, id) ?? findVariant(variants, fallbackId);
+  if (!variant) {
+    throw new Error(`Missing required toolbar variant: ${fallbackId}`);
+  }
+  return variant;
+}
+
 export function useDrawingToolbarController({
   activeTool,
   chartType = "candlestick",
@@ -90,7 +102,7 @@ export function useDrawingToolbarController({
   const isFibonacciActive = activeTool === "fibonacci";
   const isPositionActive = activePositionVariant != null;
 
-  const currentChartType = findVariant(CHART_TYPE_VARIANTS, chartType) || CHART_TYPE_VARIANTS[0];
+  const currentChartType = requireVariant(CHART_TYPE_VARIANTS, chartType, "candlestick");
 
   const closeFlyout = useCallback(() => {
     setFlyoutOpen(null);

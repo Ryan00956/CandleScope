@@ -231,17 +231,15 @@ function resolveRuntimeInputs(
   const marketDataView = options.marketData?.view;
   const marketDataActions = options.marketData?.actions;
   const marketDataStatus = options.marketData?.status;
-  return {
+  const inputs: ResolvedIndicatorRuntimeInputs = {
     candleDownColor: options.candleDownColor || "#ef4444",
     candleUpColor: options.candleUpColor || "#22c55e",
     chartData: options.chartData ?? marketDataView?.bars ?? [],
     chartDataMeta: options.chartDataMeta ?? marketDataView?.meta ?? null,
     datasetKey: options.datasetKey ?? sessionView?.datasetKey ?? "",
     exchange: options.exchange ?? sessionView?.exchange ?? "binance",
-    getCurrentVisibleRange: options.getCurrentVisibleRange,
     interval: options.interval ?? sessionView?.interval ?? "",
     indicatorRangeRequests: options.indicatorRangeRequests ?? marketDataStatus?.indicatorRangeRequests ?? [],
-    consumeIndicatorRangeRequest: options.consumeIndicatorRangeRequest ?? marketDataActions?.consumeIndicatorRangeRequest,
     marketType: options.marketType ?? sessionView?.marketType ?? "spot",
     seriesReady: options.seriesReady ?? (marketDataStatus?.activeChartReady ? 1 : 0),
     sessionKey: options.sessionKey ?? sessionView?.sessionKey ?? "",
@@ -250,6 +248,16 @@ function resolveRuntimeInputs(
     ),
     symbol: options.symbol ?? sessionView?.symbol ?? "",
   };
+  if (options.getCurrentVisibleRange !== undefined) {
+    inputs.getCurrentVisibleRange = options.getCurrentVisibleRange;
+  }
+  const consumeIndicatorRangeRequest =
+    options.consumeIndicatorRangeRequest ??
+    marketDataActions?.consumeIndicatorRangeRequest;
+  if (consumeIndicatorRangeRequest !== undefined) {
+    inputs.consumeIndicatorRangeRequest = consumeIndicatorRangeRequest;
+  }
+  return inputs;
 }
 
 const INDICATOR_RANGE_RETRY_MS = 500;
@@ -337,7 +345,7 @@ function indicatorRangePayloadError(
   fallback: string,
 ): IndicatorRuntimeError {
   const error = new Error(formatIndicatorError(payload, fallback)) as IndicatorRuntimeError;
-  error.code = payload?.code;
+  if (payload.code !== undefined) error.code = payload.code;
   error.payload = payload;
   error.deferred = payload?.code === "INDICATOR_RANGE_NOT_READY";
   return error;
@@ -360,7 +368,7 @@ function inferIntervalSecondsFromChartData(chartData: KlineBar[] = []): number |
   }
   if (!deltas.length) return null;
   deltas.sort((a, b) => a - b);
-  return deltas[Math.floor(deltas.length / 2)];
+  return deltas[Math.floor(deltas.length / 2)] ?? null;
 }
 
 function requestIndicatorRangeOnce(
@@ -628,10 +636,16 @@ export function useIndicatorRuntime(
     const dataRevision = normalizeIndicatorRevision(payload);
     if (dataRevision) seriesRevisionRef.current = dataRevision;
     if (!error) {
-      cacheIndicatorSnapshot(indicator, getIndicatorCacheContext(), normalized, schema, {
-        range: payload?.range,
-        revision: dataRevision,
-      });
+      cacheIndicatorSnapshot(
+        indicator,
+        getIndicatorCacheContext(),
+        normalized,
+        schema,
+        {
+          ...(payload.range !== undefined ? { range: payload.range } : {}),
+          ...(dataRevision !== null ? { revision: dataRevision } : {}),
+        },
+      );
     }
 
     setActiveIndicators((prev) =>
@@ -912,7 +926,7 @@ export function useIndicatorRuntime(
         let attempts = 0;
         while (true) {
           const message = target.message;
-          const payload = await indicatorRangeBatcher.schedule({
+          const rangeRequest: IndicatorRangeRequest = {
             clientId: target.indicator.id,
             kind: message.kind,
             exchange: message.exchange,
@@ -920,15 +934,20 @@ export function useIndicatorRuntime(
             symbol: message.symbol,
             interval: message.interval,
             name: message.name || message.displayName,
-            customId: message.customId,
-            script: message.script,
-            securityMode: message.securityMode,
             params: message.params,
             start: range.start,
             end: range.end,
             reason: scheduledReason,
             signal,
-          });
+          };
+          if (message.customId !== undefined) {
+            rangeRequest.customId = message.customId;
+          }
+          if (message.script !== undefined) rangeRequest.script = message.script;
+          if (message.securityMode !== undefined) {
+            rangeRequest.securityMode = message.securityMode;
+          }
+          const payload = await indicatorRangeBatcher.schedule(rangeRequest);
           if (payload?.ok !== false || payload.code === "INDICATOR_RANGE_EMPTY") return payload;
           if (payload.code !== "INDICATOR_RANGE_NOT_READY") {
             throw indicatorRangePayloadError(payload, "Indicator range error");
@@ -974,12 +993,14 @@ export function useIndicatorRuntime(
           );
         }
       },
-      onSettled: onSettled
-        ? (ok, detail = {}) => onSettled(ok, {
-          ...detail,
-          indicatorId: detail.target?.indicator?.id,
-        })
-        : undefined,
+      ...(onSettled
+        ? {
+            onSettled: (ok: boolean, detail = {}) => onSettled(ok, {
+              ...detail,
+              indicatorId: detail.target?.indicator?.id,
+            }),
+          }
+        : {}),
     });
 
     return scheduled.accepted;
@@ -1088,10 +1109,19 @@ export function useIndicatorRuntime(
       return;
     }
 
-    const cachedRange = cachedSegments.length > 0 ? {
-      start: cachedSegments.reduce((value, segment) => Math.min(value, segment.start), cachedSegments[0].start),
-      end: cachedSegments.reduce((value, segment) => Math.max(value, segment.end), cachedSegments[0].end),
-    } : null;
+    const firstCachedSegment = cachedSegments[0];
+    const cachedRange = firstCachedSegment === undefined
+      ? null
+      : {
+          start: cachedSegments.reduce(
+            (value, segment) => Math.min(value, segment.start),
+            firstCachedSegment.start,
+          ),
+          end: cachedSegments.reduce(
+            (value, segment) => Math.max(value, segment.end),
+            firstCachedSegment.end,
+          ),
+        };
     const invalidRange = explicitDirtyRange
       || normalizeIndicatorRange(
         payload?.range || payload?.resumeRange || payload?.resume_range || payload?.historyRange || payload?.history_range,

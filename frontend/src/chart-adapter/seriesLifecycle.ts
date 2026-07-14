@@ -94,7 +94,11 @@ export function createMainSeries(chart: AdapterChart, {
   upColor?: string;
 } = {}): MainSeriesHandle {
   const resolvedType = normalizeMainChartType(chartType);
-  const options = buildMainSeriesOptions(resolvedType, { upColor, downColor }, data);
+  const colorOptions = {
+    ...(upColor !== undefined ? { upColor } : {}),
+    ...(downColor !== undefined ? { downColor } : {}),
+  };
+  const options = buildMainSeriesOptions(resolvedType, colorOptions, data);
   const rendererId = getChartTypeDescriptor(resolvedType).rendererId;
   if (rendererId === "high-low") {
     return addDynamicMainSeries(
@@ -173,10 +177,10 @@ export function replaceMainSeries(chart: AdapterChart, previousSeries: MainSerie
     ? seriesData
     : buildMainSeriesData(data, {
       chartType: resolvedType,
-      downColor,
       indicatorBarColorMap,
       indicatorBarcolors,
-      upColor,
+      ...(downColor !== undefined ? { downColor } : {}),
+      ...(upColor !== undefined ? { upColor } : {}),
     });
   const previousOrder = previousSeries?.seriesOrder?.();
   const rollbackData = Array.isArray(previousSeriesData)
@@ -187,9 +191,9 @@ export function replaceMainSeries(chart: AdapterChart, previousSeries: MainSerie
   const series = createMainSeries(chart, {
     chartType: resolvedType,
     data,
-    downColor,
-    paneIndex,
-    upColor,
+    ...(downColor !== undefined ? { downColor } : {}),
+    ...(paneIndex !== undefined ? { paneIndex } : {}),
+    ...(upColor !== undefined ? { upColor } : {}),
   });
 
   try {

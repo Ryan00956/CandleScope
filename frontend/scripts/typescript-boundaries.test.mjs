@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { ESLint } from 'eslint'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
@@ -9,8 +10,15 @@ const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const packageJson = JSON.parse(readFileSync(path.join(frontendRoot, 'package.json'), 'utf8'))
 const appConfig = JSON.parse(readFileSync(path.join(frontendRoot, 'tsconfig.json'), 'utf8'))
 const nodeConfig = JSON.parse(readFileSync(path.join(frontendRoot, 'tsconfig.node.json'), 'utf8'))
-const { default: eslintConfig } = await import('../eslint.config.js')
 const tscPath = path.join(frontendRoot, 'node_modules', 'typescript', 'bin', 'tsc')
+const unsafeRuleNames = [
+  '@typescript-eslint/no-unsafe-argument',
+  '@typescript-eslint/no-unsafe-assignment',
+  '@typescript-eslint/no-unsafe-call',
+  '@typescript-eslint/no-unsafe-enum-comparison',
+  '@typescript-eslint/no-unsafe-member-access',
+  '@typescript-eslint/no-unsafe-return',
+]
 
 function normalizedConfigPath(configPath) {
   return configPath.replaceAll('\\', '/')
@@ -88,21 +96,59 @@ test('the Node project retains Node types for tests and tooling', () => {
   assert.equal(result.status, 0, result.output)
 })
 
-test('ESLint keeps Node globals out of production TypeScript', () => {
-  const productionTypescriptConfig = eslintConfig.find((config) => (
-    config.files?.includes('**/*.{ts,tsx}')
-    && config.languageOptions?.parserOptions?.project?.includes('./tsconfig.json')
-  ))
-  const nodeTypescriptConfig = eslintConfig.find((config) => (
-    config.files?.includes('src/**/*.test.{ts,tsx}')
-  ))
+test('both TypeScript projects enforce strict indexed and optional-property semantics', () => {
+  assert.equal(appConfig.compilerOptions.noUncheckedIndexedAccess, true)
+  assert.equal(appConfig.compilerOptions.exactOptionalPropertyTypes, true)
+  assert.equal(nodeConfig.extends, './tsconfig.json')
 
-  assert.ok(productionTypescriptConfig)
-  assert.ok(nodeTypescriptConfig)
+  const strictnessProbe = `
+    const values: number[] = [];
+    values[0].toFixed();
+    interface Options { optional?: string }
+    const options: Options = { optional: undefined };
+    void options;
+  `
+  for (const configName of ['tsconfig.json', 'tsconfig.node.json']) {
+    const result = runProbe(path.join(frontendRoot, configName), strictnessProbe)
+    assert.notEqual(result.status, 0, `${configName} unexpectedly accepted the strictness probe`)
+    assert.match(result.output, /error TS2532:/, `${configName} did not enforce noUncheckedIndexedAccess`)
+    assert.match(result.output, /error TS2375:/, `${configName} did not enforce exactOptionalPropertyTypes`)
+  }
+})
+
+test('ESLint keeps Node globals scoped and unsafe type boundaries enabled', async () => {
+  const eslint = new ESLint({ cwd: frontendRoot })
+  const productionTypescriptConfig = await eslint.calculateConfigForFile('src/main.tsx')
+  const nodeConfigFiles = [
+    'src/test/testDiscoveryColocated.test.ts',
+    'src/test/__tests__/nested/testDiscoveryNested.test.tsx',
+    'src/services/__tests__/api.test.ts',
+    'scripts/smoke.ts',
+  ]
+  const nodeTypescriptConfigs = await Promise.all(
+    nodeConfigFiles.map((file) => eslint.calculateConfigForFile(file)),
+  )
+
   for (const globalName of ['process', 'Buffer', 'setImmediate']) {
     assert.equal(globalName in productionTypescriptConfig.languageOptions.globals, false)
-    assert.equal(globalName in nodeTypescriptConfig.languageOptions.globals, true)
+    for (const effectiveConfig of nodeTypescriptConfigs) {
+      assert.equal(globalName in effectiveConfig.languageOptions.globals, true)
+    }
   }
   assert.deepEqual(productionTypescriptConfig.languageOptions.parserOptions.project, ['./tsconfig.json'])
-  assert.deepEqual(nodeTypescriptConfig.languageOptions.parserOptions.project, ['./tsconfig.node.json'])
+  for (const effectiveConfig of nodeTypescriptConfigs) {
+    assert.deepEqual(effectiveConfig.languageOptions.parserOptions.project, ['./tsconfig.node.json'])
+  }
+  for (const [file, effectiveConfig] of [
+    ['src/main.tsx', productionTypescriptConfig],
+    ...nodeConfigFiles.map((file, index) => [file, nodeTypescriptConfigs[index]]),
+  ]) {
+    for (const ruleName of unsafeRuleNames) {
+      assert.equal(
+        effectiveConfig.rules[ruleName]?.[0],
+        2,
+        `${ruleName} must remain an error for ${file}`,
+      )
+    }
+  }
 })

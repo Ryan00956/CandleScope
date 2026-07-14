@@ -15,6 +15,10 @@ function bars(count: number): KlineBar[] {
   }));
 }
 
+function barAt(chartData: readonly KlineBar[], index: number): KlineBar {
+  return mustBeDefined(chartData[index]);
+}
+
 test("inferFixedIntervalClosedThrough excludes the current forming bar", () => {
   const day = 86_400;
   const chartData = Array.from({ length: 3 }, (_, index) => structuralMock<KlineBar>({
@@ -22,12 +26,20 @@ test("inferFixedIntervalClosedThrough excludes the current forming bar", () => {
   }));
 
   assert.equal(
-    inferFixedIntervalClosedThrough(chartData, "1d", (chartData[2].time + day / 2) * 1_000),
-    chartData[1].time,
+    inferFixedIntervalClosedThrough(
+      chartData,
+      "1d",
+      (barAt(chartData, 2).time + day / 2) * 1_000,
+    ),
+    barAt(chartData, 1).time,
   );
   assert.equal(
-    inferFixedIntervalClosedThrough(chartData, "1d", (chartData[2].time + day) * 1_000),
-    chartData[2].time,
+    inferFixedIntervalClosedThrough(
+      chartData,
+      "1d",
+      (barAt(chartData, 2).time + day) * 1_000,
+    ),
+    barAt(chartData, 2).time,
   );
   assert.equal(inferFixedIntervalClosedThrough(chartData, "1M", Date.now()), null);
 });
@@ -39,22 +51,22 @@ test("resolveInitialHostedRange prioritizes visible bars with warmup and left pa
     [{ id: "ma", engineName: "MA", params: { period: 20 } }],
     {
       time: {
-        from: chartData[1_000].time,
-        to: chartData[1_099].time,
+        from: barAt(chartData, 1_000).time,
+        to: barAt(chartData, 1_099).time,
       },
     },
   ));
 
-  assert.equal(range.visibleStart, chartData[1_000].time);
-  assert.equal(range.visibleEnd, chartData[1_099].time);
+  assert.equal(range.visibleStart, barAt(chartData, 1_000).time);
+  assert.equal(range.visibleEnd, barAt(chartData, 1_099).time);
   assert.equal(range.warmupBars, 19);
   assert.equal(range.paddingBars, 120);
   assert.equal(range.startIndex, 861);
   assert.equal(range.endIndex, 1_099);
   assert.equal(range.visibleStartIndex, 1_000);
   assert.equal(range.visibleEndIndex, 1_099);
-  assert.equal(range.start, chartData[861].time);
-  assert.equal(range.end, chartData[1_099].time);
+  assert.equal(range.start, barAt(chartData, 861).time);
+  assert.equal(range.end, barAt(chartData, 1_099).time);
 });
 
 test("resolveInitialHostedRange falls back to the latest viewport-sized slice", () => {
@@ -65,14 +77,14 @@ test("resolveInitialHostedRange falls back to the latest viewport-sized slice", 
     null,
   ));
 
-  assert.equal(range.visibleStart, chartData[1_400].time);
-  assert.equal(range.visibleEnd, chartData[1_999].time);
+  assert.equal(range.visibleStart, barAt(chartData, 1_400).time);
+  assert.equal(range.visibleEnd, barAt(chartData, 1_999).time);
   assert.equal(range.warmupBars, 0);
   assert.equal(range.paddingBars, 210);
   assert.equal(range.startIndex, 1_190);
   assert.equal(range.endIndex, 1_999);
-  assert.equal(range.start, chartData[1_190].time);
-  assert.equal(range.end, chartData[1_999].time);
+  assert.equal(range.start, barAt(chartData, 1_190).time);
+  assert.equal(range.end, barAt(chartData, 1_999).time);
 });
 
 test("resolveInitialHostedRange covers all bars after a full-content fit", () => {
@@ -85,7 +97,10 @@ test("resolveInitialHostedRange covers all bars after a full-content fit", () =>
     ],
     {
       logical: { from: -0.5, to: 1_500.5 },
-      time: { from: chartData[0].time, to: chartData[1_500].time },
+      time: {
+        from: barAt(chartData, 0).time,
+        to: barAt(chartData, 1_500).time,
+      },
     },
   ));
 
@@ -93,8 +108,8 @@ test("resolveInitialHostedRange covers all bars after a full-content fit", () =>
   assert.equal(range.visibleEndIndex, 1_500);
   assert.equal(range.startIndex, 0);
   assert.equal(range.endIndex, 1_500);
-  assert.equal(range.start, chartData[0].time);
-  assert.equal(range.end, chartData[1_500].time);
+  assert.equal(range.start, barAt(chartData, 0).time);
+  assert.equal(range.end, barAt(chartData, 1_500).time);
 });
 
 test("resolveInitialHostedRange handles irregular monthly spacing", () => {
@@ -116,8 +131,8 @@ test("resolveInitialHostedRange handles irregular monthly spacing", () => {
     },
   ));
 
-  assert.equal(range.start, monthBars[0].time);
-  assert.equal(range.end, monthBars[3].time);
+  assert.equal(range.start, barAt(monthBars, 0).time);
+  assert.equal(range.end, barAt(monthBars, 3).time);
   assert.equal(range.startIndex, 0);
   assert.equal(range.endIndex, 3);
 });

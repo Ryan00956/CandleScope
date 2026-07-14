@@ -28,6 +28,10 @@ interface AlertTransportOptions {
   params?: AlertUrlParams;
 }
 
+function alertSignalOptions(signal: AbortSignal | undefined): AlertTransportOptions {
+  return signal === undefined ? {} : { signal };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -50,9 +54,13 @@ async function request<T>(
   const url = buildUrl(path, params);
   const response = await fetch(url, {
     method,
-    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-    signal,
+    ...(body === undefined
+      ? {}
+      : {
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+    ...(signal === undefined ? {} : { signal }),
   });
   if (!response.ok) {
     const errorData: unknown = await response.json().catch(() => ({}));
@@ -66,7 +74,7 @@ async function request<T>(
 }
 
 export function fetchAlertRules(options: AlertRequestOptions = {}): Promise<AlertRule[]> {
-  return request("/alerts/rules", parseAlertRules, { signal: options.signal });
+  return request("/alerts/rules", parseAlertRules, alertSignalOptions(options.signal));
 }
 
 export function createAlertRule(
@@ -76,7 +84,7 @@ export function createAlertRule(
   return request("/alerts/rules", parseAlertRule, {
     method: "POST",
     body: payload,
-    signal: options.signal,
+    ...alertSignalOptions(options.signal),
   });
 }
 
@@ -88,7 +96,7 @@ export function updateAlertRule(
   return request(`/alerts/rules/${encodeURIComponent(ruleId)}`, parseAlertRule, {
     method: "PUT",
     body: payload,
-    signal: options.signal,
+    ...alertSignalOptions(options.signal),
   });
 }
 
@@ -100,7 +108,7 @@ export function setAlertRuleEnabled(
   return request(`/alerts/rules/${encodeURIComponent(ruleId)}/enabled`, parseAlertRule, {
     method: "PATCH",
     body: { enabled },
-    signal: options.signal,
+    ...alertSignalOptions(options.signal),
   });
 }
 
@@ -111,7 +119,7 @@ export function deleteAlertRule(
   return request(
     `/alerts/rules/${encodeURIComponent(ruleId)}`,
     parseDeleteAlertRuleResponse,
-    { method: "DELETE", signal: options.signal },
+    { method: "DELETE", ...alertSignalOptions(options.signal) },
   );
 }
 
@@ -121,7 +129,7 @@ export function fetchAlertHistory(
 ): Promise<AlertHistoryEvent[]> {
   return request("/alerts/history", parseAlertHistory, {
     params: { limit, rule_id: ruleId },
-    signal: options.signal,
+    ...alertSignalOptions(options.signal),
   });
 }
 
@@ -132,6 +140,6 @@ export function evaluateAlertExpression(
   return request("/alerts/evaluate", parseAlertEvaluateResult, {
     method: "POST",
     body: payload,
-    signal: options.signal,
+    ...alertSignalOptions(options.signal),
   });
 }

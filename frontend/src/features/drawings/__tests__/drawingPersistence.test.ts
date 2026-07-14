@@ -22,6 +22,7 @@ import {
   MAX_LEGACY_FREEHAND_POINTS,
   normalizeFreehandStrokeV2,
 } from "../freehandStrokeModel.js";
+import { isRecord } from "../drawingContracts.js";
 import type {
   FreehandKind,
   FreehandStrokeV2,
@@ -168,6 +169,11 @@ function mustSavedFreehand(
   if (value?.type !== "freehand" && value?.type !== "highlighter") {
     throw new Error("Expected a saved freehand drawing");
   }
+  return value;
+}
+
+function mustSavedHighlighter(value: SavedDrawing | undefined): SavedHighlighterDrawing {
+  if (value?.type !== "highlighter") throw new Error("Expected a saved highlighter drawing");
   return value;
 }
 
@@ -485,9 +491,13 @@ test("freehand v3 persistence and factory round-trip lineage plus absolute-time 
 
     const raw = values.get(drawingStorageKey(symbol));
     assert.ok(raw);
-    const rawDrawings = JSON.parse(raw);
+    const rawDrawings: unknown = JSON.parse(raw);
+    if (!Array.isArray(rawDrawings)) throw new Error("Expected serialized drawings array");
     assert.equal(rawDrawings.length, 2);
     for (const item of rawDrawings) {
+      if (!isRecord(item) || !isRecord(item.stroke)) {
+        throw new Error("Expected serialized freehand stroke object");
+      }
       assert.equal(item.stroke.version, 3);
       assert.deepEqual(item.stroke.points, [
         { span: 0, ratio: 0, price: 100 },
@@ -515,8 +525,8 @@ test("freehand v3 persistence and factory round-trip lineage plus absolute-time 
 
     const loaded = loadDrawings(symbol);
     assert.equal(loaded.length, 2);
-    assert.equal(loaded[0].type, "freehand");
-    assert.equal(loaded[1].type, "highlighter");
+    assert.equal(mustBeDefined(loaded[0]).type, "freehand");
+    assert.equal(mustBeDefined(loaded[1]).type, "highlighter");
     for (const item of loaded) {
       const freehandItem = mustSavedFreehand(item);
       const restored = mustFreehandPrimitive(createPrimitiveFromSavedDrawing(freehandItem));
@@ -572,7 +582,10 @@ test("freehand load fails closed for mixed, null, unknown, or malformed stroke p
   })), null);
   assert.equal(createPrimitiveFromSavedDrawing({
     type: "freehand",
-    dataPoints: Array(MAX_LEGACY_FREEHAND_POINTS + 1).fill({ time: 100, price: 1 }),
+    dataPoints: Array.from(
+      { length: MAX_LEGACY_FREEHAND_POINTS + 1 },
+      () => ({ time: 100, price: 1 }),
+    ),
   }), null);
 
   const legacy = createPrimitiveFromSavedDrawing({
@@ -863,11 +876,11 @@ test("highlighter v2 save and load keeps stroke mode and style fields", () => {
 
     const drawings = loadDrawings(symbol);
     assert.equal(drawings.length, 1);
-    assert.equal(drawings[0].type, "highlighter");
-    assert.equal(Object.hasOwn(drawings[0], "stroke"), true);
-    assert.equal(Object.hasOwn(drawings[0], "dataPoints"), false);
-    assert.equal(drawings[0].opacity, 0.35);
-    assert.equal(drawings[0].compositeOperation, "multiply");
-    assert.equal(drawings[0].brushShape, "square");
+    const highlighter = mustSavedHighlighter(drawings[0]);
+    assert.equal(Object.hasOwn(highlighter, "stroke"), true);
+    assert.equal(Object.hasOwn(highlighter, "dataPoints"), false);
+    assert.equal(highlighter.opacity, 0.35);
+    assert.equal(highlighter.compositeOperation, "multiply");
+    assert.equal(highlighter.brushShape, "square");
   });
 });

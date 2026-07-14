@@ -94,55 +94,55 @@ export function createPrimitiveFromSavedDrawing(
   if (item.type === "line") {
     return new LineDrawingPrimitive({
       id: item.id || nextDrawingId("ln"),
-      lineType: item.lineType,
-      dataPoints: item.dataPoints,
-      color: item.color,
-      lineWidth: item.lineWidth,
+      ...(item.lineType === undefined ? {} : { lineType: item.lineType }),
+      ...(item.dataPoints === undefined ? {} : { dataPoints: item.dataPoints }),
+      ...(item.color === undefined ? {} : { color: item.color }),
+      ...(item.lineWidth === undefined ? {} : { lineWidth: item.lineWidth }),
     });
   }
   if (item.type === "axis-line") {
     return new AxisLineDrawingPrimitive({
       id: item.id || nextDrawingId("ax"),
-      axisLineType: item.axisLineType,
-      dataPoint: item.dataPoint,
-      color: item.color,
-      lineWidth: item.lineWidth,
+      ...(item.axisLineType === undefined ? {} : { axisLineType: item.axisLineType }),
+      ...(item.dataPoint === undefined ? {} : { dataPoint: item.dataPoint }),
+      ...(item.color === undefined ? {} : { color: item.color }),
+      ...(item.lineWidth === undefined ? {} : { lineWidth: item.lineWidth }),
     });
   }
   if (item.type === "angle-measure") {
     return new AngleMeasurementPrimitive({
       id: item.id || nextDrawingId("ang"),
-      dataPoints: item.dataPoints,
-      color: item.color,
-      lineWidth: item.lineWidth,
+      ...(item.dataPoints === undefined ? {} : { dataPoints: item.dataPoints }),
+      ...(item.color === undefined ? {} : { color: item.color }),
+      ...(item.lineWidth === undefined ? {} : { lineWidth: item.lineWidth }),
     });
   }
   if (item.type === "text") {
     return new TextDrawingPrimitive({
       id: item.id || nextDrawingId("tx"),
-      dataPoint: item.dataPoint,
-      text: item.text,
-      color: item.color,
-      fontSize: item.fontSize,
-      fontFamily: item.fontFamily,
-      bold: item.bold,
-      italic: item.italic,
-      underline: item.underline,
-      align: item.align,
-      bgColor: item.bgColor,
-      borderColor: item.borderColor,
-      borderWidth: item.borderWidth,
-      widthPx: item.widthPx,
-      padding: item.padding,
+      ...(item.dataPoint === undefined ? {} : { dataPoint: item.dataPoint }),
+      ...(item.text === undefined ? {} : { text: item.text }),
+      ...(item.color === undefined ? {} : { color: item.color }),
+      ...(item.fontSize === undefined ? {} : { fontSize: item.fontSize }),
+      ...(item.fontFamily === undefined ? {} : { fontFamily: item.fontFamily }),
+      ...(item.bold === undefined ? {} : { bold: item.bold }),
+      ...(item.italic === undefined ? {} : { italic: item.italic }),
+      ...(item.underline === undefined ? {} : { underline: item.underline }),
+      ...(item.align === undefined ? {} : { align: item.align }),
+      ...(item.bgColor === undefined ? {} : { bgColor: item.bgColor }),
+      ...(item.borderColor === undefined ? {} : { borderColor: item.borderColor }),
+      ...(item.borderWidth === undefined ? {} : { borderWidth: item.borderWidth }),
+      ...(item.widthPx === undefined ? {} : { widthPx: item.widthPx }),
+      ...(item.padding === undefined ? {} : { padding: item.padding }),
     });
   }
   if (item.type === "fibonacci") {
     return new FibonacciDrawingPrimitive({
       id: item.id || nextDrawingId("fib"),
-      dataPoints: item.dataPoints,
-      color: item.color,
-      lineWidth: item.lineWidth,
-      levels: item.levels,
+      ...(item.dataPoints === undefined ? {} : { dataPoints: item.dataPoints }),
+      ...(item.color === undefined ? {} : { color: item.color }),
+      ...(item.lineWidth === undefined ? {} : { lineWidth: item.lineWidth }),
+      ...(item.levels === undefined ? {} : { levels: item.levels }),
       inverted: item.inverted || false,
     });
   }
@@ -150,25 +150,25 @@ export function createPrimitiveFromSavedDrawing(
     if (typeof item.entryPrice !== "number") return null;
     return new PositionDrawingPrimitive({
       id: item.id || nextDrawingId("pos"),
-      direction: item.direction,
+      ...(item.direction === undefined ? {} : { direction: item.direction }),
       entryPrice: item.entryPrice,
-      tpPrice: item.tpPrice,
-      slPrice: item.slPrice,
-      timeRange: item.timeRange,
-      positionSize: item.positionSize,
-      infoPanelOffset: item.infoPanelOffset,
+      ...(item.tpPrice === undefined ? {} : { tpPrice: item.tpPrice }),
+      ...(item.slPrice === undefined ? {} : { slPrice: item.slPrice }),
+      ...(item.timeRange === undefined ? {} : { timeRange: item.timeRange }),
+      ...(item.positionSize === undefined ? {} : { positionSize: item.positionSize }),
+      ...(item.infoPanelOffset === undefined ? {} : { infoPanelOffset: item.infoPanelOffset }),
     });
   }
   if (item.type === "shape") {
     return new ShapeDrawingPrimitive({
       id: item.id || nextDrawingId("sh"),
-      shapeType: item.shapeType,
-      dataPoints: item.dataPoints,
-      color: item.color,
-      lineWidth: item.lineWidth,
-      fillColor: item.fillColor,
-      fillOpacity: item.fillOpacity,
-      lineStyle: item.lineStyle,
+      ...(item.shapeType === undefined ? {} : { shapeType: item.shapeType }),
+      ...(item.dataPoints === undefined ? {} : { dataPoints: item.dataPoints }),
+      ...(item.color === undefined ? {} : { color: item.color }),
+      ...(item.lineWidth === undefined ? {} : { lineWidth: item.lineWidth }),
+      ...(item.fillColor === undefined ? {} : { fillColor: item.fillColor }),
+      ...(item.fillOpacity === undefined ? {} : { fillOpacity: item.fillOpacity }),
+      ...(item.lineStyle === undefined ? {} : { lineStyle: item.lineStyle }),
     });
   }
   if (item.type === "highlighter") {
@@ -178,8 +178,8 @@ export function createPrimitiveFromSavedDrawing(
       id: item.id || nextDrawingId("hl"),
       type: "highlighter",
       ...payload,
-      color: item.color,
-      lineWidth: item.lineWidth,
+      ...(item.color === undefined ? {} : { color: item.color }),
+      ...(item.lineWidth === undefined ? {} : { lineWidth: item.lineWidth }),
       opacity: item.opacity ?? DEFAULT_HIGHLIGHTER_OPACITY,
       compositeOperation: item.compositeOperation || DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION,
       brushShape: item.brushShape || DEFAULT_HIGHLIGHTER_BRUSH_SHAPE,
@@ -191,8 +191,8 @@ export function createPrimitiveFromSavedDrawing(
     return new FreehandDrawingPrimitive({
       id: item.id || nextDrawingId("fh"),
       ...payload,
-      color: item.color,
-      lineWidth: item.lineWidth,
+      ...(item.color === undefined ? {} : { color: item.color }),
+      ...(item.lineWidth === undefined ? {} : { lineWidth: item.lineWidth }),
     });
   }
   return null;
@@ -309,7 +309,7 @@ export function createTwoPointDrawingPrimitive({
       dataPoints,
       color,
       lineWidth,
-      levels: fibLevels ? fibLevels.map((level) => ({ ...level })) : undefined,
+      ...(fibLevels ? { levels: fibLevels.map((level) => ({ ...level })) } : {}),
       inverted: fibInverted || false,
     });
   }
@@ -363,7 +363,7 @@ export function createPreviewPrimitive({
       color,
       lineWidth,
       isPreview: true,
-      levels: fibLevels ? fibLevels.map((level) => ({ ...level })) : undefined,
+      ...(fibLevels ? { levels: fibLevels.map((level) => ({ ...level })) } : {}),
       inverted: fibInverted || false,
     });
   }

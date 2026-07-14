@@ -188,23 +188,32 @@ function tracePath(
   path: BitmapPoint[],
   isSquareBrush: boolean,
 ): void {
-  context.moveTo(path[0].bx, path[0].by);
+  const first = path[0];
+  if (!first) return;
+  context.moveTo(first.bx, first.by);
   if (path.length === 2 || isSquareBrush) {
     for (let index = 1; index < path.length; index += 1) {
-      context.lineTo(path[index].bx, path[index].by);
+      const point = path[index];
+      if (!point) continue;
+      context.lineTo(point.bx, point.by);
     }
     return;
   }
 
   for (let index = 1; index < path.length - 1; index += 1) {
-    const midX = (path[index].bx + path[index + 1].bx) / 2;
-    const midY = (path[index].by + path[index + 1].by) / 2;
-    context.quadraticCurveTo(path[index].bx, path[index].by, midX, midY);
+    const point = path[index];
+    const nextPoint = path[index + 1];
+    if (!point || !nextPoint) continue;
+    const midX = (point.bx + nextPoint.bx) / 2;
+    const midY = (point.by + nextPoint.by) / 2;
+    context.quadraticCurveTo(point.bx, point.by, midX, midY);
   }
   const last = path[path.length - 1];
+  const penultimate = path[path.length - 2];
+  if (!last || !penultimate) return;
   context.quadraticCurveTo(
-    path[path.length - 2].bx,
-    path[path.length - 2].by,
+    penultimate.bx,
+    penultimate.by,
     last.bx,
     last.by,
   );
@@ -558,6 +567,7 @@ export class FreehandDrawingPrimitive {
       for (let index = 0; index < screenPoints.length - 1; index += 1) {
         const left = screenPoints[index];
         const right = screenPoints[index + 1];
+        if (!left || !right) continue;
         if (distToSegment(x, y, left.x, left.y, right.x, right.y) <= totalRadius) {
           return true;
         }

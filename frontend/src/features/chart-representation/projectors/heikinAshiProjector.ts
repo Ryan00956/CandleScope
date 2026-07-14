@@ -50,7 +50,8 @@ export class HeikinAshiProjector implements Projector {
 
   resolvePreviousDisplayRow(rows: readonly DisplayRow[] = []): DisplayRow | null {
     for (let index = rows.length - 1; index >= 0; index -= 1) {
-      if (projectedOhlc(rows[index])) return rows[index];
+      const row = rows[index];
+      if (row && projectedOhlc(row)) return row;
     }
     return null;
   }

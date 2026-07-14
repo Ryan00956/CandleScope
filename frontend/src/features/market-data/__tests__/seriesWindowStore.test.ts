@@ -26,7 +26,7 @@ test("replace normalizes duplicate and unsorted rows", () => {
 
   assert.equal(delta.type, WINDOW_DELTA_TYPES.REPLACE);
   assert.deepEqual(store.snapshot().map((row) => row.time), [60, 120, 180]);
-  assert.equal(store.snapshot()[1].close, 999);
+  assert.equal(mustBeDefined(store.snapshot()[1]).close, 999);
 });
 
 test("applyRange appends newer rows", () => {
@@ -59,7 +59,7 @@ test("applyRange mid-merges overlapping rows", () => {
 
   assert.equal(delta.type, WINDOW_DELTA_TYPES.MID_MERGE);
   assert.deepEqual(store.snapshot().map((row) => row.time), [60, 120, 180, 240]);
-  assert.equal(store.snapshot()[1].close, 500);
+  assert.equal(mustBeDefined(store.snapshot()[1]).close, 500);
 });
 
 test("applyRange noops when incoming rows are already present", () => {
@@ -77,7 +77,7 @@ test("applyTick replaces the latest bar through the time index", () => {
 
   assert.equal(delta.type, WINDOW_DELTA_TYPES.TICK);
   assert.equal(delta.replaced, true);
-  assert.equal(store.snapshot()[1].close, 777);
+  assert.equal(mustBeDefined(store.snapshot()[1]).close, 777);
 });
 
 test("applyTick treats non-tail corrections as structural merges", () => {
@@ -86,7 +86,7 @@ test("applyTick treats non-tail corrections as structural merges", () => {
   const delta = store.applyTick({ ...rows([120])[0], close: 777 });
 
   assert.equal(delta.type, WINDOW_DELTA_TYPES.MID_MERGE);
-  assert.equal(store.snapshot()[1].close, 777);
+  assert.equal(mustBeDefined(store.snapshot()[1]).close, 777);
 });
 
 test("applyTick appends a new tail bar", () => {
@@ -189,7 +189,7 @@ test("replace-last tick keeps the snapshot identity stable", () => {
 
   const after = store.snapshot();
   assert.equal(after, before);
-  assert.equal(after[1].close, 777);
+  assert.equal(mustBeDefined(after[1]).close, 777);
 });
 
 test("appended tick keeps the time index incrementally consistent", () => {

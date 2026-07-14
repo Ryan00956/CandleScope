@@ -59,6 +59,10 @@ export interface KlineRangeOptions extends RequestSignalOptions {
   strict?: boolean;
 }
 
+function requestSignalOptions(signal: AbortSignal | undefined): RequestSignalOptions {
+  return signal === undefined ? {} : { signal };
+}
+
 type UrlParams = Record<string, unknown>;
 type UnknownRecord = Record<string, unknown>;
 
@@ -114,9 +118,9 @@ export async function request(
   else requestBody = JSON.stringify(body);
   const response = await fetch(url, {
     method,
-    headers: requestHeaders,
-    body: requestBody,
-    signal,
+    ...(requestHeaders === undefined ? {} : { headers: requestHeaders }),
+    ...(requestBody === undefined ? {} : { body: requestBody }),
+    ...(signal === undefined ? {} : { signal }),
   });
   if (!response.ok) {
     const errorData: unknown = await response.json().catch(() => ({}));
@@ -144,7 +148,7 @@ export async function fetchKlines(
     limit,
     exchange,
     market_type: marketType,
-  }), { signal: options.signal });
+  }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/");
 }
 
@@ -163,7 +167,7 @@ export async function fetchKlinesHistory(
     count_back: options.countBack,
     exchange,
     market_type: marketType,
-  }), { signal: options.signal });
+  }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/history");
 }
 
@@ -183,7 +187,7 @@ export async function fetchKlinesBefore(
     bars,
     exchange,
     market_type: marketType,
-  }), { signal: options.signal });
+  }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/history/before");
 }
 
@@ -204,7 +208,7 @@ export async function fetchLatestKlines(
     market_type: marketType,
     client_id: CLIENT_INSTANCE_ID,
     source,
-  }), { signal: options.signal });
+  }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/latest");
 }
 
@@ -227,7 +231,7 @@ export async function fetchKlinesRange(
     repair: options.repair || "async",
     wait_ms: options.waitMs ?? 0,
     strict: options.strict ?? false,
-  }), { signal: options.signal });
+  }), requestSignalOptions(options.signal));
   return parseKlineResponse(payload, "GET /klines/range");
 }
 
@@ -235,7 +239,7 @@ export async function resolveInterval(
   interval = "1h",
   options: RequestSignalOptions = {},
 ): Promise<unknown> {
-  return request(buildUrl("/klines/resolve", { interval }), { signal: options.signal });
+  return request(buildUrl("/klines/resolve", { interval }), requestSignalOptions(options.signal));
 }
 
 /** Single-interval WebSocket URL (legacy). */
@@ -331,7 +335,7 @@ export async function updateCacheLimits({
 }
 
 export async function fetchCacheDiagnostics(options: RequestSignalOptions = {}): Promise<unknown> {
-  return request(`${API_BASE}/settings/cache-diagnostics`, { signal: options.signal });
+  return request(`${API_BASE}/settings/cache-diagnostics`, requestSignalOptions(options.signal));
 }
 
 interface CacheAccessEvent extends UnknownRecord {

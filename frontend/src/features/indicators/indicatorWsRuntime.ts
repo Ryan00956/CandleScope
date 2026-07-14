@@ -85,7 +85,7 @@ export function buildHostedSubscriptionMessage(
     INDICATOR_HISTORY_LIMIT,
   );
 
-  return {
+  const message: IndicatorSubscribeMessage = {
     action: "subscribe",
     clientId: indicator.id,
     kind: builtin ? "builtin" : "script",
@@ -93,28 +93,36 @@ export function buildHostedSubscriptionMessage(
     marketType,
     symbol,
     interval,
-    name: builtin ? getBuiltinIndicatorName(indicator) : undefined,
     displayName: indicator.name || indicator.id,
-    customId: !builtin ? indicator.id : undefined,
-    script: builtin ? undefined : indicator.script,
-    securityMode: builtin ? undefined : indicator.securityMode,
     params: buildIndicatorComputeParams(indicator, {
-      candleUpColor,
-      candleDownColor,
+      ...(candleUpColor !== undefined ? { candleUpColor } : {}),
+      ...(candleDownColor !== undefined ? { candleDownColor } : {}),
     }),
     historyLimit,
-    ...(Number.isFinite(Number(resumeFrom)) && Number(resumeFrom) > 0
-      ? { resumeFrom: Math.floor(Number(resumeFrom)) }
-      : {}),
-    ...(serverEpoch !== undefined && serverEpoch !== null && serverEpoch !== ""
-      ? { serverEpoch: String(serverEpoch) }
-      : {}),
-    ...(correctionRevision !== undefined &&
+  };
+  if (builtin) {
+    message.name = getBuiltinIndicatorName(indicator);
+  } else {
+    message.customId = indicator.id;
+    if (indicator.script !== undefined) message.script = indicator.script;
+    if (indicator.securityMode !== undefined) {
+      message.securityMode = indicator.securityMode;
+    }
+  }
+  if (Number.isFinite(Number(resumeFrom)) && Number(resumeFrom) > 0) {
+    message.resumeFrom = Math.floor(Number(resumeFrom));
+  }
+  if (serverEpoch !== undefined && serverEpoch !== null && serverEpoch !== "") {
+    message.serverEpoch = String(serverEpoch);
+  }
+  if (
+    correctionRevision !== undefined &&
     correctionRevision !== null &&
     correctionRevision !== ""
-      ? { correctionRevision: String(correctionRevision) }
-      : {}),
-  };
+  ) {
+    message.correctionRevision = String(correctionRevision);
+  }
+  return message;
 }
 
 export function buildHostedSubscriptionSignature(
@@ -305,11 +313,15 @@ function parseIndicatorWsRecord(value: unknown): IndicatorWsMessage {
     const message: IndicatorErrorMessage = {
       type,
       clientId,
-      error: payload.error ?? undefined,
-      detail: payload.detail,
-      code: payload.code,
-      errorDetail: payload.errorDetail,
     };
+    if (payload.error !== null && payload.error !== undefined) {
+      message.error = payload.error;
+    }
+    if (payload.detail !== undefined) message.detail = payload.detail;
+    if (payload.code !== undefined) message.code = payload.code;
+    if (payload.errorDetail !== undefined) {
+      message.errorDetail = payload.errorDetail;
+    }
     if (seq !== undefined) message.seq = seq;
     return message;
   }

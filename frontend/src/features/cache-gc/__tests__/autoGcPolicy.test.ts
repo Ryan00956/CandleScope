@@ -11,7 +11,7 @@ import type {
   CacheDiagnosticsEntry,
   FrontendGcExecutionResult,
 } from "../cacheGcTypes.js";
-import { partialMock } from "../../../test/testHelpers.js";
+import { mustBeDefined, partialMock } from "../../../test/testHelpers.js";
 
 function diagnostics(entry: CacheDiagnosticsEntry): CacheDiagnostics {
   return {
@@ -41,7 +41,7 @@ test("auto frontend GC keeps orphan indicators without pressure", () => {
 
   assert.equal(plan.mode, "auto-plan");
   assert.equal(plan.victims.length, 1);
-  assert.equal(plan.victims[0].reason, "missing-kline-dependency");
+  assert.equal(mustBeDefined(plan.victims[0]).reason, "missing-kline-dependency");
 });
 
 test("auto frontend GC skips low-score non-orphan victims", () => {
@@ -66,7 +66,7 @@ test("auto frontend GC skips low-score non-orphan victims", () => {
   });
 
   assert.equal(plan.victims.length, 0);
-  assert.equal(plan.autoSkipped[0].reason, "score-below-threshold");
+  assert.equal(mustBeDefined(plan.autoSkipped[0]).reason, "score-below-threshold");
 });
 
 test("auto frontend GC audit replaces damaged storage with validated entries", () => {
@@ -92,12 +92,13 @@ test("auto frontend GC audit replaces damaged storage with validated entries", (
     });
     assert.equal(typeof written, "string");
     if (written === null) assert.fail("Expected GC audit to write local storage");
-    const stored: Array<{ mode: string; victimCount: number }> = JSON.parse(
-      written,
-    );
+    const stored: unknown = JSON.parse(written);
+    assert.ok(Array.isArray(stored));
     assert.equal(stored.length, 1);
-    assert.equal(stored[0].mode, "auto-gc");
-    assert.equal(stored[0].victimCount, 0);
+    const firstEntry: unknown = stored[0];
+    assert.ok(firstEntry && typeof firstEntry === "object");
+    assert.equal(Reflect.get(firstEntry, "mode"), "auto-gc");
+    assert.equal(Reflect.get(firstEntry, "victimCount"), 0);
   } finally {
     if (previous) Object.defineProperty(globalThis, "localStorage", previous);
     else Reflect.deleteProperty(globalThis, "localStorage");

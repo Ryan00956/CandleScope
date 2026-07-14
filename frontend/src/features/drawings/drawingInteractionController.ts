@@ -799,8 +799,9 @@ export function useDrawing({
           }
           let lastPreviewPoint: ScreenPoint | null = null;
           for (let index = appendResult.previewPoints.length - 1; index >= 0; index -= 1) {
-            if (appendResult.previewPoints[index]) {
-              lastPreviewPoint = appendResult.previewPoints[index];
+            const previewPoint = appendResult.previewPoints[index];
+            if (previewPoint) {
+              lastPreviewPoint = previewPoint;
               break;
             }
           }
@@ -1457,13 +1458,19 @@ export function useDrawing({
       } else if (prim && prim.dataPoints.length > 3) {
         // Convert data points to screen coordinates for pixel-space RDP
         const indexed: Array<ScreenPoint & { _i: number }> = [];
-        for (let i = 0; i < prim.dataPoints.length; i++) {
-          const s = dataToScreen(prim.dataPoints[i]);
+        for (let i = 0; i < prim.dataPoints.length; i += 1) {
+          const dataPoint = prim.dataPoints[i];
+          if (!dataPoint) continue;
+          const s = dataToScreen(dataPoint);
           if (s) indexed.push({ x: s.x, y: s.y, _i: i });
         }
         if (indexed.length > 3) {
           const kept = decimateScreenPoints(indexed, 1.5); // ~1.5px tolerance
-          const decimated = kept.map((sp) => prim.dataPoints[sp._i]);
+          const decimated: DrawingDataPoint[] = [];
+          for (const sp of kept) {
+            const dataPoint = prim.dataPoints[sp._i];
+            if (dataPoint) decimated.push(dataPoint);
+          }
           prim.setDataPoints(decimated);
         }
         committed = prim.commitDataPoints?.() === true;
@@ -1692,7 +1699,9 @@ export function useDrawing({
     if (!id) return;
     const idx = primitivesRef.current.findIndex((p) => p.id === id);
     if (idx < 0) return;
-    detachPrim(primitivesRef.current[idx]);
+    const primitive = primitivesRef.current[idx];
+    if (!primitive) return;
+    detachPrim(primitive);
     primitivesRef.current.splice(idx, 1);
     selectedIdRef.current = null;
     setSelectedPrimId(null);

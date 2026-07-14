@@ -454,7 +454,7 @@ function rowsFromStore(store: SeriesWindowStore | null | undefined): KlineBar[] 
 }
 
 function latestFiniteSourceTime(rows: readonly SourceBar[] | null | undefined): number | null {
-  if (!Array.isArray(rows)) return null;
+  if (!rows) return null;
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const time = rows[index]?.time;
     if (typeof time === "number" && Number.isFinite(time)) return time;
@@ -609,19 +609,20 @@ function captureSurfaceViewport(chart: AdapterChart | null, {
     const timeScale = chart?.timeScale?.();
     const time = timeScale?.getVisibleRange?.();
     const logical = timeScale?.getVisibleLogicalRange?.();
+    const barSpacing = timeScale?.options?.().barSpacing;
     const from = sourceTimeFromAxisTime(time?.from);
     const to = sourceTimeFromAxisTime(time?.to);
     const sourceRange = from != null && to != null
       ? (from <= to ? { from, to } : { from: to, to: from })
       : null;
     return buildSurfaceViewportSnapshot({
-      axisMode,
-      barSpacing: timeScale?.options?.().barSpacing,
-      datasetKey,
-      displayRows,
-      logicalRange: logical,
       sourceRange,
-      surfaceConfigKey,
+      ...(axisMode === undefined ? {} : { axisMode }),
+      ...(barSpacing === undefined ? {} : { barSpacing }),
+      ...(datasetKey === undefined ? {} : { datasetKey }),
+      ...(displayRows === undefined ? {} : { displayRows }),
+      ...(logical === undefined ? {} : { logicalRange: logical }),
+      ...(surfaceConfigKey === undefined ? {} : { surfaceConfigKey }),
     });
   } catch {
     return null;
@@ -791,8 +792,7 @@ function buildPaneDescriptors({
     bgcolors: alignIndicatorBgcolorsToTimes(filterItemsForPane(indicatorBgcolors, "main"), dataTimeSet),
   }];
 
-  for (let index = 0; index < subPanes.length; index += 1) {
-    const subPane = subPanes[index];
+  for (const [index, subPane] of subPanes.entries()) {
     const lines = alignIndicatorLinesToTimes(subPane.lines, dataTimeSet);
     descriptors.push({
       id: subPane.id,
@@ -1501,7 +1501,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         userInteracted: userInteractedRef.current,
       })) {
         const loadMoreLeft = onNeedMoreLeftRef.current;
-        if (loadMoreLeft) void loadMoreLeft(currentData[0].time);
+        const firstRow = currentData[0];
+        if (loadMoreLeft && firstRow) void loadMoreLeft(firstRow.time);
       }
     };
 
@@ -1979,9 +1980,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         || clearFutureTimeAxis({ force: true });
       const renderedPatch = buildMainSeriesProjectionPatch({
         displayRows,
-      previousSeriesData: renderedMainSeriesDataRef.current ?? undefined,
         projectionPatch: effectiveProjectionPatch,
         renderOptions: activeRenderOptions,
+        ...(renderedMainSeriesDataRef.current === null
+          ? {}
+          : { previousSeriesData: renderedMainSeriesDataRef.current }),
       });
       let projectionRendered = false;
       try {
@@ -2105,9 +2108,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           || clearFutureTimeAxis({ force: true });
         const renderedPatch = buildMainSeriesProjectionPatch({
           displayRows,
-          previousSeriesData: renderedMainSeriesDataRef.current ?? undefined,
           projectionPatch,
           renderOptions: currentRenderOptions,
+          ...(renderedMainSeriesDataRef.current === null
+            ? {}
+            : { previousSeriesData: renderedMainSeriesDataRef.current }),
         });
         let projectionRendered = false;
         try {
@@ -2538,6 +2543,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       const mainPaneHeight = panes[0]?.getHeight?.();
       const captureRect = panes.length > 1
         && rootRect
+        && typeof mainPaneHeight === "number"
         && Number.isFinite(mainPaneHeight)
         && mainPaneHeight > 0
         ? {
@@ -2655,7 +2661,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           chartAdapter={chartAdapter}
           chartContainerRef={containerRef}
           activeTool={effectiveDrawingTool}
-          onToolChange={onDrawingToolChange}
+          {...(onDrawingToolChange === undefined ? {} : { onToolChange: onDrawingToolChange })}
           penColor={penColor}
           penSize={penSize}
           textFontSize={textFontSize}
@@ -2671,7 +2677,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           drawingAnchorMode={drawingAnchorMode}
           initialHidden={drawingsHiddenRef.current}
           onApiChange={handleDrawingApiChange}
-          onSelectedDrawingChange={onSelectedDrawingChange}
+          {...(onSelectedDrawingChange === undefined ? {} : { onSelectedDrawingChange })}
         />
       )}
 

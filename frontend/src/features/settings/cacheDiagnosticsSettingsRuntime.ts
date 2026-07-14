@@ -190,7 +190,7 @@ export function useCacheDiagnosticsRuntime({
     try {
       const accessEvents = drainFrontendCacheAccessEvents(20);
       await Promise.allSettled(accessEvents.map((event) => recordCacheAccess(event)));
-      const backend = await fetchCacheDiagnostics({ signal });
+      const backend = await fetchCacheDiagnostics(signal === undefined ? {} : { signal });
       setBackendDiagnostics(isRecord(backend) ? backend : {});
     } catch (err: unknown) {
       if (isRecord(err) && err.name === "AbortError") return;
@@ -204,7 +204,9 @@ export function useCacheDiagnosticsRuntime({
   const planFrontendGcDryRun = useCallback(() => {
     const nextFrontendDiagnostics = buildFallbackFrontendDiagnostics(chartDataCacheDiagnostics);
     const plan = planFrontendGc(nextFrontendDiagnostics, {
-      maxEstimatedBytes: settings.frontendCacheBudgetBytes,
+      ...(settings.frontendCacheBudgetBytes === undefined
+        ? {}
+        : { maxEstimatedBytes: settings.frontendCacheBudgetBytes }),
     });
     setFrontendDiagnostics(nextFrontendDiagnostics);
     setFrontendGcPlan(plan);
@@ -252,9 +254,13 @@ export function useCacheDiagnosticsRuntime({
     setError("");
     try {
       const rawPlan = await planStorageGc({
-        dbLimits: settings.cacheLimits,
-        sqliteBudgetBytes: settings.sqliteStorageBudgetBytes,
-        storageRowLimitsEnabled: settings.storageRowLimitsEnabled,
+        ...(settings.cacheLimits === undefined ? {} : { dbLimits: settings.cacheLimits }),
+        ...(settings.sqliteStorageBudgetBytes === undefined
+          ? {}
+          : { sqliteBudgetBytes: settings.sqliteStorageBudgetBytes }),
+        ...(settings.storageRowLimitsEnabled === undefined
+          ? {}
+          : { storageRowLimitsEnabled: settings.storageRowLimitsEnabled }),
       });
       const plan = isRecord(rawPlan) ? rawPlan : {};
       setStorageGcPlan(plan);
@@ -275,9 +281,13 @@ export function useCacheDiagnosticsRuntime({
     try {
       const rawResult = await runStorageGc({
         policy: {
-          dbLimits: settings.cacheLimits,
-          sqliteBudgetBytes: settings.sqliteStorageBudgetBytes,
-          storageRowLimitsEnabled: settings.storageRowLimitsEnabled,
+          ...(settings.cacheLimits === undefined ? {} : { dbLimits: settings.cacheLimits }),
+          ...(settings.sqliteStorageBudgetBytes === undefined
+            ? {}
+            : { sqliteBudgetBytes: settings.sqliteStorageBudgetBytes }),
+          ...(settings.storageRowLimitsEnabled === undefined
+            ? {}
+            : { storageRowLimitsEnabled: settings.storageRowLimitsEnabled }),
         },
       });
       const result = isRecord(rawResult) ? rawResult : {};
@@ -314,7 +324,7 @@ export function useCacheDiagnosticsRuntime({
   const runFrontendGc = useCallback(() => {
     const plan = frontendGcPlan || planFrontendGcDryRun();
     const result = executeFrontendGcPlan(plan, {
-      trimChartDataCacheEntries,
+      ...(trimChartDataCacheEntries === undefined ? {} : { trimChartDataCacheEntries }),
     });
     setFrontendGcResult(result);
     setFrontendDiagnostics(buildFallbackFrontendDiagnostics(chartDataCacheDiagnostics));

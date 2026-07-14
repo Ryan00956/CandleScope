@@ -41,9 +41,11 @@ export function setPaneHeights(
   // and also adapt when the container height changes.
   const stretchValues = panes.map((pane, index) => {
     const requested = heightsPx[index];
-    if (Number.isFinite(requested) && requested > 0) return requested;
+    if (typeof requested === "number" && Number.isFinite(requested) && requested > 0) {
+      return requested;
+    }
     const currentHeight = pane?.getHeight?.();
-    return Number.isFinite(currentHeight) && currentHeight > 0
+    return typeof currentHeight === "number" && Number.isFinite(currentHeight) && currentHeight > 0
       ? currentHeight
       : null;
   });
@@ -53,15 +55,17 @@ export function setPaneHeights(
   if (canRestoreRatios) {
     for (let index = 0; index < panes.length; index += 1) {
       const stretch = stretchValues[index];
-      if (stretch != null) panes[index].setStretchFactor(stretch);
+      const pane = panes[index];
+      if (stretch != null && pane) pane.setStretchFactor(stretch);
     }
     return;
   }
 
   for (let index = 0; index < heightsPx.length; index += 1) {
     const height = heightsPx[index];
-    if (!Number.isFinite(height) || height <= 0) continue;
-    panes[index]?.setHeight?.(height);
+    if (typeof height !== "number" || !Number.isFinite(height) || height <= 0) continue;
+    const pane = panes[index];
+    pane?.setHeight?.(height);
   }
 }
 

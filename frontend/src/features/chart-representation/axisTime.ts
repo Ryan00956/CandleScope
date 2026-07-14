@@ -100,10 +100,12 @@ export function findLastDisplayIndexForSourceTime(
   sourceTime: unknown,
 ): number {
   const target = finiteNumber(sourceTime);
-  if (target === null || !Array.isArray(displayRows)) return -1;
+  if (target === null || !displayRows) return -1;
   let match = -1;
   for (let index = 0; index < displayRows.length; index += 1) {
-    if (sourceTimeFromDisplayRow(displayRows[index]) === target) match = index;
+    const row = displayRows[index];
+    if (!row) continue;
+    if (sourceTimeFromDisplayRow(row) === target) match = index;
   }
   return match;
 }
@@ -131,7 +133,7 @@ export function findDisplayIndexForAxisAnchor(
 ): number {
   const targetSourceTime = sourceTimeFromAxisTime(axisTime);
   if (targetSourceTime === null
-    || !Array.isArray(displayRows)
+    || !displayRows
     || displayRows.length === 0) {
     return -1;
   }
@@ -149,6 +151,7 @@ export function findDisplayIndexForAxisAnchor(
 
   for (let index = 0; index < displayRows.length; index += 1) {
     const row = displayRows[index];
+    if (!row) continue;
     const rowSourceTime = sourceTimeFromAxisTime(row?.time)
       ?? sourceTimeFromDisplayRow(row);
     if (rowSourceTime !== targetSourceTime) continue;
@@ -186,7 +189,9 @@ export function findDisplayIndexForAxisAnchor(
   let firstAfterIndex = -1;
   let firstAfterTime = Number.POSITIVE_INFINITY;
   for (let index = 0; index < displayRows.length; index += 1) {
-    const lineage = sourceTimeRangeFromDisplayRow(displayRows[index]);
+    const row = displayRows[index];
+    if (!row) continue;
+    const lineage = sourceTimeRangeFromDisplayRow(row);
     if (!lineage) continue;
     if (lineage.from <= targetSourceTime && targetSourceTime <= lineage.to) {
       if (lineage.to < containingTo
@@ -227,14 +232,16 @@ export function mapSourceTimeRangeToDisplayLogicalRange(
 ): LogicalRange | null {
   const from = finiteNumber(sourceRange?.from);
   const to = finiteNumber(sourceRange?.to);
-  if (from === null || to === null || from > to || !Array.isArray(displayRows)) {
+  if (from === null || to === null || from > to || !displayRows) {
     return null;
   }
 
   let first = -1;
   let last = -1;
   for (let index = 0; index < displayRows.length; index += 1) {
-    const lineage = sourceTimeRangeFromDisplayRow(displayRows[index]);
+    const row = displayRows[index];
+    if (!row) continue;
+    const lineage = sourceTimeRangeFromDisplayRow(row);
     if (!lineage || lineage.to < from || lineage.from > to) continue;
     if (first < 0) first = index;
     last = index;
@@ -264,7 +271,7 @@ export function mapSourceViewportAnchorToDisplayLogicalRange(displayRows: readon
   const span = finiteNumber(logicalSpan);
   const offset = finiteNumber(screenOffset);
   if (target === null || span === null || span < 0 || offset === null) return null;
-  if (!Array.isArray(displayRows) || displayRows.length === 0) return null;
+  if (displayRows.length === 0) return null;
 
   const anchorIndex = findAnchorDisplayIndex(displayRows, targetAxisTime);
   if (anchorIndex < 0) return null;

@@ -203,7 +203,7 @@ test("drawing coordinate snapshots atomically version the numeric source horizon
   assert.equal(resetSnapshot.sourceTimeHorizon, 20);
   assert.strictEqual(resetSnapshot.seriesData, store.displaySnapshot());
 
-  const replaced = [initial[0], row(20, { close: 41 })];
+  const replaced = [mustBeDefined(initial[0]), row(20, { close: 41 })];
   store.applySourceDelta({ type: "tick", replaced: true }, replaced);
   const replacedSnapshot = store.drawingCoordinateSnapshot();
   assert.equal(replacedSnapshot.sourceTimeHorizon, 20);

@@ -152,7 +152,7 @@ class LineRenderer implements PrimitivePaneRenderer {
       const { points, color, lineWidth, lineType, selected, isPreview, hovered } = data;
 
       const [a, b] = points;
-      if (a.x == null || a.y == null || b.x == null || b.y == null) return;
+      if (!a || !b || a.x == null || a.y == null || b.x == null || b.y == null) return;
 
       // Scale to bitmap coords
       const ax = a.x * ratio;
@@ -255,9 +255,9 @@ function adjustAlpha(hex: string, alpha: number): string {
   // Convert hex to rgba
   let r = 0, g = 0, b = 0;
   if (hex.length === 4) {
-    r = parseInt(hex[1] + hex[1], 16);
-    g = parseInt(hex[2] + hex[2], 16);
-    b = parseInt(hex[3] + hex[3], 16);
+    r = parseInt(hex.charAt(1).repeat(2), 16);
+    g = parseInt(hex.charAt(2).repeat(2), 16);
+    b = parseInt(hex.charAt(3).repeat(2), 16);
   } else if (hex.length === 7) {
     r = parseInt(hex.slice(1, 3), 16);
     g = parseInt(hex.slice(3, 5), 16);
@@ -479,7 +479,7 @@ export class LineDrawingPrimitive {
     });
 
     const [sa, sb] = screenPoints;
-    if (sa.x == null || sa.y == null || sb.x == null || sb.y == null) return null;
+    if (!sa || !sb || sa.x == null || sa.y == null || sb.x == null || sb.y == null) return null;
 
     const HANDLE_RADIUS = 7 + this._lineWidth;
     const LINE_HIT_RADIUS = 8 + this._lineWidth / 2;
@@ -489,8 +489,7 @@ export class LineDrawingPrimitive {
       { x: sa.x, y: sa.y },
       { x: sb.x, y: sb.y },
     ];
-    for (let i = 0; i < resolvedScreenPoints.length; i++) {
-      const pt = resolvedScreenPoints[i];
+    for (const [i, pt] of resolvedScreenPoints.entries()) {
       const dx = pt.x - x;
       const dy = pt.y - y;
       if (Math.sqrt(dx * dx + dy * dy) <= HANDLE_RADIUS) {

@@ -94,7 +94,10 @@ test("indicator result cache is scoped by chart series context", () => {
     null,
   );
   assert.deepEqual(
-    mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext)).normalized.lines[0].data,
+    mustBeDefined(
+      mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext))
+        .normalized.lines[0],
+    ).data,
     [{ time: 10, value: 100 }],
   );
 });
@@ -135,7 +138,10 @@ test("replaceCachedIndicatorRange replaces only the requested time window", () =
   }, { start: 20, end: 30 });
 
   assert.deepEqual(
-    mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext)).normalized.lines[0].data,
+    mustBeDefined(
+      mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext))
+        .normalized.lines[0],
+    ).data,
     [
       { time: 10, value: 1 },
       { time: 20, value: 200 },
@@ -211,7 +217,10 @@ test("upsertCachedIndicatorLinePoint preserves consecutive realtime bars", () =>
   upsertCachedIndicatorLinePoint(maIndicator, baseContext, { ma: 3 }, 30);
 
   assert.deepEqual(
-    mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext)).normalized.lines[0].data,
+    mustBeDefined(
+      mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext))
+        .normalized.lines[0],
+    ).data,
     [
       { time: 10, value: 1 },
       { time: 20, value: 2 },
@@ -313,7 +322,10 @@ test("safe line-only indicator cache can trim old range without deleting entry",
   trimIndicatorResultCacheEntries([{ key: entry.key, action: "trim-range", keepStart: 20 }]);
 
   assert.deepEqual(
-    mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext)).normalized.lines[0].data,
+    mustBeDefined(
+      mustBeDefined(getCachedIndicatorResult(maIndicator, baseContext))
+        .normalized.lines[0],
+    ).data,
     [
       { time: 20, value: 2 },
       { time: 30, value: 3 },

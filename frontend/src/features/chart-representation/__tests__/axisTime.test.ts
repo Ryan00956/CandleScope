@@ -18,6 +18,7 @@ import type {
   OrdinalAxisTime,
   SourceTimeRange,
 } from "../chartRepresentationTypes.js";
+import { mustBeDefined } from "../../../test/testHelpers.js";
 import { malformedFixture } from "../../../test/testHelpers.js";
 
 function ordinal(order: number, sourceTime: number, sourceOrdinal = 0): OrdinalAxisTime {
@@ -180,7 +181,7 @@ test("viewport anchors preserve span and horizontal offset across projections", 
   }), { from: -2.5, to: 1.5 });
 
   assert.deepEqual(mapSourceViewportAnchorToDisplayLogicalRange(rows, {
-    anchorTime: rows[0].time,
+    anchorTime: mustBeDefined(rows[0]).time,
     sourceTime: 100,
     logicalSpan: 4,
     screenOffset: -0.5,

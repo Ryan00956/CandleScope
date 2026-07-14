@@ -6,7 +6,7 @@ import {
   createOrdinalHorzScaleBehavior,
 } from "../ordinalHorzScaleBehavior.js";
 import type { OrdinalAxisTime } from "../../features/chart-representation/chartRepresentationTypes.js";
-import { malformedFixture, structuralMock } from "../../test/testHelpers.js";
+import { malformedFixture, mustBeDefined, structuralMock } from "../../test/testHelpers.js";
 
 type OrdinalBehavior = ReturnType<typeof createOrdinalHorzScaleBehavior>;
 
@@ -62,10 +62,10 @@ test("preprocessing and conversion validate the ordinal item contract", () => {
   ];
 
   assert.doesNotThrow(() => behavior.preprocessData(data));
-  assert.doesNotThrow(() => behavior.preprocessData(data[0]));
+  assert.doesNotThrow(() => behavior.preprocessData(mustBeDefined(data[0])));
 
   const converter = behavior.createConverterToInternalObj(data);
-  const converted = converter(data[1].time);
+  const converted = converter(mustBeDefined(data[1]).time);
   assert.equal(behavior.key(converted), 0);
   assert.equal(behavior.cacheKey(converted), 0);
   const ordinalInternal = structuralMock<{

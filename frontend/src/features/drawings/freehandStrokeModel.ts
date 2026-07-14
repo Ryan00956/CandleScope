@@ -465,10 +465,13 @@ function retainPathIndexes(
     if (right - left <= 1) continue;
     let farthestIndex = -1;
     let farthestDistance = 0;
+    const startSample = samples[left];
+    const endSample = samples[right];
+    if (!startSample || !endSample) continue;
     for (let index = left + 1; index < right; index += 1) {
-      const point = samples[index].screen;
-      const startPoint = samples[left].screen;
-      const endPoint = samples[right].screen;
+      const point = samples[index]?.screen;
+      const startPoint = startSample.screen;
+      const endPoint = endSample.screen;
       if (!point || !startPoint || !endPoint) continue;
       const distance = perpendicularDistance(
         point,
@@ -492,7 +495,7 @@ function retainedDraftIndexes(samples: DraftSample[], epsilon: number): Set<numb
   let pathStart = -1;
   let hasRenderablePath = false;
   for (let index = 0; index <= samples.length; index += 1) {
-    const isPathPoint = index < samples.length && samples[index].screen !== null;
+    const isPathPoint = index < samples.length && samples[index]?.screen != null;
     if (isPathPoint && pathStart < 0) pathStart = index;
     if (isPathPoint) continue;
 
@@ -767,8 +770,10 @@ export function finalizeFreehandStrokeDraft(draft: FreehandStrokeDraft | null | 
   const spans: SourceLineageSpan[] = [];
   for (let index = 0; index < state.spans.length; index += 1) {
     if (!usedSpans.has(index)) continue;
+    const span = state.spans[index];
+    if (!span) continue;
     remap.set(index, spans.length);
-    spans.push(state.spans[index]);
+    spans.push(span);
   }
   const points: FreehandStrokeV3Point[] = keptSamples.map(({ point }) => {
     if ("time" in point) {
@@ -835,10 +840,11 @@ function resolveNormalizedFreehandStrokePoints(stroke: FreehandStroke, {
 
     if (!resolvedSpans.has(point.span)) {
       let resolved: ResolvedFreehandSpan | null = null;
-      if (typeof resolveSpan === "function") {
+      const sourceSpan = stroke.spans[point.span];
+      if (sourceSpan && typeof resolveSpan === "function") {
         try {
           resolved = normalizeResolvedSpan(resolveSpan(
-            stroke.spans[point.span],
+            sourceSpan,
             point.span,
             stroke,
           ));

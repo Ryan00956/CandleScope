@@ -125,7 +125,7 @@ test("adapter exposes persistence-safe ordinal drawing coordinates", () => {
   });
 
   assert.equal(adapter.usesOrdinalTime(), true);
-  assert.deepEqual(adapter.axisTimeToDrawingAnchor(rows[1].time), {
+  assert.deepEqual(adapter.axisTimeToDrawingAnchor(mustBeDefined(rows[1]).time), {
     time: 100,
     sourceOrdinal: 1,
     sourceProjection: "renko",
@@ -168,7 +168,7 @@ test("coordinate contexts prefer one atomic snapshot projection config over a co
     },
   });
 
-  assert.deepEqual(adapter.axisTimeToDrawingAnchor(rows[1].time), {
+  assert.deepEqual(adapter.axisTimeToDrawingAnchor(mustBeDefined(rows[1]).time), {
     time: 200,
     sourceOrdinal: 0,
     sourceProjection: "renko",
@@ -311,8 +311,8 @@ test("projection snapshots keep primitive coordinates on the current incremental
   const nextSourceRows = sourceRows.concat(sourceRow(size + 1, 100 + size));
   store.applySourceDelta({ type: "tick", appended: true }, nextSourceRows);
   const currentDisplayRows = store.displaySnapshot();
-  const firstRow = currentDisplayRows[0];
-  const lastRow = currentDisplayRows[currentDisplayRows.length - 1];
+  const firstRow = mustBeDefined(currentDisplayRows[0]);
+  const lastRow = mustBeDefined(currentDisplayRows[currentDisplayRows.length - 1]);
   Object.defineProperty(firstRow, "customValues", {
     configurable: true,
     get() {

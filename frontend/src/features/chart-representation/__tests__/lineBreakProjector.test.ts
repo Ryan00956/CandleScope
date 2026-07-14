@@ -8,7 +8,11 @@ import type {
   ProjectionCustomValues,
   SourceBar,
 } from "../chartRepresentationTypes.js";
-import { malformedFixture } from "../../../test/testHelpers.js";
+import { malformedFixture, mustBeDefined } from "../../../test/testHelpers.js";
+
+function at<T>(values: readonly T[], index: number): T {
+  return mustBeDefined(values[index]);
+}
 
 function row(
   time: number,
@@ -51,9 +55,9 @@ test("the first close anchors and the next different close creates the first lin
   assert.deepEqual(data.map(body), [
     { open: 10, high: 12, low: 10, close: 12 },
   ]);
-  assert.deepEqual(data[0].time, { order: 0, sourceTime: 3, sourceOrdinal: 0 });
-  assert.equal(data[0].customValues.venue, "demo");
-  assert.deepEqual(data[0].customValues.chartProjection, {
+  assert.deepEqual(at(data, 0).time, { order: 0, sourceTime: 3, sourceOrdinal: 0 });
+  assert.equal(at(data, 0).customValues.venue, "demo");
+  assert.deepEqual(at(data, 0).customValues.chartProjection, {
     projectorId: "line-break",
     sourceFromTime: 1,
     sourceToTime: 3,
@@ -61,7 +65,7 @@ test("the first close anchors and the next different close creates the first lin
     synthetic: true,
     provisional: false,
   });
-  assert.deepEqual(data[0].customValues.lineBreak, {
+  assert.deepEqual(at(data, 0).customValues.lineBreak, {
     direction: "up",
     numberOfLines: 3,
     source: "close",
@@ -92,7 +96,7 @@ test("strict breakouts append once and V1 reversals open at the previous low", (
   ]);
   assert.deepEqual(data.map((point) => point.time.sourceTime), [2, 3, 4, 7, 9]);
   assert.deepEqual(data.map((point) => point.time.order), [0, 1, 2, 3, 4]);
-  assert.deepEqual(data[4].customValues.lineBreak, {
+  assert.deepEqual(at(data, 4).customValues.lineBreak, {
     direction: "down",
     numberOfLines: 3,
     source: "close",
@@ -163,41 +167,41 @@ test("adjacent no-output checkpoints share an immutable persistent window", () =
   ]);
 
   assert.strictEqual(
-    projected.checkpoints[0].lineWindow,
-    projected.checkpoints[1].lineWindow,
+    at(projected.checkpoints, 0).lineWindow,
+    at(projected.checkpoints, 1).lineWindow,
   );
   assert.notStrictEqual(
-    projected.checkpoints[1].lineWindow,
-    projected.checkpoints[2].lineWindow,
+    at(projected.checkpoints, 1).lineWindow,
+    at(projected.checkpoints, 2).lineWindow,
   );
   assert.strictEqual(
-    projected.checkpoints[2].lineWindow,
-    projected.checkpoints[3].lineWindow,
+    at(projected.checkpoints, 2).lineWindow,
+    at(projected.checkpoints, 3).lineWindow,
   );
   assert.strictEqual(
-    projected.checkpoints[3].lineWindow,
-    projected.checkpoints[4].lineWindow,
+    at(projected.checkpoints, 3).lineWindow,
+    at(projected.checkpoints, 4).lineWindow,
   );
   assert.strictEqual(
-    projected.checkpoints[2].lineWindow[0],
-    projected.checkpoints[4].lineWindow[0],
+    at(at(projected.checkpoints, 2).lineWindow, 0),
+    at(at(projected.checkpoints, 4).lineWindow, 0),
   );
-  assert.notStrictEqual(projected.checkpoints[4].lineWindow, projected.state.lineWindow);
+  assert.notStrictEqual(at(projected.checkpoints, 4).lineWindow, projected.state.lineWindow);
   assert.strictEqual(
-    projected.checkpoints[4].lineWindow[0],
-    projected.state.lineWindow[0],
+    at(at(projected.checkpoints, 4).lineWindow, 0),
+    at(projected.state.lineWindow, 0),
   );
-  assert.ok(Object.isFrozen(projected.checkpoints[2].lineWindow));
-  assert.ok(Object.isFrozen(projected.checkpoints[2].lineWindow[0]));
+  assert.ok(Object.isFrozen(at(projected.checkpoints, 2).lineWindow));
+  assert.ok(Object.isFrozen(at(at(projected.checkpoints, 2).lineWindow, 0)));
 
-  const externalSeed = structuredClone(projected.checkpoints[2]);
+  const externalSeed = structuredClone(at(projected.checkpoints, 2));
   const resumed = projector.projectWithState([row(6, 11)], {
     seedState: externalSeed,
   });
-  assert.notStrictEqual(resumed.checkpoints[0].lineWindow, externalSeed.lineWindow);
-  assert.ok(Object.isFrozen(resumed.checkpoints[0].lineWindow));
-  malformedFixture<{ closeTicks: number }>(externalSeed.lineWindow[0]).closeTicks = 999;
-  assert.equal(resumed.state.lineWindow[0].closeTicks, 12);
+  assert.notStrictEqual(at(resumed.checkpoints, 0).lineWindow, externalSeed.lineWindow);
+  assert.ok(Object.isFrozen(at(resumed.checkpoints, 0).lineWindow));
+  malformedFixture<{ closeTicks: number }>(at(externalSeed.lineWindow, 0)).closeTicks = 999;
+  assert.equal(at(resumed.state.lineWindow, 0).closeTicks, 12);
 });
 
 test("seeded projection carries the latest line when retained rows stay inside", () => {
@@ -215,8 +219,8 @@ test("seeded projection carries the latest line when retained rows stay inside",
   assert.deepEqual(resumed.data.map(body), [
     { open: 13, high: 14, low: 13, close: 14 },
   ]);
-  assert.equal(resumed.data[0].time.order, 2);
-  assert.equal(resumed.data[0].time.sourceTime, 4);
+  assert.equal(at(resumed.data, 0).time.order, 2);
+  assert.equal(at(resumed.data, 0).time.sourceTime, 4);
 });
 
 test("checkpoint resume carries the latest line and appends a breakout", () => {
@@ -229,7 +233,7 @@ test("checkpoint resume carries the latest line and appends a breakout", () => {
     row(5, 15),
   ]);
   const resumed = projector.projectWithState([row(4, 14), row(5, 15)], {
-    seedState: projected.checkpoints[3],
+    seedState: at(projected.checkpoints, 3),
   });
 
   assert.deepEqual(resumed.data.map(body), [
@@ -270,19 +274,19 @@ test("provisional projection does not mutate confirmed state or checkpoints", ()
     seedState: checkpoint,
   });
 
-  assert.equal(trial.data[0].customValues.chartProjection.provisional, false);
-  assert.equal(trial.data[1].customValues.chartProjection.provisional, true);
-  assert.equal(trial.checkpoints[0].nextOrder, 1);
-  assert.equal(trial.checkpoints[0].lineWindow.length, 1);
+  assert.equal(at(trial.data, 0).customValues.chartProjection.provisional, false);
+  assert.equal(at(trial.data, 1).customValues.chartProjection.provisional, true);
+  assert.equal(at(trial.checkpoints, 0).nextOrder, 1);
+  assert.equal(at(trial.checkpoints, 0).lineWindow.length, 1);
   assert.equal(checkpoint.nextOrder, 1);
   assert.equal(checkpoint.lineWindow.length, 1);
-  assert.equal(checkpoint.lineWindow[0].customValues.phase, "confirmed");
+  assert.equal(at(checkpoint.lineWindow, 0).customValues.phase, "confirmed");
 
   const resumedConfirmed = projector.projectWithState([row(3, 14)], {
     seedState: checkpoint,
   });
-  assert.equal(resumedConfirmed.data[1].close, 14);
-  assert.equal(resumedConfirmed.data[1].customValues.chartProjection.provisional, false);
+  assert.equal(at(resumedConfirmed.data, 1).close, 14);
+  assert.equal(at(resumedConfirmed.data, 1).customValues.chartProjection.provisional, false);
 });
 
 test("whitespace and invalid closes do not initialize or advance Line Break state", () => {
@@ -296,6 +300,6 @@ test("whitespace and invalid closes do not initialize or advance Line Break stat
   assert.deepEqual(projected.data.map(body), [
     { open: 10, high: 12, low: 10, close: 12 },
   ]);
-  assert.equal(projected.data[0].customValues.chartProjection.sourceFromTime, 3);
+  assert.equal(at(projected.data, 0).customValues.chartProjection.sourceFromTime, 3);
   assert.equal(projected.checkpoints.length, 4);
 });

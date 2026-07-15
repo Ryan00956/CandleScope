@@ -41,7 +41,7 @@ test("drawing document authority only rolls back for the exact legacy value", ()
   assert.equal(resolveDrawingDocumentAuthorityMode(true), "document");
 });
 
-test("authoritative scope clear cannot be revived by the session registry", () => {
+test("authoritative scope clear publishes a dirty async tombstone without rewriting legacy bytes", () => {
   const previousLocalStorage = globalThis.localStorage;
   const values = new Map<string, string>();
   globalThis.localStorage = memoryStorage(values);
@@ -63,8 +63,8 @@ test("authoritative scope clear cannot be revived by the session registry", () =
 
     assert.equal(clearDrawingScopeAuthoritatively(scopeKey, "document"), true);
     assert.equal(store.getSnapshot().entities.size, 0);
-    assert.equal(store.dirty, false);
-    assert.equal(values.get(storageKey), "[]");
+    assert.equal(store.dirty, true);
+    assert.notEqual(values.get(storageKey), "[]");
     assert.equal(drawingDocumentSessionRegistry.getStore(scopeKey), store);
     assert.equal(drawingDocumentSessionRegistry.isLoaded(scopeKey), true);
     assert.equal(drawingDocumentSessionRegistry.shouldLoadFromPersistence(scopeKey, store), false);
@@ -74,7 +74,7 @@ test("authoritative scope clear cannot be revived by the session registry", () =
   }
 });
 
-test("failed first clear write retains a dirty empty tombstone for retry", () => {
+test("clear scheduling never synchronously overwrites legacy bytes when storage rejects writes", () => {
   const previousLocalStorage = globalThis.localStorage;
   const values = new Map<string, string>();
   const scopeKey = `removed-indicator-write-failure-${Date.now()}`;
@@ -98,7 +98,7 @@ test("failed first clear write retains a dirty empty tombstone for retry", () =>
   };
 
   try {
-    assert.equal(clearDrawingScopeAuthoritatively(scopeKey, "document"), false);
+    assert.equal(clearDrawingScopeAuthoritatively(scopeKey, "document"), true);
     const store = drawingDocumentSessionRegistry.getStore(scopeKey);
     assert.equal(store.getSnapshot().entities.size, 0);
     assert.equal(store.dirty, true);
@@ -106,15 +106,15 @@ test("failed first clear write retains a dirty empty tombstone for retry", () =>
 
     rejectWrites = false;
     assert.equal(clearDrawingScopeAuthoritatively(scopeKey, "document"), true);
-    assert.equal(store.dirty, false);
-    assert.equal(values.get(storageKey), "[]");
+    assert.equal(store.dirty, true);
+    assert.notEqual(values.get(storageKey), "[]");
   } finally {
     if (previousLocalStorage === undefined) Reflect.deleteProperty(globalThis, "localStorage");
     else globalThis.localStorage = previousLocalStorage;
   }
 });
 
-test("unavailable first read also retains an empty tombstone until storage recovers", () => {
+test("scope clear does not synchronously read unavailable legacy storage", () => {
   const previousLocalStorage = globalThis.localStorage;
   const values = new Map<string, string>();
   const scopeKey = `removed-indicator-read-failure-${Date.now()}`;
@@ -127,26 +127,24 @@ test("unavailable first read also retains an empty tombstone until storage recov
     color: "#fff",
     lineWidth: 2,
   }]));
+  let storageAccessed = false;
   globalThis.localStorage = {
     get length() { return 1; },
     clear() { throw new Error("storage unavailable"); },
-    getItem() { throw new Error("storage unavailable"); },
+    getItem() { storageAccessed = true; throw new Error("storage unavailable"); },
     key() { return null; },
     removeItem() { throw new Error("storage unavailable"); },
     setItem() { throw new Error("storage unavailable"); },
   };
 
   try {
-    assert.equal(clearDrawingScopeAuthoritatively(scopeKey, "document"), false);
+    assert.equal(clearDrawingScopeAuthoritatively(scopeKey, "document"), true);
     const store = drawingDocumentSessionRegistry.getStore(scopeKey);
     assert.equal(store.getSnapshot().entities.size, 0);
     assert.equal(store.dirty, true);
     assert.equal(drawingDocumentSessionRegistry.isLoaded(scopeKey), true);
-
-    globalThis.localStorage = memoryStorage(values);
-    assert.equal(clearDrawingScopeAuthoritatively(scopeKey, "document"), true);
-    assert.equal(store.dirty, false);
-    assert.equal(values.get(storageKey), "[]");
+    assert.equal(storageAccessed, false);
+    assert.notEqual(values.get(storageKey), "[]");
   } finally {
     if (previousLocalStorage === undefined) Reflect.deleteProperty(globalThis, "localStorage");
     else globalThis.localStorage = previousLocalStorage;

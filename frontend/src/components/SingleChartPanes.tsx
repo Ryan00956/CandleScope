@@ -96,8 +96,10 @@ import {
   DRAWING_ENGINE_TOOL_IDS,
   loadDrawingEngineHost,
   preloadDrawingEngineHost,
+  probeDrawingEnginePresence,
   shouldLoadDrawingEngine,
 } from "../features/drawings/drawingEngineLoader";
+import { prepareDrawingExportFailClosed } from "../features/drawings/export/drawingExportReadiness";
 import {
   drawingToolForAnchorMode,
   supportsDrawingAnchorMode,
@@ -154,7 +156,11 @@ import type {
 } from "../features/chart-representation/chartRepresentationTypes.js";
 import type { VisibleRangeSnapshot as SavedVisibleRangeSnapshot } from "../features/chart-session/chartSessionTypes.js";
 import type { DrawingEngineApi, DrawingEngineHostProps } from "../features/drawings/DrawingEngineHost.js";
-import type { DrawingStylePatch } from "../features/drawings/drawingInteractionController.js";
+import type {
+  DrawingExportLease,
+  DrawingExportPrepareOptions,
+  DrawingStylePatch,
+} from "../features/drawings/drawingInteractionController.js";
 import type { SelectedDrawingMeta } from "../features/drawings/drawingSelectionController.js";
 import type { DrawingToolId, FibonacciLevel } from "../features/drawings/drawingTypes.js";
 import type { IndicatorSubPane } from "../features/indicators/indicatorPaneProjection.js";
@@ -1113,6 +1119,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     });
   }, [clearFutureTimeAxis, commitFutureTimeAxisPlan, createFutureTimeAxisPlan]);
   const [DrawingEngineHost, setDrawingEngineHost] = useState<DrawingEngineHostComponent | null>(null);
+  const [drawingEngineLoadError, setDrawingEngineLoadError] = useState<Error | null>(null);
+  const [probedDrawingPresence, setProbedDrawingPresence] = useState<Readonly<{
+    drawingKey: string;
+    error: Error | null;
+    present: boolean;
+  }> | null>(null);
   const [isAutoScale, setIsAutoScale] = useState(true);
   const [contextMenu, setContextMenu] = useState<PriceScaleContextMenuPosition | null>(null);
 
@@ -2769,9 +2781,34 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     prevSubPaneScopeRef.current = { base: currentBase, ids: currentIds };
   }, [drawingKeyBase, subPanes, symbol]);
 
-  const shouldMountDrawingEngine = supportsDrawingFeatures
-    && shouldLoadDrawingEngine({ activeTool: effectiveDrawingTool, drawingKey });
+  const shouldMountDrawingEngine = supportsDrawingFeatures && (
+    shouldLoadDrawingEngine({ activeTool: effectiveDrawingTool, drawingKey })
+    || (probedDrawingPresence?.drawingKey === drawingKey && probedDrawingPresence.present)
+    || drawingApiRef.current !== null
+  );
   const drawingAnchorReady = !!mainSeriesRef.current;
+
+  useEffect(() => {
+    if (!supportsDrawingFeatures || !drawingKey) return undefined;
+    if (shouldLoadDrawingEngine({ activeTool: null, drawingKey })) {
+      setProbedDrawingPresence(Object.freeze({ drawingKey, error: null, present: true }));
+      return undefined;
+    }
+    // An active tool already mounts the engine, whose repository restore is
+    // authoritative. Avoid decoding a missing-manifest document twice.
+    if (drawingEngineToolActive) return undefined;
+    let active = true;
+    void probeDrawingEnginePresence(drawingKey).then((present) => {
+      if (active) setProbedDrawingPresence(Object.freeze({ drawingKey, error: null, present }));
+    }).catch((error) => {
+      if (active) {
+        const failure = error instanceof Error ? error : new Error("Drawing presence probe failed", { cause: error });
+        setProbedDrawingPresence(Object.freeze({ drawingKey, error: failure, present: false }));
+        console.warn("SingleChartPanes: drawing presence probe failed closed", failure);
+      }
+    });
+    return () => { active = false; };
+  }, [drawingEngineToolActive, drawingKey, supportsDrawingFeatures]);
 
   useEffect(() => {
     if (!supportsDrawingFeatures
@@ -2782,7 +2819,16 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     let cancelled = false;
     preloadDrawingEngineHost();
     void loadDrawingEngineHost().then((module) => {
-      if (!cancelled) setDrawingEngineHost(() => module.default);
+      if (!cancelled) {
+        setDrawingEngineLoadError(null);
+        setDrawingEngineHost(() => module.default);
+      }
+    }).catch((error) => {
+      if (!cancelled) {
+        setDrawingEngineLoadError(error instanceof Error
+          ? error
+          : new Error("Drawing engine module failed to load", { cause: error }));
+      }
     });
     return () => { cancelled = true; };
   }, [
@@ -2805,9 +2851,24 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const updateSelectedDrawingStyle = useCallback((patch: DrawingStylePatch) => {
     drawingApiRef.current?.updateSelectedDrawingStyle?.(patch);
   }, []);
-  const prepareDrawingExport = useCallback(() => {
-    drawingApiRef.current?.prepareExport?.();
-  }, []);
+  const prepareDrawingExport = useCallback(async (
+    options?: DrawingExportPrepareOptions,
+  ): Promise<DrawingExportLease | null> => {
+    return prepareDrawingExportFailClosed({
+      drawingKey,
+      drawingToolActive: drawingEngineToolActive,
+      engineLoadError: drawingEngineLoadError,
+      getApi: () => drawingApiRef.current,
+      hasPresenceHint: () => shouldLoadDrawingEngine({ activeTool: null, drawingKey }),
+      probePresence: () => probeDrawingEnginePresence(drawingKey),
+      supportsDrawingFeatures,
+    }, options);
+  }, [
+    drawingEngineLoadError,
+    drawingEngineToolActive,
+    drawingKey,
+    supportsDrawingFeatures,
+  ]);
   const handleDrawingApiChange = useCallback((api: DrawingEngineApi | null) => {
     drawingApiRef.current = api;
   }, []);

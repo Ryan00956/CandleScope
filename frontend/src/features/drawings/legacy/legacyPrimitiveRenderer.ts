@@ -1,7 +1,20 @@
-import { exportDrawingDocument } from "../core/drawingCodec.js";
-import { canonicalDrawingValueEquals } from "../core/drawingDocument.js";
+import {
+  exportDrawingDocument,
+  savedDrawingFromEntity,
+} from "../core/drawingCodec.js";
+import {
+  canonicalDrawingValueEquals,
+  DRAWING_DOCUMENT_SCHEMA_VERSION,
+  MAX_DRAWING_DOCUMENT_ENTITIES,
+} from "../core/drawingDocument.js";
 import type { DrawingDocument, DrawingEntity } from "../core/drawingDocument.js";
 import { createPrimitiveFromSavedDrawing } from "../drawingPrimitiveFactory.js";
+import {
+  MAX_DRAWING_STORAGE_CHARS,
+  MAX_SAVED_DRAWINGS,
+  MAX_SAVED_FREEHAND_POINTS,
+  MAX_SAVED_FREEHAND_SPANS,
+} from "../drawingPersistence.js";
 import type { DrawingPrimitive, SavedDrawing } from "../drawingTypes.js";
 
 export type LegacyPrimitiveFactory = (drawing: SavedDrawing) => DrawingPrimitive | null;
@@ -18,9 +31,36 @@ export interface LegacyPrimitiveRendererOptions {
   shouldAttachPrimitive?: (primitive: DrawingPrimitive) => boolean;
 }
 
+export interface LegacyPrimitiveAsyncReconcileOptions {
+  readonly signal?: AbortSignal;
+  readonly monotonicNow?: () => number;
+  readonly yieldToHost?: () => Promise<void>;
+  /** May lower, but never raise, the production 8ms work budget. */
+  readonly chunkBudgetMs?: number;
+  /** May lower, but never raise, the production 8-entity work budget. */
+  readonly maxEntitiesPerChunk?: number;
+}
+
+export interface LegacyPrimitiveAsyncReconcileResult {
+  readonly ok: boolean;
+  readonly cancelled: boolean;
+  readonly entityCount: number;
+  readonly chunkCount: number;
+  readonly maxChunkDurationMs: number;
+}
+
 export interface LegacyPrimitiveRenderer {
   /** Atomically materialize and replace the current canonical snapshot. */
   reconcile(document: DrawingDocument): boolean;
+  /**
+   * Fair-yield initial restore. Candidate construction is cancellable and
+   * never touches the retained surface; the final compensated swap remains
+   * atomic from the registry's point of view.
+   */
+  reconcileAsync(
+    document: DrawingDocument,
+    options?: LegacyPrimitiveAsyncReconcileOptions,
+  ): Promise<LegacyPrimitiveAsyncReconcileResult>;
   /** Alias used by lifecycle code that treats each document as a full snapshot. */
   replaceDocument(document: DrawingDocument): boolean;
   /**
@@ -90,6 +130,220 @@ export function materializeLegacyPrimitives(
   } catch {
     return null;
   }
+}
+
+const LEGACY_RESTORE_CHUNK_BUDGET_MS = 8;
+const LEGACY_RESTORE_MAX_ENTITIES_PER_CHUNK = 8;
+
+interface AsyncMaterializationMetrics {
+  readonly entityCount: number;
+  readonly chunkCount: number;
+  readonly maxChunkDurationMs: number;
+}
+
+type AsyncMaterializationResult =
+  | Readonly<{
+      status: "ready";
+      primitives: readonly DrawingPrimitive[];
+      byId: Map<string, DrawingPrimitive>;
+      metrics: AsyncMaterializationMetrics;
+    }>
+  | Readonly<{
+      status: "cancelled" | "rejected";
+      metrics: AsyncMaterializationMetrics;
+    }>;
+
+function defaultMonotonicNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+function defaultYieldToHost(): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+function boundedChunkBudget(value: number | undefined): number {
+  if (value === undefined) return LEGACY_RESTORE_CHUNK_BUDGET_MS;
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new TypeError("legacy primitive restore chunk budget must be positive");
+  }
+  return Math.min(value, LEGACY_RESTORE_CHUNK_BUDGET_MS);
+}
+
+function boundedChunkEntityCount(value: number | undefined): number {
+  if (value === undefined) return LEGACY_RESTORE_MAX_ENTITIES_PER_CHUNK;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError("legacy primitive restore entity budget must be a positive integer");
+  }
+  return Math.min(value, LEGACY_RESTORE_MAX_ENTITIES_PER_CHUNK);
+}
+
+function asyncMaterializationMetrics(
+  entityCount: number,
+  chunkCount: number,
+  maxChunkDurationMs: number,
+): AsyncMaterializationMetrics {
+  return Object.freeze({ entityCount, chunkCount, maxChunkDurationMs });
+}
+
+function freehandPayloadCounts(drawing: SavedDrawing): Readonly<{
+  points: number;
+  spans: number;
+}> {
+  if (drawing.type !== "freehand" && drawing.type !== "highlighter") {
+    return Object.freeze({ points: 0, spans: 0 });
+  }
+  return drawing.stroke === undefined
+    ? Object.freeze({ points: drawing.dataPoints.length, spans: 0 })
+    : Object.freeze({
+        points: drawing.stroke.points.length,
+        spans: drawing.stroke.spans.length,
+      });
+}
+
+function validAsyncDocumentHeader(document: DrawingDocument): boolean {
+  const entityCount = document?.entities?.size;
+  return document?.schemaVersion === DRAWING_DOCUMENT_SCHEMA_VERSION
+    && typeof document.scopeKey === "string"
+    && document.scopeKey.length > 0
+    && Number.isSafeInteger(document.documentRevision)
+    && document.documentRevision >= 0
+    && Number.isSafeInteger(entityCount)
+    && entityCount >= 0
+    && entityCount <= MAX_DRAWING_DOCUMENT_ENTITIES
+    && entityCount <= MAX_SAVED_DRAWINGS
+    && typeof document.entities.get === "function"
+    && Array.isArray(document.zOrder)
+    && document.zOrder.length === entityCount;
+}
+
+/**
+ * Build one complete candidate registry without the synchronous
+ * exportDrawingDocument(document) pass. Validation and legacy-size accounting
+ * happen per entity, and no surface credential is touched before completion.
+ */
+async function materializeLegacyPrimitivesAsync(
+  document: DrawingDocument,
+  createPrimitive: LegacyPrimitiveFactory,
+  {
+    signal,
+    monotonicNow = defaultMonotonicNow,
+    yieldToHost = defaultYieldToHost,
+    chunkBudgetMs: requestedChunkBudgetMs,
+    maxEntitiesPerChunk: requestedMaxEntitiesPerChunk,
+  }: LegacyPrimitiveAsyncReconcileOptions,
+): Promise<AsyncMaterializationResult> {
+  const chunkBudgetMs = boundedChunkBudget(requestedChunkBudgetMs);
+  const maxEntitiesPerChunk = boundedChunkEntityCount(requestedMaxEntitiesPerChunk);
+  if (!validAsyncDocumentHeader(document)) {
+    return Object.freeze({
+      status: "rejected" as const,
+      metrics: asyncMaterializationMetrics(0, 0, 0),
+    });
+  }
+  if (signal?.aborted) {
+    return Object.freeze({
+      status: "cancelled" as const,
+      metrics: asyncMaterializationMetrics(0, 0, 0),
+    });
+  }
+
+  const primitives: DrawingPrimitive[] = [];
+  const byId = new Map<string, DrawingPrimitive>();
+  const seenIds = new Set<string>();
+  let totalPoints = 0;
+  let totalSpans = 0;
+  let serializedLength = 2;
+  let chunkCount = 0;
+  let chunkEntityCount = 0;
+  let chunkStartedAt = 0;
+  let chunkOpen = false;
+  let maxChunkDurationMs = 0;
+
+  const startChunk = (): void => {
+    chunkOpen = true;
+    chunkCount += 1;
+    chunkEntityCount = 0;
+    chunkStartedAt = monotonicNow();
+  };
+  const finishChunk = (): number => {
+    if (!chunkOpen) return 0;
+    const duration = Math.max(0, monotonicNow() - chunkStartedAt);
+    maxChunkDurationMs = Math.max(maxChunkDurationMs, duration);
+    return duration;
+  };
+  const metrics = (): AsyncMaterializationMetrics => asyncMaterializationMetrics(
+    primitives.length,
+    chunkCount,
+    maxChunkDurationMs,
+  );
+  const stop = (status: "cancelled" | "rejected"): AsyncMaterializationResult => {
+    finishChunk();
+    return Object.freeze({ status, metrics: metrics() });
+  };
+
+  for (let index = 0; index < document.zOrder.length; index += 1) {
+    if (signal?.aborted) return stop("cancelled");
+    if (!chunkOpen) startChunk();
+    const id = document.zOrder[index];
+    if (typeof id !== "string" || seenIds.has(id)) return stop("rejected");
+    const entity = document.entities.get(id);
+    if (!entity || entity.id !== id) return stop("rejected");
+
+    let drawing: SavedDrawing | null = null;
+    let primitive: DrawingPrimitive | null = null;
+    let itemRaw: string | null = null;
+    try {
+      drawing = savedDrawingFromEntity(entity);
+      if (drawing) {
+        itemRaw = JSON.stringify(drawing);
+        primitive = createPrimitive(drawing);
+      }
+    } catch {
+      return stop("rejected");
+    }
+    if (!drawing
+      || typeof itemRaw !== "string"
+      || !primitive
+      || primitiveId(primitive) !== id) return stop("rejected");
+
+    const counts = freehandPayloadCounts(drawing);
+    totalPoints += counts.points;
+    totalSpans += counts.spans;
+    serializedLength += itemRaw.length + (index === 0 ? 0 : 1);
+    if (totalPoints > MAX_SAVED_FREEHAND_POINTS
+      || totalSpans > MAX_SAVED_FREEHAND_SPANS
+      || serializedLength > MAX_DRAWING_STORAGE_CHARS) return stop("rejected");
+
+    seenIds.add(id);
+    primitives.push(primitive);
+    byId.set(id, primitive);
+    chunkEntityCount += 1;
+    const chunkDuration = Math.max(0, monotonicNow() - chunkStartedAt);
+    const hasMoreEntities = index + 1 < document.zOrder.length;
+    if (hasMoreEntities
+      && (chunkEntityCount >= maxEntitiesPerChunk || chunkDuration >= chunkBudgetMs)) {
+      finishChunk();
+      chunkOpen = false;
+      try {
+        await yieldToHost();
+      } catch {
+        return Object.freeze({ status: "rejected" as const, metrics: metrics() });
+      }
+      if (signal?.aborted) {
+        return Object.freeze({ status: "cancelled" as const, metrics: metrics() });
+      }
+    }
+  }
+
+  finishChunk();
+  return Object.freeze({
+    status: "ready" as const,
+    primitives: Object.freeze(primitives),
+    byId,
+    metrics: metrics(),
+  });
 }
 
 function invokeSurfaceAction(
@@ -177,6 +431,7 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
   #document: DrawingDocument | null = null;
   #attached = new Set<DrawingPrimitive>();
   #surfaceSynchronized = true;
+  #registryGeneration = 0;
 
   constructor(options: LegacyPrimitiveRendererOptions) {
     this.#surface = options.surface ?? {};
@@ -210,6 +465,9 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
     primitives: readonly DrawingPrimitive[],
     byId?: Map<string, DrawingPrimitive>,
   ): void {
+    this.#registryGeneration = this.#registryGeneration >= Number.MAX_SAFE_INTEGER
+      ? 1
+      : this.#registryGeneration + 1;
     this.#document = document;
     this.#primitives = [...primitives];
     this.#byId = byId ?? new Map(primitives.flatMap((primitive) => {
@@ -217,6 +475,71 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
       return id ? [[id, primitive] as const] : [];
     }));
     this.#surfaceSynchronized = this.#surfaceMatchesRegistry();
+  }
+
+  #rollbackCandidateReplacement(
+    attachedCandidates: readonly DrawingPrimitive[],
+    detachedPrevious: readonly DrawingPrimitive[],
+  ): void {
+    for (const detached of detachedPrevious) this.#attach(detached);
+    for (let index = attachedCandidates.length - 1; index >= 0; index -= 1) {
+      const attached = attachedCandidates[index];
+      if (attached) this.#detach(attached);
+    }
+    this.#surfaceSynchronized = this.#surfaceMatchesRegistry();
+  }
+
+  #commitCandidateReplacement(
+    document: DrawingDocument,
+    candidates: readonly DrawingPrimitive[],
+    byId: Map<string, DrawingPrimitive>,
+    signal: AbortSignal | null,
+  ): Readonly<{ ok: boolean; cancelled: boolean }> {
+    const cancelled = (): boolean => signal?.aborted === true;
+    if (cancelled()) return Object.freeze({ ok: false, cancelled: true });
+
+    // Recover every retained credential before replacing the logical registry.
+    // A failed compensation is retryable and never forgotten or duplicated.
+    if (!this.#surfaceSynchronized && !this.rebindSurface()) {
+      return Object.freeze({ ok: false, cancelled: cancelled() });
+    }
+    if (cancelled()) return Object.freeze({ ok: false, cancelled: true });
+
+    const attachedCandidates: DrawingPrimitive[] = [];
+    for (const primitive of candidates) {
+      if (cancelled()) {
+        this.#rollbackCandidateReplacement(attachedCandidates, []);
+        return Object.freeze({ ok: false, cancelled: true });
+      }
+      if (!this.#attach(primitive)) {
+        this.#rollbackCandidateReplacement(attachedCandidates, []);
+        return Object.freeze({ ok: false, cancelled: cancelled() });
+      }
+      attachedCandidates.push(primitive);
+    }
+
+    // Phase two replaces the attached snapshot. If detaching an old primitive
+    // fails (or cancellation arrives from a synchronous surface callback),
+    // restore old owners and remove the candidate set before returning.
+    const detachedPrevious: DrawingPrimitive[] = [];
+    for (const primitive of this.#primitives) {
+      if (cancelled()) {
+        this.#rollbackCandidateReplacement(attachedCandidates, detachedPrevious);
+        return Object.freeze({ ok: false, cancelled: true });
+      }
+      if (!this.#detach(primitive)) {
+        this.#rollbackCandidateReplacement(attachedCandidates, detachedPrevious);
+        return Object.freeze({ ok: false, cancelled: cancelled() });
+      }
+      detachedPrevious.push(primitive);
+    }
+    if (cancelled()) {
+      this.#rollbackCandidateReplacement(attachedCandidates, detachedPrevious);
+      return Object.freeze({ ok: false, cancelled: true });
+    }
+
+    this.#setRegistry(document, candidates, byId);
+    return Object.freeze({ ok: this.#surfaceSynchronized, cancelled: false });
   }
 
   reconcile(document: DrawingDocument): boolean {
@@ -233,44 +556,79 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
     const candidates = materializeLegacyPrimitives(document, this.#createPrimitive);
     if (!candidates) return false;
 
-    const attachedCandidates: DrawingPrimitive[] = [];
-    for (const primitive of candidates) {
-      if (!this.#attach(primitive)) {
-        for (let index = attachedCandidates.length - 1; index >= 0; index -= 1) {
-          const attached = attachedCandidates[index];
-          if (attached) this.#detach(attached);
-        }
-        this.#surfaceSynchronized = this.#surfaceMatchesRegistry();
-        return false;
-      }
-      attachedCandidates.push(primitive);
-    }
-
-    // Phase two replaces the attached snapshot. If detaching an old primitive
-    // fails, restore already-detached old entries and remove the candidate set.
-    const detachedPrevious: DrawingPrimitive[] = [];
-    for (const primitive of this.#primitives) {
-      if (!this.#detach(primitive)) {
-        for (const detached of detachedPrevious) {
-          this.#attach(detached);
-        }
-        for (let index = attachedCandidates.length - 1; index >= 0; index -= 1) {
-          const attached = attachedCandidates[index];
-          if (attached) this.#detach(attached);
-        }
-        this.#surfaceSynchronized = this.#surfaceMatchesRegistry();
-        return false;
-      }
-      detachedPrevious.push(primitive);
-    }
-
     const byId = new Map<string, DrawingPrimitive>();
     for (const primitive of candidates) {
       const id = primitiveId(primitive);
       if (id) byId.set(id, primitive);
     }
-    this.#setRegistry(document, candidates, byId);
-    return this.#surfaceSynchronized;
+    return this.#commitCandidateReplacement(document, candidates, byId, null).ok;
+  }
+
+  async reconcileAsync(
+    document: DrawingDocument,
+    options: LegacyPrimitiveAsyncReconcileOptions = {},
+  ): Promise<LegacyPrimitiveAsyncReconcileResult> {
+    const emptyResult = (
+      ok: boolean,
+      cancelled: boolean,
+    ): LegacyPrimitiveAsyncReconcileResult => Object.freeze({
+      ok,
+      cancelled,
+      entityCount: 0,
+      chunkCount: 0,
+      maxChunkDurationMs: 0,
+    });
+    if (options.signal?.aborted) return emptyResult(false, true);
+    if (document === this.#document) {
+      const ok = this.#surfaceSynchronized ? true : this.rebindSurface();
+      const cancelled = options.signal?.aborted === true;
+      return emptyResult(cancelled ? false : ok, cancelled);
+    }
+
+    const expectedRegistryGeneration = this.#registryGeneration;
+    let materialized: AsyncMaterializationResult;
+    try {
+      materialized = await materializeLegacyPrimitivesAsync(
+        document,
+        this.#createPrimitive,
+        options,
+      );
+    } catch {
+      return emptyResult(false, options.signal?.aborted === true);
+    }
+    const result = (
+      ok: boolean,
+      cancelled: boolean,
+      commitDurationMs = 0,
+    ): LegacyPrimitiveAsyncReconcileResult => Object.freeze({
+      ok,
+      cancelled,
+      entityCount: materialized.metrics.entityCount,
+      chunkCount: materialized.metrics.chunkCount,
+      maxChunkDurationMs: Math.max(
+        materialized.metrics.maxChunkDurationMs,
+        commitDurationMs,
+      ),
+    });
+    if (materialized.status !== "ready") {
+      return result(false, materialized.status === "cancelled");
+    }
+    if (options.signal?.aborted) return result(false, true);
+    // A sync reconcile/adoption/dispose may run while construction yields. A
+    // stale async candidate must never overwrite that newer registry.
+    if (this.#registryGeneration !== expectedRegistryGeneration) {
+      return result(false, false);
+    }
+    const monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
+    const commitStartedAt = monotonicNow();
+    const committed = this.#commitCandidateReplacement(
+      document,
+      materialized.primitives,
+      materialized.byId,
+      options.signal ?? null,
+    );
+    const commitDurationMs = Math.max(0, monotonicNow() - commitStartedAt);
+    return result(committed.ok, committed.cancelled, commitDurationMs);
   }
 
   replaceDocument(document: DrawingDocument): boolean {

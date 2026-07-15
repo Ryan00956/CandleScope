@@ -1,21 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, renderExportImage } from "./exportService";
+import {
+  buildExportPresentationKey,
+  DEFAULT_EXPORT_OPTIONS,
+  renderExportImage,
+} from "./exportService";
 import type { MutableRefObject } from "react";
 import type { ChartSurfaceActions } from "../../chart-adapter/useChartSurfaceRuntime.js";
+import type {
+  DrawingExportLease,
+  DrawingExportPrepareOptions,
+} from "../drawings/drawingInteractionController.js";
+import type { DrawingExportTarget } from "../drawings/export/drawingExportBarrier.js";
 import type { ExportImageResult, ExportMetadata, ExportOptions } from "./exportTypes.js";
-
-function waitForAnimationFrames(count = 2): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const tick = (remaining: number): void => {
-      if (remaining <= 0) {
-        resolve();
-        return;
-      }
-      requestAnimationFrame(() => tick(remaining - 1));
-    };
-    tick(count);
-  });
-}
 
 function revokeObjectUrl(url: string | null | undefined): void {
   if (url && url.startsWith("blob:")) {
@@ -45,6 +41,7 @@ export interface ExportPreviewState {
   mimeType: string;
   optionsKey: string;
   generatedAt: number | null;
+  drawingTarget: DrawingExportTarget | null;
 }
 
 const EMPTY_PREVIEW: ExportPreviewState = {
@@ -56,6 +53,7 @@ const EMPTY_PREVIEW: ExportPreviewState = {
   mimeType: "",
   optionsKey: "",
   generatedAt: null,
+  drawingTarget: null,
 };
 
 export interface ExportPreviewRuntime extends ExportPreviewState {
@@ -72,9 +70,10 @@ export interface UseExportPreviewRuntimeOptions {
   metadata: ExportMetadata;
   chartSurfaceActions: ChartSurfaceActions | null | undefined;
   pageExportRef: MutableRefObject<HTMLElement | null>;
-  drawingsHidden: boolean | null | undefined;
-  prepareDrawingExport?: (() => void) | null;
-  setDrawingsHiddenForExport?: ((hidden: boolean) => void) | null;
+  drawingsHidden?: boolean | null;
+  prepareDrawingExport?: ((
+    options?: DrawingExportPrepareOptions,
+  ) => Promise<DrawingExportLease | null>) | null;
   debounceMs?: number;
 }
 
@@ -88,9 +87,8 @@ export function useExportPreviewRuntime({
   metadata,
   chartSurfaceActions,
   pageExportRef,
-  drawingsHidden,
+  drawingsHidden = false,
   prepareDrawingExport,
-  setDrawingsHiddenForExport,
   debounceMs = 450,
 }: UseExportPreviewRuntimeOptions): ExportPreviewRuntime {
   const [preview, setPreview] = useState<ExportPreviewState>(EMPTY_PREVIEW);
@@ -104,9 +102,10 @@ export function useExportPreviewRuntime({
   const mountedRef = useRef(true);
   const openRef = useRef(isOpen);
   const latestOptionsRef = useRef<ExportOptions | null>(null);
+  const latestDrawingsHiddenRef = useRef(drawingsHidden === true);
   const latestOptionsKeyRef = useRef("");
   const runGenerationRef = useRef<(() => Promise<ExportImageResult | null>) | null>(null);
-  const drawingsHiddenRef = useRef(drawingsHidden);
+  const runAbortControllerRef = useRef<AbortController | null>(null);
 
   const desiredOptions = useMemo(() => ({
     ...DEFAULT_EXPORT_OPTIONS,
@@ -115,8 +114,8 @@ export function useExportPreviewRuntime({
   }), [metadata, options]);
 
   const desiredOptionsKey = useMemo(
-    () => buildExportOptionsKey(desiredOptions),
-    [desiredOptions],
+    () => buildExportPresentationKey(desiredOptions, drawingsHidden === true),
+    [desiredOptions, drawingsHidden],
   );
 
   const clearTimer = useCallback(() => {
@@ -128,6 +127,8 @@ export function useExportPreviewRuntime({
 
   const clearPreview = useCallback(() => {
     clearTimer();
+    runAbortControllerRef.current?.abort();
+    runAbortControllerRef.current = null;
     pendingRef.current = false;
     if (urlRef.current) {
       revokeObjectUrl(urlRef.current);
@@ -143,6 +144,8 @@ export function useExportPreviewRuntime({
     return () => {
       mountedRef.current = false;
       clearTimer();
+      runAbortControllerRef.current?.abort();
+      runAbortControllerRef.current = null;
       pendingRef.current = false;
       if (urlRef.current) {
         revokeObjectUrl(urlRef.current);
@@ -159,13 +162,10 @@ export function useExportPreviewRuntime({
   }, [clearPreview, isOpen]);
 
   useEffect(() => {
-    drawingsHiddenRef.current = drawingsHidden;
-  }, [drawingsHidden]);
-
-  useEffect(() => {
     latestOptionsRef.current = desiredOptions;
+    latestDrawingsHiddenRef.current = drawingsHidden === true;
     latestOptionsKeyRef.current = desiredOptionsKey;
-  }, [desiredOptions, desiredOptionsKey]);
+  }, [desiredOptions, desiredOptionsKey, drawingsHidden]);
 
   const runGeneration = useCallback(async (): Promise<ExportImageResult | null> => {
     if (!openRef.current || !mountedRef.current) return null;
@@ -177,15 +177,20 @@ export function useExportPreviewRuntime({
 
     runningRef.current = true;
     pendingRef.current = false;
+    const runAbortController = new AbortController();
+    runAbortControllerRef.current = runAbortController;
 
     const exportOptions = {
       ...DEFAULT_EXPORT_OPTIONS,
       ...(latestOptionsRef.current || {}),
       pageElement: pageExportRef.current,
     };
-    const requestKey = buildExportOptionsKey(exportOptions);
-    const previousDrawingsHidden = drawingsHiddenRef.current;
-    let changedDrawingVisibility = false;
+    const requestKey = buildExportPresentationKey(
+      exportOptions,
+      latestDrawingsHiddenRef.current,
+    );
+    let drawingLease: DrawingExportLease | null = null;
+    let drawingTarget: DrawingExportTarget | null = null;
 
     if (mountedRef.current && openRef.current) {
       setLoading(true);
@@ -197,18 +202,38 @@ export function useExportPreviewRuntime({
         throw new Error("图表尚未就绪，无法生成预览。 ");
       }
 
-      prepareDrawingExport?.();
-
-      if (exportOptions.hideDrawings && !previousDrawingsHidden) {
-        changedDrawingVisibility = true;
-        setDrawingsHiddenForExport?.(true);
+      if (prepareDrawingExport) {
+        drawingLease = await withTimeout(
+          prepareDrawingExport({
+            hideDrawings: exportOptions.hideDrawings,
+            timeoutMs: 5_000,
+            signal: runAbortController.signal,
+          }),
+          5_250,
+          "绘图导出准备超时，未截取可能处于半更新状态的画面。 ",
+        );
+        drawingTarget = drawingLease
+          ? Object.freeze({
+              scopeKey: drawingLease.receipt.scopeKey,
+              documentRevision: drawingLease.receipt.documentRevision,
+            })
+          : null;
       }
 
-      await waitForAnimationFrames(2);
       const snapshot = chartSurfaceActions.getExportSnapshot();
       const result = await withTimeout<ExportImageResult>(
-        renderExportImage(snapshot, exportOptions),
-        12000,
+        renderExportImage(snapshot, exportOptions, {
+          afterCapture: async () => {
+            if (!drawingLease) return;
+            if (!(await drawingLease.revalidate())) {
+              throw new Error("绘图在截图期间发生变化，已丢弃过期预览，请重试。 ");
+            }
+            const completedLease = drawingLease;
+            await completedLease.restore();
+            drawingLease = null;
+          },
+        }),
+        30_000,
         "预览生成超时，请尝试降低缩放倍率、切换到图表范围，或稍后重试。 ",
       );
       const isLatest = requestKey === latestOptionsKeyRef.current;
@@ -224,8 +249,9 @@ export function useExportPreviewRuntime({
           width: result.width,
           height: result.height,
           mimeType: result.mimeType,
-          optionsKey: result.optionsKey,
+          optionsKey: requestKey,
           generatedAt: Date.now(),
+          drawingTarget,
         });
         revokeObjectUrl(oldUrl);
         setError(null);
@@ -240,11 +266,18 @@ export function useExportPreviewRuntime({
       }
       return null;
     } finally {
-      if (changedDrawingVisibility) {
-        setDrawingsHiddenForExport?.(false);
+      if (drawingLease) {
+        try {
+          await drawingLease.restore();
+        } catch (restoreError) {
+          console.warn("Failed to restore drawing presentation after export", restoreError);
+        }
       }
 
       runningRef.current = false;
+      if (runAbortControllerRef.current === runAbortController) {
+        runAbortControllerRef.current = null;
+      }
       const shouldRunAgain = openRef.current && mountedRef.current && (
         pendingRef.current || requestKey !== latestOptionsKeyRef.current
       );
@@ -256,7 +289,7 @@ export function useExportPreviewRuntime({
         setLoading(false);
       }
     }
-  }, [chartSurfaceActions, pageExportRef, prepareDrawingExport, setDrawingsHiddenForExport]);
+  }, [chartSurfaceActions, pageExportRef, prepareDrawingExport]);
 
   useEffect(() => {
     runGenerationRef.current = runGeneration;

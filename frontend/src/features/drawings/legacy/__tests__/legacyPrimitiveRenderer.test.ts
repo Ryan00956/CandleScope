@@ -55,6 +55,187 @@ test("renderer materializes and replaces snapshots in stable document z-order", 
   assert.equal(renderer.getPrimitiveById("line"), null);
 });
 
+test("reconcileAsync yields every eight entities and commits only after pure construction", async () => {
+  let clock = 0;
+  let yieldCount = 0;
+  const physical = new Set<string>();
+  const factoryCalls: string[] = [];
+  const renderer = createLegacyPrimitiveRenderer({
+    createPrimitive(drawing) {
+      clock += 1;
+      if (drawing.id) factoryCalls.push(drawing.id);
+      return createPrimitiveFromSavedDrawing(drawing);
+    },
+    surface: {
+      attachPrimitive(primitive) {
+        physical.add(primitive.id);
+        return true;
+      },
+      detachPrimitive(primitive) {
+        physical.delete(primitive.id);
+        return true;
+      },
+    },
+  });
+  const initial = documentFrom([{ type: "line", id: "old" }], "async-chunks");
+  assert.equal(renderer.reconcile(initial), true);
+  clock = 0;
+  factoryCalls.length = 0;
+  const next = documentFrom(Array.from({ length: 18 }, (_value, index): SavedDrawing => ({
+    type: "line",
+    id: `next-${index}`,
+  })), "async-chunks");
+
+  const result = await renderer.reconcileAsync(next, {
+    monotonicNow: () => clock,
+    maxEntitiesPerChunk: 8,
+    chunkBudgetMs: 8,
+    yieldToHost: async () => {
+      yieldCount += 1;
+      assert.strictEqual(renderer.documentSnapshot(), initial);
+      assert.deepEqual([...physical], ["old"], "candidate construction must not touch the surface");
+    },
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    cancelled: false,
+    entityCount: 18,
+    chunkCount: 3,
+    maxChunkDurationMs: 8,
+  });
+  assert.equal(yieldCount, 2, "the final partial chunk must not schedule an extra yield");
+  assert.deepEqual(factoryCalls, Array.from({ length: 18 }, (_value, index) => `next-${index}`));
+  assert.strictEqual(renderer.documentSnapshot(), next);
+  assert.deepEqual([...physical], Array.from({ length: 18 }, (_value, index) => `next-${index}`));
+});
+
+test("reconcileAsync cancellation during a yield leaves registry and surface untouched", async () => {
+  let clock = 0;
+  const attached: string[] = [];
+  const detached: string[] = [];
+  const controller = new AbortController();
+  const renderer = createLegacyPrimitiveRenderer({
+    createPrimitive(drawing) {
+      clock += 1;
+      return createPrimitiveFromSavedDrawing(drawing);
+    },
+    surface: {
+      attachPrimitive(primitive) {
+        attached.push(primitive.id);
+        return true;
+      },
+      detachPrimitive(primitive) {
+        detached.push(primitive.id);
+        return true;
+      },
+    },
+  });
+  const initial = documentFrom([{ type: "line", id: "old" }], "async-cancel");
+  assert.equal(renderer.reconcile(initial), true);
+  clock = 0;
+  const next = documentFrom(Array.from({ length: 10 }, (_value, index): SavedDrawing => ({
+    type: "line",
+    id: `cancelled-${index}`,
+  })), "async-cancel");
+
+  const result = await renderer.reconcileAsync(next, {
+    signal: controller.signal,
+    monotonicNow: () => clock,
+    maxEntitiesPerChunk: 2,
+    yieldToHost: async () => { controller.abort("test cancellation"); },
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    cancelled: true,
+    entityCount: 2,
+    chunkCount: 1,
+    maxChunkDurationMs: 2,
+  });
+  assert.strictEqual(renderer.documentSnapshot(), initial);
+  assert.deepEqual(ids(renderer.snapshot()), ["old"]);
+  assert.deepEqual(attached, ["old"]);
+  assert.deepEqual(detached, []);
+});
+
+test("reconcileAsync rejects a stale candidate after another reconcile wins during a yield", async () => {
+  const attached: string[] = [];
+  const detached: string[] = [];
+  const renderer = createLegacyPrimitiveRenderer({
+    surface: {
+      attachPrimitive(primitive) {
+        attached.push(primitive.id);
+        return true;
+      },
+      detachPrimitive(primitive) {
+        detached.push(primitive.id);
+        return true;
+      },
+    },
+  });
+  const initial = documentFrom([{ type: "line", id: "old" }], "async-stale");
+  const winner = documentFrom([{ type: "line", id: "winner" }], "async-stale");
+  const stale = documentFrom(Array.from({ length: 10 }, (_value, index): SavedDrawing => ({
+    type: "line",
+    id: `stale-${index}`,
+  })), "async-stale");
+  assert.equal(renderer.reconcile(initial), true);
+  let replaced = false;
+
+  const result = await renderer.reconcileAsync(stale, {
+    maxEntitiesPerChunk: 2,
+    yieldToHost: async () => {
+      if (replaced) return;
+      replaced = true;
+      assert.equal(renderer.reconcile(winner), true);
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.cancelled, false);
+  assert.equal(result.entityCount, 10);
+  assert.equal(result.chunkCount, 5);
+  assert.strictEqual(renderer.documentSnapshot(), winner);
+  assert.deepEqual(ids(renderer.snapshot()), ["winner"]);
+  assert.deepEqual(attached, ["old", "winner"]);
+  assert.deepEqual(detached, ["old"]);
+});
+
+test("reconcileAsync compensates cancellation raised by a surface attach callback", async () => {
+  const controller = new AbortController();
+  const physical = new Set<string>();
+  let cancelOnCandidate = false;
+  const renderer = createLegacyPrimitiveRenderer({
+    surface: {
+      attachPrimitive(primitive) {
+        physical.add(primitive.id);
+        if (cancelOnCandidate && primitive.id === "candidate-a") controller.abort();
+        return true;
+      },
+      detachPrimitive(primitive) {
+        physical.delete(primitive.id);
+        return true;
+      },
+    },
+  });
+  const initial = documentFrom([{ type: "line", id: "old" }], "async-commit-cancel");
+  const next = documentFrom([
+    { type: "line", id: "candidate-a" },
+    { type: "line", id: "candidate-b" },
+  ], "async-commit-cancel");
+  assert.equal(renderer.reconcile(initial), true);
+  cancelOnCandidate = true;
+
+  const result = await renderer.reconcileAsync(next, { signal: controller.signal });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.cancelled, true);
+  assert.strictEqual(renderer.documentSnapshot(), initial);
+  assert.deepEqual(ids(renderer.snapshot()), ["old"]);
+  assert.deepEqual([...physical], ["old"]);
+});
+
 test("detached document adoption materializes only affected ids and preserves every other owner", () => {
   const factoryCalls: string[] = [];
   const attached: DrawingPrimitive[] = [];

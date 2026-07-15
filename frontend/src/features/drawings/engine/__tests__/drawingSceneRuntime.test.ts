@@ -11,6 +11,7 @@ import type { LegacyPrimitiveRenderer } from "../../legacy/legacyPrimitiveRender
 import { drawingPerfCounters } from "../../performance/drawingPerfCounters.js";
 import { createDrawingScreenDisplayList } from "../../rendering/drawingDisplayList.js";
 import {
+  DrawingSceneExactPaintError,
   createDrawingSceneRuntime,
 } from "../drawingSceneRuntime.js";
 import type {
@@ -18,6 +19,7 @@ import type {
   DrawingSceneProjectionRequest,
 } from "../drawingSceneRuntime.js";
 import type { DrawingRenderRevisionStamp } from "../drawingRenderScheduler.js";
+import type { DrawingScenePaintAck } from "../../rendering/DrawingScenePrimitive.js";
 import type {
   DrawingWorkerTransport,
 } from "../../worker/drawingWorkerClient.js";
@@ -397,6 +399,280 @@ test("viewport invalidation publishes continuous LOD immediately and exact LOD a
   assert.ok(exactPlan && listener);
   listener(exactPlan.stamp);
   assert.equal(runtime.snapshot().lastExactSettleMs, 115);
+  runtime.dispose();
+});
+
+test("exact paint barrier accepts only a fresh exact plan and newer full paint evidence", async () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let exactPaintListener: ((ack: DrawingScenePaintAck) => void) | null = null;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    publishScene: () => true,
+    subscribeSceneExactPainted: (listener) => {
+      exactPaintListener = listener;
+      return () => { exactPaintListener = null; };
+    },
+  });
+  assert.equal(runtime.flushNow(), true);
+  const previousPlan = runtime.snapshot().plan;
+  assert.ok(previousPlan);
+  const deliverExactPaint = (ack: DrawingScenePaintAck): void => {
+    const listener = exactPaintListener as ((value: DrawingScenePaintAck) => void) | null;
+    assert.ok(listener);
+    listener(ack);
+  };
+  deliverExactPaint({
+    plan: previousPlan,
+    stamp: previousPlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+
+  let settled = false;
+  const pending = runtime.waitForExactPaint({
+    scopeKey: "scope-a",
+    documentRevision: 0,
+    timeoutMs: 1_000,
+  });
+  void pending.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+  const exactPlan = runtime.snapshot().plan;
+  assert.ok(exactPlan);
+  assert.notStrictEqual(exactPlan, previousPlan);
+  assert.equal(runtime.snapshot().lodToleranceClass, "settledExact");
+
+  deliverExactPaint({
+    plan: previousPlan,
+    stamp: previousPlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 2,
+  });
+  deliverExactPaint({
+    plan: exactPlan,
+    stamp: exactPlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+  deliverExactPaint({
+    plan: exactPlan,
+    stamp: { ...exactPlan.stamp },
+    attachmentRevision: 1,
+    paintSequence: 2,
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  deliverExactPaint({
+    plan: exactPlan,
+    stamp: exactPlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 2,
+  });
+  const receipt = await pending;
+  assert.strictEqual(receipt.plan, exactPlan);
+  assert.strictEqual(receipt.stamp, exactPlan.stamp);
+  assert.equal(receipt.lodToleranceClass, "settledExact");
+  assert.equal(receipt.attachmentRevision, 1);
+  assert.equal(receipt.paintSequence, 2);
+  assert.ok(receipt.sceneEpoch > 0);
+  runtime.dispose();
+});
+
+test("exact paint barrier follows the newest scene epoch and ignores a stale plan ack", async () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let exactPaintListener: ((ack: DrawingScenePaintAck) => void) | null = null;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    publishScene: () => true,
+    subscribeSceneExactPainted: (listener) => {
+      exactPaintListener = listener;
+      return () => { exactPaintListener = null; };
+    },
+  });
+
+  let settled = false;
+  const pending = runtime.waitForExactPaint({
+    scopeKey: "scope-a",
+    documentRevision: 0,
+    timeoutMs: 1_000,
+  });
+  void pending.then(
+    () => { settled = true; },
+    () => { settled = true; },
+  );
+  const firstExactPlan = runtime.snapshot().plan;
+  assert.ok(firstExactPlan);
+  const deliverExactPaint = (ack: DrawingScenePaintAck): void => {
+    const listener = exactPaintListener as ((value: DrawingScenePaintAck) => void) | null;
+    assert.ok(listener);
+    listener(ack);
+  };
+  assert.equal(runtime.invalidate("newer-scene"), true);
+  assert.equal(runtime.flushNow(), true);
+  const currentExactPlan = runtime.snapshot().plan;
+  assert.ok(currentExactPlan);
+  assert.notStrictEqual(currentExactPlan, firstExactPlan);
+
+  deliverExactPaint({
+    plan: firstExactPlan,
+    stamp: firstExactPlan.stamp,
+    attachmentRevision: 2,
+    paintSequence: 1,
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  deliverExactPaint({
+    plan: currentExactPlan,
+    stamp: currentExactPlan.stamp,
+    attachmentRevision: 2,
+    paintSequence: 2,
+  });
+  const receipt = await pending;
+  assert.strictEqual(receipt.plan, currentExactPlan);
+  assert.equal(receipt.paintSequence, 2);
+  runtime.dispose();
+});
+
+test("exact paint barrier rejects document and scope invalidation explicitly", async () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    publishScene: () => true,
+    subscribeSceneExactPainted: () => () => {},
+  });
+
+  const documentWait = runtime.waitForExactPaint({
+    scopeKey: "scope-a",
+    documentRevision: 0,
+    timeoutMs: 1_000,
+  });
+  const documentRejection = assert.rejects(documentWait, (error: unknown) => {
+    assert.ok(error instanceof DrawingSceneExactPaintError);
+    assert.equal(error.code, "document-invalidated");
+    return true;
+  });
+  assert.equal(store.loadDocument(documentWithRevision(1)).ok, true);
+  await documentRejection;
+
+  renderer.setDocument(store.getSnapshot());
+  const scopeWait = runtime.waitForExactPaint({
+    scopeKey: "scope-a",
+    documentRevision: 1,
+    timeoutMs: 1_000,
+  });
+  const scopeRejection = assert.rejects(scopeWait, (error: unknown) => {
+    assert.ok(error instanceof DrawingSceneExactPaintError);
+    assert.equal(error.code, "scope-invalidated");
+    return true;
+  });
+  runtime.suspend();
+  await scopeRejection;
+});
+
+test("exact paint barrier rejects timeout, abort, and missing exact evidence", async () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  const binding = {
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    publishScene: () => true,
+    subscribeSceneExactPainted: () => () => {},
+  } as const;
+  runtime.activate(binding);
+
+  await assert.rejects(runtime.waitForExactPaint({
+    scopeKey: "scope-a",
+    documentRevision: 0,
+    timeoutMs: 5,
+  }), (error: unknown) => {
+    assert.ok(error instanceof DrawingSceneExactPaintError);
+    assert.equal(error.code, "timeout");
+    return true;
+  });
+
+  const preAborted = new AbortController();
+  preAborted.abort();
+  await assert.rejects(runtime.waitForExactPaint({
+    scopeKey: "scope-a",
+    documentRevision: 0,
+    signal: preAborted.signal,
+  }), (error: unknown) => {
+    assert.ok(error instanceof DrawingSceneExactPaintError);
+    assert.equal(error.code, "aborted");
+    return true;
+  });
+
+  const aborted = new AbortController();
+  const abortWait = runtime.waitForExactPaint({
+    scopeKey: "scope-a",
+    documentRevision: 0,
+    timeoutMs: 1_000,
+    signal: aborted.signal,
+  });
+  const abortRejection = assert.rejects(abortWait, (error: unknown) => {
+    assert.ok(error instanceof DrawingSceneExactPaintError);
+    assert.equal(error.code, "aborted");
+    return true;
+  });
+  aborted.abort();
+  await abortRejection;
+
+  assert.equal(runtime.activate({
+    adapter: binding.adapter,
+    renderer: binding.renderer,
+    store: binding.store,
+    projectScene: binding.projectScene,
+    publishScene: binding.publishScene,
+  }), true);
+  await assert.rejects(runtime.waitForExactPaint({
+    scopeKey: "scope-a",
+    documentRevision: 0,
+  }), (error: unknown) => {
+    assert.ok(error instanceof DrawingSceneExactPaintError);
+    assert.equal(error.code, "runtime-unavailable");
+    return true;
+  });
   runtime.dispose();
 });
 

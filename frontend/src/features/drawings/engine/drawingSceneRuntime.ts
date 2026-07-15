@@ -13,6 +13,7 @@ import {
   withDrawingFreehandRaster,
 } from "../rendering/drawingDisplayList.js";
 import type { DrawingScreenDisplayList } from "../rendering/drawingDisplayList.js";
+import type { DrawingScenePaintAck } from "../rendering/DrawingScenePrimitive.js";
 import {
   createDrawingRenderScheduler,
   drawingRenderRevisionKey,
@@ -126,6 +127,14 @@ export interface DrawingSceneRuntimeBinding {
   readonly subscribeScenePainted?: (
     listener: (stamp: DrawingRenderRevisionStamp) => void,
   ) => () => void;
+  /**
+   * Full paint evidence for exact barriers. A stamp-only acknowledgement is
+   * intentionally insufficient because it cannot prove plan identity or a
+   * paint newer than the request.
+   */
+  readonly subscribeSceneExactPainted?: (
+    listener: (ack: DrawingScenePaintAck) => void,
+  ) => () => void;
   readonly clearScene?: () => void;
   readonly compareParity?: (
     plan: DrawingScreenDisplayList,
@@ -190,10 +199,46 @@ export interface DrawingSceneRuntimeSnapshot {
   readonly renderedPointCount: number;
 }
 
+export type DrawingSceneExactPaintErrorCode =
+  | "aborted"
+  | "document-invalidated"
+  | "runtime-unavailable"
+  | "scope-invalidated"
+  | "timeout";
+
+export class DrawingSceneExactPaintError extends Error {
+  readonly code: DrawingSceneExactPaintErrorCode;
+
+  constructor(code: DrawingSceneExactPaintErrorCode, message: string) {
+    super(message);
+    this.name = "DrawingSceneExactPaintError";
+    this.code = code;
+  }
+}
+
+export interface DrawingSceneExactPaintRequest {
+  readonly scopeKey: string;
+  readonly documentRevision: number;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+}
+
+export interface DrawingSceneExactPaintReceipt {
+  readonly plan: DrawingScreenDisplayList;
+  readonly stamp: DrawingRenderRevisionStamp;
+  readonly sceneEpoch: number;
+  readonly lodToleranceClass: "settledExact";
+  readonly attachmentRevision: number;
+  readonly paintSequence: number;
+}
+
 export interface DrawingSceneRuntime {
   activate(binding: DrawingSceneRuntimeBinding): boolean;
   invalidate(reason?: string): boolean;
   requestParity(): boolean;
+  waitForExactPaint(
+    request: DrawingSceneExactPaintRequest,
+  ): Promise<DrawingSceneExactPaintReceipt>;
   flushNow(): boolean;
   suspend(): void;
   snapshot(): DrawingSceneRuntimeSnapshot;
@@ -223,6 +268,26 @@ interface SceneRenderPlan extends DrawingPreparedRenderPlan {
   readonly sceneEpoch: number;
   readonly totalEntityCount: number;
   readonly visibleEntityCount: number;
+}
+
+interface ExactPaintEvidence {
+  readonly attachmentRevision: number;
+  readonly paintSequence: number;
+}
+
+interface ExactPaintWaiter {
+  readonly binding: DrawingSceneRuntimeBinding;
+  readonly scopeKey: string;
+  readonly documentRevision: number;
+  readonly minimumSceneEpoch: number;
+  readonly previousPlan: DrawingScreenDisplayList | null;
+  readonly baseline: ExactPaintEvidence | null;
+  readonly signal: AbortSignal | null;
+  readonly abortListener: (() => void) | null;
+  readonly resolve: (receipt: DrawingSceneExactPaintReceipt) => void;
+  readonly reject: (error: DrawingSceneExactPaintError) => void;
+  timeoutHandle: ReturnType<typeof setTimeout> | null;
+  settled: boolean;
 }
 
 function frameStamp(
@@ -608,6 +673,7 @@ export function createDrawingSceneRuntime({
   let unsubscribeDocument: (() => void) | null = null;
   let unsubscribeFrame: (() => void) | null = null;
   let unsubscribeScenePainted: (() => void) | null = null;
+  let unsubscribeSceneExactPainted: (() => void) | null = null;
   let latestPlan: DrawingScreenDisplayList | null = null;
   let latestHitIndex: DrawingHitIndex | null = null;
   let latestPublishedPlan: SceneRenderPlan | null = null;
@@ -617,6 +683,8 @@ export function createDrawingSceneRuntime({
   let exactRequestedAt: number | null = null;
   let pendingExactPaintStamp: DrawingRenderRevisionStamp | null = null;
   let lastExactSettleMs: number | null = null;
+  let lastExactPaintEvidence: ExactPaintEvidence | null = null;
+  const exactPaintWaiters = new Set<ExactPaintWaiter>();
   let effectiveRasterBackend: DrawingRasterBackend = rasterBackend;
   let workerClient: DrawingWorkerClient | null = null;
   /** Sticky for this runtime mount after capability/protocol/raster failure. */
@@ -858,8 +926,63 @@ export function createDrawingSceneRuntime({
     exactDelayHandle = null;
   };
 
+  const settleExactPaintWaiter = (waiter: ExactPaintWaiter): boolean => {
+    if (waiter.settled) return false;
+    waiter.settled = true;
+    exactPaintWaiters.delete(waiter);
+    if (waiter.timeoutHandle !== null) clearTimeout(waiter.timeoutHandle);
+    waiter.timeoutHandle = null;
+    if (waiter.signal && waiter.abortListener) {
+      waiter.signal.removeEventListener("abort", waiter.abortListener);
+    }
+    return true;
+  };
+
+  const rejectExactPaintWaiter = (
+    waiter: ExactPaintWaiter,
+    code: DrawingSceneExactPaintErrorCode,
+    message: string,
+  ): void => {
+    if (!settleExactPaintWaiter(waiter)) return;
+    waiter.reject(new DrawingSceneExactPaintError(code, message));
+  };
+
+  const rejectExactPaintWaiters = (
+    code: DrawingSceneExactPaintErrorCode,
+    message: string,
+  ): void => {
+    for (const waiter of Array.from(exactPaintWaiters)) {
+      rejectExactPaintWaiter(waiter, code, message);
+    }
+  };
+
+  const rejectInvalidatedExactPaintWaiters = (
+    nextBinding: DrawingSceneRuntimeBinding,
+  ): void => {
+    const document = nextBinding.store.getSnapshot();
+    for (const waiter of Array.from(exactPaintWaiters)) {
+      if (waiter.binding !== nextBinding || waiter.scopeKey !== document.scopeKey) {
+        rejectExactPaintWaiter(
+          waiter,
+          "scope-invalidated",
+          "drawing scene exact paint scope was invalidated",
+        );
+      } else if (waiter.documentRevision !== document.documentRevision) {
+        rejectExactPaintWaiter(
+          waiter,
+          "document-invalidated",
+          "drawing scene exact paint document was invalidated",
+        );
+      }
+    }
+  };
+
+  const nextSceneEpoch = (): number => (
+    sceneEpoch >= Number.MAX_SAFE_INTEGER ? 1 : sceneEpoch + 1
+  );
+
   const invalidateScene = (reason: string): boolean => {
-    sceneEpoch = sceneEpoch >= Number.MAX_SAFE_INTEGER ? 1 : sceneEpoch + 1;
+    sceneEpoch = nextSceneEpoch();
     return scheduler.invalidate(reason);
   };
 
@@ -1026,6 +1149,10 @@ export function createDrawingSceneRuntime({
         staleWorkerPublishCount += 1;
         drawingPerfCounters.incrementCounter("staleWorkerPublishCount");
       }
+      rejectExactPaintWaiters(
+        "runtime-unavailable",
+        "drawing scene exact paint runtime rejected publication",
+      );
       removeSubscriptions();
       onError?.(visiblePublicationError
         ?? new Error("drawing scene publication was rejected by the current surface"));
@@ -1167,6 +1294,10 @@ export function createDrawingSceneRuntime({
         // pre-mutation legacy fallback or the post-boundary last-valid-plan
         // fault path. Keep latestPlan intact for the latter.
         faulted = true;
+        rejectExactPaintWaiters(
+          "runtime-unavailable",
+          "drawing scene exact paint runtime faulted",
+        );
         removeSubscriptions();
       }
       onError?.(error);
@@ -1186,13 +1317,80 @@ export function createDrawingSceneRuntime({
     pendingExactPaintStamp = null;
   };
 
+  const isNewerExactPaintEvidence = (
+    candidate: ExactPaintEvidence,
+    baseline: ExactPaintEvidence | null,
+  ): boolean => {
+    if (!baseline) return true;
+    if (candidate.attachmentRevision !== baseline.attachmentRevision) {
+      return candidate.attachmentRevision > baseline.attachmentRevision;
+    }
+    return candidate.paintSequence > baseline.paintSequence;
+  };
+
+  const acceptSceneExactPainted = (ack: DrawingScenePaintAck): void => {
+    const plan = latestPublishedPlan;
+    const activeBinding = binding;
+    if (disposed
+      || faulted
+      || mode !== "scene-canary"
+      || !activeBinding
+      || !plan
+      || ack.plan !== latestPlan
+      || ack.plan !== latestHitIndex?.list
+      || ack.stamp !== ack.plan.stamp
+      || plan.binding !== activeBinding
+      || plan.sceneEpoch !== sceneEpoch
+      || !Number.isSafeInteger(ack.attachmentRevision)
+      || ack.attachmentRevision < 0
+      || !Number.isSafeInteger(ack.paintSequence)
+      || ack.paintSequence <= 0) return;
+
+    const document = activeBinding.store.getSnapshot();
+    if (document !== plan.document
+      || activeBinding.renderer.documentSnapshot() !== document
+      || plan.stamp.scopeKey !== document.scopeKey
+      || plan.stamp.documentRevision !== document.documentRevision
+      || drawingRenderRevisionKey(ack.stamp) !== drawingRenderRevisionKey(plan.stamp)
+      || !activeBinding.adapter.isDrawingFrameCurrent(plan.frame)) return;
+
+    const evidence = Object.freeze({
+      attachmentRevision: ack.attachmentRevision,
+      paintSequence: ack.paintSequence,
+    });
+    if (!isNewerExactPaintEvidence(evidence, lastExactPaintEvidence)) return;
+    lastExactPaintEvidence = evidence;
+    acceptScenePainted(ack.stamp);
+
+    if (plan.lodToleranceClass !== "settledExact") return;
+    for (const waiter of Array.from(exactPaintWaiters)) {
+      if (waiter.binding !== activeBinding
+        || waiter.scopeKey !== document.scopeKey
+        || waiter.documentRevision !== document.documentRevision
+        || plan.sceneEpoch < waiter.minimumSceneEpoch
+        || ack.plan === waiter.previousPlan
+        || !isNewerExactPaintEvidence(evidence, waiter.baseline)) continue;
+      if (!settleExactPaintWaiter(waiter)) continue;
+      waiter.resolve(Object.freeze({
+        plan: ack.plan,
+        stamp: ack.stamp,
+        sceneEpoch: plan.sceneEpoch,
+        lodToleranceClass: "settledExact",
+        attachmentRevision: ack.attachmentRevision,
+        paintSequence: ack.paintSequence,
+      }));
+    }
+  };
+
   const removeSubscriptions = (): void => {
     unsubscribeDocument?.();
     unsubscribeFrame?.();
     unsubscribeScenePainted?.();
+    unsubscribeSceneExactPainted?.();
     unsubscribeDocument = null;
     unsubscribeFrame = null;
     unsubscribeScenePainted = null;
+    unsubscribeSceneExactPainted = null;
   };
 
   const installSubscriptions = (nextBinding: DrawingSceneRuntimeBinding): void => {
@@ -1202,8 +1400,15 @@ export function createDrawingSceneRuntime({
     // the replacement plan. Replacing the pair also keeps this idempotent when
     // React asks an already-healthy runtime to reactivate.
     removeSubscriptions();
-    unsubscribeScenePainted = nextBinding.subscribeScenePainted?.(acceptScenePainted) ?? null;
+    if (nextBinding.subscribeSceneExactPainted) {
+      unsubscribeSceneExactPainted = nextBinding.subscribeSceneExactPainted(
+        acceptSceneExactPainted,
+      );
+    } else {
+      unsubscribeScenePainted = nextBinding.subscribeScenePainted?.(acceptScenePainted) ?? null;
+    }
     unsubscribeDocument = nextBinding.store.subscribe(() => {
+      rejectInvalidatedExactPaintWaiters(nextBinding);
       lodToleranceClass = "settledExact";
       exactRequestedAt = now();
       pendingExactPaintStamp = null;
@@ -1241,6 +1446,10 @@ export function createDrawingSceneRuntime({
         && binding.renderer === nextBinding.renderer
         && binding.store === nextBinding.store
         && binding.projectScene === nextBinding.projectScene) {
+        rejectExactPaintWaiters(
+          "runtime-unavailable",
+          "drawing scene exact paint runtime was reactivated",
+        );
         recoveryPublicationPending = recoveryPublicationPending || faulted;
         if (faulted || workerScopeKey !== scopeKey) disposeWorkerClient();
         faulted = false;
@@ -1251,6 +1460,15 @@ export function createDrawingSceneRuntime({
         exactRequestedAt = now();
         pendingExactPaintStamp = null;
         return invalidateScene("reactivate");
+      }
+      if (binding) {
+        const previousScopeKey = binding.store.getSnapshot().scopeKey;
+        rejectExactPaintWaiters(
+          previousScopeKey === scopeKey ? "runtime-unavailable" : "scope-invalidated",
+          previousScopeKey === scopeKey
+            ? "drawing scene exact paint binding was replaced"
+            : "drawing scene exact paint scope was replaced",
+        );
       }
       removeSubscriptions();
       clearParityDelay();
@@ -1269,6 +1487,7 @@ export function createDrawingSceneRuntime({
       exactRequestedAt = now();
       pendingExactPaintStamp = null;
       lastExactSettleMs = null;
+      lastExactPaintEvidence = null;
       lastParityAttemptAt = Number.NEGATIVE_INFINITY;
       lastParitySuccessAt = Number.NEGATIVE_INFINITY;
       installSubscriptions(nextBinding);
@@ -1292,10 +1511,112 @@ export function createDrawingSceneRuntime({
       }
       return true;
     },
+    waitForExactPaint(request) {
+      const activeBinding = binding;
+      const unavailable = (message: string): Promise<DrawingSceneExactPaintReceipt> => (
+        Promise.reject(new DrawingSceneExactPaintError("runtime-unavailable", message))
+      );
+      if (disposed
+        || faulted
+        || mode !== "scene-canary"
+        || !activeBinding
+        || typeof activeBinding.publishScene !== "function") {
+        return unavailable("drawing scene exact paint runtime is unavailable");
+      }
+      if (typeof activeBinding.subscribeSceneExactPainted !== "function") {
+        return unavailable("drawing scene exact paint evidence is unavailable");
+      }
+      const document = activeBinding.store.getSnapshot();
+      if (request.scopeKey !== document.scopeKey) {
+        return Promise.reject(new DrawingSceneExactPaintError(
+          "scope-invalidated",
+          "drawing scene exact paint scope is no longer current",
+        ));
+      }
+      if (request.documentRevision !== document.documentRevision
+        || activeBinding.renderer.documentSnapshot() !== document) {
+        return Promise.reject(new DrawingSceneExactPaintError(
+          "document-invalidated",
+          "drawing scene exact paint document is no longer current",
+        ));
+      }
+      if (request.signal?.aborted) {
+        return Promise.reject(new DrawingSceneExactPaintError(
+          "aborted",
+          "drawing scene exact paint wait was aborted",
+        ));
+      }
+      const timeoutMs = request.timeoutMs ?? 3_000;
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        return Promise.reject(new DrawingSceneExactPaintError(
+          "timeout",
+          "drawing scene exact paint wait timed out",
+        ));
+      }
+
+      return new Promise<DrawingSceneExactPaintReceipt>((resolve, reject) => {
+        const signal = request.signal ?? null;
+        const handleAbort = (): void => {
+          rejectExactPaintWaiter(
+            waiter,
+            "aborted",
+            "drawing scene exact paint wait was aborted",
+          );
+        };
+        const abortListener = signal ? handleAbort : null;
+        const waiter: ExactPaintWaiter = {
+          binding: activeBinding,
+          scopeKey: request.scopeKey,
+          documentRevision: request.documentRevision,
+          minimumSceneEpoch: nextSceneEpoch(),
+          previousPlan: latestPlan,
+          baseline: lastExactPaintEvidence,
+          signal,
+          abortListener,
+          resolve,
+          reject,
+          timeoutHandle: null,
+          settled: false,
+        };
+        exactPaintWaiters.add(waiter);
+        if (signal && abortListener) {
+          signal.addEventListener("abort", abortListener, { once: true });
+          if (signal.aborted) {
+            abortListener();
+            return;
+          }
+        }
+        waiter.timeoutHandle = setTimeout(() => {
+          rejectExactPaintWaiter(
+            waiter,
+            "timeout",
+            "drawing scene exact paint wait timed out",
+          );
+        }, timeoutMs);
+
+        lodToleranceClass = "settledExact";
+        exactRequestedAt = now();
+        pendingExactPaintStamp = null;
+        clearExactDelay();
+        if (!invalidateScene("exact-paint-barrier")) {
+          rejectExactPaintWaiter(
+            waiter,
+            "runtime-unavailable",
+            "drawing scene exact paint runtime could not invalidate",
+          );
+          return;
+        }
+        if (!waiter.settled) scheduler.flushNow();
+      });
+    },
     flushNow() {
       return !faulted && mode !== "legacy" && binding !== null && scheduler.flushNow();
     },
     suspend() {
+      rejectExactPaintWaiters(
+        "scope-invalidated",
+        "drawing scene exact paint scope was suspended",
+      );
       if (mode === "scene-canary") binding?.clearScene?.();
       if (binding) clearDrawingSceneProjectorCaches(binding.adapter);
       removeSubscriptions();
@@ -1315,6 +1636,7 @@ export function createDrawingSceneRuntime({
       exactRequestedAt = null;
       pendingExactPaintStamp = null;
       lastExactSettleMs = null;
+      lastExactPaintEvidence = null;
       rawPointCount = 0;
       renderedPointCount = 0;
       lastParityAttemptAt = Number.NEGATIVE_INFINITY;
@@ -1344,6 +1666,10 @@ export function createDrawingSceneRuntime({
     },
     dispose() {
       if (disposed) return;
+      rejectExactPaintWaiters(
+        "runtime-unavailable",
+        "drawing scene exact paint runtime was disposed",
+      );
       runtime.suspend();
       disposed = true;
       scheduler.dispose();

@@ -4,14 +4,17 @@ import { useDrawingToolState } from "./drawingToolState.js";
 import type { ChartSurfaceActions } from "../../chart-adapter/useChartSurfaceRuntime.js";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { DrawingToolStateRuntime } from "./drawingToolState.js";
-import type { DrawingStylePatch } from "./drawingInteractionController.js";
+import type {
+  DrawingExportLease,
+  DrawingExportPrepareOptions,
+  DrawingStylePatch,
+} from "./drawingInteractionController.js";
 
 export type DrawingRuntimeActions = DrawingToolStateRuntime["actions"] & {
   handleClearDrawing(): void;
   handleToggleDrawingsHidden(): void;
   handleSelectedDrawingStyleChange(patch: DrawingStylePatch): void;
-  setDrawingsHiddenForExport(hidden: boolean): void;
-  prepareExport(): void;
+  prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease | null>;
   handleIndicatorRemoved(indicatorId: string | null | undefined): void;
 };
 
@@ -42,14 +45,8 @@ export function useDrawingRuntime({
     setDrawingsHidden((prev) => !prev);
   }, [setDrawingsHidden]);
 
-  const setDrawingsHiddenForExport = useCallback((hidden: boolean) => {
-    const nextHidden = !!hidden;
-    setDrawingsHidden(nextHidden);
-    chartSurfaceActions?.setDrawingsHidden?.(nextHidden);
-  }, [chartSurfaceActions, setDrawingsHidden]);
-
-  const prepareExport = useCallback(() => {
-    chartSurfaceActions?.prepareExport?.();
+  const prepareExport = useCallback((options?: DrawingExportPrepareOptions) => {
+    return chartSurfaceActions?.prepareExport?.(options) ?? Promise.resolve(null);
   }, [chartSurfaceActions]);
 
   useEffect(() => {
@@ -73,7 +70,6 @@ export function useDrawingRuntime({
     handleClearDrawing,
     handleToggleDrawingsHidden,
     handleSelectedDrawingStyleChange,
-    setDrawingsHiddenForExport,
     prepareExport,
     handleIndicatorRemoved,
   };

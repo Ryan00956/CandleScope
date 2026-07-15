@@ -1,7 +1,11 @@
 import { useCallback, useMemo, useRef } from "react";
 import { callChartSurface, EMPTY_CHART_SURFACE_VIEW } from "./chartSurfaceContract";
 import type { ExportSnapshot } from "../features/export/exportTypes.js";
-import type { DrawingStylePatch } from "../features/drawings/drawingInteractionController.js";
+import type {
+  DrawingExportLease,
+  DrawingExportPrepareOptions,
+  DrawingStylePatch,
+} from "../features/drawings/drawingInteractionController.js";
 
 export interface ChartSurfaceVisibleRange {
   barSpacing?: number;
@@ -15,7 +19,7 @@ export interface ChartSurfaceHandle {
   getVisibleRange(): ChartSurfaceVisibleRange | null;
   clearAllDrawings(): void;
   setDrawingsHidden(hidden: boolean): void;
-  prepareExport(): void;
+  prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease | null>;
   updateSelectedDrawingStyle(patch: DrawingStylePatch): void;
   getExportSnapshot(): ExportSnapshot | null;
 }
@@ -35,8 +39,13 @@ export function useChartSurfaceRuntime() {
     callChartSurface(ref, "setDrawingsHidden", undefined, hidden);
   }, []);
 
-  const prepareExport = useCallback(() => {
-    callChartSurface(ref, "prepareExport");
+  const prepareExport = useCallback((options?: DrawingExportPrepareOptions) => {
+    return callChartSurface(
+      ref,
+      "prepareExport",
+      Promise.resolve(null),
+      options,
+    );
   }, []);
 
   const updateSelectedDrawingStyle = useCallback((patch: DrawingStylePatch) => {

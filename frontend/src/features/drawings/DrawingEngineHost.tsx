@@ -16,7 +16,11 @@ import type {
     DrawingToolId,
     FibonacciLevel,
 } from "./drawingTypes.js";
-import type { DrawingStylePatch } from "./drawingInteractionController.js";
+import type {
+    DrawingExportLease,
+    DrawingExportPrepareOptions,
+    DrawingStylePatch,
+} from "./drawingInteractionController.js";
 import type { SelectedDrawingMeta } from "./drawingSelectionController.js";
 
 export interface DrawingEngineApi {
@@ -26,7 +30,7 @@ export interface DrawingEngineApi {
     prepareSurfaceDispose(): boolean;
     setHidden(hidden: boolean): void;
     updateSelectedDrawingStyle(patch: DrawingStylePatch): void;
-    prepareExport(): void;
+    prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease>;
 }
 
 export interface DrawingEngineHostProps {
@@ -118,33 +122,19 @@ function DrawingEngineHost({
     const {
         clearAll,
         completeSurfaceDispose,
-        commitTextEditing,
-        editingTextId,
         invalidateSurfaceCredentialsForSeriesReplacement,
+        prepareExport,
         prepareSurfaceDispose,
         selectedDrawingMeta,
         setHidden,
         updateSelectedDrawingStyle,
     } = drawing;
     const appliedInitialHiddenRef = useRef(false);
-    const editingTextIdRef = useRef(editingTextId);
-    const commitTextEditingRef = useRef(commitTextEditing);
     const [chartContainerWidth, setChartContainerWidth] = useState<number>(0);
 
     useEffect(() => {
         drawingPerfCounters.incrementCounter("reactRenderCount");
     });
-
-    useEffect(() => {
-        editingTextIdRef.current = editingTextId;
-        commitTextEditingRef.current = commitTextEditing;
-    }, [commitTextEditing, editingTextId]);
-
-    const prepareExport = useCallback(() => {
-        if (editingTextIdRef.current) {
-            commitTextEditingRef.current?.({ clearSelection: true, exitTool: false });
-        }
-    }, []);
 
     useEffect(() => {
         const el = chartContainerRef.current;

@@ -8,6 +8,7 @@ import {
 import {
   canApplyDrawingVisibilityToCurrentPrimitives,
   cancelFreehandPrimitiveOnSurface,
+  createDrawingExportVisibilityIntentGate,
   detachAndRemoveDrawingPrimitive,
   dynamicSelectionHandlesForSavedDrawing,
   resolveTopmostDrawingInteractionHit,
@@ -411,6 +412,73 @@ test("stale scope may be hidden but cannot be made visible", () => {
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(false, true), true);
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(false, false), false);
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(true, false), true);
+});
+
+test("export visibility lease restores capture state before applying latest queued intent", () => {
+  const gate = createDrawingExportVisibilityIntentGate();
+  const order: string[] = [];
+
+  assert.equal(gate.request(true), true);
+  gate.begin();
+  assert.equal(gate.request(false), false);
+  assert.equal(gate.request(true), false);
+  assert.deepEqual(gate.snapshot(), { locked: true, pendingIntent: true });
+
+  assert.equal(gate.restore({
+    restoreCapturePresentation() {
+      assert.equal(gate.isLocked(), true);
+      order.push("restore-capture");
+    },
+    restoreInteraction() {
+      assert.equal(gate.isLocked(), true);
+      order.push("restore-interaction");
+    },
+    applyPendingIntent(nextHidden) {
+      assert.equal(gate.isLocked(), false);
+      order.push(`apply-pending:${String(nextHidden)}`);
+    },
+  }), true);
+
+  assert.deepEqual(order, [
+    "restore-capture",
+    "restore-interaction",
+    "apply-pending:true",
+  ]);
+  assert.deepEqual(gate.snapshot(), { locked: false, pendingIntent: null });
+});
+
+test("export visibility lease releases once and preserves cleanup failures", () => {
+  const gate = createDrawingExportVisibilityIntentGate();
+  const captureFailure = new Error("capture restore failed");
+  const order: string[] = [];
+  gate.begin();
+  assert.equal(gate.request(true), false);
+
+  assert.throws(() => gate.restore({
+    restoreCapturePresentation() {
+      order.push("restore-capture");
+      throw captureFailure;
+    },
+    restoreInteraction() {
+      order.push("restore-interaction");
+    },
+    applyPendingIntent(nextHidden) {
+      order.push(`apply-pending:${String(nextHidden)}`);
+    },
+  }), (error: unknown) => error === captureFailure);
+
+  assert.deepEqual(order, [
+    "restore-capture",
+    "restore-interaction",
+    "apply-pending:true",
+  ]);
+  assert.deepEqual(gate.snapshot(), { locked: false, pendingIntent: null });
+  assert.equal(gate.restore({
+    restoreCapturePresentation() { order.push("unexpected-capture"); },
+    restoreInteraction() { order.push("unexpected-interaction"); },
+    applyPendingIntent() { order.push("unexpected-pending"); },
+  }), false);
+  assert.equal(order.some((item) => item.startsWith("unexpected")), false);
 });
 
 test("dynamic selection handles expose only real per-kind drag affordances", () => {

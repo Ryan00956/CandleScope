@@ -19,7 +19,7 @@
  *   - Double-click text to edit
  *   - Clear all drawings
  */
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
 import { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
@@ -67,7 +67,18 @@ import {
   syncHoveredPrimitive,
 } from "./drawingHoverController.js";
 import { useDrawingPersistenceLifecycle } from "./useDrawingPersistenceLifecycle.js";
-import type { DrawingDetachedCommitReceipt } from "./useDrawingPersistenceLifecycle.js";
+import type {
+  DrawingActiveDocumentTarget,
+  DrawingDetachedCommitReceipt,
+  DrawingExportSceneReceipt,
+} from "./useDrawingPersistenceLifecycle.js";
+import {
+  createDrawingExportBarrier,
+} from "./export/drawingExportBarrier.js";
+import type {
+  DrawingExportBarrier,
+  DrawingExportBarrierLease,
+} from "./export/drawingExportBarrier.js";
 import type { DrawingDisplayHitResult } from "./rendering/drawingDisplayList.js";
 import {
   drawingCommandsForLegacyPrimitive,
@@ -354,6 +365,80 @@ export function canApplyDrawingVisibilityToCurrentPrimitives(
   nextHidden: boolean,
 ): boolean {
   return scopeReady || nextHidden;
+}
+
+export interface DrawingExportVisibilityRestoreCallbacks {
+  applyPendingIntent(nextHidden: boolean): void;
+  restoreCapturePresentation(): void;
+  restoreInteraction(): void;
+}
+
+export interface DrawingExportVisibilityIntentGate {
+  begin(): void;
+  isLocked(): boolean;
+  request(nextHidden: boolean): boolean;
+  restore(callbacks: DrawingExportVisibilityRestoreCallbacks): boolean;
+  snapshot(): Readonly<{ locked: boolean; pendingIntent: boolean | null }>;
+}
+
+/**
+ * Keeps user visibility changes out of an exact export presentation. Internal
+ * export visibility changes bypass this gate; user intent is latest-wins and
+ * is applied only after the captured presentation and interaction UI restore.
+ */
+export function createDrawingExportVisibilityIntentGate(): DrawingExportVisibilityIntentGate {
+  let locked = false;
+  let pendingIntent: boolean | null = null;
+
+  return Object.freeze({
+    begin() {
+      if (locked) throw new Error("drawing export visibility lease is already active");
+      locked = true;
+      pendingIntent = null;
+    },
+    isLocked() {
+      return locked;
+    },
+    request(nextHidden: boolean) {
+      if (!locked) return true;
+      pendingIntent = !!nextHidden;
+      return false;
+    },
+    restore(callbacks: DrawingExportVisibilityRestoreCallbacks) {
+      if (!locked) return false;
+      const failures: unknown[] = [];
+      try {
+        callbacks.restoreCapturePresentation();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        callbacks.restoreInteraction();
+      } catch (error) {
+        failures.push(error);
+      }
+
+      const nextIntent = pendingIntent;
+      pendingIntent = null;
+      locked = false;
+      if (nextIntent !== null) {
+        try {
+          callbacks.applyPendingIntent(nextIntent);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1) {
+        throw new AggregateError(failures, "drawing export visibility restore failed");
+      }
+      return true;
+    },
+    snapshot() {
+      return Object.freeze({ locked, pendingIntent });
+    },
+  });
 }
 
 export function drawingCommandsForDrag(
@@ -732,11 +817,40 @@ export interface UseDrawingOptions {
   onToolChange?: ((tool: DrawingToolId | null) => void) | null;
 }
 
+export interface DrawingExportInteractionLease {
+  restore(): void;
+}
+
+export interface DrawingExportPrepareOptions {
+  readonly hideDrawings?: boolean;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}
+
+export interface DrawingExportPersistenceState {
+  readonly persistedRevision: number;
+  readonly writePerformed: boolean;
+}
+
+export type DrawingExportLease = DrawingExportBarrierLease<
+  DrawingExportPersistenceState,
+  DrawingExportSceneReceipt,
+  number
+>;
+
+interface DrawingExportPresentationState {
+  readonly interaction: DrawingExportInteractionLease;
+  readonly previousHidden: boolean;
+  readonly visibilityChanged: boolean;
+  readonly replacementScene: DrawingExportSceneReceipt | null;
+}
+
 export interface DrawingInteractionRuntime {
   clearAll(): void;
   completeSurfaceDispose(): void;
   invalidateSurfaceCredentialsForSeriesReplacement(): void;
   prepareSurfaceDispose(): boolean;
+  prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease>;
   setHidden(hidden: boolean): void;
   primitivesRef: MutableRefObject<DrawingPrimitive[]>;
   selectedPrimId: string | null;
@@ -790,6 +904,7 @@ export function useDrawing({
 
   // ── Visibility toggle (hide all without deleting) ──
   const hiddenRef = useRef(false);
+  const [exportVisibilityIntentGate] = useState(createDrawingExportVisibilityIntentGate);
 
   // ── Line-specific state ──
   const previewRef = useRef<TwoPointDrawingPrimitive | null>(null); // LineDrawingPrimitive (dashed preview)
@@ -1092,10 +1207,14 @@ export function useDrawing({
     persistDetachedDrawings,
     persistDrawings,
     prepareSurfaceDispose: preparePersistenceSurfaceDispose,
-    prepareUserMutationScope,
+    prepareUserMutationScope: preparePersistenceUserMutationScope,
     hitTestScene,
     getSceneScreenBox,
     getSceneScreenHandles,
+    getActiveDocumentTarget,
+    flushActiveDocument,
+    waitForExactExportScene,
+    revalidateExportScene,
     subscribeVisibleScenePaint,
   } = useDrawingPersistenceLifecycle({
     beforeScopeTransitionRef,
@@ -1119,6 +1238,9 @@ export function useDrawing({
       ? {}
       : { onInteractionSurfaceFallback }),
   });
+  const prepareUserMutationScope = useCallback((): boolean => (
+    !exportVisibilityIntentGate.isLocked() && preparePersistenceUserMutationScope()
+  ), [exportVisibilityIntentGate, preparePersistenceUserMutationScope]);
 
   const cancelActiveFreehandStroke = useCallback(() => {
     const draft = freehandDraftRef.current;
@@ -1682,7 +1804,7 @@ export function useDrawing({
     cancelDynamicPaintHandoff();
     renderDynamicFeedback();
     original.setHidden?.(true, false);
-    invalidateVisibleScene();
+    if (interactionSurfaceMode !== "overlay") invalidateVisibleScene();
     try { getChartAdapter()?.requestSeriesUpdate?.(); } catch { /* scene invalidation remains */ }
     return overlayDragRegistryRef;
   }, [cancelDynamicPaintHandoff, getChartAdapter, interactionSurfaceMode, invalidateVisibleScene, primitivesRef, renderDynamicFeedback]);
@@ -2861,6 +2983,74 @@ export function useDrawing({
     drawingPerfCounters.gestureEnded();
   }, [cancelActiveFreehandStroke, flushActiveDrawingMove, interactionSurfaceMode, invalidateVisibleScene, persistDetachedDrawings, persistDrawings, prepareUserMutationScope, dataToScreen, clearCachedPointerRect, refreshSelectedTextUi, releaseOverlayDrag, retainDynamicOverlayUntilPaint, subscribeVisibleScenePaint]);
 
+  const terminalizeExportInteraction = useCallback((): boolean => {
+    if (editingTextIdRef.current) {
+      const committed = commitTextEditing({ clearSelection: false, exitTool: false });
+      if (!committed && !cancelTextEditing({ clearSelection: false, exitTool: false })) {
+        return false;
+      }
+    }
+
+    if (draggingRef.current || isDrawingFreehandRef.current) {
+      handleMouseUp();
+      if (draggingRef.current || isDrawingFreehandRef.current) return false;
+    }
+    return removePreview();
+  }, [
+    cancelTextEditing,
+    commitTextEditing,
+    editingTextIdRef,
+    handleMouseUp,
+    removePreview,
+  ]);
+
+  const acquireExportPresentation = useCallback((): DrawingExportInteractionLease => {
+    const selectedId = selectedIdRef.current;
+    const hover = dynamicHoverDecorationRef.current
+      ? Object.freeze({ ...dynamicHoverDecorationRef.current })
+      : null;
+    cancelDynamicPaintHandoff(true);
+    clearHoverFeedback();
+    liveInkControllerRef.current?.cancel();
+    dynamicOverlayControllerRef.current?.clear();
+    deselectAll();
+    setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
+    // Overlay-mode selection/hover/live ink are presentation-only canvases.
+    // Invalidating the committed scene here would replace the exact plan that
+    // the export barrier just acknowledged and make its own receipt stale.
+    if (interactionSurfaceMode !== "overlay") invalidateVisibleScene();
+    exportVisibilityIntentGate.begin();
+
+    let restored = false;
+    return Object.freeze({
+      restore() {
+        if (restored) return;
+        restored = true;
+        if (selectedId) {
+          const primitive = getPrimitiveById(selectedId);
+          if (primitive) selectPrimitive(selectedId);
+        }
+        if (interactionSurfaceMode === "overlay" && hover) {
+          dynamicHoverDecorationRef.current = hover;
+          renderDynamicFeedback(hover);
+        }
+        if (interactionSurfaceMode !== "overlay") invalidateVisibleScene();
+      },
+    });
+  }, [
+    cancelDynamicPaintHandoff,
+    clearHoverFeedback,
+    deselectAll,
+    exportVisibilityIntentGate,
+    getPrimitiveById,
+    interactionSurfaceMode,
+    invalidateVisibleScene,
+    renderDynamicFeedback,
+    selectPrimitive,
+    selectedIdRef,
+    setSelectedTextUi,
+  ]);
+
   const handlePointerCancel = useCallback(() => {
     if (interactionSurfaceMode !== "overlay" && !isDrawingFreehandRef.current) {
       handleMouseUp();
@@ -3048,9 +3238,12 @@ export function useDrawing({
    * Primitives stay attached; their renderers and hit-tests skip hidden items.
    * This avoids doing one attach/detach cycle per drawing on every toggle.
    */
-  const setHidden = useCallback((next: boolean) => {
+  const setHidden = useCallback((next: boolean, bypassExportLock = false) => {
     const value = !!next;
-    const scopeReady = prepareUserMutationScope();
+    if (!bypassExportLock && !exportVisibilityIntentGate.request(value)) return;
+    const scopeReady = bypassExportLock
+      ? preparePersistenceUserMutationScope()
+      : prepareUserMutationScope();
     const changed = hiddenRef.current !== value;
     // Keep the requested visibility as an intent even while A -> B is blocked.
     // The eventual B reconciliation reads hiddenRef. Showing is deferred so an
@@ -3092,7 +3285,189 @@ export function useDrawing({
       getChartAdapter()?.requestSeriesUpdate?.();
     }
     getChartAdapter()?.notifyDrawingFrameInvalidation?.();
-  }, [cancelDynamicPaintHandoff, getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, prepareUserMutationScope, releaseOverlayDrag]);
+  }, [cancelDynamicPaintHandoff, getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, exportVisibilityIntentGate, preparePersistenceUserMutationScope, prepareUserMutationScope, releaseOverlayDrag]);
+
+  const activeExportPresentationRef = useRef<DrawingExportPresentationState | null>(null);
+  const restoreExportVisibilityPresentation = useCallback((
+    presentation: DrawingExportPresentationState | null,
+  ): boolean => {
+    const activePresentation = activeExportPresentationRef.current;
+    // A timed-out setup operation can reject after the barrier has already
+    // released its token. Never let that stale continuation restore a newer
+    // export lease that began in the meantime.
+    if (presentation !== null && activePresentation !== presentation) return false;
+    const currentPresentation = presentation ?? activePresentation;
+    if (!currentPresentation) return false;
+    try {
+      return exportVisibilityIntentGate.restore({
+        restoreCapturePresentation() {
+          if (currentPresentation?.visibilityChanged) {
+            setHidden(currentPresentation.previousHidden, true);
+          }
+        },
+        restoreInteraction() {
+          currentPresentation?.interaction.restore();
+        },
+        applyPendingIntent(nextHidden) {
+          setHidden(nextHidden);
+        },
+      });
+    } finally {
+      if (!exportVisibilityIntentGate.isLocked()) {
+        activeExportPresentationRef.current = null;
+      }
+    }
+  }, [exportVisibilityIntentGate, setHidden]);
+
+  const exportRequestRef = useRef<Readonly<{ hideDrawings: boolean }> | null>(null);
+  const exportBarrierRef = useRef<DrawingExportBarrier<
+    DrawingExportPersistenceState,
+    DrawingExportSceneReceipt,
+    number
+  > | null>(null);
+  if (exportBarrierRef.current === null) {
+    exportBarrierRef.current = createDrawingExportBarrier<
+      DrawingExportPersistenceState,
+      DrawingExportPresentationState,
+      DrawingExportSceneReceipt,
+      number
+    >({
+      terminalizeInteraction() {
+        if (!terminalizeExportInteraction()) {
+          throw new Error("Drawing export could not finish the active interaction");
+        }
+        const target = getActiveDocumentTarget();
+        if (!target) throw new Error("Drawing export document is not ready");
+        return target;
+      },
+      async flushTargetDocument({ target }) {
+        const result = await flushActiveDocument(target);
+        if (!result.ok) throw result.error;
+        if (result.scopeKey !== target.scopeKey
+          || result.targetRevision !== target.documentRevision
+          || result.persistedRevision < target.documentRevision) {
+          throw new Error("Drawing export persistence receipt is stale");
+        }
+        return Object.freeze({
+          ...target,
+          persistence: Object.freeze({
+            persistedRevision: result.persistedRevision,
+            writePerformed: !("skipped" in result),
+          }),
+        });
+      },
+      async applyAndClearPresentation({ target, signal }) {
+        const request = exportRequestRef.current;
+        if (!request) throw new Error("Drawing export request state is unavailable");
+        const previousHidden = hiddenRef.current;
+        const interaction = acquireExportPresentation();
+        const visibilityChanged = request.hideDrawings && !previousHidden;
+        const pendingPresentation = Object.freeze({
+          interaction,
+          previousHidden,
+          visibilityChanged,
+          replacementScene: null,
+        });
+        activeExportPresentationRef.current = pendingPresentation;
+        try {
+          if (visibilityChanged) setHidden(true, true);
+          // Legacy selection handles and hide-drawings both change the static
+          // scene after the barrier's first exact receipt. Wait for a second
+          // exact receipt here so the following single-frame capture never
+          // relies on a fixed-frame guess or revalidates an intentionally
+          // replaced plan.
+          const replacementScene = interactionSurfaceMode !== "overlay" || visibilityChanged
+            ? await waitForExactExportScene(target, signal)
+            : null;
+          const completedPresentation = Object.freeze({
+            interaction,
+            previousHidden,
+            visibilityChanged,
+            replacementScene,
+          });
+          activeExportPresentationRef.current = completedPresentation;
+          return completedPresentation;
+        } catch (error) {
+          try {
+            restoreExportVisibilityPresentation(pendingPresentation);
+          } catch (restoreError) {
+            throw new AggregateError(
+              [error, restoreError],
+              "Drawing export presentation setup and restore both failed",
+            );
+          }
+          throw error;
+        }
+      },
+      async awaitExactScene({ target, signal }) {
+        const scene = await waitForExactExportScene(target, signal);
+        return Object.freeze({ ...target, scene });
+      },
+      waitForNextFrame({ signal }) {
+        return new Promise<number>((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new DOMException("Drawing export frame wait was aborted", "AbortError"));
+            return;
+          }
+          let settled = false;
+          let handle: unknown = null;
+          const finish = (timestamp: number): void => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener("abort", abort);
+            resolve(timestamp);
+          };
+          const abort = (): void => {
+            if (settled) return;
+            settled = true;
+            if (typeof handle === "number" && typeof cancelAnimationFrame === "function") {
+              cancelAnimationFrame(handle);
+            } else if (handle !== null) {
+              clearTimeout(handle as ReturnType<typeof setTimeout>);
+            }
+            reject(new DOMException("Drawing export frame wait was aborted", "AbortError"));
+          };
+          signal.addEventListener("abort", abort, { once: true });
+          if (typeof requestAnimationFrame === "function") {
+            handle = requestAnimationFrame(finish);
+          } else {
+            handle = setTimeout(() => finish(Date.now()), 16);
+          }
+        });
+      },
+      revalidate({ target, presentation, receipt }) {
+        return revalidateExportScene(
+          target,
+          presentation.replacementScene ?? receipt.scene,
+        );
+      },
+      restorePresentation({ presentation }) {
+        restoreExportVisibilityPresentation(presentation);
+      },
+    });
+  }
+
+  const prepareExport = useCallback(async (
+    options: DrawingExportPrepareOptions = {},
+  ): Promise<DrawingExportLease> => {
+    const barrier = exportBarrierRef.current;
+    if (!barrier) throw new Error("Drawing export barrier is unavailable");
+    if (barrier.snapshot().locked) {
+      return barrier.prepare({
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      });
+    }
+    exportRequestRef.current = Object.freeze({ hideDrawings: options.hideDrawings === true });
+    try {
+      return await barrier.prepare({
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      });
+    } finally {
+      exportRequestRef.current = null;
+    }
+  }, []);
 
   // ── Selected-text helpers (consumed by floating format toolbar) ──
 
@@ -3271,6 +3646,7 @@ export function useDrawing({
     clearAll,
     completeSurfaceDispose,
     invalidateSurfaceCredentialsForSeriesReplacement,
+    prepareExport,
     prepareSurfaceDispose,
     setHidden,
     primitivesRef,

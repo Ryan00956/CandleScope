@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5、Phase 6 已完成（2026-07-15）；Phase 7 尚未开始。
+状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5、Phase 6、Phase 7 已完成（2026-07-15）；Phase 8 尚未开始。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -58,7 +58,7 @@ git -C "H:\program\CandleScope" worktree list
 | 4 | 单一 DrawingScenePrimitive | 已完成（composite scene checkpoint） |
 | 5 | Dynamic Overlay 与 Live Ink | 已完成（interaction overlay checkpoint） |
 | 6 | LOD、命中索引、worker 与背压 | 已完成（LOD/worker/indexed hit checkpoint） |
-| 7 | IndexedDB、兼容迁移与 export barrier | 未开始 |
+| 7 | IndexedDB、兼容迁移与 export barrier | 已完成（async persistence/export barrier checkpoint） |
 | 8 | 全工具迁移与生命周期收口 | 未开始 |
 | 9 | 灰度、回滚演练与 legacy 删除 | 未开始 |
 
@@ -966,22 +966,22 @@ IndexedDB 可以 structured-clone typed arrays。LOD、Path2D、screen bbox、bi
 
 ### 逐步任务
 
-- [ ] 第一次读取优先查 v2 document。
-- [ ] v2 不存在时读取当前 <code>candlescope-drawings-*</code> SavedDrawing[]。
-- [ ] 处理当前 drawing engine lazy loader 依赖同步 <code>hasSavedDrawings()</code> 的接缝。
-- [ ] 使用 feature-owned 小型 manifest 或受控的异步 IDB probe 决定是否懒加载 engine；manifest 只保存 key/count/revision 提示，不作为 drawing 真值。
-- [ ] manifest 损坏或缺失时可以通过 IDB probe 修复，组件层不得直接拥有 IDB/localStorage 规则。
-- [ ] legacy 输入只在内存导入，单纯 load 不重写。
-- [ ] 第一次 mutation 后异步创建 v2 record。
-- [ ] document persistence 使用 300–500ms debounce、per-symbol latest-wins。
-- [ ] IndexedDB 事务原子更新；失败时旧 record 保持。
-- [ ] worker 可以完成序列化/校验，但最终 decoder/budget 必须再次验证。
-- [ ] canary 期间 idle 生成 legacy-compatible snapshot，供旧 build 回滚读取。
-- [ ] legacy <code>localStorage.setItem</code> 不在 pointer/mouseup 热路径。
-- [ ] quota/validation 失败不覆盖旧 localStorage value。
-- [ ] symbol switch、visibilitychange、pagehide、export 前显式 flush。
-- [ ] 保存失败保留 dirty document 并记录状态，不丢内存内容。
-- [ ] v1/v2/v3 decoder 至少保留到 legacy renderer 删除后的一个正式版本。
+- [x] 第一次读取优先查 v2 document。
+- [x] v2 不存在时读取当前 <code>candlescope-drawings-*</code> SavedDrawing[]。
+- [x] 处理当前 drawing engine lazy loader 依赖同步 <code>hasSavedDrawings()</code> 的接缝。
+- [x] 使用 feature-owned 小型 manifest 或受控的异步 IDB probe 决定是否懒加载 engine；manifest 只保存 key/count/revision 提示，不作为 drawing 真值。
+- [x] manifest 损坏或缺失时可以通过 IDB probe 修复，组件层不得直接拥有 IDB/localStorage 规则。
+- [x] legacy 输入只在内存导入，单纯 load 不重写。
+- [x] 第一次 mutation 后异步创建 v2 record。
+- [x] document persistence 使用 300–500ms debounce、per-symbol latest-wins。
+- [x] IndexedDB 事务原子更新；失败时旧 record 保持。
+- [x] worker 可以完成序列化/校验，但最终 decoder/budget 必须再次验证。
+- [x] canary 期间 idle 生成 legacy-compatible snapshot，供旧 build 回滚读取。
+- [x] legacy <code>localStorage.setItem</code> 不在 pointer/mouseup 热路径。
+- [x] quota/validation 失败不覆盖旧 localStorage value。
+- [x] symbol switch、visibilitychange、pagehide、export 前显式 flush。
+- [x] 保存失败保留 dirty document 并记录状态，不丢内存内容。
+- [x] v1/v2/v3 decoder 至少保留到 legacy renderer 删除后的一个正式版本。
 
 ### Export barrier
 
@@ -1411,4 +1411,23 @@ Correctness parity: canonical raw geometry 不被 LOD 覆盖；RDP hierarchy 保
 Known limitations: 本记录证明 Phase 6 checkpoint，不声称第 7 节全局发布矩阵全部完成；DPR 1/2 目前为 smoke，正式 5+1 仍留给最终全局发布矩阵。IndexedDB/export barrier 属于 Phase 7；angle/fibonacci/text/position 完整迁移属于 Phase 8。
 Rollback verified: VITE_DRAWING_RASTER_BACKEND=main-thread 使用相同 scene/document、screen display list 与低 LOD renderer；正式 fallback 场景 exact max=53.8ms，queue/in-flight/stale publish 均为 0。worker backend 的旧 generation、旧 plan 与旧 frame 结果禁止发布并释放资源。
 Decision: Phase 6 PASS；LOD、indexed hit、worker latest-wins/backpressure、source-lineage、主线程 fallback、浏览器功能验收与 DPR 1.5 正式性能门全部通过；Phase 7 尚未开始。
+~~~
+
+### Phase 7 执行记录
+
+~~~text
+Phase: 7 — IndexedDB、兼容迁移与 export barrier
+Date: 2026-07-15
+Commit: 本执行记录所在 checkpoint（refactor(frontend): persist drawing documents asynchronously）
+Mode: v2 IndexedDB document authoritative；feature-owned manifest 只作 lazy-load hint；v2 缺失时一次性内存导入 legacy；scene-canary + interaction overlay + worker raster
+Files: persistence/drawingDocumentRepository.ts/legacyDrawingImporter.ts/drawingPersistenceCoordinator.ts/drawingPersistenceCodec.ts；drawings/export/drawingExportBarrier.ts/drawingExportReadiness.ts；drawing loader/scope persistence/lifecycle/interaction/runtime/store/perf counters；export preview/service/runtime；chart surface/SingleChartPanes/DrawingEngineHost；Phase 7 performance scripts 与对应 tests
+Tests: npm run check PASS（architecture、typecheck、ESLint、1276/1276 tests、production build 336 modules）；Phase 7 repository/import/coordinator/export barrier/readiness/loader/export target 定向测试 32/32；controller + export barrier 并发回归 34/34；Phase 7 performance script tests 8/8；git diff --check PASS。
+Persistence: native IndexedDB 数据库 candlescope-drawings-v2、documents store、scope-keyed atomic put；400ms debounce，per-scope 单一 in-flight + latest pending；ack 精确匹配 revision，失败保留 dirty document 和旧 bytes。symbol switch、visibilitychange、pagehide 与 export 前显式 flush；idle fair-yield 生成 legacy-compatible snapshot，失败不覆盖旧值。
+Compatibility: 首读严格 v2-first，只有 v2 missing 才读取 legacy；legacy load 只在内存导入，第一次 mutation 后创建 v2。manifest 缺失/损坏由受控 IDB probe 修复；组件层不拥有存储规则。v1/v2/v3 decoder、损坏/未知版本/超预算 fail-closed 与 v2 命中绕过 legacy 均有回归。
+Export barrier: text/freehand/drag 先终态化并 flush exact revision，再等待 exact render plan；清理 selection/hover/live overlay 后等待一帧。chart/main-pane 使用现有 canvas 原子合成锁定像素，page scope 保留 DOM capture；capture 边界立即重验 lease 并恢复 presentation，超时或 scope/revision/plan 漂移明确 fail closed，不输出半更新 scene。lease 期间用户 hide/show 采用 latest-wins 排队，按 capture state、interaction overlay、解锁、pending intent 的顺序恢复；preview freshness key 同时覆盖 document target 与实际绘图可见性。
+Smoke: 可见 headed Chrome 的 overlay 模式完成 line、reload、hide-drawings export 后恢复、active freehand export；1x/2x/3x 分别生成 672×498、1344×998、2016×1496 预览，状态均为“保存即此图”；最终 overlay 线段导出再验通过，全局 hide/show 后 preview blob 自动换代且恢复可保存，fresh reload 后 console 0 errors。
+Perf result: DPR 1 与 DPR 2 各 5 个正式 measured run 全部 PASS；每轮 native IDB restore 512 entities、manifest repair=true、legacy bypass=true、scene entity count=512。DPR 1 restore 10 chunks、max=0.5ms，persistence p95=1.10ms；DPR 2 restore max=0.60ms，persistence p95=2.00ms；两个 DPR 的 attributable Long Task 均为 0，任一 restore 主线程块远低于 16ms，persistence 远低于 500ms。
+Rollback verified: v2 写入不删除 legacy snapshot；旧 build 可继续读取最后成功的兼容 snapshot。删除 v2 DB 不属于自动回滚；legacy interaction/main-thread raster 开关仍可独立回退，document 真值不降级。
+Known limitations: legacy-only 用户首次兼容读取仍是一次性 fallback；正式 512-entity 性能门针对目标 v2 IndexedDB restore。page scope 因包含完整 DOM 继续走兼容 capture，并保持同一 barrier/超时/fail-closed 契约。angle/fibonacci/text/position 完整 document/scene/overlay 迁移留给 Phase 8。
+Decision: Phase 7 PASS；异步 v2 persistence、受控 legacy migration、manifest repair、生命周期 flush、exact export barrier、浏览器兼容验收与 DPR 1/2 正式性能门全部通过；Phase 8 尚未开始。
 ~~~

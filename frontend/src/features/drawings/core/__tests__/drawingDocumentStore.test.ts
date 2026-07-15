@@ -119,7 +119,7 @@ test("failed and no-op dispatches preserve snapshot, dirty state, and notificati
   assert.deepEqual(line.style, { kind: "line", color: "#fff", lineWidth: 2 });
 });
 
-test("loadDocument deep-clones one scope without dirtying it and rejects cross-scope replacement", () => {
+test("loadDocument safely shares canonical entities without dirtying and rejects cross-scope replacement", () => {
   const scopeA = createDrawingDocument({
     scopeKey: "scope-a",
     documentRevision: 7,
@@ -148,7 +148,9 @@ test("loadDocument deep-clones one scope without dirtying it and rejects cross-s
   assert.equal(store.getSnapshot().scopeKey, "scope-a");
   assert.equal(store.getSnapshot().documentRevision, 7);
   const a = mustBeDefined(store.getSnapshot().entities.get("same-id"));
-  assert.notStrictEqual(a, scopeA.entities.get("same-id"));
+  assert.strictEqual(a, scopeA.entities.get("same-id"));
+  assert.equal(Object.isFrozen(a), true);
+  assert.equal(Object.isFrozen(a.geometry), true);
   assert.equal(a.style.kind === "line" ? a.style.color : null, "#a00");
 
   const sameLoad = store.loadDocument(scopeA);

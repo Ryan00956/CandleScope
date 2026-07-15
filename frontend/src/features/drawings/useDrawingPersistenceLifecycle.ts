@@ -3,7 +3,6 @@ import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { createPrimitiveFromSavedDrawing } from "./drawingPrimitiveFactory.js";
 import {
   loadDrawings,
-  loadSavedDrawingsFailClosed,
   saveDrawings,
 } from "./drawingPersistence.js";
 import {
@@ -18,8 +17,6 @@ import { createEmptyDrawingDocument } from "./core/drawingDocument.js";
 import type { DrawingDocument } from "./core/drawingDocument.js";
 import {
   commitLegacyPrimitiveCommands,
-  loadSavedDrawingsIntoDocumentStore,
-  persistDrawingDocumentStore,
   persistentLegacyPrimitives,
 } from "./core/drawingDocumentRuntime.js";
 import type { DrawingCommand } from "./core/drawingCommands.js";
@@ -27,6 +24,18 @@ import {
   drawingDocumentSessionRegistry,
 } from "./core/drawingDocumentStore.js";
 import type { DrawingDocumentStore } from "./core/drawingDocumentStore.js";
+import {
+  drawingPersistenceCoordinator,
+} from "./persistence/drawingPersistenceCoordinator.js";
+import type {
+  DrawingPersistenceFlushResult,
+} from "./persistence/drawingPersistenceCoordinator.js";
+import {
+  drawingDocumentRepository,
+} from "./persistence/drawingDocumentRepository.js";
+import type {
+  DrawingDocumentLoadResult,
+} from "./persistence/drawingDocumentRepository.js";
 import {
   createLegacyPrimitiveRenderer,
 } from "./legacy/legacyPrimitiveRenderer.js";
@@ -40,6 +49,7 @@ import {
   createDrawingSceneRuntime,
 } from "./engine/drawingSceneRuntime.js";
 import type { DrawingSceneRuntime } from "./engine/drawingSceneRuntime.js";
+import type { DrawingSceneExactPaintReceipt } from "./engine/drawingSceneRuntime.js";
 import {
   projectDrawingScene,
   projectDrawingSceneCanonicalGapIndexes,
@@ -172,6 +182,24 @@ export function summarizeDrawingRuntimePrimitives(
   };
 }
 
+const drawingDocumentLoadPromises = new Map<
+  string,
+  Promise<DrawingDocumentLoadResult>
+>();
+
+function loadDrawingDocumentOnce(scopeKey: string): Promise<DrawingDocumentLoadResult> {
+  const existing = drawingDocumentLoadPromises.get(scopeKey);
+  if (existing) return existing;
+  const request = drawingDocumentRepository.load(scopeKey);
+  drawingDocumentLoadPromises.set(scopeKey, request);
+  void request.finally(() => {
+    if (drawingDocumentLoadPromises.get(scopeKey) === request) {
+      drawingDocumentLoadPromises.delete(scopeKey);
+    }
+  });
+  return request;
+}
+
 function persistAndMeasure(symbol: string, primitives: readonly DrawingPrimitive[]): void {
   const startedAt = typeof performance !== "undefined" && typeof performance.now === "function"
     ? performance.now()
@@ -184,20 +212,6 @@ function persistAndMeasure(symbol: string, primitives: readonly DrawingPrimitive
       : Date.now();
     const durationMs = Math.max(0, endedAt - startedAt);
     drawingPerfCounters.recordPersistenceDuration(durationMs);
-  }
-}
-
-function persistDocumentAndMeasure(store: DrawingDocumentStore): boolean {
-  const startedAt = typeof performance !== "undefined" && typeof performance.now === "function"
-    ? performance.now()
-    : Date.now();
-  try {
-    return persistDrawingDocumentStore(store);
-  } finally {
-    const endedAt = typeof performance !== "undefined" && typeof performance.now === "function"
-      ? performance.now()
-      : Date.now();
-    drawingPerfCounters.recordPersistenceDuration(Math.max(0, endedAt - startedAt));
   }
 }
 
@@ -240,6 +254,17 @@ export interface DrawingDetachedCommitReceipt {
   readonly surfaceSynchronized: boolean;
   readonly ticket: DrawingCommittedPaintTicket | null;
 }
+
+export interface DrawingActiveDocumentTarget {
+  readonly scopeKey: string;
+  readonly documentRevision: number;
+}
+
+export type DrawingExportSceneReceipt = DrawingSceneExactPaintReceipt | Readonly<{
+  kind: "legacy-frame";
+  scopeKey: string;
+  documentRevision: number;
+}>;
 
 export interface DetachedDrawingCommandCommitResult {
   readonly changed: boolean;
@@ -450,6 +475,24 @@ export function useDrawingPersistenceLifecycle({
   hitTestScene(x: number, y: number): DrawingDisplayHitResult | null;
   getSceneScreenBox(id: string): ScreenBox | null;
   getSceneScreenHandles(id: string): readonly ScreenPoint[] | null;
+  getActiveDocumentTarget(): DrawingActiveDocumentTarget | null;
+  flushActiveDocument(
+    target: DrawingActiveDocumentTarget,
+  ): Promise<DrawingPersistenceFlushResult | Readonly<{
+    ok: true;
+    scopeKey: string;
+    targetRevision: number;
+    persistedRevision: number;
+    skipped: true;
+  }>>;
+  waitForExactExportScene(
+    target: DrawingActiveDocumentTarget,
+    signal?: AbortSignal,
+  ): Promise<DrawingExportSceneReceipt>;
+  revalidateExportScene(
+    target: DrawingActiveDocumentTarget,
+    receipt: DrawingExportSceneReceipt,
+  ): boolean;
 } {
   const authorityMode = resolveDrawingDocumentAuthorityMode();
   const [engineMode] = useState(() => (
@@ -552,6 +595,30 @@ export function useDrawingPersistenceLifecycle({
   const scopeReadyRef = useRef(false);
   const sceneSurfaceRetryCountRef = useRef(0);
   const sceneSurfaceRetryHandleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const boundedRestoreRetryRef = useRef({ scopeKey: symbol, attempts: 0 });
+
+  useEffect(() => {
+    if (authorityMode !== "document"
+      || typeof document === "undefined"
+      || typeof window === "undefined") return undefined;
+    const flushAll = (reason: "pagehide" | "visibility-hidden"): void => {
+      void drawingPersistenceCoordinator.flushAll().then((results) => {
+        for (const result of results) {
+          if (!result.ok) console.warn(`Failed to flush drawings on ${reason}`, result.error);
+        }
+      });
+    };
+    const handleVisibilityChange = (): void => {
+      if (document.visibilityState === "hidden") flushAll("visibility-hidden");
+    };
+    const handlePageHide = (): void => flushAll("pagehide");
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pagehide", handlePageHide);
+    };
+  }, [authorityMode]);
 
   // Native pointer listeners and the imperative host API are replaced in
   // passive effects. Close the commit -> passive-effect window in layout so
@@ -726,6 +793,7 @@ export function useDrawingPersistenceLifecycle({
         subscribeScenePainted: (listener) => sceneBridge.subscribePainted(
           (ack) => listener(ack.stamp),
         ),
+        subscribeSceneExactPainted: (listener) => sceneBridge.subscribePainted(listener),
         clearScene: () => sceneBridge.clearPlan(),
       } : {}),
       ...(engineMode.effective === "shadow" ? { compareParity: (plan, document, sceneCanonicalIds, frame) => {
@@ -846,15 +914,8 @@ export function useDrawingPersistenceLifecycle({
       }
     }
     if (result.changed || store.dirty) {
-      try {
-        if (!persistDocumentAndMeasure(store)) {
-          console.warn("Failed to persist drawing document; the in-memory document remains dirty");
-        }
-      } catch (error) {
-        // The document command is already committed and remains the in-memory
-        // authority. Storage failure must not escape and make the controller
-        // compensate a successfully published surface mutation.
-        console.warn("Drawing document persistence threw; the in-memory document remains dirty", error);
+      if (!drawingPersistenceCoordinator.schedule(store)) {
+        console.warn("Failed to schedule drawing document persistence; the in-memory document remains dirty");
       }
     }
     if (adoptRenderer && renderer.documentSnapshot() === store.getSnapshot()) {
@@ -1018,12 +1079,8 @@ export function useDrawingPersistenceLifecycle({
     }
 
     if (committed.changed || store.dirty) {
-      try {
-        if (!persistDocumentAndMeasure(store)) {
-          console.warn("Failed to persist detached drawing document; the in-memory document remains dirty");
-        }
-      } catch (error) {
-        console.warn("Detached drawing persistence threw; the in-memory document remains authoritative", error);
+      if (!drawingPersistenceCoordinator.schedule(store)) {
+        console.warn("Failed to schedule detached drawing persistence; the in-memory document remains authoritative");
       }
     }
 
@@ -1179,6 +1236,11 @@ export function useDrawingPersistenceLifecycle({
     if (!committed) {
       scopeReadyRef.current = true;
       return false;
+    }
+    if (store.dirty) {
+      void drawingPersistenceCoordinator.flush(store.getSnapshot().scopeKey).then((result) => {
+        if (!result.ok) console.warn("Failed to flush drawings before surface disposal", result.error);
+      });
     }
     const detached = renderer.detachSurface();
     if (!detached) {
@@ -1410,6 +1472,104 @@ export function useDrawingPersistenceLifecycle({
     return plan ? drawingDisplayEntityScreenHandles(plan, id) : null;
   }, [sceneRuntime]);
 
+  const getActiveDocumentTarget = useCallback((): DrawingActiveDocumentTarget | null => {
+    if (authorityMode !== "document" || !scopeReadyRef.current) return null;
+    const document = activeStoreRef.current.getSnapshot();
+    if (document.scopeKey !== requestedScopeRef.current
+      || document.scopeKey !== symbolRef.current) return null;
+    return Object.freeze({
+      scopeKey: document.scopeKey,
+      documentRevision: document.documentRevision,
+    });
+  }, [authorityMode, symbolRef]);
+
+  const flushActiveDocument = useCallback(async (
+    target: DrawingActiveDocumentTarget,
+  ): Promise<DrawingPersistenceFlushResult | Readonly<{
+    ok: true;
+    scopeKey: string;
+    targetRevision: number;
+    persistedRevision: number;
+    skipped: true;
+  }>> => {
+    const store = activeStoreRef.current;
+    const document = store.getSnapshot();
+    if (document.scopeKey !== target.scopeKey
+      || document.documentRevision !== target.documentRevision) {
+      return Object.freeze({
+        ok: false as const,
+        scopeKey: target.scopeKey,
+        targetRevision: target.documentRevision,
+        error: new Error("drawing export persistence target is stale"),
+      });
+    }
+    if (!store.dirty) {
+      return Object.freeze({
+        ok: true as const,
+        scopeKey: target.scopeKey,
+        targetRevision: target.documentRevision,
+        persistedRevision: target.documentRevision,
+        skipped: true as const,
+      });
+    }
+    if (!drawingPersistenceCoordinator.schedule(store)) {
+      return Object.freeze({
+        ok: false as const,
+        scopeKey: target.scopeKey,
+        targetRevision: target.documentRevision,
+        error: new Error("drawing export persistence could not be scheduled"),
+      });
+    }
+    return drawingPersistenceCoordinator.flush(target.scopeKey);
+  }, []);
+
+  const waitForExactExportScene = useCallback(async (
+    target: DrawingActiveDocumentTarget,
+    signal?: AbortSignal,
+  ): Promise<DrawingExportSceneReceipt> => {
+    const store = activeStoreRef.current;
+    const document = store.getSnapshot();
+    if (document.scopeKey !== target.scopeKey
+      || document.documentRevision !== target.documentRevision) {
+      throw new Error("drawing export scene target is stale");
+    }
+    if (engineMode.effective === "scene-canary" && sceneCanaryEnabledRef.current) {
+      return sceneRuntime.waitForExactPaint({
+        scopeKey: target.scopeKey,
+        documentRevision: target.documentRevision,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    }
+    // The rollback renderer has no composite paint receipt. Request its one
+    // coherent chart update; the export orchestrator still waits a frame and
+    // revalidates the canonical document before capture.
+    try { sceneAdapterGetterDelegate.read()()?.requestSeriesUpdate?.(); } catch { /* best effort */ }
+    return Object.freeze({
+      kind: "legacy-frame" as const,
+      scopeKey: target.scopeKey,
+      documentRevision: target.documentRevision,
+    });
+  }, [engineMode.effective, sceneAdapterGetterDelegate, sceneRuntime]);
+
+  const revalidateExportScene = useCallback((
+    target: DrawingActiveDocumentTarget,
+    receipt: DrawingExportSceneReceipt,
+  ): boolean => {
+    const document = activeStoreRef.current.getSnapshot();
+    if (document.scopeKey !== target.scopeKey
+      || document.documentRevision !== target.documentRevision) return false;
+    if ("kind" in receipt) {
+      return receipt.scopeKey === target.scopeKey
+        && receipt.documentRevision === target.documentRevision;
+    }
+    const snapshot = sceneRuntime.snapshot();
+    return receipt.stamp.scopeKey === target.scopeKey
+      && receipt.stamp.documentRevision === target.documentRevision
+      && receipt.lodToleranceClass === "settledExact"
+      && snapshot.plan === receipt.plan
+      && snapshot.lodToleranceClass === "settledExact";
+  }, [sceneRuntime]);
+
   useEffect(() => {
     const runtimeBeforeTransition = sceneRuntime.snapshot();
     const bridgeBeforeTransition = sceneBridge.snapshot();
@@ -1505,6 +1665,10 @@ export function useDrawingPersistenceLifecycle({
         restoreOnFailure: false,
       })) {
         console.warn("Failed to commit the previous drawing scope before switching symbols");
+      } else if (previousStore.dirty) {
+        void drawingPersistenceCoordinator.flush(prevSymbol).then((result) => {
+          if (!result.ok) console.warn("Failed to flush the previous drawing scope", result.error);
+        });
       }
       const detached = renderer.detachSurface();
       if (!detached) {
@@ -1563,18 +1727,105 @@ export function useDrawingPersistenceLifecycle({
       // unsaved revision with an older localStorage payload.
       drawingDocumentSessionRegistry.markLoaded(symbol, store);
     } else if (drawingDocumentSessionRegistry.shouldLoadFromPersistence(symbol, store)) {
-      const saved = loadSavedDrawingsFailClosed(symbol);
-      const loaded = saved
-        ? loadSavedDrawingsIntoDocumentStore(store, symbol, saved)
-        : null;
-      if (!loaded?.ok) {
-        console.warn("Failed to load drawing document:", loaded?.error ?? "saved drawing payload failed validation");
-      } else {
-        drawingDocumentSessionRegistry.markLoaded(symbol, store);
-      }
+      let active = true;
+      const requestedStore = store;
+      const requestedSymbol = symbol;
+      void loadDrawingDocumentOnce(requestedSymbol).then((loaded) => {
+        if (!active
+          || requestedScopeRef.current !== requestedSymbol
+          || activeStoreRef.current !== requestedStore
+          || requestedStore.getSnapshot().scopeKey !== requestedSymbol) return;
+        if (requestedStore.dirty) {
+          drawingDocumentSessionRegistry.markLoaded(requestedSymbol, requestedStore);
+        } else if (loaded.status === "found") {
+          const result = requestedStore.loadDocument(loaded.document);
+          if (!result.ok) {
+            console.warn("Failed to load drawing document:", result.error);
+            return;
+          } else {
+            drawingDocumentSessionRegistry.markLoaded(requestedSymbol, requestedStore);
+            if (loaded.source === "v2") {
+              drawingPerfCounters.recordDuration(
+                "restoreChunkMs",
+                loaded.decodeMetrics.maxChunkDurationMs,
+              );
+            }
+          }
+        } else if (loaded.status === "missing") {
+          drawingDocumentSessionRegistry.markLoaded(requestedSymbol, requestedStore);
+        } else {
+          console.warn(
+            "Drawing document restore failed closed; mutations remain disabled:",
+            loaded.source,
+            loaded.error,
+          );
+          return;
+        }
+        setScopeRetryGeneration((generation) => (
+          generation >= Number.MAX_SAFE_INTEGER ? 0 : generation + 1
+        ));
+      }).catch((error) => {
+        if (!active) return;
+        console.warn("Drawing document restore threw; mutations remain disabled", error);
+      });
+      return () => { active = false; };
     }
 
-    if (!renderer.reconcile(store.getSnapshot())) {
+    const documentToRestore = store.getSnapshot();
+    if (renderer.documentSnapshot() !== documentToRestore
+      && documentToRestore.entities.size >= 32) {
+      let active = true;
+      let retryHandle: ReturnType<typeof setTimeout> | null = null;
+      const abortController = new AbortController();
+      const scheduleBoundedRetry = (): void => {
+        const retry = boundedRestoreRetryRef.current;
+        if (retry.scopeKey !== symbol) {
+          retry.scopeKey = symbol;
+          retry.attempts = 0;
+        }
+        if (retry.attempts >= 2) return;
+        retry.attempts += 1;
+        retryHandle = setTimeout(() => {
+          retryHandle = null;
+          if (!active) return;
+          setScopeRetryGeneration((generation) => (
+            generation >= Number.MAX_SAFE_INTEGER ? 0 : generation + 1
+          ));
+        }, 50);
+      };
+      void renderer.reconcileAsync(documentToRestore, {
+        signal: abortController.signal,
+      }).then((result) => {
+        if (!active
+          || requestedScopeRef.current !== symbol
+          || activeStoreRef.current !== store
+          || store.getSnapshot() !== documentToRestore) return;
+        if (!result.ok) {
+          if (!result.cancelled) {
+            console.warn("Failed to materialize the drawing document in bounded restore chunks");
+            scheduleBoundedRetry();
+          }
+          return;
+        }
+        boundedRestoreRetryRef.current = { scopeKey: symbol, attempts: 0 };
+        drawingPerfCounters.recordDuration("restoreChunkMs", result.maxChunkDurationMs);
+        setScopeRetryGeneration((generation) => (
+          generation >= Number.MAX_SAFE_INTEGER ? 0 : generation + 1
+        ));
+      }).catch((error) => {
+        if (active) {
+          console.warn("Bounded drawing document restore failed closed", error);
+          scheduleBoundedRetry();
+        }
+      });
+      return () => {
+        active = false;
+        if (retryHandle !== null) clearTimeout(retryHandle);
+        abortController.abort("drawing restore scope changed");
+      };
+    }
+
+    if (!renderer.reconcile(documentToRestore)) {
       console.warn("Failed to materialize the drawing document; the document was retained for retry");
     } else {
       primitivesRef.current = [...renderer.snapshot()];
@@ -1641,6 +1892,11 @@ export function useDrawingPersistenceLifecycle({
           adoptRenderer: false,
           restoreOnFailure: false,
         });
+        if (store.dirty) {
+          void drawingPersistenceCoordinator.flush(store.getSnapshot().scopeKey).then((result) => {
+            if (!result.ok) console.warn("Failed to flush drawing scope during teardown", result.error);
+          });
+        }
       }
     }
     const renderer = rendererRef.current;
@@ -1677,6 +1933,10 @@ export function useDrawingPersistenceLifecycle({
     hitTestScene,
     getSceneScreenBox,
     getSceneScreenHandles,
+    getActiveDocumentTarget,
+    flushActiveDocument,
+    waitForExactExportScene,
+    revalidateExportScene,
     subscribeVisibleScenePaint,
   };
 }

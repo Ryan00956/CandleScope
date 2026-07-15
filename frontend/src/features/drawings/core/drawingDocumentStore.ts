@@ -5,7 +5,6 @@ import type {
 } from "./drawingCommands.js";
 import {
   canonicalDrawingValueEquals,
-  cloneDrawingDocument,
   createDrawingDocument,
 } from "./drawingDocument.js";
 import type { DrawingDocument } from "./drawingDocument.js";
@@ -81,7 +80,12 @@ export function createDrawingDocumentStore(
 ): DrawingDocumentStore {
   let snapshot = typeof initial === "string"
     ? createDrawingDocument({ scopeKey: initial })
-    : cloneDrawingDocument(initial);
+    : createDrawingDocument({
+        scopeKey: initial.scopeKey,
+        documentRevision: initial.documentRevision,
+        entities: initial.entities,
+        zOrder: initial.zOrder,
+      });
   let currentDirtyRevision: number | null = null;
   const listeners = new Set<DrawingDocumentStoreListener>();
 
@@ -128,7 +132,17 @@ export function createDrawingDocumentStore(
       }
       let next: DrawingDocument;
       try {
-        next = cloneDrawingDocument(document);
+        // createDrawingDocument copies the map/z-order boundary while sharing
+        // only module-authenticated, deeply immutable canonical entities. A
+        // large freehand restore therefore cannot trigger a second full deep
+        // clone after the repository already validated it; forged entities
+        // are still rebuilt defensively by the document constructor.
+        next = createDrawingDocument({
+          scopeKey: document.scopeKey,
+          documentRevision: document.documentRevision,
+          entities: document.entities,
+          zOrder: document.zOrder,
+        });
       } catch (error) {
         return loadFailure(snapshot, error);
       }

@@ -158,6 +158,8 @@ export interface DrawingPerfRuntimeSummary {
   entityCount: number;
   pointCount: number;
   typeCounts: Readonly<Record<string, number>>;
+  /** Actual chart attachments, including the single composite scene primitive. */
+  attachedPrimitiveCount?: number;
 }
 
 export type DrawingPerfRuntimeSummaryProvider = () => DrawingPerfRuntimeSummary | null;
@@ -1081,6 +1083,9 @@ export function readDrawingPerfRuntimeSummary(): DrawingPerfRuntimeSummary | nul
       || summary.entityCount < 0
       || !Number.isSafeInteger(summary.pointCount)
       || summary.pointCount < 0
+      || (summary.attachedPrimitiveCount !== undefined
+        && (!Number.isSafeInteger(summary.attachedPrimitiveCount)
+          || summary.attachedPrimitiveCount < 0))
       || !summary.typeCounts
       || typeof summary.typeCounts !== "object") {
       return null;
@@ -1099,6 +1104,9 @@ export function readDrawingPerfRuntimeSummary(): DrawingPerfRuntimeSummary | nul
       entityCount: summary.entityCount,
       pointCount: summary.pointCount,
       typeCounts: Object.fromEntries(typeEntries),
+      ...(summary.attachedPrimitiveCount === undefined
+        ? {}
+        : { attachedPrimitiveCount: summary.attachedPrimitiveCount }),
     };
   } catch {
     return null;

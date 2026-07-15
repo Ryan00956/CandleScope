@@ -65,6 +65,11 @@ export interface DrawingSceneRuntimeBinding {
   readonly projectScene: DrawingSceneProjector;
   readonly isVisible?: () => boolean;
   readonly selectedId?: () => string | null;
+  /** Visible canary filter. Shadow mode omits it and projects the full document. */
+  readonly shouldProjectNode?: (node: DrawingSceneNode) => boolean;
+  /** Visible scene publication is accepted only by the current surface generation. */
+  readonly publishScene?: (plan: DrawingScreenDisplayList) => boolean;
+  readonly clearScene?: () => void;
   readonly compareParity?: (
     plan: DrawingScreenDisplayList,
     document: DrawingDocument,
@@ -81,7 +86,7 @@ export interface DrawingSceneRuntimeMetrics {
 }
 
 export interface DrawingSceneRuntimeOptions {
-  readonly mode: "legacy" | "shadow";
+  readonly mode: "legacy" | "shadow" | "scene-canary";
   readonly compareIntervalMs?: number;
   /** Retry unavailable legacy layout samples without opening a full parity blind window. */
   readonly compareRetryIntervalMs?: number;
@@ -102,8 +107,10 @@ export interface DrawingSceneRuntimeOptions {
 export interface DrawingSceneRuntimeSnapshot {
   readonly active: boolean;
   readonly disposed: boolean;
-  readonly mode: "legacy" | "shadow";
+  readonly mode: "legacy" | "shadow" | "scene-canary";
   readonly plan: DrawingScreenDisplayList | null;
+  /** True only after the current activation/recovery accepted a publication. */
+  readonly publicationReady: boolean;
   readonly scopeKey: string | null;
 }
 
@@ -230,6 +237,19 @@ function defaultCancelPostPaintTask(value: unknown): void {
   handle.taskHandle = null;
 }
 
+function defaultRequestVisibleSceneFrame(callback: () => void): unknown {
+  if (typeof requestAnimationFrame === "function") return requestAnimationFrame(callback);
+  return setTimeout(callback, 0);
+}
+
+function defaultCancelVisibleSceneFrame(handle: unknown): void {
+  if (typeof cancelAnimationFrame === "function" && typeof handle === "number") {
+    cancelAnimationFrame(handle);
+    return;
+  }
+  clearTimeout(handle as ReturnType<typeof setTimeout>);
+}
+
 function queryCandidates(
   registry: DrawingSceneRegistry,
   nodes: readonly DrawingSceneNode[],
@@ -286,8 +306,8 @@ export function createDrawingSceneRuntime({
   onParity,
   onParityDuration,
   onSkipped,
-  requestFrame = defaultRequestShadowSceneTask,
-  cancelFrame = defaultCancelPostPaintTask,
+  requestFrame,
+  cancelFrame,
   requestParityWork = defaultRequestParityTask,
   cancelParityWork = defaultCancelPostPaintTask,
   scheduleDelay = defaultScheduleDelay,
@@ -295,13 +315,22 @@ export function createDrawingSceneRuntime({
 }: DrawingSceneRuntimeOptions): DrawingSceneRuntime {
   const parityInterval = finiteInterval(compareIntervalMs);
   const parityRetryInterval = finiteInterval(compareRetryIntervalMs);
+  const scheduleSceneFrame = requestFrame ?? (mode === "shadow"
+    ? defaultRequestShadowSceneTask
+    : defaultRequestVisibleSceneFrame);
+  const cancelSceneFrame = cancelFrame ?? (mode === "shadow"
+    ? defaultCancelPostPaintTask
+    : defaultCancelVisibleSceneFrame);
   let binding: DrawingSceneRuntimeBinding | null = null;
   let registry: DrawingSceneRegistry | null = null;
   let unsubscribeDocument: (() => void) | null = null;
   let unsubscribeFrame: (() => void) | null = null;
   let latestPlan: DrawingScreenDisplayList | null = null;
   let latestPublishedPlan: SceneRenderPlan | null = null;
+  let latestOwnedEntityCount: number | null = null;
   let disposed = false;
+  let faulted = false;
+  let recoveryPublicationPending = false;
   let lastParityAttemptAt = Number.NEGATIVE_INFINITY;
   let lastParitySuccessAt = Number.NEGATIVE_INFINITY;
   let parityDelayHandle: unknown = null;
@@ -392,7 +421,7 @@ export function createDrawingSceneRuntime({
   };
 
   const readInput = (): SceneRenderInput | null => {
-    if (disposed || mode !== "shadow" || !binding || !registry) return null;
+    if (disposed || faulted || mode === "legacy" || !binding || !registry) return null;
     const document = binding.store.getSnapshot();
     // A store listener publishes inside dispatch, before the legacy renderer
     // adopts the committed document. Waiting for exact identity guarantees
@@ -426,9 +455,12 @@ export function createDrawingSceneRuntime({
       const reconciled = registry.reconcile(input.document);
       if (!reconciled.ok) throw new Error(reconciled.error);
       const allNodes = reconciled.snapshot.nodes;
+      const ownedNodes = input.binding.shouldProjectNode
+        ? Object.freeze(allNodes.filter(input.binding.shouldProjectNode))
+        : allNodes;
       const visibleNodes = input.binding.isVisible?.() === false
         ? Object.freeze([])
-        : queryCandidates(registry, allNodes, input.frame);
+        : queryCandidates(registry, ownedNodes, input.frame);
       const list = input.binding.projectScene({
         adapter: input.adapter,
         document: input.document,
@@ -439,6 +471,9 @@ export function createDrawingSceneRuntime({
       });
       if (!list) {
         onSkipped?.("scene-projection-unresolved");
+        if (mode === "scene-canary") {
+          throw new Error("drawing scene projection was unresolved");
+        }
         return null;
       }
       if (drawingRenderRevisionKey(list.stamp) !== drawingRenderRevisionKey(input.stamp)) {
@@ -450,9 +485,9 @@ export function createDrawingSceneRuntime({
         document: input.document,
         frame: input.frame,
         list,
-        sceneCanonicalIds: Object.freeze(allNodes.map((node) => node.id)),
+        sceneCanonicalIds: Object.freeze(ownedNodes.map((node) => node.id)),
         stamp: input.stamp,
-        totalEntityCount: allNodes.length,
+        totalEntityCount: ownedNodes.length,
         visibleEntityCount: list.entities.length,
       });
     },
@@ -462,15 +497,39 @@ export function createDrawingSceneRuntime({
         scheduler.invalidate("publish-frame-stale");
         return;
       }
+      let visiblePublicationAccepted = true;
+      let visiblePublicationError: unknown = null;
+      if (mode === "scene-canary") {
+        try {
+          visiblePublicationAccepted = plan.binding.publishScene?.(plan.list) === true;
+        } catch (error) {
+          visiblePublicationAccepted = false;
+          visiblePublicationError = error;
+        }
+      }
+      if (!visiblePublicationAccepted) {
+        onSkipped?.("scene-publish-surface-stale");
+        // A rejected visible publication is an ownership failure, not a stale
+        // projector input. Stop consuming frame invalidations so a missing or
+        // replaced surface cannot become an unbounded rAF rebuild loop. The
+        // lifecycle decides whether pre-mutation legacy fallback is still safe.
+        faulted = true;
+        removeSubscriptions();
+        onError?.(visiblePublicationError
+          ?? new Error("drawing scene publication was rejected by the current surface"));
+        return;
+      }
       latestPlan = plan.list;
       latestPublishedPlan = plan;
+      latestOwnedEntityCount = plan.totalEntityCount;
+      recoveryPublicationPending = false;
       onMetrics?.(Object.freeze({
         buildDurationMs: plan.buildDurationMs,
         culledEntityCount: Math.max(0, plan.totalEntityCount - plan.visibleEntityCount),
         totalEntityCount: plan.totalEntityCount,
         visibleEntityCount: plan.visibleEntityCount,
       }));
-      const compare = plan.binding.compareParity;
+      const compare = mode === "shadow" ? plan.binding.compareParity : undefined;
       const timestamp = now();
       if (compare
         && timestamp - lastParitySuccessAt >= parityInterval
@@ -485,11 +544,19 @@ export function createDrawingSceneRuntime({
       }
     },
     onError(error) {
+      if (mode === "scene-canary") {
+        // A visible scene cannot silently retain stale pixels after projection
+        // fails. Stop consuming invalidations and let the lifecycle choose the
+        // pre-mutation legacy fallback or the post-boundary last-valid-plan
+        // fault path. Keep latestPlan intact for the latter.
+        faulted = true;
+        removeSubscriptions();
+      }
       onError?.(error);
     },
-    requestFrame,
-    cancelFrame,
-    restartPendingFrameOnInvalidate: true,
+    requestFrame: scheduleSceneFrame,
+    cancelFrame: cancelSceneFrame,
+    restartPendingFrameOnInvalidate: mode === "shadow",
   });
 
   const removeSubscriptions = (): void => {
@@ -499,9 +566,25 @@ export function createDrawingSceneRuntime({
     unsubscribeFrame = null;
   };
 
+  const installSubscriptions = (nextBinding: DrawingSceneRuntimeBinding): void => {
+    // Faults deliberately remove both subscriptions to stop a rejected scene
+    // from rebuilding forever. A same-binding activation is the explicit
+    // recovery boundary, so it must restore both listeners before scheduling
+    // the replacement plan. Replacing the pair also keeps this idempotent when
+    // React asks an already-healthy runtime to reactivate.
+    removeSubscriptions();
+    unsubscribeDocument = nextBinding.store.subscribe(() => {
+      scheduler.invalidate("document");
+    });
+    unsubscribeFrame = nextBinding.adapter.subscribeDrawingFrameInvalidation(() => {
+      if (mode === "scene-canary" && latestOwnedEntityCount === 0) return;
+      scheduler.invalidate("frame");
+    });
+  };
+
   const runtime: DrawingSceneRuntime = {
     activate(nextBinding) {
-      if (disposed || mode !== "shadow") return false;
+      if (disposed || mode === "legacy") return false;
       const scopeKey = nextBinding.store.getSnapshot().scopeKey;
       if (!scopeKey || nextBinding.renderer.documentSnapshot() !== nextBinding.store.getSnapshot()) {
         onSkipped?.("scene-activation-not-current");
@@ -513,29 +596,30 @@ export function createDrawingSceneRuntime({
         && binding.renderer === nextBinding.renderer
         && binding.store === nextBinding.store
         && binding.projectScene === nextBinding.projectScene) {
+        recoveryPublicationPending = recoveryPublicationPending || faulted;
+        faulted = false;
         binding = nextBinding;
         latestPublishedPlan = null;
+        installSubscriptions(nextBinding);
         return scheduler.invalidate("reactivate");
       }
       removeSubscriptions();
       clearParityDelay();
       clearParityWork();
+      faulted = false;
+      recoveryPublicationPending = false;
       binding = nextBinding;
       registry = createDrawingSceneRegistry(scopeKey);
       latestPlan = null;
       latestPublishedPlan = null;
+      latestOwnedEntityCount = null;
       lastParityAttemptAt = Number.NEGATIVE_INFINITY;
       lastParitySuccessAt = Number.NEGATIVE_INFINITY;
-      unsubscribeDocument = nextBinding.store.subscribe(() => {
-        scheduler.invalidate("document");
-      });
-      unsubscribeFrame = nextBinding.adapter.subscribeDrawingFrameInvalidation(() => {
-        scheduler.invalidate("frame");
-      });
+      installSubscriptions(nextBinding);
       return scheduler.invalidate("activate");
     },
     invalidate(reason = "external") {
-      return mode === "shadow" && binding !== null && scheduler.invalidate(reason);
+      return !faulted && mode !== "legacy" && binding !== null && scheduler.invalidate(reason);
     },
     requestParity() {
       if (mode !== "shadow" || !binding?.compareParity || disposed) return false;
@@ -551,25 +635,30 @@ export function createDrawingSceneRuntime({
       return true;
     },
     flushNow() {
-      return mode === "shadow" && binding !== null && scheduler.flushNow();
+      return !faulted && mode !== "legacy" && binding !== null && scheduler.flushNow();
     },
     suspend() {
+      if (mode === "scene-canary") binding?.clearScene?.();
       removeSubscriptions();
       clearParityDelay();
       clearParityWork();
       binding = null;
       registry = null;
+      faulted = false;
+      recoveryPublicationPending = false;
       latestPlan = null;
       latestPublishedPlan = null;
+      latestOwnedEntityCount = null;
       lastParityAttemptAt = Number.NEGATIVE_INFINITY;
       lastParitySuccessAt = Number.NEGATIVE_INFINITY;
     },
     snapshot() {
       return Object.freeze({
-        active: binding !== null,
+        active: binding !== null && !faulted,
         disposed,
         mode,
         plan: latestPlan,
+        publicationReady: latestPlan !== null && !faulted && !recoveryPublicationPending,
         scopeKey: binding?.store.getSnapshot().scopeKey ?? null,
       });
     },

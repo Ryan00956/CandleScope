@@ -18,6 +18,11 @@ import {
   evaluateGates,
   stableStringify,
 } from "./drawing-performance-metrics.mjs";
+import {
+  PHASE4_CROSSHAIR_MOVE_COUNT,
+  PHASE4_REQUIRED_SCENARIO_IDS,
+  buildPhase4Acceptance,
+} from "./drawing-performance-phase4.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -141,6 +146,50 @@ const DEFAULT_SCENARIOS = Object.freeze([
       "workerQueueDepth",
     ],
   }),
+  Object.freeze({
+    id: "phase4-migrated-64-viewport",
+    fixture: "phase4Migrated64",
+    action: "viewport",
+    requiredMetrics: ["sceneProjectPaintMs", "frameIntervalMs", "inputToNextPaintMs", "eventTimingMs"],
+    targetMetrics: ["sceneProjectPaintMs", "frameIntervalMs", "inputToNextPaintMs"],
+    targetCounters: ["surfacePrimitiveCount", "requestUpdatePerFrame"],
+  }),
+  Object.freeze({
+    id: "phase4-mixed-64-viewport",
+    fixture: "phase4Mixed64",
+    action: "viewport",
+    requiredMetrics: ["sceneProjectPaintMs", "frameIntervalMs", "inputToNextPaintMs", "eventTimingMs"],
+    targetMetrics: ["sceneProjectPaintMs", "frameIntervalMs", "inputToNextPaintMs"],
+    // The mixed primitive count has a fixture-derived expectation and is
+    // checked by Phase 4 acceptance rather than the global fixed-to-one gate.
+    targetCounters: ["requestUpdatePerFrame"],
+  }),
+  Object.freeze({
+    id: "phase4-crosshair-1000",
+    fixture: "phase4Migrated64",
+    action: "crosshair",
+    // Synthetic passive mouse moves do not reliably emit PerformanceEventTiming
+    // entries in headless Chromium; input-to-paint and the explicit 1000-move
+    // action evidence remain mandatory.
+    requiredMetrics: ["frameIntervalMs", "inputToNextPaintMs"],
+    targetMetrics: ["frameIntervalMs", "inputToNextPaintMs"],
+    targetCounters: [
+      "staticProjectionCount",
+      "sceneRebuildCount",
+      "surfacePrimitiveCount",
+      "requestUpdatePerFrame",
+    ],
+  }),
+  Object.freeze({
+    id: "phase4-freehand-64-viewport",
+    fixture: "freehand64x512",
+    action: "viewport",
+    requiredMetrics: ["drawingMainThreadMs", "frameIntervalMs", "inputToNextPaintMs", "eventTimingMs"],
+    targetMetrics: ["drawingMainThreadMs", "frameIntervalMs", "inputToNextPaintMs"],
+    // Freehand is deliberately still legacy in Phase 4, so the exact count is
+    // one scene primitive plus 64 legacy primitives, not the global one gate.
+    targetCounters: ["requestUpdatePerFrame"],
+  }),
 ]);
 
 function parseNumber(value, label, { min = 0, integer = false } = {}) {
@@ -151,7 +200,17 @@ function parseNumber(value, label, { min = 0, integer = false } = {}) {
   return parsed;
 }
 
+function parsePhase(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const phase = /^\d+$/.test(normalized) ? `phase${normalized}` : normalized;
+  if (!["phase0", "phase1", "phase3", "phase4"].includes(phase)) {
+    throw new Error("--phase must be phase0, phase1, phase3, or phase4");
+  }
+  return phase;
+}
+
 function parseArgs(argv) {
+  let scenariosExplicit = false;
   const args = {
     url: "",
     out: "",
@@ -208,12 +267,11 @@ function parseArgs(argv) {
       args.timeoutMs = parseNumber(argv[++index], "--timeout-ms", { min: 1_000, integer: true });
     } else if (arg === "--scenarios") {
       args.scenarios = String(argv[++index] || "").split(",").map((value) => value.trim()).filter(Boolean);
+      scenariosExplicit = true;
     } else if (arg === "--phase") {
-      const phase = String(argv[++index] || "");
-      if (phase !== "phase0" && phase !== "phase1" && phase !== "phase3") {
-        throw new Error("--phase must be phase0, phase1, or phase3");
-      }
-      args.phase = phase;
+      args.phase = parsePhase(argv[++index]);
+    } else if (arg.startsWith("--phase=")) {
+      args.phase = parsePhase(arg.slice("--phase=".length));
     } else if (arg === "--engine-mode") {
       const mode = String(argv[++index] || "");
       if (!["legacy", "shadow", "scene-canary", "scene"].includes(mode)) {
@@ -224,6 +282,10 @@ function parseArgs(argv) {
     else if (arg === "--smoke") args.smoke = true;
     else if (arg === "--enforce-targets") args.enforceTargets = true;
     else throw new Error("Unknown argument: " + arg);
+  }
+
+  if (!scenariosExplicit && args.phase === "phase4") {
+    args.scenarios = [...PHASE4_REQUIRED_SCENARIO_IDS];
   }
 
   const knownScenarioIds = new Set(DEFAULT_SCENARIOS.map((scenario) => scenario.id));
@@ -766,6 +828,23 @@ async function clickTool(cdp, tool) {
   return Boolean(await evaluate(cdp, expression));
 }
 
+async function selectToolVariant(cdp, parentTool, variant) {
+  const opened = Boolean(await evaluate(cdp, "(() => {"
+    + "const el=document.querySelector('[data-drawing-tool="
+    + JSON.stringify(parentTool) + "]');"
+    + "if(!el||el.disabled)return false;"
+    + "el.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,detail:2}));"
+    + "return true;"
+    + "})()"));
+  if (!opened) return false;
+  await waitNextAnimationFrame(cdp);
+  const expression = "(() => {"
+    + "const el=document.querySelector('[data-tool-variant=" + JSON.stringify(variant) + "]');"
+    + "if(!el||el.disabled)return false;el.click();return true;"
+    + "})()";
+  return Boolean(await evaluate(cdp, expression));
+}
+
 async function waitNextAnimationFrame(cdp) {
   await evaluate(cdp, "new Promise((resolve)=>requestAnimationFrame(()=>resolve(true)))");
 }
@@ -924,6 +1003,31 @@ async function runHover(cdp, rect, count) {
   return count;
 }
 
+async function runCrosshairMoves(cdp, rect, count) {
+  const activated = await selectToolVariant(cdp, "cursor", "cursor-crosshair");
+  if (!activated) throw new Error("Crosshair cursor tool is not available");
+  const left = rect.x + rect.width * 0.08;
+  const top = rect.y + rect.height * 0.12;
+  const width = rect.width * 0.84;
+  const height = rect.height * 0.72;
+  const batchSize = 32;
+  for (let offset = 0; offset < count; offset += batchSize) {
+    const pending = [];
+    const end = Math.min(count, offset + batchSize);
+    for (let index = offset; index < end; index += 1) {
+      const progress = index / Math.max(1, count - 1);
+      pending.push(dispatchMouseMove(
+        cdp,
+        Math.round(left + width * progress),
+        Math.round(top + height * (0.5 + Math.sin(index * 0.113) * 0.34)),
+      ));
+    }
+    await Promise.all(pending);
+    await waitNextAnimationFrame(cdp);
+  }
+  return count;
+}
+
 async function runActiveFreehand(cdp, rect, count) {
   const activated = await clickTool(cdp, "pen");
   if (!activated) throw new Error("Pen tool is not available");
@@ -984,6 +1088,7 @@ async function runScenarioAction(cdp, scenario, args, rect) {
     hoverEventsDispatched: 0,
     panEventsDispatched: 0,
     pointerSamplesDispatched: 0,
+    crosshairMovesDispatched: 0,
   };
   if (scenario.action === "viewport" || scenario.action === "mixed") {
     result.wheelEventsDispatched = await runWheel(cdp, rect, args.wheelEvents);
@@ -995,7 +1100,103 @@ async function runScenarioAction(cdp, scenario, args, rect) {
   if (scenario.action === "active-freehand") {
     result.pointerSamplesDispatched = await runActiveFreehand(cdp, rect, args.pointerSamples);
   }
+  if (scenario.action === "crosshair") {
+    result.crosshairMovesDispatched = await runCrosshairMoves(
+      cdp,
+      rect,
+      PHASE4_CROSSHAIR_MOVE_COUNT,
+    );
+  }
   return result;
+}
+
+async function startPhase4FrameProbe(cdp) {
+  return evaluateJson(cdp, () => {
+    window.__CANDLESCOPE_PHASE4_FRAME_PROBE__?.stop?.();
+    const drawingHandle = window.__CANDLESCOPE_DRAWING_PERF__;
+    if (!drawingHandle?.report) return { started: false, reason: "drawing-perf-handle-missing" };
+    const read = () => {
+      const counters = drawingHandle.report()?.counters || {};
+      const count = (key) => {
+        const value = Number(counters[key]);
+        return Number.isFinite(value) && value >= 0 ? value : 0;
+      };
+      return {
+        requestUpdates: count("requestUpdateCount"),
+        sceneRebuilds: count("sceneRebuildCount"),
+        finalProjections: count("finalProjectionCount"),
+      };
+    };
+    let active = true;
+    let frameHandle = null;
+    let last = read();
+    const baseline = { ...last };
+    const state = {
+      observedFrameIntervals: 0,
+      maxRequestUpdatesPerFrame: 0,
+      maxSceneRebuildsPerFrame: 0,
+      maxFinalProjectionsPerFrame: 0,
+      totalRequestUpdates: 0,
+      totalSceneRebuilds: 0,
+      totalFinalProjections: 0,
+    };
+    const capture = () => {
+      const current = read();
+      const requestUpdates = Math.max(0, current.requestUpdates - last.requestUpdates);
+      const sceneRebuilds = Math.max(0, current.sceneRebuilds - last.sceneRebuilds);
+      const finalProjections = Math.max(0, current.finalProjections - last.finalProjections);
+      state.observedFrameIntervals += 1;
+      state.maxRequestUpdatesPerFrame = Math.max(
+        state.maxRequestUpdatesPerFrame,
+        requestUpdates,
+      );
+      state.maxSceneRebuildsPerFrame = Math.max(
+        state.maxSceneRebuildsPerFrame,
+        sceneRebuilds,
+      );
+      state.maxFinalProjectionsPerFrame = Math.max(
+        state.maxFinalProjectionsPerFrame,
+        finalProjections,
+      );
+      state.totalRequestUpdates += requestUpdates;
+      state.totalSceneRebuilds += sceneRebuilds;
+      state.totalFinalProjections += finalProjections;
+      last = current;
+    };
+    const tick = () => {
+      if (!active) return;
+      capture();
+      frameHandle = requestAnimationFrame(tick);
+    };
+    frameHandle = requestAnimationFrame(tick);
+    const controller = {
+      stop() {
+        if (active) {
+          active = false;
+          if (frameHandle !== null) cancelAnimationFrame(frameHandle);
+          capture();
+        }
+        return {
+          started: true,
+          baseline,
+          final: { ...last },
+          ...state,
+        };
+      },
+    };
+    window.__CANDLESCOPE_PHASE4_FRAME_PROBE__ = controller;
+    return { started: true, baseline };
+  });
+}
+
+async function stopPhase4FrameProbe(cdp) {
+  return evaluateJson(cdp, () => {
+    const controller = window.__CANDLESCOPE_PHASE4_FRAME_PROBE__;
+    if (!controller?.stop) return { started: false, reason: "phase4-probe-missing" };
+    const result = controller.stop();
+    delete window.__CANDLESCOPE_PHASE4_FRAME_PROBE__;
+    return result;
+  });
 }
 
 function durationSamples(snapshot, key) {
@@ -1297,12 +1498,25 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
     // browser timing so its low-frequency full parity probe cannot be counted
     // as a new action Long Task in the formal legacy/shadow comparison.
     await evaluate(cdp, "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.(); true");
+    let phase4Probe = null;
+    if (args.phase === "phase4") {
+      const startedProbe = await startPhase4FrameProbe(cdp);
+      if (startedProbe?.started !== true) {
+        throw new Error("Phase 4 frame probe could not start: " + JSON.stringify(startedProbe));
+      }
+    }
     const beforeMetrics = metricMap(await cdp.send("Performance.getMetrics"));
     const beforeHeap = await cdp.send("Runtime.getHeapUsage");
     const actionStartedAt = Number(await evaluate(cdp, "performance.now()"));
     const action = await runScenarioAction(cdp, scenario, args, rect);
     const actionEndedAt = Number(await evaluate(cdp, "performance.now()"));
     await wait(args.settleMs);
+    if (args.phase === "phase4") {
+      phase4Probe = await stopPhase4FrameProbe(cdp);
+      if (phase4Probe?.started !== true) {
+        throw new Error("Phase 4 frame probe could not stop: " + JSON.stringify(phase4Probe));
+      }
+    }
     if (args.engineMode === "shadow" && fixture.metadata.drawingCount > 0) {
       const finalParity = await requestFinalShadowParity(
         cdp,
@@ -1341,6 +1555,7 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       anchorResolveCount: maxCounter(drawing, "anchorResolveCount"),
       finalProjectionCount: maxCounter(drawing, "finalProjectionCount"),
       sceneRebuildCount: maxCounter(drawing, "sceneRebuildCount"),
+      staticProjectionCount: phase4Probe?.totalFinalProjections ?? null,
       shadowCompareCount: maxCounter(drawing, "shadowCompareCount"),
       shadowParityMismatchCount: maxCounter(drawing, "shadowParityMismatchCount"),
       shadowSkippedCount: maxCounter(drawing, "shadowSkippedCount"),
@@ -1354,8 +1569,9 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       shadowParityMs: maxGauge(drawing, "shadowParityMs"),
       shadowSceneBuildMs: maxGauge(drawing, "shadowSceneBuildMs"),
       requestUpdateCount: maxCounter(drawing, "requestUpdateCount"),
-      surfacePrimitiveCount: Number.isSafeInteger(runtimeSummary?.entityCount)
-        ? runtimeSummary.entityCount
+      requestUpdatePerFrame: phase4Probe?.maxRequestUpdatesPerFrame ?? null,
+      surfacePrimitiveCount: Number.isSafeInteger(runtimeSummary?.attachedPrimitiveCount)
+        ? runtimeSummary.attachedPrimitiveCount
         : null,
       workerQueueDepth: maxGauge(drawing, "workerQueue"),
     };
@@ -1446,6 +1662,7 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       initialRuntimeSummary: ready.runtimeSummary,
       restore,
       action: actionEvidence,
+      phase4Probe,
       measurementWindow: {
         actionStartedAt,
         actionEndedAt,
@@ -1569,6 +1786,8 @@ function fixtureTimeOffsetDenominator(fixtureName) {
   if (fixtureName === "freehand64x512") return 511;
   if (fixtureName === "entities200") return 399;
   if (fixtureName === "entities512") return 1_023;
+  if (fixtureName === "phase4Migrated64") return 127;
+  if (fixtureName === "phase4Mixed64") return 63;
   return 1;
 }
 
@@ -1781,12 +2000,23 @@ function buildSmokeAcceptance(report, args) {
     || (report.phase3Acceptance?.engineModePassed === true
       && report.phase3Acceptance?.parityPassed === true
       && report.phase3Acceptance?.sceneBuildBudgetPassed === true);
+  const phase4RequirementsPassed = args.phase !== "phase4"
+    || (report.phase4Acceptance?.engineModePassed === true
+      && report.phase4Acceptance?.migratedFixturePassed === true
+      && report.phase4Acceptance?.mixedFixturePassed === true
+      && report.phase4Acceptance?.crosshairRebuildPassed === true
+      && report.phase4Acceptance?.viewportRequestUpdatePassed === true
+      && report.phase4Acceptance?.freehandViewUpdateFanoutPassed === true);
   return {
     applicable: args.smoke,
     smokeOnly: args.smoke,
-    passed: args.smoke && executionPassed && phase3RequirementsPassed,
+    passed: args.smoke
+      && executionPassed
+      && phase3RequirementsPassed
+      && phase4RequirementsPassed,
     executionPassed,
     phase3RequirementsPassed,
+    phase4RequirementsPassed,
     scenarioCount: report.scenarios.length,
     invalidScenarioIds: [...(report.executionAcceptance?.invalidScenarioIds ?? [])],
     note: args.smoke
@@ -2442,6 +2672,7 @@ async function main() {
       phase0Eligible: !args.smoke,
       phase1Eligible: !args.smoke,
       phase3Eligible: !args.smoke,
+      phase4Eligible: !args.smoke,
     };
     applyRestoreValidity(report, args);
     report.executionAcceptance = {
@@ -2459,12 +2690,15 @@ async function main() {
     report.phase0Acceptance = buildPhase0Acceptance(report, args);
     report.phase1Acceptance = buildPhase1Acceptance(report, args);
     report.phase3Acceptance = buildPhase3Acceptance(report, args);
+    report.phase4Acceptance = buildPhase4Acceptance(report, args);
     report.smokeAcceptance = buildSmokeAcceptance(report, args);
-    const phaseAcceptance = args.phase === "phase3"
-      ? report.phase3Acceptance
-      : args.phase === "phase1"
-        ? report.phase1Acceptance
-        : report.phase0Acceptance;
+    const phaseAcceptance = args.phase === "phase4"
+      ? report.phase4Acceptance
+      : args.phase === "phase3"
+        ? report.phase3Acceptance
+        : args.phase === "phase1"
+          ? report.phase1Acceptance
+          : report.phase0Acceptance;
     const selectedPhaseAcceptance = args.phase === "phase3"
       && args.engineMode === "legacy"
       && !args.smoke
@@ -2480,6 +2714,7 @@ async function main() {
       phase0Eligible: !args.smoke,
       phase1Eligible: !args.smoke,
       phase3Eligible: !args.smoke,
+      phase4Eligible: !args.smoke,
       executionPassed: report.executionAcceptance.passed,
     };
 
@@ -2493,11 +2728,13 @@ async function main() {
       "drawing-engine-v2",
       (args.smoke
         ? "smoke-"
-        : args.phase === "phase3"
-          ? "phase3-" + args.engineMode + "-"
-          : args.phase === "phase1"
-            ? "baseline-after-"
-            : "baseline-before-")
+        : args.phase === "phase4"
+          ? "phase4-" + args.engineMode + "-"
+          : args.phase === "phase3"
+            ? "phase3-" + args.engineMode + "-"
+            : args.phase === "phase1"
+              ? "baseline-after-"
+              : "baseline-before-")
         + git.shortCommit
         + "-" + generatedStamp + "-bars" + args.bars + "-dpr" + safeDpr + ".json",
     );
@@ -2512,6 +2749,7 @@ async function main() {
       phase3LegacyBaselineAcceptance: report.phase3LegacyBaselineAcceptance,
       phase3Acceptance: report.phase3Acceptance,
       phase3Comparison: report.phase3Comparison,
+      phase4Acceptance: report.phase4Acceptance,
       smokeAcceptance: report.smokeAcceptance,
       invalidScenarios: report.acceptance.invalidScenarioIds,
       targetAssessment: Object.fromEntries(Object.entries(report.targetAssessment)

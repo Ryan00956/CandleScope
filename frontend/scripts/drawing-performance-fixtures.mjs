@@ -6,6 +6,14 @@ export const FIXTURE_NAMES = Object.freeze([
   "freehand64x512",
   "entities200",
   "entities512",
+  "phase4Migrated64",
+  "phase4Mixed64",
+]);
+
+export const PHASE4_SCENE_DRAWING_TYPES = Object.freeze([
+  "line",
+  "axis-line",
+  "shape",
 ]);
 
 export const FIXTURE_LIMITS = Object.freeze({
@@ -30,6 +38,7 @@ export const DEFAULT_MOCK_VISIBLE_PRICE_RANGE = Object.freeze({
 });
 
 const FIXTURE_NAME_SET = new Set(FIXTURE_NAMES);
+const PHASE4_SCENE_DRAWING_TYPE_SET = new Set(PHASE4_SCENE_DRAWING_TYPES);
 const COLORS = Object.freeze([
   "#2962ff",
   "#00bfa5",
@@ -178,6 +187,52 @@ function buildEntityDrawing({ index, startTime, intervalSeconds, random }) {
   };
 }
 
+function buildPhase4MigratedDrawing({ index, startTime, intervalSeconds, random }) {
+  const slot = index * 2;
+  const firstTime = absoluteTime(startTime, intervalSeconds, slot);
+  const secondTime = absoluteTime(startTime, intervalSeconds, slot + 1);
+  const center = 62_550 + (index % 40) * 13 + (random() - 0.5) * 4;
+  const delta = 16 + random() * 28;
+  const color = COLORS[index % COLORS.length];
+  const dataPoints = [
+    { time: firstTime, price: roundedPrice(center - delta) },
+    { time: secondTime, price: roundedPrice(center + delta) },
+  ];
+
+  if (index % 3 === 0) {
+    return {
+      type: "line",
+      id: `perf-phase4-line-${String(index).padStart(3, "0")}`,
+      lineType: index % 6 === 0 ? "line-ray" : "line-segment",
+      dataPoints,
+      color,
+      lineWidth: 1 + (index % 2),
+    };
+  }
+  if (index % 3 === 1) {
+    const axisLineTypes = ["horizontal", "vertical", "cross"];
+    return {
+      type: "axis-line",
+      id: `perf-phase4-axis-${String(index).padStart(3, "0")}`,
+      axisLineType: axisLineTypes[index % axisLineTypes.length],
+      dataPoint: dataPoints[0],
+      color,
+      lineWidth: 1 + (index % 2),
+    };
+  }
+  return {
+    type: "shape",
+    id: `perf-phase4-shape-${String(index).padStart(3, "0")}`,
+    shapeType: index % 2 === 0 ? "rectangle" : "ellipse",
+    dataPoints,
+    color,
+    lineWidth: 1,
+    fillColor: color,
+    fillOpacity: 0.14,
+    lineStyle: index % 2 === 0 ? "solid" : "dashed",
+  };
+}
+
 function buildDrawings(name, options, random) {
   switch (name) {
     case "empty":
@@ -210,6 +265,30 @@ function buildDrawings(name, options, random) {
         random,
       }));
     }
+    case "phase4Migrated64":
+      return Array.from({ length: 64 }, (_, index) => buildPhase4MigratedDrawing({
+        index,
+        startTime: options.startTime,
+        intervalSeconds: options.intervalSeconds,
+        random,
+      }));
+    case "phase4Mixed64":
+      return [
+        ...Array.from({ length: 32 }, (_, index) => buildPhase4MigratedDrawing({
+          index,
+          startTime: options.startTime,
+          intervalSeconds: options.intervalSeconds,
+          random,
+        })),
+        ...Array.from({ length: 32 }, (_, strokeIndex) => buildFreehandDrawing({
+          fixtureName: name,
+          strokeIndex,
+          pointCount: 16,
+          startTime: options.startTime,
+          intervalSeconds: options.intervalSeconds,
+          random,
+        })),
+      ];
     default:
       throw new RangeError(`Unknown drawing performance fixture: ${name}`);
   }
@@ -227,6 +306,7 @@ function summarizeDrawings(drawings) {
   let minPrice = Infinity;
   let maxPrice = -Infinity;
   const drawingTypes = {};
+  let phase4SceneDrawingCount = 0;
 
   const recordTime = (time) => {
     if (!Number.isFinite(time)) return;
@@ -241,6 +321,7 @@ function summarizeDrawings(drawings) {
 
   for (const drawing of drawings) {
     drawingTypes[drawing.type] = (drawingTypes[drawing.type] ?? 0) + 1;
+    if (PHASE4_SCENE_DRAWING_TYPE_SET.has(drawing.type)) phase4SceneDrawingCount += 1;
     if (drawing.type === "freehand" || drawing.type === "highlighter") {
       const drawingPointCount = drawing.stroke?.points?.length ?? drawing.dataPoints?.length ?? 0;
       const spanCount = drawing.stroke?.spans?.length ?? 0;
@@ -276,6 +357,9 @@ function summarizeDrawings(drawings) {
     freehandSpanCount,
     maxFreehandPointsPerDrawing,
     maxFreehandSpansPerDrawing,
+    phase4SceneDrawingCount,
+    phase4LegacyDrawingCount: drawings.length - phase4SceneDrawingCount,
+    phase4ExpectedAttachedPrimitiveCount: 1 + drawings.length - phase4SceneDrawingCount,
     timeRange: {
       start: minTime === Infinity ? null : minTime,
       end: maxTime === -Infinity ? null : maxTime,

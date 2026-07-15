@@ -555,3 +555,37 @@ test("pure materialization rejects primitive factories that change canonical ids
   });
   assert.equal(materialized, null);
 });
+
+test("hybrid attachment policy retains full interaction registry but binds only legacy owners", () => {
+  const attached: string[] = [];
+  const detached: string[] = [];
+  const renderer = createLegacyPrimitiveRenderer({
+    shouldAttachPrimitive: (primitive) => primitive.id === "legacy-text",
+    surface: {
+      attachPrimitive(primitive) {
+        attached.push(primitive.id);
+        return true;
+      },
+      detachPrimitive(primitive) {
+        detached.push(primitive.id);
+        return true;
+      },
+    },
+  });
+  const document = documentFrom([
+    { type: "line", id: "scene-line" },
+    { type: "text", id: "legacy-text", dataPoint: { time: 2, price: 2 } },
+    { type: "shape", id: "scene-shape" },
+  ], "hybrid-surface");
+
+  assert.equal(renderer.reconcile(document), true);
+  assert.deepEqual(ids(renderer.snapshot()), ["scene-line", "legacy-text", "scene-shape"]);
+  assert.deepEqual(attached, ["legacy-text"]);
+  assert.equal(renderer.attachedCount(), 1);
+
+  renderer.releaseSurfaceCredentials();
+  assert.equal(renderer.rebindSurface(), true);
+  assert.deepEqual(attached, ["legacy-text", "legacy-text"]);
+  assert.equal(renderer.attachedCount(), 1);
+  assert.deepEqual(detached, []);
+});

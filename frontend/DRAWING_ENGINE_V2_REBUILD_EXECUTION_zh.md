@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3 已完成（2026-07-15）；Phase 4 尚未开始。
+状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4 已完成（2026-07-15）；Phase 5 尚未开始。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -743,20 +743,20 @@ mode 改回 legacy。shadow 不改变数据和可见行为，因此无需迁移�
 
 ### 逐步任务
 
-- [ ] 每个 drawing surface 创建一个 scene primitive。
-- [ ] <code>paneViews()</code> 返回永久复用的 readonly array。
-- [ ] 静态 pane view 使用 <code>normal</code> z-order。
-- [ ] renderer 只读取 immutable prepared render plan。
-- [ ] draw 内禁止 anchor resolve、data scan、JSON、React state 和大对象分配。
-- [ ] 同一帧最多一次 scene invalidation/requestUpdate。
-- [ ] 聚合必要的 price/time axis views；不要重新变成每 entity 一个 primitive。
-- [ ] scene primitive 不实现重型 LWC hitTest。
-- [ ] cursor-only 帧不得触发 static scene projection/rebuild。
-- [ ] series recreate 只 detach/attach 一个 scene primitive。
-- [ ] document 在 surface recreate 时继续存在。
-- [ ] 第一批只迁移 basic line、axis-line 和 shape。
-- [ ] 未迁移 kind 暂时继续由 legacy primitive 渲染；同一个 entity 不得双绘或双命中。
-- [ ] scene-canary 初始化失败仅在第一次 mutation 前允许安全回 legacy。
+- [x] 每个 drawing surface 创建一个 scene primitive。
+- [x] <code>paneViews()</code> 返回永久复用的 readonly array。
+- [x] 静态 pane view 使用 <code>normal</code> z-order。
+- [x] renderer 只读取 immutable prepared render plan。
+- [x] draw 内禁止 anchor resolve、data scan、JSON、React state 和大对象分配。
+- [x] 同一帧最多一次 scene invalidation/requestUpdate。
+- [x] 聚合必要的 price/time axis views；不要重新变成每 entity 一个 primitive。
+- [x] scene primitive 不实现重型 LWC hitTest。
+- [x] cursor-only 帧不得触发 static scene projection/rebuild。
+- [x] series recreate 只 detach/attach 一个 scene primitive。
+- [x] document 在 surface recreate 时继续存在。
+- [x] 第一批只迁移 basic line、axis-line 和 shape。
+- [x] 未迁移 kind 暂时继续由 legacy primitive 渲染；同一个 entity 不得双绘或双命中。
+- [x] scene-canary 初始化失败仅在第一次 mutation 前允许安全回 legacy。
 
 ### 功能验收
 
@@ -1353,4 +1353,22 @@ Correctness parity: canonical id/z-order、visible set、bbox、handles、hit en
 Known limitations: Phase 3 只建立不可见 scene shadow；可见 surface 仍由 legacy per-entity primitives 渲染。单一 DrawingScenePrimitive、首批 line/axis-line/shape 可见迁移、scene hit/selection/drag bridge 与真实 attached-primitive instrumentation 属于 Phase 4，不在本阶段提前切换。
 Rollback verified: VITE_DRAWING_ENGINE_MODE=legacy 可停用 shadow；shadow 不改变 SavedDrawing/document 数据、可见 canvas、pointer owner 或 persistence owner。scene build/parity 失败均保留 legacy 可见路径并 fail closed，不需要数据回滚。
 Decision: Phase 3 PASS；正式 legacy/shadow 对照、正确性 parity、≤50ms scene build 与 no-new-Long-Task 门全部通过；Phase 4 尚未开始。
+~~~
+
+### Phase 4 执行记录
+
+~~~text
+Phase: 4 — 单一 DrawingScenePrimitive
+Date: 2026-07-15
+Commit: 本执行记录所在 checkpoint（feat(frontend): render committed drawings through one scene primitive）
+Mode: document authority + scene-canary 可见 composite scene；line/axis-line/shape 归 scene，未迁移 kind 继续归 legacy primitive
+Files: rendering/DrawingScenePrimitive.ts/drawingSceneRenderer.ts/drawingSceneMigration.ts/drawingDisplayList.ts、chart-adapter/drawingScenePrimitiveBridge.ts/drawingPrimitiveTypes.ts、engine/drawingSceneProjector.ts/drawingSceneRuntime.ts、legacyPrimitiveRenderer.ts、drawing lifecycle/interaction/selection/erase/keyboard controllers、FreehandDrawingPrimitive.ts、performance counters、scripts/drawing-performance-phase4.mjs/fixtures/runner 与对应 tests
+Tests: npm test 1056/1056、npm run test:drawing 391/391、Phase 4 performance gate tests 16/16、核心定向回归 59/59；architecture migration allowlist=0、双 TypeScript、ESLint、production build 321 modules、git diff --check 全部通过
+Smoke: headed Chromium + 实际后端在 scene-canary 下创建 line/rectangle/horizontal axis-line，attachedPrimitiveCount 始终为 1；resize、reload、hide/show、clear 与 clear 后 reload 通过，console 0 errors，未出现 scene runtime fault 或 legacy fallback
+Perf baseline: output/phase4-acceptance.json（本地原始报告；production build，1440×900，DPR 1，1500 bars，Chrome/150.0.7871.101）
+Perf result: phase4Acceptance=true、failureReasons=[]；4 个固定场景各 1 warm-up + 5 measured，共 24/24 runs。纯迁移 64 entities 在 initial/action/reload 均 attached=1；mixed 32 scene + 32 legacy 均 attached=33；1000 crosshair moves 的 scene rebuild=0；viewport requestUpdatePerFrame max=1；64 legacy freehand 的 view-update fan-out gate 通过，attached=65（1 empty scene owner + 64 legacy）。
+Correctness parity: immutable render spec 覆盖 line/axis-line/shape 的 stroke、dash、fill、opacity、selection handles 与 DPR；paint extent/viewport culling、axis nearest-hit、canonical z-order interaction、shape resize raw screen box、crosshair above scene 均有回归。scene primitive 不提供 LWC heavy hitTest，交互通过 display-list hit 映射 canonical proxy；同一 entity 只归一个可见 owner。首帧发布、StrictMode effect replay、projection/publish fault、同 binding 恢复与 series generation 采用 fail-closed/transactional 测试覆盖。
+Known limitations: hover、实时 drag/live ink、动态 selection overlay 留给 Phase 5；freehand/highlighter 仍是 legacy，通用最终 targetAssessment 的 freehand 重场景仍有 5 个 measured run 未过最终帧/Long Task 目标，属于 Phase 6 的迁移范围，不影响本阶段明确要求的 fan-out gate。混合期跨 scene/legacy owner 的任意物理视觉交错仍受两个 renderer 边界限制，但交互命中已按 canonical z-order 合并。
+Rollback verified: VITE_DRAWING_ENGINE_MODE=shadow/legacy 可关闭可见 scene；SavedDrawing/document/codec 不变。scene-canary 只允许在第一次已接受 mutation 前回 legacy；边界后故障保留最后有效 render plan 并原位恢复，禁止双 owner 和静默数据回退。
+Decision: Phase 4 PASS；单 surface composite primitive、首批三类可见迁移、所有权/生命周期边界、浏览器功能验收与 Phase 4 正式性能门全部通过；Phase 5 尚未开始。
 ~~~

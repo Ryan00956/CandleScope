@@ -245,6 +245,61 @@ test("shape resize replaces both corners with canonical source-lineage anchors",
   assert.deepEqual(primitive.dataPoints, [nextFirst, nextSecond]);
 });
 
+test("partly offscreen shape side resize preserves the opposite raw anchor", () => {
+  const cases = [
+    {
+      id: "left-offscreen",
+      zone: "r",
+      origBox: { x: -40, y: 20, width: 120, height: 70 },
+      pos: { x: 100, y: 55 },
+      expectedCorners: [{ x: -40, y: 20 }, { x: 100, y: 90 }],
+    },
+    {
+      id: "right-offscreen",
+      zone: "l",
+      origBox: { x: 20, y: 20, width: 120, height: 70 },
+      pos: { x: 10, y: 55 },
+      expectedCorners: [{ x: 10, y: 20 }, { x: 140, y: 90 }],
+    },
+  ] as const;
+
+  for (const scenario of cases) {
+    const originalFirst = derivedPoint(100, 0, 10);
+    const originalSecond = derivedPoint(200, 1, 20);
+    const primitive = new ShapeDrawingPrimitive({
+      id: scenario.id,
+      shapeType: "rectangle",
+      dataPoints: [originalFirst, originalSecond],
+    });
+    const converted: ScreenPoint[] = [];
+
+    applyLineFibShapeDrag({
+      dragging: {
+        id: primitive.id,
+        type: "shape",
+        zone: scenario.zone,
+        startMouse: { x: 0, y: 0 },
+        origPoints: [originalFirst, originalSecond],
+        origBox: scenario.origBox,
+      },
+      pos: scenario.pos,
+      e: eventStub(),
+      primitivesRef: { current: [primitive] },
+      screenToData: (x, y) => {
+        converted.push({ x, y });
+        return derivedPoint(x, converted.length - 1, y);
+      },
+      dataToScreen: () => null,
+      screenToDrawingData: () => null,
+      drawingSnapEnabledRef: { current: true },
+    });
+
+    assert.deepEqual(converted, scenario.expectedCorners);
+    const fixedOppositeX = scenario.zone === "r" ? converted[0]?.x : converted[1]?.x;
+    assert.notEqual(fixedOppositeX, scenario.zone === "r" ? 0 : 100);
+  }
+});
+
 test("text body drag replaces its anchor with canonical source lineage", () => {
   const original = derivedPoint(100, 0, 10);
   const next = derivedPoint(200, 1, 20);

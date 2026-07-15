@@ -66,6 +66,7 @@ import {
   syncHoveredPrimitive,
 } from "./drawingHoverController.js";
 import { useDrawingPersistenceLifecycle } from "./useDrawingPersistenceLifecycle.js";
+import type { DrawingDisplayHitResult } from "./rendering/drawingDisplayList.js";
 import {
   drawingCommandsForLegacyPrimitive,
   drawingCommandsForSavedDrawing,
@@ -326,6 +327,29 @@ export function drawingCommandsForDrag(
     type: "update",
     geometryCommand: drawingGeometryCommandForDrag(dragging),
   });
+}
+
+/** Merge the two transitional Phase 4 owners using canonical document order. */
+export function resolveTopmostDrawingInteractionHit(
+  primitives: readonly DrawingPrimitive[],
+  legacyHit: DrawingPrimitiveHit | null,
+  sceneHit: DrawingDisplayHitResult | null,
+): DrawingPrimitiveHit | null {
+  if (!sceneHit) return legacyHit;
+  if (sceneHit.kind !== "line" && sceneHit.kind !== "axis-line" && sceneHit.kind !== "shape") {
+    return legacyHit;
+  }
+  const sceneIndex = primitives.findIndex((primitive) => primitive.id === sceneHit.entityId);
+  if (sceneIndex < 0) return legacyHit;
+  const primitive = primitives[sceneIndex];
+  if (!primitive) return legacyHit;
+  const type = sceneHit.kind === "line"
+    ? "line"
+    : sceneHit.kind === "axis-line" ? "axis-line" : "shape";
+  const sceneCandidate = { prim: primitive, type, ...sceneHit } as DrawingPrimitiveHit;
+  if (!legacyHit) return sceneCandidate;
+  const legacyIndex = primitives.lastIndexOf(legacyHit.prim);
+  return sceneIndex > legacyIndex ? sceneCandidate : legacyHit;
 }
 
 function hasMutableColor(
@@ -672,6 +696,8 @@ export function useDrawing({
     persistDrawings,
     prepareSurfaceDispose: preparePersistenceSurfaceDispose,
     prepareUserMutationScope,
+    hitTestScene,
+    getSceneScreenBox,
   } = useDrawingPersistenceLifecycle({
     beforeScopeTransitionRef,
     currentFreehandRef,
@@ -712,9 +738,17 @@ export function useDrawing({
 
   const hitTestAll = useCallback(
     (x: number, y: number, hitRadius = 8): DrawingPrimitiveHit | null => {
-      return hitTestDrawingPrimitives(primitivesRef.current, x, y, hitRadius);
+      const legacyHit = hitTestDrawingPrimitives(
+        primitivesRef.current,
+        x,
+        y,
+        hitRadius,
+        (primitive) => primitive._series !== null,
+      );
+      const sceneHit = hitTestScene(x, y);
+      return resolveTopmostDrawingInteractionHit(primitivesRef.current, legacyHit, sceneHit);
     },
-    [],
+    [hitTestScene],
   );
 
   const hitTestInteractive = useCallback(
@@ -1302,12 +1336,8 @@ export function useDrawing({
           // Clicked outside the selected text → drop selection.
           deselectAll();
         } else if (sel) {
-          let stillOnIt = false;
-          try {
-            if (typeof sel.hitTestGeometry === "function") {
-              stillOnIt = !!sel.hitTestGeometry(pos.x, pos.y);
-            }
-          } catch { /* ignore */ }
+          const selectedHit = hitTestAll(pos.x, pos.y);
+          const stillOnIt = selectedHit?.prim.id === sel.id;
           if (!stillOnIt) deselectAll();
         }
       }
@@ -1492,7 +1522,8 @@ export function useDrawing({
               zone: hit.zone || "body",
               startMouse: pos,
               origPoints: hit.prim.dataPoints.map((p) => ({ ...p })),
-              origBox: hit.prim.getBoundingBoxScreen?.() || null,
+              origBox: hit.prim.getBoundingBoxScreen?.()
+                || getSceneScreenBox(hit.prim.id),
             };
           } else if ((hit.pointIndex ?? -1) >= 0) {
             // Start dragging endpoint
@@ -1564,7 +1595,7 @@ export function useDrawing({
         }
       }
     },
-    [flushActiveDrawingMove, getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, selectPrimitive, deselectAll, getPrimitiveById, beginTextDrag, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, getChartAdapter, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
+    [flushActiveDrawingMove, getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, selectPrimitive, deselectAll, getPrimitiveById, getSceneScreenBox, beginTextDrag, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, getChartAdapter, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
   );
 
   // ════════════════════════════════════════════════════
@@ -2032,7 +2063,12 @@ export function useDrawing({
     const primitive = primitivesRef.current[idx];
     if (!primitive) return;
     if (!prepareTerminalTextMutation()) return;
-    if (!detachAndRemoveDrawingPrimitive(primitivesRef.current, primitive, detachPrim)) return;
+    const wasAttached = primitive._series !== null;
+    if (wasAttached) {
+      if (!detachAndRemoveDrawingPrimitive(primitivesRef.current, primitive, detachPrim)) return;
+    } else {
+      primitivesRef.current.splice(idx, 1);
+    }
     let persisted = false;
     try {
       persisted = persistDrawings([Object.freeze({ type: "delete", id })]) !== false;
@@ -2040,9 +2076,10 @@ export function useDrawing({
       persisted = false;
     }
     if (!persisted) {
-      if (!primitivesRef.current.some((candidate) => candidate.id === id)
-        && attachPrim(primitive)) {
-        primitivesRef.current.splice(Math.min(idx, primitivesRef.current.length), 0, primitive);
+      if (!primitivesRef.current.some((candidate) => candidate.id === id)) {
+        if (!wasAttached || attachPrim(primitive)) {
+          primitivesRef.current.splice(Math.min(idx, primitivesRef.current.length), 0, primitive);
+        }
       }
       return;
     }

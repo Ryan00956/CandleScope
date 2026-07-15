@@ -133,6 +133,7 @@ export function hitTestDrawingPrimitives(
   x: number,
   y: number,
   hitRadius = 8,
+  shouldTest: (primitive: DrawingPrimitive, index: number) => boolean = () => true,
 ): DrawingPrimitiveHit | null {
   const startedAt = typeof performance !== "undefined" && typeof performance.now === "function"
     ? performance.now()
@@ -140,6 +141,7 @@ export function hitTestDrawingPrimitives(
   try {
     for (let index = primitives.length - 1; index >= 0; index -= 1) {
       const prim = primitives[index];
+      if (!prim || !shouldTest(prim, index)) continue;
 
       if (prim instanceof PositionDrawingPrimitive) {
         const hit = prim.hitTestGeometry(x, y);

@@ -12,7 +12,7 @@ import {
 } from "./drawingSelectionController.js";
 import type { SelectedTextUi } from "./drawingSelectionController.js";
 import { resolveDrawingDocumentAuthorityMode } from "./drawingDocumentAuthority.js";
-import { resolvePhase3DrawingEngineMode } from "./drawingEngineMode.js";
+import { resolvePhase4DrawingEngineMode } from "./drawingEngineMode.js";
 import { createEmptyDrawingDocument } from "./core/drawingDocument.js";
 import {
   commitLegacyPrimitiveCommands,
@@ -50,11 +50,49 @@ import {
   registerDrawingPerfRuntimeSummaryProvider,
 } from "./performance/drawingPerfCounters.js";
 import type { DrawingPerfRuntimeSummary } from "./performance/drawingPerfCounters.js";
+import {
+  createDrawingScenePrimitiveBridge,
+} from "../../chart-adapter/drawingScenePrimitiveBridge.js";
+import type {
+  DrawingScenePrimitiveBridge,
+} from "../../chart-adapter/drawingScenePrimitiveBridge.js";
+import { DrawingScenePrimitive } from "./rendering/DrawingScenePrimitive.js";
+import {
+  drawingDisplayEntityScreenBox,
+  hitTestDrawingScreenDisplayList,
+} from "./rendering/drawingDisplayList.js";
+import type { DrawingDisplayHitResult } from "./rendering/drawingDisplayList.js";
+import type { ScreenBox } from "./drawingTypes.js";
+import {
+  isPhase4SceneDrawingKind,
+  isPhase4SceneDrawingPrimitive,
+} from "./rendering/drawingSceneMigration.js";
+
+// A drawing frame is published only after the chart has data, a measurable
+// pane and a coherent visible range. Live startup and series replacement can
+// legitimately take longer than one second, so do not mistake that normal
+// readiness window for a scene failure and permanently fall back to legacy.
+const VISIBLE_SCENE_FRAME_READY_RETRY_LIMIT = 600;
+const VISIBLE_SCENE_ATTACH_RETRY_LIMIT = 3;
+const VISIBLE_SCENE_RETRY_DELAY_MS = 16;
 
 function runtimeRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object"
     ? value as Record<string, unknown>
     : null;
+}
+
+interface MutableDrawingDelegate<T> {
+  read(): T;
+  write(value: T): void;
+}
+
+function createMutableDrawingDelegate<T>(initial: T): MutableDrawingDelegate<T> {
+  let value = initial;
+  return Object.freeze({
+    read: () => value,
+    write: (next: T) => { value = next; },
+  });
 }
 
 function runtimeArrayLength(value: unknown): number | null {
@@ -88,8 +126,21 @@ function drawingMonotonicNow(): number {
     : Date.now();
 }
 
+function configureLegacyViewportBatching(
+  primitives: readonly DrawingPrimitive[],
+  enabled: boolean,
+): void {
+  for (const primitive of primitives) {
+    const batchable = primitive as DrawingPrimitive & {
+      setViewUpdateBatching?: (next: boolean) => void;
+    };
+    batchable.setViewUpdateBatching?.(enabled);
+  }
+}
+
 export function summarizeDrawingRuntimePrimitives(
   primitives: readonly unknown[],
+  attachedPrimitiveCount?: number,
 ): DrawingPerfRuntimeSummary {
   let entityCount = 0;
   let pointCount = 0;
@@ -106,6 +157,7 @@ export function summarizeDrawingRuntimePrimitives(
     entityCount,
     pointCount,
     typeCounts,
+    ...(attachedPrimitiveCount === undefined ? {} : { attachedPrimitiveCount }),
   };
 }
 
@@ -151,6 +203,52 @@ export interface DrawingMutationScopeState {
   ready: boolean;
   requestedScope: string;
   surfaceScope: string;
+}
+
+export interface DrawingVisibleScenePublicationState {
+  attachedSurfaceGeneration: number | null;
+  publishedSurfaceGeneration: number | null;
+  requestedScope: string;
+  runtimeActive: boolean;
+  runtimePublicationReady: boolean;
+  runtimeScope: string | null;
+  sceneCanaryEnabled: boolean;
+}
+
+function hasCurrentDrawingVisibleScenePublication({
+  attachedSurfaceGeneration,
+  publishedSurfaceGeneration,
+  requestedScope,
+  runtimeScope,
+}: DrawingVisibleScenePublicationState): boolean {
+  return requestedScope.length > 0
+    && runtimeScope === requestedScope
+    && attachedSurfaceGeneration !== null
+    && publishedSurfaceGeneration === attachedSurfaceGeneration;
+}
+
+/**
+ * The scene-canary mutation boundary opens only after the current runtime and
+ * surface generation accepted a visible publication. Legacy/shadow operation
+ * bypasses this additional gate and retains its existing scope semantics.
+ */
+export function isDrawingVisibleScenePublicationReady(
+  state: DrawingVisibleScenePublicationState,
+): boolean {
+  return !state.sceneCanaryEnabled
+    || (state.runtimeActive
+      && state.runtimePublicationReady
+      && hasCurrentDrawingVisibleScenePublication(state));
+}
+
+export function canRecoverDrawingVisibleSceneInPlace(
+  state: DrawingVisibleScenePublicationState & Readonly<{ mutationStarted: boolean }>,
+): boolean {
+  return state.sceneCanaryEnabled
+    && state.mutationStarted
+    && !state.runtimePublicationReady
+    && state.publishedSurfaceGeneration !== null
+    && hasCurrentDrawingVisibleScenePublication(state);
 }
 
 /**
@@ -225,11 +323,13 @@ export function useDrawingPersistenceLifecycle({
   persistActiveScopeDrawings(commands: readonly DrawingCommand[]): boolean;
   prepareUserMutationScope(): boolean;
   prepareSurfaceDispose(): boolean;
+  hitTestScene(x: number, y: number): DrawingDisplayHitResult | null;
+  getSceneScreenBox(id: string): ScreenBox | null;
 } {
   const authorityMode = resolveDrawingDocumentAuthorityMode();
   const [engineMode] = useState(() => (
     authorityMode === "document"
-      ? resolvePhase3DrawingEngineMode()
+      ? resolvePhase4DrawingEngineMode()
       : Object.freeze({
           requested: "legacy" as const,
           effective: "legacy" as const,
@@ -237,11 +337,51 @@ export function useDrawingPersistenceLifecycle({
           failedClosed: false,
         })
   ));
+  const adapterGetterRef = useRef(getChartAdapter);
+  // One-time scene objects call these delegates only after render; the
+  // delegates let passive effects replace the current host callbacks without
+  // turning deferred work into a render-time React ref read.
+  const [sceneAdapterGetterDelegate] = useState(() => (
+    createMutableDrawingDelegate(getDrawingSceneAdapter)
+  ));
+  const mutationStartedRef = useRef(false);
+  const sceneCanaryEnabledRef = useRef(engineMode.effective === "scene-canary");
+  const [sceneRuntimeErrorHandlerDelegate] = useState(() => (
+    createMutableDrawingDelegate<(error: unknown) => void>((error) => {
+      console.warn("Drawing scene runtime failed before its lifecycle handler was ready", error);
+    })
+  ));
+  const [scenePrimitive] = useState(() => new DrawingScenePrimitive());
+  const [sceneBridge] = useState<DrawingScenePrimitiveBridge<
+    import("./rendering/drawingDisplayList.js").DrawingScreenDisplayList
+  >>(() => createDrawingScenePrimitiveBridge({
+    primitive: scenePrimitive,
+    attachPrimitive: (primitive) => {
+      const adapter = sceneAdapterGetterDelegate.read()();
+      return adapter?.attachPrimitive?.(primitive) === true;
+    },
+    detachPrimitive: (primitive) => {
+      const adapter = sceneAdapterGetterDelegate.read()();
+      return adapter?.detachPrimitive?.(primitive) === true;
+    },
+    captureDrawingFrame: () => sceneAdapterGetterDelegate.read()()?.captureDrawingFrame?.() ?? null,
+    isDrawingFrameCurrent: (frame) => (
+      sceneAdapterGetterDelegate.read()()?.isDrawingFrameCurrent?.(frame) === true
+    ),
+  }));
+  // Effect cleanups suspend this state-owned runtime instead of disposing it.
+  // React StrictMode replays cleanup/setup against the same state instance in
+  // development; disposing here would make the second activation permanently
+  // fail closed even though the chart surface is healthy.
   const [sceneRuntime] = useState<DrawingSceneRuntime>(() => createDrawingSceneRuntime({
     mode: engineMode.effective,
     onError: (error) => {
       drawingPerfCounters.incrementCounter("shadowErrorCount");
-      console.warn("Drawing shadow scene failed; the legacy renderer remains authoritative", error);
+      if (engineMode.effective === "scene-canary") {
+        sceneRuntimeErrorHandlerDelegate.read()(error);
+      } else {
+        console.warn("Drawing shadow scene failed; the legacy renderer remains authoritative", error);
+      }
     },
     onMetrics: (metrics) => {
       drawingPerfCounters.recordSceneProjectPaintDuration(metrics.buildDurationMs);
@@ -266,14 +406,14 @@ export function useDrawingPersistenceLifecycle({
       drawingPerfCounters.incrementCounter("shadowSkippedCount");
     },
   }));
-  const adapterGetterRef = useRef(getChartAdapter);
-  const sceneAdapterGetterRef = useRef(getDrawingSceneAdapter);
   const [initialStore] = useState(() => drawingDocumentSessionRegistry.getStore(symbol));
   const [scopeRetryGeneration, setScopeRetryGeneration] = useState(0);
   const activeStoreRef = useRef<DrawingDocumentStore>(initialStore);
   const rendererRef = useRef<LegacyPrimitiveRenderer | null>(null);
   const requestedScopeRef = useRef(symbol);
   const scopeReadyRef = useRef(false);
+  const sceneSurfaceRetryCountRef = useRef(0);
+  const sceneSurfaceRetryHandleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Native pointer listeners and the imperative host API are replaced in
   // passive effects. Close the commit -> passive-effect window in layout so
@@ -288,12 +428,8 @@ export function useDrawingPersistenceLifecycle({
   }, [getChartAdapter]);
 
   useEffect(() => {
-    sceneAdapterGetterRef.current = getDrawingSceneAdapter;
-  }, [getDrawingSceneAdapter]);
-
-  useEffect(() => () => {
-    sceneRuntime.dispose();
-  }, [sceneRuntime]);
+    sceneAdapterGetterDelegate.write(getDrawingSceneAdapter);
+  }, [getDrawingSceneAdapter, sceneAdapterGetterDelegate]);
 
   useEffect(() => {
     if (rendererRef.current) return;
@@ -314,21 +450,112 @@ export function useDrawingPersistenceLifecycle({
         const primitive = createPrimitiveFromSavedDrawing(saved);
         if (!primitive) return null;
         primitive.setHidden?.(hiddenRef.current, false);
+        configureLegacyViewportBatching([primitive], sceneCanaryEnabledRef.current);
         const selectable = primitive as DrawingPrimitive & {
           setSelected?: (selected: boolean) => void;
         };
         selectable.setSelected?.(primitive.id === selectedIdRef.current);
         return primitive;
       },
+      shouldAttachPrimitive: (primitive) => (
+        !sceneCanaryEnabledRef.current || !isPhase4SceneDrawingPrimitive(primitive)
+      ),
     });
   }, [hiddenRef, selectedIdRef]);
 
-  const activateShadowScene = useCallback((
+  const fallbackVisibleSceneBeforeMutation = useCallback((reason: unknown): boolean => {
+    if (engineMode.effective !== "scene-canary"
+      || !sceneCanaryEnabledRef.current
+      || mutationStartedRef.current) return false;
+    if (sceneSurfaceRetryHandleRef.current !== null) {
+      clearTimeout(sceneSurfaceRetryHandleRef.current);
+      sceneSurfaceRetryHandleRef.current = null;
+    }
+    sceneSurfaceRetryCountRef.current = 0;
+    sceneRuntime.suspend();
+    if (!sceneBridge.detach()) {
+      scopeReadyRef.current = false;
+      console.warn("Drawing scene initialization failed and its partial attachment could not be removed", reason);
+      return false;
+    }
+    sceneCanaryEnabledRef.current = false;
+    const renderer = rendererRef.current;
+    if (renderer) configureLegacyViewportBatching(renderer.snapshot(), false);
+    if (renderer && !renderer.rebindSurface()) {
+      scopeReadyRef.current = false;
+      console.warn("Drawing scene fallback could not restore the full legacy surface", reason);
+      return false;
+    }
+    console.warn("Drawing scene initialization failed before the first mutation; using the legacy surface", reason);
+    return true;
+  }, [engineMode.effective, sceneBridge, sceneRuntime]);
+
+  const scheduleVisibleSceneSurfaceRetry = useCallback((attemptLimit: number): boolean => {
+    if (sceneSurfaceRetryCountRef.current >= attemptLimit) return false;
+    sceneSurfaceRetryCountRef.current += 1;
+    if (sceneSurfaceRetryHandleRef.current !== null) return true;
+    sceneSurfaceRetryHandleRef.current = setTimeout(() => {
+      sceneSurfaceRetryHandleRef.current = null;
+      setScopeRetryGeneration((generation) => (
+        generation >= Number.MAX_SAFE_INTEGER ? 0 : generation + 1
+      ));
+    }, VISIBLE_SCENE_RETRY_DELAY_MS);
+    return true;
+  }, []);
+
+  useEffect(() => {
+    sceneRuntimeErrorHandlerDelegate.write((error) => {
+      if (!fallbackVisibleSceneBeforeMutation(error)) {
+        // Once a user mutation closes the fallback boundary, the canonical
+        // scope remains structurally ready while the scene runtime is faulted.
+        // prepareUserMutationScope additionally checks publication readiness,
+        // so interactions stay blocked until an in-place recovery publishes.
+        // A pre-boundary fallback failure has no retained plan and must keep
+        // the whole scope closed.
+        if (!mutationStartedRef.current) scopeReadyRef.current = false;
+        console.warn("Drawing scene runtime failed after the fallback boundary; retaining the last valid plan", error);
+      }
+    });
+    return () => {
+      sceneRuntimeErrorHandlerDelegate.write(() => {});
+    };
+  }, [fallbackVisibleSceneBeforeMutation, sceneRuntimeErrorHandlerDelegate]);
+
+  const ensureVisibleSceneSurface = useCallback((): boolean => {
+    if (engineMode.effective !== "scene-canary" || !sceneCanaryEnabledRef.current) return true;
+    const adapter = sceneAdapterGetterDelegate.read()();
+    if (!adapter?.captureDrawingFrame
+      || !adapter.isDrawingFrameCurrent
+      || !adapter.attachPrimitive
+      || !adapter.detachPrimitive) {
+      return fallbackVisibleSceneBeforeMutation("scene adapter capabilities are unavailable");
+    }
+    const frame = adapter.captureDrawingFrame();
+    if (!frame || adapter.isDrawingFrameCurrent(frame) !== true) {
+      if (scheduleVisibleSceneSurfaceRetry(VISIBLE_SCENE_FRAME_READY_RETRY_LIMIT)) return false;
+      return fallbackVisibleSceneBeforeMutation("scene surface did not become current during initialization");
+    }
+    if (sceneBridge.attach()) {
+      sceneSurfaceRetryCountRef.current = 0;
+      if (sceneSurfaceRetryHandleRef.current !== null) {
+        clearTimeout(sceneSurfaceRetryHandleRef.current);
+        sceneSurfaceRetryHandleRef.current = null;
+      }
+      return true;
+    }
+    if (scheduleVisibleSceneSurfaceRetry(VISIBLE_SCENE_ATTACH_RETRY_LIMIT)) return false;
+    return fallbackVisibleSceneBeforeMutation("scene primitive attachment failed");
+  }, [engineMode.effective, fallbackVisibleSceneBeforeMutation, sceneAdapterGetterDelegate, sceneBridge, scheduleVisibleSceneSurfaceRetry]);
+
+  const activateDrawingScene = useCallback((
     store: DrawingDocumentStore,
     renderer: LegacyPrimitiveRenderer,
   ): boolean => {
-    if (authorityMode !== "document" || engineMode.effective !== "shadow") return false;
-    const adapter = sceneAdapterGetterRef.current();
+    const visibleCanary = engineMode.effective === "scene-canary"
+      && sceneCanaryEnabledRef.current;
+    if (authorityMode !== "document"
+      || (engineMode.effective !== "shadow" && !visibleCanary)) return false;
+    const adapter = sceneAdapterGetterDelegate.read()();
     if (!adapter?.captureDrawingFrame
       || !adapter.isDrawingFrameCurrent
       || !adapter.projectDrawingFrameDataPoints
@@ -345,7 +572,12 @@ export function useDrawingPersistenceLifecycle({
       projectScene: projectDrawingScene,
       isVisible: () => !hiddenRef.current,
       selectedId: () => selectedIdRef.current,
-      compareParity: (plan, document, sceneCanonicalIds, frame) => {
+      ...(visibleCanary ? {
+        shouldProjectNode: (node) => isPhase4SceneDrawingKind(node.entity.kind),
+        publishScene: (plan) => sceneBridge.publish(plan),
+        clearScene: () => sceneBridge.clearPlan(),
+      } : {}),
+      ...(engineMode.effective === "shadow" ? { compareParity: (plan, document, sceneCanonicalIds, frame) => {
         const probeStartedAt = drawingMonotonicNow();
         const legacyPrimitives = renderer.snapshot();
         const legacy = captureLegacyDrawingParityProbe(legacyPrimitives, {
@@ -401,9 +633,9 @@ export function useDrawingPersistenceLifecycle({
           Math.max(0, drawingMonotonicNow() - compareStartedAt),
         );
         return result;
-      },
+      } } : {}),
     });
-  }, [authorityMode, engineMode.effective, hiddenRef, sceneRuntime, selectedIdRef]);
+  }, [authorityMode, engineMode.effective, hiddenRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime, selectedIdRef]);
 
   const commitPrimitiveDraft = useCallback((
     scopeKey: string,
@@ -419,6 +651,7 @@ export function useDrawingPersistenceLifecycle({
     const restoreOnFailure = options.restoreOnFailure !== false;
     const renderer = rendererRef.current;
     if (!renderer) return false;
+    configureLegacyViewportBatching(primitives, sceneCanaryEnabledRef.current);
     const hasCommands = options.commands !== undefined;
     // Register only delta objects relative to the renderer registry before
     // validation. Terminal commands own their normal candidates; an empty
@@ -474,31 +707,82 @@ export function useDrawingPersistenceLifecycle({
       }
     }
     if (adoptRenderer && renderer.documentSnapshot() === store.getSnapshot()) {
-      activateShadowScene(store, renderer);
+      const activated = activateDrawingScene(store, renderer);
+      if (!activated && engineMode.effective === "scene-canary"
+        && sceneCanaryEnabledRef.current) {
+        scopeReadyRef.current = false;
+        console.warn("Drawing scene could not reactivate after a canonical mutation; the last plan was retained");
+      }
     }
     return true;
-  }, [activateShadowScene, primitivesRef]);
+  }, [activateDrawingScene, engineMode.effective, primitivesRef]);
 
   const requestScopeRetry = useCallback((): void => {
+    if (engineMode.effective === "scene-canary" && sceneCanaryEnabledRef.current) {
+      const runtimeSnapshot = sceneRuntime.snapshot();
+      const bridgeSnapshot = sceneBridge.snapshot();
+      const publicationState = {
+        attachedSurfaceGeneration: bridgeSnapshot.surfaceGeneration,
+        publishedSurfaceGeneration: runtimeSnapshot.plan?.stamp.surfaceGeneration ?? null,
+        requestedScope: requestedScopeRef.current,
+        runtimeActive: runtimeSnapshot.active,
+        runtimePublicationReady: runtimeSnapshot.publicationReady,
+        runtimeScope: runtimeSnapshot.scopeKey,
+        sceneCanaryEnabled: true,
+      } satisfies DrawingVisibleScenePublicationState;
+      if (runtimeSnapshot.plan === null && runtimeSnapshot.active) {
+        // The initial frame is already scheduled. Coalesce the rejected user
+        // action into that runtime instead of re-running the React effect,
+        // whose teardown would merely restart the same first-publish wait.
+        if (sceneRuntime.invalidate("mutation-before-first-publish")) return;
+      } else if (canRecoverDrawingVisibleSceneInPlace({
+        ...publicationState,
+        mutationStarted: mutationStartedRef.current,
+      })) {
+        const renderer = rendererRef.current;
+        if (renderer && activateDrawingScene(activeStoreRef.current, renderer)) return;
+        // Fall through to the effect retry. Its recovery guard preserves the
+        // accepted plan for this exact scope/surface while it reconciles.
+      }
+    }
     setScopeRetryGeneration((generation) => (
       generation >= Number.MAX_SAFE_INTEGER ? 0 : generation + 1
     ));
-  }, []);
+  }, [activateDrawingScene, engineMode.effective, sceneBridge, sceneRuntime]);
 
   const prepareUserMutationScope = useCallback((): boolean => {
     const adapter = adapterGetterRef.current();
     const activeScope = authorityMode === "document"
       ? activeStoreRef.current.getSnapshot().scopeKey
       : symbolRef.current;
-    return prepareDrawingMutationScope({
+    const runtimeSnapshot = sceneRuntime.snapshot();
+    const bridgeSnapshot = sceneBridge.snapshot();
+    const scenePublicationReady = isDrawingVisibleScenePublicationReady({
+      attachedSurfaceGeneration: bridgeSnapshot.surfaceGeneration,
+      publishedSurfaceGeneration: runtimeSnapshot.plan?.stamp.surfaceGeneration ?? null,
+      requestedScope: requestedScopeRef.current,
+      runtimeActive: runtimeSnapshot.active,
+      runtimePublicationReady: runtimeSnapshot.publicationReady,
+      runtimeScope: runtimeSnapshot.scopeKey,
+      sceneCanaryEnabled: engineMode.effective === "scene-canary"
+        && sceneCanaryEnabledRef.current,
+    });
+    const prepared = prepareDrawingMutationScope({
       activeScope,
       hasSeries: adapter?.hasSeries?.() === true,
       previousScope: prevSymbolRef.current,
-      ready: scopeReadyRef.current,
+      ready: scopeReadyRef.current && scenePublicationReady,
       requestedScope: requestedScopeRef.current,
       surfaceScope: symbolRef.current,
     }, requestScopeRetry);
-  }, [authorityMode, prevSymbolRef, requestScopeRetry, symbolRef]);
+    // Close the fallback latch before a controller can mutate a detached
+    // interaction proxy. This is intentionally conservative for selection and
+    // visibility actions: after the first accepted user action, runtime faults
+    // retain the last valid scene instead of bulk-attaching legacy owners.
+    if (prepared && engineMode.effective === "scene-canary"
+      && sceneCanaryEnabledRef.current) mutationStartedRef.current = true;
+    return prepared;
+  }, [authorityMode, engineMode.effective, prevSymbolRef, requestScopeRetry, sceneBridge, sceneRuntime, symbolRef]);
 
   // Scope transitions must be able to finish the old gesture against the old
   // store even after React has requested a new symbol. This path is private to
@@ -514,6 +798,7 @@ export function useDrawingPersistenceLifecycle({
       }
     }
     const store = activeStoreRef.current;
+    if (commands.length > 0) mutationStartedRef.current = true;
     return commitPrimitiveDraft(
       store.getSnapshot().scopeKey,
       store,
@@ -547,6 +832,7 @@ export function useDrawingPersistenceLifecycle({
     const renderer = rendererRef.current;
     const store = activeStoreRef.current;
     if (!renderer) return false;
+    mutationStartedRef.current = true;
     const currentPrimitives = persistentLegacyPrimitives(primitivesRef.current);
     if (!renderer.canAdopt(store.getSnapshot(), currentPrimitives)
       || !renderer.adopt(store.getSnapshot(), currentPrimitives)) {
@@ -566,8 +852,10 @@ export function useDrawingPersistenceLifecycle({
 
   const prepareSurfaceDispose = useCallback((): boolean => {
     scopeReadyRef.current = false;
-    sceneRuntime.suspend();
-    if (!beforeScopeTransitionRef.current()) return false;
+    if (!beforeScopeTransitionRef.current()) {
+      scopeReadyRef.current = true;
+      return false;
+    }
     if (authorityMode === "legacy") {
       persistAndMeasure(symbolRef.current, primitivesRef.current);
       const adapter = getChartAdapter();
@@ -579,6 +867,8 @@ export function useDrawingPersistenceLifecycle({
           detached = false;
         }
       }
+      if (detached) sceneRuntime.suspend();
+      else scopeReadyRef.current = true;
       return detached;
     }
 
@@ -590,16 +880,29 @@ export function useDrawingPersistenceLifecycle({
       store,
       primitivesRef.current,
     );
-    const detached = renderer.detachSurface();
-    if (detached) {
-      renderer.adopt(createEmptyDrawingDocument(store.getSnapshot().scopeKey), []);
+    if (!committed) {
+      scopeReadyRef.current = true;
+      return false;
     }
-    return committed && detached;
-  }, [authorityMode, beforeScopeTransitionRef, commitPrimitiveDraft, getChartAdapter, primitivesRef, sceneRuntime, symbolRef]);
+    const detached = renderer.detachSurface();
+    if (!detached) {
+      renderer.rebindSurface();
+      scopeReadyRef.current = true;
+      return false;
+    }
+    if (!sceneBridge.detach()) {
+      renderer.rebindSurface();
+      scopeReadyRef.current = true;
+      return false;
+    }
+    sceneRuntime.suspend();
+    return true;
+  }, [authorityMode, beforeScopeTransitionRef, commitPrimitiveDraft, getChartAdapter, primitivesRef, sceneBridge, sceneRuntime, symbolRef]);
 
   const completeSurfaceDispose = useCallback((): void => {
     scopeReadyRef.current = false;
     sceneRuntime.suspend();
+    sceneBridge.releaseSurfaceCredentials();
     if (authorityMode === "document") {
       // chart.remove() invalidates even credentials whose explicit detach
       // failed. Forget them only after the surface owner confirms removal so
@@ -610,7 +913,7 @@ export function useDrawingPersistenceLifecycle({
       renderer?.adopt(createEmptyDrawingDocument(scopeKey), []);
       primitivesRef.current = [];
     }
-  }, [authorityMode, primitivesRef, sceneRuntime]);
+  }, [authorityMode, primitivesRef, sceneBridge, sceneRuntime]);
 
   const invalidateSurfaceCredentialsForSeriesReplacement = useCallback((): void => {
     // removeSeries() invalidates primitive-owned series bindings without
@@ -619,27 +922,62 @@ export function useDrawingPersistenceLifecycle({
     // attach each canonical primitive to the replacement series.
     scopeReadyRef.current = false;
     sceneRuntime.suspend();
+    sceneBridge.releaseSurfaceCredentials();
     try {
       rendererRef.current?.releaseSurfaceCredentials();
     } catch {
       // This imperative invalidation boundary is deliberately no-throw.
     }
-  }, [sceneRuntime]);
+  }, [sceneBridge, sceneRuntime]);
 
   useEffect(() => registerDrawingPerfRuntimeSummaryProvider(
-    () => summarizeDrawingRuntimePrimitives(primitivesRef.current),
-  ), [primitivesRef]);
+    () => summarizeDrawingRuntimePrimitives(
+      primitivesRef.current,
+      (rendererRef.current?.attachedCount() ?? 0)
+        + sceneBridge.snapshot().attachedPrimitiveCount,
+    ),
+  ), [primitivesRef, sceneBridge]);
 
   useEffect(() => registerDrawingPerfShadowParityRequester(
     () => sceneRuntime.requestParity(),
   ), [sceneRuntime]);
 
+  const hitTestScene = useCallback((x: number, y: number): DrawingDisplayHitResult | null => {
+    if (!sceneCanaryEnabledRef.current || hiddenRef.current) return null;
+    const plan = sceneRuntime.snapshot().plan;
+    if (!plan) return null;
+    return hitTestDrawingScreenDisplayList(plan, x, y, selectedIdRef.current);
+  }, [hiddenRef, sceneRuntime, selectedIdRef]);
+
+  const getSceneScreenBox = useCallback((id: string): ScreenBox | null => {
+    if (!sceneCanaryEnabledRef.current) return null;
+    const plan = sceneRuntime.snapshot().plan;
+    return plan ? drawingDisplayEntityScreenBox(plan, id) : null;
+  }, [sceneRuntime]);
+
   useEffect(() => {
+    const runtimeBeforeTransition = sceneRuntime.snapshot();
+    const bridgeBeforeTransition = sceneBridge.snapshot();
+    const preservePostBoundaryPlan = canRecoverDrawingVisibleSceneInPlace({
+      attachedSurfaceGeneration: bridgeBeforeTransition.surfaceGeneration,
+      publishedSurfaceGeneration: runtimeBeforeTransition.plan?.stamp.surfaceGeneration ?? null,
+      requestedScope: requestedScopeRef.current,
+      runtimeActive: runtimeBeforeTransition.active,
+      runtimePublicationReady: runtimeBeforeTransition.publicationReady,
+      runtimeScope: runtimeBeforeTransition.scopeKey,
+      sceneCanaryEnabled: engineMode.effective === "scene-canary"
+        && sceneCanaryEnabledRef.current,
+      mutationStarted: mutationStartedRef.current,
+    });
     scopeReadyRef.current = false;
-    sceneRuntime.suspend();
+    // A same-scope, same-surface post-boundary retry replaces the plan
+    // transactionally. Keep the last accepted pixels and runtime binding until
+    // the replacement publication succeeds; new scopes/surfaces still clear.
+    if (!preservePostBoundaryPlan) sceneRuntime.suspend();
     const adapter = getChartAdapter();
     const renderer = rendererRef.current;
     if (!adapter?.hasSeries?.() || !renderer || !symbol || !seriesReady) return;
+    if (!ensureVisibleSceneSurface()) return;
 
     const prevSymbol = prevSymbolRef.current;
     const symbolChanged = prevSymbol && prevSymbol !== symbol;
@@ -735,6 +1073,7 @@ export function useDrawingPersistenceLifecycle({
 
     if (!symbolChanged && primitivesRef.current.length > 0) {
       const currentPrimitives = persistentLegacyPrimitives(primitivesRef.current);
+      configureLegacyViewportBatching(currentPrimitives, sceneCanaryEnabledRef.current);
       for (const prim of currentPrimitives) prim.setHidden?.(hiddenRef.current, false);
       let rebound = true;
       if (!renderer.adopt(activeStoreRef.current.getSnapshot(), currentPrimitives)
@@ -752,7 +1091,10 @@ export function useDrawingPersistenceLifecycle({
       prevSymbolRef.current = symbol;
       symbolRef.current = symbol;
       scopeReadyRef.current = rebound;
-      if (rebound) activateShadowScene(activeStoreRef.current, renderer);
+      if (rebound && !activateDrawingScene(activeStoreRef.current, renderer)
+        && engineMode.effective === "scene-canary" && sceneCanaryEnabledRef.current) {
+        fallbackVisibleSceneBeforeMutation("scene runtime activation failed after series rebind");
+      }
       return;
     }
 
@@ -790,24 +1132,31 @@ export function useDrawingPersistenceLifecycle({
         setSelectedPrimId(null);
       }
       scopeReadyRef.current = true;
-      activateShadowScene(store, renderer);
+      if (!activateDrawingScene(store, renderer)
+        && engineMode.effective === "scene-canary" && sceneCanaryEnabledRef.current) {
+        fallbackVisibleSceneBeforeMutation("scene runtime activation failed");
+      }
     }
     drawingPerfCounters.setGauge("visibleEntities", primitivesRef.current.length);
 
     prevSymbolRef.current = symbol;
   }, [
     currentFreehandRef,
-    activateShadowScene,
+    activateDrawingScene,
     authorityMode,
     beforeScopeTransitionRef,
     commitPrimitiveDraft,
     draggingRef,
     getChartAdapter,
+    ensureVisibleSceneSurface,
+    engineMode.effective,
+    fallbackVisibleSceneBeforeMutation,
     hiddenRef,
     isDrawingFreehandRef,
     prevSymbolRef,
     primitivesRef,
     selectedIdRef,
+    sceneBridge,
     sceneRuntime,
     seriesReady,
     setSelectedPrimId,
@@ -821,8 +1170,13 @@ export function useDrawingPersistenceLifecycle({
   ]);
 
   useEffect(() => () => {
+    if (sceneSurfaceRetryHandleRef.current !== null) {
+      clearTimeout(sceneSurfaceRetryHandleRef.current);
+      sceneSurfaceRetryHandleRef.current = null;
+    }
     scopeReadyRef.current = false;
     sceneRuntime.suspend();
+    const sceneDetached = sceneBridge.detach();
     const adapter = getChartAdapter();
     if (authorityMode === "document") {
       const prepared = beforeScopeTransitionRef.current();
@@ -848,12 +1202,12 @@ export function useDrawingPersistenceLifecycle({
         }
       }
     }
-    if (!detached) console.warn("Drawing surface teardown was incomplete; the next surface will retry attachment");
-    if (detached) {
+    if (!detached || !sceneDetached) console.warn("Drawing surface teardown was incomplete; the next surface will retry attachment");
+    if (detached && sceneDetached) {
       const activeScope = activeStoreRef.current.getSnapshot().scopeKey;
       renderer?.adopt(createEmptyDrawingDocument(activeScope), []);
     }
-  }, [authorityMode, beforeScopeTransitionRef, commitPrimitiveDraft, getChartAdapter, primitivesRef, sceneRuntime]);
+  }, [authorityMode, beforeScopeTransitionRef, commitPrimitiveDraft, getChartAdapter, primitivesRef, sceneBridge, sceneRuntime]);
 
   return {
     clearDrawings,
@@ -863,5 +1217,7 @@ export function useDrawingPersistenceLifecycle({
     persistDrawings,
     prepareSurfaceDispose,
     prepareUserMutationScope,
+    hitTestScene,
+    getSceneScreenBox,
   };
 }

@@ -18,6 +18,7 @@ import {
   DEFAULT_FIXTURE_OPTIONS,
   FIXTURE_LIMITS,
   FIXTURE_NAMES,
+  PHASE4_SCENE_DRAWING_TYPES,
   buildDrawingFixture,
 } from "./drawing-performance-fixtures.mjs";
 
@@ -27,6 +28,8 @@ const EXPECTED_COUNTS = Object.freeze({
   freehand64x512: { drawings: 64, freehands: 64, points: 32_768, totalPoints: 32_768 },
   entities200: { drawings: 200, freehands: 0, points: 0, totalPoints: 400 },
   entities512: { drawings: 512, freehands: 0, points: 0, totalPoints: 1_024 },
+  phase4Migrated64: { drawings: 64, freehands: 0, points: 0, totalPoints: 107 },
+  phase4Mixed64: { drawings: 64, freehands: 32, points: 512, totalPoints: 565 },
 });
 
 function parsedFixture(name, options) {
@@ -126,6 +129,36 @@ test("entity fixtures stay low-point and contain only legal line or shape drawin
       assert.equal(Object.hasOwn(drawing, "stroke"), false);
     }
   }
+});
+
+test("phase4 fixtures expose exact scene-canary ownership and attachment expectations", () => {
+  assert.deepEqual(PHASE4_SCENE_DRAWING_TYPES, ["line", "axis-line", "shape"]);
+
+  const migrated = buildDrawingFixture("phase4Migrated64");
+  assert.deepEqual(migrated.metadata.drawingTypes, {
+    line: 22,
+    "axis-line": 21,
+    shape: 21,
+  });
+  assert.equal(migrated.metadata.phase4SceneDrawingCount, 64);
+  assert.equal(migrated.metadata.phase4LegacyDrawingCount, 0);
+  assert.equal(migrated.metadata.phase4ExpectedAttachedPrimitiveCount, 1);
+
+  const mixed = buildDrawingFixture("phase4Mixed64");
+  assert.deepEqual(mixed.metadata.drawingTypes, {
+    line: 11,
+    "axis-line": 11,
+    shape: 10,
+    freehand: 32,
+  });
+  assert.equal(mixed.metadata.phase4SceneDrawingCount, 32);
+  assert.equal(mixed.metadata.phase4LegacyDrawingCount, 32);
+  assert.equal(mixed.metadata.phase4ExpectedAttachedPrimitiveCount, 33);
+
+  const freehand = buildDrawingFixture("freehand64x512");
+  assert.equal(freehand.metadata.phase4SceneDrawingCount, 0);
+  assert.equal(freehand.metadata.phase4LegacyDrawingCount, 64);
+  assert.equal(freehand.metadata.phase4ExpectedAttachedPrimitiveCount, 65);
 });
 
 test("non-empty fixture prices stay inside the default mock BTCUSDT visible range", () => {

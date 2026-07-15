@@ -13,6 +13,8 @@ export interface LegacyPrimitiveSurface {
 export interface LegacyPrimitiveRendererOptions {
   surface?: LegacyPrimitiveSurface;
   createPrimitive?: LegacyPrimitiveFactory;
+  /** Transitional Phase 4 policy: registry objects may exist without owning a chart attachment. */
+  shouldAttachPrimitive?: (primitive: DrawingPrimitive) => boolean;
 }
 
 export interface LegacyPrimitiveRenderer {
@@ -35,6 +37,7 @@ export interface LegacyPrimitiveRenderer {
   /** Record checked external surface credentials before any document validation. */
   stageAttached(primitives: readonly DrawingPrimitive[]): void;
   snapshot(): readonly DrawingPrimitive[];
+  attachedCount(): number;
   /** Canonical document currently represented by the retained registry. */
   documentSnapshot(): DrawingDocument | null;
   getPrimitiveById(id: string): DrawingPrimitive | null;
@@ -112,6 +115,7 @@ function adoptionRegistry(
 class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
   readonly #surface: LegacyPrimitiveSurface;
   readonly #createPrimitive: LegacyPrimitiveFactory;
+  readonly #shouldAttachPrimitive: (primitive: DrawingPrimitive) => boolean;
   #primitives: DrawingPrimitive[] = [];
   #byId = new Map<string, DrawingPrimitive>();
   #document: DrawingDocument | null = null;
@@ -121,14 +125,17 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
   constructor(options: LegacyPrimitiveRendererOptions) {
     this.#surface = options.surface ?? {};
     this.#createPrimitive = options.createPrimitive ?? createPrimitiveFromSavedDrawing;
+    this.#shouldAttachPrimitive = options.shouldAttachPrimitive ?? (() => true);
   }
 
   #surfaceMatchesRegistry(): boolean {
-    return this.#attached.size === this.#primitives.length
-      && this.#primitives.every((primitive) => this.#attached.has(primitive));
+    const desired = this.#primitives.filter(this.#shouldAttachPrimitive);
+    return this.#attached.size === desired.length
+      && desired.every((primitive) => this.#attached.has(primitive));
   }
 
   #attach(primitive: DrawingPrimitive): boolean {
+    if (!this.#shouldAttachPrimitive(primitive)) return true;
     if (this.#attached.has(primitive)) return true;
     if (!invokeSurfaceAction(this.#surface.attachPrimitive, primitive)) return false;
     this.#attached.add(primitive);
@@ -226,6 +233,14 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
     if (!byId) return false;
     this.stageAttached(primitives);
     this.#setRegistry(document, primitives, byId);
+    const desired = new Set(primitives.filter(this.#shouldAttachPrimitive));
+    for (const primitive of [...this.#attached]) {
+      if (!desired.has(primitive) && !this.#detach(primitive)) {
+        this.#surfaceSynchronized = false;
+        return false;
+      }
+    }
+    this.#surfaceSynchronized = this.#surfaceMatchesRegistry();
     return this.#surfaceSynchronized;
   }
 
@@ -253,6 +268,10 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
     return Object.freeze([...this.#primitives]);
   }
 
+  attachedCount(): number {
+    return this.#attached.size;
+  }
+
   documentSnapshot(): DrawingDocument | null {
     return this.#document;
   }
@@ -270,7 +289,7 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
   }
 
   rebindSurface(): boolean {
-    const desired = new Set(this.#primitives);
+    const desired = new Set(this.#primitives.filter(this.#shouldAttachPrimitive));
     let recovered = true;
     for (const primitive of [...this.#attached]) {
       if (!desired.has(primitive) && !this.#detach(primitive)) recovered = false;
@@ -281,7 +300,7 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
     }
 
     const attached: DrawingPrimitive[] = [];
-    for (const primitive of this.#primitives) {
+    for (const primitive of desired) {
       if (this.#attached.has(primitive)) continue;
       if (!this.#attach(primitive)) {
         for (let index = attached.length - 1; index >= 0; index -= 1) {
@@ -299,7 +318,7 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
 
   releaseSurfaceCredentials(): void {
     this.#attached.clear();
-    this.#surfaceSynchronized = this.#primitives.length === 0;
+    this.#surfaceSynchronized = this.#surfaceMatchesRegistry();
   }
 
   restoreDocument(document: DrawingDocument): boolean {

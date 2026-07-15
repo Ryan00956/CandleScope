@@ -294,6 +294,11 @@ test("projects all nine kinds in canonical document z-order with typed geometry"
   assert.deepEqual(list.entities.map((entity) => entity.handleCount), [8, 2, 2, 1, 8, 2, 2, 0, 0]);
   assert.equal(adapter.spanInputs.length, 1);
   assert.equal(list.entities.find((entity) => entity.id === "axis")?.unboundedAxis, "horizontal");
+  assert.deepEqual(list.entities.map((entity) => entity.renderSpec?.op ?? null), [
+    "shape", "line", null, "axis-line", null, null, null, null, null,
+  ]);
+  assert.equal(list.entities.find((entity) => entity.id === "shape")?.renderSpec?.selected, true);
+  assert.equal(list.entities.find((entity) => entity.id === "line")?.renderSpec?.selected, false);
 });
 
 test("batches ordinary line and shape anchors once in canonical source-slot order", () => {
@@ -463,6 +468,105 @@ test("line-segment bboxes use parametric viewport clipping without false visibil
   assert.deepEqual([...list.handles], [-10, 20, 20, 50]);
 });
 
+test("paint extents retain thick edge strokes but still cull geometry beyond its pixels", () => {
+  const thickEdge = createDrawingEntity({
+    id: "thick-edge",
+    kind: "line",
+    geometry: {
+      kind: "line",
+      lineType: "line-segment",
+      dataPoints: [{ time: 20, price: -2 }, { time: 80, price: -2 }],
+    },
+    style: { kind: "line", lineWidth: 8 },
+  });
+  const thinOutside = createDrawingEntity({
+    id: "thin-outside",
+    kind: "line",
+    geometry: {
+      kind: "line",
+      lineType: "line-segment",
+      dataPoints: [{ time: 20, price: -4 }, { time: 80, price: -4 }],
+    },
+    style: { kind: "line", lineWidth: 2 },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "paint-edge-strokes",
+    entities: [thickEdge, thinOutside],
+  });
+  const list = project(document, createFrame({ width: 100, height: 100 }), createAdapter());
+
+  assert.ok(list);
+  assert.deepEqual(list.entities.map((entity) => entity.id), [thickEdge.id]);
+  assert.ok(Number(list.bboxes[1]) >= 0);
+  assert.ok(Number(list.bboxes[3]) > 0);
+});
+
+test("selected endpoint paint can enter the pane even when the selected path does not", () => {
+  const selectedLine = createDrawingEntity({
+    id: "selected-endpoint",
+    kind: "line",
+    geometry: {
+      kind: "line",
+      lineType: "line-segment",
+      dataPoints: [{ time: -40, price: 50 }, { time: -10, price: 50 }],
+    },
+    style: { kind: "line", lineWidth: 2 },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "selected-endpoint-edge",
+    entities: [selectedLine],
+  });
+  const list = project(
+    document,
+    createFrame({ width: 100, height: 100 }),
+    createAdapter(),
+    undefined,
+    selectedLine.id,
+  );
+
+  assert.ok(list);
+  assert.deepEqual(list.entities.map((entity) => entity.id), [selectedLine.id]);
+  assert.ok(Number(list.bboxes[2]) > 0);
+});
+
+test("selected shape handles retain edge-only paint while ordinary outside shapes cull", () => {
+  const selectedShape = createDrawingEntity({
+    id: "selected-shape-edge",
+    kind: "shape",
+    geometry: {
+      kind: "shape",
+      shapeType: "rectangle",
+      dataPoints: [{ time: -40, price: 20 }, { time: -2, price: 80 }],
+    },
+    style: { kind: "shape", lineWidth: 2 },
+  });
+  const ordinaryShape = createDrawingEntity({
+    id: "ordinary-shape-outside",
+    kind: "shape",
+    geometry: {
+      kind: "shape",
+      shapeType: "rectangle",
+      dataPoints: [{ time: -40, price: 20 }, { time: -2, price: 80 }],
+    },
+    style: { kind: "shape", lineWidth: 2 },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "selected-shape-edge",
+    entities: [selectedShape, ordinaryShape],
+  });
+  const list = project(
+    document,
+    createFrame({ width: 100, height: 100 }),
+    createAdapter(),
+    undefined,
+    selectedShape.id,
+  );
+
+  assert.ok(list);
+  assert.deepEqual(list.entities.map((entity) => entity.id), [selectedShape.id]);
+  assert.ok(Number(list.bboxes[2]) > 0);
+});
+
 test("axis lines preserve independently resolvable horizontal and vertical coordinates", () => {
   const horizontal = createDrawingEntity({
     id: "horizontal-only",
@@ -498,6 +602,51 @@ test("axis lines preserve independently resolvable horizontal and vertical coord
   assert.deepEqual(list.entities.map((entity) => entity.id), ["horizontal-only", "vertical-only"]);
   assert.deepEqual([...list.bboxes], [0, 30, 100, 30, 25, 0, 25, 100]);
   assert.deepEqual(list.entities.map((entity) => entity.handleCount), [0, 0]);
+});
+
+test("cross axis-line hits choose the nearest axis and keep the selected center first", () => {
+  const cross = createDrawingEntity({
+    id: "nearest-cross",
+    kind: "axis-line",
+    geometry: {
+      kind: "axis-line",
+      axisLineType: "cross",
+      dataPoint: { time: 40, price: 30 },
+    },
+    style: { kind: "axis-line", lineWidth: 2 },
+  });
+  const document = createDrawingDocument({ scopeKey: "nearest-cross", entities: [cross] });
+  const frame = createFrame({ width: 100, height: 100 });
+  const list = project(document, frame, createAdapter());
+  assert.ok(list);
+
+  assert.deepEqual(hitTestDrawingScreenDisplayList(list, 41, 38), {
+    entityId: cross.id,
+    kind: "axis-line",
+    pointIndex: -1,
+    zone: "vertical",
+  });
+  assert.deepEqual(hitTestDrawingScreenDisplayList(list, 48, 31), {
+    entityId: cross.id,
+    kind: "axis-line",
+    pointIndex: -1,
+    zone: "horizontal",
+  });
+  assert.deepEqual(hitTestDrawingScreenDisplayList(list, 45, 35), {
+    entityId: cross.id,
+    kind: "axis-line",
+    pointIndex: -1,
+    zone: "horizontal",
+  });
+
+  const selectedList = project(document, frame, createAdapter(), undefined, cross.id);
+  assert.ok(selectedList);
+  assert.deepEqual(hitTestDrawingScreenDisplayList(selectedList, 42, 32, cross.id), {
+    entityId: cross.id,
+    kind: "axis-line",
+    pointIndex: 0,
+    zone: "center",
+  });
 });
 
 test("preserves exact v2/v3 unresolved points as NaN pairs and path breaks", () => {

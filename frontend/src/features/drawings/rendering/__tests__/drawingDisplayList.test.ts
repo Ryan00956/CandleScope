@@ -4,6 +4,7 @@ import test from "node:test";
 import type { DrawingRenderRevisionStamp } from "../../engine/drawingRenderScheduler.js";
 import {
   createDrawingScreenDisplayList,
+  drawingDisplayEntityScreenBox,
   hitTestDrawingScreenDisplayList,
   type ProjectedDrawingEntity,
 } from "../drawingDisplayList.js";
@@ -37,6 +38,49 @@ function line(id: string, y: number): ProjectedDrawingEntity {
   };
 }
 
+function shape(
+  id: string,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+  clippedBbox: readonly [number, number, number, number],
+): ProjectedDrawingEntity {
+  const middleY = (top + bottom) / 2;
+  return {
+    id,
+    kind: "shape",
+    geometryRevision: 1,
+    styleRevision: 1,
+    style: { kind: "shape", color: "#fff", lineWidth: 2 },
+    renderSpec: {
+      op: "shape",
+      shapeType: "rectangle",
+      strokeColor: "#fff",
+      fillPaintColor: null,
+      lineWidthCssPx: 2,
+      lineStyle: "solid",
+      selected: true,
+      boxPointOffset: 0,
+    },
+    points: new Float64Array([left, top, right, bottom]),
+    bbox: clippedBbox,
+    handles: new Float64Array([right, middleY, left, middleY]),
+    handleNames: ["r", "l"],
+    handleResults: [
+      { zone: "r", handle: "r", pointIndex: -1 },
+      { zone: "l", handle: "l", pointIndex: -1 },
+    ],
+    hitZones: [{
+      kind: "box",
+      pointOffset: 0,
+      pointCount: 2,
+      tolerance: 4,
+      result: { zone: "body", pointIndex: -1 },
+    }],
+  };
+}
+
 test("display list concatenates copy-owned typed buffers and entity offsets", () => {
   const first = line("first", 20);
   const {
@@ -67,6 +111,50 @@ test("display list concatenates copy-owned typed buffers and entity offsets", ()
   assert.equal(Object.isFrozen(list.entities), true);
   first.points[0] = 999;
   assert.equal(list.points[0], 10);
+});
+
+test("display list exposes an immutable accepted screen box for detached scene interaction proxies", () => {
+  const list = createDrawingScreenDisplayList(stamp, [line("shape-proxy", 20)]);
+  assert.deepEqual(drawingDisplayEntityScreenBox(list, "shape-proxy"), {
+    x: 10,
+    y: 20,
+    width: 90,
+    height: 0,
+  });
+  assert.equal(drawingDisplayEntityScreenBox(list, "missing"), null);
+});
+
+test("partly offscreen shape interaction keeps raw box anchors instead of clipped bboxes", () => {
+  const leftList = createDrawingScreenDisplayList(stamp, [
+    shape("left-offscreen", -40, 20, 80, 90, [0, 20, 80, 90]),
+  ]);
+  const leftBox = drawingDisplayEntityScreenBox(leftList, "left-offscreen");
+  assert.deepEqual(leftBox, { x: -40, y: 20, width: 120, height: 70 });
+  assert.equal(Object.isFrozen(leftBox), true);
+  assert.deepEqual(hitTestDrawingScreenDisplayList(leftList, 80, 55, "left-offscreen"), {
+    entityId: "left-offscreen",
+    kind: "shape",
+    zone: "r",
+    handle: "r",
+    pointIndex: -1,
+  });
+
+  const rightList = createDrawingScreenDisplayList(stamp, [
+    shape("right-offscreen", 20, 20, 140, 90, [20, 20, 100, 90]),
+  ]);
+  assert.deepEqual(drawingDisplayEntityScreenBox(rightList, "right-offscreen"), {
+    x: 20,
+    y: 20,
+    width: 120,
+    height: 70,
+  });
+  assert.deepEqual(hitTestDrawingScreenDisplayList(rightList, 20, 55, "right-offscreen"), {
+    entityId: "right-offscreen",
+    kind: "shape",
+    zone: "l",
+    handle: "l",
+    pointIndex: -1,
+  });
 });
 
 test("reverse-z hit queries preserve handle and named-zone metadata", () => {

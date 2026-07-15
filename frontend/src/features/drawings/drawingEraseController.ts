@@ -29,7 +29,10 @@ export function eraseDrawingAtPointer({
   const idx = primitivesRef.current.indexOf(hit.prim);
   if (idx < 0) return false;
 
-  if (detachPrim(hit.prim) === false) return false;
+  // Phase 4 scene-owned interaction proxies are deliberately not attached as
+  // individual chart primitives. Their delete path still uses the canonical
+  // command, but has no legacy surface credential to detach.
+  if (hit.prim._series && detachPrim(hit.prim) === false) return false;
   primitivesRef.current.splice(idx, 1);
   if (persistDrawings([Object.freeze({ type: "delete", id: hit.prim.id })]) === false) return false;
   if (selectedIdRef.current === hit.prim.id) {

@@ -138,9 +138,43 @@ test("legacy mode is inert and owns no subscriptions", () => {
     disposed: false,
     mode: "legacy",
     plan: null,
+    publicationReady: false,
     scopeKey: null,
   });
   runtime.dispose();
+});
+
+test("scene-canary filters owned nodes and publishes only through the visible surface sink", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published = { current: null as ReturnType<typeof project> | null };
+  let clearCount = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  assert.equal(runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    shouldProjectNode: (node) => node.id === "inside",
+    publishScene: (plan) => {
+      published.current = plan;
+      return true;
+    },
+    clearScene: () => { clearCount += 1; },
+  }), true);
+
+  assert.equal(runtime.flushNow(), true);
+  assert.deepEqual(published.current?.entities.map((entity) => entity.id), ["inside"]);
+  assert.strictEqual(runtime.snapshot().plan, published.current);
+  assert.equal(runtime.requestParity(), false);
+  runtime.suspend();
+  assert.equal(clearCount, 1);
+  assert.equal(runtime.snapshot().plan, null);
 });
 
 test("shadow reconciles the exact document, culls, and publishes an invisible typed plan", () => {
@@ -221,6 +255,245 @@ test("data-space culling defers pixel-sized angle and fibonacci bounds to the pr
 
   assert.equal(runtime.flushNow(), true);
   assert.deepEqual(projectedNodeIds, [["far-angle", "far-fibonacci"]]);
+  runtime.dispose();
+});
+
+test("shadow treats an unresolved projection as skipped work and remains active", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const skipped: string[] = [];
+  let errorCount = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "shadow",
+    onError: () => { errorCount += 1; },
+    onSkipped: (reason) => skipped.push(reason),
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: () => null,
+  });
+
+  assert.equal(runtime.flushNow(), false);
+  assert.deepEqual(skipped, ["scene-projection-unresolved"]);
+  assert.equal(errorCount, 0);
+  assert.equal(runtime.snapshot().active, true);
+  assert.equal(adapter.listenerCount(), 1);
+  assert.equal(runtime.invalidate("later-shadow-sample"), true);
+  runtime.dispose();
+});
+
+test("scene-canary unresolved projection faults once without retrying invalidations", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const skipped: string[] = [];
+  const errors: unknown[] = [];
+  let scheduledFrames = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    onError: (error) => errors.push(error),
+    onSkipped: (reason) => skipped.push(reason),
+    requestFrame: () => {
+      scheduledFrames += 1;
+      return scheduledFrames;
+    },
+    cancelFrame: () => {},
+  });
+
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: () => null,
+    publishScene: () => true,
+  });
+
+  assert.equal(runtime.flushNow(), false);
+  assert.deepEqual(skipped, ["scene-projection-unresolved"]);
+  assert.equal(errors.length, 1);
+  assert.match(String(errors[0]), /projection was unresolved/);
+  assert.equal(runtime.snapshot().active, false);
+  assert.equal(runtime.snapshot().plan, null);
+  assert.equal(adapter.listenerCount(), 0);
+  assert.equal(runtime.invalidate("should-not-retry"), false);
+  adapter.emit();
+  assert.equal(scheduledFrames, 1);
+  runtime.dispose();
+});
+
+test("scene-canary projection throw faults while retaining the last accepted plan", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const projectionError = new Error("projector failed");
+  const errors: unknown[] = [];
+  let rejectProjection = false;
+  let scheduledFrames = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    onError: (error) => errors.push(error),
+    requestFrame: () => {
+      scheduledFrames += 1;
+      return scheduledFrames;
+    },
+    cancelFrame: () => {},
+  });
+
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: (request) => {
+      if (rejectProjection) throw projectionError;
+      return project(request);
+    },
+    publishScene: () => true,
+  });
+  assert.equal(runtime.flushNow(), true);
+  const acceptedPlan = runtime.snapshot().plan;
+  assert.ok(acceptedPlan);
+
+  rejectProjection = true;
+  assert.equal(store.dispatch({ type: "clear" }).ok, true);
+  renderer.setDocument(store.getSnapshot());
+  assert.equal(runtime.flushNow(), false);
+
+  assert.deepEqual(errors, [projectionError]);
+  assert.strictEqual(runtime.snapshot().plan, acceptedPlan);
+  assert.equal(runtime.snapshot().active, false);
+  assert.equal(adapter.listenerCount(), 0);
+  assert.equal(runtime.invalidate("should-not-retry"), false);
+  adapter.emit();
+  assert.equal(scheduledFrames, 2);
+  runtime.dispose();
+});
+
+test("scene-canary recovery restores subscriptions and replaces the retained plan only after success", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const projectionError = new Error("projector remains unavailable");
+  let rejectProjection = false;
+  const errors: unknown[] = [];
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    onError: (error) => errors.push(error),
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  const recoverableProject = (request: DrawingSceneProjectionRequest) => {
+    if (rejectProjection) throw projectionError;
+    return project(request);
+  };
+  const binding = {
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: recoverableProject,
+    publishScene: () => true,
+  } as const;
+
+  assert.equal(runtime.activate(binding), true);
+  assert.equal(runtime.flushNow(), true);
+  const acceptedPlan = runtime.snapshot().plan;
+  assert.ok(acceptedPlan);
+  assert.equal(runtime.snapshot().publicationReady, true);
+
+  rejectProjection = true;
+  assert.equal(store.dispatch({ type: "clear" }).ok, true);
+  renderer.setDocument(store.getSnapshot());
+  assert.equal(runtime.flushNow(), false);
+  assert.strictEqual(runtime.snapshot().plan, acceptedPlan);
+  assert.equal(runtime.snapshot().publicationReady, false);
+  assert.equal(adapter.listenerCount(), 0);
+
+  assert.equal(runtime.activate(binding), true);
+  assert.equal(runtime.snapshot().publicationReady, false);
+  assert.equal(adapter.listenerCount(), 1);
+  assert.equal(runtime.flushNow(), false);
+  assert.strictEqual(runtime.snapshot().plan, acceptedPlan);
+  assert.equal(runtime.snapshot().publicationReady, false);
+  assert.equal(adapter.listenerCount(), 0);
+
+  rejectProjection = false;
+  assert.equal(runtime.activate(binding), true);
+  assert.equal(runtime.snapshot().publicationReady, false);
+  assert.equal(adapter.listenerCount(), 1);
+  assert.equal(runtime.flushNow(), true);
+  assert.notStrictEqual(runtime.snapshot().plan, acceptedPlan);
+  assert.equal(runtime.snapshot().publicationReady, true);
+  assert.equal(runtime.snapshot().active, true);
+  assert.equal(adapter.listenerCount(), 1);
+  assert.deepEqual(errors, [projectionError, projectionError]);
+  runtime.dispose();
+});
+
+test("scene-canary publication rejection faults once without scheduling a rebuild loop", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let scheduledFrames = 0;
+  let errorCount = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => {
+      scheduledFrames += 1;
+      return scheduledFrames;
+    },
+    cancelFrame: () => {},
+    onError: () => { errorCount += 1; },
+  });
+
+  assert.equal(runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    publishScene: () => false,
+  }), true);
+  assert.equal(runtime.flushNow(), true);
+  assert.equal(errorCount, 1);
+  assert.equal(adapter.listenerCount(), 0);
+  assert.equal(runtime.snapshot().active, false);
+  assert.equal(runtime.snapshot().plan, null);
+  assert.equal(runtime.invalidate("should-not-retry"), false);
+  assert.equal(scheduledFrames, 1);
+  runtime.dispose();
+});
+
+test("scene-canary retains the last accepted plan after a later publication failure", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let acceptPublication = true;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    publishScene: () => acceptPublication,
+  });
+  assert.equal(runtime.flushNow(), true);
+  const acceptedPlan = runtime.snapshot().plan;
+  assert.ok(acceptedPlan);
+
+  acceptPublication = false;
+  assert.equal(store.dispatch({ type: "clear" }).ok, true);
+  renderer.setDocument(store.getSnapshot());
+  assert.equal(runtime.flushNow(), true);
+  assert.strictEqual(runtime.snapshot().plan, acceptedPlan);
+  assert.equal(runtime.snapshot().active, false);
   runtime.dispose();
 });
 

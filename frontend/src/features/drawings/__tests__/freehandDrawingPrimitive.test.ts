@@ -709,6 +709,42 @@ test("hidden freehand reports its source geometry as culled", () => {
   assert.equal(drawingPerfCounters.snapshot().counters.sceneRebuildCount, 1);
 });
 
+test("committed legacy freehand views batch one viewport projection pass per surface frame", () => {
+  const rows = [row(0, 100, 100, 100), row(1, 200, 101, 200)];
+  const chart: CoordinateChartBridge = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time) => (typeof time === "number" ? (time - 100) / 10 : null),
+    }),
+  };
+  const series: CoordinateSeriesBridge & { priceToCoordinate(price: number): number } = {
+    data: () => rows,
+    priceToCoordinate: (price) => price,
+  };
+  const first = new FreehandDrawingPrimitive({
+    id: "batch-first",
+    dataPoints: [{ time: 100, price: 1 }, { time: 200, price: 2 }],
+  });
+  const second = new FreehandDrawingPrimitive({
+    id: "batch-second",
+    dataPoints: [{ time: 100, price: 3 }, { time: 200, price: 4 }],
+  });
+  attachPrimitive(first, chart, series);
+  attachPrimitive(second, chart, series);
+  first.setViewUpdateBatching(true);
+  second.setViewUpdateBatching(true);
+  resetDrawingPerfCounters();
+
+  first.updateAllViews();
+  second.updateAllViews();
+
+  assert.equal(drawingPerfCounters.snapshot().counters.sceneRebuildCount, 1);
+  assert.ok(first.getParityScreenSnapshot());
+  assert.ok(second.getParityScreenSnapshot());
+  first.detached();
+  second.detached();
+});
+
 test("freehand preview cancel is terminal and remains persistence-filtered", () => {
   const primitive = new FreehandDrawingPrimitive({
     id: "v2-cancel",

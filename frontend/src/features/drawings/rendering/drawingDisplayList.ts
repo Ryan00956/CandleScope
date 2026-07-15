@@ -1,6 +1,14 @@
 import type { DrawingRenderRevisionStamp } from "../engine/drawingRenderScheduler.js";
 import type { DrawingStyle } from "../core/drawingDocument.js";
-import type { DrawingHit, DrawingKind } from "../drawingTypes.js";
+import type {
+  AxisLineType,
+  BasicLineToolId,
+  DrawingHit,
+  DrawingKind,
+  ScreenBox,
+  ShapeLineStyle,
+  ShapeType,
+} from "../drawingTypes.js";
 
 export const DRAWING_DISPLAY_KIND_CODES: Readonly<Record<DrawingKind, number>> = Object.freeze({
   line: 1,
@@ -15,6 +23,46 @@ export const DRAWING_DISPLAY_KIND_CODES: Readonly<Record<DrawingKind, number>> =
 });
 
 export type DrawingDisplayUnboundedAxis = "horizontal" | "vertical" | "both" | null;
+
+/**
+ * Fully-normalized paint instructions produced outside the canvas hot path.
+ * Phase 4 deliberately emits specs only for the first migrated kinds; later
+ * phases may extend this union without making the renderer inspect document
+ * geometry or infer an opcode from point counts.
+ */
+export type DrawingDisplayRenderSpec =
+  | Readonly<{
+      op: "line";
+      lineType: BasicLineToolId;
+      strokeColor: string;
+      selectionHighlightColor: string;
+      lineWidthCssPx: number;
+      selected: boolean;
+      mainPointOffset: 0;
+      anchorPointOffset: 2;
+      drawEndpointDots: boolean;
+    }>
+  | Readonly<{
+      op: "axis-line";
+      axisLineType: AxisLineType;
+      strokeColor: string;
+      selectionHighlightColor: string;
+      lineWidthCssPx: number;
+      selected: boolean;
+      segmentPointOffset: 0;
+      segmentCount: 1 | 2;
+      anchorPointOffset: number | null;
+    }>
+  | Readonly<{
+      op: "shape";
+      shapeType: ShapeType;
+      strokeColor: string;
+      fillPaintColor: string | null;
+      lineWidthCssPx: number;
+      lineStyle: ShapeLineStyle;
+      selected: boolean;
+      boxPointOffset: 0;
+    }>;
 
 export interface DrawingDisplayHitZone {
   readonly kind: "arc" | "box" | "ellipse" | "point" | "polyline";
@@ -38,6 +86,7 @@ export interface ProjectedDrawingEntity {
   readonly geometryRevision: number;
   readonly styleRevision: number;
   readonly style: DrawingStyle;
+  readonly renderSpec?: DrawingDisplayRenderSpec;
   /** Interleaved x/y Float64 coordinates. NaN pairs are unresolved gaps. */
   readonly points: Float64Array;
   readonly bbox: readonly [number, number, number, number] | null;
@@ -62,6 +111,7 @@ export interface DrawingDisplayEntity {
   readonly geometryRevision: number;
   readonly styleRevision: number;
   readonly style: DrawingStyle;
+  readonly renderSpec: DrawingDisplayRenderSpec | null;
   readonly pointOffset: number;
   readonly pointCount: number;
   readonly handleOffset: number;
@@ -103,6 +153,53 @@ export interface DrawingDisplayHitResult extends DrawingHit {
   readonly kind: DrawingKind;
 }
 
+export function drawingDisplayEntityScreenBox(
+  list: DrawingScreenDisplayList,
+  entityId: string,
+): ScreenBox | null {
+  const entityIndex = list.entities.findIndex((entity) => entity.id === entityId);
+  if (entityIndex < 0) return null;
+  const entity = list.entities[entityIndex];
+  if (!entity) return null;
+  if (entity.kind === "shape" && entity.renderSpec?.op === "shape") {
+    // The broad-phase bbox is pane-clipped. Resize must instead retain both
+    // raw projected corners so moving one side cannot snap its offscreen peer.
+    const first = pointAt(
+      list.points,
+      entity.pointOffset + entity.renderSpec.boxPointOffset,
+    );
+    const second = pointAt(
+      list.points,
+      entity.pointOffset + entity.renderSpec.boxPointOffset + 1,
+    );
+    if (!first || !second) return null;
+    const minX = Math.min(first[0], second[0]);
+    const minY = Math.min(first[1], second[1]);
+    const maxX = Math.max(first[0], second[0]);
+    const maxY = Math.max(first[1], second[1]);
+    return Object.freeze({
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+    });
+  }
+  const offset = entityIndex * 4;
+  const minX = Number(list.bboxes[offset]);
+  const minY = Number(list.bboxes[offset + 1]);
+  const maxX = Number(list.bboxes[offset + 2]);
+  const maxY = Number(list.bboxes[offset + 3]);
+  if (![minX, minY, maxX, maxY].every(Number.isFinite) || maxX < minX || maxY < minY) {
+    return null;
+  }
+  return Object.freeze({
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  });
+}
+
 function finitePairBuffer(value: Float64Array): boolean {
   if (!(value instanceof Float64Array) || value.length % 2 !== 0) return false;
   for (let index = 0; index < value.length; index += 2) {
@@ -140,6 +237,48 @@ function validHitResult(value: unknown): value is Readonly<DrawingHit> {
       || hit.body !== undefined);
 }
 
+function validRenderSpec(
+  entity: ProjectedDrawingEntity,
+  spec: DrawingDisplayRenderSpec | undefined,
+): boolean {
+  if (spec === undefined) return true;
+  if (!Number.isFinite(spec.lineWidthCssPx) || spec.lineWidthCssPx <= 0
+    || typeof spec.strokeColor !== "string" || typeof spec.selected !== "boolean") {
+    return false;
+  }
+  if (spec.op === "line") {
+    return entity.kind === "line"
+      && (spec.lineType === "line-segment"
+        || spec.lineType === "line-ray"
+        || spec.lineType === "line-infinite")
+      && spec.mainPointOffset === 0
+      && spec.anchorPointOffset === 2
+      && typeof spec.selectionHighlightColor === "string"
+      && spec.drawEndpointDots === (spec.lineType === "line-segment")
+      && entity.points.length >= 8;
+  }
+  if (spec.op === "axis-line") {
+    return entity.kind === "axis-line"
+      && (spec.axisLineType === "horizontal"
+        || spec.axisLineType === "vertical"
+        || spec.axisLineType === "cross")
+      && spec.segmentPointOffset === 0
+      && typeof spec.selectionHighlightColor === "string"
+      && (spec.segmentCount === 1 || spec.segmentCount === 2)
+      && spec.segmentCount * 4 <= entity.points.length
+      && (spec.anchorPointOffset === null
+        || (Number.isSafeInteger(spec.anchorPointOffset)
+          && spec.anchorPointOffset >= spec.segmentCount * 2
+          && (spec.anchorPointOffset + 1) * 2 <= entity.points.length));
+  }
+  return entity.kind === "shape"
+    && (spec.shapeType === "rectangle" || spec.shapeType === "ellipse")
+    && (spec.fillPaintColor === null || typeof spec.fillPaintColor === "string")
+    && (spec.lineStyle === "solid" || spec.lineStyle === "dashed" || spec.lineStyle === "dotted")
+    && spec.boxPointOffset === 0
+    && entity.points.length >= 4;
+}
+
 function validateEntity(entity: ProjectedDrawingEntity): void {
   if (!entity.id || !(entity.kind in DRAWING_DISPLAY_KIND_CODES)) {
     throw new TypeError("display entity identity is invalid");
@@ -152,6 +291,9 @@ function validateEntity(entity: ProjectedDrawingEntity): void {
     throw new TypeError("display entity coordinate buffers are invalid");
   }
   if (!validBbox(entity.bbox)) throw new TypeError("display entity bbox is invalid");
+  if (!validRenderSpec(entity, entity.renderSpec)) {
+    throw new TypeError("display entity render spec is invalid");
+  }
   const pointCount = entity.points.length / 2;
   const handleCount = (entity.handles?.length ?? 0) / 2;
   if ((entity.handleNames?.length ?? 0) !== handleCount) {
@@ -288,6 +430,7 @@ export function createDrawingScreenDisplayList(
       geometryRevision: entity.geometryRevision,
       styleRevision: entity.styleRevision,
       style: entity.style,
+      renderSpec: entity.renderSpec ? Object.freeze({ ...entity.renderSpec }) : null,
       pointOffset,
       pointCount,
       handleOffset,
@@ -477,6 +620,36 @@ function entityBboxMayContainZoneHit(
     && y <= Number(bottom) + tolerance;
 }
 
+function crossAxisLineHitZone(
+  list: DrawingScreenDisplayList,
+  entity: DrawingDisplayEntity,
+  x: number,
+  y: number,
+): DrawingDisplayHitZone | null {
+  const center = entity.hitZones.find((zone) => zone.name === "center");
+  if (center && zoneHit(list, entity, center, x, y)) return center;
+  const horizontal = entity.hitZones.find((zone) => zone.name === "horizontal");
+  const vertical = entity.hitZones.find((zone) => zone.name === "vertical");
+  const horizontalHit = horizontal ? zoneHit(list, entity, horizontal, x, y) : false;
+  const verticalHit = vertical ? zoneHit(list, entity, vertical, x, y) : false;
+  if (!horizontalHit) return verticalHit ? vertical ?? null : null;
+  if (!verticalHit) return horizontal ?? null;
+  if (!horizontal || !vertical) return horizontal ?? vertical ?? null;
+  const horizontalPoint = pointAt(
+    list.points,
+    entity.pointOffset + horizontal.pointOffset,
+  );
+  const verticalPoint = pointAt(
+    list.points,
+    entity.pointOffset + vertical.pointOffset,
+  );
+  if (!horizontalPoint || !verticalPoint) return null;
+  const horizontalDistance = Math.abs(y - horizontalPoint[1]);
+  const verticalDistance = Math.abs(x - verticalPoint[0]);
+  // Match AxisLineDrawingPrimitive: equal distance resolves horizontally.
+  return horizontalDistance <= verticalDistance ? horizontal : vertical;
+}
+
 /** Phase 3 parity query: reverse z-order sequential scan, not the Phase 6 index. */
 export function hitTestDrawingScreenDisplayList(
   list: DrawingScreenDisplayList,
@@ -510,6 +683,16 @@ export function hitTestDrawingScreenDisplayList(
     // bbox as a conservative broad phase, avoiding O(entities * points) scans
     // for strict parity probes that are nowhere near most long strokes.
     if (!entityBboxMayContainZoneHit(list, entity, entityIndex, x, y)) continue;
+    if (entity.renderSpec?.op === "axis-line"
+      && entity.renderSpec.axisLineType === "cross") {
+      const zone = crossAxisLineHitZone(list, entity, x, y);
+      if (!zone) continue;
+      return Object.freeze({
+        entityId: entity.id,
+        kind: entity.kind,
+        ...(zone.result ?? (zone.name ? { zone: zone.name } : { body: true })),
+      });
+    }
     for (const zone of entity.hitZones) {
       if (!zoneHit(list, entity, zone, x, y)) continue;
       return Object.freeze({

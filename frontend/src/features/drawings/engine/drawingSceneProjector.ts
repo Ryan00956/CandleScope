@@ -28,6 +28,7 @@ import {
 } from "../rendering/drawingDisplayList.js";
 import type {
   DrawingDisplayHitZone,
+  DrawingDisplayRenderSpec,
   DrawingDisplayUnboundedAxis,
   DrawingScreenDisplayList,
   ProjectedDrawingEntity,
@@ -119,6 +120,7 @@ interface ProjectedEntityOptions {
   readonly unresolvedSourcePointIndexes?: Uint32Array;
   readonly canonicalGapCoverageComplete?: boolean;
   readonly unboundedAxis?: DrawingDisplayUnboundedAxis;
+  readonly renderSpec?: DrawingDisplayRenderSpec;
 }
 
 const PROJECTION_FAILED = Symbol("drawing-scene-projection-failed");
@@ -142,6 +144,55 @@ const BOX_HANDLE_NAMES = Object.freeze(["tl", "t", "tr", "r", "br", "b", "bl", "
 
 function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function legacyLineAlpha(color: string, alpha: number): string {
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  if (color.length === 4 && color.startsWith("#")) {
+    red = parseInt(color.charAt(1).repeat(2), 16);
+    green = parseInt(color.charAt(2).repeat(2), 16);
+    blue = parseInt(color.charAt(3).repeat(2), 16);
+  } else if (color.length === 7 && color.startsWith("#")) {
+    red = parseInt(color.slice(1, 3), 16);
+    green = parseInt(color.slice(3, 5), 16);
+    blue = parseInt(color.slice(5, 7), 16);
+  } else {
+    return color;
+  }
+  return `rgba(${red},${green},${blue},${alpha})`;
+}
+
+function legacyPaintAlpha(color: string, alpha: number): string {
+  if (!color || color === "transparent") return "transparent";
+  const boundedAlpha = Math.max(0, Math.min(1, Number(alpha)));
+  if (color.startsWith("rgba")) {
+    const match = color.match(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/);
+    if (match) {
+      const baseAlpha = Math.max(0, Math.min(1, Number(match[4])));
+      return `rgba(${match[1]},${match[2]},${match[3]},${baseAlpha * boundedAlpha})`;
+    }
+  }
+  if (color.startsWith("rgb")) {
+    const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (match) return `rgba(${match[1]},${match[2]},${match[3]},${boundedAlpha})`;
+  }
+  let red = 0;
+  let green = 0;
+  let blue = 0;
+  if (color.length === 4 && color.startsWith("#")) {
+    red = parseInt(color.charAt(1).repeat(2), 16);
+    green = parseInt(color.charAt(2).repeat(2), 16);
+    blue = parseInt(color.charAt(3).repeat(2), 16);
+  } else if (color.length === 7 && color.startsWith("#")) {
+    red = parseInt(color.slice(1, 3), 16);
+    green = parseInt(color.slice(3, 5), 16);
+    blue = parseInt(color.slice(5, 7), 16);
+  } else {
+    return color;
+  }
+  return `rgba(${red},${green},${blue},${boundedAlpha})`;
 }
 
 function normalizeDrawingEntityForScene(entity: DrawingEntity): DrawingRenderEntity | null {
@@ -326,6 +377,7 @@ function createProjectedEntity(
     geometryRevision: entity.geometryRevision,
     styleRevision: entity.styleRevision,
     style: entity.style as DrawingStyle,
+    ...(options.renderSpec ? { renderSpec: options.renderSpec } : {}),
     points,
     bbox: options.bbox === undefined ? bboxFromValues(points) : options.bbox,
     ...(options.handles ? { handles: options.handles } : {}),
@@ -413,11 +465,13 @@ function clipParametricLine(
   width: number,
   height: number,
   mode: "line-segment" | "line-ray" | "line-infinite",
+  paintOutset: number,
 ): readonly [ScreenPoint, ScreenPoint] | null {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   if (dx === 0 && dy === 0) {
-    return a.x >= 0 && a.x <= width && a.y >= 0 && a.y <= height
+    return a.x >= -paintOutset && a.x <= width + paintOutset
+      && a.y >= -paintOutset && a.y <= height + paintOutset
       ? Object.freeze([a, b])
       : null;
   }
@@ -433,7 +487,8 @@ function clipParametricLine(
     return minimum <= maximum;
   };
 
-  if (!clipAxis(a.x, dx, 0, width) || !clipAxis(a.y, dy, 0, height)) return null;
+  if (!clipAxis(a.x, dx, -paintOutset, width + paintOutset)
+    || !clipAxis(a.y, dy, -paintOutset, height + paintOutset)) return null;
   if (!finiteNumber(minimum) || !finiteNumber(maximum)) return null;
   return Object.freeze([
     Object.freeze({ x: a.x + minimum * dx, y: a.y + minimum * dy }),
@@ -441,22 +496,68 @@ function clipParametricLine(
   ]);
 }
 
+function linePaintOutsetCssPx(
+  lineWidthCssPx: number,
+  selected: boolean,
+  drawEndpointDots: boolean,
+): number {
+  if (selected) return Math.max(lineWidthCssPx / 2 + 6, 12);
+  return drawEndpointDots
+    ? Math.max(lineWidthCssPx, 3)
+    : lineWidthCssPx / 2;
+}
+
+function linePathPaintOutsetCssPx(lineWidthCssPx: number, selected: boolean): number {
+  return selected
+    ? Math.max(lineWidthCssPx / 2 + 6, 8)
+    : lineWidthCssPx / 2;
+}
+
+function pointPaintIntersectsPane(
+  point: ScreenPoint,
+  outset: number,
+  width: number,
+  height: number,
+): boolean {
+  return point.x + outset >= 0
+    && point.x - outset <= width
+    && point.y + outset >= 0
+    && point.y - outset <= height;
+}
+
 function projectLine(
   entity: LineDrawingRenderEntity,
   frame: DrawingFrameSnapshot,
   anchors: TwoPointProjection,
+  selected: boolean,
 ): EntityProjection {
   if (anchors === PROJECTION_FAILED || anchors === null) return anchors;
   const [a, b] = anchors;
   const unbounded = entity.geometry.lineType === "line-ray"
     || entity.geometry.lineType === "line-infinite";
-  const line = clipParametricLine(
+  let line = clipParametricLine(
     a,
     b,
     frame.widthCssPx,
     frame.heightCssPx,
     entity.geometry.lineType,
+    0,
   );
+  line ??= clipParametricLine(
+    a,
+    b,
+    frame.widthCssPx,
+    frame.heightCssPx,
+    entity.geometry.lineType,
+    linePathPaintOutsetCssPx(entity.style.lineWidth, selected),
+  );
+  if (!line && (selected || entity.geometry.lineType === "line-segment")) {
+    const anchorOutset = selected ? 12 : Math.max(entity.style.lineWidth, 3);
+    if (pointPaintIntersectsPane(a, anchorOutset, frame.widthCssPx, frame.heightCssPx)
+      || pointPaintIntersectsPane(b, anchorOutset, frame.widthCssPx, frame.heightCssPx)) {
+      line = Object.freeze([a, b]);
+    }
+  }
   if (!line) return null;
   const points = new Float64Array([
     line[0].x, line[0].y, line[1].x, line[1].y,
@@ -500,6 +601,17 @@ function projectLine(
       }),
     ]),
     ...(unbounded ? { unboundedAxis: "both" as const } : {}),
+    renderSpec: Object.freeze({
+      op: "line" as const,
+      lineType: entity.geometry.lineType,
+      strokeColor: entity.style.color,
+      selectionHighlightColor: legacyLineAlpha(entity.style.color, 0.15),
+      lineWidthCssPx: entity.style.lineWidth,
+      selected,
+      mainPointOffset: 0 as const,
+      anchorPointOffset: 2 as const,
+      drawEndpointDots: entity.geometry.lineType === "line-segment",
+    }),
   });
 }
 
@@ -560,6 +672,19 @@ function projectAxisLine(
     } : {}),
     hitZones: Object.freeze(hitZones),
     unboundedAxis,
+    renderSpec: Object.freeze({
+      op: "axis-line" as const,
+      axisLineType: type,
+      strokeColor: entity.style.color,
+      selectionHighlightColor: legacyPaintAlpha(entity.style.color, 0.18),
+      lineWidthCssPx: entity.style.lineWidth,
+      selected,
+      segmentPointOffset: 0 as const,
+      segmentCount: horizontal && vertical ? 2 as const : 1 as const,
+      anchorPointOffset: selected && x !== null && y !== null
+        ? (horizontal && vertical ? 4 : 2)
+        : null,
+    }),
   });
 }
 
@@ -808,6 +933,7 @@ function projectShape(
   entity: ShapeDrawingRenderEntity,
   frame: DrawingFrameSnapshot,
   anchors: TwoPointProjection,
+  selected: boolean,
 ): EntityProjection {
   if (anchors === PROJECTION_FAILED || anchors === null) return anchors;
   const [a, b] = anchors;
@@ -860,6 +986,18 @@ function projectShape(
         result: Object.freeze({ zone: "body", pointIndex: -1 }),
       }),
     ]),
+    renderSpec: Object.freeze({
+      op: "shape" as const,
+      shapeType: entity.geometry.shapeType,
+      strokeColor: entity.style.color,
+      fillPaintColor: entity.style.fillColor !== "transparent" && entity.style.fillOpacity > 0
+        ? legacyPaintAlpha(entity.style.fillColor, entity.style.fillOpacity)
+        : null,
+      lineWidthCssPx: entity.style.lineWidth,
+      lineStyle: entity.style.lineStyle,
+      selected,
+      boxPointOffset: 0 as const,
+    }),
   });
 }
 
@@ -1609,6 +1747,7 @@ function projectEntity(
       entity,
       frame,
       ordinaryTwoPointAnchors(ordinaryAnchorsById, entity.id),
+      selected,
     );
     case "axis-line": return projectAxisLine(entity, frame, adapter, selected);
     case "angle-measure": return projectAngle(entity, frame, adapter);
@@ -1619,6 +1758,7 @@ function projectEntity(
       entity,
       frame,
       ordinaryTwoPointAnchors(ordinaryAnchorsById, entity.id),
+      selected,
     );
     case "freehand":
     case "highlighter": return projectFreehand(entity, node, frame, adapter);
@@ -1669,19 +1809,53 @@ function clipProjectedEntityToPane(
   frame: DrawingFrameSnapshot,
 ): ProjectedDrawingEntity | null {
   const bbox = entity.bbox;
-  if (!bbox
-    || bbox[2] < 0
-    || bbox[0] > frame.widthCssPx
-    || bbox[3] < 0
-    || bbox[1] > frame.heightCssPx) return null;
+  if (!bbox) return null;
+  const renderSpec = entity.renderSpec;
+  let paintOutset = 0;
+  if (renderSpec?.op === "line") {
+    paintOutset = linePaintOutsetCssPx(
+      renderSpec.lineWidthCssPx,
+      renderSpec.selected,
+      renderSpec.drawEndpointDots,
+    );
+  } else if (renderSpec?.op === "axis-line") {
+    paintOutset = renderSpec.selected
+      ? Math.max(renderSpec.lineWidthCssPx / 2 + 5, 12)
+      : renderSpec.lineWidthCssPx / 2;
+  } else if (renderSpec?.op === "shape") {
+    paintOutset = renderSpec.selected
+      ? Math.max(renderSpec.lineWidthCssPx / 2, 9)
+      : renderSpec.lineWidthCssPx / 2;
+  }
+  const paintLeft = bbox[0] - paintOutset;
+  const paintTop = bbox[1] - paintOutset;
+  const paintRight = bbox[2] + paintOutset;
+  const paintBottom = bbox[3] + paintOutset;
+  if (paintRight < 0
+    || paintLeft > frame.widthCssPx
+    || paintBottom < 0
+    || paintTop > frame.heightCssPx) return null;
+  const geometryLeft = Math.max(0, bbox[0]);
+  const geometryTop = Math.max(0, bbox[1]);
+  const geometryRight = Math.min(frame.widthCssPx, bbox[2]);
+  const geometryBottom = Math.min(frame.heightCssPx, bbox[3]);
+  const geometryIntersectsPane = geometryLeft <= geometryRight
+    && geometryTop <= geometryBottom;
   return Object.freeze({
     ...entity,
-    bbox: Object.freeze([
-      Math.max(0, bbox[0]),
-      Math.max(0, bbox[1]),
-      Math.min(frame.widthCssPx, bbox[2]),
-      Math.min(frame.heightCssPx, bbox[3]),
-    ] as const),
+    bbox: geometryIntersectsPane
+      ? Object.freeze([
+          geometryLeft,
+          geometryTop,
+          geometryRight,
+          geometryBottom,
+        ] as const)
+      : Object.freeze([
+          Math.max(0, paintLeft),
+          Math.max(0, paintTop),
+          Math.min(frame.widthCssPx, paintRight),
+          Math.min(frame.heightCssPx, paintBottom),
+        ] as const),
   });
 }
 

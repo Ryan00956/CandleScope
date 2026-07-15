@@ -5,6 +5,7 @@ import {
   DRAWING_ENGINE_MODES,
   isDrawingEngineMode,
   resolvePhase3DrawingEngineMode,
+  resolvePhase4DrawingEngineMode,
   resolveRequestedDrawingEngineMode,
 } from "../drawingEngineMode.js";
 
@@ -18,6 +19,22 @@ test("drawing engine mode resolver accepts the four exact rollout values", () =>
   }
   assert.equal(isDrawingEngineMode("SHADOW"), false);
   assert.equal(isDrawingEngineMode("unknown"), false);
+});
+
+test("Phase 4 enables the visible canary while full scene remains fail-closed", () => {
+  assert.deepEqual(resolvePhase4DrawingEngineMode({ configured: "scene-canary" }), {
+    requested: "scene-canary",
+    effective: "scene-canary",
+    source: "environment",
+    failedClosed: false,
+  });
+  assert.deepEqual(resolvePhase4DrawingEngineMode({ configured: "scene" }), {
+    requested: "scene",
+    effective: "legacy",
+    source: "environment",
+    failedClosed: true,
+  });
+  assert.equal(resolvePhase4DrawingEngineMode({ configured: "shadow" }).effective, "shadow");
 });
 
 test("development URL override wins but production ignores user-controlled input", () => {

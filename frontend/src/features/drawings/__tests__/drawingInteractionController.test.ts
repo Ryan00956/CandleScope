@@ -9,11 +9,18 @@ import {
   canApplyDrawingVisibilityToCurrentPrimitives,
   cancelFreehandPrimitiveOnSurface,
   detachAndRemoveDrawingPrimitive,
+  resolveTopmostDrawingInteractionHit,
   runDrawingPointerTransientBarrier,
   runDrawingSurfaceDisposeBarrier,
 } from "../drawingInteractionController.js";
-import { prepareDrawingMutationScope } from "../useDrawingPersistenceLifecycle.js";
+import {
+  canRecoverDrawingVisibleSceneInPlace,
+  isDrawingVisibleScenePublicationReady,
+  prepareDrawingMutationScope,
+} from "../useDrawingPersistenceLifecycle.js";
 import type { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
+import type { DrawingPrimitiveHit } from "../drawingSelectionController.js";
+import type { DrawingDisplayHitResult } from "../rendering/drawingDisplayList.js";
 import type {
   ActiveDrawingMovePayload,
   DrawingPrimitive,
@@ -28,6 +35,27 @@ import {
 function point(x: number): ScreenPoint {
   return { x, y: x };
 }
+
+test("hybrid hit ownership follows canonical z-order instead of legacy-first attachment order", () => {
+  const legacy = malformedFixture<DrawingPrimitive>({ id: "legacy" });
+  const scene = malformedFixture<DrawingPrimitive>({ id: "scene" });
+  const legacyHit = malformedFixture<DrawingPrimitiveHit>({ prim: legacy, type: "freehand" });
+  const sceneHit: DrawingDisplayHitResult = {
+    entityId: "scene",
+    kind: "shape",
+    pointIndex: -1,
+    zone: "body",
+  };
+
+  assert.strictEqual(
+    resolveTopmostDrawingInteractionHit([legacy, scene], legacyHit, sceneHit)?.prim,
+    scene,
+  );
+  assert.strictEqual(
+    resolveTopmostDrawingInteractionHit([scene, legacy], legacyHit, sceneHit)?.prim,
+    legacy,
+  );
+});
 
 test("pending pen moves retain every coalesced batch before one RAF", () => {
   const firstEvent = { altKey: false };
@@ -216,6 +244,85 @@ test("failed same-series scope readiness requests a retry and blocks the mutatio
     ready: true,
   }, () => { retries += 1; }), true);
   assert.equal(retries, 1);
+});
+
+test("scene-canary mutation readiness waits for an accepted current-surface publication", () => {
+  const accepted = {
+    attachedSurfaceGeneration: 7,
+    publishedSurfaceGeneration: 7,
+    requestedScope: "BTCUSDT",
+    runtimeActive: true,
+    runtimePublicationReady: true,
+    runtimeScope: "BTCUSDT",
+    sceneCanaryEnabled: true,
+  } as const;
+
+  assert.equal(isDrawingVisibleScenePublicationReady(accepted), true);
+  assert.equal(isDrawingVisibleScenePublicationReady({
+    ...accepted,
+    publishedSurfaceGeneration: null,
+  }), false);
+  assert.equal(isDrawingVisibleScenePublicationReady({
+    ...accepted,
+    runtimePublicationReady: false,
+  }), false);
+  assert.equal(isDrawingVisibleScenePublicationReady({
+    ...accepted,
+    publishedSurfaceGeneration: 6,
+  }), false);
+  assert.equal(isDrawingVisibleScenePublicationReady({
+    ...accepted,
+    runtimeScope: "ETHUSDT",
+  }), false);
+  assert.equal(isDrawingVisibleScenePublicationReady({
+    ...accepted,
+    sceneCanaryEnabled: false,
+    publishedSurfaceGeneration: null,
+    runtimeActive: false,
+    runtimePublicationReady: false,
+    runtimeScope: null,
+  }), true);
+
+  let retries = 0;
+  assert.equal(prepareDrawingMutationScope({
+    activeScope: "BTCUSDT",
+    hasSeries: true,
+    previousScope: "BTCUSDT",
+    ready: isDrawingVisibleScenePublicationReady({
+      ...accepted,
+      publishedSurfaceGeneration: null,
+    }),
+    requestedScope: "BTCUSDT",
+    surfaceScope: "BTCUSDT",
+  }, () => { retries += 1; }), false);
+  assert.equal(retries, 1);
+});
+
+test("only a post-boundary current-surface plan qualifies for in-place recovery", () => {
+  const faulted = {
+    attachedSurfaceGeneration: 7,
+    publishedSurfaceGeneration: 7,
+    requestedScope: "BTCUSDT",
+    runtimeActive: false,
+    runtimePublicationReady: false,
+    runtimeScope: "BTCUSDT",
+    sceneCanaryEnabled: true,
+    mutationStarted: true,
+  } as const;
+
+  assert.equal(canRecoverDrawingVisibleSceneInPlace(faulted), true);
+  assert.equal(canRecoverDrawingVisibleSceneInPlace({
+    ...faulted,
+    mutationStarted: false,
+  }), false);
+  assert.equal(canRecoverDrawingVisibleSceneInPlace({
+    ...faulted,
+    publishedSurfaceGeneration: 6,
+  }), false);
+  assert.equal(canRecoverDrawingVisibleSceneInPlace({
+    ...faulted,
+    runtimePublicationReady: true,
+  }), false);
 });
 
 test("requested symbol cannot mutate the previous active document", () => {

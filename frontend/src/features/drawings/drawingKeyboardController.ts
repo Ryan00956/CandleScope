@@ -106,7 +106,7 @@ export function useDrawingKeyboard({
         if (idx >= 0) {
           const primitive = primitivesRef.current[idx];
           if (!primitive) return;
-          if (detachPrim(primitive) === false) return;
+          if (primitive._series && detachPrim(primitive) === false) return;
           primitivesRef.current.splice(idx, 1);
           if (persistDrawings([Object.freeze({ type: "delete", id })]) === false) return;
         }

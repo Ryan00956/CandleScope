@@ -383,7 +383,7 @@ class FreehandPaneView implements PrimitivePaneView {
     this._renderer = new FreehandRenderer();
   }
 
-  update(): void {
+  update(recordRebuild = true): void {
     const startedAt = drawingPerfNow();
     const source = this._source;
     const series = source._series;
@@ -393,7 +393,7 @@ class FreehandPaneView implements PrimitivePaneView {
     if (source._hidden) {
       this._renderer.update({ paths: [], unresolvedGapIndexes: [], hidden: true });
       const durationMs = drawingPerfNow() - startedAt;
-      drawingPerfCounters.recordSceneRebuild();
+      if (recordRebuild) drawingPerfCounters.recordSceneRebuild();
       accumulateDrawingPerfFrameWork({
         geometryKey: source._id,
         drawingMainThreadMs: durationMs,
@@ -422,7 +422,7 @@ class FreehandPaneView implements PrimitivePaneView {
       hidden: false,
     });
     const durationMs = drawingPerfNow() - startedAt;
-    drawingPerfCounters.recordSceneRebuild();
+    if (recordRebuild) drawingPerfCounters.recordSceneRebuild();
     accumulateDrawingPerfFrameWork({
       geometryKey: source._id,
       drawingMainThreadMs: durationMs,
@@ -441,6 +441,77 @@ class FreehandPaneView implements PrimitivePaneView {
   zOrder(): "top" {
     return "top";
   }
+}
+
+interface FreehandViewUpdateBatch {
+  readonly members: Set<FreehandDrawingPrimitive>;
+  frameOpen: boolean;
+  membershipRevision: number;
+  processedMembershipRevision: number;
+  resetHandle: unknown;
+}
+
+const freehandViewUpdateBatches = new WeakMap<object, FreehandViewUpdateBatch>();
+
+function requestFreehandBatchFrameReset(callback: () => void): unknown {
+  if (typeof requestAnimationFrame === "function") return requestAnimationFrame(callback);
+  return setTimeout(callback, 0);
+}
+
+function freehandBatchForSeries(series: object): FreehandViewUpdateBatch {
+  let batch = freehandViewUpdateBatches.get(series);
+  if (!batch) {
+    batch = {
+      members: new Set(),
+      frameOpen: false,
+      membershipRevision: 0,
+      processedMembershipRevision: -1,
+      resetHandle: null,
+    };
+    freehandViewUpdateBatches.set(series, batch);
+  }
+  return batch;
+}
+
+function registerBatchedFreehand(source: FreehandDrawingPrimitive): void {
+  const series = source._series;
+  if (!series || source._isPreview) return;
+  const batch = freehandBatchForSeries(series as object);
+  if (batch.members.has(source)) return;
+  batch.members.add(source);
+  batch.membershipRevision += 1;
+}
+
+function unregisterBatchedFreehand(source: FreehandDrawingPrimitive): void {
+  const series = source._series;
+  if (!series) return;
+  const batch = freehandViewUpdateBatches.get(series as object);
+  if (!batch?.members.delete(source)) return;
+  batch.membershipRevision += 1;
+}
+
+function markBatchedFreehandDirty(source: FreehandDrawingPrimitive): void {
+  if (!source._viewUpdateBatching || source._isPreview || !source._series) return;
+  const batch = freehandViewUpdateBatches.get(source._series as object);
+  if (batch?.members.has(source)) batch.membershipRevision += 1;
+}
+
+function updateBatchedFreehandViews(source: FreehandDrawingPrimitive): void {
+  const series = source._series;
+  if (!series) return;
+  registerBatchedFreehand(source);
+  const batch = freehandBatchForSeries(series as object);
+  if (batch.frameOpen
+    && batch.processedMembershipRevision === batch.membershipRevision) return;
+  batch.frameOpen = true;
+  batch.processedMembershipRevision = batch.membershipRevision;
+  for (const member of batch.members) member._paneView.update(false);
+  drawingPerfCounters.recordSceneRebuild();
+  if (batch.resetHandle !== null) return;
+  batch.resetHandle = requestFreehandBatchFrameReset(() => {
+    batch.resetHandle = null;
+    batch.frameOpen = false;
+  });
 }
 
 // ── The Primitive ──
@@ -465,6 +536,7 @@ export class FreehandDrawingPrimitive {
   _paneView: FreehandPaneView;
   _requestUpdate: (() => void) | null;
   _geometryRevision: number;
+  _viewUpdateBatching: boolean;
 
   /**
    * @param {object} opts
@@ -509,6 +581,7 @@ export class FreehandDrawingPrimitive {
     this._paneView = new FreehandPaneView(this);
     this._requestUpdate = null;
     this._geometryRevision = 1;
+    this._viewUpdateBatching = false;
   }
 
   // ── ISeriesPrimitive interface ──
@@ -520,16 +593,22 @@ export class FreehandDrawingPrimitive {
       drawingPerfCounters.recordRequestUpdate();
       requestUpdate();
     };
+    if (this._viewUpdateBatching) registerBatchedFreehand(this);
   }
 
   detached(): void {
+    if (this._viewUpdateBatching) unregisterBatchedFreehand(this);
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
   }
 
   updateAllViews(): void {
-    this._paneView.update();
+    if (this._viewUpdateBatching && !this._isPreview) {
+      updateBatchedFreehandViews(this);
+    } else {
+      this._paneView.update();
+    }
   }
 
   paneViews(): PrimitivePaneView[] {
@@ -552,6 +631,15 @@ export class FreehandDrawingPrimitive {
   get compositeOperation(): GlobalCompositeOperation { return this._compositeOperation; }
   get brushShape(): BrushShape { return this._brushShape; }
   get geometryRevision(): number { return this._geometryRevision; }
+
+  /** Phase 4 keeps freehand as legacy primitives but batches their viewport projection once per surface frame. */
+  setViewUpdateBatching(enabled: boolean): void {
+    const next = !!enabled;
+    if (next === this._viewUpdateBatching) return;
+    if (this._viewUpdateBatching) unregisterBatchedFreehand(this);
+    this._viewUpdateBatching = next;
+    if (next) registerBatchedFreehand(this);
+  }
 
   /** Read-only snapshot of the exact screen paths most recently supplied to the visible renderer. */
   getParityScreenSnapshot(): Readonly<{
@@ -582,12 +670,14 @@ export class FreehandDrawingPrimitive {
   addPoint(dp: DrawingDataPoint): void {
     this._dataPoints.push(dp);
     this._geometryRevision += 1;
+    markBatchedFreehandDirty(this);
     this._requestUpdate?.();
   }
 
   setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
     this._geometryRevision += 1;
+    markBatchedFreehandDirty(this);
     this._requestUpdate?.();
   }
 
@@ -595,6 +685,7 @@ export class FreehandDrawingPrimitive {
     const next = !!v;
     if (this._hovered !== next) {
       this._hovered = next;
+      markBatchedFreehandDirty(this);
       this._requestUpdate?.();
     }
   }
@@ -603,6 +694,7 @@ export class FreehandDrawingPrimitive {
   setPreviewPoints(points: unknown): boolean {
     const normalized = normalizePreviewPoints(points);
     if (!normalized || this._previewCancelled) return false;
+    if (this._viewUpdateBatching) unregisterBatchedFreehand(this);
     this._previewScreenPoints = normalized;
     this._isPreview = true;
     this._requestUpdate?.();
@@ -614,6 +706,7 @@ export class FreehandDrawingPrimitive {
     const normalized = normalizePreviewPoints(points);
     if (!normalized || this._previewCancelled) return false;
     if (normalized.length === 0) return true;
+    if (this._viewUpdateBatching) unregisterBatchedFreehand(this);
     if (this._previewScreenPoints === null) this._previewScreenPoints = [];
     this._previewScreenPoints.push(...normalized);
     this._isPreview = true;
@@ -629,6 +722,7 @@ export class FreehandDrawingPrimitive {
     this._dataPoints = [];
     this._previewScreenPoints = null;
     this._isPreview = false;
+    if (this._viewUpdateBatching) registerBatchedFreehand(this);
     this._geometryRevision += 1;
     this._requestUpdate?.();
     return true;
@@ -642,6 +736,7 @@ export class FreehandDrawingPrimitive {
     this._stroke = null;
     this._previewScreenPoints = null;
     this._isPreview = false;
+    if (this._viewUpdateBatching) registerBatchedFreehand(this);
     this._geometryRevision += 1;
     this._requestUpdate?.();
     return true;
@@ -651,6 +746,7 @@ export class FreehandDrawingPrimitive {
   cancelPreview(): boolean {
     if (!this._isPreview || this._previewCancelled) return false;
     this._previewCancelled = true;
+    if (this._viewUpdateBatching) unregisterBatchedFreehand(this);
     this._previewScreenPoints = [];
     this._stroke = null;
     this._dataPoints = [];
@@ -661,26 +757,31 @@ export class FreehandDrawingPrimitive {
 
   setColor(c: string): void {
     this._color = c;
+    markBatchedFreehandDirty(this);
     this._requestUpdate?.();
   }
 
   setLineWidth(w: number): void {
     this._lineWidth = w;
+    markBatchedFreehandDirty(this);
     this._requestUpdate?.();
   }
 
   setOpacity(opacity: unknown): void {
     this._opacity = normalizeOpacity(opacity, this._opacity);
+    markBatchedFreehandDirty(this);
     this._requestUpdate?.();
   }
 
   setCompositeOperation(compositeOperation: GlobalCompositeOperation | null | undefined): void {
     this._compositeOperation = compositeOperation || "source-over";
+    markBatchedFreehandDirty(this);
     this._requestUpdate?.();
   }
 
   setBrushShape(brushShape: unknown): void {
     this._brushShape = normalizeBrushShape(brushShape, this._brushShape);
+    markBatchedFreehandDirty(this);
     this._requestUpdate?.();
   }
 
@@ -688,6 +789,7 @@ export class FreehandDrawingPrimitive {
     const next = !!v;
     if (this._hidden !== next) {
       this._hidden = next;
+      markBatchedFreehandDirty(this);
       if (request) this._requestUpdate?.();
     }
   }

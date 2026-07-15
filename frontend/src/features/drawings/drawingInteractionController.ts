@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
 import { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
+import { createPrimitiveFromSavedDrawing } from "./drawingPrimitiveFactory.js";
 import type { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPrimitive.js";
 import type { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
 import type { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
@@ -66,6 +67,7 @@ import {
   syncHoveredPrimitive,
 } from "./drawingHoverController.js";
 import { useDrawingPersistenceLifecycle } from "./useDrawingPersistenceLifecycle.js";
+import type { DrawingDetachedCommitReceipt } from "./useDrawingPersistenceLifecycle.js";
 import type { DrawingDisplayHitResult } from "./rendering/drawingDisplayList.js";
 import {
   drawingCommandsForLegacyPrimitive,
@@ -138,7 +140,17 @@ import type {
 import {
   accumulateDrawingPerfFrameWork,
   drawingPerfCounters,
+  recordDrawingPerfInteractionHandoffAcknowledged,
+  recordDrawingPerfInteractionHandoffPrepared,
 } from "./performance/drawingPerfCounters.js";
+import { createDynamicOverlayController } from "./interaction/dynamicOverlayController.js";
+import type {
+  DynamicOverlayController,
+  DynamicOverlayDecoration,
+} from "./interaction/dynamicOverlayController.js";
+import { createLiveInkController } from "./interaction/liveInkController.js";
+import type { LiveInkController } from "./interaction/liveInkController.js";
+import type { DrawingInteractionSurfaceMode } from "./interactionSurfaceMode.js";
 
 function drawingPerfNow(): number {
   return typeof performance !== "undefined" && typeof performance.now === "function"
@@ -234,6 +246,12 @@ function attachDrawingPrimitive(
   }
 }
 
+interface DynamicHoverDecoration {
+  readonly id: string | null;
+  readonly point: ScreenPoint;
+  readonly eraser: boolean;
+}
+
 function detachDrawingPrimitive(
   adapter: DrawingChartAdapter,
   primitive: DrawingPrimitive,
@@ -265,6 +283,8 @@ export function cancelFreehandPrimitiveOnSurface(
 ): boolean {
   if (!primitive) return true;
   primitive.cancelPreview?.();
+  // Overlay-owned live drafts are intentionally never attached to LWC.
+  if (primitive._series === null) return true;
   return detachPrimitive(primitive);
 }
 
@@ -327,6 +347,284 @@ export function drawingCommandsForDrag(
     type: "update",
     geometryCommand: drawingGeometryCommandForDrag(dragging),
   });
+}
+
+function dataPointFromSavedHorizontalAnchor(
+  anchor: unknown,
+  price: unknown,
+): DrawingDataPoint | null {
+  if (typeof price !== "number" || !Number.isFinite(price)) return null;
+  if (typeof anchor === "number" && Number.isFinite(anchor)) return { time: anchor, price };
+  if (!anchor || typeof anchor !== "object") return null;
+  return { ...(anchor as Record<string, unknown>), price } as DrawingDataPoint;
+}
+
+/** Project one detached interaction draft into cheap dynamic-canvas commands. */
+export function dynamicDecorationsForDrawingDraft(
+  primitive: DrawingPrimitive,
+  dataToScreen: DrawingDataToScreen,
+): readonly DynamicOverlayDecoration[] {
+  const saved = serializeDrawingPrimitive(
+    primitive as unknown as PersistableDrawingPrimitive,
+  );
+  if (!saved) return [];
+  const color = "color" in saved && typeof saved.color === "string"
+    ? saved.color
+    : "#3b82f6";
+  const lineWidth = "lineWidth" in saved && typeof saved.lineWidth === "number"
+    ? saved.lineWidth
+    : 2;
+  if ("dataPoints" in saved && Array.isArray(saved.dataPoints)) {
+    const projected = saved.dataPoints
+      .map((point) => dataToScreen(point))
+      .filter((point): point is ScreenPoint => point !== null);
+    if (projected.length < 2) return [];
+    const first = projected[0];
+    const last = projected.at(-1);
+    if (!first || !last) return [];
+    if (saved.type === "shape") {
+      return [Object.freeze({
+        type: "shape",
+        box: Object.freeze({
+          x: Math.min(first.x, last.x),
+          y: Math.min(first.y, last.y),
+          width: Math.abs(last.x - first.x),
+          height: Math.abs(last.y - first.y),
+        }),
+        shapeType: saved.shapeType ?? "rectangle",
+        color,
+        lineWidth,
+        ...(saved.fillColor !== undefined ? { fillColor: saved.fillColor } : {}),
+        ...(saved.fillOpacity !== undefined ? { fillOpacity: saved.fillOpacity } : {}),
+        dashed: saved.lineStyle !== undefined && saved.lineStyle !== "solid",
+        handles: Object.freeze([first, last]),
+      })];
+    }
+    if (saved.type === "fibonacci") {
+      const minX = Math.min(first.x, last.x);
+      const maxX = Math.max(first.x, last.x);
+      const startY = saved.inverted ? last.y : first.y;
+      const endY = saved.inverted ? first.y : last.y;
+      const levels = (saved.levels ?? []).filter((level) => level.enabled);
+      return Object.freeze([
+        Object.freeze({
+          type: "line" as const,
+          from: first,
+          to: last,
+          color,
+          lineWidth,
+          dashed: true,
+          handles: Object.freeze([first, last]),
+        }),
+        ...levels.map((level) => {
+          const y = startY + (endY - startY) * level.level;
+          return Object.freeze({
+            type: "line" as const,
+            from: Object.freeze({ x: minX, y }),
+            to: Object.freeze({ x: maxX, y }),
+            color: level.color,
+            lineWidth,
+          });
+        }),
+      ]);
+    }
+    return [Object.freeze({
+      type: "line",
+      from: first,
+      to: last,
+      color,
+      lineWidth,
+      ...(saved.type === "line" ? { extension: saved.lineType ?? "line-segment" } : {}),
+      handles: Object.freeze([first, last]),
+    })];
+  }
+  if (saved.type === "axis-line" && saved.dataPoint) {
+    const point = dataToScreen(saved.dataPoint);
+    return point ? [Object.freeze({
+      type: "axis-line",
+      point,
+      axisLineType: saved.axisLineType ?? "horizontal",
+      color,
+      lineWidth,
+      handles: Object.freeze([point]),
+    })] : [];
+  }
+  if (saved.type === "text" && saved.dataPoint) {
+    const point = dataToScreen(saved.dataPoint);
+    if (!point) return [];
+    return [Object.freeze({
+      type: "box",
+      box: Object.freeze({
+        x: point.x,
+        y: point.y - (saved.fontSize ?? 14),
+        width: saved.widthPx ?? 96,
+        height: (saved.fontSize ?? 14) + (saved.padding ?? 6) * 2,
+      }),
+      color,
+      dashed: false,
+    })];
+  }
+  if (saved.type === "position" && saved.timeRange) {
+    const start = dataPointFromSavedHorizontalAnchor(saved.timeRange.start, saved.entryPrice);
+    const end = dataPointFromSavedHorizontalAnchor(saved.timeRange.end, saved.entryPrice);
+    const startScreen = start ? dataToScreen(start) : null;
+    const endScreen = end ? dataToScreen(end) : null;
+    if (!startScreen || !endScreen) return [];
+    const decorations: DynamicOverlayDecoration[] = [Object.freeze({
+      type: "line",
+      from: startScreen,
+      to: endScreen,
+      color,
+      lineWidth,
+      handles: Object.freeze([startScreen, endScreen]),
+    })];
+    for (const [price, levelColor] of [
+      [saved.tpPrice, "#22c55e"],
+      [saved.slPrice, "#ef4444"],
+    ] as const) {
+      if (typeof price !== "number" || !Number.isFinite(price)) continue;
+      const levelStart = dataPointFromSavedHorizontalAnchor(saved.timeRange.start, price);
+      const levelEnd = dataPointFromSavedHorizontalAnchor(saved.timeRange.end, price);
+      const from = levelStart ? dataToScreen(levelStart) : null;
+      const to = levelEnd ? dataToScreen(levelEnd) : null;
+      if (!from || !to) continue;
+      decorations.push(Object.freeze({
+        type: "line",
+        from,
+        to,
+        color: levelColor,
+        lineWidth,
+        handles: Object.freeze([from, to]),
+      }));
+    }
+    return Object.freeze(decorations);
+  }
+  return [];
+}
+
+const DYNAMIC_BOX_HANDLE_NAMES = ["tl", "t", "tr", "r", "br", "b", "bl", "l"] as const;
+
+export interface DynamicSelectionHandleSpec {
+  readonly point: ScreenPoint;
+  readonly hit: DrawingHit;
+  readonly radius: number;
+}
+
+function dynamicBoxSelectionHandles(box: ScreenBox): readonly DynamicSelectionHandleSpec[] {
+  const left = box.x;
+  const top = box.y;
+  const right = left + box.width;
+  const bottom = top + box.height;
+  const middleX = left + box.width / 2;
+  const middleY = top + box.height / 2;
+  const points = [
+    { x: left, y: top },
+    { x: middleX, y: top },
+    { x: right, y: top },
+    { x: right, y: middleY },
+    { x: right, y: bottom },
+    { x: middleX, y: bottom },
+    { x: left, y: bottom },
+    { x: left, y: middleY },
+  ] as const;
+  return Object.freeze(points.map((point, index) => {
+    const handle = DYNAMIC_BOX_HANDLE_NAMES[index];
+    if (!handle) throw new RangeError("Dynamic selection handle index is invalid");
+    return Object.freeze({
+      point: Object.freeze(point),
+      hit: Object.freeze({ handle, zone: handle, pointIndex: -1 }),
+      radius: 9,
+    });
+  }));
+}
+
+/** Exact selected-handle affordances owned by the Phase 5 overlay. */
+export function dynamicSelectionHandlesForSavedDrawing(
+  saved: SavedDrawing,
+  dataToScreen: DrawingDataToScreen,
+  screenBox: ScreenBox | null = null,
+): readonly DynamicSelectionHandleSpec[] {
+  if ((saved.type === "text" || saved.type === "shape") && screenBox) {
+    return dynamicBoxSelectionHandles(screenBox);
+  }
+  if (saved.type === "freehand" || saved.type === "highlighter" || saved.type === "text") {
+    return [];
+  }
+  if (saved.type === "position" && saved.timeRange) {
+    const entryStart = dataPointFromSavedHorizontalAnchor(saved.timeRange.start, saved.entryPrice);
+    const entryEnd = dataPointFromSavedHorizontalAnchor(saved.timeRange.end, saved.entryPrice);
+    const start = entryStart ? dataToScreen(entryStart) : null;
+    const end = entryEnd ? dataToScreen(entryEnd) : null;
+    if (!start || !end) return [];
+    const left = Math.min(start.x, end.x);
+    const right = Math.max(start.x, end.x);
+    const middleX = (left + right) / 2;
+    const levels: Array<Readonly<{ zone: "entry" | "tp" | "sl"; price: number }>> = [
+      Object.freeze({ zone: "entry", price: saved.entryPrice ?? Number.NaN }),
+    ];
+    if (typeof saved.tpPrice === "number" && Number.isFinite(saved.tpPrice)) {
+      levels.push(Object.freeze({ zone: "tp", price: saved.tpPrice }));
+    }
+    if (typeof saved.slPrice === "number" && Number.isFinite(saved.slPrice)) {
+      levels.push(Object.freeze({ zone: "sl", price: saved.slPrice }));
+    }
+    const levelHandles = levels.flatMap((level): readonly DynamicSelectionHandleSpec[] => {
+      const anchor = dataPointFromSavedHorizontalAnchor(saved.timeRange?.start, level.price);
+      const projected = anchor ? dataToScreen(anchor) : null;
+      return projected ? [Object.freeze({
+        point: Object.freeze({ x: middleX, y: projected.y }),
+        hit: Object.freeze({ zone: level.zone, pointIndex: -1 }),
+        radius: 9,
+      })] : [];
+    });
+    if (levelHandles.length === 0) return [];
+    const ys = levelHandles.map((handle) => handle.point.y);
+    const middleY = (Math.min(...ys) + Math.max(...ys)) / 2;
+    return Object.freeze([
+      ...levelHandles,
+      Object.freeze({
+        point: Object.freeze({ x: left, y: middleY }),
+        hit: Object.freeze({ zone: "left", pointIndex: -1 }),
+        radius: 10,
+      }),
+      Object.freeze({
+        point: Object.freeze({ x: right, y: middleY }),
+        hit: Object.freeze({ zone: "right", pointIndex: -1 }),
+        radius: 10,
+      }),
+    ]);
+  }
+  if (saved.type === "axis-line" && saved.dataPoint) {
+    const point = dataToScreen(saved.dataPoint);
+    return point ? [Object.freeze({
+      point: Object.freeze(point),
+      hit: Object.freeze({ zone: "center", pointIndex: 0 }),
+      radius: 10,
+    })] : [];
+  }
+  if ("dataPoints" in saved && Array.isArray(saved.dataPoints)) {
+    const projected = saved.dataPoints
+      .map((point) => dataToScreen(point))
+      .filter((point): point is ScreenPoint => point !== null);
+    if (projected.length < 2) return [];
+    if (saved.type === "shape") {
+      const first = projected[0];
+      const last = projected.at(-1);
+      if (!first || !last) return [];
+      return dynamicBoxSelectionHandles({
+        x: Math.min(first.x, last.x),
+        y: Math.min(first.y, last.y),
+        width: Math.abs(last.x - first.x),
+        height: Math.abs(last.y - first.y),
+      });
+    }
+    return Object.freeze(projected.map((point, pointIndex) => Object.freeze({
+      point: Object.freeze(point),
+      hit: Object.freeze({ pointIndex }),
+      radius: 10,
+    })));
+  }
+  return [];
 }
 
 /** Merge the two transitional Phase 4 owners using canonical document order. */
@@ -402,6 +700,10 @@ export interface UseDrawingOptions {
   seriesReady: number;
   drawingCoordinateKey: string;
   drawingAnchorMode: DrawingAnchorMode;
+  interactionSurfaceMode?: DrawingInteractionSurfaceMode;
+  dynamicCanvasRef?: MutableRefObject<HTMLCanvasElement | null>;
+  liveInkCanvasRef?: MutableRefObject<HTMLCanvasElement | null>;
+  onInteractionSurfaceFallback?: (() => void) | null;
   onToolChange?: ((tool: DrawingToolId | null) => void) | null;
 }
 
@@ -445,6 +747,10 @@ export function useDrawing({
   seriesReady,
   drawingCoordinateKey,
   drawingAnchorMode,
+  interactionSurfaceMode = "legacy",
+  dynamicCanvasRef,
+  liveInkCanvasRef,
+  onInteractionSurfaceFallback,
   // Optional callback so the hook can flip the active tool back to null after
   // committing a text edit (PPT-style: clicking elsewhere exits text mode).
   onToolChange,
@@ -481,7 +787,9 @@ export function useDrawing({
     refreshSelectedTextUi,
   } = useDrawingSelection({
     primitivesRef,
-    onSelectionChange: notifyDrawingSceneInvalidation,
+    ...(interactionSurfaceMode === "overlay"
+      ? { mutatePrimitiveVisualState: false }
+      : { onSelectionChange: notifyDrawingSceneInvalidation }),
   });
 
   // ── Freehand-specific state ──
@@ -497,6 +805,21 @@ export function useDrawing({
   const pendingActiveMoveRef = useRef<ActiveDrawingMovePayload | null>(null);
   const beforeScopeTransitionRef = useRef<() => boolean>(() => true);
   const pointerRectRef = useRef<DOMRect | null>(null);
+  const dynamicOverlayControllerRef = useRef<DynamicOverlayController | null>(null);
+  const liveInkControllerRef = useRef<LiveInkController | null>(null);
+  const renderDynamicFeedbackRef = useRef<() => void>(() => {});
+  const dynamicHoverDecorationRef = useRef<DynamicHoverDecoration | null>(null);
+  const overlayTimeCaptureIdentityRef = useRef<object>({});
+  const activeOverlayEntityIdRef = useRef<string | null>(null);
+  const overlayDragPrimitiveRef = useRef<DrawingPrimitive | null>(null);
+  const overlayDragOriginalRef = useRef<DrawingPrimitive | null>(null);
+  const overlayDragRegistryRef = useRef<DrawingPrimitive[]>([]);
+  const pendingOverlayCommitReceiptRef = useRef<DrawingDetachedCommitReceipt | null>(null);
+  const deleteSelectedRef = useRef<() => void>(() => {});
+  const dynamicPaintUnsubscribeRef = useRef<(() => void) | null>(null);
+  const dynamicHandoffFrameRef = useRef<unknown>(null);
+  const dynamicHandoffGenerationRef = useRef(0);
+  const dynamicHandoffLockRef = useRef(false);
 
   // ── Tool refs (avoid stale closures) ──
   const activeToolRef = useRef(activeTool);
@@ -598,6 +921,46 @@ export function useDrawing({
     [screenToData],
   );
 
+  const captureOverlayFreehandBatch = useCallback((positions: readonly ScreenPoint[]) => {
+    const adapter = getChartAdapter();
+    if (!adapter || positions.length === 0) return null;
+    if (adapter.usesOrdinalTime?.() === true) {
+      return adapter.captureFreehandStrokeBatch?.([...positions]) ?? null;
+    }
+    const captures: Array<Readonly<{
+      time: number;
+      price: number;
+      screen: ScreenPoint;
+    }>> = [];
+    for (const point of positions) {
+      const dataPoint = screenToFreehandData(point.x, point.y);
+      if (!dataPoint || typeof dataPoint.time !== "number" || !Number.isFinite(dataPoint.time)) {
+        return null;
+      }
+      captures.push(Object.freeze({
+        time: dataPoint.time,
+        price: dataPoint.price,
+        screen: Object.freeze({ x: point.x, y: point.y }),
+      }));
+    }
+    return Object.freeze({
+      captureIdentity: overlayTimeCaptureIdentityRef.current,
+      sourceProjection: "time",
+      sourceProjectionConfig: "{}",
+      captures: Object.freeze(captures),
+    });
+  }, [getChartAdapter, screenToFreehandData]);
+
+  const isInsideMainPanePlot = useCallback((point: ScreenPoint): boolean => {
+    if (interactionSurfaceMode !== "overlay") return true;
+    const rect = getChartAdapter()?.getMainPanePlotRect?.();
+    return !!rect
+      && point.x >= rect.x
+      && point.x <= rect.x + rect.width
+      && point.y >= rect.y
+      && point.y <= rect.y + rect.height;
+  }, [getChartAdapter, interactionSurfaceMode]);
+
   const dataToScreen: DrawingDataToScreen = useCallback(
     (dp: DrawingDataPoint) => {
       const adapter = getChartAdapter();
@@ -683,21 +1046,32 @@ export function useDrawing({
     if (!adapter) return null;
     return {
       hasSeries: () => adapter.hasSeries?.() === true,
-      attachPrimitive: (primitive: DrawingPrimitive) => attachDrawingPrimitive(adapter, primitive),
+      attachPrimitive: (primitive: DrawingPrimitive) => {
+        if (!attachDrawingPrimitive(adapter, primitive)) return false;
+        if (interactionSurfaceMode === "overlay") {
+          try { primitive.requestUpdate?.(); } catch { /* attachment remains authoritative */ }
+          try { adapter.requestSeriesUpdate?.(); } catch { /* attachment remains authoritative */ }
+        }
+        return true;
+      },
       detachPrimitive: (primitive: DrawingPrimitive) => detachDrawingPrimitive(adapter, primitive),
     };
-  }, [getChartAdapter]);
+  }, [getChartAdapter, interactionSurfaceMode]);
 
   const {
     clearDrawings,
     completeSurfaceDispose: completePersistenceSurfaceDispose,
     invalidateSurfaceCredentialsForSeriesReplacement,
+    invalidateVisibleScene,
     persistActiveScopeDrawings,
+    persistDetachedDrawings,
     persistDrawings,
     prepareSurfaceDispose: preparePersistenceSurfaceDispose,
     prepareUserMutationScope,
     hitTestScene,
     getSceneScreenBox,
+    getSceneScreenHandles,
+    subscribeVisibleScenePaint,
   } = useDrawingPersistenceLifecycle({
     beforeScopeTransitionRef,
     currentFreehandRef,
@@ -705,6 +1079,8 @@ export function useDrawing({
     getChartAdapter: getDrawingPersistenceAdapter,
     getDrawingSceneAdapter: getChartAdapter,
     hiddenRef,
+    activeOverlayEntityIdRef,
+    dynamicOverlayEnabled: interactionSurfaceMode === "overlay",
     isDrawingFreehandRef,
     prevSymbolRef,
     primitivesRef,
@@ -714,6 +1090,9 @@ export function useDrawing({
     setSelectedTextUi,
     symbol,
     symbolRef,
+    ...(onInteractionSurfaceFallback === undefined
+      ? {}
+      : { onInteractionSurfaceFallback }),
   });
 
   const cancelActiveFreehandStroke = useCallback(() => {
@@ -729,15 +1108,56 @@ export function useDrawing({
     currentFreehandRef.current = null;
     isDrawingFreehandRef.current = false;
     lastFreehandScreenPointRef.current = null;
+    liveInkControllerRef.current?.cancel();
     return true;
   }, [detachPrim]);
 
   // ── Selection helpers are provided by useDrawingSelection above ──
 
+  const hitTestSelectedOverlayHandle = useCallback((
+    x: number,
+    y: number,
+    expectedPrimitive: DrawingPrimitive | null = null,
+  ): DrawingPrimitiveHit | null => {
+    if (interactionSurfaceMode !== "overlay" || hiddenRef.current) return null;
+    const selectedId = selectedIdRef.current;
+    if (!selectedId) return null;
+    const primitive = expectedPrimitive
+      ?? primitivesRef.current.find((candidate) => candidate.id === selectedId)
+      ?? null;
+    if (!primitive || primitive.id !== selectedId) return null;
+    const saved = serializeDrawingPrimitive(
+      primitive as unknown as PersistableDrawingPrimitive,
+    );
+    if (!saved) return null;
+    let box: ScreenBox | null = null;
+    if ("getBoundingBoxScreen" in primitive
+      && typeof primitive.getBoundingBoxScreen === "function") {
+      try {
+        box = primitive.getBoundingBoxScreen() as ScreenBox | null;
+      } catch {
+        box = null;
+      }
+    }
+    const handles = dynamicSelectionHandlesForSavedDrawing(saved, dataToScreen, box);
+    const matched = handles.find((handle) => (
+      Math.hypot(handle.point.x - x, handle.point.y - y) <= handle.radius
+    ));
+    if (!matched) return null;
+    const type = saved.type === "angle-measure" ? "angle" : saved.type;
+    return {
+      prim: primitive,
+      type,
+      ...matched.hit,
+    } as DrawingPrimitiveHit;
+  }, [dataToScreen, interactionSurfaceMode, selectedIdRef]);
+
   // ── Hit-test all primitives ──
 
   const hitTestAll = useCallback(
     (x: number, y: number, hitRadius = 8): DrawingPrimitiveHit | null => {
+      const selectedHandleHit = hitTestSelectedOverlayHandle(x, y);
+      if (selectedHandleHit) return selectedHandleHit;
       const legacyHit = hitTestDrawingPrimitives(
         primitivesRef.current,
         x,
@@ -748,7 +1168,7 @@ export function useDrawing({
       const sceneHit = hitTestScene(x, y);
       return resolveTopmostDrawingInteractionHit(primitivesRef.current, legacyHit, sceneHit);
     },
-    [hitTestScene],
+    [hitTestScene, hitTestSelectedOverlayHandle],
   );
 
   const hitTestInteractive = useCallback(
@@ -763,15 +1183,44 @@ export function useDrawing({
 
   const removePreview = useCallback(() => {
     if (previewRef.current) {
-      if (!detachPrim(previewRef.current)) return false;
+      if (!(interactionSurfaceMode === "overlay" && previewRef.current._series === null)
+        && !detachPrim(previewRef.current)) return false;
       previewRef.current = null;
+      dynamicOverlayControllerRef.current?.clear();
     }
     anchorDataRef.current = null;
     pendingTwoPointToolRef.current = null;
     return true;
-  }, [detachPrim]);
+  }, [detachPrim, interactionSurfaceMode]);
+
+  const cancelDynamicPaintHandoff = useCallback((clearDynamic = false): boolean => {
+    const hadHandoff = dynamicHandoffLockRef.current
+      || dynamicPaintUnsubscribeRef.current !== null
+      || dynamicHandoffFrameRef.current !== null;
+    dynamicHandoffLockRef.current = false;
+    dynamicHandoffGenerationRef.current += 1;
+    dynamicPaintUnsubscribeRef.current?.();
+    dynamicPaintUnsubscribeRef.current = null;
+    const handle = dynamicHandoffFrameRef.current;
+    if (handle !== null) {
+      if (typeof cancelAnimationFrame === "function" && typeof handle === "number") {
+        cancelAnimationFrame(handle);
+      } else {
+        clearTimeout(handle as ReturnType<typeof setTimeout>);
+      }
+    }
+    dynamicHandoffFrameRef.current = null;
+    // Do not erase a legitimate two-point preview/selection frame when a new
+    // pointerdown merely checks for an older committed-frame handoff.
+    if (clearDynamic && hadHandoff) dynamicOverlayControllerRef.current?.clear();
+    return hadHandoff;
+  }, []);
 
   const prepareTerminalTextMutation = useCallback(() => {
+    if (interactionSurfaceMode === "overlay") cancelDynamicPaintHandoff(true);
+    if (liveInkControllerRef.current?.snapshot().retainingFinalFrame) {
+      liveInkControllerRef.current.cancel();
+    }
     if (!runDrawingPointerTransientBarrier({
       // Text commit is never a legitimate continuation of a two-point draft,
       // even if the toolbar still reports the old line/fib/shape tool.
@@ -785,7 +1234,7 @@ export function useDrawing({
       cancelActiveFreehandStroke,
     })) return false;
     return prepareUserMutationScope();
-  }, [cancelActiveFreehandStroke, prepareUserMutationScope, removePreview]);
+  }, [cancelActiveFreehandStroke, cancelDynamicPaintHandoff, interactionSurfaceMode, prepareUserMutationScope, removePreview]);
 
   // ── Text editing lifecycle (extracted) ──
 
@@ -836,6 +1285,264 @@ export function useDrawing({
     pointerRectRef.current = null;
   }, []);
 
+  useEffect(() => {
+    if (interactionSurfaceMode !== "overlay") return undefined;
+    const dynamicCanvas = dynamicCanvasRef?.current ?? null;
+    const liveInkCanvas = liveInkCanvasRef?.current ?? null;
+    const getPlotRect = () => getChartAdapter()?.getMainPanePlotRect?.() ?? null;
+    const dynamicController = dynamicCanvas
+      ? createDynamicOverlayController({ canvas: dynamicCanvas, getPlotRect })
+      : null;
+    const liveInkController = liveInkCanvas
+      ? createLiveInkController({ canvas: liveInkCanvas, getPlotRect })
+      : null;
+    dynamicOverlayControllerRef.current = dynamicController;
+    liveInkControllerRef.current = liveInkController;
+
+    const refresh = () => {
+      dynamicController?.refreshLayout();
+      liveInkController?.refreshLayout();
+    };
+    const adapter = getChartAdapter();
+    const handleFrameInvalidation = (reason?: "manual" | "viewport") => {
+      // Exact paint tickets are viewport-bound. Retire an in-flight retained
+      // frame before refreshing geometry when pan/zoom/resize advances that
+      // revision, otherwise the rejected old ack could hold pixels forever.
+      if (reason === "viewport") {
+        cancelDynamicPaintHandoff(true);
+        if (liveInkController?.snapshot().retainingFinalFrame) liveInkController.cancel();
+      }
+      refresh();
+      renderDynamicFeedbackRef.current();
+    };
+    const unsubscribeFrameInvalidation = adapter?.subscribeDrawingFrameInvalidation?.(
+      handleFrameInvalidation,
+    );
+    let settleFrame: number | null = null;
+    let settleFramesRemaining = 8;
+    refresh();
+    if (typeof requestAnimationFrame === "function") {
+      // LWC can settle the price-scale width over several startup paints. Keep
+      // this mount-only loop bounded while re-reading the public pane geometry,
+      // so both canvases converge without adding any pointermove chart work.
+      const settle = () => {
+        settleFrame = null;
+        refresh();
+        settleFramesRemaining -= 1;
+        if (settleFramesRemaining > 0) settleFrame = requestAnimationFrame(settle);
+      };
+      settleFrame = requestAnimationFrame(settle);
+    }
+    const handleWindowResize = () => handleFrameInvalidation("viewport");
+    window.addEventListener("resize", handleWindowResize);
+    return () => {
+      window.removeEventListener("resize", handleWindowResize);
+      unsubscribeFrameInvalidation?.();
+      if (settleFrame !== null) cancelAnimationFrame(settleFrame);
+      dynamicController?.dispose();
+      liveInkController?.dispose();
+      if (dynamicOverlayControllerRef.current === dynamicController) {
+        dynamicOverlayControllerRef.current = null;
+      }
+      if (liveInkControllerRef.current === liveInkController) {
+        liveInkControllerRef.current = null;
+      }
+    };
+  }, [
+    cancelDynamicPaintHandoff,
+    drawingCoordinateKey,
+    dynamicCanvasRef,
+    getChartAdapter,
+    interactionSurfaceMode,
+    liveInkCanvasRef,
+    seriesReady,
+  ]);
+
+  const getDynamicScreenBox = useCallback((id: string | null): ScreenBox | null => {
+    if (!id) return null;
+    const sceneBox = getSceneScreenBox(id);
+    if (sceneBox) return sceneBox;
+    const primitive = getPrimitiveById(id) as DrawingPrimitive & {
+      getBoundingBoxScreen?: () => ScreenBox | null;
+    };
+    try {
+      const direct = primitive?.getBoundingBoxScreen?.() ?? null;
+      if (direct) return direct;
+    } catch {
+      // Fall through to the serialized handle extent.
+    }
+    if (!primitive) return null;
+    const saved = serializeDrawingPrimitive(
+      primitive as unknown as PersistableDrawingPrimitive,
+    );
+    if (!saved) return null;
+    const handles = dynamicSelectionHandlesForSavedDrawing(saved, dataToScreen);
+    if (handles.length === 0) return null;
+    const xs = handles.map((handle) => handle.point.x);
+    const ys = handles.map((handle) => handle.point.y);
+    const left = Math.min(...xs);
+    const right = Math.max(...xs);
+    const top = Math.min(...ys);
+    const bottom = Math.max(...ys);
+    return { x: left, y: top, width: right - left, height: bottom - top };
+  }, [dataToScreen, getPrimitiveById, getSceneScreenBox]);
+
+  const renderDynamicFeedback = useCallback((
+    hover: DynamicHoverDecoration | null = dynamicHoverDecorationRef.current,
+  ) => {
+    if (interactionSurfaceMode !== "overlay") return;
+    if (hiddenRef.current) {
+      dynamicOverlayControllerRef.current?.clear();
+      return;
+    }
+    // A committed handoff owns the exact last interaction pixels until the
+    // matching scene paint (plus one rAF). Selection/hover React effects must
+    // not replace that frame with a sparse box and create a visible gap.
+    if (dynamicHandoffLockRef.current) return;
+    // Transient geometry has strict visual ownership priority. Scene-paint and
+    // selection effects can run between pointer frames; they must repaint the
+    // complete detached draft/preview instead of replacing it with a sparse
+    // selection box or an empty frame while the pointer is paused.
+    const transient = overlayDragPrimitiveRef.current ?? previewRef.current;
+    if (transient) {
+      const transientDecorations = dynamicDecorationsForDrawingDraft(transient, dataToScreen);
+      if (transientDecorations.length === 0) {
+        dynamicOverlayControllerRef.current?.clear();
+      } else {
+        dynamicOverlayControllerRef.current?.render({ decorations: transientDecorations });
+      }
+      return;
+    }
+    const decorations = [];
+    const selectedId = selectedIdRef.current;
+    const selectionBox = getDynamicScreenBox(selectedId);
+    if (selectionBox) {
+      const sceneHandles = selectedId
+        ? getSceneScreenHandles(selectedId)
+        : null;
+      const selectedPrimitive = selectedId ? getPrimitiveById(selectedId) : null;
+      const saved = selectedPrimitive
+        ? serializeDrawingPrimitive(
+            selectedPrimitive as unknown as PersistableDrawingPrimitive,
+          )
+        : null;
+      const fallbackHandles = saved
+        ? dynamicSelectionHandlesForSavedDrawing(saved, dataToScreen, selectionBox)
+          .map((handle) => handle.point)
+        : [];
+      const handles = sceneHandles?.length ? sceneHandles : fallbackHandles;
+      decorations.push({
+        type: "box" as const,
+        box: selectionBox,
+        color: "#3b82f6",
+        ...(handles.length ? { handles } : {}),
+      });
+    }
+    if (hover) {
+      const hoverBox = getDynamicScreenBox(hover.id);
+      if (hoverBox && hover.id !== selectedIdRef.current) {
+        decorations.push({ type: "box" as const, box: hoverBox, color: "#ff6b6b" });
+      }
+      if (hover.eraser) {
+        decorations.push({
+          type: "cursor-ring" as const,
+          center: hover.point,
+          color: hover.id ? "#ff6b6b" : "rgba(148,163,184,0.8)",
+          radius: 8,
+        });
+      }
+    }
+    if (decorations.length === 0) dynamicOverlayControllerRef.current?.clear();
+    else dynamicOverlayControllerRef.current?.render({ decorations });
+  }, [dataToScreen, getDynamicScreenBox, getPrimitiveById, getSceneScreenHandles, interactionSurfaceMode, selectedIdRef]);
+  renderDynamicFeedbackRef.current = renderDynamicFeedback;
+
+  const retainDynamicOverlayUntilPaint = useCallback((
+    ticket: Readonly<{
+      scopeKey: string;
+      documentRevision: number;
+      surfaceGeneration: number;
+      viewportRevision: number;
+    }> | null,
+    { replayLastPaint = true }: Readonly<{ replayLastPaint?: boolean }> = {},
+  ) => {
+    if (interactionSurfaceMode !== "overlay") return;
+    cancelDynamicPaintHandoff();
+    if (!ticket) {
+      // Without exact surface + viewport credentials there is no paint event
+      // that can safely retire this frame. Drop back to current selection/
+      // hover feedback instead of retaining stale committed pixels forever.
+      renderDynamicFeedback();
+      return;
+    }
+    dynamicHandoffLockRef.current = true;
+    recordDrawingPerfInteractionHandoffPrepared("dynamic", ticket);
+    const generation = dynamicHandoffGenerationRef.current;
+    let matchedSynchronously = false;
+    let matched = false;
+    const onPainted = (stamp: Readonly<{
+      scopeKey: string;
+      documentRevision: number;
+      surfaceGeneration: number;
+      viewportRevision: number;
+    }>) => {
+      if (matched
+        || generation !== dynamicHandoffGenerationRef.current
+        || stamp.scopeKey !== ticket.scopeKey
+        || stamp.documentRevision !== ticket.documentRevision
+        || stamp.surfaceGeneration !== ticket.surfaceGeneration
+        || stamp.viewportRevision !== ticket.viewportRevision) return;
+      matched = true;
+      recordDrawingPerfInteractionHandoffAcknowledged("dynamic", stamp);
+      matchedSynchronously = true;
+      dynamicPaintUnsubscribeRef.current?.();
+      dynamicPaintUnsubscribeRef.current = null;
+      const clearAfterPaint = () => {
+        dynamicHandoffFrameRef.current = null;
+        if (generation !== dynamicHandoffGenerationRef.current) return;
+        dynamicHandoffLockRef.current = false;
+        renderDynamicFeedback();
+      };
+      dynamicHandoffFrameRef.current = typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame(clearAfterPaint)
+        : setTimeout(clearAfterPaint, 0);
+    };
+    const unsubscribe = subscribeVisibleScenePaint(onPainted, { replayLastPaint });
+    dynamicPaintUnsubscribeRef.current = unsubscribe;
+    if (matchedSynchronously) {
+      unsubscribe();
+      dynamicPaintUnsubscribeRef.current = null;
+    }
+  }, [cancelDynamicPaintHandoff, interactionSurfaceMode, renderDynamicFeedback, subscribeVisibleScenePaint]);
+
+  useEffect(() => () => {
+    cancelDynamicPaintHandoff();
+  }, [cancelDynamicPaintHandoff]);
+
+  useEffect(() => {
+    if (interactionSurfaceMode === "overlay") {
+      // An exact paint ticket is tied to one viewport/surface revision. If
+      // those credentials move before acknowledgement, retire the stale
+      // handoff instead of waiting forever for an ack the bridge must reject.
+      cancelDynamicPaintHandoff();
+      if (liveInkControllerRef.current?.snapshot().retainingFinalFrame) {
+        liveInkControllerRef.current.cancel();
+      }
+    }
+    dynamicOverlayControllerRef.current?.refreshLayout();
+    liveInkControllerRef.current?.refreshLayout();
+    renderDynamicFeedback();
+  }, [cancelDynamicPaintHandoff, drawingCoordinateKey, interactionSurfaceMode, renderDynamicFeedback, seriesReady]);
+
+  useEffect(() => {
+    renderDynamicFeedback();
+  }, [renderDynamicFeedback, selectedPrimId]);
+
+  useEffect(() => {
+    if (interactionSurfaceMode !== "overlay") return;
+    return subscribeVisibleScenePaint(() => renderDynamicFeedback());
+  }, [interactionSurfaceMode, renderDynamicFeedback, subscribeVisibleScenePaint]);
+
   const makePointerEventSnapshot = useCallback((e: DrawingDomPointerEvent): DrawingPointerEvent => ({
     altKey: !!e.altKey,
     shiftKey: !!e.shiftKey,
@@ -856,15 +1563,33 @@ export function useDrawing({
 
   const clearHoverFeedback = useCallback(() => {
     cancelPendingHoverFrame();
-    clearHoveredPrimitive(hoveredPrimRef);
-  }, [cancelPendingHoverFrame]);
+    if (interactionSurfaceMode === "overlay") {
+      hoveredPrimRef.current = null;
+      dynamicHoverDecorationRef.current = null;
+      renderDynamicFeedback();
+    } else {
+      clearHoveredPrimitive(hoveredPrimRef);
+    }
+  }, [cancelPendingHoverFrame, interactionSurfaceMode, renderDynamicFeedback]);
 
   const applyHoverFeedback = useCallback(
     ({ tool, x, y }: HoverFeedbackPayload) => {
       const hit = tool === "eraser"
         ? hitTestAll(x, y)
         : hitTestInteractive(x, y);
-      syncHoveredPrimitive(hoveredPrimRef, hoverTargetForTool(tool, hit));
+      const hoverTarget = hoverTargetForTool(tool, hit);
+      if (interactionSurfaceMode === "overlay") {
+        hoveredPrimRef.current = hit?.prim ?? null;
+        const decoration: DynamicHoverDecoration = {
+          id: hit?.prim.id ?? null,
+          point: { x, y },
+          eraser: tool === "eraser",
+        };
+        dynamicHoverDecorationRef.current = decoration;
+        renderDynamicFeedback(decoration);
+      } else {
+        syncHoveredPrimitive(hoveredPrimRef, hoverTarget);
+      }
 
       const container = chartContainerRef?.current;
       if (!container) return;
@@ -879,7 +1604,7 @@ export function useDrawing({
         setCursor(container, cursorForTextToolHit(hit));
       }
     },
-    [chartContainerRef, hitTestAll, hitTestInteractive],
+    [chartContainerRef, hitTestAll, hitTestInteractive, interactionSurfaceMode, renderDynamicFeedback],
   );
 
   const scheduleHoverFeedback = useCallback(
@@ -905,6 +1630,59 @@ export function useDrawing({
   useEffect(() => () => {
     cancelPendingHoverFrame();
   }, [cancelPendingHoverFrame]);
+
+  const ensureOverlayDragRegistry = useCallback((): MutableRefObject<DrawingPrimitive[]> => {
+    const dragging = draggingRef.current;
+    if (interactionSurfaceMode !== "overlay" || !dragging) return primitivesRef;
+    if (overlayDragPrimitiveRef.current?.id === dragging.id) return overlayDragRegistryRef;
+    const original = primitivesRef.current.find((primitive) => primitive.id === dragging.id) ?? null;
+    const saved = original
+      ? serializeDrawingPrimitive(original as unknown as PersistableDrawingPrimitive)
+      : null;
+    const draft = saved ? createPrimitiveFromSavedDrawing(saved) : null;
+    if (!original || !draft) {
+      // Overlay mode must never fall back to mutating the canonical primitive
+      // from pointermove. A detached clone is the ownership boundary for the
+      // entire gesture, so a clone failure cancels the drag fail-closed.
+      draggingRef.current = null;
+      overlayDragPrimitiveRef.current = null;
+      overlayDragOriginalRef.current = null;
+      overlayDragRegistryRef.current = [];
+      return overlayDragRegistryRef;
+    }
+
+    overlayDragOriginalRef.current = original;
+    overlayDragPrimitiveRef.current = draft;
+    overlayDragRegistryRef.current = primitivesRef.current.map((primitive) => (
+      primitive.id === dragging.id ? draft : primitive
+    ));
+    activeOverlayEntityIdRef.current = dragging.id;
+    cancelDynamicPaintHandoff();
+    renderDynamicFeedback();
+    original.setHidden?.(true, false);
+    invalidateVisibleScene();
+    try { getChartAdapter()?.requestSeriesUpdate?.(); } catch { /* scene invalidation remains */ }
+    return overlayDragRegistryRef;
+  }, [cancelDynamicPaintHandoff, getChartAdapter, interactionSurfaceMode, invalidateVisibleScene, primitivesRef, renderDynamicFeedback]);
+
+  const renderOverlayDragDraft = useCallback(() => {
+    const draft = overlayDragPrimitiveRef.current;
+    if (!draft || interactionSurfaceMode !== "overlay") return;
+    const decorations = dynamicDecorationsForDrawingDraft(draft, dataToScreen);
+    dynamicOverlayControllerRef.current?.render({ decorations });
+  }, [dataToScreen, interactionSurfaceMode]);
+
+  const releaseOverlayDrag = useCallback((restoreStatic: boolean, clearDynamic = true) => {
+    const original = overlayDragOriginalRef.current;
+    if (restoreStatic) original?.setHidden?.(false, false);
+    activeOverlayEntityIdRef.current = null;
+    overlayDragPrimitiveRef.current = null;
+    overlayDragOriginalRef.current = null;
+    overlayDragRegistryRef.current = [];
+    invalidateVisibleScene();
+    try { getChartAdapter()?.requestSeriesUpdate?.(); } catch { /* scene invalidation remains */ }
+    if (clearDynamic) renderDynamicFeedback();
+  }, [getChartAdapter, invalidateVisibleScene, renderDynamicFeedback]);
 
   const applyActiveDrawingMove = useCallback(
     ({ tool, pos, positions, e }: ActiveDrawingMoveInput): boolean => {
@@ -935,7 +1713,9 @@ export function useDrawing({
             remainingCapacity,
           );
           if (capturePositions.length === 0) return true;
-          const batch = getChartAdapter()?.captureFreehandStrokeBatch?.(capturePositions);
+          const batch = interactionSurfaceMode === "overlay"
+            ? captureOverlayFreehandBatch(capturePositions)
+            : getChartAdapter()?.captureFreehandStrokeBatch?.(capturePositions);
           if (!batch) {
             cancelActiveFreehandStroke();
             return true;
@@ -946,12 +1726,15 @@ export function useDrawing({
             return true;
           }
           freehandCaptureIdentityRef.current = batch.captureIdentity;
-          if (appendResult.previewPoints.length > 0
-            && !currentFreehandRef.current.appendPreviewPoints(
+          if (appendResult.previewPoints.length > 0) {
+            if (interactionSurfaceMode === "overlay") {
+              liveInkControllerRef.current?.appendFrame(appendResult.previewPoints);
+            } else if (!currentFreehandRef.current.appendPreviewPoints(
               appendResult.previewPoints,
             )) {
-            cancelActiveFreehandStroke();
-            return true;
+              cancelActiveFreehandStroke();
+              return true;
+            }
           }
           let lastPreviewPoint: ScreenPoint | null = null;
           for (let index = appendResult.previewPoints.length - 1; index >= 0; index -= 1) {
@@ -971,24 +1754,33 @@ export function useDrawing({
           const dataPoint = screenToFreehandData(point.x, point.y);
           if (!dataPoint) continue;
           currentFreehandRef.current.addPoint(dataPoint);
+          if (interactionSurfaceMode === "overlay") {
+            liveInkControllerRef.current?.appendFrame([point]);
+          }
           lastFreehandScreenPointRef.current = { x: point.x, y: point.y };
         }
         return true;
       }
 
       // ── Drag/resize of existing text & position drawings (extracted) ──
+      const activePrimitivesRef = draggingRef.current
+        ? ensureOverlayDragRegistry()
+        : primitivesRef;
       if (applyTextAndPositionDrag({
         dragging: draggingRef.current,
         pos,
         e,
-        primitivesRef,
+        primitivesRef: activePrimitivesRef,
         screenToData,
         dataToScreen,
         screenToDrawingData,
-        refreshSelectedTextUi,
+        refreshSelectedTextUi: interactionSurfaceMode === "overlay"
+          ? () => {}
+          : refreshSelectedTextUi,
         drawingSnapEnabledRef,
         chartContainerRef,
       })) {
+        if (interactionSurfaceMode === "overlay") renderOverlayDragDraft();
         return true;
       }
 
@@ -999,23 +1791,31 @@ export function useDrawing({
             dragging: draggingRef.current,
             pos,
             e,
-            primitivesRef,
+            primitivesRef: activePrimitivesRef,
             screenToData,
             dataToScreen,
             screenToDrawingData,
             drawingSnapEnabledRef,
           });
+          if (interactionSurfaceMode === "overlay") renderOverlayDragDraft();
           return true;
         }
 
         if (isTwoPointCreationTool(tool) && updateTwoPointPreview({
           tool, pos, e, anchorDataRef, previewRef, screenToDrawingData, dataToScreen, drawingSnapEnabledRef,
-        })) return true;
+        })) {
+          if (interactionSurfaceMode === "overlay" && previewRef.current) {
+            dynamicOverlayControllerRef.current?.render({
+              decorations: dynamicDecorationsForDrawingDraft(previewRef.current, dataToScreen),
+            });
+          }
+          return true;
+        }
       }
 
       return false;
     },
-    [cancelActiveFreehandStroke, getChartAdapter, screenToFreehandData, screenToData, dataToScreen, screenToDrawingData, refreshSelectedTextUi, chartContainerRef],
+    [cancelActiveFreehandStroke, captureOverlayFreehandBatch, ensureOverlayDragRegistry, getChartAdapter, interactionSurfaceMode, renderOverlayDragDraft, screenToFreehandData, screenToData, dataToScreen, screenToDrawingData, refreshSelectedTextUi, chartContainerRef],
   );
 
   const cancelActiveMoveFrame = useCallback(() => {
@@ -1033,8 +1833,10 @@ export function useDrawing({
     const result = applyActiveDrawingMove(input);
     const durationMs = Math.max(0, drawingPerfNow() - startedAt);
     drawingPerfCounters.recordInteractionDuration(durationMs);
-    drawingPerfCounters.recordActiveOverlayCpuDuration(durationMs);
-    accumulateDrawingPerfFrameWork({ drawingMainThreadMs: durationMs });
+    accumulateDrawingPerfFrameWork({
+      activeOverlayCpuMs: durationMs,
+      drawingMainThreadMs: durationMs,
+    });
     return result;
   }, [applyActiveDrawingMove]);
 
@@ -1051,8 +1853,16 @@ export function useDrawing({
       : null;
     flushActiveDrawingMove();
     if (committedDrag) {
-      const commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
-      if (!commands || persistActiveScopeDrawings(commands) === false) return false;
+      if (interactionSurfaceMode === "overlay") {
+        cancelActiveMoveFrame();
+        pendingActiveMoveRef.current = null;
+        clearCachedPointerRect();
+        releaseOverlayDrag(true);
+        draggingRef.current = null;
+      } else {
+        const commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
+        if (!commands || persistActiveScopeDrawings(commands) === false) return false;
+      }
     }
     const hadActiveFreehand = currentFreehandRef.current !== null;
     if (hadActiveFreehand && !cancelActiveFreehandStroke()) return false;
@@ -1061,7 +1871,7 @@ export function useDrawing({
     // empty until confirmation. Cancel it before persistence snapshots the old
     // scope so it is detached as well as excluded by the canonical filter.
     return cancelTextEditing();
-  }, [cancelActiveFreehandStroke, cancelTextEditing, flushActiveDrawingMove, persistActiveScopeDrawings, removePreview]);
+  }, [cancelActiveFreehandStroke, cancelActiveMoveFrame, cancelTextEditing, clearCachedPointerRect, flushActiveDrawingMove, interactionSurfaceMode, persistActiveScopeDrawings, releaseOverlayDrag, removePreview]);
 
   useEffect(() => {
     beforeScopeTransitionRef.current = prepareDrawingScopeTransition;
@@ -1107,8 +1917,13 @@ export function useDrawing({
       : null;
     flushActiveDrawingMove();
     if (committedDrag) {
-      const commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
-      if (!commands || persistDrawings(commands) === false) return;
+      if (interactionSurfaceMode === "overlay") {
+        cancelActiveDrawingMove();
+        releaseOverlayDrag(true);
+      } else {
+        const commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
+        if (!commands || persistDrawings(commands) === false) return;
+      }
     }
     cancelActiveDrawingMove();
     removePreview();
@@ -1127,7 +1942,9 @@ export function useDrawing({
     drawingCoordinateKey,
     cancelActiveFreehandStroke,
     flushActiveDrawingMove,
+    interactionSurfaceMode,
     persistDrawings,
+    releaseOverlayDrag,
     removePreview,
     resetCursorForActiveTool,
     seriesReady,
@@ -1137,13 +1954,16 @@ export function useDrawing({
     const committedDrag = !isDrawingFreehandRef.current
       ? draggingRef.current
       : null;
-    flushActiveDrawingMove();
-    if (committedDrag) {
+    if (interactionSurfaceMode !== "overlay") flushActiveDrawingMove();
+    if (committedDrag && interactionSurfaceMode !== "overlay") {
       const commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
       if (!commands || persistDrawings(commands) === false) return;
     }
     cancelActiveDrawingMove();
+    if (interactionSurfaceMode === "overlay") releaseOverlayDrag(true);
     cancelActiveFreehandStroke();
+    liveInkControllerRef.current?.cancel();
+    dynamicOverlayControllerRef.current?.clear();
     removePreview();
     clearHoverFeedback();
     draggingRef.current = null;
@@ -1155,7 +1975,9 @@ export function useDrawing({
     clearHoverFeedback,
     removePreview,
     flushActiveDrawingMove,
+    interactionSurfaceMode,
     persistDrawings,
+    releaseOverlayDrag,
   ]);
 
   const beginTextDrag = useCallback((
@@ -1185,8 +2007,9 @@ export function useDrawing({
         origDataPoint: { ...prim.dataPoint },
       };
     }
+    if (interactionSurfaceMode === "overlay") ensureOverlayDragRegistry();
     return true;
-  }, []);
+  }, [ensureOverlayDragRegistry, interactionSurfaceMode]);
 
   // ── While editing OR a text is selected, keep the textarea and toolbar
   // pinned during chart interactions, then stop once the position stabilizes.
@@ -1275,6 +2098,11 @@ export function useDrawing({
       const tool = activeToolRef.current;
       const pos = getChartPos(e);
       if (!pos) return;
+      if (!isInsideMainPanePlot(pos)) return;
+      if (interactionSurfaceMode === "overlay") cancelDynamicPaintHandoff(true);
+      if (liveInkControllerRef.current?.snapshot().retainingFinalFrame) {
+        liveInkControllerRef.current.cancel();
+      }
 
       if (!runDrawingPointerTransientBarrier({
         activeTool: tool,
@@ -1324,7 +2152,9 @@ export function useDrawing({
         if (sel instanceof TextDrawingPrimitive) {
           if (supportsDrawingHitType(drawingAnchorMode, "text")) {
             let hit: DrawingHit | false = false;
-            try { hit = sel.hitTestGeometry(pos.x, pos.y); } catch { /* ignore */ }
+            const overlayHandleHit = hitTestSelectedOverlayHandle(pos.x, pos.y, sel);
+            if (overlayHandleHit) hit = overlayHandleHit;
+            else try { hit = sel.hitTestGeometry(pos.x, pos.y); } catch { /* ignore */ }
             if (hit) {
               clearHoverFeedback();
               beginTextDrag(sel, hit, pos);
@@ -1346,15 +2176,28 @@ export function useDrawing({
       if (tool === "eraser") {
         const hit = hitTestAll(pos.x, pos.y);
         clearHoverFeedback();
-        eraseDrawingAtPointer({
-          detachPrim,
-          hit,
-          persistDrawings,
-          primitivesRef,
-          selectedIdRef,
-          setSelectedPrimId,
-          setSelectedTextUi,
-        });
+        if (interactionSurfaceMode === "overlay" && hit) {
+          const candidates = primitivesRef.current.filter((primitive) => primitive.id !== hit.prim.id);
+          const receipt = persistDetachedDrawings(
+            [Object.freeze({ type: "delete", id: hit.prim.id })],
+            candidates,
+          );
+          if (receipt?.committed && selectedIdRef.current === hit.prim.id) {
+            selectedIdRef.current = null;
+            setSelectedPrimId(null);
+            setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
+          }
+        } else {
+          eraseDrawingAtPointer({
+            detachPrim,
+            hit,
+            persistDrawings,
+            primitivesRef,
+            selectedIdRef,
+            setSelectedPrimId,
+            setSelectedTextUi,
+          });
+        }
         e.preventDefault();
         e.stopPropagation();
         return;
@@ -1363,15 +2206,37 @@ export function useDrawing({
       // ── PEN / HIGHLIGHTER (freehand): start stroke ──
       if (tool === "pen" || tool === "highlighter") {
         const adapter = getChartAdapter();
-        const sourceLineage = adapter?.usesOrdinalTime?.() === true;
-        const captureBatch = sourceLineage
-          ? adapter.captureFreehandStrokeBatch?.([pos]) || null
-          : null;
+        const sourceLineage = interactionSurfaceMode === "overlay"
+          || adapter?.usesOrdinalTime?.() === true;
+        const captureBatch = interactionSurfaceMode === "overlay"
+          ? captureOverlayFreehandBatch([pos])
+          : sourceLineage ? adapter?.captureFreehandStrokeBatch?.([pos]) || null : null;
+        const attachFreehandDraft = interactionSurfaceMode === "overlay"
+          ? (primitive: DrawingPrimitive) => {
+            primitive.setHidden?.(hiddenRef.current, false);
+            return true;
+          }
+          : attachPrim;
         if (startFreehandStroke({
           tool, pos, e, primitivesRef, currentFreehandRef, isDrawingFreehandRef,
-          freehandDraftRef, attachPrim, screenToData: screenToFreehandData,
+          freehandDraftRef, attachPrim: attachFreehandDraft, screenToData: screenToFreehandData,
           freehandCaptureIdentityRef, penColorRef, penSizeRef, sourceLineage, captureBatch,
         })) {
+          const primitive = currentFreehandRef.current;
+          if (interactionSurfaceMode === "overlay" && primitive) {
+            const started = liveInkControllerRef.current?.start({
+              color: primitive.color,
+              lineWidth: primitive.lineWidth,
+              opacity: primitive.opacity,
+              tool,
+              blendMode: primitive.compositeOperation,
+              brushShape: primitive.brushShape,
+            }, pos) === true;
+            if (!started) {
+              cancelActiveFreehandStroke();
+              return;
+            }
+          }
           lastFreehandScreenPointRef.current = currentFreehandRef.current ? { x: pos.x, y: pos.y } : null;
           clearHoverFeedback();
           return;
@@ -1460,6 +2325,10 @@ export function useDrawing({
             };
           }
 
+          if (interactionSurfaceMode === "overlay" && draggingRef.current) {
+            ensureOverlayDragRegistry();
+          }
+
           clearHoverFeedback();
           e.preventDefault();
           e.stopPropagation();
@@ -1475,10 +2344,30 @@ export function useDrawing({
         }
 
         // Place new position: click sets entry price
+        const overlaySurfaceAction = (primitive: DrawingPrimitive) => {
+          primitive.setHidden?.(hiddenRef.current, false);
+          return true;
+        };
+        const positionPersistence = interactionSurfaceMode === "overlay"
+          ? (commands: readonly DrawingCommand[]) => {
+            const receipt = persistDetachedDrawings(commands, primitivesRef.current);
+            pendingOverlayCommitReceiptRef.current = receipt;
+            return receipt?.committed === true;
+          }
+          : persistDrawings;
         if (placePositionDrawing({
-          tool, pos, e, primitivesRef, attachPrim, detachPrim, selectPrimitive, persistDrawings,
+          tool, pos, e, primitivesRef,
+          attachPrim: interactionSurfaceMode === "overlay" ? overlaySurfaceAction : attachPrim,
+          detachPrim: interactionSurfaceMode === "overlay" ? overlaySurfaceAction : detachPrim,
+          selectPrimitive, persistDrawings: positionPersistence,
           screenToDrawingData, getChartAdapter, chartContainerRef, drawingSnapEnabledRef, positionSizeRef,
-        })) return;
+        })) {
+          const receipt = pendingOverlayCommitReceiptRef.current;
+          pendingOverlayCommitReceiptRef.current = null;
+          retainDynamicOverlayUntilPaint(receipt?.ticket ?? null);
+          if (!receipt?.committed) renderDynamicFeedback();
+          return;
+        }
       }
 
       // ── LINE/FIB/SHAPE TOOLS ──
@@ -1487,17 +2376,39 @@ export function useDrawing({
 
         // Second click — commit new line/fib/shape
         if (isTwoPointCreationTool(tool)) {
+          if (interactionSurfaceMode === "overlay" && previewRef.current) {
+            dynamicHandoffLockRef.current = true;
+          }
+          const overlaySurfaceAction = (primitive: DrawingPrimitive) => {
+            primitive.setHidden?.(hiddenRef.current, false);
+            return true;
+          };
+          const commitPersistence = interactionSurfaceMode === "overlay"
+            ? (commands: readonly DrawingCommand[]) => {
+              const receipt = persistDetachedDrawings(commands, primitivesRef.current);
+              pendingOverlayCommitReceiptRef.current = receipt;
+              return receipt?.committed === true;
+            }
+            : persistDrawings;
           const handled = commitTwoPointDrawing({
-            tool, pos, e, primitivesRef, anchorDataRef, previewRef, attachPrim, detachPrim,
-            selectPrimitive, persistDrawings, screenToDrawingData, dataToScreen, drawingSnapEnabledRef,
+            tool, pos, e, primitivesRef, anchorDataRef, previewRef,
+            attachPrim: interactionSurfaceMode === "overlay" ? overlaySurfaceAction : attachPrim,
+            detachPrim: interactionSurfaceMode === "overlay" ? overlaySurfaceAction : detachPrim,
+            selectPrimitive, persistDrawings: commitPersistence,
+            screenToDrawingData, dataToScreen, drawingSnapEnabledRef,
             penColorRef, penSizeRef, fibLevelsRef, fibInvertedRef,
           });
           if (handled) {
+            const receipt = pendingOverlayCommitReceiptRef.current;
+            pendingOverlayCommitReceiptRef.current = null;
+            retainDynamicOverlayUntilPaint(receipt?.ticket ?? null);
+            if (!receipt?.committed) renderDynamicFeedback();
             if (!previewRef.current && !anchorDataRef.current) {
               pendingTwoPointToolRef.current = null;
             }
             return;
           }
+          dynamicHandoffLockRef.current = false;
         }
 
         // Hit existing element?
@@ -1545,6 +2456,10 @@ export function useDrawing({
             };
           }
 
+          if (interactionSurfaceMode === "overlay" && draggingRef.current) {
+            ensureOverlayDragRegistry();
+          }
+
           clearHoverFeedback();
           e.preventDefault();
           e.stopPropagation();
@@ -1559,6 +2474,7 @@ export function useDrawing({
             startMouse: pos,
             origDataPoint: { ...hit.prim.dataPoint },
           };
+          if (interactionSurfaceMode === "overlay") ensureOverlayDragRegistry();
           clearHoverFeedback();
           e.preventDefault();
           e.stopPropagation();
@@ -1575,27 +2491,64 @@ export function useDrawing({
 
         // One-point axis lines: click creates immediately; drag before mouseup adjusts it.
         if (isAxisLineTool) {
+          if (interactionSurfaceMode === "overlay") {
+            dynamicHandoffLockRef.current = true;
+          }
+          const overlaySurfaceAction = (primitive: DrawingPrimitive) => {
+            primitive.setHidden?.(hiddenRef.current, false);
+            return true;
+          };
+          const axisPersistence = interactionSurfaceMode === "overlay"
+            ? (commands: readonly DrawingCommand[]) => {
+              const receipt = persistDetachedDrawings(commands, primitivesRef.current);
+              pendingOverlayCommitReceiptRef.current = receipt;
+              return receipt?.committed === true;
+            }
+            : persistDrawings;
           if (beginAxisLineDrawing({
-            tool, pos, e, primitivesRef, anchorDataRef, previewRef, draggingRef, attachPrim, detachPrim,
-            selectPrimitive, persistDrawings, removePreview, screenToDrawingData,
+            tool, pos, e, primitivesRef, anchorDataRef, previewRef, draggingRef,
+            attachPrim: interactionSurfaceMode === "overlay" ? overlaySurfaceAction : attachPrim,
+            detachPrim: interactionSurfaceMode === "overlay" ? overlaySurfaceAction : detachPrim,
+            selectPrimitive, persistDrawings: axisPersistence, removePreview, screenToDrawingData,
             drawingSnapEnabledRef, penColorRef, penSizeRef,
-          })) return;
+          })) {
+            const receipt = pendingOverlayCommitReceiptRef.current;
+            pendingOverlayCommitReceiptRef.current = null;
+            retainDynamicOverlayUntilPaint(receipt?.ticket ?? null);
+            if (!receipt?.committed) renderDynamicFeedback();
+            if (interactionSurfaceMode === "overlay" && draggingRef.current) {
+              ensureOverlayDragRegistry();
+            }
+            return;
+          }
         }
 
         // First click — set anchor
         if (isTwoPointCreationTool(tool)) {
+          const previewAttach = interactionSurfaceMode === "overlay"
+            ? (primitive: DrawingPrimitive) => {
+              primitive.setHidden?.(hiddenRef.current, false);
+              return true;
+            }
+            : attachPrim;
           const handled = beginTwoPointDrawing({
-            tool, pos, e, anchorDataRef, previewRef, attachPrim, screenToDrawingData,
+            tool, pos, e, anchorDataRef, previewRef, attachPrim: previewAttach, screenToDrawingData,
             drawingSnapEnabledRef, penColorRef, penSizeRef, fibLevelsRef, fibInvertedRef,
           });
           if (handled) {
             pendingTwoPointToolRef.current = previewRef.current ? tool : null;
+            if (interactionSurfaceMode === "overlay" && previewRef.current) {
+              dynamicOverlayControllerRef.current?.render({
+                decorations: dynamicDecorationsForDrawingDraft(previewRef.current, dataToScreen),
+              });
+            }
             return;
           }
+          dynamicHandoffLockRef.current = false;
         }
       }
     },
-    [flushActiveDrawingMove, getChartPos, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, selectPrimitive, deselectAll, getPrimitiveById, getSceneScreenBox, beginTextDrag, startTextEditing, commitTextEditing, cancelTextEditing, persistDrawings, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, getChartAdapter, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback],
+    [flushActiveDrawingMove, getChartPos, isInsideMainPanePlot, captureOverlayFreehandBatch, interactionSurfaceMode, screenToFreehandData, screenToDrawingData, dataToScreen, detachPrim, attachPrim, hitTestAll, hitTestInteractive, hitTestSelectedOverlayHandle, selectPrimitive, deselectAll, getPrimitiveById, getSceneScreenBox, beginTextDrag, startTextEditing, commitTextEditing, cancelTextEditing, persistDetachedDrawings, persistDrawings, prepareUserMutationScope, removePreview, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, ensureOverlayDragRegistry, getChartAdapter, chartContainerRef, drawingAnchorMode, editingTextIdRef, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, renderDynamicFeedback, retainDynamicOverlayUntilPaint],
   );
 
   // ════════════════════════════════════════════════════
@@ -1714,14 +2667,18 @@ export function useDrawing({
     flushActiveDrawingMove();
     let commands: readonly DrawingCommand[] | null = null;
     let completedDrag = false;
+    let completedDragDescriptor: DrawingDragDescriptor | null = null;
     let completedFreehand = false;
     let completedFreehandDraft: FreehandStrokeDraft | null = null;
+    let completedFreehandPrimitive: FreehandDrawingPrimitive | null = null;
+    let completedDragCandidates: readonly DrawingPrimitive[] | null = null;
     // End freehand drawing
     if (isDrawingFreehandRef.current) {
       // ── Decimate stroke via RDP to reduce render cost ──
       const prim = currentFreehandRef.current;
       const draft = freehandDraftRef.current;
       let committed = false;
+      const finalizeStartedAt = drawingPerfNow();
       if (prim && draft) {
         const stroke = finalizeFreehandStrokeDraft(draft, {
           captureIdentity: freehandCaptureIdentityRef.current,
@@ -1750,8 +2707,17 @@ export function useDrawing({
       } else if (prim) {
         committed = prim.commitDataPoints?.() === true;
       }
+      drawingPerfCounters.recordDuration(
+        "mouseupFinalizeMs",
+        Math.max(0, drawingPerfNow() - finalizeStartedAt),
+      );
       if (committed && prim) {
+        const commandStartedAt = drawingPerfNow();
         commands = drawingCommandsForLegacyPrimitive(prim, { type: "create" });
+        drawingPerfCounters.recordDuration(
+          "mouseupCommandMs",
+          Math.max(0, drawingPerfNow() - commandStartedAt),
+        );
         if (!commands) {
           cancelActiveFreehandStroke();
           committed = false;
@@ -1763,6 +2729,7 @@ export function useDrawing({
         // surface compensation or retain the descriptor for the next barrier.
         completedFreehand = true;
         completedFreehandDraft = draft;
+        completedFreehandPrimitive = prim;
       } else {
         cancelActiveFreehandStroke();
       }
@@ -1770,16 +2737,112 @@ export function useDrawing({
     // End dragging
     if (!completedFreehand && draggingRef.current) {
       const committedDrag = draggingRef.current;
-      commands = drawingCommandsForDrag(primitivesRef.current, committedDrag);
+      completedDragCandidates = interactionSurfaceMode === "overlay"
+        && overlayDragPrimitiveRef.current
+        ? overlayDragRegistryRef.current
+        : primitivesRef.current;
+      commands = drawingCommandsForDrag(completedDragCandidates, committedDrag);
       completedDrag = true;
+      completedDragDescriptor = committedDrag;
     }
     let persisted = !commands && !completedDrag;
     if (commands) {
       try {
-        persisted = persistDrawings(commands) !== false;
+        if (interactionSurfaceMode === "overlay"
+          && completedFreehand
+          && completedFreehandPrimitive) {
+          const primitive = completedFreehandPrimitive;
+          liveInkControllerRef.current?.finish();
+          let painted = false;
+          let committedTicket: Readonly<{
+            scopeKey: string;
+            documentRevision: number;
+            surfaceGeneration: number;
+            viewportRevision: number;
+          }> | null = null;
+          const ticketIsCurrent = () => {
+            if (!committedTicket || symbolRef.current !== committedTicket.scopeKey) return false;
+            const adapter = getChartAdapter();
+            const frame = adapter?.captureDrawingFrame?.() ?? null;
+            return !!frame
+              && adapter?.isDrawingFrameCurrent?.(frame) === true
+              && frame.surfaceGeneration === committedTicket.surfaceGeneration
+              && frame.viewportRevision === committedTicket.viewportRevision;
+          };
+          const pendingPaintListeners = new Set<() => void>();
+          const unsubscribePrimitivePaint = primitive.subscribeCommittedPaint(() => {
+            if (committedTicket && !ticketIsCurrent()) return;
+            painted = true;
+            for (const listener of [...pendingPaintListeners]) listener();
+          });
+          const commitStartedAt = drawingPerfNow();
+          const receipt = persistDetachedDrawings(commands, primitivesRef.current);
+          drawingPerfCounters.recordDuration(
+            "mouseupCommitMs",
+            Math.max(0, drawingPerfNow() - commitStartedAt),
+          );
+          persisted = receipt?.committed === true;
+          const ticket = receipt?.ticket ?? null;
+          committedTicket = ticket;
+          if (persisted && ticket) {
+            recordDrawingPerfInteractionHandoffPrepared("live-ink", ticket);
+            liveInkControllerRef.current?.retainUntilPaint(ticket, (listener) => {
+              const deliver = () => {
+                recordDrawingPerfInteractionHandoffAcknowledged("live-ink", ticket);
+                listener(ticket);
+              };
+              pendingPaintListeners.add(deliver);
+              if (painted && ticketIsCurrent()) deliver();
+              return () => {
+                pendingPaintListeners.delete(deliver);
+                if (pendingPaintListeners.size === 0) unsubscribePrimitivePaint();
+              };
+            });
+          } else {
+            unsubscribePrimitivePaint();
+            liveInkControllerRef.current?.cancel();
+          }
+        } else if (interactionSurfaceMode === "overlay"
+          && completedDrag
+          && overlayDragPrimitiveRef.current
+          && completedDragCandidates) {
+          activeOverlayEntityIdRef.current = null;
+          invalidateVisibleScene();
+          try {
+            const receipt = persistDetachedDrawings(commands, completedDragCandidates);
+            pendingOverlayCommitReceiptRef.current = receipt;
+            persisted = receipt?.committed === true;
+            const changed = receipt?.changed === true;
+            releaseOverlayDrag(!persisted || !changed, !persisted || !changed);
+            if (persisted
+              && changed
+              && completedDragDescriptor
+              && (completedDragDescriptor.type === "text"
+                || completedDragDescriptor.type === "text-handle")) {
+              refreshSelectedTextUi(completedDragDescriptor.id);
+            }
+            if (persisted && changed) {
+              retainDynamicOverlayUntilPaint(receipt?.ticket ?? null, {
+                replayLastPaint: true,
+              });
+            }
+          } finally {
+            // A throwing persistence boundary still owns a hidden original and
+            // detached clone. Restore/clear them before the outer catch exits.
+            if (overlayDragPrimitiveRef.current) releaseOverlayDrag(true);
+          }
+        } else {
+          persisted = persistDrawings(commands) !== false;
+        }
       } catch {
         persisted = false;
       }
+    }
+    if (interactionSurfaceMode === "overlay"
+      && completedDrag
+      && overlayDragPrimitiveRef.current) {
+      // Null command batches never enter the persistence branch above.
+      releaseOverlayDrag(true);
     }
     if (completedFreehand) {
       if (persisted) {
@@ -1793,22 +2856,29 @@ export function useDrawing({
         cancelActiveFreehandStroke();
       }
     }
-    if (persisted && completedDrag) draggingRef.current = null;
+    if (completedDrag && (persisted || interactionSurfaceMode === "overlay")) {
+      draggingRef.current = null;
+    }
     clearCachedPointerRect();
     const durationMs = Math.max(0, drawingPerfNow() - mouseupStartedAt);
     drawingPerfCounters.recordMouseupSyncDuration(durationMs);
     drawingPerfCounters.gestureEnded();
-  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, persistDrawings, prepareUserMutationScope, dataToScreen, clearCachedPointerRect]);
+  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, getChartAdapter, interactionSurfaceMode, invalidateVisibleScene, persistDetachedDrawings, persistDrawings, prepareUserMutationScope, dataToScreen, clearCachedPointerRect, refreshSelectedTextUi, releaseOverlayDrag, retainDynamicOverlayUntilPaint, symbolRef]);
 
   const handlePointerCancel = useCallback(() => {
-    if (!isDrawingFreehandRef.current) {
+    if (interactionSurfaceMode !== "overlay" && !isDrawingFreehandRef.current) {
       handleMouseUp();
       return;
     }
     cancelActiveDrawingMove();
     cancelActiveFreehandStroke();
+    cancelDynamicPaintHandoff();
+    removePreview();
+    clearHoverFeedback();
+    draggingRef.current = null;
+    releaseOverlayDrag(true);
     clearCachedPointerRect();
-  }, [cancelActiveDrawingMove, cancelActiveFreehandStroke, clearCachedPointerRect, handleMouseUp]);
+  }, [cancelActiveDrawingMove, cancelActiveFreehandStroke, cancelDynamicPaintHandoff, clearCachedPointerRect, clearHoverFeedback, handleMouseUp, interactionSurfaceMode, releaseOverlayDrag, removePreview]);
 
   const handleMouseLeave = useCallback((e: DrawingDomPointerEvent) => {
     // Text overlays are siblings of the chart canvas container. Moving the
@@ -1817,8 +2887,10 @@ export function useDrawing({
     if (draggingRef.current && "relatedTarget" in e && isTextOverlayTarget(e.relatedTarget)) {
       return;
     }
+    if (interactionSurfaceMode === "overlay"
+      && (draggingRef.current || isDrawingFreehandRef.current)) return;
     handleMouseUp();
-  }, [handleMouseUp]);
+  }, [handleMouseUp, interactionSurfaceMode]);
 
   // ── RIGHT-CLICK: cancel pending two-point placement ──
 
@@ -1852,12 +2924,23 @@ export function useDrawing({
       || currentFreehandRef.current !== null
       || freehandDraftRef.current !== null,
     cancelActiveFreehandStroke,
+    hasActiveInteractionGesture: () => interactionSurfaceMode === "overlay"
+      && (draggingRef.current !== null || dynamicHoverDecorationRef.current !== null),
+    cancelActiveInteractionGesture: () => {
+      handlePointerCancel();
+      return true;
+    },
+    deleteSelected: () => deleteSelectedRef.current(),
   });
 
   // ── Clean up when tool changes ──
 
   useEffect(() => {
     cancelActiveDrawingMove();
+    if (interactionSurfaceMode === "overlay" && overlayDragPrimitiveRef.current) {
+      releaseOverlayDrag(true);
+      draggingRef.current = null;
+    }
     if (!isLineTool && !isFibTool && !isShapeTool) {
       removePreview();
       draggingRef.current = null;
@@ -1888,7 +2971,7 @@ export function useDrawing({
     if (!isEraserTool) {
       clearHoverFeedback();
     }
-  }, [isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing, selectedIdRef, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke]);
+  }, [interactionSurfaceMode, isLineTool, isFibTool, isShapeTool, isPenTool, isHighlighterTool, isEraserTool, isTextTool, isPositionTool, removePreview, deselectAll, cancelTextEditing, selectedIdRef, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, releaseOverlayDrag]);
 
   useDrawingPointerEvents({
     chartContainerRef,
@@ -1899,6 +2982,7 @@ export function useDrawing({
     handleMouseMove,
     handleMouseUp,
     handlePointerCancel,
+    ...(interactionSurfaceMode === "overlay" ? { handleWindowBlur: handlePointerCancel } : {}),
   });
 
   // ── Public API ──
@@ -1913,11 +2997,14 @@ export function useDrawing({
     preparePersistenceSurfaceDispose,
     () => {
       cancelActiveDrawingMove();
+      cancelDynamicPaintHandoff(true);
+      releaseOverlayDrag(true);
+      liveInkControllerRef.current?.cancel();
       clearHoverFeedback();
       draggingRef.current = null;
       resetCursorForActiveTool();
     },
-  ), [cancelActiveDrawingMove, clearHoverFeedback, preparePersistenceSurfaceDispose, resetCursorForActiveTool]);
+  ), [cancelActiveDrawingMove, cancelDynamicPaintHandoff, clearHoverFeedback, preparePersistenceSurfaceDispose, releaseOverlayDrag, resetCursorForActiveTool]);
 
   const completeSurfaceDispose = useCallback((): void => {
     // The chart owner has confirmed remove(). Surface-only drafts can now be
@@ -1935,9 +3022,13 @@ export function useDrawing({
     pendingTwoPointToolRef.current = null;
     draggingRef.current = null;
     cancelActiveDrawingMove();
+    cancelDynamicPaintHandoff();
+    releaseOverlayDrag(false);
+    liveInkControllerRef.current?.cancel();
+    dynamicOverlayControllerRef.current?.clear();
     clearHoverFeedback();
     completePersistenceSurfaceDispose();
-  }, [cancelActiveDrawingMove, clearHoverFeedback, completePersistenceSurfaceDispose, completeTextSurfaceDispose]);
+  }, [cancelActiveDrawingMove, cancelDynamicPaintHandoff, clearHoverFeedback, completePersistenceSurfaceDispose, completeTextSurfaceDispose, releaseOverlayDrag]);
 
   /** Clear all drawings (lines + freehand + text) */
   const clearAll = useCallback(() => {
@@ -1946,6 +3037,7 @@ export function useDrawing({
     if (!cancelActiveFreehandStroke()) return;
     if (!removePreview()) return;
     cancelActiveDrawingMove();
+    releaseOverlayDrag(true);
     if (!clearDrawings()) return;
     primitivesRef.current = [];
     clearHoverFeedback();
@@ -1953,7 +3045,7 @@ export function useDrawing({
     setSelectedPrimId(null);
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     draggingRef.current = null;
-  }, [clearDrawings, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, prepareTerminalTextMutation]);
+  }, [clearDrawings, removePreview, cancelTextEditing, selectedIdRef, setSelectedPrimId, setSelectedTextUi, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, prepareTerminalTextMutation, releaseOverlayDrag]);
 
   /**
    * Toggle visibility of all drawings without deleting them.
@@ -1974,11 +3066,14 @@ export function useDrawing({
 
     if (value && scopeReady) {
       // Also drop preview / transient edit state so nothing stays on screen.
+      cancelDynamicPaintHandoff();
       removePreview();
       cancelTextEditing();
       clearHoverFeedback();
       cancelActiveDrawingMove();
+      releaseOverlayDrag(true);
       cancelActiveFreehandStroke();
+      liveInkControllerRef.current?.cancel();
       draggingRef.current = null;
     }
 
@@ -2001,7 +3096,7 @@ export function useDrawing({
       getChartAdapter()?.requestSeriesUpdate?.();
     }
     getChartAdapter()?.notifyDrawingFrameInvalidation?.();
-  }, [getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, prepareUserMutationScope]);
+  }, [cancelDynamicPaintHandoff, getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, prepareUserMutationScope, releaseOverlayDrag]);
 
   // ── Selected-text helpers (consumed by floating format toolbar) ──
 
@@ -2063,6 +3158,19 @@ export function useDrawing({
     const primitive = primitivesRef.current[idx];
     if (!primitive) return;
     if (!prepareTerminalTextMutation()) return;
+    if (interactionSurfaceMode === "overlay") {
+      const candidates = primitivesRef.current.filter((candidate) => candidate.id !== id);
+      const receipt = persistDetachedDrawings(
+        [Object.freeze({ type: "delete", id })],
+        candidates,
+      );
+      if (!receipt?.committed) return;
+      selectedIdRef.current = null;
+      setSelectedPrimId(null);
+      setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
+      dynamicOverlayControllerRef.current?.clear();
+      return;
+    }
     const wasAttached = primitive._series !== null;
     if (wasAttached) {
       if (!detachAndRemoveDrawingPrimitive(primitivesRef.current, primitive, detachPrim)) return;
@@ -2086,7 +3194,14 @@ export function useDrawing({
     selectedIdRef.current = null;
     setSelectedPrimId(null);
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
-  }, [attachPrim, detachPrim, prepareTerminalTextMutation, persistDrawings, selectedIdRef, setSelectedPrimId, setSelectedTextUi]);
+  }, [attachPrim, detachPrim, interactionSurfaceMode, persistDetachedDrawings, prepareTerminalTextMutation, persistDrawings, selectedIdRef, setSelectedPrimId, setSelectedTextUi]);
+
+  useEffect(() => {
+    deleteSelectedRef.current = deleteSelected;
+    return () => {
+      if (deleteSelectedRef.current === deleteSelected) deleteSelectedRef.current = () => {};
+    };
+  }, [deleteSelected]);
 
   /**
    * Update the color and/or lineWidth of the currently selected

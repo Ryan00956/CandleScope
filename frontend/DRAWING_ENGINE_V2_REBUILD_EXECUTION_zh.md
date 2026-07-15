@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4 已完成（2026-07-15）；Phase 5 尚未开始。
+状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5 已完成（2026-07-15）；Phase 6 尚未开始。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -55,8 +55,8 @@ git -C "H:\program\CandleScope" worktree list
 | 1 | 原子坐标快照与批量 anchor resolver | 已完成（batch baseline 已固化） |
 | 2 | DrawingDocumentStore、commands 与 codec | 已完成（document authoritative checkpoint） |
 | 3 | Scene shadow、culling 与 render plan | 已完成（正式 shadow parity/perf 门通过） |
-| 4 | 单一 DrawingScenePrimitive | 未开始 |
-| 5 | Dynamic Overlay 与 Live Ink | 未开始 |
+| 4 | 单一 DrawingScenePrimitive | 已完成（composite scene checkpoint） |
+| 5 | Dynamic Overlay 与 Live Ink | 已完成（interaction overlay checkpoint） |
 | 6 | LOD、命中索引、worker 与背压 | 未开始 |
 | 7 | IndexedDB、兼容迁移与 export barrier | 未开始 |
 | 8 | 全工具迁移与生命周期收口 | 未开始 |
@@ -807,20 +807,20 @@ mode 回 shadow/legacy；document 和 codec 保持不变。
 
 ### 逐步任务
 
-- [ ] 在 pane DOM 上挂载 DPR-aware dynamic canvas。
-- [ ] 挂载独立 live-ink canvas，二者均 <code>pointer-events: none</code>。
-- [ ] overlay 使用 adapter 提供的真实 main-pane plot rect 裁剪，不覆盖 price axis、time axis 或 subpane。
-- [ ] 复用现有 coalesced events 和 rAF 合帧。
-- [ ] 每个 pointer frame 只处理本帧新增 samples。
-- [ ] live ink 只追加 line segment，不重 trace 已画历史。
-- [ ] canonical draft 使用 chunked typed buffers，避免每点扩容复制。
-- [ ] selected/hover/handles/drag preview 只画 dynamic overlay。
-- [ ] 当前活动 entity 可以从 static scene 临时排除或仅画非重复底图。
-- [ ] highlighter 使用独立 buffer 和整体 opacity/composite，避免分段接缝反复叠黑。
-- [ ] mouseup 先原子提交 document，overlay 保持最后一帧。
-- [ ] scene revision 确认可见后再清空 live ink。
-- [ ] pointer cancel、Escape、surface dispose 都能清理 overlay 和 draft。
-- [ ] pointer move 不触发 React render 或 LWC requestUpdate。
+- [x] 在 pane DOM 上挂载 DPR-aware dynamic canvas。
+- [x] 挂载独立 live-ink canvas，二者均 <code>pointer-events: none</code>。
+- [x] overlay 使用 adapter 提供的真实 main-pane plot rect 裁剪，不覆盖 price axis、time axis 或 subpane。
+- [x] 复用现有 coalesced events 和 rAF 合帧。
+- [x] 每个 pointer frame 只处理本帧新增 samples。
+- [x] live ink 只追加 line segment，不重 trace 已画历史。
+- [x] canonical draft 使用 chunked typed buffers，避免每点扩容复制。
+- [x] selected/hover/handles/drag preview 只画 dynamic overlay。
+- [x] 当前活动 entity 可以从 static scene 临时排除或仅画非重复底图。
+- [x] highlighter 使用独立 buffer 和整体 opacity/composite，避免分段接缝反复叠黑。
+- [x] mouseup 先原子提交 document，overlay 保持最后一帧。
+- [x] scene revision 确认可见后再清空 live ink。
+- [x] pointer cancel、Escape、surface dispose 都能清理 overlay 和 draft。
+- [x] pointer move 不触发 React render 或 LWC requestUpdate。
 
 ### 性能门
 
@@ -1046,7 +1046,10 @@ freehand/highlighter。本阶段按以下顺序收口剩余 kind：
 6. 回归审计 freehand/highlighter。
 
 自由笔最影响性能，但不在最早阶段同时承担全部模型迁移风险：Phase 1 先移除
-坐标热点，Phase 5 建立 overlay，Phase 6 再切换 live ink 和 scene renderer。
+坐标热点；Phase 5 接管高频 dynamic overlay 与 active live ink；Phase 6 将
+committed freehand/highlighter 迁入 static DrawingScenePrimitive，并完成 LOD、
+命中索引、worker 与 latest-wins 背压。angle measurement、fibonacci、text、
+position 的完整 document/scene/overlay 迁移仍由 Phase 8 收口。
 
 Text 的字体加载、<code>measureText</code> 和 worker font parity 必须单独验证；若
 worker 字体结果不稳定，允许该帧使用同一 scene 的主线程 Canvas2D backend，
@@ -1371,4 +1374,22 @@ Correctness parity: immutable render spec 覆盖 line/axis-line/shape 的 stroke
 Known limitations: hover、实时 drag/live ink、动态 selection overlay 留给 Phase 5；freehand/highlighter 仍是 legacy，通用最终 targetAssessment 的 freehand 重场景仍有 5 个 measured run 未过最终帧/Long Task 目标，属于 Phase 6 的迁移范围，不影响本阶段明确要求的 fan-out gate。混合期跨 scene/legacy owner 的任意物理视觉交错仍受两个 renderer 边界限制，但交互命中已按 canonical z-order 合并。
 Rollback verified: VITE_DRAWING_ENGINE_MODE=shadow/legacy 可关闭可见 scene；SavedDrawing/document/codec 不变。scene-canary 只允许在第一次已接受 mutation 前回 legacy；边界后故障保留最后有效 render plan 并原位恢复，禁止双 owner 和静默数据回退。
 Decision: Phase 4 PASS；单 surface composite primitive、首批三类可见迁移、所有权/生命周期边界、浏览器功能验收与 Phase 4 正式性能门全部通过；Phase 5 尚未开始。
+~~~
+
+### Phase 5 执行记录
+
+~~~text
+Phase: 5 — Dynamic Overlay 与 Live Ink
+Date: 2026-07-15
+Commit: 本执行记录所在 checkpoint（perf(frontend): move live drawing feedback off chart updates）
+Mode: document authority + scene-canary + mount-locked interaction overlay；scene/runtime 不可用时 fail closed 到 legacy
+Files: chart-adapter main-pane geometry/invalidation；DrawingEngineHost/interaction controller；interaction canvas controllers；document/codec/commands/persistence bridge；scene/legacy renderer；perf counters/runner/probe/tests；CSS/env
+Tests: npm run check PASS（architecture 0 allowlist；typecheck；ESLint；1111/1111 tests；production build 326 modules）；npm run test:drawing 427/427；Phase 5 acceptance unit 14/14。
+Smoke: headed Chromium 真实 pen + line，reload 后持久化；DPR=1.5 时双 canvas CSS/bitmap 与 public main-pane plot rect 精确一致；console 0 error；formal 5+1 exact handoff 20/20、blank frame 0。
+Perf baseline: output/phase4-acceptance.json
+Perf result: output/phase5-formal-final.json；5 scenarios ×（1 warmup + 5 measured）PASS；active overlay p95 <= 0.30ms，drawing main p95/p99 <= 0.30/0.90ms，frame p95/p99 <= 16.80/16.80ms，input-to-paint p95/p99 <= 14.40/14.60ms，mouseup p95/p99 <= 4.70/4.70ms，attributable >50ms Long Task = 0；25/25 pointer windows React/LWC update/scene rebuild delta 全 0。
+Correctness parity: 64×512/32768-point heavy scene active ink + legal 4096-sample commit；pen/highlighter、drag/resize、selection/hover、eraser、two-point commit/cancel、pointercancel/blur/Escape、DPR/resize、document-first exact ticket handoff 与 reload persistence 均通过。
+Known limitations: committed freehand/highlighter 仍由 legacy static renderer 承担，留给 Phase 6；angle/fibonacci/text/position 完整迁移留给 Phase 8。
+Rollback verified: VITE_DRAWING_INTERACTION_OVERLAY=legacy 可恢复旧交互 renderer；document/codec 与 static scene 不回滚。
+Decision: Phase 5 PASS；Dynamic Overlay、Live Ink、document-first exact handoff 与正式性能门通过；Phase 6 尚未开始。
 ~~~

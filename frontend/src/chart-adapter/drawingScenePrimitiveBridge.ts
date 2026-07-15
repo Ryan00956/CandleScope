@@ -1,13 +1,35 @@
 import type { DrawingFrameSnapshot } from "./drawingFrameSnapshot.js";
 
 export interface DrawingSceneBridgePlan {
-  readonly stamp: Readonly<{ surfaceGeneration: number }>;
+  readonly stamp: Readonly<{
+    surfaceGeneration: number;
+    dataRevision: number;
+    projectionRevision: number;
+    lineageIndexRevision: number;
+    viewportRevision: number;
+    themeRevision: number;
+    widthCssPx: number;
+    heightCssPx: number;
+    dpr: number;
+  }>;
 }
+
+export interface DrawingSceneBridgePaintAck<TPlan extends DrawingSceneBridgePlan> {
+  readonly plan: TPlan;
+  readonly stamp: TPlan["stamp"];
+  readonly attachmentRevision: number;
+  readonly paintSequence: number;
+}
+
+export type DrawingSceneBridgePaintListener<TPlan extends DrawingSceneBridgePlan> = (
+  ack: DrawingSceneBridgePaintAck<TPlan>
+) => void;
 
 export interface DrawingSceneBridgePrimitive<TPlan extends DrawingSceneBridgePlan> {
   publishPlan(plan: TPlan): boolean;
   clearPlan(requestUpdate?: boolean): void;
   releaseSurfaceCredentials(): void;
+  subscribePainted(listener: DrawingSceneBridgePaintListener<TPlan>): () => void;
 }
 
 export interface DrawingScenePrimitiveBridgeOptions<
@@ -21,10 +43,11 @@ export interface DrawingScenePrimitiveBridgeOptions<
   readonly isDrawingFrameCurrent: (frame: DrawingFrameSnapshot) => boolean;
 }
 
-export interface DrawingScenePrimitiveBridgeSnapshot {
+export interface DrawingScenePrimitiveBridgeSnapshot<TPlan extends DrawingSceneBridgePlan> {
   readonly attached: boolean;
   readonly attachedPrimitiveCount: 0 | 1;
   readonly surfaceGeneration: number | null;
+  readonly lastPaintedStamp: TPlan["stamp"] | null;
 }
 
 export interface DrawingScenePrimitiveBridge<TPlan extends DrawingSceneBridgePlan> {
@@ -33,7 +56,8 @@ export interface DrawingScenePrimitiveBridge<TPlan extends DrawingSceneBridgePla
   publish(plan: TPlan): boolean;
   clearPlan(requestUpdate?: boolean): void;
   releaseSurfaceCredentials(): void;
-  snapshot(): DrawingScenePrimitiveBridgeSnapshot;
+  subscribePainted(listener: DrawingSceneBridgePaintListener<TPlan>): () => void;
+  snapshot(): DrawingScenePrimitiveBridgeSnapshot<TPlan>;
 }
 
 /**
@@ -53,6 +77,53 @@ export function createDrawingScenePrimitiveBridge<
 }: DrawingScenePrimitiveBridgeOptions<TPrimitive, TPlan>): DrawingScenePrimitiveBridge<TPlan> {
   let attached = false;
   let surfaceGeneration: number | null = null;
+  let publishedPlan: TPlan | null = null;
+  let lastPaintedStamp: TPlan["stamp"] | null = null;
+  let unsubscribePrimitivePaint: (() => void) | null = null;
+  const paintListeners = new Set<DrawingSceneBridgePaintListener<TPlan>>();
+
+  const planMatchesFrame = (
+    plan: TPlan,
+    frame: DrawingFrameSnapshot,
+  ): boolean => plan.stamp.surfaceGeneration === frame.surfaceGeneration
+    && plan.stamp.dataRevision === frame.dataRevision
+    && plan.stamp.projectionRevision === frame.projectionRevision
+    && plan.stamp.lineageIndexRevision === frame.lineageIndexRevision
+    && plan.stamp.viewportRevision === frame.viewportRevision
+    && plan.stamp.themeRevision === frame.themeRevision
+    && plan.stamp.widthCssPx === frame.widthCssPx
+    && plan.stamp.heightCssPx === frame.heightCssPx
+    && plan.stamp.dpr === frame.dpr;
+
+  const disconnectPrimitivePaint = (): void => {
+    unsubscribePrimitivePaint?.();
+    unsubscribePrimitivePaint = null;
+  };
+
+  const subscribeToPrimitivePaint = (): void => {
+    unsubscribePrimitivePaint?.();
+    unsubscribePrimitivePaint = primitive.subscribePainted((ack) => {
+      if (!attached
+        || surfaceGeneration === null
+        || ack.plan !== publishedPlan
+        || ack.stamp !== ack.plan.stamp
+        || ack.stamp.surfaceGeneration !== surfaceGeneration) return;
+      const frame = captureDrawingFrame();
+      if (!frame
+        || !isDrawingFrameCurrent(frame)
+        || frame.surfaceGeneration !== surfaceGeneration
+        || !planMatchesFrame(ack.plan, frame)) return;
+      lastPaintedStamp = ack.stamp;
+      for (const listener of Array.from(paintListeners)) {
+        if (!paintListeners.has(listener)) continue;
+        try {
+          listener(ack);
+        } catch {
+          // Adapter observers must not escape into the LWC paint callback.
+        }
+      }
+    });
+  };
 
   const bridge: DrawingScenePrimitiveBridge<TPlan> = {
     attach() {
@@ -80,16 +151,25 @@ export function createDrawingScenePrimitiveBridge<
       }
       attached = true;
       surfaceGeneration = attachedFrame.surfaceGeneration;
+      publishedPlan = null;
+      lastPaintedStamp = null;
+      subscribeToPrimitivePaint();
       return true;
     },
     detach() {
       if (!attached) {
         primitive.clearPlan(false);
+        publishedPlan = null;
+        lastPaintedStamp = null;
+        disconnectPrimitivePaint();
         return true;
       }
       if (!detachPrimitive(primitive)) return false;
       attached = false;
       surfaceGeneration = null;
+      publishedPlan = null;
+      lastPaintedStamp = null;
+      disconnectPrimitivePaint();
       primitive.releaseSurfaceCredentials();
       return true;
     },
@@ -98,22 +178,46 @@ export function createDrawingScenePrimitiveBridge<
       const frame = captureDrawingFrame();
       if (!frame
         || !isDrawingFrameCurrent(frame)
-        || frame.surfaceGeneration !== surfaceGeneration) return false;
-      return primitive.publishPlan(plan);
+        || frame.surfaceGeneration !== surfaceGeneration
+        || !planMatchesFrame(plan, frame)) return false;
+      const published = primitive.publishPlan(plan);
+      if (!published) return false;
+      // LWC paints only after publication returns. A synchronous callback from
+      // a non-conforming primitive is intentionally ignored rather than
+      // acknowledging a plan whose publication result was not yet known.
+      publishedPlan = plan;
+      lastPaintedStamp = null;
+      return published;
     },
     clearPlan(requestUpdate = true) {
+      publishedPlan = null;
+      lastPaintedStamp = null;
       primitive.clearPlan(requestUpdate);
     },
     releaseSurfaceCredentials() {
       attached = false;
       surfaceGeneration = null;
+      publishedPlan = null;
+      lastPaintedStamp = null;
+      disconnectPrimitivePaint();
       primitive.releaseSurfaceCredentials();
+    },
+    subscribePainted(listener) {
+      if (!attached || typeof listener !== "function") return () => {};
+      paintListeners.add(listener);
+      let subscribed = true;
+      return () => {
+        if (!subscribed) return;
+        subscribed = false;
+        paintListeners.delete(listener);
+      };
     },
     snapshot() {
       return Object.freeze({
         attached,
         attachedPrimitiveCount: attached ? 1 as const : 0 as const,
         surfaceGeneration,
+        lastPaintedStamp,
       });
     },
   };

@@ -3,6 +3,7 @@ import {
   cloneDrawingEntity,
   commitDrawingDocumentDraft,
   createDrawingEntity,
+  isCanonicalDrawingEntity,
 } from "./drawingDocument.js";
 import type {
   CanonicalDrawingGeometry,
@@ -100,7 +101,12 @@ function fail(
 }
 
 function applyCreate(draft: MutableDrawingDraft, command: CreateDrawingCommand): void {
-  const entity = createDrawingEntity(command.entity) as DrawingEntity;
+  // Command batches built by the strict codec already own a deeply immutable,
+  // module-authenticated entity. Reuse it across preflight and store dispatch;
+  // plain or merely frozen caller input still crosses the full clone/validator.
+  const entity = isCanonicalDrawingEntity(command.entity)
+    ? command.entity
+    : createDrawingEntity(command.entity) as DrawingEntity;
   if (draft.entities.has(entity.id)) throw new TypeError(`drawing entity already exists: ${entity.id}`);
   const at = command.at ?? draft.zOrder.length;
   if (!Number.isSafeInteger(at) || at < 0 || at > draft.zOrder.length) {

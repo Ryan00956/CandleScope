@@ -48,6 +48,9 @@ interface FreehandVisibleRenderData {
   hidden: false;
   paths: ScreenPoint[][];
   unresolvedGapIndexes: number[];
+  committed: boolean;
+  geometryRevision: number;
+  attachmentRevision: number;
   color: string;
   lineWidth: number;
   hovered: boolean;
@@ -61,6 +64,14 @@ type FreehandRenderData = FreehandVisibleRenderData | {
   paths: [];
   unresolvedGapIndexes: [];
 };
+
+export interface FreehandCommittedPaintAck {
+  readonly id: string;
+  readonly geometryRevision: number;
+  readonly paintSequence: number;
+}
+
+export type FreehandCommittedPaintListener = (ack: FreehandCommittedPaintAck) => void;
 
 interface FreehandScreenProjection {
   paths: ScreenPoint[][];
@@ -310,9 +321,11 @@ function tracePath(
 // ── Pane Renderer ──
 
 class FreehandRenderer implements PrimitivePaneRenderer {
+  _source: FreehandDrawingPrimitive;
   _data: FreehandRenderData | null;
 
-  constructor() {
+  constructor(source: FreehandDrawingPrimitive) {
+    this._source = source;
     this._data = null;
   }
 
@@ -326,6 +339,7 @@ class FreehandRenderer implements PrimitivePaneRenderer {
     if (!data || !Array.isArray(data.paths)) return;
     if (data.hidden) return;
 
+    let painted = false;
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
       const hRatio = scope.horizontalPixelRatio;
@@ -360,7 +374,10 @@ class FreehandRenderer implements PrimitivePaneRenderer {
         tracePath(ctx, scaledPath, isSquareBrush);
         traced = true;
       }
-      if (traced) ctx.stroke();
+      if (traced) {
+        ctx.stroke();
+        painted = true;
+      }
 
       ctx.restore();
     });
@@ -369,6 +386,7 @@ class FreehandRenderer implements PrimitivePaneRenderer {
       drawingMainThreadMs: durationMs,
       sceneProjectPaintMs: durationMs,
     });
+    if (painted) this._source._acknowledgeCommittedPaint(data);
   }
 }
 
@@ -380,7 +398,7 @@ class FreehandPaneView implements PrimitivePaneView {
 
   constructor(source: FreehandDrawingPrimitive) {
     this._source = source;
-    this._renderer = new FreehandRenderer();
+    this._renderer = new FreehandRenderer(source);
   }
 
   update(recordRebuild = true): void {
@@ -413,6 +431,9 @@ class FreehandPaneView implements PrimitivePaneView {
     this._renderer.update({
       paths,
       unresolvedGapIndexes: projection.unresolvedGapIndexes,
+      committed: !source._isPreview && !source._previewCancelled,
+      geometryRevision: source._geometryRevision,
+      attachmentRevision: source._attachmentRevision,
       color: source._color,
       lineWidth: source._lineWidth,
       opacity: source._opacity,
@@ -537,6 +558,10 @@ export class FreehandDrawingPrimitive {
   _requestUpdate: (() => void) | null;
   _geometryRevision: number;
   _viewUpdateBatching: boolean;
+  _committedPaintListeners: Set<FreehandCommittedPaintListener>;
+  _paintSequence: number;
+  _attachmentRevision: number;
+  _disposed: boolean;
 
   /**
    * @param {object} opts
@@ -582,11 +607,17 @@ export class FreehandDrawingPrimitive {
     this._requestUpdate = null;
     this._geometryRevision = 1;
     this._viewUpdateBatching = false;
+    this._committedPaintListeners = new Set();
+    this._paintSequence = 0;
+    this._attachmentRevision = 0;
+    this._disposed = false;
   }
 
   // ── ISeriesPrimitive interface ──
 
   attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
+    if (this._disposed) return;
+    this._attachmentRevision += 1;
     this._chart = chart;
     this._series = series;
     this._requestUpdate = () => {
@@ -598,9 +629,17 @@ export class FreehandDrawingPrimitive {
 
   detached(): void {
     if (this._viewUpdateBatching) unregisterBatchedFreehand(this);
+    this._attachmentRevision += 1;
+    this._committedPaintListeners.clear();
     this._chart = null;
     this._series = null;
     this._requestUpdate = null;
+  }
+
+  dispose(): void {
+    if (this._disposed) return;
+    this._disposed = true;
+    this.detached();
   }
 
   updateAllViews(): void {
@@ -631,6 +670,48 @@ export class FreehandDrawingPrimitive {
   get compositeOperation(): GlobalCompositeOperation { return this._compositeOperation; }
   get brushShape(): BrushShape { return this._brushShape; }
   get geometryRevision(): number { return this._geometryRevision; }
+
+  /** Subscribe to completed committed bitmap strokes. Detached/disposed instances drop all listeners. */
+  subscribeCommittedPaint(listener: FreehandCommittedPaintListener): () => void {
+    if (this._disposed || typeof listener !== "function") return () => {};
+    const listeners = this._committedPaintListeners;
+    listeners.add(listener);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      listeners.delete(listener);
+    };
+  }
+
+  /** Renderer-only acknowledgement; stale plans and non-committed states fail closed. */
+  _acknowledgeCommittedPaint(data: FreehandVisibleRenderData): void {
+    if (!data.committed
+      || this._disposed
+      || this._hidden
+      || this._isPreview
+      || this._previewCancelled
+      || !this._chart
+      || !this._series
+      || data.geometryRevision !== this._geometryRevision
+      || data.attachmentRevision !== this._attachmentRevision) {
+      return;
+    }
+    this._paintSequence += 1;
+    const ack = Object.freeze({
+      id: this._id,
+      geometryRevision: data.geometryRevision,
+      paintSequence: this._paintSequence,
+    });
+    for (const listener of Array.from(this._committedPaintListeners)) {
+      if (!this._committedPaintListeners.has(listener)) continue;
+      try {
+        listener(ack);
+      } catch {
+        // Paint acknowledgement observers must never break the chart renderer.
+      }
+    }
+  }
 
   /** Phase 4 keeps freehand as legacy primitives but batches their viewport projection once per surface frame. */
   setViewUpdateBatching(enabled: boolean): void {

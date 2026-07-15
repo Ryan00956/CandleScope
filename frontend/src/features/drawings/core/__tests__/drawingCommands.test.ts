@@ -112,6 +112,22 @@ test("create, reorder, delete, and clear keep entity order a bijection", () => {
   assert.deepEqual(cleared.zOrder, []);
 });
 
+test("create reuses only module-authenticated canonical entities", () => {
+  const canonical = createDrawingEntity(lineInput("canonical"));
+  const canonicalResult = success(applyDrawingCommands(
+    createDrawingDocument({ scopeKey: "scope-a" }),
+    [{ type: "create", entity: canonical }],
+  ));
+  assert.strictEqual(canonicalResult.entities.get("canonical"), canonical);
+
+  const frozenInput = Object.freeze(lineInput("frozen-input"));
+  const frozenResult = success(applyDrawingCommands(
+    createDrawingDocument({ scopeKey: "scope-a" }),
+    [{ type: "create", entity: frozenInput }],
+  ));
+  assert.notStrictEqual(frozenResult.entities.get("frozen-input"), frozenInput);
+});
+
 test("dispatchMany is one atomic document commit and rolls every staged command back on failure", () => {
   const initial = createDrawingDocument({ scopeKey: "scope-a" });
   const batchResult = applyDrawingCommands(initial, [

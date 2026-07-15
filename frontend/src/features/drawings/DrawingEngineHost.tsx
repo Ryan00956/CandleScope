@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useDrawing } from "./drawingInteractionController.js";
 import TextEditOverlay from "../../components/TextEditOverlay";
 import TextFormatBar from "../../components/TextFormatBar";
+import DrawingInteractionOverlay from "./rendering/DrawingInteractionOverlay.js";
+import {
+    resolveDrawingInteractionSurfaceMode,
+    resolveEffectiveDrawingInteractionSurfaceMode,
+} from "./interactionSurfaceMode.js";
+import { resolvePhase4DrawingEngineMode } from "./drawingEngineMode.js";
+import { drawingPerfCounters } from "./performance/drawingPerfCounters.js";
 import type { MutableRefObject } from "react";
 import type {
     DrawingAnchorMode,
@@ -45,7 +52,7 @@ export interface DrawingEngineHostProps {
     onSelectedDrawingChange?: ((drawing: SelectedDrawingMeta | null) => void) | null;
 }
 
-export default function DrawingEngineHost({
+function DrawingEngineHost({
     chartAdapter,
     chartContainerRef,
     activeTool,
@@ -67,6 +74,24 @@ export default function DrawingEngineHost({
     onApiChange,
     onSelectedDrawingChange,
 }: DrawingEngineHostProps) {
+    const dynamicCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const liveInkCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const [interactionSurfaceMode, setInteractionSurfaceMode] = useState(
+        () => {
+            const requested = resolveDrawingInteractionSurfaceMode().mode;
+            return resolveEffectiveDrawingInteractionSurfaceMode(
+                requested,
+                resolvePhase4DrawingEngineMode().effective,
+            );
+        },
+    );
+    const handleInteractionSurfaceFallback = useCallback(() => {
+        // The rollout flag is mount-locked, but a scene-canary initialization
+        // failure is allowed to make one fail-closed transition. Keep the
+        // interaction owner aligned with the legacy static surface that the
+        // persistence lifecycle just restored.
+        setInteractionSurfaceMode("legacy");
+    }, []);
     const drawing = useDrawing({
         chartAdapter,
         chartContainerRef,
@@ -84,6 +109,10 @@ export default function DrawingEngineHost({
         seriesReady: drawingSeriesGeneration,
         drawingCoordinateKey,
         drawingAnchorMode,
+        interactionSurfaceMode,
+        dynamicCanvasRef,
+        liveInkCanvasRef,
+        onInteractionSurfaceFallback: handleInteractionSurfaceFallback,
         ...(onToolChange === undefined ? {} : { onToolChange }),
     });
     const {
@@ -101,6 +130,10 @@ export default function DrawingEngineHost({
     const editingTextIdRef = useRef(editingTextId);
     const commitTextEditingRef = useRef(commitTextEditing);
     const [chartContainerWidth, setChartContainerWidth] = useState<number>(0);
+
+    useEffect(() => {
+        drawingPerfCounters.incrementCounter("reactRenderCount");
+    });
 
     useEffect(() => {
         editingTextIdRef.current = editingTextId;
@@ -172,6 +205,14 @@ export default function DrawingEngineHost({
     return (
         <>
             <span data-drawing-engine="ready" hidden />
+            <span data-drawing-interaction-mode={interactionSurfaceMode} hidden />
+
+            {interactionSurfaceMode === "overlay" && (
+                <DrawingInteractionOverlay
+                    dynamicCanvasRef={dynamicCanvasRef}
+                    liveInkCanvasRef={liveInkCanvasRef}
+                />
+            )}
 
             {drawing.editingTextId && drawing.editingTextPos && (
                 <TextEditOverlay
@@ -212,3 +253,5 @@ export default function DrawingEngineHost({
         </>
     );
 }
+
+export default memo(DrawingEngineHost);

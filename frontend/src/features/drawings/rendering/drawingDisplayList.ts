@@ -6,6 +6,7 @@ import type {
   DrawingHit,
   DrawingKind,
   ScreenBox,
+  ScreenPoint,
   ShapeLineStyle,
   ShapeType,
 } from "../drawingTypes.js";
@@ -198,6 +199,22 @@ export function drawingDisplayEntityScreenBox(
     width: maxX - minX,
     height: maxY - minY,
   });
+}
+
+/** Return the exact accepted interaction handles for one scene entity. */
+export function drawingDisplayEntityScreenHandles(
+  list: DrawingScreenDisplayList,
+  entityId: string,
+): readonly ScreenPoint[] | null {
+  const entity = list.entities.find((candidate) => candidate.id === entityId);
+  if (!entity) return null;
+  const handles: ScreenPoint[] = [];
+  for (let index = 0; index < entity.handleCount; index += 1) {
+    const point = pointAt(list.handles, entity.handleOffset + index);
+    if (!point) continue;
+    handles.push(Object.freeze({ x: point[0], y: point[1] }));
+  }
+  return Object.freeze(handles);
 }
 
 function finitePairBuffer(value: Float64Array): boolean {

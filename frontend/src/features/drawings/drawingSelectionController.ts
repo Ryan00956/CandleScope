@@ -203,9 +203,11 @@ export interface DrawingSelectionRuntime {
 export function useDrawingSelection({
   primitivesRef,
   onSelectionChange,
+  mutatePrimitiveVisualState = true,
 }: {
   primitivesRef: MutableRefObject<DrawingPrimitive[]>;
   onSelectionChange?: () => void;
+  mutatePrimitiveVisualState?: boolean;
 }): DrawingSelectionRuntime {
   const selectedIdRef = useRef<string | null>(null);
   const [selectedPrimId, setSelectedPrimId] = useState<string | null>(null);
@@ -227,9 +229,11 @@ export function useDrawingSelection({
     setSelectedPrimId(id);
     let selectedPrim: DrawingPrimitive | null = null;
     for (const prim of primitivesRef.current) {
-      if (isSelectablePrimitive(prim)) {
+      if (mutatePrimitiveVisualState && isSelectablePrimitive(prim)) {
         prim.setSelected(prim.id === id);
         if (prim.id === id) selectedPrim = prim;
+      } else if (prim.id === id) {
+        selectedPrim = prim;
       }
     }
     if (!selectedPrim) {
@@ -238,8 +242,8 @@ export function useDrawingSelection({
     }
     setSelectedTextUi(selectedTextUiFromPrimitive(selectedPrim));
     setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(selectedPrim));
-    onSelectionChange?.();
-  }, [onSelectionChange, primitivesRef]);
+    if (mutatePrimitiveVisualState) onSelectionChange?.();
+  }, [mutatePrimitiveVisualState, onSelectionChange, primitivesRef]);
 
   const deselectAll = useCallback(() => {
     selectedIdRef.current = null;
@@ -247,12 +251,12 @@ export function useDrawingSelection({
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     setSelectedDrawingMeta(null);
     for (const prim of primitivesRef.current) {
-      if (isSelectablePrimitive(prim)) {
+      if (mutatePrimitiveVisualState && isSelectablePrimitive(prim)) {
         prim.setSelected(false);
       }
     }
-    onSelectionChange?.();
-  }, [onSelectionChange, primitivesRef]);
+    if (mutatePrimitiveVisualState) onSelectionChange?.();
+  }, [mutatePrimitiveVisualState, onSelectionChange, primitivesRef]);
 
   const getPrimitiveById = useCallback((id: string) => {
     return primitivesRef.current.find((p) => p.id === id) || null;

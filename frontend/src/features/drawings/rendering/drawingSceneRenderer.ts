@@ -314,7 +314,12 @@ export class DrawingSceneRenderer implements PrimitivePaneRenderer {
   readonly #dashedScratch = [6, 4];
   readonly #dottedScratch = [1, 4];
   readonly #selectionScratch = [4, 3];
+  readonly #onPainted: ((plan: DrawingScreenDisplayList) => void) | null;
   #plan: DrawingScreenDisplayList | null = null;
+
+  constructor(onPainted: ((plan: DrawingScreenDisplayList) => void) | null = null) {
+    this.#onPainted = onPainted;
+  }
 
   setPlan(plan: DrawingScreenDisplayList | null): void {
     this.#plan = plan;
@@ -326,54 +331,60 @@ export class DrawingSceneRenderer implements PrimitivePaneRenderer {
 
   draw(target: PrimitiveCanvasTarget): void {
     const plan = this.#plan;
-    if (!plan || plan.entities.length === 0) return;
+    if (!plan) return;
     const startedAt = drawingPerfNow();
-    target.useBitmapCoordinateSpace((scope) => {
-      const horizontalPixelRatio = scope.horizontalPixelRatio;
-      const verticalPixelRatio = scope.verticalPixelRatio;
-      this.#dashedScratch[0] = 6 * horizontalPixelRatio;
-      this.#dashedScratch[1] = 4 * horizontalPixelRatio;
-      this.#dottedScratch[0] = horizontalPixelRatio;
-      this.#dottedScratch[1] = 4 * horizontalPixelRatio;
-      for (const entity of plan.entities) {
-        const op = entity.renderSpec?.op;
-        if (op === "line") {
-          drawLine(
-            scope.context,
-            entity,
-            plan,
-            horizontalPixelRatio,
-            verticalPixelRatio,
-            scope.bitmapSize.width,
-            scope.bitmapSize.height,
-          );
-        } else if (op === "axis-line") {
-          drawAxisLine(
-            scope.context,
-            entity,
-            plan,
-            horizontalPixelRatio,
-            verticalPixelRatio,
-          );
-        } else if (op === "shape") {
-          drawShape(
-            scope.context,
-            entity,
-            plan,
-            horizontalPixelRatio,
-            verticalPixelRatio,
-            this.#emptyDashScratch,
-            this.#dashedScratch,
-            this.#dottedScratch,
-            this.#selectionScratch,
-          );
+    if (plan.entities.length > 0) {
+      target.useBitmapCoordinateSpace((scope) => {
+        const horizontalPixelRatio = scope.horizontalPixelRatio;
+        const verticalPixelRatio = scope.verticalPixelRatio;
+        this.#dashedScratch[0] = 6 * horizontalPixelRatio;
+        this.#dashedScratch[1] = 4 * horizontalPixelRatio;
+        this.#dottedScratch[0] = horizontalPixelRatio;
+        this.#dottedScratch[1] = 4 * horizontalPixelRatio;
+        for (const entity of plan.entities) {
+          const op = entity.renderSpec?.op;
+          if (op === "line") {
+            drawLine(
+              scope.context,
+              entity,
+              plan,
+              horizontalPixelRatio,
+              verticalPixelRatio,
+              scope.bitmapSize.width,
+              scope.bitmapSize.height,
+            );
+          } else if (op === "axis-line") {
+            drawAxisLine(
+              scope.context,
+              entity,
+              plan,
+              horizontalPixelRatio,
+              verticalPixelRatio,
+            );
+          } else if (op === "shape") {
+            drawShape(
+              scope.context,
+              entity,
+              plan,
+              horizontalPixelRatio,
+              verticalPixelRatio,
+              this.#emptyDashScratch,
+              this.#dashedScratch,
+              this.#dottedScratch,
+              this.#selectionScratch,
+            );
+          }
         }
-      }
-    });
+      });
+    }
     const durationMs = Math.max(0, drawingPerfNow() - startedAt);
     accumulateDrawingPerfFrameWork({
       drawingMainThreadMs: durationMs,
       sceneProjectPaintMs: durationMs,
     });
+    // A non-null empty display list is still a visible scene state: invoking
+    // draw proves that the chart consumed that exact empty revision. Null
+    // means no scene is published and therefore cannot acknowledge anything.
+    this.#onPainted?.(plan);
   }
 }

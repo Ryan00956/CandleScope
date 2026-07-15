@@ -1,6 +1,7 @@
 import {
   createDrawingDocument,
   createDrawingEntity,
+  isCanonicalDrawingEntity,
   DRAWING_DOCUMENT_SCHEMA_VERSION,
   MAX_DRAWING_DOCUMENT_ENTITIES,
 } from "./drawingDocument.js";
@@ -250,7 +251,9 @@ function copyDefinedFields(
 /** Convert one canonical entity back into the legacy-compatible wire contract. */
 export function savedDrawingFromEntity(entity: DrawingEntity): SavedDrawing | null {
   try {
-    const canonical = createDrawingEntity(entity);
+    const canonical = isCanonicalDrawingEntity(entity)
+      ? entity
+      : createDrawingEntity(entity);
     if (canonical.geometry.kind !== canonical.kind || canonical.style.kind !== canonical.kind) {
       return null;
     }

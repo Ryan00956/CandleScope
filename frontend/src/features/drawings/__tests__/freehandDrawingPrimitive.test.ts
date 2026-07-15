@@ -12,6 +12,7 @@ import type {
 } from "../../../chart-adapter/coordinateBridge.js";
 import { createDrawingFrameSnapshotFactory } from "../../../chart-adapter/drawingFrameSnapshot.js";
 import { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
+import type { FreehandCommittedPaintAck } from "../primitives/FreehandDrawingPrimitive.js";
 import { freehandStrokeToCoordinates } from "../primitives/coordinateUtils.js";
 import {
   drawingPerfCounters,
@@ -132,7 +133,10 @@ function attachPrimitive(
   }));
 }
 
-function attachedPrimitive(): FreehandDrawingPrimitive {
+function drawingSurface(): {
+  chart: CoordinateChartBridge;
+  series: CoordinateSeriesBridge & { priceToCoordinate(price: number): number };
+} {
   const rows = [row(0, 100, 100, 100), row(1, 200, 101, 200)];
   const chart: CoordinateChartBridge = {
     timeScale: () => ({
@@ -144,6 +148,11 @@ function attachedPrimitive(): FreehandDrawingPrimitive {
     data: () => rows,
     priceToCoordinate: (price) => price,
   };
+  return { chart, series };
+}
+
+function attachedPrimitive(): FreehandDrawingPrimitive {
+  const { chart, series } = drawingSurface();
   const primitive = new FreehandDrawingPrimitive({
     id: "v2-gap",
     stroke: strokeWithUnresolvedMiddle(),
@@ -174,6 +183,156 @@ function renderedPathMoves(primitive: FreehandDrawingPrimitive): Array<[number, 
   }));
   return moves;
 }
+
+function drawCurrentFreehandRenderer(
+  primitive: FreehandDrawingPrimitive,
+  onStroke: () => void = () => {},
+): void {
+  const context = partialMock<CanvasRenderingContext2D>({
+    beginPath() {},
+    lineTo() {},
+    moveTo() {},
+    quadraticCurveTo() {},
+    restore() {},
+    save() {},
+    stroke: onStroke,
+  });
+  mustBeDefined(mustBeDefined(primitive.paneViews()[0]).renderer()).draw(
+    partialMock<PrimitiveCanvasTarget>({
+      useBitmapCoordinateSpace: (draw) => draw(structuralMock<BitmapScope>({
+        context,
+        horizontalPixelRatio: 1,
+        verticalPixelRatio: 1,
+      })),
+    }),
+  );
+}
+
+test("committed freehand paint subscribers run only after the bitmap stroke completes", () => {
+  const primitive = attachedPrimitive();
+  const acks: FreehandCommittedPaintAck[] = [];
+  const order: string[] = [];
+  const unsubscribe = primitive.subscribeCommittedPaint((ack) => {
+    order.push("ack");
+    acks.push(ack);
+  });
+
+  primitive.updateAllViews();
+  assert.equal(acks.length, 0);
+  drawCurrentFreehandRenderer(primitive, () => order.push("stroke"));
+
+  assert.deepEqual(order, ["stroke", "ack"]);
+  assert.deepEqual([...acks], [{
+    id: "v2-gap",
+    geometryRevision: primitive.geometryRevision,
+    paintSequence: 1,
+  }]);
+  assert.equal(Object.isFrozen(acks[0]), true);
+
+  drawCurrentFreehandRenderer(primitive);
+  assert.deepEqual(acks.map((ack) => ack.paintSequence), [1, 2]);
+  unsubscribe();
+  unsubscribe();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(acks.length, 2);
+});
+
+test("a stale committed renderer revision cannot acknowledge a newer freehand commit", () => {
+  const primitive = attachedPrimitive();
+  primitive.updateAllViews();
+  const acks: FreehandCommittedPaintAck[] = [];
+  primitive.subscribeCommittedPaint((ack) => acks.push(ack));
+  const expectedRevision = primitive.geometryRevision + 1;
+
+  assert.equal(primitive.commitStroke(strokeWithUnresolvedMiddle()), true);
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(acks.length, 0);
+
+  primitive.updateAllViews();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(acks.length, 1);
+  assert.deepEqual(acks.map((ack) => ack.geometryRevision), [expectedRevision]);
+});
+
+test("preview, cancelled, hidden, and non-renderable freehand draws never acknowledge", () => {
+  const preview = attachedPrimitive();
+  let previewAcks = 0;
+  let previewStrokes = 0;
+  assert.equal(preview.setPreviewPoints([{ x: 0, y: 0 }, { x: 1, y: 1 }]), true);
+  preview.subscribeCommittedPaint(() => { previewAcks += 1; });
+  preview.updateAllViews();
+  drawCurrentFreehandRenderer(preview, () => { previewStrokes += 1; });
+  assert.equal(previewStrokes, 1);
+  assert.equal(previewAcks, 0);
+  assert.equal(preview.cancelPreview(), true);
+  preview.updateAllViews();
+  drawCurrentFreehandRenderer(preview);
+  assert.equal(previewAcks, 0);
+
+  const hidden = attachedPrimitive();
+  let hiddenAcks = 0;
+  hidden.subscribeCommittedPaint(() => { hiddenAcks += 1; });
+  hidden.setHidden(true, false);
+  hidden.updateAllViews();
+  drawCurrentFreehandRenderer(hidden);
+  assert.equal(hiddenAcks, 0);
+
+  const { chart, series } = drawingSurface();
+  const empty = new FreehandDrawingPrimitive({ id: "empty-committed", dataPoints: [] });
+  let emptyAcks = 0;
+  attachPrimitive(empty, chart, series);
+  empty.subscribeCommittedPaint(() => { emptyAcks += 1; });
+  empty.updateAllViews();
+  drawCurrentFreehandRenderer(empty);
+  assert.equal(emptyAcks, 0);
+});
+
+test("freehand paint subscriptions are cancelled by unsubscribe, detach, and dispose", () => {
+  const { chart, series } = drawingSurface();
+  const primitive = new FreehandDrawingPrimitive({
+    id: "paint-lifecycle",
+    dataPoints: [{ time: 100, price: 1 }, { time: 200, price: 2 }],
+  });
+  attachPrimitive(primitive, chart, series);
+  let detachedListenerCalls = 0;
+  const detachUnsubscribe = primitive.subscribeCommittedPaint(() => {
+    detachedListenerCalls += 1;
+  });
+  primitive.updateAllViews();
+  primitive.detached();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(detachedListenerCalls, 0);
+
+  attachPrimitive(primitive, chart, series);
+  let currentListenerCalls = 0;
+  const currentUnsubscribe = primitive.subscribeCommittedPaint(() => {
+    currentListenerCalls += 1;
+  });
+  primitive.updateAllViews();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(detachedListenerCalls, 0);
+  assert.equal(currentListenerCalls, 1);
+  detachUnsubscribe();
+  currentUnsubscribe();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(currentListenerCalls, 1);
+
+  let disposedListenerCalls = 0;
+  const disposeUnsubscribe = primitive.subscribeCommittedPaint(() => {
+    disposedListenerCalls += 1;
+  });
+  primitive.updateAllViews();
+  primitive.dispose();
+  primitive.dispose();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(disposedListenerCalls, 0);
+  primitive.subscribeCommittedPaint(() => { disposedListenerCalls += 1; });
+  attachPrimitive(primitive, chart, series);
+  primitive.updateAllViews();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(disposedListenerCalls, 0);
+  disposeUnsubscribe();
+});
 
 test("freehand v2 renderer and hit testing never bridge an unresolved span", () => {
   const primitive = attachedPrimitive();

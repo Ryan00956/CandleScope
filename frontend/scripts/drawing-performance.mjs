@@ -23,6 +23,13 @@ import {
   PHASE4_REQUIRED_SCENARIO_IDS,
   buildPhase4Acceptance,
 } from "./drawing-performance-phase4.mjs";
+import {
+  PHASE5_POINTER_SAMPLE_COUNT,
+  PHASE5_REQUIRED_SCENARIO_IDS,
+  PHASE5_SCENARIO_IDS,
+  buildPhase5Acceptance,
+} from "./drawing-performance-phase5.mjs";
+import { phase5BrowserProbeBootstrap } from "./drawing-performance-phase5-browser.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -190,6 +197,96 @@ const DEFAULT_SCENARIOS = Object.freeze([
     // one scene primitive plus 64 legacy primitives, not the global one gate.
     targetCounters: ["requestUpdatePerFrame"],
   }),
+  Object.freeze({
+    id: PHASE5_SCENARIO_IDS.pen,
+    fixture: "freehand64x512",
+    action: "phase5-pen",
+    // Exercise 4096 active samples over the full 64x512 scene, then clear the
+    // maxed aggregate fixture and commit a second legal 4096-point stroke.
+    expectedEntityDelta: -63,
+    expectedTypeDeltas: Object.freeze({ freehand: -63 }),
+    // The interaction draft receives 4096 samples; persistence may apply the
+    // canonical final simplifier before serialization, so stored point count
+    // is not used as a proxy for input coverage.
+    minimumFinalPointCount: 1,
+    requiredMetrics: [
+      "drawingMainThreadMs",
+      "frameIntervalMs",
+      "inputToNextPaintMs",
+      "mouseupSyncMs",
+      "activeOverlayCpuMs",
+    ],
+    targetMetrics: ["drawingMainThreadMs", "frameIntervalMs", "inputToNextPaintMs", "mouseupSyncMs", "activeOverlayCpuMs"],
+    targetCounters: [],
+  }),
+  Object.freeze({
+    id: PHASE5_SCENARIO_IDS.highlighter,
+    fixture: "freehand64x512",
+    action: "phase5-highlighter",
+    expectedEntityDelta: -63,
+    expectedTypeDeltas: Object.freeze({ freehand: -64, highlighter: 1 }),
+    minimumFinalPointCount: 1,
+    requiredMetrics: [
+      "drawingMainThreadMs",
+      "frameIntervalMs",
+      "inputToNextPaintMs",
+      "mouseupSyncMs",
+      "activeOverlayCpuMs",
+    ],
+    targetMetrics: ["drawingMainThreadMs", "frameIntervalMs", "inputToNextPaintMs", "mouseupSyncMs", "activeOverlayCpuMs"],
+    targetCounters: [],
+  }),
+  Object.freeze({
+    id: PHASE5_SCENARIO_IDS.dragResize,
+    fixture: "empty",
+    action: "phase5-drag-resize",
+    expectedEntityDelta: 1,
+    expectedTypeDeltas: Object.freeze({ line: 1 }),
+    minimumPointDelta: 2,
+    requiredMetrics: [
+      "drawingMainThreadMs",
+      "frameIntervalMs",
+      "inputToNextPaintMs",
+      "mouseupSyncMs",
+      "activeOverlayCpuMs",
+    ],
+    targetMetrics: ["drawingMainThreadMs", "frameIntervalMs", "inputToNextPaintMs", "mouseupSyncMs", "activeOverlayCpuMs"],
+    targetCounters: [],
+  }),
+  Object.freeze({
+    id: PHASE5_SCENARIO_IDS.twoPoint,
+    fixture: "empty",
+    action: "phase5-two-point",
+    expectedEntityDelta: 1,
+    expectedTypeDeltas: Object.freeze({ line: 1 }),
+    minimumPointDelta: 2,
+    requiredMetrics: [
+      "drawingMainThreadMs",
+      "frameIntervalMs",
+      "inputToNextPaintMs",
+      "mouseupSyncMs",
+      "activeOverlayCpuMs",
+    ],
+    targetMetrics: ["drawingMainThreadMs", "frameIntervalMs", "inputToNextPaintMs", "mouseupSyncMs", "activeOverlayCpuMs"],
+    targetCounters: [],
+  }),
+  Object.freeze({
+    id: PHASE5_SCENARIO_IDS.eraserCancel,
+    fixture: "empty",
+    action: "phase5-eraser-cancel",
+    expectedEntityDelta: 1,
+    expectedTypeDeltas: Object.freeze({ line: 1 }),
+    minimumPointDelta: 2,
+    requiredMetrics: [
+      "drawingMainThreadMs",
+      "frameIntervalMs",
+      "inputToNextPaintMs",
+      "mouseupSyncMs",
+      "activeOverlayCpuMs",
+    ],
+    targetMetrics: ["drawingMainThreadMs", "frameIntervalMs", "inputToNextPaintMs", "mouseupSyncMs", "activeOverlayCpuMs"],
+    targetCounters: [],
+  }),
 ]);
 
 function parseNumber(value, label, { min = 0, integer = false } = {}) {
@@ -203,14 +300,21 @@ function parseNumber(value, label, { min = 0, integer = false } = {}) {
 function parsePhase(value) {
   const normalized = String(value || "").trim().toLowerCase();
   const phase = /^\d+$/.test(normalized) ? `phase${normalized}` : normalized;
-  if (!["phase0", "phase1", "phase3", "phase4"].includes(phase)) {
-    throw new Error("--phase must be phase0, phase1, phase3, or phase4");
+  if (!["phase0", "phase1", "phase3", "phase4", "phase5"].includes(phase)) {
+    throw new Error("--phase must be phase0, phase1, phase3, phase4, or phase5");
   }
   return phase;
 }
 
 function parseArgs(argv) {
   let scenariosExplicit = false;
+  let dprExplicit = false;
+  let engineModeExplicit = ["legacy", "shadow", "scene-canary", "scene"].includes(
+    process.env.VITE_DRAWING_ENGINE_MODE,
+  );
+  let interactionSurfaceModeExplicit = ["overlay", "legacy"].includes(
+    process.env.VITE_DRAWING_INTERACTION_OVERLAY,
+  );
   const args = {
     url: "",
     out: "",
@@ -225,7 +329,7 @@ function parseArgs(argv) {
     intervalSeconds: 3_600,
     wheelEvents: 60,
     hoverEvents: 240,
-    pointerSamples: 4_096,
+    pointerSamples: PHASE5_POINTER_SAMPLE_COUNT,
     settleMs: 750,
     timeoutMs: 45_000,
     headless: false,
@@ -234,8 +338,15 @@ function parseArgs(argv) {
     engineMode: ["legacy", "shadow", "scene-canary", "scene"].includes(
       process.env.VITE_DRAWING_ENGINE_MODE,
     ) ? process.env.VITE_DRAWING_ENGINE_MODE : "legacy",
+    interactionSurfaceMode: interactionSurfaceModeExplicit
+      ? process.env.VITE_DRAWING_INTERACTION_OVERLAY
+      : null,
     enforceTargets: false,
-    scenarios: DEFAULT_SCENARIOS.map((scenario) => scenario.id),
+    // Preserve the historical phase0/1/3 default set. Phase 4 and Phase 5
+    // replace it below with their own formal matrices.
+    scenarios: DEFAULT_SCENARIOS
+      .map((scenario) => scenario.id)
+      .filter((id) => !PHASE5_REQUIRED_SCENARIO_IDS.includes(id)),
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -245,7 +356,10 @@ function parseArgs(argv) {
     else if (arg === "--compare-before") args.compareBefore = String(argv[++index] || "");
     else if (arg === "--chrome") args.chromePath = String(argv[++index] || "");
     else if (arg === "--bars") args.bars = parseNumber(argv[++index], "--bars", { min: 2, integer: true });
-    else if (arg === "--dpr") args.dpr = parseNumber(argv[++index], "--dpr", { min: 0.5 });
+    else if (arg === "--dpr") {
+      args.dpr = parseNumber(argv[++index], "--dpr", { min: 0.5 });
+      dprExplicit = true;
+    }
     else if (arg === "--runs") args.runs = parseNumber(argv[++index], "--runs", { min: 1, integer: true });
     else if (arg === "--warmup-runs") {
       args.warmupRuns = parseNumber(argv[++index], "--warmup-runs", { min: 0, integer: true });
@@ -278,6 +392,14 @@ function parseArgs(argv) {
         throw new Error("--engine-mode must be legacy, shadow, scene-canary, or scene");
       }
       args.engineMode = mode;
+      engineModeExplicit = true;
+    } else if (arg === "--interaction-surface-mode") {
+      const mode = String(argv[++index] || "");
+      if (!["overlay", "legacy"].includes(mode)) {
+        throw new Error("--interaction-surface-mode must be overlay or legacy");
+      }
+      args.interactionSurfaceMode = mode;
+      interactionSurfaceModeExplicit = true;
     } else if (arg === "--headless") args.headless = true;
     else if (arg === "--smoke") args.smoke = true;
     else if (arg === "--enforce-targets") args.enforceTargets = true;
@@ -286,6 +408,16 @@ function parseArgs(argv) {
 
   if (!scenariosExplicit && args.phase === "phase4") {
     args.scenarios = [...PHASE4_REQUIRED_SCENARIO_IDS];
+  }
+  if (!scenariosExplicit && args.phase === "phase5") {
+    args.scenarios = [...PHASE5_REQUIRED_SCENARIO_IDS];
+  }
+  if (args.phase === "phase5" && !dprExplicit) args.dpr = 1.5;
+  if (args.phase === "phase5" && !engineModeExplicit) {
+    args.engineMode = "scene-canary";
+  }
+  if (args.phase === "phase5" && !interactionSurfaceModeExplicit) {
+    args.interactionSurfaceMode = "overlay";
   }
 
   const knownScenarioIds = new Set(DEFAULT_SCENARIOS.map((scenario) => scenario.id));
@@ -501,24 +633,31 @@ function metricDelta(before, after, name) {
   return Number.isFinite(left) && Number.isFinite(right) ? Math.max(0, right - left) : null;
 }
 
-function managedBuildEnvironment(engineMode) {
-  return {
+function managedBuildEnvironment(engineMode, interactionSurfaceMode = null) {
+  const environment = {
     ...MANAGED_BUILD_ENVIRONMENT,
     VITE_DRAWING_ENGINE_MODE: engineMode,
   };
+  if (interactionSurfaceMode === "overlay" || interactionSurfaceMode === "legacy") {
+    environment.VITE_DRAWING_INTERACTION_OVERLAY = interactionSurfaceMode;
+  }
+  return environment;
 }
 
-function managedBuildProcessEnvironment(engineMode) {
+function managedBuildProcessEnvironment(engineMode, interactionSurfaceMode = null) {
   const inherited = Object.fromEntries(Object.entries(process.env)
     .filter(([name]) => !name.startsWith("VITE_")));
-  return { ...inherited, ...managedBuildEnvironment(engineMode) };
+  return {
+    ...inherited,
+    ...managedBuildEnvironment(engineMode, interactionSurfaceMode),
+  };
 }
 
-function ensureProductionBuild(engineMode) {
+function ensureProductionBuild(engineMode, interactionSurfaceMode = null) {
   const viteBin = path.join(FRONTEND_ROOT, "node_modules", "vite", "bin", "vite.js");
   execFileSync(process.execPath, [viteBin, "build"], {
     cwd: FRONTEND_ROOT,
-    env: managedBuildProcessEnvironment(engineMode),
+    env: managedBuildProcessEnvironment(engineMode, interactionSurfaceMode),
     stdio: "inherit",
     windowsHide: true,
   });
@@ -737,7 +876,12 @@ async function installScenarioBootstrap(cdp, fixture) {
   return response.result?.identifier || null;
 }
 
-async function waitForChartReady(cdp, expectedDrawingCount, timeoutMs) {
+async function waitForChartReady(
+  cdp,
+  expectedDrawingCount,
+  timeoutMs,
+  { requireDrawingEngine = false } = {},
+) {
   const started = Date.now();
   let latest = null;
   let lastEvaluationError = null;
@@ -782,7 +926,9 @@ async function waitForChartReady(cdp, expectedDrawingCount, timeoutMs) {
       ? { entityCount: 0, pointCount: 0, typeCounts: {} }
       : null);
     const normalizedLoadedDrawingCount = normalizedRuntimeSummary?.entityCount ?? null;
-    const drawingEngineSatisfied = expectedDrawingCount === 0 || latest?.drawingReady;
+    const drawingEngineSatisfied = expectedDrawingCount === 0 && !requireDrawingEngine
+      ? true
+      : latest?.drawingReady;
     const drawingSatisfied = drawingEngineSatisfied
       && latest?.drawingHandlePresent
       && normalizedLoadedDrawingCount === expectedDrawingCount;
@@ -843,6 +989,60 @@ async function selectToolVariant(cdp, parentTool, variant) {
     + "if(!el||el.disabled)return false;el.click();return true;"
     + "})()";
   return Boolean(await evaluate(cdp, expression));
+}
+
+async function selectToolVariantFromCandidates(cdp, parentTools, variant) {
+  const candidates = Array.isArray(parentTools) ? parentTools : [parentTools];
+  const opened = Boolean(await evaluate(cdp, "(() => {"
+    + "const selectors=" + JSON.stringify(candidates)
+    + ".map((tool)=>'[data-drawing-tool=\\\"'+CSS.escape(tool)+'\\\"]');"
+    + "const el=document.querySelector(selectors.join(','));"
+    + "if(!el||el.disabled)return false;"
+    + "el.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true,detail:2}));"
+    + "return true;"
+    + "})()"));
+  if (!opened) return false;
+  await waitNextAnimationFrame(cdp);
+  const expression = "(() => {"
+    + "const el=document.querySelector('[data-tool-variant=" + JSON.stringify(variant) + "]');"
+    + "if(!el||el.disabled)return false;el.click();return true;"
+    + "})()";
+  return Boolean(await evaluate(cdp, expression));
+}
+
+async function dispatchLeftClick(cdp, point, { modifiers = 0 } = {}) {
+  await dispatchMouseMove(cdp, point.x, point.y, 0, modifiers);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    modifiers,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: point.x,
+    y: point.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    modifiers,
+  });
+}
+
+async function dispatchEscape(cdp) {
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
+}
+
+async function clickDrawingAction(cdp, action) {
+  return Boolean(await evaluate(cdp, "(() => {"
+    + "const el=Array.from(document.querySelectorAll('[data-drawing-action]'))"
+    + ".find((node)=>node.getAttribute('data-drawing-action')===" + JSON.stringify(action) + ");"
+    + "if(!el||el.disabled)return false;el.click();return true;"
+    + "})()"));
 }
 
 async function waitNextAnimationFrame(cdp) {
@@ -907,13 +1107,14 @@ async function requestFinalShadowParity(cdp, timeoutMs) {
   return { passed: false, evidence: latest };
 }
 
-async function dispatchMouseMove(cdp, x, y, buttons = 0) {
+async function dispatchMouseMove(cdp, x, y, buttons = 0, modifiers = 0) {
   await cdp.send("Input.dispatchMouseEvent", {
     type: "mouseMoved",
     x,
     y,
     button: buttons ? "left" : "none",
     buttons,
+    modifiers,
   });
 }
 
@@ -1081,7 +1282,628 @@ async function runActiveFreehand(cdp, rect, count) {
   return count;
 }
 
-async function runScenarioAction(cdp, scenario, args, rect) {
+const PHASE5_LINE_TOOL_CANDIDATES = Object.freeze([
+  "line-segment",
+  "line-ray",
+  "line-infinite",
+  "line-horizontal",
+  "line-vertical",
+  "line-cross",
+  "angle-measure",
+]);
+
+function phase5LineGeometry(rect) {
+  const first = {
+    x: Math.round(rect.x + rect.width * 0.30),
+    y: Math.round(rect.y + rect.height * 0.36),
+  };
+  const second = {
+    x: Math.round(rect.x + rect.width * 0.67),
+    y: Math.round(rect.y + rect.height * 0.64),
+  };
+  return {
+    first,
+    second,
+    midpoint: {
+      x: Math.round((first.x + second.x) / 2),
+      y: Math.round((first.y + second.y) / 2),
+    },
+  };
+}
+
+function phase5FreehandPoint(rect, index) {
+  const left = rect.x + rect.width * 0.10;
+  const top = rect.y + rect.height * 0.20;
+  const width = rect.width * 0.78;
+  const height = rect.height * 0.56;
+  return {
+    // Keep adjacent samples farther apart than the production min-distance
+    // filter while wrapping inside the plot. This proves a 4096-sample typed
+    // draft instead of merely dispatching 4096 sub-pixel events that collapse
+    // into a much smaller canonical stroke.
+    x: Math.round(left + ((index * 3.25) % width)),
+    y: Math.round(top + height * (
+      0.5
+      + Math.sin(index * 0.071) * 0.27
+      + Math.cos(index * 0.017) * 0.11
+    )),
+  };
+}
+
+async function activatePhase5FreehandTool(cdp, tool) {
+  const activated = await selectToolVariantFromCandidates(
+    cdp,
+    ["pen", "highlighter"],
+    tool,
+  );
+  if (!activated) throw new Error("Phase 5 " + tool + " toolbar variant is unavailable");
+}
+
+async function activatePhase5LineTool(cdp) {
+  const activated = await selectToolVariantFromCandidates(
+    cdp,
+    PHASE5_LINE_TOOL_CANDIDATES,
+    "line-segment",
+  );
+  if (!activated) throw new Error("Phase 5 line-segment toolbar variant is unavailable");
+}
+
+async function dispatchPhase5CoalescedPointerMoves(cdp, points) {
+  const payload = Array.isArray(points)
+    ? points.filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y))
+    : [];
+  if (payload.length === 0) return 0;
+  return Number(await evaluate(cdp, "(() => {"
+    + "const points=" + JSON.stringify(payload) + ";"
+    + "const target=document.querySelector('.chart-pane[data-pane-id=\\\"main\\\"] .chart-pane-container,"
+      + ".chart-pane[data-pane-id=\\\"single-chart\\\"]');"
+    + "if(!target||typeof PointerEvent!=='function')return 0;"
+    + "const last=points[points.length-1];"
+    + "const event=new PointerEvent('pointermove',{bubbles:true,cancelable:true,"
+      + "clientX:last.x,clientY:last.y,button:0,buttons:1,pointerId:1,pointerType:'mouse',isPrimary:true});"
+    + "Object.defineProperty(event,'getCoalescedEvents',{configurable:true,value:()=>points.map((point)=>({"
+      + "clientX:point.x,clientY:point.y,button:0,buttons:1,pointerId:1,pointerType:'mouse',isPrimary:true"
+      + "}))});"
+    + "target.dispatchEvent(event);return points.length;"
+    + "})()"));
+}
+
+async function runPhase5FreehandGesture(cdp, rect, count, tool, {
+  commit,
+  label,
+} = {}) {
+  await activatePhase5FreehandTool(cdp, tool);
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+  const first = phase5FreehandPoint(rect, 0);
+  const end = phase5FreehandPoint(rect, count - 1);
+  const watch = [
+    phase5FreehandPoint(rect, Math.floor(count * 0.25)),
+    phase5FreehandPoint(rect, Math.floor(count * 0.50)),
+    phase5FreehandPoint(rect, Math.floor(count * 0.75)),
+    end,
+  ];
+  await callPhase5Probe(cdp, "setWatchPoints", "live-ink", watch);
+  await dispatchMouseMove(cdp, first.x, first.y);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: first.x,
+    y: first.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  if (await callPhase5Probe(cdp, "settleReactRenders") !== true) {
+    throw new Error("Phase 5 React render baseline did not settle for " + tool);
+  }
+  if (await callPhase5Probe(cdp, "beginPointerMoveWindow", label) !== true) {
+    throw new Error("Phase 5 pointermove window could not start for " + tool);
+  }
+  const batchSize = 32;
+  let coalescedSamplesDispatched = 0;
+  let coalescedBatchesDispatched = 0;
+  for (let offset = 1; offset < count; offset += batchSize) {
+    const points = [];
+    const batchEnd = Math.min(count, offset + batchSize);
+    for (let index = offset; index < batchEnd; index += 1) {
+      points.push(phase5FreehandPoint(rect, index));
+    }
+    coalescedSamplesDispatched += await dispatchPhase5CoalescedPointerMoves(cdp, points);
+    coalescedBatchesDispatched += 1;
+    await waitNextAnimationFrame(cdp);
+  }
+  const moveWindow = await callPhase5Probe(cdp, "endPointerMoveWindow");
+  if (!moveWindow) throw new Error("Phase 5 pointermove window could not stop for " + tool);
+  const liveInkVisibleAtEnd = await callPhase5Probe(
+    cdp,
+    "readVisibility",
+    "live-ink",
+  ) === true;
+  if (!commit) {
+    await dispatchEscape(cdp);
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: end.x,
+      y: end.y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+    });
+    await waitNextAnimationFrame(cdp);
+    await waitNextAnimationFrame(cdp);
+    const liveInkVisibleAfterCancel = await callPhase5Probe(
+      cdp,
+      "readVisibility",
+      "live-ink",
+    ) === true;
+    return {
+      coalescedSamplesDispatched,
+      coalescedBatchesDispatched,
+      moveWindow,
+      liveInkVisibleAtEnd,
+      liveInkVisibleAfterCancel,
+    };
+  }
+  const liveInkVisibleBeforeCommit = await callPhase5Probe(
+    cdp,
+    "prepareHandoff",
+    "live-ink",
+    watch[2],
+  ) === true;
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: end.x,
+    y: end.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  await callPhase5Probe(cdp, "markCommitted");
+  return {
+    pointerSamplesDispatched: count,
+    moveWindow,
+    liveInkVisibleBeforeCommit,
+    coalescedSamplesDispatched,
+    coalescedBatchesDispatched,
+  };
+}
+
+async function runPhase5Freehand(cdp, rect, count, tool, storageKey, timeoutMs) {
+  const heavy = await runPhase5FreehandGesture(cdp, rect, count, tool, {
+    commit: false,
+    label: tool + "-heavy-live-ink",
+  });
+  if (heavy.liveInkVisibleAtEnd !== true || heavy.liveInkVisibleAfterCancel !== false) {
+    throw new Error("Phase 5 heavy live ink did not cancel cleanly for " + tool);
+  }
+  const heavyFixtureSummaryAfterCancel = await readSavedDrawingSummary(cdp, storageKey);
+  const heavyFixturePreservedAfterCancel = Boolean(heavyFixtureSummaryAfterCancel
+    && heavyFixtureSummaryAfterCancel.entityCount === 64
+    && heavyFixtureSummaryAfterCancel.pointCount === 32_768
+    && sameTypeCounts(heavyFixtureSummaryAfterCancel.typeCounts, { freehand: 64 }));
+  if (!heavyFixturePreservedAfterCancel) {
+    throw new Error("Phase 5 heavy fixture changed during cancelled " + tool + " gesture");
+  }
+  if (!await clickDrawingAction(cdp, "clear")) {
+    throw new Error("Phase 5 drawing clear action is unavailable");
+  }
+  const cleared = await waitForSavedDrawingCount(cdp, storageKey, 0, timeoutMs);
+  if (!cleared.matched) throw new Error("Phase 5 heavy fixture did not clear before commit");
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+  const committed = await runPhase5FreehandGesture(cdp, rect, count, tool, {
+    commit: true,
+    label: tool + "-commit-live-ink",
+  });
+  return {
+    pointerSamplesDispatched: count,
+    heavyPointerSamplesDispatched: count,
+    committedPointerSamplesDispatched: count,
+    coalescedSamplesDispatched: heavy.coalescedSamplesDispatched,
+    committedCoalescedSamplesDispatched: committed.coalescedSamplesDispatched,
+    coalescedBatchesDispatched: heavy.coalescedBatchesDispatched,
+    committedCoalescedBatchesDispatched: committed.coalescedBatchesDispatched,
+    heavyMoveWindow: heavy.moveWindow,
+    committedMoveWindow: committed.moveWindow,
+    heavyLiveInkVisibleBeforeCancel: heavy.liveInkVisibleAtEnd,
+    heavyLiveInkVisibleAfterCancel: heavy.liveInkVisibleAfterCancel,
+    heavyFixtureSummaryAfterCancel,
+    heavyFixturePreservedAfterCancel,
+    fixtureClearedBeforeCommit: cleared.matched,
+    liveInkVisibleBeforeCommit: committed.liveInkVisibleBeforeCommit,
+  };
+}
+
+async function createPhase5Line(cdp, rect, {
+  trackPreviewWindow = false,
+  trackHandoff = false,
+  label = "two-point-preview",
+} = {}) {
+  await activatePhase5LineTool(cdp);
+  await waitNextAnimationFrame(cdp);
+  const geometry = phase5LineGeometry(rect);
+  await dispatchLeftClick(cdp, geometry.first, { modifiers: 1 });
+  await callPhase5Probe(cdp, "setWatchPoints", "dynamic", [geometry.midpoint]);
+  if (trackPreviewWindow) {
+    if (await callPhase5Probe(cdp, "settleReactRenders") !== true) {
+      throw new Error("Phase 5 React render baseline did not settle for two-point preview");
+    }
+    if (await callPhase5Probe(cdp, "beginPointerMoveWindow", label) !== true) {
+      throw new Error("Phase 5 two-point preview window could not start");
+    }
+  }
+  await dispatchMouseMove(cdp, geometry.second.x, geometry.second.y, 0, 1);
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+  const moveWindow = trackPreviewWindow
+    ? await callPhase5Probe(cdp, "endPointerMoveWindow")
+    : null;
+  const handoffVisibleBeforeCommit = trackHandoff
+    ? await callPhase5Probe(cdp, "prepareHandoff", "dynamic", geometry.midpoint) === true
+    : null;
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: geometry.second.x,
+    y: geometry.second.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    modifiers: 1,
+  });
+  if (trackHandoff) await callPhase5Probe(cdp, "markCommitted");
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: geometry.second.x,
+    y: geometry.second.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    modifiers: 1,
+  });
+  return { ...geometry, moveWindow, handoffVisibleBeforeCommit };
+}
+
+async function readSavedDrawingRaw(cdp, storageKey) {
+  const value = await evaluate(cdp, "localStorage.getItem(" + JSON.stringify(storageKey) + ")");
+  return typeof value === "string" ? value : null;
+}
+
+async function waitForSavedRawChange(cdp, storageKey, before, timeoutMs) {
+  const started = Date.now();
+  let current = await readSavedDrawingRaw(cdp, storageKey);
+  while (Date.now() - started < timeoutMs && current === before) {
+    await wait(25);
+    current = await readSavedDrawingRaw(cdp, storageKey);
+  }
+  return { changed: typeof current === "string" && current !== before, current };
+}
+
+function savedLineGeometryFromRaw(raw) {
+  if (typeof raw !== "string") return null;
+  try {
+    const drawings = JSON.parse(raw);
+    if (!Array.isArray(drawings)) return null;
+    const line = drawings.find((item) => (
+      item && typeof item === "object" && item.type === "line"
+    ));
+    if (!line || !Array.isArray(line.dataPoints) || line.dataPoints.length !== 2) return null;
+    const [first, second] = line.dataPoints;
+    if (!first || typeof first !== "object" || !second || typeof second !== "object") return null;
+    return {
+      first: structuredClone(first),
+      second: structuredClone(second),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameSavedPoint(left, right) {
+  return left !== null
+    && right !== null
+    && JSON.stringify(left) === JSON.stringify(right);
+}
+
+async function dispatchPhase5DragMoves(cdp, from, to, steps) {
+  for (let index = 1; index <= steps; index += 1) {
+    const point = {
+      x: Math.round(from.x + (to.x - from.x) * (index / steps)),
+      y: Math.round(from.y + (to.y - from.y) * (index / steps)),
+    };
+    await dispatchMouseMove(cdp, point.x, point.y, 1, 1);
+    if (index % 4 === 0) await waitNextAnimationFrame(cdp);
+  }
+  return steps;
+}
+
+async function runPhase5DragResize(cdp, rect, storageKey, timeoutMs) {
+  const line = await createPhase5Line(cdp, rect);
+  const persistedLine = await waitForSavedDrawingCount(cdp, storageKey, 1, timeoutMs);
+  if (!persistedLine.matched) throw new Error("Phase 5 drag fixture line did not persist");
+  const originalRaw = await readSavedDrawingRaw(cdp, storageKey);
+  const originalGeometry = savedLineGeometryFromRaw(originalRaw);
+  if (!originalGeometry) throw new Error("Phase 5 drag fixture geometry is unavailable");
+  // Existing line hit-testing and drag initiation are owned by the line tool
+  // branch. Re-select it explicitly because the toolbar may be configured for
+  // one-shot drawing; passive cursor mode only preserves an existing selection.
+  await activatePhase5LineTool(cdp);
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+
+  const dragEnd = { x: line.midpoint.x + 64, y: line.midpoint.y - 30 };
+  const draggedFirst = { x: line.first.x + 64, y: line.first.y - 30 };
+  const draggedSecond = { x: line.second.x + 64, y: line.second.y - 30 };
+  await dispatchMouseMove(cdp, line.midpoint.x, line.midpoint.y, 0, 1);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: line.midpoint.x,
+    y: line.midpoint.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    modifiers: 1,
+  });
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+  await callPhase5Probe(cdp, "setWatchPoints", "dynamic", [dragEnd]);
+  if (await callPhase5Probe(cdp, "settleReactRenders") !== true) {
+    throw new Error("Phase 5 React render baseline did not settle for line drag");
+  }
+  if (await callPhase5Probe(cdp, "beginPointerMoveWindow", "line-drag") !== true) {
+    throw new Error("Phase 5 line drag window could not start");
+  }
+  const dragMovesDispatched = await dispatchPhase5DragMoves(
+    cdp,
+    line.midpoint,
+    dragEnd,
+    24,
+  );
+  await callPhase5Probe(cdp, "endPointerMoveWindow");
+  const dragOverlayVisibleBeforeCommit = await callPhase5Probe(
+    cdp,
+    "prepareHandoff",
+    "dynamic",
+    dragEnd,
+  ) === true;
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: dragEnd.x,
+    y: dragEnd.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    modifiers: 1,
+  });
+  await callPhase5Probe(cdp, "markCommitted");
+  const afterDrag = await waitForSavedRawChange(cdp, storageKey, originalRaw, timeoutMs);
+  const draggedGeometry = savedLineGeometryFromRaw(afterDrag.current);
+  const dragGeometryMatched = Boolean(draggedGeometry
+    && !sameSavedPoint(originalGeometry.first, draggedGeometry.first)
+    && !sameSavedPoint(originalGeometry.second, draggedGeometry.second));
+
+  const resizeEnd = { x: draggedSecond.x + 72, y: draggedSecond.y + 48 };
+  const resizeMidpoint = {
+    x: Math.round((draggedFirst.x + resizeEnd.x) / 2),
+    y: Math.round((draggedFirst.y + resizeEnd.y) / 2),
+  };
+  await dispatchMouseMove(cdp, draggedSecond.x, draggedSecond.y, 0, 1);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: draggedSecond.x,
+    y: draggedSecond.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    modifiers: 1,
+  });
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+  await callPhase5Probe(cdp, "setWatchPoints", "dynamic", [resizeMidpoint]);
+  if (await callPhase5Probe(cdp, "settleReactRenders") !== true) {
+    throw new Error("Phase 5 React render baseline did not settle for line resize");
+  }
+  if (await callPhase5Probe(cdp, "beginPointerMoveWindow", "line-resize") !== true) {
+    throw new Error("Phase 5 line resize window could not start");
+  }
+  const resizeMovesDispatched = await dispatchPhase5DragMoves(
+    cdp,
+    draggedSecond,
+    resizeEnd,
+    24,
+  );
+  await callPhase5Probe(cdp, "endPointerMoveWindow");
+  const resizeOverlayVisibleBeforeCommit = await callPhase5Probe(
+    cdp,
+    "prepareHandoff",
+    "dynamic",
+    resizeMidpoint,
+  ) === true;
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: resizeEnd.x,
+    y: resizeEnd.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    modifiers: 1,
+  });
+  await callPhase5Probe(cdp, "markCommitted");
+  const afterResize = await waitForSavedRawChange(
+    cdp,
+    storageKey,
+    afterDrag.current,
+    timeoutMs,
+  );
+  const resizedGeometry = savedLineGeometryFromRaw(afterResize.current);
+  const resizeGeometryMatched = Boolean(draggedGeometry && resizedGeometry
+    && sameSavedPoint(draggedGeometry.first, resizedGeometry.first)
+    && !sameSavedPoint(draggedGeometry.second, resizedGeometry.second));
+  return {
+    twoPointCommits: 1,
+    dragMovesDispatched,
+    resizeMovesDispatched,
+    dragPersistenceMatched: afterDrag.changed,
+    resizePersistenceMatched: afterResize.changed,
+    dragGeometryMatched,
+    resizeGeometryMatched,
+    dragOverlayVisibleBeforeCommit,
+    resizeOverlayVisibleBeforeCommit,
+  };
+}
+
+async function runPhase5TwoPoint(cdp, rect, storageKey, timeoutMs) {
+  await createPhase5Line(cdp, rect, {
+    trackPreviewWindow: true,
+    trackHandoff: true,
+  });
+  const committed = await waitForSavedDrawingCount(cdp, storageKey, 1, timeoutMs);
+  if (!committed.matched) throw new Error("Phase 5 two-point line did not persist");
+
+  const cancelFirst = {
+    x: Math.round(rect.x + rect.width * 0.38),
+    y: Math.round(rect.y + rect.height * 0.70),
+  };
+  const cancelSecond = {
+    x: Math.round(rect.x + rect.width * 0.74),
+    y: Math.round(rect.y + rect.height * 0.30),
+  };
+  const cancelMidpoint = {
+    x: Math.round((cancelFirst.x + cancelSecond.x) / 2),
+    y: Math.round((cancelFirst.y + cancelSecond.y) / 2),
+  };
+  // The successful commit leaves the new line selected. Clear that selection
+  // in passive cursor mode before starting the independent cancel gesture;
+  // otherwise the first line-tool click is correctly consumed as deselect.
+  if (!await clickTool(cdp, "cursor")) throw new Error("Phase 5 cursor tool is unavailable");
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+  await dispatchLeftClick(cdp, cancelFirst, { modifiers: 1 });
+  await activatePhase5LineTool(cdp);
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+  await dispatchLeftClick(cdp, cancelFirst, { modifiers: 1 });
+  await callPhase5Probe(
+    cdp,
+    "setWatchPoints",
+    "dynamic",
+    [cancelFirst, cancelMidpoint, cancelSecond],
+  );
+  await dispatchMouseMove(cdp, cancelSecond.x, cancelSecond.y, 0, 1);
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+  const previewVisibleBeforeCancel = await callPhase5Probe(cdp, "readVisibility", "dynamic");
+  await dispatchEscape(cdp);
+  await waitNextAnimationFrame(cdp);
+  const previewVisibleAfterCancel = await callPhase5Probe(cdp, "readVisibility", "dynamic");
+  const savedCountAfterCancel = await readSavedDrawingCount(cdp, storageKey);
+  return {
+    twoPointCommits: 1,
+    twoPointCancels: 1,
+    previewVisibleBeforeCancel,
+    previewVisibleAfterCancel,
+    savedCountAfterCommit: committed.count,
+    savedCountAfterCancel,
+  };
+}
+
+async function runPhase5EraserCancel(cdp, rect, storageKey, timeoutMs, hoverCount) {
+  const line = await createPhase5Line(cdp, rect);
+  const committed = await waitForSavedDrawingCount(cdp, storageKey, 1, timeoutMs);
+  if (!committed.matched) throw new Error("Phase 5 eraser fixture line did not persist");
+  if (!await clickTool(cdp, "eraser")) throw new Error("Phase 5 eraser tool is unavailable");
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
+  await callPhase5Probe(
+    cdp,
+    "setWatchPoints",
+    "dynamic",
+    [line.first, line.midpoint, line.second],
+  );
+  if (await callPhase5Probe(cdp, "settleReactRenders") !== true) {
+    throw new Error("Phase 5 React render baseline did not settle for eraser hover");
+  }
+  if (await callPhase5Probe(cdp, "beginPointerMoveWindow", "eraser-hover") !== true) {
+    throw new Error("Phase 5 eraser hover window could not start");
+  }
+  for (let index = 0; index < hoverCount; index += 1) {
+    const progress = index / Math.max(1, hoverCount - 1);
+    await dispatchMouseMove(
+      cdp,
+      Math.round(line.first.x + (line.second.x - line.first.x) * progress),
+      Math.round(line.first.y + (line.second.y - line.first.y) * progress),
+    );
+    if (index % 4 === 3) await waitNextAnimationFrame(cdp);
+  }
+  await callPhase5Probe(cdp, "endPointerMoveWindow");
+  const savedCountBeforeCancel = await readSavedDrawingCount(cdp, storageKey);
+  const hoverAndReadVisibility = async () => {
+    await dispatchMouseMove(cdp, line.midpoint.x, line.midpoint.y);
+    await waitNextAnimationFrame(cdp);
+    await waitNextAnimationFrame(cdp);
+    return await callPhase5Probe(cdp, "readVisibility", "dynamic") === true;
+  };
+  const overlayVisibleBeforePointerCancel = await callPhase5Probe(
+    cdp,
+    "readVisibility",
+    "dynamic",
+  ) === true;
+  const pointerCancelEventsDispatched = await evaluateJson(cdp, () => {
+    const target = document.querySelector(
+      ".chart-pane[data-pane-id=\"main\"] .chart-pane-container, "
+        + ".chart-pane[data-pane-id=\"single-chart\"]",
+    );
+    if (!target) return 0;
+    target.dispatchEvent(new PointerEvent("pointercancel", {
+      bubbles: true,
+      cancelable: true,
+      pointerId: 1,
+      pointerType: "mouse",
+    }));
+    return 1;
+  });
+  await waitNextAnimationFrame(cdp);
+  const pointerCancelOverlayCleared = await callPhase5Probe(
+    cdp,
+    "readVisibility",
+    "dynamic",
+  ) === false;
+
+  const overlayVisibleBeforeWindowBlur = await hoverAndReadVisibility();
+  const windowBlurEventsDispatched = await evaluateJson(cdp, () => {
+    window.dispatchEvent(new Event("blur"));
+    return 1;
+  });
+  await waitNextAnimationFrame(cdp);
+  const windowBlurOverlayCleared = await callPhase5Probe(
+    cdp,
+    "readVisibility",
+    "dynamic",
+  ) === false;
+
+  const overlayVisibleBeforeEscape = await hoverAndReadVisibility();
+  await dispatchEscape(cdp);
+  await waitNextAnimationFrame(cdp);
+  const escapeOverlayCleared = await callPhase5Probe(
+    cdp,
+    "readVisibility",
+    "dynamic",
+  ) === false;
+  return {
+    eraserHoverEventsDispatched: hoverCount,
+    overlayVisibleBeforePointerCancel,
+    pointerCancelOverlayCleared,
+    overlayVisibleBeforeWindowBlur,
+    windowBlurOverlayCleared,
+    overlayVisibleBeforeEscape,
+    escapeOverlayCleared,
+    savedCountBeforeCancel,
+    savedCountAfterCancel: await readSavedDrawingCount(cdp, storageKey),
+    pointerCancelEventsDispatched: pointerCancelEventsDispatched ?? 0,
+    windowBlurEventsDispatched: windowBlurEventsDispatched ?? 0,
+  };
+}
+
+async function runScenarioAction(cdp, scenario, fixture, args, rect) {
   const result = {
     action: scenario.action,
     wheelEventsDispatched: 0,
@@ -1089,6 +1911,13 @@ async function runScenarioAction(cdp, scenario, args, rect) {
     panEventsDispatched: 0,
     pointerSamplesDispatched: 0,
     crosshairMovesDispatched: 0,
+    twoPointCommits: 0,
+    twoPointCancels: 0,
+    dragMovesDispatched: 0,
+    resizeMovesDispatched: 0,
+    eraserHoverEventsDispatched: 0,
+    pointerCancelEventsDispatched: 0,
+    windowBlurEventsDispatched: 0,
   };
   if (scenario.action === "viewport" || scenario.action === "mixed") {
     result.wheelEventsDispatched = await runWheel(cdp, rect, args.wheelEvents);
@@ -1106,6 +1935,54 @@ async function runScenarioAction(cdp, scenario, args, rect) {
       rect,
       PHASE4_CROSSHAIR_MOVE_COUNT,
     );
+  }
+  if (scenario.action === "phase5-pen") {
+    Object.assign(result, await runPhase5Freehand(
+      cdp,
+      rect,
+      args.pointerSamples,
+      "pen",
+      fixture.storageKey,
+      Math.min(args.timeoutMs, 5_000),
+    ));
+  }
+  if (scenario.action === "phase5-highlighter") {
+    Object.assign(
+      result,
+      await runPhase5Freehand(
+        cdp,
+        rect,
+        args.pointerSamples,
+        "highlighter",
+        fixture.storageKey,
+        Math.min(args.timeoutMs, 5_000),
+      ),
+    );
+  }
+  if (scenario.action === "phase5-drag-resize") {
+    Object.assign(result, await runPhase5DragResize(
+      cdp,
+      rect,
+      fixture.storageKey,
+      Math.min(args.timeoutMs, 5_000),
+    ));
+  }
+  if (scenario.action === "phase5-two-point") {
+    Object.assign(result, await runPhase5TwoPoint(
+      cdp,
+      rect,
+      fixture.storageKey,
+      Math.min(args.timeoutMs, 5_000),
+    ));
+  }
+  if (scenario.action === "phase5-eraser-cancel") {
+    Object.assign(result, await runPhase5EraserCancel(
+      cdp,
+      rect,
+      fixture.storageKey,
+      Math.min(args.timeoutMs, 5_000),
+      args.hoverEvents,
+    ));
   }
   return result;
 }
@@ -1197,6 +2074,25 @@ async function stopPhase4FrameProbe(cdp) {
     delete window.__CANDLESCOPE_PHASE4_FRAME_PROBE__;
     return result;
   });
+}
+
+async function startPhase5Probe(cdp) {
+  return evaluateJson(cdp, phase5BrowserProbeBootstrap);
+}
+
+async function callPhase5Probe(cdp, method, ...args) {
+  const expression = "(async()=>{const controller=window.__CANDLESCOPE_PHASE5_PROBE__;"
+    + "if(!controller||typeof controller[" + JSON.stringify(method) + "]!=='function')return null;"
+    + "return JSON.stringify(await controller[" + JSON.stringify(method) + "](..."
+    + JSON.stringify(args) + "));})()";
+  const value = await evaluate(cdp, expression);
+  return typeof value === "string" ? JSON.parse(value) : value ?? null;
+}
+
+async function stopPhase5Probe(cdp) {
+  const result = await callPhase5Probe(cdp, "stop");
+  await evaluate(cdp, "delete window.__CANDLESCOPE_PHASE5_PROBE__; true");
+  return result;
 }
 
 function durationSamples(snapshot, key) {
@@ -1342,7 +2238,26 @@ async function waitForSavedDrawingCount(cdp, storageKey, expectedCount, timeoutM
 }
 
 function expectedDrawingCountAfterAction(scenario, fixture) {
-  return fixture.metadata.drawingCount + (scenario.action === "active-freehand" ? 1 : 0);
+  const configuredDelta = Number(scenario?.expectedEntityDelta);
+  const entityDelta = Number.isSafeInteger(configuredDelta)
+    ? configuredDelta
+    : scenario.action === "active-freehand" ? 1 : 0;
+  return Math.max(0, fixture.metadata.drawingCount + entityDelta);
+}
+
+function expectedDrawingTypesAfterAction(scenario, fixture) {
+  const typeCounts = { ...(fixture.metadata.drawingTypes || {}) };
+  const configured = scenario?.expectedTypeDeltas;
+  const deltas = configured && typeof configured === "object" && !Array.isArray(configured)
+    ? configured
+    : scenario.action === "active-freehand" ? { freehand: 1 } : {};
+  for (const [type, rawDelta] of Object.entries(deltas)) {
+    const delta = Number(rawDelta);
+    if (!Number.isSafeInteger(delta)) return null;
+    typeCounts[type] = (typeCounts[type] || 0) + delta;
+    if (typeCounts[type] === 0) delete typeCounts[type];
+  }
+  return typeCounts;
 }
 
 function createReloadRestoreResult(expectedCount, persisted, persistedSummary = null) {
@@ -1445,7 +2360,29 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       url: args.url + (args.url.includes("?") ? "&" : "?")
         + "drawingPerf=" + encodeURIComponent(scenario.id + "-" + iteration),
     });
-    const ready = await waitForChartReady(cdp, fixture.metadata.drawingCount, args.timeoutMs);
+    let ready = await waitForChartReady(
+      cdp,
+      fixture.metadata.drawingCount,
+      args.timeoutMs,
+    );
+    if (args.phase === "phase5" && ready.drawingReady !== true) {
+      // The production app intentionally lazy-mounts DrawingEngineHost when
+      // an empty document has no active drawing tool. Activate a real tool
+      // outside the measured window, then require the full host and overlay
+      // surfaces before resetting counters or dispatching scenario input.
+      const activated = await selectToolVariantFromCandidates(
+        cdp,
+        ["pen", "highlighter"],
+        "pen",
+      );
+      if (!activated) throw new Error("Phase 5 could not activate the lazy drawing host");
+      ready = await waitForChartReady(
+        cdp,
+        fixture.metadata.drawingCount,
+        args.timeoutMs,
+        { requireDrawingEngine: true },
+      );
+    }
     const rect = await getChartRect(cdp);
     if (!rect || rect.width < 200 || rect.height < 120) {
       throw new Error("Chart rectangle is unavailable or too small");
@@ -1499,22 +2436,35 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
     // as a new action Long Task in the formal legacy/shadow comparison.
     await evaluate(cdp, "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.(); true");
     let phase4Probe = null;
+    let phase5Probe = null;
     if (args.phase === "phase4") {
       const startedProbe = await startPhase4FrameProbe(cdp);
       if (startedProbe?.started !== true) {
         throw new Error("Phase 4 frame probe could not start: " + JSON.stringify(startedProbe));
       }
     }
+    if (args.phase === "phase5") {
+      const startedProbe = await startPhase5Probe(cdp);
+      if (startedProbe?.started !== true) {
+        throw new Error("Phase 5 interaction probe could not start: " + JSON.stringify(startedProbe));
+      }
+    }
     const beforeMetrics = metricMap(await cdp.send("Performance.getMetrics"));
     const beforeHeap = await cdp.send("Runtime.getHeapUsage");
     const actionStartedAt = Number(await evaluate(cdp, "performance.now()"));
-    const action = await runScenarioAction(cdp, scenario, args, rect);
+    const action = await runScenarioAction(cdp, scenario, fixture, args, rect);
     const actionEndedAt = Number(await evaluate(cdp, "performance.now()"));
     await wait(args.settleMs);
     if (args.phase === "phase4") {
       phase4Probe = await stopPhase4FrameProbe(cdp);
       if (phase4Probe?.started !== true) {
         throw new Error("Phase 4 frame probe could not stop: " + JSON.stringify(phase4Probe));
+      }
+    }
+    if (args.phase === "phase5") {
+      phase5Probe = await stopPhase5Probe(cdp);
+      if (phase5Probe?.started !== true) {
+        throw new Error("Phase 5 interaction probe could not stop: " + JSON.stringify(phase5Probe));
       }
     }
     if (args.engineMode === "shadow" && fixture.metadata.drawingCount > 0) {
@@ -1540,6 +2490,9 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       sceneProjectPaintMs: durationCapture(rawCapture, drawing, "sceneProjectPaintMs"),
       hitQueryMs: durationCapture(rawCapture, drawing, "hitQueryMs"),
       mouseupSyncMs: durationCapture(rawCapture, drawing, "mouseupSyncMs"),
+      mouseupFinalizeMs: durationCapture(rawCapture, drawing, "mouseupFinalizeMs"),
+      mouseupCommandMs: durationCapture(rawCapture, drawing, "mouseupCommandMs"),
+      mouseupCommitMs: durationCapture(rawCapture, drawing, "mouseupCommitMs"),
       persistenceMs: durationCapture(rawCapture, drawing, "persistenceMs"),
       activeOverlayCpuMs: durationCapture(rawCapture, drawing, "activeOverlayCpuMs"),
       frameIntervalMs: browserCapture(bench, "rafIntervalsMs"),
@@ -1588,13 +2541,22 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       Math.min(args.timeoutMs, 5_000),
     );
     const persistedSummary = await readSavedDrawingSummary(cdp, fixture.storageKey);
-    const expectedActiveFreehandCount = (fixture.metadata.drawingTypes.freehand || 0)
-      + (scenario.action === "active-freehand" ? 1 : 0);
+    const expectedTypeCounts = expectedDrawingTypesAfterAction(scenario, fixture);
+    const configuredPointDelta = Number(scenario?.minimumPointDelta);
+    const minimumPointDelta = Number.isSafeInteger(configuredPointDelta)
+      && configuredPointDelta >= 0
+      ? configuredPointDelta
+      : scenario.action === "active-freehand" ? 1 : 0;
+    const configuredMinimumFinalPointCount = Number(scenario?.minimumFinalPointCount);
+    const minimumFinalPointCount = Number.isSafeInteger(configuredMinimumFinalPointCount)
+      && configuredMinimumFinalPointCount >= 0
+      ? configuredMinimumFinalPointCount
+      : fixture.metadata.pointCount + minimumPointDelta;
     if (!persistedSummary
       || persistedSummary.entityCount !== expectedSavedDrawingCount
-      || (persistedSummary.typeCounts.freehand || 0) !== expectedActiveFreehandCount
-      || (scenario.action === "active-freehand"
-        && persistedSummary.pointCount <= fixture.metadata.pointCount)) {
+      || !expectedTypeCounts
+      || !sameTypeCounts(persistedSummary.typeCounts, expectedTypeCounts)
+      || persistedSummary.pointCount < minimumFinalPointCount) {
       persisted.matched = false;
       persisted.error = "Persisted drawing entity/type/point summary did not match the action";
     }
@@ -1630,6 +2592,9 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
         frameIntervalMs: captures.frameIntervalMs.samples,
         hitQueryMs: captures.hitQueryMs.samples,
         mouseupSyncMs: captures.mouseupSyncMs.samples,
+        mouseupFinalizeMs: captures.mouseupFinalizeMs.samples,
+        mouseupCommandMs: captures.mouseupCommandMs.samples,
+        mouseupCommitMs: captures.mouseupCommitMs.samples,
         workerFinalizeMs: [],
         persistenceMs: captures.persistenceMs.samples,
         exactRenderMs: [],
@@ -1663,6 +2628,7 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       restore,
       action: actionEvidence,
       phase4Probe,
+      phase5Probe,
       measurementWindow: {
         actionStartedAt,
         actionEndedAt,
@@ -2491,7 +3457,9 @@ async function main() {
   const git = readGitContext();
   const selectedScenarios = DEFAULT_SCENARIOS.filter((scenario) => args.scenarios.includes(scenario.id));
   const managed = !args.url;
-  const buildEnvironment = managed ? managedBuildEnvironment(args.engineMode) : null;
+  const buildEnvironment = managed
+    ? managedBuildEnvironment(args.engineMode, args.interactionSurfaceMode)
+    : null;
   const configuredProjectorMode = buildEnvironment?.VITE_DRAWING_COORDINATE_PROJECTOR
     ?? process.env.VITE_DRAWING_COORDINATE_PROJECTOR;
   const drawingCoordinateProjectorMode = configuredProjectorMode === "scalar"
@@ -2499,7 +3467,7 @@ async function main() {
     || configuredProjectorMode === "batch"
     ? configuredProjectorMode
     : "batch";
-  if (managed) ensureProductionBuild(args.engineMode);
+  if (managed) ensureProductionBuild(args.engineMode, args.interactionSurfaceMode);
   const servers = managed ? await startManagedServers(args) : null;
   if (servers) args.url = servers.url;
   if (!args.url.endsWith("/")) args.url += "/";
@@ -2664,6 +3632,7 @@ async function main() {
     report.configuration.drawingDocumentAuthority = buildEnvironment
       ?.VITE_DRAWING_DOCUMENT_AUTHORITY ?? null;
     report.configuration.drawingEngineMode = args.engineMode;
+    report.configuration.drawingInteractionSurfaceMode = args.interactionSurfaceMode;
     report.configuration.buildEnvironment = buildEnvironment;
     report.configuration.compareBefore = args.compareBefore || null;
     report.runMode = {
@@ -2673,6 +3642,7 @@ async function main() {
       phase1Eligible: !args.smoke,
       phase3Eligible: !args.smoke,
       phase4Eligible: !args.smoke,
+      phase5Eligible: !args.smoke,
     };
     applyRestoreValidity(report, args);
     report.executionAcceptance = {
@@ -2691,10 +3661,13 @@ async function main() {
     report.phase1Acceptance = buildPhase1Acceptance(report, args);
     report.phase3Acceptance = buildPhase3Acceptance(report, args);
     report.phase4Acceptance = buildPhase4Acceptance(report, args);
+    report.phase5Acceptance = buildPhase5Acceptance(report, args);
     report.smokeAcceptance = buildSmokeAcceptance(report, args);
-    const phaseAcceptance = args.phase === "phase4"
-      ? report.phase4Acceptance
-      : args.phase === "phase3"
+    const phaseAcceptance = args.phase === "phase5"
+      ? report.phase5Acceptance
+      : args.phase === "phase4"
+        ? report.phase4Acceptance
+        : args.phase === "phase3"
         ? report.phase3Acceptance
         : args.phase === "phase1"
           ? report.phase1Acceptance
@@ -2715,6 +3688,7 @@ async function main() {
       phase1Eligible: !args.smoke,
       phase3Eligible: !args.smoke,
       phase4Eligible: !args.smoke,
+      phase5Eligible: !args.smoke,
       executionPassed: report.executionAcceptance.passed,
     };
 
@@ -2728,7 +3702,9 @@ async function main() {
       "drawing-engine-v2",
       (args.smoke
         ? "smoke-"
-        : args.phase === "phase4"
+        : args.phase === "phase5"
+          ? "phase5-" + args.engineMode + "-"
+          : args.phase === "phase4"
           ? "phase4-" + args.engineMode + "-"
           : args.phase === "phase3"
             ? "phase3-" + args.engineMode + "-"
@@ -2750,6 +3726,7 @@ async function main() {
       phase3Acceptance: report.phase3Acceptance,
       phase3Comparison: report.phase3Comparison,
       phase4Acceptance: report.phase4Acceptance,
+      phase5Acceptance: report.phase5Acceptance,
       smokeAcceptance: report.smokeAcceptance,
       invalidScenarios: report.acceptance.invalidScenarioIds,
       targetAssessment: Object.fromEntries(Object.entries(report.targetAssessment)

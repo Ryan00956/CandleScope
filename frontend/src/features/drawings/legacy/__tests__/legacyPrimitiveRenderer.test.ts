@@ -7,6 +7,7 @@ import { createPrimitiveFromSavedDrawing } from "../../drawingPrimitiveFactory.j
 import type { DrawingPrimitive, SavedDrawing } from "../../drawingTypes.js";
 import {
   createLegacyPrimitiveRenderer,
+  legacyPrimitiveDocumentDeltaIds,
   materializeLegacyPrimitives,
 } from "../legacyPrimitiveRenderer.js";
 
@@ -52,6 +53,177 @@ test("renderer materializes and replaces snapshots in stable document z-order", 
   assert.deepEqual(attached, ["text", "line", "shape", "axis", "next-line"]);
   assert.deepEqual(detached, ["text", "line", "shape"]);
   assert.equal(renderer.getPrimitiveById("line"), null);
+});
+
+test("detached document adoption materializes only affected ids and preserves every other owner", () => {
+  const factoryCalls: string[] = [];
+  const attached: DrawingPrimitive[] = [];
+  const detached: DrawingPrimitive[] = [];
+  const renderer = createLegacyPrimitiveRenderer({
+    createPrimitive(drawing) {
+      if (!drawing.id) return null;
+      factoryCalls.push(drawing.id);
+      return createPrimitiveFromSavedDrawing(drawing);
+    },
+    surface: {
+      attachPrimitive(primitive) {
+        attached.push(primitive);
+        return true;
+      },
+      detachPrimitive(primitive) {
+        detached.push(primitive);
+        return true;
+      },
+    },
+  });
+  const initial = documentFrom([
+    { type: "line", id: "a", color: "#fff" },
+    { type: "line", id: "b", color: "#fff" },
+    { type: "text", id: "c", dataPoint: { time: 3, price: 3 }, text: "same" },
+  ], "detached-delta");
+  assert.equal(renderer.reconcile(initial), true);
+  const [oldA, oldB, oldC] = renderer.snapshot();
+  assert.ok(oldA && oldB && oldC);
+  factoryCalls.length = 0;
+  attached.length = 0;
+  detached.length = 0;
+
+  const styledAndReordered = documentFrom([
+    { type: "text", id: "c", dataPoint: { time: 3, price: 3 }, text: "same" },
+    { type: "line", id: "a", color: "#fff" },
+    { type: "line", id: "b", color: "#f00" },
+  ], "detached-delta");
+  assert.deepEqual(legacyPrimitiveDocumentDeltaIds(initial, styledAndReordered), ["b"]);
+  assert.equal(renderer.adoptDetached(styledAndReordered), true);
+  const [nextC, nextA, nextB] = renderer.snapshot();
+  assert.strictEqual(nextA, oldA);
+  assert.strictEqual(nextC, oldC);
+  assert.notStrictEqual(nextB, oldB);
+  assert.deepEqual(factoryCalls, ["b"]);
+  assert.deepEqual(detached, [oldB]);
+  assert.deepEqual(attached, [nextB]);
+
+  factoryCalls.length = 0;
+  attached.length = 0;
+  detached.length = 0;
+  const reorderedOnly = documentFrom([
+    { type: "line", id: "a", color: "#fff" },
+    { type: "line", id: "b", color: "#f00" },
+    { type: "text", id: "c", dataPoint: { time: 3, price: 3 }, text: "same" },
+  ], "detached-delta");
+  assert.deepEqual(legacyPrimitiveDocumentDeltaIds(styledAndReordered, reorderedOnly), []);
+  assert.equal(renderer.adoptDetached(reorderedOnly), true);
+  assert.strictEqual(renderer.getPrimitiveById("a"), oldA);
+  assert.strictEqual(renderer.getPrimitiveById("b"), nextB);
+  assert.strictEqual(renderer.getPrimitiveById("c"), oldC);
+  assert.deepEqual(factoryCalls, []);
+  assert.deepEqual(attached, []);
+  assert.deepEqual(detached, []);
+});
+
+test("detached adoption keeps the committed document authoritative after candidate attach failure", () => {
+  let rejectChangedCandidate = false;
+  let rejectedCandidate: DrawingPrimitive | null = null;
+  const physical = new Set<DrawingPrimitive>();
+  const renderer = createLegacyPrimitiveRenderer({
+    surface: {
+      attachPrimitive(primitive) {
+        if (rejectChangedCandidate && primitive.id === "changed") {
+          rejectedCandidate = primitive;
+          return false;
+        }
+        physical.add(primitive);
+        return true;
+      },
+      detachPrimitive(primitive) {
+        physical.delete(primitive);
+        return true;
+      },
+    },
+  });
+  const initial = documentFrom([
+    { type: "line", id: "stable", color: "#fff" },
+    { type: "line", id: "changed", color: "#fff" },
+  ], "detached-attach-failure");
+  assert.equal(renderer.reconcile(initial), true);
+  const retainedStable = renderer.getPrimitiveById("stable");
+  const retainedOldChanged = renderer.getPrimitiveById("changed");
+  assert.ok(retainedStable && retainedOldChanged);
+
+  const committed = documentFrom([
+    { type: "line", id: "stable", color: "#fff" },
+    { type: "line", id: "changed", color: "#f00" },
+  ], "detached-attach-failure");
+  rejectChangedCandidate = true;
+  assert.equal(renderer.adoptDetached(committed), false);
+  const detachedCandidate = renderer.getPrimitiveById("changed");
+  assert.ok(detachedCandidate);
+  assert.strictEqual(renderer.documentSnapshot(), committed);
+  assert.strictEqual(renderer.getPrimitiveById("stable"), retainedStable);
+  assert.notStrictEqual(detachedCandidate, retainedOldChanged);
+  assert.equal(physical.has(retainedStable), true);
+  assert.equal(physical.has(retainedOldChanged), false);
+  assert.equal(physical.has(detachedCandidate), false);
+  assert.equal([...physical].filter((primitive) => primitive.id === "changed").length, 0);
+  assert.strictEqual(rejectedCandidate, detachedCandidate);
+
+  rejectChangedCandidate = false;
+  rejectedCandidate = null;
+  assert.equal(renderer.rebindSurface(), true);
+  assert.equal(physical.has(retainedStable), true);
+  assert.equal(physical.has(detachedCandidate), true);
+  assert.equal([...physical].filter((primitive) => primitive.id === "changed").length, 1);
+});
+
+test("detached adoption never attaches a replacement when the old same-id owner cannot detach", () => {
+  let rejectDetach = false;
+  const physical = new Set<DrawingPrimitive>();
+  const attachCounts = new Map<string, number>();
+  const renderer = createLegacyPrimitiveRenderer({
+    surface: {
+      attachPrimitive(primitive) {
+        attachCounts.set(primitive.id, (attachCounts.get(primitive.id) ?? 0) + 1);
+        physical.add(primitive);
+        return true;
+      },
+      detachPrimitive(primitive) {
+        if (rejectDetach && primitive.id === "changed") return false;
+        physical.delete(primitive);
+        return true;
+      },
+    },
+  });
+  const initial = documentFrom([
+    { type: "line", id: "stable", color: "#fff" },
+    { type: "line", id: "changed", color: "#fff" },
+  ], "detached-detach-failure");
+  assert.equal(renderer.reconcile(initial), true);
+  const stable = renderer.getPrimitiveById("stable");
+  const oldChanged = renderer.getPrimitiveById("changed");
+  assert.ok(stable && oldChanged);
+
+  rejectDetach = true;
+  const committed = documentFrom([
+    { type: "line", id: "stable", color: "#fff" },
+    { type: "line", id: "changed", color: "#f00" },
+  ], "detached-detach-failure");
+  assert.equal(renderer.adoptDetached(committed), false);
+  const candidate = renderer.getPrimitiveById("changed");
+  assert.ok(candidate);
+  assert.strictEqual(renderer.documentSnapshot(), committed);
+  assert.equal(physical.has(oldChanged), true);
+  assert.equal(physical.has(candidate), false);
+  assert.equal([...physical].filter((primitive) => primitive.id === "changed").length, 1);
+  assert.equal(attachCounts.get("stable"), 1);
+  assert.equal(attachCounts.get("changed"), 1);
+
+  rejectDetach = false;
+  assert.equal(renderer.rebindSurface(), true);
+  assert.equal(physical.has(oldChanged), false);
+  assert.equal(physical.has(candidate), true);
+  assert.equal([...physical].filter((primitive) => primitive.id === "changed").length, 1);
+  assert.equal(attachCounts.get("stable"), 1, "unaffected owner must not reattach");
+  assert.equal(attachCounts.get("changed"), 2);
 });
 
 test("factory failure preserves the complete old primitive collection", () => {

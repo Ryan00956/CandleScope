@@ -1,5 +1,6 @@
 import { exportDrawingDocument } from "../core/drawingCodec.js";
-import type { DrawingDocument } from "../core/drawingDocument.js";
+import { canonicalDrawingValueEquals } from "../core/drawingDocument.js";
+import type { DrawingDocument, DrawingEntity } from "../core/drawingDocument.js";
 import { createPrimitiveFromSavedDrawing } from "../drawingPrimitiveFactory.js";
 import type { DrawingPrimitive, SavedDrawing } from "../drawingTypes.js";
 
@@ -32,6 +33,15 @@ export interface LegacyPrimitiveRenderer {
    * credentials for the completed mutation.
    */
   adoptAttached(document: DrawingDocument, primitives: readonly DrawingPrimitive[]): boolean;
+  /**
+   * Incrementally materialize a document that was already committed by the
+   * canonical store. Candidates are detached and own no surface credential.
+   * A surface failure never rolls the retained document back.
+   */
+  adoptDetached(
+    document: DrawingDocument,
+    primitives?: readonly DrawingPrimitive[],
+  ): boolean;
   /** Validate an adoption without changing renderer or chart state. */
   canAdopt(document: DrawingDocument, primitives: readonly DrawingPrimitive[]): boolean;
   /** Record checked external surface credentials before any document validation. */
@@ -98,18 +108,64 @@ function adoptionRegistry(
   document: DrawingDocument,
   primitives: readonly DrawingPrimitive[],
 ): Map<string, DrawingPrimitive> | null {
-  const saved = exportDrawingDocument(document);
-  if (!saved || saved.length !== primitives.length) return null;
+  // DrawingDocument snapshots crossing this renderer are already normalized
+  // by the document store/codec. Adoption only needs to prove exact registry
+  // identity and z-order; re-exporting the full document here would stringify
+  // large freehand geometry several times on mouseup.
+  const zOrder: readonly unknown[] = document?.zOrder ?? [];
+  if (!document
+    || !document.entities
+    || typeof document.entities.get !== "function"
+    || !Number.isSafeInteger(document.entities.size)
+    || !Array.isArray(zOrder)
+    || zOrder.length !== document.entities.size
+    || zOrder.length !== primitives.length) return null;
   const byId = new Map<string, DrawingPrimitive>();
-  for (let index = 0; index < saved.length; index += 1) {
-    const expected = saved[index];
+  for (let index = 0; index < zOrder.length; index += 1) {
+    const candidateId: unknown = zOrder.at(index);
+    if (typeof candidateId !== "string") return null;
+    const id = candidateId;
+    const entity = document.entities.get(id);
     const primitive = primitives[index];
-    if (!expected || !primitive) return null;
-    const id = primitiveId(primitive);
-    if (id !== expected.id || byId.has(id)) return null;
+    if (!entity || entity.id !== id || !primitive || byId.has(id)) return null;
+    if (primitiveId(primitive) !== id) return null;
     byId.set(id, primitive);
   }
   return byId;
+}
+
+function canonicalEntityEquals(left: DrawingEntity, right: DrawingEntity): boolean {
+  return left.id === right.id
+    && left.kind === right.kind
+    && left.geometryRevision === right.geometryRevision
+    && left.styleRevision === right.styleRevision
+    && canonicalDrawingValueEquals(left.geometry, right.geometry)
+    && canonicalDrawingValueEquals(left.style, right.style)
+    && canonicalDrawingValueEquals(left.bounds, right.bounds);
+}
+
+/**
+ * Resolve the canonical entity ids whose primitive materialization changed.
+ * Reordering alone deliberately returns an empty delta so existing primitive
+ * identity and surface ownership remain untouched.
+ */
+export function legacyPrimitiveDocumentDeltaIds(
+  previous: DrawingDocument,
+  next: DrawingDocument,
+): readonly string[] | null {
+  if (previous.scopeKey !== next.scopeKey) return null;
+  const changed = new Set<string>();
+  for (const id of next.zOrder) {
+    const nextEntity = next.entities.get(id);
+    const previousEntity = previous.entities.get(id);
+    if (!nextEntity || !previousEntity || !canonicalEntityEquals(previousEntity, nextEntity)) {
+      changed.add(id);
+    }
+  }
+  for (const id of previous.zOrder) {
+    if (!next.entities.has(id)) changed.add(id);
+  }
+  return Object.freeze([...changed]);
 }
 
 class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
@@ -240,6 +296,74 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
         return false;
       }
     }
+    this.#surfaceSynchronized = this.#surfaceMatchesRegistry();
+    return this.#surfaceSynchronized;
+  }
+
+  adoptDetached(
+    document: DrawingDocument,
+    primitives?: readonly DrawingPrimitive[],
+  ): boolean {
+    const previousDocument = this.#document;
+    if (!previousDocument) return false;
+    if (document === previousDocument) {
+      return this.#surfaceSynchronized ? true : this.rebindSurface();
+    }
+    const deltaIds = legacyPrimitiveDocumentDeltaIds(previousDocument, document);
+    if (!deltaIds) return false;
+    const delta = new Set(deltaIds);
+    const suppliedById = primitives === undefined
+      ? null
+      : adoptionRegistry(document, primitives);
+    if (primitives !== undefined && !suppliedById) return false;
+    const saved = suppliedById ? null : exportDrawingDocument(document);
+    if (!suppliedById && !saved) return false;
+    const nextPrimitives: DrawingPrimitive[] = [];
+    const nextById = new Map<string, DrawingPrimitive>();
+
+    // Pure construction comes first. Unchanged ids retain their exact object;
+    // only canonical delta ids cross the primitive factory boundary.
+    try {
+      for (let index = 0; index < document.zOrder.length; index += 1) {
+        const id = document.zOrder[index];
+        const drawing = saved?.[index] ?? null;
+        if (!id || (!suppliedById && (!drawing || drawing.id !== id))) return false;
+        const primitive = delta.has(id)
+          ? suppliedById?.get(id) ?? (drawing ? this.#createPrimitive(drawing) : null)
+          : this.#byId.get(id) ?? null;
+        if (!primitive || primitiveId(primitive) !== id || nextById.has(id)) {
+          return false;
+        }
+        if (!delta.has(id)
+          && suppliedById
+          && suppliedById.get(id) !== primitive) return false;
+        nextPrimitives.push(primitive);
+        nextById.set(id, primitive);
+      }
+    } catch {
+      return false;
+    }
+
+    // The canonical store already committed this document. Advance the
+    // retained registry before touching the surface so attach/detach failures
+    // cannot demote the legacy renderer back into document authority.
+    this.#setRegistry(document, nextPrimitives, nextById);
+
+    for (const id of delta) {
+      const candidate = nextById.get(id) ?? null;
+      let staleOwnerRetained = false;
+      for (const attached of [...this.#attached]) {
+        if (attached !== candidate && primitiveId(attached) === id && !this.#detach(attached)) {
+          staleOwnerRetained = true;
+        }
+      }
+      // Never attach a second owner for one canonical id. A failed detach
+      // leaves the new detached candidate retryable and the surface marked
+      // unsynchronized instead of producing duplicate visual ownership.
+      if (staleOwnerRetained) continue;
+      if (candidate) this.#attach(candidate);
+    }
+
     this.#surfaceSynchronized = this.#surfaceMatchesRegistry();
     return this.#surfaceSynchronized;
   }

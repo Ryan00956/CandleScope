@@ -9,6 +9,7 @@ import {
   canApplyDrawingVisibilityToCurrentPrimitives,
   cancelFreehandPrimitiveOnSurface,
   detachAndRemoveDrawingPrimitive,
+  dynamicSelectionHandlesForSavedDrawing,
   resolveTopmostDrawingInteractionHit,
   runDrawingPointerTransientBarrier,
   runDrawingSurfaceDisposeBarrier,
@@ -23,7 +24,9 @@ import type { DrawingPrimitiveHit } from "../drawingSelectionController.js";
 import type { DrawingDisplayHitResult } from "../rendering/drawingDisplayList.js";
 import type {
   ActiveDrawingMovePayload,
+  DrawingDataToScreen,
   DrawingPrimitive,
+  SavedDrawing,
   ScreenPoint,
 } from "../drawingTypes.js";
 import {
@@ -342,4 +345,40 @@ test("stale scope may be hidden but cannot be made visible", () => {
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(false, true), true);
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(false, false), false);
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(true, false), true);
+});
+
+test("dynamic selection handles expose only real per-kind drag affordances", () => {
+  const project: DrawingDataToScreen = (dataPoint) => (
+    typeof dataPoint.time === "number"
+      ? { x: dataPoint.time, y: dataPoint.price }
+      : null
+  );
+  const text: SavedDrawing = { type: "text", dataPoint: { time: 10, price: 20 } };
+  const textHandles = dynamicSelectionHandlesForSavedDrawing(
+    text,
+    project,
+    { x: 10, y: 20, width: 80, height: 40 },
+  );
+  assert.deepEqual(textHandles.map((handle) => handle.hit.handle), [
+    "tl", "t", "tr", "r", "br", "b", "bl", "l",
+  ]);
+
+  const position: SavedDrawing = {
+    type: "position",
+    entryPrice: 100,
+    tpPrice: 120,
+    slPrice: 90,
+    timeRange: { start: 10, end: 30 },
+  };
+  const positionHandles = dynamicSelectionHandlesForSavedDrawing(position, project);
+  assert.deepEqual(positionHandles.map((handle) => handle.hit.zone), [
+    "entry", "tp", "sl", "left", "right",
+  ]);
+  assert.deepEqual(positionHandles.slice(-2).map((handle) => handle.point.x), [10, 30]);
+
+  const freehand: SavedDrawing = {
+    type: "freehand",
+    dataPoints: [{ time: 10, price: 10 }, { time: 20, price: 20 }],
+  };
+  assert.deepEqual(dynamicSelectionHandlesForSavedDrawing(freehand, project), []);
 });

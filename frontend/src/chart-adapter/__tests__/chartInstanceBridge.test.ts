@@ -100,6 +100,117 @@ test("adapter exposes the drawable time-scale width separately from the chart co
   assert.equal(adapter.getTimeScaleWidth(), 912);
 });
 
+test("main-pane plot rect uses the public pane surface and offsets past only the left price scale", () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const testWindow = { devicePixelRatio: 2.5 };
+  const paneIndexes: Array<number | undefined> = [];
+  const priceScaleRequests: Array<readonly [string, number | undefined]> = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: testWindow,
+  });
+
+  try {
+    const adapter = createLightweightChartAdapter({
+      chartRef: {
+        current: {
+          paneSize: (paneIndex?: number) => {
+            paneIndexes.push(paneIndex);
+            return { width: 912, height: 438 };
+          },
+          priceScale: (priceScaleId: string, paneIndex?: number) => {
+            priceScaleRequests.push([priceScaleId, paneIndex]);
+            return { width: () => 64 };
+          },
+        },
+      },
+      seriesRef: { current: {} },
+    });
+
+    assert.deepEqual(adapter.getMainPanePlotRect(), {
+      x: 64,
+      y: 0,
+      width: 912,
+      height: 438,
+      dpr: 2.5,
+    });
+    assert.deepEqual(paneIndexes, [0]);
+    assert.deepEqual(priceScaleRequests, [["left", 0]]);
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("main-pane plot rect re-reads pane size, left scale width, and DPR after resize", () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const testWindow = { devicePixelRatio: 1 };
+  let pane = { width: 700, height: 320 };
+  let leftPriceScaleWidth = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: testWindow,
+  });
+
+  try {
+    const adapter = createLightweightChartAdapter({
+      chartRef: {
+        current: {
+          paneSize: () => pane,
+          priceScale: () => ({ width: () => leftPriceScaleWidth }),
+        },
+      },
+      seriesRef: { current: {} },
+    });
+
+    assert.deepEqual(adapter.getMainPanePlotRect(), {
+      x: 0,
+      y: 0,
+      width: 700,
+      height: 320,
+      dpr: 1,
+    });
+
+    pane = { width: 944, height: 511 };
+    leftPriceScaleWidth = 57;
+    testWindow.devicePixelRatio = 2;
+    assert.deepEqual(adapter.getMainPanePlotRect(), {
+      x: 57,
+      y: 0,
+      width: 944,
+      height: 511,
+      dpr: 2,
+    });
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("main-pane plot rect fails closed for invalid public geometry without container fallback", () => {
+  let pane: { width: number; height: number } | null = { width: 0, height: 320 };
+  let leftPriceScaleWidth = 48;
+  const adapter = createLightweightChartAdapter({
+    chartRef: {
+      current: {
+        paneSize: () => pane,
+        priceScale: () => ({ width: () => leftPriceScaleWidth }),
+        timeScale: () => ({ width: () => 1_280 }),
+      },
+    },
+    seriesRef: { current: {} },
+  });
+
+  assert.equal(adapter.getMainPanePlotRect(), null);
+  pane = { width: 912, height: Number.NaN };
+  assert.equal(adapter.getMainPanePlotRect(), null);
+  pane = { width: 912, height: 438 };
+  leftPriceScaleWidth = -1;
+  assert.equal(adapter.getMainPanePlotRect(), null);
+  pane = null;
+  assert.equal(adapter.getMainPanePlotRect(), null);
+});
+
 test("adapter exposes persistence-safe ordinal drawing coordinates", () => {
   const rows = [
     displayRow(0, 100, 0),
@@ -922,7 +1033,7 @@ test("drawing frame exposes a narrow source-lineage span projection", () => {
 test("drawing frame invalidation subscription hides chart objects and releases listeners", () => {
   let visibleHandler: (() => void) | null = null;
   let sizeHandler: (() => void) | null = null;
-  const calls: number[] = [];
+  const calls: unknown[] = [];
   const timeScale = {
     setVisibleLogicalRange: () => {},
     subscribeSizeChange: (handler: () => void) => { sizeHandler = handler; },
@@ -938,21 +1049,21 @@ test("drawing frame invalidation subscription hides chart objects and releases l
     chartRef: { current: { timeScale: () => timeScale } },
     seriesRef: { current: { applyOptions: () => undefined } },
   });
-  const unsubscribe = adapter.subscribeDrawingFrameInvalidation((...args: unknown[]) => {
-    calls.push(args.length);
+  const unsubscribe = adapter.subscribeDrawingFrameInvalidation((reason) => {
+    calls.push(reason);
   });
 
   (visibleHandler as (() => void) | null)?.();
   (sizeHandler as (() => void) | null)?.();
   adapter.requestSeriesUpdate();
   adapter.notifyDrawingFrameInvalidation();
-  assert.deepEqual(calls, [0, 0, 0, 0]);
+  assert.deepEqual(calls, ["viewport", "viewport", "manual", "manual"]);
 
   unsubscribe();
   assert.equal(visibleHandler, null);
   assert.equal(sizeHandler, null);
   adapter.notifyDrawingFrameInvalidation();
-  assert.deepEqual(calls, [0, 0, 0, 0]);
+  assert.deepEqual(calls, ["viewport", "viewport", "manual", "manual"]);
 });
 
 test("scene text measurement uses exact detached-canvas font metrics", () => {

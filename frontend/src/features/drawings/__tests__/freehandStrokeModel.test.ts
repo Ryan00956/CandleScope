@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY,
   FREEHAND_STROKE_V3_VERSION,
   MAX_FREEHAND_STROKE_POINTS,
   MAX_FREEHAND_STROKE_SPANS,
@@ -14,6 +15,7 @@ import {
   finalizeFreehandStrokeDraft,
   getFreehandStrokeDraftPreviewPoints,
   getFreehandStrokeDraftRemainingCapacity,
+  inspectFreehandStrokeDraftStorage,
   isFreehandStrokeDraftSaturated,
   normalizeLegacyFreehandDataPoints,
   normalizeSavedFreehandPayload,
@@ -782,6 +784,100 @@ test("freehand draft drops unused spans and remaps retained point indexes", () =
   assert.equal(finalized.spans.length, 1);
   assert.deepEqual(finalized.spans[0], keptSpan);
   assert.deepEqual(spanIndexes(finalized), [0, 0]);
+});
+
+test("freehand draft stores 255, 256, 257, and 4096 samples in fixed typed chunks", () => {
+  const span = mustBeDefined(stroke().spans[0]);
+  for (const count of [255, 256, 257, MAX_FREEHAND_STROKE_POINTS]) {
+    const identity = {};
+    const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+    const captures = Array.from({ length: count }, (_value, index) => capture(
+      span,
+      index,
+      index % 7,
+      index / Math.max(1, count - 1),
+      index,
+    ));
+    assert.equal(appendFreehandStrokeCaptureBatch(
+      draft,
+      draftBatch(identity, captures),
+    ), true);
+
+    const inspection = mustBeDefined(inspectFreehandStrokeDraftStorage(draft));
+    const expectedChunkCount = Math.ceil(count / FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY);
+    const expectedLastChunkLength = count % FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY
+      || FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY;
+    assert.deepEqual(inspection, {
+      chunkCapacity: FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY,
+      chunkCount: expectedChunkCount,
+      sampleCount: count,
+      allocatedSlots: expectedChunkCount * FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY,
+      chunkLengths: [
+        ...Array.from(
+          { length: Math.max(0, expectedChunkCount - 1) },
+          () => FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY,
+        ),
+        expectedLastChunkLength,
+      ],
+      typedArrayBacked: true,
+    });
+    assert.equal(getFreehandStrokeDraftRemainingCapacity(draft),
+      MAX_FREEHAND_STROKE_POINTS - count);
+    assert.equal(isFreehandStrokeDraftSaturated(draft),
+      count === MAX_FREEHAND_STROKE_POINTS);
+    const preview = getFreehandStrokeDraftPreviewPoints(draft);
+    assert.equal(preview.length, count);
+    assert.deepEqual(preview[0], { x: 0, y: 0 });
+    assert.deepEqual(preview[count - 1], { x: count - 1, y: (count - 1) % 7 });
+  }
+});
+
+test("freehand draft finalizes across a chunk boundary without consuming storage", () => {
+  const count = FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY + 1;
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  const span = mustBeDefined(stroke().spans[0]);
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity,
+    Array.from({ length: count }, (_value, index) => capture(
+      span,
+      index,
+      index * index,
+      index / (count - 1),
+      index + 0.25,
+    )))), true);
+  const before = mustBeDefined(inspectFreehandStrokeDraftStorage(draft));
+
+  const finalized = mustBeDefined(finalizeFreehandStrokeDraft(draft, {
+    captureIdentity: identity,
+    epsilon: 0,
+  }));
+
+  assert.equal(finalized.version, 2);
+  assert.equal(finalized.points.length, count);
+  assert.deepEqual(finalized.points.slice(254).map((point) => point.price), [
+    254.25,
+    255.25,
+    256.25,
+  ]);
+  assert.deepEqual(inspectFreehandStrokeDraftStorage(draft), before);
+});
+
+test("cancelling a freehand draft releases every allocated typed chunk", () => {
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  const span = mustBeDefined(stroke().spans[0]);
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity,
+    Array.from({ length: FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY + 1 }, (_value, index) => (
+      capture(span, index, 0, index / FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY, index)
+    )))), true);
+  assert.equal(inspectFreehandStrokeDraftStorage(draft)?.chunkCount, 2);
+
+  assert.equal(cancelFreehandStrokeDraft(draft), true);
+  assert.equal(inspectFreehandStrokeDraftStorage(draft), null);
+  assert.equal(cancelFreehandStrokeDraft(draft), false);
+  assert.deepEqual(getFreehandStrokeDraftPreviewPoints(draft), []);
+  assert.equal(getFreehandStrokeDraftRemainingCapacity(draft), null);
+  assert.equal(finalizeFreehandStrokeDraft(draft, { captureIdentity: identity }), null);
 });
 
 test("freehand draft decimation is iterative at the point cap", () => {

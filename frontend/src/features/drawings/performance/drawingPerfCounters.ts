@@ -14,6 +14,9 @@ export const DRAWING_PERF_DURATION_METRICS = [
   "drawingMainThreadMs",
   "hitQueryMs",
   "mouseupSyncMs",
+  "mouseupFinalizeMs",
+  "mouseupCommandMs",
+  "mouseupCommitMs",
   "persistenceMs",
   "sceneProjectPaintMs",
   "activeOverlayCpuMs",
@@ -28,6 +31,7 @@ export const DRAWING_PERF_COUNTER_METRICS = [
   "finalProjectionCount",
   "sceneRebuildCount",
   "requestUpdateCount",
+  "reactRenderCount",
   "workerJobCount",
   "workerResultCount",
   "staleWorkerResultCount",
@@ -62,7 +66,8 @@ export type DrawingPerfCounterMetric = typeof DRAWING_PERF_COUNTER_METRICS[numbe
 export type DrawingPerfGaugeMetric = typeof DRAWING_PERF_GAUGE_METRICS[number];
 export type DrawingPerfFrameWorkDurationMetric =
   | "drawingMainThreadMs"
-  | "sceneProjectPaintMs";
+  | "sceneProjectPaintMs"
+  | "activeOverlayCpuMs";
 export type DrawingPerfFrameWorkGeometryMetric =
   | "rawPoints"
   | "renderedPoints"
@@ -138,6 +143,7 @@ export interface DrawingPerfFrameWorkContribution {
   geometryKey?: string;
   drawingMainThreadMs?: number;
   sceneProjectPaintMs?: number;
+  activeOverlayCpuMs?: number;
   rawPoints?: number;
   renderedPoints?: number;
   visibleEntities?: number;
@@ -148,6 +154,7 @@ export interface DrawingPerfFrameWorkFlushResult {
   contributionCount: number;
   drawingMainThreadMs: number | null;
   sceneProjectPaintMs: number | null;
+  activeOverlayCpuMs: number | null;
   rawPoints: number | null;
   renderedPoints: number | null;
   visibleEntities: number | null;
@@ -160,6 +167,35 @@ export interface DrawingPerfRuntimeSummary {
   typeCounts: Readonly<Record<string, number>>;
   /** Actual chart attachments, including the single composite scene primitive. */
   attachedPrimitiveCount?: number;
+  effectiveEngineMode?: "legacy" | "shadow" | "scene-canary";
+  scenePublicationReady?: boolean;
+  mainPanePlotRect?: Readonly<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    dpr: number;
+  }>;
+}
+
+export type DrawingPerfInteractionHandoffKind = "dynamic" | "live-ink";
+
+export interface DrawingPerfInteractionHandoffStamp {
+  readonly scopeKey: string;
+  readonly documentRevision: number;
+  readonly surfaceGeneration: number;
+  readonly viewportRevision: number;
+}
+
+export interface DrawingPerfInteractionHandoffRecord {
+  readonly sequence: number;
+  readonly kind: DrawingPerfInteractionHandoffKind;
+  readonly stamp: DrawingPerfInteractionHandoffStamp;
+}
+
+export interface DrawingPerfInteractionHandoffSnapshot {
+  readonly prepared: DrawingPerfInteractionHandoffRecord | null;
+  readonly acknowledged: DrawingPerfInteractionHandoffRecord | null;
 }
 
 export type DrawingPerfRuntimeSummaryProvider = () => DrawingPerfRuntimeSummary | null;
@@ -226,6 +262,7 @@ export interface DrawingPerfDebugHandle {
     provider: DrawingPerfRuntimeSummaryProvider | null,
   ) => () => void;
   readonly readRuntimeSummary: () => DrawingPerfRuntimeSummary | null;
+  readonly readInteractionHandoff: () => DrawingPerfInteractionHandoffSnapshot;
   readonly requestShadowParity: () => boolean;
   readonly reset: () => void;
 }
@@ -249,6 +286,7 @@ const OTHER_LONG_TASK_ATTRIBUTION = "other";
 const FRAME_WORK_METRICS = [
   "drawingMainThreadMs",
   "sceneProjectPaintMs",
+  "activeOverlayCpuMs",
   "rawPoints",
   "renderedPoints",
   "visibleEntities",
@@ -427,6 +465,9 @@ function createDurationHistograms(
     drawingMainThreadMs: new RollingDurationHistogram(capacity),
     hitQueryMs: new RollingDurationHistogram(capacity),
     mouseupSyncMs: new RollingDurationHistogram(capacity),
+    mouseupFinalizeMs: new RollingDurationHistogram(capacity),
+    mouseupCommandMs: new RollingDurationHistogram(capacity),
+    mouseupCommitMs: new RollingDurationHistogram(capacity),
     persistenceMs: new RollingDurationHistogram(capacity),
     sceneProjectPaintMs: new RollingDurationHistogram(capacity),
     activeOverlayCpuMs: new RollingDurationHistogram(capacity),
@@ -444,6 +485,9 @@ function createRawCaptures(
     drawingMainThreadMs: new BoundedRawCapture(capacity),
     hitQueryMs: new BoundedRawCapture(capacity),
     mouseupSyncMs: new BoundedRawCapture(capacity),
+    mouseupFinalizeMs: new BoundedRawCapture(capacity),
+    mouseupCommandMs: new BoundedRawCapture(capacity),
+    mouseupCommitMs: new BoundedRawCapture(capacity),
     persistenceMs: new BoundedRawCapture(capacity),
     sceneProjectPaintMs: new BoundedRawCapture(capacity),
     activeOverlayCpuMs: new BoundedRawCapture(capacity),
@@ -466,6 +510,9 @@ function emptyRawCaptureSnapshot(): DrawingPerfRawCaptureSnapshot {
       drawingMainThreadMs: emptyRawMetricCapture(),
       hitQueryMs: emptyRawMetricCapture(),
       mouseupSyncMs: emptyRawMetricCapture(),
+      mouseupFinalizeMs: emptyRawMetricCapture(),
+      mouseupCommandMs: emptyRawMetricCapture(),
+      mouseupCommitMs: emptyRawMetricCapture(),
       persistenceMs: emptyRawMetricCapture(),
       sceneProjectPaintMs: emptyRawMetricCapture(),
       activeOverlayCpuMs: emptyRawMetricCapture(),
@@ -492,6 +539,7 @@ function createFrameWorkAccumulator(): FrameWorkAccumulator {
     values: {
       drawingMainThreadMs: 0,
       sceneProjectPaintMs: 0,
+      activeOverlayCpuMs: 0,
       rawPoints: 0,
       renderedPoints: 0,
       visibleEntities: 0,
@@ -500,6 +548,7 @@ function createFrameWorkAccumulator(): FrameWorkAccumulator {
     seen: {
       drawingMainThreadMs: false,
       sceneProjectPaintMs: false,
+      activeOverlayCpuMs: false,
       rawPoints: false,
       renderedPoints: false,
       visibleEntities: false,
@@ -519,6 +568,7 @@ function createCounters(): Record<DrawingPerfCounterMetric, number> {
     finalProjectionCount: 0,
     sceneRebuildCount: 0,
     requestUpdateCount: 0,
+    reactRenderCount: 0,
     workerJobCount: 0,
     workerResultCount: 0,
     staleWorkerResultCount: 0,
@@ -664,6 +714,7 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
   accumulateFrameWork(contribution: DrawingPerfFrameWorkContribution): boolean {
     const supplied = contribution.drawingMainThreadMs !== undefined
       || contribution.sceneProjectPaintMs !== undefined
+      || contribution.activeOverlayCpuMs !== undefined
       || contribution.rawPoints !== undefined
       || contribution.renderedPoints !== undefined
       || contribution.visibleEntities !== undefined
@@ -674,6 +725,7 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
         || contribution.geometryKey.trim().length === 0)) return false;
     if (!this.isOptionalNonNegative(contribution.drawingMainThreadMs)
       || !this.isOptionalNonNegative(contribution.sceneProjectPaintMs)
+      || !this.isOptionalNonNegative(contribution.activeOverlayCpuMs)
       || !this.isOptionalNonNegative(contribution.rawPoints)
       || !this.isOptionalNonNegative(contribution.renderedPoints)
       || !this.isOptionalNonNegative(contribution.visibleEntities)
@@ -683,6 +735,7 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
 
     this.addFrameWorkValue("drawingMainThreadMs", contribution.drawingMainThreadMs);
     this.addFrameWorkValue("sceneProjectPaintMs", contribution.sceneProjectPaintMs);
+    this.addFrameWorkValue("activeOverlayCpuMs", contribution.activeOverlayCpuMs);
     const geometryKey = contribution.geometryKey?.trim().slice(0, 160);
     if (geometryKey) {
       const geometry = this.frameWork.geometryByKey.get(geometryKey) ?? {};
@@ -838,6 +891,9 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
       sceneProjectPaintMs: this.frameWork.seen.sceneProjectPaintMs
         ? this.frameWork.values.sceneProjectPaintMs
         : null,
+      activeOverlayCpuMs: this.frameWork.seen.activeOverlayCpuMs
+        ? this.frameWork.values.activeOverlayCpuMs
+        : null,
       rawPoints: this.frameWork.seen.rawPoints ? this.frameWork.values.rawPoints : null,
       renderedPoints: this.frameWork.seen.renderedPoints
         ? this.frameWork.values.renderedPoints
@@ -861,6 +917,9 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
     }
     if (result.sceneProjectPaintMs !== null) {
       this.recordDurationWithoutFlush("sceneProjectPaintMs", result.sceneProjectPaintMs);
+    }
+    if (result.activeOverlayCpuMs !== null) {
+      this.recordDurationWithoutFlush("activeOverlayCpuMs", result.activeOverlayCpuMs);
     }
     if (result.rawPoints !== null) this.setGaugeWithoutFlush("rawPoints", result.rawPoints);
     if (result.renderedPoints !== null) {
@@ -961,6 +1020,9 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
         drawingMainThreadMs: read(this.rawCaptures.drawingMainThreadMs),
         hitQueryMs: read(this.rawCaptures.hitQueryMs),
         mouseupSyncMs: read(this.rawCaptures.mouseupSyncMs),
+        mouseupFinalizeMs: read(this.rawCaptures.mouseupFinalizeMs),
+        mouseupCommandMs: read(this.rawCaptures.mouseupCommandMs),
+        mouseupCommitMs: read(this.rawCaptures.mouseupCommitMs),
         persistenceMs: read(this.rawCaptures.persistenceMs),
         sceneProjectPaintMs: read(this.rawCaptures.sceneProjectPaintMs),
         activeOverlayCpuMs: read(this.rawCaptures.activeOverlayCpuMs),
@@ -985,6 +1047,9 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
         drawingMainThreadMs: this.histograms.drawingMainThreadMs.snapshot(),
         hitQueryMs: this.histograms.hitQueryMs.snapshot(),
         mouseupSyncMs: this.histograms.mouseupSyncMs.snapshot(),
+        mouseupFinalizeMs: this.histograms.mouseupFinalizeMs.snapshot(),
+        mouseupCommandMs: this.histograms.mouseupCommandMs.snapshot(),
+        mouseupCommitMs: this.histograms.mouseupCommitMs.snapshot(),
         persistenceMs: this.histograms.persistenceMs.snapshot(),
         sceneProjectPaintMs: this.histograms.sceneProjectPaintMs.snapshot(),
         activeOverlayCpuMs: this.histograms.activeOverlayCpuMs.snapshot(),
@@ -1064,6 +1129,77 @@ export function accumulateDrawingPerfFrameWork(
 
 let runtimeSummaryProvider: DrawingPerfRuntimeSummaryProvider | null = null;
 let shadowParityRequester: DrawingPerfShadowParityRequester | null = null;
+let interactionHandoffSequence = 0;
+let preparedInteractionHandoff: DrawingPerfInteractionHandoffRecord | null = null;
+let acknowledgedInteractionHandoff: DrawingPerfInteractionHandoffRecord | null = null;
+
+function validInteractionHandoffStamp(
+  stamp: DrawingPerfInteractionHandoffStamp,
+): boolean {
+  return typeof stamp.scopeKey === "string"
+    && stamp.scopeKey.length > 0
+    && Number.isSafeInteger(stamp.documentRevision)
+    && stamp.documentRevision >= 0
+    && Number.isSafeInteger(stamp.surfaceGeneration)
+    && stamp.surfaceGeneration >= 0
+    && Number.isSafeInteger(stamp.viewportRevision)
+    && stamp.viewportRevision >= 0;
+}
+
+function sameInteractionHandoffStamp(
+  left: DrawingPerfInteractionHandoffStamp,
+  right: DrawingPerfInteractionHandoffStamp,
+): boolean {
+  return left.scopeKey === right.scopeKey
+    && left.documentRevision === right.documentRevision
+    && left.surfaceGeneration === right.surfaceGeneration
+    && left.viewportRevision === right.viewportRevision;
+}
+
+export function recordDrawingPerfInteractionHandoffPrepared(
+  kind: DrawingPerfInteractionHandoffKind,
+  stamp: DrawingPerfInteractionHandoffStamp,
+): DrawingPerfInteractionHandoffRecord | null {
+  if ((kind !== "dynamic" && kind !== "live-ink") || !validInteractionHandoffStamp(stamp)) {
+    return null;
+  }
+  interactionHandoffSequence = interactionHandoffSequence >= Number.MAX_SAFE_INTEGER
+    ? 1
+    : interactionHandoffSequence + 1;
+  preparedInteractionHandoff = Object.freeze({
+    sequence: interactionHandoffSequence,
+    kind,
+    stamp: Object.freeze({ ...stamp }),
+  });
+  acknowledgedInteractionHandoff = null;
+  return preparedInteractionHandoff;
+}
+
+export function recordDrawingPerfInteractionHandoffAcknowledged(
+  kind: DrawingPerfInteractionHandoffKind,
+  stamp: DrawingPerfInteractionHandoffStamp,
+): boolean {
+  const prepared = preparedInteractionHandoff;
+  if (!prepared
+    || prepared.kind !== kind
+    || !validInteractionHandoffStamp(stamp)
+    || !sameInteractionHandoffStamp(prepared.stamp, stamp)) return false;
+  acknowledgedInteractionHandoff = prepared;
+  return true;
+}
+
+export function readDrawingPerfInteractionHandoff(): DrawingPerfInteractionHandoffSnapshot {
+  return Object.freeze({
+    prepared: preparedInteractionHandoff,
+    acknowledged: acknowledgedInteractionHandoff,
+  });
+}
+
+function resetDrawingPerfInteractionHandoff(): void {
+  interactionHandoffSequence = 0;
+  preparedInteractionHandoff = null;
+  acknowledgedInteractionHandoff = null;
+}
 
 export function registerDrawingPerfRuntimeSummaryProvider(
   provider: DrawingPerfRuntimeSummaryProvider | null,
@@ -1078,6 +1214,7 @@ export function readDrawingPerfRuntimeSummary(): DrawingPerfRuntimeSummary | nul
   if (!runtimeSummaryProvider) return null;
   try {
     const summary = runtimeSummaryProvider();
+    const plotRect = summary?.mainPanePlotRect;
     if (!summary
       || !Number.isSafeInteger(summary.entityCount)
       || summary.entityCount < 0
@@ -1086,6 +1223,22 @@ export function readDrawingPerfRuntimeSummary(): DrawingPerfRuntimeSummary | nul
       || (summary.attachedPrimitiveCount !== undefined
         && (!Number.isSafeInteger(summary.attachedPrimitiveCount)
           || summary.attachedPrimitiveCount < 0))
+      || (summary.effectiveEngineMode !== undefined
+        && summary.effectiveEngineMode !== "legacy"
+        && summary.effectiveEngineMode !== "shadow"
+        && summary.effectiveEngineMode !== "scene-canary")
+      || (summary.scenePublicationReady !== undefined
+        && typeof summary.scenePublicationReady !== "boolean")
+      || (plotRect !== undefined && (
+        !Number.isFinite(plotRect.x)
+        || !Number.isFinite(plotRect.y)
+        || !Number.isFinite(plotRect.width)
+        || plotRect.width <= 0
+        || !Number.isFinite(plotRect.height)
+        || plotRect.height <= 0
+        || !Number.isFinite(plotRect.dpr)
+        || plotRect.dpr <= 0
+      ))
       || !summary.typeCounts
       || typeof summary.typeCounts !== "object") {
       return null;
@@ -1107,6 +1260,15 @@ export function readDrawingPerfRuntimeSummary(): DrawingPerfRuntimeSummary | nul
       ...(summary.attachedPrimitiveCount === undefined
         ? {}
         : { attachedPrimitiveCount: summary.attachedPrimitiveCount }),
+      ...(summary.effectiveEngineMode === undefined
+        ? {}
+        : { effectiveEngineMode: summary.effectiveEngineMode }),
+      ...(summary.scenePublicationReady === undefined
+        ? {}
+        : { scenePublicationReady: summary.scenePublicationReady }),
+      ...(plotRect === undefined
+        ? {}
+        : { mainPanePlotRect: Object.freeze({ ...plotRect }) }),
     };
   } catch {
     return null;
@@ -1137,6 +1299,7 @@ export function getDrawingPerfCounters(): DrawingPerfCounters {
 
 export function resetDrawingPerfCounters(): void {
   drawingPerfCounters.reset();
+  resetDrawingPerfInteractionHandoff();
 }
 
 export function flushDrawingPerfCounters(
@@ -1159,8 +1322,12 @@ export function installDrawingPerfDebugHandle(
       registerDrawingPerfRuntimeSummaryProvider(provider)
     ),
     readRuntimeSummary: () => readDrawingPerfRuntimeSummary(),
+    readInteractionHandoff: () => readDrawingPerfInteractionHandoff(),
     requestShadowParity: () => requestDrawingPerfShadowParity(),
-    reset: () => { drawingPerfCounters.reset(); },
+    reset: () => {
+      drawingPerfCounters.reset();
+      resetDrawingPerfInteractionHandoff();
+    },
   });
   globalRef.__CANDLESCOPE_DRAWING_PERF__ = handle;
   return handle;

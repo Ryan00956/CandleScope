@@ -161,6 +161,8 @@ export interface DrawingDocumentInput {
   documentRevision?: number;
 }
 
+const canonicalDrawingEntities = new WeakSet<object>();
+
 class FrozenReadonlyMap<K, V> implements ReadonlyMap<K, V> {
   readonly #source: Map<K, V>;
 
@@ -291,7 +293,7 @@ export function createDrawingEntity(input: DrawingEntityInput): DrawingEntity {
     throw new TypeError("Drawing entity kind does not match geometry/style");
   }
   const bounds = input.bounds ?? { kind: "deferred" as const };
-  return Object.freeze({
+  const entity = Object.freeze({
     id: input.id,
     kind: input.kind,
     geometryRevision,
@@ -300,6 +302,15 @@ export function createDrawingEntity(input: DrawingEntityInput): DrawingEntity {
     style: cloneAndFreezeCanonical(input.style),
     bounds: cloneAndFreezeCanonical(bounds),
   });
+  canonicalDrawingEntities.add(entity);
+  return entity;
+}
+
+/** True only for immutable entities constructed by this module. */
+export function isCanonicalDrawingEntity(value: unknown): value is DrawingEntity {
+  return typeof value === "object"
+    && value !== null
+    && canonicalDrawingEntities.has(value);
 }
 
 export function cloneDrawingEntity(
@@ -345,7 +356,11 @@ export function createDrawingDocument(input: DrawingDocumentInput): DrawingDocum
     if (key !== entity.id || mutable.has(key)) {
       throw new TypeError("Drawing document contains duplicate or mismatched ids");
     }
-    mutable.set(key, createDrawingEntity(entity));
+    // Canonical entities are deeply immutable and carry an unforgeable
+    // module-private credential, so sharing them cannot leak mutable input.
+    mutable.set(key, isCanonicalDrawingEntity(entity)
+      ? entity
+      : createDrawingEntity(entity));
   }
   const zOrder = input.zOrder ? [...input.zOrder] : [...mutable.keys()];
   if (zOrder.length !== mutable.size || new Set(zOrder).size !== zOrder.length
@@ -404,7 +419,9 @@ export function createEmptyDrawingDocument(scopeKey: string): DrawingDocument {
 export function cloneDrawingDocument(document: DrawingDocument): DrawingDocument {
   return createDrawingDocument({
     documentRevision: document.documentRevision,
-    entities: [...document.entities.values()],
+    // This API promises a defensive clone even though ordinary document
+    // assembly may safely share module-authenticated immutable entities.
+    entities: [...document.entities.values()].map((entity) => createDrawingEntity(entity)),
     scopeKey: document.scopeKey,
     zOrder: document.zOrder,
   });

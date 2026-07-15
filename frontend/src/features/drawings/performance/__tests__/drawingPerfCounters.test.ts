@@ -6,6 +6,9 @@ import {
   createDrawingPerfCounters,
   installDrawingPerfDebugHandle,
   readDrawingPerfBootstrapConfig,
+  readDrawingPerfInteractionHandoff,
+  recordDrawingPerfInteractionHandoffAcknowledged,
+  recordDrawingPerfInteractionHandoffPrepared,
   registerDrawingPerfShadowParityRequester,
   type DrawingPerfDebugHandle,
   type DrawingPerfSummaryEventDetail,
@@ -258,6 +261,7 @@ test("frame work aggregates primitive durations and geometry into one frame samp
   assert.equal(counters.accumulateFrameWork({
     drawingMainThreadMs: 1,
     sceneProjectPaintMs: 0.5,
+    activeOverlayCpuMs: 0.25,
     rawPoints: 100,
     renderedPoints: 20,
     visibleEntities: 1,
@@ -265,6 +269,7 @@ test("frame work aggregates primitive durations and geometry into one frame samp
   assert.equal(counters.accumulateFrameWork({
     drawingMainThreadMs: 2,
     sceneProjectPaintMs: 1.25,
+    activeOverlayCpuMs: 0.5,
     rawPoints: 200,
     renderedPoints: 40,
     culledEntities: 1,
@@ -278,6 +283,7 @@ test("frame work aggregates primitive durations and geometry into one frame samp
     contributionCount: 2,
     drawingMainThreadMs: 3,
     sceneProjectPaintMs: 1.75,
+    activeOverlayCpuMs: 0.75,
     rawPoints: 300,
     renderedPoints: 60,
     visibleEntities: 1,
@@ -288,6 +294,7 @@ test("frame work aggregates primitive durations and geometry into one frame samp
   const snapshot = counters.snapshot();
   assert.deepEqual(snapshot.durations.drawingMainThreadMs.samples, [3]);
   assert.deepEqual(snapshot.durations.sceneProjectPaintMs.samples, [1.75]);
+  assert.deepEqual(snapshot.durations.activeOverlayCpuMs.samples, [0.75]);
   assert.equal(snapshot.gauges.rawPoints, 300);
   assert.equal(snapshot.gauges.renderedPoints, 60);
   assert.equal(snapshot.gauges.visibleEntities, 1);
@@ -297,6 +304,19 @@ test("frame work aggregates primitive durations and geometry into one frame samp
     counters.readRawCapture().metrics.drawingMainThreadMs.samples,
     [3],
   );
+});
+
+test("active overlay CPU can be the only contribution and is sampled once per frame", () => {
+  const counters = createDrawingPerfCounters({
+    now: () => 0,
+    reporter: null,
+    benchmarkRawCapture: true,
+  });
+  assert.equal(counters.accumulateFrameWork({ activeOverlayCpuMs: 0.4 }), true);
+  assert.equal(counters.accumulateFrameWork({ activeOverlayCpuMs: 0.6 }), true);
+  const frame = counters.flushFrameWork();
+  assert.equal(frame?.activeOverlayCpuMs, 1);
+  assert.deepEqual(counters.readRawCapture().metrics.activeOverlayCpuMs.samples, [1]);
 });
 
 test("frame geometry uses the last contribution per primitive instead of double counting redraws", () => {
@@ -431,11 +451,19 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
     entityCount: 3,
     pointCount: 512,
     typeCounts: { freehand: 2, trendLine: 1 },
+    attachedPrimitiveCount: 2,
+    effectiveEngineMode: "scene-canary",
+    scenePublicationReady: true,
+    mainPanePlotRect: { x: 8, y: 4, width: 900, height: 540, dpr: 1.5 },
   }));
   assert.deepEqual(handle?.readRuntimeSummary(), {
     entityCount: 3,
     pointCount: 512,
     typeCounts: { freehand: 2, trendLine: 1 },
+    attachedPrimitiveCount: 2,
+    effectiveEngineMode: "scene-canary",
+    scenePublicationReady: true,
+    mainPanePlotRect: { x: 8, y: 4, width: 900, height: 540, dpr: 1.5 },
   });
   unregister?.();
   assert.equal(handle?.readRuntimeSummary(), null);
@@ -444,6 +472,14 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
   });
   assert.equal(handle?.readRuntimeSummary(), null);
   unregisterThrowing?.();
+  const unregisterInvalidSurface = handle?.registerRuntimeSummaryProvider(() => ({
+    entityCount: 0,
+    pointCount: 0,
+    typeCounts: {},
+    mainPanePlotRect: { x: 0, y: 0, width: 0, height: 10, dpr: 1.5 },
+  }));
+  assert.equal(handle?.readRuntimeSummary(), null);
+  unregisterInvalidSurface?.();
   assert.equal(handle?.requestShadowParity(), false);
   const unregisterParity = registerDrawingPerfShadowParityRequester(() => true);
   assert.equal(handle?.requestShadowParity(), true);
@@ -456,4 +492,36 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
   unregisterThrowingParity();
   assert.doesNotThrow(() => handle?.reset());
   assert.equal(installDrawingPerfDebugHandle(null), null);
+});
+
+test("interaction handoff telemetry only acknowledges the exact prepared stamp", () => {
+  const handle = installDrawingPerfDebugHandle({});
+  handle?.reset();
+  const stamp = {
+    scopeKey: "BTCUSDT",
+    documentRevision: 7,
+    surfaceGeneration: 3,
+    viewportRevision: 11,
+  } as const;
+  const prepared = recordDrawingPerfInteractionHandoffPrepared("live-ink", stamp);
+  assert.equal(prepared?.sequence, 1);
+  assert.deepEqual(readDrawingPerfInteractionHandoff(), {
+    prepared,
+    acknowledged: null,
+  });
+  assert.equal(recordDrawingPerfInteractionHandoffAcknowledged("dynamic", stamp), false);
+  assert.equal(recordDrawingPerfInteractionHandoffAcknowledged("live-ink", {
+    ...stamp,
+    viewportRevision: 12,
+  }), false);
+  assert.equal(recordDrawingPerfInteractionHandoffAcknowledged("live-ink", stamp), true);
+  assert.deepEqual(readDrawingPerfInteractionHandoff(), {
+    prepared,
+    acknowledged: prepared,
+  });
+  handle?.reset();
+  assert.deepEqual(readDrawingPerfInteractionHandoff(), {
+    prepared: null,
+    acknowledged: null,
+  });
 });

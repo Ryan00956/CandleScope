@@ -32,6 +32,9 @@ export interface UseDrawingKeyboardOptions {
   setSelectedTextUi: Dispatch<SetStateAction<SelectedTextUi>>;
   hasActiveFreehandStroke?: (() => boolean) | null;
   cancelActiveFreehandStroke?: (() => boolean) | null;
+  hasActiveInteractionGesture?: (() => boolean) | null;
+  cancelActiveInteractionGesture?: (() => boolean) | null;
+  deleteSelected?: (() => void) | null;
 }
 
 export function handleDrawingEscape({
@@ -42,6 +45,8 @@ export function handleDrawingEscape({
   removePreview,
   deselectAll,
   preventDefault,
+  hasActiveInteractionGesture = false,
+  cancelActiveInteractionGesture = () => true,
 }: Readonly<{
   hasActiveFreehandStroke: boolean;
   cancelActiveFreehandStroke(): boolean;
@@ -50,9 +55,16 @@ export function handleDrawingEscape({
   removePreview(): void;
   deselectAll(): void;
   preventDefault(): void;
+  hasActiveInteractionGesture?: boolean;
+  cancelActiveInteractionGesture?: () => boolean;
 }>): void {
   if (hasActiveFreehandStroke) {
     cancelActiveFreehandStroke();
+    preventDefault();
+    return;
+  }
+  if (hasActiveInteractionGesture) {
+    cancelActiveInteractionGesture();
     preventDefault();
     return;
   }
@@ -75,6 +87,9 @@ export function useDrawingKeyboard({
   setSelectedTextUi,
   hasActiveFreehandStroke = null,
   cancelActiveFreehandStroke = null,
+  hasActiveInteractionGesture = null,
+  cancelActiveInteractionGesture = null,
+  deleteSelected = null,
 }: UseDrawingKeyboardOptions): void {
   useEffect(() => {
     if (!active) return undefined;
@@ -87,6 +102,8 @@ export function useDrawingKeyboard({
         handleDrawingEscape({
           hasActiveFreehandStroke: hasActiveFreehandStroke?.() === true,
           cancelActiveFreehandStroke: () => cancelActiveFreehandStroke?.() !== false,
+          hasActiveInteractionGesture: hasActiveInteractionGesture?.() === true,
+          cancelActiveInteractionGesture: () => cancelActiveInteractionGesture?.() !== false,
           hasAnchor: anchorDataRef.current !== null,
           hasSelection: selectedIdRef.current !== null,
           removePreview,
@@ -97,6 +114,11 @@ export function useDrawingKeyboard({
       if ((e.key === "Delete" || e.key === "Backspace") && selectedIdRef.current) {
         // Don't delete if focused on an input
         if (document.activeElement?.tagName === "INPUT" || document.activeElement?.tagName === "TEXTAREA") return;
+        if (deleteSelected) {
+          deleteSelected();
+          e.preventDefault();
+          return;
+        }
         // This terminal barrier retires transient credentials and verifies the
         // rendered symbol owns the active document before detach can happen.
         if (!beforeTerminalMutation()) return;
@@ -118,7 +140,7 @@ export function useDrawingKeyboard({
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [active, anchorDataRef, beforeTerminalMutation, selectedIdRef, editingTextIdRef, primitivesRef, removePreview, deselectAll, detachPrim, persistDrawings, setSelectedPrimId, setSelectedTextUi, hasActiveFreehandStroke, cancelActiveFreehandStroke]);
+  }, [active, anchorDataRef, beforeTerminalMutation, selectedIdRef, editingTextIdRef, primitivesRef, removePreview, deselectAll, detachPrim, persistDrawings, setSelectedPrimId, setSelectedTextUi, hasActiveFreehandStroke, cancelActiveFreehandStroke, hasActiveInteractionGesture, cancelActiveInteractionGesture, deleteSelected]);
 }
 
 export default useDrawingKeyboard;

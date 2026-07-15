@@ -4,6 +4,7 @@ import test from "node:test";
 import type { DrawingRenderRevisionStamp } from "../../engine/drawingRenderScheduler.js";
 import {
   createDrawingScreenDisplayList,
+  drawingDisplayEntityScreenHandles,
   drawingDisplayEntityScreenBox,
   hitTestDrawingScreenDisplayList,
   type ProjectedDrawingEntity,
@@ -121,7 +122,13 @@ test("display list exposes an immutable accepted screen box for detached scene i
     width: 90,
     height: 0,
   });
+  assert.deepEqual(drawingDisplayEntityScreenHandles(list, "shape-proxy"), [
+    { x: 10, y: 20 },
+    { x: 100, y: 20 },
+  ]);
+  assert.equal(Object.isFrozen(drawingDisplayEntityScreenHandles(list, "shape-proxy")), true);
   assert.equal(drawingDisplayEntityScreenBox(list, "missing"), null);
+  assert.equal(drawingDisplayEntityScreenHandles(list, "missing"), null);
 });
 
 test("partly offscreen shape interaction keeps raw box anchors instead of clipped bboxes", () => {

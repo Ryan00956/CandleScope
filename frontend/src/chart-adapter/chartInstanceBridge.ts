@@ -24,6 +24,8 @@ import {
   isDrawingFrameSnapshot,
 } from "./drawingFrameSnapshot.js";
 import type { DrawingFrameSnapshot } from "./drawingFrameSnapshot.js";
+
+export type DrawingFrameInvalidationReason = "manual" | "viewport";
 import type { DrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex.js";
 import type { DisplayRow } from "../features/chart-representation/chartRepresentationTypes.js";
 import type { MainSeriesHandle } from "./chartAdapterTypes.js";
@@ -57,6 +59,8 @@ interface AdapterTimeScale {
 }
 
 interface AdapterChart extends CoordinateChartBridge {
+  paneSize(paneIndex?: number): { width: number; height: number };
+  priceScale(priceScaleId: string, paneIndex?: number): { width(): number };
   timeScale(): AdapterTimeScale;
   subscribeCrosshairMove(handler: CrosshairHandler): void;
   unsubscribeCrosshairMove(handler: CrosshairHandler): void;
@@ -107,6 +111,14 @@ interface DrawingTextMeasureRequest {
   readonly bold: boolean;
   readonly italic: boolean;
   readonly fontWeight?: number | "normal" | "bold";
+}
+
+export interface MainPanePlotRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly dpr: number;
 }
 
 type CrosshairHandler = (event: unknown) => void;
@@ -161,6 +173,12 @@ function isDisplayRowArray(value: unknown): value is DisplayRow[] {
   if (!Array.isArray(value)) return false;
   const rows: unknown[] = value;
   return rows.every(isDisplayRow);
+}
+
+function currentDevicePixelRatio(): number {
+  if (typeof window === "undefined") return 1;
+  const dpr = window.devicePixelRatio;
+  return typeof dpr === "number" && Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
 }
 
 function snapshotLineageRevision(
@@ -288,10 +306,14 @@ export function createLightweightChartAdapter({
     sourceTimeHorizon: snapshot.sourceTimeHorizon,
   });
   const drawingFrameSeriesOwners = new WeakMap<DrawingFrameSnapshot, AdapterSeries>();
-  const drawingFrameInvalidationListeners = new Set<() => void>();
-  const emitDrawingFrameInvalidation = () => {
+  const drawingFrameInvalidationListeners = new Set<(
+    reason: DrawingFrameInvalidationReason,
+  ) => void>();
+  const emitDrawingFrameInvalidation = (
+    reason: DrawingFrameInvalidationReason = "manual",
+  ) => {
     for (const listener of drawingFrameInvalidationListeners) {
-      safeCall(() => listener(), undefined);
+      safeCall(() => listener(reason), undefined);
     }
   };
   const captureDrawingFrame = (): DrawingFrameSnapshot | null => {
@@ -408,11 +430,13 @@ export function createLightweightChartAdapter({
       if (!isDrawingFrameCurrent(snapshot)) return null;
       return Object.freeze({ left: projected.left, right: projected.right });
     }, null),
-    subscribeDrawingFrameInvalidation: (listener: () => void) => {
+    subscribeDrawingFrameInvalidation: (
+      listener: (reason: DrawingFrameInvalidationReason) => void,
+    ) => {
       if (typeof listener !== "function") return () => {};
       drawingFrameInvalidationListeners.add(listener);
       const timeScale = safeCall(() => getChart()?.timeScale(), null);
-      const notify = () => safeCall(() => listener(), undefined);
+      const notify = () => safeCall(() => listener("viewport"), undefined);
       safeCall(() => timeScale?.subscribeVisibleLogicalRangeChange?.(notify), undefined);
       safeCall(() => timeScale?.subscribeSizeChange?.(notify), undefined);
       return () => {
@@ -573,6 +597,32 @@ export function createLightweightChartAdapter({
       null,
     ),
     getBarSpacing: () => safeCall(() => getChart()?.timeScale().options?.().barSpacing, null),
+    getMainPanePlotRect: (): Readonly<MainPanePlotRect> | null => safeCall(() => {
+      const chart = getChart();
+      if (!chart) return null;
+
+      // Lightweight Charts defines paneSize(0) as the main pane's plot
+      // surface, excluding both price scales and the time scale. Its
+      // coordinates are pane-local, so only the visible left price scale
+      // needs to be added to position a DOM overlay in chart coordinates.
+      const pane = chart.paneSize(0);
+      const leftPriceScaleWidth = chart.priceScale("left", 0).width();
+      if (!pane
+        || !Number.isFinite(pane.width)
+        || pane.width <= 0
+        || !Number.isFinite(pane.height)
+        || pane.height <= 0
+        || !Number.isFinite(leftPriceScaleWidth)
+        || leftPriceScaleWidth < 0) return null;
+
+      return Object.freeze({
+        x: leftPriceScaleWidth,
+        y: 0,
+        width: pane.width,
+        height: pane.height,
+        dpr: currentDevicePixelRatio(),
+      });
+    }, null),
     getTimeScaleWidth: () => safeCall(() => {
       const width = getChart()?.timeScale().width?.();
       return typeof width === "number" && Number.isFinite(width) && width > 0 ? width : null;
@@ -604,12 +654,12 @@ export function createLightweightChartAdapter({
       if (!timeScale || !range) return false;
       if (range.logical) {
         timeScale.setVisibleLogicalRange(range.logical);
-        emitDrawingFrameInvalidation();
+        emitDrawingFrameInvalidation("viewport");
         return true;
       }
       if (range.time) {
         timeScale.setVisibleRange(range.time);
-        emitDrawingFrameInvalidation();
+        emitDrawingFrameInvalidation("viewport");
         return true;
       }
       return false;

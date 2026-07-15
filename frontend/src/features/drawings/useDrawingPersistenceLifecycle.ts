@@ -14,6 +14,7 @@ import type { SelectedTextUi } from "./drawingSelectionController.js";
 import { resolveDrawingDocumentAuthorityMode } from "./drawingDocumentAuthority.js";
 import { resolvePhase4DrawingEngineMode } from "./drawingEngineMode.js";
 import { createEmptyDrawingDocument } from "./core/drawingDocument.js";
+import type { DrawingDocument } from "./core/drawingDocument.js";
 import {
   commitLegacyPrimitiveCommands,
   loadSavedDrawingsIntoDocumentStore,
@@ -31,6 +32,7 @@ import {
 import type { LegacyPrimitiveRenderer } from "./legacy/legacyPrimitiveRenderer.js";
 import type {
   DrawingChartAdapter,
+  DrawingKind,
   DrawingPrimitive,
 } from "./drawingTypes.js";
 import {
@@ -58,11 +60,12 @@ import type {
 } from "../../chart-adapter/drawingScenePrimitiveBridge.js";
 import { DrawingScenePrimitive } from "./rendering/DrawingScenePrimitive.js";
 import {
+  drawingDisplayEntityScreenHandles,
   drawingDisplayEntityScreenBox,
   hitTestDrawingScreenDisplayList,
 } from "./rendering/drawingDisplayList.js";
 import type { DrawingDisplayHitResult } from "./rendering/drawingDisplayList.js";
-import type { ScreenBox } from "./drawingTypes.js";
+import type { ScreenBox, ScreenPoint } from "./drawingTypes.js";
 import {
   isPhase4SceneDrawingKind,
   isPhase4SceneDrawingPrimitive,
@@ -215,6 +218,104 @@ export interface DrawingVisibleScenePublicationState {
   sceneCanaryEnabled: boolean;
 }
 
+export interface DrawingCommittedPaintTicket {
+  readonly scopeKey: string;
+  readonly documentRevision: number;
+  readonly surfaceGeneration: number;
+  readonly viewportRevision: number;
+}
+
+export interface DrawingDetachedCommitReceipt {
+  /** True means the document store already accepted the command batch. */
+  readonly committed: true;
+  readonly changed: boolean;
+  readonly surfaceSynchronized: boolean;
+  readonly ticket: DrawingCommittedPaintTicket | null;
+}
+
+export interface DetachedDrawingCommandCommitResult {
+  readonly changed: boolean;
+  readonly document: DrawingDocument;
+  readonly rendererAdopted: boolean;
+  readonly surfaceSynchronized: boolean;
+}
+
+export interface CommitDetachedDrawingCommandsOptions {
+  readonly commands: readonly DrawingCommand[];
+  readonly primitives: readonly DrawingPrimitive[];
+  readonly renderer: LegacyPrimitiveRenderer;
+  readonly scopeKey: string;
+  readonly store: DrawingDocumentStore;
+}
+
+/**
+ * Pure document-first mutation boundary for detached interaction candidates.
+ * Candidate serialization and command equivalence are validated before the
+ * store publishes; every surface action happens only after that publication.
+ */
+export function commitDetachedDrawingCommands({
+  commands,
+  primitives,
+  renderer,
+  scopeKey,
+  store,
+}: CommitDetachedDrawingCommandsOptions): DetachedDrawingCommandCommitResult | null {
+  const committed = commitLegacyPrimitiveCommands(
+    store,
+    scopeKey,
+    primitives,
+    commands,
+    (document, candidates) => renderer.canAdopt(document, candidates),
+  );
+  if (!committed.ok) return null;
+  const surfaceSynchronized = renderer.adoptDetached(
+    committed.document,
+    committed.primitives,
+  );
+  return Object.freeze({
+    changed: committed.changed,
+    document: committed.document,
+    rendererAdopted: renderer.documentSnapshot() === committed.document,
+    surfaceSynchronized,
+  });
+}
+
+export function createDrawingCommittedPaintTicket(
+  document: DrawingDocument,
+  frame: Readonly<{ surfaceGeneration: number; viewportRevision: number }> | null,
+  attachedSurfaceGeneration: number | null,
+): DrawingCommittedPaintTicket | null {
+  if (!frame
+    || !Number.isSafeInteger(frame.surfaceGeneration)
+    || frame.surfaceGeneration < 0
+    || !Number.isSafeInteger(frame.viewportRevision)
+    || frame.viewportRevision < 0
+    || attachedSurfaceGeneration !== frame.surfaceGeneration) return null;
+  return Object.freeze({
+    scopeKey: document.scopeKey,
+    documentRevision: document.documentRevision,
+    surfaceGeneration: frame.surfaceGeneration,
+    viewportRevision: frame.viewportRevision,
+  });
+}
+
+export function visibleSceneSelectedId(
+  selectedId: string | null,
+  dynamicOverlayEnabled: boolean,
+): string | null {
+  return dynamicOverlayEnabled ? null : selectedId;
+}
+
+export function shouldProjectVisibleSceneEntity(
+  kind: DrawingKind,
+  id: string,
+  dynamicOverlayEnabled: boolean,
+  activeOverlayEntityId: string | null,
+): boolean {
+  return isPhase4SceneDrawingKind(kind)
+    && (!dynamicOverlayEnabled || id !== activeOverlayEntityId);
+}
+
 function hasCurrentDrawingVisibleScenePublication({
   attachedSurfaceGeneration,
   publishedSurfaceGeneration,
@@ -282,13 +383,16 @@ export function prepareDrawingMutationScope(
 }
 
 export interface UseDrawingPersistenceLifecycleOptions {
+  activeOverlayEntityIdRef?: MutableRefObject<string | null>;
   beforeScopeTransitionRef: MutableRefObject<() => boolean>;
   currentFreehandRef: MutableRefObject<FreehandDrawingPrimitive | null>;
   draggingRef: MutableRefObject<unknown | null>;
+  dynamicOverlayEnabled?: boolean;
   getChartAdapter(): DrawingPersistenceAdapter | null;
   getDrawingSceneAdapter(): DrawingChartAdapter | null;
   hiddenRef: MutableRefObject<boolean>;
   isDrawingFreehandRef: MutableRefObject<boolean>;
+  onInteractionSurfaceFallback?: (() => void) | null;
   prevSymbolRef: MutableRefObject<string | null>;
   primitivesRef: MutableRefObject<DrawingPrimitive[]>;
   selectedIdRef: MutableRefObject<string | null>;
@@ -300,13 +404,16 @@ export interface UseDrawingPersistenceLifecycleOptions {
 }
 
 export function useDrawingPersistenceLifecycle({
+  activeOverlayEntityIdRef,
   beforeScopeTransitionRef,
   currentFreehandRef,
   draggingRef,
+  dynamicOverlayEnabled = false,
   getChartAdapter,
   getDrawingSceneAdapter,
   hiddenRef,
   isDrawingFreehandRef,
+  onInteractionSurfaceFallback,
   prevSymbolRef,
   primitivesRef,
   selectedIdRef,
@@ -319,12 +426,22 @@ export function useDrawingPersistenceLifecycle({
   clearDrawings(): boolean;
   completeSurfaceDispose(): void;
   invalidateSurfaceCredentialsForSeriesReplacement(): void;
+  invalidateVisibleScene(): boolean;
+  persistDetachedDrawings(
+    commands: readonly DrawingCommand[],
+    candidatePrimitives?: readonly DrawingPrimitive[],
+  ): DrawingDetachedCommitReceipt | null;
   persistDrawings(commands: readonly DrawingCommand[]): boolean;
   persistActiveScopeDrawings(commands: readonly DrawingCommand[]): boolean;
+  subscribeVisibleScenePaint(
+    listener: (stamp: DrawingCommittedPaintTicket) => void,
+    options?: Readonly<{ replayLastPaint?: boolean }>,
+  ): () => void;
   prepareUserMutationScope(): boolean;
   prepareSurfaceDispose(): boolean;
   hitTestScene(x: number, y: number): DrawingDisplayHitResult | null;
   getSceneScreenBox(id: string): ScreenBox | null;
+  getSceneScreenHandles(id: string): readonly ScreenPoint[] | null;
 } {
   const authorityMode = resolveDrawingDocumentAuthorityMode();
   const [engineMode] = useState(() => (
@@ -479,6 +596,11 @@ export function useDrawingPersistenceLifecycle({
       return false;
     }
     sceneCanaryEnabledRef.current = false;
+    // Keep the interaction owner aligned with the irreversible runtime
+    // downgrade even if this particular legacy rebind attempt still fails.
+    // The scope remains blocked and retries the surface, but no overlay-side
+    // detached mutation may run against a legacy static owner in the interim.
+    onInteractionSurfaceFallback?.();
     const renderer = rendererRef.current;
     if (renderer) configureLegacyViewportBatching(renderer.snapshot(), false);
     if (renderer && !renderer.rebindSurface()) {
@@ -488,7 +610,7 @@ export function useDrawingPersistenceLifecycle({
     }
     console.warn("Drawing scene initialization failed before the first mutation; using the legacy surface", reason);
     return true;
-  }, [engineMode.effective, sceneBridge, sceneRuntime]);
+  }, [engineMode.effective, onInteractionSurfaceFallback, sceneBridge, sceneRuntime]);
 
   const scheduleVisibleSceneSurfaceRetry = useCallback((attemptLimit: number): boolean => {
     if (sceneSurfaceRetryCountRef.current >= attemptLimit) return false;
@@ -571,9 +693,14 @@ export function useDrawingPersistenceLifecycle({
       store,
       projectScene: projectDrawingScene,
       isVisible: () => !hiddenRef.current,
-      selectedId: () => selectedIdRef.current,
+      selectedId: () => visibleSceneSelectedId(selectedIdRef.current, dynamicOverlayEnabled),
       ...(visibleCanary ? {
-        shouldProjectNode: (node) => isPhase4SceneDrawingKind(node.entity.kind),
+        shouldProjectNode: (node) => shouldProjectVisibleSceneEntity(
+          node.entity.kind,
+          node.id,
+          dynamicOverlayEnabled,
+          activeOverlayEntityIdRef?.current ?? null,
+        ),
         publishScene: (plan) => sceneBridge.publish(plan),
         clearScene: () => sceneBridge.clearPlan(),
       } : {}),
@@ -635,7 +762,7 @@ export function useDrawingPersistenceLifecycle({
         return result;
       } } : {}),
     });
-  }, [authorityMode, engineMode.effective, hiddenRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime, selectedIdRef]);
+  }, [activeOverlayEntityIdRef, authorityMode, dynamicOverlayEnabled, engineMode.effective, hiddenRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime, selectedIdRef]);
 
   const commitPrimitiveDraft = useCallback((
     scopeKey: string,
@@ -750,6 +877,34 @@ export function useDrawingPersistenceLifecycle({
     ));
   }, [activateDrawingScene, engineMode.effective, sceneBridge, sceneRuntime]);
 
+  const invalidateVisibleScene = useCallback((): boolean => {
+    if (authorityMode !== "document"
+      || engineMode.effective !== "scene-canary"
+      || !sceneCanaryEnabledRef.current) return false;
+    let adapterInvalidated = false;
+    const adapter = sceneAdapterGetterDelegate.read()();
+    if (adapter?.notifyDrawingFrameInvalidation) {
+      try {
+        adapter.notifyDrawingFrameInvalidation();
+        adapterInvalidated = true;
+      } catch {
+        // The runtime invalidation below remains the fail-closed fallback.
+      }
+    }
+    return sceneRuntime.invalidate("interaction-overlay") || adapterInvalidated;
+  }, [authorityMode, engineMode.effective, sceneAdapterGetterDelegate, sceneRuntime]);
+
+  const subscribeVisibleScenePaint = useCallback((
+    listener: (stamp: DrawingCommittedPaintTicket) => void,
+    { replayLastPaint = true }: Readonly<{ replayLastPaint?: boolean }> = {},
+  ): (() => void) => {
+    if (typeof listener !== "function") return () => {};
+    const unsubscribe = sceneBridge.subscribePainted((ack) => listener(ack.stamp));
+    const lastPaintedStamp = sceneBridge.snapshot().lastPaintedStamp;
+    if (replayLastPaint && lastPaintedStamp) listener(lastPaintedStamp);
+    return unsubscribe;
+  }, [sceneBridge]);
+
   const prepareUserMutationScope = useCallback((): boolean => {
     const adapter = adapterGetterRef.current();
     const activeScope = authorityMode === "document"
@@ -811,6 +966,123 @@ export function useDrawingPersistenceLifecycle({
     if (!prepareUserMutationScope()) return false;
     return persistActiveScopeDrawings(commands);
   }, [persistActiveScopeDrawings, prepareUserMutationScope]);
+
+  const persistDetachedDrawings = useCallback((
+    commands: readonly DrawingCommand[],
+    candidatePrimitives: readonly DrawingPrimitive[] = primitivesRef.current,
+  ): DrawingDetachedCommitReceipt | null => {
+    if (!dynamicOverlayEnabled
+      || authorityMode !== "document"
+      || !prepareUserMutationScope()) return null;
+    const renderer = rendererRef.current;
+    if (!renderer || commands.length === 0) return null;
+    const store = activeStoreRef.current;
+    const persistentCandidates = persistentLegacyPrimitives(candidatePrimitives);
+    configureLegacyViewportBatching(persistentCandidates, true);
+    mutationStartedRef.current = true;
+
+    const committed = commitDetachedDrawingCommands({
+      commands,
+      primitives: persistentCandidates,
+      renderer,
+      scopeKey: store.getSnapshot().scopeKey,
+      store,
+    });
+    if (!committed) {
+      console.warn("Failed to commit detached drawing candidates");
+      return null;
+    }
+
+    if (committed.changed || store.dirty) {
+      try {
+        if (!persistDocumentAndMeasure(store)) {
+          console.warn("Failed to persist detached drawing document; the in-memory document remains dirty");
+        }
+      } catch (error) {
+        console.warn("Detached drawing persistence threw; the in-memory document remains authoritative", error);
+      }
+    }
+
+    if (committed.rendererAdopted) {
+      primitivesRef.current = [...renderer.snapshot()];
+    }
+    if (!committed.rendererAdopted || !committed.surfaceSynchronized) {
+      scopeReadyRef.current = false;
+      requestScopeRetry();
+      return Object.freeze({
+        committed: true,
+        changed: committed.changed,
+        surfaceSynchronized: false,
+        ticket: null,
+      });
+    }
+
+    if (engineMode.effective === "scene-canary" && sceneCanaryEnabledRef.current) {
+      // The active runtime already subscribed to this authoritative store;
+      // dispatch scheduled its document invalidation before renderer adoption.
+      // Re-activating the identical binding on every mouseup would tear down
+      // and reinstall subscriptions in the synchronous interaction budget.
+      const runtimeSnapshot = sceneRuntime.snapshot();
+      const activated = runtimeSnapshot.active
+        && runtimeSnapshot.scopeKey === committed.document.scopeKey
+        ? true
+        : activateDrawingScene(store, renderer);
+      if (!activated) {
+        scopeReadyRef.current = false;
+        requestScopeRetry();
+        return Object.freeze({
+          committed: true,
+          changed: committed.changed,
+          surfaceSynchronized: true,
+          ticket: null,
+        });
+      }
+    }
+    if (activeOverlayEntityIdRef?.current) {
+      return Object.freeze({
+        committed: true,
+        changed: committed.changed,
+        surfaceSynchronized: true,
+        ticket: null,
+      });
+    }
+
+    const adapter = sceneAdapterGetterDelegate.read()();
+    const frame = adapter?.captureDrawingFrame?.() ?? null;
+    if (!frame || adapter?.isDrawingFrameCurrent?.(frame) !== true) {
+      return Object.freeze({
+        committed: true,
+        changed: committed.changed,
+        surfaceSynchronized: true,
+        ticket: null,
+      });
+    }
+    const ticket = createDrawingCommittedPaintTicket(
+      committed.document,
+      frame,
+      engineMode.effective === "scene-canary" && sceneCanaryEnabledRef.current
+        ? sceneBridge.snapshot().surfaceGeneration
+        : frame.surfaceGeneration,
+    );
+    return Object.freeze({
+      committed: true,
+      changed: committed.changed,
+      surfaceSynchronized: true,
+      ticket,
+    });
+  }, [
+    activeOverlayEntityIdRef,
+    activateDrawingScene,
+    authorityMode,
+    dynamicOverlayEnabled,
+    engineMode.effective,
+    prepareUserMutationScope,
+    primitivesRef,
+    requestScopeRetry,
+    sceneAdapterGetterDelegate,
+    sceneBridge,
+    sceneRuntime,
+  ]);
 
   const clearDrawings = useCallback((): boolean => {
     // This check happens before any canonical primitive is detached. In a
@@ -930,13 +1202,35 @@ export function useDrawingPersistenceLifecycle({
     }
   }, [sceneBridge, sceneRuntime]);
 
-  useEffect(() => registerDrawingPerfRuntimeSummaryProvider(
-    () => summarizeDrawingRuntimePrimitives(
-      primitivesRef.current,
-      (rendererRef.current?.attachedCount() ?? 0)
-        + sceneBridge.snapshot().attachedPrimitiveCount,
-    ),
-  ), [primitivesRef, sceneBridge]);
+  useEffect(() => registerDrawingPerfRuntimeSummaryProvider(() => {
+    const bridgeSnapshot = sceneBridge.snapshot();
+    const runtimeSnapshot = sceneRuntime.snapshot();
+    const effectiveEngineMode = engineMode.effective === "scene-canary"
+      && !sceneCanaryEnabledRef.current
+      ? "legacy"
+      : engineMode.effective;
+    const adapter = sceneAdapterGetterDelegate.read()();
+    const plotRect = adapter?.getMainPanePlotRect?.() ?? null;
+    return {
+      ...summarizeDrawingRuntimePrimitives(
+        primitivesRef.current,
+        (rendererRef.current?.attachedCount() ?? 0)
+          + bridgeSnapshot.attachedPrimitiveCount,
+      ),
+      effectiveEngineMode,
+      scenePublicationReady: effectiveEngineMode === "scene-canary"
+        && isDrawingVisibleScenePublicationReady({
+          attachedSurfaceGeneration: bridgeSnapshot.surfaceGeneration,
+          publishedSurfaceGeneration: runtimeSnapshot.plan?.stamp.surfaceGeneration ?? null,
+          requestedScope: requestedScopeRef.current,
+          runtimeActive: runtimeSnapshot.active,
+          runtimePublicationReady: runtimeSnapshot.publicationReady,
+          runtimeScope: runtimeSnapshot.scopeKey,
+          sceneCanaryEnabled: sceneCanaryEnabledRef.current,
+        }),
+      ...(plotRect ? { mainPanePlotRect: plotRect } : {}),
+    };
+  }), [engineMode.effective, primitivesRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime]);
 
   useEffect(() => registerDrawingPerfShadowParityRequester(
     () => sceneRuntime.requestParity(),
@@ -953,6 +1247,12 @@ export function useDrawingPersistenceLifecycle({
     if (!sceneCanaryEnabledRef.current) return null;
     const plan = sceneRuntime.snapshot().plan;
     return plan ? drawingDisplayEntityScreenBox(plan, id) : null;
+  }, [sceneRuntime]);
+
+  const getSceneScreenHandles = useCallback((id: string): readonly ScreenPoint[] | null => {
+    if (!sceneCanaryEnabledRef.current) return null;
+    const plan = sceneRuntime.snapshot().plan;
+    return plan ? drawingDisplayEntityScreenHandles(plan, id) : null;
   }, [sceneRuntime]);
 
   useEffect(() => {
@@ -1213,11 +1513,15 @@ export function useDrawingPersistenceLifecycle({
     clearDrawings,
     completeSurfaceDispose,
     invalidateSurfaceCredentialsForSeriesReplacement,
+    invalidateVisibleScene,
     persistActiveScopeDrawings,
+    persistDetachedDrawings,
     persistDrawings,
     prepareSurfaceDispose,
     prepareUserMutationScope,
     hitTestScene,
     getSceneScreenBox,
+    getSceneScreenHandles,
+    subscribeVisibleScenePaint,
   };
 }

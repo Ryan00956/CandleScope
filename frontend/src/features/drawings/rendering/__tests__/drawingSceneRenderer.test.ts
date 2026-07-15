@@ -169,3 +169,48 @@ test("ray and infinite lines extend from immutable anchors beyond the bitmap edg
     assert.equal(calls.some((call) => call.name === "arc"), false);
   }
 });
+
+test("renderer acknowledges only non-null plans after their canvas draw completes", () => {
+  const order: string[] = [];
+  const acknowledged: unknown[] = [];
+  const renderer = new DrawingSceneRenderer((plan) => {
+    order.push("ack");
+    acknowledged.push(plan);
+  });
+  const recorded = recordingTarget(1, 1);
+  const target = {
+    useBitmapCoordinateSpace(callback: Parameters<PrimitiveCanvasTarget["useBitmapCoordinateSpace"]>[0]) {
+      order.push("canvas-start");
+      recorded.target.useBitmapCoordinateSpace(callback);
+      order.push("canvas-end");
+    },
+  } as PrimitiveCanvasTarget;
+
+  renderer.draw(target);
+  assert.deepEqual(order, []);
+
+  const nonEmpty = createDrawingScreenDisplayList(stamp, [lineEntity("line-segment")]);
+  renderer.setPlan(nonEmpty);
+  renderer.draw(target);
+  assert.deepEqual(order, ["canvas-start", "canvas-end", "ack"]);
+  assert.strictEqual(acknowledged[0], nonEmpty);
+
+  let emptyTargetUsed = false;
+  const empty = createDrawingScreenDisplayList({ ...stamp, documentRevision: 2 }, []);
+  renderer.setPlan(empty);
+  renderer.draw({
+    useBitmapCoordinateSpace() { emptyTargetUsed = true; },
+  } as unknown as PrimitiveCanvasTarget);
+  assert.equal(emptyTargetUsed, false);
+  assert.strictEqual(acknowledged[1], empty);
+});
+
+test("renderer does not acknowledge when bitmap drawing throws", () => {
+  let acknowledgements = 0;
+  const renderer = new DrawingSceneRenderer(() => { acknowledgements += 1; });
+  renderer.setPlan(createDrawingScreenDisplayList(stamp, [lineEntity("line-segment")]));
+  assert.throws(() => renderer.draw({
+    useBitmapCoordinateSpace() { throw new Error("bitmap unavailable"); },
+  } as unknown as PrimitiveCanvasTarget), /bitmap unavailable/);
+  assert.equal(acknowledgements, 0);
+});

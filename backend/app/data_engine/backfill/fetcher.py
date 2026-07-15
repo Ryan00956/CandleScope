@@ -229,6 +229,8 @@ class HistoricalFetcher:
         all_bars: list[FetchedBar] = []
         errors: list[str] = []
         pages_fetched = 0
+        source_complete = False
+        empty_reason: str | None = None
 
         interval_ms = parse_interval_ms(task.interval)
         if interval_ms is None:
@@ -336,8 +338,21 @@ class HistoricalFetcher:
 
             pages_fetched += 1
 
-            if not page_bars:
+            if not page_bars and not raw_messages:
+                # Preserve a successful empty-page signal separately from
+                # failures.  The coordinator combines this with calendar,
+                # pagination and local-bound evidence before learning a
+                # durable history boundary.
+                source_complete = True
+                empty_reason = "source_empty"
                 break  # No more data available
+            if not page_bars:
+                # A non-empty payload that normalizes to no closed bars may be
+                # a forming candle, schema drift, or parse failure.  It is not
+                # evidence that the provider's history is exhausted.
+                errors.append("History page contained no usable closed bars")
+                empty_reason = "unusable_page"
+                break
 
             all_bars.extend(page_bars)
             await self._fire_progress(task, len(all_bars), estimated_total)
@@ -380,6 +395,14 @@ class HistoricalFetcher:
             elapsed_ms=elapsed,
             pages_fetched=pages_fetched,
             errors=errors,
+            source_complete=source_complete and not errors,
+            exhausted_before_ms=(
+                min((bar.open_time for bar in all_bars), default=None)
+                if source_complete and not errors
+                else None
+            ),
+            empty_reason=empty_reason if source_complete and not errors else None,
+            retryable=bool(errors),
         )
 
         logger.info(

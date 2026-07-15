@@ -72,6 +72,41 @@ test("explicitly complete pages close the request while fallback stays retryable
   assert.deepEqual(nextUncoveredHistoryRange([], requested), requested);
 });
 
+test("terminal empty pages become resolved coverage instead of a retry loop", () => {
+  const requested = { startMs: 1_000, endMs: 5_000 };
+  const exhausted = coverageForHistoryPage(requested, {
+    count: 0,
+    coverage: { earliest_ms: null, latest_ms: null, complete: false },
+    fallback: false,
+    history_state: "exhausted",
+    complete: true,
+    retryable: false,
+  }, "backward");
+
+  assert.deepEqual(exhausted, requested);
+  assert.equal(nextUncoveredHistoryRange(exhausted ? [exhausted] : [], requested), null);
+
+  const exhaustedFallback = coverageForHistoryPage(requested, {
+    count: 0,
+    coverage: { earliest_ms: null, latest_ms: null, complete: false },
+    fallback: true,
+    history_state: "exhausted",
+    complete: true,
+    retryable: false,
+  }, "backward");
+  assert.deepEqual(exhaustedFallback, requested);
+
+  const pending = coverageForHistoryPage(requested, {
+    count: 0,
+    coverage: { earliest_ms: null, latest_ms: null, complete: false },
+    fallback: false,
+    history_state: "pending",
+    complete: false,
+    retryable: true,
+  }, "backward");
+  assert.equal(pending, null);
+});
+
 test("coverage segments preserve real gaps instead of claiming one broad span", () => {
   const coverage = mergeHistoryCoverage(
     [{ startMs: 1_000, endMs: 2_000 }],

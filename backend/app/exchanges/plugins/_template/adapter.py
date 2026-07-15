@@ -6,6 +6,9 @@ from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportM
 from app.exchanges.models import (
     ExchangeCapabilities,
     ExchangeMarket,
+    HistoryAvailabilityPolicy,
+    HistoryCadence,
+    HistoryEmptyPageSemantics,
     MarketChannelCapability,
     SymbolInfo,
 )
@@ -26,12 +29,14 @@ class TemplateExchangeAdapter:
         return ExchangeCapabilities(
             exchange=self.id,
             name=self.name,
-            capability_schema_version=2,
+            capability_schema_version=3,
             markets=[
                 ExchangeMarket(
                     market_type="spot",
                     product_type="spot",
                     label="Spot",
+                    calendar_id="replace-with-exchange-calendar",
+                    timezone="UTC",
                 ),
             ],
             channels=[
@@ -64,6 +69,14 @@ class TemplateExchangeAdapter:
                     ),
                     connection_model="message_per_stream",
                     limits={"rest.max_limit": 1000},
+                    history_policy=HistoryAvailabilityPolicy(
+                        cadence=HistoryCadence.REGULAR,
+                        empty_page_semantics=(
+                            HistoryEmptyPageSemantics.AUTHORITATIVE_RANGE_EMPTY
+                        ),
+                        calendar_id="replace-with-exchange-calendar",
+                        timezone="UTC",
+                    ),
                 ),
             ],
             native_intervals=["1m", "5m", "15m", "1h", "1d"],

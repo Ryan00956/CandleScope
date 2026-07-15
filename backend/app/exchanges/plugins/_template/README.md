@@ -58,7 +58,7 @@ Built-in examples:
 6. Implement symbol canonicalization and symbol metadata conversion in `symbols.py`.
 7. Add a pagination policy in `pagination.py` if default reverse-time pagination is not correct for the exchange.
 8. Return the protocol, normalizer, symbol normalizer, and policies from `plugin.py`.
-9. Keep `plugin_api_version="1.0"` and `capability_schema_version=1` unless the backend registry explicitly supports a newer major contract.
+9. Keep `plugin_api_version="1.0"`; choose the highest capability schema implemented completely by the plugin (the bundled template demonstrates schema v3).
 10. Register it in `app/exchanges/registry.py` through `bootstrap_default_adapters()`, or load it explicitly with `CANDLESCOPE_EXCHANGE_PLUGINS=module.path,module.path:factory`.
 11. Add contract fixtures under `tests/fixtures/exchanges/` with `ExchangeContractCase` and `NormalizerContractSample`.
 12. Add tests for capabilities, symbol normalization, REST specs, WS specs/subscriptions, normalizer behavior, pagination, and historical fetch behavior.
@@ -71,6 +71,8 @@ At minimum, define:
 - `capabilities()`: supported market types, intervals, REST/WS features.
 - `plugin_api_version`: major contract version consumed by `ExchangeRegistry`.
 - `capability_schema_version`: schema version for capability metadata.
+- Schema-v3 `markets`: declare `calendar_id` and `timezone`.
+- Schema-v3 historical `channels`: declare typed cadence, empty-page semantics, calendar identity, and finite history limits in `history_policy`.
 - `protocol_features`: stable feature flags such as `rest.kline`, `ws.shared_multiplex`, or `pagination.reverse_time`.
 - `limits`: machine-readable limits such as `rest.kline.max_limit`.
 - `known_limitations`: honest limitations that frontend/runtime diagnostics can surface.

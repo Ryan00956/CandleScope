@@ -11,7 +11,25 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.core.executors import run_storage
+from app.data_engine.history.calendar import TradingCalendar
+from app.data_engine.history.models import (
+    BoundaryReason,
+    BoundarySide,
+    BoundaryState,
+    HistoryAvailability,
+    HistoryDisposition,
+    HistoryPlan,
+    HistoryRequest,
+    HistorySeriesKey,
+    TimeBound,
+)
+from app.data_engine.history.planner import HistoryRequestPlanner
+from app.data_engine.history.service import HistoryAvailabilityService
 from app.data_engine.interval_policy import parse_interval_ms
+from app.exchanges.models import (
+    HistoryAvailabilityPolicy,
+    HistoryEmptyPageSemantics,
+)
 from .models import BarData, DataEvent, DataEventType, SeriesKey, audience_for_backfill_reason
 
 logger = logging.getLogger("data_manager.backfill_coordinator")
@@ -108,6 +126,9 @@ class RepairRequest:
     def merged_with(self, other: RepairRequest) -> RepairRequest:
         """Return a range that covers both requests for the same series."""
         metadata = {**self.metadata, **other.metadata}
+        planned_ranges = self._merged_history_fetch_ranges(other)
+        if planned_ranges:
+            metadata["history_fetch_ranges"] = planned_ranges
         metadata.setdefault("merged_request_ids", [])
         metadata["merged_request_ids"] = [
             *metadata["merged_request_ids"],
@@ -129,6 +150,43 @@ class RepairRequest:
             request_id=self.request_id,
         )
 
+    def _merged_history_fetch_ranges(
+        self,
+        other: RepairRequest,
+    ) -> list[dict[str, int]]:
+        ranges: list[tuple[int, int]] = []
+        for request in (self, other):
+            raw_ranges = request.metadata.get("history_fetch_ranges")
+            if not isinstance(raw_ranges, list):
+                raw_ranges = [{"start_ms": request.start_ms, "end_ms": request.end_ms}]
+            for raw in raw_ranges:
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    start_ms = int(raw["start_ms"])
+                    end_ms = int(raw["end_ms"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if start_ms <= end_ms:
+                    ranges.append((start_ms, end_ms))
+        if not ranges:
+            return []
+        ranges.sort()
+        merged: list[tuple[int, int]] = [ranges[0]]
+        for start_ms, end_ms in ranges[1:]:
+            previous_start, previous_end = merged[-1]
+            if start_ms <= previous_end:
+                merged[-1] = (previous_start, max(previous_end, end_ms))
+            else:
+                merged.append((start_ms, end_ms))
+        return [
+            {"start_ms": start_ms, "end_ms": end_ms}
+            for start_ms, end_ms in merged
+        ]
+
+
+HistoryPolicyResolver = Callable[[RepairRequest], Any]
+
 
 @dataclass(slots=True)
 class RepairOutcome:
@@ -140,6 +198,16 @@ class RepairOutcome:
     verified_contiguous: bool | None = None
     remaining_missing_bars: int | None = None
     error: str | None = None
+    terminal_reason: str | None = None
+    exhausted_before_ms: int | None = None
+    retryable: bool = False
+
+
+@dataclass(slots=True)
+class _PreparedHistoryRequest:
+    request: RepairRequest | None
+    plan: HistoryPlan | None = None
+    context: Any | None = None
 
 
 @dataclass(slots=True)
@@ -401,40 +469,58 @@ class _BackfillScheduler:
         interval_ms = parse_interval_ms(request.interval) or 60_000
         chunk_span = interval_ms * self._chunk_bars
         chunks: list[_FetchChunk] = []
-        start = int(request.start_ms)
-        end = int(request.end_ms)
         sequence = 0
-        while start <= end:
-            chunk_end = min(end, start + chunk_span - interval_ms)
-            chunk_request = RepairRequest(
-                symbol=request.symbol,
-                interval=request.interval,
-                start_ms=start,
-                end_ms=chunk_end,
-                exchange=request.exchange,
-                market_type=request.market_type,
-                reason=request.reason,
-                priority=request.priority,
-                requester=request.requester,
-                wait_policy=request.wait_policy,
-                metadata={
-                    **request.metadata,
-                    "parent_request_id": request.request_id,
-                    "chunk_sequence": sequence,
-                },
-                request_id=request.request_id,
-            )
-            chunks.append(_FetchChunk(
-                chunk_id=f"{request.request_id}:{sequence}",
-                parent_id=request.request_id,
-                request=chunk_request,
-                sequence=sequence,
-            ))
-            sequence += 1
-            start = chunk_end + interval_ms
+        for planned_start, planned_end in self._planned_ranges(request):
+            start = planned_start
+            while start <= planned_end:
+                chunk_end = min(planned_end, start + chunk_span - interval_ms)
+                chunk_request = RepairRequest(
+                    symbol=request.symbol,
+                    interval=request.interval,
+                    start_ms=start,
+                    end_ms=chunk_end,
+                    exchange=request.exchange,
+                    market_type=request.market_type,
+                    reason=request.reason,
+                    priority=request.priority,
+                    requester=request.requester,
+                    wait_policy=request.wait_policy,
+                    metadata={
+                        **request.metadata,
+                        "parent_request_id": request.request_id,
+                        "chunk_sequence": sequence,
+                    },
+                    request_id=request.request_id,
+                )
+                chunks.append(_FetchChunk(
+                    chunk_id=f"{request.request_id}:{sequence}",
+                    parent_id=request.request_id,
+                    request=chunk_request,
+                    sequence=sequence,
+                ))
+                sequence += 1
+                start = chunk_end + interval_ms
         if self._newest_first(request):
             return list(reversed(chunks))
         return chunks
+
+    @staticmethod
+    def _planned_ranges(request: RepairRequest) -> list[tuple[int, int]]:
+        raw_ranges = request.metadata.get("history_fetch_ranges")
+        if not isinstance(raw_ranges, list):
+            return [(int(request.start_ms), int(request.end_ms))]
+        ranges: list[tuple[int, int]] = []
+        for raw in raw_ranges:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                start_ms = max(int(request.start_ms), int(raw["start_ms"]))
+                end_ms = min(int(request.end_ms), int(raw["end_ms"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start_ms <= end_ms:
+                ranges.append((start_ms, end_ms))
+        return ranges or [(int(request.start_ms), int(request.end_ms))]
 
     @staticmethod
     def _newest_first(request: RepairRequest) -> bool:
@@ -584,6 +670,14 @@ class _BackfillScheduler:
         if self._is_failed(outcome.status):
             state.failed = outcome
             self._discard_remaining_chunks(state)
+        elif (
+            self._newest_first(state.request)
+            and self._is_left_terminal_outcome(outcome)
+        ):
+            # Newest-first requests must not continue scheduling successively
+            # older chunks after the provider has confirmed the left edge.
+            self._discard_remaining_chunks(state)
+            state.completed = state.total
 
         if not self._is_failed(outcome.status):
             self._coverage.setdefault(chunk.request.series_key, []).append({
@@ -625,6 +719,9 @@ class _BackfillScheduler:
                 verified_contiguous=False,
                 remaining_missing_bars=state.failed.remaining_missing_bars,
                 error=state.failed.error,
+                terminal_reason=state.failed.terminal_reason,
+                exhausted_before_ms=state.failed.exhausted_before_ms,
+                retryable=state.failed.retryable,
             )
 
         last = state.outcomes[-1] if state.outcomes else None
@@ -653,6 +750,27 @@ class _BackfillScheduler:
                 else None
             ),
             error=None,
+            terminal_reason=(
+                next(
+                    (
+                        outcome.terminal_reason
+                        for outcome in reversed(state.outcomes)
+                        if outcome.terminal_reason
+                    ),
+                    None,
+                )
+            ),
+            exhausted_before_ms=(
+                next(
+                    (
+                        outcome.exhausted_before_ms
+                        for outcome in reversed(state.outcomes)
+                        if outcome.exhausted_before_ms is not None
+                    ),
+                    None,
+                )
+            ),
+            retryable=any(outcome.retryable for outcome in state.outcomes),
         )
 
     def _bucket_for(self, request: RepairRequest) -> _TokenBucket:
@@ -662,6 +780,20 @@ class _BackfillScheduler:
             bucket = _TokenBucket(key=key)
             self._buckets[key] = bucket
         return bucket
+
+    @staticmethod
+    def _is_left_terminal_outcome(outcome: RepairOutcome) -> bool:
+        return (
+            not outcome.retryable
+            and outcome.terminal_reason in {
+                "provider_exhausted",
+                BoundaryReason.SOURCE_EXHAUSTED.value,
+                BoundaryReason.DATA_START.value,
+                BoundaryReason.LISTING.value,
+                BoundaryReason.UPSTREAM_START.value,
+                BoundaryReason.PROVIDER_RETENTION.value,
+            }
+        )
 
     def _state_snapshot(
         self,
@@ -703,6 +835,9 @@ class _BackfillScheduler:
             "verified_contiguous": outcome.verified_contiguous,
             "remaining_missing_bars": outcome.remaining_missing_bars,
             "error": outcome.error,
+            "terminal_reason": outcome.terminal_reason,
+            "exhausted_before_ms": outcome.exhausted_before_ms,
+            "retryable": outcome.retryable,
         }
 
     @staticmethod
@@ -776,6 +911,8 @@ class BackfillCoordinator:
         gap_ledger: GapLedgerLike | None = None,
         max_concurrency: int = 4,
         chunk_bars: int = 1000,
+        history_service: HistoryAvailabilityService | None = None,
+        history_policy_resolver: HistoryPolicyResolver | None = None,
     ) -> None:
         self._storage = storage
         self._bars_backfilled = bars_backfilled
@@ -785,6 +922,8 @@ class BackfillCoordinator:
         self._max_retries = max(1, max_retries)
         self._base_delay_seconds = base_delay_seconds
         self._gap_ledger = gap_ledger
+        self._history_service = history_service
+        self._history_policy_resolver = history_policy_resolver
 
         self._futures: dict[str, asyncio.Future[RepairOutcome]] = {}
         self._outcomes: dict[str, RepairOutcome] = {}
@@ -1067,12 +1206,251 @@ class BackfillCoordinator:
             raise RuntimeError("BackfillCoordinator is shut down")
 
         self._prune_retained_state()
-        canonical_id, future = self._scheduler.submit(request)
+        prepared = self._prepare_history_request(request)
+        if prepared.request is None:
+            future = self._future_for(request)
+            outcome = self._history_no_fetch_outcome(request, prepared.plan)
+            self._complete(request, outcome)
+            return request.request_id, future
+
+        canonical_id, future = self._scheduler.submit(prepared.request)
         if canonical_id != request.request_id:
             self._request_id_aliases[request.request_id] = canonical_id
             self._request_id_alias_expires_at[request.request_id] = None
             self._prune_retained_state()
         return canonical_id, future
+
+    def _prepare_history_request(
+        self,
+        request: RepairRequest,
+    ) -> _PreparedHistoryRequest:
+        plan, context = self._plan_history_request(request)
+        if plan is None:
+            return _PreparedHistoryRequest(request=request)
+        if not plan.has_fetch_work:
+            return _PreparedHistoryRequest(request=None, plan=plan, context=context)
+
+        fetch_ranges = [
+            {"start_ms": item.start_ms, "end_ms": item.end_ms}
+            for item in plan.fetch_ranges
+        ]
+        prepared = RepairRequest(
+            symbol=request.symbol,
+            interval=request.interval,
+            start_ms=plan.fetch_ranges[0].start_ms,
+            end_ms=plan.fetch_ranges[-1].end_ms,
+            exchange=request.exchange,
+            market_type=request.market_type,
+            reason=request.reason,
+            priority=request.priority,
+            requester=request.requester,
+            wait_policy=request.wait_policy,
+            metadata={
+                **request.metadata,
+                "history_fetch_ranges": fetch_ranges,
+                "history_calendar_id": plan.calendar_id,
+                "history_exclusions": [
+                    {
+                        "start_ms": item.time_range.start_ms,
+                        "end_ms": item.time_range.end_ms,
+                        "disposition": item.disposition.value,
+                        "reason": item.reason.value,
+                    }
+                    for item in plan.exclusions
+                ],
+            },
+            request_id=request.request_id,
+        )
+        return _PreparedHistoryRequest(
+            request=prepared,
+            plan=plan,
+            context=context,
+        )
+
+    def _plan_history_request(
+        self,
+        request: RepairRequest,
+    ) -> tuple[HistoryPlan | None, Any | None]:
+        if self._history_service is None and self._history_policy_resolver is None:
+            return None, None
+
+        history_request = HistoryRequest(
+            series=self._history_series_key(request),
+            interval=request.interval,
+            start_ms=request.start_ms,
+            end_ms=request.end_ms,
+        )
+        context: Any | None = None
+        if self._history_policy_resolver is not None:
+            try:
+                resolved = self._history_policy_resolver(request)
+            except Exception as exc:
+                logger.warning(
+                    "History policy resolution failed for %s:%s:%s@%s: %s",
+                    request.exchange,
+                    request.market_type,
+                    request.symbol,
+                    request.interval,
+                    exc,
+                )
+                return HistoryRequestPlanner.fail_closed(
+                    history_request,
+                    reason=BoundaryReason.AVAILABILITY_UNKNOWN,
+                ), None
+            if (
+                isinstance(resolved, tuple)
+                and len(resolved) == 2
+                and isinstance(resolved[0], HistoryPlan)
+            ):
+                return resolved[0], resolved[1]
+            context = resolved
+
+        availability = self._context_availability(context)
+        if availability is None:
+            if self._history_policy_resolver is not None:
+                return HistoryRequestPlanner.fail_closed(
+                    history_request,
+                    reason=BoundaryReason.AVAILABILITY_UNKNOWN,
+                ), context
+            availability = HistoryAvailability(calendar_id="crypto.24x7.utc")
+
+        if self._history_service is not None:
+            availability = self._history_service.resolve_availability(
+                history_request.series,
+                availability,
+            )
+
+        calendar = self._context_calendar(context, availability)
+        if calendar is not None:
+            return HistoryRequestPlanner(calendar).plan(
+                history_request,
+                availability,
+            ), context
+        if self._history_service is not None:
+            return self._history_service.plan(
+                history_request,
+                availability,
+                calendar_id=availability.calendar_id,
+            ), context
+        return HistoryRequestPlanner.fail_closed(
+            history_request,
+            reason=BoundaryReason.CALENDAR_UNKNOWN,
+            calendar_id=availability.calendar_id,
+        ), context
+
+    @staticmethod
+    def _history_series_key(request: RepairRequest) -> HistorySeriesKey:
+        return HistorySeriesKey(
+            exchange=request.exchange,
+            market_type=request.market_type,
+            symbol=request.symbol,
+            channel="kline",
+            variant=request.interval,
+        )
+
+    @staticmethod
+    def _context_availability(context: Any | None) -> HistoryAvailability | None:
+        if isinstance(context, HistoryAvailability):
+            return context
+        availability = getattr(context, "availability", None)
+        if isinstance(availability, HistoryAvailability):
+            return availability
+        policy = (
+            context
+            if isinstance(context, HistoryAvailabilityPolicy)
+            else getattr(context, "policy", None)
+        )
+        if not isinstance(policy, HistoryAvailabilityPolicy):
+            return None
+        return HistoryAvailability(
+            upstream_start=(
+                TimeBound(
+                    policy.available_from_ms,
+                    BoundaryReason.UPSTREAM_START,
+                )
+                if policy.available_from_ms is not None
+                else None
+            ),
+            upstream_end=(
+                TimeBound(
+                    policy.available_to_ms,
+                    BoundaryReason.UPSTREAM_END,
+                )
+                if policy.available_to_ms is not None
+                else None
+            ),
+            rolling_retention_ms=policy.max_age_ms,
+            calendar_id=policy.calendar_id,
+        )
+
+    def _context_calendar(
+        self,
+        context: Any | None,
+        availability: HistoryAvailability | None = None,
+    ) -> TradingCalendar | None:
+        calendar = getattr(context, "calendar", None)
+        if isinstance(calendar, TradingCalendar):
+            return calendar
+        if self._history_service is None:
+            return None
+        calendar_id = (
+            availability.calendar_id
+            if availability is not None
+            else None
+        )
+        return self._history_service.calendars.get(calendar_id)
+
+    @staticmethod
+    def _history_no_fetch_outcome(
+        request: RepairRequest,
+        plan: HistoryPlan | None,
+    ) -> RepairOutcome:
+        if plan is None:
+            return RepairOutcome(
+                request=request,
+                status="completed",
+                retryable=True,
+                error="history planning produced no request",
+            )
+        exclusion = next(
+            (
+                item
+                for item in plan.exclusions
+                if item.disposition is HistoryDisposition.TERMINAL
+            ),
+            plan.exclusions[0] if plan.exclusions else None,
+        )
+        reason = exclusion.reason.value if exclusion is not None else None
+        lower_reasons = {
+            BoundaryReason.DATA_START,
+            BoundaryReason.LISTING,
+            BoundaryReason.UPSTREAM_START,
+            BoundaryReason.PROVIDER_RETENTION,
+            BoundaryReason.SOURCE_EXHAUSTED,
+        }
+        exhausted_before_ms = (
+            exclusion.bound.value_ms
+            if exclusion is not None
+            and exclusion.bound is not None
+            and exclusion.reason in lower_reasons
+            else None
+        )
+        retryable = plan.retryable or plan.unknown
+        terminal_reason = (
+            reason
+            if plan.terminal or plan.disposition is HistoryDisposition.NOT_EXPECTED
+            else None
+        )
+        return RepairOutcome(
+            request=request,
+            status="completed",
+            verified_contiguous=(None if retryable else True),
+            remaining_missing_bars=(None if retryable else 0),
+            terminal_reason=terminal_reason,
+            exhausted_before_ms=exhausted_before_ms,
+            retryable=retryable,
+            error=("history availability is unknown" if plan.unknown else None),
+        )
 
     def _canonical_request_id(self, request_id: str) -> str:
         canonical_id = request_id
@@ -1149,6 +1527,12 @@ class BackfillCoordinator:
         return future
 
     async def _run_with_retries(self, request: RepairRequest) -> RepairOutcome:
+        prepared = self._prepare_history_request(request)
+        if prepared.request is None:
+            return self._history_no_fetch_outcome(request, prepared.plan)
+        request = prepared.request
+        history_context = prepared.context
+
         if self._engine is None:
             return RepairOutcome(
                 request=request,
@@ -1195,7 +1579,10 @@ class BackfillCoordinator:
                 }
                 if not self._is_failed(report.status):
                     self._ledger_mark_verifying(request)
-                    verification = await self._verify_request_range(request)
+                    verification = await self._verify_request_range(
+                        request,
+                        context=history_context,
+                    )
                     self._ledger_mark_verified(request, report, verification)
                     bars_loaded = await self._load_backfilled_to_cache(
                         request,
@@ -1216,6 +1603,17 @@ class BackfillCoordinator:
                         "; ".join(report.errors) if report.errors else None,
                     )
 
+                terminal_reason: str | None = None
+                exhausted_before_ms: int | None = None
+                if not self._is_failed(report.status):
+                    terminal_reason, exhausted_before_ms = (
+                        await self._record_confirmed_left_boundary(
+                            request,
+                            report,
+                            context=history_context,
+                        )
+                    )
+
                 return RepairOutcome(
                     request=request,
                     status=report.status,
@@ -1225,6 +1623,9 @@ class BackfillCoordinator:
                     verified_contiguous=verification.get("verified_contiguous"),
                     remaining_missing_bars=verification.get("remaining_missing_bars"),
                     error="; ".join(report.errors) if report.errors else None,
+                    terminal_reason=terminal_reason,
+                    exhausted_before_ms=exhausted_before_ms,
+                    retryable=self._report_retryable(report),
                 )
             except asyncio.CancelledError:
                 raise
@@ -1382,7 +1783,12 @@ class BackfillCoordinator:
             },
         ))
 
-    async def _verify_request_range(self, request: RepairRequest) -> dict[str, Any]:
+    async def _verify_request_range(
+        self,
+        request: RepairRequest,
+        *,
+        context: Any | None = None,
+    ) -> dict[str, Any]:
         query_bars = getattr(self._storage, "query_bars", None)
         if not callable(query_bars):
             return {
@@ -1425,19 +1831,47 @@ class BackfillCoordinator:
             }
 
         actual = {int(row["open_time"]) for row in rows}
-        expected = 0
-        missing = 0
-        current = int(request.start_ms)
-        while current <= request.end_ms:
-            expected += 1
-            if current not in actual:
-                missing += 1
-            current += interval_ms
+        calendar = self._context_calendar(
+            context,
+            self._context_availability(context),
+        )
+        if calendar is None and self._history_service is not None:
+            calendar = self._history_service.calendars.get(
+                request.metadata.get("history_calendar_id")
+            )
+        if calendar is not None:
+            try:
+                expected_opens = set(calendar.expected_opens(
+                    request.start_ms,
+                    request.end_ms,
+                    request.interval,
+                ))
+            except Exception as exc:
+                logger.warning(
+                    "Calendar verification failed for %s:%s:%s@%s: %s",
+                    request.exchange,
+                    request.market_type,
+                    request.symbol,
+                    request.interval,
+                    exc,
+                )
+                return {
+                    "verified_contiguous": None,
+                    "remaining_missing_bars": None,
+                }
+        else:
+            expected_opens: set[int] = set()
+            current = int(request.start_ms)
+            while current <= request.end_ms:
+                expected_opens.add(current)
+                current += interval_ms
+
+        missing = len(expected_opens - actual)
 
         return {
             "verified_contiguous": missing == 0,
             "remaining_missing_bars": missing,
-            "expected_bars": expected,
+            "expected_bars": len(expected_opens),
             "actual_bars": len(actual),
         }
 
@@ -1571,6 +2005,215 @@ class BackfillCoordinator:
         return int(getattr(reconcile_result, "bars_written", 0) or 0) + int(
             getattr(reconcile_result, "custom_bars_written", 0) or 0
         )
+
+    @staticmethod
+    def _report_fetch_results(report: Any) -> list[Any]:
+        return list(getattr(report, "fetch_results", None) or [])
+
+    @classmethod
+    def _report_exhausted_before_ms(cls, report: Any) -> int | None:
+        values = [
+            int(value)
+            for result in cls._report_fetch_results(report)
+            if (value := getattr(result, "exhausted_before_ms", None)) is not None
+        ]
+        return min(values) if values else None
+
+    @classmethod
+    def _report_retryable(cls, report: Any) -> bool:
+        return any(
+            bool(getattr(result, "retryable", False))
+            for result in cls._report_fetch_results(report)
+        )
+
+    async def _record_confirmed_left_boundary(
+        self,
+        request: RepairRequest,
+        report: Any,
+        *,
+        context: Any | None,
+    ) -> tuple[str | None, int | None]:
+        """Persist only policy-authorised, non-retryable empty-page evidence."""
+        empty_results = [
+            result
+            for result in self._report_fetch_results(report)
+            if bool(getattr(result, "source_complete", False))
+        ]
+        if not empty_results:
+            return None, None
+        if self._report_retryable(report) or bool(getattr(report, "errors", None)):
+            return None, None
+
+        semantics = self._context_empty_page_semantics(context)
+        if semantics is HistoryEmptyPageSemantics.UNKNOWN:
+            return None, None
+
+        boundary_ms = await self._left_boundary_value(
+            request,
+            report,
+            context=context,
+            allow_without_local_edge=(
+                semantics is HistoryEmptyPageSemantics.TERMINAL_EXHAUSTION
+            ),
+        )
+        if boundary_ms is None:
+            return None, None
+
+        if self._history_service is None:
+            if semantics is HistoryEmptyPageSemantics.TERMINAL_EXHAUSTION:
+                return "provider_exhausted", boundary_ms
+            return None, None
+
+        availability = self._context_availability(context)
+        revision = availability.revision if availability is not None else ""
+        try:
+            if semantics is HistoryEmptyPageSemantics.TERMINAL_EXHAUSTION:
+                record = self._history_service.record_boundary(
+                    self._history_series_key(request),
+                    BoundarySide.LEFT,
+                    value_ms=boundary_ms,
+                    reason=BoundaryReason.SOURCE_EXHAUSTED,
+                    state=BoundaryState.CONFIRMED,
+                    revision=revision,
+                )
+            else:
+                record = self._history_service.record_boundary(
+                    self._history_series_key(request),
+                    BoundarySide.LEFT,
+                    value_ms=boundary_ms,
+                    reason=BoundaryReason.SOURCE_EXHAUSTED,
+                    state=BoundaryState.CANDIDATE,
+                    revision=revision,
+                    promote_after=2,
+                )
+        except (RuntimeError, ValueError) as exc:
+            logger.warning(
+                "History boundary evidence rejected for %s:%s:%s@%s: %s",
+                request.exchange,
+                request.market_type,
+                request.symbol,
+                request.interval,
+                exc,
+            )
+            return None, None
+
+        if record.bound.state is not BoundaryState.CONFIRMED:
+            return None, None
+        return "provider_exhausted", record.bound.value_ms
+
+    @staticmethod
+    def _context_empty_page_semantics(
+        context: Any | None,
+    ) -> HistoryEmptyPageSemantics:
+        value = getattr(context, "empty_page_semantics", None)
+        if value is None:
+            policy = (
+                context
+                if isinstance(context, HistoryAvailabilityPolicy)
+                else getattr(context, "policy", None)
+            )
+            value = getattr(policy, "empty_page_semantics", None)
+        try:
+            return HistoryEmptyPageSemantics(value)
+        except (TypeError, ValueError):
+            return HistoryEmptyPageSemantics.UNKNOWN
+
+    async def _left_boundary_value(
+        self,
+        request: RepairRequest,
+        report: Any,
+        *,
+        context: Any | None,
+        allow_without_local_edge: bool,
+    ) -> int | None:
+        reported = self._report_exhausted_before_ms(report)
+        earliest: int | None = None
+        get_bounds = getattr(self._storage, "get_bounds", None)
+        if callable(get_bounds):
+            try:
+                bounds = await run_storage(
+                    get_bounds,
+                    request.symbol,
+                    request.interval,
+                    exchange=request.exchange,
+                    market_type=request.market_type,
+                )
+                raw_earliest = (bounds or {}).get("earliest_open_time")
+                if raw_earliest is not None:
+                    earliest = int(raw_earliest)
+            except Exception as exc:
+                logger.warning(
+                    "History boundary bounds lookup failed for %s:%s:%s@%s: %s",
+                    request.exchange,
+                    request.market_type,
+                    request.symbol,
+                    request.interval,
+                    exc,
+                )
+
+        if reported is not None and (earliest is None or reported <= earliest):
+            return reported
+        if earliest is not None:
+            if request.start_ms <= earliest <= request.end_ms:
+                return earliest
+            if request.end_ms < earliest and self._request_touches_left_edge(
+                request,
+                earliest,
+                context=context,
+            ):
+                return earliest
+        if not allow_without_local_edge:
+            return None
+        if request.reason not in {
+            "initial_history",
+            "visible_load_more",
+            "query_left_gap",
+            "query_shortfall",
+        }:
+            return None
+
+        calendar = self._context_calendar(
+            context,
+            self._context_availability(context),
+        )
+        if calendar is not None:
+            last = calendar.last_expected_open(
+                request.start_ms,
+                request.end_ms,
+                request.interval,
+            )
+            if last is None:
+                return None
+            return calendar.next_expected_open(last, request.interval)
+        interval_ms = parse_interval_ms(request.interval)
+        return request.end_ms + interval_ms if interval_ms else None
+
+    def _request_touches_left_edge(
+        self,
+        request: RepairRequest,
+        earliest_ms: int,
+        *,
+        context: Any | None,
+    ) -> bool:
+        calendar = self._context_calendar(
+            context,
+            self._context_availability(context),
+        )
+        if calendar is not None:
+            previous = calendar.previous_expected_open(
+                earliest_ms,
+                request.interval,
+            )
+            last = calendar.last_expected_open(
+                request.start_ms,
+                request.end_ms,
+                request.interval,
+            )
+            return previous is not None and last == previous
+        interval_ms = parse_interval_ms(request.interval)
+        if interval_ms is None:
+            return False
+        return request.end_ms == earliest_ms - interval_ms
 
     def _written_ranges_for_request(
         self,

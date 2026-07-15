@@ -11,7 +11,7 @@ from .plugin import BuiltinExchangePlugin, ExchangePlugin
 
 
 SUPPORTED_PLUGIN_API_MAJOR = 1
-SUPPORTED_CAPABILITY_SCHEMA_VERSION = 2
+SUPPORTED_CAPABILITY_SCHEMA_VERSION = 3
 
 
 class ExchangePluginRegistrationError(ValueError):

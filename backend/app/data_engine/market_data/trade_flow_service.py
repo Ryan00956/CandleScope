@@ -1311,7 +1311,7 @@ class TradeFlowService:
             capabilities = get_exchange_registry().get_plugin(identity[0]).capabilities()
         except KeyError as exc:
             raise ValueError(str(exc)) from exc
-        if getattr(capabilities, "capability_schema_version", 1) != 2:
+        if getattr(capabilities, "capability_schema_version", 1) < 2:
             raise ValueError("trade-flow requires an authoritative capability schema v2")
         capability = capabilities.channel_capability(
             MarketChannel.AGG_TRADE,

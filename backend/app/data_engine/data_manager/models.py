@@ -368,6 +368,17 @@ class QueryResult:
     has_tail_gap: bool = False
     missing_ranges: list[MissingRange] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Directional history-resolution state.  These fields are additive so
+    # older callers can continue to rely on ``has_more`` while newer clients
+    # can distinguish a terminal left edge from a pending repair.
+    history_state: str = "ready"
+    complete: bool = False
+    retryable: bool = False
+    terminal_reason: str | None = None
+    earliest_available_ms: int | None = None
+    next_before_ms: int | None = None
+    availability_revision: str | None = None
+    excluded_ranges: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -384,6 +395,14 @@ class QueryResult:
             "missing_ranges": [r.to_dict() for r in self.missing_ranges],
             "data": [b.to_dict() for b in self.bars],
             "metadata": self.metadata,
+            "history_state": self.history_state,
+            "complete": self.complete,
+            "retryable": self.retryable,
+            "terminal_reason": self.terminal_reason,
+            "earliest_available_ms": self.earliest_available_ms,
+            "next_before_ms": self.next_before_ms,
+            "availability_revision": self.availability_revision,
+            "excluded_ranges": list(self.excluded_ranges),
         }
 
     @property

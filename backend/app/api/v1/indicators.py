@@ -686,9 +686,29 @@ async def compute_range(req: IndicatorRangeRequest, request: Request):
         payload = build_error_payload(
             "INDICATOR_RANGE_EMPTY",
             str(exc),
-            hint="目标区间暂时没有已收盘 K 线，等待下一根 K 线后会自动更新。",
+            hint=(
+                "目标区间没有应生成的已收盘 K 线，无需继续重试。"
+                if not exc.retryable
+                else "目标区间暂时没有已收盘 K 线，等待下一根 K 线后会自动更新。"
+            ),
         )
-        payload["detail"] = {"range": {"start": start_s, "end": end_s}}
+        availability = {
+            "history_state": (
+                exc.history_state
+                or ("exhausted" if not exc.retryable else "pending")
+            ),
+            "complete": not exc.retryable,
+            "retryable": exc.retryable,
+            "terminal_reason": exc.terminal_reason,
+            "earliest_available_ms": exc.earliest_available_ms,
+            "availability_revision": exc.availability_revision,
+            "excluded_ranges": exc.excluded_ranges,
+        }
+        payload.update(availability)
+        payload["detail"] = {
+            "range": {"start": start_s, "end": end_s},
+            "availability": availability,
+        }
         return payload
     except IndicatorRangeNotReadyError as exc:
         payload = build_error_payload(
@@ -742,8 +762,30 @@ def _batch_range_error_payload(
         payload = build_error_payload(
             "INDICATOR_RANGE_EMPTY",
             str(exc),
-            hint="目标区间暂时没有已收盘 K 线，等待下一根 K 线后会自动更新。",
+            hint=(
+                "目标区间没有应生成的已收盘 K 线，无需继续重试。"
+                if not exc.retryable
+                else "目标区间暂时没有已收盘 K 线，等待下一根 K 线后会自动更新。"
+            ),
         )
+        availability = {
+            "history_state": (
+                exc.history_state
+                or ("exhausted" if not exc.retryable else "pending")
+            ),
+            "complete": not exc.retryable,
+            "retryable": exc.retryable,
+            "terminal_reason": exc.terminal_reason,
+            "earliest_available_ms": exc.earliest_available_ms,
+            "availability_revision": exc.availability_revision,
+            "excluded_ranges": exc.excluded_ranges,
+        }
+        payload.update(availability)
+        payload["detail"] = {
+            "range": {"start": start_s, "end": end_s},
+            "availability": availability,
+        }
+        return payload
     elif isinstance(exc, IndicatorRangeNotReadyError):
         payload = build_error_payload(
             "INDICATOR_RANGE_NOT_READY",

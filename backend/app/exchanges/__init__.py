@@ -10,8 +10,12 @@ from .contracts import (
 )
 from .loader import EXTERNAL_EXCHANGE_PLUGINS_ENV, load_external_plugin, load_external_plugins_from_env
 from .models import (
+    CRYPTO_24X7_CALENDAR_ID,
     ExchangeCapabilities,
     ExchangeMarket,
+    HistoryAvailabilityPolicy,
+    HistoryCadence,
+    HistoryEmptyPageSemantics,
     MarketChannelCapability,
     SymbolInfo,
     serialize_exchange_capabilities,
@@ -40,6 +44,7 @@ from .registry import (
 
 __all__ = [
     "AdapterBackedProtocol",
+    "CRYPTO_24X7_CALENDAR_ID",
     "EXTERNAL_EXCHANGE_PLUGINS_ENV",
     "ExchangeAdapter",
     "ExchangeCapabilities",
@@ -47,6 +52,9 @@ __all__ = [
     "ExchangeContractIssue",
     "ExchangeContractReport",
     "ExchangeMarket",
+    "HistoryAvailabilityPolicy",
+    "HistoryCadence",
+    "HistoryEmptyPageSemantics",
     "MarketChannelCapability",
     "ExchangePlugin",
     "ExchangePluginLoadStatus",

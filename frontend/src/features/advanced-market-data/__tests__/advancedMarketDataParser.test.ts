@@ -49,6 +49,41 @@ test("history accepts MarketStateEvent rows without Hub revision", () => {
   assert.equal(parsed.data[0]?.data.sample_kind, "settlement");
 });
 
+test("history parses terminal availability metadata for empty pages", () => {
+  const parsed = parseMarketHistoryPayload({
+    type: "market.history",
+    key: record().key,
+    count: 0,
+    data: [],
+    coverage: {
+      earliest_ms: null,
+      latest_ms: null,
+      complete: false,
+    },
+    history_state: "exhausted",
+    complete: true,
+    retryable: false,
+    terminal_reason: "provider_retention",
+    earliest_available_ms: 1_700_000_000_000,
+    next_before_ms: null,
+    availability_revision: "history-v2",
+    excluded_ranges: [{
+      start_ms: 1_699_999_000_000,
+      end_ms: 1_699_999_999_999,
+      reason: "market_closed",
+    }],
+  });
+
+  assert.equal(parsed.history_state, "exhausted");
+  assert.equal(parsed.retryable, false);
+  assert.equal(parsed.terminal_reason, "provider_retention");
+  assert.deepEqual(parsed.excluded_ranges, [{
+    start_ms: 1_699_999_000_000,
+    end_ms: 1_699_999_999_999,
+    reason: "market_closed",
+  }]);
+});
+
 test("snapshot and websocket-grade Hub records still require revision", () => {
   assert.throws(() => parseMarketSnapshotPayload({
     type: "market.snapshot",

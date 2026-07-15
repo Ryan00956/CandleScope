@@ -133,6 +133,10 @@ def test_market_history_returns_coverage_and_forwards_query() -> None:
         "earliest_ms": 1_700_000_000_000,
         "latest_ms": 1_700_028_800_000,
         "complete": True,
+        "terminal_reason": None,
+        "retryable": False,
+        "earliest_available_ms": None,
+        "availability_revision": None,
     }
     assert dm.history_calls == [{
         "key": MarketStreamKey.build(
@@ -212,10 +216,22 @@ def test_market_history_expired_empty_page_is_complete_and_not_retryable() -> No
         "data": [],
         "fallback": False,
         "has_more": False,
+        "history_state": "ready",
+        "complete": True,
+        "retryable": False,
+        "terminal_reason": None,
+        "earliest_available_ms": None,
+        "next_before_ms": None,
+        "availability_revision": None,
+        "excluded_ranges": [],
         "coverage": {
             "earliest_ms": None,
             "latest_ms": None,
             "complete": True,
+            "terminal_reason": None,
+            "retryable": False,
+            "earliest_available_ms": None,
+            "availability_revision": None,
         },
     }
 

@@ -18,6 +18,12 @@ import logging
 from collections import OrderedDict
 from typing import Callable, Awaitable
 
+from app.data_engine.history.calendar import (
+    AlwaysOpenCalendar,
+    CalendarRegistry,
+    TradingCalendar,
+)
+
 from .config import IngestionConfig
 from .metrics import LayerMetrics
 from .models import (
@@ -27,19 +33,12 @@ from .models import (
     GapMarker,
 )
 from .transport import TransportLayer
-from app.data_engine.interval_policy import STANDARD_INTERVAL_MS, is_monthly_interval
 
 logger = logging.getLogger("ingestion.L5_Continuity")
-
-# ─── Fixed interval mapping for kline gap detection ───────────
-#
-# Monthly intervals have variable duration, so ContinuityLayer intentionally
-# excludes them from fixed-step stream gap detection.
-_FIXED_INTERVAL_MS: dict[str, int] = {
-    interval: value
-    for interval, value in STANDARD_INTERVAL_MS.items()
-    if not is_monthly_interval(interval)
-}
+CalendarResolver = Callable[
+    [str, str, str],
+    TradingCalendar | str | None,
+]
 
 
 class ContinuityLayer:
@@ -50,10 +49,20 @@ class ContinuityLayer:
         config: IngestionConfig,
         transport: TransportLayer,
         descriptor: StreamDescriptor,
+        *,
+        calendar_resolver: CalendarResolver | None = None,
+        calendar_registry: CalendarRegistry | None = None,
     ) -> None:
         self._cfg = config
         self._transport = transport
         self._descriptor = descriptor
+        self._calendar_registry = calendar_registry or CalendarRegistry()
+        self._calendar_resolver = calendar_resolver
+        self._default_calendar = (
+            self._calendar_registry.get("crypto.24x7.utc")
+            or AlwaysOpenCalendar()
+        )
+        self._calendar = self._resolve_calendar()
 
         self._metrics = LayerMetrics("L5_Continuity")
 
@@ -62,11 +71,6 @@ class ContinuityLayer:
 
         # Last emitted continuity key (for gap detection)
         self._last_continuity_key: int | None = None
-
-        # Kline interval in ms (only for kline streams)
-        self._interval_ms: int | None = None
-        if descriptor.stream_type == StreamType.KLINE and descriptor.interval:
-            self._interval_ms = _FIXED_INTERVAL_MS.get(descriptor.interval)
 
         # Upstream callbacks
         self._on_event: Callable[[MarketEvent], Awaitable[None]] | None = None
@@ -84,6 +88,9 @@ class ContinuityLayer:
             "stream_key": self._descriptor.key,
             "last_continuity_key": self._last_continuity_key,
             "seen_cache_size": len(self._seen),
+            "calendar_id": (
+                self._calendar.calendar_id if self._calendar is not None else None
+            ),
             "metrics": self._metrics.snapshot(),
         }
 
@@ -96,6 +103,21 @@ class ContinuityLayer:
     def on_gap(self, callback: Callable[[GapMarker], Awaitable[None]]) -> None:
         """Register callback for gap markers (→ L6)."""
         self._on_gap = callback
+
+    def set_calendar_resolver(
+        self,
+        resolver: CalendarResolver | None,
+        *,
+        registry: CalendarRegistry | None = None,
+    ) -> None:
+        """Replace the per-series calendar resolver used for K-line gaps."""
+        if registry is not None:
+            self._calendar_registry = registry
+            self._default_calendar = (
+                registry.get("crypto.24x7.utc") or AlwaysOpenCalendar()
+            )
+        self._calendar_resolver = resolver
+        self._calendar = self._resolve_calendar()
 
     # ── Public: Ingest (called by L4) ────────────────────────
 
@@ -162,15 +184,82 @@ class ContinuityLayer:
     def _compute_expected_next(self, st: StreamType) -> int | None:
         if self._last_continuity_key is None:
             return None
-        if st == StreamType.KLINE and self._interval_ms:
-            return self._last_continuity_key + self._interval_ms
+        if (
+            st == StreamType.KLINE
+            and self._descriptor.interval
+            and self._calendar is not None
+        ):
+            try:
+                return self._calendar.next_expected_open(
+                    self._last_continuity_key,
+                    self._descriptor.interval,
+                )
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Unable to advance trading calendar for %s: %s",
+                    self._descriptor.key,
+                    exc,
+                )
+                return None
         if st in (StreamType.AGG_TRADE, StreamType.TRADE):
             return self._last_continuity_key + 1
         return None
 
     def _estimate_gap_count(self, st: StreamType, expected: int, actual: int) -> int:
-        if st == StreamType.KLINE and self._interval_ms:
-            return (actual - expected) // self._interval_ms
+        if (
+            st == StreamType.KLINE
+            and self._descriptor.interval
+            and self._calendar is not None
+        ):
+            try:
+                return self._calendar.count_expected(
+                    expected,
+                    actual - 1,
+                    self._descriptor.interval,
+                )
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Unable to count expected bars for %s: %s",
+                    self._descriptor.key,
+                    exc,
+                )
+                return 0
         if st in (StreamType.AGG_TRADE, StreamType.TRADE):
             return actual - expected
         return 0
+
+    def _resolve_calendar(self) -> TradingCalendar | None:
+        if self._calendar_resolver is None:
+            return self._default_calendar
+        try:
+            resolved = self._calendar_resolver(
+                self._descriptor.exchange,
+                self._descriptor.market_type,
+                self._descriptor.symbol,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Trading calendar resolver failed for %s: %s",
+                self._descriptor.key,
+                exc,
+            )
+            return None
+        if resolved is None:
+            return self._default_calendar
+        if isinstance(resolved, str):
+            calendar = self._calendar_registry.get(resolved)
+            if calendar is None:
+                logger.warning(
+                    "Unknown trading calendar %r for %s; gap detection disabled",
+                    resolved,
+                    self._descriptor.key,
+                )
+            return calendar
+        if isinstance(resolved, TradingCalendar):
+            return resolved
+        logger.warning(
+            "Invalid trading calendar resolver result for %s: %r",
+            self._descriptor.key,
+            resolved,
+        )
+        return None

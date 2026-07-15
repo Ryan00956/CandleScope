@@ -17,8 +17,12 @@ from app.core.market import VALID_INTERVALS
 from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
 from app.data_engine.market_data.kline_metrics import KLINE_DERIVED_FIELDS
 from app.exchanges.models import (
+    CRYPTO_24X7_CALENDAR_ID,
     ExchangeCapabilities,
     ExchangeMarket,
+    HistoryAvailabilityPolicy,
+    HistoryCadence,
+    HistoryEmptyPageSemantics,
     MarketChannelCapability,
     SymbolInfo,
 )
@@ -122,6 +126,25 @@ _LIQUIDATION_FIELDS = (
 _OPEN_INTEREST_PERIODS = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
 
 
+def _history_policy(cadence: HistoryCadence) -> HistoryAvailabilityPolicy:
+    return HistoryAvailabilityPolicy(
+        cadence=cadence,
+        empty_page_semantics=HistoryEmptyPageSemantics.AUTHORITATIVE_RANGE_EMPTY,
+        calendar_id=CRYPTO_24X7_CALENDAR_ID,
+        timezone="UTC",
+    )
+
+
+def _timestamp_ms(value: Any) -> int | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _channel_capabilities() -> list[MarketChannelCapability]:
     return [
         MarketChannelCapability(
@@ -141,6 +164,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             derived_fields=KLINE_DERIVED_FIELDS,
             connection_model="path_per_stream",
             limits={"rest.max_limit": 1000},
+            history_policy=_history_policy(HistoryCadence.REGULAR),
         ),
         MarketChannelCapability(
             channel=MarketChannel.KLINE,
@@ -160,6 +184,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             connection_model="path_per_stream",
             limits={"rest.max_limit": 1000},
             known_limitations=("The USD-M kline endpoint does not support 1s bars",),
+            history_policy=_history_policy(HistoryCadence.REGULAR),
         ),
         MarketChannelCapability(
             channel=MarketChannel.AGG_TRADE,
@@ -174,6 +199,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             available_fields=_AGG_TRADE_FIELDS,
             connection_model="path_per_stream",
             limits={"rest.max_limit": 1000},
+            history_policy=_history_policy(HistoryCadence.EVENT_DRIVEN),
         ),
         MarketChannelCapability(
             channel=MarketChannel.AGG_TRADE,
@@ -197,6 +223,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
                 "USD-M aggregate-trade history is limited to the last 24 hours",
                 "Each USD-M aggregate-trade time range must be shorter than one hour",
             ),
+            history_policy=_history_policy(HistoryCadence.EVENT_DRIVEN),
         ),
         MarketChannelCapability(
             channel=MarketChannel.TRADE,
@@ -380,6 +407,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
                 "history.shared_requests_per_5m": 500,
             },
             known_limitations=("Realtime funding data shares the mark-price upstream stream",),
+            history_policy=_history_policy(HistoryCadence.SCHEDULED),
         ),
         MarketChannelCapability(
             channel=MarketChannel.OPEN_INTEREST,
@@ -402,6 +430,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
                 "service.max_active_streams": 64,
             },
             known_limitations=("Binance USD-M exposes open interest through REST, not a public WS stream",),
+            history_policy=_history_policy(HistoryCadence.REGULAR),
         ),
         MarketChannelCapability(
             channel=MarketChannel.LIQUIDATION,
@@ -440,18 +469,22 @@ class BinanceExchangeAdapter:
         return ExchangeCapabilities(
             exchange=self.id,
             name=self.name,
-            capability_schema_version=2,
+            capability_schema_version=3,
             markets=[
                 ExchangeMarket(
                     market_type="spot",
                     product_type="spot",
                     label="Spot",
+                    calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                    timezone="UTC",
                 ),
                 ExchangeMarket(
                     market_type="futures",
                     product_type="perpetual",
                     label="USDT-M Perpetual",
                     contract_family="usdt-m",
+                    calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                    timezone="UTC",
                 ),
             ],
             channels=_channel_capabilities(),
@@ -548,6 +581,7 @@ class BinanceExchangeAdapter:
                     market_type="spot",
                     product_type="spot",
                     raw=item,
+                    listed_at_ms=_timestamp_ms(item.get("onboardDate")),
                 ),
             )
         return symbols
@@ -564,6 +598,7 @@ class BinanceExchangeAdapter:
                 continue
             if item.get("contractType") != "PERPETUAL":
                 continue
+            contract_type = str(item.get("contractType", ""))
             symbols.append(
                 SymbolInfo(
                     symbol=item["symbol"],
@@ -573,8 +608,16 @@ class BinanceExchangeAdapter:
                     exchange=self.id,
                     market_type="futures",
                     product_type="perpetual",
-                    contract_type=item.get("contractType", ""),
+                    contract_type=contract_type,
                     raw=item,
+                    listed_at_ms=_timestamp_ms(item.get("onboardDate")),
+                    # Binance publishes a far-future deliveryDate placeholder
+                    # for perpetuals. It is not a delisting/expiry boundary.
+                    expiry_at_ms=(
+                        None
+                        if contract_type == "PERPETUAL"
+                        else _timestamp_ms(item.get("deliveryDate"))
+                    ),
                 ),
             )
         return symbols

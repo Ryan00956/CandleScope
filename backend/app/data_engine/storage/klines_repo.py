@@ -4,25 +4,32 @@ import sqlite3
 import time
 import logging
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
 from app.core.config import KLINES_DB_PATH
 from app.core.executors import run_storage
-from app.data_engine.interval_policy import (
-    INTERVAL_SECONDS,
-    VALID_INTERVALS,
-    compute_bucket_end_ms,
-    compute_bucket_start_ms,
-    is_monthly_interval,
-    parse_interval_ms,
+from app.data_engine.history.calendar import (
+    AlwaysOpenCalendar,
+    CalendarRegistry,
+    TradingCalendar,
 )
+from app.data_engine.interval_policy import INTERVAL_SECONDS, VALID_INTERVALS, parse_interval_ms
 
 # Valid market types
 VALID_MARKET_TYPES = ("spot", "futures", "swap")
 DEFAULT_EXCHANGE = "binance"
 DEFAULT_MARKET_TYPE = "spot"
 logger = logging.getLogger("candlescope.storage.klines")
+CalendarResolver = Callable[
+    [str, str, str],
+    TradingCalendar | str | None,
+]
+_CALENDAR_REGISTRY = CalendarRegistry()
+_ALWAYS_OPEN_CALENDAR = (
+    _CALENDAR_REGISTRY.get("crypto.24x7.utc") or AlwaysOpenCalendar()
+)
 
 
 def interval_to_milliseconds(interval: str) -> int:
@@ -380,43 +387,54 @@ def list_series_summaries(
     return [dict(r) for r in rows]
 
 
-def _first_expected_open_ms(start_ms: int, interval: str) -> int:
-    interval_ms = parse_interval_ms(interval) or 60_000
-    bucket = compute_bucket_start_ms(start_ms, interval_ms, interval=interval)
-    if bucket < start_ms:
-        bucket = compute_bucket_end_ms(bucket, interval_ms, interval=interval)
-    return bucket
-
-
-def _last_expected_open_ms(end_ms: int, interval: str) -> int:
-    interval_ms = parse_interval_ms(interval) or 60_000
-    return compute_bucket_start_ms(end_ms, interval_ms, interval=interval)
-
-
-def _next_expected_open_ms(open_ms: int, interval: str) -> int:
-    interval_ms = parse_interval_ms(interval) or 60_000
-    return compute_bucket_end_ms(open_ms, interval_ms, interval=interval)
-
-
-def _previous_expected_open_ms(open_ms: int, interval: str) -> int:
-    interval_ms = parse_interval_ms(interval) or 60_000
-    return compute_bucket_start_ms(open_ms - 1, interval_ms, interval=interval)
-
-
-def _count_expected_opens(start_ms: int, end_ms: int, interval: str) -> int:
-    if start_ms > end_ms:
-        return 0
-
-    interval_ms = parse_interval_ms(interval) or 60_000
-    if not is_monthly_interval(interval):
-        return (end_ms - start_ms) // interval_ms + 1
-
-    count = 0
-    current = start_ms
-    while current <= end_ms:
-        count += 1
-        current = compute_bucket_end_ms(current, interval_ms, interval=interval)
-    return count
+def _resolve_trading_calendar(
+    *,
+    exchange: str,
+    market_type: str,
+    symbol: str,
+    calendar: TradingCalendar | None,
+    calendar_resolver: CalendarResolver | None,
+    calendar_registry: CalendarRegistry | None,
+) -> TradingCalendar | None:
+    if calendar is not None:
+        return calendar
+    if calendar_resolver is None:
+        return _ALWAYS_OPEN_CALENDAR
+    try:
+        resolved = calendar_resolver(exchange, market_type, symbol)
+    except Exception as exc:
+        logger.warning(
+            "Trading calendar resolver failed for %s:%s:%s: %s",
+            exchange,
+            market_type,
+            symbol,
+            exc,
+        )
+        return None
+    if resolved is None:
+        return _ALWAYS_OPEN_CALENDAR
+    if isinstance(resolved, str):
+        registry = calendar_registry or _CALENDAR_REGISTRY
+        selected = registry.get(resolved)
+        if selected is None:
+            logger.warning(
+                "Unknown trading calendar %r for %s:%s:%s; gap scan skipped",
+                resolved,
+                exchange,
+                market_type,
+                symbol,
+            )
+        return selected
+    if isinstance(resolved, TradingCalendar):
+        return resolved
+    logger.warning(
+        "Invalid trading calendar resolver result for %s:%s:%s: %r",
+        exchange,
+        market_type,
+        symbol,
+        resolved,
+    )
+    return None
 
 
 def _gap_payload(
@@ -428,8 +446,9 @@ def _gap_payload(
     start_ms: int,
     end_ms: int,
     reason: str,
+    calendar: TradingCalendar,
 ) -> dict:
-    missing_bars = _count_expected_opens(start_ms, end_ms, interval)
+    missing_bars = calendar.count_expected(start_ms, end_ms, interval)
     return {
         "exchange": exchange,
         "market_type": market_type,
@@ -452,6 +471,9 @@ def scan_klines_gaps(
     exchange: str = DEFAULT_EXCHANGE,
     market_type: str = DEFAULT_MARKET_TYPE,
     limit: int = 50_000,
+    calendar: TradingCalendar | None = None,
+    calendar_resolver: CalendarResolver | None = None,
+    calendar_registry: CalendarRegistry | None = None,
 ) -> dict:
     """Scan one stored series for continuity gaps in a bounded range."""
     interval_ms = parse_interval_ms(interval)
@@ -467,6 +489,28 @@ def scan_klines_gaps(
             "scanned_bars": 0,
             "truncated": False,
             "error": f"Unsupported interval: {interval}",
+        }
+
+    selected_calendar = _resolve_trading_calendar(
+        exchange=exchange,
+        market_type=market_type,
+        symbol=symbol,
+        calendar=calendar,
+        calendar_resolver=calendar_resolver,
+        calendar_registry=calendar_registry,
+    )
+    if selected_calendar is None:
+        return {
+            "exchange": exchange,
+            "market_type": market_type,
+            "symbol": symbol,
+            "interval": interval,
+            "gaps": [],
+            "gap_count": 0,
+            "missing_bars": 0,
+            "scanned_bars": 0,
+            "truncated": False,
+            "error": "Trading calendar could not be resolved",
         }
 
     where = ["exchange = ?", "market_type = ?", "symbol = ?", "interval = ?"]
@@ -496,9 +540,17 @@ def scan_klines_gaps(
 
     if not opens:
         if start_ms is not None and end_ms is not None and start_ms <= end_ms:
-            gap_start = _first_expected_open_ms(start_ms, interval)
-            gap_end = _last_expected_open_ms(end_ms, interval)
-            if gap_start <= gap_end:
+            gap_start = selected_calendar.first_expected_open(
+                start_ms, end_ms, interval
+            )
+            gap_end = selected_calendar.last_expected_open(
+                start_ms, end_ms, interval
+            )
+            if (
+                gap_start is not None
+                and gap_end is not None
+                and gap_start <= gap_end
+            ):
                 gaps.append(_gap_payload(
                     exchange=exchange,
                     market_type=market_type,
@@ -507,6 +559,7 @@ def scan_klines_gaps(
                     start_ms=gap_start,
                     end_ms=gap_end,
                     reason="empty_range",
+                    calendar=selected_calendar,
                 ))
         return {
             "exchange": exchange,
@@ -520,12 +573,22 @@ def scan_klines_gaps(
             "missing_bars": sum(gap["missing_bars"] for gap in gaps),
             "scanned_bars": 0,
             "truncated": truncated,
+            "calendar_id": selected_calendar.calendar_id,
         }
 
     if start_ms is not None:
-        first_expected = _first_expected_open_ms(start_ms, interval)
-        if opens[0] > first_expected:
-            gap_end = _previous_expected_open_ms(opens[0], interval)
+        first_expected = selected_calendar.first_expected_open(
+            start_ms,
+            min(end_ms if end_ms is not None else opens[0] - 1, opens[0] - 1),
+            interval,
+        )
+        if first_expected is not None and opens[0] > first_expected:
+            gap_end = selected_calendar.previous_expected_open(opens[0], interval)
+            if gap_end is None or first_expected > gap_end:
+                gap_end = None
+        else:
+            gap_end = None
+        if gap_end is not None:
             gaps.append(_gap_payload(
                 exchange=exchange,
                 market_type=market_type,
@@ -534,13 +597,17 @@ def scan_klines_gaps(
                 start_ms=first_expected,
                 end_ms=gap_end,
                 reason="head_gap",
+                calendar=selected_calendar,
             ))
 
     previous = opens[0]
     for current in opens[1:]:
-        expected_next = _next_expected_open_ms(previous, interval)
-        if current > expected_next:
-            gap_end = _previous_expected_open_ms(current, interval)
+        expected_next = selected_calendar.next_expected_open(previous, interval)
+        if expected_next is not None and current > expected_next:
+            gap_end = selected_calendar.previous_expected_open(current, interval)
+            if gap_end is None or expected_next > gap_end:
+                previous = current
+                continue
             gaps.append(_gap_payload(
                 exchange=exchange,
                 market_type=market_type,
@@ -549,13 +616,20 @@ def scan_klines_gaps(
                 start_ms=expected_next,
                 end_ms=gap_end,
                 reason="interior_gap",
+                calendar=selected_calendar,
             ))
         previous = current
 
     if end_ms is not None and not truncated:
-        last_expected = _last_expected_open_ms(end_ms, interval)
-        next_expected = _next_expected_open_ms(opens[-1], interval)
-        if next_expected <= last_expected:
+        last_expected = selected_calendar.last_expected_open(
+            opens[-1] + 1, end_ms, interval
+        )
+        next_expected = selected_calendar.next_expected_open(opens[-1], interval)
+        if (
+            next_expected is not None
+            and last_expected is not None
+            and next_expected <= last_expected
+        ):
             gaps.append(_gap_payload(
                 exchange=exchange,
                 market_type=market_type,
@@ -564,6 +638,7 @@ def scan_klines_gaps(
                 start_ms=next_expected,
                 end_ms=last_expected,
                 reason="tail_gap",
+                calendar=selected_calendar,
             ))
 
     return {
@@ -578,6 +653,7 @@ def scan_klines_gaps(
         "missing_bars": sum(gap["missing_bars"] for gap in gaps),
         "scanned_bars": len(opens),
         "truncated": truncated,
+        "calendar_id": selected_calendar.calendar_id,
     }
 
 
@@ -601,9 +677,25 @@ class KlinesRepoAdapter:
         self,
         exchange: str = DEFAULT_EXCHANGE,
         market_type: str = DEFAULT_MARKET_TYPE,
+        *,
+        calendar_resolver: CalendarResolver | None = None,
+        calendar_registry: CalendarRegistry | None = None,
     ) -> None:
         self._exchange = exchange
         self._market_type = market_type
+        self._calendar_resolver = calendar_resolver
+        self._calendar_registry = calendar_registry
+
+    def set_calendar_resolver(
+        self,
+        resolver: CalendarResolver | None,
+        *,
+        registry: CalendarRegistry | None = None,
+    ) -> None:
+        """Inject the per-series calendar lookup used by ``scan_gaps``."""
+        self._calendar_resolver = resolver
+        if registry is not None:
+            self._calendar_registry = registry
 
     def query_bars(
         self,
@@ -688,6 +780,7 @@ class KlinesRepoAdapter:
         exchange: str | None = None,
         market_type: str | None = None,
         limit: int = 50_000,
+        calendar: TradingCalendar | None = None,
     ) -> dict:
         """Scan a stored series for continuity gaps."""
         return scan_klines_gaps(
@@ -698,6 +791,9 @@ class KlinesRepoAdapter:
             exchange=exchange or self._exchange,
             market_type=market_type or self._market_type,
             limit=limit,
+            calendar=calendar,
+            calendar_resolver=self._calendar_resolver,
+            calendar_registry=self._calendar_registry,
         )
 
     def delete_bars(

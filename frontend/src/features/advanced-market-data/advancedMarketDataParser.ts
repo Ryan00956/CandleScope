@@ -1,7 +1,9 @@
 import {
   ADVANCED_MARKET_CHANNELS,
   type AdvancedMarketChannel,
+  type MarketHistoryExcludedRange,
   type MarketHistoryPayload,
+  type MarketHistoryState,
   type MarketSnapshotPayload,
   type MarketSocketMessage,
   type MarketStateRecord,
@@ -65,6 +67,38 @@ function expectBoolean(value: unknown, path: string): boolean {
     throw new AdvancedMarketPayloadError(path, "expected a boolean");
   }
   return value;
+}
+
+function expectNullableString(value: unknown, path: string): string | null {
+  if (value == null) return null;
+  return expectString(value, path);
+}
+
+function expectHistoryState(value: unknown, path: string): MarketHistoryState {
+  const state = expectNonEmptyString(value, path);
+  if (state !== "ready" && state !== "pending" && state !== "exhausted") {
+    throw new AdvancedMarketPayloadError(path, "expected ready, pending, or exhausted");
+  }
+  return state;
+}
+
+function parseExcludedRanges(value: unknown, path: string): MarketHistoryExcludedRange[] {
+  return expectArray(value, path).map((item, index) => {
+    const itemPath = `${path}[${index}]`;
+    const record = expectRecord(item, itemPath);
+    const startMs = expectNonNegativeInteger(record.start_ms, `${itemPath}.start_ms`);
+    const endMs = expectNonNegativeInteger(record.end_ms, `${itemPath}.end_ms`);
+    if (endMs < startMs) {
+      throw new AdvancedMarketPayloadError(itemPath, "end_ms must be greater than or equal to start_ms");
+    }
+    return {
+      start_ms: startMs,
+      end_ms: endMs,
+      ...(record.reason == null
+        ? {}
+        : { reason: expectNonEmptyString(record.reason, `${itemPath}.reason`) }),
+    };
+  });
 }
 
 function expectChannel(value: unknown, path: string): AdvancedMarketChannel {
@@ -216,6 +250,32 @@ export function parseMarketHistoryPayload(
   }
   if ("next_end_ms" in record) {
     result.next_end_ms = expectNullableInteger(record.next_end_ms, `${path}.next_end_ms`);
+  }
+  if ("history_state" in record) {
+    result.history_state = expectHistoryState(record.history_state, `${path}.history_state`);
+  }
+  if ("complete" in record) result.complete = expectBoolean(record.complete, `${path}.complete`);
+  if ("retryable" in record) result.retryable = expectBoolean(record.retryable, `${path}.retryable`);
+  if ("terminal_reason" in record) {
+    result.terminal_reason = expectNullableString(record.terminal_reason, `${path}.terminal_reason`);
+  }
+  if ("earliest_available_ms" in record) {
+    result.earliest_available_ms = expectNullableInteger(
+      record.earliest_available_ms,
+      `${path}.earliest_available_ms`,
+    );
+  }
+  if ("next_before_ms" in record) {
+    result.next_before_ms = expectNullableInteger(record.next_before_ms, `${path}.next_before_ms`);
+  }
+  if ("availability_revision" in record) {
+    result.availability_revision = expectNullableString(
+      record.availability_revision,
+      `${path}.availability_revision`,
+    );
+  }
+  if ("excluded_ranges" in record) {
+    result.excluded_ranges = parseExcludedRanges(record.excluded_ranges, `${path}.excluded_ranges`);
   }
   return result;
 }

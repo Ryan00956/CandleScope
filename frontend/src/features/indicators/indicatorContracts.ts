@@ -817,6 +817,64 @@ export function parseIndicatorPayloadEnvelope(
     );
   }
   if (httpStatus !== undefined) envelope.__httpStatus = httpStatus;
+  if (record.history_state !== undefined && record.history_state !== null) {
+    const historyState = expectIndicatorString(record.history_state, `${path}.history_state`);
+    if (historyState !== "ready" && historyState !== "pending" && historyState !== "exhausted") {
+      throw new IndicatorPayloadError(
+        `${path}.history_state`,
+        "expected ready, pending, or exhausted",
+      );
+    }
+    envelope.history_state = historyState;
+  }
+  const complete = optionalIndicatorBoolean(record.complete, `${path}.complete`);
+  const retryable = optionalIndicatorBoolean(record.retryable, `${path}.retryable`);
+  if (complete !== undefined) envelope.complete = complete;
+  if (retryable !== undefined) envelope.retryable = retryable;
+  if (record.terminal_reason !== undefined) {
+    envelope.terminal_reason = record.terminal_reason === null
+      ? null
+      : expectIndicatorString(record.terminal_reason, `${path}.terminal_reason`);
+  }
+  for (const field of ["earliest_available_ms", "next_before_ms"] as const) {
+    if (record[field] === null) {
+      envelope[field] = null;
+      continue;
+    }
+    const parsed = optionalIndicatorFiniteNumber(record[field], `${path}.${field}`);
+    if (parsed !== undefined) {
+      if (!Number.isInteger(parsed) || parsed < 0) {
+        throw new IndicatorPayloadError(`${path}.${field}`, "expected a non-negative integer or null");
+      }
+      envelope[field] = parsed;
+    }
+  }
+  if (record.availability_revision !== undefined) {
+    envelope.availability_revision = record.availability_revision === null
+      ? null
+      : expectIndicatorString(record.availability_revision, `${path}.availability_revision`);
+  }
+  if (record.excluded_ranges !== undefined && record.excluded_ranges !== null) {
+    envelope.excluded_ranges = expectIndicatorArray(
+      record.excluded_ranges,
+      `${path}.excluded_ranges`,
+    ).map((item, index) => {
+      const itemPath = `${path}.excluded_ranges[${index}]`;
+      const excluded = expectIndicatorRecord(item, itemPath);
+      const startMs = expectIndicatorFiniteNumber(excluded.start_ms, `${itemPath}.start_ms`);
+      const endMs = expectIndicatorFiniteNumber(excluded.end_ms, `${itemPath}.end_ms`);
+      if (!Number.isInteger(startMs) || startMs < 0 || !Number.isInteger(endMs) || endMs < startMs) {
+        throw new IndicatorPayloadError(itemPath, "expected a valid non-negative start_ms/end_ms range");
+      }
+      return {
+        start_ms: startMs,
+        end_ms: endMs,
+        ...(excluded.reason == null
+          ? {}
+          : { reason: expectIndicatorNonEmptyString(excluded.reason, `${itemPath}.reason`) }),
+      };
+    });
+  }
   return envelope;
 }
 

@@ -33,16 +33,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, Awaitable, Any
+from typing import Awaitable, Callable
 
-from app.data_engine.interval_policy import (
-    compute_bucket_end_ms,
-    compute_bucket_start_ms,
-    is_monthly_interval,
-    next_month_bucket,
-    parse_interval_ms,
-    parse_monthly_count,
+from app.data_engine.history.calendar import (
+    AlwaysOpenCalendar,
+    CalendarRegistry,
+    TradingCalendar,
 )
+from app.data_engine.interval_policy import parse_interval_ms
 
 from ..ingestion.metrics import LayerMetrics
 from .config import BackfillConfig
@@ -55,57 +53,14 @@ from .models import (
 logger = logging.getLogger("backfill.GapDetector")
 
 
-def _is_monthly(interval: str) -> bool:
-    """Return True if interval uses calendar-month units (e.g. '1M')."""
-    return is_monthly_interval(interval)
-
-
-def _next_month_open_ms(ts_ms: int, months: int = 1) -> int:
-    """Compute the open_time of the next monthly candle after *ts_ms*."""
-    return next_month_bucket(ts_ms // 1000, months) * 1000
-
-
-def _first_expected_open_ms(start_ms: int, interval: str, interval_ms: int) -> int:
-    bucket = compute_bucket_start_ms(start_ms, interval_ms, interval=interval)
-    if bucket < start_ms:
-        bucket = compute_bucket_end_ms(bucket, interval_ms, interval=interval)
-    return bucket
-
-
-def _last_expected_open_ms(end_ms: int, interval: str, interval_ms: int) -> int:
-    return compute_bucket_start_ms(end_ms, interval_ms, interval=interval)
-
-
-def _next_expected_open_ms(open_ms: int, interval: str, interval_ms: int) -> int:
-    return compute_bucket_end_ms(open_ms, interval_ms, interval=interval)
-
-
-def _previous_expected_open_ms(open_ms: int, interval: str, interval_ms: int) -> int:
-    return compute_bucket_start_ms(open_ms - 1, interval_ms, interval=interval)
-
-
-def _count_expected_opens(
-    start_ms: int,
-    end_ms: int,
-    interval: str,
-    interval_ms: int,
-) -> int:
-    if start_ms > end_ms:
-        return 0
-    if _is_monthly(interval):
-        month_count = parse_monthly_count(interval) or 1
-        count = 0
-        current = start_ms
-        while current <= end_ms:
-            count += 1
-            current = _next_month_open_ms(current, month_count)
-        return count
-    return (end_ms - start_ms) // interval_ms + 1
-
 # Type aliases
 ReferenceTimeProvider = Callable[[str, str, str, str], Awaitable[int | None]]
 GapFilter = Callable[[GapInfo], bool]
 GapCallback = Callable[[GapInfo], Awaitable[None]]
+CalendarResolver = Callable[
+    [str, str, str],
+    TradingCalendar | str | None,
+]
 
 
 class GapDetector:
@@ -120,10 +75,19 @@ class GapDetector:
         self,
         config: BackfillConfig,
         storage: StorageBackend,
+        *,
+        calendar_resolver: CalendarResolver | None = None,
+        calendar_registry: CalendarRegistry | None = None,
     ) -> None:
         self._cfg = config
         self._storage = storage
         self._metrics = LayerMetrics("GapDetector")
+        self._calendar_registry = calendar_registry or CalendarRegistry()
+        self._calendar_resolver = calendar_resolver
+        self._default_calendar = (
+            self._calendar_registry.get("crypto.24x7.utc")
+            or AlwaysOpenCalendar()
+        )
 
         # Extension points
         self._reference_time_provider: ReferenceTimeProvider | None = None
@@ -167,6 +131,26 @@ class GapDetector:
             detector.set_reference_time_provider(live_ref)
         """
         self._reference_time_provider = provider
+
+    def set_calendar_resolver(
+        self,
+        resolver: CalendarResolver | None,
+        *,
+        registry: CalendarRegistry | None = None,
+    ) -> None:
+        """Set the per-series trading-calendar resolver.
+
+        The resolver receives ``(exchange, market_type, symbol)`` and may
+        return either a calendar object, a registered calendar id, or ``None``
+        to use the continuously traded default.  An unknown explicit id is
+        handled fail-closed: the affected series is not reported as gapped.
+        """
+        if registry is not None:
+            self._calendar_registry = registry
+            self._default_calendar = (
+                registry.get("crypto.24x7.utc") or AlwaysOpenCalendar()
+            )
+        self._calendar_resolver = resolver
 
     def set_gap_filter(self, filter_fn: GapFilter) -> None:
         """Set a custom filter to ignore certain gaps.
@@ -299,6 +283,11 @@ class GapDetector:
             logger.warning("Cannot parse interval '%s', skipping", interval)
             return []
 
+        calendar = self._resolve_calendar(exchange, market_type, symbol)
+        if calendar is None:
+            self._metrics.inc("calendar_resolution_failures")
+            return []
+
         # Determine reference (live edge)
         reference_ms = await self._get_reference_time(
             symbol,
@@ -320,14 +309,15 @@ class GapDetector:
 
         # ── Case 1: Empty storage — one big gap ──
         if db_earliest is None or db_latest is None:
-            first_expected = _first_expected_open_ms(range_start_ms, interval, interval_ms)
-            last_expected = _last_expected_open_ms(reference_ms, interval, interval_ms)
-            missing = _count_expected_opens(
-                first_expected,
-                last_expected,
-                interval,
-                interval_ms,
+            first_expected = calendar.first_expected_open(
+                range_start_ms, reference_ms, interval
             )
+            last_expected = calendar.last_expected_open(
+                range_start_ms, reference_ms, interval
+            )
+            if first_expected is None or last_expected is None:
+                return []
+            missing = calendar.count_expected(first_expected, last_expected, interval)
             if missing > self._cfg.gap_tolerance_bars:
                 gap = GapInfo(
                     symbol=symbol,
@@ -345,15 +335,18 @@ class GapDetector:
             return await self._apply_filter_and_notify(gaps)
 
         # ── Case 2: Head gap — DB starts later than requested range ──
-        first_expected = _first_expected_open_ms(range_start_ms, interval, interval_ms)
-        head_end = _previous_expected_open_ms(db_earliest, interval, interval_ms)
-        if first_expected <= head_end:
-            missing = _count_expected_opens(
-                first_expected,
-                head_end,
-                interval,
-                interval_ms,
-            )
+        first_expected = calendar.first_expected_open(
+            range_start_ms,
+            min(reference_ms, db_earliest - 1),
+            interval,
+        )
+        head_end = calendar.previous_expected_open(db_earliest, interval)
+        if (
+            first_expected is not None
+            and head_end is not None
+            and first_expected <= head_end
+        ):
+            missing = calendar.count_expected(first_expected, head_end, interval)
             if missing > self._cfg.gap_tolerance_bars:
                 gap = GapInfo(
                     symbol=symbol,
@@ -370,41 +363,26 @@ class GapDetector:
                 gaps.append(gap)
 
         # ── Case 3: Tail gap — DB is behind the live edge ──
-        if _is_monthly(interval):
-            month_count = parse_monthly_count(interval) or 1
-            next_expected = _next_month_open_ms(db_latest, month_count)
-            last_expected = _last_expected_open_ms(reference_ms, interval, interval_ms)
-            if next_expected <= last_expected:
-                missing = _count_expected_opens(
-                    next_expected,
-                    last_expected,
-                    interval,
-                    interval_ms,
-                )
-                if missing > self._cfg.gap_tolerance_bars:
-                    gap = GapInfo(
-                        symbol=symbol,
-                        interval=interval,
-                        gap_type=GapType.TAIL,
-                        start_ms=next_expected,
-                        end_ms=last_expected,
-                        missing_bars=missing,
-                        exchange=exchange,
-                        db_latest_ms=db_latest,
-                        reference_ms=reference_ms,
-                        market_type=market_type,
-                    )
-                    gaps.append(gap)
-        elif db_latest < reference_ms - interval_ms * self._cfg.gap_tolerance_bars:
-            next_expected = db_latest + interval_ms
-            missing = (reference_ms - next_expected) // interval_ms + 1
+        # Calendar stepping skips market closures and also handles monthly bars.
+        next_expected = calendar.next_expected_open(db_latest, interval)
+        last_expected = calendar.last_expected_open(
+            db_latest + 1,
+            reference_ms,
+            interval,
+        )
+        if (
+            next_expected is not None
+            and last_expected is not None
+            and next_expected <= last_expected
+        ):
+            missing = calendar.count_expected(next_expected, last_expected, interval)
             if missing > self._cfg.gap_tolerance_bars:
                 gap = GapInfo(
                     symbol=symbol,
                     interval=interval,
                     gap_type=GapType.TAIL,
                     start_ms=next_expected,
-                    end_ms=reference_ms,
+                    end_ms=last_expected,
                     missing_bars=missing,
                     exchange=exchange,
                     db_latest_ms=db_latest,
@@ -418,12 +396,12 @@ class GapDetector:
             interior_gaps = await self._detect_interior_gaps(
                 symbol,
                 interval,
-                interval_ms,
                 max(range_start_ms, db_earliest),
                 min(range_end_ms, db_latest),
                 reference_ms,
                 exchange=exchange,
                 market_type=market_type,
+                calendar=calendar,
             )
             gaps.extend(interior_gaps)
 
@@ -435,12 +413,12 @@ class GapDetector:
         self,
         symbol: str,
         interval: str,
-        interval_ms: int,
         scan_start: int,
         scan_end: int,
         reference_ms: int,
         exchange: str = "binance",
         market_type: str = "spot",
+        calendar: TradingCalendar | None = None,
     ) -> list[GapInfo]:
         """Scan for holes inside the stored data range.
 
@@ -449,6 +427,7 @@ class GapDetector:
         """
         if scan_start > scan_end:
             return []
+        calendar = calendar or self._default_calendar
 
         try:
             existing_times = await self._storage.get_existing_open_times(
@@ -475,18 +454,13 @@ class GapDetector:
             )
             existing_times = {int(r["open_time"]) for r in rows}
 
-        first_expected = _first_expected_open_ms(scan_start, interval, interval_ms)
-        last_expected = _last_expected_open_ms(scan_end, interval, interval_ms)
-        if first_expected > last_expected:
+        first_expected = calendar.first_expected_open(scan_start, scan_end, interval)
+        last_expected = calendar.last_expected_open(scan_start, scan_end, interval)
+        if first_expected is None or last_expected is None:
             return []
 
         if not existing_times:
-            missing = _count_expected_opens(
-                first_expected,
-                last_expected,
-                interval,
-                interval_ms,
-            )
+            missing = calendar.count_expected(first_expected, last_expected, interval)
             if missing <= self._cfg.gap_tolerance_bars:
                 return []
             gap = GapInfo(
@@ -509,12 +483,7 @@ class GapDetector:
             if first_expected <= ts <= last_expected
         )
         if not sorted_times:
-            missing = _count_expected_opens(
-                first_expected,
-                last_expected,
-                interval,
-                interval_ms,
-            )
+            missing = calendar.count_expected(first_expected, last_expected, interval)
             if missing <= self._cfg.gap_tolerance_bars:
                 return []
             gap = GapInfo(
@@ -536,14 +505,13 @@ class GapDetector:
         hole_count = 0
 
         if sorted_times[0] > first_expected:
-            gap_end = _previous_expected_open_ms(sorted_times[0], interval, interval_ms)
-            missing = _count_expected_opens(
-                first_expected,
-                gap_end,
-                interval,
-                interval_ms,
+            gap_end = calendar.previous_expected_open(sorted_times[0], interval)
+            missing = (
+                calendar.count_expected(first_expected, gap_end, interval)
+                if gap_end is not None and first_expected <= gap_end
+                else 0
             )
-            if missing > self._cfg.gap_tolerance_bars:
+            if gap_end is not None and missing > self._cfg.gap_tolerance_bars:
                 gaps.append(GapInfo(
                     symbol=symbol,
                     interval=interval,
@@ -569,17 +537,16 @@ class GapDetector:
             current = sorted_times[i]
             next_time = sorted_times[i + 1]
 
-            expected_next = _next_expected_open_ms(current, interval, interval_ms)
+            expected_next = calendar.next_expected_open(current, interval)
 
-            if next_time > expected_next:
-                gap_end = _previous_expected_open_ms(next_time, interval, interval_ms)
-                missing = _count_expected_opens(
-                    expected_next,
-                    gap_end,
-                    interval,
-                    interval_ms,
+            if expected_next is not None and next_time > expected_next:
+                gap_end = calendar.previous_expected_open(next_time, interval)
+                missing = (
+                    calendar.count_expected(expected_next, gap_end, interval)
+                    if gap_end is not None and expected_next <= gap_end
+                    else 0
                 )
-                if missing > self._cfg.gap_tolerance_bars:
+                if gap_end is not None and missing > self._cfg.gap_tolerance_bars:
                     gap = GapInfo(
                         symbol=symbol,
                         interval=interval,
@@ -595,17 +562,14 @@ class GapDetector:
                     gaps.append(gap)
                     hole_count += 1
 
+        trailing_start = calendar.next_expected_open(sorted_times[-1], interval)
         if (
             hole_count < self._cfg.gap_max_interior_holes
-            and _next_expected_open_ms(sorted_times[-1], interval, interval_ms) <= last_expected
+            and trailing_start is not None
+            and trailing_start <= last_expected
         ):
-            start_ms = _next_expected_open_ms(sorted_times[-1], interval, interval_ms)
-            missing = _count_expected_opens(
-                start_ms,
-                last_expected,
-                interval,
-                interval_ms,
-            )
+            start_ms = trailing_start
+            missing = calendar.count_expected(start_ms, last_expected, interval)
             if missing > self._cfg.gap_tolerance_bars:
                 gaps.append(GapInfo(
                     symbol=symbol,
@@ -624,6 +588,49 @@ class GapDetector:
         return gaps
 
     # ── Internal: Reference time resolution ──────────────────
+
+    def _resolve_calendar(
+        self,
+        exchange: str,
+        market_type: str,
+        symbol: str,
+    ) -> TradingCalendar | None:
+        if self._calendar_resolver is None:
+            return self._default_calendar
+        try:
+            resolved = self._calendar_resolver(exchange, market_type, symbol)
+        except Exception as exc:
+            logger.warning(
+                "Trading calendar resolver failed for %s:%s:%s: %s",
+                exchange,
+                market_type,
+                symbol,
+                exc,
+            )
+            return None
+        if resolved is None:
+            return self._default_calendar
+        if isinstance(resolved, str):
+            calendar = self._calendar_registry.get(resolved)
+            if calendar is None:
+                logger.warning(
+                    "Unknown trading calendar %r for %s:%s:%s; gap scan skipped",
+                    resolved,
+                    exchange,
+                    market_type,
+                    symbol,
+                )
+            return calendar
+        if isinstance(resolved, TradingCalendar):
+            return resolved
+        logger.warning(
+            "Invalid trading calendar resolver result for %s:%s:%s: %r",
+            exchange,
+            market_type,
+            symbol,
+            resolved,
+        )
+        return None
 
     async def _get_reference_time(
         self,

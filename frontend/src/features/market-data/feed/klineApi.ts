@@ -7,6 +7,8 @@ import {
 } from "../../../services/api.js";
 import type { TransportKlineResponse } from "../../../services/apiPayloadParsers.js";
 import type {
+  HistoryAvailabilityState,
+  HistoryExcludedRange,
   KlineApi,
   KlineFetchResult,
   KlineHistoryRequestOptions,
@@ -20,13 +22,98 @@ import {
 } from "../marketDataTypes.js";
 import type { IntervalString } from "../../../utils/intervals.js";
 
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new TypeError(`${field} must be a boolean`);
+  return value;
+}
+
+function optionalNullableString(value: unknown, field: string): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") throw new TypeError(`${field} must be a string or null`);
+  return value;
+}
+
+function optionalNullableNonNegativeNumber(
+  value: unknown,
+  field: string,
+): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new TypeError(`${field} must be a non-negative finite number or null`);
+  }
+  return value;
+}
+
+function optionalHistoryState(value: unknown): HistoryAvailabilityState | undefined {
+  if (value === undefined) return undefined;
+  if (value === "ready" || value === "pending" || value === "exhausted") return value;
+  throw new TypeError("history_state must be ready, pending, or exhausted");
+}
+
+function optionalExcludedRanges(value: unknown): HistoryExcludedRange[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new TypeError("excluded_ranges must be an array");
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new TypeError(`excluded_ranges[${index}] must be an object`);
+    }
+    const record = item as Record<string, unknown>;
+    const startMs = optionalNullableNonNegativeNumber(
+      record.start_ms,
+      `excluded_ranges[${index}].start_ms`,
+    );
+    const endMs = optionalNullableNonNegativeNumber(
+      record.end_ms,
+      `excluded_ranges[${index}].end_ms`,
+    );
+    if (startMs == null || endMs == null || endMs < startMs) {
+      throw new TypeError(`excluded_ranges[${index}] must contain a valid start_ms/end_ms range`);
+    }
+    const reason = optionalNullableString(record.reason, `excluded_ranges[${index}].reason`);
+    return {
+      ...record,
+      start_ms: startMs,
+      end_ms: endMs,
+      ...(reason == null ? {} : { reason }),
+    };
+  });
+}
+
 function toMarketDataResult(result: TransportKlineResponse): KlineFetchResult {
   const data: KlineBar[] = result.data.map((row) => {
     const time = toEpochSeconds(row.time);
     if (time === null) throw new TypeError("Validated kline time could not be converted to EpochSeconds");
     return { ...row, time };
   });
-  return { ...result, data };
+  const historyState = optionalHistoryState(result.history_state);
+  const complete = optionalBoolean(result.complete, "complete");
+  const retryable = optionalBoolean(result.retryable, "retryable");
+  const terminalReason = optionalNullableString(result.terminal_reason, "terminal_reason");
+  const earliestAvailableMs = optionalNullableNonNegativeNumber(
+    result.earliest_available_ms,
+    "earliest_available_ms",
+  );
+  const nextBeforeMs = optionalNullableNonNegativeNumber(result.next_before_ms, "next_before_ms");
+  const availabilityRevision = optionalNullableString(
+    result.availability_revision,
+    "availability_revision",
+  );
+  const excludedRanges = optionalExcludedRanges(result.excluded_ranges);
+  return {
+    ...result,
+    data,
+    ...(historyState === undefined ? {} : { history_state: historyState }),
+    ...(complete === undefined ? {} : { complete }),
+    ...(retryable === undefined ? {} : { retryable }),
+    ...(terminalReason === undefined ? {} : { terminal_reason: terminalReason }),
+    ...(earliestAvailableMs === undefined ? {} : { earliest_available_ms: earliestAvailableMs }),
+    ...(nextBeforeMs === undefined ? {} : { next_before_ms: nextBeforeMs }),
+    ...(availabilityRevision === undefined ? {} : { availability_revision: availabilityRevision }),
+    ...(excludedRanges === undefined ? {} : { excluded_ranges: excludedRanges }),
+  };
 }
 
 async function fetchKlinesHistory(

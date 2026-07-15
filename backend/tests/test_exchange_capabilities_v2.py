@@ -24,7 +24,7 @@ from tests.fixtures.exchanges.contract_cases import (
 )
 
 
-def test_builtin_capability_v2_declares_exact_market_channel_matrix() -> None:
+def test_builtin_capability_v3_declares_exact_market_channel_matrix() -> None:
     bootstrap_default_adapters()
     registry = get_exchange_registry()
     expected_by_exchange = builtin_exchange_channel_expectations()
@@ -32,7 +32,7 @@ def test_builtin_capability_v2_declares_exact_market_channel_matrix() -> None:
     assert set(expected_by_exchange) == {"binance", "okx"}
     for exchange, expected in expected_by_exchange.items():
         capabilities = registry.get_plugin(exchange).capabilities()
-        assert capabilities.capability_schema_version == 2
+        assert capabilities.capability_schema_version == 3
 
         actual = _expanded_capabilities(capabilities)
         assert set(actual) == set(expected)
@@ -328,10 +328,10 @@ def test_registry_rejects_future_capability_schema_version() -> None:
             return ExchangeCapabilities(
                 exchange=self.id,
                 name=self.name,
-                capability_schema_version=3,
+                capability_schema_version=4,
             )
 
-    with pytest.raises(ExchangePluginRegistrationError, match="capability schema 3"):
+    with pytest.raises(ExchangePluginRegistrationError, match="capability schema 4"):
         registry.register(FutureSchemaAdapter())
 
 

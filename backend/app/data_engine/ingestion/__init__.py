@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable
 
 from .config import IngestionConfig
 from .models import (
@@ -98,6 +98,7 @@ class StreamPipeline:
         transport: TransportLayer,
         descriptor: StreamDescriptor,
         session_factory: Callable[[], SessionLike] | None = None,
+        calendar_resolver: Callable[[str, str, str], Any] | None = None,
     ) -> None:
         self.descriptor = descriptor
 
@@ -109,7 +110,12 @@ class StreamPipeline:
             session_factory=session_factory,
         )
         self.normalize = NormalizeLayer(config, descriptor)
-        self.continuity = ContinuityLayer(config, transport, descriptor)
+        self.continuity = ContinuityLayer(
+            config,
+            transport,
+            descriptor,
+            calendar_resolver=calendar_resolver,
+        )
         self.delivery = DeliveryLayer(config, descriptor)
 
         # Wire: L3 → L4 → L5 → L6
@@ -146,13 +152,19 @@ class MarketDataIngress:
     Owns the shared L1 Transport layer and creates per-stream pipelines.
     """
 
-    def __init__(self, config: IngestionConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: IngestionConfig | None = None,
+        *,
+        calendar_resolver: Callable[[str, str, str], Any] | None = None,
+    ) -> None:
         self._cfg = config or IngestionConfig()
         self._transport = TransportLayer(self._cfg)
         self._shared_ws = SharedWsHubRegistry(self._cfg, self._transport)
         self._pipelines: dict[str, StreamPipeline] = {}
         self._stream_locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._started = False
+        self._calendar_resolver = calendar_resolver
 
     @property
     def config(self) -> IngestionConfig:
@@ -210,6 +222,7 @@ class MarketDataIngress:
                 self._transport,
                 descriptor,
                 session_factory=self._create_session_factory(descriptor),
+                calendar_resolver=self._calendar_resolver,
             )
             if on_health is not None:
                 pipeline.on_health_change(on_health)

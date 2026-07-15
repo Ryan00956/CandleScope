@@ -272,6 +272,15 @@ class DataManager:
         self.query_engine.set_storage(storage)
         self.coordinator.set_storage(storage)
 
+    def set_history_policy(self, history_policy: Any | None) -> None:
+        """Inject the shared history availability/calendar resolver."""
+        self.query_engine.set_history_policy(history_policy)
+
+    @property
+    def history_policy(self) -> Any | None:
+        """Return the configured shared history resolver, if any."""
+        return self.query_engine.history_policy
+
     def set_ingestion_factory(self, factory: IngestionFactory) -> None:
         """Inject an ingestion factory for auto-starting streams.
 

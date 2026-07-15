@@ -213,7 +213,7 @@ def test_schema_v2_support_queries_are_market_and_transport_specific() -> None:
     assert not capabilities.supports_channel(MarketChannel.KLINE, "futures")
 
 
-@pytest.mark.parametrize("schema_version", [0, -1, 3, "2", True])
+@pytest.mark.parametrize("schema_version", [0, -1, 4, "2", True])
 def test_capability_validator_rejects_invalid_schema_versions(schema_version: object) -> None:
     capabilities = _v2_capabilities()
     capabilities.capability_schema_version = schema_version  # type: ignore[assignment]
@@ -318,7 +318,7 @@ def test_channel_model_rejects_bare_string_collections(field_name: str) -> None:
         _kline_capability(**{field_name: "spot"})
 
 
-@pytest.mark.parametrize("schema_version", [0, -1, 3, "2", True])
+@pytest.mark.parametrize("schema_version", [0, -1, 4, "2", True])
 def test_registry_rejects_invalid_capability_schema_versions(schema_version: object) -> None:
     class Adapter:
         id = "test"

@@ -54,14 +54,22 @@ export function nextUncoveredHistoryRange(
 
 export function coverageForHistoryPage(
   requested: MarketHistoryRange,
-  payload: Pick<MarketHistoryPayload, "count" | "coverage" | "fallback" | "has_more">,
+  payload: Pick<
+    MarketHistoryPayload,
+    "count" | "coverage" | "fallback" | "has_more" | "history_state" | "complete" | "retryable"
+  >,
   direction: MarketHistoryPageDirection,
 ): MarketHistoryRange | null {
   const target = normalizedRange(requested);
-  if (payload.fallback === true) return null;
+  const explicitlyResolved = payload.complete === true
+    || payload.history_state === "exhausted"
+    || (payload.count === 0 && payload.retryable === false);
+  if (payload.fallback === true && !explicitlyResolved) return null;
   const earliestMs = payload.coverage.earliest_ms;
   const latestMs = payload.coverage.latest_ms;
-  const pageIsExhaustive = payload.coverage.complete || payload.has_more === false;
+  const pageIsExhaustive = payload.coverage.complete
+    || payload.has_more === false
+    || explicitlyResolved;
   if (pageIsExhaustive) return target;
   if (earliestMs === null || latestMs === null || payload.count === 0) return null;
 

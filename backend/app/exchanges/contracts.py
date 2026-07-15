@@ -35,7 +35,13 @@ _RESYNC_MODES = {
 _DELIVERY_CLASSES = {item.value for item in DeliveryClass}
 _MARKET_CHANNELS = {item.value for item in MarketChannel}
 _TRANSPORT_MODES = {item.value for item in TransportMode}
-_SUPPORTED_CAPABILITY_SCHEMA_VERSION = 2
+_SUPPORTED_CAPABILITY_SCHEMA_VERSION = 3
+_HISTORY_CADENCES = {"unknown", "regular", "scheduled", "event_driven"}
+_HISTORY_EMPTY_PAGE_SEMANTICS = {
+    "unknown",
+    "authoritative_range_empty",
+    "terminal_exhaustion",
+}
 
 
 @dataclass(slots=True)
@@ -170,8 +176,8 @@ def validate_exchange_capabilities(
     """Validate one capability document without invoking the full plugin.
 
     Registry admission and the executable plugin contract intentionally share
-    this validator so schema v2 cannot be accepted by one boundary and rejected
-    by another.  Schema v1 keeps its legacy meaning: an absent/empty channel
+    this validator so schema v2+ cannot be accepted by one boundary and rejected
+    by another. Schema v1 keeps its legacy meaning: an absent/empty channel
     list is unknown support, not an authoritative denial.
     """
 
@@ -259,17 +265,20 @@ def _validate_capability_values(
         return
     if schema_version >= 2:
         _validate_channel_capabilities(capabilities, report)
+    if schema_version >= 3:
+        _validate_market_availability(capabilities, report)
 
 
 def _validate_channel_capabilities(
     capabilities: Any,
     report: ExchangeContractReport,
 ) -> None:
+    schema_version = getattr(capabilities, "capability_schema_version", 1)
     raw_channels = getattr(capabilities, "channels", ()) or ()
     if isinstance(raw_channels, (str, bytes, dict)):
         report.add(
             "capabilities.channels_invalid",
-            "capability schema v2 channels must be a list or tuple",
+            "capability schema v2+ channels must be a list or tuple",
         )
         return
     try:
@@ -277,13 +286,13 @@ def _validate_channel_capabilities(
     except TypeError:
         report.add(
             "capabilities.channels_invalid",
-            "capability schema v2 channels must be iterable",
+            "capability schema v2+ channels must be iterable",
         )
         return
     if not channels:
         report.add(
             "capabilities.channels_missing",
-            "capability schema v2 requires at least one channel declaration",
+            "capability schema v2+ requires at least one channel declaration",
         )
         return
 
@@ -553,6 +562,142 @@ def _validate_channel_capabilities(
                 "capabilities.update_intervals_not_canonical",
                 f"channel {channel!r} update intervals must be unique and increasing",
             )
+        if schema_version >= 3:
+            _validate_history_availability_policy(
+                item,
+                channel=channel,
+                history=history,
+                report=report,
+            )
+
+
+def _validate_market_availability(
+    capabilities: Any,
+    report: ExchangeContractReport,
+) -> None:
+    raw_markets = getattr(capabilities, "markets", ()) or ()
+    try:
+        markets = tuple(raw_markets)
+    except TypeError:
+        return
+    for market in markets:
+        market_type = str(getattr(market, "market_type", "") or "").strip().lower()
+        calendar_id = getattr(market, "calendar_id", None)
+        timezone = getattr(market, "timezone", None)
+        if not isinstance(calendar_id, str) or not calendar_id.strip():
+            report.add(
+                "capabilities.market_calendar_missing",
+                f"schema-v3 market {market_type!r} must declare calendar_id",
+            )
+        if not isinstance(timezone, str) or not timezone.strip():
+            report.add(
+                "capabilities.market_timezone_missing",
+                f"schema-v3 market {market_type!r} must declare timezone",
+            )
+
+
+def _validate_history_availability_policy(
+    item: Any,
+    *,
+    channel: str,
+    history: bool,
+    report: ExchangeContractReport,
+) -> None:
+    policy = getattr(item, "history_policy", None)
+    if not history:
+        return
+    if policy is None:
+        report.add(
+            "capabilities.history_policy_missing",
+            f"schema-v3 historical channel {channel!r} must declare history_policy",
+        )
+        return
+
+    def policy_value(name: str, default: Any = None) -> Any:
+        if isinstance(policy, dict):
+            return policy.get(name, default)
+        return getattr(policy, name, default)
+
+    cadence = _enum_value(policy_value("cadence"))
+    if cadence not in _HISTORY_CADENCES or cadence == "unknown":
+        report.add(
+            "capabilities.history_cadence_invalid",
+            f"historical channel {channel!r} must declare a known cadence, got {cadence!r}",
+        )
+    empty_semantics = _enum_value(policy_value("empty_page_semantics"))
+    if (
+        empty_semantics not in _HISTORY_EMPTY_PAGE_SEMANTICS
+        or empty_semantics == "unknown"
+    ):
+        report.add(
+            "capabilities.history_empty_semantics_invalid",
+            f"historical channel {channel!r} must declare empty-page semantics, "
+            f"got {empty_semantics!r}",
+        )
+
+    for field_name in ("calendar_id", "timezone"):
+        value = policy_value(field_name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            report.add(
+                "capabilities.history_policy_string_invalid",
+                f"historical channel {channel!r} {field_name} must be a non-empty string or null",
+            )
+
+    numeric_values: dict[str, Any] = {}
+    for field_name in (
+        "max_age_ms",
+        "max_window_ms",
+        "max_page_size",
+        "available_from_ms",
+        "available_to_ms",
+    ):
+        value = policy_value(field_name)
+        numeric_values[field_name] = value
+        if value is None:
+            continue
+        minimum = 1 if field_name.startswith("max_") else 0
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < minimum
+        ):
+            report.add(
+                "capabilities.history_policy_number_invalid",
+                f"historical channel {channel!r} {field_name} must be "
+                f"an integer >= {minimum} or null",
+            )
+    if (
+        isinstance(numeric_values["available_from_ms"], int)
+        and not isinstance(numeric_values["available_from_ms"], bool)
+        and isinstance(numeric_values["available_to_ms"], int)
+        and not isinstance(numeric_values["available_to_ms"], bool)
+        and numeric_values["available_from_ms"] > numeric_values["available_to_ms"]
+    ):
+        report.add(
+            "capabilities.history_policy_range_invalid",
+            f"historical channel {channel!r} available_from_ms exceeds available_to_ms",
+        )
+
+    limits = getattr(item, "limits", None)
+    if not isinstance(limits, dict):
+        return
+    legacy_fields = {
+        "max_age_ms": limits.get("history.max_age_ms"),
+        "max_window_ms": limits.get("history.max_window_ms"),
+        "max_page_size": limits.get(
+            "history.max_limit",
+            limits.get("rest.max_limit"),
+        ),
+    }
+    for field_name, legacy_value in legacy_fields.items():
+        if legacy_value is None:
+            continue
+        if numeric_values[field_name] != legacy_value:
+            report.add(
+                "capabilities.history_policy_legacy_mismatch",
+                f"historical channel {channel!r} {field_name} does not match "
+                "the legacy dotted limit",
+            )
 
 
 def _validate_depth_params(
@@ -597,7 +742,7 @@ def _validate_declared_channel_coverage(
     if (
         isinstance(schema_version, bool)
         or not isinstance(schema_version, int)
-        or schema_version != 2
+        or schema_version < 2
     ):
         return
 
@@ -705,7 +850,7 @@ def _capability_for_descriptor(capabilities: Any | None, descriptor: Any) -> Any
     if capabilities is None:
         return None
     schema_version = getattr(capabilities, "capability_schema_version", 1)
-    if isinstance(schema_version, bool) or schema_version != 2:
+    if isinstance(schema_version, bool) or schema_version < 2:
         return None
     channel = _descriptor_channel(descriptor)
     market_type = str(getattr(descriptor, "market_type", "")).strip().lower()

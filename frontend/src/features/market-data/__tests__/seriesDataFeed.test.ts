@@ -288,6 +288,115 @@ test("requestBeforePage owns pending and cooldown state", async () => {
   assert.equal(calls, 1);
 });
 
+test("terminal before-page availability prevents repeated left-edge HTTP requests", async () => {
+  let calls = 0;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesBefore: async () => {
+        calls += 1;
+        return {
+          data: [],
+          history_state: "exhausted",
+          complete: true,
+          retryable: false,
+          terminal_reason: "provider_exhausted",
+          earliest_available_ms: 100_000,
+          availability_revision: "history-v1",
+        };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+
+  const first = await feed.requestBeforePage(SERIES, {
+    before: epochSeconds(200),
+    bars: 500,
+    cooldownMs: 0,
+  });
+  const second = await feed.requestBeforePage(SERIES, {
+    before: epochSeconds(200),
+    bars: 500,
+  });
+
+  assert.equal(first.history_state, "exhausted");
+  assert.equal(second.skipped, true);
+  assert.equal(second.reason, "history-exhausted");
+  assert.equal(second.has_more, false);
+  assert.equal(calls, 1);
+
+  feed.invalidateBeforePageAvailability(SERIES);
+  feed.resetBeforePageCooldown(SERIES);
+  await feed.requestBeforePage(SERIES, {
+    before: epochSeconds(100),
+    bars: 500,
+  });
+  assert.equal(calls, 2);
+});
+
+test("new pending availability remains retryable without legacy has_more", async () => {
+  let calls = 0;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesBefore: async () => {
+        calls += 1;
+        return {
+          data: [],
+          history_state: "pending",
+          complete: false,
+          retryable: true,
+        };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+
+  const first = await feed.requestBeforePage(SERIES, {
+    before: epochSeconds(200),
+    bars: 500,
+    pendingCooldownMs: 0,
+  });
+  const second = await feed.requestBeforePage(SERIES, {
+    before: epochSeconds(200),
+    bars: 500,
+    pendingCooldownMs: 0,
+  });
+
+  assert.equal(first.pending, true);
+  assert.equal(second.pending, true);
+  assert.equal(calls, 2);
+});
+
+test("legacy terminal pages keep old per-request semantics without persistent inference", async () => {
+  let calls = 0;
+  const feed = new SeriesDataFeed({
+    api: {
+      fetchKlinesBefore: async () => {
+        calls += 1;
+        return { data: [], has_more: false };
+      },
+    },
+    getActiveSeries: () => SERIES,
+    commitMergedChartData: () => {},
+  });
+
+  const first = await feed.requestBeforePage(SERIES, {
+    before: epochSeconds(200),
+    bars: 500,
+    cooldownMs: 0,
+  });
+  const second = await feed.requestBeforePage(SERIES, {
+    before: epochSeconds(200),
+    bars: 500,
+    cooldownMs: 0,
+  });
+
+  assert.equal(first.pending, false);
+  assert.equal(second.skipped, undefined);
+  assert.equal(calls, 2);
+});
+
 test("before-page safety and completion attempts are tracked in the feed", () => {
   const feed = new SeriesDataFeed();
   feed.setPendingBeforePage(SERIES, {

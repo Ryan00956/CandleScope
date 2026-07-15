@@ -8,7 +8,11 @@ from typing import Any
 
 from app.core import config
 from app.core.executors import run_indicator, run_pyne_wait, run_storage
-from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_policy import (
+    compute_bucket_end_ms,
+    compute_bucket_start_ms,
+    parse_interval_ms,
+)
 from app.indicator import create_engine
 from app.indicator.errors import error_detail
 from app.indicator.events import IndicatorEvent, IndicatorEventType
@@ -24,7 +28,6 @@ from app.indicator.script_identity import script_hash
 from app.indicator.serialization import (
     build_indicator_snapshot_payload,
     build_pyne_snapshot_payload,
-    build_ws_error_payload,
 )
 
 _pyne_incremental_sessions = PyneIncrementalSessionManager()
@@ -32,6 +35,25 @@ _pyne_incremental_sessions = PyneIncrementalSessionManager()
 
 class IndicatorRangeEmptyError(RuntimeError):
     """Target range has no closed bars yet, usually because it is forming-only."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        terminal_reason: str | None = None,
+        earliest_available_ms: int | None = None,
+        availability_revision: str | None = None,
+        retryable: bool = True,
+        excluded_ranges: list[dict[str, Any]] | None = None,
+        history_state: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.terminal_reason = terminal_reason
+        self.earliest_available_ms = earliest_available_ms
+        self.availability_revision = availability_revision
+        self.retryable = bool(retryable)
+        self.excluded_ranges = list(excluded_ranges or [])
+        self.history_state = history_state
 
 
 class IndicatorRangeNotReadyError(RuntimeError):
@@ -375,7 +397,51 @@ def _query_indicator_compute_result(
     start_ms = start_s * 1000
     end_ms = end_s * 1000
     compute_start_ms = max(0, start_ms - warmup_bars * interval_ms)
-    needed = int((end_ms - compute_start_ms) // interval_ms) + 1
+    calendar = None
+    history_policy = getattr(dm, "history_policy", None)
+    if history_policy is not None:
+        try:
+            series = history_policy.series_key(
+                exchange=meta["exchange"],
+                market_type=meta["market_type"],
+                symbol=meta["symbol"],
+                channel="kline",
+                variant=meta["interval"],
+            )
+            calendar = history_policy.resolve(series).calendar
+        except Exception:
+            calendar = None
+    if calendar is not None:
+        start_bucket = compute_bucket_start_ms(
+            start_ms,
+            interval_ms,
+            interval=meta["interval"],
+        )
+        anchor = calendar.previous_expected_open(
+            compute_bucket_end_ms(
+                start_bucket,
+                interval_ms,
+                interval=meta["interval"],
+            ),
+            meta["interval"],
+        )
+        if anchor is not None:
+            compute_start_ms = anchor
+            for _ in range(warmup_bars):
+                previous = calendar.previous_expected_open(
+                    compute_start_ms,
+                    meta["interval"],
+                )
+                if previous is None:
+                    break
+                compute_start_ms = previous
+        needed = calendar.count_expected(
+            compute_start_ms,
+            end_ms,
+            meta["interval"],
+        )
+    else:
+        needed = int((end_ms - compute_start_ms) // interval_ms) + 1
     result = dm.query(
         meta["symbol"],
         meta["interval"],
@@ -410,6 +476,24 @@ def _closed_indicator_compute_bars(
         ]
         if raw_target_bars:
             raise IndicatorRangeEmptyError("target K-line range has no closed bars yet")
+        terminal_reason = getattr(result, "terminal_reason", None)
+        if (
+            getattr(result, "history_state", None) == "exhausted"
+            or terminal_reason
+            or (
+                bool(getattr(result, "complete", False))
+                and not bool(getattr(result, "retryable", False))
+            )
+        ):
+            raise IndicatorRangeEmptyError(
+                "target K-line range is outside available history",
+                terminal_reason=terminal_reason,
+                earliest_available_ms=getattr(result, "earliest_available_ms", None),
+                availability_revision=getattr(result, "availability_revision", None),
+                retryable=False,
+                excluded_ranges=getattr(result, "excluded_ranges", None),
+                history_state=getattr(result, "history_state", None) or "ready",
+            )
         raise RuntimeError("target K-line range is not available yet")
     return bars
 

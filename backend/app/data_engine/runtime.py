@@ -59,6 +59,12 @@ from app.data_engine.data_manager.subscriptions import SubscriptionService
 from app.data_engine.ingestion import TransportLayer
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.factory import ExchangeIngestionFactory
+from app.data_engine.history import (
+    ExchangeHistoryPolicyResolver,
+    HistoryAvailabilityService,
+    HistoryBoundaryRepository,
+    get_history_calendar_registry,
+)
 from app.data_engine.market_data.append_hub import AppendBatchHub
 from app.data_engine.market_data.full_order_book import FullOrderBookEngine
 from app.data_engine.market_data.full_order_book_service import FullOrderBookService
@@ -782,14 +788,54 @@ async def start_data_engine() -> DataEngineRuntime:
     full_order_book_service: FullOrderBookService | None = None
 
     try:
+        history_service = HistoryAvailabilityService(
+            calendars=get_history_calendar_registry(),
+            boundaries=HistoryBoundaryRepository(KLINES_DB_PATH),
+        )
+        history_policy = ExchangeHistoryPolicyResolver(history_service)
+
+        def _calendar_resolver(
+            exchange: str,
+            market_type: str,
+            symbol: str,
+        ):
+            key = history_policy.series_key(
+                exchange=exchange,
+                market_type=market_type,
+                symbol=symbol,
+                channel="kline",
+            )
+            context = history_policy.resolve(key)
+            return (
+                context.calendar
+                or context.availability.calendar_id
+                or "history.calendar.unknown"
+            )
+
         dm = DataManager()
+        set_history_policy = getattr(dm, "set_history_policy", None)
+        if callable(set_history_policy):
+            set_history_policy(history_policy)
 
         storage = KlinesRepoAdapter()
+        set_storage_calendar = getattr(storage, "set_calendar_resolver", None)
+        if callable(set_storage_calendar):
+            set_storage_calendar(
+                _calendar_resolver,
+                registry=history_service.calendars,
+            )
         async_storage = AsyncKlinesRepoAdapter()
         gap_ledger = GapLedger()
         dm.set_storage(storage)
 
         ingestion_factory = ExchangeIngestionFactory()
+        set_ingestion_calendar = getattr(
+            ingestion_factory,
+            "set_calendar_resolver",
+            None,
+        )
+        if callable(set_ingestion_calendar):
+            set_ingestion_calendar(_calendar_resolver)
         dm.set_ingestion_factory(ingestion_factory)
         print("[startup] IngestionFactory injected ✓")
 
@@ -800,6 +846,7 @@ async def start_data_engine() -> DataEngineRuntime:
             ingestion_factory,
             metrics_repository=market_metrics_repository,
             metrics_writer=market_metrics_writer,
+            history_policy=history_policy,
         )
         dm.set_market_data_service(market_data_service)
         print("[startup] MarketDataService injected ✓")
@@ -831,6 +878,10 @@ async def start_data_engine() -> DataEngineRuntime:
             transport=transport,
             ingestion_config=ingestion_cfg,
         )
+        backfill_engine.detector.set_calendar_resolver(
+            _calendar_resolver,
+            registry=history_service.calendars,
+        )
         dm.wire_backfill_reconciler(backfill_engine.reconciler)
 
         backfill_coordinator = BackfillCoordinator(
@@ -840,6 +891,16 @@ async def start_data_engine() -> DataEngineRuntime:
             engine=backfill_engine,
             loop=asyncio.get_running_loop(),
             gap_ledger=gap_ledger,
+            history_service=history_service,
+            history_policy_resolver=lambda repair: history_policy.resolve(
+                history_policy.series_key(
+                    exchange=repair.exchange,
+                    market_type=repair.market_type,
+                    symbol=repair.symbol,
+                    channel="kline",
+                    variant=repair.interval,
+                )
+            ),
         )
         dm.set_backfill_trigger(backfill_coordinator.trigger)
         print("[startup] BackfillCoordinator injected ✓")

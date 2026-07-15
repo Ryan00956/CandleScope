@@ -57,6 +57,14 @@ export interface MarketHistoryCoverage {
   complete: boolean;
 }
 
+export type MarketHistoryState = "ready" | "pending" | "exhausted";
+
+export interface MarketHistoryExcludedRange {
+  start_ms: number;
+  end_ms: number;
+  reason?: string;
+}
+
 export interface MarketHistoryPayload {
   type: "market.history";
   key: MarketStreamKeyPayload;
@@ -67,6 +75,14 @@ export interface MarketHistoryPayload {
   has_more?: boolean;
   next_start_ms?: number | null;
   next_end_ms?: number | null;
+  history_state?: MarketHistoryState;
+  complete?: boolean;
+  retryable?: boolean;
+  terminal_reason?: string | null;
+  earliest_available_ms?: number | null;
+  next_before_ms?: number | null;
+  availability_revision?: string | null;
+  excluded_ranges?: MarketHistoryExcludedRange[];
 }
 
 export type MarketSocketMessage =

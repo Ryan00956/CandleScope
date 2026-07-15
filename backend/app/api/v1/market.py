@@ -83,6 +83,11 @@ async def market_history(
             )
             events = page.events
             fallback = bool(page.fallback)
+            page_complete_override = getattr(page, "complete", None)
+            retryable = bool(getattr(page, "retryable", False))
+            terminal_reason = getattr(page, "terminal_reason", None)
+            earliest_available_ms = getattr(page, "earliest_available_ms", None)
+            availability_revision = getattr(page, "availability_revision", None)
         else:
             events = await dm.market_history(
                 key,
@@ -92,6 +97,11 @@ async def market_history(
                 limit=limit,
             )
             fallback = False
+            page_complete_override = None
+            retryable = False
+            terminal_reason = None
+            earliest_available_ms = None
+            availability_revision = None
     except HTTPException:
         raise
     except ValueError as exc:
@@ -103,7 +113,12 @@ async def market_history(
     if period is not None:
         response_key["params"] = {"period": period}
 
-    page_complete = not fallback and len(events) < limit
+    page_complete = (
+        bool(page_complete_override)
+        if page_complete_override is not None
+        else not fallback and len(events) < limit
+    )
+    exhausted = bool(page_complete and terminal_reason and not retryable)
     return {
         "type": "market.history",
         "key": response_key,
@@ -111,10 +126,22 @@ async def market_history(
         "data": [event.to_dict() for event in events],
         "fallback": fallback,
         "has_more": fallback or not page_complete,
+        "history_state": "exhausted" if exhausted else ("pending" if retryable else "ready"),
+        "complete": page_complete,
+        "retryable": retryable,
+        "terminal_reason": terminal_reason if exhausted else None,
+        "earliest_available_ms": earliest_available_ms,
+        "next_before_ms": None if exhausted else None,
+        "availability_revision": availability_revision,
+        "excluded_ranges": [],
         "coverage": {
             "earliest_ms": min((event.event_time_ms for event in events), default=None),
             "latest_ms": max((event.event_time_ms for event in events), default=None),
             "complete": page_complete,
+            "terminal_reason": terminal_reason if exhausted else None,
+            "retryable": retryable,
+            "earliest_available_ms": earliest_available_ms,
+            "availability_revision": availability_revision,
         },
     }
 

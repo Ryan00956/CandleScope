@@ -8,8 +8,12 @@ import aiohttp
 from app.core.config import REQUEST_TIMEOUT, get_effective_proxy
 from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
 from app.exchanges.models import (
+    CRYPTO_24X7_CALENDAR_ID,
     ExchangeCapabilities,
     ExchangeMarket,
+    HistoryAvailabilityPolicy,
+    HistoryCadence,
+    HistoryEmptyPageSemantics,
     MarketChannelCapability,
     SymbolInfo,
 )
@@ -46,6 +50,16 @@ _TICKER_FIELDS = (
     "volume",
     "quote_volume",
 )
+
+
+def _timestamp_ms(value: Any) -> int | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _channel_capabilities() -> list[MarketChannelCapability]:
@@ -88,6 +102,14 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             known_limitations=(
                 "Trade count and taker-buy fields are unavailable; normalized zero placeholders are not data",
                 "Current shared WebSocket hubs multiplex intervals only; each symbol has its own connection",
+            ),
+            history_policy=HistoryAvailabilityPolicy(
+                cadence=HistoryCadence.REGULAR,
+                empty_page_semantics=(
+                    HistoryEmptyPageSemantics.AUTHORITATIVE_RANGE_EMPTY
+                ),
+                calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                timezone="UTC",
             ),
         ),
         MarketChannelCapability(
@@ -144,17 +166,21 @@ class OkxExchangeAdapter:
         return ExchangeCapabilities(
             exchange=self.id,
             name=self.name,
-            capability_schema_version=2,
+            capability_schema_version=3,
             markets=[
                 ExchangeMarket(
                     market_type="spot",
                     product_type="spot",
                     label="Spot",
+                    calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                    timezone="UTC",
                 ),
                 ExchangeMarket(
                     market_type="futures",
                     product_type="perpetual",
                     label="Swap Perpetual",
+                    calendar_id=CRYPTO_24X7_CALENDAR_ID,
+                    timezone="UTC",
                 ),
             ],
             channels=_channel_capabilities(),
@@ -268,6 +294,11 @@ class OkxExchangeAdapter:
                     product_type=product_type,
                     contract_type=str(item.get("ctType", "")),
                     raw=item,
+                    listed_at_ms=_timestamp_ms(item.get("listTime")),
+                    continuous_trading_at_ms=_timestamp_ms(
+                        item.get("contTdSwTime"),
+                    ),
+                    expiry_at_ms=_timestamp_ms(item.get("expTime")),
                 ),
             )
         return symbols

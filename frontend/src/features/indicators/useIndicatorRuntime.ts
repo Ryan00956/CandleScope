@@ -324,6 +324,27 @@ export function isTypedIndicatorRangeWait(
   );
 }
 
+function indicatorAvailabilityValue(
+  payload: Partial<IndicatorPayloadEnvelope> | null | undefined,
+  field: string,
+): unknown {
+  const topLevel = recordValue(payload);
+  if (topLevel[field] !== undefined) return topLevel[field];
+  const detail = recordValue(payload?.detail);
+  const availability = recordValue(detail.availability);
+  return availability[field] ?? detail[field];
+}
+
+export function isResolvedIndicatorRangeEmpty(
+  payload: Partial<IndicatorPayloadEnvelope> | null | undefined,
+): boolean {
+  if (payload?.code !== "INDICATOR_RANGE_EMPTY") return false;
+  const historyState = indicatorAvailabilityValue(payload, "history_state");
+  const complete = indicatorAvailabilityValue(payload, "complete");
+  const retryable = indicatorAvailabilityValue(payload, "retryable");
+  return historyState === "exhausted" || complete === true || retryable === false;
+}
+
 function abortableDelay(delayMs: number | null, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) {
     return Promise.reject(new DOMException("Aborted", "AbortError"));
@@ -716,7 +737,8 @@ export function useIndicatorRuntime(
     if (!indicator) return;
     const dataRevision = normalizeIndicatorRevision(payload);
     if (dataRevision) seriesRevisionRef.current = dataRevision;
-    if (payload?.ok !== false) {
+    const resolvedEmpty = isResolvedIndicatorRangeEmpty(payload);
+    if (payload?.ok !== false || resolvedEmpty) {
       replaceCachedIndicatorRange(indicator, getIndicatorCacheContext(), normalized, range, {
         revision: dataRevision,
       });
@@ -728,7 +750,7 @@ export function useIndicatorRuntime(
           ? {
               ...indicator,
               lines: replaceIndicatorLinesRange(indicator.lines || [], normalized.lines, range),
-              error: payload?.ok === false ? formatIndicatorError(payload) : null,
+              error: payload?.ok === false && !resolvedEmpty ? formatIndicatorError(payload) : null,
             }
           : indicator
       )
@@ -980,7 +1002,7 @@ export function useIndicatorRuntime(
         }
       },
       apply: ({ range, result: payload, target }) => {
-        if (payload?.code === "INDICATOR_RANGE_EMPTY") return;
+        if (payload?.code === "INDICATOR_RANGE_EMPTY" && !isResolvedIndicatorRangeEmpty(payload)) return;
         const currentIndicator = activeIndicatorsRef.current.find((item) => item.id === target.indicator.id);
         if (!currentIndicator) return;
         if (buildIndicatorResultCacheKey(currentIndicator, cacheContext) !== target.key) return;

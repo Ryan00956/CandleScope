@@ -34,7 +34,7 @@ def kline_available_fields(exchange: str, market_type: str) -> frozenset[str]:
         from app.exchanges import bootstrap_default_adapters
 
         capabilities = bootstrap_default_adapters().get_capabilities(exchange)
-        if getattr(capabilities, "capability_schema_version", 1) != 2:
+        if getattr(capabilities, "capability_schema_version", 1) < 2:
             return frozenset()
         normalized_market = str(market_type or "").strip().lower()
         channel = capabilities.channel_capability(MarketChannel.KLINE, normalized_market)

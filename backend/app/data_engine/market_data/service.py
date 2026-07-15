@@ -16,6 +16,11 @@ from app.data_engine.ingestion.models import (
     TransportRequest,
 )
 from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.history import (
+    BoundaryReason,
+    ExchangeHistoryPolicyResolver,
+    TimeBound,
+)
 from app.data_engine.storage.market_metrics_repo import MarketMetricsRepository
 from app.exchanges import (
     bootstrap_default_adapters,
@@ -68,6 +73,11 @@ class _PhysicalEntry:
 class MarketHistoryPage:
     events: list[MarketStateEvent]
     fallback: bool = False
+    complete: bool | None = None
+    retryable: bool = False
+    terminal_reason: str | None = None
+    earliest_available_ms: int | None = None
+    availability_revision: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +85,10 @@ class _HistoryRefreshPlan:
     start_ms: int | None
     end_ms: int | None
     should_fetch: bool = True
+    terminal_reason: str | None = None
+    earliest_available_ms: int | None = None
+    availability_revision: str | None = None
+    max_page_size: int | None = None
 
 
 class MarketDataService:
@@ -90,6 +104,7 @@ class MarketDataService:
         max_summary_streams: int = 512,
         metrics_repository: MarketMetricsRepository | None = None,
         metrics_writer: MarketMetricStorageWriter | None = None,
+        history_policy: ExchangeHistoryPolicyResolver | None = None,
     ) -> None:
         self._factory = ingestion_factory
         self.hub = hub or MarketEventHub()
@@ -104,6 +119,7 @@ class MarketDataService:
         self._rate_limits = get_shared_rate_limit_manager()
         self._metrics_repository = metrics_repository
         self._metrics_writer = metrics_writer
+        self._history_policy = history_policy
         self._metrics = {"snapshot_fetch_errors": 0, "physical_stop_errors": 0}
         self._closed = False
 
@@ -341,10 +357,16 @@ class MarketDataService:
         )
         if self._metrics_repository is None:
             if not refresh_plan.should_fetch:
-                return MarketHistoryPage(events=[])
+                return MarketHistoryPage(
+                    events=[],
+                    complete=True,
+                    terminal_reason=refresh_plan.terminal_reason,
+                    earliest_available_ms=refresh_plan.earliest_available_ms,
+                    availability_revision=refresh_plan.availability_revision,
+                )
             raw_events = await self._fetch_market(
                 descriptor,
-                limit=limit,
+                limit=min(limit, refresh_plan.max_page_size or limit),
                 start_ms=refresh_plan.start_ms,
                 end_ms=refresh_plan.end_ms,
                 history=True,
@@ -363,11 +385,21 @@ class MarketDataService:
             end_ms=end_ms,
         )
         if not refresh_plan.should_fetch:
-            return MarketHistoryPage(events=local_events)
+            return MarketHistoryPage(
+                events=local_events,
+                complete=len(local_events) < limit,
+                terminal_reason=(
+                    refresh_plan.terminal_reason
+                    if len(local_events) < limit
+                    else None
+                ),
+                earliest_available_ms=refresh_plan.earliest_available_ms,
+                availability_revision=refresh_plan.availability_revision,
+            )
         try:
             raw_events = await self._fetch_market(
                 descriptor,
-                limit=limit,
+                limit=min(limit, refresh_plan.max_page_size or limit),
                 start_ms=refresh_plan.start_ms,
                 end_ms=refresh_plan.end_ms,
                 history=True,
@@ -382,7 +414,7 @@ class MarketDataService:
                 event_key.topic,
                 exc_info=True,
             )
-            return MarketHistoryPage(events=local_events, fallback=True)
+            return MarketHistoryPage(events=local_events, fallback=True, retryable=True)
 
         projected_events = [
             projected
@@ -400,8 +432,8 @@ class MarketDataService:
             ),
         )
 
-    @staticmethod
     def _history_refresh_plan(
+        self,
         key: MarketStreamKey,
         *,
         period: str | None,
@@ -422,6 +454,102 @@ class MarketDataService:
             supported_periods = params.get("period", ())
             if period not in supported_periods:
                 raise ValueError(f"unsupported open-interest period: {period}")
+
+        if self._history_policy is not None:
+            series = self._history_policy.series_key(
+                exchange=key.exchange,
+                market_type=key.market_type,
+                symbol=key.symbol,
+                channel=key.channel,
+                variant=period or "",
+                params=dict(key.params),
+            )
+            context = self._history_policy.resolve(series)
+            availability = context.availability
+            policy = context.policy
+            current_ms = int(time.time() * 1000)
+            lower_bounds = [
+                bound
+                for bound in (availability.data_start, availability.upstream_start)
+                if bound is not None and bound.confirmed and not bound.retryable
+            ]
+            if availability.rolling_retention_ms is not None:
+                retention_start_ms = (
+                    current_ms
+                    - availability.rolling_retention_ms
+                    + _HISTORY_RETENTION_SAFETY_MS
+                )
+                if period:
+                    period_ms = parse_interval_ms(period)
+                    if period_ms is None:
+                        raise ValueError(f"unsupported history period: {period}")
+                    retention_start_ms = (
+                        (retention_start_ms + period_ms - 1) // period_ms
+                    ) * period_ms
+                lower_bounds.append(TimeBound(
+                    retention_start_ms,
+                    BoundaryReason.PROVIDER_RETENTION,
+                    revision=context.revision,
+                    dynamic=True,
+                ))
+            upper_bounds = [
+                bound
+                for bound in (availability.data_end, availability.upstream_end)
+                if bound is not None and bound.confirmed and not bound.retryable
+            ]
+            lower = max(lower_bounds, key=lambda item: item.value_ms, default=None)
+            upper = min(upper_bounds, key=lambda item: item.value_ms, default=None)
+            max_page_size = policy.max_page_size if policy is not None else None
+
+            if end_ms is not None and lower is not None and end_ms < lower.value_ms:
+                return _HistoryRefreshPlan(
+                    start_ms=None,
+                    end_ms=None,
+                    should_fetch=False,
+                    terminal_reason=lower.reason.value,
+                    earliest_available_ms=lower.value_ms,
+                    availability_revision=context.revision,
+                    max_page_size=max_page_size,
+                )
+            if start_ms is not None and upper is not None and start_ms > upper.value_ms:
+                return _HistoryRefreshPlan(
+                    start_ms=None,
+                    end_ms=None,
+                    should_fetch=False,
+                    terminal_reason=upper.reason.value,
+                    earliest_available_ms=lower.value_ms if lower is not None else None,
+                    availability_revision=context.revision,
+                    max_page_size=max_page_size,
+                )
+
+            refresh_start_ms = (
+                max(start_ms, lower.value_ms)
+                if start_ms is not None and lower is not None
+                else start_ms
+            )
+            refresh_end_ms = (
+                min(end_ms, upper.value_ms)
+                if end_ms is not None and upper is not None
+                else end_ms
+            )
+            if (
+                policy is not None
+                and policy.max_window_ms is not None
+                and refresh_end_ms is not None
+            ):
+                window_start = refresh_end_ms - policy.max_window_ms
+                refresh_start_ms = (
+                    window_start
+                    if refresh_start_ms is None
+                    else max(refresh_start_ms, window_start)
+                )
+            return _HistoryRefreshPlan(
+                start_ms=refresh_start_ms,
+                end_ms=refresh_end_ms,
+                earliest_available_ms=lower.value_ms if lower is not None else None,
+                availability_revision=context.revision,
+                max_page_size=max_page_size,
+            )
 
         if start_ms is None and end_ms is None:
             return _HistoryRefreshPlan(start_ms=None, end_ms=None)
@@ -449,6 +577,9 @@ class MarketDataService:
                 start_ms=None,
                 end_ms=None,
                 should_fetch=False,
+                terminal_reason="outside_upstream_retention",
+                earliest_available_ms=retention_start_ms,
+                availability_revision=f"rolling:{raw_max_age_ms}",
             )
 
         refresh_start_ms = (
@@ -459,6 +590,8 @@ class MarketDataService:
         return _HistoryRefreshPlan(
             start_ms=refresh_start_ms,
             end_ms=end_ms,
+            earliest_available_ms=retention_start_ms,
+            availability_revision=f"rolling:{raw_max_age_ms}",
         )
 
     async def _read_persisted_history(

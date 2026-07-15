@@ -59,9 +59,12 @@ symbol metadata 兼容；新代码应走 plugin contracts。
 - `limits`
 - `known_limitations`
 
-schema v2 的每个 channel 会分别声明 transport、snapshot/delta、sequence/resync、
+schema v2+ 的每个 channel 会分别声明 transport、snapshot/delta、sequence/resync、
 `available_fields`、`unavailable_fields` 和 `derived_fields`。K 线 P0 用这些字段门控
 增强成交量与订单流代理，避免把插件占位值当作真实行情。
+schema v3 增加 market 的 `calendar_id`/`timezone`、channel 的强类型
+`history_policy`，以及标准化的 symbol 生命周期时间；旧的 dotted history limits
+仍为 schema v1/v2 消费方保留。
 
 前端使用这些元数据决定 interval 列表、可用 market type、WS 行为和用户可见限制。
 新增交易所 UI 行为应放进 capabilities，而不是新增前端交易所分支。

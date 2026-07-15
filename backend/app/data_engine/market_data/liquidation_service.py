@@ -818,7 +818,7 @@ class LiquidationService:
             capabilities = get_exchange_registry().get_plugin(identity[0]).capabilities()
         except KeyError as exc:
             raise ValueError(str(exc)) from exc
-        if getattr(capabilities, "capability_schema_version", 1) != 2:
+        if getattr(capabilities, "capability_schema_version", 1) < 2:
             raise ValueError(
                 "liquidation capture requires an authoritative capability schema v2",
             )

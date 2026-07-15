@@ -105,16 +105,31 @@ class ExchangeIngestionFactory:
         await dm.start()
     """
 
-    def __init__(self, config: IngestionConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: IngestionConfig | None = None,
+        *,
+        calendar_resolver: Callable[[str, str, str], Any] | None = None,
+    ) -> None:
         self._cfg = config or IngestionConfig()
         self._ingress: Any = None  # lazily created MarketDataIngress
         self._ingress_lock = asyncio.Lock()
         self._stream_locks: dict[str, tuple[asyncio.Lock, int]] = {}
         self._failed_stream_stops: set[str] = set()
+        self._calendar_resolver = calendar_resolver
 
     @property
     def config(self) -> IngestionConfig:
         return self._cfg
+
+    def set_calendar_resolver(
+        self,
+        resolver: Callable[[str, str, str], Any] | None,
+    ) -> None:
+        """Set calendar lookup before the shared ingress is created."""
+        if self._ingress is not None:
+            raise RuntimeError("calendar resolver must be set before ingestion starts")
+        self._calendar_resolver = resolver
 
     def get_transports(self) -> list[Any]:
         """Return active transport layers managed by this factory."""
@@ -132,7 +147,10 @@ class ExchangeIngestionFactory:
             # Import here to avoid circular imports at module level
             from . import MarketDataIngress
 
-            ingress = MarketDataIngress(self._cfg)
+            ingress = MarketDataIngress(
+                self._cfg,
+                calendar_resolver=self._calendar_resolver,
+            )
             await ingress.start()
             self._ingress = ingress
             logger.info("MarketDataIngress initialized and started")

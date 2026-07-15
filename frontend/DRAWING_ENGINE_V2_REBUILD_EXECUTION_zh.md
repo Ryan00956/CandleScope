@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5、Phase 6、Phase 7 已完成（2026-07-15）；Phase 8 尚未开始。
+状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5、Phase 6、Phase 7 已完成（2026-07-15）；Phase 8 已完成（2026-07-16）；Phase 9 等待生产灰度与观察窗门槛。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -59,8 +59,8 @@ git -C "H:\program\CandleScope" worktree list
 | 5 | Dynamic Overlay 与 Live Ink | 已完成（interaction overlay checkpoint） |
 | 6 | LOD、命中索引、worker 与背压 | 已完成（LOD/worker/indexed hit checkpoint） |
 | 7 | IndexedDB、兼容迁移与 export barrier | 已完成（async persistence/export barrier checkpoint） |
-| 8 | 全工具迁移与生命周期收口 | 未开始 |
-| 9 | 灰度、回滚演练与 legacy 删除 | 未开始 |
+| 8 | 全工具迁移与生命周期收口 | 已完成（全工具 scene document checkpoint） |
+| 9 | 灰度、回滚演练与 legacy 删除 | 未开始（等待生产灰度与观察窗） |
 
 ## 3. 已确认的性能基线
 
@@ -1057,33 +1057,38 @@ worker 字体结果不稳定，允许该帧使用同一 scene 的主线程 Canva
 
 ### 每类工具固定步骤
 
-- [ ] entity geometry/style 定义完成。
-- [ ] legacy import/export round-trip。
-- [ ] scene static renderer。
-- [ ] dynamic preview。
-- [ ] handles/drag/resize。
-- [ ] hit zones 和 cursor。
-- [ ] style patch。
-- [ ] hide/clear/delete。
-- [ ] reload。
-- [ ] future/source-lineage semantics。
-- [ ] export。
-- [ ] pixel/anchor golden。
-- [ ] shadow parity 达标。
-- [ ] scene-canary 可见。
-- [ ] 对应 legacy primitive 不再实例化。
+- [x] entity geometry/style 定义完成。
+- [x] legacy import/export round-trip。
+- [x] scene static renderer。
+- [x] dynamic preview。
+- [x] handles/drag/resize。
+- [x] hit zones 和 cursor。
+- [x] style patch。
+- [x] hide/clear/delete。
+- [x] reload。
+- [x] future/source-lineage semantics。
+- [x] export。
+- [x] pixel/anchor golden。
+- [x] shadow parity 达标。
+- [x] scene-canary 可见。
+- [x] 对应 legacy primitive 不再实例化。
+
+注：freehand/highlighter 的 public contract 不提供 committed whole-drawing
+drag/resize handles；该项对这两类按 N/A 验收，其 create/live ink、selection、hit、
+style、erase/delete、hide、reload、source-lineage 与 export 均已覆盖。其余 kind 的
+handles/drag/resize 按各自公开交互契约完成。
 
 ### 生命周期
 
-- [ ] chart remove 前同步取消 pointer capture、rAF 和 overlay。
-- [ ] worker pending 标记 stale，不允许写回新 surface。
-- [ ] 关闭 current/previous ImageBitmap。
-- [ ] detach 唯一 scene primitive。
-- [ ] series recreate 后重新 attach 一个 scene primitive。
-- [ ] document 不因 surface recreate 销毁。
-- [ ] drawingCoordinateKey 改变立即清空旧 screen geometry/hit grid。
-- [ ] hidden scene 不进行无用 raster，但 persistence 保持。
-- [ ] clearAll 同时清 document、scene cache、overlay、selection 和持久化任务。
+- [x] chart remove 前同步取消 pointer capture、rAF 和 overlay。
+- [x] worker pending 标记 stale，不允许写回新 surface。
+- [x] 关闭 current/previous ImageBitmap。
+- [x] detach 唯一 scene primitive。
+- [x] series recreate 后重新 attach 一个 scene primitive。
+- [x] document 不因 surface recreate 销毁。
+- [x] drawingCoordinateKey 改变立即清空旧 screen geometry/hit grid。
+- [x] hidden scene 不进行无用 raster，但 persistence 保持。
+- [x] clearAll 同时清 document、scene cache、overlay、selection 和持久化任务。
 
 ### 全局功能矩阵
 
@@ -1430,4 +1435,25 @@ Perf result: DPR 1 与 DPR 2 各 5 个正式 measured run 全部 PASS；每轮 n
 Rollback verified: v2 写入不删除 legacy snapshot；旧 build 可继续读取最后成功的兼容 snapshot。删除 v2 DB 不属于自动回滚；legacy interaction/main-thread raster 开关仍可独立回退，document 真值不降级。
 Known limitations: legacy-only 用户首次兼容读取仍是一次性 fallback；正式 512-entity 性能门针对目标 v2 IndexedDB restore。page scope 因包含完整 DOM 继续走兼容 capture，并保持同一 barrier/超时/fail-closed 契约。angle/fibonacci/text/position 完整 document/scene/overlay 迁移留给 Phase 8。
 Decision: Phase 7 PASS；异步 v2 persistence、受控 legacy migration、manifest repair、生命周期 flush、exact export barrier、浏览器兼容验收与 DPR 1/2 正式性能门全部通过；Phase 8 尚未开始。
+~~~
+
+### Phase 8 执行记录
+
+~~~text
+Phase: 8 — 全工具迁移与生命周期收口
+Date: 2026-07-16
+Commit: 本执行记录所在 checkpoint（refactor(frontend): migrate all drawings to scene documents）
+Mode: IndexedDB v2 DrawingDocument authoritative + scene-canary + interaction overlay + worker raster；每 pane 固定一个 DrawingScenePrimitive；scene-canary 下不实例化 per-drawing legacy primitive
+Files: drawing document scene registry；angle/fibonacci/text/position scene painter 与 display-list/projector；document-native creation/hit/drag/text edit；dynamic overlay/live ink handoff；DrawingEngineHost/persistence/interaction/selection/hover；scene runtime/renderer/bridge/frame snapshot；SingleChartPanes；smoke/export/DOM evidence/performance harness 与对应 tests
+Tests: npm run check PASS（architecture、typecheck、ESLint、1391/1391 tests、production build 347 modules）；npm run test:drawing 640/640；hidden export/controller 定向 100/100；scripts tests 131/131；git diff --check PASS。
+Tool migration: line、axis-line、angle-measure、fibonacci、text、position、shape、freehand、highlighter 九类均由 canonical entity/document 驱动 static scene 与 overlay interaction；document-only registry 的 snapshot/attached/legacy instance 均为 0，唯一 composite scene primitive 由 bridge 持有。angle/fibonacci/text/position 新增独立 painter；text 使用统一 font metric revision 与 main-thread Canvas2D parity 边界；position long/short 颜色语义有显式回归。freehand/highlighter 不声明 public contract 外的 whole-drawing drag/resize，其余交互与生命周期矩阵全部覆盖。
+Browser acceptance: 可见 headed Chrome 逐类验证九种 drawing 的创建与 scene 可见性，并覆盖 select/hover、line whole drag 与 endpoint resize、text/style、eraser/delete、hide/show、reload、clear/reload、export preview；最终 registry=scene-document-only、legacy instances=0、legacy attached=0。正式 line workflow 的 document revision 1→2、geometry revision 1→2，IDB geometry 与 SavedDrawing 一致，entity count 1→1；再创建 future anchor 后 persisted/restored count 均为 2。
+Smoke: output/phase8-smoke-report-final4.json，managed production preview、headed Chrome，drawingCheck/chartTypeMatrixCheck/exportMatrixCheck 全部 true。15 种 chart type 切换、持久化与恢复通过；原生 3-pane 布局为 495/134/133px。chart PNG、main-pane JPEG、page WebP 三例预览与下载 magic 全过；global hidden 的 base/forced exact export 后 runtime、worker、stamp 与 bridge 连续两次确认退休，随后可见性恢复。warnings/exceptions/failures 均为 0。
+Perf baseline: Phase 6 output/phase6-formal-dpr15-final.json；Phase 8 正式报告 output/phase8-formal-dpr15-final.json。保留 output/phase8-formal-dpr15.json 作为失败样本：全部 latency target 已过，但一次 Page.reload 在 1ms 内误读旧 document；harness 随后加入 next-document one-shot marker、per-run IDB/localStorage 隔离与 canonical document runtime summary，未放宽任何 DOM/restore 门。
+Perf result: production managed preview，headed Chrome，1440×900、DPR 1.5、10000 bars，6 scenarios ×（1 warm-up + 5 measured）全部 PASS；30/30 measured reload restore、72/72 Phase 8 DOM observations、全部 target assessment 与 runtime evidence 通过，drawing-attributable Long Task=0。freehand 64×512 zoom/pan scene project+paint p95/p99=4.3/9.7ms、frame=17.0/17.1ms、exact max=117.0ms；source-lineage 为 6.1/13.4ms、17.0/17.1ms、78.4ms；indexed hit 5000 queries p95/p99/max=0/0.1/0.1ms；active finalize drawing main=0.2/0.4ms、input-to-paint=15.1/15.3ms、mouseup p95=4.3ms、worker finalize p95=6.0ms、exact max=47.9ms；main-thread fallback scene=4.3/9.6ms、frame=16.9/17.0ms、exact max=53.5ms。
+Backpressure: 96ms worker fault injection 的五次 measured 均 queue max/current≤2/0、in-flight max/current≤1/0、stale publish=0，并完成 latest-wins 收敛；全部 measured runtime 只附着一个 composite primitive。每轮 fixture 前清理临时 profile 的 indexeddb/local_storage，避免前一轮 canonical v2 覆盖新 fixture；每次 reload 必须观测下一 document 的唯一 marker，正式 30 轮 marker wait=19–25ms，随后才进入严格 restore/DOM 验收。
+Correctness parity: geometry/style、legacy codec round-trip、static/dynamic renderer、handles/hit/cursor/style patch、hide/clear/delete/reload、future/source-lineage、export 与 golden 覆盖九类 drawing；shape/text 部分越出 pane 时，resize 继续使用未裁剪的原始投影 box，避免尺寸或锚点跳变。chart type、price mode、anchor、DPR、symbol/interval/projection/theme/resize/reload/dispose-recreate、interaction 与 export 全局矩阵由单测、正式 perf、统一 smoke 和可见浏览器验收共同覆盖。hidden scene 普通 reconcile 保持 runtime/bridge suspended；只有 exact export lease 可临时激活空 scene，ACK 后立即退休并重验 canonical document identity 与 latest visibility intent。
+Rollback verified: legacy/shadow mode、legacy primitive factory/renderer 与最后兼容 SavedDrawing snapshot 本阶段不删除；VITE_DRAWING_ENGINE_MODE、VITE_DRAWING_INTERACTION_OVERLAY、VITE_DRAWING_RASTER_BACKEND 可独立回退。v2/legacy bytes 与 IDB compatibility boundary 保留，删除 legacy 只允许在 Phase 9 全部门槛满足后执行。
+Known limitations: Phase 9 需要 production cohort 1%→10%→50%→100%、100% 默认两个发布或 14 天、完整观察窗、八项强制回滚演练、一小时 soak 与用户数据丢失审计；当前本地 checkpoint 不能提供这些外部证据，因此不开始 legacy 删除，也不把默认 mode 切到 scene。
+Decision: Phase 8 PASS；九类 drawing 的 document/scene/overlay 迁移、零 legacy primitive、生命周期、统一 smoke 与正式 perf 门全部通过。后续停止在 Phase 9 外部灰度/观察窗门槛，待证据齐全后重新审计。
 ~~~

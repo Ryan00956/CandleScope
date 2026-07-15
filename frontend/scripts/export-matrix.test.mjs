@@ -5,6 +5,8 @@ import {
   hasExpectedImageMagic,
   runExportMatrix,
   summarizeExportMatrixAcceptance,
+  summarizeHiddenSceneRuntimeRetirement,
+  waitForStableHiddenSceneRuntimeRetirement,
 } from "./export-matrix.mjs";
 
 test("hasExpectedImageMagic recognizes PNG, JPEG, and WebP headers", () => {
@@ -74,6 +76,64 @@ test("summarizeExportMatrixAcceptance reports failed cases and acceptance gates"
   assert.equal(acceptance.scopeDimensionsPassed, false);
   assert.equal(acceptance.panelClosed, false);
   assert.equal(acceptance.error, "preview failed");
+});
+
+test("hidden-scene runtime retirement is mandatory when the performance handle exists", () => {
+  const retired = summarizeHiddenSceneRuntimeRetirement({
+    handleAvailable: true,
+    readerAvailable: true,
+    runtime: {
+      scenePublicationReady: false,
+      queueDepthCurrent: 0,
+      inFlightCurrent: 0,
+      lastRequestedStamp: null,
+      lastPublishedStamp: null,
+    },
+  });
+  assert.equal(retired.passed, true);
+
+  for (const runtime of [
+    { ...retired.runtime, scenePublicationReady: true },
+    { ...retired.runtime, queueDepthCurrent: 1 },
+    { ...retired.runtime, inFlightCurrent: 1 },
+    { ...retired.runtime, lastRequestedStamp: { documentRevision: 1 } },
+    { ...retired.runtime, lastPublishedStamp: { documentRevision: 1 } },
+  ]) {
+    assert.equal(summarizeHiddenSceneRuntimeRetirement({
+      handleAvailable: true,
+      readerAvailable: true,
+      runtime,
+    }).passed, false);
+  }
+  assert.equal(summarizeHiddenSceneRuntimeRetirement({
+    handleAvailable: true,
+    readerAvailable: false,
+  }).passed, false);
+  assert.equal(summarizeHiddenSceneRuntimeRetirement().passed, true);
+});
+
+test("hidden-scene retirement waits for pending previews and consecutive stable samples", async () => {
+  const samples = [
+    { passed: false, previewIdle: false, runtime: { scenePublicationReady: true } },
+    { passed: true, previewIdle: true, runtime: { scenePublicationReady: false } },
+    { passed: false, previewIdle: false, runtime: { scenePublicationReady: true } },
+    { passed: true, previewIdle: true, runtime: { scenePublicationReady: false } },
+    { passed: true, previewIdle: true, runtime: { scenePublicationReady: false } },
+  ];
+  let clock = 0;
+  const result = await waitForStableHiddenSceneRuntimeRetirement({
+    readSample: async () => samples.shift(),
+    wait: async (durationMs) => { clock += durationMs; },
+    now: () => clock,
+    timeoutMs: 1_000,
+    sampleIntervalMs: 10,
+    requiredStableSamples: 2,
+  });
+
+  assert.equal(result.passed, true);
+  assert.equal(result.previewIdle, true);
+  assert.equal(result.stableSampleCount, 2);
+  assert.equal(result.sampleCount, 5);
 });
 
 test("runExportMatrix enforces injected browser helpers", async () => {

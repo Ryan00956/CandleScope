@@ -7,6 +7,7 @@ import {
 } from "../../core/drawingDocument.js";
 import type { DrawingDocument } from "../../core/drawingDocument.js";
 import { createDrawingDocumentStore } from "../../core/drawingDocumentStore.js";
+import { hitTestDrawingHitIndex } from "../../geometry/drawingHitIndex.js";
 import type { LegacyPrimitiveRenderer } from "../../legacy/legacyPrimitiveRenderer.js";
 import { drawingPerfCounters } from "../../performance/drawingPerfCounters.js";
 import { createDrawingScreenDisplayList } from "../../rendering/drawingDisplayList.js";
@@ -76,14 +77,16 @@ function freehandDocument(): DrawingDocument {
 }
 
 function frame({
+  coordinateKey = "frame-a",
   includeAffinePriceCertificate = true,
 }: {
+  coordinateKey?: string;
   includeAffinePriceCertificate?: boolean;
 } = {}) {
   return createDrawingFrameSnapshotFactory().capture({
     axisKind: "time",
     barSpacing: 6,
-    coordinateKey: "frame-a",
+    coordinateKey,
     drawingViewport: {
       horizontalDomain: "time",
       minHorizontal: 0,
@@ -123,6 +126,7 @@ function fakeAdapter(captured = frame()) {
     adapter,
     clearFrame: () => { current = null as unknown as typeof captured; },
     restoreFrame: () => { current = captured; },
+    setFrame: (next: typeof captured) => { current = next; },
     emit: (reason?: "manual" | "viewport") => {
       for (const listener of listeners) listener(reason);
     },
@@ -490,6 +494,84 @@ test("exact paint barrier accepts only a fresh exact plan and newer full paint e
   runtime.dispose();
 });
 
+test("export-only hidden visibility receives an exact empty plan before ordinary suspend", async () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let visible = true;
+  let clearCount = 0;
+  const clearScene = () => { clearCount += 1; };
+  let exactPaintListener: ((ack: DrawingScenePaintAck) => void) | null = null;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    isVisible: () => visible,
+    publishScene: () => true,
+    clearScene,
+    subscribeSceneExactPainted: (listener) => {
+      exactPaintListener = listener;
+      return () => { exactPaintListener = null; };
+    },
+  });
+  assert.equal(runtime.flushNow(), true);
+  const visiblePlan = runtime.snapshot().plan;
+  assert.ok(visiblePlan);
+  assert.equal(visiblePlan.entities.length, 1);
+  const deliverExactPaint = (ack: DrawingScenePaintAck): void => {
+    const listener = exactPaintListener as ((value: DrawingScenePaintAck) => void) | null;
+    assert.ok(listener);
+    listener(ack);
+  };
+  deliverExactPaint({
+    plan: visiblePlan,
+    stamp: visiblePlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+
+  visible = false;
+  clearScene();
+  assert.equal(runtime.invalidate("export-visibility-hidden"), true);
+  const pending = runtime.waitForExactPaint({
+    scopeKey: "scope-a",
+    documentRevision: 0,
+    timeoutMs: 1_000,
+  });
+  const hiddenPlan = runtime.snapshot().plan;
+  assert.ok(hiddenPlan);
+  assert.notStrictEqual(hiddenPlan, visiblePlan);
+  assert.equal(hiddenPlan.entities.length, 0);
+  deliverExactPaint({
+    plan: hiddenPlan,
+    stamp: hiddenPlan.stamp,
+    attachmentRevision: 1,
+    paintSequence: 2,
+  });
+
+  const receipt = await pending;
+  assert.strictEqual(receipt.plan, hiddenPlan);
+  assert.equal(receipt.plan.entities.length, 0);
+  assert.equal(runtime.snapshot().publicationReady, true);
+
+  runtime.suspend();
+  assert.equal(runtime.snapshot().active, false);
+  assert.equal(runtime.snapshot().publicationReady, false);
+  assert.equal(runtime.snapshot().plan, null);
+  assert.equal(adapter.listenerCount(), 0);
+  adapter.emit("viewport");
+  assert.equal(runtime.invalidate("capture-frame-advanced"), false);
+  assert.equal(runtime.snapshot().plan, null);
+  assert.ok(clearCount >= 2);
+  runtime.dispose();
+});
+
 test("exact paint barrier follows the newest scene epoch and ignores a stale plan ack", async () => {
   const store = createDrawingDocumentStore(documentWithRevision());
   const adapter = fakeAdapter();
@@ -766,6 +848,100 @@ test("same-stamp invalidation rejects an old worker bitmap before a new scene ep
   published[0]?.freehandRaster?.bitmap.close();
   runtime.dispose();
   assert.equal(closed, 2);
+});
+
+test("coordinate-key changes synchronously retire public geometry and stale the old worker plan", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const frameA = frame({ coordinateKey: "frame-a" });
+  const frameB = frame({ coordinateKey: "frame-b" });
+  const adapter = fakeAdapter(frameA);
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  const projectedCoordinateKeys: string[] = [];
+  let visiblePlan: ReturnType<typeof projectFreehand> | null = null;
+  let visibleBitmapCloseCount = 0;
+  let staleBitmapCloseCount = 0;
+  let clearCount = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: (request) => {
+      projectedCoordinateKeys.push(request.frame.coordinateKey);
+      return projectFreehand(request);
+    },
+    publishScene: (plan) => {
+      published.push(plan);
+      visiblePlan = plan;
+      return true;
+    },
+    clearScene: () => {
+      clearCount += 1;
+      visiblePlan?.freehandRaster?.bitmap.close();
+      visiblePlan = null;
+    },
+  });
+
+  assert.equal(runtime.flushNow(), true);
+  const firstRequest = transport.renderRequests()[0];
+  assert.ok(firstRequest);
+  transport.emit(bitmapWorkerResponse(firstRequest, () => { visibleBitmapCloseCount += 1; }));
+  const firstPlan = runtime.snapshot().plan;
+  const firstHitIndex = runtime.snapshot().hitIndex;
+  assert.ok(firstPlan && firstHitIndex);
+  assert.equal(hitTestDrawingHitIndex(firstHitIndex, 20, 20)?.entityId, "ink");
+  assert.equal(firstPlan.entities[0]?.handleCount, 2);
+
+  // Leave one frame-a worker result in flight, then swap coordinate systems.
+  adapter.emit("viewport");
+  assert.equal(runtime.flushNow(), true);
+  const staleRequest = transport.renderRequests()[1];
+  assert.ok(staleRequest);
+  adapter.setFrame(frameB);
+  adapter.emit("manual");
+
+  // The invalidation listener must fail closed before the queued frame runs.
+  const cleared = runtime.snapshot();
+  assert.equal(clearCount, 1);
+  assert.equal(visibleBitmapCloseCount, 1);
+  assert.equal(visiblePlan, null);
+  assert.equal(cleared.plan, null);
+  assert.equal(cleared.hitIndex, null);
+  assert.equal(cleared.publicationReady, false);
+  assert.equal(cleared.hitIndex ? hitTestDrawingHitIndex(cleared.hitIndex, 20, 20) : null, null);
+
+  transport.emit(bitmapWorkerResponse(staleRequest, () => { staleBitmapCloseCount += 1; }));
+  assert.equal(staleBitmapCloseCount, 1, "the superseded worker bitmap is released");
+  assert.equal(published.length, 1, "the old coordinate-space plan is never republished");
+  assert.equal(runtime.snapshot().plan, null);
+
+  assert.equal(runtime.flushNow(), true);
+  const recoveredRequest = transport.renderRequests()[2];
+  assert.ok(recoveredRequest);
+  assert.deepEqual(recoveredRequest.header.stamp, staleRequest.header.stamp,
+    "the coordinate epoch, not stamp drift, must reject the old worker plan");
+  transport.emit(bitmapWorkerResponse(recoveredRequest, () => { visibleBitmapCloseCount += 1; }));
+  const recovered = runtime.snapshot();
+  assert.equal(published.length, 2);
+  assert.strictEqual(recovered.plan, published[1]);
+  assert.strictEqual(recovered.hitIndex?.list, recovered.plan);
+  assert.equal(recovered.publicationReady, true);
+  assert.equal(recovered.plan?.entities[0]?.handleCount, 2);
+  assert.equal(recovered.hitIndex
+    ? hitTestDrawingHitIndex(recovered.hitIndex, 20, 20)?.entityId
+    : null, "ink");
+  assert.deepEqual(projectedCoordinateKeys, ["frame-a", "frame-a", "frame-b"]);
+
+  runtime.dispose();
+  assert.equal(visibleBitmapCloseCount, 2);
 });
 
 test("worker frame-stale preflight is a stale result drop, not a stale publication", () => {

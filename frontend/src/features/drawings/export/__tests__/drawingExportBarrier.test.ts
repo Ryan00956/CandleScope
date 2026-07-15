@@ -125,6 +125,8 @@ test("the active preparation and returned lease both reject concurrent capture",
   controller.abort("test complete");
   await assert.rejects(preparing, (error: unknown) => assertBarrierError(error, "aborted"));
   assert.equal(preparingHarness.restores.length, 1);
+  assert.equal(preparingHarness.restores[0]?.presentation, null);
+  assert.equal(preparingHarness.restores[0]?.presentationAttempted, false);
 
   const leasedHarness = createHarness();
   const leasedBarrier = createDrawingExportBarrier(leasedHarness.dependencies);
@@ -155,6 +157,10 @@ for (const failedStage of [
       harness.restores[0]?.presentationApplied,
       ["frame", "stale"].includes(failedStage),
     );
+    if (failedStage === "scene") {
+      assert.equal(harness.restores[0]?.presentation, null);
+      assert.equal(harness.restores[0]?.presentationAttempted, false);
+    }
     assert.deepEqual(barrier.snapshot(), { locked: false, leaseId: null });
 
     const recovery = createHarness();
@@ -190,6 +196,8 @@ test("mismatched persistence and exact-scene identities fail closed", async () =
     (error: unknown) => assertBarrierError(error, "invalid-receipt"),
   );
   assert.equal(sceneHarness.restores.length, 1);
+  assert.equal(sceneHarness.restores[0]?.presentation, null);
+  assert.equal(sceneHarness.restores[0]?.presentationAttempted, false);
 });
 
 test("timeout aborts the active callback, restores presentation, and unlocks", async () => {
@@ -210,6 +218,8 @@ test("timeout aborts the active callback, restores presentation, and unlocks", a
   assert.equal((observedSignal as AbortSignal | null)?.aborted, true);
   assert.equal(harness.restores.length, 1);
   assert.equal(harness.restores[0]?.presentationApplied, false);
+  assert.equal(harness.restores[0]?.presentation, null);
+  assert.equal(harness.restores[0]?.presentationAttempted, false);
   assert.deepEqual(barrier.snapshot(), { locked: false, leaseId: null });
 });
 

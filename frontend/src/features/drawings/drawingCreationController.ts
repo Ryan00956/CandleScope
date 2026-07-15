@@ -100,7 +100,7 @@ function persistAttachedCreatedPrimitive(
   return false;
 }
 
-interface PositionSpanOptions {
+export interface PositionSpanOptions {
   dataPoint: DrawingDataPoint;
   pos: ScreenPoint;
   screenToDrawingData: ScreenToDrawingData;
@@ -275,7 +275,7 @@ function positionSpanCandidateXs(pointerX: number, containerWidth: number | null
  * On ordinal axes this may combine materialized lineage with an absolute
  * source-time future anchor, but never stores projection-local order/logical.
  */
-function positionTimeRangeFromScreen({
+export function positionTimeRangeFromScreen({
   dataPoint,
   pos,
   screenToDrawingData,

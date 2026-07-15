@@ -318,6 +318,30 @@ test("theme, size, DPR, and surface have independent revision boundaries", () =>
   assert.strictEqual(newSurface.coordinateIndex, dprChanged.coordinateIndex);
 });
 
+test("theme palette colors invalidate a snapshot even when themeKey is stable", () => {
+  const factory = createDrawingFrameSnapshotFactory();
+  const input = { ...baseInput(), themeKey: "custom" };
+  const initial = factory.capture({
+    ...input,
+    themePalette: { upColor: "#22c55e", downColor: "#ef4444" },
+  });
+  const recolored = factory.capture({
+    ...input,
+    themePalette: { upColor: "#00ff88", downColor: "#ff3366" },
+  });
+
+  assert.equal(recolored.themeRevision, initial.themeRevision + 1);
+  assert.deepEqual(recolored.themePalette, {
+    upColor: "#00ff88",
+    downColor: "#ff3366",
+  });
+  assert.notStrictEqual(recolored, initial);
+  assert.strictEqual(factory.capture({
+    ...input,
+    themePalette: { upColor: "#00ff88", downColor: "#ff3366" },
+  }), recolored);
+});
+
 test("factory reset starts a new independent revision sequence", () => {
   const factory = createDrawingFrameSnapshotFactory();
   const input = baseInput();

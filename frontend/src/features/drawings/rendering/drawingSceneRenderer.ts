@@ -7,6 +7,10 @@ import type {
   DrawingFreehandRasterLayer,
   DrawingScreenDisplayList,
 } from "./drawingDisplayList.js";
+import { drawAngleSceneEntity } from "./drawingSceneAnglePainter.js";
+import { drawFibonacciSceneEntity } from "./drawingSceneFibonacciPainter.js";
+import { drawTextSceneEntity } from "./drawingSceneTextPainter.js";
+import { drawPositionSceneEntity } from "./drawingScenePositionPainter.js";
 
 function drawingPerfNow(): number {
   return typeof performance !== "undefined" && typeof performance.now === "function"
@@ -485,6 +489,38 @@ export class DrawingSceneRenderer implements PrimitivePaneRenderer {
             );
           } else if (op === "axis-line") {
             drawAxisLine(
+              scope.context,
+              entity,
+              plan,
+              horizontalPixelRatio,
+              verticalPixelRatio,
+            );
+          } else if (op === "angle") {
+            drawAngleSceneEntity(
+              scope.context,
+              entity,
+              plan,
+              horizontalPixelRatio,
+              verticalPixelRatio,
+            );
+          } else if (op === "fibonacci") {
+            drawFibonacciSceneEntity(
+              scope.context,
+              entity,
+              plan,
+              horizontalPixelRatio,
+              verticalPixelRatio,
+            );
+          } else if (op === "text") {
+            drawTextSceneEntity(
+              scope.context,
+              entity,
+              plan,
+              horizontalPixelRatio,
+              verticalPixelRatio,
+            );
+          } else if (op === "position") {
+            drawPositionSceneEntity(
               scope.context,
               entity,
               plan,

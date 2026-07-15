@@ -52,6 +52,17 @@ import {
   buildPhase6LineageFixtureContract,
   phase6LineageSettings,
 } from "./drawing-performance-phase6-lineage.mjs";
+import {
+  navigateToDrawingPerformanceScenario,
+  reloadFreshDrawingPerformanceDocument,
+} from "./drawing-performance-storage.mjs";
+import {
+  assessDrawingEngineDomEvidence,
+  drawingEngineDomEvidenceBrowserSnapshot,
+  formatDrawingEngineDomEvidenceFailure,
+  shouldRequireDrawingEngineDomEvidenceForPerformance,
+  summarizeDrawingEngineDomEvidenceAssessments,
+} from "./drawing-engine-dom-evidence.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -749,6 +760,13 @@ async function evaluate(cdp, expression) {
 async function evaluateJson(cdp, functionSource) {
   const value = await evaluate(cdp, "JSON.stringify((" + functionSource + ")())");
   return typeof value === "string" ? JSON.parse(value) : null;
+}
+
+async function readDrawingEngineDomEvidence(cdp, args) {
+  const raw = await evaluateJson(cdp, drawingEngineDomEvidenceBrowserSnapshot);
+  return assessDrawingEngineDomEvidence(raw, {
+    required: shouldRequireDrawingEngineDomEvidenceForPerformance(args),
+  });
 }
 
 function metricMap(response) {
@@ -2616,10 +2634,12 @@ function createReloadRestoreResult(expectedCount, persisted, persistedSummary = 
     persistenceWaitedMs: persisted.waitedMs,
     savedSummaryBeforeReload: persistedSummary,
     reloadExpectedDrawingCount: reloadedCount,
+    reloadDocumentGeneration: null,
     savedDrawingCountAfterReload: null,
     loadedDrawingCountAfterReload: null,
     runtimeSummaryAfterReload: null,
     runtimeSummaryMatchesSaved: false,
+    drawingEngineDomEvidenceAfterReload: null,
     chartReadyAfterReload: false,
     drawingEngineReadyAfterReload: false,
     drawingEngineExpectedAfterReload: expectedCount > 0,
@@ -2647,8 +2667,28 @@ async function verifyReloadRestore(
 
   try {
     result.attempted = true;
-    await cdp.send("Page.reload", { ignoreCache: true });
-    const ready = await waitForChartReady(cdp, result.reloadExpectedDrawingCount, args.timeoutMs);
+    result.reloadDocumentGeneration = await reloadFreshDrawingPerformanceDocument(cdp, {
+      timeoutMs: args.timeoutMs,
+    });
+    let ready = await waitForChartReady(cdp, result.reloadExpectedDrawingCount, args.timeoutMs);
+    const evidenceRequired = shouldRequireDrawingEngineDomEvidenceForPerformance(args);
+    if (evidenceRequired && ready.drawingReady !== true) {
+      const activated = await selectToolVariantFromCandidates(
+        cdp,
+        ["pen", "highlighter"],
+        "pen",
+      );
+      if (!activated) {
+        throw new Error("Phase 8 reload could not activate the lazy drawing host for DOM evidence");
+      }
+      ready = await waitForChartReady(
+        cdp,
+        result.reloadExpectedDrawingCount,
+        args.timeoutMs,
+        { requireDrawingEngine: true },
+      );
+    }
+    result.drawingEngineDomEvidenceAfterReload = await readDrawingEngineDomEvidence(cdp, args);
     const savedDrawingCountAfterReload = await readSavedDrawingCount(cdp, fixture.storageKey);
     result.savedDrawingCountAfterReload = savedDrawingCountAfterReload;
     result.loadedDrawingCountAfterReload = ready.loadedDrawingCount;
@@ -2669,9 +2709,15 @@ async function verifyReloadRestore(
       && result.runtimeSummaryMatchesSaved
       && result.chartReadyAfterReload
       && result.drawingEngineRequirementSatisfiedAfterReload
-      && result.drawingPerfHandleReadyAfterReload;
+      && result.drawingPerfHandleReadyAfterReload
+      && result.drawingEngineDomEvidenceAfterReload.passed;
     if (!result.passed) {
-      result.error = "Reload completed but persisted and restored drawing evidence did not match";
+      result.error = result.drawingEngineDomEvidenceAfterReload.passed
+        ? "Reload completed but persisted and restored drawing evidence did not match"
+        : formatDrawingEngineDomEvidenceFailure(
+            result.drawingEngineDomEvidenceAfterReload,
+            "Drawing performance reload",
+          );
     }
   } catch (error) {
     result.error = error.message;
@@ -2766,10 +2812,14 @@ async function runOneScenario(
   const networkStart = diagnostics.networkFailures.length;
   try {
     await ensureHeadedBenchmarkWindow(cdp, browserWindowId, args.headless);
-    await cdp.send("Page.navigate", {
-      url: args.url + (args.url.includes("?") ? "&" : "?")
-        + "drawingPerf=" + encodeURIComponent(scenario.id + "-" + iteration),
-    });
+    // Every iteration uses the same temporary browser profile and drawing
+    // scope. Clear both persistence authorities before navigation so the
+    // next-document bootstrap is the only fixture source. In particular, a
+    // canonical IDB record produced by a prior mutating run must not shadow
+    // the newly seeded legacy compatibility snapshot.
+    const scenarioUrl = args.url + (args.url.includes("?") ? "&" : "?")
+      + "drawingPerf=" + encodeURIComponent(scenario.id + "-" + iteration);
+    await navigateToDrawingPerformanceScenario(cdp, args.url, scenarioUrl);
     let ready = await waitForChartReady(
       cdp,
       fixture.metadata.drawingCount,
@@ -2793,6 +2843,13 @@ async function runOneScenario(
         args.timeoutMs,
         { requireDrawingEngine: true },
       );
+    }
+    const drawingEngineDomEvidence = await readDrawingEngineDomEvidence(cdp, args);
+    if (drawingEngineDomEvidence.required && !drawingEngineDomEvidence.passed) {
+      throw new Error(formatDrawingEngineDomEvidenceFailure(
+        drawingEngineDomEvidence,
+        "Drawing performance",
+      ));
     }
     const rect = await getChartRect(cdp);
     if (!rect || rect.width < 200 || rect.height < 120) {
@@ -3127,6 +3184,7 @@ async function runOneScenario(
       initialRestoredCount,
       initialSavedSummary,
       initialRuntimeSummary: ready.runtimeSummary,
+      drawingEngineDomEvidence,
       restore,
       action: actionEvidence,
       phase4Probe,
@@ -3330,6 +3388,19 @@ function applyRestoreValidity(report, args) {
     invalidScenarioIds,
     restoreChecksRequired: true,
   };
+}
+
+function buildDrawingEngineDomEvidenceAcceptance(report, args) {
+  const records = report.scenarios.flatMap((scenario) => (
+    (scenario.rawRuns || []).map((run) => ({
+      id: run?.id ?? `${scenario.id}:unknown-run`,
+      initial: run?.drawingEngineDomEvidence ?? null,
+      reload: run?.restore?.drawingEngineDomEvidenceAfterReload ?? null,
+    }))
+  ));
+  return summarizeDrawingEngineDomEvidenceAssessments(records, {
+    required: shouldRequireDrawingEngineDomEvidenceForPerformance(args),
+  });
 }
 
 function buildPhase0Acceptance(report, args) {
@@ -4192,6 +4263,10 @@ async function main() {
       phase6Eligible: !args.smoke,
     };
     applyRestoreValidity(report, args);
+    report.drawingEngineDomEvidenceAcceptance = buildDrawingEngineDomEvidenceAcceptance(
+      report,
+      args,
+    );
     report.executionAcceptance = {
       ...report.acceptance,
       failedScenarioIds: [...report.acceptance.failedScenarioIds],
@@ -4282,6 +4357,7 @@ async function main() {
       phase5Acceptance: report.phase5Acceptance,
       phase6Acceptance: report.phase6Acceptance,
       smokeAcceptance: report.smokeAcceptance,
+      drawingEngineDomEvidenceAcceptance: report.drawingEngineDomEvidenceAcceptance,
       invalidScenarios: report.acceptance.invalidScenarioIds,
       targetAssessment: Object.fromEntries(Object.entries(report.targetAssessment)
         .map(([id, value]) => [id, { passed: value.passed, failedCount: value.failedCount }])),

@@ -6,11 +6,15 @@ import {
   mergePendingActiveDrawingMove,
 } from "../drawingMoveBatch.js";
 import {
+  acquireDrawingExportInteractionPresentation,
   canApplyDrawingVisibilityToCurrentPrimitives,
   cancelFreehandPrimitiveOnSurface,
+  commitSavedDrawingAfterDynamicFrame,
   createDrawingExportVisibilityIntentGate,
   detachAndRemoveDrawingPrimitive,
   dynamicSelectionHandlesForSavedDrawing,
+  hitTestOverlayDrawingEntity,
+  isDrawingCoordinateCleanupBoundaryCurrent,
   resolveTopmostDrawingInteractionHit,
   runDrawingPointerTransientBarrier,
   runDrawingSurfaceDisposeBarrier,
@@ -20,6 +24,7 @@ import {
   canRecoverDrawingVisibleSceneInPlace,
   isDrawingVisibleScenePublicationReady,
   prepareDrawingMutationScope,
+  restorePrePresentationHiddenDrawingSceneRuntime,
 } from "../useDrawingPersistenceLifecycle.js";
 import type { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
 import type { DrawingPrimitiveHit } from "../drawingSelectionController.js";
@@ -127,6 +132,42 @@ test("scene hit ownership accepts freehand and highlighter compatibility proxies
   }
 });
 
+test("512-entity overlay hover misses do not materialize or scan the drawing document", () => {
+  const drawings = new Map<string, SavedDrawing>(Array.from({ length: 512 }, (_, index) => {
+    const id = `line-${index}`;
+    const drawing: SavedDrawing = {
+      type: "line" as const,
+      id,
+      dataPoints: [],
+    };
+    return [id, drawing] as const;
+  }));
+  let lookupCount = 0;
+  const getSavedDrawing = (id: string): SavedDrawing | null => {
+    lookupCount += 1;
+    return drawings.get(id) ?? null;
+  };
+
+  assert.equal(hitTestOverlayDrawingEntity(
+    240,
+    180,
+    () => null,
+    getSavedDrawing,
+  ), null);
+  assert.equal(lookupCount, 0);
+
+  const target = mustBeDefined(drawings.get("line-511"));
+  const hit = hitTestOverlayDrawingEntity(
+    240,
+    180,
+    () => ({ entityId: "line-511", kind: "line", zone: "body" }),
+    getSavedDrawing,
+  );
+  assert.strictEqual(hit?.saved, target);
+  assert.equal(hit?.id, "line-511");
+  assert.equal(lookupCount, 1);
+});
+
 test("pending pen moves retain every coalesced batch before one RAF", () => {
   const firstEvent = { altKey: false };
   const latestEvent = { altKey: true };
@@ -189,6 +230,34 @@ test("near-capacity capture drops an invalid tail before atomic coordinate captu
   );
   assert.deepEqual(limitFreehandCapturePositions(validPrefix, 0), []);
   assert.deepEqual(limitFreehandCapturePositions(validPrefix, -1), []);
+});
+
+test("coordinate cleanup ignores rerenders until the real surface boundary changes", () => {
+  const boundary = {
+    drawingCoordinateKey: "binance:BTCUSDT:1h:time",
+    seriesReady: 2,
+  } as const;
+
+  assert.equal(isDrawingCoordinateCleanupBoundaryCurrent(
+    boundary,
+    boundary.drawingCoordinateKey,
+    boundary.seriesReady,
+  ), true);
+  assert.equal(isDrawingCoordinateCleanupBoundaryCurrent(
+    boundary,
+    "binance:BTCUSDT:4h:time",
+    boundary.seriesReady,
+  ), false);
+  assert.equal(isDrawingCoordinateCleanupBoundaryCurrent(
+    boundary,
+    boundary.drawingCoordinateKey,
+    boundary.seriesReady + 1,
+  ), false);
+  assert.equal(isDrawingCoordinateCleanupBoundaryCurrent(
+    null,
+    boundary.drawingCoordinateKey,
+    boundary.seriesReady,
+  ), false);
 });
 
 test("failed surface detach preserves the primitive registry for document retry", () => {
@@ -414,6 +483,73 @@ test("stale scope may be hidden but cannot be made visible", () => {
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(true, false), true);
 });
 
+test("pre-presentation export failure preserves a newer visible intent and active runtime", () => {
+  let currentlyHidden = true;
+  let runtimeActive = true;
+  let suspendCount = 0;
+
+  // The export started globally hidden and temporarily activated an exact
+  // empty scene. Before its exact wait failed, the user requested show.
+  currentlyHidden = false;
+  const cleanupOwned = restorePrePresentationHiddenDrawingSceneRuntime(
+    true,
+    currentlyHidden,
+    false,
+    () => {
+      currentlyHidden = true;
+      runtimeActive = false;
+      suspendCount += 1;
+    },
+  );
+
+  assert.equal(cleanupOwned, false);
+  assert.equal(currentlyHidden, false);
+  assert.equal(runtimeActive, true);
+  assert.equal(suspendCount, 0);
+});
+
+test("export presentation acquisition owns and rolls back synchronous clear failures", () => {
+  const gate = createDrawingExportVisibilityIntentGate();
+  const setupError = new Error("clear presentation failed");
+  const order: string[] = [];
+  let selected = true;
+  let hidden = true;
+
+  assert.throws(() => acquireDrawingExportInteractionPresentation({
+    beginVisibilityLease() {
+      order.push("begin");
+      gate.begin();
+    },
+    clearPresentation() {
+      assert.equal(gate.isLocked(), true);
+      order.push("clear");
+      selected = false;
+      assert.equal(gate.request(false), false);
+      throw setupError;
+    },
+    rollbackFailedAcquisition() {
+      order.push("rollback");
+      gate.restore({
+        restoreCapturePresentation() {},
+        restoreInteraction() {
+          selected = true;
+        },
+        applyPendingIntent(nextHidden) {
+          hidden = nextHidden;
+        },
+      });
+    },
+    restoreInteraction() {
+      order.push("unexpected-lease-restore");
+    },
+  }), (error: unknown) => error === setupError);
+
+  assert.deepEqual(order, ["begin", "clear", "rollback"]);
+  assert.equal(selected, true);
+  assert.equal(hidden, false);
+  assert.equal(gate.isLocked(), false);
+});
+
 test("export visibility lease restores capture state before applying latest queued intent", () => {
   const gate = createDrawingExportVisibilityIntentGate();
   const order: string[] = [];
@@ -510,9 +646,149 @@ test("dynamic selection handles expose only real per-kind drag affordances", () 
   ]);
   assert.deepEqual(positionHandles.slice(-2).map((handle) => handle.point.x), [10, 30]);
 
+  const foldedSceneHandles = [
+    { x: 50, y: 50 },
+    { x: 50, y: 10 },
+    { x: 50, y: 70 },
+    { x: 38, y: 40 },
+    { x: 62, y: 40 },
+  ];
+  const foldedPositionHandles = dynamicSelectionHandlesForSavedDrawing(
+    position,
+    () => ({ x: 50, y: 40 }),
+    null,
+    foldedSceneHandles,
+  );
+  assert.deepEqual(
+    foldedPositionHandles.map((handle) => [handle.hit.zone, handle.point.x, handle.point.y]),
+    [
+      ["entry", 50, 50],
+      ["tp", 50, 10],
+      ["sl", 50, 70],
+      ["left", 38, 40],
+      ["right", 62, 40],
+    ],
+  );
+
   const freehand: SavedDrawing = {
     type: "freehand",
     dataPoints: [{ time: 10, price: 10 }, { time: 20, price: 20 }],
   };
   assert.deepEqual(dynamicSelectionHandlesForSavedDrawing(freehand, project), []);
+});
+
+test("position creation paints its complete dynamic handoff frame before document commit", () => {
+  const position: SavedDrawing = {
+    id: "position-handoff",
+    type: "position",
+    direction: "long",
+    entryPrice: 100,
+    tpPrice: 120,
+    slPrice: 90,
+    timeRange: { start: 10, end: 30 },
+  };
+  const project: DrawingDataToScreen = (dataPoint) => (
+    typeof dataPoint.time === "number"
+      ? { x: dataPoint.time, y: dataPoint.price }
+      : null
+  );
+  const order: string[] = [];
+  const receipt = { committed: true, ticket: { documentRevision: 2 } } as const;
+  const themePalette = { upColor: "#00aa11", downColor: "#dd0022" } as const;
+
+  const result = commitSavedDrawingAfterDynamicFrame(
+    position,
+    project,
+    (decorations) => {
+      order.push("dynamic");
+      assert.equal(decorations.length, 3);
+      assert.deepEqual(decorations.map((decoration) => decoration.type), [
+        "line", "line", "line",
+      ]);
+      assert.deepEqual(decorations.map((decoration) => (
+        decoration.type === "line" ? decoration.color : null
+      )), ["#3b82f6", themePalette.upColor, themePalette.downColor]);
+    },
+    () => {
+      assert.deepEqual(order, ["dynamic"]);
+      order.push("commit");
+      return receipt;
+    },
+    themePalette,
+  );
+
+  assert.strictEqual(result, receipt);
+  assert.deepEqual(order, ["dynamic", "commit"]);
+});
+
+test("short-position dynamic levels follow the static scene price-direction palette", () => {
+  const position: SavedDrawing = {
+    id: "short-position-theme",
+    type: "position",
+    direction: "short",
+    entryPrice: 100,
+    tpPrice: 80,
+    slPrice: 110,
+    timeRange: { start: 10, end: 30 },
+  };
+  const project: DrawingDataToScreen = (dataPoint) => (
+    typeof dataPoint.time === "number"
+      ? { x: dataPoint.time, y: dataPoint.price }
+      : null
+  );
+  const themePalette = { upColor: "#00aa11", downColor: "#dd0022" } as const;
+
+  commitSavedDrawingAfterDynamicFrame(
+    position,
+    project,
+    (decorations) => {
+      assert.deepEqual(decorations.map((decoration) => (
+        decoration.type === "line" ? decoration.color : null
+      )), ["#3b82f6", themePalette.downColor, themePalette.upColor]);
+    },
+    () => undefined,
+    themePalette,
+  );
+});
+
+test("two-point final click paints the exact endpoint before document commit", () => {
+  const finalDrawing: SavedDrawing = {
+    id: "line-final-click",
+    type: "line",
+    lineType: "line-ray",
+    color: "#123456",
+    lineWidth: 3,
+    dataPoints: [
+      { time: 10, price: 20 },
+      { time: 47, price: 83 },
+    ],
+  };
+  const project: DrawingDataToScreen = (dataPoint) => (
+    typeof dataPoint.time === "number"
+      ? { x: dataPoint.time, y: dataPoint.price }
+      : null
+  );
+  const order: string[] = [];
+  let paintedEndpoint: ScreenPoint = { x: 35, y: 70 };
+
+  commitSavedDrawingAfterDynamicFrame(
+    finalDrawing,
+    project,
+    (decorations) => {
+      order.push("dynamic");
+      const line = decorations[0];
+      assert.equal(line?.type, "line");
+      if (line?.type !== "line") return;
+      paintedEndpoint = line.to;
+      assert.equal(line.extension, "line-ray");
+      assert.deepEqual(paintedEndpoint, { x: 47, y: 83 });
+    },
+    () => {
+      assert.deepEqual(order, ["dynamic"]);
+      assert.deepEqual(paintedEndpoint, { x: 47, y: 83 });
+      order.push("commit");
+    },
+  );
+
+  assert.deepEqual(order, ["dynamic", "commit"]);
 });

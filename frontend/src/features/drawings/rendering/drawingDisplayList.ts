@@ -55,6 +55,95 @@ export type DrawingDisplayRenderSpec =
       anchorPointOffset: number | null;
     }>
   | Readonly<{
+      op: "angle";
+      strokeColor: string;
+      selectionHighlightColor: string;
+      lineWidthCssPx: number;
+      selected: boolean;
+      rayPointOffset: number;
+      baselinePointOffset: number;
+      arcPointOffset: number;
+      arcPointCount: number;
+      labelBoxPointOffset: number;
+      labelText: string;
+    }>
+  | Readonly<{
+      op: "fibonacci";
+      strokeColor: string;
+      selectionHighlightColor: string;
+      lineWidthCssPx: number;
+      selected: boolean;
+      trendPointOffset: number;
+      startPrice: number;
+      endPrice: number;
+      levelLines: readonly Readonly<{
+        color: string;
+        level: number;
+        logicalPrice: number;
+        pointOffset: number;
+      }>[];
+    }>
+  | Readonly<{
+      op: "text";
+      strokeColor: string;
+      lineWidthCssPx: number;
+      selected: boolean;
+      boxPointOffset: number;
+      lines: readonly Readonly<{
+        text: string;
+        widthCssPx: number;
+      }>[];
+      textColor: string;
+      fontSizeCssPx: number;
+      fontFamily: string;
+      bold: boolean;
+      italic: boolean;
+      underline: boolean;
+      align: "left" | "center" | "right";
+      backgroundColor: string | null;
+      borderColor: string | null;
+      borderWidthCssPx: number;
+      paddingCssPx: number;
+      lineHeightCssPx: number;
+      selectionColor: string;
+    }>
+  | Readonly<{
+      op: "position";
+      strokeColor: string;
+      lineWidthCssPx: number;
+      selected: boolean;
+      entryLinePointOffset: number;
+      entryColor: string;
+      upColor: string;
+      downColor: string;
+      direction: "long" | "short";
+      tpLevel: Readonly<{
+        linePointOffset: number;
+        bodyPointOffset: number;
+        priceText: string;
+        percentText: string;
+        pnlText: string | null;
+        color: string;
+      }> | null;
+      slLevel: Readonly<{
+        linePointOffset: number;
+        bodyPointOffset: number;
+        priceText: string;
+        percentText: string;
+        pnlText: string | null;
+        color: string;
+      }> | null;
+      panelBoxPointOffset: number;
+      panelLines: readonly Readonly<{
+        label: string;
+        value: string;
+        extra: string | null;
+        color: string;
+      }>[];
+      badgeText: "LONG" | "SHORT";
+      badgeColor: string;
+    }>
+  | Readonly<{
       op: "shape";
       shapeType: ShapeType;
       strokeColor: string;
@@ -306,16 +395,21 @@ export function drawingDisplayEntityScreenBox(
   if (entityIndex < 0) return null;
   const entity = list.entities[entityIndex];
   if (!entity) return null;
-  if (entity.kind === "shape" && entity.renderSpec?.op === "shape") {
+  const rawBoxPointOffset = entity.kind === "shape" && entity.renderSpec?.op === "shape"
+    ? entity.renderSpec.boxPointOffset
+    : entity.kind === "text" && entity.renderSpec?.op === "text"
+      ? entity.renderSpec.boxPointOffset
+      : null;
+  if (rawBoxPointOffset !== null) {
     // The broad-phase bbox is pane-clipped. Resize must instead retain both
     // raw projected corners so moving one side cannot snap its offscreen peer.
     const first = pointAt(
       list.points,
-      entity.pointOffset + entity.renderSpec.boxPointOffset,
+      entity.pointOffset + rawBoxPointOffset,
     );
     const second = pointAt(
       list.points,
-      entity.pointOffset + entity.renderSpec.boxPointOffset + 1,
+      entity.pointOffset + rawBoxPointOffset + 1,
     );
     if (!first || !second) return null;
     const minX = Math.min(first[0], second[0]);
@@ -398,6 +492,63 @@ function validHitResult(value: unknown): value is Readonly<DrawingHit> {
       || hit.body !== undefined);
 }
 
+function unknownRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object"
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function validFibonacciLevelLines(value: unknown, pointCount: number): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.every((candidate: unknown) => {
+    const level = unknownRecord(candidate);
+    if (!level) return false;
+    const color = level.color;
+    const ratio = level.level;
+    const logicalPrice = level.logicalPrice;
+    const pointOffset = level.pointOffset;
+    return typeof color === "string"
+      && typeof ratio === "number"
+      && Number.isFinite(ratio)
+      && typeof logicalPrice === "number"
+      && Number.isFinite(logicalPrice)
+      && typeof pointOffset === "number"
+      && Number.isSafeInteger(pointOffset)
+      && pointOffset >= 0
+      && pointOffset + 2 <= pointCount;
+  });
+}
+
+function validTextRenderLines(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.every((candidate: unknown) => {
+    const line = unknownRecord(candidate);
+    if (!line) return false;
+    const text = line.text;
+    const widthCssPx = line.widthCssPx;
+    return typeof text === "string"
+      && typeof widthCssPx === "number"
+      && Number.isFinite(widthCssPx)
+      && widthCssPx >= 0;
+  });
+}
+
+function validPositionPanelLines(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.every((candidate: unknown) => {
+    const line = unknownRecord(candidate);
+    if (!line) return false;
+    const label = line.label;
+    const lineValue = line.value;
+    const extra = line.extra;
+    const color = line.color;
+    return typeof label === "string"
+      && typeof lineValue === "string"
+      && (extra === null || typeof extra === "string")
+      && typeof color === "string";
+  });
+}
+
 function validRenderSpec(
   entity: ProjectedDrawingEntity,
   spec: DrawingDisplayRenderSpec | undefined,
@@ -431,6 +582,89 @@ function validRenderSpec(
         || (Number.isSafeInteger(spec.anchorPointOffset)
           && spec.anchorPointOffset >= spec.segmentCount * 2
           && (spec.anchorPointOffset + 1) * 2 <= entity.points.length));
+  }
+  if (spec.op === "angle") {
+    const pointCount = entity.points.length / 2;
+    return entity.kind === "angle-measure"
+      && typeof spec.selectionHighlightColor === "string"
+      && typeof spec.labelText === "string"
+      && Number.isSafeInteger(spec.rayPointOffset)
+      && spec.rayPointOffset >= 0
+      && spec.rayPointOffset + 2 <= pointCount
+      && Number.isSafeInteger(spec.baselinePointOffset)
+      && spec.baselinePointOffset >= 0
+      && spec.baselinePointOffset + 2 <= pointCount
+      && Number.isSafeInteger(spec.arcPointOffset)
+      && spec.arcPointOffset >= 0
+      && Number.isSafeInteger(spec.arcPointCount)
+      && spec.arcPointCount >= 2
+      && spec.arcPointOffset + spec.arcPointCount <= pointCount
+      && Number.isSafeInteger(spec.labelBoxPointOffset)
+      && spec.labelBoxPointOffset >= 0
+      && spec.labelBoxPointOffset + 2 <= pointCount;
+  }
+  if (spec.op === "fibonacci") {
+    const pointCount = entity.points.length / 2;
+    return entity.kind === "fibonacci"
+      && typeof spec.selectionHighlightColor === "string"
+      && Number.isSafeInteger(spec.trendPointOffset)
+      && spec.trendPointOffset >= 0
+      && spec.trendPointOffset + 2 <= pointCount
+      && Number.isFinite(spec.startPrice)
+      && Number.isFinite(spec.endPrice)
+      && validFibonacciLevelLines(spec.levelLines, pointCount);
+  }
+  if (spec.op === "text") {
+    const pointCount = entity.points.length / 2;
+    return entity.kind === "text"
+      && Number.isSafeInteger(spec.boxPointOffset)
+      && spec.boxPointOffset >= 0
+      && spec.boxPointOffset + 2 <= pointCount
+      && validTextRenderLines(spec.lines)
+      && typeof spec.textColor === "string"
+      && Number.isFinite(spec.fontSizeCssPx)
+      && spec.fontSizeCssPx > 0
+      && typeof spec.fontFamily === "string"
+      && spec.fontFamily.length > 0
+      && typeof spec.bold === "boolean"
+      && typeof spec.italic === "boolean"
+      && typeof spec.underline === "boolean"
+      && (spec.align === "left" || spec.align === "center" || spec.align === "right")
+      && (spec.backgroundColor === null || typeof spec.backgroundColor === "string")
+      && (spec.borderColor === null || typeof spec.borderColor === "string")
+      && Number.isFinite(spec.borderWidthCssPx)
+      && spec.borderWidthCssPx >= 0
+      && Number.isFinite(spec.paddingCssPx)
+      && spec.paddingCssPx >= 0
+      && Number.isFinite(spec.lineHeightCssPx)
+      && spec.lineHeightCssPx > 0
+      && typeof spec.selectionColor === "string";
+  }
+  if (spec.op === "position") {
+    const pointCount = entity.points.length / 2;
+    const validPairOffset = (offset: number): boolean => Number.isSafeInteger(offset)
+      && offset >= 0
+      && offset + 2 <= pointCount;
+    const validLevel = (level: typeof spec.tpLevel): boolean => level === null || (
+      validPairOffset(level.linePointOffset)
+      && validPairOffset(level.bodyPointOffset)
+      && typeof level.priceText === "string"
+      && typeof level.percentText === "string"
+      && (level.pnlText === null || typeof level.pnlText === "string")
+      && typeof level.color === "string"
+    );
+    return entity.kind === "position"
+      && validPairOffset(spec.entryLinePointOffset)
+      && typeof spec.entryColor === "string"
+      && typeof spec.upColor === "string"
+      && typeof spec.downColor === "string"
+      && (spec.direction === "long" || spec.direction === "short")
+      && validLevel(spec.tpLevel)
+      && validLevel(spec.slLevel)
+      && validPairOffset(spec.panelBoxPointOffset)
+      && validPositionPanelLines(spec.panelLines)
+      && (spec.badgeText === "LONG" || spec.badgeText === "SHORT")
+      && typeof spec.badgeColor === "string";
   }
   if (spec.op === "shape") {
     return entity.kind === "shape"
@@ -530,6 +764,30 @@ function copyInto(target: Float64Array, offset: number, source: Float64Array): v
   target.set(source, offset);
 }
 
+function freezeRenderSpec(spec: DrawingDisplayRenderSpec): DrawingDisplayRenderSpec {
+  if (spec.op === "fibonacci") {
+    return Object.freeze({
+      ...spec,
+      levelLines: Object.freeze(spec.levelLines.map((level) => Object.freeze({ ...level }))),
+    });
+  }
+  if (spec.op === "text") {
+    return Object.freeze({
+      ...spec,
+      lines: Object.freeze(spec.lines.map((line) => Object.freeze({ ...line }))),
+    });
+  }
+  if (spec.op === "position") {
+    return Object.freeze({
+      ...spec,
+      tpLevel: spec.tpLevel ? Object.freeze({ ...spec.tpLevel }) : null,
+      slLevel: spec.slLevel ? Object.freeze({ ...spec.slLevel }) : null,
+      panelLines: Object.freeze(spec.panelLines.map((line) => Object.freeze({ ...line }))),
+    });
+  }
+  return Object.freeze({ ...spec });
+}
+
 /** Build one compact, copy-owned screen display list in document z-order. */
 export function createDrawingScreenDisplayList(
   stamp: DrawingRenderRevisionStamp,
@@ -604,7 +862,7 @@ export function createDrawingScreenDisplayList(
       geometryRevision: entity.geometryRevision,
       styleRevision: entity.styleRevision,
       style: entity.style,
-      renderSpec: entity.renderSpec ? Object.freeze({ ...entity.renderSpec }) : null,
+      renderSpec: entity.renderSpec ? freezeRenderSpec(entity.renderSpec) : null,
       pointOffset,
       pointCount,
       handleOffset,

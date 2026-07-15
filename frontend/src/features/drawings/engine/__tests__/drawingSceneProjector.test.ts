@@ -360,11 +360,11 @@ test("projects all nine kinds in canonical document z-order with typed geometry"
   ]);
   assert.equal(list.points instanceof Float64Array, true);
   assert.equal(list.entities.every((entity, index) => Number.isFinite(list.bboxes[index * 4])), true);
-  assert.deepEqual(list.entities.map((entity) => entity.handleCount), [8, 2, 2, 1, 8, 2, 2, 0, 0]);
+  assert.deepEqual(list.entities.map((entity) => entity.handleCount), [8, 2, 5, 1, 8, 2, 2, 0, 0]);
   assert.equal(adapter.spanInputs.length, 1);
   assert.equal(list.entities.find((entity) => entity.id === "axis")?.unboundedAxis, "horizontal");
   assert.deepEqual(list.entities.map((entity) => entity.renderSpec?.op ?? null), [
-    "shape", "line", null, "axis-line", null, null, null, "freehand", "freehand",
+    "shape", "line", "position", "axis-line", "text", "angle", "fibonacci", "freehand", "freehand",
   ]);
   assert.equal(list.entities.find((entity) => entity.id === "shape")?.renderSpec?.selected, true);
   assert.equal(list.entities.find((entity) => entity.id === "line")?.renderSpec?.selected, false);
@@ -827,6 +827,270 @@ test("selected shape handles retain edge-only paint while ordinary outside shape
   assert.ok(list);
   assert.deepEqual(list.entities.map((entity) => entity.id), [selectedShape.id]);
   assert.ok(Number(list.bboxes[2]) > 0);
+});
+
+test("fibonacci level labels retain edge paint while fully offscreen labels cull", () => {
+  const edge = createDrawingEntity({
+    id: "fibonacci-label-edge",
+    kind: "fibonacci",
+    geometry: {
+      kind: "fibonacci",
+      dataPoints: [{ time: -10, price: 30 }, { time: -1, price: 70 }],
+      inverted: false,
+    },
+    style: {
+      kind: "fibonacci",
+      lineWidth: 2,
+      levels: [{ level: 0.5, color: "#0af", enabled: true }],
+    },
+  });
+  const far = createDrawingEntity({
+    id: "fibonacci-label-far",
+    kind: "fibonacci",
+    geometry: {
+      kind: "fibonacci",
+      dataPoints: [{ time: -200, price: 30 }, { time: -180, price: 70 }],
+      inverted: false,
+    },
+    style: {
+      kind: "fibonacci",
+      lineWidth: 2,
+      levels: [{ level: 0.5, color: "#0af", enabled: true }],
+    },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "fibonacci-label-culling",
+    entities: [edge, far],
+  });
+  const list = project(document, createFrame({ width: 100, height: 100 }), createAdapter());
+
+  assert.ok(list);
+  assert.deepEqual(list.entities.map((entity) => entity.id), [edge.id]);
+  assert.equal(Number(list.bboxes[0]), 0);
+  assert.ok(Number(list.bboxes[2]) > 0);
+});
+
+test("position direction and price badges participate in edge culling", () => {
+  const directionEdge = createDrawingEntity({
+    id: "position-direction-edge",
+    kind: "position",
+    geometry: {
+      kind: "position",
+      direction: "long",
+      entryPrice: 50,
+      tpPrice: null,
+      slPrice: null,
+      timeRange: { start: { time: -40 }, end: { time: -30 } },
+    },
+    style: { kind: "position", infoPanelOffset: { x: 0, y: 0 } },
+  });
+  const directionFar = createDrawingEntity({
+    id: "position-direction-far",
+    kind: "position",
+    geometry: {
+      kind: "position",
+      direction: "long",
+      entryPrice: 50,
+      tpPrice: null,
+      slPrice: null,
+      timeRange: { start: { time: -240 }, end: { time: -230 } },
+    },
+    style: { kind: "position", infoPanelOffset: { x: 0, y: 0 } },
+  });
+  const priceEdge = createDrawingEntity({
+    id: "position-price-edge",
+    kind: "position",
+    geometry: {
+      kind: "position",
+      direction: "long",
+      entryPrice: 50,
+      tpPrice: 70,
+      slPrice: null,
+      timeRange: { start: { time: -100 }, end: { time: -12 } },
+    },
+    style: { kind: "position", infoPanelOffset: { x: 0, y: 0 } },
+  });
+  const priceFar = createDrawingEntity({
+    id: "position-price-far",
+    kind: "position",
+    geometry: {
+      kind: "position",
+      direction: "long",
+      entryPrice: 50,
+      tpPrice: 70,
+      slPrice: null,
+      timeRange: { start: { time: -250 }, end: { time: -150 } },
+    },
+    style: { kind: "position", infoPanelOffset: { x: 0, y: 0 } },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "position-badge-culling",
+    entities: [directionEdge, directionFar, priceEdge, priceFar],
+  });
+  const list = project(document, createFrame({ width: 100, height: 100 }), createAdapter());
+
+  assert.ok(list);
+  assert.deepEqual(list.entities.map((entity) => entity.id), [directionEdge.id, priceEdge.id]);
+});
+
+test("new scene selection handles retain edge-only paint for angle, fibonacci, and text", () => {
+  const angle = createDrawingEntity({
+    id: "selected-angle-edge",
+    kind: "angle-measure",
+    geometry: {
+      kind: "angle-measure",
+      dataPoints: [{ time: -9, price: 50 }, { time: -20, price: 50 }],
+    },
+    style: { kind: "angle-measure", lineWidth: 2 },
+  });
+  const fibonacci = createDrawingEntity({
+    id: "selected-fibonacci-edge",
+    kind: "fibonacci",
+    geometry: {
+      kind: "fibonacci",
+      dataPoints: [{ time: -20, price: 40 }, { time: -9, price: 60 }],
+      inverted: false,
+    },
+    style: { kind: "fibonacci", lineWidth: 2, levels: [] },
+  });
+  const text = createDrawingEntity({
+    id: "selected-text-edge",
+    kind: "text",
+    geometry: { kind: "text", dataPoint: { time: -8, price: 50 } },
+    style: {
+      kind: "text",
+      text: "x",
+      fontSize: 10,
+      widthPx: 4,
+      padding: 0,
+      borderColor: null,
+      borderWidth: 0,
+    },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "new-scene-selection-edge",
+    entities: [angle, fibonacci, text],
+  });
+  const frame = createFrame({ width: 100, height: 100 });
+  const nodes = registryNodes(document);
+
+  for (const selected of [angle, fibonacci, text]) {
+    const list = project(document, frame, createAdapter(), nodes, selected.id);
+    assert.ok(list);
+    assert.deepEqual(list.entities.map((entity) => entity.id), [selected.id]);
+    assert.ok(Number(list.bboxes[2]) > 0);
+  }
+});
+
+test("selected angle and fibonacci halos retain imported 100px edge paint without keeping offscreen paint", () => {
+  const angleEdge = createDrawingEntity({
+    id: "selected-angle-wide-edge",
+    kind: "angle-measure",
+    geometry: {
+      kind: "angle-measure",
+      dataPoints: [{ time: 20, price: -54 }, { time: 80, price: -94 }],
+    },
+    style: { kind: "angle-measure", lineWidth: 100 },
+  });
+  const angleFar = createDrawingEntity({
+    id: "selected-angle-wide-far",
+    kind: "angle-measure",
+    geometry: {
+      kind: "angle-measure",
+      dataPoints: [{ time: 20, price: -56 }, { time: 80, price: -96 }],
+    },
+    style: { kind: "angle-measure", lineWidth: 100 },
+  });
+  const fibonacciEdge = createDrawingEntity({
+    id: "selected-fibonacci-wide-edge",
+    kind: "fibonacci",
+    geometry: {
+      kind: "fibonacci",
+      dataPoints: [{ time: 20, price: -55 }, { time: 80, price: -95 }],
+      inverted: false,
+    },
+    style: { kind: "fibonacci", lineWidth: 100, levels: [] },
+  });
+  const fibonacciFar = createDrawingEntity({
+    id: "selected-fibonacci-wide-far",
+    kind: "fibonacci",
+    geometry: {
+      kind: "fibonacci",
+      dataPoints: [{ time: 20, price: -57 }, { time: 80, price: -97 }],
+      inverted: false,
+    },
+    style: { kind: "fibonacci", lineWidth: 100, levels: [] },
+  });
+  const frame = createFrame({ width: 100, height: 100 });
+
+  for (const [scopeKey, edge, far] of [
+    ["selected-angle-wide-culling", angleEdge, angleFar],
+    ["selected-fibonacci-wide-culling", fibonacciEdge, fibonacciFar],
+  ] as const) {
+    const edgeDocument = createDrawingDocument({ scopeKey: `${scopeKey}:edge`, entities: [edge] });
+    const edgeList = project(
+      edgeDocument,
+      frame,
+      createAdapter(),
+      undefined,
+      edge.id,
+    );
+    assert.ok(edgeList);
+    assert.deepEqual(edgeList.entities.map((entity) => entity.id), [edge.id]);
+    assert.equal(edgeList.entities[0]?.renderSpec?.lineWidthCssPx, 100);
+    assert.equal(Number(edgeList.bboxes[1]), 0);
+    assert.ok(Number(edgeList.bboxes[3]) > 0, `${edge.id} halo must enter the pane`);
+
+    const farDocument = createDrawingDocument({ scopeKey: `${scopeKey}:far`, entities: [far] });
+    const farList = project(
+      farDocument,
+      frame,
+      createAdapter(),
+      undefined,
+      far.id,
+    );
+    assert.ok(farList);
+    assert.deepEqual(farList.entities, []);
+  }
+});
+
+test("position panel shadow retains edge paint without keeping a farther panel", () => {
+  const shadowEdge = createDrawingEntity({
+    id: "position-panel-shadow-edge",
+    kind: "position",
+    geometry: {
+      kind: "position",
+      direction: "long",
+      entryPrice: 50,
+      tpPrice: null,
+      slPrice: null,
+      timeRange: { start: { time: 200 }, end: { time: 224 } },
+    },
+    style: { kind: "position", infoPanelOffset: { x: -35, y: 0 } },
+  });
+  const shadowFar = createDrawingEntity({
+    id: "position-panel-shadow-far",
+    kind: "position",
+    geometry: {
+      kind: "position",
+      direction: "long",
+      entryPrice: 50,
+      tpPrice: null,
+      slPrice: null,
+      timeRange: { start: { time: 200 }, end: { time: 224 } },
+    },
+    style: { kind: "position", infoPanelOffset: { x: -30, y: 0 } },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "position-panel-shadow-culling",
+    entities: [shadowEdge, shadowFar],
+  });
+  const list = project(document, createFrame({ width: 100, height: 100 }), createAdapter());
+
+  assert.ok(list);
+  assert.deepEqual(list.entities.map((entity) => entity.id), [shadowEdge.id]);
+  assert.ok(Number(list.bboxes[0]) < 100);
+  assert.equal(Number(list.bboxes[2]), 100);
 });
 
 test("axis lines preserve independently resolvable horizontal and vertical coordinates", () => {
@@ -2556,7 +2820,7 @@ test("projected zones return exact legacy endpoint, body, and selected-handle hi
   assert.equal(hitTestDrawingScreenDisplayList(ellipseList, 20, 20), null);
 });
 
-test("position panel measures the legacy current-price and PnL lines from the atomic frame", () => {
+test("position panel and badges measure current-price and PnL text from the atomic frame", () => {
   const position = createDrawingEntity({
     id: "position-panel",
     kind: "position",
@@ -2593,7 +2857,9 @@ test("position panel measures the legacy current-price and PnL lines from the at
     "现价: 70.0000 (+16.67%) +166.67",
     "盈亏比: 1 : 1.00",
     "仓位: $1000",
+    "80.0000  +33.33%  +333.33",
+    "40.0000  -33.33%  -333.33",
   ]);
-  assert.deepEqual([...list.handles], [40, 60, 80, 60]);
-  assert.deepEqual(list.entities[0]?.handleNames, ["left", "right"]);
+  assert.deepEqual([...list.handles], [60, 60, 60, 80, 60, 40, 40, 60, 80, 60]);
+  assert.deepEqual(list.entities[0]?.handleNames, ["entry", "tp", "sl", "left", "right"]);
 });

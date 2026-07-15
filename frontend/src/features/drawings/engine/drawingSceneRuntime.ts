@@ -700,6 +700,7 @@ export function createDrawingSceneRuntime({
   let rawPointCount = 0;
   let renderedPointCount = 0;
   let sceneEpoch = 0;
+  let observedCoordinateKey: string | null = null;
   let disposed = false;
   let faulted = false;
   let recoveryPublicationPending = false;
@@ -1021,6 +1022,46 @@ export function createDrawingSceneRuntime({
     pendingParityPlan = null;
   };
 
+  /**
+   * A coordinate-key transition invalidates every screen-space artifact even
+   * though the canonical document and surface binding remain valid. Retire the
+   * public plan synchronously so neither paint nor hit testing can observe the
+   * previous coordinate system while the replacement frame is still queued.
+   */
+  const invalidateChangedCoordinateSpace = (frame: DrawingFrameSnapshot): boolean => {
+    const nextCoordinateKey = frame.coordinateKey;
+    if (observedCoordinateKey === null) {
+      observedCoordinateKey = nextCoordinateKey;
+      return false;
+    }
+    if (observedCoordinateKey === nextCoordinateKey) return false;
+    observedCoordinateKey = nextCoordinateKey;
+
+    // Advance before calling the visible sink. Any already-delivered worker
+    // callback or prepared plan is stale before old pixels are cleared.
+    sceneEpoch = nextSceneEpoch();
+    clearParityDelay();
+    clearParityWork();
+    if (binding) clearDrawingSceneProjectorCaches(binding.adapter);
+    latestPlan = null;
+    latestHitIndex = null;
+    latestPublishedPlan = null;
+    pendingExactPaintStamp = null;
+    lastExactSettleMs = null;
+    lastExactPaintEvidence = null;
+    lastWorkerRequestedStamp = null;
+    lastWorkerPublishedStamp = null;
+    workerRequestedAt.clear();
+    workerPlans.clear();
+    rawPointCount = 0;
+    renderedPointCount = 0;
+    drawingPerfCounters.setGauge("rawPoints", 0);
+    drawingPerfCounters.setGauge("renderedPoints", 0);
+    drawingPerfCounters.setGauge("lodRatio", 0);
+    if (mode === "scene-canary") binding?.clearScene?.();
+    return true;
+  };
+
   const runParityWork = (): void => {
     parityWorkHandle = null;
     const plan = pendingParityPlan;
@@ -1088,6 +1129,7 @@ export function createDrawingSceneRuntime({
       onSkipped?.("drawing-frame-unavailable");
       return null;
     }
+    invalidateChangedCoordinateSpace(frame);
     return Object.freeze({
       adapter: binding.adapter,
       binding,
@@ -1416,7 +1458,11 @@ export function createDrawingSceneRuntime({
       invalidateScene("document");
     });
     unsubscribeFrame = nextBinding.adapter.subscribeDrawingFrameInvalidation((reason = "manual") => {
-      if (mode === "scene-canary" && latestOwnedEntityCount === 0) return;
+      const currentFrame = nextBinding.adapter.captureDrawingFrame();
+      const coordinateSpaceChanged = currentFrame !== null
+        && nextBinding.adapter.isDrawingFrameCurrent(currentFrame)
+        && invalidateChangedCoordinateSpace(currentFrame);
+      if (mode === "scene-canary" && latestOwnedEntityCount === 0 && !coordinateSpaceChanged) return;
       if (reason === "viewport") {
         lodToleranceClass = "continuousViewport";
         exactRequestedAt = now();
@@ -1428,7 +1474,8 @@ export function createDrawingSceneRuntime({
         pendingExactPaintStamp = null;
         clearExactDelay();
       }
-      invalidateScene(`frame:${reason}`);
+      if (coordinateSpaceChanged) scheduler.invalidate(`frame:${reason}`);
+      else invalidateScene(`frame:${reason}`);
     });
   };
 
@@ -1479,6 +1526,7 @@ export function createDrawingSceneRuntime({
       recoveryPublicationPending = false;
       binding = nextBinding;
       registry = createDrawingSceneRegistry(scopeKey);
+      observedCoordinateKey = null;
       latestPlan = null;
       latestHitIndex = null;
       latestPublishedPlan = null;
@@ -1626,6 +1674,7 @@ export function createDrawingSceneRuntime({
       disposeWorkerClient();
       binding = null;
       registry = null;
+      observedCoordinateKey = null;
       faulted = false;
       recoveryPublicationPending = false;
       latestPlan = null;

@@ -12,6 +12,20 @@ import {
 } from "./overlayCanvasSurface.js";
 import type { DrawingOverlayPlotRect } from "./overlayCanvasSurface.js";
 
+export type DynamicAngleOverlayDecoration = Readonly<{
+  type: "angle";
+  ray: readonly [ScreenPoint, ScreenPoint];
+  baseline: readonly [ScreenPoint, ScreenPoint];
+  arcPoints: readonly ScreenPoint[];
+  label: Readonly<{
+    center: ScreenPoint;
+    text: string;
+  }>;
+  color: string;
+  lineWidth: number;
+  selected: boolean;
+}>;
+
 export type DynamicOverlayDecoration =
   | Readonly<{
       type: "box";
@@ -30,6 +44,7 @@ export type DynamicOverlayDecoration =
       extension?: BasicLineToolId;
       handles?: readonly ScreenPoint[];
     }>
+  | DynamicAngleOverlayDecoration
   | Readonly<{
       type: "axis-line";
       point: ScreenPoint;
@@ -98,8 +113,147 @@ function defaultCancelFrame(handle: unknown): void {
   }
 }
 
-function finitePoint(point: ScreenPoint): boolean {
-  return Number.isFinite(point.x) && Number.isFinite(point.y);
+function finitePoint(point: unknown): point is ScreenPoint {
+  return !!point
+    && typeof point === "object"
+    && Number.isFinite((point as ScreenPoint).x)
+    && Number.isFinite((point as ScreenPoint).y);
+}
+
+function finitePointPair(value: unknown): value is readonly [ScreenPoint, ScreenPoint] {
+  return Array.isArray(value)
+    && value.length === 2
+    && finitePoint(value[0])
+    && finitePoint(value[1]);
+}
+
+function freezePoint(point: ScreenPoint): ScreenPoint {
+  return Object.freeze({ x: Number(point.x), y: Number(point.y) });
+}
+
+function shortestAngleDelta(from: number, to: number): number {
+  let delta = to - from;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  return delta;
+}
+
+function formatAngle(degrees: number): string {
+  const rounded = degrees >= 10
+    ? Math.round(degrees * 10) / 10
+    : Math.round(degrees * 100) / 100;
+  return `${rounded.toFixed(rounded % 1 === 0 ? 0 : 1)}°`;
+}
+
+/**
+ * Build the complete CSS-pixel geometry for one dynamic angle overlay.
+ * Raster scaling remains the canvas surface's responsibility.
+ */
+export function buildAngleDynamicOverlayDecoration(
+  from: ScreenPoint,
+  to: ScreenPoint,
+  color: string,
+  lineWidth: number,
+  selected: boolean,
+): DynamicAngleOverlayDecoration | null {
+  if (!finitePoint(from)
+    || !finitePoint(to)
+    || typeof color !== "string"
+    || color.trim().length === 0
+    || !Number.isFinite(lineWidth)
+    || lineWidth <= 0
+    || typeof selected !== "boolean") return null;
+
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const distance = Math.hypot(dx, dy);
+  if (!Number.isFinite(distance) || distance < 0.5) return null;
+
+  const start = freezePoint(from);
+  const end = freezePoint(to);
+  const refDir = dx >= 0 ? 1 : -1;
+  const refLen = Math.max(Math.abs(dx), Math.min(distance, 80), 32);
+  const startAngle = refDir > 0 ? 0 : Math.PI;
+  const delta = shortestAngleDelta(startAngle, Math.atan2(dy, dx));
+  const radius = Math.min(Math.max(18, distance * 0.28), 54);
+  const arcSegmentCount = Math.max(8, Math.ceil(Math.abs(delta) * 12));
+  const arcPoints: ScreenPoint[] = [];
+  for (let index = 0; index <= arcSegmentCount; index += 1) {
+    const angle = startAngle + delta * (index / arcSegmentCount);
+    arcPoints.push(freezePoint({
+      x: start.x + Math.cos(angle) * radius,
+      y: start.y + Math.sin(angle) * radius,
+    }));
+  }
+  const labelAngle = startAngle + delta / 2;
+  const labelRadius = radius + 16;
+  const degrees = Math.abs(delta) * 180 / Math.PI;
+
+  return Object.freeze({
+    type: "angle" as const,
+    ray: Object.freeze([start, end] as const),
+    baseline: Object.freeze([
+      start,
+      freezePoint({ x: start.x + refDir * refLen, y: start.y }),
+    ] as const),
+    arcPoints: Object.freeze(arcPoints),
+    label: Object.freeze({
+      center: freezePoint({
+        x: start.x + Math.cos(labelAngle) * labelRadius,
+        y: start.y + Math.sin(labelAngle) * labelRadius,
+      }),
+      text: formatAngle(degrees),
+    }),
+    color,
+    lineWidth,
+    selected,
+  });
+}
+
+function validAngleDecoration(
+  item: DynamicAngleOverlayDecoration,
+): boolean {
+  return finitePointPair(item.ray)
+    && finitePointPair(item.baseline)
+    && Array.isArray(item.arcPoints)
+    && item.arcPoints.length >= 2
+    && item.arcPoints.every(finitePoint)
+    && !!item.label
+    && typeof item.label === "object"
+    && finitePoint(item.label.center)
+    && typeof item.label.text === "string"
+    && item.label.text.length > 0
+    && typeof item.color === "string"
+    && item.color.trim().length > 0
+    && Number.isFinite(item.lineWidth)
+    && item.lineWidth > 0
+    && typeof item.selected === "boolean";
+}
+
+function adjustAlpha(color: string, alpha: number): string {
+  if (!color || color === "transparent") return "transparent";
+  const normalizedAlpha = Math.max(0, Math.min(1, Number(alpha)));
+  if (color.startsWith("rgba")) {
+    const match = color.match(/rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/);
+    if (match) {
+      const baseAlpha = Math.max(0, Math.min(1, Number(match[4])));
+      return `rgba(${match[1]},${match[2]},${match[3]},${baseAlpha * normalizedAlpha})`;
+    }
+  }
+  if (color.startsWith("rgb")) {
+    const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (match) return `rgba(${match[1]},${match[2]},${match[3]},${normalizedAlpha})`;
+  }
+  const channels = color.length === 4
+    ? [color.charAt(1).repeat(2), color.charAt(2).repeat(2), color.charAt(3).repeat(2)]
+    : color.length === 7
+      ? [color.slice(1, 3), color.slice(3, 5), color.slice(5, 7)]
+      : null;
+  if (!channels) return color;
+  const [red, green, blue] = channels.map((channel) => Number.parseInt(channel ?? "", 16));
+  return [red, green, blue].every(Number.isFinite)
+    ? `rgba(${red},${green},${blue},${normalizedAlpha})`
+    : color;
 }
 
 function extendDynamicLine(
@@ -123,6 +277,110 @@ function extendDynamicLine(
     { x: from.x - ux * length, y: from.y - uy * length },
     { x: from.x + ux * length, y: from.y + uy * length },
   ];
+}
+
+function fallbackAngleLabelWidth(text: string): number {
+  return [...text].reduce((width, character) => (
+    width + (character.charCodeAt(0) > 0xff ? 11 : 11 * 0.62)
+  ), 0);
+}
+
+function drawDynamicAngleDecoration(
+  context: CanvasRenderingContext2D,
+  item: DynamicAngleOverlayDecoration,
+  rect: DrawingOverlayPlotRect,
+): void {
+  if (!validAngleDecoration(item)) return;
+  const localPoint = (point: ScreenPoint): ScreenPoint => ({
+    x: point.x - rect.x,
+    y: point.y - rect.y,
+  });
+  const ray = item.ray.map(localPoint) as unknown as readonly [ScreenPoint, ScreenPoint];
+  const baseline = item.baseline.map(localPoint) as unknown as readonly [ScreenPoint, ScreenPoint];
+  const arcPoints = item.arcPoints.map(localPoint);
+  const labelCenter = localPoint(item.label.center);
+  const firstArcPoint = arcPoints[0];
+  if (!firstArcPoint) return;
+
+  context.save();
+  context.lineCap = "round";
+  context.lineJoin = "round";
+
+  if (item.selected) {
+    context.strokeStyle = adjustAlpha(item.color, 0.18);
+    context.lineWidth = Math.max(item.lineWidth + 10, 12);
+    context.beginPath();
+    context.moveTo(ray[0].x, ray[0].y);
+    context.lineTo(ray[1].x, ray[1].y);
+    context.stroke();
+  }
+
+  context.strokeStyle = item.color;
+  context.lineWidth = item.lineWidth;
+  context.beginPath();
+  context.moveTo(ray[0].x, ray[0].y);
+  context.lineTo(ray[1].x, ray[1].y);
+  context.stroke();
+
+  context.save();
+  context.globalAlpha = 0.65;
+  context.setLineDash([4, 4]);
+  context.beginPath();
+  context.moveTo(baseline[0].x, baseline[0].y);
+  context.lineTo(baseline[1].x, baseline[1].y);
+  context.stroke();
+  context.restore();
+
+  context.setLineDash([]);
+  context.globalAlpha = 1;
+  context.strokeStyle = item.color;
+  context.lineWidth = Math.max(1.5, item.lineWidth * 0.85);
+  context.beginPath();
+  context.moveTo(firstArcPoint.x, firstArcPoint.y);
+  for (let index = 1; index < arcPoints.length; index += 1) {
+    const point = arcPoints[index];
+    if (point) context.lineTo(point.x, point.y);
+  }
+  context.stroke();
+
+  context.font = "600 11px sans-serif";
+  context.textBaseline = "middle";
+  context.textAlign = "center";
+  let labelTextWidth = fallbackAngleLabelWidth(item.label.text);
+  try {
+    const measuredWidth = context.measureText(item.label.text).width;
+    if (Number.isFinite(measuredWidth) && measuredWidth >= 0) labelTextWidth = measuredWidth;
+  } catch {
+    // The same deterministic fallback used by scene projection keeps drafts paintable.
+  }
+  const boxWidth = labelTextWidth + 10;
+  const boxHeight = 17;
+  const boxLeft = labelCenter.x - boxWidth / 2;
+  const boxTop = labelCenter.y - boxHeight / 2;
+  context.fillStyle = "rgba(15, 23, 42, 0.86)";
+  context.strokeStyle = adjustAlpha(item.color, 0.55);
+  context.lineWidth = 1;
+  context.beginPath();
+  context.roundRect(boxLeft, boxTop, boxWidth, boxHeight, 4);
+  context.fill();
+  context.stroke();
+  context.fillStyle = item.color;
+  context.fillText(item.label.text, labelCenter.x, labelCenter.y + 0.5);
+
+  const handleRadius = item.selected ? 6 : 3.5;
+  context.fillStyle = item.selected ? "#ffffff" : adjustAlpha(item.color, 0.5);
+  context.strokeStyle = item.color;
+  context.lineWidth = item.selected ? 2 : 1.25;
+  context.shadowColor = "rgba(0,0,0,0.3)";
+  context.shadowBlur = item.selected ? 4 * rect.dpr : 0;
+  for (const point of ray) {
+    context.beginPath();
+    context.arc(point.x, point.y, handleRadius, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+  }
+  context.shadowBlur = 0;
+  context.restore();
 }
 
 export function createDynamicOverlayController({
@@ -235,6 +493,8 @@ export function createDynamicOverlayController({
         for (const handle of item.handles ?? []) {
           drawHandle(context, handle, layout.rect, item.color);
         }
+      } else if (item.type === "angle") {
+        drawDynamicAngleDecoration(context, item, layout.rect);
       } else if (item.type === "axis-line") {
         if (!finitePoint(item.point)) continue;
         const x = item.point.x - layout.rect.x;

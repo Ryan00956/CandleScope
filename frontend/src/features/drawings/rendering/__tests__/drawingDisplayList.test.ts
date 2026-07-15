@@ -82,6 +82,56 @@ function shape(
   };
 }
 
+function text(
+  id: string,
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+  clippedBbox: readonly [number, number, number, number],
+): ProjectedDrawingEntity {
+  return {
+    id,
+    kind: "text",
+    geometryRevision: 1,
+    styleRevision: 1,
+    style: { kind: "text", text: "partly offscreen", fontSize: 14 },
+    renderSpec: {
+      op: "text",
+      strokeColor: "#fff",
+      lineWidthCssPx: 1,
+      selected: true,
+      boxPointOffset: 0,
+      lines: [{ text: "partly offscreen", widthCssPx: 104 }],
+      textColor: "#fff",
+      fontSizeCssPx: 14,
+      fontFamily: "sans-serif",
+      bold: false,
+      italic: false,
+      underline: false,
+      align: "left",
+      backgroundColor: null,
+      borderColor: null,
+      borderWidthCssPx: 1,
+      paddingCssPx: 6,
+      lineHeightCssPx: 18.2,
+      selectionColor: "#3b82f6",
+    },
+    points: new Float64Array([left, top, right, bottom]),
+    bbox: clippedBbox,
+    handles: new Float64Array([right, (top + bottom) / 2]),
+    handleNames: ["r"],
+    handleResults: [{ handle: "r" }],
+    hitZones: [{
+      kind: "box",
+      pointOffset: 0,
+      pointCount: 2,
+      tolerance: 2,
+      result: { body: true },
+    }],
+  };
+}
+
 test("display list concatenates copy-owned typed buffers and entity offsets", () => {
   const first = line("first", 20);
   const {
@@ -161,6 +211,21 @@ test("partly offscreen shape interaction keeps raw box anchors instead of clippe
     zone: "l",
     handle: "l",
     pointIndex: -1,
+  });
+});
+
+test("partly offscreen text resize keeps the full projected box instead of its clipped bbox", () => {
+  const list = createDrawingScreenDisplayList(stamp, [
+    text("text-left-offscreen", -32, 24, 96, 72, [0, 24, 96, 72]),
+  ]);
+
+  const box = drawingDisplayEntityScreenBox(list, "text-left-offscreen");
+  assert.deepEqual(box, { x: -32, y: 24, width: 128, height: 48 });
+  assert.equal(Object.isFrozen(box), true);
+  assert.deepEqual(hitTestDrawingScreenDisplayList(list, 96, 48, "text-left-offscreen"), {
+    entityId: "text-left-offscreen",
+    kind: "text",
+    handle: "r",
   });
 });
 

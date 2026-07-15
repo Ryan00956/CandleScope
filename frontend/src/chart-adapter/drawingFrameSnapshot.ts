@@ -23,6 +23,11 @@ export interface DrawingFrameViewport {
   }>[];
 }
 
+export interface DrawingFrameThemePalette {
+  readonly upColor: string;
+  readonly downColor: string;
+}
+
 /**
  * One immutable, adapter-owned view of every input needed by drawing
  * coordinate work for a frame. The data/index references are main-thread only;
@@ -47,6 +52,7 @@ export interface DrawingFrameSnapshot {
   readonly sourceIntervalSeconds: unknown;
   readonly sourceTimeHorizon: unknown;
   readonly surfaceGeneration: number;
+  readonly themePalette: DrawingFrameThemePalette;
   readonly themeRevision: number;
   readonly viewportRevision: number;
   readonly widthCssPx: number;
@@ -69,6 +75,7 @@ export interface DrawingFrameSnapshotInput {
   sourceIntervalSeconds?: unknown;
   sourceTimeHorizon?: unknown;
   surfaceToken?: unknown;
+  themePalette?: Readonly<Partial<DrawingFrameThemePalette>> | null;
   themeKey?: unknown;
   viewportKey?: unknown;
   widthCssPx?: unknown;
@@ -123,6 +130,18 @@ function normalizedDpr(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? value
     : 1;
+}
+
+function normalizedThemePalette(
+  value: DrawingFrameSnapshotInput["themePalette"],
+): DrawingFrameThemePalette {
+  const upColor = typeof value?.upColor === "string" && value.upColor.trim()
+    ? value.upColor.trim()
+    : "#22c55e";
+  const downColor = typeof value?.downColor === "string" && value.downColor.trim()
+    ? value.downColor.trim()
+    : "#ef4444";
+  return Object.freeze({ upColor, downColor });
 }
 
 function finiteNumber(value: unknown): value is number {
@@ -279,6 +298,7 @@ export function createDrawingFrameSnapshotFactory(): DrawingFrameSnapshotFactory
         drawingViewport?.maxPrice ?? null,
       ]);
       const themeKey = input.themeKey ?? null;
+      const themePalette = normalizedThemePalette(input.themePalette);
       const surfaceToken = input.surfaceToken ?? null;
 
       const surfaceChanged = state.snapshot === null
@@ -301,7 +321,9 @@ export function createDrawingFrameSnapshotFactory(): DrawingFrameSnapshotFactory
         || heightCssPx !== state.lastHeight
         || dpr !== state.lastDpr;
       const themeChanged = state.snapshot === null
-        || !sameValue(themeKey, state.lastThemeKey);
+        || !sameValue(themeKey, state.lastThemeKey)
+        || themePalette.upColor !== state.snapshot.themePalette.upColor
+        || themePalette.downColor !== state.snapshot.themePalette.downColor;
 
       if (surfaceChanged) state.surfaceGeneration += 1;
       if (dataChanged) state.dataRevision += 1;
@@ -347,6 +369,7 @@ export function createDrawingFrameSnapshotFactory(): DrawingFrameSnapshotFactory
         sourceIntervalSeconds: input.sourceIntervalSeconds,
         sourceTimeHorizon: input.sourceTimeHorizon,
         surfaceGeneration: state.surfaceGeneration,
+        themePalette,
         themeRevision: state.themeRevision,
         viewportRevision: state.viewportRevision,
         widthCssPx,

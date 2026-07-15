@@ -110,6 +110,7 @@ import {
   shouldShowCrosshairDetails,
 } from "../features/drawings/drawingModel";
 import { clearDrawingScopeAuthoritatively } from "../features/drawings/drawingScopePersistence";
+import { useDrawingFontMetricRevision } from "../features/drawings/text/drawingFontMetricRevision";
 import {
   axisTimeKey,
   buildDisplaySourceTimeIndex,
@@ -891,6 +892,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   priceScaleMode = 0,
   onPriceScaleModeChange,
 }: SingleChartPanesProps, ref) {
+  const drawingFontMetricRevision = useDrawingFontMetricRevision();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cursorOverlayRef = useRef<HTMLDivElement | null>(null);
@@ -932,6 +934,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }
   const drawingCoordinateKeyRef = useRef("");
   const drawingThemeKeyRef = useRef("");
+  const drawingThemePaletteRef = useRef({ upColor, downColor });
   const drawingPriceProjectionKeyRef = useRef("");
   const projectionGenerationRef = useRef(0);
   const projectionRenderContextRef = useRef<ProjectionRenderContext | null>(null);
@@ -1192,7 +1195,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     customBg,
     upColor,
     downColor,
+    drawingFontMetricRevision,
   ]);
+  drawingThemePaletteRef.current = { upColor, downColor };
   drawingPriceProjectionKeyRef.current = JSON.stringify([invertScale, priceScaleMode]);
   requestedChartTypeRef.current = resolvedChartType;
   requestedProjectionSettingsRef.current = projectionSettings;
@@ -1357,6 +1362,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           sourceIntervalSeconds: owner.sourceIntervalSeconds,
           sourceTimeHorizon: snapshot.sourceTimeHorizon,
           surfaceToken: series,
+          themePalette: drawingThemePaletteRef.current,
           themeKey: drawingThemeKeyRef.current,
           viewportKey,
           widthCssPx,
@@ -1365,6 +1371,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     }),
     [],
   );
+
+  useEffect(() => {
+    if (drawingFontMetricRevision <= 0) return;
+    chartAdapter.notifyDrawingFrameInvalidation();
+  }, [chartAdapter, drawingFontMetricRevision]);
 
   useEffect(() => {
     onCrosshairMove?.(null);

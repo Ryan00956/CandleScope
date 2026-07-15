@@ -62,6 +62,7 @@ import type {
 } from "../rendering/drawingRenderDefaults.js";
 import type { DrawingRenderRevisionStamp } from "./drawingRenderScheduler.js";
 import type { DrawingSceneNode } from "./drawingSceneRegistry.js";
+import { drawingPositionLevelColor } from "../drawingPositionColors.js";
 
 export interface DrawingSceneTextMeasureRequest {
   readonly text: string;
@@ -1044,6 +1045,7 @@ function projectAngle(
   entity: AngleDrawingRenderEntity,
   frame: DrawingFrameSnapshot,
   adapter: DrawingSceneProjectionAdapter,
+  selected: boolean,
 ): EntityProjection {
   const anchors = projectTwoDataPoints(entity, frame, adapter);
   if (anchors === PROJECTION_FAILED || anchors === null) return anchors;
@@ -1099,6 +1101,7 @@ function projectAngle(
     result: Object.freeze({ pointIndex: -1, zone: "baseline" }),
   }));
   const arcSegments = Math.max(8, Math.ceil(Math.abs(delta) * 12));
+  const arcOffset = values.length / 2;
   for (let index = 0; index <= arcSegments; index += 1) {
     const angle = startAngle + delta * (index / arcSegments);
     pushPoint(values, {
@@ -1156,6 +1159,19 @@ function projectAngle(
   }
   return createProjectedEntity(entity, new Float64Array(values), {
     bbox: bboxFromValues(exactBboxValues),
+    renderSpec: Object.freeze({
+      op: "angle" as const,
+      strokeColor: entity.style.color,
+      selectionHighlightColor: legacyPaintAlpha(entity.style.color, 0.18),
+      lineWidthCssPx: entity.style.lineWidth,
+      selected,
+      rayPointOffset: lineOffset,
+      baselinePointOffset: baselineOffset,
+      arcPointOffset: arcOffset,
+      arcPointCount: arcSegments + 1,
+      labelBoxPointOffset: labelOffset,
+      labelText: label,
+    }),
     handles: new Float64Array([a.x, a.y, b.x, b.y]),
     handleNames: Object.freeze(["vertex", "ray"]),
     handleResults: Object.freeze([null, null]),
@@ -1167,6 +1183,7 @@ function projectFibonacci(
   entity: FibonacciDrawingRenderEntity,
   frame: DrawingFrameSnapshot,
   adapter: DrawingSceneProjectionAdapter,
+  selected: boolean,
 ): EntityProjection {
   const anchors = projectTwoDataPoints(entity, frame, adapter);
   if (anchors === PROJECTION_FAILED || anchors === null) return anchors;
@@ -1205,10 +1222,44 @@ function projectFibonacci(
   const right = Math.max(a.x, b.x);
   const startY = entity.geometry.inverted ? b.y : a.y;
   const endY = entity.geometry.inverted ? a.y : b.y;
+  const firstPrice = entity.geometry.dataPoints[0]?.price ?? 0;
+  const secondPrice = entity.geometry.dataPoints[1]?.price ?? 0;
+  const startPrice = entity.geometry.inverted ? secondPrice : firstPrice;
+  const endPrice = entity.geometry.inverted ? firstPrice : secondPrice;
+  let labelBbox: readonly [number, number, number, number] | null = null;
+  const labelFontSize = 11;
+  const levelLines: Array<Readonly<{
+    color: string;
+    level: number;
+    logicalPrice: number;
+    pointOffset: number;
+  }>> = [];
   for (const level of entity.style.levels) {
     if (!level.enabled || !finiteNumber(level.level)) continue;
     const y = startY + (endY - startY) * level.level;
+    const logicalPrice = startPrice + (endPrice - startPrice) * level.level;
     const offset = pushPair(values, { x: left, y }, { x: right, y });
+    levelLines.push(Object.freeze({
+      color: level.color,
+      level: level.level,
+      logicalPrice,
+      pointOffset: offset,
+    }));
+    const labelText = `${level.level} (${logicalPrice.toFixed(2)})`;
+    const labelLeft = left + 4;
+    const labelBottom = y - 2;
+    labelBbox = unionBboxes(labelBbox, Object.freeze([
+      labelLeft,
+      labelBottom - labelFontSize,
+      labelLeft + measuredTextWidth(adapter, {
+        text: labelText,
+        fontFamily: "sans-serif",
+        fontSize: labelFontSize,
+        bold: false,
+        italic: false,
+      }),
+      labelBottom,
+    ]));
     hitZones.push(Object.freeze({
       kind: "polyline",
       name: `level:${level.level}`,
@@ -1219,6 +1270,18 @@ function projectFibonacci(
     }));
   }
   return createProjectedEntity(entity, new Float64Array(values), {
+    bbox: unionBboxes(bboxFromValues(values), labelBbox),
+    renderSpec: Object.freeze({
+      op: "fibonacci" as const,
+      strokeColor: entity.style.color,
+      selectionHighlightColor: legacyPaintAlpha(entity.style.color, 0.15),
+      lineWidthCssPx: entity.style.lineWidth,
+      selected,
+      trendPointOffset: trendOffset,
+      startPrice,
+      endPrice,
+      levelLines: Object.freeze(levelLines),
+    }),
     handles: new Float64Array([a.x, a.y, b.x, b.y]),
     handleNames: Object.freeze(["start", "end"]),
     handleResults: Object.freeze([null, null]),
@@ -1358,6 +1421,7 @@ function projectText(
   entity: TextDrawingRenderEntity,
   frame: DrawingFrameSnapshot,
   adapter: DrawingSceneProjectionAdapter,
+  selected: boolean,
 ): EntityProjection {
   const projected = projectBatch(
     adapter,
@@ -1383,10 +1447,18 @@ function projectText(
     (line) => wrapTextLine(line, innerWidthCap, measure),
   );
   if (lines.length === 0) lines.push("");
-  const measuredWidth = lines.reduce((width, line) => Math.max(width, measure(line)), 0);
+  const measuredLines = lines.map((text) => Object.freeze({
+    text,
+    widthCssPx: measure(text),
+  }));
+  const measuredWidth = measuredLines.reduce(
+    (width, line) => Math.max(width, line.widthCssPx),
+    0,
+  );
   const innerWidth = innerWidthCap ?? measuredWidth;
+  const lineHeight = entity.style.fontSize * 1.3;
   const width = innerWidth + padding * 2;
-  const height = lines.length * (entity.style.fontSize * 1.3) + padding * 2;
+  const height = measuredLines.length * lineHeight + padding * 2;
   const right = anchor.x + width;
   const bottom = anchor.y + height;
   return createProjectedEntity(entity, new Float64Array([
@@ -1394,6 +1466,27 @@ function projectText(
     right, bottom,
   ]), {
     bbox: Object.freeze([anchor.x, anchor.y, right, bottom]),
+    renderSpec: Object.freeze({
+      op: "text" as const,
+      strokeColor: entity.style.color,
+      lineWidthCssPx: Math.max(1, entity.style.borderWidth),
+      selected,
+      boxPointOffset: 0,
+      lines: Object.freeze(measuredLines),
+      textColor: entity.style.color,
+      fontSizeCssPx: entity.style.fontSize,
+      fontFamily: entity.style.fontFamily,
+      bold: entity.style.bold,
+      italic: entity.style.italic,
+      underline: entity.style.underline,
+      align: entity.style.align,
+      backgroundColor: entity.style.bgColor,
+      borderColor: entity.style.borderColor,
+      borderWidthCssPx: entity.style.borderWidth,
+      paddingCssPx: padding,
+      lineHeightCssPx: lineHeight,
+      selectionColor: "#3b82f6",
+    }),
     handles: boxHandles(anchor.x, anchor.y, right, bottom),
     handleNames: BOX_HANDLE_NAMES,
     handleTolerance: 7,
@@ -1443,35 +1536,83 @@ function positionCurrentPrice(frame: DrawingFrameSnapshot): number | null {
   return finiteNumber(last.value) ? last.value : null;
 }
 
+interface PositionPanelPaintLine {
+  readonly label: string;
+  readonly value: string;
+  readonly extra: string | null;
+  readonly color: string;
+}
+
+function signedPositionValue(value: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
 function positionPanelLines(
   entity: PositionDrawingRenderEntity,
   currentPrice: number | null,
-): readonly string[] {
+  upColor: string,
+  downColor: string,
+): readonly PositionPanelPaintLine[] {
   const { direction, entryPrice, slPrice, tpPrice } = entity.geometry;
   const size = entity.style.positionSize;
   const isLong = direction === "long";
-  const lines = [`入场: ${formatPositionPrice(entryPrice)}`];
+  const priceColor = (price: number): string => drawingPositionLevelColor(
+    entryPrice,
+    price,
+    { upColor, downColor },
+  );
+  const lines: PositionPanelPaintLine[] = [Object.freeze({
+    label: "入场",
+    value: formatPositionPrice(entryPrice),
+    extra: null,
+    color: "#2196f3",
+  })];
   if (tpPrice !== null) {
     const percent = positionPnlPercent(entryPrice, tpPrice, isLong);
     const pnl = size ? size * percent / 100 : null;
-    lines.push(`止盈: ${formatPositionPrice(tpPrice)} (${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%)${pnl === null ? "" : ` ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`}`);
+    lines.push(Object.freeze({
+      label: "止盈",
+      value: `${formatPositionPrice(tpPrice)} (${signedPositionValue(percent)}%)`,
+      extra: pnl === null ? null : signedPositionValue(pnl),
+      color: priceColor(tpPrice),
+    }));
   }
   if (slPrice !== null) {
     const percent = positionPnlPercent(entryPrice, slPrice, isLong);
     const pnl = size ? size * percent / 100 : null;
-    lines.push(`止损: ${formatPositionPrice(slPrice)} (${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%)${pnl === null ? "" : ` ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}`}`);
+    lines.push(Object.freeze({
+      label: "止损",
+      value: `${formatPositionPrice(slPrice)} (${signedPositionValue(percent)}%)`,
+      extra: pnl === null ? null : signedPositionValue(pnl),
+      color: priceColor(slPrice),
+    }));
   }
   if (currentPrice !== null && finiteNumber(currentPrice)) {
     const percent = positionPnlPercent(entryPrice, currentPrice, isLong);
     const pnl = size ? size * percent / 100 : null;
-    lines.push(`现价: ${formatPositionPrice(currentPrice)} (${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%)${pnl === null ? "" : ` ${percent >= 0 ? "+" : ""}${pnl.toFixed(2)}`}`);
+    lines.push(Object.freeze({
+      label: "现价",
+      value: `${formatPositionPrice(currentPrice)} (${signedPositionValue(percent)}%)`,
+      extra: pnl === null ? null : signedPositionValue(pnl),
+      color: priceColor(currentPrice),
+    }));
   }
   if (tpPrice !== null && slPrice !== null && entryPrice) {
     const reward = Math.abs(tpPrice - entryPrice);
     const risk = Math.abs(slPrice - entryPrice);
-    if (risk > 0) lines.push(`盈亏比: 1 : ${(reward / risk).toFixed(2)}`);
+    if (risk > 0) lines.push(Object.freeze({
+      label: "盈亏比",
+      value: `1 : ${(reward / risk).toFixed(2)}`,
+      extra: null,
+      color: "#ffab40",
+    }));
   }
-  if (size) lines.push(`仓位: $${size.toFixed(0)}`);
+  if (size) lines.push(Object.freeze({
+    label: "仓位",
+    value: `$${size.toFixed(0)}`,
+    extra: null,
+    color: "#b0bec5",
+  }));
   return Object.freeze(lines);
 }
 
@@ -1514,7 +1655,10 @@ function projectPosition(
     result: Object.freeze({ zone: "entry", pointIndex: -1 }),
   }));
   const bodyBounds: Array<readonly [number, number, number, number]> = [];
-  const appendPriceZone = (name: "tp" | "sl", y: number): void => {
+  const appendPriceZone = (name: "tp" | "sl", y: number): Readonly<{
+    bodyOffset: number;
+    lineOffset: number;
+  }> => {
     const lineOffset = pushPair(values, { x: left, y }, { x: right, y });
     hitZones.push(Object.freeze({
       kind: "polyline", name, pointOffset: lineOffset, pointCount: 2, tolerance: 8,
@@ -1528,19 +1672,29 @@ function projectPosition(
       result: Object.freeze({ zone: "body", pointIndex: -1 }),
     }));
     bodyBounds.push(Object.freeze([left, top, right, bottom]));
+    return Object.freeze({ bodyOffset, lineOffset });
   };
-  if (tpY !== null) appendPriceZone("tp", tpY);
-  if (slY !== null) appendPriceZone("sl", slY);
+  const tpOffsets = tpY === null ? null : appendPriceZone("tp", tpY);
+  const slOffsets = slY === null ? null : appendPriceZone("sl", slY);
 
-  const panelLines = positionPanelLines(entity, positionCurrentPrice(frame));
+  const { upColor, downColor } = frame.themePalette;
+  const panelLines = positionPanelLines(
+    entity,
+    positionCurrentPrice(frame),
+    upColor,
+    downColor,
+  );
   const panelFont = 11;
-  const panelTextWidth = panelLines.reduce((width, text) => Math.max(width, measuredTextWidth(adapter, {
-    text,
-    fontFamily: "sans-serif",
-    fontSize: panelFont,
-    bold: false,
-    italic: false,
-  })), 0);
+  const panelTextWidth = panelLines.reduce((width, line) => {
+    const text = `${line.label}: ${line.value}${line.extra ? ` ${line.extra}` : ""}`;
+    return Math.max(width, measuredTextWidth(adapter, {
+      text,
+      fontFamily: "sans-serif",
+      fontSize: panelFont,
+      bold: false,
+      italic: false,
+    }));
+  }, 0);
   const panelWidth = panelTextWidth + 16;
   const panelHeight = panelLines.length * 17 + 12;
   const panelLeft = right - panelWidth - 8 + entity.style.infoPanelOffset.x;
@@ -1563,6 +1717,12 @@ function projectPosition(
   const mainBbox: readonly [number, number, number, number] = Object.freeze([left, top, right, bottom]);
   const panelBbox: readonly [number, number, number, number] = Object.freeze([
     panelLeft, panelTop, panelLeft + panelWidth, panelTop + panelHeight,
+  ]);
+  const directionBadgeBbox: readonly [number, number, number, number] = Object.freeze([
+    left + 4,
+    entryY - 24,
+    left + 52,
+    entryY - 4,
   ]);
   const middleY = (top + bottom) / 2;
   if (selected) {
@@ -1595,11 +1755,99 @@ function projectPosition(
     (leftZone, rightZone) => Number(zonePriority.get(leftZone.name ?? "") ?? 99)
       - Number(zonePriority.get(rightZone.name ?? "") ?? 99),
   );
+  const isLong = entity.geometry.direction === "long";
+  const positionLevelSpec = (
+    price: number | null,
+    offsets: Readonly<{ bodyOffset: number; lineOffset: number }> | null,
+  ) => {
+    if (price === null || !offsets) return null;
+    const percent = positionPnlPercent(entryPrice, price, isLong);
+    const pnl = entity.style.positionSize ? entity.style.positionSize * percent / 100 : 0;
+    return Object.freeze({
+      linePointOffset: offsets.lineOffset,
+      bodyPointOffset: offsets.bodyOffset,
+      priceText: formatPositionPrice(price),
+      percentText: `${signedPositionValue(percent)}%`,
+      pnlText: pnl === 0 ? null : signedPositionValue(pnl),
+      color: drawingPositionLevelColor(entryPrice, price, frame.themePalette),
+    });
+  };
+  const tpLevel = positionLevelSpec(tpPrice, tpOffsets);
+  const slLevel = positionLevelSpec(slPrice, slOffsets);
+  const priceBadgeBbox = (
+    level: Readonly<{
+      priceText: string;
+      percentText: string;
+      pnlText: string | null;
+    }> | null,
+    y: number | null,
+  ): readonly [number, number, number, number] | null => {
+    if (!level || y === null) return null;
+    const text = [
+      level.priceText,
+      level.percentText,
+      ...(level.pnlText ? [level.pnlText] : []),
+    ].join("  ");
+    const badgeLeft = right + 4;
+    const badgeHeight = 18;
+    return Object.freeze([
+      badgeLeft,
+      y - badgeHeight / 2,
+      badgeLeft + measuredTextWidth(adapter, {
+        text,
+        fontFamily: "sans-serif",
+        fontSize: 10,
+        bold: false,
+        italic: false,
+      }) + 12,
+      y + badgeHeight / 2,
+    ]);
+  };
+  const paintBbox = unionBboxes(
+    unionBboxes(
+      unionBboxes(mainBbox, panelBbox),
+      directionBadgeBbox,
+    ),
+    unionBboxes(
+      priceBadgeBbox(tpLevel, tpY),
+      priceBadgeBbox(slLevel, slY),
+    ),
+  );
+  const middleX = (left + right) / 2;
+  const handleValues: number[] = [middleX, entryY];
+  const handleNames: string[] = ["entry"];
+  if (tpY !== null) {
+    handleValues.push(middleX, tpY);
+    handleNames.push("tp");
+  }
+  if (slY !== null) {
+    handleValues.push(middleX, slY);
+    handleNames.push("sl");
+  }
+  handleValues.push(left, middleY, right, middleY);
+  handleNames.push("left", "right");
   return createProjectedEntity(entity, new Float64Array(values), {
-    bbox: unionBboxes(mainBbox, panelBbox),
-    handles: new Float64Array([left, middleY, right, middleY]),
-    handleNames: Object.freeze(["left", "right"]),
-    handleResults: Object.freeze([null, null]),
+    bbox: paintBbox,
+    renderSpec: Object.freeze({
+      op: "position" as const,
+      strokeColor: "#2196f3",
+      lineWidthCssPx: 2.5,
+      selected,
+      entryLinePointOffset: entryOffset,
+      entryColor: "#2196f3",
+      upColor,
+      downColor,
+      direction: entity.geometry.direction,
+      tpLevel,
+      slLevel,
+      panelBoxPointOffset: panelOffset,
+      panelLines,
+      badgeText: isLong ? "LONG" as const : "SHORT" as const,
+      badgeColor: isLong ? upColor : downColor,
+    }),
+    handles: new Float64Array(handleValues),
+    handleNames: Object.freeze(handleNames),
+    handleResults: Object.freeze(handleNames.map(() => null)),
     hitZones: Object.freeze(orderedHitZones),
   });
 }
@@ -3086,9 +3334,9 @@ function projectEntity(
       selected,
     );
     case "axis-line": return projectAxisLine(entity, frame, adapter, selected);
-    case "angle-measure": return projectAngle(entity, frame, adapter);
-    case "text": return projectText(entity, frame, adapter);
-    case "fibonacci": return projectFibonacci(entity, frame, adapter);
+    case "angle-measure": return projectAngle(entity, frame, adapter, selected);
+    case "text": return projectText(entity, frame, adapter, selected);
+    case "fibonacci": return projectFibonacci(entity, frame, adapter, selected);
     case "position": return projectPosition(entity, frame, adapter, selected);
     case "shape": return projectShape(
       entity,
@@ -3169,6 +3417,30 @@ function clipProjectedEntityToPane(
     paintOutset = renderSpec.selected
       ? Math.max(renderSpec.lineWidthCssPx / 2, 9)
       : renderSpec.lineWidthCssPx / 2;
+  } else if (renderSpec?.op === "angle") {
+    // Selected angle rays paint a halo whose full width is lineWidth + 10px.
+    // The 12px floor also covers endpoint handles, stroke, and shadow.
+    paintOutset = renderSpec.selected
+      ? Math.max(renderSpec.lineWidthCssPx / 2 + 5, 12)
+      : Math.max(renderSpec.lineWidthCssPx / 2, 4.5);
+  } else if (renderSpec?.op === "fibonacci") {
+    // Selected Fibonacci trends paint a halo whose full width is
+    // lineWidth + 12px; large imported widths must retain that extra radius.
+    paintOutset = renderSpec.selected
+      ? Math.max(renderSpec.lineWidthCssPx / 2 + 6, 12)
+      : Math.max(renderSpec.lineWidthCssPx, 3);
+  } else if (renderSpec?.op === "text") {
+    const borderOutset = renderSpec.borderColor
+      && renderSpec.borderColor !== "transparent"
+      ? (renderSpec.borderWidthCssPx || 1) / 2
+      : 0;
+    paintOutset = renderSpec.selected ? Math.max(borderOutset, 5) : borderOutset;
+  } else if (renderSpec?.op === "position") {
+    // The info panel always paints an 8px shadow; selected entry handles add
+    // a 5px radius, 2px stroke, and 4px blur outside their projected point.
+    paintOutset = renderSpec.selected
+      ? Math.max(renderSpec.lineWidthCssPx / 2, 10)
+      : Math.max(renderSpec.lineWidthCssPx / 2, 8);
   } else if (renderSpec?.op === "freehand") {
     paintOutset = freehandPaintOutsetCssPx(
       renderSpec.lineWidthCssPx,

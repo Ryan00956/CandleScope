@@ -57,6 +57,85 @@ export function summarizeExportMatrixAcceptance({
   };
 }
 
+export function summarizeHiddenSceneRuntimeRetirement({
+  handleAvailable = false,
+  readerAvailable = false,
+  runtime = null,
+  error = "",
+} = {}) {
+  const runtimeRetired = Boolean(
+    runtime
+    && runtime.scenePublicationReady === false
+    && runtime.queueDepthCurrent === 0
+    && runtime.inFlightCurrent === 0
+    && runtime.lastRequestedStamp === null
+    && runtime.lastPublishedStamp === null
+  );
+  return {
+    handleAvailable: Boolean(handleAvailable),
+    readerAvailable: Boolean(readerAvailable),
+    runtime: runtime || null,
+    error: error || "",
+    // Performance instrumentation is optional in production builds. Once the
+    // handle exists, however, retirement evidence is mandatory and fail-closed.
+    passed: !handleAvailable || (readerAvailable && !error && runtimeRetired),
+  };
+}
+
+export async function waitForStableHiddenSceneRuntimeRetirement({
+  readSample,
+  wait,
+  timeoutMs = 10_000,
+  sampleIntervalMs = 100,
+  requiredStableSamples = 2,
+  now = Date.now,
+} = {}) {
+  if (typeof readSample !== "function") {
+    throw new TypeError("waitForStableHiddenSceneRuntimeRetirement requires readSample");
+  }
+  if (typeof wait !== "function") {
+    throw new TypeError("waitForStableHiddenSceneRuntimeRetirement requires wait");
+  }
+  const required = Math.max(2, Math.floor(Number(requiredStableSamples) || 2));
+  const timeout = Math.max(1, Number(timeoutMs) || 10_000);
+  const interval = Math.max(0, Number(sampleIntervalMs) || 0);
+  const started = now();
+  let stableSampleCount = 0;
+  let sampleCount = 0;
+  let lastSample = null;
+
+  while (now() - started < timeout) {
+    lastSample = await readSample();
+    sampleCount += 1;
+    if (lastSample?.passed === true && lastSample?.previewIdle === true) {
+      stableSampleCount += 1;
+      if (stableSampleCount >= required) {
+        return {
+          ...lastSample,
+          stableSampleCount,
+          requiredStableSamples: required,
+          sampleCount,
+          elapsedMs: now() - started,
+          passed: true,
+        };
+      }
+    } else {
+      stableSampleCount = 0;
+    }
+    await wait(interval);
+  }
+
+  return {
+    ...(lastSample || summarizeHiddenSceneRuntimeRetirement()),
+    previewIdle: lastSample?.previewIdle === true,
+    stableSampleCount,
+    requiredStableSamples: required,
+    sampleCount,
+    elapsedMs: now() - started,
+    passed: false,
+  };
+}
+
 export async function runExportMatrix({
   cdp,
   args,
@@ -131,6 +210,74 @@ export async function runExportMatrix({
       2_000,
       25,
     );
+  }
+
+  async function readHiddenSceneRuntimeRetirement() {
+    const result = await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const frame = document.querySelector('.export-preview-frame');
+        const save = document.querySelector('[data-export-action="save"]');
+        const previewError = document.querySelector('.export-preview-error')?.textContent?.trim() || '';
+        const panelError = document.querySelector('.export-panel-message.error')?.textContent?.trim() || '';
+        const previewIdle = Boolean(
+          frame
+          && save
+          && !frame.classList.contains('loading')
+          && !frame.classList.contains('stale')
+          && !save.disabled
+          && !previewError
+          && !panelError
+        );
+        const handle = window.__CANDLESCOPE_DRAWING_PERF__;
+        if (!handle) {
+          return { handleAvailable: false, readerAvailable: false, runtime: null, error: '', previewIdle };
+        }
+        const reader = handle.readPhase6Runtime;
+        if (typeof reader !== 'function') {
+          return { handleAvailable: true, readerAvailable: false, runtime: null, error: '', previewIdle };
+        }
+        try {
+          const runtime = reader.call(handle);
+          return {
+            handleAvailable: true,
+            readerAvailable: true,
+            runtime: runtime ? {
+              scenePublicationReady: runtime.scenePublicationReady,
+              queueDepthCurrent: runtime.queueDepthCurrent,
+              inFlightCurrent: runtime.inFlightCurrent,
+              lastRequestedStamp: runtime.lastRequestedStamp,
+              lastPublishedStamp: runtime.lastPublishedStamp,
+            } : null,
+            error: '',
+            previewIdle,
+          };
+        } catch (error) {
+          return {
+            handleAvailable: true,
+            readerAvailable: true,
+            runtime: null,
+            error: error?.message || String(error),
+            previewIdle,
+          };
+        }
+      })()`,
+      returnByValue: true,
+    });
+    const sample = result.result?.value || {};
+    return {
+      ...summarizeHiddenSceneRuntimeRetirement(sample),
+      previewIdle: sample.previewIdle === true,
+    };
+  }
+
+  async function waitForHiddenSceneRuntimeRetirement() {
+    return waitForStableHiddenSceneRuntimeRetirement({
+      readSample: readHiddenSceneRuntimeRetirement,
+      wait: delay,
+      timeoutMs: Math.min(timeoutMs, 15_000),
+      sampleIntervalMs: 100,
+      requiredStableSamples: 2,
+    });
   }
 
   async function readExportPreview() {
@@ -390,6 +537,94 @@ export async function runExportMatrix({
     25,
   );
   const webpDownload = await saveExportPreview("webp", webpPreview);
+
+  // A globally hidden scene normally owns no active exact-paint runtime. Both
+  // export option states must temporarily publish an exact empty scene, then
+  // restore the ordinary globally-hidden lifecycle after each preview lease.
+  const globalHideClicked = await click(cdp, '[data-drawing-action="toggle-hidden"]');
+  const globalHideActive = globalHideClicked && await waitExpression(
+    cdp,
+    `document.querySelector('[data-drawing-action="toggle-hidden"]')?.classList.contains('active') === true`,
+    2_000,
+    25,
+  );
+  const globalHiddenBaseConfig = await configureExportCase({
+    scope: "page",
+    format: "webp",
+    hideDrawings: false,
+    watermarkEnabled: false,
+  });
+  const globalHiddenBasePreview = await waitForExportPreview({
+    format: "webp",
+    scope: "page",
+    previousSignature: webpPreview.signature,
+    timeout: Math.min(timeoutMs, 20_000),
+  });
+  const globalHiddenBaseRuntimeRetirement = globalHiddenBasePreview.ready
+    ? await waitForHiddenSceneRuntimeRetirement()
+    : summarizeHiddenSceneRuntimeRetirement();
+  const globalHiddenAfterBase = await waitExpression(
+    cdp,
+    `document.querySelector('[data-drawing-action="toggle-hidden"]')?.classList.contains('active') === true`,
+    2_000,
+    25,
+  );
+  const globalHiddenForcedConfig = await configureExportCase({
+    scope: "page",
+    format: "webp",
+    hideDrawings: true,
+    watermarkEnabled: false,
+  });
+  const globalHiddenForcedInvalidated = await observeExportPreviewInvalidation();
+  const globalHiddenForcedPreview = await waitForExportPreview({
+    format: "webp",
+    scope: "page",
+    timeout: Math.min(timeoutMs, 20_000),
+  });
+  const globalHiddenForcedRuntimeRetirement = globalHiddenForcedPreview.ready
+    ? await waitForHiddenSceneRuntimeRetirement()
+    : summarizeHiddenSceneRuntimeRetirement();
+  const globalHiddenAfterForced = await waitExpression(
+    cdp,
+    `document.querySelector('[data-drawing-action="toggle-hidden"]')?.classList.contains('active') === true`,
+    2_000,
+    25,
+  );
+  const globalShowClicked = await click(cdp, '[data-drawing-action="toggle-hidden"]');
+  const globalVisibilityRestored = globalShowClicked && await waitExpression(
+    cdp,
+    `!document.querySelector('[data-drawing-action="toggle-hidden"]')?.classList.contains('active')`,
+    2_000,
+    25,
+  );
+  const globalHiddenContract = {
+    globalHideClicked,
+    globalHideActive,
+    baseConfig: globalHiddenBaseConfig,
+    basePreview: globalHiddenBasePreview,
+    baseRuntimeRetirement: globalHiddenBaseRuntimeRetirement,
+    hiddenAfterBase: globalHiddenAfterBase,
+    forcedConfig: globalHiddenForcedConfig,
+    forcedInvalidated: globalHiddenForcedInvalidated,
+    forcedPreview: globalHiddenForcedPreview,
+    forcedRuntimeRetirement: globalHiddenForcedRuntimeRetirement,
+    hiddenAfterForced: globalHiddenAfterForced,
+    globalShowClicked,
+    globalVisibilityRestored,
+    passed: Boolean(
+      globalHideActive
+      && globalHiddenBaseConfig.passed
+      && globalHiddenBasePreview.ready
+      && globalHiddenBaseRuntimeRetirement.passed
+      && globalHiddenAfterBase
+      && globalHiddenForcedConfig.passed
+      && globalHiddenForcedInvalidated
+      && globalHiddenForcedPreview.ready
+      && globalHiddenForcedRuntimeRetirement.passed
+      && globalHiddenAfterForced
+      && globalVisibilityRestored
+    ),
+  };
   const webpRuntimeIssueCount = getRuntimeIssueCount();
   cases.push({
     scope: "page",
@@ -401,6 +636,7 @@ export async function runExportMatrix({
     preview: webpPreview,
     pixelSignatureChanged: webpBasePreview.signature !== webpPreview.signature,
     drawingsRestored,
+    globalHiddenContract,
     save: webpDownload,
     runtimeIssues: webpRuntimeIssueCount - runtimeIssueCount,
     passed: webpBaseConfig.passed
@@ -410,6 +646,7 @@ export async function runExportMatrix({
       && webpPreview.mimeType === "image/webp"
       && webpBasePreview.signature !== webpPreview.signature
       && drawingsRestored
+      && globalHiddenContract.passed
       && webpDownload.passed,
   });
 

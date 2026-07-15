@@ -49,6 +49,8 @@ export interface DrawingScenePrimitiveBridgeSnapshot<TPlan extends DrawingSceneB
   readonly attached: boolean;
   readonly attachedPrimitiveCount: 0 | 1;
   readonly surfaceGeneration: number | null;
+  /** Exact plan currently owned by the composite primitive; null means visually blank. */
+  readonly publishedPlan: TPlan | null;
   readonly lastPaintedStamp: TPlan["stamp"] | null;
 }
 
@@ -237,6 +239,7 @@ export function createDrawingScenePrimitiveBridge<
         attached,
         attachedPrimitiveCount: attached ? 1 as const : 0 as const,
         surfaceGeneration,
+        publishedPlan,
         lastPaintedStamp,
       });
     },

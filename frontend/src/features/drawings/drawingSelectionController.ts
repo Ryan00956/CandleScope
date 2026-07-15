@@ -12,10 +12,19 @@ import type {
   DrawingHit,
   DrawingHitType,
   DrawingPrimitive,
+  SavedDrawing,
   ScreenBox,
   TextAlign,
 } from "./drawingTypes.js";
 import { drawingPerfCounters } from "./performance/drawingPerfCounters.js";
+import {
+  DEFAULT_DRAWING_RENDER_COLOR,
+  DEFAULT_DRAWING_RENDER_LINE_WIDTH,
+  DEFAULT_HIGHLIGHTER_RENDER_OPACITY,
+  DEFAULT_TEXT_RENDER_COLOR,
+  DEFAULT_TEXT_RENDER_FONT_FAMILY,
+  DEFAULT_TEXT_RENDER_FONT_SIZE,
+} from "./rendering/drawingRenderDefaults.js";
 
 export interface SelectedTextSnapshot {
   text: string;
@@ -177,6 +186,53 @@ export function hitTestDrawingPrimitives(
   }
 }
 
+export function selectedTextUiFromSavedDrawing(
+  saved: SavedDrawing | null | undefined,
+  box: ScreenBox | null = null,
+): SelectedTextUi {
+  if (!saved || saved.type !== "text") return EMPTY_SELECTED_TEXT_UI;
+  return {
+    snapshot: {
+      text: saved.text ?? "Text",
+      color: saved.color || DEFAULT_TEXT_RENDER_COLOR,
+      fontSize: saved.fontSize || DEFAULT_TEXT_RENDER_FONT_SIZE,
+      fontFamily: saved.fontFamily || DEFAULT_TEXT_RENDER_FONT_FAMILY,
+      bold: !!saved.bold,
+      italic: !!saved.italic,
+      underline: !!saved.underline,
+      align: saved.align || "left",
+      bgColor: saved.bgColor ?? null,
+      borderColor: saved.borderColor ?? null,
+      borderWidth: saved.borderWidth ?? 1,
+      widthPx: saved.widthPx ?? null,
+      padding: saved.padding ?? 6,
+    },
+    box,
+  };
+}
+
+export function selectedDrawingMetaFromSavedDrawing(
+  saved: SavedDrawing | null | undefined,
+): SelectedDrawingMeta | null {
+  if (!saved?.id || saved.type === "text" || saved.type === "position") return null;
+  const type = saved.type === "axis-line"
+    ? saved.axisLineType === "cross" ? "cross-line" : `${saved.axisLineType ?? "horizontal"}-line`
+    : saved.type === "angle-measure"
+      ? "angle-measure"
+      : saved.type === "shape"
+        ? saved.shapeType ?? "shape"
+        : saved.type;
+  return {
+    id: saved.id,
+    type,
+    color: saved.color || DEFAULT_DRAWING_RENDER_COLOR,
+    lineWidth: saved.lineWidth || DEFAULT_DRAWING_RENDER_LINE_WIDTH,
+    ...(saved.type === "highlighter"
+      ? { opacity: saved.opacity ?? DEFAULT_HIGHLIGHTER_RENDER_OPACITY }
+      : {}),
+  };
+}
+
 /**
  * useDrawingSelection — selection state + selection lifecycle.
  *
@@ -202,10 +258,14 @@ export interface DrawingSelectionRuntime {
 
 export function useDrawingSelection({
   primitivesRef,
+  getSavedDrawingById,
+  getScreenBoxById,
   onSelectionChange,
   mutatePrimitiveVisualState = true,
 }: {
   primitivesRef: MutableRefObject<DrawingPrimitive[]>;
+  getSavedDrawingById?: (id: string) => SavedDrawing | null;
+  getScreenBoxById?: (id: string) => ScreenBox | null;
   onSelectionChange?: () => void;
   mutatePrimitiveVisualState?: boolean;
 }): DrawingSelectionRuntime {
@@ -240,10 +300,15 @@ export function useDrawingSelection({
       // Freehand strokes don't have setSelected; locate by id directly
       selectedPrim = primitivesRef.current.find((p) => p.id === id) || null;
     }
-    setSelectedTextUi(selectedTextUiFromPrimitive(selectedPrim));
-    setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(selectedPrim));
+    const saved = selectedPrim ? null : getSavedDrawingById?.(id) ?? null;
+    setSelectedTextUi(selectedPrim
+      ? selectedTextUiFromPrimitive(selectedPrim)
+      : selectedTextUiFromSavedDrawing(saved, getScreenBoxById?.(id) ?? null));
+    setSelectedDrawingMeta(selectedPrim
+      ? selectedDrawingMetaFromPrimitive(selectedPrim)
+      : selectedDrawingMetaFromSavedDrawing(saved));
     if (mutatePrimitiveVisualState) onSelectionChange?.();
-  }, [mutatePrimitiveVisualState, onSelectionChange, primitivesRef]);
+  }, [getSavedDrawingById, getScreenBoxById, mutatePrimitiveVisualState, onSelectionChange, primitivesRef]);
 
   const deselectAll = useCallback(() => {
     selectedIdRef.current = null;
@@ -264,8 +329,11 @@ export function useDrawingSelection({
 
   const refreshSelectedTextUi = useCallback((id: string | null = selectedIdRef.current) => {
     const prim = id ? primitivesRef.current.find((p) => p.id === id) : null;
-    setSelectedTextUi(selectedTextUiFromPrimitive(prim));
-  }, [primitivesRef]);
+    const saved = !prim && id ? getSavedDrawingById?.(id) ?? null : null;
+    setSelectedTextUi(prim
+      ? selectedTextUiFromPrimitive(prim)
+      : selectedTextUiFromSavedDrawing(saved, id ? getScreenBoxById?.(id) ?? null : null));
+  }, [getSavedDrawingById, getScreenBoxById, primitivesRef]);
 
   return {
     selectedIdRef,

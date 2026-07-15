@@ -129,6 +129,7 @@ function DrawingEngineHost({
         setHidden,
         updateSelectedDrawingStyle,
     } = drawing;
+    const legacyPrimitiveEvidence = drawing.getLegacyPrimitiveRuntimeEvidence();
     const appliedInitialHiddenRef = useRef(false);
     const [chartContainerWidth, setChartContainerWidth] = useState<number>(0);
 
@@ -195,7 +196,21 @@ function DrawingEngineHost({
     return (
         <>
             <span data-drawing-engine="ready" hidden />
-            <span data-drawing-interaction-mode={interactionSurfaceMode} hidden />
+            <span
+                data-drawing-interaction-mode={interactionSurfaceMode}
+                data-drawing-editing-text-id={drawing.editingTextId ?? ""}
+                data-drawing-editing-text-position={drawing.editingTextPos
+                    ? `${drawing.editingTextPos.x},${drawing.editingTextPos.y}`
+                    : ""}
+                hidden
+            />
+            <span
+                data-drawing-registry-kind={legacyPrimitiveEvidence.registryKind}
+                data-drawing-legacy-instances={legacyPrimitiveEvidence.legacyPrimitiveInstanceCount}
+                data-drawing-legacy-attached={legacyPrimitiveEvidence.legacyPrimitiveAttachedCount}
+                data-drawing-zero-legacy={legacyPrimitiveEvidence.zeroLegacyPrimitiveInvariant ? "true" : "false"}
+                hidden
+            />
 
             {interactionSurfaceMode === "overlay" && (
                 <DrawingInteractionOverlay

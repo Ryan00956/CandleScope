@@ -378,6 +378,7 @@ class TextPaneView implements PrimitivePaneView {
 // ── The Primitive ──
 
 export class TextDrawingPrimitive {
+  _type: "text";
   _id: string;
   _dataPoint: DrawingDataPoint;
   _text: string;
@@ -423,6 +424,7 @@ export class TextDrawingPrimitive {
    * @param {number} [opts.padding]
    */
   constructor(opts: TextPrimitiveOptions) {
+    this._type = "text";
     this._id = opts.id;
     this._dataPoint = opts.dataPoint || { logical: 0, price: 0 };
     this._text = opts.text != null ? opts.text : "Text";

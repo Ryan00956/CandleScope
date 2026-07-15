@@ -270,6 +270,7 @@ test("scene bridge forwards only the exact plan painted on its current attached 
   bridge.subscribePainted((ack) => forwarded.push(ack));
   assert.equal(bridge.publish(firstPlan), true);
   assert.strictEqual(publishedPlan, firstPlan);
+  assert.strictEqual(bridge.snapshot().publishedPlan, firstPlan);
   emitPaint(firstPlan, 1);
   assert.deepEqual(forwarded.map((ack) => ack.stamp.documentRevision), [1]);
   assert.strictEqual(bridge.snapshot().lastPaintedStamp, firstPlan.stamp);
@@ -300,5 +301,6 @@ test("scene bridge forwards only the exact plan painted on its current attached 
   assert.deepEqual(forwarded.map((ack) => ack.stamp.documentRevision), [1, 2, 3]);
   assert.strictEqual(bridge.snapshot().lastPaintedStamp, secondPlan.stamp);
   bridge.clearPlan(false);
+  assert.equal(bridge.snapshot().publishedPlan, null);
   assert.equal(bridge.snapshot().lastPaintedStamp, null);
 });

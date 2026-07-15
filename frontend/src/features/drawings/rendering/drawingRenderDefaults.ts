@@ -390,7 +390,7 @@ export function normalizeDrawingEntityForRender(
         }),
         style: Object.freeze({
           kind: "position" as const,
-          positionSize: style.positionSize || DEFAULT_POSITION_RENDER_SIZE,
+          positionSize: style.positionSize ?? DEFAULT_POSITION_RENDER_SIZE,
           infoPanelOffset: normalizePositionOffsetForRender(style.infoPanelOffset),
         }),
       });

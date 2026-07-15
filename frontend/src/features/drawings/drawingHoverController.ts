@@ -13,7 +13,8 @@ interface HoverablePrimitive {
 
 interface HoverDrawingHit {
   type: DrawingHitType;
-  prim: HoverablePrimitive;
+  prim?: HoverablePrimitive;
+  axisLineType?: AxisLineType;
   pointIndex?: number;
   zone?: string;
   handle?: string;
@@ -68,7 +69,7 @@ export function hoverTargetForTool(
 
 export function cursorForLineToolHit(hit: HoverDrawingHit | null | undefined): string {
   if (hit?.type === "axis-line") {
-    const axisLineType = hit.prim.axisLineType;
+    const axisLineType = hit.axisLineType ?? hit.prim?.axisLineType;
     if (axisLineType === "horizontal") return "ns-resize";
     if (axisLineType === "vertical") return "ew-resize";
     return "move";

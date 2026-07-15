@@ -224,6 +224,7 @@ class DataManager:
         self._subscriptions: Any = None
         self._price_stream_controller: PriceStreamControllerLike | None = None
         self._market_data_service: Any = None
+        self._trade_flow_service: Any = None
         self._stream_leases: dict[SeriesKey, _StreamLease] = {}
         self._memory_gc_last_report: dict[str, Any] | None = None
         self._storage_gc_last_report: dict[str, Any] | None = None
@@ -295,9 +296,29 @@ class DataManager:
             raise TypeError("market data service does not implement the required facade")
         self._market_data_service = service
 
+    def set_trade_flow_service(self, service: Any) -> None:
+        """Attach the append-only aggregate-trade/TradeFlow service."""
+
+        required = (
+            "ensure_stream",
+            "release_stream",
+            "recent",
+            "history",
+            "attach",
+            "archive_coverage",
+            "diagnostics",
+        )
+        if any(not callable(getattr(service, name, None)) for name in required):
+            raise TypeError("trade flow service does not implement the required facade")
+        self._trade_flow_service = service
+
     @property
     def market_data_ready(self) -> bool:
         return self._market_data_service is not None
+
+    @property
+    def trade_flow_ready(self) -> bool:
+        return self._trade_flow_service is not None
 
     def wire_backfill_reconciler(self, reconciler: BackfillReconcilerLike) -> None:
         """Attach this manager's BarAggregator to a backfill reconciler."""
@@ -880,6 +901,57 @@ class DataManager:
         if self._market_data_service is None:
             raise RuntimeError("advanced market data service is not initialized")
         return self._market_data_service
+
+    # ═══════════════════════════════════════════════════════════
+    #  TradeFlow — append-only and intentionally separate from P1 latest state
+    # ═══════════════════════════════════════════════════════════
+
+    async def ensure_trade_flow_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_trade_flow_service()
+        return await service.ensure_stream(key, consumer_id=consumer_id)
+
+    async def release_trade_flow_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_trade_flow_service()
+        return await service.release_stream(key, consumer_id=consumer_id)
+
+    def trade_flow_recent(self, key: MarketStreamKey, **kwargs: Any) -> list[Any]:
+        service = self._require_trade_flow_service()
+        return service.recent(key, **kwargs)
+
+    async def trade_flow_history(
+        self,
+        key: MarketStreamKey,
+        **kwargs: Any,
+    ) -> list[Any]:
+        service = self._require_trade_flow_service()
+        return await service.history(key, **kwargs)
+
+    def attach_trade_flow(self, keys: list[MarketStreamKey], **kwargs: Any) -> Any:
+        service = self._require_trade_flow_service()
+        return service.attach(keys, **kwargs)
+
+    async def trade_flow_archive_coverage(
+        self,
+        key: MarketStreamKey,
+        **kwargs: Any,
+    ) -> Any:
+        service = self._require_trade_flow_service()
+        return await service.archive_coverage(key, **kwargs)
+
+    def _require_trade_flow_service(self) -> Any:
+        if self._trade_flow_service is None:
+            raise RuntimeError("trade flow service is not initialized")
+        return self._trade_flow_service
 
     # ═══════════════════════════════════════════════════════════
     #  Event Subscription — for real-time consumers
@@ -1902,6 +1974,11 @@ class DataManager:
             "market_data": (
                 self._market_data_service.diagnostics()
                 if self._market_data_service is not None
+                else {"status": "not_initialized"}
+            ),
+            "trade_flow": (
+                self._trade_flow_service.diagnostics()
+                if self._trade_flow_service is not None
                 else {"status": "not_initialized"}
             ),
             "auto_gc": self.auto_gc_snapshot(),

@@ -259,6 +259,7 @@ class TransportRequest:
     limit: int = 1
     start_ms: int | None = None
     end_ms: int | None = None
+    from_id: int | None = None
     history: bool = False
     quota_acquired: bool = False
     quota_semaphore_held: bool = False

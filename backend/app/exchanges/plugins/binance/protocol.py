@@ -149,6 +149,13 @@ class BinanceExchangeProtocol:
                 params["endTime"] = str(max(0, int(req.end_ms)))
         elif desc.stream_type.value == "aggTrade":
             params["limit"] = min(max(int(req.limit or 1), 1), 1000)
+            from_id = getattr(req, "from_id", None)
+            if from_id is not None:
+                if req.start_ms is not None or req.end_ms is not None:
+                    raise ValueError(
+                        "aggregate-trade requests cannot combine from_id with a time range",
+                    )
+                params["fromId"] = str(max(0, int(from_id)))
             if req.start_ms is not None:
                 params["startTime"] = str(max(0, int(req.start_ms)))
             if req.end_ms is not None:

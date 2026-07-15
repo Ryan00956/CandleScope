@@ -3,11 +3,30 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from app.core.config import KLINES_DB_PATH
+from app.core.config import (
+    KLINES_DB_PATH,
+    RAW_AGG_TRADE_ARCHIVE_BACKEND,
+    RAW_AGG_TRADE_ARCHIVE_DIR,
+    RAW_AGG_TRADE_ARCHIVE_ENABLED,
+    RAW_AGG_TRADE_ARCHIVE_FLUSH_SECONDS,
+    RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES,
+    RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH,
+    RAW_AGG_TRADE_ARCHIVE_STREAMS,
+    TRADE_FLOW_BATCH_INTERVAL_SECONDS,
+    TRADE_FLOW_DB_PATH,
+    TRADE_FLOW_EVENT_QUEUE_SIZE,
+    TRADE_FLOW_GAP_REPAIR_MAX_TRADES,
+    TRADE_FLOW_MAX_BATCH_SIZE,
+    TRADE_FLOW_MAX_STREAMS,
+    TRADE_FLOW_RAW_RING_SIZE,
+    TRADE_FLOW_ROLLUP_BACKEND,
+)
 from app.data_engine.backfill import BackfillEngine
 from app.data_engine.data_manager import DataManager
 from app.data_engine.data_manager.backfill_coordinator import BackfillCoordinator
@@ -16,16 +35,36 @@ from app.data_engine.data_manager.subscriptions import SubscriptionService
 from app.data_engine.ingestion import TransportLayer
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.factory import ExchangeIngestionFactory
+from app.data_engine.market_data.append_hub import AppendBatchHub
 from app.data_engine.market_data.service import MarketDataService
 from app.data_engine.market_data.storage_writer import MarketMetricStorageWriter
+from app.data_engine.market_data.trade_flow import (
+    NormalizedAggTrade,
+    TradeFlowEngine,
+)
+from app.data_engine.market_data.trade_flow_service import TradeFlowService
 from app.data_engine.storage import (
     AsyncKlinesRepoAdapter,
+    DisabledRawAggTradeArchive,
     GapLedger,
     KlinesRepoAdapter,
     MarketMetricsRepository,
+    ParquetRawAggTradeArchive,
+    RawAggTradeArchive,
+    RawAggTradeArchiveWriter,
+    SQLiteTradeFlowRollupStore,
+    TradeFlowRollupStore,
+    TradeFlowRollupWriter,
 )
 
 logger = logging.getLogger("data_engine.runtime")
+
+
+class TradeFlowConfigurationError(RuntimeError):
+    """A fail-fast TradeFlow storage or pipeline configuration error."""
+
+
+_RAW_ARCHIVE_CONSUMER_ID = "runtime:raw-agg-trade-archive"
 
 
 @dataclass(slots=True)
@@ -38,6 +77,7 @@ class DataEngineRuntime:
     backfill_engine: BackfillEngine
     backfill_coordinator: BackfillCoordinator
     market_data_service: MarketDataService
+    trade_flow_service: TradeFlowService
     price_stream_source: IngestionPriceSource | None = None
     subscription_service: SubscriptionService | None = None
     gap_scan_task: asyncio.Task | None = None
@@ -114,6 +154,12 @@ class DataEngineRuntime:
         )
 
         await self._shutdown_step(
+            "TradeFlowService",
+            self.trade_flow_service.shutdown(),
+            None,
+        )
+
+        await self._shutdown_step(
             "MarketDataService",
             self.market_data_service.shutdown(),
             step_timeout,
@@ -151,14 +197,230 @@ class DataEngineRuntime:
         print(f"[shutdown] {name} task cancelled ✓")
 
     @staticmethod
-    async def _shutdown_step(name: str, awaitable: Any, timeout: float) -> None:
+    async def _shutdown_step(
+        name: str,
+        awaitable: Any,
+        timeout: float | None,
+    ) -> None:
         try:
-            await asyncio.wait_for(awaitable, timeout=timeout)
+            if timeout is None:
+                # TradeFlow owns lossless final-rollup and optional raw archive
+                # queues.  Cancelling halfway through would make replay
+                # completeness unknowable, so its cancellation-safe shutdown
+                # is allowed to drain before dependent transports are closed.
+                await awaitable
+            else:
+                await asyncio.wait_for(awaitable, timeout=timeout)
             print(f"[shutdown] {name} shut down ✓")
         except asyncio.TimeoutError:
             print(f"[shutdown] {name} shutdown timed out")
         except Exception as exc:
             print(f"[shutdown] {name} shutdown error: {exc}")
+
+
+def _build_trade_flow_service(
+    ingestion_factory: ExchangeIngestionFactory,
+) -> TradeFlowService:
+    """Construct the independent append-only TradeFlow pipeline.
+
+    Backend selection happens before any exchange stream can be leased, so an
+    unsupported rollup/archive backend or an unusable enabled archive fails the
+    application startup instead of surfacing only after the first trade.
+    """
+
+    rollup_store = _build_trade_flow_rollup_store()
+    raw_archive = _build_raw_agg_trade_archive()
+    rollup_writer = TradeFlowRollupWriter(rollup_store)
+    if raw_archive.enabled:
+        archive_flush_seconds = _non_negative_float_config(
+            "RAW_AGG_TRADE_ARCHIVE_FLUSH_SECONDS",
+            RAW_AGG_TRADE_ARCHIVE_FLUSH_SECONDS,
+        )
+        archive_pending_batches = _positive_int_config(
+            "RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES",
+            RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES,
+        )
+        archive_batch_rows = _positive_int_config(
+            "RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH",
+            RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH,
+        )
+    else:
+        # Archive-only settings are intentionally inert while archival is off.
+        archive_flush_seconds = 0.0
+        archive_pending_batches = 1
+        archive_batch_rows = 1
+    archive_writer = RawAggTradeArchiveWriter(
+        raw_archive,
+        flush_interval_seconds=archive_flush_seconds,
+        max_pending_batches=archive_pending_batches,
+        max_rows_per_batch=archive_batch_rows,
+    )
+    event_queue_size = _positive_int_config(
+        "TRADE_FLOW_EVENT_QUEUE_SIZE",
+        TRADE_FLOW_EVENT_QUEUE_SIZE,
+    )
+    max_batch_size = _positive_int_config(
+        "TRADE_FLOW_MAX_BATCH_SIZE",
+        TRADE_FLOW_MAX_BATCH_SIZE,
+    )
+    max_streams = _positive_int_config(
+        "TRADE_FLOW_MAX_STREAMS",
+        TRADE_FLOW_MAX_STREAMS,
+    )
+    engine = TradeFlowEngine(
+        raw_ring_size=_positive_int_config(
+            "TRADE_FLOW_RAW_RING_SIZE",
+            TRADE_FLOW_RAW_RING_SIZE,
+        ),
+        max_streams=max_streams,
+    )
+    hub = AppendBatchHub[NormalizedAggTrade](
+        max_pending_records=event_queue_size,
+        max_batch_size=max_batch_size,
+        default_subscriber_max_pending_records=event_queue_size,
+    )
+    return TradeFlowService(
+        ingestion_factory,
+        engine=engine,
+        hub=hub,
+        rollup_store=rollup_store,
+        rollup_writer=rollup_writer,
+        raw_archive=raw_archive,
+        archive_writer=archive_writer,
+        command_queue_size=event_queue_size,
+        max_repair_trades_per_gap=_positive_int_config(
+            "TRADE_FLOW_GAP_REPAIR_MAX_TRADES",
+            TRADE_FLOW_GAP_REPAIR_MAX_TRADES,
+        ),
+        flush_interval_seconds=_positive_float_config(
+            "TRADE_FLOW_BATCH_INTERVAL_SECONDS",
+            TRADE_FLOW_BATCH_INTERVAL_SECONDS,
+        ),
+        archive_forward_queue_size=event_queue_size,
+        archive_forward_batch_size=archive_batch_rows,
+        max_streams=max_streams,
+    )
+
+
+def _build_trade_flow_rollup_store() -> TradeFlowRollupStore:
+    backend = str(TRADE_FLOW_ROLLUP_BACKEND).strip().lower()
+    if backend == "sqlite":
+        try:
+            return SQLiteTradeFlowRollupStore(TRADE_FLOW_DB_PATH)
+        except (OSError, TypeError, ValueError) as exc:
+            raise TradeFlowConfigurationError(
+                f"invalid TradeFlow SQLite path: {TRADE_FLOW_DB_PATH!r}"
+            ) from exc
+    raise TradeFlowConfigurationError(
+        "unsupported TradeFlow rollup backend "
+        f"{backend!r}; supported backends: sqlite"
+    )
+
+
+def _build_raw_agg_trade_archive() -> RawAggTradeArchive:
+    if not RAW_AGG_TRADE_ARCHIVE_ENABLED:
+        return DisabledRawAggTradeArchive()
+
+    backend = str(RAW_AGG_TRADE_ARCHIVE_BACKEND).strip().lower()
+    if backend != "parquet":
+        raise TradeFlowConfigurationError(
+            "unsupported raw aggTrade archive backend "
+            f"{backend!r}; supported backends: parquet"
+        )
+
+    try:
+        archive_root = Path(RAW_AGG_TRADE_ARCHIVE_DIR).expanduser()
+        archive_root.mkdir(parents=True, exist_ok=True)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise TradeFlowConfigurationError(
+            "raw aggTrade archive directory is unusable: "
+            f"{RAW_AGG_TRADE_ARCHIVE_DIR!r}"
+        ) from exc
+    if not archive_root.is_dir():
+        raise TradeFlowConfigurationError(
+            f"raw aggTrade archive path is not a directory: {archive_root}"
+        )
+
+    try:
+        return ParquetRawAggTradeArchive(
+            archive_root,
+            max_rows_per_file=_positive_int_config(
+                "RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH",
+                RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH,
+            ),
+        )
+    except TradeFlowConfigurationError:
+        raise
+    except Exception as exc:
+        raise TradeFlowConfigurationError(
+            "failed to initialize raw aggTrade Parquet archive: "
+            f"{exc}"
+        ) from exc
+
+
+def _raw_archive_stream_identities() -> tuple[tuple[str, str, str], ...]:
+    """Parse configured always-on raw archive identities fail-closed."""
+
+    if not RAW_AGG_TRADE_ARCHIVE_ENABLED:
+        return ()
+    identities: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw in RAW_AGG_TRADE_ARCHIVE_STREAMS:
+        if not isinstance(raw, str):
+            raise TradeFlowConfigurationError(
+                "RAW_AGG_TRADE_ARCHIVE_STREAMS entries must be strings"
+            )
+        parts = tuple(part.strip() for part in raw.split(":"))
+        if len(parts) != 3 or any(not part for part in parts):
+            raise TradeFlowConfigurationError(
+                "RAW_AGG_TRADE_ARCHIVE_STREAMS entries must use "
+                "exchange:market_type:symbol"
+            )
+        identity = (parts[0].lower(), parts[1].lower(), parts[2].upper())
+        if identity not in seen:
+            seen.add(identity)
+            identities.append(identity)
+    return tuple(identities)
+
+
+async def _start_raw_archive_streams(service: TradeFlowService) -> None:
+    """Hold optional runtime leases for continuous replay capture."""
+
+    for identity in _raw_archive_stream_identities():
+        try:
+            await service.ensure_stream(
+                identity,
+                consumer_id=_RAW_ARCHIVE_CONSUMER_ID,
+            )
+        except Exception as exc:
+            raise TradeFlowConfigurationError(
+                "failed to start configured raw aggTrade archive stream "
+                f"{identity[0]}:{identity[1]}:{identity[2]}"
+            ) from exc
+
+
+def _positive_int_config(name: str, value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise TradeFlowConfigurationError(f"{name} must be greater than zero")
+    return value
+
+
+def _positive_float_config(name: str, value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TradeFlowConfigurationError(f"{name} must be greater than zero")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise TradeFlowConfigurationError(f"{name} must be greater than zero")
+    return parsed
+
+
+def _non_negative_float_config(name: str, value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TradeFlowConfigurationError(f"{name} must be zero or greater")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0:
+        raise TradeFlowConfigurationError(f"{name} must be zero or greater")
+    return parsed
 
 
 async def start_data_engine() -> DataEngineRuntime:
@@ -169,6 +431,7 @@ async def start_data_engine() -> DataEngineRuntime:
     transport: TransportLayer | None = None
     price_source: IngestionPriceSource | None = None
     market_data_service: MarketDataService | None = None
+    trade_flow_service: TradeFlowService | None = None
 
     try:
         dm = DataManager()
@@ -192,6 +455,11 @@ async def start_data_engine() -> DataEngineRuntime:
         )
         dm.set_market_data_service(market_data_service)
         print("[startup] MarketDataService injected ✓")
+
+        trade_flow_service = _build_trade_flow_service(ingestion_factory)
+        dm.set_trade_flow_service(trade_flow_service)
+        await _start_raw_archive_streams(trade_flow_service)
+        print("[startup] TradeFlowService injected ✓")
 
         ingestion_cfg = IngestionConfig()
         transport = TransportLayer(ingestion_cfg)
@@ -234,6 +502,7 @@ async def start_data_engine() -> DataEngineRuntime:
             backfill_engine=backfill_engine,
             backfill_coordinator=backfill_coordinator,
             market_data_service=market_data_service,
+            trade_flow_service=trade_flow_service,
             price_stream_source=price_source,
             subscription_service=subscription_service,
             gap_scan_task=gap_scan_task,
@@ -250,6 +519,7 @@ async def start_data_engine() -> DataEngineRuntime:
                 transport=transport,
                 price_source=price_source,
                 market_data_service=market_data_service,
+                trade_flow_service=trade_flow_service,
             )
         raise
 
@@ -403,10 +673,14 @@ async def _cleanup_partial_start(
     transport: TransportLayer | None,
     price_source: IngestionPriceSource | None,
     market_data_service: MarketDataService | None,
+    trade_flow_service: TradeFlowService | None,
 ) -> None:
     if price_source is not None:
         with suppress(Exception):
             await price_source.stop()
+    if trade_flow_service is not None:
+        with suppress(Exception):
+            await trade_flow_service.shutdown()
     if market_data_service is not None:
         with suppress(Exception):
             await market_data_service.shutdown()
@@ -421,4 +695,8 @@ async def _cleanup_partial_start(
             await transport.stop()
 
 
-__all__ = ["DataEngineRuntime", "start_data_engine"]
+__all__ = [
+    "DataEngineRuntime",
+    "TradeFlowConfigurationError",
+    "start_data_engine",
+]

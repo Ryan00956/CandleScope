@@ -46,15 +46,25 @@ from app.api.v1.indicators import router as indicators_router  # indicator engin
 from app.api.v1.exchanges import router as exchanges_router
 from app.api.v1.klines import router as klines_router
 from app.api.v1.market import router as market_router
+from app.api.v1.trade_flow import router as trade_flow_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.stream import router as stream_router
 from app.api.v1.subscriptions import router as subscriptions_router
 from app.api.v1.subscriptions import price_ws_router
 from app.api.v1.symbols import router as symbols_router
-from app.core.config import CORS_ORIGINS, EVENT_LOOP_LAG_INTERVAL_SECONDS
+from app.core.config import (
+    CORS_ORIGINS,
+    EVENT_LOOP_LAG_INTERVAL_SECONDS,
+    TRADE_FLOW_DB_PATH,
+    TRADE_FLOW_ROLLUP_BACKEND,
+)
 from app.core.executors import executors_snapshot
 from app.core.runtime_metrics import EventLoopLagMonitor, ws_runtime_metrics
-from app.data_engine.storage import init_klines_storage, init_market_metrics_storage
+from app.data_engine.storage import (
+    init_klines_storage,
+    init_market_metrics_storage,
+    init_trade_flow_storage,
+)
 
 logger = logging.getLogger("candlescope")
 
@@ -74,6 +84,7 @@ app.add_middleware(
 
 app.include_router(klines_router, prefix="/api/v1")
 app.include_router(market_router, prefix="/api/v1")
+app.include_router(trade_flow_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
 app.include_router(alerts_router, prefix="/api/v1")
@@ -91,10 +102,14 @@ app.include_router(price_ws_router, prefix="/api/v1")
 
 async def _init_data_manager() -> None:
     """Create and start the DataEngine runtime."""
+    from app.data_engine.runtime import (
+        TradeFlowConfigurationError,
+        start_data_engine,
+    )
+
     try:
         from app.alerts.facade import AlertFacade
         from app.alerts.runtime import AlertRuntimeEngine
-        from app.data_engine.runtime import start_data_engine
         from app.indicator.data_manager_bridge import bridge_indicator_engine
         from app.indicator.range_result_service import IndicatorRangeResultService
         from app.indicator.series_revision import SeriesRevisionRegistry
@@ -133,6 +148,13 @@ async def _init_data_manager() -> None:
             logger.warning("AlertRuntime bridge failed: %s", exc, exc_info=True)
             print(f"[startup] AlertRuntime bridge failed: {exc}")
 
+    except TradeFlowConfigurationError as exc:
+        logger.critical(
+            "TradeFlow configuration prevents safe startup: %s",
+            exc,
+            exc_info=True,
+        )
+        raise
     except Exception as exc:
         logger.error("DataManager initialization failed: %s", exc, exc_info=True)
         print(f"[startup] DataManager init failed: {exc}")
@@ -154,6 +176,8 @@ async def startup_event() -> None:
     # 1. Initialize SQLite storage
     init_klines_storage()
     init_market_metrics_storage()
+    if TRADE_FLOW_ROLLUP_BACKEND == "sqlite":
+        init_trade_flow_storage(TRADE_FLOW_DB_PATH)
 
     # 2. Load exchange symbol info (non-blocking, best-effort)
     try:

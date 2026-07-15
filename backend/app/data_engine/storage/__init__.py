@@ -21,6 +21,20 @@ from .klines_repo import (
 )
 from .gap_ledger import GapLedger
 from .market_metrics_repo import MarketMetricsRepository, init_market_metrics_storage
+from .raw_trade_archive import (
+    DisabledRawAggTradeArchive,
+    ParquetRawAggTradeArchive,
+    RawAggTradeArchive,
+    RawAggTradeArchiveWriter,
+    RawAggTradeCoverage,
+    RawAggTradeGap,
+)
+from .trade_flow_store import (
+    SQLiteTradeFlowRollupStore,
+    TradeFlowRollupStore,
+    init_trade_flow_storage,
+)
+from .trade_flow_writer import TradeFlowRollupWriter
 
 __all__ = [
     "DEFAULT_EXCHANGE",
@@ -45,4 +59,14 @@ __all__ = [
     "GapLedger",
     "MarketMetricsRepository",
     "init_market_metrics_storage",
+    "DisabledRawAggTradeArchive",
+    "ParquetRawAggTradeArchive",
+    "RawAggTradeArchive",
+    "RawAggTradeArchiveWriter",
+    "RawAggTradeCoverage",
+    "RawAggTradeGap",
+    "SQLiteTradeFlowRollupStore",
+    "TradeFlowRollupStore",
+    "TradeFlowRollupWriter",
+    "init_trade_flow_storage",
 ]

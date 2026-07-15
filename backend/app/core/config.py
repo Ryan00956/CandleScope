@@ -21,6 +21,52 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("CANDLE_DATA_DIR", BASE_DIR / "data"))
 KLINES_DB_PATH = Path(os.getenv("KLINES_DB_PATH", DATA_DIR / "candlescope.db"))
 
+# TradeFlow is storage-backend neutral at the service boundary.  SQLite is the
+# first rollup implementation; raw aggregate-trade Parquet is opt-in because it
+# is intended for deterministic research/replay rather than normal chart use.
+TRADE_FLOW_ROLLUP_BACKEND = os.getenv(
+    "TRADE_FLOW_ROLLUP_BACKEND", "sqlite"
+).strip().lower()
+TRADE_FLOW_DB_PATH = Path(os.getenv("TRADE_FLOW_DB_PATH", KLINES_DB_PATH))
+TRADE_FLOW_RAW_RING_SIZE = int(os.getenv("TRADE_FLOW_RAW_RING_SIZE", "20000"))
+TRADE_FLOW_MAX_STREAMS = int(os.getenv("TRADE_FLOW_MAX_STREAMS", "64"))
+TRADE_FLOW_EVENT_QUEUE_SIZE = int(
+    os.getenv("TRADE_FLOW_EVENT_QUEUE_SIZE", "20000")
+)
+TRADE_FLOW_BATCH_INTERVAL_SECONDS = float(
+    os.getenv("TRADE_FLOW_BATCH_INTERVAL_SECONDS", "0.05")
+)
+TRADE_FLOW_MAX_BATCH_SIZE = int(os.getenv("TRADE_FLOW_MAX_BATCH_SIZE", "1000"))
+TRADE_FLOW_GAP_REPAIR_MAX_TRADES = int(
+    os.getenv("TRADE_FLOW_GAP_REPAIR_MAX_TRADES", "20000")
+)
+RAW_AGG_TRADE_ARCHIVE_ENABLED = os.getenv(
+    "RAW_AGG_TRADE_ARCHIVE_ENABLED", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+RAW_AGG_TRADE_ARCHIVE_BACKEND = os.getenv(
+    "RAW_AGG_TRADE_ARCHIVE_BACKEND", "parquet"
+).strip().lower()
+RAW_AGG_TRADE_ARCHIVE_DIR = Path(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_DIR", DATA_DIR / "raw_agg_trades")
+)
+# Optional comma-separated ``exchange:market_type:symbol`` identities.  When
+# empty, archival follows ordinary TradeFlow leases; configured identities are
+# held by a runtime lease so replay capture does not depend on an open browser.
+RAW_AGG_TRADE_ARCHIVE_STREAMS = tuple(
+    item.strip()
+    for item in os.getenv("RAW_AGG_TRADE_ARCHIVE_STREAMS", "").split(",")
+    if item.strip()
+)
+RAW_AGG_TRADE_ARCHIVE_FLUSH_SECONDS = float(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_FLUSH_SECONDS", "1.0")
+)
+RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES = int(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_MAX_PENDING_BATCHES", "16")
+)
+RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH = int(
+    os.getenv("RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH", "10000")
+)
+
 # Binance HTTP APIs
 BINANCE_BASE_URLS = [
     "https://api.binance.com",

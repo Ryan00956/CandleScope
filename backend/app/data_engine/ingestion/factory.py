@@ -179,6 +179,8 @@ class ExchangeIngestionFactory:
         self,
         descriptor: StreamDescriptor,
         on_market_event: Callable[[MarketEvent], Awaitable[None]],
+        *,
+        on_gap: Callable[[Any], Awaitable[None]] | None = None,
     ) -> _IngestionHandle:
         """Start one non-K-line physical market-data pipeline.
 
@@ -188,7 +190,11 @@ class ExchangeIngestionFactory:
 
         if descriptor.stream_type == StreamType.KLINE:
             raise ValueError("start_market does not accept KLINE descriptors")
-        return await self._start_descriptor(descriptor, on_market_event)
+        return await self._start_descriptor(
+            descriptor,
+            on_market_event,
+            on_gap=on_gap,
+        )
 
     async def _start_descriptor(
         self,
@@ -286,6 +292,7 @@ class ExchangeIngestionFactory:
         limit: int = 1,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        from_id: int | None = None,
         history: bool = False,
     ) -> list[MarketEvent]:
         """Fetch and normalize one REST snapshot or history page."""
@@ -299,6 +306,7 @@ class ExchangeIngestionFactory:
             limit=limit,
             start_ms=start_ms,
             end_ms=end_ms,
+            from_id=from_id,
             history=history,
         ))
         normalizer = create_normalizer(self._cfg, descriptor)

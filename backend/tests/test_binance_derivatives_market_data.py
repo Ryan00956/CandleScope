@@ -20,6 +20,7 @@ from app.data_engine.ingestion.transport import TransportError, TransportLayer
 from app.exchanges.plugins.binance.normalizer import BinanceNormalizer
 from app.exchanges.plugins.binance.plugin import BinancePlugin
 from app.exchanges.plugins.binance.protocol import BinanceExchangeProtocol
+from app.exchanges.rate_limits import HistoricalRequest
 from app.exchanges.ws_protocol import WsSubscriptionMode
 
 
@@ -79,6 +80,33 @@ def test_derivatives_history_override_preserves_existing_futures_rest_paths() ->
     ) is None
 
 
+def test_aggregate_trade_gap_repair_uses_from_id_without_time_range() -> None:
+    protocol = BinanceExchangeProtocol()
+    descriptor = _descriptor(StreamType.AGG_TRADE)
+
+    request = protocol.rest_request(
+        TransportRequest(descriptor, history=True, limit=5000, from_id=123),
+    )
+
+    assert request is not None
+    assert request.path == "/fapi/v1/aggTrades"
+    assert request.params == {
+        "symbol": "BTCUSDT",
+        "limit": 1000,
+        "fromId": "123",
+    }
+
+    with pytest.raises(ValueError, match="cannot combine from_id"):
+        protocol.rest_request(
+            TransportRequest(
+                descriptor,
+                history=True,
+                from_id=123,
+                start_ms=1_700_000_000_000,
+            ),
+        )
+
+
 def test_open_interest_history_rejects_unsupported_period_before_http() -> None:
     protocol = BinanceExchangeProtocol()
     with pytest.raises(ValueError, match="unsupported open-interest period"):
@@ -100,6 +128,14 @@ def test_binance_derivatives_rest_endpoints_have_shared_quota_buckets() -> None:
     assert rules["/fapi/v1/openInterest"].bucket_key == (
         "binance:futures:request_weight:ip"
     )
+    agg_trade_rule = rules["/fapi/v1/aggTrades"]
+    assert agg_trade_rule.bucket_key == "binance:futures:request_weight:ip"
+    assert agg_trade_rule.cost(HistoricalRequest(
+        exchange="binance",
+        market_type="futures",
+        endpoint="/fapi/v1/aggTrades",
+        symbol="BTCUSDT",
+    )) == 20
     assert rules["/fapi/v1/fundingRate"].refill_interval_seconds == 300
     assert rules["/futures/data/openInterestHist"].refill_interval_seconds == 300
 

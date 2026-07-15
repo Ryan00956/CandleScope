@@ -15,6 +15,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from app.api.v1.stream_indicators import stream_indicators
 from app.api.v1.stream_klines import stream_multi_kline, stream_single_kline
 from app.api.v1.stream_market import stream_market
+from app.api.v1.stream_trade_flow import stream_trade_flow
 from app.api.v1.stream_utils import (
     normalize_exchange as _normalize_exchange,
     normalize_market_type as _normalize_market_type,
@@ -170,3 +171,20 @@ async def market_stream(websocket: WebSocket) -> None:
         await websocket.close(code=1013)
         return
     await stream_market(websocket, dm)
+
+
+@router.websocket("/trade-flow")
+async def trade_flow_stream(websocket: WebSocket) -> None:
+    """Deliver append-only aggregate trades over ``tradeflow.v1``."""
+
+    await websocket.accept()
+    dm = _get_data_manager(websocket)
+    if dm is None or not getattr(dm, "trade_flow_ready", False):
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "code": "TRADE_FLOW_STREAM_NOT_READY",
+            "detail": "Trade-flow market data is not initialized.",
+        })
+        await websocket.close(code=1013)
+        return
+    await stream_trade_flow(websocket, dm)

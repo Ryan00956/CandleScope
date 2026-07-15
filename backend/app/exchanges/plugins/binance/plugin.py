@@ -106,6 +106,18 @@ class BinancePlugin(BuiltinExchangePlugin):
                     cooldown_seconds=backoff,
                 ),
                 RateLimitRule(
+                    name="binance_futures_aggregate_trades",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/aggTrades",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=lambda _request: 20,
+                    max_concurrency=futures_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
                     name="binance_futures_premium_index",
                     bucket_key="binance:futures:request_weight:ip",
                     endpoint="/fapi/v1/premiumIndex",

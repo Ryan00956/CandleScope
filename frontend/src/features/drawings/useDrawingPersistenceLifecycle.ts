@@ -12,6 +12,7 @@ import {
 } from "./drawingSelectionController.js";
 import type { SelectedTextUi } from "./drawingSelectionController.js";
 import { resolveDrawingDocumentAuthorityMode } from "./drawingDocumentAuthority.js";
+import { resolvePhase3DrawingEngineMode } from "./drawingEngineMode.js";
 import { createEmptyDrawingDocument } from "./core/drawingDocument.js";
 import {
   commitLegacyPrimitiveCommands,
@@ -29,11 +30,23 @@ import {
 } from "./legacy/legacyPrimitiveRenderer.js";
 import type { LegacyPrimitiveRenderer } from "./legacy/legacyPrimitiveRenderer.js";
 import type {
+  DrawingChartAdapter,
   DrawingPrimitive,
 } from "./drawingTypes.js";
+import {
+  createDrawingSceneRuntime,
+} from "./engine/drawingSceneRuntime.js";
+import type { DrawingSceneRuntime } from "./engine/drawingSceneRuntime.js";
+import {
+  projectDrawingScene,
+  projectDrawingSceneCanonicalGapIndexes,
+} from "./engine/drawingSceneProjector.js";
+import { compareDrawingShadowParity } from "./engine/drawingShadowParity.js";
+import { captureLegacyDrawingParityProbe } from "./legacy/legacyDrawingParityProbe.js";
 import type { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
 import {
   drawingPerfCounters,
+  registerDrawingPerfShadowParityRequester,
   registerDrawingPerfRuntimeSummaryProvider,
 } from "./performance/drawingPerfCounters.js";
 import type { DrawingPerfRuntimeSummary } from "./performance/drawingPerfCounters.js";
@@ -67,6 +80,12 @@ function runtimePrimitivePointCount(record: Record<string, unknown>): number {
   const dataPointCount = runtimeArrayLength(record.dataPoints ?? record._dataPoints);
   if (dataPointCount !== null) return dataPointCount;
   return record.dataPoint !== undefined || record._dataPoint !== undefined ? 1 : 0;
+}
+
+function drawingMonotonicNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
 }
 
 export function summarizeDrawingRuntimePrimitives(
@@ -169,6 +188,7 @@ export interface UseDrawingPersistenceLifecycleOptions {
   currentFreehandRef: MutableRefObject<FreehandDrawingPrimitive | null>;
   draggingRef: MutableRefObject<unknown | null>;
   getChartAdapter(): DrawingPersistenceAdapter | null;
+  getDrawingSceneAdapter(): DrawingChartAdapter | null;
   hiddenRef: MutableRefObject<boolean>;
   isDrawingFreehandRef: MutableRefObject<boolean>;
   prevSymbolRef: MutableRefObject<string | null>;
@@ -186,6 +206,7 @@ export function useDrawingPersistenceLifecycle({
   currentFreehandRef,
   draggingRef,
   getChartAdapter,
+  getDrawingSceneAdapter,
   hiddenRef,
   isDrawingFreehandRef,
   prevSymbolRef,
@@ -206,7 +227,47 @@ export function useDrawingPersistenceLifecycle({
   prepareSurfaceDispose(): boolean;
 } {
   const authorityMode = resolveDrawingDocumentAuthorityMode();
+  const [engineMode] = useState(() => (
+    authorityMode === "document"
+      ? resolvePhase3DrawingEngineMode()
+      : Object.freeze({
+          requested: "legacy" as const,
+          effective: "legacy" as const,
+          source: "default" as const,
+          failedClosed: false,
+        })
+  ));
+  const [sceneRuntime] = useState<DrawingSceneRuntime>(() => createDrawingSceneRuntime({
+    mode: engineMode.effective,
+    onError: (error) => {
+      drawingPerfCounters.incrementCounter("shadowErrorCount");
+      console.warn("Drawing shadow scene failed; the legacy renderer remains authoritative", error);
+    },
+    onMetrics: (metrics) => {
+      drawingPerfCounters.recordSceneProjectPaintDuration(metrics.buildDurationMs);
+      drawingPerfCounters.setGauge("shadowSceneBuildMs", metrics.buildDurationMs);
+      drawingPerfCounters.recordSceneRebuild();
+      drawingPerfCounters.setGauge("visibleEntities", metrics.visibleEntityCount);
+      drawingPerfCounters.setGauge("culledEntities", metrics.culledEntityCount);
+    },
+    onParity: (result) => {
+      drawingPerfCounters.incrementCounter("shadowCompareCount");
+      if (!result.ok) {
+        drawingPerfCounters.incrementCounter("shadowParityMismatchCount");
+      }
+      drawingPerfCounters.setGauge("shadowComparedEntities", result.comparedEntityCount);
+      drawingPerfCounters.setGauge("shadowComparedHits", result.comparedHitCount);
+      drawingPerfCounters.setGauge("shadowMismatchItems", result.mismatches.length);
+    },
+    onParityDuration: (durationMs) => {
+      drawingPerfCounters.setGauge("shadowParityMs", durationMs);
+    },
+    onSkipped: () => {
+      drawingPerfCounters.incrementCounter("shadowSkippedCount");
+    },
+  }));
   const adapterGetterRef = useRef(getChartAdapter);
+  const sceneAdapterGetterRef = useRef(getDrawingSceneAdapter);
   const [initialStore] = useState(() => drawingDocumentSessionRegistry.getStore(symbol));
   const [scopeRetryGeneration, setScopeRetryGeneration] = useState(0);
   const activeStoreRef = useRef<DrawingDocumentStore>(initialStore);
@@ -225,6 +286,14 @@ export function useDrawingPersistenceLifecycle({
   useEffect(() => {
     adapterGetterRef.current = getChartAdapter;
   }, [getChartAdapter]);
+
+  useEffect(() => {
+    sceneAdapterGetterRef.current = getDrawingSceneAdapter;
+  }, [getDrawingSceneAdapter]);
+
+  useEffect(() => () => {
+    sceneRuntime.dispose();
+  }, [sceneRuntime]);
 
   useEffect(() => {
     if (rendererRef.current) return;
@@ -253,6 +322,88 @@ export function useDrawingPersistenceLifecycle({
       },
     });
   }, [hiddenRef, selectedIdRef]);
+
+  const activateShadowScene = useCallback((
+    store: DrawingDocumentStore,
+    renderer: LegacyPrimitiveRenderer,
+  ): boolean => {
+    if (authorityMode !== "document" || engineMode.effective !== "shadow") return false;
+    const adapter = sceneAdapterGetterRef.current();
+    if (!adapter?.captureDrawingFrame
+      || !adapter.isDrawingFrameCurrent
+      || !adapter.projectDrawingFrameDataPoints
+      || !adapter.projectDrawingFrameSourceLineageSpan
+      || !adapter.measureText
+      || !adapter.subscribeDrawingFrameInvalidation) {
+      sceneRuntime.suspend();
+      return false;
+    }
+    return sceneRuntime.activate({
+      adapter,
+      renderer,
+      store,
+      projectScene: projectDrawingScene,
+      isVisible: () => !hiddenRef.current,
+      selectedId: () => selectedIdRef.current,
+      compareParity: (plan, document, sceneCanonicalIds, frame) => {
+        const probeStartedAt = drawingMonotonicNow();
+        const legacyPrimitives = renderer.snapshot();
+        const legacy = captureLegacyDrawingParityProbe(legacyPrimitives, {
+          widthCssPx: plan.stamp.widthCssPx,
+          heightCssPx: plan.stamp.heightCssPx,
+        });
+        drawingPerfCounters.setGauge(
+          "shadowLegacyProbeMs",
+          Math.max(0, drawingMonotonicNow() - probeStartedAt),
+        );
+        if (legacy.skippedCount > 0) {
+          drawingPerfCounters.incrementCounter("shadowSkippedCount", legacy.skippedCount);
+        }
+        if (legacy.errorCount > 0) {
+          drawingPerfCounters.incrementCounter("shadowErrorCount", legacy.errorCount);
+        }
+        // Layout capture reads the last coherent legacy paint. During the
+        // short window between a document/frame publication and the next
+        // paint, pixel-sized primitives may not have a usable painted box.
+        // Treat that sample as unavailable instead of manufacturing strict
+        // visible-set/missing-probe mismatches from a partial registry. A
+        // hit-only skip remains comparable for layout and serialization.
+        if (legacy.legacyLayouts.length !== legacyPrimitives.length
+          || legacy.serializedDrawings.length !== legacyPrimitives.length) {
+          return null;
+        }
+        const gapStartedAt = drawingMonotonicNow();
+        const sceneCanonicalGapIndexes = projectDrawingSceneCanonicalGapIndexes({
+          adapter,
+          document,
+          plan,
+          frame,
+        });
+        drawingPerfCounters.setGauge(
+          "shadowGapProjectionMs",
+          Math.max(0, drawingMonotonicNow() - gapStartedAt),
+        );
+        if (!sceneCanonicalGapIndexes || !adapter.isDrawingFrameCurrent(frame)) {
+          return null;
+        }
+        const compareStartedAt = drawingMonotonicNow();
+        const result = compareDrawingShadowParity({
+          document,
+          plan,
+          sceneCanonicalIds,
+          legacySerializedDrawings: legacy.serializedDrawings,
+          legacyLayouts: legacy.legacyLayouts,
+          hitProbes: legacy.hitProbes,
+          sceneCanonicalGapIndexes,
+        });
+        drawingPerfCounters.setGauge(
+          "shadowParityCompareMs",
+          Math.max(0, drawingMonotonicNow() - compareStartedAt),
+        );
+        return result;
+      },
+    });
+  }, [authorityMode, engineMode.effective, hiddenRef, sceneRuntime, selectedIdRef]);
 
   const commitPrimitiveDraft = useCallback((
     scopeKey: string,
@@ -322,8 +473,11 @@ export function useDrawingPersistenceLifecycle({
         console.warn("Drawing document persistence threw; the in-memory document remains dirty", error);
       }
     }
+    if (adoptRenderer && renderer.documentSnapshot() === store.getSnapshot()) {
+      activateShadowScene(store, renderer);
+    }
     return true;
-  }, [primitivesRef]);
+  }, [activateShadowScene, primitivesRef]);
 
   const requestScopeRetry = useCallback((): void => {
     setScopeRetryGeneration((generation) => (
@@ -412,6 +566,7 @@ export function useDrawingPersistenceLifecycle({
 
   const prepareSurfaceDispose = useCallback((): boolean => {
     scopeReadyRef.current = false;
+    sceneRuntime.suspend();
     if (!beforeScopeTransitionRef.current()) return false;
     if (authorityMode === "legacy") {
       persistAndMeasure(symbolRef.current, primitivesRef.current);
@@ -440,10 +595,11 @@ export function useDrawingPersistenceLifecycle({
       renderer.adopt(createEmptyDrawingDocument(store.getSnapshot().scopeKey), []);
     }
     return committed && detached;
-  }, [authorityMode, beforeScopeTransitionRef, commitPrimitiveDraft, getChartAdapter, primitivesRef, symbolRef]);
+  }, [authorityMode, beforeScopeTransitionRef, commitPrimitiveDraft, getChartAdapter, primitivesRef, sceneRuntime, symbolRef]);
 
   const completeSurfaceDispose = useCallback((): void => {
     scopeReadyRef.current = false;
+    sceneRuntime.suspend();
     if (authorityMode === "document") {
       // chart.remove() invalidates even credentials whose explicit detach
       // failed. Forget them only after the surface owner confirms removal so
@@ -454,7 +610,7 @@ export function useDrawingPersistenceLifecycle({
       renderer?.adopt(createEmptyDrawingDocument(scopeKey), []);
       primitivesRef.current = [];
     }
-  }, [authorityMode, primitivesRef]);
+  }, [authorityMode, primitivesRef, sceneRuntime]);
 
   const invalidateSurfaceCredentialsForSeriesReplacement = useCallback((): void => {
     // removeSeries() invalidates primitive-owned series bindings without
@@ -462,19 +618,25 @@ export function useDrawingPersistenceLifecycle({
     // but forget every old-series credential so the generation effect must
     // attach each canonical primitive to the replacement series.
     scopeReadyRef.current = false;
+    sceneRuntime.suspend();
     try {
       rendererRef.current?.releaseSurfaceCredentials();
     } catch {
       // This imperative invalidation boundary is deliberately no-throw.
     }
-  }, []);
+  }, [sceneRuntime]);
 
   useEffect(() => registerDrawingPerfRuntimeSummaryProvider(
     () => summarizeDrawingRuntimePrimitives(primitivesRef.current),
   ), [primitivesRef]);
 
+  useEffect(() => registerDrawingPerfShadowParityRequester(
+    () => sceneRuntime.requestParity(),
+  ), [sceneRuntime]);
+
   useEffect(() => {
     scopeReadyRef.current = false;
+    sceneRuntime.suspend();
     const adapter = getChartAdapter();
     const renderer = rendererRef.current;
     if (!adapter?.hasSeries?.() || !renderer || !symbol || !seriesReady) return;
@@ -590,6 +752,7 @@ export function useDrawingPersistenceLifecycle({
       prevSymbolRef.current = symbol;
       symbolRef.current = symbol;
       scopeReadyRef.current = rebound;
+      if (rebound) activateShadowScene(activeStoreRef.current, renderer);
       return;
     }
 
@@ -627,12 +790,14 @@ export function useDrawingPersistenceLifecycle({
         setSelectedPrimId(null);
       }
       scopeReadyRef.current = true;
+      activateShadowScene(store, renderer);
     }
     drawingPerfCounters.setGauge("visibleEntities", primitivesRef.current.length);
 
     prevSymbolRef.current = symbol;
   }, [
     currentFreehandRef,
+    activateShadowScene,
     authorityMode,
     beforeScopeTransitionRef,
     commitPrimitiveDraft,
@@ -643,6 +808,7 @@ export function useDrawingPersistenceLifecycle({
     prevSymbolRef,
     primitivesRef,
     selectedIdRef,
+    sceneRuntime,
     seriesReady,
     setSelectedPrimId,
     setSelectedTextUi,
@@ -656,6 +822,7 @@ export function useDrawingPersistenceLifecycle({
 
   useEffect(() => () => {
     scopeReadyRef.current = false;
+    sceneRuntime.suspend();
     const adapter = getChartAdapter();
     if (authorityMode === "document") {
       const prepared = beforeScopeTransitionRef.current();
@@ -686,7 +853,7 @@ export function useDrawingPersistenceLifecycle({
       const activeScope = activeStoreRef.current.getSnapshot().scopeKey;
       renderer?.adopt(createEmptyDrawingDocument(activeScope), []);
     }
-  }, [authorityMode, beforeScopeTransitionRef, commitPrimitiveDraft, getChartAdapter, primitivesRef]);
+  }, [authorityMode, beforeScopeTransitionRef, commitPrimitiveDraft, getChartAdapter, primitivesRef, sceneRuntime]);
 
   return {
     clearDrawings,

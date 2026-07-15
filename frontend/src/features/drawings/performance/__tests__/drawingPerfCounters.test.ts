@@ -6,6 +6,7 @@ import {
   createDrawingPerfCounters,
   installDrawingPerfDebugHandle,
   readDrawingPerfBootstrapConfig,
+  registerDrawingPerfShadowParityRequester,
   type DrawingPerfDebugHandle,
   type DrawingPerfSummaryEventDetail,
 } from "../drawingPerfCounters.js";
@@ -120,12 +121,63 @@ test("counters, gauges, and attributed long tasks reject invalid measurements", 
     workerQueue: 2,
     workerInFlight: 0,
     cacheBytes: 0,
+    shadowComparedEntities: 0,
+    shadowComparedHits: 0,
+    shadowGapProjectionMs: 0,
+    shadowLegacyProbeMs: 0,
+    shadowMismatchItems: 0,
+    shadowParityCompareMs: 0,
+    shadowParityMs: 0,
+    shadowSceneBuildMs: 0,
   });
   assert.equal(snapshot.gaugeMaxima.workerQueue, 2);
   assert.equal(snapshot.gaugeMaxima.rawPoints, 4_096);
   assert.equal(Object.keys(snapshot.longTasksByAttribution).length, 2);
   assert.deepEqual(snapshot.longTasksByAttribution.render, { count: 1, totalDurationMs: 55 });
   assert.deepEqual(snapshot.longTasksByAttribution.other, { count: 2, totalDurationMs: 130 });
+});
+
+test("shadow parity summaries use fixed-size counters and latest-value gauges", () => {
+  const counters = createDrawingPerfCounters({ now: () => 0, reporter: null });
+  assert.equal(counters.incrementCounter("shadowCompareCount"), true);
+  assert.equal(counters.incrementCounter("shadowParityMismatchCount", 2), true);
+  assert.equal(counters.incrementCounter("shadowSkippedCount", 3), true);
+  assert.equal(counters.incrementCounter("shadowErrorCount", 4), true);
+  assert.equal(counters.setGauge("shadowComparedEntities", 512), true);
+  assert.equal(counters.setGauge("shadowComparedHits", 32), true);
+  assert.equal(counters.setGauge("shadowGapProjectionMs", 4.5), true);
+  assert.equal(counters.setGauge("shadowLegacyProbeMs", 5.5), true);
+  assert.equal(counters.setGauge("shadowMismatchItems", 7), true);
+  assert.equal(counters.setGauge("shadowParityCompareMs", 2.5), true);
+  assert.equal(counters.setGauge("shadowParityMs", 12.5), true);
+
+  let snapshot = counters.snapshot();
+  assert.equal(snapshot.counters.shadowCompareCount, 1);
+  assert.equal(snapshot.counters.shadowParityMismatchCount, 2);
+  assert.equal(snapshot.counters.shadowSkippedCount, 3);
+  assert.equal(snapshot.counters.shadowErrorCount, 4);
+  assert.equal(snapshot.gauges.shadowComparedEntities, 512);
+  assert.equal(snapshot.gauges.shadowComparedHits, 32);
+  assert.equal(snapshot.gauges.shadowGapProjectionMs, 4.5);
+  assert.equal(snapshot.gauges.shadowLegacyProbeMs, 5.5);
+  assert.equal(snapshot.gauges.shadowMismatchItems, 7);
+  assert.equal(snapshot.gauges.shadowParityCompareMs, 2.5);
+  assert.equal(snapshot.gauges.shadowParityMs, 12.5);
+
+  assert.equal(counters.incrementCounter("shadowCompareCount", Number.MAX_SAFE_INTEGER), true);
+  assert.equal(counters.incrementCounter("shadowCompareCount"), true);
+  assert.equal(counters.setGauge("shadowMismatchItems", 1), true);
+  snapshot = counters.snapshot();
+  assert.equal(snapshot.counters.shadowCompareCount, Number.MAX_SAFE_INTEGER);
+  assert.equal(snapshot.gauges.shadowMismatchItems, 1);
+  assert.equal(snapshot.gaugeMaxima.shadowMismatchItems, 7);
+
+  counters.reset();
+  snapshot = counters.snapshot();
+  assert.equal(snapshot.counters.shadowCompareCount, 0);
+  assert.equal(snapshot.gauges.shadowComparedEntities, 0);
+  assert.equal(snapshot.gauges.shadowComparedHits, 0);
+  assert.equal(snapshot.gauges.shadowMismatchItems, 0);
 });
 
 test("reset clears all rolling state and restarts the controlled clock window", () => {
@@ -392,6 +444,16 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
   });
   assert.equal(handle?.readRuntimeSummary(), null);
   unregisterThrowing?.();
+  assert.equal(handle?.requestShadowParity(), false);
+  const unregisterParity = registerDrawingPerfShadowParityRequester(() => true);
+  assert.equal(handle?.requestShadowParity(), true);
+  unregisterParity();
+  assert.equal(handle?.requestShadowParity(), false);
+  const unregisterThrowingParity = registerDrawingPerfShadowParityRequester(() => {
+    throw new Error("scene unavailable");
+  });
+  assert.equal(handle?.requestShadowParity(), false);
+  unregisterThrowingParity();
   assert.doesNotThrow(() => handle?.reset());
   assert.equal(installDrawingPerfDebugHandle(null), null);
 });

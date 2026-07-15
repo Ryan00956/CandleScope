@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3 尚未开始。
+状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3 已完成（2026-07-15）；Phase 4 尚未开始。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -54,7 +54,7 @@ git -C "H:\program\CandleScope" worktree list
 | 0 | 固定重负载基准与 instrumentation | 已完成（before baseline 已固化） |
 | 1 | 原子坐标快照与批量 anchor resolver | 已完成（batch baseline 已固化） |
 | 2 | DrawingDocumentStore、commands 与 codec | 已完成（document authoritative checkpoint） |
-| 3 | Scene shadow、culling 与 render plan | 未开始 |
+| 3 | Scene shadow、culling 与 render plan | 已完成（正式 shadow parity/perf 门通过） |
 | 4 | 单一 DrawingScenePrimitive | 未开始 |
 | 5 | Dynamic Overlay 与 Live Ink | 未开始 |
 | 6 | LOD、命中索引、worker 与背压 | 未开始 |
@@ -686,17 +686,17 @@ Phase 2C：
 
 ### 逐步任务
 
-- [ ] 实现 <code>legacy/shadow/scene-canary/scene</code> mode resolver。
-- [ ] scene registry 按 entity id/z-order 维护 retained nodes。
-- [ ] 每 entity 生成 canonical bounds。
-- [ ] ray/infinite line 使用明确 unbounded 标志，不伪造巨大 bbox。
-- [ ] 当前 ≤ 512 entities 先采用 packed bbox arrays 顺序扫描。
-- [ ] 长自由笔按 chunk 建 bounds，避免一个跨全图 stroke 每次处理全部点。
-- [ ] shadow 使用同一 atomic frame snapshot。
-- [ ] 生成 typed screen display list，不创建每点对象。
-- [ ] 比较 legacy 与 scene 的 visible entity、bbox、handles、hit entity 和 serialized output。
-- [ ] 对比结果低频汇总到 perf store。
-- [ ] shadow 禁止 attach 可见 canvas、注册第二套 pointer listener或写第二份 persistence。
+- [x] 实现 <code>legacy/shadow/scene-canary/scene</code> mode resolver。
+- [x] scene registry 按 entity id/z-order 维护 retained nodes。
+- [x] 每 entity 生成 canonical bounds。
+- [x] ray/infinite line 使用明确 unbounded 标志，不伪造巨大 bbox。
+- [x] 当前 ≤ 512 entities 先采用 packed bbox arrays 顺序扫描。
+- [x] 长自由笔按 chunk 建 bounds，避免一个跨全图 stroke 每次处理全部点。
+- [x] shadow 使用同一 atomic frame snapshot。
+- [x] 生成 typed screen display list，不创建每点对象。
+- [x] 比较 legacy 与 scene 的 visible entity、bbox、handles、hit entity 和 serialized output。
+- [x] 对比结果低频汇总到 perf store。
+- [x] shadow 禁止 attach 可见 canvas、注册第二套 pointer listener或写第二份 persistence。
 
 ### Shadow parity 门
 
@@ -1335,4 +1335,22 @@ Correctness parity: 9 类 drawing geometry/style、legacy import/export、freeha
 Known limitations: Phase 3 scene shadow/culling/render plan 尚未开始；legacy per-entity primitives 仍承担可见渲染和活动手势草稿，因此最终 V2 frame/scene 目标按计划尚未达成，不属于 Phase 2 失败。
 Rollback verified: 设置 VITE_DRAWING_DOCUMENT_AUTHORITY=legacy 即回到原 legacy adapter；继续读写相同 SavedDrawing[] key/数据，不迁移、不删除本地数据。document 模式的 dirty session 在 host reacquisition 时保留，失败提交恢复 canonical snapshot。
 Decision: Phase 2 PASS；独立最终复审无 P0/P1/exit blocker；Phase 3 未开始。
+~~~
+
+### Phase 3 执行记录
+
+~~~text
+Phase: 3 — Scene shadow、culling 与 render plan
+Date: 2026-07-15
+Commit: 本执行记录所在 checkpoint（feat(frontend): add shadow drawing scene runtime）
+Mode: legacy 可见 renderer + shadow scene；scene-canary/scene 在 Phase 4 可见 primitive 就绪前继续 fail closed 到 legacy
+Files: drawingEngineMode.ts、engine/drawingSceneRuntime.ts/drawingSceneRegistry.ts/drawingRenderScheduler.ts/drawingSceneProjector.ts/drawingShadowParity.ts、geometry/drawingBounds.ts、rendering/drawingDisplayList.ts、legacy parity probe、atomic frame/adapter/lifecycle/selection/interaction/perf counters、scripts/drawing-performance.mjs、.env.example 与对应 tests
+Tests: npm.cmd run check 通过：architecture migration allowlist=0、双 TypeScript、ESLint、1023/1023 tests、production build 317 modules、git diff --check；scene runtime/scheduler/projector/display-list/parity 定向回归 56/56 通过
+Smoke: production build 下 64×512 scene-build margin 三轮 smoke 为 35.0/29.8/39.2ms，优化后正式前复测为 63/70/80 Long Tasks；200 mixed 三轮均为 0；两组 smoke 的 execution、parity、hit coverage、restore 与 diagnostics 均通过
+Perf baseline: docs/perf-baselines/drawing-engine-v2/phase3-legacy-2026-07-15.json；docs/perf-baselines/drawing-engine-v2/phase3-shadow-2026-07-15.json；共同 buildInputFingerprint=4aeb3eca5c643b236e9a7897e1b95fbb0065acd4b825c8d03264285df9446c42
+Perf result: phase3Acceptance=true、phase3Comparison=true、beforeEligible=true、afterEligible=true、contextComparable=true；Chrome/150.0.7871.101，6 场景各 1 warm-up + 5 measured，共 36/36 runs。legacy→shadow attributable Long Tasks：empty 0→0、single freehand 0→0、64×512/32768 点 373→317、200 mixed 0→0、512 mixed 5→2、active 1→0；所有场景 noNewLongTasks=true。shadowSceneBuildMs 单轮最大值：empty 0、single 6.0、64×512 30.5、200 mixed 3.1、512 mixed 6.1、active 5.0ms，全部 ≤50ms。
+Correctness parity: canonical id/z-order、visible set、bbox、handles、hit entity/zone/handle、normalized SavedDrawing 与 unresolved gap 全部通过；非空场景每轮均有实体和 hit 比较，64×512 为 64 entities/32 hits；全部 measured run 的 shadowParityMismatchCount=0、shadowErrorCount=0、shadowMismatchItems=0，restore/diagnostics 全部干净。shadow scene 只读取 authoritative document 与 atomic frame，不 attach canvas、不注册 pointer listener、不写 persistence。
+Known limitations: Phase 3 只建立不可见 scene shadow；可见 surface 仍由 legacy per-entity primitives 渲染。单一 DrawingScenePrimitive、首批 line/axis-line/shape 可见迁移、scene hit/selection/drag bridge 与真实 attached-primitive instrumentation 属于 Phase 4，不在本阶段提前切换。
+Rollback verified: VITE_DRAWING_ENGINE_MODE=legacy 可停用 shadow；shadow 不改变 SavedDrawing/document 数据、可见 canvas、pointer owner 或 persistence owner。scene build/parity 失败均保留 legacy 可见路径并 fail closed，不需要数据回滚。
+Decision: Phase 3 PASS；正式 legacy/shadow 对照、正确性 parity、≤50ms scene build 与 no-new-Long-Task 门全部通过；Phase 4 尚未开始。
 ~~~

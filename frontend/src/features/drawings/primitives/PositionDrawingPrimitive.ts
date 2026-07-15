@@ -760,11 +760,15 @@ class PositionPaneView implements PrimitivePaneView {
     const chart = source._chart;
 
     if (!series || !chart) return;
+    source._parityInfoPanelBox = null;
     if (source._hidden) {
       source._infoPanelBox = null;
       this._renderer.update({
         hidden: true,
-        setInfoPanelBox: (box: ScreenBox | null) => { source._infoPanelBox = box; },
+        setInfoPanelBox: (box: ScreenBox | null) => {
+          source._infoPanelBox = box;
+          source._parityInfoPanelBox = box;
+        },
       });
       return;
     }
@@ -836,7 +840,10 @@ class PositionPaneView implements PrimitivePaneView {
       downColor,
       currentPrice,
       hidden: false,
-      setInfoPanelBox: (box: ScreenBox | null) => { source._infoPanelBox = box; },
+      setInfoPanelBox: (box: ScreenBox | null) => {
+        source._infoPanelBox = box;
+        source._parityInfoPanelBox = box;
+      },
     });
   }
 
@@ -862,6 +869,7 @@ export class PositionDrawingPrimitive {
   _positionSize: number;
   _infoPanelOffset: PositionInfoPanelOffset;
   _infoPanelBox: ScreenBox | null;
+  _parityInfoPanelBox: ScreenBox | null;
   _selected: boolean;
   _isPreview: boolean;
   _hovered: boolean;
@@ -894,6 +902,7 @@ export class PositionDrawingPrimitive {
     this._positionSize = opts.positionSize || 1000;
     this._infoPanelOffset = normalizeInfoPanelOffset(opts.infoPanelOffset);
     this._infoPanelBox = null;
+    this._parityInfoPanelBox = null;
     this._selected = opts.selected || false;
     this._isPreview = opts.isPreview || false;
     this._hovered = opts.hovered || false;
@@ -940,6 +949,11 @@ export class PositionDrawingPrimitive {
   get infoPanelOffset(): PositionInfoPanelOffset { return this._infoPanelOffset; }
   get selected(): boolean { return this._selected; }
   get geometryRevision(): number { return this._geometryRevision; }
+  getParityInfoPanelBox(): Readonly<ScreenBox> | null {
+    return this._parityInfoPanelBox
+      ? Object.freeze({ ...this._parityInfoPanelBox })
+      : null;
+  }
   get dataPoints(): DrawingDataPoint[] {
     const points: DrawingDataPoint[] = [];
     const start = horizontalAnchorToDataPoint(this._timeRange.start, this._entryPrice);

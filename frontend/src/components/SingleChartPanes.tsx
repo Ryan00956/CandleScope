@@ -11,7 +11,10 @@ import type {
   MutableRefObject,
 } from "react";
 import { createLightweightChartAdapter } from "../chart-adapter/chartInstanceBridge";
-import { createDrawingFrameSnapshotFactory } from "../chart-adapter/drawingFrameSnapshot";
+import {
+  createDrawingFrameSnapshotFactory,
+  createDrawingViewportSignature,
+} from "../chart-adapter/drawingFrameSnapshot";
 import {
   applyChartPaneAppearance,
   buildChartPaneOptions,
@@ -1229,29 +1232,85 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         const chart = chartRef.current;
         const series = mainSeriesRef.current;
         const container = containerRef.current;
+        if (!chart || !series || !container) return null;
         const rect = container?.getBoundingClientRect?.();
-        let viewportKey = "unavailable";
+        const containerHeight = rect?.height ?? container.clientHeight ?? 0;
+        const paneHeight = chart.panes?.()?.[0]?.getHeight?.();
+        const heightCssPx = typeof paneHeight === "number"
+          && Number.isFinite(paneHeight)
+          && paneHeight > 0
+          ? paneHeight
+          : containerHeight;
+        const widthCssPx = rect?.width ?? container.clientWidth ?? 0;
+        if (!Number.isFinite(heightCssPx) || heightCssPx <= 0
+          || !Number.isFinite(widthCssPx) || widthCssPx <= 0) return null;
+        let viewportKey: string | null = null;
+        let drawingViewport: {
+          horizontalDomain: "logical" | "time";
+          minHorizontal: number;
+          maxHorizontal: number;
+          minPrice: number;
+          maxPrice: number;
+        } | null = null;
+        let barSpacing = 1;
         try {
-          const timeScale = chart?.timeScale?.();
-          const logical = timeScale?.getVisibleLogicalRange?.() || null;
-          viewportKey = JSON.stringify([
-            logical?.from ?? null,
-            logical?.to ?? null,
-            timeScale?.options?.().barSpacing ?? null,
-            timeScale?.scrollPosition?.() ?? null,
-            drawingPriceProjectionKeyRef.current,
-          ]);
+          const timeScale = chart.timeScale();
+          const logical = timeScale.getVisibleLogicalRange() || null;
+          const visibleTime = timeScale.getVisibleRange() || null;
+          const priceAtTop = series.coordinateToPrice(0);
+          const priceAtMiddle = series.coordinateToPrice(heightCssPx / 2);
+          const priceAtBottom = series.coordinateToPrice(heightCssPx);
+          barSpacing = timeScale.options().barSpacing;
+          viewportKey = createDrawingViewportSignature({
+            barSpacing,
+            heightCssPx,
+            logicalRange: logical,
+            priceAtBottom,
+            priceAtMiddle,
+            priceAtTop,
+            priceProjectionKey: drawingPriceProjectionKeyRef.current,
+            scrollPosition: timeScale.scrollPosition(),
+          });
+          const topPrice = typeof priceAtTop === "number" && Number.isFinite(priceAtTop)
+            ? Number(priceAtTop)
+            : null;
+          const bottomPrice = typeof priceAtBottom === "number" && Number.isFinite(priceAtBottom)
+            ? Number(priceAtBottom)
+            : null;
+          const axisKind = surfaceAxisModeRef.current === "derived-ordinal"
+            ? "derived-ordinal"
+            : "time";
+          const from = axisKind === "derived-ordinal"
+            ? logical?.from ?? null
+            : sourceTimeFromAxisTime(visibleTime?.from);
+          const to = axisKind === "derived-ordinal"
+            ? logical?.to ?? null
+            : sourceTimeFromAxisTime(visibleTime?.to);
+          if (topPrice !== null && bottomPrice !== null
+            && typeof from === "number" && Number.isFinite(from)
+            && typeof to === "number" && Number.isFinite(to)) {
+            drawingViewport = {
+              horizontalDomain: axisKind === "derived-ordinal" ? "logical" : "time",
+              minHorizontal: Math.min(from, to),
+              maxHorizontal: Math.max(from, to),
+              minPrice: Math.min(topPrice, bottomPrice),
+              maxPrice: Math.max(topPrice, bottomPrice),
+            };
+          }
         } catch {
-          viewportKey = "unavailable";
+          return null;
         }
+        if (!viewportKey) return null;
         return drawingFrameSnapshotFactoryRef.current?.capture({
           axisKind: surfaceAxisModeRef.current === "derived-ordinal"
             ? "derived-ordinal"
             : "time",
+          barSpacing,
           coordinateKey: owner.coordinateKey || drawingCoordinateKeyRef.current,
           dpr: typeof window === "undefined" ? 1 : window.devicePixelRatio,
           drawingProjectionConfig: owner.drawingProjectionConfig,
-          heightCssPx: rect?.height ?? container?.clientHeight ?? 0,
+          drawingViewport,
+          heightCssPx,
           ordinalSeriesIndex: snapshot.ordinalSeriesIndex,
           projectionKey: owner.drawingProjectionConfig ?? surfaceAxisModeRef.current,
           seriesData: snapshot.seriesData,
@@ -1261,7 +1320,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           surfaceToken: series,
           themeKey: drawingThemeKeyRef.current,
           viewportKey,
-          widthCssPx: rect?.width ?? container?.clientWidth ?? 0,
+          widthCssPx,
         }) || null;
       },
     }),
@@ -1707,6 +1766,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (!isChartPointerActiveRef.current) return;
       isChartPointerActiveRef.current = false;
       saveNativePaneHeights();
+      chartAdapter.notifyDrawingFrameInvalidation();
       if (futureTimeAxisCoveragePendingRef.current) scheduleFutureTimeAxisCoverage();
     };
     wrapper.addEventListener("wheel", markUserInteracted, { passive: true });
@@ -1726,7 +1786,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       window.removeEventListener("blur", releasePointer);
       isChartPointerActiveRef.current = false;
     };
-  }, [activeSubPanes.length, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage]);
+  }, [activeSubPanes.length, chartAdapter, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1735,6 +1795,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       applyChartPaneAppearance(chart, { theme, customBg, timezone, interval });
       chart.applyOptions({ layout: buildPaneLayoutOptions() });
       appliedAppearanceIntervalRef.current = interval;
+      chartAdapter.notifyDrawingFrameInvalidation();
     };
     if (appliedAppearanceIntervalRef.current === interval) {
       applyAppearance();
@@ -1802,7 +1863,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }
     });
     return () => cancelAnimationFrame(frameId);
-  }, [customBg, interval, theme, timezone]);
+  }, [chartAdapter, customBg, interval, theme, timezone]);
 
   useEffect(() => {
     const activeType = mainSeriesTypeRef.current || resolvedChartType;
@@ -1810,7 +1871,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       ...buildMainSeriesStyleOptions(activeType, { upColor, downColor }),
       crosshairMarkerVisible: showCrosshairDetails && !drawingEngineToolActive,
     });
-  }, [downColor, drawingEngineToolActive, resolvedChartType, seriesReady, showCrosshairDetails, upColor]);
+    chartAdapter.notifyDrawingFrameInvalidation();
+  }, [chartAdapter, downColor, drawingEngineToolActive, resolvedChartType, seriesReady, showCrosshairDetails, upColor]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -1922,6 +1984,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       mainSeriesRef.current = result.series;
       mainSeriesTypeRef.current = result.chartType;
       mainSeriesReplaced = true;
+      chartAdapter.notifyDrawingFrameInvalidation();
       // Publish drawing invalidation immediately after the irreversible series
       // replacement. Later projection/layout work may throw, but the drawing
       // lifecycle must still receive a generation and rebind every entity.
@@ -2000,14 +2063,16 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       invertScale: !!invertScale,
       mode: priceScaleMode ?? 0,
     });
-  }, [invertScale, priceScaleMode, seriesReady]);
+    chartAdapter.notifyDrawingFrameInvalidation();
+  }, [chartAdapter, invertScale, priceScaleMode, seriesReady]);
 
   const resetAutoScale = useCallback(() => {
     try {
       chartRef.current?.priceScale("right", 0).applyOptions({ autoScale: true });
+      chartAdapter.notifyDrawingFrameInvalidation();
       setIsAutoScale(true);
     } catch { /* */ }
-  }, []);
+  }, [chartAdapter]);
 
   const handlePriceScaleContextMenu = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
     const rect = containerRef.current?.getBoundingClientRect?.();
@@ -2815,6 +2880,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
               const next = !isAutoScale;
               try {
                 chartRef.current?.priceScale("right", 0).applyOptions({ autoScale: next });
+                chartAdapter.notifyDrawingFrameInvalidation();
               } catch { /* */ }
               setIsAutoScale(next);
               setContextMenu(null);

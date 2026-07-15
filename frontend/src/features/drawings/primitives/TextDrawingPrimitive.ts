@@ -23,6 +23,7 @@ import type {
   PrimitiveCanvasTarget,
   PrimitivePaneRenderer,
   PrimitivePaneView,
+  ScreenBox,
   ScreenPoint,
   TextAlign,
   TextDrawingPatch,
@@ -51,6 +52,7 @@ interface TextRenderData extends FontDescriptor {
   padding: number;
   selected: boolean;
   hovered: boolean;
+  setPaintBox: (box: ScreenBox | null) => void;
 }
 
 interface TextBox extends ScreenPoint {
@@ -133,8 +135,11 @@ class TextRenderer implements PrimitivePaneRenderer {
 
   draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
-    if (!data || data.x == null || data.y == null) return;
-    if (data.hidden) return;
+    if (!data) return;
+    if (data.x == null || data.y == null || data.hidden) {
+      data.setPaintBox(null);
+      return;
+    }
     const renderX = data.x;
     const renderY = data.y;
 
@@ -183,6 +188,7 @@ class TextRenderer implements PrimitivePaneRenderer {
       const boxY = renderY;
       const boxW = innerWidth + 2 * padding;
       const boxH = innerHeight + 2 * padding;
+      data.setPaintBox({ x: boxX, y: boxY, width: boxW, height: boxH });
 
       // ── Background fill ──
       if (bgColor && bgColor !== "transparent") {
@@ -327,6 +333,7 @@ class TextPaneView implements PrimitivePaneView {
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
+    source._lastPaintBox = null;
     const base: Omit<TextRenderData, "x" | "y" | "hidden"> = {
       text: source._text,
       color: source._color,
@@ -343,6 +350,7 @@ class TextPaneView implements PrimitivePaneView {
       padding: source._padding,
       selected: source._selected,
       hovered: source._hovered,
+      setPaintBox: (box: ScreenBox | null) => { source._lastPaintBox = box; },
     };
     if (source._hidden) {
       this._renderer.update({ x: null, y: null, hidden: true, ...base });
@@ -389,6 +397,7 @@ export class TextDrawingPrimitive {
   _hovered: boolean;
   _hidden: boolean;
   _unconfirmedText: boolean;
+  _lastPaintBox: ScreenBox | null;
   _geometryRevision: number;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
@@ -434,6 +443,7 @@ export class TextDrawingPrimitive {
     this._hovered = false;
     this._hidden = false;
     this._unconfirmedText = false;
+    this._lastPaintBox = null;
     this._geometryRevision = 1;
 
     this._series = null;
@@ -477,6 +487,9 @@ export class TextDrawingPrimitive {
   get selected() { return this._selected; }
   get isUnconfirmedText() { return this._unconfirmedText; }
   get geometryRevision() { return this._geometryRevision; }
+  getParityPaintBox(): Readonly<ScreenBox> | null {
+    return this._lastPaintBox ? Object.freeze({ ...this._lastPaintBox }) : null;
+  }
 
   // ── Setters ──
 

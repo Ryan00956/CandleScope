@@ -32,6 +32,10 @@ export const DRAWING_PERF_COUNTER_METRICS = [
   "workerResultCount",
   "staleWorkerResultCount",
   "workerQueueDropCount",
+  "shadowCompareCount",
+  "shadowParityMismatchCount",
+  "shadowSkippedCount",
+  "shadowErrorCount",
 ] as const;
 
 export const DRAWING_PERF_GAUGE_METRICS = [
@@ -43,6 +47,14 @@ export const DRAWING_PERF_GAUGE_METRICS = [
   "workerQueue",
   "workerInFlight",
   "cacheBytes",
+  "shadowComparedEntities",
+  "shadowComparedHits",
+  "shadowGapProjectionMs",
+  "shadowLegacyProbeMs",
+  "shadowMismatchItems",
+  "shadowParityCompareMs",
+  "shadowParityMs",
+  "shadowSceneBuildMs",
 ] as const;
 
 export type DrawingPerfDurationMetric = typeof DRAWING_PERF_DURATION_METRICS[number];
@@ -149,6 +161,7 @@ export interface DrawingPerfRuntimeSummary {
 }
 
 export type DrawingPerfRuntimeSummaryProvider = () => DrawingPerfRuntimeSummary | null;
+export type DrawingPerfShadowParityRequester = () => boolean;
 
 export interface DrawingPerfBootstrapConfig {
   /** Benchmark-only: retain a larger drainable raw sample stream. */
@@ -211,6 +224,7 @@ export interface DrawingPerfDebugHandle {
     provider: DrawingPerfRuntimeSummaryProvider | null,
   ) => () => void;
   readonly readRuntimeSummary: () => DrawingPerfRuntimeSummary | null;
+  readonly requestShadowParity: () => boolean;
   readonly reset: () => void;
 }
 
@@ -507,6 +521,10 @@ function createCounters(): Record<DrawingPerfCounterMetric, number> {
     workerResultCount: 0,
     staleWorkerResultCount: 0,
     workerQueueDropCount: 0,
+    shadowCompareCount: 0,
+    shadowParityMismatchCount: 0,
+    shadowSkippedCount: 0,
+    shadowErrorCount: 0,
   };
 }
 
@@ -520,6 +538,14 @@ function createGauges(): Record<DrawingPerfGaugeMetric, number> {
     workerQueue: 0,
     workerInFlight: 0,
     cacheBytes: 0,
+    shadowComparedEntities: 0,
+    shadowComparedHits: 0,
+    shadowGapProjectionMs: 0,
+    shadowLegacyProbeMs: 0,
+    shadowMismatchItems: 0,
+    shadowParityCompareMs: 0,
+    shadowParityMs: 0,
+    shadowSceneBuildMs: 0,
   };
 }
 
@@ -1035,6 +1061,7 @@ export function accumulateDrawingPerfFrameWork(
 }
 
 let runtimeSummaryProvider: DrawingPerfRuntimeSummaryProvider | null = null;
+let shadowParityRequester: DrawingPerfShadowParityRequester | null = null;
 
 export function registerDrawingPerfRuntimeSummaryProvider(
   provider: DrawingPerfRuntimeSummaryProvider | null,
@@ -1078,6 +1105,24 @@ export function readDrawingPerfRuntimeSummary(): DrawingPerfRuntimeSummary | nul
   }
 }
 
+export function registerDrawingPerfShadowParityRequester(
+  requester: DrawingPerfShadowParityRequester | null,
+): () => void {
+  shadowParityRequester = requester;
+  return () => {
+    if (shadowParityRequester === requester) shadowParityRequester = null;
+  };
+}
+
+export function requestDrawingPerfShadowParity(): boolean {
+  if (!shadowParityRequester) return false;
+  try {
+    return shadowParityRequester() === true;
+  } catch {
+    return false;
+  }
+}
+
 export function getDrawingPerfCounters(): DrawingPerfCounters {
   return drawingPerfCounters;
 }
@@ -1106,6 +1151,7 @@ export function installDrawingPerfDebugHandle(
       registerDrawingPerfRuntimeSummaryProvider(provider)
     ),
     readRuntimeSummary: () => readDrawingPerfRuntimeSummary(),
+    requestShadowParity: () => requestDrawingPerfShadowParity(),
     reset: () => { drawingPerfCounters.reset(); },
   });
   globalRef.__CANDLESCOPE_DRAWING_PERF__ = handle;

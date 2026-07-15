@@ -171,13 +171,18 @@ class AngleRenderer implements PrimitivePaneRenderer {
         return;
       }
 
-      const sa = { x: a.x * hRatio, y: a.y * vRatio };
-      const sb = { x: b.x * hRatio, y: b.y * vRatio };
-      const geometry = computeGeometry(sa, sb);
+      // Geometry is defined in CSS pixels, exactly like hit testing and the
+      // scene projector. Only rasterization is scaled to bitmap coordinates.
+      // This keeps the visible arc/label invariant across DPR values.
+      const cssA = { x: Number(a.x), y: Number(a.y) };
+      const cssB = { x: Number(b.x), y: Number(b.y) };
+      const geometry = computeGeometry(cssA, cssB);
       if (!geometry) {
         setLabelBox?.(null);
         return;
       }
+      const sa = { x: cssA.x * hRatio, y: cssA.y * vRatio };
+      const sb = { x: cssB.x * hRatio, y: cssB.y * vRatio };
 
       const scaledWidth = lineWidth * minRatio;
       const text = formatAngle(geometry.degrees);
@@ -215,7 +220,7 @@ class AngleRenderer implements PrimitivePaneRenderer {
       ctx.setLineDash([4 * hRatio, 4 * hRatio]);
       ctx.beginPath();
       ctx.moveTo(sa.x, sa.y);
-      ctx.lineTo(sa.x + geometry.refDir * geometry.refLen, sa.y);
+      ctx.lineTo(sa.x + geometry.refDir * geometry.refLen * hRatio, sa.y);
       ctx.stroke();
       ctx.restore();
 
@@ -226,10 +231,12 @@ class AngleRenderer implements PrimitivePaneRenderer {
       ctx.strokeStyle = color;
       ctx.lineWidth = Math.max(1.5 * minRatio, scaledWidth * 0.85);
       ctx.beginPath();
-      ctx.arc(
+      ctx.ellipse(
         sa.x,
         sa.y,
-        geometry.radius,
+        geometry.radius * hRatio,
+        geometry.radius * vRatio,
+        0,
         geometry.startAngle,
         geometry.startAngle + geometry.delta,
         geometry.delta < 0,
@@ -246,8 +253,10 @@ class AngleRenderer implements PrimitivePaneRenderer {
       const textWidth = ctx.measureText(text).width;
       const boxW = textWidth + padX * 2;
       const boxH = fontSize + padY * 2;
-      const boxX = geometry.labelX - boxW / 2;
-      const boxY = geometry.labelY - boxH / 2;
+      const labelX = geometry.labelX * hRatio;
+      const labelY = geometry.labelY * vRatio;
+      const boxX = labelX - boxW / 2;
+      const boxY = labelY - boxH / 2;
 
       ctx.fillStyle = "rgba(15, 23, 42, 0.86)";
       ctx.strokeStyle = adjustAlpha(color, 0.55);
@@ -257,7 +266,7 @@ class AngleRenderer implements PrimitivePaneRenderer {
       ctx.fill();
       ctx.stroke();
       ctx.fillStyle = color;
-      ctx.fillText(text, geometry.labelX, geometry.labelY + 0.5 * vRatio);
+      ctx.fillText(text, labelX, labelY + 0.5 * vRatio);
 
       setLabelBox?.({
         x: boxX / hRatio,
@@ -301,6 +310,7 @@ class AnglePaneView implements PrimitivePaneView {
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
+    source._parityLabelBox = null;
     if (source._hidden) {
       source._labelBox = null;
       this._renderer.update({
@@ -311,7 +321,10 @@ class AnglePaneView implements PrimitivePaneView {
         hovered: source._hovered,
         isPreview: source._isPreview,
         hidden: true,
-        setLabelBox: (box: ScreenBox | null) => { source._labelBox = box; },
+        setLabelBox: (box: ScreenBox | null) => {
+          source._labelBox = box;
+          source._parityLabelBox = box;
+        },
       });
       return;
     }
@@ -340,7 +353,10 @@ class AnglePaneView implements PrimitivePaneView {
       hovered: source._hovered,
       isPreview: source._isPreview,
       hidden: source._hidden,
-      setLabelBox: (box: ScreenBox | null) => { source._labelBox = box; },
+      setLabelBox: (box: ScreenBox | null) => {
+        source._labelBox = box;
+        source._parityLabelBox = box;
+      },
     });
   }
 
@@ -365,6 +381,7 @@ export class AngleMeasurementPrimitive {
   _hidden: boolean;
   _geometryRevision: number;
   _labelBox: ScreenBox | null;
+  _parityLabelBox: ScreenBox | null;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
   _paneView: AnglePaneView;
@@ -382,6 +399,7 @@ export class AngleMeasurementPrimitive {
     this._hidden = !!opts.hidden;
     this._geometryRevision = 1;
     this._labelBox = null;
+    this._parityLabelBox = null;
 
     this._series = null;
     this._chart = null;
@@ -416,6 +434,9 @@ export class AngleMeasurementPrimitive {
   get lineWidth() { return this._lineWidth; }
   get selected() { return this._selected; }
   get geometryRevision() { return this._geometryRevision; }
+  getParityLabelBox(): Readonly<ScreenBox> | null {
+    return this._parityLabelBox ? Object.freeze({ ...this._parityLabelBox }) : null;
+  }
 
   setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;

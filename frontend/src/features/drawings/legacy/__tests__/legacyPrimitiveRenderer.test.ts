@@ -36,6 +36,7 @@ test("renderer materializes and replaces snapshots in stable document z-order", 
   ]);
 
   assert.equal(renderer.reconcile(first), true);
+  assert.strictEqual(renderer.documentSnapshot(), first);
   assert.deepEqual(ids(renderer.snapshot()), ["text", "line", "shape"]);
   assert.deepEqual(attached, ["text", "line", "shape"]);
   assert.deepEqual(detached, []);
@@ -46,6 +47,7 @@ test("renderer materializes and replaces snapshots in stable document z-order", 
     { type: "line", id: "next-line", dataPoints: [{ time: 4, price: 4 }, { time: 5, price: 5 }] },
   ]);
   assert.equal(renderer.replaceDocument(second), true);
+  assert.strictEqual(renderer.documentSnapshot(), second);
   assert.deepEqual(ids(renderer.snapshot()), ["axis", "next-line"]);
   assert.deepEqual(attached, ["text", "line", "shape", "axis", "next-line"]);
   assert.deepEqual(detached, ["text", "line", "shape"]);
@@ -372,13 +374,21 @@ test("confirmed chart removal invalidates failed-detach credentials before rebin
 test("main-series replacement reattaches every entity after credential invalidation", () => {
   let surfaceGeneration = 0;
   const attachedGenerations: number[] = [];
+  const physicalByGeneration = new Map<number, Set<DrawingPrimitive>>([
+    [0, new Set<DrawingPrimitive>()],
+    [1, new Set<DrawingPrimitive>()],
+  ]);
   const renderer = createLegacyPrimitiveRenderer({
     surface: {
-      attachPrimitive() {
+      attachPrimitive(primitive) {
         attachedGenerations.push(surfaceGeneration);
+        physicalByGeneration.get(surfaceGeneration)?.add(primitive);
         return true;
       },
-      detachPrimitive() { return true; },
+      detachPrimitive(primitive) {
+        physicalByGeneration.get(surfaceGeneration)?.delete(primitive);
+        return true;
+      },
     },
   });
   const document = documentFrom([
@@ -389,13 +399,59 @@ test("main-series replacement reattaches every entity after credential invalidat
   assert.equal(renderer.reconcile(document), true);
   const primitives = renderer.snapshot();
   assert.deepEqual(attachedGenerations, [0, 0]);
+  assert.equal(physicalByGeneration.get(0)?.size, 2);
 
   // Lightweight Charts has removed the old series out-of-band.
+  physicalByGeneration.get(0)?.clear();
   surfaceGeneration = 1;
   renderer.releaseSurfaceCredentials();
   assert.equal(renderer.adopt(document, primitives), true);
   assert.equal(renderer.rebindSurface(), true);
   assert.deepEqual(attachedGenerations, [0, 0, 1, 1]);
+  assert.equal(physicalByGeneration.get(0)?.size, 0);
+  assert.equal(physicalByGeneration.get(1)?.size, 2);
+  for (const primitive of primitives) {
+    assert.equal(physicalByGeneration.get(1)?.has(primitive), true);
+  }
+});
+
+test("failed main-series replacement recovery retains surviving old-series credentials", () => {
+  let rejectedDetachId: string | null = "second";
+  const physical = new Set<DrawingPrimitive>();
+  const attachCounts = new Map<string, number>();
+  const renderer = createLegacyPrimitiveRenderer({
+    surface: {
+      attachPrimitive(primitive) {
+        attachCounts.set(primitive.id, (attachCounts.get(primitive.id) ?? 0) + 1);
+        physical.add(primitive);
+        return true;
+      },
+      detachPrimitive(primitive) {
+        if (primitive.id === rejectedDetachId) return false;
+        physical.delete(primitive);
+        return true;
+      },
+    },
+  });
+  const document = documentFrom([
+    { type: "line", id: "first" },
+    { type: "line", id: "second" },
+  ], "series-replacement-rollback");
+
+  assert.equal(renderer.reconcile(document), true);
+  const primitives = renderer.snapshot();
+  assert.equal(renderer.detachSurface(), false);
+  assert.deepEqual([...physical].map((primitive) => primitive.id), ["second"]);
+
+  // Preparation failed, so the old series remains authoritative. The
+  // replacement-only credential invalidation must not run: generation recovery
+  // should attach only the primitive that was successfully detached.
+  rejectedDetachId = null;
+  assert.equal(renderer.adopt(document, primitives), true);
+  assert.equal(renderer.rebindSurface(), true);
+  assert.deepEqual([...physical].map((primitive) => primitive.id).sort(), ["first", "second"]);
+  assert.equal(attachCounts.get("first"), 2);
+  assert.equal(attachCounts.get("second"), 1);
 });
 
 test("style adoption cannot certify an existing primitive missing after partial detach", () => {

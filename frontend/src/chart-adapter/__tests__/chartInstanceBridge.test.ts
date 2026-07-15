@@ -726,3 +726,265 @@ test("freehand future capture uses snapshot-owned config, horizon, and interval"
     snapshot: 1,
   });
 });
+
+test("atomic drawing frames preserve provider identity and bind to one series generation", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }];
+  const seriesA = { priceToCoordinate: (price: number) => price };
+  const seriesB = { priceToCoordinate: (price: number) => price * 2 };
+  const seriesRef = { current: seriesA };
+  const chart = { timeScale: () => ({}) };
+  const factory = createDrawingFrameSnapshotFactory();
+  const input = {
+    axisKind: "time" as const,
+    coordinateKey: "BTCUSDT:time:1m:0",
+    dpr: 1,
+    drawingProjectionConfig: "time:identity",
+    heightCssPx: 600,
+    projectionKey: "time:identity",
+    seriesData: rows,
+    sourceInterval: "1m",
+    sourceIntervalSeconds: 60,
+    sourceTimeHorizon: 200,
+    surfaceToken: seriesA,
+    themeKey: "dark",
+    viewportKey: "viewport-a",
+    widthCssPx: 900,
+  };
+  let currentSnapshot = factory.capture(input);
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    drawingCoordinateSnapshotProvider: () => currentSnapshot,
+    seriesRef,
+  });
+
+  const captured = mustBeDefined(adapter.captureDrawingFrame());
+  assert.strictEqual(captured, currentSnapshot);
+  assert.equal(adapter.isDrawingFrameCurrent(captured), true);
+
+  currentSnapshot = factory.capture({ ...input, viewportKey: "viewport-b" });
+  assert.equal(adapter.isDrawingFrameCurrent(captured), false);
+  const panned = mustBeDefined(adapter.captureDrawingFrame());
+  assert.strictEqual(panned, currentSnapshot);
+
+  seriesRef.current = seriesB;
+  currentSnapshot = factory.capture({
+    ...input,
+    surfaceToken: seriesB,
+    viewportKey: "viewport-b",
+  });
+  assert.equal(adapter.isDrawingFrameCurrent(panned), false);
+  const replacement = mustBeDefined(adapter.captureDrawingFrame());
+  assert.strictEqual(replacement, currentSnapshot);
+  assert.equal(replacement.surfaceGeneration, panned.surfaceGeneration + 1);
+  assert.equal(adapter.isDrawingFrameCurrent(replacement), true);
+});
+
+test("drawing frame batch projection returns interleaved Float64 XY without point objects", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }, { time: 300 }];
+  const timeCoordinates = new Map<unknown, number>([
+    [100, 10],
+    [200, 20],
+    [300, 30],
+  ]);
+  const chart = {
+    timeScale: () => ({
+      logicalToCoordinate: (logical: number) => logical * 10,
+      timeToCoordinate: (time: unknown) => timeCoordinates.get(time) ?? null,
+    }),
+  };
+  const series = { priceToCoordinate: (price: number) => 1_000 - price * 2 };
+  const factory = createDrawingFrameSnapshotFactory();
+  const snapshot = factory.capture({
+    axisKind: "time",
+    coordinateKey: "BTCUSDT:time:1m:0",
+    dpr: 1,
+    heightCssPx: 600,
+    projectionKey: "time:identity",
+    seriesData: rows,
+    surfaceToken: series,
+    themeKey: "dark",
+    viewportKey: "viewport-a",
+    widthCssPx: 900,
+  });
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    drawingCoordinateSnapshotProvider: () => snapshot,
+    seriesRef: { current: series },
+  });
+  const frame = mustBeDefined(adapter.captureDrawingFrame());
+  const coordinates = mustBeDefined(adapter.projectDrawingFrameDataPoints(frame, [
+    { price: 10, time: 100 },
+    { price: 20, time: 150 },
+    { price: "invalid", time: 200 },
+  ]));
+
+  assert.equal(coordinates instanceof Float64Array, true);
+  assert.deepEqual(Array.from(coordinates), [
+    10, 980,
+    15, 960,
+    20, Number.NaN,
+  ]);
+  assert.equal(snapshot.coordinateIndex.stats.numericBatchMergeWalkCount, 1);
+  assert.deepEqual(Array.from(mustBeDefined(adapter.projectDrawingFrameDataPoints(frame, [
+    { price: 30, time: "invalid" },
+  ]))), [Number.NaN, 940]);
+});
+
+test("drawing frame projection discards a batch when the provider advances mid-project", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }];
+  const chart = {
+    timeScale: () => ({
+      timeToCoordinate: (time: unknown) => time === 100 ? 10 : time === 200 ? 20 : null,
+    }),
+  };
+  const factory = createDrawingFrameSnapshotFactory();
+  const input = {
+    axisKind: "time" as const,
+    coordinateKey: "BTCUSDT:time:1m:0",
+    dpr: 1,
+    heightCssPx: 600,
+    projectionKey: "time:identity",
+    seriesData: rows,
+    surfaceToken: "surface-a",
+    themeKey: "dark",
+    viewportKey: "viewport-a",
+    widthCssPx: 900,
+  };
+  let currentSnapshot = factory.capture(input);
+  const series = {
+    priceToCoordinate: (price: number) => {
+      currentSnapshot = factory.capture({ ...input, viewportKey: "viewport-b" });
+      return price;
+    },
+  };
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    drawingCoordinateSnapshotProvider: () => currentSnapshot,
+    seriesRef: { current: series },
+  });
+  const frame = mustBeDefined(adapter.captureDrawingFrame());
+
+  assert.equal(adapter.projectDrawingFrameDataPoints(frame, [{ price: 10, time: 100 }]), null);
+  assert.equal(adapter.isDrawingFrameCurrent(frame), false);
+});
+
+test("drawing frame exposes a narrow source-lineage span projection", () => {
+  const rows = [displayRow(0, 100, 0), displayRow(1, 100, 1), displayRow(2, 200, 0)];
+  const lineageIndex = createDrawingLineageIndex(rows);
+  const chart = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time: unknown) => isOrdinalAxisTime(time) ? time.order * 10 : null,
+    }),
+  };
+  const series = { priceToCoordinate: (price: number) => price };
+  const snapshot = createDrawingFrameSnapshotFactory().capture({
+    axisKind: "derived-ordinal",
+    coordinateKey: "BTCUSDT:renko:10:0",
+    dpr: 1,
+    drawingProjectionConfig: "dataset-a:renko:10",
+    heightCssPx: 600,
+    ordinalSeriesIndex: lineageIndex,
+    projectionKey: "dataset-a:renko:10",
+    seriesData: rows,
+    sourceTimeHorizon: 200,
+    surfaceToken: series,
+    themeKey: "dark",
+    viewportKey: "viewport-a",
+    widthCssPx: 900,
+  });
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    drawingCoordinateSnapshotProvider: () => snapshot,
+    seriesRef: { current: series },
+  });
+  const frame = mustBeDefined(adapter.captureDrawingFrame());
+  const projected = adapter.projectDrawingFrameSourceLineageSpan(frame, {
+    exact: {
+      left: { time: 100, sourceOrdinal: 0 },
+      right: { time: 100, sourceOrdinal: 1 },
+    },
+    fallback: {
+      fromTime: 100,
+      leftRatio: 0,
+      rightRatio: 1,
+      toTime: 100,
+    },
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:10",
+  });
+
+  assert.deepEqual(projected, { left: 0, right: 10 });
+  assert.equal(Object.isFrozen(projected), true);
+  assert.deepEqual(Object.keys(projected || {}), ["left", "right"]);
+});
+
+test("drawing frame invalidation subscription hides chart objects and releases listeners", () => {
+  let visibleHandler: (() => void) | null = null;
+  let sizeHandler: (() => void) | null = null;
+  const calls: number[] = [];
+  const timeScale = {
+    setVisibleLogicalRange: () => {},
+    subscribeSizeChange: (handler: () => void) => { sizeHandler = handler; },
+    subscribeVisibleLogicalRangeChange: (handler: () => void) => { visibleHandler = handler; },
+    unsubscribeSizeChange: (handler: () => void) => {
+      if (sizeHandler === handler) sizeHandler = null;
+    },
+    unsubscribeVisibleLogicalRangeChange: (handler: () => void) => {
+      if (visibleHandler === handler) visibleHandler = null;
+    },
+  };
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: { timeScale: () => timeScale } },
+    seriesRef: { current: { applyOptions: () => undefined } },
+  });
+  const unsubscribe = adapter.subscribeDrawingFrameInvalidation((...args: unknown[]) => {
+    calls.push(args.length);
+  });
+
+  (visibleHandler as (() => void) | null)?.();
+  (sizeHandler as (() => void) | null)?.();
+  adapter.requestSeriesUpdate();
+  adapter.notifyDrawingFrameInvalidation();
+  assert.deepEqual(calls, [0, 0, 0, 0]);
+
+  unsubscribe();
+  assert.equal(visibleHandler, null);
+  assert.equal(sizeHandler, null);
+  adapter.notifyDrawingFrameInvalidation();
+  assert.deepEqual(calls, [0, 0, 0, 0]);
+});
+
+test("scene text measurement uses exact detached-canvas font metrics", () => {
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  let assignedFont = "";
+  const context = {
+    get font() { return assignedFont; },
+    set font(value: string) { assignedFont = value; },
+    measureText: (text: string) => ({ width: text.length * 7.25 }),
+  };
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      createElement: (tag: string) => {
+        assert.equal(tag, "canvas");
+        return { getContext: (kind: string) => kind === "2d" ? context : null };
+      },
+    },
+  });
+  try {
+    const adapter = createLightweightChartAdapter({ chartRef: null, seriesRef: null });
+    assert.deepEqual(adapter.measureText({
+      text: "42.0°",
+      fontFamily: "sans-serif",
+      fontSize: 11,
+      bold: false,
+      italic: true,
+      fontWeight: 600,
+    }), { width: 36.25 });
+    assert.equal(assignedFont, "italic 600 11px sans-serif");
+  } finally {
+    if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+    else Reflect.deleteProperty(globalThis, "document");
+  }
+});

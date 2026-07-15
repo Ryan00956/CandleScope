@@ -1,4 +1,5 @@
 import { spawn, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -24,6 +25,13 @@ const DEFAULT_MOCK_END_TIME = 1_783_987_200;
 const PHASE0_MIN_MEASURED_RUNS = 5;
 const PHASE0_MIN_WARMUP_RUNS = 1;
 const PHASE0_POINTER_SAMPLES = 4_096;
+const GIT_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const MANAGED_BUILD_ENVIRONMENT = Object.freeze({
+  VITE_API_BASE: "/api/v1",
+  VITE_DRAWING_COORDINATE_PROJECTOR: "batch",
+  VITE_DRAWING_DOCUMENT_AUTHORITY: "document",
+});
 const PHASE0_REQUIRED_SCENARIO_IDS = Object.freeze([
   "empty-viewport",
   "single-freehand-4096-viewport",
@@ -164,6 +172,9 @@ function parseArgs(argv) {
     headless: false,
     smoke: false,
     phase: "phase0",
+    engineMode: ["legacy", "shadow", "scene-canary", "scene"].includes(
+      process.env.VITE_DRAWING_ENGINE_MODE,
+    ) ? process.env.VITE_DRAWING_ENGINE_MODE : "legacy",
     enforceTargets: false,
     scenarios: DEFAULT_SCENARIOS.map((scenario) => scenario.id),
   };
@@ -199,10 +210,16 @@ function parseArgs(argv) {
       args.scenarios = String(argv[++index] || "").split(",").map((value) => value.trim()).filter(Boolean);
     } else if (arg === "--phase") {
       const phase = String(argv[++index] || "");
-      if (phase !== "phase0" && phase !== "phase1") {
-        throw new Error("--phase must be phase0 or phase1");
+      if (phase !== "phase0" && phase !== "phase1" && phase !== "phase3") {
+        throw new Error("--phase must be phase0, phase1, or phase3");
       }
       args.phase = phase;
+    } else if (arg === "--engine-mode") {
+      const mode = String(argv[++index] || "");
+      if (!["legacy", "shadow", "scene-canary", "scene"].includes(mode)) {
+        throw new Error("--engine-mode must be legacy, shadow, scene-canary, or scene");
+      }
+      args.engineMode = mode;
     } else if (arg === "--headless") args.headless = true;
     else if (arg === "--smoke") args.smoke = true;
     else if (arg === "--enforce-targets") args.enforceTargets = true;
@@ -422,10 +439,24 @@ function metricDelta(before, after, name) {
   return Number.isFinite(left) && Number.isFinite(right) ? Math.max(0, right - left) : null;
 }
 
-function ensureProductionBuild() {
+function managedBuildEnvironment(engineMode) {
+  return {
+    ...MANAGED_BUILD_ENVIRONMENT,
+    VITE_DRAWING_ENGINE_MODE: engineMode,
+  };
+}
+
+function managedBuildProcessEnvironment(engineMode) {
+  const inherited = Object.fromEntries(Object.entries(process.env)
+    .filter(([name]) => !name.startsWith("VITE_")));
+  return { ...inherited, ...managedBuildEnvironment(engineMode) };
+}
+
+function ensureProductionBuild(engineMode) {
   const viteBin = path.join(FRONTEND_ROOT, "node_modules", "vite", "bin", "vite.js");
   execFileSync(process.execPath, [viteBin, "build"], {
     cwd: FRONTEND_ROOT,
+    env: managedBuildProcessEnvironment(engineMode),
     stdio: "inherit",
     windowsHide: true,
   });
@@ -497,6 +528,9 @@ function browserBenchmarkBootstrap(payload) {
   });
   try {
     localStorage.setItem(payload.storageKey, payload.raw);
+    // Viewport actions are intentionally persisted by the production app.
+    // A benchmark run must not inherit the previous scenario's pan/zoom state.
+    localStorage.removeItem("candlescope-visible-ranges");
     localStorage.setItem("candlescope-active-indicators", "[]");
     localStorage.setItem("candlescope-vol-initialized", "1");
   } catch {
@@ -736,6 +770,64 @@ async function waitNextAnimationFrame(cdp) {
   await evaluate(cdp, "new Promise((resolve)=>requestAnimationFrame(()=>resolve(true)))");
 }
 
+async function waitForShadowParityCoverage(cdp, timeoutMs) {
+  const started = Date.now();
+  let latest = null;
+  while (Date.now() - started < timeoutMs) {
+    latest = await evaluateJson(cdp, () => {
+      const snapshot = window.__CANDLESCOPE_DRAWING_PERF__?.report?.() || null;
+      return {
+        compareCount: Number(snapshot?.counterMaxima?.shadowCompareCount || 0),
+        comparedEntities: Number(snapshot?.gaugeMaxima?.shadowComparedEntities || 0),
+        comparedHits: Number(snapshot?.gaugeMaxima?.shadowComparedHits || 0),
+        errorCount: Number(snapshot?.counterMaxima?.shadowErrorCount || 0),
+        sceneRebuildCount: Number(snapshot?.counterMaxima?.sceneRebuildCount || 0),
+        skippedCount: Number(snapshot?.counterMaxima?.shadowSkippedCount || 0),
+      };
+    });
+    if (latest?.compareCount > 0
+      && latest?.comparedEntities > 0
+      && latest?.comparedHits > 0) return { passed: true, evidence: latest };
+    await wait(50);
+  }
+  return { passed: false, evidence: latest };
+}
+
+async function requestFinalShadowParity(cdp, timeoutMs) {
+  const requested = await evaluateJson(cdp, () => {
+    const handle = window.__CANDLESCOPE_DRAWING_PERF__;
+    const before = Number(handle?.report?.()?.counterMaxima?.shadowCompareCount || 0);
+    return {
+      before,
+      requested: handle?.requestShadowParity?.() === true,
+    };
+  });
+  if (!requested?.requested) return { passed: false, evidence: requested ?? null };
+  const started = Date.now();
+  let latest = null;
+  while (Date.now() - started < timeoutMs) {
+    latest = await evaluateJson(cdp, () => {
+      const snapshot = window.__CANDLESCOPE_DRAWING_PERF__?.report?.() || null;
+      return {
+        compareCount: Number(snapshot?.counterMaxima?.shadowCompareCount || 0),
+        errorCount: Number(snapshot?.counterMaxima?.shadowErrorCount || 0),
+        mismatchCount: Number(snapshot?.counterMaxima?.shadowParityMismatchCount || 0),
+        mismatchItems: Number(snapshot?.gaugeMaxima?.shadowMismatchItems || 0),
+      };
+    });
+    if (latest?.compareCount > requested.before) {
+      return {
+        passed: latest.errorCount === 0
+          && latest.mismatchCount === 0
+          && latest.mismatchItems === 0,
+        evidence: latest,
+      };
+    }
+    await wait(50);
+  }
+  return { passed: false, evidence: latest };
+}
+
 async function dispatchMouseMove(cdp, x, y, buttons = 0) {
   await cdp.send("Input.dispatchMouseEvent", {
     type: "mouseMoved",
@@ -791,6 +883,29 @@ async function runPan(cdp, rect) {
     clickCount: 1,
   });
   return steps;
+}
+
+async function resetTimeScaleWarmup(cdp, rect) {
+  const x = Math.round(rect.x + rect.width * 0.5);
+  const y = Math.round(rect.y + rect.height - 8);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x,
+    y,
+    button: "left",
+    buttons: 1,
+    clickCount: 2,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x,
+    y,
+    button: "left",
+    buttons: 0,
+    clickCount: 2,
+  });
+  await waitNextAnimationFrame(cdp);
+  await waitNextAnimationFrame(cdp);
 }
 
 async function runHover(cdp, rect, count) {
@@ -1150,15 +1265,54 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       throw new Error("The application runtime did not restore the fixture entity/type/point summary");
     }
 
+    if (fixture.metadata.drawingCount > 0) {
+      // The drawing host can become ready before Lightweight Charts has
+      // painted every restored legacy primitive. Reset the time scale outside
+      // the measured window so every scenario starts from the same visible
+      // range and publishes a coherent last-paint snapshot.
+      await resetTimeScaleWarmup(cdp, rect);
+    }
     await wait(100);
-    await evaluate(cdp, "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.();"
-      + "window.__CANDLESCOPE_DRAWING_PERF__?.reset?.();true");
+    const shadowParityRequested = Boolean(await evaluate(cdp, "(() => {"
+      + "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.();"
+      + "const handle=window.__CANDLESCOPE_DRAWING_PERF__;"
+      + "handle?.reset?.();"
+      + "return handle?.requestShadowParity?.()===true;"
+      + "})()"));
+    if (args.engineMode === "shadow" && fixture.metadata.drawingCount > 0) {
+      if (!shadowParityRequested) {
+        throw new Error("Shadow scene was not active after the benchmark counter reset");
+      }
+      const parityEvidence = await waitForShadowParityCoverage(
+        cdp,
+        Math.min(args.timeoutMs, 10_000),
+      );
+      if (!parityEvidence?.passed) {
+        throw new Error("Shadow parity did not cover a visible entity and hit after reset: "
+          + JSON.stringify(parityEvidence?.evidence || null));
+      }
+    }
+    // Initial parity is a fixture/readiness assertion, not part of the user
+    // action window. Keep its drawing counters as coverage evidence, but reset
+    // browser timing so its low-frequency full parity probe cannot be counted
+    // as a new action Long Task in the formal legacy/shadow comparison.
+    await evaluate(cdp, "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.(); true");
     const beforeMetrics = metricMap(await cdp.send("Performance.getMetrics"));
     const beforeHeap = await cdp.send("Runtime.getHeapUsage");
     const actionStartedAt = Number(await evaluate(cdp, "performance.now()"));
     const action = await runScenarioAction(cdp, scenario, args, rect);
     const actionEndedAt = Number(await evaluate(cdp, "performance.now()"));
     await wait(args.settleMs);
+    if (args.engineMode === "shadow" && fixture.metadata.drawingCount > 0) {
+      const finalParity = await requestFinalShadowParity(
+        cdp,
+        Math.min(args.timeoutMs, 10_000),
+      );
+      if (!finalParity.passed) {
+        throw new Error("Final shadow parity did not complete cleanly after the scenario action: "
+          + JSON.stringify(finalParity.evidence || null));
+      }
+    }
     const measurementEndedAt = Number(await evaluate(cdp, "performance.now()"));
     const snapshots = await readDrawingSnapshots(cdp);
     const afterMetrics = metricMap(await cdp.send("Performance.getMetrics"));
@@ -1187,6 +1341,18 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       anchorResolveCount: maxCounter(drawing, "anchorResolveCount"),
       finalProjectionCount: maxCounter(drawing, "finalProjectionCount"),
       sceneRebuildCount: maxCounter(drawing, "sceneRebuildCount"),
+      shadowCompareCount: maxCounter(drawing, "shadowCompareCount"),
+      shadowParityMismatchCount: maxCounter(drawing, "shadowParityMismatchCount"),
+      shadowSkippedCount: maxCounter(drawing, "shadowSkippedCount"),
+      shadowErrorCount: maxCounter(drawing, "shadowErrorCount"),
+      shadowComparedEntities: maxGauge(drawing, "shadowComparedEntities"),
+      shadowComparedHits: maxGauge(drawing, "shadowComparedHits"),
+      shadowGapProjectionMs: maxGauge(drawing, "shadowGapProjectionMs"),
+      shadowLegacyProbeMs: maxGauge(drawing, "shadowLegacyProbeMs"),
+      shadowMismatchItems: maxGauge(drawing, "shadowMismatchItems"),
+      shadowParityCompareMs: maxGauge(drawing, "shadowParityCompareMs"),
+      shadowParityMs: maxGauge(drawing, "shadowParityMs"),
+      shadowSceneBuildMs: maxGauge(drawing, "shadowSceneBuildMs"),
       requestUpdateCount: maxCounter(drawing, "requestUpdateCount"),
       surfacePrimitiveCount: Number.isSafeInteger(runtimeSummary?.entityCount)
         ? runtimeSummary.entityCount
@@ -1328,10 +1494,62 @@ function readGitContext() {
       shortCommit: commit.slice(0, 8),
       dirty: status.length > 0,
       status: status ? status.split(/\r?\n/) : [],
+      buildInputFingerprint: hashBuildInputs(),
     };
   } catch {
-    return { commit: null, shortCommit: "unknown", dirty: null, status: [] };
+    return {
+      commit: null,
+      shortCommit: "unknown",
+      dirty: null,
+      status: [],
+      buildInputFingerprint: hashBuildInputs(),
+    };
   }
+}
+
+function hashBuildInputs() {
+  const hash = createHash("sha256");
+  const roots = ["public", "src", "scripts"];
+  const rootFiles = [
+    "index.html",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "tsconfig.app.json",
+    "tsconfig.node.json",
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.ts",
+  ];
+  const viteEnvironmentFiles = [
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.production.local",
+  ];
+  const files = [];
+  const visit = (absolute, relative) => {
+    if (!fs.existsSync(absolute)) return;
+    const stat = fs.statSync(absolute);
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(absolute).sort()) {
+        visit(path.join(absolute, name), path.join(relative, name));
+      }
+      return;
+    }
+    if (stat.isFile()) files.push({ absolute, relative: relative.replaceAll("\\", "/") });
+  };
+  for (const root of roots) visit(path.join(FRONTEND_ROOT, root), root);
+  for (const file of [...rootFiles, ...viteEnvironmentFiles]) {
+    visit(path.join(FRONTEND_ROOT, file), file);
+  }
+  for (const file of files.sort((left, right) => left.relative.localeCompare(right.relative))) {
+    hash.update(file.relative);
+    hash.update("\0");
+    hash.update(fs.readFileSync(file.absolute));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
 }
 
 function machineContext() {
@@ -1559,11 +1777,16 @@ function buildPhase0Acceptance(report, args) {
 
 function buildSmokeAcceptance(report, args) {
   const executionPassed = report.executionAcceptance?.passed === true;
+  const phase3RequirementsPassed = args.phase !== "phase3"
+    || (report.phase3Acceptance?.engineModePassed === true
+      && report.phase3Acceptance?.parityPassed === true
+      && report.phase3Acceptance?.sceneBuildBudgetPassed === true);
   return {
     applicable: args.smoke,
     smokeOnly: args.smoke,
-    passed: args.smoke && executionPassed,
+    passed: args.smoke && executionPassed && phase3RequirementsPassed,
     executionPassed,
+    phase3RequirementsPassed,
     scenarioCount: report.scenarios.length,
     invalidScenarioIds: [...(report.executionAcceptance?.invalidScenarioIds ?? [])],
     note: args.smoke
@@ -1660,6 +1883,91 @@ function finiteMetric(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function phase3MachineIdentity(machine) {
+  return {
+    platform: machine?.platform ?? null,
+    release: machine?.release ?? null,
+    arch: machine?.arch ?? null,
+    cpu: machine?.cpu ?? null,
+    logicalCores: machine?.logicalCores ?? null,
+  };
+}
+
+function comparablePhase3BuildEnvironment(environment) {
+  if (!environment || typeof environment !== "object") return null;
+  const { VITE_DRAWING_ENGINE_MODE: _engineMode, ...sharedEnvironment } = environment;
+  return sharedEnvironment;
+}
+
+function assessFormalPhase3Report(candidate, mode) {
+  const scenarios = Array.isArray(candidate?.scenarios) ? candidate.scenarios : [];
+  const ids = new Set(scenarios.map((scenario) => scenario?.id));
+  const gitCommit = candidate?.context?.git?.commit;
+  const buildInputFingerprint = candidate?.context?.git?.buildInputFingerprint;
+  const machine = phase3MachineIdentity(candidate?.context?.machine);
+  const scenarioCoverage = scenarios.length === PHASE0_REQUIRED_SCENARIO_IDS.length
+    && PHASE0_REQUIRED_SCENARIO_IDS.every((id) => ids.has(id));
+  const repetitionCoverage = scenarioCoverage && scenarios.every((scenario) => {
+    const rawRuns = Array.isArray(scenario?.rawRuns) ? scenario.rawRuns : [];
+    const measuredRuns = rawRuns.filter((run) => !run?.warmup);
+    const warmupRuns = rawRuns.filter((run) => run?.warmup);
+    return measuredRuns.length >= PHASE0_MIN_MEASURED_RUNS
+      && warmupRuns.length >= PHASE0_MIN_WARMUP_RUNS
+      && Number(scenario?.repetitions?.measuredRuns) === measuredRuns.length
+      && Number(scenario?.repetitions?.warmupRuns) === warmupRuns.length;
+  });
+  const longTaskInstrumentation = repetitionCoverage && scenarios.every((scenario) => (
+    scenario.rawRuns.filter((run) => !run?.warmup)
+      .every((run) => run?.bench?.longTaskSupported === true)
+  ));
+  const machineIdentityPresent = Object.entries(machine).every(([key, value]) => (
+    key === "logicalCores"
+      ? Number.isSafeInteger(value) && value > 0
+      : typeof value === "string" && value.length > 0
+  ));
+  const checks = {
+    mode: candidate?.context?.mode === mode
+      && candidate?.configuration?.drawingEngineMode === mode,
+    phase: candidate?.runMode?.name === "phase3",
+    formalRun: candidate?.runMode?.smokeOnly === false,
+    productionBuild: candidate?.environment?.productionBuild === true
+      && candidate?.environment?.productionBuildVerification === "managed-vite-preview",
+    execution: candidate?.executionAcceptance?.passed === true,
+    scenarioCoverage,
+    repetitionCoverage,
+    longTaskInstrumentation,
+    gitCommit: typeof gitCommit === "string" && GIT_COMMIT_PATTERN.test(gitCommit),
+    buildInputFingerprint: typeof buildInputFingerprint === "string"
+      && SHA256_PATTERN.test(buildInputFingerprint),
+    machineIdentity: machineIdentityPresent,
+    browserVersion: typeof candidate?.context?.browser?.version === "string"
+      && candidate.context.browser.version.length > 0,
+    buildEnvironment: stableStringify(candidate?.configuration?.buildEnvironment)
+      === stableStringify(managedBuildEnvironment(mode)),
+  };
+  const failureReasons = Object.entries(checks)
+    .filter(([, passed]) => !passed)
+    .map(([name]) => name);
+  return {
+    passed: failureReasons.length === 0,
+    checks,
+    failureReasons,
+  };
+}
+
+function buildPhase3LegacyBaselineAcceptance(report, args) {
+  const applicable = args.phase === "phase3" && args.engineMode === "legacy" && !args.smoke;
+  const eligibility = assessFormalPhase3Report(report, "legacy");
+  return {
+    applicable,
+    passed: applicable && eligibility.passed,
+    eligibility,
+    failureReasons: applicable
+      ? eligibility.failureReasons
+      : ["not-a-formal-phase3-legacy-run"],
+  };
+}
+
 function buildPhase1Comparison(report, compareBefore) {
   if (!compareBefore) {
     return {
@@ -1739,18 +2047,229 @@ function buildPhase1Comparison(report, compareBefore) {
   };
 }
 
+function buildPhase3Comparison(report, compareBefore) {
+  if (!compareBefore) {
+    return { applicable: false, passed: false, failureReasons: ["legacy-baseline-not-provided"] };
+  }
+  const baselinePath = path.resolve(process.cwd(), compareBefore);
+  let before = null;
+  try {
+    before = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
+  } catch (error) {
+    return {
+      applicable: true,
+      baselinePath,
+      passed: false,
+      failureReasons: ["legacy-baseline-unreadable"],
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  const beforeEligibility = assessFormalPhase3Report(before, "legacy");
+  const afterEligibility = assessFormalPhase3Report(report, "shadow");
+  const beforeEligible = beforeEligibility.passed;
+  const afterEligible = afterEligibility.passed;
+  const scenarioResults = report.scenarios.map((afterScenario) => {
+    const beforeScenario = before.scenarios?.find?.((item) => item?.id === afterScenario.id);
+    const beforeCount = Number(beforeScenario?.longTasks?.overThresholdCount);
+    const afterCount = Number(afterScenario?.longTasks?.overThresholdCount);
+    const beforeMeasuredRuns = Number(beforeScenario?.repetitions?.measuredRuns);
+    const afterMeasuredRuns = Number(afterScenario?.repetitions?.measuredRuns);
+    const beforeWarmupRuns = Number(beforeScenario?.repetitions?.warmupRuns);
+    const afterWarmupRuns = Number(afterScenario?.repetitions?.warmupRuns);
+    const comparable = Boolean(beforeScenario)
+      && beforeScenario.fixture?.bars === afterScenario.fixture?.bars
+      && beforeScenario.fixture?.entities === afterScenario.fixture?.entities
+      && beforeScenario.fixture?.points === afterScenario.fixture?.points
+      && beforeScenario.fixture?.dpr === afterScenario.fixture?.dpr
+      && beforeMeasuredRuns === afterMeasuredRuns
+      && beforeWarmupRuns === afterWarmupRuns;
+    return {
+      id: afterScenario.id,
+      comparable,
+      beforeLongTaskCount: Number.isFinite(beforeCount) ? beforeCount : null,
+      afterLongTaskCount: Number.isFinite(afterCount) ? afterCount : null,
+      beforeMeasuredRuns: Number.isFinite(beforeMeasuredRuns) ? beforeMeasuredRuns : null,
+      afterMeasuredRuns: Number.isFinite(afterMeasuredRuns) ? afterMeasuredRuns : null,
+      noNewLongTasks: comparable
+        && Number.isFinite(beforeCount)
+        && Number.isFinite(afterCount)
+        && afterCount <= beforeCount,
+    };
+  });
+  const contextChecks = {
+    bars: before.configuration?.bars === report.configuration?.bars,
+    browser: before.context?.browser?.version === report.context?.browser?.version,
+    buildEnvironment: stableStringify(comparablePhase3BuildEnvironment(
+      before.configuration?.buildEnvironment,
+    )) === stableStringify(comparablePhase3BuildEnvironment(
+      report.configuration?.buildEnvironment,
+    )),
+    buildInputFingerprint: SHA256_PATTERN.test(before.context?.git?.buildInputFingerprint || "")
+      && SHA256_PATTERN.test(report.context?.git?.buildInputFingerprint || "")
+      && before.context.git.buildInputFingerprint === report.context.git.buildInputFingerprint,
+    commit: GIT_COMMIT_PATTERN.test(before.context?.git?.commit || "")
+      && GIT_COMMIT_PATTERN.test(report.context?.git?.commit || "")
+      && before.context.git.commit === report.context.git.commit,
+    coordinateProjector: before.configuration?.drawingCoordinateProjectorMode
+      === report.configuration?.drawingCoordinateProjectorMode,
+    dpr: before.environment?.dpr === report.environment?.dpr,
+    headless: before.configuration?.headless === report.configuration?.headless,
+    hoverEvents: before.configuration?.hoverEvents === report.configuration?.hoverEvents,
+    intervalSeconds: before.configuration?.intervalSeconds
+      === report.configuration?.intervalSeconds,
+    longTaskThreshold: before.configuration?.longTaskThresholdMs
+      === report.configuration?.longTaskThresholdMs,
+    machine: stableStringify(phase3MachineIdentity(before.context?.machine))
+      === stableStringify(phase3MachineIdentity(report.context?.machine)),
+    mock: stableStringify(before.environment?.mock) === stableStringify(report.environment?.mock),
+    mockEndTime: before.configuration?.mockEndTime === report.configuration?.mockEndTime,
+    pointerSamples: before.configuration?.pointerSamples === report.configuration?.pointerSamples,
+    scenarios: stableStringify(before.configuration?.scenarios)
+      === stableStringify(report.configuration?.scenarios),
+    seed: before.configuration?.seed === report.configuration?.seed,
+    serverMode: before.configuration?.serverMode === report.configuration?.serverMode,
+    settleMs: before.configuration?.settleMs === report.configuration?.settleMs,
+    viewportHeight: before.environment?.viewport?.height === report.environment?.viewport?.height,
+    viewportWidth: before.environment?.viewport?.width === report.environment?.viewport?.width,
+    wheelEvents: before.configuration?.wheelEvents === report.configuration?.wheelEvents,
+  };
+  const contextComparable = Object.values(contextChecks).every(Boolean);
+  const modesPassed = before.context?.mode === "legacy" && report.context?.mode === "shadow";
+  const passed = beforeEligible
+    && afterEligible
+    && contextComparable
+    && modesPassed
+    && scenarioResults.length > 0
+    && scenarioResults.every((result) => result.noNewLongTasks);
+  const failureReasons = [];
+  if (!beforeEligible) failureReasons.push("legacy-baseline-ineligible");
+  if (!afterEligible) failureReasons.push("shadow-report-ineligible");
+  if (!contextComparable) failureReasons.push("baseline-context-mismatch");
+  if (!modesPassed) failureReasons.push("legacy-shadow-mode-mismatch");
+  if (scenarioResults.some((result) => !result.comparable)) failureReasons.push("scenario-mismatch");
+  if (scenarioResults.some((result) => !result.noNewLongTasks)) failureReasons.push("new-long-task-detected");
+  return {
+    applicable: true,
+    baselinePath,
+    beforeEligible,
+    afterEligible,
+    beforeEligibility,
+    afterEligibility,
+    contextChecks,
+    contextComparable,
+    modesPassed,
+    scenarioResults,
+    passed,
+    failureReasons,
+  };
+}
+
+function buildPhase3Acceptance(report, args) {
+  const presentScenarioIds = new Set(report.scenarios.map((scenario) => scenario.id));
+  const missingRequiredScenarioIds = PHASE0_REQUIRED_SCENARIO_IDS
+    .filter((scenarioId) => !presentScenarioIds.has(scenarioId));
+  const measuredRunCoveragePassed = args.runs >= PHASE0_MIN_MEASURED_RUNS
+    && report.scenarios.every((scenario) => scenario.repetitions.measuredRuns >= PHASE0_MIN_MEASURED_RUNS);
+  const warmupCoveragePassed = args.warmupRuns >= PHASE0_MIN_WARMUP_RUNS
+    && report.scenarios.every((scenario) => scenario.repetitions.warmupRuns >= PHASE0_MIN_WARMUP_RUNS);
+  const measuredRuns = report.scenarios.flatMap((scenario) => (
+    (scenario.rawRuns || []).filter((run) => !run.warmup).map((run) => ({
+      entityCount: Number(scenario.fixture?.entities || 0),
+      run,
+      scenarioId: scenario.id,
+    }))
+  ));
+  const parityCounterPassed = measuredRuns.length > 0 && measuredRuns.every(({ entityCount, run }) => (
+    (entityCount === 0 || Number(run.counters?.shadowCompareCount) > 0)
+    && Number(run.counters?.shadowParityMismatchCount) === 0
+    && Number(run.counters?.shadowErrorCount) === 0
+    && Number(run.counters?.shadowMismatchItems) === 0
+  ));
+  const nonEmptyMeasuredRuns = measuredRuns.filter(({ entityCount }) => entityCount > 0);
+  const nonEmptyParityCoveragePassed = nonEmptyMeasuredRuns.length > 0
+    && nonEmptyMeasuredRuns
+      .every(({ run }) => Number(run.counters?.shadowComparedEntities) > 0);
+  const hitParityCoveragePassed = nonEmptyMeasuredRuns.length > 0
+    && nonEmptyMeasuredRuns
+      .every(({ run }) => Number(run.counters?.shadowComparedHits) > 0);
+  const parityPassed = parityCounterPassed
+    && nonEmptyParityCoveragePassed
+    && hitParityCoveragePassed;
+  const longTaskInstrumentationPassed = measuredRuns.length > 0
+    && measuredRuns.every(({ run }) => run?.bench?.longTaskSupported === true);
+  const sceneBuildBudgetPassed = measuredRuns.every(({ entityCount, run }) => {
+    if (entityCount === 0) return true;
+    const buildMs = Number(run.counters?.shadowSceneBuildMs);
+    return Number.isFinite(buildMs) && buildMs >= 0 && buildMs <= 50;
+  });
+  const productionBuildPassed = report.environment?.productionBuild === true
+    && report.environment?.productionBuildVerification === "managed-vite-preview";
+  const engineModePassed = report.configuration?.drawingEngineMode === "shadow"
+    && report.context?.mode === "shadow";
+  const comparisonPassed = report.phase3Comparison?.passed === true;
+  const executionPassed = report.executionAcceptance?.passed === true;
+  const phase3Eligible = !args.smoke && productionBuildPassed;
+  const passed = phase3Eligible
+    && engineModePassed
+    && missingRequiredScenarioIds.length === 0
+    && measuredRunCoveragePassed
+    && warmupCoveragePassed
+    && executionPassed
+    && parityPassed
+    && longTaskInstrumentationPassed
+    && sceneBuildBudgetPassed
+    && comparisonPassed;
+  const failureReasons = [];
+  if (args.smoke) failureReasons.push("smoke-only-run");
+  if (!productionBuildPassed) failureReasons.push("production-build-unverified");
+  if (!engineModePassed) failureReasons.push("shadow-mode-not-selected");
+  if (missingRequiredScenarioIds.length > 0) failureReasons.push("missing-required-scenarios");
+  if (!measuredRunCoveragePassed) failureReasons.push("measured-runs-below-five");
+  if (!warmupCoveragePassed) failureReasons.push("warmup-runs-below-one");
+  if (!executionPassed) failureReasons.push("scenario-execution-invalid");
+  if (!parityCounterPassed) failureReasons.push("shadow-parity-counter-failed");
+  if (!nonEmptyParityCoveragePassed) failureReasons.push("shadow-visible-entity-coverage-failed");
+  if (!hitParityCoveragePassed) failureReasons.push("shadow-hit-coverage-failed");
+  if (!longTaskInstrumentationPassed) failureReasons.push("long-task-instrumentation-unavailable");
+  if (!sceneBuildBudgetPassed) failureReasons.push("shadow-build-over-50ms");
+  if (!comparisonPassed) failureReasons.push("legacy-shadow-long-task-comparison-failed");
+  return {
+    passed,
+    phase3Eligible,
+    productionBuildPassed,
+    engineModePassed,
+    requiredScenarioIds: [...PHASE0_REQUIRED_SCENARIO_IDS],
+    missingRequiredScenarioIds,
+    minimumMeasuredRuns: PHASE0_MIN_MEASURED_RUNS,
+    measuredRunCoveragePassed,
+    minimumWarmupRuns: PHASE0_MIN_WARMUP_RUNS,
+    warmupCoveragePassed,
+    executionPassed,
+    parityPassed,
+    parityCounterPassed,
+    nonEmptyParityCoveragePassed,
+    hitParityCoveragePassed,
+    longTaskInstrumentationPassed,
+    sceneBuildBudgetPassed,
+    comparisonPassed,
+    failureReasons,
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const git = readGitContext();
-  const configuredProjectorMode = process.env.VITE_DRAWING_COORDINATE_PROJECTOR;
+  const selectedScenarios = DEFAULT_SCENARIOS.filter((scenario) => args.scenarios.includes(scenario.id));
+  const managed = !args.url;
+  const buildEnvironment = managed ? managedBuildEnvironment(args.engineMode) : null;
+  const configuredProjectorMode = buildEnvironment?.VITE_DRAWING_COORDINATE_PROJECTOR
+    ?? process.env.VITE_DRAWING_COORDINATE_PROJECTOR;
   const drawingCoordinateProjectorMode = configuredProjectorMode === "scalar"
     || configuredProjectorMode === "parity"
     || configuredProjectorMode === "batch"
     ? configuredProjectorMode
     : "batch";
-  const selectedScenarios = DEFAULT_SCENARIOS.filter((scenario) => args.scenarios.includes(scenario.id));
-  const managed = !args.url;
-  if (managed) ensureProductionBuild();
+  if (managed) ensureProductionBuild(args.engineMode);
   const servers = managed ? await startManagedServers(args) : null;
   if (servers) args.url = servers.url;
   if (!args.url.endsWith("/")) args.url += "/";
@@ -1866,7 +2385,7 @@ async function main() {
           userAgent: browserVersion.result?.userAgent || null,
         },
         machine: machineContext(),
-        mode: "legacy",
+        mode: args.engineMode,
       },
       environment: {
         viewport: DEFAULT_VIEWPORT,
@@ -1886,7 +2405,7 @@ async function main() {
           bars: args.bars,
           entities: fixture.metadata.drawingCount,
           points: fixture.metadata.pointCount,
-          mode: "legacy",
+          mode: args.engineMode,
           dpr: args.dpr,
         },
         runs,
@@ -1904,16 +2423,25 @@ async function main() {
     report.configuration.headless = args.headless;
     report.configuration.smokeOnly = args.smoke;
     report.configuration.scenarios = args.scenarios;
+    report.configuration.bars = args.bars;
+    report.configuration.intervalSeconds = args.intervalSeconds;
+    report.configuration.mockEndTime = args.mockEndTime;
+    report.configuration.settleMs = args.settleMs;
     report.configuration.wheelEvents = args.wheelEvents;
     report.configuration.hoverEvents = args.hoverEvents;
     report.configuration.pointerSamples = args.pointerSamples;
     report.configuration.drawingCoordinateProjectorMode = drawingCoordinateProjectorMode;
+    report.configuration.drawingDocumentAuthority = buildEnvironment
+      ?.VITE_DRAWING_DOCUMENT_AUTHORITY ?? null;
+    report.configuration.drawingEngineMode = args.engineMode;
+    report.configuration.buildEnvironment = buildEnvironment;
     report.configuration.compareBefore = args.compareBefore || null;
     report.runMode = {
       name: args.smoke ? "smoke" : args.phase,
       smokeOnly: args.smoke,
       phase0Eligible: !args.smoke,
       phase1Eligible: !args.smoke,
+      phase3Eligible: !args.smoke,
     };
     applyRestoreValidity(report, args);
     report.executionAcceptance = {
@@ -1925,20 +2453,33 @@ async function main() {
       scenario.id,
       evaluateGates(scenario, applicableHardGates(scenario)),
     ]));
+    report.phase3LegacyBaselineAcceptance = buildPhase3LegacyBaselineAcceptance(report, args);
     report.phase1Comparison = buildPhase1Comparison(report, args.compareBefore);
+    report.phase3Comparison = buildPhase3Comparison(report, args.compareBefore);
     report.phase0Acceptance = buildPhase0Acceptance(report, args);
     report.phase1Acceptance = buildPhase1Acceptance(report, args);
+    report.phase3Acceptance = buildPhase3Acceptance(report, args);
     report.smokeAcceptance = buildSmokeAcceptance(report, args);
-    const phaseAcceptance = args.phase === "phase1"
-      ? report.phase1Acceptance
-      : report.phase0Acceptance;
+    const phaseAcceptance = args.phase === "phase3"
+      ? report.phase3Acceptance
+      : args.phase === "phase1"
+        ? report.phase1Acceptance
+        : report.phase0Acceptance;
+    const selectedPhaseAcceptance = args.phase === "phase3"
+      && args.engineMode === "legacy"
+      && !args.smoke
+      ? report.phase3LegacyBaselineAcceptance
+      : phaseAcceptance;
     report.acceptance = {
       ...report.executionAcceptance,
-      kind: args.phase,
-      passed: phaseAcceptance.passed,
+      kind: selectedPhaseAcceptance === report.phase3LegacyBaselineAcceptance
+        ? "phase3-legacy-baseline"
+        : args.phase,
+      passed: selectedPhaseAcceptance.passed,
       smokeOnly: args.smoke,
       phase0Eligible: !args.smoke,
       phase1Eligible: !args.smoke,
+      phase3Eligible: !args.smoke,
       executionPassed: report.executionAcceptance.passed,
     };
 
@@ -1950,7 +2491,13 @@ async function main() {
       "docs",
       "perf-baselines",
       "drawing-engine-v2",
-      (args.smoke ? "smoke-" : args.phase === "phase1" ? "baseline-after-" : "baseline-before-")
+      (args.smoke
+        ? "smoke-"
+        : args.phase === "phase3"
+          ? "phase3-" + args.engineMode + "-"
+          : args.phase === "phase1"
+            ? "baseline-after-"
+            : "baseline-before-")
         + git.shortCommit
         + "-" + generatedStamp + "-bars" + args.bars + "-dpr" + safeDpr + ".json",
     );
@@ -1962,6 +2509,9 @@ async function main() {
       phase0Acceptance: report.phase0Acceptance,
       phase1Acceptance: report.phase1Acceptance,
       phase1Comparison: report.phase1Comparison,
+      phase3LegacyBaselineAcceptance: report.phase3LegacyBaselineAcceptance,
+      phase3Acceptance: report.phase3Acceptance,
+      phase3Comparison: report.phase3Comparison,
       smokeAcceptance: report.smokeAcceptance,
       invalidScenarios: report.acceptance.invalidScenarioIds,
       targetAssessment: Object.fromEntries(Object.entries(report.targetAssessment)
@@ -1971,7 +2521,7 @@ async function main() {
     const targetPassed = Object.values(report.targetAssessment).every((assessment) => assessment.passed);
     const selectedModePassed = args.smoke
       ? report.smokeAcceptance.passed
-      : phaseAcceptance.passed;
+      : selectedPhaseAcceptance.passed;
     if (!selectedModePassed || (args.enforceTargets && !targetPassed)) {
       process.exitCode = 1;
     }

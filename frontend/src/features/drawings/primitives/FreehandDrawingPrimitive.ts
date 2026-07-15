@@ -47,6 +47,7 @@ interface BitmapPoint {
 interface FreehandVisibleRenderData {
   hidden: false;
   paths: ScreenPoint[][];
+  unresolvedGapIndexes: number[];
   color: string;
   lineWidth: number;
   hovered: boolean;
@@ -58,7 +59,13 @@ interface FreehandVisibleRenderData {
 type FreehandRenderData = FreehandVisibleRenderData | {
   hidden: true;
   paths: [];
+  unresolvedGapIndexes: [];
 };
+
+interface FreehandScreenProjection {
+  paths: ScreenPoint[][];
+  unresolvedGapIndexes: number[];
+}
 
 const DEFAULT_HIGHLIGHTER_OPACITY = 0.35;
 const DEFAULT_HIGHLIGHTER_COMPOSITE_OPERATION: GlobalCompositeOperation = "multiply";
@@ -86,7 +93,7 @@ function normalizeOpacity(value: unknown, fallback = 1): number {
 }
 
 function normalizeBrushShape(value: unknown, fallback: BrushShape = "round"): BrushShape {
-  return value === "square" ? "square" : fallback;
+  return value === "round" || value === "square" ? value : fallback;
 }
 
 function normalizePreviewPoints(value: unknown): Array<ScreenPoint | null> | null {
@@ -123,7 +130,7 @@ function splitScreenPaths(points: Array<ScreenPoint | null>): ScreenPoint[][] {
 
 // ── Geometry helper ──
 
-function distToSegment(
+function squaredDistanceToSegment(
   px: number,
   py: number,
   ax: number,
@@ -134,25 +141,61 @@ function distToSegment(
   const dx = bx - ax;
   const dy = by - ay;
   const lenSq = dx * dx + dy * dy;
-  if (lenSq === 0) return Math.sqrt((px - ax) ** 2 + (py - ay) ** 2);
+  if (lenSq === 0) return (px - ax) ** 2 + (py - ay) ** 2;
   let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
   t = Math.max(0, Math.min(1, t));
   const projX = ax + t * dx;
   const projY = ay + t * dy;
-  return Math.sqrt((px - projX) ** 2 + (py - projY) ** 2);
+  return (px - projX) ** 2 + (py - projY) ** 2;
 }
 
-function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][] {
+function hitTestScreenPaths(
+  screenPaths: readonly (readonly Readonly<ScreenPoint>[])[],
+  x: number,
+  y: number,
+  radius: number,
+): boolean {
+  const radiusSquared = radius * radius;
+  for (const screenPoints of screenPaths) {
+    // The renderer intentionally skips singleton paths because Canvas has
+    // no visible segment to stroke. Hit testing must follow the same rule.
+    if (screenPoints.length < 2) continue;
+    for (const point of screenPoints) {
+      const dx = point.x - x;
+      const dy = point.y - y;
+      if (dx * dx + dy * dy <= radiusSquared) return true;
+    }
+
+    // Segments are checked within one resolved path only. An unresolved marker
+    // starts a new path and can never create a hit across the gap.
+    for (let index = 0; index < screenPoints.length - 1; index += 1) {
+      const left = screenPoints[index];
+      const right = screenPoints[index + 1];
+      if (!left || !right) continue;
+      if (squaredDistanceToSegment(x, y, left.x, left.y, right.x, right.y)
+        <= radiusSquared) return true;
+    }
+  }
+  return false;
+}
+
+function screenProjectionForSource(source: FreehandDrawingPrimitive): FreehandScreenProjection {
   if (source._previewScreenPoints !== null) {
-    return splitScreenPaths(source._previewScreenPoints);
+    return {
+      paths: splitScreenPaths(source._previewScreenPoints),
+      unresolvedGapIndexes: source._previewScreenPoints.flatMap((point, index) => (
+        point === null ? [index] : []
+      )),
+    };
   }
   const series = source._series;
   const chart = source._chart;
-  if (!series || !chart) return [];
+  if (!series || !chart) return { paths: [], unresolvedGapIndexes: [] };
   const coordinateContext: DrawingCoordinateContext = {};
 
   if (source._stroke) {
     const paths: ScreenPoint[][] = [];
+    const unresolvedGapIndexes: number[] = [];
     let currentPath: ScreenPoint[] = [];
     const horizontalPoints = freehandStrokeToCoordinates(
       chart,
@@ -165,9 +208,10 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
       },
     );
     let projectedPointCount = 0;
-    for (const point of horizontalPoints) {
+    for (const [index, point] of horizontalPoints.entries()) {
       const y = point ? series.priceToCoordinate(point.price) : null;
       if (!point || !Number.isFinite(point.x) || typeof y !== "number" || !Number.isFinite(y)) {
+        unresolvedGapIndexes.push(index);
         if (currentPath.length > 0) paths.push(currentPath);
         currentPath = [];
         continue;
@@ -179,12 +223,13 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
     if (projectedPointCount > 0) {
       drawingPerfCounters.recordFinalProjection(projectedPointCount);
     }
-    return paths;
+    return { paths, unresolvedGapIndexes };
   }
 
   // Preserve the legacy v1 time-axis behavior, but never bridge an unresolved
   // legacy point after the same saved stroke is rendered on an ordinal axis.
   const paths: ScreenPoint[][] = [];
+  const unresolvedGapIndexes: number[] = [];
   let path: ScreenPoint[] = [];
   let splitOnUnresolved: boolean | null = null;
   let projectedPointCount = 0;
@@ -210,6 +255,7 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
       path.push({ x, y });
       projectedPointCount += 1;
     } else if (splitOnUnresolved) {
+      unresolvedGapIndexes.push(index);
       if (path.length > 0) paths.push(path);
       path = [];
     }
@@ -218,7 +264,11 @@ function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][]
   if (projectedPointCount > 0) {
     drawingPerfCounters.recordFinalProjection(projectedPointCount);
   }
-  return paths;
+  return { paths, unresolvedGapIndexes };
+}
+
+function screenPathsForSource(source: FreehandDrawingPrimitive): ScreenPoint[][] {
+  return screenProjectionForSource(source).paths;
 }
 
 function tracePath(
@@ -341,7 +391,7 @@ class FreehandPaneView implements PrimitivePaneView {
 
     if (!series || !chart) return;
     if (source._hidden) {
-      this._renderer.update({ paths: [], hidden: true });
+      this._renderer.update({ paths: [], unresolvedGapIndexes: [], hidden: true });
       const durationMs = drawingPerfNow() - startedAt;
       drawingPerfCounters.recordSceneRebuild();
       accumulateDrawingPerfFrameWork({
@@ -356,11 +406,13 @@ class FreehandPaneView implements PrimitivePaneView {
       return;
     }
 
-    const paths = screenPathsForSource(source);
+    const projection = screenProjectionForSource(source);
+    const paths = projection.paths;
     const rawPoints = rawPointCountForSource(source);
     const renderedPoints = paths.reduce((sum, path) => sum + path.length, 0);
     this._renderer.update({
       paths,
+      unresolvedGapIndexes: projection.unresolvedGapIndexes,
       color: source._color,
       lineWidth: source._lineWidth,
       opacity: source._opacity,
@@ -501,6 +553,32 @@ export class FreehandDrawingPrimitive {
   get brushShape(): BrushShape { return this._brushShape; }
   get geometryRevision(): number { return this._geometryRevision; }
 
+  /** Read-only snapshot of the exact screen paths most recently supplied to the visible renderer. */
+  getParityScreenSnapshot(): Readonly<{
+    hidden: boolean;
+    paths: readonly (readonly Readonly<ScreenPoint>[])[];
+    unresolvedGapIndexes: readonly number[];
+  }> | null {
+    const data = this._paneView._renderer._data;
+    if (!data) return null;
+    return Object.freeze({
+      hidden: data.hidden,
+      // Renderer updates replace these arrays; they are never mutated after
+      // publication. Expose the coherent last-paint view without cloning every
+      // point during a low-frequency parity sample.
+      paths: data.paths,
+      unresolvedGapIndexes: data.unresolvedGapIndexes,
+    });
+  }
+
+  /** Exact legacy freehand hit semantics over the coherent last-painted paths. */
+  hitTestParityScreenSnapshot(x: number, y: number, hitRadius = 8): boolean {
+    if (this._hidden || this._isPreview) return false;
+    const data = this._paneView._renderer._data;
+    if (!data || data.hidden) return false;
+    return hitTestScreenPaths(data.paths, x, y, hitRadius + this._lineWidth / 2);
+  }
+
   addPoint(dp: DrawingDataPoint): void {
     this._dataPoints.push(dp);
     this._geometryRevision += 1;
@@ -627,33 +705,7 @@ export class FreehandDrawingPrimitive {
     if (this._stroke ? this._stroke.points.length < 2 : this._dataPoints.length < 2) return false;
 
     const screenPaths = screenPathsForSource(this);
-
-    const totalRadius = hitRadius + this._lineWidth / 2;
-
-    // Check each point
-    for (const screenPoints of screenPaths) {
-      // The renderer intentionally skips singleton paths because Canvas has
-      // no visible segment to stroke. Hit testing must follow the same rule.
-      if (screenPoints.length < 2) continue;
-      for (const point of screenPoints) {
-        const dx = point.x - x;
-        const dy = point.y - y;
-        if (Math.sqrt(dx * dx + dy * dy) <= totalRadius) return true;
-      }
-
-      // Segments are checked within one resolved path only. An unresolved marker
-      // starts a new path and can never create an eraser hit across the gap.
-      for (let index = 0; index < screenPoints.length - 1; index += 1) {
-        const left = screenPoints[index];
-        const right = screenPoints[index + 1];
-        if (!left || !right) continue;
-        if (distToSegment(x, y, left.x, left.y, right.x, right.y) <= totalRadius) {
-          return true;
-        }
-      }
-    }
-
-    return false;
+    return hitTestScreenPaths(screenPaths, x, y, hitRadius + this._lineWidth / 2);
   }
 }
 

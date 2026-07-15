@@ -427,6 +427,9 @@ export function useDrawing({
 }: UseDrawingOptions): DrawingInteractionRuntime {
   const onToolChangeRef = useRef(onToolChange);
   const getChartAdapter = useCallback(() => chartAdapter || null, [chartAdapter]);
+  const notifyDrawingSceneInvalidation = useCallback(() => {
+    getChartAdapter()?.notifyDrawingFrameInvalidation?.();
+  }, [getChartAdapter]);
   // ── All primitives (lines + freehand strokes + text) ──
   const primitivesRef = useRef<DrawingPrimitive[]>([]); // (LineDrawingPrimitive | FreehandDrawingPrimitive | TextDrawingPrimitive)[]
 
@@ -452,7 +455,10 @@ export function useDrawing({
     deselectAll,
     getPrimitiveById,
     refreshSelectedTextUi,
-  } = useDrawingSelection({ primitivesRef });
+  } = useDrawingSelection({
+    primitivesRef,
+    onSelectionChange: notifyDrawingSceneInvalidation,
+  });
 
   // ── Freehand-specific state ──
   const currentFreehandRef = useRef<FreehandDrawingPrimitive | null>(null); // FreehandDrawingPrimitive being drawn
@@ -671,6 +677,7 @@ export function useDrawing({
     currentFreehandRef,
     draggingRef,
     getChartAdapter: getDrawingPersistenceAdapter,
+    getDrawingSceneAdapter: getChartAdapter,
     hiddenRef,
     isDrawingFreehandRef,
     prevSymbolRef,
@@ -1962,6 +1969,7 @@ export function useDrawing({
       // can request one themselves.
       getChartAdapter()?.requestSeriesUpdate?.();
     }
+    getChartAdapter()?.notifyDrawingFrameInvalidation?.();
   }, [getChartAdapter, removePreview, cancelTextEditing, clearHoverFeedback, cancelActiveDrawingMove, cancelActiveFreehandStroke, prepareUserMutationScope]);
 
   // ── Selected-text helpers (consumed by floating format toolbar) ──

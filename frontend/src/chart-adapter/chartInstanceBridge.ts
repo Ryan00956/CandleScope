@@ -6,6 +6,8 @@ import {
   isOrdinalAxisTime,
   logicalToCoordinateInterpolated,
   registerDrawingSeriesContext,
+  resolveDrawingDataPointsToCoordinates,
+  resolveSourceLineageSpanToCoordinates,
   timeToCoordinateInterpolated,
 } from "./coordinateBridge.js";
 import type {
@@ -15,8 +17,12 @@ import type {
   DrawingCoordinateContext,
   DrawingSeriesProviders,
   ScreenPoint,
+  SourceLineageSpanInput,
 } from "./coordinateBridge.js";
-import { isDrawingFrameSnapshot } from "./drawingFrameSnapshot.js";
+import {
+  drawingFrameRevisionsEqual,
+  isDrawingFrameSnapshot,
+} from "./drawingFrameSnapshot.js";
 import type { DrawingFrameSnapshot } from "./drawingFrameSnapshot.js";
 import type { DrawingLineageIndex } from "../features/chart-representation/drawingLineageIndex.js";
 import type { DisplayRow } from "../features/chart-representation/chartRepresentationTypes.js";
@@ -38,7 +44,15 @@ interface AdapterTimeScale {
   scrollPosition(): number;
   setVisibleLogicalRange(range: unknown): void;
   setVisibleRange(range: unknown): void;
+  subscribeSizeChange?(handler: (width: number, height: number) => void): void;
+  subscribeVisibleLogicalRangeChange?(
+    handler: (range: { from: number; to: number } | null) => void,
+  ): void;
   timeToCoordinate(time: unknown): number | null;
+  unsubscribeSizeChange?(handler: (width: number, height: number) => void): void;
+  unsubscribeVisibleLogicalRangeChange?(
+    handler: (range: { from: number; to: number } | null) => void,
+  ): void;
   width?(): number;
 }
 
@@ -86,7 +100,38 @@ interface VisibleRangeSnapshot {
   scrollPosition?: number;
 }
 
+interface DrawingTextMeasureRequest {
+  readonly text: string;
+  readonly fontFamily: string;
+  readonly fontSize: number;
+  readonly bold: boolean;
+  readonly italic: boolean;
+  readonly fontWeight?: number | "normal" | "bold";
+}
+
 type CrosshairHandler = (event: unknown) => void;
+
+let drawingTextMeasureContext: CanvasRenderingContext2D | null | undefined;
+
+function measureDrawingText(
+  request: DrawingTextMeasureRequest,
+): Readonly<{ width: number }> | null {
+  if (typeof document === "undefined"
+    || typeof request.text !== "string"
+    || typeof request.fontFamily !== "string"
+    || request.fontFamily.length === 0
+    || !Number.isFinite(request.fontSize)
+    || request.fontSize <= 0) return null;
+  if (drawingTextMeasureContext === undefined) {
+    drawingTextMeasureContext = document.createElement("canvas").getContext("2d");
+  }
+  const context = drawingTextMeasureContext;
+  if (!context) return null;
+  const weight = request.fontWeight ?? (request.bold ? "bold" : "normal");
+  context.font = `${request.italic ? "italic " : ""}${weight} ${request.fontSize}px ${request.fontFamily}`;
+  const width = context.measureText(request.text).width;
+  return Number.isFinite(width) && width >= 0 ? Object.freeze({ width }) : null;
+}
 
 function getRefValue<T>(refOrValue: RefOrValue<T>): T | null | undefined {
   return refOrValue && typeof refOrValue === "object" && "current" in refOrValue
@@ -229,6 +274,46 @@ export function createLightweightChartAdapter({
       ...(isDrawingFrameSnapshot(snapshot) ? { drawingFrameSnapshot: snapshot } : {}),
     };
   };
+  const createDrawingFrameCoordinateContext = (
+    snapshot: DrawingFrameSnapshot,
+  ): DrawingCoordinateContext => ({
+    drawingCoordinateIndex: snapshot.coordinateIndex,
+    drawingFrameSnapshot: snapshot,
+    drawingOrdinalSeriesIndex: snapshot.ordinalSeriesIndex,
+    drawingOrdinalSeriesIndexRevision: snapshot.lineageIndexRevision,
+    drawingProjectionConfig: snapshot.drawingProjectionConfig,
+    seriesData: snapshot.seriesData,
+    sourceInterval: snapshot.sourceInterval,
+    sourceIntervalSeconds: snapshot.sourceIntervalSeconds,
+    sourceTimeHorizon: snapshot.sourceTimeHorizon,
+  });
+  const drawingFrameSeriesOwners = new WeakMap<DrawingFrameSnapshot, AdapterSeries>();
+  const drawingFrameInvalidationListeners = new Set<() => void>();
+  const emitDrawingFrameInvalidation = () => {
+    for (const listener of drawingFrameInvalidationListeners) {
+      safeCall(() => listener(), undefined);
+    }
+  };
+  const captureDrawingFrame = (): DrawingFrameSnapshot | null => {
+    const chart = getChart();
+    const series = getSeries();
+    const snapshot = getDrawingCoordinateSnapshot();
+    if (!chart || !series || !isDrawingFrameSnapshot(snapshot)) return null;
+    const existingOwner = drawingFrameSeriesOwners.get(snapshot);
+    if (existingOwner && existingOwner !== series) return null;
+    drawingFrameSeriesOwners.set(snapshot, series);
+    return snapshot;
+  };
+  const isDrawingFrameCurrent = (snapshot: DrawingFrameSnapshot): boolean => {
+    if (!isDrawingFrameSnapshot(snapshot)) return false;
+    const chart = getChart();
+    const series = getSeries();
+    if (!chart || !series || drawingFrameSeriesOwners.get(snapshot) !== series) return false;
+    const current = getDrawingCoordinateSnapshot();
+    return current === snapshot
+      && drawingFrameRevisionsEqual(snapshot, current)
+      && current.surfaceGeneration === snapshot.surfaceGeneration;
+  };
   let lastFreehandCaptureIdentity: FreehandCaptureIdentityRecord | null = null;
   const captureIdentityFor = (
     series: AdapterSeries,
@@ -262,6 +347,84 @@ export function createLightweightChartAdapter({
     usesOrdinalTime: () => usesOrdinalData(getSeriesData()),
     getMainSeries: getSeries,
     getSeriesData,
+    captureDrawingFrame,
+    isDrawingFrameCurrent,
+    projectDrawingFrameDataPoints: (
+      snapshot: DrawingFrameSnapshot,
+      dataPoints: readonly CoordinateDataPoint[],
+    ): Float64Array | null => safeCall(() => {
+      if (!isDrawingFrameCurrent(snapshot)) return null;
+      const chart = getChart();
+      const series = getSeries();
+      if (!chart || !series) return null;
+      const xCoordinates = resolveDrawingDataPointsToCoordinates(
+        chart,
+        series,
+        dataPoints,
+        createDrawingFrameCoordinateContext(snapshot),
+      );
+      if (xCoordinates.length !== dataPoints.length) return null;
+
+      const coordinates = new Float64Array(dataPoints.length * 2);
+      coordinates.fill(Number.NaN);
+      for (let index = 0; index < dataPoints.length; index += 1) {
+        const point = dataPoints[index];
+        const x = xCoordinates[index];
+        const price = point?.price;
+        const coordinateIndex = index * 2;
+        // Preserve each independently resolvable axis. Cross/axis drawings
+        // intentionally render a horizontal line from price even when its
+        // anchor x is unresolved, and vice versa for a vertical line.
+        if (typeof x === "number" && Number.isFinite(x)) {
+          coordinates[coordinateIndex] = x;
+        }
+        if (typeof price === "number" && Number.isFinite(price)) {
+          const y = series.priceToCoordinate(price);
+          if (typeof y === "number" && Number.isFinite(y)) {
+            coordinates[coordinateIndex + 1] = y;
+          }
+        }
+      }
+      return isDrawingFrameCurrent(snapshot) ? coordinates : null;
+    }, null),
+    projectDrawingFrameSourceLineageSpan: (
+      snapshot: DrawingFrameSnapshot,
+      span: SourceLineageSpanInput,
+    ): Readonly<{ left: number; right: number }> | null => safeCall(() => {
+      if (!isDrawingFrameCurrent(snapshot)) return null;
+      const chart = getChart();
+      const series = getSeries();
+      if (!chart || !series) return null;
+      const projected = resolveSourceLineageSpanToCoordinates(
+        chart,
+        series,
+        span,
+        createDrawingFrameCoordinateContext(snapshot),
+      );
+      if (!projected
+        || !Number.isFinite(projected.left)
+        || !Number.isFinite(projected.right)
+        || projected.left >= projected.right) return null;
+      if (!isDrawingFrameCurrent(snapshot)) return null;
+      return Object.freeze({ left: projected.left, right: projected.right });
+    }, null),
+    subscribeDrawingFrameInvalidation: (listener: () => void) => {
+      if (typeof listener !== "function") return () => {};
+      drawingFrameInvalidationListeners.add(listener);
+      const timeScale = safeCall(() => getChart()?.timeScale(), null);
+      const notify = () => safeCall(() => listener(), undefined);
+      safeCall(() => timeScale?.subscribeVisibleLogicalRangeChange?.(notify), undefined);
+      safeCall(() => timeScale?.subscribeSizeChange?.(notify), undefined);
+      return () => {
+        drawingFrameInvalidationListeners.delete(listener);
+        safeCall(() => timeScale?.unsubscribeVisibleLogicalRangeChange?.(notify), undefined);
+        safeCall(() => timeScale?.unsubscribeSizeChange?.(notify), undefined);
+      };
+    },
+    notifyDrawingFrameInvalidation: emitDrawingFrameInvalidation,
+    // Exact browser font metrics are required for shadow parity with the last
+    // legacy paint. This detached canvas never becomes a visible scene owner.
+    measureText: measureDrawingText,
     captureFreehandStrokeBatch: (screenPoints: ScreenPoint[]) => safeCall(() => {
       const chart = getChart();
       const series = getSeries();
@@ -441,10 +604,12 @@ export function createLightweightChartAdapter({
       if (!timeScale || !range) return false;
       if (range.logical) {
         timeScale.setVisibleLogicalRange(range.logical);
+        emitDrawingFrameInvalidation();
         return true;
       }
       if (range.time) {
         timeScale.setVisibleRange(range.time);
+        emitDrawingFrameInvalidation();
         return true;
       }
       return false;
@@ -455,6 +620,10 @@ export function createLightweightChartAdapter({
       chart.subscribeCrosshairMove(handler);
       return () => safeCall(() => chart.unsubscribeCrosshairMove(handler), null);
     },
-    requestSeriesUpdate: () => safeCall(() => getSeries()?.applyOptions({}), null),
+    requestSeriesUpdate: () => safeCall(() => {
+      const result = getSeries()?.applyOptions({});
+      emitDrawingFrameInvalidation();
+      return result;
+    }, null),
   };
 }

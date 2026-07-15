@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   createDrawingFrameSnapshotFactory,
+  createDrawingViewportSignature,
+  drawingFrameRevisionsEqual,
   isDrawingFrameSnapshot,
   type DrawingFrameSnapshotInput,
 } from "../drawingFrameSnapshot.js";
@@ -22,9 +24,17 @@ function baseInput(
 ): DrawingFrameSnapshotInput {
   return {
     axisKind: "time",
+    barSpacing: 6,
     coordinateKey: "BTCUSDT:time:1m:0",
     dpr: 1,
     drawingProjectionConfig: "time:identity",
+    drawingViewport: {
+      horizontalDomain: "time",
+      minHorizontal: 100,
+      maxHorizontal: 300,
+      minPrice: 80,
+      maxPrice: 120,
+    },
     heightCssPx: 600,
     projectionKey: "time:identity",
     seriesData,
@@ -107,6 +117,40 @@ test("viewport-only changes preserve world key and coordinate index", () => {
 
   const unchanged = factory.capture({ ...input, viewportKey: "viewport-b" });
   assert.strictEqual(unchanged, panned);
+});
+
+test("atomic culling viewport and bar spacing participate in viewport revision", () => {
+  const factory = createDrawingFrameSnapshotFactory();
+  const input = baseInput();
+  const initial = factory.capture(input);
+  const panned = factory.capture({
+    ...input,
+    drawingViewport: {
+      horizontalDomain: "time",
+      minHorizontal: 200,
+      maxHorizontal: 400,
+      minPrice: 80,
+      maxPrice: 120,
+    },
+  });
+  assert.equal(panned.viewportRevision, initial.viewportRevision + 1);
+  assert.deepEqual(panned.drawingViewport, {
+    horizontalDomain: "time",
+    minHorizontal: 200,
+    maxHorizontal: 400,
+    minPrice: 80,
+    maxPrice: 120,
+  });
+  assert.equal(panned.worldRevisionKey, initial.worldRevisionKey);
+
+  const spaced = factory.capture({
+    ...input,
+    barSpacing: 8,
+    drawingViewport: panned.drawingViewport,
+  });
+  assert.equal(spaced.viewportRevision, panned.viewportRevision + 1);
+  assert.equal(spaced.barSpacing, 8);
+  assert.equal(isDrawingFrameSnapshot({ ...spaced, drawingViewport: { minPrice: 1 } }), false);
 });
 
 test("data identity changes advance data revision and rebuild numeric coordinate index", () => {
@@ -222,4 +266,58 @@ test("factory reset starts a new independent revision sequence", () => {
   assert.equal(reset.viewportRevision, 1);
   assert.equal(reset.themeRevision, 1);
   assert.equal(reset.surfaceGeneration, 1);
+});
+
+test("viewport signatures include the real vertical price transform", () => {
+  const base = {
+    barSpacing: 6,
+    heightCssPx: 600,
+    logicalRange: { from: 10, to: 20 },
+    priceAtBottom: 80,
+    priceAtMiddle: 100,
+    priceAtTop: 120,
+    priceProjectionKey: "normal:false",
+    scrollPosition: 0,
+  };
+  const initial = createDrawingViewportSignature(base);
+  const verticallyScaled = createDrawingViewportSignature({
+    ...base,
+    priceAtBottom: 60,
+    priceAtTop: 140,
+  });
+
+  assert.equal(typeof initial, "string");
+  assert.notEqual(verticallyScaled, initial);
+  assert.equal(createDrawingViewportSignature({ ...base, priceAtMiddle: null }), null);
+  assert.equal(createDrawingViewportSignature({ ...base, priceAtTop: Number.NaN }), null);
+  assert.equal(createDrawingViewportSignature({ ...base, heightCssPx: 0 }), null);
+  assert.equal(createDrawingViewportSignature({
+    ...base,
+    logicalRange: { from: 10, to: Number.POSITIVE_INFINITY },
+  }), null);
+});
+
+test("frame revision equality covers every worker-visible generation boundary", () => {
+  const factory = createDrawingFrameSnapshotFactory();
+  const input = baseInput();
+  const initial = factory.capture(input);
+  const clone = Object.freeze({ ...initial });
+
+  assert.equal(drawingFrameRevisionsEqual(initial, initial), true);
+  assert.equal(drawingFrameRevisionsEqual(initial, clone), true);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, viewportRevision: 2 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, surfaceGeneration: 2 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, dataRevision: 2 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, projectionRevision: 2 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, lineageIndexRevision: 2 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, themeRevision: 2 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, widthCssPx: 901 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, heightCssPx: 601 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, dpr: 2 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, barSpacing: 8 }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, {
+    ...clone,
+    drawingViewport: { ...clone.drawingViewport!, maxPrice: 121 },
+  }), false);
+  assert.equal(drawingFrameRevisionsEqual(initial, { ...clone, coordinateKey: "other" }), false);
 });

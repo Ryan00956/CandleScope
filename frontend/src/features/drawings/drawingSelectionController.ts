@@ -200,8 +200,10 @@ export interface DrawingSelectionRuntime {
 
 export function useDrawingSelection({
   primitivesRef,
+  onSelectionChange,
 }: {
   primitivesRef: MutableRefObject<DrawingPrimitive[]>;
+  onSelectionChange?: () => void;
 }): DrawingSelectionRuntime {
   const selectedIdRef = useRef<string | null>(null);
   const [selectedPrimId, setSelectedPrimId] = useState<string | null>(null);
@@ -234,7 +236,8 @@ export function useDrawingSelection({
     }
     setSelectedTextUi(selectedTextUiFromPrimitive(selectedPrim));
     setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(selectedPrim));
-  }, [primitivesRef]);
+    onSelectionChange?.();
+  }, [onSelectionChange, primitivesRef]);
 
   const deselectAll = useCallback(() => {
     selectedIdRef.current = null;
@@ -246,7 +249,8 @@ export function useDrawingSelection({
         prim.setSelected(false);
       }
     }
-  }, [primitivesRef]);
+    onSelectionChange?.();
+  }, [onSelectionChange, primitivesRef]);
 
   const getPrimitiveById = useCallback((id: string) => {
     return primitivesRef.current.find((p) => p.id === id) || null;

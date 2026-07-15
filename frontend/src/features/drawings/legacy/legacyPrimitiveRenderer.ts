@@ -35,6 +35,8 @@ export interface LegacyPrimitiveRenderer {
   /** Record checked external surface credentials before any document validation. */
   stageAttached(primitives: readonly DrawingPrimitive[]): void;
   snapshot(): readonly DrawingPrimitive[];
+  /** Canonical document currently represented by the retained registry. */
+  documentSnapshot(): DrawingDocument | null;
   getPrimitiveById(id: string): DrawingPrimitive | null;
   /** Detach the current registry from its surface while retaining it for rebind. */
   detachSurface(): boolean;
@@ -249,6 +251,10 @@ class LegacyPrimitiveRendererImpl implements LegacyPrimitiveRenderer {
 
   snapshot(): readonly DrawingPrimitive[] {
     return Object.freeze([...this.#primitives]);
+  }
+
+  documentSnapshot(): DrawingDocument | null {
+    return this.#document;
   }
 
   getPrimitiveById(id: string): DrawingPrimitive | null {

@@ -88,6 +88,7 @@ async def market_history(
             terminal_reason = getattr(page, "terminal_reason", None)
             earliest_available_ms = getattr(page, "earliest_available_ms", None)
             availability_revision = getattr(page, "availability_revision", None)
+            excluded_ranges = list(getattr(page, "excluded_ranges", ()) or ())
         else:
             events = await dm.market_history(
                 key,
@@ -102,6 +103,7 @@ async def market_history(
             terminal_reason = None
             earliest_available_ms = None
             availability_revision = None
+            excluded_ranges = []
     except HTTPException:
         raise
     except ValueError as exc:
@@ -133,7 +135,7 @@ async def market_history(
         "earliest_available_ms": earliest_available_ms,
         "next_before_ms": None if exhausted else None,
         "availability_revision": availability_revision,
-        "excluded_ranges": [],
+        "excluded_ranges": excluded_ranges,
         "coverage": {
             "earliest_ms": min((event.event_time_ms for event in events), default=None),
             "latest_ms": max((event.event_time_ms for event in events), default=None),

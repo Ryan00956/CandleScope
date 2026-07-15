@@ -40,7 +40,10 @@ from app.data_engine.history.calendar import (
     CalendarRegistry,
     TradingCalendar,
 )
-from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_policy import (
+    last_closed_bar_open_ms,
+    parse_interval_ms,
+)
 
 from ..ingestion.metrics import LayerMetrics
 from .config import BackfillConfig
@@ -296,6 +299,18 @@ class GapDetector:
             exchange=exchange,
             market_type=market_type,
         )
+        # A reference can be a wall-clock timestamp or an open time from a
+        # different interval.  Neither makes the target interval's current
+        # forming bucket eligible for historical repair.  Preserve an older
+        # ingestion reference while capping newer references at the latest
+        # fully closed target bucket.
+        last_closed_ms = last_closed_bar_open_ms(
+            int(time.time() * 1000),
+            interval,
+        )
+        if last_closed_ms is None:
+            return []
+        reference_ms = min(reference_ms, last_closed_ms)
 
         # Query storage boundaries
         db_earliest = await self._storage.get_earliest_time(

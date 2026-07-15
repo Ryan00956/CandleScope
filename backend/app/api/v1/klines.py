@@ -36,6 +36,7 @@ from app.core.market import (
 from app.data_engine.interval_policy import (
     compute_bucket_end_ms,
     compute_bucket_start_ms,
+    last_closed_bar_open_ms,
     parse_interval_ms,
 )
 from app.data_engine.history import TradingCalendar
@@ -243,11 +244,7 @@ async def _poll_backfill_storage(
 def _last_closed_open_ms(interval: str, now_ms: int | None = None) -> int:
     """Return the latest closed bar open_time for an interval."""
     now = int(now_ms if now_ms is not None else time.time() * 1000)
-    interval_ms = parse_interval_ms(interval) or 60_000
-    current_open = compute_bucket_start_ms(now, interval_ms, interval=interval)
-    if current_open <= 0:
-        return current_open
-    return compute_bucket_start_ms(current_open - 1, interval_ms, interval=interval)
+    return last_closed_bar_open_ms(now, interval) or 0
 
 
 def _first_expected_open_ms(start_ms: int, interval: str) -> int:
@@ -563,13 +560,26 @@ def _schedule_related_interval_warmup(
     for interval in _related_warmup_intervals(current_interval):
         try:
             interval_ms = _interval_ms_for_request(interval)
-            warmup_start_ms = max(start_ms, end_ms - (RELATED_WARMUP_TARGET_BARS * interval_ms))
+            # ``end_ms`` is closed for the chart's current interval, but it
+            # can still fall inside a forming candle of a wider related
+            # interval.  Recompute the live edge for each target interval so
+            # a 15m request at 16:45 does not try to repair the still-forming
+            # 16:00 1h candle before 17:00.
+            warmup_end_ms = min(end_ms, _last_closed_open_ms(interval))
+            warmup_start_ms = max(
+                start_ms,
+                warmup_end_ms - (RELATED_WARMUP_TARGET_BARS * interval_ms),
+            )
+            # A narrow visible range can begin after the wider interval's
+            # last closed open.  Fetch that one closed bar instead of emitting
+            # an inverted range or falling forward into the forming candle.
+            warmup_start_ms = min(warmup_start_ms, warmup_end_ms)
             _call_data_manager_method(
                 request_backfill,
                 symbol,
                 interval,
                 warmup_start_ms,
-                end_ms,
+                warmup_end_ms,
                 exchange,
                 market_type,
                 reason="related_interval_warmup",
@@ -584,7 +594,7 @@ def _schedule_related_interval_warmup(
                     },
                     "warmup_range": {
                         "start_ms": warmup_start_ms,
-                        "end_ms": end_ms,
+                        "end_ms": warmup_end_ms,
                         "target_bars": RELATED_WARMUP_TARGET_BARS,
                     },
                 },

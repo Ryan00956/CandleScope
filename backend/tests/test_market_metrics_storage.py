@@ -372,6 +372,88 @@ async def test_open_interest_end_only_query_preserves_upstream_page_semantics(
 
 
 @_async_test
+async def test_fully_future_history_is_not_fetched_and_is_explicitly_excluded(
+    monkeypatch,
+) -> None:
+    now_ms = 1_702_592_100_000
+    monkeypatch.setattr(
+        "app.data_engine.market_data.service.time.time",
+        lambda: now_ms / 1000,
+    )
+    factory = _Factory()
+    service = MarketDataService(factory)
+
+    page = await service.history_page(
+        _key(MarketChannel.FUNDING_RATE),
+        start_ms=now_ms + 1,
+        end_ms=now_ms + 10_000,
+        limit=500,
+    )
+
+    assert factory.fetch_calls == []
+    assert page.events == []
+    assert page.complete is True
+    assert page.retryable is False
+    assert page.terminal_reason is None
+    assert page.excluded_ranges == ({
+        "start_ms": now_ms + 1,
+        "end_ms": now_ms + 10_000,
+        "disposition": "not_expected",
+        "reason": "future",
+    },)
+    await service.shutdown()
+
+
+@_async_test
+async def test_mixed_history_range_clamps_to_wall_clock_and_regular_cadence(
+    monkeypatch,
+) -> None:
+    period_ms = 5 * 60 * 1000
+    now_ms = 1_702_592_123_456
+    latest_oi_event_ms = (now_ms // period_ms) * period_ms
+    monkeypatch.setattr(
+        "app.data_engine.market_data.service.time.time",
+        lambda: now_ms / 1000,
+    )
+    factory = _Factory()
+    service = MarketDataService(factory)
+
+    funding_start_ms = now_ms - 60_000
+    funding_page = await service.history_page(
+        _key(MarketChannel.FUNDING_RATE),
+        start_ms=funding_start_ms,
+        end_ms=now_ms + 60_000,
+        limit=500,
+    )
+    assert factory.fetch_calls[-1]["start_ms"] == funding_start_ms
+    assert factory.fetch_calls[-1]["end_ms"] == now_ms
+    assert funding_page.excluded_ranges == ({
+        "start_ms": now_ms + 1,
+        "end_ms": now_ms + 60_000,
+        "disposition": "not_expected",
+        "reason": "future",
+    },)
+
+    oi_start_ms = latest_oi_event_ms - period_ms
+    oi_page = await service.history_page(
+        _key(MarketChannel.OPEN_INTEREST),
+        period="5m",
+        start_ms=oi_start_ms,
+        end_ms=now_ms + period_ms,
+        limit=500,
+    )
+    assert factory.fetch_calls[-1]["start_ms"] == oi_start_ms
+    assert factory.fetch_calls[-1]["end_ms"] == latest_oi_event_ms
+    assert oi_page.excluded_ranges == ({
+        "start_ms": latest_oi_event_ms + 1,
+        "end_ms": now_ms + period_ms,
+        "disposition": "not_expected",
+        "reason": "future",
+    },)
+    await service.shutdown()
+
+
+@_async_test
 async def test_realtime_storage_is_channel_gated_and_uses_stable_buckets(tmp_path) -> None:
     repository = MarketMetricsRepository(tmp_path / "realtime.sqlite")
     writer = MarketMetricStorageWriter(repository, flush_interval_seconds=60)

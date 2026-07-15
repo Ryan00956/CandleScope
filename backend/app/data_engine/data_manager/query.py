@@ -34,6 +34,7 @@ from app.data_engine.interval_policy import (
     compute_bucket_start_ms,
     is_custom_interval,
     is_ephemeral_interval,
+    last_closed_bar_open_ms,
     parse_custom_interval,
     parse_interval_ms,
 )
@@ -1150,6 +1151,14 @@ class QueryEngine:
         """
         now_ms = int(time.time() * 1000)
         effective_end = end_ms if end_ms is not None else now_ms
+        last_closed_ms = last_closed_bar_open_ms(now_ms, key.interval)
+        if last_closed_ms is None:
+            logger.debug(
+                "Skipping backfill for %s because its closed-bar boundary is unknown",
+                key,
+            )
+            return None
+        effective_end = min(effective_end, last_closed_ms)
 
         if start_ms is not None:
             effective_start = start_ms

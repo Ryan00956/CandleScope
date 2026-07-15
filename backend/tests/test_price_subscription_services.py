@@ -377,10 +377,9 @@ def test_data_manager_daily_open_prefers_storage_1d_bar() -> None:
     asyncio.run(_run())
 
 
-def test_data_manager_daily_open_triggers_1d_backfill_when_storage_missing() -> None:
+def test_data_manager_daily_open_repairs_from_first_closed_minute_not_forming_day() -> None:
     async def _run() -> None:
         updated_at_ms = DAY_MS * 10 + 123_000
-        bucket_start = compute_bucket_start_ms(updated_at_ms, DAY_MS, interval="1d")
 
         class _Storage:
             def query_bars(self, **kwargs):
@@ -411,9 +410,9 @@ def test_data_manager_daily_open_triggers_1d_backfill_when_storage_missing() -> 
         assert snapshot.daily_open == 99
         assert calls == [(
             "BTC-USDT",
-            "1d",
-            bucket_start,
-            bucket_start + DAY_MS - 1,
+            "1m",
+            compute_bucket_start_ms(updated_at_ms, DAY_MS, interval="1d"),
+            compute_bucket_start_ms(updated_at_ms, DAY_MS, interval="1d"),
             "okx",
             "spot",
         )]
@@ -421,10 +420,44 @@ def test_data_manager_daily_open_triggers_1d_backfill_when_storage_missing() -> 
     asyncio.run(_run())
 
 
-def test_data_manager_daily_open_marks_price_only_priority_metadata() -> None:
+def test_data_manager_daily_open_does_not_backfill_forming_first_minute() -> None:
+    async def _run() -> None:
+        updated_at_ms = DAY_MS * 10 + 30_000
+
+        class _Storage:
+            def query_bars(self, **kwargs):
+                return []
+
+        calls: list[tuple] = []
+        dm = DataManager()
+        dm.set_storage(_Storage())  # type: ignore[arg-type]
+        dm.set_backfill_trigger(lambda *args: calls.append(args))
+
+        await dm.ensure_price_stream("BTC-USDT", exchange="okx", market_type="spot")
+        await dm.on_price_ticks([{
+            "symbol": "okx:spot:BTC-USDT",
+            "price": 100,
+            "open": 90,
+            "high": 110,
+            "low": 80,
+            "change_pct": 11.1111,
+            "volume": 12,
+            "quote_volume": 1200,
+            "daily_open": 99,
+            "updated_at_ms": updated_at_ms,
+        }])
+
+        snapshot = dm.get_price("BTC-USDT", exchange="okx")
+        assert snapshot is not None
+        assert snapshot.daily_open == 99
+        assert calls == []
+
+    asyncio.run(_run())
+
+
+def test_data_manager_daily_open_deduplicates_minute_repair_and_keeps_live_value_fresh() -> None:
     async def _run() -> None:
         updated_at_ms = DAY_MS * 10 + 123_000
-        bucket_start = compute_bucket_start_ms(updated_at_ms, DAY_MS, interval="1d")
 
         class _Storage:
             def query_bars(self, **kwargs):
@@ -449,21 +482,35 @@ def test_data_manager_daily_open_marks_price_only_priority_metadata() -> None:
             "updated_at_ms": updated_at_ms,
         }])
 
+        await dm.on_price_ticks([{
+            "symbol": "okx:spot:BTC-USDT",
+            "price": 101,
+            "open": 91,
+            "high": 111,
+            "low": 81,
+            "change_pct": 10.989,
+            "volume": 13,
+            "quote_volume": 1300,
+            "daily_open": 98,
+            "updated_at_ms": updated_at_ms + 60_000,
+        }])
+
+        snapshot = dm.get_price("BTC-USDT", exchange="okx")
+        assert snapshot is not None
+        assert snapshot.daily_open == 98
         assert len(calls) == 1
         args, kwargs = calls[0]
+        bucket_start = compute_bucket_start_ms(updated_at_ms, DAY_MS, interval="1d")
         assert args == (
             "BTC-USDT",
-            "1d",
+            "1m",
             bucket_start,
-            bucket_start + DAY_MS - 1,
+            bucket_start,
             "okx",
             "spot",
         )
         assert kwargs["reason"] == "price_daily_open"
-        assert kwargs["priority"] == 70
-        assert kwargs["requester"] == "daily_open"
-        assert kwargs["metadata"]["focus_scope"] == "price"
-        assert kwargs["metadata"]["subscription_tier"] == "price"
+        assert kwargs["metadata"]["requested_interval"] == "1m"
 
     asyncio.run(_run())
 

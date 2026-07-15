@@ -9,6 +9,7 @@ import {
 } from "./advancedMarketDataApi.js";
 import { advancedMarketDataStore } from "./advancedMarketDataStore.js";
 import {
+  clampHistoryRangeToNow,
   coverageForHistoryPage,
   mergeHistoryCoverage,
   nextUncoveredHistoryRange,
@@ -66,10 +67,10 @@ function parseVisibleTimeRange(range: unknown): MarketHistoryRange | null {
   const from = Number(range.time.from);
   const to = Number(range.time.to);
   if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
-  return {
+  return clampHistoryRangeToNow({
     startMs: Math.max(0, Math.floor(Math.min(from, to) * 1000)),
     endMs: Math.max(0, Math.ceil(Math.max(from, to) * 1000)),
-  };
+  });
 }
 
 export function useAdvancedMarketDataRuntime({

@@ -268,6 +268,41 @@ def compute_bucket_close_ms(
     ) - 1
 
 
+def last_closed_bar_open_ms(now_ms: int, interval: str) -> int | None:
+    """Return the open time of the latest fully closed interval bucket.
+
+    Historical K-line ranges are expressed in bar ``open_time`` values.  The
+    bucket containing ``now_ms`` is still forming, so the right-most eligible
+    historical open is the bucket immediately before it.  Bucket helpers are
+    used instead of fixed-width subtraction so calendar-month intervals (for
+    example ``1M`` and ``2M``) retain their real UTC month boundaries.
+    """
+    width_ms = parse_interval_ms(interval)
+    if width_ms is None or width_ms <= 0:
+        return None
+
+    current_open_ms = compute_bucket_start_ms(
+        int(now_ms),
+        width_ms,
+        interval=interval,
+    )
+    if current_open_ms <= 0:
+        return None
+
+    previous_open_ms = compute_bucket_start_ms(
+        current_open_ms - 1,
+        width_ms,
+        interval=interval,
+    )
+    if compute_bucket_end_ms(
+        previous_open_ms,
+        width_ms,
+        interval=interval,
+    ) > int(now_ms):
+        return None
+    return previous_open_ms
+
+
 def find_best_base_interval(
     custom_seconds: int,
     *,

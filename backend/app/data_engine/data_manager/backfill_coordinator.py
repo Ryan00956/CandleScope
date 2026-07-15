@@ -25,7 +25,10 @@ from app.data_engine.history.models import (
 )
 from app.data_engine.history.planner import HistoryRequestPlanner
 from app.data_engine.history.service import HistoryAvailabilityService
-from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_policy import (
+    last_closed_bar_open_ms,
+    parse_interval_ms,
+)
 from app.exchanges.models import (
     HistoryAvailabilityPolicy,
     HistoryEmptyPageSemantics,
@@ -1226,7 +1229,25 @@ class BackfillCoordinator:
     ) -> _PreparedHistoryRequest:
         plan, context = self._plan_history_request(request)
         if plan is None:
-            return _PreparedHistoryRequest(request=request)
+            # Alternate embeddings may omit the availability service.  Still
+            # enforce the universal closed-bar edge before a request reaches
+            # the fetch engine; otherwise a forming-only task is guaranteed to
+            # normalize to zero historical bars and be retried as a failure.
+            now_ms = int(time.time() * 1000)
+            last_closed_ms = last_closed_bar_open_ms(now_ms, request.interval)
+            if last_closed_ms is None or request.end_ms <= last_closed_ms:
+                return _PreparedHistoryRequest(request=request)
+            history_request = HistoryRequest(
+                series=self._history_series_key(request),
+                interval=request.interval,
+                start_ms=request.start_ms,
+                end_ms=request.end_ms,
+            )
+            plan = HistoryRequestPlanner().plan(
+                history_request,
+                HistoryAvailability(calendar_id="crypto.24x7.utc"),
+                now_ms=now_ms,
+            )
         if not plan.has_fetch_work:
             return _PreparedHistoryRequest(request=None, plan=plan, context=context)
 

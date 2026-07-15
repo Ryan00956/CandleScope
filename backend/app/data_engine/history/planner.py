@@ -14,6 +14,7 @@ from app.data_engine.history.models import (
     TimeBound,
     TimeRange,
 )
+from app.data_engine.interval_policy import last_closed_bar_open_ms
 
 
 def _now_ms() -> int:
@@ -139,6 +140,43 @@ class HistoryRequestPlanner:
                 ))
             effective_end = min(effective_end, upper_bound.value_ms)
 
+        # K-line history contains finalized bars only.  A request may use a
+        # wall-clock or another interval's right edge, either of which can land
+        # inside the target interval's forming bucket.  Keep that dynamic tail
+        # out of expected/fetch work without turning it into a durable terminal
+        # series boundary.
+        if request.series.channel == "kline":
+            last_closed_ms = last_closed_bar_open_ms(
+                current_ms,
+                request.interval,
+            )
+            if last_closed_ms is not None and effective_end > last_closed_ms:
+                excluded_start = max(effective_start, last_closed_ms + 1)
+                if excluded_start <= effective_end:
+                    tail_has_expected_open = bool(selected_calendar.open_segments(
+                        excluded_start,
+                        effective_end,
+                        request.interval,
+                    ))
+                    tail_reason = (
+                        BoundaryReason.FORMING_BAR
+                        if tail_has_expected_open
+                        else BoundaryReason.MARKET_CLOSED
+                    )
+                    forming_bound = TimeBound(
+                        last_closed_ms,
+                        tail_reason,
+                        revision=availability.revision,
+                        dynamic=True,
+                    )
+                    exclusions.append(HistoryExclusion(
+                        TimeRange(excluded_start, effective_end),
+                        HistoryDisposition.NOT_EXPECTED,
+                        tail_reason,
+                        forming_bound,
+                    ))
+                effective_end = min(effective_end, last_closed_ms)
+
         if effective_start > effective_end:
             if not exclusions:
                 deciding_bound = lower_bound or upper_bound
@@ -148,11 +186,19 @@ class HistoryRequestPlanner:
                     deciding_bound.reason if deciding_bound else BoundaryReason.AVAILABILITY_UNKNOWN,
                     deciding_bound,
                 ))
+            terminal = any(
+                item.disposition is HistoryDisposition.TERMINAL
+                for item in exclusions
+            )
             return HistoryPlan(
                 request=request,
-                disposition=HistoryDisposition.TERMINAL,
+                disposition=(
+                    HistoryDisposition.TERMINAL
+                    if terminal
+                    else HistoryDisposition.NOT_EXPECTED
+                ),
                 exclusions=tuple(exclusions),
-                terminal=True,
+                terminal=terminal,
                 unknown=unknown,
                 calendar_id=selected_calendar.calendar_id,
             )

@@ -236,6 +236,46 @@ def test_market_history_expired_empty_page_is_complete_and_not_retryable() -> No
     }
 
 
+def test_market_history_exposes_not_expected_future_exclusion() -> None:
+    class _FutureHistoryManager(_MarketDataManager):
+        async def market_history_page(self, key: MarketStreamKey, **kwargs):
+            self.history_calls.append({"key": key, **kwargs})
+            return MarketHistoryPage(
+                events=[],
+                complete=True,
+                excluded_ranges=({
+                    "start_ms": 200,
+                    "end_ms": 300,
+                    "disposition": "not_expected",
+                    "reason": "future",
+                },),
+            )
+
+    response = _client(_FutureHistoryManager()).get(
+        "/api/v1/market/history",
+        params={
+            "channel": "funding_rate",
+            "start_ms": 200,
+            "end_ms": 300,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 0
+    assert payload["history_state"] == "ready"
+    assert payload["complete"] is True
+    assert payload["retryable"] is False
+    assert payload["terminal_reason"] is None
+    assert payload["has_more"] is False
+    assert payload["excluded_ranges"] == [{
+        "start_ms": 200,
+        "end_ms": 300,
+        "disposition": "not_expected",
+        "reason": "future",
+    }]
+
+
 def test_market_http_does_not_expose_raw_upstream_error_text() -> None:
     class _FailingManager(_MarketDataManager):
         async def market_snapshot(self, keys, *, refresh_missing):

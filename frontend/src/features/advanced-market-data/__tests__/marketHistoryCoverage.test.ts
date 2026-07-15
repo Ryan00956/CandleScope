@@ -2,10 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  clampHistoryRangeToNow,
   coverageForHistoryPage,
   mergeHistoryCoverage,
   nextUncoveredHistoryRange,
 } from "../marketHistoryCoverage.js";
+
+test("future-only market history ranges are not requested", () => {
+  assert.equal(clampHistoryRangeToNow({ startMs: 2_001, endMs: 3_000 }, 2_000), null);
+});
+
+test("market history ranges crossing now are clamped to the current time", () => {
+  assert.deepEqual(
+    clampHistoryRangeToNow({ startMs: 1_000, endMs: 3_000 }, 2_000),
+    { startMs: 1_000, endMs: 2_000 },
+  );
+});
 
 test("a full finite page advances the next request to the older uncovered range", () => {
   const requested = { startMs: 1_000, endMs: 10_000 };

@@ -78,6 +78,7 @@ class MarketHistoryPage:
     terminal_reason: str | None = None
     earliest_available_ms: int | None = None
     availability_revision: str | None = None
+    excluded_ranges: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +90,8 @@ class _HistoryRefreshPlan:
     earliest_available_ms: int | None = None
     availability_revision: str | None = None
     max_page_size: int | None = None
+    event_cutoff_ms: int | None = None
+    excluded_ranges: tuple[dict[str, Any], ...] = ()
 
 
 class MarketDataService:
@@ -363,6 +366,7 @@ class MarketDataService:
                     terminal_reason=refresh_plan.terminal_reason,
                     earliest_available_ms=refresh_plan.earliest_available_ms,
                     availability_revision=refresh_plan.availability_revision,
+                    excluded_ranges=refresh_plan.excluded_ranges,
                 )
             raw_events = await self._fetch_market(
                 descriptor,
@@ -371,11 +375,15 @@ class MarketDataService:
                 end_ms=refresh_plan.end_ms,
                 history=True,
             )
-            return MarketHistoryPage(events=[
+            projected_events = [
                 projected
                 for event in raw_events
                 if (projected := self._project(event, event_key)) is not None
-            ])
+            ]
+            return MarketHistoryPage(
+                events=self._apply_history_event_cutoff(projected_events, refresh_plan),
+                excluded_ranges=refresh_plan.excluded_ranges,
+            )
 
         local_events = await self._read_persisted_history(
             event_key,
@@ -384,6 +392,7 @@ class MarketDataService:
             start_ms=start_ms,
             end_ms=end_ms,
         )
+        local_events = self._apply_history_event_cutoff(local_events, refresh_plan)
         if not refresh_plan.should_fetch:
             return MarketHistoryPage(
                 events=local_events,
@@ -395,6 +404,7 @@ class MarketDataService:
                 ),
                 earliest_available_ms=refresh_plan.earliest_available_ms,
                 availability_revision=refresh_plan.availability_revision,
+                excluded_ranges=refresh_plan.excluded_ranges,
             )
         try:
             raw_events = await self._fetch_market(
@@ -414,7 +424,12 @@ class MarketDataService:
                 event_key.topic,
                 exc_info=True,
             )
-            return MarketHistoryPage(events=local_events, fallback=True, retryable=True)
+            return MarketHistoryPage(
+                events=local_events,
+                fallback=True,
+                retryable=True,
+                excluded_ranges=refresh_plan.excluded_ranges,
+            )
 
         projected_events = [
             projected
@@ -422,14 +437,16 @@ class MarketDataService:
             if (projected := self._project(event, event_key)) is not None
         ]
         await self._persist_final_history(projected_events, period=period)
+        persisted_events = await self._read_persisted_history(
+            event_key,
+            period=period,
+            limit=limit,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
         return MarketHistoryPage(
-            events=await self._read_persisted_history(
-                event_key,
-                period=period,
-                limit=limit,
-                start_ms=start_ms,
-                end_ms=end_ms,
-            ),
+            events=self._apply_history_event_cutoff(persisted_events, refresh_plan),
+            excluded_ranges=refresh_plan.excluded_ranges,
         )
 
     def _history_refresh_plan(
@@ -455,6 +472,33 @@ class MarketDataService:
             if period not in supported_periods:
                 raise ValueError(f"unsupported open-interest period: {period}")
 
+        current_ms = int(time.time() * 1000)
+        latest_expected_ms = self._latest_expected_history_ms(
+            capability,
+            period=period,
+            current_ms=current_ms,
+        )
+        future_exclusions: tuple[dict[str, Any], ...] = ()
+        refresh_request_end_ms = end_ms
+        if start_ms is not None and start_ms > latest_expected_ms:
+            excluded_end_ms = end_ms if end_ms is not None else start_ms
+            return _HistoryRefreshPlan(
+                start_ms=None,
+                end_ms=None,
+                should_fetch=False,
+                event_cutoff_ms=latest_expected_ms,
+                excluded_ranges=(self._future_history_exclusion(
+                    start_ms,
+                    excluded_end_ms,
+                ),),
+            )
+        if end_ms is not None and end_ms > latest_expected_ms:
+            refresh_request_end_ms = latest_expected_ms
+            future_exclusions = (self._future_history_exclusion(
+                latest_expected_ms + 1,
+                end_ms,
+            ),)
+
         if self._history_policy is not None:
             series = self._history_policy.series_key(
                 exchange=key.exchange,
@@ -467,7 +511,6 @@ class MarketDataService:
             context = self._history_policy.resolve(series)
             availability = context.availability
             policy = context.policy
-            current_ms = int(time.time() * 1000)
             lower_bounds = [
                 bound
                 for bound in (availability.data_start, availability.upstream_start)
@@ -501,7 +544,11 @@ class MarketDataService:
             upper = min(upper_bounds, key=lambda item: item.value_ms, default=None)
             max_page_size = policy.max_page_size if policy is not None else None
 
-            if end_ms is not None and lower is not None and end_ms < lower.value_ms:
+            if (
+                refresh_request_end_ms is not None
+                and lower is not None
+                and refresh_request_end_ms < lower.value_ms
+            ):
                 return _HistoryRefreshPlan(
                     start_ms=None,
                     end_ms=None,
@@ -510,6 +557,10 @@ class MarketDataService:
                     earliest_available_ms=lower.value_ms,
                     availability_revision=context.revision,
                     max_page_size=max_page_size,
+                    event_cutoff_ms=(
+                        latest_expected_ms if future_exclusions else None
+                    ),
+                    excluded_ranges=future_exclusions,
                 )
             if start_ms is not None and upper is not None and start_ms > upper.value_ms:
                 return _HistoryRefreshPlan(
@@ -520,6 +571,10 @@ class MarketDataService:
                     earliest_available_ms=lower.value_ms if lower is not None else None,
                     availability_revision=context.revision,
                     max_page_size=max_page_size,
+                    event_cutoff_ms=(
+                        latest_expected_ms if future_exclusions else None
+                    ),
+                    excluded_ranges=future_exclusions,
                 )
 
             refresh_start_ms = (
@@ -528,9 +583,9 @@ class MarketDataService:
                 else start_ms
             )
             refresh_end_ms = (
-                min(end_ms, upper.value_ms)
-                if end_ms is not None and upper is not None
-                else end_ms
+                min(refresh_request_end_ms, upper.value_ms)
+                if refresh_request_end_ms is not None and upper is not None
+                else refresh_request_end_ms
             )
             if (
                 policy is not None
@@ -549,17 +604,24 @@ class MarketDataService:
                 earliest_available_ms=lower.value_ms if lower is not None else None,
                 availability_revision=context.revision,
                 max_page_size=max_page_size,
+                event_cutoff_ms=(latest_expected_ms if future_exclusions else None),
+                excluded_ranges=future_exclusions,
             )
 
-        if start_ms is None and end_ms is None:
+        if start_ms is None and refresh_request_end_ms is None:
             return _HistoryRefreshPlan(start_ms=None, end_ms=None)
 
         limits = getattr(capability, "limits", {}) if capability is not None else {}
         raw_max_age_ms = limits.get("history.max_age_ms")
         if type(raw_max_age_ms) is not int or raw_max_age_ms <= 0:
-            return _HistoryRefreshPlan(start_ms=start_ms, end_ms=end_ms)
+            return _HistoryRefreshPlan(
+                start_ms=start_ms,
+                end_ms=refresh_request_end_ms,
+                event_cutoff_ms=(latest_expected_ms if future_exclusions else None),
+                excluded_ranges=future_exclusions,
+            )
 
-        retention_start_ms = int(time.time() * 1000) - raw_max_age_ms
+        retention_start_ms = current_ms - raw_max_age_ms
         if period:
             period_ms = parse_interval_ms(period)
             if period_ms is None:
@@ -572,7 +634,10 @@ class MarketDataService:
                 (retention_start_ms + period_ms - 1) // period_ms
             ) * period_ms
 
-        if end_ms is not None and end_ms < retention_start_ms:
+        if (
+            refresh_request_end_ms is not None
+            and refresh_request_end_ms < retention_start_ms
+        ):
             return _HistoryRefreshPlan(
                 start_ms=None,
                 end_ms=None,
@@ -580,6 +645,8 @@ class MarketDataService:
                 terminal_reason="outside_upstream_retention",
                 earliest_available_ms=retention_start_ms,
                 availability_revision=f"rolling:{raw_max_age_ms}",
+                event_cutoff_ms=(latest_expected_ms if future_exclusions else None),
+                excluded_ranges=future_exclusions,
             )
 
         refresh_start_ms = (
@@ -589,10 +656,50 @@ class MarketDataService:
         )
         return _HistoryRefreshPlan(
             start_ms=refresh_start_ms,
-            end_ms=end_ms,
+            end_ms=refresh_request_end_ms,
             earliest_available_ms=retention_start_ms,
             availability_revision=f"rolling:{raw_max_age_ms}",
+            event_cutoff_ms=(latest_expected_ms if future_exclusions else None),
+            excluded_ranges=future_exclusions,
         )
+
+    @staticmethod
+    def _latest_expected_history_ms(
+        capability: Any,
+        *,
+        period: str | None,
+        current_ms: int,
+    ) -> int:
+        policy = getattr(capability, "history_policy", None)
+        cadence = getattr(getattr(policy, "cadence", None), "value", None)
+        if cadence == "regular" and period:
+            period_ms = parse_interval_ms(period)
+            if period_ms is None:
+                raise ValueError(f"unsupported history period: {period}")
+            return (current_ms // period_ms) * period_ms
+        return current_ms
+
+    @staticmethod
+    def _future_history_exclusion(start_ms: int, end_ms: int) -> dict[str, Any]:
+        return {
+            "start_ms": int(start_ms),
+            "end_ms": int(end_ms),
+            "disposition": "not_expected",
+            "reason": "future",
+        }
+
+    @staticmethod
+    def _apply_history_event_cutoff(
+        events: list[MarketStateEvent],
+        plan: _HistoryRefreshPlan,
+    ) -> list[MarketStateEvent]:
+        if plan.event_cutoff_ms is None:
+            return events
+        return [
+            event
+            for event in events
+            if event.event_time_ms <= plan.event_cutoff_ms
+        ]
 
     async def _read_persisted_history(
         self,

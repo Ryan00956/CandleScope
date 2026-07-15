@@ -6,6 +6,7 @@ import time
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import app.api.v1.klines as klines_api
 from app.api.v1.klines import _schedule_related_interval_warmup, router as klines_router
 from app.data_engine.data_manager import DataManager
 from app.data_engine.data_manager.models import BarData, QueryResult, QuerySource
@@ -842,6 +843,51 @@ def test_related_interval_warmup_caps_each_interval_to_target_bars() -> None:
         "end_ms": 10_000_000_000,
         "target_bars": 1_000,
     }
+
+
+def test_related_interval_warmup_uses_each_target_last_closed_open(
+    monkeypatch,
+) -> None:
+    class _WarmupDataManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[tuple, dict]] = []
+
+        def request_backfill(self, *args, **kwargs) -> None:
+            self.calls.append((args, kwargs))
+
+    last_closed = {
+        "1m": 9_600_000,
+        "5m": 9_000_000,
+        "1h": 7_200_000,
+    }
+    monkeypatch.setattr(
+        klines_api,
+        "_last_closed_open_ms",
+        lambda interval: last_closed[interval],
+    )
+    dm = _WarmupDataManager()
+
+    _schedule_related_interval_warmup(
+        dm,
+        symbol="BTCUSDT",
+        current_interval="15m",
+        start_ms=9_750_000,
+        end_ms=9_900_000,
+        exchange="binance",
+        market_type="futures",
+    )
+
+    by_interval = {args[1]: (args, kwargs) for args, kwargs in dm.calls}
+    assert list(by_interval) == ["5m", "1h", "1m"]
+    for interval, expected_end_ms in last_closed.items():
+        args, kwargs = by_interval[interval]
+        assert args[2] == expected_end_ms
+        assert args[3] == expected_end_ms
+        assert kwargs["metadata"]["visible_range"] == {
+            "start_ms": 9_750_000,
+            "end_ms": 9_900_000,
+        }
+        assert kwargs["metadata"]["warmup_range"]["end_ms"] == expected_end_ms
 
 
 def test_continuity_endpoint_returns_storage_gap_report() -> None:

@@ -13,6 +13,19 @@ function normalizedRange(range: MarketHistoryRange): MarketHistoryRange {
   return { startMs, endMs };
 }
 
+export function clampHistoryRangeToNow(
+  requested: MarketHistoryRange,
+  nowMs: number = Date.now(),
+): MarketHistoryRange | null {
+  const target = normalizedRange(requested);
+  const upperBound = Math.max(0, Math.floor(nowMs));
+  if (target.startMs > upperBound) return null;
+  return {
+    startMs: target.startMs,
+    endMs: Math.min(target.endMs, upperBound),
+  };
+}
+
 export function mergeHistoryCoverage(
   current: readonly MarketHistoryRange[],
   incoming: MarketHistoryRange,

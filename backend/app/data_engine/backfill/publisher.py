@@ -33,7 +33,6 @@ from .models import (
     FetchResult,
     ReconcileResult,
     RepairReport,
-    FetchedBar,
 )
 
 logger = logging.getLogger("backfill.Publisher")
@@ -225,6 +224,21 @@ class RepairPublisher:
     def _default_format(report: RepairReport) -> dict:
         """Default compact format for logging."""
         rec = report.reconcile_result
+        all_fetch_issues = [
+            {
+                "task": result.task.task_key,
+                "interval": result.task.interval,
+                "start_ms": result.task.start_ms,
+                "end_ms": result.task.end_ms,
+                "status": result.status.value,
+                "errors": list(result.errors),
+            }
+            for result in report.fetch_results
+            if result.errors or result.status in {
+                BackfillStatus.FAILED,
+                BackfillStatus.PARTIAL,
+            }
+        ]
         return {
             "run_id": report.run_id,
             "symbol": report.symbol,
@@ -240,6 +254,8 @@ class RepairPublisher:
             "bars_cached": rec.bars_cached if rec else 0,
             "written_ranges": len(rec.written_ranges) if rec else 0,
             "errors": report.errors[:5],  # first 5 errors
+            "fetch_issue_count": len(all_fetch_issues),
+            "fetch_issues": all_fetch_issues[:5],
         }
 
     # ── Internal: Callbacks ──────────────────────────────────

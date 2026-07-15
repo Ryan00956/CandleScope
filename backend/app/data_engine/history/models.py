@@ -39,6 +39,7 @@ class BoundaryReason(str, Enum):
     PROVIDER_RETENTION = "provider_retention"
     SOURCE_EXHAUSTED = "source_exhausted"
     MARKET_CLOSED = "market_closed"
+    FORMING_BAR = "forming_bar"
     CALENDAR_UNKNOWN = "calendar_unknown"
     TEMPORARY_UNAVAILABLE = "temporary_unavailable"
     AVAILABILITY_UNKNOWN = "availability_unknown"

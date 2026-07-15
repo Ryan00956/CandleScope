@@ -5,9 +5,11 @@ import {
   drawingAnchorFromAxisTime,
   isOrdinalAxisTime,
   logicalToCoordinateInterpolated,
+  projectSourceLineageSpanWithMode,
+  projectDrawingCoordinateResolutions,
   registerDrawingSeriesContext,
-  resolveDrawingDataPointsToCoordinates,
-  resolveSourceLineageSpanToCoordinates,
+  resolveDrawingSourceAnchors,
+  resolveSourceLineageSpan,
   timeToCoordinateInterpolated,
 } from "./coordinateBridge.js";
 import type {
@@ -15,6 +17,8 @@ import type {
   CoordinateDataPoint,
   CoordinateSeriesBridge,
   DrawingCoordinateContext,
+  DrawingCoordinateResolution,
+  DrawingSourceLineageSpanResolution,
   DrawingSeriesProviders,
   ScreenPoint,
   SourceLineageSpanInput,
@@ -305,9 +309,58 @@ export function createLightweightChartAdapter({
     sourceIntervalSeconds: snapshot.sourceIntervalSeconds,
     sourceTimeHorizon: snapshot.sourceTimeHorizon,
   });
+  const drawingLineageSpanWorldCache = new WeakMap<
+    object,
+    WeakMap<object, Map<string, DrawingSourceLineageSpanResolution | null>>
+  >();
+  let drawingLineageExactProjectionCount = 0;
+  let drawingLineageFallbackProjectionCount = 0;
+  let drawingLineageUnresolvedProjectionCount = 0;
+  const resolveDrawingFrameSourceLineageSpan = (
+    snapshot: DrawingFrameSnapshot,
+    series: AdapterSeries,
+    span: SourceLineageSpanInput,
+    context: DrawingCoordinateContext,
+  ): DrawingSourceLineageSpanResolution | null => {
+    const exactIdentity = span.exact;
+    const fallbackIdentity = span.fallback;
+    if (!exactIdentity || typeof exactIdentity !== "object"
+      || !fallbackIdentity || typeof fallbackIdentity !== "object") {
+      return resolveSourceLineageSpan(series, span, context);
+    }
+    let byFallback = drawingLineageSpanWorldCache.get(exactIdentity);
+    if (!byFallback) {
+      byFallback = new WeakMap();
+      drawingLineageSpanWorldCache.set(exactIdentity, byFallback);
+    }
+    let entries = byFallback.get(fallbackIdentity);
+    if (!entries) {
+      entries = new Map();
+      byFallback.set(fallbackIdentity, entries);
+    }
+    const key = JSON.stringify([
+      snapshot.worldRevisionKey,
+      span.sourceProjection ?? null,
+      span.sourceProjectionConfig ?? null,
+    ]);
+    if (entries.has(key)) {
+      const cached = entries.get(key) ?? null;
+      entries.delete(key);
+      entries.set(key, cached);
+      return cached;
+    }
+    const resolved = resolveSourceLineageSpan(series, span, context);
+    entries.set(key, resolved);
+    while (entries.size > 4) {
+      const oldest = entries.keys().next();
+      if (oldest.done) break;
+      entries.delete(oldest.value);
+    }
+    return resolved;
+  };
   const drawingFrameSeriesOwners = new WeakMap<DrawingFrameSnapshot, AdapterSeries>();
   const drawingFrameInvalidationListeners = new Set<(
-    reason: DrawingFrameInvalidationReason,
+    reason?: DrawingFrameInvalidationReason,
   ) => void>();
   const emitDrawingFrameInvalidation = (
     reason: DrawingFrameInvalidationReason = "manual",
@@ -362,6 +415,60 @@ export function createLightweightChartAdapter({
     };
     return identity;
   };
+  const resolveDrawingFrameDataPoints = (
+    snapshot: DrawingFrameSnapshot,
+    dataPoints: readonly CoordinateDataPoint[],
+  ): readonly (DrawingCoordinateResolution | null)[] | null => safeCall(() => {
+    if (!isDrawingFrameCurrent(snapshot)) return null;
+    const context = createDrawingFrameCoordinateContext(snapshot);
+    const sourceResolutions = resolveDrawingSourceAnchors(
+      snapshot.seriesData,
+      dataPoints,
+      context,
+    );
+    if (sourceResolutions.length !== dataPoints.length) return null;
+    const resolutions = dataPoints.map((point, index): DrawingCoordinateResolution | null => {
+      if (point.time !== null && point.time !== undefined) {
+        return sourceResolutions[index] ?? null;
+      }
+      return typeof point.logical === "number" && Number.isFinite(point.logical)
+        ? Object.freeze({ kind: "logical" as const, logical: point.logical })
+        : null;
+    });
+    return isDrawingFrameCurrent(snapshot) ? Object.freeze(resolutions) : null;
+  }, null);
+  const projectDrawingFrameResolvedDataPoints = (
+    snapshot: DrawingFrameSnapshot,
+    resolutions: readonly (DrawingCoordinateResolution | null)[],
+    dataPoints: readonly CoordinateDataPoint[],
+  ): Float64Array | null => safeCall(() => {
+    if (!isDrawingFrameCurrent(snapshot) || resolutions.length !== dataPoints.length) return null;
+    const chart = getChart();
+    const series = getSeries();
+    if (!chart || !series) return null;
+    const xCoordinates = projectDrawingCoordinateResolutions(
+      chart.timeScale(),
+      resolutions,
+      createDrawingFrameCoordinateContext(snapshot),
+    );
+    if (xCoordinates.length !== dataPoints.length) return null;
+    const coordinates = new Float64Array(dataPoints.length * 2);
+    coordinates.fill(Number.NaN);
+    for (let index = 0; index < dataPoints.length; index += 1) {
+      const point = dataPoints[index];
+      const x = xCoordinates[index];
+      const price = point?.price;
+      const coordinateIndex = index * 2;
+      // Preserve each independently resolvable axis. Cross/axis drawings
+      // intentionally render one axis even when the other is unresolved.
+      if (typeof x === "number" && Number.isFinite(x)) coordinates[coordinateIndex] = x;
+      if (typeof price === "number" && Number.isFinite(price)) {
+        const y = series.priceToCoordinate(price);
+        if (typeof y === "number" && Number.isFinite(y)) coordinates[coordinateIndex + 1] = y;
+      }
+    }
+    return isDrawingFrameCurrent(snapshot) ? coordinates : null;
+  }, null);
 
   return {
     isReady: () => !!(getChart() && getSeries()),
@@ -371,43 +478,16 @@ export function createLightweightChartAdapter({
     getSeriesData,
     captureDrawingFrame,
     isDrawingFrameCurrent,
+    resolveDrawingFrameDataPoints,
+    projectDrawingFrameResolvedDataPoints,
     projectDrawingFrameDataPoints: (
       snapshot: DrawingFrameSnapshot,
       dataPoints: readonly CoordinateDataPoint[],
     ): Float64Array | null => safeCall(() => {
-      if (!isDrawingFrameCurrent(snapshot)) return null;
-      const chart = getChart();
-      const series = getSeries();
-      if (!chart || !series) return null;
-      const xCoordinates = resolveDrawingDataPointsToCoordinates(
-        chart,
-        series,
-        dataPoints,
-        createDrawingFrameCoordinateContext(snapshot),
-      );
-      if (xCoordinates.length !== dataPoints.length) return null;
-
-      const coordinates = new Float64Array(dataPoints.length * 2);
-      coordinates.fill(Number.NaN);
-      for (let index = 0; index < dataPoints.length; index += 1) {
-        const point = dataPoints[index];
-        const x = xCoordinates[index];
-        const price = point?.price;
-        const coordinateIndex = index * 2;
-        // Preserve each independently resolvable axis. Cross/axis drawings
-        // intentionally render a horizontal line from price even when its
-        // anchor x is unresolved, and vice versa for a vertical line.
-        if (typeof x === "number" && Number.isFinite(x)) {
-          coordinates[coordinateIndex] = x;
-        }
-        if (typeof price === "number" && Number.isFinite(price)) {
-          const y = series.priceToCoordinate(price);
-          if (typeof y === "number" && Number.isFinite(y)) {
-            coordinates[coordinateIndex + 1] = y;
-          }
-        }
-      }
-      return isDrawingFrameCurrent(snapshot) ? coordinates : null;
+      const resolutions = resolveDrawingFrameDataPoints(snapshot, dataPoints);
+      return resolutions
+        ? projectDrawingFrameResolvedDataPoints(snapshot, resolutions, dataPoints)
+        : null;
     }, null),
     projectDrawingFrameSourceLineageSpan: (
       snapshot: DrawingFrameSnapshot,
@@ -417,21 +497,37 @@ export function createLightweightChartAdapter({
       const chart = getChart();
       const series = getSeries();
       if (!chart || !series) return null;
-      const projected = resolveSourceLineageSpanToCoordinates(
-        chart,
+      const context = createDrawingFrameCoordinateContext(snapshot);
+      const resolution = resolveDrawingFrameSourceLineageSpan(
+        snapshot,
         series,
         span,
-        createDrawingFrameCoordinateContext(snapshot),
+        context,
+      );
+      const projected = projectSourceLineageSpanWithMode(
+        chart.timeScale(),
+        resolution,
+        context,
       );
       if (!projected
         || !Number.isFinite(projected.left)
         || !Number.isFinite(projected.right)
-        || projected.left >= projected.right) return null;
+        || projected.left >= projected.right) {
+        drawingLineageUnresolvedProjectionCount += 1;
+        return null;
+      }
       if (!isDrawingFrameCurrent(snapshot)) return null;
+      if (projected.mode === "exact") drawingLineageExactProjectionCount += 1;
+      else drawingLineageFallbackProjectionCount += 1;
       return Object.freeze({ left: projected.left, right: projected.right });
     }, null),
+    readDrawingFrameSourceLineageStats: () => Object.freeze({
+      exactProjectionCount: drawingLineageExactProjectionCount,
+      fallbackProjectionCount: drawingLineageFallbackProjectionCount,
+      unresolvedProjectionCount: drawingLineageUnresolvedProjectionCount,
+    }),
     subscribeDrawingFrameInvalidation: (
-      listener: (reason: DrawingFrameInvalidationReason) => void,
+      listener: (reason?: DrawingFrameInvalidationReason) => void,
     ) => {
       if (typeof listener !== "function") return () => {};
       drawingFrameInvalidationListeners.add(listener);

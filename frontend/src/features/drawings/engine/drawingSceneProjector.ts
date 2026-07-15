@@ -1,6 +1,7 @@
 import type { DrawingFrameSnapshot } from "../../../chart-adapter/drawingFrameSnapshot.js";
 import type {
   CoordinateDataPoint,
+  DrawingCoordinateResolution,
   SourceLineageSpanInput,
 } from "../../../chart-adapter/coordinateBridge.js";
 import type {
@@ -23,6 +24,18 @@ import type {
   DrawingBoundsChunk,
   DrawingBoundsViewport,
 } from "../geometry/drawingBounds.js";
+import {
+  createDrawingLodHierarchy,
+  DRAWING_LOD_TOLERANCE_CSS_PX,
+  DrawingByteWeightedLruCache,
+  selectDrawingLod,
+} from "../geometry/drawingLod.js";
+import type {
+  DrawingLodHierarchy,
+  DrawingLodSelection,
+  DrawingLodToleranceClass,
+} from "../geometry/drawingLod.js";
+import { drawingPerfCounters } from "../performance/drawingPerfCounters.js";
 import {
   createDrawingScreenDisplayList,
 } from "../rendering/drawingDisplayList.js";
@@ -67,6 +80,17 @@ export interface DrawingSceneProjectionAdapter {
     frame: DrawingFrameSnapshot,
     dataPoints: readonly CoordinateDataPoint[],
   ): Float64Array | null;
+  /** Pure source/world resolution; this result is reusable across viewport revisions. */
+  resolveDrawingFrameDataPoints?(
+    frame: DrawingFrameSnapshot,
+    dataPoints: readonly CoordinateDataPoint[],
+  ): readonly (DrawingCoordinateResolution | null)[] | null;
+  /** Public LWC-bound final projection for a previously resolved subset. */
+  projectDrawingFrameResolvedDataPoints?(
+    frame: DrawingFrameSnapshot,
+    resolutions: readonly (DrawingCoordinateResolution | null)[],
+    dataPoints: readonly CoordinateDataPoint[],
+  ): Float64Array | null;
   projectDrawingFrameSourceLineageSpan(
     frame: DrawingFrameSnapshot,
     span: SourceLineageSpanInput,
@@ -84,6 +108,15 @@ export interface DrawingSceneProjectionInput {
   readonly stamp: DrawingRenderRevisionStamp;
   readonly adapter: DrawingSceneProjectionAdapter;
   readonly selectedId: string | null;
+  readonly lodToleranceClass?: DrawingLodToleranceClass;
+}
+
+export interface DrawingSceneWorldWarmupInput {
+  readonly document: DrawingDocument;
+  /** Complete scene-owned node set before viewport culling. */
+  readonly nodes: readonly DrawingSceneNode[];
+  readonly frame: DrawingFrameSnapshot;
+  readonly adapter: DrawingSceneProjectionAdapter;
 }
 
 export interface DrawingSceneCanonicalGapProjectionInput {
@@ -139,6 +172,15 @@ interface NormalizedRenderEntityCacheEntry {
 }
 
 const normalizedRenderEntityCache = new WeakMap<DrawingEntity, NormalizedRenderEntityCacheEntry>();
+interface FreehandChunkProjectionRequest {
+  readonly indexes: readonly number[];
+  readonly points: readonly CoordinateDataPoint[];
+}
+
+const freehandChunkProjectionRequestCache = new WeakMap<
+  object,
+  Map<string, FreehandChunkProjectionRequest>
+>();
 
 const BOX_HANDLE_NAMES = Object.freeze(["tl", "t", "tr", "r", "br", "b", "bl", "l"]);
 
@@ -228,10 +270,39 @@ function projectBatch(
   adapter: DrawingSceneProjectionAdapter,
   frame: DrawingFrameSnapshot,
   points: readonly CoordinateDataPoint[],
+  requestIdentity?: object,
 ): BatchProjection {
+  if (adapter.resolveDrawingFrameDataPoints && adapter.projectDrawingFrameResolvedDataPoints) {
+    const resolutions = resolveCachedDrawingWorldBatch(
+      adapter,
+      frame,
+      points,
+      requestIdentity,
+    );
+    if (!resolutions) return PROJECTION_FAILED;
+    return projectResolvedBatch(adapter, frame, resolutions, points);
+  }
   try {
     const projected = adapter.projectDrawingFrameDataPoints(frame, points);
     return validProjectedBuffer(projected, points.length) ? projected : PROJECTION_FAILED;
+  } catch {
+    return PROJECTION_FAILED;
+  }
+}
+
+function projectResolvedBatch(
+  adapter: DrawingSceneProjectionAdapter,
+  frame: DrawingFrameSnapshot,
+  resolutions: readonly (DrawingCoordinateResolution | null)[],
+  points: readonly CoordinateDataPoint[],
+): BatchProjection {
+  const finalProject = adapter.projectDrawingFrameResolvedDataPoints;
+  if (!finalProject || resolutions.length !== points.length) return PROJECTION_FAILED;
+  try {
+    const projected = finalProject(frame, resolutions, points);
+    if (!validProjectedBuffer(projected, points.length)) return PROJECTION_FAILED;
+    drawingPerfCounters.recordFinalProjection(points.length);
+    return projected;
   } catch {
     return PROJECTION_FAILED;
   }
@@ -279,7 +350,12 @@ function bboxFromDrawablePolyline(
   values: ArrayLike<number>,
   widthCssPx: number,
   heightCssPx: number,
+  paintOutsetCssPx = 0,
 ): readonly [number, number, number, number] | null {
+  const clipLeft = -Math.max(0, paintOutsetCssPx);
+  const clipTop = clipLeft;
+  const clipRight = widthCssPx + Math.max(0, paintOutsetCssPx);
+  const clipBottom = heightCssPx + Math.max(0, paintOutsetCssPx);
   let left = Number.POSITIVE_INFINITY;
   let top = Number.POSITIVE_INFINITY;
   let right = Number.NEGATIVE_INFINITY;
@@ -301,19 +377,19 @@ function bboxFromDrawablePolyline(
       let firstY = previousY;
       let secondX = x;
       let secondY = y;
-      let visible = previousX >= 0 && previousX <= widthCssPx
-        && previousY >= 0 && previousY <= heightCssPx
-        && x >= 0 && x <= widthCssPx
-        && y >= 0 && y <= heightCssPx;
+      let visible = previousX >= clipLeft && previousX <= clipRight
+        && previousY >= clipTop && previousY <= clipBottom
+        && x >= clipLeft && x <= clipRight
+        && y >= clipTop && y <= clipBottom;
       if (!visible) {
         let minT = 0;
         let maxT = 1;
         visible = true;
         if (dx === 0) {
-          visible = previousX >= 0 && previousX <= widthCssPx;
+          visible = previousX >= clipLeft && previousX <= clipRight;
         } else {
-          let first = -previousX / dx;
-          let second = (widthCssPx - previousX) / dx;
+          let first = (clipLeft - previousX) / dx;
+          let second = (clipRight - previousX) / dx;
           if (first > second) [first, second] = [second, first];
           minT = Math.max(minT, first);
           maxT = Math.min(maxT, second);
@@ -321,10 +397,10 @@ function bboxFromDrawablePolyline(
         }
         if (visible) {
           if (dy === 0) {
-            visible = previousY >= 0 && previousY <= heightCssPx;
+            visible = previousY >= clipTop && previousY <= clipBottom;
           } else {
-            let first = -previousY / dy;
-            let second = (heightCssPx - previousY) / dy;
+            let first = (clipTop - previousY) / dy;
+            let second = (clipBottom - previousY) / dy;
             if (first > second) [first, second] = [second, first];
             minT = Math.max(minT, first);
             maxT = Math.min(maxT, second);
@@ -350,6 +426,232 @@ function bboxFromDrawablePolyline(
     hasPrevious = true;
   }
   return Number.isFinite(left) ? Object.freeze([left, top, right, bottom]) : null;
+}
+
+/**
+ * Match traceFreehandRun's midpoint-quadratic path while keeping culling
+ * fail-open. A quadratic can enter the pane even when neither adjacent raw
+ * polyline segment does, so its exact axis extrema (rather than the raw
+ * chords) own the conservative visibility box. Finite singleton runs remain
+ * non-drawable, exactly like the renderer.
+ */
+function bboxFromDrawableQuadraticPath(
+  values: ArrayLike<number>,
+  widthCssPx: number,
+  heightCssPx: number,
+  paintOutsetCssPx = 0,
+): readonly [number, number, number, number] | null {
+  const outset = Math.max(0, paintOutsetCssPx);
+  const clipLeft = -outset;
+  const clipTop = -outset;
+  const clipRight = widthCssPx + outset;
+  const clipBottom = heightCssPx + outset;
+  let left = Number.POSITIVE_INFINITY;
+  let top = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  let bottom = Number.NEGATIVE_INFINITY;
+  const includeClippedBounds = (
+    segmentLeft: number,
+    segmentTop: number,
+    segmentRight: number,
+    segmentBottom: number,
+  ): void => {
+    if (segmentRight < clipLeft || segmentLeft > clipRight
+      || segmentBottom < clipTop || segmentTop > clipBottom) return;
+    left = Math.min(left, Math.max(clipLeft, segmentLeft));
+    top = Math.min(top, Math.max(clipTop, segmentTop));
+    right = Math.max(right, Math.min(clipRight, segmentRight));
+    bottom = Math.max(bottom, Math.min(clipBottom, segmentBottom));
+  };
+
+  const includeLine = (
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number,
+  ): void => {
+    const dx = endX - startX;
+    const dy = endY - startY;
+    let minimum = 0;
+    let maximum = 1;
+    const clipAxis = (origin: number, delta: number, lower: number, upper: number): boolean => {
+      if (delta === 0) return origin >= lower && origin <= upper;
+      const first = (lower - origin) / delta;
+      const second = (upper - origin) / delta;
+      minimum = Math.max(minimum, Math.min(first, second));
+      maximum = Math.min(maximum, Math.max(first, second));
+      return minimum <= maximum;
+    };
+    if (!clipAxis(startX, dx, clipLeft, clipRight)
+      || !clipAxis(startY, dy, clipTop, clipBottom)) return;
+    const firstX = startX + dx * minimum;
+    const firstY = startY + dy * minimum;
+    const secondX = startX + dx * maximum;
+    const secondY = startY + dy * maximum;
+    includeClippedBounds(
+      Math.min(firstX, secondX),
+      Math.min(firstY, secondY),
+      Math.max(firstX, secondX),
+      Math.max(firstY, secondY),
+    );
+  };
+
+  const includeQuadratic = (
+    startX: number,
+    startY: number,
+    controlX: number,
+    controlY: number,
+    endX: number,
+    endY: number,
+  ): void => {
+    const ax = startX - 2 * controlX + endX;
+    const bx = 2 * (controlX - startX);
+    const ay = startY - 2 * controlY + endY;
+    const by = 2 * (controlY - startY);
+    const evaluate = (a: number, b: number, start: number, ratio: number): number => (
+      (a * ratio + b) * ratio + start
+    );
+    const xAt = (ratio: number): number => evaluate(ax, bx, startX, ratio);
+    const yAt = (ratio: number): number => evaluate(ay, by, startY, ratio);
+    const boundaries = [0, 1];
+    const appendBoundaryRoots = (a: number, b: number, start: number, bound: number): void => {
+      const c = start - bound;
+      if (Math.abs(a) <= Number.EPSILON) {
+        if (Math.abs(b) <= Number.EPSILON) return;
+        const ratio = -c / b;
+        if (ratio > 0 && ratio < 1) boundaries.push(ratio);
+        return;
+      }
+      const discriminant = b * b - 4 * a * c;
+      if (discriminant < 0) return;
+      const root = Math.sqrt(Math.max(0, discriminant));
+      const first = (-b - root) / (2 * a);
+      const second = (-b + root) / (2 * a);
+      if (first > 0 && first < 1) boundaries.push(first);
+      if (second > 0 && second < 1) boundaries.push(second);
+    };
+    appendBoundaryRoots(ax, bx, startX, clipLeft);
+    appendBoundaryRoots(ax, bx, startX, clipRight);
+    appendBoundaryRoots(ay, by, startY, clipTop);
+    appendBoundaryRoots(ay, by, startY, clipBottom);
+    boundaries.sort((first, second) => first - second);
+    const uniqueBoundaries = boundaries.filter((ratio, index) => (
+      index === 0 || Math.abs(ratio - Number(boundaries[index - 1])) > 1e-12
+    ));
+    const inside = (ratio: number): boolean => {
+      const x = xAt(ratio);
+      const y = yAt(ratio);
+      const epsilon = 1e-9;
+      return x >= clipLeft - epsilon && x <= clipRight + epsilon
+        && y >= clipTop - epsilon && y <= clipBottom + epsilon;
+    };
+    const includeInterval = (minimum: number, maximum: number): void => {
+      const ratios = [minimum, maximum];
+      const xExtremum = ax === 0 ? Number.NaN : -bx / (2 * ax);
+      const yExtremum = ay === 0 ? Number.NaN : -by / (2 * ay);
+      if (xExtremum > minimum && xExtremum < maximum) ratios.push(xExtremum);
+      if (yExtremum > minimum && yExtremum < maximum) ratios.push(yExtremum);
+      let segmentLeft = Number.POSITIVE_INFINITY;
+      let segmentTop = Number.POSITIVE_INFINITY;
+      let segmentRight = Number.NEGATIVE_INFINITY;
+      let segmentBottom = Number.NEGATIVE_INFINITY;
+      for (const ratio of ratios) {
+        const x = xAt(ratio);
+        const y = yAt(ratio);
+        segmentLeft = Math.min(segmentLeft, x);
+        segmentTop = Math.min(segmentTop, y);
+        segmentRight = Math.max(segmentRight, x);
+        segmentBottom = Math.max(segmentBottom, y);
+      }
+      includeClippedBounds(segmentLeft, segmentTop, segmentRight, segmentBottom);
+    };
+    for (let index = 0; index < uniqueBoundaries.length - 1; index += 1) {
+      const minimum = Number(uniqueBoundaries[index]);
+      const maximum = Number(uniqueBoundaries[index + 1]);
+      if (inside((minimum + maximum) / 2)) includeInterval(minimum, maximum);
+    }
+    // Retain a tangent-only contact where no positive-length interval lies in
+    // the pane. Canvas can still cover pixels there once stroke width applies.
+    for (const ratio of uniqueBoundaries) {
+      if (!inside(ratio)) continue;
+      const x = xAt(ratio);
+      const y = yAt(ratio);
+      includeClippedBounds(x, y, x, y);
+    }
+  };
+
+  const pointCount = Math.floor(values.length / 2);
+  let runStart = -1;
+  const processRun = (runEnd: number): void => {
+    if (runStart < 0 || runEnd - runStart < 2) return;
+    const startX = Number(values[runStart * 2]);
+    const startY = Number(values[runStart * 2 + 1]);
+    if (runEnd - runStart === 2) {
+      includeLine(
+        startX,
+        startY,
+        Number(values[(runEnd - 1) * 2]),
+        Number(values[(runEnd - 1) * 2 + 1]),
+      );
+      return;
+    }
+    let currentX = startX;
+    let currentY = startY;
+    for (let pointIndex = runStart + 1; pointIndex < runEnd - 1; pointIndex += 1) {
+      const controlX = Number(values[pointIndex * 2]);
+      const controlY = Number(values[pointIndex * 2 + 1]);
+      const nextX = Number(values[(pointIndex + 1) * 2]);
+      const nextY = Number(values[(pointIndex + 1) * 2 + 1]);
+      const endX = (controlX + nextX) / 2;
+      const endY = (controlY + nextY) / 2;
+      includeQuadratic(currentX, currentY, controlX, controlY, endX, endY);
+      currentX = endX;
+      currentY = endY;
+    }
+    const penultimateIndex = runEnd - 2;
+    includeQuadratic(
+      currentX,
+      currentY,
+      Number(values[penultimateIndex * 2]),
+      Number(values[penultimateIndex * 2 + 1]),
+      Number(values[(runEnd - 1) * 2]),
+      Number(values[(runEnd - 1) * 2 + 1]),
+    );
+  };
+
+  for (let pointIndex = 0; pointIndex <= pointCount; pointIndex += 1) {
+    const finite = pointIndex < pointCount
+      && finiteNumber(values[pointIndex * 2])
+      && finiteNumber(values[pointIndex * 2 + 1]);
+    if (finite && runStart < 0) runStart = pointIndex;
+    if (finite || runStart < 0) continue;
+    processRun(pointIndex);
+    runStart = -1;
+  }
+  return Number.isFinite(left) ? Object.freeze([left, top, right, bottom]) : null;
+}
+
+function freehandPaintOutsetCssPx(
+  lineWidthCssPx: number,
+  brushShape: "round" | "square",
+): number {
+  const halfStroke = Math.max(0, lineWidthCssPx) / 2;
+  // A 45-degree square cap reaches halfStroke along both the tangent and the
+  // normal. The selected freehand paint replaces the stroke color/opacity but
+  // keeps the same width, so it needs the same conservative extent.
+  return brushShape === "square" ? halfStroke * Math.SQRT2 : halfStroke;
+}
+
+function bboxFromDrawableFreehand(
+  values: ArrayLike<number>,
+  widthCssPx: number,
+  heightCssPx: number,
+  paintOutsetCssPx: number,
+  pathInterpolation: "linear" | "quadratic",
+): readonly [number, number, number, number] | null {
+  return pathInterpolation === "quadratic"
+    ? bboxFromDrawableQuadraticPath(values, widthCssPx, heightCssPx, paintOutsetCssPx)
+    : bboxFromDrawablePolyline(values, widthCssPx, heightCssPx, paintOutsetCssPx);
 }
 
 function unionBboxes(
@@ -410,7 +712,7 @@ function projectTwoDataPoints(
   const first = entity.geometry.dataPoints[0];
   const second = entity.geometry.dataPoints[1];
   if (!first || !second) return null;
-  const projected = projectBatch(adapter, frame, [first, second]);
+  const projected = projectBatch(adapter, frame, [first, second], entity.geometry);
   if (projected === PROJECTION_FAILED) return projected;
   const a = screenPointAt(projected, 0);
   const b = screenPointAt(projected, 1);
@@ -426,6 +728,9 @@ function projectOrdinaryTwoPointBatch(
   const ids: string[] = [];
   const pointOffsets: number[] = [];
   const requests: CoordinateDataPoint[] = [];
+  const resolutions: (DrawingCoordinateResolution | null)[] = [];
+  const splitProjection = !!adapter.resolveDrawingFrameDataPoints
+    && !!adapter.projectDrawingFrameResolvedDataPoints;
   for (const { renderEntity } of entries) {
     if (renderEntity.kind !== "line" && renderEntity.kind !== "shape") continue;
     const first = renderEntity.geometry.dataPoints[0];
@@ -437,9 +742,21 @@ function projectOrdinaryTwoPointBatch(
     ids.push(renderEntity.id);
     pointOffsets.push(requests.length);
     requests.push(first, second);
+    if (splitProjection) {
+      const entityResolutions = resolveCachedDrawingWorldBatch(
+        adapter,
+        frame,
+        renderEntity.geometry.dataPoints,
+        renderEntity.geometry,
+      );
+      if (!entityResolutions || entityResolutions.length !== 2) return PROJECTION_FAILED;
+      resolutions.push(...entityResolutions);
+    }
   }
   if (requests.length === 0) return anchorsById;
-  const projected = projectBatch(adapter, frame, requests);
+  const projected = splitProjection
+    ? projectResolvedBatch(adapter, frame, resolutions, requests)
+    : projectBatch(adapter, frame, requests);
   if (projected === PROJECTION_FAILED) return projected;
   for (let index = 0; index < ids.length; index += 1) {
     const id = ids[index];
@@ -623,7 +940,7 @@ function projectAxisLine(
 ): EntityProjection {
   const anchor = entity.geometry.dataPoint;
   if (!anchor) return null;
-  const projected = projectBatch(adapter, frame, [anchor]);
+  const projected = projectBatch(adapter, frame, [anchor], entity.geometry);
   if (projected === PROJECTION_FAILED) return projected;
   const x = finiteNumber(projected[0]) ? Number(projected[0]) : null;
   const y = finiteNumber(projected[1]) ? Number(projected[1]) : null;
@@ -1042,7 +1359,12 @@ function projectText(
   frame: DrawingFrameSnapshot,
   adapter: DrawingSceneProjectionAdapter,
 ): EntityProjection {
-  const projected = projectBatch(adapter, frame, [entity.geometry.dataPoint]);
+  const projected = projectBatch(
+    adapter,
+    frame,
+    [entity.geometry.dataPoint],
+    entity.geometry,
+  );
   if (projected === PROJECTION_FAILED) return projected;
   const anchor = screenPointAt(projected, 0);
   if (!anchor) return null;
@@ -1166,7 +1488,7 @@ function projectPosition(
   const requests: DrawingDataPoint[] = [start, end];
   const tpIndex = tpPrice === null ? -1 : requests.push({ ...start, price: tpPrice }) - 1;
   const slIndex = slPrice === null ? -1 : requests.push({ ...start, price: slPrice }) - 1;
-  const projected = projectBatch(adapter, frame, requests);
+  const projected = projectBatch(adapter, frame, requests, entity.geometry);
   if (projected === PROJECTION_FAILED) return projected;
   const startPoint = screenPointAt(projected, 0);
   const endPoint = screenPointAt(projected, 1);
@@ -1284,10 +1606,7 @@ function projectPosition(
 
 function chunkProjectionRequests(
   chunks: readonly DrawingBoundsChunk[],
-): {
-  readonly indexes: readonly number[];
-  readonly points: readonly CoordinateDataPoint[];
-} {
+): FreehandChunkProjectionRequest {
   const indexes: number[] = [];
   const points: CoordinateDataPoint[] = [];
   chunks.forEach((chunk, chunkIndex) => {
@@ -1305,7 +1624,28 @@ function chunkProjectionRequests(
       { ...horizontalMaximum, price: bounds.maxPrice },
     );
   });
-  return { indexes, points };
+  return Object.freeze({
+    indexes: Object.freeze(indexes),
+    points: Object.freeze(points),
+  });
+}
+
+function cachedChunkProjectionRequests(
+  node: DrawingSceneNode,
+  chunks: readonly DrawingBoundsChunk[],
+  cacheKey: string,
+): FreehandChunkProjectionRequest {
+  const boundsIdentity = node.entity.geometry as object;
+  let byDomain = freehandChunkProjectionRequestCache.get(boundsIdentity);
+  if (!byDomain) {
+    byDomain = new Map();
+    freehandChunkProjectionRequestCache.set(boundsIdentity, byDomain);
+  }
+  const cached = byDomain.get(cacheKey);
+  if (cached) return cached;
+  const created = chunkProjectionRequests(chunks);
+  byDomain.set(cacheKey, created);
+  return created;
 }
 
 function visibleFreehandChunks(
@@ -1313,6 +1653,7 @@ function visibleFreehandChunks(
   chunks: readonly DrawingBoundsChunk[],
   frame: DrawingFrameSnapshot,
   adapter: DrawingSceneProjectionAdapter,
+  paintRadiusCssPx: number,
 ): readonly DrawingBoundsChunk[] | ProjectionFailure {
   const viewport = frame.drawingViewport as DrawingBoundsViewport | null;
   if (!viewport || chunks.length === 0) return chunks;
@@ -1360,9 +1701,55 @@ function visibleFreehandChunks(
     ...lineageFailOpen,
     ...comparable.filter((chunk) => drawingGeometryBoundsIntersectsViewport(chunk.bounds, viewport)),
   ]);
+  const projectedChunkIntersectsPane = (
+    first: ScreenPoint | null,
+    second: ScreenPoint | null,
+  ): boolean => !first || !second || (
+    Math.max(first.x, second.x) >= -paintRadiusCssPx
+      && Math.min(first.x, second.x) <= frame.widthCssPx + paintRadiusCssPx
+      && Math.max(first.y, second.y) >= -paintRadiusCssPx
+      && Math.min(first.y, second.y) <= frame.heightCssPx + paintRadiusCssPx
+  );
+  // Data-space culling owns the common case. Project bounded corners only for
+  // chunks it rejected so thick round/square paint entering a pane edge cannot
+  // disappear before the exact screen bbox clip.
+  if (paintRadiusCssPx > 0) {
+    const rejectedComparable = comparable.filter((chunk) => !visible.has(chunk));
+    const request = cachedChunkProjectionRequests(
+      node,
+      comparable,
+      `paint-extent:${viewport.horizontalDomain}`,
+    );
+    // Warm immutable corner anchors before measured viewport gestures even if
+    // every chunk is currently data-visible. Final projection remains lazy.
+    if (request.points.length > 0
+      && adapter.resolveDrawingFrameDataPoints
+      && adapter.projectDrawingFrameResolvedDataPoints) {
+      resolveCachedDrawingWorldBatch(adapter, frame, request.points, request.points as object);
+    }
+    if (rejectedComparable.length > 0) {
+      const projected = projectBatch(adapter, frame, request.points, request.points as object);
+      if (projected === PROJECTION_FAILED) return projected;
+      request.indexes.forEach((comparableIndex, requestIndex) => {
+        const chunk = comparable[comparableIndex];
+        if (!chunk || visible.has(chunk)) return;
+        if (projectedChunkIntersectsPane(
+          screenPointAt(projected, requestIndex * 2),
+          screenPointAt(projected, requestIndex * 2 + 1),
+        )) visible.add(chunk);
+      });
+    }
+    for (const chunk of comparable) {
+      if (chunk.bounds.kind !== "bounded") visible.add(chunk);
+    }
+  }
   if (incomparable.length > 0) {
-    const request = chunkProjectionRequests(incomparable);
-    const projected = projectBatch(adapter, frame, request.points);
+    const request = cachedChunkProjectionRequests(
+      node,
+      incomparable,
+      `cross-domain:${viewport.horizontalDomain}`,
+    );
+    const projected = projectBatch(adapter, frame, request.points, request.points as object);
     if (projected === PROJECTION_FAILED) return projected;
     request.indexes.forEach((incomparableIndex, requestIndex) => {
       const chunk = incomparable[incomparableIndex];
@@ -1370,12 +1757,7 @@ function visibleFreehandChunks(
       const first = screenPointAt(projected, requestIndex * 2);
       const second = screenPointAt(projected, requestIndex * 2 + 1);
       // Unresolved chunk corners fail open; this is still bounded to chunk size.
-      if (!first || !second || (
-        Math.max(first.x, second.x) >= 0
-        && Math.min(first.x, second.x) <= frame.widthCssPx
-        && Math.max(first.y, second.y) >= 0
-        && Math.min(first.y, second.y) <= frame.heightCssPx
-      )) visible.add(chunk);
+      if (projectedChunkIntersectsPane(first, second)) visible.add(chunk);
     });
     for (const chunk of incomparable) {
       if (chunk.bounds.kind !== "bounded") visible.add(chunk);
@@ -1399,17 +1781,41 @@ function mergeChunkRanges(chunks: readonly DrawingBoundsChunk[]): readonly Point
   return Object.freeze(ranges.map((range) => Object.freeze(range)));
 }
 
+function expandAndMergePointRanges(
+  ranges: readonly PointRange[],
+  pointCount: number,
+  haloPointCount: number,
+): readonly PointRange[] {
+  if (haloPointCount <= 0 || ranges.length === 0) return ranges;
+  const expanded: Array<{ start: number; end: number }> = [];
+  for (const range of ranges) {
+    const start = Math.max(0, range.start - haloPointCount);
+    const end = Math.min(pointCount, range.end + haloPointCount);
+    const previous = expanded.at(-1);
+    if (previous && start <= previous.end) previous.end = Math.max(previous.end, end);
+    else expanded.push({ start, end });
+  }
+  return Object.freeze(expanded.map((range) => Object.freeze(range)));
+}
+
 function selectedFreehandRanges(
   node: DrawingSceneNode,
   pointCount: number,
   frame: DrawingFrameSnapshot,
   adapter: DrawingSceneProjectionAdapter,
+  paintRadiusCssPx: number,
 ): readonly PointRange[] | ProjectionFailure {
   if (pointCount === 0) return Object.freeze([]);
   if (node.bounds.chunks.length === 0 || !frame.drawingViewport) {
     return Object.freeze([Object.freeze({ start: 0, end: pointCount })]);
   }
-  const chunks = visibleFreehandChunks(node, node.bounds.chunks, frame, adapter);
+  const chunks = visibleFreehandChunks(
+    node,
+    node.bounds.chunks,
+    frame,
+    adapter,
+    paintRadiusCssPx,
+  );
   if (chunks === PROJECTION_FAILED) return chunks;
   return mergeChunkRanges(chunks).map((range) => Object.freeze({
     start: Math.min(pointCount, range.start),
@@ -1492,6 +1898,866 @@ function strokeBatchRequests(
   return frozen;
 }
 
+function projectLineageSpanCoordinates(
+  stroke: FreehandStroke,
+  sourcePointIndexes: Iterable<number>,
+  frame: DrawingFrameSnapshot,
+  adapter: DrawingSceneProjectionAdapter,
+): ReadonlyMap<number, LineageSpanScreenCoordinates> {
+  const coordinates = new Map<number, LineageSpanScreenCoordinates>();
+  const attempted = new Set<number>();
+  for (const pointIndex of sourcePointIndexes) {
+    const point = stroke.points[pointIndex];
+    if (!point || !("span" in point) || attempted.has(point.span)) continue;
+    attempted.add(point.span);
+    const span = stroke.spans[point.span];
+    if (!span) continue;
+    let projected: Readonly<{ left: number; right: number }> | null = null;
+    try {
+      projected = adapter.projectDrawingFrameSourceLineageSpan(
+        frame,
+        spanProjectionInput(stroke, span),
+      );
+    } catch {
+      projected = null;
+    }
+    if (!projected || !finiteNumber(projected.left) || !finiteNumber(projected.right)
+      || projected.left >= projected.right) continue;
+    coordinates.set(point.span, Object.freeze({
+      left: projected.left,
+      right: projected.right,
+    }));
+  }
+  return coordinates;
+}
+
+function projectedLineageX(
+  stroke: FreehandStroke | null,
+  sourcePointIndex: number,
+  coordinates: ReadonlyMap<number, LineageSpanScreenCoordinates> | null,
+): number | null {
+  if (!stroke || !coordinates) return null;
+  const point = stroke.points[sourcePointIndex];
+  if (!point || !("span" in point)) return null;
+  const span = coordinates.get(point.span);
+  if (!span) return Number.NaN;
+  const projected = span.left + (span.right - span.left) * point.ratio;
+  return finiteNumber(projected) ? projected : Number.NaN;
+}
+
+interface CachedDrawingWorldResolution {
+  readonly kind: "world";
+  readonly resolutions: readonly (DrawingCoordinateResolution | null)[];
+}
+
+interface CachedDrawingLodSelection {
+  readonly kind: "lod";
+  readonly pathInterpolation: "linear";
+  readonly selection: DrawingLodSelection;
+}
+
+interface CachedDrawingScreenHierarchy {
+  readonly kind: "screen-hierarchy";
+  readonly hierarchy: DrawingLodHierarchy;
+  readonly priceProjectionResidualCssPx: number;
+  readonly quadraticSmoothingDeviationCssPx: number;
+  readonly screenCoordinates: Float64Array;
+}
+
+interface LineageSpanScreenCoordinates {
+  readonly left: number;
+  readonly right: number;
+}
+
+interface FreehandLodPlan {
+  readonly selection: DrawingLodSelection;
+  readonly lineageSpanCoordinates: ReadonlyMap<number, LineageSpanScreenCoordinates> | null;
+  readonly pathInterpolation: "linear";
+}
+
+interface CertifiedAffinePriceProjection {
+  readonly interceptCssPx: number;
+  readonly maximumPrice: number;
+  readonly minimumPrice: number;
+  readonly residualCssPx: number;
+  readonly slopeCssPxPerPrice: number;
+}
+
+const DRAWING_AFFINE_PRICE_PROJECTION_RESIDUAL_LIMIT_CSS_PX = 0.25;
+
+function certifiedAffinePriceProjection(
+  samples: readonly Readonly<{ price: number; coordinateCssPx: number }>[],
+): CertifiedAffinePriceProjection | null {
+  if (samples.length < 3) return null;
+  const ordered = [...samples].sort((left, right) => left.price - right.price);
+  const first = ordered[0];
+  const last = ordered.at(-1);
+  if (!first || !last || !finiteNumber(first.price) || !finiteNumber(last.price)
+    || !finiteNumber(first.coordinateCssPx) || !finiteNumber(last.coordinateCssPx)
+    || first.price === last.price) return null;
+  const slopeCssPxPerPrice = (last.coordinateCssPx - first.coordinateCssPx)
+    / (last.price - first.price);
+  const interceptCssPx = first.coordinateCssPx - slopeCssPxPerPrice * first.price;
+  if (!finiteNumber(slopeCssPxPerPrice) || !finiteNumber(interceptCssPx)) return null;
+  let residualCssPx = 0;
+  for (const sample of ordered) {
+    if (!finiteNumber(sample.price) || !finiteNumber(sample.coordinateCssPx)) return null;
+    const predicted = slopeCssPxPerPrice * sample.price + interceptCssPx;
+    residualCssPx = Math.max(residualCssPx, Math.abs(predicted - sample.coordinateCssPx));
+  }
+  if (!finiteNumber(residualCssPx)
+    || residualCssPx > DRAWING_AFFINE_PRICE_PROJECTION_RESIDUAL_LIMIT_CSS_PX) return null;
+  return Object.freeze({
+    interceptCssPx,
+    maximumPrice: last.price,
+    minimumPrice: first.price,
+    residualCssPx,
+    slopeCssPxPerPrice,
+  });
+}
+
+type CachedDrawingProjectionValue =
+  | CachedDrawingWorldResolution
+  | CachedDrawingLodSelection
+  | CachedDrawingScreenHierarchy;
+
+interface DrawingProjectionCache {
+  readonly entries: DrawingByteWeightedLruCache<string, CachedDrawingProjectionValue>;
+  readonly recentScreenHierarchyKeys: Map<number, string[]>;
+  readonly requestIds: WeakMap<object, number>;
+  readonly warmedSceneWorldKeys: WeakMap<object, string>;
+  nextRequestId: number;
+}
+
+const drawingProjectionCaches = new WeakMap<object, DrawingProjectionCache>();
+const DRAWING_RECENT_SCREEN_HIERARCHIES_PER_REQUEST = 3;
+
+function drawingProjectionCache(adapter: DrawingSceneProjectionAdapter): DrawingProjectionCache {
+  const key = adapter as object;
+  const cached = drawingProjectionCaches.get(key);
+  if (cached) return cached;
+  const created: DrawingProjectionCache = {
+    entries: new DrawingByteWeightedLruCache(),
+    recentScreenHierarchyKeys: new Map(),
+    requestIds: new WeakMap(),
+    warmedSceneWorldKeys: new WeakMap(),
+    nextRequestId: 1,
+  };
+  drawingProjectionCaches.set(key, created);
+  return created;
+}
+
+function retainRecentDrawingScreenHierarchy(
+  cache: DrawingProjectionCache,
+  requestId: number,
+  hierarchyKey: string,
+): void {
+  const recent = cache.recentScreenHierarchyKeys.get(requestId) ?? [];
+  const priorIndex = recent.indexOf(hierarchyKey);
+  if (priorIndex >= 0) recent.splice(priorIndex, 1);
+  recent.push(hierarchyKey);
+  while (recent.length > DRAWING_RECENT_SCREEN_HIERARCHIES_PER_REQUEST) {
+    const evictedHierarchyKey = recent.shift();
+    if (!evictedHierarchyKey) continue;
+    deleteDrawingScreenHierarchy(cache, evictedHierarchyKey);
+  }
+  cache.recentScreenHierarchyKeys.set(requestId, recent);
+}
+
+function deleteDrawingScreenHierarchy(
+  cache: DrawingProjectionCache,
+  hierarchyKey: string,
+): void {
+  cache.entries.delete(hierarchyKey);
+  for (const toleranceClass of Object.keys(
+    DRAWING_LOD_TOLERANCE_CSS_PX,
+  ) as DrawingLodToleranceClass[]) {
+    cache.entries.delete([
+      "lod",
+      hierarchyKey,
+      toleranceClass,
+      "quadratic-source",
+    ].join(":"));
+    cache.entries.delete([
+      "lod",
+      hierarchyKey,
+      toleranceClass,
+      "linear-source",
+    ].join(":"));
+  }
+}
+
+function takeReusableDrawingScreenHierarchy(
+  cache: DrawingProjectionCache,
+  requestId: number,
+  hierarchyKey: string,
+  pointCount: number,
+): CachedDrawingScreenHierarchy | null {
+  const recent = cache.recentScreenHierarchyKeys.get(requestId);
+  if (!recent) return null;
+  const staleCurrentIndex = recent.indexOf(hierarchyKey);
+  if (staleCurrentIndex >= 0) recent.splice(staleCurrentIndex, 1);
+  if (recent.length < DRAWING_RECENT_SCREEN_HIERARCHIES_PER_REQUEST) return null;
+  const reusableKey = recent.shift();
+  if (!reusableKey) return null;
+  const reusable = cache.entries.peek(reusableKey);
+  deleteDrawingScreenHierarchy(cache, reusableKey);
+  return reusable?.kind === "screen-hierarchy"
+    && reusable.screenCoordinates.length === pointCount * 2
+    && reusable.hierarchy.importanceCssPx.length === pointCount
+    ? reusable
+    : null;
+}
+
+function drawingProjectionRequestId(
+  cache: DrawingProjectionCache,
+  requestIdentity: object,
+): number {
+  const cached = cache.requestIds.get(requestIdentity);
+  if (cached !== undefined) return cached;
+  const created = cache.nextRequestId;
+  cache.nextRequestId += 1;
+  cache.requestIds.set(requestIdentity, created);
+  return created;
+}
+
+function projectionRequestIdentityKey(
+  cache: DrawingProjectionCache,
+  requests: readonly CoordinateDataPoint[],
+  requestIdentity?: object,
+): string {
+  if (requestIdentity) return `object-${drawingProjectionRequestId(cache, requestIdentity)}`;
+  // Short-lived batching arrays must not determine cache identity. Canonical
+  // coordinate point objects are immutable, so their ordered identities form
+  // the request identity while the WeakMap avoids retaining them.
+  return `points-${requests.map(
+    (point) => drawingProjectionRequestId(cache, point as object),
+  ).join(".")}`;
+}
+
+/** Surface/symbol lifecycle boundary for world and LOD caches. */
+export function clearDrawingSceneProjectorCaches(
+  adapter: DrawingSceneProjectionAdapter,
+): void {
+  const key = adapter as object;
+  const cache = drawingProjectionCaches.get(key);
+  cache?.entries.dispose();
+  drawingProjectionCaches.delete(key);
+}
+
+function pointToSegmentDistanceSquared(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared <= 0) {
+    const pointDx = px - ax;
+    const pointDy = py - ay;
+    return pointDx * pointDx + pointDy * pointDy;
+  }
+  const ratio = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lengthSquared));
+  const nearestX = ax + ratio * dx;
+  const nearestY = ay + ratio * dy;
+  const pointDx = px - nearestX;
+  const pointDy = py - nearestY;
+  return pointDx * pointDx + pointDy * pointDy;
+}
+
+/**
+ * Conservative distance budget between the legacy midpoint-quadratic stroke
+ * and its raw polyline. Each quadratic segment stays inside S-C-E; the
+ * control-point distance to chord S-E bounds every point in that triangle.
+ */
+function quadraticSmoothingDeviationUpperBound(coordinates: Float64Array): number {
+  const pointCount = coordinates.length / 2;
+  let maximumSquared = 0;
+  let runStart = 0;
+  while (runStart < pointCount) {
+    while (runStart < pointCount && (!finiteNumber(coordinates[runStart * 2])
+      || !finiteNumber(coordinates[runStart * 2 + 1]))) runStart += 1;
+    if (runStart >= pointCount) break;
+    let runEnd = runStart + 1;
+    while (runEnd < pointCount && finiteNumber(coordinates[runEnd * 2])
+      && finiteNumber(coordinates[runEnd * 2 + 1])) runEnd += 1;
+    for (let pointIndex = runStart + 1; pointIndex < runEnd - 1; pointIndex += 1) {
+      const controlX = Number(coordinates[pointIndex * 2]);
+      const controlY = Number(coordinates[pointIndex * 2 + 1]);
+      const startX = pointIndex === runStart + 1
+        ? Number(coordinates[runStart * 2])
+        : (Number(coordinates[(pointIndex - 1) * 2]) + controlX) / 2;
+      const startY = pointIndex === runStart + 1
+        ? Number(coordinates[runStart * 2 + 1])
+        : (Number(coordinates[(pointIndex - 1) * 2 + 1]) + controlY) / 2;
+      const endX = (controlX + Number(coordinates[(pointIndex + 1) * 2])) / 2;
+      const endY = (controlY + Number(coordinates[(pointIndex + 1) * 2 + 1])) / 2;
+      maximumSquared = Math.max(maximumSquared, pointToSegmentDistanceSquared(
+        controlX,
+        controlY,
+        startX,
+        startY,
+        endX,
+        endY,
+      ));
+    }
+    runStart = runEnd + 1;
+  }
+  return Math.sqrt(maximumSquared);
+}
+
+function resolveCachedDrawingWorldBatch(
+  adapter: DrawingSceneProjectionAdapter,
+  frame: DrawingFrameSnapshot,
+  requests: readonly CoordinateDataPoint[],
+  requestIdentity?: object,
+): readonly (DrawingCoordinateResolution | null)[] | null {
+  if (!adapter.resolveDrawingFrameDataPoints || !adapter.projectDrawingFrameResolvedDataPoints) {
+    return null;
+  }
+  const cache = drawingProjectionCache(adapter);
+  const identityKey = projectionRequestIdentityKey(cache, requests, requestIdentity);
+  const cacheKey = `world:${identityKey}:${frame.worldRevisionKey}`;
+  const cached = cache.entries.get(cacheKey);
+  if (cached?.kind === "world" && cached.resolutions.length === requests.length) {
+    drawingPerfCounters.setGauge("cacheBytes", cache.entries.totalBytes());
+    return cached.resolutions;
+  }
+  let resolutions: readonly (DrawingCoordinateResolution | null)[] | null = null;
+  try {
+    resolutions = adapter.resolveDrawingFrameDataPoints(frame, requests);
+  } catch {
+    resolutions = null;
+  }
+  if (!resolutions || resolutions.length !== requests.length) return null;
+  const owned = Object.freeze(Array.from(resolutions));
+  cache.entries.set(cacheKey, Object.freeze({
+    kind: "world" as const,
+    resolutions: owned,
+  }), Math.max(64, cacheKey.length * 2 + owned.length * 32));
+  drawingPerfCounters.recordAnchorResolve(requests.length);
+  drawingPerfCounters.setGauge("cacheBytes", cache.entries.totalBytes());
+  return owned;
+}
+
+function resolveFreehandWorldBatch(
+  adapter: DrawingSceneProjectionAdapter,
+  frame: DrawingFrameSnapshot,
+  requests: readonly CoordinateDataPoint[],
+): readonly (DrawingCoordinateResolution | null)[] | null {
+  return resolveCachedDrawingWorldBatch(adapter, frame, requests, requests as object);
+}
+
+/**
+ * Resolve every scene-owned source anchor once at the document/world boundary.
+ * Viewport culling may then change the visible subset without manufacturing a
+ * new source-resolution batch key or touching canonical lineage again.
+ */
+export function warmDrawingSceneWorldResolutions({
+  document,
+  nodes,
+  frame,
+  adapter,
+}: DrawingSceneWorldWarmupInput): boolean {
+  if (!adapter.resolveDrawingFrameDataPoints || !adapter.projectDrawingFrameResolvedDataPoints) {
+    return true;
+  }
+  const orderedNodes = orderedCurrentNodes(document, nodes);
+  if (!orderedNodes) return false;
+  const cache = drawingProjectionCache(adapter);
+  const warmKey = [
+    frame.worldRevisionKey,
+    ...orderedNodes.map((node) => `${node.id}:${node.geometryRevision}`),
+  ].join("|");
+  if (cache.warmedSceneWorldKeys.get(document as object) === warmKey) return true;
+  for (const node of orderedNodes) {
+    const entity = normalizeDrawingEntityForScene(node.entity);
+    if (!entity) continue;
+    let requests: readonly CoordinateDataPoint[] | null = null;
+    let requestIdentity: object | undefined;
+    if (entity.kind === "line" || entity.kind === "shape") {
+      requests = entity.geometry.dataPoints;
+      requestIdentity = entity.geometry;
+    } else if (entity.kind === "axis-line") {
+      if (entity.geometry.dataPoint) {
+        requests = Object.freeze([entity.geometry.dataPoint]);
+        requestIdentity = entity.geometry;
+      }
+    } else if (entity.kind === "freehand" || entity.kind === "highlighter") {
+      requests = entity.geometry.stroke
+        ? strokeBatchRequests(entity.geometry.stroke)
+        : entity.geometry.dataPoints;
+      requestIdentity = requests ?? undefined;
+    }
+    if (!requests || requests.length === 0) continue;
+    if (!resolveCachedDrawingWorldBatch(adapter, frame, requests, requestIdentity)) return false;
+  }
+  cache.warmedSceneWorldKeys.set(document as object, warmKey);
+  return true;
+}
+
+function selectFreehandLod(
+  adapter: DrawingSceneProjectionAdapter,
+  requests: readonly CoordinateDataPoint[],
+  resolutions: readonly (DrawingCoordinateResolution | null)[],
+  ranges: readonly PointRange[],
+  frame: DrawingFrameSnapshot,
+  toleranceClass: DrawingLodToleranceClass,
+  stroke: FreehandStroke | null,
+  quadraticSmoothing: boolean,
+): FreehandLodPlan | null {
+  const viewport = frame.drawingViewport;
+  if (!viewport
+    || !finiteNumber(viewport.minLogical)
+    || !finiteNumber(viewport.maxLogical)
+    || viewport.minLogical === viewport.maxLogical) return null;
+  const cache = drawingProjectionCache(adapter);
+  const requestId = drawingProjectionRequestId(cache, requests);
+  const priceProjectionSamples = viewport.priceProjectionSamples ?? [];
+  const priceSignature = priceProjectionSamples.map(
+    (sample) => `${sample.price}:${sample.coordinateCssPx}`,
+  ).join(",");
+  const rangeSignature = ranges.map((range) => `${range.start}-${range.end}`).join(",");
+  // Lightweight Charts' horizontal data-coordinate transform is a uniform
+  // scale (`barSpacing`) plus translation. RDP distances and the quadratic
+  // smoothing bound are translation invariant, so panning must not rebuild a
+  // hierarchy whose exact CSS geometry only moved left/right. Keep multiple
+  // recent zoom scales in the byte-LRU by keying the scale, not the mutable
+  // visible range. The three public inverse-price samples identify the full
+  // vertical coordinate frame used by production (including log,
+  // percentage/indexed and inverted scales). If a test/partial adapter cannot
+  // provide that frame evidence, retain the conservative viewport boundary.
+  const viewportGeometryKey = priceProjectionSamples.length >= 3
+    ? [
+        "translation-invariant",
+        frame.axisKind,
+        frame.barSpacing,
+        viewport.minPrice,
+        viewport.maxPrice,
+        priceSignature,
+      ].join(":")
+    : ["viewport", frame.viewportRevision].join(":");
+  const hierarchyKey = [
+    "screen-hierarchy",
+    "public-exact",
+    stroke && stroke.spans.length > 0 ? "lineage" : "ordinary",
+    requestId,
+    frame.worldRevisionKey,
+    frame.widthCssPx,
+    frame.heightCssPx,
+    viewportGeometryKey,
+    rangeSignature,
+  ].join(":");
+  const lodKey = [
+    "lod",
+    hierarchyKey,
+    toleranceClass,
+    quadraticSmoothing ? "quadratic-source" : "linear-source",
+  ].join(":");
+  const cached = cache.entries.get(lodKey);
+  if (cached?.kind === "lod") {
+    retainRecentDrawingScreenHierarchy(cache, requestId, hierarchyKey);
+    drawingPerfCounters.setGauge("cacheBytes", cache.entries.totalBytes());
+    const lineageSpanCoordinates = stroke && stroke.spans.length > 0
+      ? projectLineageSpanCoordinates(
+          stroke,
+          cached.selection.pointIndexes,
+          frame,
+          adapter,
+        )
+      : null;
+    return Object.freeze({
+      selection: cached.selection,
+      lineageSpanCoordinates,
+      pathInterpolation: cached.pathInterpolation,
+    });
+  }
+
+  let hierarchy: DrawingLodHierarchy | null = null;
+  let lineageSpanCoordinates: ReadonlyMap<number, LineageSpanScreenCoordinates> | null = null;
+  let priceProjectionResidualCssPx = 0;
+  let quadraticSmoothingDeviationCssPx = 0;
+  let screenCoordinates: Float64Array | null = null;
+  const cachedHierarchy = cache.entries.get(hierarchyKey);
+  if (cachedHierarchy?.kind === "screen-hierarchy") {
+    retainRecentDrawingScreenHierarchy(cache, requestId, hierarchyKey);
+    hierarchy = cachedHierarchy.hierarchy;
+    priceProjectionResidualCssPx = cachedHierarchy.priceProjectionResidualCssPx;
+    quadraticSmoothingDeviationCssPx = cachedHierarchy.quadraticSmoothingDeviationCssPx;
+    screenCoordinates = cachedHierarchy.screenCoordinates;
+  } else {
+    const reusableHierarchy = takeReusableDrawingScreenHierarchy(
+      cache,
+      requestId,
+      hierarchyKey,
+      requests.length,
+    );
+    const candidateIndexes: number[] = [];
+    for (const range of ranges) {
+      for (let pointIndex = range.start; pointIndex < range.end; pointIndex += 1) {
+        candidateIndexes.push(pointIndex);
+      }
+    }
+    if (stroke && stroke.spans.length > 0) {
+      lineageSpanCoordinates = projectLineageSpanCoordinates(
+        stroke,
+        candidateIndexes,
+        frame,
+        adapter,
+      );
+    }
+    const proxy = reusableHierarchy?.screenCoordinates
+      ?? new Float64Array(requests.length * 2);
+    proxy.fill(Number.NaN);
+    let affinePriceProjection = stroke && stroke.spans.length > 0
+      ? certifiedAffinePriceProjection(priceProjectionSamples)
+      : null;
+    let usedAffineLineageProxy = affinePriceProjection !== null;
+    if (affinePriceProjection) {
+      let minimumCandidatePrice = Number.POSITIVE_INFINITY;
+      let maximumCandidatePrice = Number.NEGATIVE_INFINITY;
+      let minimumCandidateIndex = -1;
+      let maximumCandidateIndex = -1;
+      for (const sourcePointIndex of candidateIndexes) {
+        const request = requests[sourcePointIndex];
+        const lineageX = projectedLineageX(stroke, sourcePointIndex, lineageSpanCoordinates);
+        const price = request?.price;
+        if (!request || lineageX === null || !finiteNumber(price)) {
+          usedAffineLineageProxy = false;
+          break;
+        }
+        if (price < minimumCandidatePrice) {
+          minimumCandidatePrice = price;
+          minimumCandidateIndex = sourcePointIndex;
+        }
+        if (price > maximumCandidatePrice) {
+          maximumCandidatePrice = price;
+          maximumCandidateIndex = sourcePointIndex;
+        }
+      }
+      const priceEnvelopeEpsilon = Math.max(
+        1,
+        Math.abs(affinePriceProjection.minimumPrice),
+        Math.abs(affinePriceProjection.maximumPrice),
+      ) * Number.EPSILON * 8;
+      const candidateOutsideSampleEnvelope = usedAffineLineageProxy
+        && (minimumCandidatePrice < affinePriceProjection.minimumPrice - priceEnvelopeEpsilon
+          || maximumCandidatePrice > affinePriceProjection.maximumPrice + priceEnvelopeEpsilon);
+      if (candidateOutsideSampleEnvelope) {
+        // A locally near-linear log scale can otherwise look affine across the
+        // pane samples yet diverge badly for an offscreen point retained by a
+        // visible chunk. Extend the certificate over the actual candidate
+        // price domain with only extrema + midpoint public final projections.
+        let middleCandidateIndex = minimumCandidateIndex;
+        let middleDistance = Number.POSITIVE_INFINITY;
+        const middleCandidatePrice = (minimumCandidatePrice + maximumCandidatePrice) / 2;
+        for (const sourcePointIndex of candidateIndexes) {
+          const price = requests[sourcePointIndex]?.price;
+          if (!finiteNumber(price)) continue;
+          const distance = Math.abs(price - middleCandidatePrice);
+          if (distance < middleDistance) {
+            middleDistance = distance;
+            middleCandidateIndex = sourcePointIndex;
+          }
+        }
+        const evidenceIndexes = Array.from(new Set([
+          minimumCandidateIndex,
+          middleCandidateIndex,
+          maximumCandidateIndex,
+        ].filter((index) => index >= 0)));
+        const evidenceRequests = evidenceIndexes.map((index) => requests[index]).filter(
+          (request): request is CoordinateDataPoint => request !== undefined,
+        );
+        const evidenceResolutions = evidenceIndexes.map((index) => resolutions[index] ?? null);
+        const finalProject = adapter.projectDrawingFrameResolvedDataPoints;
+        let exactEvidence: Float64Array | null = null;
+        if (finalProject && evidenceRequests.length === evidenceIndexes.length) {
+          try {
+            exactEvidence = finalProject(frame, evidenceResolutions, evidenceRequests);
+          } catch {
+            exactEvidence = null;
+          }
+        }
+        if (!validProjectedBuffer(exactEvidence, evidenceRequests.length)) {
+          usedAffineLineageProxy = false;
+        } else {
+          drawingPerfCounters.recordFinalProjection(evidenceRequests.length);
+          const extendedSamples = [...priceProjectionSamples];
+          for (let index = 0; index < evidenceRequests.length; index += 1) {
+            const price = evidenceRequests[index]?.price;
+            const coordinateCssPx = exactEvidence[index * 2 + 1];
+            if (!finiteNumber(price) || !finiteNumber(coordinateCssPx)) {
+              usedAffineLineageProxy = false;
+              break;
+            }
+            extendedSamples.push(Object.freeze({ price, coordinateCssPx }));
+          }
+          affinePriceProjection = usedAffineLineageProxy
+            ? certifiedAffinePriceProjection(extendedSamples)
+            : null;
+          if (!affinePriceProjection) usedAffineLineageProxy = false;
+        }
+      }
+    }
+    if (affinePriceProjection && usedAffineLineageProxy) {
+      for (const sourcePointIndex of candidateIndexes) {
+        const request = requests[sourcePointIndex];
+        const lineageX = projectedLineageX(stroke, sourcePointIndex, lineageSpanCoordinates);
+        const price = request?.price;
+        if (!request || lineageX === null || !finiteNumber(price)) {
+          usedAffineLineageProxy = false;
+          break;
+        }
+        if (!finiteNumber(lineageX)) continue;
+        const y = affinePriceProjection.slopeCssPxPerPrice * price
+          + affinePriceProjection.interceptCssPx;
+        if (!finiteNumber(y)) {
+          usedAffineLineageProxy = false;
+          break;
+        }
+        proxy[sourcePointIndex * 2] = lineageX;
+        proxy[sourcePointIndex * 2 + 1] = y;
+      }
+      if (usedAffineLineageProxy) {
+        priceProjectionResidualCssPx = affinePriceProjection.residualCssPx;
+      } else {
+        proxy.fill(Number.NaN);
+      }
+    }
+    if (!usedAffineLineageProxy) {
+      // Non-lineage strokes and price modes whose three public samples do not
+      // prove an affine map keep the exact public final projector as the
+      // screen-error oracle. The certified lineage fast path above only
+      // chooses a hierarchy; selected publication vertices are still sent
+      // through this projector by projectFreehandLod.
+      const candidateRequests = candidateIndexes.map(
+        (pointIndex) => requests[pointIndex],
+      ).filter((request): request is CoordinateDataPoint => request !== undefined);
+      const candidateResolutions = candidateIndexes.map(
+        (pointIndex) => resolutions[pointIndex] ?? null,
+      );
+      const finalProject = adapter.projectDrawingFrameResolvedDataPoints;
+      if (!finalProject || candidateRequests.length !== candidateIndexes.length) return null;
+      let exactProjected: Float64Array | null = null;
+      try {
+        exactProjected = finalProject(frame, candidateResolutions, candidateRequests);
+      } catch {
+        exactProjected = null;
+      }
+      if (!validProjectedBuffer(exactProjected, candidateRequests.length)) return null;
+      drawingPerfCounters.recordFinalProjection(candidateRequests.length);
+      candidateIndexes.forEach((sourcePointIndex, candidateIndex) => {
+        const projectedX = exactProjected?.[candidateIndex * 2];
+        const y = exactProjected?.[candidateIndex * 2 + 1];
+        const lineageX = projectedLineageX(
+          stroke,
+          sourcePointIndex,
+          lineageSpanCoordinates,
+        );
+        const x = lineageX ?? projectedX;
+        if (!finiteNumber(x) || !finiteNumber(y)) return;
+        proxy[sourcePointIndex * 2] = x;
+        proxy[sourcePointIndex * 2 + 1] = y;
+      });
+    }
+    quadraticSmoothingDeviationCssPx = quadraticSmoothingDeviationUpperBound(proxy);
+    screenCoordinates = proxy;
+    const projectionResidualBudgetCssPx = priceProjectionResidualCssPx * 2;
+    const supportedImportanceFloors = Object.values(DRAWING_LOD_TOLERANCE_CSS_PX).flatMap(
+      (targetToleranceCssPx) => {
+        const linearFloor = targetToleranceCssPx - projectionResidualBudgetCssPx;
+        const quadraticFloor = linearFloor - quadraticSmoothingDeviationCssPx;
+        return [linearFloor, quadraticFloor].filter((floor) => floor >= 0);
+      },
+    );
+    const minimumImportanceCssPx = supportedImportanceFloors.length > 0
+      ? Math.min(...supportedImportanceFloors)
+      : 0;
+    hierarchy = createDrawingLodHierarchy(proxy, {
+      ...(reusableHierarchy ? {
+        importanceBuffer: reusableHierarchy.hierarchy.importanceCssPx as Float64Array,
+      } : {}),
+      minimumImportanceCssPx,
+    });
+    if (hierarchy.finitePointCount === 0) return null;
+    cache.entries.set(hierarchyKey, Object.freeze({
+      kind: "screen-hierarchy" as const,
+      hierarchy,
+      priceProjectionResidualCssPx,
+      quadraticSmoothingDeviationCssPx,
+      screenCoordinates,
+    }), Math.max(
+      64,
+      hierarchyKey.length * 2
+        + hierarchy.estimatedByteSize
+        + screenCoordinates.byteLength,
+    ));
+    retainRecentDrawingScreenHierarchy(cache, requestId, hierarchyKey);
+  }
+
+  if (!hierarchy || !screenCoordinates) return null;
+  const targetToleranceCssPx = DRAWING_LOD_TOLERANCE_CSS_PX[toleranceClass];
+  const smoothingDeviationCssPx = quadraticSmoothing
+    ? quadraticSmoothingDeviationCssPx
+    : 0;
+  const simplificationToleranceCssPx = targetToleranceCssPx
+    - smoothingDeviationCssPx
+    - priceProjectionResidualCssPx * 2;
+  if (!finiteNumber(simplificationToleranceCssPx) || simplificationToleranceCssPx < 0) {
+    return null;
+  }
+  const selection = selectDrawingLod(hierarchy, {
+    toleranceClass,
+    simplificationToleranceCssPx,
+    visibleWidthCssPx: frame.widthCssPx,
+  });
+  // Nested effective importance is the conservative error certificate for
+  // every selected chord: refinement stops only after the owning segment's
+  // true maximum error is at or below this threshold. Avoid rescanning every
+  // raw point after the hierarchy already proved the same bound.
+  const certifiedPolylineErrorCssPx = selection.effectiveToleranceCssPx;
+  if (!selection.capSatisfied
+    || selection.selectedPointCount >= hierarchy.finitePointCount
+    || certifiedPolylineErrorCssPx + smoothingDeviationCssPx
+      + priceProjectionResidualCssPx * 2
+      > targetToleranceCssPx + 1e-9) return null;
+  // Cached hierarchy coordinates may belong to a translated viewport. Never
+  // retain those absolute span coordinates in the LOD cache: selected output
+  // is always projected against the current atomic frame before publication.
+  lineageSpanCoordinates ??= stroke && stroke.spans.length > 0
+    ? projectLineageSpanCoordinates(stroke, selection.pointIndexes, frame, adapter)
+    : null;
+  const plan = Object.freeze({
+    selection,
+    lineageSpanCoordinates,
+    pathInterpolation: "linear" as const,
+  });
+  cache.entries.set(lodKey, Object.freeze({
+    kind: "lod" as const,
+    pathInterpolation: plan.pathInterpolation,
+    selection: plan.selection,
+  }), Math.max(
+    64,
+    lodKey.length * 2
+      + selection.pointIndexes.byteLength
+      + selection.pathBreaks.byteLength
+      + selection.paths.length * 32,
+  ));
+  drawingPerfCounters.setGauge("cacheBytes", cache.entries.totalBytes());
+  return plan;
+}
+
+function freehandRenderSpec(
+  entity: FreehandDrawingRenderEntity,
+  selected: boolean,
+  pathInterpolation: "linear" | "quadratic" = "quadratic",
+): DrawingDisplayRenderSpec {
+  return Object.freeze({
+    op: "freehand" as const,
+    strokeColor: entity.style.color,
+    selectionHighlightColor: "#ff6b6b",
+    lineWidthCssPx: entity.style.lineWidth,
+    opacity: entity.style.opacity,
+    compositeOperation: entity.style.compositeOperation,
+    brushShape: entity.style.brushShape,
+    pathInterpolation,
+    selected,
+  });
+}
+
+function projectFreehandLod(
+  entity: FreehandDrawingRenderEntity,
+  requests: readonly CoordinateDataPoint[],
+  resolutions: readonly (DrawingCoordinateResolution | null)[],
+  plan: FreehandLodPlan,
+  frame: DrawingFrameSnapshot,
+  adapter: DrawingSceneProjectionAdapter,
+  selected: boolean,
+): EntityProjection {
+  const finalProject = adapter.projectDrawingFrameResolvedDataPoints;
+  const { selection } = plan;
+  if (!finalProject || selection.selectedPointCount === 0) return null;
+  const sourceIndexes = selection.pointIndexes;
+  const selectedRequests = new Array<CoordinateDataPoint>(sourceIndexes.length);
+  const selectedResolutions = new Array<DrawingCoordinateResolution | null>(sourceIndexes.length);
+  for (let selectedIndex = 0; selectedIndex < sourceIndexes.length; selectedIndex += 1) {
+    const sourcePointIndex = sourceIndexes[selectedIndex];
+    const request = sourcePointIndex === undefined ? undefined : requests[sourcePointIndex];
+    if (sourcePointIndex === undefined || request === undefined) return PROJECTION_FAILED;
+    selectedRequests[selectedIndex] = request;
+    selectedResolutions[selectedIndex] = resolutions[sourcePointIndex] ?? null;
+  }
+  let projected: Float64Array | null = null;
+  try {
+    projected = finalProject(frame, selectedResolutions, selectedRequests);
+  } catch {
+    projected = null;
+  }
+  if (!validProjectedBuffer(projected, selectedRequests.length)) return PROJECTION_FAILED;
+  drawingPerfCounters.recordFinalProjection(selectedRequests.length);
+  const separatorCount = selection.pathBreaks.length;
+  const points = new Float64Array((sourceIndexes.length + separatorCount) * 2);
+  const pathBreaks: number[] = [];
+  const unresolvedSourcePointIndexes: number[] = [];
+  let outputPointIndex = 0;
+  let breakOffsetIndex = 0;
+  for (let selectedIndex = 0; selectedIndex < sourceIndexes.length; selectedIndex += 1) {
+    if (selection.pathBreaks[breakOffsetIndex] === selectedIndex) {
+      pathBreaks.push(outputPointIndex);
+      points[outputPointIndex * 2] = Number.NaN;
+      points[outputPointIndex * 2 + 1] = Number.NaN;
+      outputPointIndex += 1;
+      breakOffsetIndex += 1;
+    }
+    const projectedX = projected[selectedIndex * 2];
+    const y = projected[selectedIndex * 2 + 1];
+    const sourcePointIndex = sourceIndexes[selectedIndex];
+    const lineageX = sourcePointIndex === undefined
+      ? null
+      : projectedLineageX(
+          entity.geometry.stroke,
+          sourcePointIndex,
+          plan.lineageSpanCoordinates,
+        );
+    const x = lineageX ?? projectedX;
+    if (!finiteNumber(x) || !finiteNumber(y)) {
+      points[outputPointIndex * 2] = Number.NaN;
+      points[outputPointIndex * 2 + 1] = Number.NaN;
+      if (sourcePointIndex !== undefined) unresolvedSourcePointIndexes.push(sourcePointIndex);
+      pathBreaks.push(outputPointIndex);
+    } else {
+      points[outputPointIndex * 2] = x;
+      points[outputPointIndex * 2 + 1] = y;
+    }
+    outputPointIndex += 1;
+  }
+  return createProjectedEntity(entity, points, {
+    renderSpec: freehandRenderSpec(entity, selected, plan.pathInterpolation),
+    bbox: bboxFromDrawableFreehand(
+      points,
+      frame.widthCssPx,
+      frame.heightCssPx,
+      freehandPaintOutsetCssPx(entity.style.lineWidth, entity.style.brushShape),
+      plan.pathInterpolation,
+    ),
+    pathBreaks: new Uint32Array(pathBreaks),
+    unresolvedSourcePointIndexes: new Uint32Array(unresolvedSourcePointIndexes),
+    canonicalGapCoverageComplete: false,
+    hitZones: Object.freeze([Object.freeze({
+      kind: "polyline" as const,
+      name: "stroke",
+      pointOffset: 0,
+      pointCount: points.length / 2,
+      tolerance: 8 + entity.style.lineWidth / 2,
+      result: Object.freeze({ body: true }),
+    })]),
+  });
+}
+
 function projectFreehandCanonicalGapIndexes(
   entity: FreehandDrawingRenderEntity,
   frame: DrawingFrameSnapshot,
@@ -1524,7 +2790,7 @@ function projectFreehandCanonicalGapIndexes(
     }
   }
 
-  const projected = projectBatch(adapter, frame, requests);
+  const projected = projectBatch(adapter, frame, requests, requests as object);
   if (projected === PROJECTION_FAILED) return projected;
   const unresolved: number[] = [];
   const splitOnUnresolved = stroke !== null || frame.axisKind === "derived-ordinal";
@@ -1549,6 +2815,7 @@ function projectFreehandRanges(
   ranges: readonly PointRange[],
   frame: DrawingFrameSnapshot,
   adapter: DrawingSceneProjectionAdapter,
+  selected: boolean,
 ): EntityProjection {
   const stroke = entity.geometry.stroke;
   const sourcePointCount = stroke?.points.length ?? entity.geometry.dataPoints.length;
@@ -1568,7 +2835,12 @@ function projectFreehandRanges(
       ? canonicalRequests
       : canonicalRequests.slice(singleRange.start, singleRange.end);
     if (requests.length !== singleRange.end - singleRange.start) return PROJECTION_FAILED;
-    const projected = projectBatch(adapter, frame, requests);
+    const projected = projectBatch(
+      adapter,
+      frame,
+      requests,
+      coversFullSource ? canonicalRequests as object : undefined,
+    );
     if (projected === PROJECTION_FAILED) return projected;
     const pathBreaks: number[] = [];
     const unresolvedSourcePointIndexes: number[] = [];
@@ -1589,7 +2861,14 @@ function projectFreehandRanges(
     }
     if (normalizedCopy) points = normalizedCopy;
     return createProjectedEntity(entity, points, {
-      bbox: bboxFromDrawablePolyline(points, frame.widthCssPx, frame.heightCssPx),
+      renderSpec: freehandRenderSpec(entity, selected),
+      bbox: bboxFromDrawableFreehand(
+        points,
+        frame.widthCssPx,
+        frame.heightCssPx,
+        freehandPaintOutsetCssPx(entity.style.lineWidth, entity.style.brushShape),
+        entity.style.brushShape === "square" ? "linear" : "quadratic",
+      ),
       pathBreaks: new Uint32Array(pathBreaks),
       unresolvedSourcePointIndexes: new Uint32Array(unresolvedSourcePointIndexes),
       canonicalGapCoverageComplete: coversFullSource,
@@ -1640,7 +2919,12 @@ function projectFreehandRanges(
   }
   // This final adapter call also makes a stale frame discovered by an earlier
   // span projection fail the whole scene instead of publishing partial paths.
-  const projected = projectBatch(adapter, frame, requests);
+  const projected = projectBatch(
+    adapter,
+    frame,
+    requests,
+    coversFullSource ? canonicalRequests as object : undefined,
+  );
   if (projected === PROJECTION_FAILED) return projected;
   const pathBreaks: number[] = [];
   const unresolvedSourcePointIndexes: number[] = [];
@@ -1706,7 +2990,14 @@ function projectFreehandRanges(
   if (fixedValues && outputPointCount * 2 !== fixedValues.length) return PROJECTION_FAILED;
   const points = fixedValues ?? new Float64Array(dynamicValues);
   return createProjectedEntity(entity, points, {
-    bbox: bboxFromDrawablePolyline(points, frame.widthCssPx, frame.heightCssPx),
+    renderSpec: freehandRenderSpec(entity, selected),
+    bbox: bboxFromDrawableFreehand(
+      points,
+      frame.widthCssPx,
+      frame.heightCssPx,
+      freehandPaintOutsetCssPx(entity.style.lineWidth, entity.style.brushShape),
+      entity.style.brushShape === "square" ? "linear" : "quadratic",
+    ),
     pathBreaks: new Uint32Array(pathBreaks),
     unresolvedSourcePointIndexes: new Uint32Array(unresolvedSourcePointIndexes),
     canonicalGapCoverageComplete: coversFullSource,
@@ -1726,12 +3017,56 @@ function projectFreehand(
   node: DrawingSceneNode,
   frame: DrawingFrameSnapshot,
   adapter: DrawingSceneProjectionAdapter,
+  selected: boolean,
+  lodToleranceClass: DrawingLodToleranceClass,
 ): EntityProjection {
   const sourcePointCount = entity.geometry.stroke?.points.length
     ?? entity.geometry.dataPoints.length;
-  const ranges = selectedFreehandRanges(node, sourcePointCount, frame, adapter);
-  if (ranges === PROJECTION_FAILED) return ranges;
-  return projectFreehandRanges(entity, ranges, frame, adapter);
+  const selectedRanges = selectedFreehandRanges(
+    node,
+    sourcePointCount,
+    frame,
+    adapter,
+    freehandPaintOutsetCssPx(entity.style.lineWidth, entity.style.brushShape) + 2,
+  );
+  if (selectedRanges === PROJECTION_FAILED) return selectedRanges;
+  const ranges = expandAndMergePointRanges(
+    selectedRanges,
+    sourcePointCount,
+    entity.style.brushShape === "square" ? 0 : 1,
+  );
+  const stroke = entity.geometry.stroke;
+  const canonicalRequests = stroke ? strokeBatchRequests(stroke) : entity.geometry.dataPoints;
+  // Cull first, build each continuous path against its real screen mapping,
+  // select nested source indexes, and only then run the public final projector.
+  // Span points retain their exact/fallback lineage envelope throughout LOD.
+  if (canonicalRequests && ranges.length > 0) {
+    const resolutions = resolveFreehandWorldBatch(adapter, frame, canonicalRequests);
+    const plan = resolutions
+      ? selectFreehandLod(
+          adapter,
+          canonicalRequests,
+          resolutions,
+          ranges,
+          frame,
+          selected ? "selectedEdit" : lodToleranceClass,
+          stroke,
+          entity.style.brushShape !== "square",
+        )
+      : null;
+    if (resolutions && plan) {
+      return projectFreehandLod(
+        entity,
+        canonicalRequests,
+        resolutions,
+        plan,
+        frame,
+        adapter,
+        selected,
+      );
+    }
+  }
+  return projectFreehandRanges(entity, ranges, frame, adapter, selected);
 }
 
 function projectEntity(
@@ -1741,6 +3076,7 @@ function projectEntity(
   adapter: DrawingSceneProjectionAdapter,
   selected: boolean,
   ordinaryAnchorsById: ReadonlyMap<string, TwoPointAnchors>,
+  lodToleranceClass: DrawingLodToleranceClass,
 ): EntityProjection {
   switch (entity.kind) {
     case "line": return projectLine(
@@ -1761,7 +3097,14 @@ function projectEntity(
       selected,
     );
     case "freehand":
-    case "highlighter": return projectFreehand(entity, node, frame, adapter);
+    case "highlighter": return projectFreehand(
+      entity,
+      node,
+      frame,
+      adapter,
+      selected,
+      lodToleranceClass,
+    );
   }
 }
 
@@ -1826,6 +3169,11 @@ function clipProjectedEntityToPane(
     paintOutset = renderSpec.selected
       ? Math.max(renderSpec.lineWidthCssPx / 2, 9)
       : renderSpec.lineWidthCssPx / 2;
+  } else if (renderSpec?.op === "freehand") {
+    paintOutset = freehandPaintOutsetCssPx(
+      renderSpec.lineWidthCssPx,
+      renderSpec.brushShape,
+    );
   }
   const paintLeft = bbox[0] - paintOutset;
   const paintTop = bbox[1] - paintOutset;
@@ -1871,6 +3219,7 @@ export function projectDrawingScene({
   stamp,
   adapter,
   selectedId,
+  lodToleranceClass = "normalStatic",
 }: DrawingSceneProjectionInput): DrawingScreenDisplayList | null {
   try {
     if (!stampMatchesInput(stamp, document, frame)) return null;
@@ -1892,6 +3241,7 @@ export function projectDrawingScene({
         adapter,
         node.id === selectedId,
         ordinaryAnchorsById,
+        lodToleranceClass,
       );
       if (result === PROJECTION_FAILED) return null;
       if (result) {

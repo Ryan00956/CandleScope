@@ -4,6 +4,7 @@ import {
 } from "../performance/drawingPerfCounters.js";
 import type {
   DrawingDisplayEntity,
+  DrawingFreehandRasterLayer,
   DrawingScreenDisplayList,
 } from "./drawingDisplayList.js";
 
@@ -308,6 +309,116 @@ function drawShape(
   context.restore();
 }
 
+function traceFreehandRun(
+  context: CanvasRenderingContext2D,
+  points: Readonly<Float64Array>,
+  startPointIndex: number,
+  endPointIndex: number,
+  horizontalPixelRatio: number,
+  verticalPixelRatio: number,
+  linearPath: boolean,
+): boolean {
+  const length = endPointIndex - startPointIndex;
+  if (length < 2 || !finitePoint(points, startPointIndex)) return false;
+  context.moveTo(
+    Number(points[startPointIndex * 2]) * horizontalPixelRatio,
+    Number(points[startPointIndex * 2 + 1]) * verticalPixelRatio,
+  );
+  if (length === 2 || linearPath) {
+    for (let pointIndex = startPointIndex + 1; pointIndex < endPointIndex; pointIndex += 1) {
+      if (!finitePoint(points, pointIndex)) return false;
+      context.lineTo(
+        Number(points[pointIndex * 2]) * horizontalPixelRatio,
+        Number(points[pointIndex * 2 + 1]) * verticalPixelRatio,
+      );
+    }
+    return true;
+  }
+  for (let pointIndex = startPointIndex + 1; pointIndex < endPointIndex - 1; pointIndex += 1) {
+    if (!finitePoint(points, pointIndex) || !finitePoint(points, pointIndex + 1)) return false;
+    const x = Number(points[pointIndex * 2]) * horizontalPixelRatio;
+    const y = Number(points[pointIndex * 2 + 1]) * verticalPixelRatio;
+    const nextX = Number(points[(pointIndex + 1) * 2]) * horizontalPixelRatio;
+    const nextY = Number(points[(pointIndex + 1) * 2 + 1]) * verticalPixelRatio;
+    context.quadraticCurveTo(x, y, (x + nextX) / 2, (y + nextY) / 2);
+  }
+  const penultimate = endPointIndex - 2;
+  const last = endPointIndex - 1;
+  if (!finitePoint(points, penultimate) || !finitePoint(points, last)) return false;
+  context.quadraticCurveTo(
+    Number(points[penultimate * 2]) * horizontalPixelRatio,
+    Number(points[penultimate * 2 + 1]) * verticalPixelRatio,
+    Number(points[last * 2]) * horizontalPixelRatio,
+    Number(points[last * 2 + 1]) * verticalPixelRatio,
+  );
+  return true;
+}
+
+function drawFreehand(
+  context: CanvasRenderingContext2D,
+  entity: DrawingDisplayEntity,
+  list: DrawingScreenDisplayList,
+  horizontalPixelRatio: number,
+  verticalPixelRatio: number,
+): void {
+  const spec = entity.renderSpec;
+  if (!spec || spec.op !== "freehand") return;
+  const squareBrush = spec.brushShape === "square";
+  const linearPath = squareBrush || spec.pathInterpolation === "linear";
+  const endPointIndex = entity.pointOffset + entity.pointCount;
+  context.save();
+  context.lineCap = squareBrush ? "square" : "round";
+  context.lineJoin = squareBrush ? "bevel" : "round";
+  context.lineWidth = spec.lineWidthCssPx * Math.min(horizontalPixelRatio, verticalPixelRatio);
+  context.globalCompositeOperation = spec.selected ? "source-over" : spec.compositeOperation;
+  context.strokeStyle = spec.selected ? spec.selectionHighlightColor : spec.strokeColor;
+  context.globalAlpha = spec.selected ? 0.6 : spec.opacity;
+  context.beginPath();
+  let traced = false;
+  let runStart = -1;
+  for (let pointIndex = entity.pointOffset; pointIndex <= endPointIndex; pointIndex += 1) {
+    const finite = pointIndex < endPointIndex && finitePoint(list.points, pointIndex);
+    if (finite && runStart < 0) runStart = pointIndex;
+    if (finite || runStart < 0) continue;
+    traced = traceFreehandRun(
+      context,
+      list.points,
+      runStart,
+      pointIndex,
+      horizontalPixelRatio,
+      verticalPixelRatio,
+      linearPath,
+    ) || traced;
+    runStart = -1;
+  }
+  if (traced) context.stroke();
+  context.restore();
+}
+
+function drawFreehandRasterLayer(
+  context: CanvasRenderingContext2D,
+  bitmap: ImageBitmap,
+  layer: DrawingFreehandRasterLayer,
+  horizontalPixelRatio: number,
+  verticalPixelRatio: number,
+): void {
+  context.save();
+  context.globalAlpha = layer.opacity;
+  context.globalCompositeOperation = layer.compositeOperation;
+  context.drawImage(
+    bitmap,
+    layer.sourceXPhysicalPx,
+    layer.sourceYPhysicalPx,
+    layer.sourceWidthPhysicalPx,
+    layer.sourceHeightPhysicalPx,
+    layer.destinationXCssPx * horizontalPixelRatio,
+    layer.destinationYCssPx * verticalPixelRatio,
+    layer.destinationWidthCssPx * horizontalPixelRatio,
+    layer.destinationHeightCssPx * verticalPixelRatio,
+  );
+  context.restore();
+}
+
 /** Pure canvas consumer: no document, projection, adapter, JSON, or React access. */
 export class DrawingSceneRenderer implements PrimitivePaneRenderer {
   readonly #emptyDashScratch: number[] = [];
@@ -322,6 +433,11 @@ export class DrawingSceneRenderer implements PrimitivePaneRenderer {
   }
 
   setPlan(plan: DrawingScreenDisplayList | null): void {
+    const previousBitmap = this.#plan?.freehandRaster?.bitmap;
+    const nextBitmap = plan?.freehandRaster?.bitmap;
+    if (previousBitmap && previousBitmap !== nextBitmap) {
+      try { previousBitmap.close(); } catch { /* already released */ }
+    }
     this.#plan = plan;
   }
 
@@ -337,11 +453,25 @@ export class DrawingSceneRenderer implements PrimitivePaneRenderer {
       target.useBitmapCoordinateSpace((scope) => {
         const horizontalPixelRatio = scope.horizontalPixelRatio;
         const verticalPixelRatio = scope.verticalPixelRatio;
+        const raster = plan.freehandRaster;
+        const matchingRaster = raster !== undefined
+          && raster.widthCssPx === plan.stamp.widthCssPx
+          && raster.heightCssPx === plan.stamp.heightCssPx
+          && raster.dpr === plan.stamp.dpr
+          && raster.bitmap.width === raster.atlasWidthPhysicalPx
+          && raster.bitmap.height === raster.atlasHeightPhysicalPx
+          ? raster
+          : null;
+        let rasterLayerCursor = 0;
+        let rasterCoveredThroughEntityIndex = -1;
         this.#dashedScratch[0] = 6 * horizontalPixelRatio;
         this.#dashedScratch[1] = 4 * horizontalPixelRatio;
         this.#dottedScratch[0] = horizontalPixelRatio;
         this.#dottedScratch[1] = 4 * horizontalPixelRatio;
-        for (const entity of plan.entities) {
+        for (let entityIndex = 0; entityIndex < plan.entities.length; entityIndex += 1) {
+          if (entityIndex <= rasterCoveredThroughEntityIndex) continue;
+          const entity = plan.entities[entityIndex];
+          if (!entity) continue;
           const op = entity.renderSpec?.op;
           if (op === "line") {
             drawLine(
@@ -372,6 +502,27 @@ export class DrawingSceneRenderer implements PrimitivePaneRenderer {
               this.#dashedScratch,
               this.#dottedScratch,
               this.#selectionScratch,
+            );
+          } else if (op === "freehand") {
+            const layer = matchingRaster?.layers[rasterLayerCursor];
+            if (matchingRaster && layer?.entityIndex === entityIndex) {
+              drawFreehandRasterLayer(
+                scope.context,
+                matchingRaster.bitmap,
+                layer,
+                horizontalPixelRatio,
+                verticalPixelRatio,
+              );
+              rasterCoveredThroughEntityIndex = layer.lastEntityIndex;
+              rasterLayerCursor += 1;
+              continue;
+            }
+            drawFreehand(
+              scope.context,
+              entity,
+              plan,
+              horizontalPixelRatio,
+              verticalPixelRatio,
             );
           }
         }

@@ -9,6 +9,8 @@ import {
   readDrawingPerfInteractionHandoff,
   recordDrawingPerfInteractionHandoffAcknowledged,
   recordDrawingPerfInteractionHandoffPrepared,
+  registerDrawingPerfPhase6HitOracleProvider,
+  registerDrawingPerfPhase6RuntimeProvider,
   registerDrawingPerfShadowParityRequester,
   type DrawingPerfDebugHandle,
   type DrawingPerfSummaryEventDetail,
@@ -138,6 +140,49 @@ test("counters, gauges, and attributed long tasks reject invalid measurements", 
   assert.equal(Object.keys(snapshot.longTasksByAttribution).length, 2);
   assert.deepEqual(snapshot.longTasksByAttribution.render, { count: 1, totalDurationMs: 55 });
   assert.deepEqual(snapshot.longTasksByAttribution.other, { count: 2, totalDurationMs: 130 });
+});
+
+test("Phase 6 exact and worker telemetry is retained in histograms, raw capture, counters, and gauges", () => {
+  const counters = createDrawingPerfCounters({
+    now: () => 0,
+    reporter: null,
+    benchmarkRawCapture: true,
+    rawCaptureCapacity: 4,
+  });
+
+  assert.equal(counters.recordDuration("workerFinalizeMs", 8.5), true);
+  assert.equal(counters.recordDuration("exactRenderMs", 104), true);
+  assert.equal(counters.recordDuration("exactRenderMs", Number.NaN), false);
+  assert.equal(counters.incrementCounter("workerJobCount", 3), true);
+  assert.equal(counters.incrementCounter("workerResultCount", 2), true);
+  assert.equal(counters.incrementCounter("staleWorkerResultCount"), true);
+  assert.equal(counters.incrementCounter("staleWorkerPublishCount", 2), true);
+  assert.equal(counters.incrementCounter("workerQueueDropCount"), true);
+  assert.equal(counters.setGauge("workerQueue", 2), true);
+  assert.equal(counters.setGauge("workerInFlight", 1), true);
+  assert.equal(counters.setGauge("cacheBytes", 65_536), true);
+
+  const snapshot = counters.snapshot();
+  assert.deepEqual(snapshot.durations.workerFinalizeMs.samples, [8.5]);
+  assert.deepEqual(snapshot.durations.exactRenderMs.samples, [104]);
+  assert.equal(snapshot.counters.workerJobCount, 3);
+  assert.equal(snapshot.counters.workerResultCount, 2);
+  assert.equal(snapshot.counters.staleWorkerResultCount, 1);
+  assert.equal(snapshot.counters.staleWorkerPublishCount, 2);
+  assert.equal(snapshot.counters.workerQueueDropCount, 1);
+  assert.equal(snapshot.gauges.workerQueue, 2);
+  assert.equal(snapshot.gauges.workerInFlight, 1);
+  assert.equal(snapshot.gauges.cacheBytes, 65_536);
+  assert.deepEqual(counters.readRawCapture().metrics.workerFinalizeMs.samples, [8.5]);
+  assert.deepEqual(counters.readRawCapture().metrics.exactRenderMs.samples, [104]);
+
+  counters.reset();
+  const reset = counters.snapshot();
+  assert.equal(reset.durations.workerFinalizeMs.sampleCount, 0);
+  assert.equal(reset.durations.exactRenderMs.sampleCount, 0);
+  assert.equal(reset.counters.staleWorkerPublishCount, 0);
+  assert.equal(reset.gauges.workerQueue, 0);
+  assert.equal(reset.gauges.cacheBytes, 0);
 });
 
 test("shadow parity summaries use fixed-size counters and latest-value gauges", () => {
@@ -494,7 +539,75 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
   assert.equal(installDrawingPerfDebugHandle(null), null);
 });
 
-test("interaction handoff telemetry only acknowledges the exact prepared stamp", () => {
+test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle providers", () => {
+  const handle = installDrawingPerfDebugHandle({});
+  const phase6Runtime = Object.freeze({
+    engineMode: "scene-canary" as const,
+    scenePublicationReady: true,
+    attachedPrimitiveCount: 1,
+    backend: "worker" as const,
+    backendSource: "environment" as const,
+    workerResultDelayMs: 32,
+    sourceLineageExactResolveCount: 64,
+    sourceLineageFallbackResolveCount: 0,
+    sourceLineageUnresolvedResolveCount: 0,
+    offscreenSupported: true,
+    queueDepthMax: 2,
+    inFlightMax: 1,
+    queueDepthCurrent: 1,
+    inFlightCurrent: 1,
+    workerJobDelta: 4,
+    workerResultDelta: 3,
+    pendingDropDelta: 1,
+    staleResultDropDelta: 1,
+    stalePublishCount: 0,
+    rawPoints: 32_768,
+    renderedPoints: 1_024,
+    lodRatio: 0.03125,
+    canonicalRawPreserved: true,
+    vertexBudgetPassed: true,
+    cacheBytes: 262_144,
+    exactRenderMs: 96,
+    lastRequestedStamp: Object.freeze({ viewportRevision: 8 }),
+    lastPublishedStamp: Object.freeze({ viewportRevision: 8 }),
+  });
+  const unregisterRuntime = registerDrawingPerfPhase6RuntimeProvider(() => phase6Runtime);
+  assert.strictEqual(handle?.readPhase6Runtime(), phase6Runtime);
+  unregisterRuntime();
+  assert.equal(handle?.readPhase6Runtime(), null);
+
+  const unregisterThrowingRuntime = registerDrawingPerfPhase6RuntimeProvider(() => {
+    throw new Error("surface disposed");
+  });
+  assert.equal(handle?.readPhase6Runtime(), null);
+  unregisterThrowingRuntime();
+
+  const oracleResult = Object.freeze({
+    queryCount: 2,
+    mismatchCount: 0,
+    maxCandidates: 3,
+    totalSegments: 1_000,
+    indexedResults: Object.freeze([null, { entityId: "top" }]),
+    oracleResults: Object.freeze([null, { entityId: "top" }]),
+  });
+  const unregisterOracle = registerDrawingPerfPhase6HitOracleProvider((points) => {
+    assert.deepEqual(points, [{ x: 10, y: 20 }, { x: 30, y: 40 }]);
+    return oracleResult;
+  });
+  assert.strictEqual(handle?.runPhase6HitOracle([
+    { x: 10, y: 20 },
+    { x: 30, y: 40 },
+  ]), oracleResult);
+  unregisterOracle();
+  assert.deepEqual(handle?.runPhase6HitOracle([{ x: 1, y: 2 }]), {
+    queryCount: 0,
+    mismatchCount: 0,
+    maxCandidates: 0,
+    totalSegments: 0,
+  });
+});
+
+test("interaction handoff telemetry accepts covering paints across viewport revisions", () => {
   const handle = installDrawingPerfDebugHandle({});
   handle?.reset();
   const stamp = {
@@ -512,9 +625,26 @@ test("interaction handoff telemetry only acknowledges the exact prepared stamp",
   assert.equal(recordDrawingPerfInteractionHandoffAcknowledged("dynamic", stamp), false);
   assert.equal(recordDrawingPerfInteractionHandoffAcknowledged("live-ink", {
     ...stamp,
+    documentRevision: 6,
     viewportRevision: 12,
   }), false);
-  assert.equal(recordDrawingPerfInteractionHandoffAcknowledged("live-ink", stamp), true);
+  assert.equal(recordDrawingPerfInteractionHandoffAcknowledged("live-ink", {
+    ...stamp,
+    scopeKey: "ETHUSDT",
+    documentRevision: 8,
+    viewportRevision: 12,
+  }), false);
+  assert.equal(recordDrawingPerfInteractionHandoffAcknowledged("live-ink", {
+    ...stamp,
+    documentRevision: 8,
+    surfaceGeneration: 4,
+    viewportRevision: 12,
+  }), false);
+  assert.equal(recordDrawingPerfInteractionHandoffAcknowledged("live-ink", {
+    ...stamp,
+    documentRevision: 8,
+    viewportRevision: 12,
+  }), true);
   assert.deepEqual(readDrawingPerfInteractionHandoff(), {
     prepared,
     acknowledged: prepared,

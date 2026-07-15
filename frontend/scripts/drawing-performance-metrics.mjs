@@ -35,6 +35,8 @@ export const DRAWING_COUNTER_KEYS = Object.freeze([
   "requestUpdatePerFrame",
   "surfacePrimitiveCount",
   "workerQueueDepth",
+  "workerInFlight",
+  "staleWorkerPublishCount",
 ]);
 
 const METRIC_ALIASES = Object.freeze({
@@ -77,6 +79,8 @@ const COUNTER_ALIASES = Object.freeze({
   requestUpdatePerFrame: ["requestUpdatePerFrame", "requestUpdatePerFrameMax"],
   surfacePrimitiveCount: ["surfacePrimitiveCount", "surfacePrimitiveMax"],
   workerQueueDepth: ["workerQueueDepth", "workerQueueDepthMax"],
+  workerInFlight: ["workerInFlight", "workerInFlightMax"],
+  staleWorkerPublishCount: ["staleWorkerPublishCount"],
 });
 
 export const DRAWING_PERFORMANCE_HARD_GATES = Object.freeze([
@@ -217,6 +221,18 @@ export const DRAWING_PERFORMANCE_HARD_GATES = Object.freeze([
     path: "counters.workerQueueDepth.max",
     operator: "<=",
     expected: 2,
+  }),
+  Object.freeze({
+    id: "worker-in-flight",
+    path: "counters.workerInFlight.max",
+    operator: "<=",
+    expected: 1,
+  }),
+  Object.freeze({
+    id: "stale-worker-publish-count",
+    path: "counters.staleWorkerPublishCount.max",
+    operator: "===",
+    expected: 0,
   }),
 ]);
 
@@ -728,9 +744,29 @@ export function summarizeScenarioRuns(runs = [], options = {}) {
   const summary = {
     id: options.id ?? options.scenarioId ?? null,
     fixture: {
+      name: typeof options.fixture?.name === "string" ? options.fixture.name : null,
       bars: numericValue(options.fixture?.bars ?? options.bars),
       entities: numericValue(options.fixture?.entities ?? options.entities),
       points: numericValue(options.fixture?.points ?? options.points),
+      spans: numericValue(options.fixture?.spans),
+      maxFreehandPointsPerDrawing: numericValue(
+        options.fixture?.maxFreehandPointsPerDrawing,
+      ),
+      maxFreehandSpansPerDrawing: numericValue(
+        options.fixture?.maxFreehandSpansPerDrawing,
+      ),
+      sourceLineage: typeof options.fixture?.sourceLineage === "boolean"
+        ? options.fixture.sourceLineage
+        : null,
+      sourceProjection: typeof options.fixture?.sourceProjection === "string"
+        ? options.fixture.sourceProjection
+        : null,
+      sourceProjectionConfig: typeof options.fixture?.sourceProjectionConfig === "string"
+        ? options.fixture.sourceProjectionConfig
+        : null,
+      lineageExact: options.fixture?.lineageExact ?? null,
+      lineageFallback: options.fixture?.lineageFallback ?? null,
+      lineageDerivedRowCount: numericValue(options.fixture?.lineageDerivedRowCount),
       mode: options.fixture?.mode ?? options.mode ?? null,
       dpr: numericValue(options.fixture?.dpr ?? options.dpr),
     },

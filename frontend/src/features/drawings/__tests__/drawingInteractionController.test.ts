@@ -13,6 +13,7 @@ import {
   resolveTopmostDrawingInteractionHit,
   runDrawingPointerTransientBarrier,
   runDrawingSurfaceDisposeBarrier,
+  scenePaintCoversDrawingHandoff,
 } from "../drawingInteractionController.js";
 import {
   canRecoverDrawingVisibleSceneInPlace,
@@ -39,6 +40,42 @@ function point(x: number): ScreenPoint {
   return { x, y: x };
 }
 
+test("scene paint handoff ignores superseded viewport but rejects wrong ownership or stale document", () => {
+  const ticket = {
+    scopeKey: "BTCUSDT",
+    documentRevision: 7,
+    surfaceGeneration: 3,
+    viewportRevision: 11,
+  } as const;
+
+  assert.equal(scenePaintCoversDrawingHandoff(ticket, {
+    ...ticket,
+    viewportRevision: 12,
+  }), true);
+  assert.equal(scenePaintCoversDrawingHandoff(ticket, {
+    ...ticket,
+    documentRevision: 8,
+    viewportRevision: 13,
+  }), true);
+  assert.equal(scenePaintCoversDrawingHandoff(ticket, {
+    ...ticket,
+    documentRevision: 6,
+    viewportRevision: 12,
+  }), false);
+  assert.equal(scenePaintCoversDrawingHandoff(ticket, {
+    ...ticket,
+    scopeKey: "ETHUSDT",
+    documentRevision: 8,
+    viewportRevision: 12,
+  }), false);
+  assert.equal(scenePaintCoversDrawingHandoff(ticket, {
+    ...ticket,
+    documentRevision: 8,
+    surfaceGeneration: 4,
+    viewportRevision: 12,
+  }), false);
+});
+
 test("hybrid hit ownership follows canonical z-order instead of legacy-first attachment order", () => {
   const legacy = malformedFixture<DrawingPrimitive>({ id: "legacy" });
   const scene = malformedFixture<DrawingPrimitive>({ id: "scene" });
@@ -58,6 +95,35 @@ test("hybrid hit ownership follows canonical z-order instead of legacy-first att
     resolveTopmostDrawingInteractionHit([scene, legacy], legacyHit, sceneHit)?.prim,
     legacy,
   );
+});
+
+test("scene hit ownership accepts freehand and highlighter compatibility proxies", () => {
+  for (const kind of ["freehand", "highlighter"] as const) {
+    const legacy = malformedFixture<DrawingPrimitive>({ id: `legacy-${kind}` });
+    const scene = malformedFixture<DrawingPrimitive>({ id: `scene-${kind}` });
+    const legacyHit = malformedFixture<DrawingPrimitiveHit>({
+      prim: legacy,
+      type: "text",
+    });
+    const sceneHit: DrawingDisplayHitResult = {
+      entityId: `scene-${kind}`,
+      kind,
+      pointIndex: -1,
+    };
+
+    const sceneTop = resolveTopmostDrawingInteractionHit(
+      [legacy, scene],
+      legacyHit,
+      sceneHit,
+    );
+    assert.strictEqual(sceneTop?.prim, scene);
+    assert.equal(sceneTop?.type, kind);
+
+    assert.strictEqual(
+      resolveTopmostDrawingInteractionHit([scene, legacy], legacyHit, sceneHit)?.prim,
+      legacy,
+    );
+  }
 });
 
 test("pending pen moves retain every coalesced batch before one RAF", () => {

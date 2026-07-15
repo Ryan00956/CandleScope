@@ -12,6 +12,7 @@ import {
 } from "./drawingSelectionController.js";
 import type { SelectedTextUi } from "./drawingSelectionController.js";
 import { resolveDrawingDocumentAuthorityMode } from "./drawingDocumentAuthority.js";
+import { resolveDrawingRasterBackend } from "./drawingRasterBackend.js";
 import { resolvePhase4DrawingEngineMode } from "./drawingEngineMode.js";
 import { createEmptyDrawingDocument } from "./core/drawingDocument.js";
 import type { DrawingDocument } from "./core/drawingDocument.js";
@@ -45,9 +46,15 @@ import {
 } from "./engine/drawingSceneProjector.js";
 import { compareDrawingShadowParity } from "./engine/drawingShadowParity.js";
 import { captureLegacyDrawingParityProbe } from "./legacy/legacyDrawingParityProbe.js";
+import {
+  hitTestDrawingHitIndex,
+  queryDrawingHitIndex,
+} from "./geometry/drawingHitIndex.js";
 import type { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
 import {
   drawingPerfCounters,
+  registerDrawingPerfPhase6HitOracleProvider,
+  registerDrawingPerfPhase6RuntimeProvider,
   registerDrawingPerfShadowParityRequester,
   registerDrawingPerfRuntimeSummaryProvider,
 } from "./performance/drawingPerfCounters.js";
@@ -67,9 +74,10 @@ import {
 import type { DrawingDisplayHitResult } from "./rendering/drawingDisplayList.js";
 import type { ScreenBox, ScreenPoint } from "./drawingTypes.js";
 import {
-  isPhase4SceneDrawingKind,
-  isPhase4SceneDrawingPrimitive,
+  isPhase6SceneDrawingKind,
+  isPhase6SceneDrawingPrimitive,
 } from "./rendering/drawingSceneMigration.js";
+import { sameDrawingWorkerStamp } from "./worker/drawingWorkerProtocol.js";
 
 // A drawing frame is published only after the chart has data, a measurable
 // pane and a coherent visible range. Live startup and series replacement can
@@ -312,7 +320,7 @@ export function shouldProjectVisibleSceneEntity(
   dynamicOverlayEnabled: boolean,
   activeOverlayEntityId: string | null,
 ): boolean {
-  return isPhase4SceneDrawingKind(kind)
+  return isPhase6SceneDrawingKind(kind)
     && (!dynamicOverlayEnabled || id !== activeOverlayEntityId);
 }
 
@@ -462,11 +470,15 @@ export function useDrawingPersistenceLifecycle({
     createMutableDrawingDelegate(getDrawingSceneAdapter)
   ));
   const mutationStartedRef = useRef(false);
+  const [rasterBackend] = useState(() => resolveDrawingRasterBackend());
   const sceneCanaryEnabledRef = useRef(engineMode.effective === "scene-canary");
   const [sceneRuntimeErrorHandlerDelegate] = useState(() => (
     createMutableDrawingDelegate<(error: unknown) => void>((error) => {
       console.warn("Drawing scene runtime failed before its lifecycle handler was ready", error);
     })
+  ));
+  const [scenePaintRecoveryDelegate] = useState(() => (
+    createMutableDrawingDelegate<() => void>(() => {})
   ));
   const [scenePrimitive] = useState(() => new DrawingScenePrimitive());
   const [sceneBridge] = useState<DrawingScenePrimitiveBridge<
@@ -485,6 +497,7 @@ export function useDrawingPersistenceLifecycle({
     isDrawingFrameCurrent: (frame) => (
       sceneAdapterGetterDelegate.read()()?.isDrawingFrameCurrent?.(frame) === true
     ),
+    onCurrentPaintRejected: () => scenePaintRecoveryDelegate.read()(),
   }));
   // Effect cleanups suspend this state-owned runtime instead of disposing it.
   // React StrictMode replays cleanup/setup against the same state instance in
@@ -492,6 +505,8 @@ export function useDrawingPersistenceLifecycle({
   // fail closed even though the chart surface is healthy.
   const [sceneRuntime] = useState<DrawingSceneRuntime>(() => createDrawingSceneRuntime({
     mode: engineMode.effective,
+    rasterBackend: rasterBackend.effective,
+    workerResultDeliveryDelayMs: rasterBackend.workerResultDeliveryDelayMs,
     onError: (error) => {
       drawingPerfCounters.incrementCounter("shadowErrorCount");
       if (engineMode.effective === "scene-canary") {
@@ -501,7 +516,6 @@ export function useDrawingPersistenceLifecycle({
       }
     },
     onMetrics: (metrics) => {
-      drawingPerfCounters.recordSceneProjectPaintDuration(metrics.buildDurationMs);
       drawingPerfCounters.setGauge("shadowSceneBuildMs", metrics.buildDurationMs);
       drawingPerfCounters.recordSceneRebuild();
       drawingPerfCounters.setGauge("visibleEntities", metrics.visibleEntityCount);
@@ -523,6 +537,13 @@ export function useDrawingPersistenceLifecycle({
       drawingPerfCounters.incrementCounter("shadowSkippedCount");
     },
   }));
+  useEffect(() => {
+    const recoverCurrentPaint = () => {
+      sceneRuntime.invalidate("visible-paint-frame-stale");
+    };
+    scenePaintRecoveryDelegate.write(recoverCurrentPaint);
+    return () => scenePaintRecoveryDelegate.write(() => {});
+  }, [scenePaintRecoveryDelegate, sceneRuntime]);
   const [initialStore] = useState(() => drawingDocumentSessionRegistry.getStore(symbol));
   const [scopeRetryGeneration, setScopeRetryGeneration] = useState(0);
   const activeStoreRef = useRef<DrawingDocumentStore>(initialStore);
@@ -575,7 +596,7 @@ export function useDrawingPersistenceLifecycle({
         return primitive;
       },
       shouldAttachPrimitive: (primitive) => (
-        !sceneCanaryEnabledRef.current || !isPhase4SceneDrawingPrimitive(primitive)
+        !sceneCanaryEnabledRef.current || !isPhase6SceneDrawingPrimitive(primitive)
       ),
     });
   }, [hiddenRef, selectedIdRef]);
@@ -702,6 +723,9 @@ export function useDrawingPersistenceLifecycle({
           activeOverlayEntityIdRef?.current ?? null,
         ),
         publishScene: (plan) => sceneBridge.publish(plan),
+        subscribeScenePainted: (listener) => sceneBridge.subscribePainted(
+          (ack) => listener(ack.stamp),
+        ),
         clearScene: () => sceneBridge.clearPlan(),
       } : {}),
       ...(engineMode.effective === "shadow" ? { compareParity: (plan, document, sceneCanonicalIds, frame) => {
@@ -1232,15 +1256,146 @@ export function useDrawingPersistenceLifecycle({
     };
   }), [engineMode.effective, primitivesRef, sceneAdapterGetterDelegate, sceneBridge, sceneRuntime]);
 
+  useEffect(() => registerDrawingPerfPhase6RuntimeProvider(() => {
+    const bridgeSnapshot = sceneBridge.snapshot();
+    const runtimeSnapshot = sceneRuntime.snapshot();
+    const perf = drawingPerfCounters.snapshot();
+    const worker = runtimeSnapshot.worker;
+    const lineageStats = sceneAdapterGetterDelegate.read()()
+      ?.readDrawingFrameSourceLineageStats?.() ?? null;
+    const planStamp = runtimeSnapshot.plan?.stamp ?? null;
+    const paintedStamp = bridgeSnapshot.lastPaintedStamp;
+    const currentPlanPainted = !!planStamp
+      && !!paintedStamp
+      && sameDrawingWorkerStamp(planStamp, paintedStamp);
+    // Freshness is a visible-scene invariant, including plans whose entities
+    // do not require a worker raster. Worker-specific job/result evidence is
+    // reported separately; the requested stamp here is always the current
+    // accepted plan that the bridge must acknowledge after paint.
+    const requestedStamp = planStamp;
+    // A worker publication is evidence only after DrawingSceneRenderer has
+    // consumed the bitmap and the generation-safe bridge acknowledged that
+    // exact plan. Runtime acceptance alone is too early for a raster gate.
+    const publishedStamp = currentPlanPainted ? paintedStamp : null;
+    const rawPoints = runtimeSnapshot.rawPointCount;
+    const renderedPoints = runtimeSnapshot.renderedPointCount;
+    const canonicalRawPoints = Array.from(
+      activeStoreRef.current.getSnapshot().entities.values(),
+    ).reduce((count, entity) => {
+      const geometry = entity.geometry;
+      return geometry.kind === "freehand" || geometry.kind === "highlighter"
+        ? count + (geometry.stroke?.points.length ?? geometry.dataPoints?.length ?? 0)
+        : count;
+    }, 0);
+    const currentPlan = runtimeSnapshot.plan;
+    const vertexBudgetPassed = currentPlan?.entities.every((entity) => (
+      entity.kind !== "freehand" && entity.kind !== "highlighter"
+        ? true
+        : Math.max(0, entity.pointCount - entity.pathBreakCount)
+          <= Math.floor(currentPlan.stamp.widthCssPx * 3)
+    )) ?? true;
+    return Object.freeze({
+      engineMode: engineMode.effective,
+      scenePublicationReady: runtimeSnapshot.publicationReady,
+      attachedPrimitiveCount: (rendererRef.current?.attachedCount() ?? 0)
+        + bridgeSnapshot.attachedPrimitiveCount,
+      backend: runtimeSnapshot.rasterBackend,
+      backendSource: rasterBackend.source,
+      workerResultDelayMs: runtimeSnapshot.workerResultDeliveryDelayMs,
+      sourceLineageExactResolveCount: lineageStats?.exactProjectionCount ?? 0,
+      sourceLineageFallbackResolveCount: lineageStats?.fallbackProjectionCount ?? 0,
+      sourceLineageUnresolvedResolveCount: lineageStats?.unresolvedProjectionCount ?? 0,
+      offscreenSupported: runtimeSnapshot.offscreenSupported,
+      queueDepthMax: perf.gaugeMaxima.workerQueue,
+      inFlightMax: perf.gaugeMaxima.workerInFlight,
+      queueDepthCurrent: worker?.queueDepth ?? 0,
+      inFlightCurrent: worker?.inFlight ?? 0,
+      workerJobDelta: worker?.submittedCount ?? 0,
+      workerResultDelta: worker?.resultCount ?? 0,
+      pendingDropDelta: worker?.queueDropCount ?? 0,
+      staleResultDropDelta: worker?.staleResultCount ?? 0,
+      stalePublishCount: runtimeSnapshot.staleWorkerPublishCount,
+      rawPoints,
+      renderedPoints,
+      lodRatio: rawPoints > 0 ? Math.min(1, renderedPoints / rawPoints) : 0,
+      canonicalRawPreserved: rawPoints === canonicalRawPoints,
+      vertexBudgetPassed,
+      cacheBytes: perf.gauges.cacheBytes,
+      exactRenderMs: runtimeSnapshot.lastExactSettleMs,
+      lastRequestedStamp: requestedStamp ? Object.freeze({ ...requestedStamp }) : null,
+      lastPublishedStamp: publishedStamp ? Object.freeze({ ...publishedStamp }) : null,
+    });
+  }), [
+    engineMode.effective,
+    rasterBackend,
+    sceneAdapterGetterDelegate,
+    sceneBridge,
+    sceneRuntime,
+  ]);
+
+  useEffect(() => registerDrawingPerfPhase6HitOracleProvider((points) => {
+    const runtimeSnapshot = sceneRuntime.snapshot();
+    const plan = runtimeSnapshot.plan;
+    const index = runtimeSnapshot.hitIndex;
+    if (!plan || !index || index.list !== plan) {
+      return Object.freeze({
+        queryCount: 0,
+        mismatchCount: 0,
+        maxCandidates: 0,
+        totalSegments: 0,
+        indexedResults: Object.freeze([]),
+        oracleResults: Object.freeze([]),
+      });
+    }
+    const safePoints = points.slice(0, 1_000);
+    const indexedResults: Array<DrawingDisplayHitResult | null> = [];
+    const oracleResults: Array<DrawingDisplayHitResult | null> = [];
+    let mismatchCount = 0;
+    let maxCandidates = 0;
+    for (const point of safePoints) {
+      const query = queryDrawingHitIndex(index, point.x, point.y);
+      maxCandidates = Math.max(maxCandidates, query.candidateEntityCount);
+      const startedAt = drawingMonotonicNow();
+      const indexed = hitTestDrawingHitIndex(index, point.x, point.y, selectedIdRef.current);
+      drawingPerfCounters.recordHitQueryDuration(
+        Math.max(0, drawingMonotonicNow() - startedAt),
+      );
+      const oracle = hitTestDrawingScreenDisplayList(
+        plan,
+        point.x,
+        point.y,
+        selectedIdRef.current,
+      );
+      indexedResults.push(indexed);
+      oracleResults.push(oracle);
+      if (JSON.stringify(indexed) !== JSON.stringify(oracle)) mismatchCount += 1;
+    }
+    return Object.freeze({
+      queryCount: safePoints.length,
+      mismatchCount,
+      maxCandidates,
+      totalSegments: index.stats.segmentCount,
+      indexedResults: Object.freeze(indexedResults),
+      oracleResults: Object.freeze(oracleResults),
+    });
+  }), [sceneRuntime, selectedIdRef]);
+
   useEffect(() => registerDrawingPerfShadowParityRequester(
     () => sceneRuntime.requestParity(),
   ), [sceneRuntime]);
 
   const hitTestScene = useCallback((x: number, y: number): DrawingDisplayHitResult | null => {
     if (!sceneCanaryEnabledRef.current || hiddenRef.current) return null;
-    const plan = sceneRuntime.snapshot().plan;
-    if (!plan) return null;
-    return hitTestDrawingScreenDisplayList(plan, x, y, selectedIdRef.current);
+    const snapshot = sceneRuntime.snapshot();
+    if (!snapshot.plan || !snapshot.hitIndex || snapshot.hitIndex.list !== snapshot.plan) return null;
+    const startedAt = drawingMonotonicNow();
+    try {
+      return hitTestDrawingHitIndex(snapshot.hitIndex, x, y, selectedIdRef.current);
+    } finally {
+      drawingPerfCounters.recordHitQueryDuration(
+        Math.max(0, drawingMonotonicNow() - startedAt),
+      );
+    }
   }, [hiddenRef, sceneRuntime, selectedIdRef]);
 
   const getSceneScreenBox = useCallback((id: string): ScreenBox | null => {

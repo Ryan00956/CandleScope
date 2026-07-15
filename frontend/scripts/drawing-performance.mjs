@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildDrawingFixture,
   DEFAULT_FIXTURE_OPTIONS,
+  fixtureTimeOffsetDenominator,
 } from "./drawing-performance-fixtures.mjs";
 import {
   buildDrawingPerformanceReport,
@@ -30,6 +31,27 @@ import {
   buildPhase5Acceptance,
 } from "./drawing-performance-phase5.mjs";
 import { phase5BrowserProbeBootstrap } from "./drawing-performance-phase5-browser.mjs";
+import {
+  PHASE6_BAR_COUNT,
+  PHASE6_HIT_QUERY_COUNT,
+  PHASE6_REQUIRED_SCENARIO_IDS,
+  PHASE6_LINEAGE_VIEWPORT_SCENARIO,
+  PHASE6_SCENARIO_IDS,
+  buildPhase6HitQueryPoints,
+  buildPhase6Acceptance,
+  normalizePhase6PanePlotRect,
+} from "./drawing-performance-phase6.mjs";
+import {
+  phase6ActionRequiresCurrentPaint,
+  phase6BrowserProbeBootstrap,
+  phase6SceneReadiness,
+  waitForPhase6ActionCurrentPaint,
+} from "./drawing-performance-phase6-browser.mjs";
+import { buildDrawingPerformanceMockBars } from "./drawing-performance-mock-data.mjs";
+import {
+  buildPhase6LineageFixtureContract,
+  phase6LineageSettings,
+} from "./drawing-performance-phase6-lineage.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -287,6 +309,91 @@ const DEFAULT_SCENARIOS = Object.freeze([
     targetMetrics: ["drawingMainThreadMs", "frameIntervalMs", "inputToNextPaintMs", "mouseupSyncMs", "activeOverlayCpuMs"],
     targetCounters: [],
   }),
+  Object.freeze({
+    id: PHASE6_SCENARIO_IDS.freehandZoomPan,
+    fixture: "freehand64x512",
+    action: "phase6-viewport",
+    requiredMetrics: ["sceneProjectPaintMs", "frameIntervalMs", "exactRenderMs"],
+    targetMetrics: ["sceneProjectPaintMs", "frameIntervalMs", "exactRenderMs"],
+    targetCounters: [
+      "surfacePrimitiveCount",
+      "workerQueueDepth",
+      "workerInFlight",
+      "staleWorkerPublishCount",
+    ],
+  }),
+  PHASE6_LINEAGE_VIEWPORT_SCENARIO,
+  Object.freeze({
+    id: PHASE6_SCENARIO_IDS.hitIndex,
+    fixture: "entities512",
+    action: "phase6-hit-index",
+    requiredMetrics: ["hitQueryMs"],
+    targetMetrics: ["hitQueryMs"],
+    targetCounters: [
+      "surfacePrimitiveCount",
+      "workerQueueDepth",
+      "workerInFlight",
+      "staleWorkerPublishCount",
+    ],
+  }),
+  Object.freeze({
+    id: PHASE6_SCENARIO_IDS.activeFinalize,
+    fixture: "freehand64x512",
+    action: "phase6-active-finalize",
+    expectedEntityDelta: -63,
+    expectedTypeDeltas: Object.freeze({ freehand: -63 }),
+    minimumFinalPointCount: 1,
+    requiredMetrics: [
+      "drawingMainThreadMs",
+      "frameIntervalMs",
+      "inputToNextPaintMs",
+      "mouseupSyncMs",
+      "workerFinalizeMs",
+      "exactRenderMs",
+    ],
+    targetMetrics: [
+      "drawingMainThreadMs",
+      "frameIntervalMs",
+      "inputToNextPaintMs",
+      "mouseupSyncMs",
+      "workerFinalizeMs",
+      "exactRenderMs",
+    ],
+    targetCounters: [
+      "surfacePrimitiveCount",
+      "workerQueueDepth",
+      "workerInFlight",
+      "staleWorkerPublishCount",
+    ],
+  }),
+  Object.freeze({
+    id: PHASE6_SCENARIO_IDS.workerBackpressure,
+    fixture: "freehand64x512",
+    action: "phase6-worker-backpressure",
+    requiredMetrics: ["sceneProjectPaintMs", "frameIntervalMs", "exactRenderMs"],
+    // Fault injection deliberately delays exact completion. Keep the sample
+    // mandatory to prove convergence, but do not apply the normal 120 ms SLO.
+    targetMetrics: ["sceneProjectPaintMs", "frameIntervalMs"],
+    targetCounters: [
+      "surfacePrimitiveCount",
+      "workerQueueDepth",
+      "workerInFlight",
+      "staleWorkerPublishCount",
+    ],
+  }),
+  Object.freeze({
+    id: PHASE6_SCENARIO_IDS.mainThreadFallback,
+    fixture: "freehand64x512",
+    action: "phase6-main-thread-fallback",
+    requiredMetrics: ["sceneProjectPaintMs", "frameIntervalMs", "exactRenderMs"],
+    targetMetrics: ["sceneProjectPaintMs", "frameIntervalMs", "exactRenderMs"],
+    targetCounters: [
+      "surfacePrimitiveCount",
+      "workerQueueDepth",
+      "workerInFlight",
+      "staleWorkerPublishCount",
+    ],
+  }),
 ]);
 
 function parseNumber(value, label, { min = 0, integer = false } = {}) {
@@ -300,8 +407,8 @@ function parseNumber(value, label, { min = 0, integer = false } = {}) {
 function parsePhase(value) {
   const normalized = String(value || "").trim().toLowerCase();
   const phase = /^\d+$/.test(normalized) ? `phase${normalized}` : normalized;
-  if (!["phase0", "phase1", "phase3", "phase4", "phase5"].includes(phase)) {
-    throw new Error("--phase must be phase0, phase1, phase3, phase4, or phase5");
+  if (!["phase0", "phase1", "phase3", "phase4", "phase5", "phase6"].includes(phase)) {
+    throw new Error("--phase must be phase0, phase1, phase3, phase4, phase5, or phase6");
   }
   return phase;
 }
@@ -309,6 +416,7 @@ function parsePhase(value) {
 function parseArgs(argv) {
   let scenariosExplicit = false;
   let dprExplicit = false;
+  let barsExplicit = false;
   let engineModeExplicit = ["legacy", "shadow", "scene-canary", "scene"].includes(
     process.env.VITE_DRAWING_ENGINE_MODE,
   );
@@ -341,12 +449,14 @@ function parseArgs(argv) {
     interactionSurfaceMode: interactionSurfaceModeExplicit
       ? process.env.VITE_DRAWING_INTERACTION_OVERLAY
       : null,
+    rasterBackend: null,
     enforceTargets: false,
     // Preserve the historical phase0/1/3 default set. Phase 4 and Phase 5
     // replace it below with their own formal matrices.
     scenarios: DEFAULT_SCENARIOS
       .map((scenario) => scenario.id)
-      .filter((id) => !PHASE5_REQUIRED_SCENARIO_IDS.includes(id)),
+      .filter((id) => !PHASE5_REQUIRED_SCENARIO_IDS.includes(id)
+        && !PHASE6_REQUIRED_SCENARIO_IDS.includes(id)),
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -355,7 +465,10 @@ function parseArgs(argv) {
     else if (arg === "--out") args.out = String(argv[++index] || "");
     else if (arg === "--compare-before") args.compareBefore = String(argv[++index] || "");
     else if (arg === "--chrome") args.chromePath = String(argv[++index] || "");
-    else if (arg === "--bars") args.bars = parseNumber(argv[++index], "--bars", { min: 2, integer: true });
+    else if (arg === "--bars") {
+      args.bars = parseNumber(argv[++index], "--bars", { min: 2, integer: true });
+      barsExplicit = true;
+    }
     else if (arg === "--dpr") {
       args.dpr = parseNumber(argv[++index], "--dpr", { min: 0.5 });
       dprExplicit = true;
@@ -400,6 +513,12 @@ function parseArgs(argv) {
       }
       args.interactionSurfaceMode = mode;
       interactionSurfaceModeExplicit = true;
+    } else if (arg === "--raster-backend") {
+      const backend = String(argv[++index] || "");
+      if (!["worker", "main-thread"].includes(backend)) {
+        throw new Error("--raster-backend must be worker or main-thread");
+      }
+      args.rasterBackend = backend;
     } else if (arg === "--headless") args.headless = true;
     else if (arg === "--smoke") args.smoke = true;
     else if (arg === "--enforce-targets") args.enforceTargets = true;
@@ -412,12 +531,21 @@ function parseArgs(argv) {
   if (!scenariosExplicit && args.phase === "phase5") {
     args.scenarios = [...PHASE5_REQUIRED_SCENARIO_IDS];
   }
+  if (!scenariosExplicit && args.phase === "phase6") {
+    args.scenarios = [...PHASE6_REQUIRED_SCENARIO_IDS];
+  }
   if (args.phase === "phase5" && !dprExplicit) args.dpr = 1.5;
   if (args.phase === "phase5" && !engineModeExplicit) {
     args.engineMode = "scene-canary";
   }
   if (args.phase === "phase5" && !interactionSurfaceModeExplicit) {
     args.interactionSurfaceMode = "overlay";
+  }
+  if (args.phase === "phase6") {
+    if (!barsExplicit) args.bars = PHASE6_BAR_COUNT;
+    if (!engineModeExplicit) args.engineMode = "scene-canary";
+    if (!interactionSurfaceModeExplicit) args.interactionSurfaceMode = "overlay";
+    if (args.rasterBackend === null) args.rasterBackend = "worker";
   }
 
   const knownScenarioIds = new Set(DEFAULT_SCENARIOS.map((scenario) => scenario.id));
@@ -633,7 +761,11 @@ function metricDelta(before, after, name) {
   return Number.isFinite(left) && Number.isFinite(right) ? Math.max(0, right - left) : null;
 }
 
-function managedBuildEnvironment(engineMode, interactionSurfaceMode = null) {
+function managedBuildEnvironment(
+  engineMode,
+  interactionSurfaceMode = null,
+  rasterBackend = null,
+) {
   const environment = {
     ...MANAGED_BUILD_ENVIRONMENT,
     VITE_DRAWING_ENGINE_MODE: engineMode,
@@ -641,23 +773,30 @@ function managedBuildEnvironment(engineMode, interactionSurfaceMode = null) {
   if (interactionSurfaceMode === "overlay" || interactionSurfaceMode === "legacy") {
     environment.VITE_DRAWING_INTERACTION_OVERLAY = interactionSurfaceMode;
   }
+  if (rasterBackend === "worker" || rasterBackend === "main-thread") {
+    environment.VITE_DRAWING_RASTER_BACKEND = rasterBackend;
+  }
   return environment;
 }
 
-function managedBuildProcessEnvironment(engineMode, interactionSurfaceMode = null) {
+function managedBuildProcessEnvironment(
+  engineMode,
+  interactionSurfaceMode = null,
+  rasterBackend = null,
+) {
   const inherited = Object.fromEntries(Object.entries(process.env)
     .filter(([name]) => !name.startsWith("VITE_")));
   return {
     ...inherited,
-    ...managedBuildEnvironment(engineMode, interactionSurfaceMode),
+    ...managedBuildEnvironment(engineMode, interactionSurfaceMode, rasterBackend),
   };
 }
 
-function ensureProductionBuild(engineMode, interactionSurfaceMode = null) {
+function ensureProductionBuild(engineMode, interactionSurfaceMode = null, rasterBackend = null) {
   const viteBin = path.join(FRONTEND_ROOT, "node_modules", "vite", "bin", "vite.js");
   execFileSync(process.execPath, [viteBin, "build"], {
     cwd: FRONTEND_ROOT,
-    env: managedBuildProcessEnvironment(engineMode, interactionSurfaceMode),
+    env: managedBuildProcessEnvironment(engineMode, interactionSurfaceMode, rasterBackend),
     stdio: "inherit",
     windowsHide: true,
   });
@@ -726,9 +865,20 @@ function browserBenchmarkBootstrap(payload) {
   window.__CANDLESCOPE_DRAWING_PERF_CONFIG__ = Object.freeze({
     benchmarkRawCapture: true,
     rawCaptureCapacity: 20_000,
+    phase6ForceMainThreadFallback: payload.phase6ForceMainThreadFallback === true,
+    phase6WorkerDelayMs: Number.isFinite(payload.phase6WorkerDelayMs)
+      ? Math.max(0, payload.phase6WorkerDelayMs)
+      : 0,
   });
   try {
     localStorage.setItem(payload.storageKey, payload.raw);
+    localStorage.setItem("candlescope-settings", JSON.stringify(payload.chartSettings));
+    localStorage.setItem("candlescope-user-prefs", JSON.stringify({
+      lastExchange: "binance",
+      lastMarketType: "spot",
+      lastSymbol: "BTCUSDT",
+      lastInterval: "1h",
+    }));
     // Viewport actions are intentionally persisted by the production app.
     // A benchmark run must not inherit the previous scenario's pan/zoom state.
     localStorage.removeItem("candlescope-visible-ranges");
@@ -869,9 +1019,21 @@ function browserBenchmarkBootstrap(payload) {
   });
 }
 
-async function installScenarioBootstrap(cdp, fixture) {
-  const source = "(" + browserBenchmarkBootstrap.toString() + ")("
-    + JSON.stringify({ storageKey: fixture.storageKey, raw: fixture.raw }) + ");";
+async function installScenarioBootstrap(cdp, fixture, scenario) {
+  const source = '('
+    + browserBenchmarkBootstrap.toString()
+    + ')('
+    + JSON.stringify({
+      storageKey: fixture.storageKey,
+      raw: fixture.raw,
+      phase6ForceMainThreadFallback:
+        scenario?.id === PHASE6_SCENARIO_IDS.mainThreadFallback,
+      phase6WorkerDelayMs:
+        scenario?.id === PHASE6_SCENARIO_IDS.workerBackpressure ? 96 : 0,
+      chartSettings: scenario?.id === PHASE6_SCENARIO_IDS.freehandLineageZoomPan
+        ? phase6LineageSettings()
+        : { chartType: "candlestick" },
+    }) + ");";
   const response = await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source });
   return response.result?.identifier || null;
 }
@@ -1045,8 +1207,60 @@ async function clickDrawingAction(cdp, action) {
     + "})()"));
 }
 
-async function waitNextAnimationFrame(cdp) {
-  await evaluate(cdp, "new Promise((resolve)=>requestAnimationFrame(()=>resolve(true)))");
+async function waitNextAnimationFrame(cdp, timeoutMs = 2_000) {
+  const safeTimeoutMs = Math.max(250, Number(timeoutMs) || 2_000);
+  const arrived = await Promise.race([
+    evaluate(cdp, "new Promise((resolve)=>requestAnimationFrame(()=>resolve(true)))"),
+    wait(safeTimeoutMs).then(() => false),
+  ]);
+  if (arrived !== true) {
+    throw new Error("Animation frame did not arrive within " + safeTimeoutMs
+      + "ms; the headed benchmark window may be hidden or minimized");
+  }
+}
+
+async function ensureHeadedBenchmarkWindow(cdp, windowId, headless) {
+  if (headless) {
+    return {
+      headed: false,
+      windowState: "headless",
+      visibilityState: null,
+      hidden: null,
+      devicePixelRatio: null,
+    };
+  }
+  if (!Number.isSafeInteger(windowId)) {
+    throw new Error("Headed benchmark browser window is unavailable");
+  }
+
+  const before = await cdp.send("Browser.getWindowBounds", { windowId });
+  if (before.result?.bounds?.windowState !== "normal") {
+    await cdp.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { windowState: "normal" },
+    });
+  }
+  await cdp.send("Page.bringToFront");
+  await wait(50);
+  const visibility = await evaluateJson(cdp, () => ({
+    visibilityState: document.visibilityState,
+    hidden: document.hidden,
+    devicePixelRatio: window.devicePixelRatio,
+  }));
+  const after = await cdp.send("Browser.getWindowBounds", { windowId });
+  const evidence = {
+    headed: true,
+    windowState: after.result?.bounds?.windowState ?? null,
+    visibilityState: visibility?.visibilityState ?? null,
+    hidden: visibility?.hidden ?? null,
+    devicePixelRatio: Number(visibility?.devicePixelRatio),
+  };
+  if (evidence.windowState !== "normal"
+    || evidence.visibilityState !== "visible"
+    || evidence.hidden !== false) {
+    throw new Error("Headed benchmark window is not visible: " + JSON.stringify(evidence));
+  }
+  return evidence;
 }
 
 async function waitForShadowParityCoverage(cdp, timeoutMs) {
@@ -1130,6 +1344,48 @@ async function runWheel(cdp, rect, count) {
       deltaY: index % 2 === 0 ? -92 : 92,
     });
     await wait(24);
+  }
+  return count;
+}
+
+async function runWheelBurst(cdp, rect, count) {
+  const x = Math.round(rect.x + rect.width * 0.56);
+  const y = Math.round(rect.y + rect.height * 0.52);
+  const batchSize = 32;
+  for (let offset = 0; offset < count; offset += batchSize) {
+    const pending = [];
+    const end = Math.min(count, offset + batchSize);
+    for (let index = offset; index < end; index += 1) {
+      pending.push(cdp.send("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x,
+        y,
+        deltaX: 0,
+        deltaY: index % 2 === 0 ? -92 : 92,
+      }));
+    }
+    await Promise.all(pending);
+    await waitNextAnimationFrame(cdp);
+  }
+  return count;
+}
+
+async function runWorkerBackpressureWheelCadence(cdp, rect, count) {
+  const x = Math.round(rect.x + rect.width * 0.56);
+  const y = Math.round(rect.y + rect.height * 0.52);
+  // One trusted wheel input per display frame forces distinct viewport scene
+  // builds faster than the benchmark's delayed worker can finish. This is what
+  // exercises the real 1-in-flight + 1-pending latest-wins queue; large CDP
+  // Promise batches serialize too slowly and collapse into a few rebuilds.
+  for (let index = 0; index < count; index += 1) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      x,
+      y,
+      deltaX: 0,
+      deltaY: index % 2 === 0 ? -92 : 92,
+    });
+    await waitNextAnimationFrame(cdp);
   }
   return count;
 }
@@ -1474,7 +1730,8 @@ async function runPhase5Freehand(cdp, rect, count, tool, storageKey, timeoutMs) 
     label: tool + "-heavy-live-ink",
   });
   if (heavy.liveInkVisibleAtEnd !== true || heavy.liveInkVisibleAfterCancel !== false) {
-    throw new Error("Phase 5 heavy live ink did not cancel cleanly for " + tool);
+    throw new Error("Phase 5 heavy live ink did not cancel cleanly for " + tool
+      + ": " + JSON.stringify(heavy));
   }
   const heavyFixtureSummaryAfterCancel = await readSavedDrawingSummary(cdp, storageKey);
   const heavyFixturePreservedAfterCancel = Boolean(heavyFixtureSummaryAfterCancel
@@ -1903,7 +2160,7 @@ async function runPhase5EraserCancel(cdp, rect, storageKey, timeoutMs, hoverCoun
   };
 }
 
-async function runScenarioAction(cdp, scenario, fixture, args, rect) {
+async function runScenarioAction(cdp, scenario, fixture, args, rect, runtimeSummary = null) {
   const result = {
     action: scenario.action,
     wheelEventsDispatched: 0,
@@ -1918,6 +2175,8 @@ async function runScenarioAction(cdp, scenario, fixture, args, rect) {
     eraserHoverEventsDispatched: 0,
     pointerCancelEventsDispatched: 0,
     windowBlurEventsDispatched: 0,
+    hitQueriesRequested: 0,
+    workerBackpressureWheelEventsDispatched: 0,
   };
   if (scenario.action === "viewport" || scenario.action === "mixed") {
     result.wheelEventsDispatched = await runWheel(cdp, rect, args.wheelEvents);
@@ -1984,7 +2243,73 @@ async function runScenarioAction(cdp, scenario, fixture, args, rect) {
       args.hoverEvents,
     ));
   }
+  if (scenario.action === "phase6-viewport"
+    || scenario.action === "phase6-main-thread-fallback") {
+    result.wheelEventsDispatched = await runWheel(cdp, rect, args.wheelEvents);
+    result.panEventsDispatched = await runPan(cdp, rect);
+  }
+  if (scenario.action === "phase6-hit-index") {
+    const beforeViewport = await callPhase6Probe(cdp, "snapshot");
+    result.wheelEventsDispatched = await runWheelBurst(cdp, rect, 8);
+    const mainPanePlotRect = runtimeSummary?.mainPanePlotRect ?? null;
+    const paneLocalPlotRect = normalizePhase6PanePlotRect(mainPanePlotRect);
+    const points = buildPhase6HitQueryPoints(mainPanePlotRect, PHASE6_HIT_QUERY_COUNT);
+    result.hitQueryCoordinateSpace = "pane-local";
+    result.hitQueryPlotRect = paneLocalPlotRect;
+    result.hitQueryPointsPrepared = points.length;
+    const paint = await callPhase6Probe(
+      cdp,
+      "waitForCurrentPaint",
+      beforeViewport?.runtime?.lastRequestedStamp ?? null,
+      Math.min(args.timeoutMs, 10_000),
+    );
+    result.hitQueryPaintWaitPassed = paint?.passed === true;
+    result.hitQueryPreviousStamp = paint?.previousStamp ?? null;
+    result.hitQueryRequestedStamp = paint?.requestedStamp ?? null;
+    result.hitQueryPaintedStamp = paint?.paintedStamp ?? null;
+    if (paint?.passed !== true) {
+      throw new Error("Phase 6 hit index did not publish the new viewport plan before query: "
+        + JSON.stringify(paint));
+    }
+  }
+  if (scenario.action === "phase6-active-finalize") {
+    Object.assign(result, await runPhase5Freehand(
+      cdp,
+      rect,
+      args.pointerSamples,
+      "pen",
+      fixture.storageKey,
+      Math.min(args.timeoutMs, 5_000),
+    ));
+  }
+  if (scenario.action === "phase6-worker-backpressure") {
+    result.workerBackpressureWheelEventsDispatched = await runWorkerBackpressureWheelCadence(
+      cdp,
+      rect,
+      96,
+    );
+  }
   return result;
+}
+
+async function completePhase6HitOracle(cdp, action, runtimeSummary = null) {
+  const mainPanePlotRect = runtimeSummary?.mainPanePlotRect ?? null;
+  const points = buildPhase6HitQueryPoints(mainPanePlotRect, PHASE6_HIT_QUERY_COUNT);
+  const oracle = await callPhase6Probe(cdp, "runHitOracle", points);
+  return {
+    ...action,
+    hitQueriesRequested: points.length,
+    hitOracleSupported: oracle?.supported === true,
+    hitOracleQueryCount: oracle?.queryCount ?? null,
+    hitOracleMismatchCount: oracle?.mismatchCount ?? null,
+    hitOraclePositiveHitCount: oracle?.positiveHitCount ?? null,
+    hitOracleCandidateCoverageCount: oracle?.candidateCoverageCount ?? null,
+    hitOracleMaxCandidates: oracle?.maxCandidates ?? null,
+    hitQueryQueriedStamp: oracle?.queriedStamp ?? null,
+    hitQueryOraclePaintedStamp: oracle?.paintedStamp ?? null,
+    hitQueryCurrentPainted: oracle?.currentPainted === true,
+    hitOracleOutsideMeasurementWindow: true,
+  };
 }
 
 async function startPhase4FrameProbe(cdp) {
@@ -2092,6 +2417,25 @@ async function callPhase5Probe(cdp, method, ...args) {
 async function stopPhase5Probe(cdp) {
   const result = await callPhase5Probe(cdp, "stop");
   await evaluate(cdp, "delete window.__CANDLESCOPE_PHASE5_PROBE__; true");
+  return result;
+}
+
+async function startPhase6Probe(cdp) {
+  return evaluateJson(cdp, phase6BrowserProbeBootstrap);
+}
+
+async function callPhase6Probe(cdp, method, ...args) {
+  const expression = "(async()=>{const controller=window.__CANDLESCOPE_PHASE6_PROBE__;"
+    + "if(!controller||typeof controller[" + JSON.stringify(method) + "]!=='function')return null;"
+    + "return JSON.stringify(await controller[" + JSON.stringify(method) + "](..."
+    + JSON.stringify(args) + "));})()";
+  const value = await evaluate(cdp, expression);
+  return typeof value === "string" ? JSON.parse(value) : value ?? null;
+}
+
+async function stopPhase6Probe(cdp) {
+  const result = await callPhase6Probe(cdp, "stop");
+  await evaluate(cdp, "delete window.__CANDLESCOPE_PHASE6_PROBE__; true");
   return result;
 }
 
@@ -2349,13 +2693,79 @@ async function readDrawingSnapshots(cdp) {
   });
 }
 
-async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, diagnostics) {
-  let bootstrapIdentifier = await installScenarioBootstrap(cdp, fixture);
+async function waitForPhase6SceneReady(cdp, {
+  expectedRawPoints,
+  requireWorker,
+  timeoutMs,
+}) {
+  const started = Date.now();
+  let latest = null;
+  let stableKey = null;
+  let stableSince = null;
+  while (Date.now() - started < timeoutMs) {
+    latest = await evaluateJson(cdp, () => {
+      const runtime = window.__CANDLESCOPE_DRAWING_PERF__?.readPhase6Runtime?.() || null;
+      if (!runtime) return null;
+      const requested = runtime.lastRequestedStamp;
+      const published = runtime.lastPublishedStamp;
+      return {
+        ...runtime,
+        stampCurrent: Boolean(requested && published
+          && requested.scopeKey === published.scopeKey
+          && requested.documentRevision === published.documentRevision
+          && requested.dataRevision === published.dataRevision
+          && requested.projectionRevision === published.projectionRevision
+          && requested.viewportRevision === published.viewportRevision
+          && requested.sizeRevision === published.sizeRevision
+          && requested.dprRevision === published.dprRevision
+          && requested.themeRevision === published.themeRevision
+          && requested.surfaceRevision === published.surfaceRevision),
+      };
+    });
+    const ready = phase6SceneReadiness(latest, { expectedRawPoints, requireWorker });
+    if (ready) {
+      const nextStableKey = JSON.stringify({
+        backend: latest.backend,
+        renderedPoints: latest.renderedPoints,
+        requested: latest.lastRequestedStamp,
+        published: latest.lastPublishedStamp,
+        workerJobs: latest.workerJobDelta,
+        workerResults: latest.workerResultDelta,
+      });
+      if (nextStableKey !== stableKey) {
+        stableKey = nextStableKey;
+        stableSince = Date.now();
+      } else if (stableSince !== null && Date.now() - stableSince >= 250) {
+        await waitNextAnimationFrame(cdp);
+        return latest;
+      }
+    } else {
+      stableKey = null;
+      stableSince = null;
+    }
+    await wait(25);
+  }
+  throw new Error("Phase 6 restored scene did not reach a painted current stamp: "
+    + JSON.stringify(latest));
+}
+
+async function runOneScenario(
+  cdp,
+  scenario,
+  fixture,
+  args,
+  iteration,
+  warmup,
+  diagnostics,
+  browserWindowId,
+) {
+  let bootstrapIdentifier = await installScenarioBootstrap(cdp, fixture, scenario);
   const runStartedAt = Date.now();
   const consoleStart = diagnostics.consoleErrors.length;
   const exceptionStart = diagnostics.runtimeExceptions.length;
   const networkStart = diagnostics.networkFailures.length;
   try {
+    await ensureHeadedBenchmarkWindow(cdp, browserWindowId, args.headless);
     await cdp.send("Page.navigate", {
       url: args.url + (args.url.includes("?") ? "&" : "?")
         + "drawingPerf=" + encodeURIComponent(scenario.id + "-" + iteration),
@@ -2365,7 +2775,8 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       fixture.metadata.drawingCount,
       args.timeoutMs,
     );
-    if (args.phase === "phase5" && ready.drawingReady !== true) {
+    if ((args.phase === "phase5" || args.phase === "phase6")
+      && ready.drawingReady !== true) {
       // The production app intentionally lazy-mounts DrawingEngineHost when
       // an empty document has no active drawing tool. Activate a real tool
       // outside the measured window, then require the full host and overlay
@@ -2410,6 +2821,25 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       // range and publishes a coherent last-paint snapshot.
       await resetTimeScaleWarmup(cdp, rect);
     }
+    if (scenario.action === "phase6-active-finalize") {
+      await activatePhase5FreehandTool(cdp, "pen");
+      await waitNextAnimationFrame(cdp);
+      await waitNextAnimationFrame(cdp);
+    }
+    if (args.phase === "phase6") {
+      const hasFreehandFixture = fixture.metadata.freehandPointCount > 0;
+      await waitForPhase6SceneReady(cdp, {
+        expectedRawPoints: fixture.metadata.freehandPointCount,
+        requireWorker: hasFreehandFixture
+          && scenario.id !== PHASE6_SCENARIO_IDS.mainThreadFallback,
+        timeoutMs: args.timeoutMs,
+      });
+    }
+    const browserWindow = await ensureHeadedBenchmarkWindow(
+      cdp,
+      browserWindowId,
+      args.headless,
+    );
     await wait(100);
     const shadowParityRequested = Boolean(await evaluate(cdp, "(() => {"
       + "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.();"
@@ -2437,34 +2867,100 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
     await evaluate(cdp, "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.(); true");
     let phase4Probe = null;
     let phase5Probe = null;
+    let phase6Probe = null;
+    let phase6CurrentPaintBaseline = null;
     if (args.phase === "phase4") {
       const startedProbe = await startPhase4FrameProbe(cdp);
       if (startedProbe?.started !== true) {
         throw new Error("Phase 4 frame probe could not start: " + JSON.stringify(startedProbe));
       }
     }
-    if (args.phase === "phase5") {
+    const phase5ProbeRequired = args.phase === "phase5"
+      || scenario.action === "phase6-active-finalize";
+    if (phase5ProbeRequired) {
       const startedProbe = await startPhase5Probe(cdp);
       if (startedProbe?.started !== true) {
         throw new Error("Phase 5 interaction probe could not start: " + JSON.stringify(startedProbe));
       }
     }
+    if (args.phase === "phase6") {
+      const startedProbe = await startPhase6Probe(cdp);
+      if (startedProbe?.started !== true) {
+        throw new Error("Phase 6 runtime probe could not start: " + JSON.stringify(startedProbe));
+      }
+      if (phase6ActionRequiresCurrentPaint(scenario.action)) {
+        const baseline = await callPhase6Probe(cdp, "snapshot");
+        phase6CurrentPaintBaseline = baseline?.runtime?.lastRequestedStamp ?? null;
+        if (!phase6CurrentPaintBaseline) {
+          throw new Error("Phase 6 " + scenario.action
+            + " current-paint baseline stamp is missing: " + JSON.stringify(baseline));
+        }
+      }
+    }
     const beforeMetrics = metricMap(await cdp.send("Performance.getMetrics"));
     const beforeHeap = await cdp.send("Runtime.getHeapUsage");
     const actionStartedAt = Number(await evaluate(cdp, "performance.now()"));
-    const action = await runScenarioAction(cdp, scenario, fixture, args, rect);
+    let action = await runScenarioAction(
+      cdp,
+      scenario,
+      fixture,
+      args,
+      rect,
+      ready.runtimeSummary,
+    );
     const actionEndedAt = Number(await evaluate(cdp, "performance.now()"));
     await wait(args.settleMs);
+    if (args.phase === "phase6" && phase6ActionRequiresCurrentPaint(scenario.action)) {
+      const paintWait = await waitForPhase6ActionCurrentPaint({
+        action: scenario.action,
+        previousStamp: phase6CurrentPaintBaseline,
+        timeoutMs: args.timeoutMs,
+        waitForCurrentPaint: (previousStamp, timeoutMs) => callPhase6Probe(
+          cdp,
+          "waitForCurrentPaint",
+          previousStamp,
+          timeoutMs,
+        ),
+      });
+      const paint = paintWait.result;
+      action = {
+        ...action,
+        currentPaintWaitPassed: paint?.passed === true,
+        currentPaintPreviousStamp: paint?.previousStamp ?? null,
+        currentPaintRequestedStamp: paint?.requestedStamp ?? null,
+        currentPaintedStamp: paint?.paintedStamp ?? null,
+      };
+    }
     if (args.phase === "phase4") {
       phase4Probe = await stopPhase4FrameProbe(cdp);
       if (phase4Probe?.started !== true) {
         throw new Error("Phase 4 frame probe could not stop: " + JSON.stringify(phase4Probe));
       }
     }
-    if (args.phase === "phase5") {
+    if (phase5ProbeRequired) {
       phase5Probe = await stopPhase5Probe(cdp);
       if (phase5Probe?.started !== true) {
         throw new Error("Phase 5 interaction probe could not stop: " + JSON.stringify(phase5Probe));
+      }
+    }
+    let measurementEndedAt = null;
+    let measurementBench = null;
+    if (scenario.action === "phase6-hit-index") {
+      // The provider intentionally computes both indexed and brute-force
+      // answers. Close the production action/Long-Task window first, retain
+      // its browser timing snapshot, then collect parity and the indexed-only
+      // hitQueryMs samples without charging brute-force oracle CPU to the gate.
+      measurementEndedAt = Number(await evaluate(cdp, "performance.now()"));
+      measurementBench = await evaluateJson(
+        cdp,
+        () => window.__CANDLESCOPE_DRAWING_BENCH__?.report?.() || null,
+      );
+      action = await completePhase6HitOracle(cdp, action, ready.runtimeSummary);
+    }
+    if (args.phase === "phase6") {
+      phase6Probe = await stopPhase6Probe(cdp);
+      if (phase6Probe?.started !== true) {
+        throw new Error("Phase 6 runtime probe could not stop: " + JSON.stringify(phase6Probe));
       }
     }
     if (args.engineMode === "shadow" && fixture.metadata.drawingCount > 0) {
@@ -2477,12 +2973,12 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
           + JSON.stringify(finalParity.evidence || null));
       }
     }
-    const measurementEndedAt = Number(await evaluate(cdp, "performance.now()"));
+    measurementEndedAt ??= Number(await evaluate(cdp, "performance.now()"));
     const snapshots = await readDrawingSnapshots(cdp);
     const afterMetrics = metricMap(await cdp.send("Performance.getMetrics"));
     const afterHeap = await cdp.send("Runtime.getHeapUsage");
     const drawing = snapshots?.snapshot;
-    const bench = snapshots?.bench;
+    const bench = measurementBench ?? snapshots?.bench;
     const rawCapture = snapshots?.rawCapture;
     const runtimeSummary = snapshots?.runtimeSummary;
     const captures = {
@@ -2495,6 +2991,8 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       mouseupCommitMs: durationCapture(rawCapture, drawing, "mouseupCommitMs"),
       persistenceMs: durationCapture(rawCapture, drawing, "persistenceMs"),
       activeOverlayCpuMs: durationCapture(rawCapture, drawing, "activeOverlayCpuMs"),
+      workerFinalizeMs: durationCapture(rawCapture, drawing, "workerFinalizeMs"),
+      exactRenderMs: durationCapture(rawCapture, drawing, "exactRenderMs"),
       frameIntervalMs: browserCapture(bench, "rafIntervalsMs"),
       inputToNextPaintMs: browserCapture(bench, "inputToNextPaintMs"),
       eventTimingMs: browserCapture(bench, "eventTimingMs"),
@@ -2527,6 +3025,8 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
         ? runtimeSummary.attachedPrimitiveCount
         : null,
       workerQueueDepth: maxGauge(drawing, "workerQueue"),
+      workerInFlight: maxGauge(drawing, "workerInFlight"),
+      staleWorkerPublishCount: maxCounter(drawing, "staleWorkerPublishCount"),
     };
     const actionEvidence = {
       ...action,
@@ -2595,9 +3095,9 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
         mouseupFinalizeMs: captures.mouseupFinalizeMs.samples,
         mouseupCommandMs: captures.mouseupCommandMs.samples,
         mouseupCommitMs: captures.mouseupCommitMs.samples,
-        workerFinalizeMs: [],
+        workerFinalizeMs: captures.workerFinalizeMs.samples,
         persistenceMs: captures.persistenceMs.samples,
-        exactRenderMs: [],
+        exactRenderMs: captures.exactRenderMs.samples,
         activeOverlayCpuMs: captures.activeOverlayCpuMs.samples,
       },
       sampleCompleteness: Object.fromEntries(Object.entries(captures)
@@ -2617,7 +3117,9 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       },
       worker: {
         queueDepthMax: counters.workerQueueDepth,
+        inFlightMax: counters.workerInFlight,
         staleResultPublishCount: maxCounter(drawing, "staleWorkerResultCount"),
+        staleWorkerPublishCount: counters.staleWorkerPublishCount,
       },
       fixture: fixture.metadata,
       ready,
@@ -2629,6 +3131,7 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
       action: actionEvidence,
       phase4Probe,
       phase5Probe,
+      phase6Probe,
       measurementWindow: {
         actionStartedAt,
         actionEndedAt,
@@ -2643,6 +3146,7 @@ async function runOneScenario(cdp, scenario, fixture, args, iteration, warmup, d
         viewport: bench?.viewport ?? null,
         captureStats: bench?.captureStats ?? null,
       },
+      browserWindow,
       drawingSnapshot: drawing,
       drawingRawCapture: rawCapture,
       runtimeSummary,
@@ -2745,16 +3249,6 @@ function machineContext() {
     logicalCores: os.cpus()?.length || null,
     memoryBytes: os.totalmem(),
   };
-}
-
-function fixtureTimeOffsetDenominator(fixtureName) {
-  if (fixtureName === "singleFreehand4096") return 4_095;
-  if (fixtureName === "freehand64x512") return 511;
-  if (fixtureName === "entities200") return 399;
-  if (fixtureName === "entities512") return 1_023;
-  if (fixtureName === "phase4Migrated64") return 127;
-  if (fixtureName === "phase4Mixed64") return 63;
-  return 1;
 }
 
 function assertFixtureOverlapsMockPriceRange(fixture, mockMeta) {
@@ -3458,7 +3952,11 @@ async function main() {
   const selectedScenarios = DEFAULT_SCENARIOS.filter((scenario) => args.scenarios.includes(scenario.id));
   const managed = !args.url;
   const buildEnvironment = managed
-    ? managedBuildEnvironment(args.engineMode, args.interactionSurfaceMode)
+    ? managedBuildEnvironment(
+      args.engineMode,
+      args.interactionSurfaceMode,
+      args.rasterBackend,
+    )
     : null;
   const configuredProjectorMode = buildEnvironment?.VITE_DRAWING_COORDINATE_PROJECTOR
     ?? process.env.VITE_DRAWING_COORDINATE_PROJECTOR;
@@ -3467,7 +3965,11 @@ async function main() {
     || configuredProjectorMode === "batch"
     ? configuredProjectorMode
     : "batch";
-  if (managed) ensureProductionBuild(args.engineMode, args.interactionSurfaceMode);
+  if (managed) ensureProductionBuild(
+    args.engineMode,
+    args.interactionSurfaceMode,
+    args.rasterBackend,
+  );
   const servers = managed ? await startManagedServers(args) : null;
   if (servers) args.url = servers.url;
   if (!args.url.endsWith("/")) args.url += "/";
@@ -3483,6 +3985,12 @@ async function main() {
     "--no-default-browser-check",
     "--disable-extensions",
     "--enable-precise-memory-info",
+    // Codex/CI can keep a headed Chrome window occluded even after
+    // Page.bringToFront. Preserve real headed rendering and DPR behavior while
+    // preventing Chrome from reducing rAF/timer cadence for that window.
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
     "--window-size=" + DEFAULT_VIEWPORT.width + "," + DEFAULT_VIEWPORT.height,
   ];
   if (args.headless) chromeArgs.push("--headless=new", "--disable-gpu");
@@ -3538,18 +4046,44 @@ async function main() {
       screenHeight: DEFAULT_VIEWPORT.height,
     });
     await cdp.send("Page.bringToFront");
+    const browserWindowId = args.headless
+      ? null
+      : (await cdp.send("Browser.getWindowForTarget", { targetId: page.id })).result?.windowId;
+    await ensureHeadedBenchmarkWindow(cdp, browserWindowId, args.headless);
     const browserVersion = await cdp.send("Browser.getVersion");
     const allScenarioRuns = [];
     const totalRuns = args.warmupRuns + args.runs;
     const fixtureStartTime = args.mockEndTime - (args.bars - 1) * args.intervalSeconds;
+    const mockBars = buildDrawingPerformanceMockBars({
+      barCount: args.bars,
+      intervalSeconds: args.intervalSeconds,
+      endTime: args.mockEndTime,
+    });
+    const phase6PriceProfile = args.phase === "phase6"
+      ? Object.freeze({ start: mockBars[0].close, end: mockBars.at(-1).close })
+      : null;
+    const mockCloseByTime = new Map(mockBars.map((bar) => [bar.time, bar.close]));
+    const lineageContract = selectedScenarios.some(
+      (scenario) => scenario.id === PHASE6_SCENARIO_IDS.freehandLineageZoomPan,
+    ) ? buildPhase6LineageFixtureContract(mockBars) : null;
 
     for (const scenario of selectedScenarios) {
+      const scenarioPriceProfile = scenario.id === PHASE6_SCENARIO_IDS.freehandLineageZoomPan
+        ? Object.freeze({
+            start: mockCloseByTime.get(lineageContract.exact.left.time),
+            end: mockCloseByTime.get(lineageContract.exact.right.time),
+          })
+        : phase6PriceProfile;
       const fixture = buildDrawingFixture(scenario.fixture, {
         scopeKey: "binance:spot:BTCUSDT__main",
         startTime: fixtureStartTime,
         intervalSeconds: (args.intervalSeconds * Math.max(1, args.bars - 1))
           / fixtureTimeOffsetDenominator(scenario.fixture),
         seed: args.seed,
+        ...(scenarioPriceProfile ? { priceProfile: scenarioPriceProfile } : {}),
+        ...(scenario.id === PHASE6_SCENARIO_IDS.freehandLineageZoomPan
+          ? { lineageContract }
+          : {}),
       });
       if (managed) assertFixtureOverlapsMockPriceRange(fixture, servers?.mockMeta);
       const runs = [];
@@ -3565,6 +4099,7 @@ async function main() {
           iteration + 1,
           warmup,
           diagnostics,
+          browserWindowId,
         );
         runs.push(run);
         console.log("  " + run.durationMs + "ms; rAF samples="
@@ -3600,9 +4135,19 @@ async function main() {
       scenarios: allScenarioRuns.map(({ scenario, fixture, runs }) => ({
         id: scenario.id,
         fixture: {
+          name: fixture.metadata.name,
           bars: args.bars,
           entities: fixture.metadata.drawingCount,
           points: fixture.metadata.pointCount,
+          spans: fixture.metadata.freehandSpanCount,
+          maxFreehandPointsPerDrawing: fixture.metadata.maxFreehandPointsPerDrawing,
+          maxFreehandSpansPerDrawing: fixture.metadata.maxFreehandSpansPerDrawing,
+          sourceLineage: fixture.metadata.freehandSpanCount > 0,
+          sourceProjection: fixture.metadata.sourceProjection ?? null,
+          sourceProjectionConfig: fixture.metadata.sourceProjectionConfig ?? null,
+          lineageExact: fixture.metadata.lineageExact ?? null,
+          lineageFallback: fixture.metadata.lineageFallback ?? null,
+          lineageDerivedRowCount: fixture.metadata.lineageDerivedRowCount ?? null,
           mode: args.engineMode,
           dpr: args.dpr,
         },
@@ -3633,6 +4178,7 @@ async function main() {
       ?.VITE_DRAWING_DOCUMENT_AUTHORITY ?? null;
     report.configuration.drawingEngineMode = args.engineMode;
     report.configuration.drawingInteractionSurfaceMode = args.interactionSurfaceMode;
+    report.configuration.drawingRasterBackend = args.rasterBackend;
     report.configuration.buildEnvironment = buildEnvironment;
     report.configuration.compareBefore = args.compareBefore || null;
     report.runMode = {
@@ -3643,6 +4189,7 @@ async function main() {
       phase3Eligible: !args.smoke,
       phase4Eligible: !args.smoke,
       phase5Eligible: !args.smoke,
+      phase6Eligible: !args.smoke,
     };
     applyRestoreValidity(report, args);
     report.executionAcceptance = {
@@ -3662,9 +4209,12 @@ async function main() {
     report.phase3Acceptance = buildPhase3Acceptance(report, args);
     report.phase4Acceptance = buildPhase4Acceptance(report, args);
     report.phase5Acceptance = buildPhase5Acceptance(report, args);
+    report.phase6Acceptance = buildPhase6Acceptance(report, args);
     report.smokeAcceptance = buildSmokeAcceptance(report, args);
-    const phaseAcceptance = args.phase === "phase5"
-      ? report.phase5Acceptance
+    const phaseAcceptance = args.phase === "phase6"
+      ? report.phase6Acceptance
+      : args.phase === "phase5"
+        ? report.phase5Acceptance
       : args.phase === "phase4"
         ? report.phase4Acceptance
         : args.phase === "phase3"
@@ -3689,6 +4239,7 @@ async function main() {
       phase3Eligible: !args.smoke,
       phase4Eligible: !args.smoke,
       phase5Eligible: !args.smoke,
+      phase6Eligible: !args.smoke,
       executionPassed: report.executionAcceptance.passed,
     };
 
@@ -3702,6 +4253,8 @@ async function main() {
       "drawing-engine-v2",
       (args.smoke
         ? "smoke-"
+        : args.phase === "phase6"
+          ? "phase6-" + args.engineMode + "-"
         : args.phase === "phase5"
           ? "phase5-" + args.engineMode + "-"
           : args.phase === "phase4"
@@ -3727,6 +4280,7 @@ async function main() {
       phase3Comparison: report.phase3Comparison,
       phase4Acceptance: report.phase4Acceptance,
       phase5Acceptance: report.phase5Acceptance,
+      phase6Acceptance: report.phase6Acceptance,
       smokeAcceptance: report.smokeAcceptance,
       invalidScenarios: report.acceptance.invalidScenarioIds,
       targetAssessment: Object.fromEntries(Object.entries(report.targetAssessment)

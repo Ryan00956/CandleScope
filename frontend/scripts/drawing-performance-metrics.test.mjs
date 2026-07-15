@@ -113,6 +113,39 @@ test("gate evaluation supports bounds and equality with explicit failure reasons
   ]);
 });
 
+test("worker concurrency and stale-publication gates fail closed", () => {
+  const report = buildDrawingPerformanceReport({
+    scenarios: [{
+      id: "phase6-worker",
+      runs: [
+        measuredRun(100, { warmup: true }),
+        ...Array.from({ length: 5 }, (_, index) => ({
+          ...measuredRun(index + 1),
+          counters: {
+            workerQueueDepth: 2,
+            workerInFlight: 1,
+            staleWorkerPublishCount: 0,
+          },
+        })),
+      ],
+      requiredMetrics: ["drawingMainThreadMs"],
+      gates: [],
+    }],
+  });
+  const scenario = report.scenarios[0];
+  assert.equal(scenario.counters.workerInFlight.max, 1);
+  assert.equal(scenario.counters.staleWorkerPublishCount.max, 0);
+  assert.equal(evaluateGates(scenario, [
+    { id: "in-flight", path: "counters.workerInFlight.max", max: 1 },
+    { id: "stale", path: "counters.staleWorkerPublishCount.max", equals: 0 },
+  ]).passed, true);
+
+  delete scenario.counters.staleWorkerPublishCount;
+  assert.equal(evaluateGates(scenario, [
+    { id: "stale", path: "counters.staleWorkerPublishCount.max", equals: 0 },
+  ]).passed, false);
+});
+
 test("five measured repetitions preserve raw samples and report p95 variability", () => {
   const runs = [
     measuredRun(100, { warmup: true }),
@@ -246,7 +279,18 @@ test("report builder emits a versioned stable structure and fails closed with no
     configuration: { warmupRuns: 1, requiredMeasuredRuns: 5, seed: 7 },
     scenarios: [{
       id: "zero-drawing",
-      fixture: { bars: 1500, entities: 0, points: 0, mode: "legacy", dpr: 1 },
+      fixture: {
+        name: "freehandLineage64x512",
+        bars: 1500,
+        entities: 0,
+        points: 0,
+        spans: 64,
+        maxFreehandPointsPerDrawing: 512,
+        maxFreehandSpansPerDrawing: 1,
+        sourceLineage: true,
+        mode: "legacy",
+        dpr: 1,
+      },
       runs: [measuredRun(100, { warmup: true }), ...Array.from(
         { length: 5 },
         (_, index) => measuredRun(index + 1),
@@ -258,6 +302,9 @@ test("report builder emits a versioned stable structure and fails closed with no
 
   assert.equal(report.acceptance.passed, true);
   assert.equal(report.scenarios[0].fixture.entities, 0);
+  assert.equal(report.scenarios[0].fixture.name, "freehandLineage64x512");
+  assert.equal(report.scenarios[0].fixture.spans, 64);
+  assert.equal(report.scenarios[0].fixture.sourceLineage, true);
   assert.match(stableStringify(report), /"schemaVersion": "drawing-engine-v2-perf\/v1"/);
 });
 

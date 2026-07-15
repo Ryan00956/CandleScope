@@ -1028,6 +1028,90 @@ test("drawing frame exposes a narrow source-lineage span projection", () => {
   assert.deepEqual(projected, { left: 0, right: 10 });
   assert.equal(Object.isFrozen(projected), true);
   assert.deepEqual(Object.keys(projected || {}), ["left", "right"]);
+  assert.deepEqual(adapter.readDrawingFrameSourceLineageStats(), {
+    exactProjectionCount: 1,
+    fallbackProjectionCount: 0,
+    unresolvedProjectionCount: 0,
+  });
+});
+
+test("source-lineage span world resolution is reused across viewport-only frames", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }, { time: 300 }];
+  const timeScale = {
+    options: () => ({ barSpacing: 10 }),
+    timeToCoordinate: (time: unknown) => typeof time === "number" ? time / 10 : null,
+  };
+  const chart = { timeScale: () => timeScale };
+  const series = { priceToCoordinate: (price: number) => price };
+  const factory = createDrawingFrameSnapshotFactory();
+  const input = {
+    axisKind: "time" as const,
+    coordinateKey: "BTCUSDT:time:1m:0",
+    dpr: 1,
+    heightCssPx: 600,
+    projectionKey: "time:identity",
+    seriesData: rows,
+    surfaceToken: series,
+    themeKey: "dark",
+    viewportKey: "viewport-a",
+    widthCssPx: 900,
+  };
+  let snapshot = factory.capture(input);
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    drawingCoordinateSnapshotProvider: () => snapshot,
+    seriesRef: { current: series },
+  });
+  const span = Object.freeze({
+    exact: Object.freeze({
+      left: Object.freeze({ time: 100, sourceOrdinal: 0 }),
+      right: Object.freeze({ time: 300, sourceOrdinal: 0 }),
+    }),
+    fallback: Object.freeze({
+      fromTime: 100,
+      leftRatio: 0.2,
+      rightRatio: 0.8,
+      toTime: 300,
+    }),
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:10",
+  });
+
+  const firstFrame = mustBeDefined(adapter.captureDrawingFrame());
+  assert.deepEqual(adapter.projectDrawingFrameSourceLineageSpan(firstFrame, span), {
+    left: 11,
+    right: 29,
+  });
+  assert.deepEqual(adapter.readDrawingFrameSourceLineageStats(), {
+    exactProjectionCount: 0,
+    fallbackProjectionCount: 1,
+    unresolvedProjectionCount: 0,
+  });
+  const searchesAfterFirst = firstFrame.coordinateIndex.stats.numericBinarySearchCount;
+  assert.equal(searchesAfterFirst, 2);
+
+  snapshot = factory.capture({ ...input, viewportKey: "viewport-b" });
+  const viewportFrame = mustBeDefined(adapter.captureDrawingFrame());
+  assert.equal(viewportFrame.worldRevisionKey, firstFrame.worldRevisionKey);
+  assert.deepEqual(adapter.projectDrawingFrameSourceLineageSpan(viewportFrame, span), {
+    left: 11,
+    right: 29,
+  });
+  assert.equal(
+    viewportFrame.coordinateIndex.stats.numericBinarySearchCount,
+    searchesAfterFirst,
+    "viewport projection must reuse the immutable source-span resolution",
+  );
+
+  snapshot = factory.capture({
+    ...input,
+    projectionKey: "time:changed",
+    viewportKey: "viewport-b",
+  });
+  const changedWorldFrame = mustBeDefined(adapter.captureDrawingFrame());
+  assert.notEqual(changedWorldFrame.worldRevisionKey, viewportFrame.worldRevisionKey);
+  assert.ok(adapter.projectDrawingFrameSourceLineageSpan(changedWorldFrame, span));
+  assert.equal(changedWorldFrame.coordinateIndex.stats.numericBinarySearchCount, 4);
 });
 
 test("drawing frame invalidation subscription hides chart objects and releases listeners", () => {

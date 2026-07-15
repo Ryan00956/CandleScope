@@ -20,6 +20,8 @@ export const DRAWING_PERF_DURATION_METRICS = [
   "persistenceMs",
   "sceneProjectPaintMs",
   "activeOverlayCpuMs",
+  "workerFinalizeMs",
+  "exactRenderMs",
 ] as const;
 
 export const DRAWING_PERF_COUNTER_METRICS = [
@@ -35,6 +37,7 @@ export const DRAWING_PERF_COUNTER_METRICS = [
   "workerJobCount",
   "workerResultCount",
   "staleWorkerResultCount",
+  "staleWorkerPublishCount",
   "workerQueueDropCount",
   "shadowCompareCount",
   "shadowParityMismatchCount",
@@ -178,6 +181,51 @@ export interface DrawingPerfRuntimeSummary {
   }>;
 }
 
+export interface DrawingPerfPhase6RuntimeSnapshot {
+  readonly engineMode: "legacy" | "shadow" | "scene-canary";
+  readonly scenePublicationReady: boolean;
+  readonly attachedPrimitiveCount: number;
+  readonly backend: "worker" | "main-thread";
+  readonly backendSource: "default" | "environment" | "benchmark-fallback";
+  readonly workerResultDelayMs: number;
+  readonly sourceLineageExactResolveCount: number;
+  readonly sourceLineageFallbackResolveCount: number;
+  readonly sourceLineageUnresolvedResolveCount: number;
+  readonly offscreenSupported: boolean;
+  readonly queueDepthMax: number;
+  readonly inFlightMax: number;
+  readonly queueDepthCurrent: number;
+  readonly inFlightCurrent: number;
+  readonly workerJobDelta: number;
+  readonly workerResultDelta: number;
+  readonly pendingDropDelta: number;
+  readonly staleResultDropDelta: number;
+  readonly stalePublishCount: number;
+  readonly rawPoints: number;
+  readonly renderedPoints: number;
+  readonly lodRatio: number;
+  readonly canonicalRawPreserved: boolean;
+  readonly vertexBudgetPassed: boolean;
+  readonly cacheBytes: number;
+  readonly exactRenderMs: number | null;
+  readonly lastRequestedStamp: Readonly<Record<string, unknown>> | null;
+  readonly lastPublishedStamp: Readonly<Record<string, unknown>> | null;
+}
+
+export interface DrawingPerfPhase6HitOracleResult {
+  readonly queryCount: number;
+  readonly mismatchCount: number;
+  readonly maxCandidates: number;
+  readonly totalSegments: number;
+  readonly indexedResults?: readonly unknown[];
+  readonly oracleResults?: readonly unknown[];
+}
+
+export type DrawingPerfPhase6RuntimeProvider = () => DrawingPerfPhase6RuntimeSnapshot | null;
+export type DrawingPerfPhase6HitOracleProvider = (
+  points: readonly Readonly<{ x: number; y: number }>[],
+) => DrawingPerfPhase6HitOracleResult;
+
 export type DrawingPerfInteractionHandoffKind = "dynamic" | "live-ink";
 
 export interface DrawingPerfInteractionHandoffStamp {
@@ -262,6 +310,8 @@ export interface DrawingPerfDebugHandle {
     provider: DrawingPerfRuntimeSummaryProvider | null,
   ) => () => void;
   readonly readRuntimeSummary: () => DrawingPerfRuntimeSummary | null;
+  readonly readPhase6Runtime: () => DrawingPerfPhase6RuntimeSnapshot | null;
+  readonly runPhase6HitOracle: DrawingPerfPhase6HitOracleProvider;
   readonly readInteractionHandoff: () => DrawingPerfInteractionHandoffSnapshot;
   readonly requestShadowParity: () => boolean;
   readonly reset: () => void;
@@ -471,6 +521,8 @@ function createDurationHistograms(
     persistenceMs: new RollingDurationHistogram(capacity),
     sceneProjectPaintMs: new RollingDurationHistogram(capacity),
     activeOverlayCpuMs: new RollingDurationHistogram(capacity),
+    workerFinalizeMs: new RollingDurationHistogram(capacity),
+    exactRenderMs: new RollingDurationHistogram(capacity),
   };
 }
 
@@ -491,6 +543,8 @@ function createRawCaptures(
     persistenceMs: new BoundedRawCapture(capacity),
     sceneProjectPaintMs: new BoundedRawCapture(capacity),
     activeOverlayCpuMs: new BoundedRawCapture(capacity),
+    workerFinalizeMs: new BoundedRawCapture(capacity),
+    exactRenderMs: new BoundedRawCapture(capacity),
   };
 }
 
@@ -516,6 +570,8 @@ function emptyRawCaptureSnapshot(): DrawingPerfRawCaptureSnapshot {
       persistenceMs: emptyRawMetricCapture(),
       sceneProjectPaintMs: emptyRawMetricCapture(),
       activeOverlayCpuMs: emptyRawMetricCapture(),
+      workerFinalizeMs: emptyRawMetricCapture(),
+      exactRenderMs: emptyRawMetricCapture(),
     },
   };
 }
@@ -572,6 +628,7 @@ function createCounters(): Record<DrawingPerfCounterMetric, number> {
     workerJobCount: 0,
     workerResultCount: 0,
     staleWorkerResultCount: 0,
+    staleWorkerPublishCount: 0,
     workerQueueDropCount: 0,
     shadowCompareCount: 0,
     shadowParityMismatchCount: 0,
@@ -1026,6 +1083,8 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
         persistenceMs: read(this.rawCaptures.persistenceMs),
         sceneProjectPaintMs: read(this.rawCaptures.sceneProjectPaintMs),
         activeOverlayCpuMs: read(this.rawCaptures.activeOverlayCpuMs),
+        workerFinalizeMs: read(this.rawCaptures.workerFinalizeMs),
+        exactRenderMs: read(this.rawCaptures.exactRenderMs),
       },
     };
   }
@@ -1053,6 +1112,8 @@ class DrawingPerfCountersImpl implements DrawingPerfCounters {
         persistenceMs: this.histograms.persistenceMs.snapshot(),
         sceneProjectPaintMs: this.histograms.sceneProjectPaintMs.snapshot(),
         activeOverlayCpuMs: this.histograms.activeOverlayCpuMs.snapshot(),
+        workerFinalizeMs: this.histograms.workerFinalizeMs.snapshot(),
+        exactRenderMs: this.histograms.exactRenderMs.snapshot(),
       },
       counters: copyCounters(this.counters),
       counterMaxima: copyCounters(this.counterMaxima),
@@ -1128,6 +1189,8 @@ export function accumulateDrawingPerfFrameWork(
 }
 
 let runtimeSummaryProvider: DrawingPerfRuntimeSummaryProvider | null = null;
+let phase6RuntimeProvider: DrawingPerfPhase6RuntimeProvider | null = null;
+let phase6HitOracleProvider: DrawingPerfPhase6HitOracleProvider | null = null;
 let shadowParityRequester: DrawingPerfShadowParityRequester | null = null;
 let interactionHandoffSequence = 0;
 let preparedInteractionHandoff: DrawingPerfInteractionHandoffRecord | null = null;
@@ -1146,14 +1209,13 @@ function validInteractionHandoffStamp(
     && stamp.viewportRevision >= 0;
 }
 
-function sameInteractionHandoffStamp(
-  left: DrawingPerfInteractionHandoffStamp,
-  right: DrawingPerfInteractionHandoffStamp,
+function interactionPaintCoversHandoff(
+  ticket: DrawingPerfInteractionHandoffStamp,
+  stamp: DrawingPerfInteractionHandoffStamp,
 ): boolean {
-  return left.scopeKey === right.scopeKey
-    && left.documentRevision === right.documentRevision
-    && left.surfaceGeneration === right.surfaceGeneration
-    && left.viewportRevision === right.viewportRevision;
+  return ticket.scopeKey === stamp.scopeKey
+    && ticket.surfaceGeneration === stamp.surfaceGeneration
+    && stamp.documentRevision >= ticket.documentRevision;
 }
 
 export function recordDrawingPerfInteractionHandoffPrepared(
@@ -1183,7 +1245,7 @@ export function recordDrawingPerfInteractionHandoffAcknowledged(
   if (!prepared
     || prepared.kind !== kind
     || !validInteractionHandoffStamp(stamp)
-    || !sameInteractionHandoffStamp(prepared.stamp, stamp)) return false;
+    || !interactionPaintCoversHandoff(prepared.stamp, stamp)) return false;
   acknowledgedInteractionHandoff = prepared;
   return true;
 }
@@ -1275,6 +1337,47 @@ export function readDrawingPerfRuntimeSummary(): DrawingPerfRuntimeSummary | nul
   }
 }
 
+export function registerDrawingPerfPhase6RuntimeProvider(
+  provider: DrawingPerfPhase6RuntimeProvider | null,
+): () => void {
+  phase6RuntimeProvider = provider;
+  return () => {
+    if (phase6RuntimeProvider === provider) phase6RuntimeProvider = null;
+  };
+}
+
+export function registerDrawingPerfPhase6HitOracleProvider(
+  provider: DrawingPerfPhase6HitOracleProvider | null,
+): () => void {
+  phase6HitOracleProvider = provider;
+  return () => {
+    if (phase6HitOracleProvider === provider) phase6HitOracleProvider = null;
+  };
+}
+
+export function readDrawingPerfPhase6Runtime(): DrawingPerfPhase6RuntimeSnapshot | null {
+  if (!phase6RuntimeProvider) return null;
+  try {
+    return phase6RuntimeProvider();
+  } catch {
+    return null;
+  }
+}
+
+export function runDrawingPerfPhase6HitOracle(
+  points: readonly Readonly<{ x: number; y: number }>[],
+): DrawingPerfPhase6HitOracleResult {
+  if (!phase6HitOracleProvider) {
+    return Object.freeze({
+      queryCount: 0,
+      mismatchCount: 0,
+      maxCandidates: 0,
+      totalSegments: 0,
+    });
+  }
+  return phase6HitOracleProvider(points);
+}
+
 export function registerDrawingPerfShadowParityRequester(
   requester: DrawingPerfShadowParityRequester | null,
 ): () => void {
@@ -1322,6 +1425,10 @@ export function installDrawingPerfDebugHandle(
       registerDrawingPerfRuntimeSummaryProvider(provider)
     ),
     readRuntimeSummary: () => readDrawingPerfRuntimeSummary(),
+    readPhase6Runtime: () => readDrawingPerfPhase6Runtime(),
+    runPhase6HitOracle: (
+      points: readonly Readonly<{ x: number; y: number }>[],
+    ) => runDrawingPerfPhase6HitOracle(points),
     readInteractionHandoff: () => readDrawingPerfInteractionHandoff(),
     requestShadowParity: () => requestDrawingPerfShadowParity(),
     reset: () => {

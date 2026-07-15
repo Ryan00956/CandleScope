@@ -41,6 +41,8 @@ export interface DrawingScenePrimitiveBridgeOptions<
   readonly detachPrimitive: (primitive: TPrimitive) => boolean;
   readonly captureDrawingFrame: () => DrawingFrameSnapshot | null;
   readonly isDrawingFrameCurrent: (frame: DrawingFrameSnapshot) => boolean;
+  /** Rebuild after the current plan was painted against an advanced adapter frame. */
+  readonly onCurrentPaintRejected?: () => void;
 }
 
 export interface DrawingScenePrimitiveBridgeSnapshot<TPlan extends DrawingSceneBridgePlan> {
@@ -74,10 +76,12 @@ export function createDrawingScenePrimitiveBridge<
   detachPrimitive,
   captureDrawingFrame,
   isDrawingFrameCurrent,
+  onCurrentPaintRejected,
 }: DrawingScenePrimitiveBridgeOptions<TPrimitive, TPlan>): DrawingScenePrimitiveBridge<TPlan> {
   let attached = false;
   let surfaceGeneration: number | null = null;
   let publishedPlan: TPlan | null = null;
+  let paintRecoveryRequestedForPlan: TPlan | null = null;
   let lastPaintedStamp: TPlan["stamp"] | null = null;
   let unsubscribePrimitivePaint: (() => void) | null = null;
   const paintListeners = new Set<DrawingSceneBridgePaintListener<TPlan>>();
@@ -109,10 +113,20 @@ export function createDrawingScenePrimitiveBridge<
         || ack.stamp !== ack.plan.stamp
         || ack.stamp.surfaceGeneration !== surfaceGeneration) return;
       const frame = captureDrawingFrame();
-      if (!frame
-        || !isDrawingFrameCurrent(frame)
-        || frame.surfaceGeneration !== surfaceGeneration
-        || !planMatchesFrame(ack.plan, frame)) return;
+      if (!frame || !isDrawingFrameCurrent(frame)) return;
+      if (frame.surfaceGeneration !== surfaceGeneration) return;
+      if (!planMatchesFrame(ack.plan, frame)) {
+        // The renderer consumed the exact plan currently owned by this bridge,
+        // so this is not a superseded draw. Ask the scene runtime to rebuild
+        // from the newer atomic frame instead of waiting forever for an ACK
+        // that can no longer become valid.
+        if (paintRecoveryRequestedForPlan !== ack.plan) {
+          paintRecoveryRequestedForPlan = ack.plan;
+          try { onCurrentPaintRejected?.(); } catch { /* recovery is best effort */ }
+        }
+        return;
+      }
+      paintRecoveryRequestedForPlan = null;
       lastPaintedStamp = ack.stamp;
       for (const listener of Array.from(paintListeners)) {
         if (!paintListeners.has(listener)) continue;
@@ -152,6 +166,7 @@ export function createDrawingScenePrimitiveBridge<
       attached = true;
       surfaceGeneration = attachedFrame.surfaceGeneration;
       publishedPlan = null;
+      paintRecoveryRequestedForPlan = null;
       lastPaintedStamp = null;
       subscribeToPrimitivePaint();
       return true;
@@ -160,6 +175,7 @@ export function createDrawingScenePrimitiveBridge<
       if (!attached) {
         primitive.clearPlan(false);
         publishedPlan = null;
+        paintRecoveryRequestedForPlan = null;
         lastPaintedStamp = null;
         disconnectPrimitivePaint();
         return true;
@@ -168,6 +184,7 @@ export function createDrawingScenePrimitiveBridge<
       attached = false;
       surfaceGeneration = null;
       publishedPlan = null;
+      paintRecoveryRequestedForPlan = null;
       lastPaintedStamp = null;
       disconnectPrimitivePaint();
       primitive.releaseSurfaceCredentials();
@@ -186,11 +203,13 @@ export function createDrawingScenePrimitiveBridge<
       // a non-conforming primitive is intentionally ignored rather than
       // acknowledging a plan whose publication result was not yet known.
       publishedPlan = plan;
+      paintRecoveryRequestedForPlan = null;
       lastPaintedStamp = null;
       return published;
     },
     clearPlan(requestUpdate = true) {
       publishedPlan = null;
+      paintRecoveryRequestedForPlan = null;
       lastPaintedStamp = null;
       primitive.clearPlan(requestUpdate);
     },
@@ -198,6 +217,7 @@ export function createDrawingScenePrimitiveBridge<
       attached = false;
       surfaceGeneration = null;
       publishedPlan = null;
+      paintRecoveryRequestedForPlan = null;
       lastPaintedStamp = null;
       disconnectPrimitivePaint();
       primitive.releaseSurfaceCredentials();

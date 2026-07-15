@@ -153,6 +153,72 @@ test("atomic culling viewport and bar spacing participate in viewport revision",
   assert.equal(isDrawingFrameSnapshot({ ...spaced, drawingViewport: { minPrice: 1 } }), false);
 });
 
+test("drawing viewport copies and normalizes logical bounds and public price samples", () => {
+  const samples = [
+    { price: 120, coordinateCssPx: 0 },
+    { price: 100, coordinateCssPx: 300 },
+    { price: 80, coordinateCssPx: 600 },
+  ];
+  const input = baseInput();
+  const snapshot = createDrawingFrameSnapshotFactory().capture({
+    ...input,
+    drawingViewport: {
+      ...input.drawingViewport!,
+      minLogical: 10,
+      maxLogical: 30,
+      priceProjectionSamples: samples,
+    },
+  });
+
+  assert.deepEqual(snapshot.drawingViewport, {
+    horizontalDomain: "time",
+    minHorizontal: 100,
+    maxHorizontal: 300,
+    minPrice: 80,
+    maxPrice: 120,
+    minLogical: 10,
+    maxLogical: 30,
+    priceProjectionSamples: [
+      { price: 120, coordinateCssPx: 0 },
+      { price: 100, coordinateCssPx: 300 },
+      { price: 80, coordinateCssPx: 600 },
+    ],
+  });
+  assert.notStrictEqual(snapshot.drawingViewport?.priceProjectionSamples, samples);
+  assert.notStrictEqual(snapshot.drawingViewport?.priceProjectionSamples?.[0], samples[0]);
+  assert.equal(Object.isFrozen(snapshot.drawingViewport), true);
+  assert.equal(Object.isFrozen(snapshot.drawingViewport?.priceProjectionSamples), true);
+  assert.equal(Object.isFrozen(snapshot.drawingViewport?.priceProjectionSamples?.[0]), true);
+  samples[0]!.coordinateCssPx = 999;
+  assert.equal(snapshot.drawingViewport?.priceProjectionSamples?.[0]?.coordinateCssPx, 0);
+
+  const insufficient = createDrawingFrameSnapshotFactory().capture({
+    ...input,
+    drawingViewport: {
+      ...input.drawingViewport!,
+      minLogical: 30,
+      maxLogical: 10,
+      priceProjectionSamples: samples.slice(0, 2),
+    },
+  });
+  assert.equal(insufficient.drawingViewport?.minLogical, undefined);
+  assert.equal(insufficient.drawingViewport?.maxLogical, undefined);
+  assert.equal(insufficient.drawingViewport?.priceProjectionSamples, undefined);
+
+  const nonFinite = createDrawingFrameSnapshotFactory().capture({
+    ...input,
+    drawingViewport: {
+      ...input.drawingViewport!,
+      priceProjectionSamples: [
+        { price: 120, coordinateCssPx: 0 },
+        { price: 100, coordinateCssPx: Number.NaN },
+        { price: 80, coordinateCssPx: 600 },
+      ],
+    },
+  });
+  assert.equal(nonFinite.drawingViewport?.priceProjectionSamples, undefined);
+});
+
 test("data identity changes advance data revision and rebuild numeric coordinate index", () => {
   const factory = createDrawingFrameSnapshotFactory();
   const firstRows = numericRows(100, 200, 300);

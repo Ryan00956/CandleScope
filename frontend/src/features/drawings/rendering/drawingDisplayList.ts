@@ -63,6 +63,18 @@ export type DrawingDisplayRenderSpec =
       lineStyle: ShapeLineStyle;
       selected: boolean;
       boxPointOffset: 0;
+    }>
+  | Readonly<{
+      op: "freehand";
+      strokeColor: string;
+      selectionHighlightColor: string;
+      lineWidthCssPx: number;
+      opacity: number;
+      compositeOperation: GlobalCompositeOperation;
+      brushShape: "round" | "square";
+      /** LOD paths are already screen-error bounded and must not be re-smoothed. */
+      pathInterpolation?: "linear" | "quadratic";
+      selected: boolean;
     }>;
 
 export interface DrawingDisplayHitZone {
@@ -129,6 +141,36 @@ export interface DrawingDisplayEntity {
   readonly unboundedAxis: DrawingDisplayUnboundedAxis;
 }
 
+/**
+ * Worker-owned raster for the committed freehand/highlighter layer. Other
+ * scene opcodes remain in the typed display list and are painted normally.
+ */
+export interface DrawingFreehandRasterLayer {
+  readonly entityIndex: number;
+  /** Inclusive end of a consecutive freehand run flattened into this tile. */
+  readonly lastEntityIndex: number;
+  readonly sourceXPhysicalPx: number;
+  readonly sourceYPhysicalPx: number;
+  readonly sourceWidthPhysicalPx: number;
+  readonly sourceHeightPhysicalPx: number;
+  readonly destinationXCssPx: number;
+  readonly destinationYCssPx: number;
+  readonly destinationWidthCssPx: number;
+  readonly destinationHeightCssPx: number;
+  readonly opacity: number;
+  readonly compositeOperation: GlobalCompositeOperation;
+}
+
+export interface DrawingFreehandRasterBitmap {
+  readonly bitmap: ImageBitmap;
+  readonly widthCssPx: number;
+  readonly heightCssPx: number;
+  readonly dpr: number;
+  readonly atlasWidthPhysicalPx: number;
+  readonly atlasHeightPhysicalPx: number;
+  readonly layers: readonly DrawingFreehandRasterLayer[];
+}
+
 export interface DrawingScreenDisplayList {
   readonly stamp: DrawingRenderRevisionStamp;
   readonly entities: readonly DrawingDisplayEntity[];
@@ -147,11 +189,113 @@ export interface DrawingScreenDisplayList {
   readonly unresolvedGapCounts: Readonly<Uint32Array>;
   readonly unresolvedSourcePointIndexes: Readonly<Uint32Array>;
   readonly unresolvedGapCount: number;
+  readonly freehandRaster?: DrawingFreehandRasterBitmap;
+}
+
+/** Attach a matching worker raster without copying or weakening typed geometry ownership. */
+export function withDrawingFreehandRaster(
+  list: DrawingScreenDisplayList,
+  raster: DrawingFreehandRasterBitmap,
+): DrawingScreenDisplayList {
+  if (!raster
+    || typeof raster.bitmap !== "object"
+    || raster.bitmap === null
+    || raster.widthCssPx !== list.stamp.widthCssPx
+    || raster.heightCssPx !== list.stamp.heightCssPx
+    || raster.dpr !== list.stamp.dpr
+    || !Number.isSafeInteger(raster.atlasWidthPhysicalPx)
+    || raster.atlasWidthPhysicalPx <= 0
+    || !Number.isSafeInteger(raster.atlasHeightPhysicalPx)
+    || raster.atlasHeightPhysicalPx <= 0
+    || raster.bitmap.width !== raster.atlasWidthPhysicalPx
+    || raster.bitmap.height !== raster.atlasHeightPhysicalPx) {
+    throw new TypeError("drawing freehand raster does not match its display-list stamp");
+  }
+  const layers: readonly DrawingFreehandRasterLayer[] = raster.layers;
+  if (!Array.isArray(layers as unknown) || layers.length === 0) {
+    throw new TypeError("drawing freehand raster does not match its display-list stamp");
+  }
+  let previousLastEntityIndex = -1;
+  for (const layer of layers) {
+    const invalid = (
+      !Number.isSafeInteger(layer.entityIndex)
+      || layer.entityIndex < 0
+      || layer.entityIndex >= list.entities.length
+      || !Number.isSafeInteger(layer.lastEntityIndex)
+      || layer.lastEntityIndex < layer.entityIndex
+      || layer.lastEntityIndex >= list.entities.length
+      || layer.entityIndex <= previousLastEntityIndex
+      || !Number.isSafeInteger(layer.sourceXPhysicalPx)
+      || layer.sourceXPhysicalPx < 0
+      || !Number.isSafeInteger(layer.sourceYPhysicalPx)
+      || layer.sourceYPhysicalPx < 0
+      || !Number.isSafeInteger(layer.sourceWidthPhysicalPx)
+      || layer.sourceWidthPhysicalPx <= 0
+      || !Number.isSafeInteger(layer.sourceHeightPhysicalPx)
+      || layer.sourceHeightPhysicalPx <= 0
+      || layer.sourceXPhysicalPx + layer.sourceWidthPhysicalPx > raster.atlasWidthPhysicalPx
+      || layer.sourceYPhysicalPx + layer.sourceHeightPhysicalPx > raster.atlasHeightPhysicalPx
+      || !Number.isFinite(layer.destinationXCssPx)
+      || !Number.isFinite(layer.destinationYCssPx)
+      || !Number.isFinite(layer.destinationWidthCssPx)
+      || layer.destinationWidthCssPx <= 0
+      || !Number.isFinite(layer.destinationHeightCssPx)
+      || layer.destinationHeightCssPx <= 0
+      || !Number.isFinite(layer.opacity)
+      || layer.opacity < 0
+      || layer.opacity > 1
+      || (layer.compositeOperation !== "source-over"
+        && layer.compositeOperation !== "multiply")
+    );
+    if (invalid) {
+      throw new TypeError("drawing freehand raster does not match its display-list stamp");
+    }
+    for (let entityIndex = layer.entityIndex; entityIndex <= layer.lastEntityIndex; entityIndex += 1) {
+      const renderSpec = list.entities[entityIndex]?.renderSpec;
+      if (renderSpec?.op !== "freehand") {
+        throw new TypeError("drawing freehand raster cannot cover non-freehand entities");
+      }
+      const grouped = layer.lastEntityIndex > layer.entityIndex;
+      const effectiveOpacity = renderSpec.selected ? 0.6 : renderSpec.opacity;
+      const effectiveCompositeOperation = renderSpec.selected
+        ? "source-over"
+        : renderSpec.compositeOperation;
+      if (grouped
+        ? renderSpec.opacity !== 1
+          || renderSpec.compositeOperation !== "source-over"
+          || renderSpec.selected
+          || layer.opacity !== 1
+          || layer.compositeOperation !== "source-over"
+        : effectiveOpacity !== layer.opacity
+          || effectiveCompositeOperation !== layer.compositeOperation) {
+        throw new TypeError("drawing freehand raster cannot change entity compositing semantics");
+      }
+    }
+    previousLastEntityIndex = layer.lastEntityIndex;
+  }
+  return Object.freeze({
+    ...list,
+    freehandRaster: Object.freeze({
+      ...raster,
+      layers: Object.freeze(layers.map((layer) => Object.freeze({ ...layer }))),
+    }),
+  });
 }
 
 export interface DrawingDisplayHitResult extends DrawingHit {
   readonly entityId: string;
   readonly kind: DrawingKind;
+}
+
+/**
+ * Spatial broad-phase output. Entity indexes are already in descending
+ * canonical z-order; polyline entries contain entity-local segment starts.
+ * Keeping this small contract beside the exact oracle avoids a dependency
+ * from the retained display list back into a particular index implementation.
+ */
+export interface DrawingDisplayHitCandidates {
+  readonly entityIndexes: readonly number[];
+  readonly polylineSegmentStartsByEntity?: ReadonlyMap<number, readonly number[]>;
 }
 
 export function drawingDisplayEntityScreenBox(
@@ -288,12 +432,25 @@ function validRenderSpec(
           && spec.anchorPointOffset >= spec.segmentCount * 2
           && (spec.anchorPointOffset + 1) * 2 <= entity.points.length));
   }
-  return entity.kind === "shape"
-    && (spec.shapeType === "rectangle" || spec.shapeType === "ellipse")
-    && (spec.fillPaintColor === null || typeof spec.fillPaintColor === "string")
-    && (spec.lineStyle === "solid" || spec.lineStyle === "dashed" || spec.lineStyle === "dotted")
-    && spec.boxPointOffset === 0
-    && entity.points.length >= 4;
+  if (spec.op === "shape") {
+    return entity.kind === "shape"
+      && (spec.shapeType === "rectangle" || spec.shapeType === "ellipse")
+      && (spec.fillPaintColor === null || typeof spec.fillPaintColor === "string")
+      && (spec.lineStyle === "solid" || spec.lineStyle === "dashed" || spec.lineStyle === "dotted")
+      && spec.boxPointOffset === 0
+      && entity.points.length >= 4;
+  }
+  return (entity.kind === "freehand" || entity.kind === "highlighter")
+    && typeof spec.selectionHighlightColor === "string"
+    && Number.isFinite(spec.opacity)
+    && spec.opacity >= 0
+    && spec.opacity <= 1
+    && typeof spec.compositeOperation === "string"
+    && spec.compositeOperation.length > 0
+    && (spec.brushShape === "round" || spec.brushShape === "square")
+    && (spec.pathInterpolation === undefined
+      || spec.pathInterpolation === "linear"
+      || spec.pathInterpolation === "quadratic");
 }
 
 function validateEntity(entity: ProjectedDrawingEntity): void {
@@ -537,6 +694,7 @@ function zoneHit(
   zone: DrawingDisplayHitZone,
   x: number,
   y: number,
+  polylineSegmentStarts?: readonly number[],
 ): boolean {
   const start = entity.pointOffset + zone.pointOffset;
   if (zone.kind === "arc") {
@@ -592,8 +750,26 @@ function zoneHit(
     const bottom = Math.max(leftTop[1], rightBottom[1]) + zone.tolerance;
     return x >= left && x <= right && y >= top && y <= bottom;
   }
-  let previous: readonly [number, number] | null = null;
   const toleranceSquared = zone.tolerance * zone.tolerance;
+  if (polylineSegmentStarts) {
+    for (const segmentStart of polylineSegmentStarts) {
+      if (!Number.isSafeInteger(segmentStart)
+        || segmentStart < zone.pointOffset
+        || segmentStart + 1 >= zone.pointOffset + zone.pointCount) continue;
+      const first = pointAt(list.points, entity.pointOffset + segmentStart);
+      const second = pointAt(list.points, entity.pointOffset + segmentStart + 1);
+      if (first && second && distanceSquaredToSegment(
+        x,
+        y,
+        first[0],
+        first[1],
+        second[0],
+        second[1],
+      ) <= toleranceSquared) return true;
+    }
+    return false;
+  }
+  let previous: readonly [number, number] | null = null;
   for (let index = 0; index < zone.pointCount; index += 1) {
     const point = pointAt(list.points, start + index);
     if (!point) {
@@ -667,34 +843,58 @@ function crossAxisLineHitZone(
   return horizontalDistance <= verticalDistance ? horizontal : vertical;
 }
 
-/** Phase 3 parity query: reverse z-order sequential scan, not the Phase 6 index. */
+function selectedHandleHit(
+  list: DrawingScreenDisplayList,
+  x: number,
+  y: number,
+  selectedId: string | null,
+): DrawingDisplayHitResult | null {
+  if (!selectedId) return null;
+  const entityIndex = list.entities.findIndex((entity) => entity.id === selectedId);
+  const entity = entityIndex >= 0 ? list.entities[entityIndex] : undefined;
+  if (!entity) return null;
+  for (let index = 0; index < entity.handleCount; index += 1) {
+    const handle = pointAt(list.handles, entity.handleOffset + index);
+    const handleName = entity.handleNames[index];
+    const exactResult = entity.handleResults?.[index];
+    if (handle && handleName
+      && Math.abs(x - handle[0]) <= entity.handleTolerance
+      && Math.abs(y - handle[1]) <= entity.handleTolerance) {
+      if (entity.handleResults && !exactResult) continue;
+      return Object.freeze({
+        entityId: entity.id,
+        kind: entity.kind,
+        ...(exactResult ?? { handle: handleName, pointIndex: index }),
+      });
+    }
+  }
+  return null;
+}
+
+/**
+ * Exact hit oracle. Without candidates it remains the Phase 3 reverse-z
+ * sequential reference; production Phase 6 supplies a uniform-grid subset.
+ */
 export function hitTestDrawingScreenDisplayList(
   list: DrawingScreenDisplayList,
   x: number,
   y: number,
   selectedId: string | null = null,
+  candidates: DrawingDisplayHitCandidates | null = null,
 ): DrawingDisplayHitResult | null {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  for (let entityIndex = list.entities.length - 1; entityIndex >= 0; entityIndex -= 1) {
+  const handleHit = selectedHandleHit(list, x, y, selectedId);
+  if (handleHit) return handleHit;
+  const entityIndexes = candidates?.entityIndexes ?? Array.from(
+    { length: list.entities.length },
+    (_, index) => list.entities.length - 1 - index,
+  );
+  for (const entityIndex of entityIndexes) {
+    if (!Number.isSafeInteger(entityIndex)
+      || entityIndex < 0
+      || entityIndex >= list.entities.length) continue;
     const entity = list.entities[entityIndex];
     if (!entity) continue;
-    if (entity.id === selectedId) {
-      for (let index = 0; index < entity.handleCount; index += 1) {
-        const handle = pointAt(list.handles, entity.handleOffset + index);
-        const handleName = entity.handleNames[index];
-        const exactResult = entity.handleResults?.[index];
-        if (handle && handleName
-          && Math.abs(x - handle[0]) <= entity.handleTolerance
-          && Math.abs(y - handle[1]) <= entity.handleTolerance) {
-          if (entity.handleResults && !exactResult) continue;
-          return Object.freeze({
-            entityId: entity.id,
-            kind: entity.kind,
-            ...(exactResult ?? { handle: handleName, pointIndex: index }),
-          });
-        }
-      }
-    }
     // Selected handles intentionally run first because a handle may extend
     // beyond the painted geometry. Ordinary zones can use the exact projected
     // bbox as a conservative broad phase, avoiding O(entities * points) scans
@@ -711,7 +911,10 @@ export function hitTestDrawingScreenDisplayList(
       });
     }
     for (const zone of entity.hitZones) {
-      if (!zoneHit(list, entity, zone, x, y)) continue;
+      const indexedSegments = zone.kind === "polyline"
+        ? candidates?.polylineSegmentStartsByEntity?.get(entityIndex)
+        : undefined;
+      if (!zoneHit(list, entity, zone, x, y, indexedSegments)) continue;
       return Object.freeze({
         entityId: entity.id,
         kind: entity.kind,

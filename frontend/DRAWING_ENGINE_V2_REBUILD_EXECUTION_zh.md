@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5 已完成（2026-07-15）；Phase 6 尚未开始。
+状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5、Phase 6 已完成（2026-07-15）；Phase 7 尚未开始。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -57,7 +57,7 @@ git -C "H:\program\CandleScope" worktree list
 | 3 | Scene shadow、culling 与 render plan | 已完成（正式 shadow parity/perf 门通过） |
 | 4 | 单一 DrawingScenePrimitive | 已完成（composite scene checkpoint） |
 | 5 | Dynamic Overlay 与 Live Ink | 已完成（interaction overlay checkpoint） |
-| 6 | LOD、命中索引、worker 与背压 | 未开始 |
+| 6 | LOD、命中索引、worker 与背压 | 已完成（LOD/worker/indexed hit checkpoint） |
 | 7 | IndexedDB、兼容迁移与 export barrier | 未开始 |
 | 8 | 全工具迁移与生命周期收口 | 未开始 |
 | 9 | 灰度、回滚演练与 legacy 删除 | 未开始 |
@@ -868,28 +868,28 @@ scene static renderer 可继续存在；关闭 overlay flag 后恢复旧交互 r
 
 ### 逐步任务
 
-- [ ] 每个连续 freehand path 生成嵌套 simplification hierarchy。
-- [ ] canonical raw points 永久保留；LOD 只是可再生 cache，不回写覆盖原始几何。
-- [ ] endpoints 和 path gaps 永久保留。
-- [ ] LOD 由屏幕误差选择，不使用固定每 N 点抽样。
-- [ ] selected/edit tolerance 约 0.35px。
-- [ ] normal static tolerance 约 0.75px。
-- [ ] continuous wheel/pan tolerance 约 1.25px。
-- [ ] 普通路径限制为每可见 CSS px 约 2–3 个有效顶点。
-- [ ] 先 entity/chunk culling，再做 LOD 和 LWC-bound final projection。
-- [ ] 当前可见 render plan 同步生成 screen bbox。
-- [ ] 建立 32/64px uniform grid，bucket 保存 segment references。
-- [ ] exact hit 使用 squared point-to-segment distance，不做无意义 sqrt。
-- [ ] z-order 只在候选集内决胜。
-- [ ] worker 持有 canonical/LOD 镜像和可选 OffscreenCanvas。
-- [ ] 主线程发送 entity patch，不每帧传全场 typed arrays。
-- [ ] final screen projection 后发送 typed ScreenDisplayList。
-- [ ] worker 返回 ImageBitmap 或有界 draw result。
-- [ ] 每类 queue 固定 1 in-flight + 1 pending-latest。
-- [ ] 新 viewport 覆盖 pending old viewport。
-- [ ] worker 在 entity/path 边界检查 cancel generation。
-- [ ] revision 不匹配结果不发布并立即释放资源。
-- [ ] 不支持 OffscreenCanvas 时走主线程分时、低 LOD fallback。
+- [x] 每个连续 freehand path 生成嵌套 simplification hierarchy。
+- [x] canonical raw points 永久保留；LOD 只是可再生 cache，不回写覆盖原始几何。
+- [x] endpoints 和 path gaps 永久保留。
+- [x] LOD 由屏幕误差选择，不使用固定每 N 点抽样。
+- [x] selected/edit tolerance 约 0.35px。
+- [x] normal static tolerance 约 0.75px。
+- [x] continuous wheel/pan tolerance 约 1.25px。
+- [x] 普通路径限制为每可见 CSS px 约 2–3 个有效顶点。
+- [x] 先 entity/chunk culling，再做 LOD 和 LWC-bound final projection。
+- [x] 当前可见 render plan 同步生成 screen bbox。
+- [x] 建立 32/64px uniform grid，bucket 保存 segment references。
+- [x] exact hit 使用 squared point-to-segment distance，不做无意义 sqrt。
+- [x] z-order 只在候选集内决胜。
+- [x] worker 持有 canonical/LOD 镜像和可选 OffscreenCanvas。
+- [x] 主线程发送 entity patch，不每帧传全场 typed arrays。
+- [x] final screen projection 后发送 typed ScreenDisplayList。
+- [x] worker 返回 ImageBitmap 或有界 draw result。
+- [x] 每类 queue 固定 1 in-flight + 1 pending-latest。
+- [x] 新 viewport 覆盖 pending old viewport。
+- [x] worker 在 entity/path 边界检查 cancel generation。
+- [x] revision 不匹配结果不发布并立即释放资源。
+- [x] 不支持 OffscreenCanvas 时走主线程分时、低 LOD fallback。
 
 ### 快速模式与 exact 收敛
 
@@ -1392,4 +1392,23 @@ Correctness parity: 64×512/32768-point heavy scene active ink + legal 4096-samp
 Known limitations: committed freehand/highlighter 仍由 legacy static renderer 承担，留给 Phase 6；angle/fibonacci/text/position 完整迁移留给 Phase 8。
 Rollback verified: VITE_DRAWING_INTERACTION_OVERLAY=legacy 可恢复旧交互 renderer；document/codec 与 static scene 不回滚。
 Decision: Phase 5 PASS；Dynamic Overlay、Live Ink、document-first exact handoff 与正式性能门通过；Phase 6 尚未开始。
+~~~
+
+### Phase 6 执行记录
+
+~~~text
+Phase: 6 — LOD、命中索引、worker 与 latest-wins 背压
+Date: 2026-07-15
+Commit: 本执行记录所在 checkpoint（perf(frontend): add drawing LOD worker and indexed hit testing）
+Mode: document authority + scene-canary + worker raster；worker/OffscreenCanvas 不可用时在同一 scene/document 内回退主线程低 LOD，不恢复 per-drawing primitive
+Files: geometry/drawingLod.ts/drawingHitIndex.ts；worker protocol/runtime/worker entry；drawingRasterBackend.ts；scene projector/runtime/renderer/display-list/migration；scene primitive/atomic frame/lifecycle/interaction/live ink；performance counters/fixtures/runner/browser probe/acceptance；mock API、env 与对应 tests
+Tests: npm run check PASS（architecture 0 allowlist；双 TypeScript；ESLint；1216/1216 tests；production build 331 modules）；npm run test:drawing 494/494；git diff --check PASS。
+Smoke: headed Chrome 创建真实 freehand 并 reload 持久化通过，console 0 error；DPR 1 与 2 的六场景 headless smoke 均 smokeAcceptance=true、execution/fixture/oracle/restore 通过、invalidScenarios=[]。两组单次 smoke 只作功能与 DPR 覆盖，不作为正式 latency 结论。
+Perf baseline: Phase 5 的 output/phase5-formal-final.json；Phase 6 正式报告 output/phase6-formal-dpr15-final.json
+Perf result: production managed preview，headed Chrome/150.0.7871.124，1440×900，DPR 1.5，59.88Hz，10000 bars，6 scenarios ×（1 warm-up + 5 measured）全部 PASS。freehand 64×512 zoom/pan 的 scene project+paint p95/p99=4.5/10.1ms、frame=17.0/17.1ms、exact max=105.4ms；Renko lineage 为 6.3/14.0ms、17.0/17.1ms、79.3ms；indexed hit 共 5000 queries，p95/p99/max=0/0.1/0.1ms、brute-force mismatch=0；active 4096 finalize 的 drawing main=0.2/0.4ms、scene=4.0/4.2ms、input-to-paint=15.1/15.2ms、mouseup=4.2/4.2ms、worker finalize p95=1.1ms、exact max=48.5ms；main-thread fallback 的 scene=4.7/9.7ms、frame=17.0/17.1ms、exact max=53.8ms；全部场景 drawing-attributable Long Task=0。
+Backpressure: 96ms worker fault injection 的五次 measured 均 queue max/current=2/0、in-flight max/current=1/0、jobs/results=98/1、pending drops=57、stale result drops=34–36、stale publish=0，最终 requested/painted stamp 一致。注入下 worker finalize p95=212.2ms、exact=301.1–350.9ms；该故障场景按契约验证 latest-wins 最终收敛，不套正常场景的 120ms exact SLO。
+Correctness parity: canonical raw geometry 不被 LOD 覆盖；RDP hierarchy 保留 endpoints/path gaps，并按 0.35/0.75/1.25px 与可见像素预算选择；entity/chunk culling 在 LOD 与 LWC-bound final projection 之前；screen bbox 与 64px uniform-grid segment index 同 render plan 发布。worker patch 先按 immutable entity identity 排除未变化实体，再为真正 upsert 构造 canonical typed buffer；短 segment 使用 tolerance-expanded AABB 保守登记，长 segment 保留 DDA，边界命中与 brute force parity 有回归。Renko lineage exact resolve=6912–7296/run、fallback/unresolved=0；五个 viewport-only 场景 anchorResolveDelta=0；active-finalize 的 769 次解析来自 document mutation/new stroke，不属于 viewport-only。LOD 证据要求 initial/final raw-rendered-ratio 三元组都存在且各自自洽，布尔 invariant 要求两次 observation 都明确为 true；hit oracle 5000/5000 与 brute force 一致；全部 measured run 的 stale publish 与 shadow parity mismatch 均为 0。
+Known limitations: 本记录证明 Phase 6 checkpoint，不声称第 7 节全局发布矩阵全部完成；DPR 1/2 目前为 smoke，正式 5+1 仍留给最终全局发布矩阵。IndexedDB/export barrier 属于 Phase 7；angle/fibonacci/text/position 完整迁移属于 Phase 8。
+Rollback verified: VITE_DRAWING_RASTER_BACKEND=main-thread 使用相同 scene/document、screen display list 与低 LOD renderer；正式 fallback 场景 exact max=53.8ms，queue/in-flight/stale publish 均为 0。worker backend 的旧 generation、旧 plan 与旧 frame 结果禁止发布并释放资源。
+Decision: Phase 6 PASS；LOD、indexed hit、worker latest-wins/backpressure、source-lineage、主线程 fallback、浏览器功能验收与 DPR 1.5 正式性能门全部通过；Phase 7 尚未开始。
 ~~~

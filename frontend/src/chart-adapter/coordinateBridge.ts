@@ -1776,17 +1776,23 @@ export function resolveSourceLineageSpan(
     : null;
 }
 
-/** Final viewport projection for one already-resolved lineage span. */
-export function projectSourceLineageSpan(
+export interface DrawingSourceLineageSpanProjection {
+  readonly left: number;
+  readonly right: number;
+  readonly mode: "exact" | "fallback";
+}
+
+/** Final viewport projection plus auditable exact-vs-envelope provenance. */
+export function projectSourceLineageSpanWithMode(
   timeScale: TimeScaleBridge | null | undefined,
   resolution: DrawingSourceLineageSpanResolution | null | undefined,
   context: DrawingCoordinateContext | null = null,
-): { left: number; right: number } | null {
+): DrawingSourceLineageSpanProjection | null {
   if (!timeScale || !resolution) return null;
   const exactLeft = projectDrawingCoordinateResolution(timeScale, resolution.exact?.left, context);
   const exactRight = projectDrawingCoordinateResolution(timeScale, resolution.exact?.right, context);
   if (exactLeft !== null && exactRight !== null && exactLeft < exactRight) {
-    return { left: exactLeft, right: exactRight };
+    return { left: exactLeft, right: exactRight, mode: "exact" };
   }
 
   const envelope = resolution.envelope;
@@ -1807,7 +1813,18 @@ export function projectSourceLineageSpan(
   return {
     left: envelopeLeft + (envelopeRight - envelopeLeft) * envelope.leftRatio,
     right: envelopeLeft + (envelopeRight - envelopeLeft) * envelope.rightRatio,
+    mode: "fallback",
   };
+}
+
+/** Final viewport projection for one already-resolved lineage span. */
+export function projectSourceLineageSpan(
+  timeScale: TimeScaleBridge | null | undefined,
+  resolution: DrawingSourceLineageSpanResolution | null | undefined,
+  context: DrawingCoordinateContext | null = null,
+): { left: number; right: number } | null {
+  const projected = projectSourceLineageSpanWithMode(timeScale, resolution, context);
+  return projected ? { left: projected.left, right: projected.right } : null;
 }
 
 /**

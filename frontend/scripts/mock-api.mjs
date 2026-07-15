@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import http from "node:http";
+import { buildDrawingPerformanceMockBars } from "./drawing-performance-mock-data.mjs";
 
 const port = Number.parseInt(process.env.PORT || "18000", 10);
 const mockBarCount = Math.max(
@@ -15,23 +16,10 @@ const mockEndTime = Number.parseInt(
   process.env.CANDLESCOPE_MOCK_END_TIME || String(defaultEndTime),
   10,
 ) || defaultEndTime;
-const baseTime = mockEndTime - (mockBarCount - 1) * mockIntervalSeconds;
-const bars = Array.from({ length: mockBarCount }, (_, index) => {
-  const time = baseTime + index * mockIntervalSeconds;
-  const wave = Math.sin(index / 8) * 120 + Math.cos(index / 17) * 80;
-  const open = 62400 + wave + index * 4;
-  const close = open + Math.sin(index / 5) * 45;
-  const high = Math.max(open, close) + 80 + Math.sin(index / 3) * 12;
-  const low = Math.min(open, close) - 75 - Math.cos(index / 4) * 10;
-  const volume = 320 + Math.round(Math.abs(Math.sin(index / 6)) * 180 + index * 0.8);
-  return {
-    time,
-    open: round(open),
-    high: round(high),
-    low: round(low),
-    close: round(close),
-    volume,
-  };
+const bars = buildDrawingPerformanceMockBars({
+  barCount: mockBarCount,
+  intervalSeconds: mockIntervalSeconds,
+  endTime: mockEndTime,
 });
 const mockPriceRange = bars.reduce((range, bar) => ({
   min: Math.min(range.min, bar.low),
@@ -227,7 +215,10 @@ function route(req, res) {
   if (path === "/api/v1/subscriptions/" || path === "/api/v1/subscriptions") return json(res, []);
   if (path === "/api/v1/subscriptions/prices") return json(res, {});
   if (path === "/api/v1/symbols/exchange-info") return json(res, { symbols: [{ symbol: "BTCUSDT" }] });
-  if (path === "/api/v1/klines/" || path === "/api/v1/klines") return json(res, historyPayload(Number(url.searchParams.get("limit")) || 500));
+  // The managed performance matrix owns the requested bar count. Returning a
+  // caller-capped tail here would claim a 10000-bar Phase 6 run while the chart
+  // had actually mounted only its ordinary 500/720-bar product window.
+  if (path === "/api/v1/klines/" || path === "/api/v1/klines") return json(res, historyPayload());
   if (path === "/api/v1/klines/latest") return json(res, historyPayload(Number(url.searchParams.get("limit")) || 5));
   if (path === "/api/v1/klines/history" || path === "/api/v1/klines/range" || path === "/api/v1/klines/history/before") {
     return json(res, historyPayload());

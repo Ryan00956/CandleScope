@@ -13,6 +13,14 @@ export interface DrawingFrameViewport {
   readonly maxHorizontal: number;
   readonly minPrice: number;
   readonly maxPrice: number;
+  /** Public LWC logical range; final X projection remains adapter-owned. */
+  readonly minLogical?: number;
+  readonly maxLogical?: number;
+  /** Three public price samples used only to prove a reliable affine proxy. */
+  readonly priceProjectionSamples?: readonly Readonly<{
+    price: number;
+    coordinateCssPx: number;
+  }>[];
 }
 
 /**
@@ -125,6 +133,14 @@ function normalizedBarSpacing(value: unknown): number {
   return finiteNumber(value) && value > 0 ? value : 1;
 }
 
+function isPriceProjectionSample(
+  value: unknown,
+): value is Readonly<{ price: number; coordinateCssPx: number }> {
+  if (!value || typeof value !== "object") return false;
+  const sample = value as { price?: unknown; coordinateCssPx?: unknown };
+  return finiteNumber(sample.price) && finiteNumber(sample.coordinateCssPx);
+}
+
 function normalizedDrawingViewport(value: unknown): DrawingFrameViewport | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<DrawingFrameViewport>;
@@ -135,12 +151,31 @@ function normalizedDrawingViewport(value: unknown): DrawingFrameViewport | null 
     || !finiteNumber(candidate.maxPrice)
     || candidate.minHorizontal > candidate.maxHorizontal
     || candidate.minPrice > candidate.maxPrice) return null;
+  const hasLogicalRange = finiteNumber(candidate.minLogical)
+    && finiteNumber(candidate.maxLogical)
+    && candidate.minLogical <= candidate.maxLogical;
+  const sampleCandidates: unknown[] | null = Array.isArray(candidate.priceProjectionSamples)
+    ? candidate.priceProjectionSamples as unknown[]
+    : null;
+  const priceProjectionSamples = sampleCandidates
+    && sampleCandidates.length >= 3
+    && sampleCandidates.every(isPriceProjectionSample)
+    ? Object.freeze(sampleCandidates.map((sample) => Object.freeze({
+        price: Number(sample.price),
+        coordinateCssPx: Number(sample.coordinateCssPx),
+      })))
+    : undefined;
   return Object.freeze({
     horizontalDomain: candidate.horizontalDomain,
     minHorizontal: candidate.minHorizontal,
     maxHorizontal: candidate.maxHorizontal,
     minPrice: candidate.minPrice,
     maxPrice: candidate.maxPrice,
+    ...(hasLogicalRange ? {
+      minLogical: Number(candidate.minLogical),
+      maxLogical: Number(candidate.maxLogical),
+    } : {}),
+    ...(priceProjectionSamples ? { priceProjectionSamples } : {}),
   });
 }
 

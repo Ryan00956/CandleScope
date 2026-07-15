@@ -20,16 +20,67 @@ import {
   FIXTURE_NAMES,
   PHASE4_SCENE_DRAWING_TYPES,
   buildDrawingFixture,
+  fixtureTimeOffsetDenominator,
 } from "./drawing-performance-fixtures.mjs";
+import { RenkoProjector } from "../src/features/chart-representation/projectors/renkoProjector.ts";
+import { resolveRenkoProjectorOptions } from "../src/features/chart-representation/renkoProjectionOptions.ts";
+import { buildDrawingPerformanceMockBars } from "./drawing-performance-mock-data.mjs";
+import {
+  PHASE6_LINEAGE_REPRESENTATION,
+  buildPhase6LineageFixtureContract,
+  projectTraditionalRenkoLineage,
+} from "./drawing-performance-phase6-lineage.mjs";
 
 const EXPECTED_COUNTS = Object.freeze({
   empty: { drawings: 0, freehands: 0, points: 0, totalPoints: 0 },
   singleFreehand4096: { drawings: 1, freehands: 1, points: 4_096, totalPoints: 4_096 },
   freehand64x512: { drawings: 64, freehands: 64, points: 32_768, totalPoints: 32_768 },
+  freehandLineage64x512: {
+    drawings: 64,
+    freehands: 64,
+    points: 32_768,
+    spans: 64,
+    totalPoints: 32_768,
+  },
   entities200: { drawings: 200, freehands: 0, points: 0, totalPoints: 400 },
   entities512: { drawings: 512, freehands: 0, points: 0, totalPoints: 1_024 },
   phase4Migrated64: { drawings: 64, freehands: 0, points: 0, totalPoints: 107 },
   phase4Mixed64: { drawings: 64, freehands: 32, points: 512, totalPoints: 565 },
+});
+
+test("managed 10000-bar mock stays inside the fixture-visible price window", () => {
+  const bars = buildDrawingPerformanceMockBars({
+    barCount: 10_000,
+    intervalSeconds: 3_600,
+    endTime: 1_783_987_200,
+  });
+  const range = bars.reduce((current, bar) => ({
+    min: Math.min(current.min, bar.low),
+    max: Math.max(current.max, bar.high),
+  }), { min: Number.POSITIVE_INFINITY, max: Number.NEGATIVE_INFINITY });
+  assert.ok(range.min >= DEFAULT_MOCK_VISIBLE_PRICE_RANGE.min, `minimum ${range.min}`);
+  assert.ok(range.max <= DEFAULT_MOCK_VISIBLE_PRICE_RANGE.max, `maximum ${range.max}`);
+});
+
+test("Phase 6 price profiles keep heavy fixtures aligned with the managed history", () => {
+  const bars = buildDrawingPerformanceMockBars({
+    barCount: 10_000,
+    intervalSeconds: 3_600,
+    endTime: 1_783_987_200,
+  });
+  const priceProfile = { start: bars[0].close, end: bars.at(-1).close };
+  const { fixture, drawings } = parsedFixture("freehand64x512", {
+    startTime: bars[0].time,
+    intervalSeconds: 3_600 * 9_999 / 511,
+    priceProfile,
+  });
+  assert.deepEqual(fixture.metadata.priceProfile, priceProfile);
+  for (const drawing of drawings) {
+    assert.ok(
+      drawing.stroke.points.at(-1).price - drawing.stroke.points[0].price > 800,
+      drawing.id,
+    );
+  }
 });
 
 function parsedFixture(name, options) {
@@ -97,8 +148,14 @@ test("all named fixtures use the current SavedDrawing and freehand v3 schemas", 
       assert.deepEqual(normalizeFreehandStrokeV3(drawing.stroke), drawing.stroke);
       assert.equal(Object.hasOwn(drawing, "dataPoints"), false);
       for (const point of drawing.stroke.points) {
-        assert.deepEqual(Object.keys(point).sort(), ["price", "time"]);
-        assert.ok(Number.isFinite(point.time));
+        if (name === "freehandLineage64x512") {
+          assert.deepEqual(Object.keys(point).sort(), ["price", "ratio", "span"]);
+          assert.equal(point.span, 0);
+          assert.ok(Number.isFinite(point.ratio));
+        } else {
+          assert.deepEqual(Object.keys(point).sort(), ["price", "time"]);
+          assert.ok(Number.isFinite(point.time));
+        }
         assert.ok(Number.isFinite(point.price));
       }
     }
@@ -117,7 +174,97 @@ test("fixtures have the promised entity and freehand point counts", () => {
     assert.equal(fixture.metadata.freehandPointCount, expected.points);
     assert.equal(fixture.metadata.pointCount, expected.totalPoints);
     assert.equal(fixture.metadata.freehandSpanCount, counts.spans);
+    if (expected.spans !== undefined) assert.equal(counts.spans, expected.spans);
   }
+});
+
+test("source-lineage fixture uses exact managed Renko ordinals and one fallback envelope", () => {
+  const intervalSeconds = 3_600;
+  const endTime = 1_783_987_200;
+  const bars = buildDrawingPerformanceMockBars({ barCount: 10_000, intervalSeconds, endTime });
+  const lineageContract = buildPhase6LineageFixtureContract(bars);
+  const startTime = bars[0].time;
+  const { fixture, drawings } = parsedFixture("freehandLineage64x512", {
+    startTime,
+    intervalSeconds: intervalSeconds * 9_999 / 511,
+    lineageContract,
+  });
+  assert.equal(fixture.metadata.freehandPointCount, 32_768);
+  assert.equal(fixture.metadata.freehandSpanCount, 64);
+  assert.equal(fixture.metadata.maxFreehandPointsPerDrawing, 512);
+  assert.equal(fixture.metadata.maxFreehandSpansPerDrawing, 1);
+  assert.equal(fixture.metadata.sourceProjection, "renko");
+  assert.equal(
+    fixture.metadata.sourceProjectionConfig,
+    PHASE6_LINEAGE_REPRESENTATION.projectionConfig,
+  );
+  assert.deepEqual(fixture.metadata.lineageExact, lineageContract.exact);
+  assert.deepEqual(fixture.metadata.lineageFallback, lineageContract.fallback);
+  for (const drawing of drawings) {
+    assert.equal(drawing.stroke.spans.length, 1);
+    assert.deepEqual(drawing.stroke.spans[0], {
+      exact: lineageContract.exact,
+      fallback: lineageContract.fallback,
+    });
+    assert.equal(drawing.stroke.sourceProjection, "renko");
+    assert.equal(drawing.stroke.sourceProjectionConfig, lineageContract.sourceProjectionConfig);
+    assert.equal(drawing.stroke.points.length, 512);
+    assert.deepEqual(drawing.stroke.points[0], {
+      span: 0,
+      ratio: 0,
+      price: drawing.stroke.points[0].price,
+    });
+    assert.equal(drawing.stroke.points.at(-1).ratio, 1);
+  }
+});
+
+test("script Renko lineage identities match the production projector exactly", () => {
+  const bars = buildDrawingPerformanceMockBars({
+    barCount: 10_000,
+    intervalSeconds: 3_600,
+    endTime: 1_783_987_200,
+  });
+  const scripted = projectTraditionalRenkoLineage(bars);
+  const runtimeOptions = resolveRenkoProjectorOptions(bars, {
+    mode: "traditional",
+    atrLength: 14,
+    boxSize: 10,
+  });
+  assert.deepEqual(runtimeOptions, {
+    boxSize: 10,
+    minTick: 0.01,
+    mode: "traditional",
+    atrLength: 14,
+    configKey: "renko:traditional:14:10:0.01",
+  });
+  const production = new RenkoProjector({ boxSize: 10, minTick: 0.01 }).project(bars)
+    .map((row) => ({
+      order: row.time.order,
+      sourceTime: row.time.sourceTime,
+      sourceOrdinal: row.time.sourceOrdinal,
+    }));
+  assert.deepEqual(scripted, production);
+  const contract = buildPhase6LineageFixtureContract(bars);
+  assert.ok(contract.exact.left.sourceOrdinal > 0);
+  assert.ok(contract.exact.right.sourceOrdinal > 0);
+  assert.ok(production.some((anchor) => (
+    anchor.sourceTime === contract.exact.left.time
+      && anchor.sourceOrdinal === contract.exact.left.sourceOrdinal
+  )));
+  assert.ok(production.some((anchor) => (
+    anchor.sourceTime === contract.exact.right.time
+      && anchor.sourceOrdinal === contract.exact.right.sourceOrdinal
+  )));
+});
+
+test("fixture-to-bars mapping spans all 10000 mock bars for both 64x512 fixtures", () => {
+  assert.equal(fixtureTimeOffsetDenominator("freehand64x512"), 511);
+  assert.equal(fixtureTimeOffsetDenominator("freehandLineage64x512"), 511);
+  const barCount = 10_000;
+  const sourceIntervalSeconds = 60;
+  const mappedInterval = sourceIntervalSeconds * (barCount - 1)
+    / fixtureTimeOffsetDenominator("freehandLineage64x512");
+  assert.equal(mappedInterval * 511, sourceIntervalSeconds * (barCount - 1));
 });
 
 test("entity fixtures stay low-point and contain only legal line or shape drawings", () => {

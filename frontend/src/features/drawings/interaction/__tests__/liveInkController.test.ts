@@ -104,13 +104,14 @@ test("highlighter applies opacity once to its whole dedicated canvas", () => {
   assert.equal(context.globalCompositeOperation, "source-over");
 });
 
-test("final ink survives stale paint and clears one frame after exact acknowledgement", () => {
+test("final ink survives stale paint and clears after a covering superseding viewport paint", () => {
   const { canvas } = canvasFixture();
   const frames: Array<() => void> = [];
   const listeners = new Set<(stamp: {
     scopeKey: string;
     documentRevision: number;
     surfaceGeneration: number;
+    viewportRevision: number;
   }) => void>();
   const controller = createLiveInkController({
     canvas,
@@ -125,17 +126,23 @@ test("final ink survives stale paint and clears one frame after exact acknowledg
   controller.appendFrame([{ x: 60, y: 30 }]);
   assert.equal(controller.finish(), true);
   controller.retainUntilPaint(
-    { scopeKey: "BTC", documentRevision: 7, surfaceGeneration: 3 },
+    { scopeKey: "BTC", documentRevision: 7, surfaceGeneration: 3, viewportRevision: 11 },
     (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
   );
 
   for (const listener of listeners) {
-    listener({ scopeKey: "BTC", documentRevision: 6, surfaceGeneration: 3 });
+    listener({ scopeKey: "BTC", documentRevision: 6, surfaceGeneration: 3, viewportRevision: 12 });
   }
   assert.equal(frames.length, 0);
   assert.equal(controller.snapshot().sampleCount, 2);
   for (const listener of listeners) {
-    listener({ scopeKey: "BTC", documentRevision: 7, surfaceGeneration: 3 });
+    listener({ scopeKey: "ETH", documentRevision: 8, surfaceGeneration: 3, viewportRevision: 12 });
+    listener({ scopeKey: "BTC", documentRevision: 8, surfaceGeneration: 4, viewportRevision: 12 });
+  }
+  assert.equal(frames.length, 0);
+  assert.equal(controller.snapshot().sampleCount, 2);
+  for (const listener of listeners) {
+    listener({ scopeKey: "BTC", documentRevision: 7, surfaceGeneration: 3, viewportRevision: 12 });
   }
   assert.equal(frames.length, 1);
   assert.equal(controller.snapshot().sampleCount, 2);

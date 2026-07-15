@@ -8,6 +8,7 @@ import {
 import type { DrawingDocument } from "../../core/drawingDocument.js";
 import { createDrawingDocumentStore } from "../../core/drawingDocumentStore.js";
 import type { LegacyPrimitiveRenderer } from "../../legacy/legacyPrimitiveRenderer.js";
+import { drawingPerfCounters } from "../../performance/drawingPerfCounters.js";
 import { createDrawingScreenDisplayList } from "../../rendering/drawingDisplayList.js";
 import {
   createDrawingSceneRuntime,
@@ -16,6 +17,17 @@ import type {
   DrawingSceneFrameAdapter,
   DrawingSceneProjectionRequest,
 } from "../drawingSceneRuntime.js";
+import type { DrawingRenderRevisionStamp } from "../drawingRenderScheduler.js";
+import type {
+  DrawingWorkerTransport,
+} from "../../worker/drawingWorkerClient.js";
+import {
+  drawingWorkerViewportByteLength,
+} from "../../worker/drawingWorkerProtocol.js";
+import type {
+  DrawingWorkerRenderRequest,
+  DrawingWorkerResponse,
+} from "../../worker/drawingWorkerProtocol.js";
 
 function lineEntity(id: string, from: number, to: number) {
   return createDrawingEntity({
@@ -43,7 +55,29 @@ function documentWithRevision(revision = 0): DrawingDocument {
   });
 }
 
-function frame() {
+function freehandDocument(): DrawingDocument {
+  const entity = createDrawingEntity({
+    id: "ink",
+    kind: "freehand",
+    geometry: {
+      kind: "freehand",
+      dataPoints: [{ time: 10, price: 10 }, { time: 20, price: 20 }],
+    },
+    style: { kind: "freehand", color: "#60a5fa", lineWidth: 2 },
+  });
+  return createDrawingDocument({
+    scopeKey: "scope-a",
+    documentRevision: 1,
+    entities: [entity],
+    zOrder: [entity.id],
+  });
+}
+
+function frame({
+  includeAffinePriceCertificate = true,
+}: {
+  includeAffinePriceCertificate?: boolean;
+} = {}) {
   return createDrawingFrameSnapshotFactory().capture({
     axisKind: "time",
     barSpacing: 6,
@@ -54,6 +88,13 @@ function frame() {
       maxHorizontal: 50,
       minPrice: 0,
       maxPrice: 50,
+      ...(includeAffinePriceCertificate ? {
+        priceProjectionSamples: [
+          { price: 0, coordinateCssPx: 300 },
+          { price: 25, coordinateCssPx: 150 },
+          { price: 50, coordinateCssPx: 0 },
+        ],
+      } : {}),
     },
     heightCssPx: 300,
     seriesData: [],
@@ -63,10 +104,9 @@ function frame() {
   });
 }
 
-function fakeAdapter() {
-  const captured = frame();
+function fakeAdapter(captured = frame()) {
   let current = captured;
-  const listeners = new Set<() => void>();
+  const listeners = new Set<(reason?: "manual" | "viewport") => void>();
   const adapter: DrawingSceneFrameAdapter = {
     captureDrawingFrame: () => current,
     isDrawingFrameCurrent: (candidate) => candidate === current,
@@ -81,7 +121,9 @@ function fakeAdapter() {
     adapter,
     clearFrame: () => { current = null as unknown as typeof captured; },
     restoreFrame: () => { current = captured; },
-    emit: () => { for (const listener of listeners) listener(); },
+    emit: (reason?: "manual" | "viewport") => {
+      for (const listener of listeners) listener(reason);
+    },
     listenerCount: () => listeners.size,
   };
 }
@@ -112,6 +154,99 @@ function project(request: DrawingSceneProjectionRequest) {
   })));
 }
 
+function projectFreehand(
+  request: DrawingSceneProjectionRequest,
+  compositeOperation: GlobalCompositeOperation = "source-over",
+) {
+  return createDrawingScreenDisplayList(request.stamp, request.nodes.map((node) => ({
+    id: node.id,
+    kind: node.entity.kind,
+    geometryRevision: node.geometryRevision,
+    styleRevision: node.styleRevision,
+    style: node.entity.style,
+    points: new Float64Array([10, 10, 40, 40]),
+    bbox: [10, 10, 40, 40] as const,
+    handles: new Float64Array([10, 10, 40, 40]),
+    handleNames: ["0", "1"],
+    hitZones: [{ kind: "polyline" as const, pointOffset: 0, pointCount: 2, tolerance: 8 }],
+    renderSpec: {
+      op: "freehand" as const,
+      strokeColor: "#60a5fa",
+      selectionHighlightColor: "#ff6b6b",
+      lineWidthCssPx: 2,
+      opacity: 1,
+      compositeOperation,
+      brushShape: "round" as const,
+      selected: false,
+    },
+  })));
+}
+
+class RuntimeWorkerTransport implements DrawingWorkerTransport {
+  onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  readonly posts: unknown[] = [];
+  terminated = false;
+
+  postMessage(message: unknown): void {
+    this.posts.push(message);
+  }
+
+  emit(message: DrawingWorkerResponse): void {
+    this.onmessage?.({ data: message } as MessageEvent<unknown>);
+  }
+
+  terminate(): void {
+    this.terminated = true;
+  }
+
+  renderRequests(): DrawingWorkerRenderRequest[] {
+    return this.posts.filter((message): message is DrawingWorkerRenderRequest => (
+      (message as { type?: string }).type === "drawing-worker/render"
+    ));
+  }
+}
+
+function bitmapWorkerResponse(
+  request: DrawingWorkerRenderRequest,
+  close: () => void,
+): DrawingWorkerResponse {
+  const paintSpec = request.viewport.paintSpecs[0];
+  assert.ok(paintSpec);
+  const bitmap = { width: 16, height: 16, close } as unknown as ImageBitmap;
+  return {
+    type: "drawing-worker/result",
+    header: request.header,
+    result: {
+      kind: "bitmap-draw-result",
+      bitmap,
+      widthCssPx: request.viewport.widthCssPx,
+      heightCssPx: request.viewport.heightCssPx,
+      dpr: request.viewport.dpr,
+      atlasWidthPhysicalPx: 16,
+      atlasHeightPhysicalPx: 16,
+      byteLength: 16 * 16 * 4,
+      layers: [{
+        entityIndex: paintSpec.entityIndex,
+        lastEntityIndex: paintSpec.entityIndex,
+        sourceXPhysicalPx: 0,
+        sourceYPhysicalPx: 0,
+        sourceWidthPhysicalPx: 16,
+        sourceHeightPhysicalPx: 16,
+        destinationXCssPx: 8,
+        destinationYCssPx: 8,
+        destinationWidthCssPx: 16,
+        destinationHeightCssPx: 16,
+        opacity: paintSpec.opacity,
+        compositeOperation: paintSpec.compositeOperation,
+      }],
+      rawPointCount: 2,
+      renderedPointCount: 2,
+      canonicalEntityCount: 1,
+    },
+  };
+}
+
 const immediateParityWork = Object.freeze({
   requestParityWork: (callback: () => void): null => {
     callback();
@@ -136,10 +271,22 @@ test("legacy mode is inert and owns no subscriptions", () => {
   assert.deepEqual(runtime.snapshot(), {
     active: false,
     disposed: false,
+    hitIndex: null,
+    lastExactSettleMs: null,
+    lastWorkerPublishedStamp: null,
+    lastWorkerRequestedStamp: null,
+    lodToleranceClass: "normalStatic",
     mode: "legacy",
+    offscreenSupported: typeof OffscreenCanvas === "function",
     plan: null,
     publicationReady: false,
+    rasterBackend: "main-thread",
+    rawPointCount: 0,
+    renderedPointCount: 0,
     scopeKey: null,
+    staleWorkerPublishCount: 0,
+    workerResultDeliveryDelayMs: 0,
+    worker: null,
   });
   runtime.dispose();
 });
@@ -171,10 +318,402 @@ test("scene-canary filters owned nodes and publishes only through the visible su
   assert.equal(runtime.flushNow(), true);
   assert.deepEqual(published.current?.entities.map((entity) => entity.id), ["inside"]);
   assert.strictEqual(runtime.snapshot().plan, published.current);
+  assert.strictEqual(runtime.snapshot().hitIndex?.list, published.current);
+  assert.equal(runtime.snapshot().hitIndex?.stats.segmentCount, 1);
+  assert.equal(runtime.snapshot().hitIndex?.stats.cellSizeCssPx, 64);
   assert.equal(runtime.requestParity(), false);
   runtime.suspend();
   assert.equal(clearCount, 1);
   assert.equal(runtime.snapshot().plan, null);
+  assert.equal(runtime.snapshot().hitIndex, null);
+});
+
+test("viewport invalidation publishes continuous LOD immediately and exact LOD after 100 ms", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const projectedToleranceClasses: string[] = [];
+  const delayed = new Map<number, Readonly<{ callback: () => void; delayMs: number }>>();
+  let nextDelayHandle = 0;
+  let timestamp = 0;
+  let paintedListener: ((stamp: DrawingRenderRevisionStamp) => void) | null = null;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    now: () => timestamp,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+    scheduleDelay: (callback, delayMs) => {
+      nextDelayHandle += 1;
+      delayed.set(nextDelayHandle, { callback, delayMs });
+      return nextDelayHandle;
+    },
+    cancelDelay: (handle) => {
+      delayed.delete(handle as number);
+    },
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: (request) => {
+      projectedToleranceClasses.push(request.lodToleranceClass);
+      return project(request);
+    },
+    publishScene: () => true,
+    subscribeScenePainted: (listener) => {
+      paintedListener = listener;
+      return () => { paintedListener = null; };
+    },
+  });
+
+  assert.equal(runtime.flushNow(), true);
+  timestamp = 10;
+  adapter.emit("viewport");
+  assert.equal(runtime.snapshot().lodToleranceClass, "continuousViewport");
+  assert.equal(runtime.flushNow(), true);
+  assert.deepEqual(projectedToleranceClasses, ["normalStatic", "continuousViewport"]);
+  assert.equal(delayed.size, 1);
+  const exactTaskEntry = [...delayed.entries()][0];
+  assert.ok(exactTaskEntry);
+  const [exactTaskHandle, exactTask] = exactTaskEntry;
+  assert.equal(exactTask.delayMs, 100);
+
+  delayed.delete(exactTaskHandle);
+  timestamp = 110;
+  exactTask.callback();
+  assert.equal(runtime.snapshot().lodToleranceClass, "settledExact");
+  timestamp = 115;
+  assert.equal(runtime.flushNow(), true);
+  assert.deepEqual(projectedToleranceClasses, [
+    "normalStatic",
+    "continuousViewport",
+    "settledExact",
+  ]);
+  assert.equal(runtime.snapshot().lastExactSettleMs, null,
+    "publication alone must not claim that exact pixels reached the canvas");
+  timestamp = 125;
+  const exactPlan = runtime.snapshot().plan;
+  const listener = paintedListener as ((stamp: DrawingRenderRevisionStamp) => void) | null;
+  assert.ok(exactPlan && listener);
+  listener(exactPlan.stamp);
+  assert.equal(runtime.snapshot().lastExactSettleMs, 115);
+  runtime.dispose();
+});
+
+test("worker backend fails closed to the same indexed scene when Worker is unavailable", () => {
+  const workerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Worker");
+  Object.defineProperty(globalThis, "Worker", {
+    configurable: true,
+    value: undefined,
+  });
+  try {
+    const store = createDrawingDocumentStore(documentWithRevision());
+    const adapter = fakeAdapter();
+    const renderer = fakeRenderer(store.getSnapshot());
+    let publicationCount = 0;
+    const runtime = createDrawingSceneRuntime({
+      mode: "scene-canary",
+      rasterBackend: "worker",
+      requestFrame: () => 1,
+      cancelFrame: () => {},
+    });
+    assert.equal(runtime.activate({
+      adapter: adapter.adapter,
+      renderer: renderer.renderer,
+      store,
+      projectScene: project,
+      publishScene: () => {
+        publicationCount += 1;
+        return true;
+      },
+    }), true);
+
+    assert.equal(runtime.snapshot().rasterBackend, "main-thread");
+    assert.equal(runtime.snapshot().worker?.availability, "unavailable");
+    assert.equal(runtime.snapshot().worker?.unavailableReason, "unsupported");
+    assert.equal(runtime.flushNow(), true);
+    assert.equal(publicationCount, 1);
+    assert.ok(runtime.snapshot().plan);
+    assert.strictEqual(runtime.snapshot().hitIndex?.list, runtime.snapshot().plan);
+    runtime.dispose();
+  } finally {
+    if (workerDescriptor) Object.defineProperty(globalThis, "Worker", workerDescriptor);
+    else Reflect.deleteProperty(globalThis, "Worker");
+  }
+});
+
+test("same-stamp invalidation rejects an old worker bitmap before a new scene epoch builds", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  let closed = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan) => {
+      published.push(plan);
+      return true;
+    },
+  });
+  assert.equal(runtime.flushNow(), true);
+  const first = transport.renderRequests()[0];
+  assert.ok(first);
+
+  // Selection/overlay ownership can change without changing the document or
+  // frame stamp. The epoch invalidation must still make this result stale.
+  assert.equal(runtime.invalidate("same-stamp-selection-change"), true);
+  transport.emit(bitmapWorkerResponse(first, () => { closed += 1; }));
+  assert.equal(closed, 1);
+  assert.equal(published.length, 0);
+
+  assert.equal(runtime.flushNow(), true);
+  const second = transport.renderRequests()[1];
+  assert.ok(second);
+  assert.deepEqual(second.header.stamp, first.header.stamp);
+  transport.emit(bitmapWorkerResponse(second, () => { closed += 1; }));
+  assert.equal(published.length, 1);
+  assert.ok(published[0]?.freehandRaster);
+  assert.equal(runtime.snapshot().rasterBackend, "worker");
+  assert.equal(runtime.snapshot().staleWorkerPublishCount, 0,
+    "a superseded result rejected inside the client never attempts publication");
+  published[0]?.freehandRaster?.bitmap.close();
+  runtime.dispose();
+  assert.equal(closed, 2);
+});
+
+test("worker frame-stale preflight is a stale result drop, not a stale publication", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  let closed = 0;
+  const beforeCounters = drawingPerfCounters.snapshot().counters;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan) => {
+      published.push(plan);
+      return true;
+    },
+  });
+  assert.equal(runtime.flushNow(), true);
+  const staleRequest = transport.renderRequests()[0];
+  assert.ok(staleRequest);
+
+  // Model a chart frame advancing before its invalidation callback reaches the
+  // scene runtime. The response is still the client's latest job and has the
+  // latest epoch/stamp, but it must fail the final frame-current preflight.
+  adapter.clearFrame();
+  transport.emit(bitmapWorkerResponse(staleRequest, () => { closed += 1; }));
+
+  assert.equal(closed, 1);
+  assert.equal(published.length, 0);
+  assert.equal(runtime.snapshot().staleWorkerPublishCount, 0);
+  const droppedCounters = drawingPerfCounters.snapshot().counters;
+  assert.equal(
+    droppedCounters.staleWorkerResultCount,
+    beforeCounters.staleWorkerResultCount + 1,
+  );
+  assert.equal(
+    droppedCounters.staleWorkerPublishCount,
+    beforeCounters.staleWorkerPublishCount,
+  );
+
+  adapter.restoreFrame();
+  assert.equal(runtime.flushNow(), true);
+  const currentRequest = transport.renderRequests()[1];
+  assert.ok(currentRequest);
+  transport.emit(bitmapWorkerResponse(currentRequest, () => { closed += 1; }));
+  assert.equal(published.length, 1);
+  assert.deepEqual(
+    runtime.snapshot().lastWorkerPublishedStamp,
+    currentRequest.header.stamp,
+  );
+  published[0]?.freehandRaster?.bitmap.close();
+  runtime.dispose();
+  assert.equal(closed, 2);
+});
+
+test("worker finalize timing includes validation, raster attachment, and synchronous publication", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let timestamp = 10;
+  const before = drawingPerfCounters.snapshot().durations.workerFinalizeMs.totalCount;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    now: () => timestamp,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: () => {
+      timestamp += 7;
+      return true;
+    },
+  });
+  assert.equal(runtime.flushNow(), true);
+  const request = transport.renderRequests()[0];
+  assert.ok(request);
+  timestamp = 60;
+  transport.emit(bitmapWorkerResponse(request, () => {}));
+
+  const finalize = drawingPerfCounters.snapshot().durations.workerFinalizeMs;
+  assert.equal(finalize.totalCount, before + 1);
+  assert.ok((finalize.maxMs ?? 0) >= 57,
+    "worker finalize must end after synchronous publication, not at callback entry");
+  runtime.snapshot().plan?.freehandRaster?.bitmap.close();
+  runtime.dispose();
+});
+
+test("a rejected worker publication increments the observable stale-publish invariant", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let closed = 0;
+  const beforeCounters = drawingPerfCounters.snapshot().counters;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    onError: () => {},
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: () => false,
+  });
+  assert.equal(runtime.flushNow(), true);
+  const request = transport.renderRequests()[0];
+  assert.ok(request);
+  transport.emit(bitmapWorkerResponse(request, () => { closed += 1; }));
+
+  assert.equal(closed, 1);
+  assert.equal(runtime.snapshot().staleWorkerPublishCount, 1);
+  const rejectedCounters = drawingPerfCounters.snapshot().counters;
+  assert.equal(
+    rejectedCounters.staleWorkerPublishCount,
+    beforeCounters.staleWorkerPublishCount + 1,
+  );
+  assert.equal(
+    rejectedCounters.staleWorkerResultCount,
+    beforeCounters.staleWorkerResultCount,
+  );
+  runtime.dispose();
+});
+
+test("bitmap capability fallback is sticky and avoids repeated worker round-trips", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let publicationCount = 0;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: () => {
+      publicationCount += 1;
+      return true;
+    },
+  });
+  assert.equal(runtime.flushNow(), true);
+  const request = transport.renderRequests()[0];
+  assert.ok(request);
+  transport.emit({
+    type: "drawing-worker/result",
+    header: request.header,
+    result: {
+      kind: "typed-draw-result",
+      ...request.viewport,
+      byteLength: drawingWorkerViewportByteLength(request.viewport),
+      rawPointCount: 2,
+      renderedPointCount: request.viewport.points.length / 2,
+      canonicalEntityCount: 1,
+    },
+  });
+  assert.equal(publicationCount, 1);
+  assert.equal(runtime.snapshot().rasterBackend, "main-thread");
+  assert.equal(transport.terminated, true);
+
+  adapter.emit("viewport");
+  assert.equal(runtime.flushNow(), true);
+  assert.equal(publicationCount, 2);
+  assert.equal(transport.renderRequests().length, 1,
+    "an unsupported raster worker is disabled for the remaining runtime mount");
+  runtime.dispose();
+});
+
+test("bbox-sensitive composite operations stay on the exact main-thread scene path", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const published: ReturnType<typeof projectFreehand>[] = [];
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: (request) => projectFreehand(request, "copy"),
+    publishScene: (plan) => {
+      published.push(plan);
+      return true;
+    },
+  });
+  assert.equal(runtime.flushNow(), true);
+  assert.equal(published.length, 1);
+  assert.equal(published[0]?.freehandRaster, undefined);
+  assert.equal(transport.renderRequests().length, 0);
+  assert.equal(runtime.snapshot().rasterBackend, "main-thread");
+  runtime.dispose();
 });
 
 test("shadow reconciles the exact document, culls, and publishes an invisible typed plan", () => {
@@ -255,6 +794,48 @@ test("data-space culling defers pixel-sized angle and fibonacci bounds to the pr
 
   assert.equal(runtime.flushNow(), true);
   assert.deepEqual(projectedNodeIds, [["far-angle", "far-fibonacci"]]);
+  runtime.dispose();
+});
+
+test("data-space culling fails open for every pixel-painted kind without an affine price certificate", () => {
+  const farLine = lineEntity("nonlinear-edge-line", 1_000, 1_100);
+  const farShape = createDrawingEntity({
+    id: "nonlinear-edge-shape",
+    kind: "shape",
+    geometry: {
+      kind: "shape",
+      shapeType: "rectangle",
+      dataPoints: [{ time: 1_000, price: 1_000 }, { time: 1_100, price: 1_100 }],
+    },
+    style: { kind: "shape", color: "#fff", lineWidth: 8 },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "nonlinear-price-cull",
+    entities: [farLine, farShape],
+    zOrder: [farLine.id, farShape.id],
+  });
+  const store = createDrawingDocumentStore(document);
+  const captured = frame({ includeAffinePriceCertificate: false });
+  const adapter = fakeAdapter(captured);
+  const renderer = fakeRenderer(store.getSnapshot());
+  const projectedNodeIds: string[][] = [];
+  const runtime = createDrawingSceneRuntime({
+    mode: "shadow",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: (request) => {
+      projectedNodeIds.push(request.nodes.map((node) => node.id));
+      return project(request);
+    },
+  });
+
+  assert.equal(runtime.flushNow(), true);
+  assert.deepEqual(projectedNodeIds, [[farLine.id, farShape.id]]);
   runtime.dispose();
 });
 

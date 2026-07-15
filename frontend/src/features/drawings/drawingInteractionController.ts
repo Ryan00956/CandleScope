@@ -158,6 +158,25 @@ function drawingPerfNow(): number {
     : Date.now();
 }
 
+export function scenePaintCoversDrawingHandoff(
+  ticket: Readonly<{
+    scopeKey: string;
+    documentRevision: number;
+    surfaceGeneration: number;
+    viewportRevision: number;
+  }>,
+  stamp: Readonly<{
+    scopeKey: string;
+    documentRevision: number;
+    surfaceGeneration: number;
+    viewportRevision: number;
+  }>,
+): boolean {
+  return stamp.scopeKey === ticket.scopeKey
+    && stamp.surfaceGeneration === ticket.surfaceGeneration
+    && stamp.documentRevision >= ticket.documentRevision;
+}
+
 const TEXT_UI_STABLE_FRAME_LIMIT = 12;
 
 type TwoPointDrawingPrimitive = LineDrawingPrimitive
@@ -627,14 +646,18 @@ export function dynamicSelectionHandlesForSavedDrawing(
   return [];
 }
 
-/** Merge the two transitional Phase 4 owners using canonical document order. */
+/** Merge transitional scene/legacy owners using canonical document order. */
 export function resolveTopmostDrawingInteractionHit(
   primitives: readonly DrawingPrimitive[],
   legacyHit: DrawingPrimitiveHit | null,
   sceneHit: DrawingDisplayHitResult | null,
 ): DrawingPrimitiveHit | null {
   if (!sceneHit) return legacyHit;
-  if (sceneHit.kind !== "line" && sceneHit.kind !== "axis-line" && sceneHit.kind !== "shape") {
+  if (sceneHit.kind !== "line"
+    && sceneHit.kind !== "axis-line"
+    && sceneHit.kind !== "shape"
+    && sceneHit.kind !== "freehand"
+    && sceneHit.kind !== "highlighter") {
     return legacyHit;
   }
   const sceneIndex = primitives.findIndex((primitive) => primitive.id === sceneHit.entityId);
@@ -643,7 +666,9 @@ export function resolveTopmostDrawingInteractionHit(
   if (!primitive) return legacyHit;
   const type = sceneHit.kind === "line"
     ? "line"
-    : sceneHit.kind === "axis-line" ? "axis-line" : "shape";
+    : sceneHit.kind === "axis-line"
+      ? "axis-line"
+      : sceneHit.kind;
   const sceneCandidate = { prim: primitive, type, ...sceneHit } as DrawingPrimitiveHit;
   if (!legacyHit) return sceneCandidate;
   const legacyIndex = primitives.lastIndexOf(legacyHit.prim);
@@ -1469,7 +1494,7 @@ export function useDrawing({
     if (interactionSurfaceMode !== "overlay") return;
     cancelDynamicPaintHandoff();
     if (!ticket) {
-      // Without exact surface + viewport credentials there is no paint event
+      // Without stable scope + surface credentials there is no paint event
       // that can safely retire this frame. Drop back to current selection/
       // hover feedback instead of retaining stale committed pixels forever.
       renderDynamicFeedback();
@@ -1488,10 +1513,7 @@ export function useDrawing({
     }>) => {
       if (matched
         || generation !== dynamicHandoffGenerationRef.current
-        || stamp.scopeKey !== ticket.scopeKey
-        || stamp.documentRevision !== ticket.documentRevision
-        || stamp.surfaceGeneration !== ticket.surfaceGeneration
-        || stamp.viewportRevision !== ticket.viewportRevision) return;
+        || !scenePaintCoversDrawingHandoff(ticket, stamp)) return;
       matched = true;
       recordDrawingPerfInteractionHandoffAcknowledged("dynamic", stamp);
       matchedSynchronously = true;
@@ -1521,8 +1543,8 @@ export function useDrawing({
 
   useEffect(() => {
     if (interactionSurfaceMode === "overlay") {
-      // An exact paint ticket is tied to one viewport/surface revision. If
-      // those credentials move before acknowledgement, retire the stale
+      // A paint ticket is tied to one drawing surface. If that surface's
+      // credentials move before acknowledgement, retire the stale
       // handoff instead of waiting forever for an ack the bridge must reject.
       cancelDynamicPaintHandoff();
       if (liveInkControllerRef.current?.snapshot().retainingFinalFrame) {
@@ -2751,30 +2773,7 @@ export function useDrawing({
         if (interactionSurfaceMode === "overlay"
           && completedFreehand
           && completedFreehandPrimitive) {
-          const primitive = completedFreehandPrimitive;
           liveInkControllerRef.current?.finish();
-          let painted = false;
-          let committedTicket: Readonly<{
-            scopeKey: string;
-            documentRevision: number;
-            surfaceGeneration: number;
-            viewportRevision: number;
-          }> | null = null;
-          const ticketIsCurrent = () => {
-            if (!committedTicket || symbolRef.current !== committedTicket.scopeKey) return false;
-            const adapter = getChartAdapter();
-            const frame = adapter?.captureDrawingFrame?.() ?? null;
-            return !!frame
-              && adapter?.isDrawingFrameCurrent?.(frame) === true
-              && frame.surfaceGeneration === committedTicket.surfaceGeneration
-              && frame.viewportRevision === committedTicket.viewportRevision;
-          };
-          const pendingPaintListeners = new Set<() => void>();
-          const unsubscribePrimitivePaint = primitive.subscribeCommittedPaint(() => {
-            if (committedTicket && !ticketIsCurrent()) return;
-            painted = true;
-            for (const listener of [...pendingPaintListeners]) listener();
-          });
           const commitStartedAt = drawingPerfNow();
           const receipt = persistDetachedDrawings(commands, primitivesRef.current);
           drawingPerfCounters.recordDuration(
@@ -2783,23 +2782,20 @@ export function useDrawing({
           );
           persisted = receipt?.committed === true;
           const ticket = receipt?.ticket ?? null;
-          committedTicket = ticket;
           if (persisted && ticket) {
             recordDrawingPerfInteractionHandoffPrepared("live-ink", ticket);
             liveInkControllerRef.current?.retainUntilPaint(ticket, (listener) => {
-              const deliver = () => {
-                recordDrawingPerfInteractionHandoffAcknowledged("live-ink", ticket);
-                listener(ticket);
-              };
-              pendingPaintListeners.add(deliver);
-              if (painted && ticketIsCurrent()) deliver();
-              return () => {
-                pendingPaintListeners.delete(deliver);
-                if (pendingPaintListeners.size === 0) unsubscribePrimitivePaint();
-              };
+              let acknowledged = false;
+              return subscribeVisibleScenePaint((stamp) => {
+                const coversHandoff = scenePaintCoversDrawingHandoff(ticket, stamp);
+                if (coversHandoff && !acknowledged) {
+                  acknowledged = true;
+                  recordDrawingPerfInteractionHandoffAcknowledged("live-ink", stamp);
+                }
+                listener(stamp);
+              }, { replayLastPaint: true });
             });
           } else {
-            unsubscribePrimitivePaint();
             liveInkControllerRef.current?.cancel();
           }
         } else if (interactionSurfaceMode === "overlay"
@@ -2863,7 +2859,7 @@ export function useDrawing({
     const durationMs = Math.max(0, drawingPerfNow() - mouseupStartedAt);
     drawingPerfCounters.recordMouseupSyncDuration(durationMs);
     drawingPerfCounters.gestureEnded();
-  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, getChartAdapter, interactionSurfaceMode, invalidateVisibleScene, persistDetachedDrawings, persistDrawings, prepareUserMutationScope, dataToScreen, clearCachedPointerRect, refreshSelectedTextUi, releaseOverlayDrag, retainDynamicOverlayUntilPaint, symbolRef]);
+  }, [cancelActiveFreehandStroke, flushActiveDrawingMove, interactionSurfaceMode, invalidateVisibleScene, persistDetachedDrawings, persistDrawings, prepareUserMutationScope, dataToScreen, clearCachedPointerRect, refreshSelectedTextUi, releaseOverlayDrag, retainDynamicOverlayUntilPaint, subscribeVisibleScenePaint]);
 
   const handlePointerCancel = useCallback(() => {
     if (interactionSurfaceMode !== "overlay" && !isDrawingFreehandRef.current) {

@@ -1235,13 +1235,20 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         if (!chart || !series || !container) return null;
         const rect = container?.getBoundingClientRect?.();
         const containerHeight = rect?.height ?? container.clientHeight ?? 0;
-        const paneHeight = chart.panes?.()?.[0]?.getHeight?.();
-        const heightCssPx = typeof paneHeight === "number"
-          && Number.isFinite(paneHeight)
-          && paneHeight > 0
-          ? paneHeight
+        const paneSize = chart.paneSize?.(0);
+        const heightCssPx = typeof paneSize?.height === "number"
+          && Number.isFinite(paneSize.height)
+          && paneSize.height > 0
+          ? paneSize.height
           : containerHeight;
-        const widthCssPx = rect?.width ?? container.clientWidth ?? 0;
+        // Drawing coordinates and primitive bitmap scopes are pane-local.
+        // Container width includes price scales, so using it here creates a
+        // worker bitmap that can never match the LWC main-pane surface.
+        const widthCssPx = typeof paneSize?.width === "number"
+          && Number.isFinite(paneSize.width)
+          && paneSize.width > 0
+          ? paneSize.width
+          : rect?.width ?? container.clientWidth ?? 0;
         if (!Number.isFinite(heightCssPx) || heightCssPx <= 0
           || !Number.isFinite(widthCssPx) || widthCssPx <= 0) return null;
         let viewportKey: string | null = null;
@@ -1251,6 +1258,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           maxHorizontal: number;
           minPrice: number;
           maxPrice: number;
+          minLogical?: number;
+          maxLogical?: number;
+          priceProjectionSamples?: readonly Readonly<{
+            price: number;
+            coordinateCssPx: number;
+          }>[];
         } | null = null;
         let barSpacing = 1;
         try {
@@ -1277,6 +1290,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           const bottomPrice = typeof priceAtBottom === "number" && Number.isFinite(priceAtBottom)
             ? Number(priceAtBottom)
             : null;
+          const middlePrice = typeof priceAtMiddle === "number" && Number.isFinite(priceAtMiddle)
+            ? Number(priceAtMiddle)
+            : null;
           const axisKind = surfaceAxisModeRef.current === "derived-ordinal"
             ? "derived-ordinal"
             : "time";
@@ -1295,6 +1311,17 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
               maxHorizontal: Math.max(from, to),
               minPrice: Math.min(topPrice, bottomPrice),
               maxPrice: Math.max(topPrice, bottomPrice),
+              ...(logical && Number.isFinite(logical.from) && Number.isFinite(logical.to) ? {
+                minLogical: Math.min(logical.from, logical.to),
+                maxLogical: Math.max(logical.from, logical.to),
+              } : {}),
+              ...(middlePrice === null ? {} : {
+                priceProjectionSamples: Object.freeze([
+                  Object.freeze({ price: topPrice, coordinateCssPx: 0 }),
+                  Object.freeze({ price: middlePrice, coordinateCssPx: heightCssPx / 2 }),
+                  Object.freeze({ price: bottomPrice, coordinateCssPx: heightCssPx }),
+                ]),
+              }),
             };
           }
         } catch {

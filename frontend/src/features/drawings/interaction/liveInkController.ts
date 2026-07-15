@@ -81,12 +81,10 @@ function finitePoint(point: ScreenPoint | null): point is ScreenPoint {
   return !!point && Number.isFinite(point.x) && Number.isFinite(point.y);
 }
 
-function exactPaintStamp(ticket: LiveInkPaintStamp, stamp: LiveInkPaintStamp): boolean {
+function paintStampCoversTicket(ticket: LiveInkPaintStamp, stamp: LiveInkPaintStamp): boolean {
   return ticket.scopeKey === stamp.scopeKey
-    && ticket.documentRevision === stamp.documentRevision
     && ticket.surfaceGeneration === stamp.surfaceGeneration
-    && (ticket.viewportRevision === undefined
-      || ticket.viewportRevision === stamp.viewportRevision);
+    && stamp.documentRevision >= ticket.documentRevision;
 }
 
 export function createLiveInkController({
@@ -277,7 +275,7 @@ export function createLiveInkController({
       paintUnsubscribe = subscribe((stamp) => {
         if (disposed
           || generation !== handoffGeneration
-          || !exactPaintStamp(ticket, stamp)) return;
+          || !paintStampCoversTicket(ticket, stamp)) return;
         paintUnsubscribe?.();
         paintUnsubscribe = null;
         handoffFrame = requestFrame(() => {

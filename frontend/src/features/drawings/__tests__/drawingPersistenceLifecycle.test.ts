@@ -202,7 +202,13 @@ test("dynamic overlay owns selection and excludes only its active migrated entit
   assert.equal(visibleSceneSelectedId("selected", true), null);
   assert.equal(visibleSceneSelectedId(null, true), null);
 
-  const migratedKinds: readonly DrawingKind[] = ["line", "axis-line", "shape"];
+  const migratedKinds: readonly DrawingKind[] = [
+    "line",
+    "axis-line",
+    "shape",
+    "freehand",
+    "highlighter",
+  ];
   for (const kind of migratedKinds) {
     assert.equal(shouldProjectVisibleSceneEntity(kind, "active", false, "active"), true);
     assert.equal(shouldProjectVisibleSceneEntity(kind, "active", true, "active"), false);
@@ -215,8 +221,6 @@ test("dynamic overlay owns selection and excludes only its active migrated entit
     "text",
     "fibonacci",
     "position",
-    "freehand",
-    "highlighter",
   ];
   for (const kind of legacyKinds) {
     assert.equal(shouldProjectVisibleSceneEntity(kind, "legacy", false, null), false);

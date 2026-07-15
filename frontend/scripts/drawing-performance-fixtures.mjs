@@ -1,9 +1,12 @@
 const STORAGE_PREFIX = "candlescope-drawings";
 
+import { PHASE6_LINEAGE_REPRESENTATION } from "./drawing-performance-phase6-lineage.mjs";
+
 export const FIXTURE_NAMES = Object.freeze([
   "empty",
   "singleFreehand4096",
   "freehand64x512",
+  "freehandLineage64x512",
   "entities200",
   "entities512",
   "phase4Migrated64",
@@ -99,7 +102,88 @@ function normalizeOptions(options) {
     throw new TypeError("Drawing fixture seed must be an unsigned 32-bit integer");
   }
 
-  return { scopeKey, startTime, intervalSeconds, seed };
+  const defaultEndTime = startTime + intervalSeconds * 511;
+  const lineageContract = normalizeLineageContract(options.lineageContract, {
+    startTime,
+    endTime: defaultEndTime,
+  });
+  const priceProfile = normalizePriceProfile(options.priceProfile);
+  return { scopeKey, startTime, intervalSeconds, seed, lineageContract, priceProfile };
+}
+
+function normalizePriceProfile(value) {
+  if (value == null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Drawing fixture priceProfile must be an object");
+  }
+  const start = Number(value.start);
+  const end = Number(value.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    throw new TypeError("Drawing fixture priceProfile endpoints must be finite");
+  }
+  return Object.freeze({ start, end });
+}
+
+function profiledPrice(priceProfile, ratio, fallback) {
+  if (!priceProfile) return fallback;
+  const boundedRatio = Math.max(0, Math.min(1, Number(ratio) || 0));
+  return priceProfile.start + (priceProfile.end - priceProfile.start) * boundedRatio;
+}
+
+function normalizeLineageContract(value, { startTime, endTime }) {
+  const fallback = {
+    sourceProjection: PHASE6_LINEAGE_REPRESENTATION.projectorId,
+    sourceProjectionConfig: PHASE6_LINEAGE_REPRESENTATION.projectionConfig,
+    exact: {
+      left: { time: startTime, sourceOrdinal: 1 },
+      right: { time: endTime, sourceOrdinal: 1 },
+    },
+    fallback: { fromTime: startTime, toTime: endTime, leftRatio: 0, rightRatio: 1 },
+    derivedRowCount: null,
+  };
+  const candidate = value ?? fallback;
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    throw new TypeError("Drawing fixture lineageContract must be an object");
+  }
+  const sourceProjection = candidate.sourceProjection;
+  const sourceProjectionConfig = candidate.sourceProjectionConfig;
+  const exact = candidate.exact;
+  const envelope = candidate.fallback;
+  const leftTime = Number(exact?.left?.time);
+  const rightTime = Number(exact?.right?.time);
+  const leftOrdinal = Number(exact?.left?.sourceOrdinal);
+  const rightOrdinal = Number(exact?.right?.sourceOrdinal);
+  const fromTime = Number(envelope?.fromTime);
+  const toTime = Number(envelope?.toTime);
+  const leftRatio = Number(envelope?.leftRatio);
+  const rightRatio = Number(envelope?.rightRatio);
+  if (typeof sourceProjection !== "string" || sourceProjection.length === 0
+    || typeof sourceProjectionConfig !== "string" || sourceProjectionConfig.length === 0
+    || !Number.isFinite(leftTime) || !Number.isFinite(rightTime) || leftTime > rightTime
+    || !Number.isSafeInteger(leftOrdinal) || leftOrdinal < 0
+    || !Number.isSafeInteger(rightOrdinal) || rightOrdinal < 0
+    || !Number.isFinite(fromTime) || !Number.isFinite(toTime) || fromTime > toTime
+    || !Number.isFinite(leftRatio) || !Number.isFinite(rightRatio)
+    || leftRatio < 0 || rightRatio > 1 || leftRatio >= rightRatio) {
+    throw new TypeError("Drawing fixture lineageContract is invalid");
+  }
+  const derivedRowCount = candidate.derivedRowCount == null
+    ? null
+    : Number(candidate.derivedRowCount);
+  if (derivedRowCount !== null
+    && (!Number.isSafeInteger(derivedRowCount) || derivedRowCount <= 0)) {
+    throw new TypeError("Drawing fixture lineageContract derivedRowCount must be positive");
+  }
+  return Object.freeze({
+    sourceProjection,
+    sourceProjectionConfig,
+    exact: Object.freeze({
+      left: Object.freeze({ time: leftTime, sourceOrdinal: leftOrdinal }),
+      right: Object.freeze({ time: rightTime, sourceOrdinal: rightOrdinal }),
+    }),
+    fallback: Object.freeze({ fromTime, toTime, leftRatio, rightRatio }),
+    derivedRowCount,
+  });
 }
 
 function absoluteTime(startTime, intervalSeconds, offset) {
@@ -119,6 +203,7 @@ function buildFreehandDrawing({
   startTime,
   intervalSeconds,
   random,
+  priceProfile,
 }) {
   const phase = random() * Math.PI * 2;
   const center = 62_800 + (strokeIndex - 31.5) * 4;
@@ -127,12 +212,15 @@ function buildFreehandDrawing({
   const points = new Array(pointCount);
 
   for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
+    const ratio = pointIndex / Math.max(1, pointCount - 1);
     const wave = Math.sin(pointIndex * frequency + phase) * amplitude;
     const secondaryWave = Math.cos(pointIndex * 0.006 + strokeIndex * 0.17) * 12;
-    const jitter = (random() - 0.5) * 3.5;
+    const jitter = (random() - 0.5) * (priceProfile ? 0.25 : 3.5);
     points[pointIndex] = {
       time: absoluteTime(startTime, intervalSeconds, pointIndex),
-      price: roundedPrice(center + wave + secondaryWave + jitter),
+      price: roundedPrice(
+        profiledPrice(priceProfile, ratio, center) + wave + secondaryWave + jitter,
+      ),
     };
   }
 
@@ -151,11 +239,64 @@ function buildFreehandDrawing({
   };
 }
 
-function buildEntityDrawing({ index, startTime, intervalSeconds, random }) {
+function buildLineageFreehandDrawing({
+  fixtureName,
+  strokeIndex,
+  pointCount,
+  random,
+  lineageContract,
+  priceProfile,
+}) {
+  const phase = random() * Math.PI * 2;
+  const center = 62_800 + (strokeIndex - 31.5) * 4;
+  const amplitude = 25 + random() * 35;
+  const frequency = 0.018 + random() * 0.022;
+  const points = new Array(pointCount);
+
+  for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
+    const ratio = pointIndex / Math.max(1, pointCount - 1);
+    const wave = Math.sin(pointIndex * frequency + phase) * amplitude;
+    const secondaryWave = Math.cos(pointIndex * 0.006 + strokeIndex * 0.17) * 12;
+    const jitter = (random() - 0.5) * (priceProfile ? 0.25 : 3.5);
+    points[pointIndex] = {
+      span: 0,
+      ratio: Number(ratio.toFixed(8)),
+      price: roundedPrice(
+        profiledPrice(priceProfile, ratio, center) + wave + secondaryWave + jitter,
+      ),
+    };
+  }
+
+  return {
+    type: "freehand",
+    id: `perf-${fixtureName}-freehand-${String(strokeIndex).padStart(3, "0")}`,
+    stroke: {
+      version: 3,
+      sourceProjection: lineageContract.sourceProjection,
+      sourceProjectionConfig: lineageContract.sourceProjectionConfig,
+      spans: [{
+        exact: lineageContract.exact,
+        fallback: lineageContract.fallback,
+      }],
+      points,
+    },
+    color: COLORS[strokeIndex % COLORS.length],
+    lineWidth: 1 + (strokeIndex % 3),
+  };
+}
+
+function buildEntityDrawing({ index, count, startTime, intervalSeconds, random, priceProfile }) {
   const slot = index * 2;
   const firstTime = absoluteTime(startTime, intervalSeconds, slot);
   const secondTime = absoluteTime(startTime, intervalSeconds, slot + 1);
-  const center = 62_500 + (index % 48) * 11 + (random() - 0.5) * 5;
+  const profiledCenter = profiledPrice(
+    priceProfile,
+    (slot + 0.5) / Math.max(1, count * 2 - 1),
+    62_500,
+  );
+  const center = priceProfile
+    ? profiledCenter + ((index % 48) - 23.5) * 6 + (random() - 0.5) * 5
+    : 62_500 + (index % 48) * 11 + (random() - 0.5) * 5;
   const delta = 18 + random() * 35;
   const color = COLORS[index % COLORS.length];
   const dataPoints = [
@@ -245,6 +386,7 @@ function buildDrawings(name, options, random) {
         startTime: options.startTime,
         intervalSeconds: options.intervalSeconds,
         random,
+        priceProfile: options.priceProfile,
       })];
     case "freehand64x512":
       return Array.from({ length: 64 }, (_, strokeIndex) => buildFreehandDrawing({
@@ -254,15 +396,27 @@ function buildDrawings(name, options, random) {
         startTime: options.startTime,
         intervalSeconds: options.intervalSeconds,
         random,
+        priceProfile: options.priceProfile,
+      }));
+    case "freehandLineage64x512":
+      return Array.from({ length: 64 }, (_, strokeIndex) => buildLineageFreehandDrawing({
+        fixtureName: name,
+        strokeIndex,
+        pointCount: 512,
+        random,
+        lineageContract: options.lineageContract,
+        priceProfile: options.priceProfile,
       }));
     case "entities200":
     case "entities512": {
       const count = name === "entities200" ? 200 : 512;
       return Array.from({ length: count }, (_, index) => buildEntityDrawing({
         index,
+        count,
         startTime: options.startTime,
         intervalSeconds: options.intervalSeconds,
         random,
+        priceProfile: options.priceProfile,
       }));
     }
     case "phase4Migrated64":
@@ -331,6 +485,12 @@ function summarizeDrawings(drawings) {
       freehandSpanCount += spanCount;
       maxFreehandPointsPerDrawing = Math.max(maxFreehandPointsPerDrawing, drawingPointCount);
       maxFreehandSpansPerDrawing = Math.max(maxFreehandSpansPerDrawing, spanCount);
+      for (const span of drawing.stroke?.spans ?? []) {
+        recordTime(span.exact?.left?.time);
+        recordTime(span.exact?.right?.time);
+        recordTime(span.fallback?.fromTime);
+        recordTime(span.fallback?.toTime);
+      }
       for (const point of drawing.stroke?.points ?? drawing.dataPoints ?? []) {
         recordTime(point.time ?? point.anchor?.time);
         recordPrice(point.price);
@@ -371,6 +531,16 @@ function summarizeDrawings(drawings) {
   };
 }
 
+export function fixtureTimeOffsetDenominator(fixtureName) {
+  if (fixtureName === "singleFreehand4096") return 4_095;
+  if (fixtureName === "freehand64x512" || fixtureName === "freehandLineage64x512") return 511;
+  if (fixtureName === "entities200") return 399;
+  if (fixtureName === "entities512") return 1_023;
+  if (fixtureName === "phase4Migrated64") return 127;
+  if (fixtureName === "phase4Mixed64") return 63;
+  return 1;
+}
+
 function assertWithinBudgets(summary, storageChars) {
   if (summary.drawingCount > FIXTURE_LIMITS.maxDrawings
     || summary.freehandPointCount > FIXTURE_LIMITS.maxFreehandPoints
@@ -386,8 +556,8 @@ function assertWithinBudgets(summary, storageChars) {
  * Build a persistence-ready deterministic drawing fixture.
  *
  * `raw` is the exact value to pass to localStorage.setItem(storageKey, raw).
- * Freehand fixtures use the current v3 codec with absolute source-time points;
- * no primitive instance or private primitive field is involved.
+ * Freehand fixtures use the current v3 codec with absolute source-time or
+ * source-lineage span points; no primitive instance/private field is involved.
  */
 export function buildDrawingFixture(name, options = {}) {
   if (!FIXTURE_NAME_SET.has(name)) {
@@ -411,6 +581,16 @@ export function buildDrawingFixture(name, options = {}) {
       intervalSeconds: normalizedOptions.intervalSeconds,
       storageChars: raw.length,
       ...summary,
+      ...(name === "freehandLineage64x512" ? {
+        sourceProjection: normalizedOptions.lineageContract.sourceProjection,
+        sourceProjectionConfig: normalizedOptions.lineageContract.sourceProjectionConfig,
+        lineageExact: normalizedOptions.lineageContract.exact,
+        lineageFallback: normalizedOptions.lineageContract.fallback,
+        lineageDerivedRowCount: normalizedOptions.lineageContract.derivedRowCount,
+      } : {}),
+      ...(normalizedOptions.priceProfile
+        ? { priceProfile: normalizedOptions.priceProfile }
+        : {}),
       withinBudgets: true,
     },
   };

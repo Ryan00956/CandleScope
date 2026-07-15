@@ -138,6 +138,7 @@ test("scene bridge rejects paint acknowledgements from every stale render-frame 
     paintSequence: number;
   }>;
   let primitiveListener: ((ack: PaintAck) => void) | null = null;
+  let recoveryCount = 0;
   const primitive = {
     publishPlan() { return true; },
     clearPlan() {},
@@ -164,8 +165,8 @@ test("scene bridge rejects paint acknowledgements from every stale render-frame 
     detachPrimitive: () => true,
     captureDrawingFrame: () => current,
     isDrawingFrameCurrent: (candidate) => candidate === current,
+    onCurrentPaintRejected: () => { recoveryCount += 1; },
   });
-  const plan = planForFrame(frame, 1);
   const forwarded: PaintAck[] = [];
   const mismatchedFields = [
     "surfaceGeneration",
@@ -181,28 +182,39 @@ test("scene bridge rejects paint acknowledgements from every stale render-frame 
 
   assert.equal(bridge.attach(), true);
   bridge.subscribePainted((ack) => forwarded.push(ack));
-  assert.equal(bridge.publish(plan), true);
 
   let paintSequence = 1;
+  let expectedRecoveryCount = 0;
   for (const field of mismatchedFields) {
+    current = frame;
+    const plan = planForFrame(frame, paintSequence);
+    assert.equal(bridge.publish(plan), true);
     current = Object.freeze({
       ...frame,
       [field]: frame[field] + 1,
     });
     emitPaint(plan, paintSequence);
     paintSequence += 1;
+    emitPaint(plan, paintSequence);
+    paintSequence += 1;
+    if (field !== "surfaceGeneration") expectedRecoveryCount += 1;
     assert.equal(forwarded.length, 0, `${field} mismatch must not forward`);
     assert.equal(
       bridge.snapshot().lastPaintedStamp,
       null,
       `${field} mismatch must not update lastPaintedStamp`,
     );
+    assert.equal(recoveryCount, expectedRecoveryCount,
+      `${field} mismatch must request at most one current-plan recovery`);
   }
 
   current = frame;
-  emitPaint(plan, paintSequence);
+  const currentPlan = planForFrame(frame, paintSequence);
+  assert.equal(bridge.publish(currentPlan), true);
+  emitPaint(currentPlan, paintSequence);
   assert.equal(forwarded.length, 1);
-  assert.strictEqual(bridge.snapshot().lastPaintedStamp, plan.stamp);
+  assert.equal(recoveryCount, mismatchedFields.length - 1);
+  assert.strictEqual(bridge.snapshot().lastPaintedStamp, currentPlan.stamp);
 });
 
 test("scene bridge forwards only the exact plan painted on its current attached generation", () => {
@@ -218,6 +230,7 @@ test("scene bridge forwards only the exact plan painted on its current attached 
   }>;
   let primitiveListener: ((ack: PaintAck) => void) | null = null;
   let publishedPlan: Plan | null = null;
+  let recoveryCount = 0;
   const primitive = {
     publishPlan(plan: Plan) {
       publishedPlan = plan;
@@ -247,6 +260,7 @@ test("scene bridge forwards only the exact plan painted on its current attached 
     detachPrimitive: () => true,
     captureDrawingFrame: () => current,
     isDrawingFrameCurrent: (frame) => frame === current,
+    onCurrentPaintRejected: () => { recoveryCount += 1; },
   });
   const firstPlan = planForFrame(firstFrame, 1);
   const newerPlan = planForFrame(firstFrame, 2);
@@ -264,12 +278,14 @@ test("scene bridge forwards only the exact plan painted on its current attached 
   assert.equal(bridge.snapshot().lastPaintedStamp, null);
   emitPaint(firstPlan, 2);
   assert.deepEqual(forwarded.map((ack) => ack.stamp.documentRevision), [1]);
+  assert.equal(recoveryCount, 0, "a superseded plan must not request recovery");
   emitPaint(newerPlan, 3);
   assert.deepEqual(forwarded.map((ack) => ack.stamp.documentRevision), [1, 2]);
 
   current = secondFrame;
   emitPaint(newerPlan, 4);
   assert.deepEqual(forwarded.map((ack) => ack.paintSequence), [1, 3]);
+  assert.equal(recoveryCount, 0, "a stale surface generation is handled by lifecycle ownership");
   bridge.releaseSurfaceCredentials();
   assert.equal(primitiveListener, null);
   assert.equal(bridge.snapshot().lastPaintedStamp, null);

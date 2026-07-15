@@ -53,9 +53,20 @@ class _SequenceSession:
 
     def __init__(self, responses: list[_FakeResponse]) -> None:
         self._responses = responses
+        self.calls = 0
 
     def get(self, *args: object, **kwargs: object) -> _FakeResponse:
+        self.calls += 1
         return self._responses.pop(0)
+
+
+class _BinanceInvalidParameterResponse(_FakeResponse):
+    def __init__(self) -> None:
+        super().__init__({}, status=400)
+        self.url = "https://fapi.binance.com/futures/data/openInterestHist"
+
+    async def text(self) -> str:
+        return '{"msg":"parameter \'startTime\' is invalid.","code":-1130}'
 
 
 class _CountingRateLimits:
@@ -139,3 +150,37 @@ def test_http_fetch_accounts_for_each_physical_endpoint_attempt() -> None:
 
     assert asyncio.run(run(preacquired=False)) == (2, 2)
     assert asyncio.run(run(preacquired=True)) == (1, 2)
+
+
+def test_http_fetch_does_not_fail_over_binance_invalid_parameter() -> None:
+    async def run() -> tuple[TransportError, int]:
+        config = IngestionConfig(
+            http_base_urls_futures=["https://one.example", "https://two.example"],
+        )
+        transport = TransportLayer(config)
+        session = _SequenceSession([_BinanceInvalidParameterResponse()])
+        transport._http_session = session  # type: ignore[assignment]
+        request = TransportRequest(
+            descriptor=StreamDescriptor(
+                symbol="BTCUSDT",
+                stream_type=StreamType.OPEN_INTEREST,
+                interval="1h",
+                exchange="binance",
+                market_type="futures",
+            ),
+            start_ms=1,
+            end_ms=2,
+            limit=500,
+            history=True,
+        )
+
+        try:
+            await transport.http_fetch(request)
+        except TransportError as exc:
+            return exc, session.calls
+        raise AssertionError("expected invalid startTime to raise TransportError")
+
+    exc, calls = asyncio.run(run())
+    assert calls == 1
+    assert exc.status_code == 400
+    assert exc.body_code == "-1130"

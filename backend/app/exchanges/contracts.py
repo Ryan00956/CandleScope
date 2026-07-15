@@ -1000,6 +1000,8 @@ def _schema_required_fields(stream_type: Any, data: dict[str, Any]) -> set[str]:
         return required
     if stream_type == StreamType.DEPTH:
         return {"bids", "asks"}
+    if stream_type == StreamType.FULL_DEPTH:
+        return {"kind", "bids", "asks"}
     return set()
 
 

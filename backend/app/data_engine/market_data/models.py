@@ -24,6 +24,7 @@ class MarketChannel(str, enum.Enum):
     TICKER = "ticker"
     MINI_TICKER = "mini_ticker"
     DEPTH = "depth"
+    FULL_DEPTH = "full_depth"
     MARK_PRICE = "mark_price"
     INDEX_PRICE = "index_price"
     FUNDING_RATE = "funding_rate"
@@ -62,6 +63,7 @@ _STREAM_VALUE_TO_CHANNEL = {
     "ticker": MarketChannel.TICKER,
     "miniTicker": MarketChannel.MINI_TICKER,
     "depth": MarketChannel.DEPTH,
+    "fullDepth": MarketChannel.FULL_DEPTH,
     "markPrice": MarketChannel.MARK_PRICE,
     "indexPrice": MarketChannel.INDEX_PRICE,
     "fundingRate": MarketChannel.FUNDING_RATE,

@@ -31,7 +31,7 @@ from .models import (
     TransportRequest,
 )
 from .transport import TransportLayer, TransportError
-from .session_types import SessionLike
+from .session_types import HealthCallback, SessionLike
 
 logger = logging.getLogger("ingestion.L3_FeedControl")
 
@@ -81,6 +81,7 @@ class FeedControlLayer:
 
         # Upstream callback — receives RawMessage from either WS or HTTP
         self._on_data: Callable[[RawMessage], Awaitable[None]] | None = None
+        self._health_observers: list[HealthCallback] = []
 
     # ── Public: Metrics / Snapshot ───────────────────────────
 
@@ -106,6 +107,7 @@ class FeedControlLayer:
             "stream_key": self._descriptor.key,
             "mode": self._mode.value,
             "ws_probe_successes": self._ws_probe_successes,
+            "health_observers": len(self._health_observers),
             "metrics": self._metrics.snapshot(),
             "session": self._session.snapshot() if self._session else None,
         }
@@ -115,6 +117,12 @@ class FeedControlLayer:
     def on_data(self, callback: Callable[[RawMessage], Awaitable[None]]) -> None:
         """Register upstream data callback (consumed by L4 Normalize)."""
         self._on_data = callback
+
+    def on_health_change(self, callback: HealthCallback) -> None:
+        """Add an observer without replacing L3's own session-health handler."""
+
+        if callback not in self._health_observers:
+            self._health_observers.append(callback)
 
     # ── Public: Lifecycle ────────────────────────────────────
 
@@ -234,6 +242,7 @@ class FeedControlLayer:
         """Called by L2 when WS health changes."""
         self._metrics.set("ws_health", health.value)
         self._metrics.mark("ws_health_changed_at")
+        await self._notify_health_observers(health, reason)
 
         fallback_states = (
             self._session.http_fallback_health_states
@@ -249,6 +258,23 @@ class FeedControlLayer:
             self._set_mode(FeedMode.WEBSOCKET)
             self._metrics.inc("ws_recoveries")
             logger.info("WS self-recovered via L2: %s", self._descriptor.key)
+
+    async def _notify_health_observers(
+        self,
+        health: SessionHealth,
+        reason: str,
+    ) -> None:
+        for callback in tuple(self._health_observers):
+            try:
+                await callback(health, reason)
+                self._metrics.inc("health_observer_notifications")
+            except Exception as exc:
+                self._metrics.inc("health_observer_errors")
+                logger.warning(
+                    "Health observer failed for %s: %s",
+                    self._descriptor.key,
+                    exc,
+                )
 
     # ── WS message handler ───────────────────────────────────
 

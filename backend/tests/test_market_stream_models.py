@@ -76,6 +76,7 @@ def test_market_stream_enums_use_canonical_snake_case_values() -> None:
         "ticker",
         "mini_ticker",
         "depth",
+        "full_depth",
         "mark_price",
         "index_price",
         "funding_rate",

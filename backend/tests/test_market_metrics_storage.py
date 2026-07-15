@@ -45,13 +45,14 @@ def _oi_row(
     value: float,
     received_at_ms: int,
     is_final: bool = True,
+    event_time_ms: int = 1_700_000_000_000,
 ) -> dict:
     return {
         "exchange": "binance",
         "market_type": "futures",
         "symbol": "BTCUSDT",
         "period": period,
-        "event_time_ms": 1_700_000_000_000,
+        "event_time_ms": event_time_ms,
         "open_interest": value,
         "open_interest_value": value * 100,
         "is_final": is_final,
@@ -150,19 +151,22 @@ class _Factory:
         self.callbacks = {}
         self.fail_history = False
         self.funding_rate = 0.001
+        self.fetch_calls: list[dict] = []
 
     async def start_market(self, descriptor, callback):
         self.callbacks[descriptor.key] = callback
         return _Handle()
 
     async def fetch_market(self, descriptor, **kwargs):
+        self.fetch_calls.append({"descriptor": descriptor, **kwargs})
         if self.fail_history:
             raise RuntimeError("upstream unavailable")
         history = kwargs.get("history", False)
+        event_time_ms = kwargs.get("start_ms") or 1_700_000_000_000
         if descriptor.stream_type == StreamType.FUNDING_RATE and history:
             data = {
                 "funding_rate": self.funding_rate,
-                "funding_time_ms": 1_700_000_000_000,
+                "funding_time_ms": event_time_ms,
             }
         elif descriptor.stream_type == StreamType.OPEN_INTEREST and history:
             data = {
@@ -177,8 +181,8 @@ class _Factory:
                 symbol=descriptor.symbol,
                 exchange=descriptor.exchange,
                 market_type=descriptor.market_type,
-                event_time_ms=1_700_000_000_000,
-                received_at_ms=1_700_000_000_100,
+                event_time_ms=event_time_ms,
+                received_at_ms=event_time_ms + 100,
                 source=DataSource.HTTP_BACKFILL,
                 data=data,
                 stream_key=descriptor.key,
@@ -241,6 +245,129 @@ async def test_history_writes_then_rereads_and_falls_back_to_local(tmp_path) -> 
     assert fallback_page.fallback is True
     fallback = fallback_page.events
     assert fallback[0].data["funding_rate"] == 0.001
+    await service.shutdown()
+
+
+@_async_test
+async def test_expired_open_interest_range_reads_local_without_upstream_retry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    period_ms = 5 * 60 * 1000
+    retention_start_ms = 1_700_000_100_000
+    # The raw cutoff is one millisecond before a period boundary.  The safety
+    # margin must still move the request to the following complete bucket.
+    now_ms = retention_start_ms + 30 * 24 * 60 * 60 * 1000 - 1
+    monkeypatch.setattr(
+        "app.data_engine.market_data.service.time.time",
+        lambda: now_ms / 1000,
+    )
+    repository = MarketMetricsRepository(tmp_path / "expired-oi.sqlite")
+    cached_time_ms = retention_start_ms - period_ms
+    repository.upsert_open_interest([
+        _oi_row(
+            period="5m",
+            value=321,
+            received_at_ms=cached_time_ms + 100,
+            event_time_ms=cached_time_ms,
+        ),
+    ])
+    factory = _Factory()
+    service = MarketDataService(factory, metrics_repository=repository)
+
+    page = await service.history_page(
+        _key(MarketChannel.OPEN_INTEREST),
+        period="5m",
+        start_ms=retention_start_ms - 2 * period_ms,
+        end_ms=retention_start_ms - 1,
+        limit=500,
+    )
+
+    assert factory.fetch_calls == []
+    assert page.fallback is False
+    assert [event.event_time_ms for event in page.events] == [cached_time_ms]
+    assert page.events[0].data["open_interest"] == 321
+    await service.shutdown()
+
+
+@_async_test
+async def test_open_interest_refresh_clamps_crossing_range_to_retention_boundary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    period_ms = 5 * 60 * 1000
+    retention_start_ms = 1_700_000_100_000
+    now_ms = retention_start_ms + 30 * 24 * 60 * 60 * 1000
+    monkeypatch.setattr(
+        "app.data_engine.market_data.service.time.time",
+        lambda: now_ms / 1000,
+    )
+    repository = MarketMetricsRepository(tmp_path / "crossing-oi.sqlite")
+    factory = _Factory()
+    service = MarketDataService(factory, metrics_repository=repository)
+    requested_end_ms = retention_start_ms + 2 * period_ms
+
+    page = await service.history_page(
+        _key(MarketChannel.OPEN_INTEREST),
+        period="5m",
+        start_ms=retention_start_ms - 2 * period_ms,
+        end_ms=requested_end_ms,
+        limit=500,
+    )
+
+    assert len(factory.fetch_calls) == 1
+    assert factory.fetch_calls[0]["start_ms"] == retention_start_ms + period_ms
+    assert factory.fetch_calls[0]["end_ms"] == requested_end_ms
+    assert page.fallback is False
+    assert [event.event_time_ms for event in page.events] == [
+        retention_start_ms + period_ms,
+    ]
+    await service.shutdown()
+
+
+@_async_test
+async def test_expired_open_interest_range_still_validates_period(tmp_path) -> None:
+    factory = _Factory()
+    service = MarketDataService(
+        factory,
+        metrics_repository=MarketMetricsRepository(tmp_path / "invalid-period.sqlite"),
+    )
+
+    with pytest.raises(ValueError, match="unsupported open-interest period: 1m"):
+        await service.history_page(
+            _key(MarketChannel.OPEN_INTEREST),
+            period="1m",
+            start_ms=0,
+            end_ms=1,
+            limit=500,
+        )
+
+    assert factory.fetch_calls == []
+    await service.shutdown()
+
+
+@_async_test
+async def test_open_interest_end_only_query_preserves_upstream_page_semantics(
+    monkeypatch,
+) -> None:
+    now_ms = 1_702_592_100_000
+    monkeypatch.setattr(
+        "app.data_engine.market_data.service.time.time",
+        lambda: now_ms / 1000,
+    )
+    factory = _Factory()
+    service = MarketDataService(factory)
+
+    await service.history_page(
+        _key(MarketChannel.OPEN_INTEREST),
+        period="5m",
+        end_ms=now_ms,
+        limit=500,
+    )
+
+    assert len(factory.fetch_calls) == 1
+    assert factory.fetch_calls[0]["start_ms"] is None
+    assert factory.fetch_calls[0]["end_ms"] == now_ms
     await service.shutdown()
 
 

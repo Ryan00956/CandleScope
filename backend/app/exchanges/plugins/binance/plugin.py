@@ -106,6 +106,18 @@ class BinancePlugin(BuiltinExchangePlugin):
                     cooldown_seconds=backoff,
                 ),
                 RateLimitRule(
+                    name="binance_futures_depth_snapshot",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/depth",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=_futures_depth_cost,
+                    max_concurrency=futures_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
                     name="binance_futures_aggregate_trades",
                     bucket_key="binance:futures:request_weight:ip",
                     endpoint="/fapi/v1/aggTrades",
@@ -180,6 +192,17 @@ def _futures_kline_cost(request: HistoricalRequest) -> int:
     if limit <= 1000:
         return 5
     return 10
+
+
+def _futures_depth_cost(request: HistoricalRequest) -> int:
+    limit = int(request.limit or 500)
+    if limit <= 50:
+        return 2
+    if limit <= 100:
+        return 5
+    if limit <= 500:
+        return 10
+    return 20
 
 
 def _configured_concurrency(value: Any, fallback: Any) -> int:

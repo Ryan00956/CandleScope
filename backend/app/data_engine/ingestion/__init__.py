@@ -49,7 +49,7 @@ from .models import (
 )
 from .transport import TransportLayer, TransportError
 from .session import SessionLayer
-from .session_types import SessionLike
+from .session_types import HealthCallback, SessionLike
 from .feed_control import FeedControlLayer
 from .normalize import NormalizeLayer
 from .continuity import ContinuityLayer
@@ -125,6 +125,11 @@ class StreamPipeline:
         await self.feed_control.stop()
         await self.delivery.close_all_subscribers()
 
+    def on_health_change(self, callback: HealthCallback) -> None:
+        """Observe L2 health changes while preserving L3's internal handler."""
+
+        self.feed_control.on_health_change(callback)
+
     def snapshot(self) -> dict:
         return {
             "stream_key": self.descriptor.key,
@@ -181,7 +186,12 @@ class MarketDataIngress:
 
     # ── Stream management ────────────────────────────────────
 
-    async def add_stream(self, descriptor: StreamDescriptor) -> StreamPipeline:
+    async def add_stream(
+        self,
+        descriptor: StreamDescriptor,
+        *,
+        on_health: HealthCallback | None = None,
+    ) -> StreamPipeline:
         """Create and start a new stream pipeline.
 
         Raises ValueError if the stream is already running.
@@ -201,6 +211,8 @@ class MarketDataIngress:
                 descriptor,
                 session_factory=self._create_session_factory(descriptor),
             )
+            if on_health is not None:
+                pipeline.on_health_change(on_health)
             self._pipelines[key] = pipeline
             try:
                 await pipeline.start()

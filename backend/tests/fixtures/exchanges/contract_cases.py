@@ -102,6 +102,19 @@ _BINANCE_FIELDS = {
         "quote_volume",
     }),
     MarketChannel.DEPTH: frozenset({"last_update_id", "bids", "asks"}),
+    MarketChannel.FULL_DEPTH: frozenset({
+        "kind",
+        "last_update_id",
+        "first_update_id",
+        "final_update_id",
+        "previous_final_update_id",
+        "event_time_ms",
+        "transaction_time_ms",
+        "update_interval_ms",
+        "snapshot_limit",
+        "bids",
+        "asks",
+    }),
     MarketChannel.MARK_PRICE: frozenset({"mark_price"}),
     MarketChannel.INDEX_PRICE: frozenset({"index_price"}),
     MarketChannel.FUNDING_RATE: frozenset({"funding_rate"}),
@@ -294,6 +307,32 @@ _BINANCE_CHANNEL_EXPECTATIONS = {
         update_intervals_ms=(100, 250, 500),
         limits=(("rest.max_limit", 1000),),
     ),
+    ("futures", MarketChannel.FULL_DEPTH): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.ORDERED_DELTA,
+        snapshot=True,
+        delta=True,
+        history=False,
+        sequence="previous_link",
+        resync="replace_snapshot",
+        connection_model="path_per_stream",
+        available_fields=_BINANCE_FIELDS[MarketChannel.FULL_DEPTH],
+        params=(("snapshot_limit", (5, 10, 20, 50, 100, 500, 1000)),),
+        update_intervals_ms=(100, 250, 500),
+        limits=(
+            ("rest.default_limit", 500),
+            ("rest.max_limit", 1000),
+        ),
+        known_limitations=(
+            "A local full book is valid only after REST snapshot alignment with buffered WebSocket deltas",
+            "Any broken previous-update link requires a fresh snapshot and buffered-delta replay",
+            "Retail Price Improvement orders are excluded from both snapshot and delta feeds",
+            "USD-M exposes no historical full-order-book replay endpoint",
+        ),
+        realtime_transports=(
+            TransportMode.WEBSOCKET,
+            TransportMode.REST_SNAPSHOT,
+        ),
+    ),
     ("futures", MarketChannel.MARK_PRICE): ChannelCapabilityExpectation(
         delivery=DeliveryClass.LATEST,
         snapshot=True,
@@ -352,7 +391,7 @@ _BINANCE_CHANNEL_EXPECTATIONS = {
         params=(("period", ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")),),
         update_intervals_ms=(5000,),
         limits=(
-            ("history.max_age_ms", 2_678_400_000),
+            ("history.max_age_ms", 2_592_000_000),
             ("history.max_limit", 500),
             ("history.requests_per_5m", 1000),
             ("realtime.request_weight", 1),
@@ -443,6 +482,7 @@ _STREAM_TYPE_TO_CHANNEL = {
     StreamType.TICKER: MarketChannel.TICKER,
     StreamType.MINI_TICKER: MarketChannel.MINI_TICKER,
     StreamType.DEPTH: MarketChannel.DEPTH,
+    StreamType.FULL_DEPTH: MarketChannel.FULL_DEPTH,
     StreamType.MARK_PRICE: MarketChannel.MARK_PRICE,
     StreamType.INDEX_PRICE: MarketChannel.INDEX_PRICE,
     StreamType.FUNDING_RATE: MarketChannel.FUNDING_RATE,
@@ -484,6 +524,7 @@ def builtin_exchange_contract_cases() -> dict[str, list[ExchangeContractCase]]:
                 StreamType.FUNDING_RATE,
                 StreamType.OPEN_INTEREST,
                 StreamType.LIQUIDATION,
+                StreamType.FULL_DEPTH,
             )
         ],
         "okx": [
@@ -695,6 +736,31 @@ def _binance_payloads(
                 ),
             ),
         ]
+    if stream_type == StreamType.FULL_DEPTH:
+        row = {
+            "lastUpdateId": 123,
+            "E": 1_700_000_000_008,
+            "T": 1_700_000_000_007,
+            "bids": [["100", "2"]],
+            "asks": [["101", "3"]],
+        }
+        ws_row = {
+            "e": "depthUpdate",
+            "E": 1_700_000_000_010,
+            "T": 1_700_000_000_009,
+            "s": "BTCUSDT",
+            "U": 120,
+            "u": 124,
+            "pu": 119,
+            "b": [["100", "0"]],
+            "a": [["101", "3"]],
+            "ps": "BTCUSDT",
+            "st": 1,
+        }
+        return row, [
+            NormalizerContractSample(payload=row, source=DataSource.HTTP),
+            NormalizerContractSample(payload=ws_row, source=DataSource.WEBSOCKET),
+        ]
     if stream_type in (StreamType.MARK_PRICE, StreamType.INDEX_PRICE):
         row = _binance_derivatives_summary_http_row()
         return row, [
@@ -780,7 +846,7 @@ def _descriptor(
         update_interval_ms=(
             250
             if stream_type == StreamType.DEPTH and market_type == "futures"
-            else None
+            else 100 if stream_type == StreamType.FULL_DEPTH else None
         ),
     )
 

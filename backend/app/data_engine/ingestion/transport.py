@@ -48,6 +48,9 @@ from .models import (
 
 logger = logging.getLogger("ingestion.L1_Transport")
 
+_NON_RETRYABLE_HTTP_BODY_CODES = frozenset({"-1130"})
+
+
 class TransportLayer:
     """Async HTTP + WS transport with endpoint rotation.
 
@@ -288,6 +291,7 @@ class TransportLayer:
                         http_status=200,
                         http_headers=headers,
                         http_body_code=body_code,
+                        request_limit=req.limit,
                     )
                     for row in rows
                 ]
@@ -304,6 +308,8 @@ class TransportLayer:
                 )
                 self._metrics.inc("http_requests_failed")
                 self._metrics.mark("http_last_error_at")
+                if _is_non_retryable_http_error(exc):
+                    raise
                 logger.warning(
                     "HTTP fetch failed (%s): [%s] %s",
                     base, type(exc).__name__, exc,
@@ -668,3 +674,11 @@ def _extract_body_code(body: object) -> str | None:
         return None
     raw = payload.get("code")
     return str(raw) if raw is not None else None
+
+
+def _is_non_retryable_http_error(exc: Exception) -> bool:
+    return (
+        isinstance(exc, TransportError)
+        and exc.status_code == 400
+        and exc.body_code in _NON_RETRYABLE_HTTP_BODY_CODES
+    )

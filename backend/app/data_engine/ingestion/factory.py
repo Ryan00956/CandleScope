@@ -43,6 +43,7 @@ from typing import Any, AsyncIterator, Callable, Awaitable
 from app.exchanges import bootstrap_default_adapters, get_exchange_registry
 
 from .config import IngestionConfig
+from .session_types import HealthCallback
 from .models import (
     DataSource,
     MarketEvent,
@@ -181,6 +182,7 @@ class ExchangeIngestionFactory:
         on_market_event: Callable[[MarketEvent], Awaitable[None]],
         *,
         on_gap: Callable[[Any], Awaitable[None]] | None = None,
+        on_health: HealthCallback | None = None,
     ) -> _IngestionHandle:
         """Start one non-K-line physical market-data pipeline.
 
@@ -194,6 +196,7 @@ class ExchangeIngestionFactory:
             descriptor,
             on_market_event,
             on_gap=on_gap,
+            on_health=on_health,
         )
 
     async def _start_descriptor(
@@ -202,6 +205,7 @@ class ExchangeIngestionFactory:
         on_market_event: Callable[[MarketEvent], Awaitable[None]],
         *,
         on_gap: Callable[[Any], Awaitable[None]] | None = None,
+        on_health: HealthCallback | None = None,
     ) -> _IngestionHandle:
         ingress = await self._ensure_ingress()
         descriptor.validate()
@@ -221,11 +225,19 @@ class ExchangeIngestionFactory:
                 existing.delivery.on_market_event(on_market_event)
                 if on_gap is not None:
                     existing.delivery.on_gap(on_gap)
+                if on_health is not None:
+                    existing.on_health_change(on_health)
                 return _IngestionHandle(self, ingress, descriptor.key)
 
             # Create a new L1–L6 pipeline
             try:
-                pipeline = await ingress.add_stream(descriptor)
+                if on_health is None:
+                    pipeline = await ingress.add_stream(descriptor)
+                else:
+                    pipeline = await ingress.add_stream(
+                        descriptor,
+                        on_health=on_health,
+                    )
             except BaseException:
                 if ingress.get_pipeline(descriptor.key) is not None:
                     try:

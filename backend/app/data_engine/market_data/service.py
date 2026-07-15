@@ -45,6 +45,7 @@ _HISTORY_STREAM_TYPES = {
 }
 _DEFAULT_OPEN_INTEREST_STORAGE_PERIOD = "5m"
 _DEFAULT_OPEN_INTEREST_STORAGE_BUCKET_MS = 5 * 60 * 1000
+_HISTORY_RETENTION_SAFETY_MS = 60 * 1000
 
 
 @dataclass(slots=True)
@@ -67,6 +68,13 @@ class _PhysicalEntry:
 class MarketHistoryPage:
     events: list[MarketStateEvent]
     fallback: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _HistoryRefreshPlan:
+    start_ms: int | None
+    end_ms: int | None
+    should_fetch: bool = True
 
 
 class MarketDataService:
@@ -325,12 +333,20 @@ class MarketDataService:
             if period is not None
             else key
         )
+        refresh_plan = self._history_refresh_plan(
+            key,
+            period=period,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
         if self._metrics_repository is None:
+            if not refresh_plan.should_fetch:
+                return MarketHistoryPage(events=[])
             raw_events = await self._fetch_market(
                 descriptor,
                 limit=limit,
-                start_ms=start_ms,
-                end_ms=end_ms,
+                start_ms=refresh_plan.start_ms,
+                end_ms=refresh_plan.end_ms,
                 history=True,
             )
             return MarketHistoryPage(events=[
@@ -346,12 +362,14 @@ class MarketDataService:
             start_ms=start_ms,
             end_ms=end_ms,
         )
+        if not refresh_plan.should_fetch:
+            return MarketHistoryPage(events=local_events)
         try:
             raw_events = await self._fetch_market(
                 descriptor,
                 limit=limit,
-                start_ms=start_ms,
-                end_ms=end_ms,
+                start_ms=refresh_plan.start_ms,
+                end_ms=refresh_plan.end_ms,
                 history=True,
             )
         except ValueError:
@@ -380,6 +398,67 @@ class MarketDataService:
                 start_ms=start_ms,
                 end_ms=end_ms,
             ),
+        )
+
+    @staticmethod
+    def _history_refresh_plan(
+        key: MarketStreamKey,
+        *,
+        period: str | None,
+        start_ms: int | None,
+        end_ms: int | None,
+    ) -> _HistoryRefreshPlan:
+        """Limit upstream refreshes to the exchange-declared retention window.
+
+        The caller's original range is still used for the SQLite read.  This
+        plan controls only the range sent to the exchange, so already-persisted
+        history remains queryable after it falls out of upstream retention.
+        """
+
+        capabilities = get_exchange_registry().get_plugin(key.exchange).capabilities()
+        capability = capabilities.channel_capability(key.channel, key.market_type)
+        if key.channel == MarketChannel.OPEN_INTEREST and period is not None:
+            params = getattr(capability, "params", {}) if capability is not None else {}
+            supported_periods = params.get("period", ())
+            if period not in supported_periods:
+                raise ValueError(f"unsupported open-interest period: {period}")
+
+        if start_ms is None and end_ms is None:
+            return _HistoryRefreshPlan(start_ms=None, end_ms=None)
+
+        limits = getattr(capability, "limits", {}) if capability is not None else {}
+        raw_max_age_ms = limits.get("history.max_age_ms")
+        if type(raw_max_age_ms) is not int or raw_max_age_ms <= 0:
+            return _HistoryRefreshPlan(start_ms=start_ms, end_ms=end_ms)
+
+        retention_start_ms = int(time.time() * 1000) - raw_max_age_ms
+        if period:
+            period_ms = parse_interval_ms(period)
+            if period_ms is None:
+                raise ValueError(f"unsupported history period: {period}")
+            # Move inside retention before aligning to a complete period.  A
+            # boundary sample can expire while the HTTP request is in flight,
+            # especially when local and exchange clocks differ slightly.
+            retention_start_ms += _HISTORY_RETENTION_SAFETY_MS
+            retention_start_ms = (
+                (retention_start_ms + period_ms - 1) // period_ms
+            ) * period_ms
+
+        if end_ms is not None and end_ms < retention_start_ms:
+            return _HistoryRefreshPlan(
+                start_ms=None,
+                end_ms=None,
+                should_fetch=False,
+            )
+
+        refresh_start_ms = (
+            None
+            if start_ms is None
+            else max(start_ms, retention_start_ms)
+        )
+        return _HistoryRefreshPlan(
+            start_ms=refresh_start_ms,
+            end_ms=end_ms,
         )
 
     async def _read_persisted_history(

@@ -286,6 +286,40 @@ One browser WebSocket multiplexes multiple symbols and channels. After connectin
 
 The server sends `subscribed`, then `snapshot`, followed by batched `update` frames using `protocol=market.v1`. A connection may hold at most 64 logical streams. Use the same `streams` shape with `action=unsubscribe`; disconnect cleanup releases all leases.
 
+## Full Order Book API (P4)
+
+P4 adds an independent local L2 reconstruction chain for Binance USD-M Futures. It subscribes to diff-depth first, aligns a REST `limit=1000` seed, and enforces `U/u/pu` continuity. A gap, reconnect, queue overflow, or crossed book immediately marks the public state stale. Raw depth is not persisted and no history endpoint is exposed.
+
+### `GET /full-order-book/snapshot`
+
+```http
+GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit=100&wait_ms=5000
+```
+
+`update_interval_ms` accepts `100`, `250`, or `500`. `limit` is an output-only projection from 1 to 1000; it does not reduce the 1000-level upstream seed. The endpoint returns only a live book and responds with `504` when bounded synchronization times out.
+
+### `WS /stream/full-order-book`
+
+```json
+{
+  "action": "subscribe",
+  "streams": [{
+    "exchange": "binance",
+    "market_type": "futures",
+    "symbol": "BTCUSDT",
+    "channel": "full_depth",
+    "params": {
+      "mode": "full",
+      "snapshot_limit": 1000,
+      "update_interval_ms": 100,
+      "output_limit": 200
+    }
+  }]
+}
+```
+
+Live frames use `full_order_book.snapshot`. Disconnect/resync frames use `full_order_book.status` with `state=stale`, `backend_sequence_continuity=false`, and empty `bids/asks`. See [`docs/FULL_ORDER_BOOK_P4_BACKEND_zh.md`](docs/FULL_ORDER_BOOK_P4_BACKEND_zh.md) for the complete state machine and configuration.
+
 ## WebSocket API
 
 ### `WS /stream/klines`

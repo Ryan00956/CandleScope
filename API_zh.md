@@ -288,6 +288,40 @@ GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&c
 
 完整架构、物理流复用和背压语义见 [`docs/ADVANCED_MARKET_DATA_P1_BACKEND_zh.md`](docs/ADVANCED_MARKET_DATA_P1_BACKEND_zh.md)。
 
+## 完整订单簿 API（P4）
+
+P4 为 Binance USD-M Futures 提供独立的本地 L2 重建链。它先订阅 diff-depth WebSocket，再以 REST `limit=1000` seed 对齐，并严格检查 `U/u/pu`。gap、重连、队列溢出或 crossed book 会立即令状态 stale，旧盘口不会继续作为 live 返回。原始 depth 不落库，也没有历史查询。
+
+### `GET /full-order-book/snapshot`
+
+```http
+GET /api/v1/full-order-book/snapshot?symbol=BTCUSDT&update_interval_ms=250&limit=100&wait_ms=5000
+```
+
+`update_interval_ms` 支持 `100`、`250`、`500`；`limit` 为 `1..1000`，只裁剪输出，不改变后台 1000 档 seed。接口仅在 book 为 live 时返回；有界等待超时返回 `504`。
+
+### `WS /stream/full-order-book`
+
+```json
+{
+  "action": "subscribe",
+  "streams": [{
+    "exchange": "binance",
+    "market_type": "futures",
+    "symbol": "BTCUSDT",
+    "channel": "full_depth",
+    "params": {
+      "mode": "full",
+      "snapshot_limit": 1000,
+      "update_interval_ms": 100,
+      "output_limit": 200
+    }
+  }]
+}
+```
+
+live 数据帧类型为 `full_order_book.snapshot`；断链/重同步帧类型为 `full_order_book.status`，并带 `state=stale`、`backend_sequence_continuity=false` 和空 `bids/asks`。完整状态机、能力边界和配置见 [`docs/FULL_ORDER_BOOK_P4_BACKEND_zh.md`](docs/FULL_ORDER_BOOK_P4_BACKEND_zh.md)。
+
 ## WebSocket API
 
 ### `WS /stream/klines`

@@ -227,6 +227,7 @@ class DataManager:
         self._trade_flow_service: Any = None
         self._liquidation_service: Any = None
         self._order_book_service: Any = None
+        self._full_order_book_service: Any = None
         self._stream_leases: dict[SeriesKey, _StreamLease] = {}
         self._memory_gc_last_report: dict[str, Any] | None = None
         self._storage_gc_last_report: dict[str, Any] | None = None
@@ -344,6 +345,21 @@ class DataManager:
             raise TypeError("order-book service does not implement the required facade")
         self._order_book_service = service
 
+    def set_full_order_book_service(self, service: Any) -> None:
+        """Attach the sequence-consistent reconstructed order-book service."""
+
+        required = (
+            "ensure_stream",
+            "release_stream",
+            "current",
+            "wait_for_live",
+            "attach",
+            "diagnostics",
+        )
+        if any(not callable(getattr(service, name, None)) for name in required):
+            raise TypeError("full order-book service does not implement the required facade")
+        self._full_order_book_service = service
+
     @property
     def market_data_ready(self) -> bool:
         return self._market_data_service is not None
@@ -359,6 +375,10 @@ class DataManager:
     @property
     def order_book_ready(self) -> bool:
         return self._order_book_service is not None
+
+    @property
+    def full_order_book_ready(self) -> bool:
+        return self._full_order_book_service is not None
 
     def wire_backfill_reconciler(self, reconciler: BackfillReconcilerLike) -> None:
         """Attach this manager's BarAggregator to a backfill reconciler."""
@@ -1082,6 +1102,54 @@ class DataManager:
         if self._order_book_service is None:
             raise RuntimeError("order-book service is not initialized")
         return self._order_book_service
+
+    # ═══════════════════════════════════════════════════════════
+    #  Full order book — strict snapshot + ordered delta rebuild
+    # ═══════════════════════════════════════════════════════════
+
+    async def ensure_full_order_book_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_full_order_book_service()
+        return await service.ensure_stream(key, consumer_id=consumer_id)
+
+    async def release_full_order_book_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_full_order_book_service()
+        return await service.release_stream(key, consumer_id=consumer_id)
+
+    def full_order_book_snapshot(self, key: MarketStreamKey) -> Any:
+        service = self._require_full_order_book_service()
+        return service.current(key, require_live=True)
+
+    async def wait_for_full_order_book_snapshot(
+        self,
+        key: MarketStreamKey,
+        *,
+        timeout_seconds: float,
+    ) -> Any:
+        service = self._require_full_order_book_service()
+        return await service.wait_for_live(key, timeout_seconds=timeout_seconds)
+
+    def attach_full_order_books(
+        self,
+        keys: list[MarketStreamKey],
+        **kwargs: Any,
+    ) -> Any:
+        service = self._require_full_order_book_service()
+        return service.attach(keys, **kwargs)
+
+    def _require_full_order_book_service(self) -> Any:
+        if self._full_order_book_service is None:
+            raise RuntimeError("full order-book service is not initialized")
+        return self._full_order_book_service
 
     # ═══════════════════════════════════════════════════════════
     #  Event Subscription — for real-time consumers
@@ -2119,6 +2187,11 @@ class DataManager:
             "order_book": (
                 self._order_book_service.diagnostics()
                 if self._order_book_service is not None
+                else {"status": "not_initialized"}
+            ),
+            "full_order_book": (
+                self._full_order_book_service.diagnostics()
+                if self._full_order_book_service is not None
                 else {"status": "not_initialized"}
             ),
             "auto_gc": self.auto_gc_snapshot(),

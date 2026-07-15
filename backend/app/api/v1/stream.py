@@ -16,6 +16,7 @@ from app.api.v1.stream_indicators import stream_indicators
 from app.api.v1.stream_klines import stream_multi_kline, stream_single_kline
 from app.api.v1.stream_liquidations import stream_liquidations
 from app.api.v1.stream_market import stream_market
+from app.api.v1.stream_full_order_book import stream_full_order_book
 from app.api.v1.stream_order_book import stream_order_book
 from app.api.v1.stream_trade_flow import stream_trade_flow
 from app.api.v1.stream_utils import (
@@ -224,3 +225,20 @@ async def order_book_stream(websocket: WebSocket) -> None:
         await websocket.close(code=1013)
         return
     await stream_order_book(websocket, dm)
+
+
+@router.websocket("/full-order-book")
+async def full_order_book_stream(websocket: WebSocket) -> None:
+    """Deliver atomic projections of a strictly reconstructed local L2 book."""
+
+    await websocket.accept()
+    dm = _get_data_manager(websocket)
+    if dm is None or not getattr(dm, "full_order_book_ready", False):
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "code": "FULL_ORDER_BOOK_STREAM_NOT_READY",
+            "detail": "Full order-book market data is not initialized.",
+        })
+        await websocket.close(code=1013)
+        return
+    await stream_full_order_book(websocket, dm)

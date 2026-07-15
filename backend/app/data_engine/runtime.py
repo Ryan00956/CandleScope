@@ -11,6 +11,16 @@ from typing import Any
 
 from app.core.config import (
     KLINES_DB_PATH,
+    FULL_ORDER_BOOK_DEFAULT_MAX_PENDING,
+    FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES,
+    FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE,
+    FULL_ORDER_BOOK_MAX_RESYNC_BACKOFF_SECONDS,
+    FULL_ORDER_BOOK_MAX_STREAMS,
+    FULL_ORDER_BOOK_MAX_UPDATES_PER_DELTA,
+    FULL_ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS,
+    FULL_ORDER_BOOK_RESYNC_BACKOFF_SECONDS,
+    FULL_ORDER_BOOK_SNAPSHOT_TIMEOUT_SECONDS,
+    FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE,
     LIQUIDATION_BATCH_INTERVAL_SECONDS,
     LIQUIDATION_CAPTURE_STREAMS,
     LIQUIDATION_DB_PATH,
@@ -50,6 +60,8 @@ from app.data_engine.ingestion import TransportLayer
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.factory import ExchangeIngestionFactory
 from app.data_engine.market_data.append_hub import AppendBatchHub
+from app.data_engine.market_data.full_order_book import FullOrderBookEngine
+from app.data_engine.market_data.full_order_book_service import FullOrderBookService
 from app.data_engine.market_data.hub import MarketEventHub
 from app.data_engine.market_data.liquidation import LiquidationEngine, NormalizedLiquidation
 from app.data_engine.market_data.liquidation_service import LiquidationService
@@ -94,6 +106,10 @@ class OrderBookConfigurationError(RuntimeError):
     """A fail-fast Partial Top-N order-book pipeline configuration error."""
 
 
+class FullOrderBookConfigurationError(RuntimeError):
+    """A fail-fast sequence-consistent full-book configuration error."""
+
+
 _RAW_ARCHIVE_CONSUMER_ID = "runtime:raw-agg-trade-archive"
 _LIQUIDATION_CAPTURE_CONSUMER_ID = "runtime:liquidation-capture"
 
@@ -111,6 +127,7 @@ class DataEngineRuntime:
     trade_flow_service: TradeFlowService
     liquidation_service: LiquidationService | None = None
     order_book_service: OrderBookService | None = None
+    full_order_book_service: FullOrderBookService | None = None
     price_stream_source: IngestionPriceSource | None = None
     subscription_service: SubscriptionService | None = None
     gap_scan_task: asyncio.Task | None = None
@@ -197,6 +214,13 @@ class DataEngineRuntime:
             await self._shutdown_step(
                 "OrderBookService",
                 self.order_book_service.shutdown(),
+                None,
+            )
+
+        if self.full_order_book_service is not None:
+            await self._shutdown_step(
+                "FullOrderBookService",
+                self.full_order_book_service.shutdown(),
                 None,
             )
 
@@ -456,6 +480,104 @@ def _build_order_book_service(
     )
 
 
+def _build_full_order_book_service(
+    ingestion_factory: ExchangeIngestionFactory,
+) -> FullOrderBookService:
+    """Construct the bounded REST-seed + ordered-delta reconstruction chain."""
+
+    error_type = FullOrderBookConfigurationError
+    max_streams = _positive_int_config(
+        "FULL_ORDER_BOOK_MAX_STREAMS",
+        FULL_ORDER_BOOK_MAX_STREAMS,
+        error_type=error_type,
+    )
+    upstream_queue_size = _positive_int_config(
+        "FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE",
+        FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE,
+        error_type=error_type,
+    )
+    max_levels_per_side = _positive_int_config(
+        "FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE",
+        FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE,
+        error_type=error_type,
+    )
+    if max_levels_per_side < 1_000:
+        raise error_type(
+            "FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE must be at least 1000 "
+            "to hold the configured Binance REST seed"
+        )
+    max_updates_per_delta = _positive_int_config(
+        "FULL_ORDER_BOOK_MAX_UPDATES_PER_DELTA",
+        FULL_ORDER_BOOK_MAX_UPDATES_PER_DELTA,
+        error_type=error_type,
+    )
+    max_buffered_level_updates = _positive_int_config(
+        "FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES",
+        FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES,
+        error_type=error_type,
+    )
+    if max_buffered_level_updates < max_updates_per_delta:
+        raise error_type(
+            "FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES must be at least "
+            "FULL_ORDER_BOOK_MAX_UPDATES_PER_DELTA"
+        )
+    default_max_pending = _positive_int_config(
+        "FULL_ORDER_BOOK_DEFAULT_MAX_PENDING",
+        FULL_ORDER_BOOK_DEFAULT_MAX_PENDING,
+        error_type=error_type,
+    )
+    snapshot_timeout = _positive_float_config(
+        "FULL_ORDER_BOOK_SNAPSHOT_TIMEOUT_SECONDS",
+        FULL_ORDER_BOOK_SNAPSHOT_TIMEOUT_SECONDS,
+        error_type=error_type,
+    )
+    initial_backoff = _non_negative_float_config(
+        "FULL_ORDER_BOOK_RESYNC_BACKOFF_SECONDS",
+        FULL_ORDER_BOOK_RESYNC_BACKOFF_SECONDS,
+        error_type=error_type,
+    )
+    max_backoff = _positive_float_config(
+        "FULL_ORDER_BOOK_MAX_RESYNC_BACKOFF_SECONDS",
+        FULL_ORDER_BOOK_MAX_RESYNC_BACKOFF_SECONDS,
+        error_type=error_type,
+    )
+    if max_backoff < initial_backoff:
+        raise error_type(
+            "FULL_ORDER_BOOK_MAX_RESYNC_BACKOFF_SECONDS cannot be less than "
+            "FULL_ORDER_BOOK_RESYNC_BACKOFF_SECONDS"
+        )
+    stop_timeout = _positive_float_config(
+        "FULL_ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS",
+        FULL_ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS,
+        error_type=error_type,
+    )
+
+    engine = FullOrderBookEngine(
+        max_streams=max_streams,
+        max_levels_per_side=max_levels_per_side,
+        max_buffered_deltas_per_stream=upstream_queue_size,
+        max_updates_per_delta=max_updates_per_delta,
+        max_buffered_level_updates=max_buffered_level_updates,
+    )
+    hub = MarketEventHub(
+        max_states=max_streams,
+        default_max_pending=default_max_pending,
+    )
+    return FullOrderBookService(
+        ingestion_factory,
+        engine=engine,
+        hub=hub,
+        max_streams=max_streams,
+        upstream_queue_size=upstream_queue_size,
+        snapshot_limit=1_000,
+        snapshot_timeout_seconds=snapshot_timeout,
+        resync_backoff_seconds=initial_backoff,
+        max_resync_backoff_seconds=max_backoff,
+        physical_stop_timeout_seconds=stop_timeout,
+        default_max_pending=default_max_pending,
+    )
+
+
 def _build_liquidation_rollup_store() -> LiquidationRollupStore:
     backend = str(LIQUIDATION_ROLLUP_BACKEND).strip().lower()
     if backend == "sqlite":
@@ -632,12 +754,17 @@ def _positive_float_config(
     return parsed
 
 
-def _non_negative_float_config(name: str, value: float) -> float:
+def _non_negative_float_config(
+    name: str,
+    value: float,
+    *,
+    error_type: type[RuntimeError] = TradeFlowConfigurationError,
+) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TradeFlowConfigurationError(f"{name} must be zero or greater")
+        raise error_type(f"{name} must be zero or greater")
     parsed = float(value)
     if not math.isfinite(parsed) or parsed < 0:
-        raise TradeFlowConfigurationError(f"{name} must be zero or greater")
+        raise error_type(f"{name} must be zero or greater")
     return parsed
 
 
@@ -652,6 +779,7 @@ async def start_data_engine() -> DataEngineRuntime:
     trade_flow_service: TradeFlowService | None = None
     liquidation_service: LiquidationService | None = None
     order_book_service: OrderBookService | None = None
+    full_order_book_service: FullOrderBookService | None = None
 
     try:
         dm = DataManager()
@@ -689,6 +817,10 @@ async def start_data_engine() -> DataEngineRuntime:
         order_book_service = _build_order_book_service(ingestion_factory)
         dm.set_order_book_service(order_book_service)
         print("[startup] OrderBookService injected ✓")
+
+        full_order_book_service = _build_full_order_book_service(ingestion_factory)
+        dm.set_full_order_book_service(full_order_book_service)
+        print("[startup] FullOrderBookService injected ✓")
 
         ingestion_cfg = IngestionConfig()
         transport = TransportLayer(ingestion_cfg)
@@ -734,6 +866,7 @@ async def start_data_engine() -> DataEngineRuntime:
             trade_flow_service=trade_flow_service,
             liquidation_service=liquidation_service,
             order_book_service=order_book_service,
+            full_order_book_service=full_order_book_service,
             price_stream_source=price_source,
             subscription_service=subscription_service,
             gap_scan_task=gap_scan_task,
@@ -753,6 +886,7 @@ async def start_data_engine() -> DataEngineRuntime:
                 trade_flow_service=trade_flow_service,
                 liquidation_service=liquidation_service,
                 order_book_service=order_book_service,
+                full_order_book_service=full_order_book_service,
             )
         raise
 
@@ -909,6 +1043,7 @@ async def _cleanup_partial_start(
     trade_flow_service: TradeFlowService | None,
     liquidation_service: LiquidationService | None = None,
     order_book_service: OrderBookService | None = None,
+    full_order_book_service: FullOrderBookService | None = None,
 ) -> None:
     if price_source is not None:
         with suppress(Exception):
@@ -919,6 +1054,9 @@ async def _cleanup_partial_start(
     if order_book_service is not None:
         with suppress(Exception):
             await order_book_service.shutdown()
+    if full_order_book_service is not None:
+        with suppress(Exception):
+            await full_order_book_service.shutdown()
     if trade_flow_service is not None:
         with suppress(Exception):
             await trade_flow_service.shutdown()
@@ -938,6 +1076,7 @@ async def _cleanup_partial_start(
 
 __all__ = [
     "DataEngineRuntime",
+    "FullOrderBookConfigurationError",
     "LiquidationConfigurationError",
     "OrderBookConfigurationError",
     "TradeFlowConfigurationError",

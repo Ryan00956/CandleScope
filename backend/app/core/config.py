@@ -112,6 +112,41 @@ ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS = float(
     os.getenv("ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS", "2.0")
 )
 
+# Full Order Books are rebuilt from a REST seed plus every ordered diff-depth
+# event.  They deliberately have separate, tighter stream limits and explicit
+# per-stream queue/book bounds; a bound violation invalidates the book and
+# triggers resynchronization instead of dropping a delta silently.
+FULL_ORDER_BOOK_MAX_STREAMS = int(
+    os.getenv("FULL_ORDER_BOOK_MAX_STREAMS", "16")
+)
+FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE = int(
+    os.getenv("FULL_ORDER_BOOK_UPSTREAM_QUEUE_SIZE", "4096")
+)
+FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE = int(
+    os.getenv("FULL_ORDER_BOOK_MAX_LEVELS_PER_SIDE", "5000")
+)
+FULL_ORDER_BOOK_MAX_UPDATES_PER_DELTA = int(
+    os.getenv("FULL_ORDER_BOOK_MAX_UPDATES_PER_DELTA", "10000")
+)
+FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES = int(
+    os.getenv("FULL_ORDER_BOOK_MAX_BUFFERED_LEVEL_UPDATES", "200000")
+)
+FULL_ORDER_BOOK_DEFAULT_MAX_PENDING = int(
+    os.getenv("FULL_ORDER_BOOK_DEFAULT_MAX_PENDING", "16")
+)
+FULL_ORDER_BOOK_SNAPSHOT_TIMEOUT_SECONDS = float(
+    os.getenv("FULL_ORDER_BOOK_SNAPSHOT_TIMEOUT_SECONDS", "5.0")
+)
+FULL_ORDER_BOOK_RESYNC_BACKOFF_SECONDS = float(
+    os.getenv("FULL_ORDER_BOOK_RESYNC_BACKOFF_SECONDS", "0.1")
+)
+FULL_ORDER_BOOK_MAX_RESYNC_BACKOFF_SECONDS = float(
+    os.getenv("FULL_ORDER_BOOK_MAX_RESYNC_BACKOFF_SECONDS", "5.0")
+)
+FULL_ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS = float(
+    os.getenv("FULL_ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS", "5.0")
+)
+
 # Binance HTTP APIs
 BINANCE_BASE_URLS = [
     "https://api.binance.com",

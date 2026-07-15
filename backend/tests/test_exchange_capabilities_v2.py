@@ -62,7 +62,10 @@ def test_every_declared_builtin_channel_has_exactly_one_contract_fixture() -> No
             expected_sources = set()
             if TransportMode.WEBSOCKET in expectation.realtime_transports:
                 expected_sources.add(DataSource.WEBSOCKET)
-            if TransportMode.REST_POLL in expectation.realtime_transports:
+            if any(
+                mode in expectation.realtime_transports
+                for mode in (TransportMode.REST_POLL, TransportMode.REST_SNAPSHOT)
+            ):
                 expected_sources.add(DataSource.HTTP)
             if expectation.history:
                 expected_sources.add(DataSource.HTTP_BACKFILL)

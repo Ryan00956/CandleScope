@@ -7,6 +7,7 @@ from app.api.v1.market import router as market_router
 from app.data_engine.ingestion.models import DataSource
 from app.data_engine.market_data.events import HubRecord, MarketStateEvent
 from app.data_engine.market_data.models import MarketChannel, MarketStreamKey
+from app.data_engine.market_data.service import MarketHistoryPage
 
 
 class _MarketDataManager:
@@ -178,6 +179,45 @@ def test_market_history_validates_range_and_period_is_part_of_response_identity(
     )
     assert response.status_code == 200
     assert response.json()["key"]["params"] == {"period": "5m"}
+
+
+def test_market_history_expired_empty_page_is_complete_and_not_retryable() -> None:
+    class _ExpiredHistoryManager(_MarketDataManager):
+        async def market_history_page(self, key: MarketStreamKey, **kwargs):
+            self.history_calls.append({"key": key, **kwargs})
+            return MarketHistoryPage(events=[], fallback=False)
+
+    response = _client(_ExpiredHistoryManager()).get(
+        "/api/v1/market/history",
+        params={
+            "channel": "open_interest",
+            "period": "1h",
+            "start_ms": 1,
+            "end_ms": 2,
+            "limit": 500,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "type": "market.history",
+        "key": {
+            "exchange": "binance",
+            "market_type": "futures",
+            "symbol": "BTCUSDT",
+            "channel": "open_interest",
+            "params": {"period": "1h"},
+        },
+        "count": 0,
+        "data": [],
+        "fallback": False,
+        "has_more": False,
+        "coverage": {
+            "earliest_ms": None,
+            "latest_ms": None,
+            "complete": True,
+        },
+    }
 
 
 def test_market_http_does_not_expose_raw_upstream_error_text() -> None:

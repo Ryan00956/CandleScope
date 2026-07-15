@@ -91,6 +91,19 @@ _FUTURES_DEPTH_FIELDS = (
     "bids",
     "asks",
 )
+_FULL_DEPTH_FIELDS = (
+    "kind",
+    "last_update_id",
+    "first_update_id",
+    "final_update_id",
+    "previous_final_update_id",
+    "event_time_ms",
+    "transaction_time_ms",
+    "update_interval_ms",
+    "snapshot_limit",
+    "bids",
+    "asks",
+)
 _LIQUIDATION_FIELDS = (
     "order_side",
     "position_side",
@@ -293,6 +306,34 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             ),
         ),
         MarketChannelCapability(
+            channel=MarketChannel.FULL_DEPTH,
+            market_types=("futures",),
+            realtime=True,
+            realtime_transports=(
+                TransportMode.WEBSOCKET,
+                TransportMode.REST_SNAPSHOT,
+            ),
+            delivery=DeliveryClass.ORDERED_DELTA,
+            snapshot=True,
+            delta=True,
+            sequence="previous_link",
+            resync="replace_snapshot",
+            params={"snapshot_limit": [5, 10, 20, 50, 100, 500, 1000]},
+            update_intervals_ms=(100, 250, 500),
+            available_fields=_FULL_DEPTH_FIELDS,
+            connection_model="path_per_stream",
+            limits={
+                "rest.default_limit": 500,
+                "rest.max_limit": 1000,
+            },
+            known_limitations=(
+                "A local full book is valid only after REST snapshot alignment with buffered WebSocket deltas",
+                "Any broken previous-update link requires a fresh snapshot and buffered-delta replay",
+                "Retail Price Improvement orders are excluded from both snapshot and delta feeds",
+                "USD-M exposes no historical full-order-book replay endpoint",
+            ),
+        ),
+        MarketChannelCapability(
             channel=MarketChannel.MARK_PRICE,
             market_types=("futures",),
             realtime=True,
@@ -355,7 +396,7 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             connection_model="polling_only",
             limits={
                 "history.max_limit": 500,
-                "history.max_age_ms": 2_678_400_000,
+                "history.max_age_ms": 2_592_000_000,
                 "history.requests_per_5m": 1000,
                 "realtime.request_weight": 1,
                 "service.max_active_streams": 64,

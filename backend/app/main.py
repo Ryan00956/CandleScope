@@ -44,6 +44,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.alerts import router as alerts_router
 from app.api.v1.indicators import router as indicators_router  # indicator engine v2
 from app.api.v1.exchanges import router as exchanges_router
+from app.api.v1.full_order_book import router as full_order_book_router
 from app.api.v1.klines import router as klines_router
 from app.api.v1.liquidations import router as liquidations_router
 from app.api.v1.market import router as market_router
@@ -92,6 +93,7 @@ app.include_router(market_router, prefix="/api/v1")
 app.include_router(trade_flow_router, prefix="/api/v1")
 app.include_router(liquidations_router, prefix="/api/v1")
 app.include_router(order_book_router, prefix="/api/v1")
+app.include_router(full_order_book_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
 app.include_router(alerts_router, prefix="/api/v1")
@@ -110,6 +112,7 @@ app.include_router(price_ws_router, prefix="/api/v1")
 async def _init_data_manager() -> None:
     """Create and start the DataEngine runtime."""
     from app.data_engine.runtime import (
+        FullOrderBookConfigurationError,
         LiquidationConfigurationError,
         OrderBookConfigurationError,
         TradeFlowConfigurationError,
@@ -161,6 +164,7 @@ async def _init_data_manager() -> None:
         TradeFlowConfigurationError,
         LiquidationConfigurationError,
         OrderBookConfigurationError,
+        FullOrderBookConfigurationError,
     ) as exc:
         logger.critical(
             "Advanced market-data configuration prevents safe startup: %s",

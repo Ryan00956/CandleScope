@@ -27,6 +27,10 @@ _DEFAULT_PARTIAL_DEPTH_UPDATE_INTERVAL_MS = {
     "spot": 1000,
     "futures": 250,
 }
+_FULL_DEPTH_UPDATE_INTERVALS_MS = {100, 250, 500}
+_DEFAULT_FULL_DEPTH_UPDATE_INTERVAL_MS = 250
+_FULL_DEPTH_SNAPSHOT_LIMITS = {5, 10, 20, 50, 100, 500, 1000}
+_DEFAULT_FULL_DEPTH_SNAPSHOT_LIMIT = 500
 
 
 class BinanceNormalizer:
@@ -63,6 +67,8 @@ class BinanceNormalizer:
             return self._parse_ws_ticker(payload, msg)
         if st == StreamType.DEPTH:
             return self._parse_ws_depth(payload, msg)
+        if st == StreamType.FULL_DEPTH:
+            return self._parse_ws_full_depth(payload, msg)
         if st in (
             StreamType.MARK_PRICE,
             StreamType.INDEX_PRICE,
@@ -85,6 +91,8 @@ class BinanceNormalizer:
             return self._parse_http_ticker(msg)
         if st == StreamType.DEPTH:
             return self._parse_http_depth(msg)
+        if st == StreamType.FULL_DEPTH:
+            return self._parse_http_full_depth(msg)
         if st in (StreamType.MARK_PRICE, StreamType.INDEX_PRICE):
             return self._parse_http_derivatives_price(msg)
         if st == StreamType.FUNDING_RATE:
@@ -264,6 +272,76 @@ class BinanceNormalizer:
             msg=msg,
             data=data,
             sequence=data["last_update_id"],
+        )
+
+    def _parse_ws_full_depth(
+        self,
+        payload: dict,
+        msg: RawMessage,
+    ) -> MarketEvent | None:
+        update_interval_ms = self._full_depth_update_interval()
+        if update_interval_ms is None or payload.get("e") != "depthUpdate":
+            return None
+        if "st" in payload and (
+            type(payload.get("st")) is not int or payload.get("st") != 1
+        ):
+            return None
+
+        expected_symbol = self._symbols.normalize(
+            self._descriptor.symbol,
+            market_type=self._descriptor.market_type,
+        ).upper()
+        if str(payload.get("s", "")).upper() != expected_symbol:
+            return None
+
+        first_update_id = self._positive_int(payload.get("U"))
+        final_update_id = self._positive_int(payload.get("u"))
+        previous_final_update_id = self._positive_int(payload.get("pu"))
+        event_time_ms = self._positive_int(payload.get("E"))
+        transaction_time_ms = self._positive_int(payload.get("T"))
+        if (
+            first_update_id is None
+            or final_update_id is None
+            or previous_final_update_id is None
+            or event_time_ms is None
+            or transaction_time_ms is None
+            or first_update_id > final_update_id
+            or previous_final_update_id >= final_update_id
+        ):
+            return None
+
+        bids = self._normalize_full_depth_levels(
+            payload.get("b"),
+            allow_empty=True,
+            allow_zero_quantity=True,
+        )
+        asks = self._normalize_full_depth_levels(
+            payload.get("a"),
+            allow_empty=True,
+            allow_zero_quantity=True,
+        )
+        if bids is None or asks is None:
+            return None
+
+        data: dict[str, object] = {
+            "kind": "delta",
+            "last_update_id": None,
+            "first_update_id": first_update_id,
+            "final_update_id": final_update_id,
+            "previous_final_update_id": previous_final_update_id,
+            "event_time_ms": event_time_ms,
+            "transaction_time_ms": transaction_time_ms,
+            "update_interval_ms": update_interval_ms,
+            "snapshot_limit": None,
+            "bids": bids,
+            "asks": asks,
+        }
+        return self._event(
+            event_type=StreamType.FULL_DEPTH,
+            event_time_ms=event_time_ms,
+            msg=msg,
+            data=data,
+            sequence=final_update_id,
         )
 
     def _parse_ws_derivatives_summary(
@@ -484,6 +562,67 @@ class BinanceNormalizer:
             sequence=data["last_update_id"],
         )
 
+    def _parse_http_full_depth(self, msg: RawMessage) -> MarketEvent | None:
+        if msg.source is not DataSource.HTTP:
+            return None
+        payload = msg.payload
+        update_interval_ms = self._full_depth_update_interval()
+        if not isinstance(payload, dict) or update_interval_ms is None:
+            return None
+
+        last_update_id = self._positive_int(payload.get("lastUpdateId"))
+        event_time_ms = self._positive_int(payload.get("E"))
+        transaction_time_ms = self._positive_int(payload.get("T"))
+        if (
+            last_update_id is None
+            or event_time_ms is None
+            or transaction_time_ms is None
+        ):
+            return None
+
+        bids = self._normalize_full_depth_levels(
+            payload.get("bids"),
+            allow_empty=False,
+            allow_zero_quantity=False,
+        )
+        asks = self._normalize_full_depth_levels(
+            payload.get("asks"),
+            allow_empty=False,
+            allow_zero_quantity=False,
+        )
+        if bids is None or asks is None:
+            return None
+
+        snapshot_limit = msg.request_limit
+        if snapshot_limit is None:
+            snapshot_limit = _DEFAULT_FULL_DEPTH_SNAPSHOT_LIMIT
+        elif (
+            type(snapshot_limit) is not int
+            or snapshot_limit not in _FULL_DEPTH_SNAPSHOT_LIMITS
+        ):
+            return None
+
+        data: dict[str, object] = {
+            "kind": "snapshot",
+            "last_update_id": last_update_id,
+            "first_update_id": None,
+            "final_update_id": None,
+            "previous_final_update_id": None,
+            "event_time_ms": event_time_ms,
+            "transaction_time_ms": transaction_time_ms,
+            "update_interval_ms": update_interval_ms,
+            "snapshot_limit": snapshot_limit,
+            "bids": bids,
+            "asks": asks,
+        }
+        return self._event(
+            event_type=StreamType.FULL_DEPTH,
+            event_time_ms=event_time_ms,
+            msg=msg,
+            data=data,
+            sequence=last_update_id,
+        )
+
     def _normalize_depth_payload(
         self,
         payload: dict,
@@ -589,6 +728,56 @@ class BinanceNormalizer:
             return None
         return depth_levels, update_interval_ms
 
+    def _full_depth_update_interval(self) -> int | None:
+        if self._descriptor.market_type.strip().lower() != "futures":
+            return None
+        if self._descriptor.depth_levels is not None:
+            return None
+        update_interval_ms = self._descriptor.update_interval_ms
+        if update_interval_ms is None:
+            return _DEFAULT_FULL_DEPTH_UPDATE_INTERVAL_MS
+        if (
+            type(update_interval_ms) is not int
+            or update_interval_ms not in _FULL_DEPTH_UPDATE_INTERVALS_MS
+        ):
+            return None
+        return update_interval_ms
+
+    @staticmethod
+    def _normalize_full_depth_levels(
+        raw_levels: object,
+        *,
+        allow_empty: bool,
+        allow_zero_quantity: bool,
+    ) -> list[list[float]] | None:
+        if not isinstance(raw_levels, (list, tuple)):
+            return None
+        if not raw_levels and not allow_empty:
+            return None
+
+        levels: list[list[float]] = []
+        for raw_level in raw_levels:
+            if not isinstance(raw_level, (list, tuple)) or len(raw_level) != 2:
+                return None
+            raw_price, raw_quantity = raw_level
+            if isinstance(raw_price, bool) or isinstance(raw_quantity, bool):
+                return None
+            try:
+                price = float(raw_price)
+                quantity = float(raw_quantity)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if (
+                not math.isfinite(price)
+                or not math.isfinite(quantity)
+                or price <= 0
+                or quantity < 0
+                or (quantity == 0 and not allow_zero_quantity)
+            ):
+                return None
+            levels.append([price, quantity])
+        return levels
+
     @staticmethod
     def _normalize_book_levels(
         raw_levels: object,
@@ -637,6 +826,13 @@ class BinanceNormalizer:
         except (TypeError, ValueError, OverflowError):
             return None
         if normalized < 0:
+            return None
+        return normalized
+
+    @classmethod
+    def _positive_int(cls, value: object) -> int | None:
+        normalized = cls._non_negative_int(value)
+        if normalized is None or normalized == 0:
             return None
         return normalized
 

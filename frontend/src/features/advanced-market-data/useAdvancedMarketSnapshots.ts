@@ -14,16 +14,16 @@ export function useAdvancedMarketSummary(
   view: AdvancedMarketRuntimeView,
 ): AdvancedMarketSummarySnapshot {
   const subscribe = useCallback(
-    (listener: () => void) => view.enabled
+    (listener: () => void) => view.summaryEnabled
       ? advancedMarketDataStore.subscribeSummary(view.identityKey, listener)
       : () => undefined,
-    [view.enabled, view.identityKey],
+    [view.identityKey, view.summaryEnabled],
   );
   const getSnapshot = useCallback(
-    () => view.enabled
+    () => view.summaryEnabled
       ? advancedMarketDataStore.getSummarySnapshot(view.identityKey)
       : EMPTY_ADVANCED_MARKET_SUMMARY,
-    [view.enabled, view.identityKey],
+    [view.identityKey, view.summaryEnabled],
   );
   return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_ADVANCED_MARKET_SUMMARY);
 }
@@ -32,16 +32,16 @@ export function useAdvancedMarketMetrics(
   view: AdvancedMarketRuntimeView,
 ): AdvancedMarketMetricsSnapshot {
   const subscribe = useCallback(
-    (listener: () => void) => view.enabled
+    (listener: () => void) => view.metricsEnabled
       ? advancedMarketDataStore.subscribeMetrics(view.identityKey, listener)
       : () => undefined,
-    [view.enabled, view.identityKey],
+    [view.identityKey, view.metricsEnabled],
   );
   const getSnapshot = useCallback(
-    () => view.enabled
+    () => view.metricsEnabled
       ? advancedMarketDataStore.getMetricsSnapshot(view.identityKey)
       : EMPTY_ADVANCED_MARKET_METRICS,
-    [view.enabled, view.identityKey],
+    [view.identityKey, view.metricsEnabled],
   );
   return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_ADVANCED_MARKET_METRICS);
 }

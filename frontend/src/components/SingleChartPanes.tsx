@@ -942,7 +942,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const visibleRangeSaveTimerRef = useRef<TimerHandle | null>(null);
   const activeSubPaneCountRef = useRef(0);
   const paneHeightStorageKeyRef = useRef<string | null>(null);
-  const prevSubPaneIdsRef = useRef<Set<string>>(new Set());
+  const prevSubPaneIdsRef = useRef<Map<string, boolean>>(new Map());
   const onNeedMoreLeftRef = useRef(onNeedMoreLeft);
   const canLoadMoreLeftRef = useRef(canLoadMoreLeft);
   const datasetKeyRef = useRef(datasetKey);
@@ -2587,11 +2587,18 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   }, [customBg, indicatorDatasetOwned, paneDescriptors, seriesReady, theme]);
 
   useEffect(() => {
-    const currentIds = new Set(subPanes.map((p) => p.id));
-    for (const prevId of prevSubPaneIdsRef.current) {
-      if (!currentIds.has(prevId)) clearSavedDrawings(`${drawingKeyBase || symbol}__${prevId}`);
+    const currentPanes = new Map(
+      subPanes.map((pane) => [pane.id, Boolean(pane.dataMarketPane)]),
+    );
+    for (const [prevId, preserveWhenHidden] of prevSubPaneIdsRef.current) {
+      // Market-data studies can disappear temporarily when hidden or when the
+      // current product lacks the channel. Preserve their pane drawings so a
+      // later supported/visible session can restore the user's work.
+      if (!currentPanes.has(prevId) && !preserveWhenHidden) {
+        clearSavedDrawings(`${drawingKeyBase || symbol}__${prevId}`);
+      }
     }
-    prevSubPaneIdsRef.current = currentIds;
+    prevSubPaneIdsRef.current = currentPanes;
   }, [drawingKeyBase, subPanes, symbol]);
 
   const shouldMountDrawingEngine = supportsDrawingFeatures

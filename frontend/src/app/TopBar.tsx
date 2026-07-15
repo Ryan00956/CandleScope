@@ -150,7 +150,7 @@ function TopBar({ symbolSearch, controls, marketSummary, advancedMarketData }: T
         </div>
       )}
 
-      {advancedMarketData.enabled && (
+      {advancedMarketData.summaryEnabled && (
         <div
           className={`advanced-market-summary advanced-market-summary-${advancedSummary.connectionStatus}`}
           aria-label="Derivatives market summary"

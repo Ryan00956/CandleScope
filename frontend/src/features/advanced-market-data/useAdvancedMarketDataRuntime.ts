@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { ChartDataCommitMeta } from "../market-data/useChartDataRuntime.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
+import { buildSeriesWindowKey } from "../market-data/window/windowRegistry.js";
 import {
   fetchAdvancedMarketHistory,
   fetchAdvancedMarketSnapshot,
@@ -17,13 +25,21 @@ import {
 } from "./marketHistoryCoverage.js";
 import { MarketStreamController } from "./marketStreamController.js";
 import { resolveOpenInterestPeriod } from "./metricPaneProjection.js";
+import { resolveAdvancedMarketCapabilities } from "./advancedMarketCapabilities.js";
+import { useMarketMetricSelection } from "./marketMetricSelectionStore.js";
 import {
-  ADVANCED_MARKET_CHANNELS,
   buildAdvancedMarketIdentityKey,
   normalizeAdvancedMarketIdentity,
+  type AdvancedMarketChannel,
+  type AdvancedMarketConnectionStatus,
   type AdvancedMarketIdentity,
   type AdvancedMarketRuntime,
+  type AdvancedMarketStudyView,
 } from "./advancedMarketDataTypes.js";
+import type {
+  MarketMetricChannel,
+  MarketMetricId,
+} from "./marketMetricSelectionTypes.js";
 
 interface UseAdvancedMarketDataRuntimeOptions {
   session: ChartSessionRuntime;
@@ -36,30 +52,59 @@ interface ActiveRuntimeContext {
   identity: AdvancedMarketIdentity;
   identityKey: string;
   interval: string;
-  generation: number;
+  historyContextKey: string;
+  metricChannels: readonly MarketMetricChannel[];
+  requestedChannels: readonly AdvancedMarketChannel[];
+  requestedChannelSignature: string;
+  seriesReady: boolean;
+}
+
+interface OwnedConnectionState {
+  identityKey: string;
+  status: AdvancedMarketConnectionStatus;
+}
+
+interface OwnedStreamErrorState {
+  identityKey: string;
+  error: string | null;
+}
+
+interface OwnedHistoryErrorState {
+  historyContextKey: string;
+  errors: Partial<Record<MarketMetricChannel, string>>;
 }
 
 const MAX_HISTORY_PAGES_PER_LOAD = 8;
 const HISTORY_RETRY_DELAY_MS = 30_000;
+const EMPTY_HISTORY_ERRORS: Partial<Record<MarketMetricChannel, string>> = Object.freeze({});
+const SUMMARY_CHANNELS: readonly AdvancedMarketChannel[] = [
+  "mark_price",
+  "index_price",
+  "basis",
+];
+const MARKET_STUDY_CATALOG: Record<MarketMetricId, {
+  name: string;
+  description: string;
+}> = {
+  "market:funding-rate": {
+    name: "资金费率 (Funding Rate)",
+    description: "永续合约已结算与下一周期预估资金费率，按百分比显示。",
+  },
+  "market:open-interest": {
+    name: "未平仓量 (Open Interest)",
+    description: "当前合约未平仓头寸规模，按交易所支持的采样周期显示。",
+  },
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 export function supportsAdvancedMarketData(session: ChartSessionRuntime): boolean {
-  const { exchange, marketType, exchangeConfig } = session.view;
-  if (marketType.toLowerCase() !== "futures") return false;
-  const raw = exchangeConfig.raw;
-  if (!raw) return exchange.toLowerCase() === "binance";
-  const channels = Array.isArray(raw.channels) ? raw.channels : [];
-  const required = new Set(["mark_price", "index_price", "funding_rate", "open_interest"]);
-  for (const item of channels) {
-    if (!isRecord(item) || typeof item.channel !== "string") continue;
-    const marketTypes = Array.isArray(item.market_types) ? item.market_types : [];
-    if (!marketTypes.some((value) => String(value).toLowerCase() === marketType.toLowerCase())) continue;
-    required.delete(item.channel.toLowerCase());
-  }
-  return required.size === 0;
+  return resolveAdvancedMarketCapabilities({
+    marketType: session.view.marketType,
+    raw: session.view.exchangeConfig.raw,
+  }).summarySupported;
 }
 
 function parseVisibleTimeRange(range: unknown): MarketHistoryRange | null {
@@ -73,6 +118,62 @@ function parseVisibleTimeRange(range: unknown): MarketHistoryRange | null {
   });
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+export function buildAdvancedMarketHistoryContextKey(
+  identityKey: string,
+  interval: string,
+  channels: readonly MarketMetricChannel[],
+): string {
+  return `${identityKey}|${interval}|${channels.join("|")}`;
+}
+
+export interface AdvancedMarketHistoryRequestGuard {
+  aborted: boolean;
+  disposed: boolean;
+  expectedGeneration: number;
+  currentGeneration: number;
+  expectedHistoryContextKey: string;
+  currentHistoryContextKey: string;
+  expectedIdentityKey: string;
+  currentIdentityKey: string;
+  expectedInterval: string;
+  currentInterval: string;
+  channel: MarketMetricChannel;
+  period: string | null;
+  currentMetricChannels: readonly MarketMetricChannel[];
+  seriesReady: boolean;
+}
+
+export function isAdvancedMarketHistoryRequestCurrent({
+  aborted,
+  disposed,
+  expectedGeneration,
+  currentGeneration,
+  expectedHistoryContextKey,
+  currentHistoryContextKey,
+  expectedIdentityKey,
+  currentIdentityKey,
+  expectedInterval,
+  currentInterval,
+  channel,
+  period,
+  currentMetricChannels,
+  seriesReady,
+}: AdvancedMarketHistoryRequestGuard): boolean {
+  return !disposed
+    && !aborted
+    && currentGeneration === expectedGeneration
+    && currentHistoryContextKey === expectedHistoryContextKey
+    && currentIdentityKey === expectedIdentityKey
+    && currentInterval === expectedInterval
+    && seriesReady
+    && currentMetricChannels.includes(channel)
+    && (channel !== "open_interest" || resolveOpenInterestPeriod(currentInterval) === period);
+}
+
 export function useAdvancedMarketDataRuntime({
   session,
   dataMeta,
@@ -84,67 +185,203 @@ export function useAdvancedMarketDataRuntime({
     symbol: session.view.symbol,
   }), [session.view.exchange, session.view.marketType, session.view.symbol]);
   const identityKey = useMemo(() => buildAdvancedMarketIdentityKey(identity), [identity]);
-  const enabled = supportsAdvancedMarketData(session);
+  const interval = session.view.interval;
+  const seriesKey = useMemo(() => String(buildSeriesWindowKey({
+    exchange: identity.exchange,
+    marketType: identity.marketType,
+    symbol: identity.symbol,
+    interval,
+  })), [identity, interval]);
+  const capabilitySnapshot = useMemo(() => resolveAdvancedMarketCapabilities({
+    marketType: session.view.marketType,
+    raw: session.view.exchangeConfig.raw,
+  }), [session.view.exchangeConfig.raw, session.view.marketType]);
+  const {
+    selections: metricSelections,
+    add: addMarketStudy,
+    remove: removeMarketStudy,
+    toggleVisibility: toggleMarketStudyVisibility,
+  } = useMarketMetricSelection();
+  const metricCapabilities = useMemo(() => ({
+    funding_rate: {
+      supported: capabilitySnapshot.channels.funding_rate.supported,
+      reason: capabilitySnapshot.channels.funding_rate.reason,
+    },
+    open_interest: {
+      supported: capabilitySnapshot.channels.open_interest.supported,
+      reason: capabilitySnapshot.channels.open_interest.reason,
+    },
+  }), [capabilitySnapshot]);
+  const activeMetricChannels = useMemo<MarketMetricChannel[]>(() => (
+    metricSelections
+      .filter((item) => (
+        item.added
+        && item.visible
+        && metricCapabilities[item.channel].supported
+      ))
+      .map((item) => item.channel)
+  ), [metricCapabilities, metricSelections]);
+  const metricChannelSignature = activeMetricChannels.join("|");
+  const summaryEnabled = capabilitySnapshot.summarySupported;
+  const metricsEnabled = activeMetricChannels.length > 0;
+  const requestedChannels = useMemo<AdvancedMarketChannel[]>(() => [
+    ...(summaryEnabled ? SUMMARY_CHANNELS : []),
+    ...activeMetricChannels,
+  ], [activeMetricChannels, summaryEnabled]);
+  const requestedChannelSignature = requestedChannels.join("|");
+  const enabled = requestedChannels.length > 0;
+  const historyContextKey = buildAdvancedMarketHistoryContextKey(
+    identityKey,
+    interval,
+    activeMetricChannels,
+  );
+  const seriesReady = String(seriesStore?.seriesKey || "") === seriesKey
+    && String(dataMeta.seriesKey || "") === seriesKey;
   const [retryToken, setRetryToken] = useState(0);
   const [historyRetryToken, setHistoryRetryToken] = useState(0);
-  const generationRef = useRef(0);
+  const [connectionState, setConnectionState] = useState<OwnedConnectionState>(() => ({
+    identityKey,
+    status: enabled ? "connecting" : "disabled",
+  }));
+  const [streamErrorState, setStreamErrorState] = useState<OwnedStreamErrorState>(() => ({
+    identityKey,
+    error: null,
+  }));
+  const [historyErrorState, setHistoryErrorState] = useState<OwnedHistoryErrorState>(() => ({
+    historyContextKey,
+    errors: {},
+  }));
+  const connectionStatus: AdvancedMarketConnectionStatus = !enabled
+    ? "disabled"
+    : connectionState.identityKey !== identityKey || connectionState.status === "disabled"
+      ? "connecting"
+      : connectionState.status;
+  const streamError = enabled && streamErrorState.identityKey === identityKey
+    ? streamErrorState.error
+    : null;
+  const historyErrors = historyErrorState.historyContextKey === historyContextKey
+    ? historyErrorState.errors
+    : EMPTY_HISTORY_ERRORS;
+  const streamGenerationRef = useRef(0);
+  const historyGenerationRef = useRef(0);
+  const disposedRef = useRef(false);
   const activeRef = useRef<ActiveRuntimeContext>({
     enabled,
     identity,
     identityKey,
-    interval: session.view.interval,
-    generation: 0,
+    interval,
+    historyContextKey,
+    metricChannels: activeMetricChannels,
+    requestedChannels,
+    requestedChannelSignature,
+    seriesReady,
   });
-  const abortControllersRef = useRef(new Set<AbortController>());
+  const historyAbortControllersRef = useRef(new Set<AbortController>());
   const inFlightRef = useRef(new Set<string>());
   const coverageRef = useRef(new Map<string, MarketHistoryRange[]>());
+  const coverageIdentityRef = useRef(identityKey);
   const historyRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const streamRef = useRef<MarketStreamController | null>(null);
 
-  useEffect(() => {
+  // Publish only committed chart state. Layout effects run before passive
+  // request effects, without leaking values from an abandoned concurrent render.
+  useLayoutEffect(() => {
     activeRef.current = {
-      ...activeRef.current,
       enabled,
       identity,
       identityKey,
-      interval: session.view.interval,
+      interval,
+      historyContextKey,
+      metricChannels: activeMetricChannels,
+      requestedChannels,
+      requestedChannelSignature,
+      seriesReady,
     };
-  }, [enabled, identity, identityKey, session.view.interval]);
+  }, [
+    activeMetricChannels,
+    enabled,
+    historyContextKey,
+    identity,
+    identityKey,
+    interval,
+    requestedChannels,
+    requestedChannelSignature,
+    seriesReady,
+  ]);
 
-  const scheduleHistoryRetry = useCallback(() => {
-    if (historyRetryTimerRef.current !== null) return;
+  const clearHistoryRetryTimer = useCallback(() => {
+    if (historyRetryTimerRef.current === null) return;
+    clearTimeout(historyRetryTimerRef.current);
+    historyRetryTimerRef.current = null;
+  }, []);
+
+  const invalidateHistoryRequests = useCallback((clearCoverage = false) => {
+    historyGenerationRef.current += 1;
+    for (const controller of historyAbortControllersRef.current) controller.abort();
+    historyAbortControllersRef.current = new Set();
+    inFlightRef.current = new Set();
+    clearHistoryRetryTimer();
+    if (clearCoverage) coverageRef.current = new Map();
+  }, [clearHistoryRetryTimer]);
+
+  const scheduleHistoryRetry = useCallback((
+    expectedHistoryContextKey: string,
+    expectedHistoryGeneration: number,
+  ) => {
+    if (disposedRef.current
+      || historyGenerationRef.current !== expectedHistoryGeneration
+      || activeRef.current.historyContextKey !== expectedHistoryContextKey
+      || historyRetryTimerRef.current !== null) return;
     historyRetryTimerRef.current = setTimeout(() => {
       historyRetryTimerRef.current = null;
+      if (disposedRef.current
+        || historyGenerationRef.current !== expectedHistoryGeneration
+        || activeRef.current.historyContextKey !== expectedHistoryContextKey) return;
       setHistoryRetryToken((value) => value + 1);
     }, HISTORY_RETRY_DELAY_MS);
   }, []);
 
-  useEffect(() => () => {
-    if (historyRetryTimerRef.current !== null) {
-      clearTimeout(historyRetryTimerRef.current);
-      historyRetryTimerRef.current = null;
-    }
-  }, []);
+  useLayoutEffect(() => {
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
+      streamGenerationRef.current += 1;
+      invalidateHistoryRequests(true);
+    };
+  }, [invalidateHistoryRequests]);
 
   const loadHistory = useCallback((requested: MarketHistoryRange): boolean => {
     const context = activeRef.current;
-    if (!context.enabled) return false;
+    if (!context.enabled || !context.seriesReady || context.metricChannels.length === 0) {
+      return false;
+    }
     const inFlight = inFlightRef.current;
     const coverage = coverageRef.current;
     const oiPeriod = resolveOpenInterestPeriod(context.interval);
-    const requests = [
-      {
+    const expectedHistoryGeneration = historyGenerationRef.current;
+    const expectedHistoryContextKey = context.historyContextKey;
+    const requests: Array<{
+      channel: MarketMetricChannel;
+      period: string | null;
+      limit: number;
+      direction: "forward" | "backward";
+    }> = [];
+    if (context.metricChannels.includes("funding_rate")) {
+      requests.push({
         channel: "funding_rate" as const,
         period: null,
         limit: 1000,
         direction: "forward" as const,
-      },
-      {
+      });
+    }
+    if (context.metricChannels.includes("open_interest")) {
+      requests.push({
         channel: "open_interest" as const,
         period: oiPeriod,
         limit: 500,
         direction: "backward" as const,
-      },
-    ];
+      });
+    }
     let scheduled = false;
     for (const descriptor of requests) {
       const coverageKey = `${context.identityKey}:${descriptor.channel}:${descriptor.period || "none"}`;
@@ -157,17 +394,48 @@ export function useAdvancedMarketDataRuntime({
       if (inFlight.has(requestKey)) continue;
       scheduled = true;
       inFlight.add(requestKey);
+      setHistoryErrorState((current) => {
+        if (disposedRef.current
+          || historyGenerationRef.current !== expectedHistoryGeneration
+          || activeRef.current.historyContextKey !== expectedHistoryContextKey) return current;
+        const errors = current.historyContextKey === expectedHistoryContextKey
+          ? current.errors
+          : {};
+        if (!(descriptor.channel in errors)) {
+          return current.historyContextKey === expectedHistoryContextKey
+            ? current
+            : { historyContextKey: expectedHistoryContextKey, errors: {} };
+        }
+        const next = { ...errors };
+        delete next[descriptor.channel];
+        return { historyContextKey: expectedHistoryContextKey, errors: next };
+      });
       const controller = new AbortController();
-      const controllers = abortControllersRef.current;
+      const controllers = historyAbortControllersRef.current;
       controllers.add(controller);
-      const expectedGeneration = context.generation;
+      const isCurrentRequest = (): boolean => {
+        const current = activeRef.current;
+        return isAdvancedMarketHistoryRequestCurrent({
+          aborted: controller.signal.aborted,
+          disposed: disposedRef.current,
+          expectedGeneration: expectedHistoryGeneration,
+          currentGeneration: historyGenerationRef.current,
+          expectedHistoryContextKey,
+          currentHistoryContextKey: current.historyContextKey,
+          expectedIdentityKey: context.identityKey,
+          currentIdentityKey: current.identityKey,
+          expectedInterval: context.interval,
+          currentInterval: current.interval,
+          channel: descriptor.channel,
+          period: descriptor.period,
+          currentMetricChannels: current.metricChannels,
+          seriesReady: current.seriesReady,
+        });
+      };
       void (async () => {
         try {
           for (let page = 0; page < MAX_HISTORY_PAGES_PER_LOAD; page += 1) {
-            const current = activeRef.current;
-            if (controller.signal.aborted
-              || current.generation !== expectedGeneration
-              || current.identityKey !== context.identityKey) return;
+            if (!isCurrentRequest()) return;
             const pageRange = nextUncoveredHistoryRange(
               coverage.get(coverageKey) || [],
               requested,
@@ -184,10 +452,7 @@ export function useAdvancedMarketDataRuntime({
                 signal: controller.signal,
               },
             );
-            const latest = activeRef.current;
-            if (controller.signal.aborted
-              || latest.generation !== expectedGeneration
-              || latest.identityKey !== context.identityKey) return;
+            if (!isCurrentRequest()) return;
             advancedMarketDataStore.mergeMetricHistory(
               context.identity,
               descriptor.channel,
@@ -195,7 +460,7 @@ export function useAdvancedMarketDataRuntime({
               descriptor.period,
             );
             if (payload.fallback === true) {
-              scheduleHistoryRetry();
+              scheduleHistoryRetry(expectedHistoryContextKey, expectedHistoryGeneration);
               return;
             }
             const covered = coverageForHistoryPage(
@@ -204,7 +469,7 @@ export function useAdvancedMarketDataRuntime({
               descriptor.direction,
             );
             if (!covered) {
-              scheduleHistoryRetry();
+              scheduleHistoryRetry(expectedHistoryContextKey, expectedHistoryGeneration);
               return;
             }
             coverage.set(
@@ -213,12 +478,25 @@ export function useAdvancedMarketDataRuntime({
             );
           }
           if (nextUncoveredHistoryRange(coverage.get(coverageKey) || [], requested)) {
-            scheduleHistoryRetry();
+            scheduleHistoryRetry(expectedHistoryContextKey, expectedHistoryGeneration);
           }
         } catch (error: unknown) {
-          if (error instanceof DOMException && error.name === "AbortError") return;
+          if (isAbortError(error) || !isCurrentRequest()) return;
           console.warn(`Advanced market ${descriptor.channel} history failed:`, error);
-          scheduleHistoryRetry();
+          setHistoryErrorState((current) => {
+            if (!isCurrentRequest()) return current;
+            const errors = current.historyContextKey === expectedHistoryContextKey
+              ? current.errors
+              : {};
+            return {
+              historyContextKey: expectedHistoryContextKey,
+              errors: {
+                ...errors,
+                [descriptor.channel]: error instanceof Error ? error.message : String(error),
+              },
+            };
+          });
+          scheduleHistoryRetry(expectedHistoryContextKey, expectedHistoryGeneration);
         } finally {
           inFlight.delete(requestKey);
           controllers.delete(controller);
@@ -234,90 +512,118 @@ export function useAdvancedMarketDataRuntime({
   }, [loadHistory]);
 
   const retry = useCallback(() => {
-    if (historyRetryTimerRef.current !== null) {
-      clearTimeout(historyRetryTimerRef.current);
-      historyRetryTimerRef.current = null;
-    }
+    invalidateHistoryRequests(false);
+    setConnectionState({
+      identityKey,
+      status: enabled ? "connecting" : "disabled",
+    });
+    setStreamErrorState({ identityKey, error: null });
+    setHistoryErrorState({ historyContextKey, errors: {} });
     setRetryToken((value) => value + 1);
-  }, []);
+  }, [enabled, historyContextKey, identityKey, invalidateHistoryRequests]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!activeMetricChannels.includes("open_interest")) return;
     advancedMarketDataStore.setOpenInterestPeriod(
       identity,
-      resolveOpenInterestPeriod(session.view.interval),
+      resolveOpenInterestPeriod(interval),
     );
-  }, [enabled, identity, session.view.interval]);
+  }, [activeMetricChannels, identity, interval]);
 
   useEffect(() => {
-    generationRef.current += 1;
-    const generation = generationRef.current;
-    activeRef.current = {
-      enabled,
-      identity,
-      identityKey,
-      interval: activeRef.current.interval,
-      generation,
-    };
-    coverageRef.current = new Map();
-    inFlightRef.current = new Set();
-    for (const controller of abortControllersRef.current) controller.abort();
-    const controllers = new Set<AbortController>();
-    abortControllersRef.current = controllers;
+    const identityChanged = coverageIdentityRef.current !== identityKey;
+    coverageIdentityRef.current = identityKey;
+    invalidateHistoryRequests(identityChanged);
+    if (!disposedRef.current) {
+      setHistoryErrorState({ historyContextKey, errors: {} });
+    }
+  }, [historyContextKey, identityKey, invalidateHistoryRequests]);
+
+  useEffect(() => {
+    streamGenerationRef.current += 1;
+    const generation = streamGenerationRef.current;
+    const isCurrentStream = (): boolean => !disposedRef.current
+      && streamGenerationRef.current === generation
+      && activeRef.current.identityKey === identityKey;
 
     if (!enabled) {
+      streamRef.current = null;
+      setConnectionState({ identityKey, status: "disabled" });
+      setStreamErrorState({ identityKey, error: null });
       advancedMarketDataStore.setConnectionStatus(identity, "disabled");
       return undefined;
     }
 
+    setConnectionState({ identityKey, status: "connecting" });
+    setStreamErrorState({ identityKey, error: null });
     advancedMarketDataStore.setConnectionStatus(identity, "connecting");
-    const snapshotController = new AbortController();
-    controllers.add(snapshotController);
-    void fetchAdvancedMarketSnapshot(identity, ADVANCED_MARKET_CHANNELS, snapshotController.signal)
-      .then((payload) => {
-        if (!snapshotController.signal.aborted
-          && activeRef.current.generation === generation
-          && activeRef.current.identityKey === identityKey) {
-          advancedMarketDataStore.applyRecords(identity, payload.data);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!(error instanceof DOMException && error.name === "AbortError")) {
-          console.warn("Advanced market snapshot failed:", error);
-        }
-      })
-      .finally(() => controllers.delete(snapshotController));
-
     const stream = new MarketStreamController({
       url: getAdvancedMarketStreamUrl(),
       identity,
+      channels: activeRef.current.requestedChannels,
       onRecords: (records) => {
-        if (activeRef.current.generation === generation
-          && activeRef.current.identityKey === identityKey) {
+        if (isCurrentStream()) {
           advancedMarketDataStore.applyRecords(identity, records);
         }
       },
       onStatus: (status) => {
-        if (activeRef.current.generation === generation
-          && activeRef.current.identityKey === identityKey) {
+        if (isCurrentStream()) {
+          setConnectionState({ identityKey, status });
+          if (status === "live") setStreamErrorState({ identityKey, error: null });
           advancedMarketDataStore.setConnectionStatus(identity, status);
         }
       },
-      onError: (error) => console.warn("Advanced market stream error:", error),
+      onError: (error) => {
+        if (isCurrentStream()) {
+          console.warn("Advanced market stream error:", error);
+          setStreamErrorState({
+            identityKey,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      },
     });
+    streamRef.current = stream;
     stream.start();
 
     return () => {
+      if (streamGenerationRef.current === generation) streamGenerationRef.current += 1;
       stream.close();
-      snapshotController.abort();
-      for (const controller of controllers) controller.abort();
-      controllers.clear();
+      if (streamRef.current === stream) streamRef.current = null;
       advancedMarketDataStore.setConnectionStatus(identity, "disconnected");
     };
   }, [enabled, identity, identityKey, retryToken]);
 
   useEffect(() => {
-    if (!enabled) return;
+    streamRef.current?.setChannels(requestedChannels);
+  }, [requestedChannelSignature, requestedChannels]);
+
+  useEffect(() => {
+    if (!enabled || requestedChannels.length === 0) return undefined;
+    const controller = new AbortController();
+    const expectedChannelSignature = requestedChannelSignature;
+    void fetchAdvancedMarketSnapshot(identity, requestedChannels, controller.signal)
+      .then((payload) => {
+        if (!disposedRef.current
+          && !controller.signal.aborted
+          && activeRef.current.identityKey === identityKey
+          && activeRef.current.requestedChannelSignature === expectedChannelSignature) {
+          advancedMarketDataStore.applyRecords(identity, payload.data);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!isAbortError(error)
+          && !disposedRef.current
+          && activeRef.current.identityKey === identityKey
+          && activeRef.current.requestedChannelSignature === expectedChannelSignature) {
+          console.warn("Advanced market snapshot failed:", error);
+        }
+      });
+    return () => controller.abort();
+  }, [enabled, identity, identityKey, requestedChannelSignature, requestedChannels, retryToken]);
+
+  useEffect(() => {
+    if (!metricsEnabled || !seriesReady) return;
     if (dataMeta.firstTime == null || dataMeta.lastTime == null) return;
     const firstTime = Number(dataMeta.firstTime);
     const lastTime = Number(dataMeta.lastTime);
@@ -329,23 +635,88 @@ export function useAdvancedMarketDataRuntime({
   }, [
     dataMeta.firstTime,
     dataMeta.lastTime,
-    enabled,
     historyRetryToken,
     loadHistory,
+    metricChannelSignature,
+    metricsEnabled,
     retryToken,
-    session.view.interval,
+    seriesReady,
+    interval,
+  ]);
+
+  const marketStudies = useMemo<AdvancedMarketStudyView[]>(() => (
+    metricSelections.map((item) => {
+      const catalog = MARKET_STUDY_CATALOG[item.id];
+      const capability = metricCapabilities[item.channel];
+      const error = item.visible
+        ? historyErrors[item.channel] || streamError || null
+        : null;
+      let status: AdvancedMarketStudyView["status"] = "available";
+      if (!capability.supported) status = "unavailable";
+      else if (!item.added) status = "available";
+      else if (!item.visible) status = "hidden";
+      else if (error) status = "error";
+      else if (connectionStatus === "live") status = "active";
+      else status = "loading";
+      return {
+        ...item,
+        ...catalog,
+        category: "contract-data" as const,
+        paneTarget: "sub" as const,
+        supported: capability.supported,
+        supportReason: capability.reason,
+        status,
+        error,
+      };
+    })
+  ), [
+    connectionStatus,
+    historyErrors,
+    metricCapabilities,
+    metricSelections,
+    streamError,
   ]);
 
   const view = useMemo(() => ({
     enabled,
+    summaryEnabled,
+    metricsEnabled,
     identity,
     identityKey,
+    seriesKey,
     seriesStore,
-  }), [enabled, identity, identityKey, seriesStore]);
+    marketStudies,
+    metricCapabilities,
+  }), [
+    enabled,
+    identity,
+    identityKey,
+    marketStudies,
+    metricCapabilities,
+    metricsEnabled,
+    seriesKey,
+    seriesStore,
+    summaryEnabled,
+  ]);
 
   return useMemo(() => ({
     view,
-    actions: { ensureVisibleRange, retry },
-    status: { enabled },
-  }), [enabled, ensureVisibleRange, retry, view]);
+    actions: {
+      ensureVisibleRange,
+      retry,
+      addMarketStudy,
+      removeMarketStudy,
+      toggleMarketStudyVisibility,
+    },
+    status: { enabled, connectionStatus },
+  }), [
+    addMarketStudy,
+    connectionStatus,
+    enabled,
+    ensureVisibleRange,
+    removeMarketStudy,
+    retry,
+    toggleMarketStudyVisibility,
+    view,
+  ]);
 }

@@ -119,3 +119,20 @@ test("OI period follows chart resolution with a 5m floor", () => {
   assert.equal(resolveOpenInterestPeriod("8h"), "6h");
   assert.equal(resolveOpenInterestPeriod("1d"), "1d");
 });
+
+test("market pane projection only returns explicitly requested studies", () => {
+  const metrics: AdvancedMarketMetricsSnapshot = {
+    fundingHistory: [],
+    fundingPreview: null,
+    openInterestHistory: [],
+    openInterestPeriod: "5m",
+    connectionStatus: "live",
+    revision: 0,
+  };
+
+  assert.deepEqual(
+    buildAdvancedMarketPanes(metrics, BARS, ["open_interest"]).map((pane) => pane.id),
+    ["advanced-open-interest"],
+  );
+  assert.deepEqual(buildAdvancedMarketPanes(metrics, BARS, []), []);
+});

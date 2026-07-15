@@ -43,7 +43,8 @@ export function buildTopBarViewModel({
       onToggleIndicatorPanel: indicatorActions.togglePanel,
       alertPanelOpen: alertsView.isOpen,
       onToggleAlertPanel: alertsActions.togglePanel,
-      activeIndicatorCount: indicatorView.activeIndicators.length,
+      activeIndicatorCount: indicatorView.activeIndicators.length
+        + advancedMarketView.marketStudies.filter((study) => study.added).length,
     },
     marketSummary: { displayData, isUp, priceChange, amplitude },
     advancedMarketData: advancedMarketView,

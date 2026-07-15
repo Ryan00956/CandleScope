@@ -6,6 +6,7 @@ import type {
   AdvancedMarketMetricsSnapshot,
   MarketStateRecord,
 } from "./advancedMarketDataTypes.js";
+import type { MarketMetricChannel } from "./marketMetricSelectionTypes.js";
 
 const OPEN_INTEREST_PERIODS = [
   { period: "5m", seconds: 300 },
@@ -119,7 +120,9 @@ export function projectMetricRecordsToCandles(
 export function buildAdvancedMarketPanes(
   metrics: AdvancedMarketMetricsSnapshot,
   bars: readonly KlineBar[],
+  channels: readonly MarketMetricChannel[] = ["funding_rate", "open_interest"],
 ): IndicatorSubPane[] {
+  const requestedChannels = new Set(channels);
   const fundingPoints = projectMetricRecordsToCandles(
     metrics.fundingHistory,
     bars,
@@ -176,18 +179,30 @@ export function buildAdvancedMarketPanes(
     else openInterestLine.data.push(previewPoint);
   }
 
-  return [
+  const panes: Array<IndicatorSubPane & { channel: MarketMetricChannel }> = [
     {
+      channel: "funding_rate",
       id: "advanced-funding",
       label: "Funding Rate (%)",
       lines: [fundingLine],
       dataMarketPane: "funding-rate",
     },
     {
+      channel: "open_interest",
       id: "advanced-open-interest",
       label: "Open Interest",
       lines: [openInterestLine],
       dataMarketPane: "open-interest",
     },
   ];
+  return panes
+    .filter((pane) => requestedChannels.has(pane.channel))
+    .map((pane) => ({
+      id: pane.id,
+      label: pane.label,
+      lines: pane.lines,
+      ...(pane.dataMarketPane === undefined
+        ? {}
+        : { dataMarketPane: pane.dataMarketPane }),
+    }));
 }

@@ -1,5 +1,9 @@
 import type { IndicatorSubPane } from "../indicators/indicatorPaneProjection.js";
 import type { SeriesWindowStore } from "../market-data/window/seriesWindowStore.js";
+import type {
+  MarketMetricChannel,
+  MarketMetricId,
+} from "./marketMetricSelectionTypes.js";
 
 export const ADVANCED_MARKET_CHANNELS = [
   "mark_price",
@@ -111,11 +115,44 @@ export interface AdvancedMarketMetricsSnapshot {
   revision: number;
 }
 
+export type AdvancedMarketStudyStatus =
+  | "available"
+  | "loading"
+  | "active"
+  | "hidden"
+  | "unavailable"
+  | "error";
+
+export interface AdvancedMarketMetricCapability {
+  supported: boolean;
+  reason: string | null;
+}
+
+export interface AdvancedMarketStudyView {
+  id: MarketMetricId;
+  channel: MarketMetricChannel;
+  name: string;
+  description: string;
+  category: "contract-data";
+  paneTarget: "sub";
+  added: boolean;
+  visible: boolean;
+  supported: boolean;
+  supportReason: string | null;
+  status: AdvancedMarketStudyStatus;
+  error: string | null;
+}
+
 export interface AdvancedMarketRuntimeView {
   enabled: boolean;
+  summaryEnabled: boolean;
+  metricsEnabled: boolean;
   identity: AdvancedMarketIdentity;
   identityKey: string;
+  seriesKey: string;
   seriesStore: SeriesWindowStore | null;
+  marketStudies: readonly AdvancedMarketStudyView[];
+  metricCapabilities: Record<MarketMetricChannel, AdvancedMarketMetricCapability>;
 }
 
 export interface AdvancedMarketRuntime {
@@ -123,9 +160,13 @@ export interface AdvancedMarketRuntime {
   actions: {
     ensureVisibleRange(range: unknown): boolean;
     retry(): void;
+    addMarketStudy(id: MarketMetricId): void;
+    removeMarketStudy(id: MarketMetricId): void;
+    toggleMarketStudyVisibility(id: MarketMetricId): void;
   };
   status: {
     enabled: boolean;
+    connectionStatus: AdvancedMarketConnectionStatus;
   };
 }
 

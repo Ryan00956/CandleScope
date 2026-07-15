@@ -39,31 +39,36 @@ function deduplicateByTime(data: KlineBar[]): KlineBar[] {
   return Array.from(seen.values()).sort((a, b) => a.time - b.time);
 }
 
-function upsertRealtimeKline(current: KlineBar[], incoming: KlineBar | null | undefined): KlineBar[] {
-  if (!current || current.length === 0) return current;
-  if (!incoming || incoming.time == null) return current;
+/**
+ * Apply the ordered realtime contract without scanning historical rows.
+ *
+ * Browser K-line sockets only forward CREATED / UPDATED / CLOSED events for a
+ * series, so supported realtime writes are a tail replacement or a newer-bar
+ * append. Historical repairs remain the responsibility of mergeFullCacheRows.
+ * The rows array is module-owned and intentionally mutated to keep this hot
+ * path O(1) with respect to the number of cached bars.
+ */
+function patchRealtimeKlineTail(
+  rows: KlineBar[],
+  incoming: KlineBar | null | undefined,
+): boolean {
+  if (rows.length === 0 || !incoming || incoming.time == null) return false;
+
+  const lastIndex = rows.length - 1;
+  const last = rows[lastIndex];
+  if (!last) return false;
+
   const next = { ...incoming };
+  if (next.time < last.time) return false;
 
-  const firstTime = current[0]?.time;
-  const lastIndex = current.length - 1;
-  const lastTime = current[lastIndex]?.time;
-  if (firstTime == null || lastTime == null) return current;
-
-  if (next.time < firstTime) return current;
-  if (next.time === lastTime) {
-    const updated = [...current];
-    updated[lastIndex] = next;
-    return updated;
-  }
-  if (next.time > lastTime) {
-    return [...current, next];
+  if (next.time === last.time) {
+    if (klineRowsEqual([last], [next])) return false;
+    rows[lastIndex] = next;
+    return true;
   }
 
-  const idx = current.findIndex((item) => item.time === next.time);
-  if (idx === -1) return current;
-  const updated = [...current];
-  updated[idx] = next;
-  return updated;
+  rows.push(next);
+  return true;
 }
 
 export function fullCacheKey(symbolKey: string, interval: string): string {
@@ -195,18 +200,17 @@ export function patchFullCacheRealtimeKline(
       source: options.source || "ws",
     });
   }
-  const patched = deduplicateByTime(upsertRealtimeKline(current.rows, tick));
-  if (klineRowsEqual(current.rows, patched)) return current;
+  if (!patchRealtimeKlineTail(current.rows, tick)) return current;
   const nowMs = options.nowMs || Date.now();
   const next: FullCacheEntry = {
     ...current,
-    rows: patched,
+    rows: current.rows,
     status: "live",
     source: options.source || "ws",
     lastUpdatedMs: nowMs,
     lastRealtimeMs: nowMs,
     lastError: null,
-    coverage: buildCoverage(patched),
+    coverage: buildCoverage(current.rows),
   };
   entries.set(next.key, next);
   registerKlineEntry(next);

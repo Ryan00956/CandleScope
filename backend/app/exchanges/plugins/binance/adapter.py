@@ -79,6 +79,21 @@ _FUTURES_TICKER_UNAVAILABLE_FIELDS = (
     "ask_price",
     "ask_qty",
 )
+_LIQUIDATION_FIELDS = (
+    "order_side",
+    "position_side",
+    "order_type",
+    "time_in_force",
+    "original_quantity",
+    "order_price",
+    "average_price",
+    "order_status",
+    "last_filled_quantity",
+    "filled_quantity",
+    "trade_time_ms",
+    "pair_symbol",
+    "symbol_type",
+)
 _OPEN_INTEREST_PERIODS = ("5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d")
 
 
@@ -334,6 +349,22 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
                 "service.max_active_streams": 64,
             },
             known_limitations=("Binance USD-M exposes open interest through REST, not a public WS stream",),
+        ),
+        MarketChannelCapability(
+            channel=MarketChannel.LIQUIDATION,
+            market_types=("futures",),
+            realtime=True,
+            realtime_transports=(TransportMode.WEBSOCKET,),
+            delivery=DeliveryClass.APPEND,
+            sequence="none",
+            update_intervals_ms=(1000,),
+            available_fields=_LIQUIDATION_FIELDS,
+            connection_model="path_per_stream",
+            known_limitations=(
+                "Binance publishes only the latest liquidation order per symbol within each 1000ms window",
+                "The public liquidation stream has no sequence or public order ID, so exact continuity and deduplication are unavailable",
+                "Binance exposes no public market-level liquidation history, so disconnect gaps cannot be backfilled",
+            ),
         ),
     ]
 

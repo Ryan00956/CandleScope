@@ -25,11 +25,11 @@ def test_registry_keeps_adapter_api_and_exposes_plugins() -> None:
     assert diagnostics["count"] >= 2
     statuses = {item["plugin_id"]: item for item in diagnostics["plugins"]}
     assert statuses["binance"]["capability_summary"] == {
-        "channel_declarations": 14,
-        "market_channel_pairs": 16,
-        "realtime_pairs": 16,
+        "channel_declarations": 15,
+        "market_channel_pairs": 17,
+        "realtime_pairs": 17,
         "history_pairs": 6,
-        "websocket_pairs": 15,
+        "websocket_pairs": 16,
         "ordered_delta_pairs": 0,
     }
     assert statuses["okx"]["capability_summary"] == {

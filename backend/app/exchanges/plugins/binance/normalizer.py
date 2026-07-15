@@ -13,6 +13,8 @@ from app.data_engine.ingestion.models import (
     StreamType,
 )
 
+from .symbols import BinanceSymbolNormalizer
+
 logger = logging.getLogger("ingestion.normalizers.binance")
 
 
@@ -22,6 +24,7 @@ class BinanceNormalizer:
     def __init__(self, config: IngestionConfig, descriptor: StreamDescriptor) -> None:
         self._cfg = config
         self._descriptor = descriptor
+        self._symbols = BinanceSymbolNormalizer()
 
     def parse(self, msg: RawMessage) -> MarketEvent | None:
         if msg.source == DataSource.WEBSOCKET:
@@ -41,6 +44,8 @@ class BinanceNormalizer:
             return self._parse_ws_kline(payload, msg)
         if st == StreamType.AGG_TRADE:
             return self._parse_ws_agg_trade(payload, msg)
+        if st == StreamType.LIQUIDATION:
+            return self._parse_ws_liquidation(payload, msg)
         if st == StreamType.TRADE:
             return self._parse_ws_trade(payload, msg)
         if st in (StreamType.TICKER, StreamType.MINI_TICKER):
@@ -313,6 +318,64 @@ class BinanceNormalizer:
             msg=msg,
             data=data,
             sequence=data["agg_trade_id"],
+        )
+
+    def _parse_ws_liquidation(self, payload: dict, msg: RawMessage) -> MarketEvent | None:
+        if self._descriptor.market_type.strip().lower() != "futures":
+            return None
+        if payload.get("e") != "forceOrder":
+            return None
+        if "st" in payload and (
+            type(payload.get("st")) is not int or payload.get("st") != 1
+        ):
+            return None
+
+        order = payload.get("o")
+        if not isinstance(order, dict):
+            return None
+        expected_symbol = self._symbols.normalize(
+            self._descriptor.symbol,
+            market_type=self._descriptor.market_type,
+        ).upper()
+        if str(order.get("s", "")).upper() != expected_symbol:
+            return None
+
+        order_side = str(order.get("S", "")).upper()
+        position_side = {"SELL": "long", "BUY": "short"}.get(order_side)
+        if position_side is None:
+            return None
+        required_fields = ("o", "f", "q", "p", "ap", "X", "l", "z", "T")
+        if any(order.get(field) in (None, "") for field in required_fields):
+            return None
+
+        try:
+            data: dict[str, object] = {
+                "order_side": order_side,
+                "position_side": position_side,
+                "order_type": str(order["o"]),
+                "time_in_force": str(order["f"]),
+                "original_quantity": float(order["q"]),
+                "order_price": float(order["p"]),
+                "average_price": float(order["ap"]),
+                "order_status": str(order["X"]),
+                "last_filled_quantity": float(order["l"]),
+                "filled_quantity": float(order["z"]),
+                "trade_time_ms": int(order["T"]),
+            }
+            event_time_ms = int(payload.get("E", data["trade_time_ms"]))
+        except (TypeError, ValueError):
+            return None
+
+        if payload.get("ps") not in (None, ""):
+            data["pair_symbol"] = str(payload["ps"]).upper()
+        if "st" in payload:
+            data["symbol_type"] = "UM"
+
+        return self._event(
+            event_type=StreamType.LIQUIDATION,
+            event_time_ms=event_time_ms,
+            msg=msg,
+            data=data,
         )
 
     def _parse_http_trade(self, msg: RawMessage) -> MarketEvent | None:

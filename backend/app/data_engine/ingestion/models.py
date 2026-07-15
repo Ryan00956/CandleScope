@@ -33,6 +33,7 @@ class StreamType(str, enum.Enum):
     INDEX_PRICE = "indexPrice"   # logical projection of markPrice stream
     FUNDING_RATE = "fundingRate" # logical projection + REST history
     OPEN_INTEREST = "openInterest"  # REST snapshot/poll + REST history
+    LIQUIDATION = "forceOrder"   # USD-M lossy liquidation-order snapshot stream
 
 
 class FeedMode(str, enum.Enum):

@@ -66,6 +66,7 @@ _STREAM_VALUE_TO_CHANNEL = {
     "indexPrice": MarketChannel.INDEX_PRICE,
     "fundingRate": MarketChannel.FUNDING_RATE,
     "openInterest": MarketChannel.OPEN_INTEREST,
+    "forceOrder": MarketChannel.LIQUIDATION,
 }
 
 

@@ -67,6 +67,34 @@ RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH = int(
     os.getenv("RAW_AGG_TRADE_ARCHIVE_MAX_ROWS_PER_BATCH", "10000")
 )
 
+# Public liquidation snapshots are lossy at the exchange boundary, but the
+# observations we do receive are append-only and worth retaining as one-minute
+# directional rollups.  Keep this backend selection independent so a future
+# DuckDB implementation does not leak into the service or API contracts.
+LIQUIDATION_ROLLUP_BACKEND = os.getenv(
+    "LIQUIDATION_ROLLUP_BACKEND", "sqlite"
+).strip().lower()
+LIQUIDATION_DB_PATH = Path(os.getenv("LIQUIDATION_DB_PATH", KLINES_DB_PATH))
+LIQUIDATION_RAW_RING_SIZE = int(os.getenv("LIQUIDATION_RAW_RING_SIZE", "5000"))
+LIQUIDATION_MAX_STREAMS = int(os.getenv("LIQUIDATION_MAX_STREAMS", "64"))
+LIQUIDATION_EVENT_QUEUE_SIZE = int(
+    os.getenv("LIQUIDATION_EVENT_QUEUE_SIZE", "8192")
+)
+LIQUIDATION_BATCH_INTERVAL_SECONDS = float(
+    os.getenv("LIQUIDATION_BATCH_INTERVAL_SECONDS", "0.1")
+)
+LIQUIDATION_MAX_BATCH_SIZE = int(os.getenv("LIQUIDATION_MAX_BATCH_SIZE", "500"))
+LIQUIDATION_FINALIZE_INTERVAL_SECONDS = float(
+    os.getenv("LIQUIDATION_FINALIZE_INTERVAL_SECONDS", "1.0")
+)
+# Optional comma-separated ``exchange:market_type:symbol`` identities.  These
+# runtime-held leases make local history capture independent of an open browser.
+LIQUIDATION_CAPTURE_STREAMS = tuple(
+    item.strip()
+    for item in os.getenv("LIQUIDATION_CAPTURE_STREAMS", "").split(",")
+    if item.strip()
+)
+
 # Binance HTTP APIs
 BINANCE_BASE_URLS = [
     "https://api.binance.com",

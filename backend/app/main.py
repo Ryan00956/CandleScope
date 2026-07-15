@@ -45,6 +45,7 @@ from app.api.v1.alerts import router as alerts_router
 from app.api.v1.indicators import router as indicators_router  # indicator engine v2
 from app.api.v1.exchanges import router as exchanges_router
 from app.api.v1.klines import router as klines_router
+from app.api.v1.liquidations import router as liquidations_router
 from app.api.v1.market import router as market_router
 from app.api.v1.trade_flow import router as trade_flow_router
 from app.api.v1.settings import router as settings_router
@@ -55,6 +56,8 @@ from app.api.v1.symbols import router as symbols_router
 from app.core.config import (
     CORS_ORIGINS,
     EVENT_LOOP_LAG_INTERVAL_SECONDS,
+    LIQUIDATION_DB_PATH,
+    LIQUIDATION_ROLLUP_BACKEND,
     TRADE_FLOW_DB_PATH,
     TRADE_FLOW_ROLLUP_BACKEND,
 )
@@ -62,6 +65,7 @@ from app.core.executors import executors_snapshot
 from app.core.runtime_metrics import EventLoopLagMonitor, ws_runtime_metrics
 from app.data_engine.storage import (
     init_klines_storage,
+    init_liquidation_storage,
     init_market_metrics_storage,
     init_trade_flow_storage,
 )
@@ -85,6 +89,7 @@ app.add_middleware(
 app.include_router(klines_router, prefix="/api/v1")
 app.include_router(market_router, prefix="/api/v1")
 app.include_router(trade_flow_router, prefix="/api/v1")
+app.include_router(liquidations_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
 app.include_router(alerts_router, prefix="/api/v1")
@@ -103,6 +108,7 @@ app.include_router(price_ws_router, prefix="/api/v1")
 async def _init_data_manager() -> None:
     """Create and start the DataEngine runtime."""
     from app.data_engine.runtime import (
+        LiquidationConfigurationError,
         TradeFlowConfigurationError,
         start_data_engine,
     )
@@ -148,9 +154,9 @@ async def _init_data_manager() -> None:
             logger.warning("AlertRuntime bridge failed: %s", exc, exc_info=True)
             print(f"[startup] AlertRuntime bridge failed: {exc}")
 
-    except TradeFlowConfigurationError as exc:
+    except (TradeFlowConfigurationError, LiquidationConfigurationError) as exc:
         logger.critical(
-            "TradeFlow configuration prevents safe startup: %s",
+            "Append-only market-data configuration prevents safe startup: %s",
             exc,
             exc_info=True,
         )
@@ -178,6 +184,8 @@ async def startup_event() -> None:
     init_market_metrics_storage()
     if TRADE_FLOW_ROLLUP_BACKEND == "sqlite":
         init_trade_flow_storage(TRADE_FLOW_DB_PATH)
+    if LIQUIDATION_ROLLUP_BACKEND == "sqlite":
+        init_liquidation_storage(LIQUIDATION_DB_PATH)
 
     # 2. Load exchange symbol info (non-blocking, best-effort)
     try:

@@ -17,6 +17,7 @@ from app.data_engine.ingestion.models import (
 )
 from app.data_engine.ingestion.shared_ws import SharedMultiplexHub, SharedWsHubRegistry
 from app.data_engine.ingestion.transport import TransportError, TransportLayer
+from app.data_engine.market_data import DeliveryClass, MarketChannel, TransportMode
 from app.exchanges.plugins.binance.normalizer import BinanceNormalizer
 from app.exchanges.plugins.binance.plugin import BinancePlugin
 from app.exchanges.plugins.binance.protocol import BinanceExchangeProtocol
@@ -180,6 +181,210 @@ def test_binance_mark_payload_filter_and_oi_ws_capability_are_truthful() -> None
     transport = TransportLayer(IngestionConfig())
     assert transport.supports_ws(_descriptor(StreamType.MARK_PRICE))
     assert not transport.supports_ws(_descriptor(StreamType.OPEN_INTEREST))
+
+
+def test_binance_liquidation_capability_is_futures_ws_only_and_lossy() -> None:
+    capabilities = BinancePlugin().capabilities()
+    liquidation = capabilities.channel_capability(MarketChannel.LIQUIDATION, "futures")
+
+    assert capabilities.channel_capability(MarketChannel.LIQUIDATION, "spot") is None
+    assert liquidation is not None
+    assert liquidation.realtime is True
+    assert liquidation.history is False
+    assert liquidation.realtime_transports == (TransportMode.WEBSOCKET,)
+    assert liquidation.history_transports == ()
+    assert liquidation.delivery is DeliveryClass.APPEND
+    assert liquidation.snapshot is False
+    assert liquidation.sequence == "none"
+    assert liquidation.resync == "none"
+    assert liquidation.update_intervals_ms == (1000,)
+    assert liquidation.connection_model == "path_per_stream"
+    limitations = " ".join(liquidation.known_limitations).lower()
+    assert "latest liquidation order" in limitations
+    assert "no sequence" in limitations
+    assert "no public market-level liquidation history" in limitations
+
+
+def test_binance_liquidation_protocol_routes_only_futures_market_ws() -> None:
+    protocol = BinanceExchangeProtocol()
+    descriptor = _descriptor(StreamType.LIQUIDATION)
+    spot = StreamDescriptor(
+        symbol="BTCUSDT",
+        stream_type=StreamType.LIQUIDATION,
+        exchange="binance",
+        market_type="spot",
+    )
+
+    assert protocol.build_ws_stream_name(descriptor) == "btcusdt@forceOrder"
+    connection = protocol.ws_connection(descriptor)
+    assert connection.base_urls[0] == "wss://fstream.binance.com/market/ws"
+    assert connection.connection_model == "path_per_stream"
+    assert connection.subscription.mode is WsSubscriptionMode.PATH
+    assert protocol.supports_ws(descriptor)
+    assert not protocol.supports_ws(spot)
+    assert protocol.rest_request(TransportRequest(descriptor)) is None
+    assert protocol.rest_request(TransportRequest(descriptor, history=True)) is None
+
+    transport = TransportLayer(IngestionConfig())
+    assert transport.supports_ws(descriptor)
+    assert not transport.supports_ws(spot)
+
+
+def test_binance_liquidation_payload_filter_requires_um_matching_symbol() -> None:
+    protocol = BinanceExchangeProtocol()
+    descriptor = _descriptor(StreamType.LIQUIDATION)
+    payload = {
+        "e": "forceOrder",
+        "E": 1_700_000_000_010,
+        "o": {"s": "BTCUSDT"},
+    }
+
+    assert protocol.payload_matches_descriptor(payload, descriptor)
+    assert protocol.payload_matches_descriptor({**payload, "st": 1}, descriptor)
+    assert not protocol.payload_matches_descriptor({**payload, "st": 2}, descriptor)
+    assert not protocol.payload_matches_descriptor({**payload, "st": True}, descriptor)
+    assert not protocol.payload_matches_descriptor(
+        {**payload, "o": {"s": "ETHUSDT"}},
+        descriptor,
+    )
+    assert not protocol.payload_matches_descriptor(
+        {**payload, "e": "aggTrade"},
+        descriptor,
+    )
+
+
+@pytest.mark.parametrize(
+    ("order_side", "position_side"),
+    [("SELL", "long"), ("BUY", "short")],
+)
+def test_binance_liquidation_normalizer_preserves_order_semantics(
+    order_side: str,
+    position_side: str,
+) -> None:
+    descriptor = _descriptor(StreamType.LIQUIDATION)
+    payload = {
+        "e": "forceOrder",
+        "E": 1_700_000_000_010,
+        "o": {
+            "s": "BTCUSDT",
+            "S": order_side,
+            "o": "LIMIT",
+            "f": "IOC",
+            "q": "0.014",
+            "p": "9910",
+            "ap": "9909.5",
+            "X": "FILLED",
+            "l": "0.010",
+            "z": "0.014",
+            "T": 1_700_000_000_000,
+        },
+        "ps": "BTCUSDT",
+        "st": 1,
+    }
+
+    event = BinanceNormalizer(IngestionConfig(), descriptor).parse(RawMessage(
+        payload=payload,
+        source=DataSource.WEBSOCKET,
+        stream_type=StreamType.LIQUIDATION,
+        received_at_ms=1_700_000_000_020,
+    ))
+
+    assert event is not None
+    assert event.event_type is StreamType.LIQUIDATION
+    assert event.event_time_ms == 1_700_000_000_010
+    assert event.sequence is None
+    assert event.data == {
+        "order_side": order_side,
+        "position_side": position_side,
+        "order_type": "LIMIT",
+        "time_in_force": "IOC",
+        "original_quantity": 0.014,
+        "order_price": 9910.0,
+        "average_price": 9909.5,
+        "order_status": "FILLED",
+        "last_filled_quantity": 0.010,
+        "filled_quantity": 0.014,
+        "trade_time_ms": 1_700_000_000_000,
+        "pair_symbol": "BTCUSDT",
+        "symbol_type": "UM",
+    }
+    assert "notional" not in event.data
+    assert "estimated_notional" not in event.data
+
+
+def test_binance_liquidation_normalizer_allows_legacy_um_payload_without_tags() -> None:
+    descriptor = _descriptor(StreamType.LIQUIDATION)
+    payload = {
+        "e": "forceOrder",
+        "E": 1_700_000_000_010,
+        "o": {
+            "s": "BTCUSDT",
+            "S": "SELL",
+            "o": "LIMIT",
+            "f": "IOC",
+            "q": "0.014",
+            "p": "9910",
+            "ap": "9910",
+            "X": "FILLED",
+            "l": "0.014",
+            "z": "0.014",
+            "T": 1_700_000_000_000,
+        },
+    }
+
+    event = BinanceNormalizer(IngestionConfig(), descriptor).parse(RawMessage(
+        payload=payload,
+        source=DataSource.WEBSOCKET,
+        stream_type=StreamType.LIQUIDATION,
+        received_at_ms=1_700_000_000_020,
+    ))
+
+    assert event is not None
+    assert "pair_symbol" not in event.data
+    assert "symbol_type" not in event.data
+
+
+def test_binance_liquidation_normalizer_rejects_wrong_market_contract_or_symbol() -> None:
+    descriptor = _descriptor(StreamType.LIQUIDATION)
+    payload = {
+        "e": "forceOrder",
+        "E": 1_700_000_000_010,
+        "o": {
+            "s": "BTCUSDT",
+            "S": "SELL",
+            "o": "LIMIT",
+            "f": "IOC",
+            "q": "0.014",
+            "p": "9910",
+            "ap": "9910",
+            "X": "FILLED",
+            "l": "0.014",
+            "z": "0.014",
+            "T": 1_700_000_000_000,
+        },
+    }
+
+    def parse(candidate: dict, target: StreamDescriptor = descriptor):
+        return BinanceNormalizer(IngestionConfig(), target).parse(RawMessage(
+            payload=candidate,
+            source=DataSource.WEBSOCKET,
+            stream_type=StreamType.LIQUIDATION,
+            received_at_ms=1_700_000_000_020,
+        ))
+
+    assert parse({**payload, "st": 2}) is None
+    assert parse({**payload, "st": True}) is None
+    assert parse({**payload, "o": {**payload["o"], "s": "ETHUSDT"}}) is None
+    assert parse({**payload, "e": "aggTrade"}) is None
+    assert parse({**payload, "o": {**payload["o"], "S": "UNKNOWN"}}) is None
+    assert parse({**payload, "o": {**payload["o"], "ap": ""}}) is None
+    spot = StreamDescriptor(
+        symbol="BTCUSDT",
+        stream_type=StreamType.LIQUIDATION,
+        exchange="binance",
+        market_type="spot",
+    )
+    assert parse(payload, spot) is None
 
 
 class _ControlConnection:

@@ -47,6 +47,7 @@ _OPEN_INTEREST_PERIODS = {"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d
 
 _FUTURES_MARKET_STREAMS = {
     "aggTrade",
+    "forceOrder",
     "kline",
     "miniTicker",
     "ticker",
@@ -232,14 +233,33 @@ class BinanceExchangeProtocol:
                 market_type=descriptor.market_type,
             ).upper()
             return payload_symbol == expected_symbol
+        if stream_type == "forceOrder":
+            if str(getattr(descriptor, "market_type", "spot")).strip().lower() != "futures":
+                return False
+            if payload.get("e") != "forceOrder":
+                return False
+            if "st" in payload and (
+                type(payload.get("st")) is not int or payload.get("st") != 1
+            ):
+                return False
+            order = payload.get("o")
+            if not isinstance(order, dict):
+                return False
+            payload_symbol = str(order.get("s", "")).upper()
+            expected_symbol = self._symbols.normalize(
+                descriptor.symbol,
+                market_type=descriptor.market_type,
+            ).upper()
+            return payload_symbol == expected_symbol
         return True
 
     def supports_ws(self, descriptor: Any) -> bool:
         """Return channel-level WS availability for the current plugin."""
 
         stream_type = getattr(getattr(descriptor, "stream_type", None), "value", "")
-        if getattr(descriptor, "market_type", "spot") != "futures":
+        if str(getattr(descriptor, "market_type", "spot")).strip().lower() != "futures":
             return stream_type not in {
+                "forceOrder",
                 "markPrice",
                 "indexPrice",
                 "fundingRate",

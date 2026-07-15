@@ -225,6 +225,7 @@ class DataManager:
         self._price_stream_controller: PriceStreamControllerLike | None = None
         self._market_data_service: Any = None
         self._trade_flow_service: Any = None
+        self._liquidation_service: Any = None
         self._stream_leases: dict[SeriesKey, _StreamLease] = {}
         self._memory_gc_last_report: dict[str, Any] | None = None
         self._storage_gc_last_report: dict[str, Any] | None = None
@@ -312,6 +313,21 @@ class DataManager:
             raise TypeError("trade flow service does not implement the required facade")
         self._trade_flow_service = service
 
+    def set_liquidation_service(self, service: Any) -> None:
+        """Attach the append-only public-liquidation observation service."""
+
+        required = (
+            "ensure_stream",
+            "release_stream",
+            "recent",
+            "history",
+            "attach",
+            "diagnostics",
+        )
+        if any(not callable(getattr(service, name, None)) for name in required):
+            raise TypeError("liquidation service does not implement the required facade")
+        self._liquidation_service = service
+
     @property
     def market_data_ready(self) -> bool:
         return self._market_data_service is not None
@@ -319,6 +335,10 @@ class DataManager:
     @property
     def trade_flow_ready(self) -> bool:
         return self._trade_flow_service is not None
+
+    @property
+    def liquidation_ready(self) -> bool:
+        return self._liquidation_service is not None
 
     def wire_backfill_reconciler(self, reconciler: BackfillReconcilerLike) -> None:
         """Attach this manager's BarAggregator to a backfill reconciler."""
@@ -952,6 +972,49 @@ class DataManager:
         if self._trade_flow_service is None:
             raise RuntimeError("trade flow service is not initialized")
         return self._trade_flow_service
+
+    # ═══════════════════════════════════════════════════════════
+    #  Liquidations — sampled append-only observations, never K-line events
+    # ═══════════════════════════════════════════════════════════
+
+    async def ensure_liquidation_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_liquidation_service()
+        return await service.ensure_stream(key, consumer_id=consumer_id)
+
+    async def release_liquidation_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_liquidation_service()
+        return await service.release_stream(key, consumer_id=consumer_id)
+
+    def liquidation_recent(self, key: MarketStreamKey, **kwargs: Any) -> list[Any]:
+        service = self._require_liquidation_service()
+        return service.recent(key, **kwargs)
+
+    async def liquidation_history(
+        self,
+        key: MarketStreamKey,
+        **kwargs: Any,
+    ) -> list[Any]:
+        service = self._require_liquidation_service()
+        return await service.history(key, **kwargs)
+
+    def attach_liquidations(self, keys: list[MarketStreamKey], **kwargs: Any) -> Any:
+        service = self._require_liquidation_service()
+        return service.attach(keys, **kwargs)
+
+    def _require_liquidation_service(self) -> Any:
+        if self._liquidation_service is None:
+            raise RuntimeError("liquidation service is not initialized")
+        return self._liquidation_service
 
     # ═══════════════════════════════════════════════════════════
     #  Event Subscription — for real-time consumers
@@ -1979,6 +2042,11 @@ class DataManager:
             "trade_flow": (
                 self._trade_flow_service.diagnostics()
                 if self._trade_flow_service is not None
+                else {"status": "not_initialized"}
+            ),
+            "liquidations": (
+                self._liquidation_service.diagnostics()
+                if self._liquidation_service is not None
                 else {"status": "not_initialized"}
             ),
             "auto_gc": self.auto_gc_snapshot(),

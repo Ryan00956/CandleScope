@@ -106,6 +106,21 @@ _BINANCE_FIELDS = {
     MarketChannel.INDEX_PRICE: frozenset({"index_price"}),
     MarketChannel.FUNDING_RATE: frozenset({"funding_rate"}),
     MarketChannel.OPEN_INTEREST: frozenset({"open_interest"}),
+    MarketChannel.LIQUIDATION: frozenset({
+        "order_side",
+        "position_side",
+        "order_type",
+        "time_in_force",
+        "original_quantity",
+        "order_price",
+        "average_price",
+        "order_status",
+        "last_filled_quantity",
+        "filled_quantity",
+        "trade_time_ms",
+        "pair_symbol",
+        "symbol_type",
+    }),
 }
 
 _OKX_KLINE_FIELDS = frozenset({
@@ -335,6 +350,23 @@ _BINANCE_CHANNEL_EXPECTATIONS = {
         ),
         realtime_transports=(TransportMode.REST_POLL,),
     ),
+    ("futures", MarketChannel.LIQUIDATION): ChannelCapabilityExpectation(
+        delivery=DeliveryClass.APPEND,
+        snapshot=False,
+        delta=False,
+        history=False,
+        sequence="none",
+        resync="none",
+        connection_model="path_per_stream",
+        available_fields=_BINANCE_FIELDS[MarketChannel.LIQUIDATION],
+        update_intervals_ms=(1000,),
+        known_limitations=(
+            "Binance publishes only the latest liquidation order per symbol within each 1000ms window",
+            "The public liquidation stream has no sequence or public order ID, so exact continuity and deduplication are unavailable",
+            "Binance exposes no public market-level liquidation history, so disconnect gaps cannot be backfilled",
+        ),
+        realtime_transports=(TransportMode.WEBSOCKET,),
+    ),
 }
 
 _OKX_KLINE_EXPECTATION = ChannelCapabilityExpectation(
@@ -402,6 +434,7 @@ _STREAM_TYPE_TO_CHANNEL = {
     StreamType.INDEX_PRICE: MarketChannel.INDEX_PRICE,
     StreamType.FUNDING_RATE: MarketChannel.FUNDING_RATE,
     StreamType.OPEN_INTEREST: MarketChannel.OPEN_INTEREST,
+    StreamType.LIQUIDATION: MarketChannel.LIQUIDATION,
 }
 
 
@@ -437,6 +470,7 @@ def builtin_exchange_contract_cases() -> dict[str, list[ExchangeContractCase]]:
                 StreamType.INDEX_PRICE,
                 StreamType.FUNDING_RATE,
                 StreamType.OPEN_INTEREST,
+                StreamType.LIQUIDATION,
             )
         ],
         "okx": [
@@ -468,7 +502,7 @@ def _binance_case(market_type: str, stream_type: StreamType) -> ExchangeContract
         descriptor=descriptor,
         request=_request(descriptor),
         sample_http_payload=http_payload,
-        expected_http_rows=1,
+        expected_http_rows=None if http_payload is None else 1,
         normalizer_samples=normalizer_samples,
     )
 
@@ -665,6 +699,31 @@ def _binance_payloads(
         return row, [
             NormalizerContractSample(payload=row, source=DataSource.HTTP),
             NormalizerContractSample(payload=history_row, source=DataSource.HTTP_BACKFILL),
+        ]
+    if stream_type == StreamType.LIQUIDATION:
+        return None, [
+            NormalizerContractSample(
+                payload={
+                    "e": "forceOrder",
+                    "E": 1_700_000_000_010,
+                    "o": {
+                        "s": "BTCUSDT",
+                        "S": "SELL",
+                        "o": "LIMIT",
+                        "f": "IOC",
+                        "q": "0.014",
+                        "p": "9910",
+                        "ap": "9909.5",
+                        "X": "FILLED",
+                        "l": "0.014",
+                        "z": "0.014",
+                        "T": 1_700_000_000_000,
+                    },
+                    "ps": "BTCUSDT",
+                    "st": 1,
+                },
+                source=DataSource.WEBSOCKET,
+            ),
         ]
     raise AssertionError(f"Unhandled Binance fixture stream type: {stream_type}")
 

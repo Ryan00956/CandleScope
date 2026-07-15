@@ -11,6 +11,15 @@ from typing import Any
 
 from app.core.config import (
     KLINES_DB_PATH,
+    LIQUIDATION_BATCH_INTERVAL_SECONDS,
+    LIQUIDATION_CAPTURE_STREAMS,
+    LIQUIDATION_DB_PATH,
+    LIQUIDATION_EVENT_QUEUE_SIZE,
+    LIQUIDATION_FINALIZE_INTERVAL_SECONDS,
+    LIQUIDATION_MAX_BATCH_SIZE,
+    LIQUIDATION_MAX_STREAMS,
+    LIQUIDATION_RAW_RING_SIZE,
+    LIQUIDATION_ROLLUP_BACKEND,
     RAW_AGG_TRADE_ARCHIVE_BACKEND,
     RAW_AGG_TRADE_ARCHIVE_DIR,
     RAW_AGG_TRADE_ARCHIVE_ENABLED,
@@ -36,6 +45,8 @@ from app.data_engine.ingestion import TransportLayer
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.factory import ExchangeIngestionFactory
 from app.data_engine.market_data.append_hub import AppendBatchHub
+from app.data_engine.market_data.liquidation import LiquidationEngine, NormalizedLiquidation
+from app.data_engine.market_data.liquidation_service import LiquidationService
 from app.data_engine.market_data.service import MarketDataService
 from app.data_engine.market_data.storage_writer import MarketMetricStorageWriter
 from app.data_engine.market_data.trade_flow import (
@@ -48,11 +59,14 @@ from app.data_engine.storage import (
     DisabledRawAggTradeArchive,
     GapLedger,
     KlinesRepoAdapter,
+    LiquidationRollupStore,
+    LiquidationRollupWriter,
     MarketMetricsRepository,
     ParquetRawAggTradeArchive,
     RawAggTradeArchive,
     RawAggTradeArchiveWriter,
     SQLiteTradeFlowRollupStore,
+    SQLiteLiquidationRollupStore,
     TradeFlowRollupStore,
     TradeFlowRollupWriter,
 )
@@ -64,7 +78,12 @@ class TradeFlowConfigurationError(RuntimeError):
     """A fail-fast TradeFlow storage or pipeline configuration error."""
 
 
+class LiquidationConfigurationError(RuntimeError):
+    """A fail-fast public-liquidation pipeline configuration error."""
+
+
 _RAW_ARCHIVE_CONSUMER_ID = "runtime:raw-agg-trade-archive"
+_LIQUIDATION_CAPTURE_CONSUMER_ID = "runtime:liquidation-capture"
 
 
 @dataclass(slots=True)
@@ -78,6 +97,7 @@ class DataEngineRuntime:
     backfill_coordinator: BackfillCoordinator
     market_data_service: MarketDataService
     trade_flow_service: TradeFlowService
+    liquidation_service: LiquidationService | None = None
     price_stream_source: IngestionPriceSource | None = None
     subscription_service: SubscriptionService | None = None
     gap_scan_task: asyncio.Task | None = None
@@ -153,6 +173,13 @@ class DataEngineRuntime:
             step_timeout,
         )
 
+        if self.liquidation_service is not None:
+            await self._shutdown_step(
+                "LiquidationService",
+                self.liquidation_service.shutdown(),
+                None,
+            )
+
         await self._shutdown_step(
             "TradeFlowService",
             self.trade_flow_service.shutdown(),
@@ -204,10 +231,10 @@ class DataEngineRuntime:
     ) -> None:
         try:
             if timeout is None:
-                # TradeFlow owns lossless final-rollup and optional raw archive
-                # queues.  Cancelling halfway through would make replay
-                # completeness unknowable, so its cancellation-safe shutdown
-                # is allowed to drain before dependent transports are closed.
+                # Append-only services own durable rollup/archive queues.
+                # Cancelling halfway through would make local capture state
+                # unknowable, so cancellation-safe shutdown drains them before
+                # dependent transports are closed.
                 await awaitable
             else:
                 await asyncio.wait_for(awaitable, timeout=timeout)
@@ -299,6 +326,76 @@ def _build_trade_flow_service(
         archive_forward_queue_size=event_queue_size,
         archive_forward_batch_size=archive_batch_rows,
         max_streams=max_streams,
+    )
+
+
+def _build_liquidation_service(
+    ingestion_factory: ExchangeIngestionFactory,
+) -> LiquidationService:
+    """Construct the independent sampled-liquidation observation pipeline."""
+
+    store = _build_liquidation_rollup_store()
+    writer = LiquidationRollupWriter(store)
+    queue_size = _positive_int_config(
+        "LIQUIDATION_EVENT_QUEUE_SIZE",
+        LIQUIDATION_EVENT_QUEUE_SIZE,
+        error_type=LiquidationConfigurationError,
+    )
+    max_streams = _positive_int_config(
+        "LIQUIDATION_MAX_STREAMS",
+        LIQUIDATION_MAX_STREAMS,
+        error_type=LiquidationConfigurationError,
+    )
+    engine = LiquidationEngine(
+        raw_ring_size=_positive_int_config(
+            "LIQUIDATION_RAW_RING_SIZE",
+            LIQUIDATION_RAW_RING_SIZE,
+            error_type=LiquidationConfigurationError,
+        ),
+        max_streams=max_streams,
+    )
+    hub = AppendBatchHub[NormalizedLiquidation](
+        max_pending_records=queue_size,
+        max_batch_size=_positive_int_config(
+            "LIQUIDATION_MAX_BATCH_SIZE",
+            LIQUIDATION_MAX_BATCH_SIZE,
+            error_type=LiquidationConfigurationError,
+        ),
+        default_subscriber_max_pending_records=queue_size,
+    )
+    return LiquidationService(
+        ingestion_factory,
+        engine=engine,
+        hub=hub,
+        rollup_store=store,
+        rollup_writer=writer,
+        command_queue_size=queue_size,
+        flush_interval_seconds=_positive_float_config(
+            "LIQUIDATION_BATCH_INTERVAL_SECONDS",
+            LIQUIDATION_BATCH_INTERVAL_SECONDS,
+            error_type=LiquidationConfigurationError,
+        ),
+        finalize_interval_seconds=_positive_float_config(
+            "LIQUIDATION_FINALIZE_INTERVAL_SECONDS",
+            LIQUIDATION_FINALIZE_INTERVAL_SECONDS,
+            error_type=LiquidationConfigurationError,
+        ),
+        max_streams=max_streams,
+    )
+
+
+def _build_liquidation_rollup_store() -> LiquidationRollupStore:
+    backend = str(LIQUIDATION_ROLLUP_BACKEND).strip().lower()
+    if backend == "sqlite":
+        try:
+            return SQLiteLiquidationRollupStore(LIQUIDATION_DB_PATH)
+        except (OSError, TypeError, ValueError) as exc:
+            raise LiquidationConfigurationError(
+                f"invalid liquidation SQLite path: {LIQUIDATION_DB_PATH!r}"
+            ) from exc
+    raise LiquidationConfigurationError(
+        "unsupported liquidation rollup backend "
+        f"{backend!r}; supported backends: sqlite"
     )
 
 
@@ -399,18 +496,67 @@ async def _start_raw_archive_streams(service: TradeFlowService) -> None:
             ) from exc
 
 
-def _positive_int_config(name: str, value: int) -> int:
+def _liquidation_capture_identities() -> tuple[tuple[str, str, str], ...]:
+    """Parse always-on liquidation capture identities fail-closed."""
+
+    identities: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw in LIQUIDATION_CAPTURE_STREAMS:
+        if not isinstance(raw, str):
+            raise LiquidationConfigurationError(
+                "LIQUIDATION_CAPTURE_STREAMS entries must be strings"
+            )
+        parts = tuple(part.strip() for part in raw.split(":"))
+        if len(parts) != 3 or any(not part for part in parts):
+            raise LiquidationConfigurationError(
+                "LIQUIDATION_CAPTURE_STREAMS entries must use "
+                "exchange:market_type:symbol"
+            )
+        identity = (parts[0].lower(), parts[1].lower(), parts[2].upper())
+        if identity not in seen:
+            seen.add(identity)
+            identities.append(identity)
+    return tuple(identities)
+
+
+async def _start_liquidation_capture_streams(service: LiquidationService) -> None:
+    """Hold optional runtime leases for durable local observation history."""
+
+    for identity in _liquidation_capture_identities():
+        try:
+            await service.ensure_stream(
+                identity,
+                consumer_id=_LIQUIDATION_CAPTURE_CONSUMER_ID,
+            )
+        except Exception as exc:
+            raise LiquidationConfigurationError(
+                "failed to start configured liquidation capture stream "
+                f"{identity[0]}:{identity[1]}:{identity[2]}"
+            ) from exc
+
+
+def _positive_int_config(
+    name: str,
+    value: int,
+    *,
+    error_type: type[RuntimeError] = TradeFlowConfigurationError,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise TradeFlowConfigurationError(f"{name} must be greater than zero")
+        raise error_type(f"{name} must be greater than zero")
     return value
 
 
-def _positive_float_config(name: str, value: float) -> float:
+def _positive_float_config(
+    name: str,
+    value: float,
+    *,
+    error_type: type[RuntimeError] = TradeFlowConfigurationError,
+) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TradeFlowConfigurationError(f"{name} must be greater than zero")
+        raise error_type(f"{name} must be greater than zero")
     parsed = float(value)
     if not math.isfinite(parsed) or parsed <= 0:
-        raise TradeFlowConfigurationError(f"{name} must be greater than zero")
+        raise error_type(f"{name} must be greater than zero")
     return parsed
 
 
@@ -432,6 +578,7 @@ async def start_data_engine() -> DataEngineRuntime:
     price_source: IngestionPriceSource | None = None
     market_data_service: MarketDataService | None = None
     trade_flow_service: TradeFlowService | None = None
+    liquidation_service: LiquidationService | None = None
 
     try:
         dm = DataManager()
@@ -460,6 +607,11 @@ async def start_data_engine() -> DataEngineRuntime:
         dm.set_trade_flow_service(trade_flow_service)
         await _start_raw_archive_streams(trade_flow_service)
         print("[startup] TradeFlowService injected ✓")
+
+        liquidation_service = _build_liquidation_service(ingestion_factory)
+        dm.set_liquidation_service(liquidation_service)
+        await _start_liquidation_capture_streams(liquidation_service)
+        print("[startup] LiquidationService injected ✓")
 
         ingestion_cfg = IngestionConfig()
         transport = TransportLayer(ingestion_cfg)
@@ -503,6 +655,7 @@ async def start_data_engine() -> DataEngineRuntime:
             backfill_coordinator=backfill_coordinator,
             market_data_service=market_data_service,
             trade_flow_service=trade_flow_service,
+            liquidation_service=liquidation_service,
             price_stream_source=price_source,
             subscription_service=subscription_service,
             gap_scan_task=gap_scan_task,
@@ -520,6 +673,7 @@ async def start_data_engine() -> DataEngineRuntime:
                 price_source=price_source,
                 market_data_service=market_data_service,
                 trade_flow_service=trade_flow_service,
+                liquidation_service=liquidation_service,
             )
         raise
 
@@ -674,10 +828,14 @@ async def _cleanup_partial_start(
     price_source: IngestionPriceSource | None,
     market_data_service: MarketDataService | None,
     trade_flow_service: TradeFlowService | None,
+    liquidation_service: LiquidationService | None = None,
 ) -> None:
     if price_source is not None:
         with suppress(Exception):
             await price_source.stop()
+    if liquidation_service is not None:
+        with suppress(Exception):
+            await liquidation_service.shutdown()
     if trade_flow_service is not None:
         with suppress(Exception):
             await trade_flow_service.shutdown()
@@ -697,6 +855,7 @@ async def _cleanup_partial_start(
 
 __all__ = [
     "DataEngineRuntime",
+    "LiquidationConfigurationError",
     "TradeFlowConfigurationError",
     "start_data_engine",
 ]

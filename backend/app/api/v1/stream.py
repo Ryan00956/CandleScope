@@ -14,6 +14,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.api.v1.stream_indicators import stream_indicators
 from app.api.v1.stream_klines import stream_multi_kline, stream_single_kline
+from app.api.v1.stream_liquidations import stream_liquidations
 from app.api.v1.stream_market import stream_market
 from app.api.v1.stream_trade_flow import stream_trade_flow
 from app.api.v1.stream_utils import (
@@ -188,3 +189,20 @@ async def trade_flow_stream(websocket: WebSocket) -> None:
         await websocket.close(code=1013)
         return
     await stream_trade_flow(websocket, dm)
+
+
+@router.websocket("/liquidations")
+async def liquidation_stream(websocket: WebSocket) -> None:
+    """Deliver sampled public liquidation observations over ``liquidation.v1``."""
+
+    await websocket.accept()
+    dm = _get_data_manager(websocket)
+    if dm is None or not getattr(dm, "liquidation_ready", False):
+        await _send_json_with_timeout(websocket, {
+            "type": "error",
+            "code": "LIQUIDATION_STREAM_NOT_READY",
+            "detail": "Liquidation market data is not initialized.",
+        })
+        await websocket.close(code=1013)
+        return
+    await stream_liquidations(websocket, dm)

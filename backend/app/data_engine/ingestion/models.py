@@ -79,6 +79,7 @@ class StreamDescriptor:
     exchange: str = "binance"
     market_type: str = "spot"       # "spot" or "futures"
     poll_interval_seconds: float | None = None  # REST-only stream cadence override
+    update_interval_ms: int | None = None  # optional WebSocket update-speed override
 
     @property
     def key(self) -> str:
@@ -88,6 +89,8 @@ class StreamDescriptor:
             base = f"{symbol}@kline_{self.interval}"
         elif self.stream_type == StreamType.DEPTH and self.depth_levels:
             base = f"{symbol}@depth{self.depth_levels}"
+            if self.update_interval_ms is not None:
+                base = f"{base}@{self.update_interval_ms}ms"
         else:
             base = f"{symbol}@{self.stream_type.value}"
         prefixes: list[str] = []
@@ -106,15 +109,41 @@ class StreamDescriptor:
         if self.stream_type == StreamType.KLINE:
             return f"{symbol}@kline_{self.interval}"
         if self.stream_type == StreamType.DEPTH and self.depth_levels:
-            return f"{symbol}@depth{self.depth_levels}"
+            base = f"{symbol}@depth{self.depth_levels}"
+            if self.update_interval_ms is not None:
+                is_binance_default = (
+                    self.exchange.strip().lower() == "binance"
+                    and (
+                        (
+                            self.market_type.strip().lower() == "futures"
+                            and self.update_interval_ms == 250
+                        )
+                        or (
+                            self.market_type.strip().lower() == "spot"
+                            and self.update_interval_ms == 1000
+                        )
+                    )
+                )
+                if is_binance_default:
+                    return base
+                return f"{base}@{self.update_interval_ms}ms"
+            return base
         return f"{symbol}@{self.stream_type.value}"
 
     def validate(self) -> None:
         """Raise ValueError if the descriptor is invalid."""
         if self.stream_type == StreamType.KLINE and not self.interval:
             raise ValueError("KLINE stream requires an interval (e.g. '1m')")
+        if self.stream_type == StreamType.DEPTH and (
+            type(self.depth_levels) is not int or self.depth_levels not in {5, 10, 20}
+        ):
+            raise ValueError("DEPTH stream requires depth_levels in {5, 10, 20}")
         if self.poll_interval_seconds is not None and self.poll_interval_seconds <= 0:
             raise ValueError("poll_interval_seconds must be positive")
+        if self.update_interval_ms is not None and (
+            type(self.update_interval_ms) is not int or self.update_interval_ms <= 0
+        ):
+            raise ValueError("update_interval_ms must be a positive integer")
 
 
 # ─── Core Output: MarketEvent ────────────────────────────────

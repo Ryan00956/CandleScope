@@ -20,6 +20,11 @@ from app.core.config import (
     LIQUIDATION_MAX_STREAMS,
     LIQUIDATION_RAW_RING_SIZE,
     LIQUIDATION_ROLLUP_BACKEND,
+    ORDER_BOOK_DEFAULT_MAX_PENDING,
+    ORDER_BOOK_EVENT_QUEUE_SIZE,
+    ORDER_BOOK_MAX_SNAPSHOT_AGE_MS,
+    ORDER_BOOK_MAX_STREAMS,
+    ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS,
     RAW_AGG_TRADE_ARCHIVE_BACKEND,
     RAW_AGG_TRADE_ARCHIVE_DIR,
     RAW_AGG_TRADE_ARCHIVE_ENABLED,
@@ -45,8 +50,11 @@ from app.data_engine.ingestion import TransportLayer
 from app.data_engine.ingestion.config import IngestionConfig
 from app.data_engine.ingestion.factory import ExchangeIngestionFactory
 from app.data_engine.market_data.append_hub import AppendBatchHub
+from app.data_engine.market_data.hub import MarketEventHub
 from app.data_engine.market_data.liquidation import LiquidationEngine, NormalizedLiquidation
 from app.data_engine.market_data.liquidation_service import LiquidationService
+from app.data_engine.market_data.order_book import OrderBookEngine
+from app.data_engine.market_data.order_book_service import OrderBookService
 from app.data_engine.market_data.service import MarketDataService
 from app.data_engine.market_data.storage_writer import MarketMetricStorageWriter
 from app.data_engine.market_data.trade_flow import (
@@ -82,6 +90,10 @@ class LiquidationConfigurationError(RuntimeError):
     """A fail-fast public-liquidation pipeline configuration error."""
 
 
+class OrderBookConfigurationError(RuntimeError):
+    """A fail-fast Partial Top-N order-book pipeline configuration error."""
+
+
 _RAW_ARCHIVE_CONSUMER_ID = "runtime:raw-agg-trade-archive"
 _LIQUIDATION_CAPTURE_CONSUMER_ID = "runtime:liquidation-capture"
 
@@ -98,6 +110,7 @@ class DataEngineRuntime:
     market_data_service: MarketDataService
     trade_flow_service: TradeFlowService
     liquidation_service: LiquidationService | None = None
+    order_book_service: OrderBookService | None = None
     price_stream_source: IngestionPriceSource | None = None
     subscription_service: SubscriptionService | None = None
     gap_scan_task: asyncio.Task | None = None
@@ -177,6 +190,13 @@ class DataEngineRuntime:
             await self._shutdown_step(
                 "LiquidationService",
                 self.liquidation_service.shutdown(),
+                None,
+            )
+
+        if self.order_book_service is not None:
+            await self._shutdown_step(
+                "OrderBookService",
+                self.order_book_service.shutdown(),
                 None,
             )
 
@@ -384,6 +404,58 @@ def _build_liquidation_service(
     )
 
 
+def _build_order_book_service(
+    ingestion_factory: ExchangeIngestionFactory,
+) -> OrderBookService:
+    """Construct the process-local latest-wins Partial Top-N pipeline."""
+
+    max_streams = _positive_int_config(
+        "ORDER_BOOK_MAX_STREAMS",
+        ORDER_BOOK_MAX_STREAMS,
+        error_type=OrderBookConfigurationError,
+    )
+    event_queue_size = _positive_int_config(
+        "ORDER_BOOK_EVENT_QUEUE_SIZE",
+        ORDER_BOOK_EVENT_QUEUE_SIZE,
+        error_type=OrderBookConfigurationError,
+    )
+    if event_queue_size < max_streams:
+        raise OrderBookConfigurationError(
+            "ORDER_BOOK_EVENT_QUEUE_SIZE must be at least ORDER_BOOK_MAX_STREAMS "
+            "so every active replaceable stream owns a latest-state slot"
+        )
+    default_max_pending = _positive_int_config(
+        "ORDER_BOOK_DEFAULT_MAX_PENDING",
+        ORDER_BOOK_DEFAULT_MAX_PENDING,
+        error_type=OrderBookConfigurationError,
+    )
+    max_snapshot_age_ms = _positive_int_config(
+        "ORDER_BOOK_MAX_SNAPSHOT_AGE_MS",
+        ORDER_BOOK_MAX_SNAPSHOT_AGE_MS,
+        error_type=OrderBookConfigurationError,
+    )
+    stop_timeout = _positive_float_config(
+        "ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS",
+        ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS,
+        error_type=OrderBookConfigurationError,
+    )
+    engine = OrderBookEngine(max_streams=max_streams)
+    hub = MarketEventHub(
+        max_states=max_streams,
+        default_max_pending=default_max_pending,
+    )
+    return OrderBookService(
+        ingestion_factory,
+        engine=engine,
+        hub=hub,
+        max_streams=max_streams,
+        event_queue_size=event_queue_size,
+        default_max_pending=default_max_pending,
+        max_snapshot_age_ms=max_snapshot_age_ms,
+        physical_stop_timeout_seconds=stop_timeout,
+    )
+
+
 def _build_liquidation_rollup_store() -> LiquidationRollupStore:
     backend = str(LIQUIDATION_ROLLUP_BACKEND).strip().lower()
     if backend == "sqlite":
@@ -579,6 +651,7 @@ async def start_data_engine() -> DataEngineRuntime:
     market_data_service: MarketDataService | None = None
     trade_flow_service: TradeFlowService | None = None
     liquidation_service: LiquidationService | None = None
+    order_book_service: OrderBookService | None = None
 
     try:
         dm = DataManager()
@@ -612,6 +685,10 @@ async def start_data_engine() -> DataEngineRuntime:
         dm.set_liquidation_service(liquidation_service)
         await _start_liquidation_capture_streams(liquidation_service)
         print("[startup] LiquidationService injected ✓")
+
+        order_book_service = _build_order_book_service(ingestion_factory)
+        dm.set_order_book_service(order_book_service)
+        print("[startup] OrderBookService injected ✓")
 
         ingestion_cfg = IngestionConfig()
         transport = TransportLayer(ingestion_cfg)
@@ -656,6 +733,7 @@ async def start_data_engine() -> DataEngineRuntime:
             market_data_service=market_data_service,
             trade_flow_service=trade_flow_service,
             liquidation_service=liquidation_service,
+            order_book_service=order_book_service,
             price_stream_source=price_source,
             subscription_service=subscription_service,
             gap_scan_task=gap_scan_task,
@@ -674,6 +752,7 @@ async def start_data_engine() -> DataEngineRuntime:
                 market_data_service=market_data_service,
                 trade_flow_service=trade_flow_service,
                 liquidation_service=liquidation_service,
+                order_book_service=order_book_service,
             )
         raise
 
@@ -829,6 +908,7 @@ async def _cleanup_partial_start(
     market_data_service: MarketDataService | None,
     trade_flow_service: TradeFlowService | None,
     liquidation_service: LiquidationService | None = None,
+    order_book_service: OrderBookService | None = None,
 ) -> None:
     if price_source is not None:
         with suppress(Exception):
@@ -836,6 +916,9 @@ async def _cleanup_partial_start(
     if liquidation_service is not None:
         with suppress(Exception):
             await liquidation_service.shutdown()
+    if order_book_service is not None:
+        with suppress(Exception):
+            await order_book_service.shutdown()
     if trade_flow_service is not None:
         with suppress(Exception):
             await trade_flow_service.shutdown()
@@ -856,6 +939,7 @@ async def _cleanup_partial_start(
 __all__ = [
     "DataEngineRuntime",
     "LiquidationConfigurationError",
+    "OrderBookConfigurationError",
     "TradeFlowConfigurationError",
     "start_data_engine",
 ]

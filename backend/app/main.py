@@ -47,6 +47,7 @@ from app.api.v1.exchanges import router as exchanges_router
 from app.api.v1.klines import router as klines_router
 from app.api.v1.liquidations import router as liquidations_router
 from app.api.v1.market import router as market_router
+from app.api.v1.order_book import router as order_book_router
 from app.api.v1.trade_flow import router as trade_flow_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.stream import router as stream_router
@@ -90,6 +91,7 @@ app.include_router(klines_router, prefix="/api/v1")
 app.include_router(market_router, prefix="/api/v1")
 app.include_router(trade_flow_router, prefix="/api/v1")
 app.include_router(liquidations_router, prefix="/api/v1")
+app.include_router(order_book_router, prefix="/api/v1")
 app.include_router(stream_router, prefix="/api/v1")
 app.include_router(indicators_router, prefix="/api/v1")
 app.include_router(alerts_router, prefix="/api/v1")
@@ -109,6 +111,7 @@ async def _init_data_manager() -> None:
     """Create and start the DataEngine runtime."""
     from app.data_engine.runtime import (
         LiquidationConfigurationError,
+        OrderBookConfigurationError,
         TradeFlowConfigurationError,
         start_data_engine,
     )
@@ -154,9 +157,13 @@ async def _init_data_manager() -> None:
             logger.warning("AlertRuntime bridge failed: %s", exc, exc_info=True)
             print(f"[startup] AlertRuntime bridge failed: {exc}")
 
-    except (TradeFlowConfigurationError, LiquidationConfigurationError) as exc:
+    except (
+        TradeFlowConfigurationError,
+        LiquidationConfigurationError,
+        OrderBookConfigurationError,
+    ) as exc:
         logger.critical(
-            "Append-only market-data configuration prevents safe startup: %s",
+            "Advanced market-data configuration prevents safe startup: %s",
             exc,
             exc_info=True,
         )

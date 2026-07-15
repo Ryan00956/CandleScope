@@ -156,6 +156,18 @@ _BINANCE_FUTURES_TICKER_UNAVAILABLE_FIELDS = frozenset({
     "ask_price",
     "ask_qty",
 })
+_BINANCE_FUTURES_DEPTH_FIELDS = frozenset({
+    "last_update_id",
+    "first_update_id",
+    "final_update_id",
+    "previous_final_update_id",
+    "event_time_ms",
+    "transaction_time_ms",
+    "depth_levels",
+    "update_interval_ms",
+    "bids",
+    "asks",
+})
 
 _BINANCE_SPOT_EXPECTATIONS = {
     MarketChannel.KLINE: ChannelCapabilityExpectation(
@@ -278,7 +290,8 @@ _BINANCE_CHANNEL_EXPECTATIONS = {
     ],
     ("futures", MarketChannel.DEPTH): replace(
         _BINANCE_SPOT_EXPECTATIONS[MarketChannel.DEPTH],
-        update_intervals_ms=(250,),
+        available_fields=_BINANCE_FUTURES_DEPTH_FIELDS,
+        update_intervals_ms=(100, 250, 500),
         limits=(("rest.max_limit", 1000),),
     ),
     ("futures", MarketChannel.MARK_PRICE): ChannelCapabilityExpectation(
@@ -650,14 +663,37 @@ def _binance_payloads(
             "bids": [["100", "2"]],
             "asks": [["101", "3"]],
         }
-        ws_row = {
-            "lastUpdateId": 124,
-            "bids": [["100", "2"]],
-            "asks": [["101", "3"]],
-        }
+        if market_type == "futures":
+            ws_row = {
+                "e": "depthUpdate",
+                "E": 1_700_000_000_010,
+                "T": 1_700_000_000_009,
+                "s": "BTCUSDT",
+                "U": 120,
+                "u": 124,
+                "pu": 119,
+                "b": [["100", "2"]],
+                "a": [["101", "3"]],
+                "ps": "BTCUSDT",
+                "st": 1,
+            }
+        else:
+            ws_row = {
+                "lastUpdateId": 124,
+                "bids": [["100", "2"]],
+                "asks": [["101", "3"]],
+            }
         return row, [
             NormalizerContractSample(payload=row, source=DataSource.HTTP),
-            NormalizerContractSample(payload=ws_row, source=DataSource.WEBSOCKET),
+            NormalizerContractSample(
+                payload=ws_row,
+                source=DataSource.WEBSOCKET,
+                required_data_fields=(
+                    set(_BINANCE_FUTURES_DEPTH_FIELDS)
+                    if market_type == "futures"
+                    else set()
+                ),
+            ),
         ]
     if stream_type in (StreamType.MARK_PRICE, StreamType.INDEX_PRICE):
         row = _binance_derivatives_summary_http_row()
@@ -741,6 +777,11 @@ def _descriptor(
         depth_levels=20 if stream_type == StreamType.DEPTH else None,
         exchange=exchange,
         market_type=market_type,
+        update_interval_ms=(
+            250
+            if stream_type == StreamType.DEPTH and market_type == "futures"
+            else None
+        ),
     )
 
 

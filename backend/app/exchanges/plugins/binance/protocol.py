@@ -44,6 +44,16 @@ _FUTURES_HISTORY_PATH = {
 
 _MARK_PRICE_PROJECTIONS = {"markPrice", "indexPrice", "fundingRate"}
 _OPEN_INTEREST_PERIODS = {"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"}
+_PARTIAL_DEPTH_LEVELS = {5, 10, 20}
+_PARTIAL_DEPTH_UPDATE_INTERVALS_MS = {
+    # Spot's 1000ms cadence is selected by omitting the speed suffix.
+    "spot": {100, 1000},
+    "futures": {100, 250, 500},
+}
+_PARTIAL_DEPTH_DEFAULT_INTERVAL_MS = {
+    "spot": 1000,
+    "futures": 250,
+}
 
 _FUTURES_MARKET_STREAMS = {
     "aggTrade",
@@ -192,8 +202,18 @@ class BinanceExchangeProtocol:
         ).lower()
         if descriptor.stream_type.value == "kline":
             return f"{symbol}@kline_{descriptor.interval}"
-        if descriptor.stream_type.value == "depth" and descriptor.depth_levels:
-            return f"{symbol}@depth{descriptor.depth_levels}"
+        if descriptor.stream_type.value == "depth":
+            levels, update_interval_ms = self._partial_depth_stream_params(descriptor)
+            stream_name = f"{symbol}@depth{levels}"
+            default_interval_ms = _PARTIAL_DEPTH_DEFAULT_INTERVAL_MS[
+                descriptor.market_type.strip().lower()
+            ]
+            if (
+                update_interval_ms is not None
+                and update_interval_ms != default_interval_ms
+            ):
+                stream_name = f"{stream_name}@{update_interval_ms}ms"
+            return stream_name
         if descriptor.stream_type.value in _MARK_PRICE_PROJECTIONS:
             return f"{symbol}@markPrice@1s"
         return f"{symbol}@{descriptor.stream_type.value}"
@@ -251,12 +271,32 @@ class BinanceExchangeProtocol:
                 market_type=descriptor.market_type,
             ).upper()
             return payload_symbol == expected_symbol
+        if stream_type == "depth" and str(
+            getattr(descriptor, "market_type", "spot"),
+        ).strip().lower() == "futures":
+            if payload.get("e") != "depthUpdate":
+                return False
+            if "st" in payload and (
+                type(payload.get("st")) is not int or payload.get("st") != 1
+            ):
+                return False
+            payload_symbol = str(payload.get("s", "")).upper()
+            expected_symbol = self._symbols.normalize(
+                descriptor.symbol,
+                market_type=descriptor.market_type,
+            ).upper()
+            return payload_symbol == expected_symbol
         return True
 
     def supports_ws(self, descriptor: Any) -> bool:
         """Return channel-level WS availability for the current plugin."""
 
         stream_type = getattr(getattr(descriptor, "stream_type", None), "value", "")
+        if stream_type == "depth":
+            try:
+                self._partial_depth_stream_params(descriptor)
+            except ValueError:
+                return False
         if str(getattr(descriptor, "market_type", "spot")).strip().lower() != "futures":
             return stream_type not in {
                 "forceOrder",
@@ -288,6 +328,28 @@ class BinanceExchangeProtocol:
             "wss://data-stream.binance.vision/ws",
             "wss://stream.binance.me:9443/ws",
         ]
+
+    @staticmethod
+    def _partial_depth_stream_params(descriptor: Any) -> tuple[int, int | None]:
+        levels = getattr(descriptor, "depth_levels", None)
+        if type(levels) is not int or levels not in _PARTIAL_DEPTH_LEVELS:
+            raise ValueError("Binance partial depth requires levels in {5, 10, 20}")
+
+        market_type = str(getattr(descriptor, "market_type", "spot")).strip().lower()
+        allowed_intervals = _PARTIAL_DEPTH_UPDATE_INTERVALS_MS.get(market_type)
+        if allowed_intervals is None:
+            raise ValueError(f"unsupported Binance depth market_type: {market_type}")
+
+        update_interval_ms = getattr(descriptor, "update_interval_ms", None)
+        if update_interval_ms is None:
+            return levels, None
+        if type(update_interval_ms) is not int or update_interval_ms not in allowed_intervals:
+            supported = ", ".join(str(value) for value in sorted(allowed_intervals))
+            raise ValueError(
+                f"Binance {market_type} partial depth update_interval_ms must be one of "
+                f"{{{supported}}}",
+            )
+        return levels, update_interval_ms
 
     @staticmethod
     def _route_futures_ws_urls(urls: list[str], route: str) -> list[str]:

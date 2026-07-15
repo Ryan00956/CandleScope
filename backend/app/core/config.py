@@ -95,6 +95,23 @@ LIQUIDATION_CAPTURE_STREAMS = tuple(
     if item.strip()
 )
 
+# Partial Top-N order books are replaceable process-local snapshots.  They do
+# not share append-only persistence settings because raw depth is deliberately
+# not archived in P3A.
+ORDER_BOOK_MAX_STREAMS = int(os.getenv("ORDER_BOOK_MAX_STREAMS", "64"))
+ORDER_BOOK_EVENT_QUEUE_SIZE = int(
+    os.getenv("ORDER_BOOK_EVENT_QUEUE_SIZE", "256")
+)
+ORDER_BOOK_DEFAULT_MAX_PENDING = int(
+    os.getenv("ORDER_BOOK_DEFAULT_MAX_PENDING", "32")
+)
+ORDER_BOOK_MAX_SNAPSHOT_AGE_MS = int(
+    os.getenv("ORDER_BOOK_MAX_SNAPSHOT_AGE_MS", "5000")
+)
+ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS = float(
+    os.getenv("ORDER_BOOK_PHYSICAL_STOP_TIMEOUT_SECONDS", "2.0")
+)
+
 # Binance HTTP APIs
 BINANCE_BASE_URLS = [
     "https://api.binance.com",

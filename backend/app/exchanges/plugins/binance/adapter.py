@@ -79,6 +79,18 @@ _FUTURES_TICKER_UNAVAILABLE_FIELDS = (
     "ask_price",
     "ask_qty",
 )
+_FUTURES_DEPTH_FIELDS = (
+    "last_update_id",
+    "first_update_id",
+    "final_update_id",
+    "previous_final_update_id",
+    "event_time_ms",
+    "transaction_time_ms",
+    "depth_levels",
+    "update_interval_ms",
+    "bids",
+    "asks",
+)
 _LIQUIDATION_FIELDS = (
     "order_side",
     "position_side",
@@ -272,8 +284,8 @@ def _channel_capabilities() -> list[MarketChannelCapability]:
             sequence="monotonic_id",
             resync="replace_snapshot",
             params={"depth_levels": [5, 10, 20]},
-            update_intervals_ms=(250,),
-            available_fields=("last_update_id", "bids", "asks"),
+            update_intervals_ms=(100, 250, 500),
+            available_fields=_FUTURES_DEPTH_FIELDS,
             connection_model="path_per_stream",
             limits={"rest.max_limit": 1000},
             known_limitations=(

@@ -226,6 +226,7 @@ class DataManager:
         self._market_data_service: Any = None
         self._trade_flow_service: Any = None
         self._liquidation_service: Any = None
+        self._order_book_service: Any = None
         self._stream_leases: dict[SeriesKey, _StreamLease] = {}
         self._memory_gc_last_report: dict[str, Any] | None = None
         self._storage_gc_last_report: dict[str, Any] | None = None
@@ -328,6 +329,21 @@ class DataManager:
             raise TypeError("liquidation service does not implement the required facade")
         self._liquidation_service = service
 
+    def set_order_book_service(self, service: Any) -> None:
+        """Attach the latest-wins Partial Top-N order-book service."""
+
+        required = (
+            "ensure_stream",
+            "release_stream",
+            "current",
+            "wait_for_snapshot",
+            "attach",
+            "diagnostics",
+        )
+        if any(not callable(getattr(service, name, None)) for name in required):
+            raise TypeError("order-book service does not implement the required facade")
+        self._order_book_service = service
+
     @property
     def market_data_ready(self) -> bool:
         return self._market_data_service is not None
@@ -339,6 +355,10 @@ class DataManager:
     @property
     def liquidation_ready(self) -> bool:
         return self._liquidation_service is not None
+
+    @property
+    def order_book_ready(self) -> bool:
+        return self._order_book_service is not None
 
     def wire_backfill_reconciler(self, reconciler: BackfillReconcilerLike) -> None:
         """Attach this manager's BarAggregator to a backfill reconciler."""
@@ -1015,6 +1035,53 @@ class DataManager:
         if self._liquidation_service is None:
             raise RuntimeError("liquidation service is not initialized")
         return self._liquidation_service
+
+    # ═══════════════════════════════════════════════════════════
+    #  Partial Top-N order book — latest replaceable snapshots
+    # ═══════════════════════════════════════════════════════════
+
+    async def ensure_order_book_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_order_book_service()
+        return await service.ensure_stream(key, consumer_id=consumer_id)
+
+    async def release_order_book_stream(
+        self,
+        key: MarketStreamKey,
+        *,
+        consumer_id: str,
+    ) -> bool:
+        service = self._require_order_book_service()
+        return await service.release_stream(key, consumer_id=consumer_id)
+
+    def order_book_snapshot(self, key: MarketStreamKey) -> Any:
+        service = self._require_order_book_service()
+        return service.current(key)
+
+    async def wait_for_order_book_snapshot(
+        self,
+        key: MarketStreamKey,
+        *,
+        timeout_seconds: float,
+    ) -> Any:
+        service = self._require_order_book_service()
+        return await service.wait_for_snapshot(
+            key,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def attach_order_books(self, keys: list[MarketStreamKey], **kwargs: Any) -> Any:
+        service = self._require_order_book_service()
+        return service.attach(keys, **kwargs)
+
+    def _require_order_book_service(self) -> Any:
+        if self._order_book_service is None:
+            raise RuntimeError("order-book service is not initialized")
+        return self._order_book_service
 
     # ═══════════════════════════════════════════════════════════
     #  Event Subscription — for real-time consumers
@@ -2047,6 +2114,11 @@ class DataManager:
             "liquidations": (
                 self._liquidation_service.diagnostics()
                 if self._liquidation_service is not None
+                else {"status": "not_initialized"}
+            ),
+            "order_book": (
+                self._order_book_service.diagnostics()
+                if self._order_book_service is not None
                 else {"status": "not_initialized"}
             ),
             "auto_gc": self.auto_gc_snapshot(),

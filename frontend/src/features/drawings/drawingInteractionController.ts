@@ -862,6 +862,71 @@ export function hitTestOverlayDrawingEntity(
 
 type DrawingInteractionHit = DrawingPrimitiveHit | DrawingEntityHit;
 
+export interface PassiveCursorSelectedNonTextHitOptions<
+  T extends { readonly type: string },
+> {
+  readonly selectedId: string;
+  readonly hitTest: () => T | null;
+  readonly hitId: (hit: T) => string;
+  readonly supportsHitType: (type: T["type"]) => boolean;
+  readonly deselect: () => void;
+}
+
+export function resolvePassiveCursorSelectedNonTextHit<
+  T extends { readonly type: string },
+>({
+  selectedId,
+  hitTest,
+  hitId,
+  supportsHitType,
+  deselect,
+}: PassiveCursorSelectedNonTextHitOptions<T>): T | null {
+  const hit = hitTest();
+  if (!hit || hitId(hit) !== selectedId) deselect();
+  return hit && supportsHitType(hit.type) ? hit : null;
+}
+
+export interface SelectedOverlayHandleHitTestOptions {
+  readonly selectedId: string;
+  readonly x: number;
+  readonly y: number;
+  readonly getSavedDrawing: (id: string) => SavedDrawing | null;
+  readonly dataToScreen: DrawingDataToScreen;
+  readonly getSceneScreenBox: (id: string) => ScreenBox | null;
+  readonly getSceneScreenHandles: (id: string) => readonly ScreenPoint[] | null;
+}
+
+export function hitTestSelectedOverlayDrawingHandle({
+  selectedId,
+  x,
+  y,
+  getSavedDrawing,
+  dataToScreen,
+  getSceneScreenBox,
+  getSceneScreenHandles,
+}: SelectedOverlayHandleHitTestOptions): DrawingEntityHit | null {
+  const saved = getSavedDrawing(selectedId);
+  if (!saved) return null;
+  if (saved.type === "freehand" || saved.type === "highlighter") return null;
+  const box = getSceneScreenBox(selectedId);
+  const handles = dynamicSelectionHandlesForSavedDrawing(
+    saved,
+    dataToScreen,
+    box,
+    getSceneScreenHandles(selectedId),
+  );
+  const matched = handles.find((handle) => (
+    Math.hypot(handle.point.x - x, handle.point.y - y) <= handle.radius
+  ));
+  if (!matched) return null;
+  return Object.freeze({
+    id: selectedId,
+    saved,
+    type: drawingHitTypeFromSavedDrawing(saved),
+    ...matched.hit,
+  });
+}
+
 function isDrawingEntityHit(hit: DrawingInteractionHit): hit is DrawingEntityHit {
   return "saved" in hit;
 }
@@ -1472,24 +1537,14 @@ export function useDrawing({
     if (interactionSurfaceMode !== "overlay" || hiddenRef.current) return null;
     const selectedId = selectedIdRef.current;
     if (!selectedId) return null;
-    const saved = getSavedDrawing(selectedId);
-    if (!saved) return null;
-    const box = getSceneScreenBox(selectedId);
-    const handles = dynamicSelectionHandlesForSavedDrawing(
-      saved,
+    return hitTestSelectedOverlayDrawingHandle({
+      selectedId,
+      x,
+      y,
+      getSavedDrawing,
       dataToScreen,
-      box,
-      getSceneScreenHandles(selectedId),
-    );
-    const matched = handles.find((handle) => (
-      Math.hypot(handle.point.x - x, handle.point.y - y) <= handle.radius
-    ));
-    if (!matched) return null;
-    return Object.freeze({
-      id: selectedId,
-      saved,
-      type: drawingHitTypeFromSavedDrawing(saved),
-      ...matched.hit,
+      getSceneScreenBox,
+      getSceneScreenHandles,
     });
   }, [dataToScreen, getSavedDrawing, getSceneScreenBox, getSceneScreenHandles, interactionSurfaceMode, selectedIdRef]);
 
@@ -2709,6 +2764,7 @@ export function useDrawing({
         e.stopPropagation();
         return;
       }
+      let passiveCursorInteractiveHit: DrawingInteractionHit | null | undefined;
 
       // Editing text owns the next chart click. Commit through the same path
       // for blank clicks, text clicks, and text-tool clicks so blur does not
@@ -2755,10 +2811,19 @@ export function useDrawing({
           // Clicked outside the selected text → drop selection.
           deselectAll();
         } else if (sel || savedSelection) {
-          const selectedHit = hitTestAll(pos.x, pos.y);
-          const stillOnIt = !!selectedHit
-            && drawingInteractionHitId(selectedHit) === (sel?.id ?? savedSelection?.id);
-          if (!stillOnIt) deselectAll();
+          const selectedId = sel?.id ?? savedSelection?.id;
+          if (!selectedId) {
+            deselectAll();
+            passiveCursorInteractiveHit = null;
+          } else {
+            passiveCursorInteractiveHit = resolvePassiveCursorSelectedNonTextHit({
+              selectedId,
+              hitTest: () => hitTestAll(pos.x, pos.y),
+              hitId: drawingInteractionHitId,
+              supportsHitType: (type) => supportsDrawingHitType(drawingAnchorMode, type),
+              deselect: deselectAll,
+            });
+          }
         }
       }
 
@@ -3318,7 +3383,9 @@ export function useDrawing({
       // creation-tool hit branch (a pen pointerdown must remain a new stroke),
       // so without this path their public style toolbar was unreachable.
       if (isPassiveCursorTool(tool)) {
-        const hit = hitTestInteractive(pos.x, pos.y);
+        const hit = passiveCursorInteractiveHit === undefined
+          ? hitTestInteractive(pos.x, pos.y)
+          : passiveCursorInteractiveHit;
         if (hit) {
           selectPrimitive(drawingInteractionHitId(hit));
           clearHoverFeedback();

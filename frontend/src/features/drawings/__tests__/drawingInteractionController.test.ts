@@ -13,8 +13,10 @@ import {
   createDrawingExportVisibilityIntentGate,
   detachAndRemoveDrawingPrimitive,
   dynamicSelectionHandlesForSavedDrawing,
+  hitTestSelectedOverlayDrawingHandle,
   hitTestOverlayDrawingEntity,
   isDrawingCoordinateCleanupBoundaryCurrent,
+  resolvePassiveCursorSelectedNonTextHit,
   resolveTopmostDrawingInteractionHit,
   runDrawingPointerTransientBarrier,
   runDrawingSurfaceDisposeBarrier,
@@ -166,6 +168,188 @@ test("512-entity overlay hover misses do not materialize or scan the drawing doc
   assert.strictEqual(hit?.saved, target);
   assert.equal(hit?.id, "line-511");
   assert.equal(lookupCount, 1);
+});
+
+test("selected passive cursor pointerdown reuses its first raw hit for every selection outcome", () => {
+  type CursorHit = Readonly<{ id: string; type: "line" | "freehand" }>;
+  const selectedId = "selected-line";
+  const selectedHit: CursorHit = { id: selectedId, type: "line" };
+  const unsupportedSelectedHit: CursorHit = { id: selectedId, type: "freehand" };
+  const otherHit: CursorHit = { id: "other-line", type: "line" };
+  const unsupportedHit: CursorHit = { id: "legacy-freehand", type: "freehand" };
+
+  const scenarios: ReadonlyArray<Readonly<{
+    name: string;
+    rawHit: CursorHit | null;
+    supported: boolean;
+    expected: CursorHit | null;
+    expectedDeselectCount: number;
+  }>> = [
+    {
+      name: "same entity",
+      rawHit: selectedHit,
+      supported: true,
+      expected: selectedHit,
+      expectedDeselectCount: 0,
+    },
+    {
+      name: "same entity with unsupported anchor",
+      rawHit: unsupportedSelectedHit,
+      supported: false,
+      expected: null,
+      expectedDeselectCount: 0,
+    },
+    {
+      name: "blank",
+      rawHit: null,
+      supported: true,
+      expected: null,
+      expectedDeselectCount: 1,
+    },
+    {
+      name: "another entity",
+      rawHit: otherHit,
+      supported: true,
+      expected: otherHit,
+      expectedDeselectCount: 1,
+    },
+    {
+      name: "unsupported anchor",
+      rawHit: unsupportedHit,
+      supported: false,
+      expected: null,
+      expectedDeselectCount: 1,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    let sceneHitCount = 0;
+    let hitIdReadCount = 0;
+    let supportCheckCount = 0;
+    let deselectCount = 0;
+    const hitTestScene = (): CursorHit | null => {
+      sceneHitCount += 1;
+      return scenario.rawHit;
+    };
+    const resolved = resolvePassiveCursorSelectedNonTextHit({
+      selectedId,
+      hitTest: hitTestScene,
+      hitId(hit) {
+        hitIdReadCount += 1;
+        return hit.id;
+      },
+      supportsHitType() {
+        supportCheckCount += 1;
+        return scenario.supported;
+      },
+      deselect() {
+        deselectCount += 1;
+      },
+    });
+
+    assert.strictEqual(resolved, scenario.expected, scenario.name);
+    assert.equal(sceneHitCount, 1, `${scenario.name}: scene hit executes once`);
+    assert.equal(
+      hitIdReadCount,
+      scenario.rawHit ? 1 : 0,
+      `${scenario.name}: only a real raw hit needs identity resolution`,
+    );
+    assert.equal(
+      supportCheckCount,
+      scenario.rawHit ? 1 : 0,
+      `${scenario.name}: only a real raw hit reaches anchor filtering`,
+    );
+    assert.equal(
+      deselectCount,
+      scenario.expectedDeselectCount,
+      `${scenario.name}: selection transition`,
+    );
+  }
+});
+
+test("selected freehand and highlighter handle probes skip scene geometry reads", () => {
+  for (const type of ["freehand", "highlighter"] as const) {
+    const selectedId = `selected-${type}`;
+    const saved: SavedDrawing = {
+      id: selectedId,
+      type,
+      dataPoints: [{ time: 10, price: 20 }, { time: 20, price: 30 }],
+    };
+    let savedReadCount = 0;
+    let sceneBoxReadCount = 0;
+    let sceneHandlesReadCount = 0;
+    let projectionCount = 0;
+
+    assert.equal(hitTestSelectedOverlayDrawingHandle({
+      selectedId,
+      x: 10,
+      y: 20,
+      getSavedDrawing(id) {
+        savedReadCount += 1;
+        assert.equal(id, selectedId);
+        return saved;
+      },
+      dataToScreen(dataPoint) {
+        projectionCount += 1;
+        return { x: Number(dataPoint.time), y: dataPoint.price };
+      },
+      getSceneScreenBox(id) {
+        sceneBoxReadCount += 1;
+        assert.equal(id, selectedId);
+        return { x: 0, y: 0, width: 100, height: 100 };
+      },
+      getSceneScreenHandles(id) {
+        sceneHandlesReadCount += 1;
+        assert.equal(id, selectedId);
+        return [{ x: 10, y: 20 }];
+      },
+    }), null, type);
+    assert.equal(savedReadCount, 1, `${type}: canonical entity read`);
+    assert.equal(sceneBoxReadCount, 0, `${type}: scene box must stay unread`);
+    assert.equal(sceneHandlesReadCount, 0, `${type}: scene handles must stay unread`);
+    assert.equal(projectionCount, 0, `${type}: handle projection must stay idle`);
+  }
+});
+
+test("selected overlay handle probes preserve ordinary endpoint hit semantics", () => {
+  const selectedId = "selected-line";
+  const saved: SavedDrawing = {
+    id: selectedId,
+    type: "line",
+    dataPoints: [{ time: 10, price: 20 }, { time: 40, price: 50 }],
+  };
+  let sceneBoxReadCount = 0;
+  let sceneHandlesReadCount = 0;
+  let projectionCount = 0;
+
+  const hit = hitTestSelectedOverlayDrawingHandle({
+    selectedId,
+    x: 10,
+    y: 20,
+    getSavedDrawing: () => saved,
+    dataToScreen(dataPoint) {
+      projectionCount += 1;
+      return typeof dataPoint.time === "number"
+        ? { x: dataPoint.time, y: dataPoint.price }
+        : null;
+    },
+    getSceneScreenBox() {
+      sceneBoxReadCount += 1;
+      return null;
+    },
+    getSceneScreenHandles() {
+      sceneHandlesReadCount += 1;
+      return null;
+    },
+  });
+
+  assert.equal(hit?.id, selectedId);
+  assert.strictEqual(hit?.saved, saved);
+  assert.equal(hit?.type, "line");
+  assert.equal(hit?.pointIndex, 0);
+  assert.equal(sceneBoxReadCount, 1);
+  assert.equal(sceneHandlesReadCount, 1);
+  assert.equal(projectionCount, 2);
 });
 
 test("pending pen moves retain every coalesced batch before one RAF", () => {

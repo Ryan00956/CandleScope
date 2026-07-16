@@ -1,5 +1,28 @@
-const DEDICATED_SCHEMA_VERSION = "drawing-rollback-drill/v1";
+const DEDICATED_SCHEMA_VERSION = "drawing-rollback-drill/v2";
 const PHASE6_SCHEMA_VERSION = "drawing-engine-v2-perf/v1";
+const DRAWING_WORKER_SCHEMA_VERSION = 1;
+
+const DRAWING_KINDS = Object.freeze([
+  "line",
+  "axis-line",
+  "angle-measure",
+  "text",
+  "fibonacci",
+  "position",
+  "shape",
+  "freehand",
+  "highlighter",
+]);
+
+const EXPORT_CHECKPOINT_TYPES = Object.freeze([
+  "export-prepare",
+  "series-rebuild-start",
+  "series-rebuild-complete",
+  "stale-lease-revalidate",
+  "fresh-lease-revalidate",
+  "export-capture",
+  "lease-restored",
+]);
 
 const STAMP_FIELDS = Object.freeze([
   "scopeKey",
@@ -36,7 +59,7 @@ export const DRAWING_ROLLBACK_DRILL_MANIFEST = Object.freeze([
     title: "OffscreenCanvas unsupported",
     requiredEvidence: "headed production browser with OffscreenCanvas disabled inside the drawing worker",
     currentCoverage: "component-only",
-    missingEvidence: "worker-global capability injection and typed-result publication proof",
+    missingEvidence: "worker-global capability injection, sticky main-thread fallback, and a second request with no worker round-trip",
     componentTest: componentTest([
       "src/features/drawings/worker/__tests__/drawingWorker.test.ts",
       "src/features/drawings/engine/__tests__/drawingSceneRuntime.test.ts",
@@ -70,7 +93,7 @@ export const DRAWING_ROLLBACK_DRILL_MANIFEST = Object.freeze([
     title: "chart type or interval changes during an active gesture",
     requiredEvidence: "headed production browser variants for both chart-type and interval boundaries",
     currentCoverage: "component-only",
-    missingEvidence: "pointerdown to boundary change to cancellation in one browser transaction",
+    missingEvidence: "active gesture to boundary-owned cancellation with an unchanged same-scope canonical document",
     componentTest: componentTest([
       "src/features/drawings/__tests__/drawingInteractionController.test.ts",
       "src/features/drawings/__tests__/drawingPersistenceLifecycle.test.ts",
@@ -108,7 +131,7 @@ export const DRAWING_ROLLBACK_DRILL_MANIFEST = Object.freeze([
     title: "legacy build reads the newest canary compatibility snapshot",
     requiredEvidence: "two production builds sharing one origin/profile: scene-canary write then legacy read",
     currentCoverage: "component-only",
-    missingEvidence: "cross-build same-profile execution and exact snapshot digest/count proof",
+    missingEvidence: "distinct rollout/build assets plus browser and server restart receipts in one same-origin/profile execution",
     componentTest: componentTest([
       "src/features/drawings/core/__tests__/drawingCodec.test.ts",
       "src/features/drawings/persistence/__tests__/legacyDrawingImporter.test.ts",
@@ -150,8 +173,12 @@ function integer(value) {
   return Number.isInteger(value) ? value : null;
 }
 
-function exactTrue(value) {
-  return value === true;
+function safePositiveInteger(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function safeNonNegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function exactZero(value) {
@@ -164,6 +191,18 @@ function emptyArray(value) {
 
 function sameNonEmptyString(left, right) {
   return nonEmptyString(left) && left === right;
+}
+
+function sha256Digest(value) {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
+}
+
+function sameSha256Digest(left, right) {
+  return sha256Digest(left) && left === right;
+}
+
+function own(value, key) {
+  return objectValue(value) !== null && Object.hasOwn(value, key);
 }
 
 function sameStamp(left, right) {
@@ -184,6 +223,75 @@ function sameStamp(left, right) {
     && finiteNumber(leftStamp.widthCssPx) > 0
     && finiteNumber(leftStamp.heightCssPx) > 0
     && finiteNumber(leftStamp.dpr) > 0;
+}
+
+function validStamp(value) {
+  return sameStamp(value, value);
+}
+
+function validWorkerIdentity(value) {
+  const identity = objectValue(value);
+  return identity !== null
+    && identity.schemaVersion === DRAWING_WORKER_SCHEMA_VERSION
+    && safePositiveInteger(identity.jobId) !== null
+    && safePositiveInteger(identity.generation) !== null
+    && validStamp(identity.stamp);
+}
+
+function sameWorkerIdentity(left, right) {
+  return validWorkerIdentity(left)
+    && validWorkerIdentity(right)
+    && left.jobId === right.jobId
+    && left.generation === right.generation
+    && sameStamp(left.stamp, right.stamp);
+}
+
+function validCounterPair(value) {
+  const pair = objectValue(value);
+  return pair !== null
+    && integer(pair.before) !== null
+    && pair.before >= 0
+    && integer(pair.after) !== null
+    && pair.after >= pair.before;
+}
+
+function counterDelta(value) {
+  return validCounterPair(value) ? value.after - value.before : null;
+}
+
+function validPaintReceipt(value, expectedStamp) {
+  const receipt = objectValue(value);
+  return receipt !== null
+    && receipt.kind === "drawing-scene-bridge-paint-ack"
+    && validTimestamp(receipt.observedAt)
+    && sameStamp(receipt.stamp, expectedStamp);
+}
+
+function validRestartReceipt(value, kind, beforeInstanceId, afterInstanceId, binding) {
+  const receipt = objectValue(value);
+  if (!receipt) return false;
+  const stoppedAtValid = validTimestamp(receipt.stoppedAt);
+  const startedAtValid = validTimestamp(receipt.startedAt);
+  return receipt.kind === kind
+    && sameNonEmptyString(receipt.beforeInstanceId, beforeInstanceId)
+    && sameNonEmptyString(receipt.afterInstanceId, afterInstanceId)
+    && receipt.beforeInstanceId !== receipt.afterInstanceId
+    && sameSha256Digest(receipt.beforeBuildFingerprint, binding?.beforeBuildFingerprint)
+    && sameSha256Digest(receipt.afterBuildFingerprint, binding?.afterBuildFingerprint)
+    && sameNonEmptyString(receipt.profileId, binding?.profileId)
+    && sameNonEmptyString(receipt.scopeKey, binding?.scopeKey)
+    && stoppedAtValid
+    && startedAtValid
+    && Date.parse(receipt.startedAt) >= Date.parse(receipt.stoppedAt);
+}
+
+function timestampsAreOrdered(values) {
+  if (!Array.isArray(values) || values.length === 0 || !values.every(validTimestamp)) {
+    return false;
+  }
+  return values.every((value, index) => (
+    index === 0 || Date.parse(value) >= Date.parse(values[index - 1])
+  ));
 }
 
 function validTimestamp(value) {
@@ -207,7 +315,6 @@ function validateDedicatedCommon(drillId, artifact) {
 
   addFailure(failures, report.schemaVersion === DEDICATED_SCHEMA_VERSION, "dedicated-schema-mismatch");
   addFailure(failures, report.drillId === drillId, "drill-id-mismatch");
-  addFailure(failures, exactTrue(report.completed), "drill-not-completed");
   addFailure(failures, environment !== null, "environment-missing");
   addFailure(failures, environment?.productionBuild === true, "production-build-not-proven");
   addFailure(failures, environment?.headed === true, "headed-browser-not-proven");
@@ -241,8 +348,7 @@ function validateDedicatedCommon(drillId, artifact) {
 function validateDocumentPreserved(failures, outcome) {
   const value = objectValue(outcome);
   addFailure(failures, value !== null, "outcome-missing");
-  addFailure(failures, value?.canonicalDocumentPreserved === true, "canonical-document-not-preserved");
-  addFailure(failures, sameNonEmptyString(value?.beforeDigest, value?.afterDigest), "document-digest-mismatch");
+  addFailure(failures, sameSha256Digest(value?.beforeDigest, value?.afterDigest), "document-digest-mismatch");
   addFailure(
     failures,
     integer(value?.beforeEntityCount) !== null
@@ -250,10 +356,15 @@ function validateDocumentPreserved(failures, outcome) {
       && value.beforeEntityCount === value.afterEntityCount,
     "document-entity-count-mismatch",
   );
-  addFailure(failures, value?.currentPaintConverged === true, "current-paint-not-converged");
   addFailure(failures, value?.queueDepthCurrent === 0, "queue-not-converged");
   addFailure(failures, sameStamp(value?.lastRequestedStamp, value?.lastPublishedStamp), "published-stamp-not-current");
+  addFailure(failures, own(value, "lastPaintedStamp"), "independent-painted-stamp-missing");
   addFailure(failures, sameStamp(value?.lastPublishedStamp, value?.lastPaintedStamp), "painted-stamp-not-current");
+  addFailure(
+    failures,
+    validPaintReceipt(value?.paintReceipt, value?.lastPaintedStamp),
+    "independent-paint-receipt-invalid-or-missing",
+  );
 }
 
 function validateWorkerInitFailure(artifact) {
@@ -261,11 +372,19 @@ function validateWorkerInitFailure(artifact) {
   const injection = objectValue(artifact?.injection);
   const observations = objectValue(artifact?.observations);
   addFailure(failures, injection?.kind === "worker-constructor-throws", "wrong-worker-init-injection");
-  addFailure(failures, observations?.workerConstructorAttempted === true, "worker-constructor-not-attempted");
-  addFailure(failures, observations?.workerConstructionFailed === true, "worker-construction-failure-not-observed");
+  addFailure(
+    failures,
+    counterDelta(observations?.workerConstructorAttempts) === 1,
+    "worker-constructor-attempt-count-invalid",
+  );
+  addFailure(
+    failures,
+    counterDelta(observations?.workerConstructionFailures) === 1,
+    "worker-construction-failure-count-invalid",
+  );
   addFailure(failures, observations?.fallbackBackend === "main-thread", "main-thread-fallback-not-active");
-  addFailure(failures, observations?.scenePublicationReady === true, "scene-publication-not-ready");
-  addFailure(failures, observations?.workerJobDelta === 0, "worker-job-ran-after-construction-failure");
+  addFailure(failures, finiteNumber(observations?.scenePublicationCountDelta) > 0, "scene-publication-not-observed");
+  addFailure(failures, counterDelta(observations?.workerJobs) === 0, "worker-job-ran-after-construction-failure");
   validateDocumentPreserved(failures, artifact?.outcome);
   return failures;
 }
@@ -274,31 +393,167 @@ function validateOffscreenUnsupported(artifact) {
   const failures = validateDedicatedCommon("offscreen-canvas-unsupported", artifact);
   const injection = objectValue(artifact?.injection);
   const observations = objectValue(artifact?.observations);
+  const firstRequest = objectValue(observations?.firstRequest);
+  const secondRequest = objectValue(observations?.secondRequest);
+  const workerRoundTrips = objectValue(observations?.workerRoundTrips);
+  const roundTripsBefore = integer(workerRoundTrips?.before);
+  const roundTripsAfterFirst = integer(workerRoundTrips?.afterFirstRequest);
+  const roundTripsAfterSecond = integer(workerRoundTrips?.afterSecondRequest);
   addFailure(failures, injection?.kind === "offscreen-canvas-unavailable", "wrong-offscreen-injection");
-  addFailure(failures, observations?.workerCreated === true, "drawing-worker-not-created");
+  addFailure(failures, counterDelta(observations?.workerCreations) === 1, "drawing-worker-creation-count-invalid");
   addFailure(failures, observations?.offscreenSupported === false, "offscreen-capability-not-disabled");
-  addFailure(failures, observations?.backend === "worker", "worker-backend-not-retained");
-  addFailure(failures, finiteNumber(observations?.typedResultCount) > 0, "typed-worker-result-not-observed");
-  addFailure(failures, observations?.bitmapResultCount === 0, "bitmap-result-observed-without-offscreen");
-  addFailure(failures, observations?.scenePublicationReady === true, "scene-publication-not-ready");
+  addFailure(failures, nonEmptyString(firstRequest?.requestId), "offscreen-first-request-id-missing");
+  addFailure(failures, nonEmptyString(secondRequest?.requestId), "offscreen-second-request-id-missing");
+  addFailure(
+    failures,
+    nonEmptyString(firstRequest?.requestId)
+      && nonEmptyString(secondRequest?.requestId)
+      && firstRequest.requestId !== secondRequest.requestId,
+    "offscreen-request-ids-not-distinct",
+  );
+  addFailure(failures, firstRequest?.backendBefore === "worker", "offscreen-first-request-did-not-enter-worker");
+  addFailure(failures, firstRequest?.resultKind === "typed-fallback", "offscreen-typed-fallback-not-observed");
+  addFailure(failures, firstRequest?.backendAfter === "main-thread", "offscreen-first-request-did-not-fallback");
+  addFailure(failures, secondRequest?.backendBefore === "main-thread", "offscreen-second-request-not-sticky-before");
+  addFailure(failures, secondRequest?.resultKind === "main-thread", "offscreen-second-request-result-not-main-thread");
+  addFailure(failures, secondRequest?.backendAfter === "main-thread", "offscreen-second-request-not-sticky-after");
+  addFailure(failures, observations?.finalBackend === "main-thread", "offscreen-final-backend-not-main-thread");
+  addFailure(
+    failures,
+    roundTripsBefore !== null
+      && roundTripsBefore >= 0
+      && roundTripsAfterFirst !== null
+      && roundTripsAfterFirst === roundTripsBefore + 1,
+    "offscreen-first-worker-round-trip-not-observed",
+  );
+  addFailure(
+    failures,
+    roundTripsAfterFirst !== null
+      && roundTripsAfterSecond !== null
+      && roundTripsAfterSecond === roundTripsAfterFirst,
+    "offscreen-second-request-used-worker-round-trip",
+  );
+  addFailure(failures, counterDelta(observations?.typedResults) > 0, "typed-worker-result-not-observed");
+  addFailure(failures, counterDelta(observations?.bitmapResults) === 0, "bitmap-result-observed-without-offscreen");
+  addFailure(failures, counterDelta(observations?.scenePublications) >= 2, "scene-publication-count-insufficient");
   validateDocumentPreserved(failures, artifact?.outcome);
   return failures;
 }
 
 function validateIndexedDbVariant(failures, value, kind) {
   const variant = objectValue(value);
+  const errorReceipt = objectValue(variant?.errorReceipt);
+  const durableRecord = objectValue(variant?.durableRecord);
+  const durableBefore = objectValue(durableRecord?.beforeFailure);
+  const durableAfter = objectValue(durableRecord?.afterFailure);
+  const manifest = objectValue(variant?.manifest);
+  const manifestBefore = objectValue(manifest?.beforeFailure);
+  const manifestAfter = objectValue(manifest?.afterFailure);
+  const states = Array.isArray(variant?.stateReceipts) ? variant.stateReceipts : [];
+  const beforeWrite = objectValue(states[0]);
+  const afterFailure = objectValue(states[1]);
+  const afterRetry = objectValue(states[2]);
+  const retry = objectValue(variant?.retryReceipt);
+  const coldReload = objectValue(variant?.coldReloadReceipt);
+  const expectedErrorName = kind === "quota" ? "QuotaExceededError" : "Error";
+  const expectedOperation = kind === "quota" ? "transaction-write" : "database-open";
   addFailure(failures, variant !== null, `indexeddb-${kind}-variant-missing`);
   addFailure(failures, variant?.kind === kind, `indexeddb-${kind}-kind-mismatch`);
-  addFailure(failures, variant?.injectionArmed === true, `indexeddb-${kind}-injection-not-armed`);
-  addFailure(failures, variant?.injectionObserved === true, `indexeddb-${kind}-injection-not-observed`);
-  addFailure(failures, variant?.writeRejected === true, `indexeddb-${kind}-write-not-rejected`);
-  addFailure(failures, variant?.durableSnapshotPreserved === true, `indexeddb-${kind}-durable-snapshot-not-preserved`);
-  addFailure(failures, variant?.manifestPreserved === true, `indexeddb-${kind}-manifest-not-preserved`);
-  addFailure(failures, variant?.pendingDocumentRetained === true, `indexeddb-${kind}-pending-document-not-retained`);
-  addFailure(failures, variant?.retrySucceeded === true, `indexeddb-${kind}-retry-not-successful`);
-  addFailure(failures, variant?.restoredAfterRetryMatchesPending === true, `indexeddb-${kind}-retry-restore-mismatch`);
-  addFailure(failures, sameNonEmptyString(variant?.pendingDigest, variant?.restoredDigest), `indexeddb-${kind}-pending-digest-mismatch`);
-  addFailure(failures, finiteNumber(variant?.failureMetricDelta) > 0, `indexeddb-${kind}-failure-metric-missing`);
+  addFailure(failures, nonEmptyString(variant?.transactionId), `indexeddb-${kind}-transaction-id-missing`);
+  addFailure(
+    failures,
+    errorReceipt?.transactionId === variant?.transactionId
+      && errorReceipt?.operation === expectedOperation
+      && errorReceipt?.name === expectedErrorName
+      && nonEmptyString(errorReceipt?.message)
+      && validTimestamp(errorReceipt?.observedAt),
+    `indexeddb-${kind}-error-receipt-invalid`,
+  );
+  if (kind === "blocked") {
+    addFailure(
+      failures,
+      errorReceipt?.message === "drawing IndexedDB upgrade is blocked",
+      "indexeddb-blocked-error-message-mismatch",
+    );
+  }
+  addFailure(
+    failures,
+    sameSha256Digest(durableBefore?.bytesDigest, durableAfter?.bytesDigest)
+      && sameSha256Digest(durableBefore?.documentDigest, durableAfter?.documentDigest),
+    `indexeddb-${kind}-durable-record-changed-on-failure`,
+  );
+  addFailure(
+    failures,
+    sameSha256Digest(manifestBefore?.bytesDigest, manifestAfter?.bytesDigest),
+    `indexeddb-${kind}-manifest-bytes-changed-on-failure`,
+  );
+  addFailure(failures, states.length === 3, `indexeddb-${kind}-state-receipt-count-mismatch`);
+  addFailure(
+    failures,
+    beforeWrite?.stage === "before-write"
+      && afterFailure?.stage === "after-failure"
+      && afterRetry?.stage === "after-retry"
+      && states.every((state) => state?.transactionId === variant?.transactionId),
+    `indexeddb-${kind}-state-receipt-sequence-invalid`,
+  );
+  addFailure(
+    failures,
+    beforeWrite?.dirty === true
+      && afterFailure?.dirty === true
+      && afterRetry?.dirty === false,
+    `indexeddb-${kind}-dirty-state-transition-invalid`,
+  );
+  addFailure(
+    failures,
+    sameSha256Digest(beforeWrite?.pendingDocumentDigest, afterFailure?.pendingDocumentDigest)
+      && sameSha256Digest(afterFailure?.pendingDocumentDigest, afterRetry?.pendingDocumentDigest),
+    `indexeddb-${kind}-pending-document-state-mismatch`,
+  );
+  addFailure(
+    failures,
+    retry?.kind === "retry-commit"
+      && retry?.transactionId === variant?.transactionId
+      && nonEmptyString(retry?.receiptId)
+      && validTimestamp(retry?.attemptedAt)
+      && validTimestamp(retry?.committedAt)
+      && Date.parse(retry?.committedAt) >= Date.parse(retry?.attemptedAt)
+      && sameSha256Digest(retry?.documentDigest, afterRetry?.pendingDocumentDigest)
+      && sha256Digest(retry?.durableRecordBytesDigest)
+      && sha256Digest(retry?.manifestBytesDigest),
+    `indexeddb-${kind}-retry-receipt-invalid`,
+  );
+  addFailure(
+    failures,
+    coldReload?.kind === "cold-reload"
+      && coldReload?.sourceTransactionId === variant?.transactionId
+      && nonEmptyString(coldReload?.receiptId)
+      && nonEmptyString(coldReload?.beforeBrowserInstanceId)
+      && nonEmptyString(coldReload?.afterBrowserInstanceId)
+      && coldReload.beforeBrowserInstanceId !== coldReload.afterBrowserInstanceId
+      && validTimestamp(coldReload?.observedAt)
+      && sameSha256Digest(coldReload?.documentDigest, retry?.documentDigest)
+      && sameSha256Digest(coldReload?.durableRecordBytesDigest, retry?.durableRecordBytesDigest)
+      && sameSha256Digest(coldReload?.manifestBytesDigest, retry?.manifestBytesDigest),
+    `indexeddb-${kind}-cold-reload-receipt-invalid`,
+  );
+  addFailure(
+    failures,
+    timestampsAreOrdered([
+      beforeWrite?.observedAt,
+      errorReceipt?.observedAt,
+      afterFailure?.observedAt,
+      retry?.attemptedAt,
+      retry?.committedAt,
+      afterRetry?.observedAt,
+      coldReload?.observedAt,
+    ]),
+    `indexeddb-${kind}-receipt-order-invalid`,
+  );
+  addFailure(
+    failures,
+    counterDelta(variant?.failureMetrics) > 0,
+    `indexeddb-${kind}-failure-metric-missing`,
+  );
 }
 
 function validateIndexedDbQuotaBlocked(artifact) {
@@ -313,17 +568,75 @@ function validateIndexedDbQuotaBlocked(artifact) {
 
 function validateGestureVariant(failures, value, kind) {
   const variant = objectValue(value);
+  const events = Array.isArray(variant?.events) ? variant.events : [];
+  const pointerDown = objectValue(events[0]);
+  const boundaryChange = objectValue(events[1]);
+  const cancellation = objectValue(events[2]);
+  const canonical = objectValue(variant?.canonical);
+  const canonicalBefore = objectValue(canonical?.before);
+  const canonicalAfter = objectValue(canonical?.after);
+  const beforeRevision = integer(canonicalBefore?.documentRevision);
+  const afterRevision = integer(canonicalAfter?.documentRevision);
+  const expectedReason = kind === "chart-type" ? "surface-dispose" : "coordinate-change";
   addFailure(failures, variant !== null, `${kind}-gesture-variant-missing`);
   addFailure(failures, variant?.kind === kind, `${kind}-gesture-kind-mismatch`);
-  addFailure(failures, variant?.pointerDownObserved === true, `${kind}-pointerdown-not-observed`);
-  addFailure(failures, variant?.gestureActiveBeforeBoundary === true, `${kind}-gesture-not-active-before-boundary`);
-  addFailure(failures, variant?.boundaryChanged === true, `${kind}-boundary-not-changed`);
-  addFailure(failures, variant?.pointerCancelObserved === true, `${kind}-pointer-cancel-not-observed`);
-  addFailure(failures, variant?.oldScopeMutationCount === 0, `${kind}-old-scope-mutated`);
-  addFailure(failures, variant?.uncommittedMutationCount === 0, `${kind}-uncommitted-mutation-persisted`);
-  addFailure(failures, variant?.newSurfaceReady === true, `${kind}-new-surface-not-ready`);
-  addFailure(failures, variant?.currentPaintConverged === true, `${kind}-current-paint-not-converged`);
-  addFailure(failures, sameNonEmptyString(variant?.beforeDigest, variant?.afterDigest), `${kind}-document-digest-mismatch`);
+  addFailure(failures, nonEmptyString(variant?.transactionId), `${kind}-transaction-id-missing`);
+  addFailure(failures, nonEmptyString(variant?.gestureId), `${kind}-gesture-id-missing`);
+  addFailure(failures, events.length === 3, `${kind}-gesture-event-count-mismatch`);
+  addFailure(
+    failures,
+    events.length === 3
+      && events.every((event) => (
+        event?.transactionId === variant?.transactionId
+          && event?.gestureId === variant?.gestureId
+      )),
+    `${kind}-gesture-event-identity-mismatch`,
+  );
+  addFailure(
+    failures,
+    timestampsAreOrdered(events.map((event) => event?.observedAt)),
+    `${kind}-gesture-event-order-invalid`,
+  );
+  addFailure(
+    failures,
+    pointerDown?.type === "pointer-down" && pointerDown?.activeAfter === true,
+    `${kind}-pointer-down-receipt-invalid`,
+  );
+  addFailure(
+    failures,
+    boundaryChange?.type === "boundary-change"
+      && boundaryChange?.boundaryKind === kind
+      && nonEmptyString(boundaryChange?.beforeValue)
+      && nonEmptyString(boundaryChange?.afterValue)
+      && boundaryChange.beforeValue !== boundaryChange.afterValue
+      && boundaryChange?.activeBefore === true,
+    `${kind}-boundary-change-receipt-invalid`,
+  );
+  addFailure(
+    failures,
+    cancellation?.type === "gesture-cancel"
+      && cancellation?.reason === expectedReason
+      && cancellation?.activeAfter === false,
+    `${kind}-boundary-cancellation-receipt-invalid`,
+  );
+  addFailure(
+    failures,
+    sameNonEmptyString(canonicalBefore?.scopeKey, canonicalAfter?.scopeKey),
+    `${kind}-canonical-scope-mismatch`,
+  );
+  addFailure(
+    failures,
+    sameSha256Digest(canonicalBefore?.digest, canonicalAfter?.digest),
+    `${kind}-canonical-document-digest-mismatch`,
+  );
+  addFailure(
+    failures,
+    beforeRevision !== null
+      && beforeRevision >= 0
+      && afterRevision !== null
+      && afterRevision === beforeRevision,
+    `${kind}-canonical-document-revision-changed`,
+  );
 }
 
 function validateActiveGestureBoundary(artifact) {
@@ -338,21 +651,101 @@ function validateActiveGestureBoundary(artifact) {
 
 function validateSeriesRebuildBeforeExport(artifact) {
   const failures = validateDedicatedCommon("series-rebuild-before-export", artifact);
-  const observations = objectValue(artifact?.observations);
+  const checkpoints = Array.isArray(artifact?.checkpointEvents)
+    ? artifact.checkpointEvents
+    : [];
+  const prepare = objectValue(checkpoints[0]);
+  const rebuildStart = objectValue(checkpoints[1]);
+  const rebuildComplete = objectValue(checkpoints[2]);
+  const staleRevalidate = objectValue(checkpoints[3]);
+  const freshRevalidate = objectValue(checkpoints[4]);
+  const capture = objectValue(checkpoints[5]);
+  const restored = objectValue(checkpoints[6]);
+  const png = objectValue(capture?.png);
   const outcome = objectValue(artifact?.outcome);
   addFailure(failures, artifact?.injection?.kind === "series-rebuild-before-export-capture", "wrong-export-rebuild-injection");
-  addFailure(failures, observations?.prepareCompleted === true, "export-prepare-not-completed");
-  addFailure(failures, observations?.rebuildStartedAfterPrepare === true, "series-rebuild-not-after-prepare");
-  addFailure(failures, observations?.rebuildCompletedBeforeCapture === true, "series-rebuild-not-before-capture");
-  addFailure(failures, observations?.surfaceGenerationAdvanced === true, "surface-generation-did-not-advance");
-  addFailure(failures, observations?.staleLeaseRejected === true, "stale-export-lease-not-rejected");
-  addFailure(failures, observations?.freshLeaseAcquired === true, "fresh-export-lease-not-acquired");
-  addFailure(failures, observations?.captureCompleted === true, "export-capture-not-completed");
-  addFailure(failures, observations?.drawingsIncluded === true, "export-drawings-not-proven");
-  addFailure(failures, observations?.leaseRestored === true, "export-lease-not-restored");
-  addFailure(failures, outcome?.currentPaintConverged === true, "post-export-paint-not-converged");
-  addFailure(failures, sameNonEmptyString(outcome?.beforeDigest, outcome?.afterDigest), "export-document-digest-mismatch");
+  addFailure(failures, checkpoints.length === EXPORT_CHECKPOINT_TYPES.length, "export-checkpoint-count-mismatch");
+  addFailure(
+    failures,
+    checkpoints.length === EXPORT_CHECKPOINT_TYPES.length
+      && checkpoints.every((event, index) => event?.type === EXPORT_CHECKPOINT_TYPES[index]),
+    "export-checkpoint-sequence-invalid",
+  );
+  addFailure(
+    failures,
+    timestampsAreOrdered(checkpoints.map((event) => event?.observedAt)),
+    "export-checkpoint-order-invalid",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(prepare?.leaseId)
+      && safePositiveInteger(prepare?.surfaceGeneration) !== null,
+    "old-export-lease-receipt-invalid",
+  );
+  addFailure(
+    failures,
+    rebuildStart?.fromSurfaceGeneration === prepare?.surfaceGeneration
+      && rebuildComplete?.fromSurfaceGeneration === prepare?.surfaceGeneration
+      && safePositiveInteger(rebuildComplete?.surfaceGeneration) !== null
+      && rebuildComplete.surfaceGeneration > prepare?.surfaceGeneration,
+    "series-rebuild-generation-transition-invalid",
+  );
+  addFailure(
+    failures,
+    staleRevalidate?.leaseId === prepare?.leaseId
+      && staleRevalidate?.surfaceGeneration === prepare?.surfaceGeneration
+      && staleRevalidate?.valid === false,
+    "stale-export-lease-revalidation-invalid",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(freshRevalidate?.leaseId)
+      && freshRevalidate?.leaseId !== prepare?.leaseId
+      && freshRevalidate?.surfaceGeneration === rebuildComplete?.surfaceGeneration
+      && freshRevalidate?.valid === true,
+    "fresh-export-lease-revalidation-invalid",
+  );
+  addFailure(
+    failures,
+    capture?.leaseId === freshRevalidate?.leaseId
+      && capture?.surfaceGeneration === freshRevalidate?.surfaceGeneration,
+    "export-capture-did-not-use-fresh-lease",
+  );
+  addFailure(
+    failures,
+    restored?.leaseId === freshRevalidate?.leaseId
+      && restored?.surfaceGeneration === freshRevalidate?.surfaceGeneration,
+    "export-lease-restore-receipt-invalid",
+  );
+  addFailure(
+    failures,
+    sha256Digest(png?.digest)
+      && safePositiveInteger(png?.bytes) !== null
+      && safePositiveInteger(png?.widthPx) !== null
+      && safePositiveInteger(png?.heightPx) !== null,
+    "export-png-receipt-invalid",
+  );
+  addFailure(
+    failures,
+    safePositiveInteger(capture?.drawingPixelDiffCount) !== null,
+    "export-drawing-pixel-diff-not-observed",
+  );
+  addFailure(
+    failures,
+    safePositiveInteger(capture?.controlPixelSampleCount) !== null
+      && capture?.controlPixelDiffCount === 0,
+    "export-control-pixel-diff-observed-or-missing",
+  );
+  addFailure(failures, sameSha256Digest(outcome?.beforeDigest, outcome?.afterDigest), "export-document-digest-mismatch");
+  addFailure(failures, outcome?.queueDepthCurrent === 0, "post-export-queue-not-converged");
   addFailure(failures, sameStamp(outcome?.lastRequestedStamp, outcome?.lastPublishedStamp), "post-export-stamp-not-current");
+  addFailure(failures, own(outcome, "lastPaintedStamp"), "post-export-independent-painted-stamp-missing");
+  addFailure(failures, sameStamp(outcome?.lastPublishedStamp, outcome?.lastPaintedStamp), "post-export-painted-stamp-not-current");
+  addFailure(
+    failures,
+    validPaintReceipt(outcome?.paintReceipt, outcome?.lastPaintedStamp),
+    "post-export-independent-paint-receipt-invalid-or-missing",
+  );
   return failures;
 }
 
@@ -418,40 +811,163 @@ function validateCanaryToLegacySnapshot(artifact) {
   const canary = objectValue(builds?.canary);
   const legacy = objectValue(builds?.legacy);
   const snapshot = objectValue(artifact?.snapshot);
+  const writeReceipt = objectValue(snapshot?.writeReceipt);
+  const readReceipt = objectValue(snapshot?.readReceipt);
+  const restartReceipts = objectValue(artifact?.restartReceipts);
+  const renderedKinds = Array.isArray(readReceipt?.renderedKinds)
+    ? readReceipt.renderedKinds
+    : [];
   addFailure(failures, artifact?.injection?.kind === "canary-build-to-legacy-build", "wrong-cross-build-injection");
   addFailure(failures, canary?.mode === "scene-canary", "canary-build-mode-mismatch");
   addFailure(failures, legacy?.mode === "legacy", "legacy-build-mode-mismatch");
   addFailure(failures, canary?.productionBuild === true && legacy?.productionBuild === true, "cross-build-production-proof-missing");
-  addFailure(failures, nonEmptyString(canary?.buildRevision), "canary-build-revision-missing");
-  addFailure(failures, nonEmptyString(legacy?.buildRevision), "legacy-build-revision-missing");
-  addFailure(failures, canary?.buildRevision !== legacy?.buildRevision, "cross-build-revisions-not-distinct");
-  addFailure(failures, sameNonEmptyString(canary?.origin, legacy?.origin), "cross-build-origin-mismatch");
-  addFailure(failures, sameNonEmptyString(canary?.profileId, legacy?.profileId), "cross-build-profile-mismatch");
-  addFailure(failures, snapshot?.compatibilityWriteObserved === true, "compatibility-write-not-observed");
-  addFailure(failures, snapshot?.legacyReadObserved === true, "legacy-read-not-observed");
-  addFailure(failures, sameNonEmptyString(snapshot?.canaryDigest, snapshot?.legacyDigest), "cross-build-snapshot-digest-mismatch");
+  addFailure(failures, nonEmptyString(canary?.sourceRevision), "canary-source-revision-missing");
+  addFailure(failures, nonEmptyString(legacy?.sourceRevision), "legacy-source-revision-missing");
+  addFailure(failures, nonEmptyString(canary?.rolloutEnvironment), "canary-rollout-environment-missing");
+  addFailure(failures, nonEmptyString(legacy?.rolloutEnvironment), "legacy-rollout-environment-missing");
   addFailure(
     failures,
-    integer(snapshot?.canaryEntityCount) !== null
-      && integer(snapshot?.canaryEntityCount) > 0
-      && snapshot.canaryEntityCount === snapshot.legacyEntityCount,
+    nonEmptyString(canary?.rolloutEnvironment)
+      && nonEmptyString(legacy?.rolloutEnvironment)
+      && canary.rolloutEnvironment !== legacy.rolloutEnvironment,
+    "cross-build-rollout-environments-not-distinct",
+  );
+  addFailure(failures, sha256Digest(canary?.buildFingerprint), "canary-build-fingerprint-invalid-or-missing");
+  addFailure(failures, sha256Digest(legacy?.buildFingerprint), "legacy-build-fingerprint-invalid-or-missing");
+  addFailure(
+    failures,
+    sha256Digest(canary?.buildFingerprint)
+      && sha256Digest(legacy?.buildFingerprint)
+      && canary.buildFingerprint !== legacy.buildFingerprint,
+    "cross-build-fingerprints-not-distinct",
+  );
+  addFailure(failures, sha256Digest(canary?.assetDigest), "canary-asset-digest-invalid-or-missing");
+  addFailure(failures, sha256Digest(legacy?.assetDigest), "legacy-asset-digest-invalid-or-missing");
+  addFailure(
+    failures,
+    sha256Digest(canary?.assetDigest)
+      && sha256Digest(legacy?.assetDigest)
+      && canary.assetDigest !== legacy.assetDigest,
+    "cross-build-asset-digests-not-distinct",
+  );
+  addFailure(failures, sameNonEmptyString(canary?.origin, legacy?.origin), "cross-build-origin-mismatch");
+  addFailure(failures, sameNonEmptyString(canary?.profileId, legacy?.profileId), "cross-build-profile-mismatch");
+  addFailure(
+    failures,
+    validRestartReceipt(
+      restartReceipts?.browser,
+      "browser",
+      canary?.browserInstanceId,
+      legacy?.browserInstanceId,
+      {
+        beforeBuildFingerprint: canary?.buildFingerprint,
+        afterBuildFingerprint: legacy?.buildFingerprint,
+        profileId: canary?.profileId,
+        scopeKey: writeReceipt?.scopeKey,
+      },
+    ),
+    "cross-build-browser-restart-receipt-invalid-or-missing",
+  );
+  addFailure(
+    failures,
+    validRestartReceipt(
+      restartReceipts?.server,
+      "server",
+      canary?.serverInstanceId,
+      legacy?.serverInstanceId,
+      {
+        beforeBuildFingerprint: canary?.buildFingerprint,
+        afterBuildFingerprint: legacy?.buildFingerprint,
+        profileId: canary?.profileId,
+        scopeKey: writeReceipt?.scopeKey,
+      },
+    ),
+    "cross-build-server-restart-receipt-invalid-or-missing",
+  );
+  addFailure(failures, writeReceipt?.kind === "compatibility-write", "compatibility-write-receipt-invalid-or-missing");
+  addFailure(failures, readReceipt?.kind === "legacy-read", "legacy-read-receipt-invalid-or-missing");
+  addFailure(
+    failures,
+    sameSha256Digest(writeReceipt?.buildFingerprint, canary?.buildFingerprint)
+      && sameNonEmptyString(writeReceipt?.profileId, canary?.profileId)
+      && nonEmptyString(writeReceipt?.scopeKey),
+    "compatibility-write-receipt-build-binding-invalid",
+  );
+  addFailure(
+    failures,
+    sameSha256Digest(readReceipt?.buildFingerprint, legacy?.buildFingerprint)
+      && sameNonEmptyString(readReceipt?.profileId, legacy?.profileId)
+      && sameNonEmptyString(readReceipt?.scopeKey, writeReceipt?.scopeKey),
+    "legacy-read-receipt-build-binding-invalid",
+  );
+  addFailure(failures, validTimestamp(writeReceipt?.observedAt), "compatibility-write-timestamp-invalid");
+  addFailure(failures, validTimestamp(readReceipt?.observedAt), "legacy-read-timestamp-invalid");
+  for (const [kind, receipt] of [
+    ["browser", restartReceipts?.browser],
+    ["server", restartReceipts?.server],
+  ]) {
+    addFailure(
+      failures,
+      timestampsAreOrdered([
+        writeReceipt?.observedAt,
+        receipt?.stoppedAt,
+        receipt?.startedAt,
+        readReceipt?.observedAt,
+      ]),
+      `cross-build-${kind}-restart-order-invalid`,
+    );
+  }
+  addFailure(failures, sameSha256Digest(writeReceipt?.documentDigest, readReceipt?.documentDigest), "cross-build-snapshot-digest-mismatch");
+  addFailure(
+    failures,
+    sameSha256Digest(writeReceipt?.sourceBytesDigest, readReceipt?.sourceBytesDigestBefore)
+      && sameSha256Digest(readReceipt?.sourceBytesDigestBefore, readReceipt?.sourceBytesDigestAfter),
+    "cross-build-source-bytes-digest-mismatch",
+  );
+  addFailure(
+    failures,
+    integer(writeReceipt?.entityCount) !== null
+      && integer(writeReceipt?.entityCount) >= DRAWING_KINDS.length
+      && writeReceipt.entityCount === readReceipt?.entityCount,
     "cross-build-entity-count-mismatch",
   );
-  addFailure(failures, snapshot?.allNineKindsCovered === true, "cross-build-kind-coverage-incomplete");
-  addFailure(failures, snapshot?.legacyRendererVisible === true, "legacy-renderer-visibility-not-proven");
-  addFailure(failures, snapshot?.sourceBytesUnchangedByRead === true, "legacy-read-rewrote-source-bytes");
+  addFailure(
+    failures,
+    renderedKinds.length === DRAWING_KINDS.length
+      && new Set(renderedKinds).size === DRAWING_KINDS.length
+      && DRAWING_KINDS.every((kind) => renderedKinds.includes(kind)),
+    "cross-build-kind-coverage-incomplete",
+  );
+  addFailure(
+    failures,
+    integer(readReceipt?.visibleEntityCount) !== null
+      && readReceipt.visibleEntityCount === readReceipt.entityCount,
+    "legacy-renderer-visibility-not-proven",
+  );
   return failures;
 }
 
 function validateDedicatedStaleGeneration(artifact) {
   const failures = validateDedicatedCommon("worker-stale-generation", artifact);
   const observations = objectValue(artifact?.observations);
-  const workerJobDelta = finiteNumber(observations?.workerJobDelta);
-  const workerResultDelta = finiteNumber(observations?.workerResultDelta);
-  const queueDepthMax = finiteNumber(observations?.queueDepthMax);
-  const inFlightMax = finiteNumber(observations?.inFlightMax);
+  const identities = objectValue(artifact?.identities);
+  const returned = objectValue(identities?.returned);
+  const accepted = objectValue(identities?.accepted);
+  const published = objectValue(identities?.published);
+  const latestSubmitted = objectValue(identities?.latestSubmitted);
+  const submittedHeaders = Array.isArray(artifact?.submittedHeaders)
+    ? artifact.submittedHeaders
+    : [];
+  const returnedSubmissionIndex = submittedHeaders.findIndex((header) => (
+    sameWorkerIdentity(header, returned)
+  ));
+  const lastSubmittedHeader = submittedHeaders.at(-1);
+  const workerJobDelta = safePositiveInteger(observations?.workerJobDelta);
+  const workerResultDelta = safePositiveInteger(observations?.workerResultDelta);
+  const queueDepthMax = safeNonNegativeInteger(observations?.queueDepthMax);
+  const inFlightMax = safeNonNegativeInteger(observations?.inFlightMax);
   addFailure(failures, artifact?.injection?.kind === "worker-stale-generation", "wrong-stale-generation-injection");
-  addFailure(failures, finiteNumber(observations?.staleResultDropDelta) > 0, "stale-result-drop-not-observed");
+  addFailure(failures, safePositiveInteger(observations?.staleResultDropDelta) !== null, "stale-result-drop-not-observed");
   addFailure(failures, observations?.stalePublishDelta === 0, "stale-result-was-published");
   addFailure(
     failures,
@@ -462,7 +978,67 @@ function validateDedicatedStaleGeneration(artifact) {
   addFailure(failures, observations?.queueDepthCurrent === 0, "worker-queue-not-converged");
   addFailure(failures, inFlightMax !== null && inFlightMax <= 1, "worker-inflight-unbounded-or-missing");
   addFailure(failures, observations?.inFlightCurrent === 0, "worker-inflight-not-converged");
+  addFailure(failures, validWorkerIdentity(returned), "returned-worker-identity-invalid-or-missing");
+  addFailure(failures, validWorkerIdentity(accepted), "accepted-worker-identity-invalid-or-missing");
+  addFailure(failures, validWorkerIdentity(published), "published-worker-identity-invalid-or-missing");
+  addFailure(failures, validWorkerIdentity(latestSubmitted), "latest-submitted-worker-identity-invalid-or-missing");
+  addFailure(
+    failures,
+    submittedHeaders.length >= 2 && submittedHeaders.every(validWorkerIdentity),
+    "submitted-worker-header-sequence-invalid-or-too-small",
+  );
+  addFailure(
+    failures,
+    submittedHeaders.every((header, index) => (
+      validWorkerIdentity(header)
+        && (index === 0
+          || (validWorkerIdentity(submittedHeaders[index - 1])
+            && header.jobId > submittedHeaders[index - 1].jobId
+            && header.generation > submittedHeaders[index - 1].generation))
+    )),
+    "submitted-worker-header-sequence-not-monotonic",
+  );
+  addFailure(
+    failures,
+    returnedSubmissionIndex >= 0 && returnedSubmissionIndex < submittedHeaders.length - 1,
+    "returned-worker-identity-was-never-submitted-or-is-latest",
+  );
+  addFailure(
+    failures,
+    sameWorkerIdentity(latestSubmitted, lastSubmittedHeader),
+    "latest-submitted-worker-identity-not-sequence-tail",
+  );
+  addFailure(
+    failures,
+    validWorkerIdentity(returned)
+      && validWorkerIdentity(latestSubmitted)
+      && returned.jobId < latestSubmitted.jobId
+      && returned.generation < latestSubmitted.generation,
+    "returned-worker-identity-not-stale",
+  );
+  addFailure(
+    failures,
+    sameWorkerIdentity(accepted, latestSubmitted),
+    "accepted-worker-identity-not-latest-submitted",
+  );
+  addFailure(
+    failures,
+    sameWorkerIdentity(published, accepted),
+    "published-worker-identity-not-accepted",
+  );
   validateDocumentPreserved(failures, artifact?.outcome);
+  addFailure(
+    failures,
+    validWorkerIdentity(latestSubmitted)
+      && sameStamp(latestSubmitted.stamp, artifact?.outcome?.lastRequestedStamp),
+    "latest-submitted-stamp-not-requested",
+  );
+  addFailure(
+    failures,
+    validWorkerIdentity(published)
+      && sameStamp(published.stamp, artifact?.outcome?.lastPublishedStamp),
+    "published-identity-stamp-not-published",
+  );
   return failures;
 }
 
@@ -474,10 +1050,10 @@ function validPhase6Diagnostics(value) {
 
 function validPhase6BackpressureRun(run, configuredDpr) {
   const runtime = run?.phase6Probe?.runtime;
-  const workerJobDelta = finiteNumber(runtime?.workerJobDelta);
-  const workerResultDelta = finiteNumber(runtime?.workerResultDelta);
-  const queueDepthMax = finiteNumber(runtime?.queueDepthMax);
-  const inFlightMax = finiteNumber(runtime?.inFlightMax);
+  const workerJobDelta = safePositiveInteger(runtime?.workerJobDelta);
+  const workerResultDelta = safePositiveInteger(runtime?.workerResultDelta);
+  const queueDepthMax = safeNonNegativeInteger(runtime?.queueDepthMax);
+  const inFlightMax = safeNonNegativeInteger(runtime?.inFlightMax);
   return run?.warmup === false
     && run?.phase6Probe?.started === true
     && finiteNumber(run?.phase6Probe?.backpressureDelayMs) >= 96
@@ -496,7 +1072,7 @@ function validPhase6BackpressureRun(run, configuredDpr) {
     && workerResultDelta !== null
     && workerJobDelta > workerResultDelta
     && workerResultDelta > 0
-    && finiteNumber(runtime?.staleResultDropDelta) > 0
+    && safePositiveInteger(runtime?.staleResultDropDelta) !== null
     && runtime?.stalePublishDelta === 0
     && queueDepthMax !== null
     && queueDepthMax <= 2
@@ -505,7 +1081,9 @@ function validPhase6BackpressureRun(run, configuredDpr) {
     && inFlightMax <= 1
     && runtime?.inFlightCurrent === 0
     && sameStamp(runtime?.lastRequestedStamp, runtime?.lastPublishedStamp)
+    && own(runtime, "lastPaintedStamp")
     && sameStamp(runtime?.lastPublishedStamp, runtime?.lastPaintedStamp)
+    && validPaintReceipt(runtime?.paintReceipt, runtime?.lastPaintedStamp)
     && run?.restore?.passed === true
     && run?.restore?.runtimeSummaryMatchesSaved === true
     && run?.restore?.savedDrawingCountBeforeReload === run?.restore?.savedDrawingCountAfterReload
@@ -569,20 +1147,33 @@ const DEDICATED_VALIDATORS = Object.freeze({
 
 export function assessDrawingRollbackDrillArtifact(drillId, artifact) {
   if (!DRAWING_ROLLBACK_DRILL_IDS.includes(drillId)) {
-    return Object.freeze({ passed: false, evidenceKind: "unknown", failures: Object.freeze(["unknown-drill-id"]) });
+    return Object.freeze({
+      passed: false,
+      trustedRunnerAccepted: false,
+      completionAuthority: "trusted-controlled-browser-runner",
+      evidenceKind: "unknown",
+      failures: Object.freeze(["unknown-drill-id"]),
+    });
   }
   if (drillId === "worker-stale-generation" && artifact?.schemaVersion === PHASE6_SCHEMA_VERSION) {
     const assessment = assessPhase6StaleGenerationReport(artifact);
-    return Object.freeze({ ...assessment, evidenceKind: "phase6-formal-browser" });
+    return Object.freeze({
+      ...assessment,
+      trustedRunnerAccepted: false,
+      completionAuthority: "trusted-controlled-browser-runner",
+      evidenceKind: "phase6-formal-browser",
+    });
   }
   const contractFailures = DEDICATED_VALIDATORS[drillId](artifact);
   const contractPassed = contractFailures.length === 0;
   const failures = contractPassed
-    ? ["controlled-browser-drill-runner-not-implemented"]
+    ? ["external-artifact-untrusted-controlled-runner-required"]
     : contractFailures;
   return Object.freeze({
     passed: false,
     contractPassed,
+    trustedRunnerAccepted: false,
+    completionAuthority: "trusted-controlled-browser-runner",
     evidenceKind: "dedicated-browser-contract",
     failures: Object.freeze(failures),
   });
@@ -647,6 +1238,8 @@ export function assessDrawingRollbackDrills({ artifacts = {}, componentEvidence 
 
   return Object.freeze({
     schemaVersion: "drawing-rollback-drill-assessment/v1",
+    completionAuthority: "trusted-controlled-browser-runner",
+    externalArtifactsCanCompleteDrills: false,
     requiredCount: DRAWING_ROLLBACK_DRILL_IDS.length,
     completedCount,
     partialCount,

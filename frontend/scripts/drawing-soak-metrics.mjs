@@ -207,6 +207,25 @@ const BROWSER_TIMING_CAPTURE_KEYS = Object.freeze({
   mouseupSyncMs: "mouseupSyncMs",
 });
 
+const DRAWING_INPUT_TYPES = Object.freeze([
+  "pointerdown",
+  "pointermove",
+  "pointerup",
+  "wheel",
+]);
+const DRAWING_INPUT_PAINT_FENCE_SCHEMA_VERSION = "drawing-input-paint-fence/v1";
+const DRAWING_INPUT_PAINT_FENCE_CAPACITY = 64;
+const DRAWING_INPUT_P95_MINIMUM_SAMPLES = 20;
+const DRAWING_INPUT_P99_MINIMUM_SAMPLES = 100;
+
+function hasExactKeys(value, keys) {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key));
+}
+
 function histogramPercentile(metric, percentile) {
   const counts = metric?.bucketCounts;
   const totalCount = nonNegativeNumber(metric?.totalCount);
@@ -278,6 +297,131 @@ function browserTimingMetricEvidence(metric, capture, { requireBuckets = false }
     && bucketsValid;
 }
 
+function browserTypedInputEvidence(timing, { requireBuckets = false } = {}) {
+  if (!hasExactKeys(timing?.inputEventCounts, DRAWING_INPUT_TYPES)
+    || !hasExactKeys(timing?.inputPaintFenceStats, DRAWING_INPUT_TYPES)
+    || !hasExactKeys(timing?.inputToNextPaintByType, DRAWING_INPUT_TYPES)) return false;
+
+  const overall = timing?.inputFenceOverall;
+  const overallIntegerKeys = [
+    "eventCount",
+    "completedEventCount",
+    "droppedEventCount",
+    "pendingEventCount",
+    "frozenEventCount",
+    "fenceCount",
+    "typeFenceCount",
+    "postRafInputCount",
+    "inputWhileFrozenCount",
+    "unattributedEventCount",
+    "unattributedFenceCount",
+    "frozenFenceCount",
+    "staleFrameCallbackCount",
+    "stalePostPaintCallbackCount",
+  ];
+  if (overall === null
+    || typeof overall !== "object"
+    || Array.isArray(overall)
+    || !overallIntegerKeys.every((key) => (
+      Number.isSafeInteger(overall[key]) && overall[key] >= 0
+    ))
+    || typeof overall.frameScheduled !== "boolean"
+    || overall.countConservationPassed !== true) return false;
+
+  let inputEventTotal = 0;
+  let completedEventTotal = 0;
+  let droppedEventTotal = 0;
+  let pendingEventTotal = 0;
+  let frozenEventTotal = 0;
+  let typeFenceTotal = 0;
+  let postRafInputTotal = 0;
+  let inputWhileFrozenTotal = 0;
+  let unattributedEventTotal = 0;
+  let unattributedFenceTotal = 0;
+  for (const type of DRAWING_INPUT_TYPES) {
+    const eventCount = timing.inputEventCounts[type];
+    const stats = timing.inputPaintFenceStats[type];
+    const histogram = timing.inputToNextPaintByType[type];
+    const integerStats = [
+      "eventCount",
+      "completedEventCount",
+      "droppedEventCount",
+      "pendingEventCount",
+      "frozenEventCount",
+      "fenceCount",
+      "coalescedEventCount",
+      "maxEventsPerFence",
+      "postRafInputCount",
+      "inputWhileFrozenCount",
+      "unattributedEventCount",
+      "unattributedFenceCount",
+    ];
+    if (!Number.isSafeInteger(eventCount)
+      || eventCount <= 0
+      || stats === null
+      || typeof stats !== "object"
+      || Array.isArray(stats)
+      || !integerStats.every((key) => Number.isSafeInteger(stats[key]) && stats[key] >= 0)
+      || stats.countConservationPassed !== true
+      || stats.eventCount !== eventCount
+      || stats.completedEventCount !== eventCount
+      || stats.droppedEventCount !== 0
+      || stats.pendingEventCount !== 0
+      || stats.frozenEventCount !== 0
+      || stats.eventCount !== stats.fenceCount + stats.coalescedEventCount
+      || stats.postRafInputCount !== 0
+      || stats.unattributedEventCount > stats.eventCount
+      || stats.unattributedFenceCount > stats.fenceCount
+      || (requireBuckets
+        && (stats.unattributedEventCount !== 0 || stats.unattributedFenceCount !== 0))
+      || stats.maxEventsPerFence < 1
+      || stats.maxEventsPerFence > stats.eventCount
+      || (stats.coalescedEventCount === 0 && stats.maxEventsPerFence !== 1)
+      || (stats.coalescedEventCount > 0 && stats.maxEventsPerFence < 2)
+      || !browserTimingMetricEvidence(
+        histogram,
+        { observed: histogram?.totalCount },
+        { requireBuckets },
+      )
+      || histogram.totalCount !== stats.fenceCount) return false;
+    inputEventTotal += eventCount;
+    completedEventTotal += stats.completedEventCount;
+    droppedEventTotal += stats.droppedEventCount;
+    pendingEventTotal += stats.pendingEventCount;
+    frozenEventTotal += stats.frozenEventCount;
+    typeFenceTotal += stats.fenceCount;
+    postRafInputTotal += stats.postRafInputCount;
+    inputWhileFrozenTotal += stats.inputWhileFrozenCount;
+    unattributedEventTotal += stats.unattributedEventCount;
+    unattributedFenceTotal += stats.unattributedFenceCount;
+  }
+  return inputEventTotal === timing.inputEvents
+    && overall.eventCount === inputEventTotal
+    && overall.completedEventCount === completedEventTotal
+    && overall.droppedEventCount === droppedEventTotal
+    && overall.pendingEventCount === pendingEventTotal
+    && overall.frozenEventCount === frozenEventTotal
+    && overall.eventCount === overall.completedEventCount
+      + overall.droppedEventCount + overall.pendingEventCount + overall.frozenEventCount
+    && overall.typeFenceCount === typeFenceTotal
+    && overall.postRafInputCount === postRafInputTotal
+    && overall.inputWhileFrozenCount === inputWhileFrozenTotal
+    && overall.unattributedEventCount === unattributedEventTotal
+    && overall.unattributedFenceCount === unattributedFenceTotal
+    && overall.fenceCount > 0
+    && overall.fenceCount <= overall.typeFenceCount
+    && (!requireBuckets || (
+      overall.droppedEventCount === 0
+        && overall.pendingEventCount === 0
+        && overall.frozenEventCount === 0
+        && overall.postRafInputCount === 0
+        && overall.unattributedEventCount === 0
+        && overall.unattributedFenceCount === 0
+        && overall.frameScheduled === false
+        && overall.frozenFenceCount === 0
+    ));
+}
+
 function browserTimingEvidence(timing, options = {}) {
   const longTaskCounts = timing?.longTaskCounts;
   const longTaskCountsValid = options.requireLongTaskCounts !== true || (
@@ -319,6 +463,7 @@ function browserTimingEvidence(timing, options = {}) {
     && timing.eventTimingSupported === true
     && timing.longTaskSupported === true
     && longTaskCountsValid
+    && browserTypedInputEvidence(timing, options)
     && REQUIRED_BROWSER_TIMING_METRICS.every(
       (key) => browserTimingMetricEvidence(
         timing.metrics?.[key],
@@ -326,6 +471,112 @@ function browserTimingEvidence(timing, options = {}) {
         options,
       ),
     );
+}
+
+function compareSlowInputPaintFences(left, right) {
+  const latencyDelta = right.handlerToPostPaintMs - left.handlerToPostPaintMs;
+  if (latencyDelta !== 0) return latencyDelta;
+  if (left.fenceId !== right.fenceId) return left.fenceId - right.fenceId;
+  if (left.eventType === right.eventType) return 0;
+  return left.eventType < right.eventType ? -1 : 1;
+}
+
+function slowInputPaintFenceEvidence(timing, cycles) {
+  const evidence = timing?.slowInputPaintFences;
+  const entries = evidence?.entries;
+  const cycleIds = new Set();
+  let cyclesValid = Array.isArray(cycles) && cycles.length > 0;
+  for (const cycle of Array.isArray(cycles) ? cycles : []) {
+    if (!Number.isSafeInteger(cycle?.cycle) || cycle.cycle <= 0 || cycleIds.has(cycle.cycle)) {
+      cyclesValid = false;
+      continue;
+    }
+    cycleIds.add(cycle.cycle);
+  }
+  const observedFenceCount = evidence?.observedFenceCount;
+  const retainedFenceCount = evidence?.retainedFenceCount;
+  const omittedFenceCount = evidence?.omittedFenceCount;
+  const typeFenceCount = DRAWING_INPUT_TYPES.reduce(
+    (total, type) => total + (timing?.inputPaintFenceStats?.[type]?.fenceCount ?? Number.NaN),
+    0,
+  );
+  const countEvidenceValid = Number.isSafeInteger(observedFenceCount)
+    && observedFenceCount > 0
+    && Number.isSafeInteger(retainedFenceCount)
+    && retainedFenceCount > 0
+    && Number.isSafeInteger(omittedFenceCount)
+    && omittedFenceCount >= 0
+    && evidence?.countConservationPassed === true
+    && retainedFenceCount <= DRAWING_INPUT_PAINT_FENCE_CAPACITY
+    && retainedFenceCount === Math.min(observedFenceCount, DRAWING_INPUT_PAINT_FENCE_CAPACITY)
+    && retainedFenceCount + omittedFenceCount === observedFenceCount
+    && observedFenceCount === typeFenceCount
+    && Array.isArray(entries)
+    && entries.length === retainedFenceCount;
+  const invalidEntryIndexes = [];
+  const identities = new Set();
+  if (Array.isArray(entries)) {
+    entries.forEach((entry, index) => {
+      const timestamps = [
+        entry?.eventTimeStampMs,
+        entry?.handlerAtMs,
+        entry?.rafAtMs,
+        entry?.postPaintAtMs,
+        entry?.handlerToRafMs,
+        entry?.rafToPostPaintMs,
+        entry?.handlerToPostPaintMs,
+      ];
+      const identity = `${entry?.fenceId}:${entry?.eventType}`;
+      const valid = Number.isSafeInteger(entry?.fenceId)
+        && entry.fenceId > 0
+        && Number.isSafeInteger(entry?.cycle)
+        && entry.cycle > 0
+        && cycleIds.has(entry.cycle)
+        && DRAWING_INPUT_TYPES.includes(entry?.eventType)
+        && Number.isSafeInteger(entry?.eventCount)
+        && entry.eventCount > 0
+        && timestamps.every((value) => nonNegativeNumber(value) !== null)
+        && entry.eventTimeStampMs <= entry.handlerAtMs
+        && (entry.lastRafAtMs === null
+          || (nonNegativeNumber(entry.lastRafAtMs) !== null
+            && entry.lastRafAtMs <= entry.handlerAtMs))
+        && entry.handlerAtMs <= entry.rafAtMs
+        && entry.rafAtMs <= entry.postPaintAtMs
+        && entry.handlerToRafMs === entry.rafAtMs - entry.handlerAtMs
+        && entry.rafToPostPaintMs === entry.postPaintAtMs - entry.rafAtMs
+        && entry.handlerToPostPaintMs === entry.postPaintAtMs - entry.handlerAtMs
+        && !identities.has(identity);
+      if (!valid) invalidEntryIndexes.push(index);
+      identities.add(identity);
+    });
+  }
+  const orderValid = Array.isArray(entries) && entries.every((entry, index) => (
+    index === 0 || compareSlowInputPaintFences(entries[index - 1], entry) <= 0
+  ));
+  const passed = evidence !== null
+    && typeof evidence === "object"
+    && !Array.isArray(evidence)
+    && evidence.schemaVersion === DRAWING_INPUT_PAINT_FENCE_SCHEMA_VERSION
+    && evidence.capacity === DRAWING_INPUT_PAINT_FENCE_CAPACITY
+    && nonNegativeNumber(evidence.performanceTimeOriginMs) !== null
+    && cyclesValid
+    && countEvidenceValid
+    && invalidEntryIndexes.length === 0
+    && orderValid;
+  return Object.freeze({
+    passed,
+    actual: Object.freeze({
+      schemaVersion: evidence?.schemaVersion ?? null,
+      capacity: evidence?.capacity ?? null,
+      observedFenceCount: Number.isSafeInteger(observedFenceCount) ? observedFenceCount : null,
+      retainedFenceCount: Number.isSafeInteger(retainedFenceCount) ? retainedFenceCount : null,
+      omittedFenceCount: Number.isSafeInteger(omittedFenceCount) ? omittedFenceCount : null,
+      typeFenceCount: Number.isSafeInteger(typeFenceCount) ? typeFenceCount : null,
+      invalidEntryIndexes,
+      orderValid,
+      cyclesValid,
+    }),
+  });
 }
 
 function sampleEvidence(sample) {
@@ -764,6 +1015,33 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
       finalBrowserTiming?.metrics?.inputToNextPaintMs?.p99Ms,
     ),
   });
+  const inputFrameLatencyByType = Object.freeze(Object.fromEntries(
+    DRAWING_INPUT_TYPES.map((type) => {
+      const metric = finalBrowserTiming?.inputToNextPaintByType?.[type];
+      const sampleCount = Number.isSafeInteger(metric?.totalCount) && metric.totalCount >= 0
+        ? metric.totalCount
+        : null;
+      const p95Ms = nonNegativeNumber(metric?.p95Ms);
+      const p99Ms = nonNegativeNumber(metric?.p99Ms);
+      const p95Eligible = sampleCount !== null
+        && sampleCount >= DRAWING_INPUT_P95_MINIMUM_SAMPLES;
+      const p99Eligible = sampleCount !== null
+        && sampleCount >= DRAWING_INPUT_P99_MINIMUM_SAMPLES;
+      const p95Passed = p95Eligible && p95Ms !== null
+        && p95Ms <= config.inputToNextPaintP95Ms;
+      const p99Passed = p99Eligible && p99Ms !== null
+        && p99Ms <= config.inputToNextPaintP99Ms;
+      return [type, Object.freeze({
+        sampleCount,
+        eligibility: Object.freeze({ p95: p95Eligible, p99: p99Eligible }),
+        p95Ms,
+        p99Ms,
+        p95Passed,
+        p99Passed,
+        passed: p95Passed && p99Passed,
+      })];
+    }),
+  ));
   const browserTimingProgressPassed = browserTimings.length > 1
     && browserTimings.every((timing, index) => {
       if (!browserTimingEvidence(timing)) return false;
@@ -771,6 +1049,13 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
       const previous = browserTimings[index - 1];
       return timing.windowDurationMs > previous.windowDurationMs
         && timing.inputEvents >= previous.inputEvents
+        && DRAWING_INPUT_TYPES.every((type) => (
+          timing.inputEventCounts[type] >= previous.inputEventCounts[type]
+            && timing.inputPaintFenceStats[type].fenceCount
+              >= previous.inputPaintFenceStats[type].fenceCount
+            && timing.inputToNextPaintByType[type].totalCount
+              >= previous.inputToNextPaintByType[type].totalCount
+        ))
         && REQUIRED_BROWSER_TIMING_METRICS.every((key) => (
           timing.metrics[key].totalCount >= previous.metrics[key].totalCount
         ));
@@ -783,6 +1068,10 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
     && inputFrameLatency.frameIntervalP99Ms <= config.frameIntervalP99Ms
     && inputFrameLatency.inputToNextPaintP95Ms <= config.inputToNextPaintP95Ms
     && inputFrameLatency.inputToNextPaintP99Ms <= config.inputToNextPaintP99Ms;
+  const inputFrameLatencyByTypePassed = browserTimingEvidence(
+    finalBrowserTiming,
+    { requireBuckets: true },
+  ) && DRAWING_INPUT_TYPES.every((type) => inputFrameLatencyByType[type].passed);
   const cacheBudgets = runtimes.map((runtime) => nonNegativeNumber(runtime?.cacheBudgetBytes));
   const cacheHardLimits = runtimes.map((runtime) => nonNegativeNumber(runtime?.cacheHardLimitBytes));
   const cacheCurrent = runtimes.map((runtime) => nonNegativeNumber(runtime?.cacheBytes));
@@ -944,6 +1233,7 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
       + config.requiredMeasuredDurationMs
       - config.workloadIntervalMs
       - config.maxSampleGapMs;
+  const inputPaintFenceEvidence = slowInputPaintFenceEvidence(finalBrowserTiming, cycles);
   const derivedMinimumGcCheckpoints = Math.floor(
     config.requiredMeasuredDurationMs / config.gcIntervalMs,
   ) + 1;
@@ -1319,6 +1609,19 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
       },
       inputFrameLatencyPassed,
     ),
+    inputFrameLatencyByType: check(
+      inputFrameLatencyByType,
+      {
+        p95: `each type has >= ${DRAWING_INPUT_P95_MINIMUM_SAMPLES} samples and p95 <= ${config.inputToNextPaintP95Ms}ms`,
+        p99: `each type has >= ${DRAWING_INPUT_P99_MINIMUM_SAMPLES} samples and p99 <= ${config.inputToNextPaintP99Ms}ms`,
+      },
+      inputFrameLatencyByTypePassed,
+    ),
+    inputPaintFenceEvidence: check(
+      inputPaintFenceEvidence.actual,
+      `${DRAWING_INPUT_PAINT_FENCE_SCHEMA_VERSION} bounded top-${DRAWING_INPUT_PAINT_FENCE_CAPACITY} trace with attributed monotonic fences`,
+      inputPaintFenceEvidence.passed,
+    ),
     workerWorkload: check(
       measuredCycles.reduce((total, cycle) => total + cycle.workerResultCycleDelta, 0),
       "every measured viewport churn submits and completes positive worker work",
@@ -1426,6 +1729,8 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
       cacheRecentHierarchyKeyCountMax: maximum(cacheRecentHierarchyKeys),
       cacheRecentRequestCountMax: maximum(cacheRecentRequestCounts),
       inputFrameLatency,
+      inputFrameLatencyByType,
+      inputPaintFenceEvidence: inputPaintFenceEvidence.actual,
       cyclesAttempted: cycles.length,
       cyclesPassed: measuredCycles.length,
       maxCycleGapMs,

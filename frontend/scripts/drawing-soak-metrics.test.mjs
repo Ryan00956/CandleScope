@@ -141,11 +141,13 @@ function heapSnapshot(aggregateUsedSize) {
   };
 }
 
-function timingMetric({ includeBuckets = false } = {}) {
+const INPUT_TYPES = ["pointerdown", "pointermove", "pointerup", "wheel"];
+
+function timingMetric({ includeBuckets = false, totalCount = 100 } = {}) {
   return {
-    totalCount: 100,
+    totalCount,
     invalidCount: 0,
-    captureObserved: 100,
+    captureObserved: totalCount,
     bucketWidthMs: 16.7,
     histogramMaxMs: 1_000,
     bucketCount: 2,
@@ -154,7 +156,7 @@ function timingMetric({ includeBuckets = false } = {}) {
     p95Ms: 16.7,
     p99Ms: 16.7,
     maxMs: 16.7,
-    ...(includeBuckets ? { bucketCounts: [100, 0] } : {}),
+    ...(includeBuckets ? { bucketCounts: [totalCount, 0] } : {}),
   };
 }
 
@@ -162,7 +164,45 @@ function browserTiming({ includeBuckets = false, windowDurationMs = 1_000 } = {}
   return {
     windowDurationMs,
     refreshRateHz: 1_000 / 16.7,
-    inputEvents: 100,
+    inputEvents: INPUT_TYPES.length * 100,
+    inputEventCounts: Object.fromEntries(INPUT_TYPES.map((type) => [type, 100])),
+    inputPaintFenceStats: Object.fromEntries(INPUT_TYPES.map((type) => [type, {
+      eventCount: 100,
+      completedEventCount: 100,
+      droppedEventCount: 0,
+      pendingEventCount: 0,
+      frozenEventCount: 0,
+      fenceCount: 100,
+      coalescedEventCount: 0,
+      maxEventsPerFence: 1,
+      postRafInputCount: 0,
+      inputWhileFrozenCount: 0,
+      unattributedEventCount: 0,
+      unattributedFenceCount: 0,
+      countConservationPassed: true,
+    }])),
+    inputFenceOverall: {
+      eventCount: INPUT_TYPES.length * 100,
+      completedEventCount: INPUT_TYPES.length * 100,
+      droppedEventCount: 0,
+      pendingEventCount: 0,
+      frozenEventCount: 0,
+      fenceCount: 100,
+      typeFenceCount: INPUT_TYPES.length * 100,
+      postRafInputCount: 0,
+      inputWhileFrozenCount: 0,
+      unattributedEventCount: 0,
+      unattributedFenceCount: 0,
+      frameScheduled: false,
+      frozenFenceCount: 0,
+      staleFrameCallbackCount: 0,
+      stalePostPaintCallbackCount: 0,
+      countConservationPassed: true,
+    },
+    inputToNextPaintByType: Object.fromEntries(INPUT_TYPES.map((type) => [
+      type,
+      timingMetric({ includeBuckets }),
+    ])),
     eventTimingSupported: true,
     longTaskSupported: true,
     longTaskCounts: {
@@ -187,6 +227,64 @@ function browserTiming({ includeBuckets = false, windowDurationMs = 1_000 } = {}
       mouseupSyncMs: timingMetric({ includeBuckets }),
     },
   };
+}
+
+function slowInputPaintFences(cycleCount, observedFenceCount = 400) {
+  const entries = Array.from({ length: Math.min(64, observedFenceCount) }, (_, index) => {
+    const handlerAtMs = 1_000 + index * 20;
+    const lastRafAtMs = handlerAtMs - 5;
+    const rafAtMs = handlerAtMs + 5;
+    const postPaintAtMs = handlerAtMs + 16.7 - index * 0.001;
+    return {
+      fenceId: index + 1,
+      cycle: (index % cycleCount) + 1,
+      eventType: INPUT_TYPES[index % INPUT_TYPES.length],
+      eventCount: 1,
+      eventTimeStampMs: handlerAtMs - 1,
+      handlerAtMs,
+      lastRafAtMs,
+      rafAtMs,
+      postPaintAtMs,
+      handlerToRafMs: rafAtMs - handlerAtMs,
+      rafToPostPaintMs: postPaintAtMs - rafAtMs,
+      handlerToPostPaintMs: postPaintAtMs - handlerAtMs,
+    };
+  });
+  return {
+    schemaVersion: "drawing-input-paint-fence/v1",
+    capacity: 64,
+    observedFenceCount,
+    retainedFenceCount: entries.length,
+    omittedFenceCount: observedFenceCount - entries.length,
+    performanceTimeOriginMs: 1_700_000_000_000,
+    countConservationPassed: true,
+    entries,
+  };
+}
+
+function setTypedInputCount(timing, type, totalCount) {
+  const includeBuckets = Array.isArray(timing.inputToNextPaintByType[type].bucketCounts);
+  timing.inputEventCounts[type] = totalCount;
+  Object.assign(timing.inputPaintFenceStats[type], {
+    eventCount: totalCount,
+    completedEventCount: totalCount,
+    fenceCount: totalCount,
+    coalescedEventCount: 0,
+    maxEventsPerFence: 1,
+  });
+  timing.inputToNextPaintByType[type] = timingMetric({ includeBuckets, totalCount });
+  const inputEvents = INPUT_TYPES.reduce(
+    (total, inputType) => total + timing.inputEventCounts[inputType],
+    0,
+  );
+  const typeFenceCount = INPUT_TYPES.reduce(
+    (total, inputType) => total + timing.inputPaintFenceStats[inputType].fenceCount,
+    0,
+  );
+  timing.inputEvents = inputEvents;
+  timing.inputFenceOverall.eventCount = inputEvents;
+  timing.inputFenceOverall.completedEventCount = inputEvents;
+  timing.inputFenceOverall.typeFenceCount = typeFenceCount;
 }
 
 function buildPassingReport({
@@ -235,6 +333,10 @@ function buildPassingReport({
     startTime: 1_000 + index * 200,
     endTime: 1_100 + index * 200,
   }));
+  const cycleCount = Math.floor(
+    (configuration.durationMs - configuration.warmupMs) / configuration.workloadIntervalMs,
+  );
+  finalBrowserTiming.slowInputPaintFences = slowInputPaintFences(cycleCount);
   return {
     configuration: {
       ...configuration,
@@ -306,13 +408,11 @@ function buildPassingReport({
     samples,
     gcCheckpoints,
     cycles: Array.from({
-      length: Math.floor(
-        (configuration.durationMs - configuration.warmupMs)
-          / configuration.workloadIntervalMs,
-      ),
+      length: cycleCount,
     }, (_, index) => {
       const viewportRevision = index + 10;
       return {
+        cycle: index + 1,
         elapsedMs: configuration.warmupMs
           + configuration.workloadIntervalMs * (index + 1),
         passed: true,
@@ -589,6 +689,89 @@ test("input/frame timing histograms are complete, bounded, and inside the fixed 
   regressed.samples[2].browserTiming.metrics.inputToNextPaintMs.captureObserved = 1;
   regressed.samples[2].browserTiming.captureStats.inputToNextPaintMs.observed = 1;
   assert.equal(assessDrawingSoak(regressed).checks.browserTimingProgress.passed, false);
+});
+
+test("typed input latency uses fail-closed nearest-rank sample eligibility", () => {
+  const cases = [
+    [19, false, false, false],
+    [20, true, false, false],
+    [99, true, false, false],
+    [100, true, true, true],
+  ];
+  for (const [sampleCount, p95Eligible, p99Eligible, passed] of cases) {
+    const report = buildPassingReport();
+    setTypedInputCount(report.browserTiming, "pointerup", sampleCount);
+    const actual = assessDrawingSoak(report).checks.inputFrameLatencyByType.actual.pointerup;
+    assert.equal(actual.sampleCount, sampleCount);
+    assert.equal(actual.eligibility.p95, p95Eligible);
+    assert.equal(actual.eligibility.p99, p99Eligible);
+    assert.equal(actual.passed, passed);
+  }
+});
+
+test("typed input latency rejects an over-SLO type and per-type progress regression", () => {
+  const overSlo = buildPassingReport();
+  Object.assign(overSlo.browserTiming.inputToNextPaintByType.wheel, {
+    bucketWidthMs: 20.1,
+    p50Ms: 20.1,
+    p95Ms: 20.1,
+    p99Ms: 20.1,
+    maxMs: 20.1,
+  });
+  let assessment = assessDrawingSoak(overSlo);
+  assert.equal(assessment.checks.inputFrameLatencyByType.actual.wheel.p95Passed, false);
+  assert.equal(assessment.checks.inputFrameLatencyByType.passed, false);
+
+  const regressed = buildPassingReport();
+  setTypedInputCount(regressed.samples[2].browserTiming, "wheel", 99);
+  assessment = assessDrawingSoak(regressed);
+  assert.equal(assessment.checks.sampleEvidence.passed, true);
+  assert.equal(assessment.checks.browserTimingProgress.passed, false);
+});
+
+test("slow input-paint fence evidence rejects unknown cycles, bad deltas, order, and capacity", () => {
+  const noPreviousRaf = buildPassingReport();
+  noPreviousRaf.browserTiming.slowInputPaintFences.entries[0].lastRafAtMs = null;
+  assert.equal(
+    assessDrawingSoak(noPreviousRaf).checks.inputPaintFenceEvidence.passed,
+    true,
+  );
+
+  const cases = [
+    ["unknown cycle", (trace) => { trace.entries[0].cycle = 999; }],
+    ["bad delta", (trace) => { trace.entries[0].handlerToRafMs += 0.1; }],
+    ["wrong order", (trace) => {
+      [trace.entries[0], trace.entries[1]] = [trace.entries[1], trace.entries[0]];
+    }],
+    ["wrong capacity", (trace) => { trace.capacity = 65; }],
+  ];
+  for (const [label, mutate] of cases) {
+    const report = buildPassingReport();
+    mutate(report.browserTiming.slowInputPaintFences);
+    assert.equal(
+      assessDrawingSoak(report).checks.inputPaintFenceEvidence.passed,
+      false,
+      label,
+    );
+  }
+});
+
+test("typed fence accounting fails closed on missing fields and post-rAF contamination", () => {
+  const missing = buildPassingReport();
+  delete missing.samples[0].browserTiming.inputEventCounts.pointermove;
+  assert.equal(assessDrawingSoak(missing).checks.sampleEvidence.passed, false);
+
+  const contaminated = buildPassingReport();
+  contaminated.browserTiming.inputPaintFenceStats.wheel.postRafInputCount = 1;
+  contaminated.browserTiming.inputFenceOverall.postRafInputCount = 1;
+  assert.equal(assessDrawingSoak(contaminated).checks.inputFrameLatencyByType.passed, false);
+
+  const unattributed = buildPassingReport();
+  unattributed.browserTiming.inputPaintFenceStats.pointerdown.unattributedEventCount = 1;
+  unattributed.browserTiming.inputPaintFenceStats.pointerdown.unattributedFenceCount = 1;
+  unattributed.browserTiming.inputFenceOverall.unattributedEventCount = 1;
+  unattributed.browserTiming.inputFenceOverall.unattributedFenceCount = 1;
+  assert.equal(assessDrawingSoak(unattributed).checks.inputFrameLatencyByType.passed, false);
 });
 
 test("refresh-rate, scene fallback, and Long Task attribution evidence fail closed", () => {

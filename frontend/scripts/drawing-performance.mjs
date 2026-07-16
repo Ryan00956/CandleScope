@@ -72,6 +72,7 @@ import {
   phase9MeasuredWorkloadDeadline,
   selectPhase9SoakDueAction,
 } from "./drawing-soak-metrics.mjs";
+import { createDrawingInputPaintFenceTracker } from "./drawing-performance-input-fence.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -1183,7 +1184,7 @@ async function startManagedServers(args) {
   }
 }
 
-function browserBenchmarkBootstrap(payload) {
+function browserBenchmarkBootstrap(payload, createInputFenceTracker) {
   window.__CANDLESCOPE_DRAWING_PERF_CONFIG__ = Object.freeze({
     benchmarkRawCapture: payload.benchmarkRawCapture !== false,
     rawCaptureCapacity: 20_000,
@@ -1246,19 +1247,6 @@ function browserBenchmarkBootstrap(payload) {
     longTaskDroppedCount: 0,
     instrumentationWindows: [],
     activeInstrumentation: null,
-    inputEvents: 0,
-    inputEventCounts: Object.fromEntries(inputEventTypes.map((type) => [type, 0])),
-    pendingPaintAt: null,
-    pendingPaintByType: Object.fromEntries(inputEventTypes.map((type) => [type, {
-      earliestAt: null,
-      eventCount: 0,
-    }])),
-    pendingPaintFenceScheduled: false,
-    inputPaintFenceStats: Object.fromEntries(inputEventTypes.map((type) => [type, {
-      coalescedEventCount: 0,
-      fenceCount: 0,
-      maxEventsPerFence: 0,
-    }])),
     captureStats: {
       rafIntervalsMs: { observed: 0, dropped: 0 },
       inputToNextPaintMs: { observed: 0, dropped: 0 },
@@ -1275,7 +1263,7 @@ function browserBenchmarkBootstrap(payload) {
     eventTimingByType: makeTimingHistogramMap(eventTimingTypes),
   });
   let state = makeState();
-  let stateEpoch = 0;
+  let inputFenceTracker = null;
   let eventTimingSupported = false;
   let longTaskSupported = false;
   const timingSampleCapacity = Number.isSafeInteger(payload.timingSampleCapacity)
@@ -1330,11 +1318,16 @@ function browserBenchmarkBootstrap(payload) {
     ]),
   );
 
-  const summarizeTimingState = (includeBuckets = false) => ({
+  const summarizeTimingState = (
+    includeBuckets = false,
+    inputFenceSnapshot = inputFenceTracker?.snapshot() ?? null,
+  ) => ({
+    timingSchemaVersion: "drawing-browser-timing/v2",
     windowDurationMs: Math.max(0, performance.now() - state.startedAt),
-    inputEvents: state.inputEvents,
-    inputEventCounts: structuredClone(state.inputEventCounts),
-    inputPaintFenceStats: structuredClone(state.inputPaintFenceStats),
+    inputEvents: inputFenceSnapshot?.inputEvents ?? 0,
+    inputEventCounts: structuredClone(inputFenceSnapshot?.inputEventCounts ?? {}),
+    inputPaintFenceStats: structuredClone(inputFenceSnapshot?.inputPaintFenceStats ?? {}),
+    inputFenceOverall: structuredClone(inputFenceSnapshot?.overall ?? null),
     inputToNextPaintByType: summarizeHistogramMap(
       state.inputToNextPaintByType,
       includeBuckets,
@@ -1404,6 +1397,28 @@ function browserBenchmarkBootstrap(payload) {
     }
   };
 
+  const makeInputFenceTracker = () => createInputFenceTracker({
+    eventTypes: inputEventTypes,
+    now: () => performance.now(),
+    performanceTimeOriginMs: performance.timeOrigin,
+    readLastRafAt: () => state.lastRafAt,
+    requestFrame: (callback) => requestAnimationFrame(callback),
+    schedulePostPaint: (callback) => setTimeout(callback, 0),
+    topKCapacity: Number.isSafeInteger(payload.inputPaintFenceTopKCapacity)
+      && payload.inputPaintFenceTopKCapacity >= 0
+      ? payload.inputPaintFenceTopKCapacity
+      : 64,
+    onOverallFence: (latencyMs) => boundedPush(
+      state.inputToNextPaintMs,
+      "inputToNextPaintMs",
+      latencyMs,
+    ),
+    onTypeFence: (type, latencyMs) => {
+      recordHistogram(state.inputToNextPaintByType[type], latencyMs);
+    },
+  });
+  inputFenceTracker = makeInputFenceTracker();
+
   const rafLoop = (at) => {
     if (state.lastRafAt !== null) {
       boundedPush(state.rafIntervalsMs, "rafIntervalsMs", at - state.lastRafAt);
@@ -1414,54 +1429,10 @@ function browserBenchmarkBootstrap(payload) {
   requestAnimationFrame(rafLoop);
 
   const onInput = (event) => {
-    const type = inputEventTypes.includes(event.type) ? event.type : null;
-    const inputAt = performance.now();
-    state.inputEvents += 1;
-    if (type) {
-      state.inputEventCounts[type] += 1;
-      const pendingType = state.pendingPaintByType[type];
-      if (pendingType.earliestAt === null) pendingType.earliestAt = inputAt;
-      pendingType.eventCount += 1;
-    }
-    if (state.pendingPaintAt === null) state.pendingPaintAt = inputAt;
-    if (state.pendingPaintFenceScheduled) return;
-    state.pendingPaintFenceScheduled = true;
-    const scheduledEpoch = stateEpoch;
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        if (scheduledEpoch !== stateEpoch) return;
-        const inputAt = state.pendingPaintAt;
-        state.pendingPaintAt = null;
-        state.pendingPaintFenceScheduled = false;
-        if (inputAt === null) return;
-        // A zero-delay task queued from rAF runs after the browser's render
-        // opportunity. Unlike sampling at rAF entry, this fence includes the
-        // style/layout/paint work needed to present the input's next frame.
-        const paintedAt = performance.now();
-        const latencyMs = Math.max(0, paintedAt - inputAt);
-        boundedPush(
-          state.inputToNextPaintMs,
-          "inputToNextPaintMs",
-          latencyMs,
-        );
-        for (const type of inputEventTypes) {
-          const pendingType = state.pendingPaintByType[type];
-          const earliestAt = pendingType.earliestAt;
-          const eventCount = pendingType.eventCount;
-          pendingType.earliestAt = null;
-          pendingType.eventCount = 0;
-          if (earliestAt === null
-            || !recordHistogram(
-              state.inputToNextPaintByType[type],
-              Math.max(0, paintedAt - earliestAt),
-            )) continue;
-          const fenceStats = state.inputPaintFenceStats[type];
-          fenceStats.fenceCount += 1;
-          fenceStats.coalescedEventCount += Math.max(0, eventCount - 1);
-          fenceStats.maxEventsPerFence = Math.max(fenceStats.maxEventsPerFence, eventCount);
-        }
-      }, 0);
-    });
+    const timeStamp = event.timeStamp >= performance.timeOrigin
+      ? event.timeStamp - performance.timeOrigin
+      : event.timeStamp;
+    inputFenceTracker.recordInput({ type: event.type, timeStamp });
   };
   for (const type of ["pointerdown", "pointermove", "pointerup", "wheel"]) {
     addEventListener(type, onInput, { capture: true, passive: true });
@@ -1521,11 +1492,18 @@ function browserBenchmarkBootstrap(payload) {
 
   window.__CANDLESCOPE_DRAWING_BENCH__ = Object.freeze({
     reset() {
-      stateEpoch += 1;
+      inputFenceTracker.dispose();
       state = makeState();
+      inputFenceTracker = makeInputFenceTracker();
     },
     timingSummary() {
       return summarizeTimingState();
+    },
+    beginInputCycle(cycle) {
+      return inputFenceTracker.beginCycle(cycle);
+    },
+    endInputCycle(cycle) {
+      return inputFenceTracker.endCycle(cycle);
     },
     beginInstrumentation(name) {
       if (state.activeInstrumentation !== null || typeof name !== "string" || name.length === 0) {
@@ -1546,6 +1524,8 @@ function browserBenchmarkBootstrap(payload) {
     },
     report() {
       const longTaskSummary = summarizeLongTasks();
+      const inputFenceSnapshot = inputFenceTracker.snapshot();
+      const timingSummary = summarizeTimingState(true, inputFenceSnapshot);
       return {
         startedAt: state.startedAt,
         endedAt: performance.now(),
@@ -1561,13 +1541,15 @@ function browserBenchmarkBootstrap(payload) {
         retainedLongTaskCount: longTaskSummary.retainedCount,
         droppedLongTaskCount: longTaskSummary.droppedCount,
         totalLongTaskCount: longTaskSummary.totalCount,
-        inputEvents: state.inputEvents,
-        inputEventCounts: structuredClone(state.inputEventCounts),
-        inputPaintFenceStats: structuredClone(state.inputPaintFenceStats),
+        inputEvents: inputFenceSnapshot.inputEvents,
+        inputEventCounts: structuredClone(inputFenceSnapshot.inputEventCounts),
+        inputPaintFenceStats: structuredClone(inputFenceSnapshot.inputPaintFenceStats),
+        inputFenceOverall: structuredClone(inputFenceSnapshot.overall),
+        slowInputPaintFences: structuredClone(inputFenceSnapshot.slowInputPaintFences),
         eventTimingSupported,
         longTaskSupported,
         captureStats: structuredClone(state.captureStats),
-        timingSummary: summarizeTimingState(true),
+        timingSummary,
         devicePixelRatio,
         viewport: {
           width: innerWidth,
@@ -1595,7 +1577,8 @@ async function installScenarioBootstrap(cdp, fixture, scenario, { soak = false }
       timingSampleCapacity: soak ? 0 : 20_000,
       longTaskCapacity: soak ? 2_000 : 20_000,
       benchmarkRawCapture: !soak,
-    }) + ");";
+      inputPaintFenceTopKCapacity: 64,
+    }) + ',(' + createDrawingInputPaintFenceTracker.toString() + "));";
   const response = await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source });
   return response.result?.identifier || null;
 }
@@ -3213,69 +3196,119 @@ async function waitForPhase9QueueConvergence(cdp, timeoutMs) {
   return { passed: false, runtime: latest, waitedMs: Date.now() - startedAt };
 }
 
+async function waitForPhase9InputFenceDrain(cdp, timeoutMs) {
+  const boundedTimeoutMs = Math.max(1, Math.min(timeoutMs, 10_000));
+  const browserDrain = evaluate(cdp, "new Promise((resolve) => {"
+    + "const deadline=performance.now()+" + boundedTimeoutMs + ";"
+    + "const check=()=>{"
+    + "const overall=window.__CANDLESCOPE_DRAWING_BENCH__"
+      + "?.timingSummary?.()?.inputFenceOverall;"
+    + "if(overall&&overall.pendingEventCount===0&&overall.frozenEventCount===0"
+      + "&&overall.frameScheduled===false&&overall.frozenFenceCount===0){resolve(true);return;}"
+    + "if(performance.now()>=deadline){resolve(false);return;}"
+    + "requestAnimationFrame(()=>setTimeout(check,0));"
+    + "};"
+    + "requestAnimationFrame(()=>setTimeout(check,0));"
+    + "})");
+  return Promise.race([
+    browserDrain,
+    wait(boundedTimeoutMs + 250).then(() => false),
+  ]);
+}
+
 async function runPhase9WorkloadCycle(cdp, rect, args, startedAt, cycleIndex) {
-  const cycleStartedAt = Date.now();
-  const before = await callPhase6Probe(cdp, "snapshot");
-  const beforeRuntime = normalizePhase9Runtime(before?.runtime);
-  const previousStamp = beforeRuntime?.lastRequestedStamp ?? null;
-  const direction = cycleIndex % 2 === 0 ? -1 : 1;
-  const wheelEvents = await runPhase9WheelChurn(cdp, rect, direction);
-  const panEvents = await runPhase9PanChurn(cdp, rect, direction);
-  if (cycleIndex > 0 && cycleIndex % 20 === 0) {
-    await resetTimeScaleWarmup(cdp, rect);
+  const cycle = cycleIndex + 1;
+  const inputCycleBegan = await evaluate(cdp, "(() => {"
+    + "const bench=window.__CANDLESCOPE_DRAWING_BENCH__;"
+    + "return bench?.beginInputCycle?.(" + cycle + ")===true;"
+    + "})()");
+  if (inputCycleBegan !== true) {
+    throw new Error(`Phase 9 input attribution cycle ${cycle} could not start`);
   }
-  const currentPaint = await callPhase6Probe(
-    cdp,
-    "waitForCurrentPaint",
-    previousStamp,
-    Math.min(args.timeoutMs, 10_000),
-  );
-  const convergence = await waitForPhase9QueueConvergence(
-    cdp,
-    Math.min(args.timeoutMs, 10_000),
-  );
-  const runtime = convergence.runtime;
-  const viewportRevision = runtime?.lastRequestedStamp?.viewportRevision ?? null;
-  const workerJobCycleDelta = Number.isFinite(runtime?.workerJobDelta)
-    && Number.isFinite(beforeRuntime?.workerJobDelta)
-    ? runtime.workerJobDelta - beforeRuntime.workerJobDelta
-    : null;
-  const workerResultCycleDelta = Number.isFinite(runtime?.workerResultDelta)
-    && Number.isFinite(beforeRuntime?.workerResultDelta)
-    ? runtime.workerResultDelta - beforeRuntime.workerResultDelta
-    : null;
-  const stalePublishCycleDelta = Number.isFinite(runtime?.stalePublishDelta)
-    && Number.isFinite(beforeRuntime?.stalePublishDelta)
-    ? runtime.stalePublishDelta - beforeRuntime.stalePublishDelta
-    : null;
-  return {
-    cycle: cycleIndex + 1,
-    capturedAt: new Date().toISOString(),
-    elapsedMs: Date.now() - startedAt,
-    durationMs: Date.now() - cycleStartedAt,
-    previousStamp,
-    viewportRevision,
-    currentPaintPassed: currentPaint?.passed === true,
-    currentPaint,
-    queueConverged: convergence.passed === true,
-    convergenceWaitMs: convergence.waitedMs,
-    workerJobCycleDelta,
-    workerResultCycleDelta,
-    stalePublishCycleDelta,
-    runtime,
-    wheelEvents,
-    panEvents,
-    direction,
-    passed: currentPaint?.passed === true
-      && convergence.passed === true
-      && Number.isSafeInteger(viewportRevision)
-      && Number.isSafeInteger(workerJobCycleDelta)
-      && workerJobCycleDelta > 0
-      && Number.isSafeInteger(workerResultCycleDelta)
-      && workerResultCycleDelta > 0
-      && workerResultCycleDelta <= workerJobCycleDelta
-      && stalePublishCycleDelta === 0,
-  };
+  let cycleError = null;
+  let result = null;
+  try {
+    const cycleStartedAt = Date.now();
+    const before = await callPhase6Probe(cdp, "snapshot");
+    const beforeRuntime = normalizePhase9Runtime(before?.runtime);
+    const previousStamp = beforeRuntime?.lastRequestedStamp ?? null;
+    const direction = cycleIndex % 2 === 0 ? -1 : 1;
+    const wheelEvents = await runPhase9WheelChurn(cdp, rect, direction);
+    const panEvents = await runPhase9PanChurn(cdp, rect, direction);
+    if (cycleIndex > 0 && cycleIndex % 20 === 0) {
+      await resetTimeScaleWarmup(cdp, rect);
+    }
+    const inputFenceDrained = await waitForPhase9InputFenceDrain(
+      cdp,
+      Math.min(args.timeoutMs, 2_000),
+    );
+    if (inputFenceDrained !== true) {
+      throw new Error(`Phase 9 input attribution cycle ${cycle} did not drain`);
+    }
+    const currentPaint = await callPhase6Probe(
+      cdp,
+      "waitForCurrentPaint",
+      previousStamp,
+      Math.min(args.timeoutMs, 10_000),
+    );
+    const convergence = await waitForPhase9QueueConvergence(
+      cdp,
+      Math.min(args.timeoutMs, 10_000),
+    );
+    const runtime = convergence.runtime;
+    const viewportRevision = runtime?.lastRequestedStamp?.viewportRevision ?? null;
+    const workerJobCycleDelta = Number.isFinite(runtime?.workerJobDelta)
+      && Number.isFinite(beforeRuntime?.workerJobDelta)
+      ? runtime.workerJobDelta - beforeRuntime.workerJobDelta
+      : null;
+    const workerResultCycleDelta = Number.isFinite(runtime?.workerResultDelta)
+      && Number.isFinite(beforeRuntime?.workerResultDelta)
+      ? runtime.workerResultDelta - beforeRuntime.workerResultDelta
+      : null;
+    const stalePublishCycleDelta = Number.isFinite(runtime?.stalePublishDelta)
+      && Number.isFinite(beforeRuntime?.stalePublishDelta)
+      ? runtime.stalePublishDelta - beforeRuntime.stalePublishDelta
+      : null;
+    result = {
+      cycle,
+      capturedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - startedAt,
+      durationMs: Date.now() - cycleStartedAt,
+      previousStamp,
+      viewportRevision,
+      currentPaintPassed: currentPaint?.passed === true,
+      currentPaint,
+      queueConverged: convergence.passed === true,
+      convergenceWaitMs: convergence.waitedMs,
+      workerJobCycleDelta,
+      workerResultCycleDelta,
+      stalePublishCycleDelta,
+      runtime,
+      wheelEvents,
+      panEvents,
+      direction,
+      passed: currentPaint?.passed === true
+        && convergence.passed === true
+        && Number.isSafeInteger(viewportRevision)
+        && Number.isSafeInteger(workerJobCycleDelta)
+        && workerJobCycleDelta > 0
+        && Number.isSafeInteger(workerResultCycleDelta)
+        && workerResultCycleDelta > 0
+        && workerResultCycleDelta <= workerJobCycleDelta
+        && stalePublishCycleDelta === 0,
+    };
+  } catch (error) {
+    cycleError = error;
+  }
+  const inputCycleEnded = await evaluate(cdp, "(() => {"
+    + "const bench=window.__CANDLESCOPE_DRAWING_BENCH__;"
+    + "return bench?.endInputCycle?.(" + cycle + ")===true;"
+    + "})()").catch(() => false);
+  if (cycleError !== null) throw cycleError;
+  if (inputCycleEnded !== true) {
+    throw new Error(`Phase 9 input attribution cycle ${cycle} could not end`);
+  }
+  return result;
 }
 
 async function preparePhase9Soak(
@@ -3740,6 +3773,7 @@ async function runPhase9Soak({
           : null,
       },
       browserTiming: {
+        timingSchemaVersion: bench?.timingSummary?.timingSchemaVersion ?? null,
         windowDurationMs: bench?.timingSummary?.windowDurationMs ?? null,
         refreshRateHz,
         longTaskSupported: bench?.longTaskSupported ?? null,
@@ -3768,6 +3802,8 @@ async function runPhase9Soak({
         inputEvents: bench?.inputEvents ?? null,
         inputEventCounts: bench?.timingSummary?.inputEventCounts ?? null,
         inputPaintFenceStats: bench?.timingSummary?.inputPaintFenceStats ?? null,
+        inputFenceOverall: bench?.timingSummary?.inputFenceOverall ?? null,
+        slowInputPaintFences: bench?.slowInputPaintFences ?? null,
         inputToNextPaintByType: bench?.timingSummary?.inputToNextPaintByType ?? null,
         eventTimingByType: bench?.timingSummary?.eventTimingByType ?? null,
         captureStats: bench?.captureStats ?? null,

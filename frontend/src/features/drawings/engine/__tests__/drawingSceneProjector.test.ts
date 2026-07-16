@@ -23,8 +23,11 @@ import type { DrawingScreenDisplayList } from "../../rendering/drawingDisplayLis
 import type { DrawingRenderRevisionStamp } from "../drawingRenderScheduler.js";
 import { createDrawingSceneRegistry } from "../drawingSceneRegistry.js";
 import {
+  clearDrawingSceneProjectorCaches,
   projectDrawingScene,
   projectDrawingSceneCanonicalGapIndexes,
+  readDrawingSceneProjectorCacheSnapshot,
+  retainBoundedDrawingScreenHierarchyMetadata,
   warmDrawingSceneWorldResolutions,
 } from "../drawingSceneProjector.js";
 import type {
@@ -511,6 +514,122 @@ test("viewport-only updates reuse cached source anchors for every static entity 
   assert.ok(project(document, changedWorldFrame, adapter));
   assert.ok(resolveCalls > resolvesBeforeWorldChange,
     "a new frame.worldRevisionKey must invalidate cached source resolutions");
+});
+
+test("exposes fail-closed read-only evidence for the adapter-scoped projection cache", () => {
+  const base = createAdapter();
+  const adapter: DrawingSceneProjectionAdapter = {
+    ...base,
+    resolveDrawingFrameDataPoints(_frame, points) {
+      return Object.freeze(points.map((point): DrawingCoordinateResolution | null => {
+        const logical = numeric(point.logical) ?? numeric(point.time);
+        return logical === null
+          ? null
+          : Object.freeze({ kind: "logical" as const, logical });
+      }));
+    },
+    projectDrawingFrameResolvedDataPoints(_frame, resolutions, points) {
+      const result = new Float64Array(points.length * 2);
+      result.fill(Number.NaN);
+      points.forEach((point, index) => {
+        const resolution = resolutions[index];
+        if (resolution?.kind === "logical") result[index * 2] = resolution.logical;
+        const price = numeric(point.price);
+        if (price !== null) result[index * 2 + 1] = price;
+      });
+      return result;
+    },
+  };
+  const entity = createDrawingEntity({
+    id: "cache-evidence-line",
+    kind: "line",
+    geometry: {
+      kind: "line",
+      lineType: "line-segment",
+      dataPoints: [{ time: 10, price: 10 }, { time: 20, price: 20 }],
+    },
+    style: { kind: "line", lineWidth: 2 },
+  });
+  const document = createDrawingDocument({
+    scopeKey: "cache-evidence",
+    entities: [entity],
+  });
+
+  assert.equal(readDrawingSceneProjectorCacheSnapshot(adapter), null);
+  assert.ok(project(document, createFrame(), adapter));
+
+  const snapshot = readDrawingSceneProjectorCacheSnapshot(adapter);
+  assert.ok(snapshot);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.ok(snapshot.totalBytes > 0);
+  assert.ok(snapshot.entryCount > 0);
+  assert.ok(snapshot.totalBytes <= snapshot.budgetBytes);
+  assert.ok(snapshot.budgetBytes <= snapshot.hardLimitBytes);
+  assert.ok(snapshot.recentRequestLimit > 0);
+  assert.equal(snapshot.recentRequestLimit, 512);
+  assert.ok(snapshot.recentRequestCount >= 0);
+  assert.ok(snapshot.recentHierarchyKeyCount >= 0);
+  assert.equal(snapshot.recentHierarchyKeysPerRequestLimit, 3);
+  assert.ok(snapshot.recentRequestCount <= snapshot.recentRequestLimit);
+
+  clearDrawingSceneProjectorCaches(adapter);
+  assert.equal(readDrawingSceneProjectorCacheSnapshot(adapter), null);
+});
+
+test("bounds recent screen-hierarchy request metadata alongside the byte LRU", () => {
+  const recentByRequest = new Map<number, string[]>();
+  const evicted: string[] = [];
+  const retain = (requestId: number, hierarchyKey: string) => {
+    retainBoundedDrawingScreenHierarchyMetadata(recentByRequest, requestId, hierarchyKey, {
+      onEvict: (key) => evicted.push(key),
+      perRequestLimit: 2,
+      requestLimit: 3,
+    });
+  };
+
+  retain(1, "1a");
+  retain(1, "1b");
+  retain(1, "1c");
+  assert.deepEqual(recentByRequest.get(1), ["1b", "1c"]);
+  assert.deepEqual(evicted, ["1a"]);
+
+  retain(2, "2a");
+  retain(3, "3a");
+  retain(2, "2b");
+  retain(4, "4a");
+  assert.equal(recentByRequest.size, 3);
+  assert.equal(recentByRequest.has(1), false);
+  assert.deepEqual([...recentByRequest.keys()], [3, 2, 4]);
+  assert.deepEqual(evicted, ["1a", "1b", "1c"]);
+
+  const supportedScene = new Map<number, string[]>();
+  const supportedSceneEvictions: string[] = [];
+  for (let requestId = 1; requestId <= 512; requestId += 1) {
+    retainBoundedDrawingScreenHierarchyMetadata(
+      supportedScene,
+      requestId,
+      `hierarchy-${requestId}`,
+      {
+        onEvict: (key) => supportedSceneEvictions.push(key),
+        perRequestLimit: 3,
+        requestLimit: 512,
+      },
+    );
+  }
+  for (let requestId = 1; requestId <= 512; requestId += 1) {
+    retainBoundedDrawingScreenHierarchyMetadata(
+      supportedScene,
+      requestId,
+      `hierarchy-${requestId}`,
+      {
+        onEvict: (key) => supportedSceneEvictions.push(key),
+        perRequestLimit: 3,
+        requestLimit: 512,
+      },
+    );
+  }
+  assert.equal(supportedScene.size, 512);
+  assert.deepEqual(supportedSceneEvictions, []);
 });
 
 test("scene world warmup keeps changing cull subsets source-resolution free", () => {

@@ -63,6 +63,13 @@ import {
   shouldRequireDrawingEngineDomEvidenceForPerformance,
   summarizeDrawingEngineDomEvidenceAssessments,
 } from "./drawing-engine-dom-evidence.mjs";
+import {
+  assessDrawingSoak,
+  DRAWING_SOAK_DEFAULTS,
+  DRAWING_SOAK_FIXED_CONTRACT,
+  isFormalDrawingSoakConfiguration,
+  normalizeDrawingSoakRuntimeEvidence,
+} from "./drawing-soak-metrics.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -73,6 +80,7 @@ const PHASE0_POINTER_SAMPLES = 4_096;
 const GIT_COMMIT_PATTERN = /^[0-9a-f]{40}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const MANAGED_BUILD_ENVIRONMENT = Object.freeze({
+  NODE_ENV: "production",
   VITE_API_BASE: "/api/v1",
   VITE_DRAWING_COORDINATE_PROJECTOR: "batch",
   VITE_DRAWING_DOCUMENT_AUTHORITY: "document",
@@ -417,9 +425,11 @@ function parseNumber(value, label, { min = 0, integer = false } = {}) {
 
 function parsePhase(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  const phase = /^\d+$/.test(normalized) ? `phase${normalized}` : normalized;
-  if (!["phase0", "phase1", "phase3", "phase4", "phase5", "phase6"].includes(phase)) {
-    throw new Error("--phase must be phase0, phase1, phase3, phase4, phase5, or phase6");
+  const phase = normalized === "phase9-soak"
+    ? "phase9"
+    : /^\d+$/.test(normalized) ? `phase${normalized}` : normalized;
+  if (!["phase0", "phase1", "phase3", "phase4", "phase5", "phase6", "phase9"].includes(phase)) {
+    throw new Error("--phase must be phase0, phase1, phase3, phase4, phase5, phase6, or phase9");
   }
   return phase;
 }
@@ -462,6 +472,7 @@ function parseArgs(argv) {
       : null,
     rasterBackend: null,
     enforceTargets: false,
+    soakConfiguration: { ...DRAWING_SOAK_DEFAULTS },
     // Preserve the historical phase0/1/3 default set. Phase 4 and Phase 5
     // replace it below with their own formal matrices.
     scenarios: DEFAULT_SCENARIOS
@@ -503,6 +514,108 @@ function parseArgs(argv) {
       args.settleMs = parseNumber(argv[++index], "--settle-ms", { min: 0, integer: true });
     } else if (arg === "--timeout-ms") {
       args.timeoutMs = parseNumber(argv[++index], "--timeout-ms", { min: 1_000, integer: true });
+    } else if (arg === "--soak-duration-ms") {
+      args.soakConfiguration.durationMs = parseNumber(
+        argv[++index],
+        "--soak-duration-ms",
+        { min: 1_000, integer: true },
+      );
+    } else if (arg === "--soak-warmup-ms") {
+      args.soakConfiguration.warmupMs = parseNumber(
+        argv[++index],
+        "--soak-warmup-ms",
+        { min: 0, integer: true },
+      );
+    } else if (arg === "--soak-required-ms") {
+      args.soakConfiguration.requiredMeasuredDurationMs = parseNumber(
+        argv[++index],
+        "--soak-required-ms",
+        { min: 1_000, integer: true },
+      );
+    } else if (arg === "--soak-sample-ms") {
+      args.soakConfiguration.sampleIntervalMs = parseNumber(
+        argv[++index],
+        "--soak-sample-ms",
+        { min: 100, integer: true },
+      );
+    } else if (arg === "--soak-gc-interval-ms") {
+      args.soakConfiguration.gcIntervalMs = parseNumber(
+        argv[++index],
+        "--soak-gc-interval-ms",
+        { min: 500, integer: true },
+      );
+    } else if (arg === "--soak-workload-interval-ms") {
+      args.soakConfiguration.workloadIntervalMs = parseNumber(
+        argv[++index],
+        "--soak-workload-interval-ms",
+        { min: 250, integer: true },
+      );
+    } else if (arg === "--soak-comparison-window-ms") {
+      args.soakConfiguration.comparisonWindowMs = parseNumber(
+        argv[++index],
+        "--soak-comparison-window-ms",
+        { min: 100, integer: true },
+      );
+    } else if (arg === "--soak-max-sample-gap-ms") {
+      args.soakConfiguration.maxSampleGapMs = parseNumber(
+        argv[++index],
+        "--soak-max-sample-gap-ms",
+        { min: 100, integer: true },
+      );
+    } else if (arg === "--soak-min-sample-coverage") {
+      args.soakConfiguration.minSampleCoverage = parseNumber(
+        argv[++index],
+        "--soak-min-sample-coverage",
+        { min: 0 },
+      );
+    } else if (arg === "--soak-min-gc-checkpoints") {
+      args.soakConfiguration.minGcCheckpoints = parseNumber(
+        argv[++index],
+        "--soak-min-gc-checkpoints",
+        { min: 1, integer: true },
+      );
+    } else if (arg === "--soak-min-viewport-revisions") {
+      args.soakConfiguration.minDistinctViewportRevisions = parseNumber(
+        argv[++index],
+        "--soak-min-viewport-revisions",
+        { min: 1, integer: true },
+      );
+    } else if (arg === "--soak-max-heap-delta-pct") {
+      args.soakConfiguration.maxHeapDeltaPct = parseNumber(
+        argv[++index],
+        "--soak-max-heap-delta-pct",
+        { min: 0 },
+      );
+    } else if (arg === "--soak-max-heap-slope-pct-per-hour") {
+      args.soakConfiguration.maxHeapSlopePctPerHour = parseNumber(
+        argv[++index],
+        "--soak-max-heap-slope-pct-per-hour",
+        { min: 0 },
+      );
+    } else if (arg === "--soak-heap-slope-noise-floor-bytes-per-hour") {
+      args.soakConfiguration.heapSlopeNoiseFloorBytesPerHour = parseNumber(
+        argv[++index],
+        "--soak-heap-slope-noise-floor-bytes-per-hour",
+        { min: 1 },
+      );
+    } else if (arg === "--soak-terminal-plateau-pct") {
+      args.soakConfiguration.terminalPlateauPct = parseNumber(
+        argv[++index],
+        "--soak-terminal-plateau-pct",
+        { min: 0 },
+      );
+    } else if (arg === "--soak-terminal-plateau-noise-floor-bytes") {
+      args.soakConfiguration.terminalPlateauNoiseFloorBytes = parseNumber(
+        argv[++index],
+        "--soak-terminal-plateau-noise-floor-bytes",
+        { min: 1 },
+      );
+    } else if (arg === "--soak-plateau-window-size") {
+      args.soakConfiguration.plateauWindowSize = parseNumber(
+        argv[++index],
+        "--soak-plateau-window-size",
+        { min: 1, integer: true },
+      );
     } else if (arg === "--scenarios") {
       args.scenarios = String(argv[++index] || "").split(",").map((value) => value.trim()).filter(Boolean);
       scenariosExplicit = true;
@@ -544,6 +657,34 @@ function parseArgs(argv) {
   }
   if (!scenariosExplicit && args.phase === "phase6") {
     args.scenarios = [...PHASE6_REQUIRED_SCENARIO_IDS];
+  }
+  if (args.phase === "phase9") {
+    if (args.url) throw new Error("Phase 9 soak requires the managed production build/mock server");
+    if (args.smoke) throw new Error("Phase 9 soak uses explicit --soak-* short-run parameters, not --smoke");
+    if (args.headless) throw new Error("Phase 9 soak requires a headed visible browser window");
+    args.scenarios = [PHASE6_SCENARIO_IDS.freehandZoomPan];
+    args.bars = PHASE6_BAR_COUNT;
+    args.dpr = 1.5;
+    args.engineMode = "scene-canary";
+    args.interactionSurfaceMode = "overlay";
+    args.rasterBackend = "worker";
+    if (args.seed !== DEFAULT_FIXTURE_OPTIONS.seed) {
+      throw new Error(`Phase 9 soak requires the fixed fixture seed ${DEFAULT_FIXTURE_OPTIONS.seed}`);
+    }
+    if (args.intervalSeconds !== 3_600) {
+      throw new Error("Phase 9 soak requires the fixed 3600-second source interval");
+    }
+    if (args.mockEndTime !== DEFAULT_MOCK_END_TIME) {
+      throw new Error(`Phase 9 soak requires the fixed mock end time ${DEFAULT_MOCK_END_TIME}`);
+    }
+    if (args.soakConfiguration.minSampleCoverage > 1) {
+      throw new Error("--soak-min-sample-coverage must be <= 1");
+    }
+    if (args.soakConfiguration.durationMs
+      < args.soakConfiguration.warmupMs
+        + args.soakConfiguration.requiredMeasuredDurationMs) {
+      throw new Error("Phase 9 soak duration must cover warmup plus the required measured window");
+    }
   }
   if (args.phase === "phase5" && !dprExplicit) args.dpr = 1.5;
   if (args.phase === "phase5" && !engineModeExplicit) {
@@ -711,24 +852,62 @@ async function connectWebSocket(wsUrl) {
   let nextId = 1;
   const pending = new Map();
   const handlers = new Map();
+  let closedError = null;
+  const rejectPending = (error) => {
+    if (closedError === null) closedError = error;
+    for (const deferred of pending.values()) {
+      clearTimeout(deferred.timer);
+      deferred.reject(error);
+    }
+    pending.clear();
+  };
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
     if (message.id && pending.has(message.id)) {
       const deferred = pending.get(message.id);
       pending.delete(message.id);
+      clearTimeout(deferred.timer);
       if (message.error) deferred.reject(new Error(message.error.message || JSON.stringify(message.error)));
       else deferred.resolve(message);
       return;
     }
     if (!message.method) return;
-    for (const handler of handlers.get(message.method) || []) handler(message.params);
+    for (const handler of handlers.get(message.method) || []) handler(message.params, message);
+  });
+  socket.addEventListener("close", (event) => {
+    rejectPending(new Error("CDP websocket closed (code=" + event.code
+      + (event.reason ? ", reason=" + event.reason : "") + ")"));
+  });
+  socket.addEventListener("error", (event) => {
+    rejectPending(new Error("CDP websocket error: " + (event.message || "unknown")));
   });
 
   return {
-    send(method, params = {}) {
+    send(method, params = {}, sessionId = null) {
+      if (closedError) return Promise.reject(closedError);
+      if (socket.readyState !== WebSocket.OPEN) {
+        return Promise.reject(new Error("CDP websocket is not open for " + method));
+      }
       const id = nextId++;
-      socket.send(JSON.stringify({ id, method, params }));
-      return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error("Timed out waiting for CDP command " + method));
+        }, 60_000);
+        pending.set(id, { resolve, reject, timer, method });
+        try {
+          socket.send(JSON.stringify({
+            id,
+            method,
+            params,
+            ...(typeof sessionId === "string" && sessionId.length > 0 ? { sessionId } : {}),
+          }));
+        } catch (error) {
+          pending.delete(id);
+          clearTimeout(timer);
+          reject(error);
+        }
+      });
     },
     on(method, handler) {
       if (!handlers.has(method)) handlers.set(method, new Set());
@@ -736,9 +915,132 @@ async function connectWebSocket(wsUrl) {
       return () => handlers.get(method)?.delete(handler);
     },
     close() {
+      rejectPending(new Error("CDP websocket closed by the drawing performance runner"));
       socket.close();
     },
   };
+}
+
+function isDrawingWorkerTarget(targetInfo) {
+  if (targetInfo?.type !== "worker") return false;
+  const identity = [targetInfo.title, targetInfo.url].filter(Boolean).join(" ");
+  return /(candlescope-drawing-worker|drawing(?:\.worker|-worker))/i.test(identity);
+}
+
+async function createDrawingWorkerHeapTracker(cdp) {
+  const sessions = new Map();
+  const register = (sessionId, targetInfo) => {
+    if (typeof sessionId !== "string" || !isDrawingWorkerTarget(targetInfo)) return;
+    const current = sessions.get(sessionId);
+    if (current) {
+      current.targetInfo = targetInfo;
+      return;
+    }
+    const record = {
+      sessionId,
+      targetInfo,
+      error: null,
+      ready: null,
+    };
+    record.ready = Promise.all([
+      cdp.send("Runtime.enable", {}, sessionId),
+      cdp.send("HeapProfiler.enable", {}, sessionId),
+    ]).catch((error) => {
+      record.error = error instanceof Error ? error.message : String(error);
+    });
+    sessions.set(sessionId, record);
+  };
+  const removeAttached = cdp.on("Target.attachedToTarget", (event) => {
+    register(event?.sessionId, event?.targetInfo);
+  });
+  const removeDetached = cdp.on("Target.detachedFromTarget", (event) => {
+    if (typeof event?.sessionId === "string") sessions.delete(event.sessionId);
+  });
+  await cdp.send("Target.setDiscoverTargets", { discover: true });
+  await cdp.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: false,
+    flatten: true,
+  });
+
+  const refresh = async () => {
+    const response = await cdp.send("Target.getTargets");
+    const trackedTargetIds = new Set(Array.from(
+      sessions.values(),
+      (record) => record.targetInfo?.targetId,
+    ));
+    for (const targetInfo of response.result?.targetInfos || []) {
+      if (!isDrawingWorkerTarget(targetInfo)
+        || trackedTargetIds.has(targetInfo.targetId)
+        || targetInfo.attached === true) continue;
+      const attached = await cdp.send("Target.attachToTarget", {
+        targetId: targetInfo.targetId,
+        flatten: true,
+      });
+      register(attached.result?.sessionId, targetInfo);
+    }
+  };
+
+  const readyRecords = async () => {
+    await refresh();
+    const records = Array.from(sessions.values());
+    await Promise.all(records.map((record) => record.ready));
+    const initializationError = records.find((record) => record.error !== null);
+    if (initializationError) {
+      throw new Error("Drawing worker CDP initialization failed: " + initializationError.error);
+    }
+    return records;
+  };
+
+  return Object.freeze({
+    async waitForWorker(timeoutMs) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt <= timeoutMs) {
+        const records = await readyRecords();
+        if (records.length > 0) return this.targets();
+        await wait(50);
+      }
+      throw new Error("Timed out waiting for the named drawing worker CDP target");
+    },
+    targets() {
+      return Array.from(sessions.values(), (record) => ({
+        sessionId: record.sessionId,
+        targetId: record.targetInfo?.targetId ?? null,
+        type: record.targetInfo?.type ?? null,
+        title: record.targetInfo?.title ?? null,
+        url: record.targetInfo?.url ?? null,
+      }));
+    },
+    async readHeap() {
+      const records = await readyRecords();
+      if (records.length === 0) throw new Error("Drawing worker heap target is not visible");
+      return Promise.all(records.map(async (record) => {
+        const response = await cdp.send("Runtime.getHeapUsage", {}, record.sessionId);
+        const heap = response.result || {};
+        return {
+          sessionId: record.sessionId,
+          targetId: record.targetInfo?.targetId ?? null,
+          title: record.targetInfo?.title ?? null,
+          url: record.targetInfo?.url ?? null,
+          usedSize: heap.usedSize ?? null,
+          totalSize: heap.totalSize ?? null,
+          embedderHeapUsedSize: heap.embedderHeapUsedSize ?? null,
+          backingStorageSize: heap.backingStorageSize ?? null,
+        };
+      }));
+    },
+    async collectGarbage() {
+      const records = await readyRecords();
+      if (records.length === 0) throw new Error("Drawing worker GC target is not visible");
+      await Promise.all(records.map((record) => (
+        cdp.send("HeapProfiler.collectGarbage", {}, record.sessionId)
+      )));
+    },
+    dispose() {
+      removeAttached();
+      removeDetached();
+    },
+  });
 }
 
 async function evaluate(cdp, expression) {
@@ -881,7 +1183,7 @@ async function startManagedServers(args) {
 
 function browserBenchmarkBootstrap(payload) {
   window.__CANDLESCOPE_DRAWING_PERF_CONFIG__ = Object.freeze({
-    benchmarkRawCapture: true,
+    benchmarkRawCapture: payload.benchmarkRawCapture !== false,
     rawCaptureCapacity: 20_000,
     phase6ForceMainThreadFallback: payload.phase6ForceMainThreadFallback === true,
     phase6WorkerDelayMs: Number.isFinite(payload.phase6WorkerDelayMs)
@@ -907,6 +1209,17 @@ function browserBenchmarkBootstrap(payload) {
     // bootstrap runs again in the application origin before its modules load.
   }
 
+  const timingHistogramBucketWidthMs = 0.1;
+  const timingHistogramMaxMs = 1_000;
+  const timingHistogramBucketCount = Math.floor(
+    timingHistogramMaxMs / timingHistogramBucketWidthMs,
+  ) + 1;
+  const makeTimingHistogram = () => ({
+    bucketCounts: new Uint32Array(timingHistogramBucketCount),
+    totalCount: 0,
+    invalidCount: 0,
+    maxMs: null,
+  });
   const makeState = () => ({
     startedAt: performance.now(),
     lastRafAt: null,
@@ -915,22 +1228,127 @@ function browserBenchmarkBootstrap(payload) {
     eventTimingMs: [],
     mouseupSyncMs: [],
     longTasks: [],
+    longTaskObservedCount: 0,
+    longTaskDroppedCount: 0,
+    instrumentationWindows: [],
+    activeInstrumentation: null,
     inputEvents: 0,
     pendingPaintAt: null,
+    pendingPaintFenceScheduled: false,
     captureStats: {
       rafIntervalsMs: { observed: 0, dropped: 0 },
       inputToNextPaintMs: { observed: 0, dropped: 0 },
       eventTimingMs: { observed: 0, dropped: 0 },
       mouseupSyncMs: { observed: 0, dropped: 0 },
     },
+    timingHistograms: {
+      rafIntervalsMs: makeTimingHistogram(),
+      inputToNextPaintMs: makeTimingHistogram(),
+      eventTimingMs: makeTimingHistogram(),
+      mouseupSyncMs: makeTimingHistogram(),
+    },
   });
   let state = makeState();
+  let stateEpoch = 0;
   let eventTimingSupported = false;
   let longTaskSupported = false;
+  const timingSampleCapacity = Number.isSafeInteger(payload.timingSampleCapacity)
+    && payload.timingSampleCapacity >= 0
+    ? payload.timingSampleCapacity
+    : 20_000;
+  const longTaskCapacity = Number.isSafeInteger(payload.longTaskCapacity)
+    && payload.longTaskCapacity > 0
+    ? payload.longTaskCapacity
+    : 20_000;
 
-  const boundedPush = (target, metric, value, capacity = 20_000) => {
-    if (!Number.isFinite(value) || value < 0) return;
+  const histogramPercentile = (histogram, percentile) => {
+    if (histogram.totalCount === 0) return null;
+    const rank = Math.max(1, Math.ceil((percentile / 100) * histogram.totalCount));
+    let cumulative = 0;
+    for (let index = 0; index < histogram.bucketCounts.length; index += 1) {
+      cumulative += histogram.bucketCounts[index];
+      if (cumulative < rank) continue;
+      if (index === histogram.bucketCounts.length - 1) return histogram.maxMs;
+      return Math.min(histogram.maxMs, (index + 1) * timingHistogramBucketWidthMs);
+    }
+    return null;
+  };
+
+  const summarizeTimingMetric = (metric, includeBuckets) => {
+    const stats = state.captureStats[metric];
+    const histogram = state.timingHistograms[metric];
+    return {
+      totalCount: histogram.totalCount,
+      invalidCount: histogram.invalidCount,
+      captureObserved: stats.observed,
+      bucketWidthMs: timingHistogramBucketWidthMs,
+      histogramMaxMs: timingHistogramMaxMs,
+      bucketCount: timingHistogramBucketCount,
+      overflowCount: histogram.bucketCounts[timingHistogramBucketCount - 1],
+      p50Ms: histogramPercentile(histogram, 50),
+      p95Ms: histogramPercentile(histogram, 95),
+      p99Ms: histogramPercentile(histogram, 99),
+      maxMs: histogram.maxMs,
+      ...(includeBuckets
+        ? { bucketCounts: Array.from(histogram.bucketCounts) }
+        : {}),
+    };
+  };
+
+  const summarizeTimingState = (includeBuckets = false) => ({
+    windowDurationMs: Math.max(0, performance.now() - state.startedAt),
+    inputEvents: state.inputEvents,
+    eventTimingSupported,
+    longTaskSupported,
+    captureStats: structuredClone(state.captureStats),
+    metrics: {
+      frameIntervalMs: summarizeTimingMetric("rafIntervalsMs", includeBuckets),
+      inputToNextPaintMs: summarizeTimingMetric("inputToNextPaintMs", includeBuckets),
+      eventTimingMs: summarizeTimingMetric("eventTimingMs", includeBuckets),
+      mouseupSyncMs: summarizeTimingMetric("mouseupSyncMs", includeBuckets),
+    },
+  });
+
+  const summarizeLongTasks = () => {
+    const windows = state.instrumentationWindows.slice();
+    if (state.activeInstrumentation) {
+      windows.push({
+        ...state.activeInstrumentation,
+        endTime: performance.now(),
+      });
+    }
+    const containedByInstrumentation = (task) => windows.some((window) => (
+      task.startTime >= window.startTime
+        && task.startTime + task.duration <= window.endTime
+    ));
+    const attributable = state.longTasks.filter((task) => !containedByInstrumentation(task));
+    const excluded = state.longTasks.filter(containedByInstrumentation);
+    return {
+      instrumentationWindows: windows,
+      attributable,
+      excluded,
+      excludedCount: excluded.length,
+      retainedCount: state.longTasks.length,
+      droppedCount: state.longTaskDroppedCount,
+      totalCount: state.longTaskObservedCount,
+    };
+  };
+
+  const boundedPush = (target, metric, value, capacity = timingSampleCapacity) => {
+    const histogram = state.timingHistograms[metric];
+    if (!Number.isFinite(value) || value < 0) {
+      histogram.invalidCount += 1;
+      return;
+    }
+    const bucketIndex = Math.min(
+      timingHistogramBucketCount - 1,
+      Math.floor(value / timingHistogramBucketWidthMs),
+    );
+    histogram.bucketCounts[bucketIndex] += 1;
+    histogram.totalCount += 1;
+    histogram.maxMs = histogram.maxMs === null ? value : Math.max(histogram.maxMs, value);
     state.captureStats[metric].observed += 1;
+    if (capacity === 0) return;
     target.push(value);
     if (target.length > capacity) {
       const dropped = target.length - capacity;
@@ -944,14 +1362,6 @@ function browserBenchmarkBootstrap(payload) {
       boundedPush(state.rafIntervalsMs, "rafIntervalsMs", at - state.lastRafAt);
     }
     state.lastRafAt = at;
-    if (state.pendingPaintAt !== null) {
-      boundedPush(
-        state.inputToNextPaintMs,
-        "inputToNextPaintMs",
-        Math.max(0, at - state.pendingPaintAt),
-      );
-      state.pendingPaintAt = null;
-    }
     requestAnimationFrame(rafLoop);
   };
   requestAnimationFrame(rafLoop);
@@ -959,6 +1369,26 @@ function browserBenchmarkBootstrap(payload) {
   const onInput = () => {
     state.inputEvents += 1;
     if (state.pendingPaintAt === null) state.pendingPaintAt = performance.now();
+    if (state.pendingPaintFenceScheduled) return;
+    state.pendingPaintFenceScheduled = true;
+    const scheduledEpoch = stateEpoch;
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        if (scheduledEpoch !== stateEpoch) return;
+        const inputAt = state.pendingPaintAt;
+        state.pendingPaintAt = null;
+        state.pendingPaintFenceScheduled = false;
+        if (inputAt === null) return;
+        // A zero-delay task queued from rAF runs after the browser's render
+        // opportunity. Unlike sampling at rAF entry, this fence includes the
+        // style/layout/paint work needed to present the input's next frame.
+        boundedPush(
+          state.inputToNextPaintMs,
+          "inputToNextPaintMs",
+          Math.max(0, performance.now() - inputAt),
+        );
+      }, 0);
+    });
   };
   for (const type of ["pointerdown", "pointermove", "pointerup", "wheel"]) {
     addEventListener(type, onInput, { capture: true, passive: true });
@@ -990,6 +1420,7 @@ function browserBenchmarkBootstrap(payload) {
   try {
     const longTaskObserver = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
+        state.longTaskObservedCount += 1;
         state.longTasks.push({
           startTime: entry.startTime,
           duration: entry.duration,
@@ -1002,6 +1433,11 @@ function browserBenchmarkBootstrap(payload) {
             containerSrc: item.containerSrc || null,
           })),
         });
+        if (state.longTasks.length > longTaskCapacity) {
+          const dropped = state.longTasks.length - longTaskCapacity;
+          state.longTasks.splice(0, dropped);
+          state.longTaskDroppedCount += dropped;
+        }
       }
     });
     longTaskObserver.observe({ type: "longtask", buffered: false });
@@ -1012,9 +1448,31 @@ function browserBenchmarkBootstrap(payload) {
 
   window.__CANDLESCOPE_DRAWING_BENCH__ = Object.freeze({
     reset() {
+      stateEpoch += 1;
       state = makeState();
     },
+    timingSummary() {
+      return summarizeTimingState();
+    },
+    beginInstrumentation(name) {
+      if (state.activeInstrumentation !== null || typeof name !== "string" || name.length === 0) {
+        return false;
+      }
+      state.activeInstrumentation = { name, startTime: performance.now() };
+      return true;
+    },
+    endInstrumentation(name) {
+      const active = state.activeInstrumentation;
+      if (!active || active.name !== name) return false;
+      state.instrumentationWindows.push({
+        ...active,
+        endTime: performance.now(),
+      });
+      state.activeInstrumentation = null;
+      return true;
+    },
     report() {
+      const longTaskSummary = summarizeLongTasks();
       return {
         startedAt: state.startedAt,
         endedAt: performance.now(),
@@ -1023,10 +1481,18 @@ function browserBenchmarkBootstrap(payload) {
         eventTimingMs: state.eventTimingMs.slice(),
         mouseupSyncMs: state.mouseupSyncMs.slice(),
         longTasks: state.longTasks.slice(),
+        attributableLongTasks: longTaskSummary.attributable,
+        excludedLongTasks: longTaskSummary.excluded,
+        instrumentationWindows: longTaskSummary.instrumentationWindows,
+        excludedLongTaskCount: longTaskSummary.excludedCount,
+        retainedLongTaskCount: longTaskSummary.retainedCount,
+        droppedLongTaskCount: longTaskSummary.droppedCount,
+        totalLongTaskCount: longTaskSummary.totalCount,
         inputEvents: state.inputEvents,
         eventTimingSupported,
         longTaskSupported,
         captureStats: structuredClone(state.captureStats),
+        timingSummary: summarizeTimingState(true),
         devicePixelRatio,
         viewport: {
           width: innerWidth,
@@ -1037,7 +1503,7 @@ function browserBenchmarkBootstrap(payload) {
   });
 }
 
-async function installScenarioBootstrap(cdp, fixture, scenario) {
+async function installScenarioBootstrap(cdp, fixture, scenario, { soak = false } = {}) {
   const source = '('
     + browserBenchmarkBootstrap.toString()
     + ')('
@@ -1051,6 +1517,9 @@ async function installScenarioBootstrap(cdp, fixture, scenario) {
       chartSettings: scenario?.id === PHASE6_SCENARIO_IDS.freehandLineageZoomPan
         ? phase6LineageSettings()
         : { chartType: "candlestick" },
+      timingSampleCapacity: soak ? 0 : 20_000,
+      longTaskCapacity: soak ? 2_000 : 20_000,
+      benchmarkRawCapture: !soak,
     }) + ");";
   const response = await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source });
   return response.result?.identifier || null;
@@ -2454,7 +2923,871 @@ async function callPhase6Probe(cdp, method, ...args) {
 async function stopPhase6Probe(cdp) {
   const result = await callPhase6Probe(cdp, "stop");
   await evaluate(cdp, "delete window.__CANDLESCOPE_PHASE6_PROBE__; true");
-  return result;
+  return result && typeof result === "object"
+    ? { ...result, stopped: true }
+    : { started: false, stopped: true, result: result ?? null };
+}
+
+const PHASE9_STAMP_KEYS = Object.freeze([
+  "scopeKey",
+  "documentRevision",
+  "surfaceGeneration",
+  "dataRevision",
+  "projectionRevision",
+  "lineageIndexRevision",
+  "viewportRevision",
+  "themeRevision",
+  "widthCssPx",
+  "heightCssPx",
+  "dpr",
+]);
+
+function samePhase9Stamp(left, right) {
+  return left !== null
+    && right !== null
+    && typeof left === "object"
+    && typeof right === "object"
+    && PHASE9_STAMP_KEYS.every((key) => left[key] === right[key]);
+}
+
+function normalizePhase9Runtime(runtime) {
+  return normalizeDrawingSoakRuntimeEvidence(runtime);
+}
+
+function phase9RuntimeQuiescent(runtime) {
+  const normalized = normalizePhase9Runtime(runtime);
+  return normalized !== null
+    && normalized.queueDepthCurrent === 0
+    && normalized.inFlightCurrent === 0
+    && normalized.sceneFallbackCount === 0
+    && normalized.sceneRuntimeFaultCount === 0
+    && normalized.legacyFallbackSucceededCount === 0
+    && normalized.sceneFallbackLastReason === null
+    && samePhase9Stamp(normalized.lastRequestedStamp, normalized.lastPublishedStamp)
+    && samePhase9Stamp(normalized.lastRequestedStamp, normalized.lastPaintedStamp);
+}
+
+function normalizeCdpHeap(result) {
+  const heap = result?.result ?? result ?? {};
+  return {
+    usedSize: Number.isFinite(heap.usedSize) ? heap.usedSize : null,
+    totalSize: Number.isFinite(heap.totalSize) ? heap.totalSize : null,
+    embedderHeapUsedSize: Number.isFinite(heap.embedderHeapUsedSize)
+      ? heap.embedderHeapUsedSize
+      : null,
+    backingStorageSize: Number.isFinite(heap.backingStorageSize)
+      ? heap.backingStorageSize
+      : null,
+  };
+}
+
+async function readPhase9Heap(cdp, workerTracker) {
+  const [pageResponse, workers] = await Promise.all([
+    cdp.send("Runtime.getHeapUsage"),
+    workerTracker.readHeap(),
+  ]);
+  const page = normalizeCdpHeap(pageResponse);
+  const aggregate = (key) => {
+    const componentSizes = [page[key], ...workers.map((worker) => worker[key])];
+    return componentSizes.every(Number.isFinite)
+      ? componentSizes.reduce((total, value) => total + value, 0)
+      : null;
+  };
+  return {
+    aggregateUsedSize: aggregate("usedSize"),
+    aggregateBackingStorageSize: aggregate("backingStorageSize"),
+    aggregateEmbedderHeapUsedSize: aggregate("embedderHeapUsedSize"),
+    page,
+    workers,
+  };
+}
+
+async function readPhase9Sample(cdp, workerTracker, startedAt) {
+  const [heap, domResponse, performanceResponse, probe, visibility, browserTiming] = await Promise.all([
+    readPhase9Heap(cdp, workerTracker),
+    cdp.send("Memory.getDOMCounters"),
+    cdp.send("Performance.getMetrics"),
+    callPhase6Probe(cdp, "snapshot"),
+    evaluateJson(cdp, () => ({
+      visibilityState: document.visibilityState,
+      hidden: document.hidden,
+      hasFocus: document.hasFocus(),
+    })),
+    evaluateJson(cdp, () => (
+      window.__CANDLESCOPE_DRAWING_BENCH__?.timingSummary?.() ?? null
+    )),
+  ]);
+  return {
+    capturedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - startedAt,
+    workerVisible: heap.workers.length > 0,
+    heap,
+    dom: {
+      documents: domResponse.result?.documents ?? null,
+      nodes: domResponse.result?.nodes ?? null,
+      jsEventListeners: domResponse.result?.jsEventListeners ?? null,
+    },
+    performance: metricMap(performanceResponse),
+    visibility,
+    browserTiming,
+    runtime: normalizePhase9Runtime(probe?.runtime),
+  };
+}
+
+async function collectPhase9GcCheckpoint(cdp, workerTracker, startedAt, scheduledAtMs) {
+  const before = await readPhase9Heap(cdp, workerTracker);
+  const instrumentationName = `phase9-forced-gc:${scheduledAtMs}`;
+  const began = await evaluate(cdp, "(() => {"
+    + "const bench=window.__CANDLESCOPE_DRAWING_BENCH__;"
+    + "return bench?.beginInstrumentation?.(" + JSON.stringify(instrumentationName) + ")===true;"
+    + "})()");
+  if (began !== true) {
+    throw new Error("Phase 9 could not open the forced-GC instrumentation window");
+  }
+  let gcError = null;
+  try {
+    await Promise.all([
+      cdp.send("HeapProfiler.collectGarbage"),
+      workerTracker.collectGarbage(),
+    ]);
+  } catch (error) {
+    gcError = error;
+  }
+  const ended = await evaluate(cdp, "(() => {"
+    + "const bench=window.__CANDLESCOPE_DRAWING_BENCH__;"
+    + "return bench?.endInstrumentation?.(" + JSON.stringify(instrumentationName) + ")===true;"
+    + "})()");
+  if (ended !== true) {
+    throw new Error("Phase 9 could not close the forced-GC instrumentation window", {
+      cause: gcError ?? undefined,
+    });
+  }
+  if (gcError !== null) throw gcError;
+  await wait(50);
+  const after = await readPhase9Heap(cdp, workerTracker);
+  return {
+    capturedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - startedAt,
+    scheduledAtMs,
+    ok: true,
+    before,
+    after,
+  };
+}
+
+async function runPhase9WheelChurn(cdp, rect, direction) {
+  const x = Math.round(rect.x + rect.width * (direction < 0 ? 0.42 : 0.62));
+  const y = Math.round(rect.y + rect.height * 0.48);
+  const count = 4;
+  for (let index = 0; index < count; index += 1) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      x,
+      y,
+      deltaX: 0,
+      deltaY: direction * 72,
+    });
+    await waitNextAnimationFrame(cdp);
+  }
+  return count;
+}
+
+async function runPhase9PanChurn(cdp, rect, direction) {
+  const fromRatio = direction < 0 ? 0.68 : 0.34;
+  const toRatio = direction < 0 ? 0.34 : 0.68;
+  const fromX = Math.round(rect.x + rect.width * fromRatio);
+  const toX = Math.round(rect.x + rect.width * toRatio);
+  const y = Math.round(rect.y + rect.height * 0.60);
+  await dispatchMouseMove(cdp, fromX, y);
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: fromX,
+    y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  const steps = 12;
+  for (let step = 1; step <= steps; step += 1) {
+    const x = Math.round(fromX + (toX - fromX) * (step / steps));
+    await dispatchMouseMove(cdp, x, y, 1);
+    await wait(8);
+  }
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: toX,
+    y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  return steps;
+}
+
+async function waitForPhase9QueueConvergence(cdp, timeoutMs) {
+  const startedAt = Date.now();
+  let latest = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    const snapshot = await callPhase6Probe(cdp, "snapshot");
+    latest = normalizePhase9Runtime(snapshot?.runtime);
+    if (phase9RuntimeQuiescent(latest)) {
+      return { passed: true, runtime: latest, waitedMs: Date.now() - startedAt };
+    }
+    await wait(25);
+  }
+  return { passed: false, runtime: latest, waitedMs: Date.now() - startedAt };
+}
+
+async function runPhase9WorkloadCycle(cdp, rect, args, startedAt, cycleIndex) {
+  const cycleStartedAt = Date.now();
+  const before = await callPhase6Probe(cdp, "snapshot");
+  const beforeRuntime = normalizePhase9Runtime(before?.runtime);
+  const previousStamp = beforeRuntime?.lastRequestedStamp ?? null;
+  const direction = cycleIndex % 2 === 0 ? -1 : 1;
+  const wheelEvents = await runPhase9WheelChurn(cdp, rect, direction);
+  const panEvents = await runPhase9PanChurn(cdp, rect, direction);
+  if (cycleIndex > 0 && cycleIndex % 20 === 0) {
+    await resetTimeScaleWarmup(cdp, rect);
+  }
+  const currentPaint = await callPhase6Probe(
+    cdp,
+    "waitForCurrentPaint",
+    previousStamp,
+    Math.min(args.timeoutMs, 10_000),
+  );
+  const convergence = await waitForPhase9QueueConvergence(
+    cdp,
+    Math.min(args.timeoutMs, 10_000),
+  );
+  const runtime = convergence.runtime;
+  const viewportRevision = runtime?.lastRequestedStamp?.viewportRevision ?? null;
+  const workerJobCycleDelta = Number.isFinite(runtime?.workerJobDelta)
+    && Number.isFinite(beforeRuntime?.workerJobDelta)
+    ? runtime.workerJobDelta - beforeRuntime.workerJobDelta
+    : null;
+  const workerResultCycleDelta = Number.isFinite(runtime?.workerResultDelta)
+    && Number.isFinite(beforeRuntime?.workerResultDelta)
+    ? runtime.workerResultDelta - beforeRuntime.workerResultDelta
+    : null;
+  const stalePublishCycleDelta = Number.isFinite(runtime?.stalePublishDelta)
+    && Number.isFinite(beforeRuntime?.stalePublishDelta)
+    ? runtime.stalePublishDelta - beforeRuntime.stalePublishDelta
+    : null;
+  return {
+    cycle: cycleIndex + 1,
+    capturedAt: new Date().toISOString(),
+    elapsedMs: Date.now() - startedAt,
+    durationMs: Date.now() - cycleStartedAt,
+    previousStamp,
+    viewportRevision,
+    currentPaintPassed: currentPaint?.passed === true,
+    currentPaint,
+    queueConverged: convergence.passed === true,
+    convergenceWaitMs: convergence.waitedMs,
+    workerJobCycleDelta,
+    workerResultCycleDelta,
+    stalePublishCycleDelta,
+    runtime,
+    wheelEvents,
+    panEvents,
+    direction,
+    passed: currentPaint?.passed === true
+      && convergence.passed === true
+      && Number.isSafeInteger(viewportRevision)
+      && Number.isSafeInteger(workerJobCycleDelta)
+      && workerJobCycleDelta > 0
+      && Number.isSafeInteger(workerResultCycleDelta)
+      && workerResultCycleDelta > 0
+      && workerResultCycleDelta <= workerJobCycleDelta
+      && stalePublishCycleDelta === 0,
+  };
+}
+
+async function preparePhase9Soak(
+  cdp,
+  workerTracker,
+  fixture,
+  scenario,
+  args,
+  browserWindowId,
+) {
+  const bootstrapIdentifier = await installScenarioBootstrap(
+    cdp,
+    fixture,
+    scenario,
+    { soak: true },
+  );
+  try {
+    await ensureHeadedBenchmarkWindow(
+      cdp,
+      browserWindowId,
+      args.headless,
+    );
+    const scenarioUrl = args.url + (args.url.includes("?") ? "&" : "?")
+      + "drawingPerf=" + encodeURIComponent("phase9-heavy-soak");
+    await navigateToDrawingPerformanceScenario(cdp, args.url, scenarioUrl);
+    const ready = await waitForChartReady(
+      cdp,
+      fixture.metadata.drawingCount,
+      args.timeoutMs,
+      { requireDrawingEngine: true },
+    );
+    const drawingEngineDomEvidence = await readDrawingEngineDomEvidence(cdp, args);
+    if (!drawingEngineDomEvidence.passed) {
+      throw new Error(formatDrawingEngineDomEvidenceFailure(
+        drawingEngineDomEvidence,
+        "Phase 9 soak",
+      ));
+    }
+    const rect = await getChartRect(cdp);
+    if (!rect || rect.width < 200 || rect.height < 120) {
+      throw new Error("Phase 9 chart rectangle is unavailable or too small");
+    }
+    const savedSummary = await readSavedDrawingSummary(cdp, fixture.storageKey);
+    const expectedSummary = {
+      entityCount: fixture.metadata.drawingCount,
+      pointCount: fixture.metadata.pointCount,
+      typeCounts: fixture.metadata.drawingTypes,
+    };
+    if (!runtimeMatchesSavedSummary(ready.runtimeSummary, savedSummary)
+      || !runtimeMatchesSavedSummary(ready.runtimeSummary, expectedSummary)) {
+      throw new Error("Phase 9 runtime did not restore the heavy-scene fixture exactly");
+    }
+    await resetTimeScaleWarmup(cdp, rect);
+    const phase6Runtime = await waitForPhase6SceneReady(cdp, {
+      expectedRawPoints: fixture.metadata.freehandPointCount,
+      requireWorker: true,
+      timeoutMs: args.timeoutMs,
+    });
+    if (phase6Runtime?.sceneFallbackCount !== 0
+      || phase6Runtime?.sceneRuntimeFaultCount !== 0
+      || phase6Runtime?.legacyFallbackSucceededCount !== 0
+      || phase6Runtime?.sceneFallbackLastReason !== null) {
+      throw new Error("Phase 9 preflight observed a scene fallback before the runtime probe: "
+        + JSON.stringify({
+          count: phase6Runtime?.sceneFallbackCount ?? null,
+          faultCount: phase6Runtime?.sceneRuntimeFaultCount ?? null,
+          succeededCount: phase6Runtime?.legacyFallbackSucceededCount ?? null,
+          reason: phase6Runtime?.sceneFallbackLastReason ?? null,
+        }));
+    }
+    const workerTargets = await workerTracker.waitForWorker(args.timeoutMs);
+    if (workerTargets.length !== 1) {
+      throw new Error("Phase 9 requires exactly one named drawing worker during preflight: "
+        + JSON.stringify(workerTargets));
+    }
+    const browserWindowInitial = await ensureHeadedBenchmarkWindow(
+      cdp,
+      browserWindowId,
+      args.headless,
+    );
+    if (browserWindowInitial.devicePixelRatio !== args.dpr) {
+      throw new Error("Phase 9 browser DPR did not match the fixed configuration: "
+        + JSON.stringify(browserWindowInitial));
+    }
+    await clickTool(cdp, "cursor");
+    await evaluate(cdp, "(() => {"
+      + "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.();"
+      + "window.__CANDLESCOPE_DRAWING_PERF__?.reset?.();"
+      + "return true;"
+      + "})()");
+    await wait(2_000);
+    const refreshRatePreflight = await evaluateJson(cdp, () => (
+      window.__CANDLESCOPE_DRAWING_BENCH__?.timingSummary?.() ?? null
+    ));
+    const preflightFrameMedianMs = refreshRatePreflight?.metrics?.frameIntervalMs?.p50Ms;
+    const preflightRefreshRateHz = Number.isFinite(preflightFrameMedianMs)
+      && preflightFrameMedianMs > 0
+      ? 1_000 / preflightFrameMedianMs
+      : null;
+    if (preflightRefreshRateHz === null
+      || preflightRefreshRateHz < DRAWING_SOAK_FIXED_CONTRACT.refreshRateHzMin
+      || preflightRefreshRateHz > DRAWING_SOAK_FIXED_CONTRACT.refreshRateHzMax) {
+      throw new Error("Phase 9 requires a stable 60Hz headed profile before the soak window: "
+        + JSON.stringify({
+          observedHz: preflightRefreshRateHz,
+          minimumHz: DRAWING_SOAK_FIXED_CONTRACT.refreshRateHzMin,
+          maximumHz: DRAWING_SOAK_FIXED_CONTRACT.refreshRateHzMax,
+        }));
+    }
+    await evaluate(cdp, "(() => {"
+      + "window.__CANDLESCOPE_DRAWING_BENCH__?.reset?.();"
+      + "window.__CANDLESCOPE_DRAWING_PERF__?.reset?.();"
+      + "return true;"
+      + "})()");
+    const startedProbe = await startPhase6Probe(cdp);
+    if (startedProbe?.started !== true) {
+      throw new Error("Phase 9 runtime probe could not start: " + JSON.stringify(startedProbe));
+    }
+    const baseline = await callPhase6Probe(cdp, "snapshot");
+    if (!phase9RuntimeQuiescent(baseline?.runtime)) {
+      throw new Error("Phase 9 baseline runtime was not quiescent/current: "
+        + JSON.stringify(baseline));
+    }
+    return {
+      bootstrapIdentifier,
+      ready,
+      rect,
+      drawingEngineDomEvidence,
+      phase6Runtime,
+      workerTargets,
+      baselineRuntime: normalizePhase9Runtime(baseline.runtime),
+      browserWindowInitial,
+      refreshRatePreflight: {
+        frameMedianMs: preflightFrameMedianMs,
+        refreshRateHz: preflightRefreshRateHz,
+        timing: refreshRatePreflight,
+      },
+    };
+  } catch (error) {
+    await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
+      identifier: bootstrapIdentifier,
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+function advancePhase9Deadline(previous, intervalMs, elapsedMs) {
+  let next = previous + intervalMs;
+  while (next <= elapsedMs) next += intervalMs;
+  return next;
+}
+
+function phase9ReportOutputPath(args, git, generatedAt) {
+  if (args.out) return path.resolve(process.cwd(), args.out);
+  const generatedStamp = generatedAt.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  return path.resolve(
+    FRONTEND_ROOT,
+    "..",
+    "docs",
+    "perf-baselines",
+    "drawing-engine-v2",
+    "phase9-soak-" + git.shortCommit + "-" + generatedStamp + "-bars"
+      + args.bars + "-dpr1_5.json",
+  );
+}
+
+function writePhase9Report(args, git, report) {
+  const outputPath = phase9ReportOutputPath(args, git, report.generatedAt);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, stableStringify(report, 2) + "\n", "utf8");
+  return outputPath;
+}
+
+async function runPhase9Soak({
+  cdp,
+  workerTracker,
+  fixture,
+  scenario,
+  args,
+  browserWindowId,
+  diagnostics,
+  git,
+  browserVersion,
+  servers,
+  buildEnvironment,
+}) {
+  const configuration = args.soakConfiguration;
+  const samples = [];
+  const gcCheckpoints = [];
+  const cycles = [];
+  const sampleErrors = [];
+  let prepared = null;
+  let probeStopped = null;
+  try {
+    prepared = await preparePhase9Soak(
+      cdp,
+      workerTracker,
+      fixture,
+      scenario,
+      args,
+      browserWindowId,
+    );
+    const startedAt = Date.now();
+    let nextSampleAtMs = configuration.warmupMs + configuration.sampleIntervalMs;
+    let nextGcAtMs = configuration.warmupMs;
+    let nextWorkloadAtMs = 0;
+    let cycleIndex = 0;
+    let timingMeasurementStarted = false;
+    console.log("[phase9-soak] heavy scene started; duration="
+      + configuration.durationMs + "ms; warmup=" + configuration.warmupMs + "ms");
+
+    while (Date.now() - startedAt < configuration.durationMs) {
+      let elapsedMs = Date.now() - startedAt;
+      let handled = false;
+      if (!timingMeasurementStarted && elapsedMs >= configuration.warmupMs) {
+        const reset = await evaluate(cdp, "(() => {"
+          + "const bench=window.__CANDLESCOPE_DRAWING_BENCH__;"
+          + "if(!bench||typeof bench.reset!=='function')return false;"
+          + "bench.reset();return true;"
+          + "})()");
+        if (reset !== true) {
+          throw new Error("Phase 9 browser timing window could not reset after warmup");
+        }
+        timingMeasurementStarted = true;
+        elapsedMs = Date.now() - startedAt;
+        handled = true;
+      }
+      if (elapsedMs >= nextSampleAtMs) {
+        const scheduledAtMs = nextSampleAtMs;
+        try {
+          samples.push(await readPhase9Sample(cdp, workerTracker, startedAt));
+        } catch (error) {
+          const failure = {
+            kind: "sample",
+            elapsedMs: Date.now() - startedAt,
+            scheduledAtMs,
+            message: error instanceof Error ? error.message : String(error),
+          };
+          sampleErrors.push(failure);
+          samples.push({ ...failure, workerVisible: false, heap: null, runtime: null });
+          throw new Error("Phase 9 sample failed; aborting the formal window: " + failure.message, {
+            cause: error,
+          });
+        }
+        elapsedMs = Date.now() - startedAt;
+        nextSampleAtMs = advancePhase9Deadline(
+          nextSampleAtMs,
+          configuration.sampleIntervalMs,
+          elapsedMs,
+        );
+        handled = true;
+      }
+      if (elapsedMs >= nextGcAtMs) {
+        const scheduledAtMs = nextGcAtMs;
+        try {
+          gcCheckpoints.push(await collectPhase9GcCheckpoint(
+            cdp,
+            workerTracker,
+            startedAt,
+            scheduledAtMs,
+          ));
+        } catch (error) {
+          const failure = {
+            kind: "gc",
+            elapsedMs: Date.now() - startedAt,
+            scheduledAtMs,
+            ok: false,
+            message: error instanceof Error ? error.message : String(error),
+          };
+          sampleErrors.push(failure);
+          gcCheckpoints.push(failure);
+          throw new Error("Phase 9 GC checkpoint failed; aborting the formal window: "
+            + failure.message, { cause: error });
+        }
+        elapsedMs = Date.now() - startedAt;
+        nextGcAtMs = advancePhase9Deadline(
+          nextGcAtMs,
+          configuration.gcIntervalMs,
+          elapsedMs,
+        );
+        handled = true;
+      }
+      if (elapsedMs >= nextWorkloadAtMs) {
+        try {
+          cycles.push(await runPhase9WorkloadCycle(
+            cdp,
+            prepared.rect,
+            args,
+            startedAt,
+            cycleIndex,
+          ));
+        } catch (error) {
+          const failure = {
+            kind: "workload",
+            cycle: cycleIndex + 1,
+            elapsedMs: Date.now() - startedAt,
+            passed: false,
+            message: error instanceof Error ? error.message : String(error),
+          };
+          sampleErrors.push(failure);
+          cycles.push(failure);
+          throw new Error("Phase 9 workload cycle failed; aborting the formal window: "
+            + failure.message, { cause: error });
+        }
+        cycleIndex += 1;
+        elapsedMs = Date.now() - startedAt;
+        nextWorkloadAtMs = advancePhase9Deadline(
+          nextWorkloadAtMs,
+          configuration.workloadIntervalMs,
+          elapsedMs,
+        );
+        handled = true;
+      }
+      if (!handled) {
+        const nextDeadline = Math.min(nextSampleAtMs, nextGcAtMs, nextWorkloadAtMs);
+        await wait(Math.max(10, Math.min(100, nextDeadline - elapsedMs)));
+      }
+    }
+
+    try {
+      samples.push(await readPhase9Sample(cdp, workerTracker, startedAt));
+    } catch (error) {
+      const failure = {
+        kind: "final-sample",
+        elapsedMs: Date.now() - startedAt,
+        message: error instanceof Error ? error.message : String(error),
+      };
+      sampleErrors.push(failure);
+      samples.push({ ...failure, workerVisible: false, heap: null, runtime: null });
+      throw new Error("Phase 9 final sample failed: " + failure.message, { cause: error });
+    }
+    try {
+      gcCheckpoints.push(await collectPhase9GcCheckpoint(
+        cdp,
+        workerTracker,
+        startedAt,
+        configuration.durationMs,
+      ));
+    } catch (error) {
+      const failure = {
+        kind: "final-gc",
+        elapsedMs: Date.now() - startedAt,
+        scheduledAtMs: configuration.durationMs,
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      };
+      sampleErrors.push(failure);
+      gcCheckpoints.push(failure);
+      throw new Error("Phase 9 final GC checkpoint failed: " + failure.message, { cause: error });
+    }
+
+    const [bench, finalDomEvidence, browserWindowFinal] = await Promise.all([
+      evaluateJson(cdp, () => window.__CANDLESCOPE_DRAWING_BENCH__?.report?.() || null),
+      readDrawingEngineDomEvidence(cdp, args),
+      ensureHeadedBenchmarkWindow(cdp, browserWindowId, args.headless),
+    ]);
+    probeStopped = await stopPhase6Probe(cdp);
+    const formalEligible = isFormalDrawingSoakConfiguration(configuration);
+    const frameMedianMs = bench?.timingSummary?.metrics?.frameIntervalMs?.p50Ms;
+    const refreshRateHz = Number.isFinite(frameMedianMs) && frameMedianMs > 0
+      ? 1_000 / frameMedianMs
+      : null;
+    const report = {
+      generatedAt: new Date().toISOString(),
+      phase: "phase9",
+      context: {
+        git,
+        browser: {
+          name: browserVersion.result?.product || "Chromium",
+          version: browserVersion.result?.product || null,
+          userAgent: browserVersion.result?.userAgent || null,
+        },
+        machine: machineContext(),
+        mode: args.engineMode,
+      },
+      environment: {
+        viewport: DEFAULT_VIEWPORT,
+        dpr: args.dpr,
+        refreshRateHz,
+        productionBuild: true,
+        productionBuildVerification: "managed-vite-preview",
+        mock: servers?.mockMeta ?? null,
+        buildEnvironment,
+      },
+      configuration: {
+        ...configuration,
+        url: args.url,
+        serverMode: "managed-preview",
+        headless: args.headless,
+        bars: args.bars,
+        dpr: args.dpr,
+        seed: args.seed,
+        intervalSeconds: args.intervalSeconds,
+        mockEndTime: args.mockEndTime,
+        drawingCoordinateProjectorMode: buildEnvironment?.VITE_DRAWING_COORDINATE_PROJECTOR
+          ?? null,
+        drawingDocumentAuthority: buildEnvironment?.VITE_DRAWING_DOCUMENT_AUTHORITY ?? null,
+        drawingEngineMode: args.engineMode,
+        drawingInteractionSurfaceMode: args.interactionSurfaceMode,
+        drawingRasterBackend: args.rasterBackend,
+        formalEligible,
+        smokeOnly: !formalEligible,
+      },
+      fixture: {
+        name: fixture.metadata.name,
+        entities: fixture.metadata.drawingCount,
+        points: fixture.metadata.pointCount,
+        freehandPoints: fixture.metadata.freehandPointCount,
+        spans: fixture.metadata.freehandSpanCount,
+        bars: args.bars,
+        seed: fixture.metadata.seed,
+        startTime: fixture.metadata.startTime,
+        intervalSeconds: fixture.metadata.intervalSeconds,
+        storageChars: fixture.metadata.storageChars,
+        rawSha256: createHash("sha256").update(fixture.raw, "utf8").digest("hex"),
+        storageKey: fixture.storageKey,
+      },
+      readiness: {
+        chart: prepared.ready,
+        drawingEngineDomEvidenceInitial: prepared.drawingEngineDomEvidence,
+        drawingEngineDomEvidenceFinal: finalDomEvidence,
+        phase6Runtime: prepared.phase6Runtime,
+        baselineRuntime: prepared.baselineRuntime,
+        browserWindowInitial: prepared.browserWindowInitial,
+        refreshRatePreflight: prepared.refreshRatePreflight,
+        browserWindowFinal,
+        workerTargetsInitial: prepared.workerTargets,
+        workerTargetsFinal: workerTracker.targets(),
+        probeStopped,
+      },
+      samples,
+      gcCheckpoints,
+      cycles,
+      diagnostics: {
+        sampleErrors,
+        consoleErrors: diagnostics.consoleErrors,
+        runtimeExceptions: diagnostics.runtimeExceptions,
+        networkFailures: diagnostics.networkFailures,
+        longTasks: Array.isArray(bench?.attributableLongTasks)
+          ? bench.attributableLongTasks
+          : null,
+      },
+      browserTiming: {
+        windowDurationMs: bench?.timingSummary?.windowDurationMs ?? null,
+        refreshRateHz,
+        longTaskSupported: bench?.longTaskSupported ?? null,
+        longTaskCounts: {
+          total: Number.isSafeInteger(bench?.totalLongTaskCount)
+            ? bench.totalLongTaskCount
+            : null,
+          retained: Number.isSafeInteger(bench?.retainedLongTaskCount)
+            ? bench.retainedLongTaskCount
+            : null,
+          dropped: Number.isSafeInteger(bench?.droppedLongTaskCount)
+            ? bench.droppedLongTaskCount
+            : null,
+          excluded: Number.isSafeInteger(bench?.excludedLongTaskCount)
+            ? bench.excludedLongTaskCount
+            : null,
+          attributable: Array.isArray(bench?.attributableLongTasks)
+            ? bench.attributableLongTasks.length
+            : null,
+        },
+        instrumentationWindows: Array.isArray(bench?.instrumentationWindows)
+          ? bench.instrumentationWindows
+          : null,
+        rawLongTasks: Array.isArray(bench?.longTasks) ? bench.longTasks : null,
+        eventTimingSupported: bench?.eventTimingSupported ?? null,
+        inputEvents: bench?.inputEvents ?? null,
+        captureStats: bench?.captureStats ?? null,
+        metrics: bench?.timingSummary?.metrics ?? null,
+      },
+      runMode: {
+        name: formalEligible ? "phase9-soak-formal" : "phase9-soak-smoke",
+        formalEligible,
+        smokeOnly: !formalEligible,
+      },
+    };
+    report.acceptance = assessDrawingSoak(report);
+    return report;
+  } catch (error) {
+    if (!probeStopped) probeStopped = await stopPhase6Probe(cdp).catch(() => null);
+    const generatedAt = new Date().toISOString();
+    const failure = {
+      message: error instanceof Error ? error.message : String(error),
+      name: error instanceof Error ? error.name : null,
+      capturedAt: generatedAt,
+    };
+    const partialReport = {
+      generatedAt,
+      phase: "phase9",
+      context: {
+        git,
+        browser: {
+          name: browserVersion.result?.product || "Chromium",
+          version: browserVersion.result?.product || null,
+          userAgent: browserVersion.result?.userAgent || null,
+        },
+        machine: machineContext(),
+        mode: args.engineMode,
+      },
+      environment: {
+        viewport: DEFAULT_VIEWPORT,
+        dpr: args.dpr,
+        productionBuild: true,
+        productionBuildVerification: "managed-vite-preview",
+        mock: servers?.mockMeta ?? null,
+        buildEnvironment,
+      },
+      configuration: {
+        ...configuration,
+        url: args.url,
+        serverMode: "managed-preview",
+        headless: args.headless,
+        bars: args.bars,
+        dpr: args.dpr,
+        seed: args.seed,
+        intervalSeconds: args.intervalSeconds,
+        mockEndTime: args.mockEndTime,
+        drawingCoordinateProjectorMode: buildEnvironment?.VITE_DRAWING_COORDINATE_PROJECTOR
+          ?? null,
+        drawingDocumentAuthority: buildEnvironment?.VITE_DRAWING_DOCUMENT_AUTHORITY ?? null,
+        drawingEngineMode: args.engineMode,
+        drawingInteractionSurfaceMode: args.interactionSurfaceMode,
+        drawingRasterBackend: args.rasterBackend,
+      },
+      fixture: {
+        name: fixture.metadata.name,
+        entities: fixture.metadata.drawingCount,
+        points: fixture.metadata.pointCount,
+        freehandPoints: fixture.metadata.freehandPointCount,
+        spans: fixture.metadata.freehandSpanCount,
+        bars: args.bars,
+        seed: fixture.metadata.seed,
+        startTime: fixture.metadata.startTime,
+        intervalSeconds: fixture.metadata.intervalSeconds,
+        storageChars: fixture.metadata.storageChars,
+        rawSha256: createHash("sha256").update(fixture.raw, "utf8").digest("hex"),
+        storageKey: fixture.storageKey,
+      },
+      readiness: {
+        chart: prepared?.ready ?? null,
+        drawingEngineDomEvidenceInitial: prepared?.drawingEngineDomEvidence ?? null,
+        phase6Runtime: prepared?.phase6Runtime ?? null,
+        baselineRuntime: prepared?.baselineRuntime ?? null,
+        browserWindowInitial: prepared?.browserWindowInitial ?? null,
+        refreshRatePreflight: prepared?.refreshRatePreflight ?? null,
+        workerTargetsInitial: prepared?.workerTargets ?? null,
+        workerTargetsFinal: workerTracker.targets(),
+        probeStopped,
+      },
+      samples,
+      gcCheckpoints,
+      cycles,
+      diagnostics: {
+        sampleErrors,
+        consoleErrors: diagnostics.consoleErrors,
+        runtimeExceptions: diagnostics.runtimeExceptions,
+        networkFailures: diagnostics.networkFailures,
+        longTasks: null,
+      },
+      failure,
+      acceptance: {
+        passed: false,
+        formalEligible: false,
+        formalAcceptance: { passed: false, eligible: false },
+        smokeAcceptance: { passed: false, formalEligible: false },
+        failureReasons: ["runnerFailure"],
+      },
+      runMode: {
+        name: "phase9-soak-failed",
+        formalEligible: false,
+        smokeOnly: false,
+      },
+    };
+    const outputPath = writePhase9Report(args, git, partialReport);
+    throw new Error(failure.message + "\nWrote partial Phase 9 report to " + outputPath, {
+      cause: error,
+    });
+  } finally {
+    if (!probeStopped) await stopPhase6Probe(cdp).catch(() => {});
+    if (prepared?.bootstrapIdentifier) {
+      await cdp.send("Page.removeScriptToEvaluateOnNewDocument", {
+        identifier: prepared.bootstrapIdentifier,
+      }).catch(() => {});
+    }
+  }
 }
 
 function durationSamples(snapshot, key) {
@@ -2757,15 +4090,17 @@ async function waitForPhase6SceneReady(cdp, {
       return {
         ...runtime,
         stampCurrent: Boolean(requested && published
-          && requested.scopeKey === published.scopeKey
-          && requested.documentRevision === published.documentRevision
-          && requested.dataRevision === published.dataRevision
-          && requested.projectionRevision === published.projectionRevision
-          && requested.viewportRevision === published.viewportRevision
-          && requested.sizeRevision === published.sizeRevision
-          && requested.dprRevision === published.dprRevision
-          && requested.themeRevision === published.themeRevision
-          && requested.surfaceRevision === published.surfaceRevision),
+        && requested.scopeKey === published.scopeKey
+        && requested.documentRevision === published.documentRevision
+        && requested.surfaceGeneration === published.surfaceGeneration
+        && requested.dataRevision === published.dataRevision
+        && requested.projectionRevision === published.projectionRevision
+        && requested.lineageIndexRevision === published.lineageIndexRevision
+        && requested.viewportRevision === published.viewportRevision
+        && requested.themeRevision === published.themeRevision
+        && requested.widthCssPx === published.widthCssPx
+        && requested.heightCssPx === published.heightCssPx
+        && requested.dpr === published.dpr),
       };
     });
     const ready = phase6SceneReadiness(latest, { expectedRawPoints, requireWorker });
@@ -3231,14 +4566,42 @@ function readGitContext() {
     encoding: "utf8",
     windowsHide: true,
   }).trim();
+  const buildInputPathspecs = [
+    "public",
+    "src",
+    "scripts",
+    "index.html",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "tsconfig.app.json",
+    "tsconfig.node.json",
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.ts",
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.production.local",
+  ];
   try {
     const commit = run(["rev-parse", "HEAD"]);
     const status = run(["status", "--short"]);
+    const buildInputStatus = run([
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--ignored=matching",
+      "--",
+      ...buildInputPathspecs,
+    ]);
     return {
       commit,
       shortCommit: commit.slice(0, 8),
       dirty: status.length > 0,
       status: status ? status.split(/\r?\n/) : [],
+      buildInputsDirty: buildInputStatus.length > 0,
+      buildInputStatus: buildInputStatus ? buildInputStatus.split(/\r?\n/) : [],
       buildInputFingerprint: hashBuildInputs(),
     };
   } catch {
@@ -3247,6 +4610,8 @@ function readGitContext() {
       shortCommit: "unknown",
       dirty: null,
       status: [],
+      buildInputsDirty: null,
+      buildInputStatus: [],
       buildInputFingerprint: hashBuildInputs(),
     };
   }
@@ -4019,7 +5384,11 @@ function buildPhase3Acceptance(report, args) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const git = readGitContext();
+  let git = readGitContext();
+  if (args.phase === "phase9" && git.buildInputsDirty !== false) {
+    throw new Error("Phase 9 requires committed, reproducible build inputs before starting: "
+      + JSON.stringify(git.buildInputStatus));
+  }
   const selectedScenarios = DEFAULT_SCENARIOS.filter((scenario) => args.scenarios.includes(scenario.id));
   const managed = !args.url;
   const buildEnvironment = managed
@@ -4041,6 +5410,16 @@ async function main() {
     args.interactionSurfaceMode,
     args.rasterBackend,
   );
+  if (args.phase === "phase9") {
+    const postBuildGit = readGitContext();
+    if (postBuildGit.buildInputsDirty !== false
+      || postBuildGit.commit !== git.commit
+      || postBuildGit.buildInputFingerprint !== git.buildInputFingerprint) {
+      throw new Error("Phase 9 build inputs changed between provenance preflight and the production build: "
+        + JSON.stringify({ before: git, after: postBuildGit }));
+    }
+    git = postBuildGit;
+  }
   const servers = managed ? await startManagedServers(args) : null;
   if (servers) args.url = servers.url;
   if (!args.url.endsWith("/")) args.url += "/";
@@ -4072,10 +5451,14 @@ async function main() {
   });
 
   let cdp = null;
+  let workerTracker = null;
   try {
     const targets = await waitForDebugTarget(debugPort, args.timeoutMs);
     const page = targets.find((target) => target.type === "page") || targets[0];
     cdp = await connectWebSocket(page.webSocketDebuggerUrl);
+    if (args.phase === "phase9") {
+      workerTracker = await createDrawingWorkerHeapTracker(cdp);
+    }
     const diagnostics = {
       consoleErrors: [],
       runtimeExceptions: [],
@@ -4108,6 +5491,7 @@ async function main() {
     await cdp.send("Page.enable");
     await cdp.send("Network.enable");
     await cdp.send("Performance.enable", { timeDomain: "timeTicks" });
+    if (args.phase === "phase9") await cdp.send("HeapProfiler.enable");
     await cdp.send("Emulation.setDeviceMetricsOverride", {
       width: DEFAULT_VIEWPORT.width,
       height: DEFAULT_VIEWPORT.height,
@@ -4130,13 +5514,59 @@ async function main() {
       intervalSeconds: args.intervalSeconds,
       endTime: args.mockEndTime,
     });
-    const phase6PriceProfile = args.phase === "phase6"
+    const phase6PriceProfile = args.phase === "phase6" || args.phase === "phase9"
       ? Object.freeze({ start: mockBars[0].close, end: mockBars.at(-1).close })
       : null;
     const mockCloseByTime = new Map(mockBars.map((bar) => [bar.time, bar.close]));
     const lineageContract = selectedScenarios.some(
       (scenario) => scenario.id === PHASE6_SCENARIO_IDS.freehandLineageZoomPan,
     ) ? buildPhase6LineageFixtureContract(mockBars) : null;
+
+    if (args.phase === "phase9") {
+      const scenario = selectedScenarios[0];
+      const fixture = buildDrawingFixture(scenario.fixture, {
+        scopeKey: "binance:spot:BTCUSDT__main",
+        startTime: fixtureStartTime,
+        intervalSeconds: (args.intervalSeconds * Math.max(1, args.bars - 1))
+          / fixtureTimeOffsetDenominator(scenario.fixture),
+        seed: args.seed,
+        priceProfile: phase6PriceProfile,
+      });
+      assertFixtureOverlapsMockPriceRange(fixture, servers?.mockMeta);
+      const report = await runPhase9Soak({
+        cdp,
+        workerTracker,
+        fixture,
+        scenario,
+        args,
+        browserWindowId,
+        diagnostics,
+        git,
+        browserVersion,
+        servers,
+        buildEnvironment,
+      });
+      const generatedStamp = report.generatedAt.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+      const defaultOut = path.resolve(
+        FRONTEND_ROOT,
+        "..",
+        "docs",
+        "perf-baselines",
+        "drawing-engine-v2",
+        "phase9-soak-" + git.shortCommit + "-" + generatedStamp + "-bars"
+          + args.bars + "-dpr1_5.json",
+      );
+      const outputPath = args.out ? path.resolve(process.cwd(), args.out) : defaultOut;
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+      fs.writeFileSync(outputPath, stableStringify(report, 2) + "\n", "utf8");
+      console.log("Wrote Phase 9 drawing soak report to " + outputPath);
+      console.log(JSON.stringify(report.acceptance, null, 2));
+      const runPassed = report.acceptance.formalEligible
+        ? report.acceptance.passed === true
+        : report.acceptance.smokeAcceptance?.passed === true;
+      if (!runPassed) process.exitCode = 1;
+      return;
+    }
 
     for (const scenario of selectedScenarios) {
       const scenarioPriceProfile = scenario.id === PHASE6_SCENARIO_IDS.freehandLineageZoomPan
@@ -4371,6 +5801,7 @@ async function main() {
       process.exitCode = 1;
     }
   } finally {
+    workerTracker?.dispose?.();
     cdp?.close?.();
     await stopProcess(chrome);
     await removeDirectoryWithRetries(profileDirectory);

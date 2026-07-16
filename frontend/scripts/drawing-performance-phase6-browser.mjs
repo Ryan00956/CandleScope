@@ -174,6 +174,7 @@ export function phase6BrowserProbeBootstrap() {
       renderedPoints: gauge("renderedPoints"),
       renderedPointsMax: gaugeMaximum("renderedPoints"),
       lodRatio: gauge("lodRatio"),
+      cacheBytes: gauge("cacheBytes"),
       cacheBytesMax: gaugeMaximum("cacheBytes"),
     };
   };
@@ -236,6 +237,15 @@ export function phase6BrowserProbeBootstrap() {
       finalCounters.stalePublishes,
       initialCounters.stalePublishes,
     ) ?? stalePublishRuntime;
+    const initialSceneFallbackCount = chooseNumber(
+      valueAt(initialPhase6, ["sceneFallbackCount"]),
+    );
+    const sceneFallbackCount = chooseNumber(valueAt(phase6, ["sceneFallbackCount"]));
+    const sceneRuntimeFaultCount = chooseNumber(
+      valueAt(phase6, ["sceneRuntimeFaultCount"]),
+      sceneFallbackCount,
+    );
+    const sceneFallbackDelta = counterDelta(sceneFallbackCount, initialSceneFallbackCount);
     const initialLodObservation = readLodObservation(initialPhase6, initialCounters);
     const finalLodObservation = readLodObservation(phase6, finalCounters);
     // Keep raw/rendered/ratio from one accepted plan. Prefer the observation
@@ -308,6 +318,17 @@ export function phase6BrowserProbeBootstrap() {
         initialCounters.staleResultDrops,
       ) ?? chooseNumber(valueAt(phase6, ["staleResultDropDelta", "staleResultDrops"])),
       stalePublishDelta,
+      stalePublishCount: stalePublishRuntime,
+      sceneFallbackCount,
+      sceneRuntimeFaultCount,
+      legacyFallbackSucceededCount: chooseNumber(
+        valueAt(phase6, ["legacyFallbackSucceededCount"]),
+      ),
+      sceneFallbackDelta,
+      sceneFallbackLastReason: sceneFallbackCount !== null && sceneFallbackCount > 0
+        && typeof valueAt(phase6, ["sceneFallbackLastReason"]) === "string"
+        ? valueAt(phase6, ["sceneFallbackLastReason"])
+        : null,
       rawPointsMax: lodObservation?.rawPoints ?? null,
       renderedPointsMax: lodObservation?.renderedPoints ?? null,
       lodRatio: lodObservation?.lodRatio ?? null,
@@ -334,10 +355,32 @@ export function phase6BrowserProbeBootstrap() {
         finalCounters.finalProjections,
         initialCounters.finalProjections,
       ),
+      cacheBytes: chooseNumber(
+        valueAt(phase6, ["cacheBytes"]),
+        finalCounters.cacheBytes,
+      ),
       cacheBytesMax: chooseMaximum(
-        valueAt(phase6, ["cacheBytesMax", "cacheBytes"]),
+        valueAt(phase6, ["cacheBytesMax"]),
         finalCounters.cacheBytesMax,
       ),
+      cacheBudgetBytes: chooseNumber(valueAt(phase6, ["cacheBudgetBytes"])),
+      cacheHardLimitBytes: chooseNumber(valueAt(phase6, ["cacheHardLimitBytes"])),
+      cacheEntryCount: chooseNumber(valueAt(phase6, ["cacheEntryCount"])),
+      cacheBudgetEvictionCount: chooseNumber(
+        valueAt(phase6, ["cacheBudgetEvictionCount"]),
+      ),
+      cacheEntryBytes: chooseNumber(valueAt(phase6, ["cacheEntryBytes"])),
+      cacheEntryBudgetBytes: chooseNumber(valueAt(phase6, ["cacheEntryBudgetBytes"])),
+      cacheMetadataBytes: chooseNumber(valueAt(phase6, ["cacheMetadataBytes"])),
+      cacheMetadataBudgetBytes: chooseNumber(valueAt(phase6, ["cacheMetadataBudgetBytes"])),
+      cacheRecentHierarchyKeyCount: chooseNumber(
+        valueAt(phase6, ["cacheRecentHierarchyKeyCount"]),
+      ),
+      cacheRecentHierarchyKeysPerRequestLimit: chooseNumber(
+        valueAt(phase6, ["cacheRecentHierarchyKeysPerRequestLimit"]),
+      ),
+      cacheRecentRequestCount: chooseNumber(valueAt(phase6, ["cacheRecentRequestCount"])),
+      cacheRecentRequestLimit: chooseNumber(valueAt(phase6, ["cacheRecentRequestLimit"])),
       lastRequestedStamp: safeClone(valueAt(phase6, ["lastRequestedStamp", "requestedStamp"])),
       lastPublishedStamp: safeClone(valueAt(phase6, ["lastPublishedStamp", "publishedStamp"])),
       lastPaintedStamp: safeClone(valueAt(

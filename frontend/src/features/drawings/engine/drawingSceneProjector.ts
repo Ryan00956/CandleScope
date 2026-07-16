@@ -9,6 +9,7 @@ import type {
   DrawingEntity,
   DrawingStyle,
 } from "../core/drawingDocument.js";
+import { MAX_DRAWING_DOCUMENT_ENTITIES } from "../core/drawingDocument.js";
 import type {
   DrawingDataPoint,
   DrawingHit,
@@ -26,11 +27,14 @@ import type {
 } from "../geometry/drawingBounds.js";
 import {
   createDrawingLodHierarchy,
+  DRAWING_LOD_DEFAULT_CACHE_BUDGET_BYTES,
+  DRAWING_LOD_MAX_CACHE_BUDGET_BYTES,
   DRAWING_LOD_TOLERANCE_CSS_PX,
   DrawingByteWeightedLruCache,
   selectDrawingLod,
 } from "../geometry/drawingLod.js";
 import type {
+  DrawingByteWeightedLruSnapshot,
   DrawingLodHierarchy,
   DrawingLodSelection,
   DrawingLodToleranceClass,
@@ -2279,14 +2283,42 @@ interface DrawingProjectionCache {
 
 const drawingProjectionCaches = new WeakMap<object, DrawingProjectionCache>();
 const DRAWING_RECENT_SCREEN_HIERARCHIES_PER_REQUEST = 3;
+const DRAWING_RECENT_SCREEN_HIERARCHY_REQUEST_LIMIT = MAX_DRAWING_DOCUMENT_ENTITIES;
+const DRAWING_SCREEN_HIERARCHY_METADATA_BUDGET_BYTES = 1024 * 1024;
+const DRAWING_SCREEN_HIERARCHY_REQUEST_METADATA_BYTES = 128;
+const DRAWING_SCREEN_HIERARCHY_KEY_REFERENCE_BYTES = 16;
+
+function removeRecentDrawingScreenHierarchyKey(
+  recentByRequest: Map<number, string[]>,
+  hierarchyKey: string,
+): void {
+  for (const [requestId, recent] of recentByRequest) {
+    const index = recent.indexOf(hierarchyKey);
+    if (index < 0) continue;
+    recent.splice(index, 1);
+    if (recent.length === 0) recentByRequest.delete(requestId);
+  }
+}
 
 function drawingProjectionCache(adapter: DrawingSceneProjectionAdapter): DrawingProjectionCache {
   const key = adapter as object;
   const cached = drawingProjectionCaches.get(key);
   if (cached) return cached;
+  const recentScreenHierarchyKeys = new Map<number, string[]>();
   const created: DrawingProjectionCache = {
-    entries: new DrawingByteWeightedLruCache(),
-    recentScreenHierarchyKeys: new Map(),
+    entries: new DrawingByteWeightedLruCache({
+      budgetBytes: DRAWING_LOD_DEFAULT_CACHE_BUDGET_BYTES
+        - DRAWING_SCREEN_HIERARCHY_METADATA_BUDGET_BYTES,
+      onRemove: (value, hierarchyKey) => {
+        if (value.kind === "screen-hierarchy") {
+          removeRecentDrawingScreenHierarchyKey(
+            recentScreenHierarchyKeys,
+            hierarchyKey,
+          );
+        }
+      },
+    }),
+    recentScreenHierarchyKeys,
     requestIds: new WeakMap(),
     warmedSceneWorldKeys: new WeakMap(),
     nextRequestId: 1,
@@ -2295,21 +2327,57 @@ function drawingProjectionCache(adapter: DrawingSceneProjectionAdapter): Drawing
   return created;
 }
 
+/** @internal Exported for a low-cost bound regression without projecting 256 scenes. */
+export function retainBoundedDrawingScreenHierarchyMetadata(
+  recentByRequest: Map<number, string[]>,
+  requestId: number,
+  hierarchyKey: string,
+  options: Readonly<{
+    onEvict: (hierarchyKey: string) => void;
+    perRequestLimit: number;
+    requestLimit: number;
+  }>,
+): void {
+  const recent = recentByRequest.get(requestId) ?? [];
+  recentByRequest.delete(requestId);
+  const priorIndex = recent.indexOf(hierarchyKey);
+  if (priorIndex >= 0) recent.splice(priorIndex, 1);
+  recent.push(hierarchyKey);
+  while (recent.length > options.perRequestLimit) {
+    const evictedHierarchyKey = recent.shift();
+    if (!evictedHierarchyKey) continue;
+    options.onEvict(evictedHierarchyKey);
+  }
+  recentByRequest.set(requestId, recent);
+  while (recentByRequest.size > options.requestLimit) {
+    const oldest = recentByRequest.entries().next().value as
+      | [number, string[]]
+      | undefined;
+    if (!oldest) break;
+    recentByRequest.delete(oldest[0]);
+    for (const staleHierarchyKey of oldest[1]) {
+      options.onEvict(staleHierarchyKey);
+    }
+  }
+}
+
 function retainRecentDrawingScreenHierarchy(
   cache: DrawingProjectionCache,
   requestId: number,
   hierarchyKey: string,
 ): void {
-  const recent = cache.recentScreenHierarchyKeys.get(requestId) ?? [];
-  const priorIndex = recent.indexOf(hierarchyKey);
-  if (priorIndex >= 0) recent.splice(priorIndex, 1);
-  recent.push(hierarchyKey);
-  while (recent.length > DRAWING_RECENT_SCREEN_HIERARCHIES_PER_REQUEST) {
-    const evictedHierarchyKey = recent.shift();
-    if (!evictedHierarchyKey) continue;
-    deleteDrawingScreenHierarchy(cache, evictedHierarchyKey);
-  }
-  cache.recentScreenHierarchyKeys.set(requestId, recent);
+  retainBoundedDrawingScreenHierarchyMetadata(
+    cache.recentScreenHierarchyKeys,
+    requestId,
+    hierarchyKey,
+    {
+      onEvict: (staleHierarchyKey) => {
+        deleteDrawingScreenHierarchy(cache, staleHierarchyKey);
+      },
+      perRequestLimit: DRAWING_RECENT_SCREEN_HIERARCHIES_PER_REQUEST,
+      requestLimit: DRAWING_RECENT_SCREEN_HIERARCHY_REQUEST_LIMIT,
+    },
+  );
 }
 
 function deleteDrawingScreenHierarchy(
@@ -2391,6 +2459,46 @@ export function clearDrawingSceneProjectorCaches(
   const cache = drawingProjectionCaches.get(key);
   cache?.entries.dispose();
   drawingProjectionCaches.delete(key);
+}
+
+/** Read-only Phase 9 evidence for the adapter-scoped world/LOD cache. */
+export interface DrawingSceneProjectorCacheSnapshot
+  extends DrawingByteWeightedLruSnapshot<string> {
+  readonly entryBudgetBytes: number;
+  readonly entryBytes: number;
+  readonly metadataBudgetBytes: number;
+  readonly metadataBytes: number;
+  readonly recentHierarchyKeyCount: number;
+  readonly recentHierarchyKeysPerRequestLimit: number;
+  readonly recentRequestCount: number;
+  readonly recentRequestLimit: number;
+}
+
+export function readDrawingSceneProjectorCacheSnapshot(
+  adapter: DrawingSceneProjectionAdapter,
+): DrawingSceneProjectorCacheSnapshot | null {
+  const cache = drawingProjectionCaches.get(adapter as object);
+  if (!cache) return null;
+  const entries = cache.entries.snapshot();
+  const recentRequestCount = cache.recentScreenHierarchyKeys.size;
+  const recentHierarchyKeyCount = [...cache.recentScreenHierarchyKeys.values()]
+    .reduce((total, keys) => total + keys.length, 0);
+  const metadataBytes = recentRequestCount * DRAWING_SCREEN_HIERARCHY_REQUEST_METADATA_BYTES
+    + recentHierarchyKeyCount * DRAWING_SCREEN_HIERARCHY_KEY_REFERENCE_BYTES;
+  return Object.freeze({
+    ...entries,
+    budgetBytes: DRAWING_LOD_DEFAULT_CACHE_BUDGET_BYTES,
+    entryBudgetBytes: entries.budgetBytes,
+    entryBytes: entries.totalBytes,
+    hardLimitBytes: DRAWING_LOD_MAX_CACHE_BUDGET_BYTES,
+    metadataBudgetBytes: DRAWING_SCREEN_HIERARCHY_METADATA_BUDGET_BYTES,
+    metadataBytes,
+    totalBytes: entries.totalBytes + metadataBytes,
+    recentHierarchyKeyCount,
+    recentHierarchyKeysPerRequestLimit: DRAWING_RECENT_SCREEN_HIERARCHIES_PER_REQUEST,
+    recentRequestCount,
+    recentRequestLimit: DRAWING_RECENT_SCREEN_HIERARCHY_REQUEST_LIMIT,
+  });
 }
 
 function pointToSegmentDistanceSquared(
@@ -2608,7 +2716,9 @@ function selectFreehandLod(
   ].join(":");
   const cached = cache.entries.get(lodKey);
   if (cached?.kind === "lod") {
-    retainRecentDrawingScreenHierarchy(cache, requestId, hierarchyKey);
+    if (cache.entries.has(hierarchyKey)) {
+      retainRecentDrawingScreenHierarchy(cache, requestId, hierarchyKey);
+    }
     drawingPerfCounters.setGauge("cacheBytes", cache.entries.totalBytes());
     const lineageSpanCoordinates = stroke && stroke.spans.length > 0
       ? projectLineageSpanCoordinates(
@@ -2832,7 +2942,7 @@ function selectFreehandLod(
       minimumImportanceCssPx,
     });
     if (hierarchy.finitePointCount === 0) return null;
-    cache.entries.set(hierarchyKey, Object.freeze({
+    const hierarchyCached = cache.entries.set(hierarchyKey, Object.freeze({
       kind: "screen-hierarchy" as const,
       hierarchy,
       priceProjectionResidualCssPx,
@@ -2844,7 +2954,7 @@ function selectFreehandLod(
         + hierarchy.estimatedByteSize
         + screenCoordinates.byteLength,
     ));
-    retainRecentDrawingScreenHierarchy(cache, requestId, hierarchyKey);
+    if (hierarchyCached) retainRecentDrawingScreenHierarchy(cache, requestId, hierarchyKey);
   }
 
   if (!hierarchy || !screenCoordinates) return null;

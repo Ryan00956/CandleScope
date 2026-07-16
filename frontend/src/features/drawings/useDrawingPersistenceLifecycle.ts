@@ -64,6 +64,7 @@ import type {
 import {
   projectDrawingScene,
   projectDrawingSceneCanonicalGapIndexes,
+  readDrawingSceneProjectorCacheSnapshot,
 } from "./engine/drawingSceneProjector.js";
 import { compareDrawingShadowParity } from "./engine/drawingShadowParity.js";
 import { captureLegacyDrawingParityProbe } from "./legacy/legacyDrawingParityProbe.js";
@@ -816,10 +817,26 @@ export function useDrawingPersistenceLifecycle({
     createMutableDrawingDelegate(getDrawingSceneAdapter)
   ));
   const mutationStartedRef = useRef(false);
+  const sceneFallbackCountRef = useRef(0);
+  const legacyFallbackSucceededCountRef = useRef(0);
+  const sceneFallbackLastReasonRef = useRef<string | null>(null);
+  const recordSceneFallback = useCallback((reason: unknown): void => {
+    drawingPerfCounters.incrementCounter("sceneRuntimeFaultCount");
+    sceneFallbackCountRef.current = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      sceneFallbackCountRef.current + 1,
+    );
+    sceneFallbackLastReasonRef.current = reason instanceof Error
+      ? `${reason.name}: ${reason.message}`
+      : typeof reason === "string"
+        ? reason
+        : "unknown scene fallback";
+  }, []);
   const [rasterBackend] = useState(() => resolveDrawingRasterBackend());
   const sceneCanaryEnabledRef = useRef(engineMode.effective === "scene-canary");
   const [sceneRuntimeErrorHandlerDelegate] = useState(() => (
     createMutableDrawingDelegate<(error: unknown) => void>((error) => {
+      recordSceneFallback(error);
       console.warn("Drawing scene runtime failed before its lifecycle handler was ready", error);
     })
   ));
@@ -975,6 +992,7 @@ export function useDrawingPersistenceLifecycle({
     if (engineMode.effective !== "scene-canary"
       || !sceneCanaryEnabledRef.current
       || mutationStartedRef.current) return false;
+    recordSceneFallback(reason);
     if (sceneSurfaceRetryHandleRef.current !== null) {
       clearTimeout(sceneSurfaceRetryHandleRef.current);
       sceneSurfaceRetryHandleRef.current = null;
@@ -1009,8 +1027,20 @@ export function useDrawingPersistenceLifecycle({
       return false;
     }
     console.warn("Drawing scene initialization failed before the first mutation; using the legacy surface", reason);
+    legacyFallbackSucceededCountRef.current = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      legacyFallbackSucceededCountRef.current + 1,
+    );
+    drawingPerfCounters.incrementCounter("legacyFallbackSucceededCount");
     return true;
-  }, [engineMode.effective, onInteractionSurfaceFallback, sceneBridge, sceneDocumentOnlyEnabled, sceneRuntime]);
+  }, [
+    engineMode.effective,
+    onInteractionSurfaceFallback,
+    recordSceneFallback,
+    sceneBridge,
+    sceneDocumentOnlyEnabled,
+    sceneRuntime,
+  ]);
 
   const scheduleVisibleSceneSurfaceRetry = useCallback((attemptLimit: number): boolean => {
     if (sceneSurfaceRetryCountRef.current >= attemptLimit) return false;
@@ -1035,13 +1065,14 @@ export function useDrawingPersistenceLifecycle({
         // A pre-boundary fallback failure has no retained plan and must keep
         // the whole scope closed.
         if (!mutationStartedRef.current) scopeReadyRef.current = false;
+        else recordSceneFallback(error);
         console.warn("Drawing scene runtime failed after the fallback boundary; retaining the last valid plan", error);
       }
     });
     return () => {
       sceneRuntimeErrorHandlerDelegate.write(() => {});
     };
-  }, [fallbackVisibleSceneBeforeMutation, sceneRuntimeErrorHandlerDelegate]);
+  }, [fallbackVisibleSceneBeforeMutation, recordSceneFallback, sceneRuntimeErrorHandlerDelegate]);
 
   const ensureVisibleSceneSurface = useCallback((): boolean => {
     if (engineMode.effective !== "scene-canary" || !sceneCanaryEnabledRef.current) return true;
@@ -1899,8 +1930,9 @@ export function useDrawingPersistenceLifecycle({
     const runtimeSnapshot = sceneRuntime.snapshot();
     const perf = drawingPerfCounters.snapshot();
     const worker = runtimeSnapshot.worker;
-    const lineageStats = sceneAdapterGetterDelegate.read()()
-      ?.readDrawingFrameSourceLineageStats?.() ?? null;
+    const sceneAdapter = sceneAdapterGetterDelegate.read()();
+    const lineageStats = sceneAdapter?.readDrawingFrameSourceLineageStats?.() ?? null;
+    const cache = sceneAdapter ? readDrawingSceneProjectorCacheSnapshot(sceneAdapter) : null;
     const planStamp = runtimeSnapshot.plan?.stamp ?? null;
     const paintedStamp = bridgeSnapshot.lastPaintedStamp;
     const currentPlanPainted = !!planStamp
@@ -1953,12 +1985,30 @@ export function useDrawingPersistenceLifecycle({
       pendingDropDelta: worker?.queueDropCount ?? 0,
       staleResultDropDelta: worker?.staleResultCount ?? 0,
       stalePublishCount: runtimeSnapshot.staleWorkerPublishCount,
+      sceneFallbackCount: sceneFallbackCountRef.current,
+      sceneRuntimeFaultCount: sceneFallbackCountRef.current,
+      legacyFallbackSucceededCount: legacyFallbackSucceededCountRef.current,
+      sceneFallbackLastReason: sceneFallbackLastReasonRef.current,
       rawPoints,
       renderedPoints,
       lodRatio: rawPoints > 0 ? Math.min(1, renderedPoints / rawPoints) : 0,
       canonicalRawPreserved: rawPoints === canonicalRawPoints,
       vertexBudgetPassed,
-      cacheBytes: perf.gauges.cacheBytes,
+      cacheBytes: cache?.totalBytes ?? 0,
+      cacheBytesMax: Math.max(cache?.totalBytes ?? 0, perf.gaugeMaxima.cacheBytes),
+      cacheBudgetBytes: cache?.budgetBytes ?? 0,
+      cacheHardLimitBytes: cache?.hardLimitBytes ?? 0,
+      cacheEntryCount: cache?.entryCount ?? 0,
+      cacheBudgetEvictionCount: cache?.budgetEvictionCount ?? 0,
+      cacheEntryBytes: cache?.entryBytes ?? 0,
+      cacheEntryBudgetBytes: cache?.entryBudgetBytes ?? 0,
+      cacheMetadataBytes: cache?.metadataBytes ?? 0,
+      cacheMetadataBudgetBytes: cache?.metadataBudgetBytes ?? 0,
+      cacheRecentHierarchyKeyCount: cache?.recentHierarchyKeyCount ?? 0,
+      cacheRecentHierarchyKeysPerRequestLimit:
+        cache?.recentHierarchyKeysPerRequestLimit ?? 0,
+      cacheRecentRequestCount: cache?.recentRequestCount ?? 0,
+      cacheRecentRequestLimit: cache?.recentRequestLimit ?? 0,
       exactRenderMs: runtimeSnapshot.lastExactSettleMs,
       lastRequestedStamp: requestedStamp ? Object.freeze({ ...requestedStamp }) : null,
       lastPublishedStamp: publishedStamp ? Object.freeze({ ...publishedStamp }) : null,

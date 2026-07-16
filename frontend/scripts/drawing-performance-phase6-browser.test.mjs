@@ -139,6 +139,24 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     canonicalRawPreserved: true,
     vertexBudgetPassed: true,
     stalePublishCount: 0,
+    sceneFallbackCount: 0,
+    sceneRuntimeFaultCount: 0,
+    legacyFallbackSucceededCount: 0,
+    sceneFallbackLastReason: null,
+    cacheBytes: 2_048,
+    cacheBytesMax: 4_096,
+    cacheBudgetBytes: 64 * 1024 * 1024,
+    cacheHardLimitBytes: 96 * 1024 * 1024,
+    cacheEntryCount: 64,
+    cacheBudgetEvictionCount: 3,
+    cacheEntryBytes: 3_072,
+    cacheEntryBudgetBytes: 63 * 1024 * 1024,
+    cacheMetadataBytes: 1_024,
+    cacheMetadataBudgetBytes: 1024 * 1024,
+    cacheRecentHierarchyKeyCount: 128,
+    cacheRecentHierarchyKeysPerRequestLimit: 3,
+    cacheRecentRequestCount: 64,
+    cacheRecentRequestLimit: 512,
     lastRequestedStamp: { scopeKey: "scope", documentRevision: 2 },
     lastPublishedStamp: { scopeKey: "scope", documentRevision: 2 },
   };
@@ -147,7 +165,8 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
       counters,
       counterMaxima: counters,
       gauges: { workerQueue: 1, workerInFlight: 1, rawPoints: phase6.rawPoints,
-        renderedPoints: phase6.renderedPoints, lodRatio: phase6.lodRatio },
+        renderedPoints: phase6.renderedPoints, lodRatio: phase6.lodRatio,
+        cacheBytes: phase6.cacheBytes },
       gaugeMaxima: { workerQueue: 2, workerInFlight: 1, rawPoints: phase6.rawPoints,
         renderedPoints: phase6.renderedPoints, cacheBytes: 1024 },
     }),
@@ -212,6 +231,25 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     assert.equal(stopped.runtime.workerResultDelayMs, 96);
     assert.equal(stopped.runtime.sourceLineageExactResolveCount, 64);
     assert.equal(stopped.runtime.sourceLineageFallbackResolveCount, 0);
+    assert.equal(stopped.runtime.cacheBytes, 2_048);
+    assert.equal(stopped.runtime.cacheBytesMax, 4_096);
+    assert.equal(stopped.runtime.cacheBudgetBytes, 64 * 1024 * 1024);
+    assert.equal(stopped.runtime.cacheHardLimitBytes, 96 * 1024 * 1024);
+    assert.equal(stopped.runtime.cacheEntryCount, 64);
+    assert.equal(stopped.runtime.cacheBudgetEvictionCount, 3);
+    assert.equal(stopped.runtime.cacheEntryBytes, 3_072);
+    assert.equal(stopped.runtime.cacheEntryBudgetBytes, 63 * 1024 * 1024);
+    assert.equal(stopped.runtime.cacheMetadataBytes, 1_024);
+    assert.equal(stopped.runtime.cacheMetadataBudgetBytes, 1024 * 1024);
+    assert.equal(stopped.runtime.cacheRecentHierarchyKeyCount, 128);
+    assert.equal(stopped.runtime.cacheRecentHierarchyKeysPerRequestLimit, 3);
+    assert.equal(stopped.runtime.cacheRecentRequestCount, 64);
+    assert.equal(stopped.runtime.cacheRecentRequestLimit, 512);
+    assert.equal(stopped.runtime.sceneFallbackDelta, 0);
+    assert.equal(stopped.runtime.sceneFallbackCount, 0);
+    assert.equal(stopped.runtime.sceneRuntimeFaultCount, 0);
+    assert.equal(stopped.runtime.legacyFallbackSucceededCount, 0);
+    assert.equal(stopped.runtime.sceneFallbackLastReason, null);
     assert.deepEqual(stopped.runtime.lastPaintedStamp, phase6.lastPublishedStamp);
 
     phase6.rawPoints = 32_768;
@@ -234,6 +272,17 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     assert.equal(activeStopped.runtime.finalLodRatio, 1);
     assert.equal(activeStopped.runtime.canonicalRawPreserved, true);
     assert.equal(activeStopped.runtime.vertexBudgetPassed, true);
+
+    const fallbackStarted = phase6BrowserProbeBootstrap();
+    assert.equal(fallbackStarted.started, true);
+    phase6.sceneFallbackCount = 1;
+    phase6.sceneRuntimeFaultCount = 1;
+    phase6.sceneFallbackLastReason = "worker init failed";
+    const fallbackStopped = globalThis.window.__CANDLESCOPE_PHASE6_PROBE__.stop();
+    assert.equal(fallbackStopped.runtime.sceneFallbackDelta, 1);
+    assert.equal(fallbackStopped.runtime.sceneFallbackCount, 1);
+    assert.equal(fallbackStopped.runtime.sceneRuntimeFaultCount, 1);
+    assert.equal(fallbackStopped.runtime.sceneFallbackLastReason, "worker init failed");
 
     const missingStarted = phase6BrowserProbeBootstrap();
     assert.equal(missingStarted.started, true);

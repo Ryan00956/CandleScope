@@ -40,6 +40,8 @@ export const DRAWING_PERF_COUNTER_METRICS = [
   "workerResultCount",
   "staleWorkerResultCount",
   "staleWorkerPublishCount",
+  "sceneRuntimeFaultCount",
+  "legacyFallbackSucceededCount",
   "workerQueueDropCount",
   "shadowCompareCount",
   "shadowParityMismatchCount",
@@ -203,12 +205,29 @@ export interface DrawingPerfPhase6RuntimeSnapshot {
   readonly pendingDropDelta: number;
   readonly staleResultDropDelta: number;
   readonly stalePublishCount: number;
+  readonly sceneFallbackCount: number;
+  readonly sceneRuntimeFaultCount: number;
+  readonly legacyFallbackSucceededCount: number;
+  readonly sceneFallbackLastReason: string | null;
   readonly rawPoints: number;
   readonly renderedPoints: number;
   readonly lodRatio: number;
   readonly canonicalRawPreserved: boolean;
   readonly vertexBudgetPassed: boolean;
   readonly cacheBytes: number;
+  readonly cacheBytesMax: number;
+  readonly cacheBudgetBytes: number;
+  readonly cacheHardLimitBytes: number;
+  readonly cacheEntryCount: number;
+  readonly cacheBudgetEvictionCount: number;
+  readonly cacheEntryBytes: number;
+  readonly cacheEntryBudgetBytes: number;
+  readonly cacheMetadataBytes: number;
+  readonly cacheMetadataBudgetBytes: number;
+  readonly cacheRecentHierarchyKeyCount: number;
+  readonly cacheRecentHierarchyKeysPerRequestLimit: number;
+  readonly cacheRecentRequestCount: number;
+  readonly cacheRecentRequestLimit: number;
   readonly exactRenderMs: number | null;
   readonly lastRequestedStamp: Readonly<Record<string, unknown>> | null;
   readonly lastPublishedStamp: Readonly<Record<string, unknown>> | null;
@@ -637,6 +656,8 @@ function createCounters(): Record<DrawingPerfCounterMetric, number> {
     workerResultCount: 0,
     staleWorkerResultCount: 0,
     staleWorkerPublishCount: 0,
+    sceneRuntimeFaultCount: 0,
+    legacyFallbackSucceededCount: 0,
     workerQueueDropCount: 0,
     shadowCompareCount: 0,
     shadowParityMismatchCount: 0,

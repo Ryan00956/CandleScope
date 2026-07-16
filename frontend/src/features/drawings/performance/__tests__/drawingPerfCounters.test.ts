@@ -157,6 +157,8 @@ test("Phase 6 exact and worker telemetry is retained in histograms, raw capture,
   assert.equal(counters.incrementCounter("workerResultCount", 2), true);
   assert.equal(counters.incrementCounter("staleWorkerResultCount"), true);
   assert.equal(counters.incrementCounter("staleWorkerPublishCount", 2), true);
+  assert.equal(counters.incrementCounter("sceneRuntimeFaultCount", 2), true);
+  assert.equal(counters.incrementCounter("legacyFallbackSucceededCount"), true);
   assert.equal(counters.incrementCounter("workerQueueDropCount"), true);
   assert.equal(counters.setGauge("workerQueue", 2), true);
   assert.equal(counters.setGauge("workerInFlight", 1), true);
@@ -169,6 +171,8 @@ test("Phase 6 exact and worker telemetry is retained in histograms, raw capture,
   assert.equal(snapshot.counters.workerResultCount, 2);
   assert.equal(snapshot.counters.staleWorkerResultCount, 1);
   assert.equal(snapshot.counters.staleWorkerPublishCount, 2);
+  assert.equal(snapshot.counters.sceneRuntimeFaultCount, 2);
+  assert.equal(snapshot.counters.legacyFallbackSucceededCount, 1);
   assert.equal(snapshot.counters.workerQueueDropCount, 1);
   assert.equal(snapshot.gauges.workerQueue, 2);
   assert.equal(snapshot.gauges.workerInFlight, 1);
@@ -181,6 +185,8 @@ test("Phase 6 exact and worker telemetry is retained in histograms, raw capture,
   assert.equal(reset.durations.workerFinalizeMs.sampleCount, 0);
   assert.equal(reset.durations.exactRenderMs.sampleCount, 0);
   assert.equal(reset.counters.staleWorkerPublishCount, 0);
+  assert.equal(reset.counters.sceneRuntimeFaultCount, 0);
+  assert.equal(reset.counters.legacyFallbackSucceededCount, 0);
   assert.equal(reset.gauges.workerQueue, 0);
   assert.equal(reset.gauges.cacheBytes, 0);
 });
@@ -561,18 +567,37 @@ test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle pro
     pendingDropDelta: 1,
     staleResultDropDelta: 1,
     stalePublishCount: 0,
+    sceneFallbackCount: 0,
+    sceneRuntimeFaultCount: 0,
+    legacyFallbackSucceededCount: 0,
+    sceneFallbackLastReason: null,
     rawPoints: 32_768,
     renderedPoints: 1_024,
     lodRatio: 0.03125,
     canonicalRawPreserved: true,
     vertexBudgetPassed: true,
     cacheBytes: 262_144,
+    cacheBytesMax: 524_288,
+    cacheBudgetBytes: 64 * 1024 * 1024,
+    cacheHardLimitBytes: 96 * 1024 * 1024,
+    cacheEntryCount: 8,
+    cacheBudgetEvictionCount: 0,
+    cacheEntryBytes: 240_000,
+    cacheEntryBudgetBytes: 63 * 1024 * 1024,
+    cacheMetadataBytes: 22_144,
+    cacheMetadataBudgetBytes: 1024 * 1024,
+    cacheRecentHierarchyKeyCount: 24,
+    cacheRecentHierarchyKeysPerRequestLimit: 3,
+    cacheRecentRequestCount: 8,
+    cacheRecentRequestLimit: 512,
     exactRenderMs: 96,
     lastRequestedStamp: Object.freeze({ viewportRevision: 8 }),
     lastPublishedStamp: Object.freeze({ viewportRevision: 8 }),
   });
   const unregisterRuntime = registerDrawingPerfPhase6RuntimeProvider(() => phase6Runtime);
   assert.strictEqual(handle?.readPhase6Runtime(), phase6Runtime);
+  assert.equal(handle?.readPhase6Runtime()?.sceneRuntimeFaultCount, 0);
+  assert.equal(handle?.readPhase6Runtime()?.cacheMetadataBudgetBytes, 1024 * 1024);
   unregisterRuntime();
   assert.equal(handle?.readPhase6Runtime(), null);
 

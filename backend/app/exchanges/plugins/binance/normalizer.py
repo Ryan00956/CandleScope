@@ -93,6 +93,8 @@ class BinanceNormalizer:
             return self._parse_http_depth(msg)
         if st == StreamType.FULL_DEPTH:
             return self._parse_http_full_depth(msg)
+        if st == StreamType.PREMIUM_INDEX:
+            return self._parse_http_premium_index_kline(msg)
         if st in (StreamType.MARK_PRICE, StreamType.INDEX_PRICE):
             return self._parse_http_derivatives_price(msg)
         if st == StreamType.FUNDING_RATE:
@@ -855,6 +857,44 @@ class BinanceNormalizer:
             event_time_ms=int(payload.get("time", msg.received_at_ms)),
             msg=msg,
             data=data,
+        )
+
+    def _parse_http_premium_index_kline(self, msg: RawMessage) -> MarketEvent | None:
+        row = msg.payload
+        if not isinstance(row, (list, tuple)) or len(row) < 7:
+            logger.warning("REST premium-index kline row too short (%s)", type(row).__name__)
+            return None
+        try:
+            open_time_ms = int(row[0])
+            close_time_ms = int(row[6])
+            data = {
+                "interval": self._descriptor.interval or "1m",
+                "open_time_ms": open_time_ms,
+                "close_time_ms": close_time_ms,
+                "premium_index_open": float(row[1]),
+                "premium_index_high": float(row[2]),
+                "premium_index_low": float(row[3]),
+                "premium_index_close": float(row[4]),
+            }
+        except (TypeError, ValueError, OverflowError):
+            logger.warning("Invalid REST premium-index kline row", exc_info=True)
+            return None
+        if not all(
+            math.isfinite(data[name])
+            for name in (
+                "premium_index_open",
+                "premium_index_high",
+                "premium_index_low",
+                "premium_index_close",
+            )
+        ):
+            return None
+        return self._event(
+            event_type=StreamType.PREMIUM_INDEX,
+            event_time_ms=open_time_ms,
+            msg=msg,
+            data=data,
+            sequence=open_time_ms,
         )
 
     def _parse_http_funding_rate(self, msg: RawMessage) -> MarketEvent | None:

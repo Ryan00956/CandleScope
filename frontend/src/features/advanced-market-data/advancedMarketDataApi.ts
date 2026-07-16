@@ -13,6 +13,7 @@ import type {
 
 interface MarketHistoryQuery {
   period?: string | null;
+  view?: "hybrid" | null;
   startMs?: number | null;
   endMs?: number | null;
   limit?: number;
@@ -52,6 +53,7 @@ export async function fetchAdvancedMarketHistory(
   channel: Extract<AdvancedMarketChannel, "funding_rate" | "open_interest">,
   {
     period = null,
+    view = null,
     startMs = null,
     endMs = null,
     limit = 1000,
@@ -64,6 +66,7 @@ export async function fetchAdvancedMarketHistory(
     symbol: identity.symbol,
     channel,
     period,
+    view,
     start_ms: startMs,
     end_ms: endMs,
     limit,

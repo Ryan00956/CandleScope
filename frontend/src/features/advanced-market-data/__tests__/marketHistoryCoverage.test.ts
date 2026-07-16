@@ -84,6 +84,22 @@ test("explicitly complete pages close the request while fallback stays retryable
   assert.deepEqual(nextUncoveredHistoryRange([], requested), requested);
 });
 
+test("partial retryable hybrid pages render data without claiming coverage", () => {
+  const requested = { startMs: 1_000, endMs: 10_000 };
+  const partial = coverageForHistoryPage(requested, {
+    count: 48,
+    coverage: { earliest_ms: 1_000, latest_ms: 8_000, complete: false },
+    has_more: false,
+    fallback: false,
+    history_state: "pending",
+    complete: false,
+    retryable: true,
+  }, "forward");
+
+  assert.equal(partial, null);
+  assert.deepEqual(nextUncoveredHistoryRange([], requested), requested);
+});
+
 test("terminal empty pages become resolved coverage instead of a retry loop", () => {
   const requested = { startMs: 1_000, endMs: 5_000 };
   const exhausted = coverageForHistoryPage(requested, {
@@ -117,6 +133,18 @@ test("terminal empty pages become resolved coverage instead of a retry loop", ()
     retryable: true,
   }, "backward");
   assert.equal(pending, null);
+
+  const incompleteNonRetryable = coverageForHistoryPage(requested, {
+    count: 0,
+    coverage: { earliest_ms: null, latest_ms: null, complete: false },
+    fallback: false,
+    has_more: true,
+    history_state: "ready",
+    complete: false,
+    retryable: false,
+  }, "forward");
+  assert.equal(incompleteNonRetryable, null);
+  assert.deepEqual(nextUncoveredHistoryRange([], requested), requested);
 });
 
 test("coverage segments preserve real gaps instead of claiming one broad span", () => {

@@ -51,6 +51,14 @@ class BinancePlugin(BuiltinExchangePlugin):
             getattr(config, "fetch_binance_futures_concurrency", 1),
             1,
         )
+        premium_index_history_concurrency = _configured_concurrency(
+            getattr(
+                config,
+                "fetch_binance_futures_premium_index_concurrency",
+                4,
+            ),
+            4,
+        )
         futures_delay = _non_negative_float(
             getattr(config, "fetch_binance_futures_rate_limit_delay", 1.0),
             1.0,
@@ -138,6 +146,18 @@ class BinancePlugin(BuiltinExchangePlugin):
                     capacity=futures_capacity,
                     refill_interval_seconds=60.0,
                     max_concurrency=futures_concurrency,
+                    cooldown_seconds=backoff,
+                ),
+                RateLimitRule(
+                    name="binance_futures_premium_index_klines",
+                    bucket_key="binance:futures:request_weight:ip",
+                    endpoint="/fapi/v1/premiumIndexKlines",
+                    market_types=("futures",),
+                    algorithm="header_weight",
+                    capacity=futures_capacity,
+                    refill_interval_seconds=60.0,
+                    cost=_futures_kline_cost,
+                    max_concurrency=premium_index_history_concurrency,
                     cooldown_seconds=backoff,
                 ),
                 RateLimitRule(

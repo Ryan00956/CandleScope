@@ -39,6 +39,7 @@ _REST_PATH: dict[str, dict[str, str]] = {
 }
 
 _FUTURES_HISTORY_PATH = {
+    "premiumIndex": "/fapi/v1/premiumIndexKlines",
     "fundingRate": "/fapi/v1/fundingRate",
     "openInterest": "/futures/data/openInterestHist",
 }
@@ -194,10 +195,20 @@ class BinanceExchangeProtocol:
                     f"{{{supported}}}",
                 )
             params["limit"] = raw_limit
-        elif desc.stream_type.value in _MARK_PRICE_PROJECTIONS | {"openInterest"}:
+        elif desc.stream_type.value in _MARK_PRICE_PROJECTIONS | {
+            "openInterest",
+            "premiumIndex",
+        }:
             history = bool(getattr(req, "history", False))
             if history:
-                if desc.stream_type.value == "fundingRate":
+                if desc.stream_type.value == "premiumIndex":
+                    if desc.interval != "1m":
+                        raise ValueError(
+                            "premium-index history requires the fixed 1m interval",
+                        )
+                    params["interval"] = "1m"
+                    params["limit"] = min(max(int(req.limit or 1), 1), 1000)
+                elif desc.stream_type.value == "fundingRate":
                     params["limit"] = min(max(int(req.limit or 1), 1), 1000)
                 elif desc.stream_type.value == "openInterest":
                     if not desc.interval:
@@ -337,8 +348,9 @@ class BinanceExchangeProtocol:
                 "indexPrice",
                 "fundingRate",
                 "openInterest",
+                "premiumIndex",
             }
-        return stream_type != "openInterest"
+        return stream_type not in {"openInterest", "premiumIndex"}
 
     def extract_http_rows(self, payload: Any, stream_type: Any) -> list[Any]:
         if isinstance(payload, list):

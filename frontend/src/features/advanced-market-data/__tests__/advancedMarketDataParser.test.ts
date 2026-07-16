@@ -118,3 +118,58 @@ test("optional persistence semantics are validated", () => {
     coverage: { earliest_ms: null, latest_ms: null, complete: false },
   }), AdvancedMarketPayloadError);
 });
+
+test("hybrid funding provenance and quality metadata are parsed and validated", () => {
+  const parsed = parseMarketHistoryPayload({
+    type: "market.history",
+    key: record().key,
+    count: 1,
+    data: [record({
+      data: {
+        funding_rate: 0.00012,
+        sample_kind: "estimate",
+        provenance: "derived_estimate",
+        quality: "estimated",
+        is_final: false,
+        sample_time_ms: 1_700_000_060_000,
+        target_funding_time_ms: 1_700_028_800_000,
+        funding_cycle_ms: 1_700_028_800_000,
+        formula_version: "binance-premium-v1",
+        input_resolution: "1m",
+        input_coverage: 0.98,
+      },
+    })],
+    coverage: {
+      earliest_ms: 1_700_000_000_000,
+      latest_ms: 1_700_000_000_000,
+      complete: true,
+    },
+  });
+
+  assert.equal(parsed.data[0]?.data.provenance, "derived_history");
+  assert.equal(parsed.data[0]?.data.input_coverage, 0.98);
+
+  assert.throws(() => parseMarketHistoryPayload({
+    type: "market.history",
+    key: record().key,
+    count: 1,
+    data: [record({ data: {
+      funding_rate: 0.0001,
+      provenance: "invented",
+    } })],
+    coverage: { earliest_ms: null, latest_ms: null, complete: false },
+  }), /provenance/);
+
+  assert.throws(() => parseMarketHistoryPayload({
+    type: "market.history",
+    key: record().key,
+    count: 1,
+    data: [record({ data: {
+      funding_rate: 0.0001,
+      provenance: "derived_history",
+      quality: "estimated",
+      input_coverage: 1.1,
+    } })],
+    coverage: { earliest_ms: null, latest_ms: null, complete: false },
+  }), /input_coverage/);
+});

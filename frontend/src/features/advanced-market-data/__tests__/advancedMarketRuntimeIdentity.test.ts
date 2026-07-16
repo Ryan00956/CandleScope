@@ -3,9 +3,55 @@ import test from "node:test";
 
 import {
   buildAdvancedMarketHistoryContextKey,
+  buildTailFirstHistoryRanges,
   isAdvancedMarketHistoryRequestCurrent,
   type AdvancedMarketHistoryRequestGuard,
 } from "../useAdvancedMarketDataRuntime.js";
+
+test("initial metric history prioritizes the newest chart bars without overlap", () => {
+  const barTimes = Array.from({ length: 1_500 }, (_, index) => 1_000 + index * 60);
+  const fullRange = {
+    startMs: barTimes[0]! * 1000,
+    endMs: barTimes.at(-1)! * 1000,
+  };
+
+  const ranges = buildTailFirstHistoryRanges(fullRange, barTimes);
+
+  assert.equal(ranges.length, 2);
+  assert.deepEqual(ranges[0], {
+    startMs: barTimes[1_380]! * 1000,
+    endMs: fullRange.endMs,
+  });
+  assert.deepEqual(ranges[1], {
+    startMs: fullRange.startMs,
+    endMs: ranges[0]!.startMs - 1,
+  });
+});
+
+test("small chart windows stay in one initial history request", () => {
+  const barTimes = [1_000, 1_060, 1_120];
+  const fullRange = { startMs: 1_000_000, endMs: 1_120_000 };
+
+  assert.deepEqual(buildTailFirstHistoryRanges(fullRange, barTimes, 240), [fullRange]);
+});
+
+test("tail-first bootstrap caps high-interval charts by duration", () => {
+  const daySeconds = 24 * 60 * 60;
+  const barTimes = Array.from({ length: 365 }, (_, index) => 1_000 + index * daySeconds);
+  const fullRange = {
+    startMs: barTimes[0]! * 1000,
+    endMs: barTimes.at(-1)! * 1000,
+  };
+
+  const ranges = buildTailFirstHistoryRanges(fullRange, barTimes, 240);
+
+  assert.equal(ranges.length, 2);
+  assert.deepEqual(ranges[0], {
+    startMs: fullRange.endMs - 10 * daySeconds * 1000,
+    endMs: fullRange.endMs,
+  });
+  assert.equal(ranges[1]!.endMs, ranges[0]!.startMs - 1);
+});
 
 function currentGuard(
   overrides: Partial<AdvancedMarketHistoryRequestGuard> = {},

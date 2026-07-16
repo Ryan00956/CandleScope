@@ -185,6 +185,37 @@ def test_market_history_validates_range_and_period_is_part_of_response_identity(
     assert response.json()["key"]["params"] == {"period": "5m"}
 
 
+def test_market_history_explicit_hybrid_view_is_forwarded_and_identified() -> None:
+    dm = _MarketDataManager()
+    response = _client(dm).get(
+        "/api/v1/market/history",
+        params={
+            "channel": "funding_rate",
+            "period": "1s",
+            "view": "hybrid",
+            "start_ms": 1000,
+            "end_ms": 2000,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["key"]["params"] == {
+        "period": "1s",
+        "view": "hybrid",
+    }
+    assert dm.history_calls[0]["view"] == "hybrid"
+    assert dm.history_calls[0]["period"] == "1s"
+
+    missing_period = _client(dm).get(
+        "/api/v1/market/history?channel=funding_rate&view=hybrid",
+    )
+    assert missing_period.status_code == 422
+    wrong_channel = _client(dm).get(
+        "/api/v1/market/history?channel=open_interest&period=5m&view=hybrid",
+    )
+    assert wrong_channel.status_code == 422
+
+
 def test_market_history_expired_empty_page_is_complete_and_not_retryable() -> None:
     class _ExpiredHistoryManager(_MarketDataManager):
         async def market_history_page(self, key: MarketStreamKey, **kwargs):

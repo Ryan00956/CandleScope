@@ -261,13 +261,19 @@ GET /api/v1/market/snapshot?exchange=binance&market_type=futures&symbol=BTCUSDT&
 
 ### `GET /market/history`
 
-读取一个上游历史页面。P1 只开放 `funding_rate` 与 `open_interest`；OI 必须传 `period`（`5m`、`15m`、`30m`、`1h`、`2h`、`4h`、`6h`、`12h`、`1d`）。可选 `start_ms`、`end_ms`，`limit` 为 1 到 1000。
+读取一个有界历史页面。P1 只开放 `funding_rate` 与 `open_interest`；OI 必须传 `period`（`5m`、`15m`、`30m`、`1h`、`2h`、`4h`、`6h`、`12h`、`1d`）。可选 `start_ms`、`end_ms`，`limit` 为 1 到 1000。Funding 不传 `view` 时继续保持旧的稀疏结算契约；Binance 合约可使用 `view=hybrid`，并且必须传图表 `period`。每根已关闭 K 最多返回一个点：有交易所结算就返回权威结算，否则使用本地缓存的 Binance Premium Index 1m 数据做不偷看未来的近似估算。
 
 ```http
 GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=open_interest&period=5m&limit=500
 ```
 
-`coverage.complete` 在 P1 固定为 `false`，表示结果是 Binance REST 页面，不是本地完整历史。
+```http
+GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=funding_rate&view=hybrid&period=1h&start_ms=...&end_ms=...&limit=1000
+```
+
+Hybrid Funding 记录会返回 `provenance`（`exchange_settlement` 或 `derived_history`）、`quality`、`sample_time_ms`、`target_funding_time_ms` 和 `funding_cycle_ms`；`derived_history` 记录还会返回 `formula_version`、`input_resolution` 与 `input_coverage`。估算值只表示参考轨迹，不是交易所结算。实时 Funding 仍通过 `/market/snapshot` 和 `/stream/market` 返回，使用 `provenance=exchange_realtime`；沿用值只能在同一个目标结算周期内有效。
+
+Hybrid 页面只返回连续前缀。如果请求的 K 都已有交易所结算，会直接跳过估算输入下载。冷缓存 Premium Index 回填有单次页预算：达到容量或预算边界时返回 `complete=false`、`has_more=true`、`retryable=false`，调用方应从最后一根已返回 K 继续翻页；临时上游失败会返回 `retryable=true`，不得把本次范围记为已覆盖。无法估算的输入缺口会写入 `excluded_ranges`。模型只使用每根 K 截止时已经关闭的 1m Premium Index 样本，资金费周期也只从此前结算推断，并把标准 8 小时利率分量按推断出的 1/2/4/8 小时周期缩放。
 
 ### `WS /stream/market`
 

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { buildAdvancedMarketPanes } from "./metricPaneProjection.js";
 import { useAdvancedMarketMetrics } from "./useAdvancedMarketSnapshots.js";
 import type { AdvancedMarketRuntimeView } from "./advancedMarketDataTypes.js";
@@ -36,6 +36,13 @@ export function useAdvancedMarketPanes(
       .filter((study) => study.added && study.visible && study.supported)
       .map((study) => study.channel)
   ), [view.marketStudies]);
+  const fundingActive = activeChannels.includes("funding_rate");
+  const [realtimeClockMs, setRealtimeClockMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!fundingActive) return undefined;
+    const timer = window.setInterval(() => { setRealtimeClockMs(Date.now()); }, 5_000);
+    return () => { window.clearInterval(timer); };
+  }, [fundingActive]);
   const seriesCurrent = hasCurrentAdvancedMarketSeries(view);
   return useMemo(() => {
     if (!view.metricsEnabled || !seriesCurrent || !Number.isFinite(seriesVersion)) return [];
@@ -43,6 +50,8 @@ export function useAdvancedMarketPanes(
       metrics,
       view.seriesStore?.snapshot() || [],
       activeChannels,
+      view.interval,
+      realtimeClockMs,
     ).filter((pane) => pane.lines.some((line) => line.data.length > 0));
-  }, [activeChannels, metrics, seriesCurrent, seriesVersion, view.metricsEnabled, view.seriesStore]);
+  }, [activeChannels, metrics, realtimeClockMs, seriesCurrent, seriesVersion, view.interval, view.metricsEnabled, view.seriesStore]);
 }

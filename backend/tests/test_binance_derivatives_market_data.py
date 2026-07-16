@@ -81,6 +81,61 @@ def test_derivatives_history_override_preserves_existing_futures_rest_paths() ->
     ) is None
 
 
+def test_premium_index_history_has_explicit_fixed_1m_contract() -> None:
+    protocol = BinanceExchangeProtocol()
+    descriptor = _descriptor(StreamType.PREMIUM_INDEX, interval="1m")
+
+    request = protocol.rest_request(TransportRequest(
+        descriptor,
+        history=True,
+        limit=5000,
+        start_ms=100,
+        end_ms=200,
+    ))
+
+    assert request is not None
+    assert request.path == "/fapi/v1/premiumIndexKlines"
+    assert request.params == {
+        "symbol": "BTCUSDT",
+        "interval": "1m",
+        "limit": 1000,
+        "startTime": "100",
+        "endTime": "200",
+    }
+    assert protocol.supports_ws(descriptor) is False
+    with pytest.raises(ValueError, match="fixed 1m"):
+        _descriptor(StreamType.PREMIUM_INDEX, interval="5m").validate()
+
+
+def test_premium_index_normalizer_uses_official_close_time_position() -> None:
+    descriptor = _descriptor(StreamType.PREMIUM_INDEX, interval="1m")
+    event = BinanceNormalizer(IngestionConfig(), descriptor).parse(RawMessage(
+        payload=[
+            1_700_000_000_000,
+            "0.0001",
+            "0.0003",
+            "-0.0001",
+            "0.0002",
+            "0",
+            1_700_000_059_999,
+            "0",
+            0,
+            "0",
+            "0",
+            "0",
+        ],
+        source=DataSource.HTTP_BACKFILL,
+        stream_type=StreamType.PREMIUM_INDEX,
+        received_at_ms=1_700_000_060_100,
+    ))
+
+    assert event is not None
+    assert event.event_type == StreamType.PREMIUM_INDEX
+    assert event.event_time_ms == 1_700_000_000_000
+    assert event.data["close_time_ms"] == 1_700_000_059_999
+    assert event.data["premium_index_close"] == 0.0002
+
+
 def test_aggregate_trade_gap_repair_uses_from_id_without_time_range() -> None:
     protocol = BinanceExchangeProtocol()
     descriptor = _descriptor(StreamType.AGG_TRADE)
@@ -126,6 +181,10 @@ def test_binance_derivatives_rest_endpoints_have_shared_quota_buckets() -> None:
     assert rules["/fapi/v1/premiumIndex"].bucket_key == (
         "binance:futures:request_weight:ip"
     )
+    assert rules["/fapi/v1/premiumIndexKlines"].bucket_key == (
+        "binance:futures:request_weight:ip"
+    )
+    assert rules["/fapi/v1/premiumIndexKlines"].max_concurrency == 4
     assert rules["/fapi/v1/openInterest"].bucket_key == (
         "binance:futures:request_weight:ip"
     )
@@ -139,6 +198,16 @@ def test_binance_derivatives_rest_endpoints_have_shared_quota_buckets() -> None:
     )) == 20
     assert rules["/fapi/v1/fundingRate"].refill_interval_seconds == 300
     assert rules["/futures/data/openInterestHist"].refill_interval_seconds == 300
+
+    configured_rules = {
+        rule.endpoint: rule
+        for rule in BinancePlugin().rate_limit_policy(IngestionConfig(
+            fetch_binance_futures_premium_index_concurrency=2,
+        )).endpoint_rules
+    }
+    assert configured_rules["/fapi/v1/premiumIndexKlines"].max_concurrency == 2
+    assert configured_rules["/fapi/v1/premiumIndexKlines"].algorithm == "header_weight"
+    assert configured_rules["/fapi/v1/premiumIndexKlines"].cooldown_seconds > 0
 
 
 def test_binance_mark_projections_share_one_message_subscription_name() -> None:

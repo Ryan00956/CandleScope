@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.core.executors import run_storage
-from app.data_engine.storage.market_metrics_repo import MarketMetricsRepository
+from app.data_engine.storage.market_metrics_repo import (
+    MarketMetricsRepository,
+    normalize_funding_cycle_ms,
+)
 
 
 MetricKind = Literal["funding", "open_interest"]
@@ -47,7 +50,6 @@ class MarketMetricStorageWriter:
         self._funding_pending: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
         self._oi_pending: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
         self._wake = asyncio.Event()
-        self._close_signal = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._closing = False
         self._metrics = {
@@ -75,11 +77,14 @@ class MarketMetricStorageWriter:
         return await self._write_durable("open_interest", rows)
 
     def offer_funding(self, row: dict[str, Any]) -> bool:
+        cycle_ms = row.get("funding_cycle_ms")
+        if cycle_ms is None:
+            cycle_ms = normalize_funding_cycle_ms(row.get("funding_time_ms"))
         key = (
             row.get("exchange"),
             row.get("market_type"),
             row.get("symbol"),
-            row.get("funding_time_ms"),
+            cycle_ms,
         )
         return self._offer(self._funding_pending, key, row)
 
@@ -99,7 +104,6 @@ class MarketMetricStorageWriter:
                 await asyncio.shield(self._task)
             return
         self._closing = True
-        self._close_signal.set()
         self._wake.set()
         if self._task is not None:
             await asyncio.shield(self._task)
@@ -172,29 +176,54 @@ class MarketMetricStorageWriter:
         return True
 
     async def _run(self) -> None:
+        loop = asyncio.get_running_loop()
+        provisional_deadline: float | None = None
         while True:
-            if not self._has_work():
-                if self._closing:
+            if self._closing:
+                await self._flush_once()
+                if not self._has_work():
                     return
-                self._wake.clear()
-                if self._has_work():
+                continue
+
+            if not self._durable.empty():
+                await self._flush_durable_once()
+                continue
+
+            if self._pending_count() > 0:
+                if provisional_deadline is None:
+                    provisional_deadline = loop.time() + self._flush_interval_seconds
+                timeout = max(0.0, provisional_deadline - loop.time())
+                if timeout == 0:
+                    await self._flush_provisional_once()
+                    provisional_deadline = None
                     continue
-                await self._wake.wait()
+            else:
+                provisional_deadline = None
+                timeout = None
 
-            if not self._closing:
-                try:
-                    await asyncio.wait_for(
-                        self._close_signal.wait(),
-                        timeout=self._flush_interval_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    pass
+            self._wake.clear()
+            if self._closing or not self._durable.empty():
+                continue
+            if self._pending_count() > 0 and provisional_deadline is None:
+                continue
 
-            await self._flush_once()
-            if self._closing and not self._has_work():
-                return
+            try:
+                if timeout is None:
+                    await self._wake.wait()
+                else:
+                    await asyncio.wait_for(self._wake.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                # A durable request arriving on the timer boundary still gets
+                # priority over the lower-urgency provisional batch.
+                if self._durable.empty():
+                    await self._flush_provisional_once()
+                    provisional_deadline = None
 
     async def _flush_once(self) -> None:
+        await self._flush_durable_once()
+        await self._flush_provisional_once()
+
+    async def _flush_durable_once(self) -> None:
         requests: list[_DurableWrite] = []
         while True:
             try:
@@ -202,25 +231,39 @@ class MarketMetricStorageWriter:
             except asyncio.QueueEmpty:
                 break
 
-        funding_pending = list(self._funding_pending.values())
-        oi_pending = list(self._oi_pending.values())
-        self._funding_pending.clear()
-        self._oi_pending.clear()
-
+        if not requests:
+            return
         funding_requests = [item for item in requests if item.kind == "funding"]
         oi_requests = [item for item in requests if item.kind == "open_interest"]
         await self._flush_kind(
             "funding",
             funding_requests,
-            [*funding_pending, *(row for item in funding_requests for row in item.rows)],
+            [row for item in funding_requests for row in item.rows],
         )
         await self._flush_kind(
             "open_interest",
             oi_requests,
-            [*oi_pending, *(row for item in oi_requests for row in item.rows)],
+            [row for item in oi_requests for row in item.rows],
         )
         for _ in requests:
             self._durable.task_done()
+
+    async def _flush_provisional_once(self) -> None:
+        funding_pending = list(self._funding_pending.values())
+        oi_pending = list(self._oi_pending.values())
+        self._funding_pending.clear()
+        self._oi_pending.clear()
+
+        await self._flush_kind(
+            "funding",
+            [],
+            funding_pending,
+        )
+        await self._flush_kind(
+            "open_interest",
+            [],
+            oi_pending,
+        )
 
     async def _flush_kind(
         self,
@@ -285,11 +328,14 @@ class MarketMetricStorageWriter:
         unique: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
         for row in rows:
             if kind == "funding":
+                cycle_ms = row.get("funding_cycle_ms")
+                if cycle_ms is None:
+                    cycle_ms = normalize_funding_cycle_ms(row.get("funding_time_ms"))
                 key = (
                     row.get("exchange"),
                     row.get("market_type"),
                     row.get("symbol"),
-                    row.get("funding_time_ms"),
+                    cycle_ms,
                 )
             else:
                 key = (

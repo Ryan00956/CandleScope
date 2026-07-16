@@ -261,13 +261,19 @@ The response contains `data` and an explicit `missing` key list. Records include
 
 ### `GET /market/history`
 
-Returns one upstream history page. P1 exposes history only for `funding_rate` and `open_interest`; OI requires `period` (`5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, or `1d`). Optional parameters are `start_ms`, `end_ms`, and `limit` from 1 to 1000.
+Returns one bounded history page. P1 exposes history only for `funding_rate` and `open_interest`; OI requires `period` (`5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, or `1d`). Optional parameters are `start_ms`, `end_ms`, and `limit` from 1 to 1000. Funding keeps the legacy sparse settlement contract when `view` is omitted. For Binance futures, `view=hybrid` additionally requires the chart `period` and returns at most one point per closed chart candle: an authoritative exchange settlement when one exists, otherwise a no-lookahead estimate derived from cached Binance Premium Index 1m data.
 
 ```http
 GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=open_interest&period=5m&limit=500
 ```
 
-`coverage.complete` is always `false` in P1 because this is a Binance REST page rather than complete local history.
+```http
+GET /api/v1/market/history?exchange=binance&market_type=futures&symbol=BTCUSDT&channel=funding_rate&view=hybrid&period=1h&start_ms=...&end_ms=...&limit=1000
+```
+
+Hybrid funding records expose `provenance` (`exchange_settlement` or `derived_history`), `quality`, `sample_time_ms`, `target_funding_time_ms`, and `funding_cycle_ms`; `derived_history` records additionally expose `formula_version`, `input_resolution`, and `input_coverage`. Estimates are indicative, never exchange settlements. Realtime funding remains on `/market/snapshot` and `/stream/market` with `provenance=exchange_realtime`; a carried value is valid only inside the same target funding cycle.
+
+Hybrid pages are continuous prefixes. Exchange settlements short-circuit the estimator when they already cover every requested candle. Cold Premium Index backfills use a bounded page budget: capacity/budget boundaries return `complete=false`, `has_more=true`, and `retryable=false` so the caller can continue from the latest returned candle; transient upstream failures return `retryable=true` and must not be committed as coverage. `excluded_ranges` identifies input gaps that could not be estimated. The model uses only closed 1m Premium Index samples available at each candle cutoff, infers funding cadence only from prior settlements, and scales the standard eight-hour interest component to the inferred 1/2/4/8-hour cadence.
 
 ### `WS /stream/market`
 

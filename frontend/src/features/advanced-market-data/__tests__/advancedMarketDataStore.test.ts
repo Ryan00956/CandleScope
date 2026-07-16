@@ -102,7 +102,169 @@ test("funding history keeps settlements and overwrites preview separately", () =
   store.mergeMetricHistory(IDENTITY, "funding_rate", [settlement, firstPreview, latestPreview]);
   const snapshot = store.getMetricsSnapshot(key);
   assert.deepEqual(snapshot.fundingHistory, [settlement]);
+  assert.deepEqual(snapshot.fundingRealtimeHistory, [firstPreview, latestPreview]);
   assert.strictEqual(snapshot.fundingPreview, latestPreview);
+});
+
+test("funding derived history is isolated by chart period", () => {
+  const store = new AdvancedMarketDataStore();
+  const key = buildAdvancedMarketIdentityKey(IDENTITY);
+  const hourly = record("funding_rate", {
+    funding_rate: 0.0001,
+    sample_time_ms: 3_600_000,
+    sample_kind: "estimate",
+    provenance: "derived_history",
+    quality: "estimated",
+    is_final: false,
+  }, 0);
+  const fiveMinute = record("funding_rate", {
+    funding_rate: 0.0002,
+    sample_time_ms: 300_000,
+    sample_kind: "estimate",
+    provenance: "derived_history",
+    quality: "estimated",
+    is_final: false,
+  }, 300_000);
+
+  store.setFundingPeriod(IDENTITY, "1h");
+  store.mergeMetricHistory(IDENTITY, "funding_rate", [hourly], "1h");
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [hourly]);
+
+  store.setFundingPeriod(IDENTITY, "5m");
+  store.mergeMetricHistory(IDENTITY, "funding_rate", [fiveMinute], "5m");
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [fiveMinute]);
+
+  store.setFundingPeriod(IDENTITY, "1h");
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [hourly]);
+});
+
+test("funding period partition preserves month M distinct from minute m", () => {
+  const store = new AdvancedMarketDataStore();
+  const key = buildAdvancedMarketIdentityKey(IDENTITY);
+  const minute = record("funding_rate", {
+    funding_rate: 0.0001,
+    sample_kind: "estimate",
+    provenance: "derived_history",
+    quality: "estimated",
+    is_final: false,
+  }, 60_000);
+  const month = record("funding_rate", {
+    ...minute.data,
+    funding_rate: 0.0002,
+  }, 2_592_000_000);
+
+  store.setFundingPeriod(IDENTITY, "1m");
+  store.mergeMetricHistory(IDENTITY, "funding_rate", [minute], "1m");
+  store.setFundingPeriod(IDENTITY, "1M");
+  store.mergeMetricHistory(IDENTITY, "funding_rate", [month], "1M");
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [month]);
+
+  store.setFundingPeriod(IDENTITY, "1m");
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [minute]);
+});
+
+test("hybrid funding settlements follow their chart period without leaking bucket opens", () => {
+  const store = new AdvancedMarketDataStore();
+  const key = buildAdvancedMarketIdentityKey(IDENTITY);
+  const cycleTimeMs = 28_800_000;
+  const sparse = record("funding_rate", {
+    funding_rate: 0.0001,
+    funding_time_ms: cycleTimeMs,
+    raw_funding_time_ms: cycleTimeMs,
+    funding_cycle_ms: cycleTimeMs,
+    sample_kind: "settlement",
+    provenance: "exchange_settlement",
+    quality: "final",
+    is_final: true,
+  }, cycleTimeMs);
+  const hybrid = (period: string, bucketOpenMs: number): MarketStateRecord => ({
+    ...sparse,
+    key: { ...sparse.key, params: { period, view: "hybrid" } },
+    event_time_ms: bucketOpenMs,
+    data: { ...sparse.data, funding_rate: period === "1d" ? 0.0002 : 0.0003 },
+  });
+  const daily = hybrid("1d", 0);
+  const hourly = hybrid("1h", cycleTimeMs);
+
+  store.mergeMetricHistory(IDENTITY, "funding_rate", [sparse]);
+  store.setFundingPeriod(IDENTITY, "1d");
+  store.mergeMetricHistory(IDENTITY, "funding_rate", [daily], "1d");
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [daily]);
+
+  store.setFundingPeriod(IDENTITY, "1h");
+  store.mergeMetricHistory(IDENTITY, "funding_rate", [hourly], "1h");
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [hourly]);
+
+  store.setFundingPeriod(IDENTITY, "1d");
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingHistory, [daily]);
+});
+
+test("funding realtime keeps bounded observations and resets at cycle boundary", () => {
+  const store = new AdvancedMarketDataStore();
+  const key = buildAdvancedMarketIdentityKey(IDENTITY);
+  store.setFundingPeriod(IDENTITY, "5m");
+  const first = record("funding_rate", {
+    funding_rate: 0.0001,
+    observed_at_ms: 10_000,
+    next_funding_time_ms: 9_000_000,
+    sample_kind: "preview",
+    provenance: "exchange_realtime",
+    quality: "live",
+    is_final: false,
+  }, 10_000);
+  const sameKLatest = record("funding_rate", {
+    ...first.data,
+    funding_rate: 0.0002,
+    observed_at_ms: 20_000,
+  }, 20_000);
+  const nextK = record("funding_rate", {
+    ...first.data,
+    funding_rate: 0.0003,
+    observed_at_ms: 310_000,
+  }, 310_000);
+  const nextCycle = record("funding_rate", {
+    ...first.data,
+    funding_rate: 0.0004,
+    observed_at_ms: 610_000,
+    next_funding_time_ms: 18_000_000,
+  }, 610_000);
+
+  store.applyRecords(IDENTITY, [first, sameKLatest, nextK]);
+  assert.deepEqual(store.getMetricsSnapshot(key).fundingRealtimeHistory, [first, sameKLatest, nextK]);
+
+  store.applyRecords(IDENTITY, [nextCycle]);
+  const snapshot = store.getMetricsSnapshot(key);
+  assert.deepEqual(snapshot.fundingRealtimeHistory, [nextCycle]);
+  assert.strictEqual(snapshot.fundingPreview, nextCycle);
+});
+
+test("funding realtime observations do not use epoch buckets for week or calendar month", () => {
+  const cases = [
+    {
+      period: "1w",
+      observations: [Date.UTC(2026, 6, 12, 23, 59), Date.UTC(2026, 6, 13, 0, 1)],
+    },
+    {
+      period: "1M",
+      observations: [Date.UTC(2026, 6, 31, 23, 59), Date.UTC(2026, 7, 1, 0, 1)],
+    },
+  ];
+  for (const { period, observations } of cases) {
+    const store = new AdvancedMarketDataStore();
+    const key = buildAdvancedMarketIdentityKey(IDENTITY);
+    store.setFundingPeriod(IDENTITY, period);
+    const records = observations.map((observedAtMs, index) => record("funding_rate", {
+      funding_rate: 0.0001 + index * 0.00001,
+      observed_at_ms: observedAtMs,
+      next_funding_time_ms: Date.UTC(2026, 11, 1),
+      sample_kind: "preview",
+      provenance: "exchange_realtime",
+      quality: "live",
+      is_final: false,
+    }, observedAtMs));
+    store.applyRecords(IDENTITY, records);
+    assert.deepEqual(store.getMetricsSnapshot(key).fundingRealtimeHistory, records);
+  }
 });
 
 test("a newer metric cycle advances past an older final sample", () => {

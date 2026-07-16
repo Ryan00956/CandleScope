@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_right
 import logging
 import time
 from dataclasses import dataclass, field
@@ -10,18 +11,27 @@ from typing import Any, Iterable
 
 from app.core.executors import run_storage
 from app.data_engine.ingestion.models import (
+    DataSource,
     MarketEvent,
     StreamDescriptor,
     StreamType,
     TransportRequest,
 )
-from app.data_engine.interval_policy import parse_interval_ms
+from app.data_engine.interval_policy import (
+    compute_bucket_end_ms,
+    compute_bucket_start_ms,
+    last_closed_bar_open_ms,
+    parse_interval_ms,
+)
 from app.data_engine.history import (
     BoundaryReason,
     ExchangeHistoryPolicyResolver,
     TimeBound,
 )
-from app.data_engine.storage.market_metrics_repo import MarketMetricsRepository
+from app.data_engine.storage.market_metrics_repo import (
+    MarketMetricsRepository,
+    normalize_funding_cycle_ms,
+)
 from app.exchanges import (
     bootstrap_default_adapters,
     get_exchange_registry,
@@ -51,6 +61,25 @@ _HISTORY_STREAM_TYPES = {
 _DEFAULT_OPEN_INTEREST_STORAGE_PERIOD = "5m"
 _DEFAULT_OPEN_INTEREST_STORAGE_BUCKET_MS = 5 * 60 * 1000
 _HISTORY_RETENTION_SAFETY_MS = 60 * 1000
+_PREMIUM_INDEX_INTERVAL = "1m"
+_PREMIUM_INDEX_INTERVAL_MS = 60 * 1000
+_DEFAULT_FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000
+_BINANCE_FUNDING_INTERVALS_MS = frozenset(
+    hours * 60 * 60 * 1000
+    for hours in (1, 2, 4, 8)
+)
+_FUNDING_CONTEXT_LOOKBACK_MS = 24 * 60 * 60 * 1000
+_FUNDING_INTEREST_RATE_8H = 0.0001
+_FUNDING_ADJUSTMENT_BOUND = 0.0005
+_FUNDING_RATE_BOUND = 0.0075
+_FUNDING_FORMULA_VERSION = "binance-premium-index-cumavg-v2"
+_MAX_PREMIUM_ESTIMATE_POINTS = 250_000
+_MAX_UPSTREAM_HISTORY_PAGES_PER_REQUEST = 16
+_MAX_PREMIUM_HISTORY_PAGES_PER_REQUEST = 64
+_PREMIUM_HISTORY_PAGE_POINTS = 1000
+_PREMIUM_FETCH_CONCURRENCY = 4
+_REALTIME_FUNDING_STALE_MS = 10_000
+_FUNDING_SETTLEMENT_EDGE_TTL_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -94,6 +123,22 @@ class _HistoryRefreshPlan:
     excluded_ranges: tuple[dict[str, Any], ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _HybridFundingResult:
+    events: list[MarketStateEvent]
+    complete: bool
+    retryable: bool = False
+    fallback: bool = False
+    excluded_ranges: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _FundingSettlementCoverage:
+    start_ms: int
+    end_ms: int
+    expires_at: float | None = None
+
+
 class MarketDataService:
     """Own logical leases, physical feeds, REST reads, and the typed hub."""
 
@@ -119,6 +164,15 @@ class MarketDataService:
         self._lock = asyncio.Lock()
         self._snapshot_lock = asyncio.Lock()
         self._snapshot_tasks: dict[tuple[str, str, str, str], asyncio.Task] = {}
+        self._funding_refresh_lock = asyncio.Lock()
+        self._funding_refresh_coverage: dict[
+            tuple[str, str, str],
+            list[_FundingSettlementCoverage],
+        ] = {}
+        self._funding_refresh_tasks: dict[
+            tuple[tuple[str, str, str], int, int, int],
+            asyncio.Task[tuple[bool, int]],
+        ] = {}
         self._rate_limits = get_shared_rate_limit_manager()
         self._metrics_repository = metrics_repository
         self._metrics_writer = metrics_writer
@@ -298,6 +352,7 @@ class MarketDataService:
         limit: int = 500,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        view: str | None = None,
     ) -> list[MarketStateEvent]:
         page = await self.history_page(
             key,
@@ -305,6 +360,7 @@ class MarketDataService:
             limit=limit,
             start_ms=start_ms,
             end_ms=end_ms,
+            view=view,
         )
         return page.events
 
@@ -316,6 +372,7 @@ class MarketDataService:
         limit: int = 500,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        view: str | None = None,
     ) -> MarketHistoryPage:
         """Refresh one Funding/OI history page and serve it from SQLite.
 
@@ -333,6 +390,22 @@ class MarketDataService:
             raise ValueError(f"history is not supported for channel {key.channel.value!r}")
         if key.channel == MarketChannel.OPEN_INTEREST and not period:
             raise ValueError("open-interest history requires period")
+        normalized_view = (view or "sparse").strip().lower()
+        if normalized_view not in {"sparse", "hybrid"}:
+            raise ValueError("funding history view must be 'sparse' or 'hybrid'")
+        hybrid_funding = normalized_view == "hybrid"
+        if hybrid_funding and key.channel != MarketChannel.FUNDING_RATE:
+            raise ValueError("hybrid history is available only for funding_rate")
+        if hybrid_funding:
+            if key.exchange != "binance" or key.market_type != "futures":
+                raise ValueError(
+                    "hybrid funding history is currently available only for binance futures",
+                )
+            period_ms = parse_interval_ms(period or "")
+            if period_ms is None or period_ms <= 0:
+                raise ValueError("hybrid funding history requires a valid chart period")
+            if self._metrics_repository is None:
+                raise ValueError("hybrid funding history requires metric storage")
 
         descriptor = StreamDescriptor(
             symbol=key.symbol,
@@ -341,15 +414,20 @@ class MarketDataService:
             exchange=key.exchange,
             market_type=key.market_type,
         )
+        event_params: dict[str, str] = {}
+        if period is not None:
+            event_params["period"] = period
+        if hybrid_funding:
+            event_params["view"] = "hybrid"
         event_key = (
             MarketStreamKey.build(
                 key.exchange,
                 key.market_type,
                 key.symbol,
                 key.channel,
-                params={"period": period},
+                params=event_params,
             )
-            if period is not None
+            if event_params
             else key
         )
         refresh_plan = self._history_refresh_plan(
@@ -358,6 +436,17 @@ class MarketDataService:
             start_ms=start_ms,
             end_ms=end_ms,
         )
+        if hybrid_funding:
+            return await self._hybrid_funding_history_page(
+                event_key,
+                period=period or "",
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=limit,
+                refresh_plan=refresh_plan,
+            )
+        fetch_start_ms = refresh_plan.start_ms
+        fetch_end_ms = refresh_plan.end_ms
         if self._metrics_repository is None:
             if not refresh_plan.should_fetch:
                 return MarketHistoryPage(
@@ -371,8 +460,8 @@ class MarketDataService:
             raw_events = await self._fetch_market(
                 descriptor,
                 limit=min(limit, refresh_plan.max_page_size or limit),
-                start_ms=refresh_plan.start_ms,
-                end_ms=refresh_plan.end_ms,
+                start_ms=fetch_start_ms,
+                end_ms=fetch_end_ms,
                 history=True,
             )
             projected_events = [
@@ -410,8 +499,8 @@ class MarketDataService:
             raw_events = await self._fetch_market(
                 descriptor,
                 limit=min(limit, refresh_plan.max_page_size or limit),
-                start_ms=refresh_plan.start_ms,
-                end_ms=refresh_plan.end_ms,
+                start_ms=fetch_start_ms,
+                end_ms=fetch_end_ms,
                 history=True,
             )
         except ValueError:
@@ -447,6 +536,86 @@ class MarketDataService:
         return MarketHistoryPage(
             events=self._apply_history_event_cutoff(persisted_events, refresh_plan),
             excluded_ranges=refresh_plan.excluded_ranges,
+        )
+
+    async def _hybrid_funding_history_page(
+        self,
+        key: MarketStreamKey,
+        *,
+        period: str,
+        start_ms: int | None,
+        end_ms: int | None,
+        limit: int,
+        refresh_plan: _HistoryRefreshPlan,
+    ) -> MarketHistoryPage:
+        """Serve Hybrid Funding through its single cache/fetch owner."""
+        if not refresh_plan.should_fetch:
+            hybrid = await self._build_hybrid_funding_history(
+                key,
+                period=period,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=limit,
+                fetch_missing=False,
+            )
+            return MarketHistoryPage(
+                events=hybrid.events,
+                complete=hybrid.complete,
+                fallback=hybrid.fallback,
+                retryable=hybrid.retryable,
+                terminal_reason=refresh_plan.terminal_reason,
+                earliest_available_ms=refresh_plan.earliest_available_ms,
+                availability_revision=refresh_plan.availability_revision,
+                excluded_ranges=(
+                    *refresh_plan.excluded_ranges,
+                    *hybrid.excluded_ranges,
+                ),
+            )
+
+        try:
+            hybrid = await self._build_hybrid_funding_history(
+                key,
+                period=period,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=limit,
+                fetch_missing=True,
+            )
+        except ValueError:
+            raise
+        except Exception:
+            logger.warning(
+                "Hybrid Funding refresh failed; rebuilding the page from cache",
+                exc_info=True,
+            )
+            cached = await self._build_hybrid_funding_history(
+                key,
+                period=period,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=limit,
+                fetch_missing=False,
+            )
+            return MarketHistoryPage(
+                events=cached.events,
+                complete=False,
+                fallback=True,
+                retryable=True,
+                excluded_ranges=(
+                    *refresh_plan.excluded_ranges,
+                    *cached.excluded_ranges,
+                ),
+            )
+
+        return MarketHistoryPage(
+            events=hybrid.events,
+            complete=hybrid.complete,
+            fallback=hybrid.fallback,
+            retryable=hybrid.retryable,
+            excluded_ranges=(
+                *refresh_plan.excluded_ranges,
+                *hybrid.excluded_ranges,
+            ),
         )
 
     def _history_refresh_plan(
@@ -728,22 +897,44 @@ class MarketDataService:
                 **common,
             )
             events: list[MarketStateEvent] = []
+            now_ms = int(time.time() * 1000)
             for row in rows:
                 is_final = bool(row["is_final"])
+                cycle_ms = int(row["funding_cycle_ms"])
+                raw_time_ms = int(row["funding_time_ms"])
                 data: dict[str, Any] = {
                     "funding_rate": row["funding_rate"],
-                    "funding_time_ms": row["funding_time_ms"],
+                    "funding_cycle_ms": cycle_ms,
+                    "raw_funding_time_ms": raw_time_ms,
                     "is_final": is_final,
                     "sample_kind": "settlement" if is_final else "preview",
+                    "provenance": (
+                        "exchange_settlement" if is_final else "exchange_realtime"
+                    ),
                 }
+                if is_final:
+                    data["funding_time_ms"] = raw_time_ms
+                    data["quality"] = "final"
+                else:
+                    stale_after_ms = int(row["received_at_ms"]) + _REALTIME_FUNDING_STALE_MS
+                    stale = now_ms > stale_after_ms or now_ms >= cycle_ms
+                    data.update({
+                        "next_funding_time_ms": cycle_ms,
+                        "observed_at_ms": int(row["received_at_ms"]),
+                        "valid_until_ms": cycle_ms,
+                        "stale_after_ms": stale_after_ms,
+                        "carried": False,
+                        "stale": stale,
+                        "quality": "stale" if stale else "live",
+                    })
                 events.append(
                     MarketStateEvent(
                         key=key,
-                        event_time_ms=row["funding_time_ms"],
+                        event_time_ms=raw_time_ms,
                         received_at_ms=row["received_at_ms"],
                         source=row["source"],
                         data=data,
-                        sequence=row["funding_time_ms"],
+                        sequence=raw_time_ms,
                     ),
                 )
             return events
@@ -812,6 +1003,855 @@ class MarketDataService:
             else:
                 await run_storage(repository.upsert_open_interest, rows)
 
+    async def _build_hybrid_funding_history(
+        self,
+        key: MarketStreamKey,
+        *,
+        period: str,
+        start_ms: int | None,
+        end_ms: int | None,
+        limit: int,
+        fetch_missing: bool,
+    ) -> _HybridFundingResult:
+        repository = self._metrics_repository
+        period_ms = parse_interval_ms(period)
+        if repository is None or period_ms is None or period_ms <= 0:
+            return _HybridFundingResult(events=[], complete=True)
+
+        now_ms = int(time.time() * 1000)
+        last_closed_ms = last_closed_bar_open_ms(now_ms, period)
+        if last_closed_ms is None:
+            return _HybridFundingResult(events=[], complete=True)
+
+        requested_last_ms = (
+            last_closed_ms
+            if end_ms is None
+            else compute_bucket_start_ms(end_ms, period_ms, interval=period)
+        )
+        last_bucket_ms = min(last_closed_ms, requested_last_ms)
+        if start_ms is None:
+            first_bucket_ms = last_bucket_ms
+            for _ in range(max(0, int(limit) - 1)):
+                previous = compute_bucket_start_ms(
+                    first_bucket_ms - 1,
+                    period_ms,
+                    interval=period,
+                )
+                if previous >= first_bucket_ms or previous < 0:
+                    break
+                first_bucket_ms = previous
+        else:
+            first_bucket_ms = compute_bucket_start_ms(
+                start_ms,
+                period_ms,
+                interval=period,
+            )
+            if first_bucket_ms < start_ms:
+                first_bucket_ms = compute_bucket_end_ms(
+                    first_bucket_ms,
+                    period_ms,
+                    interval=period,
+                )
+        if first_bucket_ms > last_bucket_ms:
+            return _HybridFundingResult(events=[], complete=True)
+
+        bucket_starts: list[int] = []
+        cursor_ms = first_bucket_ms
+        page_limit = max(1, min(int(limit), 1000))
+        while cursor_ms <= last_bucket_ms and len(bucket_starts) <= page_limit:
+            bucket_starts.append(cursor_ms)
+            next_cursor_ms = compute_bucket_end_ms(
+                cursor_ms,
+                period_ms,
+                interval=period,
+            )
+            if next_cursor_ms <= cursor_ms:
+                break
+            cursor_ms = next_cursor_ms
+        complete = len(bucket_starts) <= page_limit and cursor_ms > last_bucket_ms
+        bucket_starts = bucket_starts[:page_limit]
+        if not bucket_starts:
+            return _HybridFundingResult(events=[], complete=True)
+
+        support_start_ms = max(
+            0,
+            bucket_starts[0] - _FUNDING_CONTEXT_LOOKBACK_MS,
+        )
+        desired_support_end_ms = compute_bucket_end_ms(
+            bucket_starts[-1],
+            period_ms,
+            interval=period,
+        ) - 1
+        support_end_ms = desired_support_end_ms
+        excluded_ranges: list[dict[str, Any]] = []
+        maximum_support_end_ms = (
+            support_start_ms
+            + _MAX_PREMIUM_ESTIMATE_POINTS * _PREMIUM_INDEX_INTERVAL_MS
+            - 1
+        )
+        premium_capacity_truncated = support_end_ms > maximum_support_end_ms
+        if premium_capacity_truncated:
+            support_end_ms = maximum_support_end_ms
+
+        settlement_refresh_failed = False
+        settlement_refresh_complete = True
+        settlement_covered_through_ms = desired_support_end_ms
+        if fetch_missing:
+            try:
+                (
+                    settlement_refresh_complete,
+                    settlement_covered_through_ms,
+                ) = await self._fetch_funding_settlement_pages(
+                    key,
+                    start_ms=max(0, support_start_ms - _FUNDING_CONTEXT_LOOKBACK_MS),
+                    end_ms=min(now_ms, desired_support_end_ms),
+                )
+            except Exception:
+                settlement_refresh_failed = True
+                settlement_refresh_complete = False
+                settlement_covered_through_ms = bucket_starts[0] - 1
+                logger.warning(
+                    "Funding settlement pagination failed for %s",
+                    key.topic,
+                    exc_info=True,
+                )
+
+        funding_query_start_ms = max(
+            0,
+            support_start_ms - _FUNDING_CONTEXT_LOOKBACK_MS,
+        )
+        funding_query_end_ms = desired_support_end_ms + _FUNDING_CONTEXT_LOOKBACK_MS
+        funding_query_limit = min(
+            100_000,
+            max(
+                1000,
+                (funding_query_end_ms - funding_query_start_ms) // (60 * 60 * 1000)
+                + 100,
+            ),
+        )
+        funding_rows = await run_storage(
+            repository.query_funding,
+            exchange=key.exchange,
+            market_type=key.market_type,
+            symbol=key.symbol,
+            start_ms=funding_query_start_ms,
+            end_ms=funding_query_end_ms,
+            limit=funding_query_limit,
+            oldest_first=True,
+            use_cycle_range=True,
+        )
+        final_rows = sorted(
+            (row for row in funding_rows if bool(row["is_final"])),
+            key=lambda row: int(row["funding_cycle_ms"]),
+        )
+        final_cycles = [int(row["funding_cycle_ms"]) for row in final_rows]
+
+        capacity_truncated = False
+        if not settlement_refresh_complete and not settlement_refresh_failed:
+            settlement_capacity_buckets = [
+                bucket_ms
+                for bucket_ms in bucket_starts
+                if compute_bucket_end_ms(
+                    bucket_ms,
+                    period_ms,
+                    interval=period,
+                ) - 1 <= settlement_covered_through_ms
+            ]
+            if len(settlement_capacity_buckets) < len(bucket_starts):
+                bucket_starts = settlement_capacity_buckets
+                capacity_truncated = True
+                complete = False
+                if not bucket_starts:
+                    return _HybridFundingResult(
+                        events=[],
+                        complete=False,
+                        retryable=False,
+                        excluded_ranges=tuple(excluded_ranges),
+                    )
+
+        settlement_by_bucket: dict[int, tuple[dict[str, Any], int]] = {}
+        requested_bucket_set = set(bucket_starts)
+        for row in final_rows:
+            cycle_ms = int(row["funding_cycle_ms"])
+            bucket_ms = compute_bucket_start_ms(
+                cycle_ms,
+                period_ms,
+                interval=period,
+            )
+            if bucket_ms not in requested_bucket_set:
+                continue
+            previous = settlement_by_bucket.get(bucket_ms)
+            count = 1 if previous is None else previous[1] + 1
+            settlement_by_bucket[bucket_ms] = (row, count)
+
+        needs_estimates = len(settlement_by_bucket) < len(bucket_starts)
+        premium_rows: list[dict[str, Any]] = []
+        missing_ranges: list[tuple[int, int]] = []
+        premium_continuous_through_ms: int | None = None
+        if needs_estimates:
+            if premium_capacity_truncated:
+                capacity_truncated = True
+                complete = False
+                excluded_ranges.append({
+                    "start_ms": support_end_ms + 1,
+                    "end_ms": desired_support_end_ms,
+                    "disposition": "deferred",
+                    "reason": "premium_index_capacity_page",
+                })
+            (
+                premium_rows,
+                missing_ranges,
+                premium_fetch_failed,
+                premium_budget_exhausted,
+            ) = await self._ensure_premium_index_history(
+                key,
+                start_ms=support_start_ms,
+                end_ms=support_end_ms,
+                fetch_missing=fetch_missing,
+            )
+            relevant_missing_ranges = [
+                (max(missing_start, bucket_starts[0]), min(missing_end, support_end_ms))
+                for missing_start, missing_end in missing_ranges
+                if missing_end >= bucket_starts[0] and missing_start <= support_end_ms
+            ]
+            if relevant_missing_ranges:
+                # Premium Index is a fixed 1m input stream. A later row cannot
+                # repair an earlier hole, even when both land inside the same
+                # multi-minute chart bucket. Consume and emit only the prefix
+                # strictly before the first relevant missing minute.
+                premium_continuous_through_ms = (
+                    min(start for start, _end in relevant_missing_ranges) - 1
+                )
+            excluded_ranges.extend({
+                "start_ms": missing_start,
+                "end_ms": missing_end,
+                "disposition": "estimated_data_unavailable",
+                "reason": "premium_index_unavailable",
+            } for missing_start, missing_end in relevant_missing_ranges)
+        else:
+            relevant_missing_ranges = []
+            premium_fetch_failed = False
+            premium_budget_exhausted = False
+
+        # The repository contract is unique ascending 1m rows. Keep one
+        # cumulative state per funding cycle and advance it only as chart
+        # cutoffs need data; do not materialize one point dictionary per minute.
+        running: dict[int, tuple[float, int, int, int]] = {}
+        premium_cursor = 0
+        latest_global_row: dict[str, Any] | None = None
+        events: list[MarketStateEvent] = []
+        for bucket_ms in bucket_starts:
+            bucket_end_ms = compute_bucket_end_ms(
+                bucket_ms,
+                period_ms,
+                interval=period,
+            )
+            sample_time_ms = bucket_end_ms - 1
+            if (
+                premium_continuous_through_ms is not None
+                and sample_time_ms > premium_continuous_through_ms
+            ):
+                break
+            settlement = settlement_by_bucket.get(bucket_ms)
+            if settlement is not None:
+                row, settlement_count = settlement
+                cycle_ms = int(row["funding_cycle_ms"])
+                raw_time_ms = int(row["funding_time_ms"])
+                events.append(MarketStateEvent(
+                    key=key,
+                    event_time_ms=bucket_ms,
+                    received_at_ms=int(row["received_at_ms"]),
+                    source=row["source"],
+                    data={
+                        "funding_rate": float(row["funding_rate"]),
+                        "funding_time_ms": raw_time_ms,
+                        "raw_funding_time_ms": raw_time_ms,
+                        "funding_cycle_ms": cycle_ms,
+                        "target_funding_time_ms": cycle_ms,
+                        "sample_time_ms": raw_time_ms,
+                        "is_final": True,
+                        "sample_kind": "settlement",
+                        "provenance": "exchange_settlement",
+                        "quality": "final",
+                        "settlement_count": settlement_count,
+                    },
+                    sequence=bucket_ms,
+                ))
+                continue
+
+            while premium_cursor < len(premium_rows):
+                premium_row = premium_rows[premium_cursor]
+                close_time_ms = int(premium_row["close_time_ms"])
+                if (
+                    close_time_ms > sample_time_ms
+                    or close_time_ms > support_end_ms
+                    or (
+                        premium_continuous_through_ms is not None
+                        and close_time_ms > premium_continuous_through_ms
+                    )
+                ):
+                    break
+                premium_cursor += 1
+                latest_global_row = premium_row
+                row_target_cycle_ms, row_funding_interval_ms = (
+                    _funding_cycle_context_ms(
+                        close_time_ms,
+                        final_cycles=final_cycles,
+                    )
+                )
+                row_cycle_start_ms = max(
+                    0,
+                    row_target_cycle_ms - row_funding_interval_ms,
+                )
+                if close_time_ms < row_cycle_start_ms:
+                    continue
+                premium_sum, sample_count, _last_time_ms, _received_at_ms = running.get(
+                    row_target_cycle_ms,
+                    (0.0, 0, 0, 0),
+                )
+                running[row_target_cycle_ms] = (
+                    premium_sum + float(premium_row["premium_close"]),
+                    sample_count + 1,
+                    close_time_ms,
+                    int(premium_row["received_at_ms"]),
+                )
+
+            target_cycle_ms, funding_interval_ms = _funding_cycle_context_ms(
+                sample_time_ms,
+                final_cycles=final_cycles,
+            )
+            cycle_state = running.get(target_cycle_ms)
+            input_carried = False
+            if cycle_state is not None:
+                premium_sum, sample_count, point_time_ms, received_at_ms = cycle_state
+                carry_age_ms = sample_time_ms - point_time_ms
+                if carry_age_ms >= _PREMIUM_INDEX_INTERVAL_MS:
+                    break
+                cycle_start_ms = max(0, target_cycle_ms - funding_interval_ms)
+                premium_average = premium_sum / sample_count
+                expected_count = max(
+                    1,
+                    (
+                        point_time_ms
+                        - cycle_start_ms
+                        + _PREMIUM_INDEX_INTERVAL_MS
+                    ) // _PREMIUM_INDEX_INTERVAL_MS,
+                )
+                point = {
+                    "time_ms": point_time_ms,
+                    "funding_rate": _estimated_funding_rate(
+                        premium_average,
+                        funding_interval_ms=funding_interval_ms,
+                    ),
+                    "premium_average": premium_average,
+                    "sample_count": sample_count,
+                    "expected_count": expected_count,
+                    "coverage": min(1.0, sample_count / expected_count),
+                    "received_at_ms": received_at_ms,
+                }
+                input_carried = carry_age_ms > 0
+            else:
+                if period_ms >= _PREMIUM_INDEX_INTERVAL_MS:
+                    break
+                if latest_global_row is None:
+                    break
+                proxy_row = latest_global_row
+                proxy_time_ms = int(proxy_row["close_time_ms"])
+                proxy_age_ms = sample_time_ms - proxy_time_ms
+                if proxy_age_ms < 0 or proxy_age_ms >= _PREMIUM_INDEX_INTERVAL_MS:
+                    break
+                cycle_start_ms = max(0, target_cycle_ms - funding_interval_ms)
+                premium_average = float(proxy_row["premium_close"])
+                point = {
+                    "time_ms": proxy_time_ms,
+                    "funding_rate": _estimated_funding_rate(
+                        premium_average,
+                        funding_interval_ms=target_cycle_ms - cycle_start_ms,
+                    ),
+                    "premium_average": premium_average,
+                    "sample_count": 0,
+                    "expected_count": 1,
+                    "coverage": 0.0,
+                    "received_at_ms": int(proxy_row["received_at_ms"]),
+                    "input_proxy": True,
+                }
+                input_carried = True
+            events.append(MarketStateEvent(
+                key=key,
+                event_time_ms=bucket_ms,
+                received_at_ms=int(point["received_at_ms"]),
+                source=DataSource.HTTP_BACKFILL,
+                data={
+                    "funding_rate": float(point["funding_rate"]),
+                    "sample_time_ms": sample_time_ms,
+                    "target_funding_time_ms": target_cycle_ms,
+                    "funding_cycle_ms": target_cycle_ms,
+                    "is_final": False,
+                    "sample_kind": "estimate",
+                    "provenance": "derived_history",
+                    "quality": "estimated",
+                    "formula_version": _FUNDING_FORMULA_VERSION,
+                    "input_resolution": _PREMIUM_INDEX_INTERVAL,
+                    "input_samples": int(point["sample_count"]),
+                    "expected_input_samples": int(point["expected_count"]),
+                    "input_coverage": round(float(point["coverage"]), 6),
+                    "input_carried": input_carried,
+                    "input_proxy": bool(point.get("input_proxy", False)),
+                    "premium_index_average": float(point["premium_average"]),
+                },
+                sequence=bucket_ms,
+            ))
+
+        returned_bucket_starts = {event.event_time_ms for event in events}
+        missing_bucket_starts = [
+            bucket_ms
+            for bucket_ms in bucket_starts
+            if bucket_ms not in returned_bucket_starts
+        ]
+        excluded_ranges.extend(
+            _missing_bucket_exclusions(
+                missing_bucket_starts,
+                period_ms=period_ms,
+                period=period,
+            ),
+        )
+        retryable = bool(
+            settlement_refresh_failed
+            or premium_fetch_failed
+        )
+        return _HybridFundingResult(
+            events=events,
+            complete=(
+                complete
+                and not retryable
+                and not capacity_truncated
+                and not premium_budget_exhausted
+                and not missing_bucket_starts
+            ),
+            retryable=retryable,
+            fallback=settlement_refresh_failed,
+            excluded_ranges=tuple(excluded_ranges),
+        )
+
+    async def _ensure_premium_index_history(
+        self,
+        key: MarketStreamKey,
+        *,
+        start_ms: int,
+        end_ms: int,
+        fetch_missing: bool,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[tuple[int, int]],
+        bool,
+        bool,
+    ]:
+        repository = self._metrics_repository
+        if repository is None or end_ms < start_ms:
+            return [], [], False, False
+        aligned_start_ms = (
+            start_ms // _PREMIUM_INDEX_INTERVAL_MS
+        ) * _PREMIUM_INDEX_INTERVAL_MS
+        aligned_end_ms = (
+            ((end_ms + 1) // _PREMIUM_INDEX_INTERVAL_MS) - 1
+        ) * _PREMIUM_INDEX_INTERVAL_MS
+        if aligned_end_ms < aligned_start_ms:
+            return [], [], False, False
+        common = {
+            "exchange": key.exchange,
+            "market_type": key.market_type,
+            "symbol": key.symbol,
+            "interval": _PREMIUM_INDEX_INTERVAL,
+            "start_ms": aligned_start_ms,
+            "end_ms": aligned_end_ms,
+            "limit": _MAX_PREMIUM_ESTIMATE_POINTS,
+        }
+        query_premium = getattr(
+            repository,
+            "query_premium_index_compact",
+            repository.query_premium_index,
+        )
+        rows = await run_storage(query_premium, **common)
+        missing = _missing_minute_ranges(
+            [int(row["open_time_ms"]) for row in rows],
+            start_ms=aligned_start_ms,
+            end_ms=aligned_end_ms,
+        )
+        fetch_failed = False
+        budget_exhausted = False
+        if fetch_missing and missing:
+            # Release the potentially large first materialization before the
+            # post-refresh query. A complete hot-cache hit returns it directly.
+            rows = []
+            try:
+                (
+                    _pages_used,
+                    budget_exhausted,
+                    fetch_failed,
+                ) = await self._fetch_premium_index_pages(
+                    key,
+                    ranges=missing,
+                )
+            except Exception:
+                fetch_failed = True
+                logger.warning(
+                    "Premium-index history refresh failed for %s",
+                    key.topic,
+                    exc_info=True,
+                )
+            rows = await run_storage(query_premium, **common)
+            missing = _missing_minute_ranges(
+                [int(row["open_time_ms"]) for row in rows],
+                start_ms=aligned_start_ms,
+                end_ms=aligned_end_ms,
+            )
+        return rows, missing, fetch_failed, budget_exhausted
+
+    async def _fetch_premium_index_pages(
+        self,
+        key: MarketStreamKey,
+        *,
+        ranges: list[tuple[int, int]],
+        max_pages: int = _MAX_PREMIUM_HISTORY_PAGES_PER_REQUEST,
+        max_concurrency: int = _PREMIUM_FETCH_CONCURRENCY,
+    ) -> tuple[int, bool, bool]:
+        repository = self._metrics_repository
+        if repository is None:
+            return 0, False, False
+        descriptor = StreamDescriptor(
+            symbol=key.symbol,
+            stream_type=StreamType.PREMIUM_INDEX,
+            interval=_PREMIUM_INDEX_INTERVAL,
+            exchange=key.exchange,
+            market_type=key.market_type,
+        )
+        page_ranges, budget_exhausted = _premium_index_page_ranges(
+            ranges,
+            max_pages=max_pages,
+        )
+        pages_used = 0
+        fetch_failed = False
+        concurrency = max(1, min(int(max_concurrency), len(page_ranges) or 1))
+
+        async def fetch_page(page_start_ms: int, page_end_ms: int) -> list[dict[str, Any]]:
+            page_points = (
+                (page_end_ms - page_start_ms) // _PREMIUM_INDEX_INTERVAL_MS
+            ) + 1
+            raw_events = await self._fetch_market(
+                descriptor,
+                limit=min(_PREMIUM_HISTORY_PAGE_POINTS, page_points),
+                start_ms=page_start_ms,
+                end_ms=page_end_ms,
+                history=True,
+            )
+            return [
+                row
+                for event in raw_events
+                if event.event_type == StreamType.PREMIUM_INDEX
+                and page_start_ms
+                <= int(event.data.get("open_time_ms", -1))
+                <= page_end_ms
+                for row in (self._premium_index_storage_row(event),)
+            ]
+
+        for offset in range(0, len(page_ranges), concurrency):
+            wave = page_ranges[offset:offset + concurrency]
+            results = await asyncio.gather(
+                *(fetch_page(page_start, page_end) for page_start, page_end in wave),
+                return_exceptions=True,
+            )
+            pages_used += len(wave)
+            batch: list[dict[str, Any]] = []
+            for (page_start, page_end), result in zip(wave, results):
+                if isinstance(result, BaseException):
+                    fetch_failed = True
+                    logger.warning(
+                        "Premium-index page failed for %s [%s, %s]",
+                        key.topic,
+                        page_start,
+                        page_end,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+                    continue
+                batch.extend(result)
+            if batch:
+                await run_storage(repository.upsert_premium_index, batch)
+            if fetch_failed:
+                break
+
+        return pages_used, budget_exhausted, fetch_failed
+
+    async def _fetch_funding_settlement_pages(
+        self,
+        key: MarketStreamKey,
+        *,
+        start_ms: int,
+        end_ms: int,
+        max_pages: int = _MAX_UPSTREAM_HISTORY_PAGES_PER_REQUEST,
+    ) -> tuple[bool, int]:
+        if self._metrics_repository is None or end_ms < start_ms:
+            return True, end_ms
+        identity = (key.exchange, key.market_type, key.symbol)
+        page_limit = max(1, int(max_pages))
+        now_monotonic = self._funding_refresh_monotonic()
+        async with self._funding_refresh_lock:
+            for completed_key, completed_task in list(
+                self._funding_refresh_tasks.items(),
+            ):
+                if completed_task.done():
+                    self._funding_refresh_tasks.pop(completed_key, None)
+            covered_through_ms = self._funding_coverage_prefix_locked(
+                identity,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                now_monotonic=now_monotonic,
+            )
+            if covered_through_ms >= end_ms:
+                return True, end_ms
+
+            refresh_start_ms = max(start_ms, covered_through_ms + 1)
+            task_key: tuple[tuple[str, str, str], int, int, int] | None = None
+            task: asyncio.Task[tuple[bool, int]] | None = None
+            for candidate_key, candidate_task in self._funding_refresh_tasks.items():
+                (
+                    candidate_identity,
+                    candidate_start_ms,
+                    candidate_end_ms,
+                    _candidate_page_limit,
+                ) = candidate_key
+                if (
+                    candidate_identity == identity
+                    and candidate_start_ms <= refresh_start_ms
+                    and candidate_end_ms >= end_ms
+                ):
+                    task_key = candidate_key
+                    task = candidate_task
+                    break
+
+            if task is None:
+                task_key = (identity, refresh_start_ms, end_ms, page_limit)
+                task = asyncio.create_task(
+                    self._run_funding_settlement_refresh(
+                        key,
+                        identity=identity,
+                        start_ms=refresh_start_ms,
+                        end_ms=end_ms,
+                        max_pages=page_limit,
+                    ),
+                    name=f"funding-settlement-refresh:{key.topic}",
+                )
+                self._funding_refresh_tasks[task_key] = task
+                task.add_done_callback(
+                    lambda completed, cache_key=task_key: (
+                        self._discard_funding_refresh_task(cache_key, completed)
+                    ),
+                )
+
+        await asyncio.shield(task)
+
+        async with self._funding_refresh_lock:
+            covered_through_ms = self._funding_coverage_prefix_locked(
+                identity,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                now_monotonic=self._funding_refresh_monotonic(),
+            )
+        return covered_through_ms >= end_ms, min(end_ms, covered_through_ms)
+
+    def _discard_funding_refresh_task(
+        self,
+        task_key: tuple[tuple[str, str, str], int, int, int],
+        task: asyncio.Task[tuple[bool, int]],
+    ) -> None:
+        if not task.cancelled():
+            task.exception()
+        if self._funding_refresh_tasks.get(task_key) is task:
+            self._funding_refresh_tasks.pop(task_key, None)
+
+    async def _run_funding_settlement_refresh(
+        self,
+        key: MarketStreamKey,
+        *,
+        identity: tuple[str, str, str],
+        start_ms: int,
+        end_ms: int,
+        max_pages: int,
+    ) -> tuple[bool, int]:
+        complete, covered_through_ms = (
+            await self._fetch_funding_settlement_pages_uncached(
+                key,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                max_pages=max_pages,
+            )
+        )
+        successful_end_ms = end_ms if complete else covered_through_ms
+        if successful_end_ms >= start_ms:
+            async with self._funding_refresh_lock:
+                self._record_funding_coverage_locked(
+                    identity,
+                    start_ms=start_ms,
+                    end_ms=successful_end_ms,
+                    now_ms=self._funding_refresh_wall_ms(),
+                    now_monotonic=self._funding_refresh_monotonic(),
+                )
+        return complete, covered_through_ms
+
+    async def _fetch_funding_settlement_pages_uncached(
+        self,
+        key: MarketStreamKey,
+        *,
+        start_ms: int,
+        end_ms: int,
+        max_pages: int,
+    ) -> tuple[bool, int]:
+        descriptor = StreamDescriptor(
+            symbol=key.symbol,
+            stream_type=StreamType.FUNDING_RATE,
+            exchange=key.exchange,
+            market_type=key.market_type,
+        )
+        cursor_ms = start_ms
+        covered_through_ms = start_ms - 1
+        pages = 0
+        while cursor_ms <= end_ms and pages < max_pages:
+            raw_events = await self._fetch_market(
+                descriptor,
+                limit=1000,
+                start_ms=cursor_ms,
+                end_ms=end_ms,
+                history=True,
+            )
+            pages += 1
+            projected_events = [
+                projected
+                for event in raw_events
+                if (projected := self._project(event, key)) is not None
+            ]
+            if not projected_events:
+                return True, end_ms
+            await self._persist_final_history(projected_events, period=None)
+            latest_time_ms = max(
+                int(event.data.get("funding_time_ms", event.event_time_ms))
+                for event in projected_events
+            )
+            if latest_time_ms < cursor_ms:
+                return False, covered_through_ms
+            covered_through_ms = latest_time_ms
+            cursor_ms = latest_time_ms + 1
+            if len(projected_events) < 1000:
+                return True, end_ms
+        return cursor_ms > end_ms, (
+            end_ms if cursor_ms > end_ms else covered_through_ms
+        )
+
+    @staticmethod
+    def _funding_refresh_wall_ms() -> int:
+        return int(time.time() * 1000)
+
+    @staticmethod
+    def _funding_refresh_monotonic() -> float:
+        return time.monotonic()
+
+    def _funding_coverage_prefix_locked(
+        self,
+        identity: tuple[str, str, str],
+        *,
+        start_ms: int,
+        end_ms: int,
+        now_monotonic: float,
+    ) -> int:
+        active = [
+            coverage
+            for coverage in self._funding_refresh_coverage.get(identity, ())
+            if coverage.expires_at is None or coverage.expires_at > now_monotonic
+        ]
+        if active:
+            self._funding_refresh_coverage[identity] = active
+        else:
+            self._funding_refresh_coverage.pop(identity, None)
+            return start_ms - 1
+
+        covered_through_ms = start_ms - 1
+        for coverage in sorted(active, key=lambda item: (item.start_ms, item.end_ms)):
+            if coverage.end_ms < start_ms:
+                continue
+            if coverage.start_ms > covered_through_ms + 1:
+                break
+            covered_through_ms = max(covered_through_ms, coverage.end_ms)
+            if covered_through_ms >= end_ms:
+                return end_ms
+        return min(end_ms, covered_through_ms)
+
+    def _record_funding_coverage_locked(
+        self,
+        identity: tuple[str, str, str],
+        *,
+        start_ms: int,
+        end_ms: int,
+        now_ms: int,
+        now_monotonic: float,
+    ) -> None:
+        if end_ms < start_ms:
+            return
+        historical_cutoff_ms = now_ms - _DEFAULT_FUNDING_INTERVAL_MS
+        records = self._funding_refresh_coverage.setdefault(identity, [])
+        historical_end_ms = min(end_ms, historical_cutoff_ms)
+        if start_ms <= historical_end_ms:
+            records.append(_FundingSettlementCoverage(
+                start_ms=start_ms,
+                end_ms=historical_end_ms,
+            ))
+        edge_start_ms = max(start_ms, historical_cutoff_ms + 1)
+        if edge_start_ms <= end_ms:
+            records.append(_FundingSettlementCoverage(
+                start_ms=edge_start_ms,
+                end_ms=end_ms,
+                expires_at=(
+                    now_monotonic + _FUNDING_SETTLEMENT_EDGE_TTL_SECONDS
+                ),
+            ))
+        permanent = sorted(
+            (record for record in records if record.expires_at is None),
+            key=lambda record: (record.start_ms, record.end_ms),
+        )
+        merged_permanent: list[_FundingSettlementCoverage] = []
+        for record in permanent:
+            if (
+                merged_permanent
+                and record.start_ms <= merged_permanent[-1].end_ms + 1
+            ):
+                previous = merged_permanent[-1]
+                merged_permanent[-1] = _FundingSettlementCoverage(
+                    start_ms=previous.start_ms,
+                    end_ms=max(previous.end_ms, record.end_ms),
+                )
+            else:
+                merged_permanent.append(record)
+        records[:] = merged_permanent + [
+            record
+            for record in records
+            if record.expires_at is not None
+            and record.expires_at > now_monotonic
+        ]
+
+    @staticmethod
+    def _premium_index_storage_row(event: MarketEvent) -> dict[str, Any]:
+        return {
+            "exchange": event.exchange,
+            "market_type": event.market_type,
+            "symbol": event.symbol,
+            "interval": event.data.get("interval", _PREMIUM_INDEX_INTERVAL),
+            "open_time_ms": int(event.data["open_time_ms"]),
+            "close_time_ms": int(event.data["close_time_ms"]),
+            "premium_open": event.data["premium_index_open"],
+            "premium_high": event.data["premium_index_high"],
+            "premium_low": event.data["premium_index_low"],
+            "premium_close": event.data["premium_index_close"],
+            "source": event.source.value,
+            "received_at_ms": event.received_at_ms,
+        }
+
     def subscribe(
         self,
         keys: Iterable[MarketStreamKey],
@@ -844,6 +1884,16 @@ class MarketDataService:
                 task.cancel()
         if snapshot_tasks:
             await asyncio.gather(*snapshot_tasks, return_exceptions=True)
+
+        async with self._funding_refresh_lock:
+            funding_refresh_tasks = list(self._funding_refresh_tasks.values())
+            self._funding_refresh_tasks.clear()
+            self._funding_refresh_coverage.clear()
+        for task in funding_refresh_tasks:
+            if not task.done():
+                task.cancel()
+        if funding_refresh_tasks:
+            await asyncio.gather(*funding_refresh_tasks, return_exceptions=True)
 
         if stop_tasks:
             await asyncio.gather(
@@ -1104,11 +2154,15 @@ class MarketDataService:
         funding_time_ms = event.data.get(time_field)
         if funding_time_ms is None:
             funding_time_ms = event.event_time_ms
+        funding_cycle_ms = event.data.get("funding_cycle_ms")
+        if funding_cycle_ms is None:
+            funding_cycle_ms = normalize_funding_cycle_ms(funding_time_ms)
         row: dict[str, Any] = {
             "exchange": event.key.exchange,
             "market_type": event.key.market_type,
             "symbol": event.key.symbol,
             "funding_time_ms": int(funding_time_ms),
+            "funding_cycle_ms": int(funding_cycle_ms),
             "funding_rate": event.data["funding_rate"],
             "is_final": is_final,
             "source": event.source.value,
@@ -1168,6 +2222,38 @@ class MarketDataService:
             for name in ("next_funding_time_ms", "funding_time_ms", "mark_price"):
                 if name in data:
                     projected[name] = data[name]
+            if "funding_time_ms" in data:
+                raw_time_ms = int(data["funding_time_ms"])
+                cycle_ms = normalize_funding_cycle_ms(raw_time_ms)
+                projected.update({
+                    "funding_time_ms": raw_time_ms,
+                    "raw_funding_time_ms": raw_time_ms,
+                    "funding_cycle_ms": cycle_ms,
+                    "target_funding_time_ms": cycle_ms,
+                    "sample_time_ms": raw_time_ms,
+                    "is_final": True,
+                    "sample_kind": "settlement",
+                    "provenance": "exchange_settlement",
+                    "quality": "final",
+                })
+            else:
+                raw_target_ms = int(data.get("next_funding_time_ms", event.event_time_ms))
+                cycle_ms = normalize_funding_cycle_ms(raw_target_ms)
+                projected.update({
+                    "next_funding_time_ms": raw_target_ms,
+                    "raw_next_funding_time_ms": raw_target_ms,
+                    "target_funding_time_ms": cycle_ms,
+                    "funding_cycle_ms": cycle_ms,
+                    "observed_at_ms": event.received_at_ms,
+                    "valid_until_ms": cycle_ms,
+                    "stale_after_ms": event.received_at_ms + _REALTIME_FUNDING_STALE_MS,
+                    "is_final": False,
+                    "sample_kind": "preview",
+                    "provenance": "exchange_realtime",
+                    "quality": "live",
+                    "carried": False,
+                    "stale": False,
+                })
         elif key.channel == MarketChannel.OPEN_INTEREST:
             if "open_interest" not in data:
                 return None
@@ -1301,3 +2387,181 @@ class MarketDataService:
             raise ValueError(
                 f"{key.exchange}:{key.market_type}:{key.channel.value} does not support {mode}",
             )
+
+
+def _inferred_funding_interval_ms(
+    final_cycles: list[int],
+    *,
+    as_of_ms: int,
+    observed_index: int | None = None,
+) -> int:
+    """Infer a Binance funding cadence from a bounded, no-lookahead window."""
+    if observed_index is None:
+        observed_index = bisect_right(final_cycles, as_of_ms)
+    observed_index = min(max(0, int(observed_index)), len(final_cycles))
+    # A missing settlement can make the latest adjacent difference 16h. Scan a
+    # small fixed window backwards for a valid Binance cadence instead of
+    # allocating/filtering the whole history for every Premium Index minute.
+    oldest_pair_index = max(1, observed_index - 8)
+    for current_index in range(observed_index - 1, oldest_pair_index - 1, -1):
+        difference_ms = final_cycles[current_index] - final_cycles[current_index - 1]
+        if difference_ms in _BINANCE_FUNDING_INTERVALS_MS:
+            return difference_ms
+    return _DEFAULT_FUNDING_INTERVAL_MS
+
+
+def _funding_cycle_context_ms(
+    as_of_ms: int,
+    *,
+    final_cycles: list[int],
+) -> tuple[int, int]:
+    observed_index = bisect_right(final_cycles, as_of_ms)
+    interval_ms = _inferred_funding_interval_ms(
+        final_cycles,
+        as_of_ms=as_of_ms,
+        observed_index=observed_index,
+    )
+    if observed_index:
+        anchor_ms = final_cycles[observed_index - 1]
+        steps = ((as_of_ms - anchor_ms) // interval_ms) + 1
+        return anchor_ms + steps * interval_ms, interval_ms
+    return ((as_of_ms // interval_ms) + 1) * interval_ms, interval_ms
+
+
+def _next_funding_cycle_ms(
+    as_of_ms: int,
+    *,
+    final_cycles: list[int],
+) -> int:
+    return _funding_cycle_context_ms(
+        as_of_ms,
+        final_cycles=final_cycles,
+    )[0]
+
+
+def _funding_cycle_start_ms(
+    target_cycle_ms: int,
+    *,
+    final_cycles: list[int],
+    as_of_ms: int,
+) -> int:
+    interval_ms = _inferred_funding_interval_ms(
+        final_cycles,
+        as_of_ms=as_of_ms,
+    )
+    return max(
+        0,
+        target_cycle_ms - interval_ms,
+    )
+
+
+def _estimated_funding_rate(
+    premium_average: float,
+    *,
+    funding_interval_ms: int,
+) -> float:
+    interest_rate = _FUNDING_INTEREST_RATE_8H * (
+        max(1, int(funding_interval_ms)) / _DEFAULT_FUNDING_INTERVAL_MS
+    )
+    adjustment = max(
+        -_FUNDING_ADJUSTMENT_BOUND,
+        min(
+            _FUNDING_ADJUSTMENT_BOUND,
+            interest_rate - premium_average,
+        ),
+    )
+    estimate = premium_average + adjustment
+    return max(-_FUNDING_RATE_BOUND, min(_FUNDING_RATE_BOUND, estimate))
+
+
+def _missing_minute_ranges(
+    open_times_ms: list[int],
+    *,
+    start_ms: int,
+    end_ms: int,
+) -> list[tuple[int, int]]:
+    """Return gaps from the repository's unique ascending open-time stream."""
+    if end_ms < start_ms:
+        return []
+    cursor_ms = start_ms
+    missing: list[tuple[int, int]] = []
+    previous_ms: int | None = None
+    for open_time_ms in open_times_ms:
+        if previous_ms == open_time_ms:
+            continue
+        previous_ms = open_time_ms
+        if open_time_ms < cursor_ms:
+            continue
+        if open_time_ms > end_ms:
+            break
+        if open_time_ms > cursor_ms:
+            missing.append((cursor_ms, open_time_ms - _PREMIUM_INDEX_INTERVAL_MS))
+        cursor_ms = open_time_ms + _PREMIUM_INDEX_INTERVAL_MS
+    if cursor_ms <= end_ms:
+        missing.append((cursor_ms, end_ms))
+    return missing
+
+
+def _premium_index_page_ranges(
+    missing_ranges: list[tuple[int, int]],
+    *,
+    max_pages: int,
+) -> tuple[list[tuple[int, int]], bool]:
+    """Split aligned missing ranges into deterministic 1000-minute pages."""
+    page_limit = max(1, int(max_pages))
+    page_span_ms = (
+        (_PREMIUM_HISTORY_PAGE_POINTS - 1) * _PREMIUM_INDEX_INTERVAL_MS
+    )
+    pages: list[tuple[int, int]] = []
+    budget_exhausted = False
+    for range_start_ms, range_end_ms in sorted(missing_ranges):
+        cursor_ms = int(range_start_ms)
+        aligned_end_ms = int(range_end_ms)
+        while cursor_ms <= aligned_end_ms:
+            if len(pages) >= page_limit:
+                budget_exhausted = True
+                return pages, budget_exhausted
+            page_end_ms = min(aligned_end_ms, cursor_ms + page_span_ms)
+            pages.append((cursor_ms, page_end_ms))
+            cursor_ms = page_end_ms + _PREMIUM_INDEX_INTERVAL_MS
+    return pages, budget_exhausted
+
+
+def _missing_bucket_exclusions(
+    bucket_starts_ms: list[int],
+    *,
+    period_ms: int,
+    period: str,
+) -> list[dict[str, Any]]:
+    exclusions: list[dict[str, Any]] = []
+    range_start_ms: int | None = None
+    range_end_ms: int | None = None
+    for bucket_ms in sorted(set(bucket_starts_ms)):
+        bucket_end_ms = compute_bucket_end_ms(
+            bucket_ms,
+            period_ms,
+            interval=period,
+        ) - 1
+        if range_start_ms is None:
+            range_start_ms = bucket_ms
+            range_end_ms = bucket_end_ms
+            continue
+        if range_end_ms is not None and bucket_ms == range_end_ms + 1:
+            range_end_ms = bucket_end_ms
+            continue
+        exclusions.append({
+            "start_ms": range_start_ms,
+            "end_ms": range_end_ms,
+            "disposition": "estimated_data_unavailable",
+            "reason": "premium_index_unavailable",
+        })
+        range_start_ms = bucket_ms
+        range_end_ms = bucket_end_ms
+    if range_start_ms is not None and range_end_ms is not None:
+        exclusions.append({
+            "start_ms": range_start_ms,
+            "end_ms": range_end_ms,
+            "disposition": "estimated_data_unavailable",
+            "reason": "premium_index_unavailable",
+        })
+    return exclusions

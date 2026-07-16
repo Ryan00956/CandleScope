@@ -953,6 +953,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const drawingApiRef = useRef<DrawingEngineApi | null>(null);
   const drawingsHiddenRef = useRef(false);
   const [seriesReady, setSeriesReady] = useState(0);
+  const [paneCrosshairTime, setPaneCrosshairTime] = useState<number | null>(null);
   const [drawingSeriesGeneration, setDrawingSeriesGeneration] = useState(0);
   const [drawingCoordinateGeneration, setDrawingCoordinateGeneration] = useState(0);
   const [auxiliaryDisplayState, setAuxiliaryDisplayState] = useState<AuxiliaryDisplayState>({
@@ -1198,6 +1199,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
   useEffect(() => {
     onCrosshairMove?.(null);
+    setPaneCrosshairTime(null);
   }, [datasetKey, interval, onCrosshairMove, symbol]);
 
   const dataTimeSet = resolveDataTimeSet(seriesStore);
@@ -1510,21 +1512,25 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
     setDrawingSeriesGeneration((prev) => prev + 1);
 
     const handleCrosshairMove = (param: ChartCrosshairParam) => {
-      if (isSyncingRef.current || !onCrosshairMove) return;
+      if (isSyncingRef.current) return;
       if (param.time == null) {
-        onCrosshairMove(null);
+        setPaneCrosshairTime(null);
+        onCrosshairMove?.(null);
         return;
       }
       const axisTime = typeof param.time === "number" || isOrdinalAxisTime(param.time)
         ? param.time
         : null;
       if (axisTime == null) {
-        onCrosshairMove(null);
+        setPaneCrosshairTime(null);
+        onCrosshairMove?.(null);
         return;
       }
       const displayRow = displayRowMapRef.current.get(axisTime);
       const displayIndex = displayRowIndexMapRef.current.get(axisTime);
       const sourceTime = resolveSourceTime(axisTime, displayRow);
+      setPaneCrosshairTime(sourceTime);
+      if (!onCrosshairMove) return;
       const sourceRow = sourceTime == null ? null : sourceRowMapRef.current.get(sourceTime);
       const includeVolume = initialDescriptor.axisMode === "time"
         || isLastDisplayTargetForSourceTime(displayRowsRef.current, displayIndex);
@@ -2708,17 +2714,55 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         style={{ cursor: cursorStyleForDrawingTool(effectiveDrawingTool) }}
       />
 
-      {paneLabelPositions.map((position) => (
-        <div
-          key={position.id}
-          className="chart-pane-label advanced-market-pane-label"
-          data-market-pane={position.marketPane}
-          data-pane-id={position.id}
-          style={{ top: position.top }}
-        >
-          {position.label}
-        </div>
-      ))}
+      {paneLabelPositions.map((position) => {
+        const pane = activeSubPanes.find((candidate) => candidate.id === position.id);
+        const exactPoint = paneCrosshairTime === null
+          ? null
+          : pane?.pointMetadata?.find((point) => point.time === paneCrosshairTime) ?? null;
+        const displayPoint = exactPoint ?? pane?.pointMetadata?.at(-1) ?? null;
+        return (
+          <div
+            key={position.id}
+            className={`chart-pane-label advanced-market-pane-label${exactPoint ? " crosshair-active" : ""}`}
+            data-market-pane={position.marketPane}
+            data-pane-id={position.id}
+            role="group"
+            aria-label={displayPoint?.accessibilityLabel ?? position.label}
+            style={{ top: position.top }}
+          >
+            <span className="advanced-market-pane-heading">{position.label}</span>
+            {displayPoint && (
+              <span
+                className="advanced-market-pane-value"
+                data-appearance={displayPoint.appearance}
+              >
+                <span>{displayPoint.valueLabel}</span>
+                <span className="advanced-market-pane-source">
+                  {`${displayPoint.sourceLabel} · ${displayPoint.qualityLabel}`}
+                </span>
+              </span>
+            )}
+            {pane?.legendItems && pane.legendItems.length > 0 && (
+              <span className="advanced-market-pane-legend" aria-hidden="true">
+                {pane.legendItems.map((item) => (
+                  <span key={item.id} className="advanced-market-pane-legend-item" title={item.description}>
+                    <span
+                      className="advanced-market-pane-legend-swatch"
+                      data-appearance={item.appearance}
+                    />
+                    <span>{item.label}</span>
+                  </span>
+                ))}
+              </span>
+            )}
+            {exactPoint && (
+              <span className="advanced-market-pane-tooltip" aria-hidden="true">
+                {exactPoint.details.map((detail) => <span key={detail}>{detail}</span>)}
+              </span>
+            )}
+          </div>
+        );
+      })}
 
       {cursorOverlayClass && (
         <div className="chart-pane-cursor-overlay" aria-hidden="true">

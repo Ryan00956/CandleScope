@@ -74,9 +74,12 @@ export function coverageForHistoryPage(
   direction: MarketHistoryPageDirection,
 ): MarketHistoryRange | null {
   const target = normalizedRange(requested);
+  // Partial rows are useful for immediate rendering, but retryable means the
+  // provider has not resolved all internal gaps. Never convert that response
+  // into durable range coverage.
+  if (payload.retryable === true) return null;
   const explicitlyResolved = payload.complete === true
-    || payload.history_state === "exhausted"
-    || (payload.count === 0 && payload.retryable === false);
+    || payload.history_state === "exhausted";
   if (payload.fallback === true && !explicitlyResolved) return null;
   const earliestMs = payload.coverage.earliest_ms;
   const latestMs = payload.coverage.latest_ms;

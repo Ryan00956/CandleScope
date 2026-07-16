@@ -14,6 +14,41 @@ export const ADVANCED_MARKET_CHANNELS = [
 ] as const;
 
 export type AdvancedMarketChannel = (typeof ADVANCED_MARKET_CHANNELS)[number];
+export const FUNDING_RATE_PROVENANCE = [
+  "exchange_settlement",
+  "derived_history",
+  "exchange_realtime",
+] as const;
+export type FundingRateProvenance = (typeof FUNDING_RATE_PROVENANCE)[number];
+export const FUNDING_RATE_QUALITY = [
+  "final",
+  "estimated",
+  "live",
+  "carried",
+  "stale",
+] as const;
+export type FundingRateQuality = (typeof FUNDING_RATE_QUALITY)[number];
+
+export interface FundingRateData extends Record<string, unknown> {
+  funding_rate: number;
+  provenance?: FundingRateProvenance;
+  quality?: FundingRateQuality;
+  is_final?: boolean;
+  sample_kind?: "settlement" | "estimate" | "preview" | string;
+  funding_time_ms?: number;
+  raw_funding_time_ms?: number;
+  sample_time_ms?: number;
+  target_funding_time_ms?: number;
+  next_funding_time_ms?: number;
+  funding_cycle_ms?: number;
+  observed_at_ms?: number;
+  carried?: boolean;
+  stale?: boolean;
+  formula_version?: string;
+  input_resolution?: string;
+  input_coverage?: number;
+}
+
 export const DEFAULT_OPEN_INTEREST_PERIOD = "5m";
 export type AdvancedMarketConnectionStatus =
   | "disabled"
@@ -108,6 +143,7 @@ export interface AdvancedMarketSummarySnapshot {
 
 export interface AdvancedMarketMetricsSnapshot {
   fundingHistory: readonly MarketStateRecord[];
+  fundingRealtimeHistory: readonly MarketStateRecord[];
   fundingPreview: MarketStateRecord | null;
   openInterestHistory: readonly MarketStateRecord[];
   openInterestPeriod: string;
@@ -149,6 +185,7 @@ export interface AdvancedMarketRuntimeView {
   metricsEnabled: boolean;
   identity: AdvancedMarketIdentity;
   identityKey: string;
+  interval: string;
   seriesKey: string;
   seriesStore: SeriesWindowStore | null;
   marketStudies: readonly AdvancedMarketStudyView[];

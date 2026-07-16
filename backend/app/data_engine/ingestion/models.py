@@ -31,6 +31,7 @@ class StreamType(str, enum.Enum):
     DEPTH = "depth"              # @depth<levels>      (order-book depth)
     FULL_DEPTH = "fullDepth"     # @depth              (snapshot + ordered deltas)
     MARK_PRICE = "markPrice"     # USD-M mark/index/funding summary stream
+    PREMIUM_INDEX = "premiumIndex"  # USD-M REST-only premium-index kline history
     INDEX_PRICE = "indexPrice"   # logical projection of markPrice stream
     FUNDING_RATE = "fundingRate" # logical projection + REST history
     OPEN_INTEREST = "openInterest"  # REST snapshot/poll + REST history
@@ -144,6 +145,8 @@ class StreamDescriptor:
         """Raise ValueError if the descriptor is invalid."""
         if self.stream_type == StreamType.KLINE and not self.interval:
             raise ValueError("KLINE stream requires an interval (e.g. '1m')")
+        if self.stream_type == StreamType.PREMIUM_INDEX and self.interval != "1m":
+            raise ValueError("PREMIUM_INDEX history requires the fixed 1m interval")
         if self.stream_type == StreamType.DEPTH and (
             type(self.depth_levels) is not int or self.depth_levels not in {5, 10, 20}
         ):

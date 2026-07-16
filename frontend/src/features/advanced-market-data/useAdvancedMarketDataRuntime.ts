@@ -76,6 +76,9 @@ interface OwnedHistoryErrorState {
 
 const MAX_HISTORY_PAGES_PER_LOAD = 8;
 const HISTORY_RETRY_DELAY_MS = 30_000;
+const HISTORY_CONTINUATION_DELAY_MS = 50;
+const INITIAL_HISTORY_TAIL_BARS = 120;
+const INITIAL_HISTORY_TAIL_DURATION_MS = 10 * 24 * 60 * 60 * 1000;
 const EMPTY_HISTORY_ERRORS: Partial<Record<MarketMetricChannel, string>> = Object.freeze({});
 const SUMMARY_CHANNELS: readonly AdvancedMarketChannel[] = [
   "mark_price",
@@ -88,7 +91,7 @@ const MARKET_STUDY_CATALOG: Record<MarketMetricId, {
 }> = {
   "market:funding-rate": {
     name: "资金费率 (Funding Rate)",
-    description: "永续合约已结算与下一周期预估资金费率，按百分比显示。",
+    description: "交易所结算、无前视历史估算与实时预估组成的资金费率轨迹，按百分比显示。",
   },
   "market:open-interest": {
     name: "未平仓量 (Open Interest)",
@@ -128,6 +131,30 @@ export function buildAdvancedMarketHistoryContextKey(
   channels: readonly MarketMetricChannel[],
 ): string {
   return `${identityKey}|${interval}|${channels.join("|")}`;
+}
+
+export function buildTailFirstHistoryRanges(
+  requested: MarketHistoryRange,
+  barTimesSeconds: readonly number[],
+  tailBars: number = INITIAL_HISTORY_TAIL_BARS,
+  maxTailDurationMs: number = INITIAL_HISTORY_TAIL_DURATION_MS,
+): MarketHistoryRange[] {
+  const startMs = Math.max(0, Math.floor(Math.min(requested.startMs, requested.endMs)));
+  const endMs = Math.max(startMs, Math.ceil(Math.max(requested.startMs, requested.endMs)));
+  const boundedTailBars = Math.max(1, Math.floor(tailBars));
+  const tailIndex = Math.max(0, barTimesSeconds.length - boundedTailBars);
+  const tailTime = Number(barTimesSeconds[tailIndex]);
+  if (!Number.isFinite(tailTime)) return [{ startMs, endMs }];
+  const durationFloorMs = endMs - Math.max(1, Math.floor(maxTailDurationMs));
+  const tailStartMs = Math.max(
+    startMs,
+    Math.min(endMs, Math.max(Math.floor(tailTime * 1000), durationFloorMs)),
+  );
+  if (tailStartMs <= startMs) return [{ startMs, endMs }];
+  return [
+    { startMs: tailStartMs, endMs },
+    { startMs, endMs: tailStartMs - 1 },
+  ];
 }
 
 export interface AdvancedMarketHistoryRequestGuard {
@@ -278,9 +305,11 @@ export function useAdvancedMarketDataRuntime({
   });
   const historyAbortControllersRef = useRef(new Set<AbortController>());
   const inFlightRef = useRef(new Set<string>());
+  const inFlightCoverageRef = useRef(new Map<string, MarketHistoryRange[]>());
   const coverageRef = useRef(new Map<string, MarketHistoryRange[]>());
   const coverageIdentityRef = useRef(identityKey);
   const historyRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const historyContinuationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamRef = useRef<MarketStreamController | null>(null);
 
   // Publish only committed chart state. Layout effects run before passive
@@ -315,14 +344,22 @@ export function useAdvancedMarketDataRuntime({
     historyRetryTimerRef.current = null;
   }, []);
 
+  const clearHistoryContinuationTimer = useCallback(() => {
+    if (historyContinuationTimerRef.current === null) return;
+    clearTimeout(historyContinuationTimerRef.current);
+    historyContinuationTimerRef.current = null;
+  }, []);
+
   const invalidateHistoryRequests = useCallback((clearCoverage = false) => {
     historyGenerationRef.current += 1;
     for (const controller of historyAbortControllersRef.current) controller.abort();
     historyAbortControllersRef.current = new Set();
     inFlightRef.current = new Set();
+    inFlightCoverageRef.current = new Map();
     clearHistoryRetryTimer();
+    clearHistoryContinuationTimer();
     if (clearCoverage) coverageRef.current = new Map();
-  }, [clearHistoryRetryTimer]);
+  }, [clearHistoryContinuationTimer, clearHistoryRetryTimer]);
 
   const scheduleHistoryRetry = useCallback((
     expectedHistoryContextKey: string,
@@ -341,6 +378,23 @@ export function useAdvancedMarketDataRuntime({
     }, HISTORY_RETRY_DELAY_MS);
   }, []);
 
+  const scheduleHistoryContinuation = useCallback((
+    expectedHistoryContextKey: string,
+    expectedHistoryGeneration: number,
+  ) => {
+    if (disposedRef.current
+      || historyGenerationRef.current !== expectedHistoryGeneration
+      || activeRef.current.historyContextKey !== expectedHistoryContextKey
+      || historyContinuationTimerRef.current !== null) return;
+    historyContinuationTimerRef.current = setTimeout(() => {
+      historyContinuationTimerRef.current = null;
+      if (disposedRef.current
+        || historyGenerationRef.current !== expectedHistoryGeneration
+        || activeRef.current.historyContextKey !== expectedHistoryContextKey) return;
+      setHistoryRetryToken((value) => value + 1);
+    }, HISTORY_CONTINUATION_DELAY_MS);
+  }, []);
+
   useLayoutEffect(() => {
     disposedRef.current = false;
     return () => {
@@ -356,6 +410,7 @@ export function useAdvancedMarketDataRuntime({
       return false;
     }
     const inFlight = inFlightRef.current;
+    const inFlightCoverage = inFlightCoverageRef.current;
     const coverage = coverageRef.current;
     const oiPeriod = resolveOpenInterestPeriod(context.interval);
     const expectedHistoryGeneration = historyGenerationRef.current;
@@ -363,13 +418,15 @@ export function useAdvancedMarketDataRuntime({
     const requests: Array<{
       channel: MarketMetricChannel;
       period: string | null;
+      view: "hybrid" | null;
       limit: number;
       direction: "forward" | "backward";
     }> = [];
     if (context.metricChannels.includes("funding_rate")) {
       requests.push({
         channel: "funding_rate" as const,
-        period: null,
+        period: context.interval,
+        view: "hybrid",
         limit: 1000,
         direction: "forward" as const,
       });
@@ -378,22 +435,39 @@ export function useAdvancedMarketDataRuntime({
       requests.push({
         channel: "open_interest" as const,
         period: oiPeriod,
+        view: null,
         limit: 500,
         direction: "backward" as const,
       });
     }
     let scheduled = false;
     for (const descriptor of requests) {
-      const coverageKey = `${context.identityKey}:${descriptor.channel}:${descriptor.period || "none"}`;
-      if (!nextUncoveredHistoryRange(coverage.get(coverageKey) || [], requested)) continue;
+      const coverageKey = [
+        context.identityKey,
+        descriptor.channel,
+        descriptor.period || "none",
+        descriptor.view || "sparse",
+      ].join(":");
+      const requestRange = nextUncoveredHistoryRange(
+        [
+          ...(coverage.get(coverageKey) || []),
+          ...(inFlightCoverage.get(coverageKey) || []),
+        ],
+        requested,
+      );
+      if (!requestRange) continue;
       const requestKey = [
         coverageKey,
-        requested.startMs,
-        requested.endMs,
+        requestRange.startMs,
+        requestRange.endMs,
       ].join(":");
       if (inFlight.has(requestKey)) continue;
       scheduled = true;
       inFlight.add(requestKey);
+      inFlightCoverage.set(coverageKey, [
+        ...(inFlightCoverage.get(coverageKey) || []),
+        requestRange,
+      ]);
       setHistoryErrorState((current) => {
         if (disposedRef.current
           || historyGenerationRef.current !== expectedHistoryGeneration
@@ -438,7 +512,7 @@ export function useAdvancedMarketDataRuntime({
             if (!isCurrentRequest()) return;
             const pageRange = nextUncoveredHistoryRange(
               coverage.get(coverageKey) || [],
-              requested,
+              requestRange,
             );
             if (!pageRange) return;
             const payload = await fetchAdvancedMarketHistory(
@@ -446,6 +520,7 @@ export function useAdvancedMarketDataRuntime({
               descriptor.channel,
               {
                 period: descriptor.period,
+                view: descriptor.view,
                 startMs: pageRange.startMs,
                 endMs: pageRange.endMs,
                 limit: descriptor.limit,
@@ -459,7 +534,7 @@ export function useAdvancedMarketDataRuntime({
               payload.data,
               descriptor.period,
             );
-            if (payload.fallback === true) {
+            if (payload.fallback === true || payload.retryable === true) {
               scheduleHistoryRetry(expectedHistoryContextKey, expectedHistoryGeneration);
               return;
             }
@@ -477,8 +552,8 @@ export function useAdvancedMarketDataRuntime({
               mergeHistoryCoverage(coverage.get(coverageKey) || [], covered),
             );
           }
-          if (nextUncoveredHistoryRange(coverage.get(coverageKey) || [], requested)) {
-            scheduleHistoryRetry(expectedHistoryContextKey, expectedHistoryGeneration);
+          if (nextUncoveredHistoryRange(coverage.get(coverageKey) || [], requestRange)) {
+            scheduleHistoryContinuation(expectedHistoryContextKey, expectedHistoryGeneration);
           }
         } catch (error: unknown) {
           if (isAbortError(error) || !isCurrentRequest()) return;
@@ -499,12 +574,17 @@ export function useAdvancedMarketDataRuntime({
           scheduleHistoryRetry(expectedHistoryContextKey, expectedHistoryGeneration);
         } finally {
           inFlight.delete(requestKey);
+          const remainingRanges = (inFlightCoverage.get(coverageKey) || []).filter(
+            (range) => range.startMs !== requestRange.startMs || range.endMs !== requestRange.endMs,
+          );
+          if (remainingRanges.length > 0) inFlightCoverage.set(coverageKey, remainingRanges);
+          else inFlightCoverage.delete(coverageKey);
           controllers.delete(controller);
         }
       })();
     }
     return scheduled;
-  }, [scheduleHistoryRetry]);
+  }, [scheduleHistoryContinuation, scheduleHistoryRetry]);
 
   const ensureVisibleRange = useCallback((range: unknown): boolean => {
     const requested = parseVisibleTimeRange(range);
@@ -528,6 +608,11 @@ export function useAdvancedMarketDataRuntime({
       identity,
       resolveOpenInterestPeriod(interval),
     );
+  }, [activeMetricChannels, identity, interval]);
+
+  useEffect(() => {
+    if (!activeMetricChannels.includes("funding_rate")) return;
+    advancedMarketDataStore.setFundingPeriod(identity, interval);
   }, [activeMetricChannels, identity, interval]);
 
   useEffect(() => {
@@ -628,10 +713,14 @@ export function useAdvancedMarketDataRuntime({
     const firstTime = Number(dataMeta.firstTime);
     const lastTime = Number(dataMeta.lastTime);
     if (!Number.isFinite(firstTime) || !Number.isFinite(lastTime)) return;
-    loadHistory({
+    const fullRange = {
       startMs: Math.max(0, Math.floor(firstTime * 1000)),
       endMs: Math.max(0, Math.ceil(lastTime * 1000)),
-    });
+    };
+    const barTimes = (seriesStore?.snapshot() || []).map((row) => Number(row.time));
+    for (const range of buildTailFirstHistoryRanges(fullRange, barTimes)) {
+      loadHistory(range);
+    }
   }, [
     dataMeta.firstTime,
     dataMeta.lastTime,
@@ -640,6 +729,7 @@ export function useAdvancedMarketDataRuntime({
     metricChannelSignature,
     metricsEnabled,
     retryToken,
+    seriesStore,
     seriesReady,
     interval,
   ]);
@@ -683,6 +773,7 @@ export function useAdvancedMarketDataRuntime({
     metricsEnabled,
     identity,
     identityKey,
+    interval,
     seriesKey,
     seriesStore,
     marketStudies,
@@ -691,6 +782,7 @@ export function useAdvancedMarketDataRuntime({
     enabled,
     identity,
     identityKey,
+    interval,
     marketStudies,
     metricCapabilities,
     metricsEnabled,

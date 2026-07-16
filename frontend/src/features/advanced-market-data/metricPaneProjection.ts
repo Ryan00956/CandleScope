@@ -1,5 +1,13 @@
-import type { IndicatorSubPane } from "../indicators/indicatorPaneProjection.js";
-import type { IndicatorLine, IndicatorValuePoint } from "../indicators/indicatorTypes.js";
+import type {
+  IndicatorPaneLegendItem,
+  IndicatorPanePointMetadata,
+  IndicatorSubPane,
+} from "../indicators/indicatorPaneProjection.js";
+import type {
+  IndicatorColorPoint,
+  IndicatorLine,
+  IndicatorValuePoint,
+} from "../indicators/indicatorTypes.js";
 import type { KlineBar } from "../market-data/marketDataTypes.js";
 import { parseIntervalSeconds } from "../../utils/intervals.js";
 import type {
@@ -7,6 +15,14 @@ import type {
   MarketStateRecord,
 } from "./advancedMarketDataTypes.js";
 import type { MarketMetricChannel } from "./marketMetricSelectionTypes.js";
+import {
+  fundingRateProvenance,
+  fundingRateQuality,
+  fundingRateSampleTimeMs,
+  fundingRateTargetTimeMs,
+  isFundingRateHistory,
+  isFundingRateRealtimeUsable,
+} from "./fundingRateSemantics.js";
 
 const OPEN_INTEREST_PERIODS = [
   { period: "5m", seconds: 300 },
@@ -32,6 +48,42 @@ interface ProjectedCandidate {
   sampleTimeMs: number;
 }
 
+interface FundingProjectionCandidate {
+  record: MarketStateRecord;
+  sampleTimeMs: number;
+  carried: boolean;
+  stale: boolean;
+}
+
+const FUNDING_REALTIME_STALE_AFTER_MS = 15_000;
+
+const FUNDING_RATE_LEGEND: readonly IndicatorPaneLegendItem[] = Object.freeze([
+  {
+    id: "exchange-settlement",
+    label: "交易所结算",
+    appearance: "solid",
+    description: "交易所公布的最终结算资金费率",
+  },
+  {
+    id: "derived-history",
+    label: "历史估算",
+    appearance: "estimated",
+    description: "仅使用当时已有数据计算的无前视历史估算",
+  },
+  {
+    id: "exchange-realtime",
+    label: "交易所实时",
+    appearance: "realtime",
+    description: "交易所实时推送的下一周期资金费率",
+  },
+  {
+    id: "realtime-carried",
+    label: "实时沿用",
+    appearance: "carried",
+    description: "同一资金周期内沿用最近一次交易所实时值",
+  },
+]);
+
 function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -42,11 +94,267 @@ function isFinal(record: MarketStateRecord): boolean {
 
 export function marketMetricSampleTimeMs(record: MarketStateRecord): number {
   if (record.channel === "funding_rate") {
-    const preview = record.data.is_final === false || record.data.sample_kind === "preview";
-    if (preview) return record.received_at_ms;
-    return finiteNumber(record.data.funding_time_ms) ?? record.event_time_ms;
+    return fundingRateSampleTimeMs(record);
   }
   return record.event_time_ms;
+}
+
+function fundingPrecedence(record: MarketStateRecord): number {
+  const provenance = fundingRateProvenance(record);
+  if (provenance === "exchange_settlement") return 2;
+  if (provenance === "derived_history") return 1;
+  return 0;
+}
+
+function fundingAppearance(
+  record: MarketStateRecord,
+  carried: boolean,
+  stale = false,
+): IndicatorPaneLegendItem["appearance"] {
+  const provenance = fundingRateProvenance(record);
+  if (provenance === "exchange_settlement") return "solid";
+  if (provenance === "derived_history") return "estimated";
+  const quality = fundingRateQuality(record);
+  return carried || stale || quality === "carried" || quality === "stale" ? "carried" : "realtime";
+}
+
+function fundingColor(
+  record: MarketStateRecord,
+  value: number,
+  carried: boolean,
+  stale: boolean,
+): string {
+  const positive = value >= 0;
+  const appearance = fundingAppearance(record, carried, stale);
+  if (appearance === "estimated") {
+    return positive ? "rgba(34, 197, 94, 0.42)" : "rgba(239, 68, 68, 0.42)";
+  }
+  if (appearance === "realtime") return positive ? "#4ade80" : "#fb7185";
+  if (appearance === "carried") {
+    const isStale = stale || fundingRateQuality(record) === "stale" || record.data.stale === true;
+    const opacity = isStale ? 0.34 : 0.58;
+    return positive
+      ? `rgba(74, 222, 128, ${opacity})`
+      : `rgba(251, 113, 133, ${opacity})`;
+  }
+  return positive ? "#22c55e" : "#ef4444";
+}
+
+function formatFundingValue(value: number): string {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}%`;
+}
+
+function formatFundingTime(value: unknown): string | null {
+  const timeMs = finiteNumber(value);
+  if (timeMs === null) return null;
+  return new Date(timeMs).toISOString().replace("T", " ").replace(".000Z", " UTC");
+}
+
+function fundingPointMetadata(
+  record: MarketStateRecord,
+  time: number,
+  value: number,
+  carried: boolean,
+  stale: boolean,
+): IndicatorPanePointMetadata {
+  const provenance = fundingRateProvenance(record);
+  const baseQuality = fundingRateQuality(record);
+  const effectiveQuality = provenance === "exchange_realtime" && stale
+    ? "stale"
+    : provenance === "exchange_realtime"
+    && carried
+    && baseQuality !== "stale"
+    ? "carried"
+    : baseQuality;
+  const sourceLabel = {
+    exchange_settlement: "交易所历史结算",
+    derived_history: "模型历史估算",
+    exchange_realtime: "交易所实时预估",
+  }[provenance];
+  const qualityLabel = {
+    final: "最终值",
+    estimated: "估算值",
+    live: "实时",
+    carried: "同周期沿用",
+    stale: "实时已过期",
+  }[effectiveQuality];
+  const details = [`来源：${sourceLabel}`, `状态：${qualityLabel}`];
+  if (provenance === "exchange_settlement") {
+    const fundingTime = formatFundingTime(record.data.funding_time_ms);
+    if (fundingTime) details.push(`结算时间：${fundingTime}`);
+  } else if (provenance === "derived_history") {
+    const cutoff = formatFundingTime(record.data.sample_time_ms);
+    const target = formatFundingTime(fundingRateTargetTimeMs(record));
+    if (cutoff) details.push(`观测截止：${cutoff}`);
+    if (target) details.push(`目标结算：${target}`);
+    if (typeof record.data.formula_version === "string") {
+      details.push(`公式：${record.data.formula_version}`);
+    }
+    if (typeof record.data.input_resolution === "string") {
+      details.push(`输入粒度：${record.data.input_resolution}`);
+    }
+    const inputCoverage = finiteNumber(record.data.input_coverage);
+    if (inputCoverage !== null) details.push(`输入覆盖：${Math.round(inputCoverage * 100)}%`);
+  } else {
+    const observedAt = formatFundingTime(
+      finiteNumber(record.data.observed_at_ms) ?? record.received_at_ms,
+    );
+    const target = formatFundingTime(fundingRateTargetTimeMs(record));
+    if (observedAt) details.push(`观测时间：${observedAt}`);
+    if (target) details.push(`目标结算：${target}`);
+  }
+  const valueLabel = formatFundingValue(value);
+  return {
+    time,
+    value,
+    valueLabel,
+    sourceLabel,
+    qualityLabel,
+    appearance: fundingAppearance(record, carried, stale),
+    details,
+    accessibilityLabel: `资金费率 ${valueLabel}，${details.join("，")}`,
+  };
+}
+
+function lowerBoundFundingObservation(
+  records: readonly MarketStateRecord[],
+  targetMs: number,
+): number {
+  let low = 0;
+  let high = records.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const record = records[middle];
+    if (record && fundingRateSampleTimeMs(record) < targetMs) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function projectFundingRateTrajectory(
+  metrics: AdvancedMarketMetricsSnapshot,
+  bars: readonly KlineBar[],
+  interval: unknown,
+  nowMs: number,
+): {
+  points: Array<IndicatorValuePoint & IndicatorColorPoint>;
+  metadata: IndicatorPanePointMetadata[];
+} {
+  if (bars.length === 0) return { points: [], metadata: [] };
+  const sortedBars = [...bars].sort((left, right) => left.time - right.time);
+  const inferredIntervalSeconds = sortedBars.length > 1
+    ? Math.max(1, sortedBars[sortedBars.length - 1]!.time - sortedBars[sortedBars.length - 2]!.time)
+    : 1;
+  const intervalSeconds = parseIntervalSeconds(interval) ?? inferredIntervalSeconds;
+  const candidates = new Map<number, FundingProjectionCandidate>();
+  const historicalRecords = metrics.fundingHistory
+    .filter(isFundingRateHistory)
+    .sort((left, right) => (
+      fundingRateSampleTimeMs(left) - fundingRateSampleTimeMs(right)
+      || fundingPrecedence(left) - fundingPrecedence(right)
+      || left.received_at_ms - right.received_at_ms
+      || left.revision - right.revision
+    ));
+  let historyBarIndex = 0;
+  for (const record of historicalRecords) {
+    if (finiteNumber(record.data.funding_rate) === null) continue;
+    const sampleTimeMs = fundingRateSampleTimeMs(record);
+    const sampleTime = sampleTimeMs / 1000;
+    while (historyBarIndex < sortedBars.length && sortedBars[historyBarIndex]!.time < sampleTime) {
+      historyBarIndex += 1;
+    }
+    const bar = sortedBars[historyBarIndex];
+    if (!bar) continue;
+    const previous = candidates.get(bar.time);
+    if (!previous
+      || fundingPrecedence(record) > fundingPrecedence(previous.record)
+      || (fundingPrecedence(record) === fundingPrecedence(previous.record)
+        && sampleTimeMs >= previous.sampleTimeMs)) {
+      candidates.set(bar.time, { record, sampleTimeMs, carried: false, stale: false });
+    }
+  }
+
+  const realtimeTimeline = metrics.fundingRealtimeHistory || [];
+  const visibleStartMs = sortedBars[0]!.time * 1000;
+  const visibleEndMs = Math.min(
+    (sortedBars.at(-1)!.time + intervalSeconds) * 1000,
+    nowMs,
+  );
+  const firstVisibleObservation = lowerBoundFundingObservation(realtimeTimeline, visibleStartMs);
+  const afterVisibleObservation = lowerBoundFundingObservation(realtimeTimeline, visibleEndMs);
+  const realtimeRecords = realtimeTimeline.slice(
+    Math.max(0, firstVisibleObservation - 1),
+    afterVisibleObservation,
+  );
+  if (metrics.fundingPreview) {
+    const previewTimeMs = fundingRateSampleTimeMs(metrics.fundingPreview);
+    if (previewTimeMs < visibleEndMs
+      && (previewTimeMs >= visibleStartMs || realtimeRecords.length === 0)) {
+      const existingIndex = realtimeRecords.findIndex((record) => (
+        fundingRateSampleTimeMs(record) === previewTimeMs
+      ));
+      if (existingIndex >= 0) realtimeRecords[existingIndex] = metrics.fundingPreview;
+      else realtimeRecords.push(metrics.fundingPreview);
+      realtimeRecords.sort((left, right) => (
+        fundingRateSampleTimeMs(left) - fundingRateSampleTimeMs(right)
+        || left.received_at_ms - right.received_at_ms
+      ));
+    }
+  }
+  let realtimeIndex = 0;
+  let latestRealtime: MarketStateRecord | null = null;
+  for (const [index, bar] of sortedBars.entries()) {
+    const nominalBarCloseMs = (sortedBars[index + 1]?.time ?? (bar.time + intervalSeconds)) * 1000;
+    const observationCutoffMs = Math.min(nominalBarCloseMs, nowMs);
+    while (realtimeIndex < realtimeRecords.length) {
+      const record = realtimeRecords[realtimeIndex];
+      if (!record || fundingRateSampleTimeMs(record) >= observationCutoffMs) break;
+      latestRealtime = record;
+      realtimeIndex += 1;
+    }
+    if (!latestRealtime || finiteNumber(latestRealtime.data.funding_rate) === null) continue;
+    if (!isFundingRateRealtimeUsable(latestRealtime, bar.time * 1000, observationCutoffMs)) continue;
+    const observedAtMs = fundingRateSampleTimeMs(latestRealtime);
+    if (observedAtMs >= observationCutoffMs) continue;
+    const carried = latestRealtime.data.carried === true || observedAtMs < bar.time * 1000;
+    const stale = latestRealtime.data.stale === true
+      || observationCutoffMs - observedAtMs > FUNDING_REALTIME_STALE_AFTER_MS;
+    const existing = candidates.get(bar.time);
+    if (existing && fundingRateProvenance(existing.record) === "exchange_settlement") continue;
+    candidates.set(bar.time, {
+      record: latestRealtime,
+      sampleTimeMs: observedAtMs,
+      carried,
+      stale,
+    });
+  }
+
+  const projected = [...candidates.entries()]
+    .sort(([left], [right]) => left - right)
+    .flatMap(([time, candidate]) => {
+      const rawValue = finiteNumber(candidate.record.data.funding_rate);
+      if (rawValue === null) return [];
+      const value = rawValue * 100;
+      return [{
+        point: {
+          time,
+          value,
+          color: fundingColor(candidate.record, value, candidate.carried, candidate.stale),
+        },
+        metadata: fundingPointMetadata(
+          candidate.record,
+          time,
+          value,
+          candidate.carried,
+          candidate.stale,
+        ),
+      }];
+    });
+  return {
+    points: projected.map(({ point }) => point),
+    metadata: projected.map(({ metadata }) => metadata),
+  };
 }
 
 export function resolveOpenInterestPeriod(interval: unknown): string {
@@ -121,34 +429,21 @@ export function buildAdvancedMarketPanes(
   metrics: AdvancedMarketMetricsSnapshot,
   bars: readonly KlineBar[],
   channels: readonly MarketMetricChannel[] = ["funding_rate", "open_interest"],
+  interval: unknown = null,
+  nowMs: number = Date.now(),
 ): IndicatorSubPane[] {
   const requestedChannels = new Set(channels);
-  const fundingPoints = projectMetricRecordsToCandles(
-    metrics.fundingHistory,
-    bars,
-    { valueField: "funding_rate", transform: (value) => value * 100 },
-  );
-  const previewValue = finiteNumber(metrics.fundingPreview?.data.funding_rate);
+  const fundingProjection = projectFundingRateTrajectory(metrics, bars, interval, nowMs);
   const tailBar = bars.at(-1);
-  if (previewValue !== null && tailBar) {
-    const existingIndex = fundingPoints.findIndex((point) => point.time === tailBar.time);
-    const previewPoint = { time: tailBar.time, value: previewValue * 100 };
-    if (existingIndex >= 0) fundingPoints[existingIndex] = previewPoint;
-    else fundingPoints.push(previewPoint);
-  }
-  const fundingColorData = fundingPoints.map((point) => ({
-    ...point,
-    color: point.value >= 0 ? "#22c55e" : "#ef4444",
-  }));
   const fundingLine: IndicatorLine = {
     id: "advanced-funding-rate-line",
     indicatorId: "advanced-market-data",
-    name: "Funding Rate (%)",
+    name: "资金费率 (%)",
     pane: "advanced-funding",
     type: "histogram",
     color: "#22c55e",
-    data: fundingColorData,
-    colorData: fundingColorData,
+    data: fundingProjection.points,
+    colorData: fundingProjection.points,
   };
 
   const openInterestLine: IndicatorLine = {
@@ -183,9 +478,11 @@ export function buildAdvancedMarketPanes(
     {
       channel: "funding_rate",
       id: "advanced-funding",
-      label: "Funding Rate (%)",
+      label: "资金费率 (%)",
       lines: [fundingLine],
       dataMarketPane: "funding-rate",
+      legendItems: FUNDING_RATE_LEGEND,
+      pointMetadata: fundingProjection.metadata,
     },
     {
       channel: "open_interest",
@@ -204,5 +501,7 @@ export function buildAdvancedMarketPanes(
       ...(pane.dataMarketPane === undefined
         ? {}
         : { dataMarketPane: pane.dataMarketPane }),
+      ...(pane.legendItems === undefined ? {} : { legendItems: pane.legendItems }),
+      ...(pane.pointMetadata === undefined ? {} : { pointMetadata: pane.pointMetadata }),
     }));
 }

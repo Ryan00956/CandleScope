@@ -8,8 +8,17 @@ import {
   type AdvancedMarketSummarySnapshot,
   type MarketStateRecord,
 } from "./advancedMarketDataTypes.js";
+import {
+  fundingRateProvenance,
+  fundingRateSampleTimeMs,
+  fundingRateTargetTimeMs,
+  isFundingRateHistory,
+  isFundingRateRealtime,
+} from "./fundingRateSemantics.js";
+import { normalizeIntervalValue } from "../../utils/intervals.js";
 
 const MAX_METRIC_RECORDS = 20_000;
+const MAX_FUNDING_REALTIME_RECORDS = 36_000;
 const MAX_IDENTITY_STATES = 16;
 
 export const EMPTY_ADVANCED_MARKET_SUMMARY: AdvancedMarketSummarySnapshot = Object.freeze({
@@ -24,6 +33,7 @@ export const EMPTY_ADVANCED_MARKET_SUMMARY: AdvancedMarketSummarySnapshot = Obje
 
 export const EMPTY_ADVANCED_MARKET_METRICS: AdvancedMarketMetricsSnapshot = Object.freeze({
   fundingHistory: Object.freeze([]) as readonly MarketStateRecord[],
+  fundingRealtimeHistory: Object.freeze([]) as readonly MarketStateRecord[],
   fundingPreview: null,
   openInterestHistory: Object.freeze([]) as readonly MarketStateRecord[],
   openInterestPeriod: DEFAULT_OPEN_INTEREST_PERIOD,
@@ -33,7 +43,12 @@ export const EMPTY_ADVANCED_MARKET_METRICS: AdvancedMarketMetricsSnapshot = Obje
 
 interface IdentityStoreState {
   latestByChannel: Map<AdvancedMarketChannel, MarketStateRecord>;
-  fundingHistory: MarketStateRecord[];
+  fundingLegacySettlementHistory: MarketStateRecord[];
+  fundingHybridSettlementHistoryByPeriod: Map<string, MarketStateRecord[]>;
+  fundingDerivedHistoryByPeriod: Map<string, MarketStateRecord[]>;
+  activeFundingPeriod: string | null;
+  fundingDisplayHistory: MarketStateRecord[];
+  fundingRealtimeHistory: MarketStateRecord[];
   fundingPreview: MarketStateRecord | null;
   openInterestHistoryByPeriod: Map<string, MarketStateRecord[]>;
   openInterestLive: MarketStateRecord | null;
@@ -56,6 +71,10 @@ function normalizePeriod(value: unknown): string | null {
   return normalized || null;
 }
 
+function normalizeFundingPeriod(value: unknown): string | null {
+  return normalizeIntervalValue(value) || null;
+}
+
 function asOpenInterestLiveProvisional(record: MarketStateRecord): MarketStateRecord {
   if (record.data.is_final !== undefined || record.data.sample_kind !== undefined) {
     return record;
@@ -74,8 +93,15 @@ function compareSameSamplePrecedence(
   left: MarketStateRecord,
   right: MarketStateRecord,
 ): number {
-  const leftFinal = left.data.is_final === true ? 1 : 0;
-  const rightFinal = right.data.is_final === true ? 1 : 0;
+  const fundingPrecedence = (record: MarketStateRecord): number => {
+    if (record.channel !== "funding_rate") return record.data.is_final === true ? 1 : 0;
+    const provenance = fundingRateProvenance(record);
+    if (provenance === "exchange_settlement") return 2;
+    if (provenance === "derived_history") return 1;
+    return 0;
+  };
+  const leftFinal = fundingPrecedence(left);
+  const rightFinal = fundingPrecedence(right);
   return leftFinal - rightFinal
     || left.revision - right.revision
     || left.received_at_ms - right.received_at_ms;
@@ -88,7 +114,7 @@ function compareChannelProgress(left: MarketStateRecord, right: MarketStateRecor
 
 function metricSampleTime(record: MarketStateRecord): number {
   if (record.channel === "funding_rate") {
-    return finiteNumber(record.data.funding_time_ms) ?? record.event_time_ms;
+    return fundingRateSampleTimeMs(record);
   }
   return record.event_time_ms;
 }
@@ -96,6 +122,7 @@ function metricSampleTime(record: MarketStateRecord): number {
 function mergeRecords(
   current: readonly MarketStateRecord[],
   incoming: readonly MarketStateRecord[],
+  maxRecords: number = MAX_METRIC_RECORDS,
 ): MarketStateRecord[] {
   if (incoming.length === 0) return current as MarketStateRecord[];
   const byTime = new Map<number, MarketStateRecord>();
@@ -110,9 +137,68 @@ function mergeRecords(
   const merged = Array.from(byTime.values()).sort((a, b) => (
     metricSampleTime(a) - metricSampleTime(b) || compareSameSamplePrecedence(a, b)
   ));
-  return merged.length <= MAX_METRIC_RECORDS
+  return merged.length <= maxRecords
     ? merged
-    : merged.slice(merged.length - MAX_METRIC_RECORDS);
+    : merged.slice(merged.length - maxRecords);
+}
+
+function appendFundingRealtimeRecord(
+  state: IdentityStoreState,
+  record: MarketStateRecord,
+): void {
+  const timeline = state.fundingRealtimeHistory;
+  const observationMs = fundingRateSampleTimeMs(record);
+  const tail = timeline.at(-1);
+  if (tail && fundingRateSampleTimeMs(tail) === observationMs) {
+    if (compareChannelProgress(record, tail) >= 0) timeline[timeline.length - 1] = record;
+    return;
+  }
+  timeline.push(record);
+  if (timeline.length > MAX_FUNDING_REALTIME_RECORDS) {
+    timeline.splice(0, timeline.length - MAX_FUNDING_REALTIME_RECORDS);
+  }
+}
+
+function fundingSettlementCycleKey(record: MarketStateRecord): string {
+  const cycleTime = finiteNumber(record.data.funding_cycle_ms)
+    ?? finiteNumber(record.data.raw_funding_time_ms)
+    ?? finiteNumber(record.data.funding_time_ms);
+  return cycleTime === null
+    ? `sample:${fundingRateSampleTimeMs(record)}`
+    : `cycle:${cycleTime}`;
+}
+
+function mergeFundingSettlements(
+  legacy: readonly MarketStateRecord[],
+  hybrid: readonly MarketStateRecord[],
+): MarketStateRecord[] {
+  const byCycle = new Map<string, MarketStateRecord>();
+  for (const record of legacy) {
+    const key = fundingSettlementCycleKey(record);
+    const previous = byCycle.get(key);
+    if (!previous || compareSameSamplePrecedence(record, previous) >= 0) {
+      byCycle.set(key, record);
+    }
+  }
+  // The active hybrid bucket is authoritative for chart placement even when
+  // a cached sparse record represents the same exchange settlement cycle.
+  for (const record of hybrid) byCycle.set(fundingSettlementCycleKey(record), record);
+  return [...byCycle.values()]
+    .sort((left, right) => metricSampleTime(left) - metricSampleTime(right))
+    .slice(-MAX_METRIC_RECORDS);
+}
+
+function refreshFundingDisplayHistory(state: IdentityStoreState): void {
+  const hybridSettlements = state.activeFundingPeriod
+    ? state.fundingHybridSettlementHistoryByPeriod.get(state.activeFundingPeriod) ?? []
+    : [];
+  const derived = state.activeFundingPeriod
+    ? state.fundingDerivedHistoryByPeriod.get(state.activeFundingPeriod) ?? []
+    : [];
+  state.fundingDisplayHistory = mergeRecords(
+    mergeFundingSettlements(state.fundingLegacySettlementHistory, hybridSettlements),
+    derived,
+  );
 }
 
 function sameSummary(
@@ -144,7 +230,12 @@ function recordMatchesIdentity(
 function createState(): IdentityStoreState {
   return {
     latestByChannel: new Map(),
-    fundingHistory: [],
+    fundingLegacySettlementHistory: [],
+    fundingHybridSettlementHistoryByPeriod: new Map(),
+    fundingDerivedHistoryByPeriod: new Map(),
+    activeFundingPeriod: null,
+    fundingDisplayHistory: [],
+    fundingRealtimeHistory: [],
     fundingPreview: null,
     openInterestHistoryByPeriod: new Map(),
     openInterestLive: null,
@@ -217,6 +308,19 @@ export class AdvancedMarketDataStore {
     this.publishMetrics(state);
   }
 
+  setFundingPeriod(identity: AdvancedMarketIdentity, period: string): void {
+    const normalized = normalizeFundingPeriod(period);
+    if (!normalized) return;
+    const state = this.state(identity);
+    if (state.activeFundingPeriod === normalized) return;
+    state.activeFundingPeriod = normalized;
+    // A period switch hands closed bars back to hybrid history. Keep only the
+    // latest exchange observation for the newly forming K.
+    state.fundingRealtimeHistory = state.fundingPreview ? [state.fundingPreview] : [];
+    refreshFundingDisplayHistory(state);
+    this.publishMetrics(state);
+  }
+
   applyRecords(
     identity: AdvancedMarketIdentity,
     records: readonly MarketStateRecord[],
@@ -235,12 +339,45 @@ export class AdvancedMarketDataStore {
         || record.channel === "basis") {
         summaryChanged = true;
       } else if (record.channel === "funding_rate") {
-        const isPreview = record.data.is_final === false
-          || record.data.sample_kind === "preview"
-          || finiteNumber(record.data.funding_time_ms) === null;
-        if (!isPreview) {
-          state.fundingHistory = mergeRecords(state.fundingHistory, [record]);
+        if (isFundingRateHistory(record)) {
+          if (fundingRateProvenance(record) === "exchange_settlement") {
+            const hybridPeriod = record.key.params.view === "hybrid"
+              ? normalizeFundingPeriod(record.key.params.period)
+              : null;
+            if (hybridPeriod) {
+              state.fundingHybridSettlementHistoryByPeriod.set(
+                hybridPeriod,
+                mergeRecords(
+                  state.fundingHybridSettlementHistoryByPeriod.get(hybridPeriod) ?? [],
+                  [record],
+                ),
+              );
+            } else {
+              state.fundingLegacySettlementHistory = mergeRecords(
+                state.fundingLegacySettlementHistory,
+                [record],
+              );
+            }
+            refreshFundingDisplayHistory(state);
+          } else {
+            const period = normalizeFundingPeriod(record.key.params.period);
+            if (period) {
+              state.fundingDerivedHistoryByPeriod.set(
+                period,
+                mergeRecords(state.fundingDerivedHistoryByPeriod.get(period) ?? [], [record]),
+              );
+              if (period === state.activeFundingPeriod) refreshFundingDisplayHistory(state);
+            }
+          }
         } else {
+          const previousTarget = state.fundingPreview
+            ? fundingRateTargetTimeMs(state.fundingPreview)
+            : null;
+          const nextTarget = fundingRateTargetTimeMs(record);
+          if (previousTarget !== null && nextTarget !== null && previousTarget !== nextTarget) {
+            state.fundingRealtimeHistory = [];
+          }
+          appendFundingRealtimeRecord(state, record);
           state.fundingPreview = record;
         }
         metricsChanged = true;
@@ -268,18 +405,51 @@ export class AdvancedMarketDataStore {
     if (filtered.length === 0) return;
     const state = this.state(identity);
     if (channel === "funding_rate") {
-      const settlements = filtered.filter((record) => (
-        record.data.is_final !== false
-        && record.data.sample_kind !== "preview"
-        && finiteNumber(record.data.funding_time_ms) !== null
+      const history = filtered.filter(isFundingRateHistory);
+      const previews = filtered.filter(isFundingRateRealtime);
+      const settlements = history.filter((record) => (
+        fundingRateProvenance(record) === "exchange_settlement"
       ));
-      const previews = filtered.filter((record) => !settlements.includes(record));
-      state.fundingHistory = mergeRecords(state.fundingHistory, settlements);
-      for (const preview of previews) {
-        if (!state.fundingPreview
-          || compareChannelProgress(preview, state.fundingPreview) >= 0) {
-          state.fundingPreview = preview;
+      const derived = history.filter((record) => (
+        fundingRateProvenance(record) === "derived_history"
+      ));
+      const fundingPeriod = normalizeFundingPeriod(period);
+      const hybridSettlements = settlements.filter((record) => (
+        record.key.params.view === "hybrid" && fundingPeriod !== null
+      ));
+      const legacySettlements = settlements.filter((record) => !hybridSettlements.includes(record));
+      state.fundingLegacySettlementHistory = mergeRecords(
+        state.fundingLegacySettlementHistory,
+        legacySettlements,
+      );
+      if (fundingPeriod && hybridSettlements.length > 0) {
+        state.fundingHybridSettlementHistoryByPeriod.set(
+          fundingPeriod,
+          mergeRecords(
+            state.fundingHybridSettlementHistoryByPeriod.get(fundingPeriod) ?? [],
+            hybridSettlements,
+          ),
+        );
+      }
+      if (fundingPeriod && derived.length > 0) {
+        state.fundingDerivedHistoryByPeriod.set(
+          fundingPeriod,
+          mergeRecords(state.fundingDerivedHistoryByPeriod.get(fundingPeriod) ?? [], derived),
+        );
+      }
+      refreshFundingDisplayHistory(state);
+      for (const preview of previews.sort(compareChannelProgress)) {
+        if (state.fundingPreview
+          && compareChannelProgress(preview, state.fundingPreview) < 0) continue;
+        const previousTarget = state.fundingPreview
+          ? fundingRateTargetTimeMs(state.fundingPreview)
+          : null;
+        const nextTarget = fundingRateTargetTimeMs(preview);
+        if (previousTarget !== null && nextTarget !== null && previousTarget !== nextTarget) {
+          state.fundingRealtimeHistory = [];
         }
+        appendFundingRealtimeRecord(state, preview);
+        state.fundingPreview = preview;
       }
     } else {
       const explicitPeriod = normalizePeriod(period);
@@ -363,7 +533,8 @@ export class AdvancedMarketDataStore {
       state.activeOpenInterestPeriod,
     ) ?? [];
     state.metricsSnapshot = {
-      fundingHistory: state.fundingHistory,
+      fundingHistory: state.fundingDisplayHistory,
+      fundingRealtimeHistory: state.fundingRealtimeHistory,
       fundingPreview: state.fundingPreview,
       openInterestHistory: state.openInterestLive
         ? mergeRecords(periodHistory, [state.openInterestLive])

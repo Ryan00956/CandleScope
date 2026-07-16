@@ -1,5 +1,7 @@
 import {
   ADVANCED_MARKET_CHANNELS,
+  FUNDING_RATE_PROVENANCE,
+  FUNDING_RATE_QUALITY,
   type AdvancedMarketChannel,
   type MarketHistoryExcludedRange,
   type MarketHistoryPayload,
@@ -138,7 +140,13 @@ function validateChannelData(
     "basis_rate",
     "basis_bps",
     "funding_time_ms",
+    "raw_funding_time_ms",
+    "sample_time_ms",
+    "target_funding_time_ms",
     "next_funding_time_ms",
+    "funding_cycle_ms",
+    "observed_at_ms",
+    "input_coverage",
   ]) {
     if (optionalField in data && data[optionalField] != null) {
       expectFiniteNumber(data[optionalField], `${path}.${optionalField}`);
@@ -149,6 +157,46 @@ function validateChannelData(
   }
   if ("sample_kind" in data && data.sample_kind != null) {
     expectNonEmptyString(data.sample_kind, `${path}.sample_kind`);
+  }
+  if (channel === "funding_rate") {
+    if (data.provenance === "derived_estimate") {
+      // Transitional compatibility with the short-lived backend draft name.
+      data.provenance = "derived_history";
+    }
+    if (data.provenance != null) {
+      const provenance = expectNonEmptyString(data.provenance, `${path}.provenance`);
+      if (!(FUNDING_RATE_PROVENANCE as readonly string[]).includes(provenance)) {
+        throw new AdvancedMarketPayloadError(
+          `${path}.provenance`,
+          `expected ${FUNDING_RATE_PROVENANCE.join(", ")}`,
+        );
+      }
+    }
+    if (data.quality != null) {
+      const quality = expectNonEmptyString(data.quality, `${path}.quality`);
+      if (!(FUNDING_RATE_QUALITY as readonly string[]).includes(quality)) {
+        throw new AdvancedMarketPayloadError(
+          `${path}.quality`,
+          `expected ${FUNDING_RATE_QUALITY.join(", ")}`,
+        );
+      }
+    }
+    for (const booleanField of ["carried", "stale"]) {
+      if (data[booleanField] != null) {
+        expectBoolean(data[booleanField], `${path}.${booleanField}`);
+      }
+    }
+    for (const stringField of ["formula_version", "input_resolution"]) {
+      if (data[stringField] != null) {
+        expectNonEmptyString(data[stringField], `${path}.${stringField}`);
+      }
+    }
+    if (data.input_coverage != null) {
+      const coverage = expectFiniteNumber(data.input_coverage, `${path}.input_coverage`);
+      if (coverage < 0 || coverage > 1) {
+        throw new AdvancedMarketPayloadError(`${path}.input_coverage`, "expected a value from 0 to 1");
+      }
+    }
   }
 }
 
@@ -178,7 +226,7 @@ export function parseMarketStateRecord(
   if (key.channel !== channel) {
     throw new AdvancedMarketPayloadError(`${path}.channel`, "must match key.channel");
   }
-  const data = expectRecord(record.data, `${path}.data`);
+  const data = { ...expectRecord(record.data, `${path}.data`) };
   validateChannelData(channel, data, `${path}.data`);
   return {
     key,

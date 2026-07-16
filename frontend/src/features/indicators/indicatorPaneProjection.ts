@@ -1,10 +1,30 @@
 import type { IndicatorDefinition, IndicatorLine } from "./indicatorTypes.js";
 
+export interface IndicatorPaneLegendItem {
+  id: string;
+  label: string;
+  appearance: "solid" | "estimated" | "realtime" | "carried";
+  description: string;
+}
+
+export interface IndicatorPanePointMetadata {
+  time: number;
+  value: number;
+  valueLabel: string;
+  sourceLabel: string;
+  qualityLabel: string;
+  appearance: IndicatorPaneLegendItem["appearance"];
+  details: readonly string[];
+  accessibilityLabel: string;
+}
+
 export interface IndicatorSubPane {
   id: string;
   label: string;
   lines: IndicatorLine[];
   dataMarketPane?: "funding-rate" | "open-interest";
+  legendItems?: readonly IndicatorPaneLegendItem[];
+  pointMetadata?: readonly IndicatorPanePointMetadata[];
 }
 
 export interface IndicatorPaneData {

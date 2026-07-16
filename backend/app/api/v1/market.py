@@ -62,6 +62,7 @@ async def market_history(
     exchange: str = Query("binance"),
     market_type: str = Query("futures"),
     period: str | None = Query(default=None),
+    view: str | None = Query(default=None),
     start_ms: int | None = Query(default=None, ge=0),
     end_ms: int | None = Query(default=None, ge=0),
     limit: int = Query(default=500, ge=1, le=1000),
@@ -71,16 +72,26 @@ async def market_history(
         if start_ms is not None and end_ms is not None and start_ms > end_ms:
             raise ValueError("start_ms must be less than or equal to end_ms")
         parsed_channel = MarketChannel(channel.strip().lower())
+        normalized_view = None if view is None else view.strip().lower()
+        if normalized_view not in {None, "sparse", "hybrid"}:
+            raise ValueError("funding history view must be 'sparse' or 'hybrid'")
+        if normalized_view == "hybrid":
+            if parsed_channel != MarketChannel.FUNDING_RATE:
+                raise ValueError("hybrid history is available only for funding_rate")
+            if period is None:
+                raise ValueError("hybrid funding history requires a chart period")
         key = MarketStreamKey.build(exchange, market_type, symbol, parsed_channel)
+        history_kwargs = {
+            "period": period,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "limit": limit,
+        }
+        if normalized_view is not None:
+            history_kwargs["view"] = normalized_view
         page_reader = getattr(dm, "market_history_page", None)
         if callable(page_reader):
-            page = await page_reader(
-                key,
-                period=period,
-                start_ms=start_ms,
-                end_ms=end_ms,
-                limit=limit,
-            )
+            page = await page_reader(key, **history_kwargs)
             events = page.events
             fallback = bool(page.fallback)
             page_complete_override = getattr(page, "complete", None)
@@ -90,13 +101,7 @@ async def market_history(
             availability_revision = getattr(page, "availability_revision", None)
             excluded_ranges = list(getattr(page, "excluded_ranges", ()) or ())
         else:
-            events = await dm.market_history(
-                key,
-                period=period,
-                start_ms=start_ms,
-                end_ms=end_ms,
-                limit=limit,
-            )
+            events = await dm.market_history(key, **history_kwargs)
             fallback = False
             page_complete_override = None
             retryable = False
@@ -112,8 +117,13 @@ async def market_history(
         raise _upstream_http_error("market history", exc) from exc
 
     response_key = key.to_dict()
+    response_params: dict[str, str] = {}
     if period is not None:
-        response_key["params"] = {"period": period}
+        response_params["period"] = period
+    if normalized_view is not None:
+        response_params["view"] = normalized_view
+    if response_params:
+        response_key["params"] = response_params
 
     page_complete = (
         bool(page_complete_override)

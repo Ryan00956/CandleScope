@@ -1,6 +1,25 @@
 const EVENT_LATENCY_NAME = "EventLatency";
 const EVENTS_IN_ANIMATION_FRAME_NAME = "EventsInAnimationFrame";
 const LATENCY_CATEGORY = "latency";
+const INPUT_CATEGORY = "input";
+
+const FRAME_SUBMIT_STAGE_NAMES = Object.freeze(new Set([
+  "SubmitCompositorFrameToPresentationCompositorFrame",
+  "SubmitUpdateDisplayTreeToPresentationCompositorFrame",
+]));
+
+const METRIC_SEMANTICS = Object.freeze({
+  frameSubmitByType: Object.freeze({
+    start: "input-generation",
+    end: "next-frame-submit",
+    meaning: "documented-input-to-next-paint",
+  }),
+  presentationByType: Object.freeze({
+    start: "input-generation",
+    end: "physical-presentation",
+    meaning: "input-to-physical-presentation",
+  }),
+});
 
 export const DRAWING_EVENT_LATENCY_INPUT_TYPES = Object.freeze([
   "pointerdown",
@@ -112,6 +131,11 @@ function normalizedEventDiagnostic(event, eventIndex, extra = {}) {
   });
 }
 
+function isInputFrameSubmitStage(event) {
+  return FRAME_SUBMIT_STAGE_NAMES.has(event?.name)
+    && categoryIncludes(event?.cat, INPUT_CATEGORY);
+}
+
 function parsePrimaryEventLatency(events, expectedDispatchCounts) {
   const diagnostics = {
     orphanEnds: [],
@@ -120,14 +144,27 @@ function parsePrimaryEventLatency(events, expectedDispatchCounts) {
     nonMonotonicEvents: [],
     unknownTypes: [],
     countMismatches: [],
+    orphanSubmitStageEnds: [],
+    openSubmitStageBegins: [],
+    invalidSubmitStages: [],
+    nonMonotonicSubmitStages: [],
+    unnestedSubmitStages: [],
+    submitStageCardinalityMismatches: [],
+    submitStagePresentationMismatches: [],
   };
-  const typedSamples = Object.fromEntries(
+  const frameSubmitSamples = Object.fromEntries(
+    DRAWING_EVENT_LATENCY_INPUT_TYPES.map((inputType) => [inputType, []]),
+  );
+  const presentationSamples = Object.fromEntries(
     DRAWING_EVENT_LATENCY_INPUT_TYPES.map((inputType) => [inputType, []]),
   );
   const samples = [];
-  const excludedHoverSamples = [];
+  const excludedHoverFrameSubmitSamples = [];
+  const excludedHoverPresentationSamples = [];
   const stacks = new Map();
+  const submitStageStacks = new Map();
   const lastTimestampByTrack = new Map();
+  const lastSubmitTimestampByTrack = new Map();
   let beginCount = 0;
   let endCount = 0;
   let pairedCount = 0;
@@ -137,6 +174,113 @@ function parsePrimaryEventLatency(events, expectedDispatchCounts) {
 
   for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
     const event = events[eventIndex];
+    if (isInputFrameSubmitStage(event)) {
+      if (event.ph !== "b" && event.ph !== "e") {
+        diagnostics.invalidSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+          reason: "unsupported-submit-stage-phase",
+        }));
+        continue;
+      }
+      const key = eventLatencyTrackKey(event);
+      if (key === null || !validTimestamp(event.ts) || !validProcessOrThreadId(event.tid)) {
+        diagnostics.invalidSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+          reason: "invalid-submit-stage-track-or-timestamp",
+        }));
+        continue;
+      }
+      const previousTimestamp = lastSubmitTimestampByTrack.get(key);
+      if (previousTimestamp !== undefined && event.ts < previousTimestamp) {
+        diagnostics.nonMonotonicSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+          key,
+          previousTimestampUs: previousTimestamp,
+          reason: "submit-stage-track-timestamp-regressed",
+        }));
+      }
+      lastSubmitTimestampByTrack.set(key, event.ts);
+
+      const submitStack = submitStageStacks.get(key) ?? [];
+      if (event.ph === "b") {
+        const eventLatencyStack = stacks.get(key) ?? [];
+        const owner = eventLatencyStack.at(-1) ?? null;
+        if (owner === null) {
+          diagnostics.unnestedSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+            key,
+            reason: "submit-stage-begin-without-event-latency-owner",
+          }));
+        } else if (owner.state !== "presented") {
+          diagnostics.unnestedSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+            key,
+            ownerEventIndex: owner.eventIndex,
+            ownerState: owner.state,
+            reason: "submit-stage-owned-by-non-presented-event-latency",
+          }));
+        }
+        submitStack.push({ event, eventIndex, key, owner });
+        submitStageStacks.set(key, submitStack);
+        continue;
+      }
+
+      const stageBegin = submitStack.pop();
+      submitStageStacks.set(key, submitStack);
+      if (!stageBegin) {
+        diagnostics.orphanSubmitStageEnds.push(normalizedEventDiagnostic(event, eventIndex, {
+          key,
+        }));
+        continue;
+      }
+      let validStagePair = true;
+      if (event.name !== stageBegin.event.name) {
+        validStagePair = false;
+        diagnostics.invalidSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+          beginEventIndex: stageBegin.eventIndex,
+          beginName: stageBegin.event.name,
+          key,
+          reason: "submit-stage-name-mismatch",
+        }));
+      }
+      if (event.ts < stageBegin.event.ts) {
+        validStagePair = false;
+        diagnostics.nonMonotonicSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+          beginEventIndex: stageBegin.eventIndex,
+          beginTimestampUs: stageBegin.event.ts,
+          key,
+          reason: "submit-stage-end-precedes-begin",
+        }));
+      }
+      const eventLatencyStack = stacks.get(key) ?? [];
+      const currentOwner = eventLatencyStack.at(-1) ?? null;
+      if (stageBegin.owner === null || currentOwner !== stageBegin.owner) {
+        validStagePair = false;
+        diagnostics.unnestedSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+          beginEventIndex: stageBegin.eventIndex,
+          key,
+          reason: "submit-stage-end-outside-owner-event-latency",
+        }));
+      }
+      if (stageBegin.owner !== null
+        && (stageBegin.event.tid !== stageBegin.owner.event.tid
+          || event.tid !== stageBegin.owner.event.tid)) {
+        validStagePair = false;
+        diagnostics.unnestedSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+          beginEventIndex: stageBegin.eventIndex,
+          key,
+          ownerTid: stageBegin.owner.event.tid,
+          beginTid: stageBegin.event.tid,
+          endTid: event.tid,
+          reason: "submit-stage-thread-does-not-match-owner",
+        }));
+      }
+      if (stageBegin.owner !== null) {
+        stageBegin.owner.submitStages.push({
+          begin: stageBegin.event,
+          beginEventIndex: stageBegin.eventIndex,
+          end: event,
+          endEventIndex: eventIndex,
+          valid: validStagePair,
+        });
+      }
+      continue;
+    }
     if (event?.name !== EVENT_LATENCY_NAME) continue;
     if (event.ph !== "b" && event.ph !== "e") {
       diagnostics.invalidEvents.push(normalizedEventDiagnostic(event, eventIndex, {
@@ -207,6 +351,7 @@ function parsePrimaryEventLatency(events, expectedDispatchCounts) {
         key,
         rawEventType,
         state,
+        submitStages: [],
         valid,
       });
       stacks.set(key, stack);
@@ -231,6 +376,14 @@ function parsePrimaryEventLatency(events, expectedDispatchCounts) {
     }
     if (begin.state === "termination-only") {
       terminationOnlyPairCount += 1;
+      if (begin.submitStages.length > 0) {
+        diagnostics.invalidSubmitStages.push(normalizedEventDiagnostic(event, eventIndex, {
+          beginEventIndex: begin.eventIndex,
+          key,
+          actualCount: begin.submitStages.length,
+          reason: "termination-only-event-latency-has-submit-stage",
+        }));
+      }
       continue;
     }
     if (begin.state === "partial") {
@@ -239,28 +392,85 @@ function parsePrimaryEventLatency(events, expectedDispatchCounts) {
     }
     if (begin.state !== "presented") continue;
     presentedPairCount += 1;
-    if (!begin.valid || begin.classification === null) continue;
-    const generationToPresentationMs = (event.ts - begin.event.ts) / 1_000;
-    if (!Number.isFinite(generationToPresentationMs) || generationToPresentationMs < 0) {
-      diagnostics.invalidEvents.push(normalizedEventDiagnostic(event, eventIndex, {
+    if (begin.submitStages.length !== 1) {
+      diagnostics.submitStageCardinalityMismatches.push(normalizedEventDiagnostic(event, eventIndex, {
         beginEventIndex: begin.eventIndex,
         key,
-        reason: "invalid-generation-to-presentation-duration",
+        expectedCount: 1,
+        actualCount: begin.submitStages.length,
+        reason: "presented-event-latency-submit-stage-cardinality",
       }));
       continue;
     }
+    const submitStage = begin.submitStages[0];
+    if (!submitStage.valid) continue;
+    const frameSubmitTimestampUs = submitStage.begin.ts;
+    const frameSubmitStageEndTimestampUs = submitStage.end.ts;
+    if (frameSubmitTimestampUs < begin.event.ts
+      || frameSubmitStageEndTimestampUs < frameSubmitTimestampUs
+      || frameSubmitStageEndTimestampUs > event.ts) {
+      diagnostics.unnestedSubmitStages.push(normalizedEventDiagnostic(submitStage.end, submitStage.endEventIndex, {
+        beginEventIndex: submitStage.beginEventIndex,
+        eventLatencyBeginEventIndex: begin.eventIndex,
+        eventLatencyEndEventIndex: eventIndex,
+        key,
+        reason: "submit-stage-not-contained-by-event-latency",
+      }));
+      continue;
+    }
+    if (frameSubmitStageEndTimestampUs !== event.ts) {
+      diagnostics.submitStagePresentationMismatches.push(
+        normalizedEventDiagnostic(submitStage.end, submitStage.endEventIndex, {
+          eventLatencyEndEventIndex: eventIndex,
+          eventLatencyPresentationTimestampUs: event.ts,
+          key,
+          reason: "submit-stage-end-does-not-match-presentation",
+        }),
+      );
+      continue;
+    }
+    if (!begin.valid || begin.classification === null) continue;
+    const generationToFrameSubmitUs = frameSubmitTimestampUs - begin.event.ts;
+    const frameSubmitToPresentationUs = event.ts - frameSubmitTimestampUs;
+    const generationToPresentationUs = event.ts - begin.event.ts;
+    if (!Number.isFinite(generationToFrameSubmitUs)
+      || !Number.isFinite(frameSubmitToPresentationUs)
+      || !Number.isFinite(generationToPresentationUs)
+      || generationToFrameSubmitUs < 0
+      || frameSubmitToPresentationUs < 0
+      || generationToPresentationUs < 0
+      || generationToFrameSubmitUs + frameSubmitToPresentationUs
+        !== generationToPresentationUs) {
+      diagnostics.invalidEvents.push(normalizedEventDiagnostic(event, eventIndex, {
+        beginEventIndex: begin.eventIndex,
+        key,
+        reason: "invalid-generation-submit-presentation-duration",
+      }));
+      continue;
+    }
+    const generationToFrameSubmitMs = generationToFrameSubmitUs / 1_000;
+    const frameSubmitToPresentationMs = frameSubmitToPresentationUs / 1_000;
+    const generationToPresentationMs = generationToFrameSubmitMs
+      + frameSubmitToPresentationMs;
     if (begin.classification.kind === "excluded") {
-      excludedHoverSamples.push(generationToPresentationMs);
+      excludedHoverFrameSubmitSamples.push(generationToFrameSubmitMs);
+      excludedHoverPresentationSamples.push(generationToPresentationMs);
       continue;
     }
     const inputType = begin.classification.inputType;
-    typedSamples[inputType].push(generationToPresentationMs);
+    frameSubmitSamples[inputType].push(generationToFrameSubmitMs);
+    presentationSamples[inputType].push(generationToPresentationMs);
     samples.push(Object.freeze({
       inputType,
       rawEventType: begin.rawEventType,
       generationTimestampUs: begin.event.ts,
+      frameSubmitTimestampUs,
+      frameSubmitStageEndTimestampUs,
       presentationTimestampUs: event.ts,
+      generationToFrameSubmitMs,
+      frameSubmitToPresentationMs,
       generationToPresentationMs,
+      frameSubmitStageName: submitStage.begin.name,
       pid: begin.event.pid,
       tid: begin.event.tid,
       category: begin.event.cat,
@@ -277,14 +487,30 @@ function parsePrimaryEventLatency(events, expectedDispatchCounts) {
     }
   }
 
-  const inputTypes = Object.freeze(Object.fromEntries(
+  for (const [key, stack] of submitStageStacks) {
+    for (const stageBegin of stack) {
+      diagnostics.openSubmitStageBegins.push(
+        normalizedEventDiagnostic(stageBegin.event, stageBegin.eventIndex, {
+          key,
+          ownerEventIndex: stageBegin.owner?.eventIndex ?? null,
+        }),
+      );
+    }
+  }
+
+  const frameSubmitByType = Object.freeze(Object.fromEntries(
     DRAWING_EVENT_LATENCY_INPUT_TYPES.map((inputType) => (
-      [inputType, metricForSamples(typedSamples[inputType])]
+      [inputType, metricForSamples(frameSubmitSamples[inputType])]
+    )),
+  ));
+  const presentationByType = Object.freeze(Object.fromEntries(
+    DRAWING_EVENT_LATENCY_INPUT_TYPES.map((inputType) => (
+      [inputType, metricForSamples(presentationSamples[inputType])]
     )),
   ));
   if (expectedDispatchCounts !== null) {
     for (const [inputType, expectedCount] of Object.entries(expectedDispatchCounts)) {
-      const actualCount = inputTypes[inputType].count;
+      const actualCount = presentationByType[inputType].count;
       if (actualCount !== expectedCount) {
         diagnostics.countMismatches.push(Object.freeze({
           inputType,
@@ -300,9 +526,13 @@ function parsePrimaryEventLatency(events, expectedDispatchCounts) {
     diagnostics,
     endCount,
     excluded: Object.freeze({
-      hover: metricForSamples(excludedHoverSamples),
+      hover: Object.freeze({
+        frameSubmit: metricForSamples(excludedHoverFrameSubmitSamples),
+        presentation: metricForSamples(excludedHoverPresentationSamples),
+      }),
     }),
-    inputTypes,
+    frameSubmitByType,
+    presentationByType,
     pairedCount,
     partialPresentationPairCount,
     presentedPairCount,
@@ -401,7 +631,7 @@ function pairAnimationFrameSlices(events) {
   return { errors, pairs };
 }
 
-function parseAnimationFrameCrossCheck(events, primaryInputTypes) {
+function parseAnimationFrameCrossCheck(events, primaryPresentationByType) {
   const hasAnimationFrameSchema = events.some((event) => (
     event?.name === EVENTS_IN_ANIMATION_FRAME_NAME
       && categoryIncludes(event.cat, LATENCY_CATEGORY)
@@ -413,7 +643,7 @@ function parseAnimationFrameCrossCheck(events, primaryInputTypes) {
       reason: "latency-category EventsInAnimationFrame schema is absent",
       frameCount: 0,
       excludedFrameCount: 0,
-      inputTypes: Object.freeze({
+      presentationByType: Object.freeze({
         pointerdown: metricForSamples([]),
         pointerup: metricForSamples([]),
       }),
@@ -505,21 +735,23 @@ function parseAnimationFrameCrossCheck(events, primaryInputTypes) {
     samples[inputType].push((presentationTimestampUs - generationTimestampUs) / 1_000);
   }
 
-  const inputTypes = Object.freeze({
+  const presentationByType = Object.freeze({
     pointerdown: metricForSamples(samples.pointerdown),
     pointerup: metricForSamples(samples.pointerup),
   });
   const mismatches = [];
   for (const inputType of ["pointerdown", "pointerup"]) {
-    const primary = [...primaryInputTypes[inputType].samplesMs].sort((left, right) => left - right);
-    const crossCheck = [...inputTypes[inputType].samplesMs].sort((left, right) => left - right);
+    const primary = [...primaryPresentationByType[inputType].samplesMs]
+      .sort((left, right) => left - right);
+    const crossCheck = [...presentationByType[inputType].samplesMs]
+      .sort((left, right) => left - right);
     const valuesMatch = primary.length === crossCheck.length
       && primary.every((value, index) => Math.abs(value - crossCheck[index]) <= 1e-9);
     if (!valuesMatch) {
       mismatches.push(Object.freeze({
         inputType,
-        eventLatencySamplesMs: Object.freeze(primary),
-        animationFrameSamplesMs: Object.freeze(crossCheck),
+        eventLatencyPresentationSamplesMs: Object.freeze(primary),
+        animationFramePresentationSamplesMs: Object.freeze(crossCheck),
       }));
     }
   }
@@ -530,7 +762,7 @@ function parseAnimationFrameCrossCheck(events, primaryInputTypes) {
     reason: supported ? null : "EventsInAnimationFrame schema was incomplete or ambiguous",
     frameCount: slices.pairs.length,
     excludedFrameCount,
-    inputTypes,
+    presentationByType,
     mismatches: Object.freeze(mismatches),
     schemaErrors: Object.freeze(schemaErrors.map((error) => Object.freeze({ ...error }))),
   });
@@ -550,7 +782,10 @@ export function parseDrawingEventLatencyTrace(trace, options = {}) {
     options.expectedDispatchCounts,
   );
   const primary = parsePrimaryEventLatency(events, expectedDispatchCounts);
-  const animationFrameCrossCheck = parseAnimationFrameCrossCheck(events, primary.inputTypes);
+  const animationFrameCrossCheck = parseAnimationFrameCrossCheck(
+    events,
+    primary.presentationByType,
+  );
   const diagnostics = Object.freeze(Object.fromEntries(
     Object.entries(primary.diagnostics).map(([key, entries]) => (
       [key, Object.freeze(entries.map((entry) => Object.freeze({ ...entry })))]
@@ -566,10 +801,11 @@ export function parseDrawingEventLatencyTrace(trace, options = {}) {
     failureReasons.push("eventsInAnimationFrameMismatch");
   }
   return Object.freeze({
-    schemaVersion: "drawing-event-latency-trace/v1",
+    schemaVersion: "drawing-event-latency-trace/v2",
     passed: failureReasons.length === 0,
     failureReasons: Object.freeze(failureReasons),
     expectedDispatchCounts,
+    metricSemantics: METRIC_SEMANTICS,
     eventLatency: Object.freeze({
       beginCount: primary.beginCount,
       endCount: primary.endCount,
@@ -578,7 +814,8 @@ export function parseDrawingEventLatencyTrace(trace, options = {}) {
       terminationOnlyPairCount: primary.terminationOnlyPairCount,
       partialPresentationPairCount: primary.partialPresentationPairCount,
     }),
-    inputTypes: primary.inputTypes,
+    frameSubmitByType: primary.frameSubmitByType,
+    presentationByType: primary.presentationByType,
     excluded: primary.excluded,
     samples: primary.samples,
     diagnostics,

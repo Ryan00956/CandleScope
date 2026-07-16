@@ -47,16 +47,14 @@ const DRAWING_EVENT_LATENCY_INPUT_TYPES = Object.freeze([
 ]);
 
 const DRAWING_EVENT_LATENCY_TRACE_CATEGORIES = Object.freeze([
-  "benchmark",
   "input",
-  "input.scrolling",
   "latency",
-  "latencyInfo",
 ]);
 
 const DRAWING_EVENT_LATENCY_CONFIGURATION = Object.freeze({
   dispatchesPerType: 128,
   maxAttempts: 2,
+  settleFramesPerInput: 6,
   p95ThresholdMs: 20,
   p99ThresholdMs: 33,
   p95MinimumSamples: 20,
@@ -65,10 +63,23 @@ const DRAWING_EVENT_LATENCY_CONFIGURATION = Object.freeze({
   categories: DRAWING_EVENT_LATENCY_TRACE_CATEGORIES,
 });
 
+const DRAWING_EVENT_LATENCY_METRIC_SEMANTICS = Object.freeze({
+  frameSubmitByType: Object.freeze({
+    start: "input-generation",
+    end: "next-frame-submit",
+    meaning: "documented-input-to-next-paint",
+  }),
+  presentationByType: Object.freeze({
+    start: "input-generation",
+    end: "physical-presentation",
+    meaning: "input-to-physical-presentation",
+  }),
+});
+
 export const DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT = Object.freeze({
   schemaVersion: "drawing-event-latency-calibration/v1",
   window: "post-formal-soak",
-  scenarioId: "freehand-64x512-viewport",
+  scenarioId: "phase6-freehand64-zoom-pan",
   inputTypes: DRAWING_EVENT_LATENCY_INPUT_TYPES,
   configuration: DRAWING_EVENT_LATENCY_CONFIGURATION,
 });
@@ -913,6 +924,13 @@ const EVENT_LATENCY_DIAGNOSTIC_KEYS = Object.freeze([
   "nonMonotonicEvents",
   "unknownTypes",
   "countMismatches",
+  "orphanSubmitStageEnds",
+  "openSubmitStageBegins",
+  "invalidSubmitStages",
+  "nonMonotonicSubmitStages",
+  "unnestedSubmitStages",
+  "submitStageCardinalityMismatches",
+  "submitStagePresentationMismatches",
 ]);
 
 const EVENT_LATENCY_PROVENANCE_KEYS = Object.freeze([
@@ -973,6 +991,7 @@ function exactEventLatencyConfiguration(value) {
   return hasExactKeys(value, keys)
     && value.dispatchesPerType === expected.dispatchesPerType
     && value.maxAttempts === expected.maxAttempts
+    && value.settleFramesPerInput === expected.settleFramesPerInput
     && value.p95ThresholdMs === expected.p95ThresholdMs
     && value.p99ThresholdMs === expected.p99ThresholdMs
     && value.p95MinimumSamples === expected.p95MinimumSamples
@@ -981,6 +1000,16 @@ function exactEventLatencyConfiguration(value) {
     && Array.isArray(value.categories)
     && value.categories.length === expected.categories.length
     && value.categories.every((category, index) => category === expected.categories[index]);
+}
+
+function exactEventLatencyMetricSemantics(value) {
+  return hasExactKeys(value, Object.keys(DRAWING_EVENT_LATENCY_METRIC_SEMANTICS))
+    && Object.entries(DRAWING_EVENT_LATENCY_METRIC_SEMANTICS).every(([metric, expected]) => (
+      hasExactKeys(value[metric], Object.keys(expected))
+        && Object.entries(expected).every(([key, expectedValue]) => (
+          value[metric][key] === expectedValue
+        ))
+    ));
 }
 
 function nearestRankPercentile(values, percentile) {
@@ -1003,7 +1032,25 @@ function exactNumericSamples(left, right) {
     ));
 }
 
-function eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples) {
+function exactNumericSampleMultiset(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  const sortedLeft = left.map(nonNegativeNumber).sort((a, b) => a - b);
+  const sortedRight = right.map(nonNegativeNumber).sort((a, b) => a - b);
+  return sortedLeft.every((value, index) => (
+    value !== null
+      && sortedRight[index] !== null
+      && Math.abs(value - sortedRight[index]) <= 1e-9
+  ));
+}
+
+function eventLatencyMetricEvidence(
+  metric,
+  expectedCount,
+  canonicalSamples,
+  { compareAsMultiset = false } = {},
+) {
   const samplesMs = metric?.samplesMs;
   const count = metric?.count;
   const p50Ms = nonNegativeNumber(metric?.p50Ms);
@@ -1013,7 +1060,9 @@ function eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples) {
     && count === expectedCount
     && Array.isArray(samplesMs)
     && samplesMs.length === count
-    && exactNumericSamples(samplesMs, canonicalSamples)
+    && (compareAsMultiset
+      ? exactNumericSampleMultiset(samplesMs, canonicalSamples)
+      : exactNumericSamples(samplesMs, canonicalSamples))
     && p50Ms !== null
     && p95Ms !== null
     && p99Ms !== null
@@ -1106,7 +1155,16 @@ function eventLatencyCalibrationEvidence(report) {
     Array.isArray(parser.diagnostics[key]) && parser.diagnostics[key].length === 0
   ));
   const parserSamples = Array.isArray(parser?.samples) ? parser.samples : [];
-  const canonicalSamplesByType = Object.fromEntries(
+  const metricSemanticsPassed = exactEventLatencyMetricSemantics(parser?.metricSemantics);
+  const canonicalFrameSubmitSamplesByType = Object.fromEntries(
+    DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => [
+      type,
+      parserSamples
+        .filter((sample) => sample?.inputType === type)
+        .map((sample) => sample?.generationToFrameSubmitMs),
+    ]),
+  );
+  const canonicalPresentationSamplesByType = Object.fromEntries(
     DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => [
       type,
       parserSamples
@@ -1117,17 +1175,24 @@ function eventLatencyCalibrationEvidence(report) {
   const parserSamplesPassed = Array.isArray(parser?.samples)
     && parserSamples.length === expectedCount * DRAWING_EVENT_LATENCY_INPUT_TYPES.length
     && DRAWING_EVENT_LATENCY_INPUT_TYPES.every((type) => (
-      canonicalSamplesByType[type].length === expectedCount
+      canonicalFrameSubmitSamplesByType[type].length === expectedCount
+        && canonicalPresentationSamplesByType[type].length === expectedCount
     ))
     && parserSamples.every((sample) => (
       DRAWING_EVENT_LATENCY_INPUT_TYPES.includes(sample?.inputType)
+        && nonNegativeNumber(sample?.generationToFrameSubmitMs) !== null
+        && nonNegativeNumber(sample?.frameSubmitToPresentationMs) !== null
         && nonNegativeNumber(sample?.generationToPresentationMs) !== null
+        && sample.generationToFrameSubmitMs + sample.frameSubmitToPresentationMs
+          === sample.generationToPresentationMs
     ));
-  const parserInputTypes = parser?.inputTypes;
-  const inputTypeSummaries = Object.fromEntries(DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => {
-    const metric = parserInputTypes?.[type];
-    const canonicalSamples = canonicalSamplesByType[type];
+  const parserFrameSubmitByType = parser?.frameSubmitByType;
+  const parserPresentationByType = parser?.presentationByType;
+  const frameSubmitSummaries = Object.fromEntries(DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => {
+    const metric = parserFrameSubmitByType?.[type];
+    const canonicalSamples = canonicalFrameSubmitSamplesByType[type];
     const canonicalCount = canonicalSamples.length;
+    const canonicalP50Ms = nearestRankPercentile(canonicalSamples, 50);
     const canonicalP95Ms = nearestRankPercentile(canonicalSamples, 95);
     const canonicalP99Ms = nearestRankPercentile(canonicalSamples, 99);
     const metricPassed = eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples);
@@ -1143,6 +1208,7 @@ function eventLatencyCalibrationEvidence(report) {
       && canonicalP99Ms <= DRAWING_EVENT_LATENCY_CONFIGURATION.p99ThresholdMs;
     return [type, Object.freeze({
       count: canonicalCount,
+      p50Ms: canonicalP50Ms,
       p95Ms: canonicalP95Ms,
       p99Ms: canonicalP99Ms,
       p95Eligible,
@@ -1152,10 +1218,32 @@ function eventLatencyCalibrationEvidence(report) {
       passed: metricPassed && p95Passed && p99Passed,
     })];
   }));
-  const inputTypesPassed = hasExactKeys(parserInputTypes, DRAWING_EVENT_LATENCY_INPUT_TYPES)
-    && Object.values(inputTypeSummaries).every((summary) => summary.passed);
+  const presentationSummaries = Object.fromEntries(
+    DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => {
+      const metric = parserPresentationByType?.[type];
+      const canonicalSamples = canonicalPresentationSamplesByType[type];
+      const metricPassed = eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples);
+      return [type, Object.freeze({
+        count: canonicalSamples.length,
+        p50Ms: nearestRankPercentile(canonicalSamples, 50),
+        p95Ms: nearestRankPercentile(canonicalSamples, 95),
+        p99Ms: nearestRankPercentile(canonicalSamples, 99),
+        passed: metricPassed,
+      })];
+    }),
+  );
+  const frameSubmitByTypePassed = hasExactKeys(
+    parserFrameSubmitByType,
+    DRAWING_EVENT_LATENCY_INPUT_TYPES,
+  ) && Object.values(frameSubmitSummaries).every((summary) => summary.passed);
+  const presentationByTypePassed = hasExactKeys(
+    parserPresentationByType,
+    DRAWING_EVENT_LATENCY_INPUT_TYPES,
+  ) && Object.values(presentationSummaries).every((summary) => summary.passed);
   const excludedHoverPassed = hasExactKeys(parser?.excluded, ["hover"])
-    && emptyEventLatencyMetricEvidence(parser.excluded.hover);
+    && hasExactKeys(parser.excluded.hover, ["frameSubmit", "presentation"])
+    && emptyEventLatencyMetricEvidence(parser.excluded.hover.frameSubmit)
+    && emptyEventLatencyMetricEvidence(parser.excluded.hover.presentation);
   const eventLatency = parser?.eventLatency;
   const eventLatencyCountsPassed = [
     "beginCount",
@@ -1176,7 +1264,7 @@ function eventLatencyCalibrationEvidence(report) {
     && (!tracePassed || trace.eventCount >= eventLatency.beginCount + eventLatency.endCount);
 
   const eiaf = parser?.eventsInAnimationFrame;
-  const eiafInputTypes = eiaf?.inputTypes;
+  const eiafPresentationByType = eiaf?.presentationByType;
   const eiafPassed = eiaf?.supported === true
     && eiaf?.passed === true
     && eiaf?.reason === null
@@ -1184,28 +1272,32 @@ function eventLatencyCalibrationEvidence(report) {
     && eiaf.frameCount >= expectedCount * 2
     && Number.isSafeInteger(eiaf?.excludedFrameCount)
     && eiaf.excludedFrameCount >= 0
-    && hasExactKeys(eiafInputTypes, ["pointerdown", "pointerup"])
+    && hasExactKeys(eiafPresentationByType, ["pointerdown", "pointerup"])
     && eventLatencyMetricEvidence(
-      eiafInputTypes.pointerdown,
+      eiafPresentationByType.pointerdown,
       expectedCount,
-      canonicalSamplesByType.pointerdown,
+      canonicalPresentationSamplesByType.pointerdown,
+      { compareAsMultiset: true },
     )
     && eventLatencyMetricEvidence(
-      eiafInputTypes.pointerup,
+      eiafPresentationByType.pointerup,
       expectedCount,
-      canonicalSamplesByType.pointerup,
+      canonicalPresentationSamplesByType.pointerup,
+      { compareAsMultiset: true },
     )
     && Array.isArray(eiaf.mismatches)
     && eiaf.mismatches.length === 0
     && Array.isArray(eiaf.schemaErrors)
     && eiaf.schemaErrors.length === 0;
-  const parserPassed = parser?.schemaVersion === "drawing-event-latency-trace/v1"
+  const parserPassed = parser?.schemaVersion === "drawing-event-latency-trace/v2"
     && parser?.passed === true
     && Array.isArray(parser?.failureReasons)
     && parser.failureReasons.length === 0
     && exactEventLatencyDispatchCounts(parser?.expectedDispatchCounts)
+    && metricSemanticsPassed
     && parserDiagnosticsPassed
-    && inputTypesPassed
+    && frameSubmitByTypePassed
+    && presentationByTypePassed
     && excludedHoverPassed
     && parserSamplesPassed
     && eventLatencyCountsPassed
@@ -1267,19 +1359,21 @@ function eventLatencyCalibrationEvidence(report) {
     parser: Object.freeze({
       schemaVersion: parser?.schemaVersion ?? null,
       passed: parserPassed,
+      metricSemanticsPassed,
       diagnosticsPassed: parserDiagnosticsPassed,
-      excludedHoverCount: Number.isSafeInteger(parser?.excluded?.hover?.count)
-        ? parser.excluded.hover.count
+      excludedHoverCount: Number.isSafeInteger(parser?.excluded?.hover?.presentation?.count)
+        ? parser.excluded.hover.presentation.count
         : null,
-      inputTypes: Object.freeze(inputTypeSummaries),
+      frameSubmitByType: Object.freeze(frameSubmitSummaries),
+      presentationByType: Object.freeze(presentationSummaries),
       eventsInAnimationFrame: Object.freeze({
         supported: eiaf?.supported ?? null,
         passed: eiafPassed,
-        pointerdownCount: Number.isSafeInteger(eiafInputTypes?.pointerdown?.count)
-          ? eiafInputTypes.pointerdown.count
+        pointerdownCount: Number.isSafeInteger(eiafPresentationByType?.pointerdown?.count)
+          ? eiafPresentationByType.pointerdown.count
           : null,
-        pointerupCount: Number.isSafeInteger(eiafInputTypes?.pointerup?.count)
-          ? eiafInputTypes.pointerup.count
+        pointerupCount: Number.isSafeInteger(eiafPresentationByType?.pointerup?.count)
+          ? eiafPresentationByType.pointerup.count
           : null,
       }),
     }),

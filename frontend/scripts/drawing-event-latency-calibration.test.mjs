@@ -25,18 +25,26 @@ function metric({ count = 128, p50Ms = 8, p95Ms = 16, p99Ms = 24 } = {}) {
 }
 
 function parserReport({ passed = true, count = 128, p95Ms = 16, p99Ms = 24 } = {}) {
-  const inputTypes = Object.fromEntries([
+  const inputTypeNames = [
     "pointerdown",
     "pointermove",
     "pointerup",
     "wheel",
-  ].map((inputType) => [inputType, metric({ count, p95Ms, p99Ms })]));
+  ];
+  const frameSubmitByType = Object.fromEntries(inputTypeNames.map((inputType) => [
+    inputType,
+    metric({ count, p95Ms, p99Ms }),
+  ]));
+  const presentationByType = Object.fromEntries(inputTypeNames.map((inputType) => [
+    inputType,
+    metric({ count, p50Ms: 28, p95Ms: 32, p99Ms: 48 }),
+  ]));
   return {
-    schemaVersion: "drawing-event-latency-trace/v1",
+    schemaVersion: "drawing-event-latency-trace/v2",
     passed,
     failureReasons: passed ? [] : ["countMismatches"],
     expectedDispatchCounts: Object.fromEntries(
-      Object.keys(inputTypes).map((inputType) => [inputType, 128]),
+      inputTypeNames.map((inputType) => [inputType, 128]),
     ),
     eventLatency: {
       beginCount: count * 4,
@@ -46,8 +54,14 @@ function parserReport({ passed = true, count = 128, p95Ms = 16, p99Ms = 24 } = {
       terminationOnlyPairCount: 0,
       partialPresentationPairCount: 0,
     },
-    inputTypes,
-    excluded: { hover: metric({ count: 0, p50Ms: null, p95Ms: null, p99Ms: null }) },
+    frameSubmitByType,
+    presentationByType,
+    excluded: {
+      hover: {
+        frameSubmit: metric({ count: 0, p50Ms: null, p95Ms: null, p99Ms: null }),
+        presentation: metric({ count: 0, p50Ms: null, p95Ms: null, p99Ms: null }),
+      },
+    },
     samples: [],
     diagnostics: {
       orphanEnds: [],
@@ -63,9 +77,9 @@ function parserReport({ passed = true, count = 128, p95Ms = 16, p99Ms = 24 } = {
       reason: null,
       frameCount: count * 2,
       excludedFrameCount: 0,
-      inputTypes: {
-        pointerdown: metric({ count, p95Ms, p99Ms }),
-        pointerup: metric({ count, p95Ms, p99Ms }),
+      presentationByType: {
+        pointerdown: presentationByType.pointerdown,
+        pointerup: presentationByType.pointerup,
       },
       mismatches: [],
       schemaErrors: [],
@@ -182,7 +196,11 @@ test("collects exactly 128 presented samples per type and closes the trace strea
   assert.equal(report.trace.dataLossOccurred, false);
   assert.equal(report.trace.maxBufferUsage, 0.25);
   assert.deepEqual(cdp.closedStreams, ["trace-1"]);
-  assert.equal(animationFrames, 2 + 128 * 4 + 1);
+  assert.equal(
+    animationFrames,
+    2 + 128 * 4
+      * DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.configuration.settleFramesPerInput + 1,
+  );
 
   const inputCommands = cdp.commands.filter(({ method }) => (
     method === "Input.dispatchMouseEvent"
@@ -291,6 +309,23 @@ test("retries an incomplete EventsInAnimationFrame cross-check only after safe c
     { attempt: 2, passed: true },
   ]);
   assert.deepEqual(cdp.closedStreams, ["trace-1", "trace-2"]);
+});
+
+test("fails closed when a parser response falls back to the removed v1 aliases", async () => {
+  const { report } = await runWith({
+    parseTrace: () => {
+      const parsed = parserReport();
+      parsed.excluded.hover = metric({ count: 0, p50Ms: null, p95Ms: null, p99Ms: null });
+      parsed.eventsInAnimationFrame.inputTypes =
+        parsed.eventsInAnimationFrame.presentationByType;
+      delete parsed.eventsInAnimationFrame.presentationByType;
+      return parsed;
+    },
+  });
+
+  assert.equal(report.acquisition.passed, false);
+  assert.equal(report.acquisition.attemptCount, 2);
+  assert.match(report.acquisition.failureReason, /^schema:/);
 });
 
 test("does not retry when IO.close cannot confirm cleanup", async () => {

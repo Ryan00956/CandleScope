@@ -7,8 +7,8 @@ import {
 import { DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT } from "./drawing-soak-metrics.mjs";
 
 const EVENT_LATENCY_ACQUISITION_LIMITS = Object.freeze({
-  parserSchemaVersion: "drawing-event-latency-trace/v1",
-  dispatchDeadlineMs: 30_000,
+  parserSchemaVersion: "drawing-event-latency-trace/v2",
+  dispatchDeadlineMs: 90_000,
   streamDeadlineMs: 30_000,
   streamChunkBytes: 1_048_576,
   traceExcludedCategories: Object.freeze(["*"]),
@@ -93,6 +93,14 @@ function assertDispatchActive(control) {
   if (control.aborted) throw new CalibrationDispatchAbortedError();
 }
 
+async function waitForInputSettle(waitForAnimationFrame, control) {
+  for (let frame = 0; frame < CALIBRATION_CONFIGURATION.settleFramesPerInput; frame += 1) {
+    assertDispatchActive(control);
+    await waitForAnimationFrame();
+  }
+  assertDispatchActive(control);
+}
+
 async function dispatchCalibrationInputs(
   cdp,
   rect,
@@ -127,9 +135,7 @@ async function dispatchCalibrationInputs(
     });
     state.mouseDown = true;
     counts.pointerdown += 1;
-    assertDispatchActive(control);
-    await waitForAnimationFrame();
-    assertDispatchActive(control);
+    await waitForInputSettle(waitForAnimationFrame, control);
 
     state.mouse = { x: toX, y };
     await sendCdp(cdp, "Input.dispatchMouseEvent", {
@@ -140,9 +146,7 @@ async function dispatchCalibrationInputs(
       buttons: 1,
     });
     counts.pointermove += 1;
-    assertDispatchActive(control);
-    await waitForAnimationFrame();
-    assertDispatchActive(control);
+    await waitForInputSettle(waitForAnimationFrame, control);
 
     await sendCdp(cdp, "Input.dispatchMouseEvent", {
       type: "mouseReleased",
@@ -154,9 +158,7 @@ async function dispatchCalibrationInputs(
     });
     state.mouseDown = false;
     counts.pointerup += 1;
-    assertDispatchActive(control);
-    await waitForAnimationFrame();
-    assertDispatchActive(control);
+    await waitForInputSettle(waitForAnimationFrame, control);
 
     await sendCdp(cdp, "Input.dispatchMouseEvent", {
       type: "mouseWheel",
@@ -166,9 +168,7 @@ async function dispatchCalibrationInputs(
       deltaY: direction * 72,
     });
     counts.wheel += 1;
-    assertDispatchActive(control);
-    await waitForAnimationFrame();
-    assertDispatchActive(control);
+    await waitForInputSettle(waitForAnimationFrame, control);
   }
   // The rAF callback runs before paint/presentation. One additional frame keeps
   // the final wheel's presentation endpoint inside the trace window.
@@ -239,7 +239,7 @@ function summarizeParserLatency(parser) {
   const inputTypes = {};
   let passed = parser?.passed === true;
   for (const inputType of DRAWING_EVENT_LATENCY_INPUT_TYPES) {
-    const metric = parser?.inputTypes?.[inputType];
+    const metric = parser?.frameSubmitByType?.[inputType];
     const p95Ms = Number.isFinite(metric?.p95Ms) ? metric.p95Ms : null;
     const p99Ms = Number.isFinite(metric?.p99Ms) ? metric.p99Ms : null;
     const count = Number.isSafeInteger(metric?.count) ? metric.count : null;
@@ -268,11 +268,16 @@ function parserSchemaEvidencePassed(parser) {
   const eiaf = parser?.eventsInAnimationFrame;
   return parser?.schemaVersion === EVENT_LATENCY_ACQUISITION_LIMITS.parserSchemaVersion
     && parser?.passed === true
-    && parser?.excluded?.hover?.count === 0
+    && parser?.excluded?.hover?.frameSubmit?.count === 0
+    && parser?.excluded?.hover?.presentation?.count === 0
+    && DRAWING_EVENT_LATENCY_INPUT_TYPES.every((inputType) => (
+      parser?.frameSubmitByType?.[inputType]?.count === expectedCount
+        && parser?.presentationByType?.[inputType]?.count === expectedCount
+    ))
     && eiaf?.supported === true
     && eiaf?.passed === true
-    && eiaf?.inputTypes?.pointerdown?.count === expectedCount
-    && eiaf?.inputTypes?.pointerup?.count === expectedCount;
+    && eiaf?.presentationByType?.pointerdown?.count === expectedCount
+    && eiaf?.presentationByType?.pointerup?.count === expectedCount;
 }
 
 function actualCountsMatchExpected(actual, expected) {
@@ -528,7 +533,7 @@ async function runAttempt({
     } else if (!latency.passed) {
       failure = {
         kind: "threshold",
-        message: "valid event latency samples exceeded the fixed p95/p99 thresholds",
+        message: "valid input-to-frame-submit samples exceeded the fixed p95/p99 thresholds",
       };
     }
   } catch (error) {

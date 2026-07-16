@@ -112,8 +112,7 @@ export function phase6BrowserProbeBootstrap() {
   };
   const sameStamp = (left, right) => {
     if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
-    const keys = [
-      "scopeKey",
+    const revisionKeys = [
       "documentRevision",
       "surfaceGeneration",
       "dataRevision",
@@ -121,11 +120,17 @@ export function phase6BrowserProbeBootstrap() {
       "lineageIndexRevision",
       "viewportRevision",
       "themeRevision",
-      "widthCssPx",
-      "heightCssPx",
-      "dpr",
     ];
-    return keys.every((key) => left[key] === right[key]);
+    const positiveKeys = ["widthCssPx", "heightCssPx", "dpr"];
+    const valid = (stamp) => typeof stamp.scopeKey === "string"
+      && stamp.scopeKey.length > 0
+      && revisionKeys.every((key) => Number.isSafeInteger(stamp[key]) && stamp[key] >= 0)
+      && positiveKeys.every((key) => Number.isFinite(stamp[key]) && stamp[key] > 0);
+    return valid(left)
+      && valid(right)
+      && left.scopeKey === right.scopeKey
+      && revisionKeys.every((key) => left[key] === right[key])
+      && positiveKeys.every((key) => left[key] === right[key]);
   };
   const readRaw = () => {
     const report = drawingHandle.report?.() || {};
@@ -385,7 +390,18 @@ export function phase6BrowserProbeBootstrap() {
       lastPublishedStamp: safeClone(valueAt(phase6, ["lastPublishedStamp", "publishedStamp"])),
       lastPaintedStamp: safeClone(valueAt(
         phase6,
-        ["lastPaintedStamp", "paintedStamp", "lastPublishedStamp", "publishedStamp"],
+        ["lastPaintedStamp", "paintedStamp"],
+      )),
+      paintReceipt: safeClone(valueAt(phase6, ["paintReceipt"])),
+      submittedWorkerHeaders: Array.isArray(valueAt(phase6, ["submittedWorkerHeaders"]))
+        ? safeClone(valueAt(phase6, ["submittedWorkerHeaders"]))
+        : [],
+      returnedWorkerIdentity: safeClone(valueAt(phase6, ["returnedWorkerIdentity"])),
+      acceptedWorkerIdentity: safeClone(valueAt(phase6, ["acceptedWorkerIdentity"])),
+      publishedWorkerIdentity: safeClone(valueAt(phase6, ["publishedWorkerIdentity"])),
+      latestSubmittedWorkerIdentity: safeClone(valueAt(
+        phase6,
+        ["latestSubmittedWorkerIdentity"],
       )),
     };
   };

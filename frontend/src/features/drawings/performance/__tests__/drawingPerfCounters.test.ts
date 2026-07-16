@@ -547,6 +547,12 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
 
 test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle providers", () => {
   const handle = installDrawingPerfDebugHandle({});
+  const workerIdentity = Object.freeze({
+    schemaVersion: 1,
+    jobId: 4,
+    generation: 4,
+    stamp: Object.freeze({ viewportRevision: 8 }),
+  });
   const phase6Runtime = Object.freeze({
     engineMode: "scene-canary" as const,
     scenePublicationReady: true,
@@ -593,11 +599,29 @@ test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle pro
     exactRenderMs: 96,
     lastRequestedStamp: Object.freeze({ viewportRevision: 8 }),
     lastPublishedStamp: Object.freeze({ viewportRevision: 8 }),
+    lastPaintedStamp: Object.freeze({ viewportRevision: 8 }),
+    paintReceipt: Object.freeze({
+      kind: "drawing-scene-bridge-paint-ack" as const,
+      observedAt: "2026-07-16T08:00:00.000Z",
+      stamp: Object.freeze({ viewportRevision: 8 }),
+      attachmentRevision: 1,
+      paintSequence: 2,
+    }),
+    submittedWorkerHeaders: Object.freeze([workerIdentity]),
+    returnedWorkerIdentity: null,
+    acceptedWorkerIdentity: workerIdentity,
+    publishedWorkerIdentity: workerIdentity,
+    latestSubmittedWorkerIdentity: workerIdentity,
   });
   const unregisterRuntime = registerDrawingPerfPhase6RuntimeProvider(() => phase6Runtime);
   assert.strictEqual(handle?.readPhase6Runtime(), phase6Runtime);
   assert.equal(handle?.readPhase6Runtime()?.sceneRuntimeFaultCount, 0);
   assert.equal(handle?.readPhase6Runtime()?.cacheMetadataBudgetBytes, 1024 * 1024);
+  assert.strictEqual(handle?.readPhase6Runtime()?.paintReceipt, phase6Runtime.paintReceipt);
+  assert.strictEqual(
+    handle?.readPhase6Runtime()?.latestSubmittedWorkerIdentity,
+    workerIdentity,
+  );
   unregisterRuntime();
   assert.equal(handle?.readPhase6Runtime(), null);
 

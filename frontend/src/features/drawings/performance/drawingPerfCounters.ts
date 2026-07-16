@@ -185,6 +185,21 @@ export interface DrawingPerfRuntimeSummary {
   }>;
 }
 
+export interface DrawingPerfPhase6WorkerIdentity {
+  readonly schemaVersion: number;
+  readonly jobId: number;
+  readonly generation: number;
+  readonly stamp: Readonly<Record<string, unknown>>;
+}
+
+export interface DrawingPerfPhase6PaintReceipt {
+  readonly kind: "drawing-scene-bridge-paint-ack";
+  readonly observedAt: string;
+  readonly stamp: Readonly<Record<string, unknown>>;
+  readonly attachmentRevision: number;
+  readonly paintSequence: number;
+}
+
 export interface DrawingPerfPhase6RuntimeSnapshot {
   readonly engineMode: "legacy" | "shadow" | "scene-canary";
   readonly scenePublicationReady: boolean;
@@ -231,6 +246,13 @@ export interface DrawingPerfPhase6RuntimeSnapshot {
   readonly exactRenderMs: number | null;
   readonly lastRequestedStamp: Readonly<Record<string, unknown>> | null;
   readonly lastPublishedStamp: Readonly<Record<string, unknown>> | null;
+  readonly lastPaintedStamp: Readonly<Record<string, unknown>> | null;
+  readonly paintReceipt: DrawingPerfPhase6PaintReceipt | null;
+  readonly submittedWorkerHeaders: readonly DrawingPerfPhase6WorkerIdentity[];
+  readonly returnedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
+  readonly acceptedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
+  readonly publishedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
+  readonly latestSubmittedWorkerIdentity: DrawingPerfPhase6WorkerIdentity | null;
 }
 
 export interface DrawingPerfPhase6HitOracleResult {

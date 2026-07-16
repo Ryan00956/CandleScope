@@ -53,6 +53,7 @@ import {
 } from "../worker/drawingWorkerProtocol.js";
 import type {
   DrawingWorkerEntityPatch,
+  DrawingWorkerJobHeader,
   DrawingWorkerTypedDrawResult,
   DrawingWorkerViewportPayload,
 } from "../worker/drawingWorkerProtocol.js";
@@ -203,10 +204,31 @@ export interface DrawingSceneRuntimeSnapshot {
   readonly worker: DrawingWorkerClientSnapshot | null;
   readonly lastWorkerRequestedStamp: DrawingRenderRevisionStamp | null;
   readonly lastWorkerPublishedStamp: DrawingRenderRevisionStamp | null;
+  /** Bounded, ordered identities returned by successful worker submissions. */
+  readonly submittedWorkerHeaders: readonly DrawingWorkerJobHeader[];
+  /** Most recent worker result rejected as stale before runtime acceptance. */
+  readonly returnedWorkerIdentity: DrawingWorkerJobHeader | null;
+  /** Most recent worker result that passed the runtime freshness boundary. */
+  readonly acceptedWorkerIdentity: DrawingWorkerJobHeader | null;
+  /** Most recent accepted worker result whose scene publication succeeded. */
+  readonly publishedWorkerIdentity: DrawingWorkerJobHeader | null;
+  /** Exact identity returned by the most recent successful worker submission. */
+  readonly latestSubmittedWorkerIdentity: DrawingWorkerJobHeader | null;
+  /** Exact stamp acknowledged by the generation-safe visible paint callback. */
+  readonly lastPaintedStamp: DrawingRenderRevisionStamp | null;
+  readonly paintReceipt: DrawingSceneRuntimePaintReceipt | null;
   readonly staleWorkerPublishCount: number;
   readonly workerResultDeliveryDelayMs: number;
   readonly rawPointCount: number;
   readonly renderedPointCount: number;
+}
+
+export interface DrawingSceneRuntimePaintReceipt {
+  readonly kind: "drawing-scene-bridge-paint-ack";
+  readonly observedAt: string;
+  readonly stamp: DrawingRenderRevisionStamp;
+  readonly attachmentRevision: number;
+  readonly paintSequence: number;
 }
 
 export type DrawingSceneExactPaintErrorCode =
@@ -283,6 +305,8 @@ interface SceneRenderPlan extends DrawingPreparedRenderPlan {
 interface ExactPaintEvidence {
   readonly attachmentRevision: number;
   readonly paintSequence: number;
+  readonly observedAt: string;
+  readonly stamp: DrawingRenderRevisionStamp;
 }
 
 interface ExactPaintWaiter {
@@ -329,6 +353,17 @@ function defaultNow(): number {
   return typeof performance !== "undefined" && typeof performance.now === "function"
     ? performance.now()
     : Date.now();
+}
+
+const MAX_PHASE6_WORKER_IDENTITY_HISTORY = 32;
+
+function snapshotWorkerIdentity(header: DrawingWorkerJobHeader): DrawingWorkerJobHeader {
+  return Object.freeze({
+    schemaVersion: header.schemaVersion,
+    jobId: header.jobId,
+    generation: header.generation,
+    stamp: Object.freeze({ ...header.stamp }),
+  });
 }
 
 function defaultScheduleDelay(callback: () => void, delayMs: number): unknown {
@@ -706,6 +741,11 @@ export function createDrawingSceneRuntime({
   const workerPlans = new Map<number, SceneRenderPlan>();
   let lastWorkerRequestedStamp: DrawingRenderRevisionStamp | null = null;
   let lastWorkerPublishedStamp: DrawingRenderRevisionStamp | null = null;
+  const submittedWorkerHeaders: DrawingWorkerJobHeader[] = [];
+  let returnedWorkerIdentity: DrawingWorkerJobHeader | null = null;
+  let acceptedWorkerIdentity: DrawingWorkerJobHeader | null = null;
+  let publishedWorkerIdentity: DrawingWorkerJobHeader | null = null;
+  let latestSubmittedWorkerIdentity: DrawingWorkerJobHeader | null = null;
   let staleWorkerPublishCount = 0;
   let rawPointCount = 0;
   let renderedPointCount = 0;
@@ -720,12 +760,70 @@ export function createDrawingSceneRuntime({
   let parityWorkHandle: unknown = null;
   let pendingParityPlan: SceneRenderPlan | null = null;
 
+  const sameWorkerIdentityKey = (
+    left: DrawingWorkerJobHeader | null,
+    right: DrawingWorkerJobHeader | null,
+  ): boolean => !!left
+    && !!right
+    && left.schemaVersion === right.schemaVersion
+    && left.jobId === right.jobId
+    && left.generation === right.generation;
+
+  const trimSubmittedWorkerIdentityHistory = (): void => {
+    while (submittedWorkerHeaders.length > MAX_PHASE6_WORKER_IDENTITY_HISTORY) {
+      const removableIndex = submittedWorkerHeaders.findIndex((identity, index) => (
+        index < submittedWorkerHeaders.length - 1
+          && !sameWorkerIdentityKey(identity, returnedWorkerIdentity)
+      ));
+      if (removableIndex < 0) break;
+      submittedWorkerHeaders.splice(removableIndex, 1);
+    }
+  };
+
+  const recordSubmittedWorkerIdentity = (header: DrawingWorkerJobHeader): void => {
+    const identity = snapshotWorkerIdentity(header);
+    submittedWorkerHeaders.push(identity);
+    latestSubmittedWorkerIdentity = identity;
+    trimSubmittedWorkerIdentityHistory();
+  };
+
+  const recordReturnedWorkerIdentity = (header: DrawingWorkerJobHeader): void => {
+    const identity = snapshotWorkerIdentity(header);
+    returnedWorkerIdentity = identity;
+    if (!submittedWorkerHeaders.some((candidate) => (
+      sameWorkerIdentityKey(candidate, identity)
+    ))) {
+      const insertionIndex = submittedWorkerHeaders.findIndex((candidate) => (
+        candidate.jobId > identity.jobId
+          || candidate.generation > identity.generation
+      ));
+      submittedWorkerHeaders.splice(
+        insertionIndex < 0 ? submittedWorkerHeaders.length : insertionIndex,
+        0,
+        identity,
+      );
+    }
+    trimSubmittedWorkerIdentityHistory();
+  };
+
+  const resetWorkerIdentityEvidence = (): void => {
+    submittedWorkerHeaders.length = 0;
+    returnedWorkerIdentity = null;
+    acceptedWorkerIdentity = null;
+    publishedWorkerIdentity = null;
+    latestSubmittedWorkerIdentity = null;
+  };
+
   const ensureWorkerClient = (): DrawingWorkerClient | null => {
     if (rasterBackend !== "worker" || workerRasterDisabled) {
       effectiveRasterBackend = "main-thread";
       return null;
     }
     if (workerClient) return workerClient;
+    // Worker job ids restart with each client. Keep the bounded identity
+    // sequence scoped to one real transport so a recovery cannot splice two
+    // independently monotonic generations into misleading drill evidence.
+    resetWorkerIdentityEvidence();
     effectiveRasterBackend = "worker";
     workerScopeKey = binding?.store.getSnapshot().scopeKey ?? null;
     workerClient = createDrawingWorkerClient({
@@ -753,6 +851,7 @@ export function createDrawingSceneRuntime({
       onStaleResult(response) {
         workerRequestedAt.delete(response.header.jobId);
         workerPlans.delete(response.header.jobId);
+        recordReturnedWorkerIdentity(response.header);
         drawingPerfCounters.incrementCounter("staleWorkerResultCount");
       },
       onResult(response) {
@@ -769,10 +868,12 @@ export function createDrawingSceneRuntime({
             || preparedPlan.sceneEpoch !== sceneEpoch
             || !sameDrawingWorkerStamp(response.header.stamp, requested)
             || !sameDrawingWorkerStamp(response.header.stamp, preparedPlan.stamp)) {
+            recordReturnedWorkerIdentity(response.header);
             drawingPerfCounters.incrementCounter("staleWorkerResultCount");
             releaseDrawingWorkerDrawResult(response.result);
             return;
           }
+          const acceptedIdentity = snapshotWorkerIdentity(response.header);
           drawingPerfCounters.incrementCounter("workerResultCount");
           if (response.result.kind !== "bitmap-draw-result") {
             const preparedList = workerPreparedDisplayList(preparedPlan.list, response.result);
@@ -787,9 +888,16 @@ export function createDrawingSceneRuntime({
               ...preparedPlan.hitIndex,
               list: preparedList,
             });
-            if (publishPreparedPlan(preparedPlan, preparedList, preparedHitIndex, "worker")) {
+            if (publishPreparedPlan(
+              preparedPlan,
+              preparedList,
+              preparedHitIndex,
+              "worker",
+              acceptedIdentity,
+            )) {
               effectiveRasterBackend = "main-thread";
               lastWorkerPublishedStamp = Object.freeze({ ...response.header.stamp });
+              publishedWorkerIdentity = acceptedIdentity;
             } else {
               releaseDrawingWorkerDrawResult(response.result);
             }
@@ -809,12 +917,19 @@ export function createDrawingSceneRuntime({
               ...preparedPlan.hitIndex,
               list: rasterList,
             });
-            if (!publishPreparedPlan(preparedPlan, rasterList, rasterHitIndex, "worker")) {
+            if (!publishPreparedPlan(
+              preparedPlan,
+              rasterList,
+              rasterHitIndex,
+              "worker",
+              acceptedIdentity,
+            )) {
               releaseDrawingWorkerDrawResult(response.result);
               return;
             }
             effectiveRasterBackend = "worker";
             lastWorkerPublishedStamp = Object.freeze({ ...response.header.stamp });
+            publishedWorkerIdentity = acceptedIdentity;
           } catch {
             releaseDrawingWorkerDrawResult(response.result);
             disableWorkerRaster();
@@ -911,6 +1026,7 @@ export function createDrawingSceneRuntime({
         return false;
       }
       if (!client.available) return false;
+      recordSubmittedWorkerIdentity(header);
       workerMirroredEntities = patchBatch.entities;
       lastWorkerRequestedStamp = Object.freeze({ ...header.stamp });
       workerRequestedAt.set(header.jobId, now());
@@ -1156,6 +1272,7 @@ export function createDrawingSceneRuntime({
     publishedList: DrawingScreenDisplayList,
     publishedHitIndex: DrawingHitIndex,
     source: "main-thread" | "worker",
+    workerIdentity: DrawingWorkerJobHeader | null = null,
   ): boolean {
     const currentDocument = plan.binding.store.getSnapshot();
     const documentCurrent = currentDocument === plan.document
@@ -1176,9 +1293,13 @@ export function createDrawingSceneRuntime({
         // A worker result rejected here was dropped safely; it was never
         // offered to publishScene and must not trip the stale-publish gate.
         drawingPerfCounters.incrementCounter("staleWorkerResultCount");
+        if (workerIdentity) recordReturnedWorkerIdentity(workerIdentity);
       }
       invalidateScene(documentCurrent ? "publish-frame-stale" : "publish-document-stale");
       return false;
+    }
+    if (source === "worker" && workerIdentity) {
+      acceptedWorkerIdentity = workerIdentity;
     }
     let visiblePublicationAccepted = true;
     let visiblePublicationError: unknown = null;
@@ -1427,6 +1548,8 @@ export function createDrawingSceneRuntime({
     const evidence = Object.freeze({
       attachmentRevision: ack.attachmentRevision,
       paintSequence: ack.paintSequence,
+      observedAt: new Date().toISOString(),
+      stamp: Object.freeze({ ...ack.stamp }),
     });
     if (!isNewerExactPaintEvidence(evidence, lastExactPaintEvidence)) return;
     lastExactPaintEvidence = evidence;
@@ -1556,6 +1679,7 @@ export function createDrawingSceneRuntime({
       clearParityWork();
       if (binding) clearDrawingSceneProjectorCaches(binding.adapter);
       disposeWorkerClient();
+      resetWorkerIdentityEvidence();
       faulted = false;
       recoveryPublicationPending = false;
       binding = nextBinding;
@@ -1706,6 +1830,7 @@ export function createDrawingSceneRuntime({
       clearParityWork();
       clearExactDelay();
       disposeWorkerClient();
+      resetWorkerIdentityEvidence();
       binding = null;
       registry = null;
       observedCoordinateKey = null;
@@ -1726,6 +1851,15 @@ export function createDrawingSceneRuntime({
       lastParitySuccessAt = Number.NEGATIVE_INFINITY;
     },
     snapshot() {
+      const paintReceipt: DrawingSceneRuntimePaintReceipt | null = lastExactPaintEvidence
+        ? Object.freeze({
+            kind: "drawing-scene-bridge-paint-ack",
+            observedAt: lastExactPaintEvidence.observedAt,
+            stamp: lastExactPaintEvidence.stamp,
+            attachmentRevision: lastExactPaintEvidence.attachmentRevision,
+            paintSequence: lastExactPaintEvidence.paintSequence,
+          })
+        : null;
       return Object.freeze({
         active: binding !== null && !faulted,
         disposed,
@@ -1738,6 +1872,13 @@ export function createDrawingSceneRuntime({
         worker: workerSnapshot,
         lastWorkerRequestedStamp,
         lastWorkerPublishedStamp,
+        submittedWorkerHeaders: Object.freeze([...submittedWorkerHeaders]),
+        returnedWorkerIdentity,
+        acceptedWorkerIdentity,
+        publishedWorkerIdentity,
+        latestSubmittedWorkerIdentity,
+        lastPaintedStamp: lastExactPaintEvidence?.stamp ?? null,
+        paintReceipt,
         staleWorkerPublishCount,
         workerResultDeliveryDelayMs,
         rawPointCount,

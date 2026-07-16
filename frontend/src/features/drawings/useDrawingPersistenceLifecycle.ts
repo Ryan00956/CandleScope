@@ -1934,10 +1934,12 @@ export function useDrawingPersistenceLifecycle({
     const lineageStats = sceneAdapter?.readDrawingFrameSourceLineageStats?.() ?? null;
     const cache = sceneAdapter ? readDrawingSceneProjectorCacheSnapshot(sceneAdapter) : null;
     const planStamp = runtimeSnapshot.plan?.stamp ?? null;
-    const paintedStamp = bridgeSnapshot.lastPaintedStamp;
+    const paintedStamp = runtimeSnapshot.lastPaintedStamp;
     const currentPlanPainted = !!planStamp
       && !!paintedStamp
-      && sameDrawingWorkerStamp(planStamp, paintedStamp);
+      && !!bridgeSnapshot.lastPaintedStamp
+      && sameDrawingWorkerStamp(planStamp, paintedStamp)
+      && sameDrawingWorkerStamp(planStamp, bridgeSnapshot.lastPaintedStamp);
     // Freshness is a visible-scene invariant, including plans whose entities
     // do not require a worker raster. Worker-specific job/result evidence is
     // reported separately; the requested stamp here is always the current
@@ -1947,6 +1949,19 @@ export function useDrawingPersistenceLifecycle({
     // consumed the bitmap and the generation-safe bridge acknowledged that
     // exact plan. Runtime acceptance alone is too early for a raster gate.
     const publishedStamp = currentPlanPainted ? paintedStamp : null;
+    const paintReceipt = currentPlanPainted
+      && runtimeSnapshot.paintReceipt
+      && sameDrawingWorkerStamp(runtimeSnapshot.paintReceipt.stamp, paintedStamp)
+      ? runtimeSnapshot.paintReceipt
+      : null;
+    const snapshotWorkerIdentity = (
+      identity: typeof runtimeSnapshot.latestSubmittedWorkerIdentity,
+    ) => identity ? Object.freeze({
+      schemaVersion: identity.schemaVersion,
+      jobId: identity.jobId,
+      generation: identity.generation,
+      stamp: Object.freeze({ ...identity.stamp }),
+    }) : null;
     const rawPoints = runtimeSnapshot.rawPointCount;
     const renderedPoints = runtimeSnapshot.renderedPointCount;
     const canonicalRawPoints = Array.from(
@@ -2012,6 +2027,23 @@ export function useDrawingPersistenceLifecycle({
       exactRenderMs: runtimeSnapshot.lastExactSettleMs,
       lastRequestedStamp: requestedStamp ? Object.freeze({ ...requestedStamp }) : null,
       lastPublishedStamp: publishedStamp ? Object.freeze({ ...publishedStamp }) : null,
+      lastPaintedStamp: currentPlanPainted ? Object.freeze({ ...paintedStamp }) : null,
+      paintReceipt: paintReceipt ? Object.freeze({
+        kind: paintReceipt.kind,
+        observedAt: paintReceipt.observedAt,
+        stamp: Object.freeze({ ...paintReceipt.stamp }),
+        attachmentRevision: paintReceipt.attachmentRevision,
+        paintSequence: paintReceipt.paintSequence,
+      }) : null,
+      submittedWorkerHeaders: Object.freeze(runtimeSnapshot.submittedWorkerHeaders.map(
+        (identity) => snapshotWorkerIdentity(identity)!,
+      )),
+      returnedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.returnedWorkerIdentity),
+      acceptedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.acceptedWorkerIdentity),
+      publishedWorkerIdentity: snapshotWorkerIdentity(runtimeSnapshot.publishedWorkerIdentity),
+      latestSubmittedWorkerIdentity: snapshotWorkerIdentity(
+        runtimeSnapshot.latestSubmittedWorkerIdentity,
+      ),
     });
   }), [
     engineMode.effective,

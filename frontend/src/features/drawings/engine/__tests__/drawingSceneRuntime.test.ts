@@ -285,18 +285,25 @@ test("legacy mode is inert and owns no subscriptions", () => {
     disposed: false,
     hitIndex: null,
     lastExactSettleMs: null,
+    lastPaintedStamp: null,
     lastWorkerPublishedStamp: null,
     lastWorkerRequestedStamp: null,
+    acceptedWorkerIdentity: null,
+    latestSubmittedWorkerIdentity: null,
     lodToleranceClass: "normalStatic",
     mode: "legacy",
     offscreenSupported: typeof OffscreenCanvas === "function",
+    paintReceipt: null,
     plan: null,
+    publishedWorkerIdentity: null,
     publicationReady: false,
     rasterBackend: "main-thread",
     rawPointCount: 0,
     renderedPointCount: 0,
+    returnedWorkerIdentity: null,
     scopeKey: null,
     staleWorkerPublishCount: 0,
+    submittedWorkerHeaders: [],
     workerResultDeliveryDelayMs: 0,
     worker: null,
   });
@@ -447,6 +454,13 @@ test("exact paint barrier accepts only a fresh exact plan and newer full paint e
     attachmentRevision: 1,
     paintSequence: 1,
   });
+  const initialPaintSnapshot = runtime.snapshot();
+  assert.deepEqual(initialPaintSnapshot.lastPaintedStamp, previousPlan.stamp);
+  assert.equal(initialPaintSnapshot.paintReceipt?.kind, "drawing-scene-bridge-paint-ack");
+  assert.equal(initialPaintSnapshot.paintReceipt?.attachmentRevision, 1);
+  assert.equal(initialPaintSnapshot.paintReceipt?.paintSequence, 1);
+  assert.deepEqual(initialPaintSnapshot.paintReceipt?.stamp, previousPlan.stamp);
+  assert.ok(Number.isFinite(Date.parse(initialPaintSnapshot.paintReceipt?.observedAt ?? "")));
 
   let settled = false;
   const pending = runtime.waitForExactPaint({
@@ -497,6 +511,10 @@ test("exact paint barrier accepts only a fresh exact plan and newer full paint e
   assert.equal(receipt.attachmentRevision, 1);
   assert.equal(receipt.paintSequence, 2);
   assert.ok(receipt.sceneEpoch > 0);
+  const finalPaintSnapshot = runtime.snapshot();
+  assert.deepEqual(finalPaintSnapshot.lastPaintedStamp, exactPlan.stamp);
+  assert.equal(finalPaintSnapshot.paintReceipt?.paintSequence, 2);
+  assert.deepEqual(finalPaintSnapshot.paintReceipt?.stamp, exactPlan.stamp);
   runtime.dispose();
 });
 
@@ -840,6 +858,9 @@ test("same-stamp invalidation rejects an old worker bitmap before a new scene ep
   transport.emit(bitmapWorkerResponse(first, () => { closed += 1; }));
   assert.equal(closed, 1);
   assert.equal(published.length, 0);
+  assert.deepEqual(runtime.snapshot().returnedWorkerIdentity, first.header);
+  assert.equal(runtime.snapshot().acceptedWorkerIdentity, null);
+  assert.equal(runtime.snapshot().publishedWorkerIdentity, null);
 
   assert.equal(runtime.flushNow(), true);
   const second = transport.renderRequests()[1];
@@ -847,6 +868,8 @@ test("same-stamp invalidation rejects an old worker bitmap before a new scene ep
   assert.deepEqual(second.header.stamp, first.header.stamp);
   transport.emit(bitmapWorkerResponse(second, () => { closed += 1; }));
   assert.equal(published.length, 1);
+  assert.deepEqual(runtime.snapshot().acceptedWorkerIdentity, second.header);
+  assert.deepEqual(runtime.snapshot().publishedWorkerIdentity, second.header);
   assert.ok(published[0]?.freehandRaster);
   assert.equal(runtime.snapshot().rasterBackend, "worker");
   assert.equal(runtime.snapshot().staleWorkerPublishCount, 0,
@@ -854,6 +877,88 @@ test("same-stamp invalidation rejects an old worker bitmap before a new scene ep
   published[0]?.freehandRaster?.bitmap.close();
   runtime.dispose();
   assert.equal(closed, 2);
+});
+
+test("worker evidence records real stale, accepted, and published boundaries with bounded history", () => {
+  const transport = new RuntimeWorkerTransport();
+  const store = createDrawingDocumentStore(freehandDocument());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  let visiblePlan: ReturnType<typeof projectFreehand> | null = null;
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "worker",
+    workerTransportFactory: () => transport,
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: (plan) => {
+      visiblePlan?.freehandRaster?.bitmap.close();
+      visiblePlan = plan;
+      return true;
+    },
+  });
+
+  assert.equal(runtime.flushNow(), true);
+  const staleRequest = transport.renderRequests()[0];
+  assert.ok(staleRequest);
+  assert.equal(runtime.invalidate("queue-latest"), true);
+  assert.equal(runtime.flushNow(), true);
+  const queued = runtime.snapshot();
+  assert.equal(queued.submittedWorkerHeaders.length, 2);
+  assert.deepEqual(queued.submittedWorkerHeaders[0], staleRequest.header);
+  assert.deepEqual(
+    queued.latestSubmittedWorkerIdentity,
+    queued.submittedWorkerHeaders[1],
+  );
+  assert.equal(queued.returnedWorkerIdentity, null);
+  assert.equal(queued.acceptedWorkerIdentity, null);
+  assert.equal(queued.publishedWorkerIdentity, null);
+
+  transport.emit(bitmapWorkerResponse(staleRequest, () => {}));
+  const afterStale = runtime.snapshot();
+  assert.deepEqual(afterStale.returnedWorkerIdentity, staleRequest.header);
+  assert.equal(afterStale.acceptedWorkerIdentity, null);
+  assert.equal(afterStale.publishedWorkerIdentity, null);
+
+  const latestRequest = transport.renderRequests()[1];
+  assert.ok(latestRequest);
+  assert.deepEqual(latestRequest.header, afterStale.latestSubmittedWorkerIdentity);
+  transport.emit(bitmapWorkerResponse(latestRequest, () => {}));
+  const afterLatest = runtime.snapshot();
+  assert.deepEqual(afterLatest.returnedWorkerIdentity, staleRequest.header);
+  assert.deepEqual(afterLatest.acceptedWorkerIdentity, latestRequest.header);
+  assert.deepEqual(afterLatest.publishedWorkerIdentity, latestRequest.header);
+
+  for (let index = 0; index < 33; index += 1) {
+    assert.equal(runtime.invalidate(`bounded-history-${index}`), true);
+    assert.equal(runtime.flushNow(), true);
+    const request = transport.renderRequests().at(-1);
+    assert.ok(request);
+    transport.emit(bitmapWorkerResponse(request, () => {}));
+  }
+  const bounded = runtime.snapshot();
+  assert.equal(bounded.submittedWorkerHeaders.length, 32);
+  assert.deepEqual(
+    bounded.submittedWorkerHeaders.at(-1),
+    bounded.latestSubmittedWorkerIdentity,
+  );
+  assert.ok(bounded.submittedWorkerHeaders.some((identity) => (
+    identity.jobId === bounded.returnedWorkerIdentity?.jobId
+      && identity.generation === bounded.returnedWorkerIdentity.generation
+  )));
+  assert.ok(bounded.submittedWorkerHeaders.every((identity, index) => (
+    index === 0
+      || (identity.jobId > bounded.submittedWorkerHeaders[index - 1]!.jobId
+        && identity.generation > bounded.submittedWorkerHeaders[index - 1]!.generation)
+  )));
+  runtime.snapshot().plan?.freehandRaster?.bitmap.close();
+  runtime.dispose();
 });
 
 test("viewport invalidation captures its atomic frame only in the scheduled build", () => {
@@ -1142,7 +1247,8 @@ test("worker finalize timing includes validation, raster attachment, and synchro
 });
 
 test("a rejected worker publication increments the observable stale-publish invariant", () => {
-  const transport = new RuntimeWorkerTransport();
+  const transports = [new RuntimeWorkerTransport(), new RuntimeWorkerTransport()];
+  let transportIndex = 0;
   const store = createDrawingDocumentStore(freehandDocument());
   const adapter = fakeAdapter();
   const renderer = fakeRenderer(store.getSnapshot());
@@ -1151,7 +1257,7 @@ test("a rejected worker publication increments the observable stale-publish inva
   const runtime = createDrawingSceneRuntime({
     mode: "scene-canary",
     rasterBackend: "worker",
-    workerTransportFactory: () => transport,
+    workerTransportFactory: () => transports[transportIndex++]!,
     onError: () => {},
     requestFrame: () => 1,
     cancelFrame: () => {},
@@ -1164,12 +1270,14 @@ test("a rejected worker publication increments the observable stale-publish inva
     publishScene: () => false,
   });
   assert.equal(runtime.flushNow(), true);
-  const request = transport.renderRequests()[0];
+  const request = transports[0]!.renderRequests()[0];
   assert.ok(request);
-  transport.emit(bitmapWorkerResponse(request, () => { closed += 1; }));
+  transports[0]!.emit(bitmapWorkerResponse(request, () => { closed += 1; }));
 
   assert.equal(closed, 1);
   assert.equal(runtime.snapshot().staleWorkerPublishCount, 1);
+  assert.deepEqual(runtime.snapshot().acceptedWorkerIdentity, request.header);
+  assert.equal(runtime.snapshot().publishedWorkerIdentity, null);
   const rejectedCounters = drawingPerfCounters.snapshot().counters;
   assert.equal(
     rejectedCounters.staleWorkerPublishCount,
@@ -1179,6 +1287,25 @@ test("a rejected worker publication increments the observable stale-publish inva
     rejectedCounters.staleWorkerResultCount,
     beforeCounters.staleWorkerResultCount,
   );
+
+  assert.equal(runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: projectFreehand,
+    publishScene: () => true,
+  }), true);
+  const recoveredBeforeSubmit = runtime.snapshot();
+  assert.deepEqual(recoveredBeforeSubmit.submittedWorkerHeaders, []);
+  assert.equal(recoveredBeforeSubmit.returnedWorkerIdentity, null);
+  assert.equal(recoveredBeforeSubmit.acceptedWorkerIdentity, null);
+  assert.equal(recoveredBeforeSubmit.publishedWorkerIdentity, null);
+  assert.equal(recoveredBeforeSubmit.latestSubmittedWorkerIdentity, null);
+  assert.equal(runtime.flushNow(), true);
+  const recoveredRequest = transports[1]!.renderRequests()[0];
+  assert.ok(recoveredRequest);
+  assert.equal(recoveredRequest.header.jobId, 1);
+  assert.deepEqual(runtime.snapshot().submittedWorkerHeaders, [recoveredRequest.header]);
   runtime.dispose();
 });
 

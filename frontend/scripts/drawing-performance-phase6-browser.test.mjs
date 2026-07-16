@@ -34,6 +34,42 @@ function withWindow(value, callback) {
   });
 }
 
+function workerIdentity(jobId, stamp) {
+  return {
+    schemaVersion: 1,
+    jobId,
+    generation: jobId,
+    stamp: { ...stamp },
+  };
+}
+
+function paintReceipt(stamp, paintSequence = 1) {
+  return {
+    kind: "drawing-scene-bridge-paint-ack",
+    observedAt: "2026-07-16T08:00:00.000Z",
+    stamp: { ...stamp },
+    attachmentRevision: 1,
+    paintSequence,
+  };
+}
+
+function runtimeStamp(overrides = {}) {
+  return {
+    scopeKey: "scope",
+    documentRevision: 2,
+    surfaceGeneration: 3,
+    dataRevision: 5,
+    projectionRevision: 7,
+    lineageIndexRevision: 11,
+    viewportRevision: 13,
+    themeRevision: 17,
+    widthCssPx: 996,
+    heightCssPx: 764,
+    dpr: 1.5,
+    ...overrides,
+  };
+}
+
 test("Phase 6 browser probe fails closed without the drawing perf handle", async () => {
   await withWindow({}, () => {
     assert.deepEqual(phase6BrowserProbeBootstrap(), {
@@ -121,6 +157,8 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     anchorResolveCount: 4,
     finalProjectionCount: 8,
   };
+  const initialStamp = runtimeStamp();
+  const initialWorkerIdentity = workerIdentity(2, initialStamp);
   const phase6 = {
     backend: "worker",
     backendSource: "configured-worker",
@@ -157,8 +195,15 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     cacheRecentHierarchyKeysPerRequestLimit: 3,
     cacheRecentRequestCount: 64,
     cacheRecentRequestLimit: 512,
-    lastRequestedStamp: { scopeKey: "scope", documentRevision: 2 },
-    lastPublishedStamp: { scopeKey: "scope", documentRevision: 2 },
+    lastRequestedStamp: { ...initialStamp },
+    lastPublishedStamp: { ...initialStamp },
+    lastPaintedStamp: { ...initialStamp },
+    paintReceipt: paintReceipt(initialStamp),
+    submittedWorkerHeaders: [initialWorkerIdentity],
+    returnedWorkerIdentity: null,
+    acceptedWorkerIdentity: initialWorkerIdentity,
+    publishedWorkerIdentity: initialWorkerIdentity,
+    latestSubmittedWorkerIdentity: initialWorkerIdentity,
   };
   const handle = {
     report: () => ({
@@ -189,8 +234,18 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     phase6.lodRatio = 1;
     phase6.canonicalRawPreserved = false;
     phase6.vertexBudgetPassed = false;
-    phase6.lastRequestedStamp = { scopeKey: "scope", documentRevision: 3 };
-    phase6.lastPublishedStamp = { scopeKey: "scope", documentRevision: 3 };
+    const currentStamp = runtimeStamp({ documentRevision: 3, viewportRevision: 14 });
+    const staleIdentity = workerIdentity(4, initialStamp);
+    const currentIdentity = workerIdentity(5, currentStamp);
+    phase6.lastRequestedStamp = { ...currentStamp };
+    phase6.lastPublishedStamp = { ...currentStamp };
+    phase6.lastPaintedStamp = { ...currentStamp };
+    phase6.paintReceipt = paintReceipt(currentStamp, 2);
+    phase6.submittedWorkerHeaders = [staleIdentity, currentIdentity];
+    phase6.returnedWorkerIdentity = staleIdentity;
+    phase6.acceptedWorkerIdentity = currentIdentity;
+    phase6.publishedWorkerIdentity = currentIdentity;
+    phase6.latestSubmittedWorkerIdentity = currentIdentity;
     counters = {
       ...counters,
       workerJobCount: 5,
@@ -250,7 +305,13 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
     assert.equal(stopped.runtime.sceneRuntimeFaultCount, 0);
     assert.equal(stopped.runtime.legacyFallbackSucceededCount, 0);
     assert.equal(stopped.runtime.sceneFallbackLastReason, null);
-    assert.deepEqual(stopped.runtime.lastPaintedStamp, phase6.lastPublishedStamp);
+    assert.deepEqual(stopped.runtime.lastPaintedStamp, phase6.lastPaintedStamp);
+    assert.deepEqual(stopped.runtime.paintReceipt, phase6.paintReceipt);
+    assert.deepEqual(stopped.runtime.submittedWorkerHeaders, [staleIdentity, currentIdentity]);
+    assert.deepEqual(stopped.runtime.returnedWorkerIdentity, staleIdentity);
+    assert.deepEqual(stopped.runtime.acceptedWorkerIdentity, currentIdentity);
+    assert.deepEqual(stopped.runtime.publishedWorkerIdentity, currentIdentity);
+    assert.deepEqual(stopped.runtime.latestSubmittedWorkerIdentity, currentIdentity);
 
     phase6.rawPoints = 32_768;
     phase6.renderedPoints = 4_096;
@@ -301,10 +362,11 @@ test("Phase 6 browser probe normalizes real counters, runtime, and stamp evidenc
 });
 
 test("Phase 6 browser probe waits through superseded paints for the latest requested stamp", async () => {
-  const revision = (viewportRevision) => ({ scopeKey: "scope", viewportRevision });
+  const revision = (viewportRevision) => runtimeStamp({ viewportRevision });
   const phase6 = {
     lastRequestedStamp: revision(1),
     lastPublishedStamp: revision(1),
+    lastPaintedStamp: revision(1),
   };
   const handle = {
     report: () => ({ counters: {}, counterMaxima: {}, gauges: {}, gaugeMaxima: {} }),
@@ -321,12 +383,15 @@ test("Phase 6 browser probe waits through superseded paints for the latest reque
       .waitForCurrentPaint(previousStamp, 250);
     phase6.lastRequestedStamp = revision(2);
     phase6.lastPublishedStamp = null;
+    phase6.lastPaintedStamp = null;
     setTimeout(() => {
       phase6.lastRequestedStamp = revision(3);
       phase6.lastPublishedStamp = revision(2);
+      phase6.lastPaintedStamp = revision(2);
     }, 5);
     setTimeout(() => {
       phase6.lastPublishedStamp = revision(3);
+      phase6.lastPaintedStamp = revision(3);
     }, 30);
     const painted = await waiting;
     assert.equal(painted.passed, true);
@@ -337,10 +402,11 @@ test("Phase 6 browser probe waits through superseded paints for the latest reque
 });
 
 test("Phase 6 browser probe times out while the current requested stamp is unpainted", async () => {
-  const revision = (viewportRevision) => ({ scopeKey: "scope", viewportRevision });
+  const revision = (viewportRevision) => runtimeStamp({ viewportRevision });
   const phase6 = {
     lastRequestedStamp: revision(1),
     lastPublishedStamp: revision(1),
+    lastPaintedStamp: revision(1),
   };
   const handle = {
     report: () => ({ counters: {}, counterMaxima: {}, gauges: {}, gaugeMaxima: {} }),
@@ -354,7 +420,8 @@ test("Phase 6 browser probe times out while the current requested stamp is unpai
     phase6BrowserProbeBootstrap();
     const previousStamp = phase6.lastRequestedStamp;
     phase6.lastRequestedStamp = revision(2);
-    phase6.lastPublishedStamp = revision(1);
+    phase6.lastPublishedStamp = revision(2);
+    phase6.lastPaintedStamp = revision(1);
     const painted = await globalThis.window.__CANDLESCOPE_PHASE6_PROBE__
       .waitForCurrentPaint(previousStamp, 20);
     assert.equal(painted.passed, false);
@@ -364,13 +431,38 @@ test("Phase 6 browser probe times out while the current requested stamp is unpai
   });
 });
 
+test("Phase 6 browser probe rejects structurally empty paint stamps", async () => {
+  const phase6 = {
+    lastRequestedStamp: {},
+    lastPublishedStamp: {},
+    lastPaintedStamp: {},
+  };
+  const handle = {
+    report: () => ({ counters: {}, counterMaxima: {}, gauges: {}, gaugeMaxima: {} }),
+    readRuntimeSummary: () => null,
+    readPhase6Runtime: () => phase6,
+    runPhase6HitOracle: () => null,
+  };
+  await withWindow({
+    __CANDLESCOPE_DRAWING_PERF__: handle,
+    __CANDLESCOPE_DRAWING_PERF_CONFIG__: {},
+  }, async () => {
+    phase6BrowserProbeBootstrap();
+    const painted = await globalThis.window.__CANDLESCOPE_PHASE6_PROBE__
+      .waitForCurrentPaint(null, 5);
+    assert.equal(painted.passed, false);
+    assert.equal(painted.reason, "phase6-current-plan-paint-timeout");
+  });
+});
+
 test("Phase 6 browser probe derives hit oracle mismatches instead of trusting a claimed zero", async () => {
   const handle = {
     report: () => ({ counters: {}, counterMaxima: {}, gauges: {}, gaugeMaxima: {} }),
     readRuntimeSummary: () => ({}),
     readPhase6Runtime: () => ({
-      lastRequestedStamp: { scopeKey: "scope", documentRevision: 4 },
-      lastPublishedStamp: { scopeKey: "scope", documentRevision: 4 },
+      lastRequestedStamp: runtimeStamp({ documentRevision: 4 }),
+      lastPublishedStamp: runtimeStamp({ documentRevision: 4 }),
+      lastPaintedStamp: runtimeStamp({ documentRevision: 4 }),
     }),
     runPhase6HitOracle: async (points) => ({
       queryCount: points.length,
@@ -398,7 +490,7 @@ test("Phase 6 browser probe derives hit oracle mismatches instead of trusting a 
     assert.equal(oracle.candidateCoverageCount, 1);
     assert.equal(oracle.maxCandidates, 4);
     assert.equal(oracle.currentPainted, true);
-    assert.deepEqual(oracle.queriedStamp, { scopeKey: "scope", documentRevision: 4 });
+    assert.deepEqual(oracle.queriedStamp, runtimeStamp({ documentRevision: 4 }));
   });
 });
 

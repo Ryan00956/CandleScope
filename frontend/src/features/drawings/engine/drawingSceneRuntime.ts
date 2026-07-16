@@ -1458,7 +1458,13 @@ export function createDrawingSceneRuntime({
       invalidateScene("document");
     });
     unsubscribeFrame = nextBinding.adapter.subscribeDrawingFrameInvalidation((reason = "manual") => {
-      const currentFrame = nextBinding.adapter.captureDrawingFrame();
+      // Viewport churn already schedules readInput(), which captures the same
+      // atomic frame before projection. Avoid doing that relatively expensive
+      // provider walk twice for every wheel/pan input. Explicit/manual
+      // invalidations still retire a changed coordinate space synchronously.
+      const currentFrame = reason === "viewport"
+        ? null
+        : nextBinding.adapter.captureDrawingFrame();
       const coordinateSpaceChanged = currentFrame !== null
         && nextBinding.adapter.isDrawingFrameCurrent(currentFrame)
         && invalidateChangedCoordinateSpace(currentFrame);

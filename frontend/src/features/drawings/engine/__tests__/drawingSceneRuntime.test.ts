@@ -111,9 +111,13 @@ function frame({
 
 function fakeAdapter(captured = frame()) {
   let current = captured;
+  let captureCount = 0;
   const listeners = new Set<(reason?: "manual" | "viewport") => void>();
   const adapter: DrawingSceneFrameAdapter = {
-    captureDrawingFrame: () => current,
+    captureDrawingFrame: () => {
+      captureCount += 1;
+      return current;
+    },
     isDrawingFrameCurrent: (candidate) => candidate === current,
     projectDrawingFrameDataPoints: () => new Float64Array(),
     projectDrawingFrameSourceLineageSpan: () => null,
@@ -130,6 +134,7 @@ function fakeAdapter(captured = frame()) {
     emit: (reason?: "manual" | "viewport") => {
       for (const listener of listeners) listener(reason);
     },
+    captureCount: () => captureCount,
     listenerCount: () => listeners.size,
   };
 }
@@ -848,6 +853,38 @@ test("same-stamp invalidation rejects an old worker bitmap before a new scene ep
   published[0]?.freehandRaster?.bitmap.close();
   runtime.dispose();
   assert.equal(closed, 2);
+});
+
+test("viewport invalidation captures its atomic frame only in the scheduled build", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const adapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const runtime = createDrawingSceneRuntime({
+    mode: "shadow",
+    requestFrame: () => 1,
+    cancelFrame: () => {},
+  });
+  runtime.activate({
+    adapter: adapter.adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+  });
+  assert.equal(runtime.flushNow(), true);
+
+  const beforeViewport = adapter.captureCount();
+  adapter.emit("viewport");
+  adapter.emit("viewport");
+  assert.equal(adapter.captureCount(), beforeViewport,
+    "coalesced wheel/pan invalidations must not duplicate the scheduled frame capture");
+  assert.equal(runtime.flushNow(), true);
+  assert.ok(adapter.captureCount() > beforeViewport);
+
+  const beforeManual = adapter.captureCount();
+  adapter.emit("manual");
+  assert.equal(adapter.captureCount(), beforeManual + 1,
+    "manual coordinate transitions retain synchronous fail-closed detection");
+  runtime.dispose();
 });
 
 test("coordinate-key changes synchronously retire public geometry and stale the old worker plan", () => {

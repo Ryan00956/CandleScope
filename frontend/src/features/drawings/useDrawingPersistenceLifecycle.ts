@@ -1987,6 +1987,8 @@ export function useDrawingPersistenceLifecycle({
       backend: runtimeSnapshot.rasterBackend,
       backendSource: rasterBackend.source,
       workerResultDelayMs: runtimeSnapshot.workerResultDeliveryDelayMs,
+      workerAvailability: worker?.availability ?? null,
+      workerUnavailableReason: worker?.unavailableReason ?? null,
       sourceLineageExactResolveCount: lineageStats?.exactProjectionCount ?? 0,
       sourceLineageFallbackResolveCount: lineageStats?.fallbackProjectionCount ?? 0,
       sourceLineageUnresolvedResolveCount: lineageStats?.unresolvedProjectionCount ?? 0,

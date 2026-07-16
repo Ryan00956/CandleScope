@@ -259,6 +259,10 @@ function counterDelta(value) {
   return validCounterPair(value) ? value.after - value.before : null;
 }
 
+function exactZeroCounterPair(value) {
+  return validCounterPair(value) && value.before === 0 && value.after === 0;
+}
+
 function validPaintReceipt(value, expectedStamp) {
   const receipt = objectValue(value);
   return receipt !== null
@@ -310,6 +314,8 @@ function validateDedicatedCommon(drillId, artifact) {
 
   const environment = objectValue(report.environment);
   const provenance = objectValue(report.provenance);
+  const buildAuthority = objectValue(report.buildAuthority);
+  const workerLifecycle = objectValue(buildAuthority?.workerLifecycle);
   const diagnostics = objectValue(report.diagnostics);
   const injection = objectValue(report.injection);
 
@@ -333,6 +339,111 @@ function validateDedicatedCommon(drillId, artifact) {
       "completion-precedes-start",
     );
   }
+  addFailure(failures, buildAuthority !== null, "per-drill-build-authority-missing");
+  addFailure(
+    failures,
+    buildAuthority?.kind === "controlled-browser-build-authority",
+    "per-drill-build-authority-kind-invalid",
+  );
+  addFailure(failures, buildAuthority?.drillId === drillId, "per-drill-build-authority-id-mismatch");
+  addFailure(failures, validTimestamp(buildAuthority?.capturedAt), "per-drill-build-authority-time-invalid");
+  addFailure(failures, buildAuthority?.authoritative === true, "per-drill-build-not-authoritative");
+  addFailure(
+    failures,
+    buildAuthority?.assetBuildAuthoritative === true,
+    "per-drill-asset-build-not-authoritative",
+  );
+  addFailure(failures, nonEmptyString(buildAuthority?.buildId), "per-drill-build-id-missing");
+  addFailure(failures, sha256Digest(buildAuthority?.buildFingerprint), "per-drill-build-fingerprint-invalid");
+  addFailure(
+    failures,
+    sameSha256Digest(buildAuthority?.assetDigest, buildAuthority?.currentAssetDigest),
+    "per-drill-asset-digest-mismatch",
+  );
+  addFailure(
+    failures,
+    sameSha256Digest(buildAuthority?.buildInputDigest, buildAuthority?.currentBuildInputDigest),
+    "per-drill-build-input-digest-mismatch",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(provenance?.buildRevision)
+      && buildAuthority?.gitRevision === provenance.buildRevision,
+    "per-drill-git-revision-mismatch",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(buildAuthority?.managedOrigin)
+      && buildAuthority?.observedOrigin === buildAuthority.managedOrigin,
+    "per-drill-managed-origin-mismatch",
+  );
+  addFailure(failures, nonEmptyString(buildAuthority?.href), "per-drill-managed-document-missing");
+  for (const [field, reason] of [
+    ["matchesManagedOrigin", "per-drill-managed-origin-not-proven"],
+    ["matchesManagedDocument", "per-drill-managed-document-not-proven"],
+    ["entryAssetsLoaded", "per-drill-entry-assets-not-proven"],
+    ["networkAssetAuthorityPassed", "per-drill-network-asset-authority-failed"],
+    ["networkQuiescencePassed", "per-drill-network-quiescence-failed"],
+    ["browserLoadedAssetsAccepted", "per-drill-browser-assets-not-accepted"],
+    ["domLoadedAssetsAccepted", "per-drill-dom-assets-not-accepted"],
+    ["expectedEntriesPresentInDom", "per-drill-entry-dom-assets-missing"],
+    ["distMatchesBuild", "per-drill-dist-build-mismatch"],
+    ["buildInputsMatch", "per-drill-build-inputs-mismatch"],
+    ["gitMatchesBuild", "per-drill-git-build-mismatch"],
+    ["managedOriginGuardPassed", "per-drill-origin-guard-failed"],
+    ["workerDiagnosticsPassed", "per-drill-worker-diagnostics-failed"],
+    ["handlerSettlementsPassed", "per-drill-handler-settlement-failed"],
+  ]) {
+    addFailure(failures, buildAuthority?.[field] === true, reason);
+  }
+  const workerTargets = Array.isArray(workerLifecycle?.targets) ? workerLifecycle.targets : null;
+  const drawingWorkerTargetCount = integer(workerLifecycle?.drawingWorkerTargetCount);
+  const activeDrawingWorkerTargetCount = integer(workerLifecycle?.activeDrawingWorkerTargetCount);
+  const detachedDrawingWorkerTargetCount = integer(workerLifecycle?.detachedDrawingWorkerTargetCount);
+  addFailure(failures, workerLifecycle !== null, "per-drill-worker-lifecycle-missing");
+  addFailure(failures, workerLifecycle?.accepted === true, "per-drill-worker-lifecycle-not-accepted");
+  addFailure(
+    failures,
+    workerLifecycle?.assetAuthorityAccepted === true,
+    "per-drill-worker-asset-authority-not-accepted",
+  );
+  addFailure(
+    failures,
+    integer(workerLifecycle?.constructionFaultCount) !== null
+      && workerLifecycle.constructionFaultCount >= 0,
+    "per-drill-worker-construction-fault-count-invalid",
+  );
+  addFailure(
+    failures,
+    workerTargets !== null
+      && drawingWorkerTargetCount !== null
+      && drawingWorkerTargetCount >= 0
+      && workerTargets.length === drawingWorkerTargetCount,
+    "per-drill-worker-target-count-invalid",
+  );
+  addFailure(
+    failures,
+    activeDrawingWorkerTargetCount !== null
+      && activeDrawingWorkerTargetCount >= 0
+      && detachedDrawingWorkerTargetCount !== null
+      && detachedDrawingWorkerTargetCount >= 0
+      && drawingWorkerTargetCount !== null
+      && activeDrawingWorkerTargetCount + detachedDrawingWorkerTargetCount
+        === drawingWorkerTargetCount,
+    "per-drill-worker-target-lifecycle-counts-invalid",
+  );
+  addFailure(
+    failures,
+    workerTargets?.every((target) => (
+      objectValue(target) !== null
+        && target.manifestBacked === true
+        && target.constructorProvenanceAccepted === true
+        && target.networkProvenanceAccepted === true
+        && target.assetAccepted === true
+        && sameSha256Digest(target.assetDigest, target.expectedAssetDigest)
+    )) === true,
+    "per-drill-worker-target-asset-authority-invalid",
+  );
   addFailure(failures, injection !== null, "injection-missing");
   addFailure(failures, injection?.armed === true, "injection-not-armed");
   addFailure(failures, injection?.observed === true, "injection-not-observed");
@@ -369,9 +480,61 @@ function validateDocumentPreserved(failures, outcome) {
 
 function validateWorkerInitFailure(artifact) {
   const failures = validateDedicatedCommon("worker-init-failure", artifact);
+  const buildAuthority = objectValue(artifact?.buildAuthority);
+  const workerLifecycle = objectValue(buildAuthority?.workerLifecycle);
   const injection = objectValue(artifact?.injection);
   const observations = objectValue(artifact?.observations);
+  const configuredRequest = objectValue(observations?.configuredRequest);
+  const runtime = objectValue(observations?.runtime);
   addFailure(failures, injection?.kind === "worker-constructor-throws", "wrong-worker-init-injection");
+  addFailure(
+    failures,
+    injection?.buildAuthorityCurrent === true,
+    "worker-init-current-build-authority-not-proven",
+  );
+  addFailure(
+    failures,
+    buildAuthority?.fullBuildAuthoritative === true
+      && buildAuthority?.networkAssetsPassed === true,
+    "worker-init-live-build-authority-not-proven",
+  );
+  addFailure(
+    failures,
+    workerLifecycle?.kind === "construction-failed-before-target"
+      && workerLifecycle?.drawingWorkerTargetCount === 0
+      && workerLifecycle?.activeDrawingWorkerTargetCount === 0
+      && workerLifecycle?.detachedDrawingWorkerTargetCount === 0
+      && workerLifecycle?.constructionFaultCount === 1,
+    "worker-init-build-authority-lifecycle-invalid",
+  );
+  addFailure(
+    failures,
+    configuredRequest?.engineMode === "scene-canary"
+      && configuredRequest?.backend === "worker"
+      && configuredRequest?.engineModeSource === "environment"
+      && configuredRequest?.backendSource === "environment",
+    "worker-init-configured-environment-worker-request-invalid-or-missing",
+  );
+  addFailure(failures, runtime?.engineMode === "scene-canary", "worker-init-runtime-not-scene-canary");
+  addFailure(failures, runtime?.backend === "main-thread", "worker-init-runtime-backend-not-main-thread");
+  addFailure(failures, runtime?.backendSource === "environment", "worker-init-runtime-backend-source-not-environment");
+  addFailure(failures, runtime?.workerAvailability === "unavailable", "worker-init-worker-availability-not-unavailable");
+  addFailure(
+    failures,
+    runtime?.workerUnavailableReason === "construction-failed",
+    "worker-init-unavailable-reason-not-construction-failed",
+  );
+  addFailure(failures, runtime?.attachedPrimitiveCount === 1, "worker-init-attached-primitive-count-not-one");
+  addFailure(failures, runtime?.scenePublicationReady === true, "worker-init-scene-publication-not-ready");
+  addFailure(failures, exactZero(runtime?.sceneFallbackCount), "worker-init-scene-fallback-observed-or-missing");
+  addFailure(failures, exactZero(runtime?.sceneRuntimeFaultCount), "worker-init-runtime-fault-observed-or-missing");
+  addFailure(failures, exactZero(runtime?.legacyFallbackSucceededCount), "worker-init-legacy-fallback-observed-or-missing");
+  addFailure(failures, exactZero(runtime?.stalePublishCount), "worker-init-stale-publish-observed-or-missing");
+  addFailure(
+    failures,
+    exactZeroCounterPair(observations?.stalePublishCount),
+    "worker-init-stale-publish-counter-not-zero-before-and-after",
+  );
   addFailure(
     failures,
     counterDelta(observations?.workerConstructorAttempts) === 1,
@@ -391,8 +554,13 @@ function validateWorkerInitFailure(artifact) {
 
 function validateOffscreenUnsupported(artifact) {
   const failures = validateDedicatedCommon("offscreen-canvas-unsupported", artifact);
+  const buildAuthority = objectValue(artifact?.buildAuthority);
+  const workerLifecycle = objectValue(buildAuthority?.workerLifecycle);
   const injection = objectValue(artifact?.injection);
+  const capabilityReceipt = objectValue(injection?.capabilityReceipt);
   const observations = objectValue(artifact?.observations);
+  const configuredRequest = objectValue(observations?.configuredRequest);
+  const runtime = objectValue(observations?.runtime);
   const firstRequest = objectValue(observations?.firstRequest);
   const secondRequest = objectValue(observations?.secondRequest);
   const workerRoundTrips = objectValue(observations?.workerRoundTrips);
@@ -400,6 +568,53 @@ function validateOffscreenUnsupported(artifact) {
   const roundTripsAfterFirst = integer(workerRoundTrips?.afterFirstRequest);
   const roundTripsAfterSecond = integer(workerRoundTrips?.afterSecondRequest);
   addFailure(failures, injection?.kind === "offscreen-canvas-unavailable", "wrong-offscreen-injection");
+  addFailure(
+    failures,
+    injection?.buildAuthorityCurrent === true,
+    "offscreen-current-build-authority-not-proven",
+  );
+  addFailure(
+    failures,
+    buildAuthority?.fullBuildAuthoritative === false
+      && buildAuthority?.networkAssetsPassed === false
+      && buildAuthority?.assetBuildAuthoritative === true
+      && buildAuthority?.networkAssetAuthorityPassed === true,
+    "offscreen-detached-worker-asset-authority-invalid",
+  );
+  addFailure(
+    failures,
+    workerLifecycle?.kind === "detached-after-typed-fallback"
+      && workerLifecycle?.drawingWorkerTargetCount === 1
+      && workerLifecycle?.activeDrawingWorkerTargetCount === 0
+      && workerLifecycle?.detachedDrawingWorkerTargetCount === 1
+      && workerLifecycle?.constructionFaultCount === 0,
+    "offscreen-build-authority-lifecycle-invalid",
+  );
+  addFailure(
+    failures,
+    capabilityReceipt?.realm === "drawing-worker-global"
+      && capabilityReceipt?.capability === "OffscreenCanvas"
+      && capabilityReceipt?.supported === false
+      && capabilityReceipt?.beforeType === "function"
+      && capabilityReceipt?.afterType === "undefined",
+    "offscreen-worker-global-capability-receipt-invalid-or-missing",
+  );
+  addFailure(
+    failures,
+    configuredRequest?.engineMode === "scene-canary"
+      && configuredRequest?.backend === "worker"
+      && configuredRequest?.engineModeSource === "environment"
+      && configuredRequest?.backendSource === "environment",
+    "offscreen-configured-environment-worker-request-invalid-or-missing",
+  );
+  addFailure(failures, runtime?.engineMode === "scene-canary", "offscreen-runtime-not-scene-canary");
+  addFailure(failures, runtime?.backend === "main-thread", "offscreen-runtime-backend-not-main-thread");
+  addFailure(failures, runtime?.backendSource === "environment", "offscreen-runtime-backend-source-not-environment");
+  addFailure(failures, runtime?.attachedPrimitiveCount === 1, "offscreen-attached-primitive-count-not-one");
+  addFailure(failures, runtime?.scenePublicationReady === true, "offscreen-scene-publication-not-ready");
+  addFailure(failures, exactZero(runtime?.sceneFallbackCount), "offscreen-scene-fallback-observed-or-missing");
+  addFailure(failures, exactZero(runtime?.sceneRuntimeFaultCount), "offscreen-runtime-fault-observed-or-missing");
+  addFailure(failures, exactZero(runtime?.legacyFallbackSucceededCount), "offscreen-legacy-fallback-observed-or-missing");
   addFailure(failures, counterDelta(observations?.workerCreations) === 1, "drawing-worker-creation-count-invalid");
   addFailure(failures, observations?.offscreenSupported === false, "offscreen-capability-not-disabled");
   addFailure(failures, nonEmptyString(firstRequest?.requestId), "offscreen-first-request-id-missing");
@@ -949,7 +1164,10 @@ function validateCanaryToLegacySnapshot(artifact) {
 
 function validateDedicatedStaleGeneration(artifact) {
   const failures = validateDedicatedCommon("worker-stale-generation", artifact);
+  const buildAuthority = objectValue(artifact?.buildAuthority);
+  const workerLifecycle = objectValue(buildAuthority?.workerLifecycle);
   const observations = objectValue(artifact?.observations);
+  const runtime = objectValue(observations?.runtime);
   const identities = objectValue(artifact?.identities);
   const returned = objectValue(identities?.returned);
   const accepted = objectValue(identities?.accepted);
@@ -967,6 +1185,55 @@ function validateDedicatedStaleGeneration(artifact) {
   const queueDepthMax = safeNonNegativeInteger(observations?.queueDepthMax);
   const inFlightMax = safeNonNegativeInteger(observations?.inFlightMax);
   addFailure(failures, artifact?.injection?.kind === "worker-stale-generation", "wrong-stale-generation-injection");
+  addFailure(failures, artifact?.injection?.delayMs === 96, "stale-generation-injection-delay-not-96ms");
+  addFailure(
+    failures,
+    artifact?.injection?.buildAuthorityCurrent === true,
+    "stale-generation-current-build-authority-not-proven",
+  );
+  addFailure(
+    failures,
+    buildAuthority?.fullBuildAuthoritative === true
+      && buildAuthority?.networkAssetsPassed === true,
+    "stale-generation-live-build-authority-not-proven",
+  );
+  addFailure(
+    failures,
+    workerLifecycle?.kind === "active-worker"
+      && workerLifecycle?.drawingWorkerTargetCount === 1
+      && workerLifecycle?.activeDrawingWorkerTargetCount === 1
+      && workerLifecycle?.detachedDrawingWorkerTargetCount === 0
+      && workerLifecycle?.constructionFaultCount === 0,
+    "stale-generation-build-authority-lifecycle-invalid",
+  );
+  addFailure(failures, runtime?.workerResultDelayMs === 96, "stale-generation-runtime-delay-not-96ms");
+  addFailure(failures, runtime?.engineMode === "scene-canary", "stale-generation-runtime-not-scene-canary");
+  addFailure(failures, runtime?.backend === "worker", "stale-generation-runtime-backend-not-worker");
+  addFailure(failures, runtime?.backendSource === "environment", "stale-generation-runtime-backend-source-not-environment");
+  addFailure(failures, runtime?.workerAvailability === "available", "stale-generation-worker-not-available");
+  addFailure(failures, runtime?.queueDepthMax === 2, "stale-generation-runtime-queue-depth-max-not-two");
+  addFailure(failures, runtime?.inFlightMax === 1, "stale-generation-runtime-inflight-max-not-one");
+  addFailure(failures, safePositiveInteger(runtime?.pendingDropDelta) !== null, "stale-generation-pending-drop-not-observed");
+  addFailure(
+    failures,
+    exactZeroCounterPair(observations?.stalePublishCount),
+    "stale-generation-publish-count-not-zero-before-and-after",
+  );
+  addFailure(failures, exactZero(runtime?.stalePublishCount), "stale-generation-runtime-stale-publish-observed-or-missing");
+  addFailure(failures, exactZero(runtime?.sceneFallbackCount), "stale-generation-scene-fallback-observed-or-missing");
+  addFailure(failures, exactZero(runtime?.sceneRuntimeFaultCount), "stale-generation-runtime-fault-observed-or-missing");
+  addFailure(failures, exactZero(runtime?.legacyFallbackSucceededCount), "stale-generation-legacy-fallback-observed-or-missing");
+  addFailure(
+    failures,
+    runtime?.queueDepthMax === observations?.queueDepthMax
+      && runtime?.queueDepthCurrent === observations?.queueDepthCurrent
+      && runtime?.inFlightMax === observations?.inFlightMax
+      && runtime?.inFlightCurrent === observations?.inFlightCurrent
+      && runtime?.workerJobDelta === observations?.workerJobDelta
+      && runtime?.workerResultDelta === observations?.workerResultDelta
+      && runtime?.staleResultDropDelta === observations?.staleResultDropDelta,
+    "stale-generation-runtime-observations-mismatch",
+  );
   addFailure(failures, safePositiveInteger(observations?.staleResultDropDelta) !== null, "stale-result-drop-not-observed");
   addFailure(failures, observations?.stalePublishDelta === 0, "stale-result-was-published");
   addFailure(

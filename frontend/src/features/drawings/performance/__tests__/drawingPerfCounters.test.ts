@@ -560,6 +560,8 @@ test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle pro
     backend: "worker" as const,
     backendSource: "environment" as const,
     workerResultDelayMs: 32,
+    workerAvailability: "available" as const,
+    workerUnavailableReason: null,
     sourceLineageExactResolveCount: 64,
     sourceLineageFallbackResolveCount: 0,
     sourceLineageUnresolvedResolveCount: 0,

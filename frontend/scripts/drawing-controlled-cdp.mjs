@@ -31,6 +31,13 @@ const CONTROLLED_LAUNCHERS = new Map([
 const CONTROLLED_ENTRYPOINTS = new Set(CONTROLLED_LAUNCHERS.keys());
 const OWNED_PROFILE_PREFIX = "candlescope-controlled-cdp-";
 const DIAGNOSTIC_BINDING = "__CANDLESCOPE_CONTROLLED_CDP_REPORT__";
+const CONTROLLED_ROLLBACK_SESSION_KEY = "__CANDLESCOPE_CONTROLLED_ROLLBACK_DRILL_TOKEN__";
+const CONTROLLED_ROLLBACK_HANDLE = "__CANDLESCOPE_CONTROLLED_ROLLBACK_DRILL__";
+export const CONTROLLED_WORKER_ROLLBACK_DRILL_IDS = Object.freeze([
+  "worker-init-failure",
+  "offscreen-canvas-unsupported",
+  "worker-stale-generation",
+]);
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
 const DEFAULT_MOCK = Object.freeze({
@@ -2200,6 +2207,7 @@ export function createControlledNetworkAssetTracker(
   buildReceipt,
   timeoutMs,
   mainFrameId,
+  rollbackAuthority = null,
 ) {
   if (typeof mainFrameId !== "string" || !mainFrameId) {
     throw new Error("controlled asset tracker requires the owned main frame id");
@@ -2218,6 +2226,7 @@ export function createControlledNetworkAssetTracker(
   const unmanifestedResponses = [];
   const provenanceErrors = [];
   const workerConstructions = [];
+  const workerConstructionFaults = [];
   const workerTargetConstructionBindings = new Map();
   const claimedWorkerConstructions = new Set();
   const workerBootstrapHandoffs = new Map();
@@ -2304,6 +2313,53 @@ export function createControlledNetworkAssetTracker(
     if (message?.sessionId || params?.name !== DIAGNOSTIC_BINDING) return;
     let payload;
     try { payload = JSON.parse(params?.payload || ""); } catch { return; }
+    if (payload?.kind === "worker-constructor-fault") {
+      const relativePath = assetPath(payload?.url || "");
+      const accepted = rollbackAuthority !== null
+        && payload?.runId === rollbackAuthority.runId
+        && payload?.authorityTokenSha256 === rollbackAuthority.authorityTokenSha256
+        && payload?.drillId === "worker-init-failure"
+        && typeof payload?.faultId === "string"
+        && /^[a-f0-9-]{36}$/.test(payload.faultId)
+        && Number.isSafeInteger(payload?.sequence)
+        && payload.sequence > 0
+        && payload?.workerType === "module"
+        && payload?.workerName === "candlescope-drawing-worker"
+        && drawingWorkerPaths.includes(relativePath);
+      if (!accepted) {
+        recordProvenanceError("worker-constructor-fault-untrusted", {
+          drillId: payload?.drillId ?? null,
+          url: payload?.url ?? null,
+        });
+        return;
+      }
+      const duplicate = workerConstructionFaults.some((fault) => (
+        fault.generation === currentGeneration
+      ));
+      if (duplicate) {
+        recordProvenanceError("worker-constructor-fault-duplicate", {
+          drillId: payload.drillId,
+          url: payload.url,
+        });
+        return;
+      }
+      workerConstructionFaults.push(Object.freeze({
+        kind: "controlled-worker-construction-fault",
+        generation: currentGeneration,
+        runId: payload.runId,
+        authorityTokenSha256: payload.authorityTokenSha256,
+        drillId: payload.drillId,
+        faultId: payload.faultId,
+        sequence: payload.sequence,
+        url: payload.url,
+        path: relativePath,
+        workerType: payload.workerType,
+        workerName: payload.workerName,
+        observedAt: isoNow(),
+        observationSequence: observe(),
+      }));
+      return;
+    }
     if (payload?.kind !== "worker-constructor" || typeof payload?.url !== "string") return;
     if (!controlledManagedUrlAllowed(payload.url, managedOrigin)) {
       recordProvenanceError("worker-constructor-off-origin", { url: payload.url });
@@ -2955,6 +3011,9 @@ export function createControlledNetworkAssetTracker(
     const currentProvenanceErrors = provenanceErrors.filter((record) => (
       record.generation === currentGeneration
     ));
+    const currentWorkerConstructionFaults = workerConstructionFaults.filter((record) => (
+      record.generation === currentGeneration
+    ));
     const observedPassed = observedAssets.length > 0
       && observedAssets.every((item) => item.accepted);
     const entriesPassed = entryAssets.every((item) => item.accepted);
@@ -2965,27 +3024,33 @@ export function createControlledNetworkAssetTracker(
       drawingWorkerPaths.includes(assetPath(construction.url || ""))
       && !claimedWorkerConstructions.has(construction)
     ));
-    const workersPassed = drawingWorkerPaths.length === 1
+    const workerAssetAuthorityPassed = drawingWorkerPaths.length === 1
       && unclaimedDrawingWorkerConstructions.length === 0
+      && currentWorkerConstructionFaults.length <= 1
+      && (currentWorkerConstructionFaults.length === 0 || drawingWorkerTargets.length === 0)
       && workerTargets.every((target) => (
       target.manifestBacked
-      && target.active
       && target.constructorProvenanceAccepted
       && target.networkProvenanceAccepted
       && target.assetAccepted
       && target.assetSha256 === target.expectedAssetSha256
       ));
+    const workersPassed = workerAssetAuthorityPassed
+      && workerTargets.every((target) => target.active);
+    const commonAssetAuthorityPassed = currentDocumentPath === "index.html"
+      && currentGeneration > 0
+      && entriesPassed
+      && observedPassed
+      && workerAssetAuthorityPassed
+      && currentDuplicateResponseKeys.length === 0
+      && currentUnmanifestedResponses.length === 0
+      && currentProvenanceErrors.length === 0
+      && pending.size === 0
+      && currentInFlight.length === 0;
     return Object.freeze({
-      passed: currentDocumentPath === "index.html"
-        && currentGeneration > 0
-        && entriesPassed
-        && observedPassed
-        && workersPassed
-        && currentDuplicateResponseKeys.length === 0
-        && currentUnmanifestedResponses.length === 0
-        && currentProvenanceErrors.length === 0
-        && pending.size === 0
-        && currentInFlight.length === 0,
+      passed: commonAssetAuthorityPassed && workersPassed,
+      assetAuthorityPassed: commonAssetAuthorityPassed,
+      workerAssetAuthorityPassed,
       currentGeneration,
       observationSequence,
       mainFrameId,
@@ -3015,57 +3080,64 @@ export function createControlledNetworkAssetTracker(
       workerConstructions: Object.freeze(availableWorkerConstructions.map((record) => Object.freeze({
         ...record,
       }))),
+      workerConstructionFaults: Object.freeze(
+        currentWorkerConstructionFaults.map((record) => Object.freeze({ ...record })),
+      ),
       workerBootstrapHandoffs: Object.freeze([...workerBootstrapHandoffs.values()]
         .filter((record) => record.generation === currentGeneration)),
     });
   };
-  return Object.freeze({
-    async waitForComplete() {
-      const deadline = Date.now() + timeoutMs;
-      const quietWindowMs = 200;
-      let latest = snapshot();
-      let quietStartedAt = null;
-      let quietSequence = null;
-      while (Date.now() <= deadline) {
-        if (pending.size > 0) {
-          await waitWithCancelableTimeout(Promise.allSettled([...pending]), Math.min(500, timeoutMs));
-        }
-        latest = snapshot();
-        if (latest.passed && latest.pendingCount === 0 && latest.inFlightCount === 0) {
-          if (quietSequence !== latest.observationSequence) {
-            quietSequence = latest.observationSequence;
-            quietStartedAt = Date.now();
-          } else if (Date.now() - quietStartedAt >= quietWindowMs) {
-            return Object.freeze({
-              ...latest,
-              quiescence: Object.freeze({
-                passed: true,
-                timedOut: false,
-                quietWindowMs,
-                observationSequence: quietSequence,
-                observedAt: isoNow(),
-              }),
-            });
-          }
-        } else {
-          quietSequence = null;
-          quietStartedAt = null;
-        }
-        await wait(25);
+  const waitForAuthority = async (authorityField) => {
+    const deadline = Date.now() + timeoutMs;
+    const quietWindowMs = 200;
+    let latest = snapshot();
+    let quietStartedAt = null;
+    let quietSequence = null;
+    while (Date.now() <= deadline) {
+      if (pending.size > 0) {
+        await waitWithCancelableTimeout(Promise.allSettled([...pending]), Math.min(500, timeoutMs));
       }
       latest = snapshot();
-      return Object.freeze({
-        ...latest,
+      if (latest[authorityField] === true && latest.pendingCount === 0 && latest.inFlightCount === 0) {
+        if (quietSequence !== latest.observationSequence) {
+          quietSequence = latest.observationSequence;
+          quietStartedAt = Date.now();
+        } else if (Date.now() - quietStartedAt >= quietWindowMs) {
+          return Object.freeze({
+            ...latest,
+            quiescence: Object.freeze({
+              passed: true,
+              timedOut: false,
+              authorityField,
+              quietWindowMs,
+              observationSequence: quietSequence,
+              observedAt: isoNow(),
+            }),
+          });
+        }
+      } else {
+        quietSequence = null;
+        quietStartedAt = null;
+      }
+      await wait(25);
+    }
+    latest = snapshot();
+    return Object.freeze({
+      ...latest,
+      [authorityField]: false,
+      quiescence: Object.freeze({
         passed: false,
-        quiescence: Object.freeze({
-          passed: false,
-          timedOut: true,
-          quietWindowMs,
-          observationSequence: latest.observationSequence,
-          observedAt: isoNow(),
-        }),
-      });
-    },
+        timedOut: true,
+        authorityField,
+        quietWindowMs,
+        observationSequence: latest.observationSequence,
+        observedAt: isoNow(),
+      }),
+    });
+  };
+  return Object.freeze({
+    waitForComplete: () => waitForAuthority("passed"),
+    waitForAssetAuthorityComplete: () => waitForAuthority("assetAuthorityPassed"),
     snapshot,
     dispose() {
       removeAttached();
@@ -3086,6 +3158,7 @@ async function readBrowserBuildEvidence(
   assetTracker,
   originGuard,
   workerDiagnostics,
+  { requireActiveWorkers = true } = {},
 ) {
   const managedOrigin = new URL(managedUrl).origin;
   originGuard.assertHealthy();
@@ -3095,7 +3168,10 @@ async function readBrowserBuildEvidence(
   }
   await workerDiagnostics.settle();
   workerDiagnostics.assertHealthy();
-  let networkAssets = await assetTracker.waitForComplete();
+  const waitForNetworkAuthority = requireActiveWorkers
+    ? assetTracker.waitForComplete
+    : assetTracker.waitForAssetAuthorityComplete;
+  let networkAssets = await waitForNetworkAuthority();
   const browser = await evaluateJson(cdp, `(async () => {
     if (document.fonts?.ready) await document.fonts.ready;
     const domUrls = new Set();
@@ -3129,7 +3205,7 @@ async function readBrowserBuildEvidence(
   if (!handlersAfterCapture.passed) {
     throw new Error(`CDP handlers did not settle after build capture: ${JSON.stringify(handlersAfterCapture)}`);
   }
-  networkAssets = await assetTracker.waitForComplete();
+  networkAssets = await waitForNetworkAuthority();
   const dataInitiatorTypes = new Set([
     "beacon",
     "eventsource",
@@ -3195,6 +3271,21 @@ async function readBrowserBuildEvidence(
   const currentGit = readGitBuildContext(buildReceipt.toolchain.git.path);
   const managedOriginEvidence = originGuard.snapshot();
   const workerEvidence = workerDiagnostics.snapshot();
+  const commonBuildAuthority = browser?.origin === managedOrigin
+    && controlledManagedDocumentUrlAllowed(browser?.href || "", managedUrl)
+    && browserLoadedAssetsAccepted
+    && domLoadedAssetsAccepted
+    && expectedEntriesPresentInDom
+    && handlersBeforeCapture.passed
+    && handlersAfterCapture.passed
+    && offOriginDomUrls.length === 0
+    && managedOriginEvidence.passed
+    && workerEvidence.passed
+    && currentDistribution.sha256 === buildReceipt.assetFingerprint.sha256
+    && currentInputs.sha256 === buildReceipt.inputFingerprint.sha256
+    && currentGit.commit === buildReceipt.git.commit
+    && stableJson(currentGit.status) === stableJson(buildReceipt.git.status);
+  const assetAuthoritative = commonBuildAuthority && networkAssets.assetAuthorityPassed === true;
   return Object.freeze({
     buildId: buildReceipt.buildId,
     buildFingerprint: buildReceipt.buildFingerprint,
@@ -3230,32 +3321,134 @@ async function readBrowserBuildEvidence(
     matchesManagedOrigin: browser?.origin === managedOrigin,
     matchesManagedDocument: controlledManagedDocumentUrlAllowed(browser?.href || "", managedUrl),
     entryAssetsLoaded: networkAssets.passed,
-    authoritative: browser?.origin === managedOrigin
-      && controlledManagedDocumentUrlAllowed(browser?.href || "", managedUrl)
-      && networkAssets.passed
-      && browserLoadedAssetsAccepted
-      && domLoadedAssetsAccepted
-      && expectedEntriesPresentInDom
-      && handlersBeforeCapture.passed
-      && handlersAfterCapture.passed
-      && offOriginDomUrls.length === 0
-      && managedOriginEvidence.passed
-      && workerEvidence.passed
-      && currentDistribution.sha256 === buildReceipt.assetFingerprint.sha256
-      && currentInputs.sha256 === buildReceipt.inputFingerprint.sha256
-      && currentGit.commit === buildReceipt.git.commit
-      && stableJson(currentGit.status) === stableJson(buildReceipt.git.status),
+    networkAssetsPassed: networkAssets.passed,
+    networkAssetAuthorityPassed: networkAssets.assetAuthorityPassed === true,
+    assetAuthoritative,
+    authoritative: commonBuildAuthority && networkAssets.passed,
   });
 }
 
-function diagnosticBootstrapSource() {
+export function diagnosticBootstrapSource({
+  runId = "",
+  authorityToken = "",
+  authorityTokenSha256 = "",
+  drawingWorkerPaths = [],
+} = {}) {
+  if (typeof runId !== "string" || !runId) {
+    throw new TypeError("controlled diagnostic bootstrap runId is required");
+  }
+  if (typeof authorityToken !== "string" || !authorityToken) {
+    throw new TypeError("controlled diagnostic bootstrap authority token is required");
+  }
+  if (!/^[a-f0-9]{64}$/.test(authorityTokenSha256)) {
+    throw new TypeError("controlled diagnostic bootstrap authority token digest is invalid");
+  }
+  if (!Array.isArray(drawingWorkerPaths)
+    || drawingWorkerPaths.length !== 1
+    || !drawingWorkerPaths.every((value) => (
+      typeof value === "string" && /^assets\/drawing\.worker(?:-[^/]+)?\.js$/.test(value)
+    ))) {
+    throw new TypeError("controlled diagnostic bootstrap requires one manifest drawing worker path");
+  }
+  const authority = Object.freeze({
+    runId,
+    authorityToken,
+    authorityTokenSha256,
+    drawingWorkerPaths: Object.freeze([...drawingWorkerPaths]),
+    drillIds: CONTROLLED_WORKER_ROLLBACK_DRILL_IDS,
+    sessionKey: CONTROLLED_ROLLBACK_SESSION_KEY,
+    handleName: CONTROLLED_ROLLBACK_HANDLE,
+  });
   return `(() => {
+    const authority = Object.freeze(${JSON.stringify(authority)});
     const marker = '__CANDLESCOPE_CONTROLLED_CDP_DIAGNOSTICS_INSTALLED__';
     if (window[marker] === true) return;
     Object.defineProperty(window, marker, { value: true, configurable: false });
     const report = (payload) => {
       try { window.${DIAGNOSTIC_BINDING}(JSON.stringify(payload)); } catch {}
     };
+    const cloneHeader = (value) => {
+      const header = value && typeof value === 'object' ? value : null;
+      const stamp = header && header.stamp && typeof header.stamp === 'object'
+        ? header.stamp
+        : null;
+      if (!header || !stamp) return null;
+      try {
+        return {
+          schemaVersion: header.schemaVersion,
+          jobId: header.jobId,
+          generation: header.generation,
+          stamp: { ...stamp }
+        };
+      } catch { return null; }
+    };
+    let tokenRemoved = false;
+    let token = null;
+    try {
+      const raw = sessionStorage.getItem(authority.sessionKey);
+      if (raw !== null) {
+        sessionStorage.removeItem(authority.sessionKey);
+        tokenRemoved = sessionStorage.getItem(authority.sessionKey) === null;
+        token = JSON.parse(raw);
+      }
+    } catch {}
+    const authorityAccepted = Boolean(token
+      && token.runId === authority.runId
+      && token.authorityToken === authority.authorityToken
+      && token.authorityTokenSha256 === authority.authorityTokenSha256
+      && typeof token.faultId === 'string'
+      && /^[a-f0-9-]{36}$/.test(token.faultId)
+      && Number.isSafeInteger(token.sequence)
+      && token.sequence > 0
+      && authority.drillIds.includes(token.drillId));
+    const activeDrill = authorityAccepted ? token.drillId : null;
+    const state = {
+      runId: authority.runId,
+      authorityTokenSha256: authority.authorityTokenSha256,
+      authorityAccepted,
+      tokenRemoved,
+      drillId: activeDrill,
+      faultId: authorityAccepted ? token.faultId : null,
+      sequence: authorityAccepted ? token.sequence : null,
+      armed: authorityAccepted,
+      armedAt: authorityAccepted ? new Date().toISOString() : null,
+      observed: false,
+      observedAt: null,
+      expectedDrawingWorkerPaths: [...authority.drawingWorkerPaths],
+      workerConstructorAttempts: 0,
+      workerConstructionFailures: 0,
+      workerCreations: 0,
+      renderRequestCount: 0,
+      renderResultCount: 0,
+      typedResultCount: 0,
+      bitmapResultCount: 0,
+      renderRequests: [],
+      renderResults: [],
+      constructionFailure: null
+    };
+    const observe = () => {
+      state.observed = true;
+      if (state.observedAt === null) state.observedAt = new Date().toISOString();
+    };
+    const append = (target, value) => {
+      if (target.length >= 64) target.shift();
+      target.push(value);
+    };
+    const snapshot = () => JSON.parse(JSON.stringify(state));
+    Object.defineProperty(window, authority.handleName, {
+      value: Object.freeze({ snapshot }),
+      configurable: false,
+      enumerable: false,
+      writable: false
+    });
+    if (activeDrill === 'worker-stale-generation') {
+      Object.defineProperty(window, '__CANDLESCOPE_DRAWING_PERF_CONFIG__', {
+        value: Object.freeze({ phase6WorkerDelayMs: 96 }),
+        configurable: false,
+        enumerable: false,
+        writable: false
+      });
+    }
     try {
       const NativeWorker = window.Worker;
       if (typeof NativeWorker === 'function') {
@@ -3263,12 +3456,89 @@ function diagnosticBootstrapSource() {
           construct(target, args) {
             let resolvedUrl = null;
             try { resolvedUrl = new URL(String(args[0]), location.href).href; } catch {}
+            let relativePath = null;
+            try {
+              const parsed = new URL(resolvedUrl);
+              if (parsed.origin === location.origin) {
+                relativePath = decodeURIComponent(parsed.pathname).replace(/^\\/+/, '');
+              }
+            } catch {}
+            const isDrawingWorker = authority.drawingWorkerPaths.includes(relativePath);
+            const workerType = args[1]?.type || 'classic';
+            const workerName = args[1]?.name || null;
+            const exactDrawingWorkerConstruction = isDrawingWorker
+              && workerType === 'module'
+              && workerName === 'candlescope-drawing-worker';
+            if (isDrawingWorker) state.workerConstructorAttempts += 1;
+            if (exactDrawingWorkerConstruction && activeDrill === 'worker-init-failure') {
+              state.workerConstructionFailures += 1;
+              observe();
+              const error = new DOMException(
+                'Controlled drawing worker construction failure',
+                'NotSupportedError'
+              );
+              state.constructionFailure = {
+                url: resolvedUrl,
+                workerType,
+                workerName,
+                name: error.name,
+                message: error.message,
+                observedAt: new Date().toISOString()
+              };
+              report({
+                kind: 'worker-constructor-fault',
+                runId: authority.runId,
+                authorityTokenSha256: authority.authorityTokenSha256,
+                drillId: activeDrill,
+                faultId: state.faultId,
+                sequence: state.sequence,
+                url: resolvedUrl,
+                workerType,
+                workerName
+              });
+              throw error;
+            }
             report({
               kind: 'worker-constructor',
               url: resolvedUrl,
-              workerType: args[1]?.type || 'classic'
+              workerType
             });
-            return Reflect.construct(target, args, target);
+            const worker = Reflect.construct(target, args, target);
+            if (isDrawingWorker) {
+              state.workerCreations += 1;
+              const nativePostMessage = worker.postMessage;
+              Object.defineProperty(worker, 'postMessage', {
+                value(...postArgs) {
+                  const message = postArgs[0];
+                  if (message?.type === 'drawing-worker/render') {
+                    state.renderRequestCount += 1;
+                    append(state.renderRequests, {
+                      header: cloneHeader(message.header),
+                      observedAt: new Date().toISOString()
+                    });
+                    if (activeDrill === 'worker-stale-generation') observe();
+                  }
+                  return Reflect.apply(nativePostMessage, worker, postArgs);
+                },
+                configurable: false,
+                enumerable: false,
+                writable: false
+              });
+              worker.addEventListener('message', (event) => {
+                const message = event.data;
+                if (message?.type !== 'drawing-worker/result') return;
+                const resultKind = message.result?.kind || null;
+                state.renderResultCount += 1;
+                if (resultKind === 'typed-draw-result') state.typedResultCount += 1;
+                if (resultKind === 'bitmap-draw-result') state.bitmapResultCount += 1;
+                append(state.renderResults, {
+                  header: cloneHeader(message.header),
+                  resultKind,
+                  observedAt: new Date().toISOString()
+                });
+              });
+            }
+            return worker;
           }
         });
         Object.defineProperty(window, 'Worker', {
@@ -3764,8 +4034,25 @@ async function launchOwnedBrowser(
   profileDirectory,
   managedUrl,
   launchState,
+  runId,
 ) {
   const diagnostics = createControlledDiagnosticsAggregator();
+  const drawingWorkerPaths = Object.freeze(
+    launchState.buildReceipt.assetFingerprint.files
+      .map((file) => file.path)
+      .filter((relativePath) => /^assets\/drawing\.worker(?:-[^/]+)?\.js$/.test(relativePath)),
+  );
+  if (drawingWorkerPaths.length !== 1) {
+    throw new Error("Controlled browser requires exactly one manifest drawing worker asset");
+  }
+  const rollbackAuthorityToken = randomUUID();
+  const rollbackAuthorityTokenSha256 = sha256(rollbackAuthorityToken);
+  const rollbackAuthority = Object.freeze({
+    runId,
+    authorityTokenSha256: rollbackAuthorityTokenSha256,
+    drawingWorkerPaths,
+  });
+  let rollbackSequence = 0;
   const chromeArguments = [
     "--remote-debugging-port=0",
     `--user-data-dir=${profileDirectory}`,
@@ -4064,7 +4351,14 @@ async function launchOwnedBrowser(
       flatten: true,
     });
     await cdp.send("Runtime.addBinding", { name: DIAGNOSTIC_BINDING });
-    await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: diagnosticBootstrapSource() });
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+      source: diagnosticBootstrapSource({
+        runId,
+        authorityToken: rollbackAuthorityToken,
+        authorityTokenSha256: rollbackAuthorityTokenSha256,
+        drawingWorkerPaths,
+      }),
+    });
     originGuard = await createManagedOriginGuard(cdp, managedUrl);
     const frameTree = (await cdp.send("Page.getFrameTree")).result?.frameTree;
     const mainFrameId = frameTree?.frame?.id;
@@ -4077,6 +4371,7 @@ async function launchOwnedBrowser(
       launchState.buildReceipt,
       configuration.timeoutMs,
       mainFrameId,
+      rollbackAuthority,
     );
     const browserVersion = (await cdp.send("Browser.getVersion")).result || {};
     if (!/^(?:Chrome|Chromium|Edg)\/[0-9.]+$/.test(String(browserVersion.product || ""))) {
@@ -4103,6 +4398,63 @@ async function launchOwnedBrowser(
       configuration.viewport,
       configuration.dpr,
     );
+    const navigateRollbackDrill = async (drillId) => {
+      if (!CONTROLLED_WORKER_ROLLBACK_DRILL_IDS.includes(drillId)) {
+        throw new Error(`Unknown controlled worker rollback drill: ${drillId}`);
+      }
+      rollbackSequence += 1;
+      const sequence = rollbackSequence;
+      const faultId = randomUUID();
+      const token = Object.freeze({
+        runId,
+        authorityToken: rollbackAuthorityToken,
+        authorityTokenSha256: rollbackAuthorityTokenSha256,
+        drillId,
+        faultId,
+        sequence,
+      });
+      const armedAt = isoNow();
+      const armed = await evaluateJson(cdp, `(() => {
+        const key = ${JSON.stringify(CONTROLLED_ROLLBACK_SESSION_KEY)};
+        if (sessionStorage.getItem(key) !== null) return { armed: false, reason: 'token-already-present' };
+        const value = ${JSON.stringify(JSON.stringify(token))};
+        sessionStorage.setItem(key, value);
+        return {
+          armed: sessionStorage.getItem(key) === value,
+          origin: location.origin,
+          href: location.href
+        };
+      })()`);
+      if (armed?.armed !== true || armed.origin !== new URL(managedUrl).origin) {
+        throw new Error(`Controlled rollback drill token could not be armed: ${JSON.stringify(armed)}`);
+      }
+      await cdp.send("Page.reload", { ignoreCache: true });
+      await waitForDocumentReady(cdp, new URL(managedUrl).origin, configuration.timeoutMs);
+      const bootstrap = await evaluateJson(cdp, `(() => {
+        const handle = window[${JSON.stringify(CONTROLLED_ROLLBACK_HANDLE)}];
+        return handle && typeof handle.snapshot === 'function' ? handle.snapshot() : null;
+      })()`);
+      if (bootstrap?.authorityAccepted !== true
+        || bootstrap?.tokenRemoved !== true
+        || bootstrap?.runId !== runId
+        || bootstrap?.authorityTokenSha256 !== rollbackAuthorityTokenSha256
+        || bootstrap?.drillId !== drillId
+        || bootstrap?.faultId !== faultId
+        || bootstrap?.sequence !== sequence) {
+        throw new Error(`Controlled rollback drill bootstrap rejected authority: ${JSON.stringify(bootstrap)}`);
+      }
+      return Object.freeze({
+        kind: "controlled-rollback-drill-navigation",
+        runId,
+        authorityTokenSha256: rollbackAuthorityTokenSha256,
+        drillId,
+        faultId,
+        sequence,
+        armedAt,
+        loadedAt: isoNow(),
+        bootstrap: Object.freeze({ ...bootstrap }),
+      });
+    };
     lifecycle.readyAt = isoNow();
     return {
       browserVersion: Object.freeze(stableObject(browserVersion)),
@@ -4111,6 +4463,8 @@ async function launchOwnedBrowser(
       originGuard,
       assetTracker,
       workerDiagnostics,
+      rollbackAuthority,
+      navigateRollbackDrill,
       targetId: target.id,
       windowId,
       windowEvidence,
@@ -4794,6 +5148,7 @@ export async function startControlledProductionCdp(options = {}) {
       profileDirectory,
       servers.url,
       launchState,
+      runId,
     );
     const initialBuildEvidence = await readBrowserBuildEvidence(
       browser.cdp,
@@ -4876,6 +5231,8 @@ export async function startControlledProductionCdp(options = {}) {
       registerPausedTargetInitializer: (specification) => (
         browser.workerDiagnostics.registerPausedTargetInitializer(specification)
       ),
+      rollbackAuthority: browser.rollbackAuthority,
+      navigateRollbackDrill: (drillId) => browser.navigateRollbackDrill(drillId),
       settleAuthoritativeState: assertManagedCaptureState,
       verifyWindow: async () => {
         await assertManagedCaptureState();
@@ -4899,7 +5256,10 @@ export async function startControlledProductionCdp(options = {}) {
         await assertManagedCaptureState();
         return evidence;
       },
-      readBrowserBuildEvidence: async () => {
+      readBrowserBuildEvidence: async ({ requireActiveWorkers = true } = {}) => {
+        if (typeof requireActiveWorkers !== "boolean") {
+          throw new TypeError("requireActiveWorkers must be a boolean");
+        }
         await assertManagedCaptureState();
         return readBrowserBuildEvidence(
           browser.cdp,
@@ -4908,6 +5268,7 @@ export async function startControlledProductionCdp(options = {}) {
           browser.assetTracker,
           browser.originGuard,
           browser.workerDiagnostics,
+          { requireActiveWorkers },
         );
       },
       lifecycle: () => Object.freeze({

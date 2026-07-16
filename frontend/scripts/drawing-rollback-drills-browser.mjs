@@ -7,10 +7,25 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { DRAWING_ROLLBACK_DRILL_IDS } from "./drawing-rollback-drills.mjs";
+import { startControlledProductionCdp } from "./drawing-controlled-cdp.mjs";
+import {
+  assessDrawingRollbackDrillArtifact,
+  DRAWING_ROLLBACK_DRILL_IDS,
+} from "./drawing-rollback-drills.mjs";
+import {
+  canonicalArtifactSha256,
+  runControlledWorkerRollbackDrills,
+} from "./drawing-rollback-worker-browser.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_OUTPUT_ROOT = path.join(FRONTEND_ROOT, "output", "phase9-rollback-drills");
+const FIXED_CONFIGURATION = Object.freeze({
+  dpr: 1,
+  engineMode: "scene-canary",
+  interactionSurfaceMode: "overlay",
+  rasterBackend: "worker",
+  viewport: Object.freeze({ width: 1440, height: 900 }),
+});
 const FORBIDDEN_OPTIONS = Object.freeze([
   "--allow-incomplete",
   "--artifact",
@@ -22,7 +37,7 @@ const FORBIDDEN_OPTIONS = Object.freeze([
   "--scenario-module",
 ]);
 
-const CONTROLLED_DRILL_PLAN = Object.freeze([
+export const CONTROLLED_DRILL_PLAN = Object.freeze([
   Object.freeze({ id: "worker-init-failure", producer: "worker" }),
   Object.freeze({ id: "offscreen-canvas-unsupported", producer: "worker" }),
   Object.freeze({ id: "indexeddb-quota-blocked", producer: "storage" }),
@@ -33,6 +48,12 @@ const CONTROLLED_DRILL_PLAN = Object.freeze([
   Object.freeze({ id: "canary-to-legacy-snapshot", producer: "storage" }),
 ]);
 
+const IMPLEMENTED_DRILL_IDS = new Set([
+  "worker-init-failure",
+  "offscreen-canvas-unsupported",
+  "worker-stale-generation",
+]);
+
 function usage() {
   return [
     "Phase 9 controlled headed-browser rollback drills",
@@ -41,7 +62,7 @@ function usage() {
     "",
     "Options:",
     "  --chrome <path>       Chrome/Edge executable (auto-detected by default)",
-    "  --timeout-ms <n>      Per-stage timeout (default 45000)",
+    "  --timeout-ms <n>      Per-stage timeout, 1000..600000 (default 45000)",
     "  --out-dir <path>      Parent directory for the unique controlled run",
     "  --help                Show this help",
     "",
@@ -60,21 +81,21 @@ function optionValue(argv, index, name) {
   const argument = argv[index];
   const inline = argument.startsWith(`${name}=`);
   const value = inline ? argument.slice(name.length + 1) : argv[index + 1];
-  if (typeof value !== "string" || value.startsWith("-")) {
+  if (typeof value !== "string" || !value || value.startsWith("-")) {
     throw new Error(`${name} requires a value`);
   }
   return { value, index: inline ? index : index + 1 };
 }
 
-function positiveInteger(value, name) {
+function boundedTimeout(value) {
   const number = Number(value);
-  if (!Number.isSafeInteger(number) || number <= 0) {
-    throw new TypeError(`${name} must be a positive integer`);
+  if (!Number.isSafeInteger(number) || number < 1_000 || number > 600_000) {
+    throw new TypeError("--timeout-ms must be an integer between 1000 and 600000");
   }
   return number;
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = {
     chromePath: "",
     timeoutMs: 45_000,
@@ -92,20 +113,16 @@ function parseArgs(argv) {
       args.help = true;
       continue;
     }
-    if (name !== "--chrome" && name !== "--timeout-ms" && name !== "--out-dir") {
+    if (!["--chrome", "--timeout-ms", "--out-dir"].includes(name)) {
       throw new Error(`unknown argument: ${argument}`);
     }
     if (seen.has(name)) throw new Error(`duplicate option: ${name}`);
     seen.add(name);
     const resolved = optionValue(argv, index, name);
     index = resolved.index;
-    if (!resolved.value) throw new Error(`${name} requires a value`);
     if (name === "--chrome") args.chromePath = path.resolve(resolved.value);
-    else if (name === "--timeout-ms") {
-      args.timeoutMs = positiveInteger(resolved.value, name);
-    } else {
-      args.outputRoot = path.resolve(resolved.value);
-    }
+    else if (name === "--timeout-ms") args.timeoutMs = boundedTimeout(resolved.value);
+    else args.outputRoot = path.resolve(resolved.value);
   }
   return Object.freeze(args);
 }
@@ -135,22 +152,49 @@ function validateFixedPlan() {
     && ids.every((id, index) => id === DRAWING_ROLLBACK_DRILL_IDS[index]);
 }
 
-function writeNotImplementedPartial(args) {
-  const startedAt = new Date().toISOString();
-  const runId = `phase9-${Date.now()}-${crypto.randomUUID()}`;
-  const runDirectory = path.join(args.outputRoot, runId);
-  const reportPath = path.join(runDirectory, "controlled-run.partial.json");
+function diagnosticFailures(snapshot) {
+  if (!snapshot) return ["diagnostics-missing"];
+  const page = snapshot.pageAndWorker || snapshot;
+  const failures = [];
+  for (const key of [
+    "crashes",
+    "unexpectedConsoleErrors",
+    "runtimeExceptions",
+    "unhandledRejections",
+    "windowErrors",
+    "networkFailures",
+    "commandErrors",
+    "protocolErrors",
+    "handlerErrors",
+  ]) {
+    if (!Array.isArray(page?.[key]) || page[key].length > 0) {
+      failures.push(`${key}:${Array.isArray(page?.[key]) ? page[key].length : "missing"}`);
+    }
+  }
+  if (snapshot.workers && snapshot.workers.passed !== true) failures.push("worker-diagnostics-invalid");
+  if (snapshot.originGuard && snapshot.originGuard.passed !== true) failures.push("origin-guard-invalid");
+  if (snapshot.cdpHandlers && snapshot.cdpHandlers.passed !== true) failures.push("cdp-handlers-invalid");
+  return failures;
+}
+
+export function buildInitialControlledRunReport(args, {
+  runId = `phase9-${Date.now()}-${crypto.randomUUID()}`,
+  startedAt = new Date().toISOString(),
+} = {}) {
   const planValid = validateFixedPlan();
-  const report = {
-    schemaVersion: "drawing-rollback-controlled-run-partial/v1",
+  return {
+    schemaVersion: "drawing-rollback-controlled-run-partial/v2",
     status: "partial",
     phase9RollbackDrillsPassed: false,
     harnessPassed: false,
+    workerHarnessPassed: false,
     runId,
     sourceRevision: gitRevision(),
     startedAt,
-    updatedAt: new Date().toISOString(),
+    updatedAt: startedAt,
+    completedAt: null,
     configuration: {
+      ...FIXED_CONFIGURATION,
       headed: true,
       externalArtifactsAccepted: false,
       externalCdpAccepted: false,
@@ -160,6 +204,7 @@ function writeNotImplementedPartial(args) {
     },
     lifecycle: {
       buildStarted: false,
+      buildCompleted: false,
       serverStarted: false,
       browserStarted: false,
       diagnosticsClosed: false,
@@ -174,29 +219,225 @@ function writeNotImplementedPartial(args) {
       contractPassed: false,
       trustedRunnerAccepted: false,
     })),
-    failureReasons: [
-      ...(!planValid ? ["controlled-browser-drill-plan-invalid"] : []),
-      "controlled-browser-drill-producers-not-implemented",
-    ],
+    evidence: null,
+    cleanup: null,
+    failureReasons: [...(!planValid ? ["controlled-browser-drill-plan-invalid"] : [])],
   };
+}
+
+function prefixedSha256(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? `sha256:${value}` : null;
+}
+
+export function workerDrillBuildAuthorityPassed(workerResult, buildReceipt) {
+  const artifacts = Array.isArray(workerResult?.drills) ? workerResult.drills : [];
+  if (artifacts.length !== IMPLEMENTED_DRILL_IDS.size || !buildReceipt) return false;
+  const seen = new Set();
+  const expectedBuildFingerprint = prefixedSha256(buildReceipt.buildFingerprint?.sha256);
+  const expectedAssetDigest = prefixedSha256(buildReceipt.assetFingerprint?.sha256);
+  const expectedBuildInputDigest = prefixedSha256(buildReceipt.inputFingerprint?.sha256);
+  return artifacts.every((artifact) => {
+    const drillId = artifact?.drillId;
+    const authority = artifact?.buildAuthority;
+    if (!IMPLEMENTED_DRILL_IDS.has(drillId) || seen.has(drillId)) return false;
+    seen.add(drillId);
+    return authority?.kind === "controlled-browser-build-authority"
+      && authority.drillId === drillId
+      && authority.authoritative === true
+      && authority.buildId === buildReceipt.buildId
+      && authority.buildFingerprint === expectedBuildFingerprint
+      && authority.assetDigest === expectedAssetDigest
+      && authority.currentAssetDigest === expectedAssetDigest
+      && authority.buildInputDigest === expectedBuildInputDigest
+      && authority.currentBuildInputDigest === expectedBuildInputDigest
+      && authority.gitRevision === buildReceipt.git?.commit
+      && authority.assetBuildAuthoritative === true
+      && authority.matchesManagedOrigin === true
+      && authority.matchesManagedDocument === true
+      && authority.entryAssetsLoaded === true
+      && authority.networkAssetAuthorityPassed === true
+      && authority.networkQuiescencePassed === true
+      && authority.browserLoadedAssetsAccepted === true
+      && authority.domLoadedAssetsAccepted === true
+      && authority.expectedEntriesPresentInDom === true
+      && authority.distMatchesBuild === true
+      && authority.buildInputsMatch === true
+      && authority.gitMatchesBuild === true
+      && authority.managedOriginGuardPassed === true
+      && authority.workerDiagnosticsPassed === true
+      && authority.handlerSettlementsPassed === true
+      && authority.workerLifecycle?.accepted === true
+      && authority.workerLifecycle?.assetAuthorityAccepted === true;
+  }) && seen.size === IMPLEMENTED_DRILL_IDS.size;
+}
+
+function currentFailureReasons(report, executionFailure, finalDiagnosticFailures) {
+  const reasons = [];
+  if (!report.planValid) reasons.push("controlled-browser-drill-plan-invalid");
+  if (executionFailure) reasons.push(`controlled-worker-drill-execution-failed:${executionFailure}`);
+  reasons.push(...finalDiagnosticFailures.map((reason) => `controlled-final-diagnostics:${reason}`));
+  const incomplete = CONTROLLED_DRILL_PLAN
+    .filter((entry) => !IMPLEMENTED_DRILL_IDS.has(entry.id))
+    .map((entry) => entry.id);
+  if (incomplete.length > 0) {
+    reasons.push(`controlled-browser-drill-producers-incomplete:${incomplete.join(",")}`);
+  }
+  return reasons;
+}
+
+async function runControlledRollbackDrills(args) {
+  const report = buildInitialControlledRunReport(args);
+  const runDirectory = path.join(args.outputRoot, report.runId);
+  const reportPath = path.join(runDirectory, "controlled-run.partial.json");
+  atomicWriteJson(reportPath, report);
+  let session = null;
+  let cleanup = null;
+  let executionFailure = null;
+  let workerResult = null;
+  let authoritativeState = null;
+  let liveDiagnostics = null;
+  try {
+    report.lifecycle.buildStarted = true;
+    atomicWriteJson(reportPath, report);
+    session = await startControlledProductionCdp({
+      ...FIXED_CONFIGURATION,
+      chromePath: args.chromePath,
+      timeoutMs: args.timeoutMs,
+    });
+    report.lifecycle.buildCompleted = true;
+    report.lifecycle.serverStarted = true;
+    report.lifecycle.browserStarted = true;
+    report.sourceRevision = session.buildReceipt.git.commit;
+    workerResult = await runControlledWorkerRollbackDrills(session, { timeoutMs: args.timeoutMs });
+    authoritativeState = await session.settleAuthoritativeState();
+    liveDiagnostics = session.diagnostics();
+  } catch (error) {
+    executionFailure = error instanceof Error ? error.message : String(error);
+    cleanup = error?.cleanup ?? null;
+  } finally {
+    if (session) {
+      try {
+        cleanup = await session.close();
+      } catch (error) {
+        executionFailure = `${executionFailure ? `${executionFailure}; ` : ""}close:${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
+    }
+  }
+
+  const finalDiagnostics = {
+    pageAndWorker: cleanup?.finalDiagnostics ?? null,
+    workers: cleanup?.finalWorkerDiagnostics ?? null,
+    originGuard: cleanup?.finalOriginGuard ?? null,
+    cdpHandlers: cleanup?.browser?.handlerSettlementAfterClose ?? null,
+  };
+  const finalDiagnosticFailures = diagnosticFailures(finalDiagnostics);
+  const cleanupComplete = cleanup?.summary?.complete === true;
+  const perDrillBuildAuthorityPassed = workerDrillBuildAuthorityPassed(
+    workerResult,
+    session?.buildReceipt,
+  );
+  const runAuthorityPassed = executionFailure === null
+    && session?.initialBuildEvidence?.authoritative === true
+    && perDrillBuildAuthorityPassed
+    && authoritativeState !== null
+    && diagnosticFailures(liveDiagnostics).length === 0
+    && finalDiagnosticFailures.length === 0
+    && cleanupComplete;
+
+  const artifacts = new Map((workerResult?.drills ?? []).map((artifact) => [artifact.drillId, artifact]));
+  report.drills = CONTROLLED_DRILL_PLAN.map((entry) => {
+    const artifact = artifacts.get(entry.id) ?? null;
+    if (!artifact) return {
+      ...entry,
+      status: "not-run",
+      contractPassed: false,
+      trustedRunnerAccepted: false,
+    };
+    const artifactPath = path.join(runDirectory, `${entry.id}.json`);
+    atomicWriteJson(artifactPath, artifact);
+    const assessment = assessDrawingRollbackDrillArtifact(entry.id, artifact);
+    const contractPassed = assessment.contractPassed === true;
+    const trustedRunnerAccepted = contractPassed && runAuthorityPassed;
+    return {
+      ...entry,
+      status: trustedRunnerAccepted ? "passed" : "failed",
+      contractPassed,
+      trustedRunnerAccepted,
+      artifactPath,
+      artifactSha256: canonicalArtifactSha256(artifact),
+      evidenceKind: assessment.evidenceKind,
+      assessmentFailures: assessment.failures,
+    };
+  });
+  report.workerHarnessPassed = [...IMPLEMENTED_DRILL_IDS].every((drillId) => (
+    report.drills.find((drill) => drill.id === drillId)?.trustedRunnerAccepted === true
+  ));
+  report.harnessPassed = report.workerHarnessPassed && cleanupComplete
+    && finalDiagnosticFailures.length === 0;
+  report.phase9RollbackDrillsPassed = report.drills.every((drill) => (
+    drill.trustedRunnerAccepted === true
+  ));
+  report.status = report.phase9RollbackDrillsPassed
+    ? "passed"
+    : executionFailure || !report.workerHarnessPassed
+      ? "failed"
+      : "partial";
+  report.lifecycle = {
+    ...report.lifecycle,
+    diagnosticsClosed: cleanup?.diagnosticsClosed === true,
+    browserClosed: cleanup?.browser?.exited === true,
+    serverClosed: cleanup?.servers?.preview?.exited === true && cleanup?.servers?.api?.exited === true,
+    runClosed: cleanupComplete,
+  };
+  report.evidence = {
+    buildFingerprint: session?.buildReceipt?.buildFingerprint ?? null,
+    initialBuildAuthoritative: session?.initialBuildEvidence?.authoritative === true,
+    perDrillBuildAuthorityPassed,
+    drillBuildAuthorities: Object.freeze((workerResult?.drills ?? []).map((artifact) => (
+      artifact.buildAuthority ?? null
+    ))),
+    rollbackAuthority: session?.rollbackAuthority ?? null,
+    authoritativeState,
+    liveDiagnostics,
+    finalDiagnosticFailures,
+    baseline: workerResult?.baseline ?? null,
+    finalDocument: workerResult?.finalDocument ?? null,
+  };
+  report.cleanup = cleanup;
+  report.failureReasons = currentFailureReasons(report, executionFailure, finalDiagnosticFailures);
+  report.updatedAt = new Date().toISOString();
+  report.completedAt = report.updatedAt;
   atomicWriteJson(reportPath, report);
   return Object.freeze({ reportPath, report });
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     process.stdout.write(`${usage()}\n`);
     return;
   }
-  const { reportPath, report } = writeNotImplementedPartial(args);
+  const result = await runControlledRollbackDrills(args);
   process.stdout.write(`${JSON.stringify({
-    report: reportPath,
-    status: report.status,
-    phase9RollbackDrillsPassed: false,
-    failureReasons: report.failureReasons,
+    report: result.reportPath,
+    runId: result.report.runId,
+    status: result.report.status,
+    workerHarnessPassed: result.report.workerHarnessPassed,
+    phase9RollbackDrillsPassed: result.report.phase9RollbackDrillsPassed,
+    cleanupComplete: result.report.cleanup?.summary?.complete === true,
+    failureReasons: result.report.failureReasons,
   }, null, 2)}\n`);
-  process.exitCode = 1;
+  if (!result.report.phase9RollbackDrillsPassed) process.exitCode = 1;
 }
 
-main();
+const DIRECT_ENTRYPOINT = process.argv[1] ? path.resolve(process.argv[1]) : null;
+const THIS_ENTRYPOINT = fileURLToPath(import.meta.url);
+const DIRECT_EXECUTION = DIRECT_ENTRYPOINT !== null && (
+  process.platform === "win32"
+    ? DIRECT_ENTRYPOINT.toLowerCase() === THIS_ENTRYPOINT.toLowerCase()
+    : DIRECT_ENTRYPOINT === THIS_ENTRYPOINT
+);
+
+if (DIRECT_EXECUTION) await main();

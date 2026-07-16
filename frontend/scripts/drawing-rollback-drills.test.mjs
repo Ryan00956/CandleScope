@@ -46,6 +46,19 @@ function workerIdentity(jobId, value) {
 }
 
 function commonArtifact(drillId, injectionKind) {
+  const workerInit = drillId === "worker-init-failure";
+  const offscreen = drillId === "offscreen-canvas-unsupported";
+  const workerTargets = workerInit ? [] : [{
+    targetId: "drawing-worker-1",
+    path: "assets/drawing.worker-test.js",
+    active: !offscreen,
+    manifestBacked: true,
+    constructorProvenanceAccepted: true,
+    networkProvenanceAccepted: true,
+    assetAccepted: true,
+    assetDigest: digest("e"),
+    expectedAssetDigest: digest("e"),
+  }];
   return {
     schemaVersion: "drawing-rollback-drill/v2",
     drillId,
@@ -64,10 +77,58 @@ function commonArtifact(drillId, injectionKind) {
       startedAt: "2026-07-16T08:00:00.000Z",
       completedAt: "2026-07-16T08:01:00.000Z",
     },
+    buildAuthority: {
+      kind: "controlled-browser-build-authority",
+      drillId,
+      capturedAt: "2026-07-16T08:00:59.500Z",
+      authoritative: true,
+      fullBuildAuthoritative: !offscreen,
+      assetBuildAuthoritative: true,
+      buildId: "controlled-build-1",
+      buildFingerprint: digest("b"),
+      assetDigest: digest("c"),
+      currentAssetDigest: digest("c"),
+      buildInputDigest: digest("d"),
+      currentBuildInputDigest: digest("d"),
+      gitRevision: "0123456789abcdef",
+      managedOrigin: "http://127.0.0.1:4173",
+      observedOrigin: "http://127.0.0.1:4173",
+      href: "http://127.0.0.1:4173/",
+      matchesManagedOrigin: true,
+      matchesManagedDocument: true,
+      entryAssetsLoaded: true,
+      networkAssetsPassed: !offscreen,
+      networkAssetAuthorityPassed: true,
+      networkQuiescencePassed: true,
+      browserLoadedAssetsAccepted: true,
+      domLoadedAssetsAccepted: true,
+      expectedEntriesPresentInDom: true,
+      distMatchesBuild: true,
+      buildInputsMatch: true,
+      gitMatchesBuild: true,
+      managedOriginGuardPassed: true,
+      workerDiagnosticsPassed: true,
+      handlerSettlementsPassed: true,
+      workerLifecycle: {
+        kind: workerInit
+          ? "construction-failed-before-target"
+          : offscreen
+            ? "detached-after-typed-fallback"
+            : "active-worker",
+        accepted: true,
+        drawingWorkerTargetCount: workerTargets.length,
+        activeDrawingWorkerTargetCount: workerTargets.filter((target) => target.active).length,
+        detachedDrawingWorkerTargetCount: workerTargets.filter((target) => !target.active).length,
+        constructionFaultCount: workerInit ? 1 : 0,
+        assetAuthorityAccepted: true,
+        targets: workerTargets,
+      },
+    },
     injection: {
       kind: injectionKind,
       armed: true,
       observed: true,
+      buildAuthorityCurrent: true,
     },
     diagnostics: {
       crashCount: 0,
@@ -101,24 +162,86 @@ function preservedOutcome() {
   };
 }
 
+function configuredEnvironmentWorkerRequest() {
+  return {
+    engineMode: "scene-canary",
+    backend: "worker",
+    engineModeSource: "environment",
+    backendSource: "environment",
+  };
+}
+
+function cleanSceneCanaryRuntime(overrides = {}) {
+  return {
+    engineMode: "scene-canary",
+    scenePublicationReady: true,
+    attachedPrimitiveCount: 1,
+    backend: "worker",
+    backendSource: "environment",
+    workerResultDelayMs: 0,
+    workerAvailability: "available",
+    workerUnavailableReason: null,
+    offscreenSupported: true,
+    queueDepthMax: 0,
+    inFlightMax: 0,
+    queueDepthCurrent: 0,
+    inFlightCurrent: 0,
+    workerJobDelta: 0,
+    workerResultDelta: 0,
+    pendingDropDelta: 0,
+    staleResultDropDelta: 0,
+    stalePublishCount: 0,
+    sceneFallbackCount: 0,
+    sceneRuntimeFaultCount: 0,
+    legacyFallbackSucceededCount: 0,
+    ...overrides,
+  };
+}
+
 function workerInitArtifact() {
   return {
     ...commonArtifact("worker-init-failure", "worker-constructor-throws"),
     observations: {
+      configuredRequest: configuredEnvironmentWorkerRequest(),
+      runtime: cleanSceneCanaryRuntime({
+        backend: "main-thread",
+        workerAvailability: "unavailable",
+        workerUnavailableReason: "construction-failed",
+      }),
       workerConstructorAttempts: { before: 0, after: 1 },
       workerConstructionFailures: { before: 0, after: 1 },
       fallbackBackend: "main-thread",
       scenePublicationCountDelta: 1,
       workerJobs: { before: 0, after: 0 },
+      stalePublishCount: { before: 0, after: 0 },
     },
     outcome: preservedOutcome(),
   };
 }
 
 function offscreenArtifact() {
+  const common = commonArtifact(
+    "offscreen-canvas-unsupported",
+    "offscreen-canvas-unavailable",
+  );
   return {
-    ...commonArtifact("offscreen-canvas-unsupported", "offscreen-canvas-unavailable"),
+    ...common,
+    injection: {
+      ...common.injection,
+      capabilityReceipt: {
+        realm: "drawing-worker-global",
+        capability: "OffscreenCanvas",
+        supported: false,
+        beforeType: "function",
+        afterType: "undefined",
+      },
+    },
     observations: {
+      configuredRequest: configuredEnvironmentWorkerRequest(),
+      runtime: cleanSceneCanaryRuntime({
+        backend: "main-thread",
+        workerAvailability: "disposed",
+      }),
       workerCreations: { before: 0, after: 1 },
       offscreenSupported: false,
       firstRequest: {
@@ -239,17 +362,32 @@ function indexedDbArtifact() {
 function staleGenerationArtifact() {
   const staleStamp = stamp({ viewportRevision: 18 });
   const currentStamp = stamp();
+  const common = commonArtifact("worker-stale-generation", "worker-stale-generation");
   return {
-    ...commonArtifact("worker-stale-generation", "worker-stale-generation"),
+    ...common,
+    injection: {
+      ...common.injection,
+      delayMs: 96,
+    },
     observations: {
       staleResultDropDelta: 12,
       stalePublishDelta: 0,
+      stalePublishCount: { before: 0, after: 0 },
       workerJobDelta: 30,
       workerResultDelta: 4,
       queueDepthMax: 2,
       queueDepthCurrent: 0,
       inFlightMax: 1,
       inFlightCurrent: 0,
+      runtime: cleanSceneCanaryRuntime({
+        workerResultDelayMs: 96,
+        queueDepthMax: 2,
+        inFlightMax: 1,
+        workerJobDelta: 30,
+        workerResultDelta: 4,
+        pendingDropDelta: 12,
+        staleResultDropDelta: 12,
+      }),
     },
     identities: {
       returned: workerIdentity(29, staleStamp),
@@ -706,6 +844,73 @@ test("dedicated v2 contracts derive from evidence and ignore asserted completion
   ).failures.includes("dedicated-schema-mismatch"));
 });
 
+test("dedicated contracts require a current per-drill controlled build authority receipt", () => {
+  for (const [label, mutate, reason] of [
+    [
+      "missing receipt",
+      (artifact) => { delete artifact.buildAuthority; },
+      "per-drill-build-authority-missing",
+    ],
+    [
+      "not authoritative",
+      (artifact) => { artifact.buildAuthority.authoritative = false; },
+      "per-drill-build-not-authoritative",
+    ],
+    [
+      "asset digest drift",
+      (artifact) => { artifact.buildAuthority.currentAssetDigest = digest("e"); },
+      "per-drill-asset-digest-mismatch",
+    ],
+    [
+      "build input drift",
+      (artifact) => { artifact.buildAuthority.currentBuildInputDigest = digest("e"); },
+      "per-drill-build-input-digest-mismatch",
+    ],
+    [
+      "git revision drift",
+      (artifact) => { artifact.buildAuthority.gitRevision = "fedcba9876543210"; },
+      "per-drill-git-revision-mismatch",
+    ],
+    [
+      "managed origin drift",
+      (artifact) => { artifact.buildAuthority.observedOrigin = "http://127.0.0.1:4174"; },
+      "per-drill-managed-origin-mismatch",
+    ],
+    [
+      "entry asset rejection",
+      (artifact) => { artifact.buildAuthority.entryAssetsLoaded = false; },
+      "per-drill-entry-assets-not-proven",
+    ],
+  ]) {
+    const artifact = workerInitArtifact();
+    mutate(artifact);
+    const result = assessDrawingRollbackDrillArtifact("worker-init-failure", artifact);
+    assert.ok(result.failures.includes(reason), `${label}: ${result.failures.join(", ")}`);
+  }
+
+  for (const [drillId, artifact, reason] of [
+    [
+      "worker-init-failure",
+      workerInitArtifact(),
+      "worker-init-current-build-authority-not-proven",
+    ],
+    [
+      "offscreen-canvas-unsupported",
+      offscreenArtifact(),
+      "offscreen-current-build-authority-not-proven",
+    ],
+    [
+      "worker-stale-generation",
+      staleGenerationArtifact(),
+      "stale-generation-current-build-authority-not-proven",
+    ],
+  ]) {
+    artifact.injection.buildAuthorityCurrent = false;
+    const result = assessDrawingRollbackDrillArtifact(drillId, artifact);
+    assert.ok(result.failures.includes(reason), `${drillId}: ${result.failures.join(", ")}`);
+  }
+});
+
 test("aggregate acceptance never promotes schema-only or Phase 6 partial artifacts", () => {
   const artifacts = completeArtifacts({ phase6: true });
   const result = assessDrawingRollbackDrills({ artifacts });
@@ -812,6 +1017,77 @@ test("worker fallback drills require exact data preservation and current stamps"
   ));
 });
 
+test("worker-init drill requires the configured scene-canary worker request and clean fallback runtime", () => {
+  for (const [label, mutate, reason] of [
+    [
+      "configured request",
+      (artifact) => { artifact.observations.configuredRequest.backendSource = "default"; },
+      "worker-init-configured-environment-worker-request-invalid-or-missing",
+    ],
+    [
+      "scene canary",
+      (artifact) => { artifact.observations.runtime.engineMode = "legacy"; },
+      "worker-init-runtime-not-scene-canary",
+    ],
+    [
+      "main thread fallback",
+      (artifact) => { artifact.observations.runtime.backend = "worker"; },
+      "worker-init-runtime-backend-not-main-thread",
+    ],
+    [
+      "environment backend",
+      (artifact) => { artifact.observations.runtime.backendSource = "default"; },
+      "worker-init-runtime-backend-source-not-environment",
+    ],
+    [
+      "unavailable worker",
+      (artifact) => { artifact.observations.runtime.workerAvailability = "available"; },
+      "worker-init-worker-availability-not-unavailable",
+    ],
+    [
+      "construction reason",
+      (artifact) => { artifact.observations.runtime.workerUnavailableReason = "transport-error"; },
+      "worker-init-unavailable-reason-not-construction-failed",
+    ],
+    [
+      "single primitive",
+      (artifact) => { artifact.observations.runtime.attachedPrimitiveCount = 0; },
+      "worker-init-attached-primitive-count-not-one",
+    ],
+    [
+      "zero scene fallback",
+      (artifact) => { artifact.observations.runtime.sceneFallbackCount = 1; },
+      "worker-init-scene-fallback-observed-or-missing",
+    ],
+    [
+      "zero runtime fault",
+      (artifact) => { artifact.observations.runtime.sceneRuntimeFaultCount = 1; },
+      "worker-init-runtime-fault-observed-or-missing",
+    ],
+    [
+      "zero legacy fallback",
+      (artifact) => { artifact.observations.runtime.legacyFallbackSucceededCount = 1; },
+      "worker-init-legacy-fallback-observed-or-missing",
+    ],
+    [
+      "zero stale publication runtime",
+      (artifact) => { artifact.observations.runtime.stalePublishCount = 1; },
+      "worker-init-stale-publish-observed-or-missing",
+    ],
+    [
+      "zero stale publication receipt",
+      (artifact) => { artifact.observations.stalePublishCount.after = 1; },
+      "worker-init-stale-publish-counter-not-zero-before-and-after",
+    ],
+  ]) {
+    const artifact = workerInitArtifact();
+    mutate(artifact);
+    const assessment = assessDrawingRollbackDrillArtifact("worker-init-failure", artifact);
+    assert.equal(assessment.contractPassed, false, label);
+    assert.ok(assessment.failures.includes(reason), label);
+  }
+});
+
 test("Offscreen unsupported falls back once and remains sticky without a second worker round-trip", () => {
   const valid = assessDrawingRollbackDrillArtifact(
     "offscreen-canvas-unsupported",
@@ -854,6 +1130,55 @@ test("Offscreen unsupported falls back once and remains sticky without a second 
     "offscreen-canvas-unsupported",
     extraInitialRoundTrip,
   ).failures.includes("offscreen-first-worker-round-trip-not-observed"));
+});
+
+test("Offscreen drill requires a worker-global capability receipt and a clean environment runtime", () => {
+  for (const [label, mutate, reason] of [
+    [
+      "worker-global capability",
+      (artifact) => { artifact.injection.capabilityReceipt.realm = "page-global"; },
+      "offscreen-worker-global-capability-receipt-invalid-or-missing",
+    ],
+    [
+      "configured request",
+      (artifact) => { artifact.observations.configuredRequest.engineModeSource = "url"; },
+      "offscreen-configured-environment-worker-request-invalid-or-missing",
+    ],
+    [
+      "environment backend",
+      (artifact) => { artifact.observations.runtime.backendSource = "default"; },
+      "offscreen-runtime-backend-source-not-environment",
+    ],
+    [
+      "single primitive",
+      (artifact) => { artifact.observations.runtime.attachedPrimitiveCount = 0; },
+      "offscreen-attached-primitive-count-not-one",
+    ],
+    [
+      "zero scene fallback",
+      (artifact) => { artifact.observations.runtime.sceneFallbackCount = 1; },
+      "offscreen-scene-fallback-observed-or-missing",
+    ],
+    [
+      "zero runtime fault",
+      (artifact) => { artifact.observations.runtime.sceneRuntimeFaultCount = 1; },
+      "offscreen-runtime-fault-observed-or-missing",
+    ],
+    [
+      "zero legacy fallback",
+      (artifact) => { artifact.observations.runtime.legacyFallbackSucceededCount = 1; },
+      "offscreen-legacy-fallback-observed-or-missing",
+    ],
+  ]) {
+    const artifact = offscreenArtifact();
+    mutate(artifact);
+    const assessment = assessDrawingRollbackDrillArtifact(
+      "offscreen-canvas-unsupported",
+      artifact,
+    );
+    assert.equal(assessment.contractPassed, false, label);
+    assert.ok(assessment.failures.includes(reason), label);
+  }
 });
 
 test("stale-generation drill proves returned, accepted, published, and latest identities", () => {
@@ -955,6 +1280,80 @@ test("stale-generation drill proves returned, accepted, published, and latest id
     );
     assert.equal(assessment.contractPassed, false, `${field}=${value}`);
     assert.ok(assessment.failures.includes(reason), `${field}=${value}`);
+  }
+});
+
+test("stale-generation drill requires exact 96ms pressure, bounded runtime, and zero fallback", () => {
+  for (const [label, mutate, reason] of [
+    [
+      "injection delay",
+      (artifact) => { artifact.injection.delayMs = 95; },
+      "stale-generation-injection-delay-not-96ms",
+    ],
+    [
+      "runtime delay",
+      (artifact) => { artifact.observations.runtime.workerResultDelayMs = 95; },
+      "stale-generation-runtime-delay-not-96ms",
+    ],
+    [
+      "worker backend",
+      (artifact) => { artifact.observations.runtime.backend = "main-thread"; },
+      "stale-generation-runtime-backend-not-worker",
+    ],
+    [
+      "worker available",
+      (artifact) => { artifact.observations.runtime.workerAvailability = "unavailable"; },
+      "stale-generation-worker-not-available",
+    ],
+    [
+      "queue max exactly two",
+      (artifact) => { artifact.observations.runtime.queueDepthMax = 1; },
+      "stale-generation-runtime-queue-depth-max-not-two",
+    ],
+    [
+      "inflight max exactly one",
+      (artifact) => { artifact.observations.runtime.inFlightMax = 0; },
+      "stale-generation-runtime-inflight-max-not-one",
+    ],
+    [
+      "pending latest drop",
+      (artifact) => { artifact.observations.runtime.pendingDropDelta = 0; },
+      "stale-generation-pending-drop-not-observed",
+    ],
+    [
+      "stale publication before and after",
+      (artifact) => { artifact.observations.stalePublishCount.after = 1; },
+      "stale-generation-publish-count-not-zero-before-and-after",
+    ],
+    [
+      "runtime stale publication",
+      (artifact) => { artifact.observations.runtime.stalePublishCount = 1; },
+      "stale-generation-runtime-stale-publish-observed-or-missing",
+    ],
+    [
+      "zero scene fallback",
+      (artifact) => { artifact.observations.runtime.sceneFallbackCount = 1; },
+      "stale-generation-scene-fallback-observed-or-missing",
+    ],
+    [
+      "zero runtime fault",
+      (artifact) => { artifact.observations.runtime.sceneRuntimeFaultCount = 1; },
+      "stale-generation-runtime-fault-observed-or-missing",
+    ],
+    [
+      "zero legacy fallback",
+      (artifact) => { artifact.observations.runtime.legacyFallbackSucceededCount = 1; },
+      "stale-generation-legacy-fallback-observed-or-missing",
+    ],
+  ]) {
+    const artifact = staleGenerationArtifact();
+    mutate(artifact);
+    const assessment = assessDrawingRollbackDrillArtifact(
+      "worker-stale-generation",
+      artifact,
+    );
+    assert.equal(assessment.contractPassed, false, label);
+    assert.ok(assessment.failures.includes(reason), label);
   }
 });
 

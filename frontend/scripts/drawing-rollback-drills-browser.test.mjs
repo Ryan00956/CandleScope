@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+
+import {
+  buildInitialControlledRunReport,
+  CONTROLLED_DRILL_PLAN,
+  parseArgs,
+  workerDrillBuildAuthorityPassed,
+} from "./drawing-rollback-drills-browser.mjs";
 
 const FRONTEND_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CLI = path.join(FRONTEND_ROOT, "scripts", "drawing-rollback-drills-browser.mjs");
@@ -17,6 +22,11 @@ const EXPECTED_DRILL_ORDER = Object.freeze([
   "series-rebuild-before-export",
   "continuous-dpr-resize",
   "canary-to-legacy-snapshot",
+]);
+const IMPLEMENTED_WORKER_DRILLS = Object.freeze([
+  "worker-init-failure",
+  "offscreen-canvas-unsupported",
+  "worker-stale-generation",
 ]);
 
 function runCli(args, environment = {}) {
@@ -54,43 +64,96 @@ test("controlled rollback browser CLI rejects every authority-bypassing option",
   }
 });
 
-test("incomplete runner writes only a fail-closed partial report for the fixed eight drills", () => {
-  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "candlescope-rollback-runner-"));
-  try {
-    const result = runCli(
-      ["--out-dir", temporaryRoot, "--timeout-ms", "1000"],
-      { CHROME_PATH: "C:\\untrusted\\ambient-chrome.exe" },
-    );
-    assert.equal(result.status, 1, result.stderr);
-    const summary = JSON.parse(result.stdout);
-    assert.equal(summary.status, "partial");
-    assert.equal(summary.phase9RollbackDrillsPassed, false);
-    assert.deepEqual(summary.failureReasons, [
-      "controlled-browser-drill-producers-not-implemented",
-    ]);
-    const report = JSON.parse(fs.readFileSync(summary.report, "utf8"));
-    assert.equal(report.schemaVersion, "drawing-rollback-controlled-run-partial/v1");
-    assert.equal(report.status, "partial");
-    assert.equal(report.phase9RollbackDrillsPassed, false);
-    assert.equal(report.harnessPassed, false);
-    assert.equal(report.planValid, true);
-    assert.equal(report.drills.length, 8);
-    assert.deepEqual(report.drills.map((drill) => drill.id), EXPECTED_DRILL_ORDER);
-    assert.equal(new Set(report.drills.map((drill) => drill.id)).size, 8);
-    assert.ok(report.drills.every((drill) => (
-      drill.status === "not-run"
-        && drill.contractPassed === false
-        && drill.trustedRunnerAccepted === false
-    )));
-    assert.equal(report.configuration.externalArtifactsAccepted, false);
-    assert.equal(report.configuration.externalCdpAccepted, false);
-    assert.equal(report.configuration.allowIncomplete, false);
-    assert.equal(report.configuration.chromePathConfigured, false);
-    assert.equal(report.lifecycle.runClosed, false);
-    assert.ok(!fs.existsSync(summary.report.replace(".partial.json", ".json")));
-  } finally {
-    fs.rmSync(temporaryRoot, { recursive: true, force: true });
-  }
+test("initial controlled report is fail closed for the fixed eight-drill authority", () => {
+  const args = parseArgs(["--out-dir", "controlled-output", "--timeout-ms", "1000"]);
+  const report = buildInitialControlledRunReport(args, {
+    runId: "phase9-pure-test",
+    startedAt: "2026-07-16T00:00:00.000Z",
+  });
+  assert.equal(report.schemaVersion, "drawing-rollback-controlled-run-partial/v2");
+  assert.equal(report.status, "partial");
+  assert.equal(report.phase9RollbackDrillsPassed, false);
+  assert.equal(report.harnessPassed, false);
+  assert.equal(report.workerHarnessPassed, false);
+  assert.equal(report.planValid, true);
+  assert.equal(report.drills.length, 8);
+  assert.deepEqual(report.drills.map((drill) => drill.id), EXPECTED_DRILL_ORDER);
+  assert.deepEqual(CONTROLLED_DRILL_PLAN.map((drill) => drill.id), EXPECTED_DRILL_ORDER);
+  assert.equal(new Set(report.drills.map((drill) => drill.id)).size, 8);
+  assert.ok(report.drills.every((drill) => (
+    drill.status === "not-run"
+      && drill.contractPassed === false
+      && drill.trustedRunnerAccepted === false
+  )));
+  assert.equal(report.configuration.externalArtifactsAccepted, false);
+  assert.equal(report.configuration.externalCdpAccepted, false);
+  assert.equal(report.configuration.allowIncomplete, false);
+  assert.equal(report.configuration.chromePathConfigured, false);
+  assert.equal(report.lifecycle.runClosed, false);
+  assert.deepEqual(report.failureReasons, []);
+});
+
+test("run authority requires exact current build receipts from every worker drill", () => {
+  const rawDigest = (character) => character.repeat(64);
+  const digest = (character) => `sha256:${rawDigest(character)}`;
+  const buildReceipt = {
+    buildId: "controlled-build-1",
+    buildFingerprint: { sha256: rawDigest("a") },
+    assetFingerprint: { sha256: rawDigest("b") },
+    inputFingerprint: { sha256: rawDigest("c") },
+    git: { commit: "0123456789abcdef" },
+  };
+  const workerResult = {
+    drills: IMPLEMENTED_WORKER_DRILLS.map((drillId) => {
+      const offscreen = drillId === "offscreen-canvas-unsupported";
+      return {
+        drillId,
+        buildAuthority: {
+          kind: "controlled-browser-build-authority",
+          drillId,
+          authoritative: true,
+          fullBuildAuthoritative: !offscreen,
+          assetBuildAuthoritative: true,
+          buildId: buildReceipt.buildId,
+          buildFingerprint: digest("a"),
+          assetDigest: digest("b"),
+          currentAssetDigest: digest("b"),
+          buildInputDigest: digest("c"),
+          currentBuildInputDigest: digest("c"),
+          gitRevision: buildReceipt.git.commit,
+          matchesManagedOrigin: true,
+          matchesManagedDocument: true,
+          entryAssetsLoaded: true,
+          networkAssetsPassed: !offscreen,
+          networkAssetAuthorityPassed: true,
+          networkQuiescencePassed: true,
+          browserLoadedAssetsAccepted: true,
+          domLoadedAssetsAccepted: true,
+          expectedEntriesPresentInDom: true,
+          distMatchesBuild: true,
+          buildInputsMatch: true,
+          gitMatchesBuild: true,
+          managedOriginGuardPassed: true,
+          workerDiagnosticsPassed: true,
+          handlerSettlementsPassed: true,
+          workerLifecycle: {
+            accepted: true,
+            assetAuthorityAccepted: true,
+          },
+        },
+      };
+    }),
+  };
+  assert.equal(workerDrillBuildAuthorityPassed(workerResult, buildReceipt), true);
+
+  workerResult.drills[1].buildAuthority.currentAssetDigest = digest("d");
+  assert.equal(workerDrillBuildAuthorityPassed(workerResult, buildReceipt), false);
+  workerResult.drills[1].buildAuthority.currentAssetDigest = digest("b");
+  workerResult.drills[2].drillId = "worker-init-failure";
+  assert.equal(workerDrillBuildAuthorityPassed(workerResult, buildReceipt), false);
+  workerResult.drills[2].drillId = "worker-stale-generation";
+  workerResult.drills.pop();
+  assert.equal(workerDrillBuildAuthorityPassed(workerResult, buildReceipt), false);
 });
 
 test("controlled rollback browser CLI rejects duplicate and malformed safe options", () => {
@@ -99,7 +162,7 @@ test("controlled rollback browser CLI rejects duplicate and malformed safe optio
   assert.match(duplicate.stderr, /duplicate option/);
   const malformed = runCli(["--timeout-ms", "0"]);
   assert.equal(malformed.status, 1);
-  assert.match(malformed.stderr, /must be a positive integer/);
+  assert.match(malformed.stderr, /must be an integer between 1000 and 600000/);
 
   for (const swallowedAuthorityOption of [
     ["--chrome", "--headless", "--help"],

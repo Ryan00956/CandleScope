@@ -972,6 +972,59 @@ test("processor retains the typed fallback when the bitmap backing store exceeds
   }
 });
 
+test("processor retains the typed fallback when OffscreenCanvas is unavailable", async () => {
+  const responses: DrawingWorkerResponse[] = [];
+  const transferCounts: number[] = [];
+  let factoryCalls = 0;
+  const processor = createDrawingWorkerProcessor({
+    postMessage(message, transferables) {
+      responses.push(message);
+      transferCounts.push(transferables.length);
+    },
+    yieldControl: async () => {},
+    offscreenCanvasFactory: () => {
+      factoryCalls += 1;
+      return null;
+    },
+  });
+  const payload: DrawingWorkerViewportPayload = {
+    ...viewport("offscreen-unavailable", [2, 2, 8, 8]),
+    widthCssPx: 32,
+    heightCssPx: 24,
+    dpr: 1,
+  };
+  const header = createDrawingWorkerJobHeader(7, 9, stamp({
+    widthCssPx: payload.widthCssPx,
+    heightCssPx: payload.heightCssPx,
+    dpr: payload.dpr,
+  }));
+
+  assert.equal(await processor.handleMessage(request(
+    header,
+    payload,
+    [upsert("offscreen-unavailable", 1)],
+  )), true);
+  assert.equal(factoryCalls, 1, "a valid bounded bitmap request probes capability exactly once");
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0]?.type, "drawing-worker/result");
+  if (responses[0]?.type === "drawing-worker/result") {
+    assert.deepEqual(responses[0].header, header);
+    assert.equal(responses[0].result.kind, "typed-draw-result");
+    if (responses[0].result.kind === "typed-draw-result") {
+      assert.equal(responses[0].result.widthCssPx, payload.widthCssPx);
+      assert.equal(responses[0].result.heightCssPx, payload.heightCssPx);
+      assert.equal(responses[0].result.dpr, payload.dpr);
+      assert.deepEqual(responses[0].result.entityIds, payload.entityIds);
+      assert.deepEqual(responses[0].result.pointCounts, payload.pointCounts);
+      assert.equal(responses[0].result.rawPointCount, 3);
+      assert.equal(responses[0].result.renderedPointCount, 2);
+      assert.equal(responses[0].result.canonicalEntityCount, 1);
+      assert.equal(responses[0].result.byteLength, drawingWorkerViewportByteLength(payload));
+    }
+  }
+  assert.deepEqual(transferCounts, [8]);
+});
+
 test("processor groups only consecutive opaque source-over freehands into one atlas layer", async () => {
   const responses: DrawingWorkerResponse[] = [];
   const context = new FakeRasterContext();

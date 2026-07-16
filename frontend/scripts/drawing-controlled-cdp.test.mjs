@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 import {
   CONTROLLED_DIAGNOSTIC_WORKER_DOMAIN_CAPABILITIES,
@@ -20,6 +21,7 @@ import {
   createManagedOriginGuard,
   createControlledNetworkAssetTracker,
   createControlledWorkerDiagnosticsController,
+  diagnosticBootstrapSource,
   extractHtmlAssetPaths,
   fingerprintBuildToolImplementation,
   fingerprintFileEntries,
@@ -29,6 +31,156 @@ import {
   assertControlledRunnerRuntime,
   summarizeControlledCleanup,
 } from "./drawing-controlled-cdp.mjs";
+
+const CONTROLLED_ROLLBACK_SESSION_KEY = "__CANDLESCOPE_CONTROLLED_ROLLBACK_DRILL_TOKEN__";
+const CONTROLLED_ROLLBACK_HANDLE = "__CANDLESCOPE_CONTROLLED_ROLLBACK_DRILL__";
+const CONTROLLED_DIAGNOSTIC_BINDING = "__CANDLESCOPE_CONTROLLED_CDP_REPORT__";
+const CONTROLLED_ROLLBACK_RUN_ID = "controlled-run-worker-rollback";
+const CONTROLLED_ROLLBACK_AUTHORITY_TOKEN = "controlled-worker-rollback-authority";
+const CONTROLLED_ROLLBACK_AUTHORITY_DIGEST = "a".repeat(64);
+const CONTROLLED_ROLLBACK_FAULT_ID = "11111111-1111-4111-8111-111111111111";
+const CONTROLLED_HASHED_DRAWING_WORKER_PATH = "assets/drawing.worker-a1b2c3d4.js";
+
+function controlledRollbackToken(overrides = {}) {
+  return {
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    authorityToken: CONTROLLED_ROLLBACK_AUTHORITY_TOKEN,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    drillId: "worker-init-failure",
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    sequence: 1,
+    ...overrides,
+  };
+}
+
+function createDiagnosticBootstrapFixture({ token = controlledRollbackToken() } = {}) {
+  const values = new Map();
+  if (token !== null) {
+    values.set(CONTROLLED_ROLLBACK_SESSION_KEY, JSON.stringify(token));
+  }
+  const reports = [];
+  const nativeConstructions = [];
+  const listeners = new Map();
+  class FakeWorker {
+    constructor(url, options) {
+      nativeConstructions.push({ url: String(url), options });
+    }
+
+    postMessage() {}
+
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(listener);
+    }
+  }
+  const window = {
+    Worker: FakeWorker,
+    [CONTROLLED_DIAGNOSTIC_BINDING](payload) {
+      reports.push(JSON.parse(payload));
+    },
+  };
+  const sessionStorage = {
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+  };
+  const location = new URL("http://127.0.0.1:15173/");
+  runInNewContext(diagnosticBootstrapSource({
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    authorityToken: CONTROLLED_ROLLBACK_AUTHORITY_TOKEN,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    drawingWorkerPaths: [CONTROLLED_HASHED_DRAWING_WORKER_PATH],
+  }), {
+    DOMException,
+    URL,
+    addEventListener() {},
+    location,
+    sessionStorage,
+    window,
+  });
+  return {
+    location,
+    nativeConstructions,
+    reports,
+    sessionStorage,
+    snapshot() {
+      return JSON.parse(JSON.stringify(window[CONTROLLED_ROLLBACK_HANDLE].snapshot()));
+    },
+    window,
+  };
+}
+
+async function createWorkerConstructionFaultTrackerFixture() {
+  const files = [
+    { relativePath: "index.html", content: "index" },
+    { relativePath: "assets/main.js", content: "main" },
+    { relativePath: CONTROLLED_HASHED_DRAWING_WORKER_PATH, content: "worker" },
+  ];
+  const cdp = createFakeCdp({
+    responseBodies: new Map([
+      ["<top>\0document", { body: "index", base64Encoded: false }],
+      ["<top>\0entry", { body: "main", base64Encoded: false }],
+    ]),
+  });
+  const tracker = createControlledNetworkAssetTracker(cdp, "http://127.0.0.1:15173", {
+    entryAssetPaths: ["assets/main.js"],
+    assetFingerprint: fingerprintFileEntries(files),
+  }, 400, "main-frame", {
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    drawingWorkerPaths: [CONTROLLED_HASHED_DRAWING_WORKER_PATH],
+  });
+  const emitAsset = async (requestId, path, type, initiatorType) => {
+    const url = `http://127.0.0.1:15173${path}`;
+    await cdp.emit("Network.requestWillBeSent", {
+      requestId,
+      frameId: "main-frame",
+      loaderId: "loader-1",
+      type,
+      initiator: { type: initiatorType },
+      request: { url },
+    });
+    await cdp.emit("Network.responseReceived", {
+      requestId,
+      frameId: "main-frame",
+      loaderId: "loader-1",
+      type,
+      response: { url, status: 200 },
+    });
+    await cdp.emit("Network.loadingFinished", { requestId });
+  };
+  await emitAsset("document", "/", "Document", "other");
+  await emitAsset("entry", "/assets/main.js", "Script", "parser");
+  return { cdp, tracker };
+}
+
+function controlledWorkerConstructionFault(overrides = {}) {
+  return {
+    kind: "worker-constructor-fault",
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    drillId: "worker-init-failure",
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    sequence: 1,
+    url: `http://127.0.0.1:15173/${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`,
+    workerType: "module",
+    workerName: "candlescope-drawing-worker",
+    ...overrides,
+  };
+}
+
+async function emitWorkerConstructionFault(cdp, overrides = {}) {
+  await cdp.emit("Runtime.bindingCalled", {
+    name: CONTROLLED_DIAGNOSTIC_BINDING,
+    payload: JSON.stringify(controlledWorkerConstructionFault(overrides)),
+  });
+}
 
 function createFakeCdp({ responseBodies = new Map(), evaluate = null, onSend = null } = {}) {
   const handlers = new Map();
@@ -332,6 +484,184 @@ function passingHeadedChromeCloseEvidence(rootPid = 101) {
     browserCloseReceipt: passingBrowserCloseReceipt(rootPid),
   };
 }
+
+test("diagnostic rollback authority faults only the exact manifest drawing worker construction", () => {
+  const fixture = createDiagnosticBootstrapFixture();
+  const drawingWorkerUrl = new URL(
+    `/${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`,
+    fixture.location,
+  ).href;
+
+  assert.equal(fixture.sessionStorage.getItem(CONTROLLED_ROLLBACK_SESSION_KEY), null);
+  assert.doesNotThrow(() => new fixture.window.Worker(
+    "http://127.0.0.1:15173/assets/unrelated.worker.js",
+    { type: "module", name: "candlescope-drawing-worker" },
+  ));
+  assert.doesNotThrow(() => new fixture.window.Worker(
+    "http://127.0.0.1:15173/assets/drawing.worker.js",
+    { type: "module", name: "candlescope-drawing-worker" },
+  ));
+  assert.doesNotThrow(() => new fixture.window.Worker(drawingWorkerUrl, {
+    name: "candlescope-drawing-worker",
+  }));
+  assert.doesNotThrow(() => new fixture.window.Worker(drawingWorkerUrl, {
+    type: "module",
+    name: "other-worker",
+  }));
+  assert.throws(
+    () => new fixture.window.Worker(drawingWorkerUrl, {
+      type: "module",
+      name: "candlescope-drawing-worker",
+    }),
+    (error) => error?.name === "NotSupportedError"
+      && error?.message === "Controlled drawing worker construction failure",
+  );
+
+  const snapshot = fixture.snapshot();
+  assert.equal(snapshot.authorityAccepted, true);
+  assert.equal(snapshot.tokenRemoved, true);
+  assert.equal(snapshot.drillId, "worker-init-failure");
+  assert.equal(snapshot.workerConstructorAttempts, 3);
+  assert.equal(snapshot.workerConstructionFailures, 1);
+  assert.equal(snapshot.workerCreations, 2);
+  assert.equal(snapshot.observed, true);
+  assert.equal(snapshot.constructionFailure.url, drawingWorkerUrl);
+  assert.equal(snapshot.constructionFailure.workerType, "module");
+  assert.equal(snapshot.constructionFailure.workerName, "candlescope-drawing-worker");
+  assert.equal(snapshot.constructionFailure.name, "NotSupportedError");
+  assert.equal(fixture.nativeConstructions.length, 4);
+  assert.deepEqual(fixture.reports.filter((report) => (
+    report.kind === "worker-constructor-fault"
+  )), [{
+    kind: "worker-constructor-fault",
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    drillId: "worker-init-failure",
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    sequence: 1,
+    url: drawingWorkerUrl,
+    workerType: "module",
+    workerName: "candlescope-drawing-worker",
+  }]);
+});
+
+test("diagnostic rollback bootstrap rejects missing or mismatched session authority", async (t) => {
+  const cases = [
+    { name: "missing token", token: null, tokenRemoved: false },
+    {
+      name: "mismatched token",
+      token: controlledRollbackToken({ authorityToken: "wrong-authority" }),
+      tokenRemoved: true,
+    },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, () => {
+      const fixture = createDiagnosticBootstrapFixture({ token: scenario.token });
+      assert.doesNotThrow(() => new fixture.window.Worker(
+        `http://127.0.0.1:15173/${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`,
+        { type: "module", name: "candlescope-drawing-worker" },
+      ));
+      const snapshot = fixture.snapshot();
+      assert.equal(snapshot.authorityAccepted, false);
+      assert.equal(snapshot.tokenRemoved, scenario.tokenRemoved);
+      assert.equal(snapshot.drillId, null);
+      assert.equal(snapshot.workerConstructorAttempts, 1);
+      assert.equal(snapshot.workerConstructionFailures, 0);
+      assert.equal(snapshot.workerCreations, 1);
+      assert.equal(snapshot.observed, false);
+      assert.equal(fixture.nativeConstructions.length, 1);
+      assert.equal(fixture.reports.some((report) => (
+        report.kind === "worker-constructor-fault"
+      )), false);
+    });
+  }
+});
+
+test("diagnostic rollback bootstrap counts and synchronously fails repeated exact faults", () => {
+  const fixture = createDiagnosticBootstrapFixture();
+  const construct = () => new fixture.window.Worker(
+    `http://127.0.0.1:15173/${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`,
+    { type: "module", name: "candlescope-drawing-worker" },
+  );
+  assert.throws(construct, { name: "NotSupportedError" });
+  assert.throws(construct, { name: "NotSupportedError" });
+
+  const snapshot = fixture.snapshot();
+  assert.equal(snapshot.workerConstructorAttempts, 2);
+  assert.equal(snapshot.workerConstructionFailures, 2);
+  assert.equal(snapshot.workerCreations, 0);
+  assert.equal(snapshot.observed, true);
+  assert.equal(fixture.nativeConstructions.length, 0);
+  assert.equal(fixture.reports.filter((report) => (
+    report.kind === "worker-constructor-fault"
+  )).length, 2);
+});
+
+test("asset tracker accepts one exact controlled worker construction fault in the current generation", async () => {
+  const fixture = await createWorkerConstructionFaultTrackerFixture();
+  await emitWorkerConstructionFault(fixture.cdp);
+
+  const snapshot = fixture.tracker.snapshot();
+  assert.equal(snapshot.currentGeneration, 1);
+  assert.equal(snapshot.passed, true);
+  assert.equal(snapshot.provenanceErrors.length, 0);
+  assert.equal(snapshot.drawingWorkerTargetCount, 0);
+  assert.deepEqual(snapshot.workerConstructionFaults, [{
+    ...snapshot.workerConstructionFaults[0],
+    kind: "controlled-worker-construction-fault",
+    generation: 1,
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    drillId: "worker-init-failure",
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    sequence: 1,
+    url: `http://127.0.0.1:15173/${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`,
+    path: CONTROLLED_HASHED_DRAWING_WORKER_PATH,
+    workerType: "module",
+    workerName: "candlescope-drawing-worker",
+  }]);
+  fixture.tracker.dispose();
+});
+
+test("asset tracker rejects mismatched controlled worker construction fault receipts", async (t) => {
+  const cases = [
+    { name: "run id", overrides: { runId: "other-run" } },
+    { name: "token digest", overrides: { authorityTokenSha256: "b".repeat(64) } },
+    { name: "fault id", overrides: { faultId: "not-a-fault-id" } },
+    {
+      name: "worker URL",
+      overrides: { url: "http://127.0.0.1:15173/assets/drawing.worker-other.js" },
+    },
+    { name: "worker type", overrides: { workerType: "classic" } },
+    { name: "worker name", overrides: { workerName: "other-worker" } },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const fixture = await createWorkerConstructionFaultTrackerFixture();
+      await emitWorkerConstructionFault(fixture.cdp, scenario.overrides);
+      const snapshot = fixture.tracker.snapshot();
+      assert.equal(snapshot.passed, false);
+      assert.equal(snapshot.workerConstructionFaults.length, 0);
+      assert.equal(snapshot.provenanceErrors.length, 1);
+      assert.equal(snapshot.provenanceErrors[0].kind, "worker-constructor-fault-untrusted");
+      fixture.tracker.dispose();
+    });
+  }
+});
+
+test("asset tracker fails closed on a duplicate current-generation construction fault", async () => {
+  const fixture = await createWorkerConstructionFaultTrackerFixture();
+  await emitWorkerConstructionFault(fixture.cdp);
+  await emitWorkerConstructionFault(fixture.cdp);
+
+  const snapshot = fixture.tracker.snapshot();
+  assert.equal(snapshot.currentGeneration, 1);
+  assert.equal(snapshot.passed, false);
+  assert.equal(snapshot.workerConstructionFaults.length, 1);
+  assert.equal(snapshot.provenanceErrors.length, 1);
+  assert.equal(snapshot.provenanceErrors[0].kind, "worker-constructor-fault-duplicate");
+  fixture.tracker.dispose();
+});
 
 test("managed URL guard treats HTTP and WebSocket scheme families consistently", () => {
   const origin = "http://127.0.0.1:15173";
@@ -866,7 +1196,14 @@ test("controlled asset evidence hashes entry, dynamic, and worker responses per 
   assert.equal(quiescent.inFlightCount, 0);
   await cdp.emit("Target.detachedFromTarget", { sessionId: "worker-session" });
   assert.equal(tracker.snapshot().passed, false);
+  assert.equal(tracker.snapshot().assetAuthorityPassed, true);
+  assert.equal(tracker.snapshot().workerAssetAuthorityPassed, true);
   assert.equal(tracker.snapshot().workerTargets[0].active, false);
+  const detachedQuiescent = await tracker.waitForAssetAuthorityComplete();
+  assert.equal(detachedQuiescent.assetAuthorityPassed, true);
+  assert.equal(detachedQuiescent.passed, false);
+  assert.equal(detachedQuiescent.quiescence.passed, true);
+  assert.equal(detachedQuiescent.quiescence.authorityField, "assetAuthorityPassed");
   tracker.dispose();
 });
 
@@ -924,6 +1261,7 @@ test("controlled asset evidence rejects any corrupt or unmanifested loaded resou
   await cdp.emit("Network.loadingFinished", { requestId: "evil" });
   const snapshot = tracker.snapshot();
   assert.equal(snapshot.passed, false);
+  assert.equal(snapshot.assetAuthorityPassed, false);
   assert.equal(snapshot.entryAssets.find((asset) => asset.path === "assets/main.js").accepted, false);
   assert.equal(snapshot.unmanifestedResponses.length, 1);
   tracker.dispose();

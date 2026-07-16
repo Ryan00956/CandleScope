@@ -207,6 +207,15 @@ export interface DrawingPerfPhase6RuntimeSnapshot {
   readonly backend: "worker" | "main-thread";
   readonly backendSource: "default" | "environment" | "benchmark-fallback";
   readonly workerResultDelayMs: number;
+  readonly workerAvailability: "available" | "unavailable" | "disposed" | null;
+  readonly workerUnavailableReason:
+    | "unsupported"
+    | "forced-main-thread-fallback"
+    | "construction-failed"
+    | "transport-error"
+    | "protocol-error"
+    | "post-message-failed"
+    | null;
   readonly sourceLineageExactResolveCount: number;
   readonly sourceLineageFallbackResolveCount: number;
   readonly sourceLineageUnresolvedResolveCount: number;

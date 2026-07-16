@@ -196,7 +196,7 @@ function browserTiming({ includeBuckets = false, windowDurationMs = 1_000 } = {}
       frameScheduled: false,
       frozenFenceCount: 0,
       staleFrameCallbackCount: 0,
-      stalePostPaintCallbackCount: 0,
+      stalePostRafTaskCallbackCount: 0,
       countConservationPassed: true,
     },
     inputToNextPaintByType: Object.fromEntries(INPUT_TYPES.map((type) => [
@@ -229,29 +229,36 @@ function browserTiming({ includeBuckets = false, windowDurationMs = 1_000 } = {}
   };
 }
 
-function slowInputPaintFences(cycleCount, observedFenceCount = 400) {
+function slowInputPostRafTaskFences(cycleCount, observedFenceCount = 400) {
   const entries = Array.from({ length: Math.min(64, observedFenceCount) }, (_, index) => {
     const handlerAtMs = 1_000 + index * 20;
     const lastRafAtMs = handlerAtMs - 5;
     const rafAtMs = handlerAtMs + 5;
-    const postPaintAtMs = handlerAtMs + 16.7 - index * 0.001;
+    const postRafTaskAtMs = handlerAtMs + 16.7 - index * 0.001;
+    const eventTimeStampMs = handlerAtMs - 1;
     return {
       fenceId: index + 1,
       cycle: (index % cycleCount) + 1,
       eventType: INPUT_TYPES[index % INPUT_TYPES.length],
       eventCount: 1,
-      eventTimeStampMs: handlerAtMs - 1,
+      eventTimeStampMs,
       handlerAtMs,
       lastRafAtMs,
       rafAtMs,
-      postPaintAtMs,
+      postRafTaskAtMs,
+      eventToHandlerMs: handlerAtMs - eventTimeStampMs,
       handlerToRafMs: rafAtMs - handlerAtMs,
-      rafToPostPaintMs: postPaintAtMs - rafAtMs,
-      handlerToPostPaintMs: postPaintAtMs - handlerAtMs,
+      rafToPostRafTaskMs: postRafTaskAtMs - rafAtMs,
+      handlerToPostRafTaskMs: postRafTaskAtMs - handlerAtMs,
+      eventToPostRafTaskMs: postRafTaskAtMs - eventTimeStampMs,
+      conservativeTotalMs: postRafTaskAtMs - eventTimeStampMs,
     };
   });
   return {
-    schemaVersion: "drawing-input-paint-fence/v1",
+    schemaVersion: "drawing-input-post-raf-task/v2",
+    endpoint: "post-rAF-task",
+    timestampAggregation: "per-type-cohort-earliest-independent",
+    rankingMetric: "conservativeTotalMs",
     capacity: 64,
     observedFenceCount,
     retainedFenceCount: entries.length,
@@ -336,7 +343,7 @@ function buildPassingReport({
   const cycleCount = Math.floor(
     (configuration.durationMs - configuration.warmupMs) / configuration.workloadIntervalMs,
   );
-  finalBrowserTiming.slowInputPaintFences = slowInputPaintFences(cycleCount);
+  finalBrowserTiming.slowInputPostRafTaskFences = slowInputPostRafTaskFences(cycleCount);
   return {
     configuration: {
       ...configuration,
@@ -729,9 +736,9 @@ test("typed input latency rejects an over-SLO type and per-type progress regress
   assert.equal(assessment.checks.browserTimingProgress.passed, false);
 });
 
-test("slow input-paint fence evidence rejects unknown cycles, bad deltas, order, and capacity", () => {
+test("slow post-rAF-task evidence rejects unknown cycles, bad diagnostics, order, and capacity", () => {
   const noPreviousRaf = buildPassingReport();
-  noPreviousRaf.browserTiming.slowInputPaintFences.entries[0].lastRafAtMs = null;
+  noPreviousRaf.browserTiming.slowInputPostRafTaskFences.entries[0].lastRafAtMs = null;
   assert.equal(
     assessDrawingSoak(noPreviousRaf).checks.inputPaintFenceEvidence.passed,
     true,
@@ -740,14 +747,19 @@ test("slow input-paint fence evidence rejects unknown cycles, bad deltas, order,
   const cases = [
     ["unknown cycle", (trace) => { trace.entries[0].cycle = 999; }],
     ["bad delta", (trace) => { trace.entries[0].handlerToRafMs += 0.1; }],
+    ["bad event delay", (trace) => { trace.entries[0].eventToHandlerMs += 0.1; }],
+    ["bad conservative total", (trace) => { trace.entries[0].conservativeTotalMs += 0.1; }],
     ["wrong order", (trace) => {
       [trace.entries[0], trace.entries[1]] = [trace.entries[1], trace.entries[0]];
     }],
+    ["wrong endpoint", (trace) => { trace.endpoint = "paint"; }],
+    ["wrong aggregation", (trace) => { trace.timestampAggregation = "coupled"; }],
+    ["wrong ranking metric", (trace) => { trace.rankingMetric = "handlerToPostRafTaskMs"; }],
     ["wrong capacity", (trace) => { trace.capacity = 65; }],
   ];
   for (const [label, mutate] of cases) {
     const report = buildPassingReport();
-    mutate(report.browserTiming.slowInputPaintFences);
+    mutate(report.browserTiming.slowInputPostRafTaskFences);
     assert.equal(
       assessDrawingSoak(report).checks.inputPaintFenceEvidence.passed,
       false,

@@ -11,7 +11,7 @@ function createHarness({
   let clockMs = 0;
   let lastRafAtMs = null;
   const frameCallbacks = [];
-  const postPaintCallbacks = [];
+  const postRafTaskCallbacks = [];
   const overallFences = [];
   const typeFences = [];
   const tracker = factory({
@@ -22,8 +22,8 @@ function createHarness({
     requestFrame: (callback) => {
       frameCallbacks.push(callback);
     },
-    schedulePostPaint: (callback) => {
-      postPaintCallbacks.push(callback);
+    schedulePostRafTask: (callback) => {
+      postRafTaskCallbacks.push(callback);
     },
     topKCapacity,
     onOverallFence: (latencyMs) => {
@@ -39,7 +39,7 @@ function createHarness({
     overallFences,
     typeFences,
     frameCallbacks,
-    postPaintCallbacks,
+    postRafTaskCallbacks,
     setTime(value) {
       clockMs = value;
     },
@@ -52,10 +52,10 @@ function createHarness({
       lastRafAtMs = atMs;
       frameCallbacks.shift()(atMs);
     },
-    runPostPaint(atMs) {
-      assert.ok(postPaintCallbacks.length > 0, "expected a queued post-paint task");
+    runPostRafTask(atMs) {
+      assert.ok(postRafTaskCallbacks.length > 0, "expected a queued post-rAF task");
       clockMs = atMs;
-      postPaintCallbacks.shift()();
+      postRafTaskCallbacks.shift()();
     },
   };
 }
@@ -69,13 +69,13 @@ test("is fully self-contained when stringified for browser injection", () => {
   assert.equal(harness.record("pointermove", 1_700_000_000_000.5), true);
   harness.tracker.endCycle(1);
   harness.runFrame(5);
-  harness.runPostPaint(9);
+  harness.runPostRafTask(9);
 
   const snapshot = harness.tracker.snapshot();
-  assert.equal(snapshot.schemaVersion, "drawing-input-paint-fence/v1");
+  assert.equal(snapshot.schemaVersion, "drawing-input-post-raf-task/v2");
   assert.equal(snapshot.overall.countConservationPassed, true);
   assert.equal(snapshot.inputPaintFenceStats.pointermove.fenceCount, 1);
-  assert.equal(snapshot.slowInputPaintFences.entries[0].eventTimeStampMs, 0.5);
+  assert.equal(snapshot.slowInputPostRafTaskFences.entries[0].eventTimeStampMs, 0.5);
 });
 
 test("freezes the cohort at rAF entry so post-rAF input receives the next fence", () => {
@@ -99,14 +99,14 @@ test("freezes the cohort at rAF entry so post-rAF input receives the next fence"
 
   snapshot = harness.tracker.snapshot();
   assert.equal(harness.frameCallbacks.length, 1);
-  assert.equal(harness.postPaintCallbacks.length, 1);
+  assert.equal(harness.postRafTaskCallbacks.length, 1);
   assert.equal(snapshot.inputPaintFenceStats.wheel.pendingEventCount, 1);
   assert.equal(snapshot.inputPaintFenceStats.wheel.postRafInputCount, 0);
   assert.equal(snapshot.inputPaintFenceStats.wheel.inputWhileFrozenCount, 1);
   assert.equal(snapshot.overall.postRafInputCount, 0);
   assert.equal(snapshot.overall.inputWhileFrozenCount, 1);
 
-  harness.runPostPaint(12);
+  harness.runPostRafTask(12);
   snapshot = harness.tracker.snapshot();
   assert.deepEqual(harness.overallFences, [11]);
   assert.deepEqual(harness.typeFences, [{ type: "pointermove", latencyMs: 11 }]);
@@ -115,7 +115,7 @@ test("freezes the cohort at rAF entry so post-rAF input receives the next fence"
   assert.equal(snapshot.inputPaintFenceStats.wheel.pendingEventCount, 1);
 
   harness.runFrame(20);
-  harness.runPostPaint(22);
+  harness.runPostRafTask(22);
   snapshot = harness.tracker.snapshot();
   assert.deepEqual(harness.overallFences, [11, 11]);
   assert.deepEqual(harness.typeFences, [
@@ -128,7 +128,7 @@ test("freezes the cohort at rAF entry so post-rAF input receives the next fence"
   assert.equal(snapshot.overall.unattributedFenceCount, 0);
   assert.equal(snapshot.overall.countConservationPassed, true);
   assert.deepEqual(
-    snapshot.slowInputPaintFences.entries.map((entry) => ({
+    snapshot.slowInputPostRafTaskFences.entries.map((entry) => ({
       fenceId: entry.fenceId,
       cycle: entry.cycle,
       type: entry.eventType,
@@ -149,7 +149,7 @@ test("counts every input and completed fence recorded outside an active cycle", 
   harness.setTime(2);
   harness.record("pointermove", 1.5);
   harness.runFrame(10);
-  harness.runPostPaint(20);
+  harness.runPostRafTask(20);
 
   const snapshot = harness.tracker.snapshot();
   const stats = snapshot.inputPaintFenceStats.pointermove;
@@ -158,7 +158,7 @@ test("counts every input and completed fence recorded outside an active cycle", 
   assert.equal(snapshot.overall.unattributedEventCount, 2);
   assert.equal(snapshot.overall.unattributedFenceCount, 1);
   assert.equal(snapshot.overall.countConservationPassed, true);
-  assert.equal(snapshot.slowInputPaintFences.entries[0].cycle, null);
+  assert.equal(snapshot.slowInputPostRafTaskFences.entries[0].cycle, null);
 });
 
 test("coalesces a type within one frozen cohort and retains its earliest timestamps", () => {
@@ -174,11 +174,11 @@ test("coalesces a type within one frozen cohort and retains its earliest timesta
   harness.tracker.endCycle(7);
   assert.throws(() => harness.tracker.endCycle(7), /cycle mismatch/);
   harness.runFrame(10);
-  harness.runPostPaint(20);
+  harness.runPostRafTask(20);
 
   const snapshot = harness.tracker.snapshot();
   const stats = snapshot.inputPaintFenceStats.pointermove;
-  const [entry] = snapshot.slowInputPaintFences.entries;
+  const [entry] = snapshot.slowInputPostRafTaskFences.entries;
   assert.equal(stats.eventCount, 2);
   assert.equal(stats.completedEventCount, 2);
   assert.equal(stats.fenceCount, 1);
@@ -196,16 +196,19 @@ test("coalesces a type within one frozen cohort and retains its earliest timesta
     handlerAtMs: 1,
     lastRafAtMs: null,
     rafAtMs: 10,
-    postPaintAtMs: 20,
+    postRafTaskAtMs: 20,
+    eventToHandlerMs: 0.75,
     handlerToRafMs: 9,
-    rafToPostPaintMs: 10,
-    handlerToPostPaintMs: 19,
+    rafToPostRafTaskMs: 10,
+    handlerToPostRafTaskMs: 19,
+    eventToPostRafTaskMs: 19.75,
+    conservativeTotalMs: 19.75,
   });
   assert.equal(harness.record("pointerdown", 20), false);
   assert.throws(() => harness.tracker.beginCycle(0), /positive safe integer/);
 });
 
-test("dispose invalidates queued frame and post-paint callbacks without publishing them", () => {
+test("dispose invalidates queued frame and post-rAF-task callbacks without publishing them", () => {
   const beforeFrame = createHarness();
   beforeFrame.setTime(1);
   beforeFrame.record("pointermove", 0.5);
@@ -222,20 +225,21 @@ test("dispose invalidates queued frame and post-paint callbacks without publishi
   assert.equal(beforeFrame.record("pointermove", 10), false);
   assert.throws(() => beforeFrame.tracker.beginCycle(1), /disposed/);
 
-  const beforePostPaint = createHarness();
-  beforePostPaint.setTime(1);
-  beforePostPaint.record("pointermove", 0.5);
-  beforePostPaint.runFrame(10);
-  assert.equal(beforePostPaint.tracker.dispose(), true);
-  beforePostPaint.runPostPaint(20);
+  const beforePostRafTask = createHarness();
+  beforePostRafTask.setTime(1);
+  beforePostRafTask.record("pointermove", 0.5);
+  beforePostRafTask.runFrame(10);
+  assert.equal(beforePostRafTask.tracker.dispose(), true);
+  beforePostRafTask.runPostRafTask(20);
 
-  snapshot = beforePostPaint.tracker.snapshot();
-  assert.equal(snapshot.overall.stalePostPaintCallbackCount, 1);
+  snapshot = beforePostRafTask.tracker.snapshot();
+  assert.equal(snapshot.overall.stalePostRafTaskCallbackCount, 1);
+  assert.equal(snapshot.overall.legacyAliases.stalePostPaintCallbackCount, 1);
   assert.equal(snapshot.inputPaintFenceStats.pointermove.droppedEventCount, 1);
   assert.equal(snapshot.inputPaintFenceStats.pointermove.fenceCount, 0);
-  assert.equal(snapshot.slowInputPaintFences.observedFenceCount, 0);
+  assert.equal(snapshot.slowInputPostRafTaskFences.observedFenceCount, 0);
   assert.equal(snapshot.overall.countConservationPassed, true);
-  assert.deepEqual(beforePostPaint.typeFences, []);
+  assert.deepEqual(beforePostRafTask.typeFences, []);
 });
 
 test("retains a globally bounded deterministic top-K of per-type slow fences", () => {
@@ -248,18 +252,21 @@ test("retains a globally bounded deterministic top-K of per-type slow fences", (
   harness.record("wheel", 1.5);
   harness.tracker.endCycle(1);
   harness.runFrame(5);
-  harness.runPostPaint(51);
+  harness.runPostRafTask(51);
 
   harness.tracker.beginCycle(2);
   harness.setTime(100);
   harness.record("pointermove", 99.5);
   harness.tracker.endCycle(2);
   harness.runFrame(105);
-  harness.runPostPaint(120);
+  harness.runPostRafTask(120);
 
   const snapshot = harness.tracker.snapshot();
-  const slow = snapshot.slowInputPaintFences;
-  assert.equal(slow.schemaVersion, "drawing-input-paint-fence/v1");
+  const slow = snapshot.slowInputPostRafTaskFences;
+  assert.equal(slow.schemaVersion, "drawing-input-post-raf-task/v2");
+  assert.equal(slow.endpoint, "post-rAF-task");
+  assert.equal(slow.timestampAggregation, "per-type-cohort-earliest-independent");
+  assert.equal(slow.rankingMetric, "conservativeTotalMs");
   assert.equal(slow.capacity, 2);
   assert.equal(slow.observedFenceCount, 3);
   assert.equal(slow.retainedFenceCount, 2);
@@ -268,13 +275,13 @@ test("retains a globally bounded deterministic top-K of per-type slow fences", (
   assert.equal(slow.countConservationPassed, true);
   assert.deepEqual(
     slow.entries.map((entry) => [
-      entry.handlerToPostPaintMs,
+      entry.conservativeTotalMs,
       entry.fenceId,
       entry.eventType,
     ]),
     [
-      [50, 1, "pointermove"],
-      [49, 1, "wheel"],
+      [50.5, 1, "pointermove"],
+      [49.5, 1, "wheel"],
     ],
   );
   assert.equal(snapshot.inputPaintFenceStats.pointermove.fenceCount, 2);
@@ -283,9 +290,80 @@ test("retains a globally bounded deterministic top-K of per-type slow fences", (
   assert.equal(snapshot.overall.typeFenceCount, 3);
   assert.equal(snapshot.overall.countConservationPassed, true);
 
-  slow.entries[0].handlerToPostPaintMs = -1;
+  slow.entries[0].conservativeTotalMs = -1;
   assert.equal(
-    harness.tracker.snapshot().slowInputPaintFences.entries[0].handlerToPostPaintMs,
-    50,
+    harness.tracker.snapshot().slowInputPostRafTaskFences.entries[0].conservativeTotalMs,
+    50.5,
   );
+  const legacy = snapshot.slowInputPaintFences;
+  assert.equal(legacy.legacyAlias, true);
+  assert.equal(legacy.deprecated, true);
+  assert.equal(legacy.endpoint, "post-rAF-task");
+  assert.equal(legacy.canonicalProperty, "slowInputPostRafTaskFences");
+});
+
+test("retains earliest event and handler timestamps independently", () => {
+  const harness = createHarness({ eventTypes: ["pointermove"] });
+
+  harness.tracker.beginCycle(3);
+  harness.setTime(10);
+  harness.record("pointermove", 9);
+  harness.setTime(12);
+  // A later handler may carry an older event timestamp. The diagnostic keeps
+  // both conservative minima rather than coupling event time to handler time.
+  harness.record("pointermove", 2);
+  harness.tracker.endCycle(3);
+  harness.runFrame(15);
+  harness.runPostRafTask(20);
+
+  const [entry] = harness.tracker.snapshot().slowInputPostRafTaskFences.entries;
+  assert.deepEqual(entry, {
+    fenceId: 1,
+    cycle: 3,
+    eventType: "pointermove",
+    eventCount: 2,
+    eventTimeStampMs: 2,
+    handlerAtMs: 10,
+    lastRafAtMs: null,
+    rafAtMs: 15,
+    postRafTaskAtMs: 20,
+    eventToHandlerMs: 8,
+    handlerToRafMs: 5,
+    rafToPostRafTaskMs: 5,
+    handlerToPostRafTaskMs: 10,
+    eventToPostRafTaskMs: 18,
+    conservativeTotalMs: 18,
+  });
+  assert.deepEqual(harness.typeFences, [{ type: "pointermove", latencyMs: 10 }]);
+});
+
+test("ranks diagnostics by conservative event-to-post-rAF-task total", () => {
+  const harness = createHarness({ eventTypes: ["pointermove"], topKCapacity: 1 });
+
+  harness.tracker.beginCycle(1);
+  harness.setTime(1);
+  harness.record("pointermove", 0);
+  harness.tracker.endCycle(1);
+  harness.runFrame(5);
+  harness.runPostRafTask(11);
+
+  harness.tracker.beginCycle(2);
+  harness.setTime(20);
+  harness.record("pointermove", 10);
+  harness.tracker.endCycle(2);
+  harness.runFrame(25);
+  harness.runPostRafTask(29);
+
+  const snapshot = harness.tracker.snapshot();
+  const [entry] = snapshot.slowInputPostRafTaskFences.entries;
+  // Cycle 2 has lower handler latency (9ms vs 10ms), but the older event
+  // timestamp makes its conservative end-to-end diagnostic slower (19ms).
+  assert.equal(entry.cycle, 2);
+  assert.equal(entry.handlerToPostRafTaskMs, 9);
+  assert.equal(entry.eventToPostRafTaskMs, 19);
+  assert.equal(entry.conservativeTotalMs, 19);
+  assert.deepEqual(harness.typeFences, [
+    { type: "pointermove", latencyMs: 10 },
+    { type: "pointermove", latencyMs: 9 },
+  ]);
 });

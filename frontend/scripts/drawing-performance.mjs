@@ -1403,7 +1403,7 @@ function browserBenchmarkBootstrap(payload, createInputFenceTracker) {
     performanceTimeOriginMs: performance.timeOrigin,
     readLastRafAt: () => state.lastRafAt,
     requestFrame: (callback) => requestAnimationFrame(callback),
-    schedulePostPaint: (callback) => setTimeout(callback, 0),
+    schedulePostRafTask: (callback) => setTimeout(callback, 0),
     topKCapacity: Number.isSafeInteger(payload.inputPaintFenceTopKCapacity)
       && payload.inputPaintFenceTopKCapacity >= 0
       ? payload.inputPaintFenceTopKCapacity
@@ -1545,6 +1545,9 @@ function browserBenchmarkBootstrap(payload, createInputFenceTracker) {
         inputEventCounts: structuredClone(inputFenceSnapshot.inputEventCounts),
         inputPaintFenceStats: structuredClone(inputFenceSnapshot.inputPaintFenceStats),
         inputFenceOverall: structuredClone(inputFenceSnapshot.overall),
+        slowInputPostRafTaskFences: structuredClone(
+          inputFenceSnapshot.slowInputPostRafTaskFences,
+        ),
         slowInputPaintFences: structuredClone(inputFenceSnapshot.slowInputPaintFences),
         eventTimingSupported,
         longTaskSupported,
@@ -3803,6 +3806,7 @@ async function runPhase9Soak({
         inputEventCounts: bench?.timingSummary?.inputEventCounts ?? null,
         inputPaintFenceStats: bench?.timingSummary?.inputPaintFenceStats ?? null,
         inputFenceOverall: bench?.timingSummary?.inputFenceOverall ?? null,
+        slowInputPostRafTaskFences: bench?.slowInputPostRafTaskFences ?? null,
         slowInputPaintFences: bench?.slowInputPaintFences ?? null,
         inputToNextPaintByType: bench?.timingSummary?.inputToNextPaintByType ?? null,
         eventTimingByType: bench?.timingSummary?.eventTimingByType ?? null,

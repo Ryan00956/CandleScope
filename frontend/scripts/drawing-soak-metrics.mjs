@@ -213,7 +213,7 @@ const DRAWING_INPUT_TYPES = Object.freeze([
   "pointerup",
   "wheel",
 ]);
-const DRAWING_INPUT_PAINT_FENCE_SCHEMA_VERSION = "drawing-input-paint-fence/v1";
+const DRAWING_INPUT_POST_RAF_TASK_SCHEMA_VERSION = "drawing-input-post-raf-task/v2";
 const DRAWING_INPUT_PAINT_FENCE_CAPACITY = 64;
 const DRAWING_INPUT_P95_MINIMUM_SAMPLES = 20;
 const DRAWING_INPUT_P99_MINIMUM_SAMPLES = 100;
@@ -317,7 +317,7 @@ function browserTypedInputEvidence(timing, { requireBuckets = false } = {}) {
     "unattributedFenceCount",
     "frozenFenceCount",
     "staleFrameCallbackCount",
-    "stalePostPaintCallbackCount",
+    "stalePostRafTaskCallbackCount",
   ];
   if (overall === null
     || typeof overall !== "object"
@@ -474,15 +474,15 @@ function browserTimingEvidence(timing, options = {}) {
 }
 
 function compareSlowInputPaintFences(left, right) {
-  const latencyDelta = right.handlerToPostPaintMs - left.handlerToPostPaintMs;
+  const latencyDelta = right.conservativeTotalMs - left.conservativeTotalMs;
   if (latencyDelta !== 0) return latencyDelta;
   if (left.fenceId !== right.fenceId) return left.fenceId - right.fenceId;
   if (left.eventType === right.eventType) return 0;
   return left.eventType < right.eventType ? -1 : 1;
 }
 
-function slowInputPaintFenceEvidence(timing, cycles) {
-  const evidence = timing?.slowInputPaintFences;
+function slowInputPostRafTaskFenceEvidence(timing, cycles) {
+  const evidence = timing?.slowInputPostRafTaskFences;
   const entries = evidence?.entries;
   const cycleIds = new Set();
   let cyclesValid = Array.isArray(cycles) && cycles.length > 0;
@@ -521,10 +521,13 @@ function slowInputPaintFenceEvidence(timing, cycles) {
         entry?.eventTimeStampMs,
         entry?.handlerAtMs,
         entry?.rafAtMs,
-        entry?.postPaintAtMs,
+        entry?.postRafTaskAtMs,
+        entry?.eventToHandlerMs,
         entry?.handlerToRafMs,
-        entry?.rafToPostPaintMs,
-        entry?.handlerToPostPaintMs,
+        entry?.rafToPostRafTaskMs,
+        entry?.handlerToPostRafTaskMs,
+        entry?.eventToPostRafTaskMs,
+        entry?.conservativeTotalMs,
       ];
       const identity = `${entry?.fenceId}:${entry?.eventType}`;
       const valid = Number.isSafeInteger(entry?.fenceId)
@@ -541,10 +544,15 @@ function slowInputPaintFenceEvidence(timing, cycles) {
           || (nonNegativeNumber(entry.lastRafAtMs) !== null
             && entry.lastRafAtMs <= entry.handlerAtMs))
         && entry.handlerAtMs <= entry.rafAtMs
-        && entry.rafAtMs <= entry.postPaintAtMs
+        && entry.rafAtMs <= entry.postRafTaskAtMs
+        && entry.eventToHandlerMs === entry.handlerAtMs - entry.eventTimeStampMs
         && entry.handlerToRafMs === entry.rafAtMs - entry.handlerAtMs
-        && entry.rafToPostPaintMs === entry.postPaintAtMs - entry.rafAtMs
-        && entry.handlerToPostPaintMs === entry.postPaintAtMs - entry.handlerAtMs
+        && entry.rafToPostRafTaskMs === entry.postRafTaskAtMs - entry.rafAtMs
+        && entry.handlerToPostRafTaskMs
+          === entry.postRafTaskAtMs - entry.handlerAtMs
+        && entry.eventToPostRafTaskMs
+          === entry.postRafTaskAtMs - entry.eventTimeStampMs
+        && entry.conservativeTotalMs === entry.eventToPostRafTaskMs
         && !identities.has(identity);
       if (!valid) invalidEntryIndexes.push(index);
       identities.add(identity);
@@ -556,7 +564,10 @@ function slowInputPaintFenceEvidence(timing, cycles) {
   const passed = evidence !== null
     && typeof evidence === "object"
     && !Array.isArray(evidence)
-    && evidence.schemaVersion === DRAWING_INPUT_PAINT_FENCE_SCHEMA_VERSION
+    && evidence.schemaVersion === DRAWING_INPUT_POST_RAF_TASK_SCHEMA_VERSION
+    && evidence.endpoint === "post-rAF-task"
+    && evidence.timestampAggregation === "per-type-cohort-earliest-independent"
+    && evidence.rankingMetric === "conservativeTotalMs"
     && evidence.capacity === DRAWING_INPUT_PAINT_FENCE_CAPACITY
     && nonNegativeNumber(evidence.performanceTimeOriginMs) !== null
     && cyclesValid
@@ -1233,7 +1244,10 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
       + config.requiredMeasuredDurationMs
       - config.workloadIntervalMs
       - config.maxSampleGapMs;
-  const inputPaintFenceEvidence = slowInputPaintFenceEvidence(finalBrowserTiming, cycles);
+  const inputPaintFenceEvidence = slowInputPostRafTaskFenceEvidence(
+    finalBrowserTiming,
+    cycles,
+  );
   const derivedMinimumGcCheckpoints = Math.floor(
     config.requiredMeasuredDurationMs / config.gcIntervalMs,
   ) + 1;
@@ -1619,7 +1633,7 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
     ),
     inputPaintFenceEvidence: check(
       inputPaintFenceEvidence.actual,
-      `${DRAWING_INPUT_PAINT_FENCE_SCHEMA_VERSION} bounded top-${DRAWING_INPUT_PAINT_FENCE_CAPACITY} trace with attributed monotonic fences`,
+      `${DRAWING_INPUT_POST_RAF_TASK_SCHEMA_VERSION} bounded top-${DRAWING_INPUT_PAINT_FENCE_CAPACITY} trace with attributed monotonic post-rAF-task fences`,
       inputPaintFenceEvidence.passed,
     ),
     workerWorkload: check(

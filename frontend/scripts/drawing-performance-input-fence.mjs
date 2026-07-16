@@ -14,7 +14,7 @@ export function createDrawingInputPaintFenceTracker(options) {
     "now",
     "readLastRafAt",
     "requestFrame",
-    "schedulePostPaint",
+    "schedulePostRafTask",
     "onOverallFence",
     "onTypeFence",
   ];
@@ -38,7 +38,7 @@ export function createDrawingInputPaintFenceTracker(options) {
   const now = options.now;
   const readLastRafAtOption = options.readLastRafAt;
   const requestFrame = options.requestFrame;
-  const schedulePostPaint = options.schedulePostPaint;
+  const schedulePostRafTask = options.schedulePostRafTask;
   const onOverallFence = options.onOverallFence;
   const onTypeFence = options.onTypeFence;
   const performanceTimeOriginMs = options.performanceTimeOriginMs;
@@ -77,7 +77,7 @@ export function createDrawingInputPaintFenceTracker(options) {
   let nextFenceId = 1;
   let overallFenceCount = 0;
   let staleFrameCallbackCount = 0;
-  let stalePostPaintCallbackCount = 0;
+  let stalePostRafTaskCallbackCount = 0;
   const frozenCohorts = new Map();
   const slowEntries = [];
   let observedTypeFenceCount = 0;
@@ -101,7 +101,7 @@ export function createDrawingInputPaintFenceTracker(options) {
     }
   };
   const compareSlowEntries = (left, right) => {
-    const latencyDelta = right.handlerToPostPaintMs - left.handlerToPostPaintMs;
+    const latencyDelta = right.conservativeTotalMs - left.conservativeTotalMs;
     if (latencyDelta !== 0) return latencyDelta;
     if (left.fenceId !== right.fenceId) return left.fenceId - right.fenceId;
     if (left.eventType === right.eventType) return 0;
@@ -130,15 +130,19 @@ export function createDrawingInputPaintFenceTracker(options) {
   };
 
   const completeFrozenCohort = (frozen) => {
-    const postPaintAtMs = readNow("post-paint timestamp");
-    if (postPaintAtMs < frozen.rafAtMs
-      || postPaintAtMs < frozen.cohort.earliestHandlerAtMs) {
+    const postRafTaskAtMs = readNow("post-rAF task timestamp");
+    if (postRafTaskAtMs < frozen.rafAtMs
+      || postRafTaskAtMs < frozen.cohort.earliestHandlerAtMs) {
       throw new RangeError("drawing input paint fence timestamps must be monotonic");
     }
     frozenCohorts.delete(frozen.fenceId);
     overallFenceCount += 1;
 
-    const overallLatencyMs = postPaintAtMs - frozen.cohort.earliestHandlerAtMs;
+    // Keep the historical threshold input unchanged: the existing aggregate
+    // and typed gates consume handler -> post-rAF-task latency. The trace below
+    // separately exposes event dispatch delay and uses the conservative
+    // event -> post-rAF-task total only for diagnostic ranking.
+    const overallLatencyMs = postRafTaskAtMs - frozen.cohort.earliestHandlerAtMs;
     const typeCallbacks = [];
     for (const type of eventTypes) {
       const captured = frozen.cohort.byType[type];
@@ -146,9 +150,15 @@ export function createDrawingInputPaintFenceTracker(options) {
       if (captured.handlerAtMs === null || frozen.rafAtMs < captured.handlerAtMs) {
         throw new RangeError("drawing input paint fence timestamps must be monotonic");
       }
+      if (captured.eventTimeStampMs === null
+        || captured.eventTimeStampMs > captured.handlerAtMs) {
+        throw new RangeError("drawing input paint fence event timestamps must be monotonic");
+      }
+      const eventToHandlerMs = captured.handlerAtMs - captured.eventTimeStampMs;
       const handlerToRafMs = frozen.rafAtMs - captured.handlerAtMs;
-      const rafToPostPaintMs = postPaintAtMs - frozen.rafAtMs;
-      const handlerToPostPaintMs = postPaintAtMs - captured.handlerAtMs;
+      const rafToPostRafTaskMs = postRafTaskAtMs - frozen.rafAtMs;
+      const handlerToPostRafTaskMs = postRafTaskAtMs - captured.handlerAtMs;
+      const eventToPostRafTaskMs = postRafTaskAtMs - captured.eventTimeStampMs;
       const stats = typeStats[type];
       stats.completedEventCount += captured.eventCount;
       stats.fenceCount += 1;
@@ -164,12 +174,15 @@ export function createDrawingInputPaintFenceTracker(options) {
         handlerAtMs: captured.handlerAtMs,
         lastRafAtMs: captured.lastRafAtMs,
         rafAtMs: frozen.rafAtMs,
-        postPaintAtMs,
+        postRafTaskAtMs,
+        eventToHandlerMs,
         handlerToRafMs,
-        rafToPostPaintMs,
-        handlerToPostPaintMs,
+        rafToPostRafTaskMs,
+        handlerToPostRafTaskMs,
+        eventToPostRafTaskMs,
+        conservativeTotalMs: eventToPostRafTaskMs,
       });
-      typeCallbacks.push([type, handlerToPostPaintMs]);
+      typeCallbacks.push([type, handlerToPostRafTaskMs]);
     }
 
     onOverallFence(overallLatencyMs);
@@ -200,7 +213,7 @@ export function createDrawingInputPaintFenceTracker(options) {
         }
 
         // The cohort is detached at rAF entry. Any input arriving before the
-        // post-paint task now sees frameScheduled=false and creates a new fence.
+        // following task now sees frameScheduled=false and creates a new fence.
         const frozen = {
           fenceId: nextFenceId,
           epoch: scheduledEpoch,
@@ -210,13 +223,13 @@ export function createDrawingInputPaintFenceTracker(options) {
         nextFenceId += 1;
         frozenCohorts.set(frozen.fenceId, frozen);
         try {
-          schedulePostPaint(() => {
+          schedulePostRafTask(() => {
             if (disposed || frozen.epoch !== epoch) {
-              stalePostPaintCallbackCount += 1;
+              stalePostRafTaskCallbackCount += 1;
               return;
             }
             if (frozenCohorts.get(frozen.fenceId) !== frozen) {
-              stalePostPaintCallbackCount += 1;
+              stalePostRafTaskCallbackCount += 1;
               return;
             }
             completeFrozenCohort(frozen);
@@ -266,8 +279,11 @@ export function createDrawingInputPaintFenceTracker(options) {
     }
     const pendingType = pending.byType[type];
     pendingType.eventCount += 1;
-    if (pendingType.handlerAtMs === null || handlerAtMs < pendingType.handlerAtMs) {
+    if (pendingType.eventTimeStampMs === null
+      || eventTimeStampMs < pendingType.eventTimeStampMs) {
       pendingType.eventTimeStampMs = eventTimeStampMs;
+    }
+    if (pendingType.handlerAtMs === null || handlerAtMs < pendingType.handlerAtMs) {
       pendingType.handlerAtMs = handlerAtMs;
       pendingType.lastRafAtMs = lastRafAtMs;
       pendingType.cycle = activeCycle;
@@ -376,8 +392,28 @@ export function createDrawingInputPaintFenceTracker(options) {
         + frozenEventCount
       && allTypeCountsConserved
       && slowCountConservationPassed;
+    const slowInputPostRafTaskFences = {
+      schemaVersion: "drawing-input-post-raf-task/v2",
+      endpoint: "post-rAF-task",
+      timestampAggregation: "per-type-cohort-earliest-independent",
+      rankingMetric: "conservativeTotalMs",
+      capacity: topKCapacity,
+      observedFenceCount: observedTypeFenceCount,
+      retainedFenceCount: slowEntries.length,
+      omittedFenceCount: Math.max(0, observedTypeFenceCount - slowEntries.length),
+      performanceTimeOriginMs,
+      countConservationPassed: slowCountConservationPassed,
+      entries: slowEntries.map((entry) => ({ ...entry })),
+    };
+    const slowInputPaintFences = {
+      ...slowInputPostRafTaskFences,
+      legacyAlias: true,
+      deprecated: true,
+      canonicalProperty: "slowInputPostRafTaskFences",
+      entries: slowInputPostRafTaskFences.entries.map((entry) => ({ ...entry })),
+    };
     return {
-      schemaVersion: "drawing-input-paint-fence/v1",
+      schemaVersion: "drawing-input-post-raf-task/v2",
       disposed,
       epoch,
       activeCycle,
@@ -400,19 +436,14 @@ export function createDrawingInputPaintFenceTracker(options) {
         frameScheduled,
         frozenFenceCount: frozenCohorts.size,
         staleFrameCallbackCount,
-        stalePostPaintCallbackCount,
+        stalePostRafTaskCallbackCount,
+        legacyAliases: {
+          stalePostPaintCallbackCount: stalePostRafTaskCallbackCount,
+        },
         countConservationPassed: overallCountConservationPassed,
       },
-      slowInputPaintFences: {
-        schemaVersion: "drawing-input-paint-fence/v1",
-        capacity: topKCapacity,
-        observedFenceCount: observedTypeFenceCount,
-        retainedFenceCount: slowEntries.length,
-        omittedFenceCount: Math.max(0, observedTypeFenceCount - slowEntries.length),
-        performanceTimeOriginMs,
-        countConservationPassed: slowCountConservationPassed,
-        entries: slowEntries.map((entry) => ({ ...entry })),
-      },
+      slowInputPostRafTaskFences,
+      slowInputPaintFences,
     };
   };
 

@@ -23,9 +23,13 @@
     "smoke:chart-types": "tsx scripts/smoke.mjs --url http://127.0.0.1:15173/ --chart-type-matrix --no-seed-indicators",
     "smoke:export": "tsx scripts/smoke.mjs --url http://127.0.0.1:15173/ --export-matrix --drawing-check --overlay-heavy",
     "smoke:release": "tsx scripts/smoke.mjs --url http://127.0.0.1:15173/ --chart-type-matrix --export-matrix --drawing-check --overlay-heavy",
+    "smoke:drawing:controlled": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/drawing-controlled-cdp-smoke.ps1",
+    "check:drawing:rollback-drills:browser": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/drawing-rollback-drills-browser.ps1",
     "test:drawing": "tsx --test \"src/features/drawings/**/*.test.{ts,tsx}\""
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
     "@monaco-editor/react": "^4.7.0",
     "html-to-image": "^1.11.13",
     "lightweight-charts": "^5.1.0",

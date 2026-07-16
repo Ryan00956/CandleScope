@@ -127,7 +127,13 @@ export function createDrawingRenderScheduler<
     } finally {
       running = false;
     }
-    if (!plan) return false;
+    if (!plan) {
+      // An atomic build may deliberately fail closed after an invalidation
+      // raised from inside projection. `invalidate()` cannot schedule while
+      // `running` is true, so preserve that follow-up instead of stranding it.
+      if (reasons.size > 0 && !disposed) scheduler.invalidate("follow-up");
+      return false;
+    }
     if (disposed) {
       onDiscard?.(plan, "disposed");
       return false;

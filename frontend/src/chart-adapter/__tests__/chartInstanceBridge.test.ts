@@ -941,6 +941,88 @@ test("drawing frame batch projection returns interleaved Float64 XY without poin
   ]))), [Number.NaN, 940]);
 });
 
+test("drawing frame projection sessions bound provider reads and reject a stale whole build", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }];
+  const factory = createDrawingFrameSnapshotFactory();
+  const input = {
+    axisKind: "time" as const,
+    coordinateKey: "BTCUSDT:time:1m:0",
+    dpr: 1,
+    heightCssPx: 600,
+    projectionKey: "time:identity",
+    seriesData: rows,
+    themeKey: "dark",
+    viewportKey: "viewport-a",
+    widthCssPx: 900,
+  };
+  let currentSnapshot = factory.capture({ ...input, surfaceToken: "surface-a" });
+  let providerReads = 0;
+  let advanceDuringPriceProjection = false;
+  const series = {
+    priceToCoordinate: (price: number) => {
+      if (advanceDuringPriceProjection) {
+        advanceDuringPriceProjection = false;
+        currentSnapshot = factory.capture({
+          ...input,
+          surfaceToken: "surface-a",
+          viewportKey: "viewport-b",
+        });
+      }
+      return 1_000 - price;
+    },
+  };
+  currentSnapshot = factory.capture({ ...input, surfaceToken: series });
+  const chart = {
+    timeScale: () => ({
+      timeToCoordinate: (time: unknown) => time === 100 ? 10 : time === 200 ? 20 : null,
+    }),
+  };
+  const adapter = createLightweightChartAdapter({
+    chartRef: { current: chart },
+    drawingCoordinateSnapshotProvider: () => {
+      providerReads += 1;
+      return currentSnapshot;
+    },
+    seriesRef: { current: series },
+  });
+  const frame = mustBeDefined(adapter.captureDrawingFrame());
+  const readsBeforeSession = providerReads;
+  const projectedBatchCount = adapter.runDrawingFrameProjectionSession(frame, () => {
+    assert.equal(adapter.runDrawingFrameProjectionSession(frame, () => 1), null,
+      "projection sessions reject nested re-entry");
+    for (let index = 0; index < 64; index += 1) {
+      const projected = adapter.projectDrawingFrameDataPoints(frame, [
+        { price: index, time: index % 2 === 0 ? 100 : 200 },
+      ]);
+      assert.ok(projected);
+    }
+    return 64;
+  });
+
+  assert.equal(projectedBatchCount, 64);
+  assert.equal(providerReads - readsBeforeSession, 2,
+    "the session performs one fresh provider read at each atomic boundary");
+
+  const readsBeforeInvalidatedSession = providerReads;
+  const invalidatedResult = adapter.runDrawingFrameProjectionSession(frame, () => {
+    adapter.notifyDrawingFrameInvalidation("viewport");
+    return adapter.projectDrawingFrameDataPoints(frame, [{ price: 10, time: 100 }]);
+  });
+  assert.equal(invalidatedResult, null,
+    "a synchronous invalidation rejects the whole session even if its snapshot identity is stable");
+  assert.equal(providerReads - readsBeforeInvalidatedSession, 2);
+
+  const readsBeforeStaleSession = providerReads;
+  advanceDuringPriceProjection = true;
+  const staleResult = adapter.runDrawingFrameProjectionSession(frame, () => (
+    adapter.projectDrawingFrameDataPoints(frame, [{ price: 10, time: 100 }])
+  ));
+  assert.equal(staleResult, null,
+    "a provider advance inside public coordinate projection rejects the whole session");
+  assert.equal(providerReads - readsBeforeStaleSession, 2);
+  assert.equal(adapter.isDrawingFrameCurrent(frame), false);
+});
+
 test("drawing frame projection discards a batch when the provider advances mid-project", () => {
   const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }];
   const chart = {

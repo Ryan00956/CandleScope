@@ -68,6 +68,16 @@ import {
 export interface DrawingSceneFrameAdapter {
   captureDrawingFrame(): DrawingFrameSnapshot | null;
   isDrawingFrameCurrent(frame: DrawingFrameSnapshot): boolean;
+  /**
+   * Run one synchronous scene build against a task-scoped atomic projection
+   * context. Implementations must fresh-check the frame before and after
+   * `work`; public projection calls outside this scope retain their own
+   * fail-closed checks.
+   */
+  runDrawingFrameProjectionSession?<T>(
+    frame: DrawingFrameSnapshot,
+    work: () => T | null,
+  ): T | null;
   projectDrawingFrameDataPoints(
     frame: DrawingFrameSnapshot,
     dataPoints: readonly CoordinateDataPoint[],
@@ -1252,69 +1262,87 @@ export function createDrawingSceneRuntime({
   >({
     readInput,
     buildPlan(input) {
-      if (!registry || input.binding !== binding) return null;
-      const startedAt = now();
-      const reconciled = registry.reconcile(input.document);
-      if (!reconciled.ok) throw new Error(reconciled.error);
-      const allNodes = reconciled.snapshot.nodes;
-      const ownedNodes = input.binding.shouldProjectNode
-        ? Object.freeze(allNodes.filter(input.binding.shouldProjectNode))
-        : allNodes;
-      if (!warmDrawingSceneWorldResolutions({
-        adapter: input.adapter,
-        document: input.document,
-        frame: input.frame,
-        nodes: ownedNodes,
-      })) {
-        throw new Error("drawing scene source-anchor warmup was unresolved");
-      }
-      const visibleNodes = input.binding.isVisible?.() === false
-        ? Object.freeze([])
-        : queryCandidates(registry, ownedNodes, input.frame);
-      const list = input.binding.projectScene({
-        adapter: input.adapter,
-        document: input.document,
-        frame: input.frame,
-        nodes: visibleNodes,
-        selectedId: input.binding.selectedId?.() ?? null,
-        stamp: input.stamp,
-        lodToleranceClass: input.lodToleranceClass,
-      });
-      if (!list) {
-        onSkipped?.("scene-projection-unresolved");
-        if (mode === "scene-canary") {
-          throw new Error("drawing scene projection was unresolved");
+      const activeRegistry = registry;
+      if (!activeRegistry || input.binding !== binding) return null;
+      const buildScenePlan = (): SceneRenderPlan | null => {
+        const startedAt = now();
+        const reconciled = activeRegistry.reconcile(input.document);
+        if (!reconciled.ok) throw new Error(reconciled.error);
+        const allNodes = reconciled.snapshot.nodes;
+        const ownedNodes = input.binding.shouldProjectNode
+          ? Object.freeze(allNodes.filter(input.binding.shouldProjectNode))
+          : allNodes;
+        if (!warmDrawingSceneWorldResolutions({
+          adapter: input.adapter,
+          document: input.document,
+          frame: input.frame,
+          nodes: ownedNodes,
+        })) {
+          throw new Error("drawing scene source-anchor warmup was unresolved");
         }
-        return null;
-      }
-      if (drawingRenderRevisionKey(list.stamp) !== drawingRenderRevisionKey(input.stamp)) {
-        throw new Error("drawing scene projector returned a mismatched revision stamp");
-      }
-      const hitIndex = createDrawingHitIndex(list);
-      const buildDurationMs = Math.max(0, now() - startedAt);
-      // Reconcile, culling, LOD, final LWC-bound projection, and hit-index
-      // construction all execute synchronously in this drawing frame. Count
-      // that work alongside the eventual scene paint so the Phase 6 gate
-      // cannot pass while the pre-paint path is slow.
-      accumulateDrawingPerfFrameWork({
-        drawingMainThreadMs: buildDurationMs,
-        sceneProjectPaintMs: buildDurationMs,
+        const visibleNodes = input.binding.isVisible?.() === false
+          ? Object.freeze([])
+          : queryCandidates(activeRegistry, ownedNodes, input.frame);
+        const list = input.binding.projectScene({
+          adapter: input.adapter,
+          document: input.document,
+          frame: input.frame,
+          nodes: visibleNodes,
+          selectedId: input.binding.selectedId?.() ?? null,
+          stamp: input.stamp,
+          lodToleranceClass: input.lodToleranceClass,
+        });
+        if (!list) {
+          onSkipped?.("scene-projection-unresolved");
+          if (mode === "scene-canary") {
+            throw new Error("drawing scene projection was unresolved");
+          }
+          return null;
+        }
+        if (drawingRenderRevisionKey(list.stamp) !== drawingRenderRevisionKey(input.stamp)) {
+          throw new Error("drawing scene projector returned a mismatched revision stamp");
+        }
+        const hitIndex = createDrawingHitIndex(list);
+        const buildDurationMs = Math.max(0, now() - startedAt);
+        // Reconcile, culling, LOD, final LWC-bound projection, and hit-index
+        // construction all execute synchronously in this drawing frame. Count
+        // that work alongside the eventual scene paint so the Phase 6 gate
+        // cannot pass while the pre-paint path is slow.
+        accumulateDrawingPerfFrameWork({
+          drawingMainThreadMs: buildDurationMs,
+          sceneProjectPaintMs: buildDurationMs,
+        });
+        return Object.freeze({
+          binding: input.binding,
+          buildDurationMs,
+          document: input.document,
+          frame: input.frame,
+          hitIndex,
+          list,
+          lodToleranceClass: input.lodToleranceClass,
+          sceneCanonicalIds: Object.freeze(ownedNodes.map((node) => node.id)),
+          sceneNodes: ownedNodes,
+          sceneEpoch: input.sceneEpoch,
+          stamp: input.stamp,
+          totalEntityCount: ownedNodes.length,
+          visibleEntityCount: list.entities.length,
+        });
+      };
+      if (!input.adapter.runDrawingFrameProjectionSession) return buildScenePlan();
+      let projectionReturnedNull = false;
+      const plan = input.adapter.runDrawingFrameProjectionSession(input.frame, () => {
+        const built = buildScenePlan();
+        projectionReturnedNull = built === null;
+        return built;
       });
-      return Object.freeze({
-        binding: input.binding,
-        buildDurationMs,
-        document: input.document,
-        frame: input.frame,
-        hitIndex,
-        list,
-        lodToleranceClass: input.lodToleranceClass,
-        sceneCanonicalIds: Object.freeze(ownedNodes.map((node) => node.id)),
-        sceneNodes: ownedNodes,
-        sceneEpoch: input.sceneEpoch,
-        stamp: input.stamp,
-        totalEntityCount: ownedNodes.length,
-        visibleEntityCount: list.entities.length,
-      });
+      if (!plan && !projectionReturnedNull) {
+        onSkipped?.("drawing-frame-projection-session-stale");
+        // A provider can advance synchronously inside a public chart call
+        // without first emitting an invalidation. Queue a fresh atomic read
+        // so the scene cannot remain stranded on its last accepted plan.
+        scheduler.invalidate("projection-session-stale");
+      }
+      return plan;
     },
     publish(plan) {
       const publishStartedAt = now();

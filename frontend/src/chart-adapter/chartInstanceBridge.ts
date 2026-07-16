@@ -101,6 +101,19 @@ interface FreehandCaptureIdentityRecord {
   sourceProjectionConfig: string;
 }
 
+interface DrawingFrameProjectionSessionState {
+  readonly context: DrawingCoordinateContext;
+  readonly invalidationEpoch: number;
+  readonly lineageStats: {
+    exactProjectionCount: number;
+    fallbackProjectionCount: number;
+    unresolvedProjectionCount: number;
+  };
+  readonly series: AdapterSeries;
+  readonly snapshot: DrawingFrameSnapshot;
+  readonly timeScale: AdapterTimeScale;
+}
+
 interface VisibleRangeSnapshot {
   logical?: { from: number; to: number } | null;
   time?: { from: unknown; to: unknown } | null;
@@ -362,9 +375,16 @@ export function createLightweightChartAdapter({
   const drawingFrameInvalidationListeners = new Set<(
     reason?: DrawingFrameInvalidationReason,
   ) => void>();
+  let drawingFrameInvalidationEpoch = 0;
+  const advanceDrawingFrameInvalidationEpoch = (): void => {
+    drawingFrameInvalidationEpoch = drawingFrameInvalidationEpoch >= Number.MAX_SAFE_INTEGER
+      ? 0
+      : drawingFrameInvalidationEpoch + 1;
+  };
   const emitDrawingFrameInvalidation = (
     reason: DrawingFrameInvalidationReason = "manual",
   ) => {
+    advanceDrawingFrameInvalidationEpoch();
     for (const listener of drawingFrameInvalidationListeners) {
       safeCall(() => listener(reason), undefined);
     }
@@ -389,6 +409,52 @@ export function createLightweightChartAdapter({
       && drawingFrameRevisionsEqual(snapshot, current)
       && current.surfaceGeneration === snapshot.surfaceGeneration;
   };
+  let activeDrawingFrameProjectionSession: DrawingFrameProjectionSessionState | null = null;
+  const runDrawingFrameProjectionSession = <T>(
+    snapshot: DrawingFrameSnapshot,
+    work: () => T | null,
+  ): T | null => {
+    if (activeDrawingFrameProjectionSession
+      || typeof work !== "function"
+      || !isDrawingFrameCurrent(snapshot)) return null;
+    const chart = getChart();
+    const series = getSeries();
+    if (!chart || !series || drawingFrameSeriesOwners.get(snapshot) !== series) return null;
+    const timeScale = safeCall(() => chart.timeScale(), null);
+    if (!timeScale) return null;
+    const session = Object.freeze({
+      context: createDrawingFrameCoordinateContext(snapshot),
+      invalidationEpoch: drawingFrameInvalidationEpoch,
+      lineageStats: {
+        exactProjectionCount: 0,
+        fallbackProjectionCount: 0,
+        unresolvedProjectionCount: 0,
+      },
+      series,
+      snapshot,
+      timeScale,
+    });
+    activeDrawingFrameProjectionSession = session;
+    let result: T | null;
+    try {
+      result = work();
+    } finally {
+      activeDrawingFrameProjectionSession = null;
+    }
+    const frameCurrent = isDrawingFrameCurrent(snapshot);
+    if (session.invalidationEpoch !== drawingFrameInvalidationEpoch || !frameCurrent) return null;
+    drawingLineageExactProjectionCount += session.lineageStats.exactProjectionCount;
+    drawingLineageFallbackProjectionCount += session.lineageStats.fallbackProjectionCount;
+    drawingLineageUnresolvedProjectionCount += session.lineageStats.unresolvedProjectionCount;
+    return result;
+  };
+  const projectionSessionFor = (
+    snapshot: DrawingFrameSnapshot,
+  ): DrawingFrameProjectionSessionState | null => (
+    activeDrawingFrameProjectionSession?.snapshot === snapshot
+      ? activeDrawingFrameProjectionSession
+      : null
+  );
   let lastFreehandCaptureIdentity: FreehandCaptureIdentityRecord | null = null;
   const captureIdentityFor = (
     series: AdapterSeries,
@@ -419,8 +485,10 @@ export function createLightweightChartAdapter({
     snapshot: DrawingFrameSnapshot,
     dataPoints: readonly CoordinateDataPoint[],
   ): readonly (DrawingCoordinateResolution | null)[] | null => safeCall(() => {
-    if (!isDrawingFrameCurrent(snapshot)) return null;
-    const context = createDrawingFrameCoordinateContext(snapshot);
+    const session = projectionSessionFor(snapshot);
+    if ((!session && activeDrawingFrameProjectionSession)
+      || (!session && !isDrawingFrameCurrent(snapshot))) return null;
+    const context = session?.context ?? createDrawingFrameCoordinateContext(snapshot);
     const sourceResolutions = resolveDrawingSourceAnchors(
       snapshot.seriesData,
       dataPoints,
@@ -435,21 +503,25 @@ export function createLightweightChartAdapter({
         ? Object.freeze({ kind: "logical" as const, logical: point.logical })
         : null;
     });
-    return isDrawingFrameCurrent(snapshot) ? Object.freeze(resolutions) : null;
+    return session || isDrawingFrameCurrent(snapshot) ? Object.freeze(resolutions) : null;
   }, null);
   const projectDrawingFrameResolvedDataPoints = (
     snapshot: DrawingFrameSnapshot,
     resolutions: readonly (DrawingCoordinateResolution | null)[],
     dataPoints: readonly CoordinateDataPoint[],
   ): Float64Array | null => safeCall(() => {
-    if (!isDrawingFrameCurrent(snapshot) || resolutions.length !== dataPoints.length) return null;
-    const chart = getChart();
-    const series = getSeries();
-    if (!chart || !series) return null;
+    const session = projectionSessionFor(snapshot);
+    if (resolutions.length !== dataPoints.length
+      || (!session && activeDrawingFrameProjectionSession)
+      || (!session && !isDrawingFrameCurrent(snapshot))) return null;
+    const chart = session ? null : getChart();
+    const series = session?.series ?? getSeries();
+    const timeScale = session?.timeScale ?? chart?.timeScale();
+    if (!series || !timeScale) return null;
     const xCoordinates = projectDrawingCoordinateResolutions(
-      chart.timeScale(),
+      timeScale,
       resolutions,
-      createDrawingFrameCoordinateContext(snapshot),
+      session?.context ?? createDrawingFrameCoordinateContext(snapshot),
     );
     if (xCoordinates.length !== dataPoints.length) return null;
     const coordinates = new Float64Array(dataPoints.length * 2);
@@ -467,7 +539,7 @@ export function createLightweightChartAdapter({
         if (typeof y === "number" && Number.isFinite(y)) coordinates[coordinateIndex + 1] = y;
       }
     }
-    return isDrawingFrameCurrent(snapshot) ? coordinates : null;
+    return session || isDrawingFrameCurrent(snapshot) ? coordinates : null;
   }, null);
 
   return {
@@ -478,6 +550,7 @@ export function createLightweightChartAdapter({
     getSeriesData,
     captureDrawingFrame,
     isDrawingFrameCurrent,
+    runDrawingFrameProjectionSession,
     resolveDrawingFrameDataPoints,
     projectDrawingFrameResolvedDataPoints,
     projectDrawingFrameDataPoints: (
@@ -493,11 +566,14 @@ export function createLightweightChartAdapter({
       snapshot: DrawingFrameSnapshot,
       span: SourceLineageSpanInput,
     ): Readonly<{ left: number; right: number }> | null => safeCall(() => {
-      if (!isDrawingFrameCurrent(snapshot)) return null;
-      const chart = getChart();
-      const series = getSeries();
-      if (!chart || !series) return null;
-      const context = createDrawingFrameCoordinateContext(snapshot);
+      const session = projectionSessionFor(snapshot);
+      if ((!session && activeDrawingFrameProjectionSession)
+        || (!session && !isDrawingFrameCurrent(snapshot))) return null;
+      const chart = session ? null : getChart();
+      const series = session?.series ?? getSeries();
+      const timeScale = session?.timeScale ?? chart?.timeScale();
+      if (!series || !timeScale) return null;
+      const context = session?.context ?? createDrawingFrameCoordinateContext(snapshot);
       const resolution = resolveDrawingFrameSourceLineageSpan(
         snapshot,
         series,
@@ -505,7 +581,7 @@ export function createLightweightChartAdapter({
         context,
       );
       const projected = projectSourceLineageSpanWithMode(
-        chart.timeScale(),
+        timeScale,
         resolution,
         context,
       );
@@ -513,11 +589,15 @@ export function createLightweightChartAdapter({
         || !Number.isFinite(projected.left)
         || !Number.isFinite(projected.right)
         || projected.left >= projected.right) {
-        drawingLineageUnresolvedProjectionCount += 1;
+        if (session) session.lineageStats.unresolvedProjectionCount += 1;
+        else drawingLineageUnresolvedProjectionCount += 1;
         return null;
       }
-      if (!isDrawingFrameCurrent(snapshot)) return null;
-      if (projected.mode === "exact") drawingLineageExactProjectionCount += 1;
+      if (!session && !isDrawingFrameCurrent(snapshot)) return null;
+      if (projected.mode === "exact") {
+        if (session) session.lineageStats.exactProjectionCount += 1;
+        else drawingLineageExactProjectionCount += 1;
+      } else if (session) session.lineageStats.fallbackProjectionCount += 1;
       else drawingLineageFallbackProjectionCount += 1;
       return Object.freeze({ left: projected.left, right: projected.right });
     }, null),
@@ -532,7 +612,10 @@ export function createLightweightChartAdapter({
       if (typeof listener !== "function") return () => {};
       drawingFrameInvalidationListeners.add(listener);
       const timeScale = safeCall(() => getChart()?.timeScale(), null);
-      const notify = () => safeCall(() => listener("viewport"), undefined);
+      const notify = () => {
+        advanceDrawingFrameInvalidationEpoch();
+        safeCall(() => listener("viewport"), undefined);
+      };
       safeCall(() => timeScale?.subscribeVisibleLogicalRangeChange?.(notify), undefined);
       safeCall(() => timeScale?.subscribeSizeChange?.(notify), undefined);
       return () => {

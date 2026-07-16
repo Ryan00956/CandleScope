@@ -137,6 +137,31 @@ test("an invalidation raised during build discards the plan even when revisions 
   assert.deepEqual(published, [["hidden-state", "stale-retry"]]);
 });
 
+test("an invalidation raised during an atomic null build schedules its follow-up", () => {
+  const frames: Array<() => void> = [];
+  const published: string[][] = [];
+  let first = true;
+  const scheduler = createDrawingRenderScheduler({
+    readInput: () => ({ stamp: stamp(1) }),
+    buildPlan: (value) => {
+      if (!first) return { stamp: value.stamp };
+      first = false;
+      scheduler.invalidate("projection-session-stale");
+      return null;
+    },
+    publish: (_plan, reasons) => published.push([...reasons]),
+    requestFrame: (callback) => { frames.push(callback); return callback; },
+    cancelFrame: () => {},
+  });
+
+  scheduler.invalidate("document");
+  frames.shift()?.();
+  assert.deepEqual(published, []);
+  assert.equal(frames.length, 1);
+  frames.shift()?.();
+  assert.deepEqual(published, [["projection-session-stale", "follow-up"]]);
+});
+
 test("build failures stay fail-closed, retain reasons, and retry on the next invalidation", () => {
   const frames: Array<() => void> = [];
   const errors: unknown[] = [];

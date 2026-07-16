@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createDrawingFrameSnapshotFactory } from "../../../../chart-adapter/drawingFrameSnapshot.js";
+import type { DrawingFrameSnapshot } from "../../../../chart-adapter/drawingFrameSnapshot.js";
 import {
   createDrawingDocument,
   createDrawingEntity,
@@ -884,6 +885,63 @@ test("viewport invalidation captures its atomic frame only in the scheduled buil
   adapter.emit("manual");
   assert.equal(adapter.captureCount(), beforeManual + 1,
     "manual coordinate transitions retain synchronous fail-closed detection");
+  runtime.dispose();
+});
+
+test("a stale projection session publishes no partial plan and follows up", () => {
+  const store = createDrawingDocumentStore(documentWithRevision());
+  const baseAdapter = fakeAdapter();
+  const renderer = fakeRenderer(store.getSnapshot());
+  const skipped: string[] = [];
+  const published: unknown[] = [];
+  const frames: Array<() => void> = [];
+  let rejectFirstSession = true;
+  let sessionCount = 0;
+  const adapter: DrawingSceneFrameAdapter = {
+    ...baseAdapter.adapter,
+    runDrawingFrameProjectionSession<T>(
+      _frame: DrawingFrameSnapshot,
+      work: () => T | null,
+    ): T | null {
+      sessionCount += 1;
+      const result = work();
+      if (!rejectFirstSession) return result;
+      rejectFirstSession = false;
+      return null;
+    },
+  };
+  const runtime = createDrawingSceneRuntime({
+    mode: "scene-canary",
+    rasterBackend: "main-thread",
+    requestFrame: (callback) => { frames.push(callback); return callback; },
+    cancelFrame: () => {},
+    onSkipped: (reason) => skipped.push(reason),
+  });
+  runtime.activate({
+    adapter,
+    renderer: renderer.renderer,
+    store,
+    projectScene: project,
+    publishScene: (plan) => {
+      published.push(plan);
+      return true;
+    },
+  });
+
+  assert.equal(frames.length, 1);
+  frames.shift()?.();
+  assert.equal(runtime.snapshot().active, true);
+  assert.equal(runtime.snapshot().plan, null);
+  assert.equal(published.length, 0);
+  assert.equal(sessionCount, 1);
+  assert.ok(skipped.includes("drawing-frame-projection-session-stale"));
+  assert.equal(frames.length, 1,
+    "a silently stale provider session must enqueue its own retry");
+
+  frames.shift()?.();
+  assert.equal(sessionCount, 2);
+  assert.equal(published.length, 1);
+  assert.ok(runtime.snapshot().plan);
   runtime.dispose();
 });
 

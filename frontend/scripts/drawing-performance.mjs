@@ -1216,12 +1216,24 @@ function browserBenchmarkBootstrap(payload) {
   const timingHistogramBucketCount = Math.floor(
     timingHistogramMaxMs / timingHistogramBucketWidthMs,
   ) + 1;
+  const inputEventTypes = ["pointerdown", "pointermove", "pointerup", "wheel"];
+  const eventTimingTypes = [
+    "pointerdown",
+    "pointermove",
+    "pointerup",
+    "mousedown",
+    "mouseup",
+    "wheel",
+  ];
   const makeTimingHistogram = () => ({
     bucketCounts: new Uint32Array(timingHistogramBucketCount),
     totalCount: 0,
     invalidCount: 0,
     maxMs: null,
   });
+  const makeTimingHistogramMap = (types) => Object.fromEntries(
+    types.map((type) => [type, makeTimingHistogram()]),
+  );
   const makeState = () => ({
     startedAt: performance.now(),
     lastRafAt: null,
@@ -1235,8 +1247,18 @@ function browserBenchmarkBootstrap(payload) {
     instrumentationWindows: [],
     activeInstrumentation: null,
     inputEvents: 0,
+    inputEventCounts: Object.fromEntries(inputEventTypes.map((type) => [type, 0])),
     pendingPaintAt: null,
+    pendingPaintByType: Object.fromEntries(inputEventTypes.map((type) => [type, {
+      earliestAt: null,
+      eventCount: 0,
+    }])),
     pendingPaintFenceScheduled: false,
+    inputPaintFenceStats: Object.fromEntries(inputEventTypes.map((type) => [type, {
+      coalescedEventCount: 0,
+      fenceCount: 0,
+      maxEventsPerFence: 0,
+    }])),
     captureStats: {
       rafIntervalsMs: { observed: 0, dropped: 0 },
       inputToNextPaintMs: { observed: 0, dropped: 0 },
@@ -1249,6 +1271,8 @@ function browserBenchmarkBootstrap(payload) {
       eventTimingMs: makeTimingHistogram(),
       mouseupSyncMs: makeTimingHistogram(),
     },
+    inputToNextPaintByType: makeTimingHistogramMap(inputEventTypes),
+    eventTimingByType: makeTimingHistogramMap(eventTimingTypes),
   });
   let state = makeState();
   let stateEpoch = 0;
@@ -1276,13 +1300,10 @@ function browserBenchmarkBootstrap(payload) {
     return null;
   };
 
-  const summarizeTimingMetric = (metric, includeBuckets) => {
-    const stats = state.captureStats[metric];
-    const histogram = state.timingHistograms[metric];
-    return {
+  const summarizeHistogram = (histogram, captureObserved, includeBuckets) => ({
       totalCount: histogram.totalCount,
       invalidCount: histogram.invalidCount,
-      captureObserved: stats.observed,
+      captureObserved,
       bucketWidthMs: timingHistogramBucketWidthMs,
       histogramMaxMs: timingHistogramMaxMs,
       bucketCount: timingHistogramBucketCount,
@@ -1294,12 +1315,31 @@ function browserBenchmarkBootstrap(payload) {
       ...(includeBuckets
         ? { bucketCounts: Array.from(histogram.bucketCounts) }
         : {}),
-    };
+    });
+
+  const summarizeTimingMetric = (metric, includeBuckets) => {
+    const stats = state.captureStats[metric];
+    const histogram = state.timingHistograms[metric];
+    return summarizeHistogram(histogram, stats.observed, includeBuckets);
   };
+
+  const summarizeHistogramMap = (histograms, includeBuckets) => Object.fromEntries(
+    Object.entries(histograms).map(([type, histogram]) => [
+      type,
+      summarizeHistogram(histogram, histogram.totalCount, includeBuckets),
+    ]),
+  );
 
   const summarizeTimingState = (includeBuckets = false) => ({
     windowDurationMs: Math.max(0, performance.now() - state.startedAt),
     inputEvents: state.inputEvents,
+    inputEventCounts: structuredClone(state.inputEventCounts),
+    inputPaintFenceStats: structuredClone(state.inputPaintFenceStats),
+    inputToNextPaintByType: summarizeHistogramMap(
+      state.inputToNextPaintByType,
+      includeBuckets,
+    ),
+    eventTimingByType: summarizeHistogramMap(state.eventTimingByType, includeBuckets),
     eventTimingSupported,
     longTaskSupported,
     captureStats: structuredClone(state.captureStats),
@@ -1336,11 +1376,10 @@ function browserBenchmarkBootstrap(payload) {
     };
   };
 
-  const boundedPush = (target, metric, value, capacity = timingSampleCapacity) => {
-    const histogram = state.timingHistograms[metric];
+  const recordHistogram = (histogram, value) => {
     if (!Number.isFinite(value) || value < 0) {
       histogram.invalidCount += 1;
-      return;
+      return false;
     }
     const bucketIndex = Math.min(
       timingHistogramBucketCount - 1,
@@ -1349,6 +1388,12 @@ function browserBenchmarkBootstrap(payload) {
     histogram.bucketCounts[bucketIndex] += 1;
     histogram.totalCount += 1;
     histogram.maxMs = histogram.maxMs === null ? value : Math.max(histogram.maxMs, value);
+    return true;
+  };
+
+  const boundedPush = (target, metric, value, capacity = timingSampleCapacity) => {
+    const histogram = state.timingHistograms[metric];
+    if (!recordHistogram(histogram, value)) return;
     state.captureStats[metric].observed += 1;
     if (capacity === 0) return;
     target.push(value);
@@ -1368,9 +1413,17 @@ function browserBenchmarkBootstrap(payload) {
   };
   requestAnimationFrame(rafLoop);
 
-  const onInput = () => {
+  const onInput = (event) => {
+    const type = inputEventTypes.includes(event.type) ? event.type : null;
+    const inputAt = performance.now();
     state.inputEvents += 1;
-    if (state.pendingPaintAt === null) state.pendingPaintAt = performance.now();
+    if (type) {
+      state.inputEventCounts[type] += 1;
+      const pendingType = state.pendingPaintByType[type];
+      if (pendingType.earliestAt === null) pendingType.earliestAt = inputAt;
+      pendingType.eventCount += 1;
+    }
+    if (state.pendingPaintAt === null) state.pendingPaintAt = inputAt;
     if (state.pendingPaintFenceScheduled) return;
     state.pendingPaintFenceScheduled = true;
     const scheduledEpoch = stateEpoch;
@@ -1384,11 +1437,29 @@ function browserBenchmarkBootstrap(payload) {
         // A zero-delay task queued from rAF runs after the browser's render
         // opportunity. Unlike sampling at rAF entry, this fence includes the
         // style/layout/paint work needed to present the input's next frame.
+        const paintedAt = performance.now();
+        const latencyMs = Math.max(0, paintedAt - inputAt);
         boundedPush(
           state.inputToNextPaintMs,
           "inputToNextPaintMs",
-          Math.max(0, performance.now() - inputAt),
+          latencyMs,
         );
+        for (const type of inputEventTypes) {
+          const pendingType = state.pendingPaintByType[type];
+          const earliestAt = pendingType.earliestAt;
+          const eventCount = pendingType.eventCount;
+          pendingType.earliestAt = null;
+          pendingType.eventCount = 0;
+          if (earliestAt === null
+            || !recordHistogram(
+              state.inputToNextPaintByType[type],
+              Math.max(0, paintedAt - earliestAt),
+            )) continue;
+          const fenceStats = state.inputPaintFenceStats[type];
+          fenceStats.fenceCount += 1;
+          fenceStats.coalescedEventCount += Math.max(0, eventCount - 1);
+          fenceStats.maxEventsPerFence = Math.max(fenceStats.maxEventsPerFence, eventCount);
+        }
       }, 0);
     });
   };
@@ -1407,9 +1478,9 @@ function browserBenchmarkBootstrap(payload) {
   try {
     const eventObserver = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
-        if (["pointerdown", "pointermove", "pointerup", "mousedown", "mouseup", "wheel"]
-          .includes(entry.name)) {
+        if (eventTimingTypes.includes(entry.name)) {
           boundedPush(state.eventTimingMs, "eventTimingMs", entry.duration);
+          recordHistogram(state.eventTimingByType[entry.name], entry.duration);
         }
       }
     });
@@ -1491,6 +1562,8 @@ function browserBenchmarkBootstrap(payload) {
         droppedLongTaskCount: longTaskSummary.droppedCount,
         totalLongTaskCount: longTaskSummary.totalCount,
         inputEvents: state.inputEvents,
+        inputEventCounts: structuredClone(state.inputEventCounts),
+        inputPaintFenceStats: structuredClone(state.inputPaintFenceStats),
         eventTimingSupported,
         longTaskSupported,
         captureStats: structuredClone(state.captureStats),
@@ -3693,6 +3766,10 @@ async function runPhase9Soak({
         rawLongTasks: Array.isArray(bench?.longTasks) ? bench.longTasks : null,
         eventTimingSupported: bench?.eventTimingSupported ?? null,
         inputEvents: bench?.inputEvents ?? null,
+        inputEventCounts: bench?.timingSummary?.inputEventCounts ?? null,
+        inputPaintFenceStats: bench?.timingSummary?.inputPaintFenceStats ?? null,
+        inputToNextPaintByType: bench?.timingSummary?.inputToNextPaintByType ?? null,
+        eventTimingByType: bench?.timingSummary?.eventTimingByType ?? null,
         captureStats: bench?.captureStats ?? null,
         metrics: bench?.timingSummary?.metrics ?? null,
       },

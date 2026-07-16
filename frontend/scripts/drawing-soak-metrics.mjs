@@ -52,7 +52,7 @@ const DRAWING_EVENT_LATENCY_TRACE_CATEGORIES = Object.freeze([
 ]);
 
 const DRAWING_EVENT_LATENCY_CONFIGURATION = Object.freeze({
-  dispatchesPerType: 128,
+  dispatchesPerType: 256,
   maxAttempts: 2,
   settleFramesPerInput: 6,
   p95ThresholdMs: 20,
@@ -64,10 +64,10 @@ const DRAWING_EVENT_LATENCY_CONFIGURATION = Object.freeze({
 });
 
 const DRAWING_EVENT_LATENCY_METRIC_SEMANTICS = Object.freeze({
-  frameSubmitByType: Object.freeze({
-    start: "input-generation",
+  inputToNextPaintByType: Object.freeze({
+    start: "renderer-main-processing",
     end: "next-frame-submit",
-    meaning: "documented-input-to-next-paint",
+    meaning: "presented-input-to-next-paint",
   }),
   presentationByType: Object.freeze({
     start: "input-generation",
@@ -148,6 +148,10 @@ function finiteNumber(value) {
 function nonNegativeNumber(value) {
   const number = finiteNumber(value);
   return number !== null && number >= 0 ? number : null;
+}
+
+function nonNegativeSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function median(values) {
@@ -924,6 +928,13 @@ const EVENT_LATENCY_DIAGNOSTIC_KEYS = Object.freeze([
   "nonMonotonicEvents",
   "unknownTypes",
   "countMismatches",
+  "dispatchGroupMismatches",
+  "orphanHandlerStageEnds",
+  "openHandlerStageBegins",
+  "invalidHandlerStages",
+  "nonMonotonicHandlerStages",
+  "unnestedHandlerStages",
+  "handlerStageCardinalityMismatches",
   "orphanSubmitStageEnds",
   "openSubmitStageBegins",
   "invalidSubmitStages",
@@ -931,6 +942,73 @@ const EVENT_LATENCY_DIAGNOSTIC_KEYS = Object.freeze([
   "unnestedSubmitStages",
   "submitStageCardinalityMismatches",
   "submitStagePresentationMismatches",
+  "orphanTerminationStageEnds",
+  "openTerminationStageBegins",
+  "invalidTerminationStages",
+  "nonMonotonicTerminationStages",
+  "unnestedTerminationStages",
+  "terminationStageCardinalityMismatches",
+  "terminationStageEndpointMismatches",
+]);
+
+const EVENT_LATENCY_DISPATCH_GROUP_KEYS = Object.freeze([
+  "count",
+  "presentedCount",
+  "standaloneTerminationCount",
+  "duplicateTerminationCount",
+]);
+
+const EVENT_LATENCY_SAMPLE_KEYS = Object.freeze([
+  "inputType",
+  "rawEventType",
+  "endpoint",
+  "generationTimestampUs",
+  "handlerStartTimestampUs",
+  "endpointTimestampUs",
+  "frameSubmitTimestampUs",
+  "presentationTimestampUs",
+  "generationToHandlerMs",
+  "handlerToNextPaintMs",
+  "handlerToTerminationMs",
+  "frameSubmitToPresentationMs",
+  "generationToPresentationMs",
+  "frameSubmitStageName",
+  "pid",
+  "tid",
+  "category",
+  "localId",
+]);
+
+const EVENT_LATENCY_RAW_EVENT_TYPES = Object.freeze({
+  pointerdown: "MOUSE_PRESSED",
+  pointermove: "MOUSE_DRAGGED",
+  pointerup: "MOUSE_RELEASED",
+  wheel: "MOUSE_WHEEL",
+});
+
+const EVENT_LATENCY_FRAME_SUBMIT_STAGE_NAMES = Object.freeze(new Set([
+  "SubmitCompositorFrameToPresentationCompositorFrame",
+  "SubmitUpdateDisplayTreeToPresentationCompositorFrame",
+]));
+
+const EVENT_LATENCY_COUNT_KEYS = Object.freeze([
+  "beginCount",
+  "endCount",
+  "pairedCount",
+  "presentedPairCount",
+  "terminationOnlyPairCount",
+  "partialPresentationPairCount",
+]);
+
+const EVENT_LATENCY_EIAF_SAMPLE_KEYS = Object.freeze([
+  "inputType",
+  "outcome",
+  "generationTimestampUs",
+  "endpointTimestampUs",
+  "generationToEndpointMs",
+  "pid",
+  "tid",
+  "localId",
 ]);
 
 const EVENT_LATENCY_PROVENANCE_KEYS = Object.freeze([
@@ -1032,25 +1110,7 @@ function exactNumericSamples(left, right) {
     ));
 }
 
-function exactNumericSampleMultiset(left, right) {
-  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
-    return false;
-  }
-  const sortedLeft = left.map(nonNegativeNumber).sort((a, b) => a - b);
-  const sortedRight = right.map(nonNegativeNumber).sort((a, b) => a - b);
-  return sortedLeft.every((value, index) => (
-    value !== null
-      && sortedRight[index] !== null
-      && Math.abs(value - sortedRight[index]) <= 1e-9
-  ));
-}
-
-function eventLatencyMetricEvidence(
-  metric,
-  expectedCount,
-  canonicalSamples,
-  { compareAsMultiset = false } = {},
-) {
+function eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples) {
   const samplesMs = metric?.samplesMs;
   const count = metric?.count;
   const p50Ms = nonNegativeNumber(metric?.p50Ms);
@@ -1060,9 +1120,7 @@ function eventLatencyMetricEvidence(
     && count === expectedCount
     && Array.isArray(samplesMs)
     && samplesMs.length === count
-    && (compareAsMultiset
-      ? exactNumericSampleMultiset(samplesMs, canonicalSamples)
-      : exactNumericSamples(samplesMs, canonicalSamples))
+    && exactNumericSamples(samplesMs, canonicalSamples)
     && p50Ms !== null
     && p95Ms !== null
     && p99Ms !== null
@@ -1073,6 +1131,106 @@ function eventLatencyMetricEvidence(
     && nearestRankPercentile(samplesMs, 99) === p99Ms;
 }
 
+function eventLatencyDispatchGroupEvidence(group, expectedCount) {
+  return hasExactKeys(group, EVENT_LATENCY_DISPATCH_GROUP_KEYS)
+    && EVENT_LATENCY_DISPATCH_GROUP_KEYS.every((key) => (
+      Number.isSafeInteger(group[key]) && group[key] >= 0
+    ))
+    && group.count === expectedCount
+    && group.presentedCount + group.standaloneTerminationCount === group.count
+    && group.duplicateTerminationCount <= group.presentedCount;
+}
+
+function eventLatencyRawSampleEvidence(sample) {
+  if (!hasExactKeys(sample, EVENT_LATENCY_SAMPLE_KEYS)
+    || !DRAWING_EVENT_LATENCY_INPUT_TYPES.includes(sample.inputType)
+    || sample.rawEventType !== EVENT_LATENCY_RAW_EVENT_TYPES[sample.inputType]
+    || (sample.endpoint !== "frame-submit"
+      && sample.endpoint !== "event-latency-termination")
+    || nonNegativeSafeInteger(sample.generationTimestampUs) === null
+    || nonNegativeSafeInteger(sample.handlerStartTimestampUs) === null
+    || nonNegativeSafeInteger(sample.endpointTimestampUs) === null
+    || sample.handlerStartTimestampUs < sample.generationTimestampUs
+    || sample.endpointTimestampUs < sample.handlerStartTimestampUs
+    || nonNegativeNumber(sample.generationToHandlerMs) === null
+    || sample.generationToHandlerMs
+      !== (sample.handlerStartTimestampUs - sample.generationTimestampUs) / 1_000
+    || !Number.isSafeInteger(sample.pid)
+    || sample.pid < 0
+    || !Number.isSafeInteger(sample.tid)
+    || sample.tid < 0
+    || typeof sample.category !== "string"
+    || !sample.category.split(",").some((entry) => entry.trim() === "input")
+    || typeof sample.localId !== "string"
+    || sample.localId.length === 0) return false;
+
+  if (sample.endpoint === "event-latency-termination") {
+    return sample.handlerToNextPaintMs === null
+      && nonNegativeNumber(sample.handlerToTerminationMs) !== null
+      && sample.handlerToTerminationMs
+        === (sample.endpointTimestampUs - sample.handlerStartTimestampUs) / 1_000
+      && sample.frameSubmitTimestampUs === null
+      && sample.presentationTimestampUs === null
+      && sample.frameSubmitToPresentationMs === null
+      && sample.generationToPresentationMs === null
+      && sample.frameSubmitStageName === null;
+  }
+  return nonNegativeNumber(sample.handlerToNextPaintMs) !== null
+    && sample.handlerToNextPaintMs
+      === (sample.endpointTimestampUs - sample.handlerStartTimestampUs) / 1_000
+    && sample.handlerToTerminationMs === null
+    && nonNegativeSafeInteger(sample.frameSubmitTimestampUs) !== null
+    && sample.frameSubmitTimestampUs === sample.endpointTimestampUs
+    && nonNegativeSafeInteger(sample.presentationTimestampUs) !== null
+    && sample.presentationTimestampUs >= sample.frameSubmitTimestampUs
+    && nonNegativeNumber(sample.frameSubmitToPresentationMs) !== null
+    && sample.frameSubmitToPresentationMs
+      === (sample.presentationTimestampUs - sample.frameSubmitTimestampUs) / 1_000
+    && nonNegativeNumber(sample.generationToPresentationMs) !== null
+    && sample.generationToPresentationMs
+      === (sample.presentationTimestampUs - sample.generationTimestampUs) / 1_000
+    && Math.abs(sample.generationToHandlerMs + sample.handlerToNextPaintMs
+      + sample.frameSubmitToPresentationMs - sample.generationToPresentationMs) <= 1e-9
+    && EVENT_LATENCY_FRAME_SUBMIT_STAGE_NAMES.has(sample.frameSubmitStageName);
+}
+
+function eventLatencyEiafSampleEvidence(sample) {
+  return hasExactKeys(sample, EVENT_LATENCY_EIAF_SAMPLE_KEYS)
+    && (sample.inputType === "pointerdown" || sample.inputType === "pointerup")
+    && (sample.outcome === "presentation" || sample.outcome === "fallback")
+    && nonNegativeSafeInteger(sample.generationTimestampUs) !== null
+    && nonNegativeSafeInteger(sample.endpointTimestampUs) !== null
+    && sample.endpointTimestampUs >= sample.generationTimestampUs
+    && nonNegativeNumber(sample.generationToEndpointMs) !== null
+    && sample.generationToEndpointMs
+      === (sample.endpointTimestampUs - sample.generationTimestampUs) / 1_000
+    && Number.isSafeInteger(sample.pid)
+    && sample.pid >= 0
+    && Number.isSafeInteger(sample.tid)
+    && sample.tid >= 0
+    && typeof sample.localId === "string"
+    && sample.localId.length > 0;
+}
+
+function numericSampleMultisetSubset(subset, superset) {
+  if (!Array.isArray(subset) || !Array.isArray(superset) || subset.length > superset.length) {
+    return false;
+  }
+  const normalizedSubset = subset.map(nonNegativeNumber);
+  const normalizedSuperset = superset.map(nonNegativeNumber);
+  if (normalizedSubset.some((value) => value === null)
+    || normalizedSuperset.some((value) => value === null)) return false;
+  normalizedSubset.sort((left, right) => left - right);
+  normalizedSuperset.sort((left, right) => left - right);
+  let subsetIndex = 0;
+  for (const candidate of normalizedSuperset) {
+    const expected = normalizedSubset[subsetIndex];
+    if (expected === undefined) return true;
+    if (Math.abs(candidate - expected) <= 1e-9) subsetIndex += 1;
+  }
+  return subsetIndex === normalizedSubset.length;
+}
+
 function emptyEventLatencyMetricEvidence(metric) {
   return metric?.count === 0
     && Array.isArray(metric?.samplesMs)
@@ -1080,6 +1238,12 @@ function emptyEventLatencyMetricEvidence(metric) {
     && metric.p50Ms === null
     && metric.p95Ms === null
     && metric.p99Ms === null;
+}
+
+function eventLatencyMetricOrEmptyEvidence(metric, expectedCount, canonicalSamples) {
+  return expectedCount === 0
+    ? emptyEventLatencyMetricEvidence(metric) && exactNumericSamples(metric.samplesMs, canonicalSamples)
+    : eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples);
 }
 
 function eventLatencyCalibrationEvidence(report) {
@@ -1156,46 +1320,54 @@ function eventLatencyCalibrationEvidence(report) {
   ));
   const parserSamples = Array.isArray(parser?.samples) ? parser.samples : [];
   const metricSemanticsPassed = exactEventLatencyMetricSemantics(parser?.metricSemantics);
-  const canonicalFrameSubmitSamplesByType = Object.fromEntries(
+  const rawSamplesByType = Object.fromEntries(
     DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => [
       type,
-      parserSamples
-        .filter((sample) => sample?.inputType === type)
-        .map((sample) => sample?.generationToFrameSubmitMs),
+      parserSamples.filter((sample) => sample?.inputType === type),
+    ]),
+  );
+  const canonicalInputToNextPaintSamplesByType = Object.fromEntries(
+    DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => [
+      type,
+      rawSamplesByType[type]
+        .filter((sample) => sample?.endpoint === "frame-submit")
+        .map((sample) => sample?.handlerToNextPaintMs),
     ]),
   );
   const canonicalPresentationSamplesByType = Object.fromEntries(
     DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => [
       type,
-      parserSamples
-        .filter((sample) => sample?.inputType === type)
+      rawSamplesByType[type]
+        .filter((sample) => sample?.endpoint === "frame-submit")
         .map((sample) => sample?.generationToPresentationMs),
     ]),
   );
+  const generationGroupKeys = parserSamples.map((sample) => (
+    `${sample?.pid}|${sample?.rawEventType}|${sample?.generationTimestampUs}`
+  ));
   const parserSamplesPassed = Array.isArray(parser?.samples)
     && parserSamples.length === expectedCount * DRAWING_EVENT_LATENCY_INPUT_TYPES.length
     && DRAWING_EVENT_LATENCY_INPUT_TYPES.every((type) => (
-      canonicalFrameSubmitSamplesByType[type].length === expectedCount
-        && canonicalPresentationSamplesByType[type].length === expectedCount
+      rawSamplesByType[type].length === expectedCount
     ))
-    && parserSamples.every((sample) => (
-      DRAWING_EVENT_LATENCY_INPUT_TYPES.includes(sample?.inputType)
-        && nonNegativeNumber(sample?.generationToFrameSubmitMs) !== null
-        && nonNegativeNumber(sample?.frameSubmitToPresentationMs) !== null
-        && nonNegativeNumber(sample?.generationToPresentationMs) !== null
-        && sample.generationToFrameSubmitMs + sample.frameSubmitToPresentationMs
-          === sample.generationToPresentationMs
-    ));
-  const parserFrameSubmitByType = parser?.frameSubmitByType;
+    && parserSamples.every(eventLatencyRawSampleEvidence)
+    && new Set(generationGroupKeys).size === parserSamples.length;
+  const parserInputToNextPaintByType = parser?.inputToNextPaintByType;
   const parserPresentationByType = parser?.presentationByType;
-  const frameSubmitSummaries = Object.fromEntries(DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => {
-    const metric = parserFrameSubmitByType?.[type];
-    const canonicalSamples = canonicalFrameSubmitSamplesByType[type];
+  const parserDispatchGroupsByType = parser?.dispatchGroupsByType;
+  const inputToNextPaintSummaries = Object.fromEntries(
+    DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => {
+    const metric = parserInputToNextPaintByType?.[type];
+    const canonicalSamples = canonicalInputToNextPaintSamplesByType[type];
     const canonicalCount = canonicalSamples.length;
     const canonicalP50Ms = nearestRankPercentile(canonicalSamples, 50);
     const canonicalP95Ms = nearestRankPercentile(canonicalSamples, 95);
     const canonicalP99Ms = nearestRankPercentile(canonicalSamples, 99);
-    const metricPassed = eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples);
+    const metricPassed = eventLatencyMetricOrEmptyEvidence(
+      metric,
+      canonicalCount,
+      canonicalSamples,
+    );
     const p95Eligible = canonicalCount
       >= DRAWING_EVENT_LATENCY_CONFIGURATION.p95MinimumSamples;
     const p99Eligible = canonicalCount
@@ -1217,12 +1389,17 @@ function eventLatencyCalibrationEvidence(report) {
       p99Passed,
       passed: metricPassed && p95Passed && p99Passed,
     })];
-  }));
+  }),
+  );
   const presentationSummaries = Object.fromEntries(
     DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => {
       const metric = parserPresentationByType?.[type];
       const canonicalSamples = canonicalPresentationSamplesByType[type];
-      const metricPassed = eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples);
+      const metricPassed = eventLatencyMetricOrEmptyEvidence(
+        metric,
+        canonicalSamples.length,
+        canonicalSamples,
+      );
       return [type, Object.freeze({
         count: canonicalSamples.length,
         p50Ms: nearestRankPercentile(canonicalSamples, 50),
@@ -1232,32 +1409,78 @@ function eventLatencyCalibrationEvidence(report) {
       })];
     }),
   );
-  const frameSubmitByTypePassed = hasExactKeys(
-    parserFrameSubmitByType,
+  const dispatchGroupSummaries = Object.fromEntries(
+    DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => {
+      const group = parserDispatchGroupsByType?.[type];
+      const rawSamples = rawSamplesByType[type];
+      const presentedCount = rawSamples.filter(
+        (sample) => sample?.endpoint === "frame-submit",
+      ).length;
+      const standaloneTerminationCount = rawSamples.filter(
+        (sample) => sample?.endpoint === "event-latency-termination",
+      ).length;
+      const passed = eventLatencyDispatchGroupEvidence(group, expectedCount)
+        && group.presentedCount === presentedCount
+        && group.standaloneTerminationCount === standaloneTerminationCount
+        && parserInputToNextPaintByType?.[type]?.count === group.presentedCount
+        && parserPresentationByType?.[type]?.count === group.presentedCount;
+      return [type, Object.freeze({
+        count: rawSamples.length,
+        presentedCount,
+        standaloneTerminationCount,
+        duplicateTerminationCount: Number.isSafeInteger(group?.duplicateTerminationCount)
+          ? group.duplicateTerminationCount
+          : null,
+        passed,
+      })];
+    }),
+  );
+  const inputToNextPaintByTypePassed = hasExactKeys(
+    parserInputToNextPaintByType,
     DRAWING_EVENT_LATENCY_INPUT_TYPES,
-  ) && Object.values(frameSubmitSummaries).every((summary) => summary.passed);
+  ) && Object.values(inputToNextPaintSummaries).every((summary) => summary.passed);
   const presentationByTypePassed = hasExactKeys(
     parserPresentationByType,
     DRAWING_EVENT_LATENCY_INPUT_TYPES,
   ) && Object.values(presentationSummaries).every((summary) => summary.passed);
+  const dispatchGroupsByTypePassed = hasExactKeys(
+    parserDispatchGroupsByType,
+    DRAWING_EVENT_LATENCY_INPUT_TYPES,
+  ) && Object.values(dispatchGroupSummaries).every((summary) => summary.passed);
   const excludedHoverPassed = hasExactKeys(parser?.excluded, ["hover"])
-    && hasExactKeys(parser.excluded.hover, ["frameSubmit", "presentation"])
-    && emptyEventLatencyMetricEvidence(parser.excluded.hover.frameSubmit)
+    && hasExactKeys(
+      parser.excluded.hover,
+      ["dispatchGroups", "inputToNextPaint", "presentation"],
+    )
+    && eventLatencyDispatchGroupEvidence(parser.excluded.hover.dispatchGroups, 0)
+    && parser.excluded.hover.dispatchGroups.duplicateTerminationCount === 0
+    && emptyEventLatencyMetricEvidence(parser.excluded.hover.inputToNextPaint)
     && emptyEventLatencyMetricEvidence(parser.excluded.hover.presentation);
+  const totalPresentedCount = Object.values(dispatchGroupSummaries).reduce(
+    (total, group) => total + group.presentedCount,
+    0,
+  ) + (Number.isSafeInteger(parser?.excluded?.hover?.dispatchGroups?.presentedCount)
+    ? parser.excluded.hover.dispatchGroups.presentedCount
+    : Number.NaN);
+  const totalTerminationPairCount = Object.values(dispatchGroupSummaries).reduce(
+    (total, group) => total + group.standaloneTerminationCount
+      + (group.duplicateTerminationCount ?? Number.NaN),
+    0,
+  ) + (Number.isSafeInteger(parser?.excluded?.hover?.dispatchGroups?.standaloneTerminationCount)
+    && Number.isSafeInteger(parser?.excluded?.hover?.dispatchGroups?.duplicateTerminationCount)
+    ? parser.excluded.hover.dispatchGroups.standaloneTerminationCount
+      + parser.excluded.hover.dispatchGroups.duplicateTerminationCount
+    : Number.NaN);
   const eventLatency = parser?.eventLatency;
-  const eventLatencyCountsPassed = [
-    "beginCount",
-    "endCount",
-    "pairedCount",
-    "presentedPairCount",
-    "terminationOnlyPairCount",
-    "partialPresentationPairCount",
-  ].every((key) => Number.isSafeInteger(eventLatency?.[key]) && eventLatency[key] >= 0)
+  const eventLatencyCountsPassed = hasExactKeys(eventLatency, EVENT_LATENCY_COUNT_KEYS)
+    && EVENT_LATENCY_COUNT_KEYS.every(
+      (key) => Number.isSafeInteger(eventLatency[key]) && eventLatency[key] >= 0,
+    )
     && eventLatency.beginCount === eventLatency.endCount
     && eventLatency.beginCount === eventLatency.pairedCount
     && eventLatency.partialPresentationPairCount === 0
-    && eventLatency.presentedPairCount === expectedCount
-      * DRAWING_EVENT_LATENCY_INPUT_TYPES.length
+    && eventLatency.presentedPairCount === totalPresentedCount
+    && eventLatency.terminationOnlyPairCount === totalTerminationPairCount
     && eventLatency.presentedPairCount
       + eventLatency.terminationOnlyPairCount
       + eventLatency.partialPresentationPairCount === eventLatency.pairedCount
@@ -1265,6 +1488,56 @@ function eventLatencyCalibrationEvidence(report) {
 
   const eiaf = parser?.eventsInAnimationFrame;
   const eiafPresentationByType = eiaf?.presentationByType;
+  const eiafFallbackByType = eiaf?.fallbackByType;
+  const eiafSamples = Array.isArray(eiaf?.samples) ? eiaf.samples : [];
+  const eiafSamplesByType = Object.fromEntries(["pointerdown", "pointerup"].map((type) => [
+    type,
+    eiafSamples.filter((sample) => sample?.inputType === type),
+  ]));
+  const eiafPresentationSamplesByType = Object.fromEntries(
+    ["pointerdown", "pointerup"].map((type) => [
+      type,
+      eiafSamplesByType[type]
+        .filter((sample) => sample?.outcome === "presentation")
+        .map((sample) => sample?.generationToEndpointMs),
+    ]),
+  );
+  const eiafFallbackSamplesByType = Object.fromEntries(
+    ["pointerdown", "pointerup"].map((type) => [
+      type,
+      eiafSamplesByType[type]
+        .filter((sample) => sample?.outcome === "fallback")
+        .map((sample) => sample?.generationToEndpointMs),
+    ]),
+  );
+  const eiafGroupKeys = eiafSamples.map((sample) => (
+    `${sample?.pid}|${sample?.inputType}|${sample?.generationTimestampUs}`
+  ));
+  const eiafSamplesPassed = Array.isArray(eiaf?.samples)
+    && eiafSamples.length === expectedCount * 2
+    && ["pointerdown", "pointerup"].every((type) => (
+      eiafSamplesByType[type].length === expectedCount
+    ))
+    && eiafSamples.every(eventLatencyEiafSampleEvidence)
+    && new Set(eiafGroupKeys).size === eiafSamples.length;
+  const eiafMetricsPassed = hasExactKeys(
+    eiafPresentationByType,
+    ["pointerdown", "pointerup"],
+  ) && hasExactKeys(eiafFallbackByType, ["pointerdown", "pointerup"])
+    && ["pointerdown", "pointerup"].every((type) => (
+      eventLatencyMetricOrEmptyEvidence(
+        eiafPresentationByType[type],
+        eiafPresentationSamplesByType[type].length,
+        eiafPresentationSamplesByType[type],
+      )
+        && eventLatencyMetricOrEmptyEvidence(
+          eiafFallbackByType[type],
+          eiafFallbackSamplesByType[type].length,
+          eiafFallbackSamplesByType[type],
+        )
+        && eiafPresentationByType[type].count + eiafFallbackByType[type].count
+          === expectedCount
+    ));
   const eiafPassed = eiaf?.supported === true
     && eiaf?.passed === true
     && eiaf?.reason === null
@@ -1272,32 +1545,31 @@ function eventLatencyCalibrationEvidence(report) {
     && eiaf.frameCount >= expectedCount * 2
     && Number.isSafeInteger(eiaf?.excludedFrameCount)
     && eiaf.excludedFrameCount >= 0
-    && hasExactKeys(eiafPresentationByType, ["pointerdown", "pointerup"])
-    && eventLatencyMetricEvidence(
-      eiafPresentationByType.pointerdown,
-      expectedCount,
+    && eiaf.frameCount === eiafSamples.length + eiaf.excludedFrameCount
+    && eiafSamplesPassed
+    && eiafMetricsPassed
+    && numericSampleMultisetSubset(
       canonicalPresentationSamplesByType.pointerdown,
-      { compareAsMultiset: true },
+      eiafPresentationByType.pointerdown?.samplesMs,
     )
-    && eventLatencyMetricEvidence(
-      eiafPresentationByType.pointerup,
-      expectedCount,
+    && numericSampleMultisetSubset(
       canonicalPresentationSamplesByType.pointerup,
-      { compareAsMultiset: true },
+      eiafPresentationByType.pointerup?.samplesMs,
     )
     && Array.isArray(eiaf.mismatches)
     && eiaf.mismatches.length === 0
     && Array.isArray(eiaf.schemaErrors)
     && eiaf.schemaErrors.length === 0;
-  const parserPassed = parser?.schemaVersion === "drawing-event-latency-trace/v2"
+  const parserPassed = parser?.schemaVersion === "drawing-event-latency-trace/v3"
     && parser?.passed === true
     && Array.isArray(parser?.failureReasons)
     && parser.failureReasons.length === 0
     && exactEventLatencyDispatchCounts(parser?.expectedDispatchCounts)
     && metricSemanticsPassed
     && parserDiagnosticsPassed
-    && frameSubmitByTypePassed
+    && inputToNextPaintByTypePassed
     && presentationByTypePassed
+    && dispatchGroupsByTypePassed
     && excludedHoverPassed
     && parserSamplesPassed
     && eventLatencyCountsPassed
@@ -1361,11 +1633,12 @@ function eventLatencyCalibrationEvidence(report) {
       passed: parserPassed,
       metricSemanticsPassed,
       diagnosticsPassed: parserDiagnosticsPassed,
-      excludedHoverCount: Number.isSafeInteger(parser?.excluded?.hover?.presentation?.count)
-        ? parser.excluded.hover.presentation.count
+      excludedHoverCount: Number.isSafeInteger(parser?.excluded?.hover?.dispatchGroups?.count)
+        ? parser.excluded.hover.dispatchGroups.count
         : null,
-      frameSubmitByType: Object.freeze(frameSubmitSummaries),
+      inputToNextPaintByType: Object.freeze(inputToNextPaintSummaries),
       presentationByType: Object.freeze(presentationSummaries),
+      dispatchGroupsByType: Object.freeze(dispatchGroupSummaries),
       eventsInAnimationFrame: Object.freeze({
         supported: eiaf?.supported ?? null,
         passed: eiafPassed,
@@ -1374,6 +1647,12 @@ function eventLatencyCalibrationEvidence(report) {
           : null,
         pointerupCount: Number.isSafeInteger(eiafPresentationByType?.pointerup?.count)
           ? eiafPresentationByType.pointerup.count
+          : null,
+        pointerdownFallbackCount: Number.isSafeInteger(eiafFallbackByType?.pointerdown?.count)
+          ? eiafFallbackByType.pointerdown.count
+          : null,
+        pointerupFallbackCount: Number.isSafeInteger(eiafFallbackByType?.pointerup?.count)
+          ? eiafFallbackByType.pointerup.count
           : null,
       }),
     }),
@@ -1965,7 +2244,7 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
     ),
     eventLatencyCalibration: check(
       eventLatencyCalibration.actual,
-      "post-formal-soak Chromium presentation trace: 128 exact samples/type, p95 <= 20ms, p99 <= 33ms, lossless provenance-matched acquisition",
+      `post-formal-soak Chromium EventLatency trace: ${DRAWING_EVENT_LATENCY_CONFIGURATION.dispatchesPerType} dispatches/type; presented input-to-next-paint p95 <= ${DRAWING_EVENT_LATENCY_CONFIGURATION.p95ThresholdMs}ms (>= ${DRAWING_EVENT_LATENCY_CONFIGURATION.p95MinimumSamples} samples), p99 <= ${DRAWING_EVENT_LATENCY_CONFIGURATION.p99ThresholdMs}ms (>= ${DRAWING_EVENT_LATENCY_CONFIGURATION.p99MinimumSamples} samples); lossless provenance-matched acquisition`,
       eventLatencyCalibration.passed,
     ),
     refreshRateProfile: check(

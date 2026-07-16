@@ -7,8 +7,8 @@ import {
 import { DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT } from "./drawing-soak-metrics.mjs";
 
 const EVENT_LATENCY_ACQUISITION_LIMITS = Object.freeze({
-  parserSchemaVersion: "drawing-event-latency-trace/v2",
-  dispatchDeadlineMs: 90_000,
+  parserSchemaVersion: "drawing-event-latency-trace/v3",
+  dispatchDeadlineMs: 180_000,
   streamDeadlineMs: 30_000,
   streamChunkBytes: 1_048_576,
   traceExcludedCategories: Object.freeze(["*"]),
@@ -239,21 +239,31 @@ function summarizeParserLatency(parser) {
   const inputTypes = {};
   let passed = parser?.passed === true;
   for (const inputType of DRAWING_EVENT_LATENCY_INPUT_TYPES) {
-    const metric = parser?.frameSubmitByType?.[inputType];
+    const metric = parser?.inputToNextPaintByType?.[inputType];
     const p95Ms = Number.isFinite(metric?.p95Ms) ? metric.p95Ms : null;
     const p99Ms = Number.isFinite(metric?.p99Ms) ? metric.p99Ms : null;
     const count = Number.isSafeInteger(metric?.count) ? metric.count : null;
-    const p95Passed = p95Ms !== null
+    const p95Eligible = count !== null
+      && count >= CALIBRATION_CONFIGURATION.p95MinimumSamples;
+    const p99Eligible = count !== null
+      && count >= CALIBRATION_CONFIGURATION.p99MinimumSamples;
+    const p95Passed = p95Eligible
+      && p95Ms !== null
       && p95Ms <= CALIBRATION_CONFIGURATION.p95ThresholdMs;
-    const p99Passed = p99Ms !== null
+    const p99Passed = p99Eligible
+      && p99Ms !== null
       && p99Ms <= CALIBRATION_CONFIGURATION.p99ThresholdMs;
-    const countPassed = count === CALIBRATION_CONFIGURATION.dispatchesPerType;
+    const countPassed = p95Eligible && p99Eligible;
     inputTypes[inputType] = {
       count,
       p50Ms: Number.isFinite(metric?.p50Ms) ? metric.p50Ms : null,
       p95Ms,
       p99Ms,
       countPassed,
+      eligibility: {
+        p95: p95Eligible,
+        p99: p99Eligible,
+      },
       p95Passed,
       p99Passed,
       passed: countPassed && p95Passed && p99Passed,
@@ -268,16 +278,24 @@ function parserSchemaEvidencePassed(parser) {
   const eiaf = parser?.eventsInAnimationFrame;
   return parser?.schemaVersion === EVENT_LATENCY_ACQUISITION_LIMITS.parserSchemaVersion
     && parser?.passed === true
-    && parser?.excluded?.hover?.frameSubmit?.count === 0
+    && parser?.excluded?.hover?.dispatchGroups?.count === 0
+    && parser?.excluded?.hover?.inputToNextPaint?.count === 0
     && parser?.excluded?.hover?.presentation?.count === 0
     && DRAWING_EVENT_LATENCY_INPUT_TYPES.every((inputType) => (
-      parser?.frameSubmitByType?.[inputType]?.count === expectedCount
-        && parser?.presentationByType?.[inputType]?.count === expectedCount
+      parser?.dispatchGroupsByType?.[inputType]?.count === expectedCount
+        && parser?.inputToNextPaintByType?.[inputType]?.count
+          === parser?.dispatchGroupsByType?.[inputType]?.presentedCount
+        && parser?.presentationByType?.[inputType]?.count
+          === parser?.dispatchGroupsByType?.[inputType]?.presentedCount
     ))
     && eiaf?.supported === true
     && eiaf?.passed === true
-    && eiaf?.presentationByType?.pointerdown?.count === expectedCount
-    && eiaf?.presentationByType?.pointerup?.count === expectedCount;
+    && ["pointerdown", "pointerup"].every((inputType) => (
+      Number.isSafeInteger(eiaf?.presentationByType?.[inputType]?.count)
+        && Number.isSafeInteger(eiaf?.fallbackByType?.[inputType]?.count)
+        && eiaf.presentationByType[inputType].count
+          + eiaf.fallbackByType[inputType].count === expectedCount
+    ));
 }
 
 function actualCountsMatchExpected(actual, expected) {
@@ -533,7 +551,7 @@ async function runAttempt({
     } else if (!latency.passed) {
       failure = {
         kind: "threshold",
-        message: "valid input-to-frame-submit samples exceeded the fixed p95/p99 thresholds",
+        message: "valid presented handler-to-next-paint samples did not satisfy the fixed sample eligibility and p95/p99 thresholds",
       };
     }
   } catch (error) {
@@ -705,7 +723,7 @@ function configurationReport() {
 }
 
 /**
- * Acquire a bounded Chromium presentation trace after the formal soak window.
+ * Acquire a bounded Chromium EventLatency trace after the formal soak window.
  * All acquisition failures are returned as structured evidence so the already
  * frozen formal soak report is never discarded by the runner's outer catch.
  */

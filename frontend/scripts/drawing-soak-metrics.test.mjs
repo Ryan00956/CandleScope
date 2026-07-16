@@ -313,8 +313,74 @@ function eventLatencyMetric(count = 128, valueMs = 16) {
   return eventLatencyMetricFromSamples(Array.from({ length: count }, () => valueMs));
 }
 
+const EVENT_LATENCY_RAW_TYPE_BY_INPUT = Object.freeze({
+  pointerdown: "MOUSE_PRESSED",
+  pointermove: "MOUSE_DRAGGED",
+  pointerup: "MOUSE_RELEASED",
+  wheel: "MOUSE_WHEEL",
+});
+
+function eventLatencyRawSample(inputType, inputTypeIndex, sampleIndex) {
+  const generationTimestampUs = 1_000_000 + (inputTypeIndex * 256 + sampleIndex) * 100_000;
+  const handlerStartTimestampUs = generationTimestampUs + 1_000;
+  const endpointTimestampUs = handlerStartTimestampUs + 16_000;
+  const presented = sampleIndex < 128;
+  return {
+    inputType,
+    rawEventType: EVENT_LATENCY_RAW_TYPE_BY_INPUT[inputType],
+    endpoint: presented ? "frame-submit" : "event-latency-termination",
+    generationTimestampUs,
+    handlerStartTimestampUs,
+    endpointTimestampUs,
+    frameSubmitTimestampUs: presented ? endpointTimestampUs : null,
+    presentationTimestampUs: presented ? endpointTimestampUs + 3_000 : null,
+    generationToHandlerMs: 1,
+    handlerToNextPaintMs: presented ? 16 : null,
+    frameSubmitToPresentationMs: presented ? 3 : null,
+    generationToPresentationMs: presented ? 20 : null,
+    handlerToTerminationMs: presented ? null : 16,
+    frameSubmitStageName: presented
+      ? "SubmitCompositorFrameToPresentationCompositorFrame"
+      : null,
+    pid: 1,
+    tid: 2,
+    category: "input",
+    localId: `${inputType}-${sampleIndex}`,
+  };
+}
+
+function eventLatencyEiafSample(inputType, inputTypeIndex, sampleIndex) {
+  const generationTimestampUs = 200_000_000
+    + (inputTypeIndex * 256 + sampleIndex) * 100_000;
+  const presentation = sampleIndex < 128;
+  const generationToEndpointMs = presentation ? 20 : 17;
+  return {
+    inputType,
+    outcome: presentation ? "presentation" : "fallback",
+    generationTimestampUs,
+    endpointTimestampUs: generationTimestampUs + generationToEndpointMs * 1_000,
+    generationToEndpointMs,
+    pid: 1,
+    tid: 2,
+    localId: `eiaf-${inputType}-${sampleIndex}`,
+  };
+}
+
 function eventLatencyCalibration(report) {
-  const dispatchCounts = Object.fromEntries(INPUT_TYPES.map((type) => [type, 128]));
+  const dispatchCounts = Object.fromEntries(INPUT_TYPES.map((type) => [type, 256]));
+  const samplesByType = Object.fromEntries(INPUT_TYPES.map((inputType, inputTypeIndex) => [
+    inputType,
+    Array.from(
+      { length: 256 },
+      (_, sampleIndex) => eventLatencyRawSample(inputType, inputTypeIndex, sampleIndex),
+    ),
+  ]));
+  const eiafSamples = ["pointerdown", "pointerup"].flatMap((inputType, inputTypeIndex) => (
+    Array.from(
+      { length: 256 },
+      (_, sampleIndex) => eventLatencyEiafSample(inputType, inputTypeIndex, sampleIndex),
+    )
+  ));
   return {
     schemaVersion: DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.schemaVersion,
     window: DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.window,
@@ -345,15 +411,15 @@ function eventLatencyCalibration(report) {
       maxBufferUsage: 0.25,
     },
     parser: {
-      schemaVersion: "drawing-event-latency-trace/v2",
+      schemaVersion: "drawing-event-latency-trace/v3",
       passed: true,
       failureReasons: [],
       expectedDispatchCounts: structuredClone(dispatchCounts),
       metricSemantics: {
-        frameSubmitByType: {
-          start: "input-generation",
+        inputToNextPaintByType: {
+          start: "renderer-main-processing",
           end: "next-frame-submit",
-          meaning: "documented-input-to-next-paint",
+          meaning: "presented-input-to-next-paint",
         },
         presentationByType: {
           start: "input-generation",
@@ -362,14 +428,14 @@ function eventLatencyCalibration(report) {
         },
       },
       eventLatency: {
-        beginCount: 512,
-        endCount: 512,
-        pairedCount: 512,
+        beginCount: 1_026,
+        endCount: 1_026,
+        pairedCount: 1_026,
         presentedPairCount: 512,
-        terminationOnlyPairCount: 0,
+        terminationOnlyPairCount: 514,
         partialPresentationPairCount: 0,
       },
-      frameSubmitByType: Object.fromEntries(INPUT_TYPES.map((type) => [
+      inputToNextPaintByType: Object.fromEntries(INPUT_TYPES.map((type) => [
         type,
         eventLatencyMetric(),
       ])),
@@ -377,20 +443,28 @@ function eventLatencyCalibration(report) {
         type,
         eventLatencyMetric(128, 20),
       ])),
+      dispatchGroupsByType: Object.fromEntries(INPUT_TYPES.map((type) => [
+        type,
+        {
+          count: 256,
+          presentedCount: 128,
+          standaloneTerminationCount: 128,
+          duplicateTerminationCount: type === "wheel" ? 2 : 0,
+        },
+      ])),
       excluded: {
         hover: {
-          frameSubmit: eventLatencyMetric(0),
+          dispatchGroups: {
+            count: 0,
+            presentedCount: 0,
+            standaloneTerminationCount: 0,
+            duplicateTerminationCount: 0,
+          },
+          inputToNextPaint: eventLatencyMetric(0),
           presentation: eventLatencyMetric(0),
         },
       },
-      samples: INPUT_TYPES.flatMap((inputType) => (
-        Array.from({ length: 128 }, () => ({
-          inputType,
-          generationToFrameSubmitMs: 16,
-          frameSubmitToPresentationMs: 4,
-          generationToPresentationMs: 20,
-        }))
-      )),
+      samples: INPUT_TYPES.flatMap((inputType) => samplesByType[inputType]),
       diagnostics: {
         orphanEnds: [],
         openBegins: [],
@@ -398,6 +472,13 @@ function eventLatencyCalibration(report) {
         nonMonotonicEvents: [],
         unknownTypes: [],
         countMismatches: [],
+        dispatchGroupMismatches: [],
+        orphanHandlerStageEnds: [],
+        openHandlerStageBegins: [],
+        invalidHandlerStages: [],
+        nonMonotonicHandlerStages: [],
+        unnestedHandlerStages: [],
+        handlerStageCardinalityMismatches: [],
         orphanSubmitStageEnds: [],
         openSubmitStageBegins: [],
         invalidSubmitStages: [],
@@ -405,17 +486,29 @@ function eventLatencyCalibration(report) {
         unnestedSubmitStages: [],
         submitStageCardinalityMismatches: [],
         submitStagePresentationMismatches: [],
+        orphanTerminationStageEnds: [],
+        openTerminationStageBegins: [],
+        invalidTerminationStages: [],
+        nonMonotonicTerminationStages: [],
+        unnestedTerminationStages: [],
+        terminationStageCardinalityMismatches: [],
+        terminationStageEndpointMismatches: [],
       },
       eventsInAnimationFrame: {
         supported: true,
         passed: true,
         reason: null,
-        frameCount: 256,
+        frameCount: 512,
         excludedFrameCount: 0,
         presentationByType: {
           pointerdown: eventLatencyMetric(128, 20),
           pointerup: eventLatencyMetric(128, 20),
         },
+        fallbackByType: {
+          pointerdown: eventLatencyMetric(128, 17),
+          pointerup: eventLatencyMetric(128, 17),
+        },
+        samples: eiafSamples,
         mismatches: [],
         schemaErrors: [],
       },
@@ -435,6 +528,33 @@ function eventLatencyCalibration(report) {
       failureReason: null,
     }],
   };
+}
+
+function setEventLatencyPresentedCount(calibration, inputType, presentedCount) {
+  const parser = calibration.parser;
+  const group = parser.dispatchGroupsByType[inputType];
+  const previousPresentedCount = group.presentedCount;
+  const samples = parser.samples.filter((sample) => sample.inputType === inputType);
+  samples.forEach((sample, index) => {
+    const presented = index < presentedCount;
+    sample.endpoint = presented ? "frame-submit" : "event-latency-termination";
+    sample.frameSubmitTimestampUs = presented ? sample.endpointTimestampUs : null;
+    sample.presentationTimestampUs = presented ? sample.endpointTimestampUs + 3_000 : null;
+    sample.handlerToNextPaintMs = presented ? 16 : null;
+    sample.frameSubmitToPresentationMs = presented ? 3 : null;
+    sample.generationToPresentationMs = presented ? 20 : null;
+    sample.handlerToTerminationMs = presented ? null : 16;
+    sample.frameSubmitStageName = presented
+      ? "SubmitCompositorFrameToPresentationCompositorFrame"
+      : null;
+  });
+  group.presentedCount = presentedCount;
+  group.standaloneTerminationCount = group.count - presentedCount;
+  parser.inputToNextPaintByType[inputType] = eventLatencyMetric(presentedCount, 16);
+  parser.presentationByType[inputType] = eventLatencyMetric(presentedCount, 20);
+  const delta = presentedCount - previousPresentedCount;
+  parser.eventLatency.presentedPairCount += delta;
+  parser.eventLatency.terminationOnlyPairCount -= delta;
 }
 
 function buildPassingReport({
@@ -624,7 +744,7 @@ test("locks the post-soak EventLatency calibration contract and exposes its summ
     scenarioId: "phase6-freehand64-zoom-pan",
     inputTypes: ["pointerdown", "pointermove", "pointerup", "wheel"],
     configuration: {
-      dispatchesPerType: 128,
+      dispatchesPerType: 256,
       maxAttempts: 2,
       settleFramesPerInput: 6,
       p95ThresholdMs: 20,
@@ -638,14 +758,33 @@ test("locks the post-soak EventLatency calibration contract and exposes its summ
 
   const assessment = assessDrawingSoak(buildPassingReport());
   assert.equal(assessment.checks.eventLatencyCalibration.passed, true);
+  assert.equal(
+    assessment.checks.eventLatencyCalibration.expected,
+    "post-formal-soak Chromium EventLatency trace: 256 dispatches/type; presented input-to-next-paint p95 <= 20ms (>= 20 samples), p99 <= 33ms (>= 100 samples); lossless provenance-matched acquisition",
+  );
   assert.equal(assessment.summary.eventLatencyCalibration.trace.passed, true);
   assert.equal(
-    assessment.summary.eventLatencyCalibration.parser.frameSubmitByType.wheel.count,
+    assessment.summary.eventLatencyCalibration.parser.inputToNextPaintByType.wheel.count,
     128,
   );
   assert.equal(
     assessment.summary.eventLatencyCalibration.parser.eventsInAnimationFrame.pointerupCount,
     128,
+  );
+  assert.equal(
+    assessment.summary.eventLatencyCalibration.parser.eventsInAnimationFrame
+      .pointerupFallbackCount,
+    128,
+  );
+  assert.deepEqual(
+    assessment.summary.eventLatencyCalibration.parser.dispatchGroupsByType.wheel,
+    {
+      count: 256,
+      presentedCount: 128,
+      standaloneTerminationCount: 128,
+      duplicateTerminationCount: 2,
+      passed: true,
+    },
   );
 });
 
@@ -665,6 +804,21 @@ test("EventLatency calibration is mandatory for both smoke and formal acceptance
   assert.ok(assessment.failureReasons.includes("eventLatencyCalibration"));
 });
 
+test("EventLatency generation groups include pid in their identity", () => {
+  const report = buildPassingReport();
+  const [source, sameTimestamp] = report.eventLatencyCalibration.parser.samples;
+  sameTimestamp.generationTimestampUs = source.generationTimestampUs;
+  sameTimestamp.handlerStartTimestampUs = sameTimestamp.generationTimestampUs + 1_000;
+  sameTimestamp.endpointTimestampUs = sameTimestamp.handlerStartTimestampUs + 16_000;
+  sameTimestamp.frameSubmitTimestampUs = sameTimestamp.endpointTimestampUs;
+  sameTimestamp.presentationTimestampUs = sameTimestamp.frameSubmitTimestampUs + 3_000;
+  sameTimestamp.pid = source.pid + 1;
+  assert.equal(assessDrawingSoak(report).checks.eventLatencyCalibration.passed, true);
+
+  sameTimestamp.pid = source.pid;
+  assert.equal(assessDrawingSoak(report).checks.eventLatencyCalibration.passed, false);
+});
+
 test("EventLatency calibration fails closed on counts, SLO, cross-check, provenance, or trace loss", () => {
   const cases = [
     ["configuration", (calibration) => calibration.configuration.categories.reverse()],
@@ -676,46 +830,98 @@ test("EventLatency calibration fails closed on counts, SLO, cross-check, provena
       calibration.actualDispatchCounts.wheel = 127;
     }],
     ["parser count", (calibration) => {
-      calibration.parser.frameSubmitByType.pointerup.count = 127;
-      calibration.parser.frameSubmitByType.pointerup.samplesMs.pop();
+      calibration.parser.inputToNextPaintByType.pointerup.count = 127;
+      calibration.parser.inputToNextPaintByType.pointerup.samplesMs.pop();
     }],
     ["metric semantics", (calibration) => {
-      calibration.parser.metricSemantics.frameSubmitByType.end = "physical-presentation";
+      calibration.parser.metricSemantics.inputToNextPaintByType.end = "physical-presentation";
     }],
-    ["frame-submit summary", (calibration) => {
-      Object.assign(calibration.parser.frameSubmitByType.wheel, eventLatencyMetric(128, 15));
+    ["input-to-next-paint summary", (calibration) => {
+      Object.assign(calibration.parser.inputToNextPaintByType.wheel, eventLatencyMetric(128, 15));
     }],
     ["presentation summary", (calibration) => {
       Object.assign(calibration.parser.presentationByType.wheel, eventLatencyMetric(128, 19));
     }],
     ["segment conservation", (calibration) => {
-      calibration.parser.samples[0].frameSubmitToPresentationMs = 3;
+      calibration.parser.samples[1].frameSubmitToPresentationMs = 2;
+    }],
+    ["generation group uniqueness", (calibration) => {
+      const sample = calibration.parser.samples[1];
+      sample.generationTimestampUs = calibration.parser.samples[0].generationTimestampUs;
+      sample.handlerStartTimestampUs = sample.generationTimestampUs + 1_000;
+      sample.endpointTimestampUs = sample.handlerStartTimestampUs + 16_000;
+      sample.frameSubmitTimestampUs = sample.endpointTimestampUs;
+      sample.presentationTimestampUs = sample.frameSubmitTimestampUs + 3_000;
+    }],
+    ["standalone termination paint fields", (calibration) => {
+      calibration.parser.samples[128].frameSubmitTimestampUs =
+        calibration.parser.samples[128].endpointTimestampUs;
+    }],
+    ["standalone termination null duration", (calibration) => {
+      calibration.parser.samples[128].handlerToTerminationMs = null;
+    }],
+    ["standalone termination paint duration", (calibration) => {
+      calibration.parser.samples[128].handlerToNextPaintMs = 16;
+    }],
+    ["presented null boundary", (calibration) => {
+      calibration.parser.samples[1].presentationTimestampUs = null;
+    }],
+    ["dispatch group count", (calibration) => {
+      calibration.parser.dispatchGroupsByType.wheel.presentedCount = 126;
+    }],
+    ["negative duplicate termination", (calibration) => {
+      calibration.parser.dispatchGroupsByType.wheel.duplicateTerminationCount = -1;
+    }],
+    ["excess duplicate termination", (calibration) => {
+      const group = calibration.parser.dispatchGroupsByType.wheel;
+      const previous = group.duplicateTerminationCount;
+      group.duplicateTerminationCount = group.presentedCount + 1;
+      const delta = group.duplicateTerminationCount - previous;
+      calibration.parser.eventLatency.beginCount += delta;
+      calibration.parser.eventLatency.endCount += delta;
+      calibration.parser.eventLatency.pairedCount += delta;
+      calibration.parser.eventLatency.terminationOnlyPairCount += delta;
     }],
     ["p95 threshold", (calibration) => {
       calibration.parser.samples
-        .filter((sample) => sample.inputType === "wheel")
+        .filter((sample) => (
+          sample.inputType === "wheel" && sample.endpoint === "frame-submit"
+        ))
         .forEach((sample) => {
-          sample.generationToFrameSubmitMs = 20.1;
-          sample.generationToPresentationMs = 24.1;
+          sample.handlerToNextPaintMs = 20.1;
+          sample.endpointTimestampUs = sample.handlerStartTimestampUs + 20_100;
+          if (sample.endpoint === "frame-submit") {
+            sample.frameSubmitTimestampUs = sample.endpointTimestampUs;
+            sample.presentationTimestampUs = sample.frameSubmitTimestampUs + 3_000;
+            sample.generationToPresentationMs = 24.1;
+          }
         });
-      Object.assign(calibration.parser.frameSubmitByType.wheel, eventLatencyMetric(128, 20.1));
+      Object.assign(
+        calibration.parser.inputToNextPaintByType.wheel,
+        eventLatencyMetric(128, 20.1),
+      );
       Object.assign(calibration.parser.presentationByType.wheel, eventLatencyMetric(128, 24.1));
     }],
     ["p99 threshold", (calibration) => {
-      const frameSubmitMetric = calibration.parser.frameSubmitByType.pointermove;
+      const inputMetric = calibration.parser.inputToNextPaintByType.pointermove;
       const presentationMetric = calibration.parser.presentationByType.pointermove;
       const samples = calibration.parser.samples
-        .filter((sample) => sample.inputType === "pointermove");
+        .filter((sample) => (
+          sample.inputType === "pointermove" && sample.endpoint === "frame-submit"
+        ));
       samples.slice(-2).forEach((sample) => {
-        sample.generationToFrameSubmitMs = 33.1;
+        sample.handlerToNextPaintMs = 33.1;
+        sample.endpointTimestampUs = sample.handlerStartTimestampUs + 33_100;
+        sample.frameSubmitTimestampUs = sample.endpointTimestampUs;
+        sample.presentationTimestampUs = sample.frameSubmitTimestampUs + 3_000;
         sample.generationToPresentationMs = 37.1;
       });
-      frameSubmitMetric.samplesMs = Array.from({ length: 128 }, (_, index) => (
+      inputMetric.samplesMs = Array.from({ length: 128 }, (_, index) => (
         index >= 126 ? 33.1 : 16
       ));
-      frameSubmitMetric.p50Ms = 16;
-      frameSubmitMetric.p95Ms = 16;
-      frameSubmitMetric.p99Ms = 33.1;
+      inputMetric.p50Ms = 16;
+      inputMetric.p95Ms = 16;
+      inputMetric.p99Ms = 33.1;
       presentationMetric.samplesMs = Array.from({ length: 128 }, (_, index) => (
         index >= 126 ? 37.1 : 20
       ));
@@ -738,6 +944,15 @@ test("EventLatency calibration fails closed on counts, SLO, cross-check, provena
         calibration.parser.eventsInAnimationFrame.presentationByType.pointerdown,
         eventLatencyMetric(128, 15),
       );
+    }],
+    ["cross-check percentile", (calibration) => {
+      calibration.parser.eventsInAnimationFrame.presentationByType.pointerup.p95Ms = 19;
+    }],
+    ["cross-check fallback percentile", (calibration) => {
+      calibration.parser.eventsInAnimationFrame.fallbackByType.pointerup.p95Ms = 16;
+    }],
+    ["cross-check outcome", (calibration) => {
+      calibration.parser.eventsInAnimationFrame.samples[0].outcome = "termination";
     }],
     ["provenance", (calibration) => {
       calibration.provenance.buildInputFingerprint = "d".repeat(64);
@@ -781,6 +996,38 @@ test("EventLatency calibration fails closed on counts, SLO, cross-check, provena
     ["parser diagnostics", (calibration) => {
       calibration.parser.diagnostics.orphanEnds.push({ eventIndex: 1 });
     }],
+    ["fractional raw timestamps", (calibration) => {
+      const sample = calibration.parser.samples.find(({ endpoint }) => (
+        endpoint === "frame-submit"
+      ));
+      for (const key of [
+        "generationTimestampUs",
+        "handlerStartTimestampUs",
+        "endpointTimestampUs",
+        "frameSubmitTimestampUs",
+        "presentationTimestampUs",
+      ]) sample[key] += 0.5;
+    }],
+    ["fractional EIAF timestamps", (calibration) => {
+      const sample = calibration.parser.eventsInAnimationFrame.samples[0];
+      sample.generationTimestampUs += 0.5;
+      sample.endpointTimestampUs += 0.5;
+    }],
+    ["unknown frame submit stage", (calibration) => {
+      const sample = calibration.parser.samples.find(({ endpoint }) => (
+        endpoint === "frame-submit"
+      ));
+      sample.frameSubmitStageName = "bogus";
+    }],
+    ["non-input EventLatency category", (calibration) => {
+      calibration.parser.samples[0].category = "bogus";
+    }],
+    ["EIAF frame conservation", (calibration) => {
+      calibration.parser.eventsInAnimationFrame.frameCount = 999;
+    }],
+    ["EventLatency count schema", (calibration) => {
+      calibration.parser.eventLatency.extraCount = 0;
+    }],
     ["excluded hover", (calibration) => {
       Object.assign(calibration.parser.excluded.hover.presentation, eventLatencyMetric(1));
     }],
@@ -794,29 +1041,64 @@ test("EventLatency calibration fails closed on counts, SLO, cross-check, provena
   }
 });
 
-test("EventLatency frame-submit SLO is recomputed from raw segments despite forged summaries", () => {
+test("EventLatency handler-to-next-paint SLO is recomputed from raw samples", () => {
   const report = buildPassingReport();
   report.eventLatencyCalibration.parser.samples
-    .filter((sample) => sample.inputType === "pointerup")
+    .filter((sample) => (
+      sample.inputType === "pointerup" && sample.endpoint === "frame-submit"
+    ))
     .forEach((sample) => {
-      sample.generationToFrameSubmitMs = 40;
-      sample.generationToPresentationMs = 44;
+      sample.handlerToNextPaintMs = 40;
+      sample.endpointTimestampUs = sample.handlerStartTimestampUs + 40_000;
+      if (sample.endpoint === "frame-submit") {
+        sample.frameSubmitTimestampUs = sample.endpointTimestampUs;
+        sample.presentationTimestampUs = sample.frameSubmitTimestampUs + 3_000;
+        sample.generationToPresentationMs = 44;
+      }
     });
 
   const assessment = assessDrawingSoak(report);
   const summary = assessment.summary.eventLatencyCalibration.parser;
   assert.equal(assessment.checks.eventLatencyCalibration.passed, false);
-  assert.equal(summary.frameSubmitByType.pointerup.p95Ms, 40);
-  assert.equal(summary.frameSubmitByType.pointerup.p99Ms, 40);
-  assert.equal(summary.frameSubmitByType.pointerup.p95Passed, false);
+  assert.equal(summary.inputToNextPaintByType.pointerup.p95Ms, 40);
+  assert.equal(summary.inputToNextPaintByType.pointerup.p99Ms, 40);
+  assert.equal(summary.inputToNextPaintByType.pointerup.p95Passed, false);
+});
+
+test("EventLatency formal gate requires 20 p95 and 100 presented p99 samples", () => {
+  const eligible = buildPassingReport();
+  setEventLatencyPresentedCount(eligible.eventLatencyCalibration, "pointermove", 100);
+  let assessment = assessDrawingSoak(eligible);
+  assert.equal(assessment.checks.eventLatencyCalibration.passed, true);
+  assert.equal(
+    assessment.summary.eventLatencyCalibration.parser.inputToNextPaintByType.pointermove
+      .p99Eligible,
+    true,
+  );
+
+  const ineligible = buildPassingReport();
+  setEventLatencyPresentedCount(ineligible.eventLatencyCalibration, "pointermove", 99);
+  assessment = assessDrawingSoak(ineligible);
+  assert.equal(assessment.checks.eventLatencyCalibration.passed, false);
+  assert.equal(
+    assessment.summary.eventLatencyCalibration.parser.inputToNextPaintByType.pointermove
+      .p95Eligible,
+    true,
+  );
+  assert.equal(
+    assessment.summary.eventLatencyCalibration.parser.inputToNextPaintByType.pointermove
+      .p99Eligible,
+    false,
+  );
 });
 
 test("EventLatency presentation latency is diagnostic while EIAF compares its sample multiset", () => {
   const report = buildPassingReport();
   const wheelSamples = report.eventLatencyCalibration.parser.samples
-    .filter((sample) => sample.inputType === "wheel");
+    .filter((sample) => sample.inputType === "wheel" && sample.endpoint === "frame-submit");
   for (const sample of wheelSamples) {
-    sample.frameSubmitToPresentationMs = 84;
+    sample.frameSubmitToPresentationMs = 83;
+    sample.presentationTimestampUs = sample.frameSubmitTimestampUs + 83_000;
     sample.generationToPresentationMs = 100;
   }
   report.eventLatencyCalibration.parser.presentationByType.wheel = eventLatencyMetric(128, 100);
@@ -829,24 +1111,62 @@ test("EventLatency presentation latency is diagnostic while EIAF compares its sa
   );
 
   const pointerdownSamples = report.eventLatencyCalibration.parser.samples
-    .filter((sample) => sample.inputType === "pointerdown");
+    .filter((sample) => (
+      sample.inputType === "pointerdown" && sample.endpoint === "frame-submit"
+    ));
   pointerdownSamples.forEach((sample, index) => {
     sample.frameSubmitToPresentationMs = index;
-    sample.generationToPresentationMs = 16 + index;
+    sample.presentationTimestampUs = sample.frameSubmitTimestampUs + index * 1_000;
+    sample.generationToPresentationMs = 17 + index;
   });
   const presentationSamples = pointerdownSamples.map(
     (sample) => sample.generationToPresentationMs,
   );
   report.eventLatencyCalibration.parser.presentationByType.pointerdown =
     eventLatencyMetricFromSamples(presentationSamples);
+  const eiafPresentationSamples = report.eventLatencyCalibration.parser.eventsInAnimationFrame
+    .samples.filter((sample) => (
+      sample.inputType === "pointerdown" && sample.outcome === "presentation"
+    ));
+  eiafPresentationSamples.forEach((sample, index) => {
+    sample.generationToEndpointMs = presentationSamples.at(-1 - index);
+    sample.endpointTimestampUs = sample.generationTimestampUs
+      + sample.generationToEndpointMs * 1_000;
+  });
   report.eventLatencyCalibration.parser.eventsInAnimationFrame.presentationByType.pointerdown =
-    eventLatencyMetricFromSamples([...presentationSamples].reverse());
+    eventLatencyMetricFromSamples(
+      eiafPresentationSamples.map((sample) => sample.generationToEndpointMs),
+    );
 
   assessment = assessDrawingSoak(report);
   assert.equal(assessment.checks.eventLatencyCalibration.passed, true);
   assert.equal(
     assessment.summary.eventLatencyCalibration.parser.eventsInAnimationFrame.passed,
     true,
+  );
+});
+
+test("all known EventLatency types may conserve duplicate termination without raw samples", () => {
+  const report = buildPassingReport();
+  const parser = report.eventLatencyCalibration.parser;
+  parser.dispatchGroupsByType.pointerup.duplicateTerminationCount += 1;
+  parser.eventLatency.beginCount += 1;
+  parser.eventLatency.endCount += 1;
+  parser.eventLatency.pairedCount += 1;
+  parser.eventLatency.terminationOnlyPairCount += 1;
+
+  const assessment = assessDrawingSoak(report);
+  assert.equal(parser.samples.length, 1_024);
+  assert.equal(assessment.checks.eventLatencyCalibration.passed, true);
+  assert.equal(
+    assessment.summary.eventLatencyCalibration.parser.dispatchGroupsByType.wheel
+      .duplicateTerminationCount,
+    2,
+  );
+  assert.equal(
+    assessment.summary.eventLatencyCalibration.parser.dispatchGroupsByType.pointerup
+      .duplicateTerminationCount,
+    1,
   );
 });
 

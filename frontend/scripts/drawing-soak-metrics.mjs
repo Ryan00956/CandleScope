@@ -39,6 +39,31 @@ export const DRAWING_SOAK_FIXED_CONTRACT = Object.freeze({
   maxInstrumentationWindowMs: 10_000,
 });
 
+export function phase9MeasuredWorkloadDeadline(elapsedMs) {
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) {
+    throw new TypeError("Phase 9 measured-window elapsed time must be finite and non-negative");
+  }
+  return elapsedMs;
+}
+
+export function selectPhase9SoakDueAction({
+  elapsedMs,
+  nextWorkloadAtMs,
+  nextSampleAtMs,
+  nextGcAtMs,
+}) {
+  const deadlines = [
+    ["workload", nextWorkloadAtMs],
+    ["sample", nextSampleAtMs],
+    ["gc", nextGcAtMs],
+  ];
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0
+    || deadlines.some(([, deadline]) => !Number.isFinite(deadline) || deadline < 0)) {
+    throw new TypeError("Phase 9 scheduler deadlines must be finite and non-negative");
+  }
+  return deadlines.find(([, deadline]) => elapsedMs >= deadline)?.[0] ?? null;
+}
+
 const DRAWING_SOAK_CONFIGURATION_KEYS = Object.freeze(Object.keys(DRAWING_SOAK_DEFAULTS));
 const DRAWING_SOAK_INTEGER_CONFIGURATION_KEYS = Object.freeze(new Set([
   "durationMs",

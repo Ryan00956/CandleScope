@@ -69,6 +69,8 @@ import {
   DRAWING_SOAK_FIXED_CONTRACT,
   isFormalDrawingSoakConfiguration,
   normalizeDrawingSoakRuntimeEvidence,
+  phase9MeasuredWorkloadDeadline,
+  selectPhase9SoakDueAction,
 } from "./drawing-soak-metrics.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -3426,64 +3428,18 @@ async function runPhase9Soak({
         }
         timingMeasurementStarted = true;
         elapsedMs = Date.now() - startedAt;
+        // The timing reset discards warmup input evidence. Force one workload
+        // cycle into the measured epoch before any sample can be accepted.
+        nextWorkloadAtMs = phase9MeasuredWorkloadDeadline(elapsedMs);
         handled = true;
       }
-      if (elapsedMs >= nextSampleAtMs) {
-        const scheduledAtMs = nextSampleAtMs;
-        try {
-          samples.push(await readPhase9Sample(cdp, workerTracker, startedAt));
-        } catch (error) {
-          const failure = {
-            kind: "sample",
-            elapsedMs: Date.now() - startedAt,
-            scheduledAtMs,
-            message: error instanceof Error ? error.message : String(error),
-          };
-          sampleErrors.push(failure);
-          samples.push({ ...failure, workerVisible: false, heap: null, runtime: null });
-          throw new Error("Phase 9 sample failed; aborting the formal window: " + failure.message, {
-            cause: error,
-          });
-        }
-        elapsedMs = Date.now() - startedAt;
-        nextSampleAtMs = advancePhase9Deadline(
-          nextSampleAtMs,
-          configuration.sampleIntervalMs,
-          elapsedMs,
-        );
-        handled = true;
-      }
-      if (elapsedMs >= nextGcAtMs) {
-        const scheduledAtMs = nextGcAtMs;
-        try {
-          gcCheckpoints.push(await collectPhase9GcCheckpoint(
-            cdp,
-            workerTracker,
-            startedAt,
-            scheduledAtMs,
-          ));
-        } catch (error) {
-          const failure = {
-            kind: "gc",
-            elapsedMs: Date.now() - startedAt,
-            scheduledAtMs,
-            ok: false,
-            message: error instanceof Error ? error.message : String(error),
-          };
-          sampleErrors.push(failure);
-          gcCheckpoints.push(failure);
-          throw new Error("Phase 9 GC checkpoint failed; aborting the formal window: "
-            + failure.message, { cause: error });
-        }
-        elapsedMs = Date.now() - startedAt;
-        nextGcAtMs = advancePhase9Deadline(
-          nextGcAtMs,
-          configuration.gcIntervalMs,
-          elapsedMs,
-        );
-        handled = true;
-      }
-      if (elapsedMs >= nextWorkloadAtMs) {
+      let dueAction = selectPhase9SoakDueAction({
+        elapsedMs,
+        nextWorkloadAtMs,
+        nextSampleAtMs,
+        nextGcAtMs,
+      });
+      if (dueAction === "workload") {
         try {
           cycles.push(await runPhase9WorkloadCycle(
             cdp,
@@ -3510,6 +3466,73 @@ async function runPhase9Soak({
         nextWorkloadAtMs = advancePhase9Deadline(
           nextWorkloadAtMs,
           configuration.workloadIntervalMs,
+          elapsedMs,
+        );
+        handled = true;
+      }
+      dueAction = selectPhase9SoakDueAction({
+        elapsedMs,
+        nextWorkloadAtMs,
+        nextSampleAtMs,
+        nextGcAtMs,
+      });
+      if (dueAction === "sample") {
+        const scheduledAtMs = nextSampleAtMs;
+        try {
+          samples.push(await readPhase9Sample(cdp, workerTracker, startedAt));
+        } catch (error) {
+          const failure = {
+            kind: "sample",
+            elapsedMs: Date.now() - startedAt,
+            scheduledAtMs,
+            message: error instanceof Error ? error.message : String(error),
+          };
+          sampleErrors.push(failure);
+          samples.push({ ...failure, workerVisible: false, heap: null, runtime: null });
+          throw new Error("Phase 9 sample failed; aborting the formal window: " + failure.message, {
+            cause: error,
+          });
+        }
+        elapsedMs = Date.now() - startedAt;
+        nextSampleAtMs = advancePhase9Deadline(
+          nextSampleAtMs,
+          configuration.sampleIntervalMs,
+          elapsedMs,
+        );
+        handled = true;
+      }
+      dueAction = selectPhase9SoakDueAction({
+        elapsedMs,
+        nextWorkloadAtMs,
+        nextSampleAtMs,
+        nextGcAtMs,
+      });
+      if (dueAction === "gc") {
+        const scheduledAtMs = nextGcAtMs;
+        try {
+          gcCheckpoints.push(await collectPhase9GcCheckpoint(
+            cdp,
+            workerTracker,
+            startedAt,
+            scheduledAtMs,
+          ));
+        } catch (error) {
+          const failure = {
+            kind: "gc",
+            elapsedMs: Date.now() - startedAt,
+            scheduledAtMs,
+            ok: false,
+            message: error instanceof Error ? error.message : String(error),
+          };
+          sampleErrors.push(failure);
+          gcCheckpoints.push(failure);
+          throw new Error("Phase 9 GC checkpoint failed; aborting the formal window: "
+            + failure.message, { cause: error });
+        }
+        elapsedMs = Date.now() - startedAt;
+        nextGcAtMs = advancePhase9Deadline(
+          nextGcAtMs,
+          configuration.gcIntervalMs,
           elapsedMs,
         );
         handled = true;

@@ -7,10 +7,36 @@ import {
   DRAWING_SOAK_FIXED_CONTRACT,
   isFormalDrawingSoakConfiguration,
   normalizeDrawingSoakRuntimeEvidence,
+  phase9MeasuredWorkloadDeadline,
+  selectPhase9SoakDueAction,
   theilSenSlopeBytesPerHour,
 } from "./drawing-soak-metrics.mjs";
 
 const MIB = 1024 * 1024;
+
+test("forces a workload deadline into the measured timing epoch", () => {
+  assert.equal(phase9MeasuredWorkloadDeadline(5_003), 5_003);
+  assert.equal(selectPhase9SoakDueAction({
+    elapsedMs: 6_015,
+    nextWorkloadAtMs: 5_003,
+    nextSampleAtMs: 6_000,
+    nextGcAtMs: 5_000,
+  }), "workload");
+  assert.equal(selectPhase9SoakDueAction({
+    elapsedMs: 6_015,
+    nextWorkloadAtMs: 7_003,
+    nextSampleAtMs: 6_000,
+    nextGcAtMs: 5_000,
+  }), "sample");
+  assert.throws(
+    () => phase9MeasuredWorkloadDeadline(Number.NaN),
+    /finite and non-negative/,
+  );
+  assert.throws(
+    () => phase9MeasuredWorkloadDeadline(-1),
+    /finite and non-negative/,
+  );
+});
 
 const TEST_CONFIGURATION = Object.freeze({
   durationMs: 14_000,
@@ -532,6 +558,22 @@ test("input/frame timing histograms are complete, bounded, and inside the fixed 
   const missing = buildPassingReport();
   delete missing.samples[0].browserTiming.metrics.frameIntervalMs;
   assert.equal(assessDrawingSoak(missing).checks.sampleEvidence.passed, false);
+
+  const emptyMeasuredInput = buildPassingReport();
+  const firstTiming = emptyMeasuredInput.samples[0].browserTiming;
+  firstTiming.inputEvents = 0;
+  for (const key of ["inputToNextPaintMs", "eventTimingMs", "mouseupSyncMs"]) {
+    firstTiming.captureStats[key].observed = 0;
+    Object.assign(firstTiming.metrics[key], {
+      captureObserved: 0,
+      totalCount: 0,
+      p50Ms: null,
+      p95Ms: null,
+      p99Ms: null,
+      maxMs: null,
+    });
+  }
+  assert.equal(assessDrawingSoak(emptyMeasuredInput).checks.sampleEvidence.passed, false);
 
   const corrupt = buildPassingReport();
   corrupt.browserTiming.metrics.frameIntervalMs.bucketCounts[0] = 99;

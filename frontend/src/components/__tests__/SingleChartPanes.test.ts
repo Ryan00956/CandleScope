@@ -4,12 +4,14 @@ import {
   buildVisibleRangeSnapshot,
   disposeChartPaneSurface,
   hasCurrentDatasetOwnership as hasCurrentDatasetOwnershipProduction,
+  isMainPanePlotPointerStart,
   removedDrawingSubPaneScopeKeys,
   prepareDrawingSurfaceForSeriesReplacement,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
+  shouldInvalidateDrawingFrameOnPointerRelease,
   shouldPublishUserViewportRange,
   shouldRequestMoreLeft,
   shouldRestoreChartViewport as shouldRestoreChartViewportProduction,
@@ -171,6 +173,81 @@ test("only user-driven viewport changes publish persistence and interactive cove
     isSyncing: true,
     range,
     userInteracted: true,
+  }), false);
+});
+
+test("pointer release only deduplicates drawing invalidation after a logical-range change", () => {
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    logicalRangeChanged: true,
+    mainPanePlotStart: true,
+    maxHorizontalMovementPx: 24,
+    maxVerticalMovementPx: 2,
+    pointerActive: true,
+  }), false);
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    logicalRangeChanged: true,
+    mainPanePlotStart: false,
+    maxHorizontalMovementPx: 24,
+    maxVerticalMovementPx: 2,
+    pointerActive: true,
+  }), true, "a price-axis/pane gesture still invalidates after an interleaved range callback");
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    logicalRangeChanged: true,
+    mainPanePlotStart: true,
+    maxHorizontalMovementPx: 0,
+    maxVerticalMovementPx: 0,
+    pointerActive: true,
+  }), true, "a click is not a confirmed pan");
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    drawingToolActive: true,
+    logicalRangeChanged: true,
+    mainPanePlotStart: true,
+    maxHorizontalMovementPx: 24,
+    maxVerticalMovementPx: 2,
+    pointerActive: true,
+  }), true, "an active drawing tool owns the gesture even when range changes");
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    logicalRangeChanged: false,
+    mainPanePlotStart: true,
+    maxHorizontalMovementPx: 24,
+    maxVerticalMovementPx: 2,
+    pointerActive: true,
+  }), true, "movement without a range change is not a confirmed pan");
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease(), false);
+});
+
+test("main-pane pan classification excludes price scale, time scale, separators, and unknown geometry", () => {
+  const containerRect = { left: 100, top: 50 };
+  const plotRect = { x: 20, y: 0, width: 800, height: 400 };
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 300,
+    clientY: 200,
+    containerRect,
+    plotRect,
+  }), true);
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 930,
+    clientY: 200,
+    containerRect,
+    plotRect,
+  }), false, "right price scale is outside the plot");
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 300,
+    clientY: 455,
+    containerRect,
+    plotRect,
+  }), false, "time scale and bottom pane boundary are outside the plot");
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 300,
+    clientY: 446,
+    containerRect,
+    plotRect,
+  }), false, "the guarded pane-separator edge is not a pan start");
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 300,
+    clientY: 200,
+    containerRect: null,
+    plotRect,
   }), false);
 });
 

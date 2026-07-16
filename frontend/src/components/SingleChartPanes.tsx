@@ -82,12 +82,14 @@ import {
   buildVisibleRangeSnapshot,
   disposeChartPaneSurface,
   hasCurrentDatasetOwnership,
+  isMainPanePlotPointerStart,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
   removedDrawingSubPaneScopeKeys,
   prepareDrawingSurfaceForSeriesReplacement,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
+  shouldInvalidateDrawingFrameOnPointerRelease,
   shouldPublishUserViewportRange,
   shouldRequestMoreLeft,
   shouldRestoreChartViewport,
@@ -329,6 +331,16 @@ interface ActiveSurfaceOwner {
 interface PriceScaleContextMenuPosition {
   x: number;
   y: number;
+}
+
+interface ChartPointerGestureState {
+  kind: "mouse" | "touch" | null;
+  mainPanePlotStart: boolean;
+  maxHorizontalMovementPx: number;
+  maxVerticalMovementPx: number;
+  startClientX: number;
+  startClientY: number;
+  touchIdentifier: number | null;
 }
 
 interface AuxiliaryDisplayState {
@@ -906,6 +918,16 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
   const futureTimeAxisCoverageFrameRef = useRef<number | null>(null);
   const futureTimeAxisCoveragePendingRef = useRef(false);
   const isChartPointerActiveRef = useRef(false);
+  const chartPointerLogicalRangeChangedRef = useRef(false);
+  const chartPointerGestureRef = useRef<ChartPointerGestureState>({
+    kind: null,
+    mainPanePlotStart: false,
+    maxHorizontalMovementPx: 0,
+    maxVerticalMovementPx: 0,
+    startClientX: 0,
+    startClientY: 0,
+    touchIdentifier: null,
+  });
   const indicatorSeriesRef = useRef<IndicatorSeriesEntry[]>([]);
   const panePlaceholderSeriesRef = useRef<PanePlaceholderState>({ chart: null, seriesByPane: new Map() });
   const paneRenderStateRef = useRef<Map<string, PaneRenderState>>(new Map());
@@ -1684,6 +1706,9 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
 
     const handleVisibleLogicalRangeChange = (range: VisibleLogicalRange) => {
       scheduleFutureTimeAxisCoverage();
+      if (isChartPointerActiveRef.current && range) {
+        chartPointerLogicalRangeChangedRef.current = true;
+      }
       if (!shouldPublishUserViewportRange({
         isProgrammatic: isRestoringViewportRef.current,
         isSyncing: isSyncingRef.current,
@@ -1759,6 +1784,7 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       }
       futureTimeAxisCoveragePendingRef.current = false;
       isChartPointerActiveRef.current = false;
+      chartPointerLogicalRangeChangedRef.current = false;
       mainSeriesTypeRef.current = null;
       mainSeriesReferenceRef.current = { series: null, signature: "" };
       sourceRowsRef.current = [];
@@ -1805,38 +1831,143 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       userInteractedRef.current = true;
       viewportControllerRef.current?.markUserInteracting();
     };
-    const markPointerActive = () => {
+    const resetPointerGesture = () => {
+      const gesture = chartPointerGestureRef.current;
+      gesture.kind = null;
+      gesture.mainPanePlotStart = false;
+      gesture.maxHorizontalMovementPx = 0;
+      gesture.maxVerticalMovementPx = 0;
+      gesture.startClientX = 0;
+      gesture.startClientY = 0;
+      gesture.touchIdentifier = null;
+    };
+    const beginPointerGesture = (
+      kind: ChartPointerGestureState["kind"],
+      clientX: number,
+      clientY: number,
+      touchIdentifier: number | null,
+      eligiblePointer: boolean,
+    ) => {
+      const containerRect = containerRef.current?.getBoundingClientRect?.() ?? null;
+      const plotRect = chartAdapter.getMainPanePlotRect?.() ?? null;
+      const gesture = chartPointerGestureRef.current;
+      gesture.kind = kind;
+      gesture.mainPanePlotStart = eligiblePointer
+        && !drawingEngineToolActive
+        && isMainPanePlotPointerStart({
+          clientX,
+          clientY,
+          containerRect,
+          plotRect,
+        });
+      gesture.maxHorizontalMovementPx = 0;
+      gesture.maxVerticalMovementPx = 0;
+      gesture.startClientX = clientX;
+      gesture.startClientY = clientY;
+      gesture.touchIdentifier = touchIdentifier;
+      chartPointerLogicalRangeChangedRef.current = false;
       isChartPointerActiveRef.current = true;
       markUserInteracted();
+    };
+    const markMousePointerActive = (event: MouseEvent) => {
+      beginPointerGesture("mouse", event.clientX, event.clientY, null, event.button === 0);
+    };
+    const markTouchPointerActive = (event: TouchEvent) => {
+      const touch = event.touches.length === 1 ? event.touches[0] : null;
+      beginPointerGesture(
+        "touch",
+        touch?.clientX ?? Number.NaN,
+        touch?.clientY ?? Number.NaN,
+        touch?.identifier ?? null,
+        touch !== null,
+      );
+    };
+    const trackPointerMovement = (clientX: number, clientY: number) => {
+      if (!isChartPointerActiveRef.current) return;
+      const gesture = chartPointerGestureRef.current;
+      gesture.maxHorizontalMovementPx = Math.max(
+        gesture.maxHorizontalMovementPx,
+        Math.abs(clientX - gesture.startClientX),
+      );
+      gesture.maxVerticalMovementPx = Math.max(
+        gesture.maxVerticalMovementPx,
+        Math.abs(clientY - gesture.startClientY),
+      );
+    };
+    const trackMouseMovement = (event: MouseEvent) => {
+      if (chartPointerGestureRef.current.kind !== "mouse") return;
+      trackPointerMovement(event.clientX, event.clientY);
+    };
+    const trackTouchMovement = (event: TouchEvent) => {
+      const gesture = chartPointerGestureRef.current;
+      if (gesture.kind !== "touch" || event.touches.length !== 1) {
+        gesture.mainPanePlotStart = false;
+        return;
+      }
+      const touch = event.touches[0];
+      if (!touch || touch.identifier !== gesture.touchIdentifier) {
+        gesture.mainPanePlotStart = false;
+        return;
+      }
+      trackPointerMovement(touch.clientX, touch.clientY);
     };
     const saveNativePaneHeights = () => {
       if (activeSubPanes.length > 0) saveCurrentPaneHeights();
     };
     const releasePointer = () => {
-      if (!isChartPointerActiveRef.current) return;
+      const pointerActive = isChartPointerActiveRef.current;
+      const logicalRangeChanged = chartPointerLogicalRangeChangedRef.current;
+      const gesture = chartPointerGestureRef.current;
+      const mainPanePlotStart = gesture.mainPanePlotStart;
+      const maxHorizontalMovementPx = gesture.maxHorizontalMovementPx;
+      const maxVerticalMovementPx = gesture.maxVerticalMovementPx;
       isChartPointerActiveRef.current = false;
+      chartPointerLogicalRangeChangedRef.current = false;
+      resetPointerGesture();
+      if (!pointerActive) return;
       saveNativePaneHeights();
-      chartAdapter.notifyDrawingFrameInvalidation();
+      if (shouldInvalidateDrawingFrameOnPointerRelease({
+        drawingToolActive: drawingEngineToolActive,
+        logicalRangeChanged,
+        mainPanePlotStart,
+        maxHorizontalMovementPx,
+        maxVerticalMovementPx,
+        pointerActive,
+      })) {
+        chartAdapter.notifyDrawingFrameInvalidation();
+      }
       if (futureTimeAxisCoveragePendingRef.current) scheduleFutureTimeAxisCoverage();
     };
     wrapper.addEventListener("wheel", markUserInteracted, { passive: true });
-    wrapper.addEventListener("mousedown", markPointerActive);
-    wrapper.addEventListener("touchstart", markPointerActive, { passive: true });
+    wrapper.addEventListener("mousedown", markMousePointerActive);
+    wrapper.addEventListener("touchstart", markTouchPointerActive, { passive: true });
+    window.addEventListener("mousemove", trackMouseMovement);
+    window.addEventListener("touchmove", trackTouchMovement, { passive: true });
     window.addEventListener("mouseup", releasePointer);
     window.addEventListener("touchend", releasePointer, { passive: true });
     window.addEventListener("touchcancel", releasePointer, { passive: true });
     window.addEventListener("blur", releasePointer);
     return () => {
       wrapper.removeEventListener("wheel", markUserInteracted);
-      wrapper.removeEventListener("mousedown", markPointerActive);
-      wrapper.removeEventListener("touchstart", markPointerActive);
+      wrapper.removeEventListener("mousedown", markMousePointerActive);
+      wrapper.removeEventListener("touchstart", markTouchPointerActive);
+      window.removeEventListener("mousemove", trackMouseMovement);
+      window.removeEventListener("touchmove", trackTouchMovement);
       window.removeEventListener("mouseup", releasePointer);
       window.removeEventListener("touchend", releasePointer);
       window.removeEventListener("touchcancel", releasePointer);
       window.removeEventListener("blur", releasePointer);
       isChartPointerActiveRef.current = false;
+      chartPointerLogicalRangeChangedRef.current = false;
+      resetPointerGesture();
     };
-  }, [activeSubPanes.length, chartAdapter, saveCurrentPaneHeights, scheduleFutureTimeAxisCoverage]);
+  }, [
+    activeSubPanes.length,
+    chartAdapter,
+    drawingEngineToolActive,
+    saveCurrentPaneHeights,
+    scheduleFutureTimeAxisCoverage,
+  ]);
 
   useEffect(() => {
     const chart = chartRef.current;

@@ -142,6 +142,73 @@ test("registry reports style content changes captured before updating a retained
   }
 });
 
+test("registry fast-paths identical documents but still reconciles different objects at the same revision", () => {
+  let boundsCalls = 0;
+  const registry = createDrawingSceneRegistry("scope-document-identity", {
+    createBounds: (entity) => {
+      boundsCalls += 1;
+      return createDrawingEntityGeometryBounds(entity);
+    },
+  });
+  const originalEntity = lineEntity("same-id", 1, 1);
+  const original = createDrawingDocument({
+    scopeKey: "scope-document-identity",
+    documentRevision: 7,
+    entities: [originalEntity],
+  });
+
+  const first = registry.reconcile(original);
+  assert.equal(first.ok, true);
+  assert.equal(first.ok && first.changed, true);
+  assert.equal(boundsCalls, 1);
+  const firstSnapshot = registry.getSnapshot();
+
+  const unchanged = registry.reconcile(original);
+  const unchangedAgain = registry.reconcile(original);
+  assert.equal(unchanged.ok, true);
+  assert.deepEqual(unchanged.ok && {
+    changed: unchanged.changed,
+    createdNodeCount: unchanged.createdNodeCount,
+    removedNodeCount: unchanged.removedNodeCount,
+    recomputedBoundsCount: unchanged.recomputedBoundsCount,
+    reordered: unchanged.reordered,
+  }, {
+    changed: false,
+    createdNodeCount: 0,
+    removedNodeCount: 0,
+    recomputedBoundsCount: 0,
+    reordered: false,
+  });
+  assert.strictEqual(unchanged, unchangedAgain);
+  assert.strictEqual(unchanged.snapshot, firstSnapshot);
+  assert.strictEqual(registry.getSnapshot(), firstSnapshot);
+  assert.equal(boundsCalls, 1);
+
+  const geometryContentChanged = createDrawingDocument({
+    scopeKey: "scope-document-identity",
+    documentRevision: original.documentRevision,
+    entities: [createDrawingEntity({
+      id: originalEntity.id,
+      kind: "line",
+      geometryRevision: originalEntity.geometryRevision,
+      styleRevision: originalEntity.styleRevision,
+      geometry: {
+        kind: "line",
+        lineType: "line-segment",
+        dataPoints: [{ time: 100, price: 100 }, { time: 110, price: 110 }],
+      },
+      style: originalEntity.style,
+    })],
+  });
+  const reconciled = registry.reconcile(geometryContentChanged);
+  assert.equal(reconciled.ok, true);
+  assert.equal(reconciled.ok && reconciled.changed, true);
+  assert.equal(reconciled.ok && reconciled.recomputedBoundsCount, 1);
+  assert.equal(boundsCalls, 2);
+  assert.notStrictEqual(reconciled.snapshot, firstSnapshot);
+  assert.deepEqual(registry.getNode("same-id")?.entity.geometry, geometryContentChanged.entities.get("same-id")?.geometry);
+});
+
 test("packed bbox arrays scan sequentially, constrain unbounded axes, dedupe chunks, and preserve z-order", () => {
   const freehandPoints = Array.from({ length: 260 }, (_, index) => ({
     time: 5,

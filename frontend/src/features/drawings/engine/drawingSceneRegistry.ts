@@ -352,6 +352,20 @@ function reconcileFailure(
   });
 }
 
+function unchangedReconcileSuccess(
+  snapshot: DrawingSceneRegistrySnapshot,
+): DrawingSceneRegistryReconcileSuccess {
+  return Object.freeze({
+    ok: true,
+    changed: false,
+    createdNodeCount: 0,
+    removedNodeCount: 0,
+    recomputedBoundsCount: 0,
+    reordered: false,
+    snapshot,
+  });
+}
+
 export function createDrawingSceneRegistry(
   scopeKey: string,
   options: DrawingSceneRegistryOptions = {},
@@ -362,6 +376,8 @@ export function createDrawingSceneRegistry(
   let byId = new Map<string, RetainedDrawingSceneNode>();
   let packedBounds = frozenEmptyPackedBounds();
   let snapshot = frozenSnapshot(scopeKey, 0, nodes, packedBounds);
+  let lastDocument: DrawingDocument | null = null;
+  let lastUnchangedResult: DrawingSceneRegistryReconcileSuccess | null = null;
 
   const registry: DrawingSceneRegistry = {
     scopeKey,
@@ -379,6 +395,10 @@ export function createDrawingSceneRegistry(
       }));
     },
     reconcile(document) {
+      if (document === lastDocument) {
+        lastUnchangedResult ??= unchangedReconcileSuccess(snapshot);
+        return lastUnchangedResult;
+      }
       if (document.scopeKey !== scopeKey) {
         return reconcileFailure(snapshot, "drawing scene scope does not match the registry");
       }
@@ -442,7 +462,7 @@ export function createDrawingSceneRegistry(
         || removedNodeCount > 0
         || reordered;
       snapshot = frozenSnapshot(scopeKey, document.documentRevision, nodes, packedBounds);
-      return Object.freeze({
+      const result: DrawingSceneRegistryReconcileSuccess = Object.freeze({
         ok: true,
         changed,
         createdNodeCount,
@@ -451,6 +471,9 @@ export function createDrawingSceneRegistry(
         reordered,
         snapshot,
       });
+      lastDocument = document;
+      lastUnchangedResult = changed ? null : result;
+      return result;
     },
   };
   return Object.freeze(registry);

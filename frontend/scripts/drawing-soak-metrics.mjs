@@ -39,6 +39,40 @@ export const DRAWING_SOAK_FIXED_CONTRACT = Object.freeze({
   maxInstrumentationWindowMs: 10_000,
 });
 
+const DRAWING_EVENT_LATENCY_INPUT_TYPES = Object.freeze([
+  "pointerdown",
+  "pointermove",
+  "pointerup",
+  "wheel",
+]);
+
+const DRAWING_EVENT_LATENCY_TRACE_CATEGORIES = Object.freeze([
+  "benchmark",
+  "input",
+  "input.scrolling",
+  "latency",
+  "latencyInfo",
+]);
+
+const DRAWING_EVENT_LATENCY_CONFIGURATION = Object.freeze({
+  dispatchesPerType: 128,
+  maxAttempts: 2,
+  p95ThresholdMs: 20,
+  p99ThresholdMs: 33,
+  p95MinimumSamples: 20,
+  p99MinimumSamples: 100,
+  maxTraceBytes: 64 * 1024 * 1024,
+  categories: DRAWING_EVENT_LATENCY_TRACE_CATEGORIES,
+});
+
+export const DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT = Object.freeze({
+  schemaVersion: "drawing-event-latency-calibration/v1",
+  window: "post-formal-soak",
+  scenarioId: "freehand-64x512-viewport",
+  inputTypes: DRAWING_EVENT_LATENCY_INPUT_TYPES,
+  configuration: DRAWING_EVENT_LATENCY_CONFIGURATION,
+});
+
 export function phase9MeasuredWorkloadDeadline(elapsedMs) {
   if (!Number.isFinite(elapsedMs) || elapsedMs < 0) {
     throw new TypeError("Phase 9 measured-window elapsed time must be finite and non-negative");
@@ -872,6 +906,402 @@ function diagnosticCount(diagnostics, key) {
   return nonNegativeNumber(value);
 }
 
+const EVENT_LATENCY_DIAGNOSTIC_KEYS = Object.freeze([
+  "orphanEnds",
+  "openBegins",
+  "invalidEvents",
+  "nonMonotonicEvents",
+  "unknownTypes",
+  "countMismatches",
+]);
+
+const EVENT_LATENCY_PROVENANCE_KEYS = Object.freeze([
+  "gitCommit",
+  "buildInputFingerprint",
+  "productionBuildVerification",
+  "browserProduct",
+  "userAgent",
+  "fixtureRawSha256",
+  "scenarioId",
+  "viewport",
+  "dpr",
+  "formalWindowEndedAt",
+]);
+
+const EVENT_LATENCY_TRACE_KEYS = Object.freeze([
+  "byteLength",
+  "chunkCount",
+  "sha256",
+  "eventCount",
+  "dataLossOccurred",
+  "maxBufferUsage",
+]);
+
+const EVENT_LATENCY_ACQUISITION_KEYS = Object.freeze([
+  "passed",
+  "attemptCount",
+  "startedAt",
+  "completedAt",
+  "failureReason",
+]);
+
+const EVENT_LATENCY_ATTEMPT_KEYS = Object.freeze([
+  "attempt",
+  "passed",
+  "startedAt",
+  "completedAt",
+  "failureReason",
+]);
+
+function exactIsoTimestamp(value) {
+  if (typeof value !== "string") return null;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return null;
+  return new Date(timestamp).toISOString() === value ? timestamp : null;
+}
+
+function exactEventLatencyDispatchCounts(value) {
+  return hasExactKeys(value, DRAWING_EVENT_LATENCY_INPUT_TYPES)
+    && DRAWING_EVENT_LATENCY_INPUT_TYPES.every((type) => (
+      value[type] === DRAWING_EVENT_LATENCY_CONFIGURATION.dispatchesPerType
+    ));
+}
+
+function exactEventLatencyConfiguration(value) {
+  const expected = DRAWING_EVENT_LATENCY_CONFIGURATION;
+  const keys = Object.keys(expected);
+  return hasExactKeys(value, keys)
+    && value.dispatchesPerType === expected.dispatchesPerType
+    && value.maxAttempts === expected.maxAttempts
+    && value.p95ThresholdMs === expected.p95ThresholdMs
+    && value.p99ThresholdMs === expected.p99ThresholdMs
+    && value.p95MinimumSamples === expected.p95MinimumSamples
+    && value.p99MinimumSamples === expected.p99MinimumSamples
+    && value.maxTraceBytes === expected.maxTraceBytes
+    && Array.isArray(value.categories)
+    && value.categories.length === expected.categories.length
+    && value.categories.every((category, index) => category === expected.categories[index]);
+}
+
+function nearestRankPercentile(values, percentile) {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const sorted = values
+    .map(nonNegativeNumber)
+    .filter((value) => value !== null)
+    .sort((left, right) => left - right);
+  if (sorted.length !== values.length) return null;
+  const rank = Math.max(1, Math.ceil((percentile / 100) * sorted.length));
+  return sorted[rank - 1] ?? null;
+}
+
+function exactNumericSamples(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, index) => (
+      nonNegativeNumber(value) !== null && value === right[index]
+    ));
+}
+
+function eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples) {
+  const samplesMs = metric?.samplesMs;
+  const count = metric?.count;
+  const p50Ms = nonNegativeNumber(metric?.p50Ms);
+  const p95Ms = nonNegativeNumber(metric?.p95Ms);
+  const p99Ms = nonNegativeNumber(metric?.p99Ms);
+  return Number.isSafeInteger(count)
+    && count === expectedCount
+    && Array.isArray(samplesMs)
+    && samplesMs.length === count
+    && exactNumericSamples(samplesMs, canonicalSamples)
+    && p50Ms !== null
+    && p95Ms !== null
+    && p99Ms !== null
+    && p50Ms <= p95Ms
+    && p95Ms <= p99Ms
+    && nearestRankPercentile(samplesMs, 50) === p50Ms
+    && nearestRankPercentile(samplesMs, 95) === p95Ms
+    && nearestRankPercentile(samplesMs, 99) === p99Ms;
+}
+
+function emptyEventLatencyMetricEvidence(metric) {
+  return metric?.count === 0
+    && Array.isArray(metric?.samplesMs)
+    && metric.samplesMs.length === 0
+    && metric.p50Ms === null
+    && metric.p95Ms === null
+    && metric.p99Ms === null;
+}
+
+function eventLatencyCalibrationEvidence(report) {
+  const calibration = report?.eventLatencyCalibration;
+  const configuration = calibration?.configuration;
+  const provenance = calibration?.provenance;
+  const trace = calibration?.trace;
+  const parser = calibration?.parser;
+  const acquisition = calibration?.acquisition;
+  const attempts = calibration?.attempts;
+  const expectedCount = DRAWING_EVENT_LATENCY_CONFIGURATION.dispatchesPerType;
+
+  const configurationPassed = exactEventLatencyConfiguration(configuration);
+  const expectedCountsPassed = exactEventLatencyDispatchCounts(
+    calibration?.expectedDispatchCounts,
+  );
+  const actualCountsPassed = exactEventLatencyDispatchCounts(
+    calibration?.actualDispatchCounts,
+  );
+
+  const reportViewport = report?.environment?.viewport;
+  const provenanceViewport = provenance?.viewport;
+  const formalWindowEndedAt = exactIsoTimestamp(provenance?.formalWindowEndedAt);
+  const acquisitionStartedAt = exactIsoTimestamp(acquisition?.startedAt);
+  const acquisitionCompletedAt = exactIsoTimestamp(acquisition?.completedAt);
+  const provenancePassed = hasExactKeys(provenance, EVENT_LATENCY_PROVENANCE_KEYS)
+    && provenance.gitCommit === report?.context?.git?.commit
+    && /^[0-9a-f]{40}$/.test(provenance.gitCommit ?? "")
+    && provenance.buildInputFingerprint === report?.context?.git?.buildInputFingerprint
+    && /^[0-9a-f]{64}$/.test(provenance.buildInputFingerprint ?? "")
+    && provenance.productionBuildVerification
+      === report?.environment?.productionBuildVerification
+    && provenance.browserProduct === report?.context?.browser?.version
+    && provenance.browserProduct === report?.context?.browser?.name
+    && typeof provenance.browserProduct === "string"
+    && provenance.browserProduct.length > 0
+    && provenance.userAgent === report?.context?.browser?.userAgent
+    && typeof provenance.userAgent === "string"
+    && provenance.userAgent.length > 0
+    && provenance.fixtureRawSha256 === report?.fixture?.rawSha256
+    && /^[0-9a-f]{64}$/.test(provenance.fixtureRawSha256 ?? "")
+    && provenance.scenarioId === DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.scenarioId
+    && hasExactKeys(provenanceViewport, ["width", "height"])
+    && hasExactKeys(reportViewport, ["width", "height"])
+    && Number.isSafeInteger(provenanceViewport.width)
+    && provenanceViewport.width > 0
+    && Number.isSafeInteger(provenanceViewport.height)
+    && provenanceViewport.height > 0
+    && provenanceViewport.width === reportViewport.width
+    && provenanceViewport.height === reportViewport.height
+    && provenance.dpr === report?.environment?.dpr
+    && provenance.dpr === report?.configuration?.dpr
+    && provenance.dpr === DRAWING_SOAK_FIXED_CONTRACT.dpr
+    && formalWindowEndedAt !== null;
+
+  const tracePassed = hasExactKeys(trace, EVENT_LATENCY_TRACE_KEYS)
+    && Number.isSafeInteger(trace.byteLength)
+    && trace.byteLength > 0
+    && trace.byteLength <= DRAWING_EVENT_LATENCY_CONFIGURATION.maxTraceBytes
+    && Number.isSafeInteger(trace.chunkCount)
+    && trace.chunkCount > 0
+    && /^[0-9a-f]{64}$/.test(trace.sha256 ?? "")
+    && Number.isSafeInteger(trace.eventCount)
+    && trace.eventCount > 0
+    && trace.dataLossOccurred === false
+    && nonNegativeNumber(trace.maxBufferUsage) !== null
+    && trace.maxBufferUsage <= 1;
+
+  const parserDiagnosticsPassed = hasExactKeys(
+    parser?.diagnostics,
+    EVENT_LATENCY_DIAGNOSTIC_KEYS,
+  ) && EVENT_LATENCY_DIAGNOSTIC_KEYS.every((key) => (
+    Array.isArray(parser.diagnostics[key]) && parser.diagnostics[key].length === 0
+  ));
+  const parserSamples = Array.isArray(parser?.samples) ? parser.samples : [];
+  const canonicalSamplesByType = Object.fromEntries(
+    DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => [
+      type,
+      parserSamples
+        .filter((sample) => sample?.inputType === type)
+        .map((sample) => sample?.generationToPresentationMs),
+    ]),
+  );
+  const parserSamplesPassed = Array.isArray(parser?.samples)
+    && parserSamples.length === expectedCount * DRAWING_EVENT_LATENCY_INPUT_TYPES.length
+    && DRAWING_EVENT_LATENCY_INPUT_TYPES.every((type) => (
+      canonicalSamplesByType[type].length === expectedCount
+    ))
+    && parserSamples.every((sample) => (
+      DRAWING_EVENT_LATENCY_INPUT_TYPES.includes(sample?.inputType)
+        && nonNegativeNumber(sample?.generationToPresentationMs) !== null
+    ));
+  const parserInputTypes = parser?.inputTypes;
+  const inputTypeSummaries = Object.fromEntries(DRAWING_EVENT_LATENCY_INPUT_TYPES.map((type) => {
+    const metric = parserInputTypes?.[type];
+    const canonicalSamples = canonicalSamplesByType[type];
+    const canonicalCount = canonicalSamples.length;
+    const canonicalP95Ms = nearestRankPercentile(canonicalSamples, 95);
+    const canonicalP99Ms = nearestRankPercentile(canonicalSamples, 99);
+    const metricPassed = eventLatencyMetricEvidence(metric, expectedCount, canonicalSamples);
+    const p95Eligible = canonicalCount
+      >= DRAWING_EVENT_LATENCY_CONFIGURATION.p95MinimumSamples;
+    const p99Eligible = canonicalCount
+      >= DRAWING_EVENT_LATENCY_CONFIGURATION.p99MinimumSamples;
+    const p95Passed = p95Eligible
+      && canonicalP95Ms !== null
+      && canonicalP95Ms <= DRAWING_EVENT_LATENCY_CONFIGURATION.p95ThresholdMs;
+    const p99Passed = p99Eligible
+      && canonicalP99Ms !== null
+      && canonicalP99Ms <= DRAWING_EVENT_LATENCY_CONFIGURATION.p99ThresholdMs;
+    return [type, Object.freeze({
+      count: canonicalCount,
+      p95Ms: canonicalP95Ms,
+      p99Ms: canonicalP99Ms,
+      p95Eligible,
+      p99Eligible,
+      p95Passed,
+      p99Passed,
+      passed: metricPassed && p95Passed && p99Passed,
+    })];
+  }));
+  const inputTypesPassed = hasExactKeys(parserInputTypes, DRAWING_EVENT_LATENCY_INPUT_TYPES)
+    && Object.values(inputTypeSummaries).every((summary) => summary.passed);
+  const excludedHoverPassed = hasExactKeys(parser?.excluded, ["hover"])
+    && emptyEventLatencyMetricEvidence(parser.excluded.hover);
+  const eventLatency = parser?.eventLatency;
+  const eventLatencyCountsPassed = [
+    "beginCount",
+    "endCount",
+    "pairedCount",
+    "presentedPairCount",
+    "terminationOnlyPairCount",
+    "partialPresentationPairCount",
+  ].every((key) => Number.isSafeInteger(eventLatency?.[key]) && eventLatency[key] >= 0)
+    && eventLatency.beginCount === eventLatency.endCount
+    && eventLatency.beginCount === eventLatency.pairedCount
+    && eventLatency.partialPresentationPairCount === 0
+    && eventLatency.presentedPairCount === expectedCount
+      * DRAWING_EVENT_LATENCY_INPUT_TYPES.length
+    && eventLatency.presentedPairCount
+      + eventLatency.terminationOnlyPairCount
+      + eventLatency.partialPresentationPairCount === eventLatency.pairedCount
+    && (!tracePassed || trace.eventCount >= eventLatency.beginCount + eventLatency.endCount);
+
+  const eiaf = parser?.eventsInAnimationFrame;
+  const eiafInputTypes = eiaf?.inputTypes;
+  const eiafPassed = eiaf?.supported === true
+    && eiaf?.passed === true
+    && eiaf?.reason === null
+    && Number.isSafeInteger(eiaf?.frameCount)
+    && eiaf.frameCount >= expectedCount * 2
+    && Number.isSafeInteger(eiaf?.excludedFrameCount)
+    && eiaf.excludedFrameCount >= 0
+    && hasExactKeys(eiafInputTypes, ["pointerdown", "pointerup"])
+    && eventLatencyMetricEvidence(
+      eiafInputTypes.pointerdown,
+      expectedCount,
+      canonicalSamplesByType.pointerdown,
+    )
+    && eventLatencyMetricEvidence(
+      eiafInputTypes.pointerup,
+      expectedCount,
+      canonicalSamplesByType.pointerup,
+    )
+    && Array.isArray(eiaf.mismatches)
+    && eiaf.mismatches.length === 0
+    && Array.isArray(eiaf.schemaErrors)
+    && eiaf.schemaErrors.length === 0;
+  const parserPassed = parser?.schemaVersion === "drawing-event-latency-trace/v1"
+    && parser?.passed === true
+    && Array.isArray(parser?.failureReasons)
+    && parser.failureReasons.length === 0
+    && exactEventLatencyDispatchCounts(parser?.expectedDispatchCounts)
+    && parserDiagnosticsPassed
+    && inputTypesPassed
+    && excludedHoverPassed
+    && parserSamplesPassed
+    && eventLatencyCountsPassed
+    && eiafPassed;
+
+  const acquisitionPassed = hasExactKeys(acquisition, EVENT_LATENCY_ACQUISITION_KEYS)
+    && acquisition.passed === true
+    && Number.isSafeInteger(acquisition.attemptCount)
+    && acquisition.attemptCount >= 1
+    && acquisition.attemptCount <= DRAWING_EVENT_LATENCY_CONFIGURATION.maxAttempts
+    && acquisitionStartedAt !== null
+    && acquisitionCompletedAt !== null
+    && acquisitionCompletedAt >= acquisitionStartedAt
+    && formalWindowEndedAt !== null
+    && acquisitionStartedAt >= formalWindowEndedAt
+    && acquisition.failureReason === null;
+  const attemptsPassed = Array.isArray(attempts)
+    && acquisitionPassed
+    && attempts.length === acquisition.attemptCount
+    && attempts.every((attempt, index) => {
+      const startedAt = exactIsoTimestamp(attempt?.startedAt);
+      const completedAt = exactIsoTimestamp(attempt?.completedAt);
+      const previousCompletedAt = index > 0
+        ? exactIsoTimestamp(attempts[index - 1]?.completedAt)
+        : null;
+      const isFinal = index === attempts.length - 1;
+      return hasExactKeys(attempt, EVENT_LATENCY_ATTEMPT_KEYS)
+        && attempt.attempt === index + 1
+        && startedAt !== null
+        && completedAt !== null
+        && completedAt >= startedAt
+        && (index === 0 || startedAt >= previousCompletedAt)
+        && (isFinal
+          ? attempt.passed === true && attempt.failureReason === null
+          : attempt.passed === false
+            && typeof attempt.failureReason === "string"
+            && ["technical: ", "conservation: ", "schema: "]
+              .some((prefix) => attempt.failureReason.startsWith(prefix)));
+    })
+    && attempts[0]?.startedAt === acquisition?.startedAt
+    && attempts.at(-1)?.completedAt === acquisition?.completedAt;
+
+  const actual = Object.freeze({
+    schemaVersion: calibration?.schemaVersion ?? null,
+    window: calibration?.window ?? null,
+    configurationPassed,
+    provenancePassed,
+    expectedDispatchCounts: calibration?.expectedDispatchCounts ?? null,
+    actualDispatchCounts: calibration?.actualDispatchCounts ?? null,
+    trace: trace === null || typeof trace !== "object" ? null : Object.freeze({
+      byteLength: trace.byteLength ?? null,
+      chunkCount: trace.chunkCount ?? null,
+      eventCount: trace.eventCount ?? null,
+      dataLossOccurred: trace.dataLossOccurred ?? null,
+      maxBufferUsage: trace.maxBufferUsage ?? null,
+      sha256: trace.sha256 ?? null,
+      passed: tracePassed,
+    }),
+    parser: Object.freeze({
+      schemaVersion: parser?.schemaVersion ?? null,
+      passed: parserPassed,
+      diagnosticsPassed: parserDiagnosticsPassed,
+      excludedHoverCount: Number.isSafeInteger(parser?.excluded?.hover?.count)
+        ? parser.excluded.hover.count
+        : null,
+      inputTypes: Object.freeze(inputTypeSummaries),
+      eventsInAnimationFrame: Object.freeze({
+        supported: eiaf?.supported ?? null,
+        passed: eiafPassed,
+        pointerdownCount: Number.isSafeInteger(eiafInputTypes?.pointerdown?.count)
+          ? eiafInputTypes.pointerdown.count
+          : null,
+        pointerupCount: Number.isSafeInteger(eiafInputTypes?.pointerup?.count)
+          ? eiafInputTypes.pointerup.count
+          : null,
+      }),
+    }),
+    acquisition: acquisition ?? null,
+    attemptsPassed,
+  });
+  return Object.freeze({
+    passed: calibration?.schemaVersion
+        === DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.schemaVersion
+      && calibration?.window === DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.window
+      && configurationPassed
+      && provenancePassed
+      && expectedCountsPassed
+      && actualCountsPassed
+      && tracePassed
+      && parserPassed
+      && acquisitionPassed
+      && attemptsPassed,
+    actual,
+  });
+}
+
 /**
  * Build a fail-closed Phase 9 heavy-scene soak assessment. Missing evidence is
  * always a failed check; callers must never reinterpret an unevaluated metric
@@ -1416,6 +1846,7 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
   const naturalUsedAcceptance = naturalCurveAcceptance(naturalHeap);
   const naturalBackingAcceptance = naturalCurveAcceptance(naturalBackingStorage);
   const naturalEmbedderAcceptance = naturalCurveAcceptance(naturalEmbedderHeap);
+  const eventLatencyCalibration = eventLatencyCalibrationEvidence(report);
   const checks = Object.freeze({
     configurationEvidence: check(
       configurationEvidencePassed,
@@ -1437,6 +1868,11 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
       productionHarnessPassed,
       "managed production preview with git/build/browser/machine provenance",
       productionHarnessPassed,
+    ),
+    eventLatencyCalibration: check(
+      eventLatencyCalibration.actual,
+      "post-formal-soak Chromium presentation trace: 128 exact samples/type, p95 <= 20ms, p99 <= 33ms, lossless provenance-matched acquisition",
+      eventLatencyCalibration.passed,
     ),
     refreshRateProfile: check(
       refreshRateHz,
@@ -1745,6 +2181,7 @@ export function assessDrawingSoak(report = {}, overrides = {}) {
       inputFrameLatency,
       inputFrameLatencyByType,
       inputPaintFenceEvidence: inputPaintFenceEvidence.actual,
+      eventLatencyCalibration: eventLatencyCalibration.actual,
       cyclesAttempted: cycles.length,
       cyclesPassed: measuredCycles.length,
       maxCycleGapMs,

@@ -73,6 +73,7 @@ import {
   selectPhase9SoakDueAction,
 } from "./drawing-soak-metrics.mjs";
 import { createDrawingInputPaintFenceTracker } from "./drawing-performance-input-fence.mjs";
+import { runDrawingEventLatencyCalibration } from "./drawing-event-latency-calibration.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -3689,7 +3690,36 @@ async function runPhase9Soak({
       readDrawingEngineDomEvidence(cdp, args),
       ensureHeadedBenchmarkWindow(cdp, browserWindowId, args.headless),
     ]);
+    const formalWindowEndedAt = new Date().toISOString();
+    const frozenDiagnostics = structuredClone({
+      sampleErrors,
+      consoleErrors: diagnostics.consoleErrors,
+      runtimeExceptions: diagnostics.runtimeExceptions,
+      networkFailures: diagnostics.networkFailures,
+      longTasks: Array.isArray(bench?.attributableLongTasks)
+        ? bench.attributableLongTasks
+        : null,
+    });
+    const workerTargetsFinal = structuredClone(workerTracker.targets());
     probeStopped = await stopPhase6Probe(cdp);
+    const fixtureRawSha256 = createHash("sha256").update(fixture.raw, "utf8").digest("hex");
+    const eventLatencyCalibration = await runDrawingEventLatencyCalibration({
+      cdp,
+      rect: prepared.rect,
+      waitForAnimationFrame: () => waitNextAnimationFrame(cdp),
+      provenance: {
+        gitCommit: git.commit,
+        buildInputFingerprint: git.buildInputFingerprint,
+        productionBuildVerification: "managed-vite-preview",
+        browserProduct: browserVersion.result?.product || null,
+        userAgent: browserVersion.result?.userAgent || null,
+        fixtureRawSha256,
+        scenarioId: scenario.id,
+        viewport: { ...DEFAULT_VIEWPORT },
+        dpr: args.dpr,
+        formalWindowEndedAt,
+      },
+    });
     const formalEligible = isFormalDrawingSoakConfiguration(configuration);
     const frameMedianMs = bench?.timingSummary?.metrics?.frameIntervalMs?.p50Ms;
     const refreshRateHz = Number.isFinite(frameMedianMs) && frameMedianMs > 0
@@ -3747,7 +3777,7 @@ async function runPhase9Soak({
         startTime: fixture.metadata.startTime,
         intervalSeconds: fixture.metadata.intervalSeconds,
         storageChars: fixture.metadata.storageChars,
-        rawSha256: createHash("sha256").update(fixture.raw, "utf8").digest("hex"),
+        rawSha256: fixtureRawSha256,
         storageKey: fixture.storageKey,
       },
       readiness: {
@@ -3760,21 +3790,14 @@ async function runPhase9Soak({
         refreshRatePreflight: prepared.refreshRatePreflight,
         browserWindowFinal,
         workerTargetsInitial: prepared.workerTargets,
-        workerTargetsFinal: workerTracker.targets(),
+        workerTargetsFinal,
         probeStopped,
       },
       samples,
       gcCheckpoints,
       cycles,
-      diagnostics: {
-        sampleErrors,
-        consoleErrors: diagnostics.consoleErrors,
-        runtimeExceptions: diagnostics.runtimeExceptions,
-        networkFailures: diagnostics.networkFailures,
-        longTasks: Array.isArray(bench?.attributableLongTasks)
-          ? bench.attributableLongTasks
-          : null,
-      },
+      diagnostics: frozenDiagnostics,
+      eventLatencyCalibration,
       browserTiming: {
         timingSchemaVersion: bench?.timingSummary?.timingSchemaVersion ?? null,
         windowDurationMs: bench?.timingSummary?.windowDurationMs ?? null,

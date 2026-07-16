@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   assessDrawingSoak,
+  DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT,
   DRAWING_SOAK_DEFAULTS,
   DRAWING_SOAK_FIXED_CONTRACT,
   isFormalDrawingSoakConfiguration,
@@ -294,6 +295,118 @@ function setTypedInputCount(timing, type, totalCount) {
   timing.inputFenceOverall.typeFenceCount = typeFenceCount;
 }
 
+function eventLatencyMetric(count = 128, valueMs = 16) {
+  return {
+    count,
+    samplesMs: Array.from({ length: count }, () => valueMs),
+    p50Ms: valueMs,
+    p95Ms: valueMs,
+    p99Ms: valueMs,
+  };
+}
+
+function eventLatencyCalibration(report) {
+  const dispatchCounts = Object.fromEntries(INPUT_TYPES.map((type) => [type, 128]));
+  return {
+    schemaVersion: DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.schemaVersion,
+    window: DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.window,
+    configuration: {
+      ...DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.configuration,
+      categories: [...DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.configuration.categories],
+    },
+    provenance: {
+      gitCommit: report.context.git.commit,
+      buildInputFingerprint: report.context.git.buildInputFingerprint,
+      productionBuildVerification: report.environment.productionBuildVerification,
+      browserProduct: report.context.browser.version,
+      userAgent: report.context.browser.userAgent,
+      fixtureRawSha256: report.fixture.rawSha256,
+      scenarioId: DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT.scenarioId,
+      viewport: { ...report.environment.viewport },
+      dpr: report.environment.dpr,
+      formalWindowEndedAt: "2026-07-16T00:00:00.000Z",
+    },
+    expectedDispatchCounts: structuredClone(dispatchCounts),
+    actualDispatchCounts: structuredClone(dispatchCounts),
+    trace: {
+      byteLength: MIB,
+      chunkCount: 2,
+      sha256: "c".repeat(64),
+      eventCount: 10_000,
+      dataLossOccurred: false,
+      maxBufferUsage: 0.25,
+    },
+    parser: {
+      schemaVersion: "drawing-event-latency-trace/v1",
+      passed: true,
+      failureReasons: [],
+      expectedDispatchCounts: structuredClone(dispatchCounts),
+      eventLatency: {
+        beginCount: 512,
+        endCount: 512,
+        pairedCount: 512,
+        presentedPairCount: 512,
+        terminationOnlyPairCount: 0,
+        partialPresentationPairCount: 0,
+      },
+      inputTypes: Object.fromEntries(INPUT_TYPES.map((type) => [
+        type,
+        eventLatencyMetric(),
+      ])),
+      excluded: {
+        hover: {
+          count: 0,
+          samplesMs: [],
+          p50Ms: null,
+          p95Ms: null,
+          p99Ms: null,
+        },
+      },
+      samples: INPUT_TYPES.flatMap((inputType) => (
+        Array.from({ length: 128 }, () => ({
+          inputType,
+          generationToPresentationMs: 16,
+        }))
+      )),
+      diagnostics: {
+        orphanEnds: [],
+        openBegins: [],
+        invalidEvents: [],
+        nonMonotonicEvents: [],
+        unknownTypes: [],
+        countMismatches: [],
+      },
+      eventsInAnimationFrame: {
+        supported: true,
+        passed: true,
+        reason: null,
+        frameCount: 256,
+        excludedFrameCount: 0,
+        inputTypes: {
+          pointerdown: eventLatencyMetric(),
+          pointerup: eventLatencyMetric(),
+        },
+        mismatches: [],
+        schemaErrors: [],
+      },
+    },
+    acquisition: {
+      passed: true,
+      attemptCount: 1,
+      startedAt: "2026-07-16T00:00:01.000Z",
+      completedAt: "2026-07-16T00:00:02.000Z",
+      failureReason: null,
+    },
+    attempts: [{
+      attempt: 1,
+      passed: true,
+      startedAt: "2026-07-16T00:00:01.000Z",
+      completedAt: "2026-07-16T00:00:02.000Z",
+      failureReason: null,
+    }],
+  };
+}
+
 function buildPassingReport({
   heapAt = () => 100 * MIB,
   configuration = TEST_CONFIGURATION,
@@ -344,7 +457,7 @@ function buildPassingReport({
     (configuration.durationMs - configuration.warmupMs) / configuration.workloadIntervalMs,
   );
   finalBrowserTiming.slowInputPostRafTaskFences = slowInputPostRafTaskFences(cycleCount);
-  return {
+  const report = {
     configuration: {
       ...configuration,
       drawingEngineMode: "scene-canary",
@@ -367,6 +480,8 @@ function buildPassingReport({
       rawSha256: DRAWING_SOAK_FIXED_CONTRACT.fixtureRawSha256,
     },
     environment: {
+      viewport: { width: 1440, height: 900 },
+      dpr: 1.5,
       productionBuild: true,
       productionBuildVerification: "managed-vite-preview",
       refreshRateHz: 1_000 / 16.7,
@@ -378,7 +493,11 @@ function buildPassingReport({
         buildInputFingerprint: "b".repeat(64),
         buildInputsDirty: false,
       },
-      browser: { name: "Chromium" },
+      browser: {
+        name: "Chromium/150.0.0.0",
+        version: "Chromium/150.0.0.0",
+        userAgent: "Mozilla/5.0 test Chromium/150.0.0.0",
+      },
       machine: { platform: "win32" },
     },
     readiness: {
@@ -442,6 +561,8 @@ function buildPassingReport({
     },
     browserTiming: finalBrowserTiming,
   };
+  report.eventLatencyCalibration = eventLatencyCalibration(report);
+  return report;
 }
 
 test("accepts a complete stable short soak as smoke evidence only", () => {
@@ -464,6 +585,228 @@ test("accepts only a full 66 minute configuration as formal Phase 9 evidence", (
   assert.equal(assessment.formalEligible, true);
   assert.equal(assessment.formalAcceptance.passed, true);
   assert.equal(assessment.passed, true);
+});
+
+test("locks the post-soak EventLatency calibration contract and exposes its summary", () => {
+  assert.deepEqual(DRAWING_EVENT_LATENCY_CALIBRATION_CONTRACT, {
+    schemaVersion: "drawing-event-latency-calibration/v1",
+    window: "post-formal-soak",
+    scenarioId: "freehand-64x512-viewport",
+    inputTypes: ["pointerdown", "pointermove", "pointerup", "wheel"],
+    configuration: {
+      dispatchesPerType: 128,
+      maxAttempts: 2,
+      p95ThresholdMs: 20,
+      p99ThresholdMs: 33,
+      p95MinimumSamples: 20,
+      p99MinimumSamples: 100,
+      maxTraceBytes: 64 * MIB,
+      categories: ["benchmark", "input", "input.scrolling", "latency", "latencyInfo"],
+    },
+  });
+
+  const assessment = assessDrawingSoak(buildPassingReport());
+  assert.equal(assessment.checks.eventLatencyCalibration.passed, true);
+  assert.equal(assessment.summary.eventLatencyCalibration.trace.passed, true);
+  assert.equal(
+    assessment.summary.eventLatencyCalibration.parser.inputTypes.wheel.count,
+    128,
+  );
+  assert.equal(
+    assessment.summary.eventLatencyCalibration.parser.eventsInAnimationFrame.pointerupCount,
+    128,
+  );
+});
+
+test("EventLatency calibration is mandatory for both smoke and formal acceptance", () => {
+  const smoke = buildPassingReport();
+  delete smoke.eventLatencyCalibration;
+  let assessment = assessDrawingSoak(smoke);
+  assert.equal(assessment.checks.eventLatencyCalibration.passed, false);
+  assert.equal(assessment.smokeAcceptance.passed, false);
+  assert.ok(assessment.failureReasons.includes("eventLatencyCalibration"));
+
+  const formal = buildPassingReport({ configuration: DRAWING_SOAK_DEFAULTS });
+  delete formal.eventLatencyCalibration;
+  assessment = assessDrawingSoak(formal);
+  assert.equal(assessment.formalEligible, true);
+  assert.equal(assessment.formalAcceptance.passed, false);
+  assert.ok(assessment.failureReasons.includes("eventLatencyCalibration"));
+});
+
+test("EventLatency calibration fails closed on counts, SLO, cross-check, provenance, or trace loss", () => {
+  const cases = [
+    ["configuration", (calibration) => calibration.configuration.categories.reverse()],
+    ["expected count", (calibration) => {
+      calibration.expectedDispatchCounts.pointermove = 127;
+    }],
+    ["actual count", (calibration) => {
+      calibration.actualDispatchCounts.wheel = 127;
+    }],
+    ["parser count", (calibration) => {
+      calibration.parser.inputTypes.pointerup.count = 127;
+      calibration.parser.inputTypes.pointerup.samplesMs.pop();
+    }],
+    ["p95 threshold", (calibration) => {
+      calibration.parser.samples
+        .filter((sample) => sample.inputType === "wheel")
+        .forEach((sample) => { sample.generationToPresentationMs = 20.1; });
+      Object.assign(calibration.parser.inputTypes.wheel, eventLatencyMetric(128, 20.1));
+    }],
+    ["p99 threshold", (calibration) => {
+      const metric = calibration.parser.inputTypes.pointermove;
+      const samples = calibration.parser.samples
+        .filter((sample) => sample.inputType === "pointermove");
+      samples.slice(-2).forEach((sample) => { sample.generationToPresentationMs = 33.1; });
+      metric.samplesMs = Array.from({ length: 128 }, (_, index) => (
+        index >= 126 ? 33.1 : 16
+      ));
+      metric.p50Ms = 16;
+      metric.p95Ms = 16;
+      metric.p99Ms = 33.1;
+    }],
+    ["cross-check unsupported", (calibration) => {
+      calibration.parser.eventsInAnimationFrame.supported = false;
+      calibration.parser.eventsInAnimationFrame.passed = null;
+      calibration.parser.eventsInAnimationFrame.reason = "schema absent";
+    }],
+    ["cross-check count", (calibration) => {
+      const metric = calibration.parser.eventsInAnimationFrame.inputTypes.pointerdown;
+      metric.count = 127;
+      metric.samplesMs.pop();
+    }],
+    ["cross-check values", (calibration) => {
+      Object.assign(
+        calibration.parser.eventsInAnimationFrame.inputTypes.pointerdown,
+        eventLatencyMetric(128, 15),
+      );
+    }],
+    ["provenance", (calibration) => {
+      calibration.provenance.buildInputFingerprint = "d".repeat(64);
+    }],
+    ["browser provenance", (calibration) => {
+      calibration.provenance.browserProduct = "Chromium/149.0.0.0";
+    }],
+    ["build provenance", (calibration) => {
+      calibration.provenance.productionBuildVerification = "external-preview";
+    }],
+    ["fixture provenance", (calibration) => {
+      calibration.provenance.fixtureRawSha256 = "e".repeat(64);
+    }],
+    ["viewport provenance", (calibration) => {
+      calibration.provenance.viewport.width = 1439;
+    }],
+    ["DPR provenance", (calibration) => {
+      calibration.provenance.dpr = 2;
+    }],
+    ["window ordering", (calibration) => {
+      calibration.provenance.formalWindowEndedAt = "2026-07-16T00:00:01.500Z";
+    }],
+    ["data loss", (calibration) => {
+      calibration.trace.dataLossOccurred = true;
+    }],
+    ["trace size", (calibration) => {
+      calibration.trace.byteLength = 64 * MIB + 1;
+    }],
+    ["trace hash", (calibration) => {
+      calibration.trace.sha256 = "not-a-hash";
+    }],
+    ["trace event count", (calibration) => {
+      calibration.trace.eventCount = 0;
+    }],
+    ["trace chunks", (calibration) => {
+      calibration.trace.chunkCount = 0;
+    }],
+    ["trace buffer usage", (calibration) => {
+      calibration.trace.maxBufferUsage = 1.01;
+    }],
+    ["parser diagnostics", (calibration) => {
+      calibration.parser.diagnostics.orphanEnds.push({ eventIndex: 1 });
+    }],
+    ["excluded hover", (calibration) => {
+      Object.assign(calibration.parser.excluded.hover, eventLatencyMetric(1));
+    }],
+  ];
+  for (const [label, mutate] of cases) {
+    const report = buildPassingReport();
+    mutate(report.eventLatencyCalibration);
+    const assessment = assessDrawingSoak(report);
+    assert.equal(assessment.checks.eventLatencyCalibration.passed, false, label);
+    assert.equal(assessment.smokeAcceptance.passed, false, label);
+  }
+});
+
+test("EventLatency SLO is recomputed from raw samples despite forged typed and EIAF summaries", () => {
+  const report = buildPassingReport();
+  report.eventLatencyCalibration.parser.samples
+    .filter((sample) => sample.inputType === "pointerup")
+    .forEach((sample) => { sample.generationToPresentationMs = 40; });
+
+  const assessment = assessDrawingSoak(report);
+  const summary = assessment.summary.eventLatencyCalibration.parser;
+  assert.equal(assessment.checks.eventLatencyCalibration.passed, false);
+  assert.equal(summary.inputTypes.pointerup.p95Ms, 40);
+  assert.equal(summary.inputTypes.pointerup.p99Ms, 40);
+  assert.equal(summary.inputTypes.pointerup.p95Passed, false);
+  assert.equal(summary.eventsInAnimationFrame.passed, false);
+});
+
+test("EventLatency acquisition attempts are bounded, ordered, and end in success", () => {
+  const retried = buildPassingReport();
+  retried.eventLatencyCalibration.acquisition.attemptCount = 2;
+  retried.eventLatencyCalibration.acquisition.startedAt = "2026-07-16T00:00:00.500Z";
+  retried.eventLatencyCalibration.attempts = [{
+    attempt: 1,
+    passed: false,
+    startedAt: "2026-07-16T00:00:00.500Z",
+    completedAt: "2026-07-16T00:00:00.750Z",
+    failureReason: "technical: trace buffer pressure",
+  }, {
+    attempt: 2,
+    passed: true,
+    startedAt: "2026-07-16T00:00:01.000Z",
+    completedAt: "2026-07-16T00:00:02.000Z",
+    failureReason: null,
+  }];
+  assert.equal(
+    assessDrawingSoak(retried).checks.eventLatencyCalibration.passed,
+    true,
+  );
+
+  const malformed = buildPassingReport();
+  malformed.eventLatencyCalibration.acquisition.attemptCount = 2;
+  malformed.eventLatencyCalibration.attempts.push({
+    attempt: 2,
+    passed: true,
+    startedAt: "2026-07-16T00:00:01.500Z",
+    completedAt: "2026-07-16T00:00:02.000Z",
+    failureReason: null,
+  });
+  assert.equal(
+    assessDrawingSoak(malformed).checks.eventLatencyCalibration.passed,
+    false,
+  );
+
+  const thresholdRetry = buildPassingReport();
+  thresholdRetry.eventLatencyCalibration.acquisition.attemptCount = 2;
+  thresholdRetry.eventLatencyCalibration.acquisition.startedAt = "2026-07-16T00:00:00.500Z";
+  thresholdRetry.eventLatencyCalibration.attempts = [{
+    attempt: 1,
+    passed: false,
+    startedAt: "2026-07-16T00:00:00.500Z",
+    completedAt: "2026-07-16T00:00:00.750Z",
+    failureReason: "threshold: p95 exceeded",
+  }, {
+    attempt: 2,
+    passed: true,
+    startedAt: "2026-07-16T00:00:01.000Z",
+    completedAt: "2026-07-16T00:00:02.000Z",
+    failureReason: null,
+  }];
+  assert.equal(
+    assessDrawingSoak(thresholdRetry).checks.eventLatencyCalibration.passed,
+    false,
+  );
 });
 
 test("fails closed when worker heap or runtime cache limits are missing", () => {

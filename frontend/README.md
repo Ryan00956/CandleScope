@@ -16,6 +16,7 @@ React/Vite charting UI for CandleScope.
 - [前端架构边界硬化执行文档](FRONTEND_ARCHITECTURE_HARDENING_EXECUTION_zh.md)
 - [前端最终收尾执行计划](FRONTEND_FINAL_POLISH_EXECUTION_zh.md)
 - [前端 TypeScript 渐进迁移执行文档](FRONTEND_TYPESCRIPT_MIGRATION_EXECUTION_zh.md)
+- [绘图引擎 V2 丝滑重构执行文档](DRAWING_ENGINE_V2_REBUILD_EXECUTION_zh.md)
 
 ## Backend Connection
 

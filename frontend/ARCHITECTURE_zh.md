@@ -8,6 +8,9 @@
 [前端优化阶段审查](OPTIMIZATION_PHASE_REVIEW_zh.md)。
 TypeScript 渐进迁移的分阶段步骤、验证门和回滚条件见
 [前端 TypeScript 渐进迁移执行文档](FRONTEND_TYPESCRIPT_MIGRATION_EXECUTION_zh.md)。
+绘图性能从 per-drawing primitive 迁移到 retained scene 的逐步实施、灰度和
+性能门见
+[绘图引擎 V2 丝滑重构执行文档](DRAWING_ENGINE_V2_REBUILD_EXECUTION_zh.md)。
 
 ## 目标
 
@@ -128,5 +131,6 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 - `SingleChartPanes` 内部简化继续以证据驱动。它仍然是最密集的图表模块，但
   Lightweight Charts 写操作应继续经 `chart-adapter`。
 - 当本地 smoke 数字稳定到适合跨机器比较后，可以考虑把性能预算报告接入 CI。
+- 按绘图引擎 V2 执行文档建立 drawing-specific production benchmark、单一 scene primitive、live ink overlay、LOD/worker 和异步持久化；在性能与兼容门通过前保留 legacy 回滚路径。
 - 继续把仍留在 `src/components` 的 feature UI 实现逐步迁入对应 feature，避免只为了目录整齐而移动仍不稳定的代码。
 - 当前端 feature 边界变化时，同步更新顶层 README 和本文档。

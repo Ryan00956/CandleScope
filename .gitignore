@@ -213,11 +213,16 @@ backend/data/cache_gc_audit.jsonl
 # CandleScope generated perf/test artifacts. Keep ad-hoc/raw runs local, while
 # allowing the curated drawing-engine V2 baselines required by its execution
 # document to be versioned deliberately.
+frontend/.playwright-cli/
+frontend/output/
+frontend/*.tsbuildinfo
 docs/perf-baselines/*
 !docs/perf-baselines/drawing-engine-v2/
 docs/perf-baselines/drawing-engine-v2/*
 !docs/perf-baselines/drawing-engine-v2/README.md
 !docs/perf-baselines/drawing-engine-v2/baseline-*.json
+!docs/perf-baselines/drawing-engine-v2/phase3-legacy-2026-07-15.json
+!docs/perf-baselines/drawing-engine-v2/phase3-shadow-2026-07-15.json
 
 # CandleScope local-only agent state and construction notes
 .codex

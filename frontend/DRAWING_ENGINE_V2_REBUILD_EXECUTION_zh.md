@@ -15,7 +15,7 @@
 
 旧工作树分支 <code>codex/frontend-chart-runtime</code> 已完整合并进当前 <code>main</code>，没有独有提交。本重构分支直接从当前本地 <code>main</code> 创建，不从落后的 <code>origin/main</code> 创建。
 
-当前本地 <code>main</code> 比 <code>origin/main</code> 领先 4 个提交。创建远端 PR 前必须先确认这 4 个基线提交已经进入远端主线，否则 PR 会把它们一起显示为重构差异。
+本分支以创建时的本地 <code>main</code> 为基线；本文不固化会随同步而变化的 ahead/behind 数。合并或创建远端 PR 前，必须针对实际目标主线重新检查分叉与提交范围，确认重构差异只包含本分支预期提交。
 
 每次开始工作前先执行：
 

@@ -5,7 +5,8 @@ This directory stores the curated, reviewable JSON checkpoints produced by
 
 ## What is versioned
 
-- `baseline-*.json` files are intentional before/after checkpoints. They must
+- `baseline-*.json` files and the reviewed 2026-07-15 Phase 3 legacy/shadow
+  pair are intentional before/after checkpoints. They must
   include the Git commit and dirty state, browser build, viewport, DPR, bar
   count, drawing-engine mode, fixture metadata, raw per-run samples, warm-up
   policy, summarized percentiles, and acceptance decisions.

@@ -7,7 +7,7 @@
  * remain stable.
  */
 
-import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { drawingDataPointsToCoordinates } from "./coordinateUtils.js";
 import type {
   AxisLinePrimitiveOptions,
   AxisLineType,
@@ -197,7 +197,15 @@ class AxisLinePaneView implements PrimitivePaneView {
 
     const dp = source._dataPoint;
     const coordinateContext = {};
-    const x = dp ? dataPointToCoordinate(chart, series, dp, coordinateContext) : null;
+    const x = dp
+      ? drawingDataPointsToCoordinates(
+          chart,
+          series,
+          [dp],
+          coordinateContext,
+          { cacheToken: source, geometryRevision: source._geometryRevision },
+        )[0] ?? null
+      : null;
     let y: number | null = null;
 
     if (dp?.price != null) {
@@ -236,6 +244,7 @@ export class AxisLineDrawingPrimitive {
   _hovered: boolean;
   _isPreview: boolean;
   _hidden: boolean;
+  _geometryRevision: number;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
   _paneView: AxisLinePaneView;
@@ -252,6 +261,7 @@ export class AxisLineDrawingPrimitive {
     this._hovered = !!opts.hovered;
     this._isPreview = !!opts.isPreview;
     this._hidden = !!opts.hidden;
+    this._geometryRevision = 1;
 
     this._series = null;
     this._chart = null;
@@ -286,9 +296,11 @@ export class AxisLineDrawingPrimitive {
   get color() { return this._color; }
   get lineWidth() { return this._lineWidth; }
   get selected() { return this._selected; }
+  get geometryRevision() { return this._geometryRevision; }
 
   setDataPoint(point: DrawingDataPoint | null): void {
     this._dataPoint = point;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
@@ -339,7 +351,13 @@ export class AxisLineDrawingPrimitive {
     if (!this._series || !this._chart || !this._dataPoint) return null;
     const dp = this._dataPoint;
     const coordinateContext = {};
-    const x = dataPointToCoordinate(this._chart, this._series, dp, coordinateContext);
+    const x = drawingDataPointsToCoordinates(
+      this._chart,
+      this._series,
+      [dp],
+      coordinateContext,
+      { cacheToken: this, geometryRevision: this._geometryRevision },
+    )[0] ?? null;
     let y = null;
 
     if (dp.price != null) {
@@ -349,7 +367,7 @@ export class AxisLineDrawingPrimitive {
     return { x, y };
   }
 
-  hitTest(x: number, y: number): DrawingHit | null {
+  hitTestGeometry(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     const point = this._screenPoint();
     if (!point) return null;

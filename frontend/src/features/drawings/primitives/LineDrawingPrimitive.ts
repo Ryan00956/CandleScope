@@ -14,7 +14,7 @@
  *   - hit-testing for selection, endpoint dragging, and whole-line dragging
  */
 
-import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { drawingDataPointsToCoordinates } from "./coordinateUtils.js";
 import type {
   BasicLineToolId,
   DrawingAttachedParameter,
@@ -25,6 +25,10 @@ import type {
   PrimitivePaneRenderer,
   PrimitivePaneView,
 } from "../drawingTypes.js";
+import {
+  accumulateDrawingPerfFrameWork,
+  drawingPerfCounters,
+} from "../performance/drawingPerfCounters.js";
 
 interface ExtendedLineCoordinates {
   x1: number;
@@ -47,6 +51,12 @@ interface LineRenderData {
   isPreview: boolean;
   hovered: boolean;
   hidden: boolean;
+}
+
+function drawingPerfNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
 }
 
 // ── Geometry helpers ──
@@ -144,6 +154,7 @@ class LineRenderer implements PrimitivePaneRenderer {
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
     if (data.hidden) return;
+    const startedAt = drawingPerfNow();
 
     target.useBitmapCoordinateSpace((scope) => {
       const ctx = scope.context;
@@ -248,6 +259,11 @@ class LineRenderer implements PrimitivePaneRenderer {
 
       ctx.restore();
     });
+    const durationMs = drawingPerfNow() - startedAt;
+    accumulateDrawingPerfFrameWork({
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+    });
   }
 }
 
@@ -281,6 +297,7 @@ class LinePaneView implements PrimitivePaneView {
 
   update(): void {
     // Called by the chart before rendering. Convert data coords → screen coords.
+    const startedAt = drawingPerfNow();
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
@@ -297,16 +314,42 @@ class LinePaneView implements PrimitivePaneView {
         hovered: source._hovered,
         hidden: true,
       });
+      const durationMs = drawingPerfNow() - startedAt;
+      drawingPerfCounters.recordSceneRebuild();
+      accumulateDrawingPerfFrameWork({
+        geometryKey: source._id,
+        drawingMainThreadMs: durationMs,
+        sceneProjectPaintMs: durationMs,
+        rawPoints: source._dataPoints.length,
+        renderedPoints: 0,
+        visibleEntities: 0,
+        culledEntities: 1,
+      });
       return;
     }
 
     const points: LineRenderPoint[] = [];
     const coordinateContext = {};
+    let projectedPointCount = 0;
+    const horizontalCoordinates = drawingDataPointsToCoordinates(
+      chart,
+      series,
+      source._dataPoints,
+      coordinateContext,
+      { cacheToken: source, geometryRevision: source._geometryRevision },
+    );
 
-    for (const dp of source._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
+    for (const [index, dp] of source._dataPoints.entries()) {
+      const x = horizontalCoordinates[index] ?? null;
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
+      if (typeof x === "number" && Number.isFinite(x)
+        && typeof y === "number" && Number.isFinite(y)) {
+        projectedPointCount += 1;
+      }
+    }
+    if (projectedPointCount > 0) {
+      drawingPerfCounters.recordFinalProjection(projectedPointCount);
     }
 
     this._renderer.update({
@@ -318,6 +361,18 @@ class LinePaneView implements PrimitivePaneView {
       isPreview: source._isPreview,
       hovered: source._hovered,
       hidden: source._hidden,
+    });
+    const durationMs = drawingPerfNow() - startedAt;
+    const renderable = projectedPointCount >= 2;
+    drawingPerfCounters.recordSceneRebuild();
+    accumulateDrawingPerfFrameWork({
+      geometryKey: source._id,
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+      rawPoints: source._dataPoints.length,
+      renderedPoints: renderable ? 2 : 0,
+      visibleEntities: renderable ? 1 : 0,
+      culledEntities: renderable ? 0 : 1,
     });
   }
 
@@ -342,6 +397,7 @@ export class LineDrawingPrimitive {
   _isPreview: boolean;
   _hovered: boolean;
   _hidden: boolean;
+  _geometryRevision: number;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
   _paneView: LinePaneView;
@@ -368,6 +424,7 @@ export class LineDrawingPrimitive {
     this._isPreview = opts.isPreview || false;
     this._hovered = opts.hovered || false;
     this._hidden = !!opts.hidden;
+    this._geometryRevision = 1;
 
     this._series = null;
     this._chart = null;
@@ -382,7 +439,10 @@ export class LineDrawingPrimitive {
   attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
-    this._requestUpdate = requestUpdate;
+    this._requestUpdate = () => {
+      drawingPerfCounters.recordRequestUpdate();
+      requestUpdate();
+    };
   }
 
   detached(): void {
@@ -407,9 +467,11 @@ export class LineDrawingPrimitive {
   get color() { return this._color; }
   get lineWidth() { return this._lineWidth; }
   get selected() { return this._selected; }
+  get geometryRevision() { return this._geometryRevision; }
 
   setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
@@ -465,7 +527,7 @@ export class LineDrawingPrimitive {
    * @returns {{ pointIndex: number } | null}
    *   pointIndex: 0 or 1 for endpoint hit, -1 for body hit
    */
-  hitTest(x: number, y: number): DrawingHit | null {
+  hitTestGeometry(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
     if (this._dataPoints.length < 2) return null;
@@ -473,8 +535,15 @@ export class LineDrawingPrimitive {
     const series = this._series;
     const chart = this._chart;
     const coordinateContext = {};
-    const screenPoints = this._dataPoints.map((dp) => {
-      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
+    const horizontalCoordinates = drawingDataPointsToCoordinates(
+      chart,
+      series,
+      this._dataPoints,
+      coordinateContext,
+      { cacheToken: this, geometryRevision: this._geometryRevision },
+    );
+    const screenPoints = this._dataPoints.map((dp, index) => {
+      const x = horizontalCoordinates[index] ?? null;
       return { x, y: series.priceToCoordinate(dp.price) };
     });
 

@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useDrawing } from "./drawingInteractionController.js";
 import TextEditOverlay from "../../components/TextEditOverlay";
 import TextFormatBar from "../../components/TextFormatBar";
+import DrawingInteractionOverlay from "./rendering/DrawingInteractionOverlay.js";
+import {
+    resolveDrawingInteractionSurfaceMode,
+    resolveEffectiveDrawingInteractionSurfaceMode,
+} from "./interactionSurfaceMode.js";
+import { resolvePhase4DrawingEngineMode } from "./drawingEngineMode.js";
+import { drawingPerfCounters } from "./performance/drawingPerfCounters.js";
 import type { MutableRefObject } from "react";
 import type {
     DrawingAnchorMode,
@@ -9,15 +16,22 @@ import type {
     DrawingToolId,
     FibonacciLevel,
 } from "./drawingTypes.js";
-import type { DrawingStylePatch } from "./drawingInteractionController.js";
+import type {
+    DrawingExportLease,
+    DrawingExportPrepareOptions,
+    DrawingStylePatch,
+    DrawingSurfaceDisposeBoundaryDescriptor,
+} from "./drawingInteractionController.js";
 import type { SelectedDrawingMeta } from "./drawingSelectionController.js";
 
 export interface DrawingEngineApi {
     clearAll(): void;
-    prepareSurfaceDispose(): void;
+    completeSurfaceDispose(): void;
+    invalidateSurfaceCredentialsForSeriesReplacement(): void;
+    prepareSurfaceDispose(boundary?: DrawingSurfaceDisposeBoundaryDescriptor): boolean;
     setHidden(hidden: boolean): void;
     updateSelectedDrawingStyle(patch: DrawingStylePatch): void;
-    prepareExport(): void;
+    prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease>;
 }
 
 export interface DrawingEngineHostProps {
@@ -36,6 +50,8 @@ export interface DrawingEngineHostProps {
     drawingSnapEnabled: boolean;
     drawingKey: string;
     drawingSeriesGeneration: number;
+    drawingChartType: string;
+    drawingInterval: string;
     drawingCoordinateKey: string;
     drawingAnchorMode: DrawingAnchorMode;
     initialHidden?: boolean;
@@ -43,7 +59,7 @@ export interface DrawingEngineHostProps {
     onSelectedDrawingChange?: ((drawing: SelectedDrawingMeta | null) => void) | null;
 }
 
-export default function DrawingEngineHost({
+function DrawingEngineHost({
     chartAdapter,
     chartContainerRef,
     activeTool,
@@ -59,12 +75,32 @@ export default function DrawingEngineHost({
     drawingSnapEnabled,
     drawingKey,
     drawingSeriesGeneration,
+    drawingChartType,
+    drawingInterval,
     drawingCoordinateKey,
     drawingAnchorMode,
     initialHidden = false,
     onApiChange,
     onSelectedDrawingChange,
 }: DrawingEngineHostProps) {
+    const dynamicCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const liveInkCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    const [interactionSurfaceMode, setInteractionSurfaceMode] = useState(
+        () => {
+            const requested = resolveDrawingInteractionSurfaceMode().mode;
+            return resolveEffectiveDrawingInteractionSurfaceMode(
+                requested,
+                resolvePhase4DrawingEngineMode().effective,
+            );
+        },
+    );
+    const handleInteractionSurfaceFallback = useCallback(() => {
+        // The rollout flag is mount-locked, but a scene-canary initialization
+        // failure is allowed to make one fail-closed transition. Keep the
+        // interaction owner aligned with the legacy static surface that the
+        // persistence lifecycle just restored.
+        setInteractionSurfaceMode("legacy");
+    }, []);
     const drawing = useDrawing({
         chartAdapter,
         chartContainerRef,
@@ -80,34 +116,33 @@ export default function DrawingEngineHost({
         drawingSnapEnabled,
         symbol: drawingKey,
         seriesReady: drawingSeriesGeneration,
+        drawingChartType,
+        drawingInterval,
         drawingCoordinateKey,
         drawingAnchorMode,
+        interactionSurfaceMode,
+        dynamicCanvasRef,
+        liveInkCanvasRef,
+        onInteractionSurfaceFallback: handleInteractionSurfaceFallback,
         ...(onToolChange === undefined ? {} : { onToolChange }),
     });
     const {
         clearAll,
-        commitTextEditing,
-        editingTextId,
+        completeSurfaceDispose,
+        invalidateSurfaceCredentialsForSeriesReplacement,
+        prepareExport,
         prepareSurfaceDispose,
         selectedDrawingMeta,
         setHidden,
         updateSelectedDrawingStyle,
     } = drawing;
+    const legacyPrimitiveEvidence = drawing.getLegacyPrimitiveRuntimeEvidence();
     const appliedInitialHiddenRef = useRef(false);
-    const editingTextIdRef = useRef(editingTextId);
-    const commitTextEditingRef = useRef(commitTextEditing);
     const [chartContainerWidth, setChartContainerWidth] = useState<number>(0);
 
     useEffect(() => {
-        editingTextIdRef.current = editingTextId;
-        commitTextEditingRef.current = commitTextEditing;
-    }, [commitTextEditing, editingTextId]);
-
-    const prepareExport = useCallback(() => {
-        if (editingTextIdRef.current) {
-            commitTextEditingRef.current?.({ clearSelection: true, exitTool: false });
-        }
-    }, []);
+        drawingPerfCounters.incrementCounter("reactRenderCount");
+    });
 
     useEffect(() => {
         const el = chartContainerRef.current;
@@ -143,6 +178,8 @@ export default function DrawingEngineHost({
     useEffect(() => {
         onApiChange?.({
             clearAll,
+            completeSurfaceDispose,
+            invalidateSurfaceCredentialsForSeriesReplacement,
             prepareSurfaceDispose,
             setHidden,
             updateSelectedDrawingStyle,
@@ -154,6 +191,8 @@ export default function DrawingEngineHost({
         };
     }, [
         clearAll,
+        completeSurfaceDispose,
+        invalidateSurfaceCredentialsForSeriesReplacement,
         onApiChange,
         prepareExport,
         prepareSurfaceDispose,
@@ -164,6 +203,28 @@ export default function DrawingEngineHost({
     return (
         <>
             <span data-drawing-engine="ready" hidden />
+            <span
+                data-drawing-interaction-mode={interactionSurfaceMode}
+                data-drawing-editing-text-id={drawing.editingTextId ?? ""}
+                data-drawing-editing-text-position={drawing.editingTextPos
+                    ? `${drawing.editingTextPos.x},${drawing.editingTextPos.y}`
+                    : ""}
+                hidden
+            />
+            <span
+                data-drawing-registry-kind={legacyPrimitiveEvidence.registryKind}
+                data-drawing-legacy-instances={legacyPrimitiveEvidence.legacyPrimitiveInstanceCount}
+                data-drawing-legacy-attached={legacyPrimitiveEvidence.legacyPrimitiveAttachedCount}
+                data-drawing-zero-legacy={legacyPrimitiveEvidence.zeroLegacyPrimitiveInvariant ? "true" : "false"}
+                hidden
+            />
+
+            {interactionSurfaceMode === "overlay" && (
+                <DrawingInteractionOverlay
+                    dynamicCanvasRef={dynamicCanvasRef}
+                    liveInkCanvasRef={liveInkCanvasRef}
+                />
+            )}
 
             {drawing.editingTextId && drawing.editingTextPos && (
                 <TextEditOverlay
@@ -204,3 +265,5 @@ export default function DrawingEngineHost({
         </>
     );
 }
+
+export default memo(DrawingEngineHost);

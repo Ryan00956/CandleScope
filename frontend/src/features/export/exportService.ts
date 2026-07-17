@@ -28,6 +28,11 @@ export const DEFAULT_EXPORT_OPTIONS: ExportOptions = {
   filenamePrefix: "candlescope",
 };
 
+export interface ExportCaptureLifecycle {
+  /** Runs after source pixels are fixed, before offscreen crop/encoding work. */
+  readonly afterCapture?: () => void | Promise<void>;
+}
+
 const EXCLUDED_SELECTORS = [
   ".export-exclude",
   ".text-edit-overlay",
@@ -37,6 +42,8 @@ const EXCLUDED_SELECTORS = [
   ".fib-levels-panel",
   ".position-settings-panel",
   ".loading-overlay",
+  ".chart-pane-cursor-overlay",
+  ".drawing-interaction-overlay",
 ];
 
 function isTransparentColor(value: string | null | undefined): boolean {
@@ -87,19 +94,6 @@ export function canvasToBlob(
       }
       resolve(blob);
     }, mimeType, format === "png" ? undefined : quality);
-  });
-}
-
-function waitForFrames(count = 2): Promise<void> {
-  return new Promise((resolve) => {
-    const tick = (remaining: number): void => {
-      if (remaining <= 0) {
-        resolve();
-        return;
-      }
-      requestAnimationFrame(() => tick(remaining - 1));
-    };
-    tick(count);
   });
 }
 
@@ -280,12 +274,17 @@ function captureCanvasFallback(
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("无法创建备用图片画布。 ");
 
-  const background = resolveBackgroundColor(targetElement, options.backgroundColor, options.format) || "#0f172a";
-  ctx.fillStyle = background;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const background = resolveBackgroundColor(targetElement, options.backgroundColor, options.format);
+  if (background || options.format === "jpeg") {
+    ctx.fillStyle = background || "#0f172a";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   const canvases = Array.from(targetElement.querySelectorAll("canvas"))
-    .filter((item) => item.width > 0 && item.height > 0 && item.offsetParent !== null);
+    .filter((item) => shouldIncludeNode(item)
+      && item.width > 0
+      && item.height > 0
+      && item.offsetParent !== null);
 
   if (canvases.length === 0) {
     throw new Error("未找到可导出的图表 Canvas。 ");
@@ -312,6 +311,19 @@ async function captureElementToCanvas(
   assertExportPixelBudget(rect.width, rect.height, scale);
 
   const backgroundColor = resolveBackgroundColor(targetElement, options.backgroundColor, options.format);
+
+  if (options.scope !== "page") {
+    try {
+      // The chart surface is already fully rasterized by Lightweight Charts
+      // and the drawing scene. Compositing those canvases synchronously keeps
+      // the exact-scene lease atomic; cloning the DOM can take seconds while
+      // live market updates replace the validated scene underneath it.
+      return captureCanvasFallback(targetElement, options);
+    } catch {
+      // Retain the richer DOM capture as a compatibility fallback for unusual
+      // chart hosts that do not expose drawable canvases.
+    }
+  }
 
   try {
     return await toCanvas(targetElement, {
@@ -434,9 +446,24 @@ export function buildExportOptionsKey(rawOptions: unknown = {}): string {
   });
 }
 
+/**
+ * Preview freshness also depends on the live drawing presentation. Global
+ * hide/show does not mutate the drawing document revision, so it must be part
+ * of the preview key whenever the export option itself does not force hidden.
+ */
+export function buildExportPresentationKey(
+  rawOptions: unknown = {},
+  drawingsHidden = false,
+): string {
+  const options = normalizeExportOptions(rawOptions);
+  const effectiveDrawingsHidden = options.hideDrawings || drawingsHidden;
+  return `${buildExportOptionsKey(options)}|drawings:${effectiveDrawingsHidden ? "hidden" : "visible"}`;
+}
+
 export async function renderExportImage(
   snapshot: ExportSnapshot | null | undefined,
   rawOptions: unknown = {},
+  lifecycle: ExportCaptureLifecycle = {},
 ): Promise<ExportImageResult> {
   const options = normalizeExportOptions(rawOptions);
   const targetElement = selectTargetElement(snapshot, options);
@@ -444,8 +471,8 @@ export async function renderExportImage(
     throw new Error("图表尚未就绪，无法导出。 ");
   }
 
-  await waitForFrames();
   const capturedCanvas = await captureElementToCanvas(targetElement, options);
+  await lifecycle.afterCapture?.();
   const scopedCanvas = options.scope === "main-pane"
     ? cropCapturedCanvas(capturedCanvas, snapshot?.mainPane?.captureRect, targetElement)
     : capturedCanvas;

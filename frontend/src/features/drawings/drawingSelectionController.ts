@@ -12,9 +12,19 @@ import type {
   DrawingHit,
   DrawingHitType,
   DrawingPrimitive,
+  SavedDrawing,
   ScreenBox,
   TextAlign,
 } from "./drawingTypes.js";
+import { drawingPerfCounters } from "./performance/drawingPerfCounters.js";
+import {
+  DEFAULT_DRAWING_RENDER_COLOR,
+  DEFAULT_DRAWING_RENDER_LINE_WIDTH,
+  DEFAULT_HIGHLIGHTER_RENDER_OPACITY,
+  DEFAULT_TEXT_RENDER_COLOR,
+  DEFAULT_TEXT_RENDER_FONT_FAMILY,
+  DEFAULT_TEXT_RENDER_FONT_SIZE,
+} from "./rendering/drawingRenderDefaults.js";
 
 export interface SelectedTextSnapshot {
   text: string;
@@ -132,36 +142,95 @@ export function hitTestDrawingPrimitives(
   x: number,
   y: number,
   hitRadius = 8,
+  shouldTest: (primitive: DrawingPrimitive, index: number) => boolean = () => true,
 ): DrawingPrimitiveHit | null {
-  for (let index = primitives.length - 1; index >= 0; index -= 1) {
-    const prim = primitives[index];
+  const startedAt = typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+  try {
+    for (let index = primitives.length - 1; index >= 0; index -= 1) {
+      const prim = primitives[index];
+      if (!prim || !shouldTest(prim, index)) continue;
 
-    if (prim instanceof PositionDrawingPrimitive) {
-      const hit = prim.hitTest(x, y);
-      if (hit) return { prim, type: "position", ...hit };
-    } else if (prim instanceof LineDrawingPrimitive) {
-      const hit = prim.hitTest(x, y);
-      if (hit) return { prim, type: "line", ...hit };
-    } else if (prim instanceof AxisLineDrawingPrimitive) {
-      const hit = prim.hitTest(x, y);
-      if (hit) return { prim, type: "axis-line", ...hit };
-    } else if (prim instanceof AngleMeasurementPrimitive) {
-      const hit = prim.hitTest(x, y);
-      if (hit) return { prim, type: "angle", ...hit };
-    } else if (prim instanceof FibonacciDrawingPrimitive) {
-      const hit = prim.hitTest(x, y);
-      if (hit) return { prim, type: "fibonacci", ...hit };
-    } else if (prim instanceof ShapeDrawingPrimitive) {
-      const hit = prim.hitTest(x, y);
-      if (hit) return { prim, type: "shape", ...hit };
-    } else if (prim instanceof FreehandDrawingPrimitive) {
-      if (prim.hitTest(x, y, hitRadius)) return { prim, type: prim.type === "highlighter" ? "highlighter" : "freehand" };
-    } else if (prim instanceof TextDrawingPrimitive) {
-      const hit = prim.hitTest(x, y);
-      if (hit) return { prim, type: "text", ...hit };
+      if (prim instanceof PositionDrawingPrimitive) {
+        const hit = prim.hitTestGeometry(x, y);
+        if (hit) return { prim, type: "position", ...hit };
+      } else if (prim instanceof LineDrawingPrimitive) {
+        const hit = prim.hitTestGeometry(x, y);
+        if (hit) return { prim, type: "line", ...hit };
+      } else if (prim instanceof AxisLineDrawingPrimitive) {
+        const hit = prim.hitTestGeometry(x, y);
+        if (hit) return { prim, type: "axis-line", ...hit };
+      } else if (prim instanceof AngleMeasurementPrimitive) {
+        const hit = prim.hitTestGeometry(x, y);
+        if (hit) return { prim, type: "angle", ...hit };
+      } else if (prim instanceof FibonacciDrawingPrimitive) {
+        const hit = prim.hitTestGeometry(x, y);
+        if (hit) return { prim, type: "fibonacci", ...hit };
+      } else if (prim instanceof ShapeDrawingPrimitive) {
+        const hit = prim.hitTestGeometry(x, y);
+        if (hit) return { prim, type: "shape", ...hit };
+      } else if (prim instanceof FreehandDrawingPrimitive) {
+        if (prim.hitTestGeometry(x, y, hitRadius)) return { prim, type: prim.type === "highlighter" ? "highlighter" : "freehand" };
+      } else if (prim instanceof TextDrawingPrimitive) {
+        const hit = prim.hitTestGeometry(x, y);
+        if (hit) return { prim, type: "text", ...hit };
+      }
     }
+    return null;
+  } finally {
+    const endedAt = typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now()
+      : Date.now();
+    drawingPerfCounters.recordHitQueryDuration(Math.max(0, endedAt - startedAt));
   }
-  return null;
+}
+
+export function selectedTextUiFromSavedDrawing(
+  saved: SavedDrawing | null | undefined,
+  box: ScreenBox | null = null,
+): SelectedTextUi {
+  if (!saved || saved.type !== "text") return EMPTY_SELECTED_TEXT_UI;
+  return {
+    snapshot: {
+      text: saved.text ?? "Text",
+      color: saved.color || DEFAULT_TEXT_RENDER_COLOR,
+      fontSize: saved.fontSize || DEFAULT_TEXT_RENDER_FONT_SIZE,
+      fontFamily: saved.fontFamily || DEFAULT_TEXT_RENDER_FONT_FAMILY,
+      bold: !!saved.bold,
+      italic: !!saved.italic,
+      underline: !!saved.underline,
+      align: saved.align || "left",
+      bgColor: saved.bgColor ?? null,
+      borderColor: saved.borderColor ?? null,
+      borderWidth: saved.borderWidth ?? 1,
+      widthPx: saved.widthPx ?? null,
+      padding: saved.padding ?? 6,
+    },
+    box,
+  };
+}
+
+export function selectedDrawingMetaFromSavedDrawing(
+  saved: SavedDrawing | null | undefined,
+): SelectedDrawingMeta | null {
+  if (!saved?.id || saved.type === "text" || saved.type === "position") return null;
+  const type = saved.type === "axis-line"
+    ? saved.axisLineType === "cross" ? "cross-line" : `${saved.axisLineType ?? "horizontal"}-line`
+    : saved.type === "angle-measure"
+      ? "angle-measure"
+      : saved.type === "shape"
+        ? saved.shapeType ?? "shape"
+        : saved.type;
+  return {
+    id: saved.id,
+    type,
+    color: saved.color || DEFAULT_DRAWING_RENDER_COLOR,
+    lineWidth: saved.lineWidth || DEFAULT_DRAWING_RENDER_LINE_WIDTH,
+    ...(saved.type === "highlighter"
+      ? { opacity: saved.opacity ?? DEFAULT_HIGHLIGHTER_RENDER_OPACITY }
+      : {}),
+  };
 }
 
 /**
@@ -189,8 +258,16 @@ export interface DrawingSelectionRuntime {
 
 export function useDrawingSelection({
   primitivesRef,
+  getSavedDrawingById,
+  getScreenBoxById,
+  onSelectionChange,
+  mutatePrimitiveVisualState = true,
 }: {
   primitivesRef: MutableRefObject<DrawingPrimitive[]>;
+  getSavedDrawingById?: (id: string) => SavedDrawing | null;
+  getScreenBoxById?: (id: string) => ScreenBox | null;
+  onSelectionChange?: () => void;
+  mutatePrimitiveVisualState?: boolean;
 }): DrawingSelectionRuntime {
   const selectedIdRef = useRef<string | null>(null);
   const [selectedPrimId, setSelectedPrimId] = useState<string | null>(null);
@@ -212,18 +289,26 @@ export function useDrawingSelection({
     setSelectedPrimId(id);
     let selectedPrim: DrawingPrimitive | null = null;
     for (const prim of primitivesRef.current) {
-      if (isSelectablePrimitive(prim)) {
+      if (mutatePrimitiveVisualState && isSelectablePrimitive(prim)) {
         prim.setSelected(prim.id === id);
         if (prim.id === id) selectedPrim = prim;
+      } else if (prim.id === id) {
+        selectedPrim = prim;
       }
     }
     if (!selectedPrim) {
       // Freehand strokes don't have setSelected; locate by id directly
       selectedPrim = primitivesRef.current.find((p) => p.id === id) || null;
     }
-    setSelectedTextUi(selectedTextUiFromPrimitive(selectedPrim));
-    setSelectedDrawingMeta(selectedDrawingMetaFromPrimitive(selectedPrim));
-  }, [primitivesRef]);
+    const saved = selectedPrim ? null : getSavedDrawingById?.(id) ?? null;
+    setSelectedTextUi(selectedPrim
+      ? selectedTextUiFromPrimitive(selectedPrim)
+      : selectedTextUiFromSavedDrawing(saved, getScreenBoxById?.(id) ?? null));
+    setSelectedDrawingMeta(selectedPrim
+      ? selectedDrawingMetaFromPrimitive(selectedPrim)
+      : selectedDrawingMetaFromSavedDrawing(saved));
+    if (mutatePrimitiveVisualState) onSelectionChange?.();
+  }, [getSavedDrawingById, getScreenBoxById, mutatePrimitiveVisualState, onSelectionChange, primitivesRef]);
 
   const deselectAll = useCallback(() => {
     selectedIdRef.current = null;
@@ -231,11 +316,12 @@ export function useDrawingSelection({
     setSelectedTextUi(EMPTY_SELECTED_TEXT_UI);
     setSelectedDrawingMeta(null);
     for (const prim of primitivesRef.current) {
-      if (isSelectablePrimitive(prim)) {
+      if (mutatePrimitiveVisualState && isSelectablePrimitive(prim)) {
         prim.setSelected(false);
       }
     }
-  }, [primitivesRef]);
+    if (mutatePrimitiveVisualState) onSelectionChange?.();
+  }, [mutatePrimitiveVisualState, onSelectionChange, primitivesRef]);
 
   const getPrimitiveById = useCallback((id: string) => {
     return primitivesRef.current.find((p) => p.id === id) || null;
@@ -243,8 +329,11 @@ export function useDrawingSelection({
 
   const refreshSelectedTextUi = useCallback((id: string | null = selectedIdRef.current) => {
     const prim = id ? primitivesRef.current.find((p) => p.id === id) : null;
-    setSelectedTextUi(selectedTextUiFromPrimitive(prim));
-  }, [primitivesRef]);
+    const saved = !prim && id ? getSavedDrawingById?.(id) ?? null : null;
+    setSelectedTextUi(prim
+      ? selectedTextUiFromPrimitive(prim)
+      : selectedTextUiFromSavedDrawing(saved, id ? getScreenBoxById?.(id) ?? null : null));
+  }, [getSavedDrawingById, getScreenBoxById, primitivesRef]);
 
   return {
     selectedIdRef,

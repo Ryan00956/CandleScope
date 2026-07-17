@@ -75,7 +75,7 @@ export default function FibLevelsPanel({
 
   const addCustomLevel = (): void => {
     const value = parseFloat(newLevelInput);
-    if (Number.isNaN(value)) return;
+    if (!Number.isFinite(value)) return;
     if (panelLevels.some((level) => Math.abs(level.level - value) < 0.0001)) return;
 
     const color = FIB_RANDOM_COLORS.at(panelLevels.length % FIB_RANDOM_COLORS.length) ?? "#e91e63";

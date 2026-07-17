@@ -90,3 +90,13 @@ export function buildHeapAcceptance(
       : "Reported only; the stabilized heap observation window is shorter than required.",
   };
 }
+
+/**
+ * Release acceptance is fail-closed: an unevaluated/null check is missing
+ * evidence, not a pass. Keep this pure so short or truncated soak captures
+ * cannot accidentally satisfy the aggregate gate.
+ */
+export function allAcceptanceChecksPassed(checks) {
+  const entries = Object.values(checks ?? {});
+  return entries.length > 0 && entries.every((check) => check?.passed === true);
+}

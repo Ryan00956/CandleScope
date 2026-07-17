@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY,
   FREEHAND_STROKE_V3_VERSION,
   MAX_FREEHAND_STROKE_POINTS,
   MAX_FREEHAND_STROKE_SPANS,
@@ -14,6 +15,7 @@ import {
   finalizeFreehandStrokeDraft,
   getFreehandStrokeDraftPreviewPoints,
   getFreehandStrokeDraftRemainingCapacity,
+  inspectFreehandStrokeDraftStorage,
   isFreehandStrokeDraftSaturated,
   normalizeLegacyFreehandDataPoints,
   normalizeSavedFreehandPayload,
@@ -379,6 +381,129 @@ test("freehand generic resolver preserves v3 gaps and resolves each span once", 
   }), [null, { x: 30, price: 11 }, null, null, { x: 30, price: 13 }]);
 });
 
+test("freehand batch resolver receives every time and anchor once in point order", () => {
+  const value = strokeV3({
+    points: [
+      { span: 0, ratio: 0, price: 10 },
+      { time: 250.5, price: 11 },
+      { span: 0, ratio: 1, price: 12 },
+      { anchor: { time: 200, sourceOrdinal: 0 }, price: 13 },
+      { time: 300, price: 14 },
+    ],
+  });
+  let batchCalls = 0;
+  const spanCalls: number[] = [];
+  const scalarCalls: string[] = [];
+
+  const resolved = resolveFreehandStrokePoints(value, {
+    resolveAnchor: () => {
+      scalarCalls.push("anchor");
+      return 999;
+    },
+    resolveBatch: (requests, normalizedStroke) => {
+      batchCalls += 1;
+      assert.equal(Object.isFrozen(normalizedStroke), true);
+      assert.strictEqual(requests[0]?.point, normalizedStroke.points[1]);
+      assert.deepEqual(requests, [{
+        kind: "time",
+        time: 250.5,
+        pointIndex: 1,
+        point: { time: 250.5, price: 11 },
+      }, {
+        kind: "anchor",
+        anchor: { time: 200, sourceOrdinal: 0 },
+        pointIndex: 3,
+        point: { anchor: { time: 200, sourceOrdinal: 0 }, price: 13 },
+      }, {
+        kind: "time",
+        time: 300,
+        pointIndex: 4,
+        point: { time: 300, price: 14 },
+      }]);
+      return [40.5, null, 60];
+    },
+    resolveSpan: (_span, index) => {
+      spanCalls.push(index);
+      return { left: 10, right: 20 };
+    },
+    resolveTime: () => {
+      scalarCalls.push("time");
+      return 999;
+    },
+  });
+
+  assert.equal(batchCalls, 1);
+  assert.deepEqual(spanCalls, [0]);
+  assert.deepEqual(scalarCalls, []);
+  assert.deepEqual(resolved, [
+    { x: 10, price: 10 },
+    { x: 40.5, price: 11 },
+    { x: 20, price: 12 },
+    null,
+    { x: 60, price: 14 },
+  ]);
+});
+
+test("freehand batch resolver fails closed without scalar fallback", () => {
+  const value = strokeV3({
+    points: [
+      { span: 0, ratio: 0.5, price: 10 },
+      { time: 250.5, price: 11 },
+      { anchor: { time: 200, sourceOrdinal: 0 }, price: 12 },
+    ],
+  });
+  const invalidResolvers: Array<() => unknown> = [
+    () => null,
+    () => [30],
+    () => [30, 40, 50],
+    () => [30, undefined],
+    () => [30, Number.NaN],
+    () => [30, Number.POSITIVE_INFINITY],
+    () => { throw new Error("batch failed"); },
+  ];
+
+  for (const resolveBatch of invalidResolvers) {
+    let scalarCalls = 0;
+    assert.deepEqual(resolveFreehandStrokeV3Points(value, {
+      resolveAnchor: () => {
+        scalarCalls += 1;
+        return 40;
+      },
+      resolveBatch,
+      resolveSpan: () => ({ left: 10, right: 20 }),
+      resolveTime: () => {
+        scalarCalls += 1;
+        return 30;
+      },
+    }), [
+      { x: 15, price: 10 },
+      null,
+      null,
+    ]);
+    assert.equal(scalarCalls, 0);
+  }
+});
+
+test("freehand batch resolver is not called for span-only strokes", () => {
+  let batchCalls = 0;
+  assert.deepEqual(resolveFreehandStrokeV3Points(strokeV3({
+    points: [
+      { span: 0, ratio: 0, price: 10 },
+      { span: 0, ratio: 1, price: 12 },
+    ],
+  }), {
+    resolveBatch: () => {
+      batchCalls += 1;
+      return [];
+    },
+    resolveSpan: () => ({ left: 10, right: 20 }),
+  }), [
+    { x: 10, price: 10 },
+    { x: 20, price: 12 },
+  ]);
+  assert.equal(batchCalls, 0);
+});
+
 test("legacy freehand normalization stays v1 and removes unsafe point fields", () => {
   const payload = normalizeSavedFreehandPayload({
     dataPoints: [{
@@ -659,6 +784,100 @@ test("freehand draft drops unused spans and remaps retained point indexes", () =
   assert.equal(finalized.spans.length, 1);
   assert.deepEqual(finalized.spans[0], keptSpan);
   assert.deepEqual(spanIndexes(finalized), [0, 0]);
+});
+
+test("freehand draft stores 255, 256, 257, and 4096 samples in fixed typed chunks", () => {
+  const span = mustBeDefined(stroke().spans[0]);
+  for (const count of [255, 256, 257, MAX_FREEHAND_STROKE_POINTS]) {
+    const identity = {};
+    const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+    const captures = Array.from({ length: count }, (_value, index) => capture(
+      span,
+      index,
+      index % 7,
+      index / Math.max(1, count - 1),
+      index,
+    ));
+    assert.equal(appendFreehandStrokeCaptureBatch(
+      draft,
+      draftBatch(identity, captures),
+    ), true);
+
+    const inspection = mustBeDefined(inspectFreehandStrokeDraftStorage(draft));
+    const expectedChunkCount = Math.ceil(count / FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY);
+    const expectedLastChunkLength = count % FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY
+      || FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY;
+    assert.deepEqual(inspection, {
+      chunkCapacity: FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY,
+      chunkCount: expectedChunkCount,
+      sampleCount: count,
+      allocatedSlots: expectedChunkCount * FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY,
+      chunkLengths: [
+        ...Array.from(
+          { length: Math.max(0, expectedChunkCount - 1) },
+          () => FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY,
+        ),
+        expectedLastChunkLength,
+      ],
+      typedArrayBacked: true,
+    });
+    assert.equal(getFreehandStrokeDraftRemainingCapacity(draft),
+      MAX_FREEHAND_STROKE_POINTS - count);
+    assert.equal(isFreehandStrokeDraftSaturated(draft),
+      count === MAX_FREEHAND_STROKE_POINTS);
+    const preview = getFreehandStrokeDraftPreviewPoints(draft);
+    assert.equal(preview.length, count);
+    assert.deepEqual(preview[0], { x: 0, y: 0 });
+    assert.deepEqual(preview[count - 1], { x: count - 1, y: (count - 1) % 7 });
+  }
+});
+
+test("freehand draft finalizes across a chunk boundary without consuming storage", () => {
+  const count = FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY + 1;
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  const span = mustBeDefined(stroke().spans[0]);
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity,
+    Array.from({ length: count }, (_value, index) => capture(
+      span,
+      index,
+      index * index,
+      index / (count - 1),
+      index + 0.25,
+    )))), true);
+  const before = mustBeDefined(inspectFreehandStrokeDraftStorage(draft));
+
+  const finalized = mustBeDefined(finalizeFreehandStrokeDraft(draft, {
+    captureIdentity: identity,
+    epsilon: 0,
+  }));
+
+  assert.equal(finalized.version, 2);
+  assert.equal(finalized.points.length, count);
+  assert.deepEqual(finalized.points.slice(254).map((point) => point.price), [
+    254.25,
+    255.25,
+    256.25,
+  ]);
+  assert.deepEqual(inspectFreehandStrokeDraftStorage(draft), before);
+});
+
+test("cancelling a freehand draft releases every allocated typed chunk", () => {
+  const identity = {};
+  const draft = createFreehandStrokeDraft(draftBatch(identity, []));
+  const span = mustBeDefined(stroke().spans[0]);
+  assert.equal(appendFreehandStrokeCaptureBatch(draft, draftBatch(identity,
+    Array.from({ length: FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY + 1 }, (_value, index) => (
+      capture(span, index, 0, index / FREEHAND_STROKE_DRAFT_CHUNK_CAPACITY, index)
+    )))), true);
+  assert.equal(inspectFreehandStrokeDraftStorage(draft)?.chunkCount, 2);
+
+  assert.equal(cancelFreehandStrokeDraft(draft), true);
+  assert.equal(inspectFreehandStrokeDraftStorage(draft), null);
+  assert.equal(cancelFreehandStrokeDraft(draft), false);
+  assert.deepEqual(getFreehandStrokeDraftPreviewPoints(draft), []);
+  assert.equal(getFreehandStrokeDraftRemainingCapacity(draft), null);
+  assert.equal(finalizeFreehandStrokeDraft(draft, { captureIdentity: identity }), null);
 });
 
 test("freehand draft decimation is iterative at the point cap", () => {

@@ -15,7 +15,7 @@
  *   - Hover highlight for eraser tool
  */
 
-import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { drawingDataPointsToCoordinates } from "./coordinateUtils.js";
 import type {
   DrawingAttachedParameter,
   DrawingDataPoint,
@@ -23,6 +23,7 @@ import type {
   PrimitiveCanvasTarget,
   PrimitivePaneRenderer,
   PrimitivePaneView,
+  ScreenBox,
   ScreenPoint,
   TextAlign,
   TextDrawingPatch,
@@ -51,6 +52,7 @@ interface TextRenderData extends FontDescriptor {
   padding: number;
   selected: boolean;
   hovered: boolean;
+  setPaintBox: (box: ScreenBox | null) => void;
 }
 
 interface TextBox extends ScreenPoint {
@@ -133,8 +135,11 @@ class TextRenderer implements PrimitivePaneRenderer {
 
   draw(target: PrimitiveCanvasTarget): void {
     const data = this._data;
-    if (!data || data.x == null || data.y == null) return;
-    if (data.hidden) return;
+    if (!data) return;
+    if (data.x == null || data.y == null || data.hidden) {
+      data.setPaintBox(null);
+      return;
+    }
     const renderX = data.x;
     const renderY = data.y;
 
@@ -183,6 +188,7 @@ class TextRenderer implements PrimitivePaneRenderer {
       const boxY = renderY;
       const boxW = innerWidth + 2 * padding;
       const boxH = innerHeight + 2 * padding;
+      data.setPaintBox({ x: boxX, y: boxY, width: boxW, height: boxH });
 
       // ── Background fill ──
       if (bgColor && bgColor !== "transparent") {
@@ -327,6 +333,7 @@ class TextPaneView implements PrimitivePaneView {
     const series = source._series;
     const chart = source._chart;
     if (!series || !chart) return;
+    source._lastPaintBox = null;
     const base: Omit<TextRenderData, "x" | "y" | "hidden"> = {
       text: source._text,
       color: source._color,
@@ -343,6 +350,7 @@ class TextPaneView implements PrimitivePaneView {
       padding: source._padding,
       selected: source._selected,
       hovered: source._hovered,
+      setPaintBox: (box: ScreenBox | null) => { source._lastPaintBox = box; },
     };
     if (source._hidden) {
       this._renderer.update({ x: null, y: null, hidden: true, ...base });
@@ -370,6 +378,7 @@ class TextPaneView implements PrimitivePaneView {
 // ── The Primitive ──
 
 export class TextDrawingPrimitive {
+  _type: "text";
   _id: string;
   _dataPoint: DrawingDataPoint;
   _text: string;
@@ -388,6 +397,9 @@ export class TextDrawingPrimitive {
   _selected: boolean;
   _hovered: boolean;
   _hidden: boolean;
+  _unconfirmedText: boolean;
+  _lastPaintBox: ScreenBox | null;
+  _geometryRevision: number;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
   _paneView: TextPaneView;
@@ -412,6 +424,7 @@ export class TextDrawingPrimitive {
    * @param {number} [opts.padding]
    */
   constructor(opts: TextPrimitiveOptions) {
+    this._type = "text";
     this._id = opts.id;
     this._dataPoint = opts.dataPoint || { logical: 0, price: 0 };
     this._text = opts.text != null ? opts.text : "Text";
@@ -431,6 +444,9 @@ export class TextDrawingPrimitive {
     this._selected = !!opts.selected;
     this._hovered = false;
     this._hidden = false;
+    this._unconfirmedText = false;
+    this._lastPaintBox = null;
+    this._geometryRevision = 1;
 
     this._series = null;
     this._chart = null;
@@ -471,11 +487,22 @@ export class TextDrawingPrimitive {
   get widthPx() { return this._widthPx; }
   get padding() { return this._padding; }
   get selected() { return this._selected; }
+  get isUnconfirmedText() { return this._unconfirmedText; }
+  get geometryRevision() { return this._geometryRevision; }
+  getParityPaintBox(): Readonly<ScreenBox> | null {
+    return this._lastPaintBox ? Object.freeze({ ...this._lastPaintBox }) : null;
+  }
 
   // ── Setters ──
 
   setText(t: string): void { this._text = t; this._requestUpdate?.(); }
-  setDataPoint(dp: DrawingDataPoint): void { this._dataPoint = dp; this._requestUpdate?.(); }
+  markUnconfirmedText(): void { this._unconfirmedText = true; }
+  confirmText(): void { this._unconfirmedText = false; }
+  setDataPoint(dp: DrawingDataPoint): void {
+    this._dataPoint = dp;
+    this._geometryRevision += 1;
+    this._requestUpdate?.();
+  }
   setColor(c: string): void { this._color = c; this._requestUpdate?.(); }
   setFontSize(s: number): void { this._fontSize = s; this._requestUpdate?.(); }
   setFontFamily(f: string): void { this._fontFamily = f; this._requestUpdate?.(); }
@@ -534,7 +561,13 @@ export class TextDrawingPrimitive {
   _anchorScreen(): ScreenPoint | null {
     if (!this._series || !this._chart) return null;
     const coordinateContext = {};
-    const sx = dataPointToCoordinate(this._chart, this._series, this._dataPoint, coordinateContext);
+    const sx = drawingDataPointsToCoordinates(
+      this._chart,
+      this._series,
+      [this._dataPoint],
+      coordinateContext,
+      { cacheToken: this, geometryRevision: this._geometryRevision },
+    )[0] ?? null;
     const sy = this._series.priceToCoordinate(this._dataPoint.price);
     if (sx == null || sy == null || !isFinite(sx) || !isFinite(sy)) return null;
     return { x: sx, y: sy };
@@ -593,7 +626,7 @@ export class TextDrawingPrimitive {
    *   { handle: 'tl'|'t'|'tr'|'r'|'br'|'b'|'bl'|'l' }   — handle hit (only when selected)
    *   { body: true }                                       — body hit
    */
-  hitTest(x: number, y: number): DrawingHit | false {
+  hitTestGeometry(x: number, y: number): DrawingHit | false {
     if (this._hidden) return false;
     const box = this.getBoundingBoxScreen();
     if (!box) return false;

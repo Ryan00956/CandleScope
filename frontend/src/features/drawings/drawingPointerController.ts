@@ -39,6 +39,7 @@ export function useDrawingPointerEvents({
   handleMouseMove,
   handleMouseUp,
   handlePointerCancel = handleMouseUp,
+  handleWindowBlur,
 }: {
   chartContainerRef: MutableRefObject<HTMLElement | null>;
   handleDblClick: (event: MouseEvent) => void;
@@ -48,6 +49,7 @@ export function useDrawingPointerEvents({
   handleMouseMove: DrawingPointerHandler;
   handleMouseUp: DrawingPointerHandler;
   handlePointerCancel?: DrawingPointerHandler;
+  handleWindowBlur?: (() => void) | undefined;
 }): void {
   useEffect(() => {
     const container = chartContainerRef?.current;
@@ -74,6 +76,7 @@ export function useDrawingPointerEvents({
 
     container.addEventListener("dblclick", handleDblClick);
     container.addEventListener("contextmenu", handleContextMenu);
+    if (handleWindowBlur) window.addEventListener("blur", handleWindowBlur);
 
     return () => {
       if (supportsPointerEvents) {
@@ -95,6 +98,7 @@ export function useDrawingPointerEvents({
 
       container.removeEventListener("dblclick", handleDblClick);
       container.removeEventListener("contextmenu", handleContextMenu);
+      if (handleWindowBlur) window.removeEventListener("blur", handleWindowBlur);
     };
   }, [
     chartContainerRef,
@@ -105,5 +109,6 @@ export function useDrawingPointerEvents({
     handleMouseMove,
     handleMouseUp,
     handlePointerCancel,
+    handleWindowBlur,
   ]);
 }

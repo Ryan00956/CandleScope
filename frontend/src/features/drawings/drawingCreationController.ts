@@ -27,6 +27,7 @@ import {
 } from "./drawingPrimitiveFactory.js";
 import {
   appendFreehandStrokeCaptureBatch,
+  cancelFreehandStrokeDraft,
   createFreehandStrokeDraft,
   getFreehandStrokeDraftPreviewPoints,
 } from "./freehandStrokeModel.js";
@@ -38,6 +39,8 @@ import type { AngleMeasurementPrimitive } from "./primitives/AngleMeasurementPri
 import type { FibonacciDrawingPrimitive } from "./primitives/FibonacciDrawingPrimitive.js";
 import type { LineDrawingPrimitive } from "./primitives/LineDrawingPrimitive.js";
 import type { ShapeDrawingPrimitive } from "./primitives/ShapeDrawingPrimitive.js";
+import { drawingCommandsForLegacyPrimitive } from "./core/drawingDocumentRuntime.js";
+import type { DrawingCommand } from "./core/drawingCommands.js";
 import type {
   AngleToolId,
   AxisLineToolId,
@@ -66,10 +69,38 @@ type TwoPointDrawingPrimitive = LineDrawingPrimitive
   | AngleMeasurementPrimitive
   | FibonacciDrawingPrimitive
   | ShapeDrawingPrimitive;
-type AttachPrimitive = (primitive: DrawingPrimitive) => void;
+type PrimitiveSurfaceAction = (primitive: DrawingPrimitive) => boolean;
 type SelectPrimitive = (id: string) => void;
+type PersistDrawingMutation = (commands: readonly DrawingCommand[]) => boolean | void;
 
-interface PositionSpanOptions {
+function createPrimitiveCommand(
+  primitive: DrawingPrimitive,
+): readonly DrawingCommand[] | null {
+  return drawingCommandsForLegacyPrimitive(primitive, { type: "create" });
+}
+
+function persistAttachedCreatedPrimitive(
+  persistDrawings: PersistDrawingMutation,
+  commands: readonly DrawingCommand[],
+  primitive: DrawingPrimitive,
+  primitivesRef: MutableRef<DrawingPrimitive[]>,
+  detachPrim?: PrimitiveSurfaceAction,
+): boolean {
+  try {
+    if (persistDrawings(commands) !== false) return true;
+  } catch {
+    // Treat an unexpected persistence-boundary exception exactly like an
+    // explicit rejection so the checked surface compensation still runs.
+  }
+  if (detachPrim?.(primitive) === true) {
+    primitivesRef.current = primitivesRef.current.filter((candidate) => candidate !== primitive);
+  } else if (!primitivesRef.current.includes(primitive)) {
+    primitivesRef.current.push(primitive);
+  }
+  return false;
+}
+
+export interface PositionSpanOptions {
   dataPoint: DrawingDataPoint;
   pos: ScreenPoint;
   screenToDrawingData: ScreenToDrawingData;
@@ -85,7 +116,7 @@ interface StartFreehandStrokeOptions {
   currentFreehandRef: MutableRef<FreehandDrawingPrimitive | null>;
   freehandDraftRef: MutableRef<FreehandStrokeDraft | null>;
   isDrawingFreehandRef: MutableRef<boolean>;
-  attachPrim: AttachPrimitive;
+  attachPrim: PrimitiveSurfaceAction;
   screenToData: ScreenToDrawingData;
   penColorRef: MutableRef<string>;
   penSizeRef: MutableRef<number>;
@@ -98,8 +129,12 @@ interface PlaceTextDrawingOptions {
   pos: ScreenPoint;
   e: DrawingPointerEvent;
   primitivesRef: MutableRef<DrawingPrimitive[]>;
-  attachPrim: AttachPrimitive;
-  startTextEditing: (primitive: TextDrawingPrimitive) => void;
+  attachPrim: PrimitiveSurfaceAction;
+  startTextEditing: (primitive: TextDrawingPrimitive) => boolean;
+  cancelTextEditing: (options?: Readonly<{
+    clearSelection?: boolean;
+    exitTool?: boolean;
+  }>) => boolean;
   screenToDrawingData: ScreenToDrawingData;
   drawingSnapEnabledRef: MutableRef<boolean>;
   penColorRef: MutableRef<string>;
@@ -113,9 +148,10 @@ interface PlacePositionDrawingOptions {
   pos: ScreenPoint;
   e: DrawingPointerEvent;
   primitivesRef: MutableRef<DrawingPrimitive[]>;
-  attachPrim: AttachPrimitive;
+  attachPrim: PrimitiveSurfaceAction;
+  detachPrim?: PrimitiveSurfaceAction;
   selectPrimitive: SelectPrimitive;
-  persistDrawings: () => void;
+  persistDrawings: PersistDrawingMutation;
   screenToDrawingData: ScreenToDrawingData;
   getChartAdapter: () => DrawingChartAdapter | null;
   chartContainerRef: MutableRef<HTMLElement | null>;
@@ -140,10 +176,10 @@ interface CommitTwoPointDrawingOptions extends TwoPointRefs, TwoPointStyleRefs {
   pos: ScreenPoint;
   e: DrawingPointerEvent;
   primitivesRef: MutableRef<DrawingPrimitive[]>;
-  attachPrim: AttachPrimitive;
-  detachPrim: AttachPrimitive;
+  attachPrim: PrimitiveSurfaceAction;
+  detachPrim: PrimitiveSurfaceAction;
   selectPrimitive: SelectPrimitive;
-  persistDrawings: () => void;
+  persistDrawings: PersistDrawingMutation;
   screenToDrawingData: ScreenToDrawingData;
   dataToScreen: DrawingDataToScreen;
   drawingSnapEnabledRef: MutableRef<boolean>;
@@ -155,9 +191,11 @@ interface BeginAxisLineDrawingOptions extends TwoPointRefs {
   e: DrawingPointerEvent;
   primitivesRef: MutableRef<DrawingPrimitive[]>;
   draggingRef: MutableRef<DrawingDragDescriptor | null>;
-  attachPrim: AttachPrimitive;
+  attachPrim: PrimitiveSurfaceAction;
+  detachPrim?: PrimitiveSurfaceAction;
   selectPrimitive: SelectPrimitive;
-  removePreview: () => void;
+  persistDrawings: PersistDrawingMutation;
+  removePreview: () => boolean;
   screenToDrawingData: ScreenToDrawingData;
   drawingSnapEnabledRef: MutableRef<boolean>;
   penColorRef: MutableRef<string>;
@@ -168,7 +206,7 @@ interface BeginTwoPointDrawingOptions extends TwoPointRefs, TwoPointStyleRefs {
   tool: TwoPointCreationTool;
   pos: ScreenPoint;
   e: DrawingPointerEvent;
-  attachPrim: AttachPrimitive;
+  attachPrim: PrimitiveSurfaceAction;
   screenToDrawingData: ScreenToDrawingData;
   drawingSnapEnabledRef: MutableRef<boolean>;
 }
@@ -237,7 +275,7 @@ function positionSpanCandidateXs(pointerX: number, containerWidth: number | null
  * On ordinal axes this may combine materialized lineage with an absolute
  * source-time future anchor, but never stores projection-local order/logical.
  */
-function positionTimeRangeFromScreen({
+export function positionTimeRangeFromScreen({
   dataPoint,
   pos,
   screenToDrawingData,
@@ -319,7 +357,10 @@ export function startFreehandStroke({
     color: penColorRef.current,
     lineWidth: penSizeRef.current,
   });
-  attachPrim(freehand);
+  if (!attachPrim(freehand)) {
+    if (draft) cancelFreehandStrokeDraft(draft);
+    return true;
+  }
   primitivesRef.current.push(freehand);
   currentFreehandRef.current = freehand;
   freehandDraftRef.current = draft;
@@ -337,6 +378,7 @@ export function placeTextDrawing({
   primitivesRef,
   attachPrim,
   startTextEditing,
+  cancelTextEditing,
   screenToDrawingData,
   drawingSnapEnabledRef,
   penColorRef,
@@ -355,11 +397,15 @@ export function placeTextDrawing({
     bold: textBoldRef.current || false,
     italic: textItalicRef.current || false,
   });
-  attachPrim(textPrim);
+  if (!attachPrim(textPrim)) return true;
   primitivesRef.current.push(textPrim);
 
-  // Immediately open text editor
-  startTextEditing(textPrim);
+  // Immediately open the text editor. If projection is temporarily
+  // unavailable, startTextEditing retains an explicit draft credential and
+  // this checked cancellation either removes it now or leaves it retryable.
+  if (!startTextEditing(textPrim)) {
+    cancelTextEditing({ clearSelection: true, exitTool: false });
+  }
 
   return true;
 }
@@ -371,6 +417,7 @@ export function placePositionDrawing({
   e,
   primitivesRef,
   attachPrim,
+  detachPrim,
   selectPrimitive,
   persistDrawings,
   screenToDrawingData,
@@ -426,10 +473,18 @@ export function placePositionDrawing({
     positionSize: positionSizeRef.current || 1000,
   });
 
-  attachPrim(posPrim);
+  const commands = createPrimitiveCommand(posPrim);
+  if (!commands) return true;
+  if (!attachPrim(posPrim)) return true;
   primitivesRef.current.push(posPrim);
+  if (!persistAttachedCreatedPrimitive(
+    persistDrawings,
+    commands,
+    posPrim,
+    primitivesRef,
+    detachPrim,
+  )) return true;
   selectPrimitive(posPrim.id);
-  persistDrawings();
 
   return true;
 }
@@ -471,10 +526,6 @@ export function commitTwoPointDrawing({
   const dataB = screenToDrawingData(targetPos.x, targetPos.y, { snap: drawingSnapEnabledRef.current && !e.altKey && !(isShapeDrawingTool && e.shiftKey) });
   if (!dataB) return true;
 
-  // Remove preview
-  detachPrim(previewRef.current);
-  previewRef.current = null;
-
   const finalPrim = createTwoPointDrawingPrimitive({
     tool,
     shapeType: isShapeDrawingTool ? shapeType : null,
@@ -484,12 +535,35 @@ export function commitTwoPointDrawing({
     fibLevels: fibLevelsRef.current,
     fibInverted: fibInvertedRef.current,
   });
-  attachPrim(finalPrim);
+  const commands = createPrimitiveCommand(finalPrim);
+  if (!commands) return true;
+  // Retire the tracked preview before attaching its replacement. If the new
+  // candidate cannot attach, keep the detached preview credential for retry;
+  // no untracked final primitive can remain on the surface.
+  const preview = previewRef.current;
+  if (!detachPrim(preview)) return true;
+  if (!attachPrim(finalPrim)) {
+    if (!attachPrim(preview)) {
+      // Both candidates are confirmed detached. Release the stale preview
+      // credential so Escape/scope teardown cannot retry a non-attachment
+      // forever; no final primitive has been published.
+      previewRef.current = null;
+      anchorDataRef.current = null;
+    }
+    return true;
+  }
+  previewRef.current = null;
   primitivesRef.current.push(finalPrim);
 
   anchorDataRef.current = null;
+  if (!persistAttachedCreatedPrimitive(
+    persistDrawings,
+    commands,
+    finalPrim,
+    primitivesRef,
+    detachPrim,
+  )) return true;
   selectPrimitive(finalPrim.id);
-  persistDrawings();
 
   return true;
 }
@@ -507,7 +581,9 @@ export function beginAxisLineDrawing({
   previewRef,
   draggingRef,
   attachPrim,
+  detachPrim,
   selectPrimitive,
+  persistDrawings,
   removePreview,
   screenToDrawingData,
   drawingSnapEnabledRef,
@@ -516,7 +592,7 @@ export function beginAxisLineDrawing({
 }: BeginAxisLineDrawingOptions): boolean {
   consumePointerEvent(e);
   if (anchorDataRef.current || previewRef.current) {
-    removePreview();
+    if (!removePreview()) return true;
   }
   const axisLineType = axisLineTypeFromTool(tool);
   const dataA = screenToDrawingData(pos.x, pos.y, {
@@ -532,8 +608,17 @@ export function beginAxisLineDrawing({
     color: penColorRef.current,
     lineWidth: penSizeRef.current,
   });
-  attachPrim(axisPrim);
+  const commands = createPrimitiveCommand(axisPrim);
+  if (!commands) return true;
+  if (!attachPrim(axisPrim)) return true;
   primitivesRef.current.push(axisPrim);
+  if (!persistAttachedCreatedPrimitive(
+    persistDrawings,
+    commands,
+    axisPrim,
+    primitivesRef,
+    detachPrim,
+  )) return true;
   selectPrimitive(axisPrim.id);
   draggingRef.current = {
     id: axisPrim.id,
@@ -581,8 +666,12 @@ export function beginTwoPointDrawing({
     fibLevels: fibLevelsRef.current,
     fibInverted: fibInvertedRef.current,
   });
+  if (!attachPrim(preview)) {
+    anchorDataRef.current = null;
+    previewRef.current = null;
+    return true;
+  }
   previewRef.current = preview;
-  attachPrim(preview);
 
   return true;
 }

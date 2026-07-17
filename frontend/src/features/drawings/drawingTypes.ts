@@ -231,8 +231,33 @@ export type FreehandTimeResolver = (
   stroke: FreehandStrokeV3,
 ) => unknown;
 
+export type FreehandBatchResolveRequest =
+  | {
+      readonly kind: "time";
+      readonly time: number;
+      readonly pointIndex: number;
+      readonly point: FreehandTimePoint;
+    }
+  | {
+      readonly kind: "anchor";
+      readonly anchor: ExactOrdinalAnchor;
+      readonly pointIndex: number;
+      readonly point: FreehandExactPoint;
+    };
+
+/**
+ * Resolve every absolute-time/exact-anchor point in one normalized v3 stroke.
+ * Results are positional and must be an equally sized array containing only
+ * finite horizontal coordinates or explicit `null` path gaps.
+ */
+export type FreehandBatchResolver = (
+  requests: readonly FreehandBatchResolveRequest[],
+  stroke: FreehandStrokeV3,
+) => unknown;
+
 export interface FreehandStrokeResolvers {
   resolveAnchor?: FreehandAnchorResolver | null;
+  resolveBatch?: FreehandBatchResolver | null;
   resolveSpan?: FreehandSpanResolver | null;
   resolveTime?: FreehandTimeResolver | null;
 }

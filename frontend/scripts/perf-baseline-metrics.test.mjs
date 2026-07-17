@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildHeapAcceptance, summarizeHeapSamples } from "./perf-baseline-metrics.mjs";
+import {
+  allAcceptanceChecksPassed,
+  buildHeapAcceptance,
+  summarizeHeapSamples,
+} from "./perf-baseline-metrics.mjs";
 
 function heapSamples({ minutes, start = 1_000_000, valueAt }) {
   return Array.from({ length: minutes + 1 }, (_, minute) => ({
@@ -34,6 +38,20 @@ test("heap acceptance uses effective observation duration instead of process dur
   assert.equal(summary.observedDurationMs, 55 * 60_000);
   assert.equal(acceptance.evaluated, false);
   assert.equal(acceptance.passed, null);
+});
+
+test("aggregate release acceptance fails closed for missing or unevaluated evidence", () => {
+  assert.equal(allAcceptanceChecksPassed({}), false);
+  assert.equal(allAcceptanceChecksPassed({ heap: { passed: null } }), false);
+  assert.equal(allAcceptanceChecksPassed({ heap: { passed: undefined } }), false);
+  assert.equal(allAcceptanceChecksPassed({
+    heap: { passed: true },
+    diagnostics: { passed: false },
+  }), false);
+  assert.equal(allAcceptanceChecksPassed({
+    heap: { passed: true },
+    diagnostics: { passed: true },
+  }), true);
 });
 
 test("heap window medians resist a final GC outlier", () => {

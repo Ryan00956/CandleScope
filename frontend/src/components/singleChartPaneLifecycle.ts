@@ -4,6 +4,53 @@ import type { SeriesWindowStore } from "../features/market-data/window/seriesWin
 
 const EMPTY_DATA_TIME_SET: ReadonlySet<number> = new Set<number>();
 
+export function removedDrawingSubPaneScopeKeys({
+  currentBase,
+  currentIds,
+  previousBase,
+  previousIds,
+}: Readonly<{
+  currentBase: string;
+  currentIds: ReadonlySet<string>;
+  previousBase: string | null;
+  previousIds: ReadonlySet<string>;
+}>): string[] {
+  if (!currentBase || previousBase !== currentBase) return [];
+  const removed: string[] = [];
+  for (const previousId of previousIds) {
+    if (!currentIds.has(previousId)) removed.push(`${currentBase}__${previousId}`);
+  }
+  return removed;
+}
+
+export function prepareDrawingSurfaceForSeriesReplacement(
+  prepare: (() => boolean | void) | null | undefined,
+  requestRestore: () => void,
+): boolean {
+  if (!prepare) return true;
+  try {
+    if (prepare() !== false) return true;
+  } catch {
+    // A throwing prepare may already have detached a prefix.
+  }
+  requestRestore();
+  return false;
+}
+
+export function resolveDrawingSurfaceChartTypeBoundary(
+  beforeValue: string | null | undefined,
+  afterValue: string | null | undefined,
+): Readonly<{
+  kind: "chart-type";
+  beforeValue: string;
+  afterValue: string;
+}> | undefined {
+  const before = beforeValue?.trim() || "";
+  const after = afterValue?.trim() || "";
+  if (!before || !after || before === after) return undefined;
+  return Object.freeze({ kind: "chart-type", beforeValue: before, afterValue: after });
+}
+
 function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -124,6 +171,68 @@ export function shouldPublishUserViewportRange({
   return Boolean(range && userInteracted && !isProgrammatic && !isSyncing);
 }
 
+const CHART_PAN_MIN_HORIZONTAL_DISTANCE_PX = 4;
+const MAIN_PANE_PLOT_EDGE_GUARD_PX = 4;
+
+export function isMainPanePlotPointerStart({
+  clientX,
+  clientY,
+  containerRect,
+  plotRect,
+}: {
+  clientX?: number | null;
+  clientY?: number | null;
+  containerRect?: Readonly<{ left: number; top: number }> | null;
+  plotRect?: Readonly<{ height: number; width: number; x: number; y: number }> | null;
+} = {}): boolean {
+  if (!finiteNumber(clientX)
+    || !finiteNumber(clientY)
+    || !finiteNumber(containerRect?.left)
+    || !finiteNumber(containerRect?.top)
+    || !finiteNumber(plotRect?.x)
+    || !finiteNumber(plotRect?.y)
+    || !finiteNumber(plotRect?.width)
+    || !finiteNumber(plotRect?.height)
+    || plotRect.width <= MAIN_PANE_PLOT_EDGE_GUARD_PX * 2
+    || plotRect.height <= MAIN_PANE_PLOT_EDGE_GUARD_PX * 2) return false;
+  const localX = clientX - containerRect.left;
+  const localY = clientY - containerRect.top;
+  return localX >= plotRect.x + MAIN_PANE_PLOT_EDGE_GUARD_PX
+    && localX < plotRect.x + plotRect.width - MAIN_PANE_PLOT_EDGE_GUARD_PX
+    && localY >= plotRect.y + MAIN_PANE_PLOT_EDGE_GUARD_PX
+    && localY < plotRect.y + plotRect.height - MAIN_PANE_PLOT_EDGE_GUARD_PX;
+}
+
+export function shouldInvalidateDrawingFrameOnPointerRelease({
+  drawingToolActive = false,
+  logicalRangeChanged = false,
+  mainPanePlotStart = false,
+  maxHorizontalMovementPx = 0,
+  maxVerticalMovementPx = 0,
+  pointerActive = false,
+}: {
+  drawingToolActive?: boolean;
+  logicalRangeChanged?: boolean;
+  mainPanePlotStart?: boolean;
+  maxHorizontalMovementPx?: number;
+  maxVerticalMovementPx?: number;
+  pointerActive?: boolean;
+} = {}): boolean {
+  if (!pointerActive) return false;
+  const horizontalMovement = finiteNumber(maxHorizontalMovementPx)
+    ? Math.abs(maxHorizontalMovementPx)
+    : 0;
+  const verticalMovement = finiteNumber(maxVerticalMovementPx)
+    ? Math.abs(maxVerticalMovementPx)
+    : 0;
+  const confirmedHorizontalPan = logicalRangeChanged
+    && !drawingToolActive
+    && mainPanePlotStart
+    && horizontalMovement >= CHART_PAN_MIN_HORIZONTAL_DISTANCE_PX
+    && horizontalMovement > verticalMovement;
+  return !confirmedHorizontalPan;
+}
+
 export function shouldRestoreChartViewport({
   dataMeta,
   datasetKey,
@@ -194,14 +303,21 @@ export function disposeChartPaneSurface(
     applyOptions?(options: { autoSize: boolean }): unknown;
     remove?(): unknown;
   } | null | undefined,
-  { beforeRemove }: { beforeRemove?: (() => void) | null } = {},
-): void {
-  if (!chart) return;
+  {
+    afterRemove,
+    beforeRemove,
+  }: {
+    afterRemove?: (() => boolean | void) | null;
+    beforeRemove?: (() => boolean | void) | null;
+  } = {},
+): boolean {
+  if (!chart) return true;
 
+  let drawingsPrepared = true;
   try {
-    beforeRemove?.();
+    drawingsPrepared = beforeRemove?.() !== false;
   } catch {
-    // Drawing teardown is best-effort; chart disposal must still continue.
+    drawingsPrepared = false;
   }
 
   try {
@@ -210,9 +326,23 @@ export function disposeChartPaneSurface(
     // The chart may already be partially disposed.
   }
 
+  let removed = false;
   try {
-    chart.remove?.();
+    if (chart.remove) {
+      chart.remove();
+      removed = true;
+    }
   } catch {
     // Best-effort teardown.
   }
+  // The effect will never reuse this chart object, even when remove() throws
+  // after partially destroying it. Always invalidate drawing credentials so a
+  // replacement surface cannot mistake old-series objects for attachments.
+  let drawingsCompleted = true;
+  try {
+    drawingsCompleted = afterRemove?.() !== false;
+  } catch {
+    drawingsCompleted = false;
+  }
+  return drawingsPrepared && drawingsCompleted && removed;
 }

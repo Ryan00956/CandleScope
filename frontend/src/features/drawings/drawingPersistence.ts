@@ -483,7 +483,7 @@ export function serializeHorizontalAnchor(
 /**
  * Serialize a primitive instance to a plain JSON-safe object.
  */
-function serializePrimitive(prim: PersistableDrawingPrimitive): UnknownRecord | null {
+function serializePrimitiveFields(prim: PersistableDrawingPrimitive): UnknownRecord | null {
   // Detect type by checking unique properties
   if ("_lineType" in prim) {
     // LineDrawingPrimitive
@@ -614,6 +614,144 @@ function serializePrimitive(prim: PersistableDrawingPrimitive): UnknownRecord | 
   return null;
 }
 
+const STRICT_SAVED_FIELDS: Readonly<Record<DrawingKind, readonly string[]>> = Object.freeze({
+  line: Object.freeze(["id", "lineType", "dataPoints", "color", "lineWidth"]),
+  "axis-line": Object.freeze(["id", "axisLineType", "dataPoint", "color", "lineWidth"]),
+  "angle-measure": Object.freeze(["id", "dataPoints", "color", "lineWidth"]),
+  text: Object.freeze([
+    "id", "dataPoint", "text", "color", "fontSize", "fontFamily", "bold", "italic",
+    "underline", "align", "bgColor", "borderColor", "borderWidth", "widthPx", "padding",
+  ]),
+  fibonacci: Object.freeze(["id", "dataPoints", "levels", "inverted", "color", "lineWidth"]),
+  position: Object.freeze([
+    "id", "direction", "entryPrice", "tpPrice", "slPrice", "timeRange", "positionSize",
+    "infoPanelOffset",
+  ]),
+  shape: Object.freeze([
+    "id", "shapeType", "dataPoints", "color", "lineWidth", "fillColor", "fillOpacity",
+    "lineStyle",
+  ]),
+  freehand: Object.freeze(["id", "dataPoints", "stroke", "color", "lineWidth"]),
+  highlighter: Object.freeze([
+    "id", "dataPoints", "stroke", "color", "lineWidth", "opacity", "compositeOperation",
+    "brushShape",
+  ]),
+});
+
+/**
+ * Strict document/command boundary. The compatibility normalizer above may
+ * omit an invalid optional legacy field so old tolerant reads can continue;
+ * document authority must reject that same payload instead of silently
+ * replacing explicit user data with a default.
+ */
+export function normalizeSavedDrawingItemStrict(item: unknown): SavedDrawing | null {
+  const normalized = normalizeSavedDrawingItem(item);
+  if (!normalized || !isRecord(item)) return null;
+  if (hasOwn(item, "id") && item.id !== undefined
+    && (typeof item.id !== "string" || item.id.length === 0)) return null;
+  const normalizedRecord = normalized as unknown as UnknownRecord;
+  for (const key of STRICT_SAVED_FIELDS[normalized.type]) {
+    if (hasOwn(item, key) && item[key] !== undefined && !hasOwn(normalizedRecord, key)) {
+      return null;
+    }
+  }
+  return normalized;
+}
+
+/**
+ * Convert one legacy primitive into the validated SavedDrawing contract.
+ * The document codec and rollback renderer may use this compatibility edge
+ * without taking a dependency on localStorage.
+ */
+export function serializeDrawingPrimitive(
+  prim: PersistableDrawingPrimitive,
+): SavedDrawing | null {
+  const serialized = serializePrimitiveFields(prim);
+  return serialized ? normalizeSavedDrawingItemStrict(serialized) : null;
+}
+
+function validatedSavedDrawingsForWrite(
+  drawings: readonly unknown[],
+): SavedDrawing[] | null {
+  if (!Array.isArray(drawings) || drawings.length > MAX_SAVED_DRAWINGS) return null;
+
+  const data: SavedDrawing[] = [];
+  let totalPoints = 0;
+  let totalSpans = 0;
+  for (const drawing of drawings) {
+    const item = normalizeSavedDrawingItemStrict(drawing);
+    if (!item) return null;
+    const counts = freehandPayloadCounts(item);
+    totalPoints += counts.points;
+    totalSpans += counts.spans;
+    if (totalPoints > MAX_SAVED_FREEHAND_POINTS
+      || totalSpans > MAX_SAVED_FREEHAND_SPANS) {
+      return null;
+    }
+    data.push(item);
+  }
+  return data;
+}
+
+/**
+ * Read one complete legacy payload for the document-authoritative runtime.
+ * Unlike the compatibility reader, this never skips an invalid entry: one
+ * malformed, unknown, or over-budget item rejects the whole snapshot.
+ */
+export function loadSavedDrawingsFailClosed(symbol: string): SavedDrawing[] | null {
+  if (!symbol) return [];
+  try {
+    const raw = localStorage.getItem(storageKey(symbol));
+    if (!raw) return [];
+    if (raw.length > MAX_DRAWING_STORAGE_CHARS) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length > MAX_SAVED_DRAWINGS) return null;
+
+    let totalDeclaredPoints = 0;
+    let totalDeclaredSpans = 0;
+    for (const item of parsed) {
+      const counts = declaredFreehandPayloadCounts(item);
+      totalDeclaredPoints += counts.points;
+      totalDeclaredSpans += counts.spans;
+      if (totalDeclaredPoints > MAX_SAVED_FREEHAND_POINTS
+        || totalDeclaredSpans > MAX_SAVED_FREEHAND_SPANS) return null;
+    }
+    return validatedSavedDrawingsForWrite(parsed);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist an already-decoded legacy-compatible SavedDrawing array.
+ * This is the document codec's storage boundary; it deliberately retains the
+ * existing key and top-level JSON-array format so the last legacy build can
+ * read every successful write.
+ */
+export function saveSavedDrawings(
+  symbol: string,
+  drawings: readonly SavedDrawing[],
+): boolean {
+  if (!symbol) return false;
+  try {
+    const data = validatedSavedDrawingsForWrite(drawings);
+    if (!data) {
+      console.warn("Failed to save drawings: saved drawing payload is invalid or over budget");
+      return false;
+    }
+    const raw = JSON.stringify(data);
+    if (raw.length > MAX_DRAWING_STORAGE_CHARS) {
+      console.warn("Failed to save drawings: serialized payload is too large");
+      return false;
+    }
+    localStorage.setItem(storageKey(symbol), raw);
+    return true;
+  } catch (err) {
+    console.warn("Failed to save drawings:", err);
+    return false;
+  }
+}
+
 /**
  * Save all current drawing primitives for a symbol.
  * @param {string} symbol - e.g. "BTCUSDT"
@@ -634,32 +772,15 @@ export function saveDrawings(
     }
 
     const data: SavedDrawing[] = [];
-    let totalPoints = 0;
-    let totalSpans = 0;
     for (const prim of candidates) {
-      const serialized = serializePrimitive(prim);
-      const item = normalizeSavedDrawingItem(serialized);
+      const item = serializeDrawingPrimitive(prim);
       if (!item) {
         console.warn("Failed to save drawings: a drawing could not be serialized");
         return;
       }
-      const counts = freehandPayloadCounts(item);
-      totalPoints += counts.points;
-      totalSpans += counts.spans;
-      if (totalPoints > MAX_SAVED_FREEHAND_POINTS
-        || totalSpans > MAX_SAVED_FREEHAND_SPANS) {
-        console.warn("Failed to save drawings: freehand data exceeds the storage limit");
-        return;
-      }
       data.push(item);
     }
-
-    const raw = JSON.stringify(data);
-    if (raw.length > MAX_DRAWING_STORAGE_CHARS) {
-      console.warn("Failed to save drawings: serialized payload is too large");
-      return;
-    }
-    localStorage.setItem(storageKey(symbol), raw);
+    saveSavedDrawings(symbol, data);
   } catch (err) {
     console.warn("Failed to save drawings:", err);
   }

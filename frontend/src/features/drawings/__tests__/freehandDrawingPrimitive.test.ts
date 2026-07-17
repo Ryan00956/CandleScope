@@ -10,8 +10,14 @@ import type {
   CoordinateSeriesBridge,
   DrawingCoordinateContext,
 } from "../../../chart-adapter/coordinateBridge.js";
+import { createDrawingFrameSnapshotFactory } from "../../../chart-adapter/drawingFrameSnapshot.js";
 import { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
+import type { FreehandCommittedPaintAck } from "../primitives/FreehandDrawingPrimitive.js";
 import { freehandStrokeToCoordinates } from "../primitives/coordinateUtils.js";
+import {
+  drawingPerfCounters,
+  resetDrawingPerfCounters,
+} from "../performance/drawingPerfCounters.js";
 import type {
   DrawingAttachedParameter,
   FreehandStrokeV2,
@@ -127,7 +133,10 @@ function attachPrimitive(
   }));
 }
 
-function attachedPrimitive(): FreehandDrawingPrimitive {
+function drawingSurface(): {
+  chart: CoordinateChartBridge;
+  series: CoordinateSeriesBridge & { priceToCoordinate(price: number): number };
+} {
   const rows = [row(0, 100, 100, 100), row(1, 200, 101, 200)];
   const chart: CoordinateChartBridge = {
     timeScale: () => ({
@@ -139,6 +148,11 @@ function attachedPrimitive(): FreehandDrawingPrimitive {
     data: () => rows,
     priceToCoordinate: (price) => price,
   };
+  return { chart, series };
+}
+
+function attachedPrimitive(): FreehandDrawingPrimitive {
+  const { chart, series } = drawingSurface();
   const primitive = new FreehandDrawingPrimitive({
     id: "v2-gap",
     stroke: strokeWithUnresolvedMiddle(),
@@ -170,12 +184,162 @@ function renderedPathMoves(primitive: FreehandDrawingPrimitive): Array<[number, 
   return moves;
 }
 
+function drawCurrentFreehandRenderer(
+  primitive: FreehandDrawingPrimitive,
+  onStroke: () => void = () => {},
+): void {
+  const context = partialMock<CanvasRenderingContext2D>({
+    beginPath() {},
+    lineTo() {},
+    moveTo() {},
+    quadraticCurveTo() {},
+    restore() {},
+    save() {},
+    stroke: onStroke,
+  });
+  mustBeDefined(mustBeDefined(primitive.paneViews()[0]).renderer()).draw(
+    partialMock<PrimitiveCanvasTarget>({
+      useBitmapCoordinateSpace: (draw) => draw(structuralMock<BitmapScope>({
+        context,
+        horizontalPixelRatio: 1,
+        verticalPixelRatio: 1,
+      })),
+    }),
+  );
+}
+
+test("committed freehand paint subscribers run only after the bitmap stroke completes", () => {
+  const primitive = attachedPrimitive();
+  const acks: FreehandCommittedPaintAck[] = [];
+  const order: string[] = [];
+  const unsubscribe = primitive.subscribeCommittedPaint((ack) => {
+    order.push("ack");
+    acks.push(ack);
+  });
+
+  primitive.updateAllViews();
+  assert.equal(acks.length, 0);
+  drawCurrentFreehandRenderer(primitive, () => order.push("stroke"));
+
+  assert.deepEqual(order, ["stroke", "ack"]);
+  assert.deepEqual([...acks], [{
+    id: "v2-gap",
+    geometryRevision: primitive.geometryRevision,
+    paintSequence: 1,
+  }]);
+  assert.equal(Object.isFrozen(acks[0]), true);
+
+  drawCurrentFreehandRenderer(primitive);
+  assert.deepEqual(acks.map((ack) => ack.paintSequence), [1, 2]);
+  unsubscribe();
+  unsubscribe();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(acks.length, 2);
+});
+
+test("a stale committed renderer revision cannot acknowledge a newer freehand commit", () => {
+  const primitive = attachedPrimitive();
+  primitive.updateAllViews();
+  const acks: FreehandCommittedPaintAck[] = [];
+  primitive.subscribeCommittedPaint((ack) => acks.push(ack));
+  const expectedRevision = primitive.geometryRevision + 1;
+
+  assert.equal(primitive.commitStroke(strokeWithUnresolvedMiddle()), true);
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(acks.length, 0);
+
+  primitive.updateAllViews();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(acks.length, 1);
+  assert.deepEqual(acks.map((ack) => ack.geometryRevision), [expectedRevision]);
+});
+
+test("preview, cancelled, hidden, and non-renderable freehand draws never acknowledge", () => {
+  const preview = attachedPrimitive();
+  let previewAcks = 0;
+  let previewStrokes = 0;
+  assert.equal(preview.setPreviewPoints([{ x: 0, y: 0 }, { x: 1, y: 1 }]), true);
+  preview.subscribeCommittedPaint(() => { previewAcks += 1; });
+  preview.updateAllViews();
+  drawCurrentFreehandRenderer(preview, () => { previewStrokes += 1; });
+  assert.equal(previewStrokes, 1);
+  assert.equal(previewAcks, 0);
+  assert.equal(preview.cancelPreview(), true);
+  preview.updateAllViews();
+  drawCurrentFreehandRenderer(preview);
+  assert.equal(previewAcks, 0);
+
+  const hidden = attachedPrimitive();
+  let hiddenAcks = 0;
+  hidden.subscribeCommittedPaint(() => { hiddenAcks += 1; });
+  hidden.setHidden(true, false);
+  hidden.updateAllViews();
+  drawCurrentFreehandRenderer(hidden);
+  assert.equal(hiddenAcks, 0);
+
+  const { chart, series } = drawingSurface();
+  const empty = new FreehandDrawingPrimitive({ id: "empty-committed", dataPoints: [] });
+  let emptyAcks = 0;
+  attachPrimitive(empty, chart, series);
+  empty.subscribeCommittedPaint(() => { emptyAcks += 1; });
+  empty.updateAllViews();
+  drawCurrentFreehandRenderer(empty);
+  assert.equal(emptyAcks, 0);
+});
+
+test("freehand paint subscriptions are cancelled by unsubscribe, detach, and dispose", () => {
+  const { chart, series } = drawingSurface();
+  const primitive = new FreehandDrawingPrimitive({
+    id: "paint-lifecycle",
+    dataPoints: [{ time: 100, price: 1 }, { time: 200, price: 2 }],
+  });
+  attachPrimitive(primitive, chart, series);
+  let detachedListenerCalls = 0;
+  const detachUnsubscribe = primitive.subscribeCommittedPaint(() => {
+    detachedListenerCalls += 1;
+  });
+  primitive.updateAllViews();
+  primitive.detached();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(detachedListenerCalls, 0);
+
+  attachPrimitive(primitive, chart, series);
+  let currentListenerCalls = 0;
+  const currentUnsubscribe = primitive.subscribeCommittedPaint(() => {
+    currentListenerCalls += 1;
+  });
+  primitive.updateAllViews();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(detachedListenerCalls, 0);
+  assert.equal(currentListenerCalls, 1);
+  detachUnsubscribe();
+  currentUnsubscribe();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(currentListenerCalls, 1);
+
+  let disposedListenerCalls = 0;
+  const disposeUnsubscribe = primitive.subscribeCommittedPaint(() => {
+    disposedListenerCalls += 1;
+  });
+  primitive.updateAllViews();
+  primitive.dispose();
+  primitive.dispose();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(disposedListenerCalls, 0);
+  primitive.subscribeCommittedPaint(() => { disposedListenerCalls += 1; });
+  attachPrimitive(primitive, chart, series);
+  primitive.updateAllViews();
+  drawCurrentFreehandRenderer(primitive);
+  assert.equal(disposedListenerCalls, 0);
+  disposeUnsubscribe();
+});
+
 test("freehand v2 renderer and hit testing never bridge an unresolved span", () => {
   const primitive = attachedPrimitive();
 
-  assert.equal(primitive.hitTest(1, 0, 0.1), true);
-  assert.equal(primitive.hitTest(5, 0, 0.1), false);
-  assert.equal(primitive.hitTest(9, 0, 0.1), true);
+  assert.equal(primitive.hitTestGeometry(1, 0, 0.1), true);
+  assert.equal(primitive.hitTestGeometry(5, 0, 0.1), false);
+  assert.equal(primitive.hitTestGeometry(9, 0, 0.1), true);
 
   primitive.updateAllViews();
   const moves: Array<[number, number]> = [];
@@ -224,7 +388,7 @@ test("freehand v2 hit testing skips unresolved singleton paths omitted by the re
   const primitive = new FreehandDrawingPrimitive({ id: "v2-singleton", stroke: singletonStroke });
   attachPrimitive(primitive, chart, series);
 
-  assert.equal(primitive.hitTest(5, 0, 0.1), false);
+  assert.equal(primitive.hitTestGeometry(5, 0, 0.1), false);
 });
 
 test("freehand v3 renderer and hit testing split at unresolved absolute-time points", () => {
@@ -246,9 +410,9 @@ test("freehand v3 renderer and hit testing split at unresolved absolute-time poi
   });
   attachPrimitive(primitive, chart, series);
 
-  assert.equal(primitive.hitTest(1, 0, 0.1), true);
-  assert.equal(primitive.hitTest(5, 0, 0.1), false);
-  assert.equal(primitive.hitTest(9, 0, 0.1), true);
+  assert.equal(primitive.hitTestGeometry(1, 0, 0.1), true);
+  assert.equal(primitive.hitTestGeometry(5, 0, 0.1), false);
+  assert.equal(primitive.hitTestGeometry(9, 0, 0.1), true);
   assert.deepEqual(renderedPathMoves(primitive), [[0, 0], [8, 0]]);
 });
 
@@ -290,7 +454,7 @@ test("freehand v3 resolves lineage and future time points from one coordinate sn
 
   primitive.updateAllViews();
   assert.equal(snapshots, 1);
-  assert.equal(primitive.hitTest(45, 0, 0.1), true);
+  assert.equal(primitive.hitTestGeometry(45, 0, 0.1), true);
   assert.equal(snapshots, 2);
 });
 
@@ -404,9 +568,9 @@ test("legacy freehand and highlighter split unresolved points on ordinal axes", 
     });
     attachPrimitive(primitive, chart, series);
 
-    assert.equal(primitive.hitTest(5, 0, 0.1), true, type);
-    assert.equal(primitive.hitTest(15, 0, 0.1), false, type);
-    assert.equal(primitive.hitTest(25, 0, 0.1), true, type);
+    assert.equal(primitive.hitTestGeometry(5, 0, 0.1), true, type);
+    assert.equal(primitive.hitTestGeometry(15, 0, 0.1), false, type);
+    assert.equal(primitive.hitTestGeometry(25, 0, 0.1), true, type);
     assert.deepEqual(renderedPathMoves(primitive), [[0, 0], [20, 0]], type);
   }
 });
@@ -445,7 +609,7 @@ test("legacy freehand keeps filtering invalid points into one path on time axes"
   });
   attachPrimitive(primitive, chart, series);
 
-  assert.equal(primitive.hitTest(15, 0, 0.1), true);
+  assert.equal(primitive.hitTestGeometry(15, 0, 0.1), true);
   assert.deepEqual(renderedPathMoves(primitive), [[0, 0]]);
 });
 
@@ -490,7 +654,7 @@ test("freehand preview renders screen-space paths and commit clears transient st
   }));
   assert.deepEqual(moves, [[0, 0], [8, 0]]);
   assert.deepEqual(lines, [[2, 0], [10, 0]]);
-  assert.equal(primitive.hitTest(1, 0), false);
+  assert.equal(primitive.hitTestGeometry(1, 0), false);
 
   assert.equal(primitive.commitStroke(strokeWithUnresolvedMiddle()), true);
   assert.equal(primitive.isPreview, false);
@@ -526,6 +690,220 @@ test("freehand preview appends frame deltas without replacing prior geometry", (
   assert.equal(updates, 1);
 });
 
+test("viewport-only freehand projection reuses pure anchor resolutions", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }];
+  const factory = createDrawingFrameSnapshotFactory();
+  const surfaceToken = {};
+  const baseInput = {
+    axisKind: "time" as const,
+    coordinateKey: "BTCUSDT:1m:line:0",
+    seriesData: rows,
+    surfaceToken,
+    viewportKey: "spacing-10",
+  };
+  let snapshot = factory.capture(baseInput);
+  let spacing = 10;
+  const chart: CoordinateChartBridge = {
+    timeScale: () => ({
+      timeToCoordinate: (time) => (
+        typeof time === "number" ? ((time - 100) / 100) * spacing : null
+      ),
+    }),
+  };
+  const series: CoordinateSeriesBridge = { data: () => rows };
+  registerDrawingSeriesContext(series, {
+    coordinateSnapshotProvider: () => snapshot,
+  });
+  const stroke: FreehandStrokeV3 = {
+    version: 3,
+    sourceProjection: "time",
+    sourceProjectionConfig: "BTCUSDT:1m:line",
+    spans: [],
+    points: [{ time: 100, price: 1 }, { time: 200, price: 2 }],
+  };
+  const cacheToken = {};
+
+  resetDrawingPerfCounters();
+  assert.deepEqual(
+    freehandStrokeToCoordinates(chart, series, stroke, {}, {
+      cacheToken,
+      geometryRevision: 1,
+    }).map((point) => mustBeDefined(point).x),
+    [0, 10],
+  );
+  assert.equal(snapshot.coordinateIndex.stats.numericBatchMergeWalkCount, 1);
+  assert.equal(drawingPerfCounters.snapshot().counters.anchorResolveCount, 2);
+
+  spacing = 20;
+  snapshot = factory.capture({ ...baseInput, viewportKey: "spacing-20" });
+  resetDrawingPerfCounters();
+  assert.deepEqual(
+    freehandStrokeToCoordinates(chart, series, stroke, {}, {
+      cacheToken,
+      geometryRevision: 1,
+    }).map((point) => mustBeDefined(point).x),
+    [0, 20],
+  );
+  assert.equal(snapshot.coordinateIndex.stats.numericBatchMergeWalkCount, 1);
+  assert.equal(drawingPerfCounters.snapshot().counters.anchorResolveCount, 0);
+});
+
+test("viewport-only freehand projection reuses pure lineage-span resolutions", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }];
+  const factory = createDrawingFrameSnapshotFactory();
+  const surfaceToken = {};
+  const baseInput = {
+    axisKind: "time" as const,
+    coordinateKey: "BTCUSDT:1m:line:0",
+    seriesData: rows,
+    surfaceToken,
+    viewportKey: "spacing-10",
+  };
+  let snapshot = factory.capture(baseInput);
+  let spacing = 10;
+  const chart: CoordinateChartBridge = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: spacing }),
+      timeToCoordinate: (time) => (
+        typeof time === "number" ? ((time - 100) / 100) * spacing : null
+      ),
+    }),
+  };
+  const series: CoordinateSeriesBridge = { data: () => rows };
+  registerDrawingSeriesContext(series, {
+    coordinateSnapshotProvider: () => snapshot,
+  });
+  const stroke: FreehandStrokeV2 = {
+    version: 2,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "BTCUSDT:renko:old",
+    spans: [{
+      exact: {
+        left: { time: 100, sourceOrdinal: 0 },
+        right: { time: 200, sourceOrdinal: 0 },
+      },
+      fallback: {
+        fromTime: 100,
+        toTime: 200,
+        leftRatio: 0.25,
+        rightRatio: 0.75,
+      },
+    }],
+    points: [
+      { span: 0, ratio: 0, price: 1 },
+      { span: 0, ratio: 1, price: 2 },
+    ],
+  };
+  const cacheToken = {};
+
+  assert.deepEqual(
+    freehandStrokeToCoordinates(chart, series, stroke, {}, {
+      cacheToken,
+      geometryRevision: 1,
+    }).map((point) => mustBeDefined(point).x),
+    [0, 10],
+  );
+  assert.equal(snapshot.coordinateIndex.stats.numericBinarySearchCount, 2);
+
+  spacing = 20;
+  snapshot = factory.capture({ ...baseInput, viewportKey: "spacing-20" });
+  assert.deepEqual(
+    freehandStrokeToCoordinates(chart, series, stroke, {}, {
+      cacheToken,
+      geometryRevision: 1,
+    }).map((point) => mustBeDefined(point).x),
+    [0, 20],
+  );
+  assert.equal(snapshot.coordinateIndex.stats.numericBinarySearchCount, 2);
+});
+
+test("active freehand preview reports transient screen points as raw geometry", () => {
+  resetDrawingPerfCounters();
+  const primitive = new FreehandDrawingPrimitive({
+    id: "instrumented-preview",
+    isPreview: true,
+    previewPoints: [
+      { x: 0, y: 0 },
+      { x: 2, y: 1 },
+      null,
+      { x: 4, y: 2 },
+    ],
+  });
+  primitive.attached(partialMock<DrawingAttachedParameter>({
+    chart: partialMock<DrawingAttachedParameter["chart"]>({}),
+    series: partialMock<DrawingAttachedParameter["series"]>({}),
+    requestUpdate: () => {},
+  }));
+
+  primitive.updateAllViews();
+  const frame = drawingPerfCounters.flushFrameWork();
+
+  assert.equal(frame?.rawPoints, 4);
+  assert.equal(frame?.renderedPoints, 3);
+  assert.equal(frame?.visibleEntities, 1);
+  assert.equal(frame?.culledEntities, 0);
+});
+
+test("hidden freehand reports its source geometry as culled", () => {
+  resetDrawingPerfCounters();
+  const primitive = new FreehandDrawingPrimitive({
+    id: "instrumented-hidden-preview",
+    isPreview: true,
+    previewPoints: [{ x: 0, y: 0 }, { x: 2, y: 1 }],
+    hidden: true,
+  });
+  primitive.attached(partialMock<DrawingAttachedParameter>({
+    chart: partialMock<DrawingAttachedParameter["chart"]>({}),
+    series: partialMock<DrawingAttachedParameter["series"]>({}),
+    requestUpdate: () => {},
+  }));
+
+  primitive.updateAllViews();
+  const frame = drawingPerfCounters.flushFrameWork();
+
+  assert.equal(frame?.rawPoints, 2);
+  assert.equal(frame?.renderedPoints, 0);
+  assert.equal(frame?.visibleEntities, 0);
+  assert.equal(frame?.culledEntities, 1);
+  assert.equal(drawingPerfCounters.snapshot().counters.sceneRebuildCount, 1);
+});
+
+test("committed legacy freehand views batch one viewport projection pass per surface frame", () => {
+  const rows = [row(0, 100, 100, 100), row(1, 200, 101, 200)];
+  const chart: CoordinateChartBridge = {
+    timeScale: () => ({
+      options: () => ({ barSpacing: 10 }),
+      timeToCoordinate: (time) => (typeof time === "number" ? (time - 100) / 10 : null),
+    }),
+  };
+  const series: CoordinateSeriesBridge & { priceToCoordinate(price: number): number } = {
+    data: () => rows,
+    priceToCoordinate: (price) => price,
+  };
+  const first = new FreehandDrawingPrimitive({
+    id: "batch-first",
+    dataPoints: [{ time: 100, price: 1 }, { time: 200, price: 2 }],
+  });
+  const second = new FreehandDrawingPrimitive({
+    id: "batch-second",
+    dataPoints: [{ time: 100, price: 3 }, { time: 200, price: 4 }],
+  });
+  attachPrimitive(first, chart, series);
+  attachPrimitive(second, chart, series);
+  first.setViewUpdateBatching(true);
+  second.setViewUpdateBatching(true);
+  resetDrawingPerfCounters();
+
+  first.updateAllViews();
+  second.updateAllViews();
+
+  assert.equal(drawingPerfCounters.snapshot().counters.sceneRebuildCount, 1);
+  assert.ok(first.getParityScreenSnapshot());
+  assert.ok(second.getParityScreenSnapshot());
+  first.detached();
+  second.detached();
+});
+
 test("freehand preview cancel is terminal and remains persistence-filtered", () => {
   const primitive = new FreehandDrawingPrimitive({
     id: "v2-cancel",
@@ -555,4 +933,23 @@ test("legacy freehand preview commits canonical data points on pointerup", () =>
     { time: 100, logical: 1.5, price: 10 },
     { time: 200, logical: 2.5, price: 11 },
   ]);
+});
+
+test("freehand geometry revision advances only for canonical geometry mutations", () => {
+  const primitive = new FreehandDrawingPrimitive({
+    id: "geometry-revision",
+    dataPoints: [{ time: 100, price: 10 }, { time: 200, price: 11 }],
+  });
+  const initial = primitive.geometryRevision;
+
+  primitive.setColor("#ffffff");
+  primitive.setLineWidth(4);
+  assert.equal(primitive.geometryRevision, initial);
+
+  primitive.addPoint({ time: 300, price: 12 });
+  assert.equal(primitive.geometryRevision, initial + 1);
+  primitive.setDataPoints([{ time: 100, price: 10 }, { time: 250, price: 12 }]);
+  assert.equal(primitive.geometryRevision, initial + 2);
+  assert.equal(primitive.commitDataPoints(), true);
+  assert.equal(primitive.geometryRevision, initial + 3);
 });

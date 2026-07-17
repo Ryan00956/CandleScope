@@ -7,7 +7,7 @@
  * timeframe switches.
  */
 
-import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { drawingDataPointsToCoordinates } from "./coordinateUtils.js";
 import type {
   DrawingAttachedParameter,
   DrawingDataPoint,
@@ -20,10 +20,20 @@ import type {
   ShapePrimitiveOptions,
   ShapeType,
 } from "../drawingTypes.js";
+import {
+  accumulateDrawingPerfFrameWork,
+  drawingPerfCounters,
+} from "../performance/drawingPerfCounters.js";
 
 const HANDLE_KEYS = ["tl", "t", "tr", "r", "br", "b", "bl", "l"] as const;
 type ShapeHandleKey = typeof HANDLE_KEYS[number];
 type ShapeHandlePositions = Record<ShapeHandleKey, ScreenPoint>;
+
+function drawingPerfNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
 
 interface ShapeBox extends ScreenPoint {
   width: number;
@@ -167,6 +177,7 @@ class ShapeRenderer implements PrimitivePaneRenderer {
   }
 
   draw(target: PrimitiveCanvasTarget): void {
+    const startedAt = drawingPerfNow();
     const data = this._data;
     if (!data || !data.points || data.points.length < 2) return;
     if (data.hidden) return;
@@ -264,6 +275,11 @@ class ShapeRenderer implements PrimitivePaneRenderer {
 
       ctx.restore();
     });
+    const durationMs = drawingPerfNow() - startedAt;
+    accumulateDrawingPerfFrameWork({
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+    });
   }
 }
 
@@ -277,6 +293,7 @@ class ShapePaneView implements PrimitivePaneView {
   }
 
   update(): void {
+    const startedAt = drawingPerfNow();
     const source = this._source;
     const series = source._series;
     const chart = source._chart;
@@ -295,16 +312,39 @@ class ShapePaneView implements PrimitivePaneView {
         isPreview: source._isPreview,
         hidden: true,
       });
+      const durationMs = drawingPerfNow() - startedAt;
+      drawingPerfCounters.recordSceneRebuild();
+      accumulateDrawingPerfFrameWork({
+        geometryKey: source._id,
+        drawingMainThreadMs: durationMs,
+        sceneProjectPaintMs: durationMs,
+        rawPoints: source._dataPoints.length,
+        renderedPoints: 0,
+        visibleEntities: 0,
+        culledEntities: 1,
+      });
       return;
     }
 
     const points: ShapeRenderPoint[] = [];
     const coordinateContext = {};
+    let projectedPointCount = 0;
+    const horizontalCoordinates = drawingDataPointsToCoordinates(
+      chart,
+      series,
+      source._dataPoints,
+      coordinateContext,
+      { cacheToken: source, geometryRevision: source._geometryRevision },
+    );
 
-    for (const dp of source._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
+    for (const [index, dp] of source._dataPoints.entries()) {
+      const x = horizontalCoordinates[index] ?? null;
       const y = series.priceToCoordinate(dp.price);
       points.push({ x, y });
+      if (Number.isFinite(x) && Number.isFinite(y)) projectedPointCount += 1;
+    }
+    if (projectedPointCount > 0) {
+      drawingPerfCounters.recordFinalProjection(projectedPointCount);
     }
 
     this._renderer.update({
@@ -319,6 +359,17 @@ class ShapePaneView implements PrimitivePaneView {
       hovered: source._hovered,
       isPreview: source._isPreview,
       hidden: source._hidden,
+    });
+    const durationMs = drawingPerfNow() - startedAt;
+    drawingPerfCounters.recordSceneRebuild();
+    accumulateDrawingPerfFrameWork({
+      geometryKey: source._id,
+      drawingMainThreadMs: durationMs,
+      sceneProjectPaintMs: durationMs,
+      rawPoints: source._dataPoints.length,
+      renderedPoints: projectedPointCount,
+      visibleEntities: projectedPointCount >= 2 ? 1 : 0,
+      culledEntities: projectedPointCount >= 2 ? 0 : 1,
     });
   }
 
@@ -345,6 +396,7 @@ export class ShapeDrawingPrimitive {
   _hovered: boolean;
   _isPreview: boolean;
   _hidden: boolean;
+  _geometryRevision: number;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
   _paneView: ShapePaneView;
@@ -364,6 +416,7 @@ export class ShapeDrawingPrimitive {
     this._hovered = !!opts.hovered;
     this._isPreview = !!opts.isPreview;
     this._hidden = !!opts.hidden;
+    this._geometryRevision = 1;
 
     this._series = null;
     this._chart = null;
@@ -374,7 +427,10 @@ export class ShapeDrawingPrimitive {
   attached({ chart, series, requestUpdate }: DrawingAttachedParameter): void {
     this._chart = chart;
     this._series = series;
-    this._requestUpdate = requestUpdate;
+    this._requestUpdate = () => {
+      drawingPerfCounters.recordRequestUpdate();
+      requestUpdate();
+    };
   }
 
   detached(): void {
@@ -400,9 +456,11 @@ export class ShapeDrawingPrimitive {
   get fillOpacity() { return this._fillOpacity; }
   get lineStyle() { return this._lineStyle; }
   get selected() { return this._selected; }
+  get geometryRevision() { return this._geometryRevision; }
 
   setDataPoints(points: DrawingDataPoint[]): void {
     this._dataPoints = points;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
@@ -470,9 +528,16 @@ export class ShapeDrawingPrimitive {
     const chart = this._chart;
     const points: ScreenPoint[] = [];
     const coordinateContext = {};
+    const horizontalCoordinates = drawingDataPointsToCoordinates(
+      chart,
+      series,
+      this._dataPoints,
+      coordinateContext,
+      { cacheToken: this, geometryRevision: this._geometryRevision },
+    );
 
-    for (const dp of this._dataPoints) {
-      const x = dataPointToCoordinate(chart, series, dp, coordinateContext);
+    for (const [index, dp] of this._dataPoints.entries()) {
+      const x = horizontalCoordinates[index] ?? null;
       const y = series.priceToCoordinate(dp.price);
       if (x == null || y == null || !isFinite(x) || !isFinite(y)) return null;
       points.push({ x, y });
@@ -488,7 +553,7 @@ export class ShapeDrawingPrimitive {
     return first && second ? boxFromPoints(first, second) : null;
   }
 
-  hitTest(x: number, y: number): DrawingHit | null {
+  hitTestGeometry(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     const box = this.getBoundingBoxScreen();
     if (!box) return null;

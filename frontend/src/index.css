@@ -6694,6 +6694,28 @@ body {
   pointer-events: none;
 }
 
+/* Phase 5 drawing feedback surfaces. Geometry is clipped to the adapter-owned
+   main plot rect; these layers never participate in pointer hit testing. */
+.drawing-interaction-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+}
+
+.drawing-interaction-canvas {
+  position: absolute;
+  display: block;
+  pointer-events: none;
+  user-select: none;
+}
+
+.drawing-interaction-canvas-live-ink {
+  will-change: opacity;
+}
+
 .chart-pane-cursor {
   position: absolute;
   top: 0;

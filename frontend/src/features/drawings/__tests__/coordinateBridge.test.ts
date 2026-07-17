@@ -9,12 +9,18 @@ import {
   dataPointToCoordinate,
   drawingAnchorFromAxisTime,
   drawingAnchorFromCoordinate,
+  getDrawingCoordinateProjectorMode,
   isOrdinalAxisTime,
   logicalToCoordinateInterpolated,
   logicalToInterpolatedSeriesTime,
+  prepareDrawingCoordinateContext,
+  projectDrawingCoordinateResolutions,
   registerDrawingSeriesContext,
   resolveDrawingAnchorToDisplayRow,
+  resolveDrawingDataPointsToCoordinates,
+  resolveDrawingSourceAnchors,
   resolveSourceLineageSpanToCoordinates,
+  setDrawingCoordinateProjectorModeForTests,
   timeToCoordinateInterpolated,
 } from "../../../chart-adapter/coordinateBridge.js";
 import type {
@@ -26,6 +32,7 @@ import type {
   TimeScaleBridge,
 } from "../../../chart-adapter/coordinateBridge.js";
 import { createDrawingLineageIndex } from "../../chart-representation/drawingLineageIndex.js";
+import { createDrawingFrameSnapshotFactory } from "../../../chart-adapter/drawingFrameSnapshot.js";
 import type {
   DisplayRow,
   OrdinalAxisTime,
@@ -1215,9 +1222,9 @@ test("derived drawing resolution reuses one series index across primitives", () 
   assert.equal(resolveDrawingAnchorToDisplayRow(rows, { time: 100 }), target[0]);
   assert.equal(resolveDrawingAnchorToDisplayRow(rows, { time: 200 }), target[1]);
 
-  // Each call probes the first valid time once; only the first builds the
-  // shared O(N) lineage index, so the second primitive does not rescan it.
-  assert.equal(iteratorReads, 3);
+  // The first call builds the shared lineage/coordinate indexes. The second
+  // primitive reuses both without probing or rescanning the display array.
+  assert.equal(iteratorReads, 2);
 });
 
 test("registered drawing series context uses stable display data across primitives", () => {
@@ -1617,4 +1624,200 @@ test("dataPointToCoordinate reuses cached series data for legacy fractional time
   assertAlmostEqual(dataPointToCoordinate(chart, series, { time: 1030, price: 1 }, context), 5);
   assertAlmostEqual(dataPointToCoordinate(chart, series, { time: 1090, price: 1 }, context), 15);
   assert.equal(dataCalls, 1);
+});
+
+test("frame snapshot numeric batches validate once and use the ordered merge-walk", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }, { time: 300 }];
+  const snapshot = createDrawingFrameSnapshotFactory().capture({
+    axisKind: "time",
+    coordinateKey: "symbol:1m:candlestick",
+    seriesData: rows,
+    sourceInterval: "1m",
+    sourceIntervalSeconds: 60,
+    sourceTimeHorizon: 300,
+  });
+  const context: DrawingCoordinateContext = {
+    drawingFrameSnapshot: snapshot,
+    seriesData: rows,
+  };
+
+  const resolutions = resolveDrawingSourceAnchors(
+    rows,
+    [{ time: 100 }, { time: 150 }, { time: 300 }, { time: 400 }],
+    context,
+  );
+  assert.deepEqual(resolutions.map((resolution) => resolution?.kind), [
+    "numeric-time",
+    "numeric-time",
+    "numeric-time",
+    "numeric-time",
+  ]);
+  assert.equal(snapshot.coordinateIndex.validationCount, 1);
+  assert.equal(snapshot.coordinateIndex.stats.numericBatchMergeWalkCount, 1);
+  assert.equal(snapshot.coordinateIndex.stats.numericBinarySearchCount, 0);
+
+  const timeScale: TimeScaleBridge = {
+    timeToCoordinate: (time) => {
+      if (time === 100) return 0;
+      if (time === 200) return 10;
+      if (time === 300) return 20;
+      return null;
+    },
+  };
+  assert.deepEqual(
+    projectDrawingCoordinateResolutions(timeScale, resolutions, context),
+    [0, 5, 20, 30],
+  );
+
+  const chart = { timeScale: () => timeScale };
+  const series = { data: () => rows };
+  assert.deepEqual(resolveDrawingDataPointsToCoordinates(
+    chart,
+    series,
+    [{ time: 150, logical: 999 }, { logical: 2 }],
+    context,
+  ), [5, null]);
+});
+
+test("scalar, batch, and parity projector modes retain canonical source resolutions", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }, { time: 300 }];
+  const snapshot = createDrawingFrameSnapshotFactory().capture({
+    axisKind: "time",
+    coordinateKey: "symbol:1m:line",
+    seriesData: rows,
+  });
+  const anchors = [{ time: 100 }, { time: 150 }, { time: 450 }];
+  const batch = resolveDrawingSourceAnchors(rows, anchors, {
+    drawingCoordinateProjectorMode: "batch",
+    drawingFrameSnapshot: snapshot,
+    seriesData: rows,
+  });
+  const scalar = resolveDrawingSourceAnchors(rows, anchors, {
+    drawingCoordinateProjectorMode: "scalar",
+    drawingFrameSnapshot: snapshot,
+    seriesData: rows,
+  });
+  const parity = resolveDrawingSourceAnchors(rows, anchors, {
+    drawingCoordinateProjectorMode: "parity",
+    drawingFrameSnapshot: snapshot,
+    seriesData: rows,
+  });
+
+  const canonical = (values: typeof batch) => values.map((value) => {
+    if (!value) return null;
+    return value.kind === "numeric-time" ? value.search : value.kind;
+  });
+  assert.deepEqual(canonical(scalar), canonical(batch));
+  assert.deepEqual(canonical(parity), canonical(batch));
+  assert.ok(snapshot.coordinateIndex.stats.numericBatchMergeWalkCount >= 2);
+  assert.ok(snapshot.coordinateIndex.stats.numericBinarySearchCount >= anchors.length * 2);
+
+  const restore = setDrawingCoordinateProjectorModeForTests("scalar");
+  try {
+    assert.equal(getDrawingCoordinateProjectorMode(), "scalar");
+  } finally {
+    restore();
+  }
+  assert.equal(getDrawingCoordinateProjectorMode(), "batch");
+});
+
+test("numeric final projection prefers an exact LWC target coordinate over linear extrapolation", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }];
+  const [resolution] = resolveDrawingSourceAnchors(rows, [{ time: 300 }]);
+  const timeScale: TimeScaleBridge = {
+    timeToCoordinate: (time) => {
+      if (time === 100) return 0;
+      if (time === 200) return 10;
+      if (time === 300) return 37;
+      return null;
+    },
+  };
+  assert.deepEqual(projectDrawingCoordinateResolutions(timeScale, [resolution ?? null]), [37]);
+});
+
+test("derived batch resolution preserves same-time ordinal, gaps, and calendar future semantics", () => {
+  const rows = [
+    displayRow(0, 100, 0),
+    displayRow(1, 100, 1),
+    displayRow(2, 200, 0),
+  ];
+  const lineage = createDrawingLineageIndex(rows);
+  const snapshot = createDrawingFrameSnapshotFactory().capture({
+    axisKind: "derived-ordinal",
+    coordinateKey: "symbol:1mo:renko",
+    drawingProjectionConfig: "dataset-a:renko:10",
+    ordinalSeriesIndex: lineage,
+    seriesData: rows,
+    sourceInterval: "1M",
+    sourceTimeHorizon: Date.UTC(2025, 0, 31) / 1_000,
+  });
+  const futureTime = Date.UTC(2025, 1, 28) / 1_000;
+  const context: DrawingCoordinateContext = {
+    drawingFrameSnapshot: snapshot,
+    drawingProjectionConfig: "dataset-a:renko:10",
+    drawingOrdinalSeriesIndex: lineage,
+    drawingOrdinalSeriesIndexRevision: lineage.revision,
+    seriesData: rows,
+    sourceInterval: "1M",
+    sourceTimeHorizon: Date.UTC(2025, 0, 31) / 1_000,
+  };
+  const resolutions = resolveDrawingSourceAnchors(rows, [{
+    time: 100,
+    sourceOrdinal: 1,
+    sourceProjection: "renko",
+    sourceProjectionConfig: "dataset-a:renko:10",
+  }, { time: 150 }, { time: futureTime }], context);
+  assert.equal(resolutions[0]?.kind, "ordinal-row");
+  if (resolutions[0]?.kind === "ordinal-row") assert.strictEqual(resolutions[0].row, rows[1]);
+  assert.equal(resolutions[1]?.kind, "ordinal-row");
+  assert.equal(resolutions[2]?.kind, "ordinal-future");
+  assert.equal(resolveDrawingSourceAnchors(rows, [{ time: 50 }], context)[0], null);
+
+  const timeScale: TimeScaleBridge = {
+    coordinateToLogical: (x) => x / 10,
+    logicalToCoordinate: (logical) => logical * 10,
+    options: () => ({ barSpacing: 10 }),
+    timeToCoordinate: (time) => (isOrdinalAxisTime(time) ? time.order * 10 : null),
+  };
+  assert.deepEqual(projectDrawingCoordinateResolutions(timeScale, resolutions, context), [10, 10, 30]);
+});
+
+test("registered frame snapshots hydrate the public context and reuse their coordinate index", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 200 }];
+  const snapshot = createDrawingFrameSnapshotFactory().capture({
+    axisKind: "time",
+    coordinateKey: "symbol:1m:bars",
+    seriesData: rows,
+  });
+  let providerReads = 0;
+  const series = { data: () => { throw new Error("snapshot fallback read"); } };
+  registerDrawingSeriesContext(series, {
+    coordinateSnapshotProvider: () => {
+      providerReads += 1;
+      return snapshot;
+    },
+  });
+  const context = prepareDrawingCoordinateContext(series, {});
+  prepareDrawingCoordinateContext(series, context);
+
+  assert.equal(providerReads, 1);
+  assert.strictEqual(context.drawingFrameSnapshot, snapshot);
+  assert.strictEqual(context.drawingCoordinateIndex, snapshot.coordinateIndex);
+  assert.strictEqual(context.seriesData, rows);
+  assert.equal(snapshot.coordinateIndex.validationCount, 1);
+});
+
+test("invalid numeric coordinate indexes fail closed without logical fallback", () => {
+  const rows: DisplayRow[] = [{ time: 100 }, { time: 100 }];
+  const chart: CoordinateChartBridge = {
+    timeScale: () => ({
+      logicalToCoordinate: (logical) => logical * 10,
+      timeToCoordinate: () => null,
+    }),
+  };
+  assert.deepEqual(resolveDrawingDataPointsToCoordinates(
+    chart,
+    { data: () => rows },
+    [{ time: 100, logical: 9 }],
+  ), [null]);
 });

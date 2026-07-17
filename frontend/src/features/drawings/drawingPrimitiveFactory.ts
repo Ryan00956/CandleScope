@@ -228,7 +228,7 @@ export function createTextPrimitive({
   bold,
   italic,
 }: TextFactoryOptions): TextDrawingPrimitive {
-  return new TextDrawingPrimitive({
+  const primitive = new TextDrawingPrimitive({
     id: nextDrawingId("tx"),
     dataPoint,
     text: "",
@@ -237,6 +237,8 @@ export function createTextPrimitive({
     bold: bold || false,
     italic: italic || false,
   });
+  primitive.markUnconfirmedText();
+  return primitive;
 }
 
 export function createPositionPrimitive({

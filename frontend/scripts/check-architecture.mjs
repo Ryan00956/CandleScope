@@ -24,6 +24,9 @@ const RULES = {
   featureRuntimeNoLegacyCompatFields: "feature-runtime-no-legacy-compat-fields",
   marketDataKlineFetchOnlyFeed: "market-data-kline-fetch-only-feed",
   componentNoRawTimeScaleWrite: "component-no-raw-time-scale-write",
+  drawingInteractionNoLocalStorageWrite: "drawing-interaction-no-local-storage-write",
+  drawingPublicRuntimeNoRawChartSeries: "drawing-public-runtime-no-raw-chart-series",
+  drawingWorkerNoChartRuntimeImport: "drawing-worker-no-chart-runtime-import",
   sourceTypescriptOnly: "source-typescript-only",
 };
 
@@ -41,12 +44,78 @@ const strictRuntimeContractFiles = new Set([
 
 const allowedRuntimeContractFields = new Set(["view", "actions", "status"]);
 
+const drawingInteractionHotPathModules = new Set([
+  "src/features/drawings/drawingCreationController",
+  "src/features/drawings/drawingDragResizeController",
+  "src/features/drawings/drawingEraseController",
+  "src/features/drawings/drawingHoverController",
+  "src/features/drawings/drawingInteractionController",
+  "src/features/drawings/drawingKeyboardController",
+  "src/features/drawings/drawingMoveBatch",
+  "src/features/drawings/drawingPointerController",
+  "src/features/drawings/drawingSelectionController",
+  "src/features/drawings/drawingSnapController",
+  "src/features/drawings/drawingTextEditController",
+  "src/features/drawings/freehandStrokeModel",
+  "src/features/drawings/rendering/DrawingInteractionOverlay",
+]);
+
+const drawingPublicContractDeclarations = new Map([
+  ["src/features/drawings/useDrawingRuntime", new Set([
+    "DrawingRuntime",
+    "DrawingRuntimeActions",
+  ])],
+  ["src/features/drawings/drawingToolState", new Set([
+    "DrawingToolStateRuntime",
+  ])],
+  ["src/features/drawings/DrawingEngineHost", new Set([
+    "DrawingEngineApi",
+  ])],
+]);
+
+const rawDrawingPublicPropertyPattern = /\b(?:chart|series|rawChart|rawSeries|chartAdapter|chartApi|seriesApi|chartRef|seriesRef|chartInstance|seriesInstance|mainSeries|chartWidget|chartWidgetRef|getChart|getSeries|getRawChart|getRawSeries|getChartAdapter|getMainSeries)\s*(?:\?|!)?\s*(?::|\()/g;
+const rawDrawingPublicTypePattern = /\b(?:DrawingChartAdapter|IChartApi|ISeriesApi|ChartApi|SeriesApi|ChartWidget|createLightweightChartAdapter)\b/g;
+
 function toProjectPath(filePath, projectDirectory = projectRoot) {
   return path.relative(projectDirectory, filePath).split(path.sep).join("/");
 }
 
 function normalizeModulePath(modulePath) {
   return modulePath.replace(/\.(?:mjs|cjs|mts|cts|js|jsx|ts|tsx)$/, "");
+}
+
+function isTestSourcePath(filePath) {
+  return filePath.includes("/__tests__/")
+    || /\.(?:test|spec)\.(?:ts|tsx)$/.test(filePath);
+}
+
+function isDrawingWorkerModulePath(filePath) {
+  return !isTestSourcePath(filePath)
+    && filePath.startsWith("src/features/drawings/worker/");
+}
+
+function isChartAdapterModulePath(modulePath) {
+  return modulePath === "src/chart-adapter"
+    || modulePath.startsWith("src/chart-adapter/");
+}
+
+function isLightweightChartsImport(specifier) {
+  return specifier === "lightweight-charts"
+    || specifier.startsWith("lightweight-charts/");
+}
+
+function isDrawingInteractionHotPath(filePath) {
+  if (isTestSourcePath(filePath)) return false;
+  const modulePath = normalizeModulePath(filePath);
+  return drawingInteractionHotPathModules.has(modulePath)
+    || modulePath.startsWith("src/features/drawings/interaction/");
+}
+
+function isDrawingPersistenceBoundaryPath(filePath) {
+  const modulePath = normalizeModulePath(filePath);
+  return modulePath.startsWith("src/features/drawings/persistence/")
+    || modulePath === "src/features/drawings/drawingPersistence"
+    || modulePath === "src/features/drawings/useDrawingPersistenceLifecycle";
 }
 
 function allowlistKey(entry) {
@@ -107,9 +176,16 @@ function* importSpecifiers(content) {
   const importPattern = /\b(?:import|export)\b(?:[^'"]*?\bfrom\s*|\s*)["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/gs;
   let match;
   while ((match = importPattern.exec(content))) {
+    const statement = match[0];
+    const explicitTypeOnly = /^(?:import|export)\s+type\b/.test(statement);
+    const namedClause = /^(?:import|export)\s*\{([\s\S]*?)\}\s*from\b/.exec(statement)?.[1];
+    const namedTypeOnly = typeof namedClause === "string"
+      && namedClause.split(",").filter((item) => item.trim().length > 0)
+        .every((item) => /^type\b/.test(item.trim()));
     yield {
       specifier: match[1] || match[2],
       line: lineNumberAt(content, match.index),
+      typeOnly: explicitTypeOnly || namedTypeOnly,
     };
   }
 }
@@ -216,6 +292,19 @@ function checkImports(absPath, filePath, content, projectDirectory) {
   for (const { specifier, line } of importSpecifiers(content)) {
     const target = resolveImportSpecifier(absPath, specifier, projectDirectory);
     const normalizedTarget = normalizeModulePath(target);
+    const lightweightChartsImport = isLightweightChartsImport(specifier);
+    const drawingWorkerRuntimeImport = isDrawingWorkerModulePath(filePath)
+      && (lightweightChartsImport || isChartAdapterModulePath(normalizedTarget));
+
+    if (drawingWorkerRuntimeImport) {
+      addViolation({
+        rule: RULES.drawingWorkerNoChartRuntimeImport,
+        filePath,
+        line,
+        target: normalizedTarget,
+        message: `drawing worker module imports chart runtime dependency ${specifier}; workers must consume pure drawing protocol/geometry modules`,
+      });
+    }
 
     if (isComponentOrAppPath(filePath) && normalizedTarget.startsWith("src/services/")) {
       addViolation({
@@ -247,7 +336,9 @@ function checkImports(absPath, filePath, content, projectDirectory) {
       });
     }
 
-    if (specifier === "lightweight-charts" && !filePath.startsWith("src/chart-adapter/")) {
+    if (lightweightChartsImport
+      && !filePath.startsWith("src/chart-adapter/")
+      && !drawingWorkerRuntimeImport) {
       addViolation({
         rule: RULES.chartAdapterLightweightImport,
         filePath,
@@ -310,6 +401,125 @@ function checkLocalStorage(filePath, content) {
       filePath,
       line: lineNumberAt(stripped, match.index),
       message: "component/app layer accesses localStorage directly",
+    });
+  }
+}
+
+function checkDrawingWorkerReachableImports(sourceModules, projectDirectory) {
+  const resolveSourceModule = (importer, specifier) => {
+    if (!specifier.startsWith(".") && !specifier.startsWith("src/")) return null;
+    const normalized = normalizeModulePath(
+      resolveImportSpecifier(importer.absPath, specifier, projectDirectory),
+    );
+    return sourceModules.get(normalized) ?? sourceModules.get(`${normalized}/index`) ?? null;
+  };
+
+  for (const root of sourceModules.values()) {
+    if (!isDrawingWorkerModulePath(root.filePath)) continue;
+    const visited = new Set();
+    const reportedTargets = new Set();
+    const visit = (module, chain) => {
+      if (visited.has(module.filePath)) return;
+      visited.add(module.filePath);
+      for (const imported of importSpecifiers(module.content)) {
+        if (imported.typeOnly) continue;
+        const normalizedTarget = normalizeModulePath(resolveImportSpecifier(
+          module.absPath,
+          imported.specifier,
+          projectDirectory,
+        ));
+        const forbidden = isLightweightChartsImport(imported.specifier)
+          || isChartAdapterModulePath(normalizedTarget);
+        if (forbidden && module.filePath !== root.filePath
+          && !reportedTargets.has(normalizedTarget)) {
+          reportedTargets.add(normalizedTarget);
+          addViolation({
+            rule: RULES.drawingWorkerNoChartRuntimeImport,
+            filePath: root.filePath,
+            line: chain[0]?.line ?? 1,
+            target: normalizedTarget,
+            message: `drawing worker reaches chart runtime dependency through ${[
+              root.filePath,
+              ...chain.map((item) => item.target),
+              normalizedTarget,
+            ].join(" -> ")}`,
+          });
+          continue;
+        }
+        const targetModule = resolveSourceModule(module, imported.specifier);
+        if (!targetModule || isTestSourcePath(targetModule.filePath)) continue;
+        visit(targetModule, [...chain, { line: imported.line, target: targetModule.filePath }]);
+      }
+    };
+    visit(root, []);
+  }
+}
+
+function checkDrawingHotPathReachableLocalStorageWrites(sourceModules, projectDirectory) {
+  const resolveSourceModule = (importer, specifier) => {
+    if (!specifier.startsWith(".") && !specifier.startsWith("src/")) return null;
+    const normalized = normalizeModulePath(
+      resolveImportSpecifier(importer.absPath, specifier, projectDirectory),
+    );
+    return sourceModules.get(normalized) ?? sourceModules.get(`${normalized}/index`) ?? null;
+  };
+
+  for (const root of sourceModules.values()) {
+    if (!isDrawingInteractionHotPath(root.filePath)) continue;
+    const visited = new Set();
+    const visit = (module, chain) => {
+      if (visited.has(module.filePath) || isDrawingPersistenceBoundaryPath(module.filePath)) return;
+      visited.add(module.filePath);
+      const writes = drawingLocalStorageWriteIndexes(module.content);
+      if (module.filePath !== root.filePath && writes.indexes.length > 0) {
+        addViolation({
+          rule: RULES.drawingInteractionNoLocalStorageWrite,
+          filePath: root.filePath,
+          line: chain[0]?.line ?? 1,
+          target: module.filePath,
+          message: `drawing interaction hot path reaches a synchronous localStorage write through ${[
+            root.filePath,
+            ...chain.map((item) => item.target),
+          ].join(" -> ")}; isolate persistence behind the explicit boundary`,
+        });
+        return;
+      }
+      for (const imported of importSpecifiers(module.content)) {
+        if (imported.typeOnly) continue;
+        const targetModule = resolveSourceModule(module, imported.specifier);
+        if (!targetModule || isTestSourcePath(targetModule.filePath)) continue;
+        visit(targetModule, [...chain, { line: imported.line, target: targetModule.filePath }]);
+      }
+    };
+    visit(root, []);
+  }
+}
+
+function drawingLocalStorageWriteIndexes(content) {
+  const stripped = stripCommentsAndStrings(content);
+  const indexes = [];
+  const directSetItemPattern = /(?:(?:window|globalThis|self)\s*(?:\?\.|\.)\s*)?\blocalStorage\s*(?:\?\.|\.)\s*setItem\s*(?:\?\.)?\s*\(/g;
+  let match;
+  while ((match = directSetItemPattern.exec(stripped))) indexes.push(match.index);
+  const storageAliases = new Set();
+  const aliasPattern = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:(?:window|globalThis|self)\s*(?:\?\.|\.)\s*)?localStorage\b/g;
+  while ((match = aliasPattern.exec(stripped))) storageAliases.add(match[1]);
+  for (const alias of storageAliases) {
+    const aliasWritePattern = new RegExp(`\\b${alias}\\s*(?:\\?\\.|\\.)\\s*setItem\\s*(?:\\?\\.)?\\s*\\(`, "g");
+    while ((match = aliasWritePattern.exec(stripped))) indexes.push(match.index);
+  }
+  return { indexes: [...new Set(indexes)].sort((left, right) => left - right), stripped };
+}
+
+function checkDrawingInteractionLocalStorageWrites(filePath, content) {
+  if (!isDrawingInteractionHotPath(filePath)) return;
+  const { indexes, stripped } = drawingLocalStorageWriteIndexes(content);
+  for (const index of indexes) {
+    addViolation({
+      rule: RULES.drawingInteractionNoLocalStorageWrite,
+      filePath,
+      line: lineNumberAt(stripped, index),
+      message: "drawing interaction hot path writes localStorage directly; commit through the drawing persistence boundary",
     });
   }
 }
@@ -389,6 +599,70 @@ function findMatchingBrace(content, openIndex) {
   return -1;
 }
 
+function findTypeAliasTerminator(content, startIndex) {
+  let depth = 0;
+  for (let index = startIndex; index < content.length; index += 1) {
+    const char = content[index];
+    if (char === "{" || char === "[" || char === "(") depth += 1;
+    if (char === "}" || char === "]" || char === ")") depth -= 1;
+    if (char === ";" && depth === 0) return index + 1;
+  }
+  return content.length;
+}
+
+function exportedDrawingContractSegments(content, declarationNames) {
+  const stripped = stripCommentsAndStrings(content);
+  const declarationPattern = /\bexport\s+(interface|type)\s+([A-Za-z_$][\w$]*)\b/g;
+  const segments = [];
+  let match;
+  while ((match = declarationPattern.exec(stripped))) {
+    const [, declarationKind, declarationName] = match;
+    if (!declarationNames.has(declarationName)) continue;
+    let endIndex = stripped.length;
+    if (declarationKind === "interface") {
+      const openIndex = stripped.indexOf("{", declarationPattern.lastIndex);
+      if (openIndex === -1) continue;
+      const closeIndex = findMatchingBrace(stripped, openIndex);
+      if (closeIndex === -1) continue;
+      endIndex = closeIndex + 1;
+    } else {
+      endIndex = findTypeAliasTerminator(stripped, declarationPattern.lastIndex);
+    }
+    segments.push({
+      declarationName,
+      startIndex: match.index,
+      text: stripped.slice(match.index, endIndex),
+    });
+  }
+  return { segments, stripped };
+}
+
+function firstPatternMatch(pattern, content) {
+  pattern.lastIndex = 0;
+  return pattern.exec(content);
+}
+
+function checkDrawingPublicRuntimeRawChartSeries(filePath, content) {
+  const declarationNames = drawingPublicContractDeclarations.get(normalizeModulePath(filePath));
+  if (!declarationNames) return;
+  const { segments, stripped } = exportedDrawingContractSegments(content, declarationNames);
+  for (const segment of segments) {
+    const propertyMatch = firstPatternMatch(rawDrawingPublicPropertyPattern, segment.text);
+    const typeMatch = firstPatternMatch(rawDrawingPublicTypePattern, segment.text);
+    const matches = [propertyMatch, typeMatch].filter(Boolean);
+    if (matches.length === 0) continue;
+    const firstMatch = matches.reduce((earliest, candidate) => (
+      candidate.index < earliest.index ? candidate : earliest
+    ));
+    addViolation({
+      rule: RULES.drawingPublicRuntimeNoRawChartSeries,
+      filePath,
+      line: lineNumberAt(stripped, segment.startIndex + firstMatch.index),
+      message: `public drawing contract ${segment.declarationName} exposes raw chart/series capability ${firstMatch[0].trim()}`,
+    });
+  }
+}
+
 function findLastReturnObject(content) {
   const returnPattern = /\breturn\s*\{/g;
   let match;
@@ -457,7 +731,19 @@ export function runArchitectureCheck({
   usedAllowlistEntries.clear();
   violations.length = 0;
 
-  for (const absPath of walkSourceFiles(sourceDirectory)) {
+  const sourceFiles = walkSourceFiles(sourceDirectory);
+  const sourceModules = new Map();
+  for (const absPath of sourceFiles) {
+    if (sourceFileKind(absPath) !== "typescript") continue;
+    const filePath = toProjectPath(absPath, projectDirectory);
+    sourceModules.set(normalizeModulePath(filePath), {
+      absPath,
+      content: fs.readFileSync(absPath, "utf8"),
+      filePath,
+    });
+  }
+
+  for (const absPath of sourceFiles) {
     const filePath = toProjectPath(absPath, projectDirectory);
     const fileKind = sourceFileKind(absPath);
     if (fileKind !== "typescript") {
@@ -474,14 +760,19 @@ export function runArchitectureCheck({
       });
       continue;
     }
-    const content = fs.readFileSync(absPath, "utf8");
+    const content = sourceModules.get(normalizeModulePath(filePath))?.content
+      ?? fs.readFileSync(absPath, "utf8");
     checkImports(absPath, filePath, content, projectDirectory);
     checkLocalStorage(filePath, content);
+    checkDrawingInteractionLocalStorageWrites(filePath, content);
     checkComponentRawTimeScaleWrites(filePath, content);
     checkFeatureRuntimeJsx(filePath, content);
     checkAppRuntimeBridge(filePath, content);
     checkFeatureRuntimeLegacyCompatFields(filePath, content);
+    checkDrawingPublicRuntimeRawChartSeries(filePath, content);
   }
+  checkDrawingWorkerReachableImports(sourceModules, projectDirectory);
+  checkDrawingHotPathReachableLocalStorageWrites(sourceModules, projectDirectory);
 
   for (const entry of allowlist) {
     const key = allowlistKey(entry);

@@ -4,10 +4,15 @@ import {
   buildVisibleRangeSnapshot,
   disposeChartPaneSurface,
   hasCurrentDatasetOwnership as hasCurrentDatasetOwnershipProduction,
+  isMainPanePlotPointerStart,
+  removedDrawingSubPaneScopeKeys,
+  prepareDrawingSurfaceForSeriesReplacement,
+  resolveDrawingSurfaceChartTypeBoundary,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
+  shouldInvalidateDrawingFrameOnPointerRelease,
   shouldPublishUserViewportRange,
   shouldRequestMoreLeft,
   shouldRestoreChartViewport as shouldRestoreChartViewportProduction,
@@ -28,17 +33,19 @@ function shouldRestoreChartViewport(value: object): boolean {
 
 test("chart disposal detaches drawings and disables auto-size before removal", () => {
   const calls: unknown[] = [];
-  disposeChartPaneSurface({
+  assert.equal(disposeChartPaneSurface({
     applyOptions: (options) => calls.push(["options", options]),
     remove: () => calls.push(["remove"]),
   }, {
-    beforeRemove: () => calls.push(["drawings"]),
-  });
+    beforeRemove: () => { calls.push(["drawings"]); },
+    afterRemove: () => { calls.push(["drawings-complete"]); },
+  }), true);
 
   assert.deepEqual(calls, [
     ["drawings"],
     ["options", { autoSize: false }],
     ["remove"],
+    ["drawings-complete"],
   ]);
 });
 
@@ -55,9 +62,9 @@ test("chart disposal still removes a surface when disabling auto-size fails", ()
   assert.deepEqual(calls, ["options", "remove"]);
 });
 
-test("chart disposal continues when drawing teardown fails", () => {
+test("chart disposal reports failure and continues when drawing teardown throws", () => {
   const calls: unknown[] = [];
-  assert.doesNotThrow(() => disposeChartPaneSurface({
+  assert.equal(disposeChartPaneSurface({
     applyOptions: () => calls.push("options"),
     remove: () => calls.push("remove"),
   }, {
@@ -65,9 +72,90 @@ test("chart disposal continues when drawing teardown fails", () => {
       calls.push("drawings");
       throw new Error("stale drawing runtime");
     },
-  }));
+    afterRemove: () => { calls.push("drawings-complete"); },
+  }), false);
 
-  assert.deepEqual(calls, ["drawings", "options", "remove"]);
+  assert.deepEqual(calls, ["drawings", "options", "remove", "drawings-complete"]);
+});
+
+test("sub-pane drawing cleanup never applies previous ids to a new symbol base", () => {
+  assert.deepEqual(removedDrawingSubPaneScopeKeys({
+    currentBase: "binance:spot:ETHUSDT",
+    currentIds: new Set(["rsi"]),
+    previousBase: "binance:spot:BTCUSDT",
+    previousIds: new Set(["rsi", "macd"]),
+  }), []);
+  assert.deepEqual(removedDrawingSubPaneScopeKeys({
+    currentBase: "binance:spot:BTCUSDT",
+    currentIds: new Set(["rsi"]),
+    previousBase: "binance:spot:BTCUSDT",
+    previousIds: new Set(["rsi", "macd"]),
+  }), ["binance:spot:BTCUSDT__macd"]);
+});
+
+test("main-series drawing preparation restores partial and throwing failures", () => {
+  const calls: string[] = [];
+  assert.equal(prepareDrawingSurfaceForSeriesReplacement(() => {
+    calls.push("prepare-false");
+    return false;
+  }, () => calls.push("restore-false")), false);
+  assert.equal(prepareDrawingSurfaceForSeriesReplacement(() => {
+    calls.push("prepare-throw");
+    throw new Error("partial detach");
+  }, () => calls.push("restore-throw")), false);
+  assert.equal(prepareDrawingSurfaceForSeriesReplacement(() => {
+    calls.push("prepare-success");
+    return true;
+  }, () => calls.push("restore-unexpected")), true);
+  assert.deepEqual(calls, [
+    "prepare-false",
+    "restore-false",
+    "prepare-throw",
+    "restore-throw",
+    "prepare-success",
+  ]);
+});
+
+test("full chart recreation carries only a real chart-type boundary", () => {
+  assert.deepEqual(
+    resolveDrawingSurfaceChartTypeBoundary("candlestick", "renko"),
+    {
+      kind: "chart-type",
+      beforeValue: "candlestick",
+      afterValue: "renko",
+    },
+  );
+  assert.equal(resolveDrawingSurfaceChartTypeBoundary("line", "line"), undefined);
+  assert.equal(resolveDrawingSurfaceChartTypeBoundary(null, "line"), undefined);
+});
+
+test("chart disposal reports explicit drawing failure while still releasing the chart", () => {
+  const calls: string[] = [];
+  assert.equal(disposeChartPaneSurface({
+    applyOptions: () => calls.push("options"),
+    remove: () => calls.push("remove"),
+  }, {
+    beforeRemove: () => {
+      calls.push("drawings");
+      return false;
+    },
+    afterRemove: () => { calls.push("drawings-complete"); },
+  }), false);
+
+  assert.deepEqual(calls, ["drawings", "options", "remove", "drawings-complete"]);
+});
+
+test("chart disposal invalidates drawing credentials even when remove throws", () => {
+  const calls: string[] = [];
+  assert.equal(disposeChartPaneSurface({
+    remove: () => {
+      calls.push("remove");
+      throw new Error("remove failed");
+    },
+  }, {
+    afterRemove: () => { calls.push("drawings-complete"); },
+  }), false);
+  assert.deepEqual(calls, ["remove", "drawings-complete"]);
 });
 
 test("visible range snapshots include the fitted time and logical coverage", () => {
@@ -99,6 +187,81 @@ test("only user-driven viewport changes publish persistence and interactive cove
     isSyncing: true,
     range,
     userInteracted: true,
+  }), false);
+});
+
+test("pointer release only deduplicates drawing invalidation after a logical-range change", () => {
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    logicalRangeChanged: true,
+    mainPanePlotStart: true,
+    maxHorizontalMovementPx: 24,
+    maxVerticalMovementPx: 2,
+    pointerActive: true,
+  }), false);
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    logicalRangeChanged: true,
+    mainPanePlotStart: false,
+    maxHorizontalMovementPx: 24,
+    maxVerticalMovementPx: 2,
+    pointerActive: true,
+  }), true, "a price-axis/pane gesture still invalidates after an interleaved range callback");
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    logicalRangeChanged: true,
+    mainPanePlotStart: true,
+    maxHorizontalMovementPx: 0,
+    maxVerticalMovementPx: 0,
+    pointerActive: true,
+  }), true, "a click is not a confirmed pan");
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    drawingToolActive: true,
+    logicalRangeChanged: true,
+    mainPanePlotStart: true,
+    maxHorizontalMovementPx: 24,
+    maxVerticalMovementPx: 2,
+    pointerActive: true,
+  }), true, "an active drawing tool owns the gesture even when range changes");
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease({
+    logicalRangeChanged: false,
+    mainPanePlotStart: true,
+    maxHorizontalMovementPx: 24,
+    maxVerticalMovementPx: 2,
+    pointerActive: true,
+  }), true, "movement without a range change is not a confirmed pan");
+  assert.equal(shouldInvalidateDrawingFrameOnPointerRelease(), false);
+});
+
+test("main-pane pan classification excludes price scale, time scale, separators, and unknown geometry", () => {
+  const containerRect = { left: 100, top: 50 };
+  const plotRect = { x: 20, y: 0, width: 800, height: 400 };
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 300,
+    clientY: 200,
+    containerRect,
+    plotRect,
+  }), true);
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 930,
+    clientY: 200,
+    containerRect,
+    plotRect,
+  }), false, "right price scale is outside the plot");
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 300,
+    clientY: 455,
+    containerRect,
+    plotRect,
+  }), false, "time scale and bottom pane boundary are outside the plot");
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 300,
+    clientY: 446,
+    containerRect,
+    plotRect,
+  }), false, "the guarded pane-separator edge is not a pan start");
+  assert.equal(isMainPanePlotPointerStart({
+    clientX: 300,
+    clientY: 200,
+    containerRect: null,
+    plotRect,
   }), false);
 });
 

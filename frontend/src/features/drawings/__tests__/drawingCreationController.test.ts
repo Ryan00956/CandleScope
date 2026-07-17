@@ -18,6 +18,7 @@ import type {
   PositionToolId,
   ScreenPoint,
 } from "../drawingTypes.js";
+import type { DrawingCommand } from "../core/drawingCommands.js";
 import type { FreehandDrawingPrimitive } from "../primitives/FreehandDrawingPrimitive.js";
 import type { PositionDrawingPrimitive } from "../primitives/PositionDrawingPrimitive.js";
 import type { TextDrawingPrimitive } from "../primitives/TextDrawingPrimitive.js";
@@ -92,6 +93,481 @@ function sourceLineageCaptureBatch(identity: object = {}) {
   };
 }
 
+test("confirmed attach failure never publishes or persists a new primitive", () => {
+  const freehandPrimitives: { current: DrawingPrimitive[] } = { current: [] };
+  const currentFreehandRef: { current: FreehandDrawingPrimitive | null } = { current: null };
+  const freehandDraftRef: { current: FreehandStrokeDraft | null } = { current: null };
+  const isDrawingFreehandRef = { current: false };
+  assert.equal(startFreehandStroke({
+    tool: "pen",
+    pos: { x: 10, y: 20 },
+    e: eventStub(),
+    primitivesRef: freehandPrimitives,
+    currentFreehandRef,
+    freehandDraftRef,
+    isDrawingFreehandRef,
+    attachPrim: () => false,
+    screenToData: () => ({ time: 1, price: 1 }),
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+  }), true);
+  assert.deepEqual(freehandPrimitives.current, []);
+  assert.equal(currentFreehandRef.current, null);
+  assert.equal(freehandDraftRef.current, null);
+  assert.equal(isDrawingFreehandRef.current, false);
+
+  const textPrimitives: { current: DrawingPrimitive[] } = { current: [] };
+  let textEditorStarts = 0;
+  assert.equal(placeTextDrawing({
+    pos: { x: 10, y: 20 },
+    e: eventStub(),
+    primitivesRef: textPrimitives,
+    attachPrim: () => false,
+    startTextEditing: () => { textEditorStarts += 1; return true; },
+    cancelTextEditing: () => true,
+    screenToDrawingData: () => ({ time: 1, price: 1 }),
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    textFontSizeRef: { current: 14 },
+    textBoldRef: { current: false },
+    textItalicRef: { current: false },
+  }), true);
+  assert.deepEqual(textPrimitives.current, []);
+  assert.equal(textEditorStarts, 0);
+
+  const positionPrimitives: { current: DrawingPrimitive[] } = { current: [] };
+  let selected = 0;
+  let persisted = 0;
+  assert.equal(placePositionDrawing({
+    tool: "position-long",
+    pos: { x: 100, y: 20 },
+    e: eventStub(),
+    primitivesRef: positionPrimitives,
+    attachPrim: () => false,
+    selectPrimitive: () => { selected += 1; },
+    persistDrawings: () => { persisted += 1; },
+    screenToDrawingData: (x) => x === 100
+      ? { time: 1, price: 10 }
+      : { time: 2, price: 10 },
+    getChartAdapter: () => structuralMock<DrawingChartAdapter>({
+      isReady: () => true,
+      getVisiblePriceRange: () => 100,
+    }),
+    chartContainerRef: {
+      current: structuralMock<HTMLElement>({ clientHeight: 400, clientWidth: 800 }),
+    },
+    drawingSnapEnabledRef: { current: true },
+    positionSizeRef: { current: 1_000 },
+  }), true);
+  assert.deepEqual(positionPrimitives.current, []);
+  assert.equal(selected, 0);
+  assert.equal(persisted, 0);
+
+  const axisPrimitives: { current: DrawingPrimitive[] } = { current: [] };
+  const draggingRef = { current: null };
+  assert.equal(beginAxisLineDrawing({
+    tool: "line-horizontal",
+    pos: { x: 10, y: 20 },
+    e: eventStub(),
+    primitivesRef: axisPrimitives,
+    anchorDataRef: { current: null },
+    previewRef: { current: null },
+    draggingRef,
+    attachPrim: () => false,
+    selectPrimitive: () => { selected += 1; },
+    persistDrawings: () => true,
+    removePreview() { return true; },
+    screenToDrawingData: () => ({ time: 1, price: 10 }),
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+  }), true);
+  assert.deepEqual(axisPrimitives.current, []);
+  assert.equal(draggingRef.current, null);
+  assert.equal(selected, 0);
+
+  const previewAnchorRef = { current: null as DrawingDataPoint | null };
+  const failedPreviewRef = { current: null as TwoPointDrawingPrimitive | null };
+  assert.equal(beginTwoPointDrawing({
+    tool: "line-segment",
+    pos: { x: 10, y: 20 },
+    e: eventStub(),
+    anchorDataRef: previewAnchorRef,
+    previewRef: failedPreviewRef,
+    attachPrim: () => false,
+    screenToDrawingData: () => ({ time: 1, price: 10 }),
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    fibLevelsRef: { current: [] },
+    fibInvertedRef: { current: false },
+  }), true);
+  assert.equal(previewAnchorRef.current, null);
+  assert.equal(failedPreviewRef.current, null);
+
+  const committedAnchor = { time: 1, price: 10 };
+  const retainedPreview = structuralMock<TwoPointDrawingPrimitive>({ id: "__preview__" });
+  const committedAnchorRef = { current: committedAnchor };
+  const retainedPreviewRef = { current: retainedPreview };
+  const surfaceCalls: Array<[string, DrawingPrimitive]> = [];
+  assert.equal(commitTwoPointDrawing({
+    tool: "line-segment",
+    pos: { x: 20, y: 30 },
+    e: eventStub(),
+    primitivesRef: { current: [] },
+    anchorDataRef: committedAnchorRef,
+    previewRef: retainedPreviewRef,
+    attachPrim: (primitive) => {
+      surfaceCalls.push(["attach", primitive]);
+      return primitive === retainedPreview;
+    },
+    detachPrim: (primitive) => {
+      surfaceCalls.push(["detach", primitive]);
+      return primitive === retainedPreview;
+    },
+    selectPrimitive: () => { selected += 1; },
+    persistDrawings: () => { persisted += 1; },
+    screenToDrawingData: () => ({ time: 2, price: 20 }),
+    dataToScreen: () => ({ x: 0, y: 0 }),
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    fibLevelsRef: { current: [] },
+    fibInvertedRef: { current: false },
+  }), true);
+  assert.strictEqual(committedAnchorRef.current, committedAnchor);
+  assert.strictEqual(retainedPreviewRef.current, retainedPreview);
+  assert.equal(surfaceCalls[0]?.[0], "detach");
+  assert.strictEqual(surfaceCalls[0]?.[1], retainedPreview);
+  assert.equal(surfaceCalls[1]?.[0], "attach");
+  assert.notStrictEqual(surfaceCalls[1]?.[1], retainedPreview);
+  assert.deepEqual(surfaceCalls[2], ["attach", retainedPreview]);
+  assert.equal(selected, 0);
+  assert.equal(persisted, 0);
+});
+
+test("text placement immediately cancels an editor draft whose coordinate is unavailable", () => {
+  for (const cancelled of [true, false]) {
+    const primitivesRef: { current: DrawingPrimitive[] } = { current: [] };
+    const attached: DrawingPrimitive[] = [];
+    let trackedDraft: TextDrawingPrimitive | null = null;
+    let cancelOptions: Readonly<{ clearSelection?: boolean; exitTool?: boolean }> | undefined;
+
+    assert.equal(placeTextDrawing({
+      pos: { x: 10, y: 20 },
+      e: eventStub(),
+      primitivesRef,
+      attachPrim(primitive) {
+        attached.push(primitive);
+        return true;
+      },
+      startTextEditing(primitive) {
+        trackedDraft = primitive;
+        return false;
+      },
+      cancelTextEditing(options) {
+        cancelOptions = options;
+        if (cancelled) primitivesRef.current = [];
+        return cancelled;
+      },
+      screenToDrawingData: () => ({ time: 1, price: 1 }),
+      drawingSnapEnabledRef: { current: true },
+      penColorRef: { current: "#fff" },
+      textFontSizeRef: { current: 14 },
+      textBoldRef: { current: false },
+      textItalicRef: { current: false },
+    }), true);
+
+    assert.equal(attached.length, 1);
+    assert.strictEqual(trackedDraft, attached[0]);
+    assert.equal(
+      structuralMock<TextDrawingPrimitive>(mustBeDefined(attached[0])).isUnconfirmedText,
+      true,
+    );
+    assert.deepEqual(cancelOptions, { clearSelection: true, exitTool: false });
+    assert.equal(
+      primitivesRef.current.length,
+      cancelled ? 0 : 1,
+      "a failed checked detach keeps the explicitly tracked draft retryable",
+    );
+  }
+});
+
+test("axis-line creation fails closed when an existing preview cannot detach", () => {
+  const anchor = { time: 1, price: 10 };
+  const preview = structuralMock<TwoPointDrawingPrimitive>({ id: "__preview__" });
+  const anchorDataRef = { current: anchor };
+  const previewRef = { current: preview };
+  const draggingRef = { current: null };
+  let attached = 0;
+  let persisted = 0;
+  let selected = 0;
+  let converted = 0;
+
+  assert.equal(beginAxisLineDrawing({
+    tool: "line-horizontal",
+    pos: { x: 10, y: 20 },
+    e: eventStub(),
+    primitivesRef: { current: [] },
+    anchorDataRef,
+    previewRef,
+    draggingRef,
+    attachPrim() { attached += 1; return true; },
+    selectPrimitive() { selected += 1; },
+    persistDrawings() { persisted += 1; return true; },
+    removePreview: () => false,
+    screenToDrawingData() { converted += 1; return { time: 2, price: 20 }; },
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+  }), true);
+
+  assert.strictEqual(anchorDataRef.current, anchor);
+  assert.strictEqual(previewRef.current, preview);
+  assert.equal(draggingRef.current, null);
+  assert.equal(converted, 0);
+  assert.equal(attached, 0);
+  assert.equal(persisted, 0);
+  assert.equal(selected, 0);
+});
+
+test("invalid create payloads are rejected before final surface attachment", () => {
+  let positionAttaches = 0;
+  let positionPersists = 0;
+  assert.equal(placePositionDrawing({
+    tool: "position-long",
+    pos: { x: 100, y: 20 },
+    e: eventStub(),
+    primitivesRef: { current: [] },
+    attachPrim() { positionAttaches += 1; return true; },
+    detachPrim: () => true,
+    selectPrimitive() {},
+    persistDrawings() { positionPersists += 1; return true; },
+    screenToDrawingData: (x) => x === 100
+      ? { time: 1, price: 10 }
+      : { time: 2, price: 10 },
+    getChartAdapter: () => structuralMock<DrawingChartAdapter>({
+      isReady: () => true,
+      getVisiblePriceRange: () => 100,
+    }),
+    chartContainerRef: {
+      current: structuralMock<HTMLElement>({ clientHeight: 400, clientWidth: 800 }),
+    },
+    drawingSnapEnabledRef: { current: true },
+    positionSizeRef: { current: Number.POSITIVE_INFINITY },
+  }), true);
+  assert.equal(positionAttaches, 0);
+  assert.equal(positionPersists, 0);
+
+  const anchor = { time: 1, price: 10 };
+  const preview = structuralMock<TwoPointDrawingPrimitive>({ id: "__preview__" });
+  const anchorDataRef = { current: anchor };
+  const previewRef = { current: preview };
+  let finalAttaches = 0;
+  let previewDetaches = 0;
+  let fibPersists = 0;
+  assert.equal(commitTwoPointDrawing({
+    tool: "fibonacci",
+    pos: { x: 20, y: 30 },
+    e: eventStub(),
+    primitivesRef: { current: [] },
+    anchorDataRef,
+    previewRef,
+    attachPrim() { finalAttaches += 1; return true; },
+    detachPrim() { previewDetaches += 1; return true; },
+    selectPrimitive() {},
+    persistDrawings() { fibPersists += 1; return true; },
+    screenToDrawingData: () => ({ time: 2, price: 20 }),
+    dataToScreen: () => ({ x: 0, y: 0 }),
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    fibLevelsRef: {
+      current: [{ level: Number.POSITIVE_INFINITY, color: "#fff", enabled: true }],
+    },
+    fibInvertedRef: { current: false },
+  }), true);
+  assert.strictEqual(anchorDataRef.current, anchor);
+  assert.strictEqual(previewRef.current, preview);
+  assert.equal(finalAttaches, 0);
+  assert.equal(previewDetaches, 0);
+  assert.equal(fibPersists, 0);
+});
+
+test("persistence rejection compensates an attached created primitive before selection", () => {
+  const primitivesRef: { current: DrawingPrimitive[] } = { current: [] };
+  const attached: DrawingPrimitive[] = [];
+  const detached: DrawingPrimitive[] = [];
+  let selected = 0;
+  assert.equal(placePositionDrawing({
+    tool: "position-short",
+    pos: { x: 100, y: 20 },
+    e: eventStub(),
+    primitivesRef,
+    attachPrim(primitive) { attached.push(primitive); return true; },
+    detachPrim(primitive) { detached.push(primitive); return true; },
+    selectPrimitive() { selected += 1; },
+    persistDrawings: () => false,
+    screenToDrawingData: (x) => x === 100
+      ? { time: 1, price: 10 }
+      : { time: 2, price: 10 },
+    getChartAdapter: () => structuralMock<DrawingChartAdapter>({
+      isReady: () => true,
+      getVisiblePriceRange: () => 100,
+    }),
+    chartContainerRef: {
+      current: structuralMock<HTMLElement>({ clientHeight: 400, clientWidth: 800 }),
+    },
+    drawingSnapEnabledRef: { current: true },
+    positionSizeRef: { current: 1_000 },
+  }), true);
+  assert.equal(attached.length, 1);
+  assert.deepEqual(detached, attached);
+  assert.deepEqual(primitivesRef.current, []);
+  assert.equal(selected, 0);
+});
+
+test("two-point preview detach failure never attaches or publishes the candidate", () => {
+  const anchor = { time: 1, price: 10 };
+  const preview = structuralMock<TwoPointDrawingPrimitive>({ id: "__preview__" });
+  const anchorDataRef = { current: anchor };
+  const previewRef = { current: preview };
+  const primitivesRef: { current: DrawingPrimitive[] } = { current: [] };
+  const attached: DrawingPrimitive[] = [];
+  const rolledBack: DrawingPrimitive[] = [];
+  let selected = 0;
+  let persisted = 0;
+
+  assert.equal(commitTwoPointDrawing({
+    tool: "line-segment",
+    pos: { x: 20, y: 30 },
+    e: eventStub(),
+    primitivesRef,
+    anchorDataRef,
+    previewRef,
+    attachPrim(primitive) {
+      attached.push(primitive);
+      return true;
+    },
+    detachPrim(primitive) {
+      if (primitive === preview) return false;
+      rolledBack.push(primitive);
+      return true;
+    },
+    selectPrimitive: () => { selected += 1; },
+    persistDrawings: () => { persisted += 1; },
+    screenToDrawingData: () => ({ time: 2, price: 20 }),
+    dataToScreen: () => ({ x: 0, y: 0 }),
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    fibLevelsRef: { current: [] },
+    fibInvertedRef: { current: false },
+  }), true);
+
+  assert.equal(attached.length, 0);
+  assert.deepEqual(rolledBack, []);
+  assert.strictEqual(anchorDataRef.current, anchor);
+  assert.strictEqual(previewRef.current, preview);
+  assert.deepEqual(primitivesRef.current, []);
+  assert.equal(selected, 0);
+  assert.equal(persisted, 0);
+});
+
+test("failed final attach with failed preview compensation releases the detached draft", () => {
+  const anchor = { time: 1, price: 10 };
+  const preview = structuralMock<TwoPointDrawingPrimitive>({ id: "__preview__" });
+  const anchorDataRef = { current: anchor };
+  const previewRef = { current: preview };
+  const primitivesRef: { current: DrawingPrimitive[] } = { current: [] };
+  const attached: DrawingPrimitive[] = [];
+  const detached: DrawingPrimitive[] = [];
+  let selected = 0;
+  let persisted = 0;
+
+  assert.equal(commitTwoPointDrawing({
+    tool: "line-segment",
+    pos: { x: 20, y: 30 },
+    e: eventStub(),
+    primitivesRef,
+    anchorDataRef,
+    previewRef,
+    attachPrim(primitive) {
+      attached.push(primitive);
+      return false;
+    },
+    detachPrim(primitive) {
+      detached.push(primitive);
+      return true;
+    },
+    selectPrimitive: () => { selected += 1; },
+    persistDrawings: () => { persisted += 1; },
+    screenToDrawingData: () => ({ time: 2, price: 20 }),
+    dataToScreen: () => ({ x: 0, y: 0 }),
+    drawingSnapEnabledRef: { current: true },
+    penColorRef: { current: "#fff" },
+    penSizeRef: { current: 2 },
+    fibLevelsRef: { current: [] },
+    fibInvertedRef: { current: false },
+  }), true);
+
+  assert.deepEqual(detached, [preview]);
+  assert.equal(attached.length, 2);
+  assert.notStrictEqual(attached[0], preview);
+  assert.strictEqual(attached[1], preview);
+  assert.equal(anchorDataRef.current, null);
+  assert.equal(previewRef.current, null);
+  assert.deepEqual(primitivesRef.current, []);
+  assert.equal(selected, 0);
+  assert.equal(persisted, 0);
+});
+
+test("creation controller persists a complete create command payload", () => {
+  const primitivesRef: { current: DrawingPrimitive[] } = { current: [] };
+  const persisted: Array<readonly DrawingCommand[]> = [];
+
+  assert.equal(placePositionDrawing({
+    tool: "position-long",
+    pos: { x: 100, y: 120 },
+    e: eventStub(),
+    primitivesRef,
+    attachPrim: () => true,
+    selectPrimitive() {},
+    persistDrawings(commands) {
+      persisted.push(commands);
+      return true;
+    },
+    screenToDrawingData: (x) => x === 100
+      ? { time: 100, price: 10 }
+      : { time: 200, price: 10 },
+    getChartAdapter: () => structuralMock<DrawingChartAdapter>({
+      isReady: () => true,
+      getVisiblePriceRange: () => 100,
+    }),
+    chartContainerRef: {
+      current: structuralMock<HTMLElement>({ clientHeight: 400, clientWidth: 800 }),
+    },
+    drawingSnapEnabledRef: { current: true },
+    positionSizeRef: { current: 1_000 },
+  }), true);
+
+  assert.equal(persisted.length, 1);
+  const commands = mustBeDefined(persisted[0]);
+  assert.equal(commands.length, 1);
+  const command = mustBeDefined(commands[0]);
+  assert.equal(command.type, "create");
+  if (command.type !== "create") throw new Error("Expected a create command");
+  const primitive = mustBeDefined(primitivesRef.current[0]);
+  assert.equal(command.entity.id, primitive.id);
+  assert.equal(command.entity.kind, "position");
+  assert.equal(command.entity.geometry.kind, "position");
+  assert.equal(command.entity.style.kind, "position");
+  assert.deepEqual(
+    Object.keys(command.entity).sort(),
+    ["bounds", "geometry", "geometryRevision", "id", "kind", "style", "styleRevision"],
+  );
+});
+
 test("source-lineage freehand creation starts a transient v2 draft preview", () => {
   const primitivesRef: { current: DrawingPrimitive[] } = { current: [] };
   const currentFreehandRef: { current: FreehandDrawingPrimitive | null } = { current: null };
@@ -107,7 +583,7 @@ test("source-lineage freehand creation starts a transient v2 draft preview", () 
     currentFreehandRef,
     freehandDraftRef,
     isDrawingFreehandRef,
-    attachPrim: (primitive) => attached.push(primitive),
+    attachPrim: (primitive) => { attached.push(primitive); return true; },
     screenToData: () => { throw new Error("source lineage must not fall back to v1"); },
     penColorRef: { current: "#fff" },
     penSizeRef: { current: 2 },
@@ -153,7 +629,7 @@ test("synthetic freehand creation may start directly from an absolute future cap
     currentFreehandRef,
     freehandDraftRef,
     isDrawingFreehandRef,
-    attachPrim: (primitive) => attached.push(primitive),
+    attachPrim: (primitive) => { attached.push(primitive); return true; },
     screenToData: () => { throw new Error("synthetic future capture must not use v1"); },
     penColorRef: { current: "#fff" },
     penSizeRef: { current: 2 },
@@ -186,7 +662,7 @@ test("source-time freehand creation keeps the legacy model transient until point
     currentFreehandRef,
     freehandDraftRef,
     isDrawingFreehandRef,
-    attachPrim() {},
+    attachPrim() { return true; },
     screenToData: () => point,
     penColorRef: { current: "#fff" },
     penSizeRef: { current: 8 },
@@ -212,7 +688,7 @@ test("source-lineage freehand creation fails closed without an atomic capture", 
     currentFreehandRef,
     freehandDraftRef,
     isDrawingFreehandRef,
-    attachPrim() {},
+    attachPrim() { return true; },
     screenToData: () => derivedPoint(100, 0, 10),
     penColorRef: { current: "#fff" },
     penSizeRef: { current: 2 },
@@ -233,8 +709,9 @@ test("active text and position tools retain pointer ownership when first capture
     pos: { x: 10, y: 20 },
     e: textEvent.event,
     primitivesRef: { current: [] },
-    attachPrim() {},
-    startTextEditing() {},
+    attachPrim() { return true; },
+    startTextEditing() { return true; },
+    cancelTextEditing: () => true,
     screenToDrawingData: () => null,
     drawingSnapEnabledRef: { current: true },
     penColorRef: { current: "#fff" },
@@ -250,7 +727,7 @@ test("active text and position tools retain pointer ownership when first capture
     pos: { x: 10, y: 20 },
     e: positionEvent.event,
     primitivesRef: { current: [] },
-    attachPrim() {},
+    attachPrim() { return true; },
     selectPrimitive() {},
     persistDrawings() {},
     screenToDrawingData: () => null,
@@ -271,7 +748,7 @@ test("position tool retains pointer ownership when its second row cannot resolve
     pos: { x: 100, y: 20 },
     e: tracked.event,
     primitivesRef,
-    attachPrim() {},
+    attachPrim() { return true; },
     selectPrimitive() {},
     persistDrawings: () => { persisted += 1; },
     screenToDrawingData: (x) => (x === 100 ? derivedPoint(100, 0, 10) : null),
@@ -298,8 +775,8 @@ test("pending two-point placement owns a failed second capture, but an inapplica
     primitivesRef: { current: [] },
     anchorDataRef,
     previewRef,
-    attachPrim() {},
-    detachPrim() {},
+    attachPrim() { return true; },
+    detachPrim() { return true; },
     selectPrimitive() {},
     persistDrawings() {},
     screenToDrawingData: () => null,
@@ -335,9 +812,10 @@ test("axis-line and first two-point capture failures retain active-tool pointer 
     anchorDataRef: { current: null },
     previewRef: { current: null },
     draggingRef: { current: null },
-    attachPrim() {},
+    attachPrim() { return true; },
     selectPrimitive() {},
-    removePreview() {},
+    persistDrawings: () => true,
+    removePreview() { return true; },
     screenToDrawingData: () => null,
     drawingSnapEnabledRef: { current: true },
     penColorRef: { current: "#fff" },
@@ -352,7 +830,7 @@ test("axis-line and first two-point capture failures retain active-tool pointer 
     e: twoPointEvent.event,
     anchorDataRef: { current: null },
     previewRef: { current: null },
-    attachPrim() {},
+    attachPrim() { return true; },
     screenToDrawingData: () => null,
     drawingSnapEnabledRef: { current: true },
     penColorRef: { current: "#fff" },
@@ -388,8 +866,8 @@ function commitDerivedTwoPointTool(tool: TwoPointCreationTool): CapturedTwoPoint
     primitivesRef,
     anchorDataRef,
     previewRef,
-    attachPrim: (primitive) => attached.push(primitive),
-    detachPrim: (primitive) => detached.push(primitive),
+    attachPrim: (primitive) => { attached.push(primitive); return true; },
+    detachPrim: (primitive) => { detached.push(primitive); return true; },
     selectPrimitive() {},
     persistDrawings: () => { persisted += 1; },
     screenToDrawingData: () => second,
@@ -434,8 +912,9 @@ test("text drawing keeps its canonical source-lineage anchor", () => {
     pos: { x: 10, y: 20 },
     e: eventStub(),
     primitivesRef,
-    attachPrim: (primitive) => attached.push(primitive),
-    startTextEditing: (primitive) => { editingPrimitive = primitive; },
+    attachPrim: (primitive) => { attached.push(primitive); return true; },
+    startTextEditing: (primitive) => { editingPrimitive = primitive; return true; },
+    cancelTextEditing: () => true,
     screenToDrawingData: () => dataPoint,
     drawingSnapEnabledRef: { current: true },
     penColorRef: { current: "#fff" },
@@ -480,7 +959,10 @@ function placeDerivedPosition(tool: PositionToolId, {
     pos: { x: pointerX, y: 120 },
     e: eventStub(),
     primitivesRef,
-    attachPrim: (primitive) => attached.push(structuralMock<PositionDrawingPrimitive>(primitive)),
+    attachPrim: (primitive) => {
+      attached.push(structuralMock<PositionDrawingPrimitive>(primitive));
+      return true;
+    },
     selectPrimitive() {},
     persistDrawings: () => { persisted += 1; },
     screenToDrawingData: (x) => {

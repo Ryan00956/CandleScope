@@ -1,5 +1,9 @@
 import { useCallback, useMemo, useState } from "react";
-import { buildExportOptionsKey, DEFAULT_EXPORT_OPTIONS, downloadBlob } from "./exportService";
+import {
+  buildExportPresentationKey,
+  DEFAULT_EXPORT_OPTIONS,
+  downloadBlob,
+} from "./exportService";
 import { loadExportOptions, saveExportOptions } from "./exportOptionsStore";
 import { useExportPreviewRuntime } from "./exportPreviewRuntime";
 import type { MutableRefObject } from "react";
@@ -7,7 +11,10 @@ import type { ChartSurfaceActions } from "../../chart-adapter/useChartSurfaceRun
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { DrawingRuntime } from "../drawings/useDrawingRuntime.js";
 import type { ExportMetadata, ExportOptions } from "./exportTypes.js";
-import type { ExportPreviewRuntime } from "./exportPreviewRuntime.js";
+import type {
+  DrawingExportTarget,
+  ExportPreviewRuntime,
+} from "./exportPreviewRuntime.js";
 
 export interface UseExportRuntimeOptions {
   session: ChartSessionRuntime | null | undefined;
@@ -41,6 +48,16 @@ export interface ExportRuntime {
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+export function sameDrawingExportTarget(
+  left: DrawingExportTarget | null,
+  right: DrawingExportTarget | null,
+): boolean {
+  return left === null || right === null
+    ? left === right
+    : left.scopeKey === right.scopeKey
+      && left.documentRevision === right.documentRevision;
 }
 
 export function useExportRuntime({
@@ -79,13 +96,13 @@ export function useExportRuntime({
     metadata,
     chartSurfaceActions,
     pageExportRef,
-    drawingsHidden: drawings?.view?.drawingsHidden,
+    drawingsHidden: drawings?.view?.drawingsHidden === true,
     ...(drawings?.actions?.prepareExport === undefined
       ? {}
       : { prepareDrawingExport: drawings.actions.prepareExport }),
-    ...(drawings?.actions?.setDrawingsHiddenForExport === undefined
+    ...(drawings?.actions?.exportInstrumentation === undefined
       ? {}
-      : { setDrawingsHiddenForExport: drawings.actions.setDrawingsHiddenForExport }),
+      : { drawingExportInstrumentation: drawings.actions.exportInstrumentation }),
   });
 
   const updateOptions = useCallback((nextOptions: ExportOptions) => {
@@ -115,7 +132,10 @@ export function useExportRuntime({
       ...requestedOptions,
       metadata,
     };
-    const finalOptionsKey = buildExportOptionsKey(finalOptions);
+    const finalOptionsKey = buildExportPresentationKey(
+      finalOptions,
+      drawings?.view?.drawingsHidden === true,
+    );
     const previewBlob = preview.blob && preview.optionsKey === finalOptionsKey
       ? preview.blob
       : null;
@@ -128,9 +148,30 @@ export function useExportRuntime({
       if (!previewBlob) {
         throw new Error("当前配置的预览还未生成完成，请等待右侧预览更新后再保存。 ");
       }
+      let blob = previewBlob;
+      let filename = preview.filename;
+      const drawingLease = await drawings?.actions?.prepareExport?.({
+        hideDrawings: finalOptions.hideDrawings,
+        timeoutMs: 5_000,
+      }) ?? null;
+      const currentDrawingTarget = drawingLease
+        ? Object.freeze({
+            scopeKey: drawingLease.receipt.scopeKey,
+            documentRevision: drawingLease.receipt.documentRevision,
+          })
+        : null;
+      if (drawingLease) await drawingLease.restore();
+      if (!sameDrawingExportTarget(currentDrawingTarget, preview.drawingTarget)) {
+        const refreshed = await preview.refreshPreview();
+        if (!refreshed) {
+          throw new Error("绘图已发生变化，最新预览尚未生成完成，请重试。 ");
+        }
+        blob = refreshed.blob;
+        filename = refreshed.filename;
+      }
 
-      downloadBlob(previewBlob, preview.filename);
-      setNotice(`已保存 ${preview.filename}`);
+      downloadBlob(blob, filename);
+      setNotice(`已保存 ${filename}`);
     } catch (err: unknown) {
       setError(errorMessage(err, "保存失败，请稍后重试。 "));
     } finally {
@@ -140,9 +181,9 @@ export function useExportRuntime({
     inProgress,
     metadata,
     options,
-    preview.blob,
-    preview.filename,
-    preview.optionsKey,
+    drawings?.actions,
+    drawings?.view?.drawingsHidden,
+    preview,
   ]);
 
   return {

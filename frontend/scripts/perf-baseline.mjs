@@ -11,6 +11,7 @@ import {
   summarizeIndicatorRangeRequests,
 } from "./indicator-range-network-capture.mjs";
 import {
+  allAcceptanceChecksPassed,
   buildHeapAcceptance,
   summarizeHeapSamples,
 } from "./perf-baseline-metrics.mjs";
@@ -395,7 +396,7 @@ function buildAcceptance({
     }),
   };
   return {
-    passed: Object.values(checks).every((check) => check.passed !== false),
+    passed: allAcceptanceChecksPassed(checks),
     checks,
   };
 }

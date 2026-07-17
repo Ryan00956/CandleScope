@@ -15,7 +15,7 @@
  *   - Uses K-line colors from CSS variables
  */
 
-import { dataPointToCoordinate } from "./coordinateUtils.js";
+import { drawingDataPointsToCoordinates } from "./coordinateUtils.js";
 import { isRecord, parseDrawingAnchor } from "../drawingContracts.js";
 import type {
   DrawingAttachedParameter,
@@ -185,6 +185,32 @@ export function normalizedPositionScreenRange(
     rightX = center + width / 2;
   }
   return { collapsed, leftX, rightX };
+}
+
+function positionRangeToScreenCoordinates(
+  chart: DrawingAttachedParameter["chart"],
+  series: DrawingAttachedParameter["series"],
+  range: PositionTimeRange,
+  entryPrice: number,
+  cacheToken: object,
+  geometryRevision: number,
+): [number | null, number | null] {
+  const start = horizontalAnchorToDataPoint(range.start, entryPrice);
+  const end = horizontalAnchorToDataPoint(range.end, entryPrice);
+  const points: DrawingDataPoint[] = [];
+  if (start) points.push(start);
+  if (end) points.push(end);
+  const coordinates = drawingDataPointsToCoordinates(
+    chart,
+    series,
+    points,
+    {},
+    { cacheToken, geometryRevision },
+  );
+  return [
+    start ? coordinates[0] ?? null : null,
+    end ? coordinates[start ? 1 : 0] ?? null : null,
+  ];
 }
 
 // ── Smart price formatter ──
@@ -734,29 +760,36 @@ class PositionPaneView implements PrimitivePaneView {
     const chart = source._chart;
 
     if (!series || !chart) return;
+    source._parityInfoPanelBox = null;
     if (source._hidden) {
       source._infoPanelBox = null;
       this._renderer.update({
         hidden: true,
-        setInfoPanelBox: (box: ScreenBox | null) => { source._infoPanelBox = box; },
+        setInfoPanelBox: (box: ScreenBox | null) => {
+          source._infoPanelBox = box;
+          source._parityInfoPanelBox = box;
+        },
       });
       return;
     }
 
-    // Convert time coords to screen X
-    const coordinateContext = {};
-    const toScreenX = (anchor: HorizontalDrawingAnchor | null): number | null => {
-      const dataPoint = horizontalAnchorToDataPoint(anchor, source._entryPrice);
-      return dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
-    };
+    // Convert both horizontal anchors in one revision-aware batch.
+    const [startX, endX] = positionRangeToScreenCoordinates(
+      chart,
+      series,
+      source._timeRange,
+      source._entryPrice,
+      source,
+      source._geometryRevision,
+    );
 
     const entryY = series.priceToCoordinate(source._entryPrice);
     const tpY = source._tpPrice != null ? series.priceToCoordinate(source._tpPrice) : null;
     const slY = source._slPrice != null ? series.priceToCoordinate(source._slPrice) : null;
 
     const screenRange = normalizedPositionScreenRange(
-      toScreenX(source._timeRange.start),
-      toScreenX(source._timeRange.end),
+      startX,
+      endX,
       positionMinimumScreenWidth(chart),
     );
     const leftX = screenRange?.leftX ?? null;
@@ -807,7 +840,10 @@ class PositionPaneView implements PrimitivePaneView {
       downColor,
       currentPrice,
       hidden: false,
-      setInfoPanelBox: (box: ScreenBox | null) => { source._infoPanelBox = box; },
+      setInfoPanelBox: (box: ScreenBox | null) => {
+        source._infoPanelBox = box;
+        source._parityInfoPanelBox = box;
+      },
     });
   }
 
@@ -833,10 +869,12 @@ export class PositionDrawingPrimitive {
   _positionSize: number;
   _infoPanelOffset: PositionInfoPanelOffset;
   _infoPanelBox: ScreenBox | null;
+  _parityInfoPanelBox: ScreenBox | null;
   _selected: boolean;
   _isPreview: boolean;
   _hovered: boolean;
   _hidden: boolean;
+  _geometryRevision: number;
   _series: DrawingAttachedParameter["series"] | null;
   _chart: DrawingAttachedParameter["chart"] | null;
   _paneView: PositionPaneView;
@@ -864,10 +902,12 @@ export class PositionDrawingPrimitive {
     this._positionSize = opts.positionSize || 1000;
     this._infoPanelOffset = normalizeInfoPanelOffset(opts.infoPanelOffset);
     this._infoPanelBox = null;
+    this._parityInfoPanelBox = null;
     this._selected = opts.selected || false;
     this._isPreview = opts.isPreview || false;
     this._hovered = opts.hovered || false;
     this._hidden = !!opts.hidden;
+    this._geometryRevision = 1;
 
     this._series = null;
     this._chart = null;
@@ -908,6 +948,12 @@ export class PositionDrawingPrimitive {
   get positionSize(): number { return this._positionSize; }
   get infoPanelOffset(): PositionInfoPanelOffset { return this._infoPanelOffset; }
   get selected(): boolean { return this._selected; }
+  get geometryRevision(): number { return this._geometryRevision; }
+  getParityInfoPanelBox(): Readonly<ScreenBox> | null {
+    return this._parityInfoPanelBox
+      ? Object.freeze({ ...this._parityInfoPanelBox })
+      : null;
+  }
   get dataPoints(): DrawingDataPoint[] {
     const points: DrawingDataPoint[] = [];
     const start = horizontalAnchorToDataPoint(this._timeRange.start, this._entryPrice);
@@ -919,16 +965,19 @@ export class PositionDrawingPrimitive {
 
   setEntryPrice(price: number): void {
     this._entryPrice = price;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
   setTpPrice(price: number | null): void {
     this._tpPrice = price;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
   setSlPrice(price: number | null): void {
     this._slPrice = price;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
   }
 
@@ -936,6 +985,7 @@ export class PositionDrawingPrimitive {
     const nextRange = normalizePositionTimeRange(range);
     if (!nextRange) return false;
     this._timeRange = nextRange;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
     return true;
   }
@@ -957,6 +1007,7 @@ export class PositionDrawingPrimitive {
     this._tpPrice = nextTp;
     this._slPrice = nextSl;
     this._timeRange = nextRange;
+    this._geometryRevision += 1;
     this._requestUpdate?.();
     return true;
   }
@@ -1010,6 +1061,7 @@ export class PositionDrawingPrimitive {
       if (nextRange && Number.isFinite(Number(start.price))) {
         this._timeRange = nextRange;
         this._entryPrice = start.price;
+        this._geometryRevision += 1;
       }
     }
     this._requestUpdate?.();
@@ -1029,22 +1081,24 @@ export class PositionDrawingPrimitive {
 
   // ── Hit testing ──
 
-  hitTest(x: number, y: number): DrawingHit | null {
+  hitTestGeometry(x: number, y: number): DrawingHit | null {
     if (this._hidden) return null;
     if (!this._series || !this._chart) return null;
 
     const series = this._series;
     const chart = this._chart;
-    const coordinateContext = {};
-
-    const toScreenX = (anchor: HorizontalDrawingAnchor | null): number | null => {
-      const dataPoint = horizontalAnchorToDataPoint(anchor, this._entryPrice);
-      return dataPointToCoordinate(chart, series, dataPoint, coordinateContext);
-    };
+    const [startX, endX] = positionRangeToScreenCoordinates(
+      chart,
+      series,
+      this._timeRange,
+      this._entryPrice,
+      this,
+      this._geometryRevision,
+    );
 
     const screenRange = normalizedPositionScreenRange(
-      toScreenX(this._timeRange.start),
-      toScreenX(this._timeRange.end),
+      startX,
+      endX,
       positionMinimumScreenWidth(chart),
     );
     if (!screenRange) return null;

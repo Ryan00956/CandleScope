@@ -233,6 +233,28 @@ test("hidden export frame retires the live plan without weakening document ident
     publishedPlan: null,
   });
   assert.equal(isDrawingHiddenExportSceneRetired(runtime, bridge), true);
+  const disposedWorkerWithHistory = malformedFixture<
+    NonNullable<DrawingSceneRuntimeSnapshot["worker"]>
+  >({
+    availability: "disposed",
+    queueDepth: 0,
+    inFlight: 0,
+    pending: 0,
+    latestSubmittedHeader: malformedFixture({ jobId: 7 }),
+    inFlightHeader: null,
+    pendingHeader: null,
+  });
+  assert.equal(isDrawingHiddenExportSceneRetired(
+    malformedFixture({ ...runtime, worker: disposedWorkerWithHistory }),
+    bridge,
+  ), true);
+  assert.equal(isDrawingHiddenExportSceneRetired(
+    malformedFixture({
+      ...runtime,
+      worker: malformedFixture({ ...disposedWorkerWithHistory, inFlight: 1 }),
+    }),
+    bridge,
+  ), false);
 
   const receipt: DrawingExportHiddenFrameReceipt = {
     kind: "hidden-frame",

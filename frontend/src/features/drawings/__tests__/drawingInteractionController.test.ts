@@ -23,7 +23,9 @@ import {
   runDrawingSurfaceDisposeBarrier,
   scenePaintCoversDrawingHandoff,
   shouldDeferDrawingCoordinateCleanupToChartTypeBoundary,
+  withDrawingExportCaptureScene,
 } from "../drawingInteractionController.js";
+import type { DrawingExportLease } from "../drawingInteractionController.js";
 import {
   abandonDrawingInteractionLifecycleActiveGesture,
   beginDrawingInteractionLifecycleFreehandGesture,
@@ -803,6 +805,53 @@ test("stale scope may be hidden but cannot be made visible", () => {
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(false, true), true);
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(false, false), false);
   assert.equal(canApplyDrawingVisibilityToCurrentPrimitives(true, false), true);
+});
+
+test("export lease exposes the final hidden capture scene without replacing lease authority", async () => {
+  const visibleScene = malformedFixture<DrawingExportLease["receipt"]["scene"]>({
+    plan: Object.freeze({}),
+    stamp: Object.freeze({ surfaceGeneration: 3 }),
+    sceneEpoch: 1,
+    lodToleranceClass: "settledExact",
+    attachmentRevision: 1,
+    paintSequence: 1,
+  });
+  const hiddenScene = malformedFixture<DrawingExportLease["receipt"]["scene"]>({
+    kind: "hidden-frame",
+    scopeKey: "scope",
+    documentRevision: 5,
+    document: Object.freeze({}),
+    sceneEpoch: 2,
+    attachmentRevision: 2,
+    paintSequence: 2,
+  });
+  let revalidateCount = 0;
+  let restoreCount = 0;
+  const lease = Object.freeze({
+    leaseId: 7,
+    receipt: Object.freeze({
+      leaseId: 7,
+      scopeKey: "scope",
+      documentRevision: 5,
+      persistence: Object.freeze({ persistedRevision: 5, writePerformed: false }),
+      scene: visibleScene,
+      paint: 11,
+    }),
+    revalidate: async () => { revalidateCount += 1; return true; },
+    restore: async () => { restoreCount += 1; },
+  }) as unknown as DrawingExportLease;
+
+  assert.strictEqual(withDrawingExportCaptureScene(lease, visibleScene), lease);
+  const captureLease = withDrawingExportCaptureScene(lease, hiddenScene);
+  assert.notStrictEqual(captureLease, lease);
+  assert.ok(Object.isFrozen(captureLease));
+  assert.ok(Object.isFrozen(captureLease.receipt));
+  assert.strictEqual(captureLease.receipt.scene, hiddenScene);
+  assert.strictEqual(lease.receipt.scene, visibleScene);
+  assert.equal(await captureLease.revalidate(), true);
+  await captureLease.restore();
+  assert.equal(revalidateCount, 1);
+  assert.equal(restoreCount, 1);
 });
 
 test("pre-presentation export failure preserves a newer visible intent and active runtime", () => {

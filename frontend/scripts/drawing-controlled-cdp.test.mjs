@@ -48,7 +48,9 @@ const CONTROLLED_ROLLBACK_RUN_ID = "controlled-run-worker-rollback";
 const CONTROLLED_ROLLBACK_AUTHORITY_TOKEN = "controlled-worker-rollback-authority";
 const CONTROLLED_ROLLBACK_AUTHORITY_DIGEST = "a".repeat(64);
 const CONTROLLED_ROLLBACK_FAULT_ID = "11111111-1111-4111-8111-111111111111";
+const CONTROLLED_ROLLBACK_DOCUMENT_INSTANCE_ID = "22222222-2222-4222-8222-222222222222";
 const CONTROLLED_HASHED_DRAWING_WORKER_PATH = "assets/drawing.worker-a1b2c3d4.js";
+let controlledWorkerConstructorAttempt = 0;
 
 function controlledRollbackToken(overrides = {}) {
   return {
@@ -126,6 +128,7 @@ function createDiagnosticBootstrapFixture({
     },
     indexedDB,
     location,
+    clearTimeout,
     setTimeout,
     sessionStorage,
     window,
@@ -410,6 +413,7 @@ async function createWorkerConstructionFaultTrackerFixture() {
     runId: CONTROLLED_ROLLBACK_RUN_ID,
     authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
     drawingWorkerPaths: [CONTROLLED_HASHED_DRAWING_WORKER_PATH],
+    drillIds: CONTROLLED_ROLLBACK_DRILL_IDS,
   });
   const emitAsset = async (requestId, path, type, initiatorType) => {
     const url = `http://127.0.0.1:15173${path}`;
@@ -451,8 +455,10 @@ function controlledWorkerConstructionFault(overrides = {}) {
 }
 
 async function emitWorkerConstructionFault(cdp, overrides = {}) {
+  await ensureFakeMainExecutionContext(cdp);
   await cdp.emit("Runtime.bindingCalled", {
     name: CONTROLLED_DIAGNOSTIC_BINDING,
+    executionContextId: 701,
     payload: JSON.stringify(controlledWorkerConstructionFault(overrides)),
   });
 }
@@ -495,15 +501,62 @@ function createFakeCdp({ responseBodies = new Map(), evaluate = null, onSend = n
   };
 }
 
+const fakeMainExecutionContextCdps = new WeakSet();
+async function ensureFakeMainExecutionContext(cdp) {
+  if (fakeMainExecutionContextCdps.has(cdp)) return;
+  fakeMainExecutionContextCdps.add(cdp);
+  await cdp.emit("Runtime.executionContextCreated", {
+    context: {
+      id: 701,
+      origin: "http://127.0.0.1:15173",
+      name: "",
+      auxData: {
+        isDefault: true,
+        type: "default",
+        frameId: "main-frame",
+      },
+    },
+  });
+}
+
 async function emitWorkerConstruction(
   cdp,
   url = "http://127.0.0.1:15173/assets/drawing.worker.js",
   workerType = "module",
+  {
+    controlledQuery = false,
+    ensureMainContext = true,
+    executionContextId = 701,
+    workerName = "candlescope-drawing-worker",
+  } = {},
 ) {
+  if (ensureMainContext) await ensureFakeMainExecutionContext(cdp);
+  controlledWorkerConstructorAttempt += 1;
+  const constructorId = `${CONTROLLED_ROLLBACK_DOCUMENT_INSTANCE_ID}:worker:${controlledWorkerConstructorAttempt}`;
+  const reportedUrl = new URL(url);
+  if (controlledQuery) {
+    reportedUrl.searchParams.set("__candlescope_cdp_worker_constructor", constructorId);
+  }
   await cdp.emit("Runtime.bindingCalled", {
     name: "__CANDLESCOPE_CONTROLLED_CDP_REPORT__",
-    payload: JSON.stringify({ kind: "worker-constructor", url, workerType }),
+    executionContextId,
+    payload: JSON.stringify({
+      kind: "worker-constructor",
+      runId: CONTROLLED_ROLLBACK_RUN_ID,
+      authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+      authorityAccepted: true,
+      drillId: "series-rebuild-before-export",
+      documentInstanceId: CONTROLLED_ROLLBACK_DOCUMENT_INSTANCE_ID,
+      faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+      sequence: 1,
+      constructorId,
+      constructorAttempt: controlledWorkerConstructorAttempt,
+      url: reportedUrl.href,
+      workerType,
+      workerName,
+    }),
   });
+  return { constructorId, url: reportedUrl.href };
 }
 
 async function createWorkerBootstrapHandoffFixture({
@@ -514,6 +567,7 @@ async function createWorkerBootstrapHandoffFixture({
   constructionCount = 1,
   constructionTiming = "before-source",
   constructionWorkerType = "module",
+  constructionWorkerName = "candlescope-drawing-worker",
   observationGapCount = 0,
   sourceDocumentUrl = "http://127.0.0.1:15173/",
   sourceFrameId = "main-frame",
@@ -521,6 +575,10 @@ async function createWorkerBootstrapHandoffFixture({
   sourceLoaderId = "",
   sourceTiming = "before-target",
   sourceType = "Script",
+  discoveredTargetTitle = null,
+  discoveredTargetUrl = null,
+  destroyDiscoveredTargetBeforeAttach = false,
+  targetTitle = "candlescope-drawing-worker",
   timeoutMs = 500,
   claimWorkerResponseBodyCapture = null,
   captureWorkerResponseWithManagedOriginGuard = false,
@@ -584,7 +642,9 @@ async function createWorkerBootstrapHandoffFixture({
   await emitTopResponse("entry", "/assets/main.js", "Script", "parser");
   const emitConstructions = async () => {
     for (let index = 0; index < constructionCount; index += 1) {
-      await emitWorkerConstruction(cdp, targetUrl, constructionWorkerType);
+      await emitWorkerConstruction(cdp, targetUrl, constructionWorkerType, {
+        workerName: constructionWorkerName,
+      });
     }
   };
   if (constructionTiming === "before-source") await emitConstructions();
@@ -613,12 +673,28 @@ async function createWorkerBootstrapHandoffFixture({
       },
     });
   }
+  if (discoveredTargetTitle !== null) {
+    await cdp.emit("Target.targetCreated", {
+      targetInfo: {
+        targetId,
+        type: "worker",
+        title: discoveredTargetTitle,
+        url: discoveredTargetUrl ?? targetUrl,
+        attached: false,
+        parentFrameId: "main-frame",
+      },
+    });
+    if (destroyDiscoveredTargetBeforeAttach) {
+      await cdp.emit("Target.targetDestroyed", { targetId });
+    }
+  }
   await cdp.emit("Target.attachedToTarget", {
     sessionId,
     waitingForDebugger: true,
     targetInfo: {
       targetId,
       type: "worker",
+      title: targetTitle,
       url: targetUrl,
     },
   });
@@ -673,6 +749,7 @@ async function attachAdditionalWorkerBootstrap(fixture, {
     targetInfo: {
       targetId: requestId,
       type: "worker",
+      title: "candlescope-drawing-worker",
       url: fixture.targetUrl,
     },
   });
@@ -922,6 +999,7 @@ test("diagnostic rollback authority binds exact worker, storage, and lifecycle v
     "worker-stale-generation",
     "indexeddb-quota-blocked",
     "active-gesture-chart-boundary",
+    "series-rebuild-before-export",
   ]);
   assert.deepEqual([...CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS], ["quota", "blocked"]);
 
@@ -935,6 +1013,19 @@ test("diagnostic rollback authority binds exact worker, storage, and lifecycle v
     const snapshot = fixture.snapshot();
     assert.equal(snapshot.authorityAccepted, true);
     assert.equal(snapshot.drillId, "active-gesture-chart-boundary");
+    assert.equal(snapshot.variant, null);
+  });
+
+  await t.test("accepts series-rebuild export lifecycle without a variant", () => {
+    const fixture = createDiagnosticBootstrapFixture({
+      token: controlledRollbackToken({
+        drillId: "series-rebuild-before-export",
+        variant: null,
+      }),
+    });
+    const snapshot = fixture.snapshot();
+    assert.equal(snapshot.authorityAccepted, true);
+    assert.equal(snapshot.drillId, "series-rebuild-before-export");
     assert.equal(snapshot.variant, null);
   });
 
@@ -960,6 +1051,7 @@ test("diagnostic rollback authority binds exact worker, storage, and lifecycle v
     controlledRollbackToken({ drillId: "indexeddb-quota-blocked", variant: null }),
     controlledRollbackToken({ drillId: "indexeddb-quota-blocked", variant: "other" }),
     controlledRollbackToken({ drillId: "active-gesture-chart-boundary", variant: "chart-type" }),
+    controlledRollbackToken({ drillId: "series-rebuild-before-export", variant: "chart-type" }),
   ];
   for (const [index, token] of rejected.entries()) {
     await t.test(`rejects mismatched variant ${index + 1}`, () => {
@@ -969,6 +1061,82 @@ test("diagnostic rollback authority binds exact worker, storage, and lifecycle v
       assert.equal(snapshot.variant, null);
     });
   }
+});
+
+test("series-rebuild export gate pauses exactly the first product checkpoint", async () => {
+  const fixture = createDiagnosticBootstrapFixture({
+    token: controlledRollbackToken({
+      drillId: "series-rebuild-before-export",
+      variant: null,
+    }),
+  });
+  const handle = fixture.window[CONTROLLED_ROLLBACK_HANDLE];
+  const signal = new AbortController().signal;
+  const pending = handle.awaitSeriesRebuildExportCapture({
+    transactionId: "drawing-export-1-lease-7",
+    leaseId: 7,
+    scopeKey: "binance:spot:BTCUSDT__main",
+    documentRevision: 5,
+    surfaceGeneration: 3,
+    hideDrawings: false,
+    signal,
+  });
+  const paused = fixture.snapshot();
+  assert.equal(paused.seriesRebuildExport.checkpointCount, 1);
+  assert.equal(paused.seriesRebuildExport.pauseConsumed, true);
+  assert.equal(paused.seriesRebuildExport.releaseCount, 0);
+  assert.equal(paused.seriesRebuildExport.activeCheckpointId, `${CONTROLLED_ROLLBACK_FAULT_ID}:export:1`);
+  assert.equal(paused.seriesRebuildExport.checkpoints[0].paused, true);
+  assert.equal(paused.seriesRebuildExport.checkpoints[0].releasedAt, null);
+
+  const releasedSnapshot = handle.releaseSeriesRebuildExportCapture({
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    checkpointId: paused.seriesRebuildExport.activeCheckpointId,
+  });
+  assert.equal(releasedSnapshot.seriesRebuildExport.releaseCount, 1);
+  assert.equal(releasedSnapshot.seriesRebuildExport.activeCheckpointId, null);
+  const firstReceipt = await pending;
+  assert.deepEqual(JSON.parse(JSON.stringify(firstReceipt)), {
+    accepted: true,
+    checkpointId: `${CONTROLLED_ROLLBACK_FAULT_ID}:export:1`,
+    paused: true,
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    documentInstanceId: paused.documentInstanceId,
+    faultId: CONTROLLED_ROLLBACK_FAULT_ID,
+    sequence: 1,
+    transactionId: "drawing-export-1-lease-7",
+    leaseId: 7,
+  });
+
+  const visibleReceipt = await handle.awaitSeriesRebuildExportCapture({
+    transactionId: "drawing-export-2-lease-8",
+    leaseId: 8,
+    scopeKey: "binance:spot:BTCUSDT__main",
+    documentRevision: 5,
+    surfaceGeneration: 4,
+    hideDrawings: false,
+    signal,
+  });
+  const hiddenReceipt = await handle.awaitSeriesRebuildExportCapture({
+    transactionId: "drawing-export-3-lease-9",
+    leaseId: 9,
+    scopeKey: "binance:spot:BTCUSDT__main",
+    documentRevision: 5,
+    surfaceGeneration: null,
+    hideDrawings: true,
+    signal,
+  });
+  assert.equal(visibleReceipt.paused, false);
+  assert.equal(hiddenReceipt.paused, false);
+  const completed = fixture.snapshot();
+  assert.equal(completed.seriesRebuildExport.checkpointCount, 3);
+  assert.equal(completed.seriesRebuildExport.releaseCount, 1);
+  assert.deepEqual(
+    completed.seriesRebuildExport.checkpoints.map((checkpoint) => checkpoint.releaseReason),
+    ["harness-release", "not-paused", "not-paused"],
+  );
+  assert.equal(completed.observed, true);
 });
 
 test("quota cache-expiry guard proves the full monotonic 35 second wait", async () => {
@@ -1604,6 +1772,8 @@ test("asset tracker accepts only the completely clean initial no-worker state", 
   await emitWorkerConstruction(
     unclaimedFixture.cdp,
     `http://127.0.0.1:15173/${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`,
+    "module",
+    { controlledQuery: true },
   );
   snapshot = unclaimedFixture.tracker.snapshot();
   assert.equal(snapshot.assetAuthorityPassed, false);
@@ -3194,6 +3364,475 @@ test("worker bootstrap handoff accepts request before constructor within the att
   fixture.tracker.dispose();
 });
 
+test("worker bootstrap handoff accepts a delayed constructor binding after target attachment", async () => {
+  const fixture = await createWorkerBootstrapHandoffFixture({
+    constructionTiming: "after-target",
+  });
+  await fixture.emitChildResponse();
+  await fixture.emitChildFinished();
+
+  const snapshot = fixture.tracker.snapshot();
+  const handoff = snapshot.workerBootstrapHandoffs[0];
+  assert.equal(snapshot.passed, true);
+  assert.equal(snapshot.provenanceErrors.length, 0);
+  assert.equal(snapshot.workerBootstrapHandoffs.length, 1);
+  assert.ok(handoff.sourceRequestObservationSequence < handoff.targetAttachedObservationSequence);
+  assert.ok(handoff.targetAttachedObservationSequence < handoff.constructorObservationSequence);
+  assert.equal(snapshot.workerTargets[0].assetAccepted, true);
+  fixture.tracker.dispose();
+});
+
+test("worker bootstrap handoff defers response and terminal until its constructor binding arrives", async () => {
+  const fixture = await createWorkerBootstrapHandoffFixture({
+    constructionTiming: "after-child-response",
+    timeoutMs: 100,
+  });
+  const responseTask = fixture.emitChildResponse();
+  const terminalTask = fixture.emitChildFinished();
+  assert.equal(fixture.tracker.snapshot().deferredWorkerBootstrapResponseCount, 1);
+
+  await emitWorkerConstruction(fixture.cdp, fixture.targetUrl);
+  await Promise.all([responseTask, terminalTask]);
+
+  const snapshot = fixture.tracker.snapshot();
+  const handoff = snapshot.workerBootstrapHandoffs[0];
+  assert.equal(snapshot.passed, true);
+  assert.equal(snapshot.pendingCount, 0);
+  assert.equal(snapshot.inFlightCount, 0);
+  assert.equal(snapshot.deferredWorkerBootstrapResponseCount, 0);
+  assert.equal(snapshot.provenanceErrors.length, 0);
+  assert.ok(handoff.sourceRequestObservationSequence < handoff.targetAttachedObservationSequence);
+  assert.ok(handoff.targetAttachedObservationSequence < handoff.constructorObservationSequence);
+  assert.equal(snapshot.workerTargets[0].assetAccepted, true);
+  fixture.tracker.dispose();
+});
+
+test("worker bootstrap handoff times out fail closed when the constructor binding never arrives", async () => {
+  const fixture = await createWorkerBootstrapHandoffFixture({
+    constructionTiming: "missing",
+    timeoutMs: 25,
+  });
+  await Promise.all([
+    fixture.emitChildResponse(),
+    fixture.emitChildFinished(),
+  ]);
+
+  const snapshot = fixture.tracker.snapshot();
+  const rejection = snapshot.provenanceErrors.find((record) => (
+    record.kind === "worker-bootstrap-handoff-rejected"
+  ));
+  assert.equal(snapshot.passed, false);
+  assert.equal(snapshot.pendingCount, 0);
+  assert.equal(snapshot.inFlightCount, 0);
+  assert.equal(snapshot.deferredWorkerBootstrapResponseCount, 0);
+  assert.ok(rejection.reasons.includes("missing-constructor-target-binding"));
+  assert.ok(rejection.reasons.includes("constructor-identity-not-unique"));
+  fixture.tracker.dispose();
+});
+
+test("worker bootstrap handoff accepts empty discovery before exact attachment", async () => {
+  const fixture = await createWorkerBootstrapHandoffFixture({
+    discoveredTargetTitle: "",
+    discoveredTargetUrl: "",
+  });
+  await fixture.emitChildResponse();
+  await fixture.emitChildFinished();
+
+  const snapshot = fixture.tracker.snapshot();
+  assert.equal(snapshot.passed, true);
+  assert.equal(snapshot.provenanceErrors.length, 0);
+  assert.equal(snapshot.workerBootstrapHandoffs.length, 1);
+  assert.equal(snapshot.workerTargets[0].constructorProvenanceAccepted, true);
+  fixture.tracker.dispose();
+});
+
+test("worker bootstrap handoff rejects constructor name and attached target title drift", async (t) => {
+  for (const scenario of [
+    {
+      name: "constructor worker name",
+      options: { constructionWorkerName: "other-worker" },
+      reason: "constructor-worker-name-mismatch",
+    },
+    {
+      name: "attached target title",
+      options: { targetTitle: "other-worker" },
+      reason: "target-title-mismatch",
+    },
+    {
+      name: "discovered target title history",
+      options: { discoveredTargetTitle: "other-worker" },
+      reason: "target-discovery-history-mismatch",
+    },
+    {
+      name: "discovered target URL query history",
+      options: {
+        discoveredTargetTitle: "candlescope-drawing-worker",
+        discoveredTargetUrl: "http://127.0.0.1:15173/assets/drawing.worker.js?wrong=query",
+      },
+      reason: "target-discovery-history-mismatch",
+    },
+    {
+      name: "destroyed target before attachment",
+      options: {
+        discoveredTargetTitle: "candlescope-drawing-worker",
+        destroyDiscoveredTargetBeforeAttach: true,
+      },
+      reason: "target-discovery-history-mismatch",
+    },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const fixture = await createWorkerBootstrapHandoffFixture(scenario.options);
+      await fixture.emitChildResponse();
+      await fixture.emitChildFinished();
+
+      const snapshot = fixture.tracker.snapshot();
+      const rejection = snapshot.provenanceErrors.find((record) => (
+        record.kind === "worker-bootstrap-handoff-rejected"
+      ));
+      assert.equal(snapshot.passed, false);
+      assert.equal(snapshot.workerAssetAuthorityPassed, false);
+      assert.equal(snapshot.workerBootstrapHandoffs.length, 0);
+      assert.ok(rejection?.reasons.includes(scenario.reason));
+      assert.equal(snapshot.workerTargets[0].constructorProvenanceAccepted, false);
+      fixture.tracker.dispose();
+    });
+  }
+});
+
+test("destroyed pre-attach worker retires only with exact discovery, constructor, and body authority", async () => {
+  const files = [
+    { relativePath: "index.html", content: "index" },
+    { relativePath: "assets/main.js", content: "main" },
+    { relativePath: "assets/drawing.worker.js", content: "worker" },
+  ];
+  const fingerprint = fingerprintFileEntries(files);
+  const workerAsset = fingerprint.files.find((entry) => (
+    entry.path === "assets/drawing.worker.js"
+  ));
+  const captures = new Map();
+  const claims = [];
+  const cdp = createFakeCdp({
+    responseBodies: new Map([
+      ["<top>\0document", { body: "index", base64Encoded: false }],
+      ["<top>\0entry", { body: "main", base64Encoded: false }],
+    ]),
+  });
+  const claimWorkerResponseBodyCapture = (networkId, url) => {
+    const key = `${networkId}\0${url}`;
+    const capture = captures.get(key) ?? null;
+    if (!capture || capture.claimCount !== 0) return null;
+    capture.claimCount = 1;
+    capture.claimedAt = "2026-07-17T00:00:00.001Z";
+    claims.push({ networkId, url });
+    return Object.freeze({ ...capture });
+  };
+  const tracker = createControlledNetworkAssetTracker(cdp, "http://127.0.0.1:15173", {
+    entryAssetPaths: ["assets/main.js"],
+    assetFingerprint: fingerprint,
+  }, 500, "main-frame", {
+    runId: CONTROLLED_ROLLBACK_RUN_ID,
+    authorityTokenSha256: CONTROLLED_ROLLBACK_AUTHORITY_DIGEST,
+    drawingWorkerPaths: ["assets/drawing.worker.js"],
+    drillIds: CONTROLLED_ROLLBACK_DRILL_IDS,
+  }, claimWorkerResponseBodyCapture);
+  const emitTopAsset = async (requestId, path, type, initiatorType) => {
+    const url = `http://127.0.0.1:15173${path}`;
+    await cdp.emit("Network.requestWillBeSent", {
+      requestId,
+      frameId: "main-frame",
+      loaderId: "loader-1",
+      documentURL: "http://127.0.0.1:15173/",
+      type,
+      initiator: { type: initiatorType },
+      request: { url },
+    });
+    await cdp.emit("Network.responseReceived", {
+      requestId,
+      frameId: "main-frame",
+      loaderId: "loader-1",
+      type,
+      response: { url, status: 200 },
+    });
+    await cdp.emit("Network.loadingFinished", { requestId });
+  };
+  const registerCapture = (networkId, url) => {
+    captures.set(`${networkId}\0${url}`, {
+      kind: "controlled-fetch-response-body-capture",
+      fetchRequestId: `fetch-${networkId}`,
+      networkId,
+      relativePath: "assets/drawing.worker.js",
+      resourceType: "Other",
+      sessionId: null,
+      url,
+      responseStatusCode: 200,
+      bodyBytes: workerAsset.bytes,
+      bodySha256: workerAsset.sha256,
+      capturedAt: "2026-07-17T00:00:00.000Z",
+      claimedAt: null,
+      claimCount: 0,
+    });
+  };
+  const emitWorkerSource = async (requestId, url) => {
+    await cdp.emit("Network.requestWillBeSent", {
+      requestId,
+      frameId: "main-frame",
+      loaderId: "",
+      documentURL: url,
+      type: "Script",
+      initiator: { type: "other" },
+      request: { url },
+    });
+  };
+
+  await emitTopAsset("document", "/", "Document", "other");
+  await emitTopAsset("entry", "/assets/main.js", "Script", "parser");
+
+  const orphan = await emitWorkerConstruction(
+    cdp,
+    "http://127.0.0.1:15173/assets/drawing.worker.js",
+    "module",
+    { controlledQuery: true },
+  );
+  const orphanTargetId = "orphan-worker-target";
+  registerCapture(orphanTargetId, orphan.url);
+  await cdp.emit("Target.targetCreated", {
+    targetInfo: {
+      targetId: orphanTargetId,
+      type: "worker",
+      title: "candlescope-drawing-worker",
+      url: orphan.url,
+      attached: false,
+      openerFrameId: "main-frame",
+    },
+  });
+  await emitWorkerSource(orphanTargetId, orphan.url);
+  await cdp.emit("Target.targetDestroyed", { targetId: orphanTargetId });
+
+  const unresolvedOrphan = await emitWorkerConstruction(
+    cdp,
+    "http://127.0.0.1:15173/assets/drawing.worker.js",
+    "module",
+    { controlledQuery: true },
+  );
+  const unresolvedOrphanTargetId = "unresolved-orphan-worker-target";
+  registerCapture(unresolvedOrphanTargetId, unresolvedOrphan.url);
+  await cdp.emit("Target.targetCreated", {
+    targetInfo: {
+      targetId: unresolvedOrphanTargetId,
+      type: "worker",
+      title: "",
+      url: "",
+      attached: false,
+      parentFrameId: "main-frame",
+    },
+  });
+  await emitWorkerSource(unresolvedOrphanTargetId, unresolvedOrphan.url);
+  await cdp.emit("Target.targetDestroyed", { targetId: unresolvedOrphanTargetId });
+
+  const active = await emitWorkerConstruction(
+    cdp,
+    "http://127.0.0.1:15173/assets/drawing.worker.js",
+    "module",
+    { controlledQuery: true },
+  );
+  const activeTargetId = "active-worker-target";
+  const activeSessionId = "active-worker-session";
+  registerCapture(activeTargetId, active.url);
+  await cdp.emit("Target.targetCreated", {
+    targetInfo: {
+      targetId: activeTargetId,
+      type: "worker",
+      title: "candlescope-drawing-worker",
+      url: active.url,
+      attached: false,
+      openerFrameId: "main-frame",
+    },
+  });
+  await emitWorkerSource(activeTargetId, active.url);
+  await cdp.emit("Target.attachedToTarget", {
+    sessionId: activeSessionId,
+    waitingForDebugger: true,
+    targetInfo: {
+      targetId: activeTargetId,
+      type: "worker",
+      title: "candlescope-drawing-worker",
+      url: active.url,
+    },
+  });
+  await cdp.emit("Network.responseReceived", {
+    requestId: activeTargetId,
+    type: "Script",
+    response: { url: active.url, status: 200 },
+  }, { sessionId: activeSessionId });
+  await cdp.emit("Network.loadingFinished", {
+    requestId: activeTargetId,
+  }, { sessionId: activeSessionId });
+
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.passed, true, JSON.stringify({
+    inFlight: snapshot.inFlight,
+    provenanceErrors: snapshot.provenanceErrors,
+    retiredBeforeAttachWorkerSources: snapshot.retiredBeforeAttachWorkerSources,
+    unclaimedDrawingWorkerConstructions: snapshot.unclaimedDrawingWorkerConstructions,
+  }));
+  assert.equal(snapshot.assetAuthorityPassed, true);
+  assert.equal(snapshot.retiredBeforeAttachWorkerSourceCount, 2);
+  assert.deepEqual(
+    snapshot.retiredBeforeAttachWorkerSources.map((record) => ({
+      constructorId: record.constructorId,
+      targetIdentityMode: record.targetIdentityMode,
+    })),
+    [
+      {
+        constructorId: orphan.constructorId,
+        targetIdentityMode: "populated-target-info",
+      },
+      {
+        constructorId: unresolvedOrphan.constructorId,
+        targetIdentityMode: "unresolved-target-info-before-destroy",
+      },
+    ],
+  );
+  assert.equal(snapshot.workerBootstrapHandoffs.length, 1);
+  assert.equal(snapshot.workerBootstrapHandoffs[0].targetId, activeTargetId);
+  assert.equal(snapshot.unclaimedDrawingWorkerConstructionCount, 0);
+  assert.equal(snapshot.pendingCount, 0);
+  assert.equal(snapshot.inFlightCount, 0);
+  assert.equal(snapshot.provenanceErrors.length, 0);
+  assert.deepEqual(claims, [
+    { networkId: orphanTargetId, url: orphan.url },
+    { networkId: unresolvedOrphanTargetId, url: unresolvedOrphan.url },
+    { networkId: activeTargetId, url: active.url },
+  ]);
+  await cdp.emit("Target.targetDestroyed", { targetId: orphanTargetId });
+  assert.ok(tracker.snapshot().provenanceErrors.some((record) => (
+    record.kind === "worker-target-destroyed-duplicate"
+      && record.targetId === orphanTargetId
+  )));
+
+  const partialIdentity = await emitWorkerConstruction(
+    cdp,
+    "http://127.0.0.1:15173/assets/drawing.worker.js",
+    "module",
+    { controlledQuery: true },
+  );
+  const partialIdentityTargetId = "partial-identity-worker-target";
+  registerCapture(partialIdentityTargetId, partialIdentity.url);
+  await cdp.emit("Target.targetCreated", {
+    targetInfo: {
+      targetId: partialIdentityTargetId,
+      type: "worker",
+      title: "",
+      url: partialIdentity.url,
+      attached: false,
+      parentFrameId: "main-frame",
+    },
+  });
+  await emitWorkerSource(partialIdentityTargetId, partialIdentity.url);
+  await cdp.emit("Target.targetDestroyed", { targetId: partialIdentityTargetId });
+
+  const partialIdentitySnapshot = tracker.snapshot();
+  assert.equal(partialIdentitySnapshot.passed, false);
+  assert.equal(partialIdentitySnapshot.retiredBeforeAttachWorkerSourceCount, 2);
+  assert.equal(partialIdentitySnapshot.unclaimedDrawingWorkerConstructionCount, 1);
+  assert.equal(partialIdentitySnapshot.inFlightCount, 1);
+  assert.equal(
+    captures.get(`${partialIdentityTargetId}\0${partialIdentity.url}`).claimCount,
+    0,
+  );
+  for (const scenario of [
+    { label: "changed", emitInfoChange: true },
+    { label: "type-drift", emitInfoChange: true, changedType: "iframe" },
+    { label: "wrong-parent", parentFrameId: "other-frame" },
+    { label: "source-before-create", sourceBeforeCreate: true },
+    { label: "attached", attach: true },
+  ]) {
+    const candidate = await emitWorkerConstruction(
+      cdp,
+      "http://127.0.0.1:15173/assets/drawing.worker.js",
+      "module",
+      { controlledQuery: true },
+    );
+    const targetId = `${scenario.label}-unresolved-worker-target`;
+    registerCapture(targetId, candidate.url);
+    if (scenario.sourceBeforeCreate) await emitWorkerSource(targetId, candidate.url);
+    await cdp.emit("Target.targetCreated", {
+      targetInfo: {
+        targetId,
+        type: "worker",
+        title: "",
+        url: "",
+        attached: false,
+        parentFrameId: scenario.parentFrameId ?? "main-frame",
+      },
+    });
+    if (scenario.emitInfoChange) {
+      await cdp.emit("Target.targetInfoChanged", {
+        targetInfo: {
+          targetId,
+          type: scenario.changedType ?? "worker",
+          title: "",
+          url: "",
+          attached: false,
+          parentFrameId: "main-frame",
+        },
+      });
+    }
+    if (!scenario.sourceBeforeCreate) await emitWorkerSource(targetId, candidate.url);
+    if (scenario.attach) {
+      await cdp.emit("Target.attachedToTarget", {
+        sessionId: `${scenario.label}-session`,
+        targetInfo: {
+          targetId,
+          type: "worker",
+          title: "candlescope-drawing-worker",
+          url: candidate.url,
+        },
+      });
+      await cdp.emit("Target.detachedFromTarget", { sessionId: `${scenario.label}-session` });
+    }
+    await cdp.emit("Target.targetDestroyed", { targetId });
+    const rejected = tracker.snapshot();
+    assert.equal(rejected.retiredBeforeAttachWorkerSourceCount, 2, scenario.label);
+    assert.equal(captures.get(`${targetId}\0${candidate.url}`).claimCount, 0, scenario.label);
+    assert.equal(
+      rejected.retiredBeforeAttachWorkerSources.some((record) => record.targetId === targetId),
+      false,
+      scenario.label,
+    );
+  }
+  assert.ok(tracker.snapshot().provenanceErrors.some((record) => (
+    record.kind === "worker-target-type-mismatch"
+      && record.targetId === "type-drift-unresolved-worker-target"
+      && record.actualType === "iframe"
+  )));
+  await cdp.emit("Target.targetInfoChanged", {
+    targetInfo: {
+      targetId: "changed-unresolved-worker-target",
+      type: "worker",
+      title: "candlescope-drawing-worker",
+      url: "http://127.0.0.1:15173/assets/drawing.worker.js",
+      attached: false,
+      parentFrameId: "main-frame",
+    },
+  });
+  assert.ok(tracker.snapshot().provenanceErrors.some((record) => (
+    record.kind === "worker-target-info-after-destroy"
+      && record.targetId === "changed-unresolved-worker-target"
+  )));
+  await emitWorkerConstruction(
+    cdp,
+    "http://127.0.0.1:15173/assets/drawing.worker.js",
+    "module",
+    { controlledQuery: true, ensureMainContext: false, executionContextId: 702 },
+  );
+  assert.ok(tracker.snapshot().provenanceErrors.some((record) => (
+    record.kind === "worker-constructor-main-context-untrusted"
+      && record.executionContextId === 702
+  )));
+  tracker.dispose();
+});
+
 test("worker bootstrap handoff accepts serial reconstruction in one document generation", async () => {
   const fixture = await createWorkerBootstrapHandoffFixture();
   await fixture.emitChildResponse();
@@ -3366,11 +4005,6 @@ test("worker bootstrap handoff rejects Chrome event-contract or attach-window dr
       name: "off-origin document URL",
       options: { sourceDocumentUrl: "https://example.test/" },
       reason: "source-document-url-not-controlled",
-    },
-    {
-      name: "constructor after target attach",
-      options: { constructionTiming: "after-target" },
-      reason: "constructor-not-before-target-attachment",
     },
     {
       name: "source request after target attach",
@@ -3724,6 +4358,7 @@ test("paused worker initializer runs before exactly one resume and binds exact i
     id: "offscreen-canvas-unsupported",
     targetType: "worker",
     targetUrl: "http://127.0.0.1:15173/assets/drawing.worker.js",
+    allowControlledConstructorQuery: true,
     expression: "globalThis.__drill = true",
     timeoutMs: 1_000,
   });
@@ -3734,12 +4369,13 @@ test("paused worker initializer runs before exactly one resume and binds exact i
       targetId: "worker-target",
       type: "worker",
       title: "candlescope-drawing-worker",
-      url: "http://127.0.0.1:15173/assets/drawing.worker.js",
+      url: "http://127.0.0.1:15173/assets/drawing.worker.js?__candlescope_cdp_worker_constructor=22222222-2222-4222-8222-222222222222%3Aworker%3A1",
     },
   });
   assert.equal(outcomes[0].status, "fulfilled");
   const receipt = await lease.waitForReceipt(1_000);
   assert.equal(receipt.state, "consumed");
+  assert.equal(receipt.allowControlledConstructorQuery, true);
   assert.equal(receipt.receipt.passed, true);
   assert.equal(receipt.receipt.waitingForDebugger, true);
   assert.equal(receipt.receipt.sessionId, "worker-session");
@@ -4076,7 +4712,7 @@ test("browser close evidence accepts a structured websocket error then remote cl
   });
 });
 
-test("Windows tree cleanup proof requires exact unique descendant PID coverage and ordered census", () => {
+test("Windows tree cleanup proof requires exact top-level subtree coverage and ordered census", () => {
   const rootPid = 921;
   const receipt = passingTreeStopReceipt(rootPid);
   receipt.descendantCensus.before = passingCensus(
@@ -4085,9 +4721,10 @@ test("Windows tree cleanup proof requires exact unique descendant PID coverage a
     [
       { pid: 922, parentPid: rootPid },
       { pid: 923, parentPid: 922 },
+      { pid: 924, parentPid: rootPid },
     ],
   );
-  receipt.descendantCensus.terminationReceipts = [922, 923].map((targetPid) => ({
+  receipt.descendantCensus.terminationReceipts = [922, 924].map((targetPid) => ({
     kind: "windows-taskkill",
     exited: true,
     exitCode: 0,
@@ -4104,6 +4741,12 @@ test("Windows tree cleanup proof requires exact unique descendant PID coverage a
   assert.equal(duplicateAssessment.valid, false);
   assert.ok(duplicateAssessment.violations.includes("termination-target-pids-duplicate"));
   assert.ok(duplicateAssessment.violations.includes("termination-target-pid-set-mismatch"));
+
+  const unboundParent = structuredClone(receipt);
+  unboundParent.descendantCensus.before.descendants[1].parentPid = 999;
+  const unboundAssessment = assessWindowsOwnedProcessTreeReceipt(unboundParent, rootPid);
+  assert.equal(unboundAssessment.valid, false);
+  assert.ok(unboundAssessment.violations.includes("before-descendant-parent-unbound"));
 
   const reversedCensus = structuredClone(receipt);
   reversedCensus.descendantCensus.after.checkedAt = "2026-07-16T00:00:00.200Z";

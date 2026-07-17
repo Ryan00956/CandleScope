@@ -696,7 +696,6 @@ export function isDrawingHiddenExportSceneRetired(
     && worker.queueDepth === 0
     && worker.inFlight === 0
     && worker.pending === 0
-    && worker.latestSubmittedHeader === null
     && worker.inFlightHeader === null
     && worker.pendingHeader === null
   );

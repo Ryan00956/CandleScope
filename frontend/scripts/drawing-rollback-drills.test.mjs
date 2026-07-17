@@ -888,73 +888,370 @@ function activeGestureArtifact() {
 }
 
 function seriesRebuildArtifact() {
+  const scopeKey = "binance:spot:BTCUSDT__main";
+  const documentRevision = 7;
+  const authorityTokenSha256 = digest("a");
+  const runId = "phase9-series-rebuild-before-export-1";
+  const faultId = "11111111-1111-4111-8111-111111111111";
+  const documentInstanceId = "22222222-2222-4222-8222-222222222222";
+  const boundsDigest = "sha256:a69d33208160311ad533b1c6a89e050cb4d7785c875614faf40784678a3068c8";
+  const drawingBounds = [{
+    entityId: "freehand-1",
+    kind: "freehand",
+    leftCssPx: 320,
+    topCssPx: 240,
+    rightCssPx: 560,
+    bottomCssPx: 320,
+    paddingCssPx: 8,
+  }];
+  let productEventSequence = 0;
+  const event = (type, second, fields = {}) => ({
+    eventSequence: ++productEventSequence,
+    type,
+    observedAt: `2026-07-16T08:00:${String(second).padStart(2, "0")}.000Z`,
+    ...fields,
+  });
+  const old = {
+    transactionId: "drawing-export-1-lease-1",
+    transactionSequence: 1,
+    leaseId: 1,
+    scopeKey,
+    documentRevision,
+    hideDrawings: false,
+    persistence: { persistedRevision: documentRevision, writePerformed: false },
+    sceneKind: "settled-exact",
+    sceneStamp: stamp({ surfaceGeneration: 3 }),
+    surfaceGeneration: 3,
+    sceneEpoch: 31,
+    attachmentRevision: 7,
+    paintSequence: 11,
+    barrierFrame: 101,
+    drawableEntityCount: 1,
+    drawingBounds,
+    events: [
+      event("lease-prepared", 10),
+      event("capture-source-fixed", 13),
+      event("post-capture-revalidate", 14, { valid: false }),
+      event("lease-restored", 15),
+    ],
+  };
+  const visible = {
+    ...old,
+    transactionId: "drawing-export-2-lease-2",
+    transactionSequence: 2,
+    leaseId: 2,
+    sceneStamp: stamp({ surfaceGeneration: 4 }),
+    surfaceGeneration: 4,
+    sceneEpoch: 32,
+    attachmentRevision: 8,
+    paintSequence: 12,
+    barrierFrame: 102,
+    events: [
+      event("lease-prepared", 16),
+      event("capture-source-fixed", 17),
+      event("post-capture-revalidate", 18, { valid: true }),
+      event("lease-restored", 19),
+      event("image-encoded", 20, {
+        bytes: 128_000,
+        widthPx: 100,
+        heightPx: 80,
+        mimeType: "image/png",
+        optionsKey: "visible-options",
+      }),
+      event("preview-published", 21),
+    ],
+  };
+  const hidden = {
+    ...old,
+    transactionId: "drawing-export-3-lease-3",
+    transactionSequence: 3,
+    leaseId: 3,
+    hideDrawings: true,
+    sceneKind: "hidden-frame",
+    sceneStamp: null,
+    surfaceGeneration: null,
+    sceneEpoch: 33,
+    attachmentRevision: 9,
+    paintSequence: 13,
+    barrierFrame: 103,
+    drawableEntityCount: 0,
+    drawingBounds: [],
+    events: [
+      event("lease-prepared", 22),
+      event("capture-source-fixed", 23),
+      event("post-capture-revalidate", 24, { valid: true }),
+      event("lease-restored", 25),
+      event("image-encoded", 26, {
+        bytes: 126_000,
+        widthPx: 100,
+        heightPx: 80,
+        mimeType: "image/png",
+        optionsKey: "hidden-options",
+      }),
+      event("preview-published", 27),
+    ],
+  };
+  const visiblePng = {
+    label: "visible",
+    capturedAt: "2026-07-16T08:00:21.500Z",
+    digest: digest("b"),
+    bytes: 128_000,
+    widthPx: 100,
+    heightPx: 80,
+    mimeType: "image/png",
+    magicHex: "89504e470d0a1a0a",
+    transactionId: visible.transactionId,
+    leaseId: visible.leaseId,
+    scopeKey,
+    documentRevision,
+    surfaceGeneration: 4,
+    sceneKind: "settled-exact",
+    drawableEntityCount: 1,
+    optionsKey: "visible-options",
+  };
+  const hiddenPng = {
+    label: "hidden",
+    capturedAt: "2026-07-16T08:00:27.500Z",
+    digest: digest("d"),
+    bytes: 126_000,
+    widthPx: 100,
+    heightPx: 80,
+    mimeType: "image/png",
+    magicHex: "89504e470d0a1a0a",
+    transactionId: hidden.transactionId,
+    leaseId: hidden.leaseId,
+    scopeKey,
+    documentRevision,
+    surfaceGeneration: null,
+    sceneKind: "hidden-frame",
+    drawableEntityCount: 0,
+    optionsKey: "hidden-options",
+  };
+  const comparison = {
+    algorithm: "complete-frame-drawing-bounds-v1",
+    completedAt: "2026-07-16T08:00:28.000Z",
+    widthPx: 100,
+    heightPx: 80,
+    totalPixelCount: 8_000,
+    partitionPixelCount: 8_000,
+    drawingBoundsCount: 1,
+    drawingBoundsDigest: boundsDigest,
+    drawingPixelSampleCount: 1_000,
+    drawingPixelDiffCount: 100,
+    controlPixelSampleCount: 7_000,
+    controlPixelDiffCount: 0,
+    fixedControlKind: "right-price-scale",
+    fixedControlPixelSampleCount: 512,
+    fixedControlPixelDiffCount: 0,
+    totalPixelDiffCount: 100,
+    diffBounds: { leftPx: 30, topPx: 20, rightPx: 55, bottomPx: 32 },
+  };
+  const productLifecycle = {
+    schemaVersion: 1,
+    transactionCount: 3,
+    transactions: [old, visible, hidden],
+  };
+  const transactionFields = (transaction) => ({
+    transactionId: transaction.transactionId,
+    leaseId: transaction.leaseId,
+    scopeKey: transaction.scopeKey,
+    documentRevision: transaction.documentRevision,
+    surfaceGeneration: transaction.surfaceGeneration,
+    sceneKind: transaction.sceneKind,
+  });
+  const productCheckpoint = (type, transaction, productType, fields = {}) => {
+    const product = transaction.events.find((value) => value.type === productType);
+    return {
+      type,
+      observedAt: product.observedAt,
+      ...transactionFields(transaction),
+      productEventSequence: product.eventSequence,
+      ...fields,
+    };
+  };
   const currentStamp = stamp({ surfaceGeneration: 4 });
-  return {
+  const currentWorkerIdentity = workerIdentity(9, currentStamp);
+  const artifact = {
     ...commonArtifact("series-rebuild-before-export", "series-rebuild-before-export-capture"),
     checkpointEvents: [
-      {
-        type: "export-prepare",
-        observedAt: "2026-07-16T08:00:10.000Z",
-        leaseId: "export-lease-old",
-        surfaceGeneration: 3,
-      },
+      productCheckpoint("old-export-prepare", old, "lease-prepared"),
       {
         type: "series-rebuild-start",
         observedAt: "2026-07-16T08:00:11.000Z",
         fromSurfaceGeneration: 3,
+        beforeChartType: "candlestick",
+        afterChartType: "line",
       },
       {
         type: "series-rebuild-complete",
         observedAt: "2026-07-16T08:00:12.000Z",
         fromSurfaceGeneration: 3,
         surfaceGeneration: 4,
+        beforeChartType: "candlestick",
+        afterChartType: "line",
       },
+      productCheckpoint("stale-export-pixels-fixed", old, "capture-source-fixed", {
+        capturedSurfaceGeneration: 4,
+      }),
+      productCheckpoint("stale-lease-revalidate", old, "post-capture-revalidate", { valid: false }),
+      productCheckpoint("stale-lease-restored", old, "lease-restored"),
+      productCheckpoint("visible-export-prepare", visible, "lease-prepared"),
+      productCheckpoint("visible-export-pixels-fixed", visible, "capture-source-fixed"),
+      productCheckpoint("visible-lease-revalidate", visible, "post-capture-revalidate", { valid: true }),
+      productCheckpoint("visible-lease-restored", visible, "lease-restored"),
+      productCheckpoint("visible-export-encoded", visible, "image-encoded", { png: visiblePng }),
+      productCheckpoint("hidden-export-prepare", hidden, "lease-prepared"),
+      productCheckpoint("hidden-export-pixels-fixed", hidden, "capture-source-fixed"),
+      productCheckpoint("hidden-lease-revalidate", hidden, "post-capture-revalidate", { valid: true }),
+      productCheckpoint("hidden-lease-restored", hidden, "lease-restored"),
+      productCheckpoint("hidden-export-encoded", hidden, "image-encoded", { png: hiddenPng }),
       {
-        type: "stale-lease-revalidate",
-        observedAt: "2026-07-16T08:00:13.000Z",
-        leaseId: "export-lease-old",
-        surfaceGeneration: 3,
-        valid: false,
-      },
-      {
-        type: "fresh-lease-revalidate",
-        observedAt: "2026-07-16T08:00:14.000Z",
-        leaseId: "export-lease-fresh",
-        surfaceGeneration: 4,
-        valid: true,
-      },
-      {
-        type: "export-capture",
-        observedAt: "2026-07-16T08:00:15.000Z",
-        leaseId: "export-lease-fresh",
-        surfaceGeneration: 4,
-        png: {
-          digest: digest("b"),
-          bytes: 128_000,
-          widthPx: 1_920,
-          heightPx: 1_080,
-        },
-        drawingPixelDiffCount: 4_096,
-        controlPixelSampleCount: 512,
-        controlPixelDiffCount: 0,
-      },
-      {
-        type: "lease-restored",
-        observedAt: "2026-07-16T08:00:16.000Z",
-        leaseId: "export-lease-fresh",
-        surfaceGeneration: 4,
+        type: "pixel-oracle-complete",
+        observedAt: comparison.completedAt,
+        comparison,
       },
     ],
+    productLifecycle,
+    rebuild: {
+      startedAt: "2026-07-16T08:00:11.000Z",
+      completedAt: "2026-07-16T08:00:12.000Z",
+      beforeChartType: "candlestick",
+      afterChartType: "line",
+      fromSurfaceGeneration: 3,
+      surfaceGeneration: 4,
+      requestedStamp: { ...currentStamp },
+      publishedStamp: { ...currentStamp },
+      paintedStamp: { ...currentStamp },
+      paintReceipt: { ...paintReceipt(currentStamp), attachmentRevision: 8, paintSequence: 12 },
+    },
+    staleDiscard: {
+      observedAt: "2026-07-16T08:00:15.500Z",
+      error: "绘图在截图期间发生变化，已丢弃过期预览，请重试。 ",
+      previewPublished: false,
+      encoded: false,
+      productPreviewPublished: false,
+    },
+    pageCleanup: {
+      panelClosed: true,
+      gateReleased: true,
+      pixelCacheCleared: true,
+    },
+    captures: {
+      visible: visiblePng,
+      hidden: hiddenPng,
+      comparison,
+      options: {
+        scope: "chart",
+        format: "png",
+        scale: 1,
+        background: "auto",
+        watermarkEnabled: false,
+        visibleHideDrawings: false,
+        hiddenHideDrawings: true,
+      },
+      drawingBoundsDigest: boundsDigest,
+    },
     outcome: {
+      scopeKey,
       beforeDigest: digest("c"),
       afterDigest: digest("c"),
+      beforeDocumentRevision: documentRevision,
+      afterDocumentRevision: documentRevision,
+      beforeEntityCount: 1,
+      afterEntityCount: 1,
+      surfaceGeneration: 4,
+      backend: "worker",
+      workerAvailability: "available",
       queueDepthCurrent: 0,
+      inFlightCurrent: 0,
+      stalePublishCount: 0,
       lastRequestedStamp: { ...currentStamp },
       lastPublishedStamp: { ...currentStamp },
       lastPaintedStamp: { ...currentStamp },
-      paintReceipt: paintReceipt(currentStamp),
+      paintReceipt: { ...paintReceipt(currentStamp), attachmentRevision: 8, paintSequence: 12 },
+      submittedWorkerHeaders: [{ ...currentWorkerIdentity }],
+      latestSubmittedWorkerIdentity: { ...currentWorkerIdentity },
+      returnedWorkerIdentity: null,
+      acceptedWorkerIdentity: { ...currentWorkerIdentity },
+      publishedWorkerIdentity: { ...currentWorkerIdentity },
+      exportLifecycleActiveCount: 0,
+      drawingsHidden: false,
+      scenePublicationReady: true,
     },
   };
+  artifact.provenance.runId = runId;
+  artifact.injection = {
+    ...artifact.injection,
+    runId,
+    authorityTokenSha256,
+    documentInstanceId,
+    faultId,
+    sequence: 1,
+    navigation: {
+      kind: "controlled-rollback-drill-navigation",
+      runId,
+      drillId: "series-rebuild-before-export",
+      variant: null,
+      faultId,
+      sequence: 1,
+      authorityTokenSha256,
+      authorityAccepted: true,
+      tokenRemoved: true,
+      documentInstanceId,
+    },
+    gate: {
+      checkpointCount: 3,
+      pauseConsumed: true,
+      releaseCount: 1,
+      activeCheckpointId: null,
+      checkpoints: [
+        {
+          checkpointId: `${faultId}:export:1`,
+          transactionId: old.transactionId,
+          leaseId: old.leaseId,
+          scopeKey,
+          documentRevision,
+          surfaceGeneration: 3,
+          hideDrawings: false,
+          paused: true,
+          preparedAt: "2026-07-16T08:00:10.000Z",
+          releasedAt: "2026-07-16T08:00:12.500Z",
+          releaseReason: "harness-release",
+        },
+        {
+          checkpointId: `${faultId}:export:2`,
+          transactionId: visible.transactionId,
+          leaseId: visible.leaseId,
+          scopeKey,
+          documentRevision,
+          surfaceGeneration: 4,
+          hideDrawings: false,
+          paused: false,
+          preparedAt: "2026-07-16T08:00:16.000Z",
+          releasedAt: "2026-07-16T08:00:16.000Z",
+          releaseReason: "not-paused",
+        },
+        {
+          checkpointId: `${faultId}:export:3`,
+          transactionId: hidden.transactionId,
+          leaseId: hidden.leaseId,
+          scopeKey,
+          documentRevision,
+          surfaceGeneration: null,
+          hideDrawings: true,
+          paused: false,
+          preparedAt: "2026-07-16T08:00:22.000Z",
+          releasedAt: "2026-07-16T08:00:22.000Z",
+          releaseReason: "not-paused",
+        },
+      ],
+    },
+  };
+  artifact.checkpointEvents = artifact.checkpointEvents.map((checkpoint, index) => ({
+    eventSequence: index + 1,
+    ...checkpoint,
+  }));
+  return artifact;
 }
 
 function continuousDprArtifact() {
@@ -2749,20 +3046,79 @@ test("gesture drill binds injection variants, current build, and controlled navi
 });
 
 test("export rebuild drill requires stale lease rejection and fresh exact capture", () => {
+  const baseline = assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    seriesRebuildArtifact(),
+  );
+  assert.equal(baseline.contractPassed, true, baseline.failures.join(", "));
+
+  const staleWorkerEvidence = seriesRebuildArtifact();
+  const staleWorkerIdentity = workerIdentity(8, stamp({ surfaceGeneration: 3 }));
+  staleWorkerEvidence.outcome.submittedWorkerHeaders.unshift(staleWorkerIdentity);
+  staleWorkerEvidence.outcome.returnedWorkerIdentity = staleWorkerIdentity;
+  assert.equal(
+    assessDrawingRollbackDrillArtifact(
+      "series-rebuild-before-export",
+      staleWorkerEvidence,
+    ).contractPassed,
+    true,
+  );
+
+  const currentReturnedAsStale = seriesRebuildArtifact();
+  currentReturnedAsStale.outcome.returnedWorkerIdentity = {
+    ...currentReturnedAsStale.outcome.latestSubmittedWorkerIdentity,
+  };
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    currentReturnedAsStale,
+  ).failures.includes("post-export-worker-identity-not-current"));
+
+  const detachedReturnedIdentity = seriesRebuildArtifact();
+  detachedReturnedIdentity.outcome.returnedWorkerIdentity = workerIdentity(
+    8,
+    stamp({ surfaceGeneration: 3 }),
+  );
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    detachedReturnedIdentity,
+  ).failures.includes("post-export-worker-identity-not-current"));
+
+  const unorderedWorkerHistory = seriesRebuildArtifact();
+  unorderedWorkerHistory.outcome.submittedWorkerHeaders.push(workerIdentity(
+    8,
+    stamp({ surfaceGeneration: 3 }),
+  ));
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    unorderedWorkerHistory,
+  ).failures.includes("post-export-worker-identity-not-current"));
+
+  const oversizedWorkerHistory = seriesRebuildArtifact();
+  oversizedWorkerHistory.outcome.submittedWorkerHeaders = Array.from(
+    { length: 33 },
+    (_value, index) => workerIdentity(index + 1, oversizedWorkerHistory.outcome.lastPublishedStamp),
+  );
+  const oversizedLatest = oversizedWorkerHistory.outcome.submittedWorkerHeaders.at(-1);
+  oversizedWorkerHistory.outcome.latestSubmittedWorkerIdentity = oversizedLatest;
+  oversizedWorkerHistory.outcome.acceptedWorkerIdentity = oversizedLatest;
+  oversizedWorkerHistory.outcome.publishedWorkerIdentity = oversizedLatest;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    oversizedWorkerHistory,
+  ).failures.includes("post-export-worker-identity-not-current"));
+
   const artifact = seriesRebuildArtifact();
-  artifact.checkpointEvents[3].valid = true;
-  artifact.checkpointEvents[4].valid = false;
+  artifact.checkpointEvents[4].valid = true;
   const result = assessDrawingRollbackDrillArtifact("series-rebuild-before-export", artifact);
   assert.equal(result.contractPassed, false);
   assert.ok(result.failures.includes("stale-export-lease-revalidation-invalid"));
-  assert.ok(result.failures.includes("fresh-export-lease-revalidation-invalid"));
 
   const sameLease = seriesRebuildArtifact();
-  sameLease.checkpointEvents[4].leaseId = sameLease.checkpointEvents[0].leaseId;
+  sameLease.productLifecycle.transactions[1].leaseId = sameLease.productLifecycle.transactions[0].leaseId;
   assert.ok(assessDrawingRollbackDrillArtifact(
     "series-rebuild-before-export",
     sameLease,
-  ).failures.includes("fresh-export-lease-revalidation-invalid"));
+  ).failures.includes("export-product-lifecycle-identity-invalid"));
 
   const badGeneration = seriesRebuildArtifact();
   badGeneration.checkpointEvents[2].surfaceGeneration = 3;
@@ -2772,24 +3128,35 @@ test("export rebuild drill requires stale lease rejection and fresh exact captur
   ).failures.includes("series-rebuild-generation-transition-invalid"));
 
   const invalidPng = seriesRebuildArtifact();
-  invalidPng.checkpointEvents[5].png.digest = "sha256:not-a-real-digest";
-  invalidPng.checkpointEvents[5].png.bytes = Number.MAX_SAFE_INTEGER + 1;
+  invalidPng.checkpointEvents[10].png.digest = "sha256:not-a-real-digest";
+  invalidPng.checkpointEvents[10].png.bytes = Number.MAX_SAFE_INTEGER + 1;
   assert.ok(assessDrawingRollbackDrillArtifact(
     "series-rebuild-before-export",
     invalidPng,
-  ).failures.includes("export-png-receipt-invalid"));
+  ).failures.includes("export-png-receipts-invalid"));
+
+  const detachedEncodedReceipt = seriesRebuildArtifact();
+  detachedEncodedReceipt.productLifecycle.transactions[1].events[4].bytes += 1;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    detachedEncodedReceipt,
+  ).failures.includes("export-png-receipts-invalid"));
 
   const pixelMismatch = seriesRebuildArtifact();
-  pixelMismatch.checkpointEvents[5].drawingPixelDiffCount = 0;
-  pixelMismatch.checkpointEvents[5].controlPixelDiffCount = 1;
+  pixelMismatch.checkpointEvents[16].comparison.drawingPixelDiffCount = 0;
+  pixelMismatch.checkpointEvents[16].comparison.controlPixelDiffCount = 1;
   const pixelMismatchResult = assessDrawingRollbackDrillArtifact(
     "series-rebuild-before-export",
     pixelMismatch,
   );
-  assert.ok(pixelMismatchResult.failures.includes("export-drawing-pixel-diff-not-observed"));
-  assert.ok(pixelMismatchResult.failures.includes(
-    "export-control-pixel-diff-observed-or-missing",
-  ));
+  assert.ok(pixelMismatchResult.failures.includes("export-drawing-pixel-diff-not-exact"));
+
+  const detachedBounds = seriesRebuildArtifact();
+  detachedBounds.productLifecycle.transactions[1].drawingBounds[0].leftCssPx += 1;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    detachedBounds,
+  ).failures.includes("export-pixel-oracle-partition-invalid"));
 
   const outOfOrder = seriesRebuildArtifact();
   outOfOrder.checkpointEvents[2].observedAt = "2026-07-16T08:00:09.000Z";
@@ -2815,6 +3182,36 @@ test("export rebuild drill requires stale lease rejection and fresh exact captur
   assert.ok(inferredPaintResult.failures.includes(
     "post-export-independent-painted-stamp-missing",
   ));
+
+  const missingRestore = seriesRebuildArtifact();
+  missingRestore.productLifecycle.transactions[0].events.pop();
+  const missingRestoreResult = assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    missingRestore,
+  );
+  assert.ok(missingRestoreResult.failures.includes("export-product-lifecycle-sequence-invalid"));
+  assert.ok(missingRestoreResult.failures.includes("stale-export-lease-restore-invalid"));
+
+  const stalePublished = seriesRebuildArtifact();
+  stalePublished.staleDiscard.previewPublished = true;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    stalePublished,
+  ).failures.includes("stale-export-preview-not-discarded"));
+
+  const detachedAuthority = seriesRebuildArtifact();
+  detachedAuthority.injection.navigation.faultId = "detached-fault";
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    detachedAuthority,
+  ).failures.includes("export-rebuild-navigation-authority-invalid"));
+
+  const leakedPageState = seriesRebuildArtifact();
+  leakedPageState.pageCleanup.pixelCacheCleared = false;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "series-rebuild-before-export",
+    leakedPageState,
+  ).failures.includes("post-export-page-cleanup-invalid"));
 });
 
 test("continuous DPR drill requires the full matrix on every current transition", () => {

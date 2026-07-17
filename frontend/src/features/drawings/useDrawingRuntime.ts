@@ -1,6 +1,15 @@
 import { useCallback, useEffect } from "react";
 import { clearDrawingScopeAuthoritatively } from "./drawingScopePersistence.js";
 import { useDrawingToolState } from "./drawingToolState.js";
+import { awaitControlledSeriesRebuildExportCapture } from "./export/controlledExportRollbackCheckpoint.js";
+import {
+  beginDrawingExportLifecycle,
+  recordDrawingExportCaptureSourceFixed,
+  recordDrawingExportImageEncoded,
+  recordDrawingExportLeaseRestored,
+  recordDrawingExportPostCaptureRevalidate,
+  recordDrawingExportPreviewPublished,
+} from "./export/drawingExportLifecycle.js";
 import type { ChartSurfaceActions } from "../../chart-adapter/useChartSurfaceRuntime.js";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { DrawingToolStateRuntime } from "./drawingToolState.js";
@@ -9,12 +18,52 @@ import type {
   DrawingExportPrepareOptions,
   DrawingStylePatch,
 } from "./drawingInteractionController.js";
+import type {
+  DrawingExportEncodedResult,
+  DrawingExportLifecycleTransaction,
+} from "./export/drawingExportLifecycle.js";
+
+export type DrawingRuntimeExportLease = DrawingExportLease;
+export type DrawingRuntimeExportPrepareOptions = DrawingExportPrepareOptions;
+
+export interface DrawingExportRuntimeInstrumentation {
+  begin(
+    lease: DrawingExportLease,
+    hideDrawings: boolean,
+  ): DrawingExportLifecycleTransaction;
+  awaitControlledCapture(
+    transaction: DrawingExportLifecycleTransaction,
+    signal: AbortSignal,
+  ): Promise<unknown>;
+  recordCaptureSourceFixed(transaction: DrawingExportLifecycleTransaction | null): void;
+  recordPostCaptureRevalidate(
+    transaction: DrawingExportLifecycleTransaction | null,
+    valid: boolean,
+  ): void;
+  recordLeaseRestored(transaction: DrawingExportLifecycleTransaction | null): void;
+  recordImageEncoded(
+    transaction: DrawingExportLifecycleTransaction | null,
+    result: DrawingExportEncodedResult,
+  ): void;
+  recordPreviewPublished(transaction: DrawingExportLifecycleTransaction | null): void;
+}
+
+const DRAWING_EXPORT_INSTRUMENTATION: DrawingExportRuntimeInstrumentation = Object.freeze({
+  begin: beginDrawingExportLifecycle,
+  awaitControlledCapture: awaitControlledSeriesRebuildExportCapture,
+  recordCaptureSourceFixed: recordDrawingExportCaptureSourceFixed,
+  recordPostCaptureRevalidate: recordDrawingExportPostCaptureRevalidate,
+  recordLeaseRestored: recordDrawingExportLeaseRestored,
+  recordImageEncoded: recordDrawingExportImageEncoded,
+  recordPreviewPublished: recordDrawingExportPreviewPublished,
+});
 
 export type DrawingRuntimeActions = DrawingToolStateRuntime["actions"] & {
   handleClearDrawing(): void;
   handleToggleDrawingsHidden(): void;
   handleSelectedDrawingStyleChange(patch: DrawingStylePatch): void;
   prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease | null>;
+  exportInstrumentation: DrawingExportRuntimeInstrumentation;
   handleIndicatorRemoved(indicatorId: string | null | undefined): void;
 };
 
@@ -71,6 +120,7 @@ export function useDrawingRuntime({
     handleToggleDrawingsHidden,
     handleSelectedDrawingStyleChange,
     prepareExport,
+    exportInstrumentation: DRAWING_EXPORT_INSTRUMENTATION,
     handleIndicatorRemoved,
   };
 

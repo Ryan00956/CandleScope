@@ -10,9 +10,11 @@ import type { MutableRefObject } from "react";
 import type { ChartSurfaceActions } from "../../chart-adapter/useChartSurfaceRuntime.js";
 import type { ChartSessionRuntime } from "../chart-session/chartSessionTypes.js";
 import type { DrawingRuntime } from "../drawings/useDrawingRuntime.js";
-import type { DrawingExportTarget } from "../drawings/export/drawingExportBarrier.js";
 import type { ExportMetadata, ExportOptions } from "./exportTypes.js";
-import type { ExportPreviewRuntime } from "./exportPreviewRuntime.js";
+import type {
+  DrawingExportTarget,
+  ExportPreviewRuntime,
+} from "./exportPreviewRuntime.js";
 
 export interface UseExportRuntimeOptions {
   session: ChartSessionRuntime | null | undefined;
@@ -98,6 +100,9 @@ export function useExportRuntime({
     ...(drawings?.actions?.prepareExport === undefined
       ? {}
       : { prepareDrawingExport: drawings.actions.prepareExport }),
+    ...(drawings?.actions?.exportInstrumentation === undefined
+      ? {}
+      : { drawingExportInstrumentation: drawings.actions.exportInstrumentation }),
   });
 
   const updateOptions = useCallback((nextOptions: ExportOptions) => {

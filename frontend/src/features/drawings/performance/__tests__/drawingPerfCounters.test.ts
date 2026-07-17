@@ -512,6 +512,11 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
   assert.ok(Object.isFrozen(handle));
   assert.equal(handle?.report().schemaVersion, 1);
   assert.equal(handle?.readRawCapture().enabled, false);
+  assert.deepEqual(handle?.readExportLifecycle(), {
+    schemaVersion: 1,
+    transactionCount: 0,
+    transactions: [],
+  });
   const unregister = handle?.registerRuntimeSummaryProvider(() => ({
     entityCount: 3,
     pointCount: 512,
@@ -566,6 +571,11 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
   assert.equal(handle?.requestShadowParity(), false);
   unregisterThrowingParity();
   assert.doesNotThrow(() => handle?.reset());
+  assert.deepEqual(handle?.readExportLifecycle(), {
+    schemaVersion: 1,
+    transactionCount: 0,
+    transactions: [],
+  });
   assert.deepEqual(handle?.readInteractionLifecycle(), {
     active: null,
     lastCompleted: null,

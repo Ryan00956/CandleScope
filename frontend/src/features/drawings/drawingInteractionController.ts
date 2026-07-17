@@ -1147,6 +1147,19 @@ export type DrawingExportLease = DrawingExportBarrierLease<
   number
 >;
 
+export function withDrawingExportCaptureScene(
+  lease: DrawingExportLease,
+  captureScene: DrawingExportSceneReceipt,
+): DrawingExportLease {
+  if (captureScene === lease.receipt.scene) return lease;
+  return Object.freeze({
+    leaseId: lease.leaseId,
+    receipt: Object.freeze({ ...lease.receipt, scene: captureScene }),
+    revalidate: () => lease.revalidate(),
+    restore: () => lease.restore(),
+  });
+}
+
 interface DrawingExportPresentationState {
   readonly interaction: DrawingExportInteractionLease;
   readonly previousHidden: boolean;
@@ -4420,21 +4433,24 @@ export function useDrawing({
   ): Promise<DrawingExportLease> => {
     const barrier = exportBarrierRef.current;
     if (!barrier) throw new Error("Drawing export barrier is unavailable");
-    if (barrier.snapshot().locked) {
-      return barrier.prepare({
+    const prepareBarrierLease = async (): Promise<DrawingExportLease> => {
+      const lease = await barrier.prepare({
         ...(options.signal === undefined ? {} : { signal: options.signal }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       });
+      const captureScene = activeExportPresentationRef.current?.replacementScene
+        ?? lease.receipt.scene;
+      return withDrawingExportCaptureScene(lease, captureScene);
+    };
+    if (barrier.snapshot().locked) {
+      return prepareBarrierLease();
     }
     exportRequestRef.current = Object.freeze({
       hiddenAtStart: hiddenRef.current,
       hideDrawings: options.hideDrawings === true,
     });
     try {
-      return await barrier.prepare({
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-      });
+      return await prepareBarrierLease();
     } finally {
       exportRequestRef.current = null;
     }

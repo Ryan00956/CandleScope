@@ -31,6 +31,7 @@ const CONTROLLED_LAUNCHERS = new Map([
 const CONTROLLED_ENTRYPOINTS = new Set(CONTROLLED_LAUNCHERS.keys());
 const OWNED_PROFILE_PREFIX = "candlescope-controlled-cdp-";
 const DIAGNOSTIC_BINDING = "__CANDLESCOPE_CONTROLLED_CDP_REPORT__";
+const CONTROLLED_WORKER_CONSTRUCTOR_QUERY = "__candlescope_cdp_worker_constructor";
 const CONTROLLED_ROLLBACK_SESSION_KEY = "__CANDLESCOPE_CONTROLLED_ROLLBACK_DRILL_TOKEN__";
 const CONTROLLED_ROLLBACK_HANDLE = "__CANDLESCOPE_CONTROLLED_ROLLBACK_DRILL__";
 export const CONTROLLED_WORKER_ROLLBACK_DRILL_IDS = Object.freeze([
@@ -46,6 +47,7 @@ export const CONTROLLED_ROLLBACK_DRILL_IDS = Object.freeze([
   ...CONTROLLED_WORKER_ROLLBACK_DRILL_IDS,
   "indexeddb-quota-blocked",
   "active-gesture-chart-boundary",
+  "series-rebuild-before-export",
 ]);
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -1277,7 +1279,10 @@ function readWindowsDescendantCensus(rootPid, powershellPath) {
 async function closeBuildDescendants(rootPid, toolchain) {
   const before = readWindowsDescendantCensus(rootPid, toolchain.powershell?.path ?? null);
   const terminationReceipts = [];
-  for (const descendant of before.descendants) {
+  const topLevelDescendants = before.descendants.filter((descendant) => (
+    descendant.parentPid === rootPid
+  ));
+  for (const descendant of topLevelDescendants) {
     terminationReceipts.push(await stopWindowsProcessTree(descendant.pid));
   }
   const after = readWindowsDescendantCensus(rootPid, toolchain.powershell?.path ?? null);
@@ -2828,15 +2833,24 @@ export function createControlledNetworkAssetTracker(
   const unmanifestedResponses = [];
   const provenanceErrors = [];
   const workerConstructions = [];
+  const workerConstructionsById = new Map();
   const workerConstructionFaults = [];
+  const mainDefaultExecutionContexts = new Map();
   const workerTargetConstructionBindings = new Map();
   const claimedWorkerConstructions = new Set();
+  const discoveredWorkerTargets = new Map();
+  const retiredBeforeAttachWorkerConstructions = new Set();
+  const retiredBeforeAttachWorkerSources = new Map();
   const workerBootstrapHandoffs = new Map();
   const workerBootstrapSourceClaims = new Map();
+  const deferredWorkerBootstrapResponses = new Map();
   const duplicateRequestKeys = new Set();
   const terminalRequestKeys = new Set();
   const responseEventKeys = new Set();
   const workerBootstrapObservationWindow = 20;
+  const workerBootstrapConstructionReportGraceMs = Math.min(1_000, timeoutMs);
+  const deferredWorkerBootstrapHandoff = Symbol("deferred-worker-bootstrap-handoff");
+  const rejectedWorkerBootstrapHandoff = Symbol("rejected-worker-bootstrap-handoff");
   let currentLoaderId = null;
   let currentDocumentPath = null;
   let currentDocumentUrl = null;
@@ -2877,6 +2891,7 @@ export function createControlledNetworkAssetTracker(
     candidate.generation === generation
     && candidate.url === url
     && !isRetiredWorkerConstruction(candidate)
+    && !retiredBeforeAttachWorkerConstructions.has(candidate)
   ));
   const isDataApiRequest = (relativePath, type) => (
     relativePath?.startsWith("api/") && dataApiTypes.has(type)
@@ -2911,6 +2926,109 @@ export function createControlledNetworkAssetTracker(
     workerTargetConstructionBindings.set(targets[0].sessionId, constructions[0]);
     claimedWorkerConstructions.add(constructions[0]);
   };
+  const captureDiscoveredWorkerTarget = (targetInfo, kind) => {
+    if (typeof targetInfo?.targetId !== "string") return;
+    const existing = discoveredWorkerTargets.get(targetInfo.targetId) ?? null;
+    if (existing !== null && existing.destroyedAt !== null) {
+      recordProvenanceError("worker-target-info-after-destroy", {
+        eventKind: kind,
+        targetId: targetInfo.targetId,
+      });
+      return;
+    }
+    if (targetInfo.type !== "worker") {
+      if (existing !== null) {
+        existing.typeMismatch = true;
+        recordProvenanceError("worker-target-type-mismatch", {
+          eventKind: kind,
+          targetId: targetInfo.targetId,
+          actualType: targetInfo.type ?? null,
+        });
+      }
+      return;
+    }
+    const sequence = observe();
+    const record = existing ?? {
+      generation: currentGeneration,
+      targetId: targetInfo.targetId,
+      createdAt: null,
+      createdObservationSequence: null,
+      changedAt: null,
+      changedObservationSequence: null,
+      destroyedAt: null,
+      destroyedObservationSequence: null,
+      attachedSessionId: null,
+      createdCount: 0,
+      changedCount: 0,
+      everAttached: false,
+      nonEmptyTitleMismatch: false,
+      nonEmptyTitleChanged: false,
+      nonEmptyUrlPathMismatch: false,
+      nonEmptyUrlChanged: false,
+      parentFrameMismatch: false,
+      typeMismatch: false,
+      firstNonEmptyTitle: null,
+      firstNonEmptyUrl: null,
+    };
+    const title = targetInfo.title ?? null;
+    const url = targetInfo.url ?? null;
+    const openerFrameId = targetInfo.openerFrameId ?? null;
+    const parentFrameId = targetInfo.parentFrameId ?? null;
+    if (typeof title === "string" && title.length > 0) {
+      record.nonEmptyTitleMismatch ||= title !== "candlescope-drawing-worker";
+      record.nonEmptyTitleChanged ||= record.firstNonEmptyTitle !== null
+        && record.firstNonEmptyTitle !== title;
+      record.firstNonEmptyTitle ??= title;
+    }
+    if (typeof url === "string" && url.length > 0) {
+      record.nonEmptyUrlPathMismatch ||= !drawingWorkerPaths.includes(assetPath(url));
+      record.nonEmptyUrlChanged ||= record.firstNonEmptyUrl !== null
+        && record.firstNonEmptyUrl !== url;
+      record.firstNonEmptyUrl ??= url;
+    }
+    const observedParentFrames = [openerFrameId, parentFrameId].filter((value) => (
+      typeof value === "string" && value.length > 0
+    ));
+    record.parentFrameMismatch ||= observedParentFrames.some((value) => value !== mainFrameId);
+    record.everAttached ||= targetInfo.attached === true;
+    record.type = targetInfo.type;
+    record.title = title;
+    record.url = url;
+    record.attached = targetInfo.attached === true;
+    record.openerId = targetInfo.openerId ?? null;
+    record.openerFrameId = openerFrameId;
+    record.parentId = targetInfo.parentId ?? null;
+    record.parentFrameId = parentFrameId;
+    if (kind === "created") {
+      record.createdCount += 1;
+      record.createdAt ??= isoNow();
+      record.createdObservationSequence ??= sequence;
+    } else {
+      record.changedCount += 1;
+      record.changedAt = isoNow();
+      record.changedObservationSequence = sequence;
+    }
+    discoveredWorkerTargets.set(record.targetId, record);
+    retireDestroyedUnattachedWorkerBootstraps();
+  };
+  const removeTargetCreated = cdp.on("Target.targetCreated", (params) => {
+    captureDiscoveredWorkerTarget(params?.targetInfo, "created");
+  });
+  const removeTargetInfoChanged = cdp.on("Target.targetInfoChanged", (params) => {
+    captureDiscoveredWorkerTarget(params?.targetInfo, "changed");
+  });
+  const removeTargetDestroyed = cdp.on("Target.targetDestroyed", (params) => {
+    const targetId = params?.targetId;
+    const record = discoveredWorkerTargets.get(targetId) ?? null;
+    if (!record) return;
+    if (record.destroyedAt !== null) {
+      recordProvenanceError("worker-target-destroyed-duplicate", { targetId });
+      return;
+    }
+    record.destroyedAt = isoNow();
+    record.destroyedObservationSequence = observe();
+    retireDestroyedUnattachedWorkerBootstraps();
+  });
   const removeAttached = cdp.on("Target.attachedToTarget", (params) => {
     if (typeof params?.sessionId !== "string") return;
     const attachedObservationSequence = observe();
@@ -2927,6 +3045,11 @@ export function createControlledNetworkAssetTracker(
       detachedObservationSequence: null,
     };
     targetSessions.set(params.sessionId, target);
+    const discovered = discoveredWorkerTargets.get(target.targetId) ?? null;
+    if (discovered) {
+      discovered.attachedSessionId = params.sessionId;
+      discovered.everAttached = true;
+    }
     reconcileWorkerConstructionBinding(target.generation, target.url);
   });
   const removeDetached = cdp.on("Target.detachedFromTarget", (params) => {
@@ -2936,10 +3059,50 @@ export function createControlledNetworkAssetTracker(
       target.detachedObservationSequence = observe();
     }
   });
+  const removeMainExecutionContextCreated = cdp.on("Runtime.executionContextCreated", (params, message) => {
+    if (message?.sessionId) return;
+    const context = params?.context;
+    const contextId = context?.id;
+    const auxData = context?.auxData;
+    if (!Number.isSafeInteger(contextId)
+      || auxData?.isDefault !== true
+      || auxData?.type !== "default"
+      || auxData?.frameId !== mainFrameId) return;
+    if (mainDefaultExecutionContexts.has(contextId)) {
+      recordProvenanceError("main-execution-context-created-duplicate", { executionContextId: contextId });
+      return;
+    }
+    mainDefaultExecutionContexts.set(contextId, Object.freeze({
+      executionContextId: contextId,
+      frameId: auxData.frameId,
+      generation: currentGeneration,
+      observedAt: isoNow(),
+      observationSequence: observe(),
+    }));
+  });
+  const removeMainExecutionContextDestroyed = cdp.on("Runtime.executionContextDestroyed", (params, message) => {
+    if (message?.sessionId) return;
+    if (mainDefaultExecutionContexts.delete(params?.executionContextId)) observe();
+  });
+  const removeMainExecutionContextsCleared = cdp.on("Runtime.executionContextsCleared", (_params, message) => {
+    if (message?.sessionId || mainDefaultExecutionContexts.size === 0) return;
+    mainDefaultExecutionContexts.clear();
+    observe();
+  });
   const removeWorkerConstruction = cdp.on("Runtime.bindingCalled", (params, message) => {
     if (message?.sessionId || params?.name !== DIAGNOSTIC_BINDING) return;
     let payload;
     try { payload = JSON.parse(params?.payload || ""); } catch { return; }
+    if (!["worker-constructor", "worker-constructor-fault"].includes(payload?.kind)) return;
+    const bindingContext = mainDefaultExecutionContexts.get(params?.executionContextId) ?? null;
+    if (bindingContext?.generation !== currentGeneration
+      || bindingContext?.frameId !== mainFrameId) {
+      recordProvenanceError("worker-constructor-main-context-untrusted", {
+        executionContextId: params?.executionContextId ?? null,
+        payloadKind: payload.kind,
+      });
+      return;
+    }
     if (payload?.kind === "worker-constructor-fault") {
       const relativePath = assetPath(payload?.url || "");
       const accepted = rollbackAuthority !== null
@@ -2982,6 +3145,7 @@ export function createControlledNetworkAssetTracker(
         path: relativePath,
         workerType: payload.workerType,
         workerName: payload.workerName,
+        executionContextId: params.executionContextId,
         observedAt: isoNow(),
         observationSequence: observe(),
       }));
@@ -2992,16 +3156,82 @@ export function createControlledNetworkAssetTracker(
       recordProvenanceError("worker-constructor-off-origin", { url: payload.url });
       return;
     }
+    const relativePath = assetPath(payload.url);
+    const isDrawingWorker = drawingWorkerPaths.includes(relativePath);
+    let constructorQueryId = null;
+    try {
+      constructorQueryId = new URL(payload.url).searchParams.get(CONTROLLED_WORKER_CONSTRUCTOR_QUERY);
+    } catch {
+      // The managed URL check above owns malformed URL rejection.
+    }
+    const constructorIdentityAccepted = typeof payload?.documentInstanceId === "string"
+      && payload.documentInstanceId.length > 0
+      && Number.isSafeInteger(payload?.constructorAttempt)
+      && payload.constructorAttempt > 0
+      && payload?.constructorId === `${payload.documentInstanceId}:worker:${payload.constructorAttempt}`;
+    const constructorAuthorityAccepted = rollbackAuthority === null || (
+      payload?.runId === rollbackAuthority.runId
+      && payload?.authorityTokenSha256 === rollbackAuthority.authorityTokenSha256
+      && typeof payload?.authorityAccepted === "boolean"
+      && (payload.authorityAccepted === false || (
+        rollbackAuthority.drillIds.includes(payload?.drillId)
+        && typeof payload?.faultId === "string"
+        && /^[a-f0-9-]{36}$/.test(payload.faultId)
+        && Number.isSafeInteger(payload?.sequence)
+        && payload.sequence > 0
+      ))
+    );
+    const constructorQueryAccepted = rollbackAuthority === null
+      || !isDrawingWorker
+      || constructorQueryId === payload.constructorId;
+    if (!constructorIdentityAccepted || !constructorAuthorityAccepted || !constructorQueryAccepted) {
+      recordProvenanceError("worker-constructor-untrusted", {
+        constructorId: payload?.constructorId ?? null,
+        constructorQueryId,
+        url: payload.url,
+      });
+      return;
+    }
+    const duplicate = workerConstructionsById.get(payload.constructorId) ?? null;
+    if (duplicate) {
+      const duplicateAccepted = duplicate.url === payload.url
+        && duplicate.workerType === (payload.workerType ?? null)
+        && duplicate.workerName === (payload.workerName ?? null)
+        && duplicate.documentInstanceId === payload.documentInstanceId
+        && duplicate.constructorAttempt === payload.constructorAttempt
+        && duplicate.executionContextId === params.executionContextId;
+      if (!duplicateAccepted) {
+        recordProvenanceError("worker-constructor-identity-conflict", {
+          constructorId: payload.constructorId,
+          url: payload.url,
+        });
+        return;
+      }
+      return flushDeferredWorkerBootstrapResponses(duplicate.generation, duplicate.url);
+    }
     const construction = Object.freeze({
       kind: "controlled-worker-construction",
       generation: currentGeneration,
+      runId: payload.runId ?? null,
+      authorityTokenSha256: payload.authorityTokenSha256 ?? null,
+      authorityAccepted: payload.authorityAccepted === true,
+      drillId: payload.drillId ?? null,
+      documentInstanceId: payload.documentInstanceId,
+      faultId: payload.faultId ?? null,
+      sequence: payload.sequence ?? null,
+      constructorId: payload.constructorId,
+      constructorAttempt: payload.constructorAttempt,
       url: payload.url,
       workerType: payload.workerType ?? null,
+      workerName: payload.workerName ?? null,
+      executionContextId: params.executionContextId,
       constructedAt: isoNow(),
       observationSequence: observe(),
     });
     workerConstructions.push(construction);
+    workerConstructionsById.set(construction.constructorId, construction);
     reconcileWorkerConstructionBinding(construction.generation, construction.url);
+    return flushDeferredWorkerBootstrapResponses(construction.generation, construction.url);
   });
   const removeRequest = cdp.on("Network.requestWillBeSent", (params, message) => {
     const sessionId = message?.sessionId ?? null;
@@ -3067,7 +3297,197 @@ export function createControlledNetworkAssetTracker(
     };
     requests.set(key, record);
     inFlight.set(key, record);
+    retireDestroyedUnattachedWorkerBootstraps();
   });
+  const validControlledWorkerCapture = (capture, {
+    requestId,
+    url,
+    relativePath,
+    responseStatusCode = null,
+  }) => capture?.kind === "controlled-fetch-response-body-capture"
+    && typeof capture.fetchRequestId === "string"
+    && capture.fetchRequestId.length > 0
+    && capture.networkId === requestId
+    && capture.relativePath === relativePath
+    && capture.resourceType === CONTROLLED_DRAWING_WORKER_FETCH_RESOURCE_TYPE
+    && capture.sessionId === null
+    && capture.url === url
+    && Number.isInteger(capture.responseStatusCode)
+    && capture.responseStatusCode >= 200
+    && capture.responseStatusCode < 300
+    && (responseStatusCode === null || capture.responseStatusCode === responseStatusCode)
+    && Number.isSafeInteger(capture.bodyBytes)
+    && capture.bodyBytes >= 0
+    && /^[a-f0-9]{64}$/.test(capture.bodySha256)
+    && capture.claimCount === 1
+    && typeof capture.claimedAt === "string";
+  function retireDestroyedUnattachedWorkerBootstraps() {
+    if (claimWorkerResponseBodyCapture === null) return;
+    for (const discovered of discoveredWorkerTargets.values()) {
+      if (discovered.generation !== currentGeneration
+        || discovered.type !== "worker"
+        || discovered.attached !== false
+        || discovered.attachedSessionId !== null
+        || discovered.everAttached !== false
+        || discovered.createdCount !== 1
+        || discovered.nonEmptyTitleMismatch !== false
+        || discovered.nonEmptyTitleChanged !== false
+        || discovered.nonEmptyUrlPathMismatch !== false
+        || discovered.nonEmptyUrlChanged !== false
+        || discovered.parentFrameMismatch !== false
+        || discovered.typeMismatch !== false
+        || !Number.isInteger(discovered.createdObservationSequence)
+        || !Number.isInteger(discovered.destroyedObservationSequence)
+        || discovered.createdObservationSequence >= discovered.destroyedObservationSequence) continue;
+      const sourceKey = requestKey(null, discovered.targetId);
+      if (retiredBeforeAttachWorkerSources.has(sourceKey)) continue;
+      const source = requests.get(sourceKey) ?? null;
+      const populatedTargetIdentity = discovered.title === "candlescope-drawing-worker"
+        && typeof discovered.url === "string"
+        && drawingWorkerPaths.includes(assetPath(discovered.url))
+        && discovered.changedCount <= 1
+        && discovered.firstNonEmptyTitle === discovered.title
+        && discovered.firstNonEmptyUrl === discovered.url
+        && (discovered.openerFrameId ?? discovered.parentFrameId) === mainFrameId;
+      const unresolvedTargetIdentity = discovered.title === ""
+        && discovered.url === ""
+        && discovered.changedCount === 0
+        && discovered.changedObservationSequence === null
+        && discovered.firstNonEmptyTitle === null
+        && discovered.firstNonEmptyUrl === null
+        && discovered.openerFrameId === null
+        && discovered.parentFrameId === mainFrameId;
+      if (!populatedTargetIdentity && !unresolvedTargetIdentity) continue;
+      const canonicalUrl = populatedTargetIdentity ? discovered.url : source?.url;
+      if (typeof canonicalUrl !== "string"
+        || !drawingWorkerPaths.includes(assetPath(canonicalUrl))) continue;
+      const constructionCandidates = workerConstructions.filter((construction) => (
+        construction.generation === currentGeneration
+        && construction.url === canonicalUrl
+        && !claimedWorkerConstructions.has(construction)
+        && !retiredBeforeAttachWorkerConstructions.has(construction)
+      ));
+      const construction = constructionCandidates.length === 1
+        ? constructionCandidates[0]
+        : null;
+      let constructorQueryId = null;
+      try {
+        constructorQueryId = new URL(canonicalUrl).searchParams.get(
+          CONTROLLED_WORKER_CONSTRUCTOR_QUERY,
+        );
+      } catch {
+        // The exact managed URL predicates below own malformed URL rejection.
+      }
+      const attachedTargets = [...targetSessions.values()].filter((target) => (
+        target.targetId === discovered.targetId || target.url === canonicalUrl
+      ));
+      const sourceDocumentUrlAccepted = source !== null
+        && controlledManagedUrlAllowed(source.documentUrl, managedOrigin)
+        && [currentDocumentUrl, canonicalUrl].includes(source.documentUrl);
+      const observations = [
+        construction?.observationSequence ?? null,
+        discovered.createdObservationSequence,
+        source?.requestObservationSequence ?? null,
+        discovered.destroyedObservationSequence,
+      ];
+      const observationSpan = observations.every(Number.isInteger)
+        ? Math.max(...observations) - Math.min(...observations)
+        : null;
+      const observationOrderAccepted = construction !== null
+        && source !== null
+        && construction.observationSequence < discovered.createdObservationSequence
+        && discovered.createdObservationSequence < source.requestObservationSequence
+        && source.requestObservationSequence < discovered.destroyedObservationSequence;
+      const identityAccepted = source !== null
+        && construction !== null
+        && constructorQueryId === construction.constructorId
+        && construction.workerType === "module"
+        && construction.workerName === "candlescope-drawing-worker"
+        && source.generation === currentGeneration
+        && source.requestId === discovered.targetId
+        && source.url === canonicalUrl
+        && source.path === assetPath(canonicalUrl)
+        && source.type === "Script"
+        && source.initiatorType === "other"
+        && source.frameId === mainFrameId
+        && source.loaderId === ""
+        && sourceDocumentUrlAccepted
+        && source.mainFrameProvenance === false
+        && inFlight.has(sourceKey)
+        && !responses.has(sourceKey)
+        && !workerBootstrapSourceClaims.has(sourceKey)
+        && attachedTargets.length === 0
+        && observationOrderAccepted
+        && observationSpan !== null
+        && observationSpan <= workerBootstrapObservationWindow;
+      if (!identityAccepted) continue;
+      const capture = claimWorkerResponseBodyCapture(source.requestId, source.url);
+      if (!validControlledWorkerCapture(capture, {
+        requestId: source.requestId,
+        url: source.url,
+        relativePath: source.path,
+      })) {
+        continue;
+      }
+      const expected = manifest.get(source.path);
+      if (!expected
+        || capture.bodyBytes !== expected.bytes
+        || capture.bodySha256 !== expected.sha256) {
+        recordProvenanceError("destroyed-unattached-worker-asset-mismatch", {
+          constructorId: construction.constructorId,
+          path: source.path,
+          requestId: source.requestId,
+        });
+        continue;
+      }
+      retiredBeforeAttachWorkerConstructions.add(construction);
+      retiredBeforeAttachWorkerSources.set(sourceKey, Object.freeze({
+        kind: "controlled-destroyed-unattached-worker-retirement",
+        generation: currentGeneration,
+        constructorId: construction.constructorId,
+        constructorObservationSequence: construction.observationSequence,
+        targetId: discovered.targetId,
+        targetCreatedObservationSequence: discovered.createdObservationSequence,
+        sourceRequestObservationSequence: source.requestObservationSequence,
+        targetDestroyedObservationSequence: discovered.destroyedObservationSequence,
+        observationSpan,
+        observationOrderAccepted,
+        targetIdentityMode: populatedTargetIdentity
+          ? "populated-target-info"
+          : "unresolved-target-info-before-destroy",
+        targetTitle: discovered.title,
+        targetUrl: discovered.url,
+        path: source.path,
+        url: source.url,
+        bodyBytes: capture.bodyBytes,
+        bodySha256: capture.bodySha256,
+        expectedBytes: expected.bytes,
+        expectedSha256: expected.sha256,
+        retiredAt: isoNow(),
+      }));
+      inFlight.delete(sourceKey);
+      observe();
+    }
+  }
+  const activeWorkerDiscoveryIdentityAccepted = (target) => {
+    const discovered = discoveredWorkerTargets.get(target?.targetId) ?? null;
+    return discovered === null || (
+      discovered.generation === currentGeneration
+      && discovered.createdCount === 1
+      && discovered.attachedSessionId === target.sessionId
+      && discovered.everAttached === true
+      && (target.detachedAt !== null || discovered.destroyedAt === null)
+      && discovered.nonEmptyTitleMismatch === false
+      && discovered.nonEmptyTitleChanged === false
+      && discovered.nonEmptyUrlPathMismatch === false
+      && discovered.nonEmptyUrlChanged === false
+      && (discovered.firstNonEmptyUrl === null
+        || discovered.firstNonEmptyUrl === target.url)
+      && (discovered.url === null || discovered.url === "" || discovered.url === target.url)
+      && discovered.parentFrameMismatch === false
+      && discovered.typeMismatch === false
+    );
+  };
   const canonicalWorkerBootstrapSource = (sessionId, requestId) => {
     if (sessionId === null || typeof requestId !== "string" || !requestId) return null;
     const sourceKey = requestKey(null, requestId);
@@ -3113,7 +3533,9 @@ export function createControlledNetworkAssetTracker(
       || construction.generation !== currentGeneration
       || construction.url !== target.url
       || construction.workerType !== "module"
-      || construction.observationSequence >= target.attachedObservationSequence
+      || construction.workerName !== "candlescope-drawing-worker"
+      || target.title !== "candlescope-drawing-worker"
+      || !activeWorkerDiscoveryIdentityAccepted(target)
       || source.requestObservationSequence >= target.attachedObservationSequence
       || bootstrapObservationSpan > workerBootstrapObservationWindow
       || matchingTargets.length !== 1
@@ -3139,6 +3561,7 @@ export function createControlledNetworkAssetTracker(
     responseUrl,
     relativePath,
     responseType,
+    deferMissingConstruction = false,
   }) => {
     if (sessionId === null || typeof requestId !== "string" || !requestId) return null;
     const destinationKey = requestKey(sessionId, requestId);
@@ -3153,6 +3576,7 @@ export function createControlledNetworkAssetTracker(
       candidate.generation === currentGeneration
       && candidate.type === "worker"
       && candidate.targetId === requestId
+      && candidate.title === "candlescope-drawing-worker"
       && candidate.url === responseUrl
       && candidate.detachedAt === null
     ));
@@ -3203,12 +3627,18 @@ export function createControlledNetworkAssetTracker(
     if (terminalRequestKeys.has(destinationKey)) reasons.push("destination-already-terminal");
     if (!target) reasons.push("missing-worker-target-session");
     if (target && target.type !== "worker") reasons.push("target-type-mismatch");
+    if (target && target.title !== "candlescope-drawing-worker") {
+      reasons.push("target-title-mismatch");
+    }
     if (target && target.targetId !== requestId) reasons.push("target-request-id-mismatch");
     if (target && (target.url !== responseUrl || targetPath !== relativePath)) {
       reasons.push("target-url-path-mismatch");
     }
     if (target && target.generation !== currentGeneration) reasons.push("target-generation-mismatch");
     if (target && target.detachedAt !== null) reasons.push("target-already-detached");
+    if (target && !activeWorkerDiscoveryIdentityAccepted(target)) {
+      reasons.push("target-discovery-history-mismatch");
+    }
     if (exactIdentityTargets.length !== 1 || exactIdentityTargets[0]?.sessionId !== sessionId) {
       reasons.push("target-identity-not-unique");
     }
@@ -3218,6 +3648,9 @@ export function createControlledNetworkAssetTracker(
     if (construction && construction.workerType !== "module") {
       reasons.push("constructor-worker-type-mismatch");
     }
+    if (construction && construction.workerName !== "candlescope-drawing-worker") {
+      reasons.push("constructor-worker-name-mismatch");
+    }
     if (construction && (
       construction.generation !== currentGeneration
       || construction.url !== responseUrl
@@ -3225,10 +3658,6 @@ export function createControlledNetworkAssetTracker(
     )) reasons.push("constructor-url-path-generation-mismatch");
     if (exactConstructions.length !== 1 || exactConstructions[0] !== construction) {
       reasons.push("constructor-identity-not-unique");
-    }
-    if (target && construction
-      && construction.observationSequence >= target.attachedObservationSequence) {
-      reasons.push("constructor-not-before-target-attachment");
     }
     if (source && target
       && source.requestObservationSequence >= target.attachedObservationSequence) {
@@ -3239,6 +3668,13 @@ export function createControlledNetworkAssetTracker(
       reasons.push("bootstrap-observation-window-exceeded");
     }
     if (reasons.length > 0) {
+      const onlyAwaitingConstructorReport = deferMissingConstruction
+        && construction === null
+        && exactConstructions.length === 0
+        && reasons.length === 2
+        && reasons.includes("missing-constructor-target-binding")
+        && reasons.includes("constructor-identity-not-unique");
+      if (onlyAwaitingConstructorReport) return deferredWorkerBootstrapHandoff;
       const clearedKeys = clearRequestAndCanonicalInFlight(sessionId, requestId);
       if (source && inFlight.delete(sourceKey)) {
         clearedKeys.push(sourceKey);
@@ -3293,7 +3729,7 @@ export function createControlledNetworkAssetTracker(
         targetId: target?.targetId ?? null,
         reasons,
       });
-      return null;
+      return rejectedWorkerBootstrapHandoff;
     }
     const handoffObservationSequence = observe();
     const handoffRequest = {
@@ -3332,11 +3768,83 @@ export function createControlledNetworkAssetTracker(
     workerBootstrapHandoffs.set(destinationKey, handoff);
     return handoffRequest;
   };
-  const removeResponse = cdp.on("Network.responseReceived", (params, message) => {
+  const deferWorkerBootstrapResponse = ({
+    key,
+    generation,
+    params,
+    message,
+    responseUrl,
+  }) => {
+    const existing = deferredWorkerBootstrapResponses.get(key);
+    if (existing) {
+      recordProvenanceError("duplicate-deferred-worker-bootstrap-response", {
+        generation,
+        key,
+        requestId: params?.requestId ?? null,
+        sessionId: message?.sessionId ?? null,
+      });
+      return existing.task;
+    }
+    let resolveTask;
+    const task = new Promise((resolve) => { resolveTask = resolve; });
+    const record = {
+      key,
+      generation,
+      responseUrl,
+      params,
+      message,
+      terminal: null,
+      timer: null,
+      finalizing: false,
+      task,
+      resolveTask,
+    };
+    deferredWorkerBootstrapResponses.set(key, record);
+    pending.add(task);
+    record.timer = setTimeout(() => {
+      finalizeDeferredWorkerBootstrapResponse(record);
+    }, workerBootstrapConstructionReportGraceMs);
+    return task;
+  };
+  function finalizeDeferredWorkerBootstrapResponse(record) {
+    if (record.finalizing || deferredWorkerBootstrapResponses.get(record.key) !== record) {
+      return record.task;
+    }
+    record.finalizing = true;
+    if (record.timer !== null) clearTimeout(record.timer);
+    deferredWorkerBootstrapResponses.delete(record.key);
+    const outcomes = [];
+    try {
+      const responseOutcome = processNetworkResponse(record.params, record.message, false);
+      if (responseOutcome && typeof responseOutcome.then === "function") outcomes.push(responseOutcome);
+      const terminalOutcome = replayDeferredWorkerBootstrapTerminal(record);
+      if (terminalOutcome && typeof terminalOutcome.then === "function") outcomes.push(terminalOutcome);
+    } catch (error) {
+      outcomes.push(Promise.reject(error));
+    }
+    Promise.allSettled(outcomes).finally(() => {
+      pending.delete(record.task);
+      record.resolveTask();
+      observe();
+    });
+    return record.task;
+  }
+  function flushDeferredWorkerBootstrapResponses(generation, responseUrl) {
+    const matching = [...deferredWorkerBootstrapResponses.values()].filter((record) => (
+      record.generation === generation && record.responseUrl === responseUrl
+    ));
+    if (matching.length === 0) return undefined;
+    return Promise.allSettled(matching.map(finalizeDeferredWorkerBootstrapResponse));
+  }
+  const processNetworkResponse = (params, message, allowConstructionDeferral = true) => {
     const sessionId = message?.sessionId ?? null;
     const key = requestKey(sessionId, params?.requestId);
     const relativePath = assetPath(params?.response?.url || "");
     if (!relativePath) return;
+    if (retiredBeforeAttachWorkerSources.has(key)) {
+      responseEventKeys.add(key);
+      return undefined;
+    }
     const responseType = params?.type ?? null;
     let request = requests.get(key) ?? null;
     const eventGeneration = request?.generation
@@ -3363,7 +3871,18 @@ export function createControlledNetworkAssetTracker(
         responseUrl: params?.response?.url ?? null,
         relativePath,
         responseType,
+        deferMissingConstruction: allowConstructionDeferral,
       });
+      if (request === deferredWorkerBootstrapHandoff) {
+        return deferWorkerBootstrapResponse({
+          key,
+          generation: eventGeneration,
+          params,
+          message,
+          responseUrl: params?.response?.url ?? null,
+        });
+      }
+      if (request === rejectedWorkerBootstrapHandoff) return undefined;
     }
     const generation = request?.generation ?? null;
     if (!request) {
@@ -3452,10 +3971,16 @@ export function createControlledNetworkAssetTracker(
       failed: null,
     });
     observe();
-  });
+    return undefined;
+  };
+  const removeResponse = cdp.on("Network.responseReceived", processNetworkResponse);
   const beginNetworkTerminal = (event, params, message) => {
     const sessionId = message?.sessionId ?? null;
     const key = requestKey(sessionId, params?.requestId);
+    if (retiredBeforeAttachWorkerSources.has(key)) {
+      terminalRequestKeys.add(key);
+      return { abort: true, ignored: true, key, sessionId };
+    }
     const request = requests.get(key) ?? null;
     const generation = request?.generation
       ?? responses.get(key)?.generation
@@ -3497,7 +4022,24 @@ export function createControlledNetworkAssetTracker(
     }
     return { abort: false, key, sessionId };
   };
-  const removeFinished = cdp.on("Network.loadingFinished", (params, message) => {
+  const queueDeferredWorkerBootstrapTerminal = (event, params, message) => {
+    const key = requestKey(message?.sessionId ?? null, params?.requestId);
+    const deferred = deferredWorkerBootstrapResponses.get(key) ?? null;
+    if (!deferred) return null;
+    if (deferred.terminal !== null) {
+      recordProvenanceError("duplicate-deferred-worker-bootstrap-terminal", {
+        event,
+        generation: deferred.generation,
+        key,
+        requestId: params?.requestId ?? null,
+        sessionId: message?.sessionId ?? null,
+      });
+      return deferred.task;
+    }
+    deferred.terminal = { event, params, message };
+    return deferred.task;
+  };
+  const handleNetworkFinished = (params, message) => {
     const terminal = beginNetworkTerminal("Network.loadingFinished", params, message);
     if (terminal.abort) return undefined;
     const { key, sessionId } = terminal;
@@ -3519,20 +4061,12 @@ export function createControlledNetworkAssetTracker(
       && drawingWorkerPaths.includes(record.path);
     if (canonicalDrawingWorker && claimWorkerResponseBodyCapture !== null) {
       const capture = claimWorkerResponseBodyCapture(params.requestId, record.url);
-      const captureAccepted = capture?.kind === "controlled-fetch-response-body-capture"
-        && typeof capture.fetchRequestId === "string"
-        && capture.fetchRequestId.length > 0
-        && capture.networkId === params.requestId
-        && capture.relativePath === record.path
-        && capture.resourceType === CONTROLLED_DRAWING_WORKER_FETCH_RESOURCE_TYPE
-        && capture.sessionId === null
-        && capture.url === record.url
-        && capture.responseStatusCode === record.status
-        && Number.isSafeInteger(capture.bodyBytes)
-        && capture.bodyBytes >= 0
-        && /^[a-f0-9]{64}$/.test(capture.bodySha256)
-        && capture.claimCount === 1
-        && typeof capture.claimedAt === "string";
+      const captureAccepted = validControlledWorkerCapture(capture, {
+        requestId: params.requestId,
+        url: record.url,
+        relativePath: record.path,
+        responseStatusCode: record.status,
+      });
       if (captureAccepted) {
         record.bodyBytes = capture.bodyBytes;
         record.bodySha256 = capture.bodySha256;
@@ -3569,8 +4103,8 @@ export function createControlledNetworkAssetTracker(
     pending.add(task);
     if (request) observe();
     return task;
-  });
-  const removeFailed = cdp.on("Network.loadingFailed", (params, message) => {
+  };
+  const handleNetworkFailed = (params, message) => {
     const terminal = beginNetworkTerminal("Network.loadingFailed", params, message);
     if (terminal.abort) return;
     const { key, sessionId } = terminal;
@@ -3581,7 +4115,25 @@ export function createControlledNetworkAssetTracker(
       return;
     }
     if (inFlight.delete(key) || record) observe();
-  });
+    return undefined;
+  };
+  function replayDeferredWorkerBootstrapTerminal(record) {
+    if (record.terminal?.event === "Network.loadingFinished") {
+      return handleNetworkFinished(record.terminal.params, record.terminal.message);
+    }
+    if (record.terminal?.event === "Network.loadingFailed") {
+      return handleNetworkFailed(record.terminal.params, record.terminal.message);
+    }
+    return undefined;
+  }
+  const removeFinished = cdp.on("Network.loadingFinished", (params, message) => (
+    queueDeferredWorkerBootstrapTerminal("Network.loadingFinished", params, message)
+      ?? handleNetworkFinished(params, message)
+  ));
+  const removeFailed = cdp.on("Network.loadingFailed", (params, message) => (
+    queueDeferredWorkerBootstrapTerminal("Network.loadingFailed", params, message)
+      ?? handleNetworkFailed(params, message)
+  ));
   const acceptedRecord = (record) => (
     record.status >= 200
     && record.status < 300
@@ -3675,7 +4227,15 @@ export function createControlledNetworkAssetTracker(
           ...target,
           path: relativePath,
           active: target.detachedAt === null,
-          constructorProvenanceAccepted: !isDrawingWorker || construction !== null,
+          constructorProvenanceAccepted: !isDrawingWorker || (
+            construction !== null
+            && construction.generation === currentGeneration
+            && construction.url === target.url
+            && construction.workerType === "module"
+            && construction.workerName === "candlescope-drawing-worker"
+            && target.title === "candlescope-drawing-worker"
+            && activeWorkerDiscoveryIdentityAccepted(target)
+          ),
           constructorProvenance: construction,
           manifestBacked: relativePath !== null && manifest.has(relativePath),
           networkProvenanceAccepted,
@@ -3728,7 +4288,12 @@ export function createControlledNetworkAssetTracker(
     const unclaimedDrawingWorkerConstructions = availableWorkerConstructions.filter((construction) => (
       drawingWorkerPaths.includes(assetPath(construction.url || ""))
       && !claimedWorkerConstructions.has(construction)
+      && !retiredBeforeAttachWorkerConstructions.has(construction)
     ));
+    const currentRetiredBeforeAttachWorkerSources = [...retiredBeforeAttachWorkerSources.values()]
+      .filter((record) => record.generation === currentGeneration);
+    const currentDiscoveredWorkerTargets = [...discoveredWorkerTargets.values()]
+      .filter((record) => record.generation === currentGeneration);
     const workerAssetAuthorityPassed = drawingWorkerPaths.length === 1
       && unclaimedDrawingWorkerConstructions.length === 0
       && currentWorkerConstructionFaults.length <= 1
@@ -3745,6 +4310,7 @@ export function createControlledNetworkAssetTracker(
       && workerTargets.length === 0;
     const cleanInitialWorkerStateAccepted = workerTargets.length === 0
       && availableWorkerConstructions.length === 0
+      && currentRetiredBeforeAttachWorkerSources.length === 0
       && currentWorkerConstructionFaults.length === 0
       && unclaimedDrawingWorkerConstructions.length === 0
       && currentProvenanceErrors.length === 0;
@@ -3773,6 +4339,15 @@ export function createControlledNetworkAssetTracker(
       currentDocumentPath,
       currentDocumentUrl,
       pendingCount: pending.size,
+      deferredWorkerBootstrapResponseCount: deferredWorkerBootstrapResponses.size,
+      deferredWorkerBootstrapResponses: Object.freeze(
+        [...deferredWorkerBootstrapResponses.values()].map((record) => Object.freeze({
+          generation: record.generation,
+          key: record.key,
+          responseUrl: record.responseUrl,
+          terminalEvent: record.terminal?.event ?? null,
+        })),
+      ),
       inFlightCount: currentInFlight.length,
       inFlight: Object.freeze(currentInFlight.map((record) => Object.freeze({ ...record }))),
       expectedEntryCount: entryPaths.length,
@@ -3786,6 +4361,13 @@ export function createControlledNetworkAssetTracker(
       unclaimedDrawingWorkerConstructionCount: unclaimedDrawingWorkerConstructions.length,
       unclaimedDrawingWorkerConstructions: Object.freeze(
         unclaimedDrawingWorkerConstructions.map((record) => Object.freeze({ ...record })),
+      ),
+      retiredBeforeAttachWorkerSourceCount: currentRetiredBeforeAttachWorkerSources.length,
+      retiredBeforeAttachWorkerSources: Object.freeze(
+        currentRetiredBeforeAttachWorkerSources.map((record) => Object.freeze({ ...record })),
+      ),
+      discoveredWorkerTargets: Object.freeze(
+        currentDiscoveredWorkerTargets.map((record) => Object.freeze({ ...record })),
       ),
       acceptedEntryCount: entryAssets.filter((item) => item.accepted).length,
       observedAssetCount: observedAssets.length,
@@ -3814,6 +4396,7 @@ export function createControlledNetworkAssetTracker(
     let quietStartedAt = null;
     let quietSequence = null;
     while (Date.now() <= deadline) {
+      retireDestroyedUnattachedWorkerBootstraps();
       if (pending.size > 0) {
         await waitWithCancelableTimeout(Promise.allSettled([...pending]), Math.min(500, timeoutMs));
       }
@@ -3860,8 +4443,20 @@ export function createControlledNetworkAssetTracker(
     waitForAssetAuthorityComplete: () => waitForAuthority("assetAuthorityPassed"),
     snapshot,
     dispose() {
+      for (const record of deferredWorkerBootstrapResponses.values()) {
+        if (record.timer !== null) clearTimeout(record.timer);
+        pending.delete(record.task);
+        record.resolveTask();
+      }
+      deferredWorkerBootstrapResponses.clear();
+      removeTargetCreated();
+      removeTargetInfoChanged();
+      removeTargetDestroyed();
       removeAttached();
       removeDetached();
+      removeMainExecutionContextCreated();
+      removeMainExecutionContextDestroyed();
+      removeMainExecutionContextsCleared();
       removeWorkerConstruction();
       removeRequest();
       removeResponse();
@@ -4150,6 +4745,7 @@ export function diagnosticBootstrapSource({
       workerConstructorAttempts: 0,
       workerConstructionFailures: 0,
       workerCreations: 0,
+      workerConstructionReports: [],
       renderRequestCount: 0,
       renderResultCount: 0,
       typedResultCount: 0,
@@ -4170,6 +4766,13 @@ export function diagnosticBootstrapSource({
         blockedRoute: null,
         blockedEvent: null,
         blockedRelease: null
+      },
+      seriesRebuildExport: {
+        checkpointCount: 0,
+        pauseConsumed: false,
+        releaseCount: 0,
+        activeCheckpointId: null,
+        checkpoints: []
       }
     };
     const observe = () => {
@@ -4200,6 +4803,8 @@ export function diagnosticBootstrapSource({
     let blockedKeeperClosedAt = null;
     let blockedInterceptorInstalled = false;
     let blockedFaultConsumed = false;
+    let activeSeriesRebuildExportCheckpoint = null;
+    let seriesRebuildExportCheckpointSequence = 0;
     const quotaStoreName = 'quota-probe';
     const quotaBaselineKey = 'baseline';
     const quotaProbeKey = 'probe';
@@ -4721,6 +5326,119 @@ export function diagnosticBootstrapSource({
       blockedRouteActive = false;
       return snapshot();
     };
+    const seriesRebuildExportReceipt = (checkpoint) => ({
+      accepted: true,
+      checkpointId: checkpoint.checkpointId,
+      paused: checkpoint.paused,
+      runId: authority.runId,
+      authorityTokenSha256: authority.authorityTokenSha256,
+      documentInstanceId: state.documentInstanceId,
+      faultId: state.faultId,
+      sequence: state.sequence,
+      transactionId: checkpoint.transactionId,
+      leaseId: checkpoint.leaseId
+    });
+    const awaitSeriesRebuildExportCapture = async (input = {}) => {
+      if (activeDrill !== 'series-rebuild-before-export'
+        || state.authorityAccepted !== true
+        || state.tokenRemoved !== true
+        || typeof input.transactionId !== 'string'
+        || !input.transactionId
+        || !Number.isSafeInteger(input.leaseId)
+        || input.leaseId <= 0
+        || typeof input.scopeKey !== 'string'
+        || !input.scopeKey
+        || !Number.isSafeInteger(input.documentRevision)
+        || input.documentRevision < 0
+        || typeof input.hideDrawings !== 'boolean'
+        || (input.hideDrawings !== true && (
+          !Number.isSafeInteger(input.surfaceGeneration)
+            || input.surfaceGeneration <= 0
+        ))) {
+        throw new Error('controlled series-rebuild export checkpoint authority is invalid');
+      }
+      if (state.seriesRebuildExport.checkpointCount >= 8) {
+        throw new Error('controlled series-rebuild export checkpoint capacity exceeded');
+      }
+      seriesRebuildExportCheckpointSequence += 1;
+      const paused = state.seriesRebuildExport.checkpointCount === 0;
+      if (paused && (state.seriesRebuildExport.pauseConsumed || activeSeriesRebuildExportCheckpoint)) {
+        throw new Error('controlled series-rebuild export pause was already consumed');
+      }
+      const checkpoint = {
+        checkpointId: state.faultId + ':export:' + seriesRebuildExportCheckpointSequence,
+        transactionId: input.transactionId,
+        leaseId: input.leaseId,
+        scopeKey: input.scopeKey,
+        documentRevision: input.documentRevision,
+        surfaceGeneration: Number.isSafeInteger(input.surfaceGeneration)
+          ? input.surfaceGeneration
+          : null,
+        hideDrawings: input.hideDrawings,
+        paused,
+        preparedAt: new Date().toISOString(),
+        releasedAt: paused ? null : new Date().toISOString(),
+        releaseReason: paused ? null : 'not-paused'
+      };
+      state.seriesRebuildExport.checkpointCount += 1;
+      state.seriesRebuildExport.checkpoints.push(checkpoint);
+      if (!paused) return seriesRebuildExportReceipt(checkpoint);
+
+      state.seriesRebuildExport.pauseConsumed = true;
+      state.seriesRebuildExport.activeCheckpointId = checkpoint.checkpointId;
+      const signal = input.signal;
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let timeoutId = null;
+        const removeAbort = () => {
+          try { signal?.removeEventListener?.('abort', abort); } catch {}
+        };
+        const finish = (reason, error = null) => {
+          if (settled) return;
+          settled = true;
+          if (timeoutId !== null) clearTimeout(timeoutId);
+          removeAbort();
+          checkpoint.releasedAt = new Date().toISOString();
+          checkpoint.releaseReason = reason;
+          state.seriesRebuildExport.activeCheckpointId = null;
+          activeSeriesRebuildExportCheckpoint = null;
+          if (error) reject(error);
+          else resolve(seriesRebuildExportReceipt(checkpoint));
+        };
+        const abort = () => finish(
+          'aborted',
+          new DOMException('Controlled series-rebuild export checkpoint was aborted', 'AbortError')
+        );
+        if (signal?.aborted === true) {
+          abort();
+          return;
+        }
+        try { signal?.addEventListener?.('abort', abort, { once: true }); } catch {}
+        timeoutId = setTimeout(() => finish(
+          'timeout',
+          new Error('Controlled series-rebuild export checkpoint timed out')
+        ), 30_000);
+        activeSeriesRebuildExportCheckpoint = {
+          checkpoint,
+          release() { finish('harness-release'); }
+        };
+      });
+    };
+    const releaseSeriesRebuildExportCapture = (input = {}) => {
+      const active = activeSeriesRebuildExportCheckpoint;
+      if (activeDrill !== 'series-rebuild-before-export'
+        || state.authorityAccepted !== true
+        || input.faultId !== state.faultId
+        || typeof input.checkpointId !== 'string'
+        || input.checkpointId !== state.seriesRebuildExport.activeCheckpointId
+        || active?.checkpoint?.checkpointId !== input.checkpointId) {
+        throw new Error('controlled series-rebuild export release authority is invalid');
+      }
+      state.seriesRebuildExport.releaseCount += 1;
+      observe();
+      active.release();
+      return snapshot();
+    };
     Object.defineProperty(window, authority.handleName, {
       value: Object.freeze({
         snapshot,
@@ -4729,7 +5447,9 @@ export function diagnosticBootstrapSource({
         cleanupQuotaFault,
         prepareBlockedFault,
         releaseBlockedFault,
-        cleanupBlockedFault
+        cleanupBlockedFault,
+        awaitSeriesRebuildExportCapture,
+        releaseSeriesRebuildExportCapture
       }),
       configurable: false,
       enumerable: false,
@@ -4746,6 +5466,7 @@ export function diagnosticBootstrapSource({
     try {
       const NativeWorker = window.Worker;
       if (typeof NativeWorker === 'function') {
+        let workerConstructorReportSequence = 0;
         const ControlledWorker = new Proxy(NativeWorker, {
           construct(target, args) {
             let resolvedUrl = null;
@@ -4792,13 +5513,49 @@ export function diagnosticBootstrapSource({
               });
               throw error;
             }
-            report({
-              kind: 'worker-constructor',
-              url: resolvedUrl,
-              workerType
-            });
-            const worker = Reflect.construct(target, args, target);
+            workerConstructorReportSequence += 1;
+            const constructorId = state.documentInstanceId + ':worker:' + workerConstructorReportSequence;
+            let constructionUrl = resolvedUrl;
+            let constructionArgs = args;
             if (isDrawingWorker) {
+              const parsedConstructionUrl = new URL(resolvedUrl);
+              parsedConstructionUrl.searchParams.set(
+                ${JSON.stringify(CONTROLLED_WORKER_CONSTRUCTOR_QUERY)},
+                constructorId
+              );
+              constructionUrl = parsedConstructionUrl.href;
+              constructionArgs = [...args];
+              constructionArgs[0] = constructionUrl;
+            }
+            const constructionReport = {
+              kind: 'worker-constructor',
+              runId: authority.runId,
+              authorityTokenSha256: authority.authorityTokenSha256,
+              authorityAccepted: state.authorityAccepted,
+              drillId: state.drillId,
+              documentInstanceId: state.documentInstanceId,
+              faultId: state.faultId,
+              sequence: state.sequence,
+              constructorId,
+              constructorAttempt: workerConstructorReportSequence,
+              url: constructionUrl,
+              workerType,
+              workerName
+            };
+            if (isDrawingWorker) {
+              append(state.workerConstructionReports, {
+                constructorId: constructionReport.constructorId,
+                constructorAttempt: constructionReport.constructorAttempt,
+                url: constructionUrl,
+                workerType,
+                workerName,
+                reportedAt: new Date().toISOString()
+              });
+            }
+            report(constructionReport);
+            const worker = Reflect.construct(target, constructionArgs, target);
+            if (isDrawingWorker) {
+              setTimeout(() => report(constructionReport), 0);
               state.workerCreations += 1;
               const nativePostMessage = worker.postMessage;
               Object.defineProperty(worker, 'postMessage', {
@@ -4905,6 +5662,7 @@ export function createControlledWorkerDiagnosticsController(cdp, managedOrigin =
     id: record.id,
     targetType: record.targetType,
     targetUrl: record.targetUrl,
+    allowControlledConstructorQuery: record.allowControlledConstructorQuery,
     expressionSha256: record.expressionSha256,
     timeoutMs: record.timeoutMs,
     armedAt: record.armedAt,
@@ -4922,6 +5680,24 @@ export function createControlledWorkerDiagnosticsController(cdp, managedOrigin =
     record.state = state;
     record.receipt = receipt;
     record.error = error;
+  };
+  const initializerTargetUrlMatches = (initializer, targetUrl) => {
+    if (initializer.targetUrl === targetUrl) return true;
+    if (initializer.allowControlledConstructorQuery !== true) return false;
+    try {
+      const expected = new URL(initializer.targetUrl);
+      const candidate = new URL(targetUrl);
+      const constructorId = candidate.searchParams.get(CONTROLLED_WORKER_CONSTRUCTOR_QUERY);
+      return expected.origin === candidate.origin
+        && expected.pathname === candidate.pathname
+        && expected.search === ""
+        && expected.hash === candidate.hash
+        && [...candidate.searchParams.keys()].length === 1
+        && typeof constructorId === "string"
+        && /^.+:worker:[1-9][0-9]*$/.test(constructorId);
+    } catch {
+      return false;
+    }
   };
   const removeAttached = cdp.on("Target.attachedToTarget", (params) => {
     const sessionId = params?.sessionId;
@@ -4959,7 +5735,7 @@ export function createControlledWorkerDiagnosticsController(cdp, managedOrigin =
         initializer.state === "armed"
         && initializer.armedAfterTargetSequence < sequence
         && initializer.targetType === targetInfo.type
-        && initializer.targetUrl === targetInfo.url
+        && initializerTargetUrlMatches(initializer, targetInfo.url)
       ));
       if (matches.length > 1) {
         claimError = new Error(`Multiple paused-target initializers matched ${targetInfo.url}`);
@@ -5188,12 +5964,20 @@ export function createControlledWorkerDiagnosticsController(cdp, managedOrigin =
       if (!specification || typeof specification !== "object" || Array.isArray(specification)) {
         throw new TypeError("paused-target initializer specification must be an object");
       }
-      const allowed = new Set(["id", "targetType", "targetUrl", "expression", "timeoutMs"]);
+      const allowed = new Set([
+        "id",
+        "targetType",
+        "targetUrl",
+        "allowControlledConstructorQuery",
+        "expression",
+        "timeoutMs",
+      ]);
       const unknown = Object.keys(specification).filter((key) => !allowed.has(key));
       if (unknown.length > 0) throw new Error(`Unknown paused-target initializer option: ${unknown.join(", ")}`);
       const id = String(specification.id || "");
       const targetType = String(specification.targetType || "");
       const targetUrl = String(specification.targetUrl || "");
+      const allowControlledConstructorQuery = specification.allowControlledConstructorQuery === true;
       const expression = String(specification.expression || "");
       if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) {
         throw new Error("paused-target initializer id must be a stable lowercase identifier");
@@ -5205,6 +5989,10 @@ export function createControlledWorkerDiagnosticsController(cdp, managedOrigin =
       if (!targetUrl || (managedOrigin && !controlledManagedUrlAllowed(targetUrl, managedOrigin))) {
         throw new Error(`paused-target initializer targetUrl must belong to the managed origin: ${targetUrl}`);
       }
+      if (Object.prototype.hasOwnProperty.call(specification, "allowControlledConstructorQuery")
+        && typeof specification.allowControlledConstructorQuery !== "boolean") {
+        throw new TypeError("paused-target initializer constructor query option must be boolean");
+      }
       if (!expression.trim()) throw new Error("paused-target initializer expression is required");
       const timeout = positiveInteger(specification.timeoutMs ?? 2_000, "initializer timeoutMs", 1, 60_000);
       let resolve;
@@ -5213,6 +6001,7 @@ export function createControlledWorkerDiagnosticsController(cdp, managedOrigin =
         id,
         targetType,
         targetUrl,
+        allowControlledConstructorQuery,
         expression,
         expressionSha256: sha256(expression),
         timeoutMs: timeout,
@@ -5364,6 +6153,8 @@ async function launchOwnedBrowser(
     `--user-data-dir=${profileDirectory}`,
     "--no-first-run",
     "--no-default-browser-check",
+    "--disable-background-networking",
+    "--disable-component-update",
     "--disable-extensions",
     "--disable-background-timer-throttling",
     "--disable-backgrounding-occluded-windows",
@@ -5504,6 +6295,7 @@ async function launchOwnedBrowser(
       };
       browserCloseRequestedAt = isoNow();
       closeState.requestedAt = browserCloseRequestedAt;
+      lifecycle.stopRequestedAt ??= browserCloseRequestedAt;
       try {
         const closeOutcome = await waitWithCancelableTimeout(
           cdp.send("Browser.close", {}, null, false, (dispatchReceipt) => {
@@ -6286,14 +7078,34 @@ export function assessWindowsOwnedProcessTreeReceipt(receipt, expectedRootPid) {
   const terminationReceipts = census?.terminationReceipts;
   require(Array.isArray(terminationReceipts), "termination-receipts-invalid");
   if (Array.isArray(terminationReceipts) && Array.isArray(census?.before?.descendants)) {
-    const expectedPidList = census.before.descendants.map((record) => record.pid);
+    const descendantByPid = new Map(census.before.descendants.map((record) => [record.pid, record]));
+    for (const descendant of census.before.descendants) {
+      const lineage = new Set([descendant.pid]);
+      let parentPid = descendant.parentPid;
+      while (parentPid !== expectedRootPid) {
+        const parent = descendantByPid.get(parentPid) ?? null;
+        if (parent === null) {
+          require(false, "before-descendant-parent-unbound");
+          break;
+        }
+        if (lineage.has(parent.pid)) {
+          require(false, "before-descendant-parent-cycle");
+          break;
+        }
+        lineage.add(parent.pid);
+        parentPid = parent.parentPid;
+      }
+    }
+    const expectedPidList = census.before.descendants
+      .filter((record) => record.parentPid === expectedRootPid)
+      .map((record) => record.pid);
     const expectedPids = new Set(expectedPidList);
     const terminationPidList = terminationReceipts.map((termination) => termination?.details?.targetPid);
     const terminationPids = new Set(terminationPidList);
     require(expectedPids.size === expectedPidList.length, "before-descendant-pids-duplicate");
     require(terminationPids.size === terminationPidList.length, "termination-target-pids-duplicate");
     require(
-      terminationReceipts.length === census.before.descendants.length,
+      terminationReceipts.length === expectedPidList.length,
       "termination-receipt-count-mismatch",
     );
     for (const termination of terminationReceipts) {

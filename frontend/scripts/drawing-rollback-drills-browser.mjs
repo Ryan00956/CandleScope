@@ -17,6 +17,7 @@ import {
   runControlledWorkerRollbackDrills,
 } from "./drawing-rollback-worker-browser.mjs";
 import { runControlledLifecycleRollbackDrills } from "./drawing-rollback-lifecycle-browser.mjs";
+import { runControlledExportRollbackDrills } from "./drawing-rollback-export-browser.mjs";
 import { runControlledStorageRollbackDrills } from "./drawing-rollback-storage-browser.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -56,7 +57,10 @@ const IMPLEMENTED_WORKER_DRILL_IDS = new Set([
   "worker-stale-generation",
 ]);
 const IMPLEMENTED_STORAGE_DRILL_IDS = new Set(["indexeddb-quota-blocked"]);
-const IMPLEMENTED_LIFECYCLE_DRILL_IDS = new Set(["active-gesture-chart-boundary"]);
+const IMPLEMENTED_LIFECYCLE_DRILL_IDS = new Set([
+  "active-gesture-chart-boundary",
+  "series-rebuild-before-export",
+]);
 const IMPLEMENTED_DRILL_IDS = new Set([
   ...IMPLEMENTED_WORKER_DRILL_IDS,
   ...IMPLEMENTED_STORAGE_DRILL_IDS,
@@ -353,9 +357,20 @@ async function runControlledRollbackDrills(args) {
       timeoutMs: args.timeoutMs,
       beforeDocument: workerResult.finalDocument,
     });
-    lifecycleResult = await runControlledLifecycleRollbackDrills(session, {
+    const gestureLifecycleResult = await runControlledLifecycleRollbackDrills(session, {
       timeoutMs: args.timeoutMs,
       beforeDocument: storageResult.finalDocument,
+    });
+    const exportLifecycleResult = await runControlledExportRollbackDrills(session, {
+      timeoutMs: args.timeoutMs,
+      beforeDocument: gestureLifecycleResult.finalDocument,
+    });
+    lifecycleResult = Object.freeze({
+      drills: Object.freeze([
+        ...gestureLifecycleResult.drills,
+        ...exportLifecycleResult.drills,
+      ]),
+      finalDocument: exportLifecycleResult.finalDocument,
     });
     authoritativeState = await session.settleAuthoritativeState();
     liveDiagnostics = session.diagnostics();

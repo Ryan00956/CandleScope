@@ -464,6 +464,9 @@ export async function captureDrillBuildAuthority(session, drillId) {
       currentDocumentPath: networkAssets?.currentDocumentPath ?? null,
       pendingCount: networkAssets?.pendingCount ?? null,
       inFlightCount: networkAssets?.inFlightCount ?? null,
+      inFlight: Object.freeze([...(networkAssets?.inFlight ?? [])]),
+      deferredWorkerBootstrapResponseCount:
+        networkAssets?.deferredWorkerBootstrapResponseCount ?? null,
       expectedEntryCount: networkAssets?.expectedEntryCount ?? null,
       acceptedEntryCount: networkAssets?.acceptedEntryCount ?? null,
       observedAssetCount: networkAssets?.observedAssetCount ?? null,
@@ -471,6 +474,14 @@ export async function captureDrillBuildAuthority(session, drillId) {
       duplicateResponseKeys: Object.freeze([...(networkAssets?.duplicateResponseKeys ?? [])]),
       unmanifestedResponses: Object.freeze([...(networkAssets?.unmanifestedResponses ?? [])]),
       provenanceErrors: Object.freeze([...(networkAssets?.provenanceErrors ?? [])]),
+      workerConstructions: Object.freeze([...(networkAssets?.workerConstructions ?? [])]),
+      unclaimedDrawingWorkerConstructions: Object.freeze([
+        ...(networkAssets?.unclaimedDrawingWorkerConstructions ?? []),
+      ]),
+      discoveredWorkerTargets: Object.freeze([...(networkAssets?.discoveredWorkerTargets ?? [])]),
+      retiredBeforeAttachWorkerSources: Object.freeze([
+        ...(networkAssets?.retiredBeforeAttachWorkerSources ?? []),
+      ]),
       quiescence: networkAssets?.quiescence ?? null,
     }),
     workerLifecycle: Object.freeze({
@@ -649,6 +660,7 @@ async function runOffscreenUnsupported(session, beforeDocument, timeoutMs) {
     id: "offscreen-canvas-unsupported",
     targetType: "worker",
     targetUrl: workerUrl,
+    allowControlledConstructorQuery: true,
     expression,
     timeoutMs: Math.min(timeoutMs, 10_000),
   });

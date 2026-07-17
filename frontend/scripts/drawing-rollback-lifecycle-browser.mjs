@@ -683,7 +683,7 @@ async function releaseHeldPointer(session, pointer) {
   });
 }
 
-async function switchChartType(session, desired, timeoutMs) {
+export async function switchChartType(session, desired, timeoutMs) {
   const before = await session.cdp.evaluate(
     "document.querySelector('[data-pane-id=\"single-chart\"]')?.dataset?.chartType || null",
   );

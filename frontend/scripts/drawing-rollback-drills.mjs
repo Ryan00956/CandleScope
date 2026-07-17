@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const DEDICATED_SCHEMA_VERSION = "drawing-rollback-drill/v2";
 const PHASE6_SCHEMA_VERSION = "drawing-engine-v2-perf/v1";
 const DRAWING_WORKER_SCHEMA_VERSION = 1;
@@ -18,13 +20,23 @@ const DRAWING_KINDS = Object.freeze([
 ]);
 
 const EXPORT_CHECKPOINT_TYPES = Object.freeze([
-  "export-prepare",
+  "old-export-prepare",
   "series-rebuild-start",
   "series-rebuild-complete",
+  "stale-export-pixels-fixed",
   "stale-lease-revalidate",
-  "fresh-lease-revalidate",
-  "export-capture",
-  "lease-restored",
+  "stale-lease-restored",
+  "visible-export-prepare",
+  "visible-export-pixels-fixed",
+  "visible-lease-revalidate",
+  "visible-lease-restored",
+  "visible-export-encoded",
+  "hidden-export-prepare",
+  "hidden-export-pixels-fixed",
+  "hidden-lease-revalidate",
+  "hidden-lease-restored",
+  "hidden-export-encoded",
+  "pixel-oracle-complete",
 ]);
 
 const STAMP_FIELDS = Object.freeze([
@@ -43,6 +55,10 @@ const STAMP_FIELDS = Object.freeze([
 
 function componentTest(files, pattern, minimumPassCount) {
   return Object.freeze({ files: Object.freeze(files), pattern, minimumPassCount });
+}
+
+function jsonSha256(value) {
+  return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
 
 export const DRAWING_ROLLBACK_DRILL_MANIFEST = Object.freeze([
@@ -1725,13 +1741,131 @@ function validateSeriesRebuildBeforeExport(artifact) {
   const prepare = objectValue(checkpoints[0]);
   const rebuildStart = objectValue(checkpoints[1]);
   const rebuildComplete = objectValue(checkpoints[2]);
-  const staleRevalidate = objectValue(checkpoints[3]);
-  const freshRevalidate = objectValue(checkpoints[4]);
-  const capture = objectValue(checkpoints[5]);
-  const restored = objectValue(checkpoints[6]);
-  const png = objectValue(capture?.png);
+  const stalePixels = objectValue(checkpoints[3]);
+  const staleRevalidate = objectValue(checkpoints[4]);
+  const staleRestored = objectValue(checkpoints[5]);
+  const visiblePrepare = objectValue(checkpoints[6]);
+  const visiblePixels = objectValue(checkpoints[7]);
+  const visibleRevalidate = objectValue(checkpoints[8]);
+  const visibleRestored = objectValue(checkpoints[9]);
+  const visibleEncoded = objectValue(checkpoints[10]);
+  const hiddenPrepare = objectValue(checkpoints[11]);
+  const hiddenPixels = objectValue(checkpoints[12]);
+  const hiddenRevalidate = objectValue(checkpoints[13]);
+  const hiddenRestored = objectValue(checkpoints[14]);
+  const hiddenEncoded = objectValue(checkpoints[15]);
+  const pixelOracleEvent = objectValue(checkpoints[16]);
+  const visiblePng = objectValue(visibleEncoded?.png);
+  const hiddenPng = objectValue(hiddenEncoded?.png);
+  const comparison = objectValue(pixelOracleEvent?.comparison);
+  const captures = objectValue(artifact?.captures);
+  const captureOptions = objectValue(captures?.options);
+  const productLifecycle = objectValue(artifact?.productLifecycle);
+  const transactions = Array.isArray(productLifecycle?.transactions)
+    ? productLifecycle.transactions
+    : [];
+  const oldTransaction = objectValue(transactions[0]);
+  const visibleTransaction = objectValue(transactions[1]);
+  const hiddenTransaction = objectValue(transactions[2]);
+  const rebuild = objectValue(artifact?.rebuild);
+  const staleDiscard = objectValue(artifact?.staleDiscard);
+  const pageCleanup = objectValue(artifact?.pageCleanup);
+  const injection = objectValue(artifact?.injection);
+  const navigation = objectValue(injection?.navigation);
+  const gate = objectValue(injection?.gate);
+  const gateCheckpoints = Array.isArray(gate?.checkpoints) ? gate.checkpoints : [];
   const outcome = objectValue(artifact?.outcome);
+
+  const transactionEvents = (transaction) => (
+    Array.isArray(transaction?.events) ? transaction.events : []
+  );
+  const exactTransactionEvents = (transaction, types, expectedRevalidate) => {
+    const events = transactionEvents(transaction);
+    const revalidate = events.find((event) => event?.type === "post-capture-revalidate");
+    return events.length === types.length
+      && events.every((event, index) => event?.type === types[index])
+      && timestampsAreOrdered(events.map((event) => event?.observedAt))
+      && events.every((event, index) => (
+        safePositiveInteger(event?.eventSequence) !== null
+          && (index === 0 || event.eventSequence > events[index - 1].eventSequence)
+      ))
+      && revalidate?.valid === expectedRevalidate;
+  };
+  const sameTransactionIdentity = (event, transaction) => (
+    objectValue(event) !== null
+      && objectValue(transaction) !== null
+      && event.transactionId === transaction.transactionId
+      && event.leaseId === transaction.leaseId
+      && event.scopeKey === transaction.scopeKey
+      && event.documentRevision === transaction.documentRevision
+      && event.surfaceGeneration === transaction.surfaceGeneration
+  );
+  const sameProductEvent = (checkpoint, transaction, productType) => {
+    const event = transactionEvents(transaction).find((value) => value?.type === productType);
+    return event
+      && checkpoint?.productEventSequence === event.eventSequence
+      && checkpoint?.observedAt === event.observedAt;
+  };
+  const validPng = (png, transaction) => {
+    const encoded = transactionEvents(transaction).find((event) => event?.type === "image-encoded");
+    return objectValue(png) !== null
+      && sha256Digest(png.digest)
+      && png.mimeType === "image/png"
+      && png.magicHex === "89504e470d0a1a0a"
+      && safePositiveInteger(png.bytes) !== null
+      && safePositiveInteger(png.widthPx) !== null
+      && safePositiveInteger(png.heightPx) !== null
+      && png.transactionId === transaction?.transactionId
+      && png.leaseId === transaction?.leaseId
+      && png.scopeKey === transaction?.scopeKey
+      && png.documentRevision === transaction?.documentRevision
+      && encoded?.bytes === png.bytes
+      && encoded?.widthPx === png.widthPx
+      && encoded?.heightPx === png.heightPx
+      && encoded?.mimeType === png.mimeType
+      && encoded?.optionsKey === png.optionsKey;
+  };
+
   addFailure(failures, artifact?.injection?.kind === "series-rebuild-before-export-capture", "wrong-export-rebuild-injection");
+  addFailure(failures, injection?.buildAuthorityCurrent === true, "export-rebuild-build-authority-not-current");
+  addFailure(
+    failures,
+    navigation?.kind === "controlled-rollback-drill-navigation"
+      && navigation?.drillId === "series-rebuild-before-export"
+      && navigation?.variant === null
+      && navigation?.authorityAccepted === true
+      && navigation?.tokenRemoved === true
+      && navigation?.runId === injection?.runId
+      && navigation?.faultId === injection?.faultId
+      && navigation?.sequence === injection?.sequence
+      && navigation?.authorityTokenSha256 === injection?.authorityTokenSha256
+      && navigation?.documentInstanceId === injection?.documentInstanceId,
+    "export-rebuild-navigation-authority-invalid",
+  );
+  addFailure(
+    failures,
+    nonEmptyString(injection?.runId)
+      && injection.runId === artifact?.provenance?.runId
+      && sha256Digest(injection?.authorityTokenSha256)
+      && nonEmptyString(injection?.documentInstanceId)
+      && nonEmptyString(injection?.faultId)
+      && safePositiveInteger(injection?.sequence) !== null,
+    "export-rebuild-authority-binding-invalid",
+  );
+  addFailure(
+    failures,
+    gate?.checkpointCount === 3
+      && gate?.pauseConsumed === true
+      && gate?.releaseCount === 1
+      && gate?.activeCheckpointId === null
+      && gateCheckpoints.length === 3
+      && gateCheckpoints[0]?.paused === true
+      && gateCheckpoints[0]?.releaseReason === "harness-release"
+      && gateCheckpoints.slice(1).every((checkpoint) => (
+        checkpoint?.paused === false && checkpoint?.releaseReason === "not-paused"
+      )),
+    "export-rebuild-gate-lifecycle-invalid",
+  );
   addFailure(failures, checkpoints.length === EXPORT_CHECKPOINT_TYPES.length, "export-checkpoint-count-mismatch");
   addFailure(
     failures,
@@ -1741,12 +1875,94 @@ function validateSeriesRebuildBeforeExport(artifact) {
   );
   addFailure(
     failures,
-    timestampsAreOrdered(checkpoints.map((event) => event?.observedAt)),
+    timestampsAreOrdered(checkpoints.map((event) => event?.observedAt))
+      && checkpoints.every((event, index) => event?.eventSequence === index + 1),
     "export-checkpoint-order-invalid",
   );
   addFailure(
     failures,
-    nonEmptyString(prepare?.leaseId)
+    productLifecycle?.schemaVersion === 1
+      && productLifecycle?.transactionCount === 3
+      && transactions.length === 3,
+    "export-product-lifecycle-count-invalid",
+  );
+  addFailure(
+    failures,
+    transactions.length === 3
+      && transactions.every((transaction) => (
+        nonEmptyString(transaction?.transactionId)
+          && safePositiveInteger(transaction?.leaseId) !== null
+          && nonEmptyString(transaction?.scopeKey)
+          && integer(transaction?.documentRevision) !== null
+          && transaction.documentRevision >= 0
+      ))
+      && new Set(transactions.map((transaction) => transaction?.transactionId)).size === 3
+      && new Set(transactions.map((transaction) => transaction?.leaseId)).size === 3,
+    "export-product-lifecycle-identity-invalid",
+  );
+  addFailure(
+    failures,
+    exactTransactionEvents(oldTransaction, [
+      "lease-prepared",
+      "capture-source-fixed",
+      "post-capture-revalidate",
+      "lease-restored",
+    ], false)
+      && exactTransactionEvents(visibleTransaction, [
+        "lease-prepared",
+        "capture-source-fixed",
+        "post-capture-revalidate",
+        "lease-restored",
+        "image-encoded",
+        "preview-published",
+      ], true)
+      && exactTransactionEvents(hiddenTransaction, [
+        "lease-prepared",
+        "capture-source-fixed",
+        "post-capture-revalidate",
+        "lease-restored",
+        "image-encoded",
+        "preview-published",
+      ], true)
+      && timestampsAreOrdered(transactions.flatMap(transactionEvents).map((event) => event?.observedAt)),
+    "export-product-lifecycle-sequence-invalid",
+  );
+  addFailure(
+    failures,
+    oldTransaction?.hideDrawings === false
+      && visibleTransaction?.hideDrawings === false
+      && hiddenTransaction?.hideDrawings === true
+      && oldTransaction?.sceneKind === "settled-exact"
+      && visibleTransaction?.sceneKind === "settled-exact"
+      && hiddenTransaction?.sceneKind === "hidden-frame"
+      && safePositiveInteger(oldTransaction?.surfaceGeneration) !== null
+      && safePositiveInteger(visibleTransaction?.surfaceGeneration) !== null
+      && hiddenTransaction?.surfaceGeneration === null
+      && safePositiveInteger(oldTransaction?.drawableEntityCount) !== null
+      && safePositiveInteger(visibleTransaction?.drawableEntityCount) !== null
+      && hiddenTransaction?.drawableEntityCount === 0
+      && Array.isArray(visibleTransaction?.drawingBounds)
+      && visibleTransaction.drawingBounds.length === visibleTransaction.drawableEntityCount,
+    "export-product-scene-receipts-invalid",
+  );
+  addFailure(
+    failures,
+    gateCheckpoints.length === transactions.length
+      && gateCheckpoints.every((checkpoint, index) => (
+        checkpoint?.transactionId === transactions[index]?.transactionId
+          && checkpoint?.leaseId === transactions[index]?.leaseId
+          && checkpoint?.scopeKey === transactions[index]?.scopeKey
+          && checkpoint?.documentRevision === transactions[index]?.documentRevision
+          && checkpoint?.surfaceGeneration === transactions[index]?.surfaceGeneration
+          && checkpoint?.hideDrawings === transactions[index]?.hideDrawings
+      )),
+    "export-gate-product-lifecycle-mismatch",
+  );
+  addFailure(
+    failures,
+    sameTransactionIdentity(prepare, oldTransaction)
+      && sameProductEvent(prepare, oldTransaction, "lease-prepared")
+      && safePositiveInteger(prepare?.leaseId) !== null
       && safePositiveInteger(prepare?.surfaceGeneration) !== null,
     "old-export-lease-receipt-invalid",
   );
@@ -1755,57 +1971,168 @@ function validateSeriesRebuildBeforeExport(artifact) {
     rebuildStart?.fromSurfaceGeneration === prepare?.surfaceGeneration
       && rebuildComplete?.fromSurfaceGeneration === prepare?.surfaceGeneration
       && safePositiveInteger(rebuildComplete?.surfaceGeneration) !== null
-      && rebuildComplete.surfaceGeneration > prepare?.surfaceGeneration,
+      && rebuildComplete.surfaceGeneration > prepare?.surfaceGeneration
+      && rebuild?.fromSurfaceGeneration === prepare?.surfaceGeneration
+      && rebuild?.surfaceGeneration === rebuildComplete.surfaceGeneration
+      && rebuildStart?.beforeChartType === "candlestick"
+      && rebuildStart?.afterChartType === "line"
+      && rebuildComplete?.beforeChartType === "candlestick"
+      && rebuildComplete?.afterChartType === "line"
+      && rebuild?.beforeChartType === "candlestick"
+      && rebuild?.afterChartType === "line",
     "series-rebuild-generation-transition-invalid",
   );
   addFailure(
     failures,
-    staleRevalidate?.leaseId === prepare?.leaseId
-      && staleRevalidate?.surfaceGeneration === prepare?.surfaceGeneration
+    sameTransactionIdentity(stalePixels, oldTransaction)
+      && sameProductEvent(stalePixels, oldTransaction, "capture-source-fixed")
+      && stalePixels?.capturedSurfaceGeneration === rebuildComplete?.surfaceGeneration
+      && stalePixels.capturedSurfaceGeneration > stalePixels.surfaceGeneration,
+    "stale-export-pixels-not-fixed-after-rebuild",
+  );
+  addFailure(
+    failures,
+    sameTransactionIdentity(staleRevalidate, oldTransaction)
+      && sameProductEvent(staleRevalidate, oldTransaction, "post-capture-revalidate")
       && staleRevalidate?.valid === false,
     "stale-export-lease-revalidation-invalid",
   );
   addFailure(
     failures,
-    nonEmptyString(freshRevalidate?.leaseId)
-      && freshRevalidate?.leaseId !== prepare?.leaseId
-      && freshRevalidate?.surfaceGeneration === rebuildComplete?.surfaceGeneration
-      && freshRevalidate?.valid === true,
-    "fresh-export-lease-revalidation-invalid",
+    sameTransactionIdentity(staleRestored, oldTransaction)
+      && sameProductEvent(staleRestored, oldTransaction, "lease-restored")
+      && Date.parse(visiblePrepare?.observedAt) >= Date.parse(staleRestored?.observedAt),
+    "stale-export-lease-restore-invalid",
   );
   addFailure(
     failures,
-    capture?.leaseId === freshRevalidate?.leaseId
-      && capture?.surfaceGeneration === freshRevalidate?.surfaceGeneration,
-    "export-capture-did-not-use-fresh-lease",
+    sameTransactionIdentity(visiblePrepare, visibleTransaction)
+      && sameProductEvent(visiblePrepare, visibleTransaction, "lease-prepared")
+      && visiblePrepare?.leaseId !== prepare?.leaseId
+      && visiblePrepare?.surfaceGeneration === rebuildComplete?.surfaceGeneration,
+    "visible-export-prepare-invalid",
   );
   addFailure(
     failures,
-    restored?.leaseId === freshRevalidate?.leaseId
-      && restored?.surfaceGeneration === freshRevalidate?.surfaceGeneration,
-    "export-lease-restore-receipt-invalid",
+    sameTransactionIdentity(visiblePixels, visibleTransaction)
+      && sameProductEvent(visiblePixels, visibleTransaction, "capture-source-fixed")
+      && sameTransactionIdentity(visibleRevalidate, visibleTransaction)
+      && sameProductEvent(visibleRevalidate, visibleTransaction, "post-capture-revalidate")
+      && visibleRevalidate?.valid === true
+      && sameTransactionIdentity(visibleRestored, visibleTransaction)
+      && sameProductEvent(visibleRestored, visibleTransaction, "lease-restored")
+      && sameTransactionIdentity(visibleEncoded, visibleTransaction)
+      && sameProductEvent(visibleEncoded, visibleTransaction, "image-encoded"),
+    "visible-export-lifecycle-invalid",
   );
   addFailure(
     failures,
-    sha256Digest(png?.digest)
-      && safePositiveInteger(png?.bytes) !== null
-      && safePositiveInteger(png?.widthPx) !== null
-      && safePositiveInteger(png?.heightPx) !== null,
-    "export-png-receipt-invalid",
+    sameTransactionIdentity(hiddenPrepare, hiddenTransaction)
+      && sameProductEvent(hiddenPrepare, hiddenTransaction, "lease-prepared")
+      && hiddenPrepare?.leaseId !== visiblePrepare?.leaseId
+      && hiddenPrepare?.scopeKey === visiblePrepare?.scopeKey
+      && hiddenPrepare?.documentRevision === visiblePrepare?.documentRevision
+      && sameTransactionIdentity(hiddenPixels, hiddenTransaction)
+      && sameProductEvent(hiddenPixels, hiddenTransaction, "capture-source-fixed")
+      && sameTransactionIdentity(hiddenRevalidate, hiddenTransaction)
+      && sameProductEvent(hiddenRevalidate, hiddenTransaction, "post-capture-revalidate")
+      && hiddenRevalidate?.valid === true
+      && sameTransactionIdentity(hiddenRestored, hiddenTransaction)
+      && sameProductEvent(hiddenRestored, hiddenTransaction, "lease-restored")
+      && sameTransactionIdentity(hiddenEncoded, hiddenTransaction)
+      && sameProductEvent(hiddenEncoded, hiddenTransaction, "image-encoded"),
+    "hidden-export-lifecycle-invalid",
   );
   addFailure(
     failures,
-    safePositiveInteger(capture?.drawingPixelDiffCount) !== null,
-    "export-drawing-pixel-diff-not-observed",
+    staleDiscard?.previewPublished === false
+      && staleDiscard?.encoded === false
+      && staleDiscard?.productPreviewPublished === false
+      && nonEmptyString(staleDiscard?.error)
+      && staleDiscard.error.includes("绘图在截图期间发生变化"),
+    "stale-export-preview-not-discarded",
   );
   addFailure(
     failures,
-    safePositiveInteger(capture?.controlPixelSampleCount) !== null
-      && capture?.controlPixelDiffCount === 0,
-    "export-control-pixel-diff-observed-or-missing",
+    validPng(visiblePng, visibleTransaction)
+      && validPng(hiddenPng, hiddenTransaction)
+      && sameSha256Digest(captures?.visible?.digest, visiblePng?.digest)
+      && sameSha256Digest(captures?.hidden?.digest, hiddenPng?.digest)
+      && visiblePng?.digest !== hiddenPng?.digest
+      && visiblePng?.widthPx === hiddenPng?.widthPx
+      && visiblePng?.heightPx === hiddenPng?.heightPx,
+    "export-png-receipts-invalid",
   );
-  addFailure(failures, sameSha256Digest(outcome?.beforeDigest, outcome?.afterDigest), "export-document-digest-mismatch");
+  addFailure(
+    failures,
+    captureOptions?.scope === "chart"
+      && captureOptions?.format === "png"
+      && captureOptions?.scale === 1
+      && captureOptions?.background === "auto"
+      && captureOptions?.watermarkEnabled === false
+      && captureOptions?.visibleHideDrawings === false
+      && captureOptions?.hiddenHideDrawings === true,
+    "export-visible-hidden-options-invalid",
+  );
+  const totalPixelCount = safePositiveInteger(comparison?.totalPixelCount);
+  const drawingPixelSampleCount = safePositiveInteger(comparison?.drawingPixelSampleCount);
+  const drawingPixelDiffCount = safePositiveInteger(comparison?.drawingPixelDiffCount);
+  const controlPixelSampleCount = safePositiveInteger(comparison?.controlPixelSampleCount);
+  addFailure(
+    failures,
+    comparison?.algorithm === "complete-frame-drawing-bounds-v1"
+      && comparison?.widthPx === visiblePng?.widthPx
+      && comparison?.heightPx === visiblePng?.heightPx
+      && totalPixelCount === comparison?.widthPx * comparison?.heightPx
+      && comparison?.partitionPixelCount === totalPixelCount
+      && drawingPixelSampleCount !== null
+      && controlPixelSampleCount !== null
+      && drawingPixelSampleCount + controlPixelSampleCount === totalPixelCount
+      && safePositiveInteger(comparison?.drawingBoundsCount) !== null
+      && sha256Digest(comparison?.drawingBoundsDigest)
+      && comparison?.drawingBoundsDigest === jsonSha256(visibleTransaction?.drawingBounds)
+      && sameSha256Digest(captures?.drawingBoundsDigest, comparison?.drawingBoundsDigest),
+    "export-pixel-oracle-partition-invalid",
+  );
+  addFailure(
+    failures,
+    drawingPixelDiffCount !== null
+      && drawingPixelSampleCount !== null
+      && drawingPixelDiffCount <= drawingPixelSampleCount
+      && comparison?.controlPixelDiffCount === 0
+      && safePositiveInteger(comparison?.fixedControlPixelSampleCount) !== null
+      && comparison.fixedControlPixelSampleCount >= 512
+      && comparison?.fixedControlPixelDiffCount === 0
+      && comparison?.totalPixelDiffCount === drawingPixelDiffCount
+      && objectValue(comparison?.diffBounds) !== null,
+    "export-drawing-pixel-diff-not-exact",
+  );
+  addFailure(
+    failures,
+    sameSha256Digest(outcome?.beforeDigest, outcome?.afterDigest)
+      && outcome?.scopeKey === oldTransaction?.scopeKey
+      && outcome?.beforeDocumentRevision === outcome?.afterDocumentRevision
+      && outcome?.beforeDocumentRevision === oldTransaction?.documentRevision
+      && safePositiveInteger(outcome?.beforeEntityCount) !== null
+      && outcome?.beforeEntityCount === outcome?.afterEntityCount
+      && outcome?.beforeEntityCount === visibleTransaction?.drawableEntityCount,
+    "export-document-identity-mismatch",
+  );
   addFailure(failures, outcome?.queueDepthCurrent === 0, "post-export-queue-not-converged");
+  addFailure(failures, outcome?.inFlightCurrent === 0, "post-export-in-flight-not-converged");
+  addFailure(
+    failures,
+    outcome?.backend === "worker"
+      && outcome?.workerAvailability === "available"
+      && outcome?.stalePublishCount === 0,
+    "post-export-worker-runtime-invalid",
+  );
+  addFailure(
+    failures,
+    outcome?.surfaceGeneration === rebuildComplete?.surfaceGeneration
+      && outcome?.lastRequestedStamp?.surfaceGeneration === outcome?.surfaceGeneration,
+    "post-export-surface-generation-invalid",
+  );
   addFailure(failures, sameStamp(outcome?.lastRequestedStamp, outcome?.lastPublishedStamp), "post-export-stamp-not-current");
   addFailure(failures, own(outcome, "lastPaintedStamp"), "post-export-independent-painted-stamp-missing");
   addFailure(failures, sameStamp(outcome?.lastPublishedStamp, outcome?.lastPaintedStamp), "post-export-painted-stamp-not-current");
@@ -1813,6 +2140,49 @@ function validateSeriesRebuildBeforeExport(artifact) {
     failures,
     validPaintReceipt(outcome?.paintReceipt, outcome?.lastPaintedStamp),
     "post-export-independent-paint-receipt-invalid-or-missing",
+  );
+  addFailure(
+    failures,
+    Array.isArray(outcome?.submittedWorkerHeaders)
+      && outcome.submittedWorkerHeaders.length > 0
+      && outcome.submittedWorkerHeaders.length <= 32
+      && outcome.submittedWorkerHeaders.every(validWorkerIdentity)
+      && outcome.submittedWorkerHeaders.every((identity, index, identities) => (
+        index === 0
+          || (identity.jobId > identities[index - 1].jobId
+            && identity.generation > identities[index - 1].generation)
+      ))
+      && sameWorkerIdentity(
+        outcome.submittedWorkerHeaders.at(-1),
+        outcome?.latestSubmittedWorkerIdentity,
+      )
+      && sameWorkerIdentity(outcome?.latestSubmittedWorkerIdentity, outcome?.acceptedWorkerIdentity)
+      && sameWorkerIdentity(outcome?.acceptedWorkerIdentity, outcome?.publishedWorkerIdentity)
+      && sameStamp(outcome?.publishedWorkerIdentity?.stamp, outcome?.lastPublishedStamp)
+      && (outcome?.returnedWorkerIdentity === null
+        || (validWorkerIdentity(outcome?.returnedWorkerIdentity)
+          && outcome.submittedWorkerHeaders.some((identity) => (
+            sameWorkerIdentity(identity, outcome.returnedWorkerIdentity)
+          ))
+          && !sameWorkerIdentity(
+            outcome?.returnedWorkerIdentity,
+            outcome?.latestSubmittedWorkerIdentity,
+          ))),
+    "post-export-worker-identity-not-current",
+  );
+  addFailure(
+    failures,
+    outcome?.exportLifecycleActiveCount === 0
+      && outcome?.drawingsHidden === false
+      && outcome?.scenePublicationReady === true,
+    "post-export-presentation-not-restored",
+  );
+  addFailure(
+    failures,
+    pageCleanup?.panelClosed === true
+      && pageCleanup?.gateReleased === true
+      && pageCleanup?.pixelCacheCleared === true,
+    "post-export-page-cleanup-invalid",
   );
   return failures;
 }

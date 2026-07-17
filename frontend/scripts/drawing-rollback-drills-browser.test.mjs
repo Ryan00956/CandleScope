@@ -31,7 +31,10 @@ const IMPLEMENTED_WORKER_DRILLS = Object.freeze([
   "worker-stale-generation",
 ]);
 const IMPLEMENTED_STORAGE_DRILLS = Object.freeze(["indexeddb-quota-blocked"]);
-const IMPLEMENTED_LIFECYCLE_DRILLS = Object.freeze(["active-gesture-chart-boundary"]);
+const IMPLEMENTED_LIFECYCLE_DRILLS = Object.freeze([
+  "active-gesture-chart-boundary",
+  "series-rebuild-before-export",
+]);
 
 function runCli(args, environment = {}) {
   return spawnSync(process.execPath, [CLI, ...args], {
@@ -264,6 +267,9 @@ test("run authority independently requires the current lifecycle drill build rec
   assert.equal(lifecycleDrillBuildAuthorityPassed(lifecycleResult, buildReceipt), false);
   lifecycleResult.drills[0].buildAuthority.currentAssetDigest = digest("b");
   lifecycleResult.drills[0].drillId = "series-rebuild-before-export";
+  assert.equal(lifecycleDrillBuildAuthorityPassed(lifecycleResult, buildReceipt), false);
+  lifecycleResult.drills[0].drillId = "active-gesture-chart-boundary";
+  lifecycleResult.drills.pop();
   assert.equal(lifecycleDrillBuildAuthorityPassed(lifecycleResult, buildReceipt), false);
 });
 

@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5、Phase 6、Phase 7 已完成（2026-07-15）；Phase 8 已完成（2026-07-16）；Phase 9 等待生产灰度与观察窗门槛。
+状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5、Phase 6、Phase 7 已完成（2026-07-15）；Phase 8 已完成（2026-07-16）；Phase 9 本地八项强制回滚演练已完成（2026-07-17），等待生产灰度与观察窗门槛。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -60,7 +60,7 @@ git -C "H:\program\CandleScope" worktree list
 | 6 | LOD、命中索引、worker 与背压 | 已完成（LOD/worker/indexed hit checkpoint） |
 | 7 | IndexedDB、兼容迁移与 export barrier | 已完成（async persistence/export barrier checkpoint） |
 | 8 | 全工具迁移与生命周期收口 | 已完成（全工具 scene document checkpoint） |
-| 9 | 灰度、回滚演练与 legacy 删除 | 未开始（等待生产灰度与观察窗） |
+| 9 | 灰度、回滚演练与 legacy 删除 | 进行中（本地强制回滚演练 8/8；等待生产灰度与观察窗） |
 
 ## 3. 已确认的性能基线
 
@@ -1145,14 +1145,16 @@ handles/drag/resize 按各自公开交互契约完成。
 
 ### 强制回滚演练
 
-- [ ] scene worker 初始化失败。
-- [ ] OffscreenCanvas 不支持。
-- [ ] IndexedDB quota/blocked。
-- [ ] worker 返回 stale generation。
-- [ ] chart type/interval 在 active gesture 中切换。
-- [ ] series 在 export 前重建。
-- [ ] DPR/resize 连续变化。
-- [ ] canary 构建切回 legacy 后仍能读取最新兼容 snapshot。
+以下勾选仅表示 2026-07-17 本地受控生产构建、可见 headed Chrome 演练已产生可信证据；不替代 production cohort、完整观察窗、一小时 soak 或用户数据丢失审计。
+
+- [x] scene worker 初始化失败。
+- [x] OffscreenCanvas 不支持。
+- [x] IndexedDB quota/blocked。
+- [x] worker 返回 stale generation。
+- [x] chart type/interval 在 active gesture 中切换。
+- [x] series 在 export 前重建。
+- [x] DPR/resize 连续变化。
+- [x] canary 构建切回 legacy 后仍能读取最新兼容 snapshot。
 
 ### 删除条件
 
@@ -1456,4 +1458,22 @@ Correctness parity: geometry/style、legacy codec round-trip、static/dynamic re
 Rollback verified: legacy/shadow mode、legacy primitive factory/renderer 与最后兼容 SavedDrawing snapshot 本阶段不删除；VITE_DRAWING_ENGINE_MODE、VITE_DRAWING_INTERACTION_OVERLAY、VITE_DRAWING_RASTER_BACKEND 可独立回退。v2/legacy bytes 与 IDB compatibility boundary 保留，删除 legacy 只允许在 Phase 9 全部门槛满足后执行。
 Known limitations: Phase 9 需要 production cohort 1%→10%→50%→100%、100% 默认两个发布或 14 天、完整观察窗、八项强制回滚演练、一小时 soak 与用户数据丢失审计；当前本地 checkpoint 不能提供这些外部证据，因此不开始 legacy 删除，也不把默认 mode 切到 scene。
 Decision: Phase 8 PASS；九类 drawing 的 document/scene/overlay 迁移、零 legacy primitive、生命周期、统一 smoke 与正式 perf 门全部通过。后续停止在 Phase 9 外部灰度/观察窗门槛，待证据齐全后重新审计。
+~~~
+
+### Phase 9 本地强制回滚演练执行记录
+
+~~~text
+Phase: 9A — 本地受控生产构建回滚演练
+Date: 2026-07-17
+Commit: 本执行记录所在 checkpoint（test(frontend): complete phase9 rollback drill automation）
+Scope: 只完成可在本机自动化且能严格归因的八项强制回滚演练；不执行 production cohort 扩量、不伪造观察窗、不删除 legacy、不切换默认 mode。
+Runner: 同一受控临时 Chrome profile、同一 origin/端口、可见 headed Chrome、真实 production build；固定 producer 顺序为 worker → storage → lifecycle → export → dpr → cross-build。
+Report: output/phase9-rollback-drills/phase9-1784291530628-6aecd5f5-2c28-4149-af1c-887dac21fe33/controlled-run.partial.json；status=passed，8/8 drills 的 contractPassed/trustedRunnerAccepted/status 均为 true，failureReasons=[]。
+Tests: npm run check PASS（architecture、typecheck、ESLint、1731/1731 tests、production build 357 modules）；node --test scripts/drawing-controlled-cdp.test.mjs scripts/drawing-rollback-drills.test.mjs scripts/drawing-rollback-dpr-browser.test.mjs PASS（160/160）；git diff --check PASS。
+Worker/storage/lifecycle/export: worker init failure、worker-global OffscreenCanvas unsupported sticky fallback、96ms stale-generation latest-wins、原生 IndexedDB quota/blocked、active gesture chart boundary、series rebuild-before-export 全部通过；quota 30s cache limit + 5s guard 以 monotonic clock 补足（本轮 35008.2824ms），durable record、retry/cold reload、current stamp、worker queue、export lease 与清理回执均由对应 artifact 绑定。
+DPR/resize: 1/1.5/2 与三组 viewport 交替执行 6 次纯 DPR/纯 resize transition；产品 DPR watcher、overlay CSS/bitmap、worker identity、viewport revision 与最终 1440×900 DPR 1 恢复全部收敛。浏览器 CSSOM/Lightweight Charts 在半物理像素边界允许最多 1 CSS px/1 physical px 表示差，超过边界仍 fail closed。
+Cross-build: Canary 通过真实 toolbar/flyout/CDP input 逐次精确新增九类 drawing，九次 receipt 的 entity/kind/revision/record digest 连成完整链；初始 3 个 ID/digest 与 9 个新增 ID/digest 互斥并精确分解最终 12 个 canonical entities。兼容 snapshot 同时绑定 canonical v2 IDB 全记录、生产 codec 解码后的 ID/order/kind/geometry/style 兼容语义与 v2 manifest。随后完整退役 Canary，在同 profile/origin 启动 distinct legacy production build，legacy 以 legacy interaction/main-thread raster 读取同一 snapshot，九类 materialization、12/12 instance/attachment、bytes 不变与双构建 authority 全部通过。
+Authority/cleanup: initial/per-drill/cross-build/run authority、producer order、Canary retirement 均为 true；两轮 production build 的 source revision/build input/git 相同，build/asset fingerprint 不同。最终 Chrome、mock API、preview 三个进程退出，三个端口关闭，临时 profile 删除，live/final diagnostics 与 cleanup failures 均为空。
+Remaining external gates: production cohort 1%→10%→50%→100%、各档完整观察窗、100% 默认两个发布或 14 天、一小时 soak、用户数据迁移/丢失审计仍未执行；因此 Phase 9 只标记为进行中，legacy renderer/primitive/factory 与回退开关继续保留，默认 mode 不切到 scene。
+Decision: Phase 9 本地强制回滚演练 8/8 PASS；可以提交本地自动化 checkpoint，但不能宣称 Phase 9 全部完成，也不满足 legacy 删除条件。
 ~~~

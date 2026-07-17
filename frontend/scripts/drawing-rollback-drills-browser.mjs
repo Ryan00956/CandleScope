@@ -19,6 +19,8 @@ import {
 import { runControlledLifecycleRollbackDrills } from "./drawing-rollback-lifecycle-browser.mjs";
 import { runControlledExportRollbackDrills } from "./drawing-rollback-export-browser.mjs";
 import { runControlledStorageRollbackDrills } from "./drawing-rollback-storage-browser.mjs";
+import { runControlledDprResizeRollbackDrills } from "./drawing-rollback-dpr-browser.mjs";
+import { runControlledCrossBuildRollbackDrills } from "./drawing-rollback-cross-build-browser.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_OUTPUT_ROOT = path.join(FRONTEND_ROOT, "output", "phase9-rollback-drills");
@@ -46,9 +48,18 @@ export const CONTROLLED_DRILL_PLAN = Object.freeze([
   Object.freeze({ id: "indexeddb-quota-blocked", producer: "storage" }),
   Object.freeze({ id: "worker-stale-generation", producer: "worker" }),
   Object.freeze({ id: "active-gesture-chart-boundary", producer: "lifecycle" }),
-  Object.freeze({ id: "series-rebuild-before-export", producer: "lifecycle" }),
-  Object.freeze({ id: "continuous-dpr-resize", producer: "lifecycle" }),
-  Object.freeze({ id: "canary-to-legacy-snapshot", producer: "storage" }),
+  Object.freeze({ id: "series-rebuild-before-export", producer: "export" }),
+  Object.freeze({ id: "continuous-dpr-resize", producer: "dpr" }),
+  Object.freeze({ id: "canary-to-legacy-snapshot", producer: "cross-build" }),
+]);
+
+export const CONTROLLED_PRODUCER_ORDER = Object.freeze([
+  "worker",
+  "storage",
+  "lifecycle",
+  "export",
+  "dpr",
+  "cross-build",
 ]);
 
 const IMPLEMENTED_WORKER_DRILL_IDS = new Set([
@@ -61,10 +72,14 @@ const IMPLEMENTED_LIFECYCLE_DRILL_IDS = new Set([
   "active-gesture-chart-boundary",
   "series-rebuild-before-export",
 ]);
+const IMPLEMENTED_DPR_DRILL_IDS = new Set(["continuous-dpr-resize"]);
+const IMPLEMENTED_CROSS_BUILD_DRILL_IDS = new Set(["canary-to-legacy-snapshot"]);
 const IMPLEMENTED_DRILL_IDS = new Set([
   ...IMPLEMENTED_WORKER_DRILL_IDS,
   ...IMPLEMENTED_STORAGE_DRILL_IDS,
   ...IMPLEMENTED_LIFECYCLE_DRILL_IDS,
+  ...IMPLEMENTED_DPR_DRILL_IDS,
+  ...IMPLEMENTED_CROSS_BUILD_DRILL_IDS,
 ]);
 
 function usage() {
@@ -203,6 +218,8 @@ export function buildInitialControlledRunReport(args, {
     workerHarnessPassed: false,
     storageHarnessPassed: false,
     lifecycleHarnessPassed: false,
+    dprHarnessPassed: false,
+    crossBuildHarnessPassed: false,
     runId,
     sourceRevision: gitRevision(),
     startedAt,
@@ -225,6 +242,7 @@ export function buildInitialControlledRunReport(args, {
       diagnosticsClosed: false,
       browserClosed: false,
       serverClosed: false,
+      canaryRetirementComplete: false,
       runClosed: false,
     },
     planValid,
@@ -313,6 +331,121 @@ export function lifecycleDrillBuildAuthorityPassed(lifecycleResult, buildReceipt
   );
 }
 
+export function dprDrillBuildAuthorityPassed(dprResult, buildReceipt) {
+  return drillBuildAuthorityPassed(
+    dprResult,
+    buildReceipt,
+    IMPLEMENTED_DPR_DRILL_IDS,
+  );
+}
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function crossBuildPhaseAuthorityMatchesBuild(authority, build) {
+  return authority?.kind === "controlled-browser-build-authority"
+    && authority.authoritative === true
+    && authority.assetBuildAuthoritative === true
+    && nonEmptyString(authority.capturedAt)
+    && authority.buildId === build?.buildId
+    && authority.buildFingerprint === build?.buildFingerprint
+    && authority.assetDigest === build?.assetDigest
+    && authority.currentAssetDigest === build?.assetDigest
+    && authority.buildInputDigest === build?.buildInputDigest
+    && authority.currentBuildInputDigest === build?.buildInputDigest
+    && authority.gitRevision === build?.gitRevision
+    && authority.managedOrigin === build?.origin
+    && authority.observedOrigin === build?.origin
+    && authority.profileId === build?.profileId
+    && authority.browserInstanceId === build?.browserInstanceId
+    && authority.serverInstanceId === build?.serverInstanceId
+    && authority.documentAuthority === build?.documentAuthority
+    && authority.engineMode === build?.engineMode
+    && authority.interactionSurfaceMode === build?.interactionSurfaceMode
+    && authority.rasterBackend === build?.rasterBackend;
+}
+
+export function crossBuildDrillAuthorityPassed(crossBuildResult) {
+  const artifacts = Array.isArray(crossBuildResult?.drills) ? crossBuildResult.drills : [];
+  if (artifacts.length !== 1) return false;
+  const artifact = artifacts[0];
+  const authority = artifact?.buildAuthority;
+  const crossBuild = authority?.crossBuild;
+  const canary = artifact?.builds?.canary;
+  const legacy = artifact?.builds?.legacy;
+  return artifact?.drillId === "canary-to-legacy-snapshot"
+    && authority?.drillId === artifact.drillId
+    && authority?.pairKind === "controlled-canary-to-legacy-build-authority"
+    && authority?.authoritative === true
+    && crossBuild?.kind === "controlled-cross-build-authority"
+    && crossBuild?.authoritative === true
+    && crossBuildPhaseAuthorityMatchesBuild(crossBuild?.canary, canary)
+    && crossBuildPhaseAuthorityMatchesBuild(crossBuild?.legacy, legacy)
+    && crossBuildPhaseAuthorityMatchesBuild(authority, legacy)
+    && canary?.documentAuthority === "document"
+    && canary?.engineMode === "scene-canary"
+    && canary?.interactionSurfaceMode === "overlay"
+    && canary?.rasterBackend === "worker"
+    && legacy?.documentAuthority === "legacy"
+    && legacy?.engineMode === "legacy"
+    && legacy?.interactionSurfaceMode === "legacy"
+    && legacy?.rasterBackend === "main-thread"
+    && nonEmptyString(canary?.buildId)
+    && nonEmptyString(legacy?.buildId)
+    && canary.buildId !== legacy.buildId
+    && nonEmptyString(canary?.buildFingerprint)
+    && nonEmptyString(legacy?.buildFingerprint)
+    && canary.buildFingerprint !== legacy.buildFingerprint
+    && nonEmptyString(canary?.assetDigest)
+    && nonEmptyString(legacy?.assetDigest)
+    && canary.assetDigest !== legacy.assetDigest
+    && nonEmptyString(canary?.buildInputDigest)
+    && canary.buildInputDigest === legacy.buildInputDigest
+    && crossBuild?.profile?.kind === "controlled-shared-browser-profile"
+    && crossBuild.profile.retainedAcrossRestart === true
+    && crossBuild.profile.profileId === canary.profileId
+    && crossBuild.profile.profileId === legacy.profileId
+    && crossBuild?.origin?.kind === "controlled-cross-build-same-origin-authority"
+    && crossBuild.origin.sameOriginStorageRetained === true
+    && crossBuild.origin.managedOrigin === canary.origin
+    && crossBuild.origin.managedOrigin === legacy.origin
+    && nonEmptyString(crossBuild?.browserRestartReceiptId)
+    && nonEmptyString(crossBuild?.serverRestartReceiptId)
+    && nonEmptyString(crossBuild?.writeReceiptId)
+    && nonEmptyString(crossBuild?.readReceiptId);
+}
+
+export function canaryRetirementAuthorityPassed(crossBuildResult) {
+  return crossBuildResult?.transition?.canaryRetirement?.complete === true;
+}
+
+export function controlledRunAuthorityPassed({
+  executionSucceeded,
+  initialBuildAuthoritative,
+  initialCanaryBuildAuthorityPassed,
+  crossBuildAuthorityPassed,
+  crossBuildContractPassed,
+  canaryRetirementComplete,
+  producerOrderPassed,
+  authoritativeStatePresent,
+  liveDiagnosticsPassed,
+  finalDiagnosticsPassed,
+  cleanupComplete,
+}) {
+  return executionSucceeded === true
+    && initialBuildAuthoritative === true
+    && initialCanaryBuildAuthorityPassed === true
+    && crossBuildAuthorityPassed === true
+    && crossBuildContractPassed === true
+    && canaryRetirementComplete === true
+    && producerOrderPassed === true
+    && authoritativeStatePresent === true
+    && liveDiagnosticsPassed === true
+    && finalDiagnosticsPassed === true
+    && cleanupComplete === true;
+}
+
 function currentFailureReasons(report, executionFailure, finalDiagnosticFailures) {
   const reasons = [];
   if (!report.planValid) reasons.push("controlled-browser-drill-plan-invalid");
@@ -323,6 +456,21 @@ function currentFailureReasons(report, executionFailure, finalDiagnosticFailures
     .map((entry) => entry.id);
   if (incomplete.length > 0) {
     reasons.push(`controlled-browser-drill-producers-incomplete:${incomplete.join(",")}`);
+  }
+  if (report.evidence?.canaryRetirementComplete === false) {
+    reasons.push("controlled-canary-retirement-incomplete");
+  }
+  if (report.evidence?.initialCanaryBuildAuthorityPassed === false) {
+    reasons.push("controlled-initial-canary-build-authority-failed");
+  }
+  if (report.evidence?.crossBuildAuthorityPassed === false) {
+    reasons.push("controlled-cross-build-authority-failed");
+  }
+  if (report.evidence?.crossBuildContractPassed === false) {
+    reasons.push("controlled-cross-build-contract-failed");
+  }
+  if (report.evidence?.producerOrderPassed === false) {
+    reasons.push("controlled-producer-order-incomplete");
   }
   return reasons;
 }
@@ -338,8 +486,11 @@ async function runControlledRollbackDrills(args) {
   let workerResult = null;
   let storageResult = null;
   let lifecycleResult = null;
+  let dprResult = null;
+  let crossBuildResult = null;
   let authoritativeState = null;
   let liveDiagnostics = null;
+  const producerOrder = [];
   try {
     report.lifecycle.buildStarted = true;
     atomicWriteJson(reportPath, report);
@@ -353,18 +504,22 @@ async function runControlledRollbackDrills(args) {
     report.lifecycle.browserStarted = true;
     report.sourceRevision = session.buildReceipt.git.commit;
     workerResult = await runControlledWorkerRollbackDrills(session, { timeoutMs: args.timeoutMs });
+    producerOrder.push("worker");
     storageResult = await runControlledStorageRollbackDrills(session, {
       timeoutMs: args.timeoutMs,
       beforeDocument: workerResult.finalDocument,
     });
+    producerOrder.push("storage");
     const gestureLifecycleResult = await runControlledLifecycleRollbackDrills(session, {
       timeoutMs: args.timeoutMs,
       beforeDocument: storageResult.finalDocument,
     });
+    producerOrder.push("lifecycle");
     const exportLifecycleResult = await runControlledExportRollbackDrills(session, {
       timeoutMs: args.timeoutMs,
       beforeDocument: gestureLifecycleResult.finalDocument,
     });
+    producerOrder.push("export");
     lifecycleResult = Object.freeze({
       drills: Object.freeze([
         ...gestureLifecycleResult.drills,
@@ -372,6 +527,15 @@ async function runControlledRollbackDrills(args) {
       ]),
       finalDocument: exportLifecycleResult.finalDocument,
     });
+    dprResult = await runControlledDprResizeRollbackDrills(session, {
+      timeoutMs: args.timeoutMs,
+      beforeDocument: exportLifecycleResult.finalDocument,
+    });
+    producerOrder.push("dpr");
+    crossBuildResult = await runControlledCrossBuildRollbackDrills(session, {
+      timeoutMs: args.timeoutMs,
+    });
+    producerOrder.push("cross-build");
     authoritativeState = await session.settleAuthoritativeState();
     liveDiagnostics = session.diagnostics();
   } catch (error) {
@@ -411,21 +575,48 @@ async function runControlledRollbackDrills(args) {
     lifecycleResult,
     session?.buildReceipt,
   );
-  const perDrillBuildAuthorityPassed = workerBuildAuthorityPassed
+  const dprBuildAuthorityPassed = dprDrillBuildAuthorityPassed(
+    dprResult,
+    session?.buildReceipt,
+  );
+  const initialCanaryBuildAuthorityPassed = workerBuildAuthorityPassed
     && storageBuildAuthorityPassed
-    && lifecycleBuildAuthorityPassed;
-  const runAuthorityPassed = executionFailure === null
-    && session?.initialBuildEvidence?.authoritative === true
-    && perDrillBuildAuthorityPassed
-    && authoritativeState !== null
-    && diagnosticFailures(liveDiagnostics).length === 0
-    && finalDiagnosticFailures.length === 0
-    && cleanupComplete;
+    && lifecycleBuildAuthorityPassed
+    && dprBuildAuthorityPassed;
+  const crossBuildArtifact = crossBuildResult?.drills?.length === 1
+    ? crossBuildResult.drills[0]
+    : null;
+  const crossBuildAssessment = crossBuildArtifact?.drillId === "canary-to-legacy-snapshot"
+    ? assessDrawingRollbackDrillArtifact("canary-to-legacy-snapshot", crossBuildArtifact)
+    : null;
+  const crossBuildContractPassed = crossBuildAssessment?.contractPassed === true;
+  const crossBuildAuthorityPassed = crossBuildDrillAuthorityPassed(crossBuildResult);
+  const perDrillBuildAuthorityPassed = initialCanaryBuildAuthorityPassed
+    && crossBuildAuthorityPassed;
+  const canaryRetirementComplete = canaryRetirementAuthorityPassed(crossBuildResult);
+  const producerOrderPassed = producerOrder.length === CONTROLLED_PRODUCER_ORDER.length
+    && producerOrder.every((producer, index) => producer === CONTROLLED_PRODUCER_ORDER[index]);
+  const liveDiagnosticFailures = diagnosticFailures(liveDiagnostics);
+  const runAuthorityPassed = controlledRunAuthorityPassed({
+    executionSucceeded: executionFailure === null,
+    initialBuildAuthoritative: session?.initialBuildEvidence?.authoritative === true,
+    initialCanaryBuildAuthorityPassed,
+    crossBuildAuthorityPassed,
+    crossBuildContractPassed,
+    canaryRetirementComplete,
+    producerOrderPassed,
+    authoritativeStatePresent: authoritativeState !== null,
+    liveDiagnosticsPassed: liveDiagnosticFailures.length === 0,
+    finalDiagnosticsPassed: finalDiagnosticFailures.length === 0,
+    cleanupComplete,
+  });
 
   const producedArtifacts = [
     ...(workerResult?.drills ?? []),
     ...(storageResult?.drills ?? []),
     ...(lifecycleResult?.drills ?? []),
+    ...(dprResult?.drills ?? []),
+    ...(crossBuildResult?.drills ?? []),
   ];
   const artifacts = new Map(producedArtifacts.map((artifact) => [artifact.drillId, artifact]));
   report.drills = CONTROLLED_DRILL_PLAN.map((entry) => {
@@ -461,9 +652,18 @@ async function runControlledRollbackDrills(args) {
   report.lifecycleHarnessPassed = [...IMPLEMENTED_LIFECYCLE_DRILL_IDS].every((drillId) => (
     report.drills.find((drill) => drill.id === drillId)?.trustedRunnerAccepted === true
   ));
+  report.dprHarnessPassed = [...IMPLEMENTED_DPR_DRILL_IDS].every((drillId) => (
+    report.drills.find((drill) => drill.id === drillId)?.trustedRunnerAccepted === true
+  ));
+  report.crossBuildHarnessPassed = [...IMPLEMENTED_CROSS_BUILD_DRILL_IDS].every((drillId) => (
+    report.drills.find((drill) => drill.id === drillId)?.trustedRunnerAccepted === true
+  ));
   report.harnessPassed = report.workerHarnessPassed
     && report.storageHarnessPassed
     && report.lifecycleHarnessPassed
+    && report.dprHarnessPassed
+    && report.crossBuildHarnessPassed
+    && canaryRetirementComplete
     && cleanupComplete
     && finalDiagnosticFailures.length === 0;
   report.phase9RollbackDrillsPassed = report.drills.every((drill) => (
@@ -475,6 +675,8 @@ async function runControlledRollbackDrills(args) {
         || !report.workerHarnessPassed
         || !report.storageHarnessPassed
         || !report.lifecycleHarnessPassed
+        || !report.dprHarnessPassed
+        || !report.crossBuildHarnessPassed
       ? "failed"
       : "partial";
   report.lifecycle = {
@@ -482,15 +684,27 @@ async function runControlledRollbackDrills(args) {
     diagnosticsClosed: cleanup?.diagnosticsClosed === true,
     browserClosed: cleanup?.browser?.exited === true,
     serverClosed: cleanup?.servers?.preview?.exited === true && cleanup?.servers?.api?.exited === true,
-    runClosed: cleanupComplete,
+    canaryRetirementComplete,
+    runClosed: cleanupComplete && canaryRetirementComplete,
   };
   report.evidence = {
     buildFingerprint: session?.buildReceipt?.buildFingerprint ?? null,
+    initialBuildFingerprint: session?.buildReceipt?.buildFingerprint ?? null,
+    finalBuildFingerprint: session?.currentBuildReceipt?.()?.buildFingerprint ?? null,
     initialBuildAuthoritative: session?.initialBuildEvidence?.authoritative === true,
+    runAuthorityPassed,
+    initialCanaryBuildAuthorityPassed,
     perDrillBuildAuthorityPassed,
     workerBuildAuthorityPassed,
     storageBuildAuthorityPassed,
     lifecycleBuildAuthorityPassed,
+    dprBuildAuthorityPassed,
+    crossBuildAuthorityPassed,
+    crossBuildContractPassed,
+    canaryRetirementComplete,
+    canaryRetirement: crossBuildResult?.transition?.canaryRetirement ?? null,
+    producerOrder: Object.freeze([...producerOrder]),
+    producerOrderPassed,
     storageFaultCleanupComplete,
     drillBuildAuthorities: Object.freeze(producedArtifacts.map((artifact) => (
       artifact.buildAuthority ?? null
@@ -498,9 +712,12 @@ async function runControlledRollbackDrills(args) {
     rollbackAuthority: session?.rollbackAuthority ?? null,
     authoritativeState,
     liveDiagnostics,
+    liveDiagnosticFailures,
     finalDiagnosticFailures,
     baseline: workerResult?.baseline ?? null,
-    finalDocument: lifecycleResult?.finalDocument
+    finalDocument: crossBuildResult?.finalDocument
+      ?? dprResult?.finalDocument
+      ?? lifecycleResult?.finalDocument
       ?? storageResult?.finalDocument
       ?? workerResult?.finalDocument
       ?? null,
@@ -513,6 +730,27 @@ async function runControlledRollbackDrills(args) {
   return Object.freeze({ reportPath, report });
 }
 
+export function controlledRunCliSummary(result) {
+  return {
+    report: result?.reportPath ?? null,
+    runId: result?.report?.runId ?? null,
+    status: result?.report?.status ?? "failed",
+    workerHarnessPassed: result?.report?.workerHarnessPassed === true,
+    storageHarnessPassed: result?.report?.storageHarnessPassed === true,
+    lifecycleHarnessPassed: result?.report?.lifecycleHarnessPassed === true,
+    dprHarnessPassed: result?.report?.dprHarnessPassed === true,
+    crossBuildHarnessPassed: result?.report?.crossBuildHarnessPassed === true,
+    harnessPassed: result?.report?.harnessPassed === true,
+    phase9RollbackDrillsPassed: result?.report?.phase9RollbackDrillsPassed === true,
+    canaryRetirementComplete: result?.report?.evidence?.canaryRetirementComplete === true,
+    runAuthorityPassed: result?.report?.evidence?.runAuthorityPassed === true,
+    cleanupComplete: result?.report?.cleanup?.summary?.complete === true,
+    failureReasons: Array.isArray(result?.report?.failureReasons)
+      ? result.report.failureReasons
+      : ["controlled-run-report-missing"],
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -520,18 +758,7 @@ async function main() {
     return;
   }
   const result = await runControlledRollbackDrills(args);
-  process.stdout.write(`${JSON.stringify({
-    report: result.reportPath,
-    runId: result.report.runId,
-    status: result.report.status,
-    workerHarnessPassed: result.report.workerHarnessPassed,
-    storageHarnessPassed: result.report.storageHarnessPassed,
-    lifecycleHarnessPassed: result.report.lifecycleHarnessPassed,
-    harnessPassed: result.report.harnessPassed,
-    phase9RollbackDrillsPassed: result.report.phase9RollbackDrillsPassed,
-    cleanupComplete: result.report.cleanup?.summary?.complete === true,
-    failureReasons: result.report.failureReasons,
-  }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(controlledRunCliSummary(result), null, 2)}\n`);
   if (!result.report.phase9RollbackDrillsPassed) process.exitCode = 1;
 }
 

@@ -1232,6 +1232,73 @@ test("drawing frame invalidation subscription hides chart objects and releases l
   assert.deepEqual(calls, ["viewport", "viewport", "manual", "manual"]);
 });
 
+test("drawing frame invalidation observes pure DPR changes and re-arms the resolution query", () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const mediaListeners = new Map<string, Set<() => void>>();
+  const removedQueries: string[] = [];
+  let pollListener: (() => void) | null = null;
+  const clearedPollTimers: number[] = [];
+  const testWindow = {
+    devicePixelRatio: 1,
+    setInterval(listener: () => void, delayMs: number) {
+      assert.equal(delayMs, 250);
+      pollListener = listener;
+      return 17;
+    },
+    clearInterval(timer: number) {
+      clearedPollTimers.push(timer);
+    },
+    matchMedia(query: string) {
+      const listeners = new Set<() => void>();
+      mediaListeners.set(query, listeners);
+      return {
+        addEventListener(type: string, listener: () => void) {
+          if (type === "change") listeners.add(listener);
+        },
+        removeEventListener(type: string, listener: () => void) {
+          if (type === "change" && listeners.delete(listener)) removedQueries.push(query);
+        },
+      };
+    },
+  };
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: testWindow,
+  });
+
+  try {
+    const adapter = createLightweightChartAdapter({
+      chartRef: { current: { timeScale: () => ({}) } },
+      seriesRef: { current: {} },
+    });
+    const reasons: unknown[] = [];
+    const unsubscribe = adapter.subscribeDrawingFrameInvalidation((reason) => reasons.push(reason));
+    assert.equal(mediaListeners.has("(resolution: 1dppx)"), true);
+
+    testWindow.devicePixelRatio = 1.5;
+    for (const listener of [...mustBeDefined(mediaListeners.get("(resolution: 1dppx)"))]) listener();
+    assert.deepEqual(reasons, ["viewport"]);
+    assert.equal(removedQueries.includes("(resolution: 1dppx)"), true);
+    assert.equal(mediaListeners.has("(resolution: 1.5dppx)"), true);
+
+    testWindow.devicePixelRatio = 2;
+    mustBeDefined<() => void>(pollListener)();
+    assert.deepEqual(reasons, ["viewport", "viewport"]);
+    assert.equal(mediaListeners.has("(resolution: 2dppx)"), true);
+
+    unsubscribe();
+    assert.deepEqual(clearedPollTimers, [17]);
+    assert.equal(removedQueries.includes("(resolution: 2dppx)"), true);
+    testWindow.devicePixelRatio = 2.5;
+    mustBeDefined<() => void>(pollListener)();
+    for (const listener of mediaListeners.get("(resolution: 2dppx)") ?? []) listener();
+    assert.deepEqual(reasons, ["viewport", "viewport"]);
+  } finally {
+    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
 test("scene text measurement uses exact detached-canvas font metrics", () => {
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
   let assignedFont = "";

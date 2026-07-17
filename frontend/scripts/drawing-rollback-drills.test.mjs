@@ -224,6 +224,7 @@ function offscreenArtifact() {
     "offscreen-canvas-unsupported",
     "offscreen-canvas-unavailable",
   );
+  const fallbackHeader = workerIdentity(1, stamp());
   return {
     ...common,
     injection: {
@@ -241,11 +242,19 @@ function offscreenArtifact() {
       runtime: cleanSceneCanaryRuntime({
         backend: "main-thread",
         workerAvailability: "disposed",
+        queueDepthMax: 1,
+        inFlightMax: 1,
+        workerJobDelta: 1,
+        workerResultDelta: 1,
       }),
       workerCreations: { before: 0, after: 1 },
+      workerRequests: { before: 0, after: 1 },
+      workerRequestHeaders: [structuredClone(fallbackHeader)],
+      supersededWorkerRequests: { before: 0, after: 0 },
       offscreenSupported: false,
       firstRequest: {
         requestId: "offscreen-request-1",
+        header: structuredClone(fallbackHeader),
         backendBefore: "worker",
         resultKind: "typed-fallback",
         backendAfter: "main-thread",
@@ -1264,9 +1273,31 @@ function continuousDprArtifact() {
     [2, 1200, 800],
   ];
   const transitions = configurations.map(([dpr, widthCssPx, heightCssPx], index) => ({
+    requestedDpr: dpr,
+    requestedViewport: {
+      width: widthCssPx,
+      height: heightCssPx,
+    },
+    observedWindow: {
+      headed: true,
+      windowState: "normal",
+      visibilityState: "visible",
+      hidden: false,
+      devicePixelRatio: dpr,
+      innerWidth: widthCssPx,
+      innerHeight: heightCssPx,
+    },
     dpr,
     widthCssPx,
     heightCssPx,
+    overlay: {
+      synchronized: true,
+      devicePixelRatio: dpr,
+      widthCssPx,
+      heightCssPx,
+      backingWidthPx: Math.round(widthCssPx * dpr),
+      backingHeightPx: Math.round(heightCssPx * dpr),
+    },
     overlayDprSynchronized: true,
     workerResultCurrent: true,
     queueDepthCurrent: 0,
@@ -1288,78 +1319,349 @@ function continuousDprArtifact() {
 }
 
 function crossBuildArtifact() {
+  const artifact = commonArtifact(
+    "canary-to-legacy-snapshot",
+    "canary-build-to-legacy-build",
+  );
+  const origin = "http://127.0.0.1:15173";
+  const profileId = "phase9-cross-build-profile";
+  const scopeKey = "binance:spot:BTCUSDT__main";
+  const gitRevision = artifact.provenance.buildRevision;
+  const builds = {
+    canary: {
+      mode: "scene-canary",
+      documentAuthority: "document",
+      productionBuild: true,
+      sourceRevision: "shared-source-revision",
+      rolloutEnvironment: "scene-canary-rollout",
+      buildId: "controlled-canary-build",
+      buildFingerprint: digest("d"),
+      assetDigest: digest("f"),
+      buildInputDigest: digest("8"),
+      gitRevision,
+      engineMode: "scene-canary",
+      interactionSurfaceMode: "overlay",
+      rasterBackend: "worker",
+      origin,
+      profileId,
+      browserInstanceId: "browser-canary",
+      serverInstanceId: "server-canary",
+    },
+    legacy: {
+      mode: "legacy",
+      documentAuthority: "legacy",
+      productionBuild: true,
+      sourceRevision: "shared-source-revision",
+      rolloutEnvironment: "legacy-rollout",
+      buildId: "controlled-legacy-build",
+      buildFingerprint: digest("e"),
+      assetDigest: digest("0"),
+      buildInputDigest: digest("8"),
+      gitRevision,
+      engineMode: "legacy",
+      interactionSurfaceMode: "legacy",
+      rasterBackend: "main-thread",
+      origin,
+      profileId,
+      browserInstanceId: "browser-legacy",
+      serverInstanceId: "server-legacy",
+    },
+  };
+  const uiPlan = [
+    ["line", "line-segment"],
+    ["axis-line", "line-horizontal"],
+    ["angle-measure", "angle-measure"],
+    ["text", "text"],
+    ["fibonacci", "fibonacci"],
+    ["position", "position-long"],
+    ["shape", "shape-rectangle"],
+    ["highlighter", "highlighter"],
+    ["freehand", "pen"],
+  ];
+  const initialEntityIds = [
+    "legacy-base-freehand-1",
+    "legacy-base-freehand-2",
+    "legacy-base-freehand-3",
+  ];
+  const initialEntityDigests = [digest("7"), digest("8"), digest("9")];
+  const kindCounts = Object.fromEntries([
+    "line", "axis-line", "angle-measure", "text", "fibonacci", "position", "shape",
+    "freehand", "highlighter",
+  ].map((kind) => [kind, kind === "freehand" ? 3 : 0]));
+  const recordDigests = ["a", "b", "c", "d", "e", "f", "0", "1", "2", "3"]
+    .map(digest);
+  const operations = uiPlan.map(([kind, tool], index) => {
+    const beforeKindCount = kindCounts[kind];
+    kindCounts[kind] += 1;
+    return {
+      kind,
+      tool,
+      incrementKind: "exact-canonical-kind-increment",
+      beforeEntityCount: initialEntityIds.length + index,
+      afterEntityCount: initialEntityIds.length + index + 1,
+      beforeKindCount,
+      afterKindCount: beforeKindCount + 1,
+      beforeDocumentRevision: 3 + index,
+      documentRevision: 4 + index,
+      beforeRecordDigest: recordDigests[index],
+      afterRecordDigest: recordDigests[index + 1],
+      committedEntityId: `phase9-ui-${index + 1}-${kind}`,
+      committedEntityKind: kind,
+      committedEntityDigest: digest("4"),
+      committedAt: `2026-07-16T08:00:${String(2 + index).padStart(2, "0")}.000Z`,
+    };
+  });
+  const entityIds = [
+    ...initialEntityIds,
+    ...operations.map((operation) => operation.committedEntityId),
+  ];
+  const canonicalEntityDigests = [
+    ...initialEntityDigests,
+    ...operations.map((operation) => operation.committedEntityDigest),
+  ];
+  const documentRevision = operations.at(-1).documentRevision;
+  const canonicalRecordDigest = operations.at(-1).afterRecordDigest;
+  const phaseAuthority = (build, capturedAt) => ({
+    kind: "controlled-browser-build-authority",
+    authoritative: true,
+    assetBuildAuthoritative: true,
+    capturedAt,
+    buildId: build.buildId,
+    buildFingerprint: build.buildFingerprint,
+    assetDigest: build.assetDigest,
+    currentAssetDigest: build.assetDigest,
+    buildInputDigest: build.buildInputDigest,
+    currentBuildInputDigest: build.buildInputDigest,
+    gitRevision: build.gitRevision,
+    managedOrigin: build.origin,
+    observedOrigin: build.origin,
+    profileId: build.profileId,
+    browserInstanceId: build.browserInstanceId,
+    serverInstanceId: build.serverInstanceId,
+    documentAuthority: build.documentAuthority,
+    engineMode: build.engineMode,
+    interactionSurfaceMode: build.interactionSurfaceMode,
+    rasterBackend: build.rasterBackend,
+  });
   return {
-    ...commonArtifact("canary-to-legacy-snapshot", "canary-build-to-legacy-build"),
-    builds: {
-      canary: {
-        mode: "scene-canary",
-        productionBuild: true,
-        sourceRevision: "shared-source-revision",
-        rolloutEnvironment: "scene-canary-rollout",
-        buildFingerprint: digest("d"),
-        assetDigest: digest("f"),
-        origin: "http://127.0.0.1:15173",
-        profileId: "phase9-cross-build-profile",
-        browserInstanceId: "browser-canary",
-        serverInstanceId: "server-canary",
+    ...artifact,
+    injection: {
+      ...artifact.injection,
+      uiOperationCount: operations.length,
+      finalFreehandMutationObserved: true,
+    },
+    buildAuthority: {
+      ...artifact.buildAuthority,
+      buildId: builds.legacy.buildId,
+      buildFingerprint: builds.legacy.buildFingerprint,
+      assetDigest: builds.legacy.assetDigest,
+      currentAssetDigest: builds.legacy.assetDigest,
+      buildInputDigest: builds.legacy.buildInputDigest,
+      currentBuildInputDigest: builds.legacy.buildInputDigest,
+      gitRevision: builds.legacy.gitRevision,
+      managedOrigin: origin,
+      observedOrigin: origin,
+      href: `${origin}/`,
+      profileId,
+      browserInstanceId: builds.legacy.browserInstanceId,
+      serverInstanceId: builds.legacy.serverInstanceId,
+      documentAuthority: "legacy",
+      engineMode: "legacy",
+      interactionSurfaceMode: "legacy",
+      rasterBackend: "main-thread",
+      workerLifecycle: {
+        kind: "legacy-no-drawing-worker-target",
+        accepted: true,
+        drawingWorkerTargetCount: 0,
+        activeDrawingWorkerTargetCount: 0,
+        detachedDrawingWorkerTargetCount: 0,
+        constructionFaultCount: 0,
+        assetAuthorityAccepted: true,
+        targets: [],
       },
-      legacy: {
-        mode: "legacy",
-        productionBuild: true,
-        sourceRevision: "shared-source-revision",
-        rolloutEnvironment: "legacy-rollout",
-        buildFingerprint: digest("e"),
-        assetDigest: digest("0"),
-        origin: "http://127.0.0.1:15173",
-        profileId: "phase9-cross-build-profile",
-        browserInstanceId: "browser-legacy",
-        serverInstanceId: "server-legacy",
+      crossBuild: {
+        kind: "controlled-cross-build-authority",
+        authoritative: true,
+        canary: phaseAuthority(builds.canary, "2026-07-16T08:00:15.000Z"),
+        legacy: phaseAuthority(builds.legacy, "2026-07-16T08:00:45.000Z"),
+        profile: {
+          kind: "controlled-shared-browser-profile",
+          ownership: "controlled-temporary-profile",
+          retainedAcrossRestart: true,
+          canaryObserved: true,
+          legacyObserved: true,
+          profileId,
+          profileDirectorySha256: "a".repeat(64),
+          canaryBrowserInstanceId: builds.canary.browserInstanceId,
+          legacyBrowserInstanceId: builds.legacy.browserInstanceId,
+        },
+        origin: {
+          kind: "controlled-cross-build-same-origin-authority",
+          sameOriginStorageRetained: true,
+          managedOrigin: origin,
+          canaryObservedOrigin: origin,
+          legacyObservedOrigin: origin,
+        },
+        browserRestartReceiptId: "browser-restart-receipt",
+        serverRestartReceiptId: "server-restart-receipt",
+        writeReceiptId: "compatibility-write-receipt",
+        readReceiptId: "legacy-read-receipt",
+        scopeKey,
+        documentDigest: digest("1"),
+        canonicalRecordDigest,
+        canonicalCompatibilityDigest: digest("1"),
+        manifestBytesDigest: digest("6"),
+        sourceBytesDigest: digest("2"),
       },
     },
+    builds,
     restartReceipts: {
       browser: {
-        kind: "browser",
-        beforeInstanceId: "browser-canary",
-        afterInstanceId: "browser-legacy",
-        beforeBuildFingerprint: digest("d"),
-        afterBuildFingerprint: digest("e"),
-        profileId: "phase9-cross-build-profile",
-        scopeKey: "binance:spot:BTCUSDT__main",
+        kind: "browser-restart",
+        receiptId: "browser-restart-receipt",
+        beforeInstanceId: builds.canary.browserInstanceId,
+        afterInstanceId: builds.legacy.browserInstanceId,
+        beforeBuildId: builds.canary.buildId,
+        afterBuildId: builds.legacy.buildId,
+        beforeBuildFingerprint: builds.canary.buildFingerprint,
+        afterBuildFingerprint: builds.legacy.buildFingerprint,
+        beforeAssetDigest: builds.canary.assetDigest,
+        afterAssetDigest: builds.legacy.assetDigest,
+        beforeBuildInputDigest: builds.canary.buildInputDigest,
+        afterBuildInputDigest: builds.legacy.buildInputDigest,
+        beforeGitRevision: builds.canary.gitRevision,
+        afterGitRevision: builds.legacy.gitRevision,
+        profileId,
+        origin,
+        scopeKey,
         stoppedAt: "2026-07-16T08:00:30.000Z",
         startedAt: "2026-07-16T08:00:35.000Z",
+        beforeProcess: {
+          instanceId: builds.canary.browserInstanceId,
+          pid: 1001,
+          exited: true,
+          stoppedAt: "2026-07-16T08:00:30.000Z",
+        },
+        afterProcess: {
+          instanceId: builds.legacy.browserInstanceId,
+          pid: 1002,
+          started: true,
+          running: true,
+          startedAt: "2026-07-16T08:00:35.000Z",
+          readyAt: "2026-07-16T08:00:37.000Z",
+        },
       },
       server: {
-        kind: "server",
-        beforeInstanceId: "server-canary",
-        afterInstanceId: "server-legacy",
-        beforeBuildFingerprint: digest("d"),
-        afterBuildFingerprint: digest("e"),
-        profileId: "phase9-cross-build-profile",
-        scopeKey: "binance:spot:BTCUSDT__main",
+        kind: "server-restart",
+        receiptId: "server-restart-receipt",
+        beforeInstanceId: builds.canary.serverInstanceId,
+        afterInstanceId: builds.legacy.serverInstanceId,
+        beforeBuildId: builds.canary.buildId,
+        afterBuildId: builds.legacy.buildId,
+        beforeBuildFingerprint: builds.canary.buildFingerprint,
+        afterBuildFingerprint: builds.legacy.buildFingerprint,
+        beforeAssetDigest: builds.canary.assetDigest,
+        afterAssetDigest: builds.legacy.assetDigest,
+        beforeBuildInputDigest: builds.canary.buildInputDigest,
+        afterBuildInputDigest: builds.legacy.buildInputDigest,
+        beforeGitRevision: builds.canary.gitRevision,
+        afterGitRevision: builds.legacy.gitRevision,
+        profileId,
+        origin,
+        scopeKey,
         stoppedAt: "2026-07-16T08:00:31.000Z",
         startedAt: "2026-07-16T08:00:36.000Z",
+        beforeProcess: {
+          instanceId: builds.canary.serverInstanceId,
+          pid: 2001,
+          exited: true,
+          stoppedAt: "2026-07-16T08:00:31.000Z",
+        },
+        afterProcess: {
+          instanceId: builds.legacy.serverInstanceId,
+          pid: 2002,
+          started: true,
+          running: true,
+          startedAt: "2026-07-16T08:00:36.000Z",
+          readyAt: "2026-07-16T08:00:38.000Z",
+        },
       },
+    },
+    retirement: {
+      kind: "controlled-canary-retirement",
+      schemaVersion: "candlescope-controlled-canary-retirement/v1",
+      complete: true,
+      processCount: 3,
+      allProcessesExited: true,
+      diagnosticsClosed: true,
+      portCount: 3,
+      allOwnedPortsClosed: true,
+      profileRetained: true,
+      storageFaultCleanupComplete: true,
+      profileId,
+      profileDirectorySha256: "a".repeat(64),
+      failures: [],
     },
     snapshot: {
       writeReceipt: {
         kind: "compatibility-write",
+        receiptId: "compatibility-write-receipt",
+        documentAuthority: "document",
         observedAt: "2026-07-16T08:00:20.000Z",
-        buildFingerprint: digest("d"),
-        profileId: "phase9-cross-build-profile",
-        scopeKey: "binance:spot:BTCUSDT__main",
+        buildId: builds.canary.buildId,
+        buildFingerprint: builds.canary.buildFingerprint,
+        assetDigest: builds.canary.assetDigest,
+        buildInputDigest: builds.canary.buildInputDigest,
+        gitRevision: builds.canary.gitRevision,
+        profileId,
+        origin,
+        scopeKey,
+        storageKey: `candlescope-drawings-${scopeKey}`,
+        documentRevision,
         documentDigest: digest("1"),
+        canonicalRecordDigest,
+        canonicalCompatibilityDigest: digest("1"),
         sourceBytesDigest: digest("2"),
-        entityCount: 9,
+        sourceBytesLength: 2_048,
+        entityCount: entityIds.length,
+        entityIds: [...entityIds],
+        zOrder: [...entityIds],
+        kindCounts: { ...kindCounts },
+        canonicalEntityIds: [...entityIds],
+        canonicalEntityDigests: [...canonicalEntityDigests],
+        canonicalZOrder: [...entityIds],
+        canonicalKindCounts: { ...kindCounts },
+        manifest: {
+          kind: "drawing-document-manifest",
+          manifestSchemaVersion: 1,
+          scopeKey,
+          revision: documentRevision,
+          count: entityIds.length,
+          rawBytesDigest: digest("6"),
+          rawBytesLength: 128,
+        },
       },
       readReceipt: {
         kind: "legacy-read",
+        receiptId: "legacy-read-receipt",
+        documentAuthority: "legacy",
         observedAt: "2026-07-16T08:00:50.000Z",
-        buildFingerprint: digest("e"),
-        profileId: "phase9-cross-build-profile",
-        scopeKey: "binance:spot:BTCUSDT__main",
+        buildId: builds.legacy.buildId,
+        buildFingerprint: builds.legacy.buildFingerprint,
+        assetDigest: builds.legacy.assetDigest,
+        buildInputDigest: builds.legacy.buildInputDigest,
+        gitRevision: builds.legacy.gitRevision,
+        profileId,
+        origin,
+        scopeKey,
+        storageKey: `candlescope-drawings-${scopeKey}`,
         documentDigest: digest("1"),
-        entityCount: 9,
-        visibleEntityCount: 9,
+        canonicalCompatibilityDigest: digest("1"),
+        entityCount: entityIds.length,
+        entityIds: [...entityIds],
+        zOrder: [...entityIds],
+        kindCounts: { ...kindCounts },
+        visibleEntityCount: entityIds.length,
         renderedKinds: [
           "line",
           "axis-line",
@@ -1373,6 +1675,18 @@ function crossBuildArtifact() {
         ],
         sourceBytesDigestBefore: digest("2"),
         sourceBytesDigestAfter: digest("2"),
+      },
+    },
+    observations: {
+      ui: {
+        initialEntityCount: initialEntityIds.length,
+        initialEntityIds: [...initialEntityIds],
+        initialEntityDigests: [...initialEntityDigests],
+        initialRecordDigest: operations[0].beforeRecordDigest,
+        initialKinds: ["freehand"],
+        operations,
+        finalEntityCount: entityIds.length,
+        finalFreehandMutationObserved: true,
       },
     },
   };
@@ -1864,6 +2178,34 @@ test("Offscreen unsupported falls back once and remains sticky without a second 
     "offscreen-canvas-unsupported",
     extraInitialRoundTrip,
   ).failures.includes("offscreen-first-worker-round-trip-not-observed"));
+
+  const supersededCountMismatch = offscreenArtifact();
+  supersededCountMismatch.observations.workerRequests.after = 2;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "offscreen-canvas-unsupported",
+    supersededCountMismatch,
+  ).failures.includes("offscreen-superseded-worker-request-count-invalid"));
+
+  const themeSupersession = offscreenArtifact();
+  const firstTheme = workerIdentity(1, stamp({ themeRevision: 22 }));
+  const finalTheme = workerIdentity(2, stamp({ themeRevision: 23 }));
+  themeSupersession.observations.workerRequests.after = 2;
+  themeSupersession.observations.runtime.queueDepthMax = 2;
+  themeSupersession.observations.runtime.workerJobDelta = 2;
+  themeSupersession.observations.supersededWorkerRequests.after = 1;
+  themeSupersession.observations.workerRequestHeaders = [firstTheme, finalTheme];
+  themeSupersession.observations.firstRequest.header = structuredClone(finalTheme);
+  const themeSupersessionResult = assessDrawingRollbackDrillArtifact(
+    "offscreen-canvas-unsupported",
+    themeSupersession,
+  );
+  assert.equal(themeSupersessionResult.contractPassed, true, themeSupersessionResult.failures.join(", "));
+
+  themeSupersession.observations.workerRequestHeaders[0].stamp.viewportRevision -= 1;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "offscreen-canvas-unsupported",
+    themeSupersession,
+  ).failures.includes("offscreen-worker-request-sequence-invalid"));
 });
 
 test("Offscreen drill requires a worker-global capability receipt and a clean environment runtime", () => {
@@ -2702,6 +3044,34 @@ test("quota variant requires a native run-bound cache-expiry probe and explicit 
   }
 });
 
+test("quota native receipt ordering tolerates only sub-resolution wall-clock jitter", () => {
+  const withinTolerance = indexedDbArtifact();
+  const withinQuota = withinTolerance.variants.find((variant) => variant.kind === "quota");
+  withinQuota.nativeReceipt.cleanup.completedAt = "2026-07-16T08:00:55.601Z";
+  const withinResult = assessDrawingRollbackDrillArtifact(
+    "indexeddb-quota-blocked",
+    withinTolerance,
+  );
+  assert.equal(withinResult.contractPassed, true, withinResult.failures.join(", "));
+
+  const atTolerance = indexedDbArtifact();
+  const atToleranceQuota = atTolerance.variants.find((variant) => variant.kind === "quota");
+  atToleranceQuota.nativeReceipt.cleanup.completedAt = "2026-07-16T08:00:55.602Z";
+  const atToleranceResult = assessDrawingRollbackDrillArtifact(
+    "indexeddb-quota-blocked",
+    atTolerance,
+  );
+  assert.equal(atToleranceResult.contractPassed, true, atToleranceResult.failures.join(", "));
+
+  const outsideTolerance = indexedDbArtifact();
+  const outsideQuota = outsideTolerance.variants.find((variant) => variant.kind === "quota");
+  outsideQuota.nativeReceipt.cleanup.completedAt = "2026-07-16T08:00:55.603Z";
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "indexeddb-quota-blocked",
+    outsideTolerance,
+  ).failures.includes("indexeddb-quota-native-receipt-order-invalid"));
+});
+
 test("quota cache expiry duration is authoritative from monotonic elapsed time", () => {
   const artifact = indexedDbArtifact();
   const quota = artifact.variants.find((variant) => variant.kind === "quota");
@@ -3215,11 +3585,77 @@ test("export rebuild drill requires stale lease rejection and fresh exact captur
 });
 
 test("continuous DPR drill requires the full matrix on every current transition", () => {
+  const valid = assessDrawingRollbackDrillArtifact(
+    "continuous-dpr-resize",
+    continuousDprArtifact(),
+  );
+  assert.equal(valid.contractPassed, true, valid.failures.join(", "));
+
+  const floatingPointDpr = continuousDprArtifact();
+  const observedDpr = 1.0000000298023224;
+  floatingPointDpr.transitions[0].observedWindow.devicePixelRatio = observedDpr;
+  floatingPointDpr.transitions[0].dpr = observedDpr;
+  floatingPointDpr.transitions[0].overlay.devicePixelRatio = observedDpr;
+  floatingPointDpr.transitions[0].overlay.backingWidthPx = Math.round(
+    floatingPointDpr.transitions[0].overlay.widthCssPx * observedDpr,
+  );
+  floatingPointDpr.transitions[0].overlay.backingHeightPx = Math.round(
+    floatingPointDpr.transitions[0].overlay.heightCssPx * observedDpr,
+  );
+  floatingPointDpr.transitions[0].lastRequestedStamp.dpr = observedDpr;
+  floatingPointDpr.transitions[0].lastPublishedStamp.dpr = observedDpr;
+  const floatingPointResult = assessDrawingRollbackDrillArtifact(
+    "continuous-dpr-resize",
+    floatingPointDpr,
+  );
+  assert.equal(
+    floatingPointResult.contractPassed,
+    true,
+    floatingPointResult.failures.join(", "),
+  );
+
   const noDpr2 = continuousDprArtifact();
-  noDpr2.transitions = noDpr2.transitions.map((transition) => ({ ...transition, dpr: 1.5 }));
+  noDpr2.transitions = noDpr2.transitions.map((transition) => ({
+    ...transition,
+    requestedDpr: 1.5,
+  }));
   assert.ok(assessDrawingRollbackDrillArtifact("continuous-dpr-resize", noDpr2).failures.includes(
     "dpr-matrix-incomplete",
   ));
+
+  const observedDprMismatch = continuousDprArtifact();
+  observedDprMismatch.transitions[1].observedWindow.devicePixelRatio += 0.01;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "continuous-dpr-resize",
+    observedDprMismatch,
+  ).failures.includes("transition-1-observed-window-mismatch"));
+
+  const observedViewportMismatch = continuousDprArtifact();
+  observedViewportMismatch.transitions[1].observedWindow.innerWidth += 1;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "continuous-dpr-resize",
+    observedViewportMismatch,
+  ).failures.includes("transition-1-observed-window-mismatch"));
+
+  const physicalPixelRoundingBoundary = continuousDprArtifact();
+  physicalPixelRoundingBoundary.transitions[0].overlay.backingHeightPx += 1;
+  physicalPixelRoundingBoundary.transitions[2].overlay.backingHeightPx -= 1;
+  const physicalPixelRoundingResult = assessDrawingRollbackDrillArtifact(
+    "continuous-dpr-resize",
+    physicalPixelRoundingBoundary,
+  );
+  assert.equal(
+    physicalPixelRoundingResult.contractPassed,
+    true,
+    physicalPixelRoundingResult.failures.join(", "),
+  );
+
+  const overlayBackingMismatch = continuousDprArtifact();
+  overlayBackingMismatch.transitions[1].overlay.backingWidthPx += 2;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "continuous-dpr-resize",
+    overlayBackingMismatch,
+  ).failures.includes("transition-1-overlay-dpr-not-synchronized"));
 
   const stale = continuousDprArtifact();
   stale.transitions[2].workerResultCurrent = false;
@@ -3275,6 +3711,18 @@ test("cross-build drill allows one source revision but requires distinct rollout
       "cross-build-rollout-environments-not-distinct",
     ],
     [
+      (artifact) => { artifact.builds.legacy.buildInputDigest = digest("9"); },
+      "cross-build-input-digests-mismatch",
+    ],
+    [
+      (artifact) => { artifact.builds.canary.interactionSurfaceMode = "legacy"; },
+      "canary-build-configuration-invalid",
+    ],
+    [
+      (artifact) => { artifact.builds.legacy.rasterBackend = "worker"; },
+      "legacy-build-configuration-invalid",
+    ],
+    [
       (artifact) => {
         artifact.builds.legacy.buildFingerprint = artifact.builds.canary.buildFingerprint;
       },
@@ -3293,6 +3741,45 @@ test("cross-build drill allows one source revision but requires distinct rollout
       "cross-build-profile-mismatch",
     ],
     [
+      (artifact) => { artifact.builds.canary.documentAuthority = "legacy"; },
+      "canary-document-authority-mismatch",
+    ],
+    [
+      (artifact) => { artifact.builds.legacy.documentAuthority = "document"; },
+      "legacy-document-authority-mismatch",
+    ],
+    [
+      (artifact) => { artifact.buildAuthority.crossBuild.canary.buildId = "unbound-canary"; },
+      "cross-build-canary-authority-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.buildAuthority.crossBuild.legacy.currentBuildInputDigest = digest("7");
+      },
+      "cross-build-legacy-authority-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.buildAuthority.buildFingerprint = artifact.builds.canary.buildFingerprint;
+      },
+      "cross-build-final-authority-not-legacy",
+    ],
+    [
+      (artifact) => { artifact.buildAuthority.workerLifecycle.kind = "active-worker"; },
+      "legacy-build-worker-lifecycle-invalid",
+    ],
+    [
+      (artifact) => { artifact.buildAuthority.crossBuild.profile.retainedAcrossRestart = false; },
+      "cross-build-profile-authority-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.buildAuthority.crossBuild.origin.legacyObservedOrigin =
+          "http://127.0.0.1:15174";
+      },
+      "cross-build-origin-authority-invalid",
+    ],
+    [
       (artifact) => { delete artifact.restartReceipts.browser; },
       "cross-build-browser-restart-receipt-invalid-or-missing",
     ],
@@ -3302,6 +3789,76 @@ test("cross-build drill allows one source revision but requires distinct rollout
           artifact.restartReceipts.server.beforeInstanceId;
       },
       "cross-build-server-restart-receipt-invalid-or-missing",
+    ],
+    [
+      (artifact) => { artifact.restartReceipts.browser.afterProcess.running = false; },
+      "cross-build-browser-restart-process-evidence-invalid",
+    ],
+    [
+      (artifact) => { artifact.restartReceipts.server.beforeProcess.pid = 2002; },
+      "cross-build-server-restart-process-evidence-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.buildAuthority.crossBuild.writeReceiptId = "unbound-write-receipt";
+      },
+      "cross-build-authority-receipt-binding-invalid",
+    ],
+    [
+      (artifact) => { artifact.snapshot.writeReceipt.documentAuthority = "legacy"; },
+      "compatibility-write-receipt-build-binding-invalid",
+    ],
+    [
+      (artifact) => { artifact.snapshot.readReceipt.documentAuthority = "document"; },
+      "legacy-read-receipt-build-binding-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.observations.ui.operations.at(-1).committedEntityKind = "highlighter";
+      },
+      "cross-build-ui-operation-contract-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.observations.ui.operations[0].committedEntityId =
+          artifact.observations.ui.initialEntityIds[0];
+      },
+      "cross-build-ui-operation-contract-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.observations.ui.operations[0].committedEntityDigest = digest("5");
+      },
+      "cross-build-ui-entity-provenance-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.snapshot.writeReceipt.canonicalEntityDigests[3] = digest("5");
+      },
+      "cross-build-ui-entity-provenance-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.snapshot.writeReceipt.canonicalRecordDigest = digest("5");
+      },
+      "cross-build-ui-write-receipt-binding-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.snapshot.writeReceipt.canonicalCompatibilityDigest = digest("5");
+      },
+      "cross-build-canonical-compatibility-digest-mismatch",
+    ],
+    [
+      (artifact) => {
+        const ids = artifact.snapshot.readReceipt.entityIds;
+        [ids[0], ids[1]] = [ids[1], ids[0]];
+      },
+      "cross-build-entity-identity-or-order-mismatch",
+    ],
+    [
+      (artifact) => { artifact.snapshot.writeReceipt.manifest.revision -= 1; },
+      "cross-build-canonical-manifest-binding-invalid",
     ],
   ]) {
     const artifact = crossBuildArtifact();

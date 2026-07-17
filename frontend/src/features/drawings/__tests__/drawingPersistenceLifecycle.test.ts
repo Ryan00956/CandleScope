@@ -609,3 +609,32 @@ test("legacy renderer selection retains materialization and attachment behavior"
     false,
   );
 });
+
+test("legacy runtime evidence counts direct primitive attachment independently of the renderer registry", () => {
+  const fixture = lineFixture("legacy-direct-attachment");
+  const primitiveWithSeries = fixture.primitive as unknown as { _series: unknown };
+  const renderer = createLegacyPrimitiveRenderer({
+    createPrimitive: () => null,
+    surface: {
+      attachPrimitive: () => false,
+    },
+  });
+  primitiveWithSeries._series = {};
+
+  assert.deepEqual(drawingLegacyPrimitiveRuntimeEvidence(false, renderer, [fixture.primitive]), {
+    registryKind: "legacy-compatible",
+    documentEntityCount: 1,
+    legacyPrimitiveAttachedCount: 1,
+    legacyPrimitiveInstanceCount: 1,
+    zeroLegacyPrimitiveInvariant: false,
+  });
+
+  primitiveWithSeries._series = null;
+  assert.deepEqual(drawingLegacyPrimitiveRuntimeEvidence(false, renderer, [fixture.primitive]), {
+    registryKind: "legacy-compatible",
+    documentEntityCount: 1,
+    legacyPrimitiveAttachedCount: 0,
+    legacyPrimitiveInstanceCount: 1,
+    zeroLegacyPrimitiveInvariant: false,
+  });
+});

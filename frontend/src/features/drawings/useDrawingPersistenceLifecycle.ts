@@ -35,6 +35,7 @@ import type {
   DrawingPersistenceCoordinator,
   DrawingPersistenceFlushResult,
 } from "./persistence/drawingPersistenceCoordinator.js";
+import { legacyDrawingImporter } from "./persistence/legacyDrawingImporter.js";
 import {
   encodeDrawingDocumentRecord,
   drawingDocumentRepository,
@@ -78,6 +79,7 @@ import type { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimi
 import {
   drawingPerfCounters,
   registerDrawingPerfActivePersistenceDocumentRecordProvider,
+  registerDrawingPerfLegacyCompatibilitySnapshotProvider,
   registerDrawingPerfPhase6HitOracleProvider,
   registerDrawingPerfPhase6RuntimeProvider,
   registerDrawingPerfShadowParityRequester,
@@ -309,10 +311,24 @@ export function drawingLegacyPrimitiveRuntimeEvidence(
         && legacyPrimitiveInstanceCount === 0,
     });
   }
+  // Legacy authority attaches primitives directly through the chart adapter
+  // instead of adopting them into LegacyPrimitiveRenderer. Lightweight Charts
+  // sets `_series` only after a successful attachment, so this is the narrow
+  // runtime proof that the rollback build materialized visible primitives.
+  const directlyAttachedPrimitiveCount = primitives.reduce((count, primitive) => (
+    (primitive as DrawingPrimitive & { _series?: unknown })._series ? count + 1 : count
+  ), 0);
+  const rendererAttachedPrimitiveCount = renderer?.attachedCount() ?? 0;
   return Object.freeze({
     registryKind: "legacy-compatible" as const,
-    documentEntityCount: renderer?.documentSnapshot()?.entities.size ?? 0,
-    legacyPrimitiveAttachedCount: renderer?.attachedCount() ?? 0,
+    documentEntityCount: Math.max(
+      renderer?.documentSnapshot()?.entities.size ?? 0,
+      primitives.length,
+    ),
+    legacyPrimitiveAttachedCount: Math.max(
+      rendererAttachedPrimitiveCount,
+      directlyAttachedPrimitiveCount,
+    ),
     legacyPrimitiveInstanceCount: primitives.length,
     zeroLegacyPrimitiveInvariant: false,
   });
@@ -1944,8 +1960,15 @@ export function useDrawingPersistenceLifecycle({
       : engineMode.effective;
     const adapter = sceneAdapterGetterDelegate.read()();
     const plotRect = adapter?.getMainPanePlotRect?.() ?? null;
-    const attachedPrimitiveCount = (rendererRef.current?.attachedCount() ?? 0)
-      + bridgeSnapshot.attachedPrimitiveCount;
+    const legacyPrimitiveEvidence = drawingLegacyPrimitiveRuntimeEvidence(
+      sceneDocumentOnlyEnabled,
+      rendererRef.current,
+      primitivesRef.current,
+    );
+    const attachedPrimitiveCount = Math.max(
+      rendererRef.current?.attachedCount() ?? 0,
+      legacyPrimitiveEvidence.legacyPrimitiveAttachedCount,
+    ) + bridgeSnapshot.attachedPrimitiveCount;
     const runtimeSummary = sceneDocumentOnlyEnabled
       ? summarizeDrawingRuntimeDocument(
           activeStoreRef.current.getSnapshot(),
@@ -2118,6 +2141,20 @@ export function useDrawingPersistenceLifecycle({
   useEffect(() => registerDrawingPerfActivePersistenceDocumentRecordProvider(() => (
     encodeDrawingDocumentRecord(activeStoreRef.current.getSnapshot(), 0)
   )), []);
+
+  useEffect(() => registerDrawingPerfLegacyCompatibilitySnapshotProvider(() => {
+    const scopeKey = activeStoreRef.current.getSnapshot().scopeKey;
+    const loaded = legacyDrawingImporter.load(scopeKey);
+    if (loaded.status !== "found") return null;
+    const record = encodeDrawingDocumentRecord(loaded.document, 0);
+    if (!record) return null;
+    return Object.freeze({
+      scopeKey,
+      raw: loaded.raw,
+      normalizedRaw: JSON.stringify(loaded.savedDrawings),
+      record,
+    });
+  }), []);
 
   useEffect(() => registerDrawingPerfPhase6HitOracleProvider((points) => {
     const runtimeSnapshot = sceneRuntime.snapshot();

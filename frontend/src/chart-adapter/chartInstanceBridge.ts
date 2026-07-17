@@ -618,7 +618,58 @@ export function createLightweightChartAdapter({
       };
       safeCall(() => timeScale?.subscribeVisibleLogicalRangeChange?.(notify), undefined);
       safeCall(() => timeScale?.subscribeSizeChange?.(notify), undefined);
+      let dprMediaQuery: MediaQueryList | null = null;
+      let dprChangeListener: (() => void) | null = null;
+      let dprPollTimer: number | null = null;
+      let observedDpr = currentDevicePixelRatio();
+      let dprDisposed = false;
+      const removeDprMediaQueryListener = () => {
+        if (!dprMediaQuery || !dprChangeListener) return;
+        if (typeof dprMediaQuery.removeEventListener === "function") {
+          dprMediaQuery.removeEventListener("change", dprChangeListener);
+        } else {
+          dprMediaQuery.removeListener?.(dprChangeListener);
+        }
+        dprMediaQuery = null;
+        dprChangeListener = null;
+      };
+      const detectDprChange = () => {
+        if (dprDisposed) return;
+        const nextDpr = currentDevicePixelRatio();
+        if (nextDpr === observedDpr) return;
+        observedDpr = nextDpr;
+        notify();
+        armDprMediaQuery();
+      };
+      const armDprMediaQuery = () => {
+        removeDprMediaQueryListener();
+        if (dprDisposed
+          || typeof window === "undefined"
+          || typeof window.matchMedia !== "function") return;
+        observedDpr = currentDevicePixelRatio();
+        dprMediaQuery = window.matchMedia(`(resolution: ${observedDpr}dppx)`);
+        dprChangeListener = detectDprChange;
+        if (typeof dprMediaQuery.addEventListener === "function") {
+          dprMediaQuery.addEventListener("change", dprChangeListener);
+        } else {
+          dprMediaQuery.addListener?.(dprChangeListener);
+        }
+      };
+      armDprMediaQuery();
+      if (typeof window !== "undefined" && typeof window.setInterval === "function") {
+        // Chromium's device-metrics override, and some monitor/zoom changes,
+        // update devicePixelRatio without dispatching resize or MediaQueryList
+        // change. Keep a low-frequency fallback only while a drawing consumer
+        // is subscribed so the scene and overlay cannot retain stale bitmaps.
+        dprPollTimer = window.setInterval(detectDprChange, 250);
+      }
       return () => {
+        dprDisposed = true;
+        if (dprPollTimer !== null && typeof window !== "undefined") {
+          window.clearInterval(dprPollTimer);
+          dprPollTimer = null;
+        }
+        removeDprMediaQueryListener();
         drawingFrameInvalidationListeners.delete(listener);
         safeCall(() => timeScale?.unsubscribeVisibleLogicalRangeChange?.(notify), undefined);
         safeCall(() => timeScale?.unsubscribeSizeChange?.(notify), undefined);

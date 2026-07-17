@@ -242,6 +242,13 @@ export interface DrawingPerfActivePersistenceDocumentRecord {
   readonly entities: readonly unknown[];
 }
 
+export interface DrawingPerfLegacyCompatibilitySnapshot {
+  readonly scopeKey: string;
+  readonly raw: string;
+  readonly normalizedRaw: string;
+  readonly record: DrawingPerfActivePersistenceDocumentRecord;
+}
+
 export interface DrawingPerfPhase6RuntimeSnapshot {
   readonly engineMode: "legacy" | "shadow" | "scene-canary";
   readonly scenePublicationReady: boolean;
@@ -324,6 +331,9 @@ export interface DrawingPerfPhase6HitOracleResult {
 export type DrawingPerfPhase6RuntimeProvider = () => DrawingPerfPhase6RuntimeSnapshot | null;
 export type DrawingPerfActivePersistenceDocumentRecordProvider = (
   () => DrawingPerfActivePersistenceDocumentRecord | null
+);
+export type DrawingPerfLegacyCompatibilitySnapshotProvider = (
+  () => DrawingPerfLegacyCompatibilitySnapshot | null
 );
 export type DrawingPerfPhase6HitOracleProvider = (
   points: readonly Readonly<{ x: number; y: number }>[],
@@ -417,6 +427,9 @@ export interface DrawingPerfDebugHandle {
   readonly readPhase6Runtime: () => DrawingPerfPhase6RuntimeSnapshot | null;
   readonly readActivePersistenceDocumentRecord: (
     () => DrawingPerfActivePersistenceDocumentRecord | null
+  );
+  readonly readActiveLegacyCompatibilitySnapshot: (
+    () => DrawingPerfLegacyCompatibilitySnapshot | null
   );
   readonly runPhase6HitOracle: DrawingPerfPhase6HitOracleProvider;
   readonly readInteractionHandoff: () => DrawingPerfInteractionHandoffSnapshot;
@@ -1332,6 +1345,8 @@ let runtimeSummaryProvider: DrawingPerfRuntimeSummaryProvider | null = null;
 let phase6RuntimeProvider: DrawingPerfPhase6RuntimeProvider | null = null;
 let activePersistenceDocumentRecordProvider:
   DrawingPerfActivePersistenceDocumentRecordProvider | null = null;
+let legacyCompatibilitySnapshotProvider:
+  DrawingPerfLegacyCompatibilitySnapshotProvider | null = null;
 let phase6HitOracleProvider: DrawingPerfPhase6HitOracleProvider | null = null;
 let shadowParityRequester: DrawingPerfShadowParityRequester | null = null;
 let interactionHandoffSequence = 0;
@@ -1509,6 +1524,27 @@ export function readDrawingPerfActivePersistenceDocumentRecord(
   }
 }
 
+export function registerDrawingPerfLegacyCompatibilitySnapshotProvider(
+  provider: DrawingPerfLegacyCompatibilitySnapshotProvider | null,
+): () => void {
+  legacyCompatibilitySnapshotProvider = provider;
+  return () => {
+    if (legacyCompatibilitySnapshotProvider === provider) {
+      legacyCompatibilitySnapshotProvider = null;
+    }
+  };
+}
+
+export function readDrawingPerfLegacyCompatibilitySnapshot(
+): DrawingPerfLegacyCompatibilitySnapshot | null {
+  if (!legacyCompatibilitySnapshotProvider) return null;
+  try {
+    return legacyCompatibilitySnapshotProvider();
+  } catch {
+    return null;
+  }
+}
+
 export function registerDrawingPerfPhase6HitOracleProvider(
   provider: DrawingPerfPhase6HitOracleProvider | null,
 ): () => void {
@@ -1593,6 +1629,9 @@ export function installDrawingPerfDebugHandle(
     readPhase6Runtime: () => readDrawingPerfPhase6Runtime(),
     readActivePersistenceDocumentRecord: () => (
       readDrawingPerfActivePersistenceDocumentRecord()
+    ),
+    readActiveLegacyCompatibilitySnapshot: () => (
+      readDrawingPerfLegacyCompatibilitySnapshot()
     ),
     runPhase6HitOracle: (
       points: readonly Readonly<{ x: number; y: number }>[],

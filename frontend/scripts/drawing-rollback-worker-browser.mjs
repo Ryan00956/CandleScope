@@ -27,6 +27,38 @@ function sameStamp(left, right) {
   return left && right && DRAWING_RENDER_STAMP_KEYS.every((key) => left[key] === right[key]);
 }
 
+function sameWorkerIdentity(left, right) {
+  return left
+    && right
+    && left.schemaVersion === right.schemaVersion
+    && left.jobId === right.jobId
+    && left.generation === right.generation
+    && sameStamp(left.stamp, right.stamp);
+}
+
+function validOffscreenRequestSequence(requests) {
+  if (!Array.isArray(requests) || requests.length === 0) return false;
+  return requests.every((request, index) => {
+    const current = request?.header;
+    if (current?.schemaVersion !== 1
+      || !Number.isSafeInteger(current?.jobId)
+      || current.jobId <= 0
+      || !Number.isSafeInteger(current?.generation)
+      || current.generation <= 0
+      || !current?.stamp) return false;
+    if (index === 0) return true;
+    const previous = requests[index - 1]?.header;
+    return current.jobId > previous?.jobId
+      && current.generation > previous?.generation
+      && Number.isSafeInteger(current.stamp.themeRevision)
+      && Number.isSafeInteger(previous?.stamp?.themeRevision)
+      && current.stamp.themeRevision > previous.stamp.themeRevision
+      && DRAWING_RENDER_STAMP_KEYS
+        .filter((key) => key !== "themeRevision")
+        .every((key) => current.stamp[key] === previous.stamp[key]);
+  });
+}
+
 export function runtimeCurrent(runtime) {
   return runtime
     && runtime.queueDepthCurrent === 0
@@ -111,6 +143,37 @@ export async function readRollbackState(session) {
   })()`);
 }
 
+export function offscreenTypedFallbackCurrent(bundle, state, expectedEntityCount) {
+  const runtime = bundle?.runtime;
+  const requests = Array.isArray(state?.renderRequests) ? state.renderRequests : [];
+  const results = Array.isArray(state?.renderResults) ? state.renderResults : [];
+  const latestRequest = requests.at(-1)?.header ?? null;
+  const typedResult = results[0] ?? null;
+  return state?.workerCreations === 1
+    && validOffscreenRequestSequence(requests)
+    && state?.renderRequestCount === requests.length
+    && requests.length >= 1
+    && state?.renderResultCount === 1
+    && results.length === 1
+    && state?.typedResultCount === 1
+    && state?.bitmapResultCount === 0
+    && typedResult?.resultKind === "typed-draw-result"
+    && sameWorkerIdentity(typedResult?.header, latestRequest)
+    && sameWorkerIdentity(runtime?.latestSubmittedWorkerIdentity, latestRequest)
+    && bundle?.summary?.entityCount === expectedEntityCount
+    && runtime?.backend === "main-thread"
+    && runtime?.workerAvailability === "disposed"
+    && runtime?.workerJobDelta === requests.length
+    && runtime?.workerResultDelta === 1
+    && runtime?.pendingDropDelta === 0
+    && runtime?.staleResultDropDelta === 0
+    && Number.isSafeInteger(runtime?.queueDepthMax)
+    && runtime.queueDepthMax >= 1
+    && runtime.queueDepthMax <= 2
+    && runtime?.inFlightMax === 1
+    && runtimeCurrent(runtime);
+}
+
 export async function readCanonicalDocumentEvidence(session, scopeKey) {
   const expression = `(async () => {
     const scopeKey = ${JSON.stringify(scopeKey)};
@@ -145,7 +208,11 @@ export async function readCanonicalDocumentEvidence(session, scopeKey) {
         for (const key of Object.keys(value).sort()) output[key] = canonicalize(value[key]);
         return output;
       };
-      const serialized = JSON.stringify(canonicalize(record));
+      // updatedAt is an operational persistence timestamp, not drawing
+      // semantics. Keep the browser-side receipt identical to the canonical
+      // lifecycle/export receipts so a producer handoff cannot manufacture
+      // document drift from a clock-only field.
+      const serialized = JSON.stringify(canonicalize({ ...record, updatedAt: 0 }));
       const bytes = new TextEncoder().encode(serialized);
       const digest = await crypto.subtle.digest('SHA-256', bytes);
       const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -387,10 +454,17 @@ export function assessDrillWorkerLifecycle({
   });
 }
 
-export async function captureDrillBuildAuthority(session, drillId) {
+export async function captureDrillBuildAuthority(
+  session,
+  drillId,
+  { requireActiveWorkers = drillId !== "offscreen-canvas-unsupported" } = {},
+) {
+  if (typeof requireActiveWorkers !== "boolean") {
+    throw new TypeError("requireActiveWorkers must be a boolean");
+  }
   const allowDetachedWorker = drillId === "offscreen-canvas-unsupported";
   const evidence = await session.readBrowserBuildEvidence({
-    requireActiveWorkers: !allowDetachedWorker,
+    requireActiveWorkers,
   });
   const expectedDrawingWorkerPaths = new Set(evidence?.networkAssets?.expectedDrawingWorkerPaths ?? []);
   const drawingWorkerTargets = (evidence?.networkAssets?.workerTargets ?? []).filter((target) => (
@@ -414,30 +488,62 @@ export async function captureDrillBuildAuthority(session, drillId) {
     expectedAssetDigest: prefixedSha256(target.expectedAssetSha256),
   })));
   const constructionFaultCount = evidence?.networkAssets?.workerConstructionFaults?.length ?? -1;
-  const workerLifecycle = assessDrillWorkerLifecycle({
-    drillId,
-    evidenceAuthoritative: evidence?.authoritative === true,
-    workerTargets,
-    constructionFaultCount,
-  });
+  const workerLifecycle = requireActiveWorkers || allowDetachedWorker
+    ? assessDrillWorkerLifecycle({
+        drillId,
+        evidenceAuthoritative: evidence?.authoritative === true,
+        workerTargets,
+        constructionFaultCount,
+      })
+    : Object.freeze({
+        kind: "legacy-no-drawing-worker-target",
+        accepted: evidence?.assetAuthoritative === true
+          && constructionFaultCount === 0
+          && workerTargets.length === 0,
+        drawingWorkerTargetCount: workerTargets.length,
+        activeDrawingWorkerTargetCount: 0,
+        detachedDrawingWorkerTargetCount: workerTargets.length,
+        constructionFaultCount,
+        assetAuthorityAccepted: evidence?.networkAssetAuthorityPassed === true,
+        serialHandoffAccepted: false,
+      });
   const authoritative = evidence?.assetAuthoritative === true
     && workerLifecycle.accepted
     && workerLifecycle.assetAuthorityAccepted;
   const networkAssets = evidence?.networkAssets ?? null;
+  const configuration = session.currentConfiguration?.() ?? session.configuration ?? null;
+  const lifecycle = session.lifecycle?.() ?? null;
+  const browserInstanceId = Number.isSafeInteger(lifecycle?.browser?.pid)
+    ? `headed-chrome:${lifecycle.browser.pid}`
+    : null;
+  const serverInstanceId = Number.isSafeInteger(lifecycle?.servers?.api?.pid)
+      && Number.isSafeInteger(lifecycle?.servers?.preview?.pid)
+    ? `managed-servers:${lifecycle.servers.api.pid}:${lifecycle.servers.preview.pid}`
+    : null;
   const receipt = Object.freeze({
     kind: "controlled-browser-build-authority",
     drillId,
     capturedAt: new Date().toISOString(),
     authoritative,
-    fullBuildAuthoritative: evidence?.authoritative === true,
+    fullBuildAuthoritative: evidence?.authoritative === true
+      && evidence?.networkAssetsPassed === true,
     assetBuildAuthoritative: evidence?.assetAuthoritative === true,
     buildId: evidence?.buildId ?? null,
     buildFingerprint: prefixedSha256(evidence?.buildFingerprint?.sha256),
     assetDigest: prefixedSha256(evidence?.assetFingerprint?.sha256),
     currentAssetDigest: prefixedSha256(evidence?.currentAssetSha256),
-    buildInputDigest: prefixedSha256(session.buildReceipt?.inputFingerprint?.sha256),
+    buildInputDigest: prefixedSha256(
+      (session.currentBuildReceipt?.() ?? session.buildReceipt)?.inputFingerprint?.sha256,
+    ),
     currentBuildInputDigest: prefixedSha256(evidence?.currentBuildInputSha256),
     gitRevision: evidence?.currentGit?.commit ?? null,
+    profileId: session.profileId ?? null,
+    browserInstanceId,
+    serverInstanceId,
+    documentAuthority: configuration?.documentAuthority ?? null,
+    engineMode: configuration?.engineMode ?? null,
+    interactionSurfaceMode: configuration?.interactionSurfaceMode ?? null,
+    rasterBackend: configuration?.rasterBackend ?? null,
     managedOrigin: evidence?.managedOrigin ?? null,
     observedOrigin: evidence?.observedOrigin ?? null,
     href: evidence?.href ?? null,
@@ -670,16 +776,7 @@ async function runOffscreenUnsupported(session, beforeDocument, timeoutMs) {
   const first = await waitForSample(
     async () => ({ bundle: await readRuntimeBundle(session), state: await readRollbackState(session) }),
     ({ bundle, state }) => initializer?.receipt?.result?.installed === true
-      && state?.workerCreations === 1
-      && state?.renderRequestCount === 1
-      && state?.renderResultCount === 1
-      && state?.typedResultCount === 1
-      && state?.bitmapResultCount === 0
-      && bundle?.summary?.entityCount === beforeDocument.entityCount
-      && bundle?.runtime?.backend === "main-thread"
-      && bundle?.runtime?.workerJobDelta === 1
-      && bundle?.runtime?.workerResultDelta === 1
-      && runtimeCurrent(bundle.runtime),
+      && offscreenTypedFallbackCurrent(bundle, state, beforeDocument.entityCount),
     {
       timeoutMs,
       description: "worker-global OffscreenCanvas typed fallback",
@@ -711,7 +808,7 @@ async function runOffscreenUnsupported(session, beforeDocument, timeoutMs) {
   const firstRuntime = first.value.bundle.runtime;
   const finalRuntime = final.value.bundle.runtime;
   const state = final.value.state;
-  const firstHeader = state.renderRequests[0]?.header ?? null;
+  const firstHeader = state.renderResults[0]?.header ?? null;
   const afterDocument = await waitForPreservedDocument(
     session,
     finalRuntime,
@@ -752,6 +849,14 @@ async function runOffscreenUnsupported(session, beforeDocument, timeoutMs) {
         configuredRequest: CONFIGURED_WORKER_REQUEST,
         runtime: finalRuntime,
         workerCreations: Object.freeze({ before: 0, after: state.workerCreations }),
+        workerRequests: Object.freeze({ before: 0, after: state.renderRequestCount }),
+        workerRequestHeaders: Object.freeze(
+          state.renderRequests.map((request) => Object.freeze({ ...request.header })),
+        ),
+        supersededWorkerRequests: Object.freeze({
+          before: 0,
+          after: state.renderRequestCount - state.renderResultCount,
+        }),
         offscreenSupported: capability?.supported,
         firstRequest: Object.freeze({
           requestId: requestId("worker", firstHeader),

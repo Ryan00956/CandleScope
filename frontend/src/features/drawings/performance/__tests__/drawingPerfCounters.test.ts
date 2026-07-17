@@ -10,6 +10,7 @@ import {
   recordDrawingPerfInteractionHandoffAcknowledged,
   recordDrawingPerfInteractionHandoffPrepared,
   registerDrawingPerfActivePersistenceDocumentRecordProvider,
+  registerDrawingPerfLegacyCompatibilitySnapshotProvider,
   registerDrawingPerfPhase6HitOracleProvider,
   registerDrawingPerfPhase6RuntimeProvider,
   registerDrawingPerfShadowParityRequester,
@@ -706,6 +707,30 @@ test("debug handle exposes registered Phase 6 runtime and indexed-hit oracle pro
     });
   assert.equal(handle?.readActivePersistenceDocumentRecord(), null);
   unregisterThrowingActiveDocument();
+
+  const legacyCompatibilitySnapshot = Object.freeze({
+    scopeKey: activeDocumentRecord.scopeKey,
+    raw: '[{"type":"line","id":"pending-line"}]',
+    normalizedRaw: '[{"type":"line","id":"pending-line"}]',
+    record: activeDocumentRecord,
+  });
+  const unregisterLegacyCompatibility =
+    registerDrawingPerfLegacyCompatibilitySnapshotProvider(
+      () => legacyCompatibilitySnapshot,
+    );
+  assert.strictEqual(
+    handle?.readActiveLegacyCompatibilitySnapshot(),
+    legacyCompatibilitySnapshot,
+  );
+  unregisterLegacyCompatibility();
+  assert.equal(handle?.readActiveLegacyCompatibilitySnapshot(), null);
+
+  const unregisterThrowingLegacyCompatibility =
+    registerDrawingPerfLegacyCompatibilitySnapshotProvider(() => {
+      throw new Error("legacy compatibility snapshot unavailable");
+    });
+  assert.equal(handle?.readActiveLegacyCompatibilitySnapshot(), null);
+  unregisterThrowingLegacyCompatibility();
 
   const unregisterThrowingRuntime = registerDrawingPerfPhase6RuntimeProvider(() => {
     throw new Error("surface disposed");

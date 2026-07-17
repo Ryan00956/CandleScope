@@ -48,6 +48,8 @@ export const CONTROLLED_ROLLBACK_DRILL_IDS = Object.freeze([
   "indexeddb-quota-blocked",
   "active-gesture-chart-boundary",
   "series-rebuild-before-export",
+  "continuous-dpr-resize",
+  "canary-to-legacy-snapshot",
 ]);
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -67,6 +69,7 @@ export const CONTROLLED_DIAGNOSTIC_WORKER_TYPES = Object.freeze(
 const CONTROLLED_DRAWING_WORKER_FETCH_RESOURCE_TYPE = "Other";
 const CONTROLLED_OPTION_KEYS = new Set([
   "chromePath",
+  "documentAuthority",
   "dpr",
   "engineMode",
   "interactionSurfaceMode",
@@ -143,6 +146,7 @@ function isoNow() {
 
 const INDEXEDDB_BUCKET_SPACE_CACHE_TIME_LIMIT_MS = 30_000;
 const INDEXEDDB_BUCKET_SPACE_CACHE_GUARD_MS = 5_000;
+const INDEXEDDB_BUCKET_SPACE_CACHE_WAIT_MAX_ATTEMPTS = 8;
 const CONTROLLED_QUOTA_OVERRIDE_SIZE_BYTES = 1;
 const CONTROLLED_QUOTA_STORE_NAME = "quota-probe";
 const CONTROLLED_QUOTA_BASELINE_KEY = "baseline";
@@ -159,8 +163,16 @@ export async function waitForControlledQuotaCacheExpiry({
   const requestedWaitMs = cacheTimeLimitMs + guardMs;
   const startedAt = observedAt();
   const startedMilliseconds = monotonicNow();
-  await waitFor(requestedWaitMs);
-  const elapsedMs = monotonicNow() - startedMilliseconds;
+  let elapsedMs = 0;
+  let waitAttempts = 0;
+  while (elapsedMs < requestedWaitMs
+    && waitAttempts < INDEXEDDB_BUCKET_SPACE_CACHE_WAIT_MAX_ATTEMPTS) {
+    const remainingMs = requestedWaitMs - elapsedMs;
+    await waitFor(Math.max(1, Math.ceil(remainingMs)));
+    waitAttempts += 1;
+    elapsedMs = monotonicNow() - startedMilliseconds;
+    if (!Number.isFinite(elapsedMs) || elapsedMs < 0) break;
+  }
   const completedAt = observedAt();
   if (!Number.isFinite(elapsedMs) || elapsedMs < requestedWaitMs) {
     throw new Error(
@@ -651,6 +663,10 @@ export function normalizeControlledCdpOptions(options = {}) {
   if (!["legacy", "shadow", "scene-canary", "scene"].includes(engineMode)) {
     throw new Error("engineMode must be legacy, shadow, scene-canary, or scene");
   }
+  const documentAuthority = options.documentAuthority ?? "document";
+  if (!["document", "legacy"].includes(documentAuthority)) {
+    throw new Error("documentAuthority must be document or legacy");
+  }
   const interactionSurfaceMode = options.interactionSurfaceMode ?? "overlay";
   if (!["overlay", "legacy"].includes(interactionSurfaceMode)) {
     throw new Error("interactionSurfaceMode must be overlay or legacy");
@@ -662,6 +678,7 @@ export function normalizeControlledCdpOptions(options = {}) {
   const chromePath = String(options.chromePath || "");
   return Object.freeze({
     chromePath,
+    documentAuthority,
     dpr: positiveNumber(options.dpr ?? 1, "dpr", 0.5, 4),
     engineMode,
     interactionSurfaceMode,
@@ -691,7 +708,7 @@ export function controlledBuildEnvironment(options, hostEnvironment = process.en
     NODE_ENV: "production",
     VITE_API_BASE: "/api/v1",
     VITE_DRAWING_COORDINATE_PROJECTOR: "batch",
-    VITE_DRAWING_DOCUMENT_AUTHORITY: "document",
+    VITE_DRAWING_DOCUMENT_AUTHORITY: normalized.documentAuthority,
     VITE_DRAWING_ENGINE_MODE: normalized.engineMode,
     VITE_DRAWING_INTERACTION_OVERLAY: normalized.interactionSurfaceMode,
     VITE_DRAWING_RASTER_BACKEND: normalized.rasterBackend,
@@ -2561,6 +2578,58 @@ function fingerprintLoadedAssetPaths(paths) {
   });
 }
 
+export function assessControlledLoadedAssetAuthority({
+  loadedPaths = [],
+  domLoadedPaths = [],
+  expectedEntryPaths = [],
+  manifestPaths = [],
+  observedAssets = [],
+  mainFrameObservedAssets = [],
+} = {}) {
+  const loadedAssets = fingerprintLoadedAssetPaths(loadedPaths);
+  const normalizedDomPaths = fingerprintLoadedAssetPaths(domLoadedPaths).paths;
+  const expectedEntryDomPaths = fingerprintLoadedAssetPaths(expectedEntryPaths).paths;
+  const manifestPathSet = new Set(fingerprintLoadedAssetPaths(manifestPaths).paths);
+  const expectedEntryPathSet = new Set(expectedEntryDomPaths);
+  const observedAssetByPath = new Map(observedAssets.map((asset) => [asset.path, asset]));
+  const mainFrameAssetByPath = new Map(
+    mainFrameObservedAssets.map((asset) => [asset.path, asset]),
+  );
+  const browserLoadedAssetAuthority = Object.freeze(loadedAssets.paths.map((relativePath) => Object.freeze({
+    path: relativePath,
+    entryAuthorityRequired: expectedEntryPathSet.has(relativePath),
+    manifestBacked: manifestPathSet.has(relativePath),
+    responseBodyAccepted: observedAssetByPath.get(relativePath)?.accepted === true,
+  })));
+  const browserLoadedAssetsAccepted = browserLoadedAssetAuthority.every((asset) => (
+    asset.manifestBacked
+      && (!asset.entryAuthorityRequired || asset.responseBodyAccepted)
+  ));
+  const domLoadedAssetAuthority = Object.freeze(normalizedDomPaths.map((relativePath) => Object.freeze({
+    path: relativePath,
+    entryAuthorityRequired: expectedEntryPathSet.has(relativePath),
+    manifestBacked: manifestPathSet.has(relativePath),
+    mainFrameResponseBodyAccepted: mainFrameAssetByPath.get(relativePath)?.accepted === true,
+  })));
+  const domLoadedAssetsAccepted = domLoadedAssetAuthority.every((asset) => (
+    asset.manifestBacked
+      && (!asset.entryAuthorityRequired || asset.mainFrameResponseBodyAccepted)
+  ));
+  const expectedEntriesPresentInDom = expectedEntryDomPaths.every((relativePath) => (
+    normalizedDomPaths.includes(relativePath)
+  ));
+  return Object.freeze({
+    loadedAssets,
+    domLoadedPaths: normalizedDomPaths,
+    browserLoadedAssetAuthority,
+    browserLoadedAssetsAccepted,
+    domLoadedAssetAuthority,
+    domLoadedAssetsAccepted,
+    expectedEntryDomPaths,
+    expectedEntriesPresentInDom,
+  });
+}
+
 export function controlledManagedUrlAllowed(url, managedOrigin) {
   try {
     const parsed = new URL(url);
@@ -2778,9 +2847,25 @@ export async function createManagedOriginGuard(cdp, managedUrl, drawingWorkerPat
       capture.claimedAt = isoNow();
       return Object.freeze({ ...capture });
     },
+    async settle(timeoutMs = 2_000) {
+      const parsedTimeoutMs = positiveInteger(timeoutMs, "managed-origin guard settle timeoutMs", 1, 60_000);
+      const deadline = Date.now() + parsedTimeoutMs;
+      while (armedWorkerResponses.size > 0 && violations.length === 0 && Date.now() <= deadline) {
+        await wait(Math.min(20, Math.max(1, deadline - Date.now())));
+      }
+      return this.snapshot();
+    },
+    assertNoViolations() {
+      if (violations.length > 0) {
+        throw new Error(`Managed-origin guard observed forbidden traffic: ${JSON.stringify(violations)}`);
+      }
+    },
     assertHealthy() {
       if (violations.length > 0 || armedWorkerResponses.size > 0) {
-        throw new Error(`Managed-origin guard observed forbidden traffic: ${JSON.stringify(violations)}`);
+        throw new Error(`Managed-origin guard is unhealthy: ${JSON.stringify({
+          armedWorkerResponses: [...armedWorkerResponses.values()],
+          violations,
+        })}`);
       }
     },
     snapshot() {
@@ -4478,6 +4563,7 @@ async function readBrowserBuildEvidence(
   const managedOrigin = new URL(managedUrl).origin;
   await workerDiagnostics.settle();
   workerDiagnostics.assertHealthy();
+  await originGuard.settle();
   const waitForNetworkAuthority = requireActiveWorkers
     ? assetTracker.waitForComplete
     : assetTracker.waitForAssetAuthorityComplete;
@@ -4486,6 +4572,7 @@ async function readBrowserBuildEvidence(
   if (!handlersBeforeCapture.passed) {
     throw new Error(`CDP handlers did not settle before build capture: ${JSON.stringify(handlersBeforeCapture)}`);
   }
+  await originGuard.settle();
   originGuard.assertHealthy();
   const browser = await evaluateJson(cdp, `(async () => {
     if (document.fonts?.ready) await document.fonts.ready;
@@ -4521,6 +4608,7 @@ async function readBrowserBuildEvidence(
   if (!handlersAfterCapture.passed) {
     throw new Error(`CDP handlers did not settle after build capture: ${JSON.stringify(handlersAfterCapture)}`);
   }
+  await originGuard.settle();
   originGuard.assertHealthy();
   const dataInitiatorTypes = new Set([
     "beacon",
@@ -4553,32 +4641,23 @@ async function readBrowserBuildEvidence(
       return decodeURIComponent(parsed.pathname).replace(/^\/+/, "") || null;
     } catch { return null; }
   };
-  const domLoadedPaths = [...new Set((browser?.domUrls || []).map(managedPath).filter(Boolean))].sort();
-  const loadedAssets = fingerprintLoadedAssetPaths(loadedPaths);
-  const observedAssetByPath = new Map(networkAssets.observedAssets.map((asset) => [asset.path, asset]));
-  const mainFrameAssetByPath = new Map(
-    networkAssets.mainFrameObservedAssets.map((asset) => [asset.path, asset]),
-  );
-  const browserLoadedAssetAuthority = Object.freeze(loadedAssets.paths.map((relativePath) => Object.freeze({
-    path: relativePath,
-    manifestBacked: buildReceipt.assetFingerprint.files.some((file) => file.path === relativePath),
-    responseBodyAccepted: observedAssetByPath.get(relativePath)?.accepted === true,
-  })));
-  const browserLoadedAssetsAccepted = browserLoadedAssetAuthority.every((asset) => (
-    asset.manifestBacked && asset.responseBodyAccepted
-  ));
-  const domLoadedAssetAuthority = Object.freeze(domLoadedPaths.map((relativePath) => Object.freeze({
-    path: relativePath,
-    manifestBacked: buildReceipt.assetFingerprint.files.some((file) => file.path === relativePath),
-    mainFrameResponseBodyAccepted: mainFrameAssetByPath.get(relativePath)?.accepted === true,
-  })));
-  const domLoadedAssetsAccepted = domLoadedAssetAuthority.every((asset) => (
-    asset.manifestBacked && asset.mainFrameResponseBodyAccepted
-  ));
-  const expectedEntryDomPaths = Object.freeze([...buildReceipt.entryAssetPaths].sort());
-  const expectedEntriesPresentInDom = expectedEntryDomPaths.every((relativePath) => (
-    domLoadedPaths.includes(relativePath)
-  ));
+  const loadedAssetAuthority = assessControlledLoadedAssetAuthority({
+    loadedPaths,
+    domLoadedPaths: (browser?.domUrls || []).map(managedPath).filter(Boolean),
+    expectedEntryPaths: buildReceipt.entryAssetPaths,
+    manifestPaths: buildReceipt.assetFingerprint.files.map((file) => file.path),
+    observedAssets: networkAssets.observedAssets,
+    mainFrameObservedAssets: networkAssets.mainFrameObservedAssets,
+  });
+  const {
+    loadedAssets,
+    browserLoadedAssetAuthority,
+    browserLoadedAssetsAccepted,
+    domLoadedAssetAuthority,
+    domLoadedAssetsAccepted,
+    expectedEntryDomPaths,
+    expectedEntriesPresentInDom,
+  } = loadedAssetAuthority;
   const offOriginDomUrls = (browser?.domUrls || []).filter((value) => (
     !controlledManagedUrlAllowed(value, managedOrigin)
   ));
@@ -4636,11 +4715,15 @@ async function readBrowserBuildEvidence(
     readyState: browser?.readyState ?? null,
     matchesManagedOrigin: browser?.origin === managedOrigin,
     matchesManagedDocument: controlledManagedDocumentUrlAllowed(browser?.href || "", managedUrl),
-    entryAssetsLoaded: networkAssets.passed,
+    entryAssetsLoaded: requireActiveWorkers
+      ? networkAssets.passed
+      : networkAssets.assetAuthorityPassed === true,
     networkAssetsPassed: networkAssets.passed,
     networkAssetAuthorityPassed: networkAssets.assetAuthorityPassed === true,
     assetAuthoritative,
-    authoritative: commonBuildAuthority && networkAssets.passed,
+    authoritative: requireActiveWorkers
+      ? commonBuildAuthority && networkAssets.passed
+      : assetAuthoritative,
   });
 }
 
@@ -6119,6 +6202,14 @@ async function launchOwnedBrowser(
   launchState,
   runId,
 ) {
+  const devToolsActivePortPath = path.join(profileDirectory, "DevToolsActivePort");
+  try {
+    fs.rmSync(devToolsActivePortPath, { force: true });
+  } catch (error) {
+    throw new Error(`Controlled Chrome could not remove its stale DevToolsActivePort file: ${
+      error instanceof Error ? error.message : String(error)
+    }`);
+  }
   const diagnostics = createControlledDiagnosticsAggregator();
   const drawingWorkerPaths = Object.freeze(
     launchState.buildReceipt.assetFingerprint.files
@@ -7509,6 +7600,46 @@ export function summarizeControlledCleanup(receipts) {
   });
 }
 
+export function summarizeControlledRetirement(receipts) {
+  const browser = receipts?.browser ?? null;
+  const servers = receipts?.servers ?? null;
+  const ports = Array.isArray(receipts?.ports) ? receipts.ports : [];
+  const profile = receipts?.profile ?? null;
+  const processAndPortSummary = summarizeControlledCleanup({
+    processes: [browser, servers?.preview, servers?.api].filter(Boolean),
+    ports,
+    // Retirement intentionally preserves the owned profile for the next build.
+    // Reuse the strict process/port verifier while assessing that profile below.
+    profile: { removed: true },
+  });
+  const failures = [...processAndPortSummary.failures];
+  const profileRetained = profile?.retained === true
+    && profile?.exists === true
+    && typeof profile?.profileId === "string"
+    && profile.profileId.length > 0
+    && typeof profile?.profileDirectorySha256 === "string"
+    && /^[a-f0-9]{64}$/.test(profile.profileDirectorySha256);
+  if (!profileRetained) failures.push("owned-profile-not-retained");
+  const storageFaultCleanupComplete = browser?.storageFaultCleanup?.complete === true
+    && browser?.storageFaultCleanup?.forced === false;
+  if (!storageFaultCleanupComplete) failures.push("storage-fault-cleanup-incomplete");
+  return Object.freeze({
+    kind: "controlled-canary-retirement",
+    schemaVersion: "candlescope-controlled-canary-retirement/v1",
+    complete: failures.length === 0,
+    processCount: processAndPortSummary.processCount,
+    allProcessesExited: processAndPortSummary.allProcessesExited,
+    diagnosticsClosed: processAndPortSummary.diagnosticsClosed,
+    portCount: processAndPortSummary.portCount,
+    allOwnedPortsClosed: processAndPortSummary.allOwnedPortsClosed,
+    profileRetained,
+    storageFaultCleanupComplete,
+    profileId: profile?.profileId ?? null,
+    profileDirectorySha256: profile?.profileDirectorySha256 ?? null,
+    failures: Object.freeze(failures),
+  });
+}
+
 export async function startControlledProductionCdp(options = {}) {
   assertControlledRunnerRuntime();
   assertControlledRunnerEntrypoint();
@@ -7523,14 +7654,20 @@ export async function startControlledProductionCdp(options = {}) {
   }
   const toolchain = await readToolchainFingerprint(chromePath);
   const buildReceipt = await runProductionBuild(configuration, runId, toolchain);
+  let currentConfiguration = configuration;
+  let currentBuildReceipt = buildReceipt;
   const [apiPort, previewPort] = await findDistinctLoopbackPorts(2);
   const profileDirectory = fs.mkdtempSync(path.join(os.tmpdir(), OWNED_PROFILE_PREFIX));
-  const launchState = { debugPort: null, buildReceipt };
+  const profileId = `controlled-profile:${randomUUID()}`;
+  const profileDirectorySha256 = sha256(path.resolve(profileDirectory).toLowerCase());
+  const launchState = { debugPort: null, buildReceipt: currentBuildReceipt };
+  const restartHistory = [];
   let servers = null;
   let browser = null;
   let failedServerReceipts = null;
   let failedBrowserReceipt = null;
   let closePromise = null;
+  let restartPromise = null;
 
   const close = () => {
     if (closePromise) return closePromise;
@@ -7604,6 +7741,7 @@ export async function startControlledProductionCdp(options = {}) {
         finalDiagnostics: browserReceipt?.finalDiagnostics ?? null,
         finalWorkerDiagnostics: browserReceipt?.finalWorkerDiagnostics ?? null,
         finalOriginGuard: browserReceipt?.finalOriginGuard ?? null,
+        restarts: Object.freeze(restartHistory.map((receipt) => receipt)),
         summary,
       });
     })();
@@ -7611,9 +7749,14 @@ export async function startControlledProductionCdp(options = {}) {
   };
 
   try {
-    servers = await startManagedServers(configuration, buildReceipt, apiPort, previewPort);
+    servers = await startManagedServers(
+      currentConfiguration,
+      currentBuildReceipt,
+      apiPort,
+      previewPort,
+    );
     browser = await launchOwnedBrowser(
-      configuration,
+      currentConfiguration,
       chromePath,
       toolchain,
       profileDirectory,
@@ -7624,7 +7767,7 @@ export async function startControlledProductionCdp(options = {}) {
     const initialBuildEvidence = await readBrowserBuildEvidence(
       browser.cdp,
       servers.url,
-      buildReceipt,
+      currentBuildReceipt,
       browser.assetTracker,
       browser.originGuard,
       browser.workerDiagnostics,
@@ -7658,7 +7801,10 @@ export async function startControlledProductionCdp(options = {}) {
       }
       return browser.cdp.send(method, params, sessionId);
     };
-    const assertManagedCaptureState = async () => {
+    const assertManagedCaptureState = async ({ requireOriginGuardSettled = false } = {}) => {
+      if (typeof requireOriginGuardSettled !== "boolean") {
+        throw new TypeError("requireOriginGuardSettled must be a boolean");
+      }
       const location = await evaluateJson(browser.cdp, `({ origin: location.origin, href: location.href })`);
       const handlerSettlement = await browser.cdp.settleHandlers(2_000);
       if (!handlerSettlement.passed) {
@@ -7666,12 +7812,16 @@ export async function startControlledProductionCdp(options = {}) {
       }
       const workerSettlement = await browser.workerDiagnostics.settle(2_000);
       browser.workerDiagnostics.assertHealthy();
-      browser.originGuard.assertHealthy();
+      const originSettlement = requireOriginGuardSettled
+        ? await browser.originGuard.settle(2_000)
+        : browser.originGuard.snapshot();
+      if (requireOriginGuardSettled) browser.originGuard.assertHealthy();
+      else browser.originGuard.assertNoViolations();
       if (location?.origin !== servers.origin
         || !controlledManagedDocumentUrlAllowed(location?.href || "", servers.url)) {
         throw new Error(`Authoritative capture left managed origin: ${JSON.stringify(location)}`);
       }
-      return Object.freeze({ location, handlerSettlement, workerSettlement });
+      return Object.freeze({ location, handlerSettlement, workerSettlement, originSettlement });
     };
     const cdpFacade = Object.freeze({
       send: guardedSend,
@@ -7679,15 +7829,293 @@ export async function startControlledProductionCdp(options = {}) {
       evaluate: (expression) => evaluate(browser.cdp, expression),
       evaluateJson: (expression) => evaluateJson(browser.cdp, expression),
     });
+    const restartWithLegacyBuild = ({ scopeKey = null } = {}) => {
+      if (scopeKey !== null && (typeof scopeKey !== "string" || !scopeKey.trim())) {
+        throw new TypeError("legacy restart scopeKey must be null or a non-empty string");
+      }
+      if (restartPromise) return restartPromise;
+      restartPromise = (async () => {
+        if (restartHistory.length > 0) {
+          throw new Error("Controlled canary-to-legacy restart is one-shot");
+        }
+        if (currentConfiguration.documentAuthority !== "document"
+          || currentConfiguration.engineMode !== "scene-canary") {
+          throw new Error("Controlled legacy restart requires the document/scene-canary build");
+        }
+        await assertManagedCaptureState({ requireOriginGuardSettled: true });
+        const requestedAt = isoNow();
+        const canaryConfiguration = currentConfiguration;
+        const canaryBuildReceipt = currentBuildReceipt;
+        const canaryBuildEvidence = await readBrowserBuildEvidence(
+          browser.cdp,
+          servers.url,
+          canaryBuildReceipt,
+          browser.assetTracker,
+          browser.originGuard,
+          browser.workerDiagnostics,
+        );
+        if (!canaryBuildEvidence.authoritative) {
+          throw new Error("Controlled canary build lost asset authority before legacy restart");
+        }
+        const canaryOrigin = servers.origin;
+        const canaryBrowserBefore = browser.snapshot();
+        const canaryServersBefore = servers.snapshot();
+        const canaryDebugPort = launchState.debugPort;
+        const beforeBrowserInstanceId = `headed-chrome:${canaryBrowserBefore.pid}`;
+        const beforeServerInstanceId = `managed-servers:${
+          canaryServersBefore.api?.pid
+        }:${canaryServersBefore.preview?.pid}`;
+
+        const retiringBrowser = browser;
+        const retiringServers = servers;
+        let canaryBrowserReceipt;
+        let canaryServerReceipts;
+        const transitionCloseErrors = [];
+        try {
+          canaryBrowserReceipt = await retiringBrowser.close();
+        } catch (error) {
+          canaryBrowserReceipt = retiringBrowser.snapshot();
+          transitionCloseErrors.push(`browser:${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          browser = null;
+        }
+        try {
+          canaryServerReceipts = await retiringServers.close();
+        } catch (error) {
+          canaryServerReceipts = retiringServers.snapshot();
+          transitionCloseErrors.push(`servers:${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          servers = null;
+        }
+        failedBrowserReceipt = canaryBrowserReceipt;
+        failedServerReceipts = canaryServerReceipts;
+        if (transitionCloseErrors.length > 0) {
+          throw new Error(`Controlled canary retirement failed: ${transitionCloseErrors.join("; ")}`);
+        }
+        const retiredPortReceipts = await waitForOwnedPortsClosed([
+          { kind: "mock-api", port: apiPort },
+          { kind: "vite-preview", port: previewPort },
+          { kind: "chrome-debug", port: canaryDebugPort },
+        ]);
+        if (retiredPortReceipts.length !== 3
+          || retiredPortReceipts.some((receipt) => receipt.closed !== true)) {
+          throw new Error(`Controlled canary processes did not release all owned ports: ${JSON.stringify(
+            retiredPortReceipts,
+          )}`);
+        }
+        if (!fs.existsSync(profileDirectory)) {
+          throw new Error("Controlled profile disappeared before the legacy build restart");
+        }
+        const canaryRetirement = summarizeControlledRetirement({
+          browser: canaryBrowserReceipt,
+          servers: canaryServerReceipts,
+          ports: retiredPortReceipts,
+          profile: {
+            retained: true,
+            exists: fs.existsSync(profileDirectory),
+            profileId,
+            profileDirectorySha256,
+          },
+        });
+        if (!canaryRetirement.complete) {
+          throw new Error(`Controlled canary retirement evidence is invalid: ${JSON.stringify(
+            canaryRetirement,
+          )}`);
+        }
+
+        const legacyConfiguration = normalizeControlledCdpOptions({
+          ...canaryConfiguration,
+          documentAuthority: "legacy",
+          engineMode: "legacy",
+          interactionSurfaceMode: "legacy",
+          rasterBackend: "main-thread",
+        });
+        const legacyBuildReceipt = await runProductionBuild(
+          legacyConfiguration,
+          randomUUID(),
+          toolchain,
+        );
+        if (legacyBuildReceipt.git.commit !== canaryBuildReceipt.git.commit
+          || stableJson(legacyBuildReceipt.git.status) !== stableJson(canaryBuildReceipt.git.status)
+          || legacyBuildReceipt.inputFingerprint.sha256
+            !== canaryBuildReceipt.inputFingerprint.sha256) {
+          throw new Error("Controlled legacy restart changed source or build inputs");
+        }
+        if (legacyBuildReceipt.buildFingerprint.sha256
+            === canaryBuildReceipt.buildFingerprint.sha256
+          || legacyBuildReceipt.assetFingerprint.sha256
+            === canaryBuildReceipt.assetFingerprint.sha256) {
+          throw new Error("Controlled legacy restart did not produce distinct build assets");
+        }
+        currentConfiguration = legacyConfiguration;
+        currentBuildReceipt = legacyBuildReceipt;
+        launchState.buildReceipt = legacyBuildReceipt;
+        launchState.debugPort = null;
+        servers = await startManagedServers(
+          legacyConfiguration,
+          legacyBuildReceipt,
+          apiPort,
+          previewPort,
+        );
+        browser = await launchOwnedBrowser(
+          legacyConfiguration,
+          chromePath,
+          toolchain,
+          profileDirectory,
+          servers.url,
+          launchState,
+          runId,
+        );
+        const legacyBuildEvidence = await readBrowserBuildEvidence(
+          browser.cdp,
+          servers.url,
+          legacyBuildReceipt,
+          browser.assetTracker,
+          browser.originGuard,
+          browser.workerDiagnostics,
+          { requireActiveWorkers: false },
+        );
+        if (!legacyBuildEvidence.authoritative) {
+          throw new Error(`Controlled legacy build did not load authoritative assets: ${JSON.stringify(
+            legacyBuildEvidence,
+          )}`);
+        }
+        const legacyBrowserAfter = browser.snapshot();
+        const legacyServersAfter = servers.snapshot();
+        const afterBrowserInstanceId = `headed-chrome:${legacyBrowserAfter.pid}`;
+        const afterServerInstanceId = `managed-servers:${
+          legacyServersAfter.api?.pid
+        }:${legacyServersAfter.preview?.pid}`;
+        if (servers.origin !== canaryOrigin
+          || beforeBrowserInstanceId === afterBrowserInstanceId
+          || beforeServerInstanceId === afterServerInstanceId) {
+          throw new Error("Controlled legacy restart did not preserve origin with distinct processes");
+        }
+        const browserRestart = Object.freeze({
+          kind: "browser-restart",
+          receiptId: randomUUID(),
+          beforeInstanceId: beforeBrowserInstanceId,
+          afterInstanceId: afterBrowserInstanceId,
+          beforeBuildId: canaryBuildReceipt.buildId,
+          afterBuildId: legacyBuildReceipt.buildId,
+          beforeBuildFingerprint: `sha256:${canaryBuildReceipt.buildFingerprint.sha256}`,
+          afterBuildFingerprint: `sha256:${legacyBuildReceipt.buildFingerprint.sha256}`,
+          beforeAssetDigest: `sha256:${canaryBuildReceipt.assetFingerprint.sha256}`,
+          afterAssetDigest: `sha256:${legacyBuildReceipt.assetFingerprint.sha256}`,
+          beforeBuildInputDigest: `sha256:${canaryBuildReceipt.inputFingerprint.sha256}`,
+          afterBuildInputDigest: `sha256:${legacyBuildReceipt.inputFingerprint.sha256}`,
+          beforeGitRevision: canaryBuildReceipt.git.commit,
+          afterGitRevision: legacyBuildReceipt.git.commit,
+          profileId,
+          profileDirectorySha256,
+          origin: canaryOrigin,
+          scopeKey,
+          stoppedAt: canaryBrowserReceipt.stoppedAt,
+          startedAt: legacyBrowserAfter.startedAt,
+          beforeProcess: Object.freeze({
+            ...canaryBrowserReceipt,
+            instanceId: beforeBrowserInstanceId,
+          }),
+          afterProcess: Object.freeze({
+            ...legacyBrowserAfter,
+            instanceId: afterBrowserInstanceId,
+            started: true,
+            running: legacyBrowserAfter.stoppedAt === null,
+          }),
+          retiredDebugPort: retiredPortReceipts.find((receipt) => (
+            receipt.kind === "chrome-debug"
+          )) ?? null,
+        });
+        const serverRestart = Object.freeze({
+          kind: "server-restart",
+          receiptId: randomUUID(),
+          beforeInstanceId: beforeServerInstanceId,
+          afterInstanceId: afterServerInstanceId,
+          beforeBuildId: canaryBuildReceipt.buildId,
+          afterBuildId: legacyBuildReceipt.buildId,
+          beforeBuildFingerprint: `sha256:${canaryBuildReceipt.buildFingerprint.sha256}`,
+          afterBuildFingerprint: `sha256:${legacyBuildReceipt.buildFingerprint.sha256}`,
+          beforeAssetDigest: `sha256:${canaryBuildReceipt.assetFingerprint.sha256}`,
+          afterAssetDigest: `sha256:${legacyBuildReceipt.assetFingerprint.sha256}`,
+          beforeBuildInputDigest: `sha256:${canaryBuildReceipt.inputFingerprint.sha256}`,
+          afterBuildInputDigest: `sha256:${legacyBuildReceipt.inputFingerprint.sha256}`,
+          beforeGitRevision: canaryBuildReceipt.git.commit,
+          afterGitRevision: legacyBuildReceipt.git.commit,
+          profileId,
+          profileDirectorySha256,
+          scopeKey,
+          origin: canaryOrigin,
+          stoppedAt: canaryServerReceipts.preview?.stoppedAt,
+          startedAt: legacyServersAfter.preview?.startedAt,
+          beforeProcess: Object.freeze({
+            instanceId: beforeServerInstanceId,
+            pid: canaryServerReceipts.preview?.pid,
+            exited: canaryServerReceipts.preview?.exited === true
+              && canaryServerReceipts.api?.exited === true,
+            stoppedAt: canaryServerReceipts.preview?.stoppedAt,
+          }),
+          afterProcess: Object.freeze({
+            instanceId: afterServerInstanceId,
+            pid: legacyServersAfter.preview?.pid,
+            started: true,
+            running: legacyServersAfter.preview?.stoppedAt === null
+              && legacyServersAfter.api?.stoppedAt === null,
+            startedAt: legacyServersAfter.preview?.startedAt,
+            readyAt: legacyServersAfter.preview?.readyAt,
+          }),
+          beforeProcesses: canaryServerReceipts,
+          afterProcesses: legacyServersAfter,
+          retiredPorts: retiredPortReceipts,
+        });
+        const receipt = Object.freeze({
+          kind: "controlled-canary-to-legacy-restart",
+          runId,
+          requestedAt,
+          completedAt: isoNow(),
+          profileId,
+          profileDirectorySha256,
+          origin: canaryOrigin,
+          scopeKey,
+          builds: Object.freeze({
+            canary: canaryBuildReceipt,
+            legacy: legacyBuildReceipt,
+          }),
+          buildEvidence: Object.freeze({
+            canary: canaryBuildEvidence,
+            legacy: legacyBuildEvidence,
+          }),
+          configurations: Object.freeze({
+            canary: canaryConfiguration,
+            legacy: legacyConfiguration,
+          }),
+          restartReceipts: Object.freeze({
+            browser: browserRestart,
+            server: serverRestart,
+          }),
+          canaryBuildReceipt,
+          legacyBuildReceipt,
+          browserRestart,
+          serverRestart,
+          canaryRetirement,
+        });
+        restartHistory.push(receipt);
+        return receipt;
+      })();
+      return restartPromise;
+    };
     return Object.freeze({
       kind: "controlled-production-cdp",
       runId,
       startedAt,
       readyAt: isoNow(),
       configuration,
+      profileId,
+      profileDirectorySha256,
       managedOrigin: servers.origin,
       mockMeta: stableObject(servers.mockMeta),
       buildReceipt,
+      currentConfiguration: () => currentConfiguration,
+      currentBuildReceipt: () => currentBuildReceipt,
       browserVersion: browser.browserVersion,
       browserWindow: browser.windowEvidence,
       initialBuildEvidence,
@@ -7708,7 +8136,8 @@ export async function startControlledProductionCdp(options = {}) {
       prepareIndexedDbBlockedFault: (binding) => browser.prepareIndexedDbBlockedFault(binding),
       releaseIndexedDbBlockedFault: (binding) => browser.releaseIndexedDbBlockedFault(binding),
       reloadManagedDocument: (binding) => browser.reloadManagedDocument(binding),
-      settleAuthoritativeState: assertManagedCaptureState,
+      restartWithLegacyBuild,
+      settleAuthoritativeState: () => assertManagedCaptureState({ requireOriginGuardSettled: true }),
       verifyWindow: async () => {
         await assertManagedCaptureState();
         const evidence = await verifyControlledBrowserWindow(
@@ -7739,7 +8168,7 @@ export async function startControlledProductionCdp(options = {}) {
         return readBrowserBuildEvidence(
           browser.cdp,
           servers.url,
-          buildReceipt,
+          currentBuildReceipt,
           browser.assetTracker,
           browser.originGuard,
           browser.workerDiagnostics,

@@ -1320,7 +1320,10 @@ export function useDrawing({
 
   const symbolRef = useRef(symbol);
 
-  useEffect(() => {
+  // Pointer handlers read these refs synchronously. A passive effect leaves a
+  // small post-commit window where the toolbar already shows the new tool but
+  // the chart still handles the next pointer with the previous one.
+  useLayoutEffect(() => {
     onToolChangeRef.current = onToolChange;
     activeToolRef.current = activeTool;
     penColorRef.current = penColor;

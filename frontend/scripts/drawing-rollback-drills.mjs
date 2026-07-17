@@ -6,6 +6,10 @@ const DRAWING_WORKER_SCHEMA_VERSION = 1;
 const DRAWING_DOCUMENT_RECORD_SCHEMA_VERSION = 1;
 const DRAWING_DOCUMENT_MANIFEST_SCHEMA_VERSION = 1;
 const DRAWING_DOCUMENT_DATABASE_NAME = "candlescope-drawings-v2";
+const DEVICE_METRICS_DPR_EPSILON = 0.001;
+const DEVICE_METRICS_CSS_EPSILON = 0.01;
+const DEVICE_METRICS_BACKING_PIXEL_EPSILON = 1;
+const NATIVE_RECEIPT_CLOCK_SKEW_MS = 2;
 
 const DRAWING_KINDS = Object.freeze([
   "line",
@@ -17,6 +21,18 @@ const DRAWING_KINDS = Object.freeze([
   "shape",
   "freehand",
   "highlighter",
+]);
+
+const CANARY_TO_LEGACY_UI_PLAN = Object.freeze([
+  Object.freeze({ kind: "line", tool: "line-segment" }),
+  Object.freeze({ kind: "axis-line", tool: "line-horizontal" }),
+  Object.freeze({ kind: "angle-measure", tool: "angle-measure" }),
+  Object.freeze({ kind: "text", tool: "text" }),
+  Object.freeze({ kind: "fibonacci", tool: "fibonacci" }),
+  Object.freeze({ kind: "position", tool: "position-long" }),
+  Object.freeze({ kind: "shape", tool: "shape-rectangle" }),
+  Object.freeze({ kind: "highlighter", tool: "highlighter" }),
+  Object.freeze({ kind: "freehand", tool: "pen" }),
 ]);
 
 const EXPORT_CHECKPOINT_TYPES = Object.freeze([
@@ -189,6 +205,14 @@ function finiteNumber(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function numbersNear(left, right, epsilon) {
+  return finiteNumber(left) !== null
+    && finiteNumber(right) !== null
+    && Number.isFinite(epsilon)
+    && epsilon >= 0
+    && Math.abs(left - right) <= epsilon;
+}
+
 function integer(value) {
   return Number.isInteger(value) ? value : null;
 }
@@ -266,6 +290,22 @@ function sameWorkerIdentity(left, right) {
     && sameStamp(left.stamp, right.stamp);
 }
 
+function validOffscreenRequestSequence(value, completedIdentity) {
+  if (!Array.isArray(value) || value.length === 0
+    || !sameWorkerIdentity(value.at(-1), completedIdentity)) return false;
+  return value.every((identity, index) => {
+    if (!validWorkerIdentity(identity)) return false;
+    if (index === 0) return true;
+    const previous = value[index - 1];
+    return identity.jobId > previous.jobId
+      && identity.generation > previous.generation
+      && identity.stamp.themeRevision > previous.stamp.themeRevision
+      && STAMP_FIELDS
+        .filter((field) => field !== "themeRevision")
+        .every((field) => identity.stamp[field] === previous.stamp[field]);
+  });
+}
+
 function validCounterPair(value) {
   const pair = objectValue(value);
   return pair !== null
@@ -300,13 +340,72 @@ function validRestartReceipt(value, kind, beforeInstanceId, afterInstanceId, bin
     && sameNonEmptyString(receipt.beforeInstanceId, beforeInstanceId)
     && sameNonEmptyString(receipt.afterInstanceId, afterInstanceId)
     && receipt.beforeInstanceId !== receipt.afterInstanceId
+    && sameNonEmptyString(receipt.beforeBuildId, binding?.beforeBuildId)
+    && sameNonEmptyString(receipt.afterBuildId, binding?.afterBuildId)
     && sameSha256Digest(receipt.beforeBuildFingerprint, binding?.beforeBuildFingerprint)
     && sameSha256Digest(receipt.afterBuildFingerprint, binding?.afterBuildFingerprint)
+    && sameSha256Digest(receipt.beforeAssetDigest, binding?.beforeAssetDigest)
+    && sameSha256Digest(receipt.afterAssetDigest, binding?.afterAssetDigest)
+    && sameSha256Digest(receipt.beforeBuildInputDigest, binding?.beforeBuildInputDigest)
+    && sameSha256Digest(receipt.afterBuildInputDigest, binding?.afterBuildInputDigest)
+    && sameNonEmptyString(receipt.beforeGitRevision, binding?.beforeGitRevision)
+    && sameNonEmptyString(receipt.afterGitRevision, binding?.afterGitRevision)
     && sameNonEmptyString(receipt.profileId, binding?.profileId)
+    && sameNonEmptyString(receipt.origin, binding?.origin)
     && sameNonEmptyString(receipt.scopeKey, binding?.scopeKey)
     && stoppedAtValid
     && startedAtValid
     && Date.parse(receipt.startedAt) >= Date.parse(receipt.stoppedAt);
+}
+
+function validRestartProcessEvidence(receipt, beforeInstanceId, afterInstanceId) {
+  const value = objectValue(receipt);
+  const before = objectValue(value?.beforeProcess);
+  const after = objectValue(value?.afterProcess);
+  return value !== null
+    && before !== null
+    && after !== null
+    && sameNonEmptyString(before.instanceId, beforeInstanceId)
+    && sameNonEmptyString(after.instanceId, afterInstanceId)
+    && safePositiveInteger(before.pid) !== null
+    && safePositiveInteger(after.pid) !== null
+    && before.pid !== after.pid
+    && before.exited === true
+    && after.started === true
+    && after.running === true
+    && validTimestamp(before.stoppedAt)
+    && validTimestamp(after.startedAt)
+    && validTimestamp(after.readyAt)
+    && before.stoppedAt === value.stoppedAt
+    && after.startedAt === value.startedAt
+    && Date.parse(after.readyAt) >= Date.parse(after.startedAt);
+}
+
+function validCrossBuildPhaseAuthority(value, build) {
+  const authority = objectValue(value);
+  const phase = objectValue(build);
+  return authority !== null
+    && phase !== null
+    && authority.kind === "controlled-browser-build-authority"
+    && authority.authoritative === true
+    && authority.assetBuildAuthoritative === true
+    && validTimestamp(authority.capturedAt)
+    && sameNonEmptyString(authority.buildId, phase.buildId)
+    && sameSha256Digest(authority.buildFingerprint, phase.buildFingerprint)
+    && sameSha256Digest(authority.assetDigest, phase.assetDigest)
+    && sameSha256Digest(authority.currentAssetDigest, phase.assetDigest)
+    && sameSha256Digest(authority.buildInputDigest, phase.buildInputDigest)
+    && sameSha256Digest(authority.currentBuildInputDigest, phase.buildInputDigest)
+    && sameNonEmptyString(authority.gitRevision, phase.gitRevision)
+    && sameNonEmptyString(authority.managedOrigin, phase.origin)
+    && sameNonEmptyString(authority.observedOrigin, phase.origin)
+    && sameNonEmptyString(authority.profileId, phase.profileId)
+    && sameNonEmptyString(authority.browserInstanceId, phase.browserInstanceId)
+    && sameNonEmptyString(authority.serverInstanceId, phase.serverInstanceId)
+    && sameNonEmptyString(authority.documentAuthority, phase.documentAuthority)
+    && sameNonEmptyString(authority.engineMode, phase.engineMode)
+    && sameNonEmptyString(authority.interactionSurfaceMode, phase.interactionSurfaceMode)
+    && sameNonEmptyString(authority.rasterBackend, phase.rasterBackend);
 }
 
 function timestampsAreOrdered(values) {
@@ -584,6 +683,9 @@ function validateOffscreenUnsupported(artifact) {
   const firstRequest = objectValue(observations?.firstRequest);
   const secondRequest = objectValue(observations?.secondRequest);
   const workerRoundTrips = objectValue(observations?.workerRoundTrips);
+  const workerRequestDelta = counterDelta(observations?.workerRequests);
+  const supersededWorkerRequestDelta = counterDelta(observations?.supersededWorkerRequests);
+  const workerRequestHeaders = observations?.workerRequestHeaders;
   const roundTripsBefore = integer(workerRoundTrips?.before);
   const roundTripsAfterFirst = integer(workerRoundTrips?.afterFirstRequest);
   const roundTripsAfterSecond = integer(workerRoundTrips?.afterSecondRequest);
@@ -636,6 +738,31 @@ function validateOffscreenUnsupported(artifact) {
   addFailure(failures, exactZero(runtime?.sceneRuntimeFaultCount), "offscreen-runtime-fault-observed-or-missing");
   addFailure(failures, exactZero(runtime?.legacyFallbackSucceededCount), "offscreen-legacy-fallback-observed-or-missing");
   addFailure(failures, counterDelta(observations?.workerCreations) === 1, "drawing-worker-creation-count-invalid");
+  addFailure(
+    failures,
+    workerRequestDelta !== null && workerRequestDelta >= 1,
+    "offscreen-worker-request-count-invalid",
+  );
+  addFailure(
+    failures,
+    workerRequestDelta !== null
+      && supersededWorkerRequestDelta !== null
+      && supersededWorkerRequestDelta === workerRequestDelta - 1,
+    "offscreen-superseded-worker-request-count-invalid",
+  );
+  addFailure(
+    failures,
+    Array.isArray(workerRequestHeaders)
+      && workerRequestHeaders.length === workerRequestDelta
+      && validOffscreenRequestSequence(workerRequestHeaders, firstRequest?.header),
+    "offscreen-worker-request-sequence-invalid",
+  );
+  addFailure(
+    failures,
+    workerRequestDelta !== null && runtime?.workerJobDelta === workerRequestDelta,
+    "offscreen-worker-job-count-invalid",
+  );
+  addFailure(failures, runtime?.workerResultDelta === 1, "offscreen-worker-result-count-invalid");
   addFailure(failures, observations?.offscreenSupported === false, "offscreen-capability-not-disabled");
   addFailure(failures, nonEmptyString(firstRequest?.requestId), "offscreen-first-request-id-missing");
   addFailure(failures, nonEmptyString(secondRequest?.requestId), "offscreen-second-request-id-missing");
@@ -653,6 +780,14 @@ function validateOffscreenUnsupported(artifact) {
   addFailure(failures, secondRequest?.resultKind === "main-thread", "offscreen-second-request-result-not-main-thread");
   addFailure(failures, secondRequest?.backendAfter === "main-thread", "offscreen-second-request-not-sticky-after");
   addFailure(failures, observations?.finalBackend === "main-thread", "offscreen-final-backend-not-main-thread");
+  addFailure(failures, exactZero(runtime?.pendingDropDelta), "offscreen-pending-drop-observed-or-missing");
+  addFailure(failures, exactZero(runtime?.staleResultDropDelta), "offscreen-stale-result-drop-observed-or-missing");
+  addFailure(
+    failures,
+    safePositiveInteger(runtime?.queueDepthMax) !== null && runtime.queueDepthMax <= 2,
+    "offscreen-queue-depth-bound-invalid",
+  );
+  addFailure(failures, runtime?.inFlightMax === 1, "offscreen-in-flight-bound-invalid");
   addFailure(
     failures,
     roundTripsBefore !== null
@@ -978,9 +1113,14 @@ function validateQuotaNativeReceipt(failures, value, context) {
       context.afterFailure?.observedAt,
       clearCommand?.observedAt,
       cleanup?.completedAt,
-      restored?.observedAt,
-      context.retry?.attemptedAt,
-    ]),
+    ])
+      && validTimestamp(restored?.observedAt)
+      && Date.parse(restored.observedAt) + NATIVE_RECEIPT_CLOCK_SKEW_MS
+        >= Date.parse(cleanup.completedAt)
+      && timestampsAreOrdered([
+        restored.observedAt,
+        context.retry?.attemptedAt,
+      ]),
     "indexeddb-quota-native-receipt-order-invalid",
   );
 }
@@ -2190,33 +2330,123 @@ function validateSeriesRebuildBeforeExport(artifact) {
 function validateContinuousDprResize(artifact) {
   const failures = validateDedicatedCommon("continuous-dpr-resize", artifact);
   const transitions = Array.isArray(artifact?.transitions) ? artifact.transitions : [];
-  const observedDprs = new Set(transitions.map((transition) => finiteNumber(transition?.dpr)));
+  const requestedDprs = new Set(transitions.map((transition) => finiteNumber(transition?.requestedDpr)));
   addFailure(failures, artifact?.injection?.kind === "continuous-dpr-resize", "wrong-dpr-resize-injection");
   addFailure(failures, transitions.length >= 6, "continuous-transition-coverage-too-small");
-  addFailure(failures, observedDprs.has(1) && observedDprs.has(1.5) && observedDprs.has(2), "dpr-matrix-incomplete");
+  addFailure(failures, requestedDprs.has(1) && requestedDprs.has(1.5) && requestedDprs.has(2), "dpr-matrix-incomplete");
   addFailure(
     failures,
-    new Set(transitions.map((transition) => `${transition?.widthCssPx}x${transition?.heightCssPx}`)).size >= 3,
+    new Set(transitions.map((transition) => (
+      `${transition?.requestedViewport?.width}x${transition?.requestedViewport?.height}`
+    ))).size >= 3,
     "resize-matrix-incomplete",
   );
   for (const [index, transition] of transitions.entries()) {
     const prefix = `transition-${index}`;
+    const requestedViewport = objectValue(transition?.requestedViewport);
+    const observedWindow = objectValue(transition?.observedWindow);
+    const overlay = objectValue(transition?.overlay);
     const requestedStamp = objectValue(transition?.lastRequestedStamp);
     const previousRequestedStamp = index > 0
       ? objectValue(transitions[index - 1]?.lastRequestedStamp)
       : null;
-    addFailure(failures, finiteNumber(transition?.dpr) > 0, `${prefix}-dpr-invalid`);
+    addFailure(failures, finiteNumber(transition?.requestedDpr) > 0, `${prefix}-requested-dpr-invalid`);
+    addFailure(
+      failures,
+      requestedViewport !== null
+        && safePositiveInteger(requestedViewport.width) !== null
+        && safePositiveInteger(requestedViewport.height) !== null,
+      `${prefix}-requested-viewport-invalid`,
+    );
+    addFailure(
+      failures,
+      observedWindow !== null
+        && observedWindow.headed === true
+        && observedWindow.windowState === "normal"
+        && observedWindow.visibilityState === "visible"
+        && observedWindow.hidden === false
+        && observedWindow.innerWidth === requestedViewport?.width
+        && observedWindow.innerHeight === requestedViewport?.height
+        && numbersNear(
+          observedWindow.devicePixelRatio,
+          transition?.requestedDpr,
+          DEVICE_METRICS_DPR_EPSILON,
+        ),
+      `${prefix}-observed-window-mismatch`,
+    );
+    addFailure(
+      failures,
+      finiteNumber(transition?.dpr) > 0
+        && numbersNear(
+          transition.dpr,
+          observedWindow?.devicePixelRatio,
+          DEVICE_METRICS_DPR_EPSILON,
+        )
+        && numbersNear(
+          transition.dpr,
+          transition?.requestedDpr,
+          DEVICE_METRICS_DPR_EPSILON,
+        ),
+      `${prefix}-dpr-invalid`,
+    );
     addFailure(failures, finiteNumber(transition?.widthCssPx) > 0, `${prefix}-width-invalid`);
     addFailure(failures, finiteNumber(transition?.heightCssPx) > 0, `${prefix}-height-invalid`);
-    addFailure(failures, transition?.overlayDprSynchronized === true, `${prefix}-overlay-dpr-not-synchronized`);
+    addFailure(
+      failures,
+      transition?.overlayDprSynchronized === true
+        && overlay !== null
+        && overlay.synchronized === true
+        && numbersNear(
+          overlay.devicePixelRatio,
+          observedWindow?.devicePixelRatio,
+          DEVICE_METRICS_DPR_EPSILON,
+        )
+        && numbersNear(
+          overlay.devicePixelRatio,
+          transition?.requestedDpr,
+          DEVICE_METRICS_DPR_EPSILON,
+        )
+        && numbersNear(
+          overlay.widthCssPx,
+          transition?.widthCssPx,
+          DEVICE_METRICS_CSS_EPSILON,
+        )
+        && numbersNear(
+          overlay.heightCssPx,
+          transition?.heightCssPx,
+          DEVICE_METRICS_CSS_EPSILON,
+        )
+        && safePositiveInteger(overlay.backingWidthPx) !== null
+        && safePositiveInteger(overlay.backingHeightPx) !== null
+        && Math.abs(
+          overlay.backingWidthPx - Math.round(overlay.widthCssPx * overlay.devicePixelRatio),
+        ) <= DEVICE_METRICS_BACKING_PIXEL_EPSILON
+        && Math.abs(
+          overlay.backingHeightPx - Math.round(overlay.heightCssPx * overlay.devicePixelRatio),
+        ) <= DEVICE_METRICS_BACKING_PIXEL_EPSILON,
+      `${prefix}-overlay-dpr-not-synchronized`,
+    );
     addFailure(failures, transition?.workerResultCurrent === true, `${prefix}-worker-result-not-current`);
     addFailure(failures, transition?.queueDepthCurrent === 0, `${prefix}-queue-not-converged`);
     addFailure(failures, sameStamp(transition?.lastRequestedStamp, transition?.lastPublishedStamp), `${prefix}-stamp-not-current`);
     addFailure(
       failures,
-      requestedStamp?.dpr === transition?.dpr
-        && requestedStamp?.widthCssPx === transition?.widthCssPx
-        && requestedStamp?.heightCssPx === transition?.heightCssPx,
+      numbersNear(requestedStamp?.dpr, transition?.dpr, DEVICE_METRICS_DPR_EPSILON)
+        && numbersNear(
+          requestedStamp?.dpr,
+          observedWindow?.devicePixelRatio,
+          DEVICE_METRICS_DPR_EPSILON,
+        )
+        && numbersNear(
+          requestedStamp?.widthCssPx,
+          transition?.widthCssPx,
+          DEVICE_METRICS_CSS_EPSILON,
+        )
+        && numbersNear(
+          requestedStamp?.heightCssPx,
+          transition?.heightCssPx,
+          DEVICE_METRICS_CSS_EPSILON,
+        ),
       `${prefix}-stamp-viewport-mismatch`,
     );
     if (previousRequestedStamp) {
@@ -2245,6 +2475,13 @@ function validateContinuousDprResize(artifact) {
 
 function validateCanaryToLegacySnapshot(artifact) {
   const failures = validateDedicatedCommon("canary-to-legacy-snapshot", artifact);
+  const buildAuthority = objectValue(artifact?.buildAuthority);
+  const workerLifecycle = objectValue(buildAuthority?.workerLifecycle);
+  const crossBuildAuthority = objectValue(buildAuthority?.crossBuild);
+  const canaryAuthority = objectValue(crossBuildAuthority?.canary);
+  const legacyAuthority = objectValue(crossBuildAuthority?.legacy);
+  const profileAuthority = objectValue(crossBuildAuthority?.profile);
+  const originAuthority = objectValue(crossBuildAuthority?.origin);
   const builds = objectValue(artifact?.builds);
   const canary = objectValue(builds?.canary);
   const legacy = objectValue(builds?.legacy);
@@ -2252,12 +2489,59 @@ function validateCanaryToLegacySnapshot(artifact) {
   const writeReceipt = objectValue(snapshot?.writeReceipt);
   const readReceipt = objectValue(snapshot?.readReceipt);
   const restartReceipts = objectValue(artifact?.restartReceipts);
+  const retirement = objectValue(artifact?.retirement);
+  const observations = objectValue(artifact?.observations);
+  const ui = objectValue(observations?.ui);
+  const uiOperations = Array.isArray(ui?.operations) ? ui.operations : [];
+  const writeManifest = objectValue(writeReceipt?.manifest);
+  const writeEntityIds = Array.isArray(writeReceipt?.entityIds) ? writeReceipt.entityIds : [];
+  const writeZOrder = Array.isArray(writeReceipt?.zOrder) ? writeReceipt.zOrder : [];
+  const writeCanonicalEntityIds = Array.isArray(writeReceipt?.canonicalEntityIds)
+    ? writeReceipt.canonicalEntityIds
+    : [];
+  const writeCanonicalEntityDigests = Array.isArray(writeReceipt?.canonicalEntityDigests)
+    ? writeReceipt.canonicalEntityDigests
+    : [];
+  const writeCanonicalZOrder = Array.isArray(writeReceipt?.canonicalZOrder)
+    ? writeReceipt.canonicalZOrder
+    : [];
+  const readEntityIds = Array.isArray(readReceipt?.entityIds) ? readReceipt.entityIds : [];
+  const readZOrder = Array.isArray(readReceipt?.zOrder) ? readReceipt.zOrder : [];
+  const initialEntityIds = Array.isArray(ui?.initialEntityIds) ? ui.initialEntityIds : [];
+  const initialEntityDigests = Array.isArray(ui?.initialEntityDigests)
+    ? ui.initialEntityDigests
+    : [];
+  const sameOrderedStrings = (left, right) => left.length === right.length
+    && left.every((value, index) => nonEmptyString(value) && value === right[index]);
+  const sameKindCounts = (left, right) => objectValue(left) !== null
+    && objectValue(right) !== null
+    && DRAWING_KINDS.every((kind) => (
+      safeNonNegativeInteger(left[kind]) !== null && left[kind] === right[kind]
+    ))
+    && Object.keys(left).every((kind) => DRAWING_KINDS.includes(kind))
+    && Object.keys(right).every((kind) => DRAWING_KINDS.includes(kind));
   const renderedKinds = Array.isArray(readReceipt?.renderedKinds)
     ? readReceipt.renderedKinds
     : [];
   addFailure(failures, artifact?.injection?.kind === "canary-build-to-legacy-build", "wrong-cross-build-injection");
   addFailure(failures, canary?.mode === "scene-canary", "canary-build-mode-mismatch");
   addFailure(failures, legacy?.mode === "legacy", "legacy-build-mode-mismatch");
+  addFailure(failures, canary?.documentAuthority === "document", "canary-document-authority-mismatch");
+  addFailure(failures, legacy?.documentAuthority === "legacy", "legacy-document-authority-mismatch");
+  addFailure(
+    failures,
+    canary?.engineMode === "scene-canary"
+      && canary?.interactionSurfaceMode === "overlay"
+      && canary?.rasterBackend === "worker",
+    "canary-build-configuration-invalid",
+  );
+  addFailure(
+    failures,
+    legacy?.engineMode === "legacy"
+      && legacy?.interactionSurfaceMode === "legacy"
+      && legacy?.rasterBackend === "main-thread",
+    "legacy-build-configuration-invalid",
+  );
   addFailure(failures, canary?.productionBuild === true && legacy?.productionBuild === true, "cross-build-production-proof-missing");
   addFailure(failures, nonEmptyString(canary?.sourceRevision), "canary-source-revision-missing");
   addFailure(failures, nonEmptyString(legacy?.sourceRevision), "legacy-source-revision-missing");
@@ -2272,6 +2556,15 @@ function validateCanaryToLegacySnapshot(artifact) {
   );
   addFailure(failures, sha256Digest(canary?.buildFingerprint), "canary-build-fingerprint-invalid-or-missing");
   addFailure(failures, sha256Digest(legacy?.buildFingerprint), "legacy-build-fingerprint-invalid-or-missing");
+  addFailure(failures, nonEmptyString(canary?.buildId), "canary-build-id-missing");
+  addFailure(failures, nonEmptyString(legacy?.buildId), "legacy-build-id-missing");
+  addFailure(
+    failures,
+    nonEmptyString(canary?.buildId)
+      && nonEmptyString(legacy?.buildId)
+      && canary.buildId !== legacy.buildId,
+    "cross-build-ids-not-distinct",
+  );
   addFailure(
     failures,
     sha256Digest(canary?.buildFingerprint)
@@ -2288,19 +2581,126 @@ function validateCanaryToLegacySnapshot(artifact) {
       && canary.assetDigest !== legacy.assetDigest,
     "cross-build-asset-digests-not-distinct",
   );
+  addFailure(failures, sha256Digest(canary?.buildInputDigest), "canary-build-input-digest-invalid-or-missing");
+  addFailure(failures, sha256Digest(legacy?.buildInputDigest), "legacy-build-input-digest-invalid-or-missing");
+  addFailure(
+    failures,
+    sameSha256Digest(canary?.buildInputDigest, legacy?.buildInputDigest),
+    "cross-build-input-digests-mismatch",
+  );
+  addFailure(failures, nonEmptyString(canary?.gitRevision), "canary-git-revision-missing");
+  addFailure(failures, nonEmptyString(legacy?.gitRevision), "legacy-git-revision-missing");
   addFailure(failures, sameNonEmptyString(canary?.origin, legacy?.origin), "cross-build-origin-mismatch");
   addFailure(failures, sameNonEmptyString(canary?.profileId, legacy?.profileId), "cross-build-profile-mismatch");
   addFailure(
     failures,
+    crossBuildAuthority?.kind === "controlled-cross-build-authority"
+      && crossBuildAuthority.authoritative === true,
+    "cross-build-authority-invalid-or-missing",
+  );
+  addFailure(
+    failures,
+    validCrossBuildPhaseAuthority(canaryAuthority, canary),
+    "cross-build-canary-authority-invalid",
+  );
+  addFailure(
+    failures,
+    validCrossBuildPhaseAuthority(legacyAuthority, legacy),
+    "cross-build-legacy-authority-invalid",
+  );
+  addFailure(
+    failures,
+    buildAuthority?.documentAuthority === "legacy"
+      && buildAuthority?.engineMode === "legacy"
+      && buildAuthority?.interactionSurfaceMode === "legacy"
+      && buildAuthority?.rasterBackend === "main-thread"
+      && sameNonEmptyString(buildAuthority?.buildId, legacy?.buildId)
+      && sameSha256Digest(buildAuthority?.buildFingerprint, legacy?.buildFingerprint)
+      && sameSha256Digest(buildAuthority?.assetDigest, legacy?.assetDigest)
+      && sameSha256Digest(buildAuthority?.currentAssetDigest, legacy?.assetDigest)
+      && sameSha256Digest(buildAuthority?.buildInputDigest, legacy?.buildInputDigest)
+      && sameSha256Digest(buildAuthority?.currentBuildInputDigest, legacy?.buildInputDigest)
+      && sameNonEmptyString(buildAuthority?.gitRevision, legacy?.gitRevision)
+      && sameNonEmptyString(buildAuthority?.managedOrigin, legacy?.origin)
+      && sameNonEmptyString(buildAuthority?.observedOrigin, legacy?.origin)
+      && sameNonEmptyString(buildAuthority?.profileId, legacy?.profileId)
+      && sameNonEmptyString(buildAuthority?.browserInstanceId, legacy?.browserInstanceId)
+      && sameNonEmptyString(buildAuthority?.serverInstanceId, legacy?.serverInstanceId),
+    "cross-build-final-authority-not-legacy",
+  );
+  addFailure(
+    failures,
+    workerLifecycle?.kind === "legacy-no-drawing-worker-target"
+      && workerLifecycle?.drawingWorkerTargetCount === 0
+      && workerLifecycle?.activeDrawingWorkerTargetCount === 0
+      && workerLifecycle?.detachedDrawingWorkerTargetCount === 0
+      && Array.isArray(workerLifecycle?.targets)
+      && workerLifecycle.targets.length === 0,
+    "legacy-build-worker-lifecycle-invalid",
+  );
+  addFailure(
+    failures,
+    profileAuthority?.kind === "controlled-shared-browser-profile"
+      && profileAuthority?.ownership === "controlled-temporary-profile"
+      && profileAuthority?.retainedAcrossRestart === true
+      && profileAuthority?.canaryObserved === true
+      && profileAuthority?.legacyObserved === true
+      && sameNonEmptyString(profileAuthority?.profileId, canary?.profileId)
+      && sameNonEmptyString(profileAuthority?.profileId, legacy?.profileId)
+      && typeof profileAuthority?.profileDirectorySha256 === "string"
+      && /^[a-f0-9]{64}$/.test(profileAuthority.profileDirectorySha256)
+      && sameNonEmptyString(profileAuthority?.canaryBrowserInstanceId, canary?.browserInstanceId)
+      && sameNonEmptyString(profileAuthority?.legacyBrowserInstanceId, legacy?.browserInstanceId),
+    "cross-build-profile-authority-invalid",
+  );
+  addFailure(
+    failures,
+    retirement?.kind === "controlled-canary-retirement"
+      && retirement?.schemaVersion === "candlescope-controlled-canary-retirement/v1"
+      && retirement?.complete === true
+      && retirement?.processCount === 3
+      && retirement?.allProcessesExited === true
+      && retirement?.diagnosticsClosed === true
+      && retirement?.portCount === 3
+      && retirement?.allOwnedPortsClosed === true
+      && retirement?.profileRetained === true
+      && retirement?.storageFaultCleanupComplete === true
+      && sameNonEmptyString(retirement?.profileId, profileAuthority?.profileId)
+      && retirement?.profileDirectorySha256 === profileAuthority?.profileDirectorySha256
+      && Array.isArray(retirement?.failures)
+      && retirement.failures.length === 0,
+    "cross-build-canary-retirement-invalid",
+  );
+  addFailure(
+    failures,
+    originAuthority?.kind === "controlled-cross-build-same-origin-authority"
+      && originAuthority?.sameOriginStorageRetained === true
+      && sameNonEmptyString(originAuthority?.managedOrigin, canary?.origin)
+      && sameNonEmptyString(originAuthority?.managedOrigin, legacy?.origin)
+      && sameNonEmptyString(originAuthority?.canaryObservedOrigin, canary?.origin)
+      && sameNonEmptyString(originAuthority?.legacyObservedOrigin, legacy?.origin),
+    "cross-build-origin-authority-invalid",
+  );
+  addFailure(
+    failures,
     validRestartReceipt(
       restartReceipts?.browser,
-      "browser",
+      "browser-restart",
       canary?.browserInstanceId,
       legacy?.browserInstanceId,
       {
+        beforeBuildId: canary?.buildId,
+        afterBuildId: legacy?.buildId,
         beforeBuildFingerprint: canary?.buildFingerprint,
         afterBuildFingerprint: legacy?.buildFingerprint,
+        beforeAssetDigest: canary?.assetDigest,
+        afterAssetDigest: legacy?.assetDigest,
+        beforeBuildInputDigest: canary?.buildInputDigest,
+        afterBuildInputDigest: legacy?.buildInputDigest,
+        beforeGitRevision: canary?.gitRevision,
+        afterGitRevision: legacy?.gitRevision,
         profileId: canary?.profileId,
+        origin: canary?.origin,
         scopeKey: writeReceipt?.scopeKey,
       },
     ),
@@ -2310,36 +2710,255 @@ function validateCanaryToLegacySnapshot(artifact) {
     failures,
     validRestartReceipt(
       restartReceipts?.server,
-      "server",
+      "server-restart",
       canary?.serverInstanceId,
       legacy?.serverInstanceId,
       {
+        beforeBuildId: canary?.buildId,
+        afterBuildId: legacy?.buildId,
         beforeBuildFingerprint: canary?.buildFingerprint,
         afterBuildFingerprint: legacy?.buildFingerprint,
+        beforeAssetDigest: canary?.assetDigest,
+        afterAssetDigest: legacy?.assetDigest,
+        beforeBuildInputDigest: canary?.buildInputDigest,
+        afterBuildInputDigest: legacy?.buildInputDigest,
+        beforeGitRevision: canary?.gitRevision,
+        afterGitRevision: legacy?.gitRevision,
         profileId: canary?.profileId,
+        origin: canary?.origin,
         scopeKey: writeReceipt?.scopeKey,
       },
     ),
     "cross-build-server-restart-receipt-invalid-or-missing",
   );
+  addFailure(
+    failures,
+    validRestartProcessEvidence(
+      restartReceipts?.browser,
+      canary?.browserInstanceId,
+      legacy?.browserInstanceId,
+    ),
+    "cross-build-browser-restart-process-evidence-invalid",
+  );
+  addFailure(
+    failures,
+    validRestartProcessEvidence(
+      restartReceipts?.server,
+      canary?.serverInstanceId,
+      legacy?.serverInstanceId,
+    ),
+    "cross-build-server-restart-process-evidence-invalid",
+  );
   addFailure(failures, writeReceipt?.kind === "compatibility-write", "compatibility-write-receipt-invalid-or-missing");
   addFailure(failures, readReceipt?.kind === "legacy-read", "legacy-read-receipt-invalid-or-missing");
   addFailure(
     failures,
-    sameSha256Digest(writeReceipt?.buildFingerprint, canary?.buildFingerprint)
+    writeReceipt?.documentAuthority === "document"
+      && sameNonEmptyString(writeReceipt?.buildId, canary?.buildId)
+      && sameSha256Digest(writeReceipt?.buildFingerprint, canary?.buildFingerprint)
+      && sameSha256Digest(writeReceipt?.assetDigest, canary?.assetDigest)
+      && sameSha256Digest(writeReceipt?.buildInputDigest, canary?.buildInputDigest)
+      && sameNonEmptyString(writeReceipt?.gitRevision, canary?.gitRevision)
       && sameNonEmptyString(writeReceipt?.profileId, canary?.profileId)
+      && sameNonEmptyString(writeReceipt?.origin, canary?.origin)
       && nonEmptyString(writeReceipt?.scopeKey),
     "compatibility-write-receipt-build-binding-invalid",
   );
   addFailure(
     failures,
-    sameSha256Digest(readReceipt?.buildFingerprint, legacy?.buildFingerprint)
+    readReceipt?.documentAuthority === "legacy"
+      && sameNonEmptyString(readReceipt?.buildId, legacy?.buildId)
+      && sameSha256Digest(readReceipt?.buildFingerprint, legacy?.buildFingerprint)
+      && sameSha256Digest(readReceipt?.assetDigest, legacy?.assetDigest)
+      && sameSha256Digest(readReceipt?.buildInputDigest, legacy?.buildInputDigest)
+      && sameNonEmptyString(readReceipt?.gitRevision, legacy?.gitRevision)
       && sameNonEmptyString(readReceipt?.profileId, legacy?.profileId)
+      && sameNonEmptyString(readReceipt?.origin, legacy?.origin)
       && sameNonEmptyString(readReceipt?.scopeKey, writeReceipt?.scopeKey),
     "legacy-read-receipt-build-binding-invalid",
   );
   addFailure(failures, validTimestamp(writeReceipt?.observedAt), "compatibility-write-timestamp-invalid");
   addFailure(failures, validTimestamp(readReceipt?.observedAt), "legacy-read-timestamp-invalid");
+  const initialEntityCount = safeNonNegativeInteger(ui?.initialEntityCount);
+  const finalEntityCount = safeNonNegativeInteger(ui?.finalEntityCount);
+  const initialEntityIdSet = new Set(initialEntityIds);
+  const initialEntityDigestById = new Map(initialEntityIds.map(
+    (id, index) => [id, initialEntityDigests[index]],
+  ));
+  const initialIdentityContractPassed = initialEntityCount !== null
+    && initialEntityIds.length === initialEntityCount
+    && initialEntityDigests.length === initialEntityCount
+    && initialEntityIdSet.size === initialEntityCount
+    && initialEntityIds.every(nonEmptyString)
+    && initialEntityDigests.every(sha256Digest)
+    && sha256Digest(ui?.initialRecordDigest)
+    && sameSha256Digest(ui?.initialRecordDigest, uiOperations[0]?.beforeRecordDigest);
+  const committedEntityIds = new Set();
+  let uiOperationContractPassed = initialIdentityContractPassed
+    && uiOperations.length === CANARY_TO_LEGACY_UI_PLAN.length;
+  for (let index = 0; index < CANARY_TO_LEGACY_UI_PLAN.length; index += 1) {
+    const expected = CANARY_TO_LEGACY_UI_PLAN[index];
+    const operation = objectValue(uiOperations[index]);
+    const previous = index === 0 ? null : objectValue(uiOperations[index - 1]);
+    const expectedBeforeCount = initialEntityCount === null ? null : initialEntityCount + index;
+    const beforeEntityCount = safeNonNegativeInteger(operation?.beforeEntityCount);
+    const afterEntityCount = safePositiveInteger(operation?.afterEntityCount);
+    const beforeKindCount = safeNonNegativeInteger(operation?.beforeKindCount);
+    const afterKindCount = safePositiveInteger(operation?.afterKindCount);
+    const beforeRevision = safeNonNegativeInteger(operation?.beforeDocumentRevision);
+    const afterRevision = safePositiveInteger(operation?.documentRevision);
+    const committedEntityId = operation?.committedEntityId;
+    const committedIdUnique = nonEmptyString(committedEntityId)
+      && !initialEntityIdSet.has(committedEntityId)
+      && !committedEntityIds.has(committedEntityId);
+    if (committedIdUnique) committedEntityIds.add(committedEntityId);
+    uiOperationContractPassed = uiOperationContractPassed
+      && operation?.kind === expected.kind
+      && operation?.tool === expected.tool
+      && operation?.incrementKind === "exact-canonical-kind-increment"
+      && beforeEntityCount === expectedBeforeCount
+      && afterEntityCount === beforeEntityCount + 1
+      && afterKindCount === beforeKindCount + 1
+      && beforeRevision !== null
+      && afterRevision > beforeRevision
+      && sha256Digest(operation?.beforeRecordDigest)
+      && sha256Digest(operation?.afterRecordDigest)
+      && committedIdUnique
+      && operation?.committedEntityKind === expected.kind
+      && sha256Digest(operation?.committedEntityDigest)
+      && validTimestamp(operation?.committedAt)
+      && (previous === null || (
+        previous.afterEntityCount === beforeEntityCount
+        && previous.documentRevision === beforeRevision
+        && sameSha256Digest(previous.afterRecordDigest, operation.beforeRecordDigest)
+      ));
+  }
+  const finalUiOperation = objectValue(uiOperations.at(-1));
+  uiOperationContractPassed = uiOperationContractPassed
+    && finalEntityCount === initialEntityCount + CANARY_TO_LEGACY_UI_PLAN.length
+    && finalUiOperation?.kind === "freehand"
+    && finalUiOperation?.committedEntityKind === "freehand"
+    && finalUiOperation?.afterEntityCount === finalEntityCount
+    && ui?.finalFreehandMutationObserved === true
+    && artifact?.injection?.uiOperationCount === CANARY_TO_LEGACY_UI_PLAN.length
+    && artifact?.injection?.finalFreehandMutationObserved === true;
+  addFailure(
+    failures,
+    uiOperationContractPassed,
+    "cross-build-ui-operation-contract-invalid",
+  );
+  const finalCanonicalDigestById = new Map(writeCanonicalEntityIds.map(
+    (id, index) => [id, writeCanonicalEntityDigests[index]],
+  ));
+  const finalIdsDecomposeExactly = writeEntityIds.length === initialEntityCount
+      + CANARY_TO_LEGACY_UI_PLAN.length
+    && writeCanonicalEntityDigests.length === writeEntityIds.length
+    && writeCanonicalEntityDigests.every(sha256Digest)
+    && sameOrderedStrings(
+      writeEntityIds.filter((id) => initialEntityIdSet.has(id)),
+      initialEntityIds,
+    )
+    && writeEntityIds.every((id) => (
+      initialEntityIdSet.has(id) || committedEntityIds.has(id)
+    ))
+    && initialEntityIds.every((id) => (
+      sameSha256Digest(initialEntityDigestById.get(id), finalCanonicalDigestById.get(id))
+    ))
+    && uiOperations.every((operation) => (
+      sameSha256Digest(
+        operation?.committedEntityDigest,
+        finalCanonicalDigestById.get(operation?.committedEntityId),
+      )
+    ));
+  addFailure(
+    failures,
+    uiOperationContractPassed && finalIdsDecomposeExactly,
+    "cross-build-ui-entity-provenance-invalid",
+  );
+  addFailure(
+    failures,
+    uiOperationContractPassed
+      && finalIdsDecomposeExactly
+      && writeReceipt?.entityCount === finalEntityCount
+      && writeReceipt?.documentRevision === finalUiOperation?.documentRevision
+      && sameSha256Digest(
+        writeReceipt?.canonicalRecordDigest,
+        finalUiOperation?.afterRecordDigest,
+      )
+      && committedEntityIds.size === CANARY_TO_LEGACY_UI_PLAN.length
+      && [...committedEntityIds].every((id) => writeEntityIds.includes(id)),
+    "cross-build-ui-write-receipt-binding-invalid",
+  );
+  addFailure(
+    failures,
+    sha256Digest(writeReceipt?.canonicalRecordDigest)
+      && sha256Digest(writeReceipt?.canonicalCompatibilityDigest)
+      && sha256Digest(readReceipt?.canonicalCompatibilityDigest)
+      && sameSha256Digest(
+        writeReceipt?.canonicalCompatibilityDigest,
+        writeReceipt?.documentDigest,
+      )
+      && sameSha256Digest(
+        writeReceipt?.canonicalCompatibilityDigest,
+        readReceipt?.canonicalCompatibilityDigest,
+      ),
+    "cross-build-canonical-compatibility-digest-mismatch",
+  );
+  addFailure(
+    failures,
+    writeEntityIds.length === writeReceipt?.entityCount
+      && new Set(writeEntityIds).size === writeEntityIds.length
+      && sameOrderedStrings(writeEntityIds, writeZOrder)
+      && sameOrderedStrings(writeEntityIds, writeCanonicalEntityIds)
+      && sameOrderedStrings(writeEntityIds, writeCanonicalZOrder)
+      && sameOrderedStrings(writeEntityIds, readEntityIds)
+      && sameOrderedStrings(writeEntityIds, readZOrder)
+      && sameKindCounts(writeReceipt?.kindCounts, writeReceipt?.canonicalKindCounts)
+      && sameKindCounts(writeReceipt?.kindCounts, readReceipt?.kindCounts),
+    "cross-build-entity-identity-or-order-mismatch",
+  );
+  addFailure(
+    failures,
+    writeManifest?.kind === "drawing-document-manifest"
+      && writeManifest?.manifestSchemaVersion === DRAWING_DOCUMENT_MANIFEST_SCHEMA_VERSION
+      && sameNonEmptyString(writeManifest?.scopeKey, writeReceipt?.scopeKey)
+      && writeManifest?.revision === writeReceipt?.documentRevision
+      && writeManifest?.count === writeReceipt?.entityCount
+      && sha256Digest(writeManifest?.rawBytesDigest)
+      && safePositiveInteger(writeManifest?.rawBytesLength) !== null,
+    "cross-build-canonical-manifest-binding-invalid",
+  );
+  addFailure(
+    failures,
+    sameNonEmptyString(crossBuildAuthority?.browserRestartReceiptId, restartReceipts?.browser?.receiptId)
+      && sameNonEmptyString(crossBuildAuthority?.serverRestartReceiptId, restartReceipts?.server?.receiptId)
+      && sameNonEmptyString(crossBuildAuthority?.writeReceiptId, writeReceipt?.receiptId)
+      && sameNonEmptyString(crossBuildAuthority?.readReceiptId, readReceipt?.receiptId)
+      && sameNonEmptyString(crossBuildAuthority?.scopeKey, writeReceipt?.scopeKey)
+      && sameNonEmptyString(crossBuildAuthority?.scopeKey, readReceipt?.scopeKey)
+      && sameSha256Digest(crossBuildAuthority?.documentDigest, writeReceipt?.documentDigest)
+      && sameSha256Digest(crossBuildAuthority?.documentDigest, readReceipt?.documentDigest)
+      && sameSha256Digest(
+        crossBuildAuthority?.canonicalRecordDigest,
+        writeReceipt?.canonicalRecordDigest,
+      )
+      && sameSha256Digest(
+        crossBuildAuthority?.canonicalCompatibilityDigest,
+        writeReceipt?.canonicalCompatibilityDigest,
+      )
+      && sameSha256Digest(
+        crossBuildAuthority?.canonicalCompatibilityDigest,
+        readReceipt?.canonicalCompatibilityDigest,
+      )
+      && sameSha256Digest(
+        crossBuildAuthority?.manifestBytesDigest,
+        writeManifest?.rawBytesDigest,
+      )
+      && sameSha256Digest(crossBuildAuthority?.sourceBytesDigest, writeReceipt?.sourceBytesDigest)
+      && sameSha256Digest(crossBuildAuthority?.sourceBytesDigest, readReceipt?.sourceBytesDigestBefore)
+      && sameSha256Digest(crossBuildAuthority?.sourceBytesDigest, readReceipt?.sourceBytesDigestAfter),
+    "cross-build-authority-receipt-binding-invalid",
+  );
   for (const [kind, receipt] of [
     ["browser", restartReceipts?.browser],
     ["server", restartReceipts?.server],
@@ -2350,6 +2969,7 @@ function validateCanaryToLegacySnapshot(artifact) {
         writeReceipt?.observedAt,
         receipt?.stoppedAt,
         receipt?.startedAt,
+        receipt?.afterProcess?.readyAt,
         readReceipt?.observedAt,
       ]),
       `cross-build-${kind}-restart-order-invalid`,

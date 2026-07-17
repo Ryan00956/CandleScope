@@ -10,6 +10,7 @@ import {
   CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS,
   assessControlledBrowserCloseEvidence,
   assessControlledBrowserWindow,
+  assessControlledLoadedAssetAuthority,
   assessControlledRunnerRuntimeEvidence,
   assessWindowsOwnedProcessTreeReceipt,
   assertControlledCdpResponseSession,
@@ -39,6 +40,7 @@ import {
   assertControlledRunnerEntrypoint,
   assertControlledRunnerRuntime,
   summarizeControlledCleanup,
+  summarizeControlledRetirement,
 } from "./drawing-controlled-cdp.mjs";
 
 const CONTROLLED_ROLLBACK_SESSION_KEY = "__CANDLESCOPE_CONTROLLED_ROLLBACK_DRILL_TOKEN__";
@@ -1000,6 +1002,8 @@ test("diagnostic rollback authority binds exact worker, storage, and lifecycle v
     "indexeddb-quota-blocked",
     "active-gesture-chart-boundary",
     "series-rebuild-before-export",
+    "continuous-dpr-resize",
+    "canary-to-legacy-snapshot",
   ]);
   assert.deepEqual([...CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS], ["quota", "blocked"]);
 
@@ -1168,14 +1172,28 @@ test("quota cache-expiry guard proves the full monotonic 35 second wait", async 
   assert.equal(reads, 1);
 
   monotonic = 0;
+  const earlyWaits = [];
+  const recovered = await waitForControlledQuotaCacheExpiry({
+    origin: "http://127.0.0.1:15173",
+    readUsageAndQuota: async () => ({ quotaBytes: 1, overrideActive: true }),
+    waitFor: async (milliseconds) => {
+      earlyWaits.push(milliseconds);
+      monotonic += earlyWaits.length === 1 ? 34_999 : milliseconds;
+    },
+    monotonicNow: () => monotonic,
+  });
+  assert.deepEqual(earlyWaits, [35_000, 1]);
+  assert.equal(recovered.elapsedMs, 35_000);
+
+  monotonic = 0;
   await assert.rejects(
     waitForControlledQuotaCacheExpiry({
       origin: "http://127.0.0.1:15173",
       readUsageAndQuota: async () => { throw new Error("must not read"); },
-      waitFor: async () => { monotonic += 34_999; },
+      waitFor: async () => {},
       monotonicNow: () => monotonic,
     }),
-    /elapsed only 34999ms; required 35000ms/,
+    /elapsed only 0ms; required 35000ms/,
   );
 });
 
@@ -1914,6 +1932,10 @@ test("managed origin guard keeps Fetch interception on the top-level page sessio
     && entry.params.interceptResponse === true
     && entry.sessionId === null
   )));
+  assert.equal(guard.snapshot().armedWorkerResponseCount, 1);
+  assert.doesNotThrow(() => guard.assertNoViolations());
+  assert.throws(() => guard.assertHealthy(), /armedWorkerResponses/);
+  const guardSettlement = guard.settle(500);
 
   const workerResponsePending = cdp.emit("Fetch.requestPaused", {
     requestId: "worker-fetch-request",
@@ -1932,6 +1954,9 @@ test("managed origin guard keeps Fetch interception on the top-level page sessio
   releaseWorkerBody({ result: { body: workerBody, base64Encoded: false } });
   const workerResponse = await workerResponsePending;
   assert.equal(workerResponse[0].status, "fulfilled");
+  const settledGuard = await guardSettlement;
+  assert.equal(settledGuard.passed, true);
+  assert.equal(settledGuard.armedWorkerResponseCount, 0);
   assert.ok(cdp.sends.some((entry) => (
     entry.method === "Fetch.getResponseBody"
     && entry.params.requestId === "worker-fetch-request"
@@ -2260,6 +2285,7 @@ test("controlled diagnostics require dedicated, shared, and service workers", ()
 test("controlled CDP options select a fixed headed production configuration", () => {
   const defaults = normalizeControlledCdpOptions({ chromePath: "" });
   assert.deepEqual(defaults.viewport, { width: 1440, height: 900 });
+  assert.equal(defaults.documentAuthority, "document");
   assert.equal(defaults.dpr, 1);
   assert.equal(defaults.engineMode, "scene-canary");
   assert.equal(defaults.interactionSurfaceMode, "overlay");
@@ -2270,6 +2296,7 @@ test("controlled CDP options select a fixed headed production configuration", ()
 
   const configured = normalizeControlledCdpOptions({
     chromePath: "C:\\controlled\\chrome.exe",
+    documentAuthority: "legacy",
     dpr: 1.5,
     engineMode: "legacy",
     interactionSurfaceMode: "legacy",
@@ -2282,6 +2309,7 @@ test("controlled CDP options select a fixed headed production configuration", ()
   });
   assert.deepEqual(configured, {
     chromePath: "C:\\controlled\\chrome.exe",
+    documentAuthority: "legacy",
     dpr: 1.5,
     engineMode: "legacy",
     interactionSurfaceMode: "legacy",
@@ -2319,6 +2347,10 @@ test("controlled CDP rejects external browser, server, profile, and transport st
   assert.throws(() => normalizeControlledCdpOptions({ unknown: true }), /Unknown controlled CDP option/);
   assert.throws(() => normalizeControlledCdpOptions({ dpr: 0 }), /dpr must be between/);
   assert.throws(
+    () => normalizeControlledCdpOptions({ documentAuthority: "external" }),
+    /documentAuthority must be document or legacy/,
+  );
+  assert.throws(
     () => normalizeControlledCdpOptions({ viewport: { width: 1280, height: 720, mobile: false } }),
     /Unknown viewport option/,
   );
@@ -2327,6 +2359,7 @@ test("controlled CDP rejects external browser, server, profile, and transport st
 test("controlled build environment strips ambient Vite values and records explicit production inputs", () => {
   const environment = controlledBuildEnvironment({
     chromePath: "",
+    documentAuthority: "legacy",
     engineMode: "scene",
     interactionSurfaceMode: "overlay",
     rasterBackend: "worker",
@@ -2343,7 +2376,7 @@ test("controlled build environment strips ambient Vite values and records explic
     NODE_ENV: "production",
     VITE_API_BASE: "/api/v1",
     VITE_DRAWING_COORDINATE_PROJECTOR: "batch",
-    VITE_DRAWING_DOCUMENT_AUTHORITY: "document",
+    VITE_DRAWING_DOCUMENT_AUTHORITY: "legacy",
     VITE_DRAWING_ENGINE_MODE: "scene",
     VITE_DRAWING_INTERACTION_OVERLAY: "overlay",
     VITE_DRAWING_RASTER_BACKEND: "worker",
@@ -2408,6 +2441,63 @@ test("production entry asset extraction is same-origin path based and determinis
   `);
   assert.deepEqual(assets, ["assets/main-a.js", "assets/main-b.css"]);
   assert.equal(Object.isFrozen(assets), true);
+});
+
+test("loaded asset authority requires response bodies for entries without misclassifying passive manifest assets", () => {
+  const base = {
+    loadedPaths: ["assets/main.js", "assets/main.css", "brand.svg"],
+    domLoadedPaths: ["assets/main.js", "assets/main.css", "brand.svg"],
+    expectedEntryPaths: ["assets/main.js", "assets/main.css"],
+    manifestPaths: ["index.html", "assets/main.js", "assets/main.css", "brand.svg"],
+    observedAssets: [
+      { path: "assets/main.js", accepted: true },
+      { path: "assets/main.css", accepted: true },
+    ],
+    mainFrameObservedAssets: [
+      { path: "assets/main.js", accepted: true },
+      { path: "assets/main.css", accepted: true },
+    ],
+  };
+  const passiveAsset = assessControlledLoadedAssetAuthority(base);
+  assert.equal(passiveAsset.browserLoadedAssetsAccepted, true);
+  assert.equal(passiveAsset.domLoadedAssetsAccepted, true);
+  assert.equal(passiveAsset.expectedEntriesPresentInDom, true);
+  assert.deepEqual(
+    passiveAsset.browserLoadedAssetAuthority.find((asset) => asset.path === "brand.svg"),
+    {
+      path: "brand.svg",
+      entryAuthorityRequired: false,
+      manifestBacked: true,
+      responseBodyAccepted: false,
+    },
+  );
+
+  const missingBrowserEntryBody = assessControlledLoadedAssetAuthority({
+    ...base,
+    observedAssets: base.observedAssets.filter((asset) => asset.path !== "assets/main.js"),
+  });
+  assert.equal(missingBrowserEntryBody.browserLoadedAssetsAccepted, false);
+
+  const missingMainFrameEntryBody = assessControlledLoadedAssetAuthority({
+    ...base,
+    mainFrameObservedAssets: base.mainFrameObservedAssets.filter((asset) => (
+      asset.path !== "assets/main.css"
+    )),
+  });
+  assert.equal(missingMainFrameEntryBody.domLoadedAssetsAccepted, false);
+
+  const missingEntryDom = assessControlledLoadedAssetAuthority({
+    ...base,
+    domLoadedPaths: base.domLoadedPaths.filter((path) => path !== "assets/main.css"),
+  });
+  assert.equal(missingEntryDom.expectedEntriesPresentInDom, false);
+
+  const unmanifestedPassiveAsset = assessControlledLoadedAssetAuthority({
+    ...base,
+    manifestPaths: base.manifestPaths.filter((path) => path !== "brand.svg"),
+  });
+  assert.equal(unmanifestedPassiveAsset.browserLoadedAssetsAccepted, false);
+  assert.equal(unmanifestedPassiveAsset.domLoadedAssetsAccepted, false);
 });
 
 test("controlled CDP diagnostics preserve raw errors, rejections, failures, and crashes", () => {
@@ -4951,4 +5041,79 @@ test("cleanup summary requires every owned process exit and profile removal", ()
   assert.ok(forgedReceipts.failures.includes("headed-chrome-final-diagnostics-invalid"));
   assert.ok(forgedReceipts.failures.includes("headed-chrome-intentional-close-invalid"));
   assert.ok(forgedReceipts.failures.includes("headed-chrome-tree-stop-failed"));
+});
+
+test("retirement summary requires strict process cleanup while retaining the owned profile", () => {
+  const browser = passingHeadedChromeCloseEvidence(601);
+  browser.diagnosticsBarrier = { completed: true };
+  browser.workerDiagnosticsBarrier = { passed: true };
+  browser.handlerSettlementBeforeClose = { passed: true };
+  browser.handlerSettlementAfterClose = { passed: true };
+  browser.finalWorkerDiagnostics = { passed: true };
+  browser.finalOriginGuard = { passed: true };
+  browser.finalDiagnostics = healthyFinalDiagnostics();
+  browser.finalizationErrors = [];
+  browser.storageFaultCleanup = { complete: true, forced: false };
+  const receipts = {
+    browser,
+    servers: {
+      preview: {
+        kind: "vite-preview",
+        pid: 602,
+        exited: true,
+        spawnError: null,
+        treeStopReceipt: passingTreeStopReceipt(602),
+      },
+      api: {
+        kind: "mock-api",
+        pid: 603,
+        exited: true,
+        spawnError: null,
+        treeStopReceipt: passingTreeStopReceipt(603),
+      },
+    },
+    ports: [
+      { kind: "mock-api", closed: true },
+      { kind: "vite-preview", closed: true },
+      { kind: "chrome-debug", closed: true },
+    ],
+    profile: {
+      retained: true,
+      exists: true,
+      profileId: "controlled-profile:retirement-test",
+      profileDirectorySha256: "a".repeat(64),
+    },
+  };
+  assert.deepEqual(summarizeControlledRetirement(receipts), {
+    kind: "controlled-canary-retirement",
+    schemaVersion: "candlescope-controlled-canary-retirement/v1",
+    complete: true,
+    processCount: 3,
+    allProcessesExited: true,
+    diagnosticsClosed: true,
+    portCount: 3,
+    allOwnedPortsClosed: true,
+    profileRetained: true,
+    storageFaultCleanupComplete: true,
+    profileId: "controlled-profile:retirement-test",
+    profileDirectorySha256: "a".repeat(64),
+    failures: [],
+  });
+
+  receipts.profile.exists = false;
+  const missingProfile = summarizeControlledRetirement(receipts);
+  assert.equal(missingProfile.complete, false);
+  assert.ok(missingProfile.failures.includes("owned-profile-not-retained"));
+
+  receipts.profile.exists = true;
+  receipts.servers.preview.exited = false;
+  const livePreview = summarizeControlledRetirement(receipts);
+  assert.equal(livePreview.complete, false);
+  assert.ok(livePreview.failures.includes("vite-preview-not-exited"));
+
+  receipts.servers.preview.exited = true;
+  receipts.browser.storageFaultCleanup = { complete: true, forced: true };
+  const forcedStorageCleanup = summarizeControlledRetirement(receipts);
+  assert.equal(forcedStorageCleanup.complete, false);
+  assert.ok(forcedStorageCleanup.failures.includes("storage-fault-cleanup-incomplete"));
 });

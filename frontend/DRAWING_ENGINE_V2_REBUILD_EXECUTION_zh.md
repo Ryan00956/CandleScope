@@ -1,6 +1,6 @@
 # CandleScope 绘图引擎 V2 丝滑重构执行文档
 
-状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5、Phase 6、Phase 7 已完成（2026-07-15）；Phase 8 已完成（2026-07-16）；Phase 9 本地八项强制回滚演练已完成（2026-07-17），等待生产灰度与观察窗门槛。
+状态：Phase 0、Phase 1、Phase 2 已完成（2026-07-14）；Phase 3、Phase 4、Phase 5、Phase 6、Phase 7 已完成（2026-07-15）；Phase 8 已完成（2026-07-16）；Phase 9 本地八项强制回滚演练已完成，仓库发布默认已切换到 `scene-canary + overlay`（2026-07-17），仍等待生产灰度与观察窗门槛。
 
 本文是 CandleScope 绘图引擎 V2 的主执行文档。后续实现必须按本文阶段推进，每个阶段独立验证、独立提交、独立回滚，不允许跳过性能基线、shadow 对照或兼容迁移门。
 
@@ -60,7 +60,7 @@ git -C "H:\program\CandleScope" worktree list
 | 6 | LOD、命中索引、worker 与背压 | 已完成（LOD/worker/indexed hit checkpoint） |
 | 7 | IndexedDB、兼容迁移与 export barrier | 已完成（async persistence/export barrier checkpoint） |
 | 8 | 全工具迁移与生命周期收口 | 已完成（全工具 scene document checkpoint） |
-| 9 | 灰度、回滚演练与 legacy 删除 | 进行中（本地强制回滚演练 8/8；等待生产灰度与观察窗） |
+| 9 | 灰度、回滚演练与 legacy 删除 | 进行中（本地强制回滚演练 8/8；仓库默认已切 V2；等待生产灰度与观察窗） |
 
 ## 3. 已确认的性能基线
 
@@ -1476,4 +1476,19 @@ Cross-build: Canary 通过真实 toolbar/flyout/CDP input 逐次精确新增九�
 Authority/cleanup: initial/per-drill/cross-build/run authority、producer order、Canary retirement 均为 true；两轮 production build 的 source revision/build input/git 相同，build/asset fingerprint 不同。最终 Chrome、mock API、preview 三个进程退出，三个端口关闭，临时 profile 删除，live/final diagnostics 与 cleanup failures 均为空。
 Remaining external gates: production cohort 1%→10%→50%→100%、各档完整观察窗、100% 默认两个发布或 14 天、一小时 soak、用户数据迁移/丢失审计仍未执行；因此 Phase 9 只标记为进行中，legacy renderer/primitive/factory 与回退开关继续保留，默认 mode 不切到 scene。
 Decision: Phase 9 本地强制回滚演练 8/8 PASS；可以提交本地自动化 checkpoint，但不能宣称 Phase 9 全部完成，也不满足 legacy 删除条件。
+~~~
+
+### Phase 9 仓库发布默认切换执行记录
+
+~~~text
+Phase: 9B — 仓库发布默认切换到 Drawing Engine V2
+Date: 2026-07-17
+Scope: 将“未配置”的仓库发布默认切换为 document authority + batch projector + scene-canary + overlay + worker；保留 legacy/scalar/main-thread 显式构建回滚，不删除 legacy renderer/primitive/factory，不把保留字 scene 解锁。
+Fail-closed boundary: VITE_DRAWING_ENGINE_MODE 和 VITE_DRAWING_INTERACTION_OVERLAY 的非空非法值继续回退 legacy；scene 继续由 Phase 4 resolver fail closed 到 legacy；Host 在一次 mount initializer 内共同解析静态 scene 与 interaction owner，禁止配置分裂。
+Vite configuration: 五个 VITE_DRAWING_* reader 使用可静态替换的直接 property access，并保留 Node 测试环境的安全缺省；新增 drawing-vite-env-access.test.mjs 锁定该边界。默认 production build 与显式 legacy/scalar/main-thread build 均完成独立构建验证。
+Tests: npm run check PASS（architecture migration allowlist=0、双 TypeScript、ESLint、1738/1738 tests、production build 357 modules）；npm run test:drawing PASS（674/674）；resolver、DOM evidence 与 Vite env reader 定向回归 PASS；git diff --check PASS。
+Default browser acceptance: 无绘图 VITE 环境变量的 production preview 通过统一 drawing smoke；真实 line 创建、whole-drawing drag、IDB/SavedDrawing geometry 一致、future anchor、reload restore 全部通过，entity count 1→1、最终 persisted/restored count 2→2。DOM evidence 为 effectiveEngineMode=scene-canary、interaction=overlay、registry=scene-document-only、legacy instances=0、legacy attached=0、zeroLegacy=true；failures/warnings/exceptions 均为 0。
+Rollback browser acceptance: 独立 production build 显式注入 document=legacy、projector=scalar、engine=legacy、interaction=legacy、raster=main-thread；Playwright 实际页面读取到 effectiveEngineMode=legacy、interaction=legacy、registry=legacy-compatible、backend=main-thread、backendSource=environment，证明部署回滚覆盖默认值。
+Remaining external gates: production cohort 1%→10%→50%→100%、各档完整观察窗、100% 默认两个发布或 14 天、一小时 soak、用户数据迁移/丢失审计仍未执行；Phase 9 继续标记为进行中，legacy 删除条件仍未满足。
+Decision: 仓库发布默认切换 PASS；后续部署若未显式覆盖将进入 scene-canary + overlay，紧急回滚仍通过构建环境变量执行。不得据此宣称 Phase 9 全部完成或删除 legacy。
 ~~~

@@ -252,11 +252,15 @@ const ordinalFutureProjectionContexts = new WeakMap<object, OrdinalFutureProject
 const ordinalFutureProjectionTransactions = new WeakSet<object>();
 const MAX_FREEHAND_CAPTURE_BATCH_POINTS = 4_096;
 function configuredDrawingCoordinateProjectorMode(): DrawingCoordinateProjectorMode {
-  const meta = import.meta as { readonly env?: Readonly<Record<string, unknown>> };
-  const configured = meta.env?.["VITE_DRAWING_COORDINATE_PROJECTOR"];
-  return configured === "scalar" || configured === "parity" || configured === "batch"
-    ? configured
-    : "batch";
+  // Keep this direct so Vite can inject emergency rollback values at build time.
+  try {
+    const configured: unknown = import.meta.env.VITE_DRAWING_COORDINATE_PROJECTOR;
+    return configured === "scalar" || configured === "parity" || configured === "batch"
+      ? configured
+      : "batch";
+  } catch {
+    return "batch";
+  }
 }
 
 let defaultDrawingCoordinateProjectorMode: DrawingCoordinateProjectorMode =

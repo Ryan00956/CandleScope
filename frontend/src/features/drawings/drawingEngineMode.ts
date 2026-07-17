@@ -5,6 +5,8 @@ export const DRAWING_ENGINE_MODES = [
   "scene",
 ] as const;
 
+export const DEFAULT_DRAWING_ENGINE_MODE = "scene-canary" as const;
+
 export type DrawingEngineMode = typeof DRAWING_ENGINE_MODES[number];
 export type DrawingEngineEffectiveMode = "legacy" | "shadow" | "scene-canary";
 export type DrawingEngineModeSource = "default" | "environment" | "url";
@@ -28,10 +30,12 @@ export interface DrawingEngineModeResolverOptions {
 }
 
 function configuredDrawingEngineMode(): unknown {
-  // Keep this as a direct Vite env access. Indirection through an import.meta
-  // alias survives production bundling as a browser runtime lookup, where
-  // `env` is absent and would silently force the legacy default.
-  return import.meta.env?.VITE_DRAWING_ENGINE_MODE;
+  // Keep the property access direct: Vite only replaces this exact form.
+  try {
+    return import.meta.env.VITE_DRAWING_ENGINE_MODE;
+  } catch {
+    return undefined;
+  }
 }
 
 function developmentUrlOverrideAllowed(): boolean {
@@ -62,6 +66,10 @@ function modeFromUrl(search: unknown): DrawingEngineMode | null {
   }
 }
 
+function isUnsetDrawingEngineMode(value: unknown): boolean {
+  return value === undefined || value === null || value === "";
+}
+
 /**
  * Resolve the requested rollout mode. URL overrides are intentionally opt-in
  * so production never accepts an arbitrary user-controlled mode.
@@ -70,7 +78,7 @@ export function resolveRequestedDrawingEngineMode({
   configured = configuredDrawingEngineMode(),
   urlSearch = currentUrlSearch(),
   allowUrlOverride = developmentUrlOverrideAllowed(),
-  defaultMode = "legacy",
+  defaultMode = DEFAULT_DRAWING_ENGINE_MODE,
 }: DrawingEngineModeResolverOptions = {}): Readonly<{
   mode: DrawingEngineMode;
   source: DrawingEngineModeSource;
@@ -81,6 +89,11 @@ export function resolveRequestedDrawingEngineMode({
   }
   if (isDrawingEngineMode(configured)) {
     return Object.freeze({ mode: configured, source: "environment" });
+  }
+  // A non-empty deployment value is an explicit request. Reject unknown
+  // values to legacy instead of accidentally enabling the release default.
+  if (!isUnsetDrawingEngineMode(configured)) {
+    return Object.freeze({ mode: "legacy", source: "default" });
   }
   return Object.freeze({
     mode: isDrawingEngineMode(defaultMode) ? defaultMode : "legacy",

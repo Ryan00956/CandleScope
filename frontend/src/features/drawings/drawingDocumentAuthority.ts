@@ -1,8 +1,12 @@
 export type DrawingDocumentAuthorityMode = "document" | "legacy";
 
 function configuredDrawingDocumentAuthority(): unknown {
-  const meta = import.meta as { readonly env?: Readonly<Record<string, unknown>> };
-  return meta.env?.["VITE_DRAWING_DOCUMENT_AUTHORITY"];
+  // Vite only replaces direct import.meta.env property access in production.
+  try {
+    return import.meta.env.VITE_DRAWING_DOCUMENT_AUTHORITY;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -4,10 +4,8 @@ import TextEditOverlay from "../../components/TextEditOverlay";
 import TextFormatBar from "../../components/TextFormatBar";
 import DrawingInteractionOverlay from "./rendering/DrawingInteractionOverlay.js";
 import {
-    resolveDrawingInteractionSurfaceMode,
-    resolveEffectiveDrawingInteractionSurfaceMode,
+    resolveDrawingHostInteractionSurfaceMode,
 } from "./interactionSurfaceMode.js";
-import { resolvePhase4DrawingEngineMode } from "./drawingEngineMode.js";
 import { drawingPerfCounters } from "./performance/drawingPerfCounters.js";
 import type { MutableRefObject } from "react";
 import type {
@@ -86,13 +84,7 @@ function DrawingEngineHost({
     const dynamicCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const liveInkCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const [interactionSurfaceMode, setInteractionSurfaceMode] = useState(
-        () => {
-            const requested = resolveDrawingInteractionSurfaceMode().mode;
-            return resolveEffectiveDrawingInteractionSurfaceMode(
-                requested,
-                resolvePhase4DrawingEngineMode().effective,
-            );
-        },
+        resolveDrawingHostInteractionSurfaceMode,
     );
     const handleInteractionSurfaceFallback = useCallback(() => {
         // The rollout flag is mount-locked, but a scene-canary initialization

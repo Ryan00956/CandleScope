@@ -22,6 +22,12 @@ test("drawing engine mode resolver accepts the four exact rollout values", () =>
 });
 
 test("Phase 4 enables the visible canary while full scene remains fail-closed", () => {
+  assert.deepEqual(resolvePhase4DrawingEngineMode({ configured: null }), {
+    requested: "scene-canary",
+    effective: "scene-canary",
+    source: "default",
+    failedClosed: false,
+  });
   assert.deepEqual(resolvePhase4DrawingEngineMode({ configured: "scene-canary" }), {
     requested: "scene-canary",
     effective: "scene-canary",
@@ -50,12 +56,16 @@ test("development URL override wins but production ignores user-controlled input
   }), { mode: "legacy", source: "environment" });
 });
 
-test("invalid configuration and URL values fall back to the release default", () => {
+test("invalid explicit configuration fails closed while an unset value uses the release default", () => {
   assert.deepEqual(resolveRequestedDrawingEngineMode({
     configured: "invalid",
     urlSearch: "?drawingEngineMode=also-invalid",
     allowUrlOverride: true,
   }), { mode: "legacy", source: "default" });
+  assert.deepEqual(resolveRequestedDrawingEngineMode({
+    configured: null,
+    allowUrlOverride: false,
+  }), { mode: "scene-canary", source: "default" });
   assert.deepEqual(resolveRequestedDrawingEngineMode({
     configured: null,
     allowUrlOverride: false,

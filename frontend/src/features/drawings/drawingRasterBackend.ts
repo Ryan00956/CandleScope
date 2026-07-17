@@ -17,7 +17,11 @@ export interface DrawingRasterBackendResolverOptions {
 }
 
 function configuredRasterBackend(): unknown {
-  return import.meta.env?.VITE_DRAWING_RASTER_BACKEND;
+  try {
+    return import.meta.env.VITE_DRAWING_RASTER_BACKEND;
+  } catch {
+    return undefined;
+  }
 }
 
 function benchmarkForcesMainThread(): boolean {

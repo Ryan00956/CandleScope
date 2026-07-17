@@ -127,15 +127,17 @@ Phase 11 removed the old `src/hooks` and `src/runtime/workflows` drawing wrapper
 policy stays inside this feature.
 
 Drawing Engine V2 Phases 0-8 and the local Phase 9 rollback drills are complete.
-The canonical document and batch coordinate projector are defaults, while the
-visible renderer and interaction surface remain `legacy` unless a deployment
-explicitly selects `scene-canary` plus `overlay`. Full `scene` remains
-fail-closed until production cohorts, observation windows, the one-hour soak,
-and migration-loss audit pass.
+The canonical document, batch coordinate projector, visible `scene-canary`
+renderer, `overlay` interaction surface, and worker raster backend are now the
+repository release defaults. Full `scene` remains fail-closed until production
+cohorts, observation windows, the one-hour soak, and migration-loss audit pass.
 
 Set `VITE_DRAWING_DOCUMENT_AUTHORITY=legacy`,
-`VITE_DRAWING_COORDINATE_PROJECTOR=scalar`, or the documented renderer/
-interaction/raster flags only as scoped emergency rollback controls. V2
+`VITE_DRAWING_COORDINATE_PROJECTOR=scalar`,
+`VITE_DRAWING_ENGINE_MODE=legacy`,
+`VITE_DRAWING_INTERACTION_OVERLAY=legacy`, or
+`VITE_DRAWING_RASTER_BACKEND=main-thread` only as scoped emergency rollback
+controls. V2
 IndexedDB writes continue refreshing the bounded legacy-compatible
 `SavedDrawing[]` snapshot; no rollback path may delete user data. Legacy
 primitives and their factory remain until the Phase 9 deletion conditions are

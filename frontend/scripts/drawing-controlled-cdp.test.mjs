@@ -534,13 +534,14 @@ async function createWorkerBootstrapHandoffFixture({
     { relativePath: "assets/drawing.worker.js", content: "worker" },
   ];
   const sessionId = "worker-session";
+  const responseBodies = new Map([
+    ["<top>\0document", { body: "index", base64Encoded: false }],
+    ["<top>\0entry", { body: "main", base64Encoded: false }],
+    [`${sessionId}\0${requestId}`, { body: "worker", base64Encoded: false }],
+    [`${sessionId}\0worker-self-fetch`, { body: "worker", base64Encoded: false }],
+  ]);
   const cdp = createFakeCdp({
-    responseBodies: new Map([
-      ["<top>\0document", { body: "index", base64Encoded: false }],
-      ["<top>\0entry", { body: "main", base64Encoded: false }],
-      [`${sessionId}\0${requestId}`, { body: "worker", base64Encoded: false }],
-      [`${sessionId}\0worker-self-fetch`, { body: "worker", base64Encoded: false }],
-    ]),
+    responseBodies,
     onSend: ({ method }) => (
       captureWorkerResponseWithManagedOriginGuard && method === "Fetch.getResponseBody"
         ? { result: { body: "worker", base64Encoded: false } }
@@ -629,6 +630,7 @@ async function createWorkerBootstrapHandoffFixture({
   return {
     cdp,
     requestId,
+    responseBodies,
     sessionId,
     sourceUrl,
     targetUrl,
@@ -643,6 +645,47 @@ async function createWorkerBootstrapHandoffFixture({
     },
     async emitChildFinished() {
       await cdp.emit("Network.loadingFinished", { requestId }, { sessionId });
+    },
+  };
+}
+
+async function attachAdditionalWorkerBootstrap(fixture, {
+  requestId,
+  sessionId,
+} = {}) {
+  fixture.responseBodies.set(
+    `${sessionId}\0${requestId}`,
+    { body: "worker", base64Encoded: false },
+  );
+  await emitWorkerConstruction(fixture.cdp, fixture.targetUrl);
+  await fixture.cdp.emit("Network.requestWillBeSent", {
+    requestId,
+    frameId: "main-frame",
+    loaderId: "",
+    documentURL: "http://127.0.0.1:15173/",
+    type: "Script",
+    initiator: { type: "other" },
+    request: { url: fixture.targetUrl },
+  });
+  await fixture.cdp.emit("Target.attachedToTarget", {
+    sessionId,
+    waitingForDebugger: true,
+    targetInfo: {
+      targetId: requestId,
+      type: "worker",
+      url: fixture.targetUrl,
+    },
+  });
+  return {
+    async emitChildResponse() {
+      await fixture.cdp.emit("Network.responseReceived", {
+        requestId,
+        type: "Script",
+        response: { url: fixture.targetUrl, status: 200 },
+      }, { sessionId });
+    },
+    async emitChildFinished() {
+      await fixture.cdp.emit("Network.loadingFinished", { requestId }, { sessionId });
     },
   };
 }
@@ -872,14 +915,28 @@ test("diagnostic rollback bootstrap rejects missing or mismatched session author
   }
 });
 
-test("diagnostic rollback authority binds exact worker and IndexedDB variants", async (t) => {
+test("diagnostic rollback authority binds exact worker, storage, and lifecycle variants", async (t) => {
   assert.deepEqual([...CONTROLLED_ROLLBACK_DRILL_IDS], [
     "worker-init-failure",
     "offscreen-canvas-unsupported",
     "worker-stale-generation",
     "indexeddb-quota-blocked",
+    "active-gesture-chart-boundary",
   ]);
   assert.deepEqual([...CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS], ["quota", "blocked"]);
+
+  await t.test("accepts active-gesture lifecycle without a variant", () => {
+    const fixture = createDiagnosticBootstrapFixture({
+      token: controlledRollbackToken({
+        drillId: "active-gesture-chart-boundary",
+        variant: null,
+      }),
+    });
+    const snapshot = fixture.snapshot();
+    assert.equal(snapshot.authorityAccepted, true);
+    assert.equal(snapshot.drillId, "active-gesture-chart-boundary");
+    assert.equal(snapshot.variant, null);
+  });
 
   for (const variant of CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS) {
     await t.test(`accepts IndexedDB ${variant}`, () => {
@@ -902,6 +959,7 @@ test("diagnostic rollback authority binds exact worker and IndexedDB variants", 
     controlledRollbackToken({ variant: "quota" }),
     controlledRollbackToken({ drillId: "indexeddb-quota-blocked", variant: null }),
     controlledRollbackToken({ drillId: "indexeddb-quota-blocked", variant: "other" }),
+    controlledRollbackToken({ drillId: "active-gesture-chart-boundary", variant: "chart-type" }),
   ];
   for (const [index, token] of rejected.entries()) {
     await t.test(`rejects mismatched variant ${index + 1}`, () => {
@@ -1529,6 +1587,33 @@ test("diagnostic rollback bootstrap counts and synchronously fails repeated exac
   )).length, 2);
 });
 
+test("asset tracker accepts only the completely clean initial no-worker state", async () => {
+  const cleanFixture = await createWorkerConstructionFaultTrackerFixture();
+  let snapshot = cleanFixture.tracker.snapshot();
+  assert.equal(snapshot.currentGeneration, 1);
+  assert.equal(snapshot.passed, true);
+  assert.equal(snapshot.assetAuthorityPassed, true);
+  assert.equal(snapshot.cleanInitialWorkerStateAccepted, true);
+  assert.equal(snapshot.drawingWorkerTargetCount, 0);
+  assert.equal(snapshot.workerConstructions.length, 0);
+  assert.equal(snapshot.workerConstructionFaults.length, 0);
+  assert.equal(snapshot.unclaimedDrawingWorkerConstructionCount, 0);
+  cleanFixture.tracker.dispose();
+
+  const unclaimedFixture = await createWorkerConstructionFaultTrackerFixture();
+  await emitWorkerConstruction(
+    unclaimedFixture.cdp,
+    `http://127.0.0.1:15173/${CONTROLLED_HASHED_DRAWING_WORKER_PATH}`,
+  );
+  snapshot = unclaimedFixture.tracker.snapshot();
+  assert.equal(snapshot.assetAuthorityPassed, false);
+  assert.equal(snapshot.passed, false);
+  assert.equal(snapshot.cleanInitialWorkerStateAccepted, false);
+  assert.equal(snapshot.workerConstructions.length, 1);
+  assert.equal(snapshot.unclaimedDrawingWorkerConstructionCount, 1);
+  unclaimedFixture.tracker.dispose();
+});
+
 test("asset tracker accepts one exact controlled worker construction fault in the current generation", async () => {
   const fixture = await createWorkerConstructionFaultTrackerFixture();
   await emitWorkerConstructionFault(fixture.cdp);
@@ -1576,6 +1661,7 @@ test("asset tracker rejects mismatched controlled worker construction fault rece
       assert.equal(snapshot.workerConstructionFaults.length, 0);
       assert.equal(snapshot.provenanceErrors.length, 1);
       assert.equal(snapshot.provenanceErrors[0].kind, "worker-constructor-fault-untrusted");
+      assert.equal(snapshot.cleanInitialWorkerStateAccepted, false);
       fixture.tracker.dispose();
     });
   }
@@ -3105,6 +3191,98 @@ test("worker bootstrap handoff accepts request before constructor within the att
   assert.ok(handoff.sourceRequestObservationSequence < handoff.constructorObservationSequence);
   assert.ok(handoff.constructorObservationSequence < handoff.targetAttachedObservationSequence);
   assert.equal(snapshot.workerTargets[0].assetAccepted, true);
+  fixture.tracker.dispose();
+});
+
+test("worker bootstrap handoff accepts serial reconstruction in one document generation", async () => {
+  const fixture = await createWorkerBootstrapHandoffFixture();
+  await fixture.emitChildResponse();
+  await fixture.emitChildFinished();
+  await fixture.cdp.emit("Target.detachedFromTarget", { sessionId: fixture.sessionId });
+
+  const replacement = await attachAdditionalWorkerBootstrap(fixture, {
+    requestId: "worker-bootstrap-target-2",
+    sessionId: "worker-session-2",
+  });
+  await replacement.emitChildResponse();
+  await replacement.emitChildFinished();
+
+  const snapshot = fixture.tracker.snapshot();
+  assert.equal(snapshot.currentGeneration, 1);
+  assert.equal(snapshot.assetAuthorityPassed, true);
+  assert.equal(snapshot.workerAssetAuthorityPassed, true);
+  assert.equal(snapshot.passed, true);
+  assert.equal(snapshot.inFlightCount, 0);
+  assert.equal(snapshot.provenanceErrors.length, 0);
+  assert.equal(snapshot.workerBootstrapHandoffs.length, 2);
+  assert.equal(snapshot.workerTargets.length, 2);
+  assert.equal(snapshot.activeDrawingWorkerTargetCount, 1);
+  assert.equal(snapshot.detachedDrawingWorkerTargetCount, 1);
+  assert.equal(snapshot.serialWorkerLifecycleAccepted, true);
+  assert.deepEqual(snapshot.workerTargets.map((target) => target.active), [false, true]);
+  assert.ok(
+    snapshot.workerTargets[0].detachedObservationSequence
+      < snapshot.workerTargets[1].attachedObservationSequence,
+  );
+  assert.ok(snapshot.workerTargets.every((target) => target.assetAccepted));
+  assert.equal(new Set(snapshot.workerBootstrapHandoffs.map((handoff) => (
+    handoff.constructorObservationSequence
+  ))).size, 2);
+  fixture.tracker.dispose();
+});
+
+test("worker lifecycle rejects an overlapping replacement even when both handoffs are authorized", async () => {
+  const fixture = await createWorkerBootstrapHandoffFixture();
+  await fixture.emitChildResponse();
+  await fixture.emitChildFinished();
+
+  const replacement = await attachAdditionalWorkerBootstrap(fixture, {
+    requestId: "worker-bootstrap-target-2",
+    sessionId: "worker-session-2",
+  });
+  await fixture.cdp.emit("Target.detachedFromTarget", { sessionId: fixture.sessionId });
+  await replacement.emitChildResponse();
+  await replacement.emitChildFinished();
+
+  const snapshot = fixture.tracker.snapshot();
+  assert.equal(snapshot.assetAuthorityPassed, true);
+  assert.equal(snapshot.workerAssetAuthorityPassed, true);
+  assert.equal(snapshot.passed, false);
+  assert.equal(snapshot.provenanceErrors.length, 0);
+  assert.equal(snapshot.workerBootstrapHandoffs.length, 2);
+  assert.equal(snapshot.activeDrawingWorkerTargetCount, 1);
+  assert.equal(snapshot.detachedDrawingWorkerTargetCount, 1);
+  assert.equal(snapshot.serialWorkerLifecycleAccepted, false);
+  assert.ok(
+    snapshot.workerTargets[0].detachedObservationSequence
+      > snapshot.workerTargets[1].attachedObservationSequence,
+  );
+  fixture.tracker.dispose();
+});
+
+test("worker bootstrap handoff still rejects concurrent same-generation constructors", async () => {
+  const fixture = await createWorkerBootstrapHandoffFixture();
+  await fixture.emitChildResponse();
+  await fixture.emitChildFinished();
+
+  const concurrent = await attachAdditionalWorkerBootstrap(fixture, {
+    requestId: "worker-bootstrap-target-2",
+    sessionId: "worker-session-2",
+  });
+  await concurrent.emitChildResponse();
+
+  const snapshot = fixture.tracker.snapshot();
+  const rejection = snapshot.provenanceErrors.find((record) => (
+    record.kind === "worker-bootstrap-handoff-rejected"
+  ));
+  assert.equal(snapshot.currentGeneration, 1);
+  assert.equal(snapshot.passed, false);
+  assert.equal(snapshot.inFlightCount, 0);
+  assert.equal(snapshot.workerBootstrapHandoffs.length, 1);
+  assert.equal(snapshot.workerTargets.length, 2);
+  assert.equal(snapshot.serialWorkerLifecycleAccepted, false);
+  assert.ok(snapshot.workerTargets.every((target) => target.active));
+  assert.deepEqual(rejection.reasons, ["constructor-identity-not-unique"]);
   fixture.tracker.dispose();
 });
 

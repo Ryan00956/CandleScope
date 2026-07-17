@@ -100,9 +100,10 @@ export const DRAWING_ROLLBACK_DRILL_MANIFEST = Object.freeze([
     componentTest: componentTest([
       "src/features/drawings/__tests__/drawingInteractionController.test.ts",
       "src/features/drawings/__tests__/drawingPersistenceLifecycle.test.ts",
+      "src/features/drawings/interaction/__tests__/drawingInteractionLifecycle.test.ts",
       "scripts/chart-type-matrix.test.mjs",
       "scripts/short-switch-readiness.test.mjs",
-    ], "surface disposal keeps transient state until the document barrier succeeds|requested symbol cannot mutate the previous active document|committed paint tickets reject non-exact surface and viewport coordinates|chart type matrix acceptance passes for the complete ordered contract|only the first warm step may prime from an already-active interval", 5),
+    ], "surface disposal keeps transient state until the document barrier succeeds|requested symbol cannot mutate the previous active document|freehand boundary lifecycle emits the strict three-event chart-type receipt|interval lifecycle requires the matching cancellation owner|committed paint tickets reject non-exact surface and viewport coordinates|chart type matrix acceptance passes for the complete ordered contract|only the first warm step may prime from an already-active interval", 7),
   }),
   Object.freeze({
     id: "series-rebuild-before-export",
@@ -1349,6 +1350,198 @@ function validateIndexedDbQuotaBlocked(artifact) {
   return failures;
 }
 
+const GESTURE_POINTER_EVENT_TYPES = Object.freeze([
+  "pointerdown",
+  "pointermove",
+  "pointerup",
+  "pointercancel",
+]);
+
+function sameJsonValue(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => sameJsonValue(value, right[index]));
+  }
+  const leftObject = objectValue(left);
+  const rightObject = objectValue(right);
+  if (!leftObject || !rightObject) return false;
+  const leftKeys = Object.keys(leftObject).sort();
+  const rightKeys = Object.keys(rightObject).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => (
+      key === rightKeys[index] && sameJsonValue(leftObject[key], rightObject[key])
+    ));
+}
+
+function validGesturePoint(value) {
+  return objectValue(value) !== null
+    && finiteNumber(value.x) !== null
+    && finiteNumber(value.y) !== null;
+}
+
+function gestureLedgerEvents(value) {
+  return Array.isArray(value?.events) ? value.events : [];
+}
+
+function validGestureLedger(value) {
+  const ledger = objectValue(value);
+  const events = gestureLedgerEvents(ledger);
+  return ledger !== null
+    && objectValue(ledger.counts) !== null
+    && objectValue(ledger.trustedCounts) !== null
+    && events.every((event) => (
+      objectValue(event) !== null
+        && GESTURE_POINTER_EVENT_TYPES.includes(event.type)
+        && event.isTrusted === true
+        && validTimestamp(event.observedAt)
+    ))
+    && timestampsAreOrdered(events.map((event) => event.observedAt))
+    && GESTURE_POINTER_EVENT_TYPES.every((type) => {
+      const eventCount = events.filter((event) => event.type === type).length;
+      return ledger.counts[type] === eventCount && ledger.trustedCounts[type] === eventCount;
+    });
+}
+
+function exactGestureLedgerCounts(value, { down, move, up, cancel }) {
+  return validGestureLedger(value)
+    && value.trustedCounts.pointerdown === down
+    && value.trustedCounts.pointermove === move
+    && value.trustedCounts.pointerup === up
+    && value.trustedCounts.pointercancel === cancel;
+}
+
+function gesturePointerMatches(event, pointerId, pointerType) {
+  return event?.pointerId === pointerId && event?.pointerType === pointerType;
+}
+
+function gesturePointMatches(event, point) {
+  return event?.clientX === point?.x && event?.clientY === point?.y;
+}
+
+function gestureLedgerExtends(previous, next, addedType) {
+  const before = gestureLedgerEvents(previous);
+  const after = gestureLedgerEvents(next);
+  return after.length === before.length + 1
+    && before.every((event, index) => sameJsonValue(event, after[index]))
+    && after.at(-1)?.type === addedType;
+}
+
+function validateGestureActivityEvidence(failures, variant, kind, events) {
+  const evidence = objectValue(variant?.activityEvidence);
+  const liveInk = objectValue(evidence?.liveInk);
+  const pointer = objectValue(evidence?.pointer);
+  const activeLedger = objectValue(evidence?.pointerLedgerAtActive);
+  const cancellationLedger = objectValue(evidence?.pointerLedgerAtCancellation);
+  const heldProbeLedger = objectValue(evidence?.pointerLedgerAfterHeldProbe);
+  const releaseLedger = objectValue(evidence?.pointerLedgerAfterRelease);
+  const activeEvents = gestureLedgerEvents(activeLedger);
+  const cancellationEvents = gestureLedgerEvents(cancellationLedger);
+  const heldProbeEvents = gestureLedgerEvents(heldProbeLedger);
+  const releaseEvents = gestureLedgerEvents(releaseLedger);
+  const down = activeEvents.find((event) => event.type === "pointerdown");
+  const moves = activeEvents.filter((event) => event.type === "pointermove");
+  const finalActiveMove = moves.at(-1);
+  const heldProbe = heldProbeEvents.at(-1);
+  const release = releaseEvents.at(-1);
+  const pointerId = down?.pointerId;
+  const pointerType = down?.pointerType;
+  const productLifecycle = objectValue(evidence?.productLifecycle);
+  const boundaryChange = objectValue(events[1]);
+
+  addFailure(failures, evidence !== null, `${kind}-activity-evidence-missing`);
+  addFailure(
+    failures,
+    liveInk?.before === 0
+      && safePositiveInteger(liveInk?.active) !== null
+      && liveInk?.cancelled === 0
+      && liveInk?.heldProbeAfterCancel === 0
+      && liveInk?.afterRelease === 0,
+    `${kind}-live-ink-activity-invalid`,
+  );
+  addFailure(
+    failures,
+    validGesturePoint(pointer?.start)
+      && validGesturePoint(pointer?.end)
+      && Number.isSafeInteger(pointerId)
+      && pointerId > 0
+      && pointerType === "mouse"
+      && moves.length > 0
+      && exactGestureLedgerCounts(activeLedger, {
+        down: 1, move: moves.length, up: 0, cancel: 0,
+      })
+      && down?.button === 0
+      && down?.buttons === 1
+      && gesturePointerMatches(down, pointerId, pointerType)
+      && gesturePointMatches(down, pointer.start)
+      && moves.every((event) => (
+        event.button === -1
+          && event.buttons === 1
+          && gesturePointerMatches(event, pointerId, pointerType)
+      ))
+      && gesturePointMatches(finalActiveMove, pointer.end),
+    `${kind}-pointer-active-ledger-invalid`,
+  );
+  addFailure(
+    failures,
+    exactGestureLedgerCounts(cancellationLedger, {
+      down: 1, move: moves.length, up: 0, cancel: 0,
+    }) && sameJsonValue(activeEvents, cancellationEvents),
+    `${kind}-pointer-cancellation-ledger-invalid`,
+  );
+  addFailure(
+    failures,
+    exactGestureLedgerCounts(heldProbeLedger, {
+      down: 1, move: moves.length + 1, up: 0, cancel: 0,
+    })
+      && gestureLedgerExtends(cancellationLedger, heldProbeLedger, "pointermove")
+      && heldProbe?.button === -1
+      && heldProbe?.buttons === 1
+      && gesturePointerMatches(heldProbe, pointerId, pointerType)
+      && heldProbe?.clientX === pointer?.end?.x + 8
+      && heldProbe?.clientY === pointer?.end?.y + 4,
+    `${kind}-pointer-held-probe-ledger-invalid`,
+  );
+  addFailure(
+    failures,
+    exactGestureLedgerCounts(releaseLedger, {
+      down: 1, move: moves.length + 1, up: 1, cancel: 0,
+    })
+      && gestureLedgerExtends(heldProbeLedger, releaseLedger, "pointerup")
+      && release?.button === 0
+      && release?.buttons === 0
+      && gesturePointerMatches(release, pointerId, pointerType)
+      && gesturePointMatches(release, pointer?.end),
+    `${kind}-pointer-release-ledger-invalid`,
+  );
+  addFailure(
+    failures,
+    evidence?.uiBoundary?.changed === true
+      && evidence?.uiBoundary?.beforeValue === boundaryChange?.beforeValue
+      && evidence?.uiBoundary?.afterValue === boundaryChange?.afterValue,
+    `${kind}-ui-boundary-evidence-mismatch`,
+  );
+  addFailure(
+    failures,
+    validTimestamp(evidence?.boundaryRequestedAt)
+      && validTimestamp(events[0]?.observedAt)
+      && validTimestamp(boundaryChange?.observedAt)
+      && Date.parse(evidence.boundaryRequestedAt) >= Date.parse(events[0].observedAt)
+      && Date.parse(evidence.boundaryRequestedAt) <= Date.parse(boundaryChange.observedAt),
+    `${kind}-boundary-request-order-invalid`,
+  );
+  addFailure(
+    failures,
+    productLifecycle?.kind === variant?.kind
+      && productLifecycle?.transactionId === variant?.transactionId
+      && productLifecycle?.gestureId === variant?.gestureId
+      && sameJsonValue(productLifecycle?.events, events),
+    `${kind}-product-lifecycle-evidence-mismatch`,
+  );
+}
+
 function validateGestureVariant(failures, value, kind) {
   const variant = objectValue(value);
   const events = Array.isArray(variant?.events) ? variant.events : [];
@@ -1420,11 +1613,103 @@ function validateGestureVariant(failures, value, kind) {
       && afterRevision === beforeRevision,
     `${kind}-canonical-document-revision-changed`,
   );
+  validateGestureActivityEvidence(failures, variant, kind, events);
+}
+
+function serialDrawingWorkerLifecycleAccepted(workerTargets) {
+  if (!Array.isArray(workerTargets) || workerTargets.length === 0) return false;
+  if (!workerTargets.every((target) => (
+    objectValue(target) !== null
+      && typeof target.active === "boolean"
+      && nonEmptyString(target.targetId)
+      && safePositiveInteger(target.attachedObservationSequence) !== null
+  ))) return false;
+
+  const targetIds = workerTargets.map((target) => target.targetId);
+  if (new Set(targetIds).size !== workerTargets.length) return false;
+
+  const attachedObservationSequences = workerTargets.map((target) => (
+    target.attachedObservationSequence
+  ));
+  if (new Set(attachedObservationSequences).size !== workerTargets.length) return false;
+
+  const orderedTargets = [...workerTargets].sort((left, right) => (
+    left.attachedObservationSequence - right.attachedObservationSequence
+  ));
+  const activeTargets = orderedTargets.filter((target) => target.active === true);
+  if (activeTargets.length !== 1 || orderedTargets.at(-1) !== activeTargets[0]) return false;
+
+  return orderedTargets.every((target, index) => {
+    if (target.active === true) return target.detachedObservationSequence === null;
+    const next = orderedTargets[index + 1] ?? null;
+    return next !== null
+      && safePositiveInteger(target.detachedObservationSequence) !== null
+      && target.detachedObservationSequence > target.attachedObservationSequence
+      && target.detachedObservationSequence < next.attachedObservationSequence;
+  });
 }
 
 function validateActiveGestureBoundary(artifact) {
   const failures = validateDedicatedCommon("active-gesture-chart-boundary", artifact);
-  addFailure(failures, artifact?.injection?.kind === "active-gesture-chart-boundary", "wrong-gesture-boundary-injection");
+  const workerLifecycle = objectValue(artifact?.buildAuthority?.workerLifecycle);
+  const workerTargets = Array.isArray(workerLifecycle?.targets) ? workerLifecycle.targets : [];
+  const drawingWorkerTargetCount = integer(workerLifecycle?.drawingWorkerTargetCount);
+  const activeDrawingWorkerTargetCount = integer(workerLifecycle?.activeDrawingWorkerTargetCount);
+  const detachedDrawingWorkerTargetCount = integer(workerLifecycle?.detachedDrawingWorkerTargetCount);
+  const injection = objectValue(artifact?.injection);
+  const navigation = objectValue(injection?.navigation);
+  addFailure(failures, injection?.kind === "active-gesture-chart-boundary", "wrong-gesture-boundary-injection");
+  addFailure(
+    failures,
+    Array.isArray(injection?.variants)
+      && injection.variants.length === 2
+      && injection.variants[0] === "chart-type"
+      && injection.variants[1] === "interval",
+    "gesture-boundary-injection-variants-invalid",
+  );
+  addFailure(
+    failures,
+    injection?.buildAuthorityCurrent === true,
+    "gesture-boundary-current-build-authority-not-proven",
+  );
+  addFailure(
+    failures,
+    navigation !== null
+      && sameNonEmptyString(navigation?.runId, artifact?.provenance?.runId)
+      && nonEmptyString(navigation?.faultId)
+      && safePositiveInteger(navigation?.sequence) !== null
+      && sha256Digest(navigation?.authorityTokenSha256),
+    "gesture-boundary-navigation-binding-invalid",
+  );
+  addFailure(
+    failures,
+    drawingWorkerTargetCount !== null
+      && drawingWorkerTargetCount > 0
+      && activeDrawingWorkerTargetCount === 1
+      && detachedDrawingWorkerTargetCount !== null
+      && detachedDrawingWorkerTargetCount >= 0
+      && drawingWorkerTargetCount
+        === activeDrawingWorkerTargetCount + detachedDrawingWorkerTargetCount
+      && workerTargets.length === drawingWorkerTargetCount
+      && workerTargets.filter((target) => target?.active === true).length === 1
+      && workerTargets.filter((target) => target?.active === false).length
+        === detachedDrawingWorkerTargetCount
+      && serialDrawingWorkerLifecycleAccepted(workerTargets),
+    "gesture-boundary-worker-serial-handoff-invalid",
+  );
+  addFailure(
+    failures,
+    workerTargets.length > 0
+      && workerTargets.every((target) => nonEmptyString(target?.path))
+      && new Set(workerTargets.map((target) => target.path)).size === 1
+      && workerTargets.every((target) => (
+        objectValue(target) !== null
+          && target.assetAccepted === true
+          && sameSha256Digest(target.assetDigest, target.expectedAssetDigest)
+          && target.assetDigest === workerTargets[0]?.assetDigest
+      )),
+    "gesture-boundary-worker-asset-authority-invalid",
+  );
   const variants = Array.isArray(artifact?.variants) ? artifact.variants : [];
   addFailure(failures, variants.length === 2, "gesture-boundary-variant-count-mismatch");
   validateGestureVariant(failures, variants.find((value) => value?.kind === "chart-type"), "chart-type");

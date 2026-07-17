@@ -7,6 +7,7 @@ import {
   manifestReceipt,
   pendingDrawingAccepted,
   quotaNativeReceipt,
+  retryAttemptedAt,
   storageBaselineAccepted,
   storageInjectionReceipt,
 } from "./drawing-rollback-storage-browser.mjs";
@@ -368,4 +369,42 @@ test("blocked receipt maps only the native seam lifecycle fields", () => {
     databaseName,
     completedAt: "2026-07-16T08:00:22.600Z",
   });
+});
+
+test("retry attempt is bound to the browser trigger timestamp after native cleanup", () => {
+  const cleanupCompletedAt = "2026-07-16T08:00:22.600Z";
+  const requestedAt = "2026-07-16T08:00:22.601Z";
+  assert.equal(retryAttemptedAt({ clicked: true, requestedAt }, cleanupCompletedAt), requestedAt);
+});
+
+test("retry attempt fails closed without an exact browser trigger timestamp", () => {
+  const cleanupCompletedAt = "2026-07-16T08:00:22.600Z";
+  for (const trigger of [
+    null,
+    {},
+    { requestedAt: "2026-07-16 08:00:22.601Z" },
+    { requestedAt: "not-a-timestamp" },
+  ]) {
+    assert.throws(
+      () => retryAttemptedAt(trigger, cleanupCompletedAt),
+      /retry browser trigger timestamp is invalid/,
+    );
+  }
+});
+
+test("retry attempt fails closed when browser trigger predates native cleanup", () => {
+  assert.throws(
+    () => retryAttemptedAt(
+      { requestedAt: "2026-07-16T08:00:22.599Z" },
+      "2026-07-16T08:00:22.600Z",
+    ),
+    /retry browser trigger predates native cleanup/,
+  );
+  assert.throws(
+    () => retryAttemptedAt(
+      { requestedAt: "2026-07-16T08:00:22.601Z" },
+      undefined,
+    ),
+    /native cleanup timestamp is invalid/,
+  );
 });

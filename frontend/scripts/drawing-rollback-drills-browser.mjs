@@ -16,6 +16,7 @@ import {
   canonicalArtifactSha256,
   runControlledWorkerRollbackDrills,
 } from "./drawing-rollback-worker-browser.mjs";
+import { runControlledLifecycleRollbackDrills } from "./drawing-rollback-lifecycle-browser.mjs";
 import { runControlledStorageRollbackDrills } from "./drawing-rollback-storage-browser.mjs";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -55,9 +56,11 @@ const IMPLEMENTED_WORKER_DRILL_IDS = new Set([
   "worker-stale-generation",
 ]);
 const IMPLEMENTED_STORAGE_DRILL_IDS = new Set(["indexeddb-quota-blocked"]);
+const IMPLEMENTED_LIFECYCLE_DRILL_IDS = new Set(["active-gesture-chart-boundary"]);
 const IMPLEMENTED_DRILL_IDS = new Set([
   ...IMPLEMENTED_WORKER_DRILL_IDS,
   ...IMPLEMENTED_STORAGE_DRILL_IDS,
+  ...IMPLEMENTED_LIFECYCLE_DRILL_IDS,
 ]);
 
 function usage() {
@@ -195,6 +198,7 @@ export function buildInitialControlledRunReport(args, {
     harnessPassed: false,
     workerHarnessPassed: false,
     storageHarnessPassed: false,
+    lifecycleHarnessPassed: false,
     runId,
     sourceRevision: gitRevision(),
     startedAt,
@@ -297,6 +301,14 @@ export function storageDrillBuildAuthorityPassed(storageResult, buildReceipt) {
   );
 }
 
+export function lifecycleDrillBuildAuthorityPassed(lifecycleResult, buildReceipt) {
+  return drillBuildAuthorityPassed(
+    lifecycleResult,
+    buildReceipt,
+    IMPLEMENTED_LIFECYCLE_DRILL_IDS,
+  );
+}
+
 function currentFailureReasons(report, executionFailure, finalDiagnosticFailures) {
   const reasons = [];
   if (!report.planValid) reasons.push("controlled-browser-drill-plan-invalid");
@@ -321,6 +333,7 @@ async function runControlledRollbackDrills(args) {
   let executionFailure = null;
   let workerResult = null;
   let storageResult = null;
+  let lifecycleResult = null;
   let authoritativeState = null;
   let liveDiagnostics = null;
   try {
@@ -339,6 +352,10 @@ async function runControlledRollbackDrills(args) {
     storageResult = await runControlledStorageRollbackDrills(session, {
       timeoutMs: args.timeoutMs,
       beforeDocument: workerResult.finalDocument,
+    });
+    lifecycleResult = await runControlledLifecycleRollbackDrills(session, {
+      timeoutMs: args.timeoutMs,
+      beforeDocument: storageResult.finalDocument,
     });
     authoritativeState = await session.settleAuthoritativeState();
     liveDiagnostics = session.diagnostics();
@@ -375,8 +392,13 @@ async function runControlledRollbackDrills(args) {
     storageResult,
     session?.buildReceipt,
   );
+  const lifecycleBuildAuthorityPassed = lifecycleDrillBuildAuthorityPassed(
+    lifecycleResult,
+    session?.buildReceipt,
+  );
   const perDrillBuildAuthorityPassed = workerBuildAuthorityPassed
-    && storageBuildAuthorityPassed;
+    && storageBuildAuthorityPassed
+    && lifecycleBuildAuthorityPassed;
   const runAuthorityPassed = executionFailure === null
     && session?.initialBuildEvidence?.authoritative === true
     && perDrillBuildAuthorityPassed
@@ -388,6 +410,7 @@ async function runControlledRollbackDrills(args) {
   const producedArtifacts = [
     ...(workerResult?.drills ?? []),
     ...(storageResult?.drills ?? []),
+    ...(lifecycleResult?.drills ?? []),
   ];
   const artifacts = new Map(producedArtifacts.map((artifact) => [artifact.drillId, artifact]));
   report.drills = CONTROLLED_DRILL_PLAN.map((entry) => {
@@ -420,14 +443,23 @@ async function runControlledRollbackDrills(args) {
   report.storageHarnessPassed = [...IMPLEMENTED_STORAGE_DRILL_IDS].every((drillId) => (
     report.drills.find((drill) => drill.id === drillId)?.trustedRunnerAccepted === true
   ));
-  report.harnessPassed = report.workerHarnessPassed && report.storageHarnessPassed && cleanupComplete
+  report.lifecycleHarnessPassed = [...IMPLEMENTED_LIFECYCLE_DRILL_IDS].every((drillId) => (
+    report.drills.find((drill) => drill.id === drillId)?.trustedRunnerAccepted === true
+  ));
+  report.harnessPassed = report.workerHarnessPassed
+    && report.storageHarnessPassed
+    && report.lifecycleHarnessPassed
+    && cleanupComplete
     && finalDiagnosticFailures.length === 0;
   report.phase9RollbackDrillsPassed = report.drills.every((drill) => (
     drill.trustedRunnerAccepted === true
   ));
   report.status = report.phase9RollbackDrillsPassed
     ? "passed"
-    : executionFailure || !report.workerHarnessPassed || !report.storageHarnessPassed
+    : executionFailure
+        || !report.workerHarnessPassed
+        || !report.storageHarnessPassed
+        || !report.lifecycleHarnessPassed
       ? "failed"
       : "partial";
   report.lifecycle = {
@@ -443,6 +475,7 @@ async function runControlledRollbackDrills(args) {
     perDrillBuildAuthorityPassed,
     workerBuildAuthorityPassed,
     storageBuildAuthorityPassed,
+    lifecycleBuildAuthorityPassed,
     storageFaultCleanupComplete,
     drillBuildAuthorities: Object.freeze(producedArtifacts.map((artifact) => (
       artifact.buildAuthority ?? null
@@ -452,7 +485,10 @@ async function runControlledRollbackDrills(args) {
     liveDiagnostics,
     finalDiagnosticFailures,
     baseline: workerResult?.baseline ?? null,
-    finalDocument: storageResult?.finalDocument ?? workerResult?.finalDocument ?? null,
+    finalDocument: lifecycleResult?.finalDocument
+      ?? storageResult?.finalDocument
+      ?? workerResult?.finalDocument
+      ?? null,
   };
   report.cleanup = cleanup;
   report.failureReasons = currentFailureReasons(report, executionFailure, finalDiagnosticFailures);
@@ -475,6 +511,7 @@ async function main() {
     status: result.report.status,
     workerHarnessPassed: result.report.workerHarnessPassed,
     storageHarnessPassed: result.report.storageHarnessPassed,
+    lifecycleHarnessPassed: result.report.lifecycleHarnessPassed,
     harnessPassed: result.report.harnessPassed,
     phase9RollbackDrillsPassed: result.report.phase9RollbackDrillsPassed,
     cleanupComplete: result.report.cleanup?.summary?.complete === true,

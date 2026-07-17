@@ -45,6 +45,7 @@ export const CONTROLLED_STORAGE_ROLLBACK_DRILL_VARIANTS = Object.freeze([
 export const CONTROLLED_ROLLBACK_DRILL_IDS = Object.freeze([
   ...CONTROLLED_WORKER_ROLLBACK_DRILL_IDS,
   "indexeddb-quota-blocked",
+  "active-gesture-chart-boundary",
 ]);
 const DEFAULT_TIMEOUT_MS = 45_000;
 const DEFAULT_VIEWPORT = Object.freeze({ width: 1440, height: 900 });
@@ -2857,6 +2858,26 @@ export function createControlledNetworkAssetTracker(
     } catch { return null; }
   };
   const requestKey = (sessionId, requestId) => `${sessionId || "<top>"}\0${requestId}`;
+  const isRetiredWorkerConstruction = (construction) => {
+    const bindings = [...workerTargetConstructionBindings.entries()].filter(([, candidate]) => (
+      candidate === construction
+    ));
+    if (bindings.length !== 1) return false;
+    const [[sessionId]] = bindings;
+    const target = targetSessions.get(sessionId) ?? null;
+    if (!target || target.detachedAt === null || typeof target.targetId !== "string") return false;
+    const handoff = workerBootstrapHandoffs.get(requestKey(sessionId, target.targetId)) ?? null;
+    return handoff?.generation === construction.generation
+      && handoff?.url === construction.url
+      && handoff?.destinationSessionId === sessionId
+      && handoff?.targetId === target.targetId
+      && handoff?.constructorObservationSequence === construction.observationSequence;
+  };
+  const exactWorkerConstructions = (generation, url) => workerConstructions.filter((candidate) => (
+    candidate.generation === generation
+    && candidate.url === url
+    && !isRetiredWorkerConstruction(candidate)
+  ));
   const isDataApiRequest = (relativePath, type) => (
     relativePath?.startsWith("api/") && dataApiTypes.has(type)
   );
@@ -2903,14 +2924,17 @@ export function createControlledNetworkAssetTracker(
       attachedAt: isoNow(),
       attachedObservationSequence,
       detachedAt: null,
+      detachedObservationSequence: null,
     };
     targetSessions.set(params.sessionId, target);
     reconcileWorkerConstructionBinding(target.generation, target.url);
   });
   const removeDetached = cdp.on("Target.detachedFromTarget", (params) => {
     const target = targetSessions.get(params?.sessionId);
-    if (target) target.detachedAt = isoNow();
-    if (target) observe();
+    if (target) {
+      target.detachedAt = isoNow();
+      target.detachedObservationSequence = observe();
+    }
   });
   const removeWorkerConstruction = cdp.on("Runtime.bindingCalled", (params, message) => {
     if (message?.sessionId || params?.name !== DIAGNOSTIC_BINDING) return;
@@ -3060,9 +3084,7 @@ export function createControlledNetworkAssetTracker(
       && candidate.url === target.url
       && candidate.detachedAt === null
     ));
-    const matchingConstructions = workerConstructions.filter((candidate) => (
-      candidate.generation === currentGeneration && candidate.url === target.url
-    ));
+    const matchingConstructions = exactWorkerConstructions(currentGeneration, target.url);
     const bootstrapObservationSpan = Math.max(
       construction.observationSequence,
       source.requestObservationSequence,
@@ -3134,10 +3156,7 @@ export function createControlledNetworkAssetTracker(
       && candidate.url === responseUrl
       && candidate.detachedAt === null
     ));
-    const exactConstructions = workerConstructions.filter((candidate) => (
-      candidate.generation === currentGeneration
-      && candidate.url === responseUrl
-    ));
+    const exactConstructions = exactWorkerConstructions(currentGeneration, responseUrl);
     const constructionObservationSequence = construction?.observationSequence ?? null;
     const sourceRequestObservationSequence = source?.requestObservationSequence ?? null;
     const targetAttachedObservationSequence = target?.attachedObservationSequence ?? null;
@@ -3689,6 +3708,23 @@ export function createControlledNetworkAssetTracker(
     const drawingWorkerTargets = workerTargets.filter((target) => (
       target.type === "worker" && drawingWorkerPaths.includes(target.path)
     ));
+    const orderedDrawingWorkerTargets = [...drawingWorkerTargets].sort((left, right) => (
+      left.attachedObservationSequence - right.attachedObservationSequence
+    ));
+    const activeDrawingWorkerTargets = orderedDrawingWorkerTargets.filter((target) => target.active);
+    const serialWorkerLifecycleAccepted = currentWorkerConstructionFaults.length === 0
+      && orderedDrawingWorkerTargets.length > 0
+      && orderedDrawingWorkerTargets.length === workerTargets.length
+      && activeDrawingWorkerTargets.length === 1
+      && orderedDrawingWorkerTargets.at(-1) === activeDrawingWorkerTargets[0]
+      && orderedDrawingWorkerTargets.every((target, index) => {
+        if (target.active) return target.detachedObservationSequence === null;
+        const next = orderedDrawingWorkerTargets[index + 1] ?? null;
+        return isRetiredWorkerConstruction(target.constructorProvenance)
+          && Number.isInteger(target.detachedObservationSequence)
+          && next !== null
+          && target.detachedObservationSequence < next.attachedObservationSequence;
+      });
     const unclaimedDrawingWorkerConstructions = availableWorkerConstructions.filter((construction) => (
       drawingWorkerPaths.includes(assetPath(construction.url || ""))
       && !claimedWorkerConstructions.has(construction)
@@ -3704,8 +3740,18 @@ export function createControlledNetworkAssetTracker(
       && target.assetAccepted
       && target.assetSha256 === target.expectedAssetSha256
       ));
+    const workerConstructionFaultPassed = currentWorkerConstructionFaults.length === 1
+      && drawingWorkerTargets.length === 0
+      && workerTargets.length === 0;
+    const cleanInitialWorkerStateAccepted = workerTargets.length === 0
+      && availableWorkerConstructions.length === 0
+      && currentWorkerConstructionFaults.length === 0
+      && unclaimedDrawingWorkerConstructions.length === 0
+      && currentProvenanceErrors.length === 0;
     const workersPassed = workerAssetAuthorityPassed
-      && workerTargets.every((target) => target.active);
+      && (cleanInitialWorkerStateAccepted
+        || workerConstructionFaultPassed
+        || serialWorkerLifecycleAccepted);
     const commonAssetAuthorityPassed = currentDocumentPath === "index.html"
       && currentGeneration > 0
       && entriesPassed
@@ -3732,6 +3778,11 @@ export function createControlledNetworkAssetTracker(
       expectedEntryCount: entryPaths.length,
       expectedDrawingWorkerPaths: drawingWorkerPaths,
       drawingWorkerTargetCount: drawingWorkerTargets.length,
+      activeDrawingWorkerTargetCount: activeDrawingWorkerTargets.length,
+      detachedDrawingWorkerTargetCount: drawingWorkerTargets.length
+        - activeDrawingWorkerTargets.length,
+      serialWorkerLifecycleAccepted,
+      cleanInitialWorkerStateAccepted,
       unclaimedDrawingWorkerConstructionCount: unclaimedDrawingWorkerConstructions.length,
       unclaimedDrawingWorkerConstructions: Object.freeze(
         unclaimedDrawingWorkerConstructions.map((record) => Object.freeze({ ...record })),

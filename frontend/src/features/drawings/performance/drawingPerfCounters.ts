@@ -1,4 +1,11 @@
 import { recordPerfEvent } from "../../../runtime/performance/perfMarks.js";
+import {
+  readDrawingInteractionLifecycle,
+  resetDrawingInteractionLifecycle,
+} from "../interaction/drawingInteractionLifecycle.js";
+import type {
+  DrawingInteractionLifecycleSnapshot,
+} from "../interaction/drawingInteractionLifecycle.js";
 
 export const DRAWING_PERF_EVENT_NAME = "drawing.perf.summary";
 export const DEFAULT_DRAWING_PERF_FLUSH_INTERVAL_MS = 5_000;
@@ -406,6 +413,7 @@ export interface DrawingPerfDebugHandle {
   );
   readonly runPhase6HitOracle: DrawingPerfPhase6HitOracleProvider;
   readonly readInteractionHandoff: () => DrawingPerfInteractionHandoffSnapshot;
+  readonly readInteractionLifecycle: () => DrawingInteractionLifecycleSnapshot;
   readonly requestShadowParity: () => boolean;
   readonly reset: () => void;
 }
@@ -1550,6 +1558,7 @@ export function getDrawingPerfCounters(): DrawingPerfCounters {
 export function resetDrawingPerfCounters(): void {
   drawingPerfCounters.reset();
   resetDrawingPerfInteractionHandoff();
+  resetDrawingInteractionLifecycle();
 }
 
 export function flushDrawingPerfCounters(
@@ -1580,10 +1589,12 @@ export function installDrawingPerfDebugHandle(
       points: readonly Readonly<{ x: number; y: number }>[],
     ) => runDrawingPerfPhase6HitOracle(points),
     readInteractionHandoff: () => readDrawingPerfInteractionHandoff(),
+    readInteractionLifecycle: () => readDrawingInteractionLifecycle(),
     requestShadowParity: () => requestDrawingPerfShadowParity(),
     reset: () => {
       drawingPerfCounters.reset();
       resetDrawingPerfInteractionHandoff();
+      resetDrawingInteractionLifecycle();
     },
   });
   globalRef.__CANDLESCOPE_DRAWING_PERF__ = handle;

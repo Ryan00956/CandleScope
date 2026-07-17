@@ -708,10 +708,90 @@ function staleGenerationArtifact() {
   };
 }
 
+const GESTURE_POINTER = Object.freeze({
+  start: Object.freeze({ x: 100, y: 200 }),
+  end: Object.freeze({ x: 180, y: 160 }),
+});
+
+function gesturePointerEvent(type, overrides = {}) {
+  const move = type === "pointermove";
+  const release = type === "pointerup";
+  return {
+    type,
+    isTrusted: true,
+    pointerId: 1,
+    pointerType: "mouse",
+    button: move ? -1 : 0,
+    buttons: release ? 0 : 1,
+    clientX: type === "pointerdown" ? GESTURE_POINTER.start.x : GESTURE_POINTER.end.x,
+    clientY: type === "pointerdown" ? GESTURE_POINTER.start.y : GESTURE_POINTER.end.y,
+    observedAt: release
+      ? "2026-07-16T08:00:12.200Z"
+      : move
+        ? "2026-07-16T08:00:10.200Z"
+        : "2026-07-16T08:00:10.100Z",
+    ...overrides,
+  };
+}
+
+function gestureLedger(events) {
+  const types = ["pointerdown", "pointermove", "pointerup", "pointercancel"];
+  return {
+    counts: Object.fromEntries(types.map((type) => [
+      type,
+      events.filter((event) => event.type === type).length,
+    ])),
+    trustedCounts: Object.fromEntries(types.map((type) => [
+      type,
+      events.filter((event) => event.type === type && event.isTrusted).length,
+    ])),
+    events: structuredClone(events),
+  };
+}
+
+function gestureActivityEvidence(kind, lifecycle) {
+  const activeEvents = [
+    gesturePointerEvent("pointerdown"),
+    gesturePointerEvent("pointermove"),
+  ];
+  const heldEvents = [
+    ...activeEvents,
+    gesturePointerEvent("pointermove", {
+      clientX: GESTURE_POINTER.end.x + 8,
+      clientY: GESTURE_POINTER.end.y + 4,
+      observedAt: "2026-07-16T08:00:12.100Z",
+    }),
+  ];
+  return {
+    boundaryRequestedAt: "2026-07-16T08:00:10.500Z",
+    uiBoundary: {
+      beforeValue: lifecycle.events[1].beforeValue,
+      afterValue: lifecycle.events[1].afterValue,
+      changed: true,
+    },
+    liveInk: {
+      before: 0,
+      active: 12,
+      cancelled: 0,
+      heldProbeAfterCancel: 0,
+      afterRelease: 0,
+    },
+    pointer: structuredClone(GESTURE_POINTER),
+    pointerLedgerAtActive: gestureLedger(activeEvents),
+    pointerLedgerAtCancellation: gestureLedger(activeEvents),
+    pointerLedgerAfterHeldProbe: gestureLedger(heldEvents),
+    pointerLedgerAfterRelease: gestureLedger([
+      ...heldEvents,
+      gesturePointerEvent("pointerup"),
+    ]),
+    productLifecycle: structuredClone(lifecycle),
+  };
+}
+
 function gestureVariant(kind) {
   const transactionId = `transaction-${kind}`;
   const gestureId = `gesture-${kind}`;
-  return {
+  const variant = {
     kind,
     transactionId,
     gestureId,
@@ -755,13 +835,56 @@ function gestureVariant(kind) {
       },
     },
   };
+  variant.activityEvidence = gestureActivityEvidence(kind, {
+    kind,
+    transactionId,
+    gestureId,
+    events: variant.events,
+  });
+  return variant;
 }
 
 function activeGestureArtifact() {
-  return {
+  const artifact = {
     ...commonArtifact("active-gesture-chart-boundary", "active-gesture-chart-boundary"),
     variants: [gestureVariant("chart-type"), gestureVariant("interval")],
   };
+  const initialTarget = artifact.buildAuthority.workerLifecycle.targets[0];
+  artifact.buildAuthority.workerLifecycle.targets = [
+    {
+      ...initialTarget,
+      targetId: "drawing-worker-1",
+      active: false,
+      attachedObservationSequence: 10,
+      detachedObservationSequence: 20,
+    },
+    {
+      ...initialTarget,
+      targetId: "drawing-worker-2",
+      active: false,
+      attachedObservationSequence: 30,
+      detachedObservationSequence: 40,
+    },
+    {
+      ...initialTarget,
+      targetId: "drawing-worker-3",
+      active: true,
+      attachedObservationSequence: 50,
+      detachedObservationSequence: null,
+    },
+  ];
+  artifact.buildAuthority.workerLifecycle.drawingWorkerTargetCount = 3;
+  artifact.buildAuthority.workerLifecycle.activeDrawingWorkerTargetCount = 1;
+  artifact.buildAuthority.workerLifecycle.detachedDrawingWorkerTargetCount = 2;
+  artifact.buildAuthority.workerLifecycle.serialHandoffAccepted = true;
+  artifact.injection.variants = ["chart-type", "interval"];
+  artifact.injection.navigation = {
+    runId: artifact.provenance.runId,
+    faultId: "active-gesture-boundary-fault",
+    sequence: 1,
+    authorityTokenSha256: digest("a"),
+  };
+  return artifact;
 }
 
 function seriesRebuildArtifact() {
@@ -1064,6 +1187,21 @@ test("manifest maps exactly the eight Phase 9 rollback drills", () => {
     assert.ok(drill.componentTest.pattern.length > 0);
     assert.ok(drill.componentTest.minimumPassCount > 0);
   }
+  const activeGesture = DRAWING_ROLLBACK_DRILL_MANIFEST.find(
+    (drill) => drill.id === "active-gesture-chart-boundary",
+  );
+  assert.ok(activeGesture.componentTest.files.includes(
+    "src/features/drawings/interaction/__tests__/drawingInteractionLifecycle.test.ts",
+  ));
+  assert.match(
+    activeGesture.componentTest.pattern,
+    /freehand boundary lifecycle emits the strict three-event chart-type receipt/,
+  );
+  assert.match(
+    activeGesture.componentTest.pattern,
+    /interval lifecycle requires the matching cancellation owner/,
+  );
+  assert.equal(activeGesture.componentTest.minimumPassCount, 7);
 });
 
 test("TAP evidence requires an explicit nonzero pass summary", () => {
@@ -2364,6 +2502,13 @@ test("blocked variant requires a trusted native sacrificial database lifecycle a
 });
 
 test("gesture drill requires boundary-owned cancellation with unchanged same-scope canonical state", () => {
+  assert.equal(
+    assessDrawingRollbackDrillArtifact(
+      "active-gesture-chart-boundary",
+      activeGestureArtifact(),
+    ).contractPassed,
+    true,
+  );
   const artifact = activeGestureArtifact();
   artifact.variants[0].pointerCancelObserved = false;
   artifact.variants[0].canonical.after.scopeKey = "binance:spot:ETHUSDT__main";
@@ -2413,6 +2558,194 @@ test("gesture drill requires boundary-owned cancellation with unchanged same-sco
     "active-gesture-chart-boundary",
     outOfOrder,
   ).failures.includes("interval-gesture-event-order-invalid"));
+});
+
+test("gesture drill fails closed on missing, detached, early-release, live-ink, and UI evidence", () => {
+  const cases = [
+    [
+      (artifact) => { delete artifact.variants[0].activityEvidence; },
+      "chart-type-activity-evidence-missing",
+    ],
+    [
+      (artifact) => { artifact.variants[0].activityEvidence.liveInk.active = 0; },
+      "chart-type-live-ink-activity-invalid",
+    ],
+    [
+      (artifact) => { artifact.variants[1].activityEvidence.liveInk.cancelled = 1; },
+      "interval-live-ink-activity-invalid",
+    ],
+    [
+      (artifact) => { artifact.variants[1].activityEvidence.liveInk.heldProbeAfterCancel = 1; },
+      "interval-live-ink-activity-invalid",
+    ],
+    [
+      (artifact) => { artifact.variants[1].activityEvidence.liveInk.afterRelease = 1; },
+      "interval-live-ink-activity-invalid",
+    ],
+    [
+      (artifact) => {
+        const ledger = artifact.variants[0].activityEvidence.pointerLedgerAtCancellation;
+        ledger.events.push(gesturePointerEvent("pointerup", {
+          observedAt: "2026-07-16T08:00:10.300Z",
+        }));
+        ledger.counts.pointerup = 1;
+        ledger.trustedCounts.pointerup = 1;
+      },
+      "chart-type-pointer-cancellation-ledger-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.variants[0].activityEvidence.pointerLedgerAfterRelease.events.at(-1).pointerId = 2;
+      },
+      "chart-type-pointer-release-ledger-invalid",
+    ],
+    [
+      (artifact) => { delete artifact.variants[1].activityEvidence.pointerLedgerAfterHeldProbe; },
+      "interval-pointer-held-probe-ledger-invalid",
+    ],
+    [
+      (artifact) => {
+        artifact.variants[0].activityEvidence.uiBoundary.afterValue = "detached-ui-value";
+      },
+      "chart-type-ui-boundary-evidence-mismatch",
+    ],
+    [
+      (artifact) => {
+        artifact.variants[1].activityEvidence.productLifecycle.events[2].reason = "surface-dispose";
+      },
+      "interval-product-lifecycle-evidence-mismatch",
+    ],
+  ];
+  for (const [mutate, expectedFailure] of cases) {
+    const artifact = activeGestureArtifact();
+    mutate(artifact);
+    const result = assessDrawingRollbackDrillArtifact("active-gesture-chart-boundary", artifact);
+    assert.equal(result.contractPassed, false, expectedFailure);
+    assert.ok(result.failures.includes(expectedFailure), expectedFailure);
+  }
+});
+
+test("gesture drill accepts serial worker reconstruction only with one active authorized target", () => {
+  const valid = activeGestureArtifact();
+  assert.equal(
+    assessDrawingRollbackDrillArtifact("active-gesture-chart-boundary", valid).contractPassed,
+    true,
+  );
+
+  const multipleActive = activeGestureArtifact();
+  multipleActive.buildAuthority.workerLifecycle.targets[1].active = true;
+  multipleActive.buildAuthority.workerLifecycle.activeDrawingWorkerTargetCount = 2;
+  multipleActive.buildAuthority.workerLifecycle.detachedDrawingWorkerTargetCount = 1;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "active-gesture-chart-boundary",
+    multipleActive,
+  ).failures.includes("gesture-boundary-worker-serial-handoff-invalid"));
+
+  for (const producerConclusion of [undefined, false]) {
+    const independentlyValid = activeGestureArtifact();
+    independentlyValid.buildAuthority.workerLifecycle.serialHandoffAccepted = producerConclusion;
+    assert.equal(
+      assessDrawingRollbackDrillArtifact(
+        "active-gesture-chart-boundary",
+        independentlyValid,
+      ).contractPassed,
+      true,
+    );
+  }
+
+  const invalidSerialLifecycles = [
+    (artifact) => {
+      artifact.buildAuthority.workerLifecycle.targets[0].detachedObservationSequence = null;
+    },
+    (artifact) => {
+      artifact.buildAuthority.workerLifecycle.targets[0].detachedObservationSequence = 31;
+    },
+    (artifact) => {
+      artifact.buildAuthority.workerLifecycle.targets[1].attachedObservationSequence = 10;
+    },
+    (artifact) => {
+      artifact.buildAuthority.workerLifecycle.targets[1].attachedObservationSequence = 30.5;
+    },
+    (artifact) => {
+      artifact.buildAuthority.workerLifecycle.targets[0].detachedObservationSequence = 20.5;
+    },
+    (artifact) => {
+      artifact.buildAuthority.workerLifecycle.targets[0].targetId = null;
+    },
+    (artifact) => {
+      artifact.buildAuthority.workerLifecycle.targets[1].targetId = "drawing-worker-1";
+    },
+    (artifact) => {
+      const targets = artifact.buildAuthority.workerLifecycle.targets;
+      targets[1].active = true;
+      targets[1].detachedObservationSequence = null;
+      targets[2].active = false;
+      targets[2].detachedObservationSequence = 60;
+    },
+  ];
+  for (const mutate of invalidSerialLifecycles) {
+    const invalid = activeGestureArtifact();
+    mutate(invalid);
+    const result = assessDrawingRollbackDrillArtifact("active-gesture-chart-boundary", invalid);
+    assert.equal(result.contractPassed, false);
+    assert.ok(result.failures.includes("gesture-boundary-worker-serial-handoff-invalid"));
+  }
+
+  const unauthorized = activeGestureArtifact();
+  unauthorized.buildAuthority.workerLifecycle.targets[1].assetAccepted = false;
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "active-gesture-chart-boundary",
+    unauthorized,
+  ).failures.includes("gesture-boundary-worker-asset-authority-invalid"));
+
+  for (const mutatePath of [
+    (artifact) => { artifact.buildAuthority.workerLifecycle.targets[0].path = null; },
+    (artifact) => {
+      artifact.buildAuthority.workerLifecycle.targets[1].path = "assets/other.worker.js";
+    },
+  ]) {
+    const invalidPath = activeGestureArtifact();
+    mutatePath(invalidPath);
+    const result = assessDrawingRollbackDrillArtifact(
+      "active-gesture-chart-boundary",
+      invalidPath,
+    );
+    assert.equal(result.contractPassed, false);
+    assert.ok(result.failures.includes("gesture-boundary-worker-asset-authority-invalid"));
+  }
+
+  const inconsistentAsset = activeGestureArtifact();
+  inconsistentAsset.buildAuthority.workerLifecycle.targets[1].assetDigest = digest("f");
+  inconsistentAsset.buildAuthority.workerLifecycle.targets[1].expectedAssetDigest = digest("f");
+  assert.ok(assessDrawingRollbackDrillArtifact(
+    "active-gesture-chart-boundary",
+    inconsistentAsset,
+  ).failures.includes("gesture-boundary-worker-asset-authority-invalid"));
+});
+
+test("gesture drill binds injection variants, current build, and controlled navigation", () => {
+  const cases = [
+    [
+      (artifact) => { artifact.injection.variants = ["chart-type", "chart-type"]; },
+      "gesture-boundary-injection-variants-invalid",
+    ],
+    [
+      (artifact) => { artifact.injection.buildAuthorityCurrent = false; },
+      "gesture-boundary-current-build-authority-not-proven",
+    ],
+    [
+      (artifact) => { artifact.injection.navigation.runId = "detached-run"; },
+      "gesture-boundary-navigation-binding-invalid",
+    ],
+  ];
+  for (const [mutate, expectedFailure] of cases) {
+    const artifact = activeGestureArtifact();
+    mutate(artifact);
+    assert.ok(assessDrawingRollbackDrillArtifact(
+      "active-gesture-chart-boundary",
+      artifact,
+    ).failures.includes(expectedFailure));
+  }
 });
 
 test("export rebuild drill requires stale lease rejection and fresh exact capture", () => {

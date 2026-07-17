@@ -20,6 +20,7 @@ import type {
     DrawingExportLease,
     DrawingExportPrepareOptions,
     DrawingStylePatch,
+    DrawingSurfaceDisposeBoundaryDescriptor,
 } from "./drawingInteractionController.js";
 import type { SelectedDrawingMeta } from "./drawingSelectionController.js";
 
@@ -27,7 +28,7 @@ export interface DrawingEngineApi {
     clearAll(): void;
     completeSurfaceDispose(): void;
     invalidateSurfaceCredentialsForSeriesReplacement(): void;
-    prepareSurfaceDispose(): boolean;
+    prepareSurfaceDispose(boundary?: DrawingSurfaceDisposeBoundaryDescriptor): boolean;
     setHidden(hidden: boolean): void;
     updateSelectedDrawingStyle(patch: DrawingStylePatch): void;
     prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease>;
@@ -49,6 +50,8 @@ export interface DrawingEngineHostProps {
     drawingSnapEnabled: boolean;
     drawingKey: string;
     drawingSeriesGeneration: number;
+    drawingChartType: string;
+    drawingInterval: string;
     drawingCoordinateKey: string;
     drawingAnchorMode: DrawingAnchorMode;
     initialHidden?: boolean;
@@ -72,6 +75,8 @@ function DrawingEngineHost({
     drawingSnapEnabled,
     drawingKey,
     drawingSeriesGeneration,
+    drawingChartType,
+    drawingInterval,
     drawingCoordinateKey,
     drawingAnchorMode,
     initialHidden = false,
@@ -111,6 +116,8 @@ function DrawingEngineHost({
         drawingSnapEnabled,
         symbol: drawingKey,
         seriesReady: drawingSeriesGeneration,
+        drawingChartType,
+        drawingInterval,
         drawingCoordinateKey,
         drawingAnchorMode,
         interactionSurfaceMode,

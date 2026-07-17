@@ -19,9 +19,18 @@ import {
   resolvePassiveCursorSelectedNonTextHit,
   resolveTopmostDrawingInteractionHit,
   runDrawingPointerTransientBarrier,
+  runDrawingSurfaceDisposeBoundaryLifecycle,
   runDrawingSurfaceDisposeBarrier,
   scenePaintCoversDrawingHandoff,
+  shouldDeferDrawingCoordinateCleanupToChartTypeBoundary,
 } from "../drawingInteractionController.js";
+import {
+  abandonDrawingInteractionLifecycleActiveGesture,
+  beginDrawingInteractionLifecycleFreehandGesture,
+  markDrawingInteractionLifecycleBoundaryChange,
+  readDrawingInteractionLifecycle,
+  resetDrawingInteractionLifecycle,
+} from "../interaction/drawingInteractionLifecycle.js";
 import {
   canRecoverDrawingVisibleSceneInPlace,
   isDrawingVisibleScenePublicationReady,
@@ -418,30 +427,159 @@ test("near-capacity capture drops an invalid tail before atomic coordinate captu
 
 test("coordinate cleanup ignores rerenders until the real surface boundary changes", () => {
   const boundary = {
+    drawingChartType: "candlestick",
+    drawingInterval: "1h",
     drawingCoordinateKey: "binance:BTCUSDT:1h:time",
     seriesReady: 2,
   } as const;
 
   assert.equal(isDrawingCoordinateCleanupBoundaryCurrent(
     boundary,
+    boundary.drawingChartType,
+    boundary.drawingInterval,
     boundary.drawingCoordinateKey,
     boundary.seriesReady,
   ), true);
   assert.equal(isDrawingCoordinateCleanupBoundaryCurrent(
     boundary,
+    boundary.drawingChartType,
+    "4h",
     "binance:BTCUSDT:4h:time",
     boundary.seriesReady,
   ), false);
   assert.equal(isDrawingCoordinateCleanupBoundaryCurrent(
     boundary,
+    boundary.drawingChartType,
+    boundary.drawingInterval,
     boundary.drawingCoordinateKey,
     boundary.seriesReady + 1,
   ), false);
   assert.equal(isDrawingCoordinateCleanupBoundaryCurrent(
     null,
+    boundary.drawingChartType,
+    boundary.drawingInterval,
     boundary.drawingCoordinateKey,
     boundary.seriesReady,
   ), false);
+});
+
+test("chart-type surface disposal owns layout timing and retires the deferred gesture", () => {
+  const previousBoundary = {
+    drawingChartType: "candlestick",
+    drawingInterval: "1h",
+    drawingCoordinateKey: "binance:BTCUSDT:1h:time:0",
+    seriesReady: 2,
+  } as const;
+  const deferToChartType = shouldDeferDrawingCoordinateCleanupToChartTypeBoundary(
+    previousBoundary,
+    "renko",
+    "1h",
+  );
+  assert.equal(deferToChartType, true);
+  // Projection/symbol-only coordinate changes keep the same chart type and
+  // must still be cleaned by the coordinate owner.
+  assert.equal(shouldDeferDrawingCoordinateCleanupToChartTypeBoundary(
+    previousBoundary,
+    "candlestick",
+    "1h",
+  ), false);
+  // A simultaneous interval transition remains owned by interval cleanup.
+  assert.equal(shouldDeferDrawingCoordinateCleanupToChartTypeBoundary(
+    previousBoundary,
+    "renko",
+    "4h",
+  ), false);
+
+  resetDrawingInteractionLifecycle();
+  beginDrawingInteractionLifecycleFreehandGesture();
+  // Mirrors the layout effect: deferral leaves pointer-down intact until the
+  // passive chart surface owner reaches prepareSurfaceDispose().
+  if (!deferToChartType) abandonDrawingInteractionLifecycleActiveGesture();
+  assert.equal(readDrawingInteractionLifecycle().active?.events.length, 1);
+
+  const boundaryMarked = markDrawingInteractionLifecycleBoundaryChange({
+    kind: "chart-type",
+    beforeValue: "candlestick",
+    afterValue: "renko",
+  }) !== null;
+  let physicalActive = true;
+  assert.equal(runDrawingSurfaceDisposeBoundaryLifecycle({
+    boundaryMarked,
+    hasActiveFreehand: () => physicalActive,
+    prepare: () => {
+      physicalActive = false;
+      // Ordinary physical cleanup must preserve the marked boundary receipt.
+      assert.equal(abandonDrawingInteractionLifecycleActiveGesture(), false);
+      return true;
+    },
+  }), true);
+  const completed = readDrawingInteractionLifecycle();
+  assert.equal(completed.active, null);
+  assert.equal(completed.lastCompleted?.kind, "chart-type");
+  assert.equal(completed.lastCompleted?.events[1].afterValue, "renko");
+  assert.equal(completed.lastCompleted?.events[2].reason, "surface-dispose");
+  resetDrawingInteractionLifecycle();
+});
+
+test("surface disposal lifecycle completes only a successful physical cancellation", () => {
+  resetDrawingInteractionLifecycle();
+  beginDrawingInteractionLifecycleFreehandGesture();
+  assert.ok(markDrawingInteractionLifecycleBoundaryChange({
+    kind: "chart-type",
+    beforeValue: "candlestick",
+    afterValue: "line",
+  }));
+
+  assert.equal(runDrawingSurfaceDisposeBoundaryLifecycle({
+    boundaryMarked: true,
+    hasActiveFreehand: () => false,
+    prepare: () => true,
+  }), true);
+  const snapshot = readDrawingInteractionLifecycle();
+  assert.equal(snapshot.active, null);
+  assert.equal(snapshot.lastCompleted?.events[2].reason, "surface-dispose");
+  resetDrawingInteractionLifecycle();
+});
+
+test("failed surface disposal rolls back its boundary and retains a retryable gesture", () => {
+  resetDrawingInteractionLifecycle();
+  beginDrawingInteractionLifecycleFreehandGesture();
+  assert.ok(markDrawingInteractionLifecycleBoundaryChange({
+    kind: "chart-type",
+    beforeValue: "candlestick",
+    afterValue: "line",
+  }));
+
+  assert.equal(runDrawingSurfaceDisposeBoundaryLifecycle({
+    boundaryMarked: true,
+    hasActiveFreehand: () => true,
+    prepare: () => false,
+  }), false);
+  const snapshot = readDrawingInteractionLifecycle();
+  assert.equal(snapshot.active?.events.length, 1);
+  assert.equal(snapshot.lastCompleted, null);
+  resetDrawingInteractionLifecycle();
+});
+
+test("throwing partial surface disposal abandons an already-cancelled gesture", () => {
+  resetDrawingInteractionLifecycle();
+  beginDrawingInteractionLifecycleFreehandGesture();
+  assert.ok(markDrawingInteractionLifecycleBoundaryChange({
+    kind: "chart-type",
+    beforeValue: "candlestick",
+    afterValue: "line",
+  }));
+
+  assert.throws(() => runDrawingSurfaceDisposeBoundaryLifecycle({
+    boundaryMarked: true,
+    hasActiveFreehand: () => false,
+    prepare: () => { throw new Error("partial detach"); },
+  }), /partial detach/);
+  assert.deepEqual(readDrawingInteractionLifecycle(), {
+    active: null,
+    lastCompleted: null,
+  });
+  resetDrawingInteractionLifecycle();
 });
 
 test("failed surface detach preserves the primitive registry for document retry", () => {

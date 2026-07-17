@@ -87,6 +87,7 @@ import {
   resolveDataTimeSet,
   removedDrawingSubPaneScopeKeys,
   prepareDrawingSurfaceForSeriesReplacement,
+  resolveDrawingSurfaceChartTypeBoundary,
   shouldAdvanceDrawingCoordinateGeneration,
   shouldAdvanceIndicatorSeriesReady,
   shouldInvalidateDrawingFrameOnPointerRelease,
@@ -1812,7 +1813,12 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
         // Drawing primitives keep a requestUpdate callback supplied by their
         // owning series. Detach them before remove() so a later re-attach
         // cannot enqueue work on this disposed surface.
-        beforeRemove: () => drawingApiRef.current?.prepareSurfaceDispose?.() ?? true,
+        beforeRemove: () => drawingApiRef.current?.prepareSurfaceDispose?.(
+          resolveDrawingSurfaceChartTypeBoundary(
+            initialChartType,
+            requestedChartTypeRef.current,
+          ),
+        ) ?? true,
         afterRemove: () => {
           drawingApiRef.current?.completeSurfaceDispose?.();
           return true;
@@ -2143,7 +2149,11 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
       if (drawingApi) {
         drawingPreparationAttempted = true;
         drawingSurfacePrepared = prepareDrawingSurfaceForSeriesReplacement(
-          () => drawingApi.prepareSurfaceDispose(),
+          () => drawingApi.prepareSurfaceDispose({
+            kind: "chart-type",
+            beforeValue: previousType,
+            afterValue: resolvedChartType,
+          }),
           () => setDrawingSeriesGeneration((prev) => prev + 1),
         );
         if (!drawingSurfacePrepared) {
@@ -3170,6 +3180,8 @@ const SingleChartPanes = forwardRef<ChartSurfaceHandle, SingleChartPanesProps>(f
           drawingSnapEnabled={drawingSnapEnabled}
           drawingKey={drawingKey}
           drawingSeriesGeneration={drawingSeriesGeneration}
+          drawingChartType={resolvedChartType}
+          drawingInterval={interval}
           drawingCoordinateKey={drawingCoordinateKey}
           drawingAnchorMode={drawingAnchorMode}
           initialHidden={drawingsHiddenRef.current}

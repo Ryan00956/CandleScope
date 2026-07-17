@@ -375,6 +375,28 @@ async function openExportPanelForRetry(session) {
   return receipt;
 }
 
+function exactIsoTimestamp(value) {
+  if (typeof value !== "string") return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+export function retryAttemptedAt(retryTrigger, cleanupCompletedAt) {
+  const requestedAt = retryTrigger?.requestedAt;
+  if (!exactIsoTimestamp(requestedAt)) {
+    throw new Error(`controlled IndexedDB retry browser trigger timestamp is invalid: ${requestedAt}`);
+  }
+  if (!exactIsoTimestamp(cleanupCompletedAt)) {
+    throw new Error(`controlled IndexedDB native cleanup timestamp is invalid: ${cleanupCompletedAt}`);
+  }
+  if (Date.parse(requestedAt) < Date.parse(cleanupCompletedAt)) {
+    throw new Error(
+      `controlled IndexedDB retry browser trigger predates native cleanup: ${requestedAt} < ${cleanupCompletedAt}`,
+    );
+  }
+  return requestedAt;
+}
+
 async function runVariant(session, variant, beforeDocument, timeoutMs) {
   const transactionId = crypto.randomUUID();
   const navigation = await session.navigateRollbackDrill(DRILL_ID, { variant });
@@ -504,8 +526,8 @@ async function runVariant(session, variant, beforeDocument, timeoutMs) {
     ? quotaNativeReceipt(released, fields, productErrorReceiptId)
     : blockedNativeReceipt(released, fields, productErrorReceiptId);
 
-  const attemptedAt = isoNow();
   const retryTrigger = await openExportPanelForRetry(session);
+  const attemptedAt = retryAttemptedAt(retryTrigger, nativeReceipt.cleanup?.completedAt);
   const retry = await waitForSample(
     () => readActivePersistenceState(session),
     (sample) => {

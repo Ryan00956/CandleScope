@@ -19,7 +19,7 @@
  *   - Double-click text to edit
  *   - Clear all drawings
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { TextDrawingPrimitive } from "./primitives/TextDrawingPrimitive.js";
 import { FreehandDrawingPrimitive } from "./primitives/FreehandDrawingPrimitive.js";
@@ -198,6 +198,13 @@ import { createLiveInkController } from "./interaction/liveInkController.js";
 import type { LiveInkController } from "./interaction/liveInkController.js";
 import type { DrawingInteractionSurfaceMode } from "./interactionSurfaceMode.js";
 import {
+  abandonDrawingInteractionLifecycleActiveGesture,
+  beginDrawingInteractionLifecycleFreehandGesture,
+  completeDrawingInteractionLifecycleBoundaryCancellation,
+  markDrawingInteractionLifecycleBoundaryChange,
+  rollbackDrawingInteractionLifecycleBoundaryChange,
+} from "./interaction/drawingInteractionLifecycle.js";
+import {
   DEFAULT_DRAWING_POSITION_THEME_PALETTE,
   drawingPositionLevelColor,
 } from "./drawingPositionColors.js";
@@ -369,6 +376,38 @@ export function runDrawingSurfaceDisposeBarrier(
   if (!preparePersistenceSurfaceDispose()) return false;
   finalizeTransientState();
   return true;
+}
+
+/**
+ * Keep boundary telemetry aligned with the persistence barrier even when a
+ * partial prepare throws. A failed prepare may leave the physical gesture
+ * active (retryable) or may already have cancelled it; both cases must retire
+ * the speculative boundary event before the original result/error escapes.
+ */
+export function runDrawingSurfaceDisposeBoundaryLifecycle({
+  boundaryMarked,
+  hasActiveFreehand,
+  prepare,
+}: Readonly<{
+  boundaryMarked: boolean;
+  hasActiveFreehand(): boolean;
+  prepare(): boolean;
+}>): boolean {
+  let prepared = false;
+  try {
+    prepared = prepare();
+    return prepared;
+  } finally {
+    if (boundaryMarked) {
+      const activeAfterPrepare = hasActiveFreehand();
+      if (prepared && !activeAfterPrepare) {
+        completeDrawingInteractionLifecycleBoundaryCancellation("surface-dispose");
+      } else {
+        rollbackDrawingInteractionLifecycleBoundaryChange();
+        if (!activeAfterPrepare) abandonDrawingInteractionLifecycleActiveGesture();
+      }
+    }
+  }
 }
 
 /**
@@ -992,6 +1031,8 @@ export interface UseDrawingOptions {
   drawingSnapEnabled?: boolean;
   symbol: string;
   seriesReady: number;
+  drawingChartType: string;
+  drawingInterval: string;
   drawingCoordinateKey: string;
   drawingAnchorMode: DrawingAnchorMode;
   interactionSurfaceMode?: DrawingInteractionSurfaceMode;
@@ -1002,6 +1043,8 @@ export interface UseDrawingOptions {
 }
 
 export interface DrawingCoordinateCleanupBoundary {
+  readonly drawingChartType: string;
+  readonly drawingInterval: string;
   readonly drawingCoordinateKey: string;
   readonly seriesReady: number;
 }
@@ -1009,11 +1052,31 @@ export interface DrawingCoordinateCleanupBoundary {
 /** Ignore callback-identity rerenders; only a real surface coordinate boundary owns cleanup. */
 export function isDrawingCoordinateCleanupBoundaryCurrent(
   boundary: DrawingCoordinateCleanupBoundary | null,
+  drawingChartType: string,
+  drawingInterval: string,
   drawingCoordinateKey: string,
   seriesReady: number,
 ): boolean {
-  return boundary?.drawingCoordinateKey === drawingCoordinateKey
+  return boundary?.drawingChartType === drawingChartType
+    && boundary.drawingInterval === drawingInterval
+    && boundary.drawingCoordinateKey === drawingCoordinateKey
     && boundary.seriesReady === seriesReady;
+}
+
+/**
+ * Chart-type transitions own active-gesture cancellation through the explicit
+ * surface-dispose barrier. React layout effects run before the chart owner's
+ * passive cleanup, so they must not consume that gesture first. The later
+ * series generation remains a fail-safe cleanup if surface disposal cannot run.
+ */
+export function shouldDeferDrawingCoordinateCleanupToChartTypeBoundary(
+  boundary: DrawingCoordinateCleanupBoundary | null,
+  drawingChartType: string,
+  drawingInterval: string,
+): boolean {
+  return boundary !== null
+    && boundary.drawingChartType !== drawingChartType
+    && boundary.drawingInterval === drawingInterval;
 }
 
 export interface DrawingExportInteractionLease {
@@ -1067,6 +1130,12 @@ export interface DrawingExportPrepareOptions {
   readonly timeoutMs?: number;
 }
 
+export interface DrawingSurfaceDisposeBoundaryDescriptor {
+  readonly kind: "chart-type";
+  readonly beforeValue: string;
+  readonly afterValue: string;
+}
+
 export interface DrawingExportPersistenceState {
   readonly persistedRevision: number;
   readonly writePerformed: boolean;
@@ -1089,7 +1158,7 @@ export interface DrawingInteractionRuntime {
   clearAll(): void;
   completeSurfaceDispose(): void;
   invalidateSurfaceCredentialsForSeriesReplacement(): void;
-  prepareSurfaceDispose(): boolean;
+  prepareSurfaceDispose(boundary?: DrawingSurfaceDisposeBoundaryDescriptor): boolean;
   prepareExport(options?: DrawingExportPrepareOptions): Promise<DrawingExportLease>;
   setHidden(hidden: boolean): void;
   primitivesRef: MutableRefObject<DrawingPrimitive[]>;
@@ -1125,6 +1194,8 @@ export function useDrawing({
   drawingSnapEnabled = true,
   symbol,
   seriesReady,
+  drawingChartType,
+  drawingInterval,
   drawingCoordinateKey,
   drawingAnchorMode,
   interactionSurfaceMode = "legacy",
@@ -1525,6 +1596,7 @@ export function useDrawing({
     isDrawingFreehandRef.current = false;
     lastFreehandScreenPointRef.current = null;
     liveInkControllerRef.current?.cancel();
+    abandonDrawingInteractionLifecycleActiveGesture();
     return true;
   }, [detachPrim]);
 
@@ -2487,17 +2559,40 @@ export function useDrawing({
     [applyMeasuredActiveDrawingMove],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const previousBoundary = coordinateCleanupBoundaryRef.current;
     if (isDrawingCoordinateCleanupBoundaryCurrent(
-      coordinateCleanupBoundaryRef.current,
+      previousBoundary,
+      drawingChartType,
+      drawingInterval,
       drawingCoordinateKey,
       seriesReady,
     )) return;
+    const chartTypeBoundaryOwned = shouldDeferDrawingCoordinateCleanupToChartTypeBoundary(
+      previousBoundary,
+      drawingChartType,
+      drawingInterval,
+    );
     coordinateCleanupBoundaryRef.current = Object.freeze({
+      drawingChartType,
+      drawingInterval,
       drawingCoordinateKey,
       seriesReady,
     });
-    if (!seriesReady) return;
+    if (!seriesReady || chartTypeBoundaryOwned) return;
+
+    const hadActiveFreehand = currentFreehandRef.current !== null
+      || freehandDraftRef.current !== null
+      || isDrawingFreehandRef.current;
+    const coordinateBoundaryMarked = hadActiveFreehand
+      && previousBoundary !== null
+      && previousBoundary.drawingCoordinateKey !== drawingCoordinateKey
+      && previousBoundary.drawingInterval !== drawingInterval
+      && markDrawingInteractionLifecycleBoundaryChange({
+        kind: "interval",
+        beforeValue: previousBoundary.drawingInterval,
+        afterValue: drawingInterval,
+      }) !== null;
 
     const committedDrag = !isDrawingFreehandRef.current
       ? draggingRef.current
@@ -2520,12 +2615,21 @@ export function useDrawing({
     draggingRef.current = null;
     resetCursorForActiveTool();
 
-    cancelActiveFreehandStroke();
+    const freehandCancelled = cancelActiveFreehandStroke();
+    if (coordinateBoundaryMarked) {
+      if (freehandCancelled) {
+        completeDrawingInteractionLifecycleBoundaryCancellation("coordinate-change");
+      } else {
+        rollbackDrawingInteractionLifecycleBoundaryChange();
+      }
+    }
   }, [
     cancelActiveDrawingMove,
     cancelTextEditing,
     clearHoverFeedback,
     deselectAll,
+    drawingChartType,
+    drawingInterval,
     drawingCoordinateKey,
     cancelActiveFreehandStroke,
     flushActiveDrawingMove,
@@ -2899,6 +3003,7 @@ export function useDrawing({
             cancelActiveFreehandStroke();
             return;
           }
+          beginDrawingInteractionLifecycleFreehandGesture();
           lastFreehandScreenPointRef.current = { x: pos.x, y: pos.y };
           clearHoverFeedback();
           return;
@@ -3749,6 +3854,7 @@ export function useDrawing({
         isDrawingFreehandRef.current = false;
         currentFreehandRef.current = null;
         lastFreehandScreenPointRef.current = null;
+        abandonDrawingInteractionLifecycleActiveGesture();
       } else {
         cancelActiveFreehandStroke();
       }
@@ -3987,18 +4093,34 @@ export function useDrawing({
    * disposes/recreates Lightweight Charts; the persistence lifecycle then
    * attaches the same primitives to the replacement series.
    */
-  const prepareSurfaceDispose = useCallback((): boolean => runDrawingSurfaceDisposeBarrier(
-    preparePersistenceSurfaceDispose,
-    () => {
-      cancelActiveDrawingMove();
-      cancelDynamicPaintHandoff(true);
-      releaseOverlayDrag(true);
-      liveInkControllerRef.current?.cancel();
-      clearHoverFeedback();
-      draggingRef.current = null;
-      resetCursorForActiveTool();
-    },
-  ), [cancelActiveDrawingMove, cancelDynamicPaintHandoff, clearHoverFeedback, preparePersistenceSurfaceDispose, releaseOverlayDrag, resetCursorForActiveTool]);
+  const prepareSurfaceDispose = useCallback((
+    boundary?: DrawingSurfaceDisposeBoundaryDescriptor,
+  ): boolean => {
+    const hadActiveFreehand = currentFreehandRef.current !== null
+      || freehandDraftRef.current !== null
+      || isDrawingFreehandRef.current;
+    const boundaryMarked = !!boundary
+      && hadActiveFreehand
+      && markDrawingInteractionLifecycleBoundaryChange(boundary) !== null;
+    return runDrawingSurfaceDisposeBoundaryLifecycle({
+      boundaryMarked,
+      hasActiveFreehand: () => currentFreehandRef.current !== null
+        || freehandDraftRef.current !== null
+        || isDrawingFreehandRef.current,
+      prepare: () => runDrawingSurfaceDisposeBarrier(
+        preparePersistenceSurfaceDispose,
+        () => {
+          cancelActiveDrawingMove();
+          cancelDynamicPaintHandoff(true);
+          releaseOverlayDrag(true);
+          liveInkControllerRef.current?.cancel();
+          clearHoverFeedback();
+          draggingRef.current = null;
+          resetCursorForActiveTool();
+        },
+      ),
+    });
+  }, [cancelActiveDrawingMove, cancelDynamicPaintHandoff, clearHoverFeedback, preparePersistenceSurfaceDispose, releaseOverlayDrag, resetCursorForActiveTool]);
 
   const completeSurfaceDispose = useCallback((): void => {
     // The chart owner has confirmed remove(). Surface-only drafts can now be
@@ -4012,6 +4134,7 @@ export function useDrawing({
     currentFreehandRef.current = null;
     isDrawingFreehandRef.current = false;
     lastFreehandScreenPointRef.current = null;
+    abandonDrawingInteractionLifecycleActiveGesture();
     previewRef.current = null;
     previewEntityRef.current = null;
     anchorDataRef.current = null;

@@ -37,6 +37,20 @@ export function prepareDrawingSurfaceForSeriesReplacement(
   return false;
 }
 
+export function resolveDrawingSurfaceChartTypeBoundary(
+  beforeValue: string | null | undefined,
+  afterValue: string | null | undefined,
+): Readonly<{
+  kind: "chart-type";
+  beforeValue: string;
+  afterValue: string;
+}> | undefined {
+  const before = beforeValue?.trim() || "";
+  const after = afterValue?.trim() || "";
+  if (!before || !after || before === after) return undefined;
+  return Object.freeze({ kind: "chart-type", beforeValue: before, afterValue: after });
+}
+
 function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }

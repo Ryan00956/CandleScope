@@ -7,6 +7,7 @@ import {
   isMainPanePlotPointerStart,
   removedDrawingSubPaneScopeKeys,
   prepareDrawingSurfaceForSeriesReplacement,
+  resolveDrawingSurfaceChartTypeBoundary,
   resolveIntervalTransitionReplayData,
   resolveDataTimeSet,
   shouldAdvanceDrawingCoordinateGeneration,
@@ -113,6 +114,19 @@ test("main-series drawing preparation restores partial and throwing failures", (
     "restore-throw",
     "prepare-success",
   ]);
+});
+
+test("full chart recreation carries only a real chart-type boundary", () => {
+  assert.deepEqual(
+    resolveDrawingSurfaceChartTypeBoundary("candlestick", "renko"),
+    {
+      kind: "chart-type",
+      beforeValue: "candlestick",
+      afterValue: "renko",
+    },
+  );
+  assert.equal(resolveDrawingSurfaceChartTypeBoundary("line", "line"), undefined);
+  assert.equal(resolveDrawingSurfaceChartTypeBoundary(null, "line"), undefined);
 });
 
 test("chart disposal reports explicit drawing failure while still releasing the chart", () => {

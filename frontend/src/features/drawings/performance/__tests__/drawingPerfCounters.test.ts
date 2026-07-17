@@ -16,6 +16,10 @@ import {
   type DrawingPerfDebugHandle,
   type DrawingPerfSummaryEventDetail,
 } from "../drawingPerfCounters.js";
+import {
+  beginDrawingInteractionLifecycleFreehandGesture,
+  markDrawingInteractionLifecycleBoundaryChange,
+} from "../../interaction/drawingInteractionLifecycle.js";
 
 test("rolling duration histograms retain only their bounded newest window", () => {
   let nowMs = 0;
@@ -542,6 +546,16 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
   assert.equal(handle?.readRuntimeSummary(), null);
   unregisterInvalidSurface?.();
   assert.equal(handle?.requestShadowParity(), false);
+  const activeGesture = beginDrawingInteractionLifecycleFreehandGesture();
+  assert.deepEqual(handle?.readInteractionLifecycle(), {
+    active: activeGesture,
+    lastCompleted: null,
+  });
+  markDrawingInteractionLifecycleBoundaryChange({
+    kind: "interval",
+    beforeValue: "1m",
+    afterValue: "5m",
+  });
   const unregisterParity = registerDrawingPerfShadowParityRequester(() => true);
   assert.equal(handle?.requestShadowParity(), true);
   unregisterParity();
@@ -552,6 +566,10 @@ test("debug handle can be installed explicitly and stays SSR-safe", () => {
   assert.equal(handle?.requestShadowParity(), false);
   unregisterThrowingParity();
   assert.doesNotThrow(() => handle?.reset());
+  assert.deepEqual(handle?.readInteractionLifecycle(), {
+    active: null,
+    lastCompleted: null,
+  });
   assert.equal(installDrawingPerfDebugHandle(null), null);
 });
 

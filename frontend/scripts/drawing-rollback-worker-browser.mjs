@@ -302,6 +302,91 @@ function prefixedSha256(value) {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? `sha256:${value}` : null;
 }
 
+function workerTargetAssetAuthorityAccepted(target) {
+  const assetDigestAccepted = typeof target?.assetDigest === "string"
+    && /^sha256:[a-f0-9]{64}$/.test(target.assetDigest);
+  const expectedAssetDigestAccepted = typeof target?.expectedAssetDigest === "string"
+    && /^sha256:[a-f0-9]{64}$/.test(target.expectedAssetDigest);
+  return typeof target?.targetId === "string"
+    && target.targetId.length > 0
+    && typeof target?.path === "string"
+    && target.path.length > 0
+    && target.manifestBacked === true
+    && target.constructorProvenanceAccepted === true
+    && target.networkProvenanceAccepted === true
+    && target.assetAccepted === true
+    && assetDigestAccepted
+    && expectedAssetDigestAccepted
+    && target.assetDigest === target.expectedAssetDigest;
+}
+
+export function assessDrillWorkerLifecycle({
+  drillId,
+  evidenceAuthoritative,
+  workerTargets,
+  constructionFaultCount,
+}) {
+  const targetsProvided = Array.isArray(workerTargets);
+  const targets = targetsProvided ? workerTargets : [];
+  const orderedTargets = [...targets].sort((left, right) => (
+    left.attachedObservationSequence - right.attachedObservationSequence
+  ));
+  const activeTargets = orderedTargets.filter((target) => target.active === true);
+  const workerAssetAuthorityAccepted = targetsProvided
+    && targets.every(workerTargetAssetAuthorityAccepted);
+  const observationSequencesAccepted = orderedTargets.every((target, index) => (
+    Number.isSafeInteger(target.attachedObservationSequence)
+    && target.attachedObservationSequence > 0
+    && (index === 0
+      || orderedTargets[index - 1].attachedObservationSequence
+        < target.attachedObservationSequence)
+  ));
+  const serialHandoffAccepted = observationSequencesAccepted
+    && orderedTargets.length > 0
+    && activeTargets.length === 1
+    && orderedTargets.at(-1) === activeTargets[0]
+    && orderedTargets.every((target, index) => {
+      if (target.active === true) return target.detachedObservationSequence === null;
+      const next = orderedTargets[index + 1] ?? null;
+      return Number.isSafeInteger(target.detachedObservationSequence)
+        && target.detachedObservationSequence > target.attachedObservationSequence
+        && next !== null
+        && target.detachedObservationSequence < next.attachedObservationSequence;
+    });
+  const allowDetachedWorker = drillId === "offscreen-canvas-unsupported";
+  const constructionFailedBeforeTarget = drillId === "worker-init-failure";
+  const detachedFallbackAccepted = observationSequencesAccepted
+    && orderedTargets.length === 1
+    && activeTargets.length === 0
+    && Number.isSafeInteger(orderedTargets[0].detachedObservationSequence)
+    && orderedTargets[0].detachedObservationSequence
+      > orderedTargets[0].attachedObservationSequence;
+  const kind = allowDetachedWorker
+    ? "detached-after-typed-fallback"
+    : constructionFailedBeforeTarget
+      ? "construction-failed-before-target"
+      : "active-worker";
+  const accepted = workerAssetAuthorityAccepted && (allowDetachedWorker
+    ? detachedFallbackAccepted && constructionFaultCount === 0
+    : constructionFailedBeforeTarget
+      ? evidenceAuthoritative === true
+        && targets.length === 0
+        && constructionFaultCount === 1
+      : evidenceAuthoritative === true
+        && constructionFaultCount === 0
+        && serialHandoffAccepted);
+  return Object.freeze({
+    kind,
+    accepted,
+    drawingWorkerTargetCount: targets.length,
+    activeDrawingWorkerTargetCount: activeTargets.length,
+    detachedDrawingWorkerTargetCount: targets.length - activeTargets.length,
+    constructionFaultCount,
+    assetAuthorityAccepted: workerAssetAuthorityAccepted,
+    serialHandoffAccepted,
+  });
+}
+
 export async function captureDrillBuildAuthority(session, drillId) {
   const allowDetachedWorker = drillId === "offscreen-canvas-unsupported";
   const evidence = await session.readBrowserBuildEvidence({
@@ -315,6 +400,12 @@ export async function captureDrillBuildAuthority(session, drillId) {
     targetId: target.targetId ?? null,
     path: target.path ?? null,
     active: target.active === true,
+    attachedObservationSequence: Number.isSafeInteger(target.attachedObservationSequence)
+      ? target.attachedObservationSequence
+      : null,
+    detachedObservationSequence: Number.isSafeInteger(target.detachedObservationSequence)
+      ? target.detachedObservationSequence
+      : null,
     manifestBacked: target.manifestBacked === true,
     constructorProvenanceAccepted: target.constructorProvenanceAccepted === true,
     networkProvenanceAccepted: target.networkProvenanceAccepted === true,
@@ -322,36 +413,16 @@ export async function captureDrillBuildAuthority(session, drillId) {
     assetDigest: prefixedSha256(target.assetSha256),
     expectedAssetDigest: prefixedSha256(target.expectedAssetSha256),
   })));
-  const activeDrawingWorkerTargetCount = workerTargets.filter((target) => target.active).length;
   const constructionFaultCount = evidence?.networkAssets?.workerConstructionFaults?.length ?? -1;
-  const workerLifecycleKind = allowDetachedWorker
-    ? "detached-after-typed-fallback"
-    : drillId === "worker-init-failure"
-      ? "construction-failed-before-target"
-      : "active-worker";
-  const workerLifecycleAccepted = allowDetachedWorker
-    ? workerTargets.length === 1
-      && activeDrawingWorkerTargetCount === 0
-      && constructionFaultCount === 0
-    : drillId === "worker-init-failure"
-      ? evidence?.authoritative === true
-        && workerTargets.length === 0
-        && constructionFaultCount === 1
-      : evidence?.authoritative === true
-        && workerTargets.length === 1
-        && activeDrawingWorkerTargetCount === 1
-        && constructionFaultCount === 0;
-  const workerAssetAuthorityAccepted = workerTargets.every((target) => (
-    target.manifestBacked
-      && target.constructorProvenanceAccepted
-      && target.networkProvenanceAccepted
-      && target.assetAccepted
-      && target.assetDigest !== null
-      && target.assetDigest === target.expectedAssetDigest
-  ));
+  const workerLifecycle = assessDrillWorkerLifecycle({
+    drillId,
+    evidenceAuthoritative: evidence?.authoritative === true,
+    workerTargets,
+    constructionFaultCount,
+  });
   const authoritative = evidence?.assetAuthoritative === true
-    && workerLifecycleAccepted
-    && workerAssetAuthorityAccepted;
+    && workerLifecycle.accepted
+    && workerLifecycle.assetAuthorityAccepted;
   const networkAssets = evidence?.networkAssets ?? null;
   const receipt = Object.freeze({
     kind: "controlled-browser-build-authority",
@@ -403,13 +474,7 @@ export async function captureDrillBuildAuthority(session, drillId) {
       quiescence: networkAssets?.quiescence ?? null,
     }),
     workerLifecycle: Object.freeze({
-      kind: workerLifecycleKind,
-      accepted: workerLifecycleAccepted,
-      drawingWorkerTargetCount: workerTargets.length,
-      activeDrawingWorkerTargetCount,
-      detachedDrawingWorkerTargetCount: workerTargets.length - activeDrawingWorkerTargetCount,
-      constructionFaultCount,
-      assetAuthorityAccepted: workerAssetAuthorityAccepted,
+      ...workerLifecycle,
       targets: workerTargets,
     }),
   });
